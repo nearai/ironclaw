@@ -25,20 +25,30 @@
 //! - [`audit`]: redacted durable audit envelope shapes.
 //! - [`trust`]: requested-trust vocabulary and `PackageIdentity` consumed by
 //!   the host trust policy engine in `ironclaw_trust`.
+//! - [`runtime_policy`]: deployment mode, runtime profile, and effective
+//!   runtime policy vocabulary consumed by the resolver in
+//!   `ironclaw_runtime_policy` and the host runtime planner.
+//! - [`ingress`]: host-owned HTTP ingress descriptors for product/API surfaces.
+#![warn(unreachable_pub)]
 
 pub mod action;
 pub mod approval;
 pub mod audit;
 pub mod capability;
+pub mod capability_profile;
 pub mod decision;
 pub mod dispatch;
+mod dotted_id;
 pub mod error;
+pub mod host_port;
 pub mod http;
 pub mod ids;
+pub mod ingress;
 pub mod mount;
 pub mod path;
 pub mod resource;
 pub mod runtime;
+pub mod runtime_policy;
 pub mod scope;
 pub mod trust;
 
@@ -49,15 +59,19 @@ pub use action::*;
 pub use approval::*;
 pub use audit::*;
 pub use capability::*;
+pub use capability_profile::*;
 pub use decision::*;
 pub use dispatch::*;
 pub use error::*;
+pub use host_port::*;
 pub use http::*;
 pub use ids::*;
+pub use ingress::*;
 pub use mount::*;
 pub use path::*;
 pub use resource::*;
 pub use runtime::*;
+pub use runtime_policy::*;
 pub use scope::*;
 pub use trust::*;
 

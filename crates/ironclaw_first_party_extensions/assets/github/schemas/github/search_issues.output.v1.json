@@ -1,0 +1,36 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "GitHub issue search output",
+  "type": "object",
+  "additionalProperties": true,
+  "properties": {
+    "total_count": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Total matching results reported by GitHub."
+    },
+    "incomplete_results": {
+      "type": "boolean",
+      "description": "Whether GitHub returned an incomplete result set."
+    },
+    "items": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": true,
+        "properties": {
+          "number": { "type": "integer", "minimum": 1 },
+          "title": { "type": "string" },
+          "state": { "type": "string" },
+          "html_url": { "type": "string" },
+          "repository_url": { "type": "string" },
+          "user": { "type": "object" },
+          "pull_request": { "type": "object" },
+          "created_at": { "type": "string" },
+          "updated_at": { "type": "string" }
+        }
+      }
+    }
+  },
+  "required": ["items"]
+}

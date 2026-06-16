@@ -4,21 +4,22 @@
 //! widgets that implement [`TuiWidget`]. The trait receives a read-only
 //! reference to [`AppState`] for rendering and can optionally handle key
 //! events.
+#![allow(dead_code)] // Scaffolding; some items kept for future use.
 
-pub mod approval;
-pub mod command_palette;
-pub mod conversation;
-pub mod header;
-pub mod help_overlay;
-pub mod input_box;
-pub mod logs;
-pub mod model_picker;
-pub mod registry;
-pub mod status_bar;
-pub mod tab_bar;
-pub mod thread_list;
-pub mod thread_picker;
-pub mod tool_panel;
+pub(crate) mod approval;
+pub(crate) mod command_palette;
+pub(crate) mod conversation;
+pub(crate) mod header;
+pub(crate) mod help_overlay;
+pub(crate) mod input_box;
+pub(crate) mod logs;
+pub(crate) mod model_picker;
+pub(crate) mod registry;
+pub(crate) mod status_bar;
+pub(crate) mod tab_bar;
+pub(crate) mod thread_list;
+pub(crate) mod thread_picker;
+pub(crate) mod tool_panel;
 
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
@@ -31,7 +32,7 @@ use model_picker::ModelPickerState;
 
 /// Which main content tab is currently active.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum ActiveTab {
+pub(crate) enum ActiveTab {
     #[default]
     Conversation,
     Logs,
@@ -39,7 +40,7 @@ pub enum ActiveTab {
 
 /// Shared application state visible to all widgets.
 #[derive(Debug, Clone)]
-pub struct AppState {
+pub(crate) struct AppState {
     /// IronClaw version string.
     pub version: String,
 
@@ -209,7 +210,7 @@ pub struct AppState {
 
 /// State for the thread resume picker modal.
 #[derive(Debug, Clone)]
-pub struct ThreadPickerState {
+pub(crate) struct ThreadPickerState {
     /// Available threads to resume.
     pub threads: Vec<crate::event::ThreadEntry>,
     /// Currently selected index.
@@ -281,7 +282,7 @@ impl Default for AppState {
 
 /// Last rendered terminal contents.
 #[derive(Debug, Clone)]
-pub struct ScreenSnapshot {
+pub(crate) struct ScreenSnapshot {
     pub area: Rect,
     pub buffer: Buffer,
 }
@@ -298,14 +299,14 @@ impl Default for ScreenSnapshot {
 
 /// A single terminal-cell coordinate.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct SelectionPoint {
+pub(crate) struct SelectionPoint {
     pub column: u16,
     pub row: u16,
 }
 
 /// Active text selection bounds and endpoints.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct TextSelection {
+pub(crate) struct TextSelection {
     pub anchor: SelectionPoint,
     pub focus: SelectionPoint,
     pub bounds: Rect,
@@ -313,7 +314,7 @@ pub struct TextSelection {
 
 /// A message in the conversation.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ChatMessage {
+pub(crate) struct ChatMessage {
     pub role: MessageRole,
     pub content: String,
     pub timestamp: chrono::DateTime<chrono::Utc>,
@@ -323,7 +324,7 @@ pub struct ChatMessage {
 
 /// Per-turn token usage and cost information.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct TurnCostSummary {
+pub(crate) struct TurnCostSummary {
     pub input_tokens: u64,
     pub output_tokens: u64,
     pub cost_usd: String,
@@ -331,7 +332,7 @@ pub struct TurnCostSummary {
 
 /// Who sent the message.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum MessageRole {
+pub(crate) enum MessageRole {
     User,
     Assistant,
     System,
@@ -339,7 +340,7 @@ pub enum MessageRole {
 
 /// Tool execution activity for the sidebar.
 #[derive(Debug, Clone)]
-pub struct ToolActivity {
+pub(crate) struct ToolActivity {
     pub call_id: Option<String>,
     pub name: String,
     pub started_at: chrono::DateTime<chrono::Utc>,
@@ -353,7 +354,7 @@ pub struct ToolActivity {
 
 /// Tool execution status.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ToolStatus {
+pub(crate) enum ToolStatus {
     Running,
     Success,
     Failed,
@@ -361,7 +362,7 @@ pub enum ToolStatus {
 
 /// Status of a sandbox job.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum JobStatus {
+pub(crate) enum JobStatus {
     #[default]
     Pending,
     Running,
@@ -382,7 +383,7 @@ impl std::fmt::Display for JobStatus {
 
 /// A sandbox job tracked in the sidebar.
 #[derive(Debug, Clone)]
-pub struct JobInfo {
+pub(crate) struct JobInfo {
     pub id: String,
     pub title: String,
     pub status: JobStatus,
@@ -391,7 +392,7 @@ pub struct JobInfo {
 
 /// A routine tracked in the sidebar.
 #[derive(Debug, Clone)]
-pub struct RoutineInfo {
+pub(crate) struct RoutineInfo {
     pub id: String,
     pub name: String,
     pub trigger_type: String,
@@ -402,7 +403,7 @@ pub struct RoutineInfo {
 
 /// Execution status of a thread or job.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum ThreadStatus {
+pub(crate) enum ThreadStatus {
     /// Currently executing work.
     #[default]
     Active,
@@ -427,7 +428,7 @@ impl std::fmt::Display for ThreadStatus {
 
 /// Thread information for the sidebar.
 #[derive(Debug, Clone)]
-pub struct ThreadInfo {
+pub(crate) struct ThreadInfo {
     pub id: String,
     pub label: String,
     pub is_foreground: bool,
@@ -441,7 +442,7 @@ pub struct ThreadInfo {
 
 /// Engine v2 thread information for the activity sidebar.
 #[derive(Debug, Clone)]
-pub struct EngineThreadInfo {
+pub(crate) struct EngineThreadInfo {
     pub id: String,
     pub goal: String,
     /// "Foreground", "Research", or "Mission".
@@ -455,7 +456,7 @@ pub struct EngineThreadInfo {
 
 /// Context pressure status for the status bar.
 #[derive(Debug, Clone)]
-pub struct ContextPressureInfo {
+pub(crate) struct ContextPressureInfo {
     /// Tokens consumed so far.
     pub used_tokens: u64,
     /// Maximum context window.
@@ -468,7 +469,7 @@ pub struct ContextPressureInfo {
 
 /// Sandbox / Docker status for the sidebar.
 #[derive(Debug, Clone)]
-pub struct SandboxInfo {
+pub(crate) struct SandboxInfo {
     /// Whether the Docker daemon is reachable.
     pub docker_available: bool,
     /// Number of currently running containers.
@@ -479,7 +480,7 @@ pub struct SandboxInfo {
 
 /// Secrets vault status for the sidebar.
 #[derive(Debug, Clone)]
-pub struct SecretsInfo {
+pub(crate) struct SecretsInfo {
     /// Number of stored secrets.
     pub count: u32,
     /// Whether the vault is currently unlocked.
@@ -506,7 +507,7 @@ pub struct SkillCategory {
 
 /// Cost guard / budget information for the status bar.
 #[derive(Debug, Clone)]
-pub struct CostGuardInfo {
+pub(crate) struct CostGuardInfo {
     /// Session spending budget (USD), if configured.
     pub session_budget_usd: Option<String>,
     /// Amount spent so far (USD).
@@ -519,7 +520,7 @@ pub struct CostGuardInfo {
 
 /// Log level filter for the Logs tab.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum LogLevelFilter {
+pub(crate) enum LogLevelFilter {
     /// Show all log entries.
     #[default]
     All,
@@ -547,7 +548,7 @@ impl std::fmt::Display for LogLevelFilter {
 
 impl LogLevelFilter {
     /// Returns true if the given log level passes this filter.
-    pub fn accepts(&self, level: &str) -> bool {
+    pub(crate) fn accepts(&self, level: &str) -> bool {
         match self {
             Self::All => true,
             Self::Error => level == "ERROR",
@@ -560,7 +561,7 @@ impl LogLevelFilter {
 
 /// A notification toast displayed briefly in the bottom-right corner.
 #[derive(Debug, Clone)]
-pub struct Toast {
+pub(crate) struct Toast {
     /// Short message to display.
     pub message: String,
     /// Visual style of the toast.
@@ -571,7 +572,7 @@ pub struct Toast {
 
 /// Visual style for notification toasts.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ToastKind {
+pub(crate) enum ToastKind {
     Info,
     Success,
     Warning,
@@ -580,7 +581,7 @@ pub enum ToastKind {
 
 /// Modal showing full tool output, scrollable.
 #[derive(Debug, Clone)]
-pub struct ToolDetailModal {
+pub(crate) struct ToolDetailModal {
     /// Name of the tool whose output is shown.
     pub tool_name: String,
     /// Full tool output content.
@@ -591,7 +592,7 @@ pub struct ToolDetailModal {
 
 /// Search state for Ctrl+F in conversation.
 #[derive(Debug, Clone, Default)]
-pub struct SearchState {
+pub(crate) struct SearchState {
     /// Whether search mode is active.
     pub active: bool,
     /// Current search query.
@@ -604,7 +605,7 @@ pub struct SearchState {
 
 /// Pending approval request.
 #[derive(Debug, Clone)]
-pub struct ApprovalRequest {
+pub(crate) struct ApprovalRequest {
     pub request_id: String,
     pub tool_name: String,
     pub description: String,
@@ -615,7 +616,7 @@ pub struct ApprovalRequest {
 }
 
 /// Trait implemented by all TUI widgets.
-pub trait TuiWidget: Send + Sync {
+pub(crate) trait TuiWidget: Send + Sync {
     /// Unique widget identifier.
     fn id(&self) -> &str;
 

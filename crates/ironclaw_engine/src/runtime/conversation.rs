@@ -975,6 +975,7 @@ mod tests {
                 "user1",
                 ThreadConfig::default(),
                 None,
+                None,
             )
             .await
             .unwrap();

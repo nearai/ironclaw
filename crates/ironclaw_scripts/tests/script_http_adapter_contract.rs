@@ -8,12 +8,13 @@ use ironclaw_host_api::{
 };
 use ironclaw_scripts::{ScriptHostHttpRequest, ScriptRuntimeHttpAdapter};
 
-#[test]
-fn script_host_http_adapter_uses_shared_runtime_egress() {
+#[tokio::test]
+async fn script_host_http_adapter_uses_shared_runtime_egress() {
     let egress = RecordingRuntimeEgress::ok(RuntimeHttpEgressResponse {
         status: 201,
         headers: vec![("content-type".to_string(), "application/json".to_string())],
         body: br#"{"ok":true}"#.to_vec(),
+        saved_body: None,
         request_bytes: 7,
         response_bytes: 11,
         redaction_applied: false,
@@ -34,6 +35,7 @@ fn script_host_http_adapter_uses_shared_runtime_egress() {
             response_body_limit: Some(4096),
             timeout_ms: None,
         })
+        .await
         .expect("script host-mediated HTTP should succeed");
 
     assert_eq!(response.status, 201);
@@ -52,12 +54,13 @@ fn script_host_http_adapter_uses_shared_runtime_egress() {
     assert_eq!(requests[0].response_body_limit, Some(4096));
 }
 
-#[test]
-fn script_host_http_adapter_forwards_host_supplied_policy_credentials_timeout_and_limits() {
+#[tokio::test]
+async fn script_host_http_adapter_forwards_host_supplied_policy_credentials_timeout_and_limits() {
     let egress = RecordingRuntimeEgress::ok(RuntimeHttpEgressResponse {
         status: 204,
         headers: vec![],
         body: vec![],
+        saved_body: None,
         request_bytes: 13,
         response_bytes: 0,
         redaction_applied: false,
@@ -90,6 +93,7 @@ fn script_host_http_adapter_forwards_host_supplied_policy_credentials_timeout_an
             response_body_limit: Some(512),
             timeout_ms: Some(2_500),
         })
+        .await
         .expect("script host-mediated HTTP should succeed");
 
     let requests = egress.requests.lock().unwrap();
@@ -103,8 +107,8 @@ fn script_host_http_adapter_forwards_host_supplied_policy_credentials_timeout_an
     assert_eq!(requests[0].timeout_ms, Some(2_500));
 }
 
-#[test]
-fn script_host_http_adapter_returns_sanitized_shared_egress_errors() {
+#[tokio::test]
+async fn script_host_http_adapter_returns_sanitized_shared_egress_errors() {
     let adapter = ScriptRuntimeHttpAdapter::new(Arc::new(RecordingRuntimeEgress::err(
         RuntimeHttpEgressError::Network {
             reason: "network request denied by policy for sk-test-secret".to_string(),
@@ -126,12 +130,37 @@ fn script_host_http_adapter_returns_sanitized_shared_egress_errors() {
             response_body_limit: Some(4096),
             timeout_ms: None,
         })
+        .await
         .expect_err("network denial should surface as a sanitized adapter error");
 
     let rendered = error.to_string();
     assert!(rendered.contains("network_error"));
     assert!(!rendered.contains("sk-test-secret"));
     assert!(!rendered.contains("network request denied by policy"));
+}
+
+#[tokio::test]
+async fn script_host_http_adapter_maps_panicking_runtime_egress_to_sanitized_error() {
+    let adapter = ScriptRuntimeHttpAdapter::new(Arc::new(PanickingRuntimeEgress));
+
+    let error = adapter
+        .request(ScriptHostHttpRequest {
+            scope: sample_scope(),
+            capability_id: sample_capability_id(),
+            method: NetworkMethod::Get,
+            url: "https://script-api.example.test/run".to_string(),
+            headers: vec![],
+            body: vec![],
+            network_policy: sample_policy(),
+            credential_injections: vec![],
+            response_body_limit: Some(4096),
+            timeout_ms: None,
+        })
+        .await
+        .expect_err("runtime egress panics should be contained at the script host boundary");
+
+    let rendered = error.to_string();
+    assert!(rendered.contains("runtime_http_egress_panicked"));
 }
 
 #[derive(Clone)]
@@ -156,13 +185,27 @@ impl RecordingRuntimeEgress {
     }
 }
 
+#[async_trait::async_trait]
 impl RuntimeHttpEgress for RecordingRuntimeEgress {
-    fn execute(
+    async fn execute(
         &self,
         request: RuntimeHttpEgressRequest,
     ) -> Result<RuntimeHttpEgressResponse, RuntimeHttpEgressError> {
         self.requests.lock().unwrap().push(request);
         self.response.clone()
+    }
+}
+
+#[derive(Clone)]
+struct PanickingRuntimeEgress;
+
+#[async_trait::async_trait]
+impl RuntimeHttpEgress for PanickingRuntimeEgress {
+    async fn execute(
+        &self,
+        _request: RuntimeHttpEgressRequest,
+    ) -> Result<RuntimeHttpEgressResponse, RuntimeHttpEgressError> {
+        panic!("runtime HTTP egress should not unwind through script host");
     }
 }
 

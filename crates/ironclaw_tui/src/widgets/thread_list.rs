@@ -128,12 +128,12 @@ pub(crate) fn engine_thread_index_at(
     Some(thread_index)
 }
 
-pub struct ThreadListWidget {
+pub(crate) struct ThreadListWidget {
     theme: Theme,
 }
 
 impl ThreadListWidget {
-    pub fn new(theme: Theme) -> Self {
+    pub(crate) fn new(theme: Theme) -> Self {
         Self { theme }
     }
 

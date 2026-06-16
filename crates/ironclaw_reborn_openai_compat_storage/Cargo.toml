@@ -1,0 +1,36 @@
+[package]
+name = "ironclaw_reborn_openai_compat_storage"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.92"
+description = "Durable storage adapters for Reborn OpenAI-compatible refs"
+authors = ["NEAR AI <support@near.ai>"]
+license = "MIT OR Apache-2.0"
+homepage = "https://github.com/nearai/ironclaw"
+repository = "https://github.com/nearai/ironclaw"
+publish = false
+
+[features]
+default = []
+libsql = ["ironclaw_filesystem/libsql"]
+postgres = ["ironclaw_filesystem/postgres"]
+
+[dependencies]
+async-trait = "0.1"
+chrono = { version = "0.4", features = ["clock"] }
+ironclaw_filesystem = { path = "../ironclaw_filesystem", version = "0.1.0" }
+ironclaw_host_api = { path = "../ironclaw_host_api", version = "0.1.0" }
+ironclaw_reborn_openai_compat = { path = "../ironclaw_reborn_openai_compat", version = "0.1.0" }
+hex = "0.4"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+tracing = "0.1"
+
+[dev-dependencies]
+ironclaw_product_adapters = { path = "../ironclaw_product_adapters", version = "0.1.0" }
+ironclaw_turns = { path = "../ironclaw_turns", version = "0.1.0" }
+tokio = { version = "1", features = ["macros", "rt"] }
+
+[lints]
+workspace = true

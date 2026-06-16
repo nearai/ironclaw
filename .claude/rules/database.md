@@ -6,7 +6,34 @@ paths:
 ---
 # Database Rules
 
-Dual-backend persistence: PostgreSQL + libSQL/Turso. **All new persistence features must support both backends.**
+## Status & Direction
+
+The repo is migrating off per-crate `Store`/`Repository` traits onto a
+single universal `RootFilesystem` mount table (`crates/ironclaw_filesystem/`).
+Under the new model, every persistence concern is a mount path
+(`/system/secrets`, `/system/processes`, `/engine/threads`, …) backed by
+exactly one `RootFilesystem` implementation — typed stores become thin
+wrappers around `ScopedFilesystem` and own no backend dispatch of their
+own. See `crates/ironclaw_filesystem/CLAUDE.md` and the
+`2026-05-14-universal-fs-dispatch.md` plan/ADR.
+
+**New persistence features go on `ScopedFilesystem`, not into `src/db/`.**
+The rules below cover the *legacy* per-crate dual-backend pattern that
+still exists in `src/db/`, `src/history/`, and `migrations/`. Touch them
+only when fixing or extending code that already lives there; do not add
+new sub-traits or per-domain backends.
+
+This file is `paths`-scoped to those legacy directories so the rule
+loads when (and only when) you're inside them. New code under
+`crates/ironclaw_filesystem/`, consumer crates routing through it, or
+any new mount-backed store should follow the unified-surface contract
+in `crates/ironclaw_filesystem/CLAUDE.md` instead.
+
+---
+
+## Legacy: Dual-Backend Per-Crate Pattern
+
+Dual-backend persistence: PostgreSQL + libSQL/Turso. **All new persistence features must support both backends.** *(Applies only inside the legacy directories scoped above. For new crates, mount through `RootFilesystem` and let the wiring layer pick the backend.)*
 
 See `src/db/CLAUDE.md` for full schema, dialect differences, and libSQL limitations.
 

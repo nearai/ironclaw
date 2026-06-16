@@ -510,7 +510,7 @@ fn default_patterns() -> Vec<LeakPattern> {
         // Bearer tokens (redact instead of block, might be intentional)
         LeakPattern {
             name: "bearer_token".to_string(),
-            regex: Regex::new(r"Bearer\s+[a-zA-Z0-9_-]{20,}").unwrap(), // safety: hardcoded literal
+            regex: Regex::new(r"Bearer\s+[a-zA-Z0-9._-]{20,}").unwrap(), // safety: hardcoded literal
             severity: LeakSeverity::High,
             action: LeakAction::Redact,
         },
@@ -649,6 +649,58 @@ mod tests {
         let redacted = result.redacted_content.unwrap();
         assert!(redacted.contains("[REDACTED]"));
         assert!(!redacted.contains("eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9"));
+    }
+
+    #[test]
+    fn test_redact_bearer_jwt_token_without_tail_leak() {
+        let detector = LeakDetector::new();
+        let header = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9";
+        let payload = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        let signature = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+        let content = format!("token: Bearer {header}.{payload}.{signature}");
+
+        let redacted = detector.scan_and_clean(&content).unwrap();
+
+        assert_eq!(redacted, "token: [REDACTED]");
+        for forbidden in [header, payload, signature] {
+            assert!(
+                !redacted.contains(forbidden),
+                "redacted bearer JWT leaked token fragment {forbidden}: {redacted}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_redact_bearer_token_preserves_adjacent_sentence_boundary() {
+        let detector = LeakDetector::new();
+        let token = "abcdef1234567890123456";
+        let content = format!("prefix Bearer {token}. The next sentence.");
+
+        let redacted = detector.scan_and_clean(&content).unwrap();
+
+        assert_eq!(redacted, "prefix [REDACTED] The next sentence.");
+        assert!(!redacted.contains(token));
+        assert!(redacted.ends_with("The next sentence."));
+    }
+
+    #[test]
+    fn test_redact_dotted_opaque_bearer_token_without_fragment_leak() {
+        let detector = LeakDetector::new();
+        let prefix = "opaquePrefix1234567890";
+        let middle = "middle.segment.value";
+        let suffix = "opaqueSuffix0987654321";
+        let token = format!("{prefix}.{middle}.{suffix}");
+        let content = format!("token=Bearer {token}; after token");
+
+        let redacted = detector.scan_and_clean(&content).unwrap();
+
+        assert_eq!(redacted, "token=[REDACTED]; after token");
+        for forbidden in [prefix, middle, suffix] {
+            assert!(
+                !redacted.contains(forbidden),
+                "redacted dotted bearer token leaked fragment {forbidden}: {redacted}"
+            );
+        }
     }
 
     #[test]

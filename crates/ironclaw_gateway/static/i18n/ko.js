@@ -506,8 +506,19 @@ I18n.register('ko', {
   'config.alreadySet': '(이미 설정됨 — 비워두면 유지)',
   'config.alreadyConfigured': '이미 구성됨',
   'config.autoGenerate': '비어 있으면 자동 생성됨',
+  'config.optionalSection': '선택 설정',
+  'config.optionalSectionSummary': '선택 설정 ({count})',
+  'config.requiredFieldMissing': '{name}은(는) 필수입니다.',
+  'config.invalidField': '{name} 형식이 올바르지 않습니다.',
+  'config.controlCharsNotAllowed': '{name}에는 제어 문자를 사용할 수 없습니다.',
+  'config.requiredPlaceholder': '필수',
+  'config.optionalPlaceholder': '선택',
   'config.save': '저장',
   'config.cancel': '취소',
+
+  // 설정 필드
+  'setup.secret.wecom_bot_id': 'Bot ID',
+  'setup.secret.wecom_bot_secret': 'Bot Secret',
 
   // 설정 도구 모음
   'settings.export': '내보내기',

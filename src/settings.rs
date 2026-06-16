@@ -479,6 +479,14 @@ pub struct ChannelSettings {
     #[serde(default)]
     pub wasm_channel_owner_ids: std::collections::HashMap<String, i64>,
 
+    /// Runtime config overrides for WASM channels.
+    ///
+    /// Keys use `<channel>:<config_key>` format (for example,
+    /// `wecom:allow_from`), and values are passed to the channel config as
+    /// JSON values.
+    #[serde(default)]
+    pub wasm_channel_runtime_overrides: std::collections::HashMap<String, serde_json::Value>,
+
     /// Enabled WASM channels by name.
     /// Primarily used by the setup wizard to track which channels were configured.
     ///
@@ -520,6 +528,7 @@ impl Default for ChannelSettings {
             signal_group_policy: None,
             signal_group_allow_from: None,
             wasm_channel_owner_ids: std::collections::HashMap::new(),
+            wasm_channel_runtime_overrides: std::collections::HashMap::new(),
             wasm_channels: Vec::new(),
             wasm_channels_enabled: true,
             wasm_channels_dir: None,
@@ -983,6 +992,10 @@ pub struct SkillsSettings {
     /// Maximum total context tokens allocated to skill prompts.
     #[serde(default = "default_skills_max_context_tokens")]
     pub max_context_tokens: usize,
+
+    /// Whether regex activation criteria may auto-load skills.
+    #[serde(default = "default_true")]
+    pub regex_activation_enabled: bool,
 }
 
 fn default_skills_max_active() -> usize {
@@ -999,6 +1012,7 @@ impl Default for SkillsSettings {
             enabled: true,
             max_active_skills: default_skills_max_active(),
             max_context_tokens: default_skills_max_context_tokens(),
+            regex_activation_enabled: true,
         }
     }
 }
@@ -1686,6 +1700,54 @@ mod tests {
         assert_eq!(
             settings.channels.wasm_channel_owner_ids.get("telegram"),
             Some(&987654321)
+        );
+    }
+
+    #[test]
+    fn test_wasm_channel_runtime_overrides_db_round_trip() {
+        let mut settings = Settings::default();
+        settings.channels.wasm_channel_runtime_overrides.insert(
+            "wecom:dm_policy".to_string(),
+            serde_json::json!("allowlist"),
+        );
+        settings.channels.wasm_channel_runtime_overrides.insert(
+            "wecom:allow_from".to_string(),
+            serde_json::json!(["zhangsan", "lisi"]),
+        );
+
+        let map = settings.to_db_map();
+        let restored = Settings::from_db_map(&map);
+        assert_eq!(
+            restored
+                .channels
+                .wasm_channel_runtime_overrides
+                .get("wecom:dm_policy"),
+            Some(&serde_json::json!("allowlist"))
+        );
+        assert_eq!(
+            restored
+                .channels
+                .wasm_channel_runtime_overrides
+                .get("wecom:allow_from"),
+            Some(&serde_json::json!(["zhangsan", "lisi"]))
+        );
+    }
+
+    #[test]
+    fn test_wasm_channel_runtime_overrides_via_set() {
+        let mut settings = Settings::default();
+        settings
+            .set(
+                "channels.wasm_channel_runtime_overrides.wecom:allow_from",
+                "[\"zhangsan\"]",
+            )
+            .unwrap();
+        assert_eq!(
+            settings
+                .channels
+                .wasm_channel_runtime_overrides
+                .get("wecom:allow_from"),
+            Some(&serde_json::json!(["zhangsan"]))
         );
     }
 
@@ -3130,6 +3192,36 @@ bedrock_profile = "prod-bedrock"
         assert!(settings.bedrock_region.is_none());
         assert!(settings.bedrock_cross_region.is_none());
         assert!(settings.bedrock_profile.is_none());
+    }
+
+    /// Regression guard: `SkillsSettings.regex_activation_enabled = false` must
+    /// survive a `to_db_map` → `from_db_map` round-trip.  A serialization
+    /// regression (e.g. `serde(default)` applied without a matching
+    /// `serde(skip_serializing_if)`) would cause the field to be omitted from
+    /// the map and silently revert to `true` on reload.
+    #[test]
+    fn test_db_map_round_trip_preserves_skills_regex_activation() {
+        let settings = Settings {
+            skills: crate::settings::SkillsSettings {
+                regex_activation_enabled: false,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let map = settings.to_db_map();
+        let restored = Settings::from_db_map(&map);
+        assert!(
+            !restored.skills.regex_activation_enabled,
+            "skills.regex_activation_enabled=false must survive DB round-trip"
+        );
+        // Confirm the default (true) is also preserved when round-tripping the
+        // default settings so we don't accidentally strip the default path.
+        let default_map = Settings::default().to_db_map();
+        let restored_default = Settings::from_db_map(&default_map);
+        assert!(
+            restored_default.skills.regex_activation_enabled,
+            "default skills.regex_activation_enabled=true must survive DB round-trip"
+        );
     }
 
     /// `migrate_legacy_provider_fields` is idempotent in-memory: once the

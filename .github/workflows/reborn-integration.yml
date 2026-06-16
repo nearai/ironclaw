@@ -1,0 +1,200 @@
+name: Reborn Integration Binary Crate Tests
+
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: Commit SHA or ref to test
+        required: false
+        type: string
+  pull_request:
+    branches:
+      - reborn-integration
+  merge_group:
+    branches:
+      - reborn-integration
+    types:
+      - checks_requested
+  push:
+    branches:
+      - reborn-integration
+
+permissions:
+  contents: read
+
+concurrency:
+  group: reborn-integration-${{ github.event_name }}-${{ github.head_ref || github.ref }}
+  cancel-in-progress: true
+
+env:
+  # Tests must never touch the real OS keychain (macOS Keychain auth dialog /
+  # Linux Secret Service). Guarded by src/secrets/keychain.rs::os_keychain_suppressed:
+  # cfg!(test) covers unit tests; this covers integration/e2e that link the
+  # non-cfg(test) library.
+  IRONCLAW_DISABLE_OS_KEYCHAIN: "1"
+  # GitHub-hosted runners can crash lld with bus errors when several large
+  # Reborn test binaries link concurrently.
+  CARGO_BUILD_JOBS: "1"
+  CARGO_PROFILE_DEV_DEBUG: 0
+  CARGO_PROFILE_TEST_DEBUG: 0
+
+jobs:
+  package-matrix:
+    name: Discover Reborn package crates
+    runs-on: ubuntu-latest
+    outputs:
+      packages: ${{ steps.packages.outputs.packages }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          ref: ${{ inputs.ref || github.sha }}
+          persist-credentials: false
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+
+      - id: packages
+        name: Build package matrix from Reborn crate families
+        run: |
+          packages="$(
+            cargo metadata --no-deps --format-version 1 \
+              | jq -c '
+                  [
+                    .packages[]
+                    | select(
+                        (.name | startswith("ironclaw_reborn"))
+                        or (.name | startswith("ironclaw_product"))
+                        or (.name == "ironclaw_architecture")
+                        or (.name == "ironclaw_slack_v2_adapter")
+                        or (.name == "ironclaw_telegram_v2_adapter")
+                        or (.name == "ironclaw_wasm_product_adapters")
+                        or (.name | startswith("ironclaw_webui_v2"))
+                      )
+                    | .name
+                  ]
+                  | unique
+                '
+          )"
+
+          if [ -z "${packages}" ] || [ "${packages}" = "[]" ]; then
+            echo "No Reborn workspace crates discovered" >&2
+            exit 1
+          fi
+
+          echo "packages=${packages}" >> "$GITHUB_OUTPUT"
+          echo "Testing Reborn package crates:"
+          printf '%s\n' "${packages}" | jq -r '.[] | "- " + .'
+
+  crate-tests:
+    name: Test ${{ matrix.package }}
+    needs: package-matrix
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      ANTHROPIC_API_KEY: ""
+      LLM_BACKEND: ""
+      LLM_USE_CODEX_AUTH: "false"
+      OLLAMA_BASE_URL: ""
+      OPENAI_API_KEY: ""
+    strategy:
+      fail-fast: true
+      matrix:
+        package: ${{ fromJSON(needs.package-matrix.outputs.packages) }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          ref: ${{ inputs.ref || github.sha }}
+          persist-credentials: false
+
+      - name: Free disk space
+        run: |
+          df -h /
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /usr/local/.ghcup /usr/local/share/boost /opt/hostedtoolcache/CodeQL || true
+          docker system prune -af || true
+          df -h /
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+
+      - name: Restore Rust cache
+        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          key: reborn-integration-${{ matrix.package }}
+          save-if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/reborn-integration' }}
+
+      - name: Run crate tests
+        run: |
+          feature_flags="$(scripts/ci/package-feature-flags.sh "${{ matrix.package }}")"
+
+          # shellcheck disable=SC2086 # feature_flags intentionally expands to zero or more Cargo args.
+          timeout --signal=INT --kill-after=30s 28m \
+            cargo test -p "${{ matrix.package }}" ${feature_flags} --all-targets -- --nocapture
+
+  root-reborn-parity-tests:
+    name: Reborn root tests (${{ matrix.partition }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      ANTHROPIC_API_KEY: ""
+      LLM_BACKEND: ""
+      LLM_USE_CODEX_AUTH: "false"
+      OLLAMA_BASE_URL: ""
+      OPENAI_API_KEY: ""
+      REBORN_ROOT_TEST_PARTITIONS: 4
+      REBORN_ROOT_TEST_PARTITION: ${{ matrix.partition }}
+      REBORN_ROOT_TEST_TIMEOUT: 28m
+    strategy:
+      fail-fast: true
+      matrix:
+        partition: [0, 1, 2, 3]
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          ref: ${{ inputs.ref || github.sha }}
+          persist-credentials: false
+
+      - name: Free disk space
+        run: |
+          df -h /
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /usr/local/.ghcup /usr/local/share/boost /opt/hostedtoolcache/CodeQL || true
+          docker system prune -af || true
+          df -h /
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+
+      - name: Restore Rust cache
+        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          key: reborn-integration-root-${{ matrix.partition }}
+          save-if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/reborn-integration' }}
+
+      - name: Run Reborn root tests
+        run: scripts/ci/run-reborn-root-partition.sh
+
+  reborn-integration-crate-tests:
+    name: Reborn Integration Binary Crate Tests
+    runs-on: ubuntu-latest
+    if: always()
+    needs:
+      - package-matrix
+      - crate-tests
+      - root-reborn-parity-tests
+    steps:
+      - name: Check matrix result
+        run: |
+          if [[ "${{ needs.package-matrix.result }}" != "success" ]]; then
+            echo "Reborn package matrix discovery failed"
+            exit 1
+          fi
+          if [[ "${{ needs.crate-tests.result }}" != "success" ]]; then
+            echo "One or more Reborn binary crate tests failed"
+            exit 1
+          fi
+          if [[ "${{ needs.root-reborn-parity-tests.result }}" != "success" ]]; then
+            echo "One or more Reborn root tests failed"
+            exit 1
+          fi

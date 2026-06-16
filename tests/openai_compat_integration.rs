@@ -73,6 +73,7 @@ impl LlmProvider for MockLlmProvider {
             input_tokens: 10,
             output_tokens: 5,
             finish_reason: FinishReason::Stop,
+            reasoning: None,
             cache_read_input_tokens: 0,
             cache_creation_input_tokens: 0,
         })
@@ -98,6 +99,7 @@ impl LlmProvider for MockLlmProvider {
                     arguments: serde_json::json!({"test": true}),
                     reasoning: None,
                     signature: None,
+                    arguments_parse_error: None,
                 }],
                 input_tokens: 15,
                 output_tokens: 8,
@@ -154,6 +156,7 @@ impl LlmProvider for FixedModelProvider {
             input_tokens: 10,
             output_tokens: 5,
             finish_reason: FinishReason::Stop,
+            reasoning: None,
             cache_read_input_tokens: 0,
             cache_creation_input_tokens: 0,
         })

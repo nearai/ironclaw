@@ -46,6 +46,7 @@ pub mod extension_state;
 pub mod hygiene;
 pub mod layer;
 pub mod privacy;
+mod reborn_identity_context;
 #[cfg(feature = "postgres")]
 mod repository;
 pub mod schema;
@@ -61,6 +62,7 @@ pub use document::{
     content_sha256, is_config_path, is_identity_path, is_reserved_scope, merge_workspace_entries,
     paths,
 };
+pub use reborn_identity_context::WorkspaceIdentityContextSource;
 #[cfg(feature = "postgres")]
 pub use repository::Repository;
 pub use search::{

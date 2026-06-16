@@ -12,12 +12,12 @@ use crate::theme::Theme;
 
 use super::{AppState, TuiWidget};
 
-pub struct HeaderWidget {
+pub(crate) struct HeaderWidget {
     theme: Theme,
 }
 
 impl HeaderWidget {
-    pub fn new(theme: Theme) -> Self {
+    pub(crate) fn new(theme: Theme) -> Self {
         Self { theme }
     }
 }

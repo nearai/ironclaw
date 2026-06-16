@@ -1,0 +1,30 @@
+api_version = "ironclaw.runtime/v1"
+
+[boot]
+profile = "local-dev"
+
+[identity]
+default_owner = "reborn-cli"
+tenant = "reborn-cli"
+default_agent = "reborn-cli-agent"
+
+[runner]
+heartbeat_interval_secs = 5
+poll_interval_ms = 200
+
+[skills]
+regex_activation_enabled = true
+
+[webui]
+env_token_var = "IRONCLAW_REBORN_WEBUI_TOKEN"
+env_user_id_var = "IRONCLAW_REBORN_WEBUI_USER_ID"
+
+[llm.default]
+provider_id = "nearai"
+model = "anthropic/claude-sonnet-4-5"
+api_key_env = "NEARAI_API_KEY"
+
+[slack]
+enabled = false
+signing_secret_env = "IRONCLAW_REBORN_SLACK_SIGNING_SECRET"
+bot_token_env = "IRONCLAW_REBORN_SLACK_BOT_TOKEN"

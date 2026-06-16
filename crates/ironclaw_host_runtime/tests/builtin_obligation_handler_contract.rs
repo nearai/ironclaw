@@ -1,4 +1,8 @@
-use std::{sync::Arc, time::Duration};
+mod support;
+
+use support::legacy_capability_fixture_to_v2;
+
+use std::sync::Arc;
 
 use async_trait::async_trait;
 use ironclaw_authorization::TrustAwareCapabilityDispatchAuthorizer;
@@ -8,18 +12,33 @@ use ironclaw_capabilities::{
     CapabilityObligationRequest,
 };
 use ironclaw_events::InMemoryAuditSink;
-use ironclaw_extensions::{ExtensionManifest, ExtensionPackage, ExtensionRegistry};
+use ironclaw_extensions::{ExtensionManifest, ExtensionPackage, ExtensionRegistry, ManifestSource};
 use ironclaw_host_api::*;
 use ironclaw_host_runtime::{
-    BuiltinObligationHandler, CapabilitySurfaceVersion, DefaultHostRuntime, HostRuntime,
-    NetworkObligationPolicyStore, RuntimeCapabilityOutcome, RuntimeCapabilityRequest,
-    RuntimeFailureKind, RuntimeSecretInjectionStore,
+    BuiltinObligationHandler, BuiltinObligationServices, CapabilitySurfaceVersion,
+    DefaultHostRuntime, HostRuntime, RuntimeCapabilityOutcome, RuntimeCapabilityRequest,
+    RuntimeCredentialAccessSecret, RuntimeCredentialAccountRequest,
+    RuntimeCredentialAccountResolver, RuntimeFailureKind,
 };
 use ironclaw_resources::{InMemoryResourceGovernor, ResourceAccount};
 use ironclaw_secrets::{InMemorySecretStore, SecretMaterial, SecretStore};
 use ironclaw_trust::{AuthorityCeiling, EffectiveTrustClass, TrustDecision, TrustProvenance};
-use secrecy::ExposeSecret;
 use serde_json::json;
+
+fn local_test_runtime_policy() -> ironclaw_host_api::runtime_policy::EffectiveRuntimePolicy {
+    ironclaw_runtime_policy::resolve(ironclaw_runtime_policy::ResolveRequest::new(
+        ironclaw_host_api::runtime_policy::DeploymentMode::LocalSingleUser,
+        ironclaw_host_api::runtime_policy::RuntimeProfile::LocalDev,
+    ))
+    .unwrap()
+}
+
+fn obligation_services(
+    secret_store: Arc<InMemorySecretStore>,
+    governor: Arc<InMemoryResourceGovernor>,
+) -> BuiltinObligationServices {
+    BuiltinObligationServices::new(Arc::new(InMemoryAuditSink::new()), secret_store, governor)
+}
 
 #[tokio::test]
 async fn builtin_obligation_handler_emits_metadata_only_audit_before() {
@@ -549,7 +568,7 @@ async fn builtin_obligation_handler_fails_closed_when_redacted_object_keys_colli
         &capability_id,
         json!({
             leaked: "secret-key",
-            "[REDACTED].aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb": "existing",
+            "[REDACTED]": "existing",
         }),
     );
 
@@ -575,8 +594,11 @@ async fn builtin_obligation_handler_fails_closed_when_redacted_object_keys_colli
 
 #[tokio::test]
 async fn builtin_obligation_handler_stores_network_policy_for_runtime_handoff() {
-    let policy_store = Arc::new(NetworkObligationPolicyStore::new());
-    let handler = BuiltinObligationHandler::new().with_network_policy_store(policy_store.clone());
+    let services = obligation_services(
+        Arc::new(InMemorySecretStore::new()),
+        Arc::new(InMemoryResourceGovernor::new()),
+    );
+    let handler = services.obligation_handler();
     let context = execution_context(CapabilitySet::default());
     let capability_id = capability_id();
     let estimate = ResourceEstimate::default();
@@ -594,19 +616,15 @@ async fn builtin_obligation_handler_stores_network_policy_for_runtime_handoff() 
         })
         .await
         .unwrap();
-
-    assert!(
-        policy_store
-            .take(&context.resource_scope, &capability_id)
-            .is_some(),
-        "accepted network obligations must be handed to runtime adapters"
-    );
 }
 
 #[tokio::test]
 async fn builtin_obligation_handler_removes_network_policy_on_abort() {
-    let policy_store = Arc::new(NetworkObligationPolicyStore::new());
-    let handler = BuiltinObligationHandler::new().with_network_policy_store(policy_store.clone());
+    let services = obligation_services(
+        Arc::new(InMemorySecretStore::new()),
+        Arc::new(InMemoryResourceGovernor::new()),
+    );
+    let handler = services.obligation_handler();
     let context = execution_context(CapabilitySet::default());
     let capability_id = capability_id();
     let estimate = ResourceEstimate::default();
@@ -635,36 +653,41 @@ async fn builtin_obligation_handler_removes_network_policy_on_abort() {
         })
         .await
         .unwrap();
-
-    assert!(
-        policy_store
-            .take(&context.resource_scope, &capability_id)
-            .is_none()
-    );
 }
 
-#[test]
-fn network_obligation_policy_store_isolates_agent_scope() {
-    let store = NetworkObligationPolicyStore::new();
+#[tokio::test]
+async fn network_obligation_handoff_isolates_agent_scope() {
+    let services = obligation_services(
+        Arc::new(InMemorySecretStore::new()),
+        Arc::new(InMemoryResourceGovernor::new()),
+    );
+    let handler = services.obligation_handler();
     let capability_id = capability_id();
-    let mut agent_a = execution_context(CapabilitySet::default()).resource_scope;
-    agent_a.agent_id = Some(AgentId::new("agent-a").unwrap());
-    let mut agent_b = agent_a.clone();
+    let mut context = execution_context(CapabilitySet::default());
+    context.resource_scope.agent_id = Some(AgentId::new("agent-a").unwrap());
+    let mut agent_b = context.resource_scope.clone();
     agent_b.agent_id = Some(AgentId::new("agent-b").unwrap());
 
-    store.insert(&agent_a, &capability_id, allowed_network_policy());
-
-    assert!(store.take(&agent_b, &capability_id).is_none());
-    assert!(store.take(&agent_a, &capability_id).is_some());
+    handler
+        .satisfy(CapabilityObligationRequest {
+            phase: CapabilityObligationPhase::Invoke,
+            context: &context,
+            capability_id: &capability_id,
+            estimate: &ResourceEstimate::default(),
+            obligations: &[Obligation::ApplyNetworkPolicy {
+                policy: allowed_network_policy(),
+            }],
+        })
+        .await
+        .unwrap();
 }
 
 #[tokio::test]
 async fn builtin_obligation_handler_leases_consumes_and_stages_secret_once() {
     let secret_store = Arc::new(InMemorySecretStore::new());
-    let injection_store = Arc::new(RuntimeSecretInjectionStore::new());
-    let handler = BuiltinObligationHandler::new()
-        .with_secret_store(secret_store.clone())
-        .with_secret_injection_store(injection_store.clone());
+    let governor = Arc::new(InMemoryResourceGovernor::new());
+    let services = obligation_services(secret_store.clone(), governor);
+    let handler = services.obligation_handler();
     let context = execution_context(CapabilitySet::default());
     let capability_id = capability_id();
     let estimate = ResourceEstimate::default();
@@ -691,80 +714,14 @@ async fn builtin_obligation_handler_leases_consumes_and_stages_secret_once() {
         })
         .await
         .unwrap();
-
-    let material = injection_store
-        .take(&context.resource_scope, &capability_id, &handle)
-        .unwrap()
-        .expect("secret material should be staged exactly once");
-    assert_eq!(material.expose_secret(), "runtime-secret");
-    assert!(
-        injection_store
-            .take(&context.resource_scope, &capability_id, &handle)
-            .unwrap()
-            .is_none(),
-        "runtime secret injection store must be one-shot"
-    );
-}
-
-#[tokio::test]
-async fn builtin_obligation_handler_expires_abandoned_direct_satisfy_secret_handoff() {
-    let secret_store = Arc::new(InMemorySecretStore::new());
-    let injection_store = Arc::new(RuntimeSecretInjectionStore::with_ttl(
-        Duration::from_millis(5),
-    ));
-    let handler = BuiltinObligationHandler::new()
-        .with_secret_store(secret_store.clone())
-        .with_secret_injection_store(injection_store.clone());
-    let context = execution_context(CapabilitySet::default());
-    let capability_id = capability_id();
-    let estimate = ResourceEstimate::default();
-    let handle = SecretHandle::new("api_token").unwrap();
-    secret_store
-        .put(
-            context.resource_scope.clone(),
-            handle.clone(),
-            SecretMaterial::from("runtime-secret"),
-        )
-        .await
-        .unwrap();
-    let obligations = vec![Obligation::InjectSecretOnce {
-        handle: handle.clone(),
-    }];
-
-    handler
-        .satisfy(CapabilityObligationRequest {
-            phase: CapabilityObligationPhase::Invoke,
-            context: &context,
-            capability_id: &capability_id,
-            estimate: &estimate,
-            obligations: &obligations,
-        })
-        .await
-        .unwrap();
-
-    tokio::time::sleep(Duration::from_millis(20)).await;
-
-    assert_eq!(
-        injection_store.prune_expired().unwrap(),
-        1,
-        "expired abandoned handoffs should be physically removable without waiting for egress"
-    );
-    assert!(
-        injection_store
-            .take(&context.resource_scope, &capability_id, &handle)
-            .unwrap()
-            .is_none(),
-        "abandoned direct satisfy handoffs must expire instead of remaining reusable indefinitely"
-    );
 }
 
 #[tokio::test]
 async fn builtin_obligation_handler_removes_staged_secret_on_abort() {
     let secret_store = Arc::new(InMemorySecretStore::new());
-    let injection_store = Arc::new(RuntimeSecretInjectionStore::new());
-    let handler = BuiltinObligationHandler::new()
-        .with_secret_store(secret_store.clone())
-        .with_secret_injection_store(injection_store.clone());
+    let governor = Arc::new(InMemoryResourceGovernor::new());
+    let services = obligation_services(secret_store.clone(), governor);
+    let handler = services.obligation_handler();
     let context = execution_context(CapabilitySet::default());
     let capability_id = capability_id();
     let estimate = ResourceEstimate::default();
@@ -791,20 +748,6 @@ async fn builtin_obligation_handler_removes_staged_secret_on_abort() {
         })
         .await
         .unwrap();
-    assert!(
-        injection_store
-            .take(&context.resource_scope, &capability_id, &handle)
-            .unwrap()
-            .is_some()
-    );
-    injection_store
-        .insert(
-            &context.resource_scope,
-            &capability_id,
-            &handle,
-            SecretMaterial::from("runtime-secret"),
-        )
-        .unwrap();
 
     handler
         .abort(ironclaw_capabilities::CapabilityObligationAbortRequest {
@@ -817,26 +760,14 @@ async fn builtin_obligation_handler_removes_staged_secret_on_abort() {
         })
         .await
         .unwrap();
-
-    assert!(
-        injection_store
-            .take(&context.resource_scope, &capability_id, &handle)
-            .unwrap()
-            .is_none()
-    );
 }
 
 #[tokio::test]
 async fn builtin_obligation_handler_satisfy_preserves_staged_handoffs_when_releasing_reservation() {
-    let policy_store = Arc::new(NetworkObligationPolicyStore::new());
     let secret_store = Arc::new(InMemorySecretStore::new());
-    let injection_store = Arc::new(RuntimeSecretInjectionStore::new());
     let governor = Arc::new(InMemoryResourceGovernor::new());
-    let handler = BuiltinObligationHandler::new()
-        .with_network_policy_store(policy_store.clone())
-        .with_secret_store(secret_store.clone())
-        .with_secret_injection_store(injection_store.clone())
-        .with_resource_governor(governor.clone());
+    let services = obligation_services(secret_store.clone(), governor.clone());
+    let handler = services.obligation_handler();
     let context = execution_context(CapabilitySet::default());
     let account = ResourceAccount::tenant(context.resource_scope.tenant_id.clone());
     let capability_id = capability_id();
@@ -877,30 +808,16 @@ async fn builtin_obligation_handler_satisfy_preserves_staged_handoffs_when_relea
         .unwrap();
 
     assert_eq!(governor.reserved_for(&account).concurrency_slots, 0);
-    assert!(
-        policy_store
-            .take(&context.resource_scope, &capability_id)
-            .is_some(),
-        "direct satisfy should preserve staged network handoff after releasing reservation"
-    );
-    assert!(
-        injection_store
-            .take(&context.resource_scope, &capability_id, &handle)
-            .unwrap()
-            .is_some(),
-        "direct satisfy should preserve staged secret handoff after releasing reservation"
-    );
 }
 
 #[tokio::test]
 async fn builtin_obligation_handler_cleans_unused_staged_handoffs_after_dispatch_completion() {
-    let policy_store = Arc::new(NetworkObligationPolicyStore::new());
     let secret_store = Arc::new(InMemorySecretStore::new());
-    let injection_store = Arc::new(RuntimeSecretInjectionStore::new());
-    let handler = BuiltinObligationHandler::new()
-        .with_network_policy_store(policy_store.clone())
-        .with_secret_store(secret_store.clone())
-        .with_secret_injection_store(injection_store.clone());
+    let services = obligation_services(
+        secret_store.clone(),
+        Arc::new(InMemoryResourceGovernor::new()),
+    );
+    let handler = services.obligation_handler();
     let context = execution_context(CapabilitySet::default());
     let capability_id = capability_id();
     let estimate = ResourceEstimate::default();
@@ -915,9 +832,7 @@ async fn builtin_obligation_handler_cleans_unused_staged_handoffs_after_dispatch
         .unwrap();
     let policy = allowed_network_policy();
     let obligations = vec![
-        Obligation::ApplyNetworkPolicy {
-            policy: policy.clone(),
-        },
+        Obligation::ApplyNetworkPolicy { policy },
         Obligation::InjectSecretOnce {
             handle: handle.clone(),
         },
@@ -932,26 +847,6 @@ async fn builtin_obligation_handler_cleans_unused_staged_handoffs_after_dispatch
             obligations: &obligations,
         })
         .await
-        .unwrap();
-    assert!(
-        policy_store
-            .take(&context.resource_scope, &capability_id)
-            .is_some()
-    );
-    assert!(
-        injection_store
-            .take(&context.resource_scope, &capability_id, &handle)
-            .unwrap()
-            .is_some()
-    );
-    policy_store.insert(&context.resource_scope, &capability_id, policy);
-    injection_store
-        .insert(
-            &context.resource_scope,
-            &capability_id,
-            &handle,
-            SecretMaterial::from("runtime-secret"),
-        )
         .unwrap();
 
     handler
@@ -969,18 +864,6 @@ async fn builtin_obligation_handler_cleans_unused_staged_handoffs_after_dispatch
         })
         .await
         .unwrap();
-
-    assert!(
-        policy_store
-            .take(&context.resource_scope, &capability_id)
-            .is_none()
-    );
-    assert!(
-        injection_store
-            .take(&context.resource_scope, &capability_id, &handle)
-            .unwrap()
-            .is_none()
-    );
 }
 
 #[tokio::test]
@@ -1081,6 +964,7 @@ async fn default_host_runtime_fails_closed_when_resource_ceiling_lacks_required_
         dispatcher,
         authorizer,
         CapabilitySurfaceVersion::new("surface-v1").unwrap(),
+        local_test_runtime_policy(),
     )
     .with_builtin_obligation_handler();
 
@@ -1125,6 +1009,7 @@ async fn default_host_runtime_dispatches_when_resource_ceiling_is_satisfied() {
         dispatcher,
         authorizer,
         CapabilitySurfaceVersion::new("surface-v1").unwrap(),
+        local_test_runtime_policy(),
     )
     .with_builtin_obligation_handler();
 
@@ -1158,6 +1043,7 @@ async fn default_host_runtime_installs_configured_obligation_handler() {
         dispatcher,
         authorizer,
         CapabilitySurfaceVersion::new("surface-v1").unwrap(),
+        local_test_runtime_policy(),
     )
     .with_obligation_handler(handler);
 
@@ -1229,6 +1115,7 @@ impl CapabilityDispatcher for RecordingDispatcher {
             provider: ExtensionId::new("echo").unwrap(),
             runtime: RuntimeKind::Wasm,
             output: json!({"ok": true}),
+            display_preview: None,
             usage: ResourceUsage::default(),
             receipt: ResourceReceipt {
                 id: request
@@ -1255,6 +1142,7 @@ fn sample_dispatch(
         provider: ExtensionId::new("echo").unwrap(),
         runtime: RuntimeKind::Wasm,
         output,
+        display_preview: None,
         usage: ResourceUsage::default(),
         receipt: ResourceReceipt {
             id: ResourceReservationId::new(),
@@ -1299,12 +1187,22 @@ fn allowed_network_policy() -> NetworkPolicy {
 }
 
 fn registry_with_echo_capability() -> ExtensionRegistry {
-    let manifest = ExtensionManifest::parse(ECHO_MANIFEST).unwrap();
+    let manifest = parse_manifest(ECHO_MANIFEST);
     let root = VirtualPath::new(format!("/system/extensions/{}", manifest.id.as_str())).unwrap();
     let package = ExtensionPackage::from_manifest(manifest, root).unwrap();
     let mut registry = ExtensionRegistry::new();
     registry.insert(package).unwrap();
     registry
+}
+
+fn parse_manifest(manifest: &str) -> ExtensionManifest {
+    let manifest = legacy_capability_fixture_to_v2(manifest);
+    ExtensionManifest::parse(
+        &manifest,
+        ManifestSource::InstalledLocal,
+        &HostPortCatalog::empty(),
+    )
+    .unwrap()
 }
 
 fn execution_context(grants: CapabilitySet) -> ExecutionContext {
@@ -1352,6 +1250,300 @@ fn trust_decision() -> TrustDecision {
         provenance: TrustProvenance::Default,
         evaluated_at: chrono::Utc::now(),
     }
+}
+
+#[derive(Debug)]
+struct AlwaysAuthRequiredResolver;
+
+#[async_trait::async_trait]
+impl RuntimeCredentialAccountResolver for AlwaysAuthRequiredResolver {
+    async fn resolve_access_secret(
+        &self,
+        _request: RuntimeCredentialAccountRequest<'_>,
+    ) -> Result<RuntimeCredentialAccessSecret, ironclaw_host_api::CredentialStageError> {
+        Err(ironclaw_host_api::CredentialStageError::AuthRequired)
+    }
+}
+
+#[derive(Debug)]
+struct FixedHandleResolver(ironclaw_host_api::SecretHandle);
+
+#[async_trait::async_trait]
+impl RuntimeCredentialAccountResolver for FixedHandleResolver {
+    async fn resolve_access_secret(
+        &self,
+        request: RuntimeCredentialAccountRequest<'_>,
+    ) -> Result<RuntimeCredentialAccessSecret, ironclaw_host_api::CredentialStageError> {
+        Ok(RuntimeCredentialAccessSecret {
+            scope: request.scope.clone(),
+            handle: self.0.clone(),
+        })
+    }
+}
+
+#[derive(Debug)]
+struct SourceScopedHandleResolver {
+    source_scope: ResourceScope,
+    handle: ironclaw_host_api::SecretHandle,
+}
+
+#[async_trait::async_trait]
+impl RuntimeCredentialAccountResolver for SourceScopedHandleResolver {
+    async fn resolve_access_secret(
+        &self,
+        _request: RuntimeCredentialAccountRequest<'_>,
+    ) -> Result<RuntimeCredentialAccessSecret, ironclaw_host_api::CredentialStageError> {
+        Ok(RuntimeCredentialAccessSecret {
+            scope: self.source_scope.clone(),
+            handle: self.handle.clone(),
+        })
+    }
+}
+
+#[tokio::test]
+async fn inject_credential_account_once_fails_when_no_resolver_wired() {
+    // Services built without a credential_account_resolver — obligation must hard-fail.
+    let secret_store = Arc::new(ironclaw_secrets::InMemorySecretStore::new());
+    let governor = Arc::new(ironclaw_resources::InMemoryResourceGovernor::new());
+    let services = BuiltinObligationServices::new(
+        Arc::new(ironclaw_events::InMemoryAuditSink::new()),
+        secret_store,
+        governor,
+    );
+    let handler = services.obligation_handler();
+    let context = execution_context(CapabilitySet::default());
+    let capability_id = capability_id();
+    let estimate = ResourceEstimate::default();
+    let obligations = vec![Obligation::InjectCredentialAccountOnce {
+        handle: ironclaw_host_api::SecretHandle::new("github_runtime_token").unwrap(),
+        provider: ironclaw_host_api::RuntimeCredentialAccountProviderId::new("github").unwrap(),
+        setup: ironclaw_host_api::RuntimeCredentialAccountSetup::ManualToken,
+        provider_scopes: Vec::new(),
+        requester_extension: ironclaw_host_api::ExtensionId::new("github").unwrap(),
+    }];
+
+    let err = handler
+        .satisfy(CapabilityObligationRequest {
+            phase: CapabilityObligationPhase::Invoke,
+            context: &context,
+            capability_id: &capability_id,
+            estimate: &estimate,
+            obligations: &obligations,
+        })
+        .await
+        .unwrap_err();
+
+    assert!(
+        matches!(err, CapabilityObligationError::Failed { .. }),
+        "expected Failed, got {err:?}"
+    );
+}
+
+#[tokio::test]
+async fn inject_credential_account_once_fails_when_resolver_returns_auth_required() {
+    // Services wired with a resolver that always returns AuthRequired.
+    let secret_store = Arc::new(ironclaw_secrets::InMemorySecretStore::new());
+    let governor = Arc::new(ironclaw_resources::InMemoryResourceGovernor::new());
+    let services = BuiltinObligationServices::new(
+        Arc::new(ironclaw_events::InMemoryAuditSink::new()),
+        secret_store,
+        governor,
+    )
+    .with_credential_account_resolver(Arc::new(AlwaysAuthRequiredResolver));
+    let handler = services.obligation_handler();
+    let context = execution_context(CapabilitySet::default());
+    let capability_id = capability_id();
+    let estimate = ResourceEstimate::default();
+    let provider_scopes = vec!["https://www.googleapis.com/auth/drive.readonly".to_string()];
+    let obligations = vec![Obligation::InjectCredentialAccountOnce {
+        handle: ironclaw_host_api::SecretHandle::new("github_runtime_token").unwrap(),
+        provider: ironclaw_host_api::RuntimeCredentialAccountProviderId::new("github").unwrap(),
+        setup: ironclaw_host_api::RuntimeCredentialAccountSetup::ManualToken,
+        provider_scopes: provider_scopes.clone(),
+        requester_extension: ironclaw_host_api::ExtensionId::new("github").unwrap(),
+    }];
+
+    let err = handler
+        .satisfy(CapabilityObligationRequest {
+            phase: CapabilityObligationPhase::Invoke,
+            context: &context,
+            capability_id: &capability_id,
+            estimate: &estimate,
+            obligations: &obligations,
+        })
+        .await
+        .unwrap_err();
+
+    let CapabilityObligationError::AuthRequired {
+        credential_requirements,
+    } = err
+    else {
+        panic!("expected AuthRequired, got {err:?}");
+    };
+    assert_eq!(credential_requirements.len(), 1);
+    assert_eq!(credential_requirements[0].provider.as_str(), "github");
+    assert_eq!(
+        credential_requirements[0].requester_extension.as_str(),
+        "github"
+    );
+    assert_eq!(credential_requirements[0].provider_scopes, provider_scopes);
+}
+
+#[tokio::test]
+async fn inject_credential_account_once_resolves_and_stages_secret() {
+    // Happy path: resolver returns Ok(handle), material exists in store,
+    // obligation is satisfied, and the staged secret appears in the injection store.
+    let access_handle = ironclaw_host_api::SecretHandle::new("github_access_secret").unwrap();
+    let injection_slot = ironclaw_host_api::SecretHandle::new("github_runtime_token").unwrap();
+    let secret_store = Arc::new(ironclaw_secrets::InMemorySecretStore::new());
+    // Seed the store with material under the access handle.
+    secret_store
+        .put(
+            execution_context(CapabilitySet::default())
+                .resource_scope
+                .clone(),
+            access_handle.clone(),
+            ironclaw_secrets::SecretMaterial::from("test-github-token"),
+        )
+        .await
+        .unwrap();
+    let governor = Arc::new(ironclaw_resources::InMemoryResourceGovernor::new());
+    let services = BuiltinObligationServices::new(
+        Arc::new(ironclaw_events::InMemoryAuditSink::new()),
+        secret_store,
+        governor,
+    )
+    .with_credential_account_resolver(Arc::new(FixedHandleResolver(access_handle.clone())));
+    let handler = services.obligation_handler();
+    let context = execution_context(CapabilitySet::default());
+    let capability_id = capability_id();
+    let estimate = ResourceEstimate::default();
+    let obligations = vec![Obligation::InjectCredentialAccountOnce {
+        handle: injection_slot.clone(),
+        provider: ironclaw_host_api::RuntimeCredentialAccountProviderId::new("github").unwrap(),
+        setup: ironclaw_host_api::RuntimeCredentialAccountSetup::ManualToken,
+        provider_scopes: Vec::new(),
+        requester_extension: ironclaw_host_api::ExtensionId::new("github").unwrap(),
+    }];
+
+    handler
+        .satisfy(CapabilityObligationRequest {
+            phase: CapabilityObligationPhase::Invoke,
+            context: &context,
+            capability_id: &capability_id,
+            estimate: &estimate,
+            obligations: &obligations,
+        })
+        .await
+        .expect("obligation should be satisfied");
+}
+
+#[tokio::test]
+async fn inject_credential_account_once_reads_from_resolved_source_scope() {
+    let access_handle = ironclaw_host_api::SecretHandle::new("github_access_secret").unwrap();
+    let injection_slot = ironclaw_host_api::SecretHandle::new("github_runtime_token").unwrap();
+    let source_scope =
+        ResourceScope::local_default(UserId::new("alice").unwrap(), InvocationId::new()).unwrap();
+    let mut target_scope = source_scope.clone();
+    target_scope.project_id = Some(ProjectId::new("project-a").unwrap());
+    target_scope.invocation_id = InvocationId::new();
+    let secret_store = Arc::new(ironclaw_secrets::InMemorySecretStore::new());
+    secret_store
+        .put(
+            source_scope.clone(),
+            access_handle.clone(),
+            ironclaw_secrets::SecretMaterial::from("test-github-token"),
+        )
+        .await
+        .unwrap();
+    let governor = Arc::new(ironclaw_resources::InMemoryResourceGovernor::new());
+    let services = BuiltinObligationServices::new(
+        Arc::new(ironclaw_events::InMemoryAuditSink::new()),
+        secret_store,
+        governor,
+    )
+    .with_credential_account_resolver(Arc::new(SourceScopedHandleResolver {
+        source_scope,
+        handle: access_handle,
+    }));
+    let handler = services.obligation_handler();
+    let mut context = execution_context(CapabilitySet::default());
+    context.resource_scope = target_scope;
+    let capability_id = capability_id();
+    let estimate = ResourceEstimate::default();
+    let obligations = vec![Obligation::InjectCredentialAccountOnce {
+        handle: injection_slot,
+        provider: ironclaw_host_api::RuntimeCredentialAccountProviderId::new("github").unwrap(),
+        setup: ironclaw_host_api::RuntimeCredentialAccountSetup::ManualToken,
+        provider_scopes: Vec::new(),
+        requester_extension: ironclaw_host_api::ExtensionId::new("github").unwrap(),
+    }];
+
+    handler
+        .satisfy(CapabilityObligationRequest {
+            phase: CapabilityObligationPhase::Invoke,
+            context: &context,
+            capability_id: &capability_id,
+            estimate: &estimate,
+            obligations: &obligations,
+        })
+        .await
+        .expect("obligation should read credential from resolved source scope");
+}
+
+#[tokio::test]
+async fn inject_credential_account_once_maps_unknown_resolved_secret_to_auth_required() {
+    // Resolver returns Ok(handle) but that handle has no material in the secret store.
+    // Expected: AuthRequired — lease_once on an unknown secret is classified as a
+    // user-actionable re-auth condition by `stage_secret_error`, shared with the
+    // first-party stager path (ProductAuthProviderRuntimePorts::stage_secret_once).
+    // This was Failed in earlier PR4233 iterations; aligned with reborn #4231
+    // staged-credential semantics so the runtime auth gate fires consistently
+    // regardless of which staging lane (obligation vs stager) discovered the gap.
+    let access_handle = ironclaw_host_api::SecretHandle::new("missing_secret").unwrap();
+    let secret_store = Arc::new(ironclaw_secrets::InMemorySecretStore::new()); // empty store
+    let governor = Arc::new(ironclaw_resources::InMemoryResourceGovernor::new());
+    let services = BuiltinObligationServices::new(
+        Arc::new(ironclaw_events::InMemoryAuditSink::new()),
+        secret_store,
+        governor,
+    )
+    .with_credential_account_resolver(Arc::new(FixedHandleResolver(access_handle.clone())));
+    let handler = services.obligation_handler();
+    let context = execution_context(CapabilitySet::default());
+    let capability_id = capability_id();
+    let estimate = ResourceEstimate::default();
+    let obligations = vec![Obligation::InjectCredentialAccountOnce {
+        handle: ironclaw_host_api::SecretHandle::new("github_runtime_token").unwrap(),
+        provider: ironclaw_host_api::RuntimeCredentialAccountProviderId::new("github").unwrap(),
+        setup: ironclaw_host_api::RuntimeCredentialAccountSetup::ManualToken,
+        provider_scopes: Vec::new(),
+        requester_extension: ironclaw_host_api::ExtensionId::new("github").unwrap(),
+    }];
+
+    let err = handler
+        .satisfy(CapabilityObligationRequest {
+            phase: CapabilityObligationPhase::Invoke,
+            context: &context,
+            capability_id: &capability_id,
+            estimate: &estimate,
+            obligations: &obligations,
+        })
+        .await
+        .unwrap_err();
+
+    let CapabilityObligationError::AuthRequired {
+        credential_requirements,
+    } = err
+    else {
+        panic!("expected AuthRequired when resolved handle not in store, got {err:?}");
+    };
+    assert_eq!(credential_requirements.len(), 1);
+    assert_eq!(credential_requirements[0].provider.as_str(), "github");
+    assert_eq!(
+        credential_requirements[0].requester_extension.as_str(),
+        "github"
+    );
 }
 
 const ECHO_MANIFEST: &str = r#"

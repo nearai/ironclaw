@@ -22,39 +22,108 @@
 //!   filtering of which surface a particular UI or upper service is allowed to
 //!   render is intentionally an upper-layer concern — the host does not bake
 //!   in upper-stack vocabulary (e.g. agent loop / adapter / admin).
+#![warn(unreachable_pub)]
 
 use async_trait::async_trait;
 use ironclaw_host_api::{
-    ApprovalRequestId, CapabilityDescriptor, CapabilityId, CorrelationId, ExecutionContext,
-    NetworkPolicy, ProcessId, ResourceEstimate, ResourceScope, ResourceUsage, RuntimeKind,
-    SecretHandle,
+    ApprovalRequestId, CapabilityDisplayOutputPreview, CapabilityId, CorrelationId,
+    ExecutionContext, ExtensionId, ProcessId, ResourceEstimate, ResourceScope, ResourceUsage,
+    RuntimeCredentialAuthRequirement, RuntimeKind, SecretHandle,
+    runtime_policy::{DeploymentMode, EffectiveRuntimePolicy, RuntimeProfile},
 };
-use ironclaw_host_api::{
-    RuntimeCredentialInjection, RuntimeCredentialSource, RuntimeCredentialTarget,
-    RuntimeHttpEgress, RuntimeHttpEgressError, RuntimeHttpEgressRequest, RuntimeHttpEgressResponse,
-    is_sensitive_runtime_request_header, is_sensitive_runtime_response_header,
-};
-use ironclaw_network::{
-    NetworkHttpEgress, NetworkHttpError, NetworkHttpRequest, NetworkHttpResponse,
-};
-use ironclaw_safety::{LeakDetector, params_contain_manual_credentials};
-use ironclaw_secrets::{SecretMaterial, SecretStore, SecretStoreError};
 use ironclaw_trust::TrustDecision;
-use secrecy::ExposeSecret;
 use serde_json::Value;
-use std::{fmt, sync::Arc};
+use std::{collections::BTreeMap, env, fmt};
 use thiserror::Error;
 
+mod capability_catalog;
+mod egress;
+mod extension_contracts;
+mod first_party;
+mod first_party_tools;
+mod http_body;
+mod invocation_services;
+pub mod memory_context;
 mod obligations;
+mod planner;
+mod process_aliases;
+mod process_output;
+mod process_port;
 mod production;
+mod sandbox_process;
 mod services;
+mod surface;
+mod turn_scheduler;
+mod wasm_credentials;
 
+pub use capability_catalog::{
+    HotCapabilityCatalog, HotCapabilityRecord, MAX_HOT_PROMPT_BYTES, MAX_HOT_SCHEMA_BYTES,
+    publish_hot_capability_catalog,
+};
+pub use egress::{
+    HostHttpEgressService, HostRuntimeCredentialMaterial, HostRuntimeHttpEgressPort,
+    HostRuntimeHttpEgressRequest, RuntimeSecretMaterialStager, RuntimeSecretStageError,
+};
+pub use extension_contracts::{
+    default_host_api_contract_registry, default_host_port_catalog,
+    discover_extensions_tolerant_bounded, discover_extensions_with_default_host_api_contracts,
+    discover_extensions_with_default_host_api_contracts_and_catalog,
+};
+pub use first_party::{
+    FirstPartyCapabilityError, FirstPartyCapabilityHandler, FirstPartyCapabilityRegistry,
+    FirstPartyCapabilityRequest, FirstPartyCapabilityResult,
+};
+pub use first_party_tools::{
+    APPLY_PATCH_CAPABILITY_ID, BUILTIN_FIRST_PARTY_PROVIDER, BuiltinFirstPartyTools,
+    ECHO_CAPABILITY_ID, GLOB_CAPABILITY_ID, GREP_CAPABILITY_ID, HTTP_CAPABILITY_ID,
+    HTTP_SAVE_CAPABILITY_ID, JSON_CAPABILITY_ID, LIST_DIR_CAPABILITY_ID, MEMORY_READ_CAPABILITY_ID,
+    MEMORY_SEARCH_CAPABILITY_ID, MEMORY_TREE_CAPABILITY_ID, MEMORY_WRITE_CAPABILITY_ID,
+    READ_FILE_CAPABILITY_ID, SHELL_CAPABILITY_ID, SKILL_INSTALL_CAPABILITY_ID,
+    SKILL_LIST_CAPABILITY_ID, SKILL_REMOVE_CAPABILITY_ID, SPAWN_SUBAGENT_CAPABILITY_ID,
+    TIME_CAPABILITY_ID, TRACE_COMMONS_CREDITS_CAPABILITY_ID, TRACE_COMMONS_ONBOARD_CAPABILITY_ID,
+    TRACE_COMMONS_PROFILE_SET_CAPABILITY_ID, TRACE_COMMONS_PROFILE_TOKEN_CAPABILITY_ID,
+    TRACE_COMMONS_STATUS_CAPABILITY_ID, TRIGGER_CREATE_CAPABILITY_ID, TRIGGER_LIST_CAPABILITY_ID,
+    TRIGGER_REMOVE_CAPABILITY_ID, TriggerCreateHook, WRITE_FILE_CAPABILITY_ID,
+    builtin_first_party_handlers, builtin_first_party_handlers_with_trigger_create_hook,
+    builtin_first_party_package,
+};
+#[cfg(any(test, feature = "test-support"))]
+pub use first_party_tools::{
+    TriggerManagementClock, builtin_first_party_handlers_with_trigger_clock,
+};
+pub use http_body::{RuntimeHttpBodyStore, RuntimeHttpBodyStoreError};
+pub use invocation_services::{
+    InvocationServices, InvocationServicesError, InvocationServicesResolutionRequest,
+    InvocationServicesResolver, LocalInvocationServicesResolver, ToolCallHttpEgress,
+};
 pub use obligations::{
-    BuiltinObligationHandler, BuiltinObligationServices, NetworkObligationPolicyStore,
-    ProcessObligationLifecycleStore, RuntimeSecretInjectionStore, RuntimeSecretInjectionStoreError,
+    BuiltinObligationHandler, BuiltinObligationServices, LEAK_REDACT_FAILED_CODE,
+    ProcessObligationLifecycleStore, RuntimeCredentialAccessSecret,
+    RuntimeCredentialAccountRequest, RuntimeCredentialAccountResolver,
+};
+pub use planner::{ExecutionPlan, PlannerError, plan_capability};
+pub use process_output::{SavedCommandOutput, SavedCommandOutputSanitization};
+pub use process_port::{
+    CommandExecutionOutput, CommandExecutionRequest, LocalHostProcessPort, RuntimeProcessError,
+    RuntimeProcessPort, SandboxCommandTransport, TenantSandboxProcessPort,
 };
 pub use production::DefaultHostRuntime;
-pub use services::{HostRuntimeServices, RegisteredRuntimeHealth};
+pub use sandbox_process::{
+    RebornSandboxConfig, RebornSandboxContainerIdentity, RebornSandboxNetworkBroker,
+    RebornSandboxScopeKey, RebornSandboxSecretBroker, RebornSandboxWorkspaceMode,
+    RebornScopedSandboxCommandTransport,
+};
+pub use services::{
+    HostRuntimeServices, ProductAuthCredentialStageError, ProductAuthProviderRuntimePorts,
+    ProductionEventStoreWiringError, ProductionWiringComponent, ProductionWiringConfig,
+    ProductionWiringIssue, ProductionWiringIssueKind, ProductionWiringReport,
+    RegisteredRuntimeHealth,
+};
+pub use surface::{CapabilitySurfacePolicy, VisibleCapability, VisibleCapabilityAccess};
+pub use turn_scheduler::{
+    SchedulerTurnRunWakeNotifier, TurnRunExecutor, TurnRunExecutorError, TurnRunScheduler,
+    TurnRunSchedulerConfig, TurnRunSchedulerHandle,
+};
 
 /// Stable, validated idempotency key supplied by upper turn/loop services.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -122,6 +191,14 @@ pub struct RuntimeGateId(String);
 impl RuntimeGateId {
     pub fn new() -> Self {
         Self(CorrelationId::new().to_string())
+    }
+
+    pub fn from_stable_suffix(suffix: &str) -> Result<Self, HostRuntimeError> {
+        Ok(Self(validate_bounded_contract_string(
+            suffix.to_string(),
+            "runtime gate id",
+            128,
+        )?))
     }
 
     pub fn as_str(&self) -> &str {
@@ -339,38 +416,114 @@ impl RuntimeCapabilityResumeRequest {
     }
 }
 
+/// Auth-gate resume request.
+///
+/// Re-dispatches a capability that was previously blocked by an auth gate,
+/// reusing the original `invocation_id` encoded in the `context`. When the
+/// invocation also passed a prior approval gate, `approval_request_id` is set
+/// so the host can locate and claim the matching fingerprinted lease.
+#[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
+pub struct RuntimeCapabilityAuthResumeRequest {
+    pub context: ExecutionContext,
+    pub capability_id: CapabilityId,
+    pub estimate: ResourceEstimate,
+    pub input: Value,
+    pub idempotency_key: Option<IdempotencyKey>,
+    pub trust_decision: TrustDecision,
+    /// Present when the invocation previously passed an approval gate.
+    /// Used to locate and claim the matching fingerprinted approval lease
+    /// so the re-dispatch does not require a second approval.
+    pub approval_request_id: Option<ApprovalRequestId>,
+}
+
+impl RuntimeCapabilityAuthResumeRequest {
+    pub fn new(
+        context: ExecutionContext,
+        capability_id: CapabilityId,
+        estimate: ResourceEstimate,
+        input: Value,
+        trust_decision: TrustDecision,
+        approval_request_id: Option<ApprovalRequestId>,
+    ) -> Self {
+        Self {
+            context,
+            capability_id,
+            estimate,
+            input,
+            idempotency_key: None,
+            trust_decision,
+            approval_request_id,
+        }
+    }
+
+    pub fn with_idempotency_key(mut self, key: IdempotencyKey) -> Self {
+        self.idempotency_key = Some(key);
+        self
+    }
+}
+
 /// Request to list host-filtered visible capabilities.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct VisibleCapabilityRequest {
-    pub scope: ResourceScope,
-    pub correlation_id: CorrelationId,
+    /// Authority envelope used for the same grant/trust checks as invocation.
+    pub context: ExecutionContext,
     /// Projection surface selection only; this is not authority and must not
     /// grant or bypass authorization. The host treats this as an opaque
     /// cache/version dimension; deciding which surface labels a given caller
     /// may request is an upper-layer concern.
     pub surface_kind: SurfaceKind,
+    /// Caller/host-supplied trust decisions keyed by capability provider.
+    ///
+    /// `DefaultHostRuntime` does not evaluate trust while computing visibility;
+    /// missing provider trust fails closed by omitting that provider's
+    /// capabilities from the surface.
+    pub provider_trust: BTreeMap<ExtensionId, TrustDecision>,
+    /// Upper/profile-supplied visibility ceiling. This only narrows what is
+    /// shown; it never grants authority or bypasses invocation authorization.
+    pub policy: CapabilitySurfacePolicy,
 }
 
 impl VisibleCapabilityRequest {
-    pub fn new(
-        scope: ResourceScope,
-        correlation_id: CorrelationId,
-        surface_kind: SurfaceKind,
-    ) -> Self {
+    pub fn new(context: ExecutionContext, surface_kind: SurfaceKind) -> Self {
         Self {
-            scope,
-            correlation_id,
+            context,
             surface_kind,
+            provider_trust: BTreeMap::new(),
+            policy: CapabilitySurfacePolicy::default(),
         }
+    }
+
+    pub fn with_provider_trust(
+        mut self,
+        provider_trust: BTreeMap<ExtensionId, TrustDecision>,
+    ) -> Self {
+        self.provider_trust = provider_trust;
+        self
+    }
+
+    pub fn with_policy(mut self, policy: CapabilitySurfacePolicy) -> Self {
+        self.policy = policy;
+        self
     }
 }
 
 /// Host-filtered visible capability surface.
+///
+/// Entries are returned in filtered registry order for deterministic rendering.
+/// The version fingerprint canonicalizes unordered inputs (policy allow-lists
+/// and visible capability set) so semantically equivalent projections do not
+/// churn when callers permute allow-list values or registry insertion order
+/// changes. Visibility remains informational only; invocation authority is
+/// re-checked by [`HostRuntime::invoke_capability`].
 #[derive(Debug, Clone, PartialEq)]
 pub struct VisibleCapabilitySurface {
+    /// Stable token for the semantic visible surface under this request policy.
     pub version: CapabilitySurfaceVersion,
-    pub descriptors: Vec<CapabilityDescriptor>,
+    /// Typed visible capabilities, including access status and selected
+    /// resource estimate.
+    pub capabilities: Vec<VisibleCapability>,
 }
 
 /// Successful capability completion.
@@ -378,6 +531,7 @@ pub struct VisibleCapabilitySurface {
 pub struct RuntimeCapabilityCompleted {
     pub capability_id: CapabilityId,
     pub output: Value,
+    pub display_preview: Option<CapabilityDisplayOutputPreview>,
     pub usage: ResourceUsage,
 }
 
@@ -396,6 +550,7 @@ pub struct RuntimeAuthGate {
     pub capability_id: CapabilityId,
     pub reason: RuntimeBlockedReason,
     pub required_secrets: Vec<SecretHandle>,
+    pub credential_requirements: Vec<RuntimeCredentialAuthRequirement>,
 }
 
 /// Resource suspension state.
@@ -422,9 +577,19 @@ pub struct RuntimeCapabilityFailure {
     pub message: Option<String>,
 }
 
+/// Explicit fallback for outcome categories that the loop adapter cannot handle
+/// yet. New first-class outcome variants should be added to
+/// [`RuntimeCapabilityOutcome`] and exhaustively mapped by consumers instead of
+/// being hidden behind wildcard matches.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RuntimeCapabilityUnknown {
+    pub capability_id: CapabilityId,
+    pub kind: String,
+    pub message: Option<String>,
+}
+
 /// Outcomes returned by capability invocation.
 #[derive(Debug, Clone, PartialEq, Eq)]
-#[non_exhaustive]
 pub enum RuntimeCapabilityOutcome {
     Completed(Box<RuntimeCapabilityCompleted>),
     ApprovalRequired(RuntimeApprovalGate),
@@ -432,6 +597,7 @@ pub enum RuntimeCapabilityOutcome {
     ResourceBlocked(RuntimeResourceGate),
     SpawnedProcess(RuntimeProcessHandle),
     Failed(RuntimeCapabilityFailure),
+    Unknown(RuntimeCapabilityUnknown),
 }
 
 impl RuntimeCapabilityOutcome {
@@ -443,18 +609,78 @@ impl RuntimeCapabilityOutcome {
             Self::ResourceBlocked(_) => "resource_blocked",
             Self::SpawnedProcess(_) => "spawned_process",
             Self::Failed(_) => "failed",
+            Self::Unknown(_) => "unknown",
         }
     }
 }
 
 /// Stable reasons for capability suspension.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-#[non_exhaustive]
 pub enum RuntimeBlockedReason {
     ApprovalRequired,
     AuthRequired,
     ResourceLimit,
     ResourceUnavailable,
+}
+
+/// Opt-in local diagnostic switch for raw HTTP egress failures.
+///
+/// Raw transport errors can contain URLs, query strings, host paths, proxy
+/// details, or credential-shaped text. Keep this disabled unless debugging a
+/// trusted `LocalDev` or `LocalYolo` run. Hosted and enterprise deployments
+/// never enable raw diagnostics from this environment variable alone.
+pub(crate) const UNSAFE_RAW_HTTP_EGRESS_ERRORS_ENV: &str = "IRONCLAW_UNSAFE_RAW_HTTP_EGRESS_ERRORS";
+
+pub(crate) fn runtime_policy_allows_unsafe_raw_http_diagnostics(
+    policy: Option<&EffectiveRuntimePolicy>,
+) -> bool {
+    policy.is_some_and(|policy| {
+        local_runtime_allows_unsafe_raw_http_diagnostics(policy.deployment, policy.resolved_profile)
+    })
+}
+
+pub(crate) fn local_runtime_allows_unsafe_raw_http_diagnostics(
+    deployment: DeploymentMode,
+    profile: RuntimeProfile,
+) -> bool {
+    matches!(deployment, DeploymentMode::LocalSingleUser)
+        && matches!(
+            profile,
+            RuntimeProfile::LocalDev | RuntimeProfile::LocalYolo
+        )
+}
+
+pub(crate) fn unsafe_raw_http_diagnostics_enabled(runtime_allows_raw: bool) -> bool {
+    runtime_allows_raw && env::var(UNSAFE_RAW_HTTP_EGRESS_ERRORS_ENV).as_deref() == Ok("1")
+}
+
+#[cfg(test)]
+mod raw_http_diagnostic_policy_tests {
+    use super::*;
+
+    #[test]
+    fn raw_http_diagnostics_are_limited_to_local_dev_and_yolo_profiles() {
+        assert!(local_runtime_allows_unsafe_raw_http_diagnostics(
+            DeploymentMode::LocalSingleUser,
+            RuntimeProfile::LocalDev,
+        ));
+        assert!(local_runtime_allows_unsafe_raw_http_diagnostics(
+            DeploymentMode::LocalSingleUser,
+            RuntimeProfile::LocalYolo,
+        ));
+        assert!(!local_runtime_allows_unsafe_raw_http_diagnostics(
+            DeploymentMode::LocalSingleUser,
+            RuntimeProfile::LocalSafe,
+        ));
+        assert!(!local_runtime_allows_unsafe_raw_http_diagnostics(
+            DeploymentMode::HostedMultiTenant,
+            RuntimeProfile::HostedYoloTenantScoped,
+        ));
+        assert!(!local_runtime_allows_unsafe_raw_http_diagnostics(
+            DeploymentMode::EnterpriseDedicated,
+            RuntimeProfile::EnterpriseYoloDedicated,
+        ));
+    }
 }
 
 /// Stable, sanitized failure categories.
@@ -465,12 +691,18 @@ pub enum RuntimeFailureKind {
     Backend,
     Cancelled,
     Dispatcher,
+    Internal,
     InvalidInput,
+    InvalidOutput,
     MissingRuntime,
     Network,
+    OperationFailed,
     OutputTooLarge,
+    PolicyDenied,
     Process,
     Resource,
+    Transient,
+    Unavailable,
     Unknown,
 }
 
@@ -482,15 +714,108 @@ impl RuntimeFailureKind {
             Self::Backend => "backend",
             Self::Cancelled => "cancelled",
             Self::Dispatcher => "dispatcher",
+            Self::Internal => "internal",
             Self::InvalidInput => "invalid_input",
+            Self::InvalidOutput => "invalid_output",
             Self::MissingRuntime => "missing_runtime",
             Self::Network => "network",
+            Self::OperationFailed => "operation_failed",
             Self::OutputTooLarge => "output_too_large",
+            Self::PolicyDenied => "policy_denied",
             Self::Process => "process",
             Self::Resource => "resource",
+            Self::Transient => "transient",
+            Self::Unavailable => "unavailable",
             Self::Unknown => "unknown",
         }
     }
+}
+
+/// Agent-loop handling decision for a sanitized runtime capability failure.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum CapabilityFailureDisposition {
+    /// Return a normal tool error observation to the model in the same loop.
+    ModelVisibleToolError,
+    /// Retry the same runtime invocation before exposing anything to the model.
+    /// The loop recovery strategy owns the retry budget and post-exhaustion
+    /// fallback; the host-runtime disposition only classifies the first outcome.
+    RetrySameCall,
+}
+
+const MAX_RUNTIME_FAILURE_SUMMARY_CHARS: usize = 512;
+
+impl RuntimeCapabilityFailure {
+    pub fn new(
+        capability_id: CapabilityId,
+        kind: RuntimeFailureKind,
+        message: Option<String>,
+    ) -> Self {
+        Self {
+            capability_id,
+            kind,
+            message,
+        }
+    }
+
+    pub fn safe_summary(&self) -> Option<String> {
+        let summary = self.message.as_deref()?.trim();
+        if summary.is_empty() {
+            return None;
+        }
+
+        Some(bounded_runtime_failure_summary(summary))
+    }
+
+    pub fn disposition(&self) -> CapabilityFailureDisposition {
+        capability_failure_disposition(self.kind)
+    }
+}
+
+fn bounded_runtime_failure_summary(summary: &str) -> String {
+    const ELLIPSIS: &str = "...";
+    let mut chars = summary.chars();
+    let bounded: String = chars
+        .by_ref()
+        .take(MAX_RUNTIME_FAILURE_SUMMARY_CHARS)
+        .collect();
+    if chars.next().is_some() {
+        let truncated_limit = MAX_RUNTIME_FAILURE_SUMMARY_CHARS - ELLIPSIS.chars().count();
+        let bounded: String = bounded.chars().take(truncated_limit).collect();
+        format!("{bounded}{ELLIPSIS}")
+    } else {
+        bounded
+    }
+}
+
+/// Central disposition policy for runtime capability failures.
+///
+/// Runtime failures should be surfaced through normal model-visible tool-error
+/// handling whenever they are not retryable infrastructure outages. Security
+/// isolation failures must use a separate quarantine path instead of this
+/// generic failure disposition.
+pub const fn capability_failure_disposition(
+    kind: RuntimeFailureKind,
+) -> CapabilityFailureDisposition {
+    if matches!(kind, RuntimeFailureKind::InvalidInput) {
+        return CapabilityFailureDisposition::ModelVisibleToolError;
+    }
+
+    if runtime_failure_is_retryable(kind) {
+        return CapabilityFailureDisposition::RetrySameCall;
+    }
+
+    CapabilityFailureDisposition::ModelVisibleToolError
+}
+
+const fn runtime_failure_is_retryable(kind: RuntimeFailureKind) -> bool {
+    matches!(
+        kind,
+        RuntimeFailureKind::Internal
+            | RuntimeFailureKind::Backend
+            | RuntimeFailureKind::Network
+            | RuntimeFailureKind::Transient
+            | RuntimeFailureKind::Unavailable
+    )
 }
 
 /// Work ids tracked by the host runtime for status/cancellation.
@@ -600,10 +925,61 @@ pub trait HostRuntime: Send + Sync {
         request: RuntimeCapabilityRequest,
     ) -> Result<RuntimeCapabilityOutcome, HostRuntimeError>;
 
+    async fn spawn_capability(
+        &self,
+        request: RuntimeCapabilityRequest,
+    ) -> Result<RuntimeCapabilityOutcome, HostRuntimeError> {
+        Ok(RuntimeCapabilityOutcome::Failed(
+            RuntimeCapabilityFailure::new(
+                request.capability_id,
+                RuntimeFailureKind::Unavailable,
+                Some("capability spawn is unsupported by this host runtime".to_string()),
+            ),
+        ))
+    }
+
     async fn resume_capability(
         &self,
         request: RuntimeCapabilityResumeRequest,
     ) -> Result<RuntimeCapabilityOutcome, HostRuntimeError>;
+
+    /// Re-dispatch after an auth gate has been resolved.
+    ///
+    /// Production hosts override this to route through
+    /// `CapabilityHost::auth_resume_json` which handles the `BlockedAuth`
+    /// run-state and optionally claims the prior approval lease.
+    ///
+    /// The default implementation returns an explicit `Failed` outcome so that
+    /// test stubs that do not override this method fail loudly instead of
+    /// silently falling back to a fresh `invoke_capability` call (which would
+    /// bypass run-state validation and the approval-lease-claim path).  Any
+    /// `HostRuntime` implementation that participates in auth-resume flows must
+    /// provide an explicit override.
+    async fn auth_resume_capability(
+        &self,
+        request: RuntimeCapabilityAuthResumeRequest,
+    ) -> Result<RuntimeCapabilityOutcome, HostRuntimeError> {
+        Ok(RuntimeCapabilityOutcome::Failed(
+            RuntimeCapabilityFailure::new(
+                request.capability_id,
+                RuntimeFailureKind::Unavailable,
+                Some("capability auth-resume is unsupported by this host runtime".to_string()),
+            ),
+        ))
+    }
+
+    async fn resume_spawn_capability(
+        &self,
+        request: RuntimeCapabilityResumeRequest,
+    ) -> Result<RuntimeCapabilityOutcome, HostRuntimeError> {
+        Ok(RuntimeCapabilityOutcome::Failed(
+            RuntimeCapabilityFailure::new(
+                request.capability_id,
+                RuntimeFailureKind::Unavailable,
+                Some("capability spawn resume is unsupported by this host runtime".to_string()),
+            ),
+        ))
+    }
 
     async fn visible_capabilities(
         &self,
@@ -625,7 +1001,6 @@ pub trait HostRuntime: Send + Sync {
 
 /// Sanitized host runtime infrastructure/contract errors.
 #[derive(Debug, Error, Clone, PartialEq, Eq)]
-#[non_exhaustive]
 pub enum HostRuntimeError {
     #[error("invalid host runtime request: {reason}")]
     InvalidRequest { reason: String },
@@ -645,661 +1020,4 @@ impl HostRuntimeError {
             reason: reason.into(),
         }
     }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum NetworkPolicySource {
-    StagedObligation,
-    RequestPolicyFallback,
-}
-
-#[derive(Debug, Clone)]
-pub struct HostHttpEgressService<N, S> {
-    network: N,
-    secrets: S,
-    secret_injections: Option<Arc<RuntimeSecretInjectionStore>>,
-    network_policy_store: Option<Arc<NetworkObligationPolicyStore>>,
-    network_policy_source: NetworkPolicySource,
-}
-
-impl<N, S> HostHttpEgressService<N, S> {
-    /// Construct host HTTP egress in production fail-closed mode.
-    ///
-    /// Callers must attach a [`NetworkObligationPolicyStore`] with
-    /// [`Self::with_network_policy_store`] before executing network requests.
-    /// Without that store, egress fails before transport rather than trusting a
-    /// caller-supplied policy.
-    pub fn new(network: N, secrets: S) -> Self {
-        Self {
-            network,
-            secrets,
-            secret_injections: None,
-            network_policy_store: None,
-            network_policy_source: NetworkPolicySource::StagedObligation,
-        }
-    }
-
-    /// Construct host HTTP egress that uses the policy embedded in each request.
-    ///
-    /// This is intentionally named as a test/legacy seam: production Reborn
-    /// runtime egress must consume staged `ApplyNetworkPolicy` handoffs from
-    /// [`NetworkObligationPolicyStore`] instead of trusting runtime/caller
-    /// request policy fields.
-    pub fn new_with_request_policy_for_tests(network: N, secrets: S) -> Self {
-        Self {
-            network,
-            secrets,
-            secret_injections: None,
-            network_policy_store: None,
-            network_policy_source: NetworkPolicySource::RequestPolicyFallback,
-        }
-    }
-
-    pub fn with_secret_injection_store(mut self, store: Arc<RuntimeSecretInjectionStore>) -> Self {
-        self.secret_injections = Some(store);
-        self
-    }
-
-    pub fn with_network_policy_store(mut self, store: Arc<NetworkObligationPolicyStore>) -> Self {
-        self.network_policy_store = Some(store);
-        self.network_policy_source = NetworkPolicySource::StagedObligation;
-        self
-    }
-
-    pub fn network(&self) -> &N {
-        &self.network
-    }
-
-    pub fn secrets(&self) -> &S {
-        &self.secrets
-    }
-
-    fn network_policy_for_request(
-        &self,
-        request: &mut RuntimeHttpEgressRequest,
-    ) -> Result<NetworkPolicy, RuntimeHttpEgressError> {
-        if let Some(store) = &self.network_policy_store {
-            return store
-                .get(&request.scope, &request.capability_id)
-                .ok_or_else(|| RuntimeHttpEgressError::Network {
-                    reason: "network_policy_missing".to_string(),
-                    request_bytes: 0,
-                    response_bytes: 0,
-                });
-        }
-
-        match self.network_policy_source {
-            NetworkPolicySource::StagedObligation => Err(RuntimeHttpEgressError::Network {
-                reason: "network_policy_missing".to_string(),
-                request_bytes: 0,
-                response_bytes: 0,
-            }),
-            NetworkPolicySource::RequestPolicyFallback => {
-                Ok(std::mem::take(&mut request.network_policy))
-            }
-        }
-    }
-
-    fn discard_staged_policy_for_request(&self, request: &RuntimeHttpEgressRequest) {
-        if let Some(store) = &self.network_policy_store {
-            store.discard_for_capability(&request.scope, &request.capability_id);
-        }
-    }
-}
-
-impl<N, S> RuntimeHttpEgress for HostHttpEgressService<N, S>
-where
-    N: NetworkHttpEgress,
-    S: SecretStore,
-{
-    fn execute(
-        &self,
-        mut request: RuntimeHttpEgressRequest,
-    ) -> Result<RuntimeHttpEgressResponse, RuntimeHttpEgressError> {
-        let network_policy = self.network_policy_for_request(&mut request)?;
-        if let Err(error) = validate_runtime_request(&request) {
-            self.discard_staged_policy_for_request(&request);
-            return Err(error);
-        }
-
-        let mut redaction_values = Vec::new();
-        let mut credential_materials = Vec::new();
-        let credential_injections = std::mem::take(&mut request.credential_injections);
-        for injection in &credential_injections {
-            let value = match credential_value_for_injection(
-                &mut credential_materials,
-                &self.secrets,
-                self.secret_injections.as_deref(),
-                &request,
-                injection,
-            ) {
-                Ok(value) => value,
-                Err(error) => {
-                    self.discard_staged_policy_for_request(&request);
-                    return Err(error);
-                }
-            };
-            let Some(value) = value else {
-                continue;
-            };
-            if let Err(error) = apply_credential_injection(&mut request, &injection.target, &value)
-            {
-                self.discard_staged_policy_for_request(&request);
-                return Err(error);
-            }
-            redaction_values.extend(redaction_values_for_secret(&value));
-        }
-
-        let response = self
-            .network
-            .execute(NetworkHttpRequest {
-                scope: request.scope,
-                method: request.method,
-                url: request.url,
-                headers: request.headers,
-                body: request.body,
-                policy: network_policy,
-                response_body_limit: request.response_body_limit,
-                timeout_ms: request.timeout_ms,
-            })
-            .map_err(runtime_network_error)?;
-        let credentials_injected = !redaction_values.is_empty();
-        let (response, response_redacted) = sanitize_runtime_response(response, &redaction_values)?;
-        Ok(runtime_response(
-            response,
-            credentials_injected || response_redacted,
-        ))
-    }
-}
-
-struct RuntimeCredentialMaterialCacheEntry {
-    key: RuntimeCredentialMaterialKey,
-    value: Option<String>,
-}
-
-#[derive(Clone, PartialEq, Eq)]
-enum RuntimeCredentialMaterialKey {
-    SecretStoreLease {
-        handle: SecretHandle,
-    },
-    StagedObligation {
-        capability_id: CapabilityId,
-        handle: SecretHandle,
-    },
-}
-
-impl RuntimeCredentialMaterialKey {
-    fn for_injection(injection: &RuntimeCredentialInjection) -> Self {
-        match &injection.source {
-            RuntimeCredentialSource::SecretStoreLease => Self::SecretStoreLease {
-                handle: injection.handle.clone(),
-            },
-            RuntimeCredentialSource::StagedObligation { capability_id } => Self::StagedObligation {
-                capability_id: capability_id.clone(),
-                handle: injection.handle.clone(),
-            },
-        }
-    }
-}
-
-fn credential_value_for_injection<S>(
-    cache: &mut Vec<RuntimeCredentialMaterialCacheEntry>,
-    secrets: &S,
-    secret_injections: Option<&RuntimeSecretInjectionStore>,
-    request: &RuntimeHttpEgressRequest,
-    injection: &RuntimeCredentialInjection,
-) -> Result<Option<String>, RuntimeHttpEgressError>
-where
-    S: SecretStore,
-{
-    let key = RuntimeCredentialMaterialKey::for_injection(injection);
-    if let Some(entry) = cache.iter().find(|entry| entry.key == key) {
-        return match &entry.value {
-            Some(value) => Ok(Some(value.clone())),
-            None => missing_runtime_credential(injection.required).map(|_| None),
-        };
-    }
-
-    let value = secret_material_for_injection(secrets, secret_injections, request, injection)?
-        .map(|material| material.expose_secret().to_string());
-    cache.push(RuntimeCredentialMaterialCacheEntry {
-        key,
-        value: value.clone(),
-    });
-    Ok(value)
-}
-
-fn secret_material_for_injection<S>(
-    secrets: &S,
-    secret_injections: Option<&RuntimeSecretInjectionStore>,
-    request: &RuntimeHttpEgressRequest,
-    injection: &RuntimeCredentialInjection,
-) -> Result<Option<SecretMaterial>, RuntimeHttpEgressError>
-where
-    S: SecretStore,
-{
-    match &injection.source {
-        RuntimeCredentialSource::SecretStoreLease => {
-            lease_secret_for_injection(secrets, request, injection)
-        }
-        RuntimeCredentialSource::StagedObligation { capability_id } => {
-            take_staged_secret_for_injection(secret_injections, request, capability_id, injection)
-        }
-    }
-}
-
-fn take_staged_secret_for_injection(
-    secret_injections: Option<&RuntimeSecretInjectionStore>,
-    request: &RuntimeHttpEgressRequest,
-    capability_id: &CapabilityId,
-    injection: &RuntimeCredentialInjection,
-) -> Result<Option<SecretMaterial>, RuntimeHttpEgressError> {
-    let Some(secret_injections) = secret_injections else {
-        return missing_runtime_credential(injection.required);
-    };
-    match secret_injections.take(&request.scope, capability_id, &injection.handle) {
-        Ok(Some(material)) => Ok(Some(material)),
-        Ok(None) => missing_runtime_credential(injection.required),
-        Err(_) => Err(RuntimeHttpEgressError::Credential {
-            reason: "runtime credential injection store unavailable".to_string(),
-        }),
-    }
-}
-
-fn missing_runtime_credential(
-    required: bool,
-) -> Result<Option<SecretMaterial>, RuntimeHttpEgressError> {
-    if required {
-        Err(RuntimeHttpEgressError::Credential {
-            reason: "required credential is unavailable".to_string(),
-        })
-    } else {
-        Ok(None)
-    }
-}
-
-fn lease_secret_for_injection<S>(
-    secrets: &S,
-    request: &RuntimeHttpEgressRequest,
-    injection: &RuntimeCredentialInjection,
-) -> Result<Option<SecretMaterial>, RuntimeHttpEgressError>
-where
-    S: SecretStore,
-{
-    let metadata = block_on_secret(secrets.metadata(&request.scope, &injection.handle))?;
-    if metadata.is_none() {
-        if injection.required {
-            return Err(RuntimeHttpEgressError::Credential {
-                reason: "required credential is unavailable".to_string(),
-            });
-        }
-        return Ok(None);
-    }
-    let lease = block_on_secret(secrets.lease_once(&request.scope, &injection.handle))?;
-    let material = block_on_secret(secrets.consume(&request.scope, lease.id))?;
-    Ok(Some(material))
-}
-
-fn block_on_secret<T>(
-    future: impl std::future::Future<Output = Result<T, SecretStoreError>> + Send,
-) -> Result<T, RuntimeHttpEgressError>
-where
-    T: Send,
-{
-    let joined = std::thread::scope(|scope| {
-        scope
-            .spawn(move || {
-                let runtime = tokio::runtime::Builder::new_current_thread()
-                    .enable_all()
-                    .build()
-                    .map_err(|_| RuntimeHttpEgressError::Credential {
-                        reason: "secret store runtime unavailable".to_string(),
-                    })?;
-                runtime
-                    .block_on(future)
-                    .map_err(|error| RuntimeHttpEgressError::Credential {
-                        reason: sanitized_secret_error(&error),
-                    })
-            })
-            .join()
-    });
-    joined.unwrap_or_else(|_| {
-        Err(RuntimeHttpEgressError::Credential {
-            reason: "secret store worker panicked".to_string(),
-        })
-    })
-}
-
-fn sanitized_secret_error(error: &SecretStoreError) -> String {
-    match error {
-        SecretStoreError::UnknownSecret { .. } => "credential is unavailable".to_string(),
-        SecretStoreError::UnknownLease { .. } => "credential lease is unavailable".to_string(),
-        SecretStoreError::LeaseConsumed { .. } => "credential lease was already used".to_string(),
-        SecretStoreError::LeaseRevoked { .. } => "credential lease was revoked".to_string(),
-        SecretStoreError::StoreUnavailable { .. } => "credential store unavailable".to_string(),
-    }
-}
-
-fn apply_credential_injection(
-    request: &mut RuntimeHttpEgressRequest,
-    target: &RuntimeCredentialTarget,
-    value: &str,
-) -> Result<(), RuntimeHttpEgressError> {
-    match target {
-        RuntimeCredentialTarget::Header { name, prefix } => {
-            if !valid_injected_header_name(name) {
-                return Err(RuntimeHttpEgressError::Credential {
-                    reason: "credential injection header name is invalid".to_string(),
-                });
-            }
-            let injected = match prefix {
-                Some(prefix) => format!("{prefix}{value}"),
-                None => value.to_string(),
-            };
-            if injected.chars().any(char::is_control) {
-                return Err(RuntimeHttpEgressError::Credential {
-                    reason: "credential injection header value is invalid".to_string(),
-                });
-            }
-            request.headers.push((name.clone(), injected));
-        }
-        RuntimeCredentialTarget::QueryParam { name } => {
-            let mut url =
-                url::Url::parse(&request.url).map_err(|_| RuntimeHttpEgressError::Credential {
-                    reason: "credential injection target URL is invalid".to_string(),
-                })?;
-            url.query_pairs_mut().append_pair(name, value);
-            request.url = url.to_string();
-        }
-    }
-    Ok(())
-}
-
-fn valid_injected_header_name(name: &str) -> bool {
-    !name.is_empty()
-        && name.bytes().all(|byte| {
-            byte.is_ascii_alphanumeric()
-                || matches!(
-                    byte,
-                    b'!' | b'#'
-                        | b'$'
-                        | b'%'
-                        | b'&'
-                        | b'\''
-                        | b'*'
-                        | b'+'
-                        | b'-'
-                        | b'.'
-                        | b'^'
-                        | b'_'
-                        | b'`'
-                        | b'|'
-                        | b'~'
-                )
-        })
-}
-
-fn runtime_network_error(error: NetworkHttpError) -> RuntimeHttpEgressError {
-    RuntimeHttpEgressError::Network {
-        reason: error.stable_reason().to_string(),
-        request_bytes: error.request_bytes(),
-        response_bytes: error.response_bytes(),
-    }
-}
-
-fn validate_runtime_request(
-    request: &RuntimeHttpEgressRequest,
-) -> Result<(), RuntimeHttpEgressError> {
-    if let Some((name, _)) = request
-        .headers
-        .iter()
-        .find(|(name, _)| is_sensitive_runtime_request_header(name))
-    {
-        return Err(RuntimeHttpEgressError::Request {
-            reason: format!("sensitive_header_denied:{name}"),
-            request_bytes: 0,
-            response_bytes: 0,
-        });
-    }
-
-    if runtime_request_contains_manual_credentials(request) {
-        return Err(RuntimeHttpEgressError::Request {
-            reason: "manual_credentials_denied".to_string(),
-            request_bytes: 0,
-            response_bytes: 0,
-        });
-    }
-
-    let detector = LeakDetector::new();
-    detector
-        .scan_http_request(&request.url, &request.headers, Some(&request.body))
-        .map_err(|_| runtime_request_leak_error())?;
-    scan_decoded_url_for_leaks(&detector, &request.url)?;
-    Ok(())
-}
-
-fn runtime_request_contains_manual_credentials(request: &RuntimeHttpEgressRequest) -> bool {
-    let headers = request
-        .headers
-        .iter()
-        .map(|(name, value)| serde_json::json!({ "name": name, "value": value }))
-        .collect::<Vec<_>>();
-    let params = serde_json::json!({
-        "url": request.url,
-        "headers": headers,
-    });
-    params_contain_manual_credentials(&params)
-}
-
-fn scan_decoded_url_for_leaks(
-    detector: &LeakDetector,
-    raw_url: &str,
-) -> Result<(), RuntimeHttpEgressError> {
-    let Ok(parsed) = url::Url::parse(raw_url) else {
-        return Ok(());
-    };
-
-    scan_component_for_leaks(detector, parsed.path())?;
-    if let Some(query) = parsed.query() {
-        scan_component_for_leaks(detector, query)?;
-    }
-    if !parsed.username().is_empty() {
-        scan_component_for_leaks(detector, parsed.username())?;
-    }
-    if let Some(password) = parsed.password() {
-        scan_component_for_leaks(detector, password)?;
-    }
-    for (name, value) in parsed.query_pairs() {
-        detector
-            .scan_and_clean(name.as_ref())
-            .map_err(|_| runtime_request_leak_error())?;
-        detector
-            .scan_and_clean(value.as_ref())
-            .map_err(|_| runtime_request_leak_error())?;
-    }
-    Ok(())
-}
-
-fn scan_component_for_leaks(
-    detector: &LeakDetector,
-    component: &str,
-) -> Result<(), RuntimeHttpEgressError> {
-    let decoded = percent_decode_lossy(component);
-    if decoded != component {
-        detector
-            .scan_and_clean(&decoded)
-            .map_err(|_| runtime_request_leak_error())?;
-    }
-    Ok(())
-}
-
-fn percent_decode_lossy(input: &str) -> String {
-    let bytes = input.as_bytes();
-    let mut decoded = Vec::with_capacity(bytes.len());
-    let mut index = 0;
-    while index < bytes.len() {
-        if bytes[index] == b'%'
-            && index + 2 < bytes.len()
-            && let (Some(high), Some(low)) =
-                (hex_value(bytes[index + 1]), hex_value(bytes[index + 2]))
-        {
-            decoded.push((high << 4) | low);
-            index += 3;
-            continue;
-        }
-        decoded.push(bytes[index]);
-        index += 1;
-    }
-    String::from_utf8_lossy(&decoded).into_owned()
-}
-
-fn hex_value(byte: u8) -> Option<u8> {
-    match byte {
-        b'0'..=b'9' => Some(byte - b'0'),
-        b'a'..=b'f' => Some(byte - b'a' + 10),
-        b'A'..=b'F' => Some(byte - b'A' + 10),
-        _ => None,
-    }
-}
-
-fn runtime_request_leak_error() -> RuntimeHttpEgressError {
-    RuntimeHttpEgressError::Request {
-        reason: "credential_leak_blocked".to_string(),
-        request_bytes: 0,
-        response_bytes: 0,
-    }
-}
-
-fn sanitize_runtime_response(
-    response: NetworkHttpResponse,
-    redaction_values: &[String],
-) -> Result<(NetworkHttpResponse, bool), RuntimeHttpEgressError> {
-    let NetworkHttpResponse {
-        status,
-        headers,
-        body,
-        usage,
-    } = response;
-    let mut redaction_applied = false;
-    let mut sanitized_headers = Vec::new();
-    let detector = LeakDetector::new();
-
-    for (name, value) in headers {
-        if is_sensitive_runtime_response_header(&name) {
-            redaction_applied = true;
-            continue;
-        }
-        let exact_redacted = redact(value, redaction_values);
-        if exact_redacted.contains("[REDACTED]") {
-            redaction_applied = true;
-        }
-        let cleaned = detector.scan_and_clean(&exact_redacted).map_err(|_| {
-            RuntimeHttpEgressError::Response {
-                reason: "response_leak_blocked".to_string(),
-                request_bytes: usage.request_bytes,
-                response_bytes: usage.response_bytes,
-            }
-        })?;
-        if cleaned != exact_redacted {
-            redaction_applied = true;
-        }
-        sanitized_headers.push((name, cleaned));
-    }
-
-    let body_text = String::from_utf8_lossy(&body).into_owned();
-    let exact_redacted = redact(body_text, redaction_values);
-    let exact_body_redacted = exact_redacted.contains("[REDACTED]");
-    if exact_body_redacted {
-        redaction_applied = true;
-    }
-    let cleaned =
-        detector
-            .scan_and_clean(&exact_redacted)
-            .map_err(|_| RuntimeHttpEgressError::Response {
-                reason: "response_leak_blocked".to_string(),
-                request_bytes: usage.request_bytes,
-                response_bytes: usage.response_bytes,
-            })?;
-    let leak_detector_redacted = cleaned != exact_redacted;
-    if leak_detector_redacted {
-        redaction_applied = true;
-    }
-    let body = if exact_body_redacted || leak_detector_redacted {
-        cleaned.into_bytes()
-    } else {
-        body
-    };
-
-    Ok((
-        NetworkHttpResponse {
-            status,
-            headers: sanitized_headers,
-            body,
-            usage,
-        },
-        redaction_applied,
-    ))
-}
-
-fn runtime_response(
-    response: NetworkHttpResponse,
-    redaction_applied: bool,
-) -> RuntimeHttpEgressResponse {
-    RuntimeHttpEgressResponse {
-        status: response.status,
-        headers: response.headers,
-        body: response.body,
-        request_bytes: response.usage.request_bytes,
-        response_bytes: response.usage.response_bytes,
-        redaction_applied,
-    }
-}
-
-fn redact(mut text: String, values: &[String]) -> String {
-    for value in values {
-        if !value.is_empty() {
-            text = text.replace(value, "[REDACTED]");
-        }
-    }
-    text
-}
-
-fn redaction_values_for_secret(value: &str) -> Vec<String> {
-    let mut values = Vec::new();
-    push_redaction_value(&mut values, value.to_string());
-    let encoded = url::form_urlencoded::byte_serialize(value.as_bytes()).collect::<String>();
-    push_redaction_value(&mut values, encoded.clone());
-    push_redaction_value(&mut values, lowercase_percent_escapes(&encoded));
-    let plus_encoded = encoded.replace("%20", "+");
-    push_redaction_value(&mut values, plus_encoded.clone());
-    push_redaction_value(&mut values, lowercase_percent_escapes(&plus_encoded));
-    values
-}
-
-fn push_redaction_value(values: &mut Vec<String>, value: String) {
-    if !value.is_empty() && !values.iter().any(|existing| existing == &value) {
-        values.push(value);
-    }
-}
-
-fn lowercase_percent_escapes(value: &str) -> String {
-    let bytes = value.as_bytes();
-    let mut output = String::with_capacity(value.len());
-    let mut index = 0;
-    while index < bytes.len() {
-        if bytes[index] == b'%'
-            && index + 2 < bytes.len()
-            && bytes[index + 1].is_ascii_hexdigit()
-            && bytes[index + 2].is_ascii_hexdigit()
-        {
-            output.push('%');
-            output.push((bytes[index + 1] as char).to_ascii_lowercase());
-            output.push((bytes[index + 2] as char).to_ascii_lowercase());
-            index += 3;
-            continue;
-        }
-        output.push(bytes[index] as char);
-        index += 1;
-    }
-    output
 }

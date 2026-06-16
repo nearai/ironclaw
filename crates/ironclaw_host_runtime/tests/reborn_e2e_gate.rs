@@ -1,4 +1,11 @@
-use std::sync::{Arc, Mutex};
+mod support;
+
+use support::legacy_capability_fixture_to_v2;
+
+use std::{
+    collections::BTreeMap,
+    sync::{Arc, Mutex},
+};
 
 use async_trait::async_trait;
 use chrono::Utc;
@@ -7,18 +14,18 @@ use ironclaw_authorization::{
     CapabilityLeaseStatus, CapabilityLeaseStore, GrantAuthorizer, InMemoryCapabilityLeaseStore,
     TrustAwareCapabilityDispatchAuthorizer,
 };
+use ironclaw_capabilities::CapabilityObligationHandler;
 use ironclaw_events::{
-    DurableEventLog, EventStreamKey, InMemoryDurableEventLog, InMemoryEventSink, ReadScope,
-    RuntimeEventKind,
+    DurableEventLog, EventStreamKey, InMemoryAuditSink, InMemoryDurableEventLog, InMemoryEventSink,
+    ReadScope, RuntimeEventKind,
 };
-use ironclaw_extensions::{ExtensionManifest, ExtensionPackage, ExtensionRegistry};
-use ironclaw_filesystem::LocalFilesystem;
+use ironclaw_extensions::{ExtensionManifest, ExtensionPackage, ExtensionRegistry, ManifestSource};
+use ironclaw_filesystem::{InMemoryBackend, LocalFilesystem, RootFilesystem};
 use ironclaw_host_api::*;
 use ironclaw_host_runtime::{
-    CapabilitySurfaceVersion, HostHttpEgressService, HostRuntime, HostRuntimeServices,
-    NetworkObligationPolicyStore, RuntimeCapabilityOutcome, RuntimeCapabilityRequest,
-    RuntimeCapabilityResumeRequest, RuntimeFailureKind, RuntimeSecretInjectionStore,
-    RuntimeStatusRequest, SurfaceKind,
+    BuiltinObligationServices, CapabilitySurfacePolicy, CapabilitySurfaceVersion, HostRuntime,
+    HostRuntimeServices, RuntimeCapabilityOutcome, RuntimeCapabilityRequest,
+    RuntimeCapabilityResumeRequest, RuntimeFailureKind, RuntimeStatusRequest, SurfaceKind,
 };
 use ironclaw_network::{
     NetworkHttpEgress, NetworkHttpError, NetworkHttpRequest, NetworkHttpResponse, NetworkUsage,
@@ -31,7 +38,7 @@ use ironclaw_run_state::{
 use ironclaw_scripts::{
     ScriptBackend, ScriptBackendOutput, ScriptBackendRequest, ScriptRuntime, ScriptRuntimeConfig,
 };
-use ironclaw_secrets::{InMemorySecretStore, SecretMaterial};
+use ironclaw_secrets::{InMemorySecretStore, SecretMaterial, SecretStore};
 use ironclaw_trust::{
     AdminConfig, AdminEntry, AuthorityCeiling, EffectiveTrustClass, HostTrustAssignment,
     HostTrustPolicy, TrustDecision, TrustProvenance,
@@ -43,9 +50,11 @@ async fn reborn_e2e_gate_invokes_script_through_host_runtime_with_status_events_
     let governor = Arc::new(InMemoryResourceGovernor::new());
     let run_state = Arc::new(InMemoryRunStateStore::new());
     let event_log = Arc::new(InMemoryDurableEventLog::new());
+    let filesystem = Arc::new(InMemoryBackend::new());
+    seed_script_manifest_assets(filesystem.as_ref()).await;
     let services = HostRuntimeServices::new(
         Arc::new(registry_with_manifest(SCRIPT_MANIFEST)),
-        Arc::new(LocalFilesystem::new()),
+        filesystem,
         Arc::clone(&governor),
         Arc::new(GrantAuthorizer::new()),
         ProcessServices::in_memory(),
@@ -58,22 +67,32 @@ async fn reborn_e2e_gate_invokes_script_through_host_runtime_with_status_events_
         EchoScriptBackend,
     )))
     .with_durable_event_log(Arc::clone(&event_log));
-    let runtime = services.host_runtime();
+    let runtime = services.host_runtime_for_local_testing();
     let context = execution_context_with_dispatch_grant();
     let scope = context.resource_scope.clone();
     let invocation_id = context.invocation_id;
 
     let surface = runtime
-        .visible_capabilities(ironclaw_host_runtime::VisibleCapabilityRequest::new(
-            scope.clone(),
-            context.correlation_id,
-            SurfaceKind::new("gateway-smoke").unwrap(),
-        ))
+        .visible_capabilities(
+            ironclaw_host_runtime::VisibleCapabilityRequest::new(
+                context.clone(),
+                SurfaceKind::new("gateway-smoke").unwrap(),
+            )
+            .with_policy(CapabilitySurfacePolicy::allow_all())
+            .with_provider_trust(BTreeMap::from([(
+                ExtensionId::new("script").unwrap(),
+                trust_decision_with_dispatch_authority(),
+            )])),
+        )
         .await
         .unwrap();
-    assert_eq!(surface.version.as_str(), "surface-v1");
-    assert_eq!(surface.descriptors.len(), 1);
-    assert_eq!(surface.descriptors[0].id, script_capability_id());
+    assert_ne!(surface.version.as_str(), "surface-v1");
+    assert!(surface.version.as_str().starts_with("sha256:"));
+    assert_eq!(surface.capabilities.len(), 1);
+    assert_eq!(
+        surface.capabilities[0].descriptor.id,
+        script_capability_id()
+    );
 
     let health = runtime.health().await.unwrap();
     assert!(health.ready);
@@ -171,7 +190,7 @@ async fn reborn_e2e_gate_invokes_script_through_host_runtime_with_status_events_
 #[tokio::test]
 async fn reborn_e2e_gate_blocks_for_approval_resumes_once_and_rejects_replay() {
     let fixture = approval_resume_fixture();
-    let runtime = fixture.services.host_runtime();
+    let runtime = fixture.services.host_runtime_for_local_testing();
     let context = execution_context_without_grants();
     let scope = context.resource_scope.clone();
     let invocation_id = context.invocation_id;
@@ -257,7 +276,7 @@ async fn reborn_e2e_gate_fails_unsupported_obligations_before_runtime_events_or_
         Arc::new(registry_with_manifest(SCRIPT_MANIFEST)),
         Arc::new(LocalFilesystem::new()),
         Arc::clone(&governor),
-        Arc::new(ObligatingAuthorizer),
+        Arc::new(ObligatingAuthorizer::new(vec![Obligation::AuditBefore])),
         ProcessServices::in_memory(),
         CapabilitySurfaceVersion::new("surface-v1").unwrap(),
     )
@@ -268,7 +287,7 @@ async fn reborn_e2e_gate_fails_unsupported_obligations_before_runtime_events_or_
         EchoScriptBackend,
     )))
     .with_event_sink(Arc::new(events.clone()));
-    let runtime = services.host_runtime();
+    let runtime = services.host_runtime_for_local_testing();
     let context = execution_context_with_dispatch_grant();
     let scope = context.resource_scope.clone();
     let invocation_id = context.invocation_id;
@@ -300,8 +319,212 @@ async fn reborn_e2e_gate_fails_unsupported_obligations_before_runtime_events_or_
     );
 }
 
-#[test]
-fn reborn_e2e_gate_host_http_consumes_staged_policy_and_secret_once() {
+#[tokio::test]
+async fn reborn_e2e_gate_redacts_runtime_output_before_public_result() {
+    let run_state = Arc::new(InMemoryRunStateStore::new());
+    let events = InMemoryEventSink::new();
+    let services = HostRuntimeServices::new(
+        Arc::new(registry_with_manifest(SCRIPT_MANIFEST)),
+        Arc::new(LocalFilesystem::new()),
+        Arc::new(InMemoryResourceGovernor::new()),
+        Arc::new(ObligatingAuthorizer::new(vec![Obligation::RedactOutput])),
+        ProcessServices::in_memory(),
+        CapabilitySurfaceVersion::new("surface-v1").unwrap(),
+    )
+    .with_trust_policy(Arc::new(local_manifest_trust_policy()))
+    .with_run_state(Arc::clone(&run_state))
+    .with_script_runtime(Arc::new(ScriptRuntime::new(
+        ScriptRuntimeConfig::for_testing(),
+        EchoScriptBackend,
+    )))
+    .with_event_sink(Arc::new(events.clone()));
+    let runtime = services.host_runtime_for_local_testing();
+    let context = execution_context_with_dispatch_grant();
+    let scope = context.resource_scope.clone();
+    let invocation_id = context.invocation_id;
+    let leaked_header = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9";
+    let leaked_payload = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    let leaked_signature = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+    let leaked = format!("Bearer {leaked_header}.{leaked_payload}.{leaked_signature}");
+
+    let outcome = runtime
+        .invoke_capability(RuntimeCapabilityRequest::new(
+            context,
+            script_capability_id(),
+            ResourceEstimate::default(),
+            json!({"authorization": leaked, "message": "redact before public result"}),
+            trust_decision_with_dispatch_authority(),
+        ))
+        .await
+        .unwrap();
+
+    match outcome {
+        RuntimeCapabilityOutcome::Completed(completed) => {
+            let serialized = serde_json::to_string(&completed.output).unwrap();
+            assert_eq!(
+                completed.output,
+                json!({"authorization": "[REDACTED]", "message": "redact before public result"})
+            );
+            for forbidden in [leaked_header, leaked_payload, leaked_signature] {
+                assert!(
+                    !serialized.contains(forbidden),
+                    "redacted public result leaked token fragment {forbidden}: {serialized}"
+                );
+            }
+        }
+        other => panic!("expected completed redacted outcome, got {other:?}"),
+    }
+    let run = run_state.get(&scope, invocation_id).await.unwrap().unwrap();
+    assert_eq!(run.status, RunStatus::Completed);
+    let serialized_events = serde_json::to_string(&events.events()).unwrap();
+    assert!(
+        !serialized_events.contains(&leaked),
+        "runtime events must not leak raw output before redaction: {serialized_events}"
+    );
+}
+
+#[tokio::test]
+async fn reborn_e2e_gate_sanitizes_runtime_backend_failure_before_public_surfaces() {
+    let run_state = Arc::new(InMemoryRunStateStore::new());
+    let events = InMemoryEventSink::new();
+    let services = HostRuntimeServices::new(
+        Arc::new(registry_with_manifest(SCRIPT_MANIFEST)),
+        Arc::new(LocalFilesystem::new()),
+        Arc::new(InMemoryResourceGovernor::new()),
+        Arc::new(GrantAuthorizer::new()),
+        ProcessServices::in_memory(),
+        CapabilitySurfaceVersion::new("surface-v1").unwrap(),
+    )
+    .with_trust_policy(Arc::new(local_manifest_trust_policy()))
+    .with_run_state(Arc::clone(&run_state))
+    .with_script_runtime(Arc::new(ScriptRuntime::new(
+        ScriptRuntimeConfig::for_testing(),
+        FailingScriptBackend,
+    )))
+    .with_event_sink(Arc::new(events.clone()));
+    let runtime = services.host_runtime_for_local_testing();
+    let context = execution_context_with_dispatch_grant();
+    let scope = context.resource_scope.clone();
+    let invocation_id = context.invocation_id;
+    let input_sentinel = "BACKEND_FAILURE_INPUT_SENTINEL_3067";
+    let backend_secret = "BACKEND_PROVIDER_ERROR_SECRET_3067 /private/tmp/backend-path sk-live";
+
+    let outcome = runtime
+        .invoke_capability(RuntimeCapabilityRequest::new(
+            context,
+            script_capability_id(),
+            ResourceEstimate::default(),
+            json!({"message": input_sentinel}),
+            trust_decision_with_dispatch_authority(),
+        ))
+        .await
+        .unwrap();
+
+    match outcome {
+        RuntimeCapabilityOutcome::Failed(failure) => {
+            assert_eq!(failure.kind, RuntimeFailureKind::Backend);
+            let rendered = format!("{failure:?}");
+            for forbidden in [
+                input_sentinel,
+                backend_secret,
+                "/private/tmp/backend-path",
+                "sk-live",
+            ] {
+                assert!(
+                    !rendered.contains(forbidden),
+                    "public failure leaked backend sentinel {forbidden}: {rendered}"
+                );
+            }
+            assert!(failure.message.is_some());
+        }
+        other => panic!("expected sanitized backend failure, got {other:?}"),
+    }
+
+    let run = run_state.get(&scope, invocation_id).await.unwrap().unwrap();
+    assert_eq!(run.status, RunStatus::Failed);
+    assert_eq!(run.error_kind.as_deref(), Some("Dispatch"));
+    let serialized_run = serde_json::to_string(&run).unwrap();
+    let serialized_events = serde_json::to_string(&events.events()).unwrap();
+    for forbidden in [
+        input_sentinel,
+        backend_secret,
+        "/private/tmp/backend-path",
+        "sk-live",
+    ] {
+        assert!(
+            !serialized_run.contains(forbidden),
+            "run-state leaked backend sentinel {forbidden}: {serialized_run}"
+        );
+        assert!(
+            !serialized_events.contains(forbidden),
+            "runtime events leaked backend sentinel {forbidden}: {serialized_events}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn reborn_e2e_gate_blocks_oversized_runtime_output_before_publication() {
+    let run_state = Arc::new(InMemoryRunStateStore::new());
+    let events = InMemoryEventSink::new();
+    let services = HostRuntimeServices::new(
+        Arc::new(registry_with_manifest(SCRIPT_MANIFEST)),
+        Arc::new(LocalFilesystem::new()),
+        Arc::new(InMemoryResourceGovernor::new()),
+        Arc::new(ObligatingAuthorizer::new(vec![
+            Obligation::EnforceOutputLimit { bytes: 8 },
+        ])),
+        ProcessServices::in_memory(),
+        CapabilitySurfaceVersion::new("surface-v1").unwrap(),
+    )
+    .with_trust_policy(Arc::new(local_manifest_trust_policy()))
+    .with_run_state(Arc::clone(&run_state))
+    .with_script_runtime(Arc::new(ScriptRuntime::new(
+        ScriptRuntimeConfig::for_testing(),
+        EchoScriptBackend,
+    )))
+    .with_event_sink(Arc::new(events.clone()));
+    let runtime = services.host_runtime_for_local_testing();
+    let context = execution_context_with_dispatch_grant();
+    let scope = context.resource_scope.clone();
+    let invocation_id = context.invocation_id;
+    let forbidden = "OUTPUT_LIMIT_SENTINEL_MUST_NOT_LEAK";
+
+    let outcome = runtime
+        .invoke_capability(RuntimeCapabilityRequest::new(
+            context,
+            script_capability_id(),
+            ResourceEstimate::default(),
+            json!({"message": forbidden}),
+            trust_decision_with_dispatch_authority(),
+        ))
+        .await
+        .unwrap();
+
+    match outcome {
+        RuntimeCapabilityOutcome::Failed(failure) => {
+            assert_eq!(failure.kind, RuntimeFailureKind::OutputTooLarge);
+            let rendered = format!("{failure:?}");
+            assert!(!rendered.contains(forbidden));
+        }
+        other => panic!("expected output-limit failure, got {other:?}"),
+    }
+    let run = run_state.get(&scope, invocation_id).await.unwrap().unwrap();
+    assert_eq!(run.status, RunStatus::Failed);
+    assert_eq!(run.error_kind.as_deref(), Some("ObligationFailed"));
+    let serialized_run = serde_json::to_string(&run).unwrap();
+    assert!(
+        !serialized_run.contains(forbidden),
+        "run-state record must not leak blocked output: {serialized_run}"
+    );
+    let serialized_events = serde_json::to_string(&events.events()).unwrap();
+    assert!(
+        !serialized_events.contains(forbidden),
+        "runtime events must not leak blocked output: {serialized_events}"
+    );
+}
+
+#[tokio::test]
+async fn reborn_e2e_gate_host_http_consumes_staged_policy_and_secret_once() {
     let network = RecordingNetwork::ok(NetworkHttpResponse {
         status: 200,
         headers: vec![],
@@ -313,24 +536,45 @@ fn reborn_e2e_gate_host_http_consumes_staged_policy_and_secret_once() {
         },
     });
     let network_recorder = network.requests.clone();
-    let policy_store = Arc::new(NetworkObligationPolicyStore::new());
-    let secret_injections = Arc::new(RuntimeSecretInjectionStore::new());
     let scope = sample_scope(InvocationId::new());
     let capability_id = script_capability_id();
     let handle = SecretHandle::new("api-token").unwrap();
     let staged_policy = sample_policy();
-    policy_store.insert(&scope, &capability_id, staged_policy.clone());
-    secret_injections
-        .insert(
-            &scope,
-            &capability_id,
-            &handle,
+    let secret_store = Arc::new(InMemorySecretStore::new());
+    let obligation_services = BuiltinObligationServices::new(
+        Arc::new(InMemoryAuditSink::new()),
+        secret_store.clone(),
+        Arc::new(InMemoryResourceGovernor::new()),
+    );
+    secret_store
+        .put(
+            scope.clone(),
+            handle.clone(),
             SecretMaterial::from("sk-reborn-e2e-staged-secret"),
         )
+        .await
         .unwrap();
-    let service = HostHttpEgressService::new(network, InMemorySecretStore::new())
-        .with_network_policy_store(Arc::clone(&policy_store))
-        .with_secret_injection_store(Arc::clone(&secret_injections));
+    let mut context = execution_context_without_grants();
+    context.resource_scope = scope.clone();
+    obligation_services
+        .obligation_handler()
+        .satisfy(ironclaw_capabilities::CapabilityObligationRequest {
+            phase: ironclaw_capabilities::CapabilityObligationPhase::Invoke,
+            context: &context,
+            capability_id: &capability_id,
+            estimate: &ResourceEstimate::default(),
+            obligations: &[
+                Obligation::ApplyNetworkPolicy {
+                    policy: staged_policy.clone(),
+                },
+                Obligation::InjectSecretOnce {
+                    handle: handle.clone(),
+                },
+            ],
+        })
+        .await
+        .unwrap();
+    let service = obligation_services.host_http_egress(network);
 
     let request = RuntimeHttpEgressRequest {
         runtime: RuntimeKind::Script,
@@ -353,42 +597,33 @@ fn reborn_e2e_gate_host_http_consumes_staged_policy_and_secret_once() {
             required: true,
         }],
         response_body_limit: Some(4096),
+        save_body_to: None,
         timeout_ms: None,
     };
 
     let response = service
         .execute(request.clone())
+        .await
         .expect("host HTTP egress should use staged Reborn policy and secret material");
     assert_eq!(response.status, 200);
-    let recorded = network_recorder.lock().unwrap();
-    assert_eq!(recorded.len(), 1);
-    assert_eq!(recorded[0].policy, staged_policy);
-    assert_eq!(
-        recorded[0]
-            .headers
-            .iter()
-            .find(|(name, _)| name == "authorization"),
-        Some(&(
-            "authorization".to_string(),
-            "Bearer sk-reborn-e2e-staged-secret".to_string()
-        ))
-    );
-    drop(recorded);
-    assert!(
-        secret_injections
-            .take(&scope, &capability_id, &handle)
-            .unwrap()
-            .is_none(),
-        "staged secret material must be consumed exactly once"
-    );
-    assert_eq!(
-        policy_store.get(&scope, &capability_id),
-        Some(staged_policy),
-        "host egress must leave staged network policy for invocation/process lifecycle cleanup"
-    );
-
+    {
+        let recorded = network_recorder.lock().unwrap();
+        assert_eq!(recorded.len(), 1);
+        assert_eq!(recorded[0].policy, staged_policy);
+        assert_eq!(
+            recorded[0]
+                .headers
+                .iter()
+                .find(|(name, _)| name == "authorization"),
+            Some(&(
+                "authorization".to_string(),
+                "Bearer sk-reborn-e2e-staged-secret".to_string()
+            ))
+        );
+    }
     let replay = service
         .execute(request)
+        .await
         .expect_err("consumed staged secret must not be reusable");
     assert!(matches!(replay, RuntimeHttpEgressError::Credential { .. }));
     assert_eq!(
@@ -524,7 +759,15 @@ impl TrustAwareCapabilityDispatchAuthorizer for ApprovalThenGrantAuthorizer {
     }
 }
 
-struct ObligatingAuthorizer;
+struct ObligatingAuthorizer {
+    obligations: Vec<Obligation>,
+}
+
+impl ObligatingAuthorizer {
+    fn new(obligations: Vec<Obligation>) -> Self {
+        Self { obligations }
+    }
+}
 
 #[async_trait]
 impl TrustAwareCapabilityDispatchAuthorizer for ObligatingAuthorizer {
@@ -536,12 +779,20 @@ impl TrustAwareCapabilityDispatchAuthorizer for ObligatingAuthorizer {
         _trust_decision: &TrustDecision,
     ) -> Decision {
         Decision::Allow {
-            obligations: Obligations::new(vec![Obligation::AuditBefore]).unwrap(),
+            obligations: Obligations::new(self.obligations.clone()).unwrap(),
         }
     }
 }
 
 struct EchoScriptBackend;
+
+struct FailingScriptBackend;
+
+impl ScriptBackend for FailingScriptBackend {
+    fn execute(&self, _request: ScriptBackendRequest) -> Result<ScriptBackendOutput, String> {
+        Err("BACKEND_PROVIDER_ERROR_SECRET_3067 /private/tmp/backend-path sk-live".to_string())
+    }
+}
 
 impl ScriptBackend for EchoScriptBackend {
     fn execute(&self, request: ScriptBackendRequest) -> Result<ScriptBackendOutput, String> {
@@ -565,8 +816,9 @@ impl RecordingNetwork {
     }
 }
 
+#[async_trait::async_trait]
 impl NetworkHttpEgress for RecordingNetwork {
-    fn execute(
+    async fn execute(
         &self,
         request: NetworkHttpRequest,
     ) -> Result<NetworkHttpResponse, NetworkHttpError> {
@@ -577,7 +829,7 @@ impl NetworkHttpEgress for RecordingNetwork {
 
 fn registry_with_manifest(manifest: &str) -> ExtensionRegistry {
     let mut registry = ExtensionRegistry::new();
-    let manifest = ExtensionManifest::parse(manifest).unwrap();
+    let manifest = parse_manifest(manifest);
     let package = ExtensionPackage::from_manifest(
         manifest,
         VirtualPath::new("/system/extensions/script").unwrap(),
@@ -585,6 +837,38 @@ fn registry_with_manifest(manifest: &str) -> ExtensionRegistry {
     .unwrap();
     registry.insert(package).unwrap();
     registry
+}
+
+async fn seed_script_manifest_assets(filesystem: &InMemoryBackend) {
+    for path in [
+        "/system/extensions/script/schemas/test/input.v1.json",
+        "/system/extensions/script/schemas/test/output.v1.json",
+    ] {
+        filesystem
+            .write_file(
+                &VirtualPath::new(path).unwrap(),
+                br#"{"type":"object","additionalProperties":true}"#,
+            )
+            .await
+            .unwrap();
+    }
+    filesystem
+        .write_file(
+            &VirtualPath::new("/system/extensions/script/prompts/test.md").unwrap(),
+            b"Echo script test capability.",
+        )
+        .await
+        .unwrap();
+}
+
+fn parse_manifest(manifest: &str) -> ExtensionManifest {
+    let manifest = legacy_capability_fixture_to_v2(manifest);
+    ExtensionManifest::parse(
+        &manifest,
+        ManifestSource::InstalledLocal,
+        &HostPortCatalog::empty(),
+    )
+    .unwrap()
 }
 
 fn execution_context_with_dispatch_grant() -> ExecutionContext {

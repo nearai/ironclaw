@@ -1,0 +1,492 @@
+schema_version = "reborn.extension_manifest.v2"
+id = "github"
+name = "GitHub"
+version = "0.2.6"
+description = "GitHub repository, issue, pull request, search, branch, file, release, workflow, fork, and webhook capabilities."
+trust = "first_party_requested"
+
+[runtime]
+kind = "wasm"
+module = "wasm/github_tool.wasm"
+
+[[host_api]]
+id = "ironclaw.capability_provider/v1"
+section = "capability_provider.tools"
+
+[capability_provider.tools]
+
+# GitHub REST endpoints return heterogeneous provider-owned response shapes.
+# The WASM intentionally preserves those raw JSON contracts for v1 parity while
+# keeping inputs typed and host-mediated.
+
+[[capability_provider.tools.capabilities]]
+id = "github.get_repo"
+description = "Get a GitHub repository."
+effects = ["network", "use_secret"]
+runtime_credentials = [
+  { handle = "github_runtime_token", source = { type = "product_auth_account", provider = "github" }, audience = { scheme = "https", host_pattern = "api.github.com" }, target = { type = "header", name = "authorization", prefix = "Bearer " } },
+]
+default_permission = "allow"
+visibility = "model"
+input_schema_ref = "schemas/github/get_repo.input.v1.json"
+output_schema_ref = "schemas/github/raw_output.v1.json"
+prompt_doc_ref = "prompts/github/get_repo.md"
+required_host_ports = ["host.runtime.http_egress"]
+
+[[capability_provider.tools.capabilities]]
+id = "github.create_repo"
+description = "Create a GitHub repository."
+effects = ["dispatch_capability", "network", "use_secret", "external_write"]
+runtime_credentials = [
+  { handle = "github_runtime_token", source = { type = "product_auth_account", provider = "github" }, audience = { scheme = "https", host_pattern = "api.github.com" }, target = { type = "header", name = "authorization", prefix = "Bearer " } },
+]
+default_permission = "ask"
+visibility = "model"
+input_schema_ref = "schemas/github/create_repo.input.v1.json"
+output_schema_ref = "schemas/github/raw_output.v1.json"
+prompt_doc_ref = "prompts/github/create_repo.md"
+required_host_ports = ["host.runtime.http_egress"]
+
+[[capability_provider.tools.capabilities]]
+id = "github.list_issues"
+description = "List issues in one repository."
+effects = ["network", "use_secret"]
+runtime_credentials = [
+  { handle = "github_runtime_token", source = { type = "product_auth_account", provider = "github" }, audience = { scheme = "https", host_pattern = "api.github.com" }, target = { type = "header", name = "authorization", prefix = "Bearer " } },
+]
+default_permission = "allow"
+visibility = "model"
+input_schema_ref = "schemas/github/list_issues.input.v1.json"
+output_schema_ref = "schemas/github/raw_output.v1.json"
+prompt_doc_ref = "prompts/github/list_issues.md"
+required_host_ports = ["host.runtime.http_egress"]
+
+[[capability_provider.tools.capabilities]]
+id = "github.create_issue"
+description = "Create an issue."
+effects = ["dispatch_capability", "network", "use_secret", "external_write"]
+runtime_credentials = [
+  { handle = "github_runtime_token", source = { type = "product_auth_account", provider = "github" }, audience = { scheme = "https", host_pattern = "api.github.com" }, target = { type = "header", name = "authorization", prefix = "Bearer " } },
+]
+default_permission = "ask"
+visibility = "model"
+input_schema_ref = "schemas/github/create_issue.input.v1.json"
+output_schema_ref = "schemas/github/raw_output.v1.json"
+prompt_doc_ref = "prompts/github/create_issue.md"
+required_host_ports = ["host.runtime.http_egress"]
+
+[[capability_provider.tools.capabilities]]
+id = "github.get_issue"
+description = "Fetch one issue or pull request by issue number."
+effects = ["network", "use_secret"]
+runtime_credentials = [
+  { handle = "github_runtime_token", source = { type = "product_auth_account", provider = "github" }, audience = { scheme = "https", host_pattern = "api.github.com" }, target = { type = "header", name = "authorization", prefix = "Bearer " } },
+]
+default_permission = "allow"
+visibility = "model"
+input_schema_ref = "schemas/github/get_issue.input.v1.json"
+output_schema_ref = "schemas/github/raw_output.v1.json"
+prompt_doc_ref = "prompts/github/get_issue.md"
+required_host_ports = ["host.runtime.http_egress"]
+
+[[capability_provider.tools.capabilities]]
+id = "github.list_issue_comments"
+description = "List issue or pull request timeline comments."
+effects = ["network", "use_secret"]
+runtime_credentials = [
+  { handle = "github_runtime_token", source = { type = "product_auth_account", provider = "github" }, audience = { scheme = "https", host_pattern = "api.github.com" }, target = { type = "header", name = "authorization", prefix = "Bearer " } },
+]
+default_permission = "allow"
+visibility = "model"
+input_schema_ref = "schemas/github/list_issue_comments.input.v1.json"
+output_schema_ref = "schemas/github/raw_output.v1.json"
+prompt_doc_ref = "prompts/github/list_issue_comments.md"
+required_host_ports = ["host.runtime.http_egress"]
+
+[[capability_provider.tools.capabilities]]
+id = "github.create_issue_comment"
+description = "Add an issue or pull request comment."
+effects = ["dispatch_capability", "network", "use_secret", "external_write"]
+runtime_credentials = [
+  { handle = "github_runtime_token", source = { type = "product_auth_account", provider = "github" }, audience = { scheme = "https", host_pattern = "api.github.com" }, target = { type = "header", name = "authorization", prefix = "Bearer " } },
+]
+default_permission = "ask"
+visibility = "model"
+input_schema_ref = "schemas/github/create_issue_comment.input.v1.json"
+output_schema_ref = "schemas/github/raw_output.v1.json"
+prompt_doc_ref = "prompts/github/create_issue_comment.md"
+required_host_ports = ["host.runtime.http_egress"]
+
+[[capability_provider.tools.capabilities]]
+id = "github.comment_issue"
+description = "Compatibility alias for github.create_issue_comment."
+effects = ["dispatch_capability", "network", "use_secret", "external_write"]
+runtime_credentials = [
+  { handle = "github_runtime_token", source = { type = "product_auth_account", provider = "github" }, audience = { scheme = "https", host_pattern = "api.github.com" }, target = { type = "header", name = "authorization", prefix = "Bearer " } },
+]
+default_permission = "ask"
+visibility = "model"
+input_schema_ref = "schemas/github/comment_issue.input.v1.json"
+output_schema_ref = "schemas/github/raw_output.v1.json"
+prompt_doc_ref = "prompts/github/comment_issue.md"
+required_host_ports = ["host.runtime.http_egress"]
+
+[[capability_provider.tools.capabilities]]
+id = "github.list_pull_requests"
+description = "List pull requests in one repository."
+effects = ["network", "use_secret"]
+runtime_credentials = [
+  { handle = "github_runtime_token", source = { type = "product_auth_account", provider = "github" }, audience = { scheme = "https", host_pattern = "api.github.com" }, target = { type = "header", name = "authorization", prefix = "Bearer " } },
+]
+default_permission = "allow"
+visibility = "model"
+input_schema_ref = "schemas/github/list_pull_requests.input.v1.json"
+output_schema_ref = "schemas/github/raw_output.v1.json"
+prompt_doc_ref = "prompts/github/list_pull_requests.md"
+required_host_ports = ["host.runtime.http_egress"]
+
+[[capability_provider.tools.capabilities]]
+id = "github.create_pull_request"
+description = "Create a pull request."
+effects = ["dispatch_capability", "network", "use_secret", "external_write"]
+runtime_credentials = [
+  { handle = "github_runtime_token", source = { type = "product_auth_account", provider = "github" }, audience = { scheme = "https", host_pattern = "api.github.com" }, target = { type = "header", name = "authorization", prefix = "Bearer " } },
+]
+default_permission = "ask"
+visibility = "model"
+input_schema_ref = "schemas/github/create_pull_request.input.v1.json"
+output_schema_ref = "schemas/github/raw_output.v1.json"
+prompt_doc_ref = "prompts/github/create_pull_request.md"
+required_host_ports = ["host.runtime.http_egress"]
+
+[[capability_provider.tools.capabilities]]
+id = "github.get_pull_request"
+description = "Fetch one pull request."
+effects = ["network", "use_secret"]
+runtime_credentials = [
+  { handle = "github_runtime_token", source = { type = "product_auth_account", provider = "github" }, audience = { scheme = "https", host_pattern = "api.github.com" }, target = { type = "header", name = "authorization", prefix = "Bearer " } },
+]
+default_permission = "allow"
+visibility = "model"
+input_schema_ref = "schemas/github/get_pull_request.input.v1.json"
+output_schema_ref = "schemas/github/raw_output.v1.json"
+prompt_doc_ref = "prompts/github/get_pull_request.md"
+required_host_ports = ["host.runtime.http_egress"]
+
+[[capability_provider.tools.capabilities]]
+id = "github.get_pull_request_files"
+description = "List files changed in a pull request."
+effects = ["network", "use_secret"]
+runtime_credentials = [
+  { handle = "github_runtime_token", source = { type = "product_auth_account", provider = "github" }, audience = { scheme = "https", host_pattern = "api.github.com" }, target = { type = "header", name = "authorization", prefix = "Bearer " } },
+]
+default_permission = "allow"
+visibility = "model"
+input_schema_ref = "schemas/github/get_pull_request_files.input.v1.json"
+output_schema_ref = "schemas/github/raw_output.v1.json"
+prompt_doc_ref = "prompts/github/get_pull_request_files.md"
+required_host_ports = ["host.runtime.http_egress"]
+
+[[capability_provider.tools.capabilities]]
+id = "github.create_pr_review"
+description = "Create a pull request review."
+effects = ["dispatch_capability", "network", "use_secret", "external_write"]
+runtime_credentials = [
+  { handle = "github_runtime_token", source = { type = "product_auth_account", provider = "github" }, audience = { scheme = "https", host_pattern = "api.github.com" }, target = { type = "header", name = "authorization", prefix = "Bearer " } },
+]
+default_permission = "ask"
+visibility = "model"
+input_schema_ref = "schemas/github/create_pr_review.input.v1.json"
+output_schema_ref = "schemas/github/raw_output.v1.json"
+prompt_doc_ref = "prompts/github/create_pr_review.md"
+required_host_ports = ["host.runtime.http_egress"]
+
+[[capability_provider.tools.capabilities]]
+id = "github.list_pull_request_comments"
+description = "List pull request review comments."
+effects = ["network", "use_secret"]
+runtime_credentials = [
+  { handle = "github_runtime_token", source = { type = "product_auth_account", provider = "github" }, audience = { scheme = "https", host_pattern = "api.github.com" }, target = { type = "header", name = "authorization", prefix = "Bearer " } },
+]
+default_permission = "allow"
+visibility = "model"
+input_schema_ref = "schemas/github/list_pull_request_comments.input.v1.json"
+output_schema_ref = "schemas/github/raw_output.v1.json"
+prompt_doc_ref = "prompts/github/list_pull_request_comments.md"
+required_host_ports = ["host.runtime.http_egress"]
+
+[[capability_provider.tools.capabilities]]
+id = "github.reply_pull_request_comment"
+description = "Reply to a pull request review comment."
+effects = ["dispatch_capability", "network", "use_secret", "external_write"]
+runtime_credentials = [
+  { handle = "github_runtime_token", source = { type = "product_auth_account", provider = "github" }, audience = { scheme = "https", host_pattern = "api.github.com" }, target = { type = "header", name = "authorization", prefix = "Bearer " } },
+]
+default_permission = "ask"
+visibility = "model"
+input_schema_ref = "schemas/github/reply_pull_request_comment.input.v1.json"
+output_schema_ref = "schemas/github/raw_output.v1.json"
+prompt_doc_ref = "prompts/github/reply_pull_request_comment.md"
+required_host_ports = ["host.runtime.http_egress"]
+
+[[capability_provider.tools.capabilities]]
+id = "github.get_pull_request_reviews"
+description = "List pull request reviews."
+effects = ["network", "use_secret"]
+runtime_credentials = [
+  { handle = "github_runtime_token", source = { type = "product_auth_account", provider = "github" }, audience = { scheme = "https", host_pattern = "api.github.com" }, target = { type = "header", name = "authorization", prefix = "Bearer " } },
+]
+default_permission = "allow"
+visibility = "model"
+input_schema_ref = "schemas/github/get_pull_request_reviews.input.v1.json"
+output_schema_ref = "schemas/github/raw_output.v1.json"
+prompt_doc_ref = "prompts/github/get_pull_request_reviews.md"
+required_host_ports = ["host.runtime.http_egress"]
+
+[[capability_provider.tools.capabilities]]
+id = "github.get_combined_status"
+description = "Fetch combined commit status for a ref."
+effects = ["network", "use_secret"]
+runtime_credentials = [
+  { handle = "github_runtime_token", source = { type = "product_auth_account", provider = "github" }, audience = { scheme = "https", host_pattern = "api.github.com" }, target = { type = "header", name = "authorization", prefix = "Bearer " } },
+]
+default_permission = "allow"
+visibility = "model"
+input_schema_ref = "schemas/github/get_combined_status.input.v1.json"
+output_schema_ref = "schemas/github/raw_output.v1.json"
+prompt_doc_ref = "prompts/github/get_combined_status.md"
+required_host_ports = ["host.runtime.http_egress"]
+
+[[capability_provider.tools.capabilities]]
+id = "github.merge_pull_request"
+description = "Merge a pull request."
+effects = ["dispatch_capability", "network", "use_secret", "external_write"]
+runtime_credentials = [
+  { handle = "github_runtime_token", source = { type = "product_auth_account", provider = "github" }, audience = { scheme = "https", host_pattern = "api.github.com" }, target = { type = "header", name = "authorization", prefix = "Bearer " } },
+]
+default_permission = "ask"
+visibility = "model"
+input_schema_ref = "schemas/github/merge_pull_request.input.v1.json"
+output_schema_ref = "schemas/github/raw_output.v1.json"
+prompt_doc_ref = "prompts/github/merge_pull_request.md"
+required_host_ports = ["host.runtime.http_egress"]
+
+[[capability_provider.tools.capabilities]]
+id = "github.list_repos"
+description = "List public repositories for a user."
+effects = ["network", "use_secret"]
+runtime_credentials = [
+  { handle = "github_runtime_token", source = { type = "product_auth_account", provider = "github" }, audience = { scheme = "https", host_pattern = "api.github.com" }, target = { type = "header", name = "authorization", prefix = "Bearer " } },
+]
+default_permission = "allow"
+visibility = "model"
+input_schema_ref = "schemas/github/list_repos.input.v1.json"
+output_schema_ref = "schemas/github/raw_output.v1.json"
+prompt_doc_ref = "prompts/github/list_repos.md"
+required_host_ports = ["host.runtime.http_egress"]
+
+[[capability_provider.tools.capabilities]]
+id = "github.search_repositories"
+description = "Search repositories."
+effects = ["network", "use_secret"]
+runtime_credentials = [
+  { handle = "github_runtime_token", source = { type = "product_auth_account", provider = "github" }, audience = { scheme = "https", host_pattern = "api.github.com" }, target = { type = "header", name = "authorization", prefix = "Bearer " } },
+]
+default_permission = "allow"
+visibility = "model"
+input_schema_ref = "schemas/github/search_repositories.input.v1.json"
+output_schema_ref = "schemas/github/raw_output.v1.json"
+prompt_doc_ref = "prompts/github/search_repositories.md"
+required_host_ports = ["host.runtime.http_egress"]
+
+[[capability_provider.tools.capabilities]]
+id = "github.search_code"
+description = "Search code."
+effects = ["network", "use_secret"]
+runtime_credentials = [
+  { handle = "github_runtime_token", source = { type = "product_auth_account", provider = "github" }, audience = { scheme = "https", host_pattern = "api.github.com" }, target = { type = "header", name = "authorization", prefix = "Bearer " } },
+]
+default_permission = "ask"
+visibility = "model"
+input_schema_ref = "schemas/github/search_code.input.v1.json"
+output_schema_ref = "schemas/github/raw_output.v1.json"
+prompt_doc_ref = "prompts/github/search_code.md"
+required_host_ports = ["host.runtime.http_egress"]
+
+[[capability_provider.tools.capabilities]]
+id = "github.search_issues"
+description = "Compatibility alias for github.search_issues_pull_requests."
+effects = ["network", "use_secret"]
+runtime_credentials = [
+  { handle = "github_runtime_token", source = { type = "product_auth_account", provider = "github" }, audience = { scheme = "https", host_pattern = "api.github.com" }, target = { type = "header", name = "authorization", prefix = "Bearer " } },
+]
+default_permission = "allow"
+visibility = "model"
+input_schema_ref = "schemas/github/search_issues.input.v1.json"
+output_schema_ref = "schemas/github/raw_output.v1.json"
+prompt_doc_ref = "prompts/github/search_issues.md"
+required_host_ports = ["host.runtime.http_egress"]
+
+[[capability_provider.tools.capabilities]]
+id = "github.search_issues_pull_requests"
+description = "Search GitHub issues and pull requests."
+effects = ["network", "use_secret"]
+runtime_credentials = [
+  { handle = "github_runtime_token", source = { type = "product_auth_account", provider = "github" }, audience = { scheme = "https", host_pattern = "api.github.com" }, target = { type = "header", name = "authorization", prefix = "Bearer " } },
+]
+default_permission = "allow"
+visibility = "model"
+input_schema_ref = "schemas/github/search_issues_pull_requests.input.v1.json"
+output_schema_ref = "schemas/github/raw_output.v1.json"
+prompt_doc_ref = "prompts/github/search_issues_pull_requests.md"
+required_host_ports = ["host.runtime.http_egress"]
+
+[[capability_provider.tools.capabilities]]
+id = "github.list_branches"
+description = "List repository branches."
+effects = ["network", "use_secret"]
+runtime_credentials = [
+  { handle = "github_runtime_token", source = { type = "product_auth_account", provider = "github" }, audience = { scheme = "https", host_pattern = "api.github.com" }, target = { type = "header", name = "authorization", prefix = "Bearer " } },
+]
+default_permission = "allow"
+visibility = "model"
+input_schema_ref = "schemas/github/list_branches.input.v1.json"
+output_schema_ref = "schemas/github/raw_output.v1.json"
+prompt_doc_ref = "prompts/github/list_branches.md"
+required_host_ports = ["host.runtime.http_egress"]
+
+[[capability_provider.tools.capabilities]]
+id = "github.create_branch"
+description = "Create a branch from another branch or tag ref."
+effects = ["dispatch_capability", "network", "use_secret", "external_write"]
+runtime_credentials = [
+  { handle = "github_runtime_token", source = { type = "product_auth_account", provider = "github" }, audience = { scheme = "https", host_pattern = "api.github.com" }, target = { type = "header", name = "authorization", prefix = "Bearer " } },
+]
+default_permission = "ask"
+visibility = "model"
+input_schema_ref = "schemas/github/create_branch.input.v1.json"
+output_schema_ref = "schemas/github/raw_output.v1.json"
+prompt_doc_ref = "prompts/github/create_branch.md"
+required_host_ports = ["host.runtime.http_egress"]
+
+[[capability_provider.tools.capabilities]]
+id = "github.get_file_content"
+description = "Fetch repository file content metadata/content."
+effects = ["network", "use_secret"]
+runtime_credentials = [
+  { handle = "github_runtime_token", source = { type = "product_auth_account", provider = "github" }, audience = { scheme = "https", host_pattern = "api.github.com" }, target = { type = "header", name = "authorization", prefix = "Bearer " } },
+]
+default_permission = "allow"
+visibility = "model"
+input_schema_ref = "schemas/github/get_file_content.input.v1.json"
+output_schema_ref = "schemas/github/raw_output.v1.json"
+prompt_doc_ref = "prompts/github/get_file_content.md"
+required_host_ports = ["host.runtime.http_egress"]
+
+[[capability_provider.tools.capabilities]]
+id = "github.create_or_update_file"
+description = "Create or update a repository file."
+effects = ["dispatch_capability", "network", "use_secret", "external_write"]
+runtime_credentials = [
+  { handle = "github_runtime_token", source = { type = "product_auth_account", provider = "github" }, audience = { scheme = "https", host_pattern = "api.github.com" }, target = { type = "header", name = "authorization", prefix = "Bearer " } },
+]
+default_permission = "ask"
+visibility = "model"
+input_schema_ref = "schemas/github/create_or_update_file.input.v1.json"
+output_schema_ref = "schemas/github/raw_output.v1.json"
+prompt_doc_ref = "prompts/github/create_or_update_file.md"
+required_host_ports = ["host.runtime.http_egress"]
+
+[[capability_provider.tools.capabilities]]
+id = "github.delete_file"
+description = "Delete a repository file."
+effects = ["dispatch_capability", "network", "use_secret", "external_write"]
+runtime_credentials = [
+  { handle = "github_runtime_token", source = { type = "product_auth_account", provider = "github" }, audience = { scheme = "https", host_pattern = "api.github.com" }, target = { type = "header", name = "authorization", prefix = "Bearer " } },
+]
+default_permission = "ask"
+visibility = "model"
+input_schema_ref = "schemas/github/delete_file.input.v1.json"
+output_schema_ref = "schemas/github/raw_output.v1.json"
+prompt_doc_ref = "prompts/github/delete_file.md"
+required_host_ports = ["host.runtime.http_egress"]
+
+[[capability_provider.tools.capabilities]]
+id = "github.list_releases"
+description = "List repository releases."
+effects = ["network", "use_secret"]
+runtime_credentials = [
+  { handle = "github_runtime_token", source = { type = "product_auth_account", provider = "github" }, audience = { scheme = "https", host_pattern = "api.github.com" }, target = { type = "header", name = "authorization", prefix = "Bearer " } },
+]
+default_permission = "allow"
+visibility = "model"
+input_schema_ref = "schemas/github/list_releases.input.v1.json"
+output_schema_ref = "schemas/github/raw_output.v1.json"
+prompt_doc_ref = "prompts/github/list_releases.md"
+required_host_ports = ["host.runtime.http_egress"]
+
+[[capability_provider.tools.capabilities]]
+id = "github.create_release"
+description = "Create a repository release."
+effects = ["dispatch_capability", "network", "use_secret", "external_write"]
+runtime_credentials = [
+  { handle = "github_runtime_token", source = { type = "product_auth_account", provider = "github" }, audience = { scheme = "https", host_pattern = "api.github.com" }, target = { type = "header", name = "authorization", prefix = "Bearer " } },
+]
+default_permission = "ask"
+visibility = "model"
+input_schema_ref = "schemas/github/create_release.input.v1.json"
+output_schema_ref = "schemas/github/raw_output.v1.json"
+prompt_doc_ref = "prompts/github/create_release.md"
+required_host_ports = ["host.runtime.http_egress"]
+
+[[capability_provider.tools.capabilities]]
+id = "github.trigger_workflow"
+description = "Dispatch a GitHub Actions workflow."
+effects = ["dispatch_capability", "network", "use_secret", "external_write"]
+runtime_credentials = [
+  { handle = "github_runtime_token", source = { type = "product_auth_account", provider = "github" }, audience = { scheme = "https", host_pattern = "api.github.com" }, target = { type = "header", name = "authorization", prefix = "Bearer " } },
+]
+default_permission = "ask"
+visibility = "model"
+input_schema_ref = "schemas/github/trigger_workflow.input.v1.json"
+output_schema_ref = "schemas/github/raw_output.v1.json"
+prompt_doc_ref = "prompts/github/trigger_workflow.md"
+required_host_ports = ["host.runtime.http_egress"]
+
+[[capability_provider.tools.capabilities]]
+id = "github.get_workflow_runs"
+description = "List GitHub Actions workflow runs."
+effects = ["network", "use_secret"]
+runtime_credentials = [
+  { handle = "github_runtime_token", source = { type = "product_auth_account", provider = "github" }, audience = { scheme = "https", host_pattern = "api.github.com" }, target = { type = "header", name = "authorization", prefix = "Bearer " } },
+]
+default_permission = "allow"
+visibility = "model"
+input_schema_ref = "schemas/github/get_workflow_runs.input.v1.json"
+output_schema_ref = "schemas/github/raw_output.v1.json"
+prompt_doc_ref = "prompts/github/get_workflow_runs.md"
+required_host_ports = ["host.runtime.http_egress"]
+
+[[capability_provider.tools.capabilities]]
+id = "github.fork_repo"
+description = "Fork a repository."
+effects = ["dispatch_capability", "network", "use_secret", "external_write"]
+runtime_credentials = [
+  { handle = "github_runtime_token", source = { type = "product_auth_account", provider = "github" }, audience = { scheme = "https", host_pattern = "api.github.com" }, target = { type = "header", name = "authorization", prefix = "Bearer " } },
+]
+default_permission = "ask"
+visibility = "model"
+input_schema_ref = "schemas/github/fork_repo.input.v1.json"
+output_schema_ref = "schemas/github/raw_output.v1.json"
+prompt_doc_ref = "prompts/github/fork_repo.md"
+required_host_ports = ["host.runtime.http_egress"]
+
+[[capability_provider.tools.capabilities]]
+id = "github.handle_webhook"
+description = "Normalize a GitHub webhook payload into system event intents."
+effects = ["dispatch_capability"]
+default_permission = "ask"
+visibility = "model"
+input_schema_ref = "schemas/github/handle_webhook.input.v1.json"
+output_schema_ref = "schemas/github/raw_output.v1.json"
+prompt_doc_ref = "prompts/github/handle_webhook.md"

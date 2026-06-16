@@ -17,20 +17,20 @@ crates use to record what happened. It defines:
 - in-memory durable backends used by tests and reference loops;
 - `DurableEventSink` / `DurableAuditSink` adapters that let service composition pass durable logs where producer crates expect live sink traits.
 
-Filesystem-backed JSONL durable backends and PostgreSQL/libSQL backends are
-deliberately deferred. They live in later grouped Reborn PRs that depend on
-`ironclaw_filesystem` and the database substrates. The byte-level
-`parse_jsonl` and `replay_jsonl` helpers in this crate are exposed so those
-later backends can build on the same redaction and replay invariants.
+Reborn-owned production backend selection lives in
+`crates/ironclaw_reborn_event_store/`. Keep storage drivers out of this
+substrate crate: downstream store crates should depend on `ironclaw_events`,
+not the other way around. The byte-level `parse_jsonl` and `replay_jsonl`
+helpers remain available for simple durable adapters, but compacting backends
+must store explicit cursors and cannot rely on line indexes.
 
 Forbidden dependencies (enforced by `ironclaw_architecture`): authorization,
 approvals, capabilities, dispatcher, extensions, host_runtime, secrets,
 network, mcp, processes, resources, run_state, scripts, wasm.
 
-`ironclaw_filesystem` is **deliberately not forbidden**: PR2's JSONL durable
-sink will depend on it, and pre-tightening here would force PR2 to relax the
-rule before it can land. `ironclaw_memory` is similarly not forbidden — this
-crate has no need for it today, but no boundary case has been made for
-adding it to the list. The authoritative forbidden list lives in
+`ironclaw_filesystem` and `ironclaw_memory` are **deliberately not forbidden**
+by this local note: this crate has no need for them today, but no boundary case
+has been made for adding them to the forbidden list. The authoritative
+forbidden list lives in
 `crates/ironclaw_architecture/tests/reborn_dependency_boundaries.rs`; if the
 two ever disagree, the test wins and this doc is stale.

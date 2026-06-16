@@ -1,0 +1,1532 @@
+use std::collections::{HashMap, VecDeque};
+#[cfg(test)]
+use std::sync::atomic::{AtomicUsize, Ordering};
+
+use async_trait::async_trait;
+use ironclaw_host_api::UserId;
+use ironclaw_loop_support::{AwaitedChildSetRecord, SubagentGateResolutionStore, SubagentKindId};
+use ironclaw_turns::{
+    EventCursor, GateRef, TurnEventKind, TurnRunId, TurnStatus,
+    run_profile::{AgentLoopHostError, AgentLoopHostErrorKind},
+};
+use parking_lot::Mutex;
+
+const MAX_GATE_RECORDS: usize = 4096;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AwaitedChildState {
+    pub record: AwaitedChildSetRecord,
+    pub terminal_status: Option<TurnStatus>,
+    pub terminal_event: Option<AwaitedChildTerminalEvent>,
+    pub terminal_result_written: bool,
+    /// Serialized byte length of the terminal capability result payload written
+    /// by `SubagentCompletionObserver::write_terminal_result` via
+    /// `LoopCapabilityResultWriter::update_capability_result`. Zero until
+    /// `terminal_result_written` is set; carries the real child output size
+    /// (not the initial spawn placeholder) for downstream byte-cap accounting.
+    pub terminal_byte_len: u64,
+    pub descendant_reservation_release_claimed: bool,
+    pub descendant_reservation_released: bool,
+    pub delivery_claimed: bool,
+    pub delivered_to_parent: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AwaitedChildTerminalEvent {
+    pub status: TurnStatus,
+    pub kind: TurnEventKind,
+    pub cursor: EventCursor,
+    pub sanitized_reason: Option<String>,
+    pub owner_user_id: Option<UserId>,
+}
+
+#[derive(Default)]
+pub struct BoundedSubagentGateResolutionStore {
+    inner: Mutex<GateResolutionInner>,
+    #[cfg(test)]
+    mark_child_delivered_calls: AtomicUsize,
+    #[cfg(test)]
+    fail_mark_child_delivered_on_call: AtomicUsize,
+}
+
+#[derive(Default)]
+struct GateResolutionInner {
+    by_gate: HashMap<GateRef, Vec<AwaitedChildState>>,
+    gates_by_child: HashMap<TurnRunId, Vec<GateRef>>,
+    deliverable_by_child: HashMap<TurnRunId, VecDeque<GateRef>>,
+    // Cached total state count across all gate keys. Maintained alongside
+    // every push to `by_gate` and prune via `delete_awaited_child`, so the
+    // capacity check stays O(1) instead of summing every Vec under the lock.
+    total_states: usize,
+}
+
+impl BoundedSubagentGateResolutionStore {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn fail_mark_child_delivered_on_call(&self, call: usize) {
+        self.mark_child_delivered_calls.store(0, Ordering::SeqCst);
+        self.fail_mark_child_delivered_on_call
+            .store(call, Ordering::SeqCst);
+    }
+
+    pub fn record_child_terminal(
+        &self,
+        child_run_id: TurnRunId,
+        terminal_event: AwaitedChildTerminalEvent,
+    ) -> Result<(), AgentLoopHostError> {
+        let terminal_status = terminal_event.status;
+        if !is_subagent_terminal_status(terminal_status) {
+            return Err(AgentLoopHostError::new(
+                AgentLoopHostErrorKind::Invalid,
+                "subagent gate result must be terminal",
+            ));
+        }
+        let mut inner = lock(&self.inner)?;
+        let gate_refs = inner.gates_by_child.get(&child_run_id).cloned();
+        let mut deliverable = Vec::new();
+        let Some(gate_refs) = gate_refs else {
+            return Ok(());
+        };
+        for gate_ref in gate_refs {
+            if let Some(states) = inner.by_gate.get_mut(&gate_ref) {
+                let mut any_deliverable = false;
+                for state in states
+                    .iter_mut()
+                    .filter(|state| state.record.child_run_id == child_run_id)
+                {
+                    // Skip if this child's terminal was already recorded —
+                    // event replay or recovery may redeliver the same
+                    // terminal; treat the first one as authoritative so the
+                    // event payload (cursor, status, sanitized_reason) is
+                    // never silently overwritten by a later duplicate.
+                    if state.terminal_status.is_some() {
+                        continue;
+                    }
+                    state.terminal_status = Some(terminal_status);
+                    state.terminal_event = Some(terminal_event.clone());
+                    if !state.delivery_claimed && !state.delivered_to_parent {
+                        any_deliverable = true;
+                    }
+                }
+                if any_deliverable {
+                    deliverable.push(gate_ref);
+                }
+            }
+        }
+        inner
+            .deliverable_by_child
+            .entry(child_run_id)
+            .or_default()
+            .extend(deliverable);
+        Ok(())
+    }
+
+    pub fn claim_next_terminal_state_for_child(
+        &self,
+        child_run_id: TurnRunId,
+    ) -> Result<Option<AwaitedChildState>, AgentLoopHostError> {
+        let mut inner = lock(&self.inner)?;
+        match claim_deliverable_state_for_child(&mut inner, child_run_id) {
+            DeliverableClaim::Claimed(state) => Ok(Some(*state)),
+            DeliverableClaim::Empty | DeliverableClaim::PendingSibling => Ok(None),
+        }
+    }
+
+    // Drains every deliverable state for `child_run_id` under a single lock
+    // acquisition. Each shared batch gate is requeued internally while there
+    // are remaining unclaimed states, so callers see one Vec containing every
+    // state this child unblocks. Equivalent to looping
+    // `claim_next_terminal_state_for_child` until None, but takes the lock
+    // exactly once.
+    pub fn claim_all_terminal_states_for_child(
+        &self,
+        child_run_id: TurnRunId,
+    ) -> Result<Vec<AwaitedChildState>, AgentLoopHostError> {
+        let mut claimed = Vec::new();
+        let mut inner = lock(&self.inner)?;
+        // Gate fanout is expected to stay small, so holding the lock while
+        // draining each queued terminal state avoids extra lock churn without
+        // making the scan itself a hotspot.
+        while let DeliverableClaim::Claimed(state) =
+            claim_deliverable_state_for_child(&mut inner, child_run_id)
+        {
+            claimed.push(*state);
+        }
+        Ok(claimed)
+    }
+
+    pub fn mark_delivered(&self, gate_ref: &GateRef) -> Result<(), AgentLoopHostError> {
+        let mut inner = lock(&self.inner)?;
+        if let Some(states) = inner.by_gate.get_mut(gate_ref) {
+            // Gate-wide completion marker retained for callers that have
+            // already completed every state under this gate. Per-child paths
+            // must use `mark_child_delivered` so shared gates keep retrying
+            // unfinished siblings.
+            for state in states {
+                state.delivery_claimed = false;
+                state.delivered_to_parent = true;
+            }
+        }
+        Ok(())
+    }
+
+    /// Record the serialized byte length of the terminal capability result
+    /// payload for a given child run. Called by
+    /// `SubagentCompletionObserver::write_terminal_result` immediately after
+    /// `update_capability_result` returns the real payload size.
+    ///
+    /// This stores the actual child output size on `AwaitedChildState` so that
+    /// the parent loop's byte-cap accounting can use the terminal payload size
+    /// rather than the initial spawn-placeholder size. The value is available
+    /// to the consumption path (WU-C durable settlement or in-memory drain)
+    /// via `state_for_gate` / `claim_all_terminal_states_for_child`.
+    pub fn record_terminal_byte_len(
+        &self,
+        gate_ref: &GateRef,
+        child_run_id: TurnRunId,
+        byte_len: u64,
+    ) -> Result<(), AgentLoopHostError> {
+        let mut inner = lock(&self.inner)?;
+        if let Some(states) = inner.by_gate.get_mut(gate_ref) {
+            for state in states
+                .iter_mut()
+                .filter(|state| state.record.child_run_id == child_run_id)
+            {
+                state.terminal_byte_len = byte_len;
+            }
+        }
+        Ok(())
+    }
+
+    pub fn mark_terminal_result_written(
+        &self,
+        gate_ref: &GateRef,
+        child_run_id: TurnRunId,
+    ) -> Result<(), AgentLoopHostError> {
+        let mut inner = lock(&self.inner)?;
+        if let Some(states) = inner.by_gate.get_mut(gate_ref) {
+            // Shared gates are intentionally low-fanout, so a direct linear
+            // scan keeps this state transition simple and local.
+            for state in states
+                .iter_mut()
+                .filter(|state| state.record.child_run_id == child_run_id)
+            {
+                state.terminal_result_written = true;
+            }
+        }
+        Ok(())
+    }
+
+    pub fn mark_child_delivered(
+        &self,
+        gate_ref: &GateRef,
+        child_run_id: TurnRunId,
+    ) -> Result<bool, AgentLoopHostError> {
+        #[cfg(test)]
+        {
+            let call = self
+                .mark_child_delivered_calls
+                .fetch_add(1, Ordering::SeqCst)
+                + 1;
+            if self
+                .fail_mark_child_delivered_on_call
+                .load(Ordering::SeqCst)
+                == call
+            {
+                return Err(AgentLoopHostError::new(
+                    AgentLoopHostErrorKind::Unavailable,
+                    "injected mark_child_delivered failure",
+                ));
+            }
+        }
+
+        let mut inner = lock(&self.inner)?;
+        let Some(states) = inner.by_gate.get_mut(gate_ref) else {
+            return Ok(false);
+        };
+        // Shared gates are intentionally low-fanout, so a direct linear scan
+        // is acceptable here and keeps the delivery bookkeeping localized.
+        for state in states
+            .iter_mut()
+            .filter(|state| state.record.child_run_id == child_run_id)
+        {
+            state.delivery_claimed = false;
+            state.delivered_to_parent = true;
+        }
+        Ok(states.iter().all(|state| state.delivered_to_parent))
+    }
+
+    pub fn undo_mark_child_delivered(
+        &self,
+        gate_ref: &GateRef,
+        child_run_id: TurnRunId,
+    ) -> Result<(), AgentLoopHostError> {
+        let mut inner = lock(&self.inner)?;
+        let should_requeue = if let Some(states) = inner.by_gate.get_mut(gate_ref) {
+            let mut requeue = false;
+            for state in states
+                .iter_mut()
+                .filter(|state| state.record.child_run_id == child_run_id)
+            {
+                // Only requeue if this child was already delivered and no
+                // concurrent terminal claim is still active; the claiming
+                // path will requeue itself when that claim is released.
+                if state.delivered_to_parent {
+                    state.delivered_to_parent = false;
+                    if state.terminal_status.is_some() && !state.delivery_claimed {
+                        requeue = true;
+                    }
+                }
+            }
+            requeue
+        } else {
+            false
+        };
+        if should_requeue {
+            let queue = inner.deliverable_by_child.entry(child_run_id).or_default();
+            if !queue.iter().any(|queued| queued == gate_ref) {
+                queue.push_front(gate_ref.clone());
+            }
+        }
+        Ok(())
+    }
+
+    pub fn release_terminal_claim(&self, gate_ref: &GateRef) -> Result<(), AgentLoopHostError> {
+        let mut inner = lock(&self.inner)?;
+        let to_requeue: Vec<TurnRunId> = if let Some(states) = inner.by_gate.get_mut(gate_ref) {
+            let mut cids = Vec::new();
+            for state in states.iter_mut().filter(|state| !state.delivered_to_parent) {
+                if state.delivery_claimed {
+                    state.delivery_claimed = false;
+                    if state.terminal_status.is_some() {
+                        cids.push(state.record.child_run_id);
+                    }
+                }
+            }
+            cids
+        } else {
+            Vec::new()
+        };
+        for child_run_id in to_requeue {
+            inner
+                .deliverable_by_child
+                .entry(child_run_id)
+                .or_default()
+                .push_front(gate_ref.clone());
+        }
+        Ok(())
+    }
+
+    pub fn undelivered_terminal_states(
+        &self,
+    ) -> Result<Vec<AwaitedChildState>, AgentLoopHostError> {
+        let inner = lock(&self.inner)?;
+        Ok(inner
+            .by_gate
+            .values()
+            .filter(|states| states.iter().all(|state| state.terminal_status.is_some()))
+            .flat_map(|states| states.iter())
+            .filter(|state| !state.delivered_to_parent)
+            .cloned()
+            .collect())
+    }
+
+    pub fn claim_descendant_reservation_release(
+        &self,
+        gate_ref: &GateRef,
+    ) -> Result<bool, AgentLoopHostError> {
+        let mut inner = lock(&self.inner)?;
+        let Some(states) = inner.by_gate.get_mut(gate_ref) else {
+            return Ok(false);
+        };
+        let Some(state) = states.iter_mut().find(|state| {
+            !state.descendant_reservation_released && !state.descendant_reservation_release_claimed
+        }) else {
+            return Ok(false);
+        };
+        state.descendant_reservation_release_claimed = true;
+        Ok(true)
+    }
+
+    pub fn mark_descendant_reservation_released(
+        &self,
+        gate_ref: &GateRef,
+    ) -> Result<(), AgentLoopHostError> {
+        let mut inner = lock(&self.inner)?;
+        if let Some(states) = inner.by_gate.get_mut(gate_ref) {
+            for state in states
+                .iter_mut()
+                .filter(|state| state.descendant_reservation_release_claimed)
+            {
+                state.descendant_reservation_release_claimed = false;
+                state.descendant_reservation_released = true;
+            }
+        }
+        Ok(())
+    }
+
+    pub fn release_descendant_reservation_claim(
+        &self,
+        gate_ref: &GateRef,
+    ) -> Result<(), AgentLoopHostError> {
+        let mut inner = lock(&self.inner)?;
+        if let Some(states) = inner.by_gate.get_mut(gate_ref) {
+            for state in states.iter_mut().filter(|state| {
+                state.descendant_reservation_release_claimed
+                    && !state.descendant_reservation_released
+            }) {
+                state.descendant_reservation_release_claimed = false;
+            }
+        }
+        Ok(())
+    }
+
+    // Probe for gate presence and gate-level metadata (subagent_kind, mode,
+    // parent context) that is uniform across every state under a shared
+    // batch gate. Callers that need per-child state must iterate the full
+    // Vec via the dedicated APIs.
+    pub fn state_for_gate(
+        &self,
+        gate_ref: &GateRef,
+    ) -> Result<Option<AwaitedChildState>, AgentLoopHostError> {
+        Ok(lock(&self.inner)?
+            .by_gate
+            .get(gate_ref)
+            .and_then(|states| states.first().cloned()))
+    }
+
+    pub fn state_for_child(
+        &self,
+        child_run_id: TurnRunId,
+    ) -> Result<Option<AwaitedChildState>, AgentLoopHostError> {
+        let inner = lock(&self.inner)?;
+        let Some(gates) = inner.gates_by_child.get(&child_run_id) else {
+            return Ok(None);
+        };
+        Ok(gates
+            .iter()
+            .filter_map(|gate| inner.by_gate.get(gate))
+            .flat_map(|states| states.iter())
+            .find(|state| state.record.child_run_id == child_run_id)
+            .cloned())
+    }
+
+    pub fn subagent_kind_for_child(
+        &self,
+        child_run_id: TurnRunId,
+    ) -> Result<Option<SubagentKindId>, AgentLoopHostError> {
+        let inner = lock(&self.inner)?;
+        let Some(gates) = inner.gates_by_child.get(&child_run_id) else {
+            return Ok(None);
+        };
+        Ok(gates
+            .iter()
+            .filter_map(|gate| inner.by_gate.get(gate))
+            .find_map(|states| states.first())
+            .map(|state| state.record.subagent_kind.clone()))
+    }
+
+    pub fn len(&self) -> Result<usize, AgentLoopHostError> {
+        Ok(lock(&self.inner)?
+            .by_gate
+            .values()
+            .map(|states| states.len())
+            .sum())
+    }
+
+    pub fn is_empty(&self) -> Result<bool, AgentLoopHostError> {
+        Ok(lock(&self.inner)?.total_states == 0)
+    }
+}
+
+#[async_trait]
+impl SubagentGateResolutionStore for BoundedSubagentGateResolutionStore {
+    async fn record_awaited_child(
+        &self,
+        record: AwaitedChildSetRecord,
+    ) -> Result<(), AgentLoopHostError> {
+        let mut inner = lock(&self.inner)?;
+        let gate_ref = record.gate_ref.clone();
+        if inner.by_gate.get(&gate_ref).is_some_and(|states| {
+            states
+                .iter()
+                .any(|state| state.record.child_run_id == record.child_run_id)
+        }) {
+            return Ok(());
+        }
+        if inner.total_states >= MAX_GATE_RECORDS {
+            return Err(AgentLoopHostError::new(
+                AgentLoopHostErrorKind::BudgetExceeded,
+                "subagent awaited-child gate store is at capacity",
+            ));
+        }
+        inner
+            .gates_by_child
+            .entry(record.child_run_id)
+            .or_default()
+            .push(gate_ref.clone());
+        inner
+            .by_gate
+            .entry(gate_ref.clone())
+            .or_default()
+            .push(AwaitedChildState {
+                record,
+                terminal_status: None,
+                terminal_event: None,
+                terminal_result_written: false,
+                terminal_byte_len: 0,
+                descendant_reservation_release_claimed: false,
+                descendant_reservation_released: false,
+                delivery_claimed: false,
+                delivered_to_parent: false,
+            });
+        inner.total_states += 1;
+        Ok(())
+    }
+
+    async fn delete_awaited_child(&self, gate_ref: &GateRef) -> Result<(), AgentLoopHostError> {
+        let mut inner = lock(&self.inner)?;
+        if let Some(old) = inner.by_gate.remove(gate_ref) {
+            inner.total_states = inner.total_states.saturating_sub(old.len());
+            for state in old {
+                prune_child_index(
+                    &mut inner.gates_by_child,
+                    state.record.child_run_id,
+                    gate_ref,
+                );
+                prune_deliverable_child_index(
+                    &mut inner.deliverable_by_child,
+                    state.record.child_run_id,
+                    gate_ref,
+                );
+            }
+        }
+        Ok(())
+    }
+}
+
+fn prune_child_index(
+    gates_by_child: &mut HashMap<TurnRunId, Vec<GateRef>>,
+    child_run_id: TurnRunId,
+    gate_ref: &GateRef,
+) {
+    if let Some(gates) = gates_by_child.get_mut(&child_run_id) {
+        gates.retain(|gate| gate != gate_ref);
+        if gates.is_empty() {
+            gates_by_child.remove(&child_run_id);
+        }
+    }
+}
+
+fn prune_deliverable_child_index(
+    gates_by_child: &mut HashMap<TurnRunId, VecDeque<GateRef>>,
+    child_run_id: TurnRunId,
+    gate_ref: &GateRef,
+) {
+    if let Some(gates) = gates_by_child.get_mut(&child_run_id) {
+        gates.retain(|gate| gate != gate_ref);
+        if gates.is_empty() {
+            gates_by_child.remove(&child_run_id);
+        }
+    }
+}
+
+fn is_subagent_terminal_status(status: TurnStatus) -> bool {
+    status.is_terminal()
+}
+
+// Infallible parking_lot lock helper retained for call-site compatibility
+// (every public method threads a `?` through this) and to make a future
+// switch back to a fallible store easy. `parking_lot::Mutex` cannot poison,
+// so this never returns `Err`.
+fn lock<T>(mutex: &Mutex<T>) -> Result<parking_lot::MutexGuard<'_, T>, AgentLoopHostError> {
+    Ok(mutex.lock())
+}
+
+enum DeliverableClaim {
+    Claimed(Box<AwaitedChildState>),
+    PendingSibling,
+    Empty,
+}
+
+fn claim_deliverable_state_for_child(
+    inner: &mut GateResolutionInner,
+    child_run_id: TurnRunId,
+) -> DeliverableClaim {
+    while let Some(gate_ref) = inner
+        .deliverable_by_child
+        .get_mut(&child_run_id)
+        .and_then(VecDeque::pop_front)
+    {
+        let claim_result = inner
+            .by_gate
+            .get_mut(&gate_ref)
+            .and_then(|states| try_claim_one_state(states));
+        if let Some((claimed, more_unclaimed)) = claim_result {
+            if more_unclaimed {
+                inner
+                    .deliverable_by_child
+                    .entry(child_run_id)
+                    .or_default()
+                    .push_front(gate_ref);
+            }
+            return DeliverableClaim::Claimed(Box::new(claimed));
+        }
+        // Gate exists but not every sibling under it is terminal yet.
+        // Re-queue the gate so a future `record_child_terminal` for this
+        // child doesn't see an empty queue; otherwise recovery or event
+        // replay can orphan the gate from this child's view.
+        if inner
+            .by_gate
+            .get(&gate_ref)
+            .is_some_and(|states| !states.iter().all(|s| s.terminal_status.is_some()))
+        {
+            inner
+                .deliverable_by_child
+                .entry(child_run_id)
+                .or_default()
+                .push_front(gate_ref);
+            return DeliverableClaim::PendingSibling;
+        }
+    }
+    inner.deliverable_by_child.remove(&child_run_id);
+    DeliverableClaim::Empty
+}
+
+/// Tries to claim one undelivered terminal state from the given gate's state
+/// vector. Returns `Some((state, more_unclaimed))` if a state was claimed,
+/// where `more_unclaimed` indicates whether further unclaimed terminal states
+/// remain in the same gate vector (used by callers to decide whether to
+/// requeue the gate for another drain pass).
+fn try_claim_one_state(states: &mut [AwaitedChildState]) -> Option<(AwaitedChildState, bool)> {
+    if !states.iter().all(|state| state.terminal_status.is_some()) {
+        return None;
+    }
+    let state = states
+        .iter_mut()
+        .find(|state| !state.delivery_claimed && !state.delivered_to_parent)?;
+    state.delivery_claimed = true;
+    let claimed = state.clone();
+    let more_unclaimed = states
+        .iter()
+        .any(|s| !s.delivery_claimed && !s.delivered_to_parent);
+    Some((claimed, more_unclaimed))
+}
+
+#[cfg(test)]
+mod tests {
+    use ironclaw_host_api::{AgentId, CapabilityId, TenantId, ThreadId};
+    use ironclaw_loop_support::SpawnSubagentMode;
+    use ironclaw_turns::{LoopResultRef, ReplyTargetBindingRef, SourceBindingRef, TurnScope};
+
+    use super::*;
+
+    fn record(gate_ref: &str, child_run_id: TurnRunId) -> AwaitedChildSetRecord {
+        let tenant = TenantId::new("tenant").unwrap();
+        let agent = AgentId::new("agent").unwrap();
+        let parent_scope = TurnScope::new(
+            tenant.clone(),
+            Some(agent.clone()),
+            None,
+            ThreadId::new("parent-thread").unwrap(),
+        );
+        let child_scope = TurnScope::new(
+            tenant,
+            Some(agent),
+            None,
+            ThreadId::new("child-thread").unwrap(),
+        );
+        let parent_run_id = TurnRunId::new();
+        let mut parent_run_context =
+            ironclaw_agent_loop::test_support::test_run_context("subagent-gate");
+        parent_run_context.scope = parent_scope;
+        parent_run_context.thread_id = ThreadId::new("parent-thread").unwrap();
+        parent_run_context.run_id = parent_run_id;
+        AwaitedChildSetRecord {
+            gate_ref: GateRef::new(gate_ref).unwrap(),
+            parent_run_context,
+            tree_root_run_id: TurnRunId::new(),
+            child_scope,
+            child_run_id,
+            child_thread_id: ThreadId::new("child-thread").unwrap(),
+            source_binding_ref: SourceBindingRef::new("subagent-source:test").unwrap(),
+            reply_target_binding_ref: ReplyTargetBindingRef::new("subagent-reply:test").unwrap(),
+            subagent_kind: SubagentKindId::new("general").unwrap(),
+            spawn_capability_id: CapabilityId::new(
+                ironclaw_loop_support::DEFAULT_SPAWN_SUBAGENT_CAPABILITY_ID,
+            )
+            .unwrap(),
+            result_ref: LoopResultRef::new("result:subagent.test").unwrap(),
+            mode: SpawnSubagentMode::Blocking,
+        }
+    }
+
+    #[tokio::test]
+    async fn records_terminal_child_once_until_marked_delivered() {
+        let store = BoundedSubagentGateResolutionStore::new();
+        let child_run_id = TurnRunId::new();
+        let gate = GateRef::new("gate:subagent-test").unwrap();
+        store
+            .record_awaited_child(record(gate.as_str(), child_run_id))
+            .await
+            .unwrap();
+
+        store
+            .record_child_terminal(child_run_id, terminal_event(TurnStatus::Completed))
+            .unwrap();
+        let ready = store
+            .claim_next_terminal_state_for_child(child_run_id)
+            .unwrap();
+        assert!(ready.is_some());
+        store.mark_delivered(&gate).unwrap();
+        store
+            .record_child_terminal(child_run_id, terminal_event(TurnStatus::Completed))
+            .unwrap();
+        let ready = store
+            .claim_next_terminal_state_for_child(child_run_id)
+            .unwrap();
+        assert!(ready.is_none());
+    }
+
+    #[tokio::test]
+    async fn record_child_terminal_rejects_non_terminal_statuses() {
+        let store = BoundedSubagentGateResolutionStore::new();
+        let child_run_id = TurnRunId::new();
+        let gate = GateRef::new("gate:subagent-test").unwrap();
+        store
+            .record_awaited_child(record(gate.as_str(), child_run_id))
+            .await
+            .unwrap();
+
+        let error = store
+            .record_child_terminal(child_run_id, terminal_event(TurnStatus::Running))
+            .unwrap_err();
+
+        assert_eq!(error.kind, AgentLoopHostErrorKind::Invalid);
+        assert!(error.safe_summary.contains("must be terminal"));
+    }
+
+    #[tokio::test]
+    async fn record_awaited_child_dedupes_same_gate_and_child() {
+        let store = BoundedSubagentGateResolutionStore::new();
+        let child_run_id = TurnRunId::new();
+        let gate = "gate:subagent-dedup";
+        store
+            .record_awaited_child(record(gate, child_run_id))
+            .await
+            .unwrap();
+        store
+            .record_awaited_child(record(gate, child_run_id))
+            .await
+            .unwrap();
+
+        assert_eq!(store.len().unwrap(), 1);
+        store
+            .record_child_terminal(child_run_id, terminal_event(TurnStatus::Completed))
+            .unwrap();
+        let claimed = store
+            .claim_all_terminal_states_for_child(child_run_id)
+            .unwrap();
+        assert_eq!(claimed.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn terminal_result_written_is_state_scoped_under_shared_gate() {
+        let store = BoundedSubagentGateResolutionStore::new();
+        let child_a = TurnRunId::new();
+        let child_b = TurnRunId::new();
+        let gate = GateRef::new("gate:subagent-batch-result-written").unwrap();
+        store
+            .record_awaited_child(record(gate.as_str(), child_a))
+            .await
+            .unwrap();
+        store
+            .record_awaited_child(record(gate.as_str(), child_b))
+            .await
+            .unwrap();
+
+        store.mark_terminal_result_written(&gate, child_a).unwrap();
+
+        let inner = store.inner.lock();
+        let states = inner.by_gate.get(&gate).expect("gate states");
+        let state_a = states
+            .iter()
+            .find(|state| state.record.child_run_id == child_a)
+            .expect("child A state");
+        let state_b = states
+            .iter()
+            .find(|state| state.record.child_run_id == child_b)
+            .expect("child B state");
+        assert!(state_a.terminal_result_written);
+        assert!(!state_b.terminal_result_written);
+    }
+
+    #[tokio::test]
+    async fn record_terminal_byte_len_stores_value_on_matching_child() {
+        let store = BoundedSubagentGateResolutionStore::new();
+        let child_run_id = TurnRunId::new();
+        let gate = GateRef::new("gate:subagent-byte-len-happy").unwrap();
+        store
+            .record_awaited_child(record(gate.as_str(), child_run_id))
+            .await
+            .unwrap();
+
+        store
+            .record_terminal_byte_len(&gate, child_run_id, 65_000)
+            .unwrap();
+
+        let inner = store.inner.lock();
+        let states = inner.by_gate.get(&gate).expect("gate states");
+        let state = states
+            .iter()
+            .find(|s| s.record.child_run_id == child_run_id)
+            .expect("child state");
+        assert_eq!(state.terminal_byte_len, 65_000);
+    }
+
+    #[tokio::test]
+    async fn record_terminal_byte_len_no_op_on_unknown_gate() {
+        let store = BoundedSubagentGateResolutionStore::new();
+        let child_run_id = TurnRunId::new();
+        let bogus_gate = GateRef::new("gate:subagent-byte-len-unknown").unwrap();
+
+        // No record_awaited_child call — gate does not exist in the store.
+        let result = store.record_terminal_byte_len(&bogus_gate, child_run_id, 42);
+
+        assert!(result.is_ok(), "unknown gate must be a silent no-op");
+    }
+
+    #[tokio::test]
+    async fn mark_child_delivered_does_not_mark_shared_gate_siblings() {
+        let store = BoundedSubagentGateResolutionStore::new();
+        let child_a = TurnRunId::new();
+        let child_b = TurnRunId::new();
+        let gate = GateRef::new("gate:subagent-batch-child-delivered").unwrap();
+        store
+            .record_awaited_child(record(gate.as_str(), child_a))
+            .await
+            .unwrap();
+        store
+            .record_awaited_child(record(gate.as_str(), child_b))
+            .await
+            .unwrap();
+
+        assert!(!store.mark_child_delivered(&gate, child_a).unwrap());
+        {
+            let inner = store.inner.lock();
+            let states = inner.by_gate.get(&gate).expect("gate states");
+            let state_a = states
+                .iter()
+                .find(|state| state.record.child_run_id == child_a)
+                .expect("child A state");
+            let state_b = states
+                .iter()
+                .find(|state| state.record.child_run_id == child_b)
+                .expect("child B state");
+            assert!(state_a.delivered_to_parent);
+            assert!(!state_b.delivered_to_parent);
+        }
+        assert!(store.mark_child_delivered(&gate, child_b).unwrap());
+    }
+
+    #[tokio::test]
+    async fn undo_mark_child_delivered_requeues_child_without_removing_state() {
+        let store = BoundedSubagentGateResolutionStore::new();
+        let child_a = TurnRunId::new();
+        let child_b = TurnRunId::new();
+        let gate = GateRef::new("gate:subagent-undo-delivered").unwrap();
+        store
+            .record_awaited_child(record(gate.as_str(), child_a))
+            .await
+            .unwrap();
+        store
+            .record_awaited_child(record(gate.as_str(), child_b))
+            .await
+            .unwrap();
+        store
+            .record_child_terminal(child_a, terminal_event(TurnStatus::Completed))
+            .unwrap();
+        store
+            .record_child_terminal(child_b, terminal_event(TurnStatus::Completed))
+            .unwrap();
+        let claimed = store
+            .claim_next_terminal_state_for_child(child_a)
+            .unwrap()
+            .expect("child A claimed");
+        assert_eq!(claimed.record.child_run_id, child_a);
+        assert!(!store.mark_child_delivered(&gate, child_a).unwrap());
+
+        store.undo_mark_child_delivered(&gate, child_a).unwrap();
+
+        assert_eq!(store.len().unwrap(), 2);
+        let child_a_state = store
+            .state_for_child(child_a)
+            .unwrap()
+            .expect("child A remains");
+        assert!(!child_a_state.delivered_to_parent);
+        assert!(!child_a_state.delivery_claimed);
+        let retried = store
+            .claim_next_terminal_state_for_child(child_a)
+            .unwrap()
+            .expect("child A is retryable");
+        assert_eq!(retried.record.child_run_id, child_a);
+    }
+
+    #[tokio::test]
+    async fn mark_child_delivered_returns_false_for_partial_gate_and_true_when_all_delivered() {
+        let store = BoundedSubagentGateResolutionStore::new();
+        let child_a = TurnRunId::new();
+        let child_b = TurnRunId::new();
+        let gate = GateRef::new("gate:subagent-batch-child-delivered-bool").unwrap();
+        store
+            .record_awaited_child(record(gate.as_str(), child_a))
+            .await
+            .unwrap();
+        store
+            .record_awaited_child(record(gate.as_str(), child_b))
+            .await
+            .unwrap();
+
+        assert!(
+            !store.mark_child_delivered(&gate, child_a).unwrap(),
+            "first child delivery should leave the shared gate incomplete"
+        );
+        assert!(
+            store.mark_child_delivered(&gate, child_b).unwrap(),
+            "second child delivery should complete the shared gate"
+        );
+    }
+
+    #[tokio::test]
+    async fn terminal_child_claims_one_state_at_a_time() {
+        let store = BoundedSubagentGateResolutionStore::new();
+        let child_run_id = TurnRunId::new();
+        store
+            .record_awaited_child(record("gate:subagent-first", child_run_id))
+            .await
+            .unwrap();
+        store
+            .record_awaited_child(record("gate:subagent-second", child_run_id))
+            .await
+            .unwrap();
+        store
+            .record_child_terminal(child_run_id, terminal_event(TurnStatus::Completed))
+            .unwrap();
+
+        let first = store
+            .claim_next_terminal_state_for_child(child_run_id)
+            .unwrap()
+            .expect("first gate should be claimed");
+        let second = store
+            .claim_next_terminal_state_for_child(child_run_id)
+            .unwrap()
+            .expect("second gate should be claimed independently");
+        let third = store
+            .claim_next_terminal_state_for_child(child_run_id)
+            .unwrap();
+
+        assert_ne!(first.record.gate_ref, second.record.gate_ref);
+        assert!(third.is_none());
+    }
+
+    #[tokio::test]
+    async fn undelivered_terminal_states_returns_only_terminal_undelivered_states() {
+        let store = BoundedSubagentGateResolutionStore::new();
+        assert!(store.undelivered_terminal_states().unwrap().is_empty());
+        let first_child = TurnRunId::new();
+        let second_child = TurnRunId::new();
+        let delivered_gate = GateRef::new("gate:subagent:delivered").unwrap();
+        store
+            .record_awaited_child(record("gate:subagent:pending", first_child))
+            .await
+            .unwrap();
+        store
+            .record_awaited_child(record(delivered_gate.as_str(), second_child))
+            .await
+            .unwrap();
+
+        assert!(store.undelivered_terminal_states().unwrap().is_empty());
+        store
+            .record_child_terminal(first_child, terminal_event(TurnStatus::Completed))
+            .unwrap();
+        store
+            .record_child_terminal(second_child, terminal_event(TurnStatus::Failed))
+            .unwrap();
+        store.mark_delivered(&delivered_gate).unwrap();
+
+        let states = store.undelivered_terminal_states().unwrap();
+        assert_eq!(states.len(), 1);
+        assert_eq!(states[0].record.child_run_id, first_child);
+    }
+
+    #[tokio::test]
+    async fn terminal_claim_release_allows_retry() {
+        let store = BoundedSubagentGateResolutionStore::new();
+        let child_run_id = TurnRunId::new();
+        let gate = GateRef::new("gate:subagent-test").unwrap();
+        store
+            .record_awaited_child(record(gate.as_str(), child_run_id))
+            .await
+            .unwrap();
+        store
+            .record_child_terminal(child_run_id, terminal_event(TurnStatus::Completed))
+            .unwrap();
+
+        let first = store
+            .claim_next_terminal_state_for_child(child_run_id)
+            .unwrap();
+        store.release_terminal_claim(&gate).unwrap();
+        let retried = store
+            .claim_next_terminal_state_for_child(child_run_id)
+            .unwrap();
+
+        assert!(first.is_some());
+        assert!(retried.is_some());
+    }
+
+    #[tokio::test]
+    async fn terminal_claim_release_resets_only_undelivered_states_for_shared_gate() {
+        let store = BoundedSubagentGateResolutionStore::new();
+        let delivered_child = TurnRunId::new();
+        let retry_child = TurnRunId::new();
+        let gate = GateRef::new("gate:subagent-batch-test").unwrap();
+        store
+            .record_awaited_child(record(gate.as_str(), delivered_child))
+            .await
+            .unwrap();
+        store
+            .record_awaited_child(record(gate.as_str(), retry_child))
+            .await
+            .unwrap();
+        store
+            .record_child_terminal(delivered_child, terminal_event(TurnStatus::Completed))
+            .unwrap();
+        store
+            .record_child_terminal(retry_child, terminal_event(TurnStatus::Completed))
+            .unwrap();
+
+        assert!(
+            store
+                .claim_next_terminal_state_for_child(delivered_child)
+                .unwrap()
+                .is_some()
+        );
+        assert!(
+            store
+                .claim_next_terminal_state_for_child(retry_child)
+                .unwrap()
+                .is_some()
+        );
+        {
+            let mut inner = store.inner.lock();
+            let states = inner.by_gate.get_mut(&gate).expect("gate states");
+            let delivered = states
+                .iter_mut()
+                .find(|state| state.record.child_run_id == delivered_child)
+                .expect("delivered child state");
+            delivered.delivered_to_parent = true;
+        }
+
+        store.release_terminal_claim(&gate).unwrap();
+
+        let retried = store
+            .claim_next_terminal_state_for_child(retry_child)
+            .unwrap()
+            .expect("undelivered state should be claimable after release");
+        assert_eq!(retried.record.child_run_id, retry_child);
+        assert!(
+            store
+                .claim_next_terminal_state_for_child(delivered_child)
+                .unwrap()
+                .is_none(),
+            "delivered state should not become claimable again"
+        );
+    }
+
+    #[tokio::test]
+    async fn marks_descendant_release_once() {
+        let store = BoundedSubagentGateResolutionStore::new();
+        let child_run_id = TurnRunId::new();
+        let gate = GateRef::new("gate:subagent-test").unwrap();
+        store
+            .record_awaited_child(record(gate.as_str(), child_run_id))
+            .await
+            .unwrap();
+
+        assert!(store.claim_descendant_reservation_release(&gate).unwrap());
+        assert!(!store.claim_descendant_reservation_release(&gate).unwrap());
+        store.mark_descendant_reservation_released(&gate).unwrap();
+        assert!(!store.claim_descendant_reservation_release(&gate).unwrap());
+    }
+
+    #[tokio::test]
+    async fn descendant_release_claim_can_be_retried_before_marked_released() {
+        let store = BoundedSubagentGateResolutionStore::new();
+        let child_run_id = TurnRunId::new();
+        let gate = GateRef::new("gate:subagent-test").unwrap();
+        store
+            .record_awaited_child(record(gate.as_str(), child_run_id))
+            .await
+            .unwrap();
+
+        assert!(store.claim_descendant_reservation_release(&gate).unwrap());
+        store.release_descendant_reservation_claim(&gate).unwrap();
+        assert!(store.claim_descendant_reservation_release(&gate).unwrap());
+    }
+
+    #[tokio::test]
+    async fn delete_removes_child_index() {
+        let store = BoundedSubagentGateResolutionStore::new();
+        let child_run_id = TurnRunId::new();
+        let gate = GateRef::new("gate:subagent-test").unwrap();
+        store
+            .record_awaited_child(record(gate.as_str(), child_run_id))
+            .await
+            .unwrap();
+        store.delete_awaited_child(&gate).await.unwrap();
+
+        assert!(
+            store
+                .record_child_terminal(child_run_id, terminal_event(TurnStatus::Completed))
+                .is_ok()
+        );
+        assert!(
+            store
+                .claim_next_terminal_state_for_child(child_run_id)
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[tokio::test]
+    async fn capacity_fails_closed_without_evicting_live_gates() {
+        let store = BoundedSubagentGateResolutionStore::new();
+        for index in 0..MAX_GATE_RECORDS {
+            store
+                .record_awaited_child(record(&format!("gate:subagent-{index}"), TurnRunId::new()))
+                .await
+                .unwrap();
+        }
+
+        let error = store
+            .record_awaited_child(record("gate:subagent-overflow", TurnRunId::new()))
+            .await
+            .unwrap_err();
+
+        assert_eq!(error.kind, AgentLoopHostErrorKind::BudgetExceeded);
+        assert_eq!(store.len().unwrap(), MAX_GATE_RECORDS);
+        assert!(
+            store
+                .state_for_gate(&GateRef::new("gate:subagent-0").unwrap())
+                .unwrap()
+                .is_some()
+        );
+    }
+
+    fn terminal_event(status: TurnStatus) -> AwaitedChildTerminalEvent {
+        AwaitedChildTerminalEvent {
+            status,
+            kind: TurnEventKind::Completed,
+            cursor: EventCursor(1),
+            sanitized_reason: None,
+            owner_user_id: Some(ironclaw_host_api::UserId::new("owner").unwrap()),
+        }
+    }
+
+    #[tokio::test]
+    async fn claim_returns_none_when_sibling_on_shared_gate_is_still_pending() {
+        let store = BoundedSubagentGateResolutionStore::new();
+        let child_a = TurnRunId::new();
+        let child_b = TurnRunId::new();
+        let gate = "gate:subagent-batch-pending";
+        store
+            .record_awaited_child(record(gate, child_a))
+            .await
+            .unwrap();
+        store
+            .record_awaited_child(record(gate, child_b))
+            .await
+            .unwrap();
+
+        store
+            .record_child_terminal(child_a, terminal_event(TurnStatus::Completed))
+            .unwrap();
+
+        let claim_a = store.claim_next_terminal_state_for_child(child_a).unwrap();
+        assert!(
+            claim_a.is_none(),
+            "shared batch gate must not yield while sibling pending"
+        );
+    }
+
+    #[tokio::test]
+    async fn undelivered_terminal_states_excludes_partially_complete_shared_gates() {
+        let store = BoundedSubagentGateResolutionStore::new();
+        let child_a = TurnRunId::new();
+        let child_b = TurnRunId::new();
+        let gate = "gate:subagent-batch-partial";
+        store
+            .record_awaited_child(record(gate, child_a))
+            .await
+            .unwrap();
+        store
+            .record_awaited_child(record(gate, child_b))
+            .await
+            .unwrap();
+        store
+            .record_child_terminal(child_a, terminal_event(TurnStatus::Completed))
+            .unwrap();
+
+        let undelivered = store.undelivered_terminal_states().unwrap();
+        assert!(
+            undelivered.is_empty(),
+            "partial shared gate must not surface as undelivered"
+        );
+
+        store
+            .record_child_terminal(child_b, terminal_event(TurnStatus::Completed))
+            .unwrap();
+        let undelivered = store.undelivered_terminal_states().unwrap();
+        assert_eq!(undelivered.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn state_for_gate_returns_first_registered_state_for_shared_gate() {
+        let store = BoundedSubagentGateResolutionStore::new();
+        let child_a = TurnRunId::new();
+        let child_b = TurnRunId::new();
+        let gate = "gate:subagent-batch-order";
+        store
+            .record_awaited_child(record(gate, child_a))
+            .await
+            .unwrap();
+        store
+            .record_awaited_child(record(gate, child_b))
+            .await
+            .unwrap();
+
+        let state = store
+            .state_for_gate(&GateRef::new(gate).unwrap())
+            .unwrap()
+            .expect("gate present");
+        assert_eq!(state.record.child_run_id, child_a);
+    }
+
+    #[tokio::test]
+    async fn descendant_reservation_release_claims_one_state_per_call() {
+        let store = BoundedSubagentGateResolutionStore::new();
+        let child_a = TurnRunId::new();
+        let child_b = TurnRunId::new();
+        let gate = GateRef::new("gate:subagent-batch-descendant").unwrap();
+        store
+            .record_awaited_child(record(gate.as_str(), child_a))
+            .await
+            .unwrap();
+        store
+            .record_awaited_child(record(gate.as_str(), child_b))
+            .await
+            .unwrap();
+
+        assert!(store.claim_descendant_reservation_release(&gate).unwrap());
+        store.mark_descendant_reservation_released(&gate).unwrap();
+        assert!(
+            store.claim_descendant_reservation_release(&gate).unwrap(),
+            "second sibling must still be claimable"
+        );
+        store.mark_descendant_reservation_released(&gate).unwrap();
+        assert!(
+            !store.claim_descendant_reservation_release(&gate).unwrap(),
+            "no further claims once both siblings released"
+        );
+    }
+
+    #[tokio::test]
+    async fn descendant_reservation_mark_releases_all_claimed_states() {
+        let store = BoundedSubagentGateResolutionStore::new();
+        let child_a = TurnRunId::new();
+        let child_b = TurnRunId::new();
+        let gate = GateRef::new("gate:subagent-batch-descendant-mark").unwrap();
+        store
+            .record_awaited_child(record(gate.as_str(), child_a))
+            .await
+            .unwrap();
+        store
+            .record_awaited_child(record(gate.as_str(), child_b))
+            .await
+            .unwrap();
+
+        assert!(store.claim_descendant_reservation_release(&gate).unwrap());
+        assert!(store.claim_descendant_reservation_release(&gate).unwrap());
+        store.mark_descendant_reservation_released(&gate).unwrap();
+
+        assert!(
+            !store.claim_descendant_reservation_release(&gate).unwrap(),
+            "mark must apply to every already claimed sibling state"
+        );
+    }
+
+    #[tokio::test]
+    async fn descendant_reservation_release_claim_retries_all_claimed_states() {
+        let store = BoundedSubagentGateResolutionStore::new();
+        let child_a = TurnRunId::new();
+        let child_b = TurnRunId::new();
+        let gate = GateRef::new("gate:subagent-batch-descendant-retry").unwrap();
+        store
+            .record_awaited_child(record(gate.as_str(), child_a))
+            .await
+            .unwrap();
+        store
+            .record_awaited_child(record(gate.as_str(), child_b))
+            .await
+            .unwrap();
+
+        assert!(store.claim_descendant_reservation_release(&gate).unwrap());
+        assert!(store.claim_descendant_reservation_release(&gate).unwrap());
+        store.release_descendant_reservation_claim(&gate).unwrap();
+
+        assert!(store.claim_descendant_reservation_release(&gate).unwrap());
+        assert!(store.claim_descendant_reservation_release(&gate).unwrap());
+    }
+
+    #[tokio::test]
+    async fn release_terminal_claim_requeues_all_claimed_states_under_shared_gate() {
+        let store = BoundedSubagentGateResolutionStore::new();
+        let child_a = TurnRunId::new();
+        let child_b = TurnRunId::new();
+        let gate = GateRef::new("gate:subagent-batch-requeue").unwrap();
+        store
+            .record_awaited_child(record(gate.as_str(), child_a))
+            .await
+            .unwrap();
+        store
+            .record_awaited_child(record(gate.as_str(), child_b))
+            .await
+            .unwrap();
+        store
+            .record_child_terminal(child_a, terminal_event(TurnStatus::Completed))
+            .unwrap();
+        store
+            .record_child_terminal(child_b, terminal_event(TurnStatus::Completed))
+            .unwrap();
+
+        let claimed = store.claim_all_terminal_states_for_child(child_b).unwrap();
+        assert_eq!(claimed.len(), 2);
+
+        // Simulate handle_claimed_terminal_states failure: release every
+        // claimed state. Calling release_terminal_claim multiple times for
+        // the same shared gate must be idempotent — it resets every claimed
+        // state once and re-enqueues the gate for a subsequent attempt.
+        for state in &claimed {
+            store
+                .release_terminal_claim(&state.record.gate_ref)
+                .unwrap();
+        }
+        let reclaimed = store.claim_all_terminal_states_for_child(child_b).unwrap();
+        assert_eq!(
+            reclaimed.len(),
+            2,
+            "all states must be reclaimable after release"
+        );
+    }
+
+    #[tokio::test]
+    async fn claim_all_terminal_states_drains_shared_gate_in_single_call() {
+        let store = BoundedSubagentGateResolutionStore::new();
+        let child_a = TurnRunId::new();
+        let child_b = TurnRunId::new();
+        let child_c = TurnRunId::new();
+        let gate = "gate:subagent-batch-drain";
+        store
+            .record_awaited_child(record(gate, child_a))
+            .await
+            .unwrap();
+        store
+            .record_awaited_child(record(gate, child_b))
+            .await
+            .unwrap();
+        store
+            .record_awaited_child(record(gate, child_c))
+            .await
+            .unwrap();
+        store
+            .record_child_terminal(child_a, terminal_event(TurnStatus::Completed))
+            .unwrap();
+        store
+            .record_child_terminal(child_b, terminal_event(TurnStatus::Completed))
+            .unwrap();
+        store
+            .record_child_terminal(child_c, terminal_event(TurnStatus::Completed))
+            .unwrap();
+
+        let claimed = store.claim_all_terminal_states_for_child(child_c).unwrap();
+        assert_eq!(
+            claimed.len(),
+            3,
+            "single drain call must yield every state under shared batch gate"
+        );
+    }
+
+    #[tokio::test]
+    async fn claim_requeues_gate_when_sibling_pending() {
+        let store = BoundedSubagentGateResolutionStore::new();
+        let child_a = TurnRunId::new();
+        let child_b = TurnRunId::new();
+        let gate = "gate:subagent-batch-requeue-on-pending";
+        store
+            .record_awaited_child(record(gate, child_a))
+            .await
+            .unwrap();
+        store
+            .record_awaited_child(record(gate, child_b))
+            .await
+            .unwrap();
+        store
+            .record_child_terminal(child_a, terminal_event(TurnStatus::Completed))
+            .unwrap();
+
+        // child A's claim sees B still pending; must return None AND requeue
+        // the gate so a future sibling-driven recorder still finds it.
+        let first = store.claim_next_terminal_state_for_child(child_a).unwrap();
+        assert!(first.is_none());
+
+        // Sanity check: gate ref still queued for child A.
+        {
+            let inner = store.inner.lock();
+            assert!(
+                inner
+                    .deliverable_by_child
+                    .get(&child_a)
+                    .map(|q| q.iter().any(|g| g.as_str() == gate))
+                    .unwrap_or(false),
+                "gate must be requeued for child A when sibling is pending"
+            );
+        }
+
+        // Once B terminates, both states drain via either child's claim.
+        store
+            .record_child_terminal(child_b, terminal_event(TurnStatus::Completed))
+            .unwrap();
+        let drained = store.claim_all_terminal_states_for_child(child_b).unwrap();
+        assert_eq!(drained.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn record_child_terminal_is_idempotent_on_replay() {
+        let store = BoundedSubagentGateResolutionStore::new();
+        let child = TurnRunId::new();
+        store
+            .record_awaited_child(record("gate:subagent-idempotent", child))
+            .await
+            .unwrap();
+
+        let first_event = AwaitedChildTerminalEvent {
+            status: TurnStatus::Completed,
+            kind: TurnEventKind::Completed,
+            cursor: EventCursor(1),
+            sanitized_reason: Some("first".to_string()),
+            owner_user_id: Some(ironclaw_host_api::UserId::new("owner").unwrap()),
+        };
+        let replay_event = AwaitedChildTerminalEvent {
+            status: TurnStatus::Failed,
+            kind: TurnEventKind::Failed,
+            cursor: EventCursor(2),
+            sanitized_reason: Some("replay overwrites first".to_string()),
+            owner_user_id: Some(ironclaw_host_api::UserId::new("owner").unwrap()),
+        };
+        store
+            .record_child_terminal(child, first_event.clone())
+            .unwrap();
+        store
+            .record_child_terminal(child, replay_event.clone())
+            .unwrap();
+
+        let claimed = store
+            .claim_next_terminal_state_for_child(child)
+            .unwrap()
+            .expect("delivery available");
+        let recorded = claimed.terminal_event.expect("terminal event present");
+        assert_eq!(
+            recorded.sanitized_reason.as_deref(),
+            Some("first"),
+            "first terminal is authoritative; replay must not overwrite"
+        );
+        assert_eq!(recorded.cursor, EventCursor(1));
+    }
+
+    #[tokio::test]
+    async fn record_awaited_child_capacity_counts_total_states_not_keys() {
+        let store = BoundedSubagentGateResolutionStore::new();
+        let shared_gate = "gate:subagent-batch-capacity";
+        // Filling the bound through a single shared gate must hit the cap.
+        for _ in 0..MAX_GATE_RECORDS {
+            store
+                .record_awaited_child(record(shared_gate, TurnRunId::new()))
+                .await
+                .unwrap();
+        }
+        let error = store
+            .record_awaited_child(record(shared_gate, TurnRunId::new()))
+            .await
+            .unwrap_err();
+        assert_eq!(error.kind, AgentLoopHostErrorKind::BudgetExceeded);
+    }
+
+    #[tokio::test]
+    async fn record_awaited_child_allows_duplicate_replay_at_capacity() {
+        let store = BoundedSubagentGateResolutionStore::new();
+        let gate = "gate:subagent-duplicate-at-capacity";
+        let child = TurnRunId::new();
+
+        store
+            .record_awaited_child(record(gate, child))
+            .await
+            .unwrap();
+        for index in 1..MAX_GATE_RECORDS {
+            store
+                .record_awaited_child(record(
+                    &format!("gate:subagent-fill-{index}"),
+                    TurnRunId::new(),
+                ))
+                .await
+                .unwrap();
+        }
+
+        assert_eq!(store.len().unwrap(), MAX_GATE_RECORDS);
+        store
+            .record_awaited_child(record(gate, child))
+            .await
+            .unwrap();
+        assert_eq!(store.len().unwrap(), MAX_GATE_RECORDS);
+
+        let overflow = store
+            .record_awaited_child(record(
+                "gate:subagent-overflow-at-capacity",
+                TurnRunId::new(),
+            ))
+            .await;
+        assert!(matches!(
+            overflow,
+            Err(err) if err.kind == AgentLoopHostErrorKind::BudgetExceeded
+        ));
+    }
+
+    #[tokio::test]
+    async fn is_empty_tracks_total_state_count() {
+        let store = BoundedSubagentGateResolutionStore::new();
+        let gate = GateRef::new("gate:subagent-empty-total").unwrap();
+
+        assert!(store.is_empty().unwrap());
+        store
+            .record_awaited_child(record(gate.as_str(), TurnRunId::new()))
+            .await
+            .unwrap();
+        assert_eq!(store.len().unwrap(), 1);
+        assert!(!store.is_empty().unwrap());
+        store.delete_awaited_child(&gate).await.unwrap();
+        assert_eq!(store.len().unwrap(), 0);
+        assert!(store.is_empty().unwrap());
+    }
+}

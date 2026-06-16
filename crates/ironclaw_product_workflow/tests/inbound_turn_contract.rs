@@ -1,0 +1,1486 @@
+//! Contract tests for the InboundTurnService.
+
+use std::collections::{HashMap, VecDeque};
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
+
+use async_trait::async_trait;
+use chrono::Utc;
+use ironclaw_host_api::{AgentId, TenantId, ThreadId, UserId};
+use ironclaw_loop_support::{
+    CapabilityAllowSet, CapabilityResolveError, CapabilityResultWrite,
+    CapabilitySurfaceProfileResolver, EmptyLoopCapabilityPort, HostIdentityContextBuildError,
+    HostIdentityContextCandidate, HostIdentityContextSource, HostInputBatch, HostInputQueue,
+    HostInputQueueError, HostManagedModelError, HostManagedModelGateway, HostManagedModelRequest,
+    HostManagedModelResponse, JsonSpawnSubagentInputCodec, LoopCapabilityPortFactory,
+    LoopCapabilityResultWriter, ProductLiveCancellationProbe, RunCancellationFactory,
+    RunCancellationHandle,
+};
+use ironclaw_product_adapters::{
+    AdapterInstallationId, AuthRequirement, ExternalActorRef, ExternalConversationRef,
+    ExternalEventId, ParsedProductInbound, ProductAdapterId, ProductInboundEnvelope,
+    ProductInboundPayload, ProductTriggerReason, ProtocolAuthEvidence, TrustedInboundContext,
+    UserMessagePayload,
+};
+use ironclaw_product_workflow::{
+    DefaultInboundTurnService, FakeConversationBindingService, InboundTurnOutcome,
+    InboundTurnService, ProductWorkflowError,
+};
+use ironclaw_reborn::loop_exit_applier::ThreadCheckpointLoopExitEvidencePort;
+use ironclaw_reborn::model_routes::{
+    ModelRoute, ModelRoutePolicy, ModelSelectionMode, ModelSlot, StaticModelRouteResolver,
+};
+use ironclaw_reborn::planned_driver_factory::{
+    PLANNED_DEFAULT_PROFILE_ID, default_planned_run_profile_resolver,
+};
+use ironclaw_reborn::runtime::{
+    DefaultPlannedRuntimeConfig, DefaultPlannedRuntimeParts, RuntimeTurnStateStore,
+    build_product_live_planned_runtime,
+};
+use ironclaw_reborn_composition::ProductLiveCapabilityIo;
+use ironclaw_threads::{
+    InMemorySessionThreadService, MessageStatus, SessionThreadService, ThreadHistoryRequest,
+    ThreadScope,
+};
+use ironclaw_turns::{
+    CancelRunRequest, CancelRunResponse, DefaultTurnCoordinator, EventCursor, GetRunStateRequest,
+    IdempotencyKey, InMemoryCheckpointStateStore, InMemoryLoopCheckpointStore,
+    InMemoryTurnStateStore, LoopResultRef, ResumeTurnRequest, ResumeTurnResponse, RunProfileId,
+    RunProfileVersion, SanitizedCancelReason, SubmitTurnRequest, SubmitTurnResponse, ThreadBusy,
+    TurnActor, TurnCoordinator, TurnError, TurnId, TurnOriginKind, TurnRunId, TurnRunState,
+    TurnRunWake, TurnScope, TurnStateStore, TurnStatus,
+    run_profile::{
+        AgentLoopHostError, InMemoryLoopHostMilestoneSink, InstructionSafetyContext,
+        LoopCancelReasonKind, LoopCapabilityPort, LoopInputAckToken, LoopInputCursorToken,
+        LoopRunContext, NoOpBudgetAccountant, NoOpPolicyGuard, PromptMode,
+    },
+};
+use tokio::time::{sleep, timeout};
+use tokio_util::sync::CancellationToken;
+
+fn sample_user_message_envelope(event_suffix: &str) -> ProductInboundEnvelope {
+    sample_user_message_envelope_with_install_and_text(event_suffix, "install_alpha", "hello world")
+}
+
+#[derive(Clone, Default)]
+struct CapturingTurnCoordinator {
+    last_submit: Arc<Mutex<Option<SubmitTurnRequest>>>,
+}
+
+#[async_trait]
+impl TurnCoordinator for CapturingTurnCoordinator {
+    async fn prepare_turn(&self, _scope: TurnScope) -> Result<TurnRunId, TurnError> {
+        Ok(TurnRunId::new())
+    }
+
+    async fn submit_turn(
+        &self,
+        request: SubmitTurnRequest,
+    ) -> Result<SubmitTurnResponse, TurnError> {
+        let response = SubmitTurnResponse::Accepted {
+            turn_id: TurnId::new(),
+            run_id: TurnRunId::new(),
+            status: TurnStatus::Queued,
+            resolved_run_profile_id: RunProfileId::default_profile(),
+            resolved_run_profile_version: RunProfileVersion::new(1),
+            event_cursor: EventCursor::default(),
+            accepted_message_ref: request.accepted_message_ref.clone(),
+            reply_target_binding_ref: request.reply_target_binding_ref.clone(),
+        };
+        *self
+            .last_submit
+            .lock()
+            .expect("capturing coordinator lock poisoned") = Some(request);
+        Ok(response)
+    }
+
+    async fn resume_turn(
+        &self,
+        _request: ResumeTurnRequest,
+    ) -> Result<ResumeTurnResponse, TurnError> {
+        panic!("resume_turn is not used by inbound turn contract tests")
+    }
+
+    async fn cancel_run(&self, _request: CancelRunRequest) -> Result<CancelRunResponse, TurnError> {
+        panic!("cancel_run is not used by inbound turn contract tests")
+    }
+
+    async fn get_run_state(&self, _request: GetRunStateRequest) -> Result<TurnRunState, TurnError> {
+        panic!("get_run_state is not used by inbound turn contract tests")
+    }
+}
+
+#[derive(Clone, Default)]
+struct ScriptedTurnCoordinator {
+    results: Arc<Mutex<VecDeque<Result<SubmitTurnResponse, TurnError>>>>,
+    submissions: Arc<Mutex<Vec<SubmitTurnRequest>>>,
+}
+
+impl ScriptedTurnCoordinator {
+    fn push_result(&self, result: Result<SubmitTurnResponse, TurnError>) {
+        self.results
+            .lock()
+            .expect("scripted coordinator lock poisoned")
+            .push_back(result);
+    }
+
+    fn submissions(&self) -> Vec<SubmitTurnRequest> {
+        self.submissions
+            .lock()
+            .expect("scripted coordinator submissions lock poisoned")
+            .clone()
+    }
+}
+
+#[async_trait]
+impl TurnCoordinator for ScriptedTurnCoordinator {
+    async fn prepare_turn(&self, _scope: TurnScope) -> Result<TurnRunId, TurnError> {
+        Ok(TurnRunId::new())
+    }
+
+    async fn submit_turn(
+        &self,
+        request: SubmitTurnRequest,
+    ) -> Result<SubmitTurnResponse, TurnError> {
+        self.submissions
+            .lock()
+            .expect("scripted coordinator submissions lock poisoned")
+            .push(request.clone());
+        self.results
+            .lock()
+            .expect("scripted coordinator lock poisoned")
+            .pop_front()
+            .unwrap_or_else(|| {
+                Ok(SubmitTurnResponse::Accepted {
+                    turn_id: TurnId::new(),
+                    run_id: TurnRunId::new(),
+                    status: TurnStatus::Queued,
+                    resolved_run_profile_id: RunProfileId::default_profile(),
+                    resolved_run_profile_version: RunProfileVersion::new(1),
+                    event_cursor: EventCursor::default(),
+                    accepted_message_ref: request.accepted_message_ref.clone(),
+                    reply_target_binding_ref: request.reply_target_binding_ref.clone(),
+                })
+            })
+    }
+
+    async fn resume_turn(
+        &self,
+        _request: ResumeTurnRequest,
+    ) -> Result<ResumeTurnResponse, TurnError> {
+        panic!("resume_turn is not used by inbound turn contract tests")
+    }
+
+    async fn cancel_run(&self, _request: CancelRunRequest) -> Result<CancelRunResponse, TurnError> {
+        panic!("cancel_run is not used by inbound turn contract tests")
+    }
+
+    async fn get_run_state(&self, _request: GetRunStateRequest) -> Result<TurnRunState, TurnError> {
+        panic!("get_run_state is not used by inbound turn contract tests")
+    }
+}
+
+struct ReplyModelGateway {
+    reply: String,
+    requests: Arc<Mutex<Vec<HostManagedModelRequest>>>,
+}
+
+#[async_trait]
+impl HostManagedModelGateway for ReplyModelGateway {
+    async fn stream_model(
+        &self,
+        request: HostManagedModelRequest,
+    ) -> Result<HostManagedModelResponse, HostManagedModelError> {
+        self.requests
+            .lock()
+            .expect("reply model gateway requests lock poisoned")
+            .push(request);
+        Ok(HostManagedModelResponse::assistant_reply(
+            self.reply.clone(),
+        ))
+    }
+}
+
+struct PausingReplyModelGateway {
+    reply: String,
+    requests: Arc<Mutex<Vec<HostManagedModelRequest>>>,
+    release: CancellationToken,
+}
+
+#[async_trait]
+impl HostManagedModelGateway for PausingReplyModelGateway {
+    async fn stream_model(
+        &self,
+        request: HostManagedModelRequest,
+    ) -> Result<HostManagedModelResponse, HostManagedModelError> {
+        self.requests
+            .lock()
+            .expect("pausing model gateway requests lock poisoned")
+            .push(request);
+        self.release.cancelled().await;
+        Ok(HostManagedModelResponse::assistant_reply(
+            self.reply.clone(),
+        ))
+    }
+}
+
+struct EmptyCapabilityFactory;
+
+#[async_trait]
+impl LoopCapabilityPortFactory for EmptyCapabilityFactory {
+    async fn create_capability_port(
+        &self,
+        _run_context: &LoopRunContext,
+    ) -> Result<Arc<dyn LoopCapabilityPort>, AgentLoopHostError> {
+        Ok(Arc::new(EmptyLoopCapabilityPort))
+    }
+}
+
+struct UnusedCapabilityResultWriter;
+
+#[async_trait]
+impl LoopCapabilityResultWriter for UnusedCapabilityResultWriter {
+    async fn write_capability_result(
+        &self,
+        _write: CapabilityResultWrite<'_>,
+    ) -> Result<(LoopResultRef, u64), AgentLoopHostError> {
+        Err(AgentLoopHostError::new(
+            ironclaw_turns::run_profile::AgentLoopHostErrorKind::InvalidInvocation,
+            "unused capability result writer",
+        ))
+    }
+}
+
+struct AllowAllCapabilitySurfaceResolver;
+
+#[async_trait]
+impl CapabilitySurfaceProfileResolver for AllowAllCapabilitySurfaceResolver {
+    async fn resolve(
+        &self,
+        _run_context: &LoopRunContext,
+    ) -> Result<CapabilityAllowSet, CapabilityResolveError> {
+        Ok(CapabilityAllowSet::All)
+    }
+}
+
+struct EmptyInputQueue;
+
+#[async_trait]
+impl HostInputQueue for EmptyInputQueue {
+    async fn next_after(
+        &self,
+        _run_id: TurnRunId,
+        after: LoopInputCursorToken,
+        _limit: usize,
+    ) -> Result<HostInputBatch, HostInputQueueError> {
+        Ok(HostInputBatch {
+            inputs: Vec::new(),
+            next_cursor: after,
+        })
+    }
+
+    async fn ack_consumed(
+        &self,
+        _run_id: TurnRunId,
+        _tokens: Vec<LoopInputAckToken>,
+    ) -> Result<(), HostInputQueueError> {
+        Ok(())
+    }
+}
+
+struct EmptyIdentityContextSource;
+
+#[async_trait]
+impl HostIdentityContextSource for EmptyIdentityContextSource {
+    async fn load_identity_candidates(
+        &self,
+        _run_context: &LoopRunContext,
+        _mode: PromptMode,
+    ) -> Result<Vec<HostIdentityContextCandidate>, HostIdentityContextBuildError> {
+        Ok(Vec::new())
+    }
+}
+
+#[derive(Default)]
+struct ReadyRunCancellationFactory {
+    handles: Arc<Mutex<HashMap<TurnRunId, RunCancellationHandle>>>,
+}
+
+impl ReadyRunCancellationFactory {
+    fn handle_for(&self, run_id: TurnRunId) -> Option<RunCancellationHandle> {
+        self.handles
+            .lock()
+            .expect("ready cancellation lock poisoned")
+            .get(&run_id)
+            .cloned()
+    }
+
+    fn product_cancellation_observed(&self, run_id: TurnRunId) -> bool {
+        self.handle_for(run_id)
+            .map(|handle| handle.is_requested())
+            .unwrap_or(false)
+    }
+}
+
+#[async_trait]
+impl RunCancellationFactory for ReadyRunCancellationFactory {
+    async fn handle_for_run(
+        &self,
+        _scope: &TurnScope,
+        run_id: TurnRunId,
+    ) -> Result<RunCancellationHandle, AgentLoopHostError> {
+        let handle = RunCancellationHandle::default();
+        self.handles
+            .lock()
+            .expect("ready cancellation lock poisoned")
+            .insert(run_id, handle.clone());
+        Ok(handle)
+    }
+
+    fn notify_run_wake(&self, wake: &TurnRunWake) {
+        // End-to-end product-live cancellation observation: when the
+        // coordinator publishes a `CancelRequested` wake, flip the retained
+        // run handle so product code can observe cancellation without any
+        // factory backdoor.
+        if wake.status != TurnStatus::CancelRequested {
+            return;
+        }
+        if let Some(handle) = self.handle_for(wake.run_id) {
+            handle.request(LoopCancelReasonKind::UserRequested);
+        }
+    }
+
+    fn product_live_cancellation_probe(&self) -> Option<Box<dyn ProductLiveCancellationProbe>> {
+        // Probe owns its handle directly. Not inserted into `self.handles` —
+        // the readiness probe is ephemeral and self-contained, so the factory's
+        // run-keyed handle map must not grow on every verifier call.
+        Some(Box::new(ReadyRunCancellationProbe {
+            handle: RunCancellationHandle::default(),
+        }))
+    }
+
+    fn is_product_cancellation_observed(
+        &self,
+        run_id: TurnRunId,
+    ) -> Result<bool, AgentLoopHostError> {
+        Ok(self.product_cancellation_observed(run_id))
+    }
+}
+
+struct ReadyRunCancellationProbe {
+    handle: RunCancellationHandle,
+}
+
+impl ProductLiveCancellationProbe for ReadyRunCancellationProbe {
+    fn request_cancellation(
+        &self,
+        reason_kind: LoopCancelReasonKind,
+    ) -> Result<(), AgentLoopHostError> {
+        self.handle.request(reason_kind);
+        Ok(())
+    }
+
+    fn is_cancellation_observed(&self) -> Result<bool, AgentLoopHostError> {
+        Ok(self.handle.is_requested())
+    }
+}
+
+struct UnretainedRunCancellationFactory;
+
+#[async_trait]
+impl RunCancellationFactory for UnretainedRunCancellationFactory {
+    async fn handle_for_run(
+        &self,
+        _scope: &TurnScope,
+        _run_id: TurnRunId,
+    ) -> Result<RunCancellationHandle, AgentLoopHostError> {
+        Ok(RunCancellationHandle::default())
+    }
+}
+
+fn turn_state_store_dyn(store: &Arc<InMemoryTurnStateStore>) -> Arc<dyn TurnStateStore> {
+    Arc::clone(store) as Arc<dyn TurnStateStore>
+}
+
+fn test_safety_context() -> InstructionSafetyContext {
+    InstructionSafetyContext::new("policy:test", "test safety context")
+        .expect("test safety context")
+}
+
+fn binding_with_user(user: &str, thread: &str) -> ironclaw_product_workflow::ResolvedBinding {
+    let user_id = UserId::new(user).expect("valid user");
+    ironclaw_product_workflow::ResolvedBinding {
+        tenant_id: TenantId::new("tenant:install_alpha").expect("valid tenant"),
+        actor_user_id: user_id.clone(),
+        subject_user_id: Some(user_id),
+        thread_id: ThreadId::new(thread).expect("valid thread"),
+        agent_id: Some(AgentId::new("agent:fake").expect("valid agent")),
+        project_id: None,
+    }
+}
+
+fn turn_scope_for_binding(binding: &ironclaw_product_workflow::ResolvedBinding) -> TurnScope {
+    TurnScope::new_with_owner(
+        binding.tenant_id.clone(),
+        binding.agent_id.clone(),
+        binding.project_id.clone(),
+        binding.thread_id.clone(),
+        binding.subject_user_id.clone(),
+    )
+}
+
+fn sample_user_message_envelope_with_text(
+    event_suffix: &str,
+    text: &str,
+) -> ProductInboundEnvelope {
+    sample_user_message_envelope_with_install_and_text(event_suffix, "install_alpha", text)
+}
+
+fn sample_user_message_envelope_with_install_and_text(
+    event_suffix: &str,
+    installation_id: &str,
+    text: &str,
+) -> ProductInboundEnvelope {
+    sample_user_message_envelope_with_install_text_and_trigger(
+        event_suffix,
+        installation_id,
+        text,
+        ProductTriggerReason::DirectChat,
+    )
+}
+
+fn sample_user_message_envelope_with_install_text_and_trigger(
+    event_suffix: &str,
+    installation_id: &str,
+    text: &str,
+    trigger: ProductTriggerReason,
+) -> ProductInboundEnvelope {
+    let evidence = ProtocolAuthEvidence::test_verified(
+        AuthRequirement::SharedSecretHeader {
+            header_name: "X-Secret".into(),
+        },
+        installation_id,
+    );
+    let context = TrustedInboundContext::from_verified_evidence(
+        ProductAdapterId::new("test_adapter").expect("valid"),
+        AdapterInstallationId::new(installation_id).expect("valid"),
+        Utc::now(),
+        &evidence,
+    )
+    .expect("verified");
+
+    let parsed = ParsedProductInbound::new(
+        ExternalEventId::new(format!("evt:{event_suffix}")).expect("valid"),
+        ExternalActorRef::new("test", "user1", Option::<String>::None).expect("valid"),
+        ExternalConversationRef::new(None, "conv1", None, None).expect("valid"),
+        ProductInboundPayload::UserMessage(
+            UserMessagePayload::new(text, vec![], trigger).expect("valid"),
+        ),
+    )
+    .expect("parsed");
+
+    ProductInboundEnvelope::from_trusted_parse(context, parsed).expect("envelope")
+}
+
+#[tokio::test]
+async fn user_message_resolves_binding_persists_message_and_submits_turn() {
+    let binding_service = FakeConversationBindingService::new();
+    let thread_service = InMemorySessionThreadService::default();
+    let store = Arc::new(InMemoryTurnStateStore::default());
+    let coordinator = DefaultTurnCoordinator::new(store);
+    let service =
+        DefaultInboundTurnService::new(binding_service, thread_service.clone(), coordinator);
+
+    let envelope = sample_user_message_envelope("turn1");
+    let outcome: InboundTurnOutcome = service
+        .accept_user_message(&envelope)
+        .await
+        .expect("submit");
+
+    let binding = match &outcome {
+        InboundTurnOutcome::Submitted { binding, .. } => binding,
+        _ => panic!("expected Submitted, got {outcome:?}"),
+    };
+
+    let history = thread_service
+        .list_thread_history(ThreadHistoryRequest {
+            scope: ThreadScope {
+                tenant_id: binding.tenant_id.clone(),
+                agent_id: binding.agent_id.clone().expect("agent id"),
+                project_id: binding.project_id.clone(),
+                owner_user_id: binding.subject_user_id.clone(),
+                mission_id: None,
+            },
+            thread_id: binding.thread_id.clone(),
+        })
+        .await
+        .expect("history");
+    assert_eq!(history.messages.len(), 1);
+    assert_eq!(history.messages[0].content.as_deref(), Some("hello world"));
+    assert_eq!(history.messages[0].status, MessageStatus::Submitted);
+    assert!(history.messages[0].turn_run_id.is_some());
+}
+
+#[tokio::test]
+async fn shared_user_message_submits_subject_owned_turn_scope() {
+    let binding_service = FakeConversationBindingService::new();
+    let thread_service = InMemorySessionThreadService::default();
+    let coordinator = CapturingTurnCoordinator::default();
+    let service = DefaultInboundTurnService::new(
+        binding_service,
+        thread_service.clone(),
+        coordinator.clone(),
+    );
+    let envelope = sample_user_message_envelope_with_install_text_and_trigger(
+        "shared-turn-owner",
+        "install_alpha",
+        "hello shared channel",
+        ProductTriggerReason::BotMention,
+    );
+
+    let outcome = service
+        .accept_user_message(&envelope)
+        .await
+        .expect("shared route should submit");
+    let binding = match &outcome {
+        InboundTurnOutcome::Submitted { binding, .. } => binding,
+        _ => panic!("expected Submitted, got {outcome:?}"),
+    };
+
+    let submitted = coordinator
+        .last_submit
+        .lock()
+        .expect("captured submit lock")
+        .clone()
+        .expect("turn should be submitted");
+    assert_eq!(
+        submitted.scope.explicit_owner_user_id(),
+        binding.subject_user_id.as_ref()
+    );
+    assert_eq!(submitted.actor.user_id, binding.actor_user_id);
+
+    let history = thread_service
+        .list_thread_history(ThreadHistoryRequest {
+            scope: ThreadScope {
+                tenant_id: binding.tenant_id.clone(),
+                agent_id: binding.agent_id.clone().expect("agent id"),
+                project_id: binding.project_id.clone(),
+                owner_user_id: binding.subject_user_id.clone(),
+                mission_id: None,
+            },
+            thread_id: binding.thread_id.clone(),
+        })
+        .await
+        .expect("shared route history should use the resolved subject");
+    assert_eq!(history.messages.len(), 1);
+    assert_eq!(
+        history.messages[0].content.as_deref(),
+        Some("hello shared channel")
+    );
+}
+
+#[tokio::test]
+async fn user_message_no_profile_submission_uses_planned_reborn_default() {
+    let binding_service = FakeConversationBindingService::new();
+    let thread_service = InMemorySessionThreadService::default();
+    let store = Arc::new(InMemoryTurnStateStore::default());
+    let resolver =
+        Arc::new(default_planned_run_profile_resolver().expect("planned default profile resolver"));
+    let coordinator =
+        DefaultTurnCoordinator::new(store.clone()).with_run_profile_resolver(resolver);
+    let service =
+        DefaultInboundTurnService::new(binding_service, thread_service.clone(), coordinator);
+
+    let envelope = sample_user_message_envelope("planned-product-default");
+    let outcome = service
+        .accept_user_message(&envelope)
+        .await
+        .expect("planned default submit");
+
+    let InboundTurnOutcome::Submitted {
+        binding,
+        submitted_run_id,
+        ..
+    } = outcome
+    else {
+        panic!("expected submitted outcome");
+    };
+    let state = store
+        .get_run_state(GetRunStateRequest {
+            scope: turn_scope_for_binding(&binding),
+            run_id: submitted_run_id,
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        state.resolved_run_profile_id.as_str(),
+        PLANNED_DEFAULT_PROFILE_ID
+    );
+    assert_eq!(state.status, TurnStatus::Queued);
+}
+
+#[tokio::test]
+async fn user_message_no_profile_uses_product_live_runtime_and_persists_reply() {
+    let binding_service = FakeConversationBindingService::new();
+    let envelope = sample_user_message_envelope("planned-product-live");
+    let binding = binding_with_user("user:product-live", "thread:product-live");
+    binding_service.program_binding(envelope.source_binding_key(), binding.clone());
+
+    let thread_service = InMemorySessionThreadService::default();
+    let turn_store = Arc::new(InMemoryTurnStateStore::default());
+    let checkpoint_store = Arc::new(InMemoryLoopCheckpointStore::default());
+    let model_requests = Arc::new(Mutex::new(Vec::new()));
+    let model_gateway = Arc::new(ReplyModelGateway {
+        reply: "planned product reply".to_string(),
+        requests: Arc::clone(&model_requests),
+    });
+    let thread_scope = ThreadScope {
+        tenant_id: binding.tenant_id.clone(),
+        agent_id: binding.agent_id.clone().expect("agent id"),
+        project_id: binding.project_id.clone(),
+        owner_user_id: binding.subject_user_id.clone(),
+        mission_id: None,
+    };
+    let model_route_resolver = Arc::new(
+        StaticModelRouteResolver::new(ModelRoutePolicy::new(
+            ModelSelectionMode::DeveloperAnyConfigured,
+        ))
+        .with_route(
+            ModelSlot::Default,
+            ModelRoute::new("nearai", "qwen3-coder").expect("valid model route"),
+        ),
+    );
+    let cancellation_factory = Arc::new(ReadyRunCancellationFactory::default());
+    let turn_state_for_runtime: Arc<dyn RuntimeTurnStateStore> = turn_store.clone();
+    let composition = build_product_live_planned_runtime(DefaultPlannedRuntimeParts {
+        attachment_read_port: None,
+        turn_state: turn_state_for_runtime,
+        thread_service: Arc::new(thread_service.clone()),
+        thread_scope: thread_scope.clone(),
+        model_gateway,
+        checkpoint_state_store: Arc::new(InMemoryCheckpointStateStore::default()),
+        loop_checkpoint_store: checkpoint_store.clone(),
+        milestone_sink: Arc::new(InMemoryLoopHostMilestoneSink::default()),
+        capability_factory: Arc::new(EmptyCapabilityFactory),
+        capability_surface_resolver: Arc::new(AllowAllCapabilitySurfaceResolver),
+        capability_result_writer: Arc::new(UnusedCapabilityResultWriter),
+        subagent_goal_store: Arc::new(
+            ironclaw_reborn::subagent::goal_store::InMemoryBoundedSubagentGoalStore::new(),
+        ),
+        subagent_gate_store: Arc::new(
+            ironclaw_reborn::subagent::gate_resolution::BoundedSubagentGateResolutionStore::new(),
+        ),
+        subagent_definition_resolver: Arc::new(
+            ironclaw_reborn::subagent::flavors::StaticSubagentDefinitionResolver,
+        ),
+        subagent_spawn_input_codec: Arc::new(JsonSpawnSubagentInputCodec::new(Arc::new(
+            ProductLiveCapabilityIo::default(),
+        ))),
+        subagent_spawn_limits: ironclaw_loop_support::SubagentSpawnLimits::default(),
+        loop_exit_evidence: Arc::new(
+            ThreadCheckpointLoopExitEvidencePort::new_with_thread_scope(
+                Arc::new(thread_service.clone()),
+                turn_state_store_dyn(&turn_store),
+                checkpoint_store,
+                thread_scope.clone(),
+            )
+            .with_cancellation_factory(cancellation_factory.clone()),
+        ),
+        config: DefaultPlannedRuntimeConfig::default(),
+        model_route_resolver: Some(model_route_resolver),
+        cancellation_factory: Some(cancellation_factory.clone()),
+        skill_context_source: None,
+        input_queue: Some(Arc::new(EmptyInputQueue)),
+        identity_context_source: Arc::new(EmptyIdentityContextSource),
+        model_policy_guard: Some(Arc::new(NoOpPolicyGuard)),
+        model_budget_accountant: Some(Arc::new(NoOpBudgetAccountant)),
+        safety_context: Some(test_safety_context()),
+        hook_dispatcher_builder_factory: None,
+        communication_context_provider: None,
+        hook_security_audit_sink: None,
+        turn_event_sink: None,
+    })
+    .expect("product-live runtime should build");
+
+    let cancel = CancellationToken::new();
+    let worker = Arc::clone(&composition.worker);
+    let worker_cancel = cancel.clone();
+    let worker_handle = tokio::spawn(async move { worker.run(worker_cancel).await });
+    let service = DefaultInboundTurnService::new(
+        binding_service,
+        thread_service.clone(),
+        Arc::clone(&composition.coordinator),
+    );
+
+    let outcome = service
+        .accept_user_message(&envelope)
+        .await
+        .expect("product live submit");
+    let InboundTurnOutcome::Submitted {
+        submitted_run_id, ..
+    } = outcome
+    else {
+        panic!("expected submitted outcome");
+    };
+    let turn_scope = turn_scope_for_binding(&binding);
+    let state = match timeout(Duration::from_secs(3), async {
+        loop {
+            let state = turn_store
+                .get_run_state(GetRunStateRequest {
+                    scope: turn_scope.clone(),
+                    run_id: submitted_run_id,
+                })
+                .await
+                .expect("run state");
+            if state.status.is_terminal() {
+                return state;
+            }
+            sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    {
+        Ok(state) => state,
+        Err(error) => {
+            let state = turn_store
+                .get_run_state(GetRunStateRequest {
+                    scope: turn_scope.clone(),
+                    run_id: submitted_run_id,
+                })
+                .await
+                .expect("run state after timeout");
+            let history = thread_service
+                .list_thread_history(ThreadHistoryRequest {
+                    scope: thread_scope.clone(),
+                    thread_id: binding.thread_id.clone(),
+                })
+                .await
+                .expect("history after timeout");
+            panic!(
+                "product live run should finish: {error}; last state: {state:?}; model requests: {}; history: {:?}",
+                model_requests.lock().unwrap().len(),
+                history.messages
+            );
+        }
+    };
+
+    cancel.cancel();
+    worker_handle.await.expect("worker should stop cleanly");
+
+    assert_eq!(state.status, TurnStatus::Completed);
+    assert_eq!(
+        state.resolved_run_profile_id.as_str(),
+        PLANNED_DEFAULT_PROFILE_ID
+    );
+    assert_eq!(model_requests.lock().unwrap().len(), 1);
+
+    let history = thread_service
+        .list_thread_history(ThreadHistoryRequest {
+            scope: thread_scope,
+            thread_id: binding.thread_id,
+        })
+        .await
+        .expect("history");
+    assert!(history.messages.iter().any(|message| {
+        message.status == MessageStatus::Finalized
+            && message.turn_run_id.as_deref() == Some(submitted_run_id.to_string().as_str())
+            && message.content.as_deref() == Some("planned product reply")
+    }));
+}
+
+#[tokio::test]
+async fn user_message_no_profile_can_cancel_product_live_run_from_product_path() {
+    let binding_service = FakeConversationBindingService::new();
+    let envelope = sample_user_message_envelope("planned-product-live-cancel");
+    let binding = binding_with_user("user:product-live", "thread:product-live-cancel-live");
+    binding_service.program_binding(envelope.source_binding_key(), binding.clone());
+
+    let thread_service = InMemorySessionThreadService::default();
+    let turn_store = Arc::new(InMemoryTurnStateStore::default());
+    let checkpoint_store = Arc::new(InMemoryLoopCheckpointStore::default());
+    let model_requests = Arc::new(Mutex::new(Vec::new()));
+    let model_release = CancellationToken::new();
+    let model_gateway = Arc::new(PausingReplyModelGateway {
+        reply: "reply after cancel".to_string(),
+        requests: Arc::clone(&model_requests),
+        release: model_release.clone(),
+    });
+    let thread_scope = ThreadScope {
+        tenant_id: binding.tenant_id.clone(),
+        agent_id: binding.agent_id.clone().expect("agent id"),
+        project_id: binding.project_id.clone(),
+        owner_user_id: binding.subject_user_id.clone(),
+        mission_id: None,
+    };
+    let model_route_resolver = Arc::new(
+        StaticModelRouteResolver::new(ModelRoutePolicy::new(
+            ModelSelectionMode::DeveloperAnyConfigured,
+        ))
+        .with_route(
+            ModelSlot::Default,
+            ModelRoute::new("nearai", "qwen3-coder").expect("valid model route"),
+        ),
+    );
+    let cancellation_factory = Arc::new(ReadyRunCancellationFactory::default());
+    let turn_state_for_runtime: Arc<dyn RuntimeTurnStateStore> = turn_store.clone();
+    let composition = build_product_live_planned_runtime(DefaultPlannedRuntimeParts {
+        attachment_read_port: None,
+        turn_state: turn_state_for_runtime,
+        thread_service: Arc::new(thread_service.clone()),
+        thread_scope: thread_scope.clone(),
+        model_gateway,
+        checkpoint_state_store: Arc::new(InMemoryCheckpointStateStore::default()),
+        loop_checkpoint_store: checkpoint_store.clone(),
+        milestone_sink: Arc::new(InMemoryLoopHostMilestoneSink::default()),
+        capability_factory: Arc::new(EmptyCapabilityFactory),
+        capability_surface_resolver: Arc::new(AllowAllCapabilitySurfaceResolver),
+        capability_result_writer: Arc::new(UnusedCapabilityResultWriter),
+        subagent_goal_store: Arc::new(
+            ironclaw_reborn::subagent::goal_store::InMemoryBoundedSubagentGoalStore::new(),
+        ),
+        subagent_gate_store: Arc::new(
+            ironclaw_reborn::subagent::gate_resolution::BoundedSubagentGateResolutionStore::new(),
+        ),
+        subagent_definition_resolver: Arc::new(
+            ironclaw_reborn::subagent::flavors::StaticSubagentDefinitionResolver,
+        ),
+        subagent_spawn_input_codec: Arc::new(JsonSpawnSubagentInputCodec::new(Arc::new(
+            ProductLiveCapabilityIo::default(),
+        ))),
+        subagent_spawn_limits: ironclaw_loop_support::SubagentSpawnLimits::default(),
+        // Product-live composition must bind the applier evidence to the
+        // runtime cancellation source even if the supplied evidence is not.
+        loop_exit_evidence: Arc::new(ThreadCheckpointLoopExitEvidencePort::new_with_thread_scope(
+            Arc::new(thread_service.clone()),
+            turn_state_store_dyn(&turn_store),
+            checkpoint_store,
+            thread_scope.clone(),
+        )),
+        config: DefaultPlannedRuntimeConfig::default(),
+        model_route_resolver: Some(model_route_resolver),
+        cancellation_factory: Some(cancellation_factory.clone()),
+        skill_context_source: None,
+        input_queue: Some(Arc::new(EmptyInputQueue)),
+        identity_context_source: Arc::new(EmptyIdentityContextSource),
+        model_policy_guard: Some(Arc::new(NoOpPolicyGuard)),
+        model_budget_accountant: Some(Arc::new(NoOpBudgetAccountant)),
+        safety_context: Some(test_safety_context()),
+        hook_dispatcher_builder_factory: None,
+        communication_context_provider: None,
+        hook_security_audit_sink: None,
+        turn_event_sink: None,
+    })
+    .expect("product-live runtime should build");
+
+    let cancel = CancellationToken::new();
+    let worker = Arc::clone(&composition.worker);
+    let worker_cancel = cancel.clone();
+    let worker_handle = tokio::spawn(async move { worker.run(worker_cancel).await });
+    let service = DefaultInboundTurnService::new(
+        binding_service,
+        thread_service.clone(),
+        Arc::clone(&composition.coordinator),
+    );
+
+    let outcome = service
+        .accept_user_message(&envelope)
+        .await
+        .expect("product live submit");
+    let InboundTurnOutcome::Submitted {
+        submitted_run_id, ..
+    } = outcome
+    else {
+        panic!("expected submitted outcome");
+    };
+    timeout(Duration::from_secs(3), async {
+        loop {
+            if !model_requests
+                .lock()
+                .expect("model requests lock poisoned")
+                .is_empty()
+            {
+                return;
+            }
+            sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("product live run should reach model call");
+
+    let turn_scope = turn_scope_for_binding(&binding);
+    let cancel_response = composition
+        .coordinator
+        .cancel_run(CancelRunRequest {
+            scope: turn_scope.clone(),
+            actor: TurnActor::new(binding.actor_user_id.clone()),
+            run_id: submitted_run_id,
+            reason: SanitizedCancelReason::UserRequested,
+            idempotency_key: IdempotencyKey::new("idem-product-live-cancel").expect("valid"),
+        })
+        .await
+        .expect("product cancel request");
+    assert_eq!(cancel_response.status, TurnStatus::CancelRequested);
+    // End-to-end proof: `coordinator.cancel_run` alone — no factory backdoor —
+    // must reach the retained run handle through the runtime's wake-notifier
+    // composition. Poll briefly to absorb async wake propagation.
+    timeout(Duration::from_secs(5), async {
+        loop {
+            if cancellation_factory.product_cancellation_observed(submitted_run_id) {
+                return;
+            }
+            sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("coordinator.cancel_run must drive product cancellation observation end-to-end");
+
+    model_release.cancel();
+    let state = timeout(Duration::from_secs(3), async {
+        loop {
+            let state = turn_store
+                .get_run_state(GetRunStateRequest {
+                    scope: turn_scope.clone(),
+                    run_id: submitted_run_id,
+                })
+                .await
+                .expect("run state");
+            if state.status.is_terminal() {
+                return state;
+            }
+            sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("product live run should finish after cancellation");
+
+    cancel.cancel();
+    worker_handle.await.expect("worker should stop cleanly");
+
+    assert_eq!(state.status, TurnStatus::Cancelled);
+    // Reborn-integration's executor preserves the assistant reply that arrived
+    // before the cancellation observation; the run still terminates as
+    // Cancelled. Verify the reply lands in thread history and the run is
+    // cancelled — both must hold together.
+    let history = thread_service
+        .list_thread_history(ThreadHistoryRequest {
+            scope: thread_scope,
+            thread_id: binding.thread_id,
+        })
+        .await
+        .expect("history");
+    assert!(history.messages.iter().any(|message| {
+        message.status == MessageStatus::Finalized
+            && message.turn_run_id.as_deref() == Some(submitted_run_id.to_string().as_str())
+            && message.content.as_deref() == Some("reply after cancel")
+    }));
+}
+
+#[tokio::test]
+async fn product_live_runtime_rejects_unretained_cancellation_factory() {
+    let binding_service = FakeConversationBindingService::new();
+    let envelope = sample_user_message_envelope("planned-product-inert-cancel");
+    let binding = binding_with_user("user:product-live", "thread:product-live-cancel");
+    binding_service.program_binding(envelope.source_binding_key(), binding.clone());
+
+    let thread_service = InMemorySessionThreadService::default();
+    let turn_store = Arc::new(InMemoryTurnStateStore::default());
+    let checkpoint_store = Arc::new(InMemoryLoopCheckpointStore::default());
+    let model_gateway = Arc::new(ReplyModelGateway {
+        reply: "planned product reply".to_string(),
+        requests: Arc::new(Mutex::new(Vec::new())),
+    });
+    let thread_scope = ThreadScope {
+        tenant_id: binding.tenant_id.clone(),
+        agent_id: binding.agent_id.clone().expect("agent id"),
+        project_id: binding.project_id.clone(),
+        owner_user_id: binding.subject_user_id.clone(),
+        mission_id: None,
+    };
+    let model_route_resolver = Arc::new(
+        StaticModelRouteResolver::new(ModelRoutePolicy::new(
+            ModelSelectionMode::DeveloperAnyConfigured,
+        ))
+        .with_route(
+            ModelSlot::Default,
+            ModelRoute::new("nearai", "qwen3-coder").expect("valid model route"),
+        ),
+    );
+
+    let turn_state_for_runtime: Arc<dyn RuntimeTurnStateStore> = turn_store.clone();
+    let error = match build_product_live_planned_runtime(DefaultPlannedRuntimeParts {
+        attachment_read_port: None,
+        turn_state: turn_state_for_runtime,
+        thread_service: Arc::new(thread_service.clone()),
+        thread_scope: thread_scope.clone(),
+        model_gateway,
+        checkpoint_state_store: Arc::new(InMemoryCheckpointStateStore::default()),
+        loop_checkpoint_store: checkpoint_store.clone(),
+        milestone_sink: Arc::new(InMemoryLoopHostMilestoneSink::default()),
+        capability_factory: Arc::new(EmptyCapabilityFactory),
+        capability_surface_resolver: Arc::new(AllowAllCapabilitySurfaceResolver),
+        capability_result_writer: Arc::new(UnusedCapabilityResultWriter),
+        subagent_goal_store: Arc::new(
+            ironclaw_reborn::subagent::goal_store::InMemoryBoundedSubagentGoalStore::new(),
+        ),
+        subagent_gate_store: Arc::new(
+            ironclaw_reborn::subagent::gate_resolution::BoundedSubagentGateResolutionStore::new(),
+        ),
+        subagent_definition_resolver: Arc::new(
+            ironclaw_reborn::subagent::flavors::StaticSubagentDefinitionResolver,
+        ),
+        subagent_spawn_input_codec: Arc::new(JsonSpawnSubagentInputCodec::new(Arc::new(
+            ProductLiveCapabilityIo::default(),
+        ))),
+        subagent_spawn_limits: ironclaw_loop_support::SubagentSpawnLimits::default(),
+        loop_exit_evidence: Arc::new(ThreadCheckpointLoopExitEvidencePort::new_with_thread_scope(
+            Arc::new(InMemorySessionThreadService::default()),
+            Arc::new(InMemoryTurnStateStore::default()) as Arc<dyn TurnStateStore>,
+            checkpoint_store,
+            thread_scope,
+        )),
+        config: DefaultPlannedRuntimeConfig::default(),
+        model_route_resolver: Some(model_route_resolver),
+        cancellation_factory: Some(Arc::new(UnretainedRunCancellationFactory)),
+        skill_context_source: None,
+        input_queue: Some(Arc::new(EmptyInputQueue)),
+        identity_context_source: Arc::new(EmptyIdentityContextSource),
+        model_policy_guard: Some(Arc::new(NoOpPolicyGuard)),
+        model_budget_accountant: Some(Arc::new(NoOpBudgetAccountant)),
+        safety_context: Some(test_safety_context()),
+        hook_dispatcher_builder_factory: None,
+        communication_context_provider: None,
+        hook_security_audit_sink: None,
+        turn_event_sink: None,
+    }) {
+        Ok(_) => panic!("product-live readiness must reject inert cancellation"),
+        Err(error) => error,
+    };
+
+    assert!(error.to_string().contains("inert cancellation_factory"));
+}
+
+#[tokio::test]
+async fn busy_thread_persists_second_message_as_rejected_busy() {
+    let binding_service = FakeConversationBindingService::new();
+    let thread_service = InMemorySessionThreadService::default();
+    let store = Arc::new(InMemoryTurnStateStore::default());
+    let coordinator = DefaultTurnCoordinator::new(store);
+    let service =
+        DefaultInboundTurnService::new(binding_service, thread_service.clone(), coordinator);
+
+    let first = sample_user_message_envelope("busy1");
+    service.accept_user_message(&first).await.expect("first");
+    let second = sample_user_message_envelope_with_text("busy2", "second");
+    let outcome = service
+        .accept_user_message(&second)
+        .await
+        .expect("second deferred");
+    assert!(matches!(outcome, InboundTurnOutcome::RejectedBusy { .. }));
+
+    let binding = match outcome {
+        InboundTurnOutcome::RejectedBusy { binding, .. } => binding,
+        _ => unreachable!(),
+    };
+    let history = thread_service
+        .list_thread_history(ThreadHistoryRequest {
+            scope: ThreadScope {
+                tenant_id: binding.tenant_id.clone(),
+                agent_id: binding.agent_id.clone().expect("agent id"),
+                project_id: binding.project_id.clone(),
+                owner_user_id: binding.subject_user_id.clone(),
+                mission_id: None,
+            },
+            thread_id: binding.thread_id.clone(),
+        })
+        .await
+        .expect("history");
+    assert_eq!(history.messages.len(), 2);
+    assert_eq!(history.messages[1].content.as_deref(), Some("second"));
+    assert_eq!(history.messages[1].status, MessageStatus::RejectedBusy);
+}
+
+#[tokio::test]
+async fn retry_validates_live_binding_before_accepted_message_replay() {
+    let binding_service = FakeConversationBindingService::new();
+    let binding_handle = binding_service.clone();
+    let thread_service = InMemorySessionThreadService::default();
+    let coordinator = ScriptedTurnCoordinator::default();
+    coordinator.push_result(Err(TurnError::Unavailable {
+        reason: "transient submit failure".into(),
+    }));
+    let coordinator_handle = coordinator.clone();
+    let service =
+        DefaultInboundTurnService::new(binding_service, thread_service.clone(), coordinator);
+
+    let envelope = sample_user_message_envelope("binding-churn");
+    let first_err = service
+        .accept_user_message(&envelope)
+        .await
+        .expect_err("first submit fails after message acceptance");
+    assert!(matches!(
+        first_err,
+        ProductWorkflowError::TurnSubmissionFailed { .. }
+    ));
+    assert_eq!(binding_handle.resolve_count(), 1);
+
+    binding_handle.program_binding(
+        envelope.source_binding_key(),
+        binding_with_user("user:churned", "thread:churned"),
+    );
+
+    let outcome = service
+        .accept_user_message(&envelope)
+        .await
+        .expect("retry validates the current binding before replay");
+    let InboundTurnOutcome::Submitted { binding, .. } = outcome else {
+        panic!("expected submitted retry")
+    };
+    assert_eq!(binding.actor_user_id.as_str(), "user:churned");
+    assert_eq!(binding.thread_id.as_str(), "thread:churned");
+    assert_eq!(
+        binding_handle.resolve_count(),
+        2,
+        "retry must validate current binding before accepted-message replay"
+    );
+
+    let history = thread_service
+        .list_thread_history(ThreadHistoryRequest {
+            scope: ThreadScope {
+                tenant_id: binding.tenant_id.clone(),
+                agent_id: binding.agent_id.clone().expect("agent id"),
+                project_id: binding.project_id.clone(),
+                owner_user_id: binding.subject_user_id.clone(),
+                mission_id: None,
+            },
+            thread_id: binding.thread_id.clone(),
+        })
+        .await
+        .expect("history");
+    assert_eq!(history.messages.len(), 1);
+    assert_eq!(history.messages[0].status, MessageStatus::Submitted);
+    let submissions = coordinator_handle.submissions();
+    assert_eq!(submissions.len(), 2);
+    assert_eq!(
+        submissions[0].idempotency_key.as_str(),
+        submissions[1].idempotency_key.as_str(),
+        "retry after post-submit failure must reuse stable turn idempotency key"
+    );
+}
+
+#[tokio::test]
+async fn replay_lookup_is_namespaced_by_installation() {
+    let binding_service = FakeConversationBindingService::new();
+    let binding_handle = binding_service.clone();
+    let thread_service = InMemorySessionThreadService::default();
+    let coordinator = ScriptedTurnCoordinator::default();
+    coordinator.push_result(Err(TurnError::Unavailable {
+        reason: "transient submit failure".into(),
+    }));
+    let service =
+        DefaultInboundTurnService::new(binding_service, thread_service.clone(), coordinator);
+
+    let first = sample_user_message_envelope_with_install_and_text(
+        "shared-event",
+        "install_alpha",
+        "alpha",
+    );
+    service
+        .accept_user_message(&first)
+        .await
+        .expect_err("first submit fails after accepting alpha message");
+
+    let second =
+        sample_user_message_envelope_with_install_and_text("shared-event", "install_beta", "beta");
+    let outcome = service
+        .accept_user_message(&second)
+        .await
+        .expect("second install must not replay alpha message");
+    let InboundTurnOutcome::Submitted { binding, .. } = outcome else {
+        panic!("expected submitted beta message")
+    };
+    assert_eq!(binding.tenant_id.as_str(), "tenant:install_beta");
+    assert_eq!(
+        binding_handle.resolve_count(),
+        2,
+        "same conversation/event under another installation must resolve its own binding"
+    );
+
+    let history = thread_service
+        .list_thread_history(ThreadHistoryRequest {
+            scope: ThreadScope {
+                tenant_id: binding.tenant_id.clone(),
+                agent_id: binding.agent_id.clone().expect("agent id"),
+                project_id: binding.project_id.clone(),
+                owner_user_id: binding.subject_user_id.clone(),
+                mission_id: None,
+            },
+            thread_id: binding.thread_id.clone(),
+        })
+        .await
+        .expect("history");
+    assert_eq!(history.messages.len(), 1);
+    assert_eq!(history.messages[0].content.as_deref(), Some("beta"));
+}
+
+#[tokio::test]
+async fn legacy_deferred_busy_retry_resubmits_existing_message() {
+    // A message row whose status was force-downgraded to `DeferredBusy` (the
+    // legacy status written by the now-retired `mark_message_deferred_busy`
+    // writer) must be RESUBMITTED when replayed — `from_replay_parts` maps
+    // `DeferredBusy → NeedsSubmission`.  This is distinct from `RejectedBusy`
+    // replay, which is terminal and never resubmits (covered by the dedicated
+    // `rejected_busy_replay_is_re_rejected_not_resubmitted` test).
+    let binding_service = FakeConversationBindingService::new();
+    let thread_service = InMemorySessionThreadService::default();
+    let coordinator = ScriptedTurnCoordinator::default();
+    let service = DefaultInboundTurnService::new(
+        binding_service,
+        thread_service.clone(),
+        coordinator.clone(),
+    );
+
+    // First call: submit successfully so the message row exists in the thread
+    // service with status `Submitted`.
+    let envelope = sample_user_message_envelope("deferred-busy-legacy");
+    let first = service
+        .accept_user_message(&envelope)
+        .await
+        .expect("initial submission");
+    let binding = match first {
+        InboundTurnOutcome::Submitted { ref binding, .. } => binding.clone(),
+        _ => panic!("expected Submitted on first call, got {first:?}"),
+    };
+    let thread_scope = ThreadScope {
+        tenant_id: binding.tenant_id.clone(),
+        agent_id: binding.agent_id.clone().expect("agent id"),
+        project_id: binding.project_id.clone(),
+        owner_user_id: binding.subject_user_id.clone(),
+        mission_id: None,
+    };
+    assert_eq!(
+        coordinator.submissions().len(),
+        1,
+        "coordinator must have been called once after initial submission"
+    );
+
+    // Back-door: downgrade the stored row to `DeferredBusy` to simulate a
+    // legacy row written by the now-retired `mark_message_deferred_busy`
+    // writer.  Production code no longer creates `DeferredBusy` rows, but
+    // they may exist in older deployments.
+    let history = thread_service
+        .list_thread_history(ThreadHistoryRequest {
+            scope: thread_scope.clone(),
+            thread_id: binding.thread_id.clone(),
+        })
+        .await
+        .expect("history after initial submit");
+    assert_eq!(history.messages.len(), 1);
+    let message_id = history.messages[0].message_id;
+    thread_service
+        .inject_legacy_deferred_busy_for_test(&thread_scope, &binding.thread_id, message_id)
+        .await
+        .expect("inject DeferredBusy");
+
+    // Second call with the same envelope: the replay path sees `DeferredBusy`
+    // and maps it to `NeedsSubmission`, triggering a new submission to the
+    // coordinator.
+    let second = service
+        .accept_user_message(&envelope)
+        .await
+        .expect("DeferredBusy replay resubmission");
+    assert!(
+        matches!(second, InboundTurnOutcome::Submitted { .. }),
+        "DeferredBusy replay must resubmit (NeedsSubmission path), got {second:?}"
+    );
+    assert_eq!(
+        coordinator.submissions().len(),
+        2,
+        "coordinator must be called a second time for the DeferredBusy replay resubmission"
+    );
+
+    // The message row must now reflect the new submission.
+    let history_after = thread_service
+        .list_thread_history(ThreadHistoryRequest {
+            scope: thread_scope,
+            thread_id: binding.thread_id.clone(),
+        })
+        .await
+        .expect("history after DeferredBusy replay");
+    assert_eq!(history_after.messages.len(), 1, "must not create a new row");
+    assert_eq!(
+        history_after.messages[0].status,
+        MessageStatus::Submitted,
+        "resubmitted message must be marked Submitted"
+    );
+}
+
+#[tokio::test]
+async fn reply_target_binding_ref_has_single_reply_prefix() {
+    let binding_service = FakeConversationBindingService::new();
+    let thread_service = InMemorySessionThreadService::default();
+    let coordinator = CapturingTurnCoordinator::default();
+    let captured_submit = coordinator.last_submit.clone();
+    let service = DefaultInboundTurnService::new(binding_service, thread_service, coordinator);
+
+    let envelope = sample_user_message_envelope("reply-prefix");
+    service
+        .accept_user_message(&envelope)
+        .await
+        .expect("submit");
+
+    let request = captured_submit
+        .lock()
+        .expect("captured submit lock poisoned")
+        .clone()
+        .expect("submit request captured");
+    let reply_ref = request.reply_target_binding_ref.as_str();
+    assert!(reply_ref.starts_with("reply:"));
+    assert!(!reply_ref.starts_with("reply:reply:"));
+    assert_eq!(reply_ref.matches("reply:").count(), 1);
+    assert_eq!(
+        request.product_context.as_ref().map(|c| c.origin),
+        Some(TurnOriginKind::Inbound),
+        "inbound turn must carry Inbound origin"
+    );
+    assert_eq!(
+        request
+            .product_context
+            .as_ref()
+            .and_then(|c| c.adapter.as_ref())
+            .map(|a| a.as_str()),
+        Some("test_adapter"),
+        "inbound turn must carry adapter name from envelope"
+    );
+}
+
+#[tokio::test]
+async fn max_valid_external_ids_do_not_overflow_turn_refs() {
+    let binding_service = FakeConversationBindingService::new();
+    let thread_service = InMemorySessionThreadService::default();
+    let store = Arc::new(InMemoryTurnStateStore::default());
+    let coordinator = DefaultTurnCoordinator::new(store);
+    let service = DefaultInboundTurnService::new(binding_service, thread_service, coordinator);
+
+    let long_event_id = "e".repeat(250);
+    let envelope = sample_user_message_envelope(&long_event_id);
+    service
+        .accept_user_message(&envelope)
+        .await
+        .expect("long ids accepted");
+}
+
+#[tokio::test]
+async fn overflowing_turn_ref_inputs_hash_deterministically() {
+    let long_event_id = "e".repeat(250);
+    let mut captured = Vec::new();
+
+    for _ in 0..2 {
+        let binding_service = FakeConversationBindingService::new();
+        let thread_service = InMemorySessionThreadService::default();
+        let coordinator = CapturingTurnCoordinator::default();
+        let captured_submit = coordinator.last_submit.clone();
+        let service = DefaultInboundTurnService::new(binding_service, thread_service, coordinator);
+
+        let envelope = sample_user_message_envelope(&long_event_id);
+        service
+            .accept_user_message(&envelope)
+            .await
+            .expect("long id submit");
+        let request = captured_submit
+            .lock()
+            .expect("captured submit lock poisoned")
+            .clone()
+            .expect("submit request captured");
+        captured.push(request.idempotency_key.as_str().to_string());
+    }
+
+    assert_eq!(captured[0], captured[1]);
+    assert!(captured[0].starts_with("turn:"));
+    assert!(captured[0].len() < 64);
+}
+
+#[tokio::test]
+async fn binding_failure_surfaces_workflow_error() {
+    let binding_service = FakeConversationBindingService::new();
+    binding_service.force_failure(ProductWorkflowError::BindingResolutionFailed {
+        reason: "no tenant found".into(),
+    });
+
+    let thread_service = InMemorySessionThreadService::default();
+    let store = Arc::new(InMemoryTurnStateStore::default());
+    let coordinator = DefaultTurnCoordinator::new(store);
+    let service = DefaultInboundTurnService::new(binding_service, thread_service, coordinator);
+
+    let envelope = sample_user_message_envelope("fail1");
+    let err = service
+        .accept_user_message(&envelope)
+        .await
+        .expect_err("should fail");
+
+    assert!(matches!(
+        err,
+        ProductWorkflowError::BindingResolutionFailed { .. }
+    ));
+}
+
+#[tokio::test]
+async fn rejected_busy_replay_is_re_rejected_not_resubmitted() {
+    let binding_service = FakeConversationBindingService::new();
+    let thread_service = InMemorySessionThreadService::default();
+    let coordinator = ScriptedTurnCoordinator::default();
+    let active_run_id = TurnRunId::new();
+    coordinator.push_result(Err(TurnError::ThreadBusy(ThreadBusy {
+        active_run_id,
+        status: TurnStatus::Running,
+        event_cursor: EventCursor::default(),
+    })));
+    let service =
+        DefaultInboundTurnService::new(binding_service, thread_service.clone(), coordinator);
+
+    let envelope = sample_user_message_envelope("rejected-busy-replay");
+    let first = service
+        .accept_user_message(&envelope)
+        .await
+        .expect("first busy");
+    assert!(
+        matches!(first, InboundTurnOutcome::RejectedBusy { .. }),
+        "first submission should be rejected busy"
+    );
+
+    let replayed = service
+        .accept_user_message(&envelope)
+        .await
+        .expect("replay of rejected busy message");
+    assert!(
+        matches!(replayed, InboundTurnOutcome::RejectedBusy { .. }),
+        "replay of a rejected busy message must return RejectedBusy, not submit a new turn"
+    );
+
+    let binding = match replayed {
+        InboundTurnOutcome::RejectedBusy { ref binding, .. } => binding.clone(),
+        _ => unreachable!(),
+    };
+    let history = thread_service
+        .list_thread_history(ThreadHistoryRequest {
+            scope: ThreadScope {
+                tenant_id: binding.tenant_id.clone(),
+                agent_id: binding.agent_id.clone().expect("agent id"),
+                project_id: binding.project_id.clone(),
+                owner_user_id: binding.subject_user_id.clone(),
+                mission_id: None,
+            },
+            thread_id: binding.thread_id.clone(),
+        })
+        .await
+        .expect("history");
+    assert_eq!(
+        history.messages.len(),
+        1,
+        "replay must not create a new submitted message row"
+    );
+    assert_eq!(
+        history.messages[0].status,
+        MessageStatus::RejectedBusy,
+        "original message must remain RejectedBusy, not Submitted"
+    );
+}

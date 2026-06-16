@@ -10,6 +10,7 @@ use std::{
 };
 
 use async_trait::async_trait;
+use ironclaw_events::sanitize_error_kind;
 use ironclaw_host_api::{ProcessId, ResourceScope};
 use serde_json::Value;
 
@@ -96,7 +97,12 @@ impl ProcessStore for InMemoryProcessStore {
         process_id: ProcessId,
         error_kind: String,
     ) -> Result<ProcessRecord, ProcessError> {
-        self.update_status(scope, process_id, ProcessStatus::Failed, Some(error_kind))
+        self.update_status(
+            scope,
+            process_id,
+            ProcessStatus::Failed,
+            Some(sanitize_error_kind(error_kind)),
+        )
     }
 
     async fn kill(
@@ -199,7 +205,7 @@ impl ProcessResultStore for InMemoryProcessResultStore {
             process_id,
             ProcessStatus::Failed,
             None,
-            Some(error_kind),
+            Some(sanitize_error_kind(error_kind)),
         ))
     }
 

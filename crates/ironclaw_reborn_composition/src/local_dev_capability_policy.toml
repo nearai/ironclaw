@@ -1,0 +1,271 @@
+[provider]
+id = "builtin"
+manifest_path = "/system/extensions/builtin/manifest.toml"
+authority_effects = [
+    "dispatch_capability",
+    "read_filesystem",
+    "write_filesystem",
+    "delete_filesystem",
+    "spawn_process",
+    "execute_code",
+    "network",
+    "external_write",
+]
+
+[approval_gates]
+# Local-dev gates are intentionally conservative at EffectKind granularity.
+# Some effects (process, network, filesystem writes) can be write-level or
+# destructive depending on action details that are evaluated later by the
+# capability policy, so ask_destructive currently overlaps ask_writes instead
+# of weakening coverage by removing coarse effects from either gate.
+ask_writes = [
+    "write_filesystem",
+    "delete_filesystem",
+    "spawn_process",
+    "execute_code",
+    "network",
+    "use_secret",
+    "modify_extension",
+    "modify_approval",
+    "modify_budget",
+    "external_write",
+    "financial",
+]
+ask_destructive = [
+    "write_filesystem",
+    "delete_filesystem",
+    "spawn_process",
+    "execute_code",
+    "network",
+    "use_secret",
+    "modify_extension",
+    "modify_approval",
+    "modify_budget",
+    "external_write",
+    "financial",
+]
+exempt_capabilities = [
+    # Onboarding posts redacted traces only after the first-party tool's own
+    # `confirmed=true` consent gate runs in-turn (see dispatch_onboard). The REPL
+    # approval gate would otherwise block this network+external_write capability
+    # before that consent flow can execute, so it is exempted here.
+    "builtin.trace_commons.onboard",
+    # NOTE: `builtin.trace_commons.profile_set` is deliberately NOT exempt. It
+    # publishes a public community profile (an external write to a public
+    # surface), and the tool's `confirmed=true` input is model-controlled — a
+    # prompt-injected or confused model could supply it. So profile_set must hit
+    # the runtime approval gate (user-controlled consent), with `confirmed=true`
+    # as defense-in-depth rather than the sole control.
+]
+
+[approval_defaults.spawn_capability]
+effects = [
+    "dispatch_capability",
+    "read_filesystem",
+    "write_filesystem",
+    "spawn_process",
+]
+mounts = "workspace"
+network = "default"
+
+[[grants]]
+capability = "builtin.echo"
+effects = ["dispatch_capability", "read_filesystem", "write_filesystem"]
+mounts = "workspace"
+network = "default"
+
+[[grants]]
+capability = "builtin.time"
+effects = ["dispatch_capability", "read_filesystem", "write_filesystem"]
+mounts = "workspace"
+network = "default"
+
+[[grants]]
+capability = "builtin.json"
+effects = ["dispatch_capability", "read_filesystem", "write_filesystem"]
+mounts = "workspace"
+network = "default"
+
+[[grants]]
+capability = "builtin.http"
+effects = ["dispatch_capability", "network"]
+mounts = "ambient"
+network = "local_dev_wildcard"
+
+[[grants]]
+capability = "builtin.http.save"
+effects = ["dispatch_capability", "network", "write_filesystem"]
+mounts = "workspace"
+network = "local_dev_wildcard"
+
+[[grants]]
+capability = "builtin.memory_search"
+effects = ["dispatch_capability", "read_filesystem"]
+mounts = "memory"
+network = "default"
+
+[[grants]]
+capability = "builtin.memory_write"
+effects = ["dispatch_capability", "read_filesystem", "write_filesystem"]
+mounts = "memory"
+network = "default"
+
+[[grants]]
+capability = "builtin.memory_read"
+effects = ["dispatch_capability", "read_filesystem"]
+mounts = "memory"
+network = "default"
+
+[[grants]]
+capability = "builtin.memory_tree"
+effects = ["dispatch_capability", "read_filesystem"]
+mounts = "memory"
+network = "default"
+
+# The first-party shell handler still uses direct host process execution in
+# local-dev, so its filesystem/network authority intentionally mirrors the
+# previous Rust-wired ambient grant.
+[[grants]]
+capability = "builtin.shell"
+effects = [
+    "dispatch_capability",
+    "read_filesystem",
+    "write_filesystem",
+    "spawn_process",
+    "execute_code",
+    "network",
+]
+mounts = "ambient"
+network = "local_dev_wildcard"
+
+[[grants]]
+capability = "builtin.read_file"
+effects = ["dispatch_capability", "read_filesystem", "write_filesystem"]
+mounts = "workspace"
+network = "default"
+
+[[grants]]
+capability = "builtin.write_file"
+effects = ["dispatch_capability", "read_filesystem", "write_filesystem"]
+mounts = "workspace"
+network = "default"
+
+[[grants]]
+capability = "builtin.list_dir"
+effects = ["dispatch_capability", "read_filesystem", "write_filesystem"]
+mounts = "workspace"
+network = "default"
+
+[[grants]]
+capability = "builtin.glob"
+effects = ["dispatch_capability", "read_filesystem", "write_filesystem"]
+mounts = "workspace"
+network = "default"
+
+[[grants]]
+capability = "builtin.grep"
+effects = ["dispatch_capability", "read_filesystem", "write_filesystem"]
+mounts = "workspace"
+network = "default"
+
+[[grants]]
+capability = "builtin.apply_patch"
+effects = ["dispatch_capability", "read_filesystem", "write_filesystem"]
+mounts = "workspace"
+network = "default"
+
+[[grants]]
+capability = "builtin.extension_search"
+effects = ["dispatch_capability", "read_filesystem"]
+mounts = "ambient"
+network = "default"
+
+[[grants]]
+capability = "builtin.extension_install"
+effects = ["dispatch_capability", "read_filesystem", "write_filesystem"]
+mounts = "ambient"
+network = "default"
+
+[[grants]]
+capability = "builtin.extension_activate"
+effects = ["dispatch_capability", "read_filesystem", "write_filesystem", "network"]
+mounts = "ambient"
+network = "local_dev_wildcard"
+
+[[grants]]
+capability = "builtin.extension_remove"
+effects = ["dispatch_capability", "read_filesystem", "write_filesystem"]
+mounts = "ambient"
+network = "default"
+
+[[grants]]
+capability = "builtin.skill_list"
+effects = ["dispatch_capability", "read_filesystem", "write_filesystem"]
+mounts = "skill_management"
+network = "default"
+
+[[grants]]
+capability = "builtin.skill_install"
+effects = ["dispatch_capability", "read_filesystem", "write_filesystem", "delete_filesystem", "network"]
+mounts = "skill_management"
+network = "local_dev_wildcard"
+
+[[grants]]
+capability = "builtin.skill_remove"
+effects = ["dispatch_capability", "read_filesystem", "write_filesystem", "delete_filesystem"]
+mounts = "skill_management"
+network = "default"
+
+[[grants]]
+capability = "builtin.trigger_create"
+effects = ["dispatch_capability", "external_write"]
+mounts = "ambient"
+network = "default"
+
+[[grants]]
+capability = "builtin.trigger_list"
+effects = ["dispatch_capability"]
+mounts = "ambient"
+network = "default"
+
+[[grants]]
+capability = "builtin.trigger_remove"
+effects = ["dispatch_capability", "external_write"]
+mounts = "ambient"
+network = "default"
+
+[[grants]]
+capability = "builtin.trace_commons.onboard"
+effects = ["dispatch_capability", "read_filesystem", "write_filesystem", "network", "external_write"]
+mounts = "ambient"
+network = "local_dev_wildcard"
+
+[[grants]]
+capability = "builtin.trace_commons.status"
+effects = ["dispatch_capability", "read_filesystem"]
+mounts = "ambient"
+network = "default"
+
+[[grants]]
+capability = "builtin.trace_commons.credits"
+effects = ["dispatch_capability", "read_filesystem"]
+mounts = "ambient"
+network = "default"
+
+[[grants]]
+capability = "builtin.trace_commons.profile_token"
+effects = ["dispatch_capability", "read_filesystem", "write_filesystem", "network", "external_write"]
+mounts = "ambient"
+network = "local_dev_wildcard"
+
+[[grants]]
+capability = "builtin.trace_commons.profile_set"
+effects = ["dispatch_capability", "read_filesystem", "network", "external_write"]
+mounts = "ambient"
+network = "local_dev_wildcard"
+
+[[grants]]
+capability = "builtin.outbound_delivery_target_set"
+effects = ["dispatch_capability", "external_write"]
+mounts = "ambient"
+network = "default"

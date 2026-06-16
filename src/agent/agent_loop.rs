@@ -38,6 +38,9 @@ use ironclaw_llm::LlmProvider;
 use ironclaw_safety::SafetyLayer;
 use ironclaw_skills::SkillRegistry;
 
+const TRACE_QUEUE_WORKER_INTERVAL: std::time::Duration = std::time::Duration::from_secs(300);
+const TRACE_QUEUE_WORKER_FLUSH_LIMIT: usize = 25;
+
 /// Outcome of [`Agent::handle_message`] — drives the run-loop's response/Done dispatch.
 ///
 /// Distinguishes "no response, turn is over" from "no response, turn is paused"
@@ -137,6 +140,134 @@ fn trimmed_option(value: Option<&str>) -> Option<String> {
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .map(ToOwned::to_owned)
+}
+
+async fn trace_queue_worker_scopes(
+    owner_id: &str,
+    store: Option<Arc<dyn Database>>,
+) -> Vec<String> {
+    let mut scopes = vec![owner_id.to_string()];
+    if let Some(store) = store {
+        match store.list_users(Some("active")).await {
+            Ok(users) => scopes.extend(users.into_iter().map(|user| user.id)),
+            Err(error) => {
+                tracing::debug!(%error, "Trace Commons queue worker failed to list active users");
+            }
+        }
+    }
+    scopes.sort();
+    scopes.dedup();
+    scopes
+}
+
+fn spawn_trace_queue_flush_worker(
+    owner_id: String,
+    store: Option<Arc<dyn Database>>,
+    channels: Arc<ChannelManager>,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(TRACE_QUEUE_WORKER_INTERVAL);
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        interval.tick().await;
+
+        loop {
+            interval.tick().await;
+            let scopes = trace_queue_worker_scopes(&owner_id, store.clone()).await;
+            let delivery_scopes = scopes.clone();
+            let trace_host = crate::trace_client::TraceClientHost;
+            let _report = match trace_host
+                .flush_queue_worker_tick(scopes, TRACE_QUEUE_WORKER_FLUSH_LIMIT)
+                .await
+            {
+                Ok(report) => report,
+                Err(error) => {
+                    tracing::debug!(%error, "Trace Commons queue worker tick failed");
+                    for scope in delivery_scopes {
+                        deliver_trace_credit_notice_outbox_for_scope(&scope, &channels).await;
+                    }
+                    continue;
+                }
+            };
+
+            for scope in delivery_scopes {
+                deliver_trace_credit_notice_outbox_for_scope(&scope, &channels).await;
+            }
+        }
+    })
+}
+
+async fn deliver_trace_credit_notice_outbox_for_scope(scope: &str, channels: &Arc<ChannelManager>) {
+    let trace_host = crate::trace_client::TraceClientHost;
+    let trace_scope = crate::trace_client::TraceClientScope::raw(scope);
+    let pending = match trace_host.pending_credit_notice_outbox_items(&trace_scope) {
+        Ok(pending) => pending,
+        Err(error) => {
+            tracing::debug!(
+                %error,
+                scope_ref = %crate::trace_contribution::local_pseudonymous_contributor_id(scope),
+                "Trace Commons queue worker failed to read credit notice outbox"
+            );
+            return;
+        }
+    };
+    for item in pending {
+        let response = OutgoingResponse::text(item.message.clone());
+        let results = channels.broadcast_all(scope, response).await;
+        let success_channel = results
+            .iter()
+            .find_map(|(channel, result)| result.is_ok().then(|| channel.clone()));
+        if let Some(channel) = success_channel {
+            if let Err(error) = trace_host.record_credit_notice_delivery_success(
+                &trace_scope,
+                &item.fingerprint,
+                &channel,
+            ) {
+                tracing::debug!(
+                    %channel,
+                    %error,
+                    "Trace Commons queue worker failed to record credit notice delivery"
+                );
+            }
+            continue;
+        }
+
+        if results.is_empty() {
+            if let Err(error) = trace_host.record_credit_notice_delivery_failure(
+                &trace_scope,
+                &item.fingerprint,
+                "none",
+                "no channels registered for credit notice delivery",
+            ) {
+                tracing::debug!(
+                    %error,
+                    "Trace Commons queue worker failed to record empty credit notice delivery"
+                );
+            }
+            continue;
+        }
+
+        for (channel, result) in results {
+            if let Err(error) = result {
+                tracing::debug!(
+                    %channel,
+                    %error,
+                    "Trace Commons queue worker failed to deliver credit notice"
+                );
+                if let Err(record_error) = trace_host.record_credit_notice_delivery_failure(
+                    &trace_scope,
+                    &item.fingerprint,
+                    &channel,
+                    &error.to_string(),
+                ) {
+                    tracing::debug!(
+                        %channel,
+                        %record_error,
+                        "Trace Commons queue worker failed to record credit notice delivery failure"
+                    );
+                }
+            }
+        }
+    }
 }
 
 fn resolve_owner_scope_notification_user(
@@ -245,8 +376,9 @@ async fn build_outgoing_response_for_thread(
     session: &Arc<tokio::sync::Mutex<crate::agent::session::Session>>,
     thread_id: Uuid,
     content: impl Into<String>,
+    attachment_paths: Vec<String>,
 ) -> OutgoingResponse {
-    let mut response = OutgoingResponse::text(content);
+    let mut response = OutgoingResponse::text(content).with_attachments(attachment_paths);
     let attachments = {
         let sess = session.lock().await;
         sess.threads
@@ -256,11 +388,41 @@ async fn build_outgoing_response_for_thread(
             .unwrap_or_default()
     };
 
-    if !attachments.is_empty() {
+    if response.attachments.is_empty() && !attachments.is_empty() {
         response = response.with_inline_attachments(attachments);
     }
 
     response
+}
+
+async fn submission_response_to_handle_outcome(
+    session: &Arc<tokio::sync::Mutex<crate::agent::session::Session>>,
+    thread_id: Uuid,
+    content: String,
+    attachments: Vec<String>,
+) -> HandleOutcome {
+    let has_attachments = !attachments.is_empty();
+
+    // Suppress silent replies only when there is truly nothing else to deliver.
+    // Image-only generated responses intentionally have empty text plus staged
+    // attachments, and must still reach the originating channel.
+    if ironclaw_llm::is_silent_reply(&content) {
+        if !has_attachments {
+            tracing::debug!("Suppressing silent reply token");
+            return HandleOutcome::Shutdown;
+        }
+        return HandleOutcome::Respond(
+            build_outgoing_response_for_thread(session, thread_id, "", attachments).await,
+        );
+    }
+
+    if content.is_empty() && !has_attachments {
+        HandleOutcome::NoResponse
+    } else {
+        HandleOutcome::Respond(
+            build_outgoing_response_for_thread(session, thread_id, content, attachments).await,
+        )
+    }
 }
 
 async fn resolve_channel_notification_user(
@@ -315,6 +477,18 @@ fn should_fallback_routine_notification(error: &ChannelError) -> bool {
     !matches!(error, ChannelError::MissingRoutingTarget { .. })
 }
 
+fn setup_markers_for_skills(
+    skills: &[ironclaw_skills::LoadedSkill],
+) -> std::collections::HashSet<String> {
+    let mut markers = std::collections::HashSet::new();
+    for skill in skills {
+        if let Some(marker) = &skill.manifest.activation.setup_marker {
+            markers.insert(marker.clone());
+        }
+    }
+    markers
+}
+
 /// Core dependencies for the agent.
 ///
 /// Bundles the shared components to reduce argument count.
@@ -357,6 +531,15 @@ pub struct AgentDeps {
     pub llm_backend: String,
     /// Per-tenant rate limiting registry (lazily creates rate state per user).
     pub tenant_rates: Arc<crate::tenant::TenantRateRegistry>,
+    /// Resolved runtime policy used to filter the model-facing tool list
+    /// (#3045 PR 4 + PR 5). When `None`, the legacy unfiltered tool list
+    /// is used — appropriate for tests and the bootstrap path before
+    /// `Config::with_runtime_overrides` has run. When `Some`, every
+    /// `tool_definitions` build for the LLM goes through
+    /// `ToolRegistry::tool_definitions_visible_under(policy)` so
+    /// hosted-multi-tenant deployments cannot expose provider-host shell
+    /// affordances to the model.
+    pub runtime_policy: Option<ironclaw_host_api::runtime_policy::EffectiveRuntimePolicy>,
 }
 
 /// The main agent that coordinates all components.
@@ -435,6 +618,12 @@ impl Agent {
         if let Some(ref interceptor) = deps.http_interceptor {
             scheduler.set_http_interceptor(Arc::clone(interceptor));
         }
+        if let Some(ref policy) = deps.runtime_policy {
+            // Propagate the resolved runtime policy so background-job
+            // workers see the same model-facing tool surface as the
+            // dispatcher (#3243 HIGH iteration-2 gap).
+            scheduler.set_runtime_policy(policy.clone());
+        }
         let scheduler = Arc::new(scheduler);
 
         Self {
@@ -499,7 +688,11 @@ impl Agent {
         message: &IncomingMessage,
         response: OutgoingResponse,
     ) -> Result<(), ChannelError> {
+        let staged_generated_attachments = response.attachments.clone();
         let respond_result = self.channels.respond(message, response).await;
+        crate::generated_images::remove_staged_generated_image_attachments(
+            &staged_generated_attachments,
+        );
         // Always emit Done regardless of whether respond succeeded, so the
         // client knows the turn is over even when the response delivery fails.
         if let Err(e) = self
@@ -703,27 +896,16 @@ impl Agent {
         let Some(registry) = self.skill_registry() else {
             return (vec![], message_content.to_string(), vec![]);
         };
-        // Snapshot the skill list + distinct setup markers under the read
-        // lock, then drop the guard before any await. The marker checks
-        // and the prefilter call don't need the registry lock and we
-        // shouldn't hold a poisonable RwLock across an await point.
-        let (available, distinct_markers) = match registry.read() {
-            Ok(guard) => {
-                let skills_clone: Vec<ironclaw_skills::LoadedSkill> = guard.skills().to_vec();
-                let mut markers: std::collections::HashSet<String> =
-                    std::collections::HashSet::new();
-                for s in &skills_clone {
-                    if let Some(m) = &s.manifest.activation.setup_marker {
-                        markers.insert(m.clone());
-                    }
-                }
-                (skills_clone, markers)
-            }
-            Err(e) => {
-                tracing::error!("Skill registry lock poisoned: {}", e);
-                return (vec![], message_content.to_string(), vec![]);
-            }
+        // Snapshot the skill list + distinct setup markers, then drop any
+        // registry state before marker checks and prefiltering. In hosted
+        // multi-tenant mode, non-owner turns resolve the same private skill
+        // mount used by the Settings UI so self-installed skills can actually
+        // activate at runtime.
+        let available = match self.available_skills_for_user(registry, user_id).await {
+            Some(skills) => skills,
+            None => return (vec![], message_content.to_string(), vec![]),
         };
+        let distinct_markers = setup_markers_for_skills(&available);
 
         // Resolve which setup markers are satisfied by the current
         // workspace. A marker is "satisfied" iff its path exists.
@@ -754,12 +936,15 @@ impl Agent {
 
         // Phase 2: Score-based selection on the rewritten message
         let skills_cfg = &self.deps.skills_config;
-        let outcome = ironclaw_skills::prefilter_skills(
+        let outcome = ironclaw_skills::prefilter_skills_with_options(
             &rewritten,
             &available,
             skills_cfg.max_active_skills,
             skills_cfg.max_context_tokens,
             &satisfied,
+            ironclaw_skills::SkillSelectionOptions {
+                regex_activation_enabled: skills_cfg.regex_activation_enabled,
+            },
         );
 
         // Feedback notes: start with the selector's own notes (chain-load,
@@ -797,6 +982,32 @@ impl Agent {
         }
 
         (selected, rewritten, feedback)
+    }
+
+    async fn available_skills_for_user(
+        &self,
+        registry: &Arc<std::sync::RwLock<SkillRegistry>>,
+        user_id: &str,
+    ) -> Option<Vec<ironclaw_skills::LoadedSkill>> {
+        if self.config.multi_tenant {
+            let mut scoped = match registry.read() {
+                Ok(guard) => guard.clone_config_for_tenant_user_scope(self.owner_id(), user_id),
+                Err(e) => {
+                    tracing::error!("Skill registry lock poisoned: {}", e);
+                    return None;
+                }
+            };
+            scoped.discover_all().await;
+            return Some(scoped.skills().to_vec());
+        }
+
+        match registry.read() {
+            Ok(guard) => Some(guard.skills().to_vec()),
+            Err(e) => {
+                tracing::error!("Skill registry lock poisoned: {}", e);
+                None
+            }
+        }
     }
 
     /// Send initial engine thread list and routines to the TUI channel so
@@ -991,6 +1202,12 @@ impl Agent {
             }
         });
 
+        let trace_queue_worker_handle = spawn_trace_queue_flush_worker(
+            self.owner_id().to_string(),
+            self.deps.store.clone(),
+            self.channels.clone(),
+        );
+
         // Spawn heartbeat if enabled
         let heartbeat_handle = if let Some(ref hb_config) = self.heartbeat_config {
             if hb_config.enabled {
@@ -1129,7 +1346,7 @@ impl Agent {
                     let (notify_tx, mut notify_rx) =
                         tokio::sync::mpsc::channel::<OutgoingResponse>(32);
 
-                    let engine = Arc::new(RoutineEngine::new(
+                    let mut engine = RoutineEngine::new(
                         rt_config.clone(),
                         crate::tenant::SystemScope::new(Arc::clone(store)),
                         self.llm().clone(),
@@ -1141,7 +1358,13 @@ impl Agent {
                         self.safety().clone(),
                         self.deps.sandbox_readiness,
                         self.deps.http_interceptor.clone(),
-                    ));
+                    );
+                    if let Some(ref policy) = self.deps.runtime_policy {
+                        // Apply the model-facing tool list filter to
+                        // routine-driven LLM iterations too (#3243 HIGH).
+                        engine.set_runtime_policy(policy.clone());
+                    }
+                    let engine = Arc::new(engine);
 
                     // Register routine tools
                     self.deps
@@ -1306,6 +1529,9 @@ impl Agent {
                     match self.hooks().run(&event).await {
                         Err(err) => {
                             tracing::warn!("BeforeOutbound hook blocked response: {}", err);
+                            crate::generated_images::remove_staged_generated_image_attachments(
+                                &response.attachments,
+                            );
                             // Still send Done so the client knows the turn is complete
                             // even though the response was suppressed by the hook.
                             self.send_done(&message).await;
@@ -1335,8 +1561,6 @@ impl Agent {
                     }
                 }
                 Ok(HandleOutcome::NoResponse) => {
-                    // Empty response (e.g. routine consumed the message, silent reply).
-                    // Send Done so the client knows the turn is complete.
                     tracing::debug!(
                         channel = %message.channel,
                         user = %message.user_id,
@@ -1345,10 +1569,6 @@ impl Agent {
                     self.send_done(&message).await;
                 }
                 Ok(HandleOutcome::Pending) => {
-                    // Turn paused awaiting user action (approval, auth, etc).
-                    // Do NOT emit Done — the thread is not in a terminal state.
-                    // The relevant ApprovalNeeded/AuthRequired status was already
-                    // sent by the inner handler before returning.
                     tracing::debug!(
                         channel = %message.channel,
                         user = %message.user_id,
@@ -1356,7 +1576,6 @@ impl Agent {
                     );
                 }
                 Ok(HandleOutcome::Shutdown) => {
-                    // Shutdown signal received (/quit, /exit, /shutdown)
                     tracing::debug!("Shutdown command received, exiting...");
                     break;
                 }
@@ -1411,6 +1630,7 @@ impl Agent {
         tracing::debug!("Agent shutting down...");
         repair_handle.abort();
         pruning_handle.abort();
+        trace_queue_worker_handle.abort();
         if let Some(handle) = heartbeat_handle {
             handle.abort();
         }
@@ -1949,7 +2169,11 @@ impl Agent {
                 // - `Error`: soft error — draining more messages after an error
                 //    would produce confusing interleaved output
                 // - `Err(_)`: hard error
-                while let Ok(SubmissionResult::Response { content: outgoing }) = &result {
+                while let Ok(SubmissionResult::Response {
+                    content: outgoing,
+                    attachments,
+                }) = &result
+                {
                     let merged = {
                         let mut sess = session.lock().await;
                         sess.threads
@@ -1979,9 +2203,13 @@ impl Agent {
                     //   identity will attribute every response to the first
                     //   message. This is acceptable for the current
                     //   single-user-per-thread model.
-                    let response =
-                        build_outgoing_response_for_thread(&session, thread_id, outgoing.clone())
-                            .await;
+                    let response = build_outgoing_response_for_thread(
+                        &session,
+                        thread_id,
+                        outgoing.clone(),
+                        attachments.clone(),
+                    )
+                    .await;
                     if let Err(e) = self.respond_then_done(message, response).await {
                         tracing::warn!(
                             thread_id = %thread_id,
@@ -2035,9 +2263,18 @@ impl Agent {
                         .handle_reasoning_command(&args, &session, thread_id)
                         .await;
                     return match result {
-                        SubmissionResult::Response { content } => {
-                            Ok(HandleOutcome::Respond(OutgoingResponse::text(content)))
-                        }
+                        SubmissionResult::Response {
+                            content,
+                            attachments,
+                        } => Ok(HandleOutcome::Respond(
+                            build_outgoing_response_for_thread(
+                                &session,
+                                thread_id,
+                                content,
+                                attachments,
+                            )
+                            .await,
+                        )),
                         SubmissionResult::Ok { message } => Ok(HandleOutcome::from_legacy(message)),
                         SubmissionResult::Error { message } => Ok(HandleOutcome::Respond(
                             OutgoingResponse::text(format!("Error: {}", message)),
@@ -2165,7 +2402,11 @@ impl Agent {
                         )
                         .await;
 
-                    while let Ok(SubmissionResult::Response { content: outgoing }) = &result {
+                    while let Ok(SubmissionResult::Response {
+                        content: outgoing,
+                        attachments,
+                    }) = &result
+                    {
                         let merged = {
                             let mut sess = session.lock().await;
                             sess.threads
@@ -2180,6 +2421,7 @@ impl Agent {
                             &session,
                             thread_id,
                             outgoing.clone(),
+                            attachments.clone(),
                         )
                         .await;
                         if let Err(e) = self.respond_then_done(message, response).await {
@@ -2219,7 +2461,10 @@ impl Agent {
                 // identically (#3317).
                 match crate::bridge::handle_pairing_claim(self, message, &channel, &code).await {
                     Ok(crate::bridge::BridgeOutcome::Respond(text)) => {
-                        Ok(SubmissionResult::Response { content: text })
+                        Ok(SubmissionResult::Response {
+                            content: text,
+                            attachments: Vec::new(),
+                        })
                     }
                     Ok(crate::bridge::BridgeOutcome::NoResponse)
                     | Ok(crate::bridge::BridgeOutcome::Pending) => {
@@ -2269,20 +2514,16 @@ impl Agent {
 
         // Convert SubmissionResult to a HandleOutcome.
         match result? {
-            SubmissionResult::Response { content } => {
-                // Suppress silent replies (e.g. from group chat "nothing to say" responses).
-                // Silent replies exit single-message REPL invocations.
-                if ironclaw_llm::is_silent_reply(&content) {
-                    tracing::debug!("Suppressing silent reply token");
-                    Ok(HandleOutcome::Shutdown)
-                } else if content.is_empty() {
-                    Ok(HandleOutcome::NoResponse)
-                } else {
-                    Ok(HandleOutcome::Respond(
-                        build_outgoing_response_for_thread(&session, thread_id, content).await,
-                    ))
-                }
-            }
+            SubmissionResult::Response {
+                content,
+                attachments,
+            } => Ok(submission_response_to_handle_outcome(
+                &session,
+                thread_id,
+                content,
+                attachments,
+            )
+            .await),
             SubmissionResult::Ok {
                 message: output_message,
             } => {
@@ -2371,6 +2612,7 @@ mod tests {
                 input_tokens: 0,
                 output_tokens: 0,
                 finish_reason: FinishReason::Stop,
+                reasoning: None,
                 cache_read_input_tokens: 0,
                 cache_creation_input_tokens: 0,
             })
@@ -2421,6 +2663,7 @@ mod tests {
             builder: None,
             llm_backend: "nearai".to_string(),
             tenant_rates: Arc::new(crate::tenant::TenantRateRegistry::new(4, 3)),
+            runtime_policy: None,
         };
 
         Agent::new(
@@ -2455,6 +2698,59 @@ mod tests {
             Some(Arc::new(crate::context::ContextManager::new(1))),
             None,
         )
+    }
+
+    #[tokio::test]
+    async fn select_active_skills_uses_scoped_user_registry_in_multi_tenant_mode() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let registry = ironclaw_skills::SkillRegistry::new(temp.path().join("owner-skills"))
+            .with_installed_dir(temp.path().join("owner-installed"));
+        let scoped = registry.clone_config_for_tenant_user_scope("owner", "alice");
+        let skill_content = r#"---
+name: tenant-skill
+description: Tenant runtime skill
+---
+
+Only Alice should be able to activate this skill.
+"#;
+        ironclaw_skills::SkillRegistry::prepare_install_to_disk(
+            scoped.install_target_dir(),
+            "tenant-skill",
+            skill_content,
+        )
+        .await
+        .expect("install scoped skill");
+
+        let mut agent = make_legacy_handle_message_test_agent();
+        agent.config.multi_tenant = true;
+        agent.deps.owner_id = "owner".to_string();
+        agent.deps.skill_registry = Some(Arc::new(std::sync::RwLock::new(registry)));
+
+        let (selected, rewritten, feedback) = agent
+            .select_active_skills("please use /tenant-skill", "alice")
+            .await;
+
+        assert_eq!(
+            selected
+                .iter()
+                .map(|skill| skill.name())
+                .collect::<Vec<_>>(),
+            vec!["tenant-skill"]
+        );
+        assert!(rewritten.contains("Tenant runtime skill"));
+        assert!(
+            feedback
+                .iter()
+                .any(|note| note.contains("force-activated via /mention"))
+        );
+
+        let (owner_selected, _, _) = agent
+            .select_active_skills("please use /tenant-skill", "owner")
+            .await;
+        assert!(
+            owner_selected.is_empty(),
+            "owner/shared registry must not discover hidden scoped user skills"
+        );
     }
 
     #[cfg(feature = "libsql")]
@@ -2833,7 +3129,8 @@ mod tests {
             thread_id
         };
 
-        let response = build_outgoing_response_for_thread(&session, thread_id, "done").await;
+        let response =
+            build_outgoing_response_for_thread(&session, thread_id, "done", Vec::new()).await;
 
         assert_eq!(response.content, "done");
         assert!(response.attachments.is_empty());
@@ -2844,6 +3141,36 @@ mod tests {
         );
         assert_eq!(response.inline_attachments[0].mime_type, "image/png");
         assert_eq!(response.inline_attachments[0].data, b"png-bytes");
+    }
+
+    #[tokio::test]
+    async fn empty_submission_response_with_attachments_is_delivered() {
+        use super::submission_response_to_handle_outcome;
+        use crate::agent::session::Session;
+        use std::sync::Arc;
+
+        let session: Arc<tokio::sync::Mutex<Session>> =
+            Arc::new(tokio::sync::Mutex::new(Session::new("user-123")));
+        let thread_id = {
+            let mut sess = session.lock().await;
+            sess.create_thread(None).id
+        };
+
+        let outcome = submission_response_to_handle_outcome(
+            &session,
+            thread_id,
+            String::new(),
+            vec!["/tmp/generated-image.png".to_string()],
+        )
+        .await;
+
+        match outcome {
+            HandleOutcome::Respond(response) => {
+                assert!(response.content.is_empty());
+                assert_eq!(response.attachments, vec!["/tmp/generated-image.png"]);
+            }
+            other => panic!("expected attachment response, got {other:?}"),
+        }
     }
 
     #[tokio::test]

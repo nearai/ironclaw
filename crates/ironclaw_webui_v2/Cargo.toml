@@ -1,0 +1,67 @@
+[package]
+name = "ironclaw_webui_v2"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.92"
+description = "Reborn WebChat v2 HTTP route surface. Off by default — enable with the `webui-v2-beta` feature."
+authors = ["NEAR AI <support@near.ai>"]
+license = "MIT OR Apache-2.0"
+homepage = "https://github.com/nearai/ironclaw"
+repository = "https://github.com/nearai/ironclaw"
+publish = false
+
+[features]
+default = []
+# Compile in the WebChat v2 route surface and its axum handlers. Host
+# composition must additionally mount the descriptors and run the bearer
+# auth + scope-extraction middleware before any of these handlers see
+# traffic — see crate-level docs.
+webui-v2-beta = [
+    "dep:axum",
+    "dep:async-trait",
+    "dep:async-stream",
+    "dep:futures",
+    "dep:tokio",
+]
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tracing = "0.1"
+
+ironclaw_host_api = { path = "../ironclaw_host_api", version = "0.1.0" }
+# Deliberately no direct dependency on `ironclaw_product_adapters`. Handlers
+# must consume only the `RebornServicesApi` facade plus the ingress + error
+# vocabulary; projection types (`ProjectionCursor`, `ProductOutboundEnvelope`)
+# are re-exported through `ironclaw_product_workflow`. The architecture
+# boundary test in `ironclaw_architecture` enforces this edge.
+ironclaw_product_workflow = { path = "../ironclaw_product_workflow", version = "0.1.0" }
+
+# Optional — only used when `webui-v2-beta` is enabled.
+async-trait = { version = "0.1", optional = true }
+async-stream = { version = "0.3", optional = true }
+axum = { version = "0.8", optional = true, features = ["ws"] }
+futures = { version = "0.3", optional = true }
+tokio = { version = "1", features = ["sync", "time"], optional = true }
+
+[dev-dependencies]
+ironclaw_webui_v2 = { path = ".", features = ["webui-v2-beta"] }
+ironclaw_product_workflow = { path = "../ironclaw_product_workflow", features = ["test-support"] }
+# Production handlers must NOT depend on `ironclaw_product_adapters`
+# (enforced by the architecture boundary test). The handler contract
+# tests do, because they need to construct `ProductOutboundEnvelope`
+# fixtures with the canonical newtype constructors to drive the SSE
+# projection wire-shape regression.
+ironclaw_product_adapters = { path = "../ironclaw_product_adapters" }
+ironclaw_threads = { path = "../ironclaw_threads" }
+ironclaw_turns = { path = "../ironclaw_turns" }
+async-trait = "0.1"
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
+tokio = { version = "1", features = ["macros", "net", "rt", "rt-multi-thread", "sync", "time", "test-util"] }
+# Real WebSocket client for the stream_events_ws frame-content test.
+# Oneshot can't complete a true WS upgrade so the frame-flow test
+# needs a bound listener + proper handshake.
+tokio-tungstenite = { version = "0.29", default-features = false, features = ["connect"] }
+tower = { version = "0.5", features = ["util"] }
+http = "1"
+http-body-util = "0.1"

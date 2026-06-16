@@ -146,9 +146,12 @@ impl OpenAiCodexProvider {
             "stream": true,
             "input": input,
             "text": { "verbosity": "medium" },
-            // Safe for non-reasoning models — API ignores unrecognized include values
-            "include": ["reasoning.encrypted_content"],
         });
+
+        if crate::reasoning_models::supports_openai_reasoning(&self.model) {
+            body["reasoning"] = crate::responses_reasoning::summary_request();
+            body["include"] = serde_json::json!(["reasoning.encrypted_content"]);
+        }
 
         if !instructions.is_empty() {
             body["instructions"] = serde_json::Value::String(instructions);
@@ -269,6 +272,7 @@ impl LlmProvider for OpenAiCodexProvider {
             input_tokens: parsed.input_tokens,
             output_tokens: parsed.output_tokens,
             finish_reason: parsed.finish_reason,
+            reasoning: parsed.reasoning,
             cache_read_input_tokens: 0,
             cache_creation_input_tokens: 0,
         })
@@ -309,6 +313,16 @@ impl LlmProvider for OpenAiCodexProvider {
             }
         }
 
+        // Strict-mode tool schemas advertise every optional as required+nullable,
+        // so the model fills unset optionals with `null` (or `""` for some codex
+        // models). Strip those placeholders against each tool's original schema so
+        // only provided values reach the tool. `true`: this is a codex model.
+        crate::tool_schema::strip_unset_optional_fields(
+            &mut parsed.tool_calls,
+            &request.tools,
+            true,
+        );
+
         let finish_reason = if !parsed.tool_calls.is_empty() {
             FinishReason::ToolUse
         } else {
@@ -327,7 +341,7 @@ impl LlmProvider for OpenAiCodexProvider {
             finish_reason,
             cache_read_input_tokens: 0,
             cache_creation_input_tokens: 0,
-            reasoning: None,
+            reasoning: parsed.reasoning,
         })
     }
 
@@ -530,6 +544,7 @@ fn convert_tool_definition(tool: &ToolDefinition) -> serde_json::Value {
 #[derive(Debug)]
 struct ParsedResponse {
     text_content: String,
+    reasoning: Option<String>,
     tool_calls: Vec<ToolCall>,
     input_tokens: u32,
     output_tokens: u32,
@@ -556,6 +571,7 @@ struct FunctionCallState {
 /// Parse the full SSE response body into a `ParsedResponse`.
 fn parse_sse_response(body: &str) -> Result<ParsedResponse, LlmError> {
     let mut text_content = String::new();
+    let mut reasoning_summary = String::new();
     let mut tool_calls: Vec<ToolCall> = Vec::new();
     let mut input_tokens: u32 = 0;
     let mut output_tokens: u32 = 0;
@@ -602,6 +618,12 @@ fn parse_sse_response(body: &str) -> Result<ParsedResponse, LlmError> {
                     text_content.push_str(delta);
                 }
             }
+            event_type
+                if crate::responses_reasoning::apply_summary_event(
+                    &mut reasoning_summary,
+                    event_type,
+                    &event.data,
+                ) => {}
 
             // Output item added (could be message or function_call)
             "response.output_item.added" => {
@@ -682,6 +704,7 @@ fn parse_sse_response(body: &str) -> Result<ParsedResponse, LlmError> {
                                 arguments,
                                 reasoning: None,
                                 signature: None,
+                                arguments_parse_error: None,
                             });
                         } else {
                             // Fallback: extract directly from the item
@@ -709,6 +732,7 @@ fn parse_sse_response(body: &str) -> Result<ParsedResponse, LlmError> {
                                 arguments,
                                 reasoning: None,
                                 signature: None,
+                                arguments_parse_error: None,
                             });
                         }
                     }
@@ -788,6 +812,7 @@ fn parse_sse_response(body: &str) -> Result<ParsedResponse, LlmError> {
                 arguments,
                 reasoning: None,
                 signature: None,
+                arguments_parse_error: None,
             });
         }
     }
@@ -805,6 +830,7 @@ fn parse_sse_response(body: &str) -> Result<ParsedResponse, LlmError> {
 
     Ok(ParsedResponse {
         text_content,
+        reasoning: crate::responses_reasoning::finish_summary(reasoning_summary),
         tool_calls,
         input_tokens,
         output_tokens,
@@ -885,6 +911,7 @@ mod tests {
                 arguments: serde_json::json!({"query": "test"}),
                 reasoning: None,
                 signature: None,
+                arguments_parse_error: None,
             },
             ToolCall {
                 id: "call_2".to_string(),
@@ -892,6 +919,7 @@ mod tests {
                 arguments: serde_json::json!({"path": "/tmp"}),
                 reasoning: None,
                 signature: None,
+                arguments_parse_error: None,
             },
         ];
         let msg =
@@ -1013,6 +1041,25 @@ data: {"type":"response.completed","response":{"status":"completed","usage":{"in
         assert_eq!(parsed.output_tokens, 5);
         assert_eq!(parsed.finish_reason, FinishReason::Stop);
         assert!(parsed.tool_calls.is_empty());
+    }
+
+    #[test]
+    fn test_parse_sse_reasoning_summary_response() {
+        let sse_body = r#"data: {"type":"response.reasoning_summary_text.delta","delta":"Thinking Steps\n"}
+
+data: {"type":"response.reasoning_summary_text.delta","delta":"[] Inspect context."}
+
+data: {"type":"response.output_text.delta","delta":"Done."}
+
+data: {"type":"response.completed","response":{"status":"completed","usage":{"input_tokens":10,"output_tokens":5}}}
+
+"#;
+        let parsed = parse_sse_response(sse_body).unwrap();
+        assert_eq!(parsed.text_content, "Done.");
+        assert_eq!(
+            parsed.reasoning.as_deref(),
+            Some("Thinking Steps\n[] Inspect context.")
+        );
     }
 
     #[test]
@@ -1249,6 +1296,7 @@ data: {"type":"response.completed","response":{"status":"completed","usage":{"in
             arguments: serde_json::json!({"q": "test"}),
             reasoning: None,
             signature: None,
+            arguments_parse_error: None,
         }];
         let msg = ChatMessage::assistant_with_tool_calls(None, tool_calls);
         let items = super::convert_message(&msg, 0);
@@ -1301,6 +1349,7 @@ data: {"type":"response.completed","response":{"status":"completed","usage":{"in
             arguments: serde_json::json!({}),
             reasoning: None,
             signature: None,
+            arguments_parse_error: None,
         };
         if let Some(original) = name_map.get(&tc.name) {
             tc.name = original.clone();

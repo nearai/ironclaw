@@ -447,6 +447,17 @@ impl Tool for HttpTool {
         "http"
     }
 
+    fn runtime_affordance(&self) -> crate::tools::ToolRuntimeAffordance {
+        // Direct outbound HTTP egress. Hosted-multi-tenant policies
+        // resolve to `Brokered`/`Allowlist` network modes; the broker
+        // is the supported route for those deployments. Hide this tool
+        // under non-Direct policies so the model uses the brokered
+        // surface instead. `Direct` and `DirectLogged` profiles
+        // (LocalYolo, EnterpriseYoloDedicated) keep it visible
+        // (#3243 MED tool-affordance coverage).
+        crate::tools::ToolRuntimeAffordance::DirectNetwork
+    }
+
     fn description(&self) -> &str {
         "Make HTTP requests to external APIs. Supports GET, POST, PUT, DELETE methods. \
          Use save_to to download binary files (images, PDFs, etc.) to a local path, \
