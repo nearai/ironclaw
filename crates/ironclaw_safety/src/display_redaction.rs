@@ -18,8 +18,8 @@ pub fn shell_command_display_text(command: &str) -> SafeDisplayText {
 }
 
 fn redact_shell_command_for_display(cmd: &str) -> String {
-    static PATTERNS: OnceLock<[Regex; 4]> = OnceLock::new();
-    let patterns = PATTERNS.get_or_init(|| {
+    static SHELL_FLAG_PATTERNS: OnceLock<[Regex; 2]> = OnceLock::new();
+    let shell_flag_patterns = SHELL_FLAG_PATTERNS.get_or_init(|| {
         [
             Regex::new(
                 r#"(?i)(-u|--user|--token|--api-?key|--password|--auth|--bearer)(\s+|=)(["'])[^"']*(["'])"#,
@@ -29,20 +29,19 @@ fn redact_shell_command_for_display(cmd: &str) -> String {
                 r#"(?i)(-u|--user|--token|--api-?key|--password|--auth|--bearer)(\s+|=)([^\s"'][^\s]*)"#,
             )
             .expect("hardcoded shell redaction regex is valid"), // safety: static regex literal is covered by redaction tests.
-            Regex::new(
-                r#"(?i)(Authorization|X-Api-Key|X-Auth-Token|Bearer)\s*:\s*(?:[a-zA-Z]+\s+[^\s"']+|[^\s"']+)"#,
-            )
-                .expect("hardcoded shell redaction regex is valid"), // safety: static regex literal is covered by redaction tests.
-            Regex::new(r#"[a-zA-Z][a-zA-Z0-9+.\-]*://[^\s"']+"#)
-                .expect("hardcoded shell redaction regex is valid"), // safety: static regex literal is covered by redaction tests.
         ]
     });
-    let mut out = patterns[0]
+    let shared_patterns = shared_display_redaction_patterns();
+    let mut out = shell_flag_patterns[0]
         .replace_all(cmd, "$1$2$3[redacted]$4")
         .into_owned();
-    out = patterns[1].replace_all(&out, "$1$2[redacted]").into_owned();
-    out = patterns[2].replace_all(&out, "$1: [redacted]").into_owned();
-    out = patterns[3]
+    out = shell_flag_patterns[1]
+        .replace_all(&out, "$1$2[redacted]")
+        .into_owned();
+    out = shared_patterns[0]
+        .replace_all(&out, "$1: [redacted]")
+        .into_owned();
+    out = shared_patterns[1]
         .replace_all(&out, |captures: &regex::Captures<'_>| {
             sanitize_url_substring_for_display(&captures[0])
         })
@@ -115,8 +114,18 @@ pub fn sanitize_display_text(text: &str) -> String {
 }
 
 fn redact_shared_display_substrings(text: &str) -> String {
+    let patterns = shared_display_redaction_patterns();
+    let out = patterns[0].replace_all(text, "$1: [redacted]").into_owned();
+    patterns[1]
+        .replace_all(&out, |captures: &regex::Captures<'_>| {
+            sanitize_url_substring_for_display(&captures[0])
+        })
+        .into_owned()
+}
+
+fn shared_display_redaction_patterns() -> &'static [Regex; 2] {
     static PATTERNS: OnceLock<[Regex; 2]> = OnceLock::new();
-    let patterns = PATTERNS.get_or_init(|| {
+    PATTERNS.get_or_init(|| {
         [
             Regex::new(
                 r#"(?i)(Authorization|X-Api-Key|X-Auth-Token|Bearer)\s*:\s*(?:[a-zA-Z]+\s+[^\s"']+|[^\s"']+)"#,
@@ -125,13 +134,7 @@ fn redact_shared_display_substrings(text: &str) -> String {
             Regex::new(r#"[a-zA-Z][a-zA-Z0-9+.\-]*://[^\s"']+"#)
                 .expect("hardcoded display redaction regex is valid"), // safety: static regex literal is covered by redaction tests.
         ]
-    });
-    let out = patterns[0].replace_all(text, "$1: [redacted]").into_owned();
-    patterns[1]
-        .replace_all(&out, |captures: &regex::Captures<'_>| {
-            sanitize_url_substring_for_display(&captures[0])
-        })
-        .into_owned()
+    })
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
