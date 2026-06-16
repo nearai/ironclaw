@@ -8,8 +8,8 @@ use ironclaw_approvals::{
 use ironclaw_host_api::{Action, Principal};
 use ironclaw_run_state::ApprovalStatus;
 use ironclaw_turns::{
-    GateRef, GateResumeDisposition, GetRunStateRequest, ResumeTurnPrecondition, ResumeTurnRequest,
-    ResumeTurnResponse, TurnCoordinator, TurnError, TurnErrorCategory, TurnRunId, TurnStatus,
+    GateRef, GateResumeDisposition, ResumeTurnPrecondition, ResumeTurnRequest, TurnCoordinator,
+    TurnError, TurnErrorCategory, TurnRunId, TurnStatus,
 };
 
 use super::gate_ref::{approval_reply_binding_ref, approval_source_binding_ref};
@@ -359,56 +359,28 @@ impl DefaultApprovalInteractionService {
         request: ResolveApprovalInteractionRequest,
         run_id: TurnRunId,
     ) -> Result<ResolveApprovalInteractionResponse, ProductWorkflowError> {
-        // Idempotent replay: the first Deny already resumed the run with a
-        // denial disposition.  Fetch current state to reflect the outcome
-        // without issuing a new resume or cancel call.
-        let state = self
+        // Route through resume_turn with the SAME idempotency key as the first
+        // Deny.  TurnCoordinator::resume_turn returns the cached
+        // ResumeTurnResponse for a repeated key before running the precondition
+        // check, so this is idempotent regardless of current run state.  A
+        // fresh key on a finished run still errors via the precondition
+        // (correctly StaleGate).
+        let response = self
             .turn_coordinator
-            .get_run_state(GetRunStateRequest {
-                scope: request.scope.clone(),
+            .resume_turn(ResumeTurnRequest {
+                scope: request.scope,
+                actor: request.actor,
                 run_id,
+                gate_resolution_ref: request.gate_ref.clone(),
+                precondition: ResumeTurnPrecondition::BlockedApprovalGate,
+                source_binding_ref: approval_source_binding_ref(&request.gate_ref)?,
+                reply_target_binding_ref: approval_reply_binding_ref(&request.gate_ref)?,
+                idempotency_key: request.idempotency_key,
+                resume_disposition: Some(GateResumeDisposition::Denied),
             })
             .await
             .map_err(map_approval_resume_error)?;
-        if state.status == TurnStatus::Cancelled {
-            // The run was cancelled before or instead of being denial-resumed —
-            // return a Resumed response reflecting the disposition we carried,
-            // or fall through; the simplest safe answer is StaleGate because
-            // we have no CancelRunResponse to return for the Resumed variant.
-            // Mirror auth: a Cancelled run in the replay-denied arm means
-            // something cancelled it before our first Deny could resume it.
-            return Err(approval_rejected(
-                ApprovalInteractionRejectionKind::StaleGate,
-            ));
-        }
-        if state.status.is_terminal() {
-            // Run is in some other terminal state (Completed, Failed, etc.)
-            // A replay-denied cannot be applied to a finished run.
-            return Err(approval_rejected(
-                ApprovalInteractionRejectionKind::StaleGate,
-            ));
-        }
-        if matches!(
-            state.resume_disposition.as_ref(),
-            Some(GateResumeDisposition::Denied)
-        ) {
-            // Run is non-terminal and carries our denial marker — the first
-            // Deny successfully resumed it with a denial disposition.
-            // Replay that outcome idempotently.
-            return Ok(ResolveApprovalInteractionResponse::Resumed(
-                ResumeTurnResponse {
-                    run_id,
-                    status: state.status,
-                    event_cursor: state.event_cursor,
-                },
-            ));
-        }
-        // Run is non-terminal but no denial marker — the record was denied via
-        // the approval store, but the run was not yet denial-resumed by us.
-        // Treat as stale; the gate cannot be safely replayed here.
-        Err(approval_rejected(
-            ApprovalInteractionRejectionKind::StaleGate,
-        ))
+        Ok(ResolveApprovalInteractionResponse::Resumed(response))
     }
 }
 
