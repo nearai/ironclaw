@@ -8,6 +8,7 @@
 //! - Detecting secret leakage in outputs
 
 mod credential_detect;
+mod display_redaction;
 mod leak_detector;
 mod policy;
 mod prompt_validation;
@@ -19,6 +20,10 @@ mod validator;
 
 pub use credential_detect::{
     http_parts_contain_manual_credentials, params_contain_manual_credentials,
+};
+pub use display_redaction::{
+    SHELL_COMMAND_DISPLAY_MAX_BYTES, SafeDisplayText, sanitize_display_text,
+    sanitize_url_for_display, shell_command_display_text,
 };
 pub use leak_detector::{
     LeakAction, LeakDetectionError, LeakDetector, LeakMatch, LeakPattern, LeakScanResult,

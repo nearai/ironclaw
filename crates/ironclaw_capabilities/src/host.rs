@@ -6,13 +6,13 @@ use ironclaw_host_api::{
     CapabilityDescriptor, CapabilityDispatchRequest, CapabilityDispatchResult,
     CapabilityDispatcher, CapabilityGrantId, CapabilityId, Decision, DenyReason, ExecutionContext,
     InvocationFingerprint, InvocationId, Obligation, ProcessId, ResourceEstimate, ResourceScope,
-    shell_command_display_text,
 };
 use ironclaw_processes::{ProcessManager, ProcessStart};
 use ironclaw_run_state::{
     ApprovalRequestStore, ApprovalStatus, RunStart, RunStateApprovalStore, RunStateError,
     RunStateStore, RunStatus,
 };
+use ironclaw_safety::shell_command_display_text;
 use ironclaw_trust::TrustDecision;
 use tracing::{debug, warn};
 

@@ -4,12 +4,15 @@ use async_trait::async_trait;
 use ironclaw_event_projections::{CapabilityActivityProjection, CapabilityActivityStatus};
 use ironclaw_host_api::{
     CapabilityDisplayOutputPreview, CapabilityDisplayText, CapabilityId, InvocationId,
-    sanitize_text as host_sanitize_text, sanitize_url_for_display, shell_command_display_text,
     truncate_capability_display_text,
 };
 use ironclaw_product_adapters::{
     CAPABILITY_DISPLAY_PREVIEW_MAX_BYTES, CAPABILITY_DISPLAY_SUMMARY_MAX_BYTES,
     CapabilityDisplayPreviewView, CapabilityDisplayPreviewViewInput, ProductAdapterError,
+};
+use ironclaw_safety::{
+    sanitize_display_text as safety_sanitize_text, sanitize_url_for_display,
+    shell_command_display_text,
 };
 use ironclaw_threads::ThreadMessageId;
 use ironclaw_turns::{TurnRunId, run_profile::CapabilityInputRef};
@@ -851,5 +854,5 @@ fn truncate_bytes(text: &str, max_bytes: usize) -> CapabilityDisplayText {
 }
 
 pub(crate) fn sanitize_text(text: &str) -> String {
-    host_sanitize_text(text)
+    safety_sanitize_text(text)
 }

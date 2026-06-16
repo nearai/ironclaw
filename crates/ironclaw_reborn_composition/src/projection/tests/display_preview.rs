@@ -314,7 +314,7 @@ async fn capability_display_preview_store_summarizes_http_inputs_safely() {
         "builtin.http.save",
         serde_json::json!({
             "method": "post",
-            "url": "https://user:secret@example.test/reset/sk-secret?token=secret#frag",
+            "url": "https://user:secret@example.test/reset/token/opaque-value?token=secret#frag",
             "save_to": "/workspace/tmp/result.json",
             "headers": {
                 "Authorization": "Bearer sk-secret"
@@ -328,11 +328,12 @@ async fn capability_display_preview_store_summarizes_http_inputs_safely() {
 
     let input_summary = preview.input_summary.as_deref().unwrap();
     assert!(input_summary.contains("method: POST"));
-    assert!(input_summary.contains("url: https://example.test/reset/[redacted]?..."));
+    assert!(input_summary.contains("url: https://example.test/reset/[redacted]/[redacted]?..."));
     assert!(input_summary.contains("save_to: tmp/result.json"));
     assert!(input_summary.contains("response_body_limit: 4096"));
     assert!(input_summary.contains("timeout_ms: 5000"));
     assert!(!input_summary.contains("user:secret"));
+    assert!(!input_summary.contains("opaque-value"));
     assert!(!input_summary.contains("sk-secret"));
     assert!(!input_summary.contains("token=secret"));
     assert!(!input_summary.contains("Authorization"));
@@ -376,6 +377,36 @@ async fn capability_display_preview_store_summarizes_file_inputs_without_content
 }
 
 #[tokio::test]
+async fn capability_display_preview_store_summarizes_read_limits_and_memory_tree_root() {
+    let read_preview = completed_preview_for_input(
+        "builtin.read_file",
+        "builtin.read_file",
+        serde_json::json!({
+            "path": "/workspace/src/main.rs",
+            "offset": 128,
+            "max_bytes": 4096
+        }),
+    )
+    .await;
+    let read_summary = read_preview.input_summary.as_deref().unwrap();
+    assert!(read_summary.contains("path: src/main.rs"));
+    assert!(read_summary.contains("offset: 128"));
+    assert!(read_summary.contains("limit: 4096"));
+
+    let memory_tree_preview = completed_preview_for_input(
+        "builtin.memory_tree",
+        "builtin.memory_tree",
+        serde_json::json!({
+            "limit": 12
+        }),
+    )
+    .await;
+    let memory_tree_summary = memory_tree_preview.input_summary.as_deref().unwrap();
+    assert!(memory_tree_summary.contains("path: /"));
+    assert!(memory_tree_summary.contains("limit: 12"));
+}
+
+#[tokio::test]
 async fn capability_display_preview_store_summarizes_search_and_memory_inputs() {
     let search_preview = completed_preview_for_input(
         "nearai.web_search",
@@ -406,6 +437,24 @@ async fn capability_display_preview_store_summarizes_search_and_memory_inputs() 
     assert!(memory_summary.contains("append: true"));
     assert!(memory_summary.contains("content_bytes: 16"));
     assert!(!memory_summary.contains("sk-secret"));
+}
+
+#[tokio::test]
+async fn capability_display_preview_store_summarizes_list_dir_inputs() {
+    let preview = completed_preview_for_input(
+        "builtin.list_dir",
+        "builtin.list_dir",
+        serde_json::json!({
+            "path": "/workspace/src",
+            "recursive": true,
+            "max_depth": 3
+        }),
+    )
+    .await;
+    let input_summary = preview.input_summary.as_deref().unwrap();
+    assert!(input_summary.contains("path: src"));
+    assert!(input_summary.contains("recursive: true"));
+    assert!(input_summary.contains("max_depth: 3"));
 }
 
 #[tokio::test]
