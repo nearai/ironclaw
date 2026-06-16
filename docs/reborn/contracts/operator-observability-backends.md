@@ -32,7 +32,10 @@ Required behavior:
 
 - Include the current operator status payload when status is available.
 - Convert non-ready status checks into stable diagnostic reason codes under the
-  `status` owning area.
+  `status` owning area. Status check ids may enter the public reason-code suffix
+  only when they match lowercase snake-case `[a-z][a-z0-9_]{0,63}` and do not
+  look secret/path-bearing; otherwise use a stable status/state fallback reason
+  code and sanitize display fields.
 - Include setup diagnostics for provider/model/profile/WebUI access without
   echoing secrets or provider/backend error details.
 - Include effective-config diagnostics for unsupported, immutable, deprecated,

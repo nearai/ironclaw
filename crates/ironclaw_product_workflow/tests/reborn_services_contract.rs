@@ -34,31 +34,31 @@ use ironclaw_product_workflow::{
     LlmConfigService, LlmConfigServiceError, LlmConfigSnapshot, LlmModelsResult, LlmProbeRequest,
     LlmProbeResult, LlmProviderView, NearAiLoginRequest, NearAiLoginStart,
     NearAiWalletLoginRequest, NearAiWalletLoginResult, OperatorLogsService,
-    OperatorServiceLifecycleService, OutboundPreferencesProductFacade, ProductAgentBoundCaller,
-    ProductWorkflowError, RebornAutomationInfo, RebornAutomationRecentRunInfo,
-    RebornAutomationRecentRunStatus, RebornAutomationRunStatus, RebornAutomationSource,
-    RebornAutomationState, RebornChannelConnectAction, RebornChannelConnectStrategy,
-    RebornConnectableChannelInfo, RebornDeleteThreadRequest, RebornExtensionOnboardingState,
-    RebornGetRunStateRequest, RebornLogLevel, RebornLogQueryRequest, RebornLogQueryResponse,
-    RebornOperatorConfigDiagnosticSeverity, RebornOperatorLogsQuery, RebornOperatorSetupRequest,
-    RebornOperatorSetupStatus, RebornOperatorStatusCheck, RebornOperatorStatusResponse,
-    RebornOperatorStatusSeverity, RebornOperatorStatusState, RebornOperatorSurfaceStatus,
-    RebornOutboundDeliveryModality, RebornOutboundDeliveryTargetCapabilities,
-    RebornOutboundDeliveryTargetDescription, RebornOutboundDeliveryTargetId,
-    RebornOutboundDeliveryTargetListResponse, RebornOutboundDeliveryTargetOption,
-    RebornOutboundDeliveryTargetStatus, RebornOutboundDeliveryTargetSummary,
-    RebornOutboundPreferencesResponse, RebornResolveGateResponse, RebornServiceLifecycleAction,
-    RebornServiceLifecycleRequest, RebornServiceLifecycleResponse, RebornServiceLifecycleState,
-    RebornServices, RebornServicesApi, RebornServicesError, RebornServicesErrorCode,
-    RebornServicesErrorKind, RebornSetOutboundPreferencesRequest, RebornStreamEventsRequest,
-    RebornSubmitTurnResponse, RebornTimelineRequest, ResolveApprovalInteractionRequest,
-    ResolveApprovalInteractionResponse, ResolveAuthInteractionRequest,
-    ResolveAuthInteractionResponse, SetActiveLlmRequest, StaticConnectableChannelsProductFacade,
-    StaticOperatorStatusService, TriggerRunThreadScope, UpsertLlmProviderRequest,
-    WebUiAuthenticatedCaller, WebUiCancelRunRequest, WebUiCreateThreadRequest,
-    WebUiInboundValidationCode, WebUiListAutomationsRequest, WebUiListThreadsRequest,
-    WebUiResolveGateRequest, WebUiSendMessageRequest, WebUiSetupExtensionRequest,
-    approval_gate_ref, automation_trigger_thread_metadata_json,
+    OperatorServiceLifecycleService, OperatorStatusService, OutboundPreferencesProductFacade,
+    ProductAgentBoundCaller, ProductWorkflowError, RebornAutomationInfo,
+    RebornAutomationRecentRunInfo, RebornAutomationRecentRunStatus, RebornAutomationRunStatus,
+    RebornAutomationSource, RebornAutomationState, RebornChannelConnectAction,
+    RebornChannelConnectStrategy, RebornConnectableChannelInfo, RebornDeleteThreadRequest,
+    RebornExtensionOnboardingState, RebornGetRunStateRequest, RebornLogLevel,
+    RebornLogQueryRequest, RebornLogQueryResponse, RebornOperatorConfigDiagnosticSeverity,
+    RebornOperatorLogsQuery, RebornOperatorSetupRequest, RebornOperatorSetupStatus,
+    RebornOperatorStatusCheck, RebornOperatorStatusResponse, RebornOperatorStatusSeverity,
+    RebornOperatorStatusState, RebornOperatorSurfaceStatus, RebornOutboundDeliveryModality,
+    RebornOutboundDeliveryTargetCapabilities, RebornOutboundDeliveryTargetDescription,
+    RebornOutboundDeliveryTargetId, RebornOutboundDeliveryTargetListResponse,
+    RebornOutboundDeliveryTargetOption, RebornOutboundDeliveryTargetStatus,
+    RebornOutboundDeliveryTargetSummary, RebornOutboundPreferencesResponse,
+    RebornResolveGateResponse, RebornServiceLifecycleAction, RebornServiceLifecycleRequest,
+    RebornServiceLifecycleResponse, RebornServiceLifecycleState, RebornServices, RebornServicesApi,
+    RebornServicesError, RebornServicesErrorCode, RebornServicesErrorKind,
+    RebornSetOutboundPreferencesRequest, RebornStreamEventsRequest, RebornSubmitTurnResponse,
+    RebornTimelineRequest, ResolveApprovalInteractionRequest, ResolveApprovalInteractionResponse,
+    ResolveAuthInteractionRequest, ResolveAuthInteractionResponse, SetActiveLlmRequest,
+    StaticConnectableChannelsProductFacade, StaticOperatorStatusService, TriggerRunThreadScope,
+    UpsertLlmProviderRequest, WebUiAuthenticatedCaller, WebUiCancelRunRequest,
+    WebUiCreateThreadRequest, WebUiInboundValidationCode, WebUiListAutomationsRequest,
+    WebUiListThreadsRequest, WebUiResolveGateRequest, WebUiSendMessageRequest,
+    WebUiSetupExtensionRequest, approval_gate_ref, automation_trigger_thread_metadata_json,
 };
 use ironclaw_threads::{
     AcceptInboundMessageRequest, AcceptedInboundMessage, AcceptedInboundMessageReplay,
@@ -6525,6 +6525,7 @@ struct SetupSetActiveCall {
 
 struct SetupRecordingLlmConfigService {
     snapshot_calls: Mutex<usize>,
+    snapshot_callers: Mutex<Vec<WebUiAuthenticatedCaller>>,
     upsert_provider_calls: Mutex<Vec<SetupUpsertCall>>,
     set_active_calls: Mutex<Vec<SetupSetActiveCall>>,
     test_connection_calls: Mutex<usize>,
@@ -6539,6 +6540,7 @@ impl Default for SetupRecordingLlmConfigService {
     fn default() -> Self {
         Self {
             snapshot_calls: Mutex::new(0),
+            snapshot_callers: Mutex::new(Vec::new()),
             upsert_provider_calls: Mutex::new(Vec::new()),
             set_active_calls: Mutex::new(Vec::new()),
             test_connection_calls: Mutex::new(0),
@@ -6554,6 +6556,10 @@ impl Default for SetupRecordingLlmConfigService {
 impl SetupRecordingLlmConfigService {
     fn snapshot_count(&self) -> usize {
         *self.snapshot_calls.lock().expect("lock")
+    }
+
+    fn snapshot_callers(&self) -> Vec<WebUiAuthenticatedCaller> {
+        self.snapshot_callers.lock().expect("lock").clone()
     }
 
     fn upsert_provider_count(&self) -> usize {
@@ -6623,9 +6629,10 @@ impl SetupRecordingLlmConfigService {
 impl LlmConfigService for SetupRecordingLlmConfigService {
     async fn snapshot(
         &self,
-        _caller: WebUiAuthenticatedCaller,
+        caller: WebUiAuthenticatedCaller,
     ) -> Result<LlmConfigSnapshot, LlmConfigServiceError> {
         *self.snapshot_calls.lock().expect("lock") += 1;
+        self.snapshot_callers.lock().expect("lock").push(caller);
         if let Some(error) = self.next_snapshot_error.lock().expect("lock").take() {
             return Err(error);
         }
@@ -6730,6 +6737,35 @@ impl LlmConfigService for SetupRecordingLlmConfigService {
     }
 }
 
+struct RecordingOperatorStatusService {
+    response: RebornOperatorStatusResponse,
+    callers: Mutex<Vec<WebUiAuthenticatedCaller>>,
+}
+
+impl RecordingOperatorStatusService {
+    fn new(response: RebornOperatorStatusResponse) -> Self {
+        Self {
+            response,
+            callers: Mutex::new(Vec::new()),
+        }
+    }
+
+    fn callers(&self) -> Vec<WebUiAuthenticatedCaller> {
+        self.callers.lock().expect("lock").clone()
+    }
+}
+
+#[async_trait]
+impl OperatorStatusService for RecordingOperatorStatusService {
+    async fn status(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+    ) -> Result<RebornOperatorStatusResponse, RebornServicesError> {
+        self.callers.lock().expect("lock").push(caller);
+        Ok(self.response.clone())
+    }
+}
+
 fn services_with_setup_llm_config(
     llm_config: Arc<SetupRecordingLlmConfigService>,
 ) -> RebornServices {
@@ -6744,31 +6780,44 @@ fn services_with_setup_llm_config(
 async fn operator_diagnostics_aggregates_status_setup_and_config_reasons() {
     let llm_config = Arc::new(SetupRecordingLlmConfigService::default());
     llm_config.use_active_snapshot("openai", "gpt-5-mini");
-    let status_service = StaticOperatorStatusService::new(RebornOperatorStatusResponse {
-        generated_at: Utc::now(),
-        overall: RebornOperatorStatusState::Blocked,
-        checks: vec![
-            RebornOperatorStatusCheck {
-                id: "storage".to_string(),
-                status: RebornOperatorStatusState::Blocked,
-                severity: RebornOperatorStatusSeverity::Critical,
-                summary: "storage backend is unavailable".to_string(),
-                remediation: Some("repair storage configuration".to_string()),
-            },
-            RebornOperatorStatusCheck {
-                id: "provider_model".to_string(),
-                status: RebornOperatorStatusState::Ready,
-                severity: RebornOperatorStatusSeverity::Info,
-                summary: "provider and model are configured".to_string(),
-                remediation: None,
-            },
-        ],
-    });
+    let status_service = Arc::new(RecordingOperatorStatusService::new(
+        RebornOperatorStatusResponse {
+            generated_at: Utc::now(),
+            overall: RebornOperatorStatusState::Blocked,
+            checks: vec![
+                RebornOperatorStatusCheck {
+                    id: "storage".to_string(),
+                    status: RebornOperatorStatusState::Blocked,
+                    severity: RebornOperatorStatusSeverity::Critical,
+                    summary: "storage backend is unavailable".to_string(),
+                    remediation: Some("repair storage configuration".to_string()),
+                },
+                RebornOperatorStatusCheck {
+                    id: "provider_model".to_string(),
+                    status: RebornOperatorStatusState::Ready,
+                    severity: RebornOperatorStatusSeverity::Info,
+                    summary: "provider and model are configured".to_string(),
+                    remediation: None,
+                },
+                RebornOperatorStatusCheck {
+                    id: "sk-secret-token".to_string(),
+                    status: RebornOperatorStatusState::Blocked,
+                    severity: RebornOperatorStatusSeverity::Critical,
+                    summary: "failed with sk-test1234567890 at /home/alice/.env".to_string(),
+                    remediation: Some(
+                        "inspect /home/alice/.ssh/id_ed25519 and credential token".to_string(),
+                    ),
+                },
+            ],
+        },
+    ));
     let services = services_with_setup_llm_config(llm_config.clone())
-        .with_operator_status_service(Arc::new(status_service));
+        .with_operator_status_service(status_service.clone());
+    let diagnostics_caller =
+        caller_for_user_with_project("user-diagnostics", Some("project-diagnostics"));
 
     let response = services
-        .get_operator_diagnostics(caller())
+        .get_operator_diagnostics(diagnostics_caller.clone())
         .await
         .expect("operator diagnostics");
 
@@ -6781,6 +6830,7 @@ async fn operator_diagnostics_aggregates_status_setup_and_config_reasons() {
         .map(|diagnostic| diagnostic.reason_code.as_str())
         .collect::<Vec<_>>();
     assert!(reason_codes.contains(&"operator_doctor_storage_blocked"));
+    assert!(reason_codes.contains(&"operator_doctor_status_blocked"));
     assert!(reason_codes.contains(&"operator_setup_profile_not_wired"));
     assert!(reason_codes.contains(&"operator_setup_webui_access_not_wired"));
     assert!(reason_codes.contains(&"operator_config_service_not_wired"));
@@ -6788,6 +6838,19 @@ async fn operator_diagnostics_aggregates_status_setup_and_config_reasons() {
     let rendered = serde_json::to_string(&response).expect("serialize diagnostics");
     assert!(!rendered.contains("sk-"));
     assert!(!rendered.contains("/home/"));
+    assert!(!rendered.contains(".ssh"));
+    assert!(!rendered.contains("credential token"));
+    assert!(
+        response.diagnostics.iter().any(|diagnostic| {
+            diagnostic.reason_code == "operator_doctor_status_blocked"
+                && diagnostic.key == "[redacted operator status detail]"
+                && diagnostic.message == "[redacted operator status detail]"
+                && diagnostic.remediation == "[redacted operator status detail]"
+        }),
+        "sensitive status-derived diagnostic details should be redacted"
+    );
+    assert_eq!(status_service.callers(), vec![diagnostics_caller.clone()]);
+    assert_eq!(llm_config.snapshot_callers(), vec![diagnostics_caller]);
 }
 
 #[tokio::test]

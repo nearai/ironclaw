@@ -744,6 +744,44 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn readiness_operator_status_keeps_info_diagnostics_ready() {
+        let service = ReadinessOperatorStatusService::new(RebornReadiness {
+            profile: crate::RebornCompositionProfile::Production,
+            state: crate::RebornReadinessState::ProductionValidated,
+            facades: crate::RebornFacadeReadiness {
+                host_runtime: true,
+                turn_coordinator: true,
+                product_auth: true,
+            },
+            workers: crate::RebornWorkerReadiness {
+                turn_runner: true,
+                trigger_poller: true,
+            },
+            diagnostics: vec![RebornReadinessDiagnostic {
+                profile: crate::RebornCompositionProfile::Production,
+                component: crate::RebornReadinessDiagnosticComponent::RuntimeHttpEgress,
+                reason: crate::RebornReadinessDiagnosticReason::Unverified,
+                status: RebornReadinessDiagnosticStatus::Info,
+                blocks_production: false,
+            }],
+        });
+
+        let response = service
+            .status(caller("runtime-owner"))
+            .await
+            .expect("status response");
+
+        assert_eq!(response.overall, RebornOperatorStatusState::Ready);
+        let readiness_check = response
+            .checks
+            .iter()
+            .find(|check| check.id == "readiness_runtime_http_egress")
+            .expect("readiness info diagnostic check");
+        assert_eq!(readiness_check.status, RebornOperatorStatusState::Ready);
+        assert_eq!(readiness_check.severity, RebornOperatorStatusSeverity::Info);
+    }
+
+    #[tokio::test]
     async fn skills_product_facade_hides_owner_user_skills_from_other_callers() {
         let dir = tempfile::tempdir().expect("tempdir");
         let storage_root = dir.path().join("local-dev");

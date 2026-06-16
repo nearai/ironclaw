@@ -898,18 +898,80 @@ fn operator_doctor_status_diagnostic(
         RebornOperatorStatusState::Unsupported => "unsupported",
         RebornOperatorStatusState::NotConfigured => "not_configured",
     };
+    let reason_code = operator_doctor_status_reason_code(&check.id, state);
+    let remediation = check
+        .remediation
+        .as_deref()
+        .unwrap_or("inspect the corresponding operator status check");
     Some(RebornOperatorConfigDiagnostic {
-        key: check.id.clone(),
+        key: operator_doctor_status_text(&check.id),
         severity,
-        reason_code: format!("operator_doctor_{}_{}", check.id, state),
-        message: check.summary.clone(),
+        reason_code,
+        message: operator_doctor_status_text(&check.summary),
         owning_area: RebornOperatorArea::Status,
-        remediation: check
-            .remediation
-            .as_deref()
-            .unwrap_or("inspect the corresponding operator status check")
-            .to_string(),
+        remediation: operator_doctor_status_text(remediation),
     })
+}
+
+fn operator_doctor_status_response(
+    mut status: RebornOperatorStatusResponse,
+) -> RebornOperatorStatusResponse {
+    status.checks = status
+        .checks
+        .into_iter()
+        .map(operator_doctor_status_check)
+        .collect();
+    status
+}
+
+fn operator_doctor_status_check(mut check: RebornOperatorStatusCheck) -> RebornOperatorStatusCheck {
+    check.id = operator_doctor_status_text(&check.id);
+    check.summary = operator_doctor_status_text(&check.summary);
+    check.remediation = check
+        .remediation
+        .as_deref()
+        .map(operator_doctor_status_text);
+    check
+}
+
+fn operator_doctor_status_reason_code(check_id: &str, state: &str) -> String {
+    if is_operator_doctor_reason_code_component(check_id)
+        && !operator_doctor_status_text_needs_redaction(check_id)
+    {
+        format!("operator_doctor_{check_id}_{state}")
+    } else {
+        format!("operator_doctor_status_{state}")
+    }
+}
+
+fn is_operator_doctor_reason_code_component(value: &str) -> bool {
+    let mut chars = value.chars();
+    matches!(chars.next(), Some(first) if first.is_ascii_lowercase())
+        && value.len() <= 64
+        && chars.all(|character| {
+            character.is_ascii_lowercase() || character.is_ascii_digit() || character == '_'
+        })
+}
+
+fn operator_doctor_status_text(value: &str) -> String {
+    if operator_doctor_status_text_needs_redaction(value) {
+        "[redacted operator status detail]".to_string()
+    } else {
+        value.to_string()
+    }
+}
+
+fn operator_doctor_status_text_needs_redaction(value: &str) -> bool {
+    let lower = value.to_ascii_lowercase();
+    lower.contains("sk-")
+        || lower.contains("/home/")
+        || lower.contains("\\users\\")
+        || lower.contains("/users/")
+        || lower.contains(".ssh")
+        || lower.contains(".env")
+        || lower.contains("api_key")
+        || lower.contains("password")
+        || lower.contains("credential")
 }
 
 fn operator_doctor_setup_unavailable_diagnostic(
@@ -2320,7 +2382,7 @@ impl RebornServicesApi for RebornServices {
                         .iter()
                         .filter_map(operator_doctor_status_diagnostic),
                 );
-                operator_status = Some(status);
+                operator_status = Some(operator_doctor_status_response(status));
             }
             Err(err) => {
                 tracing::debug!(
