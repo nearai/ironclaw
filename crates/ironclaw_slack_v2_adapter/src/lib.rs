@@ -6,12 +6,16 @@
 //! signing secrets or bot tokens.
 //!
 //! * [`adapter`] — ProductAdapter implementation and egress/auth metadata.
+//! * [`delivery`] — Slack Web API response classification and status mapping.
+//! * [`mrkdwn`] — Slack mrkdwn rendering and message chunking.
 //! * [`payload`] — Slack Events API payload normalization.
 //! * [`render`] — `FinalReplyView` -> `chat.postMessage` request shaping.
 
 #![forbid(unsafe_code)]
 
 mod adapter;
+mod delivery;
+mod mrkdwn;
 mod payload;
 mod render;
 

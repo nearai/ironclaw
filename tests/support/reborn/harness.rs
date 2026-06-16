@@ -941,6 +941,7 @@ impl RebornBinaryE2EHarness {
             communication_context_provider: None,
             hook_security_audit_sink: None,
             turn_event_sink: None,
+            attachment_read_port: None,
         })?;
         let binding_service: Arc<dyn ConversationBindingService> =
             Arc::new(product_harness.binding_service()?);

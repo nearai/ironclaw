@@ -11,8 +11,8 @@ serde_json = "1"
 thiserror = "2"
 tokio = { version = "1", features = ["rt", "rt-multi-thread"] }
 tracing = "0.1"
-wasmtime = { version = "44.0.2", features = ["component-model"] }
-wasmtime-wasi = "44.0.2"
+wasmtime = { version = "44.0.3", features = ["component-model"] }
+wasmtime-wasi = "44.0.3"
 
 [dev-dependencies]
 async-trait = "0.1"

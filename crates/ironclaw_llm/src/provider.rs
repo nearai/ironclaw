@@ -44,6 +44,19 @@ impl ImageUrl {
     pub fn normalized_openai_detail(&self) -> String {
         normalize_openai_image_detail(self.detail.as_deref())
     }
+
+    /// Decode an inline base64 `data:` URL into its `(media_type, base64_data)`
+    /// parts (e.g. `"data:image/png;base64,AQIDBA=="` →
+    /// `("image/png", "AQIDBA==")`). Returns `None` for a non-`data:` URL or a
+    /// `data:` URL that is not base64-encoded — callers that only support inline
+    /// bytes (Anthropic, Gemini, Bedrock) use this to forward the image and skip
+    /// remote URLs they can't fetch. The single shared parser keeps every
+    /// provider adapter consistent with the `data:` URL the model gateway emits.
+    pub fn decode_data_url(&self) -> Option<(&str, &str)> {
+        let rest = self.url.strip_prefix("data:")?;
+        let (media_type, data) = rest.split_once(";base64,")?;
+        Some((media_type, data))
+    }
 }
 
 /// Normalize an OpenAI image detail hint, defaulting to `"auto"` when absent.
