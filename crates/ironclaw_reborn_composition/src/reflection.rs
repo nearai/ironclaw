@@ -162,7 +162,7 @@ impl LearningReflectionService {
             .rev()
             .find(|message| {
                 message.kind == MessageKind::User
-                    && message.status == MessageStatus::Finalized
+                    && is_reflection_transcript_status(message.status)
                     && message
                         .content
                         .as_ref()
@@ -492,7 +492,7 @@ fn latest_user_message_has_correction_cue(message: &str) -> bool {
 fn render_transcript(messages: &[ThreadMessageRecord]) -> String {
     let selected = messages
         .iter()
-        .filter(|message| message.status == MessageStatus::Finalized)
+        .filter(|message| is_reflection_transcript_status(message.status))
         .filter_map(renderable_message)
         .rev()
         .take(MAX_TRANSCRIPT_MESSAGES)
@@ -524,6 +524,13 @@ fn renderable_message(message: &ThreadMessageRecord) -> Option<String> {
         return None;
     }
     Some(format!("{role}: {content}"))
+}
+
+fn is_reflection_transcript_status(status: MessageStatus) -> bool {
+    matches!(
+        status,
+        MessageStatus::Accepted | MessageStatus::Submitted | MessageStatus::Finalized
+    )
 }
 
 fn parse_reflection_learning(
