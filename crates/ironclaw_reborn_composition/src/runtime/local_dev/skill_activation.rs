@@ -2,7 +2,7 @@ use std::{collections::HashSet, sync::Arc};
 
 use async_trait::async_trait;
 use ironclaw_host_api::InvocationId;
-use ironclaw_loop_support::CapabilityResultWrite;
+use ironclaw_loop_support::{CapabilityResultStatus, CapabilityResultWrite};
 use ironclaw_turns::run_profile::{
     AgentLoopHostError, AgentLoopHostErrorKind, CapabilityOutcome, CapabilityResultMessage,
     ConcurrencyHint,
@@ -91,6 +91,7 @@ impl LocalDevSyntheticCapabilityHandler for SkillActivationHandler {
                 input_ref: &invocation.request.input_ref,
                 invocation_id: InvocationId::new(),
                 capability_id: &invocation.request.capability_id,
+                status: CapabilityResultStatus::Completed,
                 output,
                 display_preview: None,
             })

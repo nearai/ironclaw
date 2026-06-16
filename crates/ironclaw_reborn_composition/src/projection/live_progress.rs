@@ -9,12 +9,12 @@ use ironclaw_event_projections::{
     ProjectionCursor as EventProjectionCursor, ProjectionScope as EventProjectionScope,
 };
 use ironclaw_event_streams::{
-    InMemoryProjectionUpdateSource, ProductProjectionEnvelope, ThreadLiveProjectionItem,
-    ThreadLiveProjectionUpdate, ThreadLiveWorkSummaryPhase,
+    InMemoryProjectionUpdateSource, ProductProjectionEnvelope, ThreadLiveCapabilityActivityStatus,
+    ThreadLiveProjectionItem, ThreadLiveProjectionUpdate, ThreadLiveWorkSummaryPhase,
 };
 use ironclaw_events::{EventCursor, EventStreamKey, ReadScope};
 use ironclaw_first_party_extension_ports::{SkillActivationObservedEvent, SkillActivationObserver};
-use ironclaw_host_api::{CapabilityId, InvocationId, UserId};
+use ironclaw_host_api::{CapabilityId, ExtensionId, InvocationId, ProcessId, RuntimeKind, UserId};
 use ironclaw_product_adapters::{
     CapabilityActivityStatusView, CapabilityActivityView, CapabilityActivityViewInput,
     PROJECTION_SKILL_ACTIVATION_MAX_ITEMS, PROJECTION_SKILL_FEEDBACK_MAX_BYTES,
@@ -162,17 +162,23 @@ pub(super) fn product_items_for_live_update(
                 run_id,
                 invocation_id,
                 capability_id,
+                status,
+                provider,
+                runtime,
+                process_id,
+                output_bytes,
+                error_kind,
             } => match CapabilityActivityView::new(CapabilityActivityViewInput {
                 invocation_id: *invocation_id,
                 turn_run_id: Some(*run_id),
                 thread_id: Some(update.thread_id.clone()),
                 capability_id: capability_id.clone(),
-                status: CapabilityActivityStatusView::Started,
-                provider: None,
-                runtime: None,
-                process_id: None,
-                output_bytes: None,
-                error_kind: None,
+                status: live_capability_status_to_product_status(*status),
+                provider: provider.clone(),
+                runtime: *runtime,
+                process_id: *process_id,
+                output_bytes: *output_bytes,
+                error_kind: error_kind.clone(),
                 updated_at: Utc::now(),
             }) {
                 Ok(activity) => Some(ProductProjectionItem::CapabilityActivity(activity)),
@@ -250,8 +256,11 @@ impl LiveProgressMilestoneSink {
         milestone: &LoopHostMilestone,
         invocation_id: InvocationId,
         capability_id: &CapabilityId,
+        status: ThreadLiveCapabilityActivityStatus,
+        terminal: Option<LiveCapabilityTerminalMetadata>,
     ) {
         let sequence = self.publisher.next_live_sequence();
+        let terminal = terminal.unwrap_or_default();
         self.publisher.publish_live_item(
             milestone.actor.as_ref().map(|actor| &actor.user_id),
             &milestone.scope,
@@ -260,6 +269,12 @@ impl LiveProgressMilestoneSink {
                 run_id: milestone.run_id,
                 invocation_id,
                 capability_id: capability_id.clone(),
+                status,
+                provider: terminal.provider,
+                runtime: terminal.runtime,
+                process_id: terminal.process_id,
+                output_bytes: terminal.output_bytes,
+                error_kind: terminal.error_kind,
             },
         );
     }
@@ -360,6 +375,48 @@ impl LoopHostMilestoneSink for LiveProgressMilestoneSink {
                     &milestone,
                     InvocationId::from_uuid(activity_id.as_uuid()),
                     capability_id,
+                    ThreadLiveCapabilityActivityStatus::Started,
+                    None,
+                );
+            }
+            LoopHostMilestoneKind::CapabilityCompleted {
+                activity_id,
+                capability_id,
+                provider,
+                runtime,
+                output_bytes,
+            } => {
+                self.publish_capability_activity(
+                    &milestone,
+                    InvocationId::from_uuid(activity_id.as_uuid()),
+                    capability_id,
+                    ThreadLiveCapabilityActivityStatus::Completed,
+                    Some(LiveCapabilityTerminalMetadata {
+                        provider: Some(provider.clone()),
+                        runtime: Some(*runtime),
+                        output_bytes: Some(*output_bytes),
+                        ..LiveCapabilityTerminalMetadata::default()
+                    }),
+                );
+            }
+            LoopHostMilestoneKind::CapabilityFailed {
+                activity_id,
+                capability_id,
+                provider,
+                runtime,
+                reason_kind,
+            } => {
+                self.publish_capability_activity(
+                    &milestone,
+                    InvocationId::from_uuid(activity_id.as_uuid()),
+                    capability_id,
+                    ThreadLiveCapabilityActivityStatus::Failed,
+                    Some(LiveCapabilityTerminalMetadata {
+                        provider: provider.clone(),
+                        runtime: *runtime,
+                        error_kind: Some(reason_kind.as_str().to_string()),
+                        ..LiveCapabilityTerminalMetadata::default()
+                    }),
                 );
             }
             LoopHostMilestoneKind::DriverNote { kind, safe_summary } => {
@@ -368,6 +425,27 @@ impl LoopHostMilestoneSink for LiveProgressMilestoneSink {
             _ => {}
         }
         Ok(())
+    }
+}
+
+#[derive(Default)]
+struct LiveCapabilityTerminalMetadata {
+    provider: Option<ExtensionId>,
+    runtime: Option<RuntimeKind>,
+    process_id: Option<ProcessId>,
+    output_bytes: Option<u64>,
+    error_kind: Option<String>,
+}
+
+fn live_capability_status_to_product_status(
+    status: ThreadLiveCapabilityActivityStatus,
+) -> CapabilityActivityStatusView {
+    match status {
+        ThreadLiveCapabilityActivityStatus::Started => CapabilityActivityStatusView::Started,
+        ThreadLiveCapabilityActivityStatus::Running => CapabilityActivityStatusView::Running,
+        ThreadLiveCapabilityActivityStatus::Completed => CapabilityActivityStatusView::Completed,
+        ThreadLiveCapabilityActivityStatus::Failed => CapabilityActivityStatusView::Failed,
+        ThreadLiveCapabilityActivityStatus::Killed => CapabilityActivityStatusView::Killed,
     }
 }
 
@@ -405,6 +483,179 @@ fn driver_note_kind_to_live_work_summary_phase(
         LoopDriverNoteKind::Retrying => ThreadLiveWorkSummaryPhase::Retrying,
         LoopDriverNoteKind::Context | LoopDriverNoteKind::EventSubscriptionTerminated => {
             ThreadLiveWorkSummaryPhase::Context
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    use ironclaw_event_streams::{
+        ProjectionLiveUpdateRequest, ProjectionTarget, ProjectionUpdateSource, ProjectionViewClass,
+    };
+    use ironclaw_host_api::{AgentId, TenantId, ThreadId};
+    use ironclaw_turns::{
+        CapabilityActivityId, TurnActor, TurnId,
+        run_profile::{CapabilityFailureKind, InMemoryLoopHostMilestoneSink, LoopDriverId},
+    };
+
+    #[tokio::test]
+    async fn milestone_sink_publishes_failed_capability_activity_live_update() {
+        let fixture = LiveProgressFixture::new();
+        let mut updates = fixture.subscribe().await;
+        let activity_id = CapabilityActivityId::new();
+        let capability_id = CapabilityId::new("builtin.download_file").unwrap();
+        let provider = ExtensionId::new("google_drive").unwrap();
+        let sink = fixture.sink();
+
+        sink.publish_loop_milestone(fixture.milestone(LoopHostMilestoneKind::CapabilityFailed {
+            activity_id,
+            capability_id: capability_id.clone(),
+            provider: Some(provider.clone()),
+            runtime: Some(RuntimeKind::FirstParty),
+            reason_kind: CapabilityFailureKind::Authorization,
+        }))
+        .await
+        .expect("failed milestone publishes");
+
+        let envelope = updates.recv().await.expect("live update");
+        let ProductProjectionEnvelope::ThreadLiveUpdate(update) = envelope.as_ref() else {
+            panic!("expected thread live update");
+        };
+        let ProductProjectionItem::CapabilityActivity(activity) =
+            product_items_for_live_update(&update)
+                .into_iter()
+                .next()
+                .expect("capability activity")
+        else {
+            panic!("expected capability activity");
+        };
+        assert_eq!(
+            activity.invocation_id,
+            InvocationId::from_uuid(activity_id.as_uuid())
+        );
+        assert_eq!(activity.capability_id, capability_id);
+        assert_eq!(activity.status, CapabilityActivityStatusView::Failed);
+        assert_eq!(activity.provider.as_ref(), Some(&provider));
+        assert_eq!(activity.runtime, Some(RuntimeKind::FirstParty));
+        assert_eq!(activity.error_kind.as_deref(), Some("authorization"));
+    }
+
+    #[tokio::test]
+    async fn milestone_sink_publishes_completed_capability_activity_live_update() {
+        let fixture = LiveProgressFixture::new();
+        let mut updates = fixture.subscribe().await;
+        let activity_id = CapabilityActivityId::new();
+        let capability_id = CapabilityId::new("builtin.list_files").unwrap();
+        let provider = ExtensionId::new("google_drive").unwrap();
+        let sink = fixture.sink();
+
+        sink.publish_loop_milestone(fixture.milestone(
+            LoopHostMilestoneKind::CapabilityCompleted {
+                activity_id,
+                capability_id: capability_id.clone(),
+                provider: provider.clone(),
+                runtime: RuntimeKind::FirstParty,
+                output_bytes: 42,
+            },
+        ))
+        .await
+        .expect("completed milestone publishes");
+
+        let envelope = updates.recv().await.expect("live update");
+        let ProductProjectionEnvelope::ThreadLiveUpdate(update) = envelope.as_ref() else {
+            panic!("expected thread live update");
+        };
+        let ProductProjectionItem::CapabilityActivity(activity) =
+            product_items_for_live_update(&update)
+                .into_iter()
+                .next()
+                .expect("capability activity")
+        else {
+            panic!("expected capability activity");
+        };
+        assert_eq!(
+            activity.invocation_id,
+            InvocationId::from_uuid(activity_id.as_uuid())
+        );
+        assert_eq!(activity.capability_id, capability_id);
+        assert_eq!(activity.status, CapabilityActivityStatusView::Completed);
+        assert_eq!(activity.provider.as_ref(), Some(&provider));
+        assert_eq!(activity.runtime, Some(RuntimeKind::FirstParty));
+        assert_eq!(activity.output_bytes, Some(42));
+    }
+
+    struct LiveProgressFixture {
+        update_source: Arc<InMemoryProjectionUpdateSource>,
+        scope: TurnScope,
+        actor: TurnActor,
+        run_id: TurnRunId,
+        loop_driver_id: LoopDriverId,
+    }
+
+    impl LiveProgressFixture {
+        fn new() -> Self {
+            let tenant_id = TenantId::new("tenant-live-progress").unwrap();
+            let user_id = UserId::new("user-live-progress").unwrap();
+            let agent_id = AgentId::new("agent-live-progress").unwrap();
+            let thread_id = ThreadId::new("thread-live-progress").unwrap();
+            Self {
+                update_source: Arc::new(InMemoryProjectionUpdateSource::new(8)),
+                scope: TurnScope::new(tenant_id, Some(agent_id), None, thread_id),
+                actor: TurnActor::new(user_id),
+                run_id: TurnRunId::new(),
+                loop_driver_id: LoopDriverId::new("test_loop").unwrap(),
+            }
+        }
+
+        fn sink(&self) -> LiveProgressMilestoneSink {
+            LiveProgressMilestoneSink::new(
+                Arc::new(InMemoryLoopHostMilestoneSink::default()),
+                Arc::new(LiveProjectionPublisher::new(
+                    Arc::clone(&self.update_source),
+                    self.actor.user_id.clone(),
+                )),
+            )
+        }
+
+        fn milestone(&self, kind: LoopHostMilestoneKind) -> LoopHostMilestone {
+            LoopHostMilestone {
+                scope: self.scope.clone(),
+                actor: Some(self.actor.clone()),
+                turn_id: TurnId::new(),
+                run_id: self.run_id,
+                loop_driver_id: self.loop_driver_id.clone(),
+                kind,
+            }
+        }
+
+        async fn subscribe(
+            &self,
+        ) -> tokio::sync::broadcast::Receiver<Arc<ProductProjectionEnvelope>> {
+            self.update_source
+                .subscribe(ProjectionLiveUpdateRequest {
+                    actor: self.actor.clone(),
+                    scope: EventProjectionScope {
+                        stream: EventStreamKey::new(
+                            self.scope.tenant_id.clone(),
+                            self.actor.user_id.clone(),
+                            self.scope.agent_id.clone(),
+                        ),
+                        read_scope: ReadScope {
+                            project_id: self.scope.project_id.clone(),
+                            mission_id: None,
+                            thread_id: Some(self.scope.thread_id.clone()),
+                            process_id: None,
+                        },
+                    },
+                    view: ProjectionViewClass::ProductThread,
+                    target: ProjectionTarget::Thread {
+                        thread_id: self.scope.thread_id.clone(),
+                    },
+                })
+                .await
+                .expect("subscribe to live updates")
         }
     }
 }

@@ -16,10 +16,11 @@ use ironclaw_host_runtime::{
     VisibleCapabilityRequest as HostVisibleCapabilityRequest,
 };
 use ironclaw_loop_support::{
-    CapabilityResultWrite, HostManagedModelError, HostManagedModelErrorKind,
-    HostManagedModelGateway, HostManagedModelMessageRole, HostManagedModelRequest,
-    HostManagedModelResponse, HostManagedToolResultContent, LoopCapabilityInputResolver,
-    LoopCapabilityPortFactory, LoopCapabilityResultWriter, loop_driver_execution_extension_id,
+    CapabilityResultStatus, CapabilityResultWrite, HostManagedModelError,
+    HostManagedModelErrorKind, HostManagedModelGateway, HostManagedModelMessageRole,
+    HostManagedModelRequest, HostManagedModelResponse, HostManagedToolResultContent,
+    LoopCapabilityInputResolver, LoopCapabilityPortFactory, LoopCapabilityResultWriter,
+    loop_driver_execution_extension_id,
 };
 use ironclaw_product_workflow::OutboundPreferencesProductFacade;
 use ironclaw_run_state::ApprovalRequestStore;
@@ -278,6 +279,7 @@ impl LocalDevCapabilityIo {
         run_context: &LoopRunContext,
         invocation_id: InvocationId,
         capability_id: &CapabilityId,
+        status: CapabilityResultStatus,
     ) -> Option<ThreadMessageId> {
         let Some(durable_previews) = &self.durable_previews else {
             return None;
@@ -294,7 +296,7 @@ impl LocalDevCapabilityIo {
             match CapabilityDisplayPreviewEnvelope::new(CapabilityDisplayPreviewEnvelopeInput {
                 invocation_id,
                 capability_id: capability_id.clone(),
-                status: CapabilityDisplayPreviewStatus::Completed,
+                status: capability_result_status_to_display_status(status),
                 title: record.title,
                 subtitle: record.subtitle,
                 input_summary: record.input_summary,
@@ -503,6 +505,7 @@ impl LoopCapabilityResultWriter for LocalDevCapabilityIo {
             input_ref,
             invocation_id,
             capability_id,
+            status,
             output,
             display_preview,
         } = write;
@@ -546,7 +549,7 @@ impl LoopCapabilityResultWriter for LocalDevCapabilityIo {
             }
         }
         if let Some(message_id) = self
-            .try_append_durable_display_preview(run_context, invocation_id, capability_id)
+            .try_append_durable_display_preview(run_context, invocation_id, capability_id, status)
             .await
         {
             self.display_previews
@@ -869,6 +872,16 @@ fn ensure_local_dev_ref_scope(
             AgentLoopHostErrorKind::ScopeMismatch,
             "capability input ref is not scoped to this loop run",
         ))
+    }
+}
+
+fn capability_result_status_to_display_status(
+    status: CapabilityResultStatus,
+) -> CapabilityDisplayPreviewStatus {
+    match status {
+        CapabilityResultStatus::Completed => CapabilityDisplayPreviewStatus::Completed,
+        CapabilityResultStatus::Failed => CapabilityDisplayPreviewStatus::Failed,
+        CapabilityResultStatus::Killed => CapabilityDisplayPreviewStatus::Killed,
     }
 }
 

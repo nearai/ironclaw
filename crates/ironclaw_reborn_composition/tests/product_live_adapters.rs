@@ -15,13 +15,13 @@ use ironclaw_host_runtime::{
     VisibleCapabilityRequest as HostVisibleCapabilityRequest,
 };
 use ironclaw_loop_support::{
-    CapabilityResultWrite, HostIdentityContextBuildError, HostIdentityContextCandidate,
-    HostIdentityContextSource, HostInputBatch, HostInputEnvelope, HostInputQueue,
-    HostInputQueueError, HostManagedModelError, HostManagedModelErrorKind, HostManagedModelGateway,
-    HostManagedModelRequest, HostManagedModelResponse, JsonSpawnSubagentInputCodec,
-    LoopCapabilityInputResolver, LoopCapabilityResultWriter, ProductLiveCancellationProbe,
-    RunCancellationFactory, RunCancellationHandle, loop_driver_execution_extension_id,
-    verify_product_live_cancellation_probe,
+    CapabilityResultStatus, CapabilityResultWrite, HostIdentityContextBuildError,
+    HostIdentityContextCandidate, HostIdentityContextSource, HostInputBatch, HostInputEnvelope,
+    HostInputQueue, HostInputQueueError, HostManagedModelError, HostManagedModelErrorKind,
+    HostManagedModelGateway, HostManagedModelRequest, HostManagedModelResponse,
+    JsonSpawnSubagentInputCodec, LoopCapabilityInputResolver, LoopCapabilityResultWriter,
+    ProductLiveCancellationProbe, RunCancellationFactory, RunCancellationHandle,
+    loop_driver_execution_extension_id, verify_product_live_cancellation_probe,
 };
 use ironclaw_reborn::{
     loop_exit_applier::ThreadCheckpointLoopExitEvidencePort,
@@ -71,6 +71,7 @@ async fn write_capability_result_for_test(
             input_ref,
             invocation_id: InvocationId::new(),
             capability_id: &capability_id,
+            status: CapabilityResultStatus::Completed,
             output,
             display_preview: None,
         })
@@ -155,6 +156,7 @@ async fn capability_io_write_capability_result_returns_serialized_payload_byte_l
             input_ref: &input_ref,
             invocation_id: InvocationId::new(),
             capability_id: &capability_id,
+            status: CapabilityResultStatus::Completed,
             output: output.clone(),
             display_preview: None,
         })

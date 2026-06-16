@@ -6,7 +6,9 @@ use ironclaw_host_api::{
     Action, ApprovalRequest, ApprovalRequestId, CapabilityGrantId, CapabilityId, CorrelationId,
     InvocationFingerprint, InvocationId, Principal, ResourceEstimate, ResourceScope, UserId,
 };
-use ironclaw_loop_support::{CapabilityResultWrite, loop_driver_execution_extension_id};
+use ironclaw_loop_support::{
+    CapabilityResultStatus, CapabilityResultWrite, loop_driver_execution_extension_id,
+};
 use ironclaw_product_workflow::{
     OutboundPreferencesProductFacade, RebornOutboundDeliveryTargetId, RebornServicesError,
     RebornServicesErrorCode, WebUiAuthenticatedCaller,
@@ -360,6 +362,7 @@ async fn write_completed_result(
             input_ref: invocation_effective_input_ref(&invocation),
             invocation_id: InvocationId::new(),
             capability_id: &invocation.request.capability_id,
+            status: CapabilityResultStatus::Completed,
             output,
             display_preview: None,
         })

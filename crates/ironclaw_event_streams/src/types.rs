@@ -177,6 +177,18 @@ pub enum ThreadLiveProjectionItem {
         run_id: TurnRunId,
         invocation_id: InvocationId,
         capability_id: CapabilityId,
+        #[serde(default = "default_thread_live_capability_activity_status")]
+        status: ThreadLiveCapabilityActivityStatus,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        provider: Option<ironclaw_host_api::ExtensionId>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        runtime: Option<ironclaw_host_api::RuntimeKind>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        process_id: Option<ironclaw_host_api::ProcessId>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        output_bytes: Option<u64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        error_kind: Option<String>,
     },
     WorkSummary {
         id: String,
@@ -190,6 +202,20 @@ pub enum ThreadLiveProjectionItem {
         skill_names: Vec<String>,
         feedback: Vec<String>,
     },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ThreadLiveCapabilityActivityStatus {
+    Started,
+    Running,
+    Completed,
+    Failed,
+    Killed,
+}
+
+fn default_thread_live_capability_activity_status() -> ThreadLiveCapabilityActivityStatus {
+    ThreadLiveCapabilityActivityStatus::Started
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

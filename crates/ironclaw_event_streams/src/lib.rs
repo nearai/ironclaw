@@ -26,8 +26,8 @@ pub use types::{
     ProductProjectionEnvelope, ProjectionFetchRequest, ProjectionFetchResponse,
     ProjectionStreamItem, ProjectionSubscribeRequest, ProjectionSubscription, ProjectionTarget,
     ProjectionViewClass, PushCandidatesForUpdateRequest, SubscriberCapabilities,
-    ThreadLiveProjectionItem, ThreadLiveProjectionUpdate, ThreadLiveWorkSummaryPhase,
-    keep_alive_item,
+    ThreadLiveCapabilityActivityStatus, ThreadLiveProjectionItem, ThreadLiveProjectionUpdate,
+    ThreadLiveWorkSummaryPhase, keep_alive_item,
 };
 pub use update_source::{
     InMemoryProjectionUpdateSource, ProjectionLiveUpdateRequest, ProjectionUpdateSource,

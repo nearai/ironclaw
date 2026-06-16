@@ -13,7 +13,7 @@ use ironclaw_host_runtime::{
     CapabilityFailureDisposition, HostRuntime, HostRuntimeError, IdempotencyKey,
     RuntimeBlockedReason, RuntimeCapabilityAuthResumeRequest, RuntimeCapabilityFailure,
     RuntimeCapabilityOutcome, RuntimeCapabilityRequest, RuntimeCapabilityResumeRequest,
-    RuntimeFailureKind,
+    RuntimeCapabilityUnknown, RuntimeFailureKind,
 };
 use ironclaw_process_sandbox::{SandboxProcessPlan, ValidatedSandboxProcessPlan};
 use ironclaw_turns::{
@@ -211,8 +211,16 @@ pub struct CapabilityResultWrite<'a> {
     pub input_ref: &'a CapabilityInputRef,
     pub invocation_id: InvocationId,
     pub capability_id: &'a CapabilityId,
+    pub status: CapabilityResultStatus,
     pub output: serde_json::Value,
     pub display_preview: Option<CapabilityDisplayOutputPreview>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CapabilityResultStatus {
+    Completed,
+    Failed,
+    Killed,
 }
 
 #[async_trait]
@@ -1029,6 +1037,7 @@ impl HostRuntimeLoopCapabilityPort {
                 input_ref: &request.input_ref,
                 invocation_id: InvocationId::new(),
                 capability_id: &request.capability_id,
+                status: CapabilityResultStatus::Completed,
                 output,
                 display_preview: None,
             })
@@ -2087,6 +2096,7 @@ async fn runtime_outcome_to_loop(
                     input_ref: conversion.input_ref,
                     invocation_id: conversion.invocation_id,
                     capability_id: &completed.capability_id,
+                    status: CapabilityResultStatus::Completed,
                     output: completed.output.clone(),
                     display_preview: completed.display_preview.clone(),
                 })
@@ -2146,8 +2156,28 @@ async fn runtime_outcome_to_loop(
                 safe_summary: "capability spawned background work".to_string(),
             })
         }
-        RuntimeCapabilityOutcome::Failed(failure) => runtime_failure_to_loop(failure)?,
+        RuntimeCapabilityOutcome::Failed(failure) => {
+            write_failed_capability_result(
+                run_context,
+                result_writer,
+                conversion.input_ref,
+                conversion.invocation_id,
+                &failure.capability_id,
+                runtime_failure_output(&failure),
+            )
+            .await?;
+            runtime_failure_to_loop(failure)?
+        }
         RuntimeCapabilityOutcome::Unknown(unknown) => {
+            write_failed_capability_result(
+                run_context,
+                result_writer,
+                conversion.input_ref,
+                conversion.invocation_id,
+                &unknown.capability_id,
+                runtime_unknown_output(&unknown),
+            )
+            .await?;
             CapabilityOutcome::Failed(CapabilityFailure {
                 error_kind: capability_failure_kind(unknown.kind)?,
                 safe_summary: runtime_safe_summary(
@@ -2157,6 +2187,47 @@ async fn runtime_outcome_to_loop(
                 detail: None,
             })
         }
+    })
+}
+
+async fn write_failed_capability_result(
+    run_context: &LoopRunContext,
+    result_writer: &(dyn LoopCapabilityResultWriter + Send + Sync),
+    input_ref: &CapabilityInputRef,
+    invocation_id: InvocationId,
+    capability_id: &CapabilityId,
+    output: serde_json::Value,
+) -> Result<(), AgentLoopHostError> {
+    result_writer
+        .write_capability_result(CapabilityResultWrite {
+            run_context,
+            input_ref,
+            invocation_id,
+            capability_id,
+            status: CapabilityResultStatus::Failed,
+            output,
+            display_preview: None,
+        })
+        .await
+        .map(|_| ())
+}
+
+fn runtime_failure_output(failure: &RuntimeCapabilityFailure) -> serde_json::Value {
+    serde_json::json!({
+        "ok": false,
+        "error_kind": failure.kind.as_str(),
+        "message": runtime_failure_safe_summary(failure, "capability invocation failed"),
+    })
+}
+
+fn runtime_unknown_output(unknown: &RuntimeCapabilityUnknown) -> serde_json::Value {
+    serde_json::json!({
+        "ok": false,
+        "error_kind": unknown.kind,
+        "message": runtime_safe_summary(
+            unknown.message.clone(),
+            "capability invocation returned an unknown outcome",
+        ),
     })
 }
 
@@ -6540,12 +6611,17 @@ mod tests {
     #[derive(Default)]
     struct RecordingResultWriter {
         records: Mutex<Vec<(CapabilityId, serde_json::Value)>>,
+        statuses: Mutex<Vec<CapabilityResultStatus>>,
         display_previews: Mutex<Vec<Option<CapabilityDisplayOutputPreview>>>,
     }
 
     impl RecordingResultWriter {
         fn records(&self) -> Vec<(CapabilityId, serde_json::Value)> {
             self.records.lock().expect("records lock").clone()
+        }
+
+        fn statuses(&self) -> Vec<CapabilityResultStatus> {
+            self.statuses.lock().expect("statuses lock").clone()
         }
 
         fn display_previews(&self) -> Vec<Option<CapabilityDisplayOutputPreview>> {
@@ -6566,6 +6642,10 @@ mod tests {
                 .lock()
                 .expect("records lock")
                 .push((write.capability_id.clone(), write.output));
+            self.statuses
+                .lock()
+                .expect("statuses lock")
+                .push(write.status);
             self.display_previews
                 .lock()
                 .expect("display previews lock")

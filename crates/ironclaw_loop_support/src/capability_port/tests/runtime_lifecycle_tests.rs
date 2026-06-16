@@ -457,6 +457,60 @@ async fn runtime_capability_failed_and_unknown_outcomes_emit_failure_milestones(
 }
 
 #[tokio::test]
+async fn runtime_capability_failed_and_unknown_outcomes_write_failed_results() {
+    let cases = [
+        RuntimeCapabilityOutcome::Failed(RuntimeCapabilityFailure {
+            capability_id: CapabilityId::new("demo.echo").expect("valid capability id"),
+            kind: RuntimeFailureKind::InvalidInput,
+            message: Some("invalid input".to_string()),
+        }),
+        RuntimeCapabilityOutcome::Unknown(RuntimeCapabilityUnknown {
+            capability_id: CapabilityId::new("demo.echo").expect("valid capability id"),
+            kind: "custom_failure".to_string(),
+            message: Some("custom failure".to_string()),
+        }),
+    ];
+
+    for outcome in cases {
+        let capability_id = CapabilityId::new("demo.echo").expect("valid capability id");
+        let provider_id = ExtensionId::new("demo").expect("valid provider id");
+        let result_writer = Arc::new(RecordingResultWriter::default());
+        let port = runtime_capability_port(
+            &capability_id,
+            &provider_id,
+            Arc::new(QueuedHostRuntime::new(
+                vec![visible_capability(
+                    capability_id.clone(),
+                    provider_id.clone(),
+                )],
+                vec![Ok(outcome)],
+            )),
+            result_writer.clone(),
+            dummy_milestone_sink(),
+            "thread-runtime-capability-failure-result",
+        )
+        .await;
+
+        let outcome = invoke_visible_runtime_capability(&port)
+            .await
+            .expect("runtime failure outcome maps to loop outcome");
+
+        assert!(matches!(outcome, CapabilityOutcome::Failed(_)));
+        assert_eq!(
+            result_writer.statuses(),
+            vec![CapabilityResultStatus::Failed]
+        );
+        let records = result_writer.records();
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].0, capability_id);
+        assert_eq!(
+            records[0].1.get("ok"),
+            Some(&serde_json::Value::Bool(false))
+        );
+    }
+}
+
+#[tokio::test]
 async fn runtime_capability_mismatched_outcome_does_not_emit_terminal_milestone() {
     let capability_id = CapabilityId::new("demo.echo").expect("valid capability id");
     let provider_id = ExtensionId::new("demo").expect("valid provider id");

@@ -233,6 +233,7 @@ impl LoopCapabilityResultWriter for ProductLiveCapabilityIo {
             input_ref,
             invocation_id,
             capability_id,
+            status: _status,
             output,
             display_preview,
         } = write;
@@ -867,6 +868,7 @@ mod tests {
             input_ref: &input_ref,
             invocation_id,
             capability_id: &capability_id,
+            status: ironclaw_loop_support::CapabilityResultStatus::Completed,
             output: serde_json::json!({"content": "fn main() {}"}),
             display_preview: None,
         })
@@ -909,6 +911,7 @@ mod tests {
             input_ref: &input_ref,
             invocation_id,
             capability_id: &capability_id,
+            status: ironclaw_loop_support::CapabilityResultStatus::Completed,
             output: serde_json::json!({"success": true}),
             display_preview: Some(CapabilityDisplayOutputPreview {
                 output_summary: Some("Edited 1 file: +1/-1".to_string()),
@@ -955,6 +958,7 @@ mod tests {
             input_ref: &input_ref,
             invocation_id,
             capability_id: &capability_id,
+            status: ironclaw_loop_support::CapabilityResultStatus::Completed,
             output: serde_json::json!({"reply": "ok"}),
             display_preview: None,
         })

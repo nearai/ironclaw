@@ -19,7 +19,9 @@ mod tests {
         SKILL_LIST_CAPABILITY_ID, SKILL_REMOVE_CAPABILITY_ID, SPAWN_SUBAGENT_CAPABILITY_ID,
         WRITE_FILE_CAPABILITY_ID,
     };
-    use ironclaw_loop_support::{HostManagedModelMessage, HostSkillContextSource};
+    use ironclaw_loop_support::{
+        CapabilityResultStatus, HostManagedModelMessage, HostSkillContextSource,
+    };
     use ironclaw_outbound::CommunicationPreferenceKey;
     use ironclaw_product_workflow::{
         LifecyclePackageKind, LifecyclePackageRef, LifecycleProductAction, LifecycleProductContext,
@@ -595,6 +597,7 @@ mod tests {
                 input_ref: &input_ref,
                 invocation_id,
                 capability_id: &capability_id,
+                status: CapabilityResultStatus::Completed,
                 output: serde_json::json!({"content": "hello"}),
                 display_preview: None,
             })
@@ -665,6 +668,7 @@ mod tests {
                 input_ref: &input_ref,
                 invocation_id,
                 capability_id: &capability_id,
+                status: CapabilityResultStatus::Completed,
                 output: serde_json::json!({"content": "hello"}),
                 display_preview: None,
             })
