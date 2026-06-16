@@ -7,6 +7,7 @@
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use uuid::Uuid;
 
 use crate::types::capability::LeaseId;
@@ -309,6 +310,35 @@ impl Thread {
         self.owner_id().matches_user(user_id)
     }
 
+    /// Metadata attached to engine LLM usage accounting records.
+    pub fn llm_usage_metadata(&self, purpose: &str) -> HashMap<String, String> {
+        let mut metadata = HashMap::from([
+            ("thread_id".to_string(), self.id.0.to_string()),
+            ("user_id".to_string(), self.user_id.clone()),
+            ("purpose".to_string(), purpose.to_string()),
+        ]);
+
+        if let Some(scope) = self
+            .metadata
+            .get("conversation_scope")
+            .and_then(|v| v.as_str())
+        {
+            metadata.insert("conversation_scope".to_string(), scope.to_string());
+        }
+        if let Some(conversation_id) = self
+            .metadata
+            .get("v1_conversation_id")
+            .and_then(|v| v.as_str())
+        {
+            metadata.insert(
+                "v1_conversation_id".to_string(),
+                conversation_id.to_string(),
+            );
+        }
+
+        metadata
+    }
+
     /// Persist active skill provenance in thread metadata.
     pub fn set_active_skills(
         &mut self,
@@ -567,6 +597,31 @@ mod tests {
         )
         .with_parent(parent.id);
         assert_eq!(child.parent_id, Some(parent.id));
+    }
+
+    #[test]
+    fn llm_usage_metadata_includes_thread_identity_and_conversation_context() {
+        let mut thread = make_thread();
+        thread.metadata = serde_json::json!({
+            "conversation_scope": "scope-1",
+            "v1_conversation_id": "conv-1",
+            "ignored_non_string": 123,
+        });
+
+        let metadata = thread.llm_usage_metadata("chat");
+
+        assert_eq!(metadata.get("thread_id"), Some(&thread.id.0.to_string()));
+        assert_eq!(metadata.get("user_id"), Some(&thread.user_id));
+        assert_eq!(metadata.get("purpose"), Some(&"chat".to_string()));
+        assert_eq!(
+            metadata.get("conversation_scope"),
+            Some(&"scope-1".to_string())
+        );
+        assert_eq!(
+            metadata.get("v1_conversation_id"),
+            Some(&"conv-1".to_string())
+        );
+        assert!(!metadata.contains_key("ignored_non_string"));
     }
 
     // ── Title derivation ─────────────────────────────────────
