@@ -14,4 +14,4 @@ publish = false
 
 [dependencies]
 tracing = "0.1"
-wasmtime = { version = "44.0.2", features = ["component-model"] }
+wasmtime = { version = "44.0.3", features = ["component-model"] }
