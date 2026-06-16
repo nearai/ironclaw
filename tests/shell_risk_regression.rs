@@ -250,6 +250,7 @@ async fn env_split_string_payloads_are_classified() {
     let tool = shell_tool().await;
     let cmds = [
         r#"env -S "bash -c 'rm -rf /tmp/env-split-marker'""#,
+        r#"env -S'rm -rf /tmp/env-adjacent-marker'"#,
         r#"env --split-string "chmod 777 /tmp/env-split-marker""#,
         r#"env --split-string="echo control & rm -rf /tmp/env-split-background""#,
     ];

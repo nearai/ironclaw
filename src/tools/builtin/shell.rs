@@ -425,6 +425,9 @@ fn delegated_env_command(tokens: &[String]) -> Option<Vec<String>> {
         if token == "-S" || token == "--split-string" {
             return tokens.get(idx + 1).map(|script| shell_tokens(script));
         }
+        if let Some(script) = token.strip_prefix("-S").filter(|script| !script.is_empty()) {
+            return Some(shell_tokens(script));
+        }
         if let Some(script) = token.strip_prefix("--split-string=") {
             return Some(shell_tokens(script));
         }
