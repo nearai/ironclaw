@@ -1,27 +1,3 @@
-const WEEKDAYS = [
-  "Sundays",
-  "Mondays",
-  "Tuesdays",
-  "Wednesdays",
-  "Thursdays",
-  "Fridays",
-  "Saturdays",
-];
-const MONTHS = [
-  "Jan",
-  "Feb",
-  "Mar",
-  "Apr",
-  "May",
-  "Jun",
-  "Jul",
-  "Aug",
-  "Sep",
-  "Oct",
-  "Nov",
-  "Dec",
-];
-
 const STATE_PRESENTATION = {
   active: { label: "Active", tone: "signal" },
   scheduled: { label: "Scheduled", tone: "signal" },
@@ -61,13 +37,13 @@ export const AUTOMATION_FILTERS = [
   { value: "paused", labelKey: "automations.filter.paused", predicate: isBrowserPaused },
 ];
 
-export function normalizeAutomations(response) {
+export function normalizeAutomations(response, t, locale) {
   const automations = Array.isArray(response?.automations)
     ? response.automations
     : [];
   return automations
     .filter((automation) => automation?.source?.type === "schedule")
-    .map((automation) => normalizeAutomation(automation))
+    .map((automation) => normalizeAutomation(automation, t, locale))
     .sort(compareAutomations);
 }
 
@@ -105,10 +81,19 @@ export function automationSummary(automations) {
   };
 }
 
-export function scheduleLabel(cron, timezone) {
-  if (!cron || typeof cron !== "string") return "Custom schedule";
+// Render a cron expression as a friendly, localized cadence string.
+//
+// The sentence templates ("Every day at {time}", "Weekdays at {time}", …) and
+// the clock-free cadence words come from i18n keys (`t`), while the locale-
+// grammar-heavy pieces — clock time, weekday name, month/day — are formatted
+// with `Intl.DateTimeFormat` for `locale` so we don't hand-maintain weekday and
+// month tables in every pack. Timezone, when known, is appended as a neutral
+// parenthetical (omitted for minute/hour cadences where it is meaningless).
+export function scheduleLabel(cron, timezone, t, locale) {
+  const tr = typeof t === "function" ? t : (key) => key;
+  if (!cron || typeof cron !== "string") return tr("automations.schedule.custom");
   const parts = cronFields(cron);
-  if (!parts) return "Custom schedule";
+  if (!parts) return tr("automations.schedule.custom");
 
   const { minute, hour, dayOfMonth, month, dayOfWeek, year } = parts;
 
@@ -118,29 +103,31 @@ export function scheduleLabel(cron, timezone) {
     year === "*" && dayOfMonth === "*" && month === "*" && dayOfWeek === "*";
 
   // Sub-hourly / hourly cadences, where hour (and possibly minute) is a
-  // wildcard or step and therefore has no single clock time. These are common
-  // ("every minute", "every 15 minutes", "hourly at :00") and previously fell
-  // through to the meaningless "Custom schedule". Timezone is irrelevant for a
-  // minute-of-hour cadence, so it is omitted here.
+  // wildcard or step and therefore has no single clock time. Timezone is
+  // irrelevant for a minute-of-hour cadence, so it is omitted here. A `*/1`
+  // step is the same as "every minute".
   if (everyDate && hour === "*") {
-    if (minute === "*") return "Every minute";
+    if (minute === "*") return tr("automations.schedule.everyMinute");
     const step = minuteStep(minute);
-    if (step) return `Every ${step} minute${step === 1 ? "" : "s"}`;
+    if (step === 1) return tr("automations.schedule.everyMinute");
+    if (step) return tr("automations.schedule.everyMinutes", { count: step });
     if (isSingleNumber(minute, 0, 59)) {
-      return `Hourly at :${String(Number(minute)).padStart(2, "0")}`;
+      return tr("automations.schedule.hourlyAt", {
+        minute: String(Number(minute)).padStart(2, "0"),
+      });
     }
   }
 
-  const time = formatCronTime(hour, minute);
-  if (!time) return "Custom schedule";
+  const time = formatCronTime(hour, minute, locale);
+  if (!time) return tr("automations.schedule.custom");
 
   if (everyDate) {
-    return `Every day at ${time}${tzSuffix}`;
+    return tr("automations.schedule.everyDayAt", { time }) + tzSuffix;
   }
   const normalizedDayOfWeek = normalizeDayOfWeek(dayOfWeek);
 
   if (year === "*" && dayOfMonth === "*" && month === "*" && normalizedDayOfWeek === "1-5") {
-    return `Weekdays at ${time}${tzSuffix}`;
+    return tr("automations.schedule.weekdaysAt", { time }) + tzSuffix;
   }
   if (
     year === "*" &&
@@ -148,7 +135,8 @@ export function scheduleLabel(cron, timezone) {
     month === "*" &&
     isSingleNumber(normalizedDayOfWeek, 0, 7)
   ) {
-    return `${WEEKDAYS[Number(normalizedDayOfWeek) % 7]} at ${time}${tzSuffix}`;
+    const weekday = weekdayName(Number(normalizedDayOfWeek) % 7, locale);
+    return tr("automations.schedule.weekdayAt", { weekday, time }) + tzSuffix;
   }
   if (
     year === "*" &&
@@ -156,7 +144,9 @@ export function scheduleLabel(cron, timezone) {
     month === "*" &&
     dayOfWeek === "*"
   ) {
-    return `${ordinal(Number(dayOfMonth))} day of each month at ${time}${tzSuffix}`;
+    return (
+      tr("automations.schedule.monthlyAt", { day: Number(dayOfMonth), time }) + tzSuffix
+    );
   }
   if (
     isSingleNumber(dayOfMonth, 1, 31) &&
@@ -164,13 +154,16 @@ export function scheduleLabel(cron, timezone) {
     dayOfWeek === "*" &&
     (year === "*" || isSingleNumber(year, 1970, 9999))
   ) {
-    const date = `${MONTHS[Number(month) - 1]} ${Number(dayOfMonth)}`;
-    return year === "*"
-      ? `${date} at ${time}${tzSuffix}`
-      : `${date}, ${year} at ${time}${tzSuffix}`;
+    const date = monthDayLabel(
+      Number(month),
+      Number(dayOfMonth),
+      year === "*" ? null : Number(year),
+      locale,
+    );
+    return tr("automations.schedule.dateAt", { date, time }) + tzSuffix;
   }
 
-  return "Custom schedule";
+  return tr("automations.schedule.custom");
 }
 
 export function formatAutomationDate(value, fallback = "Unknown") {
@@ -209,7 +202,7 @@ export function runStatusTone(status) {
   return RUN_STATUS_PRESENTATION[normalizeRunStatus(status)]?.tone || "muted";
 }
 
-function normalizeAutomation(automation) {
+function normalizeAutomation(automation, t, locale) {
   const recentRuns = normalizeRuns(automation.recent_runs);
   const latestRun = recentRuns[0] || null;
   const currentRun = recentRuns.find((run) => run.status === "running") || null;
@@ -223,7 +216,12 @@ function normalizeAutomation(automation) {
     ...automation,
     display_name: automation.name || "Untitled automation",
     schedule_timezone: automation.source?.timezone || "UTC",
-    schedule_label: scheduleLabel(automation.source?.cron, automation.source?.timezone || "UTC"),
+    schedule_label: scheduleLabel(
+      automation.source?.cron,
+      automation.source?.timezone || "UTC",
+      t,
+      locale,
+    ),
     state_label: stateLabel(automation.state),
     state_tone: stateTone(automation.state),
     next_run_timestamp: parseTimestamp(automation.next_run_at),
@@ -308,13 +306,41 @@ function nextRunTimestamp(automation) {
   return automation?.next_run_timestamp ?? parseTimestamp(automation?.next_run_at);
 }
 
-function formatCronTime(hour, minute) {
+// Format a cron hour/minute as a locale-aware clock time (e.g. "9:00 AM" in
+// en, "09:00" in de). Returns null for non-numeric fields so the caller falls
+// back to "Custom schedule". The Date is built in local time and rendered
+// without a timeZone option, so the displayed h:m is exactly what we put in —
+// independent of the machine's timezone.
+function intlDateTime(locale, options, date) {
+  try {
+    return new Intl.DateTimeFormat(locale || "en", options).format(date);
+  } catch (_) {
+    return new Intl.DateTimeFormat("en", options).format(date);
+  }
+}
+
+function formatCronTime(hour, minute, locale) {
   if (!isSingleNumber(hour, 0, 23) || !isSingleNumber(minute, 0, 59)) return null;
-  const hourNum = Number(hour);
-  const minuteNum = Number(minute);
-  const period = hourNum >= 12 ? "PM" : "AM";
-  const displayHour = hourNum % 12 || 12;
-  return `${displayHour}:${String(minuteNum).padStart(2, "0")} ${period}`;
+  return intlDateTime(
+    locale,
+    { hour: "numeric", minute: "2-digit" },
+    new Date(2001, 0, 1, Number(hour), Number(minute)),
+  );
+}
+
+// Localized full weekday name for a cron day-of-week (0 = Sunday). Jan 7 2001
+// was a Sunday, so offsetting from it yields the requested weekday.
+function weekdayName(dayOfWeek, locale) {
+  return intlDateTime(locale, { weekday: "long" }, new Date(2001, 0, 7 + dayOfWeek));
+}
+
+// Localized "month day" (and optional year), e.g. "Jan 1" / "Jan 1, 2027".
+function monthDayLabel(month, day, year, locale) {
+  const options =
+    year != null
+      ? { month: "short", day: "numeric", year: "numeric" }
+      : { month: "short", day: "numeric" };
+  return intlDateTime(locale, options, new Date(year != null ? year : 2001, month - 1, day));
 }
 
 function cronFields(cron) {
@@ -368,11 +394,3 @@ function normalizeDayOfWeek(value) {
   return aliases[upper] || value;
 }
 
-function ordinal(value) {
-  const mod100 = value % 100;
-  if (mod100 >= 11 && mod100 <= 13) return `${value}th`;
-  if (value % 10 === 1) return `${value}st`;
-  if (value % 10 === 2) return `${value}nd`;
-  if (value % 10 === 3) return `${value}rd`;
-  return `${value}th`;
-}

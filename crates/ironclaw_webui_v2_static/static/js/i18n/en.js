@@ -693,6 +693,15 @@ registerPack("en", {
   "automations.schedulerOff.title": "Scheduling is turned off",
   "automations.schedulerOff.description":
     "These automations are saved but won't run until the scheduler is enabled.",
+  "automations.schedule.custom": "Custom schedule",
+  "automations.schedule.everyMinute": "Every minute",
+  "automations.schedule.everyMinutes": "Every {count} minutes",
+  "automations.schedule.hourlyAt": "Hourly at :{minute}",
+  "automations.schedule.everyDayAt": "Every day at {time}",
+  "automations.schedule.weekdaysAt": "Weekdays at {time}",
+  "automations.schedule.weekdayAt": "{weekday} at {time}",
+  "automations.schedule.monthlyAt": "Day {day} of each month at {time}",
+  "automations.schedule.dateAt": "{date} at {time}",
   "automations.delivery.eyebrow": "Delivery defaults",
   "automations.delivery.title": "Where triggered results are sent",
   "automations.delivery.explainer":

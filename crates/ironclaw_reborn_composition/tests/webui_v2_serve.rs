@@ -2932,6 +2932,7 @@ async fn public_route_mount_is_merged_without_bearer_auth_and_keeps_descriptor_p
 async fn static_automations_presenters_label_sub_hourly_schedules() {
     let (app, _) = build_app();
     let response = app
+        .clone()
         .oneshot(
             Request::builder()
                 .method(Method::GET)
@@ -2944,17 +2945,46 @@ async fn static_automations_presenters_label_sub_hourly_schedules() {
     assert_eq!(response.status(), StatusCode::OK);
     let body = read_body_string(response).await;
 
+    // The cadence labels are now localized: the presenter selects an i18n key
+    // for each sub-hourly/hourly branch and the English copy lives in en.js.
     assert!(
-        body.contains("\"Every minute\""),
-        "presenters must label `* * * * *` as `Every minute` instead of `Custom schedule`"
+        body.contains("automations.schedule.everyMinute"),
+        "presenters must label `* * * * *` / `*/1 * * * *` via the everyMinute key"
     );
     assert!(
-        body.contains("Every ${step} minute"),
-        "presenters must label `*/N * * * *` as `Every N minutes`"
+        body.contains("automations.schedule.everyMinutes"),
+        "presenters must label `*/N * * * *` via the everyMinutes key"
     );
     assert!(
-        body.contains("Hourly at :"),
-        "presenters must label `M * * * *` as an hourly cadence"
+        body.contains("automations.schedule.hourlyAt"),
+        "presenters must label `M * * * *` via the hourlyAt key"
+    );
+
+    // And the English pack must carry the human-readable copy for those keys,
+    // so a clean install still reads "Every minute" / "Hourly at :MM".
+    let en = app
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri("/v2/js/i18n/en.js")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+    assert_eq!(en.status(), StatusCode::OK);
+    let en_body = read_body_string(en).await;
+    assert!(
+        en_body.contains("\"Every minute\""),
+        "en.js must label `* * * * *` as `Every minute` instead of `Custom schedule`"
+    );
+    assert!(
+        en_body.contains("Every {count} minutes"),
+        "en.js must label `*/N * * * *` as `Every N minutes`"
+    );
+    assert!(
+        en_body.contains("Hourly at :"),
+        "en.js must label `M * * * *` as an hourly cadence"
     );
 }
 
