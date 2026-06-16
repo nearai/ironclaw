@@ -1053,7 +1053,7 @@ mod tests {
         // Build a run context that carries the denial disposition.
         let mut context = run_context_for_driver(&driver);
         context.auth_resume_disposition =
-            Some(AuthResumeDisposition::Denied { reason: None });
+            Some(AuthResumeDisposition::Denied);
 
         // Stage a checkpoint payload whose execution state has a parked auth
         // resume (disposition: None — as it would be when written at block time).
@@ -1116,7 +1116,7 @@ mod tests {
 
         let mut context = run_context_for_driver(&driver);
         context.auth_resume_disposition =
-            Some(AuthResumeDisposition::Denied { reason: None });
+            Some(AuthResumeDisposition::Denied);
 
         let staged_state = state_with_pending_auth_resume(&context);
         // Confirm the state starts with no disposition (precondition).
@@ -1152,8 +1152,8 @@ mod tests {
             .disposition
             .expect("disposition must be Some after injection");
         assert!(
-            matches!(disposition, AuthResumeDisposition::Denied { reason: None }),
-            "disposition must be Denied{{reason: None}} after injection, got {disposition:?}"
+            matches!(disposition, AuthResumeDisposition::Denied),
+            "disposition must be Denied after injection, got {disposition:?}"
         );
     }
 

@@ -148,7 +148,7 @@ impl ExecutorStage<CapabilityInput> for CapabilityStage {
             .filter(|p| {
                 matches!(
                     p.disposition.as_ref(),
-                    Some(ironclaw_turns::AuthResumeDisposition::Denied { .. })
+                    Some(ironclaw_turns::AuthResumeDisposition::Denied)
                 )
             })
             .map(|p| p.capability_id.clone())

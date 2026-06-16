@@ -5578,7 +5578,7 @@ async fn capability_stage_denied_auth_resume_surfaces_authorization_failure_and_
         resume_token: None,
         prior_approval: None,
         replay: None,
-        disposition: Some(ironclaw_turns::AuthResumeDisposition::Denied { reason: None }),
+        disposition: Some(ironclaw_turns::AuthResumeDisposition::Denied),
     });
 
     // Use provider_calls_response so provider_replay is set, enabling the
@@ -5711,7 +5711,7 @@ async fn capability_stage_denied_auth_resume_only_fails_matching_call_remaining_
         resume_token: None,
         prior_approval: None,
         replay: None,
-        disposition: Some(ironclaw_turns::AuthResumeDisposition::Denied { reason: None }),
+        disposition: Some(ironclaw_turns::AuthResumeDisposition::Denied),
     });
 
     // Build a batch with two calls:
@@ -5931,7 +5931,7 @@ async fn capability_stage_denied_auth_resume_one_denied_two_remaining_all_dispat
         resume_token: None,
         prior_approval: None,
         replay: None,
-        disposition: Some(ironclaw_turns::AuthResumeDisposition::Denied { reason: None }),
+        disposition: Some(ironclaw_turns::AuthResumeDisposition::Denied),
     });
 
     // Three calls: X (denied), Y (unrelated), Z (unrelated).

@@ -13,12 +13,10 @@ pub type TurnTimestamp = DateTime<Utc>;
 #[serde(rename_all = "snake_case")]
 pub enum AuthResumeDisposition {
     /// User explicitly declined to provide credentials for the auth gate.
-    /// `reason` is reserved for future model-surfacing; None today.
-    Denied {
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        reason: Option<String>,
-    },
-    // Future variants: Deferred, Declined { permanent: bool }, etc.
+    /// The `reason` slot was always `None`; a raw String reaching the model would bypass the
+    /// loop-safe summary validator. Re-add a typed/validated field when there is a concrete need.
+    Denied,
+    // Future variants (Deferred, etc.) can be added here.
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -154,7 +152,7 @@ mod tests {
 
     #[test]
     fn auth_resume_disposition_denied_round_trips() {
-        let disposition = AuthResumeDisposition::Denied { reason: None };
+        let disposition = AuthResumeDisposition::Denied;
         let json = serde_json::to_string(&disposition).expect("serialize");
         assert!(json.contains("denied"), "wire value is snake_case: {json}");
         let decoded: AuthResumeDisposition = serde_json::from_str(&json).expect("deserialize");
@@ -169,9 +167,9 @@ mod tests {
     ///    deserialize with `auth_resume_disposition == None`.
     /// 2. **Absent-field serialize**: when `auth_resume_disposition` is `None`,
     ///    serializing the struct must NOT emit the `auth_resume_disposition` key.
-    /// 3. **Some round-trip**: when `auth_resume_disposition` is
-    ///    `Some(Denied { reason: None })`, the key is present in serialized JSON
-    ///    with the snake_case `denied` shape and round-trips correctly.
+    /// 3. **Some round-trip**: when `auth_resume_disposition` is `Some(Denied)`,
+    ///    the key is present in serialized JSON as the snake_case string `"denied"`
+    ///    and round-trips correctly.
     #[test]
     fn resume_turn_request_auth_resume_disposition_serde_contract() {
         // --- 1. Backward-compat: omitted key → None ---
@@ -201,8 +199,8 @@ mod tests {
             "auth_resume_disposition must be absent from JSON when None (skip_serializing_if)"
         );
 
-        // --- 3. Some round-trip: Denied {{ reason: None }} ---
-        let disposition = AuthResumeDisposition::Denied { reason: None };
+        // --- 3. Some round-trip: Denied (unit variant) ---
+        let disposition = AuthResumeDisposition::Denied;
         let some_request = make_resume_request(Some(disposition.clone()));
         let some_json = serde_json::to_value(&some_request).expect("serialize Some request");
         let disposition_value = some_json
@@ -210,10 +208,11 @@ mod tests {
             .expect("object")
             .get("auth_resume_disposition")
             .expect("auth_resume_disposition key must be present when Some");
-        // The enum is serialized with rename_all = "snake_case", so Denied → {"denied": {...}}
-        assert!(
-            disposition_value.get("denied").is_some(),
-            "auth_resume_disposition must serialize as snake_case 'denied' variant: {disposition_value}"
+        // The enum is a unit variant with rename_all = "snake_case", so Denied → "denied"
+        assert_eq!(
+            disposition_value,
+            &serde_json::Value::String("denied".to_string()),
+            "auth_resume_disposition must serialize as snake_case string 'denied': {disposition_value}"
         );
         let roundtrip: ResumeTurnRequest =
             serde_json::from_value(some_json).expect("deserialize Some request");

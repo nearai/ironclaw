@@ -802,7 +802,7 @@ async fn denied_auth_on_parked_gate_cancels_flow_and_resumes_with_denial_disposi
     );
     assert!(matches!(
         resumes[0].auth_resume_disposition,
-        Some(AuthResumeDisposition::Denied { reason: None })
+        Some(AuthResumeDisposition::Denied)
     ));
     assert!(coordinator.cancellations().is_empty());
 }
