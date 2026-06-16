@@ -132,6 +132,30 @@ impl ExecutorStage<CapabilityInput> for CapabilityStage {
         // (non-denied) calls that actually reach invoke_capability_batch. This
         // keeps the outcomes.len() == invocations.len() invariant intact.
         //
+        // `capability_batch` carries `invocation_count = 0` (the default) while
+        // denied calls are handled here. This is intentional and safe:
+        //
+        //   • `append_blocked_capability_error_result` only calls
+        //     `capability_batch.record_result(...)` when
+        //     `invocation_count > 0`; with the default batch the guard is
+        //     false, so no batch-level bookkeeping is attempted. The actual
+        //     bookkeeping — result_refs and recent_failure_kinds — goes onto
+        //     `state`, not the batch, and therefore is NOT lost.
+        //
+        //   • All-denied path (remaining_calls empty): `completed_turn` is
+        //     called with an `invocation_count = 0` batch. The stop strategy
+        //     guards both the terminate-hint check and the typed-no-progress
+        //     check behind `invocation_count > 0`, so neither fires on a
+        //     vacuous batch — exactly the correct behaviour for a turn where
+        //     the only "invocations" were short-circuit failures.
+        //
+        //   • Mixed path (remaining_calls non-empty): `capability_batch` is
+        //     replaced by `for_invocation_count(remaining_calls.len())` below.
+        //     Because `record_result` was never called on the default batch
+        //     (the `invocation_count > 0` guard prevented it), the reset does
+        //     not discard any accumulated state — it is a clean slate for the
+        //     batch that will actually reach `invoke_capability_batch`.
+        //
         // We call `handle_capability_error` directly rather than routing through
         // `handle_capability_outcome(Failed(Authorization, ...))` because
         // `capability_failed_summary` builds the prefix

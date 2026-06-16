@@ -234,6 +234,7 @@ struct RecordingTurnCoordinator {
     gate_ref: Mutex<Option<GateRef>>,
     resumes: Mutex<Vec<ResumeTurnRequest>>,
     cancellations: Mutex<Vec<CancelRunRequest>>,
+    auth_resume_disposition: Mutex<Option<AuthResumeDisposition>>,
 }
 
 impl RecordingTurnCoordinator {
@@ -244,6 +245,7 @@ impl RecordingTurnCoordinator {
             gate_ref: Mutex::new(Some(gate_ref)),
             resumes: Mutex::new(Vec::new()),
             cancellations: Mutex::new(Vec::new()),
+            auth_resume_disposition: Mutex::new(None),
         }
     }
 
@@ -257,6 +259,10 @@ impl RecordingTurnCoordinator {
 
     fn set_status(&self, status: TurnStatus) {
         *self.status.lock().expect("lock") = status;
+    }
+
+    fn set_auth_resume_disposition(&self, disposition: Option<AuthResumeDisposition>) {
+        *self.auth_resume_disposition.lock().expect("lock") = disposition;
     }
 }
 
@@ -318,7 +324,7 @@ impl TurnCoordinator for RecordingTurnCoordinator {
             failure: None,
             event_cursor: EventCursor(47),
             product_context: None,
-            auth_resume_disposition: None,
+            auth_resume_disposition: self.auth_resume_disposition.lock().expect("lock").clone(),
         })
     }
 }
@@ -957,6 +963,10 @@ async fn duplicate_denied_auth_on_already_resumed_run_is_idempotent() {
     let (service, _flow_manager, coordinator) =
         service_parts(flow.clone(), vec![flow], actor.clone(), gate_ref.clone());
     coordinator.set_status(TurnStatus::Queued);
+    // The first Deny set this marker on the run when it resumed with a denial
+    // disposition.  Without it the service cannot distinguish "we denied it"
+    // from "some other path cancelled the flow".
+    coordinator.set_auth_resume_disposition(Some(AuthResumeDisposition::Denied));
 
     let response = service
         .resolve(ResolveAuthInteractionRequest {
@@ -983,6 +993,64 @@ async fn duplicate_denied_auth_on_already_resumed_run_is_idempotent() {
         coordinator.cancellations().len(),
         0,
         "duplicate Deny must not cancel the already-resumed run"
+    );
+    assert_eq!(coordinator.resumes().len(), 0);
+}
+
+#[tokio::test]
+async fn deny_on_canceled_flow_without_deny_marker_returns_stale_auth() {
+    // Scenario: NotParkedOnGate + Deny, flow=Canceled, run is non-terminal,
+    // BUT auth_resume_disposition is None — the flow was canceled by some other
+    // path (not by our deny).  The service must NOT fabricate a DenialResumed
+    // response, and must NOT issue a cancel_run call.  It should return StaleAuth.
+    let actor = TurnActor::new(UserId::new("alice").unwrap());
+    let scope = turn_scope("alice", "thread-a");
+    let run_id = TurnRunId::new();
+    let gate_ref = make_gate_ref("gate:auth-cancel-other-path");
+    let flow = auth_flow(
+        AuthFlowStatus::Canceled,
+        &scope,
+        &actor,
+        run_id,
+        &gate_ref,
+        None,
+        setup_challenge(),
+    );
+    // The run is non-terminal (e.g. still Queued from some other resumption
+    // path), and the coordinator returns auth_resume_disposition=None — no
+    // deny marker was stamped by us.
+    let (service, _flow_manager, coordinator) =
+        service_parts(flow.clone(), vec![flow], actor.clone(), gate_ref.clone());
+    coordinator.set_status(TurnStatus::Queued);
+    // auth_resume_disposition deliberately left as None (the default): this
+    // simulates a flow canceled by a path other than our Deny.
+
+    let error = service
+        .resolve(ResolveAuthInteractionRequest {
+            scope,
+            actor,
+            run_id_hint: Some(run_id),
+            gate_ref,
+            decision: AuthInteractionDecision::Deny,
+            idempotency_key: IdempotencyKey::new("auth-action-cancel-other-path").unwrap(),
+        })
+        .await
+        .expect_err("deny on other-path-canceled flow must be stale, not DenialResumed");
+
+    assert!(
+        matches!(
+            error,
+            ProductWorkflowError::AuthInteractionRejected {
+                kind: AuthInteractionRejectionKind::StaleAuth
+            }
+        ),
+        "expected StaleAuth (no deny marker), got: {error:?}"
+    );
+    // Must not issue a cancel_run — the run was not parked by us.
+    assert_eq!(
+        coordinator.cancellations().len(),
+        0,
+        "must not call cancel_run when the flow was canceled by another path"
     );
     assert_eq!(coordinator.resumes().len(), 0);
 }

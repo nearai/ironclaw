@@ -229,6 +229,20 @@ impl DefaultAuthInteractionService {
             }
             AuthFlowStatus::Failed | AuthFlowStatus::Expired | AuthFlowStatus::Canceled => {}
             AuthFlowStatus::Completed => {
+                // DELIBERATE: a Deny arriving after the OAuth flow already
+                // reached Completed is rejected as StaleAuth.  This is a race
+                // (the user clicked Deny just as the OAuth callback landed).
+                // The caller (`resume_denied_auth`) short-circuits here and the
+                // run proceeds with the credential that was just obtained.
+                //
+                // Surfacing a friendlier "already connected" message, or
+                // cancelling the run to honor the late Deny, was considered and
+                // rejected as too complex for the initial implementation.  That
+                // remains a possible follow-up; for now the late-Deny path is
+                // intentionally a no-op from the run's perspective.
+                //
+                // The existing test `deny_on_completed_flow_rejects_with_stale_auth`
+                // pins this behavior.
                 return Err(auth_rejected(AuthInteractionRejectionKind::StaleAuth));
             }
         }
@@ -416,10 +430,10 @@ impl AuthInteractionService for DefaultAuthInteractionService {
                         // reflecting existing state; no new cancel lifecycle event fires.
                         actor: None,
                     }))
-                } else {
-                    // Run is non-terminal (Queued / Running / Completed /
-                    // Blocked-on-something-else).  The first Deny already
-                    // resumed it with a denial disposition; replay that outcome.
+                } else if state.auth_resume_disposition.is_some() {
+                    // Run is non-terminal and carries our deny marker — the first
+                    // Deny successfully resumed it with a denial disposition.
+                    // Replay that outcome idempotently.
                     Ok(ResolveAuthInteractionResponse::DenialResumed(
                         ResumeTurnResponse {
                             run_id,
@@ -427,6 +441,12 @@ impl AuthInteractionService for DefaultAuthInteractionService {
                             event_cursor: state.event_cursor,
                         },
                     ))
+                } else {
+                    // The flow was Canceled but this run was NOT deny-resumed by us
+                    // (no auth_resume_disposition marker).  The flow reached
+                    // Canceled via some other path — treat as stale; the gate
+                    // cannot be resolved as a deny here.
+                    Err(auth_rejected(AuthInteractionRejectionKind::StaleAuth))
                 }
             }
         }
