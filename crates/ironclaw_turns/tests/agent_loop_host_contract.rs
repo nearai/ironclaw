@@ -3878,7 +3878,9 @@ async fn turn_run_state_auth_resume_disposition_defaults_to_none_when_missing_fr
     let mut json = serde_json::to_value(&state).unwrap();
     // The field is skip_serializing_if = "Option::is_none", so it may already be absent;
     // either way, ensure it is absent before decoding.
-    json.as_object_mut().unwrap().remove("auth_resume_disposition");
+    json.as_object_mut()
+        .unwrap()
+        .remove("auth_resume_disposition");
     let decoded: TurnRunState = serde_json::from_value(json).unwrap();
     assert!(
         decoded.auth_resume_disposition.is_none(),

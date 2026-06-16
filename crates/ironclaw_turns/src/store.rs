@@ -471,10 +471,7 @@ mod tests {
 
         let denied = AuthResumeDisposition::Denied;
         let serialized_denied = serde_json::to_value(&denied).expect("serialize Denied");
-        assert_eq!(
-            serialized_denied,
-            serde_json::json!("denied")
-        );
+        assert_eq!(serialized_denied, serde_json::json!("denied"));
         let roundtrip: AuthResumeDisposition =
             serde_json::from_value(serialized_denied).expect("roundtrip");
         assert_eq!(roundtrip, denied);

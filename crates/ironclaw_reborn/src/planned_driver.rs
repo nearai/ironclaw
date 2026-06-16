@@ -1019,8 +1019,7 @@ mod tests {
             capability_id: CapabilityId::new("test.capability").expect("valid capability id"),
             surface_version: CapabilitySurfaceVersion::new("surface:v1")
                 .expect("valid surface version"),
-            input_ref: CapabilityInputRef::new("input:test-auth-deny")
-                .expect("valid input ref"),
+            input_ref: CapabilityInputRef::new("input:test-auth-deny").expect("valid input ref"),
             effective_capability_ids: Vec::new(),
             provider_replay: None,
             resume_token: None,
@@ -1052,16 +1051,14 @@ mod tests {
 
         // Build a run context that carries the denial disposition.
         let mut context = run_context_for_driver(&driver);
-        context.auth_resume_disposition =
-            Some(AuthResumeDisposition::Denied);
+        context.auth_resume_disposition = Some(AuthResumeDisposition::Denied);
 
         // Stage a checkpoint payload whose execution state has a parked auth
         // resume (disposition: None — as it would be when written at block time).
         let staged_state = state_with_pending_auth_resume(&context);
         // Encode and re-decode to exercise the serde boundary (mirrors what the
         // production checkpoint path does via RedactedCheckpointPayload).
-        let payload_bytes =
-            serde_json::to_vec(&staged_state).expect("serialize checkpoint state");
+        let payload_bytes = serde_json::to_vec(&staged_state).expect("serialize checkpoint state");
         let loaded = LoadedCheckpointPayload {
             kind: LoopCheckpointKind::BeforeModel,
             schema_id: context.checkpoint_schema_id.clone(),
@@ -1115,8 +1112,7 @@ mod tests {
         let driver = PlannedDriver::default_from_registry(&registry).expect("driver");
 
         let mut context = run_context_for_driver(&driver);
-        context.auth_resume_disposition =
-            Some(AuthResumeDisposition::Denied);
+        context.auth_resume_disposition = Some(AuthResumeDisposition::Denied);
 
         let staged_state = state_with_pending_auth_resume(&context);
         // Confirm the state starts with no disposition (precondition).
@@ -1131,8 +1127,7 @@ mod tests {
         );
 
         // Apply the same injection logic as the production `resume` path.
-        let payload_bytes =
-            serde_json::to_vec(&staged_state).expect("serialize checkpoint state");
+        let payload_bytes = serde_json::to_vec(&staged_state).expect("serialize checkpoint state");
         let checkpoint_kind = resumable_checkpoint_kind_from_host(LoopCheckpointKind::BeforeModel)
             .expect("BeforeModel is resumable");
         let mut loaded_state =
@@ -1172,8 +1167,7 @@ mod tests {
         assert!(context.auth_resume_disposition.is_none());
 
         let staged_state = state_with_pending_auth_resume(&context);
-        let payload_bytes =
-            serde_json::to_vec(&staged_state).expect("serialize checkpoint state");
+        let payload_bytes = serde_json::to_vec(&staged_state).expect("serialize checkpoint state");
         let checkpoint_kind = resumable_checkpoint_kind_from_host(LoopCheckpointKind::BeforeModel)
             .expect("BeforeModel is resumable");
         let mut loaded_state =

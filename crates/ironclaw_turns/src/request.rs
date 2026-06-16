@@ -174,15 +174,14 @@ mod tests {
     fn resume_turn_request_auth_resume_disposition_serde_contract() {
         // --- 1. Backward-compat: omitted key → None ---
         let base = make_resume_request(None);
-        let mut json_value =
-            serde_json::to_value(&base).expect("serialize base request");
+        let mut json_value = serde_json::to_value(&base).expect("serialize base request");
         // Remove the key if it was somehow emitted (it shouldn't be — see assertion 2).
         json_value
             .as_object_mut()
             .expect("object")
             .remove("auth_resume_disposition");
-        let deserialized: ResumeTurnRequest =
-            serde_json::from_value(json_value).expect("deserialize without auth_resume_disposition");
+        let deserialized: ResumeTurnRequest = serde_json::from_value(json_value)
+            .expect("deserialize without auth_resume_disposition");
         assert_eq!(
             deserialized.auth_resume_disposition, None,
             "omitted auth_resume_disposition key must default to None"

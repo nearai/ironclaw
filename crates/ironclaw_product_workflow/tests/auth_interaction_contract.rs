@@ -982,10 +982,7 @@ async fn duplicate_denied_auth_on_already_resumed_run_is_idempotent() {
 
     // Must replay the denial outcome, not cancel the live run.
     assert!(
-        matches!(
-            response,
-            ResolveAuthInteractionResponse::DenialResumed(_)
-        ),
+        matches!(response, ResolveAuthInteractionResponse::DenialResumed(_)),
         "expected DenialResumed idempotent replay, got: {response:?}"
     );
     // The critical invariant: no new cancel_run call must have been issued.
@@ -1094,10 +1091,7 @@ async fn duplicate_denied_auth_on_cancelled_run_returns_canceled_without_new_can
     // The run is already Cancelled — reflect that, but do NOT issue a new
     // cancel_run call (that would double-fire side effects).
     assert!(
-        matches!(
-            response,
-            ResolveAuthInteractionResponse::Canceled(_)
-        ),
+        matches!(response, ResolveAuthInteractionResponse::Canceled(_)),
         "expected Canceled reflection for terminal run, got: {response:?}"
     );
     assert_eq!(

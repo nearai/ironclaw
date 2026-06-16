@@ -7306,8 +7306,7 @@ async fn resume_turn_auth_resume_disposition_is_persisted_and_visible_on_claim()
     );
 
     // Resume with Denied disposition — this is the auth-deny path.
-    let denied_disposition =
-        ironclaw_turns::AuthResumeDisposition::Denied;
+    let denied_disposition = ironclaw_turns::AuthResumeDisposition::Denied;
     coordinator
         .resume_turn(ResumeTurnRequest {
             scope: scope("thread-auth-deny-persist"),
@@ -7385,8 +7384,7 @@ async fn resume_turn_auth_resume_disposition_is_persisted_and_visible_on_claim()
         .expect("run must be claimable after second resume");
 
     assert_eq!(
-        claimed2.state.auth_resume_disposition,
-        None,
+        claimed2.state.auth_resume_disposition, None,
         "auth_resume_disposition must be None after a resume that supplies no disposition"
     );
 }

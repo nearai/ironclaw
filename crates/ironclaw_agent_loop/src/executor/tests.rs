@@ -5608,9 +5608,9 @@ async fn capability_stage_denied_auth_resume_surfaces_authorization_failure_and_
     // 1. Must return Continue (loop proceeds, not Blocked or Failed).
     let final_state = match step {
         TurnCompletedStep::Continue { state, .. } => state,
-        TurnCompletedStep::Exit(exit) => panic!(
-            "expected Continue after denied auth resume, got Exit: {exit:?}"
-        ),
+        TurnCompletedStep::Exit(exit) => {
+            panic!("expected Continue after denied auth resume, got Exit: {exit:?}")
+        }
     };
 
     // 2. pending_auth_resume must be cleared after the denied-resume path.
@@ -5642,11 +5642,13 @@ async fn capability_stage_denied_auth_resume_surfaces_authorization_failure_and_
         "observation status must be Error"
     );
     assert_eq!(
-        observation.summary,
-        "Capability failed with authorization.",
+        observation.summary, "Capability failed with authorization.",
         "observation summary must describe the authorization failure"
     );
-    let recovery = observation.recovery.as_ref().expect("recovery must be present");
+    let recovery = observation
+        .recovery
+        .as_ref()
+        .expect("recovery must be present");
     assert_eq!(
         recovery.same_call_retry,
         SameCallRetryConstraint::Forbidden,
@@ -5771,9 +5773,9 @@ async fn capability_stage_denied_auth_resume_only_fails_matching_call_remaining_
     // 1. Must return Continue — the loop must proceed, not exit.
     let final_state = match step {
         TurnCompletedStep::Continue { state, .. } => state,
-        TurnCompletedStep::Exit(exit) => panic!(
-            "expected Continue after partial auth-deny, got Exit: {exit:?}"
-        ),
+        TurnCompletedStep::Exit(exit) => {
+            panic!("expected Continue after partial auth-deny, got Exit: {exit:?}")
+        }
     };
 
     // 2. pending_auth_resume must be cleared — the denial was consumed.
@@ -5826,11 +5828,13 @@ async fn capability_stage_denied_auth_resume_only_fails_matching_call_remaining_
         "X failure observation status must be Error"
     );
     assert_eq!(
-        obs.summary,
-        "Capability failed with authorization.",
+        obs.summary, "Capability failed with authorization.",
         "X failure observation summary must describe the authorization failure"
     );
-    let recovery = obs.recovery.as_ref().expect("recovery must be present for X");
+    let recovery = obs
+        .recovery
+        .as_ref()
+        .expect("recovery must be present for X");
     assert_eq!(
         recovery.same_call_retry,
         SameCallRetryConstraint::Forbidden,
@@ -5865,8 +5869,7 @@ async fn capability_stage_denied_auth_resume_only_fails_matching_call_remaining_
 async fn capability_stage_denied_auth_resume_one_denied_two_remaining_all_dispatched() {
     let y_result_ref = LoopResultRef::new("result:y-multi").expect("valid");
     let z_result_ref = LoopResultRef::new("result:z-multi").expect("valid");
-    let z_capability_id =
-        ironclaw_host_api::CapabilityId::new("demo.write").expect("valid cap id");
+    let z_capability_id = ironclaw_host_api::CapabilityId::new("demo.write").expect("valid cap id");
 
     let host = MockHost::new(Vec::new())
         .with_extra_capability_descriptors(vec![
@@ -6002,9 +6005,9 @@ async fn capability_stage_denied_auth_resume_one_denied_two_remaining_all_dispat
     // 1. Must return Continue — the loop proceeds with both Y and Z completed.
     let final_state = match step {
         TurnCompletedStep::Continue { state, .. } => state,
-        TurnCompletedStep::Exit(exit) => panic!(
-            "expected Continue after 1-denied + 2-remaining, got Exit: {exit:?}"
-        ),
+        TurnCompletedStep::Exit(exit) => {
+            panic!("expected Continue after 1-denied + 2-remaining, got Exit: {exit:?}")
+        }
     };
 
     // 2. pending_auth_resume must be cleared.
@@ -6061,11 +6064,13 @@ async fn capability_stage_denied_auth_resume_one_denied_two_remaining_all_dispat
         "X failure observation status must be Error"
     );
     assert_eq!(
-        obs.summary,
-        "Capability failed with authorization.",
+        obs.summary, "Capability failed with authorization.",
         "X failure observation summary must describe the authorization failure"
     );
-    let recovery = obs.recovery.as_ref().expect("recovery must be present for X");
+    let recovery = obs
+        .recovery
+        .as_ref()
+        .expect("recovery must be present for X");
     assert_eq!(
         recovery.same_call_retry,
         SameCallRetryConstraint::Forbidden,

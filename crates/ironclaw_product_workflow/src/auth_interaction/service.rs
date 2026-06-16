@@ -421,15 +421,17 @@ impl AuthInteractionService for DefaultAuthInteractionService {
                     // The run was genuinely cancelled (e.g. by some other path
                     // before our first Deny resumed it).  Reflect that terminal
                     // state without issuing a new cancel_run call.
-                    Ok(ResolveAuthInteractionResponse::Canceled(CancelRunResponse {
-                        run_id,
-                        status: state.status,
-                        event_cursor: state.event_cursor,
-                        already_terminal: true,
-                        // actor: None is intentional — this is an idempotent replay
-                        // reflecting existing state; no new cancel lifecycle event fires.
-                        actor: None,
-                    }))
+                    Ok(ResolveAuthInteractionResponse::Canceled(
+                        CancelRunResponse {
+                            run_id,
+                            status: state.status,
+                            event_cursor: state.event_cursor,
+                            already_terminal: true,
+                            // actor: None is intentional — this is an idempotent replay
+                            // reflecting existing state; no new cancel lifecycle event fires.
+                            actor: None,
+                        },
+                    ))
                 } else if state.auth_resume_disposition.is_some() {
                     // Run is non-terminal and carries our deny marker — the first
                     // Deny successfully resumed it with a denial disposition.
