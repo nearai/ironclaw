@@ -1191,7 +1191,6 @@ fn run_id_from_auth_resolution(response: ResolveAuthInteractionResponse) -> Turn
     match response {
         ResolveAuthInteractionResponse::Resumed(response) => response.run_id,
         ResolveAuthInteractionResponse::Canceled(response) => response.run_id,
-        ResolveAuthInteractionResponse::DenialResumed(response) => response.run_id,
     }
 }
 

@@ -804,7 +804,7 @@ async fn denied_auth_on_parked_gate_cancels_flow_and_resumes_with_denial_disposi
     // Parked deny must resume (not cancel) so the model can surface the denial.
     assert!(matches!(
         response,
-        ResolveAuthInteractionResponse::DenialResumed(_)
+        ResolveAuthInteractionResponse::Resumed(_)
     ));
     // The OAuth flow must be cancelled.
     assert_eq!(flow_manager.cancellations().len(), 1);
@@ -952,7 +952,7 @@ async fn duplicate_denied_auth_on_already_resumed_run_is_idempotent() {
     // Scenario: first Deny already resolved the gate (flow=Canceled) and
     // resumed the run (now Queued/Running).  A duplicate Deny (double-click,
     // lost response, client retry) must NOT cancel the live resumed run.
-    // Expected: DenialResumed replay reflecting current run state, zero
+    // Expected: Resumed replay reflecting current run state, zero
     // cancel_run calls.
     let actor = TurnActor::new(UserId::new("alice").unwrap());
     let scope = turn_scope("alice", "thread-a");
@@ -991,8 +991,8 @@ async fn duplicate_denied_auth_on_already_resumed_run_is_idempotent() {
 
     // Must replay the denial outcome, not cancel the live run.
     assert!(
-        matches!(response, ResolveAuthInteractionResponse::DenialResumed(_)),
-        "expected DenialResumed idempotent replay, got: {response:?}"
+        matches!(response, ResolveAuthInteractionResponse::Resumed(_)),
+        "expected Resumed idempotent replay, got: {response:?}"
     );
     // The critical invariant: no new cancel_run call must have been issued.
     assert_eq!(
@@ -1007,7 +1007,7 @@ async fn duplicate_denied_auth_on_already_resumed_run_is_idempotent() {
 async fn deny_on_canceled_flow_without_deny_marker_returns_stale_auth() {
     // Scenario: NotParkedOnGate + Deny, flow=Canceled, run is non-terminal,
     // BUT auth_resume_disposition is None — the flow was canceled by some other
-    // path (not by our deny).  The service must NOT fabricate a DenialResumed
+    // path (not by our deny).  The service must NOT fabricate a Resumed
     // response, and must NOT issue a cancel_run call.  It should return StaleAuth.
     let actor = TurnActor::new(UserId::new("alice").unwrap());
     let scope = turn_scope("alice", "thread-a");
@@ -1041,7 +1041,7 @@ async fn deny_on_canceled_flow_without_deny_marker_returns_stale_auth() {
             idempotency_key: IdempotencyKey::new("auth-action-cancel-other-path").unwrap(),
         })
         .await
-        .expect_err("deny on other-path-canceled flow must be stale, not DenialResumed");
+        .expect_err("deny on other-path-canceled flow must be stale, not Resumed");
 
     assert!(
         matches!(
@@ -1366,14 +1366,14 @@ async fn denied_auth_on_parked_gate_propagates_get_run_state_error_without_resum
         })
         .await;
 
-    // Must propagate as an Err — not DenialResumed.
+    // Must propagate as an Err — not a spurious Resumed.
     assert!(
         result.is_err(),
         "get_run_state error must propagate as Err, got: {result:?}"
     );
     assert!(
-        !matches!(result, Ok(ResolveAuthInteractionResponse::DenialResumed(_))),
-        "get_run_state error must not produce DenialResumed"
+        !matches!(result, Ok(ResolveAuthInteractionResponse::Resumed(_))),
+        "get_run_state error must not produce a spurious Resumed"
     );
     // resume_turn must NOT have been called — no live resume should happen.
     assert_eq!(

@@ -157,11 +157,11 @@ impl AgentLoopDriver for PlannedDriver {
         };
 
         // A run resumed from a user-denied auth gate carries the denial
-        // disposition in its run context. Stamp it onto the parked auth-resume
+        // disposition in the resume request. Stamp it onto the parked auth-resume
         // so the executor surfaces a model-visible denial and continues instead
         // of re-dispatching the capability (which would re-block on the still-
         // missing credential — the infinite auth/deny loop this fixes).
-        if let Some(disposition) = run_context.auth_resume_disposition.clone()
+        if let Some(disposition) = request.auth_resume_disposition.clone()
             && let Some(pending) = initial.pending_auth_resume.as_mut()
         {
             pending.disposition = Some(disposition);
@@ -539,6 +539,7 @@ mod tests {
                     run_id: context.run_id,
                     checkpoint_id: TurnCheckpointId::new(),
                     resolved_run_profile: context.resolved_run_profile.clone(),
+                    auth_resume_disposition: None,
                 },
                 &host,
             )
@@ -576,6 +577,7 @@ mod tests {
                     run_id: context.run_id,
                     checkpoint_id,
                     resolved_run_profile: context.resolved_run_profile.clone(),
+                    auth_resume_disposition: None,
                 },
                 &host,
             )
@@ -610,6 +612,7 @@ mod tests {
                     run_id: context.run_id,
                     checkpoint_id: TurnCheckpointId::new(),
                     resolved_run_profile,
+                    auth_resume_disposition: None,
                 },
                 &host,
             )
@@ -651,6 +654,7 @@ mod tests {
                     run_id: context.run_id,
                     checkpoint_id,
                     resolved_run_profile: context.resolved_run_profile.clone(),
+                    auth_resume_disposition: None,
                 },
                 &host,
             )
@@ -702,6 +706,7 @@ mod tests {
                     run_id: context.run_id,
                     checkpoint_id,
                     resolved_run_profile: context.resolved_run_profile.clone(),
+                    auth_resume_disposition: None,
                 },
                 &host,
             )
@@ -740,6 +745,7 @@ mod tests {
                     run_id: context.run_id,
                     checkpoint_id,
                     resolved_run_profile: context.resolved_run_profile.clone(),
+                    auth_resume_disposition: None,
                 },
                 &host,
             )
@@ -1049,9 +1055,10 @@ mod tests {
         let registry = build_loop_family_registry().expect("registry");
         let driver = PlannedDriver::default_from_registry(&registry).expect("driver");
 
-        // Build a run context that carries the denial disposition.
-        let mut context = run_context_for_driver(&driver);
-        context.auth_resume_disposition = Some(AuthResumeDisposition::Denied);
+        // Build a run context (no disposition on context — disposition travels
+        // via the resume request, not the host context).
+        let context = run_context_for_driver(&driver);
+        let disposition = Some(AuthResumeDisposition::Denied);
 
         // Stage a checkpoint payload whose execution state has a parked auth
         // resume (disposition: None — as it would be when written at block time).
@@ -1080,6 +1087,7 @@ mod tests {
                     run_id: context.run_id,
                     checkpoint_id,
                     resolved_run_profile: context.resolved_run_profile.clone(),
+                    auth_resume_disposition: disposition,
                 },
                 &host,
             )
@@ -1111,8 +1119,10 @@ mod tests {
         let registry = build_loop_family_registry().expect("registry");
         let driver = PlannedDriver::default_from_registry(&registry).expect("driver");
 
-        let mut context = run_context_for_driver(&driver);
-        context.auth_resume_disposition = Some(AuthResumeDisposition::Denied);
+        // Disposition now travels via the resume request, not the host context.
+        let context = run_context_for_driver(&driver);
+        let request_disposition: Option<AuthResumeDisposition> =
+            Some(AuthResumeDisposition::Denied);
 
         let staged_state = state_with_pending_auth_resume(&context);
         // Confirm the state starts with no disposition (precondition).
@@ -1134,7 +1144,7 @@ mod tests {
             LoopExecutionState::from_checkpoint_payload(&payload_bytes, checkpoint_kind)
                 .expect("decode checkpoint state");
 
-        if let Some(disposition) = context.auth_resume_disposition.clone()
+        if let Some(disposition) = request_disposition.clone()
             && let Some(pending) = loaded_state.pending_auth_resume.as_mut()
         {
             pending.disposition = Some(disposition);
@@ -1152,19 +1162,20 @@ mod tests {
         );
     }
 
-    /// Confirm the injection is a no-op when `run_context.auth_resume_disposition`
-    /// is `None` — do not regress the normal (non-deny) resume path.
+    /// Confirm the injection is a no-op when the resume request carries no
+    /// disposition — do not regress the normal (non-deny) resume path.
     #[test]
     fn auth_deny_disposition_injection_is_noop_when_disposition_is_none() {
         use ironclaw_agent_loop::state::LoopExecutionState;
+        use ironclaw_turns::AuthResumeDisposition;
         use ironclaw_turns::run_profile::LoopCheckpointKind;
 
         let registry = build_loop_family_registry().expect("registry");
         let driver = PlannedDriver::default_from_registry(&registry).expect("driver");
 
-        // Default context has no disposition.
         let context = run_context_for_driver(&driver);
-        assert!(context.auth_resume_disposition.is_none());
+        // Disposition now travels via the resume request, not the host context.
+        let request_disposition: Option<AuthResumeDisposition> = None;
 
         let staged_state = state_with_pending_auth_resume(&context);
         let payload_bytes = serde_json::to_vec(&staged_state).expect("serialize checkpoint state");
@@ -1175,7 +1186,7 @@ mod tests {
                 .expect("decode checkpoint state");
 
         // Apply injection (disposition is None — the `if let Some` guard fires false).
-        if let Some(disposition) = context.auth_resume_disposition.clone()
+        if let Some(disposition) = request_disposition.clone()
             && let Some(pending) = loaded_state.pending_auth_resume.as_mut()
         {
             pending.disposition = Some(disposition);
@@ -1188,7 +1199,7 @@ mod tests {
                 .expect("pending_auth_resume must survive round-trip")
                 .disposition
                 .is_none(),
-            "disposition must remain None when run_context.auth_resume_disposition is None"
+            "disposition must remain None when request auth_resume_disposition is None"
         );
     }
 }

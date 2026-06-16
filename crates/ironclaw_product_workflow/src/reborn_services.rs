@@ -3274,9 +3274,6 @@ impl RebornServices {
             ResolveAuthInteractionResponse::Canceled(response) => {
                 Ok(RebornResolveGateResponse::Cancelled(response.into()))
             }
-            ResolveAuthInteractionResponse::DenialResumed(response) => {
-                Ok(RebornResolveGateResponse::Resumed(response.into()))
-            }
         }
     }
 

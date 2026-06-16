@@ -279,7 +279,7 @@ impl DefaultAuthInteractionService {
             })
             .await
             .map_err(map_auth_resume_error)?;
-        Ok(ResolveAuthInteractionResponse::DenialResumed(response))
+        Ok(ResolveAuthInteractionResponse::Resumed(response))
     }
 
     async fn cancel_auth_run(
@@ -441,7 +441,7 @@ impl AuthInteractionService for DefaultAuthInteractionService {
                     // Run is non-terminal and carries our deny marker — the first
                     // Deny successfully resumed it with a denial disposition.
                     // Replay that outcome idempotently.
-                    Ok(ResolveAuthInteractionResponse::DenialResumed(
+                    Ok(ResolveAuthInteractionResponse::Resumed(
                         ResumeTurnResponse {
                             run_id,
                             status: state.status,

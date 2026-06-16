@@ -3927,13 +3927,13 @@ async fn hook_auth_gate_denial_uses_auth_interaction_service() {
     assert_eq!(coordinator.cancellation_count(), 0);
 }
 
-/// A minimal auth-interaction stub that returns `DenialResumed` for every
+/// A minimal auth-interaction stub that returns `Resumed` for every
 /// Deny decision, mirroring the production path where the model is resumed
 /// so it can surface the denial to the user.
-struct DenialResumedAuthInteractionService;
+struct DeniedResumedAuthInteractionService;
 
 #[async_trait]
-impl AuthInteractionService for DenialResumedAuthInteractionService {
+impl AuthInteractionService for DeniedResumedAuthInteractionService {
     async fn list_pending(
         &self,
         _request: ListPendingAuthInteractionsRequest,
@@ -3948,7 +3948,7 @@ impl AuthInteractionService for DenialResumedAuthInteractionService {
         request: ResolveAuthInteractionRequest,
     ) -> Result<ResolveAuthInteractionResponse, ProductWorkflowError> {
         let run_id = request.run_id_hint.expect("webui passes run_id");
-        Ok(ResolveAuthInteractionResponse::DenialResumed(
+        Ok(ResolveAuthInteractionResponse::Resumed(
             ResumeTurnResponse {
                 run_id,
                 status: TurnStatus::Queued,
@@ -3959,11 +3959,12 @@ impl AuthInteractionService for DenialResumedAuthInteractionService {
 }
 
 #[tokio::test]
-async fn hook_auth_gate_denial_resumed_maps_to_reborn_resumed() {
-    // Verifies the `DenialResumed(..) => RebornResolveGateResponse::Resumed(..)`
-    // arm of `resolve_auth_gate` is reachable through the facade.
+async fn hook_auth_gate_denial_maps_to_reborn_resumed() {
+    // Verifies that a Deny decision (which produces `Resumed` from
+    // `resume_denied_auth`) maps to `RebornResolveGateResponse::Resumed`
+    // through the facade.
     let coordinator = Arc::new(FakeTurnCoordinator::default());
-    let auth_interactions = Arc::new(DenialResumedAuthInteractionService);
+    let auth_interactions = Arc::new(DeniedResumedAuthInteractionService);
     let services = RebornServices::new(
         Arc::new(InMemorySessionThreadService::default()),
         coordinator.clone(),
@@ -3984,7 +3985,9 @@ async fn hook_auth_gate_denial_resumed_maps_to_reborn_resumed() {
             .expect("request"),
         )
         .await
-        .expect("DenialResumed from auth-interaction service must map to Resumed");
+        .expect(
+            "Resumed from auth-interaction service must map to RebornResolveGateResponse::Resumed",
+        );
 
     assert!(
         matches!(response, RebornResolveGateResponse::Resumed(_)),
