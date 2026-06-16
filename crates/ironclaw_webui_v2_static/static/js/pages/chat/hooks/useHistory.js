@@ -58,7 +58,7 @@ export function useHistory(threadId, options = {}) {
     loadError: null,
   });
   // Synchronous reentrancy guard, tracked PER THREAD — `isLoading` in state is
-  // async so it can't gate overlapping calls (scroll-to-load + onRunCompleted
+  // async so it can't gate overlapping calls (scroll-to-load + onRunSettled
   // refetch can fire in the same tick). It must be per-thread, not a single
   // boolean: a boolean held by an in-flight load of thread A would block a
   // switch to an uncached thread B, leaving B stuck loading. Each entry is
