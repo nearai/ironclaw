@@ -95,6 +95,7 @@ impl ExecutorStage<GateInput> for GateStage {
                         resume_token: auth_resume_token,
                         prior_approval: auth_prior_approval,
                         replay: auth_replay,
+                        disposition: None,
                     });
                 }
                 // Non-auth blocks do not invalidate a pending auth resume: a resource or

@@ -570,6 +570,7 @@ mod tests {
             resume_token: None,
             prior_approval: None,
             replay: None,
+            disposition: None,
         };
         let surface_version = CapabilitySurfaceVersion::new("surface:v1").unwrap();
 
@@ -615,6 +616,7 @@ mod tests {
                 correlation_id,
             }),
             replay: None,
+            disposition: None,
         };
         let surface_version = CapabilitySurfaceVersion::new("surface:v1").unwrap();
         let call = CapabilityCallCandidate {
@@ -679,6 +681,7 @@ mod tests {
             resume_token: None, // no prior approval — the key precondition
             prior_approval: None,
             replay: None,
+            disposition: None,
         };
         let surface_version = CapabilitySurfaceVersion::new("surface:v1").unwrap();
         let call = CapabilityCallCandidate {
