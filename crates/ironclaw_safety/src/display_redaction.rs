@@ -52,8 +52,7 @@ fn redact_shell_command_for_display(cmd: &str) -> String {
 
 pub fn sanitize_display_text(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
-    let mut redact_next_value = false;
-    let mut credential_key_pending_separator = false;
+    let mut credential_value_state = CredentialValueState::None;
     for token in text.split_inclusive(char::is_whitespace) {
         let trimmed = token.trim_end();
         if trimmed.is_empty() {
@@ -61,32 +60,53 @@ pub fn sanitize_display_text(text: &str) -> String {
             continue;
         }
         let suffix = &token[trimmed.len()..];
-        if is_url_like(trimmed) {
-            out.push_str(&sanitize_url_for_display(trimmed));
-            push_safe_text(&mut out, suffix);
-            redact_next_value = false;
-            credential_key_pending_separator = false;
+        if matches!(credential_value_state, CredentialValueState::AfterKey)
+            && is_credential_separator(trimmed)
+        {
+            push_safe_text(&mut out, token);
+            credential_value_state = if suffix.is_empty() {
+                CredentialValueState::AfterKey
+            } else {
+                CredentialValueState::AfterSeparator
+            };
             continue;
         }
-        if credential_key_pending_separator && credential_value_separator(trimmed) {
-            push_safe_text(&mut out, token);
-            redact_next_value = !suffix.is_empty();
-            credential_key_pending_separator = false;
+        let redacts_credential_value =
+            matches!(credential_value_state, CredentialValueState::AfterSeparator);
+        if is_url_like(trimmed) {
+            if redacts_credential_value {
+                out.push_str("[redacted]");
+            } else {
+                out.push_str(&sanitize_url_for_display(trimmed));
+            }
+            push_safe_text(&mut out, suffix);
+            credential_value_state = CredentialValueState::None;
             continue;
         }
         let redact_current =
-            redact_next_value || is_secret_like(trimmed) || is_unsafe_path_like(trimmed);
+            redacts_credential_value || is_secret_like(trimmed) || is_unsafe_path_like(trimmed);
         if redact_current {
             out.push_str("[redacted]");
             push_safe_text(&mut out, suffix);
         } else {
             push_safe_text(&mut out, token);
         }
-        redact_next_value = credential_key_expects_value(trimmed) && !suffix.is_empty();
-        credential_key_pending_separator =
-            !redact_current && credential_key_expects_separator(trimmed) && !suffix.is_empty();
+        credential_value_state = if credential_key_expects_value(trimmed) && !suffix.is_empty() {
+            CredentialValueState::AfterSeparator
+        } else if credential_key_may_have_spaced_value(trimmed) && !suffix.is_empty() {
+            CredentialValueState::AfterKey
+        } else {
+            CredentialValueState::None
+        };
     }
     out
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CredentialValueState {
+    None,
+    AfterKey,
+    AfterSeparator,
 }
 
 fn is_url_like(token: &str) -> bool {
@@ -186,13 +206,13 @@ fn is_secret_url_path_segment_label_prefix(segment: &str) -> bool {
     let lower = segment.to_ascii_lowercase();
     lower.starts_with("secret")
         || lower.starts_with("token")
-        || lower.starts_with("api-key")
-        || lower.starts_with("apikey")
-        || lower.starts_with("api_key")
         || lower.starts_with("access-token")
         || lower.starts_with("access_token")
         || lower.starts_with("refresh-token")
         || lower.starts_with("refresh_token")
+        || lower.starts_with("api-key")
+        || lower.starts_with("apikey")
+        || lower.starts_with("api_key")
         || lower.starts_with("password")
         || lower.starts_with("credential")
         || lower.starts_with("bearer")
@@ -299,19 +319,27 @@ fn credential_key_expects_value(token: &str) -> bool {
     )
 }
 
-fn credential_key_expects_separator(token: &str) -> bool {
+fn credential_key_may_have_spaced_value(token: &str) -> bool {
     let lower = token
         .trim_matches(non_credential_boundary_punctuation)
         .to_ascii_lowercase();
     matches!(
         lower.as_str(),
-        "api_key" | "apikey" | "access_token" | "secret" | "password" | "token"
+        "api_key"
+            | "apikey"
+            | "access_token"
+            | "access-token"
+            | "refresh_token"
+            | "refresh-token"
+            | "secret"
+            | "password"
+            | "token"
     )
 }
 
-fn credential_value_separator(token: &str) -> bool {
+fn is_credential_separator(token: &str) -> bool {
     let trimmed = token.trim_matches(non_credential_boundary_punctuation);
-    matches!(trimmed, "=" | ":")
+    matches!(trimmed, ":" | "=")
 }
 
 fn non_credential_boundary_punctuation(character: char) -> bool {
@@ -443,16 +471,16 @@ mod tests {
     }
 
     #[test]
-    fn shell_command_display_text_redacts_value_after_access_and_refresh_token_labels() {
+    fn shell_command_display_text_redacts_common_token_url_path_labels() {
         let display = shell_command_display_text(
-            "curl https://example.test/oauth/access-token/opaque-access/refresh_token/opaque-refresh?debug=true",
+            "curl https://example.test/oauth/access-token/opaque-value/refresh_token/other-value?debug=true",
         );
 
         assert!(display.text.contains(
             "https://example.test/oauth/[redacted]/[redacted]/[redacted]/[redacted]?..."
         ));
-        assert!(!display.text.contains("opaque-access"));
-        assert!(!display.text.contains("opaque-refresh"));
+        assert!(!display.text.contains("opaque-value"));
+        assert!(!display.text.contains("other-value"));
         assert!(!display.text.contains("debug=true"));
     }
 
@@ -486,6 +514,23 @@ mod tests {
         assert!(!display.text.contains("reset%2Fsk-secret"));
         assert!(!display.text.contains("sk-secret"));
         assert!(!display.text.contains("debug=true"));
+    }
+
+    #[test]
+    fn shell_command_display_text_redacts_percent_encoded_backslash_path_separators() {
+        let display = shell_command_display_text(
+            "curl https://example.test/reset%5Csk-secret/public https://example.test/reset%5cghp_secret/public",
+        );
+
+        assert!(
+            display
+                .text
+                .contains("https://example.test/[redacted]/public")
+        );
+        assert!(!display.text.contains("reset%5Csk-secret"));
+        assert!(!display.text.contains("reset%5cghp_secret"));
+        assert!(!display.text.contains("sk-secret"));
+        assert!(!display.text.contains("ghp_secret"));
     }
 
     #[test]
@@ -581,5 +626,19 @@ mod tests {
         assert!(!sanitized.contains("opaque-token"));
         assert!(!sanitized.contains("opaque-api-key"));
         assert!(!sanitized.contains("opaque-password"));
+    }
+
+    #[test]
+    fn shell_command_display_text_redacts_spaced_credential_values() {
+        let display = shell_command_display_text(
+            "env token = opaque-value api_key = other-value password : third-value",
+        );
+
+        assert!(display.text.contains("token = [redacted]"));
+        assert!(display.text.contains("api_key = [redacted]"));
+        assert!(display.text.contains("password : [redacted]"));
+        assert!(!display.text.contains("opaque-value"));
+        assert!(!display.text.contains("other-value"));
+        assert!(!display.text.contains("third-value"));
     }
 }
