@@ -518,6 +518,7 @@ mod tests {
             progress: CapabilityProgress::MadeProgress,
             terminate_hint: false,
             byte_len: 1000,
+            output_digest: None,
         };
         let result_a2 = CapabilityResultMessage {
             result_ref: ironclaw_turns::LoopResultRef::new("result:a2".to_string()).unwrap(),
@@ -525,6 +526,7 @@ mod tests {
             progress: CapabilityProgress::MadeProgress,
             terminate_hint: false,
             byte_len: 500,
+            output_digest: None,
         };
         let result_b = CapabilityResultMessage {
             result_ref: ironclaw_turns::LoopResultRef::new("result:b".to_string()).unwrap(),
@@ -532,6 +534,7 @@ mod tests {
             progress: CapabilityProgress::MadeProgress,
             terminate_hint: false,
             byte_len: 2000,
+            output_digest: None,
         };
         push_completed_result(&mut state, &cap_a, result_a1);
         push_completed_result(&mut state, &cap_a, result_a2);

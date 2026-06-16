@@ -12,7 +12,7 @@ use ironclaw_turns::{
 };
 
 use crate::{
-    state::{CheckpointKind, LoopExecutionState},
+    state::{CapabilityOutputObservation, CheckpointKind, LoopExecutionState},
     strategies::{
         BatchPolicy, CapabilityBatchTurnSummary, CapabilityErrorClass, CapabilityErrorSummary,
         GateKind, RecoveryOutcome, SanitizedStrategySummary, TurnSummary,
@@ -377,6 +377,7 @@ impl ExecutorStage<CapabilityInput> for CapabilityStage {
                             progress: CapabilityProgress::MadeProgress,
                             terminate_hint: false,
                             byte_len,
+                            output_digest: None,
                         };
                         append_completed_capability_result(
                             ctx.host,
@@ -645,6 +646,7 @@ impl CapabilityStage {
                     progress: CapabilityProgress::MadeProgress,
                     terminate_hint: false,
                     byte_len,
+                    output_digest: None,
                 };
                 AwaitDependentRunGateStage
                     .process(
@@ -1047,6 +1049,7 @@ async fn append_spawned_child_result(
         progress: CapabilityProgress::MadeProgress,
         terminate_hint: false,
         byte_len,
+        output_digest: None,
     };
     append_completed_capability_result(host, state, call, result, capability_batch).await
 }
@@ -1078,6 +1081,14 @@ async fn append_completed_capability_result(
 ) -> Result<(), AgentLoopExecutorError> {
     append_capability_result_ref(host, call, &result).await?;
     let signature = capability_call_signature(call)?;
+    if let Some(output_digest) = result.output_digest {
+        state
+            .seen_capability_output_digests
+            .push(CapabilityOutputObservation {
+                signature: signature.clone(),
+                output_digest,
+            });
+    }
     capability_batch.record_result(signature, result.progress, result.terminate_hint);
     push_completed_result(state, &call.capability_id, result);
     Ok(())
@@ -1156,6 +1167,7 @@ mod tests {
             progress: CapabilityProgress::MadeProgress,
             terminate_hint: false,
             byte_len: 0,
+            output_digest: None,
         })
     }
 

@@ -20,6 +20,7 @@ use crate::{
 
 use super::{
     compaction::{CompactionInitiator, LoopCompactionPort},
+    content_digest::ContentDigest,
     instruction_bundle::InstructionBundleFingerprint,
     model_observation::{CapabilityFailureDetail, ModelVisibleToolObservation},
     refs::{CheckpointSchemaId, LoopDriverId, ModelProfileId},
@@ -1589,6 +1590,10 @@ pub struct CapabilityResultMessage {
     /// Serialized output size in bytes — pure metadata, no PII.
     #[serde(default)]
     pub byte_len: u64,
+    /// Digest over normalized output content. Optional for backward
+    /// compatibility and for synthetic results that do not stage real output.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_digest: Option<ContentDigest>,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]

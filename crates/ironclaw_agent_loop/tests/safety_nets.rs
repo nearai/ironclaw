@@ -9,7 +9,10 @@ use ironclaw_agent_loop::{
         ScriptedCapabilityOutcome, ScriptedModelResponse,
     },
 };
-use ironclaw_turns::{LoopExit, LoopFailureKind, run_profile::LoopRunInfoPort};
+use ironclaw_turns::{
+    LoopExit, LoopFailureKind,
+    run_profile::{ContentDigest, LoopRunInfoPort},
+};
 
 #[tokio::test]
 async fn repeated_signature_warns_before_allowing_final_reply() {
@@ -147,6 +150,63 @@ async fn repeated_signature_made_progress_after_warning_clears_warning_and_conti
             .is_empty(),
         "warning should be cleared before the final reply prompt"
     );
+}
+
+#[tokio::test]
+async fn repeated_identical_output_digest_does_not_change_progress_stop_behavior() {
+    let digest = ContentDigest(7);
+    let script = ScenarioScript {
+        model_responses: VecDeque::from([
+            ScriptedModelResponse::Calls(vec![ScriptedCapabilityCall::new("demo.echo")]),
+            ScriptedModelResponse::Calls(vec![ScriptedCapabilityCall::new("demo.echo")]),
+            ScriptedModelResponse::Calls(vec![ScriptedCapabilityCall::new("demo.echo")]),
+            ScriptedModelResponse::Calls(vec![ScriptedCapabilityCall::new("demo.echo")]),
+            ScriptedModelResponse::Reply {
+                text: "done after identical output digests".to_string(),
+            },
+        ]),
+        capability_outcomes: VecDeque::from([
+            vec![ScriptedCapabilityOutcome::completed_with_output_digest(
+                "result:repeat-digest-1",
+                digest,
+            )],
+            vec![ScriptedCapabilityOutcome::completed_with_output_digest(
+                "result:repeat-digest-2",
+                digest,
+            )],
+            vec![ScriptedCapabilityOutcome::completed_with_output_digest(
+                "result:repeat-digest-3",
+                digest,
+            )],
+            vec![ScriptedCapabilityOutcome::completed_with_output_digest(
+                "result:repeat-digest-4",
+                digest,
+            )],
+        ]),
+        single_call_retry_outcomes: VecDeque::new(),
+        pending_inputs: VecDeque::new(),
+    };
+    let (host, _) = MockAgentLoopDriverHost::builder().script(script).build();
+    let state = LoopExecutionState::initial_for_run(host.run_context());
+
+    let exit = CanonicalAgentLoopExecutor
+        .execute_family(&families::default(), &host, state)
+        .await
+        .expect("loop execution should succeed");
+
+    match exit {
+        LoopExit::Completed(completed) => {
+            assert_eq!(completed.reply_message_refs.len(), 1);
+            assert!(completed.final_checkpoint_id.is_some());
+        }
+        other => panic!("expected final reply completion, got {other:?}"),
+    }
+    assert_eq!(
+        host.finalized_assistant_messages(),
+        vec!["done after identical output digests"]
+    );
+    assert_eq!(host.model_call_count(), 5);
+    assert_eq!(repeated_call_warning_prompt_count(&host), 1);
 }
 
 #[tokio::test]

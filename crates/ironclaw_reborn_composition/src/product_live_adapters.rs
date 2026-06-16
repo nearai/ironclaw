@@ -22,9 +22,10 @@ use ironclaw_host_runtime::{
 };
 use ironclaw_loop_support::{
     CapabilityAllowSet, CapabilityResolveError, CapabilityResultWrite,
-    CapabilitySurfaceProfileResolver, HostIdentityContextSource, HostInputQueue,
-    HostRuntimeLoopCapabilityPortFactory, LoopCapabilityInputResolver, LoopCapabilityPortFactory,
-    LoopCapabilityResultWriter, RunCancellationFactory, loop_driver_execution_extension_id,
+    CapabilitySurfaceProfileResolver, CapabilityWriteResult, HostIdentityContextSource,
+    HostInputQueue, HostRuntimeLoopCapabilityPortFactory, LoopCapabilityInputResolver,
+    LoopCapabilityPortFactory, LoopCapabilityResultWriter, RunCancellationFactory,
+    loop_driver_execution_extension_id,
 };
 use ironclaw_reborn::model_routes::{
     ModelRoute, ModelRouteError, ModelRoutePolicy, ModelRouteResolver, ModelSelectionMode,
@@ -227,7 +228,7 @@ impl LoopCapabilityResultWriter for ProductLiveCapabilityIo {
     async fn write_capability_result(
         &self,
         write: CapabilityResultWrite<'_>,
-    ) -> Result<(LoopResultRef, u64), AgentLoopHostError> {
+    ) -> Result<CapabilityWriteResult, AgentLoopHostError> {
         let CapabilityResultWrite {
             run_context,
             input_ref,
@@ -275,7 +276,11 @@ impl LoopCapabilityResultWriter for ProductLiveCapabilityIo {
             },
             display_preview.as_ref(),
         );
-        Ok((result_ref, byte_len as u64))
+        Ok(CapabilityWriteResult::from_output(
+            result_ref,
+            byte_len as u64,
+            &output,
+        ))
     }
 
     async fn update_capability_result(

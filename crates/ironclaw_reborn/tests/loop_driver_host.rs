@@ -37,13 +37,13 @@ use ironclaw_host_runtime::{
 };
 use ironclaw_loop_support::{
     CapabilityAllowSet, CapabilityResolveError, CapabilityResultWrite,
-    CapabilitySurfaceProfileResolver, EmptyLoopCapabilityPort, HostIdentityContextBuildError,
-    HostIdentityContextCandidate, HostIdentityContextSource, HostIdentityMessageContent,
-    HostInputBatch, HostInputEnvelope, HostInputQueue, HostInputQueueError, HostManagedModelError,
-    HostManagedModelErrorKind, HostManagedModelGateway, HostManagedModelMessageRole,
-    HostManagedModelRequest, HostManagedModelResponse, HostRuntimeLoopCapabilityPort,
-    HostSkillContextBuildError, HostSkillContextCandidate, HostSkillContextSource,
-    IdentityApplicability, IdentityFileName, JsonSpawnSubagentInputCodec,
+    CapabilitySurfaceProfileResolver, CapabilityWriteResult, EmptyLoopCapabilityPort,
+    HostIdentityContextBuildError, HostIdentityContextCandidate, HostIdentityContextSource,
+    HostIdentityMessageContent, HostInputBatch, HostInputEnvelope, HostInputQueue,
+    HostInputQueueError, HostManagedModelError, HostManagedModelErrorKind, HostManagedModelGateway,
+    HostManagedModelMessageRole, HostManagedModelRequest, HostManagedModelResponse,
+    HostRuntimeLoopCapabilityPort, HostSkillContextBuildError, HostSkillContextCandidate,
+    HostSkillContextSource, IdentityApplicability, IdentityFileName, JsonSpawnSubagentInputCodec,
     LoopCapabilityInputResolver, LoopCapabilityPortFactory, LoopCapabilityResultWriter,
     ProductLiveCancellationProbe, RunCancellationFactory, RunCancellationHandle,
     identity_message_ref, loop_driver_execution_extension_id,
@@ -6834,7 +6834,7 @@ impl LoopCapabilityResultWriter for InMemoryCapabilityIo {
     async fn write_capability_result(
         &self,
         write: CapabilityResultWrite<'_>,
-    ) -> Result<(LoopResultRef, u64), AgentLoopHostError> {
+    ) -> Result<CapabilityWriteResult, AgentLoopHostError> {
         let mut remaining_failures = self.fail_result_writes_remaining.lock().unwrap();
         if *remaining_failures > 0 {
             *remaining_failures -= 1;
@@ -6844,6 +6844,7 @@ impl LoopCapabilityResultWriter for InMemoryCapabilityIo {
             ));
         }
         drop(remaining_failures);
+        let output = write.output.clone();
         self.results
             .lock()
             .unwrap()
@@ -6860,7 +6861,7 @@ impl LoopCapabilityResultWriter for InMemoryCapabilityIo {
                 "capability result ref could not be represented",
             )
         })?;
-        Ok((result_ref, 0))
+        Ok(CapabilityWriteResult::from_output(result_ref, 0, &output))
     }
 }
 

@@ -15,13 +15,13 @@ use ironclaw_host_runtime::{
     VisibleCapabilityRequest as HostVisibleCapabilityRequest,
 };
 use ironclaw_loop_support::{
-    CapabilityResultWrite, HostIdentityContextBuildError, HostIdentityContextCandidate,
-    HostIdentityContextSource, HostInputBatch, HostInputEnvelope, HostInputQueue,
-    HostInputQueueError, HostManagedModelError, HostManagedModelErrorKind, HostManagedModelGateway,
-    HostManagedModelRequest, HostManagedModelResponse, JsonSpawnSubagentInputCodec,
-    LoopCapabilityInputResolver, LoopCapabilityResultWriter, ProductLiveCancellationProbe,
-    RunCancellationFactory, RunCancellationHandle, loop_driver_execution_extension_id,
-    verify_product_live_cancellation_probe,
+    CapabilityResultWrite, CapabilityWriteResult, HostIdentityContextBuildError,
+    HostIdentityContextCandidate, HostIdentityContextSource, HostInputBatch, HostInputEnvelope,
+    HostInputQueue, HostInputQueueError, HostManagedModelError, HostManagedModelErrorKind,
+    HostManagedModelGateway, HostManagedModelRequest, HostManagedModelResponse,
+    JsonSpawnSubagentInputCodec, LoopCapabilityInputResolver, LoopCapabilityResultWriter,
+    ProductLiveCancellationProbe, RunCancellationFactory, RunCancellationHandle,
+    loop_driver_execution_extension_id, verify_product_live_cancellation_probe,
 };
 use ironclaw_reborn::{
     loop_exit_applier::ThreadCheckpointLoopExitEvidencePort,
@@ -65,7 +65,7 @@ async fn write_capability_result_for_test(
     output: serde_json::Value,
 ) -> Result<LoopResultRef, AgentLoopHostError> {
     let capability_id = capability_id(capability);
-    let (result_ref, _byte_len) = io
+    let CapabilityWriteResult { result_ref, .. } = io
         .write_capability_result(CapabilityResultWrite {
             run_context,
             input_ref,
@@ -149,7 +149,7 @@ async fn capability_io_write_capability_result_returns_serialized_payload_byte_l
     let expected_len = serde_json::to_vec(&output).expect("serialize").len() as u64;
     let capability_id = CapabilityId::new("demo.echo").expect("valid capability id");
 
-    let (_, byte_len) = io
+    let CapabilityWriteResult { byte_len, .. } = io
         .write_capability_result(CapabilityResultWrite {
             run_context: &run_context,
             input_ref: &input_ref,
@@ -1706,8 +1706,11 @@ impl LoopCapabilityResultWriter for UnusedCapabilityIo {
     async fn write_capability_result(
         &self,
         _write: CapabilityResultWrite<'_>,
-    ) -> Result<(LoopResultRef, u64), AgentLoopHostError> {
-        Ok((LoopResultRef::new("result:adapter-test").unwrap(), 0))
+    ) -> Result<CapabilityWriteResult, AgentLoopHostError> {
+        Ok(CapabilityWriteResult::without_output_digest(
+            LoopResultRef::new("result:adapter-test").unwrap(),
+            0,
+        ))
     }
 }
 

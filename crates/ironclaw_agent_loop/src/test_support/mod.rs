@@ -21,18 +21,19 @@ use ironclaw_turns::{
         CapabilityFailureKind, CapabilityInputRef, CapabilityInvocation, CapabilityOutcome,
         CapabilityProgress, CapabilityResultMessage, CapabilitySurfaceProfileId,
         CapabilitySurfaceVersion, CheckpointPolicy, CheckpointSchemaId, ConcurrencyClass,
-        ConcurrencyHint, ContextProfileId, FinalizeAssistantMessage, LoopCancellationPort,
-        LoopCancellationSignal, LoopCheckpointKind, LoopCheckpointRequest, LoopCheckpointStateRef,
-        LoopCompactionError, LoopCompactionOutcome, LoopCompactionRequest, LoopCompactionResponse,
-        LoopContextBundle, LoopContextCompactionMetadata, LoopContextRequest, LoopDriverId,
-        LoopInput, LoopInputAck, LoopInputAckToken, LoopInputBatch, LoopInputCursor,
-        LoopInputCursorToken, LoopModelMessage, LoopModelRequest, LoopModelResponse,
-        LoopProgressEvent, LoopPromptBundle, LoopPromptBundleRef, LoopPromptBundleRequest,
-        LoopRunContext, LoopRunInfoPort, ModelProfileId, ModelStreamChunk, ParentLoopOutput,
-        ProviderToolCallReference, RedactedRunProfileProvenance, ResolvedRunProfile,
-        ResourceBudgetPolicy, ResourceBudgetTier, RunClassId, RunProfileFingerprint,
-        RuntimeProfileConstraints, SchedulingClass, StageCheckpointPayloadRequest, SteeringPolicy,
-        VisibleCapabilityRequest, VisibleCapabilitySurface,
+        ConcurrencyHint, ContentDigest, ContextProfileId, FinalizeAssistantMessage,
+        LoopCancellationPort, LoopCancellationSignal, LoopCheckpointKind, LoopCheckpointRequest,
+        LoopCheckpointStateRef, LoopCompactionError, LoopCompactionOutcome, LoopCompactionRequest,
+        LoopCompactionResponse, LoopContextBundle, LoopContextCompactionMetadata,
+        LoopContextRequest, LoopDriverId, LoopInput, LoopInputAck, LoopInputAckToken,
+        LoopInputBatch, LoopInputCursor, LoopInputCursorToken, LoopModelMessage, LoopModelRequest,
+        LoopModelResponse, LoopProgressEvent, LoopPromptBundle, LoopPromptBundleRef,
+        LoopPromptBundleRequest, LoopRunContext, LoopRunInfoPort, ModelProfileId, ModelStreamChunk,
+        ParentLoopOutput, ProviderToolCallReference, RedactedRunProfileProvenance,
+        ResolvedRunProfile, ResourceBudgetPolicy, ResourceBudgetTier, RunClassId,
+        RunProfileFingerprint, RuntimeProfileConstraints, SchedulingClass,
+        StageCheckpointPayloadRequest, SteeringPolicy, VisibleCapabilityRequest,
+        VisibleCapabilitySurface,
     },
 };
 
@@ -455,6 +456,8 @@ pub enum ScriptedCapabilityOutcome {
         progress: CapabilityProgress,
         /// Whether this result should naturally end the loop.
         terminate_hint: bool,
+        /// Optional digest over completed output.
+        output_digest: Option<ContentDigest>,
     },
     /// Approval gate.
     ApprovalRequired {
@@ -503,6 +506,20 @@ impl ScriptedCapabilityOutcome {
             result_ref: result_ref.into(),
             progress: CapabilityProgress::MadeProgress,
             terminate_hint: false,
+            output_digest: None,
+        }
+    }
+
+    /// Creates a completed outcome with a supplied output digest.
+    pub fn completed_with_output_digest(
+        result_ref: impl Into<String>,
+        output_digest: ContentDigest,
+    ) -> Self {
+        Self::Completed {
+            result_ref: result_ref.into(),
+            progress: CapabilityProgress::MadeProgress,
+            terminate_hint: false,
+            output_digest: Some(output_digest),
         }
     }
 
@@ -512,6 +529,7 @@ impl ScriptedCapabilityOutcome {
             result_ref: result_ref.into(),
             progress: CapabilityProgress::NoChange,
             terminate_hint: false,
+            output_digest: None,
         }
     }
 
@@ -521,6 +539,7 @@ impl ScriptedCapabilityOutcome {
             result_ref: result_ref.into(),
             progress: CapabilityProgress::Blocked,
             terminate_hint: false,
+            output_digest: None,
         }
     }
 
@@ -530,6 +549,7 @@ impl ScriptedCapabilityOutcome {
             result_ref: result_ref.into(),
             progress: CapabilityProgress::MadeProgress,
             terminate_hint: true,
+            output_digest: None,
         }
     }
 
@@ -1045,6 +1065,7 @@ fn scripted_capability_outcome(
             result_ref,
             progress,
             terminate_hint,
+            output_digest,
         } => Ok(CapabilityOutcome::Completed(CapabilityResultMessage {
             result_ref: LoopResultRef::new(result_ref)
                 .unwrap_or_else(|error| panic!("test result ref should be valid: {error}")),
@@ -1052,6 +1073,7 @@ fn scripted_capability_outcome(
             progress,
             terminate_hint,
             byte_len: 0,
+            output_digest,
         })),
         ScriptedCapabilityOutcome::ApprovalRequired { gate_ref } => {
             Ok(CapabilityOutcome::ApprovalRequired {

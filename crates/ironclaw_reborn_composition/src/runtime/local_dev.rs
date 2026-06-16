@@ -16,7 +16,7 @@ use ironclaw_host_runtime::{
     VisibleCapabilityRequest as HostVisibleCapabilityRequest,
 };
 use ironclaw_loop_support::{
-    CapabilityResultWrite, HostManagedModelError, HostManagedModelErrorKind,
+    CapabilityResultWrite, CapabilityWriteResult, HostManagedModelError, HostManagedModelErrorKind,
     HostManagedModelGateway, HostManagedModelMessageRole, HostManagedModelRequest,
     HostManagedModelResponse, HostManagedToolResultContent, LoopCapabilityInputResolver,
     LoopCapabilityPortFactory, LoopCapabilityResultWriter, loop_driver_execution_extension_id,
@@ -497,7 +497,7 @@ impl LoopCapabilityResultWriter for LocalDevCapabilityIo {
     async fn write_capability_result(
         &self,
         write: CapabilityResultWrite<'_>,
-    ) -> Result<(LoopResultRef, u64), AgentLoopHostError> {
+    ) -> Result<CapabilityWriteResult, AgentLoopHostError> {
         let CapabilityResultWrite {
             run_context,
             input_ref,
@@ -552,7 +552,11 @@ impl LoopCapabilityResultWriter for LocalDevCapabilityIo {
             self.display_previews
                 .attach_timeline_message_id(invocation_id, message_id);
         }
-        Ok((result_ref, output_bytes))
+        Ok(CapabilityWriteResult::from_output(
+            result_ref,
+            output_bytes,
+            &output,
+        ))
     }
 
     async fn update_capability_result(
