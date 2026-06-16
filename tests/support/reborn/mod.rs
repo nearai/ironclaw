@@ -8,6 +8,7 @@ pub mod harness;
 pub mod model_replay;
 pub mod network;
 pub mod product_workflow;
+#[allow(dead_code)]
 pub mod qa_scenarios;
 pub mod qa_trace;
 pub mod session_thread;

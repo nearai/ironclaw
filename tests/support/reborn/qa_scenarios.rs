@@ -1,8 +1,6 @@
-#![allow(dead_code)] // Shared by the QA smoke scenario test binary only.
-
 use std::collections::BTreeSet;
 
-const QA_SCENARIOS: &[&str] = &[
+pub const QA_SCENARIOS: &[&str] = &[
     "three_step_time_write_read_summary",
     "session_continuity_write_read_append",
     "automation_heartbeat_smoke",
@@ -27,14 +25,9 @@ const QA_SCENARIOS: &[&str] = &[
     "cleanup_verification_smoke",
 ];
 
-const COVERED_QA_SCENARIOS: &[&str] = QA_SCENARIOS;
-
-pub fn assert_all_covered() {
+pub fn assert_all_covered(covered_scenarios: &[&str]) {
     let expected = QA_SCENARIOS.iter().copied().collect::<BTreeSet<_>>();
-    let covered = COVERED_QA_SCENARIOS
-        .iter()
-        .copied()
-        .collect::<BTreeSet<_>>();
+    let covered = covered_scenarios.iter().copied().collect::<BTreeSet<_>>();
     assert_eq!(
         expected, covered,
         "each pasted QA smoke scenario must be represented in Reborn e2e coverage"

@@ -29,9 +29,34 @@ use reborn_support::{
     },
 };
 
+const COVERED_QA_SCENARIOS: &[&str] = &[
+    "three_step_time_write_read_summary",
+    "session_continuity_write_read_append",
+    "automation_heartbeat_smoke",
+    "paused_cron_automation_smoke",
+    "subagent_capability_smoke",
+    "skill_discovery_smoke",
+    "skill_invocation_smoke",
+    "browser_integration_smoke",
+    "local_browser_interaction_smoke",
+    "mcp_discovery_smoke",
+    "plugin_capability_smoke",
+    "github_capability_smoke",
+    "document_artifact_smoke",
+    "spreadsheet_artifact_smoke",
+    "presentation_artifact_smoke",
+    "image_generation_smoke",
+    "error_handling_smoke",
+    "long_running_process_smoke",
+    "repo_read_only_review_smoke",
+    "approval_boundary_smoke",
+    "patch_isolation_smoke",
+    "cleanup_verification_smoke",
+];
+
 #[test]
 fn every_pasted_qa_scenario_has_reborn_e2e_coverage() {
-    reborn_support::qa_scenarios::assert_all_covered();
+    reborn_support::qa_scenarios::assert_all_covered(COVERED_QA_SCENARIOS);
 }
 
 #[tokio::test]
@@ -154,6 +179,7 @@ async fn qa_three_step_time_write_read_and_session_continuity_workflows() {
         "session marker alpha\nsession marker beta\n"
     );
     let requests = harness.model_requests();
+    assert!(requests.len() >= 2, "expected at least 2 model requests");
     assert_eq!(
         tool_result_count(&requests[1]),
         1,
@@ -402,6 +428,7 @@ async fn qa_skill_discovery_and_invocation_smokes_are_read_only_until_invoked() 
     .await;
 
     let results = harness.capability_results();
+    assert!(results.len() >= 4, "expected at least 4 capability results");
     assert_eq!(results[1].output["installed"], serde_json::json!(true));
     assert!(
         results[2]
