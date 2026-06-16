@@ -122,16 +122,21 @@ fn runtime_payload_candidates(
 ) -> Vec<RuntimePayloadCandidate> {
     let state_payloads = usize::from(!runs.is_empty());
     let activity_payloads = max_payloads.saturating_sub(state_payloads);
-    let mut candidates = Vec::with_capacity(
-        state_payloads.saturating_add(activity_payloads.min(capability_activities.len())),
-    );
+    let activities = capability_activities
+        .into_iter()
+        .take(activity_payloads)
+        .collect::<Vec<_>>();
+    let mut candidates =
+        Vec::with_capacity(state_payloads.saturating_add(activities.len().saturating_mul(2)));
     if !runs.is_empty() {
         candidates.push(RuntimePayloadCandidate::State { runs });
     }
-    for activity in capability_activities.into_iter().take(activity_payloads) {
+    for activity in activities.iter() {
         candidates.push(RuntimePayloadCandidate::CapabilityActivity(
             activity.clone(),
         ));
+    }
+    for activity in activities {
         candidates.push(RuntimePayloadCandidate::CapabilityDisplayPreview(activity));
     }
     candidates
@@ -158,32 +163,29 @@ fn append_activity_replay_candidates(
         .iter()
         .map(activity_event_key)
         .collect::<HashSet<_>>();
-    let mut emitted_activities = 0usize;
+    let mut activities = Vec::with_capacity(max_activities);
 
     for activity in transitions.iter().take(max_activities) {
-        candidates.push(RuntimePayloadCandidate::CapabilityActivity(
-            activity.clone(),
-        ));
-        candidates.push(RuntimePayloadCandidate::CapabilityDisplayPreview(
-            activity.clone(),
-        ));
-        emitted_activities = emitted_activities.saturating_add(1);
+        activities.push(activity.clone());
     }
 
     for activity in replay.capability_activities.iter() {
-        if emitted_activities >= max_activities {
+        if activities.len() >= max_activities {
             break;
         }
         if transition_keys.contains(&activity_event_key(activity)) {
             continue;
         }
+        activities.push(activity.clone());
+    }
+
+    for activity in activities.iter() {
         candidates.push(RuntimePayloadCandidate::CapabilityActivity(
             activity.clone(),
         ));
-        candidates.push(RuntimePayloadCandidate::CapabilityDisplayPreview(
-            activity.clone(),
-        ));
-        emitted_activities = emitted_activities.saturating_add(1);
+    }
+    for activity in activities {
+        candidates.push(RuntimePayloadCandidate::CapabilityDisplayPreview(activity));
     }
 }
 

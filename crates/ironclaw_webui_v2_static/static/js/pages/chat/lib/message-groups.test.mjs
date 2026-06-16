@@ -14,6 +14,64 @@ test("groupMessages: consecutive tool_activity messages collapse into one run", 
   assert.deepEqual(grouped[0].activity.map((item) => item.id), ["a", "b"]);
 });
 
+test("groupMessages: tool activities sort by stable activity order", () => {
+  const grouped = groupMessages([
+    {
+      id: "tool-search",
+      role: "tool_activity",
+      toolName: "search",
+      activityOrder: 4,
+    },
+    {
+      id: "tool-extension-a",
+      role: "tool_activity",
+      toolName: "extension_search",
+      activityOrder: 2,
+    },
+    {
+      id: "tool-extension-b",
+      role: "tool_activity",
+      toolName: "extension_search",
+      activityOrder: 3,
+    },
+  ]);
+
+  assert.deepEqual(
+    grouped[0].activity.map((item) => item.id),
+    ["tool-extension-a", "tool-extension-b", "tool-search"],
+  );
+});
+
+test("groupMessages: authoritative projection activity sorts before provisional live activity", () => {
+  const grouped = groupMessages([
+    {
+      id: "tool-web",
+      role: "tool_activity",
+      toolName: "search",
+      activityOrder: 1,
+    },
+    {
+      id: "tool-extension-a",
+      role: "tool_activity",
+      toolName: "extension_search",
+      activityOrder: 42002,
+      activityOrderSource: "projection_cursor",
+    },
+    {
+      id: "tool-extension-b",
+      role: "tool_activity",
+      toolName: "extension_search",
+      activityOrder: 42003,
+      activityOrderSource: "projection_cursor",
+    },
+  ]);
+
+  assert.deepEqual(
+    grouped[0].activity.map((item) => item.id),
+    ["tool-extension-a", "tool-extension-b", "tool-web"],
+  );
+});
+
 test("groupMessages: non-auxiliary messages break tool runs", () => {
   const grouped = groupMessages([
     { id: "a", role: "tool_activity" },

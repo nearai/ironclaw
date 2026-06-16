@@ -731,6 +731,165 @@ test("useChatEvents: projection order annotates replayed terminal activity", () 
   );
 });
 
+test("useChatEvents: durable activity cursor order replaces live provisional order", () => {
+  const runId = "run-live-then-durable-order";
+  const harness = createUseChatEventsHarness();
+  const cursor = (delivered) =>
+    JSON.stringify({
+      runtime_item: 42,
+      runtime_payloads_delivered: delivered,
+    });
+
+  harness.handleEvent({
+    type: "projection_update",
+    frame: {
+      state: {
+        items: [
+          {
+            capability_activity: {
+              invocation_id: "invocation-web",
+              turn_run_id: runId,
+              capability_id: "web-access.search",
+              status: "started",
+            },
+          },
+        ],
+      },
+    },
+  });
+
+  assert.deepEqual(
+    harness.messages.map((message) => [message.id, message.activityOrder]),
+    [["tool-invocation-web", 1]],
+  );
+
+  for (const [invocationId, capabilityId, delivered] of [
+    ["invocation-extension-a", "builtin.extension_search", 2],
+    ["invocation-extension-b", "builtin.extension_search", 3],
+    ["invocation-web", "web-access.search", 4],
+  ]) {
+    harness.handleEvent({
+      type: "capability_activity",
+      frame: {
+        cursor: cursor(delivered),
+        activity: {
+          invocation_id: invocationId,
+          turn_run_id: runId,
+          capability_id: capabilityId,
+          status: invocationId === "invocation-web" ? "started" : "completed",
+        },
+      },
+    });
+  }
+
+  assert.deepEqual(
+    harness.messages.map((message) => [
+      message.id,
+      message.toolName,
+      message.activityOrder,
+    ]),
+    [
+      ["tool-invocation-web", "search", 42004],
+      ["tool-invocation-extension-a", "extension_search", 42002],
+      ["tool-invocation-extension-b", "extension_search", 42003],
+    ],
+  );
+});
+
+test("useChatEvents: projection snapshot order replaces gate provisional order", () => {
+  const runId = "run-gate-then-snapshot-order";
+  const gateRef = "gate:web-search";
+  const harness = createUseChatEventsHarness({
+    gateFromEvent: () => ({
+      kind: "gate",
+      runId,
+      gateRef,
+      toolName: "web-access.search",
+    }),
+  });
+  const cursor = JSON.stringify({
+    live: { runtime: 42 },
+  });
+
+  harness.handleEvent({
+    type: "gate",
+    frame: {
+      prompt: {
+        turn_run_id: runId,
+        approval_request_ref: gateRef,
+      },
+    },
+  });
+  assert.deepEqual(
+    harness.messages.map((message) => [
+      message.id,
+      message.toolName,
+      message.activityOrder,
+      message.activityOrderSource,
+    ]),
+    [[`tool-gate:${runId}:${gateRef}`, "search", 1, undefined]],
+  );
+
+  harness.handleEvent({
+    type: "projection_update",
+    frame: {
+      cursor,
+      state: {
+        items: [
+          {
+            capability_activity: {
+              invocation_id: "invocation-extension-a",
+              turn_run_id: runId,
+              capability_id: "builtin.extension_search",
+              status: "completed",
+            },
+          },
+          {
+            capability_activity: {
+              invocation_id: "invocation-extension-b",
+              turn_run_id: runId,
+              capability_id: "builtin.extension_search",
+              status: "completed",
+            },
+          },
+          {
+            capability_activity: {
+              invocation_id: `gate:${runId}:${gateRef}`,
+              turn_run_id: runId,
+              capability_id: "web-access.search",
+              status: "started",
+            },
+          },
+        ],
+      },
+    },
+  });
+
+  assert.deepEqual(
+    harness.messages.map((message) => [
+      message.id,
+      message.toolName,
+      message.activityOrder,
+      message.activityOrderSource,
+    ]),
+    [
+      [`tool-gate:${runId}:${gateRef}`, "search", 42003, "projection_snapshot"],
+      [
+        "tool-invocation-extension-a",
+        "extension_search",
+        42001,
+        "projection_snapshot",
+      ],
+      [
+        "tool-invocation-extension-b",
+        "extension_search",
+        42002,
+        "projection_snapshot",
+      ],
+    ],
+  );
+});
+
 test("useChatEvents: stale terminal run status does not clear newer run", () => {
   const harness = createUseChatEventsHarness();
 

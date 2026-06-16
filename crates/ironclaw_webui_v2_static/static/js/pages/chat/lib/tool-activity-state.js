@@ -51,11 +51,12 @@ export function upsertToolActivityMessage(
 ) {
   if (!card) return;
   let incoming = normalizeToolCard(card);
-  if (options.assignOrder) incoming = assignActivityOrder(incoming, stateRef);
   incoming = applyRememberedTerminal(incoming, stateRef);
-  if (options.assignOrder) incoming = assignActivityOrder(incoming, stateRef);
-  const targetId = toolMessageId(incoming);
   setMessages((prev) => {
+    if (options.assignOrder) {
+      incoming = assignActivityOrder(incoming, stateRef, prev);
+    }
+    const targetId = toolMessageId(incoming);
     const existing = findToolActivityIndex(prev, incoming, targetId, options);
     if (existing >= 0) {
       const copy = [...prev];
@@ -180,15 +181,40 @@ function mergeToolActivity(current, incoming) {
     gateRef: incoming.gateRef || current.gateRef || null,
     gateActivity: current.gateActivity && incoming.gateActivity,
     capabilityId: incoming.capabilityId || current.capabilityId || null,
-    activityOrder: Number.isFinite(incoming.activityOrder)
-      ? incoming.activityOrder
-      : current.activityOrder,
+    activityOrder: mergedActivityOrder(current, incoming),
+    activityOrderSource: mergedActivityOrderSource(current, incoming),
   };
   if (current.gateActivity && !incoming.gateActivity) {
     merged.id = toolMessageId(incoming);
     merged.gateActivity = false;
   }
   return merged;
+}
+
+function mergedActivityOrder(current, incoming) {
+  if (
+    activityOrderSourceRank(incoming.activityOrderSource) >
+      activityOrderSourceRank(current.activityOrderSource) &&
+    Number.isFinite(incoming.activityOrder)
+  ) {
+    return incoming.activityOrder;
+  }
+  return Number.isFinite(current.activityOrder)
+    ? current.activityOrder
+    : incoming.activityOrder;
+}
+
+function mergedActivityOrderSource(current, incoming) {
+  return activityOrderSourceRank(incoming.activityOrderSource) >
+    activityOrderSourceRank(current.activityOrderSource)
+    ? incoming.activityOrderSource
+    : current.activityOrderSource || incoming.activityOrderSource;
+}
+
+function activityOrderSourceRank(source) {
+  if (source === "projection_cursor") return 3;
+  if (source === "projection_snapshot" || source === "timeline") return 2;
+  return 0;
 }
 
 function applyRememberedTerminal(card, stateRef) {
@@ -219,7 +245,7 @@ function normalizeToolCard(card) {
   };
 }
 
-function assignActivityOrder(card, stateRef) {
+function assignActivityOrder(card, stateRef, existingMessages = []) {
   if (!card?.invocationId) return card;
   const state = stateRef?.current;
   if (!state) return card;
@@ -230,9 +256,15 @@ function assignActivityOrder(card, stateRef) {
     ? card.activityOrder
     : null;
   const rememberedOrder = state.orderByInvocation.get(card.invocationId);
-  const order = explicitOrder ?? rememberedOrder ?? state.nextOrder;
+  const existingMaxOrder = maxExistingActivityOrder(existingMessages);
+  const nextAvailableOrder = Number.isFinite(existingMaxOrder)
+    ? Math.max(state.nextOrder, existingMaxOrder + 1)
+    : state.nextOrder;
+  const order = explicitOrder ?? rememberedOrder ?? nextAvailableOrder;
   if (rememberedOrder === undefined && explicitOrder === null) {
     state.nextOrder = order + 1;
+  } else {
+    state.nextOrder = Math.max(state.nextOrder, order + 1);
   }
   state.orderByInvocation.set(card.invocationId, order);
   if (card.activityOrder === order) return card;
@@ -241,5 +273,22 @@ function assignActivityOrder(card, stateRef) {
 
 function rememberActivityOrder(card, stateRef) {
   if (!card?.invocationId || !Number.isFinite(card.activityOrder)) return;
-  stateRef?.current?.orderByInvocation?.set(card.invocationId, card.activityOrder);
+  const state = stateRef?.current;
+  state?.orderByInvocation?.set(card.invocationId, card.activityOrder);
+  if (state && Number.isFinite(state.nextOrder)) {
+    state.nextOrder = Math.max(state.nextOrder, card.activityOrder + 1);
+  }
+}
+
+function maxExistingActivityOrder(messages) {
+  let max = null;
+  for (const message of messages || []) {
+    if (message?.role !== "tool_activity") continue;
+    const order = Number.isFinite(message.activityOrder)
+      ? message.activityOrder
+      : message.sequence;
+    if (!Number.isFinite(order)) continue;
+    max = max === null ? order : Math.max(max, order);
+  }
+  return max;
 }

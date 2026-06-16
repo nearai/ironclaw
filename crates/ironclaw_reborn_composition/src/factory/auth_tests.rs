@@ -88,6 +88,7 @@ fn auth_error_mapping_run_state(request: &GetRunStateRequest) -> TurnRunState {
         event_cursor: EventCursor::default(),
         product_context: None,
         auth_resume_disposition: None,
+        approval_resume_disposition: None,
     }
 }
 

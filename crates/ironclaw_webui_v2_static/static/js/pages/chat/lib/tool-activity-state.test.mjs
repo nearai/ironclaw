@@ -219,3 +219,161 @@ test("tool activity cards use unprefixed display names", () => {
     "web_search",
   );
 });
+
+test("tool activity state assigns pending gates after existing timeline activity", () => {
+  const runId = "run-refresh-order";
+  const stateRef = { current: createToolActivityState() };
+  let messages = [
+    {
+      id: "tool-extension-a",
+      role: "tool_activity",
+      invocationId: "extension-a",
+      turnRunId: runId,
+      toolName: "extension_search",
+      toolStatus: "success",
+      activityOrder: 2,
+    },
+    {
+      id: "tool-extension-b",
+      role: "tool_activity",
+      invocationId: "extension-b",
+      turnRunId: runId,
+      toolName: "extension_search",
+      toolStatus: "success",
+      activityOrder: 3,
+    },
+  ];
+  const setMessages = (updater) => {
+    messages = typeof updater === "function" ? updater(messages) : updater;
+  };
+
+  ensureGateToolActivity(
+    setMessages,
+    {
+      kind: "gate",
+      runId,
+      gateRef: "gate:web-search",
+      toolName: "web-access.search",
+    },
+    stateRef,
+  );
+
+  assert.deepEqual(
+    messages.map((message) => [message.toolName, message.activityOrder]),
+    [
+      ["extension_search", 2],
+      ["extension_search", 3],
+      ["search", 4],
+    ],
+  );
+});
+
+test("tool activity state preserves rebased order when a gate is denied", () => {
+  const runId = "run-deny-rebased";
+  const stateRef = { current: createToolActivityState() };
+  let messages = [];
+  const setMessages = (updater) => {
+    messages = typeof updater === "function" ? updater(messages) : updater;
+  };
+  const gate = {
+    kind: "gate",
+    runId,
+    gateRef: "gate:web-search",
+    toolName: "web-access.search",
+  };
+
+  ensureGateToolActivity(setMessages, gate, stateRef);
+  messages = messages.map((message) => ({
+    ...message,
+    activityOrder: 4,
+  }));
+  failGateToolActivity(setMessages, gate, stateRef);
+
+  assert.equal(messages.length, 1);
+  assert.equal(messages[0].toolStatus, "error");
+  assert.equal(messages[0].activityOrder, 4);
+});
+
+test("tool activity state lets durable projection order replace live provisional order", () => {
+  const runId = "run-projection-order";
+  const stateRef = { current: createToolActivityState() };
+  let messages = [];
+  const setMessages = (updater) => {
+    messages = typeof updater === "function" ? updater(messages) : updater;
+  };
+
+  upsertToolActivityMessage(
+    setMessages,
+    {
+      invocationId: "invocation-web",
+      callId: "invocation-web",
+      capabilityId: "web-access.search",
+      toolName: "search",
+      toolStatus: "running",
+      turnRunId: runId,
+    },
+    stateRef,
+    { assignOrder: true },
+  );
+  upsertToolActivityMessage(
+    setMessages,
+    {
+      invocationId: "invocation-web",
+      callId: "invocation-web",
+      capabilityId: "web-access.search",
+      toolName: "search",
+      toolStatus: "running",
+      turnRunId: runId,
+      activityOrder: 42004,
+      activityOrderSource: "projection_cursor",
+    },
+    stateRef,
+    { assignOrder: true },
+  );
+
+  assert.equal(messages.length, 1);
+  assert.equal(messages[0].activityOrder, 42004);
+  assert.equal(messages[0].activityOrderSource, "projection_cursor");
+});
+
+test("tool activity state lets projection snapshot order replace gate provisional order", () => {
+  const runId = "run-snapshot-order";
+  const stateRef = { current: createToolActivityState() };
+  let messages = [];
+  const setMessages = (updater) => {
+    messages = typeof updater === "function" ? updater(messages) : updater;
+  };
+
+  ensureGateToolActivity(
+    setMessages,
+    {
+      kind: "gate",
+      runId,
+      gateRef: "gate:web-search",
+      toolName: "web-access.search",
+    },
+    stateRef,
+  );
+  assert.equal(messages[0].activityOrder, 1);
+  assert.equal(messages[0].activityOrderSource, undefined);
+
+  upsertToolActivityMessage(
+    setMessages,
+    {
+      invocationId: messages[0].invocationId,
+      callId: messages[0].callId,
+      capabilityId: "web-access.search",
+      toolName: "search",
+      toolStatus: "running",
+      turnRunId: runId,
+      activityOrder: 42003,
+      activityOrderSource: "projection_snapshot",
+    },
+    stateRef,
+    { assignOrder: true },
+  );
+
+  assert.equal(messages.length, 1);
+  assert.equal(messages[0].activityOrder, 42003);
+  assert.equal(messages[0].activityOrderSource, "projection_snapshot");
+});

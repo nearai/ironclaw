@@ -142,3 +142,72 @@ test("useHistory full refresh preserves SSE-only activity messages", async () =>
   );
   assert.equal(setCalls.at(-1).messages[1].toolStatus, "error");
 });
+
+test("useHistory full refresh rebases live gate activity after timeline tools", async () => {
+  const threadId = "thread-activity-order";
+  const runId = "run-activity-order";
+  const setCalls = [];
+  const timelineMessages = [
+    {
+      id: "tool-extension-a",
+      role: "tool_activity",
+      invocationId: "extension-a",
+      turnRunId: runId,
+      toolName: "extension_search",
+      toolStatus: "success",
+      activityOrder: 2,
+    },
+    {
+      id: "tool-extension-b",
+      role: "tool_activity",
+      invocationId: "extension-b",
+      turnRunId: runId,
+      toolName: "extension_search",
+      toolStatus: "success",
+      activityOrder: 3,
+    },
+  ];
+  const context = {
+    console,
+    fetchTimeline: async () => ({
+      messages: [],
+      next_cursor: null,
+    }),
+    globalThis: {},
+    messagesFromTimeline: () => timelineMessages,
+    React: createReactStub({ setCalls }),
+    authScope: () => "test-user",
+  };
+
+  vm.runInNewContext(useHistorySourceForTest(), context);
+  context.globalThis.__testExports.clearHistoryCache();
+  const history = context.globalThis.__testExports.useHistory(threadId, {});
+  await flushMicrotasks();
+
+  history.setMessages((messages) => [
+    {
+      id: "tool-gate-web-search",
+      role: "tool_activity",
+      invocationId: "gate-web-search",
+      turnRunId: runId,
+      toolName: "search",
+      toolStatus: "running",
+      activityOrder: 1,
+    },
+    ...messages,
+  ]);
+  await history.loadHistory();
+  await flushMicrotasks();
+
+  assert.deepEqual(
+    JSON.parse(JSON.stringify(setCalls.at(-1).messages.map((message) => [
+      message.id,
+      message.activityOrder,
+    ]))),
+    [
+      ["tool-extension-a", 2],
+      ["tool-extension-b", 3],
+      ["tool-gate-web-search", 4],
+    ],
+  );
+});

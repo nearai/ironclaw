@@ -134,6 +134,9 @@ function orderActivityRun(activity) {
 }
 
 function compareToolActivityOrder(left, right) {
+  const authorityOrder = compareActivityOrderAuthority(left, right);
+  if (authorityOrder !== 0) return authorityOrder;
+
   const explicitOrder = compareNullableNumber(left.activityOrder, right.activityOrder);
   if (explicitOrder !== 0) return explicitOrder;
 
@@ -144,6 +147,21 @@ function compareToolActivityOrder(left, right) {
   if (timestampOrder !== 0) return timestampOrder;
 
   return compareNullableNumber(left.sequence, right.sequence);
+}
+
+function compareActivityOrderAuthority(left, right) {
+  const leftHasAuthority = hasAuthoritativeActivityOrder(left);
+  const rightHasAuthority = hasAuthoritativeActivityOrder(right);
+  if (leftHasAuthority === rightHasAuthority) return 0;
+  return leftHasAuthority ? -1 : 1;
+}
+
+function hasAuthoritativeActivityOrder(message) {
+  return (
+    message?.activityOrderSource === "projection_cursor" ||
+    message?.activityOrderSource === "projection_snapshot" ||
+    message?.activityOrderSource === "timeline"
+  );
 }
 
 function compareNullableNumber(left, right) {

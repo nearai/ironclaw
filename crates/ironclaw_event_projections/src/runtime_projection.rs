@@ -60,7 +60,7 @@ fn enforce_capability_activity_output_limit(
     if activities.len() > limit {
         let split_index = limit.saturating_sub(1);
         activities
-            .select_nth_unstable_by(split_index, compare_capability_activities_for_projection);
+            .select_nth_unstable_by(split_index, compare_capability_activities_for_output_window);
         activities.truncate(limit);
     }
     sort_capability_activities_for_projection(activities);
@@ -92,6 +92,20 @@ fn compare_capability_activities_for_projection(
     left: &CapabilityActivityProjection,
     right: &CapabilityActivityProjection,
 ) -> Ordering {
+    compare_projection_order_ascending(
+        &left.updated_at,
+        &right.updated_at,
+        left.last_cursor,
+        right.last_cursor,
+        &left.invocation_id,
+        &right.invocation_id,
+    )
+}
+
+fn compare_capability_activities_for_output_window(
+    left: &CapabilityActivityProjection,
+    right: &CapabilityActivityProjection,
+) -> Ordering {
     compare_projection_order(
         &left.updated_at,
         &right.updated_at,
@@ -113,6 +127,24 @@ fn compare_projection_order(
     right_updated_at
         .cmp(left_updated_at)
         .then_with(|| right_cursor.cmp(&left_cursor))
+        .then_with(|| {
+            left_invocation_id
+                .as_uuid()
+                .cmp(&right_invocation_id.as_uuid())
+        })
+}
+
+fn compare_projection_order_ascending(
+    left_updated_at: &ironclaw_host_api::Timestamp,
+    right_updated_at: &ironclaw_host_api::Timestamp,
+    left_cursor: ironclaw_events::EventCursor,
+    right_cursor: ironclaw_events::EventCursor,
+    left_invocation_id: &InvocationId,
+    right_invocation_id: &InvocationId,
+) -> Ordering {
+    left_updated_at
+        .cmp(right_updated_at)
+        .then_with(|| left_cursor.cmp(&right_cursor))
         .then_with(|| {
             left_invocation_id
                 .as_uuid()
