@@ -172,11 +172,19 @@ has_legacy_tests=true
 has_reborn_tests=true"
 
 assert_scope \
-  "shared reborn tests workflow" \
+  "reborn tests workflow" \
   ".github/workflows/reborn-tests.yml" \
   "docs_only=false
 has_core_code=true
-has_legacy_tests=true
+has_legacy_tests=false
+has_reborn_tests=true"
+
+assert_scope \
+  "reborn tests workflow validator" \
+  "scripts/ci/validate-reborn-tests-workflow.py" \
+  "docs_only=false
+has_core_code=true
+has_legacy_tests=false
 has_reborn_tests=true"
 
 assert_scope \
