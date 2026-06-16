@@ -11,6 +11,7 @@ use ironclaw_host_api::runtime_policy::{DeploymentMode, RuntimeProfile};
 use ironclaw_host_api::runtime_policy::{
     EffectiveRuntimePolicy, FilesystemBackendKind, NetworkMode, SecretMode,
 };
+use ironclaw_host_api::{AgentId, TenantId};
 #[cfg(all(test, feature = "slack-v2-host-beta"))]
 use ironclaw_host_runtime::HostRuntimeHttpEgressPort;
 use ironclaw_host_runtime::TenantSandboxProcessPort;
@@ -168,6 +169,7 @@ impl RebornRuntimeProcessBinding {
 pub struct RebornBuildInput {
     pub(crate) profile: RebornCompositionProfile,
     pub(crate) owner_id: String,
+    pub(crate) local_runtime_identity: Option<RebornLocalRuntimeIdentity>,
     pub(crate) storage: RebornStorageInput,
     pub(crate) production_trust_policy: Option<Arc<HostTrustPolicy>>,
     pub(crate) runtime_policy: Option<EffectiveRuntimePolicy>,
@@ -182,6 +184,12 @@ pub struct RebornBuildInput {
     pub(crate) oauth_provider_configs: Vec<OAuthProviderBackendConfig>,
     pub(crate) oauth_dcr_provider_configs: Vec<OAuthDcrProviderBackendConfig>,
     pub(crate) nearai_mcp_bootstrap_config: Option<crate::nearai_mcp::NearAiMcpBootstrapConfig>,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct RebornLocalRuntimeIdentity {
+    pub(crate) tenant_id: TenantId,
+    pub(crate) agent_id: AgentId,
 }
 
 pub(crate) enum RebornStorageInput {
@@ -228,6 +236,16 @@ impl RebornBuildInput {
     /// wrote to.
     pub fn with_owner_id(mut self, owner_id: impl Into<String>) -> Self {
         self.owner_id = owner_id.into();
+        self
+    }
+
+    /// Override the local runtime tenant/agent identity used by command-style
+    /// facades that need a surface context before a full runtime exists.
+    pub fn with_local_runtime_identity(mut self, tenant_id: TenantId, agent_id: AgentId) -> Self {
+        self.local_runtime_identity = Some(RebornLocalRuntimeIdentity {
+            tenant_id,
+            agent_id,
+        });
         self
     }
 
@@ -620,6 +638,7 @@ impl RebornBuildInput {
         Self {
             profile,
             owner_id: owner_id.into(),
+            local_runtime_identity: None,
             storage,
             production_trust_policy: None,
             runtime_policy: None,

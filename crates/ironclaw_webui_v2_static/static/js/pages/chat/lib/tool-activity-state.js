@@ -97,7 +97,7 @@ function toolMessageId(card) {
 }
 
 function findToolActivityIndex(messages, card, targetId, options) {
-  const exact = messages.findIndex((message) => message.id === targetId);
+  const exact = messages.findIndex((message) => message?.id === targetId);
   if (exact >= 0) return exact;
 
   const gateRef = card.gateRef || null;

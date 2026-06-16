@@ -81,16 +81,16 @@ function ReasoningItem({ content }) {
 }
 
 function hasToolCalls(item) {
-  return item.toolCalls && item.toolCalls.length > 0;
+  return item?.toolCalls && item.toolCalls.length > 0;
 }
 
 function shouldExpandActivityRun(activity) {
   return (activity || []).some((item) => {
-    if (item.role === "thinking") return true;
-    if (item.toolStatus === "running" || item.toolStatus === "error") return true;
+    if (item?.role === "thinking") return true;
+    if (item?.toolStatus === "running" || item?.toolStatus === "error") return true;
     if (!hasToolCalls(item)) return false;
     return item.toolCalls.some(
-      (tool) => tool.toolStatus === "running" || tool.toolStatus === "error",
+      (tool) => tool?.toolStatus === "running" || tool?.toolStatus === "error",
     );
   });
 }

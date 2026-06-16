@@ -1,9 +1,7 @@
-use ironclaw_host_api::{TenantId, UserId};
 use ironclaw_product_workflow::{
     LifecycleExtensionSource, LifecycleExtensionSummary, LifecyclePackageKind, LifecyclePackageRef,
     LifecyclePhase, LifecycleProductAction, LifecycleProductContext, LifecycleProductFacade,
-    LifecycleProductPayload, LifecycleProductResponse, LifecycleProductSurfaceContext,
-    ProductWorkflowError,
+    LifecycleProductPayload, LifecycleProductResponse, ProductWorkflowError,
 };
 use thiserror::Error;
 
@@ -46,12 +44,9 @@ pub async fn execute_reborn_extension_lifecycle_command(
             product_auth.runtime_credential_account_selection_service(),
         );
     }
-    Ok(facade
-        .execute(
-            extension_lifecycle_surface_context()?,
-            command.into_action()?,
-        )
-        .await?)
+    let context =
+        LifecycleProductContext::Surface(local_runtime.extension_lifecycle_surface_context.clone());
+    Ok(facade.execute(context, command.into_action()?).await?)
 }
 
 pub fn render_reborn_extension_lifecycle_response(
@@ -116,23 +111,6 @@ impl RebornExtensionLifecycleCommand {
                 package_ref: extension_package_ref(id)?,
             },
         })
-    }
-}
-
-fn extension_lifecycle_surface_context() -> Result<LifecycleProductContext, ProductWorkflowError> {
-    Ok(LifecycleProductContext::Surface(
-        LifecycleProductSurfaceContext {
-            tenant_id: TenantId::new("reborn-cli").map_err(invalid_surface_context)?,
-            user_id: UserId::new("reborn-cli").map_err(invalid_surface_context)?,
-            agent_id: None,
-            project_id: None,
-        },
-    ))
-}
-
-fn invalid_surface_context(error: impl std::fmt::Display) -> ProductWorkflowError {
-    ProductWorkflowError::InvalidBindingRequest {
-        reason: error.to_string(),
     }
 }
 
@@ -213,7 +191,7 @@ mod tests {
     use ironclaw_auth::{
         AuthContinuationRef, AuthProductScope, AuthProviderId, AuthSurface, CredentialAccountLabel,
     };
-    use ironclaw_host_api::{InvocationId, ResourceScope, TenantId, UserId};
+    use ironclaw_host_api::{AgentId, InvocationId, ResourceScope, TenantId, UserId};
     use secrecy::SecretString;
 
     use super::*;
@@ -242,10 +220,16 @@ mod tests {
     #[tokio::test]
     async fn extension_lifecycle_command_activates_credentialed_extension_with_product_auth() {
         let dir = tempfile::tempdir().expect("tempdir");
-        let services = build_reborn_services(RebornBuildInput::local_dev(
-            "reborn-cli",
-            dir.path().join("local-dev"),
-        ))
+        let owner = "extension-lifecycle-command-owner";
+        let tenant = "extension-lifecycle-command-tenant";
+        let agent = "extension-lifecycle-command-agent";
+        let services = build_reborn_services(
+            RebornBuildInput::local_dev(owner, dir.path().join("local-dev"))
+                .with_local_runtime_identity(
+                    TenantId::new(tenant).expect("tenant"),
+                    AgentId::new(agent).expect("agent"),
+                ),
+        )
         .await
         .expect("local-dev services build");
         let product_auth = services
@@ -254,9 +238,9 @@ mod tests {
             .expect("local-dev composes product auth");
         let scope = AuthProductScope::new(
             ResourceScope {
-                tenant_id: TenantId::new("reborn-cli").expect("tenant"),
-                user_id: UserId::new("reborn-cli").expect("user"),
-                agent_id: None,
+                tenant_id: TenantId::new(tenant).expect("tenant"),
+                user_id: UserId::new(owner).expect("user"),
+                agent_id: Some(AgentId::new(agent).expect("agent")),
                 project_id: None,
                 mission_id: None,
                 thread_id: None,

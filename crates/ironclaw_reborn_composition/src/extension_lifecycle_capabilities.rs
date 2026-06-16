@@ -269,8 +269,6 @@ mod tests {
     };
     use ironclaw_trust::{AuthorityCeiling, EffectiveTrustClass, TrustDecision, TrustProvenance};
 
-    use crate::product_auth_runtime_credentials::runtime_account_owner_scope;
-
     use super::*;
     use crate::{RebornBuildInput, RebornServices, build_reborn_services};
 
@@ -813,7 +811,7 @@ mod tests {
             .expect("product auth")
             .credential_account_service()
             .create_account(NewCredentialAccount {
-                scope: AuthProductScope::new(runtime_account_owner_scope(scope), AuthSurface::Api),
+                scope: AuthProductScope::credential_owner(scope, AuthSurface::Api),
                 provider: AuthProviderId::new(provider).expect("valid auth provider"),
                 label: CredentialAccountLabel::new(provider).expect("valid account label"),
                 status: CredentialAccountStatus::Configured,

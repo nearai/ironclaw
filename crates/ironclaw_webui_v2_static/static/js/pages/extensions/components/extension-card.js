@@ -16,7 +16,7 @@ import { primaryExtensionAction } from "../lib/extension-actions.js";
    live in an overflow menu so the resting card stays calm. */
 
 const CARD =
-  "flex h-full flex-col rounded-[14px] border border-[var(--v2-panel-border)] " +
+  "flex self-start flex-col rounded-[14px] border border-[var(--v2-panel-border)] " +
   "bg-[var(--v2-surface-soft)] p-4";
 const META = "mt-1.5 flex flex-wrap items-center gap-x-2 font-mono text-[10px] text-[var(--v2-text-faint)]";
 const DESC = "mt-2 line-clamp-2 min-h-[2.5rem] text-xs leading-5 text-[var(--v2-text-muted)]";
@@ -122,7 +122,13 @@ export function ExtensionCard({ ext, onActivate, onConfigure, onRemove, isBusy }
       : ext.onboarding?.credential_next_step || ext.onboarding?.credential_instructions) ||
     null;
 
-  const configurePayload = { packageRef: ext.package_ref, displayName };
+  const configurePayload = {
+    packageRef: ext.package_ref,
+    displayName,
+    active: ext.active,
+    activationStatus: ext.activation_status,
+    onboardingState: ext.onboarding_state,
+  };
 
   const primaryActions = [];
   const overflowActions = [];

@@ -1067,6 +1067,14 @@ impl RebornRuntime {
         self.turn_coordinator.clone()
     }
 
+    #[cfg(feature = "slack-v2-host-beta")]
+    pub(crate) fn auth_challenge_provider(&self) -> Option<Arc<dyn crate::AuthChallengeProvider>> {
+        self.services
+            .product_auth
+            .as_ref()
+            .and_then(|product_auth| product_auth.as_auth_challenge_provider())
+    }
+
     pub(crate) fn webui_event_stream(&self) -> Arc<dyn ProjectionStream> {
         self.projection_services.webui_event_stream()
     }
@@ -1127,15 +1135,6 @@ impl RebornRuntime {
                 reason: format!("outbound delivery target provider lookup failed: {error}"),
             })
     }
-
-    #[cfg(feature = "slack-v2-host-beta")]
-    pub(crate) fn auth_challenge_provider(&self) -> Option<Arc<dyn crate::AuthChallengeProvider>> {
-        self.services
-            .product_auth
-            .as_ref()
-            .and_then(|product_auth| product_auth.as_auth_challenge_provider())
-    }
-
     /// Wire the triggered-run delivery hook into the already-spawned trigger
     /// poller. Must be called after [`build_reborn_runtime`] returns and after
     /// the hook itself is constructed (e.g. inside
@@ -2148,6 +2147,11 @@ pub async fn build_reborn_runtime(
         None
     };
 
+    let validated_identity = validate_runtime_identity(identity)?;
+    services_input = services_input.with_local_runtime_identity(
+        validated_identity.tenant_id.clone(),
+        validated_identity.agent_id.clone(),
+    );
     let trusted_laptop_access = services_input.grants_trusted_laptop_access();
     let owner_id = services_input.owner_id().to_string();
     let mut services = build_reborn_services(services_input).await?;
@@ -2211,7 +2215,6 @@ pub async fn build_reborn_runtime(
         subagent_goal_store,
         trigger_repository: _trigger_repository,
     } = runtime_parts;
-    let validated_identity = validate_runtime_identity(identity)?;
     let (skill_context_source, skill_activation_source, skill_execution_adapter) =
         match (configured_skill_context_source, local_runtime) {
             (Some(source), _) => (Some(source), None, None),
@@ -8560,6 +8563,14 @@ mod tests {
     impl crate::product_auth_runtime_credentials::RuntimeCredentialAccountSelectionService
         for MultiToolConfiguredCredentials
     {
+        async fn select_configured_account_for_binding(
+            &self,
+            _lookup: ironclaw_auth::CredentialAccountSelectionRequest,
+            _runtime_scope: ironclaw_auth::AuthProductScope,
+        ) -> Result<ironclaw_auth::CredentialAccount, ironclaw_auth::AuthProductError> {
+            Err(ironclaw_auth::AuthProductError::CredentialMissing)
+        }
+
         async fn select_unique_configured_runtime_account(
             &self,
             _request: crate::product_auth_runtime_credentials::RuntimeCredentialAccountSelectionRequest,

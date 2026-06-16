@@ -3783,7 +3783,7 @@ async fn approval_gate_resolution_uses_approval_interaction_service() {
 }
 
 #[tokio::test]
-async fn approval_gate_denial_uses_approval_interaction_service_and_returns_cancelled() {
+async fn approval_gate_denial_uses_approval_interaction_service_and_returns_resumed() {
     let coordinator = Arc::new(FakeTurnCoordinator::default());
     let approval_interactions = Arc::new(RecordingApprovalInteractionService::default());
     let services = RebornServices::new(
@@ -3809,7 +3809,7 @@ async fn approval_gate_denial_uses_approval_interaction_service_and_returns_canc
         .await
         .expect("approval gate denial succeeds");
 
-    assert!(matches!(response, RebornResolveGateResponse::Cancelled(_)));
+    assert!(matches!(response, RebornResolveGateResponse::Resumed(_)));
     assert_eq!(approval_interactions.resolution_count(), 1);
     assert_eq!(coordinator.cancellation_count(), 0);
     assert_eq!(
