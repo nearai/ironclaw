@@ -1890,8 +1890,8 @@ async fn idempotent_deny_replay_returns_same_resumed_response_as_first_deny() {
         .await
         .expect("first deny");
 
-    let first_run_id = match &first_response {
-        ResolveApprovalInteractionResponse::Resumed(r) => r.run_id,
+    let first_resumed = match &first_response {
+        ResolveApprovalInteractionResponse::Resumed(r) => r.clone(),
         other => panic!("expected Resumed, got {other:?}"),
     };
     assert_eq!(resolver.denial_count(), 1);
@@ -1946,12 +1946,12 @@ async fn idempotent_deny_replay_returns_same_resumed_response_as_first_deny() {
         .await
         .expect("idempotent replay must succeed");
 
-    let second_run_id = match &second_response {
-        ResolveApprovalInteractionResponse::Resumed(r) => r.run_id,
+    let second_resumed = match &second_response {
+        ResolveApprovalInteractionResponse::Resumed(r) => r.clone(),
         other => panic!("expected Resumed, got {other:?}"),
     };
-    // Must return the SAME run_id as the first response (same cached result).
-    assert_eq!(first_run_id, second_run_id);
+    // Must return the SAME full response as the first (same cached result).
+    assert_eq!(first_resumed, second_resumed);
     // Replay went through resume_turn (one more call → total 2), not cancel_run.
     assert_eq!(coordinator.resumption_count(), 2);
     assert_eq!(coordinator.cancellation_count(), 0);

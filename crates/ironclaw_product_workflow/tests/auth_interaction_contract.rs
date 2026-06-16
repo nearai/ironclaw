@@ -898,8 +898,8 @@ async fn idempotent_auth_deny_replay_returns_same_resumed_response_as_first_deny
         .await
         .expect("first deny");
 
-    let first_run_id = match &first_response {
-        ResolveAuthInteractionResponse::Resumed(r) => r.run_id,
+    let first_resumed = match &first_response {
+        ResolveAuthInteractionResponse::Resumed(r) => r.clone(),
         other => panic!("expected Resumed, got {other:?}"),
     };
     assert_eq!(flow_manager.cancellations().len(), 1);
@@ -949,12 +949,12 @@ async fn idempotent_auth_deny_replay_returns_same_resumed_response_as_first_deny
         .await
         .expect("idempotent auth replay must succeed");
 
-    let second_run_id = match &second_response {
-        ResolveAuthInteractionResponse::Resumed(r) => r.run_id,
+    let second_resumed = match &second_response {
+        ResolveAuthInteractionResponse::Resumed(r) => r.clone(),
         other => panic!("expected Resumed, got {other:?}"),
     };
-    // Must return the SAME run_id as the first response.
-    assert_eq!(first_run_id, second_run_id);
+    // Must return the SAME full response as the first (same cached result).
+    assert_eq!(first_resumed, second_resumed);
     // Replay went through resume_turn (cache hit), not cancel_run.
     assert_eq!(coordinator2.resumes().len(), 1);
     assert_eq!(coordinator2.cancellations().len(), 0);

@@ -285,7 +285,7 @@ fn stamp_resume_disposition(
         (true, true) => {
             // Should never happen: two pending slots share the same gate_ref.
             // Refuse to stamp either rather than misattribute the denial.
-            tracing::warn!(
+            tracing::debug!(
                 ?last_gate,
                 "ambiguous gate resume disposition; refusing to stamp"
             );
