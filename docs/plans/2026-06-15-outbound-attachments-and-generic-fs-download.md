@@ -115,7 +115,13 @@ filesystem navigation (a future file browser) is another.
 Ordered by dependency. Each layer compiles independently
 (`cargo build -p <crate>` / `node --check`). Follows the `reborn-feature` ladder.
 
-### 3.1 `attach_file` first-party tool
+> **Historical (not implemented):** §3.1–§3.3 below describe the original
+> tool+harvest approach that was **dropped** in favor of the path/link-based
+> design (see the 2026-06-15 design decision above). They are retained only as
+> the rejected alternative; **only §3.4 (generic FS read API) and §3.5
+> (frontend) actually landed.** Do not build against §3.1–§3.3.
+
+### 3.1 `attach_file` first-party tool _(dropped — not implemented)_
 
 **Crate:** `ironclaw_first_party_extensions` (the coding tools live here, dispatched
 by `ironclaw_host_runtime`). Mirror `write_file` in
@@ -164,7 +170,7 @@ profile.
 > (`/workspace/...`) — the download endpoint resolves it directly. Do **not** invent
 > a second opaque id scheme; the scoped path already can't escape the mount.
 
-### 3.2 Harvest refs onto the finalized assistant message
+### 3.2 Harvest refs onto the finalized assistant message _(dropped — not implemented)_
 
 **Crate:** `ironclaw_turns` (loop host) + `ironclaw_reborn`/composition (the
 `LoopTranscriptPort` impl).
@@ -198,7 +204,7 @@ persistence.
 > loop-accumulation path keeps the change local to where capability results already
 > flow.
 
-### 3.3 Project `attachments` into the timeline + SSE
+### 3.3 Project `attachments` into the timeline + SSE _(dropped — not implemented)_
 
 **Crate:** `ironclaw_product_adapters` + `ironclaw_webui_v2`.
 
