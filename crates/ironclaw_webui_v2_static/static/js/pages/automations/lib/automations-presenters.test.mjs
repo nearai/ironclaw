@@ -21,6 +21,32 @@ const EN_SCHEDULE = {
   "automations.schedule.weekdayAt": "{weekday} at {time}",
   "automations.schedule.monthlyAt": "Day {day} of each month at {time}",
   "automations.schedule.dateAt": "{date} at {time}",
+  // Status / state / date-fallback labels are now localized too; mirror en.js
+  // so assertions read human English.
+  "automations.state.active": "Active",
+  "automations.state.scheduled": "Scheduled",
+  "automations.state.paused": "Paused",
+  "automations.state.disabled": "Disabled",
+  "automations.state.inactive": "Inactive",
+  "automations.state.completed": "Completed",
+  "automations.state.unknown": "Unknown",
+  "automations.lastStatus.done": "Done",
+  "automations.lastStatus.error": "Error",
+  "automations.lastStatus.running": "Running",
+  "automations.lastStatus.none": "No result",
+  "automations.runStatus.ok": "OK",
+  "automations.runStatus.error": "Error",
+  "automations.runStatus.running": "Running",
+  "automations.runStatus.unknown": "Unknown",
+  "automations.date.unknown": "Unknown",
+  "automations.date.notScheduled": "Not scheduled",
+  "automations.date.noRuns": "No runs yet",
+  "automations.date.unscheduled": "Unscheduled",
+  "automations.date.notSubmitted": "Not submitted",
+  "automations.date.notCompleted": "Not completed",
+  "automations.untitled": "Untitled automation",
+  "automations.successRate.none": "No completed runs",
+  "automations.successRate.visible": "{percent}% visible runs",
 };
 const t = (key, params = {}) =>
   (EN_SCHEDULE[key] || key).replace(/\{(\w+)\}/g, (m, k) =>
