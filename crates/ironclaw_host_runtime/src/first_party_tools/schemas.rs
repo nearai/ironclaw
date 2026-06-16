@@ -243,6 +243,24 @@ pub(crate) fn resolve_builtin_input_schema_ref(reference: &str) -> Option<Value>
             "required": ["display_handle"],
             "additionalProperties": false
         }),
+        "schemas/builtin/profile_set.input.v1.json" => json!({
+            "type": "object",
+            "properties": {
+                "timezone": {
+                    "type": "string",
+                    "description": "IANA timezone name, e.g. America/Los_Angeles or Asia/Tokyo"
+                },
+                "locale": {
+                    "type": "string",
+                    "description": "BCP-47 locale tag, e.g. en-US or ja-JP"
+                },
+                "location": {
+                    "type": "string",
+                    "description": "Free-text location label, e.g. Tokyo, Japan"
+                }
+            },
+            "additionalProperties": false
+        }),
         "schemas/builtin/read_file.input.v1.json" => json!({
             "type": "object",
             "properties": {

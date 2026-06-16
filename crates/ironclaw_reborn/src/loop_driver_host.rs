@@ -18,14 +18,14 @@ use ironclaw_hooks::middleware::{
 use ironclaw_host_api::ExtensionId;
 use ironclaw_loop_support::{
     ACTIVE_TASK_COMPACTION_SYSTEM_PROMPT, CapabilityResolveError, CapabilitySurfaceProfileFilter,
-    CapabilitySurfaceProfileResolver, EmptyLoopCapabilityPort, GuardedSystemInferencePort,
-    HostIdentityContextSource, HostInputQueue, HostManagedModelGateway, HostQueueLoopInputPort,
-    HostSkillContextSource, LoopAttachmentReadPort, LoopCapabilityInputResolver,
-    LoopCapabilityPortFactory, ModelGatewayBackedSystemInferencePort, RunCancellationFactory,
-    RunCancellationObservationKind, RunStateLoopCancellationPort, SubagentLoopPromptPort,
-    SubagentPromptComposer, ThreadBackedLoopContextPort, ThreadBackedLoopTranscriptPort,
-    ThreadContextWindowCache, TurnStateRunCancellationFactory, active_task_compaction_prompt_id,
-    host_managed_loop_compaction_port_with_prompt_id,
+    CapabilitySurfaceProfileResolver, EmptyLoopCapabilityPort, EmptyUserProfileSource,
+    GuardedSystemInferencePort, HostIdentityContextSource, HostInputQueue, HostManagedModelGateway,
+    HostQueueLoopInputPort, HostSkillContextSource, HostUserProfileSource, LoopAttachmentReadPort,
+    LoopCapabilityInputResolver, LoopCapabilityPortFactory, ModelGatewayBackedSystemInferencePort,
+    RunCancellationFactory, RunCancellationObservationKind, RunStateLoopCancellationPort,
+    SubagentLoopPromptPort, SubagentPromptComposer, ThreadBackedLoopContextPort,
+    ThreadBackedLoopTranscriptPort, ThreadContextWindowCache, TurnStateRunCancellationFactory,
+    active_task_compaction_prompt_id, host_managed_loop_compaction_port_with_prompt_id,
 };
 use ironclaw_threads::{SessionThreadService, ThreadScope};
 
@@ -948,6 +948,11 @@ where
     event_subscription: Option<EventTriggeredHookSubscription>,
     safety_context: InstructionSafetyContext,
     identity_context_source: Option<Arc<dyn HostIdentityContextSource>>,
+    /// Per-run user agent-context profile source. Resolved once at loop start;
+    /// result is stamped into `LoopRuntimeContext.user_profile`. Defaults to
+    /// `EmptyUserProfileSource` (returns `None`) so callers that do not wire a
+    /// profile source degrade gracefully rather than failing.
+    user_profile_source: Arc<dyn HostUserProfileSource>,
     communication_context_provider: Option<Arc<dyn CommunicationContextProvider>>,
     input_queue: Option<Arc<dyn HostInputQueue>>,
     profiled_capabilities: Option<ProfiledCapabilityHostRuntime>,
@@ -1013,6 +1018,7 @@ where
             event_subscription: None,
             safety_context,
             identity_context_source: None,
+            user_profile_source: Arc::new(EmptyUserProfileSource),
             communication_context_provider: None,
             input_queue: None,
             profiled_capabilities: None,
@@ -1275,6 +1281,15 @@ where
         source: Arc<dyn HostIdentityContextSource>,
     ) -> Self {
         self.identity_context_source = Some(source);
+        self
+    }
+
+    /// Installs the per-user profile source. The source is resolved once at
+    /// loop start; its result is stamped into `LoopRuntimeContext.user_profile`
+    /// so the model sees the user's timezone/locale/location every turn.
+    /// When not called the factory defaults to `EmptyUserProfileSource`.
+    pub fn with_user_profile_source(mut self, source: Arc<dyn HostUserProfileSource>) -> Self {
+        self.user_profile_source = source;
         self
     }
 
@@ -1547,6 +1562,15 @@ where
             Some(fetch) => fetch.resolve(delivery_tools_visible).await,
             None => None,
         };
+        // Resolve the per-user profile once at loop start (a single bounded
+        // memory read). Performance: acceptable here — the existing
+        // `communication` slice already does backend fetches at loop start.
+        // If this becomes a critical-path concern a follow-up can move it
+        // onto the same concurrent fetch budget as `CommunicationContextProvider`.
+        let user_profile = self
+            .user_profile_source
+            .resolve_user_profile(&run_context)
+            .await;
         let prompt_authority = LoopPromptBundleAuthority::shared();
         let surface_state_for_prompt = Arc::clone(&surface_state);
         let prompt_port = HostManagedLoopPromptPort::new(
@@ -1564,7 +1588,7 @@ where
             loop_started_at_utc: chrono::Utc::now(),
             communication,
             product_context: run_context.product_context.clone(),
-            user_profile: None,
+            user_profile,
         });
         let mut prompt: Arc<dyn LoopPromptPort> = Arc::new(prompt_port);
         if let Some(dispatcher) = per_build_dispatcher.as_ref() {

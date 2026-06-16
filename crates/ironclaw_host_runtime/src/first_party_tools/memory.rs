@@ -698,6 +698,70 @@ fn tree_for_paths(paths: &[String], root: &str, max_depth: usize) -> Vec<Value> 
     output
 }
 
+/// Compare-and-write field-merge for the structured user profile doc. Keys the
+/// doc via the shared `profile_scope_and_path` helper (single scope-decision
+/// home). Validated field map is merged over existing JSON under a CAS retry
+/// loop so concurrent `profile_set` calls cannot lose a field.
+pub(super) async fn profile_merge_write(
+    state: &MemoryCapabilityState,
+    request: &FirstPartyCapabilityRequest,
+    fields: serde_json::Map<String, serde_json::Value>,
+) -> Result<FirstPartyCapabilityResult, FirstPartyCapabilityError> {
+    use crate::user_profile_source::profile_scope_and_path;
+
+    ensure_memory_mount(request, /* write */ true)?;
+    let (scope, path) = profile_scope_and_path(
+        request.scope.tenant_id.as_str(),
+        request.scope.user_id.as_str(),
+    )
+    .map_err(|_| input_error())?;
+    let context = MemoryContext::new(scope).with_audit_context(
+        request.scope.clone(),
+        ironclaw_host_api::CorrelationId::new(),
+    );
+    let backend = state.backend_for(request)?;
+    let options = write_options(None);
+
+    // CAS retry loop — mirrors `patch_document`'s MAX_MEMORY_PATCH_RETRIES pattern.
+    // Read current bytes + hash, merge fields, compare-and-write; retry on hash
+    // mismatch (a concurrent writer raced in).
+    for _ in 0..MAX_MEMORY_PATCH_RETRIES {
+        let current = backend
+            .read_document(&context, &path)
+            .await
+            .map_err(|_| operation_error())?;
+        let expected_hash = current.as_deref().map(content_bytes_sha256);
+        let mut doc: serde_json::Map<String, serde_json::Value> = match &current {
+            Some(bytes) => serde_json::from_slice(bytes).unwrap_or_default(),
+            None => serde_json::Map::new(),
+        };
+        for (k, v) in &fields {
+            doc.insert(k.clone(), v.clone());
+        }
+        let bytes =
+            serde_json::to_vec(&serde_json::Value::Object(doc)).map_err(|_| operation_error())?;
+
+        let outcome = backend
+            .compare_and_write_document_with_backend_options(
+                &context,
+                &path,
+                expected_hash.as_deref(),
+                &bytes,
+                &options,
+            )
+            .await
+            .map_err(|_| operation_error())?;
+        if outcome == MemoryWriteOutcome::Written {
+            return Ok(FirstPartyCapabilityResult::new(
+                serde_json::json!({ "status": "ok" }),
+                ResourceUsage::default(),
+            ));
+        }
+        // else: hash moved under us — loop and re-merge onto the newer doc.
+    }
+    Err(operation_error())
+}
+
 fn resolve_target_path(target: &str, input: &Value) -> Result<String, FirstPartyCapabilityError> {
     match target {
         "memory" => Ok(MEMORY_PATH.to_string()),

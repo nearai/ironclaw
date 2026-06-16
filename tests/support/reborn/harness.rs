@@ -64,7 +64,7 @@ use ironclaw_host_runtime::{
 };
 use ironclaw_loop_support::{
     CapabilityAllowSet, CapabilityResolveError, CapabilityResultWrite,
-    CapabilitySurfaceProfileResolver, DEFAULT_SPAWN_SUBAGENT_CAPABILITY_ID,
+    CapabilitySurfaceProfileResolver, DEFAULT_SPAWN_SUBAGENT_CAPABILITY_ID, EmptyUserProfileSource,
     HostIdentityContextBuildError, HostIdentityContextCandidate, HostIdentityContextSource,
     HostManagedModelRequest, HostRuntimeLoopCapabilityPortFactory, JsonSpawnSubagentInputCodec,
     LoopCapabilityPortFactory, LoopCapabilityResultWriter,
@@ -934,6 +934,7 @@ impl RebornBinaryE2EHarness {
             skill_context_source: None,
             input_queue: None,
             identity_context_source,
+            user_profile_source: Arc::new(EmptyUserProfileSource),
             model_policy_guard: None,
             model_budget_accountant: None,
             safety_context: None,
