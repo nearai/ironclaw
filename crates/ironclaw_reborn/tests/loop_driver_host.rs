@@ -5798,7 +5798,11 @@ async fn text_only_host_does_not_reinvoke_runtime_after_failed_outcome_retry() {
     let invocations = runtime.invocations();
     assert_eq!(invocations.len(), 1);
     assert!(invocations[0].idempotency_key.is_some());
-    assert!(io.results().is_empty());
+    let results = io.results();
+    assert_eq!(results.len(), 1);
+    assert_eq!(results[0].0, capability_id);
+    assert_eq!(results[0].1.get("ok"), Some(&json!(false)));
+    assert_eq!(results[0].1.get("error_kind"), Some(&json!("dispatcher")));
 }
 
 #[tokio::test]
