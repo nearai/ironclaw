@@ -258,7 +258,9 @@ impl<'a> PromptPlanningPipeline<'a> {
         // Auth-resume check runs after approval (approval takes priority; both set
         // simultaneously is impossible today, but this ordering is defensive).
         if let Some(resume) = self.state.pending_auth_resume.as_ref() {
-            let call = pending_auth_resume_candidate(resume, surface.version.clone());
+            let call =
+                pending_auth_resume_candidate(self.ctx.host, resume, surface.version.clone())
+                    .await?;
             return Ok(PromptStep::ResumeAuth(Box::new(
                 ApprovalResumePromptOutput {
                     state: self.state,

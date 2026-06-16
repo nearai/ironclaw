@@ -1,7 +1,7 @@
 //! `PostgresPredicateStateBackend` run against the shared trait-level
 //! contract harness from `ironclaw_hooks::predicate_state::contract`.
 //!
-//! All nine contract functions are exercised. The harness is the same
+//! Every contract function is exercised. The harness is the same
 //! one the in-memory backend is wired through (PR 1/4), so this proves
 //! the durable backend honors the identical isolation / dedup / window /
 //! atomicity invariants by construction.
@@ -176,6 +176,7 @@ pg_contract!(duplicate_event_id_is_noop_for_invocations);
 pg_contract!(duplicate_event_id_is_noop_for_values);
 pg_contract!(invocation_retains_entry_at_exact_window_cutoff);
 pg_contract!(event_id_dedup_isolated_across_maps);
+pg_contract!(tenant_key_quota_spans_invocation_and_value_maps);
 pg_contract!(record_invocation_overflow_is_fail_closed);
 pg_contract!(evict_older_than_reaps_strictly_older_rows);
 pg_contract!(evict_older_than_retains_entry_at_exact_cutoff);

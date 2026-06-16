@@ -11,7 +11,7 @@ export function Avatar({ role, className = "" }) {
   return html`
     <div
       className=${[
-        "flex h-8 w-8 shrink-0 items-center justify-center rounded-full font-mono text-[11px] font-semibold",
+        "flex h-7 w-7 shrink-0 items-center justify-center rounded-full font-mono text-[10px] font-semibold",
         BG[role] || BG.assistant,
         className,
       ].join(" ")}

@@ -129,6 +129,12 @@ Register this WebUI login callback in the Google OAuth client:
 https://<railway-domain>/auth/callback/google
 ```
 
+Notion MCP and other product-auth OAuth setup flows use the same hosted WebUI
+base URL for provider callbacks. Set `IRONCLAW_REBORN_WEBUI_BASE_URL` to the
+same public host so product-auth providers see the public callback origin rather
+than the local listener address. Google product-auth is separate and still uses
+`IRONCLAW_REBORN_GOOGLE_OAUTH_REDIRECT_URI` explicitly.
+
 Product-auth Google credentials are a separate flow. Configure
 `IRONCLAW_REBORN_GOOGLE_OAUTH_REDIRECT_URI` only when the deployment should let
 the agent connect a Google credential:

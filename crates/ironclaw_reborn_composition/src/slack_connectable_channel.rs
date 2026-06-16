@@ -51,6 +51,11 @@ pub fn build_webui_services_with_slack_host_beta_mounts(
             mounts.channel_routes.operator_user_id().clone(),
         )
     });
+    if slack_mounts.is_some() && runtime.outbound_delivery_target_provider().is_none() {
+        return Err(RebornBuildError::InvalidConfig {
+            reason: "outbound delivery target providers require local runtime services".to_string(),
+        });
+    }
     build_webui_services_with_connectable_channels(
         runtime,
         event_stream,

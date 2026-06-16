@@ -33,7 +33,9 @@ use ironclaw_host_runtime::{
     RuntimeCapabilityRequest, RuntimeFailureKind, RuntimeProcessError, RuntimeProcessPort,
     SHELL_CAPABILITY_ID, SKILL_INSTALL_CAPABILITY_ID, SKILL_LIST_CAPABILITY_ID,
     SKILL_REMOVE_CAPABILITY_ID, SPAWN_SUBAGENT_CAPABILITY_ID, SandboxCommandTransport, SurfaceKind,
-    TIME_CAPABILITY_ID, TRIGGER_CREATE_CAPABILITY_ID, TRIGGER_LIST_CAPABILITY_ID,
+    TIME_CAPABILITY_ID, TRACE_COMMONS_CREDITS_CAPABILITY_ID, TRACE_COMMONS_ONBOARD_CAPABILITY_ID,
+    TRACE_COMMONS_PROFILE_SET_CAPABILITY_ID, TRACE_COMMONS_PROFILE_TOKEN_CAPABILITY_ID,
+    TRACE_COMMONS_STATUS_CAPABILITY_ID, TRIGGER_CREATE_CAPABILITY_ID, TRIGGER_LIST_CAPABILITY_ID,
     TRIGGER_REMOVE_CAPABILITY_ID, TenantSandboxProcessPort, ToolCallHttpEgress, TriggerCreateHook,
     VisibleCapabilityAccess, VisibleCapabilityRequest, WRITE_FILE_CAPABILITY_ID,
     builtin_first_party_handlers, builtin_first_party_handlers_with_trigger_create_hook,
@@ -82,7 +84,9 @@ async fn builtin_first_party_package_declares_expected_capabilities() {
             | SKILL_INSTALL_CAPABILITY_ID
             | SKILL_REMOVE_CAPABILITY_ID
             | TRIGGER_CREATE_CAPABILITY_ID
-            | TRIGGER_REMOVE_CAPABILITY_ID => PermissionMode::Ask,
+            | TRIGGER_REMOVE_CAPABILITY_ID
+            | TRACE_COMMONS_ONBOARD_CAPABILITY_ID
+            | TRACE_COMMONS_PROFILE_TOKEN_CAPABILITY_ID => PermissionMode::Ask,
             _ => PermissionMode::Allow,
         };
         assert_eq!(descriptor.default_permission, expected_permission);
@@ -118,6 +122,11 @@ async fn builtin_first_party_package_declares_expected_capabilities() {
         http.effects,
         vec![EffectKind::DispatchCapability, EffectKind::Network]
     );
+    assert!(
+        http.description
+            .contains("Prefer GitHub extension capabilities"),
+        "builtin.http should steer GitHub repository API tasks toward the GitHub extension"
+    );
     let http_save = package
         .capabilities
         .iter()
@@ -130,6 +139,12 @@ async fn builtin_first_party_package_declares_expected_capabilities() {
             EffectKind::Network,
             EffectKind::WriteFilesystem
         ]
+    );
+    assert!(
+        http_save
+            .description
+            .contains("Prefer GitHub extension capabilities"),
+        "builtin.http.save should steer GitHub repository API tasks toward the GitHub extension"
     );
 
     let memory_write = package
@@ -1043,6 +1058,7 @@ async fn builtin_trigger_list_embeds_recent_run_history_with_run_limit() {
             trigger_id: record.trigger_id,
             fire_slot: first_fire_slot,
             run_id: first_run_id,
+            thread_id: ThreadId::new("01890f0f-0001-7000-8000-000000000001").unwrap(),
             submitted_at: first_fire_slot + chrono::Duration::seconds(1),
             next_run_at: first_fire_slot + chrono::Duration::minutes(1),
         })
@@ -1076,6 +1092,7 @@ async fn builtin_trigger_list_embeds_recent_run_history_with_run_limit() {
             trigger_id: record.trigger_id,
             fire_slot: second_fire_slot,
             run_id: second_run_id,
+            thread_id: ThreadId::new("01890f0f-0002-7000-8000-000000000002").unwrap(),
             submitted_at: second_fire_slot + chrono::Duration::seconds(1),
             next_run_at: second_fire_slot + chrono::Duration::minutes(1),
         })
@@ -1109,6 +1126,7 @@ async fn builtin_trigger_list_embeds_recent_run_history_with_run_limit() {
             trigger_id: record.trigger_id,
             fire_slot: third_fire_slot,
             run_id: third_run_id,
+            thread_id: ThreadId::new("01890f0f-0003-7000-8000-000000000003").unwrap(),
             submitted_at: third_fire_slot + chrono::Duration::seconds(1),
             next_run_at: third_fire_slot + chrono::Duration::minutes(1),
         })
@@ -1135,10 +1153,9 @@ async fn builtin_trigger_list_embeds_recent_run_history_with_run_limit() {
     assert_eq!(runs[2]["run_id"], json!(first_run_id.to_string()));
     assert_eq!(runs[2]["status"], json!("ok"));
     assert_ne!(runs[2]["completed_at"], Value::Null);
-    assert_eq!(
-        runs[0]["thread_id"].as_str().unwrap().len(),
-        64,
-        "trigger route thread ids are deterministic hex identifiers"
+    assert!(
+        uuid::Uuid::parse_str(runs[0]["thread_id"].as_str().unwrap()).is_ok(),
+        "run thread ids are canonical conversation thread UUIDs, not route placeholders"
     );
 }
 
@@ -1251,6 +1268,7 @@ async fn seed_completed_trigger_runs(
                 trigger_id: record.trigger_id,
                 fire_slot,
                 run_id,
+                thread_id: ThreadId::new("01890f0f-0004-7000-8000-000000000004").unwrap(),
                 submitted_at: fire_slot + chrono::Duration::seconds(1),
                 next_run_at: fire_slot + chrono::Duration::minutes(1),
             })
@@ -6539,6 +6557,15 @@ fn trigger_backend_error() -> ironclaw_triggers::TriggerError {
 
 #[async_trait]
 impl TriggerRepository for RemoveFailingTriggerRepository {
+    async fn find_trigger_run_by_thread_id(
+        &self,
+        _tenant_id: TenantId,
+        _thread_id: &ThreadId,
+    ) -> Result<Option<(TriggerRecord, TriggerRunRecord)>, TriggerError> {
+        // Trigger-thread lookup is not exercised by this fake.
+        Ok(None)
+    }
+
     async fn upsert_trigger(
         &self,
         record: ironclaw_triggers::TriggerRecord,
@@ -6671,6 +6698,15 @@ impl TriggerRepository for RemoveFailingTriggerRepository {
 
 #[async_trait]
 impl TriggerRepository for BatchRunHistoryFailingTriggerRepository {
+    async fn find_trigger_run_by_thread_id(
+        &self,
+        _tenant_id: TenantId,
+        _thread_id: &ThreadId,
+    ) -> Result<Option<(TriggerRecord, TriggerRunRecord)>, TriggerError> {
+        // Trigger-thread lookup is not exercised by this fake.
+        Ok(None)
+    }
+
     async fn upsert_trigger(
         &self,
         record: ironclaw_triggers::TriggerRecord,
@@ -6811,6 +6847,15 @@ impl TriggerRepository for BatchRunHistoryFailingTriggerRepository {
 
 #[async_trait]
 impl TriggerRepository for FailingTriggerRepository {
+    async fn find_trigger_run_by_thread_id(
+        &self,
+        _tenant_id: TenantId,
+        _thread_id: &ThreadId,
+    ) -> Result<Option<(TriggerRecord, TriggerRunRecord)>, TriggerError> {
+        // Trigger-thread lookup is not exercised by this fake.
+        Ok(None)
+    }
+
     async fn upsert_trigger(
         &self,
         _record: ironclaw_triggers::TriggerRecord,
@@ -7210,6 +7255,11 @@ fn all_builtin_capability_ids() -> Vec<&'static str> {
         HTTP_SAVE_CAPABILITY_ID,
         SHELL_CAPABILITY_ID,
         SPAWN_SUBAGENT_CAPABILITY_ID,
+        TRACE_COMMONS_ONBOARD_CAPABILITY_ID,
+        TRACE_COMMONS_STATUS_CAPABILITY_ID,
+        TRACE_COMMONS_CREDITS_CAPABILITY_ID,
+        TRACE_COMMONS_PROFILE_TOKEN_CAPABILITY_ID,
+        TRACE_COMMONS_PROFILE_SET_CAPABILITY_ID,
         MEMORY_SEARCH_CAPABILITY_ID,
         MEMORY_WRITE_CAPABILITY_ID,
         MEMORY_READ_CAPABILITY_ID,
@@ -7798,6 +7848,7 @@ fn builtin_effects() -> Vec<EffectKind> {
         EffectKind::Network,
         EffectKind::SpawnProcess,
         EffectKind::ExecuteCode,
+        // Required by builtin.trace_commons.onboard.
         EffectKind::ExternalWrite,
     ]
 }

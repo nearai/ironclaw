@@ -16,8 +16,8 @@ use crate::{
     TRIGGER_TRUSTED_ADAPTER_INSTALLATION_ID, TRIGGER_TRUSTED_ADAPTER_KIND,
     TRIGGER_TRUSTED_EXTERNAL_ACTOR_NAMESPACE, TriggerCompletionPolicy, TriggerError, TriggerFire,
     TriggerId, TriggerInboundContentRef, TriggerMaterializedPrompt, TriggerPromptMaterializer,
-    TriggerRecord, TriggerRepository, TriggerRunHistoryStatus, TriggerRunStatus, TriggerSchedule,
-    TriggerSourceKind, TriggerSourceProvider, TriggerState,
+    TriggerRecord, TriggerRepository, TriggerRunHistoryStatus, TriggerRunRecord, TriggerRunStatus,
+    TriggerSchedule, TriggerSourceKind, TriggerSourceProvider, TriggerState,
 };
 
 fn ts(seconds: i64) -> Timestamp {
@@ -320,6 +320,7 @@ async fn tick_persists_replayed_submit_with_original_run_ref() {
             TrustedTriggerFireSubmitOutcome::Replayed {
                 original_run_id,
                 replayed_at: ts(1_704_067_205),
+                thread_id: None,
             },
         )])),
         Arc::new(RecordingActiveRunLookup::default()),
@@ -341,6 +342,51 @@ async fn tick_persists_replayed_submit_with_original_run_ref() {
     assert_eq!(persisted.active_fire_slot, Some(fire_slot));
     assert_eq!(persisted.active_run_ref, Some(original_run_id));
     assert_eq!(persisted.next_run_at, expected_next_run_at);
+}
+
+/// Regression guard: when the submitter returns `Replayed { thread_id: Some(id) }`,
+/// the worker must forward the canonical thread_id to `mark_fire_replayed`.
+/// Without this guard, a silent drop of the `thread_id` field in the worker's
+/// `Replayed` arm would leave the run row with `thread_id = None`, breaking the
+/// automation panel's ability to link to the replayed thread.
+#[tokio::test]
+async fn tick_persists_replayed_submit_with_canonical_thread_id() {
+    let repo = Arc::new(InMemoryTriggerRepository::default());
+    let trigger_id = TriggerId::parse("01HZZZZZZZZZZZZZZZZZZZZZZZ").expect("ulid");
+    let fire_slot = ts(1_704_067_200);
+    let record = sample_record(trigger_id, tenant("tenant-a"), fire_slot);
+    repo.upsert_trigger(record).await.expect("insert");
+    let original_run_id = TurnRunId::parse("01890f0f-9b6f-7a85-9e5b-9f21a93c4f5a").expect("run id");
+    let canonical_thread_id = ThreadId::new("thread-canonical-replay").expect("valid thread id");
+    let worker = worker(
+        repo.clone(),
+        Arc::new(RecordingMaterializer::success("content:trigger-fire")),
+        Arc::new(RecordingSubmitter::with_outcomes(vec![Ok(
+            TrustedTriggerFireSubmitOutcome::Replayed {
+                original_run_id,
+                replayed_at: ts(1_704_067_205),
+                thread_id: Some(canonical_thread_id.clone()),
+            },
+        )])),
+        Arc::new(RecordingActiveRunLookup::default()),
+    );
+
+    worker.tick_once(fire_slot).await.expect("tick succeeds");
+
+    // The run history row for this fire slot must carry the canonical thread_id.
+    let runs = repo
+        .list_trigger_run_history(tenant("tenant-a"), trigger_id, 10)
+        .await
+        .expect("list run history");
+    let run = runs
+        .iter()
+        .find(|r| r.fire_slot == fire_slot)
+        .expect("run row for fire_slot");
+    assert_eq!(
+        run.thread_id,
+        Some(canonical_thread_id),
+        "replayed thread_id must be forwarded to mark_fire_replayed and stored on the run row"
+    );
 }
 
 #[tokio::test]
@@ -1178,6 +1224,7 @@ async fn tick_replayed_submit_can_be_cleared_on_a_later_tick_without_stopping_du
             TrustedTriggerFireSubmitOutcome::Replayed {
                 original_run_id: replayed_run_id,
                 replayed_at: ts(1_704_067_205),
+                thread_id: None,
             },
         )])),
         Arc::new(RecordingActiveRunLookup::default()),
@@ -1527,6 +1574,7 @@ async fn tick_replayed_mark_fire_missing_reports_due_failure() {
             TrustedTriggerFireSubmitOutcome::Replayed {
                 original_run_id,
                 replayed_at: fire_slot,
+                thread_id: None,
             },
         )])),
         Arc::new(RecordingActiveRunLookup::default()),
@@ -2088,6 +2136,15 @@ impl TickConcurrencyRepository {
 
 #[async_trait]
 impl TriggerRepository for TickConcurrencyRepository {
+    async fn find_trigger_run_by_thread_id(
+        &self,
+        _tenant_id: TenantId,
+        _thread_id: &ThreadId,
+    ) -> Result<Option<(TriggerRecord, TriggerRunRecord)>, TriggerError> {
+        // Trigger-thread lookup is not exercised by this fake.
+        Ok(None)
+    }
+
     async fn upsert_trigger(&self, _record: TriggerRecord) -> Result<(), TriggerError> {
         unreachable!("tick-concurrency repository is read-only")
     }
@@ -2228,6 +2285,15 @@ struct ActiveListErrorRepository;
 
 #[async_trait]
 impl TriggerRepository for ActiveListErrorRepository {
+    async fn find_trigger_run_by_thread_id(
+        &self,
+        _tenant_id: TenantId,
+        _thread_id: &ThreadId,
+    ) -> Result<Option<(TriggerRecord, TriggerRunRecord)>, TriggerError> {
+        // Trigger-thread lookup is not exercised by this fake.
+        Ok(None)
+    }
+
     async fn upsert_trigger(&self, _record: TriggerRecord) -> Result<(), TriggerError> {
         unreachable!("active-list-error repository is read-only")
     }
@@ -2372,6 +2438,15 @@ impl ActiveWrapRefetchErrorRepository {
 
 #[async_trait]
 impl TriggerRepository for ActiveWrapRefetchErrorRepository {
+    async fn find_trigger_run_by_thread_id(
+        &self,
+        _tenant_id: TenantId,
+        _thread_id: &ThreadId,
+    ) -> Result<Option<(TriggerRecord, TriggerRunRecord)>, TriggerError> {
+        // Trigger-thread lookup is not exercised by this fake.
+        Ok(None)
+    }
+
     async fn upsert_trigger(&self, _record: TriggerRecord) -> Result<(), TriggerError> {
         unreachable!("active-wrap-refetch-error repository is read-only")
     }
@@ -2509,6 +2584,15 @@ struct ActiveClearRaceRepository {
 
 #[async_trait]
 impl TriggerRepository for ActiveClearRaceRepository {
+    async fn find_trigger_run_by_thread_id(
+        &self,
+        _tenant_id: TenantId,
+        _thread_id: &ThreadId,
+    ) -> Result<Option<(TriggerRecord, TriggerRunRecord)>, TriggerError> {
+        // Trigger-thread lookup is not exercised by this fake.
+        Ok(None)
+    }
+
     async fn upsert_trigger(&self, _record: TriggerRecord) -> Result<(), TriggerError> {
         unreachable!("active-clear-race repository is read-only")
     }
@@ -2658,6 +2742,15 @@ impl ActiveClearFailsOnceRepository {
 
 #[async_trait]
 impl TriggerRepository for ActiveClearFailsOnceRepository {
+    async fn find_trigger_run_by_thread_id(
+        &self,
+        _tenant_id: TenantId,
+        _thread_id: &ThreadId,
+    ) -> Result<Option<(TriggerRecord, TriggerRunRecord)>, TriggerError> {
+        // Trigger-thread lookup is not exercised by this fake.
+        Ok(None)
+    }
+
     async fn upsert_trigger(&self, _record: TriggerRecord) -> Result<(), TriggerError> {
         unreachable!("active-clear-fails-once repository is read-only")
     }
@@ -2842,6 +2935,15 @@ struct AcceptedMissingRepository {
 
 #[async_trait]
 impl TriggerRepository for AcceptedMissingRepository {
+    async fn find_trigger_run_by_thread_id(
+        &self,
+        _tenant_id: TenantId,
+        _thread_id: &ThreadId,
+    ) -> Result<Option<(TriggerRecord, TriggerRunRecord)>, TriggerError> {
+        // Trigger-thread lookup is not exercised by this fake.
+        Ok(None)
+    }
+
     async fn upsert_trigger(&self, _record: TriggerRecord) -> Result<(), TriggerError> {
         unreachable!("accepted-missing repository is read-only")
     }
@@ -2971,6 +3073,15 @@ struct ReplayedMissingRepository {
 
 #[async_trait]
 impl TriggerRepository for ReplayedMissingRepository {
+    async fn find_trigger_run_by_thread_id(
+        &self,
+        _tenant_id: TenantId,
+        _thread_id: &ThreadId,
+    ) -> Result<Option<(TriggerRecord, TriggerRunRecord)>, TriggerError> {
+        // Trigger-thread lookup is not exercised by this fake.
+        Ok(None)
+    }
+
     async fn upsert_trigger(&self, _record: TriggerRecord) -> Result<(), TriggerError> {
         unreachable!("replayed-missing repository is read-only")
     }
@@ -3101,6 +3212,15 @@ struct DueErrorThenSuccessRepository {
 
 #[async_trait]
 impl TriggerRepository for DueErrorThenSuccessRepository {
+    async fn find_trigger_run_by_thread_id(
+        &self,
+        _tenant_id: TenantId,
+        _thread_id: &ThreadId,
+    ) -> Result<Option<(TriggerRecord, TriggerRunRecord)>, TriggerError> {
+        // Trigger-thread lookup is not exercised by this fake.
+        Ok(None)
+    }
+
     async fn upsert_trigger(&self, _record: TriggerRecord) -> Result<(), TriggerError> {
         unreachable!("due-error repository is read-only")
     }
@@ -3247,6 +3367,15 @@ impl ClaimRaceRepository {
 
 #[async_trait]
 impl TriggerRepository for ClaimRaceRepository {
+    async fn find_trigger_run_by_thread_id(
+        &self,
+        _tenant_id: TenantId,
+        _thread_id: &ThreadId,
+    ) -> Result<Option<(TriggerRecord, TriggerRunRecord)>, TriggerError> {
+        // Trigger-thread lookup is not exercised by this fake.
+        Ok(None)
+    }
+
     async fn upsert_trigger(&self, _record: TriggerRecord) -> Result<(), TriggerError> {
         unreachable!("claim-race repository is read-only")
     }

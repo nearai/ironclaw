@@ -9,8 +9,8 @@ use crate::error::ProductWorkflowError;
 
 const APPROVAL_GATE_PREFIX: &str = "gate:approval-";
 
-pub fn is_approval_gate_ref(gate_ref: &GateRef) -> bool {
-    gate_ref.as_str().starts_with(APPROVAL_GATE_PREFIX)
+pub fn is_approval_gate_ref(gate_ref_str: &str) -> bool {
+    gate_ref_str.starts_with(APPROVAL_GATE_PREFIX)
 }
 
 pub fn approval_gate_ref(request_id: ApprovalRequestId) -> Result<GateRef, ProductWorkflowError> {
@@ -18,7 +18,7 @@ pub fn approval_gate_ref(request_id: ApprovalRequestId) -> Result<GateRef, Produ
         .map_err(|_| approval_rejected(ApprovalInteractionRejectionKind::InvalidGateRef))
 }
 
-pub(super) fn approval_request_id_from_gate_ref(
+pub fn approval_request_id_from_gate_ref(
     gate_ref: &GateRef,
 ) -> Result<ApprovalRequestId, ProductWorkflowError> {
     let Some(value) = gate_ref.as_str().strip_prefix(APPROVAL_GATE_PREFIX) else {
@@ -62,8 +62,8 @@ mod tests {
         let generic = GateRef::new("gate:approve-slack").expect("generic gate");
         let adjacent = GateRef::new("gate:approvalish-test").expect("adjacent gate");
 
-        assert!(is_approval_gate_ref(&typed));
-        assert!(!is_approval_gate_ref(&generic));
-        assert!(!is_approval_gate_ref(&adjacent));
+        assert!(is_approval_gate_ref(typed.as_str()));
+        assert!(!is_approval_gate_ref(generic.as_str()));
+        assert!(!is_approval_gate_ref(adjacent.as_str()));
     }
 }

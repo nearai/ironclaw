@@ -10,22 +10,8 @@ function packageId(item) {
   return item.package_ref?.id || "";
 }
 
-export function isSlackChannelEnabled(enabledChannels) {
-  return ["slack", "slack_v2", "slack-v2"].some((channel) =>
-    enabledChannels.includes(channel)
-  );
-}
-
-export function slackBuiltinStatus(slackEnabled, connectAction) {
-  if (slackEnabled) {
-    return { label: "on", tone: "success" };
-  }
-  if (connectAction?.strategy === "admin_managed_channels") {
-    return { label: "manage", tone: "info" };
-  }
-  return connectAction
-    ? { label: "connect", tone: "info" }
-    : { label: "off", tone: "muted" };
+export function isSlackPackage(item) {
+  return packageId(item) === "slack";
 }
 
 export function isSlackAdminManagedAction(connectAction) {
@@ -51,7 +37,7 @@ export function findSlackConnectActions(connectableChannels) {
   return fallback ? [fallback] : [];
 }
 
-export function SlackBuiltInConnectAction({
+export function SlackConnectActionSections({
   slackConnectAction,
   slackConnectActions,
 }) {
@@ -85,11 +71,12 @@ export function ChannelsTab({
   isBusy,
 }) {
   const t = useT();
+  const installedChannels = channels || [];
   const enabledChannels = status.enabled_channels || [];
-  const slackEnabled = isSlackChannelEnabled(enabledChannels);
   const slackConnectActions = findSlackConnectActions(connectableChannels);
-  const slackConnectAction = slackConnectActions[0] || null;
-  const slackStatus = slackBuiltinStatus(slackEnabled, slackConnectAction);
+  const hasInstalledSlackPackage = installedChannels.some(isSlackPackage);
+  const showLegacySlackConnectActions =
+    slackConnectActions.length > 0 && !hasInstalledSlackPackage;
 
   return html`
     <div className="space-y-5">
@@ -115,16 +102,6 @@ export function ChannelsTab({
           detail="ENABLE_HTTP=true"
         />
         <${BuiltinRow}
-          name="Slack"
-          description=${t("channels.slackDesc") || "Tenant app channel for DMs and app mentions"}
-          enabled=${slackEnabled}
-          statusLabel=${slackStatus.label}
-          statusTone=${slackStatus.tone}
-          detail=${t("channels.slackDetail") || "Tenant Slack app install"}
-        >
-          <${SlackBuiltInConnectAction} slackConnectActions=${slackConnectActions} />
-        <//>
-        <${BuiltinRow}
           name="CLI"
           description=${t("channels.cliDesc") || "Terminal interface with TUI or simple REPL"}
           enabled=${enabledChannels.includes("cli")}
@@ -136,9 +113,24 @@ export function ChannelsTab({
           enabled=${enabledChannels.includes("repl")}
           detail="ironclaw run --repl"
         />
+        ${showLegacySlackConnectActions &&
+        html`
+          <${BuiltinRow}
+            name=${t("channels.slack") || "Slack"}
+            description=${t("channels.slackDesc") || "Tenant app channel for DMs and app mentions"}
+            enabled=${false}
+            statusLabel="legacy"
+            statusTone="muted"
+            detail=${t("channels.slackDetail") || "Tenant Slack app install"}
+          >
+            <${SlackConnectActionSections}
+              slackConnectActions=${slackConnectActions}
+            />
+          </${BuiltinRow}>
+        `}
       </div>
 
-      ${channels.length > 0 &&
+      ${installedChannels.length > 0 &&
       html`
         <div className="v2-panel rounded-[18px] p-5 sm:p-6">
           <h3
@@ -147,7 +139,7 @@ export function ChannelsTab({
             ${t("channels.messaging")}
           </h3>
           <div className="grid grid-cols-1 gap-4">
-            ${channels.map(
+            ${installedChannels.map(
               (ch) => html`
                 <div key=${packageId(ch)} className="flex flex-col gap-3">
                   <${ExtensionCard}
@@ -157,6 +149,10 @@ export function ChannelsTab({
                     onRemove=${onRemove}
                     isBusy=${isBusy}
                   />
+                  ${isSlackPackage(ch) &&
+                  html`<${SlackConnectActionSections}
+                    slackConnectActions=${slackConnectActions}
+                  />`}
                   ${(ch.onboarding_state === "pairing_required" ||
                     ch.onboarding_state === "pairing") &&
                   html` <${PairingSection} channel=${packageId(ch)} /> `}
@@ -172,7 +168,7 @@ export function ChannelsTab({
           <h3
             className="mb-4 font-mono text-[11px] uppercase tracking-[0.14em] text-signal"
           >
-            Available channels
+            ${t("channels.availableChannels")}
           </h3>
           <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 2xl:grid-cols-3">
             ${channelRegistry.map(

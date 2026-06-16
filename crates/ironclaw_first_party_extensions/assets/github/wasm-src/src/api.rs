@@ -123,21 +123,51 @@ pub(crate) fn list_issues(
     if !validate_path_segment(owner) || !validate_path_segment(repo) {
         return Err("Invalid owner or repo name".into());
     }
-    let encoded_owner = url_encode_path(owner);
-    let encoded_repo = url_encode_path(repo);
     let state = state.unwrap_or("open");
+    let search_state = match state {
+        "open" | "closed" => Some(state),
+        "all" => None,
+        _ => return Err("invalid_state".to_string()),
+    };
+    validate_search_page(page)?;
+    validate_search_limit(limit)?;
     let limit = limit.unwrap_or(30).min(100); // Cap at 100
-    let encoded_state = url_encode_query(state);
+    let query = build_issue_search_query(
+        None,
+        None,
+        Some(owner),
+        Some(repo),
+        None,
+        None,
+        None,
+        search_state,
+        Some("issue"),
+    )?;
 
     let mut path = format!(
-        "/repos/{}/{}/issues?state={}&per_page={}",
-        encoded_owner, encoded_repo, encoded_state, limit
+        "/search/issues?q={}&per_page={}",
+        url_encode_query(&query),
+        limit
     );
-    if let Some(p) = page {
-        path.push_str(&format!("&page={}", p));
-    }
+    append_search_params(&mut path, page, Some("created"), Some("desc"))?;
 
-    github_request("GET", &path, None)
+    let response = github_request("GET", &path, None)?;
+    issue_items_from_search_response(&response)
+}
+
+pub(crate) fn issue_items_from_search_response(response: &str) -> Result<String, String> {
+    let response: serde_json::Value = serde_json::from_str(response).map_err(|error| {
+        format!("github_api_invalid_json: failed to parse issue search response: {error}")
+    })?;
+    let items = response
+        .get("items")
+        .and_then(serde_json::Value::as_array)
+        .ok_or_else(|| {
+            "github_api_invalid_json: issue search response missing items array".to_string()
+        })?;
+    serde_json::to_string(items).map_err(|error| {
+        format!("github_api_invalid_json: failed to serialize issue search items: {error}")
+    })
 }
 
 pub(crate) fn create_issue(

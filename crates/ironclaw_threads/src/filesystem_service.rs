@@ -614,6 +614,29 @@ where
             path.as_str()
         )))
     }
+
+    /// Force-set a persisted message's status to `DeferredBusy` and clear its
+    /// turn refs, exactly as the retired `mark_message_deferred_busy` writer
+    /// would have. Never call from production code.
+    ///
+    /// Gated behind `#[cfg(any(test, feature = "test-support"))]` so it is
+    /// absent from production builds. Integration tests in a separate
+    /// compilation unit must enable the `test-support` feature.
+    #[cfg(any(test, feature = "test-support"))]
+    pub async fn inject_legacy_deferred_busy_for_test(
+        &self,
+        scope: &ThreadScope,
+        thread_id: &ThreadId,
+        message_id: ThreadMessageId,
+    ) -> Result<ThreadMessageRecord, SessionThreadError> {
+        self.apply_message_update(scope, thread_id, message_id, |message| {
+            message.status = MessageStatus::DeferredBusy;
+            message.turn_id = None;
+            message.turn_run_id = None;
+            Ok(())
+        })
+        .await
+    }
 }
 
 #[async_trait]
@@ -748,6 +771,12 @@ where
             .reserve_sequence(&request.scope, &request.thread_id)
             .await?;
         let message_id = ThreadMessageId::new();
+        // Borrow `request` for the idempotency key before moving `content` out,
+        // so the content (now carrying attachment refs) is consumed by move
+        // rather than deep-cloned on this per-message hot path.
+        let idempotency_key = InboundIdempotencyKey::from_request(&request);
+        let (content_text, attachments) = request.content.into_parts();
+        crate::contract::validate_attachment_refs(&attachments)?;
         let message = ThreadMessageRecord {
             message_id,
             thread_id: request.thread_id.clone(),
@@ -761,13 +790,14 @@ where
             turn_run_id: None,
             tool_result_ref: None,
             tool_result_provider_call: None,
-            content: Some(request.content.clone().into_text()),
+            content: Some(content_text),
+            attachments,
             redaction_ref: None,
         };
         self.write_new_message(&request.scope, &request.thread_id, &message, "message")
             .await?;
 
-        if let Some(idempotency_key) = InboundIdempotencyKey::from_request(&request) {
+        if let Some(idempotency_key) = idempotency_key {
             let idem_record = InboundIdempotencyRecord {
                 scope: idempotency_key.scope.clone(),
                 source_binding_id: idempotency_key.source_binding_id.clone(),
@@ -867,7 +897,7 @@ where
         .await
     }
 
-    async fn mark_message_deferred_busy(
+    async fn mark_message_rejected_busy(
         &self,
         scope: &ThreadScope,
         thread_id: &ThreadId,
@@ -879,8 +909,8 @@ where
                 thread_id: thread_id.clone(),
             })?;
         self.apply_message_update(scope, thread_id, message_id, |message| {
-            ensure_user_accepted(message, "mark_message_deferred_busy")?;
-            message.status = MessageStatus::DeferredBusy;
+            ensure_user_accepted(message, "mark_message_rejected_busy")?;
+            message.status = MessageStatus::RejectedBusy;
             message.turn_id = None;
             message.turn_run_id = None;
             Ok(())
@@ -923,6 +953,7 @@ where
             tool_result_ref: None,
             tool_result_provider_call: None,
             content: Some(request.content.into_text()),
+            attachments: Vec::new(),
             redaction_ref: None,
         };
         self.write_new_message(
@@ -1032,6 +1063,7 @@ where
             tool_result_ref: Some(envelope.result_ref),
             tool_result_provider_call: provider_call,
             content: Some(content),
+            attachments: Vec::new(),
             redaction_ref: None,
         };
         self.write_new_message(
@@ -1088,6 +1120,7 @@ where
             tool_result_ref: request.preview.result_ref.clone(),
             tool_result_provider_call: None,
             content: Some(content),
+            attachments: Vec::new(),
             redaction_ref: None,
         };
         let path = message_record_path(&request.scope, &request.thread_id, message.message_id)?;
@@ -1191,6 +1224,9 @@ where
             |message| {
                 ensure_draft(message)?;
                 message.content = Some(request.content.clone().into_text());
+                // Keep content and attachments in lockstep (as redaction does):
+                // a content update must not leave stale attachment refs behind.
+                message.attachments = Vec::new();
                 Ok(())
             },
         )
@@ -1213,6 +1249,7 @@ where
             ensure_draft(message)?;
             message.status = MessageStatus::Finalized;
             message.content = Some(content.clone().into_text());
+            message.attachments = Vec::new();
             Ok(())
         })
         .await
@@ -1234,6 +1271,7 @@ where
             |message| {
                 message.status = MessageStatus::Redacted;
                 message.content = None;
+                message.attachments = Vec::new();
                 message.tool_result_provider_call = None;
                 message.redaction_ref = Some(request.redaction_ref.clone());
                 Ok(())
@@ -1941,20 +1979,14 @@ fn context_messages_with_summary_replacements(
                 kind: MessageKind::Summary,
                 tool_result_provider_call: None,
                 content: summary.content.clone(),
+                image_attachments: Vec::new(),
             });
             emitted_summaries.insert(summary.summary_id);
             skip_through = summary.end_sequence;
             continue;
         }
         if let Some(content) = message.content.clone() {
-            context.push(ContextMessage {
-                message_id: Some(message.message_id),
-                summary_id: None,
-                sequence: message.sequence,
-                kind: message.kind,
-                tool_result_provider_call: message.tool_result_provider_call.clone(),
-                content,
-            });
+            context.push(ContextMessage::from_transcript_message(message, content));
         }
     }
     context
@@ -1973,14 +2005,8 @@ fn context_messages_by_id(
         .iter()
         .filter_map(|message_id| {
             let message = visible_messages.get(message_id)?;
-            Some(ContextMessage {
-                message_id: Some(message.message_id),
-                summary_id: None,
-                sequence: message.sequence,
-                kind: message.kind,
-                tool_result_provider_call: message.tool_result_provider_call.clone(),
-                content: message.content.clone()?,
-            })
+            let content = message.content.clone()?;
+            Some(ContextMessage::from_transcript_message(message, content))
         })
         .collect()
 }
@@ -1989,6 +2015,11 @@ fn history_messages(messages: &[ThreadMessageRecord]) -> Vec<ThreadMessageRecord
     messages.iter().map(history_message).collect()
 }
 
+// Deny-by-default projection: every field is listed deliberately so a newly
+// added sensitive field does NOT auto-flow into persisted history. Do not
+// collapse to `..message.clone()` — `tool_result_provider_call` is dropped
+// here precisely because raw runtime/tool payloads must never surface as
+// ordinary transcript content (see crate guardrails).
 fn history_message(message: &ThreadMessageRecord) -> ThreadMessageRecord {
     ThreadMessageRecord {
         message_id: message.message_id,
@@ -2004,6 +2035,7 @@ fn history_message(message: &ThreadMessageRecord) -> ThreadMessageRecord {
         tool_result_ref: message.tool_result_ref.clone(),
         tool_result_provider_call: None,
         content: message.content.clone(),
+        attachments: message.attachments.clone(),
         redaction_ref: message.redaction_ref.clone(),
     }
 }
@@ -2027,6 +2059,31 @@ fn history_summary_artifacts(
         .collect()
 }
 
+/// Returns true when a non-model-context-visible message within the summary
+/// span could later become model-visible (i.e. it is in a resurfaceable pending
+/// state).  Permanently-terminal non-visible messages (RejectedBusy, capability
+/// previews) never resurface, so a compaction summary spanning them is safe to
+/// apply — blocking it would silently drop a legitimate compacted range.
+///
+/// Resurfaceable statuses (must still block the summary):
+///   Draft | Interrupted | Superseded | DeferredBusy
+/// Permanent non-visible (must NOT block):
+///   RejectedBusy (terminal, user must explicitly resend)
+///   CapabilityDisplayPreview kind (never model-visible regardless of status)
+///
+/// Note: Redacted/Deleted keep their blocking role here — they were never
+/// model-visible and the separate `summary_covers_redacted_or_deleted_content`
+/// guard (used for history display) doesn't cover the context-build path.
+fn can_resurface_as_model_visible(message: &ThreadMessageRecord) -> bool {
+    matches!(
+        message.status,
+        MessageStatus::Draft
+            | MessageStatus::Interrupted
+            | MessageStatus::Superseded
+            | MessageStatus::DeferredBusy
+    )
+}
+
 fn summary_covers_hidden_content(
     messages: &[ThreadMessageRecord],
     summary: &SummaryArtifact,
@@ -2035,6 +2092,11 @@ fn summary_covers_hidden_content(
         summary.start_sequence <= message.sequence
             && message.sequence <= summary.end_sequence
             && !is_model_context_visible(message)
+            && (can_resurface_as_model_visible(message)
+                || matches!(
+                    message.status,
+                    MessageStatus::Redacted | MessageStatus::Deleted
+                ))
     })
 }
 

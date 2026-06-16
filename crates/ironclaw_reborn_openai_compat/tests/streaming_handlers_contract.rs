@@ -529,6 +529,30 @@ async fn chat_stream_idempotency_retries_pending_mapping_after_busy() {
     assert_eq!(workflow.seen_count(), 2);
 }
 
+#[tokio::test]
+async fn chat_stream_rejected_busy_ack_returns_429() {
+    let streamer = Arc::new(QueuedStreamer::new());
+    let workflow = Arc::new(FixedAckWorkflow::new(rejected_busy_ack()));
+    let router = router_with_workflow(streamer, workflow.clone());
+    let body = json!({
+        "model": "gpt-reborn",
+        "stream": true,
+        "messages": [{"role": "user", "content": "hello"}]
+    });
+
+    let response = router
+        .oneshot(post_json_with_key(
+            "/v1/chat/completions",
+            body,
+            "rejected-busy-key",
+        ))
+        .await
+        .expect("response");
+
+    assert_eq!(response.status(), http::StatusCode::TOO_MANY_REQUESTS);
+    assert_eq!(workflow.seen_count(), 1);
+}
+
 #[derive(Default)]
 struct QueuedStreamer {
     chat: Mutex<VecDeque<Result<Vec<ProductOutboundEnvelope>, OpenAiCompatHttpError>>>,
@@ -885,6 +909,13 @@ fn deferred_busy_ack() -> ProductInboundAck {
     ProductInboundAck::DeferredBusy {
         accepted_message_ref: AcceptedMessageRef::new("msg:busy").expect("accepted ref"),
         active_run_id: TurnRunId::new(),
+    }
+}
+
+fn rejected_busy_ack() -> ProductInboundAck {
+    ProductInboundAck::RejectedBusy {
+        accepted_message_ref: AcceptedMessageRef::new("msg:rejected-busy").expect("accepted ref"),
+        active_run_id: None,
     }
 }
 

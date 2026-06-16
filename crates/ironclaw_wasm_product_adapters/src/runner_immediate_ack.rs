@@ -19,7 +19,8 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use ironclaw_product_adapters::{
-    InboundRetryDisposition, ProductInboundAck, ProductInboundEnvelope, ProtocolAuthEvidence,
+    InboundRetryDisposition, ProductAdapterError, ProductInboundAck, ProductInboundEnvelope,
+    ProtocolAuthEvidence,
 };
 
 use crate::runner::{NativeProductAdapterRunner, RunnerError, WebhookProcessOutcome};
@@ -31,6 +32,16 @@ use crate::runner::{NativeProductAdapterRunner, RunnerError, WebhookProcessOutco
 #[async_trait]
 pub trait ImmediateAckWorkflowObserver: Send + Sync {
     async fn observe_workflow_ack(&self, envelope: ProductInboundEnvelope, ack: ProductInboundAck);
+
+    /// Called when the asynchronous workflow returns an error after the protocol
+    /// ACK has already been sent. Implementations must treat follow-up feedback
+    /// as best-effort because the transport cannot retry this event.
+    async fn observe_workflow_error(
+        &self,
+        _envelope: ProductInboundEnvelope,
+        _error: ProductAdapterError,
+    ) {
+    }
 }
 
 impl NativeProductAdapterRunner {
@@ -62,8 +73,8 @@ impl NativeProductAdapterRunner {
 
     /// Same as [`Self::process_verified_webhook_immediate_ack`], but notifies a
     /// host-owned observer after the asynchronous workflow dispatch returns an
-    /// ack. This lets product hosts trigger follow-up delivery (for example a
-    /// final reply push) without delaying the protocol-level ACK.
+    /// ack or error. This lets product hosts trigger follow-up delivery (for
+    /// example a final reply push) without delaying the protocol-level ACK.
     pub async fn process_verified_webhook_immediate_ack_with_observer(
         &self,
         body: &[u8],
@@ -115,6 +126,9 @@ impl NativeProductAdapterRunner {
                         error = %error,
                         "async webhook workflow dispatch failed after protocol ack"
                     );
+                    if let Some(observer) = observer {
+                        observer.observe_workflow_error(envelope, error).await;
+                    }
                 }
                 Err(_) => {
                     tracing::debug!(
@@ -151,6 +165,7 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::time::Duration;
 
+    use super::ImmediateAckWorkflowObserver;
     use async_trait::async_trait;
     use ironclaw_product_adapters::capabilities::ProductAdapterCapabilities;
     use ironclaw_product_adapters::external::{
@@ -271,6 +286,58 @@ mod tests {
         }
     }
 
+    struct RejectingWorkflow;
+
+    #[async_trait]
+    impl ironclaw_product_adapters::ProductWorkflow for RejectingWorkflow {
+        async fn submit_inbound(
+            &self,
+            _envelope: ProductInboundEnvelope,
+        ) -> Result<ProductInboundAck, ProductAdapterError> {
+            Err(ProductAdapterError::WorkflowRejected {
+                kind: ironclaw_product_adapters::ProductWorkflowRejectionKind::ScopeNotFound,
+                status_code: 404,
+                retryable: false,
+                reason: ironclaw_product_adapters::RedactedString::new("missing binding"),
+            })
+        }
+
+        async fn resolve_projection_subscription(
+            &self,
+            _envelope: ProductInboundEnvelope,
+        ) -> Result<ProjectionSubscriptionRequest, ProductAdapterError> {
+            Err(ProductAdapterError::Internal {
+                detail: ironclaw_product_adapters::redaction::RedactedString::new(
+                    "test stub: resolve_projection_subscription not supported",
+                ),
+            })
+        }
+    }
+
+    struct RecordingObserver {
+        ack_count: Arc<AtomicUsize>,
+        error_count: Arc<AtomicUsize>,
+    }
+
+    #[async_trait]
+    impl ImmediateAckWorkflowObserver for RecordingObserver {
+        async fn observe_workflow_ack(
+            &self,
+            _envelope: ProductInboundEnvelope,
+            _ack: ProductInboundAck,
+        ) {
+            self.ack_count.fetch_add(1, Ordering::SeqCst);
+        }
+
+        async fn observe_workflow_error(
+            &self,
+            _envelope: ProductInboundEnvelope,
+            _error: ProductAdapterError,
+        ) {
+            self.error_count.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
     struct BlockingWorkflow {
         entered: Arc<AtomicUsize>,
         release: Arc<Notify>,
@@ -344,6 +411,30 @@ mod tests {
         assert_eq!(outcome, WebhookProcessOutcome::AcceptedForAsyncDispatch);
         runner.drain_immediate_ack_tasks().await;
         assert_eq!(parse_count.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn immediate_ack_observer_receives_post_ack_workflow_errors() {
+        let parse_count = Arc::new(AtomicUsize::new(0));
+        let ack_count = Arc::new(AtomicUsize::new(0));
+        let error_count = Arc::new(AtomicUsize::new(0));
+        let runner = runner_with_workflow(Arc::clone(&parse_count), Arc::new(RejectingWorkflow), 1);
+        let observer = Arc::new(RecordingObserver {
+            ack_count: Arc::clone(&ack_count),
+            error_count: Arc::clone(&error_count),
+        });
+        let evidence = verified_evidence(&runner);
+
+        let outcome = runner
+            .process_verified_webhook_immediate_ack_with_observer(b"{}", &evidence, Some(observer))
+            .await
+            .expect("verified webhook should dispatch");
+
+        assert_eq!(outcome, WebhookProcessOutcome::AcceptedForAsyncDispatch);
+        runner.drain_immediate_ack_tasks().await;
+        assert_eq!(parse_count.load(Ordering::SeqCst), 1);
+        assert_eq!(ack_count.load(Ordering::SeqCst), 0);
+        assert_eq!(error_count.load(Ordering::SeqCst), 1);
     }
 
     #[tokio::test]

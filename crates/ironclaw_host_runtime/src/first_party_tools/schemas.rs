@@ -181,6 +181,68 @@ pub(crate) fn resolve_builtin_input_schema_ref(reference: &str) -> Option<Value>
             "required": ["subagent_type", "task"],
             "additionalProperties": false
         }),
+        "schemas/builtin/trace_commons-onboard.input.v1.json" => json!({
+            "type": "object",
+            "properties": {
+                "invite_url": {
+                    "type": "string",
+                    "description": "Trace Commons operator-issued invite link (https://…/onboard#CODE)"
+                },
+                "include_message_text": {
+                    "type": "boolean",
+                    "description": "Whether contributions may include redacted message text (default: false)"
+                },
+                "include_tool_payloads": {
+                    "type": "boolean",
+                    "description": "Whether contributions may include redacted tool payloads (default: false)"
+                },
+                "confirmed": {
+                    "type": "boolean",
+                    "description": "Must be true only after the user has explicitly consented in this conversation (default: false)"
+                }
+            },
+            "required": ["invite_url"],
+            "additionalProperties": false
+        }),
+        "schemas/builtin/trace_commons-status.input.v1.json" => json!({
+            "type": "object",
+            "properties": {},
+            "additionalProperties": false
+        }),
+        "schemas/builtin/trace_commons-credits.input.v1.json" => json!({
+            "type": "object",
+            "properties": {},
+            "additionalProperties": false
+        }),
+        "schemas/builtin/trace_commons-profile_token.input.v1.json" => json!({
+            "type": "object",
+            "properties": {
+                "confirmed": {
+                    "type": "boolean",
+                    "description": "Must be true only after the user has explicitly asked to mint a manual/browser profile-management token in this conversation (default: false)"
+                }
+            },
+            "additionalProperties": false
+        }),
+        "schemas/builtin/trace_commons-profile_set.input.v1.json" => json!({
+            "type": "object",
+            "properties": {
+                "display_handle": {
+                    "type": "string",
+                    "description": "Pseudonymous public display handle, 3-32 ASCII letters, digits, '-' or '_'"
+                },
+                "bio": {
+                    "type": "string",
+                    "description": "Optional short public bio, at most 280 bytes"
+                },
+                "confirmed": {
+                    "type": "boolean",
+                    "description": "Must be true only after the user has explicitly approved publishing this handle/bio in this conversation (default: false)"
+                }
+            },
+            "required": ["display_handle"],
+            "additionalProperties": false
+        }),
         "schemas/builtin/read_file.input.v1.json" => json!({
             "type": "object",
             "properties": {
@@ -256,7 +318,7 @@ pub(crate) fn resolve_builtin_input_schema_ref(reference: &str) -> Option<Value>
         "schemas/builtin/extension_search.input.v1.json" => json!({
             "type": "object",
             "properties": {
-                "query": { "type": "string", "description": "Optional search query for locally available Reborn extensions. Omit to list all extensions." }
+                "query": { "type": "string", "description": "Optional extension, product, provider, or service name to search in the local Reborn extension catalog. Omit to list bundled and installed extensions." }
             },
             "additionalProperties": false
         }),
@@ -314,7 +376,7 @@ pub(crate) fn resolve_builtin_input_schema_ref(reference: &str) -> Option<Value>
                 },
                 "prompt": {
                     "type": "string",
-                    "description": "Prompt submitted when the trigger fires. Runtime validation caps UTF-8 content at 32768 bytes."
+                    "description": "Prompt submitted when the trigger fires. Runtime validation caps UTF-8 content at 32768 bytes. Do not embed delivery routing here; when the user asks to send routine or trigger results through an outbound product/channel, first select the target through the visible outbound delivery target capabilities, then create the trigger."
                 },
                 "cron": { "type": "string", "description": "Five-, six-, or seven-field cron expression; fire cadence must be at least one minute" },
                 "timezone": { "type": "string", "description": "IANA timezone name for cron evaluation (e.g. 'America/New_York', 'Europe/London', 'UTC'). The cron expression is evaluated in this timezone; fire times are stored and compared in UTC. If the user's timezone is already known from the conversation or their settings, use it without asking; if unknown, ask the user before creating the trigger. Never silently assume UTC — a trigger that fires at the wrong local time is worse than no trigger." }

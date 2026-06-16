@@ -12,7 +12,8 @@ use serde::{Deserialize, Serialize};
 use crate::{
     CapabilityGrantId, CapabilityId, ExtensionId, MountView, NetworkPolicy, NetworkTargetPattern,
     Principal, ResourceCeiling, ResourceProfile, RuntimeCredentialAccountProviderId,
-    RuntimeCredentialTarget, RuntimeKind, SecretHandle, Timestamp, TrustClass,
+    RuntimeCredentialAuthRequirement, RuntimeCredentialTarget, RuntimeKind, SecretHandle,
+    Timestamp, TrustClass,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -84,6 +85,25 @@ pub struct RuntimeCredentialRequirement {
     pub audience: NetworkTargetPattern,
     pub target: RuntimeCredentialTarget,
     pub required: bool,
+}
+
+impl RuntimeCredentialRequirement {
+    pub fn product_auth_requirement_for(
+        &self,
+        requester_extension: ExtensionId,
+    ) -> Option<RuntimeCredentialAuthRequirement> {
+        let RuntimeCredentialRequirementSource::ProductAuthAccount { provider, setup } =
+            &self.source
+        else {
+            return None;
+        };
+        Some(RuntimeCredentialAuthRequirement {
+            provider: provider.clone(),
+            setup: setup.clone(),
+            requester_extension,
+            provider_scopes: self.provider_scopes.clone(),
+        })
+    }
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]

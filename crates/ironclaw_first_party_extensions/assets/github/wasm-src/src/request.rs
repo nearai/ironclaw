@@ -1,7 +1,11 @@
+#[cfg(not(test))]
 const GITHUB_API_ROOT: &str = "https://api.github.com";
+#[cfg(not(test))]
 const GITHUB_API_VERSION: &str = "2026-03-10";
+#[cfg(not(test))]
 const HTTP_TIMEOUT_MS: u32 = 10_000;
 
+#[cfg(not(test))]
 pub(crate) fn github_request(
     method: &str,
     path: &str,
@@ -37,6 +41,17 @@ pub(crate) fn github_request(
     Err(format!("github_api_error_status_{}", response.status))
 }
 
+#[cfg(test)]
+pub(crate) fn github_request(
+    method: &str,
+    path: &str,
+    body: Option<String>,
+) -> Result<String, String> {
+    test_support::record_request(method, path, body);
+    test_support::take_response()
+        .unwrap_or_else(|| Err("github_test_missing_mock_response".to_string()))
+}
+
 pub(crate) fn sanitize_host_error(error: &str) -> String {
     let lower = error.to_ascii_lowercase();
     if lower.contains("auth")
@@ -59,4 +74,46 @@ pub(crate) fn sanitize_host_error(error: &str) -> String {
         return "github_api_egress_denied".to_string();
     }
     "github_api_request_failed".to_string()
+}
+
+#[cfg(test)]
+pub(crate) mod test_support {
+    use std::cell::RefCell;
+
+    #[derive(Clone, Debug, PartialEq, Eq)]
+    pub(crate) struct CapturedRequest {
+        pub(crate) method: String,
+        pub(crate) path: String,
+        pub(crate) body: Option<String>,
+    }
+
+    thread_local! {
+        static REQUESTS: RefCell<Vec<CapturedRequest>> = const { RefCell::new(Vec::new()) };
+        static RESPONSE: RefCell<Option<Result<String, String>>> = const { RefCell::new(None) };
+    }
+
+    pub(crate) fn set_response(response: Result<String, String>) {
+        REQUESTS.with(|requests| requests.borrow_mut().clear());
+        RESPONSE.with(|next_response| {
+            *next_response.borrow_mut() = Some(response);
+        });
+    }
+
+    pub(crate) fn requests() -> Vec<CapturedRequest> {
+        REQUESTS.with(|requests| requests.borrow().clone())
+    }
+
+    pub(super) fn record_request(method: &str, path: &str, body: Option<String>) {
+        REQUESTS.with(|requests| {
+            requests.borrow_mut().push(CapturedRequest {
+                method: method.to_string(),
+                path: path.to_string(),
+                body,
+            });
+        });
+    }
+
+    pub(super) fn take_response() -> Option<Result<String, String>> {
+        RESPONSE.with(|response| response.borrow_mut().take())
+    }
 }

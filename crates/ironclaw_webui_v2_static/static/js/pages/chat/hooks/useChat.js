@@ -18,14 +18,13 @@ import {
   recordAcceptedMessageRef,
   removePending,
 } from "../lib/pending-messages.js";
+import { toRenderAttachment, toWireAttachment } from "../lib/attachments.js";
 import { useHistory } from "./useHistory.js";
 import { useSSE } from "./useSSE.js";
 
 const AUTH_TOKEN_FLOW_TIMEOUT_MS = 30000;
 const AUTH_GATE_CREDENTIAL_STORED_ERROR =
   "credential_stored_gate_resolution_failed";
-const UNSUPPORTED_MULTIMODAL_PAYLOAD_ERROR =
-  "webui_v2_multimodal_payload_unsupported";
 const OAUTH_CALLBACK_CHANNEL = "ironclaw-product-auth";
 const OAUTH_CALLBACK_STORAGE_KEY = "ironclaw:product-auth:oauth-complete";
 const OAUTH_CALLBACK_MESSAGE_TYPE = "ironclaw:product-auth:oauth-complete";
@@ -53,12 +52,6 @@ function threadNeedsSidebarRefresh(threadId) {
   if (!Array.isArray(threads)) return true;
   const thread = threads.find((item) => item.thread_id === threadId || item.id === threadId);
   return !thread?.title;
-}
-
-function unsupportedMultimodalPayloadError() {
-  const error = new Error("webchat v2 multimodal payload unsupported");
-  error.safeErrorCode = UNSUPPORTED_MULTIMODAL_PAYLOAD_ERROR;
-  return error;
 }
 
 function submitResponseResumedTurnGate(response) {
@@ -149,6 +142,7 @@ export function useChat(threadId) {
     hasMore,
     nextCursor,
     isLoading: historyLoading,
+    loadError: historyLoadError,
     loadHistory,
     setMessages,
   } = useHistory(threadId, { getPendingMessages, setPendingMessages });
@@ -246,15 +240,19 @@ export function useChat(threadId) {
     setActiveRun,
     activeRunRef,
     // Reborn's projection bridge does not yet emit `Text` items for
-    // assistant replies, so the SSE stream only delivers `run_status`.
-    // On terminal success, refetch the timeline so the assistant
-    // message that landed in the thread becomes visible in the UI.
-    // Clear pending optimistic messages first so the real user
-    // message from the server doesn't render alongside its
+    // assistant replies, and never emits `capability_display_preview`
+    // items in the projection state — the assistant reply and the rich
+    // tool input/output cards live only in the thread timeline. Refetch
+    // the timeline on EVERY terminal run (success or not) so both become
+    // visible; a failed/cancelled run still recovers the tool previews for
+    // tools that completed before it terminated. `preserveClientOnly`
+    // keeps the client-side `err-*` failure bubble across the reload.
+    // On success, clear pending optimistic messages first so the real
+    // user message from the server doesn't render alongside its
     // pre-submit optimistic twin.
-    onRunCompleted: () => {
-      setPendingMessages([]);
-      loadHistory();
+    onRunSettled: (_runId, { success }) => {
+      if (success) setPendingMessages([]);
+      loadHistory(undefined, { preserveClientOnly: true });
     },
   });
 
@@ -264,10 +262,12 @@ export function useChat(threadId) {
     enabled: Boolean(threadId),
   });
 
-  // Accepts the fork's call shape `{ images, attachments, threadId,
-  // timezone }`. v2 SendMessage carries `content` only; image and
-  // file payloads are rejected until the v2 contract grows typed
-  // multimodal fields.
+  // Accepts the composer call shape `{ attachments, threadId }`. The
+  // `attachments` are staged objects from `lib/attachments.js`
+  // (`stageFiles`); we split them into the `WebUiInboundAttachment` wire
+  // shape for the send and the render shape for the optimistic bubble so
+  // cards/thumbnails appear immediately, matching what the timeline
+  // projection returns after the run.
   //
   // v2 send-message requires `thread_id` as a path parameter — the
   // facade refuses to implicitly create a missing thread. When the
@@ -277,15 +277,20 @@ export function useChat(threadId) {
   // hook can route to `/chat/<id>` after the first send.
   const send = React.useCallback(
     async (content, opts = {}) => {
-      const { threadId: targetThreadId, images = [], attachments = [] } = opts;
-      if (images.length > 0 || attachments.length > 0) {
-        throw unsupportedMultimodalPayloadError();
-      }
+      const { threadId: targetThreadId, attachments: stagedAttachments = [] } =
+        opts;
+      const wireAttachments = stagedAttachments.map(toWireAttachment);
+      const renderAttachments = stagedAttachments.map(toRenderAttachment);
 
-      const connectable = await resolveConnectAction(content);
-      if (connectable) {
-        setChannelConnectAction(connectable);
-        return { channel_connect_action: connectable };
+      // Channel-connect slash commands ("/connect telegram") never carry
+      // attachments; skip that detection when files are staged so an
+      // upload is never misread as a command and dropped.
+      if (stagedAttachments.length === 0) {
+        const connectable = await resolveConnectAction(content);
+        if (connectable) {
+          setChannelConnectAction(connectable);
+          return { channel_connect_action: connectable };
+        }
       }
       setChannelConnectAction(null);
 
@@ -305,6 +310,7 @@ export function useChat(threadId) {
         id: `pending-${pendingSeqRef.current++}`,
         role: "user",
         content,
+        attachments: renderAttachments,
         timestamp: new Date().toISOString(),
         isOptimistic: true,
       };
@@ -317,6 +323,7 @@ export function useChat(threadId) {
           id: optimisticId,
           role: "user",
           content,
+          attachments: renderAttachments,
           timestamp: pendingRecord.timestamp,
           isOptimistic: true,
         },
@@ -329,6 +336,7 @@ export function useChat(threadId) {
         const response = await sendMessage({
           threadId: sendThreadId,
           content,
+          attachments: wireAttachments,
         });
         // Refresh the sidebar only while the cached entry is missing
         // or title-less. Once the first-message title has appeared,
@@ -356,6 +364,32 @@ export function useChat(threadId) {
               m.id === optimisticId ? { ...m, timelineMessageId } : m,
             ),
           );
+        }
+        // When the thread was busy, the message is rejected (not deferred).
+        // Mark the optimistic user message as failed and display the
+        // server's notice (if present) as a system message so the user
+        // knows to resend.
+        if (response?.outcome === "rejected_busy") {
+          setMessages((prev) =>
+            prev.map((m) =>
+              m.id === optimisticId
+                ? { ...m, isOptimistic: false, status: "error" }
+                : m,
+            ),
+          );
+          if (response?.notice) {
+            setMessages((prev) => [
+              ...prev,
+              {
+                id: `system-rejected-${pendingSeqRef.current++}`,
+                role: "system",
+                content: response.notice,
+                timestamp: new Date().toISOString(),
+                isOptimistic: false,
+              },
+            ]);
+          }
+          setIsProcessing(false);
         }
         return response;
       } catch (err) {
@@ -554,6 +588,7 @@ export function useChat(threadId) {
     activeRun,
     sseStatus,
     historyLoading,
+    historyLoadError,
     hasMore,
     cooldownSeconds,
     send,

@@ -263,17 +263,17 @@ Required WebUI env vars:
 | `IRONCLAW_REBORN_WEBUI_TOKEN` | Bearer token for WebUI requests. If SSO is enabled, this also signs sessions and must be at least 32 bytes. |
 | `IRONCLAW_REBORN_WEBUI_USER_ID` | Reborn owner/user id for env-bearer requests. If `[identity].default_owner` is configured, it must match this value. |
 
-Optional WebUI SSO env vars:
+Optional WebUI OAuth env vars:
 
 | Variable | Purpose |
 | --- | --- |
+| `IRONCLAW_REBORN_WEBUI_BASE_URL` | Public base URL used for WebUI login and product-auth OAuth callbacks. Non-loopback deployments must use `https://`. |
 | `IRONCLAW_REBORN_WEBUI_GOOGLE_CLIENT_ID` | Enables Google SSO when set. |
 | `IRONCLAW_REBORN_WEBUI_GOOGLE_CLIENT_SECRET` | Required when Google SSO is enabled. |
 | `IRONCLAW_REBORN_WEBUI_GOOGLE_ALLOWED_HD` | Optional Google hosted-domain restriction. |
 | `IRONCLAW_REBORN_WEBUI_GITHUB_CLIENT_ID` | Enables GitHub SSO when set. |
 | `IRONCLAW_REBORN_WEBUI_GITHUB_CLIENT_SECRET` | Required when GitHub SSO is enabled. |
 | `IRONCLAW_REBORN_WEBUI_ALLOWED_EMAIL_DOMAINS` | Required when any SSO provider is enabled. Comma-separated verified email domains. |
-| `IRONCLAW_REBORN_WEBUI_BASE_URL` | Public base URL used for OAuth callbacks. Non-loopback deployments must use `https://`. |
 | `IRONCLAW_REBORN_WEBUI_OAUTH_HTTP_TIMEOUT_SECS` | Optional OAuth HTTP timeout override. |
 
 For Google SSO, create a Google OAuth web client and register the Reborn WebUI
@@ -290,11 +290,13 @@ the authorized redirect URI in Google Cloud is:
 https://ironclaw.example.com/auth/callback/google
 ```
 
-Do not include a trailing slash in `IRONCLAW_REBORN_WEBUI_BASE_URL`; Reborn
-trims it before building callback URLs. If the base URL is omitted, Reborn uses
-the actual listener address, such as `http://127.0.0.1:3000`, which is suitable
-only for loopback/local OAuth testing. Public or non-loopback SSO deployments
-must set an `https://` base URL.
+Notion MCP and other product-auth OAuth setup flows use the same public WebUI
+base URL when registering provider callback URLs. Do not include a trailing
+slash in `IRONCLAW_REBORN_WEBUI_BASE_URL`; Reborn trims it before building
+callback URLs. If the base URL is omitted, Reborn uses the actual listener
+address, such as `http://127.0.0.1:3000`, which is suitable only for
+loopback/local OAuth testing. Public or non-loopback OAuth deployments must set
+an `https://` base URL.
 
 Complete Google SSO startup env:
 

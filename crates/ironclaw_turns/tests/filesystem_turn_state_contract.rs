@@ -12,10 +12,11 @@ use ironclaw_host_api::{
 };
 use ironclaw_turns::{
     AcceptedMessageRef, AllowAllTurnAdmissionPolicy, FilesystemTurnStateStore, GetRunStateRequest,
-    IdempotencyKey, InMemoryRunProfileResolver, ReplyTargetBindingRef, RunProfileRequest,
-    SourceBindingRef, SubmitChildRunRequest, SubmitTurnRequest, SubmitTurnResponse, TurnActor,
-    TurnError, TurnLeaseToken, TurnRunId, TurnRunnerId, TurnScope, TurnSpawnTreeStateStore,
-    TurnStateStore, TurnStatus,
+    IdempotencyKey, InMemoryRunProfileResolver, ProductTurnContext, ReplyTargetBindingRef,
+    RunOriginAdapter, RunProfileRequest, SourceBindingRef, SubmitChildRunRequest,
+    SubmitTurnRequest, SubmitTurnResponse, TurnActor, TurnError, TurnLeaseToken, TurnOriginKind,
+    TurnOwner, TurnRunId, TurnRunnerId, TurnScope, TurnSpawnTreeStateStore, TurnStateStore,
+    TurnStatus,
     runner::{ClaimRunRequest, RecoverExpiredLeasesRequest, TurnRunTransitionPort},
 };
 
@@ -89,6 +90,7 @@ fn submit_request_for(scope: TurnScope, idempotency_key: &str) -> SubmitTurnRequ
         parent_run_id: None,
         subagent_depth: 0,
         spawn_tree_root_run_id: None,
+        product_context: None,
     }
 }
 
@@ -437,5 +439,76 @@ async fn filesystem_spawn_tree_reads_are_scope_checked() {
             .unwrap()
             .run_id,
         child
+    );
+}
+
+#[tokio::test]
+async fn filesystem_turn_state_store_persists_product_context_through_snapshot_round_trip() {
+    // Regression for item-6 persistence: product_context must survive the
+    // snapshot write → read cycle so the model-visible runtime context
+    // section renders the correct origin after a restart.
+    let backend = Arc::new(engine_filesystem());
+    let scoped = scoped_turns_fs(Arc::clone(&backend));
+    let store = FilesystemTurnStateStore::new(Arc::clone(&scoped));
+    let resolver = InMemoryRunProfileResolver::default();
+
+    // Submit with a non-None product context.
+    let mut request = submit_request_for(turn_scope("thread-origin-rt"), "idem-origin-rt");
+    let expected_ctx = ProductTurnContext::new(
+        TurnOriginKind::Inbound,
+        None,
+        Some(RunOriginAdapter::new("telegram_v2").unwrap()),
+        TurnOwner::Personal {
+            user: ironclaw_host_api::UserId::new("user-rt").unwrap(),
+        },
+    );
+    request.product_context = Some(expected_ctx.clone());
+    let response = store
+        .submit_turn(request.clone(), &AllowAllTurnAdmissionPolicy, &resolver)
+        .await
+        .unwrap();
+    let run_id = accepted_run_id(&response);
+
+    // Re-open the store — this forces a full deserialize from the snapshot.
+    let reopened = FilesystemTurnStateStore::new(scoped);
+    let state = reopened
+        .get_run_state(GetRunStateRequest {
+            scope: request.scope.clone(),
+            run_id,
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        state.product_context,
+        Some(expected_ctx),
+        "product_context must survive snapshot round-trip"
+    );
+
+    // Also verify that None product_context is preserved as None (separate thread to
+    // avoid ThreadBusy on the already-queued run above).
+    let mut request_none =
+        submit_request_for(turn_scope("thread-origin-rt-none"), "idem-origin-none");
+    request_none.product_context = None;
+    let response_none = reopened
+        .submit_turn(
+            request_none.clone(),
+            &AllowAllTurnAdmissionPolicy,
+            &resolver,
+        )
+        .await
+        .unwrap();
+    let run_id_none = accepted_run_id(&response_none);
+
+    let reopened2 = FilesystemTurnStateStore::new(scoped_turns_fs(Arc::clone(&backend)));
+    let state_none = reopened2
+        .get_run_state(GetRunStateRequest {
+            scope: request_none.scope,
+            run_id: run_id_none,
+        })
+        .await
+        .unwrap();
+    assert!(
+        state_none.product_context.is_none(),
+        "None product_context must remain None after snapshot round-trip"
     );
 }

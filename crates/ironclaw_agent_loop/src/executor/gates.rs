@@ -32,6 +32,7 @@ pub(super) struct GateInput {
     pub(super) gate_ref: ironclaw_turns::LoopGateRef,
     pub(super) credential_requirements: Vec<ironclaw_host_api::RuntimeCredentialAuthRequirement>,
     pub(super) approval_resume: Option<CapabilityApprovalResume>,
+    pub(super) auth_resume: Option<ironclaw_turns::run_profile::CapabilityAuthResume>,
 }
 
 pub(super) struct AwaitDependentRunGateInput {
@@ -62,8 +63,13 @@ impl ExecutorStage<GateInput> for GateStage {
             GateOutcome::Block { gate } => {
                 state.gate_state = gate;
                 state.last_gate = Some(gate_ref.clone());
+                let auth_resume = input.auth_resume.as_ref();
+                let auth_resume_token = auth_resume.map(|r| r.resume_token.clone());
+                let auth_replay = auth_resume.and_then(|r| r.replay.clone());
+                let auth_prior_approval = auth_resume.and_then(|r| r.prior_approval.clone());
+                let approval_resume = input.approval_resume;
                 state.pending_approval_resume =
-                    input.approval_resume.map(|resume| PendingApprovalResume {
+                    approval_resume.map(|resume| PendingApprovalResume {
                         gate_ref: gate_ref.clone(),
                         capability_id: call.capability_id.clone(),
                         approval_request_id: resume.approval_request_id,
@@ -77,6 +83,8 @@ impl ExecutorStage<GateInput> for GateStage {
                         estimate: resume.estimate,
                     });
                 if matches!(kind, GateKind::Auth) {
+                    // CapabilityStage shapes auth-resume metadata; GateStage
+                    // only persists it at the blocking checkpoint.
                     state.pending_auth_resume = Some(PendingAuthResume {
                         gate_ref: gate_ref.clone(),
                         capability_id: call.capability_id.clone(),
@@ -84,6 +92,10 @@ impl ExecutorStage<GateInput> for GateStage {
                         input_ref: call.input_ref.clone(),
                         effective_capability_ids: call.effective_capability_ids.clone(),
                         provider_replay: call.provider_replay.clone(),
+                        resume_token: auth_resume_token,
+                        prior_approval: auth_prior_approval,
+                        replay: auth_replay,
+                        disposition: None,
                     });
                 }
                 // Non-auth blocks do not invalidate a pending auth resume: a resource or

@@ -7,12 +7,12 @@ use ironclaw_host_api::CapabilityId;
 use ironclaw_loop_support::{
     CapabilitySurfaceProfileResolver, CompositeTurnRunWakeNotifier,
     DecoratingLoopCapabilityPortFactory, HostIdentityContextSource, HostInputQueue,
-    HostManagedModelGateway, HostSkillContextSource, LoopCapabilityPortDecorator,
-    LoopCapabilityPortFactory, LoopCapabilityResultWriter, ProductLiveCancellationReadiness,
-    RunCancellationFactory, SpawnSubagentFlavorDescriptor, SpawnSubagentInputCodec,
-    SubagentDefinitionResolver, SubagentPromptComposer, SubagentPromptMaterialSource,
-    SubagentSpawnCapabilityPort, SubagentSpawnDeps, SubagentSpawnGoalStore, SubagentSpawnLimits,
-    verify_product_live_cancellation_probe,
+    HostManagedModelGateway, HostSkillContextSource, LoopAttachmentReadPort,
+    LoopCapabilityPortDecorator, LoopCapabilityPortFactory, LoopCapabilityResultWriter,
+    ProductLiveCancellationReadiness, RunCancellationFactory, SpawnSubagentFlavorDescriptor,
+    SpawnSubagentInputCodec, SubagentDefinitionResolver, SubagentPromptComposer,
+    SubagentPromptMaterialSource, SubagentSpawnCapabilityPort, SubagentSpawnDeps,
+    SubagentSpawnGoalStore, SubagentSpawnLimits, verify_product_live_cancellation_probe,
 };
 use ironclaw_threads::{SessionThreadService, ThreadScope};
 use ironclaw_turns::{
@@ -23,8 +23,9 @@ use ironclaw_turns::{
     TurnStateStore,
     loop_exit::LoopExitEvidencePort,
     run_profile::{
-        AgentLoopHostError, InstructionSafetyContext, LoopCapabilityPort, LoopHostMilestoneSink,
-        LoopModelBudgetAccountant, LoopModelPolicyGuard, LoopRunContext,
+        AgentLoopHostError, CommunicationContextProvider, InstructionSafetyContext,
+        LoopCapabilityPort, LoopHostMilestoneSink, LoopModelBudgetAccountant, LoopModelPolicyGuard,
+        LoopRunContext,
     },
     runner::TurnRunTransitionPort,
 };
@@ -105,6 +106,14 @@ where
     pub model_route_resolver: Option<Arc<dyn ModelRouteResolver>>,
     pub cancellation_factory: Option<Arc<dyn RunCancellationFactory>>,
     pub skill_context_source: Option<Arc<dyn HostSkillContextSource>>,
+    /// Reads landed attachment bytes so the model port can build multimodal
+    /// image parts for vision-capable models. Genuinely optional, not a
+    /// fail-closed gap: a reader can only exist where a local runtime composed a
+    /// workspace filesystem to read landed bytes back from. Compositions without
+    /// one have nothing to read, so `None` correctly degrades to the transcript's
+    /// textual `<attachments>` pointer (the same fallback a text-only model
+    /// gets) rather than failing the turn.
+    pub attachment_read_port: Option<Arc<dyn LoopAttachmentReadPort>>,
     pub input_queue: Option<Arc<dyn HostInputQueue>>,
     /// Required by live planned-runtime composition. Helper-level tests may use
     /// a no-op implementation, but the type signature always requires a valid
@@ -123,6 +132,7 @@ where
     /// the hook framework dormant: no dispatcher is composed and the runtime
     /// behaves exactly as it did before hooks existed.
     pub hook_dispatcher_builder_factory: Option<HookDispatcherBuilderFactory>,
+    pub communication_context_provider: Option<Arc<dyn CommunicationContextProvider>>,
 }
 
 pub trait RuntimeSubagentGoalStore:
@@ -491,6 +501,9 @@ where
     if let Some(factory) = parts.cancellation_factory {
         host_factory = host_factory.with_cancellation_factory(factory);
     }
+    if let Some(port) = parts.attachment_read_port {
+        host_factory = host_factory.with_attachment_read_port(port);
+    }
     if let Some(source) = parts.skill_context_source {
         host_factory = host_factory.with_skill_context_source(source);
     }
@@ -505,6 +518,9 @@ where
     }
     if let Some(factory) = parts.hook_dispatcher_builder_factory {
         host_factory = host_factory.with_hook_dispatcher_builder_factory(move || factory());
+    }
+    if let Some(provider) = parts.communication_context_provider {
+        host_factory = host_factory.with_communication_context_provider(provider);
     }
     if let Some(sink) = parts.hook_security_audit_sink {
         host_factory = host_factory.with_hook_security_audit_sink(sink);
