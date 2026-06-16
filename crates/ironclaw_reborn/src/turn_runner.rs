@@ -358,10 +358,27 @@ impl TurnRunnerWorker {
     }
 
     /// Execute a claimed run: heartbeat, invoke driver, apply exit.
+    ///
+    /// Instrumented with a `thread_id` + `run_id` span so every tracing event
+    /// emitted while the run executes (driver, tool dispatch, exit) inherits
+    /// those correlation fields. `OperatorLogLayer` reads them via `from_root`,
+    /// which is what populates the operator Logs panel's scoped (thread/run)
+    /// view; without the span, scoped queries match nothing.
+    #[tracing::instrument(
+        skip_all,
+        fields(
+            thread_id = %claimed.state.scope.thread_id,
+            run_id = %claimed.state.run_id,
+        )
+    )]
     async fn execute_claimed_run(&self, claimed: ClaimedTurnRun, cancel: &CancellationToken) {
         let run_id = claimed.state.run_id;
         let runner_id = claimed.runner_id;
         let lease_token = claimed.lease_token;
+        // Anchor INFO event inside the run span so the Logs panel always has at
+        // least one thread/run-correlated entry per run, even when the driver's
+        // own logs sit below the active level filter.
+        tracing::info!("turn run started");
 
         let exit_result = {
             let heartbeat_cancel = CancellationToken::new();
