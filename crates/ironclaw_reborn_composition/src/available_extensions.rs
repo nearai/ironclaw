@@ -151,7 +151,7 @@ fn onboarding(package_id: &str) -> Option<LifecycleExtensionOnboarding> {
             "Web Access does not need credentials. Activate it to make web search and saved-result retrieval tools available.",
             Some("No credentials are required for Web Access."),
             None,
-            "Install Web Access, then activate it to publish its tools.",
+            "Activate Web Access to publish its tools.",
         )),
         _ => None,
     }
@@ -1802,6 +1802,12 @@ mod tests {
                                 && !step.contains("Install")
                         }),
                     "{extension_id} configure next step should describe activation after saving credentials"
+                );
+            } else if extension_id == "web-access" {
+                assert_eq!(
+                    onboarding.credential_next_step.as_deref(),
+                    Some("Activate Web Access to publish its tools."),
+                    "web-access configure next step should not repeat install-first copy"
                 );
             } else {
                 assert!(
