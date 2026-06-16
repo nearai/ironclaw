@@ -2579,16 +2579,26 @@ pub async fn build_reborn_runtime(
     let mut turn_event_sinks: Vec<Arc<dyn ironclaw_turns::TurnEventSink>> =
         vec![trace_capture_sink];
     #[cfg(feature = "root-llm-provider")]
-    if let Some((learning_provider, learning_model)) = skill_learning_provider {
+    if let (Some((learning_provider, learning_model)), Some(local_runtime)) =
+        (skill_learning_provider, local_runtime)
+    {
         let inference: Arc<dyn ironclaw_skill_learning::SkillInferencePort> =
             Arc::new(crate::skill_learning::SkillLearningInferenceAdapter::new(
                 learning_provider,
                 learning_model,
             ));
+        // Reuse the runtime's already-built scoped skill-management port so the
+        // learned skill lands exactly where the WebUI lists it and the next run
+        // loads it.
+        let skill_writer: Arc<dyn crate::skill_learning::SkillWriter> =
+            Arc::new(crate::skill_learning::PortSkillWriter::new(Arc::clone(
+                &local_runtime.skill_management,
+            )));
         turn_event_sinks.push(Arc::new(
             crate::skill_learning::SkillLearningTurnEventSink::new(
                 Arc::clone(&thread_service),
                 inference,
+                skill_writer,
             ),
         ));
     }
