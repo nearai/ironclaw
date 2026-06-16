@@ -365,6 +365,7 @@ impl TurnRunnerWorker {
     /// which is what populates the operator Logs panel's scoped (thread/run)
     /// view; without the span, scoped queries match nothing.
     #[tracing::instrument(
+        name = "turn_run",
         skip_all,
         fields(
             thread_id = %claimed.state.scope.thread_id,
@@ -375,10 +376,7 @@ impl TurnRunnerWorker {
         let run_id = claimed.state.run_id;
         let runner_id = claimed.runner_id;
         let lease_token = claimed.lease_token;
-        // Anchor INFO event inside the run span so the Logs panel always has at
-        // least one thread/run-correlated entry per run, even when the driver's
-        // own logs sit below the active level filter.
-        tracing::info!("turn run started");
+        tracing::debug!("turn run started");
 
         let exit_result = {
             let heartbeat_cancel = CancellationToken::new();
@@ -431,6 +429,7 @@ impl TurnRunnerWorker {
                     .await;
             }
         }
+        tracing::debug!("turn run finished");
     }
 
     /// Resolve driver from registry and invoke it.

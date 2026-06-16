@@ -72,6 +72,7 @@ sha2 = "0.10"
 tempfile = "3"
 tokio = { version = "1", features = ["macros", "rt", "sync", "time"] }
 tokio-postgres = "0.7"
+tracing-subscriber = "0.3"
 zeroize = "1"
 wat = "1.245.1"
 wit-component = "0.245.1"
