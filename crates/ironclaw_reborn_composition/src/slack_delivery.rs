@@ -2005,8 +2005,16 @@ async fn deliver_triggered_run(
     // iteration. Fail closed: if the preference cannot be read or the binding ref
     // does not parse as a personal DM, treat the target as non-DM.
     let target_is_verified_dm = {
+        // Resolve the preference owner: for owner-scoped runs the preference is
+        // stored under the owner identity, not the acting principal. Using the
+        // actor here would read a different (potentially absent) record and
+        // fail-close even when the owner has a valid personal-DM target.
+        let pref_owner_user_id = scope
+            .explicit_owner_user_id()
+            .cloned()
+            .unwrap_or_else(|| actor.user_id.clone());
         let pref_key =
-            CommunicationPreferenceKey::personal(scope.tenant_id.clone(), actor.user_id.clone());
+            CommunicationPreferenceKey::personal(scope.tenant_id.clone(), pref_owner_user_id);
         match services
             .communication_preferences
             .load_communication_preference(pref_key)
@@ -2193,6 +2201,13 @@ async fn deliver_triggered_run(
                     "triggered run OAuth URL suppressed by send-time backstop: resolved \
                      target is not a personal DM; cancelling run"
                 );
+                // Clean up any OAuth auth-prompt messages that were posted to a DM in
+                // earlier loop iterations. Both return paths in this arm must not
+                // leave those messages lingering — drain once here, before the first
+                // possible return.
+                for message in messages_to_delete_after_final.drain(..) {
+                    delete_triggered_slack_message(services, message).await;
+                }
                 // Cancel the blocked run.
                 if let Err(err) = cancel_auth_blocked_run(
                     services.turn_coordinator.as_ref(),
@@ -7337,6 +7352,61 @@ mod tests {
         }
     }
 
+    /// A `CommunicationPreferenceRepository` that returns `Ok(None)` on the
+    /// FIRST `load_communication_preference` call (simulating an absent record
+    /// during the pre-loop snapshot read) and delegates all subsequent calls to
+    /// a real `InMemoryOutboundStateStore`.
+    ///
+    /// This lets us verify that a snapshot-read of `Ok(None)` is fail-closed
+    /// (`target_is_verified_dm = false`) while still allowing the delivery itself
+    /// to proceed (since the outbound policy calls the repo again at send time
+    /// and finds the seeded preference).
+    struct FirstCallNonePreferenceRepository {
+        call_count: std::sync::atomic::AtomicU32,
+        delegate: Arc<InMemoryOutboundStateStore>,
+    }
+
+    impl FirstCallNonePreferenceRepository {
+        fn new(delegate: Arc<InMemoryOutboundStateStore>) -> Self {
+            Self {
+                call_count: std::sync::atomic::AtomicU32::new(0),
+                delegate,
+            }
+        }
+    }
+
+    #[async_trait]
+    impl CommunicationPreferenceRepository for FirstCallNonePreferenceRepository {
+        async fn load_communication_preference(
+            &self,
+            key: CommunicationPreferenceKey,
+        ) -> Result<
+            Option<ironclaw_outbound::VersionedCommunicationPreferenceRecord>,
+            ironclaw_outbound::OutboundError,
+        > {
+            let n = self
+                .call_count
+                .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+            if n == 0 {
+                // First call (pre-loop snapshot): simulate absent preference.
+                Ok(None)
+            } else {
+                // Subsequent calls (send-time delivery resolution): delegate.
+                self.delegate.load_communication_preference(key).await
+            }
+        }
+
+        async fn write_communication_preference(
+            &self,
+            request: ironclaw_outbound::WriteCommunicationPreferenceRequest,
+        ) -> Result<
+            ironclaw_outbound::VersionedCommunicationPreferenceRecord,
+            ironclaw_outbound::OutboundError,
+        > {
+            self.delegate.write_communication_preference(request).await
+        }
+    }
+
     /// Build `SlackFinalReplyDeliveryServices` with a custom
     /// `CommunicationPreferenceRepository` that is separate from the outbound store
     /// (the outbound store is used for delivery-state only; preference reads go
@@ -7631,6 +7701,139 @@ mod tests {
         assert!(
             route.is_none(),
             "no gate route must be recorded when OAuth is suppressed due to preference read error"
+        );
+    }
+
+    /// Fail-closed: `load_communication_preference` returns `Ok(None)` (no
+    /// preference record stored) on the pre-loop snapshot read →
+    /// `target_is_verified_dm = false` → OAuth URL suppressed →
+    /// auth-unavailable notice posted instead. No gate route recorded.
+    ///
+    /// Regression for A5/A3: an absent preference must not be treated as a DM.
+    #[tokio::test]
+    async fn triggered_oauth_auth_no_preference_suppresses_authorization_url() {
+        let install = "test-install";
+        let gate_ref_str = "gate:oauth-no-preference";
+        let scope = personal_turn_scope();
+        let run_id = TurnRunId::new();
+        let agent = scope.agent_id.as_ref().expect("agent").as_str();
+
+        // Shared-channel binding seeded in the outbound store so delivery can
+        // resolve it. The preference repo (the default empty InMemoryOutboundStateStore)
+        // has NO communication preference record, so the snapshot read returns
+        // Ok(None) → fail-closed.
+        let shared_binding = test_slack_shared_channel_binding_ref(install, agent);
+
+        let coordinator = Arc::new(ScriptedTurnCoordinator::with_states(vec![
+            scripted_state(TurnStatus::BlockedAuth, Some(gate_ref_str)),
+            scripted_state(TurnStatus::Completed, None),
+        ]));
+        let thread_service = Arc::new(InMemorySessionThreadService::default());
+        seed_finalized_assistant_message(
+            &thread_service,
+            &scope,
+            run_id,
+            "Run complete after auth.",
+        )
+        .await;
+
+        // The outbound store is seeded with the delivery-target binding so the
+        // FinalReply notice can be posted.  The preference repo (FirstCallNonePreferenceRepository)
+        // returns Ok(None) on the first (pre-loop snapshot) call → fail-closed, then
+        // delegates to the real store on subsequent (send-time) calls so delivery
+        // can proceed.
+        let outbound = Arc::new(InMemoryOutboundStateStore::default());
+        seed_personal_preference(&outbound, &scope, shared_binding).await;
+
+        let prefs = Arc::new(FirstCallNonePreferenceRepository::new(Arc::clone(
+            &outbound,
+        )));
+
+        let egress = Arc::new(FakeProtocolHttpEgress::new(vec!["slack.com".to_string()]));
+        egress.allow_credential_handle("slack_bot_token");
+        // auth-unavailable notice.
+        egress.program_response(
+            "slack.com",
+            Ok(EgressResponse::new(
+                200,
+                slack_post_ok_json("C0SHARED", "no-pref.1"),
+            )),
+        );
+        // Final reply after Completed.
+        egress.program_response(
+            "slack.com",
+            Ok(EgressResponse::new(
+                200,
+                slack_post_ok_json("C0SHARED", "no-pref.2"),
+            )),
+        );
+
+        let delivery_store = Arc::new(InMemoryTriggeredRunDeliveryStore::default());
+        let route_store = Arc::new(InMemoryDeliveredGateRouteStore::default());
+        let mut services = make_services_with_prefs(
+            coordinator,
+            thread_service,
+            egress.clone(),
+            outbound,
+            prefs,
+            install,
+        );
+        services.auth_challenges = Some(Arc::new(OAuthAuthChallengeProvider {
+            url: "https://provider.example/oauth-no-preference".to_string(),
+        }));
+
+        let settings = SlackFinalReplyDeliverySettings {
+            poll_interval: std::time::Duration::ZERO,
+            max_wait: std::time::Duration::from_secs(5),
+            max_concurrent_deliveries: NonZeroUsize::new(1).unwrap(),
+            max_pending_deliveries: NonZeroUsize::new(8).unwrap(),
+        };
+        let driver = TriggeredRunDeliveryDriver::with_settings(
+            services,
+            settings,
+            delivery_store.clone(),
+            route_store.clone(),
+            scope.agent_id.clone().expect("test scope has agent"),
+        );
+
+        driver
+            .on_trigger_submitted(minimal_trigger_fire(None), run_id, scope.clone())
+            .await;
+        wait_for_delivery_record(&delivery_store, run_id).await;
+
+        let posted: Vec<String> = egress
+            .calls()
+            .iter()
+            .filter(|c| c.path == "/api/chat.postMessage")
+            .map(|c| String::from_utf8_lossy(&c.body).to_string())
+            .collect();
+
+        // The OAuth URL must NOT appear anywhere (no preference → fail closed).
+        for body in &posted {
+            assert!(
+                !body.contains("https://provider.example/oauth-no-preference"),
+                "authorization_url must NOT be posted when no preference is stored (fail closed); \
+                 got: {body}"
+            );
+        }
+
+        // The auth-unavailable notice must be posted.
+        assert!(
+            posted
+                .iter()
+                .any(|b| b.contains(SLACK_AUTH_UNAVAILABLE_MESSAGE)),
+            "auth-unavailable notice must be posted when no preference is stored; got: {posted:?}"
+        );
+
+        // No gate route recorded.
+        let creator = ironclaw_host_api::UserId::new("creator-user").expect("user id");
+        let route = route_store
+            .load_delivered_gate_route(&scope.tenant_id, &creator, gate_ref_str)
+            .await
+            .expect("load route");
+        assert!(
+            route.is_none(),
+            "no gate route must be recorded when OAuth is suppressed due to absent preference"
         );
     }
 }
