@@ -2206,8 +2206,11 @@ async fn deliver_triggered_run(
                         target = "ironclaw::reborn::slack_delivery",
                         %run_id,
                         error = %err,
-                        "triggered run OAuth backstop: cancel_auth_blocked_run failed (continuing)"
+                        "triggered run OAuth backstop: cancel_auth_blocked_run failed"
                     );
+                    let outcome = TriggeredRunDeliveryOutcomeKind::Failed;
+                    record_triggered_run_outcome(delivery_store, run_id, outcome).await;
+                    return outcome;
                 }
                 // Reset the guard so the notice delivery is not blocked.
                 authority
@@ -2226,11 +2229,23 @@ async fn deliver_triggered_run(
                     }),
                     gate_ref_for_routing: None,
                 };
-                let _ = deliver_triggered_notification(
+                let outcome = match deliver_triggered_notification(
                     services, &scope, &actor, run_id, &state, &authority, notice,
                 )
-                .await;
-                let outcome = TriggeredRunDeliveryOutcomeKind::Delivered;
+                .await
+                {
+                    Ok(_) => TriggeredRunDeliveryOutcomeKind::Delivered,
+                    Err(TriggeredNotificationFailure::NoDefaultConfigured) => {
+                        TriggeredRunDeliveryOutcomeKind::NoDefaultConfigured
+                    }
+                    Err(TriggeredNotificationFailure::Denied) => {
+                        TriggeredRunDeliveryOutcomeKind::Denied
+                    }
+                    Err(TriggeredNotificationFailure::OAuthTargetNotDm)
+                    | Err(TriggeredNotificationFailure::Other(_)) => {
+                        TriggeredRunDeliveryOutcomeKind::Failed
+                    }
+                };
                 record_triggered_run_outcome(delivery_store, run_id, outcome).await;
                 return outcome;
             }
@@ -2627,12 +2642,9 @@ fn classify_delivery_error(
         ProductOutboundDeliveryError::Outbound(OutboundError::AccessDenied) => {
             TriggeredNotificationFailure::Denied
         }
-        // Authority backstop trip: the resolver returned BindingResolutionFailed
-        // with the sentinel reason, meaning the send-time target was not a
-        // personal DM despite the payload carrying an OAuth authorization_url.
-        // The sentinel is matched directly from the Workflow source; if it is
-        // not reachable via pattern (e.g. due to wrapping changes), the
-        // `to_string().contains` fallback below would catch it instead.
+        // Authority backstop trip: the resolver wraps BindingResolutionFailed as
+        // Workflow { source: BindingResolutionFailed { reason } }, so the sentinel
+        // reason is reachable by direct pattern match below. There is no fallback.
         ProductOutboundDeliveryError::Workflow {
             source: ProductWorkflowError::BindingResolutionFailed { reason },
             ..

@@ -798,6 +798,84 @@ fn take_product_binding_segment<'a>(raw: &'a str, name: &str) -> Option<(&'a str
     Some((value, raw))
 }
 
+/// Decoded fields from a Slack reply-target binding ref segment walk.
+///
+/// Produced by [`decode_slack_reply_target_binding_ref`]; consumed by both
+/// [`slack_conversation_id_from_reply_target_binding_ref`] and
+/// [`slack_reply_target_is_personal_dm`] so that the segment format is
+/// parsed in exactly one place.
+struct DecodedSlackReplyTarget {
+    conversation_id: String,
+    space_id: Option<String>,
+    /// `true` iff a `topic` segment was successfully consumed after
+    /// `conversation` — required for the personal-DM predicate to mirror
+    /// the original behaviour, which demanded `topic` be present.
+    topic_present: bool,
+    /// Present only when the ref carries trailing `actor_kind` + `actor`
+    /// segments (personal-DM refs).
+    actor_kind: Option<String>,
+    /// Present only when the ref carries a non-empty `actor` segment value.
+    actor_id: Option<String>,
+    /// `true` iff the segment walk consumed the entire ref with no leftover
+    /// bytes — required for the personal-DM predicate to reject trailing
+    /// garbage.
+    fully_consumed: bool,
+}
+
+/// Walk the length-prefixed segment format shared by both
+/// [`slack_shared_channel_reply_target_binding_ref`] and
+/// [`slack_personal_dm_reply_target_binding_ref`] and return the decoded
+/// fields.
+///
+/// Returns `None` if the ref does not start with `reply:`, if any of the
+/// required prefix segments (adapter / installation / agent / project / space /
+/// conversation) are missing or malformed, or if the conversation id is empty.
+/// Optional trailing segments (topic / actor_kind / actor) are consumed when
+/// present but are not required; whether they were found is recorded in
+/// `topic_present`, `actor_kind`, and `actor_id`.
+fn decode_slack_reply_target_binding_ref(
+    target: &ironclaw_turns::ReplyTargetBindingRef,
+) -> Option<DecodedSlackReplyTarget> {
+    let mut raw = target.as_str().strip_prefix("reply:")?;
+    // Skip adapter, installation, agent, project — not validated here.
+    for name in &["adapter", "installation", "agent", "project"] {
+        let (_, rest) = take_product_binding_segment(raw, name)?;
+        raw = rest;
+    }
+    // Consume the required conversation fingerprint segments: space / conversation.
+    let (space_id, rest) = take_product_binding_segment(raw, "space")?;
+    let (conversation_id, rest) = take_product_binding_segment(rest, "conversation")?;
+    if conversation_id.is_empty() {
+        return None;
+    }
+    // Consume the optional topic segment (present in both shared-channel and
+    // personal-DM refs built by the constructors in this module).
+    let (topic_present, rest) = match take_product_binding_segment(rest, "topic") {
+        Some((_, after_topic)) => (true, after_topic),
+        None => (false, rest),
+    };
+    // Consume the optional actor_kind + actor segments (personal-DM only).
+    let (actor_kind, actor_id, rest) = match take_product_binding_segment(rest, "actor_kind") {
+        Some((kind, after_kind)) => match take_product_binding_segment(after_kind, "actor") {
+            Some((id, after_actor)) => (Some(kind.to_string()), Some(id.to_string()), after_actor),
+            None => (Some(kind.to_string()), None, after_kind),
+        },
+        None => (None, None, rest),
+    };
+    Some(DecodedSlackReplyTarget {
+        conversation_id: conversation_id.to_string(),
+        space_id: if space_id.is_empty() {
+            None
+        } else {
+            Some(space_id.to_string())
+        },
+        topic_present,
+        actor_kind,
+        actor_id,
+        fully_consumed: rest.is_empty(),
+    })
+}
+
 /// Extract the Slack channel ID encoded in a Slack reply-target binding ref.
 ///
 /// Parses the length-prefixed segment format produced by
@@ -811,25 +889,8 @@ fn take_product_binding_segment<'a>(raw: &'a str, name: &str) -> Option<(&'a str
 pub(crate) fn slack_conversation_id_from_reply_target_binding_ref(
     target: &ironclaw_turns::ReplyTargetBindingRef,
 ) -> Option<(String, Option<String>)> {
-    let mut raw = target.as_str().strip_prefix("reply:")?;
-    // Skip adapter, installation, agent, project — we don't validate them here.
-    for name in &["adapter", "installation", "agent", "project"] {
-        let (_, rest) = take_product_binding_segment(raw, name)?;
-        raw = rest;
-    }
-    let (space_id, rest) = take_product_binding_segment(raw, "space")?;
-    let (conversation_id, _) = take_product_binding_segment(rest, "conversation")?;
-    if conversation_id.is_empty() {
-        return None;
-    }
-    Some((
-        conversation_id.to_string(),
-        if space_id.is_empty() {
-            None
-        } else {
-            Some(space_id.to_string())
-        },
-    ))
+    let decoded = decode_slack_reply_target_binding_ref(target)?;
+    Some((decoded.conversation_id, decoded.space_id))
 }
 
 /// Returns `true` iff `target` is a verified personal-DM Slack reply-target
@@ -854,40 +915,24 @@ pub(crate) fn slack_conversation_id_from_reply_target_binding_ref(
 pub(crate) fn slack_reply_target_is_personal_dm(
     target: &ironclaw_turns::ReplyTargetBindingRef,
 ) -> bool {
-    let Some(mut raw) = target.as_str().strip_prefix("reply:") else {
-        return false;
-    };
-    // Skip adapter, installation, agent, project — not validated here.
-    for name in &["adapter", "installation", "agent", "project"] {
-        let Some((_, rest)) = take_product_binding_segment(raw, name) else {
-            return false;
-        };
-        raw = rest;
-    }
-    // Consume the conversation fingerprint: space / conversation / topic.
-    let Some((_, rest)) = take_product_binding_segment(raw, "space") else {
-        return false;
-    };
-    let Some((conversation_id, rest)) = take_product_binding_segment(rest, "conversation") else {
-        return false;
-    };
-    let Some((_, rest)) = take_product_binding_segment(rest, "topic") else {
+    let Some(decoded) = decode_slack_reply_target_binding_ref(target) else {
         return false;
     };
     // DM channel ids start with uppercase 'D'.
-    if !conversation_id.starts_with('D') {
+    if !decoded.conversation_id.starts_with('D') {
         return false;
     }
-    // Personal-DM refs carry trailing actor_kind + actor segments.
-    let Some((actor_kind, rest)) = take_product_binding_segment(rest, "actor_kind") else {
+    // The conversation fingerprint must include a topic segment (as produced by
+    // `ExternalConversationRef::conversation_fingerprint`); refs missing it are
+    // not well-formed personal-DM refs.
+    if !decoded.topic_present {
         return false;
-    };
-    let Some((actor_id, rest)) = take_product_binding_segment(rest, "actor") else {
-        return false;
-    };
+    }
     // actor_kind must be the Slack user kind; actor must be non-empty; no
     // further segments are permitted.
-    actor_kind == SLACK_USER_ACTOR_KIND && !actor_id.is_empty() && rest.is_empty()
+    decoded.actor_kind.as_deref() == Some(SLACK_USER_ACTOR_KIND)
+        && decoded.actor_id.as_deref().is_some_and(|id| !id.is_empty())
+        && decoded.fully_consumed
 }
 
 fn map_slack_target_route_error(error: SlackChannelRouteError) -> RebornServicesError {
