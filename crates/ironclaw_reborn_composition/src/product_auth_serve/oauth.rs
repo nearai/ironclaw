@@ -131,7 +131,6 @@ async fn start_dcr_extension_oauth_flow(
         &state,
         scope.clone(),
         provider.clone(),
-        requested_scopes.clone(),
         Some(&requester_extension),
     )
     .await?;
@@ -201,7 +200,6 @@ async fn start_google_oauth_flow(
         &state,
         scope.clone(),
         provider.clone(),
-        requested_scopes.clone(),
         requester_extension.as_ref(),
     )
     .await?;
