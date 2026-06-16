@@ -5854,6 +5854,20 @@ async fn capability_stage_denied_auth_resume_only_fails_matching_call_remaining_
                 .is_some_and(|o| o.status != ToolObservationStatus::Error),
         "Y's result must not be an Authorization failure"
     );
+
+    // 5. final_state.result_refs must carry BOTH refs so the next model prompt sees them.
+    //    A regression that appends to the host but forgets to update result_refs would still
+    //    pass all checks above — this assertion catches that gap.
+    assert!(
+        final_state
+            .result_refs
+            .contains(&auth_failure_entry.result_ref),
+        "final_state.result_refs must contain the Authorization failure ref for X"
+    );
+    assert!(
+        final_state.result_refs.contains(&y_result_ref),
+        "final_state.result_refs must contain Y's completed result ref"
+    );
 }
 
 /// Regression test: partition + sizing invariant with 1 denied + 2 remaining calls.
@@ -6034,11 +6048,15 @@ async fn capability_stage_denied_auth_resume_one_denied_two_remaining_all_dispat
         2,
         "batch must contain exactly 2 invocations (Y and Z, not X)"
     );
-    assert!(
-        batch_cap_ids
-            .iter()
-            .all(|id| **id == other_capability_id() || **id == z_capability_id),
-        "batch must contain only Y (demo.list) and Z (demo.write)"
+    let dispatched_ids: std::collections::HashSet<_> =
+        batch_cap_ids.iter().map(|id| (*id).clone()).collect();
+    let expected_ids: std::collections::HashSet<_> =
+        [other_capability_id(), z_capability_id.clone()]
+            .into_iter()
+            .collect();
+    assert_eq!(
+        dispatched_ids, expected_ids,
+        "batch must contain exactly the two distinct remaining capabilities Y (demo.list) and Z (demo.write), not [Y,Y] or any other combination"
     );
 
     // 4. Three result refs appended total:
@@ -6085,5 +6103,21 @@ async fn capability_stage_denied_auth_resume_one_denied_two_remaining_all_dispat
     assert!(
         appended.iter().any(|r| r.result_ref == z_result_ref),
         "Z's completed result ref must be appended"
+    );
+
+    // 5. final_state.result_refs must carry all three refs.
+    assert!(
+        final_state
+            .result_refs
+            .contains(&auth_failure_entry.result_ref),
+        "final_state.result_refs must contain the Authorization failure ref for X"
+    );
+    assert!(
+        final_state.result_refs.contains(&y_result_ref),
+        "final_state.result_refs must contain Y's completed result ref"
+    );
+    assert!(
+        final_state.result_refs.contains(&z_result_ref),
+        "final_state.result_refs must contain Z's completed result ref"
     );
 }
