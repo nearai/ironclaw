@@ -72,8 +72,15 @@ enum ContentItem {
 /// Any other part — including a remote-URL, malformed, oversized, or
 /// type-mismatched image — falls back to a bounded marker via
 /// [`content_array_item_text`] (e.g. `[image omitted]`), exactly as before.
+///
+/// `enable_attachments` is the caller's "can I carry bytes downstream?" signal
+/// (the attachment-submit door is wired). When `false`, inline images are NOT
+/// extracted as carried bytes — they fall back to the `[image omitted]` marker
+/// like any other unsupported part — so an image is never silently dropped when
+/// there is no door to land it through.
 pub(crate) fn content_value_to_text_and_images(
     content: Option<&serde_json::Value>,
+    enable_attachments: bool,
 ) -> (String, Vec<DecodedInlineImage>) {
     let mut images = Vec::new();
     let text = match content {
@@ -81,7 +88,7 @@ pub(crate) fn content_value_to_text_and_images(
         Some(serde_json::Value::Array(items)) => {
             let mut fragments = Vec::with_capacity(items.len());
             for item in items {
-                match content_array_item_or_image(item) {
+                match content_array_item_or_image(item, enable_attachments) {
                     Some(ContentItem::Image(image)) => images.push(image),
                     Some(ContentItem::Text(text)) => fragments.push(text),
                     None => {}
@@ -89,23 +96,29 @@ pub(crate) fn content_value_to_text_and_images(
             }
             fragments.join(" ")
         }
-        Some(value @ serde_json::Value::Object(_)) => match content_array_item_or_image(value) {
-            Some(ContentItem::Image(image)) => {
-                images.push(image);
-                String::new()
+        Some(value @ serde_json::Value::Object(_)) => {
+            match content_array_item_or_image(value, enable_attachments) {
+                Some(ContentItem::Image(image)) => {
+                    images.push(image);
+                    String::new()
+                }
+                Some(ContentItem::Text(text)) => text,
+                None => non_text_part_marker(None).to_string(),
             }
-            Some(ContentItem::Text(text)) => text,
-            None => non_text_part_marker(None).to_string(),
-        },
+        }
         Some(value) if !value.is_null() => non_text_part_marker(None).to_string(),
         _ => String::new(),
     };
     (text, images)
 }
 
-fn content_array_item_or_image(value: &serde_json::Value) -> Option<ContentItem> {
+fn content_array_item_or_image(
+    value: &serde_json::Value,
+    enable_attachments: bool,
+) -> Option<ContentItem> {
     let object = value.as_object()?;
-    if object.get("type").and_then(serde_json::Value::as_str) == Some("image_url")
+    if enable_attachments
+        && object.get("type").and_then(serde_json::Value::as_str) == Some("image_url")
         && let Some(image) = decode_inline_image(object)
     {
         return Some(ContentItem::Image(image));
@@ -123,8 +136,12 @@ fn decode_inline_image(
         .and_then(|image_url| image_url.get("url"))
         .and_then(serde_json::Value::as_str)?;
     let (declared_mime, data) = parse_image_data_url(url)?;
+    // Standard MIME base64 encoders wrap lines, so a data URL payload may carry
+    // newlines/spaces that the strict decoder rejects. Strip ASCII whitespace
+    // first so a well-formed-but-wrapped image isn't dropped to `[image omitted]`.
+    let cleaned: Vec<u8> = data.bytes().filter(|b| !b.is_ascii_whitespace()).collect();
     let bytes = base64::engine::general_purpose::STANDARD
-        .decode(data)
+        .decode(&cleaned)
         .ok()?;
     if bytes.is_empty() || bytes.len() > MAX_INLINE_IMAGE_BYTES {
         return None;
@@ -259,7 +276,7 @@ mod tests {
             { "type": "text", "text": "look at this" },
             { "type": "image_url", "image_url": { "url": PNG_DATA_URL } },
         ]);
-        let (text, images) = content_value_to_text_and_images(Some(&content));
+        let (text, images) = content_value_to_text_and_images(Some(&content), true);
         assert_eq!(text, "look at this");
         assert_eq!(images.len(), 1);
         assert_eq!(images[0].mime_type, "image/png");
@@ -274,11 +291,39 @@ mod tests {
     }
 
     #[test]
+    fn inline_image_falls_back_to_marker_when_attachments_disabled() {
+        // With no attachment door wired (`enable_attachments = false`) a decoded
+        // inline image must NOT be extracted as a carried byte — it has nowhere
+        // to land — so it falls back to the `[image omitted]` marker instead of
+        // vanishing entirely (neither carried nor marked).
+        let content = json!([
+            { "type": "text", "text": "look at this" },
+            { "type": "image_url", "image_url": { "url": PNG_DATA_URL } },
+        ]);
+        let (text, images) = content_value_to_text_and_images(Some(&content), false);
+        assert!(images.is_empty(), "no door wired → nothing is carried");
+        assert_eq!(text, "look at this [image omitted]");
+    }
+
+    #[test]
+    fn inline_image_decodes_through_wrapping_whitespace() {
+        // A data URL whose base64 payload is line-wrapped (standard MIME
+        // encoders) must still decode rather than fall back to the marker.
+        let content = json!([
+            { "type": "image_url", "image_url": { "url": "data:image/png;base64,iVBOR\nw0KGg\r\no=" } },
+        ]);
+        let (text, images) = content_value_to_text_and_images(Some(&content), true);
+        assert_eq!(images.len(), 1, "wrapped base64 must still decode");
+        assert_eq!(images[0].mime_type, "image/png");
+        assert!(!text.contains("[image omitted]"));
+    }
+
+    #[test]
     fn remote_image_url_falls_back_to_marker() {
         let content = json!([
             { "type": "image_url", "image_url": { "url": "https://example.com/cat.png" } },
         ]);
-        let (text, images) = content_value_to_text_and_images(Some(&content));
+        let (text, images) = content_value_to_text_and_images(Some(&content), true);
         assert_eq!(text, "[image omitted]");
         assert!(images.is_empty(), "remote URLs are not fetched/carried");
     }
@@ -288,7 +333,7 @@ mod tests {
         let content = json!([
             { "type": "image_url", "image_url": { "url": "data:image/png;base64,@@not-base64@@" } },
         ]);
-        let (text, images) = content_value_to_text_and_images(Some(&content));
+        let (text, images) = content_value_to_text_and_images(Some(&content), true);
         assert_eq!(text, "[image omitted]");
         assert!(images.is_empty());
     }
@@ -299,7 +344,7 @@ mod tests {
         let content = json!([
             { "type": "image_url", "image_url": { "url": "data:image/png;base64,/9j/4AAQ" } },
         ]);
-        let (text, images) = content_value_to_text_and_images(Some(&content));
+        let (text, images) = content_value_to_text_and_images(Some(&content), true);
         assert_eq!(text, "[image omitted]");
         assert!(
             images.is_empty(),
@@ -312,7 +357,7 @@ mod tests {
         let content = json!([
             { "type": "image_url", "image_url": { "url": "data:image/svg+xml;base64,PHN2Zz4=" } },
         ]);
-        let (text, images) = content_value_to_text_and_images(Some(&content));
+        let (text, images) = content_value_to_text_and_images(Some(&content), true);
         assert_eq!(text, "[image omitted]");
         assert!(images.is_empty());
     }

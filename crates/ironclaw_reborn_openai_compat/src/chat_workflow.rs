@@ -224,7 +224,8 @@ impl OpenAiChatCompletionsWorkflow {
             )));
         }
 
-        let (user_message_payload, attachments) = chat_user_message_and_attachments(&request)?;
+        let (user_message_payload, attachments) =
+            chat_user_message_and_attachments(&request, self.attachment_submit.is_some())?;
         let model_only_tools = OpenAiChatModelOnlyTools::from_request(&request);
 
         let request_fingerprint = OpenAiCompatRequestFingerprint::from_body_bytes(raw_body);
@@ -377,7 +378,8 @@ impl OpenAiChatCompletionsWorkflow {
             )));
         }
 
-        let (user_message_payload, attachments) = chat_user_message_and_attachments(&request)?;
+        let (user_message_payload, attachments) =
+            chat_user_message_and_attachments(&request, self.attachment_submit.is_some())?;
         let model_only_tools = OpenAiChatModelOnlyTools::from_request(&request);
         let request_fingerprint = OpenAiCompatRequestFingerprint::from_body_bytes(raw_body);
         let reservation = self
@@ -727,6 +729,7 @@ pub(crate) fn parse_chat_request(
 
 fn chat_messages_to_product_text_and_images(
     request: &OpenAiChatCompletionRequest,
+    enable_attachments: bool,
 ) -> Result<(String, Vec<DecodedInlineImage>), OpenAiCompatHttpError> {
     if request.messages.is_empty() {
         return Err(OpenAiCompatHttpError::invalid_request(Some(
@@ -742,7 +745,7 @@ fn chat_messages_to_product_text_and_images(
     let mut images = Vec::new();
     for message in &request.messages {
         let (content_text, mut message_images) =
-            content_value_to_text_and_images(message.content.as_ref());
+            content_value_to_text_and_images(message.content.as_ref(), enable_attachments);
         images.append(&mut message_images);
         rendered_messages.push(serde_json::json!({
             "role": chat_role_label(&message.role),
@@ -774,8 +777,9 @@ fn chat_role_label(role: &OpenAiChatMessageRole) -> &'static str {
 
 fn chat_user_message_and_attachments(
     request: &OpenAiChatCompletionRequest,
+    enable_attachments: bool,
 ) -> Result<(UserMessagePayload, Vec<InboundAttachment>), OpenAiCompatHttpError> {
-    let (text, images) = chat_messages_to_product_text_and_images(request)?;
+    let (text, images) = chat_messages_to_product_text_and_images(request, enable_attachments)?;
     let attachments = images
         .into_iter()
         .enumerate()
