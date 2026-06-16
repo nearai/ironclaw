@@ -1969,7 +1969,6 @@ async fn deliver_triggered_run(
     // Use the scope's agent_id when present; otherwise fall back to the configured
     // fallback_agent_id — the same value record_trigger_prompt uses — so the key
     // matches the thread that was stored at submit time.
-    let _thread_id = scope.thread_id.clone();
     let thread_scope = ThreadScope {
         tenant_id: scope.tenant_id.clone(),
         agent_id: scope
@@ -2109,7 +2108,13 @@ async fn deliver_triggered_run(
                     )
                     .await;
                 }
-                if let Some(marker) = next_blocked_marker {
+                if let Some(marker) = next_blocked_marker
+                    && matches!(
+                        event_kind,
+                        RunNotificationEventKind::ApprovalNeeded
+                            | RunNotificationEventKind::AuthRequired
+                    )
+                {
                     if event_kind == RunNotificationEventKind::AuthRequired {
                         messages_to_delete_after_final.extend(posted_messages);
                     }
@@ -2928,6 +2933,9 @@ mod tests {
         scope_not_found: bool,
         calls: Mutex<usize>,
         cancel_calls: Mutex<Vec<TurnRunId>>,
+        /// When set, `cancel_run` returns `Err(TurnError::Unavailable)` instead of
+        /// the normal success response. Used to test the OAuth backstop cancel-failure path.
+        cancel_should_fail: std::sync::atomic::AtomicBool,
     }
 
     impl ScriptedTurnCoordinator {
@@ -2938,6 +2946,7 @@ mod tests {
                 scope_not_found: false,
                 calls: Mutex::new(0),
                 cancel_calls: Mutex::new(Vec::new()),
+                cancel_should_fail: std::sync::atomic::AtomicBool::new(false),
             }
         }
 
@@ -3052,6 +3061,14 @@ mod tests {
                 .lock()
                 .expect("cancel calls lock")
                 .push(request.run_id);
+            if self
+                .cancel_should_fail
+                .load(std::sync::atomic::Ordering::Acquire)
+            {
+                return Err(TurnError::Unavailable {
+                    reason: "ScriptedTurnCoordinator: cancel_should_fail is set".to_string(),
+                });
+            }
             Ok(ironclaw_turns::CancelRunResponse {
                 run_id: request.run_id,
                 status: TurnStatus::Cancelled,
@@ -5795,6 +5812,223 @@ mod tests {
                 .iter()
                 .any(|b| b.contains(SLACK_AUTH_UNAVAILABLE_MESSAGE)),
             "expected the auth-unavailable notice to be posted; got: {posted:?}"
+        );
+    }
+
+    // ── BUG1 regression + OAuth backstop cancel-failure tests ─────────────────
+    //
+    // BUG1: when a triggered run reaches BlockedAuth with a non-OAuth challenge,
+    // `triggered_notification_for_state` cancels the run inline and returns a
+    // terminal FinalReplyReady notification. The delivery loop previously treated
+    // any Some(next_blocked_marker) as "still waiting", causing the loop to
+    // continue after a successful terminal delivery, read the now-Cancelled run
+    // state, hit Ok(None), and record Skipped instead of Delivered.
+
+    /// BUG1 regression: a triggered run that hits BlockedAuth with a non-OAuth
+    /// challenge (no authorization_url) must record `Delivered` — NOT `Skipped`.
+    ///
+    /// The non-OAuth deny branch in `triggered_notification_for_state` cancels the
+    /// run inline and returns a terminal `FinalReplyReady` notification. After the
+    /// notice is successfully posted, the delivery loop must fall through to the
+    /// terminal `Delivered` path rather than looping back and seeing the now-Cancelled
+    /// run as `Ok(None)` → `Skipped`.
+    #[tokio::test]
+    async fn triggered_non_oauth_auth_denial_records_delivered() {
+        let install = "test-install";
+        let gate_ref_str = "gate:non-oauth-denial-delivered";
+        let scope = personal_turn_scope();
+        let run_id = TurnRunId::new();
+        let binding_ref =
+            test_slack_binding_ref(install, scope.agent_id.as_ref().expect("agent").as_str());
+
+        // First poll → BlockedAuth (non-OAuth: no auth_challenges wired, so no
+        // authorization_url → deny branch fires inline cancel + FinalReplyReady).
+        // Second poll → Cancelled (terminal, no finalized message → Ok(None)).
+        // Without the BUG1 fix the loop continues to the second poll and records
+        // Skipped. With the fix, after the FinalReplyReady delivery the loop
+        // falls through to Delivered without polling again.
+        let coordinator = Arc::new(ScriptedTurnCoordinator::with_states(vec![
+            scripted_state(TurnStatus::BlockedAuth, Some(gate_ref_str)),
+            scripted_state(TurnStatus::Cancelled, None),
+        ]));
+        // No finalized assistant message needed: the terminal delivery is the
+        // auth-unavailable notice, not a Completed assistant reply.
+
+        let outbound = Arc::new(InMemoryOutboundStateStore::default());
+        seed_personal_preference(&outbound, &scope, binding_ref).await;
+
+        let egress = Arc::new(FakeProtocolHttpEgress::new(vec!["slack.com".to_string()]));
+        egress.allow_credential_handle("slack_bot_token");
+        // One postMessage for the auth-unavailable notice.
+        egress.program_response(
+            "slack.com",
+            Ok(EgressResponse::new(
+                200,
+                slack_post_ok_json("D456", "bug1.1"),
+            )),
+        );
+
+        let delivery_store = Arc::new(InMemoryTriggeredRunDeliveryStore::default());
+        let route_store = Arc::new(InMemoryDeliveredGateRouteStore::default());
+        let services = make_services(
+            coordinator.clone(),
+            Arc::new(InMemorySessionThreadService::default()),
+            egress.clone(),
+            outbound,
+            install,
+        );
+        let settings = SlackFinalReplyDeliverySettings {
+            poll_interval: std::time::Duration::ZERO,
+            max_wait: std::time::Duration::from_secs(5),
+            max_concurrent_deliveries: NonZeroUsize::new(1).unwrap(),
+            max_pending_deliveries: NonZeroUsize::new(8).unwrap(),
+        };
+        let driver = TriggeredRunDeliveryDriver::with_settings(
+            services,
+            settings,
+            delivery_store.clone(),
+            route_store.clone(),
+            scope.agent_id.clone().expect("test scope has agent"),
+        );
+
+        let fire = minimal_trigger_fire(None);
+        driver
+            .on_trigger_submitted(fire, run_id, scope.clone())
+            .await;
+        let record = wait_for_delivery_record(&delivery_store, run_id).await;
+
+        // BUG1 regression: outcome must be Delivered, not Skipped.
+        assert_eq!(
+            record.outcome,
+            TriggeredRunDeliveryOutcomeKind::Delivered,
+            "non-OAuth auth denial must record Delivered (not Skipped); got: {:?}",
+            record.outcome
+        );
+
+        // The auth-unavailable notice must have been posted.
+        let posted: Vec<String> = egress
+            .calls()
+            .iter()
+            .filter(|c| c.path == "/api/chat.postMessage")
+            .map(|c| String::from_utf8_lossy(&c.body).to_string())
+            .collect();
+        assert!(
+            posted
+                .iter()
+                .any(|b| b.contains(SLACK_AUTH_UNAVAILABLE_MESSAGE)),
+            "auth-unavailable notice must be posted; got: {posted:?}"
+        );
+
+        // cancel_run was called exactly once (inline by triggered_notification_for_state).
+        assert_eq!(
+            coordinator.cancel_call_count(),
+            1,
+            "cancel_run must be called exactly once for non-OAuth auth denial"
+        );
+    }
+
+    /// OAuth backstop cancel-failure path: when `cancel_auth_blocked_run` fails in
+    /// the `OAuthTargetNotDm` error arm, the outcome must be `Failed` and NO
+    /// `/api/chat.delete` calls must be made (we must not strip the auth prompt
+    /// while the run may still be live).
+    #[tokio::test]
+    async fn triggered_oauth_auth_backstop_cancel_failure_records_failed() {
+        let install = "test-install";
+        let gate_ref_str = "gate:oauth-backstop-cancel-fail";
+        let scope = personal_turn_scope();
+        let run_id = TurnRunId::new();
+
+        // Use a SHARED CHANNEL binding ref so the OAuth backstop trips.
+        let binding_ref = test_slack_shared_channel_binding_ref(
+            install,
+            scope.agent_id.as_ref().expect("agent").as_str(),
+        );
+
+        // First poll → BlockedAuth; second poll is never reached because the
+        // cancel fails and we return Failed immediately.
+        let coordinator = Arc::new(ScriptedTurnCoordinator::with_states(vec![scripted_state(
+            TurnStatus::BlockedAuth,
+            Some(gate_ref_str),
+        )]));
+        // Make cancel_run fail so the OAuthTargetNotDm backstop arm returns Failed.
+        coordinator
+            .cancel_should_fail
+            .store(true, std::sync::atomic::Ordering::Release);
+
+        let outbound = Arc::new(InMemoryOutboundStateStore::default());
+        // Seed preference with the shared-channel binding so the OAuth guard trips.
+        seed_personal_preference(&outbound, &scope, binding_ref).await;
+
+        let egress = Arc::new(FakeProtocolHttpEgress::new(vec!["slack.com".to_string()]));
+        egress.allow_credential_handle("slack_bot_token");
+        // The initial auth-prompt delivery to the shared channel returns success
+        // (the backstop fires only after the delivery attempt when the authority
+        // detects the non-DM binding).  We do NOT program a postMessage response
+        // because the backstop intercepts BEFORE delivery via the
+        // `require_personal_dm_for_oauth` guard — no actual HTTP call is made.
+        // (The guard is checked inside `deliver_triggered_notification`; it
+        // returns `OAuthTargetNotDm` without posting.)
+
+        let delivery_store = Arc::new(InMemoryTriggeredRunDeliveryStore::default());
+        let route_store = Arc::new(InMemoryDeliveredGateRouteStore::default());
+        let mut services = make_services(
+            coordinator.clone(),
+            Arc::new(InMemorySessionThreadService::default()),
+            egress.clone(),
+            outbound,
+            install,
+        );
+        // Wire up an OAuth challenge provider so the BlockedAuth state generates
+        // an authorization_url, triggering the DM-only guard.
+        services.auth_challenges = Some(Arc::new(OAuthAuthChallengeProvider {
+            url: "https://provider.example/oauth-cancel-fail".to_string(),
+        }));
+
+        let settings = SlackFinalReplyDeliverySettings {
+            poll_interval: std::time::Duration::ZERO,
+            max_wait: std::time::Duration::from_secs(5),
+            max_concurrent_deliveries: NonZeroUsize::new(1).unwrap(),
+            max_pending_deliveries: NonZeroUsize::new(8).unwrap(),
+        };
+        let driver = TriggeredRunDeliveryDriver::with_settings(
+            services,
+            settings,
+            delivery_store.clone(),
+            route_store.clone(),
+            scope.agent_id.clone().expect("test scope has agent"),
+        );
+
+        let fire = minimal_trigger_fire(None);
+        driver
+            .on_trigger_submitted(fire, run_id, scope.clone())
+            .await;
+        let record = wait_for_delivery_record(&delivery_store, run_id).await;
+
+        // The cancel failed → outcome must be Failed.
+        assert_eq!(
+            record.outcome,
+            TriggeredRunDeliveryOutcomeKind::Failed,
+            "OAuth backstop cancel failure must record Failed; got: {:?}",
+            record.outcome
+        );
+
+        // No chat.delete calls: the auth prompt must not be removed when the
+        // cancel failed (the run may still be live).
+        let delete_call_count = egress
+            .calls()
+            .into_iter()
+            .filter(|c| c.path == "/api/chat.delete")
+            .count();
+        assert_eq!(
+            delete_call_count, 0,
+            "no chat.delete must be issued when backstop cancel fails; got {delete_call_count} calls"
+        );
+
+        // cancel_run was attempted exactly once.
+        assert_eq!(
+            coordinator.cancel_call_count(),
+            1,
+            "cancel_run must be attempted exactly once in the backstop arm"
         );
     }
 
