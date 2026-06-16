@@ -17,6 +17,15 @@ EXPECTED_WEBUI_TESTS = {
     "webui_v2_operator_route_predicate_contract",
     "webui_v2_schema_contract",
 }
+EXPECTED_REBORN_PACKAGES = {
+    "ironclaw_architecture",
+    "ironclaw_product_workflow",
+    "ironclaw_product_adapters",
+    "ironclaw_slack_v2_adapter",
+    "ironclaw_telegram_v2_adapter",
+    "ironclaw_wasm_product_adapters",
+    "ironclaw_webui_v2_static",
+}
 
 
 def cargo_metadata() -> dict:
@@ -34,7 +43,11 @@ def reborn_package_matrix(metadata: dict) -> list[str]:
         name = package["name"]
         if (
             name.startswith("ironclaw_reborn")
-            or name in {"ironclaw_product_workflow", "ironclaw_product_adapters"}
+            or name.startswith("ironclaw_product")
+            or name == "ironclaw_architecture"
+            or name == "ironclaw_slack_v2_adapter"
+            or name == "ironclaw_telegram_v2_adapter"
+            or name == "ironclaw_wasm_product_adapters"
             or name.startswith("ironclaw_webui_v2")
         ) and name != "ironclaw_webui_v2":
             packages.append(name)
@@ -66,7 +79,10 @@ def main() -> None:
     metadata = cargo_metadata()
     packages = reborn_package_matrix(metadata)
     assert "ironclaw_webui_v2" not in packages
-    assert "ironclaw_webui_v2_static" in packages
+    assert EXPECTED_REBORN_PACKAGES <= set(packages), (
+        "missing expected Reborn package matrix entries: "
+        f"{sorted(EXPECTED_REBORN_PACKAGES - set(packages))}"
+    )
 
     targets = webui_target_matrix(metadata)
     target_names = {name for name, _kind in targets}
