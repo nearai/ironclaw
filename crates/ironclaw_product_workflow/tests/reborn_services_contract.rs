@@ -6991,6 +6991,29 @@ async fn run_operator_setup_rejects_blank_profile_before_provider_write() {
 }
 
 #[tokio::test]
+async fn run_operator_setup_rejects_oversized_profile_before_provider_write() {
+    let llm_config = Arc::new(SetupRecordingLlmConfigService::default());
+    let services = services_with_setup_llm_config(llm_config.clone());
+
+    let err = services
+        .run_operator_setup(
+            caller(),
+            RebornOperatorSetupRequest {
+                provider_id: Some("openai".to_string()),
+                adapter: Some("open_ai_completions".to_string()),
+                profile_id: Some("x".repeat(129)),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect_err("oversized profile id is rejected");
+
+    assert_setup_validation(err, "profile_id", WebUiInboundValidationCode::InvalidValue);
+    assert_eq!(llm_config.upsert_provider_count(), 0);
+    assert_eq!(llm_config.set_active_count(), 0);
+}
+
+#[tokio::test]
 async fn run_operator_setup_rejects_short_webui_access_token_before_provider_write() {
     let llm_config = Arc::new(SetupRecordingLlmConfigService::default());
     let services = services_with_setup_llm_config(llm_config.clone());
@@ -7245,6 +7268,58 @@ async fn run_operator_setup_rejects_unwired_host_mutations_before_provider_write
         )
         .await
         .expect_err("unwired host mutations fail closed");
+
+    assert_eq!(err.code, RebornServicesErrorCode::Unavailable);
+    assert_eq!(err.kind, RebornServicesErrorKind::ServiceUnavailable);
+    assert_eq!(err.status_code, 503);
+    assert_eq!(llm_config.upsert_provider_count(), 0);
+    assert_eq!(llm_config.set_active_count(), 0);
+}
+
+#[tokio::test]
+async fn run_operator_setup_rejects_profile_only_host_mutation_before_provider_write() {
+    let llm_config = Arc::new(SetupRecordingLlmConfigService::default());
+    let services = services_with_setup_llm_config(llm_config.clone());
+
+    let err = services
+        .run_operator_setup(
+            caller(),
+            RebornOperatorSetupRequest {
+                provider_id: Some("openai".to_string()),
+                adapter: Some("open_ai_completions".to_string()),
+                profile_id: Some("production".to_string()),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect_err("unwired profile mutation fails closed");
+
+    assert_eq!(err.code, RebornServicesErrorCode::Unavailable);
+    assert_eq!(err.kind, RebornServicesErrorKind::ServiceUnavailable);
+    assert_eq!(err.status_code, 503);
+    assert_eq!(llm_config.upsert_provider_count(), 0);
+    assert_eq!(llm_config.set_active_count(), 0);
+}
+
+#[tokio::test]
+async fn run_operator_setup_rejects_token_only_host_mutation_before_provider_write() {
+    let llm_config = Arc::new(SetupRecordingLlmConfigService::default());
+    let services = services_with_setup_llm_config(llm_config.clone());
+
+    let err = services
+        .run_operator_setup(
+            caller(),
+            RebornOperatorSetupRequest {
+                provider_id: Some("openai".to_string()),
+                adapter: Some("open_ai_completions".to_string()),
+                webui_access_token: Some(SecretString::from(
+                    "webui-secret-token-value".to_string(),
+                )),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect_err("unwired WebUI token mutation fails closed");
 
     assert_eq!(err.code, RebornServicesErrorCode::Unavailable);
     assert_eq!(err.kind, RebornServicesErrorKind::ServiceUnavailable);
