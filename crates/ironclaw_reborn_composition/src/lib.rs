@@ -31,6 +31,7 @@ mod available_extensions;
 mod budget;
 mod budget_events;
 mod bundled_skills;
+mod config_blueprint;
 mod default_system_prompt;
 mod error;
 mod extension_installation_store;
@@ -81,6 +82,10 @@ mod profile;
 mod profile_approval_authorization;
 mod projection;
 pub use auth_prompt::{AuthChallengeProvider, AuthChallengeView};
+pub use config_blueprint::{
+    BlueprintReferencedFile, BlueprintSectionCounts, BlueprintValidationError,
+    BlueprintValidationSummary, REPO_LOCAL_BLUEPRINT, validate_blueprint,
+};
 #[cfg(feature = "root-llm-provider")]
 mod provider_admin;
 #[cfg(feature = "root-llm-provider")]
