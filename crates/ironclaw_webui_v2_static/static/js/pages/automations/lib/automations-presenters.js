@@ -373,12 +373,14 @@ function weekdayName(dayOfWeek, locale) {
 }
 
 // Localized "month day" (and optional year), e.g. "Jan 1" / "Jan 1, 2027".
+// The placeholder year for a yearless cron must be a leap year so that
+// "Feb 29" (cron `0 0 29 2 *`) doesn't roll over to "Mar 1".
 function monthDayLabel(month, day, year, locale) {
   const options =
     year != null
       ? { month: "short", day: "numeric", year: "numeric" }
       : { month: "short", day: "numeric" };
-  return intlDateTime(locale, options, new Date(year != null ? year : 2001, month - 1, day));
+  return intlDateTime(locale, options, new Date(year != null ? year : 2000, month - 1, day));
 }
 
 function cronFields(cron) {

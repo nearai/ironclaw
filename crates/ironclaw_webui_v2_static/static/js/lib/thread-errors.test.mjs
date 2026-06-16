@@ -5,11 +5,13 @@ import { deleteThreadErrorMessage, isThreadBusyError } from "./thread-errors.js"
 
 const t = (key) => key;
 
-test("isThreadBusyError detects the 409 busy conflict", () => {
-  assert.equal(isThreadBusyError({ status: 409 }), true);
+test("isThreadBusyError matches the busy kind, not any 409", () => {
+  assert.equal(isThreadBusyError({ status: 409, payload: { kind: "busy" } }), true);
   assert.equal(isThreadBusyError({ payload: { kind: "busy" } }), true);
+  // A non-busy 409 conflict must not be reported as busy (wrong guidance).
+  assert.equal(isThreadBusyError({ status: 409, payload: { kind: "conflict" } }), false);
+  assert.equal(isThreadBusyError({ status: 409 }), false);
   assert.equal(isThreadBusyError({ status: 500 }), false);
-  assert.equal(isThreadBusyError({ payload: { kind: "not_found" } }), false);
   assert.equal(isThreadBusyError(undefined), false);
 });
 

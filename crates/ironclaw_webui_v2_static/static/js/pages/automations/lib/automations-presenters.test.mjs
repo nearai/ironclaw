@@ -176,6 +176,9 @@ test("scheduleLabel presents common recurring schedules in friendly language", (
   assert.equal(scheduleLabel("0 17 12 * *"), "Day 12 of each month at 5:00 PM");
   assert.equal(scheduleLabel("0 17 13 * *"), "Day 13 of each month at 5:00 PM");
   assert.equal(scheduleLabel("0 0 9 1 1 * 2027"), "Jan 1, 2027 at 9:00 AM");
+  // Feb 29 with no year must not roll over to Mar 1 (placeholder year must be
+  // a leap year).
+  assert.equal(scheduleLabel("0 0 29 2 *"), "Feb 29 at 12:00 AM");
   assert.equal(scheduleLabel("* 0 9 * * *"), "Custom schedule");
   assert.equal(scheduleLabel("0 24 * * *"), "Custom schedule");
   assert.equal(scheduleLabel("0 0 32 * *"), "Custom schedule");
