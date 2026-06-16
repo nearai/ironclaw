@@ -180,11 +180,12 @@ open = "5"
 pgvector = { version = "0.4", features = ["postgres"], optional = true }
 
 # WASM sandbox for untrusted tool execution
-# Pinned to 44.0.2: minimum patch that contains the fix for
+# Pinned to 44.0.3: minimum patch line that contains the fixes for
 # RUSTSEC-2026-0149 (path_open(TRUNCATE) bypassing FilePerms::WRITE
-# host restriction). 43.x is end-of-life for this advisory.
-wasmtime = { version = "44.0.2", features = ["component-model"] }
-wasmtime-wasi = "44.0.2"  # WASI support for component model
+# host restriction) and RUSTSEC-2026-0182 (WASIp1 fd_renumber leak).
+# 43.x is end-of-life for these advisories.
+wasmtime = { version = "44.0.3", features = ["component-model"] }
+wasmtime-wasi = "44.0.3"  # WASI support for component model
 wasmparser = "0.246.2"  # WASM binary parsing for validation
 
 # Cryptography for secrets management
