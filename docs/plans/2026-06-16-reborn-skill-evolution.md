@@ -86,8 +86,9 @@ to the sealed `ironclaw_agent_loop` crate**. Demo value is the top priority.
    new task uses `/X` (explicit; `ExplicitOnly` default) → qualitatively follows the Procedure /
    picks the right tool first try. (No live stopwatch claim.)
 
-### Phase 2 — Evolution loop (GEPA-lite; Day 2)
-- New `ironclaw-reborn skills evolve <name>` (in composition):
+### Phase 2 — Skill Refinement (eval-driven reflective improvement; Day 2)
+- Our own name (NOT "GEPA"/"self-evolution" — those are DSPy/Hermes terms).
+- New `ironclaw-reborn skills refine <name>`:
   1. **Frozen, committed eval fixture** (hand-authored / pre-generated then reviewed) — NOT
      self-generated at demo time. Report `n` explicitly.
   2. Baseline score: single-LLM-call proxy (skill-as-context + task → output), **judge returns
@@ -138,22 +139,51 @@ Branch `feat/skill-evolution` off `origin/main`.
   module registered in `lib.rs`. `cargo check -p ironclaw_reborn_composition` green.
 - Modeled on `trace_capture.rs` (the existing non-run post-completion sink).
 
-### Increment 2 — extraction LLM call (scoped, prompt ported)
-- Prompt: `crates/ironclaw_reborn_composition/assets/prompts/skill_extraction.md` (one-shot
-  transcript -> `SKILL.md` or `SKIP:`), to load via `include_str!`.
-- LLM path (idiomatic, no raw provider plumbing): `SystemInferencePort::call_system_inference`
-  (`crates/ironclaw_turns/src/run_profile/system_inference.rs`) via
-  `ModelGatewayBackedSystemInferencePort::new(model_gateway, LoopRunContext)`
-  (`ironclaw_loop_support::system_inference`). Template = the `failure_explanation` wiring at
-  `runtime.rs:2694`. The `model_gateway` Arc is in scope at the composition site.
-- Learning model = a model-id string; NEAR AI honours per-request model override
-  (`CompletionRequest::model`), so no separate provider is constructed.
-- TODO: thread a `SystemInferencePort` (+ learning model id + the extraction prompt) into
-  `SkillLearningTurnEventSink`; build the request from the transcript; parse `SKILL.md`/`SKIP`.
+### Increment 2 — distillation logic crate (DONE)
+- New leaf crate `ironclaw_skill_learning` (pure logic; no LLM/runtime/fs deps):
+  `distill_skill(transcript, &dyn SkillInferencePort) -> DistillOutcome`, validated with
+  `ironclaw_skills::parse_skill_md` (the install-path parser) so output is guaranteed installable;
+  `parse_distillation` tolerates `SKIP:` + code fences. Extraction prompt moved here
+  (`prompts/skill_extraction.md`). 6 unit tests.
+
+### Increment 2b — wire distillation into the sink (DONE)
+- IMPORTANT (direction correction): `SystemInferencePort` was REJECTED — it has no per-request
+  model override (would force the run's model, violating the strong-learning-model decision) and
+  would require editing the `ironclaw_turns` contract crate. Instead: a dedicated strong-model
+  `LlmProvider` built from the run's NEAR config with the model overridden
+  (`IRONCLAW_SKILL_LEARNING_MODEL`) via `build_skill_learning_provider` in `runtime.rs` (no churn
+  to `build_llm_gateway`). `SkillLearningInferenceAdapter` bridges `LlmProvider` -> the crate's
+  `SkillInferencePort`. Sink gated on `root-llm-provider`.
+
+### Increment 3 — install distilled skill (DONE)
+- `SkillWriter` seam; `PortSkillWriter` over the runtime's existing
+  `local_runtime.skill_management` (`install_for_scope`, update on conflict). Scope from the
+  EVENT (`local_default` + tenant override — avoids the `default`-tenant demo-killer).
+  Injection-scanned (`ironclaw_safety::validate_trusted_trigger_prompt` + `Sanitizer`) before
+  install. Skill appears in Settings->Skills + loads into the next run. (Decision #3: chose
+  scan+visible now; pre-approval gate deferred.)
+
+### Increment 4 — live "learned a skill" bubble (DONE)
+- `LiveProjectionPublisher::publish_skill_learned` (post-run analogue of the in-run
+  skill-activation observer) + `SkillLearnedNotifier`/`LiveSkillLearnedNotifier` seam; emits a
+  `SkillActivation` projection item rendered by the EXISTING WebChat v2 chat bubble (zero new
+  wire variants). Wired by cloning the projection publisher before the milestone-sink builder
+  consumes it.
+
+### Next
+- Increment 5 — **Skill Refinement** (`skills refine`): eval-driven reflective improvement
+  (frozen eval fixture; judge returns score+feedback; gate on size/growth/must-beat-baseline;
+  lead the demo with the gate rejecting a regression). NOT "GEPA".
+- Pre-approval gate for learned skills (decision #3): stage-to-pending + one-click approve.
+- `ironclaw-reborn skills extract`/`refine` CLI; end-to-end run verification.
 
 ### Key API references
 - `LlmProvider::complete(CompletionRequest{messages, model, ...}) -> CompletionResponse{content}`
-  (`ironclaw_llm/src/provider.rs:515`).
+  (`ironclaw_llm/src/provider.rs:515`); NEAR AI honours the per-request `model` override.
 - Skill write (scoped): `SkillManagementContext::new(filesystem, mounts, scope)` +
   `install_skill`/`update_skill` (`ironclaw_skills/src/management.rs`); scope MUST come from the
   event (tenant + owner), mirroring `RebornLocalSkillManagementPort` in `lifecycle.rs`.
+
+### Verification gate (run per increment)
+`cargo check` (default + `root-llm-provider`) 0 warnings; `cargo test` + `cargo clippy`
+(`root-llm-provider,test-support,libsql`) green.
