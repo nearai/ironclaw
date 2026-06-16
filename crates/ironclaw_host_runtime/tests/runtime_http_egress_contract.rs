@@ -2371,8 +2371,8 @@ async fn mcp_http_client_reuses_staged_credential_for_json_rpc_session() {
     drop(requests);
 }
 
-#[test]
-fn wasm_http_adapter_reuses_staged_credential_for_multiple_requests_in_one_invocation() {
+#[tokio::test]
+async fn wasm_http_adapter_reuses_staged_credential_for_multiple_requests_in_one_invocation() {
     let network = RecordingNetwork::ok(NetworkHttpResponse {
         status: 200,
         headers: vec![],
