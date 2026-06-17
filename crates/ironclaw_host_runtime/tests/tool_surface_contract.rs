@@ -631,6 +631,21 @@ async fn visible_surface_resolves_builtin_first_party_input_schema_refs() {
         apply_patch_validator
             .validate(&json!({
                 "path": "/workspace/main.rs",
+                "old_string": "null",
+                "new_string": null,
+                "edits": [
+                    {"oldText": "old", "newText": "new"},
+                    {"oldText": "other", "newText": "replacement"}
+                ],
+                "replace_all": true
+            }))
+            .is_err(),
+        "apply_patch schema should reject replace_all multi-edit even with placeholders"
+    );
+    assert!(
+        apply_patch_validator
+            .validate(&json!({
+                "path": "/workspace/main.rs",
                 "old_string": "old",
                 "new_string": "new",
                 "edits": [{"oldText": "old", "newText": "new"}]

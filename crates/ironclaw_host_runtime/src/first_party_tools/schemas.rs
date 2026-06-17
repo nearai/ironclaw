@@ -396,18 +396,18 @@ pub(crate) fn resolve_builtin_input_schema_ref(reference: &str) -> Option<Value>
                         "required": ["replace_all"]
                     },
                     "then": {
-                        "oneOf": [
-                            { "required": ["old_string", "new_string"] },
-                            {
-                                "properties": {
-                                    "edits": {
+                        "properties": {
+                            "edits": {
+                                "oneOf": [
+                                    {
                                         "type": "array",
                                         "maxItems": 1
-                                    }
-                                },
-                                "required": ["edits"]
+                                    },
+                                    { "type": "null" },
+                                    { "const": "null" }
+                                ]
                             }
-                        ]
+                        }
                     }
                 }
             ],
