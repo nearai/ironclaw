@@ -134,7 +134,7 @@ pub(crate) struct CapabilityDisplayPreviewResult<'a> {
 impl CapabilityDisplayPreviewStore {
     fn lock_pending_inputs(&self) -> MutexGuard<'_, CapabilityDisplayPendingInputs> {
         self.pending.lock().unwrap_or_else(|poisoned| {
-            tracing::warn!(
+            tracing::debug!(
                 "capability display preview pending input store was poisoned; recovering"
             );
             poisoned.into_inner()
@@ -143,7 +143,7 @@ impl CapabilityDisplayPreviewStore {
 
     fn lock_completed_previews(&self) -> MutexGuard<'_, CapabilityDisplayCompletedPreviews> {
         self.completed.lock().unwrap_or_else(|poisoned| {
-            tracing::warn!(
+            tracing::debug!(
                 "capability display preview completed preview store was poisoned; recovering"
             );
             poisoned.into_inner()
@@ -198,11 +198,10 @@ impl CapabilityDisplayPreviewStore {
         invocation_id: InvocationId,
         input_ref: &CapabilityInputRef,
     ) {
-        if let Ok(mut pending) = self.pending.lock() {
-            pending
-                .input_ref_by_invocation
-                .insert(invocation_id.to_string(), input_ref.as_str().to_string());
-        }
+        let mut pending = self.lock_pending_inputs();
+        pending
+            .input_ref_by_invocation
+            .insert(invocation_id.to_string(), input_ref.as_str().to_string());
     }
 
     #[cfg(test)]
@@ -310,7 +309,7 @@ impl CapabilityDisplayPreviewSource for CapabilityDisplayPreviewStore {
     }
 
     fn running_input(&self, invocation_id: InvocationId) -> Option<CapabilityRunningInput> {
-        let pending = self.pending.lock().ok()?;
+        let pending = self.lock_pending_inputs();
         let input_ref = pending
             .input_ref_by_invocation
             .get(&invocation_id.to_string())?;
@@ -796,12 +795,9 @@ fn safe_path_subtitle(value: &serde_json::Value) -> Option<String> {
 fn primary_arg_subtitle(capability_id: &str, value: &serde_json::Value) -> Option<String> {
     // Search-shaped tools → the query string.
     if (capability_matches(capability_id, "memory_search")
-        || capability_id == "web_search"
-        || capability_id == "llm_context"
-        || capability_id.ends_with(".web_search")
-        || capability_id.ends_with(".search")
-        || capability_id == "web-access.search"
-        || capability_id == "nearai.web_search")
+        || capability_matches(capability_id, "web_search")
+        || capability_matches(capability_id, "search")
+        || capability_matches(capability_id, "llm_context"))
         && let Some(query) = string_arg(value, &["query", "q", "text", "pattern"])
     {
         return non_empty(bounded_summary_value(query).text);
@@ -817,9 +813,8 @@ fn primary_arg_subtitle(capability_id: &str, value: &serde_json::Value) -> Optio
     // HTTP / fetch → the URL (sensitive parts stripped).
     if (capability_matches(capability_id, "http")
         || capability_matches(capability_id, "http.save")
-        || capability_id == "web_fetch"
-        || capability_id.ends_with(".web_fetch")
-        || capability_id == "web-access.get_content")
+        || capability_matches(capability_id, "web_fetch")
+        || capability_matches(capability_id, "get_content"))
         && let Some(url) = string_arg(value, &["url"])
     {
         return non_empty(safe_url_display(url).text);

@@ -312,6 +312,20 @@ impl CapabilityActivityView {
         if let Some(error_kind) = self.error_kind.as_deref() {
             validate_error_kind("capability_activity_error_kind", error_kind)?;
         }
+        // The running-frame input fields are sanitized/byte-bounded upstream;
+        // re-validate them at the product boundary (as `error_kind` is) so an
+        // upstream regression can't leak unbounded/control-char text to the
+        // browser.
+        validate_optional_display_text(
+            "capability_activity_subtitle",
+            self.subtitle.as_deref(),
+            CAPABILITY_DISPLAY_SUMMARY_MAX_BYTES,
+        )?;
+        validate_optional_display_text(
+            "capability_activity_input_summary",
+            self.input_summary.as_deref(),
+            CAPABILITY_DISPLAY_SUMMARY_MAX_BYTES,
+        )?;
         Ok(())
     }
 }
@@ -1993,5 +2007,52 @@ mod tests {
             view.error_kind.as_deref(),
             Some(CAPABILITY_ACTIVITY_UNCLASSIFIED_ERROR_KIND)
         );
+    }
+
+    fn capability_activity_view_input_for_detail_test() -> CapabilityActivityViewInput {
+        CapabilityActivityViewInput {
+            invocation_id: InvocationId::new(),
+            turn_run_id: Some(TurnRunId::new()),
+            thread_id: Some(ThreadId::new("thread-tool-activity").expect("thread id")),
+            capability_id: CapabilityId::new("nearai.web_search").expect("capability id"),
+            status: CapabilityActivityStatusView::Started,
+            provider: None,
+            runtime: None,
+            process_id: None,
+            output_bytes: None,
+            error_kind: None,
+            subtitle: None,
+            input_summary: None,
+            updated_at: Utc::now(),
+            activity_order: None,
+        }
+    }
+
+    #[test]
+    fn capability_activity_view_rejects_oversized_running_input_fields() {
+        let oversized = "a".repeat(CAPABILITY_DISPLAY_SUMMARY_MAX_BYTES + 1);
+
+        let subtitle_input = CapabilityActivityViewInput {
+            subtitle: Some(oversized.clone()),
+            ..capability_activity_view_input_for_detail_test()
+        };
+        assert!(CapabilityActivityView::new(subtitle_input).is_err());
+
+        let summary_input = CapabilityActivityViewInput {
+            input_summary: Some(oversized),
+            ..capability_activity_view_input_for_detail_test()
+        };
+        assert!(CapabilityActivityView::new(summary_input).is_err());
+    }
+
+    #[test]
+    fn capability_activity_view_rejects_control_char_running_input_on_serialize() {
+        let view = CapabilityActivityView {
+            subtitle: Some("query\u{0}with-nul".to_string()),
+            ..CapabilityActivityView::new(capability_activity_view_input_for_detail_test())
+                .expect("base view")
+        };
+
+        assert!(serde_json::to_value(view).is_err());
     }
 }
