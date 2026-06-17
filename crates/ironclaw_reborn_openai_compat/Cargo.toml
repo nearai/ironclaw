@@ -18,8 +18,10 @@ openai-compat-beta = ["dep:async-stream", "dep:axum", "dep:futures-core"]
 
 [dependencies]
 async-trait = "0.1"
+base64 = "0.22"
 chrono = { version = "0.4", features = ["clock"] }
 hex = "0.4"
+ironclaw_attachments = { path = "../ironclaw_attachments", version = "0.1.0" }
 ironclaw_host_api = { path = "../ironclaw_host_api", version = "0.1.0" }
 ironclaw_product_adapters = { path = "../ironclaw_product_adapters", version = "0.1.0" }
 serde = { version = "1", features = ["derive"] }

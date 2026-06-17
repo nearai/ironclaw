@@ -8,20 +8,23 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
+use ironclaw_attachments::InboundAttachment;
 use ironclaw_filesystem::{RootFilesystem, ScopedFilesystem};
 use ironclaw_host_api::{
     AgentId, InvocationId, MountAlias, MountGrant, MountPermissions, MountView, ProjectId,
     ResourceScope, TenantId, UserId, VirtualPath,
 };
 use ironclaw_product_adapters::{
-    AdapterInstallationId, ProductAdapterId, ProductInboundAck, ProductOutboundEnvelope,
-    ProductOutboundPayload, ProductProjectionItem, ProductProjectionState, ProductWorkflow,
-    ProjectionCursor, ProjectionReadRequest, ProjectionStream, ProjectionSubscriptionRequest,
+    AdapterInstallationId, ProductAdapterError, ProductAdapterId, ProductInboundAck,
+    ProductInboundEnvelope, ProductOutboundEnvelope, ProductOutboundPayload, ProductProjectionItem,
+    ProductProjectionState, ProductWorkflow, ProjectionCursor, ProjectionReadRequest,
+    ProjectionStream, ProjectionSubscriptionRequest,
 };
 use ironclaw_product_workflow::{
-    DefaultInboundTurnService, DefaultProductWorkflow, ProductActorUserResolutionRequest,
-    ProductActorUserResolver, ProductConversationBindingService, ProductInstallationKey,
-    ProductInstallationScope, ProductWorkflowError, StaticProductInstallationResolver,
+    DefaultInboundTurnService, DefaultProductWorkflow, InboundAttachmentLander,
+    ProductActorUserResolutionRequest, ProductActorUserResolver, ProductConversationBindingService,
+    ProductInstallationKey, ProductInstallationScope, ProductWorkflowError,
+    StaticProductInstallationResolver,
 };
 use ironclaw_product_workflow_storage::RebornFilesystemIdempotencyLedger;
 use ironclaw_reborn_openai_compat::{
@@ -29,12 +32,13 @@ use ironclaw_reborn_openai_compat::{
     OpenAiChatCompletionProjection, OpenAiChatCompletionProjectionReader,
     OpenAiChatCompletionProjectionRequest, OpenAiChatCompletionsWorkflow,
     OpenAiChatProjectionStreamRequest, OpenAiCompatErrorKind, OpenAiCompatHttpError,
-    OpenAiCompatProjectionStreamer, OpenAiCompatRefStore, OpenAiCompatResourceBinding,
-    OpenAiCompatRouterState, OpenAiResponseErrorObject, OpenAiResponseObject,
-    OpenAiResponseOutputItem, OpenAiResponseOutputItemStatus, OpenAiResponseProjection,
-    OpenAiResponseProjectionStreamRequest, OpenAiResponseReadRequest, OpenAiResponseStatus,
-    OpenAiResponseWaitRequest, OpenAiResponsesMessageRole, OpenAiResponsesProjectionReader,
-    OpenAiResponsesWorkflow, openai_compat_router_with_state, openai_compat_routes,
+    OpenAiCompatInboundAttachmentSubmit, OpenAiCompatProjectionStreamer, OpenAiCompatRefStore,
+    OpenAiCompatResourceBinding, OpenAiCompatRouterState, OpenAiResponseErrorObject,
+    OpenAiResponseObject, OpenAiResponseOutputItem, OpenAiResponseOutputItemStatus,
+    OpenAiResponseProjection, OpenAiResponseProjectionStreamRequest, OpenAiResponseReadRequest,
+    OpenAiResponseStatus, OpenAiResponseWaitRequest, OpenAiResponsesMessageRole,
+    OpenAiResponsesProjectionReader, OpenAiResponsesWorkflow, openai_compat_router_with_state,
+    openai_compat_routes,
 };
 use ironclaw_reborn_openai_compat_storage::FilesystemOpenAiCompatRefStore;
 use ironclaw_threads::{
@@ -91,11 +95,21 @@ pub async fn build_openai_compat_route_mount(
         installation_scope,
     )]);
     let binding = ProductConversationBindingService::new(conversation_port, installation_resolver);
-    let inbound = Arc::new(DefaultInboundTurnService::new(
+    let mut inbound_turn_service = DefaultInboundTurnService::new(
         binding.clone(),
         runtime.webui_thread_service(),
         runtime.webui_turn_coordinator(),
-    ));
+    );
+    // Lands inline image bytes (vision, #4644) through the same project-scoped
+    // workspace authority the agent's file tools resolve through, so an image
+    // attached to an OpenAI-compatible chat completion reaches the model.
+    if let Some(workspace_filesystem) = runtime.webui_workspace_filesystem() {
+        let lander: Arc<dyn InboundAttachmentLander> = Arc::new(
+            crate::attachment_landing::ProjectScopedAttachmentLander::new(workspace_filesystem),
+        );
+        inbound_turn_service = inbound_turn_service.with_inbound_attachments(lander);
+    }
+    let inbound = Arc::new(inbound_turn_service);
     // `.with_delivered_gate_routes` is intentionally omitted here. The
     // OpenAI-compat surface never produces `ApprovalResolution`,
     // `ScopedApprovalResolution`, or `AuthResolution` payloads (verified: no
@@ -103,7 +117,10 @@ pub async fn build_openai_compat_route_mount(
     // so the delivered-route conversation-fingerprint fallback is unreachable on
     // this surface. The workflow falls back to the default in-memory no-op store,
     // which is correct for this surface.
-    let product_workflow: Arc<dyn ProductWorkflow> = Arc::new(
+    // Keep the concrete type so the same instance can back both the bytes-free
+    // `ProductWorkflow` door and the inline-attachment native door (vision,
+    // #4644), the latter via `OpenAiCompatAttachmentSubmitAdapter`.
+    let default_product_workflow = Arc::new(
         DefaultProductWorkflow::new(
             inbound,
             Arc::new(RebornFilesystemIdempotencyLedger::new(
@@ -122,6 +139,11 @@ pub async fn build_openai_compat_route_mount(
         .with_approval_interaction_service(runtime.webui_approval_interaction_service())
         .with_auth_interaction_service(runtime.webui_auth_interaction_service()),
     );
+    let attachment_submit: Arc<dyn OpenAiCompatInboundAttachmentSubmit> =
+        Arc::new(OpenAiCompatAttachmentSubmitAdapter {
+            workflow: default_product_workflow.clone(),
+        });
+    let product_workflow: Arc<dyn ProductWorkflow> = default_product_workflow;
 
     let ref_filesystem: Arc<dyn RootFilesystem> = local_runtime.extension_filesystem.clone();
     let ref_store: Arc<dyn OpenAiCompatRefStore> =
@@ -146,7 +168,8 @@ pub async fn build_openai_compat_route_mount(
             ref_store.clone(),
             chat_projection_reader,
         )
-        .with_projection_streamer(projection_streamer.clone()),
+        .with_projection_streamer(projection_streamer.clone())
+        .with_attachment_submit(attachment_submit),
     );
     let responses_workflow = Arc::new(
         OpenAiResponsesWorkflow::new(product_workflow, ref_store, responses_projection_reader)
@@ -159,6 +182,27 @@ pub async fn build_openai_compat_route_mount(
         ),
         openai_compat_routes(),
     ))
+}
+
+/// Bridges the route crate's [`OpenAiCompatInboundAttachmentSubmit`] door to the
+/// product-workflow's native attachment landing. Lives here (not in the route
+/// crate) because the route crate must not depend on `ironclaw_product_workflow`
+/// (enforced by `reborn_dependency_boundaries`).
+struct OpenAiCompatAttachmentSubmitAdapter {
+    workflow: Arc<DefaultProductWorkflow>,
+}
+
+#[async_trait]
+impl OpenAiCompatInboundAttachmentSubmit for OpenAiCompatAttachmentSubmitAdapter {
+    async fn submit_inbound_with_attachments(
+        &self,
+        envelope: ProductInboundEnvelope,
+        attachments: Vec<InboundAttachment>,
+    ) -> Result<ProductInboundAck, ProductAdapterError> {
+        self.workflow
+            .submit_inbound_with_attachments(envelope, attachments)
+            .await
+    }
 }
 
 struct OpenAiCompatRuntimeProjectionStreamer {

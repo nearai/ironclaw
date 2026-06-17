@@ -11,6 +11,7 @@ mod http_output;
 mod json;
 mod memory;
 mod model_visible_output;
+mod profile_set;
 mod schemas;
 mod shell;
 mod skill_management;
@@ -52,6 +53,7 @@ pub use memory::{
     MEMORY_READ_CAPABILITY_ID, MEMORY_SEARCH_CAPABILITY_ID, MEMORY_TREE_CAPABILITY_ID,
     MEMORY_WRITE_CAPABILITY_ID,
 };
+pub use profile_set::PROFILE_SET_CAPABILITY_ID;
 pub use shell::SHELL_CAPABILITY_ID;
 pub use skill_management::{
     SKILL_INSTALL_CAPABILITY_ID, SKILL_LIST_CAPABILITY_ID, SKILL_REMOVE_CAPABILITY_ID,
@@ -173,6 +175,7 @@ pub fn builtin_first_party_package() -> Result<ExtensionPackage, ExtensionError>
                     trace_commons::credits_manifest()?,
                     trace_commons::profile_token_manifest()?,
                     trace_commons::profile_set_manifest()?,
+                    profile_set::manifest()?,
                 ];
                 capabilities.extend(memory::manifests()?);
                 capabilities.extend(coding_manifests()?);
@@ -294,8 +297,9 @@ fn builtin_first_party_base_registry() -> Result<FirstPartyCapabilityRegistry, H
     );
     registry.insert_handler(
         CapabilityId::new(TRACE_COMMONS_PROFILE_SET_CAPABILITY_ID)?,
-        handler,
+        handler.clone(),
     );
+    registry.insert_handler(CapabilityId::new(PROFILE_SET_CAPABILITY_ID)?, handler);
     skill_management::insert_handlers(&mut registry)?;
     Ok(registry)
 }
@@ -360,6 +364,14 @@ impl FirstPartyCapabilityHandler for BuiltinFirstPartyTools {
                 let mut result = memory::dispatch(&self.memory_state, &request).await?;
                 result.usage.output_bytes =
                     bounded_output_bytes(&result.output, FIRST_PARTY_MAX_OUTPUT_BYTES)?;
+                return Ok(result);
+            }
+            PROFILE_SET_CAPABILITY_ID => {
+                let mut result = profile_set::dispatch(&self.memory_state, &request).await?;
+                result.usage.output_bytes =
+                    bounded_output_bytes(&result.output, FIRST_PARTY_MAX_OUTPUT_BYTES)?;
+                result.usage.wall_clock_ms =
+                    start.elapsed().as_millis().try_into().unwrap_or(u64::MAX);
                 return Ok(result);
             }
             SHELL_CAPABILITY_ID => {

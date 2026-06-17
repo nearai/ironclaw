@@ -172,14 +172,13 @@ mod tests {
     }
 
     #[test]
-    fn chat_cancelled_gate_resolution_exits_processing_state() {
+    fn chat_gate_resolution_always_resumes_run() {
         let use_chat = asset_text("js/pages/chat/hooks/useChat.js");
-        assert!(
-            use_chat
-                .contains("resolution === \"approved\" || resolution === \"credential_provided\"")
-        );
-        assert!(use_chat.contains("setIsProcessing(shouldContinueProcessing);"));
-        assert!(use_chat.contains("setActiveRun(null);"));
+        // Every gate resolution resumes the run; there is no shouldContinueProcessing
+        // conditional. The terminal run_status SSE event is what clears processing.
+        assert!(use_chat.contains("setPendingGate(null);\n      setIsProcessing(true);"));
+        // activeRun is NOT cleared inside resolveGate — the run keeps going.
+        assert!(!use_chat.contains("setIsProcessing(shouldContinueProcessing);"));
 
         let events = asset_text("js/pages/chat/lib/useChatEvents.js");
         assert!(events.contains("TERMINAL_RUN_STATUSES.has(status)"));
@@ -338,6 +337,14 @@ mod tests {
         assert!(presenter.contains("source?.type === \"schedule\""));
         assert!(presenter.contains("Custom schedule"));
         assert!(!presenter.contains("Webhook"));
+    }
+
+    #[test]
+    fn sidebar_new_chat_label_owns_typography() {
+        let sidebar_nav = asset_text("js/components/sidebar-nav.js");
+
+        assert!(sidebar_nav.contains("<span className=\"text-[13px] font-medium\""));
+        assert!(sidebar_nav.contains("t(\"chat.newThread\")"));
     }
 
     #[test]

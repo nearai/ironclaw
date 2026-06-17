@@ -29,9 +29,9 @@ use ironclaw_host_runtime::{
     GREP_CAPABILITY_ID, HTTP_CAPABILITY_ID, HTTP_SAVE_CAPABILITY_ID, HostRuntime,
     HostRuntimeServices, JSON_CAPABILITY_ID, LIST_DIR_CAPABILITY_ID, MEMORY_READ_CAPABILITY_ID,
     MEMORY_SEARCH_CAPABILITY_ID, MEMORY_TREE_CAPABILITY_ID, MEMORY_WRITE_CAPABILITY_ID,
-    READ_FILE_CAPABILITY_ID, RuntimeCapabilityFailure, RuntimeCapabilityOutcome,
-    RuntimeCapabilityRequest, RuntimeFailureKind, RuntimeProcessError, RuntimeProcessPort,
-    SHELL_CAPABILITY_ID, SKILL_INSTALL_CAPABILITY_ID, SKILL_LIST_CAPABILITY_ID,
+    PROFILE_SET_CAPABILITY_ID, READ_FILE_CAPABILITY_ID, RuntimeCapabilityFailure,
+    RuntimeCapabilityOutcome, RuntimeCapabilityRequest, RuntimeFailureKind, RuntimeProcessError,
+    RuntimeProcessPort, SHELL_CAPABILITY_ID, SKILL_INSTALL_CAPABILITY_ID, SKILL_LIST_CAPABILITY_ID,
     SKILL_REMOVE_CAPABILITY_ID, SPAWN_SUBAGENT_CAPABILITY_ID, SandboxCommandTransport, SurfaceKind,
     TIME_CAPABILITY_ID, TRACE_COMMONS_CREDITS_CAPABILITY_ID, TRACE_COMMONS_ONBOARD_CAPABILITY_ID,
     TRACE_COMMONS_PROFILE_SET_CAPABILITY_ID, TRACE_COMMONS_PROFILE_TOKEN_CAPABILITY_ID,
@@ -86,6 +86,7 @@ async fn builtin_first_party_package_declares_expected_capabilities() {
             | TRIGGER_CREATE_CAPABILITY_ID
             | TRIGGER_REMOVE_CAPABILITY_ID
             | TRACE_COMMONS_ONBOARD_CAPABILITY_ID
+            | TRACE_COMMONS_PROFILE_SET_CAPABILITY_ID
             | TRACE_COMMONS_PROFILE_TOKEN_CAPABILITY_ID => PermissionMode::Ask,
             _ => PermissionMode::Allow,
         };
@@ -1886,6 +1887,49 @@ async fn memory_write_requires_memory_mount_authority() {
     )
     .await
     .unwrap_err();
+    assert_eq!(failure, RuntimeFailureKind::Authorization);
+}
+
+#[tokio::test]
+async fn builtin_profile_set_rejects_missing_memory_mount_authority() {
+    // profile_set routes through ensure_memory_mount(request, /*write*/ true) in
+    // profile_merge_write. This test verifies that the guard fires when the invocation
+    // context carries only a /workspace mount (no /memory write grant), mirroring
+    // the memory_write_requires_memory_mount_authority test above.
+    let runtime = runtime_with_filesystem(InMemoryBackend::new());
+    let (_filesystem, workspace_mounts) =
+        in_memory_mounted_filesystem(MountPermissions::read_write_list_delete());
+    let failure = invoke_with_context(
+        &runtime,
+        PROFILE_SET_CAPABILITY_ID,
+        json!({"timezone": "Asia/Tokyo"}),
+        execution_context_with_mounts([PROFILE_SET_CAPABILITY_ID], workspace_mounts),
+    )
+    .await
+    .unwrap_err();
+    // ensure_memory_mount returns FilesystemDenied, which maps to RuntimeFailureKind::Authorization.
+    assert_eq!(failure, RuntimeFailureKind::Authorization);
+}
+
+#[tokio::test]
+async fn builtin_profile_set_rejects_memory_mount_without_delete_permission() {
+    // ensure_memory_mount(write=true) requires read + list + write + delete.
+    // A /memory grant with read+list+write but NO delete must be rejected with
+    // Authorization, locking the current contract.
+    // MountPermissions::read_write() has read=true, write=true, list=true, delete=false.
+    let runtime = runtime_with_filesystem(InMemoryBackend::new());
+    let failure = invoke_with_context(
+        &runtime,
+        PROFILE_SET_CAPABILITY_ID,
+        json!({"timezone": "Asia/Tokyo"}),
+        execution_context_with_mounts(
+            [PROFILE_SET_CAPABILITY_ID],
+            memory_mounts(MountPermissions::read_write()),
+        ),
+    )
+    .await
+    .unwrap_err();
+    // ensure_memory_mount rejects write without delete (FilesystemDenied → Authorization).
     assert_eq!(failure, RuntimeFailureKind::Authorization);
 }
 
@@ -7260,6 +7304,7 @@ fn all_builtin_capability_ids() -> Vec<&'static str> {
         TRACE_COMMONS_CREDITS_CAPABILITY_ID,
         TRACE_COMMONS_PROFILE_TOKEN_CAPABILITY_ID,
         TRACE_COMMONS_PROFILE_SET_CAPABILITY_ID,
+        PROFILE_SET_CAPABILITY_ID,
         MEMORY_SEARCH_CAPABILITY_ID,
         MEMORY_WRITE_CAPABILITY_ID,
         MEMORY_READ_CAPABILITY_ID,

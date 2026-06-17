@@ -526,9 +526,9 @@ async fn instruction_bundle_renders_runtime_context_section() {
             loop_started_at_utc: chrono::Utc
                 .with_ymd_and_hms(2026, 6, 11, 21, 32, 0)
                 .unwrap(),
-            user_timezone: None,
             communication: None,
             product_context: None,
+            user_profile: None,
         }),
     };
 
@@ -613,9 +613,9 @@ async fn instruction_bundle_runtime_fingerprint_stable_within_minute() {
             loop_started_at_utc: chrono::Utc
                 .with_ymd_and_hms(2026, 6, 11, 21, 32, 7)
                 .unwrap(),
-            user_timezone: None,
             communication: None,
             product_context: None,
+            user_profile: None,
         }),
     };
 
@@ -628,9 +628,9 @@ async fn instruction_bundle_runtime_fingerprint_stable_within_minute() {
             loop_started_at_utc: chrono::Utc
                 .with_ymd_and_hms(2026, 6, 11, 21, 32, 46)
                 .unwrap(),
-            user_timezone: None,
             communication: None,
             product_context: None,
+            user_profile: None,
         }),
     };
 
@@ -697,9 +697,9 @@ async fn instruction_bundle_renders_runtime_context_exactly_once_per_build() {
             loop_started_at_utc: chrono::Utc
                 .with_ymd_and_hms(2026, 6, 11, 21, 32, 0)
                 .unwrap(),
-            user_timezone: None,
             communication: None,
             product_context: None,
+            user_profile: None,
         }),
     };
 
@@ -789,9 +789,9 @@ async fn instruction_bundle_without_runtime_context_renders_no_runtime_section()
             loop_started_at_utc: chrono::Utc
                 .with_ymd_and_hms(2026, 6, 11, 21, 32, 0)
                 .unwrap(),
-            user_timezone: None,
             communication: None,
             product_context: None,
+            user_profile: None,
         }),
         ..request
     };
@@ -2150,7 +2150,7 @@ async fn loop_prompt_bundle_public_serialization_hides_raw_content() {
         failure: None,
         event_cursor: EventCursor(0),
         product_context: None,
-        auth_resume_disposition: None,
+        resume_disposition: None,
     };
     let public_json = serde_json::to_string(&(bundle, host.milestones(), status)).unwrap();
     assert!(public_json.contains("prompt_bundle_built"));
@@ -3811,7 +3811,7 @@ async fn turn_run_state_product_context_defaults_to_none_when_missing_from_json(
         failure: None,
         event_cursor: EventCursor(0),
         product_context: None,
-        auth_resume_disposition: None,
+        resume_disposition: None,
     };
 
     // Serialize without the product_context field (simulate old wire).
@@ -3846,10 +3846,11 @@ async fn turn_run_state_product_context_defaults_to_none_when_missing_from_json(
 }
 
 #[tokio::test]
-async fn turn_run_state_auth_resume_disposition_defaults_to_none_when_missing_from_json() {
-    // Guard the #[serde(default)] backward-compat contract for auth_resume_disposition:
+async fn turn_run_state_resume_disposition_defaults_to_none_when_missing_from_json() {
+    // Guard the #[serde(default)] backward-compat contract for resume_disposition
+    // (serialized under the legacy key "auth_resume_disposition"):
     // old persisted TurnRunState payloads that pre-date the field must deserialize
-    // cleanly with auth_resume_disposition == None.
+    // cleanly with resume_disposition == None.
     let context = claimed_run_context().await;
     let state = TurnRunState {
         scope: context.scope.clone(),
@@ -3870,7 +3871,7 @@ async fn turn_run_state_auth_resume_disposition_defaults_to_none_when_missing_fr
         failure: None,
         event_cursor: EventCursor(0),
         product_context: None,
-        auth_resume_disposition: None,
+        resume_disposition: None,
     };
 
     // Serialize, remove the auth_resume_disposition key (simulates a legacy checkpoint
@@ -3883,8 +3884,8 @@ async fn turn_run_state_auth_resume_disposition_defaults_to_none_when_missing_fr
         .remove("auth_resume_disposition");
     let decoded: TurnRunState = serde_json::from_value(json).unwrap();
     assert!(
-        decoded.auth_resume_disposition.is_none(),
-        "auth_resume_disposition must default to None when absent from legacy JSON"
+        decoded.resume_disposition.is_none(),
+        "resume_disposition must default to None when absent from legacy JSON"
     );
 }
 
@@ -3917,9 +3918,9 @@ async fn instruction_bundle_runtime_communication_none_is_byte_identical_to_4795
         inline_messages: Vec::new(),
         runtime_context: Some(LoopRuntimeContext {
             loop_started_at_utc: Utc.with_ymd_and_hms(2026, 6, 11, 21, 32, 0).unwrap(),
-            user_timezone: None,
             communication: None,
             product_context: None,
+            user_profile: None,
         }),
     };
 
@@ -3973,7 +3974,6 @@ async fn instruction_bundle_runtime_communication_renders_all_fields() {
         inline_messages: Vec::new(),
         runtime_context: Some(LoopRuntimeContext {
             loop_started_at_utc: Utc.with_ymd_and_hms(2026, 6, 11, 21, 32, 0).unwrap(),
-            user_timezone: None,
             communication: Some(CommunicationRuntimeContext {
                 connected_channels: ConnectedChannelsState::Known(vec![ConnectedChannelSummary {
                     name: "Slack".to_string(),
@@ -3994,6 +3994,7 @@ async fn instruction_bundle_runtime_communication_renders_all_fields() {
                     user: UserId::new("test-user").unwrap(),
                 },
             )),
+            user_profile: None,
         }),
     };
 
@@ -4048,7 +4049,6 @@ async fn instruction_bundle_runtime_scheduled_trigger_with_no_delivery_emits_war
         inline_messages: Vec::new(),
         runtime_context: Some(LoopRuntimeContext {
             loop_started_at_utc: Utc.with_ymd_and_hms(2026, 6, 11, 21, 32, 0).unwrap(),
-            user_timezone: None,
             communication: Some(CommunicationRuntimeContext {
                 connected_channels: ConnectedChannelsState::Unknown,
                 delivery_target: DeliveryTargetState::NoneSet,
@@ -4062,6 +4062,7 @@ async fn instruction_bundle_runtime_scheduled_trigger_with_no_delivery_emits_war
                     user: UserId::new("test-user").unwrap(),
                 },
             )),
+            user_profile: None,
         }),
     };
 
