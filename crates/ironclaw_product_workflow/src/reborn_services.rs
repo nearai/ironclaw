@@ -322,6 +322,19 @@ pub trait SkillsProductFacade: Send + Sync {
         let _ = (caller, name);
         Err(RebornServicesError::service_unavailable(false))
     }
+
+    /// Toggle a skill's automatic activation. Disabling keeps the skill
+    /// invokable via an explicit `/name` mention but excludes it from criteria
+    /// (keyword/regex) selection.
+    async fn set_skill_auto_activate(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        name: String,
+        enabled: bool,
+    ) -> Result<RebornSkillActionResponse, RebornServicesError> {
+        let _ = (caller, name, enabled);
+        Err(RebornServicesError::service_unavailable(false))
+    }
 }
 
 #[derive(Debug, Default)]
@@ -1136,6 +1149,20 @@ pub trait RebornServicesApi: Send + Sync {
         caller: WebUiAuthenticatedCaller,
         name: String,
     ) -> Result<RebornSkillActionResponse, RebornServicesError>;
+
+    /// Toggle a skill's automatic activation (see
+    /// [`SkillsProductFacade::set_skill_auto_activate`]). Defaults to
+    /// unavailable so impls that do not surface skill management inherit a
+    /// fail-closed response.
+    async fn set_skill_auto_activate(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        name: String,
+        enabled: bool,
+    ) -> Result<RebornSkillActionResponse, RebornServicesError> {
+        let _ = (caller, name, enabled);
+        Err(RebornServicesError::service_unavailable(false))
+    }
 
     async fn list_extension_registry(
         &self,
@@ -2431,6 +2458,17 @@ impl RebornServicesApi for RebornServices {
         content: String,
     ) -> Result<RebornSkillActionResponse, RebornServicesError> {
         self.skills_facade.update_skill(caller, name, content).await
+    }
+
+    async fn set_skill_auto_activate(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        name: String,
+        enabled: bool,
+    ) -> Result<RebornSkillActionResponse, RebornServicesError> {
+        self.skills_facade
+            .set_skill_auto_activate(caller, name, enabled)
+            .await
     }
 
     async fn remove_skill(

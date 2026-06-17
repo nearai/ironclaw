@@ -1057,6 +1057,14 @@ pub struct RebornSkillInfo {
     pub can_edit: bool,
     #[serde(default)]
     pub can_delete: bool,
+    /// Whether the skill auto-activates on matching requests. `false` means it
+    /// only runs when explicitly invoked with `/name`. Defaults to `true`.
+    #[serde(default = "default_true")]
+    pub auto_activate: bool,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

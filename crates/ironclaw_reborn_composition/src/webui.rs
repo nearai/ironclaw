@@ -367,6 +367,37 @@ impl SkillsProductFacade for LocalSkillsProductFacade {
             message: format!("Skill '{}' removed", removed.name),
         })
     }
+
+    async fn set_skill_auto_activate(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        name: String,
+        enabled: bool,
+    ) -> Result<RebornSkillActionResponse, RebornServicesError> {
+        let scope = caller_skill_scope(caller);
+        let current = self
+            .skill_management
+            .read_content_for_scope(scope.clone(), &name)
+            .await
+            .map_err(map_skill_management_error)?;
+        let updated = ironclaw_skills::set_skill_auto_activate(&current.content, enabled);
+        // The toggled document is trusted prompt text loaded into the next run,
+        // so re-scan it before persisting (parity with install/update).
+        validate_skill_content_safety(&updated)?;
+        let result = self
+            .skill_management
+            .update_for_scope(scope, &name, &updated)
+            .await
+            .map_err(map_skill_management_error)?;
+        Ok(RebornSkillActionResponse {
+            success: true,
+            message: format!(
+                "Skill '{}' auto-activation {}",
+                result.name,
+                if enabled { "enabled" } else { "disabled" }
+            ),
+        })
+    }
 }
 
 fn caller_skill_scope(caller: WebUiAuthenticatedCaller) -> ResourceScope {
@@ -422,6 +453,7 @@ fn skill_info(skill: ironclaw_skills::SkillSummary) -> RebornSkillInfo {
         has_scripts: false,
         can_edit: can_manage,
         can_delete: can_manage,
+        auto_activate: skill.auto_activate,
     }
 }
 

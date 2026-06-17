@@ -1038,6 +1038,7 @@ mod learning {
                 keywords: keywords.iter().map(|k| k.to_string()).collect(),
                 tags: tags.iter().map(|t| t.to_string()).collect(),
                 requires_skills: Vec::new(),
+                auto_activate: true,
             }
         }
 
