@@ -91,7 +91,10 @@ async fn profile_merge_write(
         request.scope.tenant_id.as_str(),
         request.scope.user_id.as_str(),
     )
-    .map_err(|_| input_error())?;
+    .map_err(|error| {
+        tracing::debug!(%error, "profile_set scope construction failed");
+        input_error()
+    })?;
     let context = MemoryContext::new(scope).with_audit_context(
         request.scope.clone(),
         ironclaw_host_api::CorrelationId::new(),
@@ -134,6 +137,21 @@ pub(super) async fn profile_merge_into(
             },
             None => serde_json::Map::new(),
         };
+        // Refuse to overwrite a doc whose KNOWN fields are type-corrupt. The reader
+        // (`ProfileJson`) hard-fails its typed parse on a non-string known field, so
+        // silently merging onto it would brick the profile to None on every future
+        // load. Fail loud instead (consistent with the corrupt-JSON guard above).
+        for key in ["timezone", "locale", "location"] {
+            if let Some(value) = doc.get(key)
+                && !value.is_string()
+            {
+                tracing::debug!(
+                    field = key,
+                    "profile doc has a non-string known field; refusing to overwrite"
+                );
+                return Err(operation_error());
+            }
+        }
         for (k, v) in &fields {
             doc.insert(k.clone(), v.clone());
         }
@@ -482,6 +500,45 @@ mod tests {
             // Always report a hash conflict so the caller retries.
             Ok(MemoryWriteOutcome::Conflict)
         }
+    }
+
+    #[tokio::test]
+    async fn refuses_write_when_existing_known_field_is_corrupt() {
+        let state = MemoryCapabilityState::default();
+        // Seed a corrupt profile doc ({"timezone": 123}) on the request's filesystem.
+        let req = profile_set_request(json!({"locale": "en-US"}));
+        let scope = sample_scope();
+        let (doc_scope, path) =
+            profile_scope_and_path(scope.tenant_id.as_str(), scope.user_id.as_str()).unwrap();
+        let context = MemoryContext::new(doc_scope);
+        let repository = Arc::new(FilesystemMemoryDocumentRepository::new(Arc::clone(
+            &req.services.filesystem,
+        )));
+        let backend =
+            RepositoryMemoryBackend::new(repository).with_capabilities(MemoryBackendCapabilities {
+                file_documents: true,
+                metadata: true,
+                ..MemoryBackendCapabilities::default()
+            });
+        backend
+            .write_document_with_backend_options(
+                &context,
+                &path,
+                br#"{"timezone": 123}"#,
+                &MemoryBackendWriteOptions::default(),
+            )
+            .await
+            .expect("seed corrupt doc");
+
+        // A profile_set write must refuse rather than merge onto the corruption.
+        let err = dispatch(&state, &req).await.unwrap_err();
+        assert!(
+            matches!(
+                err.kind(),
+                Some(ironclaw_host_api::RuntimeDispatchErrorKind::OperationFailed)
+            ),
+            "corrupt known field must produce OperationFailed, got: {err:?}"
+        );
     }
 
     #[tokio::test]

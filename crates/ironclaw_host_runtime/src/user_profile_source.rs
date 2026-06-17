@@ -14,6 +14,7 @@ use std::sync::Arc;
 
 use chrono_tz::Tz;
 use ironclaw_filesystem::RootFilesystem;
+use ironclaw_host_api::HostApiError;
 use ironclaw_memory::{
     FilesystemMemoryDocumentRepository, MemoryBackend, MemoryContext, MemoryDocumentPath,
     MemoryDocumentScope, RepositoryMemoryBackend,
@@ -31,12 +32,10 @@ pub const PROFILE_DOCUMENT_PATH: &str = "context/profile.json";
 pub(crate) fn profile_scope_and_path(
     tenant_id: &str,
     user_id: &str,
-) -> Result<(MemoryDocumentScope, MemoryDocumentPath), ()> {
-    let scope =
-        MemoryDocumentScope::new_with_agent(tenant_id, user_id, None, None).map_err(|_| ())?;
+) -> Result<(MemoryDocumentScope, MemoryDocumentPath), HostApiError> {
+    let scope = MemoryDocumentScope::new_with_agent(tenant_id, user_id, None, None)?;
     let path =
-        MemoryDocumentPath::new_with_agent(tenant_id, user_id, None, None, PROFILE_DOCUMENT_PATH)
-            .map_err(|_| ())?;
+        MemoryDocumentPath::new_with_agent(tenant_id, user_id, None, None, PROFILE_DOCUMENT_PATH)?;
     Ok((scope, path))
 }
 
@@ -63,7 +62,15 @@ impl MemoryBackedUserProfileSource {
         let scope = &run_context.scope;
         let user_id = run_context.actor.as_ref().map(|a| a.user_id.as_str())?;
         // Shared scope helper — same keying as the writer (no duplicated decision).
-        let (doc_scope, path) = profile_scope_and_path(scope.tenant_id.as_str(), user_id).ok()?;
+        let (doc_scope, path) = match profile_scope_and_path(scope.tenant_id.as_str(), user_id) {
+            Ok(pair) => pair,
+            Err(error) => {
+                // silent-ok: profile is optional loop-start context; a scope-construction
+                // failure degrades to no-profile rather than failing the user's turn.
+                tracing::debug!(%error, "user profile scope construction failed; continuing without profile");
+                return None;
+            }
+        };
         let context = MemoryContext::new(doc_scope);
 
         let repository = Arc::new(FilesystemMemoryDocumentRepository::new(Arc::clone(
@@ -76,6 +83,7 @@ impl MemoryBackedUserProfileSource {
             Ok(None) => return None,
             Err(error) => {
                 tracing::debug!(error = %error, "user profile read failed; continuing without profile");
+                // silent-ok: optional loop-start context; an unreadable profile degrades to no-profile, not a failed turn.
                 return None;
             }
         };
@@ -84,6 +92,7 @@ impl MemoryBackedUserProfileSource {
             Ok(parsed) => parsed,
             Err(error) => {
                 tracing::debug!(error = %error, "user profile JSON parse failed; continuing without profile");
+                // silent-ok: optional loop-start context; a corrupt profile doc degrades to no-profile, not a failed turn.
                 return None;
             }
         };
