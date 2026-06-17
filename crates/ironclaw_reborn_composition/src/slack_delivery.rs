@@ -1411,6 +1411,18 @@ enum SlackFinalReplyDeliveryError {
     InvalidProjectionRef { reason: String },
 }
 
+/// Fail closed when a delivery that must reach a personal DM (e.g. carries an
+/// OAuth authorization_url) resolves to a non-DM target.
+fn enforce_direct_message_if_required(
+    target: &ReplyTargetBindingRef,
+    require_direct_message: bool,
+) -> Result<(), ProductWorkflowError> {
+    if require_direct_message && !slack_reply_target_is_personal_dm(target) {
+        return Err(ProductWorkflowError::OutboundTargetNotDirectMessage);
+    }
+    Ok(())
+}
+
 struct ObservedSlackReplyTargetAuthority {
     scope: TurnScope,
     actor: TurnActor,
@@ -1446,9 +1458,7 @@ impl ProductOutboundTargetResolver for ObservedSlackReplyTargetAuthority {
             return Err(ProductWorkflowError::BindingAccessDenied);
         }
         // Defense in depth: honor the DM requirement even on the live-path resolver.
-        if require_direct_message && !slack_reply_target_is_personal_dm(target.target()) {
-            return Err(ProductWorkflowError::OutboundTargetNotDirectMessage);
-        }
+        enforce_direct_message_if_required(target.target(), require_direct_message)?;
         Ok(VerifiedProductOutboundTargetMetadata {
             external_conversation_ref: self.external_conversation_ref.clone(),
             external_actor_ref: self.external_actor_ref.clone(),
@@ -2223,8 +2233,7 @@ async fn deliver_triggered_run(
                     }
                     TriggeredNotificationFailure::Denied => TriggeredRunDeliveryOutcomeKind::Denied,
                     TriggeredNotificationFailure::OAuthTargetNotDm => {
-                        // Handled in the dedicated arm above; unreachable here.
-                        TriggeredRunDeliveryOutcomeKind::Failed
+                        unreachable!("OAuthTargetNotDm is handled by the dedicated arm above")
                     }
                     TriggeredNotificationFailure::Other(_) => {
                         TriggeredRunDeliveryOutcomeKind::Failed
@@ -2507,6 +2516,7 @@ impl std::fmt::Display for TriggeredNotificationFailure {
 }
 
 /// Delivers a triggered-run notification, returning the list of posted Slack messages.
+// arch-exempt: too_many_args, needs a delivery-request bundle (services + scope + actor + state + authority + notification), plan #4953
 #[allow(clippy::too_many_arguments)]
 async fn deliver_triggered_notification(
     services: &SlackFinalReplyDeliveryServices,
@@ -2695,9 +2705,7 @@ impl ProductOutboundTargetResolver for TriggeredSlackReplyTargetAuthority {
         // authorization_url), enforce that the EXACT send-time binding is a personal
         // DM. Checked against the binding resolved NOW (at send time), making it
         // race-free against the pre-loop preference snapshot going stale.
-        if require_direct_message && !slack_reply_target_is_personal_dm(target.target()) {
-            return Err(ProductWorkflowError::OutboundTargetNotDirectMessage);
-        }
+        enforce_direct_message_if_required(target.target(), require_direct_message)?;
 
         // Decode the DM channel ID from the binding ref. The ref was built by
         // `slack_personal_dm_reply_target_binding_ref` / `slack_shared_channel_reply_target_binding_ref`
@@ -7490,4 +7498,51 @@ mod tests {
     // Removed: triggered_oauth_auth_no_preference_suppresses_authorization_url
     // — tested the pre-loop snapshot fail-closed behavior for an absent preference
     // record; redundant after snapshot removal for the same reason as above.
+
+    // ── enforce_direct_message_if_required ────────────────────────────────────
+    //
+    // Direct unit tests for the shared helper that both ObservedSlackReplyTargetAuthority
+    // and TriggeredSlackReplyTargetAuthority delegate to (Fix 3 / Fix 6).
+    //
+    // The helper takes `&ReplyTargetBindingRef` so no ValidatedReplyTargetBinding
+    // scaffolding is required — we test the guard logic directly.
+
+    #[test]
+    fn enforce_direct_message_shared_channel_require_true_returns_err() {
+        let install = "test-install";
+        let agent = "test-agent";
+        let binding_ref = test_slack_shared_channel_binding_ref(install, agent);
+        let result = enforce_direct_message_if_required(&binding_ref, true);
+        assert!(
+            matches!(
+                result,
+                Err(ProductWorkflowError::OutboundTargetNotDirectMessage)
+            ),
+            "shared channel + require=true must return OutboundTargetNotDirectMessage"
+        );
+    }
+
+    #[test]
+    fn enforce_direct_message_shared_channel_require_false_returns_ok() {
+        let install = "test-install";
+        let agent = "test-agent";
+        let binding_ref = test_slack_shared_channel_binding_ref(install, agent);
+        let result = enforce_direct_message_if_required(&binding_ref, false);
+        assert!(
+            result.is_ok(),
+            "shared channel + require=false must not be rejected"
+        );
+    }
+
+    #[test]
+    fn enforce_direct_message_dm_binding_require_true_returns_ok() {
+        let install = "test-install";
+        let agent = "test-agent";
+        let binding_ref = test_slack_binding_ref(install, agent);
+        let result = enforce_direct_message_if_required(&binding_ref, true);
+        assert!(
+            result.is_ok(),
+            "personal DM binding + require=true must not be rejected"
+        );
+    }
 }

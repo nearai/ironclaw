@@ -297,7 +297,8 @@ fn delivery_failure_kind_for_workflow_error(error: &ProductWorkflowError) -> Del
         ProductWorkflowError::BindingAccessDenied
         | ProductWorkflowError::BindingRequired { .. }
         | ProductWorkflowError::UnknownInstallation
-        | ProductWorkflowError::InvalidBindingRequest { .. } => DeliveryFailureKind::Rejected,
+        | ProductWorkflowError::InvalidBindingRequest { .. }
+        | ProductWorkflowError::OutboundTargetNotDirectMessage => DeliveryFailureKind::Rejected,
         _ => DeliveryFailureKind::Unknown,
     }
 }

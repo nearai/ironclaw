@@ -245,6 +245,44 @@ impl ProductOutboundTargetResolver for FakeProductOutboundTargetResolver {
     }
 }
 
+/// A resolver that returns `OutboundTargetNotDirectMessage` when
+/// `require_direct_message == true`, and succeeds otherwise.  Used to verify
+/// that the `require_direct_message_target` flag threads from the delivery
+/// request all the way through to the resolver and produces the right
+/// `DeliveryFailureKind::Rejected` audit classification.
+#[derive(Default)]
+struct DmRequiringFakeProductOutboundTargetResolver {
+    calls: Mutex<Vec<(ReplyTargetBindingRef, bool)>>,
+}
+
+impl DmRequiringFakeProductOutboundTargetResolver {
+    fn calls(&self) -> Vec<(ReplyTargetBindingRef, bool)> {
+        self.calls.lock().expect("dm resolver lock").clone()
+    }
+}
+
+#[async_trait]
+impl ProductOutboundTargetResolver for DmRequiringFakeProductOutboundTargetResolver {
+    async fn resolve_product_outbound_target_metadata(
+        &self,
+        target: &ironclaw_outbound::ValidatedReplyTargetBinding,
+        require_direct_message: bool,
+    ) -> Result<VerifiedProductOutboundTargetMetadata, ProductWorkflowError> {
+        self.calls
+            .lock()
+            .expect("dm resolver lock")
+            .push((target.target().clone(), require_direct_message));
+        if require_direct_message {
+            return Err(ProductWorkflowError::OutboundTargetNotDirectMessage);
+        }
+        Ok(VerifiedProductOutboundTargetMetadata {
+            external_conversation_ref: ExternalConversationRef::new(None, "tg-chat-dm", None, None)
+                .expect("valid external conversation"),
+            external_actor_ref: None,
+        })
+    }
+}
+
 #[derive(Default)]
 struct StatusFailingOutboundStore {
     inner: InMemoryOutboundStateStore,
@@ -1666,5 +1704,124 @@ async fn no_delivery_system_event_does_not_call_render_or_egress() {
             .await
             .unwrap()
             .is_empty()
+    );
+}
+
+// ── require_direct_message_target flag threading ──────────────────────────────
+//
+// Verify that the flag is forwarded to the resolver and that a resolver
+// returning `OutboundTargetNotDirectMessage` maps to `Rejected` in the audit
+// trail (Fix 1 + Fix 5 contract).
+
+#[tokio::test]
+async fn require_direct_message_true_propagates_to_resolver_and_maps_to_rejected() {
+    let scope = scope();
+    let store = InMemoryOutboundStateStore::default();
+    let validator = FakeReplyTargetBindingValidator::default();
+    validator.allow(validated_reply_target());
+    let preferences = FakePreferenceRepository::default();
+    seed_preference(&preferences, &scope);
+    let resolver = DmRequiringFakeProductOutboundTargetResolver::default();
+    let policy = configured_policy(&store, &validator);
+    let adapter = telegram_adapter();
+    let egress = FakeProtocolHttpEgress::new(["api.telegram.org".to_string()]);
+    let sink = FakeOutboundDeliverySink::new();
+
+    let err = prepare_and_render_product_outbound(
+        &policy,
+        &preferences,
+        &resolver,
+        ProductOutboundDeliveryRequest {
+            delivery: delivery_request(scope.clone()),
+            payload: final_reply_payload(),
+            projection_cursor: ProjectionCursor::new("cursor:dm-required-true")
+                .expect("valid cursor"),
+            adapter: &adapter,
+            egress: &egress,
+            delivery_sink: &sink,
+            require_direct_message_target: true,
+        },
+    )
+    .await
+    .expect_err("require_direct_message=true with non-DM resolver must fail");
+
+    // The error must be Workflow { source: OutboundTargetNotDirectMessage }.
+    assert!(
+        matches!(
+            err,
+            ironclaw_product_workflow::ProductOutboundDeliveryError::Workflow {
+                source: ProductWorkflowError::OutboundTargetNotDirectMessage,
+                status_update_error: None,
+                ..
+            }
+        ),
+        "unexpected error: {err:?}"
+    );
+    // The flag must have been forwarded to the resolver.
+    let calls = resolver.calls();
+    assert_eq!(calls.len(), 1);
+    assert!(
+        calls[0].1,
+        "require_direct_message must be true at resolver"
+    );
+    // Audit trail must record Rejected (not Unknown).
+    let attempts = store.list_delivery_attempts(scope).await.unwrap();
+    assert_eq!(attempts.len(), 1);
+    assert_eq!(
+        attempts[0].failure_kind,
+        Some(ironclaw_outbound::DeliveryFailureKind::Rejected),
+        "OutboundTargetNotDirectMessage must map to Rejected, not Unknown"
+    );
+}
+
+#[tokio::test]
+async fn require_direct_message_false_does_not_trigger_dm_rejection() {
+    let scope = scope();
+    let store = InMemoryOutboundStateStore::default();
+    let validator = FakeReplyTargetBindingValidator::default();
+    validator.allow(validated_reply_target());
+    let preferences = FakePreferenceRepository::default();
+    seed_preference(&preferences, &scope);
+    let resolver = DmRequiringFakeProductOutboundTargetResolver::default();
+    let policy = configured_policy(&store, &validator);
+    let adapter = telegram_adapter();
+    let egress = FakeProtocolHttpEgress::new(["api.telegram.org".to_string()]);
+    egress.allow_credential_handle("telegram_bot_token");
+    let sink = FakeOutboundDeliverySink::new();
+
+    let outcome = prepare_and_render_product_outbound(
+        &policy,
+        &preferences,
+        &resolver,
+        ProductOutboundDeliveryRequest {
+            delivery: delivery_request(scope.clone()),
+            payload: final_reply_payload(),
+            projection_cursor: ProjectionCursor::new("cursor:dm-required-false")
+                .expect("valid cursor"),
+            adapter: &adapter,
+            egress: &egress,
+            delivery_sink: &sink,
+            require_direct_message_target: false,
+        },
+    )
+    .await
+    .expect("require_direct_message=false must not trigger DM rejection");
+
+    assert!(
+        matches!(outcome, ProductOutboundDeliveryOutcome::Rendered { .. }),
+        "unexpected outcome: {outcome:?}"
+    );
+    // Flag must have been forwarded as false.
+    let calls = resolver.calls();
+    assert_eq!(calls.len(), 1);
+    assert!(
+        !calls[0].1,
+        "require_direct_message must be false at resolver"
+    );
+    let attempts = store.list_delivery_attempts(scope).await.unwrap();
+    assert_eq!(attempts.len(), 1);
+    assert_eq!(
+        attempts[0].status,
+        ironclaw_outbound::OutboundDeliveryStatus::Delivered
     );
 }
