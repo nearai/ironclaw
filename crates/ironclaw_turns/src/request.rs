@@ -11,9 +11,10 @@ pub type TurnTimestamp = DateTime<Utc>;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum AuthResumeDisposition {
-    /// The user explicitly declined the auth gate. The executor surfaces this to
-    /// the model as an authorization failure rather than re-dispatching the gate.
+pub enum GateResumeDisposition {
+    /// The user explicitly declined the gate (auth OR approval). The executor
+    /// surfaces this to the model as a non-retryable authorization failure rather
+    /// than re-dispatching the gate.
     ///
     /// New variants (e.g. `Deferred`) may be added here as needs arise.
     Denied,
@@ -104,8 +105,12 @@ pub struct ResumeTurnRequest {
     pub idempotency_key: IdempotencyKey,
     #[serde(default, skip_serializing_if = "ResumeTurnPrecondition::is_default")]
     pub precondition: ResumeTurnPrecondition,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub auth_resume_disposition: Option<AuthResumeDisposition>,
+    #[serde(
+        rename = "auth_resume_disposition",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub resume_disposition: Option<GateResumeDisposition>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -129,7 +134,7 @@ mod tests {
 
     use super::*;
 
-    fn make_resume_request(disposition: Option<AuthResumeDisposition>) -> ResumeTurnRequest {
+    fn make_resume_request(disposition: Option<GateResumeDisposition>) -> ResumeTurnRequest {
         ResumeTurnRequest {
             scope: TurnScope {
                 tenant_id: TenantId::from_trusted("tenant:test".to_string()),
@@ -146,32 +151,31 @@ mod tests {
                 .expect("valid reply target ref"),
             idempotency_key: IdempotencyKey::new("idempotency-key").expect("valid idempotency key"),
             precondition: ResumeTurnPrecondition::default(),
-            auth_resume_disposition: disposition,
+            resume_disposition: disposition,
         }
     }
 
     #[test]
-    fn auth_resume_disposition_denied_round_trips() {
-        let disposition = AuthResumeDisposition::Denied;
+    fn gate_resume_disposition_denied_round_trips() {
+        let disposition = GateResumeDisposition::Denied;
         let json = serde_json::to_string(&disposition).expect("serialize");
         assert!(json.contains("denied"), "wire value is snake_case: {json}");
-        let decoded: AuthResumeDisposition = serde_json::from_str(&json).expect("deserialize");
+        let decoded: GateResumeDisposition = serde_json::from_str(&json).expect("deserialize");
         assert_eq!(disposition, decoded);
     }
 
-    /// Asserts the `#[serde(default, skip_serializing_if = "Option::is_none")]`
-    /// contract on `ResumeTurnRequest.auth_resume_disposition`:
+    /// Asserts the serde contract on `ResumeTurnRequest.resume_disposition`:
     ///
     /// 1. **Backward-compat deserialize**: a JSON object for a full
     ///    `ResumeTurnRequest` that omits the `auth_resume_disposition` key must
-    ///    deserialize with `auth_resume_disposition == None`.
-    /// 2. **Absent-field serialize**: when `auth_resume_disposition` is `None`,
+    ///    deserialize with `resume_disposition == None`.
+    /// 2. **Absent-field serialize**: when `resume_disposition` is `None`,
     ///    serializing the struct must NOT emit the `auth_resume_disposition` key.
-    /// 3. **Some round-trip**: when `auth_resume_disposition` is `Some(Denied)`,
+    /// 3. **Some round-trip**: when `resume_disposition` is `Some(Denied)`,
     ///    the key is present in serialized JSON as the snake_case string `"denied"`
     ///    and round-trips correctly.
     #[test]
-    fn resume_turn_request_auth_resume_disposition_serde_contract() {
+    fn resume_turn_request_resume_disposition_serde_contract() {
         // --- 1. Backward-compat: omitted key → None ---
         let base = make_resume_request(None);
         let mut json_value = serde_json::to_value(&base).expect("serialize base request");
@@ -183,7 +187,7 @@ mod tests {
         let deserialized: ResumeTurnRequest = serde_json::from_value(json_value)
             .expect("deserialize without auth_resume_disposition");
         assert_eq!(
-            deserialized.auth_resume_disposition, None,
+            deserialized.resume_disposition, None,
             "omitted auth_resume_disposition key must default to None"
         );
 
@@ -199,7 +203,7 @@ mod tests {
         );
 
         // --- 3. Some round-trip: Denied (unit variant) ---
-        let disposition = AuthResumeDisposition::Denied;
+        let disposition = GateResumeDisposition::Denied;
         let some_request = make_resume_request(Some(disposition.clone()));
         let some_json = serde_json::to_value(&some_request).expect("serialize Some request");
         let disposition_value = some_json
@@ -211,14 +215,61 @@ mod tests {
         assert_eq!(
             disposition_value,
             &serde_json::Value::String("denied".to_string()),
-            "auth_resume_disposition must serialize as snake_case string 'denied': {disposition_value}"
+            "resume_disposition must serialize under the legacy key 'auth_resume_disposition' as 'denied': {disposition_value}"
         );
         let roundtrip: ResumeTurnRequest =
             serde_json::from_value(some_json).expect("deserialize Some request");
         assert_eq!(
-            roundtrip.auth_resume_disposition,
+            roundtrip.resume_disposition,
             Some(disposition),
-            "auth_resume_disposition must round-trip correctly"
+            "resume_disposition must round-trip correctly"
+        );
+    }
+
+    /// Proves that a `ResumeTurnRequest` serialized with the OLD wire key
+    /// `"auth_resume_disposition"` (from before the rename to `resume_disposition`)
+    /// still deserializes into the new `resume_disposition` field, and that a
+    /// missing field defaults to `None`.
+    ///
+    /// Strategy: round-trip through `make_resume_request` (gives us a valid
+    /// struct), then overwrite/inject the key in the JSON map to simulate
+    /// what pre-rename code would have written.
+    #[test]
+    fn resume_disposition_deserializes_legacy_auth_key() {
+        // --- Part 1: old key "auth_resume_disposition" lands on resume_disposition ---
+        // Start from a valid serialized request (no disposition set).
+        let base = make_resume_request(None);
+        let mut json_value = serde_json::to_value(&base).expect("serialize base");
+        // Inject the old wire key with the "denied" variant value — as pre-rename
+        // code would have written it.
+        json_value.as_object_mut().expect("object").insert(
+            "auth_resume_disposition".to_string(),
+            serde_json::json!("denied"),
+        );
+
+        let deserialized: ResumeTurnRequest =
+            serde_json::from_value(json_value).expect("legacy JSON must deserialize");
+        assert_eq!(
+            deserialized.resume_disposition,
+            Some(GateResumeDisposition::Denied),
+            "legacy 'auth_resume_disposition' key must deserialize into resume_disposition"
+        );
+
+        // --- Part 2: completely missing field defaults to None ---
+        let base_none = make_resume_request(None);
+        let mut json_none = serde_json::to_value(&base_none).expect("serialize base_none");
+        // Remove the key entirely (it won't be present for None due to skip_serializing_if,
+        // but remove defensively in case the serializer ever changes).
+        json_none
+            .as_object_mut()
+            .expect("object")
+            .remove("auth_resume_disposition");
+
+        let deserialized_none: ResumeTurnRequest =
+            serde_json::from_value(json_none).expect("missing-field JSON must deserialize");
+        assert_eq!(
+            deserialized_none.resume_disposition, None,
+            "missing auth_resume_disposition key must default to None"
         );
     }
 }

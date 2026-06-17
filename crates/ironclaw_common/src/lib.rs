@@ -23,6 +23,7 @@ pub use attachment::{AttachmentKind, AttachmentRef, IncomingAttachment, normaliz
 pub use attachment_format::{
     AttachmentFormat, ExtractorId, accept_attribute, accept_tokens, all_formats,
     canonical_extension, extractor_for_mime, is_supported_mime, kind_for_mime, lookup,
+    mime_for_extension,
 };
 pub use event::{
     AppEvent, CodeExecutionFailureCategory, JobResultStatus, OnboardingStateDto, PlanStepDto,

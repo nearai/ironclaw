@@ -106,7 +106,7 @@ impl ProductAuthTurnGateResumeDispatcher {
                 reply_target_binding_ref,
                 idempotency_key,
                 precondition: ResumeTurnPrecondition::BlockedAuthGate,
-                auth_resume_disposition: None,
+                resume_disposition: None,
             })
             .await
             .map_err(map_auth_resume_error)?;
@@ -499,7 +499,7 @@ mod tests {
             failure: None,
             event_cursor: EventCursor::default(),
             product_context: None,
-            auth_resume_disposition: None,
+            resume_disposition: None,
         }
     }
 

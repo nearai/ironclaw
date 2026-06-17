@@ -4,9 +4,65 @@ import test from "node:test";
 import {
   automationSummary,
   filterAutomations,
-  normalizeAutomations,
-  scheduleLabel,
+  normalizeAutomations as normalizeAutomationsRaw,
+  scheduleLabel as scheduleLabelRaw,
 } from "./automations-presenters.js";
+
+// Schedule labels are now localized: the presenter takes a translator + locale.
+// Mirror the en.js `automations.schedule.*` templates so these tests exercise
+// the real key→template→interpolation path and assert human-readable English.
+const EN_SCHEDULE = {
+  "automations.schedule.custom": "Custom schedule",
+  "automations.schedule.everyMinute": "Every minute",
+  "automations.schedule.everyMinutes": "Every {count} minutes",
+  "automations.schedule.hourlyAt": "Hourly at :{minute}",
+  "automations.schedule.everyDayAt": "Every day at {time}",
+  "automations.schedule.weekdaysAt": "Weekdays at {time}",
+  "automations.schedule.weekdayAt": "{weekday} at {time}",
+  "automations.schedule.monthlyAt": "Day {day} of each month at {time}",
+  "automations.schedule.dateAt": "{date} at {time}",
+  // Status / state / date-fallback labels are now localized too; mirror en.js
+  // so assertions read human English.
+  "automations.state.active": "Active",
+  "automations.state.scheduled": "Scheduled",
+  "automations.state.paused": "Paused",
+  "automations.state.disabled": "Disabled",
+  "automations.state.inactive": "Inactive",
+  "automations.state.completed": "Completed",
+  "automations.state.unknown": "Unknown",
+  "automations.lastStatus.done": "Done",
+  "automations.lastStatus.error": "Error",
+  "automations.lastStatus.running": "Running",
+  "automations.lastStatus.none": "No result",
+  "automations.runStatus.ok": "OK",
+  "automations.runStatus.error": "Error",
+  "automations.runStatus.running": "Running",
+  "automations.runStatus.unknown": "Unknown",
+  "automations.date.unknown": "Unknown",
+  "automations.date.notScheduled": "Not scheduled",
+  "automations.date.noRuns": "No runs yet",
+  "automations.date.unscheduled": "Unscheduled",
+  "automations.date.notSubmitted": "Not submitted",
+  "automations.date.notCompleted": "Not completed",
+  "automations.untitled": "Untitled automation",
+  "automations.successRate.none": "No completed runs",
+  "automations.successRate.visible": "{percent}% visible runs",
+};
+const t = (key, params = {}) =>
+  (EN_SCHEDULE[key] || key).replace(/\{(\w+)\}/g, (m, k) =>
+    params[k] !== undefined ? params[k] : m,
+  );
+// Intl may separate the clock time from AM/PM with a narrow no-break space
+// (U+202F) depending on the ICU build; normalize so assertions are stable.
+const norm = (value) =>
+  typeof value === "string" ? value.replace(/[\u202f\u00a0]/g, " ") : value;
+const scheduleLabel = (cron, timezone, locale = "en") =>
+  norm(scheduleLabelRaw(cron, timezone, t, locale));
+const normalizeAutomations = (response, locale = "en") =>
+  normalizeAutomationsRaw(response, t, locale).map((automation) => ({
+    ...automation,
+    schedule_label: norm(automation.schedule_label),
+  }));
 
 test("normalizeAutomations keeps only schedule rows and avoids raw schedule text", () => {
   const automations = normalizeAutomations({
@@ -111,30 +167,43 @@ test("scheduleLabel presents common recurring schedules in friendly language", (
   assert.equal(scheduleLabel("30 14 * * *"), "Every day at 2:30 PM");
   assert.equal(scheduleLabel("0 30 14 * * *"), "Every day at 2:30 PM");
   assert.equal(scheduleLabel("00 30 14 * * * *"), "Every day at 2:30 PM");
-  assert.equal(scheduleLabel("0 8 * * 1"), "Mondays at 8:00 AM");
-  assert.equal(scheduleLabel("0 8 * * MON"), "Mondays at 8:00 AM");
-  assert.equal(scheduleLabel("0 8 * * 7"), "Sundays at 8:00 AM");
+  assert.equal(scheduleLabel("0 8 * * 1"), "Monday at 8:00 AM");
+  assert.equal(scheduleLabel("0 8 * * MON"), "Monday at 8:00 AM");
+  assert.equal(scheduleLabel("0 8 * * 7"), "Sunday at 8:00 AM");
   assert.equal(scheduleLabel("0 9 * * MON-FRI"), "Weekdays at 9:00 AM");
-  assert.equal(scheduleLabel("0 17 1 * *"), "1st day of each month at 5:00 PM");
-  assert.equal(scheduleLabel("0 17 11 * *"), "11th day of each month at 5:00 PM");
-  assert.equal(scheduleLabel("0 17 12 * *"), "12th day of each month at 5:00 PM");
-  assert.equal(scheduleLabel("0 17 13 * *"), "13th day of each month at 5:00 PM");
+  assert.equal(scheduleLabel("0 17 1 * *"), "Day 1 of each month at 5:00 PM");
+  assert.equal(scheduleLabel("0 17 11 * *"), "Day 11 of each month at 5:00 PM");
+  assert.equal(scheduleLabel("0 17 12 * *"), "Day 12 of each month at 5:00 PM");
+  assert.equal(scheduleLabel("0 17 13 * *"), "Day 13 of each month at 5:00 PM");
   assert.equal(scheduleLabel("0 0 9 1 1 * 2027"), "Jan 1, 2027 at 9:00 AM");
-  assert.equal(scheduleLabel("*/5 * * * *"), "Custom schedule");
+  // Feb 29 with no year must not roll over to Mar 1 (placeholder year must be
+  // a leap year).
+  assert.equal(scheduleLabel("0 0 29 2 *"), "Feb 29 at 12:00 AM");
   assert.equal(scheduleLabel("* 0 9 * * *"), "Custom schedule");
   assert.equal(scheduleLabel("0 24 * * *"), "Custom schedule");
   assert.equal(scheduleLabel("0 0 32 * *"), "Custom schedule");
   assert.equal(scheduleLabel("0 0 * 13 *"), "Custom schedule");
 });
 
+test("scheduleLabel labels sub-hourly and hourly cadences", () => {
+  assert.equal(scheduleLabel("* * * * *"), "Every minute");
+  assert.equal(scheduleLabel("*/1 * * * *"), "Every minute");
+  assert.equal(scheduleLabel("*/5 * * * *"), "Every 5 minutes");
+  assert.equal(scheduleLabel("*/15 * * * *"), "Every 15 minutes");
+  assert.equal(scheduleLabel("0 * * * *"), "Hourly at :00");
+  assert.equal(scheduleLabel("30 * * * *"), "Hourly at :30");
+  // Minute/hour cadences are timezone-independent — no suffix appended.
+  assert.equal(scheduleLabel("*/15 * * * *", "America/New_York"), "Every 15 minutes");
+});
+
 test("scheduleLabel appends timezone suffix when timezone is provided", () => {
   assert.equal(scheduleLabel("0 9 * * *", "America/New_York"), "Every day at 9:00 AM (America/New_York)");
   assert.equal(scheduleLabel("0 9 * * MON-FRI", "Europe/London"), "Weekdays at 9:00 AM (Europe/London)");
-  assert.equal(scheduleLabel("0 9 * * 1", "Asia/Tokyo"), "Mondays at 9:00 AM (Asia/Tokyo)");
-  assert.equal(scheduleLabel("0 17 1 * *", "America/Chicago"), "1st day of each month at 5:00 PM (America/Chicago)");
+  assert.equal(scheduleLabel("0 9 * * 1", "Asia/Tokyo"), "Monday at 9:00 AM (Asia/Tokyo)");
+  assert.equal(scheduleLabel("0 17 1 * *", "America/Chicago"), "Day 1 of each month at 5:00 PM (America/Chicago)");
   assert.equal(scheduleLabel("0 0 9 1 1 * 2027", "UTC"), "Jan 1, 2027 at 9:00 AM (UTC)");
   // Custom schedule does not append timezone suffix
-  assert.equal(scheduleLabel("*/5 * * * *", "America/New_York"), "Custom schedule");
+  assert.equal(scheduleLabel("* 0 9 * * *", "America/New_York"), "Custom schedule");
   // No timezone argument — no suffix
   assert.equal(scheduleLabel("0 9 * * *"), "Every day at 9:00 AM");
   // Null/undefined timezone — no suffix

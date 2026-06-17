@@ -57,6 +57,7 @@ export function AutomationsSummaryStrip({ summary }) {
               label=${card.label}
               value=${card.value}
               tone=${card.tone}
+              badgeLabel=${t(`automations.badge.${card.tone}`)}
               detail=${card.detail}
               valueClassName=${card.valueClassName}
               showDivider=${false}
