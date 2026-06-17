@@ -1719,8 +1719,11 @@ async fn turn_runner_worker_completes_queued_run_after_turn_store_reopen() {
 #[tokio::test(flavor = "current_thread")]
 async fn turn_runner_worker_emits_thread_run_correlated_operator_log() {
     let capture = CorrelatedEventCapture::default();
+    // Capture at DEBUG to mirror the operator-logs capture filter: run
+    // lifecycle anchors are `debug!` so they never corrupt a REPL/TUI via the
+    // info-level stderr layer, yet stay captured for the Logs panel.
     let subscriber = tracing_subscriber::registry()
-        .with(LevelFilter::INFO)
+        .with(LevelFilter::DEBUG)
         .with(capture.layer());
     let dispatch = tracing::Dispatch::new(subscriber);
     let _guard = tracing::dispatcher::set_default(&dispatch);

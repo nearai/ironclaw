@@ -960,8 +960,11 @@ async fn production_services_scheduler_and_coordinator_execute_turn_end_to_end()
 #[tokio::test(flavor = "current_thread")]
 async fn scheduler_executor_emits_thread_run_correlated_operator_log() {
     let capture = CorrelatedEventCapture::default();
+    // Capture at DEBUG to mirror the operator-logs capture filter: run
+    // lifecycle anchors are `debug!` so they never corrupt a REPL/TUI via the
+    // info-level stderr layer, yet stay captured for the Logs panel.
     let subscriber = tracing_subscriber::registry()
-        .with(LevelFilter::INFO)
+        .with(LevelFilter::DEBUG)
         .with(capture.layer());
     let dispatch = tracing::Dispatch::new(subscriber);
     let _guard = tracing::dispatcher::set_default(&dispatch);

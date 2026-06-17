@@ -376,7 +376,7 @@ impl TurnRunnerWorker {
         let run_id = claimed.state.run_id;
         let runner_id = claimed.runner_id;
         let lease_token = claimed.lease_token;
-        tracing::info!("turn run started");
+        tracing::debug!("turn run started");
 
         let exit_result = {
             let heartbeat_cancel = CancellationToken::new();
