@@ -532,7 +532,7 @@ impl SlackFinalReplyDeliveryObserver {
             scope,
             actor,
             run_id,
-            gate_ref,
+            Some(gate_ref),
         )
         .await
     }
@@ -1154,15 +1154,16 @@ async fn cancel_auth_blocked_run(
     scope: &TurnScope,
     actor: TurnActor,
     run_id: TurnRunId,
-    gate_ref: &str,
+    gate_ref: Option<&str>,
 ) -> Result<(), SlackFinalReplyDeliveryError> {
     // Cancel the durable AuthFlow record first so it does not linger non-terminal
     // after the run is cancelled (#4952). Owner resolution mirrors
     // `auth_prompt_view_for_blocked_auth`: an explicit turn owner (shared/team
     // subject) wins, else the acting user. This is best-effort cleanliness — a
     // flow-cancel failure must NOT block the run cancellation, which is the
-    // user-visible terminal action.
-    if let Some(canceller) = auth_flow_canceller {
+    // user-visible terminal action. When `gate_ref` is absent there is no flow to
+    // resolve, so the flow cancel is skipped entirely (not encoded as an empty ref).
+    if let (Some(canceller), Some(gate_ref)) = (auth_flow_canceller, gate_ref) {
         let owner_user_id = scope.explicit_owner_user_id().unwrap_or(&actor.user_id);
         if let Err(error) = canceller
             .cancel_blocked_auth_flow(scope, owner_user_id, run_id, gate_ref)
@@ -2198,11 +2199,7 @@ async fn deliver_triggered_run(
                     &scope,
                     actor.clone(),
                     run_id,
-                    state
-                        .gate_ref
-                        .as_ref()
-                        .map(|gate_ref| gate_ref.as_str())
-                        .unwrap_or_default(),
+                    state.gate_ref.as_ref().map(|gate_ref| gate_ref.as_str()),
                 )
                 .await
                 {
@@ -2500,7 +2497,7 @@ async fn triggered_notification_for_state(
                     scope,
                     actor.clone(),
                     run_id,
-                    gate_ref.as_str(),
+                    Some(gate_ref.as_str()),
                 )
                 .await?;
                 Ok(Some(SlackActionableNotification {
@@ -3251,6 +3248,27 @@ mod tests {
         outbound: Arc<InMemoryOutboundStateStore>,
         installation_id: &str,
     ) -> SlackFinalReplyDeliveryServices {
+        make_services_with_canceller(
+            coordinator,
+            thread_service,
+            egress,
+            outbound,
+            installation_id,
+            None,
+        )
+    }
+
+    /// Like [`make_services`] but threads in an explicit `auth_flow_canceller`.
+    /// Used by triggered-path tests that need to assert `BlockedAuthFlowCanceller`
+    /// is called (or not called) when the triggered delivery hits a `BlockedAuth` state.
+    fn make_services_with_canceller(
+        coordinator: Arc<dyn TurnCoordinator>,
+        thread_service: Arc<dyn ironclaw_threads::SessionThreadService>,
+        egress: Arc<FakeProtocolHttpEgress>,
+        outbound: Arc<InMemoryOutboundStateStore>,
+        installation_id: &str,
+        auth_flow_canceller: Option<Arc<dyn BlockedAuthFlowCanceller>>,
+    ) -> SlackFinalReplyDeliveryServices {
         SlackFinalReplyDeliveryServices {
             binding_service: Arc::new(TestNoopConversationBindingService),
             thread_service,
@@ -3262,7 +3280,7 @@ mod tests {
             egress,
             delivery_sink: Arc::new(FakeOutboundDeliverySink::default()),
             auth_challenges: None,
-            auth_flow_canceller: None,
+            auth_flow_canceller,
             approval_requests: None,
         }
     }
@@ -4498,10 +4516,11 @@ mod tests {
             Some(Arc::clone(&recorder) as Arc<dyn BlockedAuthFlowCanceller>),
         );
         let env = envelope(user_message_payload());
+        let submitted_run_id = TurnRunId::new();
         let ack = ProductInboundAck::Accepted {
             accepted_message_ref: AcceptedMessageRef::new("slack:blocked-auth-flow-cancel-test")
                 .expect("ref"),
-            submitted_run_id: TurnRunId::new(),
+            submitted_run_id,
         };
 
         observer.observe_workflow_ack(env, ack).await;
@@ -4521,6 +4540,10 @@ mod tests {
             calls.len(),
             1,
             "auto-deny must cancel the stale auth flow exactly once"
+        );
+        assert_eq!(
+            calls[0].0, submitted_run_id,
+            "canceller must receive the same run_id as the submitted ack"
         );
         assert_eq!(
             calls[0].1, "gate:auth-cancel-test",
@@ -6049,6 +6072,96 @@ mod tests {
         );
     }
 
+    /// Triggered non-OAuth `BlockedAuth` → `cancel_auth_blocked_run` invokes the
+    /// `BlockedAuthFlowCanceller` for the blocked gate (#4952).
+    ///
+    /// Drives the same `triggered_notification_for_state` non-OAuth branch as
+    /// `triggered_non_oauth_auth_denial_records_delivered`, but this time a
+    /// `RecordingBlockedAuthFlowCanceller` is wired so we can assert the stale
+    /// auth-flow record is cancelled.
+    #[tokio::test]
+    async fn triggered_non_oauth_auth_cancels_stale_auth_flow() {
+        let install = "test-install";
+        let gate_ref_str = "gate:triggered-non-oauth-stale-flow";
+        let scope = personal_turn_scope();
+        let run_id = TurnRunId::new();
+        let binding_ref =
+            test_slack_binding_ref(install, scope.agent_id.as_ref().expect("agent").as_str());
+
+        // First poll → BlockedAuth (non-OAuth: no auth_challenges, so no
+        // authorization_url → deny branch in triggered_notification_for_state).
+        // Second poll → Cancelled (terminal, no message → Ok(None)).
+        let coordinator = Arc::new(ScriptedTurnCoordinator::with_states(vec![
+            scripted_state(TurnStatus::BlockedAuth, Some(gate_ref_str)),
+            scripted_state(TurnStatus::Cancelled, None),
+        ]));
+
+        let outbound = Arc::new(InMemoryOutboundStateStore::default());
+        seed_personal_preference(&outbound, &scope, binding_ref).await;
+
+        let egress = Arc::new(FakeProtocolHttpEgress::new(vec!["slack.com".to_string()]));
+        egress.allow_credential_handle("slack_bot_token");
+        // One postMessage for the auth-unavailable notice.
+        egress.program_response(
+            "slack.com",
+            Ok(EgressResponse::new(
+                200,
+                slack_post_ok_json("D456", "noa1.1"),
+            )),
+        );
+
+        let recorder = Arc::new(RecordingBlockedAuthFlowCanceller::default());
+        let delivery_store = Arc::new(InMemoryTriggeredRunDeliveryStore::default());
+        let route_store = Arc::new(InMemoryDeliveredGateRouteStore::default());
+        let services = make_services_with_canceller(
+            coordinator.clone(),
+            Arc::new(InMemorySessionThreadService::default()),
+            egress.clone(),
+            outbound,
+            install,
+            Some(Arc::clone(&recorder) as Arc<dyn BlockedAuthFlowCanceller>),
+        );
+        let settings = SlackFinalReplyDeliverySettings {
+            poll_interval: std::time::Duration::ZERO,
+            max_wait: std::time::Duration::from_secs(5),
+            max_concurrent_deliveries: NonZeroUsize::new(1).unwrap(),
+            max_pending_deliveries: NonZeroUsize::new(8).unwrap(),
+        };
+        let driver = TriggeredRunDeliveryDriver::with_settings(
+            services,
+            settings,
+            delivery_store.clone(),
+            route_store.clone(),
+            scope.agent_id.clone().expect("test scope has agent"),
+        );
+
+        let fire = minimal_trigger_fire(None);
+        driver
+            .on_trigger_submitted(fire, run_id, scope.clone())
+            .await;
+        wait_for_delivery_record(&delivery_store, run_id).await;
+
+        // The stale auth flow must have been cancelled exactly once.
+        let calls = recorder
+            .calls
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        assert_eq!(
+            calls.len(),
+            1,
+            "triggered non-OAuth auth deny must cancel the stale auth flow exactly once; got {} calls",
+            calls.len()
+        );
+        assert_eq!(
+            calls[0].0, run_id,
+            "canceller must receive the triggered run's run_id"
+        );
+        assert_eq!(
+            calls[0].1, gate_ref_str,
+            "canceller must receive the blocked gate_ref"
+        );
+    }
+
     /// OAuth backstop cancel-failure path: when `cancel_auth_blocked_run` fails in
     /// the `OAuthTargetNotDm` error arm, the outcome must be `Failed` and NO
     /// `/api/chat.delete` calls must be made (we must not strip the auth prompt
@@ -6151,6 +6264,108 @@ mod tests {
             coordinator.cancel_call_count(),
             1,
             "cancel_run must be attempted exactly once in the backstop arm"
+        );
+    }
+
+    /// OAuth `OAuthTargetNotDm` backstop → `BlockedAuthFlowCanceller` is invoked
+    /// to cancel the stale auth-flow record alongside the run (#4952).
+    ///
+    /// Models on `triggered_oauth_auth_backstop_cancel_failure_records_failed` but
+    /// wires a `RecordingBlockedAuthFlowCanceller` (no cancel_run failure) so the
+    /// backstop succeeds and we can assert the canceller was called for the correct
+    /// gate_ref.
+    #[tokio::test]
+    async fn triggered_oauth_backstop_cancels_stale_auth_flow() {
+        let install = "test-install";
+        let gate_ref_str = "gate:oauth-backstop-stale-flow";
+        let scope = personal_turn_scope();
+        let run_id = TurnRunId::new();
+
+        // Use a SHARED CHANNEL binding ref so the OAuth backstop trips
+        // (OAuthTargetNotDm is returned before any HTTP post is made).
+        let binding_ref = test_slack_shared_channel_binding_ref(
+            install,
+            scope.agent_id.as_ref().expect("agent").as_str(),
+        );
+
+        // First poll → BlockedAuth; second poll → Cancelled (after cancel_run).
+        let coordinator = Arc::new(ScriptedTurnCoordinator::with_states(vec![
+            scripted_state(TurnStatus::BlockedAuth, Some(gate_ref_str)),
+            scripted_state(TurnStatus::Cancelled, None),
+        ]));
+        // cancel_run must succeed so the backstop posts the unavailable notice.
+
+        let outbound = Arc::new(InMemoryOutboundStateStore::default());
+        // Seed preference with the shared-channel binding so the OAuth guard trips.
+        seed_personal_preference(&outbound, &scope, binding_ref).await;
+
+        let egress = Arc::new(FakeProtocolHttpEgress::new(vec!["slack.com".to_string()]));
+        egress.allow_credential_handle("slack_bot_token");
+        // One postMessage for the auth-unavailable notice (the backstop posts
+        // after a successful cancel_run).
+        egress.program_response(
+            "slack.com",
+            Ok(EgressResponse::new(
+                200,
+                slack_post_ok_json("C0SHARED", "obs2.1"),
+            )),
+        );
+
+        let recorder = Arc::new(RecordingBlockedAuthFlowCanceller::default());
+        let delivery_store = Arc::new(InMemoryTriggeredRunDeliveryStore::default());
+        let route_store = Arc::new(InMemoryDeliveredGateRouteStore::default());
+        let mut services = make_services_with_canceller(
+            coordinator.clone(),
+            Arc::new(InMemorySessionThreadService::default()),
+            egress.clone(),
+            outbound,
+            install,
+            Some(Arc::clone(&recorder) as Arc<dyn BlockedAuthFlowCanceller>),
+        );
+        // Wire up an OAuth challenge provider so the BlockedAuth state generates
+        // an authorization_url, triggering the DM-only guard.
+        services.auth_challenges = Some(Arc::new(OAuthAuthChallengeProvider {
+            url: "https://provider.example/oauth-backstop-stale".to_string(),
+        }));
+
+        let settings = SlackFinalReplyDeliverySettings {
+            poll_interval: std::time::Duration::ZERO,
+            max_wait: std::time::Duration::from_secs(5),
+            max_concurrent_deliveries: NonZeroUsize::new(1).unwrap(),
+            max_pending_deliveries: NonZeroUsize::new(8).unwrap(),
+        };
+        let driver = TriggeredRunDeliveryDriver::with_settings(
+            services,
+            settings,
+            delivery_store.clone(),
+            route_store.clone(),
+            scope.agent_id.clone().expect("test scope has agent"),
+        );
+
+        let fire = minimal_trigger_fire(None);
+        driver
+            .on_trigger_submitted(fire, run_id, scope.clone())
+            .await;
+        wait_for_delivery_record(&delivery_store, run_id).await;
+
+        // The stale auth flow must have been cancelled exactly once.
+        let calls = recorder
+            .calls
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        assert_eq!(
+            calls.len(),
+            1,
+            "OAuth backstop must cancel the stale auth flow exactly once; got {} calls",
+            calls.len()
+        );
+        assert_eq!(
+            calls[0].0, run_id,
+            "canceller must receive the triggered run's run_id"
+        );
+        assert_eq!(
+            calls[0].1, gate_ref_str,
+            "canceller must receive the blocked gate_ref"
         );
     }
 
