@@ -227,12 +227,12 @@ mod tests {
         // write-protection only. See profile design §4a.
         let stable = WorkspaceIdentityContextSource::stable_identity_paths();
         assert!(
-            !stable.iter().any(|p| *p == paths::PROFILE),
+            !stable.contains(&paths::PROFILE),
             "context/profile.json must be consumed by the typed producer, not prose-injected; found: {stable:?}"
         );
         let personal = WorkspaceIdentityContextSource::personal_identity_paths();
         assert!(
-            !personal.iter().any(|p| *p == paths::PROFILE),
+            !personal.contains(&paths::PROFILE),
             "context/profile.json must not be in personal identity paths either; found: {personal:?}"
         );
     }
