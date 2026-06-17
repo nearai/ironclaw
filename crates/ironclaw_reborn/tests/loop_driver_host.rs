@@ -1765,19 +1765,19 @@ async fn turn_runner_worker_emits_thread_run_correlated_operator_log() {
     );
 
     let cancel = tokio_util::sync::CancellationToken::new();
-    let cancel_clone = cancel.clone();
-    let handle = tokio::spawn(async move { worker.run(cancel_clone).await });
-
-    wait_for_run_status(
-        turn_store.as_ref(),
-        &fixture.context.scope,
-        run_id,
-        TurnStatus::Completed,
-        "turn runner should complete queued run for operator log correlation",
-    )
-    .await;
-    cancel.cancel();
-    handle.await.unwrap();
+    let worker_done = worker.run(cancel.clone());
+    let completion = async {
+        wait_for_run_status(
+            turn_store.as_ref(),
+            &fixture.context.scope,
+            run_id,
+            TurnStatus::Completed,
+            "turn runner should complete queued run for operator log correlation",
+        )
+        .await;
+        cancel.cancel();
+    };
+    tokio::join!(worker_done, completion);
 
     assert!(
         capture.contains(
