@@ -185,6 +185,20 @@ pub struct SlackHostBetaRuntimeConfig {
     pub agent_id: AgentId,
     pub project_id: Option<ProjectId>,
     pub operator_user_id: UserId,
+    pub legacy_setup: Option<SlackHostBetaLegacySetup>,
+}
+
+#[derive(Debug, Clone)]
+pub struct SlackHostBetaLegacySetup {
+    pub installation_id: String,
+    pub team_id: String,
+    pub api_app_id: String,
+    pub slack_user_id: Option<String>,
+    pub user_id: UserId,
+    pub shared_subject_user_id: Option<UserId>,
+    pub channel_routes: Vec<SlackHostBetaChannelRoute>,
+    pub signing_secret: SecretString,
+    pub bot_token: SecretString,
 }
 
 impl SlackHostBetaRuntimeConfig {
@@ -199,7 +213,13 @@ impl SlackHostBetaRuntimeConfig {
             agent_id,
             project_id,
             operator_user_id,
+            legacy_setup: None,
         }
+    }
+
+    pub fn with_legacy_setup(mut self, legacy_setup: SlackHostBetaLegacySetup) -> Self {
+        self.legacy_setup = Some(legacy_setup);
+        self
     }
 }
 
@@ -685,11 +705,11 @@ pub fn build_slack_host_beta_mounts(
     })
 }
 
-pub fn build_slack_host_beta_runtime_mounts(
+pub async fn build_slack_host_beta_runtime_mounts(
     runtime: &RebornRuntime,
     config: SlackHostBetaRuntimeConfig,
 ) -> Result<SlackHostBetaMounts, SlackHostBetaBuildError> {
-    runtime_setup::build_runtime_mounts(runtime, config)
+    runtime_setup::build_runtime_mounts(runtime, config).await
 }
 
 pub fn build_slack_events_route_mount_with_actor_user_resolver(

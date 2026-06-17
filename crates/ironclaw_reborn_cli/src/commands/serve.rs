@@ -361,6 +361,7 @@ impl ServeCommand {
             let slack_mounts = if let Some(slack_config) = slack_host_beta_config {
                 Some(
                     build_slack_host_beta_runtime_mounts(&runtime, slack_config)
+                        .await
                         .context("failed to compose Slack host-beta routes")?,
                 )
             } else {

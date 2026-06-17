@@ -41,8 +41,9 @@ pub use config_file::{
     BootSection, BudgetSection, DefaultLlmSlotUpdate, DefaultLlmSlotUpdateSession, DriversSection,
     HarnessSection, IdentitySection, LlmSlotFieldUpdate, LlmSlotSelection, PolicySection,
     REBORN_CONFIG_API_VERSION, RebornConfigFile, RebornConfigFileError,
-    RebornConfigFileUpdateError, RunnerSection, SlackSection, StorageBackend, StorageSection,
-    TriggerPollerConfigSection, begin_default_llm_slot_update, update_default_llm_slot,
+    RebornConfigFileUpdateError, RunnerSection, SlackChannelRouteSection, SlackSection,
+    StorageBackend, StorageSection, TriggerPollerConfigSection, begin_default_llm_slot_update,
+    update_default_llm_slot,
 };
 pub use config_seed::{
     RebornConfigSeedError, RebornConfigSeedOutcome, seed_default_config_file_if_missing,
