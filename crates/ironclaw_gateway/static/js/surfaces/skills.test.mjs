@@ -90,6 +90,8 @@ test("skill install validation clears name error when the name becomes valid", (
 
   harness.context.installSkillFromForm();
 
+  assert.equal(harness.installs.length, 0);
+  assert.equal(harness.toasts.length, 1);
   assert.equal(error.hidden, false);
   assert.equal(error.textContent, "Skill name is required");
   assert.equal(name.getAttribute("aria-invalid"), "true");
@@ -100,6 +102,9 @@ test("skill install validation clears name error when the name becomes valid", (
   assert.equal(error.hidden, true);
   assert.equal(error.textContent, "");
   assert.equal(name.getAttribute("aria-invalid"), null);
+
+  harness.context.installSkillFromForm();
+  assert.equal(harness.installs.length, 1);
 });
 
 test("skill install validation clears url error when the url becomes valid", () => {
@@ -112,6 +117,8 @@ test("skill install validation clears url error when the url becomes valid", () 
 
   harness.context.installSkillFromForm();
 
+  assert.equal(harness.installs.length, 0);
+  assert.equal(harness.toasts.length, 1);
   assert.equal(error.hidden, false);
   assert.equal(error.textContent, "URL must use HTTPS");
   assert.equal(url.getAttribute("aria-invalid"), "true");
@@ -122,4 +129,7 @@ test("skill install validation clears url error when the url becomes valid", () 
   assert.equal(error.hidden, true);
   assert.equal(error.textContent, "");
   assert.equal(url.getAttribute("aria-invalid"), null);
+
+  harness.context.installSkillFromForm();
+  assert.equal(harness.installs.length, 1);
 });

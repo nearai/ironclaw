@@ -127,6 +127,8 @@ jobs:
         run: |
           find crates/ironclaw_gateway/static/js -type f -name '*.js' \
             -exec node --check {} +
+      - name: Run gateway JS tests
+        run: node --test crates/ironclaw_gateway/static/js/**/*.test.mjs
 
   deny-check:
     name: cargo-deny

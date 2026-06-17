@@ -459,9 +459,13 @@ function installSkillFromForm() {
   var url = urlInput.value.trim() || null;
   var hasValidName = validateSkillInstallName();
   var hasValidUrl = validateSkillInstallUrl();
-  if (!hasValidName) { showToast(I18n.t('skills.nameRequired'), 'error'); }
-  if (!hasValidUrl) { showToast(I18n.t('skills.httpsRequired'), 'error'); }
-  if (!hasValidName || !hasValidUrl) return;
+  if (!hasValidName || !hasValidUrl) {
+    showToast(
+      I18n.t(!hasValidName ? 'skills.nameRequired' : 'skills.httpsRequired'),
+      'error'
+    );
+    return;
+  }
 
   if (!confirm(I18n.t('skills.confirmInstall', { name: name }))) return;
   installSkill(name, url, null);

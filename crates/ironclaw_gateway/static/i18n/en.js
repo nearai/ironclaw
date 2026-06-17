@@ -895,7 +895,9 @@ I18n.register('en', {
 
   // Skills (dynamic)
   'skills.confirmInstallHub': 'Install skill "{name}" from ClawHub?',
+  'skills.nameLabel': 'Skill name',
   'skills.nameRequired': 'Skill name is required',
+  'skills.urlLabel': 'Skill URL',
   'skills.httpsRequired': 'URL must use HTTPS',
   'skills.confirmInstall': 'Install skill "{name}"?',
 

@@ -876,7 +876,9 @@ I18n.register('zh-CN', {
 
   // 技能（动态）
   'skills.confirmInstallHub': '从 ClawHub 安装技能 "{name}"？',
+  'skills.nameLabel': '技能名称',
   'skills.nameRequired': '技能名称是必填项',
+  'skills.urlLabel': '技能 URL',
   'skills.httpsRequired': 'URL 必须使用 HTTPS',
   'skills.confirmInstall': '安装技能 "{name}"？',
 
