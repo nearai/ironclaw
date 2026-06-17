@@ -235,16 +235,15 @@ mod learning {
             name: &str,
             content: &str,
         ) -> Result<String, String> {
-            // Consolidate near-duplicates: the distiller gives the same kind of
-            // task a slightly different name each run, so without this the
-            // user's skill list fills with siblings that never get reused
-            // together. When an existing learned skill covers the same ground,
-            // evolve it in place under its existing name instead of installing a
-            // second one — the self-improvement loop: the model folds the new
-            // evidence (more gotchas, clearer steps, a bumped version) into the
-            // existing skill. `update_skill` requires the document's frontmatter
-            // `name` to equal the target, so the merged content is retargeted.
-            if let Some(existing_name) = self.find_duplicate(&scope, name, content).await {
+            // Self-improvement loop: when this task has been learned before
+            // (the same skill name, or a renamed sibling covering the same
+            // ground), evolve the existing skill in place instead of overwriting
+            // it with a fresh distillation or accreting a near-duplicate. The
+            // model folds the new evidence (more gotchas, clearer steps, a bumped
+            // version) into the existing skill. `update_skill` requires the
+            // document's frontmatter `name` to equal the target, so the merged
+            // content is retargeted.
+            if let Some(existing_name) = self.find_merge_target(&scope, name, content).await {
                 let existing = self
                     .port
                     .read_content_for_scope(scope.clone(), &existing_name)
@@ -310,17 +309,28 @@ mod learning {
     }
 
     impl PortSkillWriter {
-        /// Find an existing learned skill at `scope` that the freshly distilled
-        /// `content` is a near-duplicate of, returning its stored name so the
-        /// caller can refine it in place. Best-effort: a parse/listing failure
-        /// returns `None` (fall through to a normal install).
-        async fn find_duplicate(
+        /// Find the existing learned skill the freshly distilled `content` should
+        /// evolve, returning its stored name so the caller can refine in place.
+        /// Two cases, both routed through refinement (not a plain overwrite):
+        /// an exact-name re-learn of a known skill (the common case — the
+        /// distiller derives the name from the task, so it often repeats), or a
+        /// renamed sibling that's similar enough. Best-effort: a parse/listing
+        /// failure returns `None` (fall through to a fresh install).
+        async fn find_merge_target(
             &self,
             scope: &ResourceScope,
             name: &str,
             content: &str,
         ) -> Option<String> {
             let parsed = parse_skill_md(content).ok()?;
+            let existing = self.port.list_for_scope(scope.clone()).await.ok()?;
+            // Exact-name re-learn of an existing learned skill → refine it.
+            if existing.iter().any(|summary| {
+                matches!(summary.source, ManagedSkillSource::User) && summary.name == name
+            }) {
+                return Some(name.to_string());
+            }
+            // A renamed sibling covering the same ground.
             let new_tokens = skill_token_set(
                 &parsed.manifest.name,
                 &parsed.manifest.activation.keywords,
@@ -329,17 +339,16 @@ mod learning {
             if new_tokens.len() < MIN_DEDUP_TOKENS {
                 return None;
             }
-            let existing = self.port.list_for_scope(scope.clone()).await.ok()?;
             select_duplicate_skill(name, &new_tokens, &existing)
         }
     }
 
     /// Pick the existing learned skill most similar to a candidate token set,
     /// if any clears [`SKILL_DEDUP_SIMILARITY_THRESHOLD`]. Only `User`-source
-    /// skills are merge targets (never system or registry-installed skills),
-    /// and the same-named skill is skipped (that is a plain re-learn, handled by
-    /// the install→update-on-conflict path). Pure so it is unit-testable without
-    /// a filesystem-backed skill port.
+    /// skills are merge targets (never system or registry-installed skills);
+    /// the same-named skill is skipped here because an exact-name re-learn is
+    /// resolved earlier in [`PortSkillWriter::find_merge_target`]. Pure so it is
+    /// unit-testable without a filesystem-backed skill port.
     fn select_duplicate_skill(
         new_name: &str,
         new_tokens: &BTreeSet<String>,
@@ -681,7 +690,11 @@ mod learning {
             .append_assistant_draft(AppendAssistantDraftRequest {
                 scope: scope.clone(),
                 thread_id: thread_id.clone(),
-                turn_run_id: run_id.to_string(),
+                // A DISTINCT turn-run id, NOT the run's own id: the durable
+                // store dedups assistant drafts by `turn_run_id` and returns the
+                // existing one, so reusing `run_id` hands back the run's already
+                // finalized reply and the finalize below fails `MessageNotDraft`.
+                turn_run_id: format!("skill-learned:{run_id}"),
                 content: MessageContent::text(note.clone()),
             })
             .await
@@ -831,7 +844,7 @@ mod learning {
         use super::*;
         use ironclaw_host_api::{AgentId, ThreadId};
         use ironclaw_threads::{
-            EnsureThreadRequest, InMemorySessionThreadService, ThreadHistoryRequest,
+            EnsureThreadRequest, InMemorySessionThreadService, MessageStatus, ThreadHistoryRequest,
         };
         use ironclaw_turns::{EventCursor, TurnStatus};
 
@@ -924,6 +937,13 @@ mod learning {
         // assistant note in the thread so the user sees it from `get_timeline`
         // even when no live SSE/WS stream was connected when distillation
         // finished. (The live bubble is best-effort and ephemeral.)
+        //
+        // The thread is seeded with the run's OWN finalized assistant reply under
+        // the run's `turn_run_id` first, because the durable store dedups
+        // assistant drafts by `turn_run_id`: reusing the run id hands back that
+        // finalized reply and the announce's finalize fails `MessageNotDraft`.
+        // The earlier fresh-thread version of this test missed that divergence
+        // (it appended to an empty thread); a live run surfaced it.
         #[tokio::test]
         async fn appends_durable_learned_skill_note_to_thread() {
             let service: Arc<dyn SessionThreadService> =
@@ -936,6 +956,7 @@ mod learning {
                 mission_id: None,
             };
             let thread_id = ThreadId::new("announce-thread").expect("thread");
+            let run_id = TurnRunId::new();
             service
                 .ensure_thread(EnsureThreadRequest {
                     scope: scope.clone(),
@@ -947,11 +968,31 @@ mod learning {
                 .await
                 .expect("ensure thread");
 
+            // The run's own finalized assistant reply, under `run_id`.
+            let reply = service
+                .append_assistant_draft(AppendAssistantDraftRequest {
+                    scope: scope.clone(),
+                    thread_id: thread_id.clone(),
+                    turn_run_id: run_id.to_string(),
+                    content: MessageContent::text("the run's own reply"),
+                })
+                .await
+                .expect("seed reply draft");
+            service
+                .finalize_assistant_message(
+                    &scope,
+                    &thread_id,
+                    reply.message_id,
+                    MessageContent::text("the run's own reply"),
+                )
+                .await
+                .expect("finalize seeded reply");
+
             announce_learned_skill(
                 service.as_ref(),
                 &scope,
                 &thread_id,
-                TurnRunId::new(),
+                run_id,
                 "file-character-count-roundtrip",
             )
             .await;
@@ -960,16 +1001,26 @@ mod learning {
                 .list_thread_history(ThreadHistoryRequest { scope, thread_id })
                 .await
                 .expect("history");
-            assert!(
-                history.messages.iter().any(|message| {
+            let note = history
+                .messages
+                .iter()
+                .find(|message| {
                     matches!(message.kind, MessageKind::Assistant)
                         && message.content.as_deref().is_some_and(|content| {
                             content.contains("file-character-count-roundtrip")
                                 && content.contains("learned a new skill")
                         })
-                }),
-                "a durable assistant note naming the learned skill must be persisted: {:#?}",
-                history.messages
+                })
+                .expect("a durable learned-skill note must be persisted");
+            // The note is a SEPARATE finalized message, not the run's reply.
+            assert_ne!(
+                note.message_id, reply.message_id,
+                "the note must be its own message, not the run's reply"
+            );
+            assert!(
+                matches!(note.status, MessageStatus::Finalized),
+                "the note must finalize (not stay a draft): {:?}",
+                note.status
             );
         }
 
