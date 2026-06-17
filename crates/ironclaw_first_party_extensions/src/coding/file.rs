@@ -11,8 +11,8 @@ use super::{CodingCapabilityError, CodingCapabilityOutput, CodingCapabilityReque
 
 use super::{
     config::{
-        DEFAULT_LINE_LIMIT, MAX_DIR_ENTRIES, MAX_PATCH_SIZE, MAX_READ_SIZE, MAX_VISITED_ENTRIES,
-        MAX_WRITE_SIZE,
+        DEFAULT_LINE_LIMIT, DEFAULT_READ_MAX_BYTES, MAX_DIR_ENTRIES, MAX_PATCH_SIZE, MAX_READ_SIZE,
+        MAX_VISITED_ENTRIES, MAX_WRITE_SIZE,
     },
     diff_preview::{file_diff_preview, will_use_large_diff_path},
     input_error,
@@ -25,7 +25,10 @@ use super::{
         virtual_to_relative,
     },
     state::{SharedCodingEditLocks, read_scope_key},
-    text::{count_matches, decode_text, encode_text, reject_binary_probe, replace_content},
+    text::{
+        count_matches, decode_text, encode_text, previous_char_boundary, reject_binary_probe,
+        replace_content,
+    },
     types::{ListEntry, MatchMethod, ResolvedPath},
 };
 
@@ -101,24 +104,74 @@ fn read_file_text_output(
     let lines: Vec<&str> = content.lines().collect();
     let total_lines = lines.len();
     let start_line = offset.saturating_sub(1).min(total_lines);
-    let (end_line, truncated_by_default) = if let Some(limit) = limit {
+    let (line_end, truncated_by_default) = if let Some(limit) = limit {
         ((start_line + limit).min(total_lines), false)
     } else if !has_explicit_range && total_lines > DEFAULT_LINE_LIMIT {
         (DEFAULT_LINE_LIMIT.min(total_lines), true)
     } else {
         (total_lines, false)
     };
-    let selected_lines: Vec<String> = lines[start_line..end_line]
-        .iter()
-        .enumerate()
-        .map(|(index, line)| format!("{:>6}│ {}", start_line + index + 1, line))
-        .collect();
+
+    // Render the selected line window with the line-number gutter, enforcing a
+    // byte budget *on top of* the line cap so a handful of very long lines can't
+    // dump hundreds of KB into the context. Truncation always lands on a complete
+    // line; the model resumes past the cut with the returned `next_offset`.
+    let mut rendered: Vec<String> = Vec::new();
+    let mut emitted_bytes = 0usize;
+    let mut truncated_by_bytes = false;
+    for (index, line) in lines[start_line..line_end].iter().enumerate() {
+        let formatted = format!("{:>6}│ {}", start_line + index + 1, line);
+        if rendered.is_empty() && formatted.len() > DEFAULT_READ_MAX_BYTES {
+            // A single line longer than the entire budget (minified blob, wide log
+            // row). Emit it clamped on a UTF-8 boundary rather than returning
+            // nothing, and still advance the cursor so the next read moves past it.
+            let clamp_to = previous_char_boundary(&formatted, DEFAULT_READ_MAX_BYTES);
+            rendered.push(format!("{} …[line truncated]", &formatted[..clamp_to]));
+            truncated_by_bytes = true;
+            break;
+        }
+        // +1 for the newline that joins this line to the previous one.
+        let cost = formatted.len() + usize::from(!rendered.is_empty());
+        if !rendered.is_empty() && emitted_bytes + cost > DEFAULT_READ_MAX_BYTES {
+            truncated_by_bytes = true;
+            break;
+        }
+        emitted_bytes += cost;
+        rendered.push(formatted);
+    }
+
+    let lines_shown = rendered.len();
+    let last_line_shown = start_line + lines_shown;
+    let has_more = last_line_shown < total_lines;
+    let next_offset = has_more.then_some(last_line_shown + 1);
+    let truncated_by = if truncated_by_bytes {
+        Some("bytes")
+    } else if has_more {
+        Some("lines")
+    } else {
+        None
+    };
+
+    let mut body = rendered.join("\n");
+    if let (Some(reason), Some(next)) = (truncated_by, next_offset) {
+        body.push_str(&format!(
+            "\n\n[Showing lines {}-{} of {} ({} limit). Use offset={} to continue.]",
+            start_line + 1,
+            last_line_shown,
+            total_lines,
+            reason,
+            next
+        ));
+    }
 
     json!({
-        "content": selected_lines.join("\n"),
+        "content": body,
         "total_lines": total_lines,
-        "lines_shown": end_line - start_line,
+        "lines_shown": lines_shown,
         "truncated_by_default": truncated_by_default,
+        "truncated": truncated_by.is_some(),
+        "truncated_by": truncated_by,
+        "next_offset": next_offset,
         "path": scoped_path
     })
 }

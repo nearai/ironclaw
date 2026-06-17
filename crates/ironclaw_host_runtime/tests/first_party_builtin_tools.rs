@@ -5325,6 +5325,97 @@ async fn builtin_coding_tools_match_v1_read_write_list_glob_and_grep_shapes() {
 }
 
 #[tokio::test]
+async fn read_file_enforces_byte_budget_on_long_lines_and_offers_continuation() {
+    // A few very long lines: only 6 lines (well under the 2000-line cap) but
+    // ~180 KB total, the shape that let a 310 KB log dump into context and
+    // exhaust the pinchbench turn budget. The byte cap must truncate it.
+    let temp = tempfile::tempdir().unwrap();
+    let wide_line = "x".repeat(30 * 1024);
+    let body = (0..6)
+        .map(|_| wide_line.as_str())
+        .collect::<Vec<_>>()
+        .join("\n");
+    std::fs::write(temp.path().join("wide.log"), format!("{body}\n")).unwrap();
+
+    let (filesystem, mounts) = mounted_filesystem(temp.path(), MountPermissions::read_only());
+    let runtime = runtime_with_filesystem(filesystem);
+    let context = execution_context_with_mounts(all_builtin_capability_ids(), mounts);
+
+    let read = invoke_with_context(
+        &runtime,
+        READ_FILE_CAPABILITY_ID,
+        json!({"path": "/workspace/wide.log"}),
+        context.clone(),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(read["total_lines"], json!(6));
+    assert_eq!(read["truncated"], json!(true));
+    assert_eq!(read["truncated_by"], json!("bytes"));
+    // Stopped well before all 6 lines, and the body stays inside the budget
+    // (+ the short continuation notice).
+    let shown = read["lines_shown"].as_u64().unwrap();
+    assert!(
+        shown >= 1 && shown < 6,
+        "expected partial read, got {shown}"
+    );
+    let content = read["content"].as_str().unwrap();
+    assert!(
+        content.len() <= 64 * 1024 + 256,
+        "body exceeded byte budget: {} bytes",
+        content.len()
+    );
+    let next = read["next_offset"].as_u64().unwrap();
+    assert_eq!(next, shown + 1);
+    assert!(content.contains(&format!("Use offset={next} to continue")));
+
+    // Resuming from next_offset advances past the already-shown lines.
+    let resumed = invoke_with_context(
+        &runtime,
+        READ_FILE_CAPABILITY_ID,
+        json!({"path": "/workspace/wide.log", "offset": next}),
+        context.clone(),
+    )
+    .await
+    .unwrap();
+    let resumed_first = resumed["content"].as_str().unwrap();
+    assert!(resumed_first.starts_with(&format!("{:>6}│", next)));
+}
+
+#[tokio::test]
+async fn read_file_clamps_a_single_line_larger_than_the_whole_budget() {
+    // One line bigger than the entire byte budget must still return something
+    // (clamped on a UTF-8 boundary) and advance the cursor rather than emit empty.
+    let temp = tempfile::tempdir().unwrap();
+    std::fs::write(
+        temp.path().join("blob.txt"),
+        format!("{}\nnext\n", "y".repeat(100 * 1024)),
+    )
+    .unwrap();
+
+    let (filesystem, mounts) = mounted_filesystem(temp.path(), MountPermissions::read_only());
+    let runtime = runtime_with_filesystem(filesystem);
+    let context = execution_context_with_mounts(all_builtin_capability_ids(), mounts);
+
+    let read = invoke_with_context(
+        &runtime,
+        READ_FILE_CAPABILITY_ID,
+        json!({"path": "/workspace/blob.txt"}),
+        context.clone(),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(read["lines_shown"], json!(1));
+    assert_eq!(read["truncated_by"], json!("bytes"));
+    assert_eq!(read["next_offset"], json!(2));
+    let content = read["content"].as_str().unwrap();
+    assert!(content.contains("[line truncated]"));
+    assert!(content.len() <= 64 * 1024 + 256);
+}
+
+#[tokio::test]
 async fn builtin_coding_paths_are_relative_to_requested_root_and_zero_values_match_v1() {
     let temp = tempfile::tempdir().unwrap();
     std::fs::create_dir_all(temp.path().join("src/nested")).unwrap();
