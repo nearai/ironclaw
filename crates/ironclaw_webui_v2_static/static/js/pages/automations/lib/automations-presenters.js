@@ -335,6 +335,24 @@ export function runStatusBreakdown(runs) {
   ].filter((part) => part.count > 0);
 }
 
+// The fully-resolved data the recent-run summary renders: the total label plus
+// one chip per non-empty status (localized text + tone). `RunHistorySummary`
+// maps this 1:1 with no logic of its own, so this function is the single place
+// a status bucket could be dropped — and the place the caller-level test drives.
+export function runSummaryView(runs, t) {
+  const tx = tr(t);
+  const counts = summarizeRuns(runs);
+  const chips = runStatusBreakdown(runs).map((part) => ({
+    ...part,
+    text: tx(`automations.runs.${part.key}`, { count: part.count }),
+  }));
+  return {
+    total: counts.total,
+    totalText: tx("automations.runs.total", { count: counts.total }),
+    chips,
+  };
+}
+
 function successRateLabel(runs, t) {
   const tx = tr(t);
   const terminalRuns = runs.filter((run) => run.status === "ok" || run.status === "error");

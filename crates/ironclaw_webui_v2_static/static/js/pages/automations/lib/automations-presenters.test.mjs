@@ -6,6 +6,7 @@ import {
   filterAutomations,
   normalizeAutomations as normalizeAutomationsRaw,
   runStatusBreakdown,
+  runSummaryView,
   scheduleLabel as scheduleLabelRaw,
   summarizeRuns,
 } from "./automations-presenters.js";
@@ -49,6 +50,12 @@ const EN_SCHEDULE = {
   "automations.untitled": "Untitled automation",
   "automations.successRate.none": "No completed runs",
   "automations.successRate.visible": "{percent}% visible runs",
+  // Run-summary labels (mirror en.js) so runSummaryView assertions read English.
+  "automations.runs.total": "Recent runs: {count}",
+  "automations.runs.ok": "OK: {count}",
+  "automations.runs.error": "Failed: {count}",
+  "automations.runs.running": "Running: {count}",
+  "automations.runs.unknown": "Unknown: {count}",
 };
 const t = (key, params = {}) =>
   (EN_SCHEDULE[key] || key).replace(/\{(\w+)\}/g, (m, k) =>
@@ -516,4 +523,45 @@ test("runStatusBreakdown surfaces every non-empty bucket incl. unknown", () => {
 test("runStatusBreakdown omits zero-count buckets", () => {
   const parts = runStatusBreakdown([{ status: "ok" }]);
   assert.deepEqual(parts.map((part) => part.key), ["ok"]);
+});
+
+// Drives the exact data RunHistorySummary renders (the component maps this 1:1,
+// with no logic of its own). With an unrecognized + a missing status present,
+// the rendered chips must include the localized unknown chip and must sum to
+// the total shown in the header. Guards #4988 at the render path, not just the
+// counting helper.
+test("runSummaryView renders the unknown chip and chips sum to total", () => {
+  const runs = [
+    { status: "ok" },
+    { status: "ok" },
+    { status: "error" },
+    { status: "running" },
+    { status: "mystery-status" }, // unrecognized -> unknown
+    {}, // missing -> unknown
+  ];
+  const view = runSummaryView(runs, t);
+
+  assert.equal(view.total, 6);
+  assert.equal(view.totalText, "Recent runs: 6");
+
+  const unknownChip = view.chips.find((chip) => chip.key === "unknown");
+  assert.ok(unknownChip, "rendered chips must include the unknown bucket");
+  assert.equal(unknownChip.text, "Unknown: 2");
+
+  const renderedTexts = view.chips.map((chip) => chip.text);
+  assert.deepEqual(renderedTexts, [
+    "OK: 2",
+    "Failed: 1",
+    "Running: 1",
+    "Unknown: 2",
+  ]);
+
+  const chipSum = view.chips.reduce((sum, chip) => sum + chip.count, 0);
+  assert.equal(chipSum, view.total, "displayed chips must sum to the total");
+});
+
+test("runSummaryView reports zero total for an empty history", () => {
+  const view = runSummaryView([], t);
+  assert.equal(view.total, 0);
+  assert.deepEqual(view.chips, []);
 });

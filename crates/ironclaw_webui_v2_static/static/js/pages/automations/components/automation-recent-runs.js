@@ -4,7 +4,7 @@ import { StatusPill } from "../../../design-system/primitives.js";
 import { html } from "../../../lib/html.js";
 import { useT } from "../../../lib/i18n.js";
 import { cn } from "../../../utils/cn.js";
-import { runStatusBreakdown, summarizeRuns } from "../lib/automations-presenters.js";
+import { runSummaryView } from "../lib/automations-presenters.js";
 import { buildScopedLogsPath } from "../../logs/lib/logs-data.js";
 
 const MAX_VISIBLE_DOTS = 8;
@@ -59,25 +59,20 @@ export function RunDots({ runs = [] }) {
 // summary" the dot strip alone can't convey at a glance (#4988).
 export function RunHistorySummary({ runs = [], className = "" }) {
   const t = useT();
-  const counts = summarizeRuns(runs);
-  if (!counts.total) {
+  // All chip/text/bucket decisions live in runSummaryView (pure + tested); this
+  // component only maps the resolved view to spans.
+  const view = runSummaryView(runs, t);
+  if (!view.total) {
     return html`<span className=${cn("text-[11px] text-iron-400", className)}>
       ${t("automations.table.noRuns")}
     </span>`;
   }
 
-  // Includes the unknown bucket so the chips always sum to total.
-  const parts = runStatusBreakdown(runs);
-
   return html`
     <div className=${cn("flex flex-wrap items-center gap-x-2 gap-y-1 text-[11px]", className)}>
-      <span className="text-iron-300">
-        ${t("automations.runs.total", { count: counts.total })}
-      </span>
-      ${parts.map(
-        (part) => html`<span key=${part.key} className=${part.tone}>
-          ${t(`automations.runs.${part.key}`, { count: part.count })}
-        </span>`
+      <span className="text-iron-300">${view.totalText}</span>
+      ${view.chips.map(
+        (chip) => html`<span key=${chip.key} className=${chip.tone}>${chip.text}</span>`
       )}
     </div>
   `;
