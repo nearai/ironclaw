@@ -527,9 +527,15 @@
               </div>
               <div class="extensions-section">
                 <h3 data-i18n="skills.installByUrl">Install Skill by URL</h3>
-                <div class="ext-install-form">
-                  <input type="text" id="skill-install-name" data-i18n-placeholder="skills.namePlaceholder" placeholder="Skill name or slug">
-                  <input type="text" id="skill-install-url" data-i18n-placeholder="skills.urlPlaceholder" placeholder="HTTPS URL to SKILL.md (optional)">
+                <div class="ext-install-form skill-install-form" id="skill-install-form">
+                  <div class="skill-install-field">
+                    <input type="text" id="skill-install-name" data-i18n-placeholder="skills.namePlaceholder" placeholder="Skill name or slug">
+                    <div class="skill-install-error" id="skill-install-name-error" role="alert" aria-live="polite" hidden></div>
+                  </div>
+                  <div class="skill-install-field">
+                    <input type="text" id="skill-install-url" data-i18n-placeholder="skills.urlPlaceholder" placeholder="HTTPS URL to SKILL.md (optional)">
+                    <div class="skill-install-error" id="skill-install-url-error" role="alert" aria-live="polite" hidden></div>
+                  </div>
                   <button id="skill-install-btn" data-i18n="extensions.install">Install</button>
                 </div>
               </div>

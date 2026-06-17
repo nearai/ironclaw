@@ -399,23 +399,83 @@ function removeSkill(name) {
   }, I18n.t('common.remove'), 'btn-danger');
 }
 
-function installSkillFromForm() {
-  var name = document.getElementById('skill-install-name').value.trim();
-  if (!name) { showToast(I18n.t('skills.nameRequired'), 'error'); return; }
-  var url = document.getElementById('skill-install-url').value.trim() || null;
-  if (url && !url.startsWith('https://')) {
-    showToast(I18n.t('skills.httpsRequired'), 'error');
-    return;
+function setSkillInstallFieldError(inputId, message) {
+  var input = document.getElementById(inputId);
+  var error = document.getElementById(inputId + '-error');
+  if (!input || !error) return;
+
+  if (message) {
+    error.textContent = message;
+    error.hidden = false;
+    input.setAttribute('aria-invalid', 'true');
+    input.setAttribute('aria-describedby', error.id);
+  } else {
+    error.textContent = '';
+    error.hidden = true;
+    input.removeAttribute('aria-invalid');
+    input.removeAttribute('aria-describedby');
   }
+}
+
+function validateSkillInstallName() {
+  var input = document.getElementById('skill-install-name');
+  var isValid = !!(input && input.value.trim());
+  setSkillInstallFieldError(
+    'skill-install-name',
+    isValid ? '' : I18n.t('skills.nameRequired')
+  );
+  return isValid;
+}
+
+function validateSkillInstallUrl() {
+  var input = document.getElementById('skill-install-url');
+  var value = input ? input.value.trim() : '';
+  var isValid = !value || value.startsWith('https://');
+  setSkillInstallFieldError(
+    'skill-install-url',
+    isValid ? '' : I18n.t('skills.httpsRequired')
+  );
+  return isValid;
+}
+
+function clearSkillInstallValidationForValidFields() {
+  var nameInput = document.getElementById('skill-install-name');
+  var urlInput = document.getElementById('skill-install-url');
+  if (nameInput && nameInput.value.trim()) {
+    setSkillInstallFieldError('skill-install-name', '');
+  }
+  if (urlInput) {
+    var url = urlInput.value.trim();
+    if (!url || url.startsWith('https://')) {
+      setSkillInstallFieldError('skill-install-url', '');
+    }
+  }
+}
+
+function installSkillFromForm() {
+  var nameInput = document.getElementById('skill-install-name');
+  var urlInput = document.getElementById('skill-install-url');
+  var name = nameInput.value.trim();
+  var url = urlInput.value.trim() || null;
+  var hasValidName = validateSkillInstallName();
+  var hasValidUrl = validateSkillInstallUrl();
+  if (!hasValidName) { showToast(I18n.t('skills.nameRequired'), 'error'); }
+  if (!hasValidUrl) { showToast(I18n.t('skills.httpsRequired'), 'error'); }
+  if (!hasValidName || !hasValidUrl) return;
+
   if (!confirm(I18n.t('skills.confirmInstall', { name: name }))) return;
   installSkill(name, url, null);
-  document.getElementById('skill-install-name').value = '';
-  document.getElementById('skill-install-url').value = '';
+  nameInput.value = '';
+  urlInput.value = '';
+  setSkillInstallFieldError('skill-install-name', '');
+  setSkillInstallFieldError('skill-install-url', '');
 }
 
 // Wire up Enter key on search input
 document.getElementById('skill-search-input').addEventListener('keydown', function(e) {
   if (e.key === 'Enter') searchClawHub();
 });
+document.getElementById('skill-install-name').addEventListener('input', clearSkillInstallValidationForValidFields);
+document.getElementById('skill-install-url').addEventListener('input', clearSkillInstallValidationForValidFields);
 
 // --- Tool Permissions ---

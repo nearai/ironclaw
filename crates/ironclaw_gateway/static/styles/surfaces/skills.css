@@ -78,3 +78,35 @@
   animation: skillFadeIn 0.3s ease-out both;
 }
 
+.skill-install-form {
+  align-items: flex-start;
+}
+
+.skill-install-field {
+  display: flex;
+  flex: 1 1 220px;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 180px;
+}
+
+.skill-install-field input {
+  width: 100%;
+}
+
+.skill-install-field input[aria-invalid="true"] {
+  border-color: var(--danger);
+  box-shadow: 0 0 0 3px var(--danger-error-bg);
+}
+
+.skill-install-error {
+  color: var(--danger);
+  font-size: var(--text-xs);
+  line-height: 1.35;
+  min-height: 1.35em;
+}
+
+.skill-install-error[hidden] {
+  display: block;
+  visibility: hidden;
+}
