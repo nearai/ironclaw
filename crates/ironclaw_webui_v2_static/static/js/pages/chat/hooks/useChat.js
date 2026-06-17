@@ -467,20 +467,18 @@ export function useChat(threadId) {
       if (resolution === "denied" && outcome === "resumed") {
         failGateToolActivity(setMessages, pendingGate, toolActivityStateRef);
       }
-      // Every gate resolution (approved, denied, credential_provided, cancelled)
-      // resumes the run on the backend. Keep processing and preserve activeRun so
-      // the browser stays in sync with the continuing run. The terminal run_status
-      // SSE event (completed/failed/cancelled) is what clears processing naturally.
-      // Run termination is the separate cancelRun (X button) path.
       setPendingGate(null);
-      setIsProcessing(true);
       if (outcome === "resumed") {
+        setIsProcessing(true);
         setActiveRun({
           runId: response?.run_id || runId,
           threadId: response?.thread_id || threadId,
           status: response?.status || "queued",
         });
+        return;
       }
+      setIsProcessing(false);
+      setActiveRun(null);
     },
     [pendingGate, threadId, setMessages, setActiveRun],
   );

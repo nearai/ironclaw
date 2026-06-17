@@ -633,6 +633,7 @@ test("useChat.approve deny with already_terminal true does not synthesize failed
   const threadId = "thread-1";
   const runId = "run-already-terminal-true";
   const gateRef = "gate-already-terminal-true";
+  const stateUpdates = [];
   let renderedMessages = [
     {
       id: "tool-existing-terminal",
@@ -656,6 +657,7 @@ test("useChat.approve deny with already_terminal true does not synthesize failed
         [4, false],
         [5, { runId, gateRef, kind: "gate", toolName: "nearai.web_search" }],
       ]),
+      setCalls: stateUpdates,
     }),
     addPending,
     cancelRunRequest: async () => {},
@@ -706,6 +708,16 @@ test("useChat.approve deny with already_terminal true does not synthesize failed
   assert.equal(renderedMessages.length, 1);
   assert.equal(renderedMessages[0].toolStatus, "ok");
   assert.equal(renderedMessages[0].toolError, undefined);
+  assert.deepEqual(JSON.parse(JSON.stringify(stateUpdates.slice(-3))), [
+    { index: 5, value: null },
+    { index: 4, value: false },
+    { index: 2, value: null },
+  ]);
+  assert.equal(
+    stateUpdates.some((update) => update.index === 4 && update.value === true),
+    false,
+    "already_terminal gate resolution must not turn processing back on",
+  );
 });
 
 test("useChat.cancelRun completion does not clear a newer run", async () => {
@@ -1211,7 +1223,12 @@ function createResolveGateContext({ stateUpdates = [] } = {}) {
     recordAcceptedMessageRef,
     removePending,
     resolveChannelConnectCommand,
-    resolveGateRequest: async () => {},
+    resolveGateRequest: async () => ({
+      outcome: "resumed",
+      run_id: "run-1",
+      thread_id: "thread-1",
+      status: "queued",
+    }),
     sendMessage: async () => {
       throw new Error("sendMessage should not run");
     },
