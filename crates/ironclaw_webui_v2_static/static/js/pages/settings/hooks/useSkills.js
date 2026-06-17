@@ -4,6 +4,7 @@ import {
   fetchSkills,
   installSkill as installSkillRequest,
   removeSkill as removeSkillRequest,
+  setSkillAutoActivate as setSkillAutoActivateRequest,
   updateSkill as updateSkillRequest,
 } from "../lib/settings-api.js";
 
@@ -35,6 +36,13 @@ export function useSkills() {
     },
   });
 
+  const autoActivateMutation = useMutation({
+    mutationFn: ({ name, enabled }) => setSkillAutoActivateRequest(name, enabled),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["skills"] });
+    },
+  });
+
   const skills = query.data?.skills || [];
 
   return {
@@ -44,8 +52,10 @@ export function useSkills() {
     installSkill: installMutation.mutateAsync,
     removeSkill: removeMutation.mutateAsync,
     updateSkill: updateMutation.mutateAsync,
+    setSkillAutoActivate: autoActivateMutation.mutateAsync,
     isInstalling: installMutation.isPending,
     isRemoving: removeMutation.isPending,
     isUpdating: updateMutation.isPending,
+    isSettingAutoActivate: autoActivateMutation.isPending,
   };
 }

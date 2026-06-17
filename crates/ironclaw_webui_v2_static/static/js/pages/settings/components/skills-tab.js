@@ -16,9 +16,11 @@ export function SkillsTab({ searchQuery = "" }) {
     installSkill,
     removeSkill,
     updateSkill,
+    setSkillAutoActivate,
     isInstalling,
     isRemoving,
     isUpdating,
+    isSettingAutoActivate,
   } = useSkills();
   const [actionError, setActionError] = React.useState("");
   const [actionResult, setActionResult] = React.useState("");
@@ -61,6 +63,21 @@ export function SkillsTab({ searchQuery = "" }) {
       return { success: false, message };
     }
   }, [t, updateSkill]);
+
+  const handleSetAutoActivate = React.useCallback(async (name, enabled) => {
+    setActionError("");
+    setActionResult("");
+    try {
+      const response = await setSkillAutoActivate({ name, enabled });
+      if (!response?.success) {
+        setActionError(response?.message || t("skills.updateFailed"));
+        return;
+      }
+      setActionResult(response.message);
+    } catch (err) {
+      setActionError(err.message || t("skills.updateFailed"));
+    }
+  }, [setSkillAutoActivate, t]);
 
   let body;
   if (query.isLoading) {
@@ -122,8 +139,10 @@ export function SkillsTab({ searchQuery = "" }) {
                 onEdit=${fetchSkillContent}
                 onRemove=${handleRemove}
                 onUpdate=${handleUpdate}
+                onSetAutoActivate=${handleSetAutoActivate}
                 isRemoving=${isRemoving}
                 isUpdating=${isUpdating}
+                isSettingAutoActivate=${isSettingAutoActivate}
               />
             `
           )}
@@ -141,7 +160,17 @@ export function SkillsTab({ searchQuery = "" }) {
   `;
 }
 
-function SkillGroup({ title, skills, onEdit, onRemove, onUpdate, isRemoving, isUpdating }) {
+function SkillGroup({
+  title,
+  skills,
+  onEdit,
+  onRemove,
+  onUpdate,
+  onSetAutoActivate,
+  isRemoving,
+  isUpdating,
+  isSettingAutoActivate,
+}) {
   if (skills.length === 0) return null;
   return html`
     <${Card} padding="md">
@@ -156,8 +185,10 @@ function SkillGroup({ title, skills, onEdit, onRemove, onUpdate, isRemoving, isU
             onEdit=${onEdit}
             onRemove=${onRemove}
             onUpdate=${onUpdate}
+            onSetAutoActivate=${onSetAutoActivate}
             isRemoving=${isRemoving}
             isUpdating=${isUpdating}
+            isSettingAutoActivate=${isSettingAutoActivate}
           />
         `
       )}

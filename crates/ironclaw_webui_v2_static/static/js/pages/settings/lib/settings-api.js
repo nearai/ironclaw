@@ -117,6 +117,13 @@ export function removeSkill(name) {
     headers: { "X-Confirm-Action": "true" },
   });
 }
+export function setSkillAutoActivate(name, enabled) {
+  return apiFetch(`/api/webchat/v2/skills/${encodeURIComponent(name)}/auto-activate`, {
+    method: "POST",
+    headers: { "X-Confirm-Action": "true" },
+    body: JSON.stringify({ enabled }),
+  });
+}
 // Trace Commons credits — read-only, scoped server-side to the
 // authenticated caller. The response is the contributor-local view as
 // of the last credit sync; the authoritative ledger is server-side.
