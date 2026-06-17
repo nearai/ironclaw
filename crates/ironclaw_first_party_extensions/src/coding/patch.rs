@@ -1,0 +1,144 @@
+use serde_json::Value;
+
+use super::{
+    CodingCapabilityError, input_error, inputs::required_str, operation_error_with_summary,
+    text::ReplaceContentError,
+};
+
+#[derive(Debug, Clone)]
+pub(super) struct PatchEdit {
+    pub(super) old_string: String,
+    pub(super) new_string: String,
+}
+
+#[derive(Debug, Clone)]
+pub(super) struct ApplyPatchInput {
+    pub(super) edits: Vec<PatchEdit>,
+    pub(super) replace_all: bool,
+}
+
+pub(super) fn parse_apply_patch_input(
+    input: &Value,
+) -> Result<ApplyPatchInput, CodingCapabilityError> {
+    let replace_all = input
+        .get("replace_all")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+
+    let edits = if let Some(edits_value) = input.get("edits") {
+        if input.get("old_string").is_some() || input.get("new_string").is_some() {
+            return Err(input_error());
+        }
+        parse_patch_edits(edits_value)?
+    } else {
+        let old_string = normalize_patch_text(required_str(input, "old_string")?);
+        let new_string = normalize_patch_text(required_str(input, "new_string")?);
+        vec![validated_patch_edit(old_string, new_string)?]
+    };
+
+    if edits.is_empty() || replace_all && edits.len() != 1 {
+        return Err(input_error());
+    }
+
+    Ok(ApplyPatchInput { edits, replace_all })
+}
+
+pub(super) fn replacement_error(
+    error: ReplaceContentError,
+    safe_path: String,
+    edit_count: usize,
+) -> CodingCapabilityError {
+    match error {
+        ReplaceContentError::EmptyOld | ReplaceContentError::NoChange => input_error(),
+        ReplaceContentError::NotFound { edit_index } => operation_error_with_summary(format!(
+            "apply_patch failed for {safe_path}: {} matched 0 times",
+            edit_label(edit_index, edit_count)
+        )),
+        ReplaceContentError::Duplicate {
+            edit_index,
+            occurrences,
+        } => operation_error_with_summary(format!(
+            "apply_patch failed for {safe_path}: {} matched {occurrences} times; set replace_all=true or provide a unique old_string",
+            edit_label(edit_index, edit_count)
+        )),
+        ReplaceContentError::Overlap {
+            previous_edit_index,
+            current_edit_index,
+        } => operation_error_with_summary(format!(
+            "apply_patch failed for {safe_path}: edits[{previous_edit_index}] and edits[{current_edit_index}] overlap; merge them into one edit"
+        )),
+    }
+}
+
+fn parse_patch_edits(edits_value: &Value) -> Result<Vec<PatchEdit>, CodingCapabilityError> {
+    let parsed;
+    let edits_value = if let Some(edits_string) = edits_value.as_str() {
+        parsed = serde_json::from_str::<Value>(edits_string).map_err(|_| input_error())?;
+        &parsed
+    } else {
+        edits_value
+    };
+
+    let edits = edits_value.as_array().ok_or_else(input_error)?;
+    if edits.is_empty() {
+        return Err(input_error());
+    }
+
+    edits
+        .iter()
+        .map(parse_patch_edit)
+        .collect::<Result<Vec<_>, _>>()
+}
+
+fn parse_patch_edit(edit: &Value) -> Result<PatchEdit, CodingCapabilityError> {
+    let snake = patch_edit_from_fields(edit, "old_string", "new_string")?;
+    let camel = patch_edit_from_fields(edit, "oldText", "newText")?;
+    match (snake, camel) {
+        (Some(_), Some(_)) => Err(input_error()),
+        (Some(edit), None) | (None, Some(edit)) => validated_patch_edit(edit.0, edit.1),
+        (None, None) => Err(input_error()),
+    }
+}
+
+fn patch_edit_from_fields(
+    edit: &Value,
+    old_field: &str,
+    new_field: &str,
+) -> Result<Option<(String, String)>, CodingCapabilityError> {
+    let old = edit.get(old_field);
+    let new = edit.get(new_field);
+    match (old, new) {
+        (None, None) => Ok(None),
+        (Some(old), Some(new)) => {
+            let old = old.as_str().ok_or_else(input_error)?;
+            let new = new.as_str().ok_or_else(input_error)?;
+            Ok(Some((normalize_patch_text(old), normalize_patch_text(new))))
+        }
+        _ => Err(input_error()),
+    }
+}
+
+fn validated_patch_edit(
+    old_string: String,
+    new_string: String,
+) -> Result<PatchEdit, CodingCapabilityError> {
+    if old_string.is_empty() || old_string == new_string {
+        return Err(input_error());
+    }
+    Ok(PatchEdit {
+        old_string,
+        new_string,
+    })
+}
+
+fn normalize_patch_text(value: &str) -> String {
+    value.replace("\r\n", "\n").replace('\r', "\n")
+}
+
+fn edit_label(edit_index: usize, edit_count: usize) -> String {
+    if edit_count == 1 {
+        "old_string".to_string()
+    } else {
+        format!("edits[{edit_index}].old_string")
+    }
+}

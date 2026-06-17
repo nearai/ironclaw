@@ -308,11 +308,31 @@ pub(crate) fn resolve_builtin_input_schema_ref(reference: &str) -> Option<Value>
             "type": "object",
             "properties": {
                 "path": { "type": "string", "description": "Scoped file path to patch" },
-                "old_string": { "type": "string", "description": "Exact text to replace" },
-                "new_string": { "type": "string", "description": "Replacement text" },
-                "replace_all": { "type": "boolean", "description": "Replace every match instead of exactly one" }
+                "old_string": {
+                    "type": "string",
+                    "description": "Text to replace for a single targeted edit. Exact matches are preferred; fuzzy Unicode and trailing-whitespace normalization is used when exact text is not present."
+                },
+                "new_string": { "type": "string", "description": "Replacement text for a single targeted edit" },
+                "edits": {
+                    "type": "array",
+                    "description": "One or more targeted replacements matched against the original file. Prefer this for multiple disjoint edits.",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "old_string": { "type": "string", "description": "Text to replace" },
+                            "new_string": { "type": "string", "description": "Replacement text" }
+                        },
+                        "required": ["old_string", "new_string"],
+                        "additionalProperties": false
+                    }
+                },
+                "replace_all": { "type": "boolean", "description": "Replace every match instead of exactly one. Only valid with a single targeted edit." }
             },
-            "required": ["path", "old_string", "new_string"],
+            "required": ["path"],
+            "oneOf": [
+                { "required": ["old_string", "new_string"] },
+                { "required": ["edits"] }
+            ],
             "additionalProperties": false
         }),
         "schemas/builtin/extension_search.input.v1.json" => json!({

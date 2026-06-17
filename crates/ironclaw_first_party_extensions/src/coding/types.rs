@@ -46,14 +46,5 @@ pub(super) enum LineEnding {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum MatchMethod {
     Exact,
-    TrailingWhitespace,
-    QuoteNormalization,
-    Both,
-}
-
-#[derive(Debug)]
-pub(super) struct FuzzyMatch {
-    pub(super) start: usize,
-    pub(super) end: usize,
-    pub(super) method: MatchMethod,
+    FuzzyNormalization,
 }

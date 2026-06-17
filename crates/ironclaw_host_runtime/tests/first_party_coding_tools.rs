@@ -448,6 +448,147 @@ async fn builtin_apply_patch_failure_reports_path_and_match_count() {
 }
 
 #[tokio::test]
+async fn builtin_apply_patch_accepts_pi_style_multi_edit_with_fuzzy_unicode_matching() {
+    let temp = tempfile::tempdir().unwrap();
+    std::fs::write(
+        temp.path().join("main.txt"),
+        "hello\u{00A0}world\nrange: 1\u{2013}5\n\u{FF21}\u{FF22}\u{FF23}123\n",
+    )
+    .unwrap();
+
+    let (filesystem, mounts) = mounted_filesystem(temp.path(), MountPermissions::read_write());
+    let runtime = runtime_with_filesystem(filesystem);
+    let context = execution_context_with_mounts(coding_capability_ids(), mounts);
+
+    let patched = invoke_with_context(
+        &runtime,
+        APPLY_PATCH_CAPABILITY_ID,
+        json!({
+            "path": "/workspace/main.txt",
+            "edits": [
+                { "oldText": "hello world\n", "newText": "hello universe\n" },
+                { "oldText": "range: 1-5\nABC123\n", "newText": "range: 10-50\nASCII\n" }
+            ]
+        }),
+        context,
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(patched["success"], json!(true));
+    assert_eq!(patched["replacements"], json!(2));
+    assert_eq!(patched["match_method"], json!("FuzzyNormalization"));
+    assert_eq!(
+        std::fs::read_to_string(temp.path().join("main.txt")).unwrap(),
+        "hello universe\nrange: 10-50\nASCII\n"
+    );
+}
+
+#[tokio::test]
+async fn builtin_apply_patch_fuzzy_match_preserves_unrelated_original_content() {
+    let temp = tempfile::tempdir().unwrap();
+    std::fs::write(
+        temp.path().join("main.txt"),
+        "target\u{00A0}text\nuntouched\u{00A0}text   \n",
+    )
+    .unwrap();
+
+    let (filesystem, mounts) = mounted_filesystem(temp.path(), MountPermissions::read_write());
+    let runtime = runtime_with_filesystem(filesystem);
+    let context = execution_context_with_mounts(coding_capability_ids(), mounts);
+
+    let patched = invoke_with_context(
+        &runtime,
+        APPLY_PATCH_CAPABILITY_ID,
+        json!({
+            "path": "/workspace/main.txt",
+            "old_string": "target text",
+            "new_string": "changed text"
+        }),
+        context,
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(patched["success"], json!(true));
+    assert_eq!(patched["match_method"], json!("FuzzyNormalization"));
+    assert_eq!(
+        std::fs::read_to_string(temp.path().join("main.txt")).unwrap(),
+        "changed text\nuntouched\u{00A0}text   \n"
+    );
+}
+
+#[tokio::test]
+async fn builtin_apply_patch_replace_all_replaces_exact_and_fuzzy_matches() {
+    let temp = tempfile::tempdir().unwrap();
+    std::fs::write(
+        temp.path().join("main.txt"),
+        "hello world\nhello\u{00A0}world\n",
+    )
+    .unwrap();
+
+    let (filesystem, mounts) = mounted_filesystem(temp.path(), MountPermissions::read_write());
+    let runtime = runtime_with_filesystem(filesystem);
+    let context = execution_context_with_mounts(coding_capability_ids(), mounts);
+
+    let patched = invoke_with_context(
+        &runtime,
+        APPLY_PATCH_CAPABILITY_ID,
+        json!({
+            "path": "/workspace/main.txt",
+            "old_string": "hello world",
+            "new_string": "hello universe",
+            "replace_all": true
+        }),
+        context,
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(patched["success"], json!(true));
+    assert_eq!(patched["replacements"], json!(2));
+    assert_eq!(patched["match_method"], json!("FuzzyNormalization"));
+    assert_eq!(
+        std::fs::read_to_string(temp.path().join("main.txt")).unwrap(),
+        "hello universe\nhello universe\n"
+    );
+}
+
+#[tokio::test]
+async fn builtin_apply_patch_rejects_duplicate_after_fuzzy_normalization() {
+    let temp = tempfile::tempdir().unwrap();
+    std::fs::write(
+        temp.path().join("main.txt"),
+        "hello world\nhello\u{00A0}world\n",
+    )
+    .unwrap();
+
+    let (filesystem, mounts) = mounted_filesystem(temp.path(), MountPermissions::read_write());
+    let runtime = runtime_with_filesystem(filesystem);
+    let context = execution_context_with_mounts(coding_capability_ids(), mounts);
+
+    let failure = invoke_failure_with_context(
+        &runtime,
+        APPLY_PATCH_CAPABILITY_ID,
+        json!({
+            "path": "/workspace/main.txt",
+            "old_string": "hello world",
+            "new_string": "hello universe"
+        }),
+        context,
+    )
+    .await;
+
+    assert_eq!(failure.kind, RuntimeFailureKind::OperationFailed);
+    assert_eq!(
+        failure.message.as_deref(),
+        Some(
+            "apply_patch failed for path workspace main.txt: old_string matched 2 times; set replace_all=true or provide a unique old_string"
+        )
+    );
+}
+
+#[tokio::test]
 async fn builtin_read_file_failure_reports_missing_path() {
     let temp = tempfile::tempdir().unwrap();
     let (filesystem, mounts) = mounted_filesystem(temp.path(), MountPermissions::read_only());

@@ -27,6 +27,7 @@ similar = "2"
 thiserror = "2"
 tokio = { version = "1", features = ["rt", "sync"] }
 tracing = "0.1"
+unicode-normalization = "0.1"
 
 [dev-dependencies]
 tempfile = "3"

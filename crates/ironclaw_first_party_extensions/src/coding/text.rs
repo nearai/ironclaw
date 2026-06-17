@@ -1,8 +1,10 @@
+use unicode_normalization::UnicodeNormalization;
+
 use super::CodingCapabilityError;
 
 use super::{
     operation_error,
-    types::{FileEncoding, FuzzyMatch, LineEnding, MatchMethod},
+    types::{FileEncoding, LineEnding, MatchMethod},
 };
 
 pub(super) fn reject_binary_probe(bytes: &[u8]) -> Result<(), CodingCapabilityError> {
@@ -86,174 +88,327 @@ fn detect_line_ending(content: &str) -> LineEnding {
     }
 }
 
+#[derive(Debug, Clone, Copy)]
+pub(super) struct TextEdit<'a> {
+    pub(super) old_string: &'a str,
+    pub(super) new_string: &'a str,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) enum ReplaceContentError {
+    EmptyOld,
+    NotFound {
+        edit_index: usize,
+    },
+    Duplicate {
+        edit_index: usize,
+        occurrences: usize,
+    },
+    Overlap {
+        previous_edit_index: usize,
+        current_edit_index: usize,
+    },
+    NoChange,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct ReplaceContentOutcome {
+    pub(super) content: String,
+    pub(super) replacements: usize,
+    pub(super) match_method: MatchMethod,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct MatchSpan {
+    start: usize,
+    end: usize,
+    method: MatchMethod,
+}
+
+#[derive(Debug)]
+struct EditMatches {
+    spans: Vec<MatchSpan>,
+    occurrence_count: usize,
+}
+
+#[derive(Debug)]
+struct MatchedEdit {
+    edit_index: usize,
+    start: usize,
+    end: usize,
+    new_string: String,
+}
+
+#[derive(Debug)]
+struct NormalizedText {
+    text: String,
+    spans: Vec<SourceSpan>,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct SourceSpan {
+    start: usize,
+    end: usize,
+}
+
 pub(super) fn replace_content(
     content: &str,
-    old_string: &str,
-    new_string: &str,
+    edits: &[TextEdit<'_>],
     replace_all: bool,
-    match_count: usize,
-) -> Result<(String, usize), CodingCapabilityError> {
-    if replace_all {
-        let mut matches = Vec::new();
-        let mut search_offset = 0usize;
-        while let Some(item) = find_match_from(content, old_string, search_offset) {
-            if item.end <= item.start {
-                return Err(operation_error());
+) -> Result<ReplaceContentOutcome, ReplaceContentError> {
+    for edit in edits {
+        if edit.old_string.is_empty() {
+            return Err(ReplaceContentError::EmptyOld);
+        }
+    }
+    if edits.is_empty() {
+        return Err(ReplaceContentError::NoChange);
+    }
+    if replace_all && edits.len() != 1 {
+        return Err(ReplaceContentError::NoChange);
+    }
+
+    let mut matched_edits = Vec::with_capacity(edits.len());
+    let mut match_method = MatchMethod::Exact;
+    for (edit_index, edit) in edits.iter().enumerate() {
+        let matches = find_edit_matches(content, edit.old_string);
+        if matches.spans.is_empty() {
+            return Err(ReplaceContentError::NotFound { edit_index });
+        }
+        if !replace_all && matches.occurrence_count > 1 {
+            return Err(ReplaceContentError::Duplicate {
+                edit_index,
+                occurrences: matches.occurrence_count,
+            });
+        }
+
+        let spans = if replace_all {
+            matches.spans
+        } else {
+            vec![matches.spans[0]]
+        };
+        for span in spans {
+            if span.method != MatchMethod::Exact {
+                match_method = MatchMethod::FuzzyNormalization;
             }
-            search_offset = item.end;
-            matches.push((item.start, item.end));
+            matched_edits.push(MatchedEdit {
+                edit_index,
+                start: span.start,
+                end: span.end,
+                new_string: edit.new_string.to_string(),
+            });
         }
-        if matches.len() != match_count {
-            return Err(operation_error());
-        }
-        let mut rebuilt = String::with_capacity(content.len());
-        let mut last = 0usize;
-        for (start, end) in matches {
-            rebuilt.push_str(&content[last..start]);
-            rebuilt.push_str(new_string);
-            last = end;
-        }
-        rebuilt.push_str(&content[last..]);
-        Ok((rebuilt, match_count))
-    } else {
-        let item = find_match(content, old_string).ok_or_else(operation_error)?;
-        let mut rebuilt =
-            String::with_capacity(content.len() - (item.end - item.start) + new_string.len());
-        rebuilt.push_str(&content[..item.start]);
-        rebuilt.push_str(new_string);
-        rebuilt.push_str(&content[item.end..]);
-        Ok((rebuilt, 1))
     }
-}
 
-fn find_match(haystack: &str, needle: &str) -> Option<FuzzyMatch> {
-    find_match_from(haystack, needle, 0)
-}
+    matched_edits.sort_by_key(|edit| edit.start);
+    for pair in matched_edits.windows(2) {
+        let previous = &pair[0];
+        let current = &pair[1];
+        if previous.end > current.start {
+            return Err(ReplaceContentError::Overlap {
+                previous_edit_index: previous.edit_index,
+                current_edit_index: current.edit_index,
+            });
+        }
+    }
 
-fn find_match_from(haystack: &str, needle: &str, start_offset: usize) -> Option<FuzzyMatch> {
-    let search = haystack.get(start_offset..)?;
-    if let Some(index) = search.find(needle) {
-        let start = start_offset + index;
-        return Some(FuzzyMatch {
-            start,
-            end: start + needle.len(),
-            method: MatchMethod::Exact,
-        });
+    let new_content = apply_matched_edits(content, &matched_edits);
+    if new_content == content {
+        return Err(ReplaceContentError::NoChange);
     }
-    let needle_stripped = strip_trailing_whitespace(needle);
-    let haystack_stripped = strip_trailing_whitespace(search);
-    if let Some((start, end)) = find_normalized_span(search, &haystack_stripped, &needle_stripped) {
-        return Some(FuzzyMatch {
-            start: start_offset + start,
-            end: start_offset + end,
-            method: MatchMethod::TrailingWhitespace,
-        });
-    }
-    let needle_normalized = normalize_quotes(needle);
-    let haystack_normalized = normalize_quotes(search);
-    if let Some(index) = haystack_normalized.find(&needle_normalized) {
-        let char_start = haystack_normalized[..index].chars().count();
-        let char_len = needle_normalized.chars().count();
-        let start = char_to_byte_idx(search, char_start)?;
-        let end = char_to_byte_idx(search, char_start + char_len)?;
-        return Some(FuzzyMatch {
-            start: start_offset + start,
-            end: start_offset + end,
-            method: MatchMethod::QuoteNormalization,
-        });
-    }
-    let needle_both = normalize_quotes(&needle_stripped);
-    let haystack_both = normalize_quotes(&haystack_stripped);
-    find_normalized_span(search, &haystack_both, &needle_both).map(|(start, end)| FuzzyMatch {
-        start: start_offset + start,
-        end: start_offset + end,
-        method: MatchMethod::Both,
+    Ok(ReplaceContentOutcome {
+        content: new_content,
+        replacements: matched_edits.len(),
+        match_method,
     })
 }
 
-pub(super) fn count_matches(haystack: &str, needle: &str) -> (usize, MatchMethod) {
-    let mut count = 0usize;
-    let mut method = MatchMethod::Exact;
-    let mut search_offset = 0usize;
-    while let Some(item) = find_match_from(haystack, needle, search_offset) {
-        if item.end <= item.start {
-            break;
+fn find_edit_matches(content: &str, old_string: &str) -> EditMatches {
+    let exact_spans = find_exact_spans(content, old_string)
+        .into_iter()
+        .map(|(start, end)| MatchSpan {
+            start,
+            end,
+            method: MatchMethod::Exact,
+        })
+        .collect::<Vec<_>>();
+    if !exact_spans.is_empty() {
+        if old_string.trim().is_empty() {
+            return EditMatches {
+                occurrence_count: exact_spans.len(),
+                spans: exact_spans,
+            };
         }
-        if count == 0 {
-            method = item.method;
-        }
-        count += 1;
-        search_offset = item.end;
-    }
-    (count, method)
-}
 
-fn strip_trailing_whitespace(value: &str) -> String {
-    value
-        .lines()
-        .map(str::trim_end)
-        .collect::<Vec<_>>()
-        .join("\n")
-}
-
-fn normalize_quotes(value: &str) -> String {
-    value
-        .replace(['\u{2018}', '\u{2019}', '\u{2032}'], "'")
-        .replace(['\u{201C}', '\u{201D}', '\u{2033}'], "\"")
-}
-
-fn find_normalized_span(original: &str, normalized: &str, needle: &str) -> Option<(usize, usize)> {
-    let index = normalized.find(needle)?;
-    let char_index = normalized[..index].chars().count();
-    let char_len = needle.chars().count();
-    let start = map_normalized_char_to_original_byte(original, char_index)?;
-    let end = map_normalized_char_to_original_byte(original, char_index + char_len)?;
-    Some((start, end))
-}
-
-fn char_to_byte_idx(value: &str, char_index: usize) -> Option<usize> {
-    if char_index == value.chars().count() {
-        return Some(value.len());
-    }
-    value.char_indices().nth(char_index).map(|(index, _)| index)
-}
-
-fn map_normalized_char_to_original_byte(
-    original: &str,
-    normalized_char_index: usize,
-) -> Option<usize> {
-    if normalized_char_index == 0 {
-        return Some(0);
-    }
-    let mut normalized_seen = 0usize;
-    let mut original_byte = 0usize;
-    for segment in original.split_inclusive('\n') {
-        let (line, has_newline) = if let Some(stripped) = segment.strip_suffix('\n') {
-            (stripped, true)
+        let fuzzy_spans = find_fuzzy_spans(content, old_string);
+        let occurrence_count = if fuzzy_spans.is_empty() {
+            exact_spans.len()
         } else {
-            (segment, false)
+            fuzzy_spans.len().max(exact_spans.len())
         };
-        let trimmed = line.trim_end();
-        let trimmed_chars = trimmed.chars().count();
-        if normalized_char_index <= normalized_seen + trimmed_chars {
-            let within_line = normalized_char_index - normalized_seen;
-            return Some(original_byte + char_to_byte_idx(line, within_line)?);
+        return EditMatches {
+            spans: merge_exact_and_fuzzy_spans(exact_spans, fuzzy_spans),
+            occurrence_count,
+        };
+    }
+
+    let fuzzy_spans = find_fuzzy_spans(content, old_string);
+    EditMatches {
+        occurrence_count: fuzzy_spans.len(),
+        spans: fuzzy_spans,
+    }
+}
+
+fn merge_exact_and_fuzzy_spans(
+    mut exact_spans: Vec<MatchSpan>,
+    fuzzy_spans: Vec<MatchSpan>,
+) -> Vec<MatchSpan> {
+    for fuzzy in fuzzy_spans {
+        if exact_spans.iter().any(|exact| spans_overlap(*exact, fuzzy)) {
+            continue;
         }
-        normalized_seen += trimmed_chars;
-        original_byte += line.len();
-        if has_newline {
-            if normalized_char_index == normalized_seen + 1 {
-                return Some(original_byte);
+        exact_spans.push(fuzzy);
+    }
+    exact_spans.sort_by_key(|span| (span.start, span.end));
+    exact_spans
+}
+
+fn spans_overlap(left: MatchSpan, right: MatchSpan) -> bool {
+    left.start < right.end && right.start < left.end
+}
+
+fn apply_matched_edits(content: &str, matched_edits: &[MatchedEdit]) -> String {
+    let new_len = matched_edits.iter().fold(content.len(), |len, edit| {
+        len.saturating_sub(edit.end - edit.start) + edit.new_string.len()
+    });
+    let mut rebuilt = String::with_capacity(new_len);
+    let mut last = 0usize;
+    for edit in matched_edits {
+        rebuilt.push_str(&content[last..edit.start]);
+        rebuilt.push_str(&edit.new_string);
+        last = edit.end;
+    }
+    rebuilt.push_str(&content[last..]);
+    rebuilt
+}
+
+fn find_exact_spans(haystack: &str, needle: &str) -> Vec<(usize, usize)> {
+    if needle.is_empty() {
+        return Vec::new();
+    }
+
+    let mut spans = Vec::new();
+    let mut search_offset = 0usize;
+    while let Some(index) = haystack[search_offset..].find(needle) {
+        let start = search_offset + index;
+        let end = start + needle.len();
+        spans.push((start, end));
+        search_offset = end;
+    }
+    spans
+}
+
+fn find_fuzzy_spans(content: &str, old_string: &str) -> Vec<MatchSpan> {
+    if old_string.trim().is_empty() {
+        return Vec::new();
+    }
+
+    let normalized_content = normalize_with_source_map(content);
+    let normalized_old = normalize_for_fuzzy_match(old_string);
+    if normalized_old.is_empty() {
+        return Vec::new();
+    }
+
+    find_exact_spans(&normalized_content.text, &normalized_old)
+        .into_iter()
+        .filter_map(|(start, end)| {
+            normalized_span_to_source_span(&normalized_content, start, end).map(|span| MatchSpan {
+                start: span.start,
+                end: span.end,
+                method: MatchMethod::FuzzyNormalization,
+            })
+        })
+        .collect()
+}
+
+fn normalize_for_fuzzy_match(value: &str) -> String {
+    normalize_with_source_map(value).text
+}
+
+fn normalize_with_source_map(value: &str) -> NormalizedText {
+    let mut text = String::new();
+    let mut spans = Vec::new();
+    let mut base_offset = 0usize;
+
+    for segment in value.split_inclusive('\n') {
+        let has_newline = segment.ends_with('\n');
+        let line = if has_newline {
+            &segment[..segment.len() - 1]
+        } else {
+            segment
+        };
+        let mut line_text = String::new();
+        let mut line_spans = Vec::new();
+        for (offset, ch) in line.char_indices() {
+            let source_span = SourceSpan {
+                start: base_offset + offset,
+                end: base_offset + offset + ch.len_utf8(),
+            };
+            for normalized in normalize_char_for_fuzzy_match(ch) {
+                line_text.push(normalized);
+                line_spans.push(source_span);
             }
-            normalized_seen += 1;
-            original_byte += 1;
         }
+        while line_text.chars().last().is_some_and(char::is_whitespace) {
+            line_text.pop();
+            line_spans.pop();
+        }
+        text.push_str(&line_text);
+        spans.extend(line_spans);
+        if has_newline {
+            text.push('\n');
+            spans.push(SourceSpan {
+                start: base_offset + segment.len() - 1,
+                end: base_offset + segment.len(),
+            });
+        }
+        base_offset += segment.len();
     }
-    if normalized_char_index == normalized_seen {
-        Some(original_byte)
-    } else {
-        None
+
+    NormalizedText { text, spans }
+}
+
+fn normalize_char_for_fuzzy_match(ch: char) -> Vec<char> {
+    ch.to_string().nfkd().map(normalize_fuzzy_char).collect()
+}
+
+fn normalize_fuzzy_char(ch: char) -> char {
+    match ch {
+        '\u{2018}' | '\u{2019}' | '\u{201A}' | '\u{201B}' | '\u{2032}' => '\'',
+        '\u{201C}' | '\u{201D}' | '\u{201E}' | '\u{201F}' | '\u{2033}' => '"',
+        '\u{2010}' | '\u{2011}' | '\u{2012}' | '\u{2013}' | '\u{2014}' | '\u{2015}'
+        | '\u{2212}' => '-',
+        '\u{00A0}' | '\u{2002}' | '\u{2003}' | '\u{2004}' | '\u{2005}' | '\u{2006}'
+        | '\u{2007}' | '\u{2008}' | '\u{2009}' | '\u{200A}' | '\u{202F}' | '\u{205F}'
+        | '\u{3000}' => ' ',
+        _ => ch,
     }
+}
+
+fn normalized_span_to_source_span(
+    normalized: &NormalizedText,
+    start: usize,
+    end: usize,
+) -> Option<SourceSpan> {
+    let start_char = normalized.text[..start].chars().count();
+    let end_char = normalized.text[..end].chars().count();
+    if start_char >= end_char {
+        return None;
+    }
+    Some(SourceSpan {
+        start: normalized.spans.get(start_char)?.start,
+        end: normalized.spans.get(end_char - 1)?.end,
+    })
 }
 
 pub(super) fn previous_char_boundary(value: &str, mut end: usize) -> usize {
@@ -269,10 +424,51 @@ mod tests {
     use super::*;
 
     #[test]
-    fn count_matches_ignores_unlocatable_trailing_whitespace_normalization() {
-        let (count, method) = count_matches("\na", "\n ");
+    fn replace_content_ignores_unlocatable_trailing_whitespace_normalization() {
+        let result = replace_content(
+            "\na",
+            &[TextEdit {
+                old_string: "\n ",
+                new_string: "\nx",
+            }],
+            false,
+        );
 
-        assert_eq!(count, 0);
-        assert_eq!(method, MatchMethod::Exact);
+        assert_eq!(result, Err(ReplaceContentError::NotFound { edit_index: 0 }));
+    }
+
+    #[test]
+    fn fuzzy_replacement_preserves_unrelated_original_content() {
+        let content = "target\u{00A0}text\nuntouched\u{00A0}text   \n";
+        let result = replace_content(
+            content,
+            &[TextEdit {
+                old_string: "target text",
+                new_string: "changed text",
+            }],
+            false,
+        )
+        .expect("fuzzy replacement");
+
+        assert_eq!(result.content, "changed text\nuntouched\u{00A0}text   \n");
+        assert_eq!(result.match_method, MatchMethod::FuzzyNormalization);
+    }
+
+    #[test]
+    fn replace_all_replaces_exact_and_fuzzy_matches() {
+        let content = "hello world\nhello\u{00A0}world\n";
+        let result = replace_content(
+            content,
+            &[TextEdit {
+                old_string: "hello world",
+                new_string: "hello universe",
+            }],
+            true,
+        )
+        .expect("replace all");
+
+        assert_eq!(result.content, "hello universe\nhello universe\n");
+        assert_eq!(result.replacements, 2);
+        assert_eq!(result.match_method, MatchMethod::FuzzyNormalization);
     }
 }
