@@ -105,6 +105,25 @@ pub trait LoopCapabilityInputResolver: Send + Sync {
             "provider tool-call input registration is not supported",
         ))
     }
+
+    /// Record the display-preview input for a provider tool call under
+    /// `input_ref`.
+    ///
+    /// `ProviderToolCallInputResolver` decorates this trait and owns the
+    /// canonical (digest-based) `input_ref` for provider tool calls; it stages
+    /// the arguments itself and does NOT delegate
+    /// `register_provider_tool_call_input` to the inner resolver. Any host-side
+    /// side effect keyed on that ref — notably recording the activity-card
+    /// input summary — must therefore be driven through this hook so it lands
+    /// under the same ref the result write later uses. Default no-op: only
+    /// resolvers that own a display-preview store implement it.
+    fn record_provider_tool_call_display_input(
+        &self,
+        _run_context: &LoopRunContext,
+        _input_ref: &CapabilityInputRef,
+        _tool_call: &ProviderToolCall,
+    ) {
+    }
 }
 
 struct ProviderToolCallInputResolver {
@@ -159,15 +178,31 @@ impl LoopCapabilityInputResolver for ProviderToolCallInputResolver {
                 "provider tool-call input store is unavailable",
             )
         })?;
-        if let Some(existing) = provider_inputs.get(input_ref.as_str()) {
+        let newly_registered = if let Some(existing) = provider_inputs.get(input_ref.as_str()) {
             if existing != &tool_call.arguments {
                 return Err(AgentLoopHostError::new(
                     AgentLoopHostErrorKind::Internal,
                     "provider tool-call input ref collision",
                 ));
             }
+            false
         } else {
             provider_inputs.insert(input_ref.as_str().to_string(), tool_call.arguments.clone());
+            true
+        };
+        // Release the store lock before invoking the inner side-effect hook so
+        // we never hold it across the inner resolver's own locking.
+        drop(provider_inputs);
+        // This decorator owns the provider tool-call `input_ref` and bypasses
+        // the inner `register_provider_tool_call_input`. Drive the inner
+        // resolver's display-preview recording here so the activity-card input
+        // summary lands under the same ref the result write uses — otherwise
+        // the summary is never recorded and the UI shows tool calls with no
+        // arguments. Only on first registration, so a replay/retry of the same
+        // call doesn't re-record after the result already consumed the input.
+        if newly_registered {
+            self.inner
+                .record_provider_tool_call_display_input(run_context, &input_ref, tool_call);
         }
         Ok(input_ref)
     }
@@ -3571,6 +3606,42 @@ mod tests {
         }
     }
 
+    /// Inner resolver that records every
+    /// `record_provider_tool_call_display_input` call, so a test can assert the
+    /// `ProviderToolCallInputResolver` decorator drives the inner's
+    /// display-preview hook under the canonical ref.
+    #[derive(Default)]
+    struct DisplayInputRecordingResolver {
+        recorded: Mutex<Vec<(String, String, serde_json::Value)>>,
+    }
+
+    #[async_trait]
+    impl LoopCapabilityInputResolver for DisplayInputRecordingResolver {
+        async fn resolve_capability_input(
+            &self,
+            _run_context: &LoopRunContext,
+            _input_ref: &CapabilityInputRef,
+        ) -> Result<serde_json::Value, AgentLoopHostError> {
+            Err(AgentLoopHostError::new(
+                AgentLoopHostErrorKind::InvalidInvocation,
+                "inner resolver should not resolve in this test",
+            ))
+        }
+
+        fn record_provider_tool_call_display_input(
+            &self,
+            _run_context: &LoopRunContext,
+            input_ref: &CapabilityInputRef,
+            tool_call: &ProviderToolCall,
+        ) {
+            self.recorded.lock().expect("recorded lock").push((
+                input_ref.as_str().to_string(),
+                tool_call.name.clone(),
+                tool_call.arguments.clone(),
+            ));
+        }
+    }
+
     #[tokio::test]
     async fn provider_tool_call_input_resolver_stages_arguments() {
         let run_context = loop_run_context(&execution_context("thread-provider-input")).await;
@@ -3588,6 +3659,44 @@ mod tests {
 
         assert!(input_ref.as_str().starts_with("input:provider-tool-"));
         assert_eq!(resolved, serde_json::json!({"message":"hello"}));
+    }
+
+    /// Regression (#activity-card-args): the decorator owns the canonical
+    /// provider tool-call ref and bypasses the inner
+    /// `register_provider_tool_call_input`, so it MUST drive the inner's
+    /// display-preview recording hook under that same ref — otherwise the
+    /// activity-card input summary is never recorded and the UI shows tool
+    /// calls with no arguments. Fires exactly once even if the same call is
+    /// registered twice (replay/retry).
+    #[tokio::test]
+    async fn provider_tool_call_input_resolver_drives_inner_display_input_hook() {
+        let run_context = loop_run_context(&execution_context("thread-display-input")).await;
+        let inner = Arc::new(DisplayInputRecordingResolver::default());
+        let resolver = ProviderToolCallInputResolver::new(inner.clone());
+        let call = provider_tool_call();
+
+        let input_ref = resolver
+            .register_provider_tool_call_input(&run_context, &call)
+            .await
+            .expect("provider input should stage");
+
+        // Registering the identical call again (replay/retry) must not
+        // re-record after the first registration.
+        resolver
+            .register_provider_tool_call_input(&run_context, &call)
+            .await
+            .expect("duplicate registration is idempotent");
+
+        let recorded = inner.recorded.lock().expect("recorded lock").clone();
+        assert_eq!(recorded.len(), 1, "display input recorded exactly once");
+        let (recorded_ref, recorded_name, recorded_args) = &recorded[0];
+        assert_eq!(
+            recorded_ref,
+            input_ref.as_str(),
+            "display input must be recorded under the canonical ref the result write later uses",
+        );
+        assert_eq!(recorded_name, &call.name);
+        assert_eq!(recorded_args, &call.arguments);
     }
 
     /// Captures every input callback the port forwards, so tests can drive the
