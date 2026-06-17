@@ -2280,7 +2280,7 @@ fn runtime_model_visible_failure_to_loop(
         RuntimeFailureKind::Authorization | RuntimeFailureKind::PolicyDenied
     ) {
         return Ok(CapabilityOutcome::Denied(CapabilityDenied {
-            reason_kind: capability_denied_reason_kind(failure.kind.as_str())?,
+            reason_kind: denied_reason_kind_for(failure.kind)?,
             safe_summary: runtime_failure_safe_summary(&failure, "capability authorization denied"),
         }));
     }
@@ -2355,6 +2355,31 @@ fn ensure_runtime_outcome_matches(
         ));
     }
     Ok(())
+}
+
+/// Maps an authorization/policy runtime failure to a leak-safe denied reason
+/// identifier.
+///
+/// `RuntimeFailureKind::Authorization.as_str()` is the literal string
+/// `"authorization"`, which the loop-safe identifier validator rejects as a
+/// sensitive marker (it guards against leaking `Authorization:` header
+/// material into identifiers). Passing it straight into
+/// `capability_denied_reason_kind` therefore turned every authorization denial
+/// into an internal "could not be represented" error, which the executor
+/// mapped to `HostUnavailable` and the planned driver recorded as a terminal
+/// "driver unavailable" failure — borking the whole run (observed when a Gmail
+/// extension activation failed authorization on auth-resume). Use stable,
+/// non-leaky tags so the denial surfaces to the model as a clean `Denied`
+/// outcome instead.
+fn denied_reason_kind_for(
+    kind: RuntimeFailureKind,
+) -> Result<CapabilityDeniedReasonKind, AgentLoopHostError> {
+    let reason = match kind {
+        RuntimeFailureKind::Authorization => "auth_denied",
+        RuntimeFailureKind::PolicyDenied => "policy_denied",
+        other => other.as_str(),
+    };
+    capability_denied_reason_kind(reason)
 }
 
 fn capability_denied_reason_kind(
@@ -2728,6 +2753,27 @@ mod tests {
             CapabilityOutcome::Denied(denied)
                 if denied.reason_kind.as_str() == "policy_denied"
                     && denied.safe_summary == "policy denied request"
+        ));
+
+        // Regression: RuntimeFailureKind::Authorization.as_str() is the literal
+        // "authorization", which the loop-safe identifier validator rejects as a
+        // sensitive marker. Feeding it straight into the denied reason kind used
+        // to fail conversion with an internal "could not be represented" error,
+        // which the executor mapped to HostUnavailable and the planned driver
+        // turned into a terminal "driver unavailable" failure — borking the run
+        // (e.g. a Gmail activation that failed authorization on auth-resume).
+        // The conversion must instead yield a clean, leak-safe Denied outcome.
+        let auth_denied = runtime_failure_to_loop(RuntimeCapabilityFailure::new(
+            capability_id.clone(),
+            RuntimeFailureKind::Authorization,
+            Some("capability requires authentication".to_string()),
+        ))
+        .expect("convert authorization denial without borking the run");
+        assert!(matches!(
+            auth_denied,
+            CapabilityOutcome::Denied(denied)
+                if denied.reason_kind.as_str() == "auth_denied"
+                    && denied.safe_summary == "capability requires authentication"
         ));
 
         let operation_failed = runtime_failure_to_loop(RuntimeCapabilityFailure::new(
