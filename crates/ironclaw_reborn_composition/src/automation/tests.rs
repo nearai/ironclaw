@@ -15,9 +15,9 @@ use ironclaw_product_workflow::{
 use ironclaw_triggers::{
     ActiveTriggerScanCursor, ClaimDueFireOutcome, ClaimDueFireRequest, ClearActiveFireRequest,
     FireAcceptedRequest, FirePermanentFailedRequest, FireReplayedRequest,
-    FireRetryableFailedRequest, FireTerminalFailedRequest, InMemoryTriggerRepository, TriggerError,
-    TriggerId, TriggerRecord, TriggerRepository, TriggerRunHistoryStatus, TriggerRunRecord,
-    TriggerSchedule, TriggerSourceKind, TriggerState,
+    FireRetryableFailedRequest, FireTerminalFailedRequest, InMemoryTriggerRepository,
+    SanitizedFailureReason, TriggerError, TriggerId, TriggerRecord, TriggerRepository,
+    TriggerRunHistoryStatus, TriggerRunRecord, TriggerSchedule, TriggerSourceKind, TriggerState,
 };
 use ironclaw_turns::TurnRunId;
 
@@ -77,6 +77,14 @@ fn make_record(
 }
 
 fn make_run_record(trigger_id: TriggerId, status: TriggerRunHistoryStatus) -> TriggerRunRecord {
+    make_run_record_with_reason(trigger_id, status, None)
+}
+
+fn make_run_record_with_reason(
+    trigger_id: TriggerId,
+    status: TriggerRunHistoryStatus,
+    failure_reason: Option<SanitizedFailureReason>,
+) -> TriggerRunRecord {
     let tenant_id = TenantId::new("tenant-alpha").expect("valid tenant");
     let fire_slot = now();
     TriggerRunRecord {
@@ -93,6 +101,7 @@ fn make_run_record(trigger_id: TriggerId, status: TriggerRunHistoryStatus) -> Tr
         status,
         submitted_at: now(),
         completed_at: None,
+        failure_reason,
     }
 }
 
@@ -475,6 +484,45 @@ async fn automation_facade_maps_trigger_run_status_and_last_status() {
     let run = make_run_record(id, TriggerRunHistoryStatus::Running);
     let mapped = super::map_recent_run(&run).expect("map_recent_run");
     assert_eq!(mapped.status, RebornAutomationRecentRunStatus::Running);
+}
+
+#[test]
+fn map_recent_run_surfaces_failure_reason_on_error_row() {
+    let id = TriggerId::new();
+    let reason = SanitizedFailureReason::sanitize("trigger fire not authorized")
+        .expect("non-empty sanitized reason");
+    let run = make_run_record_with_reason(id, TriggerRunHistoryStatus::Error, Some(reason.clone()));
+
+    let mapped = super::map_recent_run(&run).expect("map_recent_run");
+    assert_eq!(mapped.status, RebornAutomationRecentRunStatus::Error);
+    assert_eq!(
+        mapped.failure_reason.as_deref(),
+        Some(reason.as_str()),
+        "an error row must surface its sanitized failure reason"
+    );
+}
+
+#[test]
+fn map_recent_run_drops_failure_reason_on_non_error_row() {
+    // F2 projection defense: even if a non-error row defensively carries a
+    // stale failure_reason, the projection must never surface it. The data
+    // fix in the triggers crate already clears it on a non-error overwrite;
+    // this gate is belt-and-suspenders on top of that.
+    let id = TriggerId::new();
+    let reason =
+        SanitizedFailureReason::sanitize("stale leftover reason").expect("non-empty reason");
+
+    for status in [
+        TriggerRunHistoryStatus::Ok,
+        TriggerRunHistoryStatus::Running,
+    ] {
+        let run = make_run_record_with_reason(id, status, Some(reason.clone()));
+        let mapped = super::map_recent_run(&run).expect("map_recent_run");
+        assert!(
+            mapped.failure_reason.is_none(),
+            "a non-error ({status:?}) row must never surface a failure_reason"
+        );
+    }
 }
 
 // Resolver tests (resolve_run_thread_scope_*) live in

@@ -1,0 +1,795 @@
+//! Operator repair tooling for local-dev trigger-fire access (#4992).
+//!
+//! A local-dev Reborn trigger can be stranded when its persisted
+//! `creator_user_id` has no active row in `local_reborn_access` for the
+//! trigger's exact scope — e.g. the SSO identity index was dropped and the same
+//! account minted a fresh `UserId`, or the trigger carries a non-default
+//! agent/project scope that was never seeded. The fire-time checker now
+//! self-heals an *absent* scope on the next fire, but operators still need a way
+//! to inspect strands up front and to reassign triggers whose creator id is
+//! truly gone.
+//!
+//! This module keeps the libSQL substrate handle private to composition (the
+//! same boundary `open_local_trigger_access_store` honors) and exposes one
+//! high-level API the CLI calls. `repair_local_trigger_access` opens its OWN
+//! libSQL handle on the `reborn-local-dev.db` path — it does not reuse a
+//! running runtime's handle — so it is intended for offline/operator use:
+//! running it against a live server can hit transient SQLite busy/lock errors.
+//!
+//! Reassign (`--reassign-to` / `--reassign-to-current-sso-owner`) rewrites a
+//! stranded trigger's `creator_user_id` AND re-pairs the new owner's trusted
+//! external actor through the SAME filesystem-backed conversation store the
+//! runtime's trigger poller binds against at fire time
+//! (`factory::build_trigger_conversation_services_from_libsql`, scoped over the
+//! `/tenants` libSQL mount via the production `wrap_scoped` resolver). Seeding
+//! the access row alone is insufficient: fire-time binding fails closed for
+//! unpaired actors, so without the re-pair the repair would report success
+//! while the next fire still fails (#4992).
+
+use std::path::Path;
+use std::sync::Arc;
+
+use ironclaw_conversations::RebornFilesystemConversationServices;
+use ironclaw_host_api::{TenantId, UserId};
+use ironclaw_reborn::local_trigger_access::{
+    LocalAccessState, LocalTriggerAccessRole, LocalTriggerAccessSeed, LocalTriggerAccessSource,
+    RebornLibSqlLocalTriggerAccessStore, RebornLocalTriggerAccessStoreError,
+};
+use ironclaw_triggers::{LibSqlTriggerRepository, TriggerError, TriggerRecord, TriggerRepository};
+
+use crate::factory::{build_trigger_conversation_services_from_libsql, pair_trigger_creator};
+
+/// What the repair pass should do beyond reporting.
+#[derive(Debug, Clone)]
+pub enum TriggerAccessRepairAction {
+    /// Report stranded triggers only; make no changes.
+    Report,
+    /// Seed exact-scope active access for each stranded creator. Idempotent and
+    /// non-reactivating: a deliberately revoked (inactive) row is left as-is.
+    Reseed,
+    /// Reassign each stranded trigger to an explicit user id and seed access.
+    Reassign(UserId),
+    /// Reassign each stranded trigger to the single active SSO-admitted owner
+    /// and seed access. Fails if there is not exactly one such owner.
+    ReassignToCurrentSsoOwner,
+}
+
+/// One trigger whose creator lacks active local access for its exact scope.
+#[derive(Debug, Clone)]
+pub struct StrandedTrigger {
+    pub trigger_id: String,
+    pub name: String,
+    pub creator_user_id: String,
+    pub agent_id: Option<String>,
+    pub project_id: Option<String>,
+    /// Whether the scope has no row at all (`Absent`) or a deliberately
+    /// deactivated row (`Revoked`). `--reseed` only helps `Absent`.
+    pub access_state: LocalAccessState,
+    pub trigger_state: String,
+}
+
+/// Outcome of a repair pass.
+#[derive(Debug, Clone)]
+pub struct TriggerAccessRepairReport {
+    pub total_triggers: usize,
+    pub stranded: Vec<StrandedTrigger>,
+    pub reseeded: usize,
+    /// Stranded rows a `Reseed` pass could not fix because their access row is
+    /// `Revoked` (intentionally deactivated). `seed_local_access` is
+    /// `ON CONFLICT DO NOTHING`, so reseeding a revoked row is a no-op — only a
+    /// `--reassign-to*` action can recover these.
+    pub skipped_revoked: usize,
+    pub reassigned: usize,
+    /// Reassign targets skipped because they already hold a deliberately revoked
+    /// (inactive) row at the trigger's exact scope. `seed_local_access` is
+    /// `ON CONFLICT DO NOTHING`, so seeding cannot reactivate it; rather than
+    /// report a false success and flip ownership to a target that fire-time auth
+    /// will deny, the trigger is left untouched (ownership unchanged) and stays
+    /// visible to a re-run. Recover by reassigning to a non-revoked target.
+    pub skipped_revoked_target: usize,
+    /// The target user id *requested* for a reassign pass (`None` for non-reassign
+    /// actions). This is the requested target, not a guarantee every stranded
+    /// trigger landed on it — read `reassigned` for how many actually moved and
+    /// `skipped_revoked_target` for how many were left behind.
+    pub reassigned_to: Option<String>,
+}
+
+/// Failure modes of the repair pass.
+#[derive(Debug, thiserror::Error)]
+pub enum TriggerAccessRepairError {
+    #[error("trigger repository backend failure: {0}")]
+    Trigger(String),
+    #[error("local trigger access store failure: {0}")]
+    Access(String),
+    #[error(
+        "cannot resolve a single current SSO owner: {found} active SSO-admitted owners. \
+         Pass an explicit target user id instead."
+    )]
+    AmbiguousSsoOwner { found: usize },
+    #[error(
+        "no active SSO-admitted owner found to reassign to. \
+         Log in via SSO first, or pass an explicit target user id."
+    )]
+    NoSsoOwner,
+    #[error(
+        "could not re-pair the reassign target's trusted trigger actor (fire-time binding \
+         fails closed for unpaired actors); trigger ownership was left unchanged so the \
+         strand stays visible to a re-run: {reason}"
+    )]
+    Pairing { reason: String },
+}
+
+impl From<TriggerError> for TriggerAccessRepairError {
+    fn from(error: TriggerError) -> Self {
+        Self::Trigger(error.to_string())
+    }
+}
+
+impl From<RebornLocalTriggerAccessStoreError> for TriggerAccessRepairError {
+    fn from(error: RebornLocalTriggerAccessStoreError) -> Self {
+        Self::Access(error.to_string())
+    }
+}
+
+/// Run a repair pass over the local-dev substrate DB at `path` for `tenant_id`.
+///
+/// Opens ITS OWN libSQL handle on `path` (the `reborn-local-dev.db` file),
+/// separate from any running runtime's handle. The trigger repository and the
+/// local access store inside this repair pass share THAT one handle. It then
+/// enumerates the tenant's triggers, collects those whose creator lacks active
+/// access for the trigger's exact scope, and applies `action`. Always returns
+/// the stranded set so callers can report regardless of the action taken.
+///
+/// Because this opens a distinct handle on the same file, running it against a
+/// live server can hit transient SQLite busy/lock errors — it is intended for
+/// offline/operator use.
+pub async fn repair_local_trigger_access(
+    path: &Path,
+    tenant_id: &TenantId,
+    action: TriggerAccessRepairAction,
+) -> Result<TriggerAccessRepairReport, TriggerAccessRepairError> {
+    // Fail loud if the substrate DB is missing rather than silently creating an
+    // empty one: a mispointed home/path would otherwise build a fresh DB and
+    // report "0 stranded", a false-negative repair result. (`serve`/`run` create
+    // this file; repair only ever reads/edits an existing local-dev substrate.)
+    if !path.exists() {
+        return Err(TriggerAccessRepairError::Access(format!(
+            "local-dev substrate DB not found at {}",
+            path.display()
+        )));
+    }
+    let db = Arc::new(
+        libsql::Builder::new_local(path)
+            .build()
+            .await
+            .map_err(|err| TriggerAccessRepairError::Access(format!("open substrate db: {err}")))?,
+    );
+    let repository = LibSqlTriggerRepository::new(Arc::clone(&db));
+    repository.run_migrations().await?;
+    let access = RebornLibSqlLocalTriggerAccessStore::open(Arc::clone(&db)).await?;
+
+    let triggers = repository.list_triggers(tenant_id.clone()).await?;
+    let total_triggers = triggers.len();
+
+    let mut stranded_records: Vec<(TriggerRecord, LocalAccessState)> = Vec::new();
+    for trigger in triggers {
+        let state = access
+            .local_access_state(
+                tenant_id,
+                &trigger.creator_user_id,
+                trigger.agent_id.as_ref(),
+                trigger.project_id.as_ref(),
+            )
+            .await?;
+        if state != LocalAccessState::Active {
+            stranded_records.push((trigger, state));
+        }
+    }
+
+    let stranded: Vec<StrandedTrigger> = stranded_records
+        .iter()
+        .map(|(trigger, state)| StrandedTrigger {
+            trigger_id: trigger.trigger_id.to_string(),
+            name: trigger.name.clone(),
+            creator_user_id: trigger.creator_user_id.as_str().to_string(),
+            agent_id: trigger.agent_id.as_ref().map(|id| id.as_str().to_string()),
+            project_id: trigger
+                .project_id
+                .as_ref()
+                .map(|id| id.as_str().to_string()),
+            access_state: *state,
+            trigger_state: trigger.state.as_str().to_string(),
+        })
+        .collect();
+
+    let mut report = TriggerAccessRepairReport {
+        total_triggers,
+        stranded,
+        reseeded: 0,
+        skipped_revoked: 0,
+        reassigned: 0,
+        skipped_revoked_target: 0,
+        reassigned_to: None,
+    };
+
+    match action {
+        TriggerAccessRepairAction::Report => {}
+        TriggerAccessRepairAction::Reseed => {
+            for (trigger, state) in &stranded_records {
+                seed_creator_access(&access, tenant_id, trigger, &trigger.creator_user_id).await?;
+                // `seed_local_access` is `ON CONFLICT DO NOTHING`, so reseeding a
+                // `Revoked` row leaves it inactive — that is not a recovery. Only
+                // count an `Absent` scope as actually reseeded; surface the rest
+                // as `skipped_revoked` so the operator knows to use `--reassign-to*`.
+                match state {
+                    LocalAccessState::Absent => report.reseeded += 1,
+                    LocalAccessState::Revoked => report.skipped_revoked += 1,
+                    LocalAccessState::Active => {}
+                }
+            }
+        }
+        TriggerAccessRepairAction::Reassign(target) => {
+            let conversations = build_trigger_conversation_services_from_libsql(Arc::clone(&db))
+                .await
+                .map_err(|error| TriggerAccessRepairError::Pairing {
+                    reason: format!("open trigger conversation services: {error}"),
+                })?;
+            let outcome = apply_reassign(
+                &repository,
+                &access,
+                &conversations,
+                tenant_id,
+                &stranded_records,
+                &target,
+            )
+            .await?;
+            report.reassigned = outcome.reassigned;
+            report.skipped_revoked_target = outcome.skipped_revoked_target;
+            // The target *requested* for this pass. How many triggers actually
+            // moved is `reassigned`; the skip line also references this target, so
+            // record it unconditionally and let the CLI guard the "reassigned N"
+            // message on `reassigned > 0`.
+            report.reassigned_to = Some(target.as_str().to_string());
+        }
+        TriggerAccessRepairAction::ReassignToCurrentSsoOwner => {
+            let target = resolve_current_sso_owner(&access, tenant_id).await?;
+            let conversations = build_trigger_conversation_services_from_libsql(Arc::clone(&db))
+                .await
+                .map_err(|error| TriggerAccessRepairError::Pairing {
+                    reason: format!("open trigger conversation services: {error}"),
+                })?;
+            let outcome = apply_reassign(
+                &repository,
+                &access,
+                &conversations,
+                tenant_id,
+                &stranded_records,
+                &target,
+            )
+            .await?;
+            report.reassigned = outcome.reassigned;
+            report.skipped_revoked_target = outcome.skipped_revoked_target;
+            // The target *requested* for this pass. How many triggers actually
+            // moved is `reassigned`; the skip line also references this target, so
+            // record it unconditionally and let the CLI guard the "reassigned N"
+            // message on `reassigned > 0`.
+            report.reassigned_to = Some(target.as_str().to_string());
+        }
+    }
+
+    Ok(report)
+}
+
+async fn resolve_current_sso_owner(
+    access: &RebornLibSqlLocalTriggerAccessStore,
+    tenant_id: &TenantId,
+) -> Result<UserId, TriggerAccessRepairError> {
+    let owners = access
+        .list_active_user_ids_for_source(tenant_id, LocalTriggerAccessSource::LocalDevSsoBootstrap)
+        .await?;
+    match owners.len() {
+        0 => Err(TriggerAccessRepairError::NoSsoOwner),
+        1 => Ok(owners.into_iter().next().expect("len checked")),
+        found => Err(TriggerAccessRepairError::AmbiguousSsoOwner { found }),
+    }
+}
+
+/// Per-target tally of an `apply_reassign` pass.
+struct ReassignOutcome {
+    /// Triggers fully reassigned (target provisioned, paired, ownership rewritten).
+    reassigned: usize,
+    /// Triggers left untouched because the target holds a revoked row at the
+    /// trigger's exact scope (see [`TriggerAccessRepairReport::skipped_revoked_target`]).
+    skipped_revoked_target: usize,
+}
+
+async fn apply_reassign(
+    repository: &LibSqlTriggerRepository,
+    access: &RebornLibSqlLocalTriggerAccessStore,
+    conversations: &RebornFilesystemConversationServices,
+    tenant_id: &TenantId,
+    stranded_records: &[(TriggerRecord, LocalAccessState)],
+    target: &UserId,
+) -> Result<ReassignOutcome, TriggerAccessRepairError> {
+    let mut outcome = ReassignOutcome {
+        reassigned: 0,
+        skipped_revoked_target: 0,
+    };
+    for (trigger, _) in stranded_records {
+        let mut updated = trigger.clone();
+        updated.creator_user_id = target.clone();
+
+        // Provision the target FIRST, commit the ownership rewrite LAST. The
+        // repair scan treats any trigger whose CURRENT creator lacks active
+        // access as stranded, so keeping `upsert_trigger` as the final step means
+        // any earlier failure leaves the old creator in place and the trigger
+        // stays visible to a re-run — never a silent half-reassigned/unpaired
+        // state (#4992 P1).
+
+        // 1. Seed the target's exact-scope access, then confirm it actually
+        //    became active. `seed_local_access` is `ON CONFLICT DO NOTHING`, so a
+        //    target that already holds a deliberately revoked row at this scope
+        //    stays revoked; flipping ownership to it would report success while
+        //    fire-time auth denies (#4992 P2). Skip it, leave the trigger
+        //    stranded, and surface the count so the operator picks another target.
+        seed_creator_access(access, tenant_id, trigger, target).await?;
+        let target_state = access
+            .local_access_state(
+                tenant_id,
+                target,
+                trigger.agent_id.as_ref(),
+                trigger.project_id.as_ref(),
+            )
+            .await?;
+        if target_state != LocalAccessState::Active {
+            outcome.skipped_revoked_target += 1;
+            continue;
+        }
+
+        // 2. Re-pair the target's trusted actor. Fire-time binding
+        //    (`TriggerTrustedInboundBinding::for_fire`) keys the external actor on
+        //    the trigger's `creator_user_id` and FAILS CLOSED for unpaired actors,
+        //    so the access row alone is insufficient. Mirrors create-time
+        //    `factory::pair_trigger_creator`, keyed on the UPDATED record so the
+        //    actor ref is `target`; idempotent, so a retry after a later failure
+        //    is safe.
+        pair_trigger_creator(conversations, &updated)
+            .await
+            .map_err(|error| TriggerAccessRepairError::Pairing {
+                reason: error.to_string(),
+            })?;
+
+        // 3. Commit the ownership rewrite last.
+        repository.upsert_trigger(updated).await?;
+        outcome.reassigned += 1;
+    }
+    Ok(outcome)
+}
+
+async fn seed_creator_access(
+    access: &RebornLibSqlLocalTriggerAccessStore,
+    tenant_id: &TenantId,
+    trigger: &TriggerRecord,
+    user_id: &UserId,
+) -> Result<(), TriggerAccessRepairError> {
+    access
+        .seed_local_access(LocalTriggerAccessSeed {
+            tenant_id,
+            user_id,
+            agent_id: trigger.agent_id.as_ref(),
+            project_id: trigger.project_id.as_ref(),
+            role: LocalTriggerAccessRole::Owner,
+            source: LocalTriggerAccessSource::LocalDevTriggerCreateBootstrap,
+        })
+        .await?;
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ironclaw_host_api::{AgentId, ProjectId};
+    use ironclaw_triggers::{
+        TriggerCompletionPolicy, TriggerId, TriggerSchedule, TriggerSourceKind, TriggerState,
+    };
+    use std::path::PathBuf;
+
+    fn ts(seconds: i64) -> ironclaw_host_api::Timestamp {
+        use chrono::TimeZone;
+        chrono::Utc
+            .timestamp_opt(seconds, 0)
+            .single()
+            .expect("valid timestamp")
+    }
+
+    fn stranded_record(trigger_id: &str, tenant: &TenantId, creator: &UserId) -> TriggerRecord {
+        TriggerRecord {
+            trigger_id: TriggerId::parse(trigger_id).expect("ulid"),
+            tenant_id: tenant.clone(),
+            creator_user_id: creator.clone(),
+            agent_id: Some(AgentId::new("repair-agent").expect("agent")),
+            project_id: Some(ProjectId::new("repair-project").expect("project")),
+            name: "repair test".to_string(),
+            source: TriggerSourceKind::Schedule,
+            schedule: TriggerSchedule::cron("0 8 * * *").expect("cron"),
+            completion_policy: TriggerCompletionPolicy::Recurring,
+            prompt: "do the thing".to_string(),
+            state: TriggerState::Scheduled,
+            next_run_at: ts(1_704_067_200),
+            last_run_at: None,
+            last_fired_slot: None,
+            last_status: None,
+            active_fire_slot: None,
+            active_run_ref: None,
+            created_at: ts(1_704_067_200),
+        }
+    }
+
+    async fn seed_trigger(path: &std::path::Path, record: TriggerRecord) {
+        let db = Arc::new(
+            libsql::Builder::new_local(path)
+                .build()
+                .await
+                .expect("build db"),
+        );
+        let repo = LibSqlTriggerRepository::new(db);
+        repo.run_migrations().await.expect("migrate");
+        repo.upsert_trigger(record).await.expect("seed trigger");
+    }
+
+    /// Build + migrate an empty substrate DB (no triggers) so `repair_*` sees an
+    /// existing file rather than failing its missing-DB guard.
+    async fn create_empty_substrate(path: &std::path::Path) {
+        let db = Arc::new(
+            libsql::Builder::new_local(path)
+                .build()
+                .await
+                .expect("build db"),
+        );
+        LibSqlTriggerRepository::new(db)
+            .run_migrations()
+            .await
+            .expect("migrate");
+    }
+
+    fn db_path(dir: &tempfile::TempDir) -> PathBuf {
+        dir.path().join("reborn-local-dev.db")
+    }
+
+    #[tokio::test]
+    async fn report_lists_stranded_then_reseed_grants_access() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = db_path(&dir);
+        let tenant = TenantId::new("reborn-cli").expect("tenant");
+        let creator = UserId::new("stranded-creator").expect("user");
+        seed_trigger(
+            &path,
+            stranded_record("01J0000000000000000000A001", &tenant, &creator),
+        )
+        .await;
+
+        let report = repair_local_trigger_access(&path, &tenant, TriggerAccessRepairAction::Report)
+            .await
+            .expect("report");
+        assert_eq!(report.total_triggers, 1);
+        assert_eq!(report.stranded.len(), 1);
+        assert_eq!(report.stranded[0].access_state, LocalAccessState::Absent);
+        assert_eq!(report.reseeded, 0);
+
+        let applied =
+            repair_local_trigger_access(&path, &tenant, TriggerAccessRepairAction::Reseed)
+                .await
+                .expect("reseed");
+        assert_eq!(applied.reseeded, 1);
+
+        // After reseed the creator now has active access — no longer stranded.
+        let after = repair_local_trigger_access(&path, &tenant, TriggerAccessRepairAction::Report)
+            .await
+            .expect("report after reseed");
+        assert!(
+            after.stranded.is_empty(),
+            "reseed should clear the strand for the exact scope"
+        );
+    }
+
+    #[tokio::test]
+    async fn reassign_rewrites_creator_and_seeds_target() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = db_path(&dir);
+        let tenant = TenantId::new("reborn-cli").expect("tenant");
+        let creator = UserId::new("gone-creator").expect("user");
+        let target = UserId::new("current-owner").expect("user");
+        let trigger_id = "01J0000000000000000000A002";
+        seed_trigger(&path, stranded_record(trigger_id, &tenant, &creator)).await;
+
+        let applied = repair_local_trigger_access(
+            &path,
+            &tenant,
+            TriggerAccessRepairAction::Reassign(target.clone()),
+        )
+        .await
+        .expect("reassign");
+        assert_eq!(applied.reassigned, 1);
+        assert_eq!(applied.reassigned_to.as_deref(), Some(target.as_str()));
+
+        // The persisted trigger now belongs to the target, who has active access.
+        let db = Arc::new(
+            libsql::Builder::new_local(&path)
+                .build()
+                .await
+                .expect("reopen db"),
+        );
+        let repo = LibSqlTriggerRepository::new(Arc::clone(&db));
+        let reloaded = repo
+            .get_trigger(tenant.clone(), TriggerId::parse(trigger_id).expect("ulid"))
+            .await
+            .expect("get trigger")
+            .expect("trigger present");
+        assert_eq!(reloaded.creator_user_id, target);
+
+        let access = RebornLibSqlLocalTriggerAccessStore::open(db)
+            .await
+            .expect("open access");
+        assert!(
+            access
+                .has_active_local_access(
+                    &tenant,
+                    &target,
+                    reloaded.agent_id.as_ref(),
+                    reloaded.project_id.as_ref()
+                )
+                .await
+                .expect("check access"),
+            "target must have active access for the trigger scope after reassign"
+        );
+    }
+
+    /// Seed an active row for `user` at the given scope, then deactivate it via
+    /// a reconcile that excludes `user` — leaving a `Revoked` (inactive) row, the
+    /// operator-revocation state. Used to set up a reassign target that
+    /// `seed_local_access` (`ON CONFLICT DO NOTHING`) cannot reactivate.
+    async fn seed_revoked_at_scope(
+        path: &std::path::Path,
+        tenant: &TenantId,
+        user: &UserId,
+        agent_id: Option<&AgentId>,
+        project_id: Option<&ProjectId>,
+    ) {
+        use ironclaw_reborn::local_trigger_access::LocalTriggerAccessReconciliation;
+        let db = Arc::new(
+            libsql::Builder::new_local(path)
+                .build()
+                .await
+                .expect("build db"),
+        );
+        let access = RebornLibSqlLocalTriggerAccessStore::open(db)
+            .await
+            .expect("open access");
+        access
+            .seed_local_access(LocalTriggerAccessSeed {
+                tenant_id: tenant,
+                user_id: user,
+                agent_id,
+                project_id,
+                role: LocalTriggerAccessRole::Owner,
+                source: LocalTriggerAccessSource::LocalDevSsoBootstrap,
+            })
+            .await
+            .expect("seed target");
+        let keeper = UserId::new("some-other-owner").expect("user");
+        access
+            .reconcile_local_access(LocalTriggerAccessReconciliation {
+                tenant_id: tenant,
+                user_ids: &[keeper],
+                agent_id,
+                project_id,
+                role: LocalTriggerAccessRole::Owner,
+                source: LocalTriggerAccessSource::LocalDevSsoBootstrap,
+            })
+            .await
+            .expect("revoke target");
+    }
+
+    #[tokio::test]
+    async fn reassign_skips_target_with_revoked_scope_row_and_leaves_trigger_stranded() {
+        // #4992 P1+P2: a reassign target that already holds a deliberately
+        // revoked row at the trigger's exact scope cannot be reactivated by the
+        // `ON CONFLICT DO NOTHING` seed. The repair must NOT report a false
+        // success or flip ownership to a target fire-time auth will deny — it
+        // skips the trigger, leaves ownership unchanged, and keeps it visible.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = db_path(&dir);
+        let tenant = TenantId::new("reborn-cli").expect("tenant");
+        let creator = UserId::new("gone-creator").expect("user");
+        let target = UserId::new("revoked-target").expect("user");
+        let trigger_id = "01J0000000000000000000A003";
+        let record = stranded_record(trigger_id, &tenant, &creator);
+        seed_trigger(&path, record.clone()).await;
+        seed_revoked_at_scope(
+            &path,
+            &tenant,
+            &target,
+            record.agent_id.as_ref(),
+            record.project_id.as_ref(),
+        )
+        .await;
+
+        let applied = repair_local_trigger_access(
+            &path,
+            &tenant,
+            TriggerAccessRepairAction::Reassign(target.clone()),
+        )
+        .await
+        .expect("reassign");
+        assert_eq!(
+            applied.reassigned, 0,
+            "revoked target must not count as reassigned"
+        );
+        assert_eq!(applied.skipped_revoked_target, 1);
+        assert_eq!(
+            applied.reassigned_to.as_deref(),
+            Some(target.as_str()),
+            "the requested target is recorded even when nothing moved, so the CLI skip line can name it"
+        );
+
+        // Ownership is unchanged: the upsert never ran.
+        let db = Arc::new(
+            libsql::Builder::new_local(&path)
+                .build()
+                .await
+                .expect("reopen db"),
+        );
+        let repo = LibSqlTriggerRepository::new(Arc::clone(&db));
+        let reloaded = repo
+            .get_trigger(tenant.clone(), TriggerId::parse(trigger_id).expect("ulid"))
+            .await
+            .expect("get trigger")
+            .expect("trigger present");
+        assert_eq!(
+            reloaded.creator_user_id, creator,
+            "ownership must stay with the original creator when the target is revoked"
+        );
+
+        // The trigger is still reported stranded, not silently lost.
+        let after = repair_local_trigger_access(&path, &tenant, TriggerAccessRepairAction::Report)
+            .await
+            .expect("report after");
+        assert_eq!(
+            after.stranded.len(),
+            1,
+            "the unrepaired trigger stays visible to the next repair pass"
+        );
+    }
+
+    /// Seed an active SSO-bootstrap access row for `user` at the default
+    /// (no agent/project) scope so `resolve_current_sso_owner` can find it.
+    async fn seed_sso_owner(path: &std::path::Path, tenant: &TenantId, user: &UserId) {
+        let db = Arc::new(
+            libsql::Builder::new_local(path)
+                .build()
+                .await
+                .expect("build db"),
+        );
+        let access = RebornLibSqlLocalTriggerAccessStore::open(db)
+            .await
+            .expect("open access");
+        access
+            .seed_local_access(LocalTriggerAccessSeed {
+                tenant_id: tenant,
+                user_id: user,
+                agent_id: None,
+                project_id: None,
+                role: LocalTriggerAccessRole::Owner,
+                source: LocalTriggerAccessSource::LocalDevSsoBootstrap,
+            })
+            .await
+            .expect("seed sso owner");
+    }
+
+    #[tokio::test]
+    async fn reassign_to_current_sso_owner_without_owner_errors() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = db_path(&dir);
+        let tenant = TenantId::new("reborn-cli").expect("tenant");
+        let creator = UserId::new("stranded-creator").expect("user");
+        seed_trigger(
+            &path,
+            stranded_record("01J0000000000000000000A003", &tenant, &creator),
+        )
+        .await;
+
+        let err = repair_local_trigger_access(
+            &path,
+            &tenant,
+            TriggerAccessRepairAction::ReassignToCurrentSsoOwner,
+        )
+        .await
+        .expect_err("no sso owner present");
+        assert!(
+            matches!(err, TriggerAccessRepairError::NoSsoOwner),
+            "expected NoSsoOwner, got {err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn reassign_to_current_sso_owner_with_two_owners_is_ambiguous() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = db_path(&dir);
+        let tenant = TenantId::new("reborn-cli").expect("tenant");
+        let creator = UserId::new("stranded-creator").expect("user");
+        seed_trigger(
+            &path,
+            stranded_record("01J0000000000000000000A004", &tenant, &creator),
+        )
+        .await;
+
+        let owner_one = UserId::new("sso-owner-one").expect("user");
+        let owner_two = UserId::new("sso-owner-two").expect("user");
+        seed_sso_owner(&path, &tenant, &owner_one).await;
+        seed_sso_owner(&path, &tenant, &owner_two).await;
+
+        let err = repair_local_trigger_access(
+            &path,
+            &tenant,
+            TriggerAccessRepairAction::ReassignToCurrentSsoOwner,
+        )
+        .await
+        .expect_err("ambiguous sso owners present");
+        assert!(
+            matches!(
+                err,
+                TriggerAccessRepairError::AmbiguousSsoOwner { found: 2 }
+            ),
+            "expected AmbiguousSsoOwner {{ found: 2 }}, got {err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn empty_stranded_report_is_consistent() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = db_path(&dir);
+        let tenant = TenantId::new("reborn-cli").expect("tenant");
+        // The substrate exists but holds no triggers (distinct from a missing DB,
+        // which now fails loud).
+        create_empty_substrate(&path).await;
+
+        // No triggers seeded at all: nothing scanned, nothing stranded.
+        let report = repair_local_trigger_access(&path, &tenant, TriggerAccessRepairAction::Report)
+            .await
+            .expect("report");
+        assert_eq!(report.total_triggers, 0);
+        assert_eq!(report.stranded.len(), 0);
+        assert_eq!(report.reseeded, 0);
+        assert_eq!(report.skipped_revoked, 0);
+
+        // A Reseed pass over an empty strand set is a no-op.
+        let applied =
+            repair_local_trigger_access(&path, &tenant, TriggerAccessRepairAction::Reseed)
+                .await
+                .expect("reseed empty");
+        assert_eq!(applied.reseeded, 0);
+        assert_eq!(applied.skipped_revoked, 0);
+        assert_eq!(applied.stranded.len(), 0);
+    }
+
+    #[tokio::test]
+    async fn repair_fails_loud_when_substrate_db_is_missing() {
+        // A mispointed path must NOT silently create an empty DB and report
+        // "0 stranded" — that would be a false-negative repair.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("does-not-exist.db");
+        let tenant = TenantId::new("reborn-cli").expect("tenant");
+
+        let error = repair_local_trigger_access(&path, &tenant, TriggerAccessRepairAction::Report)
+            .await
+            .expect_err("missing substrate DB must fail loud");
+        assert!(
+            matches!(error, TriggerAccessRepairError::Access(reason) if reason.contains("not found")),
+            "expected a missing-DB access error, got a different failure"
+        );
+        assert!(
+            !path.exists(),
+            "repair must not have created the substrate file"
+        );
+    }
+}

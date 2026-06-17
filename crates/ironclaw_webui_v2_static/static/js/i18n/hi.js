@@ -1007,6 +1007,7 @@ registerPack("hi", {
   "automations.detail.noCurrentRun": "कोई सक्रिय रन नहीं",
   "automations.detail.noRuns": "इस ऑटोमेशन ने अभी तक कोई दिखाई देने वाला रन नहीं बनाया है।",
   "automations.detail.noThread": "कोई थ्रेड संलग्न नहीं",
+  "automations.detail.failureReason": "विफल:",
   "automations.detail.openRun": "रन खोलें",
   "automations.detail.recentRuns": "हाल के रन",
   "automations.detail.run": "रन",

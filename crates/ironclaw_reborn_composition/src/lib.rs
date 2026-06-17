@@ -91,7 +91,14 @@ mod profile_approval_authorization;
 mod project_filesystem_reader;
 mod projection;
 mod trajectory_observer;
+#[cfg(feature = "webui-v2-beta")]
+mod trigger_access_repair;
 pub use auth_prompt::{AuthChallengeProvider, AuthChallengeView};
+#[cfg(feature = "webui-v2-beta")]
+pub use trigger_access_repair::{
+    StrandedTrigger, TriggerAccessRepairAction, TriggerAccessRepairError,
+    TriggerAccessRepairReport, repair_local_trigger_access,
+};
 #[cfg(feature = "slack-v2-host-beta")]
 mod delivered_gate_routing;
 #[cfg(feature = "root-llm-provider")]
@@ -357,8 +364,8 @@ pub mod host_api {
 /// stays private to this facade and callers never construct one.
 #[cfg(feature = "webui-v2-beta")]
 pub use ironclaw_reborn::local_trigger_access::{
-    LocalTriggerAccessReconciliation, LocalTriggerAccessRole, LocalTriggerAccessSeed,
-    LocalTriggerAccessSource, RebornLibSqlLocalTriggerAccessStore,
+    LocalAccessState, LocalTriggerAccessReconciliation, LocalTriggerAccessRole,
+    LocalTriggerAccessSeed, LocalTriggerAccessSource, RebornLibSqlLocalTriggerAccessStore,
     RebornLocalTriggerAccessStoreError,
 };
 
@@ -370,26 +377,55 @@ impl runtime_input::TriggerFireAccessChecker for RebornLibSqlLocalTriggerAccessS
         request: runtime_input::TriggerFireAccessCheck,
     ) -> Result<runtime_input::TriggerFireAccessDecision, runtime_input::TriggerFireAccessError>
     {
-        self.has_active_local_access(
-            &request.tenant_id,
-            &request.creator_user_id,
-            request.agent_id.as_ref(),
-            request.project_id.as_ref(),
-        )
-        .await
-        .map_err(|error| runtime_input::TriggerFireAccessError::Unavailable {
-            reason: error.to_string(),
-        })
-        .map(|allowed| {
-            if allowed {
-                runtime_input::TriggerFireAccessDecision::Allowed
-            } else {
-                runtime_input::TriggerFireAccessDecision::Denied {
-                    reason: "trigger creator does not have active local access for this scope"
-                        .to_string(),
-                }
+        let to_unavailable = |error: RebornLocalTriggerAccessStoreError| {
+            runtime_input::TriggerFireAccessError::Unavailable {
+                reason: error.to_string(),
             }
-        })
+        };
+
+        // Distinguish an active grant from a deliberate revocation from a
+        // never-seeded / lost-on-DB-drop strand. Only the last is safe to
+        // self-heal: a fire is only ever materialized from a persisted trigger
+        // record whose `creator_user_id` was set under an authenticated caller,
+        // so the record's existence is the ownership proof. A `Revoked` row is
+        // the local operator's revocation mechanism and must stay denied.
+        let state = self
+            .local_access_state(
+                &request.tenant_id,
+                &request.creator_user_id,
+                request.agent_id.as_ref(),
+                request.project_id.as_ref(),
+            )
+            .await
+            .map_err(to_unavailable)?;
+
+        match state {
+            LocalAccessState::Active => Ok(runtime_input::TriggerFireAccessDecision::Allowed),
+            LocalAccessState::Revoked => Ok(runtime_input::TriggerFireAccessDecision::Denied {
+                reason: "trigger creator's local access was revoked for this scope".to_string(),
+            }),
+            LocalAccessState::Absent => {
+                // Strand recovery: seed the exact trigger scope so the access
+                // row's lifetime now tracks the trigger's, then allow this fire.
+                // Idempotent and best-effort — a transient seed failure falls
+                // back to a retryable denial rather than a fake acceptance.
+                tracing::debug!(
+                    trigger_id = %request.trigger_id,
+                    "self-healing absent local trigger-fire access for persisted trigger creator"
+                );
+                self.seed_local_access(LocalTriggerAccessSeed {
+                    tenant_id: &request.tenant_id,
+                    user_id: &request.creator_user_id,
+                    agent_id: request.agent_id.as_ref(),
+                    project_id: request.project_id.as_ref(),
+                    role: LocalTriggerAccessRole::Owner,
+                    source: LocalTriggerAccessSource::LocalDevTriggerCreateBootstrap,
+                })
+                .await
+                .map_err(to_unavailable)?;
+                Ok(runtime_input::TriggerFireAccessDecision::Allowed)
+            }
+        }
     }
 }
 
@@ -479,14 +515,13 @@ mod webui_user_access_checker_tests {
     use ironclaw_host_api::{AgentId, ProjectId, TenantId, UserId};
 
     #[tokio::test]
-    async fn user_store_trigger_fire_checker_uses_exact_seeded_scope() {
+    async fn user_store_trigger_fire_checker_allows_active_scope() {
         let root = tempfile::tempdir().expect("tempdir");
         let store = open_local_trigger_access_store(&root.path().join("reborn-local-dev.db"))
             .await
             .expect("open local trigger access store");
         let tenant_id = TenantId::new("checker-tenant").expect("tenant id");
         let user_id = UserId::new("checker-user").expect("user id");
-        let other_user_id = UserId::new("checker-other-user").expect("user id");
         let agent_id = AgentId::new("checker-agent").expect("agent id");
         let project_id = ProjectId::new("checker-project").expect("project id");
 
@@ -504,21 +539,8 @@ mod webui_user_access_checker_tests {
 
         let allowed = store
             .check_trigger_fire_access(TriggerFireAccessCheck {
-                tenant_id: tenant_id.clone(),
-                creator_user_id: user_id,
-                agent_id: Some(agent_id.clone()),
-                project_id: Some(project_id.clone()),
-                trigger_id: TriggerId::new(),
-                fire_slot: chrono::Utc::now(),
-            })
-            .await
-            .expect("check access");
-        assert_eq!(allowed, TriggerFireAccessDecision::Allowed);
-
-        let denied = store
-            .check_trigger_fire_access(TriggerFireAccessCheck {
                 tenant_id,
-                creator_user_id: other_user_id,
+                creator_user_id: user_id,
                 agent_id: Some(agent_id),
                 project_id: Some(project_id),
                 trigger_id: TriggerId::new(),
@@ -526,10 +548,106 @@ mod webui_user_access_checker_tests {
             })
             .await
             .expect("check access");
+        assert_eq!(allowed, TriggerFireAccessDecision::Allowed);
+    }
+
+    #[tokio::test]
+    async fn user_store_trigger_fire_checker_self_heals_absent_scope() {
+        // A trigger persisted under a creator whose exact scope was never
+        // seeded (non-default agent/project) or whose access row was lost on a
+        // local-dev DB drop must still fire: the persisted trigger record is
+        // the ownership proof, so the checker self-heals an absent scope.
+        let root = tempfile::tempdir().expect("tempdir");
+        let store = open_local_trigger_access_store(&root.path().join("reborn-local-dev.db"))
+            .await
+            .expect("open local trigger access store");
+        let tenant_id = TenantId::new("checker-tenant").expect("tenant id");
+        let creator = UserId::new("stranded-creator").expect("user id");
+        let agent_id = AgentId::new("checker-agent").expect("agent id");
+        let project_id = ProjectId::new("checker-project").expect("project id");
+
+        assert!(
+            !store
+                .has_active_local_access(&tenant_id, &creator, Some(&agent_id), Some(&project_id))
+                .await
+                .expect("read access"),
+            "no row should exist before the fire"
+        );
+
+        let decision = store
+            .check_trigger_fire_access(TriggerFireAccessCheck {
+                tenant_id: tenant_id.clone(),
+                creator_user_id: creator.clone(),
+                agent_id: Some(agent_id.clone()),
+                project_id: Some(project_id.clone()),
+                trigger_id: TriggerId::new(),
+                fire_slot: chrono::Utc::now(),
+            })
+            .await
+            .expect("check access");
+        assert_eq!(decision, TriggerFireAccessDecision::Allowed);
+
+        assert!(
+            store
+                .has_active_local_access(&tenant_id, &creator, Some(&agent_id), Some(&project_id))
+                .await
+                .expect("read access"),
+            "self-heal should have seeded an active row for the exact scope"
+        );
+    }
+
+    #[tokio::test]
+    async fn user_store_trigger_fire_checker_denies_revoked_scope() {
+        // An inactive row is the local operator's revocation mechanism; the
+        // checker must NOT self-heal over it.
+        let root = tempfile::tempdir().expect("tempdir");
+        let store = open_local_trigger_access_store(&root.path().join("reborn-local-dev.db"))
+            .await
+            .expect("open local trigger access store");
+        let tenant_id = TenantId::new("checker-tenant").expect("tenant id");
+        let creator = UserId::new("revoked-creator").expect("user id");
+        let keeper = UserId::new("kept-creator").expect("user id");
+        let agent_id = AgentId::new("checker-agent").expect("agent id");
+
+        store
+            .seed_local_access(LocalTriggerAccessSeed {
+                tenant_id: &tenant_id,
+                user_id: &creator,
+                agent_id: Some(&agent_id),
+                project_id: None,
+                role: LocalTriggerAccessRole::Owner,
+                source: LocalTriggerAccessSource::LocalDevSsoBootstrap,
+            })
+            .await
+            .expect("seed local access");
+        // Reconcile the same source/scope with a different user set, deactivating
+        // the original creator's row (the revocation path).
+        store
+            .reconcile_local_access(LocalTriggerAccessReconciliation {
+                tenant_id: &tenant_id,
+                user_ids: &[keeper],
+                agent_id: Some(&agent_id),
+                project_id: None,
+                role: LocalTriggerAccessRole::Owner,
+                source: LocalTriggerAccessSource::LocalDevSsoBootstrap,
+            })
+            .await
+            .expect("reconcile local access");
+
+        let decision = store
+            .check_trigger_fire_access(TriggerFireAccessCheck {
+                tenant_id,
+                creator_user_id: creator,
+                agent_id: Some(agent_id),
+                project_id: None,
+                trigger_id: TriggerId::new(),
+                fire_slot: chrono::Utc::now(),
+            })
+            .await
+            .expect("check access");
         assert!(matches!(
-            denied,
-            TriggerFireAccessDecision::Denied { reason }
-                if reason.contains("does not have active local access")
+            decision,
+            TriggerFireAccessDecision::Denied { reason } if reason.contains("revoked")
         ));
     }
 }

@@ -1007,6 +1007,7 @@ registerPack("ja", {
   "automations.detail.noCurrentRun": "実行中のものはありません",
   "automations.detail.noRuns": "この自動化では、まだ表示可能な実行がありません。",
   "automations.detail.noThread": "スレッドが関連付けられていません",
+  "automations.detail.failureReason": "失敗:",
   "automations.detail.openRun": "実行を開く",
   "automations.detail.recentRuns": "最近の実行",
   "automations.detail.run": "実行",

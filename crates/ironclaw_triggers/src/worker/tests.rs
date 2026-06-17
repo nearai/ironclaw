@@ -1785,6 +1785,55 @@ async fn tick_permanent_materialization_failure_advances_next_slot() {
     assert_eq!(persisted.active_run_ref, None);
 }
 
+/// Drives the worker through an authorization-style materialization failure and
+/// asserts the persisted run-history row carries a sanitized `failure_reason`
+/// (not just the in-record `last_status`). Locks that the curated reason text
+/// threaded from `classify_failure` → `persist_failed_fire` → the repository
+/// survives onto the row the Automations panel reads, with no run/thread link.
+#[tokio::test]
+async fn tick_materialization_failure_persists_run_history_failure_reason() {
+    let repo = Arc::new(InMemoryTriggerRepository::default());
+    let trigger_id = TriggerId::parse("01HZZZZZZZZZZZZZZZZZZZZZZZ").expect("ulid");
+    let fire_slot = ts(1_704_067_200);
+    let record = sample_record(trigger_id, tenant("tenant-a"), fire_slot);
+    repo.upsert_trigger(record).await.expect("insert");
+    let worker = worker(
+        repo.clone(),
+        Arc::new(RecordingMaterializer::failure(
+            TriggerError::InvalidMaterialization {
+                reason: "trigger fire not authorized: creator access revoked".to_string(),
+            },
+        )),
+        Arc::new(RecordingSubmitter::with_outcomes(Vec::new())),
+        Arc::new(RecordingActiveRunLookup::default()),
+    );
+
+    worker.tick_once(fire_slot).await.expect("tick succeeds");
+
+    let runs = repo
+        .list_trigger_run_history(tenant("tenant-a"), trigger_id, 10)
+        .await
+        .expect("list run history");
+    let run = runs
+        .iter()
+        .find(|run| run.fire_slot == fire_slot)
+        .expect("run row for fire_slot");
+    assert_eq!(run.status, TriggerRunHistoryStatus::Error);
+    assert_eq!(run.run_id, None, "failed fire must not link a run id");
+    assert_eq!(run.thread_id, None, "failed fire must not link a thread");
+    let failure_reason = run
+        .failure_reason
+        .as_ref()
+        .expect("error run row must carry a failure reason");
+    assert!(
+        failure_reason
+            .as_str()
+            .contains("trigger fire not authorized"),
+        "persisted reason must surface the curated authorization detail, got {:?}",
+        failure_reason.as_str()
+    );
+}
+
 #[tokio::test]
 async fn tick_source_provider_none_persists_permanent_failure_with_next_slot() {
     let repo = Arc::new(InMemoryTriggerRepository::default());

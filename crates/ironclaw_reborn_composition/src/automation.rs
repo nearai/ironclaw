@@ -298,6 +298,18 @@ fn map_recent_run(run: &TriggerRunRecord) -> Option<RebornAutomationRecentRunInf
         status,
         submitted_at: run.submitted_at,
         completed_at: run.completed_at,
+        // Sanitized pre-acceptance failure reason so the panel can explain a
+        // failed fire instead of only "No thread attached". Belt-and-suspenders
+        // on top of the triggers-crate data fix that clears the reason on a
+        // non-error overwrite: surface it ONLY on error rows so a stale reason
+        // can never reach the UI on an OK/Running row.
+        failure_reason: if run.status == TriggerRunHistoryStatus::Error {
+            run.failure_reason
+                .as_ref()
+                .map(|reason| reason.as_str().to_string())
+        } else {
+            None
+        },
     })
 }
 

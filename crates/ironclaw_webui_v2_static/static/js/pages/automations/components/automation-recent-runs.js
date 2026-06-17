@@ -52,10 +52,21 @@ export function RecentRunRow({ run, onOpenRun, onOpenLogs }) {
       </div>
       <div className="min-w-0">
         <div className="text-sm font-semibold text-iron-100">${run.fired_label}</div>
-        <div className="mt-1 truncate font-mono text-[11px] text-iron-400">
+        <div
+          className=${cn(
+            "mt-1 font-mono text-[11px]",
+            run.thread_id
+              ? "truncate text-iron-400"
+              : run.failure_reason
+                ? "truncate text-red-300"
+                : "truncate text-iron-400",
+          )}
+        >
           ${run.thread_id
             ? `${t("automations.detail.thread")} ${run.thread_id}`
-            : t("automations.detail.noThread")}
+            : run.failure_reason
+              ? `${t("automations.detail.failureReason")} ${run.failure_reason}`
+              : t("automations.detail.noThread")}
         </div>
         ${run.run_id &&
         html`

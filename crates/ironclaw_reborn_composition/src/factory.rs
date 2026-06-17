@@ -1638,7 +1638,7 @@ where
     }
 }
 
-async fn pair_trigger_creator(
+pub(crate) async fn pair_trigger_creator(
     pairing: &dyn ConversationActorPairingService,
     record: &TriggerRecord,
 ) -> Result<(), TriggerError> {
@@ -1780,6 +1780,60 @@ async fn build_local_dev_root_filesystem(
         filesystem: Arc::new(root),
         database: db,
     })
+}
+
+/// Build the trigger-conversation pairing services over a `/tenants` libSQL
+/// mount scoped IDENTICALLY to the local-dev runtime's `subagent_goal_filesystem`.
+///
+/// The conversation singleton (`/conversations/state.json`, which holds the
+/// external-actor pairings the trigger poller reads at fire time) resolves
+/// through [`invocation_mount_view`](crate::invocation_mount_view) to
+/// `/tenants/__system__/users/__system__/conversations/state.json`, i.e.
+/// entirely under the `/tenants` mount. The runtime builds its
+/// `subagent_goal_filesystem` by mounting `/tenants` on a
+/// `LibSqlRootFilesystem` over `reborn-local-dev.db` with the SAME
+/// `local_dev_mount_descriptor("/tenants", "local-dev-reborn-state", …)` args
+/// used here (see [`build_local_dev_root_filesystem`]) and wrapping it with
+/// [`wrap_scoped`](crate::wrap_scoped). Reproducing that exact construction
+/// here lands pairings in the precise tree the runtime's poller binds against.
+///
+/// The offline operator repair path
+/// (`trigger_access_repair::repair_local_trigger_access`) opens its own libSQL
+/// handle on the same file and calls this so its re-pair is visible to a later
+/// runtime/poller. Confined to `webui-v2-beta` (its only caller) to ship no
+/// dead code when the repair surface is absent.
+#[cfg(all(feature = "libsql", feature = "webui-v2-beta"))]
+pub(crate) async fn build_trigger_conversation_services_from_libsql(
+    db: Arc<libsql::Database>,
+) -> Result<RebornFilesystemConversationServices, InboundTurnError> {
+    let database = Arc::new(LibSqlRootFilesystem::new(db));
+    database
+        .run_migrations()
+        .await
+        .map_err(|error| InboundTurnError::DurableState {
+            reason: format!("trigger-conversation substrate migration: {error}"),
+        })?;
+    let mut root = CompositeRootFilesystem::new();
+    root.mount(
+        local_dev_mount_descriptor(
+            "/tenants",
+            "local-dev-reborn-state",
+            BackendKind::DatabaseFilesystem,
+            StorageClass::StructuredRecords,
+            ContentKind::StructuredRecord,
+            IndexPolicy::NotIndexed,
+            database.capabilities(),
+        )
+        .map_err(|error| InboundTurnError::DurableState {
+            reason: format!("trigger-conversation mount: {error}"),
+        })?,
+        database,
+    )
+    .map_err(|error| InboundTurnError::DurableState {
+        reason: format!("trigger-conversation mount: {error}"),
+    })?;
+    let scoped = crate::wrap_scoped(Arc::new(root));
+    RebornFilesystemConversationServices::new(scoped).await
 }
 
 #[cfg(not(feature = "libsql"))]

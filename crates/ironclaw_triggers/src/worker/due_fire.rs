@@ -8,8 +8,9 @@ use ironclaw_host_api::Timestamp;
 use super::{
     TriggerPollerFailureReason, TriggerPollerFireOutcome, TriggerPollerWorker,
     TrustedTriggerFireSubmitOutcome, TrustedTriggerSubmitRequest,
-    failure::{FireFailureDisposition, classify_failure, next_run_at_after_fire},
+    failure::{FireFailureDisposition, category_detail, classify_failure, next_run_at_after_fire},
 };
+use crate::SanitizedFailureReason;
 
 impl TriggerPollerWorker {
     pub(super) async fn process_due_record(
@@ -72,6 +73,7 @@ impl TriggerPollerWorker {
                         fire_slot,
                         FireFailureDisposition::PermanentTerminal,
                         classification.reason,
+                        classification.detail,
                     )
                     .await;
             }
@@ -85,6 +87,7 @@ impl TriggerPollerWorker {
                         fire_slot,
                         FireFailureDisposition::PermanentReschedule(next_run_at),
                         TriggerPollerFailureReason::SourceNoFire,
+                        category_detail(TriggerPollerFailureReason::SourceNoFire),
                     )
                     .await;
             }
@@ -96,6 +99,7 @@ impl TriggerPollerWorker {
                         fire_slot,
                         FireFailureDisposition::from_kind(classification.kind, next_run_at),
                         classification.reason,
+                        classification.detail,
                     )
                     .await;
             }
@@ -115,6 +119,7 @@ impl TriggerPollerWorker {
                         fire_slot,
                         FireFailureDisposition::from_kind(classification.kind, next_run_at),
                         classification.reason,
+                        classification.detail,
                     )
                     .await;
             }
@@ -188,6 +193,7 @@ impl TriggerPollerWorker {
                     fire_slot,
                     FireFailureDisposition::from_kind(classification.kind, next_run_at),
                     classification.reason,
+                    classification.detail,
                 )
                 .await
             }
@@ -200,6 +206,7 @@ impl TriggerPollerWorker {
         fire_slot: Timestamp,
         disposition: FireFailureDisposition,
         reason: TriggerPollerFailureReason,
+        detail: Option<SanitizedFailureReason>,
     ) -> Result<TriggerPollerFireOutcome, TriggerError> {
         match disposition {
             FireFailureDisposition::Retryable => {
@@ -209,6 +216,7 @@ impl TriggerPollerWorker {
                         tenant_id: record.tenant_id,
                         trigger_id: record.trigger_id,
                         fire_slot,
+                        failure_reason: detail,
                     })
                     .await?;
                 Ok(TriggerPollerFireOutcome::RetryableFailed { reason })
@@ -220,6 +228,7 @@ impl TriggerPollerWorker {
                         tenant_id: record.tenant_id,
                         trigger_id: record.trigger_id,
                         fire_slot,
+                        failure_reason: detail,
                     })
                     .await?;
                 Ok(TriggerPollerFireOutcome::PermanentFailed { reason })
@@ -232,6 +241,7 @@ impl TriggerPollerWorker {
                         trigger_id: record.trigger_id,
                         fire_slot,
                         next_run_at,
+                        failure_reason: detail,
                     })
                     .await?;
                 Ok(TriggerPollerFireOutcome::PermanentFailed { reason })

@@ -1007,6 +1007,7 @@ registerPack("de", {
   "automations.detail.noCurrentRun": "Kein aktiver Lauf",
   "automations.detail.noRuns": "Diese Automatisierung hat noch keine sichtbaren Läufe erzeugt.",
   "automations.detail.noThread": "Kein Thread verknüpft",
+  "automations.detail.failureReason": "Fehlgeschlagen:",
   "automations.detail.openRun": "Lauf öffnen",
   "automations.detail.recentRuns": "Aktuelle Läufe",
   "automations.detail.run": "Lauf",

@@ -21,6 +21,8 @@ pub(crate) mod serve_sso;
 pub(crate) mod skills;
 pub(crate) mod traces;
 #[cfg(feature = "webui-v2-beta")]
+pub(crate) mod triggers;
+#[cfg(feature = "webui-v2-beta")]
 pub(crate) mod user_directory;
 #[cfg(feature = "webui-v2-beta")]
 pub(crate) mod webui_auth;
@@ -61,6 +63,10 @@ pub(crate) enum Command {
     Skills(skills::SkillsCommand),
     /// Manage trace contributions to TraceCommons.
     Traces(Box<traces::TracesCommand>),
+    /// Inspect and repair local-dev trigger-fire access. Available only when
+    /// the binary is built with the `webui-v2-beta` Cargo feature.
+    #[cfg(feature = "webui-v2-beta")]
+    Triggers(triggers::TriggersCommand),
 }
 
 impl Command {
@@ -98,6 +104,10 @@ impl Command {
                 command.execute(crate::context::RebornCliContext::resolve_from_env()?)
             }
             Self::Traces(command) => command.execute(),
+            #[cfg(feature = "webui-v2-beta")]
+            Self::Triggers(command) => {
+                command.execute(crate::context::RebornCliContext::resolve_from_env()?)
+            }
         }
     }
 }

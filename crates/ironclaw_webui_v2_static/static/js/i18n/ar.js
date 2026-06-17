@@ -1007,6 +1007,7 @@ registerPack("ar", {
   "automations.detail.noCurrentRun": "لا يوجد تشغيل نشط",
   "automations.detail.noRuns": "لم تنتج هذه الأتمتة أي عمليات تشغيل مرئية بعد.",
   "automations.detail.noThread": "لا توجد محادثة مرتبطة",
+  "automations.detail.failureReason": "فشل:",
   "automations.detail.openRun": "فتح التشغيل",
   "automations.detail.recentRuns": "عمليات التشغيل الأخيرة",
   "automations.detail.run": "تشغيل",

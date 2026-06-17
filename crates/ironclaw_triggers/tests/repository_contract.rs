@@ -1006,6 +1006,133 @@ async fn libsql_repository_run_migrations_is_idempotent() {
     repo.run_migrations().await.expect("second run migrations");
 }
 
+/// Simulates an OLDER database whose `trigger_run_history` table predates the
+/// `failure_reason` column. `run_migrations()` must apply the idempotent
+/// `ALTER TABLE ADD COLUMN failure_reason` upgrade path, and a failed fire's
+/// reason must round-trip through it. Locks T5: the ADD COLUMN upgrade, not just
+/// the fresh-CREATE path.
+#[cfg(feature = "libsql")]
+#[tokio::test]
+async fn libsql_repository_adds_failure_reason_column_on_upgrade() {
+    use ironclaw_triggers::{
+        ClaimDueFireOutcome, ClaimDueFireRequest, FirePermanentFailedRequest,
+        SanitizedFailureReason, TriggerRunHistoryStatus,
+    };
+
+    let dir = tempdir().expect("tempdir");
+    let db_path = dir.path().join("triggers-legacy-run-history.db");
+    let db = Arc::new(
+        libsql::Builder::new_local(db_path.display().to_string())
+            .build()
+            .await
+            .expect("build libsql db"),
+    );
+
+    // Build the trigger_records table (current shape) plus a trigger_run_history
+    // table WITHOUT the failure_reason column — the pre-upgrade schema. thread_id
+    // is created nullable so the migration's ADD COLUMN path (not the thread_id
+    // rebuild) is exercised.
+    let conn = db.connect().expect("raw libsql connect for schema setup");
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS trigger_records (
+            trigger_id TEXT NOT NULL,
+            tenant_id TEXT NOT NULL,
+            creator_user_id TEXT NOT NULL,
+            agent_id TEXT,
+            project_id TEXT,
+            name TEXT NOT NULL,
+            source TEXT NOT NULL,
+            schedule_expression TEXT NOT NULL,
+            schedule_timezone TEXT NOT NULL DEFAULT 'UTC',
+            completion_policy TEXT NOT NULL,
+            prompt TEXT NOT NULL,
+            state TEXT NOT NULL,
+            next_run_at TEXT NOT NULL,
+            last_run_at TEXT,
+            last_fired_slot TEXT,
+            last_status TEXT,
+            active_fire_slot TEXT,
+            active_run_ref TEXT,
+            created_at TEXT NOT NULL,
+            PRIMARY KEY (tenant_id, trigger_id)
+        )",
+        (),
+    )
+    .await
+    .expect("create pre-upgrade trigger_records");
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS trigger_run_history (
+            tenant_id TEXT NOT NULL,
+            trigger_id TEXT NOT NULL,
+            fire_slot TEXT NOT NULL,
+            run_id TEXT,
+            thread_id TEXT,
+            status TEXT NOT NULL,
+            submitted_at TEXT NOT NULL,
+            completed_at TEXT,
+            PRIMARY KEY (tenant_id, trigger_id, fire_slot)
+        )",
+        (),
+    )
+    .await
+    .expect("create pre-upgrade trigger_run_history without failure_reason");
+
+    // Run migrations — must add the failure_reason column on the existing table.
+    let repo = LibSqlTriggerRepository::new(db);
+    repo.run_migrations()
+        .await
+        .expect("migration must add failure_reason column on pre-upgrade table");
+
+    // Write a failed fire with a reason and read it back through the column.
+    let trigger_id = TriggerId::parse("01J00000000000000000000099").expect("ulid");
+    let tenant_id = TenantId::new("tenant-run-history-upgrade").expect("valid tenant");
+    let fire_slot = ts(1_704_067_200);
+    let record = sample_record(trigger_id, tenant_id.clone(), fire_slot);
+    let next_run_at = record
+        .schedule
+        .next_slot_after(fire_slot)
+        .expect("next slot calculation")
+        .expect("future slot");
+    repo.upsert_trigger(record).await.expect("insert record");
+
+    let claimed = repo
+        .claim_due_fire(ClaimDueFireRequest {
+            tenant_id: tenant_id.clone(),
+            trigger_id,
+            fire_slot,
+            now: fire_slot + chrono::Duration::seconds(3),
+        })
+        .await
+        .expect("claim fire");
+    assert!(matches!(claimed, ClaimDueFireOutcome::Claimed(_)));
+
+    let reason =
+        SanitizedFailureReason::sanitize("trigger fire not authorized: creator access revoked")
+            .expect("non-empty reason");
+    repo.mark_fire_permanently_failed(FirePermanentFailedRequest {
+        tenant_id: tenant_id.clone(),
+        trigger_id,
+        fire_slot,
+        next_run_at,
+        failure_reason: Some(reason.clone()),
+    })
+    .await
+    .expect("mark permanently failed")
+    .expect("failed fire should persist after column upgrade");
+
+    let runs = repo
+        .list_trigger_run_history(tenant_id, trigger_id, 10)
+        .await
+        .expect("list run history after upgrade");
+    assert_eq!(runs.len(), 1);
+    assert_eq!(runs[0].status, TriggerRunHistoryStatus::Error);
+    assert_eq!(
+        runs[0].failure_reason,
+        Some(reason),
+        "failure reason must round-trip through the upgraded column"
+    );
+}
+
 #[cfg(feature = "libsql")]
 #[tokio::test]
 async fn libsql_repository_rejects_malformed_persisted_rows() {
@@ -1492,7 +1619,7 @@ mod fire_claim_contract {
     use ironclaw_triggers::{
         ClaimDueFireOutcome, ClaimDueFireRequest, FireAcceptedRequest, FirePermanentFailedRequest,
         FireReplayedRequest, FireRetryableFailedRequest, FireTerminalFailedRequest,
-        TriggerRunHistoryStatus,
+        SanitizedFailureReason, TriggerRunHistoryStatus,
     };
 
     async fn assert_fire_claim_and_update_contract(repo: &impl TriggerRepository) {
@@ -1596,6 +1723,7 @@ mod fire_claim_contract {
                 tenant_id: tenant_id.clone(),
                 trigger_id,
                 fire_slot,
+                failure_reason: None,
             })
             .await
             .expect_err("stale retryable failure must not clear accepted run ref");
@@ -1678,6 +1806,7 @@ mod fire_claim_contract {
                 trigger_id: replayed_trigger_id,
                 fire_slot,
                 next_run_at: expected_next_run_at,
+                failure_reason: None,
             })
             .await
             .expect_err("stale permanent failure must not clear replayed run ref");
@@ -1710,6 +1839,7 @@ mod fire_claim_contract {
                 tenant_id: retryable_tenant_id,
                 trigger_id: retryable_trigger_id,
                 fire_slot,
+                failure_reason: None,
             })
             .await
             .expect("mark retryable failed")
@@ -1750,6 +1880,7 @@ mod fire_claim_contract {
                 trigger_id: permanent_trigger_id,
                 fire_slot,
                 next_run_at: expected_next_run_at,
+                failure_reason: None,
             })
             .await
             .expect("mark permanently failed")
@@ -1789,6 +1920,7 @@ mod fire_claim_contract {
                 tenant_id: terminal_tenant_id,
                 trigger_id: terminal_trigger_id,
                 fire_slot,
+                failure_reason: None,
             })
             .await
             .expect("mark terminally failed")
@@ -1914,6 +2046,7 @@ mod fire_claim_contract {
                 tenant_id: stale_retryable_tenant_id.clone(),
                 trigger_id: stale_retryable_trigger_id,
                 fire_slot: stale_fire_slot,
+                failure_reason: None,
             })
             .await
             .expect("stale retryable update")
@@ -1944,6 +2077,7 @@ mod fire_claim_contract {
                 trigger_id: stale_permanent_trigger_id,
                 fire_slot: stale_fire_slot,
                 next_run_at: ts(1_704_067_260),
+                failure_reason: None,
             })
             .await
             .expect("stale permanent update")
@@ -1973,6 +2107,7 @@ mod fire_claim_contract {
                 tenant_id: stale_terminal_tenant_id.clone(),
                 trigger_id: stale_terminal_trigger_id,
                 fire_slot: stale_fire_slot,
+                failure_reason: None,
             })
             .await
             .expect("stale terminal update")
@@ -2046,6 +2181,7 @@ mod fire_claim_contract {
                 tenant_id: retryable_tenant_id,
                 trigger_id: retryable_trigger_id,
                 fire_slot,
+                failure_reason: None,
             })
             .await
             .expect_err("retryable failure rejects advanced next_run_at");
@@ -2065,6 +2201,7 @@ mod fire_claim_contract {
                 trigger_id: permanent_trigger_id,
                 fire_slot,
                 next_run_at: fire_slot,
+                failure_reason: None,
             })
             .await
             .expect_err("permanent failure rejects non-future next_run_at");
@@ -2682,6 +2819,177 @@ mod fire_claim_contract {
         assert_fire_clear_contract(repo).await;
         assert_run_history_lifecycle_contract(repo).await;
         assert_run_history_retention_contract(repo).await;
+        assert_failed_fire_persists_failure_reason(repo).await;
+        assert_failure_reason_cleared_on_successful_retry(repo).await;
+    }
+
+    /// A pre-acceptance failure persists a sanitized `failure_reason` that
+    /// round-trips through `list_trigger_run_history`, while `run_id`/`thread_id`
+    /// stay null — the regression guard for #4992's "No thread attached" gap.
+    async fn assert_failed_fire_persists_failure_reason(repo: &impl TriggerRepository) {
+        let trigger_id = TriggerId::parse("01J00000000000000000000031").expect("ulid");
+        let tenant_id = tenant("tenant-failure-reason");
+        let fire_slot = ts(1_704_070_800);
+        let record = sample_record(trigger_id, tenant_id.clone(), fire_slot);
+        let next_run_at = record
+            .schedule
+            .next_slot_after(fire_slot)
+            .expect("next slot calculation")
+            .expect("future slot");
+        repo.upsert_trigger(record).await.expect("insert record");
+
+        let claimed = repo
+            .claim_due_fire(ClaimDueFireRequest {
+                tenant_id: tenant_id.clone(),
+                trigger_id,
+                fire_slot,
+                now: fire_slot + chrono::Duration::seconds(3),
+            })
+            .await
+            .expect("claim fire");
+        assert!(matches!(claimed, ClaimDueFireOutcome::Claimed(_)));
+
+        let reason =
+            SanitizedFailureReason::sanitize("trigger fire not authorized: creator access revoked")
+                .expect("non-empty reason");
+        repo.mark_fire_permanently_failed(FirePermanentFailedRequest {
+            tenant_id: tenant_id.clone(),
+            trigger_id,
+            fire_slot,
+            next_run_at,
+            failure_reason: Some(reason.clone()),
+        })
+        .await
+        .expect("mark permanently failed")
+        .expect("failed fire should persist");
+
+        let runs = repo
+            .list_trigger_run_history(tenant_id.clone(), trigger_id, 10)
+            .await
+            .expect("list failed run history");
+        assert_eq!(runs.len(), 1);
+        assert_eq!(runs[0].status, TriggerRunHistoryStatus::Error);
+        assert_eq!(runs[0].run_id, None, "pre-acceptance failure has no run id");
+        assert_eq!(
+            runs[0].thread_id, None,
+            "pre-acceptance failure has no canonical thread"
+        );
+        assert_eq!(
+            runs[0].failure_reason,
+            Some(reason),
+            "sanitized failure reason must round-trip through run history"
+        );
+    }
+
+    /// A fire that fails (persisting a `failure_reason`) and is then re-claimed
+    /// on the SAME `fire_slot` and driven to a non-error terminal/Ok state must
+    /// end with `failure_reason == None`. Locks F2: the SQL writers
+    /// overwrite-on-conflict (clear when `None`) instead of `COALESCE`-ing a
+    /// stale reason forward, and the in-memory `clear_active_fire` path clears it
+    /// too — so the backends do not diverge and a now-OK row carries no stale
+    /// failure text.
+    async fn assert_failure_reason_cleared_on_successful_retry(repo: &impl TriggerRepository) {
+        let trigger_id = TriggerId::parse("01J00000000000000000000032").expect("ulid");
+        let tenant_id = tenant("tenant-retry-clears-reason");
+        let fire_slot = ts(1_704_074_400);
+        let record = sample_record(trigger_id, tenant_id.clone(), fire_slot);
+        let next_run_at = record
+            .schedule
+            .next_slot_after(fire_slot)
+            .expect("next slot calculation")
+            .expect("future slot");
+        repo.upsert_trigger(record).await.expect("insert record");
+
+        // First attempt: claim and mark retryable-failed with a reason. A
+        // retryable failure leaves `next_run_at` at-or-before the fire slot so
+        // the same slot can be re-claimed.
+        let claimed = repo
+            .claim_due_fire(ClaimDueFireRequest {
+                tenant_id: tenant_id.clone(),
+                trigger_id,
+                fire_slot,
+                now: fire_slot + chrono::Duration::seconds(3),
+            })
+            .await
+            .expect("first claim");
+        assert!(matches!(claimed, ClaimDueFireOutcome::Claimed(_)));
+        let reason = SanitizedFailureReason::sanitize("trigger backend temporarily unavailable")
+            .expect("non-empty reason");
+        repo.mark_fire_retryable_failed(FireRetryableFailedRequest {
+            tenant_id: tenant_id.clone(),
+            trigger_id,
+            fire_slot,
+            failure_reason: Some(reason.clone()),
+        })
+        .await
+        .expect("mark retryable failed")
+        .expect("failed fire should persist");
+
+        let runs = repo
+            .list_trigger_run_history(tenant_id.clone(), trigger_id, 10)
+            .await
+            .expect("list after failure");
+        let failed = runs
+            .iter()
+            .find(|run| run.fire_slot == fire_slot)
+            .expect("run row after failure");
+        assert_eq!(failed.status, TriggerRunHistoryStatus::Error);
+        assert_eq!(failed.failure_reason, Some(reason));
+
+        // Retry: re-claim the SAME fire slot, accept it, and clear the active
+        // fire with a successful status.
+        let reclaimed = repo
+            .claim_due_fire(ClaimDueFireRequest {
+                tenant_id: tenant_id.clone(),
+                trigger_id,
+                fire_slot,
+                now: fire_slot + chrono::Duration::seconds(6),
+            })
+            .await
+            .expect("re-claim same slot");
+        assert!(
+            matches!(reclaimed, ClaimDueFireOutcome::Claimed(_)),
+            "the same fire slot must be re-claimable after a retryable failure"
+        );
+        let run_id = TurnRunId::parse("01890f0f-9b6f-7a85-9e5b-9f21a93c4f90").expect("valid run");
+        let thread_id =
+            ThreadId::new("01890f0f-d000-7000-8000-000000000001").expect("valid thread id");
+        repo.mark_fire_accepted(FireAcceptedRequest {
+            tenant_id: tenant_id.clone(),
+            trigger_id,
+            fire_slot,
+            run_id,
+            thread_id,
+            submitted_at: fire_slot + chrono::Duration::seconds(6),
+            next_run_at,
+        })
+        .await
+        .expect("mark accepted on retry")
+        .expect("accepted fire should persist");
+        repo.clear_active_fire(ClearActiveFireRequest {
+            tenant_id: tenant_id.clone(),
+            trigger_id,
+            fire_slot,
+            run_id,
+            status: TriggerRunHistoryStatus::Ok,
+        })
+        .await
+        .expect("clear active fire")
+        .expect("cleared fire should persist");
+
+        let runs = repo
+            .list_trigger_run_history(tenant_id.clone(), trigger_id, 10)
+            .await
+            .expect("list after successful retry");
+        let cleared = runs
+            .iter()
+            .find(|run| run.fire_slot == fire_slot)
+            .expect("run row after successful retry");
+        assert_eq!(cleared.status, TriggerRunHistoryStatus::Ok);
+        assert_eq!(
+            cleared.failure_reason, None,
+            "a now-OK row must not carry a stale failure reason from the earlier attempt"
+        );
     }
 
     async fn assert_run_history_lifecycle_contract(repo: &impl TriggerRepository) {
@@ -2883,6 +3191,7 @@ mod fire_claim_contract {
             tenant_id: failed_tenant_id.clone(),
             trigger_id: failed_trigger_id,
             fire_slot,
+            failure_reason: None,
         })
         .await
         .expect("mark terminal failure")
@@ -3162,6 +3471,8 @@ mod fire_claim_contract {
         assert_fire_clear_contract(&repo).await;
         assert_run_history_lifecycle_contract(&repo).await;
         assert_run_history_retention_contract(&repo).await;
+        assert_failed_fire_persists_failure_reason(&repo).await;
+        assert_failure_reason_cleared_on_successful_retry(&repo).await;
     }
 
     #[cfg(feature = "libsql")]
