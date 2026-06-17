@@ -266,7 +266,7 @@ pub(crate) fn resolve_builtin_input_schema_ref(reference: &str) -> Option<Value>
         "schemas/builtin/read_file.input.v1.json" => json!({
             "type": "object",
             "properties": {
-                "path": { "type": "string", "description": "Scoped path to read" },
+                "path": { "type": "string", "description": "Scoped path to read. Supported document files such as PDFs are returned as extracted text." },
                 "offset": { "type": "integer", "minimum": 0, "description": "1-based starting line; 0 starts at the beginning" },
                 "limit": { "type": "integer", "minimum": 0, "description": "Maximum lines to return" }
             },

@@ -2965,18 +2965,18 @@ async fn builtin_http_does_not_inline_huge_binary_payloads() {
     .await
     .unwrap();
 
-    let body_base64 = output["body_base64"].as_str().expect("binary response");
     assert_eq!(output["body_truncated"], json!(true));
-    assert!(body_base64.len() <= 4096);
-    assert_eq!(output["body_bytes_returned"], json!(3072));
+    assert_eq!(output["body_base64_omitted"], json!(true));
+    assert_eq!(output["body_bytes_returned"], json!(0));
     assert_eq!(output["truncation"]["body"], json!(true));
-    assert_eq!(output["truncation"]["bytes_returned"], json!(3072));
+    assert_eq!(output["truncation"]["bytes_returned"], json!(0));
     assert!(
         output["body_truncation_hint"]
             .as_str()
             .expect("hint")
             .contains("builtin.http.save")
     );
+    assert!(output.get("body_base64").is_none());
     assert!(output.get("body_text").is_none());
     assert!(serialized_json_len(&output) <= 6_000);
 }
@@ -3010,11 +3010,11 @@ async fn builtin_http_truncates_tiny_binary_responses_without_panicking() {
 
 #[tokio::test]
 async fn builtin_http_final_budget_trim_preserves_base64_alignment() {
-    let headers = (0..4)
+    let headers = (0..2)
         .map(|index| (format!("x-large-{index}"), "h".repeat(512)))
         .collect::<Vec<_>>();
     let egress =
-        Arc::new(RecordingRuntimeHttpEgress::with_body(vec![0xFF; 4 * 1024]).with_headers(headers));
+        Arc::new(RecordingRuntimeHttpEgress::with_body(vec![0xFF; 512]).with_headers(headers));
     let runtime = runtime_with_http_egress(Arc::clone(&egress));
 
     let output = invoke_with_context(
@@ -3022,7 +3022,7 @@ async fn builtin_http_final_budget_trim_preserves_base64_alignment() {
         HTTP_CAPABILITY_ID,
         json!({
             "url": "https://api.example.test/v1/items",
-            "response_body_limit": 4096
+            "response_body_limit": 512
         }),
         execution_context_with_network([HTTP_CAPABILITY_ID], http_test_policy()),
     )
@@ -3032,10 +3032,10 @@ async fn builtin_http_final_budget_trim_preserves_base64_alignment() {
     let body_base64 = output["body_base64"].as_str().expect("binary response");
     assert_eq!(output["body_truncated"], json!(true));
     assert!(!body_base64.is_empty());
-    assert!(body_base64.len() < 4096);
+    assert!(body_base64.len() < 684);
     assert_eq!(body_base64.len() % 4, 0);
     assert_eq!(output["truncation"]["body"], json!(true));
-    assert!(serialized_json_len(&output) <= 6_000);
+    assert!(serialized_json_len(&output) <= 3_000);
 }
 
 #[tokio::test]
