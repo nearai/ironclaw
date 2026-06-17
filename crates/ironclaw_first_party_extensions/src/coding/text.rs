@@ -145,6 +145,7 @@ struct MatchedEdit {
 struct NormalizedText {
     text: String,
     spans: Vec<SourceSpan>,
+    byte_starts: Vec<usize>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -177,9 +178,25 @@ impl<'a> TextMatcher<'a> {
             })
             .collect::<Vec<_>>();
         if !exact_spans.is_empty() {
+            if old_string.trim().is_empty()
+                || !replace_all && exact_spans.len() > 1
+                || !content_may_need_fuzzy_normalization(self.content)
+            {
+                return EditMatches {
+                    occurrence_count: exact_spans.len(),
+                    spans: exact_spans,
+                };
+            }
+
+            let fuzzy_spans = self.find_fuzzy_spans(old_string, match_limit);
+            let occurrence_count = if fuzzy_spans.is_empty() {
+                exact_spans.len()
+            } else {
+                fuzzy_spans.len().max(exact_spans.len())
+            };
             return EditMatches {
-                occurrence_count: exact_spans.len(),
-                spans: exact_spans,
+                spans: merge_exact_and_fuzzy_spans(exact_spans, fuzzy_spans),
+                occurrence_count,
             };
         }
 
@@ -216,6 +233,24 @@ impl<'a> TextMatcher<'a> {
             })
             .collect()
     }
+}
+
+fn merge_exact_and_fuzzy_spans(
+    mut exact_spans: Vec<MatchSpan>,
+    fuzzy_spans: Vec<MatchSpan>,
+) -> Vec<MatchSpan> {
+    for fuzzy in fuzzy_spans {
+        if exact_spans.iter().any(|exact| spans_overlap(*exact, fuzzy)) {
+            continue;
+        }
+        exact_spans.push(fuzzy);
+    }
+    exact_spans.sort_by_key(|span| (span.start, span.end));
+    exact_spans
+}
+
+fn spans_overlap(left: MatchSpan, right: MatchSpan) -> bool {
+    left.start < right.end && right.start < left.end
 }
 
 pub(super) fn replace_content(
@@ -336,6 +371,7 @@ fn normalize_for_fuzzy_match(value: &str) -> String {
 fn normalize_with_source_map(value: &str) -> NormalizedText {
     let mut text = String::new();
     let mut spans = Vec::new();
+    let mut byte_starts = Vec::new();
     let mut base_offset = 0usize;
 
     for segment in value.split_inclusive('\n') {
@@ -347,12 +383,14 @@ fn normalize_with_source_map(value: &str) -> NormalizedText {
         };
         let mut line_text = String::new();
         let mut line_spans = Vec::new();
+        let mut line_byte_starts = Vec::new();
         for (offset, ch) in line.char_indices() {
             let source_span = SourceSpan {
                 start: base_offset + offset,
                 end: base_offset + offset + ch.len_utf8(),
             };
             for normalized in normalize_char_for_fuzzy_match(ch) {
+                line_byte_starts.push(line_text.len());
                 line_text.push(normalized);
                 line_spans.push(source_span);
             }
@@ -360,10 +398,14 @@ fn normalize_with_source_map(value: &str) -> NormalizedText {
         while line_text.chars().last().is_some_and(char::is_whitespace) {
             line_text.pop();
             line_spans.pop();
+            line_byte_starts.pop();
         }
+        let text_base = text.len();
         text.push_str(&line_text);
+        byte_starts.extend(line_byte_starts.into_iter().map(|start| text_base + start));
         spans.extend(line_spans);
         if has_newline {
+            byte_starts.push(text.len());
             text.push('\n');
             spans.push(SourceSpan {
                 start: base_offset + segment.len() - 1,
@@ -373,7 +415,11 @@ fn normalize_with_source_map(value: &str) -> NormalizedText {
         base_offset += segment.len();
     }
 
-    NormalizedText { text, spans }
+    NormalizedText {
+        text,
+        spans,
+        byte_starts,
+    }
 }
 
 fn normalize_char_for_fuzzy_match(ch: char) -> Vec<char> {
@@ -398,8 +444,12 @@ fn normalized_span_to_source_span(
     start: usize,
     end: usize,
 ) -> Option<SourceSpan> {
-    let start_char = normalized.text[..start].chars().count();
-    let end_char = normalized.text[..end].chars().count();
+    let start_char = normalized.byte_starts.binary_search(&start).ok()?;
+    let end_char = if end == normalized.text.len() {
+        normalized.spans.len()
+    } else {
+        normalized.byte_starts.binary_search(&end).ok()?
+    };
     if start_char >= end_char {
         return None;
     }
@@ -407,6 +457,24 @@ fn normalized_span_to_source_span(
         start: normalized.spans.get(start_char)?.start,
         end: normalized.spans.get(end_char - 1)?.end,
     })
+}
+
+fn content_may_need_fuzzy_normalization(value: &str) -> bool {
+    for segment in value.split_inclusive('\n') {
+        let line = segment.strip_suffix('\n').unwrap_or(segment);
+        if line.chars().last().is_some_and(char::is_whitespace) {
+            return true;
+        }
+        if line.chars().any(char_needs_fuzzy_normalization) {
+            return true;
+        }
+    }
+    false
+}
+
+fn char_needs_fuzzy_normalization(ch: char) -> bool {
+    let normalized = normalize_char_for_fuzzy_match(ch);
+    normalized.len() != 1 || normalized[0] != ch
 }
 
 pub(super) fn previous_char_boundary(value: &str, mut end: usize) -> usize {
@@ -468,5 +536,43 @@ mod tests {
         assert_eq!(result.content, "hello universe\nhello universe\n");
         assert_eq!(result.replacements, 2);
         assert_eq!(result.match_method, MatchMethod::FuzzyNormalization);
+    }
+
+    #[test]
+    fn replace_all_replaces_mixed_exact_and_fuzzy_matches() {
+        let content = "hello world\nhello\u{00A0}world\n";
+        let result = replace_content(
+            content,
+            &[TextEdit {
+                old_string: "hello world",
+                new_string: "hello universe",
+            }],
+            true,
+        )
+        .expect("replace all");
+
+        assert_eq!(result.content, "hello universe\nhello universe\n");
+        assert_eq!(result.replacements, 2);
+        assert_eq!(result.match_method, MatchMethod::FuzzyNormalization);
+    }
+
+    #[test]
+    fn mixed_exact_and_fuzzy_matches_are_duplicate_without_replace_all() {
+        let result = replace_content(
+            "hello world\nhello\u{00A0}world\n",
+            &[TextEdit {
+                old_string: "hello world",
+                new_string: "hello universe",
+            }],
+            false,
+        );
+
+        assert_eq!(
+            result,
+            Err(ReplaceContentError::Duplicate {
+                edit_index: 0,
+                occurrences: 2
+            })
+        );
     }
 }

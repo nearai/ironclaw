@@ -623,11 +623,47 @@ async fn builtin_apply_patch_replace_all_replaces_fuzzy_matches_when_exact_text_
 }
 
 #[tokio::test]
+async fn builtin_apply_patch_replace_all_replaces_mixed_exact_and_fuzzy_matches() {
+    let temp = tempfile::tempdir().unwrap();
+    std::fs::write(
+        temp.path().join("main.txt"),
+        "hello world\nhello\u{00A0}world\n",
+    )
+    .unwrap();
+
+    let (filesystem, mounts) = mounted_filesystem(temp.path(), MountPermissions::read_write());
+    let runtime = runtime_with_filesystem(filesystem);
+    let context = execution_context_with_mounts(coding_capability_ids(), mounts);
+
+    let patched = invoke_with_context(
+        &runtime,
+        APPLY_PATCH_CAPABILITY_ID,
+        json!({
+            "path": "/workspace/main.txt",
+            "old_string": "hello world",
+            "new_string": "hello universe",
+            "replace_all": true
+        }),
+        context,
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(patched["success"], json!(true));
+    assert_eq!(patched["replacements"], json!(2));
+    assert_eq!(patched["match_method"], json!("FuzzyNormalization"));
+    assert_eq!(
+        std::fs::read_to_string(temp.path().join("main.txt")).unwrap(),
+        "hello universe\nhello universe\n"
+    );
+}
+
+#[tokio::test]
 async fn builtin_apply_patch_rejects_duplicate_after_fuzzy_normalization() {
     let temp = tempfile::tempdir().unwrap();
     std::fs::write(
         temp.path().join("main.txt"),
-        "hello\u{00A0}world\nhello\u{2003}world\n",
+        "hello world\nhello\u{00A0}world\n",
     )
     .unwrap();
 
