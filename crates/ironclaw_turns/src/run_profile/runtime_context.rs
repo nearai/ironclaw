@@ -130,16 +130,20 @@ impl LoopRuntimeContext {
     pub fn render_model_content(&self) -> String {
         let utc = self.loop_started_at_utc.format("%Y-%m-%dT%H:%MZ");
         let user_timezone = self.user_profile.as_ref().and_then(|p| p.timezone);
-        let local = user_timezone.map(|tz| {
-            let local = self.loop_started_at_utc.with_timezone(&tz);
-            format!("{} ({}, {})", utc, local.format("%H:%M %a"), tz.name())
-        });
-        let time_line = match local {
-            Some(stamped) => format!(
-                "Current date/time at loop start: {stamped}. This was captured when \
-                 this loop started; for the precise current time use the time \
-                 capability if it is visible."
-            ),
+        let time_line = match user_timezone {
+            Some(tz) => {
+                let local = self.loop_started_at_utc.with_timezone(&tz);
+                // State explicitly that this is the USER's timezone/local time so the
+                // model treats it as where the user is, not an arbitrary system label.
+                format!(
+                    "Current date/time at loop start: {utc} (UTC). The user's timezone \
+                     is {}, so the user's current local time is {}. This was captured \
+                     when this loop started; for the precise current time use the time \
+                     capability if it is visible.",
+                    tz.name(),
+                    local.format("%H:%M %a"),
+                )
+            }
             None => format!(
                 "Current date/time at loop start: {utc}. The user's timezone is \
                  unknown - if local time matters, ask the user and offer to save \
@@ -551,6 +555,16 @@ mod tests {
         );
         assert!(text.contains("14:32 Thu"), "local time + weekday: {text}");
         assert!(text.contains("America/Los_Angeles"), "{text}");
+        // Must explicitly attribute the timezone + local time to the USER, not
+        // render a bare tz label the model might not connect to the user.
+        assert!(
+            text.contains("user's timezone is America/Los_Angeles"),
+            "explicit user-timezone attribution: {text}"
+        );
+        assert!(
+            text.contains("user's current local time is 14:32 Thu"),
+            "explicit user-local-time attribution: {text}"
+        );
         assert!(text.contains("time capability"), "{text}");
         assert!(!text.contains(":47"), "seconds must be truncated: {text}");
     }
