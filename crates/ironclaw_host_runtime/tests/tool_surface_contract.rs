@@ -561,13 +561,7 @@ async fn visible_surface_resolves_builtin_first_party_input_schema_refs() {
     apply_patch_validator
         .validate(&json!({
             "path": "/workspace/main.rs",
-            "edits": [{"oldText": "old", "newText": "new"}]
-        }))
-        .expect("apply_patch schema should accept Pi-style multi-edit input");
-    apply_patch_validator
-        .validate(&json!({
-            "path": "/workspace/main.rs",
-            "edits": [{"oldText": "old", "newText": "new"}],
+            "edits": [{"old_string": "old", "new_string": "new"}],
             "replace_all": true
         }))
         .expect("apply_patch schema should accept replace_all with one edit");
@@ -616,8 +610,8 @@ async fn visible_surface_resolves_builtin_first_party_input_schema_refs() {
             .validate(&json!({
                 "path": "/workspace/main.rs",
                 "edits": [
-                    {"oldText": "old", "newText": "new"},
-                    {"oldText": "other", "newText": "replacement"}
+                    {"old_string": "old", "new_string": "new"},
+                    {"old_string": "other", "new_string": "replacement"}
                 ],
                 "replace_all": true
             }))
@@ -631,8 +625,8 @@ async fn visible_surface_resolves_builtin_first_party_input_schema_refs() {
                 "old_string": "null",
                 "new_string": null,
                 "edits": [
-                    {"oldText": "old", "newText": "new"},
-                    {"oldText": "other", "newText": "replacement"}
+                    {"old_string": "old", "new_string": "new"},
+                    {"old_string": "other", "new_string": "replacement"}
                 ],
                 "replace_all": true
             }))
@@ -645,7 +639,7 @@ async fn visible_surface_resolves_builtin_first_party_input_schema_refs() {
                 "path": "/workspace/main.rs",
                 "old_string": "old",
                 "new_string": "new",
-                "edits": [{"oldText": "old", "newText": "new"}]
+                "edits": [{"old_string": "old", "new_string": "new"}]
             }))
             .is_err(),
         "apply_patch schema should reject complete single-edit shape mixed with edits array"
@@ -655,37 +649,10 @@ async fn visible_surface_resolves_builtin_first_party_input_schema_refs() {
             .validate(&json!({
                 "path": "/workspace/main.rs",
                 "old_string": "old",
-                "edits": [{"oldText": "old", "newText": "new"}]
+                "edits": [{"old_string": "old", "new_string": "new"}]
             }))
             .is_err(),
         "apply_patch schema should reject mixed top-level edit shapes"
-    );
-    assert!(
-        apply_patch_validator
-            .validate(&json!({
-                "path": "/workspace/main.rs",
-                "edits": [{
-                    "old_string": "old",
-                    "new_string": "new",
-                    "oldText": "old",
-                    "newText": "new"
-                }]
-            }))
-            .is_err(),
-        "apply_patch schema should reject ambiguous edit aliases"
-    );
-    assert!(
-        apply_patch_validator
-            .validate(&json!({
-                "path": "/workspace/main.rs",
-                "edits": [{
-                    "old_string": "old",
-                    "new_string": "new",
-                    "oldText": "old"
-                }]
-            }))
-            .is_err(),
-        "apply_patch schema should reject partial mixed edit aliases"
     );
 
     let trigger_create = surface

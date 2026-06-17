@@ -324,30 +324,9 @@ pub(crate) fn resolve_builtin_input_schema_ref(reference: &str) -> Option<Value>
                                 "type": "object",
                                 "properties": {
                                     "old_string": { "type": "string", "description": "Text to replace" },
-                                    "new_string": { "type": "string", "description": "Replacement text" },
-                                    "oldText": { "type": "string", "description": "Compatibility alias for old_string" },
-                                    "newText": { "type": "string", "description": "Compatibility alias for new_string" }
+                                    "new_string": { "type": "string", "description": "Replacement text" }
                                 },
-                                "oneOf": [
-                                    {
-                                        "required": ["old_string", "new_string"],
-                                        "not": {
-                                            "anyOf": [
-                                                { "required": ["oldText"] },
-                                                { "required": ["newText"] }
-                                            ]
-                                        }
-                                    },
-                                    {
-                                        "required": ["oldText", "newText"],
-                                        "not": {
-                                            "anyOf": [
-                                                { "required": ["old_string"] },
-                                                { "required": ["new_string"] }
-                                            ]
-                                        }
-                                    }
-                                ],
+                                "required": ["old_string", "new_string"],
                                 "additionalProperties": false
                             }
                         },

@@ -448,7 +448,7 @@ async fn builtin_apply_patch_failure_reports_path_and_match_count() {
 }
 
 #[tokio::test]
-async fn builtin_apply_patch_accepts_pi_style_multi_edit_with_fuzzy_unicode_matching() {
+async fn builtin_apply_patch_accepts_multi_edit_with_fuzzy_unicode_matching() {
     let temp = tempfile::tempdir().unwrap();
     std::fs::write(
         temp.path().join("main.txt"),
@@ -466,8 +466,8 @@ async fn builtin_apply_patch_accepts_pi_style_multi_edit_with_fuzzy_unicode_matc
         json!({
             "path": "/workspace/main.txt",
             "edits": [
-                { "oldText": "hello world\n", "newText": "hello universe\n" },
-                { "oldText": "range: 1-5\nABC123\n", "newText": "range: 10-50\nASCII\n" }
+                { "old_string": "hello world\n", "new_string": "hello universe\n" },
+                { "old_string": "range: 1-5\nABC123\n", "new_string": "range: 10-50\nASCII\n" }
             ]
         }),
         context,

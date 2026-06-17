@@ -453,10 +453,27 @@ fn normalized_span_to_source_span(
     if start_char >= end_char {
         return None;
     }
+    if start_char > 0
+        && same_source_span(
+            normalized.spans[start_char],
+            normalized.spans[start_char - 1],
+        )
+    {
+        return None;
+    }
+    if end_char < normalized.spans.len()
+        && same_source_span(normalized.spans[end_char], normalized.spans[end_char - 1])
+    {
+        return None;
+    }
     Some(SourceSpan {
         start: normalized.spans.get(start_char)?.start,
         end: normalized.spans.get(end_char - 1)?.end,
     })
+}
+
+fn same_source_span(left: SourceSpan, right: SourceSpan) -> bool {
+    left.start == right.start && left.end == right.end
 }
 
 fn content_may_need_fuzzy_normalization(value: &str) -> bool {
@@ -518,6 +535,20 @@ mod tests {
 
         assert_eq!(result.content, "changed text\nuntouched\u{00A0}text   \n");
         assert_eq!(result.match_method, MatchMethod::FuzzyNormalization);
+    }
+
+    #[test]
+    fn fuzzy_replacement_rejects_partial_source_character_match() {
+        let result = replace_content(
+            "caf\u{00E9}\n",
+            &[TextEdit {
+                old_string: "cafe",
+                new_string: "coffee",
+            }],
+            false,
+        );
+
+        assert_eq!(result, Err(ReplaceContentError::NotFound { edit_index: 0 }));
     }
 
     #[test]
