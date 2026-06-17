@@ -107,20 +107,24 @@ pub trait LoopCapabilityInputResolver: Send + Sync {
     }
 
     /// Record the display-preview input for a provider tool call under
-    /// `input_ref`.
+    /// `input_ref`, keyed for display by the resolved dotted `capability_id`
+    /// (e.g. `nearai.web_search`) — NOT the provider tool name
+    /// (`nearai__web_search`), which is a lossy, digest-suffixed encoding that
+    /// both renders badly and defeats the per-tool summary/subtitle matchers.
     ///
     /// `ProviderToolCallInputResolver` decorates this trait and owns the
-    /// canonical (digest-based) `input_ref` for provider tool calls; it stages
-    /// the arguments itself and does NOT delegate
-    /// `register_provider_tool_call_input` to the inner resolver. Any host-side
-    /// side effect keyed on that ref — notably recording the activity-card
-    /// input summary — must therefore be driven through this hook so it lands
-    /// under the same ref the result write later uses. Default no-op: only
-    /// resolvers that own a display-preview store implement it.
+    /// canonical (digest-based) `input_ref`; it stages the arguments itself and
+    /// does NOT delegate `register_provider_tool_call_input` to the inner
+    /// resolver, so it forwards this hook to `inner` instead. The caller
+    /// (`register_provider_tool_call`) drives it after registration because that
+    /// is where the resolved `capability_id` and the canonical `input_ref` are
+    /// both in hand. Default no-op: only resolvers that own a display-preview
+    /// store implement it.
     fn record_provider_tool_call_display_input(
         &self,
         _run_context: &LoopRunContext,
         _input_ref: &CapabilityInputRef,
+        _capability_id: &CapabilityId,
         _tool_call: &ProviderToolCall,
     ) {
     }
@@ -178,33 +182,35 @@ impl LoopCapabilityInputResolver for ProviderToolCallInputResolver {
                 "provider tool-call input store is unavailable",
             )
         })?;
-        let newly_registered = if let Some(existing) = provider_inputs.get(input_ref.as_str()) {
+        if let Some(existing) = provider_inputs.get(input_ref.as_str()) {
             if existing != &tool_call.arguments {
                 return Err(AgentLoopHostError::new(
                     AgentLoopHostErrorKind::Internal,
                     "provider tool-call input ref collision",
                 ));
             }
-            false
         } else {
             provider_inputs.insert(input_ref.as_str().to_string(), tool_call.arguments.clone());
-            true
-        };
-        // Release the store lock before invoking the inner side-effect hook so
-        // we never hold it across the inner resolver's own locking.
-        drop(provider_inputs);
-        // This decorator owns the provider tool-call `input_ref` and bypasses
-        // the inner `register_provider_tool_call_input`. Drive the inner
-        // resolver's display-preview recording here so the activity-card input
-        // summary lands under the same ref the result write uses — otherwise
-        // the summary is never recorded and the UI shows tool calls with no
-        // arguments. Only on first registration, so a replay/retry of the same
-        // call doesn't re-record after the result already consumed the input.
-        if newly_registered {
-            self.inner
-                .record_provider_tool_call_display_input(run_context, &input_ref, tool_call);
         }
         Ok(input_ref)
+    }
+
+    fn record_provider_tool_call_display_input(
+        &self,
+        run_context: &LoopRunContext,
+        input_ref: &CapabilityInputRef,
+        capability_id: &CapabilityId,
+        tool_call: &ProviderToolCall,
+    ) {
+        // This decorator bypasses the inner `register_provider_tool_call_input`,
+        // so forward the display-recording side effect to `inner` (the resolver
+        // that owns the display-preview store).
+        self.inner.record_provider_tool_call_display_input(
+            run_context,
+            input_ref,
+            capability_id,
+            tool_call,
+        );
     }
 }
 
@@ -1163,6 +1169,16 @@ impl LoopCapabilityPort for HostRuntimeLoopCapabilityPort {
             .input_resolver
             .register_provider_tool_call_input(&self.run_context, &normalized_tool_call)
             .await?;
+        // Record the activity-card display input now that both the canonical
+        // `input_ref` and the resolved dotted `capability_id` are in hand, so
+        // the card shows `nearai.web_search   <query>` (not the lossy provider
+        // tool name `nearai__web_search`) and the per-tool summary matches.
+        self.input_resolver.record_provider_tool_call_display_input(
+            &self.run_context,
+            &input_ref,
+            &prepared.capability_id,
+            &normalized_tool_call,
+        );
         if prepared.capability_id.as_str() == crate::capability_info::CAPABILITY_ID {
             self.record_provider_tool_call_effective_capability_ids(
                 &input_ref,
@@ -3608,8 +3624,8 @@ mod tests {
 
     /// Inner resolver that records every
     /// `record_provider_tool_call_display_input` call, so a test can assert the
-    /// `ProviderToolCallInputResolver` decorator drives the inner's
-    /// display-preview hook under the canonical ref.
+    /// `ProviderToolCallInputResolver` decorator forwards the display hook with
+    /// the resolved capability id.
     #[derive(Default)]
     struct DisplayInputRecordingResolver {
         recorded: Mutex<Vec<(String, String, serde_json::Value)>>,
@@ -3632,11 +3648,12 @@ mod tests {
             &self,
             _run_context: &LoopRunContext,
             input_ref: &CapabilityInputRef,
+            capability_id: &CapabilityId,
             tool_call: &ProviderToolCall,
         ) {
             self.recorded.lock().expect("recorded lock").push((
                 input_ref.as_str().to_string(),
-                tool_call.name.clone(),
+                capability_id.as_str().to_string(),
                 tool_call.arguments.clone(),
             ));
         }
@@ -3661,41 +3678,40 @@ mod tests {
         assert_eq!(resolved, serde_json::json!({"message":"hello"}));
     }
 
-    /// Regression (#activity-card-args): the decorator owns the canonical
-    /// provider tool-call ref and bypasses the inner
-    /// `register_provider_tool_call_input`, so it MUST drive the inner's
-    /// display-preview recording hook under that same ref — otherwise the
-    /// activity-card input summary is never recorded and the UI shows tool
-    /// calls with no arguments. Fires exactly once even if the same call is
-    /// registered twice (replay/retry).
+    /// Regression (#activity-card-args): the decorator bypasses the inner
+    /// `register_provider_tool_call_input`, so it MUST forward the
+    /// display-preview hook to the inner resolver — and key it by the resolved
+    /// dotted capability id (`nearai.web_search`), not the lossy provider tool
+    /// name (`nearai__web_search`). Otherwise the activity card renders the
+    /// wrong name and the per-tool summary/subtitle matchers miss.
     #[tokio::test]
-    async fn provider_tool_call_input_resolver_drives_inner_display_input_hook() {
+    async fn provider_tool_call_input_resolver_forwards_display_input_hook_with_capability_id() {
         let run_context = loop_run_context(&execution_context("thread-display-input")).await;
         let inner = Arc::new(DisplayInputRecordingResolver::default());
         let resolver = ProviderToolCallInputResolver::new(inner.clone());
         let call = provider_tool_call();
+        let input_ref = provider_tool_call_input_ref(&run_context, &call).expect("ref");
+        let capability_id = CapabilityId::new("nearai.web_search").expect("capability id");
 
-        let input_ref = resolver
-            .register_provider_tool_call_input(&run_context, &call)
-            .await
-            .expect("provider input should stage");
-
-        // Registering the identical call again (replay/retry) must not
-        // re-record after the first registration.
-        resolver
-            .register_provider_tool_call_input(&run_context, &call)
-            .await
-            .expect("duplicate registration is idempotent");
+        resolver.record_provider_tool_call_display_input(
+            &run_context,
+            &input_ref,
+            &capability_id,
+            &call,
+        );
 
         let recorded = inner.recorded.lock().expect("recorded lock").clone();
-        assert_eq!(recorded.len(), 1, "display input recorded exactly once");
-        let (recorded_ref, recorded_name, recorded_args) = &recorded[0];
+        assert_eq!(recorded.len(), 1, "display input forwarded exactly once");
+        let (recorded_ref, recorded_capability, recorded_args) = &recorded[0];
         assert_eq!(
             recorded_ref,
             input_ref.as_str(),
             "display input must be recorded under the canonical ref the result write later uses",
         );
-        assert_eq!(recorded_name, &call.name);
+        assert_eq!(
+            recorded_capability, "nearai.web_search",
+            "display input must be keyed by the resolved dotted capability id",
+        );
         assert_eq!(recorded_args, &call.arguments);
     }
 

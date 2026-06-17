@@ -496,15 +496,18 @@ impl LoopCapabilityInputResolver for LocalDevCapabilityIo {
         &self,
         run_context: &LoopRunContext,
         input_ref: &CapabilityInputRef,
+        capability_id: &CapabilityId,
         tool_call: &ProviderToolCall,
     ) {
         // Driven by the `ProviderToolCallInputResolver` decorator under the
         // canonical (digest) provider tool-call ref, so the activity-card input
         // summary lands under the same ref `write_capability_result` later uses.
+        // Key the display by the resolved dotted `capability_id`, not the lossy
+        // provider tool name, so the title and per-tool summary are correct.
         self.display_previews.record_input(
             &run_context.run_id.to_string(),
             input_ref,
-            &tool_call.name,
+            capability_id.as_str(),
             &tool_call.arguments,
         );
     }

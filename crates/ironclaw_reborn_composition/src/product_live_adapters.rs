@@ -229,15 +229,18 @@ impl LoopCapabilityInputResolver for ProductLiveCapabilityIo {
         &self,
         run_context: &LoopRunContext,
         input_ref: &CapabilityInputRef,
+        capability_id: &CapabilityId,
         tool_call: &ProviderToolCall,
     ) {
         // Driven by the `ProviderToolCallInputResolver` decorator under the
         // canonical (digest) provider tool-call ref, so the activity-card input
         // summary lands under the same ref `write_capability_result` later uses.
+        // Key the display by the resolved dotted `capability_id`, not the lossy
+        // provider tool name, so the title and per-tool summary are correct.
         self.display_previews.record_input(
             &run_context.run_id.to_string(),
             input_ref,
-            &tool_call.name,
+            capability_id.as_str(),
             &tool_call.arguments,
         );
     }
@@ -924,17 +927,21 @@ mod tests {
     async fn capability_io_records_display_input_via_provider_tool_call_hook() {
         let io = ProductLiveCapabilityIo::default();
         let run_context = loop_run_context().await;
+        // The model-facing provider tool name is the lossy `__` encoding; the
+        // resolved capability id is the dotted form. The display must key off
+        // the capability id so the card title and per-tool summary are correct.
         let tool_call = ProviderToolCall {
             provider_id: "provider".to_string(),
             provider_model_id: "model".to_string(),
             turn_id: Some("turn_1".to_string()),
             id: "call_1".to_string(),
-            name: "read_file".to_string(),
-            arguments: serde_json::json!({"path": "src/main.rs"}),
+            name: "nearai__web_search".to_string(),
+            arguments: serde_json::json!({"query": "deploy status"}),
             response_reasoning: None,
             reasoning: None,
             signature: None,
         };
+        let capability_id = CapabilityId::new("nearai.web_search").unwrap();
         // The decorator owns this ref; it is NOT produced by
         // `register_provider_tool_call_input` here.
         let input_ref = CapabilityInputRef::new(format!(
@@ -943,16 +950,20 @@ mod tests {
         ))
         .expect("valid ref");
 
-        io.record_provider_tool_call_display_input(&run_context, &input_ref, &tool_call);
+        io.record_provider_tool_call_display_input(
+            &run_context,
+            &input_ref,
+            &capability_id,
+            &tool_call,
+        );
 
         let invocation_id = InvocationId::new();
-        let capability_id = CapabilityId::new("builtin.read_file").unwrap();
         io.write_capability_result(CapabilityResultWrite {
             run_context: &run_context,
             input_ref: &input_ref,
             invocation_id,
             capability_id: &capability_id,
-            output: serde_json::json!({"content": "fn main() {}"}),
+            output: serde_json::json!({"results": []}),
             display_preview: None,
         })
         .await
@@ -963,12 +974,17 @@ mod tests {
             .display_previews
             .record_for_invocation(invocation_id)
             .expect("preview recorded");
+        // Title is the dotted capability id, not the `__` provider tool name.
+        assert_eq!(record.title, "nearai.web_search");
+        // The per-tool web_search matcher fires (query summarized), rather than
+        // falling back to a raw JSON dump.
         assert!(
             record
                 .input_summary
                 .as_deref()
-                .is_some_and(|summary| summary.contains("path: src/main.rs")),
-            "input summary must be present for the hook-recorded provider tool call",
+                .is_some_and(|summary| summary.contains("query: deploy status")),
+            "input summary should use the web_search matcher, got {:?}",
+            record.input_summary,
         );
     }
 
