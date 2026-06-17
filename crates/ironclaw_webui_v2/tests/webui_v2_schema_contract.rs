@@ -81,6 +81,7 @@ fn gate_prompt() -> GatePromptView {
     GatePromptView {
         turn_run_id: run_id(),
         gate_ref: "gate:approval".to_string(),
+        invocation_id: None,
         headline: "Approve action".to_string(),
         body: "Review the requested action.".to_string(),
         allow_always: true,

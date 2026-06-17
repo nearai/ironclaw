@@ -69,12 +69,8 @@ export function messagesFromTimeline(records, pendingMessages = [], threadId = n
         ...card,
         timestamp: timestampForRecord(record) || card.updatedAt || null,
         sequence: record.sequence,
-        activityOrder: Number.isFinite(card.activityOrder)
-          ? card.activityOrder
-          : Number.isFinite(record.sequence)
-            ? record.sequence
-            : null,
-        activityOrderSource: card.activityOrderSource || "timeline",
+        activityOrder: card.activityOrder,
+        activityOrderSource: card.activityOrderSource,
         turnRunId: record.turn_run_id || null,
       });
       continue;

@@ -93,10 +93,8 @@ fn compare_capability_activities_for_projection(
     right: &CapabilityActivityProjection,
 ) -> Ordering {
     compare_projection_order_ascending(
-        &left.updated_at,
-        &right.updated_at,
-        left.last_cursor,
-        right.last_cursor,
+        left.activity_order_cursor(),
+        right.activity_order_cursor(),
         &left.invocation_id,
         &right.invocation_id,
     )
@@ -135,21 +133,16 @@ fn compare_projection_order(
 }
 
 fn compare_projection_order_ascending(
-    left_updated_at: &ironclaw_host_api::Timestamp,
-    right_updated_at: &ironclaw_host_api::Timestamp,
     left_cursor: ironclaw_events::EventCursor,
     right_cursor: ironclaw_events::EventCursor,
     left_invocation_id: &InvocationId,
     right_invocation_id: &InvocationId,
 ) -> Ordering {
-    left_updated_at
-        .cmp(right_updated_at)
-        .then_with(|| left_cursor.cmp(&right_cursor))
-        .then_with(|| {
-            left_invocation_id
-                .as_uuid()
-                .cmp(&right_invocation_id.as_uuid())
-        })
+    left_cursor.cmp(&right_cursor).then_with(|| {
+        left_invocation_id
+            .as_uuid()
+            .cmp(&right_invocation_id.as_uuid())
+    })
 }
 
 fn preserve_status_on_dispatch_success<S>(
@@ -321,6 +314,7 @@ fn capability_activity_projection_for_entry(
         process_id: event.process_id,
         output_bytes: event.output_bytes,
         error_kind: event.error_kind.clone().map(sanitize_error_kind),
+        first_cursor: entry.cursor,
         last_cursor: entry.cursor,
         updated_at: event.timestamp,
     }

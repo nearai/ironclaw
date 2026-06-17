@@ -1122,6 +1122,7 @@ fn slack_approval_gate_prompt_view(
     GatePromptView {
         turn_run_id: run_id,
         gate_ref: gate_ref_str.to_string(),
+        invocation_id: None,
         headline: "Approval needed".to_string(),
         body,
         allow_always: is_approval_gate_ref(gate_ref_str),

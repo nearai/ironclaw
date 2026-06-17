@@ -4,11 +4,11 @@ use super::{ChatCompletionMessage, MessageContent};
 
 /// Rewrite tool-call / tool-result messages into neutral transcript text.
 ///
-/// NEAR AI cloud-api does not support the OpenAI multi-turn tool-calling
-/// protocol (`role: "tool"` messages). This adapter keeps assistant prose but
-/// drops assistant tool-call protocol events so the model does not learn an
-/// assistant-authored tool-event completion pattern. Tool results become
-/// user-side observations.
+/// This is a legacy compatibility adapter for OpenAI-compatible endpoints
+/// that reject the standard multi-turn tool-calling protocol (`role: "tool"`
+/// messages). It keeps assistant prose but drops assistant tool-call protocol
+/// events so the model does not learn an assistant-authored tool-event
+/// completion pattern. Tool results become user-side observations.
 pub(super) fn flatten_tool_messages(
     messages: Vec<ChatCompletionMessage>,
 ) -> Vec<ChatCompletionMessage> {

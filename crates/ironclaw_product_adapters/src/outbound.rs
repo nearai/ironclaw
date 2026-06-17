@@ -580,6 +580,8 @@ impl<'de> Deserialize<'de> for CapabilityDisplayPreviewView {
 pub struct GatePromptView {
     pub turn_run_id: TurnRunId,
     pub gate_ref: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub invocation_id: Option<InvocationId>,
     pub headline: String,
     pub body: String,
     #[serde(default)]
@@ -1525,6 +1527,7 @@ mod tests {
         let view = GatePromptView {
             turn_run_id: TurnRunId::new(),
             gate_ref: "gate:approval-test".to_string(),
+            invocation_id: Some(InvocationId::new()),
             headline: "Approval required".to_string(),
             body: "capability requires approval".to_string(),
             allow_always: true,

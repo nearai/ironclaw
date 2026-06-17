@@ -69,7 +69,7 @@ function toolCardFromGate(gate, overrides = {}) {
   if (!gate?.runId || !gate?.gateRef || gate.kind !== "gate" || !gate.toolName) {
     return null;
   }
-  const invocationId = `gate:${gate.runId}:${gate.gateRef}`;
+  const invocationId = gate.invocationId || `gate:${gate.runId}:${gate.gateRef}`;
   return {
     invocationId,
     callId: invocationId,

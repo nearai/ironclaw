@@ -134,8 +134,10 @@ function orderActivityRun(activity) {
 }
 
 function compareToolActivityOrder(left, right) {
-  const explicitOrder = compareNullableNumber(left.activityOrder, right.activityOrder);
-  if (explicitOrder !== 0) return explicitOrder;
+  if (Number.isFinite(left.activityOrder) && Number.isFinite(right.activityOrder)) {
+    const explicitOrder = left.activityOrder - right.activityOrder;
+    if (explicitOrder !== 0) return explicitOrder;
+  }
 
   const timestampOrder = compareNullableNumber(
     timestampMs(left.updatedAt || left.timestamp),

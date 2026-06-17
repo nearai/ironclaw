@@ -114,6 +114,9 @@ impl CapabilityDisplayPreviewStore {
         tool_name: &str,
         arguments: &serde_json::Value,
     ) {
+        let Ok(mut pending) = self.pending.lock() else {
+            return;
+        };
         let input_summary = input_summary(tool_name, arguments);
         let input = CapabilityDisplayInputPreview {
             title: bounded_display_text(tool_name, CAPABILITY_DISPLAY_SUMMARY_MAX_BYTES).text,
@@ -123,15 +126,13 @@ impl CapabilityDisplayPreviewStore {
                 .is_some_and(|summary| summary.truncated),
             input_summary: input_summary.map(|summary| summary.text),
         };
-        if let Ok(mut pending) = self.pending.lock() {
-            let input_ref = input_ref.as_str().to_string();
-            pending.by_ref.insert(input_ref.clone(), input);
-            pending
-                .refs_by_run
-                .entry(run_id.to_string())
-                .or_default()
-                .push(input_ref);
-        }
+        let input_ref = input_ref.as_str().to_string();
+        pending.by_ref.insert(input_ref.clone(), input);
+        pending
+            .refs_by_run
+            .entry(run_id.to_string())
+            .or_default()
+            .push(input_ref);
     }
 
     #[cfg(test)]
@@ -287,7 +288,7 @@ fn capability_display_preview_resolution_from_store(
         result_ref: record.result_ref,
         truncated: record.truncated,
         updated_at: activity.updated_at,
-        activity_order: Some(activity.last_cursor.as_u64()),
+        activity_order: Some(activity.activity_order_cursor().as_u64()),
     })
     .map(Box::new)
     .map(CapabilityDisplayPreviewResolution::Ready)
@@ -327,7 +328,7 @@ fn failed_capability_display_preview(
         result_ref: None,
         truncated: false,
         updated_at: activity.updated_at,
-        activity_order: Some(activity.last_cursor.as_u64()),
+        activity_order: Some(activity.activity_order_cursor().as_u64()),
     })
     .map(Box::new)
     .map(CapabilityDisplayPreviewResolution::Ready)

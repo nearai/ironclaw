@@ -187,15 +187,29 @@ fn newest_activity_window(
     if max_activities == 0 || activities.is_empty() {
         return Vec::new();
     }
-    activities.sort_by(compare_capability_activity_projection_order);
     if activities.len() > max_activities {
+        activities.sort_by(compare_capability_activity_recency_order);
         let drop_count = activities.len() - max_activities;
         activities.drain(0..drop_count);
     }
+    activities.sort_by(compare_capability_activity_projection_order);
     activities
 }
 
 fn compare_capability_activity_projection_order(
+    left: &CapabilityActivityProjection,
+    right: &CapabilityActivityProjection,
+) -> Ordering {
+    left.activity_order_cursor()
+        .cmp(&right.activity_order_cursor())
+        .then_with(|| {
+            left.invocation_id
+                .as_uuid()
+                .cmp(&right.invocation_id.as_uuid())
+        })
+}
+
+fn compare_capability_activity_recency_order(
     left: &CapabilityActivityProjection,
     right: &CapabilityActivityProjection,
 ) -> Ordering {

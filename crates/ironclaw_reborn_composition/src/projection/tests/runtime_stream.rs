@@ -235,6 +235,7 @@ async fn capability_display_preview_store_redacts_unsafe_paths_and_secrets() {
             process_id: None,
             output_bytes: Some(42),
             error_kind: None,
+            first_cursor: ironclaw_events::EventCursor::new(1),
             last_cursor: ironclaw_events::EventCursor::new(1),
             updated_at: chrono::Utc::now(),
         })
@@ -890,7 +891,7 @@ async fn webui_event_stream_delivers_prior_completed_activity_before_pending_app
     let provider = ExtensionId::new("builtin").unwrap();
     let event_log = Arc::new(InMemoryDurableEventLog::new());
     event_log
-        .append(RuntimeEvent::dispatch_succeeded(
+        .append(RuntimeEvent::dispatch_requested(
             resource_scope(
                 &tenant_id,
                 &user_id,
@@ -899,9 +900,19 @@ async fn webui_event_stream_delivers_prior_completed_activity_before_pending_app
                 first_extension_invocation,
             ),
             extension_search.clone(),
-            provider.clone(),
-            RuntimeKind::FirstParty,
-            32,
+        ))
+        .await
+        .unwrap();
+    event_log
+        .append(RuntimeEvent::dispatch_requested(
+            resource_scope(
+                &tenant_id,
+                &user_id,
+                &agent_id,
+                &thread_id,
+                second_extension_invocation,
+            ),
+            extension_search.clone(),
         ))
         .await
         .unwrap();
@@ -915,9 +926,25 @@ async fn webui_event_stream_delivers_prior_completed_activity_before_pending_app
                 second_extension_invocation,
             ),
             extension_search.clone(),
-            provider,
+            provider.clone(),
             RuntimeKind::FirstParty,
             48,
+        ))
+        .await
+        .unwrap();
+    event_log
+        .append(RuntimeEvent::dispatch_succeeded(
+            resource_scope(
+                &tenant_id,
+                &user_id,
+                &agent_id,
+                &thread_id,
+                first_extension_invocation,
+            ),
+            extension_search.clone(),
+            provider,
+            RuntimeKind::FirstParty,
+            32,
         ))
         .await
         .unwrap();
@@ -985,7 +1012,7 @@ async fn webui_event_stream_delivers_prior_completed_activity_before_pending_app
                 approval_invocation,
                 web_access_search,
                 CapabilityActivityStatusView::Started,
-                Some(3),
+                Some(5),
             ),
         ],
         "a pending approval preview must not hide already completed tool activity"
@@ -1286,6 +1313,7 @@ async fn webui_projection_snapshot_bounds_activity_fanout_before_payload_mapping
                 process_id: None,
                 output_bytes: None,
                 error_kind: None,
+                first_cursor: ironclaw_events::EventCursor::new(index as u64 + 1),
                 last_cursor: ironclaw_events::EventCursor::new(index as u64 + 1),
                 updated_at: chrono::Utc::now(),
             })

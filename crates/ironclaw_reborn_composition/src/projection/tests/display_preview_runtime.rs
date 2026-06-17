@@ -70,6 +70,7 @@ impl PreviewProjectionFixture {
                 process_id: None,
                 output_bytes: Some(12),
                 error_kind: None,
+                first_cursor: ironclaw_events::EventCursor::new(1),
                 last_cursor: ironclaw_events::EventCursor::new(1),
                 updated_at,
             }],
@@ -170,6 +171,7 @@ impl PreviewProjectionFixture {
                 process_id: None,
                 output_bytes: Some(12),
                 error_kind: None,
+                first_cursor: cursor,
                 last_cursor: cursor,
                 updated_at,
             });
