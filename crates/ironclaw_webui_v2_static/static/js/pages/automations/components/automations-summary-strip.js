@@ -34,12 +34,12 @@ export function AutomationsSummaryStrip({ summary, activeFilter, onSelectFilter 
       key: "failures",
       label: t("automations.summary.failures"),
       value: summary?.failures ?? 0,
-      tone: (summary?.failures ?? 0) > 0 ? "danger" : "success",
+      tone: (summary?.failures ?? 0) > 0 ? "warning" : "success",
       detail: t("automations.summary.failuresDetail"),
-      // The failures card is the primary actionable card (#5004): clicking it
-      // filters the list down to the automations with failed runs so the user
-      // can jump straight to what went wrong instead of hunting through
-      // history. Only offer the jump when there is at least one failure.
+      // The attention card is the primary actionable card (#5004): clicking it
+      // filters the list down to automations whose recent run history includes
+      // the existing error bucket. With the current API shape that can mean a
+      // true failure or a run awaiting user attention.
       filter: (summary?.failures ?? 0) > 0 ? "failures" : null,
     },
     {

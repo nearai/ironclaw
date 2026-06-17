@@ -13,13 +13,13 @@ const STATE_PRESENTATION = {
 
 const LAST_STATUS_PRESENTATION = {
   ok: { labelKey: "automations.lastStatus.done", tone: "success" },
-  error: { labelKey: "automations.lastStatus.error", tone: "danger" },
+  error: { labelKey: "automations.status.needsReview", tone: "warning" },
   running: { labelKey: "automations.lastStatus.running", tone: "info" },
 };
 
 const RUN_STATUS_PRESENTATION = {
   ok: { labelKey: "automations.runStatus.ok", tone: "success" },
-  error: { labelKey: "automations.runStatus.error", tone: "danger" },
+  error: { labelKey: "automations.status.needsReview", tone: "warning" },
   running: { labelKey: "automations.runStatus.running", tone: "info" },
   unknown: { labelKey: "automations.runStatus.unknown", tone: "muted" },
 };
@@ -324,12 +324,12 @@ export function summarizeRuns(runs) {
 // Ordered, non-empty status buckets for the recent-run summary chips. Kept in
 // the presenter (not inline in the component) so a caller-level test can assert
 // that no counted status — including `unknown` — is dropped from what the UI
-// renders. Each entry carries the i18n key suffix and the chip tone class.
+// renders. Each entry carries the normalized bucket key and the chip tone class.
 export function runStatusBreakdown(runs) {
   const counts = summarizeRuns(runs);
   return [
     { key: "ok", tone: "text-emerald-300", count: counts.ok },
-    { key: "error", tone: "text-red-300", count: counts.error },
+    { key: "error", tone: "text-[var(--v2-warning-text)]", count: counts.error },
     { key: "running", tone: "text-sky-300", count: counts.running },
     { key: "unknown", tone: "text-iron-400", count: counts.unknown },
   ].filter((part) => part.count > 0);

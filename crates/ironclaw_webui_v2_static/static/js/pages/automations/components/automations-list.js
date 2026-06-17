@@ -159,7 +159,7 @@ export function AutomationsList({
                                 tone=${automation.has_running_run
                                   ? "info"
                                   : automation.has_failed_runs
-                                    ? "danger"
+                                    ? "warning"
                                     : automation.state_tone}
                                 label=${automation.has_running_run
                                   ? t("automations.status.running")

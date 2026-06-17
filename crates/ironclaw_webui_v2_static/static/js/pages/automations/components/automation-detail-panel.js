@@ -21,6 +21,7 @@ function MetaItem({ label, value, tone }) {
           "mt-2 min-w-0 break-words text-sm text-iron-100",
           tone === "success" && "text-emerald-200",
           tone === "danger" && "text-red-200",
+          tone === "warning" && "text-[var(--v2-warning-text)]",
           tone === "info" && "text-sky-200"
         )}
       >
@@ -75,7 +76,7 @@ export function AutomationDetailPanel({ automation }) {
           <${MetaItem}
             label=${t("automations.detail.successRate")}
             value=${automation.success_rate_label}
-            tone=${automation.has_failed_runs ? "danger" : "success"}
+            tone=${automation.has_failed_runs ? "warning" : "success"}
           />
           <${MetaItem} label=${t("automations.detail.lastCompleted")} value=${automation.last_run_label} />
           <${MetaItem}

@@ -38,9 +38,10 @@ const EN_SCHEDULE = {
   "automations.lastStatus.running": "Running",
   "automations.lastStatus.none": "No result",
   "automations.runStatus.ok": "OK",
-  "automations.runStatus.error": "Error",
+  "automations.runStatus.error": "Needs attention",
   "automations.runStatus.running": "Running",
   "automations.runStatus.unknown": "Unknown",
+  "automations.status.needsReview": "Needs attention",
   "automations.date.unknown": "Unknown",
   "automations.date.notScheduled": "Not scheduled",
   "automations.date.noRuns": "No runs yet",
@@ -53,7 +54,7 @@ const EN_SCHEDULE = {
   // Run-summary labels (mirror en.js) so runSummaryView assertions read English.
   "automations.runs.total": "Recent runs: {count}",
   "automations.runs.ok": "OK: {count}",
-  "automations.runs.error": "Failed: {count}",
+  "automations.runs.error": "Needs attention: {count}",
   "automations.runs.running": "Running: {count}",
   "automations.runs.unknown": "Unknown: {count}",
 };
@@ -360,8 +361,10 @@ test("normalizeAutomations presents bounded recent run history", () => {
   assert.equal(automations[0].latest_run.run_id, "run-running");
   assert.equal(automations[0].current_run.run_id, "run-running");
   assert.match(automations[0].last_run_label, /Jun 4/);
-  assert.equal(automations[0].last_status_label, "Error");
-  assert.equal(automations[0].last_status_tone, "danger");
+  assert.equal(automations[0].last_status_label, "Needs attention");
+  assert.equal(automations[0].last_status_tone, "warning");
+  assert.equal(automations[0].recent_runs[1].status_label, "Needs attention");
+  assert.equal(automations[0].recent_runs[1].status_tone, "warning");
   // Post-acceptance statuses (running/ok/error) must produce a chat_path.
   assert.equal(automations[0].recent_runs[0].chat_path, "/chat/thread-running");
   assert.equal(automations[0].recent_runs[1].chat_path, "/chat/thread-error");
@@ -504,6 +507,11 @@ test("runStatusBreakdown surfaces every non-empty bucket incl. unknown", () => {
   ]);
   const byKey = Object.fromEntries(parts.map((part) => [part.key, part.count]));
   assert.deepEqual(byKey, { ok: 2, error: 1, running: 1, unknown: 2 });
+  assert.equal(
+    parts.find((part) => part.key === "error")?.tone,
+    "text-[var(--v2-warning-text)]",
+    "automation-triggered error runs must render as warning/attention, not red terminal errors",
+  );
   assert.ok(
     parts.some((part) => part.key === "unknown"),
     "unknown bucket must be present when unknown-status runs exist",
@@ -551,7 +559,7 @@ test("runSummaryView renders the unknown chip and chips sum to total", () => {
   const renderedTexts = view.chips.map((chip) => chip.text);
   assert.deepEqual(renderedTexts, [
     "OK: 2",
-    "Failed: 1",
+    "Needs attention: 1",
     "Running: 1",
     "Unknown: 2",
   ]);

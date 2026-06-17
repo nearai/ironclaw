@@ -21,7 +21,7 @@ export function RunDots({ runs = [] }) {
   const t = useT();
   const visibleRuns = runs.slice(0, MAX_VISIBLE_DOTS);
   if (!visibleRuns.length) {
-    return html`<span className="text-xs text-iron-400">${t("automations.table.noRuns")}</span>`;
+    return null;
   }
   const overflow = runs.length - visibleRuns.length;
 
@@ -37,7 +37,8 @@ export function RunDots({ runs = [] }) {
           className=${cn(
             "h-3 w-3 rounded-full border",
             run.status === "ok" && "border-emerald-300/50 bg-emerald-400",
-            run.status === "error" && "border-red-300/50 bg-red-400",
+            run.status === "error" &&
+              "border-[color-mix(in_srgb,var(--v2-warning-text)_48%,var(--v2-panel-border))] bg-[var(--v2-warning-text)]",
             run.status === "running" && "border-sky-300/60 bg-sky-400",
             run.status === "unknown" && "border-iron-500 bg-iron-600"
           )}
