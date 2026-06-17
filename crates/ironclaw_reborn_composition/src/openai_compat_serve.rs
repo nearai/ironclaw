@@ -330,11 +330,17 @@ impl OpenAiResponsesThreadProjectionReader {
             .filter(|message| message.turn_run_id.as_deref() == Some(turn_run_id.as_str()))
             .collect();
 
-        // Tool calls/outputs, in transcript order.
+        // Tool calls/outputs, in transcript order. Finalized only: history can
+        // surface redacted/deleted messages, and matching the finalized status
+        // these rows are appended with avoids leaking redacted tool activity
+        // (including a `tool_result_ref` fallback call id).
         let mut tool_results: Vec<&ThreadMessageRecord> = run_messages
             .iter()
             .copied()
-            .filter(|message| message.kind == MessageKind::ToolResultReference)
+            .filter(|message| {
+                message.kind == MessageKind::ToolResultReference
+                    && message.status == MessageStatus::Finalized
+            })
             .collect();
         tool_results.sort_by_key(|message| message.sequence);
         // The run's single finalized assistant reply (drafts dedup by run).
@@ -483,11 +489,19 @@ fn push_tool_output_items(
 
 /// The raw tool output for a tool-result message: the model-visible
 /// `model_observation` JSON when present, falling back to the safe summary.
+///
+/// Parsing is best-effort: the envelope shape is deserialized directly without
+/// the strict `from_json_str` validation, so a version mismatch or a legacy
+/// `model_observation`/`result_ref` shape still yields the intended
+/// `model_observation`/`safe_summary` rather than leaking the entire raw
+/// envelope. Only content that does not deserialize as an envelope at all
+/// (`safe_summary` itself is still validated on deserialize) falls back to the
+/// raw string.
 fn tool_result_output(message: &ThreadMessageRecord) -> serde_json::Value {
     let Some(content) = message.content.as_deref() else {
         return serde_json::Value::Null;
     };
-    match ToolResultReferenceEnvelope::from_json_str(content) {
+    match serde_json::from_str::<ToolResultReferenceEnvelope>(content) {
         Ok(envelope) => envelope.model_observation.unwrap_or_else(|| {
             serde_json::Value::String(envelope.safe_summary.as_str().to_string())
         }),
@@ -857,7 +871,7 @@ mod tests {
                 id, role, content, ..
             } => {
                 assert!(matches!(role, OpenAiResponsesMessageRole::Assistant));
-                // Message ids are sequence-keyed so multi-step runs stay unique.
+                // Message ids are response-id-keyed (`msg_{response_id}`).
                 assert!(id.starts_with("msg_"));
                 assert_eq!(
                     content,
