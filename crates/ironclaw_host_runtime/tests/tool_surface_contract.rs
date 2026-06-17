@@ -564,6 +564,35 @@ async fn visible_surface_resolves_builtin_first_party_input_schema_refs() {
             "edits": [{"oldText": "old", "newText": "new"}]
         }))
         .expect("apply_patch schema should accept Pi-style multi-edit input");
+    apply_patch_validator
+        .validate(&json!({
+            "path": "/workspace/main.rs",
+            "edits": [{"oldText": "old", "newText": "new"}],
+            "replace_all": true
+        }))
+        .expect("apply_patch schema should accept replace_all with one edit");
+    assert!(
+        apply_patch_validator
+            .validate(&json!({
+                "path": "/workspace/main.rs",
+                "edits": []
+            }))
+            .is_err(),
+        "apply_patch schema should reject empty edits"
+    );
+    assert!(
+        apply_patch_validator
+            .validate(&json!({
+                "path": "/workspace/main.rs",
+                "edits": [
+                    {"oldText": "old", "newText": "new"},
+                    {"oldText": "other", "newText": "replacement"}
+                ],
+                "replace_all": true
+            }))
+            .is_err(),
+        "apply_patch schema should reject replace_all with multiple edits"
+    );
     assert!(
         apply_patch_validator
             .validate(&json!({

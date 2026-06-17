@@ -316,6 +316,7 @@ pub(crate) fn resolve_builtin_input_schema_ref(reference: &str) -> Option<Value>
                 "edits": {
                     "type": "array",
                     "description": "One or more targeted replacements matched against the original file. Prefer this for multiple disjoint edits.",
+                    "minItems": 1,
                     "maxItems": 256,
                     "items": {
                         "type": "object",
@@ -338,6 +339,27 @@ pub(crate) fn resolve_builtin_input_schema_ref(reference: &str) -> Option<Value>
             "oneOf": [
                 { "required": ["old_string", "new_string"] },
                 { "required": ["edits"] }
+            ],
+            "allOf": [
+                {
+                    "if": {
+                        "properties": {
+                            "replace_all": { "const": true }
+                        },
+                        "required": ["replace_all"]
+                    },
+                    "then": {
+                        "oneOf": [
+                            { "required": ["old_string", "new_string"] },
+                            {
+                                "properties": {
+                                    "edits": { "maxItems": 1 }
+                                },
+                                "required": ["edits"]
+                            }
+                        ]
+                    }
+                }
             ],
             "additionalProperties": false
         }),

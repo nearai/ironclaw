@@ -167,7 +167,8 @@ impl<'a> TextMatcher<'a> {
     }
 
     fn find_edit_matches(&self, old_string: &str, replace_all: bool) -> EditMatches {
-        let exact_spans = find_exact_spans(self.content, old_string)
+        let match_limit = if replace_all { None } else { Some(2) };
+        let exact_spans = find_exact_spans(self.content, old_string, match_limit)
             .into_iter()
             .map(|(start, end)| MatchSpan {
                 start,
@@ -183,7 +184,7 @@ impl<'a> TextMatcher<'a> {
                 };
             }
 
-            let fuzzy_spans = self.find_fuzzy_spans(old_string);
+            let fuzzy_spans = self.find_fuzzy_spans(old_string, match_limit);
             let occurrence_count = if fuzzy_spans.is_empty() {
                 exact_spans.len()
             } else {
@@ -195,14 +196,14 @@ impl<'a> TextMatcher<'a> {
             };
         }
 
-        let fuzzy_spans = self.find_fuzzy_spans(old_string);
+        let fuzzy_spans = self.find_fuzzy_spans(old_string, match_limit);
         EditMatches {
             occurrence_count: fuzzy_spans.len(),
             spans: fuzzy_spans,
         }
     }
 
-    fn find_fuzzy_spans(&self, old_string: &str) -> Vec<MatchSpan> {
+    fn find_fuzzy_spans(&self, old_string: &str, match_limit: Option<usize>) -> Vec<MatchSpan> {
         if old_string.trim().is_empty() {
             return Vec::new();
         }
@@ -215,7 +216,7 @@ impl<'a> TextMatcher<'a> {
         let normalized_content = self
             .normalized_content
             .get_or_init(|| normalize_with_source_map(self.content));
-        find_exact_spans(&normalized_content.text, &normalized_old)
+        find_exact_spans(&normalized_content.text, &normalized_old, match_limit)
             .into_iter()
             .filter_map(|(start, end)| {
                 normalized_span_to_source_span(normalized_content, start, end).map(|span| {
@@ -336,7 +337,11 @@ fn apply_matched_edits(content: &str, matched_edits: &[MatchedEdit]) -> String {
     rebuilt
 }
 
-fn find_exact_spans(haystack: &str, needle: &str) -> Vec<(usize, usize)> {
+fn find_exact_spans(
+    haystack: &str,
+    needle: &str,
+    match_limit: Option<usize>,
+) -> Vec<(usize, usize)> {
     if needle.is_empty() {
         return Vec::new();
     }
@@ -347,6 +352,9 @@ fn find_exact_spans(haystack: &str, needle: &str) -> Vec<(usize, usize)> {
         let start = search_offset + index;
         let end = start + needle.len();
         spans.push((start, end));
+        if match_limit.is_some_and(|limit| spans.len() >= limit) {
+            break;
+        }
         search_offset = end;
     }
     spans
