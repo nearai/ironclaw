@@ -3060,8 +3060,15 @@ fn local_dev_selector_config(
 ) -> SkillActivationSelectorConfig {
     SkillActivationSelectorConfig {
         max_context_tokens: LOCAL_DEV_MAX_SKILL_CONTEXT_TOKENS,
+        // `ExplicitAndCriteria` (the upstream default) lets a learned skill
+        // auto-activate when a later request matches its keywords/patterns —
+        // not only when the user types `$name`/`/name`. This is what closes
+        // the learn→reuse loop: a skill distilled from one task is applied
+        // automatically on the next similar task. Explicit mentions still
+        // force-activate; criteria selection is additive and bounded by
+        // `max_active_skills` / `max_context_tokens`.
         selection_mode:
-            ironclaw_first_party_extension_ports::SkillActivationSelectionMode::ExplicitOnly,
+            ironclaw_first_party_extension_ports::SkillActivationSelectionMode::ExplicitAndCriteria,
         regex_activation_enabled: regex_skill_activation_enabled,
         ..SkillActivationSelectorConfig::default()
     }
@@ -3452,9 +3459,13 @@ mod tests {
             !cfg.regex_activation_enabled,
             "regex_skill_activation_enabled=false must propagate into SkillActivationSelectorConfig"
         );
+        // Local-dev uses criteria selection so a learned skill auto-activates on
+        // a keyword/pattern match (the learn→reuse loop), not only on an
+        // explicit `$name` mention. A revert to `ExplicitOnly` would silently
+        // break auto-reuse, so lock it here.
         assert!(matches!(
             cfg.selection_mode,
-            ironclaw_first_party_extension_ports::SkillActivationSelectionMode::ExplicitOnly
+            ironclaw_first_party_extension_ports::SkillActivationSelectionMode::ExplicitAndCriteria
         ));
     }
 
