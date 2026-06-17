@@ -16,7 +16,7 @@
 //! running runtime's handle — so it is intended for offline/operator use:
 //! running it against a live server can hit transient SQLite busy/lock errors.
 //!
-//! Reassign (`--reassign` / `--reassign-to-current-sso-owner`) rewrites a
+//! Reassign (`--reassign-to` / `--reassign-to-current-sso-owner`) rewrites a
 //! stranded trigger's `creator_user_id` AND re-pairs the new owner's trusted
 //! external actor through the SAME filesystem-backed conversation store the
 //! runtime's trigger poller binds against at fire time
@@ -80,6 +80,13 @@ pub struct TriggerAccessRepairReport {
     /// `--reassign-to*` action can recover these.
     pub skipped_revoked: usize,
     pub reassigned: usize,
+    /// Reassign targets skipped because they already hold a deliberately revoked
+    /// (inactive) row at the trigger's exact scope. `seed_local_access` is
+    /// `ON CONFLICT DO NOTHING`, so seeding cannot reactivate it; rather than
+    /// report a false success and flip ownership to a target that fire-time auth
+    /// will deny, the trigger is left untouched (ownership unchanged) and stays
+    /// visible to a re-run. Recover by reassigning to a non-revoked target.
+    pub skipped_revoked_target: usize,
     pub reassigned_to: Option<String>,
 }
 
@@ -101,8 +108,9 @@ pub enum TriggerAccessRepairError {
     )]
     NoSsoOwner,
     #[error(
-        "reassigned trigger ownership but could not re-pair the new owner's trusted \
-         trigger actor (fire-time binding fails closed for unpaired actors): {reason}"
+        "could not re-pair the reassign target's trusted trigger actor (fire-time binding \
+         fails closed for unpaired actors); trigger ownership was left unchanged so the \
+         strand stays visible to a re-run: {reason}"
     )]
     Pairing { reason: String },
 }
@@ -191,6 +199,7 @@ pub async fn repair_local_trigger_access(
         reseeded: 0,
         skipped_revoked: 0,
         reassigned: 0,
+        skipped_revoked_target: 0,
         reassigned_to: None,
     };
 
@@ -216,7 +225,7 @@ pub async fn repair_local_trigger_access(
                 .map_err(|error| TriggerAccessRepairError::Pairing {
                     reason: format!("open trigger conversation services: {error}"),
                 })?;
-            apply_reassign(
+            let outcome = apply_reassign(
                 &repository,
                 &access,
                 &conversations,
@@ -225,7 +234,8 @@ pub async fn repair_local_trigger_access(
                 &target,
             )
             .await?;
-            report.reassigned = stranded_records.len();
+            report.reassigned = outcome.reassigned;
+            report.skipped_revoked_target = outcome.skipped_revoked_target;
             report.reassigned_to = Some(target.as_str().to_string());
         }
         TriggerAccessRepairAction::ReassignToCurrentSsoOwner => {
@@ -235,7 +245,7 @@ pub async fn repair_local_trigger_access(
                 .map_err(|error| TriggerAccessRepairError::Pairing {
                     reason: format!("open trigger conversation services: {error}"),
                 })?;
-            apply_reassign(
+            let outcome = apply_reassign(
                 &repository,
                 &access,
                 &conversations,
@@ -244,7 +254,8 @@ pub async fn repair_local_trigger_access(
                 &target,
             )
             .await?;
-            report.reassigned = stranded_records.len();
+            report.reassigned = outcome.reassigned;
+            report.skipped_revoked_target = outcome.skipped_revoked_target;
             report.reassigned_to = Some(target.as_str().to_string());
         }
     }
@@ -266,6 +277,15 @@ async fn resolve_current_sso_owner(
     }
 }
 
+/// Per-target tally of an `apply_reassign` pass.
+struct ReassignOutcome {
+    /// Triggers fully reassigned (target provisioned, paired, ownership rewritten).
+    reassigned: usize,
+    /// Triggers left untouched because the target holds a revoked row at the
+    /// trigger's exact scope (see [`TriggerAccessRepairReport::skipped_revoked_target`]).
+    skipped_revoked_target: usize,
+}
+
 async fn apply_reassign(
     repository: &LibSqlTriggerRepository,
     access: &RebornLibSqlLocalTriggerAccessStore,
@@ -273,27 +293,60 @@ async fn apply_reassign(
     tenant_id: &TenantId,
     stranded_records: &[(TriggerRecord, LocalAccessState)],
     target: &UserId,
-) -> Result<(), TriggerAccessRepairError> {
+) -> Result<ReassignOutcome, TriggerAccessRepairError> {
+    let mut outcome = ReassignOutcome {
+        reassigned: 0,
+        skipped_revoked_target: 0,
+    };
     for (trigger, _) in stranded_records {
         let mut updated = trigger.clone();
         updated.creator_user_id = target.clone();
-        repository.upsert_trigger(updated.clone()).await?;
+
+        // Provision the target FIRST, commit the ownership rewrite LAST. The
+        // repair scan treats any trigger whose CURRENT creator lacks active
+        // access as stranded, so keeping `upsert_trigger` as the final step means
+        // any earlier failure leaves the old creator in place and the trigger
+        // stays visible to a re-run — never a silent half-reassigned/unpaired
+        // state (#4992 P1).
+
+        // 1. Seed the target's exact-scope access, then confirm it actually
+        //    became active. `seed_local_access` is `ON CONFLICT DO NOTHING`, so a
+        //    target that already holds a deliberately revoked row at this scope
+        //    stays revoked; flipping ownership to it would report success while
+        //    fire-time auth denies (#4992 P2). Skip it, leave the trigger
+        //    stranded, and surface the count so the operator picks another target.
         seed_creator_access(access, tenant_id, trigger, target).await?;
-        // The access row alone is not enough: fire-time conversation binding
-        // (`TriggerTrustedInboundBinding::for_fire`) keys the external actor on
-        // the trigger's `creator_user_id`, and binding resolution FAILS CLOSED
-        // for unpaired actors. Without re-pairing the new owner here, the next
-        // fire still fails even though the access row exists — the false-success
-        // trap this repair must not leave behind (#4992). `pair_trigger_creator`
-        // mirrors the create-time pairing in `factory::pair_trigger_creator`,
-        // pairing on the UPDATED record so the actor ref is keyed on `target`.
+        let target_state = access
+            .local_access_state(
+                tenant_id,
+                target,
+                trigger.agent_id.as_ref(),
+                trigger.project_id.as_ref(),
+            )
+            .await?;
+        if target_state != LocalAccessState::Active {
+            outcome.skipped_revoked_target += 1;
+            continue;
+        }
+
+        // 2. Re-pair the target's trusted actor. Fire-time binding
+        //    (`TriggerTrustedInboundBinding::for_fire`) keys the external actor on
+        //    the trigger's `creator_user_id` and FAILS CLOSED for unpaired actors,
+        //    so the access row alone is insufficient. Mirrors create-time
+        //    `factory::pair_trigger_creator`, keyed on the UPDATED record so the
+        //    actor ref is `target`; idempotent, so a retry after a later failure
+        //    is safe.
         pair_trigger_creator(conversations, &updated)
             .await
             .map_err(|error| TriggerAccessRepairError::Pairing {
                 reason: error.to_string(),
             })?;
+
+        // 3. Commit the ownership rewrite last.
+        repository.upsert_trigger(updated).await?;
+        outcome.reassigned += 1;
     }
-    Ok(())
+    Ok(outcome)
 }
 
 async fn seed_creator_access(
@@ -456,6 +509,118 @@ mod tests {
                 .await
                 .expect("check access"),
             "target must have active access for the trigger scope after reassign"
+        );
+    }
+
+    /// Seed an active row for `user` at the given scope, then deactivate it via
+    /// a reconcile that excludes `user` — leaving a `Revoked` (inactive) row, the
+    /// operator-revocation state. Used to set up a reassign target that
+    /// `seed_local_access` (`ON CONFLICT DO NOTHING`) cannot reactivate.
+    async fn seed_revoked_at_scope(
+        path: &std::path::Path,
+        tenant: &TenantId,
+        user: &UserId,
+        agent_id: Option<&AgentId>,
+        project_id: Option<&ProjectId>,
+    ) {
+        use ironclaw_reborn::local_trigger_access::LocalTriggerAccessReconciliation;
+        let db = Arc::new(
+            libsql::Builder::new_local(path)
+                .build()
+                .await
+                .expect("build db"),
+        );
+        let access = RebornLibSqlLocalTriggerAccessStore::open(db)
+            .await
+            .expect("open access");
+        access
+            .seed_local_access(LocalTriggerAccessSeed {
+                tenant_id: tenant,
+                user_id: user,
+                agent_id,
+                project_id,
+                role: LocalTriggerAccessRole::Owner,
+                source: LocalTriggerAccessSource::LocalDevSsoBootstrap,
+            })
+            .await
+            .expect("seed target");
+        let keeper = UserId::new("some-other-owner").expect("user");
+        access
+            .reconcile_local_access(LocalTriggerAccessReconciliation {
+                tenant_id: tenant,
+                user_ids: &[keeper],
+                agent_id,
+                project_id,
+                role: LocalTriggerAccessRole::Owner,
+                source: LocalTriggerAccessSource::LocalDevSsoBootstrap,
+            })
+            .await
+            .expect("revoke target");
+    }
+
+    #[tokio::test]
+    async fn reassign_skips_target_with_revoked_scope_row_and_leaves_trigger_stranded() {
+        // #4992 P1+P2: a reassign target that already holds a deliberately
+        // revoked row at the trigger's exact scope cannot be reactivated by the
+        // `ON CONFLICT DO NOTHING` seed. The repair must NOT report a false
+        // success or flip ownership to a target fire-time auth will deny — it
+        // skips the trigger, leaves ownership unchanged, and keeps it visible.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = db_path(&dir);
+        let tenant = TenantId::new("reborn-cli").expect("tenant");
+        let creator = UserId::new("gone-creator").expect("user");
+        let target = UserId::new("revoked-target").expect("user");
+        let trigger_id = "01J0000000000000000000A003";
+        let record = stranded_record(trigger_id, &tenant, &creator);
+        seed_trigger(&path, record.clone()).await;
+        seed_revoked_at_scope(
+            &path,
+            &tenant,
+            &target,
+            record.agent_id.as_ref(),
+            record.project_id.as_ref(),
+        )
+        .await;
+
+        let applied = repair_local_trigger_access(
+            &path,
+            &tenant,
+            TriggerAccessRepairAction::Reassign(target.clone()),
+        )
+        .await
+        .expect("reassign");
+        assert_eq!(
+            applied.reassigned, 0,
+            "revoked target must not count as reassigned"
+        );
+        assert_eq!(applied.skipped_revoked_target, 1);
+
+        // Ownership is unchanged: the upsert never ran.
+        let db = Arc::new(
+            libsql::Builder::new_local(&path)
+                .build()
+                .await
+                .expect("reopen db"),
+        );
+        let repo = LibSqlTriggerRepository::new(Arc::clone(&db));
+        let reloaded = repo
+            .get_trigger(tenant.clone(), TriggerId::parse(trigger_id).expect("ulid"))
+            .await
+            .expect("get trigger")
+            .expect("trigger present");
+        assert_eq!(
+            reloaded.creator_user_id, creator,
+            "ownership must stay with the original creator when the target is revoked"
+        );
+
+        // The trigger is still reported stranded, not silently lost.
+        let after = repair_local_trigger_access(&path, &tenant, TriggerAccessRepairAction::Report)
+            .await
+            .expect("report after");
+        assert_eq!(
+            after.stranded.len(),
+            1,
+            "the unrepaired trigger stays visible to the next repair pass"
         );
     }
 

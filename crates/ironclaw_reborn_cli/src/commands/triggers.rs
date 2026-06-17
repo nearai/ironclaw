@@ -223,6 +223,14 @@ fn print_apply_summary(report: &TriggerAccessRepairReport) {
             report.reassigned
         );
     }
+    if report.skipped_revoked_target > 0 {
+        let target = report.reassigned_to.as_deref().unwrap_or("(unknown)");
+        println!(
+            "Skipped {} trigger(s): reassign target `{target}` has a revoked row at that \
+             scope (left stranded — choose a different target).",
+            report.skipped_revoked_target
+        );
+    }
 }
 
 #[cfg(test)]
