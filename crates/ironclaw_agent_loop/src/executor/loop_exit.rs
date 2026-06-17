@@ -194,25 +194,29 @@ impl ExitStage {
                 // bit-for-bit). Otherwise finalize a typed no-progress failure that
                 // the product layer renders deterministically — never a canned
                 // "I stopped" reply finalized as a successful turn.
-                match try_final_answer_nudge(ctx, &mut state).await? {
+                // The nudge owns its own output-token accounting (it pushes to
+                // `recent_output_token_counts` on AcceptFinal); the caller only
+                // owns `assistant_refs`. Keep the checkpoint write single and
+                // shared across both outcomes.
+                let completed = match try_final_answer_nudge(ctx, &mut state).await? {
                     Some(reply_ref) => {
                         state.assistant_refs.push(reply_ref);
-                        let checked = CheckpointStage
-                            .write(ctx, state, CheckpointKind::Final)
-                            .await?;
-                        completed_exit(ctx.host, checked.state, Some(checked.checkpoint_id))
+                        true
                     }
-                    None => {
-                        let checked = CheckpointStage
-                            .write(ctx, state, CheckpointKind::Final)
-                            .await?;
-                        failed_exit(
-                            ctx.host,
-                            checked.state,
-                            LoopFailureKind::NoProgressDetected,
-                            Some(checked.checkpoint_id),
-                        )
-                    }
+                    None => false,
+                };
+                let checked = CheckpointStage
+                    .write(ctx, state, CheckpointKind::Final)
+                    .await?;
+                if completed {
+                    completed_exit(ctx.host, checked.state, Some(checked.checkpoint_id))
+                } else {
+                    failed_exit(
+                        ctx.host,
+                        checked.state,
+                        LoopFailureKind::NoProgressDetected,
+                        Some(checked.checkpoint_id),
+                    )
                 }
             }
             StopKind::Aborted(failure_kind) => {
