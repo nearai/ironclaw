@@ -543,6 +543,42 @@ async fn visible_surface_resolves_builtin_first_party_input_schema_refs() {
     assert_schema_has_property(&surface, "builtin.skill_install", "url");
     assert_schema_has_property(&surface, "builtin.skill_install", "name");
 
+    let apply_patch_schema = &surface
+        .capabilities
+        .iter()
+        .find(|capability| capability.descriptor.id == capability_id("builtin.apply_patch"))
+        .expect("builtin.apply_patch should be visible")
+        .descriptor
+        .parameters_schema;
+    let apply_patch_validator =
+        jsonschema::validator_for(apply_patch_schema).expect("apply_patch schema is valid");
+    apply_patch_validator
+        .validate(&json!({
+            "path": "/workspace/main.rs",
+            "edits": [{"old_string": "old", "new_string": "new"}]
+        }))
+        .expect("apply_patch schema should accept canonical multi-edit input");
+    apply_patch_validator
+        .validate(&json!({
+            "path": "/workspace/main.rs",
+            "edits": [{"oldText": "old", "newText": "new"}]
+        }))
+        .expect("apply_patch schema should accept Pi-style multi-edit input");
+    assert!(
+        apply_patch_validator
+            .validate(&json!({
+                "path": "/workspace/main.rs",
+                "edits": [{
+                    "old_string": "old",
+                    "new_string": "new",
+                    "oldText": "old",
+                    "newText": "new"
+                }]
+            }))
+            .is_err(),
+        "apply_patch schema should reject ambiguous edit aliases"
+    );
+
     let trigger_create = surface
         .capabilities
         .iter()

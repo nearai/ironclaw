@@ -321,9 +321,14 @@ pub(crate) fn resolve_builtin_input_schema_ref(reference: &str) -> Option<Value>
                         "type": "object",
                         "properties": {
                             "old_string": { "type": "string", "description": "Text to replace" },
-                            "new_string": { "type": "string", "description": "Replacement text" }
+                            "new_string": { "type": "string", "description": "Replacement text" },
+                            "oldText": { "type": "string", "description": "Compatibility alias for old_string" },
+                            "newText": { "type": "string", "description": "Compatibility alias for new_string" }
                         },
-                        "required": ["old_string", "new_string"],
+                        "oneOf": [
+                            { "required": ["old_string", "new_string"] },
+                            { "required": ["oldText", "newText"] }
+                        ],
                         "additionalProperties": false
                     }
                 },
