@@ -4909,6 +4909,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "ironclaw_projects"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "base64 0.22.1",
+ "chrono",
+ "ironclaw_filesystem",
+ "ironclaw_host_api",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+ "ulid",
+]
+
+[[package]]
 name = "ironclaw_prompt_envelope"
 version = "0.1.0"
 dependencies = [
@@ -5029,6 +5046,7 @@ dependencies = [
  "ironclaw_product_context",
  "ironclaw_product_workflow",
  "ironclaw_product_workflow_storage",
+ "ironclaw_projects",
  "ironclaw_reborn",
  "ironclaw_reborn_composition",
  "ironclaw_reborn_config",
