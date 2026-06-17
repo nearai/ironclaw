@@ -72,6 +72,12 @@ pub const GLOB_CAPABILITY_ID: &str = "builtin.glob";
 pub const GREP_CAPABILITY_ID: &str = "builtin.grep";
 pub const APPLY_PATCH_CAPABILITY_ID: &str = "builtin.apply_patch";
 
+// `builtin.shell` is the only built-in first-party handler that directly
+// requires a RuntimeProcessPort. `builtin.spawn_subagent` declares
+// SpawnProcess as an authorization effect, but child-run scheduling is governed
+// by runtime-policy planning rather than this process-port capability list.
+const PROCESS_PORT_BACKED_BUILTIN_CAPABILITY_IDS: &[&str] = &[SHELL_CAPABILITY_ID];
+
 const MAX_FIRST_PARTY_INPUT_BYTES: usize = 1_048_576;
 const MAX_WRITE_FILE_INPUT_BYTES: usize = 6 * 1024 * 1024;
 const MAX_APPLY_PATCH_INPUT_BYTES: usize = 21 * 1024 * 1024;
@@ -182,13 +188,13 @@ pub fn builtin_first_party_package_for_process_backend(
     process_backend: ProcessBackendKind,
 ) -> Result<ExtensionPackage, ExtensionError> {
     let mut package = builtin_first_party_package()?;
-    if !first_party_process_capabilities_enabled(process_backend) {
-        remove_builtin_shell_capability(&mut package)?;
+    if !process_port_backed_builtins_enabled(process_backend) {
+        remove_process_port_backed_builtin_capabilities(&mut package)?;
     }
     Ok(package)
 }
 
-fn first_party_process_capabilities_enabled(process_backend: ProcessBackendKind) -> bool {
+fn process_port_backed_builtins_enabled(process_backend: ProcessBackendKind) -> bool {
     matches!(
         process_backend,
         ProcessBackendKind::Docker
@@ -200,32 +206,44 @@ fn first_party_process_capabilities_enabled(process_backend: ProcessBackendKind)
     )
 }
 
-fn remove_builtin_shell_capability(package: &mut ExtensionPackage) -> Result<(), ExtensionError> {
-    let shell_capability_id = CapabilityId::new(SHELL_CAPABILITY_ID)?;
+fn remove_process_port_backed_builtin_capabilities(
+    package: &mut ExtensionPackage,
+) -> Result<(), ExtensionError> {
+    for capability_id in PROCESS_PORT_BACKED_BUILTIN_CAPABILITY_IDS {
+        remove_builtin_capability(package, capability_id)?;
+    }
+    Ok(())
+}
+
+fn remove_builtin_capability(
+    package: &mut ExtensionPackage,
+    capability_id: &str,
+) -> Result<(), ExtensionError> {
+    let capability_id = CapabilityId::new(capability_id)?;
     let descriptor_present = package
         .capabilities
         .iter()
-        .any(|candidate| candidate.id == shell_capability_id);
+        .any(|candidate| candidate.id == capability_id);
     let manifest_present = package
         .manifest
         .capabilities
         .iter()
-        .any(|candidate| candidate.id == shell_capability_id);
+        .any(|candidate| candidate.id == capability_id);
     if !descriptor_present || !manifest_present {
         return Err(ExtensionError::InvalidManifest {
             reason: format!(
-                "built-in first-party package is missing process capability {SHELL_CAPABILITY_ID}"
+                "built-in first-party package is missing process-port-backed capability {capability_id}"
             ),
         });
     }
 
     package
         .capabilities
-        .retain(|candidate| candidate.id != shell_capability_id);
+        .retain(|candidate| candidate.id != capability_id);
     package
         .manifest
         .capabilities
-        .retain(|candidate| candidate.id != shell_capability_id);
+        .retain(|candidate| candidate.id != capability_id);
     Ok(())
 }
 
@@ -259,8 +277,8 @@ pub fn builtin_first_party_handlers_for_process_backend(
     process_backend: ProcessBackendKind,
 ) -> Result<FirstPartyCapabilityRegistry, HostApiError> {
     let mut registry = builtin_first_party_handlers(trigger_repository)?;
-    if !first_party_process_capabilities_enabled(process_backend) {
-        remove_builtin_shell_handler(&mut registry)?;
+    if !process_port_backed_builtins_enabled(process_backend) {
+        remove_process_port_backed_builtin_handlers(&mut registry)?;
     }
     Ok(registry)
 }
@@ -289,24 +307,34 @@ pub fn builtin_first_party_handlers_with_trigger_create_hook_for_process_backend
         trigger_repository,
         trigger_create_hook,
     )?;
-    if !first_party_process_capabilities_enabled(process_backend) {
-        remove_builtin_shell_handler(&mut registry)?;
+    if !process_port_backed_builtins_enabled(process_backend) {
+        remove_process_port_backed_builtin_handlers(&mut registry)?;
     }
     Ok(registry)
 }
 
-fn remove_builtin_shell_handler(
+fn remove_process_port_backed_builtin_handlers(
     registry: &mut FirstPartyCapabilityRegistry,
 ) -> Result<(), HostApiError> {
-    let shell_capability_id = CapabilityId::new(SHELL_CAPABILITY_ID)?;
-    if !registry.contains_handler(&shell_capability_id) {
+    for capability_id in PROCESS_PORT_BACKED_BUILTIN_CAPABILITY_IDS {
+        remove_builtin_handler(registry, capability_id)?;
+    }
+    Ok(())
+}
+
+fn remove_builtin_handler(
+    registry: &mut FirstPartyCapabilityRegistry,
+    capability_id: &str,
+) -> Result<(), HostApiError> {
+    let capability_id = CapabilityId::new(capability_id)?;
+    if !registry.contains_handler(&capability_id) {
         return Err(HostApiError::InvariantViolation {
             reason: format!(
-                "built-in first-party handlers are missing process capability {SHELL_CAPABILITY_ID}"
+                "built-in first-party handlers are missing process-port-backed capability {capability_id}"
             ),
         });
     }
-    registry.remove_handler(&shell_capability_id);
+    registry.remove_handler(&capability_id);
     Ok(())
 }
 

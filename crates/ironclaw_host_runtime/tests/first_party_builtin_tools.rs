@@ -163,7 +163,7 @@ async fn builtin_first_party_package_declares_expected_capabilities() {
 }
 
 #[tokio::test]
-async fn builtin_first_party_processless_package_and_handlers_omit_shell() {
+async fn builtin_first_party_processless_package_and_handlers_omit_process_port_backed_shell() {
     let package =
         builtin_first_party_package_for_process_backend(ProcessBackendKind::None).unwrap();
     let ids = package
@@ -172,6 +172,7 @@ async fn builtin_first_party_processless_package_and_handlers_omit_shell() {
         .map(|descriptor| descriptor.id.as_str())
         .collect::<Vec<_>>();
     assert!(!ids.contains(&SHELL_CAPABILITY_ID));
+    assert!(ids.contains(&SPAWN_SUBAGENT_CAPABILITY_ID));
     assert!(ids.contains(&ECHO_CAPABILITY_ID));
     assert!(
         !package
@@ -187,6 +188,7 @@ async fn builtin_first_party_processless_package_and_handlers_omit_shell() {
     )
     .unwrap();
     assert!(!handlers.contains_handler(&capability_id(SHELL_CAPABILITY_ID)));
+    assert!(handlers.contains_handler(&capability_id(SPAWN_SUBAGENT_CAPABILITY_ID)));
     assert!(handlers.contains_handler(&capability_id(ECHO_CAPABILITY_ID)));
 }
 
