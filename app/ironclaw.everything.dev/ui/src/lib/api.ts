@@ -15,8 +15,6 @@ function createRpcLink(runtimeConfig: { hostUrl: string; rpcBase: string }) {
     url: `${runtimeConfig.hostUrl}${runtimeConfig.rpcBase}`,
     interceptors: [
       onError((error: unknown) => {
-        console.error("oRPC API Error:", error);
-
         if (typeof window === "undefined") {
           return;
         }
@@ -24,6 +22,14 @@ function createRpcLink(runtimeConfig: { hostUrl: string; rpcBase: string }) {
         if (error && typeof error === "object") {
           const err = error as Record<string, unknown>;
           const message = err.message ? String(err.message).toLowerCase() : "";
+          const status = "status" in err ? Number(err.status) : 0;
+          const isIronclaw404 = (typeof err.f === "string" && err.f.includes("Ironclaw API error")) || message.includes("ironclaw api error");
+
+          if (isIronclaw404) {
+            return;
+          }
+
+          console.error("oRPC API Error:", error);
 
           if (
             message.includes("fetch") ||
@@ -39,7 +45,6 @@ function createRpcLink(runtimeConfig: { hostUrl: string; rpcBase: string }) {
             return;
           }
 
-          const status = "status" in err ? Number(err.status) : 0;
           if (
             status === 412 ||
             message.includes("precondition_failed") ||

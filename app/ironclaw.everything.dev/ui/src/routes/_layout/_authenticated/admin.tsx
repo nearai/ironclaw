@@ -3,7 +3,7 @@ import { createFileRoute, Outlet, redirect } from "@tanstack/react-router";
 export const Route = createFileRoute("/_layout/_authenticated/admin")({
   beforeLoad: async ({ context }) => {
     if (!context.auth.isAdmin) {
-      throw redirect({ to: "/home" });
+      throw redirect({ to: "/chat" });
     }
   },
   component: AdminLayout,

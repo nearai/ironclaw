@@ -3,6 +3,7 @@ import {
   Check,
   ChevronDown,
   Cloud,
+  Code2,
   Copy,
   ExternalLink,
   Key,
@@ -18,6 +19,7 @@ import { useRef, useState } from "react";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import { CommandCopy } from "@/components/ui/command-copy";
+import { getRepository } from "@/app";
 import { useConnectionMode } from "@/hooks/use-connection-mode";
 import { useIronclawStatus } from "@/hooks/use-ironclaw-status";
 
@@ -86,21 +88,7 @@ const steps: Array<{
             <strong className="text-foreground">Generate an API key</strong> in the &ldquo;API
             Keys&rdquo; section
           </li>
-          <li>
-            <strong className="text-foreground">Export your API key</strong>
-          </li>
         </ol>
-
-        <CommandCopy command='export NEARAI_API_KEY="your-key-here"' />
-
-        <p className="text-xs text-muted-foreground">
-          The{" "}
-          <code className="rounded bg-secondary px-1 py-0.5 font-mono text-xs">
-            scripts/bos-dev.sh --local
-          </code>{" "}
-          script in the next step will configure the model provider automatically (defaults to
-          DeepSeek V4 Flash via NEAR AI).
-        </p>
 
         <div className="rounded-md border border-border bg-muted/50 px-3.5 py-2.5 text-xs text-muted-foreground">
           Never share your API key publicly or commit it to version control.
@@ -137,11 +125,6 @@ const steps: Array<{
 1. Create your account at https://cloud.near.ai
 2. Claim $5 of free credits
 3. Generate an API key in the "API Keys" section
-4. Export your API key:
-
-\`\`\`bash
-export NEARAI_API_KEY="your-key-here"
-\`\`\`
 
 Setup guide: https://docs.near.ai/cloud/quickstart#setup`,
   },
@@ -149,42 +132,33 @@ Setup guide: https://docs.near.ai/cloud/quickstart#setup`,
     id: "setup",
     step: "1",
     icon: Terminal,
-    title: "Set Up IronClaw (Reborn)",
-    subtitle: "Build and run the reborn binary with the WebUI",
+    title: "Start Reborn with ngrok tunnel",
+    subtitle: "Expose a local binary via ngrok for the production dashboard",
     content: ({ onNext }) => (
       <div className="space-y-4">
         <div className="rounded-lg border border-border bg-muted px-3.5 py-3 text-sm text-muted-foreground">
-          <strong>ironclaw-reborn</strong> is the standalone binary with the WebChat v2 UI. Build
-          from source — pre-built releases are not yet available.
+          <strong>scripts/bos-dev.sh --tunnel</strong> starts ironclaw-reborn locally and exposes it
+          via ngrok. It prints the Tunnel URL and API Token to paste into Settings.
         </div>
 
         <div className="rounded-xl border-2 border-primary/30 bg-primary/5 px-5 py-4 space-y-3">
           <p className="text-sm font-bold text-foreground">Quick start (recommended)</p>
           <p className="text-sm text-muted-foreground">
-            The repo includes{" "}
-            <code className="rounded bg-secondary px-1 py-0.5 font-mono text-xs">
-              scripts/bos-dev.sh --local
-            </code>{" "}
-            which handles the entire setup (or{" "}
-            <code className="rounded bg-secondary px-1 py-0.5 font-mono text-xs">
-              scripts/bos-dev.sh work.efiz.near/ironclaw.everything.dev
-            </code>{" "}
-            to connect to a remote gateway):
+            Clone the repo, export your API key, and run the tunnel script:
           </p>
           <CommandCopy command="git clone https://github.com/NEARBuilders/ironclaw.git && cd ironclaw" />
           <CommandCopy command='export NEARAI_API_KEY="your-key-here"' />
-          <CommandCopy command="scripts/bos-dev.sh --local" />
+          <CommandCopy command="scripts/bos-dev.sh --tunnel" />
           <p className="text-sm text-muted-foreground">
-            Open{" "}
-            <a
-              href="http://localhost:3000"
-              target="_blank"
-              rel="noopener noreferrer"
+            Copy the <strong>Tunnel URL</strong> and <strong>API Token</strong> printed by the
+            script, then paste them into{" "}
+            <Link
+              to="/settings/ironclaw"
               className="text-primary underline underline-offset-4"
             >
-              http://localhost:3000
-            </a>{" "}
-            and log in with the printed token.
+              Settings → IronClaw
+            </Link>
+            .
           </p>
         </div>
 
@@ -196,26 +170,39 @@ Setup guide: https://docs.near.ai/cloud/quickstart#setup`,
             />
             Manual setup (expand)
           </summary>
-          <div className="mt-4 space-y-4">
-            <CommandCopy command="git clone https://github.com/NEARBuilders/ironclaw.git" />
-            <CommandCopy command="cd ironclaw" />
-            <CommandCopy command="cargo run -q -p ironclaw_reborn_cli --bin ironclaw-reborn -- --help" />
-            <p className="text-xs text-muted-foreground">
-              Or build separately:{" "}
-              <code className="rounded bg-secondary px-1 py-0.5 font-mono text-xs">
-                cargo build -p ironclaw_reborn_cli --bin ironclaw-reborn
-              </code>
+          <div className="mt-4 space-y-3">
+            <p className="text-sm text-muted-foreground">
+              Build from source or run without ngrok. The repo has full build instructions and CLI
+              reference.
             </p>
-            <CommandCopy command='export IRONCLAW_REBORN_WEBUI_TOKEN="$(openssl rand -hex 32)"' />
-            <CommandCopy command='export IRONCLAW_REBORN_WEBUI_USER_ID="reborn-cli"' />
-            <CommandCopy command="cargo run -q -p ironclaw_reborn_cli --features webui-v2-beta --bin ironclaw-reborn -- serve" />
+            <Button variant="outline" size="sm" asChild>
+              <a
+                href={getRepository() ?? "https://github.com/NEARBuilders/ironclaw"}
+                target="_blank"
+                rel="noopener noreferrer"
+              >
+                <Code2 size={14} />
+                View source on GitHub
+              </a>
+            </Button>
+            <p className="text-xs text-muted-foreground pt-2">
+              Key environment variables for manual runs:
+            </p>
+            <div className="space-y-1">
+              <code className="block rounded bg-secondary px-2 py-1 font-mono text-xs">
+                IRONCLAW_REBORN_WEBUI_TOKEN — bearer token for your binary
+              </code>
+              <code className="block rounded bg-secondary px-2 py-1 font-mono text-xs">
+                NEARAI_API_KEY — provider API key (or OPENAI_API_KEY / ANTHROPIC_API_KEY)
+              </code>
+            </div>
           </div>
         </details>
 
         <div className="flex flex-wrap items-center justify-between gap-2">
           <Button variant="outline" size="sm" asChild>
             <a
-              href="https://github.com/nearai/ironclaw/blob/main/docs/reborn-binary.md"
+              href={getRepository() ? `${getRepository()}/blob/main/docs/reborn-binary.md` : "https://github.com/nearai/ironclaw/blob/main/docs/reborn-binary.md"}
               target="_blank"
               rel="noopener noreferrer"
             >
@@ -230,15 +217,17 @@ Setup guide: https://docs.near.ai/cloud/quickstart#setup`,
         </div>
       </div>
     ),
-    markdown: `## Step 1: Set Up IronClaw (Reborn)
+    markdown: `## Step 1: Start Reborn with ngrok tunnel
 
 ### Quick start (recommended)
 
 \`\`\`bash
 git clone https://github.com/NEARBuilders/ironclaw.git && cd ironclaw
 export NEARAI_API_KEY="your-key-here"
-scripts/bos-dev.sh --local
+scripts/bos-dev.sh --tunnel
 \`\`\`
+
+Copy the printed Tunnel URL and API Token into Settings → IronClaw on the dashboard.
 
 Reborn binary docs: https://github.com/nearai/ironclaw/blob/main/docs/reborn-binary.md`,
   },
@@ -792,33 +781,50 @@ function IronclawPage() {
             </div>
 
             {connectionStatus !== "checking" && (
-              <div className="mt-4 flex items-center gap-3 rounded-lg border border-border bg-muted/50 px-3.5 py-2.5">
+              <div
+                className={`mt-4 flex items-center gap-3 rounded-lg border px-3.5 py-2.5 ${
+                  isConnected
+                    ? "border-[color:var(--near-green)]/30 bg-[color:var(--near-green)]/5"
+                    : "border-destructive/30 bg-destructive/5"
+                }`}
+              >
                 <div
                   className={`h-2 w-2 rounded-full shrink-0 ${
-                    isConnected
-                      ? "bg-[color:var(--near-green)]"
-                      : connectionStatus === "disconnected"
-                        ? "bg-destructive"
-                        : "bg-muted-foreground"
+                    isConnected ? "bg-[color:var(--near-green)]" : "bg-destructive"
                   }`}
                 />
                 <span className="text-xs text-muted-foreground flex-1">
                   {isConnected
                     ? `Connected via ${connectionMode === "hosted" ? "deployed" : "tunnel"}`
-                    : connectionStatus === "disconnected"
-                      ? "Connection lost — check your agent and try refreshing"
-                      : "Not connected — configure your connection below"}
+                    : "Agent not connected"}
                 </span>
-                <button
-                  type="button"
-                  onClick={() => {
-                    refetchStatus();
-                  }}
-                  className="flex items-center gap-1 text-xs text-muted-foreground hover:text-foreground transition-colors"
-                >
-                  <RefreshCw size={10} />
-                  Refresh
-                </button>
+                {isConnected ? (
+                  <button
+                    type="button"
+                    onClick={() => refetchStatus()}
+                    className="flex items-center gap-1 text-xs text-muted-foreground hover:text-foreground transition-colors"
+                  >
+                    <RefreshCw size={10} />
+                    Refresh
+                  </button>
+                ) : (
+                  <div className="flex items-center gap-2">
+                    <Link
+                      to="/settings/ironclaw"
+                      className="flex items-center gap-1 text-xs font-medium text-primary hover:text-primary/80 transition-colors"
+                    >
+                      Settings
+                    </Link>
+                    <button
+                      type="button"
+                      onClick={() => refetchStatus()}
+                      className="flex items-center gap-1 text-xs text-muted-foreground hover:text-foreground transition-colors"
+                    >
+                      <RefreshCw size={10} />
+                      Retry
+                    </button>
+                  </div>
+                )}
               </div>
             )}
           </div>
@@ -826,7 +832,9 @@ function IronclawPage() {
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
             <div
               onClick={scrollToLocalSetup}
-              className="rounded-xl border-2 border-primary/20 bg-card p-6 hover:border-primary/40 transition-colors text-left cursor-pointer"
+              className={`rounded-xl border-2 bg-card p-6 hover:border-primary/40 transition-colors text-left cursor-pointer ${
+                isConnected ? "border-[color:var(--near-green)]/30" : "border-primary/20"
+              }`}
             >
               <div className="flex items-center gap-3 mb-4">
                 <div className="flex h-10 w-10 items-center justify-center rounded-lg bg-primary/10">
@@ -838,8 +846,8 @@ function IronclawPage() {
                 </div>
               </div>
               <p className="text-sm text-muted-foreground mb-4">
-                Run ironclaw-reborn on your machine and expose it with ngrok or Cloudflare Tunnel.
-                Paste the tunnel URL into Settings — ideal for staging and sharing a live preview.
+                Run Reborn locally and expose it via ngrok. The script prints a Tunnel URL and
+                API Token to paste into Settings.
               </p>
               <Button
                 type="button"
@@ -848,13 +856,14 @@ function IronclawPage() {
                   scrollToLocalSetup();
                 }}
               >
-                Set up tunnel
+                {isConnected ? "Reconfigure" : "Set up tunnel"}
               </Button>
             </div>
 
             <div
-              onClick={() => window.location.href = "/settings/ironclaw"}
-              className="rounded-xl border-2 border-primary/20 bg-card p-6 hover:border-primary/40 transition-colors text-left cursor-pointer"
+              className={`rounded-xl border-2 bg-card p-6 text-left opacity-60 blur-[1px] pointer-events-none select-none ${
+                isConnected ? "border-[color:var(--near-green)]/30" : "border-primary/20"
+              }`}
             >
               <div className="flex items-center gap-3 mb-4">
                 <div className="flex h-10 w-10 items-center justify-center rounded-lg bg-primary/10">
@@ -862,20 +871,17 @@ function IronclawPage() {
                 </div>
                 <div>
                   <h3 className="text-base font-semibold text-foreground">Deploy Your Own</h3>
-                  <p className="text-xs text-muted-foreground">Docker, Railway, or VPS</p>
+                  <p className="text-xs text-muted-foreground">agent.near.ai · TEE deployment</p>
                 </div>
               </div>
               <p className="text-sm text-muted-foreground mb-4">
-                Deploy IronClaw on a server, generate an API token, and connect via Settings. Share
-                API keys with your team — each user gets their own dashboard.
+                Configure a hosted agent at agent.near.ai, deploy to a Trusted Execution
+                Environment, generate an API token, and connect via Settings. Share API keys with
+                your team — each user gets their own dashboard.
               </p>
-              <Link
-                to="/settings/ironclaw"
-                onClick={(e) => e.stopPropagation()}
-                className="inline-flex h-9 items-center justify-center rounded-lg bg-primary px-4 text-sm font-bold text-primary-foreground hover:opacity-90 transition-opacity"
-              >
-                Connect via Settings
-              </Link>
+              <span className="inline-flex h-9 items-center justify-center rounded-lg bg-primary px-4 text-sm font-bold text-primary-foreground">
+                Deploy Agent
+              </span>
             </div>
           </div>
 

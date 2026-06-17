@@ -67,8 +67,9 @@ export function useIronclawStatus(): {
           attachmentCapabilities: apiSession?.capabilities?.attachments ?? null,
         };
       } catch (err: any) {
+        const isIronclaw404 = (typeof err?.f === "string" && err.f.includes("Ironclaw API error")) || (err?.message && String(err.message).includes("Ironclaw API error"));
         const isNotConfigured =
-          err?.code === "PRECONDITION_FAILED" || err?.message?.includes("No IronClaw connection configured");
+          err?.code === "PRECONDITION_FAILED" || err?.message?.includes("No IronClaw connection configured") || isIronclaw404;
         if (isNotConfigured) {
           clearWasConnected();
           return { connected: false, session: null, attachmentCapabilities: null };
@@ -111,6 +112,21 @@ export function useIronclawStatus(): {
   const prevStatus = useRef<IronclawConnectionStatus>(status);
   useEffect(() => {
     if (prevStatus.current === "checking" && status === "disconnected") {
+      prevStatus.current = status;
+      return;
+    }
+    if (prevStatus.current === "checking" && status === "never-connected") {
+      if (!isToastShown()) {
+        markToastShown();
+        toast("IronClaw agent not connected", {
+          description: "Set up a connection in Settings to get started.",
+          action: {
+            label: "Settings",
+            onClick: () => window.location.href = "/settings/ironclaw",
+          },
+          duration: 8000,
+        });
+      }
       prevStatus.current = status;
       return;
     }

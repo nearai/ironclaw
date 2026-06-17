@@ -1,11 +1,9 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link, useNavigate, useRouter } from "@tanstack/react-router";
-import { Check, Cloud, Shuffle, Terminal } from "lucide-react";
-import { toast } from "sonner";
-import { useMemo } from "react";
+
 import type { Organization } from "@/app";
-import { ironclawStatusQueryKey } from "@/hooks/use-ironclaw-status";
-import { sessionQueryOptions, useApiClient, useAuthClient } from "@/app";
+
+import { sessionQueryOptions, useAuthClient } from "@/app";
 import { OrgSwitcher } from "@/components";
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
 import {
@@ -16,7 +14,6 @@ import {
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
-import { useConnectionMode } from "@/hooks/use-connection-mode";
 
 export function UserNav() {
   const auth = useAuthClient();
@@ -36,10 +33,6 @@ export function UserNav() {
   });
   const activeOrgId = session?.session?.activeOrganizationId;
 
-  const activeOrg = useMemo(() => {
-    return organizations?.find((org) => org.id === activeOrgId);
-  }, [organizations, activeOrgId]);
-
   const nearAccountId = auth.near.getAccountId();
 
   const { data: nearProfile } = useQuery({
@@ -57,23 +50,6 @@ export function UserNav() {
     (nearProfile?.image?.ipfs_cid
       ? `https://ipfs.near.social/ipfs/${nearProfile.image.ipfs_cid}`
       : null);
-
-  const { connectionMode, switchMode } = useConnectionMode();
-  const apiClient = useApiClient();
-
-  const disconnectTunnelMutation = useMutation({
-    mutationFn: async () => {
-      await apiClient.ironclaw.settings.delete();
-    },
-    onSuccess: () => {
-      switchMode("hosted");
-      queryClient.invalidateQueries({ queryKey: ironclawStatusQueryKey });
-      toast.success("Tunnel disconnected");
-    },
-    onError: (err: any) => {
-      toast.error(err.message ?? "Failed to disconnect");
-    },
-  });
 
   const signOutMutation = useMutation({
     mutationFn: async () => {
@@ -157,61 +133,6 @@ export function UserNav() {
           <DropdownMenuSeparator />
           <DropdownMenuItem asChild>
             <Link to="/home">workspace</Link>
-          </DropdownMenuItem>
-          {activeOrg && (
-            <DropdownMenuItem asChild>
-              <Link to="/organizations/$slug" params={{ slug: activeOrg.slug }}>
-                {activeOrg.name}
-              </Link>
-            </DropdownMenuItem>
-          )}
-          <DropdownMenuSeparator />
-          <DropdownMenuLabel className="text-xs text-muted-foreground">
-            connection
-          </DropdownMenuLabel>
-          <DropdownMenuItem
-            onClick={() => switchMode("auto")}
-            className="gap-2 text-xs cursor-pointer"
-          >
-            <div className="flex h-4 w-4 items-center justify-center">
-              {connectionMode === "auto" && (
-                <Check size={12} className="text-[color:var(--near-green)]" />
-              )}
-            </div>
-            <Shuffle size={12} className="shrink-0" />
-            Auto (prefer tunnel)
-          </DropdownMenuItem>
-          <DropdownMenuItem
-            onClick={() => switchMode("hosted")}
-            className="gap-2 text-xs cursor-pointer"
-          >
-            <div className="flex h-4 w-4 items-center justify-center">
-              {connectionMode === "hosted" && (
-                <Check size={12} className="text-[color:var(--near-green)]" />
-              )}
-            </div>
-            <Cloud size={12} className="shrink-0" />
-            Hosted
-          </DropdownMenuItem>
-          <DropdownMenuItem
-            onClick={() => switchMode("local")}
-            className="gap-2 text-xs cursor-pointer"
-          >
-            <div className="flex h-4 w-4 items-center justify-center">
-              {connectionMode === "local" && (
-                <Check size={12} className="text-[color:var(--near-green)]" />
-              )}
-            </div>
-            <Terminal size={12} className="shrink-0" />
-            Tunnel
-          </DropdownMenuItem>
-          <DropdownMenuItem
-            onClick={() => disconnectTunnelMutation.mutate()}
-            disabled={disconnectTunnelMutation.isPending}
-            className="gap-2 text-xs cursor-pointer text-destructive focus:text-destructive"
-          >
-            <Terminal size={12} className="shrink-0" />
-            {disconnectTunnelMutation.isPending ? "Disconnecting..." : "Clear connection"}
           </DropdownMenuItem>
           <DropdownMenuItem asChild>
             <Link to="/settings">settings</Link>

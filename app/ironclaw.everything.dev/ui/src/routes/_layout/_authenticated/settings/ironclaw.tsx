@@ -112,7 +112,7 @@ function IronclawSettings() {
       <div className="space-y-1">
         <h2 className="text-lg font-semibold text-foreground">IronClaw Connection</h2>
         <p className="text-sm text-muted-foreground">
-          Configure how this dashboard connects to your ironclaw agent.
+          Connect to a tunneled or deployed IronClaw agent.
         </p>
       </div>
 
@@ -155,15 +155,12 @@ function IronclawSettings() {
               <Cloud size={14} className="text-muted-foreground" />
             </div>
             <div>
-              <p className="text-sm font-semibold text-foreground">Hosted Agent Mode</p>
+              <p className="text-sm font-semibold text-foreground">Hosted Agent</p>
               <p className="mt-1 text-sm text-muted-foreground">
-                You are connected through the shared hosted agent. No local binary configuration
-                needed. API keys are managed from the{" "}
+                Using the shared hosted agent. Manage API keys from{" "}
                 <Link to="/settings/api-keys" className="text-primary underline underline-offset-2">
-                  API keys settings
-                </Link>{" "}
-                page — create a new key or revoke an existing one. After generating a key, the agent
-                will reconnect automatically.
+                  Settings → API Keys
+                </Link>.
               </p>
             </div>
           </div>
@@ -220,9 +217,8 @@ function IronclawSettings() {
                 placeholder="https://your-tunnel.ngrok.io"
                 required
               />
-              <p className="text-xs text-muted-foreground">
-                Public URL pointing to your ironclaw reborn binary (e.g. via ngrok, Cloudflare
-                Tunnel). Must expose the WebChat v2 API.
+              <p className="text-xs font-medium text-muted-foreground">
+                The Tunnel URL printed by <code className="rounded bg-secondary px-1 py-0.5 font-mono text-xs">scripts/bos-dev.sh --tunnel</code> (e.g. https://xxx.ngrok.io).
               </p>
             </div>
 
@@ -237,21 +233,21 @@ function IronclawSettings() {
                 value={apiToken}
                 onChange={(e) => setApiToken(e.target.value)}
                 placeholder={
-                  tokenConfigured ? "Token is configured" : "The bearer token your binary expects"
+                  tokenConfigured ? "Token is configured" : "Token printed by the setup script"
                 }
                 required={!tokenConfigured}
               />
-              <p className="text-xs text-muted-foreground">
+              <p className="text-xs font-medium text-muted-foreground">
                 {tokenConfigured
-                  ? "Token is already configured. Leave empty to keep the existing token."
-                  : "Must match the bearer token configured on your Reborn binary."}
+                  ? "Token is configured. Leave empty to keep it."
+                  : "The API Token printed by the setup script."}
               </p>
             </div>
           </Card>
 
           <div className="flex items-center justify-between gap-4">
             {!hasSettings && (
-              <p className="text-xs text-muted-foreground">
+              <p className="text-xs font-medium text-muted-foreground">
                 No settings configured yet. Add your tunnel URL and API token to connect.
               </p>
             )}
@@ -296,26 +292,12 @@ function IronclawSettings() {
 
       <div className="rounded-lg border border-border bg-muted/50 px-4 py-3 space-y-1.5">
         <p className="text-xs font-medium text-foreground">How to set up a tunnel</p>
-        <p className="text-xs text-muted-foreground">
-          Run <code className="rounded bg-secondary px-1 py-0.5 font-mono text-xs">./scripts/bos-dev.sh --tunnel</code> from the repo root to start Reborn
-          locally with an ngrok tunnel. It prints the Tunnel URL and API Token above.
-        </p>
-        <div className="space-y-0.5 mt-1">
-          <p className="text-xs text-muted-foreground">
-            <code className="rounded bg-secondary px-1 py-0.5 font-mono text-xs">./scripts/bos-dev.sh --local</code> starts the everything-dev stack
-            on localhost (no tunnel needed).
-          </p>
-        </div>
-        <p className="text-xs text-muted-foreground mt-1">
-          Alternatively, run your binary directly with{" "}
+        <p className="text-xs font-medium text-muted-foreground">
+          From the repo root, run{" "}
           <code className="rounded bg-secondary px-1 py-0.5 font-mono text-xs">
-            ngrok http http://localhost:3001
-          </code>{" "}
-          and set{" "}
-          <code className="rounded bg-secondary px-1 py-0.5 font-mono text-xs">
-            IRONCLAW_REBORN_WEBUI_TOKEN
-          </code>{" "}
-          to match the API Token above.
+            ./scripts/bos-dev.sh --tunnel
+          </code>
+          {" "}— it prints the Tunnel URL and API Token. Paste them above.
         </p>
       </div>
     </div>

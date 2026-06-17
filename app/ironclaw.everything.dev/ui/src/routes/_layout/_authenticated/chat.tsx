@@ -202,7 +202,7 @@ function ChatAreaCore({
 
       <ChatMessageList
         streamLoading={isBusy}
-        empty={initialMessages.length === 0 && !isBusy}
+        empty={chat.messages.filter((m: any) => m.parts.length > 0).length === 0 && !isBusy}
         emptyMessage={
           threadMetaError ? "Failed to load thread" : "No messages yet. Send a message to start."
         }
