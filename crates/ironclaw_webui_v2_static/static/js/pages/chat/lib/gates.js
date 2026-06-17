@@ -15,6 +15,7 @@ export function gateFromEvent(eventType, prompt) {
       kind: "gate",
       runId: prompt.turn_run_id,
       gateRef: prompt.gate_ref,
+      invocationId: prompt.invocation_id || null,
       headline: prompt.headline,
       body: prompt.body,
       allowAlways: prompt.allow_always === true,

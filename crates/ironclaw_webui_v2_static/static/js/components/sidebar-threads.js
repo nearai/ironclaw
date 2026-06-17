@@ -30,7 +30,10 @@ const STATE_PRESENTATION = Object.freeze({
     label: "Needs your attention",
     textClass: "text-[var(--v2-warning-text)]",
     dotClass: "bg-[var(--v2-warning-text)]",
-    borderClass: "border-[var(--v2-warning-text)]",
+    // The colored dot + label badge already signals attention; the solid
+    // left border felt visually heavy, so this state carries no border
+    // accent. The reserved border-l-2 width stays transparent.
+    borderClass: "border-transparent",
   },
   [THREAD_STATE.RUNNING]: {
     label: "Running",

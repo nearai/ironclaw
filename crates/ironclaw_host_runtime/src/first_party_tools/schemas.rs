@@ -243,10 +243,30 @@ pub(crate) fn resolve_builtin_input_schema_ref(reference: &str) -> Option<Value>
             "required": ["display_handle"],
             "additionalProperties": false
         }),
+        "schemas/builtin/profile_set.input.v1.json" => json!({
+            "type": "object",
+            "properties": {
+                "timezone": {
+                    "type": "string",
+                    "description": "IANA timezone name, e.g. America/Los_Angeles or Asia/Tokyo"
+                },
+                "locale": {
+                    "type": "string",
+                    "description": "BCP-47 locale tag, e.g. en-US or ja-JP",
+                    "maxLength": 35
+                },
+                "location": {
+                    "type": "string",
+                    "description": "Free-text location label, e.g. Tokyo, Japan"
+                }
+            },
+            "minProperties": 1,
+            "additionalProperties": false
+        }),
         "schemas/builtin/read_file.input.v1.json" => json!({
             "type": "object",
             "properties": {
-                "path": { "type": "string", "description": "Scoped path to read" },
+                "path": { "type": "string", "description": "Scoped path to read. Supported document files such as PDFs are returned as extracted text." },
                 "offset": { "type": "integer", "minimum": 0, "description": "1-based starting line; 0 starts at the beginning" },
                 "limit": { "type": "integer", "minimum": 0, "description": "Maximum lines to return" }
             },
@@ -308,11 +328,88 @@ pub(crate) fn resolve_builtin_input_schema_ref(reference: &str) -> Option<Value>
             "type": "object",
             "properties": {
                 "path": { "type": "string", "description": "Scoped file path to patch" },
-                "old_string": { "type": "string", "description": "Exact text to replace" },
-                "new_string": { "type": "string", "description": "Replacement text" },
-                "replace_all": { "type": "boolean", "description": "Replace every match instead of exactly one" }
+                "old_string": {
+                    "type": ["string", "null"],
+                    "description": "Text to replace for a single targeted edit. Exact matches are preferred; fuzzy Unicode and trailing-whitespace normalization is used when exact text is not present."
+                },
+                "new_string": { "type": ["string", "null"], "description": "Replacement text for a single targeted edit" },
+                "edits": {
+                    "description": "One or more targeted replacements matched against the original file. Prefer this for multiple disjoint edits.",
+                    "oneOf": [
+                        {
+                            "type": "array",
+                            "minItems": 1,
+                            "maxItems": 256,
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "old_string": { "type": "string", "description": "Text to replace" },
+                                    "new_string": { "type": "string", "description": "Replacement text" }
+                                },
+                                "required": ["old_string", "new_string"],
+                                "additionalProperties": false
+                            }
+                        },
+                        { "type": "null" },
+                        { "const": "null" }
+                    ]
+                },
+                "replace_all": { "type": "boolean", "description": "Replace every match instead of exactly one. Only valid with a single targeted edit." }
             },
-            "required": ["path", "old_string", "new_string"],
+            "required": ["path"],
+            "oneOf": [
+                {
+                    "properties": {
+                        "old_string": {
+                            "type": "string",
+                            "not": { "const": "null" }
+                        },
+                        "new_string": {
+                            "type": "string",
+                            "not": { "const": "null" }
+                        }
+                    },
+                    "required": ["old_string", "new_string"],
+                    "not": {
+                        "properties": {
+                            "edits": { "type": "array" }
+                        },
+                        "required": ["edits"]
+                    }
+                },
+                {
+                    "properties": {
+                        "edits": { "type": "array" },
+                        "old_string": { "enum": ["null", null] },
+                        "new_string": { "enum": ["null", null] }
+                    },
+                    "required": ["edits"]
+                }
+            ],
+            "allOf": [
+                {
+                    "if": {
+                        "properties": {
+                            "replace_all": { "const": true }
+                        },
+                        "required": ["replace_all"]
+                    },
+                    "then": {
+                        "properties": {
+                            "edits": {
+                                "oneOf": [
+                                    {
+                                        "type": "array",
+                                        "maxItems": 1
+                                    },
+                                    { "type": "null" },
+                                    { "const": "null" }
+                                ]
+                            }
+                        }
+                    }
+                }
+            ],
             "additionalProperties": false
         }),
         "schemas/builtin/extension_search.input.v1.json" => json!({

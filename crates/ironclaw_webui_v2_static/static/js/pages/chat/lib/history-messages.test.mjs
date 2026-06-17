@@ -173,6 +173,56 @@ test("messagesFromTimeline: finalized assistant records are marked as final repl
   assert.equal(messages[1].isFinalReply, false);
 });
 
+test("messagesFromTimeline: tool previews use timeline sequence as activity order", () => {
+  const messages = messagesFromTimeline([
+    {
+      message_id: "tool-preview-1",
+      kind: "capability_display_preview",
+      sequence: 2,
+      status: "finalized",
+      turn_run_id: "run-tools",
+      content: JSON.stringify({
+        version: 1,
+        invocation_id: "invocation-extension-a",
+        capability_id: "builtin.extension_search",
+        status: "completed",
+        title: "extension_search",
+        activity_order: 10,
+      }),
+    },
+    {
+      message_id: "tool-preview-2",
+      kind: "capability_display_preview",
+      sequence: 3,
+      status: "finalized",
+      turn_run_id: "run-tools",
+      content: JSON.stringify({
+        version: 1,
+        invocation_id: "invocation-extension-b",
+        capability_id: "builtin.extension_search",
+        status: "completed",
+        title: "extension_search",
+        activity_order: 11,
+      }),
+    },
+  ]);
+
+  assert.deepEqual(
+    messages.map((message) => [
+      message.id,
+      message.toolName,
+      message.toolStatus,
+      message.sequence,
+      message.activityOrder,
+      message.activityOrderSource,
+    ]),
+    [
+      ["tool-invocation-extension-a", "extension_search", "success", 2, 10, "projection"],
+      ["tool-invocation-extension-b", "extension_search", "success", 3, 11, "projection"],
+    ],
+  );
+});
+
 // Refresh-persistence contract (#3272): the timeline returns
 // `ThreadMessageRecord.attachments`; the projection must surface them as
 // render cards so they survive a reload / thread switch.

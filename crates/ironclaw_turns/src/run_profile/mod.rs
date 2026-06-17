@@ -115,7 +115,7 @@ pub use resolver::{
 pub use runtime_context::{
     CommunicationContextFetch, CommunicationContextProvider, CommunicationRuntimeContext,
     ConnectedChannelSummary, ConnectedChannelsState, DeliveryTargetState, DeliveryTargetSummary,
-    LoopRuntimeContext,
+    Locale, LocaleError, LoopRuntimeContext, UserProfileContext,
 };
 pub use skill_context::{
     InstalledSkillSnapshot, NoopSkillContextSource, SkillActivationState, SkillContextBudget,

@@ -3994,6 +3994,7 @@ dependencies = [
  "iana-time-zone",
  "insta",
  "ironclaw_approvals",
+ "ironclaw_auth",
  "ironclaw_authorization",
  "ironclaw_common",
  "ironclaw_embeddings",
@@ -4431,6 +4432,7 @@ dependencies = [
  "futures-util",
  "glob",
  "ironclaw_auth",
+ "ironclaw_extractors",
  "ironclaw_filesystem",
  "ironclaw_host_api",
  "ironclaw_safety",
@@ -4442,6 +4444,7 @@ dependencies = [
  "thiserror 2.0.18",
  "tokio",
  "tracing",
+ "unicode-normalization",
 ]
 
 [[package]]
@@ -4606,6 +4609,7 @@ dependencies = [
  "tokio",
  "tokio-postgres",
  "tracing",
+ "tracing-subscriber",
  "url",
  "uuid",
  "wat",
@@ -4956,6 +4960,7 @@ dependencies = [
  "tokio",
  "tokio-util",
  "tracing",
+ "tracing-subscriber",
  "tracing-test",
  "wat",
 ]

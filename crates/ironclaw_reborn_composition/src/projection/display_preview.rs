@@ -1,4 +1,7 @@
-use std::{collections::HashMap, sync::Mutex};
+use std::{
+    collections::HashMap,
+    sync::{Mutex, MutexGuard},
+};
 
 use async_trait::async_trait;
 use ironclaw_event_projections::{CapabilityActivityProjection, CapabilityActivityStatus};
@@ -111,6 +114,39 @@ pub(crate) struct CapabilityDisplayPreviewResult<'a> {
 }
 
 impl CapabilityDisplayPreviewStore {
+    fn lock_pending_inputs(&self) -> MutexGuard<'_, CapabilityDisplayPendingInputs> {
+        self.pending.lock().unwrap_or_else(|poisoned| {
+            tracing::warn!(
+                "capability display preview pending input store was poisoned; recovering"
+            );
+            poisoned.into_inner()
+        })
+    }
+
+    fn lock_completed_previews(&self) -> MutexGuard<'_, CapabilityDisplayCompletedPreviews> {
+        self.completed.lock().unwrap_or_else(|poisoned| {
+            tracing::warn!(
+                "capability display preview completed preview store was poisoned; recovering"
+            );
+            poisoned.into_inner()
+        })
+    }
+
+    fn has_pending_input_for_activity(&self, activity: &CapabilityActivityProjection) -> bool {
+        let Some(run_id) = activity.run_id else {
+            return false;
+        };
+        let pending = self.lock_pending_inputs();
+        pending
+            .refs_by_run
+            .get(&run_id.to_string())
+            .is_some_and(|input_refs| {
+                input_refs
+                    .iter()
+                    .any(|input_ref| pending.by_ref.contains_key(input_ref))
+            })
+    }
+
     pub(crate) fn record_input(
         &self,
         run_id: &str,
@@ -118,6 +154,7 @@ impl CapabilityDisplayPreviewStore {
         tool_name: &str,
         arguments: &serde_json::Value,
     ) {
+        let mut pending = self.lock_pending_inputs();
         let input_summary = input_summary(tool_name, arguments);
         let input = CapabilityDisplayInputPreview {
             title: bounded_display_text(tool_name, CAPABILITY_DISPLAY_SUMMARY_MAX_BYTES).text,
@@ -127,15 +164,13 @@ impl CapabilityDisplayPreviewStore {
                 .is_some_and(|summary| summary.truncated),
             input_summary: input_summary.map(|summary| summary.text),
         };
-        if let Ok(mut pending) = self.pending.lock() {
-            let input_ref = input_ref.as_str().to_string();
-            pending.by_ref.insert(input_ref.clone(), input);
-            pending
-                .refs_by_run
-                .entry(run_id.to_string())
-                .or_default()
-                .push(input_ref);
-        }
+        let input_ref = input_ref.as_str().to_string();
+        pending.by_ref.insert(input_ref.clone(), input);
+        pending
+            .refs_by_run
+            .entry(run_id.to_string())
+            .or_default()
+            .push(input_ref);
     }
 
     #[cfg(test)]
@@ -149,10 +184,9 @@ impl CapabilityDisplayPreviewStore {
         display_preview: Option<&CapabilityDisplayOutputPreview>,
     ) {
         let input = self
-            .pending
-            .lock()
-            .ok()
-            .and_then(|mut pending| pending.by_ref.remove(result.input_ref.as_str()));
+            .lock_pending_inputs()
+            .by_ref
+            .remove(result.input_ref.as_str());
         let title = input
             .as_ref()
             .map(|input| input.title.clone())
@@ -174,30 +208,29 @@ impl CapabilityDisplayPreviewStore {
             result_ref: Some(result.result_ref.to_string()),
             truncated: input.as_ref().is_some_and(|input| input.truncated) || output.truncated,
         };
-        if let Ok(mut completed) = self.completed.lock() {
-            let invocation_id = result.invocation_id.to_string();
-            completed
-                .by_invocation
-                .insert(invocation_id.clone(), record);
-            completed
-                .invocations_by_run
-                .entry(result.run_id.to_string())
-                .or_default()
-                .push(invocation_id);
-        }
+        let mut completed = self.lock_completed_previews();
+        let invocation_id = result.invocation_id.to_string();
+        completed
+            .by_invocation
+            .insert(invocation_id.clone(), record);
+        completed
+            .invocations_by_run
+            .entry(result.run_id.to_string())
+            .or_default()
+            .push(invocation_id);
     }
 
     pub(crate) fn prune_run(&self, run_id: &str) {
-        if let Ok(mut pending) = self.pending.lock()
-            && let Some(input_refs) = pending.refs_by_run.remove(run_id)
-        {
+        let mut pending = self.lock_pending_inputs();
+        if let Some(input_refs) = pending.refs_by_run.remove(run_id) {
             for input_ref in input_refs {
                 pending.by_ref.remove(&input_ref);
             }
         }
-        if let Ok(mut completed) = self.completed.lock()
-            && let Some(invocation_ids) = completed.invocations_by_run.remove(run_id)
-        {
+        drop(pending);
+
+        let mut completed = self.lock_completed_previews();
+        if let Some(invocation_ids) = completed.invocations_by_run.remove(run_id) {
             for invocation_id in invocation_ids {
                 completed.by_invocation.remove(&invocation_id);
             }
@@ -208,12 +241,10 @@ impl CapabilityDisplayPreviewStore {
         &self,
         invocation_id: InvocationId,
     ) -> Option<CapabilityDisplayPreviewRecord> {
-        self.completed.lock().ok().and_then(|completed| {
-            completed
-                .by_invocation
-                .get(&invocation_id.to_string())
-                .cloned()
-        })
+        self.lock_completed_previews()
+            .by_invocation
+            .get(&invocation_id.to_string())
+            .cloned()
     }
 
     pub(crate) fn attach_timeline_message_id(
@@ -221,9 +252,8 @@ impl CapabilityDisplayPreviewStore {
         invocation_id: InvocationId,
         timeline_message_id: ThreadMessageId,
     ) {
-        if let Ok(mut completed) = self.completed.lock()
-            && let Some(record) = completed.by_invocation.get_mut(&invocation_id.to_string())
-        {
+        let mut completed = self.lock_completed_previews();
+        if let Some(record) = completed.by_invocation.get_mut(&invocation_id.to_string()) {
             record.timeline_message_id = Some(timeline_message_id);
         }
     }
@@ -266,7 +296,9 @@ fn capability_display_preview_resolution_from_store(
             CapabilityActivityStatus::Failed | CapabilityActivityStatus::Killed
         ) {
             failed_capability_display_preview(activity)
-        } else if completed_preview_may_still_arrive(activity) {
+        } else if store.has_pending_input_for_activity(activity)
+            && completed_preview_may_still_arrive(activity)
+        {
             Ok(CapabilityDisplayPreviewResolution::Pending)
         } else {
             Ok(CapabilityDisplayPreviewResolution::NotApplicable)
@@ -291,6 +323,7 @@ fn capability_display_preview_resolution_from_store(
         result_ref: record.result_ref,
         truncated: record.truncated,
         updated_at: activity.updated_at,
+        activity_order: Some(activity.activity_order_cursor().as_u64()),
     })
     .map(Box::new)
     .map(CapabilityDisplayPreviewResolution::Ready)
@@ -330,6 +363,7 @@ fn failed_capability_display_preview(
         result_ref: None,
         truncated: false,
         updated_at: activity.updated_at,
+        activity_order: Some(activity.activity_order_cursor().as_u64()),
     })
     .map(Box::new)
     .map(CapabilityDisplayPreviewResolution::Ready)
@@ -855,4 +889,39 @@ fn truncate_bytes(text: &str, max_bytes: usize) -> CapabilityDisplayText {
 
 pub(crate) fn sanitize_text(text: &str) -> String {
     safety_sanitize_text(text)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::panic::{AssertUnwindSafe, catch_unwind};
+
+    use serde_json::json;
+
+    use super::*;
+
+    #[test]
+    fn record_input_recovers_from_poisoned_pending_input_lock() {
+        let store = CapabilityDisplayPreviewStore::default();
+        let poison_result = catch_unwind(AssertUnwindSafe(|| {
+            let _guard = store.pending.lock().expect("pending input lock");
+            panic!("poison pending input lock");
+        }));
+        assert!(poison_result.is_err());
+
+        let input_ref = CapabilityInputRef::new("input:poisoned-preview").expect("input ref");
+        store.record_input(
+            "run-poisoned-preview",
+            &input_ref,
+            "shell",
+            &json!({ "command": "echo hi" }),
+        );
+
+        let pending = store.lock_pending_inputs();
+        let input = pending
+            .by_ref
+            .get(input_ref.as_str())
+            .expect("input preview should be recorded after poisoned lock recovery");
+        assert_eq!(input.title, "shell");
+        assert_eq!(input.input_summary.as_deref(), Some("command: echo hi"));
+    }
 }

@@ -712,6 +712,7 @@ registerPack("es", {
   "automations.summary.activeDetail": "Horarios habilitados esperando su próxima ejecución.",
   "automations.summary.paused": "En pausa",
   "automations.summary.pausedDetail": "Actualmente no se espera que se ejecuten los horarios.",
+  "automations.summary.filterAction": "Mostrar {label}",
   "automations.summary.nextRun": "Próxima ejecución",
   "automations.summary.none": "Ninguno",
   "automations.summary.nextRunDetail": "Ejecución programada más próxima en esta lista.",
@@ -719,11 +720,31 @@ registerPack("es", {
   "automations.empty.matchingDescription": "Pruebe con un filtro de estado diferente.",
   "automations.empty.noneTitle": "Aún no hay automatizaciones programadas.",
   "automations.empty.noneDescription": "Este agente no tiene trabajo programado para mostrar.",
+  "automations.empty.onboardingTitle": "Aún no hay automatizaciones",
+  "automations.empty.onboardingDescription":
+    "Las automatizaciones se crean conversando con tu agente; no hay ningún formulario que rellenar. Pídele que haga algo según un horario y configurará una automatización recurrente por ti.",
+  "automations.empty.examplesTitle": "Prueba a pedirle a tu agente",
+  "automations.empty.example1":
+    "Revisa el repositorio nearai/ironclaw cada 10 minutos y resume los nuevos issues, PRs y commits.",
+  "automations.empty.example2":
+    "Cada día laborable a las 9:00, envíame un resumen de mi correo sin leer.",
+  "automations.empty.example3":
+    "Recuérdame revisar las pull requests abiertas cada tarde a las 15:00.",
+  "automations.empty.startInChat": "Empezar en el chat",
+  "automations.empty.copyPrompt": "Copiar prompt",
+  "automations.empty.copied": "Copiado",
+  "automations.refreshing": "Actualizando…",
   "automations.table.name": "Nombre",
   "automations.table.schedule": "Programación",
   "automations.table.nextRun": "Próxima ejecución",
   "automations.table.lastRun": "Última ejecución",
   "automations.table.status": "Estado",
+  "automations.runs.total": "Ejecuciones recientes: {count}",
+  "automations.runs.ok": "OK: {count}",
+  "automations.runs.error": "Con error: {count}",
+  "automations.runs.running": "En ejecución: {count}",
+  "automations.runs.unknown": "Desconocido: {count}",
+  "automations.runs.showingOf": "Mostrando {shown} de {total} ejecuciones recientes",
 
   // Routines page
   "routines.explorer": "Tareas",

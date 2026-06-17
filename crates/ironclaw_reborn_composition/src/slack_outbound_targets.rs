@@ -798,6 +798,100 @@ fn take_product_binding_segment<'a>(raw: &'a str, name: &str) -> Option<(&'a str
     Some((value, raw))
 }
 
+/// Decoded fields from a Slack reply-target binding ref segment walk.
+///
+/// Produced by [`decode_slack_reply_target_binding_ref`]; consumed by both
+/// [`slack_conversation_id_from_reply_target_binding_ref`] and
+/// [`slack_reply_target_is_personal_dm`] so that the segment format is
+/// parsed in exactly one place.
+struct DecodedSlackReplyTarget {
+    conversation_id: String,
+    space_id: Option<String>,
+    /// `true` iff a `topic` segment was successfully consumed after
+    /// `conversation` — required for the personal-DM predicate to mirror
+    /// the original behaviour, which demanded `topic` be present.
+    topic_present: bool,
+    /// Present only when the ref carries trailing `actor_kind` + `actor`
+    /// segments (personal-DM refs).
+    actor_kind: Option<String>,
+    /// Present only when the ref carries a non-empty `actor` segment value.
+    actor_id: Option<String>,
+    /// `true` iff the segment walk consumed the entire ref with no leftover
+    /// bytes — required for the personal-DM predicate to reject trailing
+    /// garbage.
+    fully_consumed: bool,
+}
+
+/// Walk the length-prefixed segment format shared by both
+/// [`slack_shared_channel_reply_target_binding_ref`] and
+/// [`slack_personal_dm_reply_target_binding_ref`] and return the decoded
+/// fields.
+///
+/// Returns `None` if the ref does not start with `reply:`, if any of the
+/// required prefix segments (adapter / installation / agent / project / space /
+/// conversation) are missing or malformed, or if the conversation id is empty.
+/// Optional trailing segments (topic / actor_kind / actor) are consumed when
+/// present but are not required; whether they were found is recorded in
+/// `topic_present`, `actor_kind`, and `actor_id`.
+fn decode_slack_reply_target_binding_ref(
+    target: &ironclaw_turns::ReplyTargetBindingRef,
+) -> Option<DecodedSlackReplyTarget> {
+    let mut raw = target.as_str().strip_prefix("reply:")?;
+    // Validate the adapter segment — reject non-Slack adapter refs fail-closed.
+    let (adapter_id, rest) = take_product_binding_segment(raw, "adapter")?;
+    if adapter_id != SLACK_V2_ADAPTER_ID {
+        return None;
+    }
+    raw = rest;
+    // Skip installation, agent, project — values not validated here.
+    for name in &["installation", "agent", "project"] {
+        let (_, rest) = take_product_binding_segment(raw, name)?;
+        raw = rest;
+    }
+    // Consume the required conversation fingerprint segments: space / conversation.
+    let (space_id, rest) = take_product_binding_segment(raw, "space")?;
+    let (conversation_id, rest) = take_product_binding_segment(rest, "conversation")?;
+    if conversation_id.is_empty() {
+        return None;
+    }
+    // Consume the optional topic segment (present in both shared-channel and
+    // personal-DM refs built by the constructors in this module).
+    let (topic_present, rest) = match take_product_binding_segment(rest, "topic") {
+        Some((_, after_topic)) => (true, after_topic),
+        None => (false, rest),
+    };
+    // Consume the optional actor_kind + actor segments (personal-DM only).
+    let (actor_kind, actor_id, rest) = match take_product_binding_segment(rest, "actor_kind") {
+        Some((kind, after_kind)) => match take_product_binding_segment(after_kind, "actor") {
+            Some((id, after_actor)) => {
+                // Map an empty actor value to None so the type matches the
+                // doc-comment ("Present only when the `actor` segment exists
+                // with a non-empty value").
+                let actor_id = if id.is_empty() {
+                    None
+                } else {
+                    Some(id.to_string())
+                };
+                (Some(kind.to_string()), actor_id, after_actor)
+            }
+            None => (Some(kind.to_string()), None, after_kind),
+        },
+        None => (None, None, rest),
+    };
+    Some(DecodedSlackReplyTarget {
+        conversation_id: conversation_id.to_string(),
+        space_id: if space_id.is_empty() {
+            None
+        } else {
+            Some(space_id.to_string())
+        },
+        topic_present,
+        actor_kind,
+        actor_id,
+        fully_consumed: rest.is_empty(),
+    })
+}
+
 /// Extract the Slack channel ID encoded in a Slack reply-target binding ref.
 ///
 /// Parses the length-prefixed segment format produced by
@@ -808,28 +902,65 @@ fn take_product_binding_segment<'a>(raw: &'a str, name: &str) -> Option<(&'a str
 /// preference.
 ///
 /// Returns `None` if the ref is not a Slack reply target or is malformed.
+///
+/// Note: adapter identity is enforced by [`decode_slack_reply_target_binding_ref`],
+/// so refs with a non-Slack adapter now return `None` where they previously
+/// returned `Some`.
 pub(crate) fn slack_conversation_id_from_reply_target_binding_ref(
     target: &ironclaw_turns::ReplyTargetBindingRef,
 ) -> Option<(String, Option<String>)> {
-    let mut raw = target.as_str().strip_prefix("reply:")?;
-    // Skip adapter, installation, agent, project — we don't validate them here.
-    for name in &["adapter", "installation", "agent", "project"] {
-        let (_, rest) = take_product_binding_segment(raw, name)?;
-        raw = rest;
+    let decoded = decode_slack_reply_target_binding_ref(target)?;
+    Some((decoded.conversation_id, decoded.space_id))
+}
+
+/// Returns `true` iff `target` is a verified personal-DM Slack reply-target
+/// binding ref.
+///
+/// A personal-DM ref has two structural markers beyond the shared segment
+/// prefix (adapter / installation / agent / project / space / conversation /
+/// topic):
+///
+/// 1. Trailing `actor_kind` + `actor` segments are **present** — this is the
+///    distinguishing property that [`slack_personal_dm_reply_target_binding_ref`]
+///    adds and [`slack_shared_channel_reply_target_binding_ref`] omits.
+/// 2. The decoded conversation id (the DM channel id) **starts with uppercase
+///    `'D'`** — the Slack-assigned prefix for all DM channels.
+///
+/// Any parse failure (malformed segment encoding, missing fields, non-`D`
+/// channel id) returns `false` — fail closed.
+///
+/// This does NOT validate the installation, agent, project, or space values
+/// against a live provider config. It is a structural parse only: safe to
+/// call before a provider is available.
+pub(crate) fn slack_reply_target_is_personal_dm(
+    target: &ironclaw_turns::ReplyTargetBindingRef,
+) -> bool {
+    let Some(decoded) = decode_slack_reply_target_binding_ref(target) else {
+        return false;
+    };
+    // A well-formed Slack reply target always carries the team/space binding. An
+    // empty `space` segment (`space:0:`) decodes to `None` here; reject it so a
+    // corrupted or forged preference missing the space cannot satisfy the
+    // OAuth-DM gate.
+    if decoded.space_id.is_none() {
+        return false;
     }
-    let (space_id, rest) = take_product_binding_segment(raw, "space")?;
-    let (conversation_id, _) = take_product_binding_segment(rest, "conversation")?;
-    if conversation_id.is_empty() {
-        return None;
+    // DM channel ids start with uppercase 'D'.
+    if !decoded.conversation_id.starts_with('D') {
+        return false;
     }
-    Some((
-        conversation_id.to_string(),
-        if space_id.is_empty() {
-            None
-        } else {
-            Some(space_id.to_string())
-        },
-    ))
+    // The conversation fingerprint must include a topic segment (as produced by
+    // `ExternalConversationRef::conversation_fingerprint`); refs missing it are
+    // not well-formed personal-DM refs.
+    if !decoded.topic_present {
+        return false;
+    }
+    // actor_kind must be the Slack user kind; actor_id is Some only when the
+    // actor segment is non-empty (invariant enforced at decode time); no
+    // further segments are permitted.
+    decoded.actor_kind.as_deref() == Some(SLACK_USER_ACTOR_KIND)
+        && decoded.actor_id.is_some()
+        && decoded.fully_consumed
 }
 
 fn map_slack_target_route_error(error: SlackChannelRouteError) -> RebornServicesError {
@@ -1432,6 +1563,330 @@ mod tests {
             result.is_none(),
             "cross-tenant caller must not resolve personal DM target; got: {:?}",
             result.map(|e| e.summary.target_id.as_str().to_string())
+        );
+    }
+
+    // ── slack_reply_target_is_personal_dm ─────────────────────────────────────
+
+    /// Build a personal-DM binding ref from raw segment strings (no provider needed).
+    fn dm_binding_ref(dm_channel_id: &str, slack_user_id: &str) -> ReplyTargetBindingRef {
+        let installation_id = AdapterInstallationId::new(INSTALLATION).expect("installation");
+        let agent_id = AgentId::new(AGENT).expect("agent");
+        let project_id = ProjectId::new(PROJECT).expect("project");
+        let team_id = SlackTeamId::new(TEAM);
+        let slack_user = SlackUserId::new(slack_user_id);
+        slack_personal_dm_reply_target_binding_ref(
+            &installation_id,
+            &agent_id,
+            Some(&project_id),
+            &team_id,
+            dm_channel_id,
+            &slack_user,
+        )
+        .expect("personal DM binding ref")
+    }
+
+    /// Build a shared-channel binding ref from raw segment strings (no provider needed).
+    fn shared_channel_binding_ref(channel_id: &str) -> ReplyTargetBindingRef {
+        let installation_id = AdapterInstallationId::new(INSTALLATION).expect("installation");
+        let agent_id = AgentId::new(AGENT).expect("agent");
+        let project_id = ProjectId::new(PROJECT).expect("project");
+        let team_id = SlackTeamId::new(TEAM);
+        slack_shared_channel_reply_target_binding_ref(
+            &installation_id,
+            &agent_id,
+            Some(&project_id),
+            &team_id,
+            channel_id,
+        )
+        .expect("shared channel binding ref")
+    }
+
+    #[test]
+    fn slack_reply_target_is_personal_dm_returns_true_for_dm_ref() {
+        let binding_ref = dm_binding_ref("D0HOST", SLACK_USER);
+        assert!(
+            slack_reply_target_is_personal_dm(&binding_ref),
+            "personal-DM binding ref must be identified as a personal DM"
+        );
+    }
+
+    #[test]
+    fn slack_reply_target_is_personal_dm_returns_false_for_shared_channel_ref() {
+        let binding_ref = shared_channel_binding_ref("C0HOST");
+        assert!(
+            !slack_reply_target_is_personal_dm(&binding_ref),
+            "shared-channel binding ref must NOT be identified as a personal DM"
+        );
+    }
+
+    #[test]
+    fn slack_reply_target_is_personal_dm_returns_false_for_non_d_prefixed_channel() {
+        // Build a raw ref with actor_kind/actor but a non-'D' channel id
+        // (e.g. a group DM channel starting with 'G'). The parser must reject it.
+        fn seg(name: &str, value: &str) -> String {
+            format!("{}:{}:{};", name, value.len(), value)
+        }
+        let raw = format!(
+            "{}{}{}{}{}{}{}{}{}",
+            seg("adapter", "slack_v2"),
+            seg("installation", INSTALLATION),
+            seg("agent", AGENT),
+            seg("project", PROJECT),
+            seg("space", TEAM),
+            seg("conversation", "G0GROUP"),
+            seg("topic", ""),
+            seg("actor_kind", "slack_user"),
+            seg("actor", SLACK_USER),
+        );
+        let binding_ref =
+            slack_reply_target_binding_ref_from_raw(raw).expect("builds syntactically");
+        assert!(
+            !slack_reply_target_is_personal_dm(&binding_ref),
+            "non-'D'-prefixed channel must NOT be identified as a personal DM"
+        );
+    }
+
+    #[test]
+    fn slack_reply_target_is_personal_dm_returns_false_for_malformed_ref() {
+        let malformed = ReplyTargetBindingRef::new("reply:not-a-valid-segment-format".to_string())
+            .expect("syntactically valid ref");
+        assert!(
+            !slack_reply_target_is_personal_dm(&malformed),
+            "malformed ref must return false (fail closed)"
+        );
+    }
+
+    #[test]
+    fn slack_reply_target_is_personal_dm_returns_false_for_empty_actor() {
+        // Build a ref that has actor_kind but empty actor id — must be rejected.
+        fn seg(name: &str, value: &str) -> String {
+            format!("{}:{}:{};", name, value.len(), value)
+        }
+        let raw = format!(
+            "{}{}{}{}{}{}{}{}{}",
+            seg("adapter", "slack_v2"),
+            seg("installation", INSTALLATION),
+            seg("agent", AGENT),
+            seg("project", PROJECT),
+            seg("space", TEAM),
+            seg("conversation", "D0HOST"),
+            seg("topic", ""),
+            seg("actor_kind", "slack_user"),
+            seg("actor", ""),
+        );
+        let binding_ref =
+            slack_reply_target_binding_ref_from_raw(raw).expect("builds syntactically");
+        assert!(
+            !slack_reply_target_is_personal_dm(&binding_ref),
+            "ref with empty actor must NOT be identified as a personal DM"
+        );
+    }
+
+    /// Tests the two reject predicates not covered by the sibling tests:
+    ///
+    /// (a) A syntactically correct personal-DM ref whose `actor_kind` segment
+    ///     contains a non-Slack actor kind must return `false` — the predicate
+    ///     requires `actor_kind == SLACK_USER_ACTOR_KIND`.
+    ///
+    /// (b) A personal-DM ref with an EXTRA trailing segment appended after
+    ///     `actor` must return `false` — the predicate requires `rest.is_empty()`
+    ///     after consuming the `actor` segment.
+    #[test]
+    fn slack_reply_target_is_personal_dm_rejects_wrong_actor_kind_and_trailing_segments() {
+        fn seg(name: &str, value: &str) -> String {
+            format!("{}:{}:{};", name, value.len(), value)
+        }
+
+        // (a) Wrong actor_kind: use a non-Slack actor kind.
+        let raw_wrong_kind = format!(
+            "{}{}{}{}{}{}{}{}{}",
+            seg("adapter", "slack_v2"),
+            seg("installation", INSTALLATION),
+            seg("agent", AGENT),
+            seg("project", PROJECT),
+            seg("space", TEAM),
+            seg("conversation", "D0HOST"),
+            seg("topic", ""),
+            seg("actor_kind", "not_a_slack_user"),
+            seg("actor", SLACK_USER),
+        );
+        let binding_ref_wrong_kind =
+            slack_reply_target_binding_ref_from_raw(raw_wrong_kind).expect("builds syntactically");
+        assert!(
+            !slack_reply_target_is_personal_dm(&binding_ref_wrong_kind),
+            "actor_kind != slack_user must NOT be identified as a personal DM"
+        );
+
+        // (b) Extra trailing segment after the actor segment.
+        let raw_trailing = format!(
+            "{}{}{}{}{}{}{}{}{}{}",
+            seg("adapter", "slack_v2"),
+            seg("installation", INSTALLATION),
+            seg("agent", AGENT),
+            seg("project", PROJECT),
+            seg("space", TEAM),
+            seg("conversation", "D0HOST"),
+            seg("topic", ""),
+            seg("actor_kind", "slack_user"),
+            seg("actor", SLACK_USER),
+            seg("extra", "unexpected"),
+        );
+        let binding_ref_trailing =
+            slack_reply_target_binding_ref_from_raw(raw_trailing).expect("builds syntactically");
+        assert!(
+            !slack_reply_target_is_personal_dm(&binding_ref_trailing),
+            "trailing segment after actor must NOT be identified as a personal DM"
+        );
+    }
+
+    // ── slack_reply_target_is_personal_dm: missing topic segment ─────────────
+
+    #[test]
+    fn slack_reply_target_is_personal_dm_returns_false_for_missing_topic_segment() {
+        // Build a ref that has all DM segments EXCEPT the topic segment.
+        // The decoder records topic_present=false when the topic segment is
+        // absent, and the DM predicate requires topic_present=true.
+        fn seg(name: &str, value: &str) -> String {
+            format!("{}:{}:{};", name, value.len(), value)
+        }
+        let raw = format!(
+            "{}{}{}{}{}{}{}{}",
+            seg("adapter", SLACK_V2_ADAPTER_ID),
+            seg("installation", INSTALLATION),
+            seg("agent", AGENT),
+            seg("project", PROJECT),
+            seg("space", TEAM),
+            seg("conversation", "D0HOST"),
+            // topic segment intentionally omitted
+            seg("actor_kind", SLACK_USER_ACTOR_KIND),
+            seg("actor", SLACK_USER),
+        );
+        let binding_ref =
+            slack_reply_target_binding_ref_from_raw(raw).expect("builds syntactically");
+        assert!(
+            !slack_reply_target_is_personal_dm(&binding_ref),
+            "ref missing topic segment must NOT be identified as a personal DM"
+        );
+    }
+
+    // ── slack_reply_target_is_personal_dm: empty space segment ───────────────
+
+    #[test]
+    fn slack_reply_target_is_personal_dm_returns_false_for_empty_space_segment() {
+        // A ref with an empty `space` segment (`space:0:`) decodes space_id to
+        // None. A forged/corrupted preference missing the team/space binding must
+        // NOT satisfy the OAuth-DM gate.
+        fn seg(name: &str, value: &str) -> String {
+            format!("{}:{}:{};", name, value.len(), value)
+        }
+        let raw = format!(
+            "{}{}{}{}{}{}{}{}{}",
+            seg("adapter", SLACK_V2_ADAPTER_ID),
+            seg("installation", INSTALLATION),
+            seg("agent", AGENT),
+            seg("project", PROJECT),
+            seg("space", ""),
+            seg("conversation", "D0HOST"),
+            seg("topic", ""),
+            seg("actor_kind", SLACK_USER_ACTOR_KIND),
+            seg("actor", SLACK_USER),
+        );
+        let binding_ref =
+            slack_reply_target_binding_ref_from_raw(raw).expect("builds syntactically");
+        assert!(
+            !slack_reply_target_is_personal_dm(&binding_ref),
+            "ref with empty space segment must NOT be identified as a personal DM"
+        );
+    }
+
+    // ── slack_reply_target_is_personal_dm: wrong adapter ─────────────────────
+
+    #[test]
+    fn slack_reply_target_is_personal_dm_rejects_non_slack_adapter() {
+        // Build a ref identical to a valid personal-DM ref but with a
+        // non-Slack adapter id.  The decoder must fail-closed and return None,
+        // so the DM predicate must return false.
+        fn seg(name: &str, value: &str) -> String {
+            format!("{}:{}:{};", name, value.len(), value)
+        }
+        let raw = format!(
+            "{}{}{}{}{}{}{}{}{}",
+            seg("adapter", "other_adapter"),
+            seg("installation", INSTALLATION),
+            seg("agent", AGENT),
+            seg("project", PROJECT),
+            seg("space", TEAM),
+            seg("conversation", "D0HOST"),
+            seg("topic", ""),
+            seg("actor_kind", SLACK_USER_ACTOR_KIND),
+            seg("actor", SLACK_USER),
+        );
+        let binding_ref =
+            slack_reply_target_binding_ref_from_raw(raw).expect("builds syntactically");
+        assert!(
+            !slack_reply_target_is_personal_dm(&binding_ref),
+            "non-Slack adapter ref must NOT be identified as a personal DM"
+        );
+    }
+
+    // ── slack_reply_target_is_personal_dm: missing actor segment (not just empty) ──
+
+    #[test]
+    fn slack_reply_target_is_personal_dm_returns_false_for_missing_actor_segment() {
+        // A ref with actor_kind present but NO actor segment at all (label absent,
+        // not just empty value).  The decoder returns actor_id = None because
+        // take_product_binding_segment for "actor" fails; the DM predicate must
+        // return false (actor_id is None).
+        fn seg(name: &str, value: &str) -> String {
+            format!("{}:{}:{};", name, value.len(), value)
+        }
+        let raw = format!(
+            "{}{}{}{}{}{}{}{}",
+            seg("adapter", SLACK_V2_ADAPTER_ID),
+            seg("installation", INSTALLATION),
+            seg("agent", AGENT),
+            seg("project", PROJECT),
+            seg("space", TEAM),
+            seg("conversation", "D0HOST"),
+            seg("topic", ""),
+            seg("actor_kind", SLACK_USER_ACTOR_KIND),
+            // actor segment intentionally absent
+        );
+        let binding_ref =
+            slack_reply_target_binding_ref_from_raw(raw).expect("builds syntactically");
+        assert!(
+            !slack_reply_target_is_personal_dm(&binding_ref),
+            "ref with actor_kind but no actor segment must NOT be identified as a personal DM"
+        );
+    }
+
+    // ── slack_conversation_id_from_reply_target_binding_ref: adapter contract ──
+
+    #[test]
+    fn slack_conversation_id_from_reply_target_binding_ref_returns_none_for_non_slack_adapter() {
+        // A syntactically valid ref with a non-Slack adapter value must return
+        // None, pinning the adapter-validation contract that the shared decoder
+        // now enforces for this function as well.
+        fn seg(name: &str, value: &str) -> String {
+            format!("{}:{}:{};", name, value.len(), value)
+        }
+        let raw = format!(
+            "{}{}{}{}{}{}{}",
+            seg("adapter", "not_slack_v2"),
+            seg("installation", INSTALLATION),
+            seg("agent", AGENT),
+            seg("project", PROJECT),
+            seg("space", TEAM),
+            seg("conversation", "C0HOST"),
+            seg("topic", ""),
+        );
+        let binding_ref =
+            slack_reply_target_binding_ref_from_raw(raw).expect("builds syntactically");
+        assert!(
+            slack_conversation_id_from_reply_target_binding_ref(&binding_ref).is_none(),
+            "non-Slack adapter ref must return None from \
+             slack_conversation_id_from_reply_target_binding_ref"
         );
     }
 }

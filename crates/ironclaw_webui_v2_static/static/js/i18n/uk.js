@@ -712,6 +712,7 @@ registerPack("uk", {
   "automations.summary.activeDetail": "Увімкнені розклади, які очікують наступного запуску.",
   "automations.summary.paused": "Призупинено",
   "automations.summary.pausedDetail": "Розклади наразі не запускаються.",
+  "automations.summary.filterAction": "Показати {label}",
   "automations.summary.nextRun": "Наступний запуск",
   "automations.summary.none": "Жодного",
   "automations.summary.nextRunDetail": "Найближчий запланований запуск у цьому списку.",
@@ -719,11 +720,31 @@ registerPack("uk", {
   "automations.empty.matchingDescription": "Спробуйте інший фільтр статусу.",
   "automations.empty.noneTitle": "Ще немає запланованих автоматизацій.",
   "automations.empty.noneDescription": "Цей агент не має запланованої роботи для показу.",
+  "automations.empty.onboardingTitle": "Поки немає автоматизацій",
+  "automations.empty.onboardingDescription":
+    "Автоматизації створюються в чаті з вашим агентом — жодної форми заповнювати не потрібно. Попросіть його робити щось за розкладом, і він налаштує повторювану автоматизацію для вас.",
+  "automations.empty.examplesTitle": "Спробуйте попросити свого агента",
+  "automations.empty.example1":
+    "Перевіряй репозиторій nearai/ironclaw кожні 10 хвилин і підсумовуй нові issue, PR та коміти.",
+  "automations.empty.example2":
+    "Щобудня о 9:00 надсилай мені зведення непрочитаних листів.",
+  "automations.empty.example3":
+    "Нагадуй мені переглядати відкриті pull request щодня о 15:00.",
+  "automations.empty.startInChat": "Почати в чаті",
+  "automations.empty.copyPrompt": "Скопіювати запит",
+  "automations.empty.copied": "Скопійовано",
+  "automations.refreshing": "Оновлення…",
   "automations.table.name": "Назва",
   "automations.table.schedule": "Розклад",
   "automations.table.nextRun": "Наступний запуск",
   "automations.table.lastRun": "Останній запуск",
   "automations.table.status": "Статус",
+  "automations.runs.total": "Останні запуски: {count}",
+  "automations.runs.ok": "Успішні: {count}",
+  "automations.runs.error": "З помилкою: {count}",
+  "automations.runs.running": "Виконується: {count}",
+  "automations.runs.unknown": "Невідомо: {count}",
+  "automations.runs.showingOf": "Показано {shown} з {total} останніх запусків",
 
   // Routines page
   "routines.explorer": "Завдання",

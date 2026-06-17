@@ -13,9 +13,9 @@ use ironclaw_host_api::{
 use ironclaw_host_runtime::{CapabilitySurfacePolicy, SurfaceKind};
 use ironclaw_loop_support::{
     CapabilityAllowSet, CapabilityResolveError, CapabilitySurfaceProfileResolver,
-    EmptyLoopCapabilityPort, HostIdentityContextBuildError, HostIdentityContextCandidate,
-    HostIdentityContextSource, HostInputBatch, HostInputQueue, HostInputQueueError,
-    HostManagedModelError, HostManagedModelErrorKind, HostManagedModelGateway,
+    EmptyLoopCapabilityPort, EmptyUserProfileSource, HostIdentityContextBuildError,
+    HostIdentityContextCandidate, HostIdentityContextSource, HostInputBatch, HostInputQueue,
+    HostInputQueueError, HostManagedModelError, HostManagedModelErrorKind, HostManagedModelGateway,
     HostManagedModelRequest, HostManagedModelResponse, JsonSpawnSubagentInputCodec,
     LoopCapabilityPortFactory, LoopCapabilityResultWriter, ProductLiveCancellationProbe,
     RunCancellationFactory, RunCancellationHandle,
@@ -299,6 +299,7 @@ impl ProductLiveAgentLoopHarness {
             skill_context_source: None,
             input_queue: Some(Arc::new(EmptyInputQueue)),
             identity_context_source: Arc::new(EmptyIdentityContextSource),
+            user_profile_source: Arc::new(EmptyUserProfileSource),
             model_policy_guard: Some(Arc::new(NoOpPolicyGuard)),
             model_budget_accountant: Some(Arc::new(NoOpBudgetAccountant)),
             safety_context: Some(test_safety_context()),

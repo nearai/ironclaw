@@ -37,16 +37,16 @@ use ironclaw_host_runtime::{
 };
 use ironclaw_loop_support::{
     CapabilityAllowSet, CapabilityResolveError, CapabilityResultWrite,
-    CapabilitySurfaceProfileResolver, EmptyLoopCapabilityPort, HostIdentityContextBuildError,
-    HostIdentityContextCandidate, HostIdentityContextSource, HostIdentityMessageContent,
-    HostInputBatch, HostInputEnvelope, HostInputQueue, HostInputQueueError, HostManagedModelError,
-    HostManagedModelErrorKind, HostManagedModelGateway, HostManagedModelMessageRole,
-    HostManagedModelRequest, HostManagedModelResponse, HostRuntimeLoopCapabilityPort,
-    HostSkillContextBuildError, HostSkillContextCandidate, HostSkillContextSource,
-    IdentityApplicability, IdentityFileName, JsonSpawnSubagentInputCodec,
-    LoopCapabilityInputResolver, LoopCapabilityPortFactory, LoopCapabilityResultWriter,
-    ProductLiveCancellationProbe, RunCancellationFactory, RunCancellationHandle,
-    identity_message_ref, loop_driver_execution_extension_id,
+    CapabilitySurfaceProfileResolver, EmptyLoopCapabilityPort, EmptyUserProfileSource,
+    HostIdentityContextBuildError, HostIdentityContextCandidate, HostIdentityContextSource,
+    HostIdentityMessageContent, HostInputBatch, HostInputEnvelope, HostInputQueue,
+    HostInputQueueError, HostManagedModelError, HostManagedModelErrorKind, HostManagedModelGateway,
+    HostManagedModelMessageRole, HostManagedModelRequest, HostManagedModelResponse,
+    HostRuntimeLoopCapabilityPort, HostSkillContextBuildError, HostSkillContextCandidate,
+    HostSkillContextSource, HostUserProfileSource, IdentityApplicability, IdentityFileName,
+    JsonSpawnSubagentInputCodec, LoopCapabilityInputResolver, LoopCapabilityPortFactory,
+    LoopCapabilityResultWriter, ProductLiveCancellationProbe, RunCancellationFactory,
+    RunCancellationHandle, identity_message_ref, loop_driver_execution_extension_id,
 };
 use ironclaw_processes::ProcessServices;
 use ironclaw_reborn::driver_registry::{
@@ -126,12 +126,125 @@ use ironclaw_turns::{
         LoopPromptBundleRequest, LoopPromptPort, LoopRunContext, LoopSafeSummary, ModelWorkKind,
         ModelWorkOutcome, ModelWorkRequest, NoOpBudgetAccountant, NoOpPolicyGuard,
         ParentLoopOutput, PersonalContextPolicy, PromptMode, SkillVisibility,
-        StageCheckpointPayloadRequest, SystemInferenceTaskId, VisibleCapabilityRequest,
-        VisibleCapabilitySurface,
+        StageCheckpointPayloadRequest, SystemInferenceTaskId, UserProfileContext,
+        VisibleCapabilityRequest, VisibleCapabilitySurface,
     },
     runner::{ClaimRunRequest, ClaimedTurnRun, TurnRunTransitionPort},
 };
 use serde_json::{Value, json};
+use tracing::field::{Field, Visit};
+use tracing_subscriber::{
+    Layer, filter::LevelFilter, layer::Context, layer::SubscriberExt, registry::LookupSpan,
+};
+
+#[derive(Clone, Debug)]
+struct CapturedEvent {
+    message: String,
+    fields: Vec<(String, String)>,
+}
+
+#[derive(Clone, Default)]
+struct CorrelatedEventCapture {
+    events: Arc<Mutex<Vec<CapturedEvent>>>,
+}
+
+struct CorrelatedEventLayer {
+    events: Arc<Mutex<Vec<CapturedEvent>>>,
+}
+
+#[derive(Debug, Clone)]
+struct CapturedSpanFields(Vec<(String, String)>);
+
+#[derive(Default)]
+struct CaptureVisitor {
+    message: String,
+    fields: Vec<(String, String)>,
+}
+
+impl CorrelatedEventCapture {
+    fn layer(&self) -> CorrelatedEventLayer {
+        CorrelatedEventLayer {
+            events: Arc::clone(&self.events),
+        }
+    }
+
+    fn contains(&self, message: &str, thread_id: &str, run_id: &str) -> bool {
+        self.events.lock().unwrap().iter().any(|event| {
+            event.message == message
+                && event
+                    .fields
+                    .iter()
+                    .any(|(name, value)| name == "thread_id" && value == thread_id)
+                && event
+                    .fields
+                    .iter()
+                    .any(|(name, value)| name == "run_id" && value == run_id)
+        })
+    }
+}
+
+impl CaptureVisitor {
+    fn record_owned(&mut self, field: &Field, value: String) {
+        if field.name() == "message" {
+            self.message = value;
+        } else {
+            self.fields.push((field.name().to_string(), value));
+        }
+    }
+}
+
+impl Visit for CaptureVisitor {
+    fn record_debug(&mut self, field: &Field, value: &dyn std::fmt::Debug) {
+        let rendered = format!("{value:?}");
+        let value = rendered
+            .strip_prefix('"')
+            .and_then(|value| value.strip_suffix('"'))
+            .unwrap_or(rendered.as_str())
+            .to_string();
+        self.record_owned(field, value);
+    }
+
+    fn record_str(&mut self, field: &Field, value: &str) {
+        self.record_owned(field, value.to_string());
+    }
+}
+
+impl<S> Layer<S> for CorrelatedEventLayer
+where
+    S: tracing::Subscriber + for<'lookup> LookupSpan<'lookup>,
+{
+    fn on_new_span(
+        &self,
+        attrs: &tracing::span::Attributes<'_>,
+        id: &tracing::Id,
+        ctx: Context<'_, S>,
+    ) {
+        let mut visitor = CaptureVisitor::default();
+        attrs.record(&mut visitor);
+        if let Some(span) = ctx.span(id) {
+            span.extensions_mut()
+                .insert(CapturedSpanFields(visitor.fields));
+        }
+    }
+
+    fn on_event(&self, event: &tracing::Event<'_>, ctx: Context<'_, S>) {
+        let mut visitor = CaptureVisitor::default();
+        event.record(&mut visitor);
+        let mut fields = Vec::new();
+        if let Some(scope) = ctx.event_scope(event) {
+            for span in scope.from_root() {
+                if let Some(span_fields) = span.extensions().get::<CapturedSpanFields>() {
+                    fields.extend(span_fields.0.clone());
+                }
+            }
+        }
+        fields.extend(visitor.fields);
+        self.events.lock().unwrap().push(CapturedEvent {
+            message: visitor.message,
+            fields,
+        });
+    }
+}
 
 fn driver_requirements_for(
     descriptor: &AgentLoopDriverDescriptor,
@@ -1603,6 +1716,78 @@ async fn turn_runner_worker_completes_queued_run_after_turn_store_reopen() {
     }));
 }
 
+#[tokio::test(flavor = "current_thread")]
+async fn turn_runner_worker_emits_thread_run_correlated_operator_log() {
+    let capture = CorrelatedEventCapture::default();
+    // Capture at DEBUG to mirror the operator-logs capture filter: run
+    // lifecycle anchors are `debug!` so they never corrupt a REPL/TUI via the
+    // info-level stderr layer, yet stay captured for the Logs panel.
+    let subscriber = tracing_subscriber::registry()
+        .with(LevelFilter::DEBUG)
+        .with(capture.layer());
+    let dispatch = tracing::Dispatch::new(subscriber);
+    let _guard = tracing::dispatcher::set_default(&dispatch);
+
+    let fixture =
+        HostFixture::new_unsubmitted("thread-runner-operator-log", "hello operator log").await;
+    let turn_store = Arc::new(InMemoryTurnStateStore::default());
+    let resolver = InMemoryRunProfileResolver::default();
+    let resolved = resolver
+        .resolve_run_profile(RunProfileResolutionRequest::interactive_default())
+        .await
+        .unwrap();
+    let descriptor = resolved.loop_driver.clone();
+    let run_id =
+        queue_fixture_turn(&fixture, turn_store.as_ref(), &resolver, "idem-runner-log").await;
+
+    let mut registry = DriverRegistry::new();
+    registry
+        .register_driver(
+            Arc::new(TextOnlyFinalReplyDriver { descriptor }),
+            DriverRequirements::all_required(),
+            DriverKind::Reference,
+        )
+        .unwrap();
+
+    let (_wake_sender, wake_receiver) = TurnRunnerWakeReceiver::new();
+    let worker = TurnRunnerWorker::new(
+        TurnRunnerWorkerConfig {
+            heartbeat_interval: std::time::Duration::from_millis(20),
+            poll_interval: std::time::Duration::from_millis(10),
+            scope_filter: Some(fixture.context.scope.clone()),
+        },
+        turn_store.clone(),
+        loop_exit_applier_for_fixture(&fixture, turn_store.clone()),
+        Arc::new(registry),
+        Arc::new(fixture.factory_with_loop_checkpoint_store(turn_store.clone())),
+        wake_receiver,
+    );
+
+    let cancel = tokio_util::sync::CancellationToken::new();
+    let cancel_clone = cancel.clone();
+    let handle = tokio::spawn(async move { worker.run(cancel_clone).await });
+
+    wait_for_run_status(
+        turn_store.as_ref(),
+        &fixture.context.scope,
+        run_id,
+        TurnStatus::Completed,
+        "turn runner should complete queued run for operator log correlation",
+    )
+    .await;
+    cancel.cancel();
+    handle.await.unwrap();
+
+    assert!(
+        capture.contains(
+            "turn run started",
+            &fixture.context.scope.thread_id.to_string(),
+            &run_id.to_string(),
+        ),
+        "turn runner should emit a run-scoped tracing event carrying thread_id and run_id"
+    );
+}
+
 #[cfg(feature = "libsql-restart-tests")]
 #[tokio::test]
 async fn turn_runner_worker_completes_after_libsql_turn_and_thread_services_reopen() {
@@ -2940,6 +3125,7 @@ async fn default_planned_runtime_composes_no_profile_coordinator_and_profiled_ho
         skill_context_source: None,
         input_queue: None,
         identity_context_source: Arc::new(StaticIdentityContextSource::new(Vec::new())),
+        user_profile_source: Arc::new(EmptyUserProfileSource),
         model_policy_guard: None,
         model_budget_accountant: None,
         safety_context: None,
@@ -3114,6 +3300,7 @@ async fn build_runtime_host_with_optional_hooks(
         skill_context_source: None,
         input_queue: None,
         identity_context_source: Arc::new(StaticIdentityContextSource::new(Vec::new())),
+        user_profile_source: Arc::new(EmptyUserProfileSource),
         model_policy_guard: None,
         model_budget_accountant: None,
         safety_context: None,
@@ -3456,6 +3643,7 @@ async fn product_live_runtime_builds_when_all_required_adapters_are_present() {
         skill_context_source: None,
         input_queue: Some(Arc::new(EmptyHostInputQueue)),
         identity_context_source: Arc::new(EmptyIdentityContextSource),
+        user_profile_source: Arc::new(EmptyUserProfileSource),
         model_policy_guard: Some(Arc::new(NoOpPolicyGuard)),
         model_budget_accountant: Some(Arc::new(NoOpBudgetAccountant)),
         safety_context: Some(test_safety_context()),
@@ -3570,6 +3758,7 @@ async fn product_live_parts_for_gate_test(
         skill_context_source: None,
         input_queue: Some(Arc::new(EmptyHostInputQueue)),
         identity_context_source: Arc::new(EmptyIdentityContextSource),
+        user_profile_source: Arc::new(EmptyUserProfileSource),
         model_policy_guard: Some(Arc::new(NoOpPolicyGuard)),
         model_budget_accountant: Some(Arc::new(NoOpBudgetAccountant)),
         safety_context: Some(test_safety_context()),
@@ -4266,6 +4455,116 @@ async fn text_only_host_factory_threads_identity_source_to_prompt_and_model() {
             .messages
             .iter()
             .any(|message| message.content == "factory identity content")
+    );
+}
+
+/// Fake `HostUserProfileSource` that always returns a fixed `UserProfileContext`.
+/// Used to verify that `RebornLoopDriverHostFactory::with_user_profile_source` is
+/// stored and called at build time (the rendered runtime context contains the profile).
+struct FixedUserProfileSource {
+    profile: UserProfileContext,
+}
+
+#[async_trait::async_trait]
+impl HostUserProfileSource for FixedUserProfileSource {
+    async fn resolve_user_profile(
+        &self,
+        _run_context: &LoopRunContext,
+    ) -> Option<UserProfileContext> {
+        Some(self.profile.clone())
+    }
+}
+
+#[tokio::test]
+async fn text_only_host_factory_threads_user_profile_source_to_runtime_context() {
+    // Prove that `with_user_profile_source` stores the source and that the
+    // factory calls it at build time — the rendered runtime context must carry
+    // the profile returned by the source.
+    use ironclaw_turns::run_profile::Locale;
+
+    let fixture = HostFixture::new("thread-host-user-profile", "hello reborn").await;
+    let profile = UserProfileContext {
+        timezone: None, // keep it simple; timezone tests live in ironclaw_turns
+        locale: Locale::new("ja-JP").ok(),
+        location: Some("Tokyo, Japan".to_string()),
+    };
+    let source = Arc::new(FixedUserProfileSource {
+        profile: profile.clone(),
+    });
+    let host = fixture
+        .factory()
+        .with_user_profile_source(source)
+        .build_text_only_host(RebornLoopDriverHostRequest {
+            claimed_run: fixture.claimed.clone(),
+            loop_run_context: fixture.context.clone(),
+        })
+        .await
+        .unwrap();
+
+    // The runtime context is rendered inside the prompt port; retrieve it via
+    // `build_prompt_bundle` + `stream_model`. The materialized system message
+    // content is carried in `HostManagedModelRequest.messages[*].content` as
+    // a plain string after the materialization store resolves the refs — this
+    // is the authoritative path to assert that the profile reached the model.
+    let host_dyn: &(dyn AgentLoopDriverHost + Send + Sync) = &host;
+    let surface = host_dyn
+        .visible_capabilities(VisibleCapabilityRequest)
+        .await
+        .unwrap();
+    let surface_version = surface.version.clone();
+    let bundle = host_dyn
+        .build_prompt_bundle(LoopPromptBundleRequest {
+            mode: PromptMode::TextOnly,
+            context_cursor: None,
+            surface_version: Some(surface_version.clone()),
+            checkpoint_state_ref: None,
+            max_messages: Some(8),
+            inline_messages: Vec::new(),
+            capability_view: None,
+        })
+        .await
+        .unwrap();
+
+    // Drive the model port so the recording gateway captures the fully
+    // materialized messages (content refs resolved to plain strings).
+    // `run_context().user_profile` does not exist on `LoopRunContext`; the
+    // profile lives inside `LoopRuntimeContext` in the prompt port and is
+    // only observable through the rendered model content.
+    host_dyn
+        .stream_model(LoopModelRequest {
+            messages: bundle.messages,
+            surface_version: Some(surface_version),
+            model_preference: None,
+            capability_view: None,
+        })
+        .await
+        .unwrap();
+
+    // The system message (first) should contain the profile render.
+    let requests = fixture.gateway.requests();
+    assert_eq!(
+        requests.len(),
+        1,
+        "stream_model must produce exactly one gateway request"
+    );
+    let runtime_ctx_message = requests[0]
+        .messages
+        .iter()
+        .find(|m| m.content.contains("User profile:"))
+        .expect("model request must contain a runtime context message with the User profile: line");
+    // location renders on its own untrusted-data line (same system message).
+    assert!(
+        runtime_ctx_message.content.contains("Tokyo, Japan")
+            && runtime_ctx_message
+                .content
+                .contains("User-provided location"),
+        "host factory must thread FixedUserProfileSource location into runtime context: {:?}",
+        runtime_ctx_message.content
+    );
+    assert!(
+        runtime_ctx_message.content.contains("locale=ja-JP"),
+        "host factory must thread FixedUserProfileSource locale into runtime context: {:?}",
+        runtime_ctx_message.content
     );
 }
 

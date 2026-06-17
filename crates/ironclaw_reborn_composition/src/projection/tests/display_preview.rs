@@ -56,6 +56,7 @@ async fn completed_preview_for_input(
             process_id: None,
             output_bytes: Some(12),
             error_kind: None,
+            first_cursor: ironclaw_events::EventCursor::new(1),
             last_cursor: ironclaw_events::EventCursor::new(1),
             updated_at: chrono::Utc::now(),
         })
@@ -179,6 +180,7 @@ async fn capability_display_preview_error_does_not_drop_activity_payload() {
                 process_id: None,
                 output_bytes: Some(12),
                 error_kind: None,
+                first_cursor: ironclaw_events::EventCursor::new(1),
                 last_cursor: ironclaw_events::EventCursor::new(1),
                 updated_at: chrono::Utc::now(),
             }],
@@ -241,6 +243,7 @@ async fn capability_display_preview_store_redacts_unsafe_paths_and_secrets() {
             process_id: None,
             output_bytes: Some(42),
             error_kind: None,
+            first_cursor: ironclaw_events::EventCursor::new(1),
             last_cursor: ironclaw_events::EventCursor::new(1),
             updated_at: chrono::Utc::now(),
         })
@@ -292,6 +295,7 @@ async fn capability_display_preview_store_summarizes_shell_command_safely() {
             process_id: None,
             output_bytes: Some(2),
             error_kind: None,
+            first_cursor: ironclaw_events::EventCursor::new(1),
             last_cursor: ironclaw_events::EventCursor::new(1),
             updated_at: chrono::Utc::now(),
         })
@@ -555,6 +559,7 @@ async fn capability_display_preview_store_admits_workspace_and_project_scoped_pa
                 process_id: None,
                 output_bytes: Some(4),
                 error_kind: None,
+                first_cursor: ironclaw_events::EventCursor::new(1),
                 last_cursor: ironclaw_events::EventCursor::new(1),
                 updated_at: chrono::Utc::now(),
             })
@@ -601,6 +606,7 @@ async fn capability_display_preview_store_redacts_common_secret_text_shapes() {
             process_id: None,
             output_bytes: Some(256),
             error_kind: None,
+            first_cursor: ironclaw_events::EventCursor::new(1),
             last_cursor: ironclaw_events::EventCursor::new(1),
             updated_at: chrono::Utc::now(),
         })
@@ -661,6 +667,7 @@ async fn capability_display_preview_store_redacts_camel_case_api_key_json() {
             process_id: None,
             output_bytes: Some(128),
             error_kind: None,
+            first_cursor: ironclaw_events::EventCursor::new(1),
             last_cursor: ironclaw_events::EventCursor::new(1),
             updated_at: chrono::Utc::now(),
         })
@@ -727,6 +734,7 @@ async fn capability_display_preview_store_keys_completed_results_by_invocation()
             process_id: None,
             output_bytes: Some(12),
             error_kind: None,
+            first_cursor: ironclaw_events::EventCursor::new(1),
             last_cursor: ironclaw_events::EventCursor::new(1),
             updated_at: chrono::Utc::now(),
         })
@@ -745,6 +753,7 @@ async fn capability_display_preview_store_keys_completed_results_by_invocation()
             process_id: None,
             output_bytes: Some(13),
             error_kind: None,
+            first_cursor: ironclaw_events::EventCursor::new(2),
             last_cursor: ironclaw_events::EventCursor::new(2),
             updated_at: chrono::Utc::now(),
         })
@@ -757,11 +766,13 @@ async fn capability_display_preview_store_keys_completed_results_by_invocation()
         first_preview.output_preview.as_deref(),
         Some("first output")
     );
+    assert_eq!(first_preview.activity_order, Some(1));
     assert_eq!(second_preview.result_ref.as_deref(), Some("result:second"));
     assert_eq!(
         second_preview.output_preview.as_deref(),
         Some("second output")
     );
+    assert_eq!(second_preview.activity_order, Some(2));
 }
 
 #[tokio::test]
@@ -817,6 +828,7 @@ async fn capability_display_preview_store_pairs_inputs_by_ref_when_results_compl
             process_id: None,
             output_bytes: Some(12),
             error_kind: None,
+            first_cursor: ironclaw_events::EventCursor::new(1),
             last_cursor: ironclaw_events::EventCursor::new(1),
             updated_at: chrono::Utc::now(),
         })
@@ -835,6 +847,7 @@ async fn capability_display_preview_store_pairs_inputs_by_ref_when_results_compl
             process_id: None,
             output_bytes: Some(13),
             error_kind: None,
+            first_cursor: ironclaw_events::EventCursor::new(2),
             last_cursor: ironclaw_events::EventCursor::new(2),
             updated_at: chrono::Utc::now(),
         })
@@ -849,6 +862,7 @@ async fn capability_display_preview_store_pairs_inputs_by_ref_when_results_compl
         first_preview.output_preview.as_deref(),
         Some("first output")
     );
+    assert_eq!(first_preview.activity_order, Some(1));
     assert_eq!(second_preview.title, "second");
     assert_eq!(second_preview.subtitle.as_deref(), Some("src/second.rs"));
     assert_eq!(second_preview.result_ref.as_deref(), Some("result:second"));
@@ -856,6 +870,7 @@ async fn capability_display_preview_store_pairs_inputs_by_ref_when_results_compl
         second_preview.output_preview.as_deref(),
         Some("second output")
     );
+    assert_eq!(second_preview.activity_order, Some(2));
 }
 
 #[test]
@@ -914,6 +929,7 @@ async fn capability_display_preview_marks_json_depth_truncation() {
             process_id: None,
             output_bytes: Some(256),
             error_kind: None,
+            first_cursor: ironclaw_events::EventCursor::new(1),
             last_cursor: ironclaw_events::EventCursor::new(1),
             updated_at: chrono::Utc::now(),
         })
@@ -946,6 +962,7 @@ async fn capability_display_preview_falls_back_for_failed_tool_without_result() 
             process_id: None,
             output_bytes: None,
             error_kind: Some("operation_failed".to_string()),
+            first_cursor: ironclaw_events::EventCursor::new(1),
             last_cursor: ironclaw_events::EventCursor::new(1),
             updated_at: chrono::Utc::now(),
         })
@@ -996,6 +1013,7 @@ async fn capability_display_preview_store_preserves_long_line_counts() {
             process_id: None,
             output_bytes: Some(2048),
             error_kind: None,
+            first_cursor: ironclaw_events::EventCursor::new(1),
             last_cursor: ironclaw_events::EventCursor::new(1),
             updated_at: chrono::Utc::now(),
         })
@@ -1058,6 +1076,7 @@ async fn capability_display_preview_store_marks_truncated_side_channel_summary()
             process_id: None,
             output_bytes: Some(32),
             error_kind: None,
+            first_cursor: ironclaw_events::EventCursor::new(1),
             last_cursor: ironclaw_events::EventCursor::new(1),
             updated_at: chrono::Utc::now(),
         })

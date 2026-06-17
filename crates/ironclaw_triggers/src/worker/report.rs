@@ -47,6 +47,12 @@ pub enum TriggerPollerFireOutcome {
     ClearedTerminalActive {
         run_id: TurnRunId,
     },
+    /// Cleared an active fire whose run was parked on a human-interaction gate
+    /// (approval/auth) that an unattended scheduled fire cannot resolve. The
+    /// fire is recorded as failed and the schedule is unblocked. See #4986.
+    ClearedBlockedActive {
+        run_id: TurnRunId,
+    },
     ActiveRunLookupFailed {
         run_id: TurnRunId,
         reason: TriggerPollerFailureReason,
