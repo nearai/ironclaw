@@ -170,12 +170,62 @@ Branch `feat/skill-evolution` off `origin/main`.
   wire variants). Wired by cloning the projection publisher before the milestone-sink builder
   consumes it.
 
+### Increment 5 — DURABLE learned-skill feedback (DONE)
+- Problem found while dogfooding: the Increment-4 live bubble is **published but never
+  delivered** in the running server. Proven empirically — across 7 learned skills the user saw
+  nothing, and a raw SSE capture covering a known publish ~7s after run completion contained 0
+  `skill_activation` frames (only durable `run_status`/`capability_activity`). The live path is
+  the ephemeral `InMemoryProjectionUpdateSource`; durable projections deliver fine.
+- The live mechanism is CORRECT in isolation: two new deterministic tests
+  (`webui_event_stream_drains_skill_learned_projection_from_update_source` and
+  `..._when_sse_resumes_from_advanced_durable_cursor`) publish via `publish_skill_learned` and
+  assert the `SkillActivation` item drains to the WebUI stream on both the fresh and
+  resume-from-advanced-cursor paths — both pass. The production non-delivery is a
+  runtime-specific condition that could NOT be reproduced deterministically or instrumented live
+  (relaunching with debug logging needs the NEAR AI key, unavailable to the agent). Left as a
+  known gap; the live publish is kept (harmless, guarded by the two tests).
+- FIX shipped: a **durable** path independent of the live stream. After install,
+  `announce_learned_skill` appends a finalized assistant note ("🎓 I learned a new skill: …") via
+  `SessionThreadService`, so it renders from `get_timeline` and survives a reload regardless of
+  stream timing. The spawned extraction body is lifted into `ExtractionJob::run` so the durable
+  announce is testable through its caller (`appends_durable_learned_skill_note_to_thread`).
+
+### Increment 6 — auto-activate (consume) learned skills (DONE)
+- `local_dev_selector_config` hard-coded `SkillActivationSelectionMode::ExplicitOnly`, so a learned
+  skill only activated on an explicit `$name`/`/name` — the loop never re-used what it learned.
+  Switched local-dev to `ExplicitAndCriteria` (upstream default) so a learned skill auto-activates
+  on a keyword/pattern match. Selector-config unit test updated to lock the new mode.
+
+### Increment 7 — near-duplicate consolidation (DONE)
+- The distiller names the same task differently each run, so the skill list accreted siblings
+  (`file-create-read-count-summary`, `file-character-count-roundtrip`,
+  `create-read-count-file-characters` …). Before installing, `PortSkillWriter` lists existing
+  `User`-source skills and, when one clears a Jaccard floor (0.45 over the combined
+  name/keyword/tag token sets), consolidates into it under its existing name instead of installing
+  a sibling. `update_skill` enforces name==frontmatter, so the merged content is retargeted first.
+  Pure helpers (`skill_token_set`/`jaccard_similarity`/`select_duplicate_skill`/`rewrite_skill_name`)
+  are unit-tested, including the exact demo sibling-merge case.
+
+### Increment 8 — Skill Refinement / self-evolution (DONE)
+- On the consolidation merge, instead of overwriting, the learning model **refines**: it folds the
+  candidate's new evidence into the existing skill (converged steps, the UNION of gotchas, a bumped
+  version). `ironclaw_skill_learning::refine_skill` + `prompts/skill_refinement.md` (logic crate);
+  composition `SkillRefiner`/`LlmSkillRefiner` maps the outcome to a `MergeAction`:
+  `Replace`(refined, retargeted, injection-scanned) / `KeepExisting`(existing already subsumes it) /
+  `Overwrite`(fallback to plain consolidation). Unit-tested through the refiner; merge quality is
+  verified live against NEAR AI.
+
 ### Next
-- Increment 5 — **Skill Refinement** (`skills refine`): eval-driven reflective improvement
-  (frozen eval fixture; judge returns score+feedback; gate on size/growth/must-beat-baseline;
-  lead the demo with the gate rejecting a regression). NOT "GEPA".
+- **Pin the live-SSE bubble non-delivery** (Increment 5 gap). Needs an instrumented run with the
+  NEAR AI key: log the exact `EventProjectionScope` at `publish_skill_learned` vs the SSE
+  subscription, or add a faithful harness over the real SSE handler loop. The durable path already
+  makes the feedback reliable, so this is polish, not a blocker.
+- Deepen refinement into an **eval-driven** loop: frozen eval fixture, judge returns score+feedback,
+  gate on size/growth/must-beat-baseline; lead a demo with the gate rejecting a regression. NOT "GEPA".
 - Pre-approval gate for learned skills (decision #3): stage-to-pending + one-click approve.
 - `ironclaw-reborn skills extract`/`refine` CLI; end-to-end run verification.
+- Consolidate the EXISTING on-disk near-duplicate skills (dedup is forward-looking; it does not
+  retroactively merge the three siblings already learned during dogfooding).
 
 ### Key API references
 - `LlmProvider::complete(CompletionRequest{messages, model, ...}) -> CompletionResponse{content}`
