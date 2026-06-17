@@ -9,12 +9,12 @@ use chrono::Utc;
 use ironclaw_host_api::{AgentId, TenantId, ThreadId, UserId};
 use ironclaw_loop_support::{
     CapabilityAllowSet, CapabilityResolveError, CapabilityResultWrite,
-    CapabilitySurfaceProfileResolver, EmptyLoopCapabilityPort, HostIdentityContextBuildError,
-    HostIdentityContextCandidate, HostIdentityContextSource, HostInputBatch, HostInputQueue,
-    HostInputQueueError, HostManagedModelError, HostManagedModelGateway, HostManagedModelRequest,
-    HostManagedModelResponse, JsonSpawnSubagentInputCodec, LoopCapabilityPortFactory,
-    LoopCapabilityResultWriter, ProductLiveCancellationProbe, RunCancellationFactory,
-    RunCancellationHandle,
+    CapabilitySurfaceProfileResolver, EmptyLoopCapabilityPort, EmptyUserProfileSource,
+    HostIdentityContextBuildError, HostIdentityContextCandidate, HostIdentityContextSource,
+    HostInputBatch, HostInputQueue, HostInputQueueError, HostManagedModelError,
+    HostManagedModelGateway, HostManagedModelRequest, HostManagedModelResponse,
+    JsonSpawnSubagentInputCodec, LoopCapabilityPortFactory, LoopCapabilityResultWriter,
+    ProductLiveCancellationProbe, RunCancellationFactory, RunCancellationHandle,
 };
 use ironclaw_product_adapters::{
     AdapterInstallationId, AuthRequirement, ExternalActorRef, ExternalConversationRef,
@@ -692,6 +692,7 @@ async fn user_message_no_profile_uses_product_live_runtime_and_persists_reply() 
         skill_context_source: None,
         input_queue: Some(Arc::new(EmptyInputQueue)),
         identity_context_source: Arc::new(EmptyIdentityContextSource),
+        user_profile_source: Arc::new(EmptyUserProfileSource),
         model_policy_guard: Some(Arc::new(NoOpPolicyGuard)),
         model_budget_accountant: Some(Arc::new(NoOpBudgetAccountant)),
         safety_context: Some(test_safety_context()),
@@ -862,6 +863,7 @@ async fn user_message_no_profile_can_cancel_product_live_run_from_product_path()
         skill_context_source: None,
         input_queue: Some(Arc::new(EmptyInputQueue)),
         identity_context_source: Arc::new(EmptyIdentityContextSource),
+        user_profile_source: Arc::new(EmptyUserProfileSource),
         model_policy_guard: Some(Arc::new(NoOpPolicyGuard)),
         model_budget_accountant: Some(Arc::new(NoOpBudgetAccountant)),
         safety_context: Some(test_safety_context()),
@@ -1044,6 +1046,7 @@ async fn product_live_runtime_rejects_unretained_cancellation_factory() {
         skill_context_source: None,
         input_queue: Some(Arc::new(EmptyInputQueue)),
         identity_context_source: Arc::new(EmptyIdentityContextSource),
+        user_profile_source: Arc::new(EmptyUserProfileSource),
         model_policy_guard: Some(Arc::new(NoOpPolicyGuard)),
         model_budget_accountant: Some(Arc::new(NoOpBudgetAccountant)),
         safety_context: Some(test_safety_context()),
