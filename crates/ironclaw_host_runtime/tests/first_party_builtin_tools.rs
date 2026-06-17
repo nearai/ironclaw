@@ -38,8 +38,9 @@ use ironclaw_host_runtime::{
     TRACE_COMMONS_STATUS_CAPABILITY_ID, TRIGGER_CREATE_CAPABILITY_ID, TRIGGER_LIST_CAPABILITY_ID,
     TRIGGER_REMOVE_CAPABILITY_ID, TenantSandboxProcessPort, ToolCallHttpEgress, TriggerCreateHook,
     VisibleCapabilityAccess, VisibleCapabilityRequest, WRITE_FILE_CAPABILITY_ID,
-    builtin_first_party_handlers, builtin_first_party_handlers_with_trigger_create_hook,
-    builtin_first_party_package,
+    builtin_first_party_handlers, builtin_first_party_handlers_for_process_backend,
+    builtin_first_party_handlers_with_trigger_create_hook, builtin_first_party_package,
+    builtin_first_party_package_for_process_backend,
 };
 #[cfg(feature = "test-support")]
 use ironclaw_host_runtime::{
@@ -175,6 +176,55 @@ async fn builtin_first_party_package_declares_expected_capabilities() {
     for id in all_builtin_capability_ids() {
         assert!(handlers.contains_handler(&capability_id(id)));
     }
+}
+
+#[tokio::test]
+async fn builtin_first_party_processless_package_and_handlers_omit_process_port_backed_shell() {
+    let package =
+        builtin_first_party_package_for_process_backend(ProcessBackendKind::None).unwrap();
+    let ids = package
+        .capabilities
+        .iter()
+        .map(|descriptor| descriptor.id.as_str())
+        .collect::<Vec<_>>();
+    assert!(!ids.contains(&SHELL_CAPABILITY_ID));
+    assert!(ids.contains(&SPAWN_SUBAGENT_CAPABILITY_ID));
+    assert!(ids.contains(&ECHO_CAPABILITY_ID));
+    assert!(
+        !package
+            .manifest
+            .capabilities
+            .iter()
+            .any(|capability| capability.id.as_str() == SHELL_CAPABILITY_ID)
+    );
+
+    let handlers = builtin_first_party_handlers_for_process_backend(
+        Arc::new(InMemoryTriggerRepository::default()),
+        ProcessBackendKind::None,
+    )
+    .unwrap();
+    assert!(!handlers.contains_handler(&capability_id(SHELL_CAPABILITY_ID)));
+    assert!(handlers.contains_handler(&capability_id(SPAWN_SUBAGENT_CAPABILITY_ID)));
+    assert!(handlers.contains_handler(&capability_id(ECHO_CAPABILITY_ID)));
+}
+
+#[tokio::test]
+async fn builtin_first_party_process_backend_package_and_handlers_keep_shell() {
+    let package =
+        builtin_first_party_package_for_process_backend(ProcessBackendKind::TenantSandbox).unwrap();
+    assert!(
+        package
+            .capabilities
+            .iter()
+            .any(|descriptor| descriptor.id.as_str() == SHELL_CAPABILITY_ID)
+    );
+
+    let handlers = builtin_first_party_handlers_for_process_backend(
+        Arc::new(InMemoryTriggerRepository::default()),
+        ProcessBackendKind::TenantSandbox,
+    )
+    .unwrap();
+    assert!(handlers.contains_handler(&capability_id(SHELL_CAPABILITY_ID)));
 }
 
 fn assert_coding_manifest_contract(descriptor: &CapabilityDescriptor) {
@@ -5354,15 +5404,15 @@ async fn read_file_enforces_byte_budget_on_long_lines_and_offers_continuation() 
     assert_eq!(read["truncated"], json!(true));
     assert_eq!(read["truncated_by"], json!("bytes"));
     // Stopped well before all 6 lines, and the body stays inside the budget
-    // (+ the short continuation notice).
+    // including the continuation notice.
     let shown = read["lines_shown"].as_u64().unwrap();
     assert!(
-        shown >= 1 && shown < 6,
+        (1..6).contains(&shown),
         "expected partial read, got {shown}"
     );
     let content = read["content"].as_str().unwrap();
     assert!(
-        content.len() <= 64 * 1024 + 256,
+        content.len() <= 64 * 1024,
         "body exceeded byte budget: {} bytes",
         content.len()
     );
@@ -5381,6 +5431,39 @@ async fn read_file_enforces_byte_budget_on_long_lines_and_offers_continuation() 
     .unwrap();
     let resumed_first = resumed["content"].as_str().unwrap();
     assert!(resumed_first.starts_with(&format!("{:>6}│", next)));
+}
+
+#[tokio::test]
+async fn read_file_saturates_large_limit_without_overflow() {
+    let temp = tempfile::tempdir().unwrap();
+    std::fs::write(temp.path().join("lines.txt"), "first\nsecond\nthird\n").unwrap();
+
+    let (filesystem, mounts) = mounted_filesystem(temp.path(), MountPermissions::read_only());
+    let runtime = runtime_with_filesystem(filesystem);
+    let context = execution_context_with_mounts(all_builtin_capability_ids(), mounts);
+
+    let read = invoke_with_context(
+        &runtime,
+        READ_FILE_CAPABILITY_ID,
+        json!({
+            "path": "/workspace/lines.txt",
+            "offset": 2,
+            "limit": usize::MAX,
+        }),
+        context,
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(read["total_lines"], json!(3));
+    assert_eq!(read["lines_shown"], json!(2));
+    assert_eq!(read["truncated"], json!(false));
+    assert!(read["truncated_by"].is_null());
+    assert!(read["next_offset"].is_null());
+    let content = read["content"].as_str().unwrap();
+    assert!(content.starts_with("     2│ second"));
+    assert!(content.contains("     3│ third"));
+    assert!(!content.contains("     1│ first"));
 }
 
 #[tokio::test]
@@ -5412,7 +5495,11 @@ async fn read_file_clamps_a_single_line_larger_than_the_whole_budget() {
     assert_eq!(read["next_offset"], json!(2));
     let content = read["content"].as_str().unwrap();
     assert!(content.contains("[line truncated]"));
-    assert!(content.len() <= 64 * 1024 + 256);
+    assert!(
+        content.len() <= 64 * 1024,
+        "body exceeded byte budget: {} bytes",
+        content.len()
+    );
 }
 
 #[tokio::test]

@@ -3584,6 +3584,7 @@ fn make_capability_activity_envelope(cursor: &str) -> ProductOutboundEnvelope {
             output_bytes: None,
             error_kind: None,
             updated_at: chrono::Utc::now(),
+            activity_order: None,
         }),
     )
 }

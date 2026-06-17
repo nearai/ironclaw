@@ -884,6 +884,7 @@ async fn runtime_payload_from_candidate(
             Ok(RuntimePayloadResolution::Payload(Box::new(payload)))
         }
         RuntimePayloadCandidate::CapabilityActivity(activity) => {
+            let activity_order = activity.activity_order_cursor().as_u64();
             CapabilityActivityView::new(CapabilityActivityViewInput {
                 invocation_id: activity.invocation_id,
                 turn_run_id: activity
@@ -898,6 +899,7 @@ async fn runtime_payload_from_candidate(
                 output_bytes: activity.output_bytes,
                 error_kind: activity.error_kind,
                 updated_at: activity.updated_at,
+                activity_order: Some(activity_order),
             })
             .map(ProductOutboundPayload::CapabilityActivity)
             .map(Box::new)
