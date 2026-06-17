@@ -376,12 +376,21 @@ async fn gsuite_handler_errors_when_refresh_retry_is_still_auth_expired() {
         .await
         .expect_err("retry auth expiry should fail");
 
-    assert_eq!(error.kind(), RuntimeDispatchErrorKind::Backend);
+    assert_eq!(error.kind(), RuntimeDispatchErrorKind::Client);
+    assert!(
+        error.is_auth_required(),
+        "refreshed credential rejected by Google must trigger auth reauthorization; got {error:?}"
+    );
+    let requests = egress.requests();
+    assert_eq!(requests.len(), 2);
+    let refreshed_access = requests[1].credential_injections[0].handle.clone();
     assert_eq!(
         error.reason(),
-        Some(&GsuiteCredentialDispatchReason::BackendAuth)
+        Some(&GsuiteCredentialDispatchReason::AuthRequired {
+            required_secrets: vec![refreshed_access.clone()]
+        })
     );
-    assert_eq!(egress.requests().len(), 2);
+    assert_eq!(error.auth_requirement(), Some(vec![refreshed_access]));
     assert_eq!(
         error.usage().map(|usage| usage.network_egress_bytes),
         Some(246)

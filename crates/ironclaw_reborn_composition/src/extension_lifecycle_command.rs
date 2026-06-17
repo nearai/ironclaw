@@ -1,7 +1,8 @@
 use ironclaw_product_workflow::{
-    LifecycleExtensionSource, LifecycleExtensionSummary, LifecyclePackageKind, LifecyclePackageRef,
-    LifecyclePhase, LifecycleProductAction, LifecycleProductContext, LifecycleProductFacade,
-    LifecycleProductPayload, LifecycleProductResponse, ProductWorkflowError,
+    LifecycleExtensionSource, LifecyclePackageKind, LifecyclePackageRef, LifecyclePhase,
+    LifecycleProductAction, LifecycleProductContext, LifecycleProductFacade,
+    LifecycleProductPayload, LifecycleProductResponse, LifecycleSearchExtensionSummary,
+    ProductWorkflowError,
 };
 use thiserror::Error;
 
@@ -122,28 +123,29 @@ fn extension_package_ref(
 
 fn render_search_payload(
     output: &mut String,
-    extensions: &[LifecycleExtensionSummary],
+    extensions: &[LifecycleSearchExtensionSummary],
     count: usize,
 ) {
     push_line(output, format_args!("count: {count}"));
     for extension in extensions {
+        let summary = &extension.summary;
         push_line(
             output,
             format_args!(
                 "- {}: {} {} ({})",
-                extension.package_ref.id.as_str(),
-                terminal_safe(&extension.name),
-                terminal_safe(&extension.version),
-                extension_source_label(extension.source)
+                summary.package_ref.id.as_str(),
+                terminal_safe(&summary.name),
+                terminal_safe(&summary.version),
+                extension_source_label(summary.source)
             ),
         );
-        if !extension.description.is_empty() {
+        if !summary.description.is_empty() {
             push_line(
                 output,
-                format_args!("  description: {}", terminal_safe(&extension.description)),
+                format_args!("  description: {}", terminal_safe(&summary.description)),
             );
         }
-        render_string_array(output, &extension.visible_capability_ids, "  capability");
+        render_string_array(output, &summary.visible_capability_ids, "  capability");
     }
 }
 
@@ -192,6 +194,7 @@ mod tests {
         AuthContinuationRef, AuthProductScope, AuthProviderId, AuthSurface, CredentialAccountLabel,
     };
     use ironclaw_host_api::{AgentId, InvocationId, ResourceScope, TenantId, UserId};
+    use ironclaw_product_workflow::LifecycleExtensionSummary;
     use secrecy::SecretString;
 
     use super::*;
@@ -316,20 +319,26 @@ mod tests {
             message: None,
             payload: Some(LifecycleProductPayload::ExtensionSearch {
                 count: 1,
-                extensions: vec![LifecycleExtensionSummary {
-                    package_ref: LifecyclePackageRef::new(LifecyclePackageKind::Extension, "evil")
+                extensions: vec![LifecycleSearchExtensionSummary {
+                    summary: LifecycleExtensionSummary {
+                        package_ref: LifecyclePackageRef::new(
+                            LifecyclePackageKind::Extension,
+                            "evil",
+                        )
                         .expect("package ref"),
-                    name: "bad\u{1b}[31mname".to_string(),
-                    version: "0.1.0".to_string(),
-                    description: "line\rrewrite".to_string(),
-                    source: LifecycleExtensionSource::HostBundled,
-                    runtime_kind:
-                        ironclaw_product_workflow::LifecycleExtensionRuntimeKind::WasmTool,
-                    surface_kinds: Vec::new(),
-                    visible_capability_ids: Vec::new(),
-                    visible_read_only_capability_ids: Vec::new(),
-                    credential_requirements: Vec::new(),
-                    onboarding: None,
+                        name: "bad\u{1b}[31mname".to_string(),
+                        version: "0.1.0".to_string(),
+                        description: "line\rrewrite".to_string(),
+                        source: LifecycleExtensionSource::HostBundled,
+                        runtime_kind:
+                            ironclaw_product_workflow::LifecycleExtensionRuntimeKind::WasmTool,
+                        surface_kinds: Vec::new(),
+                        visible_capability_ids: Vec::new(),
+                        visible_read_only_capability_ids: Vec::new(),
+                        credential_requirements: Vec::new(),
+                        onboarding: None,
+                    },
+                    installation_phase: None,
                 }],
             }),
         };

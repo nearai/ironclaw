@@ -119,6 +119,15 @@ export function useChat(threadId) {
     activeRunRef.current = value;
     setActiveRunState(value);
   }, []);
+  // Mirror committed activeRun into the ref. The setActiveRun wrapper keeps
+  // the ref current for back-to-back synchronous reads inside event handlers;
+  // this effect additionally covers paths that set the state directly — the
+  // per-thread reset below uses the raw setter so render stays side-effect
+  // free (no ref mutation during render, which a concurrent render could
+  // discard without rolling back).
+  React.useEffect(() => {
+    activeRunRef.current = activeRun;
+  }, [activeRun]);
   const [channelConnectAction, setChannelConnectAction] = React.useState(null);
 
   const getPendingMessages = React.useCallback(
@@ -149,6 +158,7 @@ export function useChat(threadId) {
 
   const [isProcessing, setIsProcessing] = React.useState(false);
   const [pendingGate, setPendingGate] = React.useState(null);
+  const [stateThreadId, setStateThreadId] = React.useState(threadId);
   const authTokenSubmitRef = React.useRef({
     gateKey: null,
     credentialRef: null,
@@ -162,12 +172,33 @@ export function useChat(threadId) {
   // back to non-default values if that thread actually has an active
   // run / gate. `cooldownUntil` is intentionally not reset — it's a
   // rate-limit timer that applies across threads.
-  React.useEffect(() => {
+  //
+  // This runs DURING render (not in an effect) on purpose. An effect
+  // fires a beat too late: there is one render where the new threadId is
+  // already in scope but pendingGate / isProcessing still hold the prior
+  // thread's values, and any consumer reading them in that render (the
+  // approval card, and the sidebar state mirror in chat.js) briefly
+  // mis-attributes the old thread's gate to the newly opened one — e.g.
+  // a "needs attention" badge bleeding onto a normal thread. React
+  // supports a conditional setState during render for exactly this
+  // "adjust state when a prop changes" case; it re-renders immediately
+  // without committing the stale output. The previous-threadId guard is
+  // itself state (not a ref) so an aborted concurrent render rolls it
+  // back and the reset re-fires on retry instead of being skipped.
+  //
+  // DO NOT move this into a useEffect — that is the regression it fixes.
+  // Two rules keep this pattern correct, and any change here must preserve
+  // both: (1) the guard must be state, not a ref, so it
+  // is rolled back on a discarded render; (2) only plain state setters may
+  // run here (no ref writes / side effects) — that is why this uses the
+  // raw setActiveRunState rather than the activeRunRef-mutating wrapper.
+  if (stateThreadId !== threadId) {
+    setStateThreadId(threadId);
     setIsProcessing(false);
     setPendingGate(null);
-    setActiveRun(null);
+    setActiveRunState(null);
     setChannelConnectAction(null);
-  }, [threadId]);
+  }
 
   const cooldownSeconds = Math.max(0, Math.ceil((cooldownUntil - now) / 1000));
   const pendingAuthGateKey =
@@ -240,15 +271,19 @@ export function useChat(threadId) {
     setActiveRun,
     activeRunRef,
     // Reborn's projection bridge does not yet emit `Text` items for
-    // assistant replies, so the SSE stream only delivers `run_status`.
-    // On terminal success, refetch the timeline so the assistant
-    // message that landed in the thread becomes visible in the UI.
-    // Clear pending optimistic messages first so the real user
-    // message from the server doesn't render alongside its
+    // assistant replies, and never emits `capability_display_preview`
+    // items in the projection state — the assistant reply and the rich
+    // tool input/output cards live only in the thread timeline. Refetch
+    // the timeline on EVERY terminal run (success or not) so both become
+    // visible; a failed/cancelled run still recovers the tool previews for
+    // tools that completed before it terminated. `preserveClientOnly`
+    // keeps the client-side `err-*` failure bubble across the reload.
+    // On success, clear pending optimistic messages first so the real
+    // user message from the server doesn't render alongside its
     // pre-submit optimistic twin.
-    onRunCompleted: () => {
-      setPendingMessages([]);
-      loadHistory();
+    onRunSettled: (_runId, { success }) => {
+      if (success) setPendingMessages([]);
+      loadHistory(undefined, { preserveClientOnly: true });
     },
   });
 
@@ -440,13 +475,13 @@ export function useChat(threadId) {
         always: opts.always,
         credentialRef: opts.credentialRef,
       });
-      const shouldContinueProcessing =
-        resolution === "approved" || resolution === "credential_provided";
+      // Every gate resolution (approved, denied, credential_provided, cancelled)
+      // resumes the run on the backend. Keep processing and preserve activeRun so
+      // the browser stays in sync with the continuing run. The terminal run_status
+      // SSE event (completed/failed/cancelled) is what clears processing naturally.
+      // Run termination is the separate cancelRun (X button) path.
       setPendingGate(null);
-      setIsProcessing(shouldContinueProcessing);
-      if (!shouldContinueProcessing) {
-        setActiveRun(null);
-      }
+      setIsProcessing(true);
     },
     [pendingGate, threadId],
   );

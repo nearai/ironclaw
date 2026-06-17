@@ -1,84 +1,11 @@
 import { React, html } from "../../../lib/html.js";
 import { MarkdownRenderer } from "./markdown-renderer.js";
 import { ToolActivity } from "./tool-activity.js";
-import { Avatar } from "./avatar.js";
 import { Icon } from "../../../design-system/icons.js";
-import { useT } from "../../../lib/i18n.js";
 import { toast } from "../../../lib/toast.js";
-import { fetchAttachmentDataUrl } from "../../../lib/api.js";
+import { ProjectFileChips } from "./project-file-chips.js";
+import { AttachmentChip } from "./attachment-chip.js";
 import { AttachmentPreviewModal } from "./attachment-preview.js";
-
-/* Thumbnail for one message attachment. An optimistic (just-sent) image
-   carries a local data URL in `preview_url` and renders immediately. A
-   persisted image instead carries a `fetch_url`: `<img>` cannot send the
-   session bearer, so the bytes are fetched here and turned into a data URL
-   (the SPA's CSP allows `data:` images, not `blob:`). Anything else —
-   non-images, unlanded refs, or a failed fetch — falls back to the file icon. */
-function AttachmentThumbnail({ att }) {
-  // Only images get a rendered thumbnail. Every landed attachment carries a
-  // `fetch_url` (for click-to-preview of any kind), so the thumbnail must gate
-  // on kind — otherwise a PDF/text would be fetched and shown as a broken
-  // `<img>`. Non-images keep the file icon.
-  const isImage =
-    att.kind === "image" || (att.mime_type || "").toLowerCase().startsWith("image/");
-  const [resolvedUrl, setResolvedUrl] = React.useState(
-    isImage ? att.preview_url || null : null,
-  );
-
-  React.useEffect(() => {
-    if (!isImage || att.preview_url || !att.fetch_url) return undefined;
-    // The local data URL is already renderable; only a persisted image needs
-    // the authenticated byte fetch.
-    let cancelled = false;
-    fetchAttachmentDataUrl(att.fetch_url)
-      .then((url) => {
-        if (!cancelled) setResolvedUrl(url);
-      })
-      .catch(() => {
-        /* Leave the file-icon fallback in place on any read failure. */
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [isImage, att.preview_url, att.fetch_url]);
-
-  if (isImage && resolvedUrl) {
-    return html`<img
-      src=${resolvedUrl}
-      alt=${att.filename || "attachment"}
-      className="h-9 w-9 shrink-0 rounded object-cover"
-    />`;
-  }
-  return html`<${Icon} name="file" className="h-3.5 w-3.5 shrink-0 text-signal" />`;
-}
-
-/* One attachment chip: thumbnail/icon + filename + type/size. Clicking opens
-   the preview modal when the attachment has bytes to show (a landed
-   `fetch_url`, or an optimistic image's local `preview_url`); otherwise it
-   renders as a static row. */
-const ATTACHMENT_CHIP_CLASS =
-  "flex items-center gap-2 rounded-md border border-iron-700 bg-iron-900/50 px-3 py-2 text-xs";
-
-function AttachmentChip({ att, onPreview }) {
-  const inner = html`
-    <${AttachmentThumbnail} att=${att} />
-    <span className="truncate">${att.filename || "attachment"}</span>
-    <span className="ml-auto shrink-0 text-iron-200"
-      >${att.mime_type}${att.size_label ? " / " + att.size_label : ""}</span
-    >
-  `;
-  if (!att.fetch_url && !att.preview_url) {
-    return html`<div className=${ATTACHMENT_CHIP_CLASS}>${inner}</div>`;
-  }
-  return html`<button
-    type="button"
-    onClick=${() => onPreview(att)}
-    aria-label=${`Preview ${att.filename || "attachment"}`}
-    className=${`${ATTACHMENT_CHIP_CLASS} w-full text-left transition-colors hover:border-signal/40 hover:bg-iron-900/80`}
-  >
-    ${inner}
-  </button>`;
-}
 
 /* User keeps a tinted bubble; assistant is borderless (document-like);
    system / error stay as centered tinted notices. Reasoning ("thinking")
@@ -128,10 +55,9 @@ function ThinkingDisclosure({ content }) {
   `;
 }
 
-function MessageBubbleImpl({ message, onRetry }) {
+function MessageBubbleImpl({ message, onRetry, threadId }) {
   const { role, content, images, attachments, generatedImages, isOptimistic, status, error, toolCalls, timestamp } = message;
   const isUser = role === "user";
-  const t = useT();
   const [copied, setCopied] = React.useState(false);
   // The attachment currently open in the preview modal (null when closed).
   const [previewAttachment, setPreviewAttachment] = React.useState(null);
@@ -191,12 +117,6 @@ function MessageBubbleImpl({ message, onRetry }) {
   const isNotice = role === "system" || role === "error";
   const bubbleWidthClass = isUser ? "max-w-[85%]" : isNotice ? "mx-auto max-w-[85%]" : "w-full max-w-[85%]";
   const contentWidthClass = isUser ? "" : "w-full min-w-0 max-w-full";
-  // Persistent identity for the two conversational roles; system / error
-  // stay as centered notices without an avatar.
-  const showIdentity = role === "user" || role === "assistant";
-  const identityName = isUser
-    ? t("chat.identityUser")
-    : t("chat.identityAssistant");
 
   return html`
     <div
@@ -204,20 +124,6 @@ function MessageBubbleImpl({ message, onRetry }) {
       className=${["group flex w-full min-w-0 flex-col", isUser ? "items-end" : "items-start"].join(" ")}
     >
       <div className=${["flex min-w-0 flex-col gap-2", bubbleWidthClass].join(" ")}>
-        ${showIdentity &&
-        html`
-          <div
-            className=${[
-              "flex items-center gap-2 px-1",
-              isUser ? "flex-row-reverse" : "",
-            ].join(" ")}
-          >
-            <${Avatar} role=${role} />
-            <span className="text-xs font-medium text-[var(--v2-text-muted)]">
-              ${identityName}
-            </span>
-          </div>
-        `}
         <div
           className=${[
             "text-base leading-7",
@@ -255,6 +161,12 @@ function MessageBubbleImpl({ message, onRetry }) {
               onClose=${() => setPreviewAttachment(null)}
             />
           `}
+
+          ${role === "assistant" &&
+          html`<${ProjectFileChips}
+            threadId=${threadId}
+            content=${typeof content === "string" ? content : ""}
+          />`}
         </div>
 
         ${(showActions || status === "error" || timeLabel) && html`

@@ -41,7 +41,8 @@ function createUseChatEventsHarness({
   let isProcessing = false;
   let activeRun = null;
   const activeRunRef = { current: null };
-  const completedRuns = [];
+  // [{ runId, success }] in fire order; one entry per settled run.
+  const settledRuns = [];
   const context = {
     Date,
     React: {
@@ -76,7 +77,7 @@ function createUseChatEventsHarness({
       activeRunRef.current = activeRun;
     },
     activeRunRef,
-    onRunCompleted: (runId) => completedRuns.push(runId),
+    onRunSettled: (runId, { success }) => settledRuns.push({ runId, success }),
   });
 
   return {
@@ -97,8 +98,8 @@ function createUseChatEventsHarness({
       activeRun = run;
       activeRunRef.current = run;
     },
-    get completedRuns() {
-      return completedRuns;
+    get settledRuns() {
+      return settledRuns;
     },
   };
 }
@@ -551,11 +552,110 @@ test("useChatEvents: stale completed run status does not refetch timeline", () =
     },
   });
 
-  assert.deepEqual(harness.completedRuns, []);
+  assert.deepEqual(harness.settledRuns, []);
   assert.equal(harness.isProcessing, true);
   assert.deepEqual(plain(harness.activeRun), {
     runId: "run-2",
     threadId: "thread-1",
     status: "running",
   });
+});
+
+test("useChatEvents: terminal success settles the run once", () => {
+  const harness = createUseChatEventsHarness();
+
+  harness.handleEvent({
+    type: "projection_update",
+    frame: {
+      state: {
+        items: [{ run_status: { run_id: "run-1", status: "running" } }],
+      },
+    },
+  });
+  harness.handleEvent({
+    type: "projection_update",
+    frame: {
+      state: {
+        items: [{ run_status: { run_id: "run-1", status: "completed" } }],
+      },
+    },
+  });
+  // Replay of the same terminal projection must not settle twice.
+  harness.handleEvent({
+    type: "projection_update",
+    frame: {
+      state: {
+        items: [{ run_status: { run_id: "run-1", status: "completed" } }],
+      },
+    },
+  });
+
+  assert.deepEqual(harness.settledRuns, [{ runId: "run-1", success: true }]);
+});
+
+test("useChatEvents: terminal failure settles the run as not successful", () => {
+  const harness = createUseChatEventsHarness();
+
+  harness.handleEvent({
+    type: "projection_update",
+    frame: {
+      state: {
+        items: [{ run_status: { run_id: "run-1", status: "running" } }],
+      },
+    },
+  });
+  harness.handleEvent({
+    type: "projection_update",
+    frame: {
+      state: {
+        items: [{ run_status: { run_id: "run-1", status: "failed" } }],
+      },
+    },
+  });
+
+  // A failed run still settles so the timeline reload recovers tool
+  // input/output previews for tools that ran before it terminated.
+  assert.deepEqual(harness.settledRuns, [{ runId: "run-1", success: false }]);
+});
+
+test("useChatEvents: terminal cancellation settles the run as not successful", () => {
+  const harness = createUseChatEventsHarness();
+
+  harness.handleEvent({
+    type: "projection_update",
+    frame: {
+      state: {
+        items: [{ run_status: { run_id: "run-1", status: "running" } }],
+      },
+    },
+  });
+  harness.handleEvent({
+    type: "projection_update",
+    frame: {
+      state: {
+        items: [{ run_status: { run_id: "run-1", status: "cancelled" } }],
+      },
+    },
+  });
+
+  assert.deepEqual(harness.settledRuns, [{ runId: "run-1", success: false }]);
+});
+
+test("useChatEvents: typed failed event settles the run as not successful", () => {
+  const harness = createUseChatEventsHarness();
+
+  harness.handleEvent({
+    type: "failed",
+    frame: {
+      run_state: {
+        run_id: "run-typed-failed-1",
+        status: "Failed",
+        failure: { category: "model_unavailable" },
+      },
+    },
+  });
+
+  assert.deepEqual(harness.settledRuns, [
+    { runId: "run-typed-failed-1", success: false },
+  ]);
 });

@@ -470,6 +470,65 @@ async fn builtin_read_file_failure_reports_missing_path() {
 }
 
 #[tokio::test]
+async fn builtin_read_file_extracts_supported_document_text() {
+    let temp = tempfile::tempdir().unwrap();
+    std::fs::write(
+        temp.path().join("hello.pdf"),
+        include_bytes!("../../../tests/fixtures/hello.pdf"),
+    )
+    .unwrap();
+    let (filesystem, mounts) = mounted_filesystem(temp.path(), MountPermissions::read_only());
+    let runtime = runtime_with_filesystem(filesystem);
+    let context = execution_context_with_mounts(coding_capability_ids(), mounts);
+
+    let output = invoke_with_context(
+        &runtime,
+        READ_FILE_CAPABILITY_ID,
+        json!({"path": "/workspace/hello.pdf", "limit": 5}),
+        context,
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(output["path"], json!("/workspace/hello.pdf"));
+    assert_eq!(output["truncated_by_default"], json!(false));
+    assert!(
+        output["content"]
+            .as_str()
+            .expect("read_file content")
+            .contains("Hello")
+    );
+}
+
+#[tokio::test]
+async fn builtin_read_file_prefers_text_for_pdf_named_git_lfs_pointer() {
+    let temp = tempfile::tempdir().unwrap();
+    std::fs::write(
+        temp.path().join("GPT4.pdf"),
+        "version https://git-lfs.github.com/spec/v1\n\
+oid sha256:dee926384a7c107a9b51273a99fca2aecb3ed6c27ba7ace0fba67a147a63d2aa\n\
+size 7370286\n",
+    )
+    .unwrap();
+    let (filesystem, mounts) = mounted_filesystem(temp.path(), MountPermissions::read_only());
+    let runtime = runtime_with_filesystem(filesystem);
+    let context = execution_context_with_mounts(coding_capability_ids(), mounts);
+
+    let output = invoke_with_context(
+        &runtime,
+        READ_FILE_CAPABILITY_ID,
+        json!({"path": "/workspace/GPT4.pdf"}),
+        context,
+    )
+    .await
+    .unwrap();
+
+    let content = output["content"].as_str().expect("read_file content");
+    assert!(content.contains("version https://git-lfs.github.com/spec/v1"));
+    assert!(content.contains("size 7370286"));
+}
+
+#[tokio::test]
 async fn builtin_coding_glob_reports_visited_entry_budget_as_truncated_result() {
     let temp = tempfile::tempdir().unwrap();
     let (_filesystem, mounts) = mounted_filesystem(temp.path(), MountPermissions::read_only());
