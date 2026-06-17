@@ -111,6 +111,14 @@ pub(crate) fn build_webui_services_with_connectable_channels(
                 crate::attachment_landing::ProjectScopedAttachmentReader::new(workspace_filesystem),
             ));
     }
+    // Standalone read-only filesystem viewer: browses memory + workspace over a
+    // dedicated read-only multi-mount view (not the read-write workspace handle
+    // above), so navigation can never become a write path.
+    if let Some(browse_filesystem) = runtime.webui_browse_filesystem() {
+        api = api.with_filesystem_browser(Arc::new(
+            crate::mount_filesystem_reader::MountScopedFilesystemReader::new(browse_filesystem),
+        ));
+    }
     if let Some(skill_activation_source) = runtime.webui_skill_activation_source() {
         let activation_recorder = Arc::clone(&skill_activation_source);
         let activation_clearer = skill_activation_source;

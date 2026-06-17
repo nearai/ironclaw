@@ -1238,6 +1238,28 @@ impl RebornRuntime {
         })
     }
 
+    /// Read-only scoped filesystem spanning every mount the standalone WebUI
+    /// filesystem viewer can browse (workspace files + persistent memory), over
+    /// the same composite root the agent's tools resolve through. `None` when no
+    /// local runtime is composed, or when the browse mount view can't be built.
+    ///
+    /// Distinct from [`Self::webui_workspace_filesystem`]: that handle is the
+    /// read-write workspace-only view used to land attachments, whereas this is
+    /// a strictly read-only, multi-mount navigation view.
+    pub(crate) fn webui_browse_filesystem(
+        &self,
+    ) -> Option<Arc<ironclaw_filesystem::ScopedFilesystem<crate::factory::LocalDevRootFilesystem>>>
+    {
+        let rt = self.services.local_runtime.as_ref()?;
+        let view = crate::local_dev_mounts::browse_mount_view().ok()?;
+        Some(Arc::new(
+            ironclaw_filesystem::ScopedFilesystem::with_fixed_view(
+                Arc::clone(&rt.extension_filesystem),
+                view,
+            ),
+        ))
+    }
+
     /// Test-only handle on the resource governor backing the budget
     /// accountant. Exposed under `test-support` so integration tests can
     /// assert ledger state after a `send_user_message` round-trip.

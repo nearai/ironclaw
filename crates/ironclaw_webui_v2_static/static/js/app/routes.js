@@ -8,7 +8,7 @@ export const defaultRoute = "/chat";
 // the page's `lib/*-api.js` calls real endpoints.
 export const primaryRoutes = [
   { id: "chat", path: "/chat", labelKey: "nav.chat" },
-  { id: "workspace", path: "/workspace", labelKey: "nav.workspace", hidden: true },
+  { id: "workspace", path: "/workspace", labelKey: "nav.workspace" },
   { id: "projects", path: "/projects", labelKey: "nav.projects", hidden: true },
   { id: "jobs", path: "/jobs", labelKey: "nav.jobs", hidden: true },
   { id: "routines", path: "/routines", labelKey: "nav.routines", hidden: true },
