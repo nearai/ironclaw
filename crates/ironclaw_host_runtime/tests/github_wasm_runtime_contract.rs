@@ -961,6 +961,24 @@ async fn bundled_github_wasm_builds_create_repo_fork_and_release_requests() {
         }),
     );
 
+    let list_my_repos_http = Arc::new(RecordingWasmHostHttp::ok(WasmHttpResponse {
+        status: 200,
+        headers_json: "{}".to_string(),
+        body: br#"[]"#.to_vec(),
+    }));
+    let list_my_repos = execute_bundled_github_wasm(
+        "github.list_repos",
+        json!({"username": "me", "limit": 2}),
+        Arc::clone(&list_my_repos_http),
+    );
+    assert_eq!(list_my_repos.error, None);
+    assert_single_wasm_request(
+        &list_my_repos_http,
+        "GET",
+        "https://api.github.com/user/repos?per_page=2",
+        None,
+    );
+
     let fork_http = Arc::new(RecordingWasmHostHttp::ok(WasmHttpResponse {
         status: 202,
         headers_json: "{}".to_string(),
