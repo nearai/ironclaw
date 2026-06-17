@@ -119,6 +119,15 @@ export function useChat(threadId) {
     activeRunRef.current = value;
     setActiveRunState(value);
   }, []);
+  // Mirror committed activeRun into the ref. The setActiveRun wrapper keeps
+  // the ref current for back-to-back synchronous reads inside event handlers;
+  // this effect additionally covers paths that set the state directly — the
+  // per-thread reset below uses the raw setter so render stays side-effect
+  // free (no ref mutation during render, which a concurrent render could
+  // discard without rolling back).
+  React.useEffect(() => {
+    activeRunRef.current = activeRun;
+  }, [activeRun]);
   const [channelConnectAction, setChannelConnectAction] = React.useState(null);
 
   const getPendingMessages = React.useCallback(
@@ -173,13 +182,14 @@ export function useChat(threadId) {
   // a "needs attention" badge bleeding onto a normal thread. React
   // supports a conditional setState during render for exactly this
   // "adjust state when a prop changes" case; it re-renders immediately
-  // without committing the stale output, and the ref guard keeps it from
-  // looping.
+  // without committing the stale output. The previous-threadId guard is
+  // itself state (not a ref) so an aborted concurrent render rolls it
+  // back and the reset re-fires on retry instead of being skipped.
   if (stateThreadId !== threadId) {
     setStateThreadId(threadId);
     setIsProcessing(false);
     setPendingGate(null);
-    setActiveRun(null);
+    setActiveRunState(null);
     setChannelConnectAction(null);
   }
 
