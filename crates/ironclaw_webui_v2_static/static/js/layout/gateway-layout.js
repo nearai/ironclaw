@@ -16,7 +16,14 @@ import { ToastViewport } from "../components/toast-viewport.js";
 import { React } from "../lib/html.js";
 import { cn } from "../utils/cn.js";
 
-export function GatewayLayout({ token, profile, isChecking = false, isAdmin, onSignOut }) {
+export function GatewayLayout({
+  token,
+  profile,
+  isChecking = false,
+  hasOperatorConfig = false,
+  isAdmin,
+  onSignOut,
+}) {
   const t = useT();
   const { theme, toggleTheme } = useInterfaceTheme();
   const statusQuery = useGatewayStatus(token);
@@ -119,6 +126,7 @@ export function GatewayLayout({ token, profile, isChecking = false, isAdmin, onS
         <${PageHeader}
           threadsState=${threadsState}
           onToggleSidebar=${sidebar.toggle}
+          hasOperatorConfig=${hasOperatorConfig}
         />
         <main className="min-h-0 min-w-0 flex-1 overflow-hidden">
           ${statusQuery.error &&

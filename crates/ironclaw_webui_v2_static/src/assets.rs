@@ -425,7 +425,11 @@ mod tests {
         assert!(auth.contains("Your session expired. Please sign in again."));
         assert!(auth.contains("setIsSessionChecking(Boolean(nextToken))"));
         assert!(auth.contains("setIsSessionChecking(true);"));
-        assert!(auth.contains("isAdmin: Boolean(session?.capabilities?.operator_webui_config)"));
+        assert!(auth.contains(
+            "const hasOperatorConfig = Boolean(session?.capabilities?.operator_webui_config)"
+        ));
+        assert!(auth.contains("hasOperatorConfig,"));
+        assert!(auth.contains("isAdmin: hasOperatorConfig"));
         assert!(!auth.contains("isAdmin: false"));
 
         let sidebar_nav = asset_text("js/components/sidebar-nav.js");

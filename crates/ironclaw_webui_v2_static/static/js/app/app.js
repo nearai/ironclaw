@@ -79,6 +79,7 @@ function AuthenticatedLayout({ auth }) {
         token=${auth.token}
         profile=${auth.profile}
         isChecking=${auth.isChecking}
+        hasOperatorConfig=${auth.hasOperatorConfig}
         isAdmin=${auth.isAdmin}
         onSignOut=${auth.signOut}
       />
@@ -91,6 +92,13 @@ function AdminRoute({ auth }) {
     return html`<${Navigate} to=${defaultRoute} replace />`;
   }
   return html`<${AdminPage} />`;
+}
+
+function OperatorRoute({ auth, children }) {
+  if (!auth.hasOperatorConfig) {
+    return html`<${Navigate} to=${defaultRoute} replace />`;
+  }
+  return children;
 }
 
 export function App() {
@@ -121,7 +129,7 @@ export function App() {
           <${Route} path="automations" element=${html`<${AutomationsPage} />`} />
           <${Route} path="extensions" element=${html`<${ExtensionsPage} />`} />
           <${Route} path="extensions/:tab" element=${html`<${ExtensionsPage} />`} />
-          <${Route} path="logs" element=${html`<${LogsPage} />`} />
+          <${Route} path="logs" element=${html`<${OperatorRoute} auth=${auth}><${LogsPage} /><//>`} />
           <${Route} path="settings" element=${html`<${SettingsPage} />`} />
           <${Route} path="settings/:tab" element=${html`<${SettingsPage} />`} />
           <${Route} path="admin" element=${html`<${AdminRoute} auth=${auth} />`} />

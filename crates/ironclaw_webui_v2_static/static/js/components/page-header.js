@@ -8,7 +8,7 @@ import { TeeShield } from "./tee-shield.js";
 
 const DOCS_URL = "https://docs.ironclaw.com";
 
-export function PageHeader({ threadsState, onToggleSidebar }) {
+export function PageHeader({ threadsState, onToggleSidebar, hasOperatorConfig = false }) {
   const t = useT();
   const location = useLocation();
 
@@ -89,17 +89,20 @@ export function PageHeader({ threadsState, onToggleSidebar }) {
 
       <div className="ml-auto flex shrink-0 items-center gap-1">
         <${TeeShield} />
-        <${NavLink}
-          to="/logs"
-          className=${({ isActive }) =>
-            cn(
-              "grid h-8 w-8 place-items-center rounded-[8px] text-[var(--v2-text-muted)] hover:bg-[var(--v2-surface-muted)] hover:text-[var(--v2-text-strong)]",
-              isActive && "bg-[var(--v2-accent-soft)] text-[var(--v2-accent-text)]"
-            )}
-          title=${t("nav.logs")}
-        >
-          <${Icon} name="list" className="h-4 w-4" />
-        <//>
+        ${hasOperatorConfig &&
+        html`
+          <${NavLink}
+            to="/logs"
+            className=${({ isActive }) =>
+              cn(
+                "grid h-8 w-8 place-items-center rounded-[8px] text-[var(--v2-text-muted)] hover:bg-[var(--v2-surface-muted)] hover:text-[var(--v2-text-strong)]",
+                isActive && "bg-[var(--v2-accent-soft)] text-[var(--v2-accent-text)]"
+              )}
+            title=${t("nav.logs")}
+          >
+            <${Icon} name="list" className="h-4 w-4" />
+          <//>
+        `}
         <a
           href=${DOCS_URL}
           target="_blank"
