@@ -95,7 +95,9 @@ use ironclaw_turns::{
 use ironclaw_host_runtime::MemoryBackedUserProfileSource;
 use ironclaw_turns::run_profile::UserProfileContext;
 
-use crate::default_system_prompt::DefaultSystemPromptIdentitySource;
+use crate::default_system_prompt::{
+    DefaultSystemPromptIdentitySource, EmbeddedDefaultIdentitySource,
+};
 use crate::factory::{LocalDevRootFilesystem, LocalDevTurnStateStore, builtin_extension_registry};
 use crate::local_dev_capability_policy::local_dev_capability_policy;
 use crate::outbound_preferences::{
@@ -120,8 +122,7 @@ use crate::{
     RebornReadinessState, RebornServices, build_reborn_services,
 };
 use production::{
-    EmptyCapabilitySurfaceResolver, EmptyIdentityContextSource,
-    UnavailableApprovalInteractionService, UnavailableCapabilityIo,
+    EmptyCapabilitySurfaceResolver, UnavailableApprovalInteractionService, UnavailableCapabilityIo,
     UnavailableCapabilityPortFactory,
 };
 
@@ -161,6 +162,7 @@ struct RuntimeStoreParts<'a> {
     broadcast_budget_event_sink: Arc<ironclaw_resources::BroadcastBudgetEventSink>,
     subagent_goal_store: Arc<dyn RuntimeSubagentGoalStore>,
     trigger_repository: Option<Arc<dyn ironclaw_triggers::TriggerRepository>>,
+    raw_filesystem: Option<Arc<dyn ironclaw_filesystem::RootFilesystem>>,
 }
 
 fn local_runtime_parts(
@@ -187,6 +189,7 @@ fn local_runtime_parts(
         broadcast_budget_event_sink: Arc::clone(&local_runtime.broadcast_budget_event_sink),
         subagent_goal_store,
         trigger_repository: Some(Arc::clone(&local_runtime.trigger_repository)),
+        raw_filesystem: None,
     }
 }
 
@@ -213,6 +216,9 @@ where
             &graph.scoped_filesystem,
         ))) as Arc<dyn RuntimeSubagentGoalStore>,
         trigger_repository: Some(Arc::clone(&graph.trigger_repository)),
+        raw_filesystem: Some(
+            Arc::clone(&graph.raw_filesystem) as Arc<dyn ironclaw_filesystem::RootFilesystem>
+        ),
     }
 }
 
@@ -2239,6 +2245,7 @@ pub async fn build_reborn_runtime(
         broadcast_budget_event_sink,
         subagent_goal_store,
         trigger_repository: _trigger_repository,
+        raw_filesystem,
     } = runtime_parts;
     let (skill_context_source, skill_activation_source, skill_execution_adapter) =
         match (configured_skill_context_source, local_runtime) {
@@ -2672,31 +2679,35 @@ pub async fn build_reborn_runtime(
                     reason: error.to_string(),
                 })?,
             ) as Arc<dyn HostIdentityContextSource>,
-            None => Arc::new(EmptyIdentityContextSource) as Arc<dyn HostIdentityContextSource>,
+            None => {
+                Arc::new(EmbeddedDefaultIdentitySource::new()) as Arc<dyn HostIdentityContextSource>
+            }
         },
         // Resolve the per-user agent-context profile (timezone/locale/location) from
-        // `context/profile.json` via the workspace filesystem. When a local-dev workspace
-        // filesystem is available, the `MemoryBackedUserProfileSource` adapter reads it;
-        // otherwise `EmptyUserProfileSource` degrades gracefully to `None` (profile unknown).
-        // `extension_filesystem` is the raw `Arc<LocalDevRootFilesystem>` (=
-        // `CompositeRootFilesystem`) — the underlying RootFilesystem the workspace
-        // mounts are built from. `MemoryBackedUserProfileSource` constructs its own
-        // full virtual paths via `profile_scope_and_path` and does not use the
-        // `ScopedFilesystem` mount view, so the raw `RootFilesystem` is correct here.
+        // `context/profile.json` via the workspace filesystem. Production now wires BOTH
+        // optional context sources (neither degrades to Empty any longer):
         //
-        // NOTE: this `Some(local_runtime) => real / None => Empty` guard intentionally
-        // mirrors `identity_context_source` directly above. The production-graph path
-        // (`production_runtime_parts`, `local_runtime: None`) currently wires NEITHER the
-        // identity source NOR this profile source — both degrade to Empty there today.
-        // Wiring the production-graph composition for these optional context sources is a
-        // single deferred follow-up (identity + profile together, to keep them paired);
-        // do not wire only one of them here, or they will diverge. See issue #5013.
+        //   - Identity: `EmbeddedDefaultIdentitySource` serves the compile-time default
+        //     system prompt as a "SYSTEM.md" candidate. Production has no OS storage root,
+        //     so the local-dev `DefaultSystemPromptIdentitySource` file-reader does not apply.
+        //   - Profile: `MemoryBackedUserProfileSource` reads through the production graph's
+        //     raw `RootFilesystem` (portable to the DB-backed production FS). The raw
+        //     filesystem is correct here because `MemoryBackedUserProfileSource` constructs
+        //     its own full virtual paths and does not use the `ScopedFilesystem` mount view.
+        //
+        // The asymmetry is intentional: identity comes from the embedded constant, while the
+        // per-user profile is resolved dynamically via the host filesystem abstraction.
         user_profile_source: match local_runtime {
             Some(local_runtime) => Arc::new(MemoryBackedUserProfileSourceAdapter(
                 MemoryBackedUserProfileSource::new(Arc::clone(&local_runtime.extension_filesystem)
                     as Arc<dyn ironclaw_filesystem::RootFilesystem>),
             )) as Arc<dyn HostUserProfileSource>,
-            None => Arc::new(EmptyUserProfileSource) as Arc<dyn HostUserProfileSource>,
+            None => match raw_filesystem {
+                Some(filesystem) => Arc::new(MemoryBackedUserProfileSourceAdapter(
+                    MemoryBackedUserProfileSource::new(filesystem),
+                )) as Arc<dyn HostUserProfileSource>,
+                None => Arc::new(EmptyUserProfileSource) as Arc<dyn HostUserProfileSource>,
+            },
         },
         model_policy_guard: None,
         model_budget_accountant,
@@ -4842,6 +4853,185 @@ mod tests {
         );
         assert!(runtime.services().readiness.diagnostics.is_empty());
         assert!(runtime.services().readiness.workers.turn_runner);
+
+        runtime.shutdown().await.expect("runtime shutdown");
+    }
+
+    /// Regression guard (issue #5013): the production composition path must wire
+    /// both context sources instead of the Empty fallbacks.
+    ///
+    /// Part 2 (profile) is the caller-level wiring guard: it drives
+    /// `build_reborn_runtime`, then resolves a seeded `context/profile.json`
+    /// through `MemoryBackedUserProfileSource` over the *same*
+    /// `production_graph.raw_filesystem` the `user_profile_source` `None` arm
+    /// threads. The real regression this targets is `raw_filesystem` being
+    /// dropped on the way to `DefaultPlannedRuntimeParts` (per
+    /// `.claude/rules/testing.md` "test through the caller") — that would leave
+    /// the source `EmptyUserProfileSource` and break the resolution assert.
+    ///
+    /// Part 1 (identity) verifies the *behavior* of `EmbeddedDefaultIdentitySource`
+    /// — the source the production `identity_context_source` `None` arm
+    /// constructs. Note it exercises a freshly built instance, not the wired
+    /// one: `RebornRuntime` exposes no facade seam for the identity source, and
+    /// unlike the profile arm the identity arm threads no host handle
+    /// (`EmbeddedDefaultIdentitySource::new()` takes no args), so there is no
+    /// equivalent silent-input-drop risk to guard at the caller. Building the
+    /// runtime above still proves the production composition accepts the
+    /// embedded source in that arm.
+    #[cfg(feature = "libsql")]
+    #[tokio::test]
+    async fn production_runtime_wires_embedded_identity_and_memory_user_profile_sources() {
+        use ironclaw_host_api::VirtualPath;
+        use ironclaw_host_runtime::MemoryBackedUserProfileSource;
+        use ironclaw_loop_support::{HostIdentityContextSource, HostUserProfileSource};
+        use ironclaw_turns::run_profile::PromptMode;
+
+        let owner_id = "prod-context-wiring-owner";
+        let tenant_id_str = "prod-context-wiring-tenant";
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db = Arc::new(
+            libsql::Builder::new_local(dir.path().join("reborn.db"))
+                .build()
+                .await
+                .expect("libsql db"),
+        );
+        let gateway = Arc::new(RecordingGateway {
+            reply: "wiring test".to_string(),
+            requests: Arc::new(StdMutex::new(Vec::new())),
+        });
+
+        let input = RebornRuntimeInput::from_services(
+            RebornBuildInput::libsql(
+                crate::RebornCompositionProfile::Production,
+                owner_id,
+                Arc::clone(&db),
+                dir.path().join("events.db").to_string_lossy(),
+                None,
+                ironclaw_secrets::SecretMaterial::from("01234567890123456789012345678901"),
+            )
+            .with_production_trust_policy(Arc::new(
+                crate::builtin_first_party_trust_policy().expect("trust policy"),
+            ))
+            .with_runtime_policy(EffectiveRuntimePolicy {
+                deployment: DeploymentMode::HostedMultiTenant,
+                requested_profile: RuntimeProfile::SecureDefault,
+                resolved_profile: RuntimeProfile::SecureDefault,
+                filesystem_backend: FilesystemBackendKind::ScopedVirtual,
+                process_backend: ProcessBackendKind::TenantSandbox,
+                network_mode: NetworkMode::Deny,
+                secret_mode: SecretMode::BrokeredHandles,
+                approval_policy: ApprovalPolicy::AskAlways,
+                audit_mode: AuditMode::Standard,
+            })
+            .with_runtime_process_binding(RebornRuntimeProcessBinding::tenant_sandbox(Arc::new(
+                ironclaw_host_runtime::TenantSandboxProcessPort::new(Arc::new(
+                    RecordingSandboxTransport,
+                )),
+            ))),
+        )
+        .with_identity(RebornRuntimeIdentity {
+            tenant_id: tenant_id_str.to_string(),
+            agent_id: "prod-context-wiring-agent".to_string(),
+            source_binding_id: "prod-context-wiring-source".to_string(),
+            reply_target_binding_id: "prod-context-wiring-reply".to_string(),
+        })
+        .with_model_gateway_override(gateway);
+
+        let runtime = build_reborn_runtime(input)
+            .await
+            .expect("production runtime builds");
+
+        // ── Part 1: identity source ──────────────────────────────────────────
+        // Production wires `EmbeddedDefaultIdentitySource`. Verify it yields a
+        // non-empty candidate that contains the embedded default system prompt text.
+        let identity_source = super::EmbeddedDefaultIdentitySource::new();
+        let run_context_for_identity = {
+            let resolved = InMemoryRunProfileResolver::default()
+                .resolve_run_profile(RunProfileResolutionRequest::interactive_default())
+                .await
+                .expect("run profile resolves");
+            let scope = ironclaw_turns::TurnScope::new(
+                TenantId::new(tenant_id_str).expect("tenant id"),
+                None,
+                None,
+                ThreadId::new("identity-test-thread").expect("thread id"),
+            );
+            LoopRunContext::new(scope, TurnId::new(), TurnRunId::new(), resolved)
+        };
+        let identity_candidates = identity_source
+            .load_identity_candidates(&run_context_for_identity, PromptMode::TextOnly)
+            .await
+            .expect("embedded identity source must load without error");
+        assert!(
+            !identity_candidates.is_empty(),
+            "production EmbeddedDefaultIdentitySource must yield at least one candidate; got none"
+        );
+
+        // ── Part 2: user profile source ─────────────────────────────────────
+        // Production wires raw_filesystem from the production store graph so
+        // `MemoryBackedUserProfileSource` can read `context/profile.json`.
+        // Verify by seeding the file, creating the source, and resolving.
+        let raw_filesystem = {
+            let production_runtime = runtime
+                .services()
+                .production_runtime
+                .as_ref()
+                .expect("production runtime must be present for Production profile");
+            match production_runtime {
+                #[cfg(feature = "libsql")]
+                crate::factory::RebornProductionRuntimeServices::LibSql(graph) => {
+                    Arc::clone(&graph.raw_filesystem)
+                        as Arc<dyn ironclaw_filesystem::RootFilesystem>
+                }
+                #[allow(unreachable_patterns)]
+                _ => panic!("expected libsql production runtime in test"),
+            }
+        };
+
+        // Seed the profile via the same raw_filesystem the production source uses.
+        let profile_virtual_path = VirtualPath::new(format!(
+            "/memory/tenants/{tenant_id_str}/users/{owner_id}/agents/_none/projects/_none/context/profile.json"
+        ))
+        .expect("profile virtual path must be valid");
+        raw_filesystem
+            .write_file(
+                &profile_virtual_path,
+                br#"{"timezone":"Asia/Tokyo","locale":"ja-JP","location":"Tokyo, Japan"}"#,
+            )
+            .await
+            .expect("profile seed write must succeed");
+
+        // Build the source the same way `production_runtime_parts` does and resolve.
+        let profile_source = super::MemoryBackedUserProfileSourceAdapter(
+            MemoryBackedUserProfileSource::new(Arc::clone(&raw_filesystem)),
+        );
+        let resolved_profile_run_context = {
+            let resolved = InMemoryRunProfileResolver::default()
+                .resolve_run_profile(RunProfileResolutionRequest::interactive_default())
+                .await
+                .expect("run profile resolves");
+            let scope = ironclaw_turns::TurnScope::new(
+                TenantId::new(tenant_id_str).expect("tenant id"),
+                None,
+                None,
+                ThreadId::new("profile-test-thread").expect("thread id"),
+            );
+            let actor = ironclaw_turns::TurnActor::new(UserId::new(owner_id).expect("user id"));
+            LoopRunContext::new(scope, TurnId::new(), TurnRunId::new(), resolved).with_actor(actor)
+        };
+        let user_profile = profile_source
+            .resolve_user_profile(&resolved_profile_run_context)
+            .await;
+        assert!(
+            user_profile.is_some(),
+            "production user profile source must resolve a seeded profile; got None"
+        );
+        let user_profile = user_profile.unwrap();
+        assert_eq!(
+            user_profile.location.as_deref(),
+            Some("Tokyo, Japan"),
+            "resolved profile must contain the seeded location"
+        );
 
         runtime.shutdown().await.expect("runtime shutdown");
     }

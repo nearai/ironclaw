@@ -42,6 +42,17 @@ pub(crate) struct DefaultSystemPromptIdentitySource {
     loaded_identity_content: Arc<RwLock<HashMap<LoopMessageRef, HostIdentityMessageContent>>>,
 }
 
+fn default_identity_name() -> Result<IdentityFileName, HostIdentityContextBuildError> {
+    IdentityFileName::new(DEFAULT_SYSTEM_PROMPT_NAME)
+}
+
+fn default_identity_message_ref(
+    content: &str,
+) -> Result<LoopMessageRef, HostIdentityContextBuildError> {
+    let name = default_identity_name()?;
+    identity_message_ref(&name, content).map_err(|_| HostIdentityContextBuildError::Internal)
+}
+
 impl DefaultSystemPromptIdentitySource {
     pub(crate) fn try_new(
         storage_root: PathBuf,
@@ -59,26 +70,36 @@ impl DefaultSystemPromptIdentitySource {
         read_default_system_prompt(&self.storage_root, &self.prompt_path)
     }
 
-    fn identity_name() -> Result<IdentityFileName, HostIdentityContextBuildError> {
-        IdentityFileName::new(DEFAULT_SYSTEM_PROMPT_NAME)
-    }
-
-    fn message_ref_for(content: &str) -> Result<LoopMessageRef, HostIdentityContextBuildError> {
-        let name = Self::identity_name()?;
-        identity_message_ref(&name, content).map_err(|_| HostIdentityContextBuildError::Internal)
-    }
-
     fn cache_identity_content(
         &self,
         message_ref: LoopMessageRef,
         content: String,
     ) -> Result<(), HostIdentityContextBuildError> {
-        let name = Self::identity_name()?;
+        let name = default_identity_name()?;
         self.loaded_identity_content
             .write()
             .map_err(|_| HostIdentityContextBuildError::Internal)?
             .insert(message_ref, HostIdentityMessageContent { name, content });
         Ok(())
+    }
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct EmbeddedDefaultIdentitySource {
+    loaded_identity_content: Arc<RwLock<HashMap<LoopMessageRef, HostIdentityMessageContent>>>,
+}
+
+impl EmbeddedDefaultIdentitySource {
+    pub(crate) fn new() -> Self {
+        Self {
+            loaded_identity_content: Arc::new(RwLock::new(HashMap::new())),
+        }
+    }
+}
+
+impl Default for EmbeddedDefaultIdentitySource {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -250,10 +271,53 @@ impl HostIdentityContextSource for DefaultSystemPromptIdentitySource {
         let content = self
             .prompt_content()
             .map_err(|_| HostIdentityContextBuildError::SourceUnavailable)?;
-        let name = Self::identity_name()?;
-        let message_ref = Self::message_ref_for(&content)?;
+        let name = default_identity_name()?;
+        let message_ref = default_identity_message_ref(&content)?;
         let model_visible_bytes = content.len();
         self.cache_identity_content(message_ref.clone(), content)?;
+        Ok(vec![HostIdentityContextCandidate::new_trusted(
+            name,
+            message_ref,
+            format!("identity file {DEFAULT_SYSTEM_PROMPT_NAME} available"),
+            IdentityApplicability::Always,
+            model_visible_bytes,
+        )])
+    }
+
+    async fn resolve_identity_message_content(
+        &self,
+        _run_context: &LoopRunContext,
+        message_ref: &LoopMessageRef,
+    ) -> Result<Option<HostIdentityMessageContent>, HostIdentityContextBuildError> {
+        self.loaded_identity_content
+            .read()
+            .map_err(|_| HostIdentityContextBuildError::Internal)
+            .map(|cache| cache.get(message_ref).cloned())
+    }
+}
+
+#[async_trait]
+impl HostIdentityContextSource for EmbeddedDefaultIdentitySource {
+    async fn load_identity_candidates(
+        &self,
+        _run_context: &LoopRunContext,
+        _mode: PromptMode,
+    ) -> Result<Vec<HostIdentityContextCandidate>, HostIdentityContextBuildError> {
+        let content = DEFAULT_SYSTEM_PROMPT_EMBEDDED.to_string();
+        let name = default_identity_name()?;
+        let message_ref = default_identity_message_ref(&content)?;
+        let model_visible_bytes = content.len();
+        let name_for_cache = name.clone();
+        self.loaded_identity_content
+            .write()
+            .map_err(|_| HostIdentityContextBuildError::Internal)?
+            .insert(
+                message_ref.clone(),
+                HostIdentityMessageContent {
+                    name: name_for_cache,
+                    content,
+                },
+            );
         Ok(vec![HostIdentityContextCandidate::new_trusted(
             name,
             message_ref,
@@ -395,5 +459,34 @@ mod tests {
             .expect_err("symlink should be rejected");
 
         assert!(error.to_string().contains("must not be a symlink"));
+    }
+
+    #[tokio::test]
+    async fn embedded_default_identity_source_yields_system_prompt_candidate() {
+        let source = EmbeddedDefaultIdentitySource::new();
+        let context = test_run_context().await;
+
+        let candidates = source
+            .load_identity_candidates(&context, PromptMode::TextOnly)
+            .await
+            .expect("load candidates");
+
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(candidates[0].name.as_str(), DEFAULT_SYSTEM_PROMPT_NAME);
+
+        let content = source
+            .resolve_identity_message_content(
+                &context,
+                candidates[0]
+                    .message_ref
+                    .as_ref()
+                    .expect("trusted identity has ref"),
+            )
+            .await
+            .expect("resolve content")
+            .expect("content exists");
+
+        assert!(!content.content.is_empty());
+        assert_eq!(content.content, DEFAULT_SYSTEM_PROMPT_EMBEDDED);
     }
 }

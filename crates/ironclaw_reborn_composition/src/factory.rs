@@ -520,6 +520,11 @@ where
     F: RootFilesystem + 'static,
 {
     pub(crate) scoped_filesystem: Arc<ScopedFilesystem<F>>,
+    /// Raw root filesystem (unscoped). Needed by sources that build their own
+    /// fully-qualified virtual paths and must bypass the `ScopedFilesystem`
+    /// mount view — e.g. `MemoryBackedUserProfileSource` for the per-user
+    /// `context/profile.json` on the production composition path.
+    pub(crate) raw_filesystem: Arc<F>,
     /// Registry used by the production host runtime for extension descriptors.
     #[allow(dead_code)]
     pub(crate) extension_registry: Arc<ExtensionRegistry>,
@@ -3147,6 +3152,7 @@ where
     let audit_log = Arc::clone(&event_stores.audit);
     let production_runtime_graph = Arc::new(RebornProductionRuntimeStoreGraph {
         scoped_filesystem: Arc::clone(&stores.scoped_filesystem),
+        raw_filesystem: Arc::clone(&stores.filesystem),
         extension_registry: Arc::clone(&extension_registry),
         turn_state: Arc::clone(&turn_state),
         checkpoint_state_store: Arc::clone(&checkpoint_state_store),
