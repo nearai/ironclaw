@@ -1,12 +1,10 @@
 import { ArrowDown, MessageSquare } from "lucide-react";
 import { type ReactNode, useCallback, useEffect, useRef, useState } from "react";
 import { ScrollArea } from "@/components/ui/scroll-area";
-import { Skeleton } from "@/components/ui/skeleton";
 import { cn } from "@/lib/utils";
 
 interface ChatMessageListProps {
   children: ReactNode;
-  loading?: boolean;
   empty?: boolean;
   emptyMessage?: string;
   streamLoading?: boolean;
@@ -16,7 +14,6 @@ const NEAR_BOTTOM_THRESHOLD = 120;
 
 export function ChatMessageList({
   children,
-  loading,
   empty,
   emptyMessage = "No messages yet",
   streamLoading,
@@ -41,16 +38,12 @@ export function ChatMessageList({
     bottomRef.current?.scrollIntoView({ behavior, block: "end" });
   }, []);
 
-  const prevLoadingRef = useRef(loading);
   const prevEmptyRef = useRef(empty);
   const prevStreamLoadingRef = useRef(streamLoading);
   const userScrolledAwayRef = useRef(false);
 
   useEffect(() => {
-    const wasLoading = prevLoadingRef.current;
     const wasEmpty = prevEmptyRef.current;
-    const wasStreaming = prevStreamLoadingRef.current;
-    prevLoadingRef.current = loading;
     prevEmptyRef.current = empty;
     prevStreamLoadingRef.current = streamLoading;
 
@@ -60,22 +53,12 @@ export function ChatMessageList({
       return;
     }
 
-    if (wasLoading && !loading) {
-      userScrolledAwayRef.current = false;
-      requestAnimationFrame(() => scrollToBottom("instant"));
-      return;
-    }
-
-    if (!wasStreaming && streamLoading) {
-      userScrolledAwayRef.current = false;
-    }
-
     if (userScrolledAwayRef.current) return;
 
     if (isNearBottom()) {
       requestAnimationFrame(() => scrollToBottom("smooth"));
     }
-  }, [children, loading, empty, streamLoading, isNearBottom, scrollToBottom]);
+  }, [children, empty, streamLoading, isNearBottom, scrollToBottom]);
 
   useEffect(() => {
     const vp = viewportRef.current;
@@ -84,7 +67,7 @@ export function ChatMessageList({
     const onScroll = () => {
       const nearBottom = isNearBottom();
       setShowScrollButton(!nearBottom);
-      if (!nearBottom && (prevStreamLoadingRef.current || prevLoadingRef.current)) {
+      if (!nearBottom && prevStreamLoadingRef.current) {
         userScrolledAwayRef.current = true;
       }
       if (nearBottom) {
@@ -95,23 +78,6 @@ export function ChatMessageList({
     vp.addEventListener("scroll", onScroll, { passive: true });
     return () => vp.removeEventListener("scroll", onScroll);
   }, [isNearBottom]);
-
-  if (loading) {
-    return (
-      <div className="flex-1 p-4">
-        <div className="mx-auto max-w-4xl space-y-4">
-          {Array.from({ length: 4 }).map((_, i) => (
-            <div key={i} className={`flex ${i % 2 === 0 ? "justify-end" : "justify-start"}`}>
-              <div className={`space-y-2 ${i % 2 === 0 ? "max-w-[60%]" : "max-w-[75%]"}`}>
-                <Skeleton className="h-4 w-32" />
-                <Skeleton className="h-16 w-full rounded-xl" />
-              </div>
-            </div>
-          ))}
-        </div>
-      </div>
-    );
-  }
 
   if (empty) {
     return (
