@@ -149,6 +149,7 @@ export function useChat(threadId) {
 
   const [isProcessing, setIsProcessing] = React.useState(false);
   const [pendingGate, setPendingGate] = React.useState(null);
+  const [stateThreadId, setStateThreadId] = React.useState(threadId);
   const authTokenSubmitRef = React.useRef({
     gateKey: null,
     credentialRef: null,
@@ -174,9 +175,8 @@ export function useChat(threadId) {
   // "adjust state when a prop changes" case; it re-renders immediately
   // without committing the stale output, and the ref guard keeps it from
   // looping.
-  const lastThreadIdRef = React.useRef(threadId);
-  if (lastThreadIdRef.current !== threadId) {
-    lastThreadIdRef.current = threadId;
+  if (stateThreadId !== threadId) {
+    setStateThreadId(threadId);
     setIsProcessing(false);
     setPendingGate(null);
     setActiveRun(null);
