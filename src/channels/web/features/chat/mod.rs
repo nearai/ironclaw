@@ -1191,6 +1191,9 @@ fn in_progress_from_thread(thread: &crate::agent::session::Thread) -> Option<InP
     if turn.state != crate::agent::session::TurnState::Processing {
         return None;
     }
+    if turn.response.is_some() || turn.completed_at.is_some() {
+        return None;
+    }
     Some(InProgressInfo {
         turn_number: turn.turn_number,
         user_message_id: turn.user_message_id,
@@ -1299,6 +1302,12 @@ fn turn_tool_calls_succeeded(turn: &TurnInfo) -> bool {
     }
 }
 
+fn turn_has_terminal_response(turn: &TurnInfo) -> bool {
+    // DB reconciliation waits for both fields so a partially persisted response
+    // does not hide an actually stuck tool step.
+    turn.response.is_some() && turn.completed_at.is_some()
+}
+
 fn reconcile_in_progress_with_turns(
     turns: &mut [TurnInfo],
     in_progress: Option<InProgressInfo>,
@@ -1314,14 +1323,15 @@ fn reconcile_in_progress_with_turns(
     };
 
     if in_progress_matches_turn(last_turn, &in_progress) {
-        // Only treat the matching turn as "already done" if the model wrote
-        // a final response AND the trailing tool call is in a successful
-        // terminal state (see `turn_tool_calls_succeeded`). Earlier failed
-        // attempts are allowed as long as a later retry succeeded — that's
-        // a legitimate recovery. A trailing unfinished / errored tool call
-        // keeps the processing affordance visible so the user sees the
-        // stuck step instead of fabricated success (#1993).
-        if last_turn.response.is_some() && turn_tool_calls_succeeded(last_turn) {
+        // A completed turn must not keep the browser's "Working" affordance
+        // alive after a final response (#4961). While the response is still
+        // absent, keep failed / unfinished tool calls visible as in-progress
+        // so the user sees the stuck step instead of a fabricated success
+        // (#1993). Earlier failed attempts are allowed as long as a later
+        // retry succeeded — that's a legitimate recovery.
+        if turn_has_terminal_response(last_turn)
+            || (last_turn.response.is_some() && turn_tool_calls_succeeded(last_turn))
+        {
             None
         } else {
             last_turn.state = in_progress.state.clone();
@@ -1478,14 +1488,12 @@ mod tests {
         );
     }
 
-    /// Regression for #1993 — after a 502 mid-turn the response text can
-    /// be persisted but the claimed tool call never completes. On chat
-    /// reopen, naive rehydration dropped the in-progress flag and showed
-    /// the fabricated "Done!" as if the action had succeeded. The fix
-    /// keeps the matching turn in-progress whenever any recorded tool
-    /// call errored or never produced a result.
+    /// Regression for #1993 — after a 502 mid-turn the claimed tool call
+    /// may never complete. On chat reopen, naive rehydration dropped the
+    /// in-progress flag and hid the stuck action. Keep the matching turn
+    /// in-progress while no terminal response has been recorded.
     #[test]
-    fn test_reconcile_retains_in_progress_when_tool_call_failed() {
+    fn test_reconcile_retains_in_progress_when_tool_call_failed_without_terminal_response() {
         use crate::channels::web::types::ToolCallInfo;
 
         let started_at = chrono::Utc::now().to_rfc3339();
@@ -1494,11 +1502,10 @@ mod tests {
             turn_number: 1,
             user_message_id: Some(user_message_id),
             user_input: "send 'hi' to telegram".to_string(),
-            // Model claimed success even though the tool call errored.
-            response: Some("Done! I've sent 'hi' to your Telegram.".to_string()),
-            state: "Completed".to_string(),
+            response: None,
+            state: "Processing".to_string(),
             started_at: started_at.clone(),
-            completed_at: Some(started_at.clone()),
+            completed_at: None,
             tool_calls: vec![ToolCallInfo {
                 name: "telegram_send".to_string(),
                 has_result: false,
@@ -1527,9 +1534,80 @@ mod tests {
         assert!(
             reconciled.is_some(),
             "a turn with a failed tool call must stay in-progress so the UI \
-             does not show the fabricated success"
+             does not hide the stuck action"
         );
         assert_eq!(turns[0].state, "Processing");
+    }
+
+    #[test]
+    fn test_reconcile_drops_in_progress_when_failed_tool_has_terminal_response() {
+        use crate::channels::web::types::ToolCallInfo;
+
+        let started_at = chrono::Utc::now().to_rfc3339();
+        let user_message_id = Uuid::new_v4();
+        let mut turns = vec![TurnInfo {
+            turn_number: 1,
+            user_message_id: Some(user_message_id),
+            user_input: "try the flaky tool".to_string(),
+            response: Some("I stopped because I was repeating the same step.".to_string()),
+            state: "Failed".to_string(),
+            started_at: started_at.clone(),
+            completed_at: Some(started_at.clone()),
+            tool_calls: vec![ToolCallInfo {
+                name: "shell".to_string(),
+                has_result: false,
+                has_error: true,
+                call_id: None,
+                result_preview: None,
+                result: None,
+                error: Some("command failed".to_string()),
+                rationale: None,
+            }],
+            generated_images: Vec::new(),
+            narrative: None,
+        }];
+
+        let reconciled = reconcile_in_progress_with_turns(
+            &mut turns,
+            Some(InProgressInfo {
+                turn_number: 1,
+                user_message_id: Some(user_message_id),
+                state: "Processing".to_string(),
+                user_input: "try the flaky tool".to_string(),
+                started_at,
+            }),
+        );
+
+        assert!(
+            reconciled.is_none(),
+            "a terminal response means the run is no longer working, even if \
+             the final tool call failed"
+        );
+        assert_eq!(turns[0].state, "Failed");
+    }
+
+    #[test]
+    fn test_in_progress_from_thread_drops_processing_turn_with_response() {
+        let mut thread = crate::agent::session::Thread::new(Uuid::new_v4(), Some("gateway"));
+        thread.start_turn("stop after retry loop");
+        {
+            let turn = thread.turns.last_mut().expect("turn");
+            turn.response = Some("I stopped because I was repeating the same step.".to_string());
+        }
+
+        assert!(in_progress_from_thread(&thread).is_none());
+    }
+
+    #[test]
+    fn test_in_progress_from_thread_drops_processing_turn_with_completion_time() {
+        let mut thread = crate::agent::session::Thread::new(Uuid::new_v4(), Some("gateway"));
+        thread.start_turn("stop after timeout");
+        {
+            let turn = thread.turns.last_mut().expect("turn");
+            turn.completed_at = Some(chrono::Utc::now());
+        }
+
+        assert!(in_progress_from_thread(&thread).is_none());
     }
 
     /// Regression for serrrfirat's review on PR #2753 — the original
@@ -2340,6 +2418,94 @@ mod tests {
         assert_eq!(turns[0]["state"], "Completed");
         assert_eq!(turns[0]["user_input"], "What is 2+2?");
         assert_eq!(turns[0]["response"], "4");
+    }
+
+    #[cfg(feature = "libsql")]
+    #[tokio::test]
+    async fn test_chat_history_handler_drops_in_progress_for_terminal_failed_tool_response() {
+        use axum::body::Body;
+        use tower::ServiceExt;
+
+        let (db, _tmp) = crate::testing::test_db().await;
+        let session_manager = Arc::new(SessionManager::new());
+        let state =
+            test_gateway_state_with_store_and_session_manager(Arc::clone(&db), session_manager);
+        let app = Router::new()
+            .route("/api/chat/history", get(chat_history_handler))
+            .with_state(state);
+
+        let thread_id = db
+            .create_conversation("gateway", "test-user", None)
+            .await
+            .expect("create conversation");
+        let user_message_id = db
+            .add_conversation_message(thread_id, "user", "try the flaky tool")
+            .await
+            .expect("add user message");
+        db.add_conversation_message(
+            thread_id,
+            "tool_calls",
+            &serde_json::json!([{
+                "name": "shell",
+                "tool_call_id": "call-1",
+                "error": "command failed",
+            }])
+            .to_string(),
+        )
+        .await
+        .expect("add tool call summary");
+        db.add_conversation_message(
+            thread_id,
+            "assistant",
+            "I stopped because I was repeating the same step.",
+        )
+        .await
+        .expect("add assistant message");
+        db.update_conversation_metadata_field(
+            thread_id,
+            "live_state",
+            &serde_json::json!({
+                "turn_number": 0,
+                "user_message_id": user_message_id,
+                "state": "Processing",
+                "user_input": "try the flaky tool",
+                "started_at": chrono::Utc::now().to_rfc3339(),
+            }),
+        )
+        .await
+        .expect("set stale live_state");
+
+        let mut req = axum::http::Request::builder()
+            .method("GET")
+            .uri(format!("/api/chat/history?thread_id={thread_id}"))
+            .body(Body::empty())
+            .expect("request");
+        req.extensions_mut().insert(UserIdentity {
+            user_id: "test-user".to_string(),
+            role: "member".to_string(),
+            workspace_read_scopes: Vec::new(),
+        });
+
+        let resp = ServiceExt::<axum::http::Request<Body>>::oneshot(app, req)
+            .await
+            .expect("response");
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let body = axum::body::to_bytes(resp.into_body(), 1024 * 64)
+            .await
+            .expect("body");
+        let payload: serde_json::Value =
+            serde_json::from_slice(&body).expect("history response json");
+
+        assert!(payload.get("in_progress").is_none());
+        let turns = payload["turns"].as_array().expect("turns array");
+        assert_eq!(turns.len(), 1);
+        assert_eq!(
+            turns[0]["response"],
+            "I stopped because I was repeating the same step."
+        );
+        assert_eq!(turns[0]["state"], "Completed");
+        assert_eq!(turns[0]["tool_calls"][0]["error"], "command failed");
     }
 
     #[cfg(feature = "libsql")]

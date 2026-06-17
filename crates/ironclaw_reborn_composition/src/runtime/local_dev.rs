@@ -305,6 +305,7 @@ impl LocalDevCapabilityIo {
                 result_ref: record.result_ref,
                 truncated: record.truncated,
                 updated_at: Utc::now(),
+                activity_order: None,
             }) {
                 Ok(preview) => preview,
                 Err(error) => {

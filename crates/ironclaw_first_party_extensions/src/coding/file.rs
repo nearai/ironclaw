@@ -18,6 +18,7 @@ use super::{
     input_error,
     inputs::{optional_usize, required_str},
     operation_error_with_summary,
+    patch::{parse_apply_patch_input, replacement_error},
     paths::{
         create_parent_dir_unless_sensitive, deny_sensitive_existing_path, filesystem_error,
         is_excluded_name, is_sensitive_scoped_path, is_workspace_path, operation_allowed,
@@ -25,7 +26,7 @@ use super::{
         virtual_to_relative,
     },
     state::{SharedCodingEditLocks, read_scope_key},
-    text::{count_matches, decode_text, encode_text, reject_binary_probe, replace_content},
+    text::{TextEdit, decode_text, encode_text, reject_binary_probe, replace_content},
     types::{ListEntry, MatchMethod, ResolvedPath},
 };
 
@@ -330,16 +331,7 @@ pub(super) async fn apply_patch(
             RuntimeDispatchErrorKind::FilesystemDenied,
         ));
     }
-    let old_string = required_str(request.input, "old_string")?;
-    let new_string = required_str(request.input, "new_string")?;
-    if old_string == new_string {
-        return Err(input_error());
-    }
-    let replace_all = request
-        .input
-        .get("replace_all")
-        .and_then(Value::as_bool)
-        .unwrap_or(false);
+    let patch_input = parse_apply_patch_input(request.input)?;
     let scope = read_scope_key(request);
     let _edit_guard = edit_locks
         .lock_edit(&scope, resolved.virtual_path.as_str())
@@ -374,23 +366,23 @@ pub(super) async fn apply_patch(
         })?;
     reject_binary_probe(&bytes)?;
     let (content, encoding, line_ending) = decode_text(&bytes)?;
-    let (match_count, match_method) = count_matches(&content, old_string);
-    if match_count == 0 {
-        return Err(operation_error_with_summary(format!(
-            "apply_patch failed for {}: old_string matched 0 times",
-            safe_summary_path(resolved.scoped_path.as_str())
-        )));
-    }
-    if !replace_all && match_count > 1 {
-        return Err(operation_error_with_summary(format!(
-            "apply_patch failed for {}: old_string matched {match_count} times; set replace_all=true or provide a unique old_string",
-            safe_summary_path(resolved.scoped_path.as_str())
-        )));
-    }
-
-    let (new_content, replacements) =
-        replace_content(&content, old_string, new_string, replace_all, match_count)?;
-    let output = encode_text(&new_content, encoding, line_ending);
+    let text_edits = patch_input
+        .edits
+        .iter()
+        .map(|edit| TextEdit {
+            old_string: edit.old_string.as_str(),
+            new_string: edit.new_string.as_str(),
+        })
+        .collect::<Vec<_>>();
+    let replacement =
+        replace_content(&content, &text_edits, patch_input.replace_all).map_err(|error| {
+            replacement_error(
+                error,
+                safe_summary_path(resolved.scoped_path.as_str()),
+                patch_input.edits.len(),
+            )
+        })?;
+    let output = encode_text(&replacement.content, encoding, line_ending);
     request
         .filesystem
         .write_file(&resolved.virtual_path, &output)
@@ -400,13 +392,17 @@ pub(super) async fn apply_patch(
         })?;
     let mut result = json!({
         "path": resolved.scoped_path.as_str(),
-        "replacements": replacements,
+        "replacements": replacement.replacements,
         "success": true
     });
-    if match_method != MatchMethod::Exact {
-        result["match_method"] = json!(format!("{match_method:?}"));
+    if replacement.match_method != MatchMethod::Exact {
+        result["match_method"] = json!(replacement.match_method.as_wire_name());
     }
-    let display_preview = file_diff_preview(resolved.scoped_path.as_str(), &content, &new_content);
+    let display_preview = file_diff_preview(
+        resolved.scoped_path.as_str(),
+        &content,
+        &replacement.content,
+    );
     Ok(CodingCapabilityOutput::with_display_preview(
         result,
         Some(display_preview),

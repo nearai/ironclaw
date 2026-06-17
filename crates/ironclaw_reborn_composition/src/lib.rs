@@ -91,7 +91,7 @@ mod profile_approval_authorization;
 mod project_filesystem_reader;
 mod projection;
 mod trajectory_observer;
-pub use auth_prompt::{AuthChallengeProvider, AuthChallengeView};
+pub use auth_prompt::{AuthChallengeProvider, AuthChallengeView, BlockedAuthFlowCanceller};
 #[cfg(feature = "slack-v2-host-beta")]
 mod delivered_gate_routing;
 #[cfg(feature = "root-llm-provider")]

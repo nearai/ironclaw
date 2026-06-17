@@ -4,6 +4,7 @@
 //! authority-bearing wiring: authenticated callers, ProductWorkflow,
 //! conversation binding, durable idempotency/ref stores, and projection reads.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -12,7 +13,7 @@ use ironclaw_attachments::InboundAttachment;
 use ironclaw_filesystem::{RootFilesystem, ScopedFilesystem};
 use ironclaw_host_api::{
     AgentId, InvocationId, MountAlias, MountGrant, MountPermissions, MountView, ProjectId,
-    ResourceScope, TenantId, UserId, VirtualPath,
+    ResourceScope, TenantId, ThreadId, UserId, VirtualPath,
 };
 use ironclaw_product_adapters::{
     AdapterInstallationId, ProductAdapterError, ProductAdapterId, ProductInboundAck,
@@ -34,15 +35,18 @@ use ironclaw_reborn_openai_compat::{
     OpenAiChatProjectionStreamRequest, OpenAiCompatErrorKind, OpenAiCompatHttpError,
     OpenAiCompatInboundAttachmentSubmit, OpenAiCompatProjectionStreamer, OpenAiCompatRefStore,
     OpenAiCompatResourceBinding, OpenAiCompatRouterState, OpenAiResponseErrorObject,
-    OpenAiResponseObject, OpenAiResponseOutputItem, OpenAiResponseOutputItemStatus,
-    OpenAiResponseProjection, OpenAiResponseProjectionStreamRequest, OpenAiResponseReadRequest,
-    OpenAiResponseStatus, OpenAiResponseWaitRequest, OpenAiResponsesMessageRole,
-    OpenAiResponsesProjectionReader, OpenAiResponsesWorkflow, openai_compat_router_with_state,
-    openai_compat_routes,
+    OpenAiResponseId, OpenAiResponseObject, OpenAiResponseOutputItem,
+    OpenAiResponseOutputItemStatus, OpenAiResponseProjection,
+    OpenAiResponseProjectionStreamRequest, OpenAiResponseReadRequest, OpenAiResponseStatus,
+    OpenAiResponseWaitRequest, OpenAiResponsesMessageRole, OpenAiResponsesProjectionReader,
+    OpenAiResponsesWorkflow, openai_compat_router_with_state, openai_compat_routes,
 };
 use ironclaw_reborn_openai_compat_storage::FilesystemOpenAiCompatRefStore;
 use ironclaw_threads::{
-    FinalizedAssistantMessageByRunRequest, SessionThreadError, SessionThreadService, ThreadScope,
+    FinalizedAssistantMessageByRunRequest, LoadContextMessagesRequest, MessageKind, MessageStatus,
+    ProviderToolCallReferenceEnvelope, SessionThreadError, SessionThreadService,
+    ThreadHistoryRequest, ThreadMessageId, ThreadMessageRecord, ThreadScope,
+    ToolResultReferenceEnvelope,
 };
 
 use crate::RebornBuildError;
@@ -352,13 +356,136 @@ impl OpenAiResponsesThreadProjectionReader {
         }
     }
 
-    async fn read_finalized_response_message(
+    /// Project a single response run into OpenAI Responses `output` items: every
+    /// tool call paired with its raw output, then the run's finalized assistant
+    /// message. Tool items always precede the assistant message regardless of
+    /// transcript sequence — the assistant draft's sequence is reserved when the
+    /// turn starts, which can predate the tool results it later produces.
+    ///
+    /// The data is joined from two thread-service reads because neither one
+    /// alone carries everything: the history projection keeps `turn_run_id`
+    /// (run attribution) plus the tool-result envelope content (the raw
+    /// `model_observation`) but strips `tool_result_provider_call`, while the
+    /// context projection preserves the provider call (function name, arguments,
+    /// call id) but drops `turn_run_id`. Joining by `message_id` recovers both.
+    async fn read_run_output(
         &self,
         request: &ProjectionReadRequest,
         turn_run_id: String,
-    ) -> Result<Option<String>, OpenAiCompatHttpError> {
+        public_id: &OpenAiResponseId,
+    ) -> Result<RunResponseProjection, OpenAiCompatHttpError> {
         let thread_scope = thread_scope_from_projection_read(request)?;
-        match self
+        let thread_id = request.scope.thread_id.clone();
+
+        let history = self
+            .thread_service
+            .list_thread_history(ThreadHistoryRequest {
+                scope: thread_scope.clone(),
+                thread_id: thread_id.clone(),
+            })
+            .await
+            .map_err(map_thread_read_error)?;
+
+        let run_messages: Vec<&ThreadMessageRecord> = history
+            .messages
+            .iter()
+            .filter(|message| message.turn_run_id.as_deref() == Some(turn_run_id.as_str()))
+            .collect();
+
+        // Tool calls/outputs, in transcript order. Finalized only: history can
+        // surface redacted/deleted messages, and matching the finalized status
+        // these rows are appended with avoids leaking redacted tool activity
+        // (including a `tool_result_ref` fallback call id).
+        let mut tool_results: Vec<&ThreadMessageRecord> = run_messages
+            .iter()
+            .copied()
+            .filter(|message| {
+                message.kind == MessageKind::ToolResultReference
+                    && message.status == MessageStatus::Finalized
+            })
+            .collect();
+        tool_results.sort_by_key(|message| message.sequence);
+        // The run's single finalized assistant reply (drafts dedup by run).
+        let assistant = run_messages
+            .iter()
+            .copied()
+            .filter(|message| {
+                message.kind == MessageKind::Assistant && message.status == MessageStatus::Finalized
+            })
+            .max_by_key(|message| message.sequence);
+
+        let provider_calls = self
+            .load_provider_calls(
+                &thread_scope,
+                &thread_id,
+                tool_results
+                    .iter()
+                    .map(|message| message.message_id)
+                    .collect(),
+            )
+            .await?;
+
+        let mut items = Vec::with_capacity(tool_results.len() * 2 + 1);
+        for message in tool_results {
+            push_tool_output_items(&mut items, message, &provider_calls);
+        }
+        if let Some(message) = assistant {
+            items.push(OpenAiResponseOutputItem::Message {
+                id: format!("msg_{}", public_id.as_str()),
+                status: Some(OpenAiResponseOutputItemStatus::Completed),
+                role: OpenAiResponsesMessageRole::Assistant,
+                content: serde_json::json!([{
+                    "type": "output_text",
+                    "text": message.content.clone().unwrap_or_default(),
+                }]),
+            });
+        }
+
+        Ok(RunResponseProjection {
+            items,
+            assistant_finalized: assistant.is_some(),
+        })
+    }
+
+    /// Re-read the run's tool-result messages through the context projection to
+    /// recover `tool_result_provider_call`, which the history projection strips.
+    async fn load_provider_calls(
+        &self,
+        scope: &ThreadScope,
+        thread_id: &ThreadId,
+        message_ids: Vec<ThreadMessageId>,
+    ) -> Result<HashMap<ThreadMessageId, ProviderToolCallReferenceEnvelope>, OpenAiCompatHttpError>
+    {
+        if message_ids.is_empty() {
+            return Ok(HashMap::new());
+        }
+        let context = self
+            .thread_service
+            .load_context_messages(LoadContextMessagesRequest {
+                scope: scope.clone(),
+                thread_id: thread_id.clone(),
+                message_ids,
+            })
+            .await
+            .map_err(map_thread_read_error)?;
+        Ok(context
+            .messages
+            .into_iter()
+            .filter_map(|message| Some((message.message_id?, message.tool_result_provider_call?)))
+            .collect())
+    }
+
+    /// Cheap completion gate for the wait poll loop: the run has produced its
+    /// final reply once a finalized assistant message exists for it. Kept
+    /// separate from [`read_run_output`] so polling does not repeatedly read the
+    /// full transcript while waiting.
+    async fn run_completed(
+        &self,
+        request: &ProjectionReadRequest,
+        turn_run_id: String,
+    ) -> Result<bool, OpenAiCompatHttpError> {
+        let thread_scope = thread_scope_from_projection_read(request)?;
+        let message = self
             .thread_service
             .finalized_assistant_message_by_run(FinalizedAssistantMessageByRunRequest {
                 scope: thread_scope,
@@ -366,30 +493,13 @@ impl OpenAiResponsesThreadProjectionReader {
                 turn_run_id,
             })
             .await
-        {
-            Ok(message) => Ok(message.map(|message| message.content.unwrap_or_default())),
-            Err(
-                SessionThreadError::UnknownThread { .. }
-                | SessionThreadError::ThreadScopeMismatch { .. },
-            ) => Err(OpenAiCompatHttpError::not_found(Some(
-                "response_id".to_string(),
-            ))),
-            Err(error) => {
-                tracing::warn!(
-                    target = "ironclaw::reborn::openai_compat",
-                    error = %error,
-                    "failed to read finalized assistant message for OpenAI-compatible response"
-                );
-                Err(OpenAiCompatHttpError::from_kind(
-                    503,
-                    true,
-                    OpenAiCompatErrorKind::ServiceUnavailable,
-                    None,
-                ))
-            }
-        }
+            .map_err(map_thread_read_error)?;
+        Ok(message.is_some())
     }
 
+    /// Drain the projection event stream for the run's latest status. Used while
+    /// polling so a failed/cancelled run surfaces even before (or without) a
+    /// finalized assistant message.
     async fn read_projected_response_status(
         &self,
         request: &ProjectionReadRequest,
@@ -412,6 +522,101 @@ impl OpenAiResponsesThreadProjectionReader {
     }
 }
 
+/// A response run's projected `output` items plus whether the run's final
+/// assistant message has been finalized (i.e. the run is complete).
+struct RunResponseProjection {
+    items: Vec<OpenAiResponseOutputItem>,
+    assistant_finalized: bool,
+}
+
+/// Append a tool call and its raw output to `items`. When the provider-call side
+/// channel is available, both a `function_call` (name/arguments) and the paired
+/// `function_call_output` are emitted; otherwise only the output is emitted,
+/// keyed by the opaque tool-result ref so the call id still correlates.
+fn push_tool_output_items(
+    items: &mut Vec<OpenAiResponseOutputItem>,
+    message: &ThreadMessageRecord,
+    provider_calls: &HashMap<ThreadMessageId, ProviderToolCallReferenceEnvelope>,
+) {
+    let output = tool_result_output(message);
+    match provider_calls.get(&message.message_id) {
+        Some(provider_call) => {
+            let call_id = provider_call.provider_call_id.clone();
+            let arguments = serde_json::to_string(&provider_call.arguments)
+                .unwrap_or_else(|_| "{}".to_string());
+            items.push(OpenAiResponseOutputItem::FunctionCall {
+                id: format!("fc_{call_id}"),
+                status: Some(OpenAiResponseOutputItemStatus::Completed),
+                call_id: call_id.clone(),
+                name: provider_call.provider_tool_name.clone(),
+                arguments,
+            });
+            items.push(OpenAiResponseOutputItem::FunctionCallOutput {
+                id: format!("fco_{call_id}"),
+                status: Some(OpenAiResponseOutputItemStatus::Completed),
+                call_id,
+                output,
+            });
+        }
+        None => {
+            let call_id = message
+                .tool_result_ref
+                .clone()
+                .unwrap_or_else(|| format!("call_{}", message.sequence));
+            items.push(OpenAiResponseOutputItem::FunctionCallOutput {
+                id: format!("fco_{call_id}"),
+                status: Some(OpenAiResponseOutputItemStatus::Completed),
+                call_id,
+                output,
+            });
+        }
+    }
+}
+
+/// The raw tool output for a tool-result message: the model-visible
+/// `model_observation` JSON when present, falling back to the safe summary.
+///
+/// Parsing is best-effort: the envelope shape is deserialized directly without
+/// the strict `from_json_str` validation, so a version mismatch or a legacy
+/// `model_observation`/`result_ref` shape still yields the intended
+/// `model_observation`/`safe_summary` rather than leaking the entire raw
+/// envelope. Only content that does not deserialize as an envelope at all
+/// (`safe_summary` itself is still validated on deserialize) falls back to the
+/// raw string.
+fn tool_result_output(message: &ThreadMessageRecord) -> serde_json::Value {
+    let Some(content) = message.content.as_deref() else {
+        return serde_json::Value::Null;
+    };
+    match serde_json::from_str::<ToolResultReferenceEnvelope>(content) {
+        Ok(envelope) => envelope.model_observation.unwrap_or_else(|| {
+            serde_json::Value::String(envelope.safe_summary.as_str().to_string())
+        }),
+        Err(_) => serde_json::Value::String(content.to_string()),
+    }
+}
+
+fn map_thread_read_error(error: SessionThreadError) -> OpenAiCompatHttpError {
+    match error {
+        SessionThreadError::UnknownThread { .. }
+        | SessionThreadError::ThreadScopeMismatch { .. } => {
+            OpenAiCompatHttpError::not_found(Some("response_id".to_string()))
+        }
+        error => {
+            tracing::warn!(
+                target = "ironclaw::reborn::openai_compat",
+                error = %error,
+                "failed to read thread projection for OpenAI-compatible response"
+            );
+            OpenAiCompatHttpError::from_kind(
+                503,
+                true,
+                OpenAiCompatErrorKind::ServiceUnavailable,
+                None,
+            )
+        }
+    }
+}
+
 #[async_trait]
 impl OpenAiResponsesProjectionReader for OpenAiResponsesThreadProjectionReader {
     async fn wait_for_response_completion(
@@ -426,16 +631,26 @@ impl OpenAiResponsesProjectionReader for OpenAiResponsesThreadProjectionReader {
         };
         let mut projection_after_cursor = request.projection_read.after_cursor.clone();
         loop {
-            if let Some(content) = self
-                .read_finalized_response_message(&request.projection_read, submitted_run_id.clone())
+            // Cheap completion gate first; only read the full transcript
+            // projection (tool calls/outputs + assistant message) once the run
+            // has produced its finalized reply.
+            if self
+                .run_completed(&request.projection_read, submitted_run_id.clone())
                 .await?
             {
+                let projection = self
+                    .read_run_output(
+                        &request.projection_read,
+                        submitted_run_id,
+                        &request.public_id,
+                    )
+                    .await?;
                 return Ok(OpenAiResponseProjection::new(response_object(
                     request.public_id,
                     request.mapping.created_at,
                     request.requested_model,
                     OpenAiResponseStatus::Completed,
-                    Some(content),
+                    projection.items,
                 )));
             }
             let projected = self
@@ -459,7 +674,7 @@ impl OpenAiResponsesProjectionReader for OpenAiResponsesThreadProjectionReader {
                     request.mapping.created_at,
                     request.requested_model,
                     status,
-                    None,
+                    Vec::new(),
                 )));
             }
             tokio::time::sleep(self.poll_interval).await;
@@ -471,10 +686,14 @@ impl OpenAiResponsesProjectionReader for OpenAiResponsesThreadProjectionReader {
         request: OpenAiResponseReadRequest,
     ) -> Result<OpenAiResponseObject, OpenAiCompatHttpError> {
         let submitted_run_id = response_turn_run_ref_from_mapping(&request)?;
-        let content = self
-            .read_finalized_response_message(&request.projection_read, submitted_run_id.clone())
+        let projection = self
+            .read_run_output(
+                &request.projection_read,
+                submitted_run_id.clone(),
+                &request.public_id,
+            )
             .await?;
-        let projected_status = if content.is_some() {
+        let projected_status = if projection.assistant_finalized {
             None
         } else {
             self.read_projected_response_status(
@@ -485,7 +704,7 @@ impl OpenAiResponsesProjectionReader for OpenAiResponsesThreadProjectionReader {
             .await?
             .status
         };
-        let status = match (content.is_some(), projected_status) {
+        let status = match (projection.assistant_finalized, projected_status) {
             (true, _) => OpenAiResponseStatus::Completed,
             (false, Some(OpenAiResponseStatus::Completed | OpenAiResponseStatus::InProgress)) => {
                 OpenAiResponseStatus::InProgress
@@ -500,7 +719,7 @@ impl OpenAiResponsesProjectionReader for OpenAiResponsesThreadProjectionReader {
                 .requested_model
                 .unwrap_or_else(|| "reborn".to_string()),
             status,
-            content,
+            projection.items,
         ))
     }
 }
@@ -576,22 +795,12 @@ fn response_status_from_projection_run_status(status: &str) -> Option<OpenAiResp
 }
 
 fn response_object(
-    id: ironclaw_reborn_openai_compat::OpenAiResponseId,
+    id: OpenAiResponseId,
     created_at: u64,
     model: String,
     status: OpenAiResponseStatus,
-    content: Option<String>,
+    output: Vec<OpenAiResponseOutputItem>,
 ) -> OpenAiResponseObject {
-    let output = content
-        .map(|text| {
-            vec![OpenAiResponseOutputItem::Message {
-                id: format!("msg_{}", id.as_str()),
-                status: Some(OpenAiResponseOutputItemStatus::Completed),
-                role: OpenAiResponsesMessageRole::Assistant,
-                content: serde_json::json!([{"type": "output_text", "text": text}]),
-            }]
-        })
-        .unwrap_or_default();
     let error = if matches!(status, OpenAiResponseStatus::Failed) {
         Some(OpenAiResponseErrorObject::from_kind(
             OpenAiCompatErrorKind::Internal,

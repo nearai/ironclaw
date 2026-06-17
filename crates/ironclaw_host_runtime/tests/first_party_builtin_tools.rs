@@ -38,8 +38,9 @@ use ironclaw_host_runtime::{
     TRACE_COMMONS_STATUS_CAPABILITY_ID, TRIGGER_CREATE_CAPABILITY_ID, TRIGGER_LIST_CAPABILITY_ID,
     TRIGGER_REMOVE_CAPABILITY_ID, TenantSandboxProcessPort, ToolCallHttpEgress, TriggerCreateHook,
     VisibleCapabilityAccess, VisibleCapabilityRequest, WRITE_FILE_CAPABILITY_ID,
-    builtin_first_party_handlers, builtin_first_party_handlers_with_trigger_create_hook,
-    builtin_first_party_package,
+    builtin_first_party_handlers, builtin_first_party_handlers_for_process_backend,
+    builtin_first_party_handlers_with_trigger_create_hook, builtin_first_party_package,
+    builtin_first_party_package_for_process_backend,
 };
 #[cfg(feature = "test-support")]
 use ironclaw_host_runtime::{
@@ -175,6 +176,55 @@ async fn builtin_first_party_package_declares_expected_capabilities() {
     for id in all_builtin_capability_ids() {
         assert!(handlers.contains_handler(&capability_id(id)));
     }
+}
+
+#[tokio::test]
+async fn builtin_first_party_processless_package_and_handlers_omit_process_port_backed_shell() {
+    let package =
+        builtin_first_party_package_for_process_backend(ProcessBackendKind::None).unwrap();
+    let ids = package
+        .capabilities
+        .iter()
+        .map(|descriptor| descriptor.id.as_str())
+        .collect::<Vec<_>>();
+    assert!(!ids.contains(&SHELL_CAPABILITY_ID));
+    assert!(ids.contains(&SPAWN_SUBAGENT_CAPABILITY_ID));
+    assert!(ids.contains(&ECHO_CAPABILITY_ID));
+    assert!(
+        !package
+            .manifest
+            .capabilities
+            .iter()
+            .any(|capability| capability.id.as_str() == SHELL_CAPABILITY_ID)
+    );
+
+    let handlers = builtin_first_party_handlers_for_process_backend(
+        Arc::new(InMemoryTriggerRepository::default()),
+        ProcessBackendKind::None,
+    )
+    .unwrap();
+    assert!(!handlers.contains_handler(&capability_id(SHELL_CAPABILITY_ID)));
+    assert!(handlers.contains_handler(&capability_id(SPAWN_SUBAGENT_CAPABILITY_ID)));
+    assert!(handlers.contains_handler(&capability_id(ECHO_CAPABILITY_ID)));
+}
+
+#[tokio::test]
+async fn builtin_first_party_process_backend_package_and_handlers_keep_shell() {
+    let package =
+        builtin_first_party_package_for_process_backend(ProcessBackendKind::TenantSandbox).unwrap();
+    assert!(
+        package
+            .capabilities
+            .iter()
+            .any(|descriptor| descriptor.id.as_str() == SHELL_CAPABILITY_ID)
+    );
+
+    let handlers = builtin_first_party_handlers_for_process_backend(
+        Arc::new(InMemoryTriggerRepository::default()),
+        ProcessBackendKind::TenantSandbox,
+    )
+    .unwrap();
+    assert!(handlers.contains_handler(&capability_id(SHELL_CAPABILITY_ID)));
 }
 
 fn assert_coding_manifest_contract(descriptor: &CapabilityDescriptor) {

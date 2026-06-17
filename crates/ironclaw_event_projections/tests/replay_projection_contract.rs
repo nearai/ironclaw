@@ -1095,6 +1095,72 @@ async fn replay_projection_snapshot_bounds_capability_activity_window_to_request
 }
 
 #[tokio::test]
+async fn replay_projection_orders_capability_activities_by_first_cursor() {
+    let log = Arc::new(InMemoryDurableEventLog::new());
+    let service = ReplayEventProjectionService::new(Arc::clone(&log));
+    let thread_id = ThreadId::new("thread-tool-activity-order").unwrap();
+    let first_invocation = InvocationId::new();
+    let second_invocation = InvocationId::new();
+    let first_scope = scope_for_thread_with_invocation(thread_id.clone(), first_invocation);
+    let second_scope = scope_for_thread_with_invocation(thread_id, second_invocation);
+    let capability = capability_id();
+    let provider = provider_id();
+
+    log.append(RuntimeEvent::dispatch_requested(
+        first_scope.clone(),
+        capability.clone(),
+    ))
+    .await
+    .unwrap();
+    log.append(RuntimeEvent::dispatch_requested(
+        second_scope.clone(),
+        capability.clone(),
+    ))
+    .await
+    .unwrap();
+    log.append(RuntimeEvent::dispatch_succeeded(
+        second_scope,
+        capability.clone(),
+        provider.clone(),
+        RuntimeKind::Script,
+        20,
+    ))
+    .await
+    .unwrap();
+    log.append(RuntimeEvent::dispatch_succeeded(
+        first_scope.clone(),
+        capability,
+        provider,
+        RuntimeKind::Script,
+        10,
+    ))
+    .await
+    .unwrap();
+
+    let snapshot = service
+        .snapshot(ProjectionRequest {
+            scope: ProjectionScope::from_resource_scope(&first_scope),
+            after: None,
+            limit: 16,
+        })
+        .await
+        .unwrap();
+
+    let activities = snapshot.capability_activities;
+    assert_eq!(
+        activities
+            .iter()
+            .map(|activity| activity.invocation_id)
+            .collect::<Vec<_>>(),
+        vec![first_invocation, second_invocation]
+    );
+    assert_eq!(activities[0].first_cursor, EventCursor::new(1));
+    assert_eq!(activities[0].last_cursor, EventCursor::new(4));
+    assert_eq!(activities[1].first_cursor, EventCursor::new(2));
+    assert_eq!(activities[1].last_cursor, EventCursor::new(3));
+}
+
+#[tokio::test]
 async fn replay_projection_updates_capability_activity_only_for_touched_invocations() {
     let log = Arc::new(InMemoryDurableEventLog::new());
     let service = ReplayEventProjectionService::new(Arc::clone(&log));

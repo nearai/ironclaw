@@ -4444,6 +4444,7 @@ dependencies = [
  "thiserror 2.0.18",
  "tokio",
  "tracing",
+ "unicode-normalization",
 ]
 
 [[package]]
@@ -4608,6 +4609,7 @@ dependencies = [
  "tokio",
  "tokio-postgres",
  "tracing",
+ "tracing-subscriber",
  "url",
  "uuid",
  "wat",
@@ -4958,6 +4960,7 @@ dependencies = [
  "tokio",
  "tokio-util",
  "tracing",
+ "tracing-subscriber",
  "tracing-test",
  "wat",
 ]

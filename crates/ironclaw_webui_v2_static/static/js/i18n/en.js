@@ -771,6 +771,7 @@ registerPack("en", {
   "automations.summary.failures": "Failures",
   "automations.summary.failuresDetail":
     "Automations with a failed run in recent history.",
+  "automations.summary.filterAction": "Show {label}",
   "automations.summary.nextRun": "Next run",
   "automations.summary.none": "None",
   "automations.summary.nextRunDetail": "Soonest scheduled run in this list.",
@@ -778,6 +779,20 @@ registerPack("en", {
   "automations.empty.matchingDescription": "Try a different status filter.",
   "automations.empty.noneTitle": "No scheduled automations yet.",
   "automations.empty.noneDescription": "This agent has no scheduled work to show.",
+  "automations.empty.onboardingTitle": "No automations yet",
+  "automations.empty.onboardingDescription":
+    "Automations are created by chatting with your agent — there's no form to fill out. Ask it to do something on a schedule and it will set up a recurring automation for you.",
+  "automations.empty.examplesTitle": "Try asking your agent",
+  "automations.empty.example1":
+    "Check the nearai/ironclaw repo every 10 minutes and summarize new issues, PRs, and commits.",
+  "automations.empty.example2":
+    "Every weekday at 9am, send me a summary of my unread email.",
+  "automations.empty.example3":
+    "Remind me to review open pull requests every afternoon at 3pm.",
+  "automations.empty.startInChat": "Start in chat",
+  "automations.empty.copyPrompt": "Copy prompt",
+  "automations.empty.copied": "Copied",
+  "automations.refreshing": "Refreshing…",
   "automations.table.name": "Name",
   "automations.table.schedule": "Schedule",
   "automations.table.nextRun": "Next run",
@@ -785,6 +800,12 @@ registerPack("en", {
   "automations.table.recentRuns": "Recent runs",
   "automations.table.noRuns": "No runs",
   "automations.table.status": "Status",
+  "automations.runs.total": "Recent runs: {count}",
+  "automations.runs.ok": "OK: {count}",
+  "automations.runs.error": "Failed: {count}",
+  "automations.runs.running": "Running: {count}",
+  "automations.runs.unknown": "Unknown: {count}",
+  "automations.runs.showingOf": "Showing {shown} of {total} recent runs",
   "automations.status.running": "Running",
   "automations.status.needsReview": "Needs review",
   "automations.detail.emptyTitle": "Select an automation",

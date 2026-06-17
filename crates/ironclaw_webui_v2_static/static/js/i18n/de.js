@@ -712,6 +712,7 @@ registerPack("de", {
   "automations.summary.activeDetail": "Aktivierte Zeitpläne, die auf ihre nächste Ausführung warten.",
   "automations.summary.paused": "Angehalten",
   "automations.summary.pausedDetail": "Zeitpläne werden derzeit voraussichtlich nicht ausgeführt.",
+  "automations.summary.filterAction": "{label} anzeigen",
   "automations.summary.nextRun": "Nächster Lauf",
   "automations.summary.none": "Keine",
   "automations.summary.nextRunDetail": "Frühester geplanter Lauf in dieser Liste.",
@@ -719,11 +720,31 @@ registerPack("de", {
   "automations.empty.matchingDescription": "Versuchen Sie es mit einem anderen Statusfilter.",
   "automations.empty.noneTitle": "Noch keine geplanten Automatisierungen.",
   "automations.empty.noneDescription": "Dieser Agent hat keine geplanten Arbeiten zum Anzeigen.",
+  "automations.empty.onboardingTitle": "Noch keine Automatisierungen",
+  "automations.empty.onboardingDescription":
+    "Automatisierungen werden im Chat mit deinem Agenten erstellt – es gibt kein Formular. Bitte ihn, etwas nach einem Zeitplan zu erledigen, und er richtet eine wiederkehrende Automatisierung für dich ein.",
+  "automations.empty.examplesTitle": "Frag deinen Agenten zum Beispiel",
+  "automations.empty.example1":
+    "Prüfe das Repo nearai/ironclaw alle 10 Minuten und fasse neue Issues, PRs und Commits zusammen.",
+  "automations.empty.example2":
+    "Schick mir jeden Werktag um 9 Uhr eine Zusammenfassung meiner ungelesenen E-Mails.",
+  "automations.empty.example3":
+    "Erinnere mich jeden Nachmittag um 15 Uhr daran, offene Pull Requests zu prüfen.",
+  "automations.empty.startInChat": "Im Chat starten",
+  "automations.empty.copyPrompt": "Prompt kopieren",
+  "automations.empty.copied": "Kopiert",
+  "automations.refreshing": "Wird aktualisiert …",
   "automations.table.name": "Name",
   "automations.table.schedule": "Zeitplan",
   "automations.table.nextRun": "Nächster Lauf",
   "automations.table.lastRun": "Letzter Lauf",
   "automations.table.status": "Status",
+  "automations.runs.total": "Letzte Ausführungen: {count}",
+  "automations.runs.ok": "OK: {count}",
+  "automations.runs.error": "Fehlgeschlagen: {count}",
+  "automations.runs.running": "Laufend: {count}",
+  "automations.runs.unknown": "Unbekannt: {count}",
+  "automations.runs.showingOf": "{shown} von {total} letzten Ausführungen werden angezeigt",
 
   // Routines page
   "routines.explorer": "Aufgaben",

@@ -712,6 +712,7 @@ registerPack("ar", {
   "automations.summary.activeDetail": "الجداول الزمنية الممكّنة في انتظار التشغيل التالي.",
   "automations.summary.paused": "متوقف مؤقتًا",
   "automations.summary.pausedDetail": "لا يُتوقع تشغيل الجداول حاليًا.",
+  "automations.summary.filterAction": "عرض {label}",
   "automations.summary.nextRun": "التشغيل التالي",
   "automations.summary.none": "لا شيء",
   "automations.summary.nextRunDetail": "أقرب تشغيل مجدول في هذه القائمة.",
@@ -719,11 +720,31 @@ registerPack("ar", {
   "automations.empty.matchingDescription": "جرب مرشح حالة مختلف.",
   "automations.empty.noneTitle": "لا توجد عمليات أتمتة مجدولة حتى الآن.",
   "automations.empty.noneDescription": "ليس لدى هذا الوكيل أي عمل مجدول لعرضه.",
+  "automations.empty.onboardingTitle": "لا توجد أتمتة بعد",
+  "automations.empty.onboardingDescription":
+    "تُنشأ الأتمتة عبر المحادثة مع وكيلك — لا يوجد نموذج لتعبئته. اطلب منه القيام بشيء وفق جدول زمني وسيقوم بإعداد أتمتة متكررة من أجلك.",
+  "automations.empty.examplesTitle": "جرّب أن تطلب من وكيلك",
+  "automations.empty.example1":
+    "تحقق من مستودع nearai/ironclaw كل 10 دقائق ولخّص المشكلات وطلبات السحب والـ commits الجديدة.",
+  "automations.empty.example2":
+    "كل يوم عمل في الساعة 9 صباحًا، أرسل لي ملخصًا لرسائلي غير المقروءة.",
+  "automations.empty.example3":
+    "ذكّرني بمراجعة طلبات السحب المفتوحة كل بعد ظهر في الساعة 3.",
+  "automations.empty.startInChat": "ابدأ في المحادثة",
+  "automations.empty.copyPrompt": "نسخ الموجّه",
+  "automations.empty.copied": "تم النسخ",
+  "automations.refreshing": "جارٍ التحديث…",
   "automations.table.name": "الاسم",
   "automations.table.schedule": "الجدول الزمني",
   "automations.table.nextRun": "التشغيل التالي",
   "automations.table.lastRun": "التشغيل الأخير",
   "automations.table.status": "الحالة",
+  "automations.runs.total": "عمليات التشغيل الأخيرة: {count}",
+  "automations.runs.ok": "ناجحة: {count}",
+  "automations.runs.error": "فاشلة: {count}",
+  "automations.runs.running": "قيد التشغيل: {count}",
+  "automations.runs.unknown": "غير معروفة: {count}",
+  "automations.runs.showingOf": "عرض {shown} من {total} عمليات تشغيل حديثة",
 
   // Routines page
   "routines.explorer": "المهام",

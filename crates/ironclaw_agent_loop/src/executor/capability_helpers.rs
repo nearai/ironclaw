@@ -571,6 +571,7 @@ mod tests {
             effective_capability_ids: vec![cap_a.clone(), cap_b.clone()],
             provider_replay: None,
             resume_token: None,
+            activity_id: None,
             prior_approval: None,
             replay: None,
             disposition: None,
@@ -614,6 +615,7 @@ mod tests {
             effective_capability_ids: vec![cap.clone()],
             provider_replay: None,
             resume_token: Some(resume_token.clone()),
+            activity_id: None,
             prior_approval: Some(AuthResumeApprovalIdentity {
                 approval_request_id,
                 correlation_id,
@@ -682,6 +684,7 @@ mod tests {
             effective_capability_ids: vec![cap.clone()],
             provider_replay: None,
             resume_token: None, // no prior approval — the key precondition
+            activity_id: None,
             prior_approval: None,
             replay: None,
             disposition: None,

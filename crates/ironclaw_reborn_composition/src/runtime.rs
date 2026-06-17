@@ -1100,6 +1100,16 @@ impl RebornRuntime {
             .and_then(|product_auth| product_auth.as_auth_challenge_provider())
     }
 
+    #[cfg(feature = "slack-v2-host-beta")]
+    pub(crate) fn blocked_auth_flow_canceller(
+        &self,
+    ) -> Option<Arc<dyn crate::BlockedAuthFlowCanceller>> {
+        self.services
+            .product_auth
+            .as_ref()
+            .and_then(|product_auth| product_auth.as_blocked_auth_flow_canceller())
+    }
+
     pub(crate) fn webui_event_stream(&self) -> Arc<dyn ProjectionStream> {
         self.projection_services.webui_event_stream()
     }

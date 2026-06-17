@@ -308,6 +308,51 @@ function normalizeRunStatus(status) {
   return "unknown";
 }
 
+// Count recent runs by status so the UI can show a "how many" summary instead
+// of relying on the reader counting densely-packed status dots. The API can
+// return up to 25 recent runs while the dot strip only has room for a handful,
+// so callers use `total` to render an overflow indicator (#4988).
+export function summarizeRuns(runs) {
+  const list = Array.isArray(runs) ? runs : [];
+  const counts = { total: list.length, ok: 0, error: 0, running: 0, unknown: 0 };
+  for (const run of list) {
+    counts[normalizeRunStatus(run?.status)] += 1;
+  }
+  return counts;
+}
+
+// Ordered, non-empty status buckets for the recent-run summary chips. Kept in
+// the presenter (not inline in the component) so a caller-level test can assert
+// that no counted status — including `unknown` — is dropped from what the UI
+// renders. Each entry carries the i18n key suffix and the chip tone class.
+export function runStatusBreakdown(runs) {
+  const counts = summarizeRuns(runs);
+  return [
+    { key: "ok", tone: "text-emerald-300", count: counts.ok },
+    { key: "error", tone: "text-red-300", count: counts.error },
+    { key: "running", tone: "text-sky-300", count: counts.running },
+    { key: "unknown", tone: "text-iron-400", count: counts.unknown },
+  ].filter((part) => part.count > 0);
+}
+
+// The fully-resolved data the recent-run summary renders: the total label plus
+// one chip per non-empty status (localized text + tone). `RunHistorySummary`
+// maps this 1:1 with no logic of its own, so this function is the single place
+// a status bucket could be dropped — and the place the caller-level test drives.
+export function runSummaryView(runs, t) {
+  const tx = tr(t);
+  const counts = summarizeRuns(runs);
+  const chips = runStatusBreakdown(runs).map((part) => ({
+    ...part,
+    text: tx(`automations.runs.${part.key}`, { count: part.count }),
+  }));
+  return {
+    total: counts.total,
+    totalText: tx("automations.runs.total", { count: counts.total }),
+    chips,
+  };
+}
+
 function successRateLabel(runs, t) {
   const tx = tr(t);
   const terminalRuns = runs.filter((run) => run.status === "ok" || run.status === "error");
