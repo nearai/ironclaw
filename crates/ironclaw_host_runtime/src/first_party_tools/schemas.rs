@@ -309,10 +309,10 @@ pub(crate) fn resolve_builtin_input_schema_ref(reference: &str) -> Option<Value>
             "properties": {
                 "path": { "type": "string", "description": "Scoped file path to patch" },
                 "old_string": {
-                    "type": "string",
+                    "type": ["string", "null"],
                     "description": "Text to replace for a single targeted edit. Exact matches are preferred; fuzzy Unicode and trailing-whitespace normalization is used when exact text is not present."
                 },
-                "new_string": { "type": "string", "description": "Replacement text for a single targeted edit" },
+                "new_string": { "type": ["string", "null"], "description": "Replacement text for a single targeted edit" },
                 "edits": {
                     "description": "One or more targeted replacements matched against the original file. Prefer this for multiple disjoint edits.",
                     "oneOf": [
@@ -360,6 +360,16 @@ pub(crate) fn resolve_builtin_input_schema_ref(reference: &str) -> Option<Value>
             "required": ["path"],
             "oneOf": [
                 {
+                    "properties": {
+                        "old_string": {
+                            "type": "string",
+                            "not": { "const": "null" }
+                        },
+                        "new_string": {
+                            "type": "string",
+                            "not": { "const": "null" }
+                        }
+                    },
                     "required": ["old_string", "new_string"],
                     "not": {
                         "properties": {
@@ -370,15 +380,11 @@ pub(crate) fn resolve_builtin_input_schema_ref(reference: &str) -> Option<Value>
                 },
                 {
                     "properties": {
-                        "edits": { "type": "array" }
+                        "edits": { "type": "array" },
+                        "old_string": { "enum": ["null", null] },
+                        "new_string": { "enum": ["null", null] }
                     },
-                    "required": ["edits"],
-                    "not": {
-                        "anyOf": [
-                            { "required": ["old_string"] },
-                            { "required": ["new_string"] }
-                        ]
-                    }
+                    "required": ["edits"]
                 }
             ],
             "allOf": [

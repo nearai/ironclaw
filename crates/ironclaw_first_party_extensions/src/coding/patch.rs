@@ -28,7 +28,9 @@ pub(super) fn parse_apply_patch_input(
         .unwrap_or(false);
 
     let edits = if let Some(edits_value) = optional_edits_value(input) {
-        if input.get("old_string").is_some() || input.get("new_string").is_some() {
+        if optional_sentinel_field(input, "old_string").is_some()
+            || optional_sentinel_field(input, "new_string").is_some()
+        {
             return Err(input_error());
         }
         parse_patch_edits(edits_value)?
@@ -93,7 +95,11 @@ fn parse_patch_edits(edits_value: &Value) -> Result<Vec<PatchEdit>, CodingCapabi
 }
 
 fn optional_edits_value(input: &Value) -> Option<&Value> {
-    match input.get("edits") {
+    optional_sentinel_field(input, "edits")
+}
+
+fn optional_sentinel_field<'a>(input: &'a Value, field: &str) -> Option<&'a Value> {
+    match input.get(field) {
         Some(Value::Null) => None,
         Some(Value::String(value)) if value == "null" => None,
         value => value,
@@ -188,5 +194,23 @@ mod tests {
         });
 
         assert!(parse_apply_patch_input(&input).is_err());
+    }
+
+    #[test]
+    fn parse_apply_patch_input_treats_top_level_null_strings_as_absent_for_edits() {
+        let input = json!({
+            "path": "/workspace/main.txt",
+            "old_string": "null",
+            "new_string": Value::Null,
+            "edits": [
+                {"old_string": "old", "new_string": "new"}
+            ]
+        });
+
+        let parsed = parse_apply_patch_input(&input).expect("multi edit");
+
+        assert_eq!(parsed.edits.len(), 1);
+        assert_eq!(parsed.edits[0].old_string, "old");
+        assert_eq!(parsed.edits[0].new_string, "new");
     }
 }

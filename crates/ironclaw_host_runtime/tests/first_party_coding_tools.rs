@@ -555,6 +555,38 @@ async fn builtin_apply_patch_ignores_null_edits_placeholder_for_single_edit() {
 }
 
 #[tokio::test]
+async fn builtin_apply_patch_ignores_top_level_null_placeholders_for_multi_edit() {
+    let temp = tempfile::tempdir().unwrap();
+    std::fs::write(temp.path().join("main.txt"), "old\n").unwrap();
+
+    let (filesystem, mounts) = mounted_filesystem(temp.path(), MountPermissions::read_write());
+    let runtime = runtime_with_filesystem(filesystem);
+    let context = execution_context_with_mounts(coding_capability_ids(), mounts);
+
+    let patched = invoke_with_context(
+        &runtime,
+        APPLY_PATCH_CAPABILITY_ID,
+        json!({
+            "path": "/workspace/main.txt",
+            "old_string": "null",
+            "new_string": Value::Null,
+            "edits": [
+                {"old_string": "old", "new_string": "new"}
+            ]
+        }),
+        context,
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(patched["success"], json!(true));
+    assert_eq!(
+        std::fs::read_to_string(temp.path().join("main.txt")).unwrap(),
+        "new\n"
+    );
+}
+
+#[tokio::test]
 async fn builtin_apply_patch_replace_all_replaces_fuzzy_matches_when_exact_text_is_absent() {
     let temp = tempfile::tempdir().unwrap();
     std::fs::write(

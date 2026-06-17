@@ -587,6 +587,24 @@ async fn visible_surface_resolves_builtin_first_party_input_schema_refs() {
             "edits": "null"
         }))
         .expect("apply_patch schema should accept string null edits placeholder with single edit");
+    apply_patch_validator
+        .validate(&json!({
+            "path": "/workspace/main.rs",
+            "old_string": "null",
+            "new_string": null,
+            "edits": [{"old_string": "old", "new_string": "new"}]
+        }))
+        .expect("apply_patch schema should accept inactive single-edit placeholders with edits");
+    assert!(
+        apply_patch_validator
+            .validate(&json!({
+                "path": "/workspace/main.rs",
+                "old_string": "null",
+                "new_string": "new"
+            }))
+            .is_err(),
+        "apply_patch schema should reject placeholder old_string as active single-edit input"
+    );
     assert!(
         apply_patch_validator
             .validate(&json!({
