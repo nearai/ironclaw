@@ -26,7 +26,14 @@ import { buildScopedLogsPath } from "../logs/lib/logs-data.js";
 /* Grace window before an active thread's sidebar state is cleared to idle.
  * Long enough for SSE to rehydrate a gate/run after a thread switch (so a
  * persisted "needs attention" badge isn't wiped-then-restored), short
- * enough that a genuinely resolved thread clears promptly. */
+ * enough that a genuinely resolved thread clears promptly.
+ *
+ * Assumption: SSE rehydration of a live gate/run completes within this
+ * window. If it doesn't, a still-pending thread's badge clears here and
+ * reappears when the gate finally arrives — a one-off re-flicker, never a
+ * wrong state. The downside is purely cosmetic and self-correcting, so it
+ * is intentionally not instrumented; revisit this constant (not add
+ * telemetry) if slow links make the re-flicker noticeable. */
 const THREAD_STATE_CLEAR_GRACE_MS = 1500;
 
 export function Chat({

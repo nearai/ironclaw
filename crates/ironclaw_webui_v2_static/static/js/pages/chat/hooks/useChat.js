@@ -185,6 +185,13 @@ export function useChat(threadId) {
   // without committing the stale output. The previous-threadId guard is
   // itself state (not a ref) so an aborted concurrent render rolls it
   // back and the reset re-fires on retry instead of being skipped.
+  //
+  // DO NOT move this into a useEffect — that is the regression it fixes.
+  // Two rules keep this pattern correct, and any change here must preserve
+  // both: (1) the guard must be state, not a ref, so it
+  // is rolled back on a discarded render; (2) only plain state setters may
+  // run here (no ref writes / side effects) — that is why this uses the
+  // raw setActiveRunState rather than the activeRunRef-mutating wrapper.
   if (stateThreadId !== threadId) {
     setStateThreadId(threadId);
     setIsProcessing(false);

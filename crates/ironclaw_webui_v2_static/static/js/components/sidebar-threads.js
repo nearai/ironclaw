@@ -32,7 +32,7 @@ const STATE_PRESENTATION = Object.freeze({
     dotClass: "bg-[var(--v2-warning-text)]",
     // The colored dot + label badge already signals attention; the solid
     // left border felt visually heavy, so this state carries no border
-    // accent (see #4965). The reserved border-l-2 width stays transparent.
+    // accent. The reserved border-l-2 width stays transparent.
     borderClass: "border-transparent",
   },
   [THREAD_STATE.RUNNING]: {
