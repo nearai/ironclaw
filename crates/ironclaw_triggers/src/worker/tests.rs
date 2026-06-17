@@ -5,8 +5,8 @@ use std::{
 
 use async_trait::async_trait;
 use chrono::{TimeZone, Utc};
-use ironclaw_host_api::{AgentId, ProjectId, TenantId, Timestamp, UserId};
-use ironclaw_turns::TurnRunId;
+use ironclaw_host_api::{AgentId, ProjectId, TenantId, ThreadId, Timestamp, UserId};
+use ironclaw_turns::{TurnRunId, TurnScope};
 
 use super::*;
 use crate::{
@@ -16,8 +16,8 @@ use crate::{
     TRIGGER_TRUSTED_ADAPTER_INSTALLATION_ID, TRIGGER_TRUSTED_ADAPTER_KIND,
     TRIGGER_TRUSTED_EXTERNAL_ACTOR_NAMESPACE, TriggerCompletionPolicy, TriggerError, TriggerFire,
     TriggerId, TriggerInboundContentRef, TriggerMaterializedPrompt, TriggerPromptMaterializer,
-    TriggerRecord, TriggerRepository, TriggerRunStatus, TriggerSchedule, TriggerSourceKind,
-    TriggerSourceProvider, TriggerState,
+    TriggerRecord, TriggerRepository, TriggerRunHistoryStatus, TriggerRunRecord, TriggerRunStatus,
+    TriggerSchedule, TriggerSourceKind, TriggerSourceProvider, TriggerState,
 };
 
 fn ts(seconds: i64) -> Timestamp {
@@ -32,6 +32,15 @@ fn ymd_hms(year: i32, month: u32, day: u32, hour: u32, minute: u32, second: u32)
 
 fn tenant(value: &str) -> TenantId {
     TenantId::new(value).expect("valid tenant")
+}
+
+fn test_turn_scope() -> TurnScope {
+    TurnScope::new(
+        TenantId::new("test-tenant").expect("tenant id"),
+        None,
+        None,
+        ThreadId::new("test-thread").expect("thread id"),
+    )
 }
 
 fn user(value: &str) -> UserId {
@@ -210,6 +219,7 @@ async fn tick_processes_one_due_trigger_happy_path() {
         TrustedTriggerFireSubmitOutcome::Accepted {
             run_id,
             submitted_at: ts(1_704_067_205),
+            turn_scope: test_turn_scope(),
         },
     )]));
     let materializer = Arc::new(RecordingMaterializer::success("content:trigger-fire"));
@@ -310,6 +320,7 @@ async fn tick_persists_replayed_submit_with_original_run_ref() {
             TrustedTriggerFireSubmitOutcome::Replayed {
                 original_run_id,
                 replayed_at: ts(1_704_067_205),
+                thread_id: None,
             },
         )])),
         Arc::new(RecordingActiveRunLookup::default()),
@@ -331,6 +342,51 @@ async fn tick_persists_replayed_submit_with_original_run_ref() {
     assert_eq!(persisted.active_fire_slot, Some(fire_slot));
     assert_eq!(persisted.active_run_ref, Some(original_run_id));
     assert_eq!(persisted.next_run_at, expected_next_run_at);
+}
+
+/// Regression guard: when the submitter returns `Replayed { thread_id: Some(id) }`,
+/// the worker must forward the canonical thread_id to `mark_fire_replayed`.
+/// Without this guard, a silent drop of the `thread_id` field in the worker's
+/// `Replayed` arm would leave the run row with `thread_id = None`, breaking the
+/// automation panel's ability to link to the replayed thread.
+#[tokio::test]
+async fn tick_persists_replayed_submit_with_canonical_thread_id() {
+    let repo = Arc::new(InMemoryTriggerRepository::default());
+    let trigger_id = TriggerId::parse("01HZZZZZZZZZZZZZZZZZZZZZZZ").expect("ulid");
+    let fire_slot = ts(1_704_067_200);
+    let record = sample_record(trigger_id, tenant("tenant-a"), fire_slot);
+    repo.upsert_trigger(record).await.expect("insert");
+    let original_run_id = TurnRunId::parse("01890f0f-9b6f-7a85-9e5b-9f21a93c4f5a").expect("run id");
+    let canonical_thread_id = ThreadId::new("thread-canonical-replay").expect("valid thread id");
+    let worker = worker(
+        repo.clone(),
+        Arc::new(RecordingMaterializer::success("content:trigger-fire")),
+        Arc::new(RecordingSubmitter::with_outcomes(vec![Ok(
+            TrustedTriggerFireSubmitOutcome::Replayed {
+                original_run_id,
+                replayed_at: ts(1_704_067_205),
+                thread_id: Some(canonical_thread_id.clone()),
+            },
+        )])),
+        Arc::new(RecordingActiveRunLookup::default()),
+    );
+
+    worker.tick_once(fire_slot).await.expect("tick succeeds");
+
+    // The run history row for this fire slot must carry the canonical thread_id.
+    let runs = repo
+        .list_trigger_run_history(tenant("tenant-a"), trigger_id, 10)
+        .await
+        .expect("list run history");
+    let run = runs
+        .iter()
+        .find(|r| r.fire_slot == fire_slot)
+        .expect("run row for fire_slot");
+    assert_eq!(
+        run.thread_id,
+        Some(canonical_thread_id),
+        "replayed thread_id must be forwarded to mark_fire_replayed and stored on the run row"
+    );
 }
 
 #[tokio::test]
@@ -477,6 +533,7 @@ async fn tick_skips_active_trigger_but_processes_other_due_trigger() {
         TrustedTriggerFireSubmitOutcome::Accepted {
             run_id: due_run_ref,
             submitted_at: fire_slot,
+            turn_scope: test_turn_scope(),
         },
     )]));
     let active_lookup = Arc::new(RecordingActiveRunLookup::with_state(
@@ -526,7 +583,9 @@ async fn tick_clears_terminal_active_run() {
     record.active_run_ref = Some(run_id);
     repo.upsert_trigger(record).await.expect("insert active");
     let active_lookup = Arc::new(RecordingActiveRunLookup::with_state(
-        TriggerActiveRunState::Terminal,
+        TriggerActiveRunState::Terminal {
+            status: TriggerRunHistoryStatus::Ok,
+        },
     ));
     let worker = worker(
         repo.clone(),
@@ -558,6 +617,48 @@ async fn tick_clears_terminal_active_run() {
         .expect("record present");
     assert_eq!(persisted.active_fire_slot, None);
     assert_eq!(persisted.active_run_ref, None);
+    let runs = repo
+        .list_trigger_run_history(tenant("tenant-a"), trigger_id, 10)
+        .await
+        .expect("list run history");
+    assert_eq!(runs[0].status, TriggerRunHistoryStatus::Ok);
+}
+
+#[tokio::test]
+async fn tick_records_failed_terminal_active_run_as_error() {
+    let repo = Arc::new(InMemoryTriggerRepository::default());
+    let trigger_id = TriggerId::parse("01HZZZZZZZZZZZZZZZZZZZZZZY").expect("ulid");
+    let fire_slot = ts(1_704_067_200);
+    let run_id = TurnRunId::parse("01890f0f-9b6f-7a85-9e5b-9f21a93c4f5d").expect("run id");
+    let mut record = sample_record(trigger_id, tenant("tenant-a"), ts(1_704_067_260));
+    record.active_fire_slot = Some(fire_slot);
+    record.active_run_ref = Some(run_id);
+    repo.upsert_trigger(record).await.expect("insert active");
+    let worker = worker(
+        repo.clone(),
+        Arc::new(RecordingMaterializer::success("content:trigger-fire")),
+        Arc::new(RecordingSubmitter::with_outcomes(Vec::new())),
+        Arc::new(RecordingActiveRunLookup::with_state(
+            TriggerActiveRunState::Terminal {
+                status: TriggerRunHistoryStatus::Error,
+            },
+        )),
+    );
+
+    let report = worker.tick_once(fire_slot).await.expect("tick succeeds");
+
+    assert_eq!(
+        report.results.last().map(|result| &result.outcome),
+        Some(&TriggerPollerFireOutcome::ClearedTerminalActive { run_id })
+    );
+    let runs = repo
+        .list_trigger_run_history(tenant("tenant-a"), trigger_id, 10)
+        .await
+        .expect("list run history");
+    assert_eq!(runs.len(), 1);
+    assert_eq!(runs[0].run_id, Some(run_id));
+    assert_eq!(runs[0].status, TriggerRunHistoryStatus::Error);
+    assert!(runs[0].completed_at.is_some());
 }
 
 #[tokio::test]
@@ -607,7 +708,9 @@ async fn tick_active_cleanup_cursor_reaches_terminal_rows_after_blocked_page() {
         Ok(TriggerActiveRunState::Nonterminal),
         Ok(TriggerActiveRunState::Nonterminal),
         Ok(TriggerActiveRunState::Nonterminal),
-        Ok(TriggerActiveRunState::Terminal),
+        Ok(TriggerActiveRunState::Terminal {
+            status: TriggerRunHistoryStatus::Ok,
+        }),
     ]));
     let worker = worker_with_config(
         repo.clone(),
@@ -830,10 +933,18 @@ async fn tick_retries_active_page_when_clear_fails_before_advancing_cursor() {
         second_id,
     ));
     let active_lookup = Arc::new(RecordingActiveRunLookup::with_results(vec![
-        Ok(TriggerActiveRunState::Terminal),
-        Ok(TriggerActiveRunState::Terminal),
-        Ok(TriggerActiveRunState::Terminal),
-        Ok(TriggerActiveRunState::Terminal),
+        Ok(TriggerActiveRunState::Terminal {
+            status: TriggerRunHistoryStatus::Ok,
+        }),
+        Ok(TriggerActiveRunState::Terminal {
+            status: TriggerRunHistoryStatus::Ok,
+        }),
+        Ok(TriggerActiveRunState::Terminal {
+            status: TriggerRunHistoryStatus::Ok,
+        }),
+        Ok(TriggerActiveRunState::Terminal {
+            status: TriggerRunHistoryStatus::Ok,
+        }),
     ]));
     let worker = worker_with_config(
         repo.clone(),
@@ -890,7 +1001,9 @@ async fn tick_reports_terminal_active_clear_race() {
         Arc::new(RecordingMaterializer::success("content:trigger-fire")),
         Arc::new(RecordingSubmitter::with_outcomes(Vec::new())),
         Arc::new(RecordingActiveRunLookup::with_state(
-            TriggerActiveRunState::Terminal,
+            TriggerActiveRunState::Terminal {
+                status: TriggerRunHistoryStatus::Ok,
+            },
         )),
     );
 
@@ -925,10 +1038,13 @@ async fn tick_clears_terminal_active_and_processes_due_trigger() {
             TrustedTriggerFireSubmitOutcome::Accepted {
                 run_id: due_run_id,
                 submitted_at: fire_slot,
+                turn_scope: test_turn_scope(),
             },
         )])),
         Arc::new(RecordingActiveRunLookup::with_state(
-            TriggerActiveRunState::Terminal,
+            TriggerActiveRunState::Terminal {
+                status: TriggerRunHistoryStatus::Ok,
+            },
         )),
     );
 
@@ -972,6 +1088,7 @@ async fn tick_reports_active_lookup_error_and_continues_to_due_triggers() {
             TrustedTriggerFireSubmitOutcome::Accepted {
                 run_id: due_run_id,
                 submitted_at: fire_slot,
+                turn_scope: test_turn_scope(),
             },
         )])),
         Arc::new(RecordingActiveRunLookup::with_results(vec![Err(
@@ -1029,8 +1146,12 @@ async fn tick_retries_active_lookup_error_before_advancing_cursor() {
         Err(TriggerError::Backend {
             reason: "turn state unavailable".to_string(),
         }),
-        Ok(TriggerActiveRunState::Terminal),
-        Ok(TriggerActiveRunState::Terminal),
+        Ok(TriggerActiveRunState::Terminal {
+            status: TriggerRunHistoryStatus::Ok,
+        }),
+        Ok(TriggerActiveRunState::Terminal {
+            status: TriggerRunHistoryStatus::Ok,
+        }),
     ]));
     let worker = worker_with_config(
         repo.clone(),
@@ -1103,6 +1224,7 @@ async fn tick_replayed_submit_can_be_cleared_on_a_later_tick_without_stopping_du
             TrustedTriggerFireSubmitOutcome::Replayed {
                 original_run_id: replayed_run_id,
                 replayed_at: ts(1_704_067_205),
+                thread_id: None,
             },
         )])),
         Arc::new(RecordingActiveRunLookup::default()),
@@ -1136,10 +1258,13 @@ async fn tick_replayed_submit_can_be_cleared_on_a_later_tick_without_stopping_du
             TrustedTriggerFireSubmitOutcome::Accepted {
                 run_id: second_due_run_id,
                 submitted_at: fire_slot,
+                turn_scope: test_turn_scope(),
             },
         )])),
         Arc::new(RecordingActiveRunLookup::with_results(vec![Ok(
-            TriggerActiveRunState::Terminal,
+            TriggerActiveRunState::Terminal {
+                status: TriggerRunHistoryStatus::Ok,
+            },
         )])),
     );
 
@@ -1244,7 +1369,9 @@ async fn tick_keeps_claim_only_active_fire_blocked() {
     let materializer = Arc::new(RecordingMaterializer::success("content:trigger-fire"));
     let submitter = Arc::new(RecordingSubmitter::with_outcomes(Vec::new()));
     let active_lookup = Arc::new(RecordingActiveRunLookup::with_state(
-        TriggerActiveRunState::Terminal,
+        TriggerActiveRunState::Terminal {
+            status: TriggerRunHistoryStatus::Ok,
+        },
     ));
     let worker = worker(
         repo.clone(),
@@ -1301,7 +1428,9 @@ async fn tick_active_cleanup_cursor_advances_past_claim_only_record() {
     let materializer = Arc::new(RecordingMaterializer::success("content:trigger-fire"));
     let submitter = Arc::new(RecordingSubmitter::with_outcomes(Vec::new()));
     let active_lookup = Arc::new(RecordingActiveRunLookup::with_state(
-        TriggerActiveRunState::Terminal,
+        TriggerActiveRunState::Terminal {
+            status: TriggerRunHistoryStatus::Ok,
+        },
     ));
     let worker = worker_with_config(
         repo.clone(),
@@ -1410,6 +1539,7 @@ async fn tick_accepted_mark_fire_missing_reports_due_failure() {
             TrustedTriggerFireSubmitOutcome::Accepted {
                 run_id,
                 submitted_at: fire_slot,
+                turn_scope: test_turn_scope(),
             },
         )])),
         Arc::new(RecordingActiveRunLookup::default()),
@@ -1444,6 +1574,7 @@ async fn tick_replayed_mark_fire_missing_reports_due_failure() {
             TrustedTriggerFireSubmitOutcome::Replayed {
                 original_run_id,
                 replayed_at: fire_slot,
+                thread_id: None,
             },
         )])),
         Arc::new(RecordingActiveRunLookup::default()),
@@ -1499,6 +1630,7 @@ async fn tick_reports_due_record_error_and_continues_to_later_due_trigger() {
             TrustedTriggerFireSubmitOutcome::Accepted {
                 run_id: success_run_id,
                 submitted_at: fire_slot,
+                turn_scope: test_turn_scope(),
             },
         )])),
         Arc::new(RecordingActiveRunLookup::default()),
@@ -2004,6 +2136,15 @@ impl TickConcurrencyRepository {
 
 #[async_trait]
 impl TriggerRepository for TickConcurrencyRepository {
+    async fn find_trigger_run_by_thread_id(
+        &self,
+        _tenant_id: TenantId,
+        _thread_id: &ThreadId,
+    ) -> Result<Option<(TriggerRecord, TriggerRunRecord)>, TriggerError> {
+        // Trigger-thread lookup is not exercised by this fake.
+        Ok(None)
+    }
+
     async fn upsert_trigger(&self, _record: TriggerRecord) -> Result<(), TriggerError> {
         unreachable!("tick-concurrency repository is read-only")
     }
@@ -2144,6 +2285,15 @@ struct ActiveListErrorRepository;
 
 #[async_trait]
 impl TriggerRepository for ActiveListErrorRepository {
+    async fn find_trigger_run_by_thread_id(
+        &self,
+        _tenant_id: TenantId,
+        _thread_id: &ThreadId,
+    ) -> Result<Option<(TriggerRecord, TriggerRunRecord)>, TriggerError> {
+        // Trigger-thread lookup is not exercised by this fake.
+        Ok(None)
+    }
+
     async fn upsert_trigger(&self, _record: TriggerRecord) -> Result<(), TriggerError> {
         unreachable!("active-list-error repository is read-only")
     }
@@ -2288,6 +2438,15 @@ impl ActiveWrapRefetchErrorRepository {
 
 #[async_trait]
 impl TriggerRepository for ActiveWrapRefetchErrorRepository {
+    async fn find_trigger_run_by_thread_id(
+        &self,
+        _tenant_id: TenantId,
+        _thread_id: &ThreadId,
+    ) -> Result<Option<(TriggerRecord, TriggerRunRecord)>, TriggerError> {
+        // Trigger-thread lookup is not exercised by this fake.
+        Ok(None)
+    }
+
     async fn upsert_trigger(&self, _record: TriggerRecord) -> Result<(), TriggerError> {
         unreachable!("active-wrap-refetch-error repository is read-only")
     }
@@ -2425,6 +2584,15 @@ struct ActiveClearRaceRepository {
 
 #[async_trait]
 impl TriggerRepository for ActiveClearRaceRepository {
+    async fn find_trigger_run_by_thread_id(
+        &self,
+        _tenant_id: TenantId,
+        _thread_id: &ThreadId,
+    ) -> Result<Option<(TriggerRecord, TriggerRunRecord)>, TriggerError> {
+        // Trigger-thread lookup is not exercised by this fake.
+        Ok(None)
+    }
+
     async fn upsert_trigger(&self, _record: TriggerRecord) -> Result<(), TriggerError> {
         unreachable!("active-clear-race repository is read-only")
     }
@@ -2574,6 +2742,15 @@ impl ActiveClearFailsOnceRepository {
 
 #[async_trait]
 impl TriggerRepository for ActiveClearFailsOnceRepository {
+    async fn find_trigger_run_by_thread_id(
+        &self,
+        _tenant_id: TenantId,
+        _thread_id: &ThreadId,
+    ) -> Result<Option<(TriggerRecord, TriggerRunRecord)>, TriggerError> {
+        // Trigger-thread lookup is not exercised by this fake.
+        Ok(None)
+    }
+
     async fn upsert_trigger(&self, _record: TriggerRecord) -> Result<(), TriggerError> {
         unreachable!("active-clear-fails-once repository is read-only")
     }
@@ -2758,6 +2935,15 @@ struct AcceptedMissingRepository {
 
 #[async_trait]
 impl TriggerRepository for AcceptedMissingRepository {
+    async fn find_trigger_run_by_thread_id(
+        &self,
+        _tenant_id: TenantId,
+        _thread_id: &ThreadId,
+    ) -> Result<Option<(TriggerRecord, TriggerRunRecord)>, TriggerError> {
+        // Trigger-thread lookup is not exercised by this fake.
+        Ok(None)
+    }
+
     async fn upsert_trigger(&self, _record: TriggerRecord) -> Result<(), TriggerError> {
         unreachable!("accepted-missing repository is read-only")
     }
@@ -2887,6 +3073,15 @@ struct ReplayedMissingRepository {
 
 #[async_trait]
 impl TriggerRepository for ReplayedMissingRepository {
+    async fn find_trigger_run_by_thread_id(
+        &self,
+        _tenant_id: TenantId,
+        _thread_id: &ThreadId,
+    ) -> Result<Option<(TriggerRecord, TriggerRunRecord)>, TriggerError> {
+        // Trigger-thread lookup is not exercised by this fake.
+        Ok(None)
+    }
+
     async fn upsert_trigger(&self, _record: TriggerRecord) -> Result<(), TriggerError> {
         unreachable!("replayed-missing repository is read-only")
     }
@@ -3017,6 +3212,15 @@ struct DueErrorThenSuccessRepository {
 
 #[async_trait]
 impl TriggerRepository for DueErrorThenSuccessRepository {
+    async fn find_trigger_run_by_thread_id(
+        &self,
+        _tenant_id: TenantId,
+        _thread_id: &ThreadId,
+    ) -> Result<Option<(TriggerRecord, TriggerRunRecord)>, TriggerError> {
+        // Trigger-thread lookup is not exercised by this fake.
+        Ok(None)
+    }
+
     async fn upsert_trigger(&self, _record: TriggerRecord) -> Result<(), TriggerError> {
         unreachable!("due-error repository is read-only")
     }
@@ -3163,6 +3367,15 @@ impl ClaimRaceRepository {
 
 #[async_trait]
 impl TriggerRepository for ClaimRaceRepository {
+    async fn find_trigger_run_by_thread_id(
+        &self,
+        _tenant_id: TenantId,
+        _thread_id: &ThreadId,
+    ) -> Result<Option<(TriggerRecord, TriggerRunRecord)>, TriggerError> {
+        // Trigger-thread lookup is not exercised by this fake.
+        Ok(None)
+    }
+
     async fn upsert_trigger(&self, _record: TriggerRecord) -> Result<(), TriggerError> {
         unreachable!("claim-race repository is read-only")
     }
@@ -3284,5 +3497,129 @@ impl TriggerRepository for ClaimRaceRepository {
         _request: ClearActiveFireRequest,
     ) -> Result<Option<TriggerRecord>, TriggerError> {
         unreachable!("claim-race repository should not clear active fires")
+    }
+}
+
+#[tokio::test]
+async fn timezone_aware_firing_harness() {
+    // Fixed instants — all UTC.
+    // "0 9 * * *" America/New_York in January (UTC-5) = 14:00 UTC.
+    let before = ymd_hms(2026, 1, 2, 13, 0, 0);
+    let expected_seed_next_run_at = ymd_hms(2026, 1, 2, 14, 0, 0);
+    let tick1 = ymd_hms(2026, 1, 2, 13, 59, 0);
+    let tick2 = ymd_hms(2026, 1, 2, 14, 0, 0);
+    let expected_post_fire_next_run_at = ymd_hms(2026, 1, 3, 14, 0, 0);
+
+    // Build the schedule and compute the seed next_run_at from the reference instant.
+    let schedule = TriggerSchedule::cron_with_timezone("0 9 * * *", "America/New_York")
+        .expect("valid schedule");
+    let computed_seed = schedule
+        .next_slot_after(before)
+        .expect("next slot computation succeeds")
+        .expect("there is a future slot after 2026-01-02 13:00:00 UTC");
+
+    // Conversion assertion: 9 AM ET (UTC-5 in January) = 14:00 UTC.
+    assert_eq!(
+        computed_seed, expected_seed_next_run_at,
+        "next_slot_after(13:00 UTC) for '0 9 * * *' America/New_York must be 14:00 UTC"
+    );
+
+    // Seed one trigger record with next_run_at = 14:00 UTC.
+    let repo = Arc::new(InMemoryTriggerRepository::default());
+    let trigger_id = TriggerId::parse("01HZZZZZZZZZZZZZZZZZZZZZZZ").expect("ulid");
+    let record = TriggerRecord {
+        trigger_id,
+        tenant_id: tenant("tenant-tz"),
+        creator_user_id: user("user-a"),
+        agent_id: Some(AgentId::new("agent-a").expect("valid agent")),
+        project_id: Some(ProjectId::new("project-a").expect("valid project")),
+        name: "daily 9am eastern".to_string(),
+        source: TriggerSourceKind::Schedule,
+        schedule: schedule.clone(),
+        completion_policy: TriggerCompletionPolicy::Recurring,
+        prompt: "run daily summary".to_string(),
+        state: TriggerState::Scheduled,
+        next_run_at: computed_seed,
+        last_run_at: None,
+        last_fired_slot: None,
+        last_status: None,
+        active_fire_slot: None,
+        active_run_ref: None,
+        created_at: ts(1_704_067_000),
+    };
+    repo.upsert_trigger(record.clone()).await.expect("insert");
+
+    // ── tick1: 13:59 UTC — not yet due, must not fire ────────────────
+    {
+        let submitter = Arc::new(RecordingSubmitter::with_outcomes(Vec::new()));
+        let materializer = Arc::new(RecordingMaterializer::success("content:trigger-fire"));
+        let w = worker(
+            repo.clone(),
+            materializer.clone(),
+            submitter.clone(),
+            Arc::new(RecordingActiveRunLookup::default()),
+        );
+
+        w.tick_once(tick1).await.expect("tick1 succeeds");
+
+        assert_eq!(
+            submitter.requests().len(),
+            0,
+            "tick1 (13:59 UTC): submitter must not be called before 14:00 UTC fire slot"
+        );
+        let state_after_tick1 = repo
+            .get_trigger(tenant("tenant-tz"), trigger_id)
+            .await
+            .expect("load after tick1")
+            .expect("record present");
+        assert!(
+            state_after_tick1.last_fired_slot.is_none(),
+            "tick1 (13:59 UTC): last_fired_slot must remain None"
+        );
+        assert_eq!(
+            state_after_tick1.next_run_at, expected_seed_next_run_at,
+            "tick1 (13:59 UTC): next_run_at must be unchanged"
+        );
+    }
+
+    // ── tick2: 14:00 UTC — due, must fire ───────────────────────────
+    {
+        let run_id = TurnRunId::parse("01890f0f-9b6f-7a85-9e5b-9f21a93c4f5a").expect("run id");
+        let submitter = Arc::new(RecordingSubmitter::with_outcomes(vec![Ok(
+            TrustedTriggerFireSubmitOutcome::Accepted {
+                run_id,
+                submitted_at: tick2,
+                turn_scope: test_turn_scope(),
+            },
+        )]));
+        let materializer = Arc::new(RecordingMaterializer::success("content:trigger-fire"));
+        let w = worker(
+            repo.clone(),
+            materializer.clone(),
+            submitter.clone(),
+            Arc::new(RecordingActiveRunLookup::default()),
+        );
+
+        w.tick_once(tick2).await.expect("tick2 succeeds");
+
+        assert_eq!(
+            submitter.requests().len(),
+            1,
+            "tick2 (14:00 UTC): submitter must be called exactly once"
+        );
+        let state_after_tick2 = repo
+            .get_trigger(tenant("tenant-tz"), trigger_id)
+            .await
+            .expect("load after tick2")
+            .expect("record present");
+        assert_eq!(
+            state_after_tick2.last_fired_slot,
+            Some(tick2),
+            "tick2 (14:00 UTC): last_fired_slot must equal the fire slot"
+        );
+        assert_eq!(
+            state_after_tick2.next_run_at, expected_post_fire_next_run_at,
+            "tick2 (14:00 UTC): next_run_at must advance to 2026-01-03 14:00:00 UTC (next day 9 AM ET)"
+        );
     }
 }

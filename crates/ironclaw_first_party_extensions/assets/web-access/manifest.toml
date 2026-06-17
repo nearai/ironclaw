@@ -11,7 +11,7 @@ service = "web-access"
 
 [[capabilities]]
 id = "web-access.search"
-description = "Search the web with zero-config Exa MCP and return cited source results."
+description = "Search the web with zero-config Exa MCP and return cited source results. Prefer GitHub extension capabilities for GitHub repository, issue, pull request, release, or workflow data when they are available."
 effects = ["dispatch_capability", "network"]
 default_permission = "allow"
 visibility = "model"

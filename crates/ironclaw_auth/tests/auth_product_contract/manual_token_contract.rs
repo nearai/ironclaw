@@ -321,6 +321,65 @@ async fn manual_token_submit_can_update_bound_account() {
 }
 
 #[tokio::test]
+async fn manual_token_reconnect_updates_bound_account_across_a_different_thread() {
+    // Regression (#4935 defect A, manual-token path): a manual-token reconnect
+    // arriving from a different thread/invocation than the one the account was
+    // created in must UPDATE the bound account at owner granularity, not fail.
+    // The OAuth path already had this guarantee; the manual-token apply path was
+    // still using full `scope_matches`, so setup accepted the binding but submit
+    // rejected it with CrossScopeDenied (and would have re-forked the account).
+    let services = InMemoryAuthProductServices::new();
+    let create_scope = scope("alice");
+    let account = services
+        .create_account(account_request(
+            create_scope.clone(),
+            "old manual github",
+            CredentialAccountStatus::Expired,
+        ))
+        .await
+        .expect("existing account");
+
+    let reauth_scope = reconnect_scope("alice", "thread-reauth");
+    let challenge = services
+        .request_secret_input(ManualTokenSetupRequest {
+            scope: reauth_scope.clone(),
+            provider: provider(),
+            label: label("updated manual github"),
+            continuation: AuthContinuationRef::SetupOnly,
+            update_binding: Some(update_binding(&account)),
+            expires_at: Utc::now() + Duration::minutes(5),
+        })
+        .await
+        .expect("manual reconnect challenge across a different thread");
+    let interaction_id = match challenge {
+        AuthChallenge::ManualTokenRequired { interaction_id, .. } => interaction_id,
+        other => panic!("unexpected challenge {other:?}"),
+    };
+
+    let result = services
+        .submit_manual_token(
+            &reauth_scope,
+            SecretSubmitRequest {
+                interaction_id,
+                secret: secret("ghp_reconnect_token"),
+            },
+        )
+        .await
+        .expect("manual reconnect submit must update the bound account, not fork");
+
+    assert_eq!(result.account_id, account.id);
+    assert_eq!(result.status, CredentialAccountStatus::Configured);
+
+    // No fork: still exactly one account for the owner.
+    let accounts = services
+        .list_accounts(CredentialAccountListRequest::new(create_scope, provider()).with_limit(10))
+        .await
+        .expect("list accounts");
+    assert_eq!(accounts.accounts.len(), 1);
+    assert_eq!(accounts.accounts[0].id, account.id);
+}
+
+#[tokio::test]
 async fn manual_token_update_binding_is_scope_checked_before_challenge() {
     let services = InMemoryAuthProductServices::new();
     let owner = scope("alice");

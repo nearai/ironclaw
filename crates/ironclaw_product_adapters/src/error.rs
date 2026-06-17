@@ -16,6 +16,9 @@ pub enum ProductWorkflowRejectionKind {
     InvalidRequest,
     Unavailable,
     Conflict,
+    /// A bare approval/auth reply matched more than one live pending gate;
+    /// the caller must disambiguate with an explicit gate reference.
+    Ambiguous,
 }
 
 /// Public error surface for product adapters and the workflow facade.

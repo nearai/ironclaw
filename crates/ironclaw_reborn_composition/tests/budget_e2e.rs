@@ -53,6 +53,18 @@ use ironclaw_turns::run_profile::ModelProfileId;
 use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
 
+/// How long the runtime polls for a turn to complete before giving up.
+/// Generous so the turn still finishes when the whole suite of full-runtime
+/// tests runs concurrently and contends for CPU/disk; the poll loop exits as
+/// soon as the turn is done, so the happy path is unaffected by the ceiling.
+const POLL_MAX_TOTAL: Duration = Duration::from_secs(20);
+
+/// Per-test backstop guarding `send_user_message` against a genuine hang.
+/// Must be strictly larger than [`POLL_MAX_TOTAL`]: if the two are equal the
+/// outer guard races the runtime's own poll budget and fires spuriously under
+/// parallel load (the turn finishes right as both deadlines elapse).
+const SEND_GUARD_TIMEOUT: Duration = Duration::from_secs(40);
+
 fn local_dev_runtime_policy() -> EffectiveRuntimePolicy {
     EffectiveRuntimePolicy {
         deployment: DeploymentMode::LocalSingleUser,
@@ -108,7 +120,7 @@ fn build_input(
     })
     .with_poll_settings(PollSettings {
         interval: Duration::from_millis(10),
-        max_total: Duration::from_secs(3),
+        max_total: POLL_MAX_TOTAL,
     })
     .with_model_gateway_override(gateway)
     .with_model_cost_table_override(cost_table)
@@ -132,7 +144,7 @@ async fn f1_happy_path_records_actual_usd_in_ledger() {
     let conversation = runtime.new_conversation().await.expect("conversation");
 
     let reply = tokio::time::timeout(
-        Duration::from_secs(3),
+        SEND_GUARD_TIMEOUT,
         runtime.send_user_message(&conversation, "ping"),
     )
     .await
@@ -216,7 +228,7 @@ async fn f2_crossing_warn_threshold_emits_warned_event() {
 
     let conversation = runtime.new_conversation().await.expect("conversation");
     let _ = tokio::time::timeout(
-        Duration::from_secs(3),
+        SEND_GUARD_TIMEOUT,
         runtime.send_user_message(&conversation, "ping"),
     )
     .await
@@ -283,7 +295,7 @@ async fn f6_hard_cap_denied_before_provider_call() {
 
     let conversation = runtime.new_conversation().await.expect("conversation");
     let outcome = tokio::time::timeout(
-        Duration::from_secs(3),
+        SEND_GUARD_TIMEOUT,
         runtime.send_user_message(&conversation, "ping"),
     )
     .await
@@ -344,7 +356,7 @@ async fn c1_provider_tokens_reconcile_to_actual_usd() {
 
     let conversation = runtime.new_conversation().await.expect("conversation");
     let _ = tokio::time::timeout(
-        Duration::from_secs(3),
+        SEND_GUARD_TIMEOUT,
         runtime.send_user_message(&conversation, "ping"),
     )
     .await
@@ -391,7 +403,7 @@ async fn c2_unknown_model_in_cost_table_uses_default_cost_fallback() {
 
     let conversation = runtime.new_conversation().await.expect("conversation");
     let _ = tokio::time::timeout(
-        Duration::from_secs(3),
+        SEND_GUARD_TIMEOUT,
         runtime.send_user_message(&conversation, "ping"),
     )
     .await
@@ -438,7 +450,7 @@ async fn c3_zero_cost_model_records_zero_spend() {
 
     let conversation = runtime.new_conversation().await.expect("conversation");
     let _ = tokio::time::timeout(
-        Duration::from_secs(3),
+        SEND_GUARD_TIMEOUT,
         runtime.send_user_message(&conversation, "ping"),
     )
     .await
@@ -491,7 +503,7 @@ async fn d3_seeding_policy_installs_default_cap_on_first_touch() {
 
     let conversation = runtime.new_conversation().await.expect("conversation");
     let reply = tokio::time::timeout(
-        Duration::from_secs(3),
+        SEND_GUARD_TIMEOUT,
         runtime.send_user_message(&conversation, "ping"),
     )
     .await
@@ -588,7 +600,7 @@ async fn d1_agent_deny_preserves_user_warn_event() {
 
     let conversation = runtime.new_conversation().await.expect("conversation");
     let _ = tokio::time::timeout(
-        Duration::from_secs(3),
+        SEND_GUARD_TIMEOUT,
         runtime.send_user_message(&conversation, "ping"),
     )
     .await
@@ -665,7 +677,7 @@ async fn broadcast_sink_publishes_events_to_subscribers() {
 
     let conversation = runtime.new_conversation().await.expect("conversation");
     let _ = tokio::time::timeout(
-        Duration::from_secs(3),
+        SEND_GUARD_TIMEOUT,
         runtime.send_user_message(&conversation, "ping"),
     )
     .await
@@ -736,7 +748,7 @@ async fn budget_test_gateway_scripted_replies_drive_per_turn_costs() {
     let conversation = runtime.new_conversation().await.expect("conversation");
     for prompt in ["first", "second"] {
         let _ = tokio::time::timeout(
-            Duration::from_secs(3),
+            SEND_GUARD_TIMEOUT,
             runtime.send_user_message(&conversation, prompt),
         )
         .await
@@ -803,7 +815,7 @@ async fn projection_delivers_budget_events_to_installed_observer() {
     let runtime = build_reborn_runtime(input).await.expect("runtime builds");
     let conversation = runtime.new_conversation().await.expect("conversation");
     let _ = tokio::time::timeout(
-        Duration::from_secs(3),
+        SEND_GUARD_TIMEOUT,
         runtime.send_user_message(&conversation, "ping"),
     )
     .await

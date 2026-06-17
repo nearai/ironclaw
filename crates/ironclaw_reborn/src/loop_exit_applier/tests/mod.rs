@@ -1,13 +1,13 @@
 use std::sync::Arc;
 
-use ironclaw_host_api::{AgentId, TenantId, ThreadId, UserId};
+use ironclaw_host_api::{AgentId, ApprovalRequestId, TenantId, ThreadId, UserId};
 use ironclaw_threads::{
     AppendAssistantDraftRequest, EnsureThreadRequest, InMemorySessionThreadService, MessageContent,
     MessageKind, MessageStatus, SessionThreadService, ThreadHistoryRequest, ThreadMessageId,
     ThreadMessageRecord, ThreadScope, ToolResultSafeSummary,
 };
 use ironclaw_turns::{
-    CheckpointStateStore, InMemoryCheckpointStateStore, InMemoryLoopCheckpointStore,
+    CheckpointStateStore, InMemoryCheckpointStateStore, InMemoryLoopCheckpointStore, LoopBlocked,
     LoopBlockedKind, LoopCheckpointKind, LoopCheckpointStore, LoopCompleted, LoopCompletionKind,
     LoopExit, LoopFailed, LoopFailureKind, LoopGateRef, LoopMessageRef, LoopResultRef,
     PutCheckpointStateRequest, PutLoopCheckpointRequest, TurnActor, TurnCheckpointId, TurnError,
@@ -15,8 +15,8 @@ use ironclaw_turns::{
 };
 
 use super::{
-    BlockedEvidenceRequest, CompletionEvidenceRequest, FailureEvidenceRequest,
-    InMemoryLoopExitEvidencePort, LoopExitApplier, LoopExitEvidencePort,
+    ApprovalGateEvidenceStore, BlockedEvidenceRequest, CompletionEvidenceRequest,
+    FailureEvidenceRequest, InMemoryLoopExitEvidencePort, LoopExitApplier, LoopExitEvidencePort,
     ThreadCheckpointLoopExitEvidencePort, verify_tool_result_ref,
 };
 
@@ -835,6 +835,7 @@ async fn thread_checkpoint_evidence_rejects_wrong_run_and_malformed_result_ref_r
             tool_result_ref: Some(malformed_result.as_str().to_string()),
             tool_result_provider_call: None,
             content: Some("not-json".to_string()),
+            attachments: Vec::new(),
             redaction_ref: None,
         });
         history.messages.push(ThreadMessageRecord {
@@ -854,6 +855,7 @@ async fn thread_checkpoint_evidence_rejects_wrong_run_and_malformed_result_ref_r
                 r#"{{"version":1,"result_ref":"{}","safe_summary":"raw tool input includes secret"}}"#,
                 unsafe_summary_result.as_str()
             )),
+            attachments: Vec::new(),
             redaction_ref: None,
         });
         history
@@ -995,6 +997,52 @@ async fn thread_checkpoint_evidence_does_not_read_checkpoint_for_blocked_claims(
         .expect("blocked evidence should fail closed without checkpoint I/O");
 
     assert!(!verified);
+}
+
+#[tokio::test]
+async fn thread_checkpoint_evidence_verifies_pending_approval_blocked_checkpoint() {
+    let claimed = claimed_run();
+    let checkpoint_id = TurnCheckpointId::new();
+    let state_ref =
+        ironclaw_turns::LoopCheckpointStateRef::new("checkpoint:approval-blocked-state")
+            .expect("valid state ref");
+    let request_id = ApprovalRequestId::new();
+    let gate_ref = LoopGateRef::new(format!("gate:approval-{request_id}")).expect("valid gate ref");
+    let checkpoint = loop_checkpoint_record_with_gate(
+        &claimed,
+        checkpoint_id,
+        state_ref.clone(),
+        LoopCheckpointKind::BeforeBlock,
+        Some(gate_ref.clone()),
+    );
+    let approval_evidence = Arc::new(StaticApprovalGateEvidence {
+        scope: claimed.state.scope.clone(),
+        gate_ref: gate_ref.clone(),
+    });
+    let evidence = text_checkpoint_evidence(Arc::new(StaticLoopCheckpointStore::new(checkpoint)))
+        .with_approval_gate_evidence(approval_evidence);
+    let exit = LoopExit::Blocked(LoopBlocked {
+        kind: LoopBlockedKind::Approval,
+        gate_ref,
+        credential_requirements: Vec::new(),
+        checkpoint_id,
+        state_ref,
+        exit_id: test_exit_id(),
+    });
+    let LoopExit::Blocked(blocked) = &exit else {
+        unreachable!("blocked exit")
+    };
+    let verified = evidence
+        .verify_blocked_evidence(BlockedEvidenceRequest {
+            scope: &claimed.state.scope,
+            turn_id: claimed.state.turn_id,
+            run_id: claimed.state.run_id,
+            blocked,
+        })
+        .await
+        .expect("approval blocked evidence should verify through pending approval");
+
+    assert!(verified);
 }
 
 #[tokio::test]
@@ -1316,4 +1364,20 @@ async fn thread_checkpoint_evidence_assumes_recovery_when_latest_checkpoint_unkn
         .expect("latest checkpoint fallback should not read store");
 
     assert_eq!(latest, Some(LoopCheckpointKind::BeforeSideEffect));
+}
+
+struct StaticApprovalGateEvidence {
+    scope: TurnScope,
+    gate_ref: LoopGateRef,
+}
+
+#[async_trait::async_trait]
+impl ApprovalGateEvidenceStore for StaticApprovalGateEvidence {
+    async fn pending_approval_gate(
+        &self,
+        scope: &TurnScope,
+        gate_ref: &LoopGateRef,
+    ) -> Result<bool, TurnError> {
+        Ok(scope == &self.scope && gate_ref == &self.gate_ref)
+    }
 }

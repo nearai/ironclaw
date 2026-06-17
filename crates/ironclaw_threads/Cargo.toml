@@ -14,6 +14,7 @@ publish = false
 async-trait = "0.1"
 chrono = { version = "0.4", features = ["serde"] }
 futures = "0.3"
+ironclaw_common = { path = "../ironclaw_common", version = "0.4.2" }
 ironclaw_filesystem = { path = "../ironclaw_filesystem", version = "0.1.0" }
 ironclaw_host_api = { path = "../ironclaw_host_api", version = "0.1.0" }
 ironclaw_safety = { path = "../ironclaw_safety", version = "0.2.2" }
@@ -25,5 +26,12 @@ tokio = { version = "1", features = ["sync"] }
 tracing = "0.1"
 uuid = { version = "1", features = ["v4", "serde"] }
 
+[features]
+## Exposes test-only back-doors (e.g. `inject_legacy_deferred_busy_for_test`)
+## needed by integration tests in a separate compilation unit. Never enable
+## in production builds; this feature is intentionally off by default.
+test-support = []
+
 [dev-dependencies]
-tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+ironclaw_threads = { path = ".", features = ["test-support"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "time"] }

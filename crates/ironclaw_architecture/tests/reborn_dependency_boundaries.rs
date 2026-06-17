@@ -1260,6 +1260,7 @@ fn reborn_product_api_crates_do_not_bind_http_ingress() {
         "crates/ironclaw_reborn_config/src",
         "crates/ironclaw_reborn_event_store/src",
         "crates/ironclaw_reborn_api/src",
+        "crates/ironclaw_reborn_openai_compat/src",
         "crates/ironclaw_product_adapters/src",
         "crates/ironclaw_product_adapter_registry/src",
         "crates/ironclaw_product_workflow/src",
@@ -1291,6 +1292,68 @@ fn reborn_product_api_crates_do_not_bind_http_ingress() {
     assert!(
         violations.is_empty(),
         "Reborn HTTP ingress must be host-owned; product/API crates may expose descriptors or route fragments but must not bind/serve listeners:\n{}",
+        violations.join("\n")
+    );
+}
+
+#[test]
+fn reborn_openai_compat_routes_do_not_depend_on_v1_gateway_or_legacy_streams() {
+    let forbidden = [
+        ForbiddenUse {
+            pattern: "src/channels/web",
+            reason: "OpenAI-compatible Reborn routes must not route through v1 gateway handlers",
+            exempt: None,
+        },
+        ForbiddenUse {
+            pattern: "crate::channels::web",
+            reason: "OpenAI-compatible Reborn routes must not import v1 gateway modules",
+            exempt: None,
+        },
+        ForbiddenUse {
+            pattern: "ironclaw::channels::web",
+            reason: "OpenAI-compatible Reborn routes must not import v1 gateway modules",
+            exempt: None,
+        },
+        ForbiddenUse {
+            pattern: "GatewayState",
+            reason: "OpenAI-compatible Reborn routes must not depend on v1 gateway state",
+            exempt: None,
+        },
+        ForbiddenUse {
+            pattern: "SseManager",
+            reason: "OpenAI-compatible Reborn streaming must use projection-stream ports, not raw legacy SSE streams",
+            exempt: None,
+        },
+        ForbiddenUse {
+            pattern: "AppEvent",
+            reason: "OpenAI-compatible Reborn streaming must translate ProductProjectionItem state, not raw legacy AppEvent streams",
+            exempt: None,
+        },
+        ForbiddenUse {
+            pattern: "IncomingMessage",
+            reason: "OpenAI-compatible Reborn routes must enter through ProductWorkflow, not legacy channel ingress",
+            exempt: None,
+        },
+        ForbiddenUse {
+            pattern: "get_or_create_assistant_conversation",
+            reason: "OpenAI-compatible Reborn retrieve/cancel must use opaque refs and projection readers, not legacy conversation reconstruction",
+            exempt: None,
+        },
+        ForbiddenUse {
+            pattern: "ConversationManager",
+            reason: "OpenAI-compatible Reborn routes must not reconstruct legacy conversations directly",
+            exempt: None,
+        },
+    ];
+
+    let root = workspace_root();
+    let compat_src = root.join("crates/ironclaw_reborn_openai_compat/src");
+    let mut violations = Vec::new();
+    collect_forbidden_uses(&compat_src, &root, &forbidden, &mut violations);
+
+    assert!(
+        violations.is_empty(),
+        "Reborn OpenAI-compatible routes must stay ProductWorkflow/projection-port backed and independent of v1 gateway handlers, legacy SSE/AppEvent streams, and legacy conversation reconstruction:\n{}",
         violations.join("\n")
     );
 }
@@ -1630,6 +1693,108 @@ fn boundary_rules() -> Vec<BoundaryRule> {
                 "ironclaw_turns",
                 "ironclaw_wasm",
                 "ironclaw_wasm_product_adapters",
+            ],
+        },
+        BoundaryRule {
+            // OpenAI-compatible route surface is a Reborn product/API facade.
+            // It may depend on host ingress vocabulary and ProductWorkflow
+            // adapter contracts, but it must not revive v1 gateway/LLM proxy
+            // paths or reach into runtime/composition services directly.
+            crate_name: "ironclaw_reborn_openai_compat",
+            forbidden: vec![
+                "ironclaw",
+                "ironclaw_capabilities",
+                "ironclaw_conversations",
+                "ironclaw_dispatcher",
+                "ironclaw_engine",
+                "ironclaw_event_projections",
+                "ironclaw_event_streams",
+                "ironclaw_events",
+                "ironclaw_extensions",
+                "ironclaw_filesystem",
+                "ironclaw_gateway",
+                "ironclaw_host_runtime",
+                "ironclaw_llm",
+                "ironclaw_loop_support",
+                "ironclaw_mcp",
+                "ironclaw_memory",
+                "ironclaw_network",
+                "ironclaw_outbound",
+                "ironclaw_processes",
+                "ironclaw_product_workflow",
+                "ironclaw_reborn",
+                "ironclaw_reborn_cli",
+                "ironclaw_reborn_composition",
+                "ironclaw_reborn_config",
+                "ironclaw_reborn_event_store",
+                "ironclaw_first_party_extensions",
+                "ironclaw_first_party_extension_ports",
+                "ironclaw_resources",
+                "ironclaw_run_state",
+                "ironclaw_runtime_policy",
+                "ironclaw_safety",
+                "ironclaw_scripts",
+                "ironclaw_secrets",
+                "ironclaw_skills",
+                "ironclaw_storage",
+                "ironclaw_threads",
+                "ironclaw_trust",
+                "ironclaw_tui",
+                "ironclaw_turns",
+                "ironclaw_wasm",
+                "ironclaw_wasm_product_adapters",
+                "ironclaw_webui_v2",
+            ],
+        },
+        BoundaryRule {
+            // Durable storage for OpenAI-compatible public refs sits behind
+            // the OpenAiCompatRefStore port. It may use the universal
+            // filesystem backend and the OpenAI-compatible contract crate, but
+            // must not grow route handling, ProductWorkflow orchestration, or
+            // runtime/composition reach-through.
+            crate_name: "ironclaw_reborn_openai_compat_storage",
+            forbidden: vec![
+                "ironclaw",
+                "ironclaw_capabilities",
+                "ironclaw_conversations",
+                "ironclaw_dispatcher",
+                "ironclaw_engine",
+                "ironclaw_event_projections",
+                "ironclaw_event_streams",
+                "ironclaw_events",
+                "ironclaw_extensions",
+                "ironclaw_gateway",
+                "ironclaw_host_runtime",
+                "ironclaw_llm",
+                "ironclaw_loop_support",
+                "ironclaw_mcp",
+                "ironclaw_memory",
+                "ironclaw_network",
+                "ironclaw_outbound",
+                "ironclaw_processes",
+                "ironclaw_product_workflow",
+                "ironclaw_reborn",
+                "ironclaw_reborn_cli",
+                "ironclaw_reborn_composition",
+                "ironclaw_reborn_config",
+                "ironclaw_reborn_event_store",
+                "ironclaw_first_party_extensions",
+                "ironclaw_first_party_extension_ports",
+                "ironclaw_resources",
+                "ironclaw_run_state",
+                "ironclaw_runtime_policy",
+                "ironclaw_safety",
+                "ironclaw_scripts",
+                "ironclaw_secrets",
+                "ironclaw_skills",
+                "ironclaw_storage",
+                "ironclaw_threads",
+                "ironclaw_trust",
+                "ironclaw_tui",
+                "ironclaw_turns",
+                "ironclaw_wasm",
+                "ironclaw_wasm_product_adapters",
+                "ironclaw_webui_v2",
             ],
         },
         BoundaryRule {
@@ -2445,6 +2610,59 @@ fn boundary_rules() -> Vec<BoundaryRule> {
                 "ironclaw_run_state",
                 "ironclaw_scripts",
                 "ironclaw_secrets",
+                "ironclaw_wasm",
+            ],
+        },
+        // The agent-loop framework crate owns reusable loop mechanics
+        // (executor, strategies, families, state) and depends upward on neutral
+        // contracts in `ironclaw_turns`. It must not import host runtime crates,
+        // product adapters, dispatcher, capability host, filesystem, network,
+        // secrets, DB backends, or the loop-support adapter layer — those all
+        // sit above agent_loop in the stack and would create an inversion.
+        BoundaryRule {
+            crate_name: "ironclaw_agent_loop",
+            forbidden: vec![
+                "ironclaw",
+                "ironclaw_approvals",
+                "ironclaw_auth",
+                "ironclaw_authorization",
+                "ironclaw_capabilities",
+                "ironclaw_conversations",
+                "ironclaw_dispatcher",
+                "ironclaw_engine",
+                "ironclaw_event_projections",
+                "ironclaw_event_streams",
+                "ironclaw_extensions",
+                "ironclaw_filesystem",
+                "ironclaw_gateway",
+                "ironclaw_host_runtime",
+                "ironclaw_llm",
+                "ironclaw_loop_support",
+                "ironclaw_mcp",
+                "ironclaw_memory",
+                "ironclaw_network",
+                "ironclaw_outbound",
+                "ironclaw_processes",
+                "ironclaw_product_adapter_registry",
+                "ironclaw_product_adapters",
+                "ironclaw_product_workflow",
+                "ironclaw_reborn",
+                "ironclaw_reborn_cli",
+                "ironclaw_reborn_composition",
+                "ironclaw_reborn_config",
+                "ironclaw_reborn_event_store",
+                "ironclaw_reborn_traces",
+                "ironclaw_reborn_webui_ingress",
+                "ironclaw_resources",
+                "ironclaw_run_state",
+                "ironclaw_runtime_policy",
+                "ironclaw_safety",
+                "ironclaw_scripts",
+                "ironclaw_secrets",
+                "ironclaw_skills",
+                "ironclaw_threads",
+                "ironclaw_trust",
+                "ironclaw_tui",
                 "ironclaw_wasm",
             ],
         },

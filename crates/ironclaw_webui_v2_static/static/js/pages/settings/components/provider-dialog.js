@@ -90,9 +90,9 @@ export function ProviderDialog({
 
         <label className="block space-y-2 text-sm text-[var(--v2-text-strong)]">
           ${t("llm.defaultModel")}
-          <div className="flex gap-2">
+          <div className="flex items-stretch gap-2">
             <${Input} value=${form.model} onChange=${(e) => formState.update("model", e.target.value)} />
-            <${Button} type="button" variant="secondary" size="sm" disabled=${busy !== ""} onClick=${formState.fetchModels}>
+            <${Button} type="button" variant="secondary" className="shrink-0 whitespace-nowrap" disabled=${busy !== ""} onClick=${formState.fetchModels}>
               ${busy === "models" ? t("llm.fetchingModels") : t("llm.fetchModels")}
             <//>
           </div>

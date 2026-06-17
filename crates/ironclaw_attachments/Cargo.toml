@@ -1,0 +1,25 @@
+[package]
+name = "ironclaw_attachments"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.92"
+description = "Channel-agnostic attachment landing for IronClaw Reborn: write attachment bytes through the scoped filesystem authority and return a ScopedPath storage key."
+authors = ["NEAR AI <support@near.ai>"]
+license = "MIT OR Apache-2.0"
+homepage = "https://github.com/nearai/ironclaw"
+repository = "https://github.com/nearai/ironclaw"
+publish = false
+
+[dependencies]
+ironclaw_common = { path = "../ironclaw_common", version = "0.4.2" }
+ironclaw_extractors = { path = "../ironclaw_extractors", version = "0.1.0" }
+ironclaw_filesystem = { path = "../ironclaw_filesystem", version = "0.1.0" }
+ironclaw_host_api = { path = "../ironclaw_host_api", version = "0.1.0" }
+thiserror = "2"
+tracing = "0.1"
+
+[dev-dependencies]
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+
+[lints]
+workspace = true

@@ -154,13 +154,20 @@ pub(crate) fn resolve_builtin_input_schema_ref(reference: &str) -> Option<Value>
             "required": ["command"],
             "additionalProperties": false
         }),
+        // NOTE: this schema is published by the host_runtime first-party
+        // capability registry (consumed by `surface.rs::resolve_builtin_input_schema_ref`).
+        // The decorator path (`ironclaw_loop_support::build_spawn_subagent_parameters_schema`)
+        // builds an equivalent schema dynamically from the registered flavor
+        // catalog and overrides the model-facing tool definition at runtime.
+        // The two shapes MUST stay in sync. Long-term, route this entry
+        // through the canonical builder to eliminate the dual source of truth.
         "schemas/builtin/spawn_subagent.input.v1.json" => json!({
             "type": "object",
             "properties": {
-                "flavor_id": {
+                "subagent_type": {
                     "type": "string",
-                    "enum": ["general", "researcher", "coder", "explorer"],
-                    "description": "Subagent flavor. general: read/search only, bounded task. researcher: + web search, prefer evidence over mutation. coder: read/write/shell, file-focused execution. explorer: read/search, deep analysis, no writes."
+                    "enum": ["general", "explorer", "coder", "planner"],
+                    "description": "Which subagent profile to spawn. Options:\n- general: read-only file exploration (read_file, list_dir, grep)\n- explorer: read + glob over filesystem (read_file, list_dir, grep, glob)\n- coder: read + write + shell (read_file, write_file, apply_patch, shell, list_dir, grep, glob)\n- planner: read codebase + web research, returns a structured implementation plan (read_file, list_dir, grep, glob, http)"
                 },
                 "task": {
                     "type": "string",
@@ -171,7 +178,89 @@ pub(crate) fn resolve_builtin_input_schema_ref(reference: &str) -> Option<Value>
                     "description": "Optional context to pass to the child subagent"
                 }
             },
-            "required": ["flavor_id", "task"],
+            "required": ["subagent_type", "task"],
+            "additionalProperties": false
+        }),
+        "schemas/builtin/trace_commons-onboard.input.v1.json" => json!({
+            "type": "object",
+            "properties": {
+                "invite_url": {
+                    "type": "string",
+                    "description": "Trace Commons operator-issued invite link (https://…/onboard#CODE)"
+                },
+                "include_message_text": {
+                    "type": "boolean",
+                    "description": "Whether contributions may include redacted message text (default: false)"
+                },
+                "include_tool_payloads": {
+                    "type": "boolean",
+                    "description": "Whether contributions may include redacted tool payloads (default: false)"
+                },
+                "confirmed": {
+                    "type": "boolean",
+                    "description": "Must be true only after the user has explicitly consented in this conversation (default: false)"
+                }
+            },
+            "required": ["invite_url"],
+            "additionalProperties": false
+        }),
+        "schemas/builtin/trace_commons-status.input.v1.json" => json!({
+            "type": "object",
+            "properties": {},
+            "additionalProperties": false
+        }),
+        "schemas/builtin/trace_commons-credits.input.v1.json" => json!({
+            "type": "object",
+            "properties": {},
+            "additionalProperties": false
+        }),
+        "schemas/builtin/trace_commons-profile_token.input.v1.json" => json!({
+            "type": "object",
+            "properties": {
+                "confirmed": {
+                    "type": "boolean",
+                    "description": "Must be true only after the user has explicitly asked to mint a manual/browser profile-management token in this conversation (default: false)"
+                }
+            },
+            "additionalProperties": false
+        }),
+        "schemas/builtin/trace_commons-profile_set.input.v1.json" => json!({
+            "type": "object",
+            "properties": {
+                "display_handle": {
+                    "type": "string",
+                    "description": "Pseudonymous public display handle, 3-32 ASCII letters, digits, '-' or '_'"
+                },
+                "bio": {
+                    "type": "string",
+                    "description": "Optional short public bio, at most 280 bytes"
+                },
+                "confirmed": {
+                    "type": "boolean",
+                    "description": "Must be true only after the user has explicitly approved publishing this handle/bio in this conversation (default: false)"
+                }
+            },
+            "required": ["display_handle"],
+            "additionalProperties": false
+        }),
+        "schemas/builtin/profile_set.input.v1.json" => json!({
+            "type": "object",
+            "properties": {
+                "timezone": {
+                    "type": "string",
+                    "description": "IANA timezone name, e.g. America/Los_Angeles or Asia/Tokyo"
+                },
+                "locale": {
+                    "type": "string",
+                    "description": "BCP-47 locale tag, e.g. en-US or ja-JP",
+                    "maxLength": 35
+                },
+                "location": {
+                    "type": "string",
+                    "description": "Free-text location label, e.g. Tokyo, Japan"
+                }
+            },
+            "minProperties": 1,
             "additionalProperties": false
         }),
         "schemas/builtin/read_file.input.v1.json" => json!({
@@ -249,7 +338,7 @@ pub(crate) fn resolve_builtin_input_schema_ref(reference: &str) -> Option<Value>
         "schemas/builtin/extension_search.input.v1.json" => json!({
             "type": "object",
             "properties": {
-                "query": { "type": "string", "description": "Optional search query for locally available Reborn extensions. Omit to list all extensions." }
+                "query": { "type": "string", "description": "Optional extension, product, provider, or service name to search in the local Reborn extension catalog. Omit to list bundled and installed extensions." }
             },
             "additionalProperties": false
         }),
@@ -307,11 +396,12 @@ pub(crate) fn resolve_builtin_input_schema_ref(reference: &str) -> Option<Value>
                 },
                 "prompt": {
                     "type": "string",
-                    "description": "Prompt submitted when the trigger fires. Runtime validation caps UTF-8 content at 32768 bytes."
+                    "description": "Prompt submitted when the trigger fires. Runtime validation caps UTF-8 content at 32768 bytes. Do not embed delivery routing here; when the user asks to send routine or trigger results through an outbound product/channel, first select the target through the visible outbound delivery target capabilities, then create the trigger."
                 },
-                "cron": { "type": "string", "description": "Five-, six-, or seven-field cron expression; fire cadence must be at least one minute" }
+                "cron": { "type": "string", "description": "Five-, six-, or seven-field cron expression; fire cadence must be at least one minute" },
+                "timezone": { "type": "string", "description": "IANA timezone name for cron evaluation (e.g. 'America/New_York', 'Europe/London', 'UTC'). The cron expression is evaluated in this timezone; fire times are stored and compared in UTC. If the user's timezone is already known from the conversation or their settings, use it without asking; if unknown, ask the user before creating the trigger. Never silently assume UTC — a trigger that fires at the wrong local time is worse than no trigger." }
             },
-            "required": ["name", "prompt", "cron"],
+            "required": ["name", "prompt", "cron", "timezone"],
             "additionalProperties": false
         }),
         "schemas/builtin/trigger_list.input.v1.json" => json!({
@@ -322,6 +412,12 @@ pub(crate) fn resolve_builtin_input_schema_ref(reference: &str) -> Option<Value>
                     "minimum": 0,
                     "maximum": 100,
                     "description": "Maximum triggers to return. Defaults to 100."
+                },
+                "run_limit": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 100,
+                    "description": "Maximum recent runs to embed per trigger. Defaults to 25."
                 }
             },
             "additionalProperties": false

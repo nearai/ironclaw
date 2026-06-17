@@ -67,6 +67,16 @@ V1 schedule shape is cron-backed schedule intake only.
 - Second-level cron fields, sub-minute intervals, and any equivalent cadence below one minute are invalid in V1.
 - The create path must reject invalid schedules before persistence, not at poll time.
 
+#### 3.2.1 Timezone requirement
+
+`trigger_create` requires a valid IANA timezone string alongside the cron expression.
+
+- Invalid timezone strings — any string that `chrono-tz` does not recognise — are rejected at the tool boundary with an input error before persistence. The cadence and seconds-field rules above are unchanged and are validated in the same pre-persistence step.
+- Cron expressions are evaluated in the stored timezone; computed fire slots and `next_run_at` are always UTC instants.
+- Pre-existing persisted rows that lack an explicit timezone are treated as if `schedule_timezone = 'UTC'`; their behavior is identical to the pre-change UTC-only behavior.
+
+The `TriggerSchedule::Cron` variant stores both `expression` and `timezone` as the canonical schedule definition. `TriggerRecord.schedule` carries the full cron shape, including the IANA timezone string.
+
 ### 3.3 Trigger state
 
 `TriggerRecord.state` is the trigger-definition state, not the turn-run state.
@@ -287,6 +297,27 @@ The turn pipeline remains the source of truth for admission, active-lock handlin
 In V1, `last_status` reflects submit outcome only. It is separate from the
 active-fire claim and does not become an in-flight sentinel.
 
+V1 also persists bounded per-trigger run-history rows for product-surface inspection:
+
+- each row is scoped by `(tenant_id, trigger_id, fire_slot)` and records the
+  deterministic trigger route thread id, optional submitted `TurnRunId`,
+  status, `submitted_at`, and optional `completed_at`;
+- `Running` means the fire was claimed or submitted and no terminal cleanup has
+  completed for that `fire_slot`;
+- `Ok` means active-run cleanup observed a completed terminal turn and cleared
+  the exact active fire;
+- `Error` means poller-owned claim or submit processing failed before an active
+  run could complete, or observed a failed, cancelled, or recovery-required
+  terminal turn;
+- list APIs return newest rows first and clamp caller limits to the repository
+  maximum. A zero limit returns no rows. User-facing list paths must use the
+  batched repository query when loading histories for multiple triggers;
+- durable repositories retain only the newest 500 run-history rows per trigger.
+
+Run-history rows are observational. They must not be used as the idempotency
+ledger for fire replay; deterministic fire identity and the trusted conversation
+binding remain the replay source of truth.
+
 Replay of an already accepted/submitted slot returns the original accepted
 message and turn submission. If that submitted turn later reaches a terminal
 failure, V1 does not mint a second turn for the same `fire_slot`; retry-on-run-
@@ -341,11 +372,13 @@ messages directly.
 
 The trigger system must expose `trigger_create`, `trigger_list`, and `trigger_remove` as first-party Reborn capabilities.
 
-- `trigger_create` validates the schedule, captures caller scope, pairs the
-  caller as the host-trusted synthetic trigger actor used by the poller, and
-  persists the trigger. This pairing is composition-owned trigger management
-  wiring; trigger repositories remain storage-only, and the poller must still
-  fail closed for records whose creator actor was not paired.
+- `trigger_create` validates the schedule and timezone, captures caller scope,
+  pairs the caller as the host-trusted synthetic trigger actor used by the
+  poller, and persists the trigger. Schedule validation includes both cadence
+  rejection (sub-minute and second-level fields) and IANA timezone validation;
+  both are enforced before persistence. This pairing is composition-owned
+  trigger management wiring; trigger repositories remain storage-only, and the
+  poller must still fail closed for records whose creator actor was not paired.
 - `trigger_create` pairs the creator before persisting the trigger record. This
   intentionally fails closed before storage if the actor pairing cannot be
   established, instead of storing a trigger that the poller cannot fire. A
@@ -355,7 +388,10 @@ The trigger system must expose `trigger_create`, `trigger_list`, and `trigger_re
   services between `trigger_create` pairing and trigger-poller fire submission.
   The shared service preserves the conversation store's mutation lock across
   both paths and avoids racing optimistic durable-state writes.
-- `trigger_list` is caller-scoped and surfaces the current schedule state plus `last_status`.
+- `trigger_list` is caller-scoped and surfaces the current schedule state plus
+  `last_status` and a bounded `recent_runs` projection. Omitted `run_limit`
+  defaults to 25 recent runs per trigger; callers that do not need embedded run
+  history pass `run_limit = 0`.
 - `trigger_remove` is caller-scoped delete.
 - Local-dev builds compiled with `libsql` store trigger records in the
   local-dev libSQL database (`reborn-local-dev.db`) through the same
@@ -381,7 +417,16 @@ Capability follow-ups before launch:
 
 ## 9. Delivery
 
-Trigger delivery is fast-follow.
+Trigger delivery target selection is outside trigger identity and goes through
+the outbound delivery track. Product-facing outbound preference APIs and
+explicit provider-backed target tooling own discovery and approval-gated
+selection. Local-dev Reborn exposes model-visible outbound target
+discovery/selection capabilities that write the caller's final-reply
+preference. When a user asks to send routine or trigger results through a
+delivery product/channel, model-visible trigger surfaces must steer the model to
+discover and select an outbound delivery target before calling
+`trigger_create`; durable selection remains product-owned and trigger records
+still do not embed delivery targets.
 
 - Trigger ingress identity must not include delivery targets.
 - Trigger record identity must not include delivery targets.

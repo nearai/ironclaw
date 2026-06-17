@@ -16,10 +16,10 @@ v1 secrets / settings / DB.
 |---|---|
 | `serve_webui_v2(opts)` | Bind a `TcpListener` + run `axum::serve` with graceful shutdown |
 | `RebornWebuiServeOptions` | Owner-supplied input (addr, router, shutdown receiver) |
-| `EnvBearerAuthenticator` | Single-token `WebuiAuthenticator` for the standalone CLI / local dev |
+| `EnvBearerAuthenticator` | Single-token `WebuiAuthenticator` for the standalone CLI / local dev; accepted tokens map to operator WebUI capabilities |
 | `SessionStore` trait | Pluggable session storage; durable impl is host's; `InMemorySessionStore` for local dev / tests |
-| `SessionAuthenticator` | `WebuiAuthenticator` that resolves bearer tokens through a `SessionStore` |
-| `OidcAuthenticator` | OIDC bearer-token verifier (JWKS + standard claims) |
+| `SessionAuthenticator` | `WebuiAuthenticator` that resolves bearer tokens through a `SessionStore`; accepted tokens map to non-operator WebUI capabilities |
+| `OidcAuthenticator` | OIDC bearer-token verifier (JWKS + standard claims); accepted tokens map to non-operator WebUI capabilities |
 | `webui_v2_auth_router(config) -> PublicRouteMount` | OAuth login router + route descriptors. The descriptors travel with the router so composition can fold them into the descriptor-driven per-route rate-limit / body-limit middleware — same machinery the v2 facade and product-auth callback already use, no side door. |
 | `PublicRouteMount` | `{ router, descriptors }` pair handed to `WebuiServeConfig::with_public_route_mount` |
 | `OAuthProvider` trait (in `auth/provider.rs`) | Extension point for per-provider URL / code-exchange logic. Deliberately lives in its own module so each provider does not depend on the others. `GoogleProvider` and `GitHubProvider` ship today. |
@@ -36,6 +36,12 @@ the session lifecycle types. The OAuth callback's job is exactly that
 — turn a provider profile into a `SessionStore::create_session` call
 — so the login mint path belongs in the same host-owned crate, not
 behind the product/API seam in `ironclaw_reborn_composition`.
+
+SSO sessions are user identity only. They must not inherit operator
+WebUI configuration privileges from the deployment. When the CLI
+composes SSO plus the env bearer token, the env token remains the
+separate operator credential and session/OIDC bearers remain
+non-operator.
 
 Composition merges the `PublicRouteMount` supplied by
 `webui_v2_auth_router` through

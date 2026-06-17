@@ -249,6 +249,7 @@ fn is_transient_validator_error(error: &OutboundError) -> bool {
         // but classify it as transient (retryable) for defence in depth.
         OutboundError::Backend | OutboundError::Serialization | OutboundError::CasConflict => true,
         OutboundError::InvalidRequest { .. }
+        | OutboundError::PreferenceTargetMissing { .. }
         | OutboundError::SubscriptionScopeMismatch
         | OutboundError::AccessDenied
         | OutboundError::DeliveryNotFound => false,
@@ -340,7 +341,14 @@ mod tests {
                 modality: CommunicationModality::Text,
                 intent: CommunicationDeliveryIntent::RunNotification(RunNotificationContext {
                     event_kind: RunNotificationEventKind::ApprovalNeeded,
-                    origin: RunNotificationOrigin::LiveSourceRoute {
+                    origin: RunNotificationOrigin::TriggeredFromSourceRoute {
+                        trigger: crate::TriggerCommunicationContext {
+                            trigger_origin_ref: crate::TriggerOriginRef::new("trigger:approval")
+                                .expect("valid trigger id"),
+                            trigger_source_kind: crate::TriggerSourceKind::Schedule,
+                            fire_slot: crate::TriggerFireSlot::new("2026-06-08T09:00:00Z")
+                                .expect("valid fire slot"),
+                        },
                         source_route: SourceRouteContext {
                             reply_target_binding_ref: reply_ref("reply:source"),
                         },
@@ -433,8 +441,7 @@ mod tests {
         auth_prompt_target: Option<&str>,
     ) -> CommunicationPreferenceRecord {
         CommunicationPreferenceRecord {
-            tenant_id: scope.tenant_id.clone(),
-            user_id: user_id("alice"),
+            scope: crate::DeliveryDefaultScope::personal(scope.tenant_id.clone(), user_id("alice")),
             final_reply_target: final_reply_target.map(reply_ref),
             progress_target: progress_target.map(reply_ref),
             approval_prompt_target: approval_prompt_target.map(reply_ref),
@@ -446,11 +453,12 @@ mod tests {
     }
 
     fn turn_scope(thread_id: &str) -> TurnScope {
-        TurnScope::new(
+        TurnScope::new_with_owner(
             TenantId::new("tenant-a").expect("valid tenant"),
             Some(AgentId::new("agent-a").expect("valid agent")),
             Some(ProjectId::new("project-a").expect("valid project")),
             ThreadId::new(thread_id).expect("valid thread"),
+            Some(user_id("alice")),
         )
     }
 

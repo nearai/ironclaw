@@ -6,28 +6,31 @@ use std::{
 use async_trait::async_trait;
 use ironclaw_host_api::{
     CapabilityDisplayOutputPreview, CapabilityId, CapabilitySet, CorrelationId, EffectKind,
-    ExecutionContext, ExtensionId, InvocationId, MountView, Principal, RuntimeKind,
-    sha256_digest_token,
+    ExecutionContext, ExtensionId, InvocationId, MountView, Principal, ResourceEstimate,
+    RuntimeKind, sha256_digest_token,
 };
 use ironclaw_host_runtime::{
     CapabilityFailureDisposition, HostRuntime, HostRuntimeError, IdempotencyKey,
-    RuntimeBlockedReason, RuntimeCapabilityFailure, RuntimeCapabilityOutcome,
-    RuntimeCapabilityRequest, RuntimeFailureKind,
+    RuntimeBlockedReason, RuntimeCapabilityAuthResumeRequest, RuntimeCapabilityFailure,
+    RuntimeCapabilityOutcome, RuntimeCapabilityRequest, RuntimeCapabilityResumeRequest,
+    RuntimeFailureKind,
 };
 use ironclaw_process_sandbox::{SandboxProcessPlan, ValidatedSandboxProcessPlan};
 use ironclaw_turns::{
     CapabilityActivityId, LoopGateRef, LoopResultRef,
     run_profile::{
-        AgentLoopHostError, AgentLoopHostErrorKind, CapabilityBatchInvocation,
-        CapabilityBatchOutcome, CapabilityDenied, CapabilityDeniedReasonKind,
-        CapabilityDescriptorView, CapabilityFailure, CapabilityFailureKind, CapabilityInputRef,
-        CapabilityInvocation, CapabilityOutcome, CapabilityResultMessage, ConcurrencyHint,
-        LoopCapabilityPort, LoopHostMilestone, LoopHostMilestoneKind, LoopHostMilestoneSink,
-        LoopProcessRef, LoopRunContext, LoopSafeSummary, ProcessHandleSummary, ProviderToolCall,
+        AgentLoopHostError, AgentLoopHostErrorKind, CapabilityApprovalResume, CapabilityAuthResume,
+        CapabilityBatchInvocation, CapabilityBatchOutcome, CapabilityDenied,
+        CapabilityDeniedReasonKind, CapabilityDescriptorView, CapabilityFailure,
+        CapabilityFailureKind, CapabilityInputRef, CapabilityInvocation, CapabilityOutcome,
+        CapabilityResultMessage, CapabilityResumeToken, ConcurrencyHint, LoopCapabilityPort,
+        LoopHostMilestone, LoopHostMilestoneKind, LoopHostMilestoneSink, LoopProcessRef,
+        LoopRunContext, LoopSafeSummary, ProcessHandleSummary, ProviderToolCall,
         ProviderToolCallCapabilityIds, ProviderToolCallReplay, ProviderToolDefinition,
         VisibleCapabilityRequest, VisibleCapabilitySurface,
     },
 };
+use serde_json::Value;
 use tokio::sync::Notify;
 
 mod provider_input;
@@ -35,7 +38,8 @@ mod provider_validation;
 mod surface_snapshot;
 
 use self::provider_input::{
-    normalize_provider_arguments, prepare_provider_arguments, schema_contains_external_ref,
+    normalize_provider_arguments, prepare_provider_arguments,
+    prepare_provider_arguments_with_detail, schema_contains_external_ref,
 };
 use self::provider_validation::{
     PROVIDER_TOOL_NAME_MAX_BYTES, validate_provider_arguments, validate_provider_tool_call,
@@ -50,6 +54,37 @@ use self::surface_snapshot::{
 // existing adapter boundary.
 const PROVIDER_TOOL_NAME_DIGEST_BYTES: usize = 32;
 const PROVIDER_TOOL_CALL_INPUT_REF_PREFIX: &str = "input:provider-tool-";
+
+/// Observes a capability invocation's resolved input (arguments) as the host
+/// loop executes it, for trajectory capture by downstream consumers (benchmark
+/// harnesses, debuggers, UI). `call_id` is the capability input ref.
+///
+/// **Input-only.** This layer stages completed outcomes through
+/// [`LoopCapabilityResultWriter`], not through the port, so it does not observe
+/// results: result events belong to whichever result-writer the composition
+/// installs (e.g. reborn's `LocalDevCapabilityIo`), keyed back to `call_id`.
+/// Keeping the substrate observer input-only avoids advertising a result
+/// callback this layer would never fire.
+///
+/// Best-effort and side-effect-free. The callback fires inline on the
+/// per-capability hot path, so an implementation **must never block** (do I/O,
+/// contend on a lock): hand the event to a non-blocking queue and return. A
+/// callback that panics is caught at the call site and the event is dropped —
+/// it cannot unwind or fail the run — but it must not rely on that.
+pub trait CapabilityTrajectoryObserver: std::fmt::Debug + Send + Sync {
+    /// A model tool call resolved to a capability invocation: `capability_id` is
+    /// the resolved capability (e.g. `builtin.shell`), `arguments` the tool-call
+    /// input JSON resolved from the input ref. This fires before schema
+    /// normalization/coercion, so `arguments` is the raw model-emitted input
+    /// (what the trajectory should record), not the post-validation execution
+    /// payload.
+    fn on_capability_input(
+        &self,
+        call_id: &str,
+        capability_id: &str,
+        arguments: &serde_json::Value,
+    );
+}
 const MAX_IN_MEMORY_PROVIDER_TOOL_CALL_EFFECTIVE_CAPABILITY_IDS: usize = 128;
 
 #[async_trait]
@@ -140,17 +175,22 @@ impl LoopCapabilityInputResolver for ProviderToolCallInputResolver {
 
 #[async_trait]
 pub trait LoopCapabilityResultWriter: Send + Sync {
+    /// Write the result of a completed capability invocation.
+    ///
+    /// Returns a tuple of `(LoopResultRef, u64)` where the `u64` is the
+    /// serialized byte length of the staged result JSON, for downstream
+    /// per-capability byte accounting (no PII; pure size).
     async fn write_capability_result(
         &self,
         write: CapabilityResultWrite<'_>,
-    ) -> Result<LoopResultRef, AgentLoopHostError>;
+    ) -> Result<(LoopResultRef, u64), AgentLoopHostError>;
 
     async fn update_capability_result(
         &self,
         _run_context: &LoopRunContext,
         _result_ref: &LoopResultRef,
         _output: serde_json::Value,
-    ) -> Result<(), AgentLoopHostError> {
+    ) -> Result<u64, AgentLoopHostError> {
         Err(AgentLoopHostError::new(
             AgentLoopHostErrorKind::InvalidInvocation,
             "capability result updates are not supported by this writer",
@@ -233,6 +273,7 @@ pub struct HostRuntimeLoopCapabilityPortFactory {
     milestone_sink: Arc<dyn LoopHostMilestoneSink>,
     execution_mounts: MountView,
     capability_execution_mounts: HashMap<CapabilityId, MountView>,
+    trajectory_observer: Option<Arc<dyn CapabilityTrajectoryObserver>>,
 }
 
 impl HostRuntimeLoopCapabilityPortFactory {
@@ -251,7 +292,18 @@ impl HostRuntimeLoopCapabilityPortFactory {
             milestone_sink,
             execution_mounts: MountView::default(),
             capability_execution_mounts: HashMap::new(),
+            trajectory_observer: None,
         }
+    }
+
+    /// Attach a [`CapabilityTrajectoryObserver`] that every port built by this
+    /// factory forwards capability inputs to. No-op when unset.
+    pub fn with_trajectory_observer(
+        mut self,
+        observer: Option<Arc<dyn CapabilityTrajectoryObserver>>,
+    ) -> Self {
+        self.trajectory_observer = observer;
+        self
     }
 
     pub fn with_execution_mounts(mut self, mounts: MountView) -> Self {
@@ -284,6 +336,7 @@ impl HostRuntimeLoopCapabilityPortFactory {
         )
         .with_execution_mounts(self.execution_mounts.clone())
         .with_capability_execution_mounts(self.capability_execution_mounts.clone())
+        .with_trajectory_observer(self.trajectory_observer.clone())
     }
 }
 
@@ -315,6 +368,7 @@ enum DispatchRecord {
     },
     RuntimeCompleted {
         invocation_id: InvocationId,
+        correlation_id: CorrelationId,
         requested_capability_id: CapabilityId,
         outcome: RuntimeCapabilityOutcome,
     },
@@ -327,11 +381,43 @@ enum DispatchRecord {
 
 struct RuntimeOutcomeCompletion<'a> {
     input_ref: &'a CapabilityInputRef,
+    input: Option<&'a Value>,
+    estimate: Option<&'a ResourceEstimate>,
     invocation_id: InvocationId,
+    correlation_id: CorrelationId,
     requested_capability_id: &'a CapabilityId,
     provider: ExtensionId,
     runtime: RuntimeKind,
     outcome: RuntimeCapabilityOutcome,
+}
+
+struct RuntimeOutcomeConversion<'a> {
+    input_ref: &'a CapabilityInputRef,
+    input: Option<&'a Value>,
+    estimate: Option<&'a ResourceEstimate>,
+    invocation_id: InvocationId,
+    correlation_id: CorrelationId,
+    requested_capability_id: &'a CapabilityId,
+    outcome: RuntimeCapabilityOutcome,
+}
+
+struct CapabilityReplayInput<'a> {
+    input: &'a Value,
+    estimate: &'a ResourceEstimate,
+}
+
+impl<'a> RuntimeOutcomeCompletion<'a> {
+    fn conversion(&self) -> RuntimeOutcomeConversion<'a> {
+        RuntimeOutcomeConversion {
+            input_ref: self.input_ref,
+            input: self.input,
+            estimate: self.estimate,
+            invocation_id: self.invocation_id,
+            correlation_id: self.correlation_id,
+            requested_capability_id: self.requested_capability_id,
+            outcome: self.outcome.clone(),
+        }
+    }
 }
 
 #[derive(Default)]
@@ -347,6 +433,7 @@ impl DispatchRecordStore {
             Some(DispatchRecord::InFlight { notify }) => Ok(DispatchReservation::Wait(notify)),
             Some(DispatchRecord::RuntimeCompleted {
                 invocation_id,
+                correlation_id,
                 requested_capability_id,
                 outcome,
             }) => {
@@ -358,6 +445,7 @@ impl DispatchRecordStore {
                 );
                 Ok(DispatchReservation::RuntimeCompleted {
                     invocation_id,
+                    correlation_id,
                     requested_capability_id,
                     outcome,
                 })
@@ -446,6 +534,7 @@ enum DispatchReservation {
     Wait(Arc<Notify>),
     RuntimeCompleted {
         invocation_id: InvocationId,
+        correlation_id: CorrelationId,
         requested_capability_id: CapabilityId,
         outcome: RuntimeCapabilityOutcome,
     },
@@ -552,6 +641,7 @@ pub struct HostRuntimeLoopCapabilityPort {
     current_surface_version: Mutex<Option<String>>,
     dispatch_records: Mutex<DispatchRecordStore>,
     provider_tool_call_effective_capability_ids: Mutex<ProviderToolCallEffectiveCapabilityIdStore>,
+    trajectory_observer: Option<Arc<dyn CapabilityTrajectoryObserver>>,
 }
 
 /// Lock a poisoned-aware `Mutex` and wrap a poison error as the canonical
@@ -596,7 +686,18 @@ impl HostRuntimeLoopCapabilityPort {
             provider_tool_call_effective_capability_ids: Mutex::new(
                 ProviderToolCallEffectiveCapabilityIdStore::default(),
             ),
+            trajectory_observer: None,
         }
+    }
+
+    /// Attach a [`CapabilityTrajectoryObserver`] notified of each capability's
+    /// resolved input as this port executes it. No-op when unset.
+    pub fn with_trajectory_observer(
+        mut self,
+        observer: Option<Arc<dyn CapabilityTrajectoryObserver>>,
+    ) -> Self {
+        self.trajectory_observer = observer;
+        self
     }
 
     pub fn with_execution_mounts(mut self, mounts: MountView) -> Self {
@@ -672,6 +773,7 @@ impl HostRuntimeLoopCapabilityPort {
         &self,
         key: &IdempotencyKey,
         invocation_id: InvocationId,
+        correlation_id: CorrelationId,
         requested_capability_id: CapabilityId,
         outcome: RuntimeCapabilityOutcome,
     ) -> Result<(), AgentLoopHostError> {
@@ -679,6 +781,7 @@ impl HostRuntimeLoopCapabilityPort {
             key,
             DispatchRecord::RuntimeCompleted {
                 invocation_id,
+                correlation_id,
                 requested_capability_id,
                 outcome,
             },
@@ -806,16 +909,14 @@ impl HostRuntimeLoopCapabilityPort {
         let result = runtime_outcome_to_loop(
             &self.run_context,
             self.result_writer.as_ref(),
-            completion.input_ref,
-            completion.invocation_id,
-            completion.requested_capability_id,
-            completion.outcome.clone(),
+            completion.conversion(),
         )
         .await;
         if should_retry_result_write(&completion.outcome, &result) {
             self.record_runtime_completed(
                 key,
                 completion.invocation_id,
+                completion.correlation_id,
                 completion.requested_capability_id.clone(),
                 completion.outcome,
             )?;
@@ -916,11 +1017,12 @@ impl HostRuntimeLoopCapabilityPort {
                 return Ok(CapabilityOutcome::Failed(CapabilityFailure {
                     error_kind: CapabilityFailureKind::InvalidInput,
                     safe_summary: error.safe_summary,
+                    detail: None,
                 }));
             }
             Err(error) => return Err(error),
         };
-        let result_ref = self
+        let (result_ref, byte_len) = self
             .result_writer
             .write_capability_result(CapabilityResultWrite {
                 run_context: &self.run_context,
@@ -936,6 +1038,7 @@ impl HostRuntimeLoopCapabilityPort {
             safe_summary: "capability info returned".to_string(),
             progress: ironclaw_turns::run_profile::CapabilityProgress::MadeProgress,
             terminate_hint: false,
+            byte_len,
         }))
     }
 
@@ -1123,6 +1226,11 @@ impl LoopCapabilityPort for HostRuntimeLoopCapabilityPort {
         &self,
         request: CapabilityInvocation,
     ) -> Result<CapabilityOutcome, AgentLoopHostError> {
+        let effective_input_ref = request
+            .approval_resume
+            .as_ref()
+            .map(|resume| &resume.input_ref)
+            .unwrap_or(&request.input_ref);
         let snapshot = self.snapshot_for(&request.surface_version)?;
         let Some(capability) = snapshot.capabilities.get(&request.capability_id).cloned() else {
             return Ok(CapabilityOutcome::Denied(CapabilityDenied {
@@ -1130,7 +1238,8 @@ impl LoopCapabilityPort for HostRuntimeLoopCapabilityPort {
                 safe_summary: "capability was not visible on the cited surface".to_string(),
             }));
         };
-        let idempotency_key = invocation_idempotency_key(&self.run_context, &request)?;
+        let idempotency_key =
+            invocation_idempotency_key(&self.run_context, &request, effective_input_ref)?;
         loop {
             match self.reserve_dispatch(&idempotency_key)? {
                 DispatchReservation::Reserved => break,
@@ -1140,6 +1249,7 @@ impl LoopCapabilityPort for HostRuntimeLoopCapabilityPort {
                 }
                 DispatchReservation::RuntimeCompleted {
                     invocation_id,
+                    correlation_id,
                     requested_capability_id,
                     outcome,
                 } => {
@@ -1148,8 +1258,11 @@ impl LoopCapabilityPort for HostRuntimeLoopCapabilityPort {
                             .finish_runtime_outcome(
                                 &idempotency_key,
                                 RuntimeOutcomeCompletion {
-                                    input_ref: &request.input_ref,
+                                    input_ref: effective_input_ref,
+                                    input: None,
+                                    estimate: None,
                                     invocation_id,
+                                    correlation_id,
                                     requested_capability_id: &requested_capability_id,
                                     provider: capability.provider.clone(),
                                     runtime: capability.runtime,
@@ -1161,10 +1274,15 @@ impl LoopCapabilityPort for HostRuntimeLoopCapabilityPort {
                     let result = runtime_outcome_to_loop(
                         &self.run_context,
                         self.result_writer.as_ref(),
-                        &request.input_ref,
-                        invocation_id,
-                        &requested_capability_id,
-                        outcome,
+                        RuntimeOutcomeConversion {
+                            input_ref: effective_input_ref,
+                            input: None,
+                            estimate: None,
+                            invocation_id,
+                            correlation_id,
+                            requested_capability_id: &requested_capability_id,
+                            outcome,
+                        },
                     )
                     .await;
                     self.record_loop_completed(&idempotency_key, result.clone())?;
@@ -1210,32 +1328,62 @@ impl LoopCapabilityPort for HostRuntimeLoopCapabilityPort {
                 safe_summary: "capability provider trust is unavailable".to_string(),
             }));
         };
-        let input = self
-            .input_resolver
-            .resolve_capability_input(&self.run_context, &request.input_ref)
-            .await?;
-        let input = match prepare_provider_arguments(
-            &input,
-            &capability.parameters_schema,
-            "capability input",
-        ) {
-            Ok(input) => input,
-            Err(error)
-                if error.kind == AgentLoopHostErrorKind::InvalidInvocation
-                    && is_provider_tool_call_input_ref(&request.input_ref) =>
-            {
-                let result = Ok(CapabilityOutcome::Failed(CapabilityFailure {
-                    error_kind: CapabilityFailureKind::InvalidInput,
-                    safe_summary: error.safe_summary,
+        let (input, estimate) = if let Some(replay) = invocation_replay_input(&request) {
+            (replay.input.clone(), replay.estimate.clone())
+        } else {
+            let input = self
+                .input_resolver
+                .resolve_capability_input(&self.run_context, effective_input_ref)
+                .await?;
+            // Trajectory capture: the resolved input is the model's tool
+            // arguments, and this is the one place they are visible (the provider
+            // tool-call decorator stages them upstream and bypasses the input
+            // resolver hook).
+            if let Some(observer) = &self.trajectory_observer {
+                // Best-effort, inline on the capability hot path: a panicking
+                // observer must never unwind the invocation before dispatch.
+                // (Blocking is the observer's own contract.)
+                let caught = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    observer.on_capability_input(
+                        effective_input_ref.as_str(),
+                        request.capability_id.as_str(),
+                        &input,
+                    );
                 }));
-                guard.commit();
-                self.record_loop_completed(&idempotency_key, result.clone())?;
-                return result;
+                if caught.is_err() {
+                    tracing::warn!(
+                        capability_id = request.capability_id.as_str(),
+                        "trajectory observer on_capability_input panicked; dropping event"
+                    );
+                }
             }
-            Err(error) => return Err(error),
+            let input = match prepare_provider_arguments_with_detail(
+                &input,
+                &capability.parameters_schema,
+                "capability input",
+            ) {
+                Ok(input) => input,
+                Err(error)
+                    if error.error.kind == AgentLoopHostErrorKind::InvalidInvocation
+                        && is_provider_tool_call_input_ref(effective_input_ref) =>
+                {
+                    let result = Ok(CapabilityOutcome::Failed(CapabilityFailure {
+                        error_kind: CapabilityFailureKind::InvalidInput,
+                        safe_summary: error.error.safe_summary,
+                        detail: error.detail,
+                    }));
+                    guard.commit();
+                    self.record_loop_completed(&idempotency_key, result.clone())?;
+                    return result;
+                }
+                Err(error) => return Err(error.error),
+            };
+            (
+                host_runtime_input_for_capability(&request.capability_id, input)?,
+                capability.estimate.clone(),
+            )
         };
-        let input = host_runtime_input_for_capability(&request.capability_id, input)?;
-        let invocation_context = invocation_context_from_visible(
+        let mut invocation_context = invocation_context_from_visible(
             &self.visible_request.context,
             &self.run_context,
             &request.capability_id,
@@ -1244,7 +1392,70 @@ impl LoopCapabilityPort for HostRuntimeLoopCapabilityPort {
             &trust_decision.authority_ceiling.allowed_effects,
             self.execution_mounts_for(&request.capability_id),
         )?;
+        // Normalize the two mutually-exclusive resume fields into a single
+        // local value BEFORE touching `invocation_context`, so an illegal
+        // both-set invocation is rejected before any state mutation occurs.
+        enum ResolvedResumeMode<'a> {
+            Approval(&'a CapabilityApprovalResume),
+            Auth(&'a CapabilityAuthResume),
+            None,
+        }
+        let resume_mode = match (
+            request.approval_resume.as_ref(),
+            request.auth_resume.as_ref(),
+        ) {
+            (Some(_), Some(_)) => {
+                // Both resume modes set simultaneously is an illegal invocation:
+                // approval_resume and auth_resume are mutually exclusive paths.
+                // Fail closed — do not dispatch, and do not mutate context.
+                return Err(AgentLoopHostError::new(
+                    AgentLoopHostErrorKind::InvalidInvocation,
+                    "capability invocation has both approval_resume and auth_resume set; \
+                     these resume modes are mutually exclusive",
+                ));
+            }
+            (Some(resume), _) => ResolvedResumeMode::Approval(resume),
+            (_, Some(auth_resume)) => ResolvedResumeMode::Auth(auth_resume),
+            (Option::None, Option::None) => ResolvedResumeMode::None,
+        };
+        match &resume_mode {
+            ResolvedResumeMode::Approval(resume) => {
+                let resume_invocation_id = invocation_id_from_resume_token(&resume.resume_token)?;
+                invocation_context.invocation_id = resume_invocation_id;
+                invocation_context.correlation_id = resume.correlation_id;
+                invocation_context.resource_scope.invocation_id = resume_invocation_id;
+                invocation_context.validate().map_err(|_| {
+                    AgentLoopHostError::new(
+                        AgentLoopHostErrorKind::InvalidInvocation,
+                        "capability approval resume context is invalid",
+                    )
+                })?;
+            }
+            ResolvedResumeMode::Auth(auth_resume) => {
+                // Reuse original invocation identifier so the fingerprinted
+                // approval lease (scoped to that identifier) can still be matched
+                // and claimed.
+                let resume_invocation_id =
+                    invocation_id_from_resume_token(&auth_resume.resume_token)?;
+                invocation_context.invocation_id = resume_invocation_id;
+                invocation_context.resource_scope.invocation_id = resume_invocation_id;
+                // Restore original correlation identifier when a prior approval is
+                // present so the same trace-correlation identifier flows through
+                // the full capability lifecycle (mirrors the approval-resume path).
+                if let Some(pa) = auth_resume.prior_approval.as_ref() {
+                    invocation_context.correlation_id = pa.correlation_id;
+                }
+                invocation_context.validate().map_err(|_| {
+                    AgentLoopHostError::new(
+                        AgentLoopHostErrorKind::InvalidInvocation,
+                        "capability auth resume context is invalid",
+                    )
+                })?;
+            }
+            ResolvedResumeMode::None => {}
+        }
         let invocation_id = invocation_context.invocation_id;
+        let correlation_id = invocation_context.correlation_id;
         let requested_capability_id = request.capability_id.clone();
         let provider = capability.provider.clone();
         let runtime = capability.runtime;
@@ -1254,42 +1465,90 @@ impl LoopCapabilityPort for HostRuntimeLoopCapabilityPort {
             capability_id: request.capability_id.clone(),
         })
         .await?;
-        let runtime_request = RuntimeCapabilityRequest::new(
-            invocation_context,
-            request.capability_id,
-            capability.estimate,
-            input,
-            trust_decision,
-        )
-        .with_idempotency_key(idempotency_key.clone());
-        let outcome =
-            match dispatch_runtime_capability(self.runtime.as_ref(), runtime_request).await {
-                Ok(outcome) => outcome,
-                Err(error) => {
-                    let host_error = host_runtime_error(error);
-                    let terminal_milestone = LoopHostMilestoneKind::CapabilityFailed {
-                        activity_id: capability_activity_id,
-                        capability_id: requested_capability_id.clone(),
-                        provider: Some(provider),
-                        runtime: Some(runtime),
-                        reason_kind: capability_failure_kind(host_error.kind.as_str())?,
-                    };
-                    guard.commit();
-                    return self
-                        .complete_terminal_milestone(
-                            &idempotency_key,
-                            Err(host_error),
-                            Some(terminal_milestone),
-                        )
-                        .await;
-                }
-            };
+        let outcome = match resume_mode {
+            ResolvedResumeMode::Approval(resume) => {
+                let runtime_request = RuntimeCapabilityResumeRequest::new(
+                    invocation_context,
+                    resume.approval_request_id,
+                    request.capability_id,
+                    estimate.clone(),
+                    input.clone(),
+                    trust_decision,
+                )
+                .with_idempotency_key(idempotency_key.clone());
+                dispatch_runtime_capability_resume(self.runtime.as_ref(), runtime_request).await
+            }
+            ResolvedResumeMode::Auth(auth_resume) => {
+                let prior_approval_id = auth_resume
+                    .prior_approval
+                    .as_ref()
+                    .map(|pa| pa.approval_request_id);
+                tracing::debug!(
+                    invocation_id = %invocation_id,
+                    auth_resume = true,
+                    approval_request_id = prior_approval_id.map(|id| id.to_string()).as_deref().unwrap_or("none"),
+                    "capability auth-resume re-dispatch with preserved invocation identity"
+                );
+                let runtime_request = RuntimeCapabilityAuthResumeRequest::new(
+                    invocation_context,
+                    request.capability_id,
+                    estimate.clone(),
+                    input.clone(),
+                    trust_decision,
+                    prior_approval_id,
+                )
+                .with_idempotency_key(idempotency_key.clone());
+                dispatch_runtime_capability_auth_resume(self.runtime.as_ref(), runtime_request)
+                    .await
+            }
+            ResolvedResumeMode::None => {
+                let runtime_request = RuntimeCapabilityRequest::new(
+                    invocation_context,
+                    request.capability_id,
+                    estimate.clone(),
+                    input.clone(),
+                    trust_decision,
+                )
+                .with_idempotency_key(idempotency_key.clone());
+                dispatch_runtime_capability(self.runtime.as_ref(), runtime_request).await
+            }
+        };
+        let outcome = match outcome {
+            Ok(outcome) => outcome,
+            Err(HostRuntimeError::Unavailable { reason }) => {
+                runtime_failed_outcome_for_host_runtime_unavailable(
+                    requested_capability_id.clone(),
+                    reason,
+                )
+            }
+            Err(error) => {
+                let host_error = host_runtime_error(error);
+                let terminal_milestone = LoopHostMilestoneKind::CapabilityFailed {
+                    activity_id: capability_activity_id,
+                    capability_id: requested_capability_id.clone(),
+                    provider: Some(provider),
+                    runtime: Some(runtime),
+                    reason_kind: capability_failure_kind(host_error.kind.as_str())?,
+                };
+                guard.commit();
+                return self
+                    .complete_terminal_milestone(
+                        &idempotency_key,
+                        Err(host_error),
+                        Some(terminal_milestone),
+                    )
+                    .await;
+            }
+        };
         guard.commit();
         self.finish_runtime_outcome(
             &idempotency_key,
             RuntimeOutcomeCompletion {
-                input_ref: &request.input_ref,
+                input_ref: effective_input_ref,
+                input: Some(&input),
+                estimate: Some(&estimate),
                 invocation_id,
+                correlation_id,
                 requested_capability_id: &requested_capability_id,
                 provider,
                 runtime,
@@ -1330,6 +1589,26 @@ async fn dispatch_runtime_capability(
     } else {
         runtime.invoke_capability(request).await
     }
+}
+
+async fn dispatch_runtime_capability_resume(
+    runtime: &(dyn HostRuntime + Send + Sync),
+    request: RuntimeCapabilityResumeRequest,
+) -> Result<RuntimeCapabilityOutcome, HostRuntimeError> {
+    if is_process_sandbox_capability(&request.capability_id) {
+        runtime.resume_spawn_capability(request).await
+    } else {
+        runtime.resume_capability(request).await
+    }
+}
+
+/// Auth-resume dispatch: always uses `auth_resume_capability` (no spawn
+/// variant; sandbox spawns do not go through approval/auth gates).
+async fn dispatch_runtime_capability_auth_resume(
+    runtime: &(dyn HostRuntime + Send + Sync),
+    request: RuntimeCapabilityAuthResumeRequest,
+) -> Result<RuntimeCapabilityOutcome, HostRuntimeError> {
+    runtime.auth_resume_capability(request).await
 }
 
 fn host_runtime_input_for_capability(
@@ -1659,13 +1938,37 @@ fn effects_are_covered(required: &[EffectKind], allowed: &[EffectKind]) -> bool 
 fn invocation_idempotency_key(
     run_context: &LoopRunContext,
     request: &CapabilityInvocation,
+    input_ref: &CapabilityInputRef,
 ) -> Result<IdempotencyKey, AgentLoopHostError> {
+    // Each mode must hash to a distinct key: a colliding key would replay the
+    // prior mode's recorded outcome (e.g. an auth re-dispatch receiving the
+    // original cached ApprovalRequired gate) instead of dispatching.
+    let resume_scope = match (
+        request.approval_resume.as_ref(),
+        request.auth_resume.as_ref(),
+    ) {
+        (Some(resume), _) => format!(
+            "resume:{}:{}",
+            resume.approval_request_id, resume.resume_token
+        ),
+        (None, Some(auth_resume)) => format!(
+            "auth-resume:{}:{}",
+            auth_resume
+                .prior_approval
+                .as_ref()
+                .map(|pa| pa.approval_request_id.to_string())
+                .unwrap_or_else(|| "none".to_string()),
+            auth_resume.resume_token
+        ),
+        (None, None) => "dispatch".to_string(),
+    };
     let payload = format!(
-        "loop-capability\nrun={}\nsurface={}\ncapability={}\ninput={}",
+        "loop-capability\nrun={}\nsurface={}\ncapability={}\ninput={}\nmode={}",
         run_context.run_id,
         request.surface_version.as_str(),
         request.capability_id.as_str(),
-        request.input_ref.as_str()
+        input_ref.as_str(),
+        resume_scope
     );
     IdempotencyKey::new(format!(
         "loop-capability:{}",
@@ -1733,22 +2036,56 @@ fn loop_surface_version(
     })
 }
 
+fn runtime_resume_replay<'a>(
+    input: Option<&'a Value>,
+    estimate: Option<&'a ResourceEstimate>,
+    gate_kind: &'static str,
+) -> Result<CapabilityReplayInput<'a>, AgentLoopHostError> {
+    let input = input.ok_or_else(|| {
+        AgentLoopHostError::new(
+            AgentLoopHostErrorKind::Internal,
+            format!("{gate_kind} resume replay input is unavailable"),
+        )
+    })?;
+    let estimate = estimate.ok_or_else(|| {
+        AgentLoopHostError::new(
+            AgentLoopHostErrorKind::Internal,
+            format!("{gate_kind} resume replay estimate is unavailable"),
+        )
+    })?;
+    Ok(CapabilityReplayInput { input, estimate })
+}
+
+fn invocation_replay_input(request: &CapabilityInvocation) -> Option<CapabilityReplayInput<'_>> {
+    if let Some(resume) = request.approval_resume.as_ref() {
+        return Some(CapabilityReplayInput {
+            input: &resume.input,
+            estimate: &resume.estimate,
+        });
+    }
+    request
+        .auth_resume
+        .as_ref()
+        .and_then(|resume| resume.replay.as_ref())
+        .map(|replay| CapabilityReplayInput {
+            input: &replay.input,
+            estimate: &replay.estimate,
+        })
+}
+
 async fn runtime_outcome_to_loop(
     run_context: &LoopRunContext,
     result_writer: &(dyn LoopCapabilityResultWriter + Send + Sync),
-    input_ref: &CapabilityInputRef,
-    invocation_id: InvocationId,
-    requested_capability_id: &CapabilityId,
-    outcome: RuntimeCapabilityOutcome,
+    conversion: RuntimeOutcomeConversion<'_>,
 ) -> Result<CapabilityOutcome, AgentLoopHostError> {
-    ensure_runtime_outcome_matches(requested_capability_id, &outcome)?;
-    Ok(match outcome {
+    ensure_runtime_outcome_matches(conversion.requested_capability_id, &conversion.outcome)?;
+    Ok(match conversion.outcome {
         RuntimeCapabilityOutcome::Completed(completed) => {
-            let result_ref = result_writer
+            let (result_ref, byte_len) = result_writer
                 .write_capability_result(CapabilityResultWrite {
                     run_context,
-                    input_ref,
-                    invocation_id,
+                    input_ref: conversion.input_ref,
+                    invocation_id: conversion.invocation_id,
                     capability_id: &completed.capability_id,
                     output: completed.output.clone(),
                     display_preview: completed.display_preview.clone(),
@@ -1759,17 +2096,40 @@ async fn runtime_outcome_to_loop(
                 safe_summary: "capability completed".to_string(),
                 progress: ironclaw_turns::run_profile::CapabilityProgress::MadeProgress,
                 terminate_hint: false,
+                byte_len,
             })
         }
-        RuntimeCapabilityOutcome::ApprovalRequired(gate) => CapabilityOutcome::ApprovalRequired {
-            gate_ref: loop_gate_ref("approval", gate.approval_request_id.to_string())?,
-            safe_summary: blocked_summary(gate.reason).to_string(),
-        },
-        RuntimeCapabilityOutcome::AuthRequired(gate) => CapabilityOutcome::AuthRequired {
-            gate_ref: loop_gate_ref("auth", gate.gate_id.to_string())?,
-            credential_requirements: gate.credential_requirements,
-            safe_summary: blocked_summary(gate.reason).to_string(),
-        },
+        RuntimeCapabilityOutcome::ApprovalRequired(gate) => {
+            let replay = runtime_resume_replay(conversion.input, conversion.estimate, "approval")?;
+            CapabilityOutcome::ApprovalRequired {
+                gate_ref: loop_gate_ref("approval", gate.approval_request_id.to_string())?,
+                safe_summary: blocked_summary(gate.reason).to_string(),
+                approval_resume: Some(ironclaw_turns::run_profile::CapabilityApprovalResume {
+                    approval_request_id: gate.approval_request_id,
+                    resume_token: resume_token_from_invocation_id(conversion.invocation_id)?,
+                    correlation_id: conversion.correlation_id,
+                    input_ref: conversion.input_ref.clone(),
+                    input: replay.input.clone(),
+                    estimate: replay.estimate.clone(),
+                }),
+            }
+        }
+        RuntimeCapabilityOutcome::AuthRequired(gate) => {
+            let replay = runtime_resume_replay(conversion.input, conversion.estimate, "auth")?;
+            CapabilityOutcome::AuthRequired {
+                gate_ref: loop_gate_ref("auth", gate.gate_id.to_string())?,
+                credential_requirements: gate.credential_requirements,
+                safe_summary: blocked_summary(gate.reason).to_string(),
+                auth_resume: Some(ironclaw_turns::run_profile::CapabilityAuthResume {
+                    resume_token: resume_token_from_invocation_id(conversion.invocation_id)?,
+                    prior_approval: None,
+                    replay: Some(ironclaw_turns::run_profile::CapabilityAuthResumeReplay {
+                        input: replay.input.clone(),
+                        estimate: replay.estimate.clone(),
+                    }),
+                }),
+            }
+        }
         RuntimeCapabilityOutcome::ResourceBlocked(gate) => CapabilityOutcome::ResourceBlocked {
             gate_ref: loop_gate_ref("resource", gate.gate_id.to_string())?,
             safe_summary: blocked_summary(gate.reason).to_string(),
@@ -1794,6 +2154,7 @@ async fn runtime_outcome_to_loop(
                     unknown.message,
                     "capability invocation returned an unknown outcome",
                 ),
+                detail: None,
             })
         }
     })
@@ -1854,6 +2215,7 @@ fn runtime_failure_to_loop(
                     &failure,
                     "capability invocation failed",
                 ),
+                detail: None,
             }))
         }
     }
@@ -1875,6 +2237,7 @@ fn runtime_model_visible_failure_to_loop(
     Ok(CapabilityOutcome::Failed(CapabilityFailure {
         error_kind: model_visible_runtime_failure_kind_to_loop(failure.kind)?,
         safe_summary: runtime_failure_safe_summary(&failure, "capability invocation failed"),
+        detail: None,
     }))
 }
 
@@ -1901,6 +2264,18 @@ fn runtime_failure_kind_to_loop(
         RuntimeFailureKind::Unknown => capability_failure_kind("unknown")?,
         _ => capability_failure_kind(kind.as_str())?,
     })
+}
+
+fn runtime_failed_outcome_for_host_runtime_unavailable(
+    capability_id: CapabilityId,
+    reason: String,
+) -> RuntimeCapabilityOutcome {
+    let host_error = host_runtime_error(HostRuntimeError::Unavailable { reason });
+    RuntimeCapabilityOutcome::Failed(RuntimeCapabilityFailure::new(
+        capability_id,
+        RuntimeFailureKind::Unavailable,
+        Some(host_error.safe_summary),
+    ))
 }
 
 fn model_visible_runtime_failure_kind_to_loop(
@@ -1987,6 +2362,28 @@ fn blocked_summary(reason: RuntimeBlockedReason) -> &'static str {
         RuntimeBlockedReason::ResourceLimit => "capability is blocked by resource limits",
         RuntimeBlockedReason::ResourceUnavailable => "capability resources are unavailable",
     }
+}
+
+fn resume_token_from_invocation_id(
+    invocation_id: InvocationId,
+) -> Result<CapabilityResumeToken, AgentLoopHostError> {
+    CapabilityResumeToken::new(invocation_id.to_string()).map_err(|reason| {
+        AgentLoopHostError::new(
+            AgentLoopHostErrorKind::Internal,
+            format!("capability resume token is invalid: {reason}"),
+        )
+    })
+}
+
+fn invocation_id_from_resume_token(
+    resume_token: &CapabilityResumeToken,
+) -> Result<InvocationId, AgentLoopHostError> {
+    InvocationId::parse(resume_token.as_str()).map_err(|_| {
+        AgentLoopHostError::new(
+            AgentLoopHostErrorKind::InvalidInvocation,
+            "capability approval resume token is invalid",
+        )
+    })
 }
 
 fn host_runtime_error(error: HostRuntimeError) -> AgentLoopHostError {
@@ -3193,6 +3590,88 @@ mod tests {
         assert_eq!(resolved, serde_json::json!({"message":"hello"}));
     }
 
+    /// Captures every input callback the port forwards, so tests can drive the
+    /// real `invoke_capability` call site and assert the observer fired.
+    #[derive(Debug, Default)]
+    struct RecordingTrajectoryObserver {
+        inputs: Mutex<Vec<(String, String, serde_json::Value)>>,
+    }
+
+    impl CapabilityTrajectoryObserver for RecordingTrajectoryObserver {
+        fn on_capability_input(
+            &self,
+            call_id: &str,
+            capability_id: &str,
+            arguments: &serde_json::Value,
+        ) {
+            self.inputs.lock().expect("inputs lock").push((
+                call_id.to_string(),
+                capability_id.to_string(),
+                arguments.clone(),
+            ));
+        }
+    }
+
+    #[tokio::test]
+    async fn invoke_capability_forwards_resolved_input_to_trajectory_observer() {
+        let capability_id = CapabilityId::new("demo.echo").expect("valid capability id");
+        let provider_id = ExtensionId::new("demo").expect("valid provider id");
+        let observer = Arc::new(RecordingTrajectoryObserver::default());
+
+        // Mirror `runtime_capability_port`, but attach the trajectory observer
+        // to the factory via `with_trajectory_observer` so the port forwards the
+        // resolved tool-call input when a capability is invoked.
+        let mut context = execution_context("thread-trajectory-observer-input");
+        let run_context = loop_run_context(&context).await;
+        let loop_driver_extension =
+            loop_driver_execution_extension_id(&run_context).expect("valid extension id");
+        context.grants.grants.push(dispatch_capability_grant(
+            &capability_id,
+            &loop_driver_extension,
+        ));
+        let port = HostRuntimeLoopCapabilityPortFactory::new(
+            Arc::new(RecordingHostRuntime::new(vec![visible_capability(
+                capability_id.clone(),
+                provider_id.clone(),
+            )])),
+            visible_request(context).with_provider_trust(std::collections::BTreeMap::from([(
+                provider_id.clone(),
+                dispatch_trust_decision(),
+            )])),
+            dummy_input_resolver(),
+            Arc::new(RecordingResultWriter::default()),
+            dummy_milestone_sink(),
+        )
+        .with_trajectory_observer(Some(
+            observer.clone() as Arc<dyn CapabilityTrajectoryObserver>
+        ))
+        .port_for_run_context(run_context);
+
+        let outcome = invoke_visible_runtime_capability(&port)
+            .await
+            .expect("capability invocation succeeds");
+        assert!(matches!(outcome, CapabilityOutcome::Completed(_)));
+
+        let inputs = observer.inputs.lock().expect("inputs lock");
+        assert_eq!(
+            inputs.len(),
+            1,
+            "observer should see exactly one capability input"
+        );
+        let (call_id, observed_capability, arguments) = &inputs[0];
+        assert!(!call_id.is_empty(), "call_id (input ref) should be present");
+        assert_eq!(
+            observed_capability,
+            capability_id.as_str(),
+            "observer should receive the resolved capability id"
+        );
+        assert_eq!(
+            arguments,
+            &serde_json::json!({"message": "hello"}),
+            "observer should receive the resolved tool-call arguments"
+        );
+    }
+
     #[tokio::test]
     async fn runtime_capability_invocation_emits_dispatch_lifecycle_milestones() {
         let capability_id = CapabilityId::new("demo.echo").expect("valid capability id");
@@ -3402,59 +3881,93 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn runtime_capability_host_error_emits_failure_milestone() {
-        let cases = [
-            (
-                HostRuntimeError::invalid_request("bad request"),
-                AgentLoopHostErrorKind::InvalidInvocation,
-            ),
-            (
-                HostRuntimeError::unavailable("runtime unavailable"),
-                AgentLoopHostErrorKind::Unavailable,
-            ),
-        ];
+    async fn runtime_capability_unavailable_returns_failed_outcome_and_emits_failure_milestone() {
+        let capability_id = CapabilityId::new("demo.echo").expect("valid capability id");
+        let provider_id = ExtensionId::new("demo").expect("valid provider id");
+        let milestone_sink =
+            Arc::new(ironclaw_turns::run_profile::InMemoryLoopHostMilestoneSink::default());
+        let port = runtime_capability_port(
+            &capability_id,
+            &provider_id,
+            Arc::new(QueuedHostRuntime::new(
+                vec![visible_capability(
+                    capability_id.clone(),
+                    provider_id.clone(),
+                )],
+                vec![Err(HostRuntimeError::unavailable("runtime unavailable"))],
+            )),
+            Arc::new(RecordingResultWriter::default()),
+            milestone_sink.clone(),
+            "thread-runtime-capability-unavailable-milestone",
+        )
+        .await;
 
-        for (runtime_error, expected_error_kind) in cases {
-            let capability_id = CapabilityId::new("demo.echo").expect("valid capability id");
-            let provider_id = ExtensionId::new("demo").expect("valid provider id");
-            let milestone_sink =
-                Arc::new(ironclaw_turns::run_profile::InMemoryLoopHostMilestoneSink::default());
-            let port = runtime_capability_port(
-                &capability_id,
-                &provider_id,
-                Arc::new(QueuedHostRuntime::new(
-                    vec![visible_capability(
-                        capability_id.clone(),
-                        provider_id.clone(),
-                    )],
-                    vec![Err(runtime_error)],
-                )),
-                Arc::new(RecordingResultWriter::default()),
-                milestone_sink.clone(),
-                "thread-runtime-capability-host-error-milestone",
-            )
-            .await;
+        let outcome = invoke_visible_runtime_capability(&port)
+            .await
+            .expect("host runtime unavailability should become a capability failure");
 
-            let error = invoke_visible_runtime_capability(&port)
-                .await
-                .expect_err("host runtime error propagates");
+        assert!(matches!(
+            outcome,
+            CapabilityOutcome::Failed(failure)
+                if failure.error_kind == CapabilityFailureKind::Unavailable
+        ));
+        let milestones = milestone_sink.milestones();
+        assert_eq!(milestones.len(), 2);
+        assert!(matches!(
+            &milestones[1].kind,
+            ironclaw_turns::run_profile::LoopHostMilestoneKind::CapabilityFailed {
+                capability_id: actual,
+                provider: Some(provider),
+                runtime: Some(RuntimeKind::FirstParty),
+                reason_kind,
+                ..
+            } if actual == &capability_id
+                && provider == &provider_id
+                && reason_kind == &CapabilityFailureKind::Unavailable
+        ));
+    }
 
-            assert_eq!(error.kind, expected_error_kind);
-            let milestones = milestone_sink.milestones();
-            assert_eq!(milestones.len(), 2);
-            assert!(matches!(
-                &milestones[1].kind,
-                ironclaw_turns::run_profile::LoopHostMilestoneKind::CapabilityFailed {
-                    capability_id: actual,
-                    provider: Some(provider),
-                    runtime: Some(RuntimeKind::FirstParty),
-                    reason_kind,
-                    ..
-                } if actual == &capability_id
-                    && provider == &provider_id
-                    && reason_kind.as_str() == expected_error_kind.as_str()
-            ));
-        }
+    #[tokio::test]
+    async fn runtime_capability_invalid_request_preserves_host_error_and_emits_failure_milestone() {
+        let capability_id = CapabilityId::new("demo.echo").expect("valid capability id");
+        let provider_id = ExtensionId::new("demo").expect("valid provider id");
+        let milestone_sink =
+            Arc::new(ironclaw_turns::run_profile::InMemoryLoopHostMilestoneSink::default());
+        let port = runtime_capability_port(
+            &capability_id,
+            &provider_id,
+            Arc::new(QueuedHostRuntime::new(
+                vec![visible_capability(
+                    capability_id.clone(),
+                    provider_id.clone(),
+                )],
+                vec![Err(HostRuntimeError::invalid_request("bad request"))],
+            )),
+            Arc::new(RecordingResultWriter::default()),
+            milestone_sink.clone(),
+            "thread-runtime-capability-invalid-request-milestone",
+        )
+        .await;
+
+        let error = invoke_visible_runtime_capability(&port)
+            .await
+            .expect_err("host runtime invalid request should remain a host error");
+
+        assert_eq!(error.kind, AgentLoopHostErrorKind::InvalidInvocation);
+        let milestones = milestone_sink.milestones();
+        assert_eq!(milestones.len(), 2);
+        assert!(matches!(
+            &milestones[1].kind,
+            ironclaw_turns::run_profile::LoopHostMilestoneKind::CapabilityFailed {
+                capability_id: actual,
+                provider: Some(provider),
+                runtime: Some(RuntimeKind::FirstParty),
+                reason_kind,
+                ..
+            } if actual == &capability_id
+                && provider == &provider_id
+                && reason_kind.as_str() == AgentLoopHostErrorKind::InvalidInvocation.as_str()
+        ));
     }
 
     #[tokio::test]
@@ -3541,6 +4054,8 @@ mod tests {
             surface_version: surface.version,
             capability_id: candidate.capability_id,
             input_ref: candidate.input_ref,
+            approval_resume: None,
+            auth_resume: None,
         };
         let outcome = port
             .invoke_capability(invocation.clone())
@@ -3551,6 +4066,8 @@ mod tests {
                 surface_version: invocation.surface_version,
                 capability_id: invocation.capability_id,
                 input_ref: invocation.input_ref,
+                approval_resume: None,
+                auth_resume: None,
             })
             .await
             .expect("capability_info invocation replays");
@@ -3601,6 +4118,8 @@ mod tests {
             surface_version: surface.version,
             capability_id: candidate.capability_id,
             input_ref: candidate.input_ref,
+            approval_resume: None,
+            auth_resume: None,
         };
 
         let error = port
@@ -3669,6 +4188,8 @@ mod tests {
             surface_version: surface.version,
             capability_id: candidate.capability_id,
             input_ref: candidate.input_ref,
+            approval_resume: None,
+            auth_resume: None,
         })
         .await
         .expect("capability_info invocation succeeds");
@@ -3744,6 +4265,8 @@ mod tests {
                     surface_version: surface.version.clone(),
                     capability_id: candidate.capability_id,
                     input_ref: candidate.input_ref,
+                    approval_resume: None,
+                    auth_resume: None,
                 })
                 .await
                 .expect("invalid arguments should return a capability failure, not a host error");
@@ -3752,7 +4275,8 @@ mod tests {
                 outcome,
                 CapabilityOutcome::Failed(CapabilityFailure {
                     error_kind: CapabilityFailureKind::InvalidInput,
-                    safe_summary
+                    safe_summary,
+                    ..
                 }) if safe_summary == expected_summary
             ));
         }
@@ -3823,6 +4347,8 @@ mod tests {
                     surface_version: surface.version.clone(),
                     capability_id: candidate.capability_id,
                     input_ref: candidate.input_ref,
+                    approval_resume: None,
+                    auth_resume: None,
                 })
                 .await
                 .expect("invalid name should return a capability failure, not a host error");
@@ -3902,6 +4428,8 @@ mod tests {
                 surface_version: surface.version,
                 capability_id: candidate.capability_id,
                 input_ref: candidate.input_ref,
+                approval_resume: None,
+                auth_resume: None,
             })
             .await
             .expect("unknown target should return a capability failure, not a host error");
@@ -3910,7 +4438,8 @@ mod tests {
             outcome,
             CapabilityOutcome::Failed(CapabilityFailure {
                 error_kind: CapabilityFailureKind::InvalidInput,
-                safe_summary
+                safe_summary,
+                ..
             }) if safe_summary == "capability_info target is not on the visible surface"
         ));
         assert!(
@@ -3964,6 +4493,8 @@ mod tests {
                     .expect("synthetic capability id"),
                 input_ref: CapabilityInputRef::new("input:direct-capability-info")
                     .expect("test input ref"),
+                approval_resume: None,
+                auth_resume: None,
             })
             .await
             .expect("unstaged synthetic invocation should return a model-visible failure");
@@ -3972,7 +4503,8 @@ mod tests {
             outcome,
             CapabilityOutcome::Failed(CapabilityFailure {
                 error_kind: CapabilityFailureKind::InvalidInput,
-                safe_summary
+                safe_summary,
+                ..
             }) if safe_summary == "capability_info target is not on the visible surface"
         ));
         assert!(
@@ -4041,6 +4573,8 @@ mod tests {
                 capability_id: CapabilityId::new(capability_info::CAPABILITY_ID)
                     .expect("synthetic capability id"),
                 input_ref,
+                approval_resume: None,
+                auth_resume: None,
             })
             .await
             .expect("excluded target should return a model-visible failure");
@@ -4049,7 +4583,8 @@ mod tests {
             outcome,
             CapabilityOutcome::Failed(CapabilityFailure {
                 error_kind: CapabilityFailureKind::InvalidInput,
-                safe_summary
+                safe_summary,
+                ..
             }) if safe_summary == "capability_info target is not on the visible surface"
         ));
         assert!(
@@ -4184,6 +4719,8 @@ mod tests {
                 surface_version: surface.version.clone(),
                 capability_id: candidate.capability_id,
                 input_ref: candidate.input_ref,
+                approval_resume: None,
+                auth_resume: None,
             })
             .await
             .expect("capability_info invocation succeeds");
@@ -4248,6 +4785,8 @@ mod tests {
             capability_id: capability_id.clone(),
             input_ref: CapabilityInputRef::new("input:old-builtin-capability-info")
                 .expect("valid input ref"),
+            approval_resume: None,
+            auth_resume: None,
         })
         .await
         .expect("runtime capability invocation succeeds");
@@ -4365,6 +4904,8 @@ mod tests {
             surface_version: surface.version.clone(),
             capability_id: override_id.clone(),
             input_ref: input_ref.clone(),
+            approval_resume: None,
+            auth_resume: None,
         })
         .await
         .expect("override invocation succeeds");
@@ -4372,6 +4913,8 @@ mod tests {
             surface_version: surface.version,
             capability_id: default_id.clone(),
             input_ref,
+            approval_resume: None,
+            auth_resume: None,
         })
         .await
         .expect("default invocation succeeds");
@@ -4431,6 +4974,8 @@ mod tests {
                 capability_id: capability_id.clone(),
                 input_ref: CapabilityInputRef::new("input:process-sandbox-plan")
                     .expect("valid input ref"),
+                approval_resume: None,
+                auth_resume: None,
             })
             .await
             .expect("process sandbox invocation succeeds");
@@ -4528,6 +5073,8 @@ mod tests {
                 capability_id,
                 input_ref: CapabilityInputRef::new("input:direct-invalid")
                     .expect("valid input ref"),
+                approval_resume: None,
+                auth_resume: None,
             })
             .await
             .expect_err("invalid direct input should fail before runtime dispatch");
@@ -4600,17 +5147,222 @@ mod tests {
                 surface_version: surface.version,
                 capability_id,
                 input_ref: candidate.input_ref,
+                approval_resume: None,
+                auth_resume: None,
             })
             .await
             .expect("schema-invalid provider calls should produce a capability failure");
 
-        assert!(matches!(
-            outcome,
-            CapabilityOutcome::Failed(CapabilityFailure {
-                error_kind: CapabilityFailureKind::InvalidInput,
-                safe_summary
-            }) if safe_summary.contains("schema validation")
-        ));
+        let CapabilityOutcome::Failed(CapabilityFailure {
+            error_kind,
+            safe_summary,
+            detail,
+        }) = outcome
+        else {
+            panic!("expected schema-invalid provider call to fail");
+        };
+        assert_eq!(error_kind, CapabilityFailureKind::InvalidInput);
+        assert!(safe_summary.contains("schema validation"));
+        let Some(ironclaw_turns::run_profile::CapabilityFailureDetail::InvalidInput { issues }) =
+            detail
+        else {
+            panic!("schema-invalid provider call should include invalid input detail");
+        };
+        assert_eq!(issues.len(), 1);
+        assert_eq!(issues[0].path, "message");
+        assert_eq!(
+            issues[0].code,
+            ironclaw_turns::run_profile::CapabilityInputIssueCode::MissingRequired
+        );
+        assert_eq!(issues[0].expected.as_deref(), Some("required field"));
+        assert!(
+            runtime.take_requests().is_empty(),
+            "schema-invalid provider input must not reach the runtime"
+        );
+        assert!(
+            result_writer.records().is_empty(),
+            "schema-invalid provider calls should report through the provider error-result path"
+        );
+    }
+
+    #[tokio::test]
+    async fn provider_runtime_tool_call_schema_failure_preserves_type_mismatch_detail() {
+        let capability_id = CapabilityId::new("demo.echo").expect("valid capability id");
+        let provider_id = ExtensionId::new("demo").expect("valid provider id");
+        let mut visible = visible_capability(capability_id.clone(), provider_id.clone());
+        visible.descriptor.parameters_schema = serde_json::json!({
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+                "message": { "type": "string" },
+                "limit": { "type": "integer" }
+            },
+            "required": ["message"]
+        });
+        let runtime = Arc::new(RecordingHostRuntime::new(vec![visible]));
+        let result_writer = Arc::new(RecordingResultWriter::default());
+        let context = execution_context("thread-provider-runtime-schema-detail-validation");
+        let run_context = loop_run_context(&context).await;
+        let port = HostRuntimeLoopCapabilityPortFactory::new(
+            runtime.clone(),
+            visible_request(context).with_provider_trust(std::collections::BTreeMap::from([(
+                provider_id,
+                dispatch_trust_decision(),
+            )])),
+            dummy_input_resolver(),
+            result_writer.clone(),
+            dummy_milestone_sink(),
+        )
+        .port_for_run_context(run_context);
+        let surface = port
+            .visible_capabilities(VisibleCapabilityRequest {})
+            .await
+            .expect("visible capabilities load");
+        let tool_definition = port
+            .tool_definitions()
+            .expect("tool definitions")
+            .into_iter()
+            .find(|definition| definition.capability_id == capability_id)
+            .expect("runtime capability advertised to provider");
+
+        let mut call = provider_tool_call();
+        call.name = tool_definition.name;
+        call.arguments = serde_json::json!({
+            "message": 123
+        });
+        port.validate_provider_tool_call(&call)
+            .expect("schema-invalid provider calls should stage for model-visible failure");
+        let candidate = port
+            .register_provider_tool_call(call)
+            .await
+            .expect("schema-invalid provider calls should register");
+
+        let outcome = port
+            .invoke_capability(CapabilityInvocation {
+                surface_version: surface.version,
+                capability_id,
+                input_ref: candidate.input_ref,
+                approval_resume: None,
+                auth_resume: None,
+            })
+            .await
+            .expect("schema-invalid provider calls should produce a capability failure");
+
+        let CapabilityOutcome::Failed(CapabilityFailure {
+            error_kind, detail, ..
+        }) = outcome
+        else {
+            panic!("expected schema-invalid provider call to fail");
+        };
+        assert_eq!(error_kind, CapabilityFailureKind::InvalidInput);
+        let Some(ironclaw_turns::run_profile::CapabilityFailureDetail::InvalidInput { issues }) =
+            detail
+        else {
+            panic!("schema-invalid provider call should include invalid input detail");
+        };
+        assert!(
+            issues.iter().any(|issue| {
+                issue.path == "message"
+                    && issue.code
+                        == ironclaw_turns::run_profile::CapabilityInputIssueCode::TypeMismatch
+                    && issue.expected.as_deref() == Some("string")
+                    && issue.received.as_deref() == Some("integer")
+            }),
+            "type mismatch issue should identify the mismatched field"
+        );
+        assert!(
+            runtime.take_requests().is_empty(),
+            "schema-invalid provider input must not reach the runtime"
+        );
+        assert!(
+            result_writer.records().is_empty(),
+            "schema-invalid provider calls should report through the provider error-result path"
+        );
+    }
+
+    #[tokio::test]
+    async fn provider_runtime_tool_call_schema_failure_preserves_unexpected_field_detail() {
+        let capability_id = CapabilityId::new("demo.echo").expect("valid capability id");
+        let provider_id = ExtensionId::new("demo").expect("valid provider id");
+        let mut visible = visible_capability(capability_id.clone(), provider_id.clone());
+        visible.descriptor.parameters_schema = serde_json::json!({
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+                "message": { "type": "string" }
+            },
+            "required": ["message"]
+        });
+        let runtime = Arc::new(RecordingHostRuntime::new(vec![visible]));
+        let result_writer = Arc::new(RecordingResultWriter::default());
+        let context = execution_context("thread-provider-runtime-unexpected-field-validation");
+        let run_context = loop_run_context(&context).await;
+        let port = HostRuntimeLoopCapabilityPortFactory::new(
+            runtime.clone(),
+            visible_request(context).with_provider_trust(std::collections::BTreeMap::from([(
+                provider_id,
+                dispatch_trust_decision(),
+            )])),
+            dummy_input_resolver(),
+            result_writer.clone(),
+            dummy_milestone_sink(),
+        )
+        .port_for_run_context(run_context);
+        let surface = port
+            .visible_capabilities(VisibleCapabilityRequest {})
+            .await
+            .expect("visible capabilities load");
+        let tool_definition = port
+            .tool_definitions()
+            .expect("tool definitions")
+            .into_iter()
+            .find(|definition| definition.capability_id == capability_id)
+            .expect("runtime capability advertised to provider");
+
+        let mut call = provider_tool_call();
+        call.name = tool_definition.name;
+        call.arguments = serde_json::json!({
+            "message": "hello",
+            "unexpected": true
+        });
+        port.validate_provider_tool_call(&call)
+            .expect("schema-invalid provider calls should stage for model-visible failure");
+        let candidate = port
+            .register_provider_tool_call(call)
+            .await
+            .expect("schema-invalid provider calls should register");
+
+        let outcome = port
+            .invoke_capability(CapabilityInvocation {
+                surface_version: surface.version,
+                capability_id,
+                input_ref: candidate.input_ref,
+                approval_resume: None,
+                auth_resume: None,
+            })
+            .await
+            .expect("schema-invalid provider calls should produce a capability failure");
+
+        let CapabilityOutcome::Failed(CapabilityFailure {
+            error_kind, detail, ..
+        }) = outcome
+        else {
+            panic!("expected schema-invalid provider call to fail");
+        };
+        assert_eq!(error_kind, CapabilityFailureKind::InvalidInput);
+        let Some(ironclaw_turns::run_profile::CapabilityFailureDetail::InvalidInput { issues }) =
+            detail
+        else {
+            panic!("schema-invalid provider call should include invalid input detail");
+        };
+        assert!(
+            issues.iter().any(|issue| {
+                issue.path == "unexpected"
+                    && issue.code
+                        == ironclaw_turns::run_profile::CapabilityInputIssueCode::UnexpectedField
+            }),
+            "unexpected field issue should identify the field to remove"
+        );
         assert!(
             runtime.take_requests().is_empty(),
             "schema-invalid provider input must not reach the runtime"
@@ -4662,6 +5414,8 @@ mod tests {
             surface_version: surface.version,
             capability_id,
             input_ref: CapabilityInputRef::new("input:direct-normalized").expect("valid input ref"),
+            approval_resume: None,
+            auth_resume: None,
         })
         .await
         .expect("valid direct input should dispatch");
@@ -4717,6 +5471,8 @@ mod tests {
                 capability_id,
                 input_ref: CapabilityInputRef::new("input:invalid-process-sandbox-plan")
                     .expect("valid input ref"),
+                approval_resume: None,
+                auth_resume: None,
             })
             .await
             .expect_err("invalid process sandbox plan must fail before runtime dispatch");
@@ -4772,6 +5528,8 @@ mod tests {
                 capability_id,
                 input_ref: CapabilityInputRef::new("input:malformed-process-sandbox-plan")
                     .expect("valid input ref"),
+                approval_resume: None,
+                auth_resume: None,
             })
             .await
             .expect_err("malformed process sandbox plan must fail before runtime dispatch");
@@ -5063,6 +5821,73 @@ mod tests {
         assert_eq!(invocation_context.trust, TrustClass::UserTrusted);
         assert_eq!(invocation_context.mounts, MountView::default());
         assert_eq!(invocation_context.grants.grants.len(), 1);
+    }
+
+    /// Guard: a `CapabilityInvocation` with both `approval_resume` and `auth_resume` set
+    /// must be rejected fail-closed with `InvalidInvocation` — the two resume modes are
+    /// mutually exclusive and simultaneous presence indicates a malformed invocation.
+    #[tokio::test]
+    async fn invoke_capability_rejects_both_resume_modes_set() {
+        use ironclaw_host_api::ApprovalRequestId;
+        use ironclaw_turns::run_profile::{CapabilityApprovalResume, CapabilityAuthResume};
+
+        let capability_id = CapabilityId::new("demo.echo").expect("valid capability id");
+        let provider_id = ExtensionId::new("demo").expect("valid provider id");
+        let port = runtime_capability_port(
+            &capability_id,
+            &provider_id,
+            Arc::new(RecordingHostRuntime::new(vec![visible_capability(
+                capability_id.clone(),
+                provider_id.clone(),
+            )])),
+            dummy_result_writer(),
+            dummy_milestone_sink(),
+            "thread-both-resume-modes-set",
+        )
+        .await;
+
+        // Obtain a valid surface_version and input_ref so the invocation
+        // reaches the dispatch match — the guard fires there.
+        let invocation = visible_runtime_invocation(&port).await;
+
+        let resume_token =
+            CapabilityResumeToken::new(InvocationId::new().to_string()).expect("valid token");
+        let dual_resume_invocation = CapabilityInvocation {
+            surface_version: invocation.surface_version,
+            capability_id: invocation.capability_id,
+            input_ref: invocation.input_ref,
+            approval_resume: Some(CapabilityApprovalResume {
+                approval_request_id: ApprovalRequestId::new(),
+                resume_token: resume_token.clone(),
+                correlation_id: CorrelationId::new(),
+                input_ref: CapabilityInputRef::new("input:test-dual-resume")
+                    .expect("valid input ref"),
+                input: serde_json::json!({}),
+                estimate: ResourceEstimate::default(),
+            }),
+            auth_resume: Some(CapabilityAuthResume {
+                resume_token,
+                prior_approval: None,
+                replay: None,
+            }),
+        };
+
+        let err = port
+            .invoke_capability(dual_resume_invocation)
+            .await
+            .expect_err("dual-resume invocation must be rejected");
+
+        assert_eq!(
+            err.kind,
+            AgentLoopHostErrorKind::InvalidInvocation,
+            "expected InvalidInvocation, got {:?}",
+            err.kind
+        );
+        assert!(
+            err.safe_summary.contains("mutually exclusive"),
+            "error message should name the mutual-exclusion constraint: {:?}",
+            err.safe_summary
+        );
     }
 
     fn visible_request(
@@ -5368,6 +6193,8 @@ mod tests {
             surface_version: surface.version,
             capability_id: candidate.capability_id,
             input_ref: candidate.input_ref,
+            approval_resume: None,
+            auth_resume: None,
         }
     }
 
@@ -5666,13 +6493,14 @@ mod tests {
         async fn write_capability_result(
             &self,
             _write: CapabilityResultWrite<'_>,
-        ) -> Result<LoopResultRef, AgentLoopHostError> {
-            LoopResultRef::new("result:mount-test").map_err(|_| {
+        ) -> Result<(LoopResultRef, u64), AgentLoopHostError> {
+            let result_ref = LoopResultRef::new("result:mount-test").map_err(|_| {
                 AgentLoopHostError::new(
                     AgentLoopHostErrorKind::Internal,
                     "result ref could not be built",
                 )
-            })
+            })?;
+            Ok((result_ref, 0))
         }
     }
 
@@ -5692,19 +6520,20 @@ mod tests {
         async fn write_capability_result(
             &self,
             _write: CapabilityResultWrite<'_>,
-        ) -> Result<LoopResultRef, AgentLoopHostError> {
+        ) -> Result<(LoopResultRef, u64), AgentLoopHostError> {
             if self.attempts.fetch_add(1, Ordering::SeqCst) == 0 {
                 return Err(AgentLoopHostError::new(
                     AgentLoopHostErrorKind::TranscriptWriteFailed,
                     "transient result write failure",
                 ));
             }
-            LoopResultRef::new("result:capability-info-retry").map_err(|_| {
+            let result_ref = LoopResultRef::new("result:capability-info-retry").map_err(|_| {
                 AgentLoopHostError::new(
                     AgentLoopHostErrorKind::Internal,
                     "result ref could not be built",
                 )
-            })
+            })?;
+            Ok((result_ref, 0))
         }
     }
 
@@ -5732,7 +6561,7 @@ mod tests {
         async fn write_capability_result(
             &self,
             write: CapabilityResultWrite<'_>,
-        ) -> Result<LoopResultRef, AgentLoopHostError> {
+        ) -> Result<(LoopResultRef, u64), AgentLoopHostError> {
             self.records
                 .lock()
                 .expect("records lock")
@@ -5741,12 +6570,13 @@ mod tests {
                 .lock()
                 .expect("display previews lock")
                 .push(write.display_preview);
-            LoopResultRef::new("result:capability-info").map_err(|_| {
+            let result_ref = LoopResultRef::new("result:capability-info").map_err(|_| {
                 AgentLoopHostError::new(
                     AgentLoopHostErrorKind::Internal,
                     "result ref could not be built",
                 )
-            })
+            })?;
+            Ok((result_ref, 0))
         }
     }
 
@@ -5812,7 +6642,7 @@ mod tests {
         async fn write_capability_result(
             &self,
             _write: CapabilityResultWrite<'_>,
-        ) -> Result<LoopResultRef, AgentLoopHostError> {
+        ) -> Result<(LoopResultRef, u64), AgentLoopHostError> {
             unreachable!("noop capability io should not be called")
         }
     }

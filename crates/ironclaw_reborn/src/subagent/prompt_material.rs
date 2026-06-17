@@ -342,11 +342,11 @@ mod tests {
             )
             .await
             .unwrap();
-        let source = RebornSubagentPromptMaterialSource::new(store, SubagentFlavorId::Researcher);
+        let source = RebornSubagentPromptMaterialSource::new(store, SubagentFlavorId::Planner);
 
         let material = source.material_for_run(&context).await.unwrap();
 
-        assert!(material.direction_markdown.contains("research subagent"));
+        assert!(material.direction_markdown.contains("planning subagent"));
         assert_eq!(material.goal.task, "research task");
         assert!(
             material
@@ -375,7 +375,7 @@ mod tests {
         gate_store
             .record_awaited_child(awaited_child_record(
                 &context,
-                SubagentKindId::new("researcher").unwrap(),
+                SubagentKindId::new("planner").unwrap(),
             ))
             .await
             .unwrap();
@@ -387,7 +387,7 @@ mod tests {
 
         let material = source.material_for_run(&context).await.unwrap();
 
-        assert!(material.direction_markdown.contains("research subagent"));
+        assert!(material.direction_markdown.contains("planning subagent"));
         assert_eq!(material.goal.task, "research task");
     }
 

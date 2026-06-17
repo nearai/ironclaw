@@ -40,6 +40,7 @@ use std::{
 };
 
 use async_trait::async_trait;
+use chrono::Utc;
 use futures::{StreamExt, future::join_all};
 use ironclaw_filesystem::{
     CasExpectation, ContentType, Entry, FileType, FilesystemError, FilesystemOperation,
@@ -502,6 +503,38 @@ where
         Ok(None)
     }
 
+    async fn delete_idempotency_records_for_thread(
+        &self,
+        scope: &ThreadScope,
+        thread_id: &ThreadId,
+    ) -> Result<(), SessionThreadError> {
+        let root = idempotency_root()?;
+        let resource_scope = scope.to_resource_scope();
+        let entries = match self.filesystem.list_dir(&resource_scope, &root).await {
+            Ok(entries) => entries,
+            Err(error) if is_not_found(&error) => return Ok(()),
+            Err(error) => return Err(error.into()),
+        };
+        for entry in entries {
+            if !entry.name.ends_with(".json") {
+                continue;
+            }
+            let child = join_scoped(&root, &entry.name)?;
+            let Some(versioned) = self.filesystem.get(&resource_scope, &child).await? else {
+                continue;
+            };
+            let record = deserialize::<InboundIdempotencyRecord>(&versioned.entry.body)?;
+            if record.scope == *scope && record.thread_id == *thread_id {
+                match self.filesystem.delete(&resource_scope, &child).await {
+                    Ok(()) => {}
+                    Err(error) if is_not_found(&error) => {}
+                    Err(error) => return Err(error.into()),
+                }
+            }
+        }
+        Ok(())
+    }
+
     /// Read-modify-write the `next_sequence` counter on the thread record
     /// with optimistic CAS and bounded retry. Returns the sequence
     /// assigned to the caller (i.e. `next_sequence` before the bump) plus
@@ -521,6 +554,11 @@ where
                 })?;
             let assigned = stored.next_sequence;
             stored.next_sequence = assigned + 1;
+            // Every appended message is thread activity; bump the
+            // last-activity stamp so the sidebar surfaces freshly-used
+            // threads first. Reserving a sequence is the single choke
+            // point all append paths share.
+            stored.record.updated_at = Some(Utc::now());
             let entry = Self::thread_entry(&stored)?;
             match put_with_cas(
                 self.filesystem.as_ref(),
@@ -582,6 +620,29 @@ where
             path.as_str()
         )))
     }
+
+    /// Force-set a persisted message's status to `DeferredBusy` and clear its
+    /// turn refs, exactly as the retired `mark_message_deferred_busy` writer
+    /// would have. Never call from production code.
+    ///
+    /// Gated behind `#[cfg(any(test, feature = "test-support"))]` so it is
+    /// absent from production builds. Integration tests in a separate
+    /// compilation unit must enable the `test-support` feature.
+    #[cfg(any(test, feature = "test-support"))]
+    pub async fn inject_legacy_deferred_busy_for_test(
+        &self,
+        scope: &ThreadScope,
+        thread_id: &ThreadId,
+        message_id: ThreadMessageId,
+    ) -> Result<ThreadMessageRecord, SessionThreadError> {
+        self.apply_message_update(scope, thread_id, message_id, |message| {
+            message.status = MessageStatus::DeferredBusy;
+            message.turn_id = None;
+            message.turn_run_id = None;
+            Ok(())
+        })
+        .await
+    }
 }
 
 #[async_trait]
@@ -616,6 +677,7 @@ where
         // path-keyed read above only catches same-scope existence; sibling
         // existence is racy across an outer caller. For now we rely on the
         // path uniqueness — a sibling scope cannot create the same path.
+        let now = Utc::now();
         let record = SessionThreadRecord {
             scope: request.scope,
             thread_id: thread_id.clone(),
@@ -623,6 +685,8 @@ where
             title: request.title,
             metadata_json: request.metadata_json,
             goal: None,
+            created_at: Some(now),
+            updated_at: Some(now),
         };
         let stored = StoredThreadRecord {
             record: record.clone(),
@@ -712,10 +776,21 @@ where
             }
         }
 
+        let message_id = ThreadMessageId::new();
+        // Borrow `request` for the idempotency key before moving `content` out,
+        // so the content (now carrying attachment refs) is consumed by move
+        // rather than deep-cloned on this per-message hot path.
+        let idempotency_key = InboundIdempotencyKey::from_request(&request);
+        let (content_text, attachments) = request.content.into_parts();
+        crate::contract::validate_attachment_refs(&attachments)?;
+        // Reserve the sequence only after the payload validates. Because
+        // `reserve_sequence` persists the thread's last-activity stamp, a
+        // rejected attachment must not run first — otherwise an invalid
+        // message would bump the thread to the top of the sidebar without
+        // ever being appended.
         let sequence = self
             .reserve_sequence(&request.scope, &request.thread_id)
             .await?;
-        let message_id = ThreadMessageId::new();
         let message = ThreadMessageRecord {
             message_id,
             thread_id: request.thread_id.clone(),
@@ -729,13 +804,14 @@ where
             turn_run_id: None,
             tool_result_ref: None,
             tool_result_provider_call: None,
-            content: Some(request.content.clone().into_text()),
+            content: Some(content_text),
+            attachments,
             redaction_ref: None,
         };
         self.write_new_message(&request.scope, &request.thread_id, &message, "message")
             .await?;
 
-        if let Some(idempotency_key) = InboundIdempotencyKey::from_request(&request) {
+        if let Some(idempotency_key) = idempotency_key {
             let idem_record = InboundIdempotencyRecord {
                 scope: idempotency_key.scope.clone(),
                 source_binding_id: idempotency_key.source_binding_id.clone(),
@@ -835,7 +911,7 @@ where
         .await
     }
 
-    async fn mark_message_deferred_busy(
+    async fn mark_message_rejected_busy(
         &self,
         scope: &ThreadScope,
         thread_id: &ThreadId,
@@ -847,8 +923,8 @@ where
                 thread_id: thread_id.clone(),
             })?;
         self.apply_message_update(scope, thread_id, message_id, |message| {
-            ensure_user_accepted(message, "mark_message_deferred_busy")?;
-            message.status = MessageStatus::DeferredBusy;
+            ensure_user_accepted(message, "mark_message_rejected_busy")?;
+            message.status = MessageStatus::RejectedBusy;
             message.turn_id = None;
             message.turn_run_id = None;
             Ok(())
@@ -891,6 +967,7 @@ where
             tool_result_ref: None,
             tool_result_provider_call: None,
             content: Some(request.content.into_text()),
+            attachments: Vec::new(),
             redaction_ref: None,
         };
         self.write_new_message(
@@ -908,8 +985,12 @@ where
         request: AppendToolResultReferenceRequest,
     ) -> Result<ThreadMessageRecord, SessionThreadError> {
         let provider_call = request.provider_call;
-        let envelope = ToolResultReferenceEnvelope::new(request.result_ref, request.safe_summary)
-            .map_err(SessionThreadError::Serialization)?;
+        let envelope = ToolResultReferenceEnvelope::new_best_effort_model_observation(
+            request.result_ref,
+            request.safe_summary,
+            request.model_observation,
+        )
+        .map_err(SessionThreadError::Serialization)?;
         let existing = self
             .list_thread_messages(&request.scope, &request.thread_id)
             .await?;
@@ -922,35 +1003,53 @@ where
             // Idempotent replay. If new provider metadata arrives, validate
             // and attach it (or reject on conflict) — matching the in-memory
             // contract semantics.
-            if let Some(provider_call) = provider_call.as_ref() {
+            let provider_call_update = if let Some(provider_call) = provider_call.as_ref() {
                 provider_call
                     .validate()
                     .map_err(SessionThreadError::Serialization)?;
                 match existing.tool_result_provider_call.as_ref() {
-                    Some(existing_call) if existing_call == provider_call => {
-                        return Ok(existing);
-                    }
+                    Some(existing_call) if existing_call == provider_call => None,
                     Some(_) => {
                         return Err(SessionThreadError::Serialization(
                             "tool result provider metadata conflicts with existing record"
                                 .to_string(),
                         ));
                     }
-                    None => {
-                        let provider_call = provider_call.clone();
-                        return self
-                            .apply_message_update(
-                                &request.scope,
-                                &request.thread_id,
-                                existing.message_id,
-                                |message| {
-                                    message.tool_result_provider_call = Some(provider_call.clone());
-                                    Ok(())
-                                },
-                            )
-                            .await;
-                    }
+                    None => Some(provider_call.clone()),
                 }
+            } else {
+                None
+            };
+            let model_observation = envelope.model_observation.clone();
+            if provider_call_update.is_some() || model_observation.is_some() {
+                return self
+                    .apply_message_update(
+                        &request.scope,
+                        &request.thread_id,
+                        existing.message_id,
+                        |message| {
+                            if let Some(provider_call) = provider_call_update.as_ref() {
+                                message.tool_result_provider_call = Some(provider_call.clone());
+                            }
+                            if let Some(model_observation) = model_observation.as_ref() {
+                                let content = message.content.as_deref().ok_or_else(|| {
+                                    SessionThreadError::Serialization(
+                                        "tool result reference content is missing".to_string(),
+                                    )
+                                })?;
+                                if let Some(content) = ToolResultReferenceEnvelope::merge_model_observation_content_if_absent(
+                                    content,
+                                    model_observation.clone(),
+                                )
+                                .map_err(SessionThreadError::Serialization)?
+                                {
+                                    message.content = Some(content);
+                                }
+                            }
+                            Ok(())
+                        },
+                    )
+                    .await;
             }
             return Ok(existing);
         }
@@ -978,6 +1077,7 @@ where
             tool_result_ref: Some(envelope.result_ref),
             tool_result_provider_call: provider_call,
             content: Some(content),
+            attachments: Vec::new(),
             redaction_ref: None,
         };
         self.write_new_message(
@@ -1034,6 +1134,7 @@ where
             tool_result_ref: request.preview.result_ref.clone(),
             tool_result_provider_call: None,
             content: Some(content),
+            attachments: Vec::new(),
             redaction_ref: None,
         };
         let path = message_record_path(&request.scope, &request.thread_id, message.message_id)?;
@@ -1070,11 +1171,6 @@ where
         &self,
         request: UpdateToolResultReferenceRequest,
     ) -> Result<ThreadMessageRecord, SessionThreadError> {
-        let envelope =
-            ToolResultReferenceEnvelope::new(request.result_ref.clone(), request.safe_summary)
-                .map_err(SessionThreadError::Serialization)?;
-        let content = serde_json::to_string(&envelope)
-            .map_err(|error| SessionThreadError::Serialization(error.to_string()))?;
         let existing = self
             .list_thread_messages(&request.scope, &request.thread_id)
             .await?;
@@ -1098,6 +1194,7 @@ where
         let turn_run_id = request.turn_run_id.clone();
         let result_ref = request.result_ref.clone();
         let thread_id_for_error = request.thread_id.clone();
+        let safe_summary = request.safe_summary;
         self.apply_message_update(
             &request.scope,
             &request.thread_id,
@@ -1108,6 +1205,16 @@ where
                         "tool result reference {result_ref} was not found in thread {thread_id_for_error}",
                     )));
                 }
+                let content = message.content.as_deref().ok_or_else(|| {
+                    SessionThreadError::Serialization(
+                        "tool result reference content is missing".to_string(),
+                    )
+                })?;
+                let envelope = ToolResultReferenceEnvelope::from_json_str(content)
+                    .map_err(SessionThreadError::Serialization)?
+                    .with_safe_summary(safe_summary.clone());
+                let content = serde_json::to_string(&envelope)
+                    .map_err(|error| SessionThreadError::Serialization(error.to_string()))?;
                 message.content = Some(content.clone());
                 Ok(())
             },
@@ -1131,6 +1238,9 @@ where
             |message| {
                 ensure_draft(message)?;
                 message.content = Some(request.content.clone().into_text());
+                // Keep content and attachments in lockstep (as redaction does):
+                // a content update must not leave stale attachment refs behind.
+                message.attachments = Vec::new();
                 Ok(())
             },
         )
@@ -1153,6 +1263,7 @@ where
             ensure_draft(message)?;
             message.status = MessageStatus::Finalized;
             message.content = Some(content.clone().into_text());
+            message.attachments = Vec::new();
             Ok(())
         })
         .await
@@ -1174,6 +1285,7 @@ where
             |message| {
                 message.status = MessageStatus::Redacted;
                 message.content = None;
+                message.attachments = Vec::new();
                 message.tool_result_provider_call = None;
                 message.redaction_ref = Some(request.redaction_ref.clone());
                 Ok(())
@@ -1316,6 +1428,8 @@ where
             thread_id: thread_id.clone(),
         })
         .await?;
+        self.delete_idempotency_records_for_thread(scope, thread_id)
+            .await?;
         match self
             .filesystem
             .delete(&scope.to_resource_scope(), &thread_root(scope, thread_id)?)
@@ -1405,17 +1519,21 @@ where
         request: ListThreadsForScopeRequest,
     ) -> Result<ListThreadsForScopeResponse, SessionThreadError> {
         // Per-request work scales with total thread count, not page
-        // size: `list_dir` materializes every entry, we sort, then
-        // slice. The current `ScopedFilesystem` port doesn't expose a
-        // cursor-paginated directory listing, and adding one belongs
-        // upstream of this crate. Acceptable today because:
+        // size. Activity ordering (newest interaction first) requires
+        // every record's timestamp, so we read all records under the
+        // scope, sort by activity, then slice the requested page. The
+        // current `ScopedFilesystem` port exposes neither a
+        // cursor-paginated directory listing nor a timestamp index, and
+        // adding either belongs upstream of this crate. Acceptable today
+        // because:
         //   * local-dev / single-tenant deployments keep the per-scope
         //     thread count bounded (per agent + project + owner).
-        //   * names are short strings; the dominant per-page cost is
-        //     the parallel `get` fan-out, not the directory scan.
+        //   * the record-read fan-out is concurrency-bounded, and the
+        //     heavier title-derivation probes still run only for the
+        //     sliced page.
         // When a tenant grows past low thousands of threads under a
         // single scope, replace this with a storage-level paginator
-        // (e.g. a secondary index keyed by `(scope, thread_id)`).
+        // (e.g. a secondary index keyed by `(scope, updated_at)`).
         let limit = request
             .limit
             .map(|n| (n as usize).clamp(1, LIST_THREADS_MAX_PAGE_SIZE))
@@ -1432,50 +1550,36 @@ where
             }
             Err(error) => return Err(error.into()),
         };
-        let mut thread_ids: Vec<String> = entries
+        let thread_ids: Vec<ThreadId> = entries
             .into_iter()
             .filter(|entry| entry.file_type == FileType::Directory)
-            .map(|entry| entry.name)
-            .collect();
-        thread_ids.sort();
-        let start_index = match request.cursor.as_deref() {
-            Some(cursor) => thread_ids
-                .iter()
-                .position(|id| id.as_str() > cursor)
-                .unwrap_or(thread_ids.len()),
-            None => 0,
-        };
-        let end_index = start_index.saturating_add(limit).min(thread_ids.len());
-        let thread_ids_page: Vec<ThreadId> = thread_ids[start_index..end_index]
-            .iter()
-            .map(|name| ThreadId::new(name.clone()).map_err(invalid_path))
+            .map(|entry| ThreadId::new(entry.name).map_err(invalid_path))
             .collect::<Result<_, _>>()?;
-        // Parallelize the per-thread reads. `list_dir` only returns
-        // names, so each entry still requires a `get` to materialize
-        // the record — issuing them concurrently turns an N-sequential
-        // page (up to 200 reads) into a single bounded fan-out.
-        let reads = thread_ids_page
-            .iter()
-            .map(|tid| self.read_thread_versioned(&request.scope, tid));
-        let results: Vec<Result<Option<(StoredThreadRecord, RecordVersion)>, SessionThreadError>> =
-            futures::future::join_all(reads).await;
-        let mut page: Vec<SessionThreadRecord> = Vec::with_capacity(thread_ids_page.len());
-        // Records whose `title` is `None` need a sidebar-friendly
-        // label derived from their first user message. We collect
-        // their page indices here and fan-out the indexed first-user
-        // reads below so we don't serialize N transcript probes
-        // behind the thread-record fan-out.
-        let mut needs_title: Vec<(usize, ThreadId, u64)> = Vec::new();
-        for (thread_id, result) in thread_ids_page.iter().zip(results) {
+        // Read every record to obtain its activity timestamp. `list_dir`
+        // only returns names, so each entry still requires a `get`.
+        // Bound the concurrency so a large scope can't fan out an
+        // unbounded burst of filesystem reads; ordering is irrelevant
+        // here since we sort by activity immediately after.
+        let scope = &request.scope;
+        let reads: Vec<(
+            ThreadId,
+            Result<Option<(StoredThreadRecord, RecordVersion)>, _>,
+        )> = futures::stream::iter(thread_ids)
+            .map(|tid| async move {
+                let result = self.read_thread_versioned(scope, &tid).await;
+                (tid, result)
+            })
+            .buffer_unordered(LIST_THREADS_RECORD_READ_CONCURRENCY)
+            .collect()
+            .await;
+        // Keep present, scope-matching records paired with their
+        // `next_sequence` (needed for page-scoped title derivation).
+        let mut listed: Vec<(SessionThreadRecord, u64)> = Vec::with_capacity(reads.len());
+        for (thread_id, result) in reads {
             match result {
                 Ok(Some((stored, _))) if stored.record.scope == request.scope => {
-                    let needs_derive = stored.record.title.is_none();
                     let next_sequence = stored.next_sequence;
-                    let idx = page.len();
-                    page.push(stored.record);
-                    if needs_derive {
-                        needs_title.push((idx, thread_id.clone(), next_sequence));
-                    }
+                    listed.push((stored.record, next_sequence));
                 }
                 Ok(_) => {
                     // Absent record or scope-mismatched payload (e.g.
@@ -1484,11 +1588,11 @@ where
                 }
                 Err(error) => {
                     // silent-ok: list_threads is a sidebar read; one
-                    // corrupted record must not blank out the whole
-                    // page. The error is surfaced through tracing so
-                    // operators see it without the user losing the
-                    // rest of their thread list.
-                    tracing::warn!(
+                    // corrupted record must not blank out the whole page.
+                    // Logged at `debug!` (not `warn!`) — this is an internal
+                    // diagnostic, and `info!`/`warn!` corrupt the REPL/TUI
+                    // display per the project logging rule.
+                    tracing::debug!(
                         thread_id = %thread_id.as_str(),
                         scope = ?request.scope,
                         ?error,
@@ -1496,6 +1600,45 @@ where
                     );
                 }
             }
+        }
+        // Newest activity first (`updated_at`, falling back to
+        // `created_at`). Legacy records without timestamps sort last.
+        // Tie-break on thread_id ascending so the order is stable and
+        // opaque cursors stay resumable — and to match the web sidebar's
+        // `byActivityDesc` comparator.
+        listed.sort_by(|(a, _), (b, _)| {
+            let a_key = a.updated_at.or(a.created_at);
+            let b_key = b.updated_at.or(b.created_at);
+            std::cmp::Reverse(a_key)
+                .cmp(&std::cmp::Reverse(b_key))
+                .then_with(|| a.thread_id.as_str().cmp(b.thread_id.as_str()))
+        });
+        // Opaque cursor is the last thread_id of the previous page; find
+        // it in the freshly-sorted list and resume after it. A cursor
+        // that no longer resolves (thread deleted between pages) ends the
+        // stream rather than restarting from the top.
+        let start_index = match request.cursor.as_deref() {
+            Some(cursor) => listed
+                .iter()
+                .position(|(record, _)| record.thread_id.as_str() == cursor)
+                .map(|index| index + 1)
+                .unwrap_or(listed.len()),
+            None => 0,
+        };
+        let end_index = start_index.saturating_add(limit).min(listed.len());
+        let has_more = end_index < listed.len();
+        let mut page: Vec<SessionThreadRecord> = Vec::with_capacity(end_index - start_index);
+        // Records whose `title` is `None` need a sidebar-friendly label
+        // derived from their first user message. We collect their page
+        // indices here and fan-out the indexed first-user reads below so
+        // we don't serialize N transcript probes inline.
+        let mut needs_title: Vec<(usize, ThreadId, u64)> = Vec::new();
+        for (record, next_sequence) in listed.drain(start_index..end_index) {
+            let idx = page.len();
+            if record.title.is_none() {
+                needs_title.push((idx, record.thread_id.clone(), next_sequence));
+            }
+            page.push(record);
         }
         // Derive titles in parallel from each thread's first user
         // message. v1's libSQL list path did the same thing in SQL
@@ -1534,7 +1677,9 @@ where
                         }
                     }
                     Err(error) => {
-                        tracing::warn!(
+                        // Internal diagnostic — `debug!`, not `warn!`, to keep
+                        // the REPL/TUI display intact (project logging rule).
+                        tracing::debug!(
                             thread_id = %thread_id.as_str(),
                             scope = ?request.scope,
                             ?error,
@@ -1544,15 +1689,12 @@ where
                 }
             }
         }
-        // Cursor must reflect the last *attempted* thread_id in this
-        // slice, not the last *successful* one — otherwise a page
-        // where every record was unreadable or scope-mismatched
-        // would return `next_cursor: None` and the caller would treat
-        // a transient corruption as end-of-stream. Using the slice's
-        // last id guarantees the next request advances strictly past
-        // the inspected range.
-        let next_cursor = if end_index < thread_ids.len() {
-            thread_ids_page.last().map(|tid| tid.as_str().to_string())
+        // The cursor is the last thread_id on this page; the next
+        // request resumes after it in the activity-sorted order. Only
+        // emit one when more records remain beyond this slice.
+        let next_cursor = if has_more {
+            page.last()
+                .map(|record| record.thread_id.as_str().to_string())
         } else {
             None
         };
@@ -1565,6 +1707,10 @@ where
 
 const LIST_THREADS_DEFAULT_PAGE_SIZE: usize = 50;
 const LIST_THREADS_MAX_PAGE_SIZE: usize = 200;
+/// Bounded fan-out for reading every thread record during an
+/// activity-sorted list. Caps concurrent filesystem reads so a large
+/// scope can't burst an unbounded number of `get`s.
+const LIST_THREADS_RECORD_READ_CONCURRENCY: usize = 16;
 
 // ── Idempotency key shape ──────────────────────────────────────
 //
@@ -1879,20 +2025,14 @@ fn context_messages_with_summary_replacements(
                 kind: MessageKind::Summary,
                 tool_result_provider_call: None,
                 content: summary.content.clone(),
+                image_attachments: Vec::new(),
             });
             emitted_summaries.insert(summary.summary_id);
             skip_through = summary.end_sequence;
             continue;
         }
         if let Some(content) = message.content.clone() {
-            context.push(ContextMessage {
-                message_id: Some(message.message_id),
-                summary_id: None,
-                sequence: message.sequence,
-                kind: message.kind,
-                tool_result_provider_call: message.tool_result_provider_call.clone(),
-                content,
-            });
+            context.push(ContextMessage::from_transcript_message(message, content));
         }
     }
     context
@@ -1911,14 +2051,8 @@ fn context_messages_by_id(
         .iter()
         .filter_map(|message_id| {
             let message = visible_messages.get(message_id)?;
-            Some(ContextMessage {
-                message_id: Some(message.message_id),
-                summary_id: None,
-                sequence: message.sequence,
-                kind: message.kind,
-                tool_result_provider_call: message.tool_result_provider_call.clone(),
-                content: message.content.clone()?,
-            })
+            let content = message.content.clone()?;
+            Some(ContextMessage::from_transcript_message(message, content))
         })
         .collect()
 }
@@ -1927,6 +2061,11 @@ fn history_messages(messages: &[ThreadMessageRecord]) -> Vec<ThreadMessageRecord
     messages.iter().map(history_message).collect()
 }
 
+// Deny-by-default projection: every field is listed deliberately so a newly
+// added sensitive field does NOT auto-flow into persisted history. Do not
+// collapse to `..message.clone()` — `tool_result_provider_call` is dropped
+// here precisely because raw runtime/tool payloads must never surface as
+// ordinary transcript content (see crate guardrails).
 fn history_message(message: &ThreadMessageRecord) -> ThreadMessageRecord {
     ThreadMessageRecord {
         message_id: message.message_id,
@@ -1942,6 +2081,7 @@ fn history_message(message: &ThreadMessageRecord) -> ThreadMessageRecord {
         tool_result_ref: message.tool_result_ref.clone(),
         tool_result_provider_call: None,
         content: message.content.clone(),
+        attachments: message.attachments.clone(),
         redaction_ref: message.redaction_ref.clone(),
     }
 }
@@ -1965,6 +2105,31 @@ fn history_summary_artifacts(
         .collect()
 }
 
+/// Returns true when a non-model-context-visible message within the summary
+/// span could later become model-visible (i.e. it is in a resurfaceable pending
+/// state).  Permanently-terminal non-visible messages (RejectedBusy, capability
+/// previews) never resurface, so a compaction summary spanning them is safe to
+/// apply — blocking it would silently drop a legitimate compacted range.
+///
+/// Resurfaceable statuses (must still block the summary):
+///   Draft | Interrupted | Superseded | DeferredBusy
+/// Permanent non-visible (must NOT block):
+///   RejectedBusy (terminal, user must explicitly resend)
+///   CapabilityDisplayPreview kind (never model-visible regardless of status)
+///
+/// Note: Redacted/Deleted keep their blocking role here — they were never
+/// model-visible and the separate `summary_covers_redacted_or_deleted_content`
+/// guard (used for history display) doesn't cover the context-build path.
+fn can_resurface_as_model_visible(message: &ThreadMessageRecord) -> bool {
+    matches!(
+        message.status,
+        MessageStatus::Draft
+            | MessageStatus::Interrupted
+            | MessageStatus::Superseded
+            | MessageStatus::DeferredBusy
+    )
+}
+
 fn summary_covers_hidden_content(
     messages: &[ThreadMessageRecord],
     summary: &SummaryArtifact,
@@ -1973,6 +2138,11 @@ fn summary_covers_hidden_content(
         summary.start_sequence <= message.sequence
             && message.sequence <= summary.end_sequence
             && !is_model_context_visible(message)
+            && (can_resurface_as_model_visible(message)
+                || matches!(
+                    message.status,
+                    MessageStatus::Redacted | MessageStatus::Deleted
+                ))
     })
 }
 

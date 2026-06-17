@@ -1,6 +1,6 @@
 use ironclaw_host_api::{
     CapabilityId, RuntimeCredentialInjection, RuntimeCredentialSource, RuntimeCredentialTarget,
-    RuntimeHttpEgressError, RuntimeHttpEgressRequest, SecretHandle,
+    RuntimeHttpEgressError, RuntimeHttpEgressRequest, RuntimeKind, SecretHandle,
 };
 use ironclaw_network::is_rfc3986_unreserved_segment;
 use ironclaw_safety::redaction_values_for_secret;
@@ -169,6 +169,9 @@ fn restore_staged_secrets(
     request: &RuntimeHttpEgressRequest,
     cache: &mut Vec<CredentialCacheEntry>,
 ) {
+    if runtime_reuses_staged_credentials(request.runtime) {
+        return;
+    }
     let Some(secret_injections) = secret_injections else {
         return;
     };
@@ -234,13 +237,24 @@ fn staged_secret_for_injection(
     let Some(secret_injections) = secret_injections else {
         return missing_runtime_credential(injection.required);
     };
-    match secret_injections.take(&request.scope, capability_id, &injection.handle) {
+    let material = if runtime_reuses_staged_credentials(request.runtime) {
+        secret_injections.clone_material(&request.scope, capability_id, &injection.handle)
+    } else {
+        secret_injections.take(&request.scope, capability_id, &injection.handle)
+    };
+    match material {
         Ok(Some(material)) => Ok(Some(material)),
         Ok(None) => missing_runtime_credential(injection.required),
         Err(_) => Err(RuntimeHttpEgressError::Credential {
             reason: "runtime credential injection store unavailable".to_string(),
         }),
     }
+}
+
+fn runtime_reuses_staged_credentials(runtime: RuntimeKind) -> bool {
+    // Multi-call runtimes borrow invocation-scoped staged credentials until
+    // the capability dispatch completes or aborts.
+    matches!(runtime, RuntimeKind::Mcp | RuntimeKind::Wasm)
 }
 
 fn missing_runtime_credential(

@@ -2,8 +2,8 @@ use async_trait::async_trait;
 use ironclaw_skills::{ParsedSkill, SkillTrust, parse_skill_md};
 use ironclaw_turns::run_profile::{
     AgentLoopHostError, AgentLoopHostErrorKind, InstalledSkillSnapshot, LoopContextSnippet,
-    LoopRunContext, SkillContextError, SkillContextService, SkillContextSource, SkillRunSnapshot,
-    SkillTrustLevel, SkillVisibility,
+    LoopRunContext, SkillActivationState, SkillContextError, SkillContextService,
+    SkillContextSource, SkillRunSnapshot, SkillTrustLevel, SkillVisibility,
 };
 pub(crate) use ironclaw_turns::run_profile::{
     is_skill_snippet_model_message_ref as is_snippet_model_message_ref,
@@ -16,8 +16,9 @@ use crate::SkillSourceKind;
 /// Host-owned source for production skill context candidates.
 ///
 /// Implementations own storage/policy lookups. This trait intentionally returns
-/// host-approved trust/visibility decisions plus raw SKILL.md content only for
-/// visible candidates so `ironclaw_turns` remains a snapshot-only loop boundary.
+/// host-approved trust/visibility decisions plus either safe discovery metadata
+/// or raw SKILL.md content for loaded candidates so `ironclaw_turns` remains a
+/// snapshot-only loop boundary.
 #[async_trait]
 pub trait HostSkillContextSource: Send + Sync {
     async fn load_skill_context_candidates(
@@ -26,15 +27,30 @@ pub trait HostSkillContextSource: Send + Sync {
     ) -> Result<Vec<HostSkillContextCandidate>, HostSkillContextBuildError>;
 }
 
+/// Model-visible payload for one host-approved skill candidate.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum HostSkillContextCandidatePayload {
+    /// Raw SKILL.md content for a skill that was selected and loaded.
+    LoadedSkillMd(String),
+    /// Safe discovery metadata for a skill that has not been loaded.
+    DiscoverableMetadata {
+        name: String,
+        safe_description: String,
+    },
+    /// Policy metadata for a skill that is not model-visible.
+    ///
+    /// Host sources should only emit this with non-visible visibility states.
+    /// A visible unavailable candidate violates the host-source contract and
+    /// fails closed during snapshot construction.
+    Unavailable,
+}
+
 /// One host-approved skill candidate before parsing and snapshot conversion.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HostSkillContextCandidate {
-    /// Raw SKILL.md content from the production skill source.
-    ///
-    /// Hidden/denied candidates may omit raw content; they are policy-filtered
-    /// before parsing so invisible skills cannot fail prompt construction via
-    /// malformed prompt files.
-    pub skill_md: Option<String>,
+    /// Candidate payload. Its shape determines whether the skill is loaded or
+    /// only discoverable; invalid cross-field combinations are not representable.
+    pub payload: HostSkillContextCandidatePayload,
     /// Host-approved trust state. `None` fails the build closed.
     pub trust: Option<SkillTrust>,
     /// Host-approved model visibility. `None` fails the build closed.
@@ -44,13 +60,13 @@ pub struct HostSkillContextCandidate {
 }
 
 impl HostSkillContextCandidate {
-    pub fn new(
+    pub fn loaded(
         skill_md: impl Into<String>,
         trust: Option<SkillTrust>,
         visibility: Option<SkillVisibility>,
     ) -> Self {
         Self {
-            skill_md: Some(skill_md.into()),
+            payload: HostSkillContextCandidatePayload::LoadedSkillMd(skill_md.into()),
             trust,
             visibility,
             ordering_key: None,
@@ -59,7 +75,24 @@ impl HostSkillContextCandidate {
 
     pub fn unavailable(trust: Option<SkillTrust>, visibility: Option<SkillVisibility>) -> Self {
         Self {
-            skill_md: None,
+            payload: HostSkillContextCandidatePayload::Unavailable,
+            trust,
+            visibility,
+            ordering_key: None,
+        }
+    }
+
+    pub fn discoverable(
+        name: impl Into<String>,
+        safe_description: impl Into<String>,
+        trust: Option<SkillTrust>,
+        visibility: Option<SkillVisibility>,
+    ) -> Self {
+        Self {
+            payload: HostSkillContextCandidatePayload::DiscoverableMetadata {
+                name: name.into(),
+                safe_description: safe_description.into(),
+            },
             trust,
             visibility,
             ordering_key: None,
@@ -69,6 +102,29 @@ impl HostSkillContextCandidate {
     pub fn with_ordering_key(mut self, ordering_key: impl Into<String>) -> Self {
         self.ordering_key = Some(ordering_key.into());
         self
+    }
+
+    pub fn loaded_skill_md(&self) -> Option<&str> {
+        match &self.payload {
+            HostSkillContextCandidatePayload::LoadedSkillMd(skill_md) => Some(skill_md),
+            HostSkillContextCandidatePayload::DiscoverableMetadata { .. }
+            | HostSkillContextCandidatePayload::Unavailable => None,
+        }
+    }
+
+    pub fn discoverable_metadata(&self) -> Option<(&str, &str)> {
+        match &self.payload {
+            HostSkillContextCandidatePayload::DiscoverableMetadata {
+                name,
+                safe_description,
+            } => Some((name, safe_description)),
+            HostSkillContextCandidatePayload::LoadedSkillMd(_)
+            | HostSkillContextCandidatePayload::Unavailable => None,
+        }
+    }
+
+    pub fn is_unavailable(&self) -> bool {
+        matches!(self.payload, HostSkillContextCandidatePayload::Unavailable)
     }
 }
 
@@ -152,17 +208,33 @@ pub fn build_skill_run_snapshot(
         if visibility != SkillVisibility::Visible {
             continue;
         }
-        let skill_md = candidate
-            .skill_md
-            .ok_or(HostSkillContextBuildError::SourceUnavailable)?;
-        let parsed =
-            parse_skill_md(&skill_md).map_err(|_| HostSkillContextBuildError::ParseFailed)?;
-        entries.push(parsed_skill_to_snapshot_entry(
-            parsed,
-            trust,
-            visibility,
-            candidate.ordering_key,
-        ));
+        match candidate.payload {
+            HostSkillContextCandidatePayload::LoadedSkillMd(skill_md) => {
+                let parsed = parse_skill_md(&skill_md)
+                    .map_err(|_| HostSkillContextBuildError::ParseFailed)?;
+                entries.push(parsed_skill_to_snapshot_entry(
+                    parsed,
+                    trust,
+                    visibility,
+                    candidate.ordering_key,
+                ));
+            }
+            HostSkillContextCandidatePayload::DiscoverableMetadata {
+                name,
+                safe_description,
+            } => {
+                entries.push(discoverable_skill_to_snapshot_entry(
+                    name,
+                    safe_description,
+                    trust,
+                    visibility,
+                    candidate.ordering_key,
+                ));
+            }
+            HostSkillContextCandidatePayload::Unavailable => {
+                return Err(HostSkillContextBuildError::SourceUnavailable);
+            }
+        }
     }
 
     Ok(SkillRunSnapshot::from_entries(entries))
@@ -185,8 +257,27 @@ fn parsed_skill_to_snapshot_entry(
         name,
         trust,
         visibility,
+        activation_state: SkillActivationState::Loaded,
         prompt_content,
         safe_description: parsed.manifest.description,
+    }
+}
+
+fn discoverable_skill_to_snapshot_entry(
+    name: String,
+    safe_description: String,
+    trust: SkillTrust,
+    visibility: SkillVisibility,
+    ordering_key: Option<String>,
+) -> InstalledSkillSnapshot {
+    InstalledSkillSnapshot {
+        ordering_key: ordering_key.unwrap_or_else(|| name.clone()),
+        name,
+        trust: skill_trust_level(trust),
+        visibility,
+        activation_state: SkillActivationState::Discoverable,
+        prompt_content: None,
+        safe_description,
     }
 }
 

@@ -1,12 +1,15 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use ironclaw_approvals::DenyApproval;
+use ironclaw_approvals::{
+    DenyApproval, LeaseApproval, PersistentApprovalAction, PersistentApprovalPolicyInput,
+    PersistentApprovalPolicyKey, PersistentApprovalPolicyStore,
+};
 use ironclaw_host_api::{Action, Principal};
 use ironclaw_run_state::ApprovalStatus;
 use ironclaw_turns::{
-    CancelRunRequest, GateRef, ResumeTurnPrecondition, ResumeTurnRequest, SanitizedCancelReason,
-    TurnCoordinator, TurnError, TurnErrorCategory, TurnRunId, TurnStatus,
+    GateRef, GateResumeDisposition, ResumeTurnPrecondition, ResumeTurnRequest, TurnCoordinator,
+    TurnError, TurnErrorCategory, TurnRunId, TurnStatus,
 };
 
 use super::gate_ref::{approval_reply_binding_ref, approval_source_binding_ref};
@@ -60,6 +63,10 @@ pub struct DefaultApprovalInteractionService {
     read_model: Arc<dyn ApprovalInteractionReadModel>,
     lease_terms_provider: Arc<dyn ApprovalLeaseTermsProvider>,
     resolver: Arc<dyn ApprovalResolutionPort>,
+    // arch-exempt: optional_arc, absence is the explicit fail-closed
+    // AlwaysAllowUnsupported path for minimal/test compositions until user-facing
+    // revoke controls land, plan #4539
+    persistent_policies: Option<Arc<dyn PersistentApprovalPolicyStore>>,
     turn_coordinator: Arc<dyn TurnCoordinator>,
 }
 
@@ -67,6 +74,11 @@ pub struct DefaultApprovalInteractionService {
 enum ApprovalCapabilityAction {
     Dispatch,
     Spawn,
+}
+
+struct PreparedAllowPolicy {
+    input: PersistentApprovalPolicyInput,
+    key: PersistentApprovalPolicyKey,
 }
 
 impl ApprovalCapabilityAction {
@@ -92,8 +104,17 @@ impl DefaultApprovalInteractionService {
             read_model,
             lease_terms_provider,
             resolver,
+            persistent_policies: None,
             turn_coordinator,
         }
+    }
+
+    pub fn with_persistent_policy_store(
+        mut self,
+        persistent_policies: Arc<dyn PersistentApprovalPolicyStore>,
+    ) -> Self {
+        self.persistent_policies = Some(persistent_policies);
+        self
     }
 
     async fn find_gate(
@@ -130,6 +151,7 @@ impl DefaultApprovalInteractionService {
         request: ResolveApprovalInteractionRequest,
         gate: ApprovalGateRecord,
         run_id: TurnRunId,
+        persistent: bool,
     ) -> Result<ResolveApprovalInteractionResponse, ProductWorkflowError> {
         let action = ApprovalCapabilityAction::from_action(gate.request().action.as_ref())?;
         let status = gate.status();
@@ -138,37 +160,51 @@ impl DefaultApprovalInteractionService {
                 ApprovalInteractionRejectionKind::StaleGate,
             ));
         }
+        if persistent && status != ApprovalStatus::Pending {
+            return Err(approval_rejected(
+                ApprovalInteractionRejectionKind::AlwaysAllowUnsupported,
+            ));
+        }
         let mut terms = self.lease_terms_provider.lease_terms_for(&gate).await?;
         terms.issued_by = Principal::User(request.actor.user_id.clone());
-        match (status, action) {
+        let persistent_policy = if persistent && status == ApprovalStatus::Pending {
+            self.lease_terms_provider
+                .persistent_approval_allowed(&gate)
+                .await?;
+            Some(self.prepare_allow_policy(&request, &gate, terms.clone())?)
+        } else {
+            None
+        };
+        let resolution = match (status, action) {
             (ApprovalStatus::Pending, ApprovalCapabilityAction::Dispatch) => {
                 self.resolver
                     .approve_dispatch(gate.resource_scope(), gate.request().id, terms)
-                    .await?;
+                    .await
             }
             (ApprovalStatus::Pending, ApprovalCapabilityAction::Spawn) => {
                 self.resolver
                     .approve_spawn(gate.resource_scope(), gate.request().id, terms)
-                    .await?;
+                    .await
             }
             (ApprovalStatus::Approved, ApprovalCapabilityAction::Dispatch) => {
                 self.resolver
                     .ensure_dispatch_lease(gate.resource_scope(), gate.request().id, terms)
-                    .await?;
+                    .await
             }
             (ApprovalStatus::Approved, ApprovalCapabilityAction::Spawn) => {
                 self.resolver
                     .ensure_spawn_lease(gate.resource_scope(), gate.request().id, terms)
-                    .await?;
+                    .await
             }
             (ApprovalStatus::Denied | ApprovalStatus::Expired, _) => {
                 return Err(approval_rejected(
                     ApprovalInteractionRejectionKind::StaleGate,
                 ));
             }
-        }
+        };
+        resolution?;
 
-        let response = self
+        let response = match self
             .turn_coordinator
             .resume_turn(ResumeTurnRequest {
                 scope: request.scope,
@@ -179,10 +215,77 @@ impl DefaultApprovalInteractionService {
                 source_binding_ref: approval_source_binding_ref(&request.gate_ref)?,
                 reply_target_binding_ref: approval_reply_binding_ref(&request.gate_ref)?,
                 idempotency_key: request.idempotency_key,
+                resume_disposition: None,
             })
             .await
-            .map_err(map_approval_resume_error)?;
+            .map_err(map_approval_resume_error)
+        {
+            Ok(response) => response,
+            Err(error) => return Err(error),
+        };
+        if let Some(policy) = persistent_policy {
+            self.persist_allow_policy(policy).await;
+        }
         Ok(ResolveApprovalInteractionResponse::Approved(response))
+    }
+
+    fn prepare_allow_policy(
+        &self,
+        request: &ResolveApprovalInteractionRequest,
+        gate: &ApprovalGateRecord,
+        terms: LeaseApproval,
+    ) -> Result<PreparedAllowPolicy, ProductWorkflowError> {
+        if self.persistent_policies.is_none() {
+            return Err(approval_rejected(
+                ApprovalInteractionRejectionKind::AlwaysAllowUnsupported,
+            ));
+        }
+        let Some((action, capability_id)) =
+            PersistentApprovalAction::from_action(gate.request().action.as_ref())
+        else {
+            return Err(approval_rejected(
+                ApprovalInteractionRejectionKind::UnsupportedAction,
+            ));
+        };
+        let input = PersistentApprovalPolicyInput {
+            scope: gate.resource_scope().clone(),
+            action,
+            capability_id,
+            grantee: gate.request().requested_by.clone(),
+            approved_by: Principal::User(request.actor.user_id.clone()),
+            constraints: ironclaw_host_api::GrantConstraints {
+                allowed_effects: terms.allowed_effects,
+                mounts: terms.mounts,
+                network: terms.network,
+                secrets: terms.secrets,
+                resource_ceiling: terms.resource_ceiling,
+                expires_at: terms.expires_at,
+                max_invocations: None,
+            },
+            source_approval_request_id: Some(gate.request().id),
+        };
+        let key = PersistentApprovalPolicyKey::new(
+            &input.scope,
+            input.action,
+            input.capability_id.clone(),
+            input.grantee.clone(),
+        );
+        Ok(PreparedAllowPolicy { input, key })
+    }
+
+    async fn persist_allow_policy(&self, policy: PreparedAllowPolicy) {
+        let Some(persistent_policies) = self.persistent_policies.as_ref() else {
+            return;
+        };
+        if let Err(error) = persistent_policies.allow(policy.input).await {
+            // silent-ok: turn already resumed; next invocation re-prompts if lookup misses.
+            tracing::warn!(
+                error = %error,
+                capability_id = %policy.key.capability_id,
+                action = ?policy.key.action,
+                "persistent approval policy write failed after approval resolution"
+            );
+        }
     }
 
     async fn deny_gate(
@@ -210,18 +313,38 @@ impl DefaultApprovalInteractionService {
                 ));
             }
         }
+        // The denial side effect is local to the first-time path; the resume +
+        // response mapping is shared with `replay_denied_gate`.
+        self.resume_denied(request, run_id).await
+    }
+
+    /// Resume a run whose approval gate was denied, carrying
+    /// `GateResumeDisposition::Denied`. Shared by the first-time deny
+    /// (`deny_gate`, after the durable `resolver.deny`) and the idempotent
+    /// replay (`replay_denied_gate`). `TurnCoordinator::resume_turn` replays the
+    /// cached response for a repeated idempotency key, so both callers are safe
+    /// regardless of current run state.
+    async fn resume_denied(
+        &self,
+        request: ResolveApprovalInteractionRequest,
+        run_id: TurnRunId,
+    ) -> Result<ResolveApprovalInteractionResponse, ProductWorkflowError> {
         let response = self
             .turn_coordinator
-            .cancel_run(CancelRunRequest {
+            .resume_turn(ResumeTurnRequest {
                 scope: request.scope,
                 actor: request.actor,
                 run_id,
-                reason: SanitizedCancelReason::UserRequested,
+                gate_resolution_ref: request.gate_ref.clone(),
+                precondition: ResumeTurnPrecondition::BlockedApprovalGate,
+                source_binding_ref: approval_source_binding_ref(&request.gate_ref)?,
+                reply_target_binding_ref: approval_reply_binding_ref(&request.gate_ref)?,
                 idempotency_key: request.idempotency_key,
+                resume_disposition: Some(GateResumeDisposition::Denied),
             })
             .await
             .map_err(map_approval_resume_error)?;
-        Ok(ResolveApprovalInteractionResponse::Denied(response))
+        Ok(ResolveApprovalInteractionResponse::Resumed(response))
     }
 
     async fn replay_approved_gate(
@@ -240,6 +363,7 @@ impl DefaultApprovalInteractionService {
                 source_binding_ref: approval_source_binding_ref(&request.gate_ref)?,
                 reply_target_binding_ref: approval_reply_binding_ref(&request.gate_ref)?,
                 idempotency_key: request.idempotency_key,
+                resume_disposition: None,
             })
             .await
             .map_err(map_approval_resume_error)?;
@@ -251,18 +375,12 @@ impl DefaultApprovalInteractionService {
         request: ResolveApprovalInteractionRequest,
         run_id: TurnRunId,
     ) -> Result<ResolveApprovalInteractionResponse, ProductWorkflowError> {
-        let response = self
-            .turn_coordinator
-            .cancel_run(CancelRunRequest {
-                scope: request.scope,
-                actor: request.actor,
-                run_id,
-                reason: SanitizedCancelReason::UserRequested,
-                idempotency_key: request.idempotency_key,
-            })
-            .await
-            .map_err(map_approval_resume_error)?;
-        Ok(ResolveApprovalInteractionResponse::Denied(response))
+        // Idempotent replay: the SAME idempotency key as the first Deny.
+        // TurnCoordinator::resume_turn returns the cached ResumeTurnResponse for
+        // a repeated key before running the precondition check, so this is
+        // idempotent regardless of current run state. A fresh key on a finished
+        // run still errors via the precondition (correctly StaleGate).
+        self.resume_denied(request, run_id).await
     }
 }
 
@@ -305,7 +423,10 @@ impl ApprovalInteractionService for DefaultApprovalInteractionService {
             request.decision,
         ) {
             (BlockedGateState::ParkedOnGate, _, ApprovalInteractionDecision::ApproveOnce) => {
-                self.approve_gate(request, gate, run_id).await
+                self.approve_gate(request, gate, run_id, false).await
+            }
+            (BlockedGateState::ParkedOnGate, _, ApprovalInteractionDecision::AlwaysAllow) => {
+                self.approve_gate(request, gate, run_id, true).await
             }
             (BlockedGateState::ParkedOnGate, _, ApprovalInteractionDecision::Deny) => {
                 self.deny_gate(request, gate, run_id).await
@@ -315,6 +436,13 @@ impl ApprovalInteractionService for DefaultApprovalInteractionService {
                 ApprovalStatus::Approved,
                 ApprovalInteractionDecision::ApproveOnce,
             ) => self.replay_approved_gate(request, run_id).await,
+            (
+                BlockedGateState::NotParkedOnGate,
+                ApprovalStatus::Approved,
+                ApprovalInteractionDecision::AlwaysAllow,
+            ) => Err(approval_rejected(
+                ApprovalInteractionRejectionKind::AlwaysAllowUnsupported,
+            )),
             (
                 BlockedGateState::NotParkedOnGate,
                 ApprovalStatus::Denied,

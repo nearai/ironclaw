@@ -134,6 +134,8 @@ struct RunRecord {
     parent_run_id: Option<TurnRunId>,
     subagent_depth: u32,
     spawn_tree_root_run_id: Option<TurnRunId>,
+    product_context: Option<crate::ProductTurnContext>,
+    resume_disposition: Option<crate::GateResumeDisposition>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -621,6 +623,8 @@ impl TurnStateStore for InMemoryTurnStateStore {
             parent_run_id: None,
             subagent_depth: 0,
             spawn_tree_root_run_id: None,
+            product_context: request.product_context,
+            resume_disposition: None,
         };
         inner.turns.insert(turn_id, turn_record);
         inner.active_locks.insert(
@@ -797,6 +801,7 @@ impl TurnSpawnTreeStateStore for InMemoryTurnStateStore {
                 spawn_tree_root_run_id: Some(
                     parent.spawn_tree_root_run_id.unwrap_or(parent.run_id),
                 ),
+                product_context: parent.product_context.clone(),
             }
         };
 
@@ -889,6 +894,7 @@ impl TurnSpawnTreeStateStore for InMemoryTurnStateStore {
         let parent_run_id = parent.run_id;
         let subagent_depth = parent.subagent_depth + 1;
         let root_run_id = parent.spawn_tree_root_run_id.unwrap_or(parent.run_id);
+        let parent_product_context = parent.product_context.clone();
         let Some(root) = inner.records.get(&root_run_id) else {
             let response = Err(TurnError::ScopeNotFound);
             inner.remember_submit_idempotency(
@@ -1037,6 +1043,8 @@ impl TurnSpawnTreeStateStore for InMemoryTurnStateStore {
             parent_run_id: Some(parent_run_id),
             subagent_depth,
             spawn_tree_root_run_id: Some(root_run_id),
+            product_context: parent_product_context,
+            resume_disposition: None,
         };
         inner.turns.insert(turn_id, turn_record);
         inner.active_locks.insert(
@@ -1466,6 +1474,8 @@ impl Inner {
                     parent_run_id: run.parent_run_id,
                     subagent_depth: run.subagent_depth,
                     spawn_tree_root_run_id: run.spawn_tree_root_run_id,
+                    product_context: run.product_context,
+                    resume_disposition: run.resume_disposition,
                 },
             );
         }
@@ -1931,6 +1941,7 @@ impl Inner {
             }
             let now = Utc::now();
             record.status = TurnStatus::Queued;
+            record.resume_disposition = request.resume_disposition.clone();
             record.gate_ref = None;
             record.credential_requirements = Vec::new();
             record.source_binding_ref = request.source_binding_ref.clone();
@@ -2584,6 +2595,8 @@ impl RunRecord {
             parent_run_id: self.parent_run_id,
             subagent_depth: self.subagent_depth,
             spawn_tree_root_run_id: self.spawn_tree_root_run_id,
+            product_context: self.product_context.clone(),
+            resume_disposition: self.resume_disposition.clone(),
         }
     }
 
@@ -2606,6 +2619,8 @@ impl RunRecord {
             credential_requirements: self.credential_requirements.clone(),
             failure: self.failure.clone(),
             event_cursor: self.event_cursor,
+            product_context: self.product_context.clone(),
+            resume_disposition: self.resume_disposition.clone(),
         }
     }
 }

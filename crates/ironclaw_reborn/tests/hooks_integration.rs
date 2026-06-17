@@ -217,6 +217,7 @@ impl LoopCapabilityPort for RecordingCapabilityPort {
             safe_summary: "stub capability completed".to_string(),
             progress: ironclaw_turns::run_profile::CapabilityProgress::MadeProgress,
             terminate_hint: false,
+            byte_len: 0,
         }))
     }
 
@@ -288,6 +289,7 @@ impl LoopCapabilityPort for ProviderAwareCapabilityPort {
             safe_summary: "stub capability completed".to_string(),
             progress: ironclaw_turns::run_profile::CapabilityProgress::MadeProgress,
             terminate_hint: false,
+            byte_len: 0,
         }))
     }
 
@@ -1075,6 +1077,8 @@ impl Fixture {
             credential_requirements: Vec::new(),
             failure: None,
             event_cursor: EventCursor(1),
+            product_context: None,
+            resume_disposition: None,
         };
         let claimed = ClaimedTurnRun {
             state,
@@ -1178,6 +1182,8 @@ fn invocation(
         capability_id: CapabilityId::new(capability_id).expect("capability id literal is valid"),
         input_ref: CapabilityInputRef::new(format!("input:{capability_id}"))
             .expect("input ref literal is valid"),
+        approval_resume: None,
+        auth_resume: None,
     }
 }
 
@@ -3195,6 +3201,7 @@ async fn pause_approval_hook_surfaces_as_approval_required_with_real_gate_ref() 
         CapabilityOutcome::ApprovalRequired {
             gate_ref,
             safe_summary,
+            ..
         } => {
             assert!(
                 gate_ref.as_str().starts_with("gate:hook-approval-"),

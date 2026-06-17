@@ -34,7 +34,7 @@ pub(crate) struct ContextPlan {
 /// Reference baseline `ContextStrategy` implementation.
 ///
 /// Requests `PromptMode::TextOnly` with at most [`Self::DEFAULT_MAX_MESSAGES`]
-/// transcript messages and no inline nudges. Loop families that want
+/// scanned transcript messages and no inline nudges. Loop families that want
 /// CodeAct-shaped prompts or want to inject nudges swap this strategy
 /// rather than mutating state.
 #[derive(Debug, Clone, Copy)]
@@ -45,8 +45,11 @@ pub struct DefaultContextStrategy {
 }
 
 impl DefaultContextStrategy {
-    /// Default ceiling on transcript messages requested per turn.
-    pub const DEFAULT_MAX_MESSAGES: u32 = 16;
+    /// Default ceiling on transcript messages scanned per turn.
+    ///
+    /// Host adapters apply token budgeting after the scan, so this should be
+    /// large enough for compaction to observe more than the latest chat exchange.
+    pub const DEFAULT_MAX_MESSAGES: u32 = 128;
 }
 
 impl Default for DefaultContextStrategy {
@@ -218,8 +221,8 @@ mod tests {
     }
 
     #[test]
-    fn default_max_messages_is_sixteen() {
-        assert_eq!(DefaultContextStrategy::default().max_messages, 16);
+    fn default_max_messages_is_one_hundred_twenty_eight() {
+        assert_eq!(DefaultContextStrategy::default().max_messages, 128);
     }
 
     #[tokio::test]
@@ -230,7 +233,7 @@ mod tests {
         let request = strategy.plan_context_request(&state).await;
 
         assert_eq!(request.request.mode, PromptMode::TextOnly);
-        assert_eq!(request.request.max_messages, Some(16));
+        assert_eq!(request.request.max_messages, Some(128));
         assert!(request.request.inline_messages.is_empty());
         assert!(!request.emitted_admission_control);
         assert!(!request.emitted_repeated_call_warning);

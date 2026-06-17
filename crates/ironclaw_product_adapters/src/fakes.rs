@@ -14,7 +14,10 @@ use crate::error::ProductAdapterError;
 use crate::external::ExternalEventId;
 use crate::inbound::{ProductInboundAck, ProductInboundEnvelope, ProductRejection};
 use crate::outbound::{ProductOutboundEnvelope, ProjectionCursor};
-use crate::projection::{ProjectionStream, ProjectionSubscriptionRequest};
+use crate::projection::{
+    ProductProjectionReadInput, ProductProjectionSubscribeInput, ProjectionReadRequest,
+    ProjectionStream, ProjectionSubscriptionRequest,
+};
 use crate::workflow::ProductWorkflow;
 
 pub struct FakeProductWorkflow {
@@ -27,7 +30,10 @@ struct FakeProductWorkflowState {
     outcomes_by_event: HashMap<EventDedupeKey, ProductInboundAck>,
     accepted_envelopes: Vec<ProductInboundEnvelope>,
     seen_envelopes: Vec<ProductInboundEnvelope>,
+    read_inputs: Vec<ProductProjectionReadInput>,
+    subscribe_inputs: Vec<ProductProjectionSubscribeInput>,
     fail_with: Option<ProductAdapterError>,
+    projection_read_resolution: Option<ProjectionReadRequest>,
     projection_resolution: Option<ProjectionSubscriptionRequest>,
 }
 
@@ -56,6 +62,11 @@ impl FakeProductWorkflow {
         state.fail_with = Some(error);
     }
 
+    pub fn program_projection_read_resolution(&self, request: ProjectionReadRequest) {
+        let mut state = self.state.lock().expect("fake state lock poisoned"); // safety: test-support fake state; poisoned mutex means another test already panicked;
+        state.projection_read_resolution = Some(request);
+    }
+
     pub fn program_projection_resolution(&self, request: ProjectionSubscriptionRequest) {
         let mut state = self.state.lock().expect("fake state lock poisoned"); // safety: test-support fake state; poisoned mutex means another test already panicked;
         state.projection_resolution = Some(request);
@@ -74,6 +85,16 @@ impl FakeProductWorkflow {
         let state = self.state.lock().expect("fake state lock poisoned"); // safety: test-support fake state; poisoned mutex means another test already panicked;
         state.seen_envelopes.clone()
     }
+
+    pub fn read_inputs(&self) -> Vec<ProductProjectionReadInput> {
+        let state = self.state.lock().expect("fake state lock poisoned"); // safety: test-support fake state; poisoned mutex means another test already panicked;
+        state.read_inputs.clone()
+    }
+
+    pub fn subscribe_inputs(&self) -> Vec<ProductProjectionSubscribeInput> {
+        let state = self.state.lock().expect("fake state lock poisoned"); // safety: test-support fake state; poisoned mutex means another test already panicked;
+        state.subscribe_inputs.clone()
+    }
 }
 
 impl Default for FakeProductWorkflow {
@@ -84,7 +105,7 @@ impl Default for FakeProductWorkflow {
 
 #[async_trait]
 impl ProductWorkflow for FakeProductWorkflow {
-    async fn accept_inbound(
+    async fn submit_inbound(
         &self,
         envelope: ProductInboundEnvelope,
     ) -> Result<ProductInboundAck, ProductAdapterError> {
@@ -120,18 +141,41 @@ impl ProductWorkflow for FakeProductWorkflow {
         state.seen_envelopes.push(envelope.clone());
         if matches!(
             outcome,
-            ProductInboundAck::Accepted { .. } | ProductInboundAck::DeferredBusy { .. }
+            ProductInboundAck::Accepted { .. }
+                | ProductInboundAck::DeferredBusy { .. }
+                | ProductInboundAck::RejectedBusy { .. }
         ) {
             state.accepted_envelopes.push(envelope);
         }
         Ok(outcome)
     }
 
-    async fn resolve_projection_subscription(
+    async fn read_projection(
         &self,
-        _envelope: ProductInboundEnvelope,
+        request: ProductProjectionReadInput,
+    ) -> Result<ProjectionReadRequest, ProductAdapterError> {
+        let mut state = self.state.lock().expect("fake state lock poisoned"); // safety: test-support fake state; poisoned mutex means another test already panicked;
+        if let Some(error) = state.fail_with.clone() {
+            return Err(error);
+        }
+        state.read_inputs.push(request);
+        state
+            .projection_read_resolution
+            .clone()
+            .ok_or(ProductAdapterError::Internal {
+                detail: crate::RedactedString::new("projection read resolution not programmed"),
+            })
+    }
+
+    async fn subscribe_projection(
+        &self,
+        request: ProductProjectionSubscribeInput,
     ) -> Result<ProjectionSubscriptionRequest, ProductAdapterError> {
-        let state = self.state.lock().expect("fake state lock poisoned"); // safety: test-support fake state; poisoned mutex means another test already panicked;
+        let mut state = self.state.lock().expect("fake state lock poisoned"); // safety: test-support fake state; poisoned mutex means another test already panicked;
+        if let Some(error) = state.fail_with.clone() {
+            return Err(error);
+        }
+        state.subscribe_inputs.push(request);
         state
             .projection_resolution
             .clone()

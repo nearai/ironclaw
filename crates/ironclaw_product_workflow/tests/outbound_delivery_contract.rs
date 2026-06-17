@@ -8,13 +8,15 @@ use ironclaw_host_api::{AgentId, ProjectId, TenantId, ThreadId, UserId};
 use ironclaw_outbound::{
     CommunicationDeliveryIntent, CommunicationDeliveryResolutionRequest, CommunicationModality,
     CommunicationPreferenceKey, CommunicationPreferenceRecord, CommunicationPreferenceRepository,
-    InMemoryOutboundStateStore, LoadSubscriptionCursorRequest, OutboundDeliveryAttempt,
-    OutboundError, OutboundPolicyService, OutboundStateStore, ProjectionSubscriptionRecord,
-    ReplyTargetBindingClaim, ReplyTargetBindingValidator, RequestedOutboundContext,
-    RequestedOutboundKind, RunNotificationContext, RunNotificationEventKind, RunNotificationOrigin,
-    SystemEventReasonCode, ThreadNotificationPolicy, ThreadProjectionAccessClaim,
-    ThreadProjectionAccessPolicy, ThreadProjectionAccessRequest, TriggerFireSlot, TriggerOriginRef,
-    TriggerSourceKind, UpdateDeliveryStatusRequest,
+    CommunicationPreferenceVersion, DeliveryDefaultScope, InMemoryOutboundStateStore,
+    LoadSubscriptionCursorRequest, OutboundDeliveryAttempt, OutboundError, OutboundPolicyService,
+    OutboundStateStore, ProjectionSubscriptionRecord, ReplyTargetBindingClaim,
+    ReplyTargetBindingValidator, RequestedOutboundContext, RequestedOutboundKind,
+    RunNotificationContext, RunNotificationEventKind, RunNotificationOrigin, SystemEventReasonCode,
+    ThreadNotificationPolicy, ThreadProjectionAccessClaim, ThreadProjectionAccessPolicy,
+    ThreadProjectionAccessRequest, TriggerFireSlot, TriggerOriginRef, TriggerSourceKind,
+    UpdateDeliveryStatusRequest, VersionedCommunicationPreferenceRecord,
+    WriteCommunicationPreferenceRequest,
 };
 use ironclaw_product_adapters::{
     AdapterInstallationId, AuthRequirement, DeliveryStatus, EgressCredentialHandle, EgressResponse,
@@ -124,16 +126,19 @@ impl ReplyTargetBindingValidator for FakeReplyTargetBindingValidator {
 
 #[derive(Default)]
 struct FakePreferenceRepository {
-    records: Mutex<HashMap<CommunicationPreferenceKey, CommunicationPreferenceRecord>>,
+    records: Mutex<HashMap<CommunicationPreferenceKey, VersionedCommunicationPreferenceRecord>>,
     load_calls: Mutex<usize>,
 }
 
 impl FakePreferenceRepository {
     fn put_record(&self, record: CommunicationPreferenceRecord) {
-        self.records
-            .lock()
-            .expect("preference lock")
-            .insert(record.key(), record);
+        self.records.lock().expect("preference lock").insert(
+            record.key(),
+            VersionedCommunicationPreferenceRecord {
+                record,
+                version: CommunicationPreferenceVersion::from_raw(1),
+            },
+        );
     }
 
     fn load_calls(&self) -> usize {
@@ -154,7 +159,7 @@ impl CommunicationPreferenceRepository for FakePreferenceRepository {
     async fn load_communication_preference(
         &self,
         key: CommunicationPreferenceKey,
-    ) -> Result<Option<CommunicationPreferenceRecord>, OutboundError> {
+    ) -> Result<Option<VersionedCommunicationPreferenceRecord>, OutboundError> {
         *self.load_calls.lock().expect("preference lock") += 1;
         Ok(self
             .records
@@ -162,6 +167,25 @@ impl CommunicationPreferenceRepository for FakePreferenceRepository {
             .expect("preference lock")
             .get(&key)
             .cloned())
+    }
+
+    async fn write_communication_preference(
+        &self,
+        request: WriteCommunicationPreferenceRequest,
+    ) -> Result<VersionedCommunicationPreferenceRecord, OutboundError> {
+        let mut records = self.records.lock().expect("preference lock");
+        let key = request.record.key();
+        let next_version = match (records.get(&key), request.expected_version) {
+            (None, None) => CommunicationPreferenceVersion::from_raw(1),
+            (Some(existing), Some(expected)) if existing.version == expected => expected.next(),
+            _ => return Err(OutboundError::CasConflict),
+        };
+        let record = VersionedCommunicationPreferenceRecord {
+            record: request.record,
+            version: next_version,
+        };
+        records.insert(key, record.clone());
+        Ok(record)
     }
 }
 
@@ -196,6 +220,7 @@ impl ProductOutboundTargetResolver for FakeProductOutboundTargetResolver {
     async fn resolve_product_outbound_target_metadata(
         &self,
         target: &ironclaw_outbound::ValidatedReplyTargetBinding,
+        _require_direct_message: bool,
     ) -> Result<VerifiedProductOutboundTargetMetadata, ProductWorkflowError> {
         self.calls
             .lock()
@@ -216,6 +241,44 @@ impl ProductOutboundTargetResolver for FakeProductOutboundTargetResolver {
                 ExternalActorRef::new("telegram_user", "777", Some("Telegram user"))
                     .expect("valid external actor"),
             ),
+        })
+    }
+}
+
+/// A resolver that returns `OutboundTargetNotDirectMessage` when
+/// `require_direct_message == true`, and succeeds otherwise.  Used to verify
+/// that the `require_direct_message_target` flag threads from the delivery
+/// request all the way through to the resolver and produces the right
+/// `DeliveryFailureKind::Rejected` audit classification.
+#[derive(Default)]
+struct DmRequiringFakeProductOutboundTargetResolver {
+    calls: Mutex<Vec<(ReplyTargetBindingRef, bool)>>,
+}
+
+impl DmRequiringFakeProductOutboundTargetResolver {
+    fn calls(&self) -> Vec<(ReplyTargetBindingRef, bool)> {
+        self.calls.lock().expect("dm resolver lock").clone()
+    }
+}
+
+#[async_trait]
+impl ProductOutboundTargetResolver for DmRequiringFakeProductOutboundTargetResolver {
+    async fn resolve_product_outbound_target_metadata(
+        &self,
+        target: &ironclaw_outbound::ValidatedReplyTargetBinding,
+        require_direct_message: bool,
+    ) -> Result<VerifiedProductOutboundTargetMetadata, ProductWorkflowError> {
+        self.calls
+            .lock()
+            .expect("dm resolver lock")
+            .push((target.target().clone(), require_direct_message));
+        if require_direct_message {
+            return Err(ProductWorkflowError::OutboundTargetNotDirectMessage);
+        }
+        Ok(VerifiedProductOutboundTargetMetadata {
+            external_conversation_ref: ExternalConversationRef::new(None, "tg-chat-dm", None, None)
+                .expect("valid external conversation"),
+            external_actor_ref: None,
         })
     }
 }
@@ -247,8 +310,15 @@ impl CommunicationPreferenceRepository for StatusFailingOutboundStore {
     async fn load_communication_preference(
         &self,
         key: CommunicationPreferenceKey,
-    ) -> Result<Option<CommunicationPreferenceRecord>, OutboundError> {
+    ) -> Result<Option<VersionedCommunicationPreferenceRecord>, OutboundError> {
         self.inner.load_communication_preference(key).await
+    }
+
+    async fn write_communication_preference(
+        &self,
+        request: WriteCommunicationPreferenceRequest,
+    ) -> Result<VersionedCommunicationPreferenceRecord, OutboundError> {
+        self.inner.write_communication_preference(request).await
     }
 }
 
@@ -494,11 +564,12 @@ impl ProductAdapter for FailingAdapter {
 }
 
 fn scope() -> TurnScope {
-    TurnScope::new(
+    TurnScope::new_with_owner(
         TenantId::new("tenant-product-outbound").expect("valid tenant"),
         Some(AgentId::new("agent-product-outbound").expect("valid agent")),
         Some(ProjectId::new("project-product-outbound").expect("valid project")),
         ThreadId::new("thread-product-outbound").expect("valid thread"),
+        Some(UserId::new("user-product-outbound").expect("valid user")),
     )
 }
 
@@ -631,8 +702,7 @@ fn seed_preference(repo: &FakePreferenceRepository, scope: &TurnScope) {
 
 fn preference_record(scope: &TurnScope) -> CommunicationPreferenceRecord {
     CommunicationPreferenceRecord {
-        tenant_id: scope.tenant_id.clone(),
-        user_id: actor().user_id.clone(),
+        scope: DeliveryDefaultScope::personal(scope.tenant_id.clone(), actor().user_id.clone()),
         final_reply_target: Some(validated_reply_target()),
         progress_target: None,
         approval_prompt_target: None,
@@ -669,6 +739,7 @@ async fn authorized_final_reply_renders_through_telegram_egress_after_validation
             adapter: &adapter,
             egress: &egress,
             delivery_sink: &sink,
+            require_direct_message_target: false,
         },
     )
     .await
@@ -739,6 +810,7 @@ async fn synchronous_response_marks_attempt_delivered() {
             adapter: &adapter,
             egress: &egress,
             delivery_sink: &sink,
+            require_direct_message_target: false,
         },
     )
     .await
@@ -785,6 +857,7 @@ async fn deferred_render_keeps_attempt_pending_and_skips_delivery_status_side_ef
             adapter: &adapter,
             egress: &egress,
             delivery_sink: &sink,
+            require_direct_message_target: false,
         },
     )
     .await
@@ -836,6 +909,7 @@ async fn status_update_failure_after_render_does_not_turn_send_into_failure() {
             adapter: &adapter,
             egress: &egress,
             delivery_sink: &sink,
+            require_direct_message_target: false,
         },
     )
     .await
@@ -913,6 +987,7 @@ async fn requested_outbound_preserves_actor_and_modality_before_rendering() {
             adapter: &adapter,
             egress: &egress,
             delivery_sink: &sink,
+            require_direct_message_target: false,
         },
     )
     .await
@@ -967,6 +1042,7 @@ async fn mismatched_payload_kind_marks_authorized_attempt_failed_without_render(
             adapter: &adapter,
             egress: &egress,
             delivery_sink: &sink,
+            require_direct_message_target: false,
         },
     )
     .await
@@ -1025,6 +1101,7 @@ async fn payload_kind_mismatch_preserves_status_update_failure() {
             adapter: &adapter,
             egress: &egress,
             delivery_sink: &sink,
+            require_direct_message_target: false,
         },
     )
     .await
@@ -1094,6 +1171,7 @@ async fn target_metadata_failure_with_status_update_failure_preserves_workflow_e
             adapter: &adapter,
             egress: &egress,
             delivery_sink: &sink,
+            require_direct_message_target: false,
         },
     )
     .await
@@ -1161,6 +1239,7 @@ async fn target_metadata_failure_marks_attempt_failed_without_render() {
             adapter: &adapter,
             egress: &egress,
             delivery_sink: &sink,
+            require_direct_message_target: false,
         },
     )
     .await
@@ -1231,6 +1310,7 @@ async fn target_metadata_rejection_errors_mark_attempt_failed_rejected() {
                 adapter: &adapter,
                 egress: &egress,
                 delivery_sink: &sink,
+                require_direct_message_target: false,
             },
         )
         .await
@@ -1291,6 +1371,7 @@ async fn keep_alive_payload_marks_authorized_attempt_failed_without_render() {
             adapter: &adapter,
             egress: &egress,
             delivery_sink: &sink,
+            require_direct_message_target: false,
         },
     )
     .await
@@ -1350,6 +1431,7 @@ async fn adapter_render_failure_is_returned_and_marks_attempt_failed() {
             adapter: &adapter,
             egress: &egress,
             delivery_sink: &sink,
+            require_direct_message_target: false,
         },
     )
     .await
@@ -1431,6 +1513,7 @@ async fn adapter_non_retryable_errors_mark_attempt_failed_rejected() {
                 adapter: &adapter,
                 egress: &egress,
                 delivery_sink: &sink,
+                require_direct_message_target: false,
             },
         )
         .await
@@ -1493,6 +1576,7 @@ async fn adapter_render_failure_preserves_adapter_error_when_status_update_fails
             adapter: &adapter,
             egress: &egress,
             delivery_sink: &sink,
+            require_direct_message_target: false,
         },
     )
     .await
@@ -1553,6 +1637,7 @@ async fn revoked_or_rejected_target_does_not_call_render_or_egress() {
             adapter: &adapter,
             egress: &egress,
             delivery_sink: &sink,
+            require_direct_message_target: false,
         },
     )
     .await
@@ -1598,6 +1683,7 @@ async fn no_delivery_system_event_does_not_call_render_or_egress() {
             adapter: &adapter,
             egress: &egress,
             delivery_sink: &sink,
+            require_direct_message_target: false,
         },
     )
     .await
@@ -1618,5 +1704,124 @@ async fn no_delivery_system_event_does_not_call_render_or_egress() {
             .await
             .unwrap()
             .is_empty()
+    );
+}
+
+// ── require_direct_message_target flag threading ──────────────────────────────
+//
+// Verify that the flag is forwarded to the resolver and that a resolver
+// returning `OutboundTargetNotDirectMessage` maps to `Rejected` in the audit
+// trail (Fix 1 + Fix 5 contract).
+
+#[tokio::test]
+async fn require_direct_message_true_propagates_to_resolver_and_maps_to_rejected() {
+    let scope = scope();
+    let store = InMemoryOutboundStateStore::default();
+    let validator = FakeReplyTargetBindingValidator::default();
+    validator.allow(validated_reply_target());
+    let preferences = FakePreferenceRepository::default();
+    seed_preference(&preferences, &scope);
+    let resolver = DmRequiringFakeProductOutboundTargetResolver::default();
+    let policy = configured_policy(&store, &validator);
+    let adapter = telegram_adapter();
+    let egress = FakeProtocolHttpEgress::new(["api.telegram.org".to_string()]);
+    let sink = FakeOutboundDeliverySink::new();
+
+    let err = prepare_and_render_product_outbound(
+        &policy,
+        &preferences,
+        &resolver,
+        ProductOutboundDeliveryRequest {
+            delivery: delivery_request(scope.clone()),
+            payload: final_reply_payload(),
+            projection_cursor: ProjectionCursor::new("cursor:dm-required-true")
+                .expect("valid cursor"),
+            adapter: &adapter,
+            egress: &egress,
+            delivery_sink: &sink,
+            require_direct_message_target: true,
+        },
+    )
+    .await
+    .expect_err("require_direct_message=true with non-DM resolver must fail");
+
+    // The error must be Workflow { source: OutboundTargetNotDirectMessage }.
+    assert!(
+        matches!(
+            err,
+            ironclaw_product_workflow::ProductOutboundDeliveryError::Workflow {
+                source: ProductWorkflowError::OutboundTargetNotDirectMessage,
+                status_update_error: None,
+                ..
+            }
+        ),
+        "unexpected error: {err:?}"
+    );
+    // The flag must have been forwarded to the resolver.
+    let calls = resolver.calls();
+    assert_eq!(calls.len(), 1);
+    assert!(
+        calls[0].1,
+        "require_direct_message must be true at resolver"
+    );
+    // Audit trail must record Rejected (not Unknown).
+    let attempts = store.list_delivery_attempts(scope).await.unwrap();
+    assert_eq!(attempts.len(), 1);
+    assert_eq!(
+        attempts[0].failure_kind,
+        Some(ironclaw_outbound::DeliveryFailureKind::Rejected),
+        "OutboundTargetNotDirectMessage must map to Rejected, not Unknown"
+    );
+}
+
+#[tokio::test]
+async fn require_direct_message_false_does_not_trigger_dm_rejection() {
+    let scope = scope();
+    let store = InMemoryOutboundStateStore::default();
+    let validator = FakeReplyTargetBindingValidator::default();
+    validator.allow(validated_reply_target());
+    let preferences = FakePreferenceRepository::default();
+    seed_preference(&preferences, &scope);
+    let resolver = DmRequiringFakeProductOutboundTargetResolver::default();
+    let policy = configured_policy(&store, &validator);
+    let adapter = telegram_adapter();
+    let egress = FakeProtocolHttpEgress::new(["api.telegram.org".to_string()]);
+    egress.allow_credential_handle("telegram_bot_token");
+    let sink = FakeOutboundDeliverySink::new();
+
+    let outcome = prepare_and_render_product_outbound(
+        &policy,
+        &preferences,
+        &resolver,
+        ProductOutboundDeliveryRequest {
+            delivery: delivery_request(scope.clone()),
+            payload: final_reply_payload(),
+            projection_cursor: ProjectionCursor::new("cursor:dm-required-false")
+                .expect("valid cursor"),
+            adapter: &adapter,
+            egress: &egress,
+            delivery_sink: &sink,
+            require_direct_message_target: false,
+        },
+    )
+    .await
+    .expect("require_direct_message=false must not trigger DM rejection");
+
+    assert!(
+        matches!(outcome, ProductOutboundDeliveryOutcome::Rendered { .. }),
+        "unexpected outcome: {outcome:?}"
+    );
+    // Flag must have been forwarded as false.
+    let calls = resolver.calls();
+    assert_eq!(calls.len(), 1);
+    assert!(
+        !calls[0].1,
+        "require_direct_message must be false at resolver"
+    );
+    let attempts = store.list_delivery_attempts(scope).await.unwrap();
+    assert_eq!(attempts.len(), 1);
+    assert_eq!(
+        attempts[0].status,
+        ironclaw_outbound::OutboundDeliveryStatus::Delivered
     );
 }

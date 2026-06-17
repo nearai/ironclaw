@@ -56,6 +56,17 @@ slack-v2-host-beta = [
     "webui-v2-beta",
     "dep:ironclaw_slack_v2_adapter",
     "dep:ironclaw_wasm_product_adapters",
+    "dep:ironclaw_product_workflow_storage",
+]
+openai-compat-beta = [
+    "webui-v2-beta",
+    "dep:ironclaw_reborn_openai_compat",
+    "ironclaw_reborn_openai_compat/openai-compat-beta",
+    "dep:ironclaw_reborn_openai_compat_storage",
+    "dep:ironclaw_product_workflow_storage",
+    "ironclaw_product_workflow_storage/libsql",
+    "ironclaw_reborn_openai_compat_storage/libsql",
+    "ironclaw_product_adapters/host-auth-mint",
 ]
 libsql = [
     "dep:libsql",
@@ -87,6 +98,7 @@ ironclaw_auth = { path = "../ironclaw_auth" }
 ironclaw_common = { path = "../ironclaw_common" }
 ironclaw_capabilities = { path = "../ironclaw_capabilities" }
 ironclaw_approvals = { path = "../ironclaw_approvals" }
+ironclaw_attachments = { path = "../ironclaw_attachments" }
 ironclaw_authorization = { path = "../ironclaw_authorization" }
 ironclaw_conversations = { path = "../ironclaw_conversations" }
 ironclaw_event_projections = { path = "../ironclaw_event_projections" }
@@ -105,11 +117,16 @@ ironclaw_network = { path = "../ironclaw_network" }
 ironclaw_outbound = { path = "../ironclaw_outbound" }
 ironclaw_processes = { path = "../ironclaw_processes" }
 ironclaw_product_adapters = { path = "../ironclaw_product_adapters" }
+ironclaw_product_adapter_registry = { path = "../ironclaw_product_adapter_registry" }
 ironclaw_product_workflow = { path = "../ironclaw_product_workflow" }
+ironclaw_product_workflow_storage = { path = "../ironclaw_product_workflow_storage", optional = true }
 ironclaw_reborn = { path = "../ironclaw_reborn" }
 ironclaw_reborn_config = { path = "../ironclaw_reborn_config" }
 ironclaw_reborn_identity = { path = "../ironclaw_reborn_identity", optional = true }
 ironclaw_reborn_event_store = { path = "../ironclaw_reborn_event_store" }
+ironclaw_reborn_openai_compat = { path = "../ironclaw_reborn_openai_compat", optional = true }
+ironclaw_reborn_openai_compat_storage = { path = "../ironclaw_reborn_openai_compat_storage", optional = true }
+ironclaw_reborn_traces = { path = "../ironclaw_reborn_traces" }
 ironclaw_first_party_extension_ports = { path = "../ironclaw_first_party_extension_ports" }
 ironclaw_resources = { path = "../ironclaw_resources" }
 ironclaw_run_state = { path = "../ironclaw_run_state" }
@@ -122,6 +139,7 @@ ironclaw_threads = { path = "../ironclaw_threads" }
 ironclaw_triggers = { path = "../ironclaw_triggers" }
 ironclaw_trust = { path = "../ironclaw_trust" }
 ironclaw_turns = { path = "../ironclaw_turns" }
+ironclaw_product_context = { path = "../ironclaw_product_context", version = "0.1.0" }
 # WebUI v2 route surface — feature-gated; only used by `webui_serve`.
 ironclaw_webui_v2 = { path = "../ironclaw_webui_v2", optional = true }
 # WebUI v2 static SPA bundle — feature-gated; mounted under `/v2`.
@@ -140,12 +158,14 @@ rust_decimal = { version = "1", features = ["serde", "serde-with-str"] }
 secrecy = "0.10"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+sha2 = "0.10"
 tempfile = "3"
 thiserror = "2"
 tokio = { version = "1", features = ["macros", "rt", "rt-multi-thread", "sync", "time"] }
 tokio-util = { version = "0.7", features = ["rt"] }
 toml = "0.8"
 tracing = "0.1"
+tracing-subscriber = "0.3"
 url = "2"
 uuid = { version = "1", features = ["v4"] }
 
@@ -177,6 +197,10 @@ tokio = { version = "1", features = ["macros", "net", "rt", "rt-multi-thread", "
 tokio-tungstenite = { version = "0.29", default-features = false, features = ["connect"] }
 tower = { version = "0.5", features = ["util"] }
 tracing-test = "0.2"
+
+[[test]]
+name = "production_runtime_automations"
+required-features = ["libsql"]
 
 [build-dependencies]
 ironclaw_skills = { path = "../ironclaw_skills" }

@@ -28,10 +28,21 @@ protocol event (webhook / cookie / bearer / cli)
   -> host verifies protocol auth (mints ProtocolAuthEvidence::Verified)
   -> ProductAdapter::parse_inbound(raw_payload, evidence)
        -> ProductInboundEnvelope (or None for ambient/no-op events)
-  -> ProductWorkflow::accept_inbound(envelope)
+  -> ProductWorkflow::submit_inbound(envelope)
        -> ConversationBindingService -> SessionThreadService -> TurnCoordinator
-  -> ProductInboundAck (Accepted / DeferredBusy / Rejected / Duplicate / NoOp)
+  -> ProductInboundAck (Accepted / RejectedBusy / DeferredBusy / Rejected / Duplicate / NoOp)
   -> protocol layer maps ack to status code
+
+projection read / fetch
+  -> caller resolves any opaque product/API id into canonical Reborn metadata
+  -> ProductWorkflow::read_projection(ProductProjectionReadInput)
+       -> ProjectionReadRequest
+
+projection stream / subscription
+  -> ProductWorkflow::subscribe_projection(ProductProjectionSubscribeInput)
+       -> ProjectionSubscriptionRequest
+  -> ProjectionStream::drain(request)
+       -> ProductOutboundEnvelope(s)
 
 projection update
   -> ProductOutboundEnvelope (FinalReply / Progress / GatePrompt / ...)
@@ -87,7 +98,28 @@ projection update
 - `auth_evidence: ProtocolAuthEvidence`
 - `received_at: DateTime<Utc>`
 - `payload: ProductInboundPayload` — UserMessage / Command /
-  ApprovalResolution / AuthResolution / SubscriptionRequest / NoOp.
+  ApprovalResolution / ScopedApprovalResolution / AuthResolution /
+  ProjectionRead / SubscriptionRequest / ControlAction / LinkedThreadAction /
+  NoOp.
+
+`ProductWorkflow` has three effect-boundary doors:
+
+- `submit_inbound(ProductInboundEnvelope)` for mutating submit/control actions:
+  user messages, commands, approval/auth resolutions, linked-thread actions,
+  typed control actions, and no-op acknowledgements. Projection reads and
+  projection subscriptions must not be submitted through this mutating path.
+- `read_projection(ProductProjectionReadInput)` for non-mutating projection
+  reads/fetches. Callers may provide adapter external refs for workflow binding
+  resolution or already-canonicalized actor/scope metadata after resolving an
+  opaque product/API id outside ProductWorkflow.
+- `subscribe_projection(ProductProjectionSubscribeInput)` for non-mutating
+  projection subscriptions. Legacy `resolve_projection_subscription(...)` is a
+  compatibility wrapper that converts the old envelope shape into typed
+  subscribe input.
+
+`accept_inbound(...)` remains a compatibility wrapper around `submit_inbound(...)`.
+New host/adapter/API wiring should call the specific door that matches the
+operation's effect boundary.
 
 `ProductInboundEnvelope` does not model host-internal trigger or scheduler
 ingress. Synthetic trusted trigger ingress is handled by the conversation-owned
@@ -99,7 +131,13 @@ inside `ironclaw_conversations` and are not constructible by product adapters.
 `ProductInboundAck` outcomes:
 
 - `Accepted { accepted_message_ref, submitted_run_id }`
-- `DeferredBusy { accepted_message_ref, active_run_id }`
+- `RejectedBusy { accepted_message_ref, active_run_id: Option<TurnRunId> }` — busy-thread
+  rejection; terminal/settled. The thread was occupied when the message arrived and the message
+  was not queued. The user must resend a new message. `active_run_id` is the blocking run when
+  known; `None` on idempotent replay of a previously settled `RejectedBusy` record.
+- `DeferredBusy { accepted_message_ref, active_run_id }` — **legacy** (no longer emitted for
+  new busy user-message arrivals; retained for old persisted rows and idempotent replay of
+  existing `DeferredBusy` records).
 - `Rejected(ProductRejection { kind, reason })`
 - `Duplicate { prior: Box<ProductInboundAck> }`
 - `NoOp`
@@ -108,7 +146,7 @@ Webhook ack semantics:
 
 | Outcome | Protocol response |
 |--------|-------------------|
-| `Accepted` / `DeferredBusy` / `Duplicate` / `NoOp` | 200 OK |
+| `Accepted` / `RejectedBusy` / `DeferredBusy` / `Duplicate` / `NoOp` | 200 OK |
 | `Rejected { BindingRequired \| AccessDenied \| UnknownInstallation }` | 403 |
 | `Rejected { PolicyDenied }` | 403/422 (protocol-specific) |
 | `Authentication` failure (host-side) | 401/403 |

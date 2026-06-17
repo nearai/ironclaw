@@ -56,6 +56,7 @@ where
             result_ref: result_ref.as_str().to_string(),
             safe_summary: ToolResultSafeSummary::new("tool completed").expect("safe summary"),
             provider_call: None,
+            model_observation: None,
         })
         .await
         .expect("tool result reference")
@@ -87,6 +88,8 @@ pub(super) fn running_run_state(
         credential_requirements: Vec::new(),
         failure: None,
         event_cursor: EventCursor(0),
+        product_context: None,
+        resume_disposition: None,
     }
 }
 
@@ -315,6 +318,8 @@ pub(super) fn claimed_run() -> ClaimedTurnRun {
             credential_requirements: Vec::new(),
             failure: None,
             event_cursor: EventCursor(0),
+            product_context: None,
+            resume_disposition: None,
         },
         resolved_run_profile: profile,
         runner_id: TurnRunnerId::new(),
@@ -571,5 +576,7 @@ fn state_for_mapping(
         credential_requirements: Vec::new(),
         failure,
         event_cursor: EventCursor(0),
+        product_context: None,
+        resume_disposition: None,
     }
 }

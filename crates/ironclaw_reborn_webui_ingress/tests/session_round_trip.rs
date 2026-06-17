@@ -35,14 +35,18 @@ use http_body_util::BodyExt;
 use ironclaw_host_api::{AgentId, ProjectId, TenantId, ThreadId, UserId};
 use ironclaw_product_workflow::{
     LifecyclePackageRef, RebornCancelRunResponse, RebornCreateThreadResponse,
-    RebornExtensionActionResponse, RebornExtensionListResponse, RebornExtensionRegistryResponse,
-    RebornGetRunStateRequest, RebornGetRunStateResponse, RebornListAutomationsResponse,
-    RebornListThreadsResponse, RebornResolveGateResponse, RebornServicesApi, RebornServicesError,
-    RebornSetupExtensionResponse, RebornStreamEventsRequest, RebornStreamEventsResponse,
-    RebornSubmitTurnResponse, RebornTimelineRequest, RebornTimelineResponse,
-    WebUiAuthenticatedCaller, WebUiCancelRunRequest, WebUiCreateThreadRequest,
-    WebUiListAutomationsRequest, WebUiListThreadsRequest, WebUiResolveGateRequest,
-    WebUiSendMessageRequest, WebUiSetupExtensionRequest, rejecting_reborn_services_error,
+    RebornDeleteThreadRequest, RebornDeleteThreadResponse, RebornExtensionActionResponse,
+    RebornExtensionListResponse, RebornExtensionRegistryResponse, RebornGetRunStateRequest,
+    RebornGetRunStateResponse, RebornListAutomationsResponse, RebornListThreadsResponse,
+    RebornOutboundDeliveryTargetListResponse, RebornOutboundPreferencesResponse,
+    RebornResolveGateResponse, RebornServicesApi, RebornServicesError,
+    RebornSetOutboundPreferencesRequest, RebornSetupExtensionResponse, RebornSkillActionResponse,
+    RebornSkillContentResponse, RebornSkillListResponse, RebornSkillSearchResponse,
+    RebornStreamEventsRequest, RebornStreamEventsResponse, RebornSubmitTurnResponse,
+    RebornTimelineRequest, RebornTimelineResponse, WebUiAuthenticatedCaller, WebUiCancelRunRequest,
+    WebUiCreateThreadRequest, WebUiListAutomationsRequest, WebUiListThreadsRequest,
+    WebUiResolveGateRequest, WebUiSendMessageRequest, WebUiSetupExtensionRequest,
+    rejecting_reborn_services_error,
 };
 use ironclaw_reborn_composition::{
     RebornReadiness, RebornWebuiBundle, WebuiServeConfig, webui_v2_app,
@@ -98,6 +102,8 @@ impl RebornServicesApi for StubServices {
                 title: None,
                 metadata_json: None,
                 goal: None,
+                created_at: None,
+                updated_at: None,
             },
         })
     }
@@ -165,6 +171,14 @@ impl RebornServicesApi for StubServices {
         })
     }
 
+    async fn delete_thread(
+        &self,
+        _caller: WebUiAuthenticatedCaller,
+        _request: RebornDeleteThreadRequest,
+    ) -> Result<RebornDeleteThreadResponse, RebornServicesError> {
+        unreachable!("test does not drive delete_thread")
+    }
+
     async fn list_automations(
         &self,
         _caller: WebUiAuthenticatedCaller,
@@ -173,10 +187,81 @@ impl RebornServicesApi for StubServices {
         Err(rejecting_reborn_services_error())
     }
 
+    async fn get_outbound_preferences(
+        &self,
+        _caller: WebUiAuthenticatedCaller,
+    ) -> Result<RebornOutboundPreferencesResponse, RebornServicesError> {
+        Err(rejecting_reborn_services_error())
+    }
+
+    async fn set_outbound_preferences(
+        &self,
+        _caller: WebUiAuthenticatedCaller,
+        _request: RebornSetOutboundPreferencesRequest,
+    ) -> Result<RebornOutboundPreferencesResponse, RebornServicesError> {
+        Err(rejecting_reborn_services_error())
+    }
+
+    async fn list_outbound_delivery_targets(
+        &self,
+        _caller: WebUiAuthenticatedCaller,
+    ) -> Result<RebornOutboundDeliveryTargetListResponse, RebornServicesError> {
+        Err(rejecting_reborn_services_error())
+    }
+
     async fn list_extensions(
         &self,
         _caller: WebUiAuthenticatedCaller,
     ) -> Result<RebornExtensionListResponse, RebornServicesError> {
+        Err(rejecting_reborn_services_error())
+    }
+
+    async fn list_skills(
+        &self,
+        _caller: WebUiAuthenticatedCaller,
+    ) -> Result<RebornSkillListResponse, RebornServicesError> {
+        Err(rejecting_reborn_services_error())
+    }
+
+    async fn search_skills(
+        &self,
+        _caller: WebUiAuthenticatedCaller,
+        _query: String,
+    ) -> Result<RebornSkillSearchResponse, RebornServicesError> {
+        Err(rejecting_reborn_services_error())
+    }
+
+    async fn install_skill(
+        &self,
+        _caller: WebUiAuthenticatedCaller,
+        _name: String,
+        _content: Option<String>,
+    ) -> Result<RebornSkillActionResponse, RebornServicesError> {
+        Err(rejecting_reborn_services_error())
+    }
+
+    async fn read_skill_content(
+        &self,
+        _caller: WebUiAuthenticatedCaller,
+        _name: String,
+    ) -> Result<RebornSkillContentResponse, RebornServicesError> {
+        Err(rejecting_reborn_services_error())
+    }
+
+    async fn update_skill(
+        &self,
+        _caller: WebUiAuthenticatedCaller,
+        _name: String,
+        _content: String,
+    ) -> Result<RebornSkillActionResponse, RebornServicesError> {
+        Err(rejecting_reborn_services_error())
+    }
+
+    async fn remove_skill(
+        &self,
+        _caller: WebUiAuthenticatedCaller,
+        _name: String,
+    ) -> Result<RebornSkillActionResponse, RebornServicesError> {
         Err(rejecting_reborn_services_error())
     }
 

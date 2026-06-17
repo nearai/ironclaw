@@ -1,33 +1,62 @@
 import { StatusPill } from "../../../design-system/primitives.js";
 import { html } from "../../../lib/html.js";
+import { useT } from "../../../lib/i18n.js";
+import { SlackChannelPicker } from "../../../components/slack-channel-picker.js";
+import { SlackPairingSection } from "../../../components/slack-pairing-section.js";
 import { ExtensionCard, RegistryCard } from "./extension-card.js";
 import { PairingSection } from "./pairing-section.js";
-import { redeemPairingCode } from "../lib/pairing-api.js";
-
-const SLACK_PAIRING_I18N_KEYS = {
-  title: "pairing.slackTitle",
-  instructions: "pairing.slackInstructions",
-  placeholder: "pairing.slackPlaceholder",
-  action: "pairing.connect",
-  success: "pairing.slackSuccess",
-  error: "pairing.slackError",
-  empty: "pairing.none",
-};
-
-const SLACK_PAIRING_QUERY_KEYS = [
-  ["extensions"],
-  ["pairing", "slack"],
-  ["connectable-channels"],
-];
 
 function packageId(item) {
   return item.package_ref?.id || "";
 }
 
-export function isSlackChannelEnabled(enabledChannels) {
-  return ["slack", "slack_v2", "slack-v2"].some((channel) =>
-    enabledChannels.includes(channel)
-  );
+export function isSlackPackage(item) {
+  return packageId(item) === "slack";
+}
+
+export function isSlackAdminManagedAction(connectAction) {
+  return connectAction?.channel === "slack" && connectAction.strategy === "admin_managed_channels";
+}
+
+export function isSlackInboundProofCodeAction(connectAction) {
+  return connectAction?.channel === "slack" && connectAction.strategy === "inbound_proof_code";
+}
+
+export function findSlackConnectAction(connectableChannels) {
+  return findSlackConnectActions(connectableChannels)[0] || null;
+}
+
+export function findSlackConnectActions(connectableChannels) {
+  const channels = connectableChannels || [];
+  const actions = [
+    channels.find(isSlackAdminManagedAction),
+    channels.find(isSlackInboundProofCodeAction),
+  ].filter(Boolean);
+  if (actions.length > 0) return actions;
+  const fallback = channels.find((channel) => channel.channel === "slack");
+  return fallback ? [fallback] : [];
+}
+
+export function SlackConnectActionSections({
+  slackConnectAction,
+  slackConnectActions,
+}) {
+  const actions =
+    slackConnectActions || (slackConnectAction ? [slackConnectAction] : []);
+  const sections = actions
+    .map((action) => {
+      if (isSlackAdminManagedAction(action)) {
+        return html`<${SlackChannelPicker} action=${action.action} />`;
+      }
+      if (isSlackInboundProofCodeAction(action)) {
+        return html`<${SlackPairingSection} action=${action.action} />`;
+      }
+      return null;
+    })
+    .filter(Boolean);
+  return sections.length > 0
+    ? html`<div className="space-y-3">${sections}</div>`
+    : null;
 }
 
 export function ChannelsTab({
@@ -41,11 +70,13 @@ export function ChannelsTab({
   onInstall,
   isBusy,
 }) {
+  const t = useT();
+  const installedChannels = channels || [];
   const enabledChannels = status.enabled_channels || [];
-  const slackEnabled = isSlackChannelEnabled(enabledChannels);
-  const slackConnectAction = connectableChannels?.find((channel) => channel.channel === "slack");
-  const slackStatusLabel = slackEnabled ? "on" : slackConnectAction ? "connect" : "off";
-  const slackStatusTone = slackEnabled ? "success" : slackConnectAction ? "info" : "muted";
+  const slackConnectActions = findSlackConnectActions(connectableChannels);
+  const hasInstalledSlackPackage = installedChannels.some(isSlackPackage);
+  const showLegacySlackConnectActions =
+    slackConnectActions.length > 0 && !hasInstalledSlackPackage;
 
   return html`
     <div className="space-y-5">
@@ -53,11 +84,11 @@ export function ChannelsTab({
         <h3
           className="mb-4 font-mono text-[11px] uppercase tracking-[0.14em] text-signal"
         >
-          Built-in channels
+          ${t("channels.builtIn")}
         </h3>
         <${BuiltinRow}
           name="Web Gateway"
-          description="Browser-based chat with SSE streaming"
+          description=${t("channels.webGatewayDesc") || "Browser-based chat with SSE streaming"}
           enabled=${true}
           detail=${"SSE: " +
           (status.sse_connections || 0) +
@@ -66,52 +97,49 @@ export function ChannelsTab({
         />
         <${BuiltinRow}
           name="HTTP Webhook"
-          description="Inbound webhook endpoint for external integrations"
+          description=${t("channels.httpWebhookDesc") || "Inbound webhook endpoint for external integrations"}
           enabled=${enabledChannels.includes("http")}
           detail="ENABLE_HTTP=true"
         />
         <${BuiltinRow}
-          name="Slack"
-          description="Tenant app channel for DMs and app mentions"
-          enabled=${slackEnabled}
-          statusLabel=${slackStatusLabel}
-          statusTone=${slackStatusTone}
-          detail="Tenant Slack app install"
-        >
-          ${slackConnectAction &&
-          html`<${PairingSection}
-            channel="slack"
-            redeemFn=${redeemPairingCode}
-            i18nKeys=${SLACK_PAIRING_I18N_KEYS}
-            copy=${slackConnectAction.action}
-            queryKeys=${SLACK_PAIRING_QUERY_KEYS}
-            showPendingRequests=${false}
-          />`}
-        <//>
-        <${BuiltinRow}
           name="CLI"
-          description="Terminal interface with TUI or simple REPL"
+          description=${t("channels.cliDesc") || "Terminal interface with TUI or simple REPL"}
           enabled=${enabledChannels.includes("cli")}
           detail="ironclaw run --cli"
         />
         <${BuiltinRow}
           name="REPL"
-          description="Minimal read-eval-print loop for testing"
+          description=${t("channels.replDesc") || "Minimal read-eval-print loop for testing"}
           enabled=${enabledChannels.includes("repl")}
           detail="ironclaw run --repl"
         />
+        ${showLegacySlackConnectActions &&
+        html`
+          <${BuiltinRow}
+            name=${t("channels.slack") || "Slack"}
+            description=${t("channels.slackDesc") || "Tenant app channel for DMs and app mentions"}
+            enabled=${false}
+            statusLabel="legacy"
+            statusTone="muted"
+            detail=${t("channels.slackDetail") || "Tenant Slack app install"}
+          >
+            <${SlackConnectActionSections}
+              slackConnectActions=${slackConnectActions}
+            />
+          </${BuiltinRow}>
+        `}
       </div>
 
-      ${channels.length > 0 &&
+      ${installedChannels.length > 0 &&
       html`
         <div className="v2-panel rounded-[18px] p-5 sm:p-6">
           <h3
             className="mb-4 font-mono text-[11px] uppercase tracking-[0.14em] text-signal"
           >
-            Messaging channels
+            ${t("channels.messaging")}
           </h3>
           <div className="grid grid-cols-1 gap-4">
-            ${channels.map(
+            ${installedChannels.map(
               (ch) => html`
                 <div key=${packageId(ch)} className="flex flex-col gap-3">
                   <${ExtensionCard}
@@ -121,6 +149,10 @@ export function ChannelsTab({
                     onRemove=${onRemove}
                     isBusy=${isBusy}
                   />
+                  ${isSlackPackage(ch) &&
+                  html`<${SlackConnectActionSections}
+                    slackConnectActions=${slackConnectActions}
+                  />`}
                   ${(ch.onboarding_state === "pairing_required" ||
                     ch.onboarding_state === "pairing") &&
                   html` <${PairingSection} channel=${packageId(ch)} /> `}
@@ -136,7 +168,7 @@ export function ChannelsTab({
           <h3
             className="mb-4 font-mono text-[11px] uppercase tracking-[0.14em] text-signal"
           >
-            Available channels
+            ${t("channels.availableChannels")}
           </h3>
           <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 2xl:grid-cols-3">
             ${channelRegistry.map(

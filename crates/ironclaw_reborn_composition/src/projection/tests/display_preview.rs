@@ -1,10 +1,67 @@
 use super::*;
+use async_trait::async_trait;
 use ironclaw_host_api::CapabilityDisplayOutputPreview;
-use ironclaw_product_adapters::CAPABILITY_DISPLAY_SUMMARY_MAX_BYTES;
+use ironclaw_product_adapters::{
+    CAPABILITY_DISPLAY_SUMMARY_MAX_BYTES, CapabilityDisplayPreviewView, ProductAdapterError,
+    RedactedString,
+};
 use ironclaw_turns::run_profile::CapabilityInputRef;
 
 fn preview_input_ref(label: &str) -> CapabilityInputRef {
     CapabilityInputRef::new(format!("input:{label}")).unwrap()
+}
+
+struct FailingPreviewSource;
+
+#[async_trait]
+impl CapabilityDisplayPreviewSource for FailingPreviewSource {
+    async fn preview_resolution(
+        &self,
+        _activity: &CapabilityActivityProjection,
+    ) -> Result<CapabilityDisplayPreviewResolution, ProductAdapterError> {
+        Err(ProductAdapterError::Internal {
+            detail: RedactedString::new("preview encoder failed"),
+        })
+    }
+}
+
+async fn completed_preview_for_input(
+    tool_name: &str,
+    capability_id: &str,
+    arguments: serde_json::Value,
+) -> CapabilityDisplayPreviewView {
+    let run_id = TurnRunId::new();
+    let capability = CapabilityId::new(capability_id).unwrap();
+    let input_ref = preview_input_ref(&format!("preview-input-{tool_name}"));
+    let store = CapabilityDisplayPreviewStore::default();
+    store.record_input(&run_id.to_string(), &input_ref, tool_name, &arguments);
+    store.record_result(CapabilityDisplayPreviewResult {
+        run_id: &run_id.to_string(),
+        input_ref: &input_ref,
+        invocation_id: InvocationId::from_uuid(run_id.as_uuid()),
+        capability_id: &capability,
+        result_ref: "result:preview",
+        output: &serde_json::json!({"ok": true}),
+        output_bytes: 12,
+    });
+    store
+        .preview(&CapabilityActivityProjection {
+            invocation_id: InvocationId::from_uuid(run_id.as_uuid()),
+            run_id: Some(InvocationId::from_uuid(run_id.as_uuid())),
+            capability_id: capability,
+            thread_id: Some(ThreadId::new("webui-preview-thread").unwrap()),
+            status: ironclaw_event_projections::CapabilityActivityStatus::Completed,
+            provider: None,
+            runtime: None,
+            process_id: None,
+            output_bytes: Some(12),
+            error_kind: None,
+            last_cursor: ironclaw_events::EventCursor::new(1),
+            updated_at: chrono::Utc::now(),
+        })
+        .await
+        .unwrap()
+        .unwrap()
 }
 
 #[tokio::test]
@@ -88,6 +145,67 @@ async fn webui_event_stream_enriches_activity_with_display_preview_from_store() 
 }
 
 #[tokio::test]
+async fn capability_display_preview_error_does_not_drop_activity_payload() {
+    let tenant_id = TenantId::new("webui-preview-error-tenant").unwrap();
+    let user_id = UserId::new("webui-preview-error-user").unwrap();
+    let agent_id = AgentId::new("webui-preview-error-agent").unwrap();
+    let thread_id = ThreadId::new("webui-preview-error-thread").unwrap();
+    let scope = TurnScope::new(
+        tenant_id.clone(),
+        Some(agent_id.clone()),
+        None,
+        thread_id.clone(),
+    );
+    let projection_scope = runtime_projection_scope(&TurnActor::new(user_id), &scope);
+    let cursor =
+        EventProjectionCursor::for_scope(projection_scope, ironclaw_events::EventCursor::new(1));
+    let invocation_id = InvocationId::new();
+    let run_id = TurnRunId::new();
+    let capability = CapabilityId::new("builtin.write_file").unwrap();
+
+    let item = runtime_payloads_for_item(
+        &scope,
+        &FailingPreviewSource,
+        RuntimePayloadItemInput {
+            runs: Vec::new(),
+            capability_activities: vec![CapabilityActivityProjection {
+                invocation_id,
+                run_id: Some(InvocationId::from_uuid(run_id.as_uuid())),
+                capability_id: capability.clone(),
+                thread_id: Some(thread_id),
+                status: ironclaw_event_projections::CapabilityActivityStatus::Completed,
+                provider: None,
+                runtime: None,
+                process_id: None,
+                output_bytes: Some(12),
+                error_kind: None,
+                last_cursor: ironclaw_events::EventCursor::new(1),
+                updated_at: chrono::Utc::now(),
+            }],
+            cursor,
+            state_kind: StatePayloadKind::Update,
+        },
+        None,
+        0,
+        8,
+    )
+    .await
+    .expect("preview failure should not fail projection")
+    .expect("activity payload remains renderable");
+
+    assert_eq!(item.total, 1);
+    assert!(matches!(
+        item.payloads.as_slice(),
+        [DeliveredRuntimePayload {
+            payload: ProductOutboundPayload::CapabilityActivity(activity),
+            ..
+        }]
+            if activity.invocation_id == invocation_id
+                && activity.capability_id == capability
+    ));
+}
+
+#[tokio::test]
 async fn capability_display_preview_store_redacts_unsafe_paths_and_secrets() {
     let run_id = TurnRunId::new();
     let capability = CapabilityId::new("builtin.read_file").unwrap();
@@ -137,6 +255,263 @@ async fn capability_display_preview_store_redacts_unsafe_paths_and_secrets() {
     assert!(!rendered.contains("/etc/passwd"));
     assert!(!rendered.contains("\\\\host\\\\share"));
     assert!(rendered.contains("[redacted]"));
+}
+
+#[tokio::test]
+async fn capability_display_preview_store_summarizes_shell_command_safely() {
+    let run_id = TurnRunId::new();
+    let capability = CapabilityId::new("builtin.shell").unwrap();
+    let input_ref = preview_input_ref("shell-preview-input");
+    let store = CapabilityDisplayPreviewStore::default();
+    store.record_input(
+        &run_id.to_string(),
+        &input_ref,
+        "builtin.shell",
+        &serde_json::json!({
+            "command": "pwd && curl -H 'Authorization: Bearer sk-secret' https://example.test/path?token=secret"
+        }),
+    );
+    store.record_result(CapabilityDisplayPreviewResult {
+        run_id: &run_id.to_string(),
+        input_ref: &input_ref,
+        invocation_id: InvocationId::from_uuid(run_id.as_uuid()),
+        capability_id: &capability,
+        result_ref: "result:shell-preview",
+        output: &serde_json::json!({"output": "ok"}),
+        output_bytes: 2,
+    });
+    let preview = store
+        .preview(&CapabilityActivityProjection {
+            invocation_id: InvocationId::from_uuid(run_id.as_uuid()),
+            run_id: Some(InvocationId::from_uuid(run_id.as_uuid())),
+            capability_id: capability,
+            thread_id: Some(ThreadId::new("webui-shell-preview-thread").unwrap()),
+            status: ironclaw_event_projections::CapabilityActivityStatus::Completed,
+            provider: None,
+            runtime: None,
+            process_id: None,
+            output_bytes: Some(2),
+            error_kind: None,
+            last_cursor: ironclaw_events::EventCursor::new(1),
+            updated_at: chrono::Utc::now(),
+        })
+        .await
+        .unwrap()
+        .unwrap();
+
+    let input_summary = preview.input_summary.as_deref().unwrap();
+    assert!(input_summary.contains("command: pwd && curl"));
+    assert!(input_summary.contains("-H 'Authorization: [redacted]'"));
+    assert!(input_summary.contains("https://example.test/path?..."));
+    assert!(!input_summary.contains("sk-secret"));
+    assert!(!input_summary.contains("token=secret"));
+}
+
+#[tokio::test]
+async fn capability_display_preview_store_summarizes_http_inputs_safely() {
+    let preview = completed_preview_for_input(
+        "builtin.http.save",
+        "builtin.http.save",
+        serde_json::json!({
+            "method": "post",
+            "url": "https://user:secret@example.test/reset/token/opaque-value?token=secret#frag",
+            "save_to": "/workspace/tmp/result.json",
+            "headers": {
+                "Authorization": "Bearer sk-secret"
+            },
+            "body": "secret request body",
+            "response_body_limit": 4096,
+            "timeout_ms": 5000
+        }),
+    )
+    .await;
+
+    let input_summary = preview.input_summary.as_deref().unwrap();
+    assert!(input_summary.contains("method: POST"));
+    assert!(input_summary.contains("url: https://example.test/reset/[redacted]/[redacted]?..."));
+    assert!(input_summary.contains("save_to: tmp/result.json"));
+    assert!(input_summary.contains("response_body_limit: 4096"));
+    assert!(input_summary.contains("timeout_ms: 5000"));
+    assert!(!input_summary.contains("user:secret"));
+    assert!(!input_summary.contains("opaque-value"));
+    assert!(!input_summary.contains("sk-secret"));
+    assert!(!input_summary.contains("token=secret"));
+    assert!(!input_summary.contains("Authorization"));
+    assert!(!input_summary.contains("secret request body"));
+}
+
+#[tokio::test]
+async fn capability_display_preview_store_redacts_file_url_inputs() {
+    let preview = completed_preview_for_input(
+        "builtin.http.save",
+        "builtin.http.save",
+        serde_json::json!({
+            "method": "get",
+            "url": "file:///Users/alice/.ssh/id_rsa",
+            "timeout_ms": 5000
+        }),
+    )
+    .await;
+
+    let input_summary = preview.input_summary.as_deref().unwrap();
+    assert!(input_summary.contains("url: [redacted]"));
+    assert!(!input_summary.contains("file:///Users/alice"));
+    assert!(!input_summary.contains("id_rsa"));
+}
+
+#[tokio::test]
+async fn capability_display_preview_store_summarizes_file_inputs_without_contents() {
+    let write_preview = completed_preview_for_input(
+        "builtin.write_file",
+        "builtin.write_file",
+        serde_json::json!({
+            "path": "/workspace/src/main.rs",
+            "content": "fn main() {}"
+        }),
+    )
+    .await;
+    let write_summary = write_preview.input_summary.as_deref().unwrap();
+    assert!(write_summary.contains("path: src/main.rs"));
+    assert!(write_summary.contains("content_bytes: 12"));
+    assert!(!write_summary.contains("fn main"));
+
+    let patch_preview = completed_preview_for_input(
+        "builtin.apply_patch",
+        "builtin.apply_patch",
+        serde_json::json!({
+            "path": "src/lib.rs",
+            "old_string": "let token = \"sk-secret\";",
+            "new_string": "let token = load_token();",
+            "replace_all": true
+        }),
+    )
+    .await;
+    let patch_summary = patch_preview.input_summary.as_deref().unwrap();
+    assert!(patch_summary.contains("path: src/lib.rs"));
+    assert!(patch_summary.contains("old_bytes: 24"));
+    assert!(patch_summary.contains("new_bytes: 25"));
+    assert!(patch_summary.contains("replace_all: true"));
+    assert!(!patch_summary.contains("sk-secret"));
+    assert!(!patch_summary.contains("load_token"));
+}
+
+#[tokio::test]
+async fn capability_display_preview_store_summarizes_read_limits_and_memory_tree_root() {
+    let read_preview = completed_preview_for_input(
+        "builtin.read_file",
+        "builtin.read_file",
+        serde_json::json!({
+            "path": "/workspace/src/main.rs",
+            "offset": 128,
+            "max_bytes": 4096
+        }),
+    )
+    .await;
+    let read_summary = read_preview.input_summary.as_deref().unwrap();
+    assert!(read_summary.contains("path: src/main.rs"));
+    assert!(read_summary.contains("offset: 128"));
+    assert!(read_summary.contains("limit: 4096"));
+
+    let memory_tree_preview = completed_preview_for_input(
+        "builtin.memory_tree",
+        "builtin.memory_tree",
+        serde_json::json!({
+            "limit": 12
+        }),
+    )
+    .await;
+    let memory_tree_summary = memory_tree_preview.input_summary.as_deref().unwrap();
+    assert!(memory_tree_summary.contains("path: /"));
+    assert!(memory_tree_summary.contains("limit: 12"));
+}
+
+#[tokio::test]
+async fn capability_display_preview_store_summarizes_search_and_memory_inputs() {
+    let search_preview = completed_preview_for_input(
+        "nearai.web_search",
+        "nearai.web_search",
+        serde_json::json!({
+            "query": "deployment status token: sk-secret",
+            "limit": 5
+        }),
+    )
+    .await;
+    let search_summary = search_preview.input_summary.as_deref().unwrap();
+    assert!(search_summary.contains("query: deployment status token: [redacted]"));
+    assert!(search_summary.contains("limit: 5"));
+    assert!(!search_summary.contains("sk-secret"));
+
+    let memory_preview = completed_preview_for_input(
+        "builtin.memory_write",
+        "builtin.memory_write",
+        serde_json::json!({
+            "target": "/workspace/notes/deploy.md",
+            "content": "token: sk-secret",
+            "append": true
+        }),
+    )
+    .await;
+    let memory_summary = memory_preview.input_summary.as_deref().unwrap();
+    assert!(memory_summary.contains("target: notes/deploy.md"));
+    assert!(memory_summary.contains("append: true"));
+    assert!(memory_summary.contains("content_bytes: 16"));
+    assert!(!memory_summary.contains("sk-secret"));
+}
+
+#[tokio::test]
+async fn capability_display_preview_store_summarizes_list_dir_inputs() {
+    let preview = completed_preview_for_input(
+        "builtin.list_dir",
+        "builtin.list_dir",
+        serde_json::json!({
+            "path": "/workspace/src",
+            "recursive": true,
+            "max_depth": 3
+        }),
+    )
+    .await;
+    let input_summary = preview.input_summary.as_deref().unwrap();
+    assert!(input_summary.contains("path: src"));
+    assert!(input_summary.contains("recursive: true"));
+    assert!(input_summary.contains("max_depth: 3"));
+}
+
+#[tokio::test]
+async fn capability_display_preview_store_summarizes_grep_and_glob_inputs() {
+    let grep_preview = completed_preview_for_input(
+        "builtin.grep",
+        "builtin.grep",
+        serde_json::json!({
+            "pattern": "Authorization: Bearer sk-secret",
+            "path": "/workspace/src",
+            "glob": "*.rs",
+            "output_mode": "content",
+            "head_limit": 20
+        }),
+    )
+    .await;
+    let grep_summary = grep_preview.input_summary.as_deref().unwrap();
+    assert!(grep_summary.contains("pattern: Authorization: [redacted]"));
+    assert!(grep_summary.contains("path: src"));
+    assert!(grep_summary.contains("glob: *.rs"));
+    assert!(grep_summary.contains("output_mode: content"));
+    assert!(grep_summary.contains("head_limit: 20"));
+    assert!(!grep_summary.contains("sk-secret"));
+
+    let glob_preview = completed_preview_for_input(
+        "builtin.glob",
+        "builtin.glob",
+        serde_json::json!({
+            "pattern": "**/*.rs",
+            "path": "/workspace/crates",
+            "max_results": 100
+        }),
+    )
+    .await;
+    let glob_summary = glob_preview.input_summary.as_deref().unwrap();
+    assert!(glob_summary.contains("pattern: **/*.rs"));
+    assert!(glob_summary.contains("path: crates"));
+    assert!(glob_summary.contains("max_results: 100"));
 }
 
 #[tokio::test]
@@ -208,7 +583,7 @@ async fn capability_display_preview_store_redacts_common_secret_text_shapes() {
         capability_id: &capability,
         result_ref: "result:common-secret-text",
         output: &serde_json::Value::String(
-            "password: secret123 file:///etc/passwd ghp_abcdefghijklmnopqrstuvwxyz xoxb-1234567890 AKIAIOSFODNN7EXAMPLE eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjMifQ.signature"
+            "password: secret123 file:///etc/passwd ghp_abcdefghijklmnopqrstuvwxyz xoxb-1234567890 AKIAIOSFODNN7EXAMPLE eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjMifQ.signature (https://example.test/reset/sk-secret) <https://example.test/reset/token/opaque-value> url=https://example.test/reset/token/query-value Authorization: Bearer header-value token =opaque-token password :opaque-password access_token: access-value refresh-token = refresh-value credential: credential-value"
                 .to_string(),
         ),
         output_bytes: 256,
@@ -240,6 +615,15 @@ async fn capability_display_preview_store_redacts_common_secret_text_shapes() {
     assert!(!rendered.contains("xoxb-1234567890"));
     assert!(!rendered.contains("AKIAIOSFODNN7EXAMPLE"));
     assert!(!rendered.contains("eyJhbGciOiJIUzI1NiJ9"));
+    assert!(!rendered.contains("sk-secret"));
+    assert!(!rendered.contains("opaque-value"));
+    assert!(!rendered.contains("query-value"));
+    assert!(!rendered.contains("header-value"));
+    assert!(!rendered.contains("opaque-token"));
+    assert!(!rendered.contains("opaque-password"));
+    assert!(!rendered.contains("access-value"));
+    assert!(!rendered.contains("refresh-value"));
+    assert!(!rendered.contains("credential-value"));
     assert!(rendered.contains("[redacted]"));
 }
 
@@ -684,121 +1068,4 @@ async fn capability_display_preview_store_marks_truncated_side_channel_summary()
     assert_eq!(preview.output_kind.as_deref(), Some("unified_diff"));
     assert_eq!(preview.subtitle.as_deref(), Some("/workspace/main.rs"));
     assert!(preview.truncated);
-}
-
-#[tokio::test]
-async fn webui_projection_snapshot_resumes_preview_payload() {
-    let tenant_id = TenantId::new("webui-preview-resume-tenant").unwrap();
-    let user_id = UserId::new("webui-preview-resume-user").unwrap();
-    let agent_id = AgentId::new("webui-preview-resume-agent").unwrap();
-    let thread_id = ThreadId::new("webui-preview-resume-thread").unwrap();
-    let capability = CapabilityId::new("builtin.read_file").unwrap();
-    let invocation_id = InvocationId::new();
-    let actor = TurnActor::new(user_id.clone());
-    let scope = TurnScope::new(tenant_id, Some(agent_id), None, thread_id.clone());
-    let projection_scope = runtime_projection_scope(&actor, &scope);
-    let cursor =
-        EventProjectionCursor::for_scope(projection_scope, ironclaw_events::EventCursor::new(1));
-    let display_previews = CapabilityDisplayPreviewStore::default();
-    let run_id = TurnRunId::new();
-    let input_ref = preview_input_ref("preview-resume-input");
-    display_previews.record_input(
-        &run_id.to_string(),
-        &input_ref,
-        "read_file",
-        &serde_json::json!({"path": "src/main.rs"}),
-    );
-    display_previews.record_result(CapabilityDisplayPreviewResult {
-        run_id: &run_id.to_string(),
-        input_ref: &input_ref,
-        invocation_id,
-        capability_id: &capability,
-        result_ref: "result:preview-resume",
-        output: &serde_json::json!({"content": "fn main() {}"}),
-        output_bytes: 12,
-    });
-    let snapshot = ProjectionSnapshot {
-        timeline: ThreadTimeline {
-            entries: Vec::new(),
-        },
-        runs: vec![RunStatusProjection {
-            invocation_id,
-            capability_id: capability.clone(),
-            thread_id: Some(thread_id.clone()),
-            status: RunProjectionStatus::Completed,
-            provider: None,
-            runtime: None,
-            process_id: None,
-            error_kind: None,
-            last_cursor: ironclaw_events::EventCursor::new(1),
-            updated_at: chrono::Utc::now(),
-        }],
-        capability_activities: vec![CapabilityActivityProjection {
-            invocation_id,
-            run_id: Some(InvocationId::from_uuid(run_id.as_uuid())),
-            capability_id: capability,
-            thread_id: Some(thread_id),
-            status: ironclaw_event_projections::CapabilityActivityStatus::Completed,
-            provider: None,
-            runtime: None,
-            process_id: None,
-            output_bytes: Some(12),
-            error_kind: None,
-            last_cursor: ironclaw_events::EventCursor::new(1),
-            updated_at: chrono::Utc::now(),
-        }],
-        next_cursor: cursor.clone(),
-        truncated: false,
-    };
-
-    let first_snapshot = snapshot.clone();
-    let first = runtime_payloads_for_item(
-        &scope,
-        &display_previews,
-        RuntimePayloadItemInput {
-            runs: first_snapshot.runs,
-            capability_activities: first_snapshot.capability_activities,
-            cursor: cursor.clone(),
-            state_kind: StatePayloadKind::Snapshot,
-        },
-        None,
-        0,
-        2,
-    )
-    .await
-    .unwrap()
-    .unwrap();
-    assert_eq!(first.total, 3);
-    assert_eq!(first.payloads.len(), 2);
-    assert!(matches!(
-        first.payloads[0],
-        ProductOutboundPayload::ProjectionSnapshot { .. }
-    ));
-    assert!(matches!(
-        first.payloads[1],
-        ProductOutboundPayload::CapabilityActivity(_)
-    ));
-
-    let resumed = runtime_payloads_for_item(
-        &scope,
-        &display_previews,
-        RuntimePayloadItemInput {
-            runs: snapshot.runs,
-            capability_activities: snapshot.capability_activities,
-            cursor,
-            state_kind: StatePayloadKind::Snapshot,
-        },
-        Some(first.item_cursor.runtime),
-        2,
-        2,
-    )
-    .await
-    .unwrap()
-    .unwrap();
-    assert_eq!(resumed.payloads.len(), 1);
-    assert!(matches!(
-        &resumed.payloads[0],
-        ProductOutboundPayload::CapabilityDisplayPreview(preview)
-            if preview.result_ref.as_deref() == Some("result:preview-resume")
-    ));
 }

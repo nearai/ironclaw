@@ -15,17 +15,22 @@ use std::{
 use async_trait::async_trait;
 use ironclaw_host_api::sha256_digest_token;
 use ironclaw_llm::{
-    ChatMessage, CompletionRequest, CompletionResponse, FinishReason, LlmError, LlmProvider, Role,
-    ToolCall, ToolCompletionRequest, ToolCompletionResponse, ToolDefinition, clean_response,
-    contains_codex_text_tool_call_syntax,
+    ChatMessage, CompletionRequest, CompletionResponse, ContentPart, FinishReason, ImageUrl,
+    LlmError, LlmProvider, Role, ToolCall, ToolCompletionRequest, ToolCompletionResponse,
+    ToolDefinition, clean_response, contains_codex_text_tool_call_syntax,
     costs::{default_cost, model_cost},
     recover_codex_text_tool_calls_from_tool_names,
+    vision_models::is_vision_model,
 };
 use ironclaw_loop_support::{
     HostManagedModelError, HostManagedModelErrorKind, HostManagedModelGateway,
     HostManagedModelMessage, HostManagedModelMessageRole, HostManagedModelRequest,
     HostManagedModelResponse, HostManagedModelRouteSnapshot, HostManagedToolResultContent,
     ModelCost, StaticModelCostTable, ThreadBackedLoopContextPort, ThreadBackedLoopModelPort,
+    ThreadContextWindowCache,
+};
+use ironclaw_safety::{
+    is_provider_arguments_too_large_summary, provider_arguments_exceed_max_bytes,
 };
 use ironclaw_threads::{ProviderToolCallReferenceEnvelope, SessionThreadService, ThreadScope};
 use ironclaw_turns::run_profile::LoopModelUsage;
@@ -51,6 +56,8 @@ use crate::{
 };
 
 const MODEL_CREDITS_EXHAUSTED_SUMMARY: &str = "model provider account is out of credits";
+const PROVIDER_TOOL_ARGUMENTS_OMITTED_MARKER: &str =
+    "arguments omitted because they exceeded the host provider-tool limit";
 
 /// Fail-closed routing policy from resolved Reborn model profile ids to the
 /// host-selected provider/model envelope.
@@ -166,10 +173,12 @@ where
     ) -> Result<LoopModelResponse, LoopModelGatewayError> {
         let instruction_materialization_store: Arc<dyn InstructionMaterializationStore> =
             Arc::new(InMemoryInstructionMaterializationStore::default());
+        let context_window_cache = Arc::new(ThreadContextWindowCache::default());
         self.issue_host_prompt_bundle(
             &request.context,
             &request.request,
             Arc::clone(&instruction_materialization_store),
+            Arc::clone(&context_window_cache),
         )
         .await?;
         ThreadBackedLoopModelPort::new(
@@ -180,6 +189,7 @@ where
             self.max_messages,
         )
         .with_instruction_materialization_store(instruction_materialization_store)
+        .with_context_window_cache(context_window_cache)
         .stream_model(request.request)
         .await
         .map_err(host_error_to_model_gateway_error)
@@ -196,13 +206,17 @@ where
         context: &LoopRunContext,
         request: &LoopModelRequest,
         instruction_materialization_store: Arc<dyn InstructionMaterializationStore>,
+        context_window_cache: Arc<ThreadContextWindowCache>,
     ) -> Result<(), LoopModelGatewayError> {
-        let context_port = Arc::new(ThreadBackedLoopContextPort::new(
-            Arc::clone(&self.thread_service),
-            self.thread_scope.clone(),
-            context.clone(),
-            self.max_messages,
-        ));
+        let context_port = Arc::new(
+            ThreadBackedLoopContextPort::new(
+                Arc::clone(&self.thread_service),
+                self.thread_scope.clone(),
+                context.clone(),
+                self.max_messages,
+            )
+            .with_context_window_cache(context_window_cache),
+        );
         let prompt_port = HostManagedLoopPromptPort::new(
             context.clone(),
             context_port,
@@ -825,20 +839,56 @@ where
                 ToolCompletionRequest::from_completion_request(completion, llm_tool_definitions);
             debug!("reborn model gateway dispatching tool-capable provider request");
             let response = provider
-                .complete_with_tools(tool_request)
+                .complete_with_tools(tool_request.clone())
                 .await
                 .map_err(map_provider_error)?;
             let response =
                 recover_textual_tool_calls_from_tool_response(response, &recovery_tool_names)?;
-            return tool_response_to_host(
-                response,
-                capabilities,
+            match tool_response_to_host(
+                response.clone(),
+                Arc::clone(&capabilities),
                 provider_turn_scope
                     .as_deref()
                     .unwrap_or("model_call=unknown"),
                 &replay_identity,
             )
-            .await;
+            .await
+            {
+                Ok(response) => return Ok(response),
+                Err(error) if is_repairable_provider_tool_output_error(&error) => {
+                    debug!(
+                        safe_summary = error.safe_summary.as_str(),
+                        "reborn model gateway retrying after repairable provider tool output"
+                    );
+                    let mut repair_request = tool_request;
+                    repair_request
+                        .messages
+                        .extend(provider_tool_repair_messages(
+                            &response,
+                            error.safe_summary.as_str(),
+                        ));
+                    let rejected_response = response;
+                    let response = provider
+                        .complete_with_tools(repair_request)
+                        .await
+                        .map_err(map_provider_error)?;
+                    let mut response = recover_textual_tool_calls_from_tool_response(
+                        response,
+                        &recovery_tool_names,
+                    )?;
+                    accumulate_tool_response_usage(&mut response, &rejected_response);
+                    return tool_response_to_host(
+                        response,
+                        capabilities,
+                        provider_turn_scope
+                            .as_deref()
+                            .unwrap_or("model_call=unknown"),
+                        &replay_identity,
+                    )
+                    .await;
+                }
+                Err(error) => return Err(error),
+            }
         }
         debug!(
             "reborn model gateway falling back to text-only provider request because no provider tool definitions were available"
@@ -859,6 +909,24 @@ where
         "reborn model gateway received text-only provider response"
     );
     response_to_host_reply(response)
+}
+
+fn accumulate_tool_response_usage(
+    response: &mut ToolCompletionResponse,
+    additional: &ToolCompletionResponse,
+) {
+    response.input_tokens = response
+        .input_tokens
+        .saturating_add(additional.input_tokens);
+    response.output_tokens = response
+        .output_tokens
+        .saturating_add(additional.output_tokens);
+    response.cache_read_input_tokens = response
+        .cache_read_input_tokens
+        .saturating_add(additional.cache_read_input_tokens);
+    response.cache_creation_input_tokens = response
+        .cache_creation_input_tokens
+        .saturating_add(additional.cache_creation_input_tokens);
 }
 
 fn recover_textual_tool_calls_from_tool_response(
@@ -1156,6 +1224,72 @@ fn map_provider_tool_output_error(error: AgentLoopHostError) -> HostManagedModel
     }
 }
 
+fn is_repairable_provider_tool_output_error(error: &HostManagedModelError) -> bool {
+    error.kind == HostManagedModelErrorKind::InvalidOutput
+        && is_provider_arguments_too_large_summary(&error.safe_summary)
+}
+
+fn provider_tool_repair_messages(
+    response: &ToolCompletionResponse,
+    safe_summary: &str,
+) -> Vec<ChatMessage> {
+    if response.tool_calls.is_empty() {
+        return Vec::new();
+    }
+
+    let assistant = ChatMessage::assistant_with_tool_calls(
+        response.content.clone(),
+        response
+            .tool_calls
+            .iter()
+            .map(provider_tool_call_for_repair)
+            .collect(),
+    )
+    .with_reasoning(response.reasoning.clone());
+    std::iter::once(assistant)
+        .chain(response.tool_calls.iter().map(|tool_call| {
+            ChatMessage::tool_result(
+                tool_call.id.clone(),
+                tool_call.name.clone(),
+                format!(
+                    "Tool call batch rejected by host: {safe_summary}. None of this response's tool calls were executed. Retry with smaller arguments or answer directly without this tool if it is not needed."
+                ),
+            )
+        }))
+        .collect()
+}
+
+fn provider_tool_call_for_repair(tool_call: &ToolCall) -> ToolCall {
+    let arguments = if provider_arguments_exceed_max_bytes(&tool_call.arguments) {
+        serde_json::json!({
+            "error": PROVIDER_TOOL_ARGUMENTS_OMITTED_MARKER,
+        })
+    } else {
+        tool_call.arguments.clone()
+    };
+
+    ToolCall {
+        id: tool_call.id.clone(),
+        name: tool_call.name.clone(),
+        arguments,
+        reasoning: tool_call.reasoning.clone(),
+        signature: tool_call.signature.clone(),
+        arguments_parse_error: tool_call.arguments_parse_error.clone(),
+    }
+}
+
+/// Encode raw image bytes as a base64 `data:` URL a vision model can read
+/// inline. The model port carries undecorated bytes; this provider-format
+/// concern lives at the gateway boundary.
+fn image_data_url(mime_type: &str, bytes: &[u8]) -> String {
+    use base64::Engine;
+    format!(
+        "data:{};base64,{}",
+        mime_type,
+        base64::engine::general_purpose::STANDARD.encode(bytes)
+    )
+}
+
 fn convert_messages(
     messages: Vec<HostManagedModelMessage>,
     replay_identity: &ProviderReplayIdentity,
@@ -1169,20 +1303,48 @@ fn convert_messages(
                 converted.push(ChatMessage::system(message.content.clone()))
             }
             HostManagedModelMessageRole::User => {
-                converted.push(ChatMessage::user(message.content.clone()))
+                // Attach images only for a vision-capable model. A text-only
+                // model can't accept image parts (it would error or ignore
+                // them), so it keeps just the text — the durable transcript
+                // still carries the `<attachments>` pointer for those models.
+                let vision = is_vision_model(&replay_identity.provider_model_id);
+                if message.image_parts.is_empty() || !vision {
+                    converted.push(ChatMessage::user(message.content.clone()));
+                } else {
+                    // Multimodal: the text rides in `content`; `content_parts`
+                    // carries only the image parts (the provider adapters
+                    // prepend the text). Encoding to a base64 `data:` URL is a
+                    // provider-format concern, so it happens here at the gateway
+                    // — the model port carries only the raw bytes.
+                    let parts = message
+                        .image_parts
+                        .iter()
+                        .map(|image| ContentPart::ImageUrl {
+                            image_url: ImageUrl {
+                                url: image_data_url(&image.mime_type, &image.bytes),
+                                detail: None,
+                            },
+                        })
+                        .collect();
+                    converted.push(ChatMessage::user_with_parts(message.content.clone(), parts));
+                }
             }
             HostManagedModelMessageRole::Assistant => {
                 converted.push(ChatMessage::assistant(message.content.clone()));
             }
             HostManagedModelMessageRole::ToolResult => {
                 let replay = tool_result_replay_message(message)?;
-                let Some(provider_call) = replay.provider_call else {
-                    converted.push(ChatMessage::user(tool_summary_message(replay.safe_summary)));
+                let Some(provider_call) = replay.provider_call.clone() else {
+                    converted.push(ChatMessage::user(tool_summary_message(
+                        replay.plain_fallback_content(),
+                    )));
                     index += 1;
                     continue;
                 };
                 if !provider_replay_matches_identity(&provider_call, replay_identity) {
-                    converted.push(ChatMessage::user(tool_summary_message(replay.safe_summary)));
+                    converted.push(ChatMessage::user(tool_summary_message(
+                        replay.plain_fallback_content(),
+                    )));
                     index += 1;
                     continue;
                 }
@@ -1195,13 +1357,13 @@ fn convert_messages(
                     && messages[index].role == HostManagedModelMessageRole::ToolResult
                 {
                     let next = tool_result_replay_message(&messages[index])?;
-                    let Some(next_provider_call) = next.provider_call else {
-                        plain_tool_results.push(next.safe_summary);
+                    let Some(next_provider_call) = next.provider_call.clone() else {
+                        plain_tool_results.push(next.plain_fallback_content());
                         index += 1;
                         continue;
                     };
                     if !provider_replay_matches_identity(&next_provider_call, replay_identity) {
-                        plain_tool_results.push(next.safe_summary);
+                        plain_tool_results.push(next.plain_fallback_content());
                         index += 1;
                         continue;
                     }
@@ -1287,34 +1449,46 @@ struct ToolResultReplayMessage {
     provider_call: Option<ProviderToolCallReferenceEnvelope>,
     safe_summary: String,
     model_content: String,
+    model_content_is_plain_fallback_safe: bool,
+}
+
+impl ToolResultReplayMessage {
+    fn plain_fallback_content(self) -> String {
+        if self.model_content_is_plain_fallback_safe {
+            self.model_content
+        } else {
+            self.safe_summary
+        }
+    }
 }
 
 fn tool_result_replay_message(
     message: &HostManagedModelMessage,
 ) -> Result<ToolResultReplayMessage, HostManagedModelError> {
-    let (safe_summary, model_content) = match message.tool_result_content.as_ref() {
-        Some(HostManagedToolResultContent::Reference { envelope }) => {
-            debug!(
-                result_ref = %envelope.result_ref,
-                "tool result resolved content unavailable; replaying safe summary fallback"
-            );
-            let safe_summary = envelope.safe_summary.as_str().to_string();
-            (safe_summary.clone(), safe_summary)
-        }
-        Some(HostManagedToolResultContent::Resolved { safe_summary }) => {
-            (safe_summary.as_str().to_string(), message.content.clone())
-        }
-        None => {
-            return Err(HostManagedModelError::safe(
-                HostManagedModelErrorKind::InvalidRequest,
-                "tool result replay content is missing",
-            ));
-        }
-    };
+    let (safe_summary, model_content, model_content_is_plain_fallback_safe) =
+        match message.tool_result_content.as_ref() {
+            Some(HostManagedToolResultContent::Reference { envelope }) => {
+                let safe_summary = envelope.safe_summary.as_str().to_string();
+                let model_content = envelope.model_visible_content_or_safe_summary();
+                (safe_summary, model_content, true)
+            }
+            Some(HostManagedToolResultContent::Resolved { safe_summary }) => (
+                safe_summary.as_str().to_string(),
+                message.content.clone(),
+                false,
+            ),
+            None => {
+                return Err(HostManagedModelError::safe(
+                    HostManagedModelErrorKind::InvalidRequest,
+                    "tool result replay content is missing",
+                ));
+            }
+        };
     Ok(ToolResultReplayMessage {
         provider_call: message.tool_result_provider_call.clone(),
         safe_summary,
         model_content,
+        model_content_is_plain_fallback_safe,
     })
 }
 
@@ -1356,6 +1530,7 @@ fn provider_tool_call_from_reference(
         arguments: provider_call.arguments.clone(),
         reasoning: provider_call.reasoning.clone(),
         signature: provider_call.signature.clone(),
+        arguments_parse_error: None,
     }
 }
 
@@ -1481,5 +1656,127 @@ mod tests {
 
         let err = request_failed("rate limit exceeded");
         assert!(!is_credit_exhaustion_error(&err));
+    }
+
+    #[test]
+    fn tool_result_replay_prefers_model_observation_over_safe_summary() {
+        let observation = serde_json::json!({
+            "schema_version": 1,
+            "status": "error",
+            "summary": "Tool input failed schema validation.",
+            "detail": {
+                "kind": "invalid_input",
+                "issues": [{
+                    "path": "file_path",
+                    "code": "missing_required"
+                }]
+            },
+            "trust": "untrusted_tool_output"
+        });
+        let envelope = ironclaw_threads::ToolResultReferenceEnvelope::with_model_observation(
+            "result:tool-error",
+            ironclaw_threads::ToolResultSafeSummary::new("tool failed").expect("safe summary"),
+            observation.clone(),
+        )
+        .expect("valid observation envelope");
+        let message = HostManagedModelMessage {
+            role: HostManagedModelMessageRole::ToolResult,
+            content: "tool failed".to_string(),
+            content_ref: ironclaw_turns::LoopMessageRef::new(
+                "msg:11111111-1111-1111-1111-111111111111",
+            )
+            .expect("valid message ref"),
+            tool_result_provider_call: None,
+            tool_result_content: Some(HostManagedToolResultContent::Reference { envelope }),
+            image_parts: Vec::new(),
+        };
+
+        let replay = tool_result_replay_message(&message).expect("replay message");
+
+        assert_eq!(replay.safe_summary, "tool failed");
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&replay.model_content).unwrap(),
+            observation
+        );
+    }
+
+    fn user_message_with_images(
+        content: &str,
+        image_parts: Vec<ironclaw_loop_support::HostManagedModelImagePart>,
+    ) -> HostManagedModelMessage {
+        HostManagedModelMessage {
+            role: HostManagedModelMessageRole::User,
+            content: content.to_string(),
+            content_ref: ironclaw_turns::LoopMessageRef::new(
+                "msg:11111111-1111-1111-1111-111111111111",
+            )
+            .expect("valid message ref"),
+            tool_result_provider_call: None,
+            tool_result_content: None,
+            image_parts,
+        }
+    }
+
+    #[test]
+    fn convert_messages_emits_image_url_parts_for_user_image_attachments() {
+        let message = user_message_with_images(
+            "what is in this image?",
+            vec![ironclaw_loop_support::HostManagedModelImagePart {
+                mime_type: "image/png".to_string(),
+                bytes: vec![1, 2, 3, 4],
+            }],
+        );
+        let identity = ProviderReplayIdentity::new("openai", "gpt-4o").expect("identity");
+
+        let converted = convert_messages(vec![message], &identity).expect("convert");
+
+        assert_eq!(converted.len(), 1);
+        let chat = &converted[0];
+        assert_eq!(chat.role, Role::User);
+        // Text rides in `content`; the raw bytes are base64-encoded here at the
+        // gateway into a `data:` ImageUrl part.
+        assert_eq!(chat.content, "what is in this image?");
+        assert_eq!(chat.content_parts.len(), 1);
+        match &chat.content_parts[0] {
+            ContentPart::ImageUrl { image_url } => {
+                assert_eq!(image_url.url, "data:image/png;base64,AQIDBA==");
+            }
+            other => panic!("expected an ImageUrl part, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn convert_messages_text_only_user_carries_no_content_parts() {
+        let message = user_message_with_images("hello", Vec::new());
+        let identity = ProviderReplayIdentity::new("openai", "gpt-4o").expect("identity");
+
+        let converted = convert_messages(vec![message], &identity).expect("convert");
+
+        assert_eq!(converted[0].content, "hello");
+        assert!(converted[0].content_parts.is_empty());
+    }
+
+    #[test]
+    fn convert_messages_drops_image_parts_for_non_vision_model() {
+        // Even with image bytes present, a text-only model must not receive
+        // image content (it would error or ignore it); it keeps the text and
+        // relies on the transcript's `<attachments>` pointer.
+        let message = user_message_with_images(
+            "what is in this image?",
+            vec![ironclaw_loop_support::HostManagedModelImagePart {
+                mime_type: "image/png".to_string(),
+                bytes: vec![1, 2, 3, 4],
+            }],
+        );
+        let identity =
+            ProviderReplayIdentity::new("mistral", "mistral-7b-instruct").expect("identity");
+
+        let converted = convert_messages(vec![message], &identity).expect("convert");
+
+        assert_eq!(converted[0].content, "what is in this image?");
+        assert!(
+            converted[0].content_parts.is_empty(),
+            "a non-vision model must not receive image parts"
+        );
     }
 }

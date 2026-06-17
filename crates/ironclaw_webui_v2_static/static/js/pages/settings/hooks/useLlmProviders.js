@@ -18,16 +18,32 @@ import {
 // selection, `builtin`, and `api_key_set`. Overrides are no longer a separate
 // client-side merge — the backend resolves them — so `builtinOverrides` is kept
 // as an empty object purely for the shared helper signatures.
-export function useLlmProviders({ settings: _settings, gatewayStatus }) {
+//
+// Must be a stable reference: it is threaded down to the provider dialog's reset
+// effect dependency array, so a fresh `{}` each render would re-run that effect
+// on every parent re-render and wipe the in-progress form (the model the user
+// just picked, the base URL they typed). A frozen module-level singleton keeps
+// the identity constant across renders.
+const EMPTY_BUILTIN_OVERRIDES = Object.freeze({});
+
+export function useLlmProviders({ settings: _settings, gatewayStatus, enabled = true }) {
   const queryClient = useQueryClient();
   const providersQuery = useQuery({
     queryKey: ["llm-providers"],
     queryFn: fetchLlmProviders,
+    enabled,
     staleTime: 60_000,
   });
 
-  const snapshot = providersQuery.data || { providers: [], active: null };
-  const builtinOverrides = {};
+  const snapshot = enabled
+    ? providersQuery.data || { providers: [], active: null }
+    : { providers: [], active: null };
+  // If the providers query failed (e.g. 404 when the route is gated under
+  // multi-user / SSO auth, or a transient 5xx / offline), we can't conclude
+  // "no LLM configured" — the provider may be set operator-side at boot — so
+  // callers must not treat the failure as a reason to onboard.
+  const isError = enabled && providersQuery.isError;
+  const builtinOverrides = EMPTY_BUILTIN_OVERRIDES;
   // Map the wire view onto the field names the components/helpers expect.
   const allProviders = (snapshot.providers || []).map((provider) => ({
     ...provider,
@@ -37,11 +53,18 @@ export function useLlmProviders({ settings: _settings, gatewayStatus }) {
   // Whether the backend has a usable active provider. Prefer the persisted
   // operator snapshot, but also honor runtime/env-configured LLMs surfaced by
   // gateway status so first-run onboarding does not mask an already-live model.
-  const hasActiveProvider = Boolean(
-    snapshot.active?.provider_id || gatewayStatus?.llm_backend
-  );
-  const activeProviderId =
-    snapshot.active?.provider_id || gatewayStatus?.llm_backend || "nearai";
+  const hasActiveProvider = Boolean(snapshot.active?.provider_id || gatewayStatus?.llm_backend);
+  // The honest active selection: null when nothing is configured. The grouping,
+  // sort, and per-card "active" badge must key off this — otherwise a clean
+  // install renders NEAR AI under the "ACTIVE" section even though no provider
+  // is selected (#4857). The `nearai` fallback below is for downstream *default*
+  // selection only and must never leak into active-state display.
+  const activeProviderId = hasActiveProvider
+    ? snapshot.active?.provider_id || gatewayStatus?.llm_backend
+    : null;
+  // Default provider id used when the user activates/saves without a prior
+  // selection. Intentionally falls back to `nearai`; never used for grouping.
+  const defaultProviderId = activeProviderId || "nearai";
   const selectedModel = snapshot.active?.model || gatewayStatus?.llm_model || "";
   const builtinProviders = allProviders.filter((provider) => provider.builtin);
   const customProviders = allProviders.filter((provider) => !provider.builtin);
@@ -88,7 +111,7 @@ export function useLlmProviders({ settings: _settings, gatewayStatus }) {
       if (apiKey.trim()) {
         payload.api_key = apiKey.trim();
       }
-      if ((editingProvider || provider)?.id === activeProviderId && payload.default_model) {
+      if ((editingProvider || provider)?.id === defaultProviderId && payload.default_model) {
         payload.set_active = true;
         payload.model = payload.default_model;
       }
@@ -114,6 +137,7 @@ export function useLlmProviders({ settings: _settings, gatewayStatus }) {
     activeProviderId,
     selectedModel,
     hasActiveProvider,
+    isError,
     isLoading: providersQuery.isLoading,
     error: providersQuery.error,
     setActiveProvider: (provider) => setActiveMutation.mutateAsync(provider),
