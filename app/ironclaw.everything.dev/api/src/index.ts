@@ -54,25 +54,30 @@ async function lookupCredentialsByScope(db: any, tenantId: string, scopeType: st
 }
 
 async function mintAccessSession(baseUrl: string, operatorToken: string, tenantId: string) {
-  try {
-    const resp = await fetch(
-      `${baseUrl.replace(/\/+$/, "")}/api/webchat/v2/operator/access-sessions`,
-      {
-        method: "POST",
-        headers: {
-          Authorization: `Bearer ${operatorToken}`,
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({ tenant_id: tenantId }),
-        signal: AbortSignal.timeout(10_000),
+  const resp = await fetch(
+    `${baseUrl.replace(/\/+$/, "")}/api/webchat/v2/operator/access-sessions`,
+    {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${operatorToken}`,
+        "Content-Type": "application/json",
       },
+      body: JSON.stringify({ tenant_id: tenantId }),
+      signal: AbortSignal.timeout(10_000),
+    },
+  );
+  if (!resp.ok) {
+    throw new Error(
+      `Failed to mint access session for tenant ${tenantId}: ${resp.status} ${resp.statusText}`,
     );
-    if (resp.ok) {
-      const data = (await resp.json()) as { token?: string };
-      if (data.token) return data.token;
-    }
-  } catch {}
-  return operatorToken;
+  }
+  const data = (await resp.json()) as { token?: string };
+  if (!data.token) {
+    throw new Error(
+      `Access session response missing token for tenant ${tenantId}`,
+    );
+  }
+  return data.token;
 }
 
 function resolveTenantForScope(
@@ -842,6 +847,15 @@ export default createPlugin.withPlugins<PluginsClient>()({
             if (input.always !== undefined) args.always = input.always;
             if (input.credentialRef) args.credentialRef = input.credentialRef;
             await ic.threads.resolveGate(args);
+            return { success: true };
+          }),
+
+        cancelRun: builder.conversation.cancelRun
+          .use(requireAuth)
+          .use(ic.credentials)
+          .handler(async ({ input, context }: any) => {
+            const ic = s.ironclaw(context);
+            await ic.threads.cancelRun({ id: input.threadId, runId: input.runId });
             return { success: true };
           }),
 

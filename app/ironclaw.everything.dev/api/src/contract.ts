@@ -134,6 +134,11 @@ const ThreadApproveInputSchema = z.object({
   credentialRef: z.string().optional(),
 });
 
+const CancelRunInputSchema = z.object({
+  threadId: z.string(),
+  runId: z.string(),
+});
+
 const SubmitManualTokenInputSchema = z.object({
   provider: z.string(),
   accountLabel: z.string(),
@@ -366,6 +371,16 @@ export const contract = oc.router({
         summary: "Resolve a gate (approve/deny/cancel/credential_provided)",
       })
       .input(ThreadApproveInputSchema)
+      .output(z.object({ success: z.boolean() }))
+      .errors({ UNAUTHORIZED, NOT_FOUND }),
+
+    cancelRun: oc
+      .route({
+        method: "POST",
+        path: "/conversation/threads/{threadId}/cancel",
+        summary: "Cancel an active run",
+      })
+      .input(CancelRunInputSchema)
       .output(z.object({ success: z.boolean() }))
       .errors({ UNAUTHORIZED, NOT_FOUND }),
 

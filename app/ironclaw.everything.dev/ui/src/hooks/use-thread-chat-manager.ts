@@ -57,6 +57,7 @@ export interface ThreadSession {
   pendingApprovals: PendingApproval[];
   authGates: AuthGate[];
   lastRunErrorData: unknown;
+  streamInterrupted: boolean;
   version: number;
 }
 
@@ -87,6 +88,7 @@ async function connectStream(threadId: string, content: string, attachments?: an
 
   session.isLoading = true;
   session.error = null;
+  session.streamInterrupted = false;
   session.version++;
   notify(threadId);
 
@@ -158,6 +160,10 @@ async function connectStream(threadId: string, content: string, attachments?: an
     if (current && current.abortController === ac) {
       current.isLoading = false;
       current.abortController = null;
+      if (current.runId && !ac.signal.aborted) {
+        current.streamInterrupted = true;
+        current.runId = null;
+      }
       current.version++;
     }
     notify(threadId);
@@ -409,6 +415,7 @@ export const threadChatManager = {
       pendingApprovals: [],
       authGates: [],
       lastRunErrorData: null,
+      streamInterrupted: false,
       version: 0,
     };
     sessions.set(threadId, session);

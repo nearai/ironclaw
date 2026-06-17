@@ -5,6 +5,7 @@ import {
   ChevronRight,
   MessageSquare,
   Plus,
+  Search,
   Trash2,
   Unplug,
   Zap,
@@ -14,10 +15,20 @@ import { toast } from "sonner";
 import { useApiClient } from "@/app";
 import { SubagentRow } from "@/components/thread-sidebar-row";
 import { Button } from "@/components/ui/button";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
+import { Input } from "@/components/ui/input";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Sheet, SheetContent, SheetHeader, SheetTitle } from "@/components/ui/sheet";
 import { type ConversationThread, useConversationThreads } from "@/hooks/use-conversation";
 import { useIronclawStatus } from "@/hooks/use-ironclaw-status";
+import { threadChatManager } from "@/hooks/use-thread-chat-manager";
 
 export const Route = createFileRoute("/_layout/_authenticated/chat")({
   loader: async ({ context }) => {
@@ -90,28 +101,69 @@ function ChatLayout() {
     }
   }, [apiClient, navigate, threadsQuery]);
 
+  const [deleteConfirmTarget, setDeleteConfirmTarget] = useState<string | null>(null);
+
   const deleteThread = useCallback(
     async (threadId: string) => {
-      try {
-        await apiClient.ironclaw.threads.delete({ id: threadId });
-        threadsQuery.refetch();
-        if (activeThreadId === threadId) {
-          navigate({ to: "/chat" });
-        }
-      } catch {
-        toast.error("Failed to delete thread");
-      }
+      setDeleteConfirmTarget(threadId);
     },
-    [apiClient, activeThreadId, threadsQuery, navigate],
+    [],
   );
+
+  const confirmDelete = useCallback(async () => {
+    const threadId = deleteConfirmTarget;
+    if (!threadId) return;
+    setDeleteConfirmTarget(null);
+    try {
+      await apiClient.ironclaw.threads.delete({ id: threadId });
+      threadsQuery.refetch();
+      if (activeThreadId === threadId) {
+        navigate({ to: "/chat" });
+      }
+    } catch {
+      toast.error("Failed to delete thread");
+    }
+  }, [deleteConfirmTarget, apiClient, activeThreadId, threadsQuery, navigate]);
 
   const [sidebarOpen, setSidebarOpen] = useState(true);
   const [sidebarWidth, setSidebarWidth] = useState(SIDEBAR_DEFAULT_WIDTH);
   const [sheetOpen, setSheetOpen] = useState(false);
+  const [searchQuery, setSearchQuery] = useState("");
+
+  const filteredThreads = useMemo(() => {
+    if (!searchQuery.trim()) return threads;
+    const q = searchQuery.toLowerCase();
+    return threads.filter((t) => {
+      const title = (t.title ?? `Thread ${t.threadId.slice(0, 8)}`).toLowerCase();
+      return title.includes(q);
+    });
+  }, [threads, searchQuery]);
+
+  const threadState = useMemo(() => {
+    const map = new Map<string, "running" | "needs-attention">();
+    for (const thread of threads) {
+      const session = threadChatManager.get(thread.threadId);
+      if (!session) continue;
+      if (session.pendingApprovals.length > 0) {
+        map.set(thread.threadId, "needs-attention");
+      } else if (session.isLoading || session.runId) {
+        map.set(thread.threadId, "running");
+      }
+    }
+    return map;
+  }, [threads]);
 
   useEffect(() => {
     setSheetOpen(false);
   }, [location.pathname]);
+
+  const [, tick] = useState(0);
+  useEffect(() => {
+    const unsubs = threads.map((t) =>
+      threadChatManager.subscribe(t.threadId, () => tick((n) => n + 1)),
+    );
+    return () => unsubs.forEach((fn) => fn());
+  }, [threads]);
 
   const isResizing = useRef(false);
   const startX = useRef(0);
@@ -162,14 +214,14 @@ function ChatLayout() {
   }, [threads]);
 
   const rootThreads = useMemo(
-    () => threads.filter((t) => !t.isSubagent),
-    [threads],
+    () => filteredThreads.filter((t) => !t.isSubagent),
+    [filteredThreads],
   );
 
   const orphanedSubagents = useMemo(() => {
-    const parentIds = new Set(threads.map((t) => t.threadId));
-    return threads.filter((t) => t.isSubagent && (!t.parentThreadId || !parentIds.has(t.parentThreadId)));
-  }, [threads]);
+    const parentIds = new Set(filteredThreads.map((t) => t.threadId));
+    return filteredThreads.filter((t) => t.isSubagent && (!t.parentThreadId || !parentIds.has(t.parentThreadId)));
+  }, [filteredThreads]);
 
   const toggleParent = useCallback((threadId: string) => {
     setExpandedParents((prev) => {
@@ -191,23 +243,38 @@ function ChatLayout() {
         : "bg-destructive";
 
   const threadRowClass = (isActive: boolean) =>
-    `group flex w-full items-center gap-2 rounded-lg px-3 py-2.5 text-left text-sm transition-colors cursor-pointer touch-manipulation ${
+    `group flex w-full items-center gap-2 rounded-lg px-3 py-2.5 text-left text-sm transition-colors cursor-pointer touch-manipulation border-l-2 ${
       isActive
-        ? "bg-accent text-accent-foreground"
-        : "text-muted-foreground hover:bg-muted active:bg-muted"
+        ? "border-l-primary bg-primary/10 text-foreground"
+        : "border-l-transparent text-muted-foreground hover:bg-muted active:bg-muted"
     }`;
 
   const subagentRowClass = (isActive: boolean, indented = false) =>
-    `group flex w-full items-center gap-2 rounded-lg px-3 py-1.5 text-left text-xs transition-colors cursor-pointer touch-manipulation ${
+    `group flex w-full items-center gap-2 rounded-lg px-3 py-1.5 text-left text-xs transition-colors cursor-pointer touch-manipulation border-l-2 ${
       indented ? "pl-7" : ""
     } ${
       isActive
-        ? "bg-accent text-accent-foreground"
-        : "text-muted-foreground hover:bg-muted active:bg-muted"
+        ? "border-l-primary bg-primary/10 text-foreground"
+        : "border-l-transparent text-muted-foreground hover:bg-muted active:bg-muted"
     }`;
 
   const threadListContent = (
-    <ScrollArea className="flex-1 min-h-0">
+    <>
+      {sidebarOpen && !isDisconnected && (
+        <div className="px-2 pt-1.5 pb-1">
+          <div className="relative">
+            <Search size={12} className="absolute left-2.5 top-1/2 -translate-y-1/2 text-muted-foreground/50" />
+            <Input
+              type="text"
+              value={searchQuery}
+              onChange={(e) => setSearchQuery(e.target.value)}
+              placeholder="Search threads..."
+              className="h-8 pl-7 pr-2 text-xs"
+            />
+          </div>
+        </div>
+      )}
+      <ScrollArea className="flex-1 min-h-0">
       <div className="space-y-0.5 p-2">
         {isDisconnected ? (
           <div className="flex flex-col items-center gap-3 px-2 py-6 text-center">
@@ -269,7 +336,15 @@ function ChatLayout() {
                         />
                       </button>
                     )}
-                    <MessageSquare size={14} className="shrink-0" />
+                    <span className="relative shrink-0">
+                      {threadState.get(thread.threadId) === "running" && (
+                        <span className="absolute -right-0.5 -top-0.5 h-2 w-2 animate-pulse rounded-full bg-[color:var(--near-green)]" />
+                      )}
+                      {threadState.get(thread.threadId) === "needs-attention" && (
+                        <span className="absolute -right-0.5 -top-0.5 h-2 w-2 rounded-full bg-amber-500" />
+                      )}
+                      <MessageSquare size={14} />
+                    </span>
                     <span className="truncate text-xs">
                       {thread.title ?? `Thread ${thread.threadId.slice(0, 8)}`}
                     </span>
@@ -338,6 +413,7 @@ function ChatLayout() {
         )}
       </div>
     </ScrollArea>
+    </>
   );
 
   const desktopSidebarHeader = (
@@ -429,7 +505,7 @@ function ChatLayout() {
                   }}
                   className={`w-8 h-8 rounded-lg flex items-center justify-center transition-colors touch-manipulation ${
                     activeThreadId === thread.threadId
-                      ? "bg-accent text-accent-foreground"
+                      ? "bg-primary/10 text-foreground"
                       : "text-muted-foreground hover:bg-muted"
                   }`}
                   title={thread.title ?? `Thread ${thread.threadId.slice(0, 8)}`}
@@ -465,6 +541,25 @@ function ChatLayout() {
           <Outlet />
         </div>
       </div>
+
+      <Dialog open={deleteConfirmTarget !== null} onOpenChange={(open) => { if (!open) setDeleteConfirmTarget(null); }}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Delete thread?</DialogTitle>
+            <DialogDescription>
+              This will permanently delete this thread and all its messages. This action cannot be undone.
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter>
+            <Button variant="secondary" onClick={() => setDeleteConfirmTarget(null)}>
+              Cancel
+            </Button>
+            <Button variant="destructive" onClick={confirmDelete}>
+              Delete
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </ChatLayoutCtx.Provider>
   );
 }

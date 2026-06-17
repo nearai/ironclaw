@@ -51,6 +51,7 @@ function ThreadChatView() {
 
   const chat = useThreadChat({ threadId, initialMessages });
   const isBusy = chat.isLoading;
+  const streamInterrupted = chat.streamInterrupted;
 
   const handleSend = useCallback(
     (content: string, attachments?: StagedAttachment[]) => {
@@ -91,6 +92,12 @@ function ThreadChatView() {
         onToggleVerbose={toggleVerbose}
         onCopyConversation={chat.copyConversation}
       />
+      {streamInterrupted && (
+        <div className="flex items-center gap-2 border-b border-amber-500/20 bg-amber-500/5 px-4 py-2 text-xs text-amber-600">
+          <span className="inline-block h-1.5 w-1.5 rounded-full bg-amber-500" />
+          Connection lost — messages may be incomplete. Send a new message to continue.
+        </div>
+      )}
       {firstAuthGate ? (
         firstAuthGate.challengeKind === "oauth_url"
           ? (
@@ -187,6 +194,7 @@ function ThreadChatView() {
       <ChatInput
         onSend={handleSend}
         onStop={chat.stop}
+        threadId={threadId}
         placeholder="Type a message..."
         isSending={isBusy}
         attachmentCapabilities={attachmentCapabilities}

@@ -1,3 +1,5 @@
+import { Copy } from "lucide-react";
+import { useState } from "react";
 import type { Components } from "react-markdown";
 import ReactMarkdown from "react-markdown";
 import rehypeHighlight from "rehype-highlight";
@@ -107,6 +109,22 @@ export function Markdown({ content, className }: MarkdownProps) {
   );
 }
 
+function extractCodeText(children: React.ReactNode): string {
+  let result = "";
+  const walk = (node: React.ReactNode) => {
+    if (typeof node === "string") {
+      result += node;
+    } else if (Array.isArray(node)) {
+      node.forEach(walk);
+    } else if (node && typeof node === "object" && "props" in node) {
+      const el = node as React.ReactElement<{ children?: React.ReactNode }>;
+      if (el.props?.children) walk(el.props.children);
+    }
+  };
+  walk(children);
+  return result;
+}
+
 const markdownComponents: Components = {
   code: ({ className, children, ...props }) => {
     const isBlock = className?.startsWith("language-");
@@ -133,11 +151,29 @@ const markdownComponents: Components = {
     );
   },
 
-  pre: ({ children }) => (
-    <pre className="bg-muted border border-border rounded-[10px] p-5 overflow-x-auto mb-5 leading-relaxed">
-      {children}
-    </pre>
-  ),
+  pre: ({ children }) => {
+    const [copied, setCopied] = useState(false);
+    return (
+      <div className="group relative mb-5">
+        <button
+          type="button"
+          onClick={async () => {
+            const text = extractCodeText(children);
+            await navigator.clipboard.writeText(text);
+            setCopied(true);
+            setTimeout(() => setCopied(false), 1500);
+          }}
+          className="absolute right-2 top-2 z-10 rounded-md border border-border bg-background p-1.5 opacity-0 transition-opacity group-hover:opacity-100 hover:bg-muted"
+          title={copied ? "Copied!" : "Copy code"}
+        >
+          <Copy size={12} className={cn(copied ? "text-[color:var(--near-green)]" : "text-muted-foreground")} />
+        </button>
+        <pre className="bg-muted border border-border rounded-[10px] p-5 overflow-x-auto leading-relaxed">
+          {children}
+        </pre>
+      </div>
+    );
+  },
 
   a: ({ href, children }) => (
     <a href={href ?? "#"} target="_blank" rel="noopener noreferrer">

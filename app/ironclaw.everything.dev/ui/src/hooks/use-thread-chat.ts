@@ -34,6 +34,7 @@ export function useThreadChat({ threadId, initialMessages }: UseThreadChatOption
       runId: session?.runId ?? null,
       pendingApprovals: session?.pendingApprovals ?? ([] as PendingApproval[]),
       authGates: session?.authGates ?? ([] as AuthGate[]),
+      streamInterrupted: session?.streamInterrupted ?? false,
     };
     return snapshotRef.current;
   }, [threadId]);
@@ -90,8 +91,12 @@ export function useThreadChat({ threadId, initialMessages }: UseThreadChatOption
   );
 
   const stop = useCallback(() => {
+    const session = threadChatManager.get(threadId);
+    if (session?.runId) {
+      apiClient.conversation.cancelRun({ threadId, runId: session.runId }).catch(() => {});
+    }
     threadChatManager.stop(threadId);
-  }, [threadId]);
+  }, [apiClient, threadId]);
 
   const copyConversation = useCallback(async () => {
     const session = threadChatManager.get(threadId);
@@ -127,6 +132,7 @@ export function useThreadChat({ threadId, initialMessages }: UseThreadChatOption
     runId: state.runId,
     pendingApprovals: state.pendingApprovals,
     authGates: state.authGates,
+    streamInterrupted: state.streamInterrupted,
     sendMessage,
     stop,
     resolveGate,
