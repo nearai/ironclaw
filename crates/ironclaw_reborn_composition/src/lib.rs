@@ -188,8 +188,8 @@ pub use input::{OAuthClientConfig, RebornBuildInput, RebornRuntimeProcessBinding
 pub use ironclaw_auth::GoogleOAuthRouteConfig;
 pub use ironclaw_product_workflow::{
     AccessSessionService, LifecycleExtensionSource, LifecycleExtensionSummary, LifecyclePhase,
-    LifecycleProductPayload, LifecycleProductResponse, RebornServicesError, RebornServicesErrorCode,
-    RebornServicesErrorKind,
+    LifecycleProductPayload, LifecycleProductResponse, LifecycleSearchExtensionSummary,
+    RebornServicesError, RebornServicesErrorCode, RebornServicesErrorKind,
 };
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 pub use ironclaw_runtime_policy::{

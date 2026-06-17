@@ -1,3 +1,4 @@
+use chrono::{DateTime, Utc};
 use ironclaw_common::AttachmentRef;
 use ironclaw_host_api::{AgentId, MissionId, ProjectId, TenantId, ThreadId, UserId};
 use serde::{Deserialize, Serialize};
@@ -183,10 +184,15 @@ pub struct SessionThreadRecord {
     pub metadata_json: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub goal: Option<ThreadGoal>,
+    /// When the thread was created. `None` for legacy records persisted
+    /// before activity timestamps existed; such records sort oldest.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub created_at: Option<chrono::DateTime<chrono::Utc>>,
+    pub created_at: Option<DateTime<Utc>>,
+    /// Last time the thread saw activity (a message was appended). Drives
+    /// the sidebar "Recent" ordering — newest activity first. Bumped on
+    /// every append; `None` for legacy records (sorts oldest).
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub updated_at: Option<chrono::DateTime<chrono::Utc>>,
+    pub updated_at: Option<DateTime<Utc>>,
 }
 
 /// Transcript message snapshot for UI/projection reads.

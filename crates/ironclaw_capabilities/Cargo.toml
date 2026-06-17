@@ -11,6 +11,7 @@ ironclaw_extensions = { path = "../ironclaw_extensions" }
 ironclaw_host_api = { path = "../ironclaw_host_api" }
 ironclaw_processes = { path = "../ironclaw_processes" }
 ironclaw_run_state = { path = "../ironclaw_run_state" }
+ironclaw_safety = { path = "../ironclaw_safety" }
 ironclaw_trust = { path = "../ironclaw_trust" }
 serde_json = "1"
 thiserror = "2"

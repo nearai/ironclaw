@@ -297,6 +297,10 @@ impl FirstPartyCapabilityRegistry {
         self.handlers.insert(capability_id, handler);
     }
 
+    pub fn remove_handler(&mut self, capability_id: &CapabilityId) {
+        self.handlers.remove(capability_id);
+    }
+
     pub fn get(
         &self,
         capability_id: &CapabilityId,
@@ -317,6 +321,37 @@ impl FirstPartyCapabilityRegistry {
 mod tests {
     use super::*;
     use ironclaw_host_api::{ResourceUsage, SecretHandle};
+
+    struct TestHandler;
+
+    #[async_trait]
+    impl FirstPartyCapabilityHandler for TestHandler {
+        async fn dispatch(
+            &self,
+            _request: FirstPartyCapabilityRequest,
+        ) -> Result<FirstPartyCapabilityResult, FirstPartyCapabilityError> {
+            Ok(FirstPartyCapabilityResult::new(
+                serde_json::Value::Null,
+                ResourceUsage::default(),
+            ))
+        }
+    }
+
+    #[test]
+    fn remove_handler_is_noop_for_unknown_and_removes_registered() {
+        let mut registry = FirstPartyCapabilityRegistry::new();
+        let capability_id = CapabilityId::new("builtin.shell").expect("valid test capability id");
+
+        registry.remove_handler(&capability_id);
+        assert!(!registry.contains_handler(&capability_id));
+
+        registry.insert_handler(capability_id.clone(), Arc::new(TestHandler));
+        assert!(registry.contains_handler(&capability_id));
+
+        registry.remove_handler(&capability_id);
+        assert!(!registry.contains_handler(&capability_id));
+        assert!(registry.get(&capability_id).is_none());
+    }
 
     #[test]
     fn first_party_capability_error_kind_returns_none_for_auth_required() {

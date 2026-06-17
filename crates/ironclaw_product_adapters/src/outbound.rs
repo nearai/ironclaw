@@ -228,6 +228,7 @@ pub struct CapabilityActivityView {
     pub output_bytes: Option<u64>,
     pub error_kind: Option<String>,
     pub updated_at: DateTime<Utc>,
+    pub activity_order: Option<u64>,
 }
 
 impl Serialize for CapabilityActivityView {
@@ -257,6 +258,8 @@ impl Serialize for CapabilityActivityView {
             #[serde(skip_serializing_if = "Option::is_none")]
             error_kind: &'a Option<String>,
             updated_at: &'a DateTime<Utc>,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            activity_order: Option<u64>,
         }
 
         Wire {
@@ -271,6 +274,7 @@ impl Serialize for CapabilityActivityView {
             output_bytes: self.output_bytes,
             error_kind: &self.error_kind,
             updated_at: &self.updated_at,
+            activity_order: self.activity_order,
         }
         .serialize(serializer)
     }
@@ -290,6 +294,7 @@ impl CapabilityActivityView {
             output_bytes: input.output_bytes,
             error_kind: input.error_kind,
             updated_at: input.updated_at,
+            activity_order: input.activity_order,
         };
         value.validate()?;
         Ok(value)
@@ -316,6 +321,7 @@ pub struct CapabilityActivityViewInput {
     pub output_bytes: Option<u64>,
     pub error_kind: Option<String>,
     pub updated_at: DateTime<Utc>,
+    pub activity_order: Option<u64>,
 }
 
 impl<'de> Deserialize<'de> for CapabilityActivityView {
@@ -337,6 +343,7 @@ impl<'de> Deserialize<'de> for CapabilityActivityView {
             output_bytes: Option<u64>,
             error_kind: Option<String>,
             updated_at: DateTime<Utc>,
+            activity_order: Option<u64>,
         }
         let wire = Wire::deserialize(deserializer)?;
         Self::new(CapabilityActivityViewInput {
@@ -351,6 +358,7 @@ impl<'de> Deserialize<'de> for CapabilityActivityView {
             output_bytes: wire.output_bytes,
             error_kind: wire.error_kind,
             updated_at: wire.updated_at,
+            activity_order: wire.activity_order,
         })
         .map_err(serde::de::Error::custom)
     }
@@ -384,6 +392,7 @@ pub struct CapabilityDisplayPreviewView {
     pub result_ref: Option<String>,
     pub truncated: bool,
     pub updated_at: DateTime<Utc>,
+    pub activity_order: Option<u64>,
 }
 
 impl CapabilityDisplayPreviewView {
@@ -405,6 +414,7 @@ impl CapabilityDisplayPreviewView {
             result_ref: input.result_ref,
             truncated: input.truncated,
             updated_at: input.updated_at,
+            activity_order: input.activity_order,
         };
         value.validate()?;
         Ok(value)
@@ -482,6 +492,8 @@ impl Serialize for CapabilityDisplayPreviewView {
             result_ref: &'a Option<String>,
             truncated: bool,
             updated_at: &'a DateTime<Utc>,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            activity_order: Option<u64>,
         }
 
         Wire {
@@ -501,6 +513,7 @@ impl Serialize for CapabilityDisplayPreviewView {
             result_ref: &self.result_ref,
             truncated: self.truncated,
             updated_at: &self.updated_at,
+            activity_order: self.activity_order,
         }
         .serialize(serializer)
     }
@@ -524,6 +537,7 @@ pub struct CapabilityDisplayPreviewViewInput {
     pub result_ref: Option<String>,
     pub truncated: bool,
     pub updated_at: DateTime<Utc>,
+    pub activity_order: Option<u64>,
 }
 
 impl<'de> Deserialize<'de> for CapabilityDisplayPreviewView {
@@ -551,6 +565,7 @@ impl<'de> Deserialize<'de> for CapabilityDisplayPreviewView {
             result_ref: Option<String>,
             truncated: bool,
             updated_at: DateTime<Utc>,
+            activity_order: Option<u64>,
         }
         let wire = Wire::deserialize(deserializer)?;
         Self::new(CapabilityDisplayPreviewViewInput {
@@ -570,6 +585,7 @@ impl<'de> Deserialize<'de> for CapabilityDisplayPreviewView {
             result_ref: wire.result_ref,
             truncated: wire.truncated,
             updated_at: wire.updated_at,
+            activity_order: wire.activity_order,
         })
         .map_err(serde::de::Error::custom)
     }
@@ -579,6 +595,8 @@ impl<'de> Deserialize<'de> for CapabilityDisplayPreviewView {
 pub struct GatePromptView {
     pub turn_run_id: TurnRunId,
     pub gate_ref: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub invocation_id: Option<InvocationId>,
     pub headline: String,
     pub body: String,
     #[serde(default)]
@@ -1375,6 +1393,7 @@ mod tests {
                     output_bytes: None,
                     error_kind: None,
                     updated_at: Utc::now(),
+                    activity_order: None,
                 })
                 .expect("valid capability activity"),
             )],
@@ -1523,6 +1542,7 @@ mod tests {
         let view = GatePromptView {
             turn_run_id: TurnRunId::new(),
             gate_ref: "gate:approval-test".to_string(),
+            invocation_id: Some(InvocationId::new()),
             headline: "Approval required".to_string(),
             body: "capability requires approval".to_string(),
             allow_always: true,
@@ -1703,6 +1723,7 @@ mod tests {
             output_bytes: Some(12),
             error_kind: None,
             updated_at: Utc::now(),
+            activity_order: None,
         })
         .expect("valid activity");
         let json = serde_json::to_value(&view).expect("serialize");
@@ -1746,6 +1767,7 @@ mod tests {
             result_ref: Some("result:tool-output".to_string()),
             truncated: false,
             updated_at: Utc::now(),
+            activity_order: None,
         })
         .expect("valid preview");
 
@@ -1931,6 +1953,7 @@ mod tests {
             output_bytes: None,
             error_kind: Some("/tmp/private-host-path".to_string()),
             updated_at: Utc::now(),
+            activity_order: None,
         };
 
         assert!(serde_json::to_value(view).is_err());

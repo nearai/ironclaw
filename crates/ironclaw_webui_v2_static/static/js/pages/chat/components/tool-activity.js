@@ -146,9 +146,6 @@ function ToolActivityCard({ activity, nested = false }) {
         >${toolDetail}</span
       >`}
       <span className="ml-auto flex shrink-0 items-center gap-2">
-        ${toolStatus === "running" &&
-        !hasDuration &&
-        html`<span className="font-mono text-[11px] text-iron-300">…</span>`}
         ${hasDuration &&
         html`<span className="font-mono text-[11px] text-iron-300">${toolDurationMs}ms</span>`}
         <${Icon}

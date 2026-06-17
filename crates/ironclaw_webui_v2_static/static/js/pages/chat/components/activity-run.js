@@ -6,7 +6,12 @@ import { ToolActivity } from "./tool-activity.js";
 
 export function ActivityRun({ activity }) {
   const summary = summarizeActivity(activity);
-  const [expanded, setExpanded] = React.useState(false);
+  const shouldAutoExpand = shouldExpandActivityRun(activity);
+  const [expanded, setExpanded] = React.useState(shouldAutoExpand);
+
+  React.useEffect(() => {
+    if (shouldAutoExpand) setExpanded(true);
+  }, [shouldAutoExpand]);
 
   return html`
     <div className="mr-auto flex w-full max-w-[85%] flex-col">
@@ -76,5 +81,16 @@ function ReasoningItem({ content }) {
 }
 
 function hasToolCalls(item) {
-  return item.toolCalls && item.toolCalls.length > 0;
+  return item?.toolCalls && item.toolCalls.length > 0;
+}
+
+function shouldExpandActivityRun(activity) {
+  return (activity || []).some((item) => {
+    if (item?.role === "thinking") return true;
+    if (item?.toolStatus === "running" || item?.toolStatus === "error") return true;
+    if (!hasToolCalls(item)) return false;
+    return item.toolCalls.some(
+      (tool) => tool?.toolStatus === "running" || tool?.toolStatus === "error",
+    );
+  });
 }

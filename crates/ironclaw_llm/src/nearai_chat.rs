@@ -164,10 +164,12 @@ impl NearAiChatProvider {
     /// - If set, uses Bearer API key auth
     /// - If not set, uses session token auth via `SessionManager`
     ///
-    /// By default this enables tool-message flattening for compatibility with
-    /// providers that reject `role: "tool"` messages.
+    /// By default this sends the standard Chat Completions tool protocol,
+    /// including `role: "tool"` messages. Older NEAR AI deployments that
+    /// rejected those messages can still be exercised in tests via
+    /// `new_with_options(..., true, ...)`.
     pub fn new(config: NearAiConfig, session: Arc<SessionManager>) -> Result<Self, LlmError> {
-        Self::new_with_options(config, session, true, 120)
+        Self::new_with_options(config, session, false, 120)
     }
 
     /// Create a new provider with a custom request timeout.
@@ -176,7 +178,7 @@ impl NearAiChatProvider {
         session: Arc<SessionManager>,
         request_timeout_secs: u64,
     ) -> Result<Self, LlmError> {
-        Self::new_with_options(config, session, true, request_timeout_secs)
+        Self::new_with_options(config, session, false, request_timeout_secs)
     }
 
     /// Create a chat completions provider with configurable tool-message flattening
@@ -526,8 +528,9 @@ impl LlmProvider for NearAiChatProvider {
         crate::provider::sanitize_tool_messages(&mut raw_messages);
         let raw: Vec<ChatCompletionMessage> = raw_messages.into_iter().map(|m| m.into()).collect();
 
-        // NEAR AI rejects `role:"tool"` messages even on text-only completion paths.
-        // Apply the same flattening used by complete_with_tools().
+        // Keep the compatibility rewrite opt-in. Current NEAR AI cloud-api
+        // supports standard `role:"tool"` messages, and flattening them into
+        // user text prevents models from reliably observing completed calls.
         let messages = if self.flatten_tool_messages {
             flatten_tool_messages(raw)
         } else {
@@ -602,8 +605,9 @@ impl LlmProvider for NearAiChatProvider {
         let messages: Vec<ChatCompletionMessage> =
             raw_messages.into_iter().map(|m| m.into()).collect();
 
-        // Some OpenAI-compatible providers reject `role:"tool"` messages.
-        // When enabled, rewrite tool-call / tool-result pairs into plain text.
+        // Keep the compatibility rewrite opt-in. Current NEAR AI cloud-api
+        // supports standard `role:"tool"` messages, and flattening them into
+        // user text prevents models from reliably observing completed calls.
         let messages = if self.flatten_tool_messages {
             flatten_tool_messages(messages)
         } else {
@@ -1068,6 +1072,7 @@ fn build_chat_completion_request(
     tool_choice: Option<String>,
 ) -> ChatCompletionRequest {
     let tools: Vec<ChatCompletionTool> = tools.into_iter().map(convert_tool_definition).collect();
+    let has_tools = !tools.is_empty();
 
     ChatCompletionRequest {
         model,
@@ -1075,8 +1080,8 @@ fn build_chat_completion_request(
         temperature,
         max_tokens,
         stop,
-        tools: if tools.is_empty() { None } else { Some(tools) },
-        tool_choice,
+        tools: if has_tools { Some(tools) } else { None },
+        tool_choice: if has_tools { tool_choice } else { None },
     }
 }
 
@@ -1291,6 +1296,59 @@ mod tests {
         Arc::new(SessionManager::new(SessionConfig::default()))
     }
 
+    async fn read_http_request_body(socket: &mut tokio::net::TcpStream) -> (String, String) {
+        use tokio::io::AsyncReadExt;
+
+        let mut buffer = Vec::new();
+        let mut chunk = [0_u8; 1024];
+        let header_end = loop {
+            let n = socket.read(&mut chunk).await.expect("read request");
+            assert!(n > 0, "connection closed before headers");
+            buffer.extend_from_slice(&chunk[..n]);
+            if let Some(pos) = buffer.windows(4).position(|w| w == b"\r\n\r\n") {
+                break pos + 4;
+            }
+        };
+
+        let headers = String::from_utf8_lossy(&buffer[..header_end]).to_string();
+        let content_length = headers
+            .lines()
+            .find_map(|line| {
+                let (name, value) = line.split_once(':')?;
+                if name.eq_ignore_ascii_case("content-length") {
+                    value.trim().parse::<usize>().ok()
+                } else {
+                    None
+                }
+            })
+            .unwrap_or(0);
+
+        while buffer.len() < header_end + content_length {
+            let n = socket.read(&mut chunk).await.expect("read request body");
+            assert!(n > 0, "connection closed before body");
+            buffer.extend_from_slice(&chunk[..n]);
+        }
+
+        let body =
+            String::from_utf8_lossy(&buffer[header_end..header_end + content_length]).to_string();
+        (headers, body)
+    }
+
+    async fn write_http_json_response(socket: &mut tokio::net::TcpStream, body: serde_json::Value) {
+        use tokio::io::AsyncWriteExt;
+
+        let body = body.to_string();
+        let response = format!(
+            "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\n\r\n{}",
+            body.len(),
+            body
+        );
+        socket
+            .write_all(response.as_bytes())
+            .await
+            .expect("write response");
+    }
+
     #[test]
     fn test_api_url_with_base_without_v1() {
         let mut cfg = test_nearai_config("http://127.0.0.1:8318");
@@ -1490,6 +1548,98 @@ mod tests {
         assert_eq!(chat_msg.role, "tool");
         assert_eq!(chat_msg.tool_call_id, Some("call_123".to_string()));
         assert_eq!(chat_msg.name, Some("my_tool".to_string()));
+    }
+
+    #[tokio::test]
+    async fn complete_with_tools_sends_standard_tool_results_by_default() {
+        use crate::provider::ToolDefinition;
+        use tokio::net::TcpListener;
+        use tokio::sync::oneshot;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base_url = format!("http://{}", listener.local_addr().unwrap());
+        let (tx, rx) = oneshot::channel();
+        tokio::spawn(async move {
+            let mut tx = Some(tx);
+            loop {
+                let Ok((mut socket, _)) = listener.accept().await else {
+                    break;
+                };
+                let (headers, body) = read_http_request_body(&mut socket).await;
+                if headers.starts_with("POST /v1/chat/completions ") {
+                    if let Some(tx) = tx.take() {
+                        tx.send(body).expect("send captured request");
+                    }
+                    write_http_json_response(
+                        &mut socket,
+                        serde_json::json!({
+                            "id": "chatcmpl-test",
+                            "choices": [{
+                                "message": {
+                                    "role": "assistant",
+                                    "content": "observed"
+                                },
+                                "finish_reason": "stop"
+                            }],
+                            "usage": { "prompt_tokens": 10, "completion_tokens": 2 }
+                        }),
+                    )
+                    .await;
+                    break;
+                }
+
+                write_http_json_response(&mut socket, serde_json::json!({ "models": [] })).await;
+            }
+        });
+
+        let provider = NearAiChatProvider::new(test_nearai_config(&base_url), test_session())
+            .expect("provider");
+        let tool_call = ToolCall {
+            id: "call_1".to_string(),
+            name: "echo".to_string(),
+            arguments: serde_json::json!({"message": "hi"}),
+            reasoning: None,
+            signature: None,
+            arguments_parse_error: None,
+        };
+        let response = provider
+            .complete_with_tools(ToolCompletionRequest::new(
+                vec![
+                    ChatMessage::user("run echo"),
+                    ChatMessage::assistant_with_tool_calls(None, vec![tool_call]),
+                    ChatMessage::tool_result("call_1", "echo", "done"),
+                ],
+                vec![ToolDefinition {
+                    name: "echo".to_string(),
+                    description: "Echo".to_string(),
+                    parameters: serde_json::json!({
+                        "type": "object",
+                        "properties": {
+                            "message": { "type": "string" }
+                        },
+                        "required": ["message"]
+                    }),
+                }],
+            ))
+            .await
+            .expect("tool completion");
+
+        assert_eq!(response.content.as_deref(), Some("observed"));
+        let body: serde_json::Value =
+            serde_json::from_str(&rx.await.expect("captured request body")).unwrap();
+        let messages = body["messages"].as_array().expect("messages array");
+        assert_eq!(messages[0]["role"], "user");
+        assert_eq!(messages[1]["role"], "assistant");
+        assert_eq!(messages[1]["tool_calls"][0]["id"], "call_1");
+        assert_eq!(messages[2]["role"], "tool");
+        assert_eq!(messages[2]["tool_call_id"], "call_1");
+        assert_eq!(messages[2]["name"], "echo");
+        assert_eq!(messages[2]["content"], "done");
+        let serialized = serde_json::to_string(&body).unwrap();
+        assert!(
+            !serialized.contains("Tool result from echo"),
+            "default NEAR AI provider must not flatten tool results into user text"
+        );
     }
 
     #[test]
@@ -2416,6 +2566,26 @@ mod tests {
         // Tool uses "type" key (via rename), not "tool_type"
         assert_eq!(json["tools"][0]["type"], "function");
         assert_eq!(json["tools"][0]["function"]["name"], "get_weather");
+    }
+
+    #[test]
+    fn test_request_omits_tool_choice_without_tools() {
+        let request = build_chat_completion_request(
+            "gpt-4o".to_string(),
+            vec![ChatMessage::user("continue").into()],
+            vec![],
+            None,
+            None,
+            None,
+            Some("auto".to_string()),
+        );
+
+        let json = serde_json::to_value(&request).unwrap();
+        assert!(json.get("tools").is_none());
+        assert!(
+            json.get("tool_choice").is_none(),
+            "tool_choice is invalid without tools on OpenAI-compatible chat APIs"
+        );
     }
 
     #[test]

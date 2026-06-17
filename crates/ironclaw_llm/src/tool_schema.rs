@@ -160,6 +160,21 @@ fn top_level_accepts_object_properties(map: &serde_json::Map<String, JsonValue>)
     }
 }
 
+fn top_level_required_fields(
+    schema: &JsonValue,
+    properties: &serde_json::Map<String, JsonValue>,
+) -> Vec<JsonValue> {
+    schema
+        .get("required")
+        .and_then(JsonValue::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(JsonValue::as_str)
+        .filter(|field| properties.contains_key(*field))
+        .map(|field| JsonValue::String(field.to_string()))
+        .collect()
+}
+
 pub(crate) struct CappedJson {
     pub(crate) text: String,
     pub(crate) was_truncated: bool,
@@ -235,6 +250,7 @@ fn flatten_top_level(parameters: &mut JsonValue, description: &mut String) {
 
     let detected = detect_forbidden_top_level(parameters);
     let merged_properties = merge_top_level_variant_properties(parameters);
+    let required = top_level_required_fields(parameters, &merged_properties);
 
     if let Ok(capped) = serialize_json_capped(parameters, SCHEMA_HINT_MAX_BYTES)
         && !capped.text.is_empty()
@@ -252,7 +268,7 @@ fn flatten_top_level(parameters: &mut JsonValue, description: &mut String) {
         "type": "object",
         "properties": JsonValue::Object(merged_properties),
         "additionalProperties": true,
-        "required": []
+        "required": required
     });
 }
 
@@ -444,12 +460,13 @@ pub(crate) fn strip_unset_optional_fields(
 /// objects and array items.
 ///
 /// Top-level on purpose: a tagged-enum tool is a top-level `oneOf`/`anyOf`, which
-/// the forward transform (`flatten_top_level`) rewrites to `required: []` +
-/// `additionalProperties: true`, so dropping every placeholder is exactly what
-/// collapses the model's reply to the single variant it populated. Unioning the
-/// variants' `required` sets would keep a non-selected variant's placeholder and
-/// make the args match more than one `oneOf` branch (regressing e.g.
-/// `skill_install`/`routine`), so keep it top-level.
+/// the forward transform (`flatten_top_level`) preserves only parent-level
+/// required fields and never unions variant `required` fields. Dropping
+/// placeholders for optional variant fields is exactly what collapses the
+/// model's reply to the single variant it populated. Unioning the variants'
+/// `required` sets would keep a non-selected variant's placeholder and make the
+/// args match more than one `oneOf` branch (regressing e.g. `skill_install` /
+/// `routine`), so keep it top-level.
 fn strip_unset_optionals_in_value(
     value: &mut JsonValue,
     schema: &JsonValue,
@@ -722,6 +739,35 @@ mod tests {
             result["properties"]["detail"]["enum"],
             serde_json::json!(["names", "summary", "schema"])
         );
+        assert!(description.contains("Upstream JSON schema"));
+    }
+
+    #[test]
+    fn test_flatten_top_level_preserves_parent_required_fields() {
+        let input = serde_json::json!({
+            "type": "object",
+            "properties": {
+                "path": { "type": "string" },
+                "old_string": { "type": "string" },
+                "new_string": { "type": "string" },
+                "edits": { "type": "array", "items": {"type": "object"} }
+            },
+            "required": ["path"],
+            "oneOf": [
+                { "required": ["old_string", "new_string"] },
+                { "required": ["edits"] }
+            ]
+        });
+        let mut description = "Patch tool".to_string();
+
+        let result = shape_tool_schema(ToolSchemaPolicy::FlattenOnly, &input, &mut description);
+
+        assert_eq!(result["type"], "object");
+        assert!(result.get("oneOf").is_none());
+        assert_eq!(result["additionalProperties"], true);
+        assert_eq!(result["required"], serde_json::json!(["path"]));
+        assert_eq!(result["properties"]["path"]["type"], "string");
+        assert_eq!(result["properties"]["edits"]["type"], "array");
         assert!(description.contains("Upstream JSON schema"));
     }
 

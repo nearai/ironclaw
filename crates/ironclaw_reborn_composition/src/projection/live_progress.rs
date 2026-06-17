@@ -174,6 +174,7 @@ pub(super) fn product_items_for_live_update(
                 output_bytes: None,
                 error_kind: None,
                 updated_at: Utc::now(),
+                activity_order: None,
             }) {
                 Ok(activity) => Some(ProductProjectionItem::CapabilityActivity(activity)),
                 Err(error) => {

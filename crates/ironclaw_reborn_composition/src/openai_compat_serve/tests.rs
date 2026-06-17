@@ -3,7 +3,7 @@ use super::*;
 use std::collections::VecDeque;
 use std::sync::Mutex;
 
-use ironclaw_host_api::ThreadId;
+use ironclaw_host_api::{CapabilityId, ThreadId};
 use ironclaw_product_adapters::{
     AdapterInstallationId, ExternalConversationRef, ProductAdapterError, ProductAdapterId,
     ProductOutboundTarget, ProjectionCursor,
@@ -14,7 +14,8 @@ use ironclaw_reborn_openai_compat::{
     OpenAiCompatRouteSurface, OpenAiCompatTurnRunRef, OpenAiResponseId,
 };
 use ironclaw_threads::{
-    AppendAssistantDraftRequest, EnsureThreadRequest, InMemorySessionThreadService, MessageContent,
+    AppendAssistantDraftRequest, AppendToolResultReferenceRequest, EnsureThreadRequest,
+    InMemorySessionThreadService, MessageContent, ToolResultSafeSummary,
 };
 use ironclaw_turns::{ReplyTargetBindingRef, TurnActor, TurnRunId, TurnScope};
 
@@ -411,4 +412,250 @@ fn run_status_envelope(
             .expect("projection state"),
         },
     )
+}
+
+const RUN_ID: &str = "turn-run-1";
+
+fn run_output_scope() -> ThreadScope {
+    ThreadScope {
+        tenant_id: TenantId::new("tenant-1").expect("tenant"),
+        agent_id: AgentId::new("agent-1").expect("agent"),
+        project_id: Some(ProjectId::new("project-1").expect("project")),
+        owner_user_id: Some(UserId::new("user-1").expect("user")),
+        mission_id: None,
+    }
+}
+
+/// A schema-valid `model_observation` so the thread service preserves it as
+/// the raw, model-visible tool output rather than dropping it.
+fn model_observation() -> serde_json::Value {
+    serde_json::json!({
+        "schema_version": 1,
+        "status": "error",
+        "summary": "search failed",
+        "detail": {
+            "kind": "invalid_input",
+            "issues": [{ "path": "query", "code": "invalid_value" }]
+        },
+        "trust": "untrusted_tool_output"
+    })
+}
+
+fn run_output_provider_call() -> ProviderToolCallReferenceEnvelope {
+    ProviderToolCallReferenceEnvelope {
+        provider_id: "openai".to_string(),
+        provider_model_id: "gpt-test".to_string(),
+        provider_turn_id: "turn-1".to_string(),
+        provider_call_id: "call_abc".to_string(),
+        provider_tool_name: "web_search".to_string(),
+        capability_id: CapabilityId::new("web.search").expect("capability id"),
+        arguments: serde_json::json!({ "query": "rust" }),
+        response_reasoning: None,
+        reasoning: None,
+        signature: None,
+    }
+}
+
+fn run_output_projection_read(scope: &ThreadScope, thread_id: &ThreadId) -> ProjectionReadRequest {
+    ProjectionReadRequest {
+        actor: TurnActor::new(scope.owner_user_id.clone().expect("owner")),
+        scope: TurnScope::new_with_owner(
+            scope.tenant_id.clone(),
+            Some(scope.agent_id.clone()),
+            scope.project_id.clone(),
+            thread_id.clone(),
+            scope.owner_user_id.clone(),
+        ),
+        after_cursor: None,
+        limit: None,
+    }
+}
+
+async fn ensure_run_output_thread(
+    service: &InMemorySessionThreadService,
+    scope: &ThreadScope,
+    thread_id: &ThreadId,
+) {
+    service
+        .ensure_thread(EnsureThreadRequest {
+            scope: scope.clone(),
+            thread_id: Some(thread_id.clone()),
+            created_by_actor_id: "actor".to_string(),
+            title: None,
+            metadata_json: None,
+        })
+        .await
+        .expect("ensure thread");
+}
+
+async fn append_run_output_tool_result(
+    service: &InMemorySessionThreadService,
+    scope: &ThreadScope,
+    thread_id: &ThreadId,
+) {
+    service
+        .append_tool_result_reference(AppendToolResultReferenceRequest {
+            scope: scope.clone(),
+            thread_id: thread_id.clone(),
+            turn_run_id: RUN_ID.to_string(),
+            result_ref: "result:tool-1".to_string(),
+            safe_summary: ToolResultSafeSummary::new("search failed").expect("summary"),
+            provider_call: Some(run_output_provider_call()),
+            model_observation: Some(model_observation()),
+        })
+        .await
+        .expect("append tool result");
+}
+
+fn run_output_reader(
+    service: Arc<InMemorySessionThreadService>,
+) -> OpenAiResponsesThreadProjectionReader {
+    OpenAiResponsesThreadProjectionReader::new(
+        service,
+        Arc::new(StaticProjectionStream::new(vec![])),
+    )
+}
+
+#[tokio::test]
+async fn read_run_output_emits_paired_function_call_and_raw_output() {
+    let service = Arc::new(InMemorySessionThreadService::default());
+    let scope = run_output_scope();
+    let thread_id = ThreadId::new("thread-1").expect("thread");
+    ensure_run_output_thread(&service, &scope, &thread_id).await;
+    append_run_output_tool_result(&service, &scope, &thread_id).await;
+
+    let reader = run_output_reader(service);
+    let public_id = OpenAiResponseId::new("resp_test").expect("response id");
+    let projection = reader
+        .read_run_output(
+            &run_output_projection_read(&scope, &thread_id),
+            RUN_ID.to_string(),
+            &public_id,
+        )
+        .await
+        .expect("read run output");
+
+    assert!(!projection.assistant_finalized);
+    match &projection.items[0] {
+        OpenAiResponseOutputItem::FunctionCall {
+            call_id,
+            name,
+            arguments,
+            ..
+        } => {
+            assert_eq!(call_id, "call_abc");
+            assert_eq!(name, "web_search");
+            let parsed: serde_json::Value =
+                serde_json::from_str(arguments).expect("arguments json");
+            assert_eq!(parsed, serde_json::json!({ "query": "rust" }));
+        }
+        other => panic!("expected function_call, got {other:?}"),
+    }
+    match &projection.items[1] {
+        OpenAiResponseOutputItem::FunctionCallOutput {
+            call_id, output, ..
+        } => {
+            assert_eq!(call_id, "call_abc");
+            // The raw model_observation flows through verbatim, not the summary.
+            assert_eq!(output, &model_observation());
+        }
+        other => panic!("expected function_call_output, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn read_run_output_orders_tool_items_before_assistant_message() {
+    // The assistant draft is created (sequence reserved) BEFORE the tool runs,
+    // so a naive sequence sort would place the final message first. Tool items
+    // must still come before the assistant message.
+    let service = Arc::new(InMemorySessionThreadService::default());
+    let scope = run_output_scope();
+    let thread_id = ThreadId::new("thread-3").expect("thread");
+    ensure_run_output_thread(&service, &scope, &thread_id).await;
+
+    let draft = service
+        .append_assistant_draft(AppendAssistantDraftRequest {
+            scope: scope.clone(),
+            thread_id: thread_id.clone(),
+            turn_run_id: RUN_ID.to_string(),
+            content: MessageContent::text("here is the answer"),
+        })
+        .await
+        .expect("append assistant draft");
+    append_run_output_tool_result(&service, &scope, &thread_id).await;
+    service
+        .finalize_assistant_message(
+            &scope,
+            &thread_id,
+            draft.message_id,
+            MessageContent::text("here is the answer"),
+        )
+        .await
+        .expect("finalize assistant message");
+
+    let reader = run_output_reader(service);
+    let public_id = OpenAiResponseId::new("resp_test").expect("response id");
+    let projection = reader
+        .read_run_output(
+            &run_output_projection_read(&scope, &thread_id),
+            RUN_ID.to_string(),
+            &public_id,
+        )
+        .await
+        .expect("read run output");
+
+    assert!(projection.assistant_finalized);
+    assert!(matches!(
+        projection.items[0],
+        OpenAiResponseOutputItem::FunctionCall { .. }
+    ));
+    assert!(matches!(
+        projection.items[1],
+        OpenAiResponseOutputItem::FunctionCallOutput { .. }
+    ));
+    match &projection.items[2] {
+        OpenAiResponseOutputItem::Message {
+            id, role, content, ..
+        } => {
+            assert!(matches!(role, OpenAiResponsesMessageRole::Assistant));
+            // Message ids are response-id-keyed (`msg_{response_id}`).
+            assert!(id.starts_with("msg_"));
+            assert_eq!(
+                content,
+                &serde_json::json!([{ "type": "output_text", "text": "here is the answer" }])
+            );
+        }
+        other => panic!("expected message, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn read_run_output_in_progress_surfaces_tool_output_without_final_message() {
+    let service = Arc::new(InMemorySessionThreadService::default());
+    let scope = run_output_scope();
+    let thread_id = ThreadId::new("thread-2").expect("thread");
+    ensure_run_output_thread(&service, &scope, &thread_id).await;
+    append_run_output_tool_result(&service, &scope, &thread_id).await;
+
+    let reader = run_output_reader(service);
+    let public_id = OpenAiResponseId::new("resp_test").expect("response id");
+    let projection = reader
+        .read_run_output(
+            &run_output_projection_read(&scope, &thread_id),
+            RUN_ID.to_string(),
+            &public_id,
+        )
+        .await
+        .expect("read run output");
+
+    assert!(!projection.assistant_finalized);
+    assert_eq!(projection.items.len(), 2);
+    assert!(matches!(
+        projection.items[0],
+        OpenAiResponseOutputItem::FunctionCall { .. }
+    ));
+    assert!(matches!(
+        projection.items[1],
+        OpenAiResponseOutputItem::FunctionCallOutput { .. }
+    ));
 }

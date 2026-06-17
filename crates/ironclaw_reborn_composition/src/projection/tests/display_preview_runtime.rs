@@ -70,6 +70,7 @@ impl PreviewProjectionFixture {
                 process_id: None,
                 output_bytes: Some(12),
                 error_kind: None,
+                first_cursor: ironclaw_events::EventCursor::new(1),
                 last_cursor: ironclaw_events::EventCursor::new(1),
                 updated_at,
             }],
@@ -170,6 +171,7 @@ impl PreviewProjectionFixture {
                 process_id: None,
                 output_bytes: Some(12),
                 error_kind: None,
+                first_cursor: cursor,
                 last_cursor: cursor,
                 updated_at,
             });
@@ -444,7 +446,7 @@ async fn webui_projection_advances_held_cursor_when_pending_preview_times_out() 
 }
 
 #[tokio::test]
-async fn webui_projection_with_pending_preview_on_first_activity_defers_second_activity() {
+async fn webui_projection_with_pending_preview_on_first_activity_streams_second_activity() {
     let now = chrono::Utc::now();
     let mut fixture = PreviewProjectionFixture::completed("multi", "read_file", now);
     let second = fixture.add_completed_activity(
@@ -472,8 +474,8 @@ async fn webui_projection_with_pending_preview_on_first_activity_defers_second_a
     .await
     .unwrap()
     .unwrap();
-    assert_eq!(first.total, 3);
-    assert_eq!(first.payloads.len(), 2);
+    assert_eq!(first.total, 4);
+    assert_eq!(first.payloads.len(), 3);
     assert!(matches!(
         first.payloads[0].payload,
         ProductOutboundPayload::ProjectionSnapshot { .. }
@@ -482,6 +484,11 @@ async fn webui_projection_with_pending_preview_on_first_activity_defers_second_a
         &first.payloads[1].payload,
         ProductOutboundPayload::CapabilityActivity(activity)
             if activity.invocation_id == fixture.invocation_id
+    ));
+    assert!(matches!(
+        &first.payloads[2].payload,
+        ProductOutboundPayload::CapabilityActivity(activity)
+            if activity.invocation_id == second.invocation_id
     ));
 
     fixture.record_result(
@@ -493,17 +500,16 @@ async fn webui_projection_with_pending_preview_on_first_activity_defers_second_a
         &fixture.display_previews,
         fixture.item_input(),
         Some(first.item_cursor.runtime),
-        first.payloads[1].delivered,
+        first.payloads[2].delivered,
         8,
     )
     .await
     .unwrap()
     .unwrap();
     assert_eq!(resumed.total, 5);
-    assert_eq!(resumed.payloads.len(), 3);
-    assert_eq!(resumed.payloads[0].delivered, 3);
-    assert_eq!(resumed.payloads[1].delivered, 4);
-    assert_eq!(resumed.payloads[2].delivered, 5);
+    assert_eq!(resumed.payloads.len(), 2);
+    assert_eq!(resumed.payloads[0].delivered, 4);
+    assert_eq!(resumed.payloads[1].delivered, 5);
     assert!(matches!(
         &resumed.payloads[0].payload,
         ProductOutboundPayload::CapabilityDisplayPreview(preview)
@@ -511,27 +517,17 @@ async fn webui_projection_with_pending_preview_on_first_activity_defers_second_a
     ));
     assert!(matches!(
         &resumed.payloads[1].payload,
-        ProductOutboundPayload::CapabilityActivity(activity)
-            if activity.invocation_id == second.invocation_id
-    ));
-    assert!(matches!(
-        &resumed.payloads[2].payload,
         ProductOutboundPayload::CapabilityDisplayPreview(preview)
             if preview.result_ref.as_deref() == Some("result:preview-multi-second")
     ));
 }
 
-/// Regression: a still-running first activity must hold the runtime
-/// cursor at its (not-yet-existent) preview, exactly like a completed activity
-/// awaiting its preview record. Before the fix, a running activity's preview
-/// resolved to `NotApplicable`, so the drain skipped past it and delivered the
-/// second activity's payloads. When the first invocation later completed, its
-/// now-materialized preview sat behind the resume watermark and was dropped —
-/// the tool card that "stops updating". The drain must instead defer the second
-/// activity until the first completes, then deliver the first activity's preview
-/// in order.
+/// Regression: a still-running first activity must hold the runtime cursor at
+/// its not-yet-existent preview slot without hiding later activity metadata.
+/// The UI should show subsequent OK/ERR tool rows while preserving the preview
+/// resume point so the first invocation's rich preview is delivered once ready.
 #[tokio::test]
-async fn webui_projection_holds_cursor_when_first_activity_is_still_running() {
+async fn webui_projection_holds_preview_cursor_while_streaming_later_activity() {
     let now = chrono::Utc::now();
     let mut fixture = PreviewProjectionFixture::completed("running", "read_file", now);
     // The first activity is in flight: no preview exists yet, but one will once
@@ -553,8 +549,8 @@ async fn webui_projection_holds_cursor_when_first_activity_is_still_running() {
     );
 
     // Drain while the first activity is still running. The drain holds at its
-    // pending preview slot (State + the running activity card only) instead of
-    // skipping ahead to the second activity.
+    // pending preview slot but still streams the second activity card so the UI
+    // can show progress in call order instead of waiting for run completion.
     let first = runtime_payloads_for_item(
         &fixture.scope,
         &fixture.display_previews,
@@ -566,8 +562,8 @@ async fn webui_projection_holds_cursor_when_first_activity_is_still_running() {
     .await
     .unwrap()
     .unwrap();
-    assert_eq!(first.total, 3);
-    assert_eq!(first.payloads.len(), 2);
+    assert_eq!(first.total, 4);
+    assert_eq!(first.payloads.len(), 3);
     assert!(matches!(
         first.payloads[0].payload,
         ProductOutboundPayload::ProjectionSnapshot { .. }
@@ -576,6 +572,11 @@ async fn webui_projection_holds_cursor_when_first_activity_is_still_running() {
         &first.payloads[1].payload,
         ProductOutboundPayload::CapabilityActivity(activity)
             if activity.invocation_id == fixture.invocation_id
+    ));
+    assert!(matches!(
+        &first.payloads[2].payload,
+        ProductOutboundPayload::CapabilityActivity(activity)
+            if activity.invocation_id == second.invocation_id
     ));
 
     // The first invocation completes and records its preview.
@@ -588,21 +589,21 @@ async fn webui_projection_holds_cursor_when_first_activity_is_still_running() {
         serde_json::json!({"content": "fn main() {}"}),
     );
 
-    // Resume from the held cursor: the first activity's preview is delivered in
-    // order ahead of the deferred second activity — not dropped.
+    // Resume from the held cursor: both previews are delivered in order, and
+    // the first activity's preview is not dropped.
     let resumed = runtime_payloads_for_item(
         &fixture.scope,
         &fixture.display_previews,
         fixture.item_input(),
         Some(first.item_cursor.runtime),
-        first.payloads[1].delivered,
+        first.payloads[2].delivered,
         8,
     )
     .await
     .unwrap()
     .unwrap();
     assert_eq!(resumed.total, 5);
-    assert_eq!(resumed.payloads.len(), 3);
+    assert_eq!(resumed.payloads.len(), 2);
     assert!(matches!(
         &resumed.payloads[0].payload,
         ProductOutboundPayload::CapabilityDisplayPreview(preview)
@@ -610,11 +611,6 @@ async fn webui_projection_holds_cursor_when_first_activity_is_still_running() {
     ));
     assert!(matches!(
         &resumed.payloads[1].payload,
-        ProductOutboundPayload::CapabilityActivity(activity)
-            if activity.invocation_id == second.invocation_id
-    ));
-    assert!(matches!(
-        &resumed.payloads[2].payload,
         ProductOutboundPayload::CapabilityDisplayPreview(preview)
             if preview.result_ref.as_deref() == Some("result:preview-running-second")
     ));

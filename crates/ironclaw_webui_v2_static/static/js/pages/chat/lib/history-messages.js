@@ -69,6 +69,8 @@ export function messagesFromTimeline(records, pendingMessages = [], threadId = n
         ...card,
         timestamp: timestampForRecord(record) || card.updatedAt || null,
         sequence: record.sequence,
+        activityOrder: card.activityOrder,
+        activityOrderSource: card.activityOrderSource,
         turnRunId: record.turn_run_id || null,
       });
       continue;
@@ -172,10 +174,12 @@ function toolCardFromPreviewRecord(record) {
 // `ToolActivityCard` destructures.
 export function toolCardFromPreview(preview) {
   const failed = preview.status === "failed" || preview.status === "killed";
+  const activityOrder = numericActivityOrder(preview.activity_order);
   return {
     invocationId: preview.invocation_id,
     callId: preview.invocation_id,
-    toolName: preview.title || preview.capability_id || "tool",
+    capabilityId: preview.capability_id || null,
+    toolName: toolDisplayName(preview.title || preview.capability_id) || "tool",
     toolStatus: toolStatusFromActivityStatus(preview.status),
     toolDetail: preview.subtitle || null,
     toolParameters: preview.input_summary || null,
@@ -198,6 +202,8 @@ export function toolCardFromPreview(preview) {
     outputBytes: preview.output_bytes ?? null,
     outputKind: preview.output_kind || null,
     turnRunId: preview.turn_run_id || null,
+    activityOrder,
+    activityOrderSource: Number.isFinite(activityOrder) ? "projection" : null,
   };
 }
 
@@ -206,10 +212,12 @@ export function toolCardFromPreview(preview) {
 // parameters, no output — so the resulting card is intentionally
 // sparse and is meant to be enriched by the next preview frame.
 export function toolCardFromActivity(activity) {
+  const activityOrder = numericActivityOrder(activity.activity_order);
   return {
     invocationId: activity.invocation_id,
     callId: activity.invocation_id,
-    toolName: activity.capability_id || "tool",
+    capabilityId: activity.capability_id || null,
+    toolName: toolDisplayName(activity.capability_id) || "tool",
     toolStatus: toolStatusFromActivityStatus(activity.status),
     toolDetail: null,
     toolParameters: null,
@@ -222,11 +230,20 @@ export function toolCardFromActivity(activity) {
     outputBytes: activity.output_bytes ?? null,
     outputKind: null,
     turnRunId: activity.turn_run_id || null,
+    activityOrder,
+    activityOrderSource: Number.isFinite(activityOrder) ? "projection" : null,
   };
 }
 
 export function isTerminalToolStatus(status) {
   return status === "success" || status === "error";
+}
+
+export function toolDisplayName(name) {
+  const value = typeof name === "string" ? name.trim() : "";
+  if (!value) return "";
+  const parts = value.split(".");
+  return parts[parts.length - 1] || value;
 }
 
 function toolStatusFromActivityStatus(status) {
@@ -241,4 +258,9 @@ function toolStatusFromActivityStatus(status) {
     default:
       return "running";
   }
+}
+
+function numericActivityOrder(value) {
+  const number = Number(value);
+  return Number.isFinite(number) ? number : null;
 }

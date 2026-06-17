@@ -73,7 +73,7 @@ pub use origin::{
     ProductTurnContext, RunOriginAdapter, TurnOriginKind, TurnOwner, TurnSurfaceType,
 };
 pub use request::{
-    AuthResumeDisposition, CancelRunRequest, GetRunStateRequest, ResumeTurnPrecondition,
+    CancelRunRequest, GateResumeDisposition, GetRunStateRequest, ResumeTurnPrecondition,
     ResumeTurnRequest, SubmitChildRunRequest, SubmitTurnRequest, TurnTimestamp,
 };
 pub use response::{CancelRunResponse, ResumeTurnResponse, SubmitTurnResponse, ThreadBusy};

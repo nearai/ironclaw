@@ -3572,9 +3572,7 @@ impl RebornServices {
                     ApprovalInteractionDecision::ApproveOnce
                 }
             }
-            WebUiGateResolution::Denied | WebUiGateResolution::Cancelled => {
-                ApprovalInteractionDecision::Deny
-            }
+            WebUiGateResolution::Declined => ApprovalInteractionDecision::Deny,
             WebUiGateResolution::CredentialProvided { .. } => {
                 return Err(blocked_authentication_unavailable());
             }
@@ -3592,11 +3590,9 @@ impl RebornServices {
             .await
             .map_err(|error| map_adapter_error(error.into()))?;
         match response {
-            ResolveApprovalInteractionResponse::Approved(response) => {
+            ResolveApprovalInteractionResponse::Approved(response)
+            | ResolveApprovalInteractionResponse::Resumed(response) => {
                 Ok(RebornResolveGateResponse::Resumed(response.into()))
-            }
-            ResolveApprovalInteractionResponse::Denied(response) => {
-                Ok(RebornResolveGateResponse::Cancelled(response.into()))
             }
         }
     }
@@ -3654,9 +3650,7 @@ impl RebornServices {
                         .map_err(map_auth_interaction_error)?,
                 }
             }
-            WebUiGateResolution::Denied | WebUiGateResolution::Cancelled => {
-                AuthInteractionDecision::Deny
-            }
+            WebUiGateResolution::Declined => AuthInteractionDecision::Deny,
             WebUiGateResolution::Approved { .. } => {
                 return Err(blocked_authentication_unavailable());
             }
@@ -3719,7 +3713,7 @@ impl RebornServices {
                             &binding_id,
                         )?,
                         idempotency_key: client_action_id,
-                        auth_resume_disposition: None,
+                        resume_disposition: None,
                     })
                     .await
                     .map_err(map_turn_error)?;
@@ -3728,7 +3722,7 @@ impl RebornServices {
             WebUiGateResolution::CredentialProvided { .. } => {
                 Err(blocked_authentication_unavailable())
             }
-            WebUiGateResolution::Denied | WebUiGateResolution::Cancelled => {
+            WebUiGateResolution::Declined => {
                 assert_generic_run_parked_on_gate(
                     self.turn_coordinator.as_ref(),
                     &scope,
