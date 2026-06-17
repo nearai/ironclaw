@@ -804,6 +804,7 @@ registerPack("en", {
   "automations.runs.ok": "{count} OK",
   "automations.runs.error": "{count} failed",
   "automations.runs.running": "{count} running",
+  "automations.runs.unknown": "{count} unknown",
   "automations.runs.showingOf": "Showing {shown} of {total} recent runs",
   "automations.status.running": "Running",
   "automations.status.needsReview": "Needs review",

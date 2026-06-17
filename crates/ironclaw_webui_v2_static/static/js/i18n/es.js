@@ -743,6 +743,7 @@ registerPack("es", {
   "automations.runs.ok": "{count} OK",
   "automations.runs.error": "{count} con error",
   "automations.runs.running": "{count} en ejecución",
+  "automations.runs.unknown": "{count} desconocidas",
   "automations.runs.showingOf": "Mostrando {shown} de {total} ejecuciones recientes",
 
   // Routines page

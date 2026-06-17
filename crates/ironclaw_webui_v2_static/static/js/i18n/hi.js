@@ -743,6 +743,7 @@ registerPack("hi", {
   "automations.runs.ok": "{count} ठीक",
   "automations.runs.error": "{count} विफल",
   "automations.runs.running": "{count} चल रहे",
+  "automations.runs.unknown": "{count} अज्ञात",
   "automations.runs.showingOf": "{total} हाल के रन में से {shown} दिखाए जा रहे हैं",
 
   // Routines page

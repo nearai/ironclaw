@@ -743,6 +743,7 @@ registerPack("uk", {
   "automations.runs.ok": "{count} успішних",
   "automations.runs.error": "{count} з помилкою",
   "automations.runs.running": "{count} виконується",
+  "automations.runs.unknown": "{count} невідомих",
   "automations.runs.showingOf": "Показано {shown} з {total} останніх запусків",
 
   // Routines page

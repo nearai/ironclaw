@@ -743,6 +743,7 @@ registerPack("ko", {
   "automations.runs.ok": "성공 {count}건",
   "automations.runs.error": "실패 {count}건",
   "automations.runs.running": "실행 중 {count}건",
+  "automations.runs.unknown": "알 수 없음 {count}건",
   "automations.runs.showingOf": "최근 실행 {total}건 중 {shown}건 표시",
 
   // Routines page

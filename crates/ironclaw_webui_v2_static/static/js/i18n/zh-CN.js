@@ -743,6 +743,7 @@ registerPack("zh-CN", {
   "automations.runs.ok": "{count} 次成功",
   "automations.runs.error": "{count} 次失败",
   "automations.runs.running": "{count} 次运行中",
+  "automations.runs.unknown": "{count} 次未知",
   "automations.runs.showingOf": "正在显示最近 {total} 次运行中的 {shown} 次",
 
   // Routines page

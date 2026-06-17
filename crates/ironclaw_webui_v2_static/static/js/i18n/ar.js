@@ -743,6 +743,7 @@ registerPack("ar", {
   "automations.runs.ok": "{count} ناجحة",
   "automations.runs.error": "{count} فاشلة",
   "automations.runs.running": "{count} قيد التشغيل",
+  "automations.runs.unknown": "{count} غير معروفة",
   "automations.runs.showingOf": "عرض {shown} من {total} عمليات تشغيل حديثة",
 
   // Routines page

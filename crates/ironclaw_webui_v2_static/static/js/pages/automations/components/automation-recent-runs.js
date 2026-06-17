@@ -70,6 +70,8 @@ export function RunHistorySummary({ runs = [], className = "" }) {
     counts.ok > 0 && { key: "ok", tone: "text-emerald-300", count: counts.ok },
     counts.error > 0 && { key: "error", tone: "text-red-300", count: counts.error },
     counts.running > 0 && { key: "running", tone: "text-sky-300", count: counts.running },
+    // Surface unknown-status runs too so the breakdown always sums to total.
+    counts.unknown > 0 && { key: "unknown", tone: "text-iron-400", count: counts.unknown },
   ].filter(Boolean);
 
   return html`
