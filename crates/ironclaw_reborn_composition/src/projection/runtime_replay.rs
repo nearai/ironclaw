@@ -128,10 +128,12 @@ fn runtime_payload_candidates(
     if !runs.is_empty() {
         candidates.push(RuntimePayloadCandidate::State { runs });
     }
+    // Stream lifecycle metadata before preview slots. A pending preview may
+    // hold the cursor, but it must not hide later OK/ERR activity rows.
+    for activity in activities.iter().cloned() {
+        candidates.push(RuntimePayloadCandidate::CapabilityActivity(activity));
+    }
     for activity in activities {
-        candidates.push(RuntimePayloadCandidate::CapabilityActivity(
-            activity.clone(),
-        ));
         candidates.push(RuntimePayloadCandidate::CapabilityDisplayPreview(activity));
     }
     candidates
@@ -168,10 +170,12 @@ fn append_activity_replay_candidates(
     }
     let activities = newest_activity_window(activities, max_activities);
 
+    // Stream lifecycle metadata before preview slots. A pending preview may
+    // hold the cursor, but it must not hide later OK/ERR activity rows.
+    for activity in activities.iter().cloned() {
+        candidates.push(RuntimePayloadCandidate::CapabilityActivity(activity));
+    }
     for activity in activities {
-        candidates.push(RuntimePayloadCandidate::CapabilityActivity(
-            activity.clone(),
-        ));
         candidates.push(RuntimePayloadCandidate::CapabilityDisplayPreview(activity));
     }
 }
