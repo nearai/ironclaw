@@ -1459,4 +1459,48 @@ mod tests {
             Some(true)
         );
     }
+
+    #[test]
+    fn recent_run_info_carries_failure_reason_on_the_wire_and_omits_it_when_absent() {
+        use chrono::TimeZone;
+        let submitted_at = chrono::Utc
+            .timestamp_opt(1_704_067_200, 0)
+            .single()
+            .expect("valid timestamp");
+
+        // An error row with a reason carries it under the snake_case wire key and
+        // round-trips back to an equal value (the contract the WebUI panel reads).
+        let with_reason = RebornAutomationRecentRunInfo {
+            run_id: None,
+            thread_id: None,
+            fire_slot: None,
+            status: RebornAutomationRecentRunStatus::Error,
+            submitted_at,
+            completed_at: None,
+            failure_reason: Some("trigger fire not authorized: creator access revoked".to_string()),
+        };
+        let value = serde_json::to_value(&with_reason).expect("serialize");
+        assert_eq!(
+            value
+                .get("failure_reason")
+                .and_then(serde_json::Value::as_str),
+            Some("trigger fire not authorized: creator access revoked"),
+        );
+        let restored: RebornAutomationRecentRunInfo =
+            serde_json::from_value(value).expect("deserialize");
+        assert_eq!(restored, with_reason);
+
+        // No reason → the field is omitted entirely (skip_serializing_if), not
+        // serialized as null, so the browser's truthiness check renders the
+        // "no thread" fallback.
+        let without_reason = RebornAutomationRecentRunInfo {
+            failure_reason: None,
+            ..with_reason
+        };
+        let value = serde_json::to_value(&without_reason).expect("serialize");
+        assert!(
+            value.get("failure_reason").is_none(),
+            "absent reason must be omitted, not null"
+        );
+    }
 }

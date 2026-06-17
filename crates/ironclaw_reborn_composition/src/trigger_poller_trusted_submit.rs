@@ -341,8 +341,13 @@ fn trigger_authorization_error(error: TriggerFireAuthError) -> TriggerError {
         }
         TriggerFireAuthError::Retryable { reason } => {
             tracing::debug!(%reason, "trusted trigger fire authorization retryable failure");
+            // Carry the cause like the `Denied` arm rather than dropping it for a
+            // constant (error-handling.md). This stays `Backend`, which
+            // `classify_failure` deliberately keeps OUT of the persisted/surfaced
+            // `failure_reason` (curated "backend temporarily unavailable"), so the
+            // detail enriches logs/correlation only and never reaches the UI.
             TriggerError::Backend {
-                reason: "trusted trigger fire authorization retryable failure".to_string(),
+                reason: format!("trusted trigger fire authorization retryable failure: {reason}"),
             }
         }
     }

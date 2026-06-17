@@ -236,7 +236,12 @@ pub async fn repair_local_trigger_access(
             .await?;
             report.reassigned = outcome.reassigned;
             report.skipped_revoked_target = outcome.skipped_revoked_target;
-            report.reassigned_to = Some(target.as_str().to_string());
+            // Name the landing target only when a trigger actually moved. If every
+            // stranded trigger was skipped (revoked target), `reassigned_to` would
+            // otherwise advertise a target that ended up owning nothing.
+            if outcome.reassigned > 0 {
+                report.reassigned_to = Some(target.as_str().to_string());
+            }
         }
         TriggerAccessRepairAction::ReassignToCurrentSsoOwner => {
             let target = resolve_current_sso_owner(&access, tenant_id).await?;
@@ -256,7 +261,12 @@ pub async fn repair_local_trigger_access(
             .await?;
             report.reassigned = outcome.reassigned;
             report.skipped_revoked_target = outcome.skipped_revoked_target;
-            report.reassigned_to = Some(target.as_str().to_string());
+            // Name the landing target only when a trigger actually moved. If every
+            // stranded trigger was skipped (revoked target), `reassigned_to` would
+            // otherwise advertise a target that ended up owning nothing.
+            if outcome.reassigned > 0 {
+                report.reassigned_to = Some(target.as_str().to_string());
+            }
         }
     }
 
@@ -594,6 +604,10 @@ mod tests {
             "revoked target must not count as reassigned"
         );
         assert_eq!(applied.skipped_revoked_target, 1);
+        assert_eq!(
+            applied.reassigned_to, None,
+            "no trigger landed on the target, so it must not be advertised as the new owner"
+        );
 
         // Ownership is unchanged: the upsert never ran.
         let db = Arc::new(
