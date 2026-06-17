@@ -1912,6 +1912,28 @@ async fn builtin_profile_set_rejects_missing_memory_mount_authority() {
 }
 
 #[tokio::test]
+async fn builtin_profile_set_rejects_memory_mount_without_delete_permission() {
+    // ensure_memory_mount(write=true) requires read + list + write + delete.
+    // A /memory grant with read+list+write but NO delete must be rejected with
+    // Authorization, locking the current contract.
+    // MountPermissions::read_write() has read=true, write=true, list=true, delete=false.
+    let runtime = runtime_with_filesystem(InMemoryBackend::new());
+    let failure = invoke_with_context(
+        &runtime,
+        PROFILE_SET_CAPABILITY_ID,
+        json!({"timezone": "Asia/Tokyo"}),
+        execution_context_with_mounts(
+            [PROFILE_SET_CAPABILITY_ID],
+            memory_mounts(MountPermissions::read_write()),
+        ),
+    )
+    .await
+    .unwrap_err();
+    // ensure_memory_mount rejects write without delete (FilesystemDenied → Authorization).
+    assert_eq!(failure, RuntimeFailureKind::Authorization);
+}
+
+#[tokio::test]
 async fn builtin_echo_invokes_through_host_runtime() {
     let output = invoke(ECHO_CAPABILITY_ID, json!({"message": "hello reborn"}))
         .await

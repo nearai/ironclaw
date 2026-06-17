@@ -400,6 +400,26 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn profile_set_rejects_empty_or_whitespace_only_location() {
+        // validated_fields trims location and rejects if the result is empty.
+        // Verify both an empty string and a whitespace-only string are rejected
+        // at the dispatch level.
+        for input in [json!({"location": ""}), json!({"location": "   "})] {
+            let state = MemoryCapabilityState::default();
+            let req = profile_set_request(input.clone());
+            let err = dispatch(&state, &req).await.unwrap_err();
+            assert!(
+                matches!(
+                    err.kind(),
+                    Some(ironclaw_host_api::RuntimeDispatchErrorKind::InputEncode)
+                ),
+                "location {:?} must produce InputEncode error, got: {err:?}",
+                input
+            );
+        }
+    }
+
+    #[tokio::test]
     async fn rejects_too_long_locale() {
         let state = MemoryCapabilityState::default();
         // A 36-character locale exceeds the 35-character limit enforced by Locale::new.
