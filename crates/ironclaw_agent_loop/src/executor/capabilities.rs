@@ -8,8 +8,7 @@ use ironclaw_turns::{
         AuthResumeApprovalIdentity, CapabilityActivityId, CapabilityApprovalResume,
         CapabilityAuthResume, CapabilityAuthResumeReplay, CapabilityBatchInvocation,
         CapabilityCallCandidate, CapabilityFailureKind, CapabilityOutcome, CapabilityProgress,
-        CapabilityResultMessage, CapabilityResumeToken, LoopDriverNoteKind, LoopProgressEvent,
-        VisibleCapabilitySurface,
+        CapabilityResultMessage, LoopDriverNoteKind, LoopProgressEvent, VisibleCapabilitySurface,
     },
 };
 
@@ -130,10 +129,7 @@ impl ExecutorStage<CapabilityInput> for CapabilityStage {
             )
         }) {
             let denied_cap_id = pending.capability_id.clone();
-            let denied_activity_id = pending
-                .resume_token
-                .as_ref()
-                .and_then(capability_activity_id_from_resume_token);
+            let denied_activity_id = pending.activity_id_for_resume();
             // Take ownership now that we've confirmed the disposition is Denied.
             // The unconditional take() below also covers the defensive case where
             // auth_denied_calls is empty — preventing a stale Denied disposition
@@ -177,8 +173,7 @@ impl ExecutorStage<CapabilityInput> for CapabilityStage {
             )
         }) {
             let denied_cap_id = pending.capability_id.clone();
-            let denied_activity_id =
-                capability_activity_id_from_resume_token(&pending.resume_token);
+            let denied_activity_id = pending.activity_id_for_resume();
             // Clear the slot unconditionally — even if the partition yields no
             // matching calls, a stale Denied disposition must not bleed into the
             // fall-through batch.
@@ -1107,12 +1102,6 @@ impl CapabilityStage {
         // when there is nothing left to dispatch.
         Ok(ControlFlow::Continue((state, remaining_calls)))
     }
-}
-
-fn capability_activity_id_from_resume_token(
-    resume_token: &CapabilityResumeToken,
-) -> Option<CapabilityActivityId> {
-    CapabilityActivityId::parse(resume_token.as_str()).ok()
 }
 
 fn clear_matching_pending_approval_resume(
