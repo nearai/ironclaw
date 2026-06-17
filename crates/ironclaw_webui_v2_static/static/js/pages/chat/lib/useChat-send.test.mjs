@@ -559,6 +559,76 @@ test("useChat.approve deny treats queued response without outcome as resumed", a
   ]);
 });
 
+test("useChat.approve treats already_terminal false as resumed", async () => {
+  const threadId = "thread-1";
+  const runId = "run-already-terminal-false";
+  const gateRef = "gate-already-terminal-false";
+  const stateUpdates = [];
+
+  const context = {
+    AbortController,
+    Date,
+    Error,
+    Map,
+    Math,
+    React: createReactStub({
+      initialByIndex: new Map([
+        [2, { runId, threadId, status: "awaiting_gate" }],
+        [4, false],
+        [5, { runId, gateRef, kind: "gate", toolName: "nearai.web_search" }],
+      ]),
+      setCalls: stateUpdates,
+    }),
+    addPending,
+    cancelRunRequest: async () => {},
+    clearTimeout,
+    createThreadRequest: async () => {
+      throw new Error("createThread should not run");
+    },
+    createToolActivityState,
+    failGateToolActivity,
+    globalThis: {},
+    listConnectableChannels: async () => ({ channels: [] }),
+    looksLikeChannelConnectCommand,
+    queryClient: {
+      fetchQuery: async () => ({ channels: [] }),
+      invalidateQueries: () => {},
+    },
+    recordAcceptedMessageRef,
+    removePending,
+    resolveChannelConnectCommand,
+    resolveGateRequest: async () => ({ run_id: runId, already_terminal: false }),
+    resetToolActivityState,
+    sendMessage: async () => {
+      throw new Error("sendMessage should not run");
+    },
+    setInterval,
+    setTimeout,
+    submitManualToken: async () => {},
+    useChatEvents: () => () => {},
+    useHistory: () => ({
+      messages: [],
+      hasMore: false,
+      nextCursor: null,
+      isLoading: false,
+      loadHistory: () => {},
+      setMessages: () => {},
+    }),
+    useSSE: () => ({ status: "idle" }),
+  };
+
+  runUseChatSource(context);
+
+  const chat = context.globalThis.__testExports.useChat(threadId);
+  await chat.approve(null, "deny", "gate");
+
+  assert.deepEqual(JSON.parse(JSON.stringify(stateUpdates.slice(-3))), [
+    { index: 5, value: null },
+    { index: 4, value: true },
+    { index: 2, value: { runId, threadId, status: "queued" } },
+  ]);
+});
+
 test("useChat.cancelRun completion does not clear a newer run", async () => {
   const threadId = "thread-1";
   const stateUpdates = [];

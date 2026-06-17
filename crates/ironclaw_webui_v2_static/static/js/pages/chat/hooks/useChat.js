@@ -67,9 +67,10 @@ function resolveGateOutcome(response) {
   if (response?.outcome) return response.outcome;
   const status = String(response?.status || "").toLowerCase();
   if (status === "queued" || status === "running") return "resumed";
-  if (status === "cancelled" || response?.already_terminal !== undefined) {
+  if (status === "cancelled" || response?.already_terminal === true) {
     return "cancelled";
   }
+  if (response?.already_terminal === false) return "resumed";
   return null;
 }
 

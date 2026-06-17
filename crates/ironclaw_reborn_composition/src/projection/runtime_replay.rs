@@ -128,12 +128,10 @@ fn runtime_payload_candidates(
     if !runs.is_empty() {
         candidates.push(RuntimePayloadCandidate::State { runs });
     }
-    for activity in activities.iter() {
+    for activity in activities {
         candidates.push(RuntimePayloadCandidate::CapabilityActivity(
             activity.clone(),
         ));
-    }
-    for activity in activities {
         candidates.push(RuntimePayloadCandidate::CapabilityDisplayPreview(activity));
     }
     candidates
@@ -170,12 +168,10 @@ fn append_activity_replay_candidates(
     }
     let activities = newest_activity_window(activities, max_activities);
 
-    for activity in activities.iter() {
+    for activity in activities {
         candidates.push(RuntimePayloadCandidate::CapabilityActivity(
             activity.clone(),
         ));
-    }
-    for activity in activities {
         candidates.push(RuntimePayloadCandidate::CapabilityDisplayPreview(activity));
     }
 }
