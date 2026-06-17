@@ -216,7 +216,7 @@ fn render_index_with_nonce() -> Response {
          script-src-elem 'self' 'nonce-{nonce}'; \
          style-src 'self' 'unsafe-inline'; \
          style-src-elem 'self' 'unsafe-inline'; \
-         font-src 'self' data:; \
+         font-src 'self'; \
          img-src 'self' data:; \
          media-src 'self' data:; \
          frame-src 'self' blob:; \
@@ -440,6 +440,26 @@ mod tests {
             Some("'self' data:"),
             "document CSP must keep the exact img-src allowlist; got `{csp}`",
         );
+        // Lock the same-origin directives to their EXACT source lists. A
+        // substring ban misses valid-but-remote CSP forms (`https:`, `*`,
+        // `cdn.example.com`); pinning the whole source list fails closed if
+        // any new source — scheme, wildcard, or host — is ever appended.
+        for (directive, expected) in [
+            ("default-src", "'self'"),
+            ("style-src", "'self' 'unsafe-inline'"),
+            ("style-src-elem", "'self' 'unsafe-inline'"),
+            ("font-src", "'self'"),
+            ("connect-src", "'self'"),
+            ("object-src", "'none'"),
+            ("frame-ancestors", "'none'"),
+            ("base-uri", "'self'"),
+        ] {
+            assert_eq!(
+                directives.get(directive).copied(),
+                Some(expected),
+                "document CSP must keep the exact {directive} allowlist; got `{csp}`",
+            );
+        }
         // Scripts must NOT be executable via eval or arbitrary inline —
         // the document relies on the nonce, not `'unsafe-inline'`.
         assert!(

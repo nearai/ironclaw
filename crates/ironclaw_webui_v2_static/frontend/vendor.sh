@@ -14,7 +14,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 VENDOR_DIR="$SCRIPT_DIR/../static/vendor"
 FONTS_DIR="$VENDOR_DIR/fonts"
 
-TAILWIND_VER="4"
+TAILWIND_VER="4.3.1"
 DOMPURIFY_VER="3.2.3"
 MARKED_VER="17.0.2"
 HLJS_VER="11.11.1"
@@ -43,13 +43,19 @@ echo "Vendoring Google Fonts…"
 RAW_CSS="$(curl -fsSL --max-time 60 -A "$UA" "https://fonts.googleapis.com/css2?${FONTS_QUERY}")"
 
 # Download every gstatic woff2 the CSS references and rewrite each
-# absolute URL to a local ./<basename>.woff2 path.
+# absolute URL to a local ./<basename>.woff2 path. `while read` (rather
+# than `for url in $(...)`) avoids word-splitting/globbing on the URL list.
 CSS="$RAW_CSS"
-for url in $(printf '%s\n' "$RAW_CSS" | grep -oE 'https://fonts\.gstatic\.com/[^)]+\.woff2' | sort -u); do
+while IFS= read -r url; do
+  [[ -z "$url" ]] && continue
   base="$(basename "$url")"
   fetch "$url" "$FONTS_DIR/$base"
   CSS="${CSS//$url/./$base}"
-done
+done < <(printf '%s\n' "$RAW_CSS" | grep -oE 'https://fonts\.gstatic\.com/[^)]+\.woff2' | sort -u)
+
+# Normalize single-quoted font-family / format() names to double quotes to
+# match the repo CSS convention (see static/styles/app.css).
+CSS="${CSS//\'/\"}"
 
 printf '%s\n' "$CSS" > "$FONTS_DIR/fonts.css"
 

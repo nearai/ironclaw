@@ -15,11 +15,12 @@ if [[ "${1:-}" != "--no-vendor" ]]; then
 fi
 
 echo "Installing build dependencies (npm ci)…"
-if [[ -f package-lock.json ]]; then
-  npm ci
-else
-  npm install
+if [[ ! -f package-lock.json ]]; then
+  echo "Error: package-lock.json is missing — refusing to fall back to 'npm install'." >&2
+  echo "Artifacts must build from the committed lockfile. Restore it and re-run." >&2
+  exit 1
 fi
+npm ci
 
 echo "Bundling SPA…"
 node build.mjs
