@@ -25,6 +25,12 @@ use serde::Deserialize;
 /// Relative path of the per-user agent-context profile document.
 pub const PROFILE_DOCUMENT_PATH: &str = "context/profile.json";
 
+/// Hard cap on the profile document size. profile_set writes are small and
+/// bounded; a document larger than this can only come from an external/manual
+/// edit, so we refuse to spend per-turn CPU/heap parsing it and degrade to
+/// no-profile instead.
+const MAX_PROFILE_DOCUMENT_BYTES: usize = 64 * 1024;
+
 /// Single home for the profile scope decision: keyed to the human user at
 /// `agent=None, project=None` (spec §10) regardless of run scope. BOTH the
 /// producer (read) and `profile_merge_write` (write) call this so the scope
@@ -87,6 +93,17 @@ impl MemoryBackedUserProfileSource {
                 return None;
             }
         };
+
+        if bytes.len() > MAX_PROFILE_DOCUMENT_BYTES {
+            // silent-ok: optional loop-start context; an oversized profile doc degrades
+            // to no-profile rather than burning per-turn CPU/heap, and never fails the turn.
+            tracing::debug!(
+                bytes = bytes.len(),
+                cap = MAX_PROFILE_DOCUMENT_BYTES,
+                "user profile document exceeds size cap; continuing without profile"
+            );
+            return None;
+        }
 
         let parsed: ProfileJson = match serde_json::from_slice(&bytes) {
             Ok(parsed) => parsed,
@@ -307,6 +324,25 @@ mod tests {
         assert!(
             source.resolve_user_profile(&run_ctx).await.is_none(),
             "all-blank/invalid profile fields must resolve to None"
+        );
+    }
+
+    #[tokio::test]
+    async fn oversized_profile_document_resolves_to_none() {
+        // A profile document larger than MAX_PROFILE_DOCUMENT_BYTES must degrade
+        // to no-profile rather than burning per-turn CPU/heap parsing it.
+        // The document is valid JSON (only the size guard, not a parse error, triggers).
+        let fs: Arc<dyn RootFilesystem> = Arc::new(InMemoryBackend::new());
+        // Build a valid JSON object whose "location" value exceeds the 64 KiB cap.
+        let large_location = "A".repeat(70_000);
+        let json = format!(r#"{{"location":"{}"}}"#, large_location);
+        write_profile_json(&fs, "tenant-a", "user-1", &json).await;
+
+        let source = MemoryBackedUserProfileSource::new(Arc::clone(&fs));
+        let run_ctx = run_context_with_user("tenant-a", "user-1").await;
+        assert!(
+            source.resolve_user_profile(&run_ctx).await.is_none(),
+            "oversized profile document must resolve to None (size guard, not parse error)"
         );
     }
 }

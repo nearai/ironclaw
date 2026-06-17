@@ -1891,6 +1891,27 @@ async fn memory_write_requires_memory_mount_authority() {
 }
 
 #[tokio::test]
+async fn builtin_profile_set_rejects_missing_memory_mount_authority() {
+    // profile_set routes through ensure_memory_mount(request, /*write*/ true) in
+    // profile_merge_write. This test verifies that the guard fires when the invocation
+    // context carries only a /workspace mount (no /memory write grant), mirroring
+    // the memory_write_requires_memory_mount_authority test above.
+    let runtime = runtime_with_filesystem(InMemoryBackend::new());
+    let (_filesystem, workspace_mounts) =
+        in_memory_mounted_filesystem(MountPermissions::read_write_list_delete());
+    let failure = invoke_with_context(
+        &runtime,
+        PROFILE_SET_CAPABILITY_ID,
+        json!({"timezone": "Asia/Tokyo"}),
+        execution_context_with_mounts([PROFILE_SET_CAPABILITY_ID], workspace_mounts),
+    )
+    .await
+    .unwrap_err();
+    // ensure_memory_mount returns FilesystemDenied, which maps to RuntimeFailureKind::Authorization.
+    assert_eq!(failure, RuntimeFailureKind::Authorization);
+}
+
+#[tokio::test]
 async fn builtin_echo_invokes_through_host_runtime() {
     let output = invoke(ECHO_CAPABILITY_ID, json!({"message": "hello reborn"}))
         .await

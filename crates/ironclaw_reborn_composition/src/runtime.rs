@@ -2683,6 +2683,14 @@ pub async fn build_reborn_runtime(
         // mounts are built from. `MemoryBackedUserProfileSource` constructs its own
         // full virtual paths via `profile_scope_and_path` and does not use the
         // `ScopedFilesystem` mount view, so the raw `RootFilesystem` is correct here.
+        //
+        // NOTE: this `Some(local_runtime) => real / None => Empty` guard intentionally
+        // mirrors `identity_context_source` directly above. The production-graph path
+        // (`production_runtime_parts`, `local_runtime: None`) currently wires NEITHER the
+        // identity source NOR this profile source — both degrade to Empty there today.
+        // Wiring the production-graph composition for these optional context sources is a
+        // single deferred follow-up (identity + profile together, to keep them paired);
+        // do not wire only one of them here, or they will diverge. See issue #5013.
         user_profile_source: match local_runtime {
             Some(local_runtime) => Arc::new(MemoryBackedUserProfileSourceAdapter(
                 MemoryBackedUserProfileSource::new(Arc::clone(&local_runtime.extension_filesystem)

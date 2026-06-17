@@ -4367,10 +4367,12 @@ async fn text_only_host_factory_threads_user_profile_source_to_runtime_context()
         .iter()
         .find(|m| m.content.contains("User profile:"))
         .expect("model request must contain a runtime context message with the User profile: line");
+    // location renders on its own untrusted-data line (same system message).
     assert!(
-        runtime_ctx_message
-            .content
-            .contains("location=Tokyo, Japan"),
+        runtime_ctx_message.content.contains("Tokyo, Japan")
+            && runtime_ctx_message
+                .content
+                .contains("User-provided location"),
         "host factory must thread FixedUserProfileSource location into runtime context: {:?}",
         runtime_ctx_message.content
     );

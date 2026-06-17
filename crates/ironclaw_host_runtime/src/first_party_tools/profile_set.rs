@@ -542,6 +542,45 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn dispatch_rejects_non_json_existing_profile_document() {
+        let state = MemoryCapabilityState::default();
+        // Seed a non-JSON document (raw bytes) at the profile scope/path on the request's filesystem.
+        let req = profile_set_request(json!({"locale": "en-US"}));
+        let scope = sample_scope();
+        let (doc_scope, path) =
+            profile_scope_and_path(scope.tenant_id.as_str(), scope.user_id.as_str()).unwrap();
+        let context = MemoryContext::new(doc_scope);
+        let repository = Arc::new(FilesystemMemoryDocumentRepository::new(Arc::clone(
+            &req.services.filesystem,
+        )));
+        let backend =
+            RepositoryMemoryBackend::new(repository).with_capabilities(MemoryBackendCapabilities {
+                file_documents: true,
+                metadata: true,
+                ..MemoryBackendCapabilities::default()
+            });
+        backend
+            .write_document_with_backend_options(
+                &context,
+                &path,
+                b"this is not json at all",
+                &MemoryBackendWriteOptions::default(),
+            )
+            .await
+            .expect("seed non-JSON doc");
+
+        // A profile_set write must fail closed rather than overwrite unknown content.
+        let err = dispatch(&state, &req).await.unwrap_err();
+        assert!(
+            matches!(
+                err.kind(),
+                Some(ironclaw_host_api::RuntimeDispatchErrorKind::OperationFailed)
+            ),
+            "non-JSON existing profile document must produce OperationFailed, got: {err:?}"
+        );
+    }
+
+    #[tokio::test]
     async fn profile_merge_into_returns_err_after_cas_budget_exhausted() {
         use crate::user_profile_source::profile_scope_and_path;
 
