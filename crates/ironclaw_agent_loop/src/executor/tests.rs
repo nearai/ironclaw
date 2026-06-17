@@ -1,6 +1,6 @@
 use ironclaw_host_api::{ApprovalRequestId, CorrelationId, ResourceEstimate};
 use ironclaw_turns::{
-    ApprovalResumeDisposition, CapabilityActivityId, LoopCancelledReasonKind, LoopCompletionKind,
+    CapabilityActivityId, GateResumeDisposition, LoopCancelledReasonKind, LoopCompletionKind,
     LoopDiagnosticRef, LoopExit, LoopFailureKind, LoopGateRef, LoopResultRef, TurnRunId,
     run_profile::{
         AgentLoopHostError, AgentLoopHostErrorKind, CapabilityApprovalResume, CapabilityAuthResume,
@@ -5590,16 +5590,16 @@ async fn auth_resume_origin_backend_failure_does_not_die_as_scope_mismatch() {
     );
 }
 
-/// Caller-level regression test for the auth-deny short-circuit in
+/// Caller-level regression test for the approval-deny short-circuit in
 /// `CapabilityStage::process`.
 ///
-/// When a run resumes from a user-DENIED auth gate (i.e. `pending_auth_resume`
-/// is set and `disposition = Some(Denied)`), the executor must NOT re-dispatch
-/// the parked capability (which would re-check the still-missing credential and
-/// re-block → infinite auth/deny loop). It must:
+/// When a run resumes from a user-DENIED approval gate (i.e.
+/// `pending_approval_resume` is set and `disposition = Some(Denied)`), the
+/// executor must NOT re-dispatch the parked capability (re-dispatch → re-block
+/// → infinite loop). It must:
 ///
 /// 1. Return `TurnCompletedStep::Continue` (loop proceeds, not Blocked/Exit).
-/// 2. Clear `pending_auth_resume` so the next iteration prompts the model
+/// 2. Clear `pending_approval_resume` so the next iteration prompts the model
 ///    normally.
 /// 3. Append a model-visible Authorization failure observation with
 ///    `status = Error` and `same_call_retry = Forbidden` (via
@@ -5637,7 +5637,7 @@ async fn capability_stage_denied_approval_resume_surfaces_authorization_failure_
         provider_replay,
         input: serde_json::json!({ "message": "needs approval" }),
         estimate: ResourceEstimate::default(),
-        disposition: Some(ApprovalResumeDisposition::Denied),
+        disposition: Some(GateResumeDisposition::Denied),
     });
 
     let step = CapabilityStage
@@ -6286,127 +6286,6 @@ async fn capability_stage_denied_auth_resume_one_denied_two_remaining_all_dispat
     assert!(
         final_state.result_refs.contains(&z_result_ref),
         "final_state.result_refs must contain Z's completed result ref"
-    );
-}
-
-// ── Approval-gate denial tests ────────────────────────────────────────────────
-//
-// These mirror the auth-gate denial tests above for the approval path.
-// The shared `short_circuit_denied_resume` helper must behave identically
-// regardless of which gate kind triggered the denial.
-
-/// Caller-level regression test for the approval-deny short-circuit in
-/// `CapabilityStage::process`.
-///
-/// When a run resumes from a user-DENIED approval gate (i.e.
-/// `pending_approval_resume` is set and `disposition = Some(Denied)`), the
-/// executor must NOT re-dispatch the parked capability (re-dispatch → re-block
-/// → infinite loop). It must:
-///
-/// 1. Return `TurnCompletedStep::Continue` (loop proceeds, not Blocked/Exit).
-/// 2. Clear `pending_approval_resume` so the next iteration prompts the model
-///    normally.
-/// 3. Append a model-visible Authorization failure observation with
-///    `status = Error` and `same_call_retry = Forbidden`.
-/// 4. Issue zero batch-invoke calls to the capability host.
-#[tokio::test]
-async fn capability_stage_denied_approval_resume_surfaces_authorization_failure_and_continues() {
-    let host = MockHost::new(Vec::new());
-    let family = crate::families::default();
-    let ctx = StageContext {
-        planner: family.planner(),
-        host: &host,
-    };
-
-    let mut state = LoopExecutionState::initial_for_run(host.run_context());
-    state.pending_approval_resume = Some(PendingApprovalResume {
-        gate_ref: LoopGateRef::new("gate:approval-deny-test").expect("valid"),
-        capability_id: capability_id(),
-        approval_request_id: ApprovalRequestId::new(),
-        resume_token: CapabilityResumeToken::new("00000000-0000-0000-0000-000000000042")
-            .expect("valid"),
-        correlation_id: ironclaw_host_api::CorrelationId::new(),
-        surface_version: surface_version(),
-        input_ref: CapabilityInputRef::new("input:approval-deny-test").expect("valid"),
-        effective_capability_ids: vec![capability_id()],
-        provider_replay: None,
-        input: serde_json::json!({"extension_id": "slack"}),
-        estimate: ironclaw_host_api::ResourceEstimate::default(),
-        disposition: Some(ironclaw_turns::GateResumeDisposition::Denied),
-    });
-
-    // Use provider_calls_response so provider_replay is set, which enables the
-    // model-visible observation to be written to appended_result_refs.
-    let calls = match provider_calls_response().output {
-        ParentLoopOutput::CapabilityCalls(calls) => calls,
-        ParentLoopOutput::AssistantReply(_) => panic!("expected provider calls fixture"),
-    };
-
-    let step = CapabilityStage
-        .process(
-            ctx,
-            CapabilityInput {
-                state,
-                surface: ironclaw_turns::run_profile::LoopCapabilityPort::visible_capabilities(
-                    &host,
-                    VisibleCapabilityRequest,
-                )
-                .await
-                .expect("visible surface"),
-                calls,
-            },
-        )
-        .await
-        .expect("capability stage");
-
-    // 1. Must return Continue — loop proceeds, not Blocked/Exit.
-    let final_state = match step {
-        TurnCompletedStep::Continue { state, .. } => state,
-        TurnCompletedStep::Exit(exit) => {
-            panic!("expected Continue after denied approval resume, got Exit: {exit:?}")
-        }
-    };
-
-    // 2. pending_approval_resume must be cleared after the denied-resume path.
-    assert!(
-        final_state.pending_approval_resume.is_none(),
-        "pending_approval_resume must be cleared after surfacing the deny failure"
-    );
-
-    // 3. Zero batch invocations: the short-circuit fired before invoke_capability_batch.
-    assert!(
-        host.batch_invocations().is_empty(),
-        "denied approval resume must not dispatch any capability batch invocations"
-    );
-
-    // 4. One model-visible observation appended with Authorization error + Forbidden retry.
-    let appended = host.appended_result_refs();
-    assert_eq!(
-        appended.len(),
-        1,
-        "exactly one model-visible result ref must be appended for the deny failure"
-    );
-    let observation = appended[0]
-        .model_observation
-        .as_ref()
-        .expect("model_observation must be Some for an Authorization failure");
-    assert_eq!(
-        observation.status,
-        ToolObservationStatus::Error,
-        "observation status must be Error"
-    );
-    assert_eq!(
-        observation.summary, "Capability failed with authorization.",
-        "observation summary must describe the authorization failure"
-    );
-    let recovery = observation
-        .recovery
-        .as_ref()
-        .expect("recovery must be present");
-    assert_eq!(
-        recovery.same_call_retry,
-        SameCallRetryConstraint::Forbidden,
-        "Authorization failure must map to Forbidden retry constraint (model must not retry)"
     );
 }
 
