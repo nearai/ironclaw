@@ -88,6 +88,7 @@ mod product_live_adapters;
 mod production_runtime_policy;
 mod profile;
 mod profile_approval_authorization;
+mod project_filesystem_reader;
 mod projection;
 mod trajectory_observer;
 pub use auth_prompt::{AuthChallengeProvider, AuthChallengeView};

@@ -50,11 +50,11 @@ use ironclaw_host_runtime::{
     HostRuntime, HostRuntimeError, HostRuntimeHealth, HostRuntimeServices, HostRuntimeStatus,
     JSON_CAPABILITY_ID, LIST_DIR_CAPABILITY_ID, MEMORY_READ_CAPABILITY_ID,
     MEMORY_SEARCH_CAPABILITY_ID, MEMORY_TREE_CAPABILITY_ID, MEMORY_WRITE_CAPABILITY_ID,
-    READ_FILE_CAPABILITY_ID, RuntimeCapabilityOutcome, RuntimeCapabilityRequest,
-    RuntimeCapabilityResumeRequest, RuntimeCredentialAccessSecret, RuntimeCredentialAccountRequest,
-    RuntimeCredentialAccountResolver, RuntimeStatusRequest, SHELL_CAPABILITY_ID,
-    SKILL_INSTALL_CAPABILITY_ID, SKILL_LIST_CAPABILITY_ID, SKILL_REMOVE_CAPABILITY_ID,
-    SPAWN_SUBAGENT_CAPABILITY_ID, SurfaceKind, TIME_CAPABILITY_ID,
+    PROFILE_SET_CAPABILITY_ID, READ_FILE_CAPABILITY_ID, RuntimeCapabilityOutcome,
+    RuntimeCapabilityRequest, RuntimeCapabilityResumeRequest, RuntimeCredentialAccessSecret,
+    RuntimeCredentialAccountRequest, RuntimeCredentialAccountResolver, RuntimeStatusRequest,
+    SHELL_CAPABILITY_ID, SKILL_INSTALL_CAPABILITY_ID, SKILL_LIST_CAPABILITY_ID,
+    SKILL_REMOVE_CAPABILITY_ID, SPAWN_SUBAGENT_CAPABILITY_ID, SurfaceKind, TIME_CAPABILITY_ID,
     TRACE_COMMONS_CREDITS_CAPABILITY_ID, TRACE_COMMONS_ONBOARD_CAPABILITY_ID,
     TRACE_COMMONS_PROFILE_SET_CAPABILITY_ID, TRACE_COMMONS_PROFILE_TOKEN_CAPABILITY_ID,
     TRACE_COMMONS_STATUS_CAPABILITY_ID, TRIGGER_CREATE_CAPABILITY_ID, TRIGGER_LIST_CAPABILITY_ID,
@@ -64,7 +64,7 @@ use ironclaw_host_runtime::{
 };
 use ironclaw_loop_support::{
     CapabilityAllowSet, CapabilityResolveError, CapabilityResultWrite,
-    CapabilitySurfaceProfileResolver, DEFAULT_SPAWN_SUBAGENT_CAPABILITY_ID,
+    CapabilitySurfaceProfileResolver, DEFAULT_SPAWN_SUBAGENT_CAPABILITY_ID, EmptyUserProfileSource,
     HostIdentityContextBuildError, HostIdentityContextCandidate, HostIdentityContextSource,
     HostManagedModelRequest, HostRuntimeLoopCapabilityPortFactory, JsonSpawnSubagentInputCodec,
     LoopCapabilityPortFactory, LoopCapabilityResultWriter,
@@ -934,6 +934,7 @@ impl RebornBinaryE2EHarness {
             skill_context_source: None,
             input_queue: None,
             identity_context_source,
+            user_profile_source: Arc::new(EmptyUserProfileSource),
             model_policy_guard: None,
             model_budget_accountant: None,
             safety_context: None,
@@ -1184,7 +1185,7 @@ impl RebornBinaryE2EHarness {
                 source_binding_ref: SourceBindingRef::new("src:resume")?,
                 reply_target_binding_ref: ReplyTargetBindingRef::new("reply:resume")?,
                 idempotency_key: IdempotencyKey::new(idempotency_key.into())?,
-                auth_resume_disposition: None,
+                resume_disposition: None,
             })
             .await?;
         if response.status != TurnStatus::Queued {
@@ -1894,6 +1895,10 @@ impl HostRuntimeCapabilityHarness {
             CapabilityId::new(MEMORY_WRITE_CAPABILITY_ID)?,
             CapabilityId::new(MEMORY_READ_CAPABILITY_ID)?,
             CapabilityId::new(MEMORY_TREE_CAPABILITY_ID)?,
+            // profile_set writes to the memory mount (context/profile.json under
+            // the user-scoped scope), so it needs the memory mount override just
+            // like the four memory_* capabilities above.
+            CapabilityId::new(PROFILE_SET_CAPABILITY_ID)?,
         ];
         Ok(Self {
             runtime,
@@ -1917,6 +1922,7 @@ impl HostRuntimeCapabilityHarness {
                 CapabilityId::new(MEMORY_WRITE_CAPABILITY_ID)?,
                 CapabilityId::new(MEMORY_READ_CAPABILITY_ID)?,
                 CapabilityId::new(MEMORY_TREE_CAPABILITY_ID)?,
+                CapabilityId::new(PROFILE_SET_CAPABILITY_ID)?,
                 CapabilityId::new(READ_FILE_CAPABILITY_ID)?,
                 CapabilityId::new(APPLY_PATCH_CAPABILITY_ID)?,
             ],

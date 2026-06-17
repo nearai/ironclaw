@@ -32,7 +32,7 @@ pub const MEMORY_TREE_CAPABILITY_ID: &str = "builtin.memory_tree";
 const MEMORY_PATH: &str = "MEMORY.md";
 const HEARTBEAT_PATH: &str = "HEARTBEAT.md";
 const BOOTSTRAP_PATH: &str = "BOOTSTRAP.md";
-const MAX_MEMORY_PATCH_RETRIES: usize = 8;
+pub(super) const MAX_MEMORY_PATCH_RETRIES: usize = 8;
 const MEMORY_PROMPT_SAFETY_EXTENSION_ID: &str = "memory.prompt_safety";
 
 struct MemoryServices {
@@ -161,7 +161,7 @@ pub(super) fn manifests() -> Result<Vec<CapabilityManifest>, ExtensionError> {
         )?,
         first_party_capability_manifest(
             MEMORY_WRITE_CAPABILITY_ID,
-            "Write, append, or patch Reborn persistent memory documents in the current tenant/user/agent/project scope",
+            "Write, append, or patch Reborn persistent memory documents in the current tenant/user/agent/project scope. For structured user facts (timezone, locale, location), use builtin.profile_set instead.",
             vec![EffectKind::ReadFilesystem, EffectKind::WriteFilesystem],
             PermissionMode::Allow,
             resource_profile(),
@@ -234,7 +234,7 @@ fn memory_services(
 }
 
 impl MemoryCapabilityState {
-    fn backend_for(
+    pub(super) fn backend_for(
         &self,
         request: &FirstPartyCapabilityRequest,
     ) -> Result<Arc<dyn MemoryBackend>, FirstPartyCapabilityError> {
@@ -298,7 +298,7 @@ fn build_backend(
     Arc::new(backend)
 }
 
-fn ensure_memory_mount(
+pub(super) fn ensure_memory_mount(
     request: &FirstPartyCapabilityRequest,
     write: bool,
 ) -> Result<(), FirstPartyCapabilityError> {
@@ -591,7 +591,9 @@ async fn append_document(
         .map_err(|_| operation_error())
 }
 
-fn write_options(metadata_overlay: Option<&DocumentMetadata>) -> MemoryBackendWriteOptions {
+pub(super) fn write_options(
+    metadata_overlay: Option<&DocumentMetadata>,
+) -> MemoryBackendWriteOptions {
     MemoryBackendWriteOptions {
         metadata_overlay: metadata_overlay.cloned(),
     }

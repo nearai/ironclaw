@@ -89,6 +89,7 @@ registerPack("hi", {
   "chat.attachmentUnsupportedType": "{name} एक समर्थित फ़ाइल प्रकार नहीं है।",
   "chat.attachmentReadFailed": "{name} पढ़ी नहीं जा सकी।",
   "chat.attachmentStagingFailed": "चयनित फ़ाइलें संलग्न नहीं की जा सकीं।",
+  "chat.fileDownloadFailed": "वह फ़ाइल डाउनलोड नहीं की जा सकी।",
   "chat.modeAutoReview": "ऑटो-रिव्यू",
   "chat.runtimeLocal": "स्थानीय रूप से काम करें",
   "chat.statusWorking": "काम हो रहा है",

@@ -89,6 +89,7 @@ registerPack("zh-CN", {
   "chat.attachmentUnsupportedType": "{name} 不是受支持的文件类型。",
   "chat.attachmentReadFailed": "无法读取 {name}。",
   "chat.attachmentStagingFailed": "无法附加所选文件。",
+  "chat.fileDownloadFailed": "无法下载该文件。",
   "chat.modeAutoReview": "自动审查",
   "chat.runtimeLocal": "本地工作",
   "chat.statusWorking": "正在工作",

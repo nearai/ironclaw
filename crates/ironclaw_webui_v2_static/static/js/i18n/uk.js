@@ -89,6 +89,7 @@ registerPack("uk", {
   "chat.attachmentUnsupportedType": "{name} не є підтримуваним типом файлу.",
   "chat.attachmentReadFailed": "Не вдалося прочитати {name}.",
   "chat.attachmentStagingFailed": "Не вдалося додати вибрані файли.",
+  "chat.fileDownloadFailed": "Не вдалося завантажити цей файл.",
   "chat.modeAutoReview": "Авторевʼю",
   "chat.runtimeLocal": "Працювати локально",
   "chat.statusWorking": "Працює",
