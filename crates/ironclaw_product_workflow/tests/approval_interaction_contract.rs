@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
@@ -26,8 +27,8 @@ use ironclaw_product_workflow::{
 };
 use ironclaw_run_state::{ApprovalRequestStore, ApprovalStatus, InMemoryApprovalRequestStore};
 use ironclaw_turns::{
-    AcceptedMessageRef, ApprovalResumeDisposition, CancelRunRequest, CancelRunResponse,
-    EventCursor, GateRef, GetRunStateRequest, IdempotencyKey, ReplyTargetBindingRef,
+    AcceptedMessageRef, CancelRunRequest, CancelRunResponse, EventCursor, GateRef,
+    GateResumeDisposition, GetRunStateRequest, IdempotencyKey, ReplyTargetBindingRef,
     ResumeTurnPrecondition, ResumeTurnRequest, ResumeTurnResponse, RunProfileId, RunProfileVersion,
     SourceBindingRef, SubmitTurnRequest, SubmitTurnResponse, TurnActor, TurnCoordinator, TurnError,
     TurnId, TurnRunId, TurnRunState, TurnScope, TurnStatus,
@@ -199,6 +200,8 @@ struct RecordingApprovalResolver {
     dispatch_lease_retries: Mutex<Vec<RecordedApproval>>,
     spawn_lease_retries: Mutex<Vec<RecordedApproval>>,
     denials: Mutex<Vec<(ResourceScope, ApprovalRequestId, Principal)>>,
+    /// Shared ordered event log for call-ordering tests; None by default.
+    event_log: Mutex<Option<Arc<Mutex<Vec<&'static str>>>>>,
 }
 
 #[derive(Clone)]
@@ -228,6 +231,10 @@ impl RecordingApprovalResolver {
 
     fn approvals(&self) -> Vec<RecordedApproval> {
         self.approvals.lock().expect("lock").clone()
+    }
+
+    fn set_event_log(&self, log: Arc<Mutex<Vec<&'static str>>>) {
+        *self.event_log.lock().expect("lock") = Some(log);
     }
 }
 
@@ -312,6 +319,9 @@ impl ApprovalResolutionPort for RecordingApprovalResolver {
             .lock()
             .expect("lock")
             .push((scope.clone(), request_id, denial.denied_by));
+        if let Some(log) = self.event_log.lock().expect("lock").as_ref() {
+            log.lock().expect("lock").push("deny");
+        }
         Ok(())
     }
 }
@@ -414,6 +424,13 @@ struct FakeTurnCoordinator {
     gate_ref: Mutex<Option<GateRef>>,
     resumptions: Mutex<Vec<ResumeTurnRequest>>,
     cancellations: Mutex<Vec<CancelRunRequest>>,
+    resume_error: Mutex<Option<TurnError>>,
+    /// Idempotency cache: maps (run_id, idempotency_key) → cached ResumeTurnResponse.
+    /// A second resume_turn call with the same key returns the cached response
+    /// before any precondition or status check, mirroring real TurnCoordinator behaviour.
+    resume_cache: Mutex<HashMap<(TurnRunId, IdempotencyKey), ResumeTurnResponse>>,
+    /// Shared ordered event log for call-ordering tests; None by default.
+    event_log: Mutex<Option<Arc<Mutex<Vec<&'static str>>>>>,
 }
 
 impl FakeTurnCoordinator {
@@ -424,11 +441,36 @@ impl FakeTurnCoordinator {
             gate_ref: Mutex::new(Some(gate_ref)),
             resumptions: Mutex::new(Vec::new()),
             cancellations: Mutex::new(Vec::new()),
+            resume_error: Mutex::new(None),
+            resume_cache: Mutex::new(HashMap::new()),
+            event_log: Mutex::new(None),
         }
+    }
+
+    fn set_event_log(&self, log: Arc<Mutex<Vec<&'static str>>>) {
+        *self.event_log.lock().expect("lock") = Some(log);
     }
 
     fn set_status(&self, status: TurnStatus) {
         *self.status.lock().expect("lock") = status;
+    }
+
+    fn set_resume_error(&self, error: TurnError) {
+        *self.resume_error.lock().expect("lock") = Some(error);
+    }
+
+    /// Pre-seed the idempotency cache so that a replay call with `key` returns
+    /// `response` without needing a real first-Deny call in the same test.
+    fn seed_resume_cache(
+        &self,
+        run_id: TurnRunId,
+        key: IdempotencyKey,
+        response: ResumeTurnResponse,
+    ) {
+        self.resume_cache
+            .lock()
+            .expect("lock")
+            .insert((run_id, key), response);
     }
 
     fn resumption_count(&self) -> usize {
@@ -455,12 +497,12 @@ impl FakeTurnCoordinator {
             .map(|request| request.run_id)
     }
 
-    fn last_resumption_approval_disposition(&self) -> Option<ApprovalResumeDisposition> {
+    fn last_resumption_disposition(&self) -> Option<GateResumeDisposition> {
         self.resumptions
             .lock()
             .expect("lock")
             .last()
-            .and_then(|request| request.approval_resume_disposition.clone())
+            .and_then(|request| request.resume_disposition.clone())
     }
 }
 
@@ -482,12 +524,36 @@ impl TurnCoordinator for FakeTurnCoordinator {
         request: ResumeTurnRequest,
     ) -> Result<ResumeTurnResponse, TurnError> {
         let run_id = request.run_id;
+        let cache_key = (run_id, request.idempotency_key.clone());
         self.resumptions.lock().expect("lock").push(request);
-        Ok(ResumeTurnResponse {
+        if let Some(log) = self.event_log.lock().expect("lock").as_ref() {
+            log.lock().expect("lock").push("resume");
+        }
+        // Idempotency: return cached response for a repeated key before any
+        // other check, matching real TurnCoordinator behaviour.
+        if let Some(cached) = self
+            .resume_cache
+            .lock()
+            .expect("lock")
+            .get(&cache_key)
+            .cloned()
+        {
+            return Ok(cached);
+        }
+        // Explicit error injection fires for fresh (uncached) keys.
+        if let Some(error) = self.resume_error.lock().expect("lock").clone() {
+            return Err(error);
+        }
+        let response = ResumeTurnResponse {
             run_id,
             status: TurnStatus::Queued,
             event_cursor: EventCursor(11),
-        })
+        };
+        self.resume_cache
+            .lock()
+            .expect("lock")
+            .insert(cache_key, response.clone());
+        Ok(response)
     }
 
     async fn cancel_run(&self, request: CancelRunRequest) -> Result<CancelRunResponse, TurnError> {
@@ -522,8 +588,7 @@ impl TurnCoordinator for FakeTurnCoordinator {
             failure: None,
             event_cursor: EventCursor(17),
             product_context: None,
-            auth_resume_disposition: None,
-            approval_resume_disposition: None,
+            resume_disposition: None,
         })
     }
 }
@@ -1607,6 +1672,9 @@ async fn already_approved_product_replay_without_run_hint_recovers_historical_ru
 
 #[tokio::test]
 async fn already_denied_gate_resumes_without_reissuing_denial() {
+    // Gate is already Denied but run is still parked (BlockedApproval).
+    // deny_gate no-ops the durable write and resumes the run with a denial
+    // disposition — it must NOT re-issue a denial or cancel the run.
     let (service, resolver, coordinator, run_id, gate_ref) = service_fixture_for_request_status(
         approval_request("delete a file"),
         ApprovalStatus::Denied,
@@ -1626,24 +1694,80 @@ async fn already_denied_gate_resumes_without_reissuing_denial() {
 
     assert!(matches!(
         response,
-        ResolveApprovalInteractionResponse::Denied(_)
+        ResolveApprovalInteractionResponse::Resumed(_)
     ));
     assert_eq!(resolver.denial_count(), 0);
+    assert_eq!(coordinator.cancellation_count(), 0);
     assert_eq!(coordinator.resumption_count(), 1);
     assert_eq!(
-        coordinator.last_resumption_approval_disposition(),
-        Some(ApprovalResumeDisposition::Denied)
+        coordinator.last_resumption_disposition(),
+        Some(GateResumeDisposition::Denied)
     );
-    assert_eq!(coordinator.cancellation_count(), 0);
 }
 
 #[tokio::test]
-async fn already_denied_replay_reaches_turn_coordinator_when_run_is_not_parked() {
+async fn already_denied_replay_returns_stale_when_resume_turn_fails_precondition() {
+    // NotParkedOnGate + Denied gate + fresh idempotency key (no cache entry) →
+    // resume_turn fails the precondition check (run is no longer parked) →
+    // map_approval_resume_error maps InvalidRequest → StaleGate.
+    // This covers both the Cancelled case and any other non-parked terminal state.
     let (service, resolver, coordinator, run_id, gate_ref) = service_fixture_for_request_status(
         approval_request("delete a file"),
         ApprovalStatus::Denied,
     );
     coordinator.set_status(TurnStatus::Cancelled);
+    // Inject the error the real coordinator returns when BlockedApprovalGate
+    // precondition fails (run is no longer parked).
+    coordinator.set_resume_error(TurnError::InvalidRequest {
+        reason: "precondition BlockedApprovalGate failed: run is Cancelled".to_string(),
+    });
+
+    let error = service
+        .resolve(ResolveApprovalInteractionRequest {
+            scope: scope(),
+            actor: actor("user-alpha"),
+            run_id_hint: Some(run_id),
+            gate_ref,
+            decision: ApprovalInteractionDecision::Deny,
+            idempotency_key: IdempotencyKey::new("replay-denied-cancelled").expect("idempotency"),
+        })
+        .await
+        .expect_err("fresh key on non-parked run must return StaleGate");
+
+    // map_approval_resume_error maps InvalidRequest → StaleGate.
+    assert!(matches!(
+        error,
+        ironclaw_product_workflow::ProductWorkflowError::ApprovalInteractionRejected {
+            kind: ApprovalInteractionRejectionKind::StaleGate
+        }
+    ));
+    assert_eq!(resolver.denial_count(), 0);
+    assert_eq!(coordinator.cancellation_count(), 0);
+    // resume_turn IS called once (records the call, then returns the injected error).
+    assert_eq!(coordinator.resumption_count(), 1);
+}
+
+#[tokio::test]
+async fn already_denied_replay_resumes_idempotently_when_disposition_marker_present() {
+    // NotParkedOnGate + Denied gate + non-terminal run → idempotent replay via
+    // resume_turn idempotency cache.  The cache is pre-seeded to simulate the
+    // response the first Deny would have produced.
+    let (service, _resolver, coordinator, run_id, gate_ref) = service_fixture_for_request_status(
+        approval_request("delete a file"),
+        ApprovalStatus::Denied,
+    );
+    coordinator.set_status(TurnStatus::Queued);
+    // Pre-seed the idempotency cache with the response the first Deny produced.
+    let cached_response = ResumeTurnResponse {
+        run_id,
+        status: TurnStatus::Queued,
+        event_cursor: EventCursor(11),
+    };
+    coordinator.seed_resume_cache(
+        run_id,
+        IdempotencyKey::new("replay-denied-idempotent").expect("idempotency"),
+        cached_response.clone(),
+    );
 
     let response = service
         .resolve(ResolveApprovalInteractionRequest {
@@ -1652,26 +1776,61 @@ async fn already_denied_replay_reaches_turn_coordinator_when_run_is_not_parked()
             run_id_hint: Some(run_id),
             gate_ref,
             decision: ApprovalInteractionDecision::Deny,
-            idempotency_key: IdempotencyKey::new("replay-denied").expect("idempotency"),
+            idempotency_key: IdempotencyKey::new("replay-denied-idempotent").expect("idempotency"),
         })
         .await
-        .expect("replay denied");
+        .expect("idempotent replay must succeed");
 
     assert!(matches!(
         response,
-        ResolveApprovalInteractionResponse::Denied(_)
+        ResolveApprovalInteractionResponse::Resumed(_)
     ));
-    assert_eq!(resolver.denial_count(), 0);
+    // The cache hit still counts as a resume_turn call — it just returns the
+    // cached result instead of executing the precondition.
     assert_eq!(coordinator.resumption_count(), 1);
-    assert_eq!(
-        coordinator.last_resumption_approval_disposition(),
-        Some(ApprovalResumeDisposition::Denied)
-    );
     assert_eq!(coordinator.cancellation_count(), 0);
 }
 
 #[tokio::test]
-async fn deny_marks_pending_gate_denied_then_resumes_run_with_denial_disposition() {
+async fn already_denied_replay_returns_stale_when_run_is_other_terminal_state() {
+    // NotParkedOnGate + Denied gate + other terminal run (Completed) + fresh key →
+    // replay returns StaleGate — a finished run rejects a fresh resume_turn call.
+    let (service, _resolver, coordinator, run_id, gate_ref) = service_fixture_for_request_status(
+        approval_request("delete a file"),
+        ApprovalStatus::Denied,
+    );
+    coordinator.set_status(TurnStatus::Completed);
+    // Inject the error the real coordinator returns when the precondition fails
+    // (run is Completed, not BlockedApproval).
+    coordinator.set_resume_error(TurnError::InvalidRequest {
+        reason: "precondition BlockedApprovalGate failed: run is Completed".to_string(),
+    });
+
+    let error = service
+        .resolve(ResolveApprovalInteractionRequest {
+            scope: scope(),
+            actor: actor("user-alpha"),
+            run_id_hint: Some(run_id),
+            gate_ref,
+            decision: ApprovalInteractionDecision::Deny,
+            idempotency_key: IdempotencyKey::new("replay-denied-completed").expect("idempotency"),
+        })
+        .await
+        .expect_err("completed run must return StaleGate");
+
+    assert!(matches!(
+        error,
+        ironclaw_product_workflow::ProductWorkflowError::ApprovalInteractionRejected {
+            kind: ApprovalInteractionRejectionKind::StaleGate
+        }
+    ));
+    // resume_turn IS called once (records the call, then returns the injected error).
+    assert_eq!(coordinator.resumption_count(), 1);
+    assert_eq!(coordinator.cancellation_count(), 0);
+}
+
+#[tokio::test]
+async fn deny_marks_pending_gate_denied_then_resumes_run_with_disposition() {
     let (service, resolver, coordinator, run_id, gate_ref) = service_fixture("delete a file");
     let response = service
         .resolve(ResolveApprovalInteractionRequest {
@@ -1687,20 +1846,218 @@ async fn deny_marks_pending_gate_denied_then_resumes_run_with_denial_disposition
 
     assert!(matches!(
         response,
-        ResolveApprovalInteractionResponse::Denied(_)
+        ResolveApprovalInteractionResponse::Resumed(_)
     ));
     assert_eq!(resolver.approval_count(), 0);
     assert_eq!(resolver.denial_count(), 1);
+    // Run is resumed with denial disposition, NOT cancelled.
+    assert_eq!(coordinator.cancellation_count(), 0);
     assert_eq!(coordinator.resumption_count(), 1);
+    assert_eq!(
+        coordinator.last_resumption_disposition(),
+        Some(GateResumeDisposition::Denied)
+    );
     assert_eq!(
         coordinator.last_resumption_precondition(),
         Some(ResumeTurnPrecondition::BlockedApprovalGate)
     );
-    assert_eq!(
-        coordinator.last_resumption_approval_disposition(),
-        Some(ApprovalResumeDisposition::Denied)
-    );
+}
+
+#[tokio::test]
+async fn idempotent_deny_replay_returns_same_resumed_response_as_first_deny() {
+    // First Deny (ParkedOnGate + Pending) produces Resumed(R).
+    // A second resolve() with the SAME idempotency key (NotParkedOnGate + Denied)
+    // must return the SAME Resumed(R) via resume_turn idempotency caching — even
+    // though the run is no longer parked.
+    //
+    // Two services are used: service1 drives the first Deny; service2 shares the
+    // same run_id and coordinator so the cache seeded in service1 is replayed by
+    // service2 (which sees the gate as already Denied, status Queued).
+    let request = approval_request("delete a file");
+    let request_id = request.id;
+    let (service, resolver, coordinator, run_id, gate_ref) = service_fixture_for_request(request);
+
+    // ── First call: fresh Deny on a parked, pending gate ──────────────────────
+    let first_response = service
+        .resolve(ResolveApprovalInteractionRequest {
+            scope: scope(),
+            actor: actor("user-alpha"),
+            run_id_hint: Some(run_id),
+            gate_ref: gate_ref.clone(),
+            decision: ApprovalInteractionDecision::Deny,
+            idempotency_key: IdempotencyKey::new("idem-deny-replay").expect("idempotency"),
+        })
+        .await
+        .expect("first deny");
+
+    let first_resumed = match &first_response {
+        ResolveApprovalInteractionResponse::Resumed(r) => r.clone(),
+        other => panic!("expected Resumed, got {other:?}"),
+    };
+    assert_eq!(resolver.denial_count(), 1);
+    assert_eq!(coordinator.resumption_count(), 1);
     assert_eq!(coordinator.cancellation_count(), 0);
+
+    // Simulate the transition: run left BlockedApproval and the gate is now Denied.
+    coordinator.set_status(TurnStatus::Queued);
+
+    // ── Second call: replay Deny with SAME key, gate now Denied ───────────────
+    // Build service2 with the gate pre-set to Denied and the SAME run_id/coordinator
+    // so the cache entry seeded by service1's first Deny is visible.
+    // Gate must use the same request_id so approval_gate_ref(request_id) == gate_ref.
+    let denied_request = ApprovalRequest {
+        id: request_id,
+        correlation_id: CorrelationId::new(),
+        requested_by: Principal::User(actor("user-alpha").user_id.clone()),
+        action: Box::new(Action::Dispatch {
+            capability: CapabilityId::new("demo.echo").expect("capability"),
+            estimated_resources: ResourceEstimate::default(),
+        }),
+        invocation_fingerprint: None,
+        reason: "delete a file".to_string(),
+        reusable_scope: None,
+    };
+    let denied_gate = ApprovalGateRecord::with_status(
+        resource_scope(&actor("user-alpha")),
+        run_id,
+        gate_ref.clone(),
+        denied_request,
+        ApprovalStatus::Denied,
+    )
+    .expect("denied gate with correct run_id");
+    let resolver2 = Arc::new(RecordingApprovalResolver::default());
+    let service2 = DefaultApprovalInteractionService::new(
+        Arc::new(FakeReadModel::with_gate(denied_gate)),
+        Arc::new(FixedLeaseTermsProvider),
+        resolver2.clone(),
+        // Reuse the SAME coordinator — it carries the idempotency cache from service1.
+        coordinator.clone(),
+    );
+
+    let second_response = service2
+        .resolve(ResolveApprovalInteractionRequest {
+            scope: scope(),
+            actor: actor("user-alpha"),
+            run_id_hint: Some(run_id),
+            gate_ref,
+            decision: ApprovalInteractionDecision::Deny,
+            idempotency_key: IdempotencyKey::new("idem-deny-replay").expect("idempotency"),
+        })
+        .await
+        .expect("idempotent replay must succeed");
+
+    let second_resumed = match &second_response {
+        ResolveApprovalInteractionResponse::Resumed(r) => r.clone(),
+        other => panic!("expected Resumed, got {other:?}"),
+    };
+    // Must return the SAME full response as the first (same cached result).
+    assert_eq!(first_resumed, second_resumed);
+    // Replay went through resume_turn (one more call → total 2), not cancel_run.
+    assert_eq!(coordinator.resumption_count(), 2);
+    assert_eq!(coordinator.cancellation_count(), 0);
+    // No new denial written — gate was already Denied.
+    assert_eq!(resolver2.denial_count(), 0);
+}
+
+#[tokio::test]
+async fn replay_denied_gate_returns_transient_when_resume_turn_errors() {
+    // NotParkedOnGate + Denied gate + resume_turn fails → error propagates as Transient.
+    // replay_denied_gate routes through resume_turn (not get_run_state), so injecting
+    // a resume_error is the right way to test transient backend failures on replay.
+    let (service, _resolver, coordinator, run_id, gate_ref) = service_fixture_for_request_status(
+        approval_request("delete a file"),
+        ApprovalStatus::Denied,
+    );
+    coordinator.set_status(TurnStatus::Queued);
+    // Inject a transient error for the fresh key — resume_error fires after the
+    // cache miss, before any precondition check.
+    coordinator.set_resume_error(TurnError::Unavailable {
+        reason: "coordinator unavailable".to_string(),
+    });
+
+    let error = service
+        .resolve(ResolveApprovalInteractionRequest {
+            scope: scope(),
+            actor: actor("user-alpha"),
+            run_id_hint: Some(run_id),
+            gate_ref,
+            decision: ApprovalInteractionDecision::Deny,
+            idempotency_key: IdempotencyKey::new("replay-denied-resume-error")
+                .expect("idempotency"),
+        })
+        .await
+        .expect_err("resume_turn failure must propagate");
+
+    // map_approval_resume_error maps Unavailable → Transient.
+    assert!(
+        matches!(
+            error,
+            ironclaw_product_workflow::ProductWorkflowError::Transient { .. }
+        ),
+        "expected Transient, got: {error:?}"
+    );
+    assert_eq!(coordinator.resumption_count(), 1);
+    assert_eq!(coordinator.cancellation_count(), 0);
+}
+
+#[tokio::test]
+async fn deny_marks_pending_gate_denied_then_propagates_resume_error_without_cancelling() {
+    // ParkedOnGate (BlockedApproval) + Pending gate → fresh deny path.
+    // The durable denial write must complete before resume is attempted.
+    // When resume_turn fails (Unavailable → Transient), the error propagates
+    // and cancel_run must NOT be called.
+    //
+    // An ordered event log is shared between both fakes to verify that the
+    // resolver's deny() is called strictly before the coordinator's resume_turn().
+    let call_order: Arc<Mutex<Vec<&'static str>>> = Arc::new(Mutex::new(Vec::new()));
+
+    let (service, resolver, coordinator, run_id, gate_ref) = service_fixture("delete a file");
+    resolver.set_event_log(Arc::clone(&call_order));
+    coordinator.set_event_log(Arc::clone(&call_order));
+    coordinator.set_resume_error(TurnError::Unavailable {
+        reason: "coordinator unavailable".to_string(),
+    });
+
+    let error = service
+        .resolve(ResolveApprovalInteractionRequest {
+            scope: scope(),
+            actor: actor("user-alpha"),
+            run_id_hint: Some(run_id),
+            gate_ref,
+            decision: ApprovalInteractionDecision::Deny,
+            idempotency_key: IdempotencyKey::new("deny-resume-error").expect("idempotency"),
+        })
+        .await
+        .expect_err("resume failure must propagate");
+
+    // map_approval_resume_error maps Unavailable → Transient.
+    assert!(
+        matches!(
+            error,
+            ironclaw_product_workflow::ProductWorkflowError::Transient { .. }
+        ),
+        "expected Transient, got {error:?}"
+    );
+    // Durable denial write happened before the resume attempt.
+    assert_eq!(
+        resolver.denial_count(),
+        1,
+        "denial must be written before resume"
+    );
+    // resume_turn was called (and failed), but cancel_run must never be called.
+    assert_eq!(coordinator.resumption_count(), 1);
+    assert_eq!(
+        coordinator.cancellation_count(),
+        0,
+        "cancel must not be called on deny path"
+    );
+    // Ordering: deny must be recorded strictly before resume_turn.
+    let recorded = call_order.lock().expect("lock").clone();
+    assert_eq!(
+        recorded,
+        vec!["deny", "resume"],
+        "deny must be called before resume_turn; got: {recorded:?}"
+    );
 }
 
 #[tokio::test]

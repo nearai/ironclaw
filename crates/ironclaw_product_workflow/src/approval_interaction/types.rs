@@ -282,7 +282,7 @@ pub struct ResolveApprovalInteractionRequest {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ResolveApprovalInteractionResponse {
     Approved(ResumeTurnResponse),
-    Denied(ResumeTurnResponse),
+    Resumed(ResumeTurnResponse),
 }
 
 fn display_safe_summary() -> String {

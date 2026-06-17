@@ -467,8 +467,7 @@ impl TurnRunnerWorker {
                     run_id,
                     checkpoint_id,
                     resolved_run_profile: claimed.resolved_run_profile.clone(),
-                    auth_resume_disposition: claimed.state.auth_resume_disposition.clone(),
-                    approval_resume_disposition: claimed.state.approval_resume_disposition.clone(),
+                    resume_disposition: claimed.state.resume_disposition.clone(),
                 };
                 driver
                     .resume(request, host.as_ref())

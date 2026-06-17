@@ -18,14 +18,14 @@ import {
   recordAcceptedMessageRef,
   removePending,
 } from "../lib/pending-messages.js";
-import { toRenderAttachment, toWireAttachment } from "../lib/attachments.js";
-import { useHistory } from "./useHistory.js";
-import { useSSE } from "./useSSE.js";
 import {
   createToolActivityState,
   failGateToolActivity,
   resetToolActivityState,
 } from "../lib/tool-activity-state.js";
+import { toRenderAttachment, toWireAttachment } from "../lib/attachments.js";
+import { useHistory } from "./useHistory.js";
+import { useSSE } from "./useSSE.js";
 
 const AUTH_TOKEN_FLOW_TIMEOUT_MS = 30000;
 const AUTH_GATE_CREDENTIAL_STORED_ERROR =
@@ -33,10 +33,6 @@ const AUTH_GATE_CREDENTIAL_STORED_ERROR =
 const OAUTH_CALLBACK_CHANNEL = "ironclaw-product-auth";
 const OAUTH_CALLBACK_STORAGE_KEY = "ironclaw:product-auth:oauth-complete";
 const OAUTH_CALLBACK_MESSAGE_TYPE = "ironclaw:product-auth:oauth-complete";
-
-function resolvedGateKey(runId, gateRef) {
-  return runId && gateRef ? `${runId}\n${gateRef}` : null;
-}
 
 async function withAuthTokenTimeout(task) {
   const controller = new AbortController();
@@ -71,7 +67,9 @@ function resolveGateOutcome(response) {
   if (response?.outcome) return response.outcome;
   const status = String(response?.status || "").toLowerCase();
   if (status === "queued" || status === "running") return "resumed";
-  if (status === "cancelled" || response?.already_terminal !== undefined) return "cancelled";
+  if (status === "cancelled" || response?.already_terminal !== undefined) {
+    return "cancelled";
+  }
   return null;
 }
 
@@ -131,8 +129,6 @@ export function useChat(threadId) {
   const [now, setNow] = React.useState(Date.now());
   const [activeRun, setActiveRunState] = React.useState(null);
   const activeRunRef = React.useRef(activeRun);
-  const locallyResolvedGatesRef = React.useRef(new Map());
-  const toolActivityStateRef = React.useRef(createToolActivityState());
   const setActiveRun = React.useCallback((next) => {
     const value = typeof next === "function" ? next(activeRunRef.current) : next;
     activeRunRef.current = value;
@@ -168,6 +164,7 @@ export function useChat(threadId) {
 
   const [isProcessing, setIsProcessing] = React.useState(false);
   const [pendingGate, setPendingGate] = React.useState(null);
+  const toolActivityStateRef = React.useRef(createToolActivityState());
   const authTokenSubmitRef = React.useRef({
     gateKey: null,
     credentialRef: null,
@@ -185,9 +182,8 @@ export function useChat(threadId) {
     setIsProcessing(false);
     setPendingGate(null);
     setActiveRun(null);
-    locallyResolvedGatesRef.current.clear();
-    resetToolActivityState(toolActivityStateRef);
     setChannelConnectAction(null);
+    resetToolActivityState(toolActivityStateRef);
   }, [threadId]);
 
   const cooldownSeconds = Math.max(0, Math.ceil((cooldownUntil - now) / 1000));
@@ -260,7 +256,6 @@ export function useChat(threadId) {
     setPendingGate,
     setActiveRun,
     activeRunRef,
-    locallyResolvedGatesRef,
     toolActivityStateRef,
     // Reborn's projection bridge does not yet emit `Text` items for
     // assistant replies, and never emits `capability_display_preview`
@@ -467,41 +462,26 @@ export function useChat(threadId) {
         always: opts.always,
         credentialRef: opts.credentialRef,
       });
-      const responseOutcome = resolveGateOutcome(response);
-      const responseResumed = responseOutcome === "resumed";
-      const shouldContinueProcessing =
-        responseResumed ||
-        resolution === "approved" ||
-        resolution === "credential_provided";
-      if (
-        !shouldContinueProcessing ||
-        resolution === "denied" ||
-        resolution === "cancelled"
-      ) {
-        const key = resolvedGateKey(runId, gateRef);
-        if (key) {
-          locallyResolvedGatesRef.current.set(key, {
-            resolution,
-            outcome: responseOutcome,
-          });
-        }
-      }
       if (resolution === "denied") {
         failGateToolActivity(setMessages, pendingGate, toolActivityStateRef);
       }
+      const outcome = resolveGateOutcome(response);
+      // Every gate resolution (approved, denied, credential_provided, cancelled)
+      // resumes the run on the backend. Keep processing and preserve activeRun so
+      // the browser stays in sync with the continuing run. The terminal run_status
+      // SSE event (completed/failed/cancelled) is what clears processing naturally.
+      // Run termination is the separate cancelRun (X button) path.
       setPendingGate(null);
-      setIsProcessing(shouldContinueProcessing);
-      if (shouldContinueProcessing) {
+      setIsProcessing(true);
+      if (outcome === "resumed") {
         setActiveRun({
           runId: response?.run_id || runId,
-          threadId,
+          threadId: response?.thread_id || threadId,
           status: response?.status || "queued",
         });
-      } else {
-        setActiveRun(null);
       }
     },
-    [pendingGate, threadId],
+    [pendingGate, threadId, setMessages, setActiveRun],
   );
 
   const submitAuthToken = React.useCallback(

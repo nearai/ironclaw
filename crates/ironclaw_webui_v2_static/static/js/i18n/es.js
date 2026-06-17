@@ -89,6 +89,7 @@ registerPack("es", {
   "chat.attachmentUnsupportedType": "{name} no es un tipo de archivo admitido.",
   "chat.attachmentReadFailed": "No se pudo leer {name}.",
   "chat.attachmentStagingFailed": "No se pudieron adjuntar los archivos seleccionados.",
+  "chat.fileDownloadFailed": "No se pudo descargar ese archivo.",
   "chat.modeAutoReview": "Revision automatica",
   "chat.runtimeLocal": "Trabajar localmente",
   "chat.statusWorking": "Trabajando",

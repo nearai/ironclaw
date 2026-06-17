@@ -458,8 +458,7 @@ impl TurnCoordinator for FakeTurnCoordinator {
             failure: None,
             event_cursor: EventCursor(17),
             product_context: None,
-            auth_resume_disposition: None,
-            approval_resume_disposition: None,
+            resume_disposition: None,
         })
     }
 }
@@ -555,8 +554,7 @@ impl TurnCoordinator for BlockingSubmitCoordinator {
             failure: None,
             event_cursor: EventCursor(29),
             product_context: None,
-            auth_resume_disposition: None,
-            approval_resume_disposition: None,
+            resume_disposition: None,
         })
     }
 }
@@ -602,7 +600,7 @@ impl ApprovalInteractionService for RecordingApprovalInteractionService {
                 })
             }
             ApprovalInteractionDecision::Deny => {
-                ResolveApprovalInteractionResponse::Denied(ResumeTurnResponse {
+                ResolveApprovalInteractionResponse::Resumed(ResumeTurnResponse {
                     run_id,
                     status: TurnStatus::Queued,
                     event_cursor: EventCursor(23),
@@ -3783,7 +3781,7 @@ async fn approval_gate_resolution_uses_approval_interaction_service() {
 }
 
 #[tokio::test]
-async fn approval_gate_denial_uses_approval_interaction_service_and_returns_resumed() {
+async fn approval_gate_denial_uses_approval_interaction_service_and_returns_cancelled() {
     let coordinator = Arc::new(FakeTurnCoordinator::default());
     let approval_interactions = Arc::new(RecordingApprovalInteractionService::default());
     let services = RebornServices::new(

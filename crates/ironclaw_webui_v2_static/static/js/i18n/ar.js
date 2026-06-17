@@ -89,6 +89,7 @@ registerPack("ar", {
   "chat.attachmentUnsupportedType": "{name} ليس نوع ملف مدعوم.",
   "chat.attachmentReadFailed": "تعذّرت قراءة {name}.",
   "chat.attachmentStagingFailed": "تعذّر إرفاق الملفات المحددة.",
+  "chat.fileDownloadFailed": "تعذّر تنزيل هذا الملف.",
   "chat.modeAutoReview": "مراجعة تلقائية",
   "chat.runtimeLocal": "العمل محليًا",
   "chat.statusWorking": "جارٍ العمل",

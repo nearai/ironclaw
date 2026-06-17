@@ -646,8 +646,7 @@ mod tests {
             subagent_depth: 0,
             spawn_tree_root_run_id: None,
             product_context: None,
-            auth_resume_disposition: None,
-            approval_resume_disposition: None,
+            resume_disposition: None,
         }
     }
 

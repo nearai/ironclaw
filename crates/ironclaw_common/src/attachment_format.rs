@@ -451,6 +451,24 @@ pub fn canonical_extension(mime: &str) -> Option<&'static str> {
     lookup(mime).map(|format| format.canonical_ext)
 }
 
+/// The canonical MIME type for a filename extension (without the leading dot),
+/// matched case-insensitively against each format's canonical and alias
+/// extensions. Returns `None` for an unknown extension; download callers should
+/// fall back to `application/octet-stream`.
+pub fn mime_for_extension(ext: &str) -> Option<&'static str> {
+    // `ext` is normalized to lowercase and every `FORMATS` extension/alias is a
+    // unique lowercase literal (locked by
+    // `table_has_no_duplicate_mimes_or_extensions`), so direct equality
+    // suffices — no per-iteration case folding needed.
+    let ext = ext.trim_start_matches('.').to_ascii_lowercase();
+    FORMATS
+        .iter()
+        .find(|format| {
+            format.canonical_ext == ext || format.ext_aliases.iter().any(|alias| *alias == ext)
+        })
+        .map(|format| format.mime)
+}
+
 /// The attachment kind for a MIME type.
 ///
 /// The registry is authoritative for supported formats. For unsupported MIME
@@ -636,6 +654,31 @@ mod tests {
                 format.canonical_ext
             );
             assert!(!format.canonical_ext.is_empty());
+            // `mime_for_extension` lowercases its input and compares with `==`,
+            // so every table extension must be lowercase, and every extension
+            // (canonical or alias) must be unique across the whole table — a
+            // collision would silently mislabel a download with the first match.
+            assert_eq!(
+                format.canonical_ext,
+                format.canonical_ext.to_ascii_lowercase(),
+                "canonical extension {} is not lowercase",
+                format.canonical_ext
+            );
+            for alias in format.ext_aliases {
+                assert!(
+                    seen_exts.insert(*alias),
+                    "extension {alias} appears as canonical and/or alias more than once",
+                );
+                assert_ne!(
+                    *alias, format.canonical_ext,
+                    "extension alias equals canonical for {alias}",
+                );
+                assert_eq!(
+                    *alias,
+                    alias.to_ascii_lowercase(),
+                    "extension alias {alias} is not lowercase",
+                );
+            }
             assert_eq!(
                 format.mime,
                 normalize_mime_type(format.mime),
@@ -882,5 +925,25 @@ mod tests {
                 "registry canonical_ext for {mime} diverged from web_attachment_ext"
             );
         }
+    }
+
+    #[test]
+    fn mime_for_extension_resolves_canonical_alias_and_normalizes() {
+        // Canonical extension.
+        assert_eq!(mime_for_extension("csv"), Some("text/csv"));
+        assert_eq!(mime_for_extension("jpg"), Some("image/jpeg"));
+        // Alias extensions resolve to the same canonical MIME.
+        assert_eq!(mime_for_extension("jpeg"), Some("image/jpeg"));
+        assert_eq!(mime_for_extension("jfif"), Some("image/jpeg"));
+        // Input is normalized: leading dot stripped, ASCII case-insensitive.
+        assert_eq!(mime_for_extension(".JPG"), Some("image/jpeg"));
+        assert_eq!(mime_for_extension("CSV"), Some("text/csv"));
+    }
+
+    #[test]
+    fn mime_for_extension_returns_none_for_unknown() {
+        // Download callers rely on `None` to fall back to octet-stream.
+        assert_eq!(mime_for_extension("nope"), None);
+        assert_eq!(mime_for_extension(""), None);
     }
 }

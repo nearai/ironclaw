@@ -12,6 +12,7 @@ use ironclaw_run_state::{
     ApprovalRequestStore, ApprovalStatus, RunStart, RunStateApprovalStore, RunStateError,
     RunStateStore, RunStatus,
 };
+use ironclaw_safety::shell_command_display_text;
 use ironclaw_trust::TrustDecision;
 use tracing::{debug, warn};
 
@@ -314,6 +315,11 @@ where
                 request: mut approval,
             } => {
                 let approval_request_id = approval.id;
+                add_capability_input_display_hint(
+                    &mut approval.reason,
+                    &request.capability_id,
+                    &request.input,
+                );
                 debug!(
                     approval_request_id = %approval_request_id,
                     "capability authorization requires approval"
@@ -1525,6 +1531,11 @@ where
             Decision::RequireApproval {
                 request: mut approval,
             } => {
+                add_capability_input_display_hint(
+                    &mut approval.reason,
+                    &request.capability_id,
+                    &request.input,
+                );
                 if let Err(error) = validate_approval_request_matches_invocation(
                     &approval,
                     &request.context,
@@ -2104,6 +2115,35 @@ where
                 "obligation abort failed after downstream side-effect failure",
             );
         }
+    }
+}
+
+fn add_capability_input_display_hint(
+    reason: &mut String,
+    capability_id: &CapabilityId,
+    input: &serde_json::Value,
+) {
+    let capability_id = capability_id.as_str();
+    if capability_id != "shell"
+        && capability_id != "builtin.shell"
+        && !capability_id.ends_with(".shell")
+    {
+        return;
+    }
+    let Some(command) = input
+        .get("command")
+        .and_then(serde_json::Value::as_str)
+        .map(shell_command_display_text)
+    else {
+        return;
+    };
+    if command.text.is_empty() {
+        return;
+    }
+    reason.push_str("\n\nCommand:\n");
+    reason.push_str(&command.text);
+    if command.truncated {
+        reason.push_str("\n[truncated]");
     }
 }
 

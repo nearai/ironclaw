@@ -64,10 +64,12 @@ pub struct AgentLoopDriverResumeRequest {
     pub run_id: TurnRunId,
     pub checkpoint_id: TurnCheckpointId,
     pub resolved_run_profile: ResolvedRunProfile,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub auth_resume_disposition: Option<crate::AuthResumeDisposition>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub approval_resume_disposition: Option<crate::ApprovalResumeDisposition>,
+    #[serde(
+        rename = "auth_resume_disposition",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub resume_disposition: Option<crate::GateResumeDisposition>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Error)]

@@ -42,7 +42,7 @@ test("groupMessages: tool activities sort by stable activity order", () => {
   );
 });
 
-test("groupMessages: ordered projection activity sorts before unnumbered live activity", () => {
+test("groupMessages: unnumbered live activity keeps sequence against ordered projection activity", () => {
   const grouped = groupMessages([
     {
       id: "tool-web",
@@ -65,7 +65,7 @@ test("groupMessages: ordered projection activity sorts before unnumbered live ac
 
   assert.deepEqual(
     grouped[0].activity.map((item) => item.id),
-    ["tool-extension-a", "tool-extension-b", "tool-web"],
+    ["tool-web", "tool-extension-a", "tool-extension-b"],
   );
 });
 

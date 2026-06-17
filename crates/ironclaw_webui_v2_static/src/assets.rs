@@ -54,6 +54,67 @@ mod tests {
     }
 
     #[test]
+    fn project_file_download_chips_are_wired() {
+        // The download UI: message bubble renders chips fed by extracted
+        // workspace paths. Each chip is the shared `AttachmentChip` fed a
+        // descriptor whose `fetch_url` targets the bearer-authenticated v2
+        // `/files/content` endpoint, so clicking opens the same
+        // `AttachmentPreviewModal` (image/pdf/text preview + Download) as a
+        // message attachment.
+        let chips = asset_text("js/pages/chat/components/project-file-chips.js");
+        assert!(chips.contains("extractWorkspaceFilePaths"));
+        assert!(chips.contains("statProjectFile"));
+        assert!(chips.contains("projectFileContentUrl"));
+        assert!(chips.contains("AttachmentChip"));
+        assert!(chips.contains("AttachmentPreviewModal"));
+        // The chip passes the e2e selector hooks through to the shared chip,
+        // including the inline one-click download icon.
+        assert!(chips.contains("project-file-chip"));
+        assert!(chips.contains("project-file-download"));
+        assert!(chips.contains("dataPath"));
+
+        let bubble = asset_text("js/pages/chat/components/message-bubble.js");
+        assert!(bubble.contains("ProjectFileChips"));
+        assert!(bubble.contains("threadId"));
+
+        // Both surfaces share the chip + preview implementation, so message
+        // attachments and project files cannot drift. The shared chip renders
+        // the stable e2e selector attributes.
+        let chip = asset_text("js/pages/chat/components/attachment-chip.js");
+        assert!(chip.contains("export function AttachmentChip"));
+        assert!(chip.contains("export function AttachmentThumbnail"));
+        assert!(chip.contains("data-testid=${testId}"));
+        assert!(chip.contains("data-file-path=${dataPath}"));
+        // The inline download icon fetches the bearer-authenticated bytes and
+        // saves them directly (separate from the preview modal's own Download).
+        assert!(chip.contains("data-testid=${downloadTestId}"));
+        assert!(chip.contains("fetchAttachmentBlob"));
+        assert!(chip.contains("saveBlob"));
+        assert!(bubble.contains("AttachmentChip"));
+
+        // The preview modal fetches the blob (bearer-authenticated, via the
+        // shared `fetchAttachmentBlob`) and offers a Download action with a
+        // stable test hook.
+        let preview = asset_text("js/pages/chat/components/attachment-preview.js");
+        assert!(preview.contains("fetchAttachmentBlob"));
+        assert!(preview.contains("data-testid=\"attachment-download\""));
+
+        // The api client exposes a same-origin content URL helper and keeps the
+        // bearer-authenticated blob fetch; it does no DOM (object URLs live in
+        // the preview modal / `download.js`).
+        let api = asset_text("js/lib/api.js");
+        assert!(api.contains("projectFilesBase"));
+        assert!(api.contains("/content"));
+        assert!(api.contains("projectFileContentUrl"));
+        assert!(api.contains("Authorization"));
+        assert!(!api.contains("createObjectURL"));
+
+        // The pure extraction module is served; its test sibling is not.
+        assert!(lookup("js/pages/chat/lib/project-file-paths.js").is_some());
+        assert!(lookup("js/pages/chat/lib/project-file-paths.test.js").is_none());
+    }
+
+    #[test]
     fn chat_auth_gate_assets_submit_manual_token_then_resolve_gate() {
         let auth_card = asset_text("js/pages/chat/components/auth-token-card.js");
         assert!(auth_card.contains("await onSubmit(value);"));
@@ -111,13 +172,13 @@ mod tests {
     }
 
     #[test]
-    fn chat_cancelled_gate_resolution_exits_processing_state() {
+    fn chat_gate_resolution_always_resumes_run() {
         let use_chat = asset_text("js/pages/chat/hooks/useChat.js");
-        assert!(use_chat.contains("responseOutcome === \"resumed\""));
-        assert!(use_chat.contains("resolution === \"approved\""));
-        assert!(use_chat.contains("resolution === \"credential_provided\""));
-        assert!(use_chat.contains("setIsProcessing(shouldContinueProcessing);"));
-        assert!(use_chat.contains("setActiveRun(null);"));
+        // Every gate resolution resumes the run; there is no shouldContinueProcessing
+        // conditional. The terminal run_status SSE event is what clears processing.
+        assert!(use_chat.contains("setPendingGate(null);\n      setIsProcessing(true);"));
+        // activeRun is NOT cleared inside resolveGate — the run keeps going.
+        assert!(!use_chat.contains("setIsProcessing(shouldContinueProcessing);"));
 
         let events = asset_text("js/pages/chat/lib/useChatEvents.js");
         assert!(events.contains("TERMINAL_RUN_STATUSES.has(status)"));

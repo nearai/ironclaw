@@ -816,8 +816,7 @@ async fn blocked_dependent_run_can_resume_and_cancel_directly() {
             reply_target_binding_ref: ReplyTargetBindingRef::new("reply-web-resumed").unwrap(),
             idempotency_key: IdempotencyKey::new("idem-dependent-resume").unwrap(),
             precondition: ironclaw_turns::ResumeTurnPrecondition::BlockedDependentRunGate,
-            auth_resume_disposition: None,
-            approval_resume_disposition: None,
+            resume_disposition: None,
         })
         .await
         .unwrap();
@@ -942,8 +941,7 @@ async fn default_turn_coordinator_dedupes_idempotency_replay_events_by_cursor() 
         reply_target_binding_ref: ReplyTargetBindingRef::new("reply-web-resumed").unwrap(),
         idempotency_key: IdempotencyKey::new("idem-event-replay-resume").unwrap(),
         precondition: ironclaw_turns::ResumeTurnPrecondition::BlockedDependentRunGate,
-        auth_resume_disposition: None,
-        approval_resume_disposition: None,
+        resume_disposition: None,
     };
     coordinator.resume_turn(resume.clone()).await.unwrap();
     coordinator.resume_turn(resume).await.unwrap();
@@ -1661,8 +1659,7 @@ async fn lifecycle_publishing_store_propagates_required_observer_error_on_resume
             reply_target_binding_ref: ReplyTargetBindingRef::new("reply-web-resumed").unwrap(),
             idempotency_key: IdempotencyKey::new("idem-required-resume-error").unwrap(),
             precondition: ironclaw_turns::ResumeTurnPrecondition::BlockedDependentRunGate,
-            auth_resume_disposition: None,
-            approval_resume_disposition: None,
+            resume_disposition: None,
         })
         .await
         .unwrap_err();
@@ -1868,8 +1865,7 @@ async fn turn_lifecycle_projection_replays_submit_block_resume_complete_without_
             )
             .unwrap(),
             idempotency_key: IdempotencyKey::new("idem-turn-events-resume").unwrap(),
-            auth_resume_disposition: None,
-            approval_resume_disposition: None,
+            resume_disposition: None,
         })
         .await
         .unwrap();
@@ -2497,8 +2493,7 @@ async fn resume_turn_wakes_runner_for_same_run_after_requeue() {
             source_binding_ref: SourceBindingRef::new("source-web-resumed").unwrap(),
             reply_target_binding_ref: ReplyTargetBindingRef::new("reply-web-resumed").unwrap(),
             idempotency_key: IdempotencyKey::new("idem-resume-a").unwrap(),
-            auth_resume_disposition: None,
-            approval_resume_disposition: None,
+            resume_disposition: None,
         })
         .await
         .unwrap();
@@ -2625,8 +2620,7 @@ async fn resume_turn_ignores_wake_notification_panic_after_requeue() {
             source_binding_ref: SourceBindingRef::new("source-web-resumed").unwrap(),
             reply_target_binding_ref: ReplyTargetBindingRef::new("reply-web-resumed").unwrap(),
             idempotency_key: IdempotencyKey::new("idem-resume-a").unwrap(),
-            auth_resume_disposition: None,
-            approval_resume_disposition: None,
+            resume_disposition: None,
         })
         .await
         .unwrap();
@@ -3830,8 +3824,7 @@ async fn blocked_resume_then_recovery_failure_releases_admission_reservation() {
             source_binding_ref: SourceBindingRef::new("source-web-resumed").unwrap(),
             reply_target_binding_ref: ReplyTargetBindingRef::new("reply-web-resumed").unwrap(),
             idempotency_key: IdempotencyKey::new("idem-resume-a").unwrap(),
-            auth_resume_disposition: None,
-            approval_resume_disposition: None,
+            resume_disposition: None,
         })
         .await
         .unwrap();
@@ -4132,8 +4125,7 @@ async fn resume_updates_persisted_run_binding_refs_and_replay_envelope() {
         source_binding_ref: SourceBindingRef::new("source-web-resumed").unwrap(),
         reply_target_binding_ref: ReplyTargetBindingRef::new("reply-web-resumed").unwrap(),
         idempotency_key: IdempotencyKey::new("idem-resume-a").unwrap(),
-        auth_resume_disposition: None,
-        approval_resume_disposition: None,
+        resume_disposition: None,
     };
 
     let resumed = coordinator
@@ -4481,8 +4473,7 @@ async fn idempotency_persistence_snapshot_retains_each_operation_kind_capacity()
             source_binding_ref: SourceBindingRef::new("source-web-resumed").unwrap(),
             reply_target_binding_ref: ReplyTargetBindingRef::new("reply-web-resumed").unwrap(),
             idempotency_key: IdempotencyKey::new("idem-resume-a").unwrap(),
-            auth_resume_disposition: None,
-            approval_resume_disposition: None,
+            resume_disposition: None,
         })
         .await
         .unwrap();
@@ -4581,8 +4572,7 @@ async fn idempotency_replay_helpers_require_matching_operation_kind() {
             source_binding_ref: SourceBindingRef::new("source-web-resumed").unwrap(),
             reply_target_binding_ref: ReplyTargetBindingRef::new("reply-web-resumed").unwrap(),
             idempotency_key: IdempotencyKey::new("idem-resume-a").unwrap(),
-            auth_resume_disposition: None,
-            approval_resume_disposition: None,
+            resume_disposition: None,
         })
         .await
         .unwrap();
@@ -5384,8 +5374,7 @@ async fn blocked_run_persists_checkpoint_and_keeps_same_thread_lock_until_resume
         source_binding_ref: SourceBindingRef::new("source-web").unwrap(),
         reply_target_binding_ref: ReplyTargetBindingRef::new("reply-web").unwrap(),
         idempotency_key: IdempotencyKey::new("idem-resume-a").unwrap(),
-        auth_resume_disposition: None,
-        approval_resume_disposition: None,
+        resume_disposition: None,
     };
     let resumed = coordinator
         .resume_turn(resume_request.clone())
@@ -5443,8 +5432,7 @@ async fn resume_turn_rejects_unexpected_blocked_status_without_requeueing_run() 
             source_binding_ref: SourceBindingRef::new("source-web").unwrap(),
             reply_target_binding_ref: ReplyTargetBindingRef::new("reply-web").unwrap(),
             idempotency_key: IdempotencyKey::new("idem-resume-wrong-status").unwrap(),
-            auth_resume_disposition: None,
-            approval_resume_disposition: None,
+            resume_disposition: None,
         })
         .await
         .unwrap_err();
@@ -5512,8 +5500,7 @@ async fn resume_turn_from_foreign_actor_is_denied_without_requeueing_run() {
             source_binding_ref: SourceBindingRef::new("source-web").unwrap(),
             reply_target_binding_ref: ReplyTargetBindingRef::new("reply-web").unwrap(),
             idempotency_key: IdempotencyKey::new("idem-resume-foreign-actor").unwrap(),
-            auth_resume_disposition: None,
-            approval_resume_disposition: None,
+            resume_disposition: None,
         })
         .await
         .unwrap_err();
@@ -5656,8 +5643,7 @@ async fn resume_turn_with_wrong_gate_resolution_ref_is_invalid_request() {
             source_binding_ref: SourceBindingRef::new("source-web").unwrap(),
             reply_target_binding_ref: ReplyTargetBindingRef::new("reply-web").unwrap(),
             idempotency_key: IdempotencyKey::new("idem-resume-wrong-gate").unwrap(),
-            auth_resume_disposition: None,
-            approval_resume_disposition: None,
+            resume_disposition: None,
         })
         .await
         .unwrap_err();
@@ -6086,8 +6072,7 @@ async fn any_blocked_gate_resume_does_not_resume_dependent_run_gate() {
             source_binding_ref: SourceBindingRef::new("source-web").unwrap(),
             reply_target_binding_ref: ReplyTargetBindingRef::new("reply-web").unwrap(),
             idempotency_key: IdempotencyKey::new("idem-dependent-resume-any").unwrap(),
-            auth_resume_disposition: None,
-            approval_resume_disposition: None,
+            resume_disposition: None,
         })
         .await
         .unwrap_err();
@@ -6625,8 +6610,7 @@ impl TurnRunTransitionPort for AtomicLoopExitPort {
             failure: None,
             event_cursor: EventCursor(1),
             product_context: None,
-            auth_resume_disposition: None,
-            approval_resume_disposition: None,
+            resume_disposition: None,
         })
     }
 }
@@ -7262,10 +7246,10 @@ async fn submit_child_run_inherits_parent_product_context() {
     );
 }
 
-// Persistence path: resume_turn with auth_resume_disposition writes the field onto the run
+// Persistence path: resume_turn with resume_disposition writes the field onto the run
 // record, and claim_next_run returns a TurnRunState that carries the same value.
 #[tokio::test]
-async fn resume_turn_auth_resume_disposition_is_persisted_and_visible_on_claim() {
+async fn resume_turn_resume_disposition_is_persisted_and_visible_on_claim() {
     let (coordinator, store) = coordinator();
     let run_id = accepted_run_id(
         &coordinator
@@ -7322,7 +7306,7 @@ async fn resume_turn_auth_resume_disposition_is_persisted_and_visible_on_claim()
     );
 
     // Resume with Denied disposition — this is the auth-deny path.
-    let denied_disposition = ironclaw_turns::AuthResumeDisposition::Denied;
+    let denied_disposition = ironclaw_turns::GateResumeDisposition::Denied;
     coordinator
         .resume_turn(ResumeTurnRequest {
             scope: scope("thread-auth-deny-persist"),
@@ -7333,13 +7317,12 @@ async fn resume_turn_auth_resume_disposition_is_persisted_and_visible_on_claim()
             source_binding_ref: SourceBindingRef::new("source-auth-deny").unwrap(),
             reply_target_binding_ref: ReplyTargetBindingRef::new("reply-auth-deny").unwrap(),
             idempotency_key: IdempotencyKey::new("idem-auth-deny-persist-resume").unwrap(),
-            auth_resume_disposition: Some(denied_disposition.clone()),
-            approval_resume_disposition: None,
+            resume_disposition: Some(denied_disposition.clone()),
         })
         .await
         .unwrap();
 
-    // Claim the re-queued run and assert auth_resume_disposition is propagated.
+    // Claim the re-queued run and assert resume_disposition is propagated.
     let claimed = store
         .claim_next_run(ClaimRunRequest {
             runner_id: TurnRunnerId::new(),
@@ -7351,9 +7334,9 @@ async fn resume_turn_auth_resume_disposition_is_persisted_and_visible_on_claim()
         .expect("run must be claimable after auth-deny resume");
 
     assert_eq!(
-        claimed.state.auth_resume_disposition,
+        claimed.state.resume_disposition,
         Some(denied_disposition),
-        "auth_resume_disposition must be visible on the claimed TurnRunState"
+        "resume_disposition must be visible on the claimed TurnRunState"
     );
 
     // Self-clearing contract: a subsequent normal resume (disposition: None) clears the field.
@@ -7385,8 +7368,7 @@ async fn resume_turn_auth_resume_disposition_is_persisted_and_visible_on_claim()
             source_binding_ref: SourceBindingRef::new("source-auth-deny-2").unwrap(),
             reply_target_binding_ref: ReplyTargetBindingRef::new("reply-auth-deny-2").unwrap(),
             idempotency_key: IdempotencyKey::new("idem-auth-deny-persist-resume-2").unwrap(),
-            auth_resume_disposition: None,
-            approval_resume_disposition: None,
+            resume_disposition: None,
         })
         .await
         .unwrap();
@@ -7402,8 +7384,8 @@ async fn resume_turn_auth_resume_disposition_is_persisted_and_visible_on_claim()
         .expect("run must be claimable after second resume");
 
     assert_eq!(
-        claimed2.state.auth_resume_disposition, None,
-        "auth_resume_disposition must be None after a resume that supplies no disposition"
+        claimed2.state.resume_disposition, None,
+        "resume_disposition must be None after a resume that supplies no disposition"
     );
 }
 

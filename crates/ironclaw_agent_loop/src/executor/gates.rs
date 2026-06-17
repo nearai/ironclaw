@@ -81,6 +81,9 @@ impl ExecutorStage<GateInput> for GateStage {
                         provider_replay: call.provider_replay.clone(),
                         input: resume.input,
                         estimate: resume.estimate,
+                        // Disposition is stamped by PlannedDriver at resume time;
+                        // GateStage writes the initial (blocking) checkpoint where
+                        // no denial has occurred yet.
                         disposition: None,
                     });
                 if matches!(kind, GateKind::Auth) {

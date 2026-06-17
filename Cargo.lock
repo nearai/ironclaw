@@ -4198,6 +4198,7 @@ dependencies = [
  "ironclaw_processes",
  "ironclaw_resources",
  "ironclaw_run_state",
+ "ironclaw_safety",
  "ironclaw_trust",
  "serde_json",
  "thiserror 2.0.18",
@@ -5140,11 +5141,13 @@ dependencies = [
  "async-stream",
  "async-trait",
  "axum 0.8.9",
+ "base64 0.22.1",
  "chrono",
  "futures-core",
  "hex",
  "http 1.4.1",
  "http-body-util",
+ "ironclaw_attachments",
  "ironclaw_host_api",
  "ironclaw_product_adapters",
  "ironclaw_turns",
@@ -5306,6 +5309,7 @@ dependencies = [
  "thiserror 2.0.18",
  "tracing",
  "url",
+ "urlencoding",
 ]
 
 [[package]]
