@@ -392,6 +392,75 @@ test("useChat.cancelRun clears local state before cancel request resolves", asyn
   await cancelPromise;
 });
 
+test("useChat clears transient run and gate state during thread switch render", () => {
+  const stateUpdates = [];
+  const context = {
+    AbortController,
+    Date,
+    Error,
+    Map,
+    Math,
+    React: createReactStub({
+      // useChat state call order: cooldownUntil, now, activeRun,
+      // channelConnectAction, isProcessing, pendingGate, stateThreadId.
+      initialByIndex: new Map([
+        [2, { runId: "run-old", threadId: "thread-old", status: "awaiting_gate" }],
+        [3, { channel: "slack" }],
+        [4, true],
+        [5, { runId: "run-old", gateRef: "gate-old" }],
+        [6, "thread-old"],
+      ]),
+      setCalls: stateUpdates,
+    }),
+    addPending,
+    toRenderAttachment,
+    toWireAttachment,
+    cancelRunRequest: async () => {},
+    clearTimeout,
+    createThreadRequest: async () => {
+      throw new Error("createThread should not run");
+    },
+    globalThis: {},
+    listConnectableChannels: async () => ({ channels: [] }),
+    looksLikeChannelConnectCommand,
+    queryClient: {
+      fetchQuery: async () => ({ channels: [] }),
+      invalidateQueries: () => {},
+    },
+    recordAcceptedMessageRef,
+    removePending,
+    resolveChannelConnectCommand,
+    resolveGateRequest: async () => {},
+    sendMessage: async () => {
+      throw new Error("sendMessage should not run");
+    },
+    setInterval,
+    setTimeout,
+    submitManualToken: async () => {},
+    useChatEvents: () => () => {},
+    useHistory: () => ({
+      messages: [],
+      hasMore: false,
+      nextCursor: null,
+      isLoading: false,
+      loadHistory: () => {},
+      setMessages: () => {},
+    }),
+    useSSE: () => ({ status: "idle" }),
+  };
+
+  runUseChatSource(context);
+  context.globalThis.__testExports.useChat("thread-new");
+
+  assert.deepEqual(stateUpdates.slice(0, 5), [
+    { index: 6, value: "thread-new" },
+    { index: 4, value: false },
+    { index: 5, value: null },
+    { index: 2, value: null },
+    { index: 3, value: null },
+  ]);
+});
+
 test("useChat.approve deny marks the current gated tool failed before resume", async () => {
   const threadId = "thread-1";
   const runId = "run-1";

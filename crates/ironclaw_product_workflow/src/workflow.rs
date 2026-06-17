@@ -1659,6 +1659,7 @@ fn terminal_ack_for_error(error: &ProductWorkflowError) -> Option<ProductInbound
         | ProductWorkflowError::BeforeInboundPolicyFailed {
             permanent: false, ..
         }
+        | ProductWorkflowError::OutboundTargetNotDirectMessage
         | ProductWorkflowError::DuplicateAction { .. } => None,
     }
 }
@@ -1885,6 +1886,13 @@ mod tests {
                 },
             })
             .is_none()
+        );
+    }
+
+    #[test]
+    fn terminal_ack_for_error_keeps_outbound_target_not_direct_message_unsettled() {
+        assert!(
+            terminal_ack_for_error(&ProductWorkflowError::OutboundTargetNotDirectMessage).is_none()
         );
     }
 

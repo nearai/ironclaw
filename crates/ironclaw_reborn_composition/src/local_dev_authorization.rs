@@ -58,8 +58,8 @@ mod tests {
         ResourceEstimate, RuntimeKind, TrustClass,
     };
     use ironclaw_host_runtime::{
-        BUILTIN_FIRST_PARTY_PROVIDER, TRACE_COMMONS_ONBOARD_CAPABILITY_ID,
-        TRACE_COMMONS_PROFILE_SET_CAPABILITY_ID,
+        BUILTIN_FIRST_PARTY_PROVIDER, PROFILE_SET_CAPABILITY_ID,
+        TRACE_COMMONS_ONBOARD_CAPABILITY_ID, TRACE_COMMONS_PROFILE_SET_CAPABILITY_ID,
     };
     use ironclaw_trust::{AuthorityCeiling, EffectiveTrustClass, TrustDecision, TrustProvenance};
     use serde_json::json;
@@ -153,6 +153,30 @@ mod tests {
                 ironclaw_host_api::Decision::RequireApproval { .. }
             ),
             "profile_set (public external write, not exempt) must require an approval gate, got {decision:?}"
+        );
+    }
+
+    /// Surface-visibility regression test: `builtin.profile_set` must be
+    /// Available (Allow) in the local-dev authorizer, not RequireApproval.
+    ///
+    /// This exercises the FULL authorizer path (grant lookup + effect-set
+    /// check + exemption list) to guard against the MissingGrant regression
+    /// that caused the capability to vanish from the model-visible surface.
+    /// The effects used (ReadFilesystem + WriteFilesystem) are gate-worthy
+    /// without an exemption (write_filesystem is in ask_writes), so the Allow
+    /// decision can only come from the exemption list, not from a non-gating
+    /// default policy.
+    #[tokio::test]
+    async fn local_dev_builtin_profile_set_skips_approval_gate() {
+        let decision = trace_commons_authorize_decision(
+            PROFILE_SET_CAPABILITY_ID,
+            vec![EffectKind::ReadFilesystem, EffectKind::WriteFilesystem],
+        )
+        .await;
+        assert!(
+            matches!(decision, ironclaw_host_api::Decision::Allow { .. }),
+            "builtin.profile_set is a private local write (no network/external_write) and is \
+             exempt from the approval gate; got {decision:?}"
         );
     }
 

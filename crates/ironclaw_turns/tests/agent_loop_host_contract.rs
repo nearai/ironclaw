@@ -526,9 +526,9 @@ async fn instruction_bundle_renders_runtime_context_section() {
             loop_started_at_utc: chrono::Utc
                 .with_ymd_and_hms(2026, 6, 11, 21, 32, 0)
                 .unwrap(),
-            user_timezone: None,
             communication: None,
             product_context: None,
+            user_profile: None,
         }),
     };
 
@@ -613,9 +613,9 @@ async fn instruction_bundle_runtime_fingerprint_stable_within_minute() {
             loop_started_at_utc: chrono::Utc
                 .with_ymd_and_hms(2026, 6, 11, 21, 32, 7)
                 .unwrap(),
-            user_timezone: None,
             communication: None,
             product_context: None,
+            user_profile: None,
         }),
     };
 
@@ -628,9 +628,9 @@ async fn instruction_bundle_runtime_fingerprint_stable_within_minute() {
             loop_started_at_utc: chrono::Utc
                 .with_ymd_and_hms(2026, 6, 11, 21, 32, 46)
                 .unwrap(),
-            user_timezone: None,
             communication: None,
             product_context: None,
+            user_profile: None,
         }),
     };
 
@@ -697,9 +697,9 @@ async fn instruction_bundle_renders_runtime_context_exactly_once_per_build() {
             loop_started_at_utc: chrono::Utc
                 .with_ymd_and_hms(2026, 6, 11, 21, 32, 0)
                 .unwrap(),
-            user_timezone: None,
             communication: None,
             product_context: None,
+            user_profile: None,
         }),
     };
 
@@ -789,9 +789,9 @@ async fn instruction_bundle_without_runtime_context_renders_no_runtime_section()
             loop_started_at_utc: chrono::Utc
                 .with_ymd_and_hms(2026, 6, 11, 21, 32, 0)
                 .unwrap(),
-            user_timezone: None,
             communication: None,
             product_context: None,
+            user_profile: None,
         }),
         ..request
     };
@@ -3918,9 +3918,9 @@ async fn instruction_bundle_runtime_communication_none_is_byte_identical_to_4795
         inline_messages: Vec::new(),
         runtime_context: Some(LoopRuntimeContext {
             loop_started_at_utc: Utc.with_ymd_and_hms(2026, 6, 11, 21, 32, 0).unwrap(),
-            user_timezone: None,
             communication: None,
             product_context: None,
+            user_profile: None,
         }),
     };
 
@@ -3974,7 +3974,6 @@ async fn instruction_bundle_runtime_communication_renders_all_fields() {
         inline_messages: Vec::new(),
         runtime_context: Some(LoopRuntimeContext {
             loop_started_at_utc: Utc.with_ymd_and_hms(2026, 6, 11, 21, 32, 0).unwrap(),
-            user_timezone: None,
             communication: Some(CommunicationRuntimeContext {
                 connected_channels: ConnectedChannelsState::Known(vec![ConnectedChannelSummary {
                     name: "Slack".to_string(),
@@ -3995,6 +3994,7 @@ async fn instruction_bundle_runtime_communication_renders_all_fields() {
                     user: UserId::new("test-user").unwrap(),
                 },
             )),
+            user_profile: None,
         }),
     };
 
@@ -4049,7 +4049,6 @@ async fn instruction_bundle_runtime_scheduled_trigger_with_no_delivery_emits_war
         inline_messages: Vec::new(),
         runtime_context: Some(LoopRuntimeContext {
             loop_started_at_utc: Utc.with_ymd_and_hms(2026, 6, 11, 21, 32, 0).unwrap(),
-            user_timezone: None,
             communication: Some(CommunicationRuntimeContext {
                 connected_channels: ConnectedChannelsState::Unknown,
                 delivery_target: DeliveryTargetState::NoneSet,
@@ -4063,6 +4062,7 @@ async fn instruction_bundle_runtime_scheduled_trigger_with_no_delivery_emits_war
                     user: UserId::new("test-user").unwrap(),
                 },
             )),
+            user_profile: None,
         }),
     };
 
