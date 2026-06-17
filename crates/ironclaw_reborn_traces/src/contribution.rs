@@ -8278,7 +8278,8 @@ fn trace_queue_telemetry_failure_kind_for_llm_error(
         | ironclaw_llm::error::LlmError::SessionRenewalFailed { .. } => {
             Some(TraceQueueTelemetryFailureKind::Credential)
         }
-        ironclaw_llm::error::LlmError::RateLimited { .. } => {
+        ironclaw_llm::error::LlmError::RateLimited { .. }
+        | ironclaw_llm::error::LlmError::PaymentRequired { .. } => {
             Some(TraceQueueTelemetryFailureKind::HttpRejection)
         }
         ironclaw_llm::error::LlmError::RequestFailed { .. } => {
@@ -11785,6 +11786,20 @@ mod tests {
         assert!(!failure.reason.contains("super-secret-token"));
 
         let _ = std::fs::remove_dir_all(trace_contribution_dir_for_scope(Some(&scope)));
+    }
+
+    #[test]
+    fn payment_required_llm_error_classifies_as_http_rejection() {
+        // A 402 is a provider HTTP-status rejection, like a 429 rate limit — it
+        // must produce meaningful telemetry, not fall through to `None`/Unknown.
+        assert_eq!(
+            trace_queue_telemetry_failure_kind_for_llm_error(
+                &ironclaw_llm::error::LlmError::PaymentRequired {
+                    provider: "nearai_chat".to_string(),
+                }
+            ),
+            Some(TraceQueueTelemetryFailureKind::HttpRejection)
+        );
     }
 
     #[tokio::test]

@@ -1013,6 +1013,15 @@ fn map_rig_error(model_name: &str, e: impl std::fmt::Display) -> LlmError {
         let (used, limit) = crate::error::parse_context_token_counts(&lower);
         return LlmError::ContextLengthExceeded { used, limit };
     }
+    // HTTP 402 / out-of-credits arrives here as a rendered message (rig-core
+    // only hands us a `Display` error). Classify it as PaymentRequired so the
+    // retry/circuit-breaker/failover layers leave it alone instead of churning
+    // for minutes — same reasoning as the direct-HTTP `nearai_chat` 402 branch.
+    if crate::error::is_payment_required_message(&lower) {
+        return LlmError::PaymentRequired {
+            provider: model_name.to_string(),
+        };
+    }
     LlmError::RequestFailed {
         provider: model_name.to_string(),
         reason: msg,
@@ -2889,6 +2898,21 @@ mod tests {
             matches!(err, LlmError::RequestFailed { .. }),
             "Generic error should be RequestFailed: {err:?}"
         );
+    }
+
+    #[test]
+    fn test_map_rig_error_detects_payment_required() {
+        // A 402 reaching the rig path as a rendered message must classify as
+        // PaymentRequired (non-retryable) rather than RequestFailed (retryable),
+        // or the retry/circuit-breaker/failover layers churn for minutes.
+        let err = map_rig_error(
+            "nearai",
+            r#"HTTP 402 Payment Required: {"error":{"message":"Credit limit exceeded","type":"insufficient_credits"}}"#,
+        );
+        match err {
+            LlmError::PaymentRequired { provider } => assert_eq!(provider, "nearai"),
+            other => panic!("Expected PaymentRequired, got: {other:?}"),
+        }
     }
 
     #[test]

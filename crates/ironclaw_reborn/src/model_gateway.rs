@@ -1572,6 +1572,14 @@ fn map_provider_error(error: LlmError) -> HostManagedModelError {
 }
 
 fn is_credit_exhaustion_error(error: &LlmError) -> bool {
+    // Preferred path: providers now classify HTTP 402 at the source as a
+    // dedicated variant, so it never reaches the retry/circuit-breaker/failover
+    // layers and arrives here unambiguously.
+    if matches!(error, LlmError::PaymentRequired { .. }) {
+        return true;
+    }
+    // Fallback for any provider that still surfaces credit exhaustion as a
+    // generic RequestFailed with the signal in the rendered message.
     let LlmError::RequestFailed { reason, .. } = error else {
         return false;
     };
@@ -1656,6 +1664,38 @@ mod tests {
 
         let err = request_failed("rate limit exceeded");
         assert!(!is_credit_exhaustion_error(&err));
+    }
+
+    #[test]
+    fn is_credit_exhaustion_error_matches_payment_required_variant() {
+        // Providers now classify HTTP 402 at the source, so the dedicated
+        // variant — not a string match — is the primary signal.
+        let err = LlmError::PaymentRequired {
+            provider: "nearai_chat".to_string(),
+        };
+        assert!(is_credit_exhaustion_error(&err));
+    }
+
+    #[test]
+    fn map_provider_error_maps_payment_required_to_credits_exhausted_abort() {
+        // The full contract that makes the loop abort with a user-visible "out
+        // of credits" message: PaymentRequired -> CredentialUnavailable host
+        // error carrying the credits-exhausted reason kind. CredentialUnavailable
+        // is the kind that `model_error_class` declines to classify (returns
+        // None), which the executor turns into an immediate abort rather than a
+        // recovery-strategy retry.
+        let mapped = map_provider_error(LlmError::PaymentRequired {
+            provider: "nearai_chat".to_string(),
+        });
+        assert_eq!(
+            mapped.kind,
+            HostManagedModelErrorKind::CredentialUnavailable
+        );
+        assert_eq!(
+            mapped.reason_kind,
+            Some(MODEL_CREDITS_EXHAUSTED_REASON_KIND)
+        );
+        assert_eq!(mapped.safe_summary, MODEL_CREDITS_EXHAUSTED_SUMMARY);
     }
 
     #[test]

@@ -204,6 +204,20 @@ mod tests {
     }
 
     #[test]
+    fn credential_unavailable_is_unclassified_so_the_loop_aborts_immediately() {
+        // Out-of-credits (HTTP 402) maps to `CredentialUnavailable` at the
+        // model-gateway boundary. `model_error_class` must return `None` for it
+        // so `ModelStage` takes the immediate-abort path
+        // (`HostUnavailableWithDiagnostics`) instead of handing it to the
+        // recovery strategy, which would retry a permanently-failing call.
+        let error = AgentLoopHostError::new(
+            AgentLoopHostErrorKind::CredentialUnavailable,
+            "model provider account is out of credits",
+        );
+        assert!(model_error_class(&error).is_none());
+    }
+
+    #[test]
     fn protocol_and_policy_failure_kinds_remain_distinct() {
         assert_eq!(
             capability_failure_kind(&CapabilityFailureKind::InvalidOutput),

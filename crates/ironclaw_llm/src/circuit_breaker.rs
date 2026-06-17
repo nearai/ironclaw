@@ -223,8 +223,11 @@ impl CircuitBreakerProvider {
 /// Includes `SessionExpired` because repeated session failures signal backend
 /// auth infrastructure trouble.
 ///
-/// Excludes client errors that are the caller's problem, not backend trouble:
-/// `AuthFailed`, `ContextLengthExceeded`, `ModelNotAvailable`, `Json`.
+/// Excludes client/account errors that are the caller's problem, not backend
+/// trouble: `AuthFailed`, `PaymentRequired`, `ContextLengthExceeded`,
+/// `ModelNotAvailable`, `Json`. In particular HTTP 402 (`PaymentRequired`)
+/// means the account is out of credits — the backend is healthy, so it must
+/// not push the breaker toward Open and start failing healthy sibling calls.
 ///
 /// See also `retry::is_retryable()` which answers a different question:
 /// "could retrying this exact request succeed?"
@@ -565,6 +568,11 @@ mod tests {
         assert!(!is_transient(&LlmError::ModelNotAvailable {
             provider: "p".into(),
             model: "m".into(),
+        }));
+        // HTTP 402: the account is out of credits, the backend is healthy — it
+        // must not count toward tripping the breaker.
+        assert!(!is_transient(&LlmError::PaymentRequired {
+            provider: "nearai_chat".into(),
         }));
         assert!(!is_transient(&LlmError::Json(
             serde_json::from_str::<String>("bad").unwrap_err()
