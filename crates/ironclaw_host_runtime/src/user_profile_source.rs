@@ -279,4 +279,25 @@ mod tests {
             "run context without actor must resolve to None"
         );
     }
+
+    #[tokio::test]
+    async fn all_blank_fields_resolve_to_none() {
+        // A profile document with only invalid/blank fields must resolve to None
+        // (the `profile == UserProfileContext::default()` guard should fire).
+        let fs: Arc<dyn RootFilesystem> = Arc::new(InMemoryBackend::new());
+        write_profile_json(
+            &fs,
+            "tenant-a",
+            "user-1",
+            r#"{"timezone":"Not/AZone","locale":"","location":"   "}"#,
+        )
+        .await;
+
+        let source = MemoryBackedUserProfileSource::new(Arc::clone(&fs));
+        let run_ctx = run_context_with_user("tenant-a", "user-1").await;
+        assert!(
+            source.resolve_user_profile(&run_ctx).await.is_none(),
+            "all-blank/invalid profile fields must resolve to None"
+        );
+    }
 }

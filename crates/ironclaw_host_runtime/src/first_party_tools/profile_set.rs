@@ -44,8 +44,8 @@ fn validated_fields(input: &Value) -> Result<Map<String, Value>, FirstPartyCapab
                 out.insert("locale".into(), json!(s));
             }
             "location" => {
-                let s = value.as_str().ok_or_else(input_error)?;
-                if s.is_empty() || s.chars().count() > 200 {
+                let s = value.as_str().ok_or_else(input_error)?.trim();
+                if s.is_empty() || s.chars().count() > 200 || s.len() > 800 {
                     return Err(input_error());
                 }
                 out.insert("location".into(), json!(s));
@@ -231,6 +231,84 @@ mod tests {
                 Some(ironclaw_host_api::RuntimeDispatchErrorKind::InputEncode)
             ),
             "unknown field must produce InputEncode error, got: {err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn rejects_non_object_input() {
+        let state = MemoryCapabilityState::default();
+        // Input must be a JSON object; a plain string must be rejected.
+        let req = profile_set_request(json!("timezone"));
+        let err = dispatch(&state, &req).await.unwrap_err();
+        assert!(
+            matches!(
+                err.kind(),
+                Some(ironclaw_host_api::RuntimeDispatchErrorKind::InputEncode)
+            ),
+            "non-object input must produce InputEncode error, got: {err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn rejects_empty_object_input() {
+        let state = MemoryCapabilityState::default();
+        // An empty object contains no valid fields and must be rejected.
+        let req = profile_set_request(json!({}));
+        let err = dispatch(&state, &req).await.unwrap_err();
+        assert!(
+            matches!(
+                err.kind(),
+                Some(ironclaw_host_api::RuntimeDispatchErrorKind::InputEncode)
+            ),
+            "empty object must produce InputEncode error, got: {err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn rejects_invalid_locale() {
+        let state = MemoryCapabilityState::default();
+        // A locale with a space is not valid BCP-47 (must be ascii-alnum/hyphen only).
+        let req = profile_set_request(json!({"locale": "en US"}));
+        let err = dispatch(&state, &req).await.unwrap_err();
+        assert!(
+            matches!(
+                err.kind(),
+                Some(ironclaw_host_api::RuntimeDispatchErrorKind::InputEncode)
+            ),
+            "locale with space must produce InputEncode error, got: {err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn location_at_200_chars_ok_201_rejected() {
+        let state = MemoryCapabilityState::default();
+
+        // A 200-character location (exactly at the limit) must succeed.
+        let location_200: String = "A".repeat(200);
+        let req = profile_set_request(json!({"location": location_200}));
+        let result = dispatch(&state, &req).await.unwrap();
+        assert_eq!(
+            result.output["status"], "ok",
+            "200-char location must succeed"
+        );
+        let doc = read_profile_doc(&req).await;
+        assert_eq!(
+            doc["location"].as_str().map(|s| s.len()),
+            Some(200),
+            "200-char location must be persisted"
+        );
+
+        // A 201-character location (one past the limit) must be rejected.
+        let state2 = MemoryCapabilityState::default();
+        let location_201: String = "A".repeat(201);
+        let req2 = profile_set_request(json!({"location": location_201}));
+        let err = dispatch(&state2, &req2).await.unwrap_err();
+        assert!(
+            matches!(
+                err.kind(),
+                Some(ironclaw_host_api::RuntimeDispatchErrorKind::InputEncode)
+            ),
+            "201-char location must produce InputEncode error, got: {err:?}"
         );
     }
 }

@@ -732,7 +732,13 @@ pub(super) async fn profile_merge_write(
             .map_err(|_| operation_error())?;
         let expected_hash = current.as_deref().map(content_bytes_sha256);
         let mut doc: serde_json::Map<String, serde_json::Value> = match &current {
-            Some(bytes) => serde_json::from_slice(bytes).unwrap_or_default(),
+            Some(bytes) => match serde_json::from_slice(bytes) {
+                Ok(map) => map,
+                Err(error) => {
+                    tracing::debug!(%error, "profile doc is not valid JSON; refusing to overwrite");
+                    return Err(operation_error());
+                }
+            },
             None => serde_json::Map::new(),
         };
         for (k, v) in &fields {
@@ -759,6 +765,10 @@ pub(super) async fn profile_merge_write(
         }
         // else: hash moved under us — loop and re-merge onto the newer doc.
     }
+    tracing::debug!(
+        retries = MAX_MEMORY_PATCH_RETRIES,
+        "profile merge CAS retries exhausted"
+    );
     Err(operation_error())
 }
 

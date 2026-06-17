@@ -159,8 +159,12 @@ impl LoopRuntimeContext {
                 fields.push(format!("locale={}", locale.as_str()));
             }
             if let Some(location) = &profile.location {
-                // location is free text — sanitize via the existing helper.
-                fields.push(format!("location={}", sanitize_prompt_string(location)));
+                // location is free text — apply the same model-safe policy the channel/delivery
+                // labels use; degrades to a placeholder if the value would trip the policy.
+                fields.push(format!(
+                    "location={}",
+                    model_safe_label(location, "a saved location")
+                ));
             }
             parts.push(format!("User profile: {}.", fields.join(", ")));
         }
