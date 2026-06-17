@@ -738,30 +738,34 @@ impl RebornProductAuthServices {
     /// 4-field view in that case, which is backward-compatible.
     #[doc(hidden)]
     pub fn as_auth_challenge_provider(self: &Arc<Self>) -> Option<Arc<dyn AuthChallengeProvider>> {
-        if self.flow_record_source.is_some() {
-            Some(Arc::clone(self) as Arc<dyn AuthChallengeProvider>)
-        } else {
-            None
-        }
+        self.has_flow_record_source()
+            .then(|| Arc::clone(self) as Arc<dyn AuthChallengeProvider>)
     }
 
     /// Expose this service as an `Arc<dyn BlockedAuthFlowCanceller>` so the Slack
     /// delivery path can cancel the durable `AuthFlow` record alongside the run
     /// when it auto-denies a non-OAuth auth challenge (issue #4952).
     ///
-    /// Returns `None` when no `flow_record_source` is configured — same condition
-    /// as [`Self::as_auth_challenge_provider`], since both depend on the flow
-    /// projection source. In that case the Slack path simply skips flow cancel and
-    /// still cancels the run, which is backward-compatible.
+    /// Returns `None` under the same condition as
+    /// [`Self::as_auth_challenge_provider`] — both flow-backed facades gate on
+    /// [`Self::has_flow_record_source`]. They stay separate accessors because they
+    /// expose distinct capability ports (`AuthChallengeProvider` vs
+    /// `BlockedAuthFlowCanceller`), but share the one wiring precondition.
     #[doc(hidden)]
     pub fn as_blocked_auth_flow_canceller(
         self: &Arc<Self>,
     ) -> Option<Arc<dyn BlockedAuthFlowCanceller>> {
-        if self.flow_record_source.is_some() {
-            Some(Arc::clone(self) as Arc<dyn BlockedAuthFlowCanceller>)
-        } else {
-            None
-        }
+        self.has_flow_record_source()
+            .then(|| Arc::clone(self) as Arc<dyn BlockedAuthFlowCanceller>)
+    }
+
+    /// Shared precondition for the flow-backed facades: both
+    /// [`Self::as_auth_challenge_provider`] and
+    /// [`Self::as_blocked_auth_flow_canceller`] are only available when an
+    /// `AuthFlowRecordSource` projection is wired in. Defined once so the gate
+    /// cannot drift between the two accessors.
+    fn has_flow_record_source(&self) -> bool {
+        self.flow_record_source.is_some()
     }
 
     /// Refresh a credential account through the injected product-auth port.
