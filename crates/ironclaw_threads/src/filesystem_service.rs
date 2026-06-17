@@ -776,9 +776,6 @@ where
             }
         }
 
-        let sequence = self
-            .reserve_sequence(&request.scope, &request.thread_id)
-            .await?;
         let message_id = ThreadMessageId::new();
         // Borrow `request` for the idempotency key before moving `content` out,
         // so the content (now carrying attachment refs) is consumed by move
@@ -786,6 +783,14 @@ where
         let idempotency_key = InboundIdempotencyKey::from_request(&request);
         let (content_text, attachments) = request.content.into_parts();
         crate::contract::validate_attachment_refs(&attachments)?;
+        // Reserve the sequence only after the payload validates. Because
+        // `reserve_sequence` persists the thread's last-activity stamp, a
+        // rejected attachment must not run first — otherwise an invalid
+        // message would bump the thread to the top of the sidebar without
+        // ever being appended.
+        let sequence = self
+            .reserve_sequence(&request.scope, &request.thread_id)
+            .await?;
         let message = ThreadMessageRecord {
             message_id,
             thread_id: request.thread_id.clone(),
@@ -1583,11 +1588,11 @@ where
                 }
                 Err(error) => {
                     // silent-ok: list_threads is a sidebar read; one
-                    // corrupted record must not blank out the whole
-                    // page. The error is surfaced through tracing so
-                    // operators see it without the user losing the
-                    // rest of their thread list.
-                    tracing::warn!(
+                    // corrupted record must not blank out the whole page.
+                    // Logged at `debug!` (not `warn!`) — this is an internal
+                    // diagnostic, and `info!`/`warn!` corrupt the REPL/TUI
+                    // display per the project logging rule.
+                    tracing::debug!(
                         thread_id = %thread_id.as_str(),
                         scope = ?request.scope,
                         ?error,
@@ -1672,7 +1677,9 @@ where
                         }
                     }
                     Err(error) => {
-                        tracing::warn!(
+                        // Internal diagnostic — `debug!`, not `warn!`, to keep
+                        // the REPL/TUI display intact (project logging rule).
+                        tracing::debug!(
                             thread_id = %thread_id.as_str(),
                             scope = ?request.scope,
                             ?error,

@@ -2490,6 +2490,16 @@ fn message_ids_are_stable_values() {
     assert_eq!(ThreadMessageId::parse(&id.to_string()).unwrap(), id);
 }
 
+/// Wait until the wall clock is strictly past `floor`, so the next thread
+/// created/used gets a later activity timestamp — deterministic regardless
+/// of clock resolution. Uses async sleep to avoid blocking the test runtime
+/// (`std::thread::sleep` would block the tokio executor).
+async fn wait_until_after(floor: chrono::DateTime<Utc>) {
+    while Utc::now() <= floor {
+        tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+    }
+}
+
 #[tokio::test]
 async fn list_threads_for_scope_is_scope_filtered_and_paginated() {
     let service = InMemorySessionThreadService::default();
@@ -2510,12 +2520,12 @@ async fn list_threads_for_scope_is_scope_filtered_and_paginated() {
 
     // Seed: 3 threads in scope A with deterministic ids so the
     // pagination assertion is stable. 1 thread in scope B that the
-    // scope-A enumeration must not see. A 1ms gap between creations
-    // guarantees strictly increasing `created_at` stamps regardless of
-    // clock resolution, so the activity-desc ordering is deterministic
+    // scope-A enumeration must not see. Waiting until the clock passes
+    // each thread's activity stamp guarantees strictly increasing
+    // `created_at`, so the activity-desc ordering is deterministic
     // (003 newest → first).
     for id in ["t-a-001", "t-a-002", "t-a-003"] {
-        service
+        let record = service
             .ensure_thread(EnsureThreadRequest {
                 scope: scope_a.clone(),
                 thread_id: Some(ThreadId::new(id).unwrap()),
@@ -2525,7 +2535,7 @@ async fn list_threads_for_scope_is_scope_filtered_and_paginated() {
             })
             .await
             .unwrap();
-        std::thread::sleep(std::time::Duration::from_millis(1));
+        wait_until_after(record.updated_at.expect("new thread has activity stamp")).await;
     }
     service
         .ensure_thread(EnsureThreadRequest {

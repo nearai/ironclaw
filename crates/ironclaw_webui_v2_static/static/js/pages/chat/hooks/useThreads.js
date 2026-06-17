@@ -63,8 +63,10 @@ export function useThreads() {
   //   never spuriously render.
   // - `created_at`/`updated_at` are emitted by the v2 backend now
   //   (updated_at bumped on every message append); they flow through
-  //   the spread and drive the sidebar's activity ordering. `null`
-  //   fallback covers legacy records persisted before timestamps.
+  //   the spread and drive the sidebar's activity ordering. The backend
+  //   omits them (`skip_serializing_if`) for legacy records persisted
+  //   before timestamps, so they arrive `undefined` and normalize to
+  //   `null` here.
   const threads = React.useMemo(() => {
     const records = query.data?.threads || [];
     return records.map((record) => ({

@@ -148,13 +148,17 @@ impl SessionThreadService for InMemorySessionThreadService {
         let key = InboundIdempotencyKey::from_request(&request);
         let thread = get_thread_mut(&mut state, &request.scope, &request.thread_id)?;
         let message_id = ThreadMessageId::new();
+        // Validate the payload before mutating any thread state. A rejected
+        // attachment must not increment the sequence or bump the
+        // last-activity stamp, or an invalid message would surface the
+        // thread at the top of the sidebar without being appended.
+        let (content_text, attachments) = request.content.into_parts();
+        crate::contract::validate_attachment_refs(&attachments)?;
         let sequence = thread.next_sequence;
         thread.next_sequence += 1;
         // Appending a message is thread activity; bump the last-activity
         // stamp so activity-ordered listings surface this thread first.
         thread.record.updated_at = Some(Utc::now());
-        let (content_text, attachments) = request.content.into_parts();
-        crate::contract::validate_attachment_refs(&attachments)?;
         thread.messages.push(ThreadMessageRecord {
             message_id,
             thread_id: request.thread_id.clone(),

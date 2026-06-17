@@ -88,6 +88,16 @@ fn caller() -> WebUiAuthenticatedCaller {
     caller_for_user("user-alpha")
 }
 
+/// Wait until the wall clock is strictly past `floor`, so the next thread
+/// created/used gets a later activity timestamp — deterministic regardless
+/// of clock resolution. Uses async sleep to avoid blocking the test runtime
+/// (`std::thread::sleep` would block the tokio executor).
+async fn wait_until_after(floor: chrono::DateTime<Utc>) {
+    while Utc::now() <= floor {
+        tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+    }
+}
+
 fn caller_for_user(user_id: &str) -> WebUiAuthenticatedCaller {
     caller_for_user_with_project(user_id, Some("project-alpha"))
 }
@@ -8334,9 +8344,9 @@ async fn list_threads_skips_hidden_automation_threads_when_filling_page() {
     // second visible, then first visible, then the automation thread last.
     // That yields a candidate order of [automation, first, second], so the
     // facade has to skip the leading hidden automation thread while filling
-    // the first page — the behavior under test. 1ms gaps keep the
-    // `created_at` stamps strictly ordered regardless of clock resolution.
-    thread_service
+    // the first page — the behavior under test. Waiting past each stamp
+    // keeps the `created_at` order strict regardless of clock resolution.
+    let second = thread_service
         .ensure_thread(EnsureThreadRequest {
             scope: thread_scope_for(&caller),
             thread_id: Some(second_visible_thread_id.clone()),
@@ -8346,8 +8356,8 @@ async fn list_threads_skips_hidden_automation_threads_when_filling_page() {
         })
         .await
         .expect("second visible thread");
-    std::thread::sleep(std::time::Duration::from_millis(1));
-    thread_service
+    wait_until_after(second.updated_at.expect("activity stamp")).await;
+    let first = thread_service
         .ensure_thread(EnsureThreadRequest {
             scope: thread_scope_for(&caller),
             thread_id: Some(first_visible_thread_id.clone()),
@@ -8357,7 +8367,7 @@ async fn list_threads_skips_hidden_automation_threads_when_filling_page() {
         })
         .await
         .expect("first visible thread");
-    std::thread::sleep(std::time::Duration::from_millis(1));
+    wait_until_after(first.updated_at.expect("activity stamp")).await;
     thread_service
         .ensure_thread(EnsureThreadRequest {
             scope: thread_scope_for(&caller),

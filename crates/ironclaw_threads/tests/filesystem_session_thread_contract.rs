@@ -819,6 +819,16 @@ async fn assert_reopened_history(
     assert!(wrong_scope.is_err());
 }
 
+/// Wait until the wall clock is strictly past `floor`, so the next thread
+/// created/used gets a later activity timestamp — deterministic regardless
+/// of clock resolution. Uses async sleep to avoid blocking the test runtime
+/// (`std::thread::sleep` would block the tokio executor).
+async fn wait_until_after(floor: chrono::DateTime<Utc>) {
+    while Utc::now() <= floor {
+        tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+    }
+}
+
 #[tokio::test]
 async fn filesystem_list_threads_for_scope_is_scope_filtered_and_paginated() {
     use ironclaw_threads::ListThreadsForScopeRequest;
@@ -849,7 +859,7 @@ async fn filesystem_list_threads_for_scope_is_scope_filtered_and_paginated() {
     // encodes scope axes, this also verifies the directory walk
     // doesn't leak across `(agent, project, owner)` cells.
     for id in ["t-a-001", "t-a-002", "t-a-003"] {
-        service
+        let record = service
             .ensure_thread(EnsureThreadRequest {
                 scope: scope_a.clone(),
                 thread_id: Some(ThreadId::new(id).unwrap()),
@@ -859,9 +869,9 @@ async fn filesystem_list_threads_for_scope_is_scope_filtered_and_paginated() {
             })
             .await
             .unwrap();
-        // 1ms gap → strictly increasing `created_at`, so the
-        // activity-desc ordering below is deterministic.
-        std::thread::sleep(std::time::Duration::from_millis(1));
+        // Wait past this thread's activity stamp → strictly increasing
+        // `created_at`, so the activity-desc ordering below is deterministic.
+        wait_until_after(record.updated_at.expect("new thread has activity stamp")).await;
     }
     service
         .ensure_thread(EnsureThreadRequest {
@@ -967,9 +977,10 @@ async fn filesystem_list_threads_orders_by_last_activity_not_creation() {
     let scope_a = scope("activity");
 
     // Create "older" first, then "newer" — newer has the later
-    // `created_at`. A 1ms gap makes the stamps strictly ordered.
+    // `created_at`. Waiting past each stamp keeps them strictly ordered.
+    let mut newer_stamp = None;
     for id in ["t-older", "t-newer"] {
-        service
+        let record = service
             .ensure_thread(EnsureThreadRequest {
                 scope: scope_a.clone(),
                 thread_id: Some(ThreadId::new(id).unwrap()),
@@ -979,7 +990,9 @@ async fn filesystem_list_threads_orders_by_last_activity_not_creation() {
             })
             .await
             .unwrap();
-        std::thread::sleep(std::time::Duration::from_millis(1));
+        let stamp = record.updated_at.expect("new thread has activity stamp");
+        newer_stamp = Some(stamp);
+        wait_until_after(stamp).await;
     }
 
     // Initially newest-created is first.
@@ -999,8 +1012,9 @@ async fn filesystem_list_threads_orders_by_last_activity_not_creation() {
     assert_eq!(before_ids, ["t-newer", "t-older"]);
 
     // Interact with the older thread — appending a message must bump its
-    // last-activity stamp above the newer thread's creation time.
-    std::thread::sleep(std::time::Duration::from_millis(1));
+    // last-activity stamp above the newer thread's creation time. Wait
+    // past the newer thread's stamp so the append is unambiguously later.
+    wait_until_after(newer_stamp.expect("created both threads")).await;
     service
         .accept_inbound_message(AcceptInboundMessageRequest {
             scope: scope_a.clone(),
@@ -1661,6 +1675,7 @@ async fn filesystem_persists_multiple_attachment_refs_in_order() {
 
 #[tokio::test]
 async fn filesystem_accept_rejects_duplicate_attachment_ids() {
+    use ironclaw_threads::ListThreadsForScopeRequest;
     // The accept path validates attachment refs before persisting. Drive the
     // real caller (not just the helper) so a regression that drops the check
     // would fail here, and assert nothing was written on rejection.
@@ -1678,6 +1693,12 @@ async fn filesystem_accept_rejects_duplicate_attachment_ids() {
         })
         .await
         .unwrap();
+
+    // Capture the creation activity stamp and let the clock advance, so a
+    // spurious activity bump on the rejected accept would be strictly later
+    // and therefore observable below.
+    let created_activity = thread.updated_at.expect("new thread has activity stamp");
+    wait_until_after(created_activity).await;
 
     let dup = AttachmentRef {
         id: "att-dup".into(),
@@ -1705,12 +1726,34 @@ async fn filesystem_accept_rejects_duplicate_attachment_ids() {
     // Rejection must not leave a half-written message behind.
     let history = service
         .list_thread_history(ThreadHistoryRequest {
-            scope,
-            thread_id: thread.thread_id,
+            scope: scope.clone(),
+            thread_id: thread.thread_id.clone(),
         })
         .await
         .unwrap();
     assert!(history.messages.is_empty());
+
+    // Rejection must also not bump the thread's last-activity stamp —
+    // otherwise an invalid message would float the thread to the top of
+    // the sidebar without ever being appended.
+    let listed = service
+        .list_threads_for_scope(ListThreadsForScopeRequest {
+            scope,
+            limit: None,
+            cursor: None,
+        })
+        .await
+        .unwrap();
+    let record = listed
+        .threads
+        .iter()
+        .find(|record| record.thread_id == thread.thread_id)
+        .expect("thread is still listed");
+    assert_eq!(
+        record.updated_at,
+        Some(created_activity),
+        "rejected attachment must not bump last-activity",
+    );
 }
 
 /// Mirrors `summary_spanning_interior_rejected_busy_is_applied` from the
