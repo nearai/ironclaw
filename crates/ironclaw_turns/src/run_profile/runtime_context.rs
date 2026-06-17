@@ -143,8 +143,8 @@ impl LoopRuntimeContext {
             None => format!(
                 "Current date/time at loop start: {utc}. The user's timezone is \
                  unknown - if local time matters, ask the user and offer to save \
-                 it with the profile_set capability, or use the time capability if \
-                 it is visible."
+                 it with the profile_set capability (a saved location is not a \
+                 timezone), or use the time capability if it is visible."
             ),
         };
 

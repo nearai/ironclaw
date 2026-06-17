@@ -18,9 +18,11 @@ pub const PROFILE_SET_CAPABILITY_ID: &str = "builtin.profile_set";
 pub(super) fn manifest() -> Result<CapabilityManifest, ExtensionError> {
     first_party_capability_manifest(
         PROFILE_SET_CAPABILITY_ID,
-        "Record a known structured fact about the user: timezone (IANA name), \
-         locale (BCP-47), or location (free label). Use \
-         whenever the user states one of these so future answers stay correct.",
+        "Record a private, local fact about the user's agent context — timezone \
+         (IANA name), locale (BCP-47), or location (free label). Use this \
+         (not memory_write) whenever the user states one of these so future \
+         answers stay correct. This is a private local write, not a public \
+         profile; it is unrelated to builtin.trace_commons.profile_set.",
         vec![EffectKind::ReadFilesystem, EffectKind::WriteFilesystem],
         PermissionMode::Allow,
         resource_profile(),

@@ -56,6 +56,19 @@ exempt_capabilities = [
     # prompt-injected or confused model could supply it. So profile_set must hit
     # the runtime approval gate (user-controlled consent), with `confirmed=true`
     # as defense-in-depth rather than the sole control.
+    #
+    # `builtin.profile_set` is safe to exempt (no approval gate needed) because:
+    # - It writes only to a fixed, narrow user-scoped path (context/profile.json)
+    #   under the memory mount, which is already scoped to this user.
+    # - Its field set is closed and validated server-side: only timezone (parsed
+    #   IANA name), locale (BCP-47 shape check), and location (free label, ≤200
+    #   chars). Unknown fields are rejected. No network, no secrets, no external
+    #   write, no process.
+    # - Contrast with `builtin.trace_commons.profile_set` above: that capability
+    #   is a PUBLIC external write to a community surface and must remain gated.
+    #   `builtin.profile_set` is a PRIVATE local agent-context write — structurally
+    #   equivalent to memory_write on a fixed path, which is also not gated.
+    "builtin.profile_set",
 ]
 
 [approval_defaults.spawn_capability]
@@ -106,6 +119,12 @@ network = "default"
 
 [[grants]]
 capability = "builtin.memory_write"
+effects = ["dispatch_capability", "read_filesystem", "write_filesystem"]
+mounts = "memory"
+network = "default"
+
+[[grants]]
+capability = "builtin.profile_set"
 effects = ["dispatch_capability", "read_filesystem", "write_filesystem"]
 mounts = "memory"
 network = "default"

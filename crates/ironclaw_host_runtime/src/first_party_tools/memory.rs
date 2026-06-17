@@ -161,7 +161,7 @@ pub(super) fn manifests() -> Result<Vec<CapabilityManifest>, ExtensionError> {
         )?,
         first_party_capability_manifest(
             MEMORY_WRITE_CAPABILITY_ID,
-            "Write, append, or patch Reborn persistent memory documents in the current tenant/user/agent/project scope",
+            "Write, append, or patch Reborn persistent memory documents in the current tenant/user/agent/project scope. For structured user facts (timezone, locale, location), use builtin.profile_set instead.",
             vec![EffectKind::ReadFilesystem, EffectKind::WriteFilesystem],
             PermissionMode::Allow,
             resource_profile(),

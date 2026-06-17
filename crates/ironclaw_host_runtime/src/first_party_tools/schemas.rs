@@ -259,6 +259,7 @@ pub(crate) fn resolve_builtin_input_schema_ref(reference: &str) -> Option<Value>
                     "description": "Free-text location label, e.g. Tokyo, Japan"
                 }
             },
+            "minProperties": 1,
             "additionalProperties": false
         }),
         "schemas/builtin/read_file.input.v1.json" => json!({
