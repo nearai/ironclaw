@@ -5,10 +5,10 @@ use async_trait::async_trait;
 use ironclaw_turns::{
     LoopFailureKind, LoopResultRef,
     run_profile::{
-        AuthResumeApprovalIdentity, CapabilityApprovalResume, CapabilityAuthResume,
-        CapabilityAuthResumeReplay, CapabilityBatchInvocation, CapabilityCallCandidate,
-        CapabilityFailureKind, CapabilityOutcome, CapabilityProgress, CapabilityResultMessage,
-        LoopDriverNoteKind, LoopProgressEvent, VisibleCapabilitySurface,
+        AuthResumeApprovalIdentity, CapabilityActivityId, CapabilityApprovalResume,
+        CapabilityAuthResume, CapabilityAuthResumeReplay, CapabilityBatchInvocation,
+        CapabilityCallCandidate, CapabilityFailureKind, CapabilityOutcome, CapabilityProgress,
+        CapabilityResultMessage, LoopDriverNoteKind, LoopProgressEvent, VisibleCapabilitySurface,
     },
 };
 
@@ -129,6 +129,7 @@ impl ExecutorStage<CapabilityInput> for CapabilityStage {
             )
         }) {
             let denied_cap_id = pending.capability_id.clone();
+            let denied_activity_id = pending.activity_id_for_resume();
             // Take ownership now that we've confirmed the disposition is Denied.
             // The unconditional take() below also covers the defensive case where
             // auth_denied_calls is empty — preventing a stale Denied disposition
@@ -141,6 +142,7 @@ impl ExecutorStage<CapabilityInput> for CapabilityStage {
                     &mut signatures,
                     &mut capability_batch,
                     denied_cap_id,
+                    denied_activity_id,
                     "auth gate denied by user",
                     visible_calls,
                 )
@@ -171,6 +173,7 @@ impl ExecutorStage<CapabilityInput> for CapabilityStage {
             )
         }) {
             let denied_cap_id = pending.capability_id.clone();
+            let denied_activity_id = pending.activity_id_for_resume();
             // Clear the slot unconditionally — even if the partition yields no
             // matching calls, a stale Denied disposition must not bleed into the
             // fall-through batch.
@@ -182,6 +185,7 @@ impl ExecutorStage<CapabilityInput> for CapabilityStage {
                     &mut signatures,
                     &mut capability_batch,
                     denied_cap_id,
+                    denied_activity_id,
                     "approval gate denied by user",
                     visible_calls,
                 )
@@ -1034,6 +1038,7 @@ impl CapabilityStage {
         signatures: &mut HashSet<crate::state::CapabilityCallSignature>,
         capability_batch: &mut CapabilityBatchTurnSummary,
         denied_cap_id: ironclaw_host_api::CapabilityId,
+        denied_activity_id: Option<CapabilityActivityId>,
         planner_summary: &'static str,
         visible_calls: Vec<CapabilityCallCandidate>,
     ) -> Result<
@@ -1044,8 +1049,21 @@ impl CapabilityStage {
             .into_iter()
             .partition(|call| call.capability_id == denied_cap_id);
 
+        let mut denied_activity_id = denied_activity_id;
         for call in denied_calls {
             push_call_signature_once(&mut state, signatures, &call)?;
+            if let Some(activity_id) = denied_activity_id.take() {
+                CheckpointStage
+                    .emit_progress(
+                        ctx,
+                        LoopProgressEvent::CapabilityActivityFailed {
+                            activity_id,
+                            capability_id: call.capability_id.clone(),
+                            reason_kind: CapabilityFailureKind::Authorization,
+                        },
+                    )
+                    .await;
+            }
             let failure = ironclaw_turns::run_profile::CapabilityFailure {
                 error_kind: CapabilityFailureKind::Authorization,
                 // Intentionally empty: model-visible text comes from

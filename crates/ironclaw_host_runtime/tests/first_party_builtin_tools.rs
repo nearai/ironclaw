@@ -38,8 +38,9 @@ use ironclaw_host_runtime::{
     TRACE_COMMONS_STATUS_CAPABILITY_ID, TRIGGER_CREATE_CAPABILITY_ID, TRIGGER_LIST_CAPABILITY_ID,
     TRIGGER_REMOVE_CAPABILITY_ID, TenantSandboxProcessPort, ToolCallHttpEgress, TriggerCreateHook,
     VisibleCapabilityAccess, VisibleCapabilityRequest, WRITE_FILE_CAPABILITY_ID,
-    builtin_first_party_handlers, builtin_first_party_handlers_with_trigger_create_hook,
-    builtin_first_party_package,
+    builtin_first_party_handlers, builtin_first_party_handlers_for_process_backend,
+    builtin_first_party_handlers_with_trigger_create_hook, builtin_first_party_package,
+    builtin_first_party_package_for_process_backend,
 };
 #[cfg(feature = "test-support")]
 use ironclaw_host_runtime::{
@@ -175,6 +176,55 @@ async fn builtin_first_party_package_declares_expected_capabilities() {
     for id in all_builtin_capability_ids() {
         assert!(handlers.contains_handler(&capability_id(id)));
     }
+}
+
+#[tokio::test]
+async fn builtin_first_party_processless_package_and_handlers_omit_process_port_backed_shell() {
+    let package =
+        builtin_first_party_package_for_process_backend(ProcessBackendKind::None).unwrap();
+    let ids = package
+        .capabilities
+        .iter()
+        .map(|descriptor| descriptor.id.as_str())
+        .collect::<Vec<_>>();
+    assert!(!ids.contains(&SHELL_CAPABILITY_ID));
+    assert!(ids.contains(&SPAWN_SUBAGENT_CAPABILITY_ID));
+    assert!(ids.contains(&ECHO_CAPABILITY_ID));
+    assert!(
+        !package
+            .manifest
+            .capabilities
+            .iter()
+            .any(|capability| capability.id.as_str() == SHELL_CAPABILITY_ID)
+    );
+
+    let handlers = builtin_first_party_handlers_for_process_backend(
+        Arc::new(InMemoryTriggerRepository::default()),
+        ProcessBackendKind::None,
+    )
+    .unwrap();
+    assert!(!handlers.contains_handler(&capability_id(SHELL_CAPABILITY_ID)));
+    assert!(handlers.contains_handler(&capability_id(SPAWN_SUBAGENT_CAPABILITY_ID)));
+    assert!(handlers.contains_handler(&capability_id(ECHO_CAPABILITY_ID)));
+}
+
+#[tokio::test]
+async fn builtin_first_party_process_backend_package_and_handlers_keep_shell() {
+    let package =
+        builtin_first_party_package_for_process_backend(ProcessBackendKind::TenantSandbox).unwrap();
+    assert!(
+        package
+            .capabilities
+            .iter()
+            .any(|descriptor| descriptor.id.as_str() == SHELL_CAPABILITY_ID)
+    );
+
+    let handlers = builtin_first_party_handlers_for_process_backend(
+        Arc::new(InMemoryTriggerRepository::default()),
+        ProcessBackendKind::TenantSandbox,
+    )
+    .unwrap();
+    assert!(handlers.contains_handler(&capability_id(SHELL_CAPABILITY_ID)));
 }
 
 fn assert_coding_manifest_contract(descriptor: &CapabilityDescriptor) {
@@ -5322,6 +5372,186 @@ async fn builtin_coding_tools_match_v1_read_write_list_glob_and_grep_shapes() {
     assert_eq!(grepped["files"], json!(["src/lib.rs"]));
     assert_eq!(grepped["count"], json!(1));
     assert_eq!(grepped["truncated"], json!(false));
+}
+
+#[tokio::test]
+async fn read_file_enforces_byte_budget_on_long_lines_and_offers_continuation() {
+    // A few very long lines: only 6 lines (well under the 2000-line cap) but
+    // ~180 KB total, the shape that let a 310 KB log dump into context and
+    // exhaust the pinchbench turn budget. The byte cap must truncate it.
+    let temp = tempfile::tempdir().unwrap();
+    let wide_line = "x".repeat(30 * 1024);
+    let body = (0..6)
+        .map(|_| wide_line.as_str())
+        .collect::<Vec<_>>()
+        .join("\n");
+    std::fs::write(temp.path().join("wide.log"), format!("{body}\n")).unwrap();
+
+    let (filesystem, mounts) = mounted_filesystem(temp.path(), MountPermissions::read_only());
+    let runtime = runtime_with_filesystem(filesystem);
+    let context = execution_context_with_mounts(all_builtin_capability_ids(), mounts);
+
+    let read = invoke_with_context(
+        &runtime,
+        READ_FILE_CAPABILITY_ID,
+        json!({"path": "/workspace/wide.log"}),
+        context.clone(),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(read["total_lines"], json!(6));
+    assert_eq!(read["truncated"], json!(true));
+    assert_eq!(read["truncated_by"], json!("bytes"));
+    // Stopped well before all 6 lines, and the body stays inside the budget
+    // including the continuation notice.
+    let shown = read["lines_shown"].as_u64().unwrap();
+    assert!(
+        (1..6).contains(&shown),
+        "expected partial read, got {shown}"
+    );
+    let content = read["content"].as_str().unwrap();
+    assert!(
+        content.len() <= 64 * 1024,
+        "body exceeded byte budget: {} bytes",
+        content.len()
+    );
+    let next = read["next_offset"].as_u64().unwrap();
+    assert_eq!(next, shown + 1);
+    assert!(content.contains(&format!("Use offset={next} to continue")));
+
+    // Resuming from next_offset advances past the already-shown lines.
+    let resumed = invoke_with_context(
+        &runtime,
+        READ_FILE_CAPABILITY_ID,
+        json!({"path": "/workspace/wide.log", "offset": next}),
+        context.clone(),
+    )
+    .await
+    .unwrap();
+    let resumed_first = resumed["content"].as_str().unwrap();
+    assert!(resumed_first.starts_with(&format!("{:>6}│", next)));
+}
+
+#[tokio::test]
+async fn read_file_saturates_large_limit_without_overflow() {
+    let temp = tempfile::tempdir().unwrap();
+    std::fs::write(temp.path().join("lines.txt"), "first\nsecond\nthird\n").unwrap();
+
+    let (filesystem, mounts) = mounted_filesystem(temp.path(), MountPermissions::read_only());
+    let runtime = runtime_with_filesystem(filesystem);
+    let context = execution_context_with_mounts(all_builtin_capability_ids(), mounts);
+
+    let read = invoke_with_context(
+        &runtime,
+        READ_FILE_CAPABILITY_ID,
+        json!({
+            "path": "/workspace/lines.txt",
+            "offset": 2,
+            "limit": usize::MAX,
+        }),
+        context,
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(read["total_lines"], json!(3));
+    assert_eq!(read["lines_shown"], json!(2));
+    assert_eq!(read["truncated"], json!(false));
+    assert!(read["truncated_by"].is_null());
+    assert!(read["next_offset"].is_null());
+    let content = read["content"].as_str().unwrap();
+    assert!(content.starts_with("     2│ second"));
+    assert!(content.contains("     3│ third"));
+    assert!(!content.contains("     1│ first"));
+}
+
+#[tokio::test]
+async fn read_file_clamps_a_single_line_larger_than_the_whole_budget() {
+    // One line bigger than the entire byte budget must still return something
+    // (clamped on a UTF-8 boundary) and advance the cursor rather than emit empty.
+    let temp = tempfile::tempdir().unwrap();
+    std::fs::write(
+        temp.path().join("blob.txt"),
+        format!("{}\nnext\n", "y".repeat(100 * 1024)),
+    )
+    .unwrap();
+
+    let (filesystem, mounts) = mounted_filesystem(temp.path(), MountPermissions::read_only());
+    let runtime = runtime_with_filesystem(filesystem);
+    let context = execution_context_with_mounts(all_builtin_capability_ids(), mounts);
+
+    let read = invoke_with_context(
+        &runtime,
+        READ_FILE_CAPABILITY_ID,
+        json!({"path": "/workspace/blob.txt"}),
+        context.clone(),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(read["lines_shown"], json!(1));
+    assert_eq!(read["truncated_by"], json!("bytes"));
+    assert_eq!(read["next_offset"], json!(2));
+    let content = read["content"].as_str().unwrap();
+    assert!(content.contains("[line truncated]"));
+    assert!(
+        content.len() <= 64 * 1024,
+        "body exceeded byte budget: {} bytes",
+        content.len()
+    );
+}
+
+#[tokio::test]
+async fn read_file_tolerates_stray_nul_and_invalid_utf8_in_text_logs() {
+    // A real syslog-shaped file with one stray NUL and one invalid UTF-8 byte.
+    // The strict probe/decode rejected these, forcing the agent into a grep-only
+    // fallback (pinchbench syslog tasks). The read path must now decode it lossily.
+    let temp = tempfile::tempdir().unwrap();
+    let mut bytes = b"Jan  1 00:00:00 host sshd[1]: Failed password for root\n".to_vec();
+    bytes.push(0u8); // stray NUL
+    bytes.extend_from_slice(b"\xffJan  1 00:00:01 host sshd[1]: more log line\n"); // invalid UTF-8
+    std::fs::write(temp.path().join("syslog.log"), &bytes).unwrap();
+
+    let (filesystem, mounts) = mounted_filesystem(temp.path(), MountPermissions::read_only());
+    let runtime = runtime_with_filesystem(filesystem);
+    let context = execution_context_with_mounts(all_builtin_capability_ids(), mounts);
+
+    let read = invoke_with_context(
+        &runtime,
+        READ_FILE_CAPABILITY_ID,
+        json!({"path": "/workspace/syslog.log"}),
+        context.clone(),
+    )
+    .await
+    .expect("text log with stray NUL / invalid UTF-8 must read, not hard-fail");
+    let content = read["content"].as_str().unwrap();
+    assert!(content.contains("Failed password for root"));
+    assert!(content.contains("more log line"));
+}
+
+#[tokio::test]
+async fn read_file_still_rejects_nul_dense_binary() {
+    // Genuine binary (NUL-dense): must still be kept out of context rather than
+    // dumped as U+FFFD soup. 25% NUL bytes clears both the floor and the ratio.
+    let temp = tempfile::tempdir().unwrap();
+    let bytes: Vec<u8> = (0..4096)
+        .map(|i| if i % 4 == 0 { 0u8 } else { b'A' })
+        .collect();
+    std::fs::write(temp.path().join("blob.bin"), &bytes).unwrap();
+
+    let (filesystem, mounts) = mounted_filesystem(temp.path(), MountPermissions::read_only());
+    let runtime = runtime_with_filesystem(filesystem);
+    let context = execution_context_with_mounts(all_builtin_capability_ids(), mounts);
+
+    invoke_with_context(
+        &runtime,
+        READ_FILE_CAPABILITY_ID,
+        json!({"path": "/workspace/blob.bin"}),
+        context.clone(),
+    )
+    .await
+    .expect_err("NUL-dense binary must still be rejected by read_file");
 }
 
 #[tokio::test]

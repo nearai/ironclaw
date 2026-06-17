@@ -305,6 +305,7 @@ impl LocalDevCapabilityIo {
                 result_ref: record.result_ref,
                 truncated: record.truncated,
                 updated_at: Utc::now(),
+                activity_order: None,
             }) {
                 Ok(preview) => preview,
                 Err(error) => {
@@ -578,6 +579,16 @@ impl LoopCapabilityResultWriter for LocalDevCapabilityIo {
             output_bytes,
             &output,
         ))
+    }
+
+    fn record_running_invocation(
+        &self,
+        _run_context: &LoopRunContext,
+        invocation_id: InvocationId,
+        input_ref: &CapabilityInputRef,
+    ) {
+        self.display_previews
+            .record_running_invocation(invocation_id, input_ref);
     }
 
     async fn update_capability_result(

@@ -712,6 +712,7 @@ registerPack("ko", {
   "automations.summary.activeDetail": "다음 실행을 기다리는 활성화된 일정입니다.",
   "automations.summary.paused": "일시중지됨",
   "automations.summary.pausedDetail": "현재 실행될 것으로 예상되지 않는 일정입니다.",
+  "automations.summary.filterAction": "{label} 보기",
   "automations.summary.nextRun": "다음 실행",
   "automations.summary.none": "없음",
   "automations.summary.nextRunDetail": "이 목록에서 가장 빨리 예약된 실행입니다.",
@@ -719,11 +720,31 @@ registerPack("ko", {
   "automations.empty.matchingDescription": "다른 상태 필터를 사용해 보세요.",
   "automations.empty.noneTitle": "아직 예정된 자동화가 없습니다.",
   "automations.empty.noneDescription": "이 에이전트는 표시할 예정된 작업이 없습니다.",
+  "automations.empty.onboardingTitle": "아직 자동화가 없습니다",
+  "automations.empty.onboardingDescription":
+    "자동화는 에이전트와 대화하여 만듭니다. 작성할 양식은 없습니다. 일정에 따라 무언가를 하도록 요청하면 반복 자동화를 설정해 줍니다.",
+  "automations.empty.examplesTitle": "에이전트에게 이렇게 요청해 보세요",
+  "automations.empty.example1":
+    "nearai/ironclaw 저장소를 10분마다 확인하고 새로운 이슈, PR, 커밋을 요약해 줘.",
+  "automations.empty.example2":
+    "평일 매일 오전 9시에 읽지 않은 이메일 요약을 보내 줘.",
+  "automations.empty.example3":
+    "매일 오후 3시에 열려 있는 풀 리퀘스트를 검토하라고 알려 줘.",
+  "automations.empty.startInChat": "채팅에서 시작",
+  "automations.empty.copyPrompt": "프롬프트 복사",
+  "automations.empty.copied": "복사됨",
+  "automations.refreshing": "새로고침 중…",
   "automations.table.name": "이름",
   "automations.table.schedule": "일정",
   "automations.table.nextRun": "다음 실행",
   "automations.table.lastRun": "마지막 실행",
   "automations.table.status": "상태",
+  "automations.runs.total": "최근 실행: {count}건",
+  "automations.runs.ok": "성공: {count}건",
+  "automations.runs.error": "실패: {count}건",
+  "automations.runs.running": "실행 중: {count}건",
+  "automations.runs.unknown": "알 수 없음: {count}건",
+  "automations.runs.showingOf": "최근 실행 {total}건 중 {shown}건 표시",
 
   // Routines page
   "routines.explorer": "작업",

@@ -172,12 +172,15 @@ mod tests {
     }
 
     #[test]
-    fn chat_gate_resolution_always_resumes_run() {
+    fn chat_gate_resolution_uses_resume_outcome() {
         let use_chat = asset_text("js/pages/chat/hooks/useChat.js");
-        // Every gate resolution resumes the run; there is no shouldContinueProcessing
-        // conditional. The terminal run_status SSE event is what clears processing.
-        assert!(use_chat.contains("setPendingGate(null);\n      setIsProcessing(true);"));
-        // activeRun is NOT cleared inside resolveGate — the run keeps going.
+        // Gate resolution normally resumes the run, but stale/terminal gate
+        // responses must not synthesize a processing state.
+        assert!(use_chat.contains("const outcome = resolveGateOutcome(response);"));
+        assert!(use_chat.contains("if (outcome === \"resumed\")"));
+        assert!(use_chat.contains("setIsProcessing(true);"));
+        assert!(use_chat.contains("setIsProcessing(false);"));
+        assert!(use_chat.contains("setActiveRun(null);"));
         assert!(!use_chat.contains("setIsProcessing(shouldContinueProcessing);"));
 
         let events = asset_text("js/pages/chat/lib/useChatEvents.js");

@@ -146,7 +146,7 @@ pub(crate) enum GitHubAction {
     },
     #[serde(rename = "list_repos")]
     ListRepos {
-        username: String,
+        username: Option<String>,
         page: Option<u32>,
         limit: Option<u32>,
     },

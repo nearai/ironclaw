@@ -735,6 +735,26 @@ impl HostRuntime for DefaultHostRuntime {
         context.trust = trust_decision.effective_trust.class();
 
         let registry = self.registry.snapshot();
+        // Re-apply the persistent-approval grant on the auth-resume preflight,
+        // mirroring `dispatch_capability`. The original dispatch injected this
+        // grant so the authorizer returned `Allow`; the loop re-dispatches the
+        // resume with a freshly built context that does not carry it. Without
+        // this, a capability authorized only by a persistent-approval grant
+        // (e.g. `extension_activate` under admin-config FirstParty trust) is
+        // re-authorized grant-less after the user supplies the missing
+        // credential and is denied — so the credential gate resumes only to
+        // fail authorization, even though a subsequent fresh dispatch succeeds.
+        // The helper is a no-op when no matching policy/grant exists, so
+        // capabilities that genuinely require fresh approval are unaffected.
+        self.apply_persistent_approval_policy(
+            &mut context,
+            &registry,
+            PersistentApprovalAction::Dispatch,
+            &capability_id,
+            &estimate,
+            &trust_decision,
+        )
+        .await;
         let host = self.capability_host(&registry);
         let auth_resume = CapabilityAuthResumeRequest {
             context,

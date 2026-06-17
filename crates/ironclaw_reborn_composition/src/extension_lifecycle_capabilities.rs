@@ -69,7 +69,7 @@ fn manifests() -> Result<Vec<CapabilityManifest>, ExtensionError> {
         )?,
         lifecycle_manifest(
             EXTENSION_ACTIVATE_CAPABILITY_ID,
-            "Activate an installed Reborn extension for the model-visible local-dev capability surface. Use after install succeeds or when install reports the extension is already installed. This is the step that opens the credential/auth gate when required; do not ask the user for credentials before calling it.",
+            "Activate an installed Reborn extension for the model-visible local-dev capability surface. Use after install succeeds or when install reports the extension is already installed. This is the step that opens the credential/auth gate when required; do not ask the user for credentials before calling it. If activation returns activated=true, the extension is ready; ignore earlier search onboarding or credential hints from this turn unless a later tool call raises auth_required.",
             vec![
                 EffectKind::ReadFilesystem,
                 EffectKind::WriteFilesystem,
@@ -344,7 +344,11 @@ mod tests {
         let activate = descriptor_for(&surface, EXTENSION_ACTIVATE_CAPABILITY_ID);
         assert!(
             activate.description.contains("credential/auth gate")
-                && activate.description.contains("do not ask the user"),
+                && activate.description.contains("do not ask the user")
+                && activate.description.contains("activated=true")
+                && activate
+                    .description
+                    .contains("ignore earlier search onboarding"),
             "extension_activate description should teach the model to raise auth through activation: {}",
             activate.description
         );
@@ -412,6 +416,11 @@ mod tests {
         .await
         .expect("activate succeeds");
         assert_eq!(activate["payload"]["activated"], true);
+        assert!(
+            activate["message"].as_str().is_some_and(|message| message
+                .contains("No additional authorization or configuration is needed")),
+            "activation success should override stale same-turn search onboarding, got {activate}"
+        );
 
         let after_activate = active_extension_capability_ids(&extension_management).await;
         assert!(after_activate.iter().any(|id| id == "web-access.search"));
@@ -542,6 +551,12 @@ mod tests {
         )
         .await
         .expect("configured search succeeds");
+        assert!(
+            configured_search["message"]
+                .as_str()
+                .is_some_and(|message| message.contains("already configured or active")),
+            "configured GitHub search should override stale PAT onboarding, got {configured_search}"
+        );
         let extensions = configured_search["payload"]["extensions"]
             .as_array()
             .expect("extensions array");
@@ -575,6 +590,12 @@ mod tests {
         )
         .await
         .expect("active search succeeds");
+        assert!(
+            active_search["message"]
+                .as_str()
+                .is_some_and(|message| message.contains("already configured or active")),
+            "active GitHub search should override stale PAT onboarding, got {active_search}"
+        );
         let extensions = active_search["payload"]["extensions"]
             .as_array()
             .expect("extensions array");

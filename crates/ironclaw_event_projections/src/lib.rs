@@ -297,8 +297,20 @@ pub struct CapabilityActivityProjection {
     pub process_id: Option<ProcessId>,
     pub output_bytes: Option<u64>,
     pub error_kind: Option<String>,
+    #[serde(default)]
+    pub first_cursor: EventCursor,
     pub last_cursor: EventCursor,
     pub updated_at: Timestamp,
+}
+
+impl CapabilityActivityProjection {
+    pub fn activity_order_cursor(&self) -> EventCursor {
+        if self.first_cursor == EventCursor::origin() {
+            self.last_cursor
+        } else {
+            self.first_cursor
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]

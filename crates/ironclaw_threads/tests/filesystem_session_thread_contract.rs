@@ -1496,6 +1496,7 @@ fn preview_envelope(invocation_id: InvocationId) -> CapabilityDisplayPreviewEnve
         result_ref: Some("result:demo-preview".to_string()),
         truncated: false,
         updated_at: Utc::now(),
+        activity_order: None,
     })
     .unwrap()
 }
