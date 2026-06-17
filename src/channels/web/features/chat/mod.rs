@@ -1303,6 +1303,8 @@ fn turn_tool_calls_succeeded(turn: &TurnInfo) -> bool {
 }
 
 fn turn_has_terminal_response(turn: &TurnInfo) -> bool {
+    // DB reconciliation waits for both fields so a partially persisted response
+    // does not hide an actually stuck tool step.
     turn.response.is_some() && turn.completed_at.is_some()
 }
 
@@ -1591,6 +1593,18 @@ mod tests {
         {
             let turn = thread.turns.last_mut().expect("turn");
             turn.response = Some("I stopped because I was repeating the same step.".to_string());
+        }
+
+        assert!(in_progress_from_thread(&thread).is_none());
+    }
+
+    #[test]
+    fn test_in_progress_from_thread_drops_processing_turn_with_completion_time() {
+        let mut thread = crate::agent::session::Thread::new(Uuid::new_v4(), Some("gateway"));
+        thread.start_turn("stop after timeout");
+        {
+            let turn = thread.turns.last_mut().expect("turn");
+            turn.completed_at = Some(chrono::Utc::now());
         }
 
         assert!(in_progress_from_thread(&thread).is_none());
