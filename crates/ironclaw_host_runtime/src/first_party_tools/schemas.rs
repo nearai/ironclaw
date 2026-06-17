@@ -359,7 +359,15 @@ pub(crate) fn resolve_builtin_input_schema_ref(reference: &str) -> Option<Value>
             },
             "required": ["path"],
             "oneOf": [
-                { "required": ["old_string", "new_string"] },
+                {
+                    "required": ["old_string", "new_string"],
+                    "not": {
+                        "properties": {
+                            "edits": { "type": "array" }
+                        },
+                        "required": ["edits"]
+                    }
+                },
                 {
                     "properties": {
                         "edits": { "type": "array" }

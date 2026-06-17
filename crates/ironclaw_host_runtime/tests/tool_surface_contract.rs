@@ -614,6 +614,17 @@ async fn visible_surface_resolves_builtin_first_party_input_schema_refs() {
             .validate(&json!({
                 "path": "/workspace/main.rs",
                 "old_string": "old",
+                "new_string": "new",
+                "edits": [{"oldText": "old", "newText": "new"}]
+            }))
+            .is_err(),
+        "apply_patch schema should reject complete single-edit shape mixed with edits array"
+    );
+    assert!(
+        apply_patch_validator
+            .validate(&json!({
+                "path": "/workspace/main.rs",
+                "old_string": "old",
                 "edits": [{"oldText": "old", "newText": "new"}]
             }))
             .is_err(),
