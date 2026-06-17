@@ -22,10 +22,11 @@ pub(super) struct ApplyPatchInput {
 pub(super) fn parse_apply_patch_input(
     input: &Value,
 ) -> Result<ApplyPatchInput, CodingCapabilityError> {
-    let replace_all = input
-        .get("replace_all")
-        .and_then(Value::as_bool)
-        .unwrap_or(false);
+    let replace_all = match input.get("replace_all") {
+        Some(Value::Bool(value)) => *value,
+        Some(_) => return Err(input_error()),
+        None => false,
+    };
 
     let edits = if let Some(edits_value) = optional_edits_value(input) {
         if optional_sentinel_field(input, "old_string").is_some()
@@ -35,8 +36,13 @@ pub(super) fn parse_apply_patch_input(
         }
         parse_patch_edits(edits_value)?
     } else {
-        let old_string = normalize_patch_text(required_str(input, "old_string")?);
-        let new_string = normalize_patch_text(required_str(input, "new_string")?);
+        let old_raw = required_str(input, "old_string")?;
+        let new_raw = required_str(input, "new_string")?;
+        if old_raw == "null" || new_raw == "null" {
+            return Err(input_error());
+        }
+        let old_string = normalize_patch_text(old_raw);
+        let new_string = normalize_patch_text(new_raw);
         vec![validated_patch_edit(old_string, new_string)?]
     };
 
@@ -53,7 +59,9 @@ pub(super) fn replacement_error(
     edit_count: usize,
 ) -> CodingCapabilityError {
     match error {
-        ReplaceContentError::EmptyOld | ReplaceContentError::NoChange => input_error(),
+        ReplaceContentError::EmptyOld
+        | ReplaceContentError::InvalidEditCount
+        | ReplaceContentError::NoChange => input_error(),
         ReplaceContentError::NotFound { edit_index } => operation_error_with_summary(format!(
             "apply_patch failed for {safe_path}: {} matched 0 times",
             edit_label(edit_index, edit_count)
@@ -77,7 +85,10 @@ pub(super) fn replacement_error(
 fn parse_patch_edits(edits_value: &Value) -> Result<Vec<PatchEdit>, CodingCapabilityError> {
     let parsed;
     let edits_value = if let Some(edits_string) = edits_value.as_str() {
-        parsed = serde_json::from_str::<Value>(edits_string).map_err(|_| input_error())?;
+        parsed = serde_json::from_str::<Value>(edits_string).map_err(|error| {
+            tracing::debug!(?error, "apply_patch edits string is not valid JSON");
+            input_error()
+        })?;
         &parsed
     } else {
         edits_value
@@ -180,6 +191,31 @@ mod tests {
             assert_eq!(parsed.edits.len(), 1);
             assert_eq!(parsed.edits[0].old_string, "old");
             assert_eq!(parsed.edits[0].new_string, "new");
+        }
+    }
+
+    #[test]
+    fn parse_apply_patch_input_rejects_non_boolean_replace_all() {
+        let input = json!({
+            "path": "/workspace/main.txt",
+            "old_string": "old",
+            "new_string": "new",
+            "replace_all": "true"
+        });
+
+        assert!(parse_apply_patch_input(&input).is_err());
+    }
+
+    #[test]
+    fn parse_apply_patch_input_rejects_active_null_string_placeholders() {
+        for (old_string, new_string) in [("null", "new"), ("old", "null")] {
+            let input = json!({
+                "path": "/workspace/main.txt",
+                "old_string": old_string,
+                "new_string": new_string
+            });
+
+            assert!(parse_apply_patch_input(&input).is_err());
         }
     }
 

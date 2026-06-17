@@ -48,3 +48,12 @@ pub(super) enum MatchMethod {
     Exact,
     FuzzyNormalization,
 }
+
+impl MatchMethod {
+    pub(super) fn as_wire_name(self) -> &'static str {
+        match self {
+            MatchMethod::Exact => "Exact",
+            MatchMethod::FuzzyNormalization => "FuzzyNormalization",
+        }
+    }
+}

@@ -337,7 +337,7 @@ pub(super) async fn apply_patch(
         "success": true
     });
     if replacement.match_method != MatchMethod::Exact {
-        result["match_method"] = json!(format!("{:?}", replacement.match_method));
+        result["match_method"] = json!(replacement.match_method.as_wire_name());
     }
     let display_preview = file_diff_preview(
         resolved.scoped_path.as_str(),

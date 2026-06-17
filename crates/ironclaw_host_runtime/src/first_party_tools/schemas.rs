@@ -341,10 +341,12 @@ pub(crate) fn resolve_builtin_input_schema_ref(reference: &str) -> Option<Value>
                 {
                     "properties": {
                         "old_string": {
-                            "type": "string"
+                            "type": "string",
+                            "not": { "const": "null" }
                         },
                         "new_string": {
-                            "type": "string"
+                            "type": "string",
+                            "not": { "const": "null" }
                         }
                     },
                     "required": ["old_string", "new_string"],

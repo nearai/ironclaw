@@ -99,6 +99,7 @@ pub(super) struct TextEdit<'a> {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) enum ReplaceContentError {
     EmptyOld,
+    InvalidEditCount,
     NotFound {
         edit_index: usize,
     },
@@ -264,10 +265,10 @@ pub(super) fn replace_content(
         }
     }
     if edits.is_empty() {
-        return Err(ReplaceContentError::NoChange);
+        return Err(ReplaceContentError::InvalidEditCount);
     }
     if replace_all && edits.len() != 1 {
-        return Err(ReplaceContentError::NoChange);
+        return Err(ReplaceContentError::InvalidEditCount);
     }
 
     let mut matched_edits = Vec::with_capacity(edits.len());
@@ -423,7 +424,10 @@ fn normalize_with_source_map(value: &str) -> NormalizedText {
 }
 
 fn normalize_char_for_fuzzy_match(ch: char) -> Vec<char> {
-    ch.to_string().nfkd().map(normalize_fuzzy_char).collect()
+    std::iter::once(ch)
+        .nfkd()
+        .map(normalize_fuzzy_char)
+        .collect()
 }
 
 fn normalize_fuzzy_char(ch: char) -> char {
