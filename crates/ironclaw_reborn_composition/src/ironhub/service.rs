@@ -5,8 +5,12 @@ use std::time::Instant;
 use chrono::{DateTime, Utc};
 use ironclaw_common::hashing::sha256_hex;
 use ironclaw_host_api::{
-    CapabilityId, InvocationId, NetworkMethod, ResourceScope, RuntimeHttpEgress,
-    RuntimeHttpEgressRequest, RuntimeKind, UserId,
+    CapabilityId, ExtensionId, InvocationId, NetworkMethod, ResourceScope, RuntimeHttpEgress,
+    RuntimeHttpEgressError, RuntimeHttpEgressRequest, RuntimeHttpEgressResponse, RuntimeKind,
+    TrustClass, UserId,
+};
+use ironclaw_host_runtime::{
+    BUILTIN_FIRST_PARTY_PROVIDER, HostRuntimeHttpEgressPort, HostRuntimeHttpEgressRequest,
 };
 use ironclaw_product_workflow::{
     LifecyclePackageId, LifecyclePackageKind, LifecyclePhase, LifecycleProductPayload,
@@ -16,7 +20,9 @@ use tokio::sync::Mutex as AsyncMutex;
 
 use crate::extension_lifecycle::RebornLocalExtensionManagementPort;
 use crate::factory::RebornServices;
-use crate::lifecycle::{RebornLocalSkillManagementPort, response_with_payload};
+use crate::lifecycle::{
+    RebornLocalSkillManagementError, RebornLocalSkillManagementPort, response_with_payload,
+};
 
 #[cfg(not(test))]
 use super::catalog::verify_signed_manifest;
@@ -59,8 +65,8 @@ pub async fn execute_reborn_ironhub_command(
         .extension_management
         .as_ref()
         .ok_or(IronHubCommandError::LocalRuntimeUnavailable)?;
-    let runtime_http_egress = local_runtime
-        .runtime_http_egress
+    let host_runtime_http_egress = local_runtime
+        .host_runtime_http_egress
         .as_ref()
         .ok_or(IronHubCommandError::RuntimeHttpEgressUnavailable)?;
     let scope = ResourceScope::local_default(
@@ -68,19 +74,66 @@ pub async fn execute_reborn_ironhub_command(
         InvocationId::new(),
     )
     .map_err(invalid_input)?;
-    let service = IronHubService::new(
+    let capability_id = CapabilityId::new("builtin.ironhub_fetch").map_err(invalid_input)?;
+    let service = IronHubService::new_with_host_egress(
         Arc::clone(&local_runtime.skill_management),
         Arc::clone(extension_management),
-        Arc::clone(runtime_http_egress),
+        host_runtime_http_egress.clone(),
+        capability_id,
         scope,
     );
     service.execute(command).await
 }
 
+enum IronHubEgress {
+    Host {
+        port: HostRuntimeHttpEgressPort,
+        capability_id: CapabilityId,
+    },
+    Runtime {
+        egress: Arc<dyn RuntimeHttpEgress>,
+        capability_id: CapabilityId,
+    },
+}
+
+impl IronHubEgress {
+    fn capability_id(&self) -> CapabilityId {
+        match self {
+            Self::Host { capability_id, .. } | Self::Runtime { capability_id, .. } => {
+                capability_id.clone()
+            }
+        }
+    }
+
+    async fn execute(
+        &self,
+        request: RuntimeHttpEgressRequest,
+    ) -> Result<RuntimeHttpEgressResponse, RuntimeHttpEgressError> {
+        match self {
+            Self::Host { port, .. } => {
+                port.execute(HostRuntimeHttpEgressRequest {
+                    extension_id: ExtensionId::new(BUILTIN_FIRST_PARTY_PROVIDER).map_err(
+                        |error| RuntimeHttpEgressError::Request {
+                            reason: format!("invalid builtin provider id: {error}"),
+                            request_bytes: 0,
+                            response_bytes: 0,
+                        },
+                    )?,
+                    trust: TrustClass::FirstParty,
+                    request,
+                    credentials: Vec::new(),
+                })
+                .await
+            }
+            Self::Runtime { egress, .. } => egress.execute(request).await,
+        }
+    }
+}
+
 pub(crate) struct IronHubService {
     skill_management: Arc<RebornLocalSkillManagementPort>,
     extension_management: Arc<RebornLocalExtensionManagementPort>,
-    runtime_http_egress: Arc<dyn RuntimeHttpEgress>,
+    egress: IronHubEgress,
     scope: ResourceScope,
     manifest_url: String,
     #[cfg(test)]
@@ -88,16 +141,52 @@ pub(crate) struct IronHubService {
 }
 
 impl IronHubService {
-    pub(crate) fn new(
+    pub(crate) fn new_with_host_egress(
+        skill_management: Arc<RebornLocalSkillManagementPort>,
+        extension_management: Arc<RebornLocalExtensionManagementPort>,
+        host_runtime_http_egress: HostRuntimeHttpEgressPort,
+        capability_id: CapabilityId,
+        scope: ResourceScope,
+    ) -> Self {
+        Self::new(
+            skill_management,
+            extension_management,
+            IronHubEgress::Host {
+                port: host_runtime_http_egress,
+                capability_id,
+            },
+            scope,
+        )
+    }
+
+    pub(crate) fn new_with_runtime_egress(
         skill_management: Arc<RebornLocalSkillManagementPort>,
         extension_management: Arc<RebornLocalExtensionManagementPort>,
         runtime_http_egress: Arc<dyn RuntimeHttpEgress>,
+        capability_id: CapabilityId,
+        scope: ResourceScope,
+    ) -> Self {
+        Self::new(
+            skill_management,
+            extension_management,
+            IronHubEgress::Runtime {
+                egress: runtime_http_egress,
+                capability_id,
+            },
+            scope,
+        )
+    }
+
+    fn new(
+        skill_management: Arc<RebornLocalSkillManagementPort>,
+        extension_management: Arc<RebornLocalExtensionManagementPort>,
+        egress: IronHubEgress,
         scope: ResourceScope,
     ) -> Self {
         Self {
             skill_management,
             extension_management,
-            runtime_http_egress,
+            egress,
             scope,
             manifest_url: resolve_manifest_url(),
             #[cfg(test)]
@@ -285,21 +374,25 @@ impl IronHubService {
                     String::from_utf8(content).map_err(|error| IronHubCommandError::Install {
                         reason: format!("skill markdown is not UTF-8: {error}"),
                     })?;
-                if options.force {
+                let mut result = self
+                    .skill_management
+                    .install_from_url(Some(&entry.name), &content, &entry.skill_md.url)
+                    .await;
+                if options.force && matches!(result, Err(ref error) if is_skill_conflict(error)) {
                     self.skill_management
                         .remove_if_installed(&entry.name)
                         .await
                         .map_err(|error| IronHubCommandError::Install {
                             reason: error.to_string(),
                         })?;
+                    result = self
+                        .skill_management
+                        .install_from_url(Some(&entry.name), &content, &entry.skill_md.url)
+                        .await;
                 }
-                let result = self
-                    .skill_management
-                    .install_from_url(Some(&entry.name), &content, &entry.skill_md.url)
-                    .await
-                    .map_err(|error| IronHubCommandError::Install {
-                        reason: error.to_string(),
-                    })?;
+                let result = result.map_err(|error| IronHubCommandError::Install {
+                    reason: error.to_string(),
+                })?;
                 let mut response = response_with_payload(
                     Some(package_ref(LifecyclePackageKind::Skill, &result.name)?),
                     LifecyclePhase::Installed,
@@ -412,7 +505,7 @@ impl IronHubService {
         let request = RuntimeHttpEgressRequest {
             runtime: RuntimeKind::FirstParty,
             scope: self.scope.clone(),
-            capability_id: CapabilityId::new("builtin.ironhub_fetch").map_err(invalid_input)?,
+            capability_id: self.egress.capability_id(),
             method: NetworkMethod::Get,
             url: url.to_string(),
             headers: Vec::new(),
@@ -423,13 +516,13 @@ impl IronHubService {
             save_body_to: None,
             timeout_ms: Some(30_000),
         };
-        let response = self
-            .runtime_http_egress
-            .execute(request)
-            .await
-            .map_err(|error| IronHubCommandError::Catalog {
-                reason: error.stable_runtime_reason().to_string(),
-            })?;
+        let response =
+            self.egress
+                .execute(request)
+                .await
+                .map_err(|error| IronHubCommandError::Catalog {
+                    reason: error.stable_runtime_reason().to_string(),
+                })?;
         if !(200..300).contains(&response.status) {
             return Err(IronHubCommandError::Catalog {
                 reason: format!("download returned HTTP {}", response.status),
@@ -442,6 +535,14 @@ impl IronHubService {
         }
         Ok(response.body)
     }
+}
+
+fn is_skill_conflict(error: &RebornLocalSkillManagementError) -> bool {
+    matches!(
+        error,
+        RebornLocalSkillManagementError::Skill(error)
+            if error.kind() == ironclaw_skills::SkillManagementErrorKind::Conflict
+    )
 }
 
 fn resolve_manifest_url() -> String {

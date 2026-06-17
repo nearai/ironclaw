@@ -1,3 +1,5 @@
+use std::collections::BTreeMap;
+
 use ironclaw_extensions::{
     CapabilityDeclV2, CapabilityVisibility, ExtensionAssetPath, ExtensionManifest,
     ExtensionPackage, ExtensionRuntime, ManifestSource,
@@ -323,6 +325,7 @@ impl AvailableExtensionCatalog {
         }
     }
 
+    #[cfg(test)]
     pub(crate) async fn from_filesystem_root<F>(
         fs: &F,
         root: &VirtualPath,
@@ -330,8 +333,20 @@ impl AvailableExtensionCatalog {
     where
         F: RootFilesystem + ?Sized,
     {
+        let manifest_sources = BTreeMap::new();
+        Self::from_filesystem_root_with_manifest_sources(fs, root, &manifest_sources).await
+    }
+
+    pub(crate) async fn from_filesystem_root_with_manifest_sources<F>(
+        fs: &F,
+        root: &VirtualPath,
+        manifest_sources: &BTreeMap<String, ManifestSource>,
+    ) -> Result<Self, ProductWorkflowError>
+    where
+        F: RootFilesystem + ?Sized,
+    {
         Ok(Self::from_packages(
-            load_filesystem_packages(fs, root).await?,
+            load_filesystem_packages(fs, root, manifest_sources).await?,
         ))
     }
 
@@ -1322,6 +1337,7 @@ where
 async fn load_filesystem_packages<F>(
     fs: &F,
     root: &VirtualPath,
+    manifest_sources: &BTreeMap<String, ManifestSource>,
 ) -> Result<Vec<AvailableExtensionPackage>, ProductWorkflowError>
 where
     F: RootFilesystem + ?Sized,
@@ -1380,9 +1396,13 @@ where
                 reason: format!("available extension manifest is not UTF-8: {error}"),
             }
         })?;
+        let manifest_source = manifest_sources
+            .get(&entry.name)
+            .copied()
+            .unwrap_or(ManifestSource::InstalledLocal);
         let manifest = ExtensionManifest::parse_with_optional_host_api_contracts(
             &manifest_toml,
-            ManifestSource::HostBundled,
+            manifest_source,
             &host_ports,
             &contracts,
         )
@@ -1461,7 +1481,7 @@ fn visible_capabilities(
 #[cfg(test)]
 mod tests {
     use std::{
-        collections::{HashMap, HashSet},
+        collections::{BTreeMap, HashMap, HashSet},
         sync::{Arc, Mutex},
         time::SystemTime,
     };
@@ -1901,6 +1921,71 @@ mod tests {
                 .map(|asset| asset.path.as_str())
                 .collect::<Vec<_>>(),
             vec!["manifest.toml", "wasm/fixture.wasm"]
+        );
+    }
+
+    #[tokio::test]
+    async fn filesystem_catalog_preserves_persisted_manifest_source() {
+        static REGISTRY_MANIFEST: &str = r#"
+schema_version = "reborn.extension_manifest.v2"
+id = "fixture"
+name = "Fixture"
+version = "0.1.0"
+description = "fixture extension"
+trust = "third_party"
+
+[runtime]
+kind = "wasm"
+module = "wasm/fixture.wasm"
+
+[[host_api]]
+id = "ironclaw.capability_provider/v1"
+section = "capability_provider.tools"
+
+[capability_provider.tools]
+
+[[capability_provider.tools.capabilities]]
+id = "fixture.search"
+description = "Search"
+effects = ["network"]
+default_permission = "ask"
+visibility = "model"
+input_schema_ref = "schemas/search.input.json"
+output_schema_ref = "schemas/search.output.json"
+"#;
+        let fs = InMemoryBackend::default();
+        fs.write_file(
+            &VirtualPath::new("/system/extensions/fixture/manifest.toml").unwrap(),
+            REGISTRY_MANIFEST.as_bytes(),
+        )
+        .await
+        .unwrap();
+        fs.write_file(
+            &VirtualPath::new("/system/extensions/fixture/wasm/fixture.wasm").unwrap(),
+            b"wasm",
+        )
+        .await
+        .unwrap();
+        let mut manifest_sources = BTreeMap::new();
+        manifest_sources.insert("fixture".to_string(), ManifestSource::RegistryInstalled);
+
+        let catalog = AvailableExtensionCatalog::from_filesystem_root_with_manifest_sources(
+            &fs,
+            &VirtualPath::new("/system/extensions").unwrap(),
+            &manifest_sources,
+        )
+        .await
+        .unwrap();
+        let results = catalog.search("fixture").collect::<Vec<_>>();
+
+        assert_eq!(results.len(), 1);
+        assert_eq!(
+            results[0].package.manifest.source,
+            ManifestSource::RegistryInstalled
+        );
+        assert_eq!(
+            results[0].summary().source,
+            ironclaw_product_workflow::LifecycleExtensionSource::Registry
         );
     }
 

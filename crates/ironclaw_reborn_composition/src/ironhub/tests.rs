@@ -8,8 +8,9 @@ use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use ed25519_dalek::{Signer, SigningKey};
 use ironclaw_common::hashing::sha256_hex;
 use ironclaw_host_api::{
-    InvocationId, NetworkScheme, ResourceScope, RuntimeHttpEgress, RuntimeHttpEgressError,
-    RuntimeHttpEgressRequest, RuntimeHttpEgressResponse, RuntimeKind, UserId, sha256_digest_token,
+    CapabilityId, InvocationId, NetworkScheme, ResourceScope, RuntimeHttpEgress,
+    RuntimeHttpEgressError, RuntimeHttpEgressRequest, RuntimeHttpEgressResponse, RuntimeKind,
+    UserId, sha256_digest_token,
 };
 use ironclaw_product_workflow::{LifecyclePhase, LifecycleProductPayload, LifecycleSkillSource};
 
@@ -364,6 +365,10 @@ async fn fetch_manifest_uses_runtime_egress_host_policy() {
     assert_eq!(request.runtime, RuntimeKind::FirstParty);
     assert_eq!(request.url, manifest_url);
     assert_eq!(
+        request.capability_id,
+        CapabilityId::new(super::model::IRONHUB_SEARCH_CAPABILITY_ID).expect("capability id")
+    );
+    assert_eq!(
         request.response_body_limit,
         Some(super::model::MAX_SIGNED_MANIFEST_BYTES)
     );
@@ -436,7 +441,7 @@ async fn ironhub_service(
     .await
     .expect("local-dev services build");
     let local_runtime = services.local_runtime.expect("local runtime substrate");
-    IronHubService::new(
+    IronHubService::new_with_runtime_egress(
         Arc::clone(&local_runtime.skill_management),
         local_runtime
             .extension_management
@@ -444,6 +449,7 @@ async fn ironhub_service(
             .expect("extension management")
             .clone(),
         egress,
+        CapabilityId::new(super::model::IRONHUB_SEARCH_CAPABILITY_ID).expect("capability id"),
         ResourceScope::local_default(
             UserId::new("ironhub-test-user").expect("user"),
             InvocationId::new(),
@@ -529,6 +535,7 @@ fn mixed_manifest_json(fixture: MixedManifestFixture<'_>) -> String {
 #[derive(Debug, Clone)]
 struct RecordedEgressRequest {
     runtime: RuntimeKind,
+    capability_id: CapabilityId,
     url: String,
     response_body_limit: Option<u64>,
     network_policy: ironclaw_host_api::NetworkPolicy,
@@ -580,6 +587,7 @@ impl RuntimeHttpEgress for RecordingIronHubEgress {
             .expect("requests lock")
             .push(RecordedEgressRequest {
                 runtime: request.runtime,
+                capability_id: request.capability_id.clone(),
                 url: request.url.clone(),
                 response_body_limit: request.response_body_limit,
                 network_policy: request.network_policy.clone(),

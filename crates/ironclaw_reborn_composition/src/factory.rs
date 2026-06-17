@@ -1,5 +1,6 @@
 // arch-exempt: large_file, needs Reborn composition helper extraction, plan #4469
 use std::{
+    collections::BTreeMap,
     path::{Path, PathBuf},
     sync::Arc,
 };
@@ -27,7 +28,7 @@ use ironclaw_events::{
     DurableAuditLog, DurableEventLog, InMemoryDurableAuditLog, InMemoryDurableEventLog,
 };
 use ironclaw_extensions::{
-    ExtensionInstallationStore, ExtensionLifecycleService, ExtensionRegistry,
+    ExtensionInstallationStore, ExtensionLifecycleService, ExtensionRegistry, ManifestSource,
 };
 #[cfg(not(feature = "libsql"))]
 use ironclaw_filesystem::InMemoryBackend;
@@ -750,21 +751,6 @@ async fn build_local_dev(input: RebornBuildInput) -> Result<RebornServices, Rebo
             product_auth.runtime_credential_account_selection_service(),
         ),
     ));
-    let mut available_extensions = AvailableExtensionCatalog::from_filesystem_root(
-        filesystem.as_ref(),
-        &VirtualPath::new("/system/extensions")?,
-    )
-    .await
-    .map_err(|error| RebornBuildError::InvalidConfig {
-        reason: format!("available extension catalog could not be loaded: {error}"),
-    })?;
-    available_extensions.extend(
-        AvailableExtensionCatalog::from_first_party_assets().map_err(|error| {
-            RebornBuildError::InvalidConfig {
-                reason: format!("first-party extension catalog could not be loaded: {error}"),
-            }
-        })?,
-    );
     let extension_filesystem: Arc<dyn RootFilesystem> = filesystem.clone();
     let extension_installation_store: Arc<dyn ExtensionInstallationStore> = Arc::new(
         FilesystemExtensionInstallationStore::load(extension_filesystem.clone())
@@ -772,6 +758,25 @@ async fn build_local_dev(input: RebornBuildInput) -> Result<RebornServices, Rebo
             .map_err(|error| RebornBuildError::InvalidConfig {
                 reason: format!("extension installation state could not be loaded: {error}"),
             })?,
+    );
+    let manifest_sources =
+        available_extension_manifest_sources(extension_installation_store.as_ref()).await?;
+    let mut available_extensions =
+        AvailableExtensionCatalog::from_filesystem_root_with_manifest_sources(
+            filesystem.as_ref(),
+            &VirtualPath::new("/system/extensions")?,
+            &manifest_sources,
+        )
+        .await
+        .map_err(|error| RebornBuildError::InvalidConfig {
+            reason: format!("available extension catalog could not be loaded: {error}"),
+        })?;
+    available_extensions.extend(
+        AvailableExtensionCatalog::from_first_party_assets().map_err(|error| {
+            RebornBuildError::InvalidConfig {
+                reason: format!("first-party extension catalog could not be loaded: {error}"),
+            }
+        })?,
     );
     let extension_lifecycle_service = Arc::new(tokio::sync::Mutex::new(
         ExtensionLifecycleService::new(services.shared_extension_registry().snapshot_owned()),
@@ -866,6 +871,25 @@ async fn build_local_dev(input: RebornBuildInput) -> Result<RebornServices, Rebo
         #[cfg(feature = "root-llm-provider")]
         secret_store,
     })
+}
+
+async fn available_extension_manifest_sources(
+    installation_store: &dyn ExtensionInstallationStore,
+) -> Result<BTreeMap<String, ManifestSource>, RebornBuildError> {
+    let manifests = installation_store.list_manifests().await.map_err(|error| {
+        RebornBuildError::InvalidConfig {
+            reason: format!("extension installation manifests could not be loaded: {error}"),
+        }
+    })?;
+    Ok(manifests
+        .into_iter()
+        .map(|record| {
+            (
+                record.manifest().id.as_str().to_string(),
+                record.manifest().source,
+            )
+        })
+        .collect())
 }
 
 #[cfg(feature = "libsql")]

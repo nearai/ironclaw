@@ -150,13 +150,15 @@ impl FirstPartyCapabilityHandler for IronHubCapabilityHandler {
                 RuntimeDispatchErrorKind::Executor,
             ));
         };
-        let service = IronHubService::new(
+        let capability_id = request.capability_id.clone();
+        let service = IronHubService::new_with_runtime_egress(
             Arc::clone(&self.skill_management),
             Arc::clone(&self.extension_management),
             runtime_http_egress,
+            capability_id.clone(),
             request.scope,
         );
-        let command = match request.capability_id.as_str() {
+        let command = match capability_id.as_str() {
             IRONHUB_SEARCH_CAPABILITY_ID => {
                 let input: SearchInput = parse_capability_input(request.input)?;
                 IronHubCommand::Search { query: input.query }
