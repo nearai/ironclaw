@@ -1,7 +1,4 @@
-use std::{
-    collections::{BTreeMap, BTreeSet},
-    sync::Arc,
-};
+use std::{collections::BTreeSet, sync::Arc};
 
 use ironclaw_extensions::{
     CapabilityVisibility, ExtensionActivationState, ExtensionError, ExtensionInstallation,
@@ -16,8 +13,8 @@ use ironclaw_host_api::{
     sha256_digest_token,
 };
 use ironclaw_product_workflow::{
-    LifecycleExtensionSummary, LifecycleInstalledExtensionSummary, LifecyclePackageKind,
-    LifecyclePackageRef, LifecyclePhase, LifecycleProductPayload, LifecycleProductResponse,
+    LifecycleInstalledExtensionSummary, LifecyclePackageKind, LifecyclePackageRef, LifecyclePhase,
+    LifecycleProductPayload, LifecycleProductResponse, LifecycleSearchExtensionSummary,
     ProductWorkflowError,
 };
 use tokio::sync::Mutex;
@@ -31,7 +28,8 @@ use crate::available_extensions::{
     visible_capability_ids,
 };
 use crate::extension_activation_credentials::{
-    ExtensionActivationCredentialGate, UnavailableExtensionActivationCredentialGate,
+    ExtensionActivationCredentialGate, RuntimeExtensionActivationCredentialGate,
+    UnavailableExtensionActivationCredentialGate,
 };
 use crate::extension_credential_requirements::package_runtime_credential_auth_requirements;
 use crate::lifecycle::response_with_payload;
@@ -180,16 +178,13 @@ impl RebornLocalExtensionManagementPort {
     pub(crate) async fn search(
         &self,
         query: &str,
+        credential_gate: Option<&RuntimeExtensionActivationCredentialGate>,
     ) -> Result<LifecycleProductResponse, ProductWorkflowError> {
-        let installed_phases = {
-            let _operation_guard = self.operation_lock.lock().await;
-            self.installed_phases().await?
-        };
         let extensions = self.catalog.search(query);
-        let summaries = extensions
-            .into_iter()
-            .map(|extension| search_summary(extension, &installed_phases))
-            .collect::<Vec<_>>();
+        let mut summaries = Vec::new();
+        for extension in extensions {
+            summaries.push(self.search_summary(extension, credential_gate).await?);
+        }
         let count = summaries.len();
         Ok(response_with_payload(
             None,
@@ -303,22 +298,39 @@ impl RebornLocalExtensionManagementPort {
         Ok(summaries)
     }
 
-    async fn installed_phases(
+    async fn search_summary(
         &self,
-    ) -> Result<BTreeMap<ExtensionId, LifecyclePhase>, ProductWorkflowError> {
-        Ok(self
-            .installation_store
-            .list_installations()
+        extension: &AvailableExtensionPackage,
+        credential_gate: Option<&RuntimeExtensionActivationCredentialGate>,
+    ) -> Result<LifecycleSearchExtensionSummary, ProductWorkflowError> {
+        let mut summary = extension.summary();
+        let Some(installation) = self.search_installation(&extension.package.id).await? else {
+            return Ok(LifecycleSearchExtensionSummary {
+                summary,
+                installation_phase: None,
+            });
+        };
+        let phase = search_installation_phase(extension, &installation, credential_gate).await?;
+        if search_setup_is_complete(phase) {
+            summary.credential_requirements.clear();
+            summary.onboarding = None;
+        }
+        Ok(LifecycleSearchExtensionSummary {
+            summary,
+            installation_phase: Some(phase),
+        })
+    }
+
+    async fn search_installation(
+        &self,
+        extension_id: &ExtensionId,
+    ) -> Result<Option<ExtensionInstallation>, ProductWorkflowError> {
+        let installation_id = ExtensionInstallationId::new(extension_id.as_str().to_string())
+            .map_err(map_extension_installation_error)?;
+        self.installation_store
+            .get_installation(&installation_id)
             .await
-            .map_err(map_extension_installation_error)?
-            .into_iter()
-            .map(|installation| {
-                (
-                    installation.extension_id().clone(),
-                    phase_for_activation_state(installation.activation_state()),
-                )
-            })
-            .collect())
+            .map_err(map_extension_installation_error)
     }
 
     pub(crate) async fn install(
@@ -1145,27 +1157,64 @@ fn phase_for_activation_state(state: ExtensionActivationState) -> LifecyclePhase
     }
 }
 
-fn search_summary(
+async fn search_installation_phase(
     extension: &AvailableExtensionPackage,
-    installed_phases: &BTreeMap<ExtensionId, LifecyclePhase>,
-) -> LifecycleExtensionSummary {
-    let mut summary = extension.summary();
-    let Some(phase) = installed_phases.get(&extension.package.id).copied() else {
-        return summary;
-    };
-    summary.installation_phase = Some(phase);
-    if search_setup_is_complete(phase) {
-        summary.credential_requirements.clear();
-        summary.onboarding = None;
+    installation: &ExtensionInstallation,
+    credential_gate: Option<&RuntimeExtensionActivationCredentialGate>,
+) -> Result<LifecyclePhase, ProductWorkflowError> {
+    let phase = phase_for_activation_state(installation.activation_state());
+    if phase != LifecyclePhase::Installed {
+        return Ok(phase);
     }
-    summary
+    if search_credentials_configured(extension, credential_gate).await? {
+        return Ok(LifecyclePhase::Configured);
+    }
+    Ok(phase)
+}
+
+async fn search_credentials_configured(
+    extension: &AvailableExtensionPackage,
+    credential_gate: Option<&RuntimeExtensionActivationCredentialGate>,
+) -> Result<bool, ProductWorkflowError> {
+    let requirements = package_runtime_credential_auth_requirements(&extension.package);
+    if requirements.is_empty() {
+        return Ok(false);
+    }
+    let Some(credential_gate) = credential_gate else {
+        return Ok(false);
+    };
+    Ok(credential_gate
+        .missing_requirements(requirements)
+        .await
+        .map_err(map_search_credential_stage_error)?
+        .is_empty())
 }
 
 fn search_setup_is_complete(phase: LifecyclePhase) -> bool {
     matches!(
         phase,
-        LifecyclePhase::Configured | LifecyclePhase::Activating | LifecyclePhase::Active
+        LifecyclePhase::Configured
+            | LifecyclePhase::Activating
+            | LifecyclePhase::Active
+            | LifecyclePhase::Disabled
     )
+}
+
+fn map_search_credential_stage_error(
+    error: ironclaw_host_api::CredentialStageError,
+) -> ProductWorkflowError {
+    match error {
+        ironclaw_host_api::CredentialStageError::AuthRequired => {
+            ProductWorkflowError::InvalidBindingRequest {
+                reason: "extension requires product auth credentials before search can project configured state".to_string(),
+            }
+        }
+        ironclaw_host_api::CredentialStageError::Backend => {
+            ProductWorkflowError::InvalidBindingRequest {
+                reason: "extension product auth credential state is invalid".to_string(),
+            }
+        }
+    }
 }
 
 fn map_extension_error(error: ExtensionError) -> ProductWorkflowError {
@@ -1276,7 +1325,7 @@ mod tests {
         };
         assert_eq!(extensions.len(), 1);
         assert_eq!(
-            extensions[0].visible_read_only_capability_ids,
+            extensions[0].summary.visible_read_only_capability_ids,
             vec!["fixture.search"]
         );
 
@@ -1835,18 +1884,18 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn extension_lifecycle_search_propagates_installation_store_list_error() {
+    async fn extension_lifecycle_search_propagates_installation_store_read_error() {
         let (_dir, port, _active_registry, _failing_store, _trust_policy) =
             extension_port_with_failing_store(
                 ExtensionRegistry::new(),
-                DeleteInstallationFailingStore::fail_list_installations(),
+                DeleteInstallationFailingStore::fail_get_installation(),
                 ExtensionLifecycleService::new(ExtensionRegistry::new()),
             );
 
         let error = port
-            .search("fixture")
+            .search("fixture", None)
             .await
-            .expect_err("search reports installation-store list failure");
+            .expect_err("search reports installation-store read failure");
 
         assert!(matches!(
             error,
@@ -2178,18 +2227,21 @@ mod tests {
         assert_eq!(extensions.len(), 1);
         assert!(
             extensions[0]
+                .summary
                 .visible_read_only_capability_ids
                 .iter()
                 .any(|id| id == "github.search_issues")
         );
         assert!(
             extensions[0]
+                .summary
                 .visible_read_only_capability_ids
                 .iter()
                 .any(|id| id == "github.search_issues_pull_requests")
         );
         assert!(
             extensions[0]
+                .summary
                 .visible_read_only_capability_ids
                 .iter()
                 .any(|id| id == "github.get_issue")
@@ -2240,16 +2292,16 @@ mod tests {
         };
         let github = extensions
             .iter()
-            .find(|extension| extension.package_ref.id.as_str() == "github")
+            .find(|extension| extension.summary.package_ref.id.as_str() == "github")
             .expect("github search result");
-        assert_eq!(github.installation_phase, Some(LifecyclePhase::Installed));
+        assert_eq!(github.installation_phase, Some(LifecyclePhase::Configured));
         assert!(
-            !github.credential_requirements.is_empty(),
-            "installed inactive GitHub search results still need PAT requirements"
+            github.summary.credential_requirements.is_empty(),
+            "configured inactive GitHub search results must not expose satisfied PAT requirements"
         );
         assert!(
-            github.onboarding.is_some(),
-            "installed inactive GitHub search results should retain setup onboarding"
+            github.summary.onboarding.is_none(),
+            "configured inactive GitHub search results must not expose stale PAT setup onboarding"
         );
 
         let activate = facade
@@ -2299,15 +2351,15 @@ mod tests {
         };
         let github = extensions
             .iter()
-            .find(|extension| extension.package_ref.id.as_str() == "github")
+            .find(|extension| extension.summary.package_ref.id.as_str() == "github")
             .expect("github search result");
         assert_eq!(github.installation_phase, Some(LifecyclePhase::Active));
         assert!(
-            github.credential_requirements.is_empty(),
+            github.summary.credential_requirements.is_empty(),
             "active GitHub search results must not expose satisfied PAT requirements"
         );
         assert!(
-            github.onboarding.is_none(),
+            github.summary.onboarding.is_none(),
             "active GitHub search results must not expose stale PAT setup onboarding"
         );
 
@@ -2473,7 +2525,7 @@ mod tests {
         };
         let extension_ids = extensions
             .iter()
-            .map(|extension| extension.package_ref.id.as_str())
+            .map(|extension| extension.summary.package_ref.id.as_str())
             .collect::<BTreeSet<_>>();
         assert_eq!(
             extension_ids,
@@ -2488,10 +2540,10 @@ mod tests {
         );
         let calendar = extensions
             .iter()
-            .find(|extension| extension.package_ref.id.as_str() == "google-calendar")
+            .find(|extension| extension.summary.package_ref.id.as_str() == "google-calendar")
             .expect("google-calendar search result");
         assert_eq!(
-            calendar.visible_capability_ids,
+            calendar.summary.visible_capability_ids,
             vec![
                 "google-calendar.list_calendars",
                 "google-calendar.list_events",
@@ -2505,7 +2557,7 @@ mod tests {
             ]
         );
         assert_eq!(
-            calendar.visible_read_only_capability_ids,
+            calendar.summary.visible_read_only_capability_ids,
             vec![
                 "google-calendar.list_calendars",
                 "google-calendar.list_events",
@@ -2529,9 +2581,9 @@ mod tests {
             panic!("expected extension search payload");
         };
         assert_eq!(extensions.len(), 1);
-        assert_eq!(extensions[0].package_ref.id.as_str(), "gmail");
+        assert_eq!(extensions[0].summary.package_ref.id.as_str(), "gmail");
         assert_eq!(
-            extensions[0].visible_capability_ids,
+            extensions[0].summary.visible_capability_ids,
             vec![
                 "gmail.list_messages",
                 "gmail.get_message",
@@ -2542,7 +2594,7 @@ mod tests {
             ]
         );
         assert_eq!(
-            extensions[0].visible_read_only_capability_ids,
+            extensions[0].summary.visible_read_only_capability_ids,
             vec!["gmail.list_messages", "gmail.get_message"]
         );
 
@@ -3446,7 +3498,7 @@ mod tests {
         inner: InMemoryExtensionInstallationStore,
         fail_manifest_delete: bool,
         fail_set_activation_enabled: bool,
-        fail_list_installations: bool,
+        fail_get_installation: bool,
     }
 
     impl DeleteInstallationFailingStore {
@@ -3455,7 +3507,7 @@ mod tests {
                 inner: InMemoryExtensionInstallationStore::default(),
                 fail_manifest_delete: true,
                 fail_set_activation_enabled: false,
-                fail_list_installations: false,
+                fail_get_installation: false,
             }
         }
 
@@ -3464,16 +3516,16 @@ mod tests {
                 inner: InMemoryExtensionInstallationStore::default(),
                 fail_manifest_delete: false,
                 fail_set_activation_enabled: true,
-                fail_list_installations: false,
+                fail_get_installation: false,
             }
         }
 
-        fn fail_list_installations() -> Self {
+        fn fail_get_installation() -> Self {
             Self {
                 inner: InMemoryExtensionInstallationStore::default(),
                 fail_manifest_delete: false,
                 fail_set_activation_enabled: false,
-                fail_list_installations: true,
+                fail_get_installation: true,
             }
         }
     }
@@ -3513,11 +3565,6 @@ mod tests {
         async fn list_installations(
             &self,
         ) -> Result<Vec<ExtensionInstallation>, ExtensionInstallationError> {
-            if self.fail_list_installations {
-                return Err(ExtensionInstallationError::InvalidInstallation {
-                    reason: "list installations failed".to_string(),
-                });
-            }
             self.inner.list_installations().await
         }
 
@@ -3531,6 +3578,11 @@ mod tests {
             &self,
             installation_id: &ExtensionInstallationId,
         ) -> Result<Option<ExtensionInstallation>, ExtensionInstallationError> {
+            if self.fail_get_installation {
+                return Err(ExtensionInstallationError::InvalidInstallation {
+                    reason: "get installation failed".to_string(),
+                });
+            }
             self.inner.get_installation(installation_id).await
         }
 

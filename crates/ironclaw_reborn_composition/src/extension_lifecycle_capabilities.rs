@@ -146,7 +146,13 @@ impl FirstPartyCapabilityHandler for ExtensionLifecycleToolHandler {
         let response = match request.capability_id.as_str() {
             EXTENSION_SEARCH_CAPABILITY_ID => {
                 let input: SearchInput = parse_input(request.input)?;
-                self.extension_management.search(&input.query).await
+                let credential_gate = RuntimeExtensionActivationCredentialGate::new(
+                    request.scope.clone(),
+                    Arc::clone(&self.credential_accounts),
+                );
+                self.extension_management
+                    .search(&input.query, Some(&credential_gate))
+                    .await
             }
             EXTENSION_INSTALL_CAPABILITY_ID => {
                 let input: ExtensionIdInput = parse_input(request.input)?;
@@ -528,6 +534,30 @@ mod tests {
 
         let activate_context = execution_context([EXTENSION_ACTIVATE_CAPABILITY_ID]);
         seed_configured_account(&services, &activate_context.resource_scope, "github").await;
+
+        let configured_search = invoke_json(
+            &services,
+            EXTENSION_SEARCH_CAPABILITY_ID,
+            serde_json::json!({"query": "github"}),
+        )
+        .await
+        .expect("configured search succeeds");
+        let extensions = configured_search["payload"]["extensions"]
+            .as_array()
+            .expect("extensions array");
+        let github = extensions
+            .iter()
+            .find(|extension| extension["package_ref"]["id"] == "github")
+            .expect("github search result");
+        assert_eq!(github["installation_phase"], "configured");
+        assert!(
+            github.get("credential_requirements").is_none(),
+            "configured GitHub model-visible search results must not expose satisfied PAT requirements"
+        );
+        assert!(
+            github.get("onboarding").is_none(),
+            "configured GitHub model-visible search results must not expose stale PAT setup onboarding"
+        );
 
         let activate = invoke_json(
             &services,

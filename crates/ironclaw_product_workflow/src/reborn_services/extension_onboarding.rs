@@ -489,7 +489,6 @@ mod tests {
                 version: "1.0.0".to_string(),
                 description: "test extension".to_string(),
                 source: LifecycleExtensionSource::HostBundled,
-                installation_phase: None,
                 runtime_kind,
                 surface_kinds: Vec::new(),
                 visible_capability_ids: Vec::new(),
