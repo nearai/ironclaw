@@ -38,6 +38,7 @@ env:
 jobs:
   build:
     name: Build & Push
+    if: github.repository == 'nearai/ironclaw'
     runs-on: ubuntu-24.04
     permissions:
       contents: read
