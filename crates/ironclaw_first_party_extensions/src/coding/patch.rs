@@ -5,6 +5,8 @@ use super::{
     text::ReplaceContentError,
 };
 
+const MAX_PATCH_EDITS: usize = 256;
+
 #[derive(Debug, Clone)]
 pub(super) struct PatchEdit {
     pub(super) old_string: String,
@@ -25,7 +27,7 @@ pub(super) fn parse_apply_patch_input(
         .and_then(Value::as_bool)
         .unwrap_or(false);
 
-    let edits = if let Some(edits_value) = input.get("edits") {
+    let edits = if let Some(edits_value) = optional_edits_value(input) {
         if input.get("old_string").is_some() || input.get("new_string").is_some() {
             return Err(input_error());
         }
@@ -36,7 +38,7 @@ pub(super) fn parse_apply_patch_input(
         vec![validated_patch_edit(old_string, new_string)?]
     };
 
-    if edits.is_empty() || replace_all && edits.len() != 1 {
+    if edits.is_empty() || edits.len() > MAX_PATCH_EDITS || replace_all && edits.len() != 1 {
         return Err(input_error());
     }
 
@@ -90,6 +92,14 @@ fn parse_patch_edits(edits_value: &Value) -> Result<Vec<PatchEdit>, CodingCapabi
         .collect::<Result<Vec<_>, _>>()
 }
 
+fn optional_edits_value(input: &Value) -> Option<&Value> {
+    match input.get("edits") {
+        Some(Value::Null) => None,
+        Some(Value::String(value)) if value == "null" => None,
+        value => value,
+    }
+}
+
 fn parse_patch_edit(edit: &Value) -> Result<PatchEdit, CodingCapabilityError> {
     let snake = patch_edit_from_fields(edit, "old_string", "new_string")?;
     let camel = patch_edit_from_fields(edit, "oldText", "newText")?;
@@ -140,5 +150,43 @@ fn edit_label(edit_index: usize, edit_count: usize) -> String {
         "old_string".to_string()
     } else {
         format!("edits[{edit_index}].old_string")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    use super::*;
+
+    #[test]
+    fn parse_apply_patch_input_treats_null_edits_as_absent() {
+        for edits in [Value::Null, Value::String("null".to_string())] {
+            let input = json!({
+                "path": "/workspace/main.txt",
+                "old_string": "old",
+                "new_string": "new",
+                "edits": edits
+            });
+
+            let parsed = parse_apply_patch_input(&input).expect("single edit");
+
+            assert_eq!(parsed.edits.len(), 1);
+            assert_eq!(parsed.edits[0].old_string, "old");
+            assert_eq!(parsed.edits[0].new_string, "new");
+        }
+    }
+
+    #[test]
+    fn parse_apply_patch_input_rejects_too_many_edits() {
+        let edits = (0..=MAX_PATCH_EDITS)
+            .map(|index| json!({"old_string": format!("old {index}"), "new_string": "new"}))
+            .collect::<Vec<_>>();
+        let input = json!({
+            "path": "/workspace/main.txt",
+            "edits": edits
+        });
+
+        assert!(parse_apply_patch_input(&input).is_err());
     }
 }

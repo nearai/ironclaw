@@ -316,6 +316,7 @@ pub(crate) fn resolve_builtin_input_schema_ref(reference: &str) -> Option<Value>
                 "edits": {
                     "type": "array",
                     "description": "One or more targeted replacements matched against the original file. Prefer this for multiple disjoint edits.",
+                    "maxItems": 256,
                     "items": {
                         "type": "object",
                         "properties": {

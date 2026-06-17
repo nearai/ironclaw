@@ -519,6 +519,42 @@ async fn builtin_apply_patch_fuzzy_match_preserves_unrelated_original_content() 
 }
 
 #[tokio::test]
+async fn builtin_apply_patch_ignores_null_edits_placeholder_for_single_edit() {
+    let temp = tempfile::tempdir().unwrap();
+    std::fs::write(temp.path().join("null.txt"), "old\n").unwrap();
+    std::fs::write(temp.path().join("string-null.txt"), "old\n").unwrap();
+
+    let (filesystem, mounts) = mounted_filesystem(temp.path(), MountPermissions::read_write());
+    let runtime = runtime_with_filesystem(filesystem);
+    let context = execution_context_with_mounts(coding_capability_ids(), mounts);
+
+    for (file_name, edits) in [
+        ("null.txt", Value::Null),
+        ("string-null.txt", Value::String("null".to_string())),
+    ] {
+        let patched = invoke_with_context(
+            &runtime,
+            APPLY_PATCH_CAPABILITY_ID,
+            json!({
+                "path": format!("/workspace/{file_name}"),
+                "old_string": "old",
+                "new_string": "new",
+                "edits": edits
+            }),
+            context.clone(),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(patched["success"], json!(true));
+        assert_eq!(
+            std::fs::read_to_string(temp.path().join(file_name)).unwrap(),
+            "new\n"
+        );
+    }
+}
+
+#[tokio::test]
 async fn builtin_apply_patch_replace_all_replaces_exact_and_fuzzy_matches() {
     let temp = tempfile::tempdir().unwrap();
     std::fs::write(

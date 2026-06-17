@@ -1,3 +1,5 @@
+use std::cell::OnceCell;
+
 use unicode_normalization::UnicodeNormalization;
 
 use super::CodingCapabilityError;
@@ -151,6 +153,83 @@ struct SourceSpan {
     end: usize,
 }
 
+struct TextMatcher<'a> {
+    content: &'a str,
+    normalized_content: OnceCell<NormalizedText>,
+}
+
+impl<'a> TextMatcher<'a> {
+    fn new(content: &'a str) -> Self {
+        Self {
+            content,
+            normalized_content: OnceCell::new(),
+        }
+    }
+
+    fn find_edit_matches(&self, old_string: &str, replace_all: bool) -> EditMatches {
+        let exact_spans = find_exact_spans(self.content, old_string)
+            .into_iter()
+            .map(|(start, end)| MatchSpan {
+                start,
+                end,
+                method: MatchMethod::Exact,
+            })
+            .collect::<Vec<_>>();
+        if !exact_spans.is_empty() {
+            if old_string.trim().is_empty() || !replace_all && exact_spans.len() > 1 {
+                return EditMatches {
+                    occurrence_count: exact_spans.len(),
+                    spans: exact_spans,
+                };
+            }
+
+            let fuzzy_spans = self.find_fuzzy_spans(old_string);
+            let occurrence_count = if fuzzy_spans.is_empty() {
+                exact_spans.len()
+            } else {
+                fuzzy_spans.len().max(exact_spans.len())
+            };
+            return EditMatches {
+                spans: merge_exact_and_fuzzy_spans(exact_spans, fuzzy_spans),
+                occurrence_count,
+            };
+        }
+
+        let fuzzy_spans = self.find_fuzzy_spans(old_string);
+        EditMatches {
+            occurrence_count: fuzzy_spans.len(),
+            spans: fuzzy_spans,
+        }
+    }
+
+    fn find_fuzzy_spans(&self, old_string: &str) -> Vec<MatchSpan> {
+        if old_string.trim().is_empty() {
+            return Vec::new();
+        }
+
+        let normalized_old = normalize_for_fuzzy_match(old_string);
+        if normalized_old.is_empty() {
+            return Vec::new();
+        }
+
+        let normalized_content = self
+            .normalized_content
+            .get_or_init(|| normalize_with_source_map(self.content));
+        find_exact_spans(&normalized_content.text, &normalized_old)
+            .into_iter()
+            .filter_map(|(start, end)| {
+                normalized_span_to_source_span(normalized_content, start, end).map(|span| {
+                    MatchSpan {
+                        start: span.start,
+                        end: span.end,
+                        method: MatchMethod::FuzzyNormalization,
+                    }
+                })
+            })
+            .collect()
+    }
+}
+
 pub(super) fn replace_content(
     content: &str,
     edits: &[TextEdit<'_>],
@@ -170,8 +249,9 @@ pub(super) fn replace_content(
 
     let mut matched_edits = Vec::with_capacity(edits.len());
     let mut match_method = MatchMethod::Exact;
+    let matcher = TextMatcher::new(content);
     for (edit_index, edit) in edits.iter().enumerate() {
-        let matches = find_edit_matches(content, edit.old_string);
+        let matches = matcher.find_edit_matches(edit.old_string, replace_all);
         if matches.spans.is_empty() {
             return Err(ReplaceContentError::NotFound { edit_index });
         }
@@ -223,42 +303,6 @@ pub(super) fn replace_content(
     })
 }
 
-fn find_edit_matches(content: &str, old_string: &str) -> EditMatches {
-    let exact_spans = find_exact_spans(content, old_string)
-        .into_iter()
-        .map(|(start, end)| MatchSpan {
-            start,
-            end,
-            method: MatchMethod::Exact,
-        })
-        .collect::<Vec<_>>();
-    if !exact_spans.is_empty() {
-        if old_string.trim().is_empty() {
-            return EditMatches {
-                occurrence_count: exact_spans.len(),
-                spans: exact_spans,
-            };
-        }
-
-        let fuzzy_spans = find_fuzzy_spans(content, old_string);
-        let occurrence_count = if fuzzy_spans.is_empty() {
-            exact_spans.len()
-        } else {
-            fuzzy_spans.len().max(exact_spans.len())
-        };
-        return EditMatches {
-            spans: merge_exact_and_fuzzy_spans(exact_spans, fuzzy_spans),
-            occurrence_count,
-        };
-    }
-
-    let fuzzy_spans = find_fuzzy_spans(content, old_string);
-    EditMatches {
-        occurrence_count: fuzzy_spans.len(),
-        spans: fuzzy_spans,
-    }
-}
-
 fn merge_exact_and_fuzzy_spans(
     mut exact_spans: Vec<MatchSpan>,
     fuzzy_spans: Vec<MatchSpan>,
@@ -306,29 +350,6 @@ fn find_exact_spans(haystack: &str, needle: &str) -> Vec<(usize, usize)> {
         search_offset = end;
     }
     spans
-}
-
-fn find_fuzzy_spans(content: &str, old_string: &str) -> Vec<MatchSpan> {
-    if old_string.trim().is_empty() {
-        return Vec::new();
-    }
-
-    let normalized_content = normalize_with_source_map(content);
-    let normalized_old = normalize_for_fuzzy_match(old_string);
-    if normalized_old.is_empty() {
-        return Vec::new();
-    }
-
-    find_exact_spans(&normalized_content.text, &normalized_old)
-        .into_iter()
-        .filter_map(|(start, end)| {
-            normalized_span_to_source_span(&normalized_content, start, end).map(|span| MatchSpan {
-                start: span.start,
-                end: span.end,
-                method: MatchMethod::FuzzyNormalization,
-            })
-        })
-        .collect()
 }
 
 fn normalize_for_fuzzy_match(value: &str) -> String {
