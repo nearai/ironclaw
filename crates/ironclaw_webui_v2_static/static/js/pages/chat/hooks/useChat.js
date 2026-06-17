@@ -162,12 +162,26 @@ export function useChat(threadId) {
   // back to non-default values if that thread actually has an active
   // run / gate. `cooldownUntil` is intentionally not reset — it's a
   // rate-limit timer that applies across threads.
-  React.useEffect(() => {
+  //
+  // This runs DURING render (not in an effect) on purpose. An effect
+  // fires a beat too late: there is one render where the new threadId is
+  // already in scope but pendingGate / isProcessing still hold the prior
+  // thread's values, and any consumer reading them in that render (the
+  // approval card, and the sidebar state mirror in chat.js) briefly
+  // mis-attributes the old thread's gate to the newly opened one — e.g.
+  // a "needs attention" badge bleeding onto a normal thread. React
+  // supports a conditional setState during render for exactly this
+  // "adjust state when a prop changes" case; it re-renders immediately
+  // without committing the stale output, and the ref guard keeps it from
+  // looping.
+  const lastThreadIdRef = React.useRef(threadId);
+  if (lastThreadIdRef.current !== threadId) {
+    lastThreadIdRef.current = threadId;
     setIsProcessing(false);
     setPendingGate(null);
     setActiveRun(null);
     setChannelConnectAction(null);
-  }, [threadId]);
+  }
 
   const cooldownSeconds = Math.max(0, Math.ceil((cooldownUntil - now) / 1000));
   const pendingAuthGateKey =
