@@ -915,6 +915,14 @@ fn select_skill_activations(
         candidates_with_unsatisfied_setup_markers(candidates, satisfied_setup_markers);
     let loaded_skills: Vec<LoadedSkill> =
         active_candidates.iter().map(|c| c.loaded.clone()).collect();
+    // Skills the user turned auto-activation off for stay available for an
+    // explicit `$name`/`/name` mention (handled below), but are excluded from
+    // criteria (keyword/regex) selection.
+    let criteria_skills: Vec<LoadedSkill> = loaded_skills
+        .iter()
+        .filter(|skill| skill.manifest.auto_activate)
+        .cloned()
+        .collect();
     let mention_normalized_message = normalize_dollar_skill_mentions(message);
     let (explicit, rewritten_message) =
         extract_skill_mentions(&mention_normalized_message, &loaded_skills);
@@ -950,7 +958,7 @@ fn select_skill_activations(
     if config.selection_mode == SkillActivationSelectionMode::ExplicitAndCriteria {
         let outcome = prefilter_skills_with_options(
             &rewritten_message,
-            &loaded_skills,
+            &criteria_skills,
             remaining_slots,
             remaining_tokens,
             satisfied_setup_markers,
