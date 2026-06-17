@@ -3994,6 +3994,7 @@ dependencies = [
  "iana-time-zone",
  "insta",
  "ironclaw_approvals",
+ "ironclaw_auth",
  "ironclaw_authorization",
  "ironclaw_common",
  "ironclaw_embeddings",

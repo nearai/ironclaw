@@ -26,6 +26,10 @@ use std::{
 
 use async_trait::async_trait;
 use ironclaw_approvals::{ApprovalResolver, LeaseApproval};
+use ironclaw_auth::{
+    AuthProductScope, AuthProviderId, AuthSurface, CredentialAccountLabel, CredentialAccountStatus,
+    CredentialOwnership, NewCredentialAccount, ProviderScope,
+};
 use ironclaw_authorization::{GrantAuthorizer, TrustAwareCapabilityDispatchAuthorizer};
 use ironclaw_extensions::ExtensionRegistry;
 use ironclaw_filesystem::{
@@ -36,11 +40,12 @@ use ironclaw_filesystem::{
 use ironclaw_host_api::{
     Action, AgentId, ApprovalRequestId, CapabilityDescriptor, CapabilityGrant, CapabilityGrantId,
     CapabilityId, CapabilitySet, CredentialStageError, Decision, EffectKind, ExecutionContext,
-    ExtensionId, GrantConstraints, HostPath, MountAlias, MountGrant, MountPermissions, MountView,
-    NetworkPolicy, NetworkScheme, NetworkTargetPattern, Obligation, Obligations, PackageId,
-    Principal, ProjectId, ResourceEstimate, ResourceScope, RuntimeCredentialAccountProviderId,
-    RuntimeHttpEgress, RuntimeHttpEgressError, RuntimeHttpEgressRequest, RuntimeHttpEgressResponse,
-    RuntimeKind, SecretHandle, TenantId, ThreadId, TrustClass, UserId, VirtualPath,
+    ExtensionId, GrantConstraints, HostPath, InvocationId, MountAlias, MountGrant,
+    MountPermissions, MountView, NetworkPolicy, NetworkScheme, NetworkTargetPattern, Obligation,
+    Obligations, PackageId, Principal, ProjectId, ResourceEstimate, ResourceScope,
+    RuntimeCredentialAccountProviderId, RuntimeHttpEgress, RuntimeHttpEgressError,
+    RuntimeHttpEgressRequest, RuntimeHttpEgressResponse, RuntimeKind, SecretHandle, TenantId,
+    ThreadId, TrustClass, UserId, VirtualPath,
 };
 use ironclaw_host_runtime::{
     APPLY_PATCH_CAPABILITY_ID, BUILTIN_FIRST_PARTY_PROVIDER, CancelRuntimeWorkOutcome,
@@ -136,6 +141,9 @@ use tokio_util::sync::CancellationToken;
 
 use super::{
     config::WaitConfig,
+    extension_surface::{
+        BUNDLED_EXTENSION_CAPABILITY_IDS, BUNDLED_EXTENSION_IDS, EXTENSION_LIFECYCLE_CAPABILITY_IDS,
+    },
     filesystem::local_filesystem,
     github as github_support,
     model_replay::RebornTraceReplayModelGateway,
@@ -544,6 +552,35 @@ impl RebornBinaryE2EHarness {
         model_gateway: RebornTraceReplayModelGateway,
     ) -> HarnessResult<Self> {
         let host_runtime = Arc::new(HostRuntimeCapabilityHarness::process_tools().await?);
+        Self::with_model_gateway_capability_mode(
+            conversation_id,
+            model_gateway,
+            HarnessCapabilityMode::HostRuntime(host_runtime),
+            false,
+        )
+        .await
+    }
+
+    pub async fn with_host_runtime_qa_smoke_capabilities(
+        conversation_id: &str,
+        model_gateway: RebornTraceReplayModelGateway,
+    ) -> HarnessResult<Self> {
+        let host_runtime = Arc::new(HostRuntimeCapabilityHarness::qa_smoke_tools().await?);
+        Self::with_model_gateway_capability_mode(
+            conversation_id,
+            model_gateway,
+            HarnessCapabilityMode::HostRuntime(host_runtime),
+            false,
+        )
+        .await
+    }
+
+    pub async fn with_host_runtime_extension_lifecycle_capabilities(
+        conversation_id: &str,
+        model_gateway: RebornTraceReplayModelGateway,
+    ) -> HarnessResult<Self> {
+        let host_runtime =
+            Arc::new(HostRuntimeCapabilityHarness::extension_lifecycle_tools().await?);
         Self::with_model_gateway_capability_mode(
             conversation_id,
             model_gateway,
@@ -1544,6 +1581,7 @@ struct HostRuntimeCapabilityHarness {
     network_policy: NetworkPolicy,
     secrets: Vec<SecretHandle>,
     provider_id: ExtensionId,
+    additional_provider_trust: Vec<(ExtensionId, Vec<EffectKind>)>,
     user_id: UserId,
     invocations: Arc<Mutex<Vec<CapabilityInvocation>>>,
     results: Arc<Mutex<Vec<RecordedCapabilityResult>>>,
@@ -1554,6 +1592,7 @@ struct HostRuntimeCapabilityHarness {
 struct HostRuntimeHarnessOptions {
     mounts: MountView,
     runtime_policy: Option<ironclaw_host_api::runtime_policy::EffectiveRuntimePolicy>,
+    seed_extension_credentials: bool,
 }
 
 impl HostRuntimeHarnessOptions {
@@ -1564,7 +1603,13 @@ impl HostRuntimeHarnessOptions {
         Self {
             mounts,
             runtime_policy,
+            seed_extension_credentials: false,
         }
+    }
+
+    fn with_seed_extension_credentials(mut self) -> Self {
+        self.seed_extension_credentials = true;
+        self
     }
 }
 
@@ -1650,6 +1695,109 @@ impl HostRuntimeCapabilityHarness {
             HostRuntimeHarnessOptions::new(MountView::default(), None),
         )
         .await
+    }
+
+    async fn qa_smoke_tools() -> HarnessResult<Self> {
+        let (root, storage_root, workspace_root) = host_runtime_storage_roots()?;
+        std::fs::create_dir_all(storage_root.join("skills"))?;
+        std::fs::create_dir_all(storage_root.join("system/skills"))?;
+        let runtime = local_dev_host_runtime_with_http_egress(
+            storage_root,
+            Arc::new(RecordingRuntimeHttpEgress::with_body(
+                br#"{"accepted":true,"source":"qa-smoke"}"#.to_vec(),
+            )),
+        )?;
+        let mounts = qa_smoke_mounts()?;
+        let memory_mounts = memory_mounts(MountPermissions::read_write_list_delete())?;
+        let memory_capability_ids = [
+            CapabilityId::new(MEMORY_SEARCH_CAPABILITY_ID)?,
+            CapabilityId::new(MEMORY_WRITE_CAPABILITY_ID)?,
+            CapabilityId::new(MEMORY_READ_CAPABILITY_ID)?,
+            CapabilityId::new(MEMORY_TREE_CAPABILITY_ID)?,
+        ];
+        Ok(Self {
+            runtime,
+            approval_parts: None,
+            pending_approval_scopes: Arc::new(Mutex::new(HashMap::new())),
+            io: Arc::new(ProductLiveCapabilityIo::default()),
+            root,
+            workspace_root,
+            mounts,
+            capability_mount_overrides: memory_capability_ids
+                .iter()
+                .cloned()
+                .map(|capability_id| (capability_id, memory_mounts.clone()))
+                .collect(),
+            capability_ids: vec![
+                CapabilityId::new(ECHO_CAPABILITY_ID)?,
+                CapabilityId::new(TIME_CAPABILITY_ID)?,
+                CapabilityId::new(JSON_CAPABILITY_ID)?,
+                CapabilityId::new(HTTP_CAPABILITY_ID)?,
+                CapabilityId::new(HTTP_SAVE_CAPABILITY_ID)?,
+                CapabilityId::new(MEMORY_SEARCH_CAPABILITY_ID)?,
+                CapabilityId::new(MEMORY_WRITE_CAPABILITY_ID)?,
+                CapabilityId::new(MEMORY_READ_CAPABILITY_ID)?,
+                CapabilityId::new(MEMORY_TREE_CAPABILITY_ID)?,
+                CapabilityId::new(READ_FILE_CAPABILITY_ID)?,
+                CapabilityId::new(WRITE_FILE_CAPABILITY_ID)?,
+                CapabilityId::new(LIST_DIR_CAPABILITY_ID)?,
+                CapabilityId::new(GLOB_CAPABILITY_ID)?,
+                CapabilityId::new(GREP_CAPABILITY_ID)?,
+                CapabilityId::new(APPLY_PATCH_CAPABILITY_ID)?,
+                CapabilityId::new(SHELL_CAPABILITY_ID)?,
+                CapabilityId::new(SPAWN_SUBAGENT_CAPABILITY_ID)?,
+                CapabilityId::new(SKILL_LIST_CAPABILITY_ID)?,
+                CapabilityId::new(SKILL_INSTALL_CAPABILITY_ID)?,
+                CapabilityId::new(SKILL_REMOVE_CAPABILITY_ID)?,
+                CapabilityId::new(TRIGGER_CREATE_CAPABILITY_ID)?,
+                CapabilityId::new(TRIGGER_LIST_CAPABILITY_ID)?,
+                CapabilityId::new(TRIGGER_REMOVE_CAPABILITY_ID)?,
+            ],
+            runtime_kind: RuntimeKind::FirstParty,
+            effect_kinds: vec![
+                EffectKind::DispatchCapability,
+                EffectKind::ReadFilesystem,
+                EffectKind::WriteFilesystem,
+                EffectKind::DeleteFilesystem,
+                EffectKind::Network,
+                EffectKind::SpawnProcess,
+                EffectKind::ExecuteCode,
+                EffectKind::ExternalWrite,
+            ],
+            network_policy: http_test_policy(),
+            secrets: Vec::new(),
+            provider_id: ExtensionId::new(BUILTIN_FIRST_PARTY_PROVIDER)?,
+            additional_provider_trust: Vec::new(),
+            user_id: UserId::new("reborn-e2e-qa-smoke-user")?,
+            invocations: Arc::new(Mutex::new(Vec::new())),
+            results: Arc::new(Mutex::new(Vec::new())),
+            http_egress: None,
+            network_egress: None,
+        })
+    }
+
+    async fn extension_lifecycle_tools() -> HarnessResult<Self> {
+        let mut capability_ids = capability_ids_from_strs(EXTENSION_LIFECYCLE_CAPABILITY_IDS)?;
+        capability_ids.extend(capability_ids_from_strs(BUNDLED_EXTENSION_CAPABILITY_IDS)?);
+        let mut harness = Self::new_with_options(
+            "reborn-e2e-extension-lifecycle-tools",
+            capability_ids,
+            local_dev_all_effects(),
+            Vec::new(),
+            ExtensionId::new(BUILTIN_FIRST_PARTY_PROVIDER)?,
+            UserId::new("reborn-e2e-extension-lifecycle-user")?,
+            HostRuntimeHarnessOptions::new(
+                MountView::default(),
+                Some(ironclaw_reborn_composition::local_dev_yolo_runtime_policy(
+                    true,
+                )?),
+            )
+            .with_seed_extension_credentials(),
+        )
+        .await?;
+        harness.network_policy = wildcard_test_policy();
+        harness.additional_provider_trust = bundled_extension_provider_trust()?;
+        Ok(harness)
     }
 
     async fn skill_management_tools() -> HarnessResult<Self> {
@@ -1783,6 +1931,7 @@ impl HostRuntimeCapabilityHarness {
         let HostRuntimeHarnessOptions {
             mounts,
             runtime_policy,
+            seed_extension_credentials,
         } = options;
         let root = Arc::new(tempfile::tempdir()?);
         let storage_root = root.path().join("local-dev");
@@ -1809,6 +1958,9 @@ impl HostRuntimeCapabilityHarness {
             input = input.with_runtime_policy(runtime_policy);
         }
         let services = build_reborn_services(input).await?;
+        if seed_extension_credentials {
+            seed_extension_lifecycle_credentials(&services, &user_id).await?;
+        }
         let approval_parts = services.local_dev_approval_test_parts();
         let pending_approval_scopes = Arc::new(Mutex::new(HashMap::new()));
         let runtime = services
@@ -1833,6 +1985,7 @@ impl HostRuntimeCapabilityHarness {
             network_policy: NetworkPolicy::default(),
             secrets,
             provider_id,
+            additional_provider_trust: Vec::new(),
             user_id,
             invocations: Arc::new(Mutex::new(Vec::new())),
             results: Arc::new(Mutex::new(Vec::new())),
@@ -1936,6 +2089,7 @@ impl HostRuntimeCapabilityHarness {
             network_policy,
             secrets: Vec::new(),
             provider_id: ExtensionId::new(BUILTIN_FIRST_PARTY_PROVIDER)?,
+            additional_provider_trust: Vec::new(),
             user_id,
             invocations: Arc::new(Mutex::new(Vec::new())),
             results: Arc::new(Mutex::new(Vec::new())),
@@ -1979,6 +2133,7 @@ impl HostRuntimeCapabilityHarness {
             network_policy: github_support::api_policy(),
             secrets: github_support::secret_handles()?,
             provider_id: github_support::provider_id()?,
+            additional_provider_trust: Vec::new(),
             user_id: UserId::new("reborn-e2e-github-user")?,
             invocations: Arc::new(Mutex::new(Vec::new())),
             results: Arc::new(Mutex::new(Vec::new())),
@@ -2102,6 +2257,100 @@ fn approval_request_id_from_gate_ref(gate_ref: &GateRef) -> HarnessResult<Approv
     Ok(ApprovalRequestId::parse(value)?)
 }
 
+async fn seed_extension_lifecycle_credentials(
+    services: &ironclaw_reborn_composition::RebornServices,
+    user_id: &UserId,
+) -> HarnessResult<()> {
+    let product_auth = services
+        .product_auth
+        .as_ref()
+        .ok_or("extension lifecycle harness missing product auth")?;
+    let scope = AuthProductScope::credential_owner(
+        &ResourceScope {
+            tenant_id: TenantId::new("tenant-e2e")?,
+            user_id: user_id.clone(),
+            agent_id: Some(AgentId::new("agent-e2e")?),
+            project_id: Some(ProjectId::new("project-e2e")?),
+            mission_id: None,
+            thread_id: None,
+            invocation_id: InvocationId::new(),
+        },
+        AuthSurface::Api,
+    );
+    let accounts = product_auth.credential_account_service();
+    for seed in extension_lifecycle_credential_seeds() {
+        accounts
+            .create_account(NewCredentialAccount {
+                scope: scope.clone(),
+                provider: AuthProviderId::new(seed.provider)?,
+                label: CredentialAccountLabel::new(seed.label)?,
+                status: CredentialAccountStatus::Configured,
+                ownership: CredentialOwnership::UserReusable,
+                owner_extension: None,
+                granted_extensions: Vec::new(),
+                access_secret: Some(SecretHandle::new(seed.secret_handle)?),
+                refresh_secret: None,
+                scopes: seed
+                    .scopes
+                    .iter()
+                    .map(|scope| ProviderScope::new(*scope))
+                    .collect::<Result<Vec<_>, _>>()?,
+            })
+            .await?;
+    }
+    Ok(())
+}
+
+struct ExtensionLifecycleCredentialSeed {
+    provider: &'static str,
+    label: &'static str,
+    secret_handle: &'static str,
+    scopes: &'static [&'static str],
+}
+
+fn extension_lifecycle_credential_seeds() -> &'static [ExtensionLifecycleCredentialSeed] {
+    &[
+        ExtensionLifecycleCredentialSeed {
+            provider: "github",
+            label: "qa github",
+            secret_handle: "qa_github_access",
+            scopes: &[],
+        },
+        ExtensionLifecycleCredentialSeed {
+            provider: "google",
+            label: "qa google",
+            secret_handle: "qa_google_access",
+            scopes: &[
+                "https://www.googleapis.com/auth/calendar.events",
+                "https://www.googleapis.com/auth/calendar.readonly",
+                "https://www.googleapis.com/auth/documents",
+                "https://www.googleapis.com/auth/documents.readonly",
+                "https://www.googleapis.com/auth/drive",
+                "https://www.googleapis.com/auth/drive.readonly",
+                "https://www.googleapis.com/auth/gmail.modify",
+                "https://www.googleapis.com/auth/gmail.readonly",
+                "https://www.googleapis.com/auth/gmail.send",
+                "https://www.googleapis.com/auth/presentations",
+                "https://www.googleapis.com/auth/presentations.readonly",
+                "https://www.googleapis.com/auth/spreadsheets",
+                "https://www.googleapis.com/auth/spreadsheets.readonly",
+            ],
+        },
+        ExtensionLifecycleCredentialSeed {
+            provider: "nearai",
+            label: "qa nearai",
+            secret_handle: "qa_nearai_access",
+            scopes: &[],
+        },
+        ExtensionLifecycleCredentialSeed {
+            provider: "notion",
+            label: "qa notion",
+            secret_handle: "qa_notion_access",
+            scopes: &[],
+        },
+    ]
+}
+
 struct RecordingHostRuntime {
     inner: Arc<dyn HostRuntime>,
     pending_approval_scopes: Arc<Mutex<HashMap<ApprovalRequestId, ResourceScope>>>,
@@ -2202,7 +2451,7 @@ impl LoopCapabilityPortFactory for HostRuntimeHarnessCapabilityPortFactory {
         &self,
         run_context: &LoopRunContext,
     ) -> Result<Arc<dyn LoopCapabilityPort>, AgentLoopHostError> {
-        let authority = ProductLiveVisibleCapabilityRequestConfig::new(
+        let mut authority = ProductLiveVisibleCapabilityRequestConfig::new(
             self.harness.user_id.clone(),
             self.harness.runtime_kind,
             TrustClass::FirstParty,
@@ -2224,6 +2473,13 @@ impl LoopCapabilityPortFactory for HostRuntimeHarnessCapabilityPortFactory {
             EffectiveTrustClass::user_trusted(),
             self.harness.effect_kinds.clone(),
         );
+        for (provider, effects) in &self.harness.additional_provider_trust {
+            authority = authority.with_provider_trust_for_effects(
+                provider.clone(),
+                EffectiveTrustClass::user_trusted(),
+                effects.clone(),
+            );
+        }
         let execution_mounts = self.harness.mounts.clone();
         let visible_request = visible_capability_request_for_run(run_context, authority)
             .map_err(host_runtime_harness_error)?;
@@ -2530,7 +2786,11 @@ fn first_party_trust_policy() -> HarnessResult<HostTrustPolicy> {
                 EffectKind::DispatchCapability,
                 EffectKind::ReadFilesystem,
                 EffectKind::WriteFilesystem,
+                EffectKind::DeleteFilesystem,
                 EffectKind::Network,
+                EffectKind::SpawnProcess,
+                EffectKind::ExecuteCode,
+                EffectKind::ExternalWrite,
             ],
             None,
         )]),
@@ -2565,6 +2825,45 @@ fn http_test_policy() -> NetworkPolicy {
         deny_private_ip_ranges: true,
         max_egress_bytes: Some(10_000),
     }
+}
+
+fn wildcard_test_policy() -> NetworkPolicy {
+    NetworkPolicy {
+        allowed_targets: vec![NetworkTargetPattern {
+            scheme: None,
+            host_pattern: "*".to_string(),
+            port: None,
+        }],
+        deny_private_ip_ranges: true,
+        max_egress_bytes: Some(1_000_000),
+    }
+}
+
+fn capability_ids_from_strs(ids: &[&str]) -> HarnessResult<Vec<CapabilityId>> {
+    ids.iter()
+        .map(|id| CapabilityId::new(*id).map_err(Into::into))
+        .collect()
+}
+
+fn bundled_extension_provider_trust() -> HarnessResult<Vec<(ExtensionId, Vec<EffectKind>)>> {
+    BUNDLED_EXTENSION_IDS
+        .iter()
+        .map(|id| Ok((ExtensionId::new(*id)?, local_dev_all_effects())))
+        .collect()
+}
+
+fn local_dev_all_effects() -> Vec<EffectKind> {
+    vec![
+        EffectKind::DispatchCapability,
+        EffectKind::ReadFilesystem,
+        EffectKind::WriteFilesystem,
+        EffectKind::DeleteFilesystem,
+        EffectKind::Network,
+        EffectKind::UseSecret,
+        EffectKind::SpawnProcess,
+        EffectKind::ExecuteCode,
+        EffectKind::ExternalWrite,
+    ]
 }
 
 #[derive(Debug)]
@@ -2895,6 +3194,26 @@ fn memory_mounts(permissions: MountPermissions) -> HarnessResult<MountView> {
 
 fn skill_mounts() -> HarnessResult<MountView> {
     Ok(MountView::new(vec![
+        MountGrant::new(
+            MountAlias::new("/skills")?,
+            VirtualPath::new("/projects/skills")?,
+            MountPermissions::read_write_list_delete(),
+        ),
+        MountGrant::new(
+            MountAlias::new("/system/skills")?,
+            VirtualPath::new("/projects/system/skills")?,
+            MountPermissions::read_only(),
+        ),
+    ])?)
+}
+
+fn qa_smoke_mounts() -> HarnessResult<MountView> {
+    Ok(MountView::new(vec![
+        MountGrant::new(
+            MountAlias::new("/workspace")?,
+            VirtualPath::new("/projects/workspace")?,
+            MountPermissions::read_write_list_delete(),
+        ),
         MountGrant::new(
             MountAlias::new("/skills")?,
             VirtualPath::new("/projects/skills")?,
