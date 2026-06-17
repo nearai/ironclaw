@@ -1156,31 +1156,32 @@ async fn cancel_auth_blocked_run(
     run_id: TurnRunId,
     gate_ref: Option<&str>,
 ) -> Result<(), SlackFinalReplyDeliveryError> {
-    // Cancel the durable AuthFlow record first so it does not linger non-terminal
-    // after the run is cancelled (#4952). Owner resolution mirrors
-    // `auth_prompt_view_for_blocked_auth`: an explicit turn owner (shared/team
-    // subject) wins, else the acting user. This is best-effort cleanliness — a
-    // flow-cancel failure must NOT block the run cancellation, which is the
-    // user-visible terminal action. When `gate_ref` is absent there is no flow to
-    // resolve, so the flow cancel is skipped entirely (not encoded as an empty ref).
-    if let (Some(canceller), Some(gate_ref)) = (auth_flow_canceller, gate_ref) {
-        let owner_user_id = scope.explicit_owner_user_id().unwrap_or(&actor.user_id);
-        if let Err(error) = canceller
-            .cancel_blocked_auth_flow(scope, owner_user_id, run_id, gate_ref)
-            .await
-        {
-            tracing::debug!(
-                target = "ironclaw::reborn::slack_delivery",
-                %run_id,
-                %error,
-                "failed to cancel stale auth flow on Slack auth auto-deny (best-effort)"
-            );
+    // Resolve the flow-cancel target BEFORE `cancel_run` consumes `actor`. Owner
+    // resolution mirrors `auth_prompt_view_for_blocked_auth`: an explicit turn owner
+    // (shared/team subject) wins, else the acting user. When `gate_ref` is absent
+    // there is no flow to resolve, so the flow cancel is skipped entirely (not
+    // encoded as an empty ref).
+    let flow_cancel_target = match (auth_flow_canceller, gate_ref) {
+        (Some(canceller), Some(gate_ref)) => {
+            let owner_user_id = scope
+                .explicit_owner_user_id()
+                .unwrap_or(&actor.user_id)
+                .clone();
+            Some((canceller, owner_user_id, gate_ref))
         }
-    }
+        _ => None,
+    };
+
     let idempotency_key = ironclaw_turns::IdempotencyKey::new(format!("slack-auth-block:{run_id}"))
         .map_err(|err| SlackFinalReplyDeliveryError::SlackWebApi {
             reason: format!("invalid idempotency key for slack auth block: {err}"),
         })?;
+    // Cancel the run FIRST — it is the user-visible terminal action. `cancel_run` is
+    // idempotent (`slack-auth-block:{run_id}`), so repeated passes are safe. If it
+    // fails we return here and leave the durable `AuthFlow` (and the still-usable
+    // auth prompt) intact: marking the flow terminal while the run is still
+    // `BlockedAuth` would be the inverse state drift this fix is meant to prevent,
+    // and the OAuth backstop relies on a failed cancel leaving the prompt usable.
     coordinator
         .cancel_run(ironclaw_turns::CancelRunRequest {
             scope: scope.clone(),
@@ -1190,6 +1191,22 @@ async fn cancel_auth_blocked_run(
             idempotency_key,
         })
         .await?;
+
+    // Run is now terminal — cancel the stale `AuthFlow` record alongside it (#4952).
+    // Best-effort cleanliness: a flow-cancel failure does not surface, since the
+    // run (the user-visible action) has already been cancelled.
+    if let Some((canceller, owner_user_id, gate_ref)) = flow_cancel_target
+        && let Err(error) = canceller
+            .cancel_blocked_auth_flow(scope, &owner_user_id, run_id, gate_ref)
+            .await
+    {
+        tracing::debug!(
+            target = "ironclaw::reborn::slack_delivery",
+            %run_id,
+            %error,
+            "failed to cancel stale auth flow on Slack auth auto-deny (best-effort)"
+        );
+    }
     Ok(())
 }
 
@@ -4463,24 +4480,43 @@ mod tests {
 
     /// Records every `cancel_blocked_auth_flow` call so tests can assert the Slack
     /// auto-deny path cancels the durable auth-flow record alongside the run (#4952).
+    ///
+    /// Captures all four arguments of `cancel_blocked_auth_flow` so tests can assert
+    /// that both the wiring (run_id/gate_ref) and the owner-resolution logic
+    /// (scope/owner_user_id) are correct. Asserting against concrete fixture values
+    /// catches a wrong-owner regression at production line 1167 that a tuple of
+    /// `(TurnRunId, String)` would silently miss.
+    #[derive(Clone)]
+    struct RecordedFlowCancel {
+        scope: TurnScope,
+        owner_user_id: ironclaw_host_api::UserId,
+        run_id: TurnRunId,
+        gate_ref: String,
+    }
+
     #[derive(Default)]
     struct RecordingBlockedAuthFlowCanceller {
-        calls: std::sync::Mutex<Vec<(TurnRunId, String)>>,
+        calls: std::sync::Mutex<Vec<RecordedFlowCancel>>,
     }
 
     #[async_trait]
     impl BlockedAuthFlowCanceller for RecordingBlockedAuthFlowCanceller {
         async fn cancel_blocked_auth_flow(
             &self,
-            _scope: &TurnScope,
-            _owner_user_id: &ironclaw_host_api::UserId,
+            scope: &TurnScope,
+            owner_user_id: &ironclaw_host_api::UserId,
             run_id: TurnRunId,
             gate_ref: &str,
         ) -> Result<(), ironclaw_auth::AuthProductError> {
             self.calls
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner())
-                .push((run_id, gate_ref.to_string()));
+                .push(RecordedFlowCancel {
+                    scope: scope.clone(),
+                    owner_user_id: owner_user_id.clone(),
+                    run_id,
+                    gate_ref: gate_ref.to_string(),
+                });
             Ok(())
         }
     }
@@ -4542,12 +4578,101 @@ mod tests {
             "auto-deny must cancel the stale auth flow exactly once"
         );
         assert_eq!(
-            calls[0].0, submitted_run_id,
+            calls[0].run_id, submitted_run_id,
             "canceller must receive the same run_id as the submitted ack"
         );
         assert_eq!(
-            calls[0].1, "gate:auth-cancel-test",
+            calls[0].gate_ref, "gate:auth-cancel-test",
             "must cancel the auth flow for the blocked gate"
+        );
+        // FIX 2: Assert the resolved owner_user_id and scope match the fixture values.
+        //
+        // In the live-observer path, `FakeConversationBindingService` derives:
+        //   actor_user_id    = "user:{external_actor_ref.id()}" = "user:U123"
+        //   subject_user_id  = Some("user:U123")
+        // That subject_user_id becomes thread_scope.owner_user_id → passed as the
+        // explicit owner to `TurnScope::new_with_owner`, so
+        // `scope.explicit_owner_user_id() = Some("user:U123")` which wins over
+        // actor.user_id in `cancel_auth_blocked_run` (production line 1167).
+        let expected_owner =
+            ironclaw_host_api::UserId::new("user:U123").expect("expected owner fixture");
+        assert_eq!(
+            calls[0].owner_user_id, expected_owner,
+            "owner_user_id must be the subject user derived from the external actor ref (U123)"
+        );
+        // Scope tenant must match what FakeConversationBindingService builds from
+        // installation_id "install_alpha".
+        let expected_tenant =
+            ironclaw_host_api::TenantId::new("tenant:install_alpha").expect("expected tenant");
+        assert_eq!(
+            calls[0].scope.tenant_id, expected_tenant,
+            "scope.tenant_id must match the tenant derived from the installation"
+        );
+    }
+
+    /// FIX 3: A failed `cancel_run` must leave the `AuthFlow` record intact.
+    ///
+    /// `cancel_auth_blocked_run` was reordered so the run is cancelled FIRST and
+    /// the durable `AuthFlow` is only marked terminal AFTER a successful cancel.
+    /// This test proves the invariant: when `cancel_run` returns `Err`, the
+    /// `BlockedAuthFlowCanceller` is NOT invoked — preventing inverse state drift
+    /// (a terminal `AuthFlow` whose corresponding run is still `BlockedAuth`).
+    ///
+    /// Drives the live-observer path (`SlackFinalReplyDeliveryObserver`) with a
+    /// `ScriptedTurnCoordinator` whose `cancel_should_fail` flag is set, mirroring
+    /// the mechanism used in `triggered_oauth_auth_backstop_cancel_failure_records_failed`.
+    #[tokio::test]
+    async fn blocked_auth_cancel_run_failure_leaves_auth_flow_intact() {
+        let install = "test-install";
+        let egress = Arc::new(FakeProtocolHttpEgress::new(vec!["slack.com".to_string()]));
+        egress.allow_credential_handle("slack_bot_token");
+        // No HTTP response programmed: the cancel fails before any post is made.
+
+        let outbound = Arc::new(InMemoryOutboundStateStore::default());
+        let coordinator = Arc::new(ScriptedTurnCoordinator::with_states(vec![scripted_state(
+            TurnStatus::BlockedAuth,
+            Some("gate:cancel-fail-intact"),
+        )]));
+        // Make cancel_run fail — mirrors the mechanism in
+        // `triggered_oauth_auth_backstop_cancel_failure_records_failed`.
+        coordinator
+            .cancel_should_fail
+            .store(true, std::sync::atomic::Ordering::Release);
+
+        let recorder = Arc::new(RecordingBlockedAuthFlowCanceller::default());
+        let observer = make_observer_with_canceller(
+            Arc::clone(&coordinator) as Arc<dyn TurnCoordinator>,
+            egress.clone(),
+            outbound,
+            install,
+            Some(Arc::clone(&recorder) as Arc<dyn BlockedAuthFlowCanceller>),
+        );
+        let env = envelope(user_message_payload());
+        let submitted_run_id = TurnRunId::new();
+        let ack = ProductInboundAck::Accepted {
+            accepted_message_ref: AcceptedMessageRef::new("slack:cancel-fail-intact-test")
+                .expect("ref"),
+            submitted_run_id,
+        };
+
+        observer.observe_workflow_ack(env, ack).await;
+
+        // cancel_run was attempted (it just failed).
+        assert_eq!(
+            coordinator.cancel_call_count(),
+            1,
+            "cancel_run must be attempted exactly once even when it fails"
+        );
+        // The flow canceller must NOT have been called: a failed run-cancel must
+        // leave the durable AuthFlow record intact so the auth prompt remains usable.
+        let calls = recorder
+            .calls
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        assert!(
+            calls.is_empty(),
+            "BlockedAuthFlowCanceller must NOT be called when cancel_run fails; got {} call(s)",
+            calls.len()
         );
     }
 
@@ -6153,12 +6278,30 @@ mod tests {
             calls.len()
         );
         assert_eq!(
-            calls[0].0, run_id,
+            calls[0].run_id, run_id,
             "canceller must receive the triggered run's run_id"
         );
         assert_eq!(
-            calls[0].1, gate_ref_str,
+            calls[0].gate_ref, gate_ref_str,
             "canceller must receive the blocked gate_ref"
+        );
+        // FIX 2: Assert the resolved owner_user_id and scope match the fixture values.
+        //
+        // In the triggered path, `deliver_triggered_run` builds:
+        //   actor = TurnActor::new(fire.creator_user_id) = "creator-user"
+        // `personal_turn_scope()` sets explicit owner = "creator-user", so
+        // `scope.explicit_owner_user_id() = Some("creator-user")` wins at
+        // production line 1167 (`cancel_auth_blocked_run` owner resolution).
+        let expected_owner =
+            ironclaw_host_api::UserId::new("creator-user").expect("expected owner fixture");
+        assert_eq!(
+            calls[0].owner_user_id, expected_owner,
+            "owner_user_id must be the scope's explicit owner (creator-user from personal_turn_scope)"
+        );
+        // Scope tenant must match personal_turn_scope().
+        assert_eq!(
+            calls[0].scope.tenant_id, scope.tenant_id,
+            "scope.tenant_id must match the personal_turn_scope tenant"
         );
     }
 
@@ -6360,11 +6503,11 @@ mod tests {
             calls.len()
         );
         assert_eq!(
-            calls[0].0, run_id,
+            calls[0].run_id, run_id,
             "canceller must receive the triggered run's run_id"
         );
         assert_eq!(
-            calls[0].1, gate_ref_str,
+            calls[0].gate_ref, gate_ref_str,
             "canceller must receive the blocked gate_ref"
         );
     }

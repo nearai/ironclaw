@@ -1422,8 +1422,11 @@ impl BlockedAuthFlowCanceller for RebornProductAuthServices {
         run_id: TurnRunId,
         gate_ref: &str,
     ) -> Result<(), AuthProductError> {
-        let gate_ref = AuthGateRef::new(gate_ref.to_string())
-            .map_err(|_| AuthProductError::BackendUnavailable)?;
+        let gate_ref = AuthGateRef::new(gate_ref.to_string()).map_err(|err| {
+            AuthProductError::InvalidRequest {
+                reason: format!("invalid gate ref for auth-flow cancel: {err}"),
+            }
+        })?;
         let Some(source) = self.flow_record_source.as_ref() else {
             // No projection source wired in: nothing to cancel here.
             return Ok(());
@@ -1441,8 +1444,11 @@ impl BlockedAuthFlowCanceller for RebornProductAuthServices {
                     project_id: scope.project_id.clone(),
                     thread_id: scope.thread_id.clone(),
                 },
-                turn_run_ref: TurnRunRef::new(run_id.to_string())
-                    .map_err(|_| AuthProductError::BackendUnavailable)?,
+                turn_run_ref: TurnRunRef::new(run_id.to_string()).map_err(|err| {
+                    AuthProductError::InvalidRequest {
+                        reason: format!("invalid turn run ref for auth-flow cancel: {err}"),
+                    }
+                })?,
                 gate_ref,
                 include_terminal: false,
             })
