@@ -68,6 +68,7 @@ mod fs_browse;
 mod lifecycle_setup;
 mod llm_config;
 mod project_fs;
+mod projects;
 mod trace_credits;
 mod types;
 
@@ -88,6 +89,14 @@ pub use project_fs::{
     ProjectFilesystemReader, ProjectFsEntry, ProjectFsEntryKind, ProjectFsError, ProjectFsFile,
     ProjectFsStat, RebornProjectFsListRequest, RebornProjectFsListResponse,
     RebornProjectFsReadRequest, RebornProjectFsStatRequest, RebornProjectFsStatResponse,
+};
+pub use projects::{
+    ProjectCaller, ProjectService, ProjectServiceError, RebornAddMemberRequest,
+    RebornCreateProjectRequest, RebornDeleteProjectRequest, RebornGetProjectRequest,
+    RebornListMembersRequest, RebornListMembersResponse, RebornListProjectsRequest,
+    RebornListProjectsResponse, RebornProjectInfo, RebornProjectMemberInfo,
+    RebornProjectMemberStatus, RebornProjectResponse, RebornProjectRole, RebornProjectState,
+    RebornRemoveMemberRequest, RebornUpdateMemberRoleRequest, RebornUpdateProjectRequest,
 };
 pub use types::{
     RebornAttachmentBytes, RebornAttachmentRequest, RebornAutomationInfo,
@@ -1051,12 +1060,35 @@ pub trait RebornServicesApi: Send + Sync {
         Err(RebornServicesError::service_unavailable(false))
     }
 
+    /// List the projects the caller can access (owner or active member).
+    ///
+    /// Default body reports the service unavailable so implementors without a
+    /// wired project service (and existing fakes) compile untouched.
+    async fn list_projects(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        request: RebornListProjectsRequest,
+    ) -> Result<RebornListProjectsResponse, RebornServicesError> {
+        let _ = (caller, request);
+        Err(RebornServicesError::service_unavailable(false))
+    }
+
     /// Stat a path on a browsable mount.
     async fn stat_fs_path(
         &self,
         caller: WebUiAuthenticatedCaller,
         request: RebornFsStatRequest,
     ) -> Result<RebornFsStatResponse, RebornServicesError> {
+        let _ = (caller, request);
+        Err(RebornServicesError::service_unavailable(false))
+    }
+
+    /// Create a project owned by the caller.
+    async fn create_project(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        request: RebornCreateProjectRequest,
+    ) -> Result<RebornProjectResponse, RebornServicesError> {
         let _ = (caller, request);
         Err(RebornServicesError::service_unavailable(false))
     }
@@ -1068,6 +1100,76 @@ pub trait RebornServicesApi: Send + Sync {
         caller: WebUiAuthenticatedCaller,
         request: RebornFsReadRequest,
     ) -> Result<ProjectFsFile, RebornServicesError> {
+        let _ = (caller, request);
+        Err(RebornServicesError::service_unavailable(false))
+    }
+
+    /// Fetch a single project the caller can access.
+    async fn get_project(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        request: RebornGetProjectRequest,
+    ) -> Result<RebornProjectResponse, RebornServicesError> {
+        let _ = (caller, request);
+        Err(RebornServicesError::service_unavailable(false))
+    }
+
+    /// Update a project (editor or owner access required).
+    async fn update_project(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        request: RebornUpdateProjectRequest,
+    ) -> Result<RebornProjectResponse, RebornServicesError> {
+        let _ = (caller, request);
+        Err(RebornServicesError::service_unavailable(false))
+    }
+
+    /// Delete a project (owner access required).
+    async fn delete_project(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        request: RebornDeleteProjectRequest,
+    ) -> Result<(), RebornServicesError> {
+        let _ = (caller, request);
+        Err(RebornServicesError::service_unavailable(false))
+    }
+
+    /// List a project's membership grants (viewer access required).
+    async fn list_project_members(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        request: RebornListMembersRequest,
+    ) -> Result<RebornListMembersResponse, RebornServicesError> {
+        let _ = (caller, request);
+        Err(RebornServicesError::service_unavailable(false))
+    }
+
+    /// Grant a user a role on a project (owner access required).
+    async fn add_project_member(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        request: RebornAddMemberRequest,
+    ) -> Result<RebornProjectMemberInfo, RebornServicesError> {
+        let _ = (caller, request);
+        Err(RebornServicesError::service_unavailable(false))
+    }
+
+    /// Change a member's role (owner access required).
+    async fn update_project_member_role(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        request: RebornUpdateMemberRoleRequest,
+    ) -> Result<RebornProjectMemberInfo, RebornServicesError> {
+        let _ = (caller, request);
+        Err(RebornServicesError::service_unavailable(false))
+    }
+
+    /// Revoke a member (owner access required).
+    async fn remove_project_member(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        request: RebornRemoveMemberRequest,
+    ) -> Result<(), RebornServicesError> {
         let _ = (caller, request);
         Err(RebornServicesError::service_unavailable(false))
     }
@@ -1513,6 +1615,7 @@ pub struct RebornServices {
     inbound_attachments: Option<Arc<dyn InboundAttachmentLander>>,
     project_filesystem: Option<Arc<dyn ProjectFilesystemReader>>,
     filesystem_browser: Option<Arc<dyn FilesystemBrowseReader>>,
+    project_service: Option<Arc<dyn ProjectService>>,
     inbound_attachment_reader: Option<Arc<dyn InboundAttachmentReader>>,
     event_stream: Option<Arc<dyn ProjectionStream>>,
     lifecycle_facade: Arc<dyn LifecycleProductFacade>,
@@ -1543,6 +1646,7 @@ impl RebornServices {
             inbound_attachments: None,
             project_filesystem: None,
             filesystem_browser: None,
+            project_service: None,
             inbound_attachment_reader: None,
             event_stream: None,
             lifecycle_facade: Arc::new(UnsupportedLifecycleProductFacade::new_static(
@@ -1603,6 +1707,14 @@ impl RebornServices {
         filesystem_browser: Arc<dyn FilesystemBrowseReader>,
     ) -> Self {
         self.filesystem_browser = Some(filesystem_browser);
+        self
+    }
+
+    /// Wire the project management + membership (ACL) port. Without it, the
+    /// `list_projects` / `create_project` / … methods report the service
+    /// unavailable.
+    pub fn with_project_service(mut self, project_service: Arc<dyn ProjectService>) -> Self {
+        self.project_service = Some(project_service);
         self
     }
 
@@ -2283,6 +2395,114 @@ impl RebornServicesApi for RebornServices {
             .read_file(&scope, request.mount, &request.path)
             .await
             .map_err(map_project_fs_error)
+    }
+
+    async fn list_projects(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        request: RebornListProjectsRequest,
+    ) -> Result<RebornListProjectsResponse, RebornServicesError> {
+        let service = self.require_project_service()?;
+        service
+            .list_projects(project_caller(&caller), request)
+            .await
+            .map_err(map_project_service_error)
+    }
+
+    async fn create_project(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        request: RebornCreateProjectRequest,
+    ) -> Result<RebornProjectResponse, RebornServicesError> {
+        let service = self.require_project_service()?;
+        service
+            .create_project(project_caller(&caller), request)
+            .await
+            .map_err(map_project_service_error)
+    }
+
+    async fn get_project(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        request: RebornGetProjectRequest,
+    ) -> Result<RebornProjectResponse, RebornServicesError> {
+        let service = self.require_project_service()?;
+        service
+            .get_project(project_caller(&caller), request)
+            .await
+            .map_err(map_project_service_error)
+    }
+
+    async fn update_project(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        request: RebornUpdateProjectRequest,
+    ) -> Result<RebornProjectResponse, RebornServicesError> {
+        let service = self.require_project_service()?;
+        service
+            .update_project(project_caller(&caller), request)
+            .await
+            .map_err(map_project_service_error)
+    }
+
+    async fn delete_project(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        request: RebornDeleteProjectRequest,
+    ) -> Result<(), RebornServicesError> {
+        let service = self.require_project_service()?;
+        service
+            .delete_project(project_caller(&caller), request)
+            .await
+            .map_err(map_project_service_error)
+    }
+
+    async fn list_project_members(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        request: RebornListMembersRequest,
+    ) -> Result<RebornListMembersResponse, RebornServicesError> {
+        let service = self.require_project_service()?;
+        service
+            .list_members(project_caller(&caller), request)
+            .await
+            .map_err(map_project_service_error)
+    }
+
+    async fn add_project_member(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        request: RebornAddMemberRequest,
+    ) -> Result<RebornProjectMemberInfo, RebornServicesError> {
+        let service = self.require_project_service()?;
+        service
+            .add_member(project_caller(&caller), request)
+            .await
+            .map_err(map_project_service_error)
+    }
+
+    async fn update_project_member_role(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        request: RebornUpdateMemberRoleRequest,
+    ) -> Result<RebornProjectMemberInfo, RebornServicesError> {
+        let service = self.require_project_service()?;
+        service
+            .update_member_role(project_caller(&caller), request)
+            .await
+            .map_err(map_project_service_error)
+    }
+
+    async fn remove_project_member(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        request: RebornRemoveMemberRequest,
+    ) -> Result<(), RebornServicesError> {
+        let service = self.require_project_service()?;
+        service
+            .remove_member(project_caller(&caller), request)
+            .await
+            .map_err(map_project_service_error)
     }
 
     async fn read_attachment(
@@ -3538,6 +3758,12 @@ impl RebornServices {
         Ok(browser)
     }
 
+    fn require_project_service(&self) -> Result<&Arc<dyn ProjectService>, RebornServicesError> {
+        self.project_service
+            .as_ref()
+            .ok_or_else(|| RebornServicesError::service_unavailable(false))
+    }
+
     /// Verify the caller may access the thread and return the project-scoped
     /// [`ThreadScope`] its workspace files resolve under. Reuses the same
     /// ownership + automation-trigger fallback probe as event streaming, so a
@@ -3827,6 +4053,36 @@ fn map_project_fs_error(error: ProjectFsError) -> RebornServicesError {
         }
         ProjectFsError::Unavailable => RebornServicesError::service_unavailable(true),
         ProjectFsError::Internal => RebornServicesError::internal(),
+    }
+}
+
+fn project_caller(caller: &WebUiAuthenticatedCaller) -> ProjectCaller {
+    ProjectCaller {
+        tenant_id: caller.tenant_id.clone(),
+        user_id: caller.user_id.clone(),
+    }
+}
+
+fn map_project_service_error(error: ProjectServiceError) -> RebornServicesError {
+    match error {
+        ProjectServiceError::NotFound => {
+            RebornServicesError::from_status(RebornServicesErrorCode::NotFound, 404, false)
+        }
+        ProjectServiceError::Denied => participant_denied(),
+        ProjectServiceError::InvalidInput { field } => {
+            let mut error = RebornServicesError::from_status(
+                RebornServicesErrorCode::InvalidRequest,
+                400,
+                false,
+            );
+            error.field = Some(field);
+            error
+        }
+        ProjectServiceError::Conflict => {
+            RebornServicesError::from_status(RebornServicesErrorCode::Conflict, 409, false)
+        }
+        ProjectServiceError::Unavailable => RebornServicesError::service_unavailable(true),
+        ProjectServiceError::Internal => RebornServicesError::internal(),
     }
 }
 
