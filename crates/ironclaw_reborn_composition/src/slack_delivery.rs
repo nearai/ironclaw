@@ -591,6 +591,7 @@ impl SlackFinalReplyDeliveryObserver {
                 adapter: self.services.adapter.as_ref(),
                 egress: &tracked_egress,
                 delivery_sink: self.services.delivery_sink.as_ref(),
+                require_direct_message_target: false,
             },
         )
         .await?;
@@ -1439,9 +1440,14 @@ impl ProductOutboundTargetResolver for ObservedSlackReplyTargetAuthority {
     async fn resolve_product_outbound_target_metadata(
         &self,
         target: &ValidatedReplyTargetBinding,
+        require_direct_message: bool,
     ) -> Result<VerifiedProductOutboundTargetMetadata, ProductWorkflowError> {
         if target.target() != &self.expected_target {
             return Err(ProductWorkflowError::BindingAccessDenied);
+        }
+        // Defense in depth: honor the DM requirement even on the live-path resolver.
+        if require_direct_message && !slack_reply_target_is_personal_dm(target.target()) {
+            return Err(ProductWorkflowError::OutboundTargetNotDirectMessage);
         }
         Ok(VerifiedProductOutboundTargetMetadata {
             external_conversation_ref: self.external_conversation_ref.clone(),
@@ -1986,8 +1992,6 @@ async fn deliver_triggered_run(
         actor: actor.clone(),
         trigger_context: trigger_context.clone(),
         resolved_space_id: std::sync::Mutex::new(None),
-        require_personal_dm_for_oauth: std::sync::atomic::AtomicBool::new(false),
-        oauth_target_not_dm: std::sync::atomic::AtomicBool::new(false),
     };
 
     let mut delivered_blocked_marker: Option<BlockedActionableMarker> = None;
@@ -2056,18 +2060,15 @@ async fn deliver_triggered_run(
         let event_kind = notification.event_kind;
         let gate_ref_for_routing = notification.gate_ref_for_routing.clone();
 
-        // Set the per-delivery OAuth guard BEFORE moving `notification` into the call.
-        // If the payload is an AuthPrompt with an authorization_url, the authority
-        // backstop in `resolve_product_outbound_target_metadata` will enforce that the
-        // send-time binding is a personal DM, closing the snapshot-vs-send race.
-        let payload_has_oauth_url = matches!(
+        // Compute the DM requirement from the payload BEFORE it is moved into the call.
+        // AuthPrompt payloads with an authorization_url must only be delivered to a
+        // personal DM; pass this requirement through the delivery request so the
+        // resolver enforces it at send time (closing the snapshot-vs-send race).
+        let require_direct_message_target = matches!(
             &notification.payload,
             ProductOutboundPayload::AuthPrompt(view)
                 if view.authorization_url.is_some()
         );
-        authority
-            .require_personal_dm_for_oauth
-            .store(payload_has_oauth_url, std::sync::atomic::Ordering::Release);
 
         // Build the delivery request and deliver.
         let delivery_result = deliver_triggered_notification(
@@ -2078,6 +2079,7 @@ async fn deliver_triggered_run(
             &state,
             &authority,
             notification,
+            require_direct_message_target,
         )
         .await;
 
@@ -2165,11 +2167,9 @@ async fn deliver_triggered_run(
                     record_triggered_run_outcome(delivery_store, run_id, outcome).await;
                     return outcome;
                 }
-                // Reset the guard so the notice delivery is not blocked.
-                authority
-                    .require_personal_dm_for_oauth
-                    .store(false, std::sync::atomic::Ordering::Release);
                 // Post the auth-unavailable notice as a terminal FinalReply.
+                // require_direct_message_target is false: the notice is plain text
+                // with no OAuth URL, so no DM restriction applies.
                 let notice = SlackActionableNotification {
                     event_kind: RunNotificationEventKind::FinalReplyReady,
                     payload: ProductOutboundPayload::FinalReply(FinalReplyView {
@@ -2183,7 +2183,7 @@ async fn deliver_triggered_run(
                     gate_ref_for_routing: None,
                 };
                 let outcome = match deliver_triggered_notification(
-                    services, &scope, &actor, run_id, &state, &authority, notice,
+                    services, &scope, &actor, run_id, &state, &authority, notice, false,
                 )
                 .await
                 {
@@ -2430,13 +2430,13 @@ async fn triggered_notification_for_state(
             )
             .await?;
             view.body.push_str(&triggered_gate_footer(trigger_label));
-            // Only link-based OAuth is allowed over Slack. The send-time authority
-            // backstop in `TriggeredSlackReplyTargetAuthority::resolve_product_outbound_target_metadata`
-            // enforces that the `authorization_url` only reaches a personal DM at the
-            // exact moment of delivery — it will trip and return `OAuthTargetNotDm` if
-            // the resolved binding is not a personal DM, causing `deliver_triggered_run`
-            // to cancel the run and post the auth-unavailable notice. We do not need to
-            // pre-check the DM status here: the backstop is the single enforcement point.
+            // Only link-based OAuth is allowed over Slack. The `require_direct_message_target`
+            // flag is set on the `ProductOutboundDeliveryRequest` when the payload carries
+            // an `authorization_url`, and the resolver enforces the DM constraint at send
+            // time — it returns `OutboundTargetNotDirectMessage` if the resolved binding is
+            // not a personal DM, which `classify_delivery_error` maps to `OAuthTargetNotDm`,
+            // causing `deliver_triggered_run` to cancel the run and post the auth-unavailable
+            // notice. We do not need to pre-check the DM status here.
             if view.authorization_url.is_some() {
                 Ok(Some(SlackActionableNotification {
                     event_kind: RunNotificationEventKind::AuthRequired,
@@ -2480,12 +2480,11 @@ enum TriggeredNotificationFailure {
     Denied,
     /// The payload carries an OAuth `authorization_url` but the send-time
     /// binding resolved to a non-personal-DM target. Posting the OAuth URL
-    /// to a shared channel would leak it to every member. The authority
-    /// backstop in `TriggeredSlackReplyTargetAuthority` raises this when
-    /// `require_personal_dm_for_oauth` is set and the resolved binding is not
-    /// a personal DM. `classify_delivery_error` maps the sentinel reason to
-    /// this variant; `deliver_triggered_run` handles it by cancelling the run
-    /// and posting the auth-unavailable notice.
+    /// to a shared channel would leak it to every member. The resolver returns
+    /// [`ProductWorkflowError::OutboundTargetNotDirectMessage`] when
+    /// `require_direct_message_target` is true and the binding is not a DM;
+    /// `classify_delivery_error` maps that to this variant. `deliver_triggered_run`
+    /// handles it by cancelling the run and posting the auth-unavailable notice.
     OAuthTargetNotDm,
     /// Any other delivery or transport failure.
     Other(String),
@@ -2508,6 +2507,7 @@ impl std::fmt::Display for TriggeredNotificationFailure {
 }
 
 /// Delivers a triggered-run notification, returning the list of posted Slack messages.
+#[allow(clippy::too_many_arguments)]
 async fn deliver_triggered_notification(
     services: &SlackFinalReplyDeliveryServices,
     scope: &TurnScope,
@@ -2516,6 +2516,7 @@ async fn deliver_triggered_notification(
     state: &TurnRunState,
     authority: &TriggeredSlackReplyTargetAuthority,
     notification: SlackActionableNotification,
+    require_direct_message_target: bool,
 ) -> Result<Vec<PostedSlackMessage>, TriggeredNotificationFailure> {
     let SlackActionableNotification {
         event_kind,
@@ -2568,21 +2569,12 @@ async fn deliver_triggered_notification(
             adapter: services.adapter.as_ref(),
             egress: &tracked_egress,
             delivery_sink: services.delivery_sink.as_ref(),
+            require_direct_message_target,
         },
     )
     .await;
 
     if let Err(error) = render_result {
-        // Typed handshake with the resolver: if the OAuth-DM backstop tripped,
-        // the resolver set `oauth_target_not_dm`. Read-and-clear it here so the
-        // failure is classified as `OAuthTargetNotDm` without inspecting the
-        // cross-crate error's reason string.
-        if authority
-            .oauth_target_not_dm
-            .swap(false, std::sync::atomic::Ordering::AcqRel)
-        {
-            return Err(TriggeredNotificationFailure::OAuthTargetNotDm);
-        }
         return Err(classify_delivery_error(error));
     }
 
@@ -2597,15 +2589,16 @@ fn classify_delivery_error(
     use ironclaw_outbound::OutboundError;
     use ironclaw_product_workflow::ProductOutboundDeliveryError;
     match &error {
+        ProductOutboundDeliveryError::Workflow {
+            source: ProductWorkflowError::OutboundTargetNotDirectMessage,
+            ..
+        } => TriggeredNotificationFailure::OAuthTargetNotDm,
         ProductOutboundDeliveryError::Outbound(OutboundError::PreferenceTargetMissing {
             ..
         }) => TriggeredNotificationFailure::NoDefaultConfigured,
         ProductOutboundDeliveryError::Outbound(OutboundError::AccessDenied) => {
             TriggeredNotificationFailure::Denied
         }
-        // Note: the OAuth-DM backstop trip is NOT classified here — it is detected
-        // via the authority's typed `oauth_target_not_dm` signal in
-        // `deliver_triggered_notification` before this function is reached.
         _ => TriggeredNotificationFailure::Other(error.to_string()),
     }
 }
@@ -2673,18 +2666,6 @@ struct TriggeredSlackReplyTargetAuthority {
     /// refs so inbound replies (which carry team_id as space_id)
     /// fingerprint-match the recorded ref.
     resolved_space_id: std::sync::Mutex<Option<String>>,
-    /// Set per-delivery: true when the current delivery's payload carries an OAuth
-    /// `authorization_url` that may ONLY be posted to a personal DM. The resolver
-    /// enforces this against the EXACT binding resolved at send time, closing the
-    /// snapshot-vs-send race (the pre-loop DM snapshot can go stale while the run
-    /// waits in BlockedAuth).
-    require_personal_dm_for_oauth: std::sync::atomic::AtomicBool,
-    /// Output signal: set by the resolver when `require_personal_dm_for_oauth`
-    /// is true and the resolved send-time binding is NOT a personal DM. Read
-    /// (and cleared) by `deliver_triggered_notification` to classify the delivery
-    /// failure as `OAuthTargetNotDm` — a typed handshake that avoids matching a
-    /// magic reason string on the cross-crate `ProductWorkflowError`.
-    oauth_target_not_dm: std::sync::atomic::AtomicBool,
 }
 
 #[async_trait]
@@ -2707,24 +2688,15 @@ impl ProductOutboundTargetResolver for TriggeredSlackReplyTargetAuthority {
     async fn resolve_product_outbound_target_metadata(
         &self,
         target: &ValidatedReplyTargetBinding,
+        require_direct_message: bool,
     ) -> Result<VerifiedProductOutboundTargetMetadata, ProductWorkflowError> {
-        // Authority backstop — single enforcement point for the OAuth DM rule: if
-        // the current delivery carries an OAuth `authorization_url`, enforce that
-        // the EXACT send-time binding is a personal DM. This is checked against the
-        // binding resolved NOW (at send time), making it race-free. On a trip we set
-        // the typed `oauth_target_not_dm` signal so `deliver_triggered_notification`
-        // can classify the failure as `OAuthTargetNotDm` without matching a magic
-        // reason string on the cross-crate error.
-        if self
-            .require_personal_dm_for_oauth
-            .load(std::sync::atomic::Ordering::Acquire)
-            && !slack_reply_target_is_personal_dm(target.target())
-        {
-            self.oauth_target_not_dm
-                .store(true, std::sync::atomic::Ordering::Release);
-            return Err(ProductWorkflowError::BindingResolutionFailed {
-                reason: "OAuth authorization_url requires a personal DM target".to_string(),
-            });
+        // Single enforcement point for the OAuth DM rule: when the delivery request
+        // requires a direct-message target (i.e. the payload carries an OAuth
+        // authorization_url), enforce that the EXACT send-time binding is a personal
+        // DM. Checked against the binding resolved NOW (at send time), making it
+        // race-free against the pre-loop preference snapshot going stale.
+        if require_direct_message && !slack_reply_target_is_personal_dm(target.target()) {
+            return Err(ProductWorkflowError::OutboundTargetNotDirectMessage);
         }
 
         // Decode the DM channel ID from the binding ref. The ref was built by

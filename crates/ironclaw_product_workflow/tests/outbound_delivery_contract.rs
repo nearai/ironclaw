@@ -220,6 +220,7 @@ impl ProductOutboundTargetResolver for FakeProductOutboundTargetResolver {
     async fn resolve_product_outbound_target_metadata(
         &self,
         target: &ironclaw_outbound::ValidatedReplyTargetBinding,
+        _require_direct_message: bool,
     ) -> Result<VerifiedProductOutboundTargetMetadata, ProductWorkflowError> {
         self.calls
             .lock()
@@ -700,6 +701,7 @@ async fn authorized_final_reply_renders_through_telegram_egress_after_validation
             adapter: &adapter,
             egress: &egress,
             delivery_sink: &sink,
+            require_direct_message_target: false,
         },
     )
     .await
@@ -770,6 +772,7 @@ async fn synchronous_response_marks_attempt_delivered() {
             adapter: &adapter,
             egress: &egress,
             delivery_sink: &sink,
+            require_direct_message_target: false,
         },
     )
     .await
@@ -816,6 +819,7 @@ async fn deferred_render_keeps_attempt_pending_and_skips_delivery_status_side_ef
             adapter: &adapter,
             egress: &egress,
             delivery_sink: &sink,
+            require_direct_message_target: false,
         },
     )
     .await
@@ -867,6 +871,7 @@ async fn status_update_failure_after_render_does_not_turn_send_into_failure() {
             adapter: &adapter,
             egress: &egress,
             delivery_sink: &sink,
+            require_direct_message_target: false,
         },
     )
     .await
@@ -944,6 +949,7 @@ async fn requested_outbound_preserves_actor_and_modality_before_rendering() {
             adapter: &adapter,
             egress: &egress,
             delivery_sink: &sink,
+            require_direct_message_target: false,
         },
     )
     .await
@@ -998,6 +1004,7 @@ async fn mismatched_payload_kind_marks_authorized_attempt_failed_without_render(
             adapter: &adapter,
             egress: &egress,
             delivery_sink: &sink,
+            require_direct_message_target: false,
         },
     )
     .await
@@ -1056,6 +1063,7 @@ async fn payload_kind_mismatch_preserves_status_update_failure() {
             adapter: &adapter,
             egress: &egress,
             delivery_sink: &sink,
+            require_direct_message_target: false,
         },
     )
     .await
@@ -1125,6 +1133,7 @@ async fn target_metadata_failure_with_status_update_failure_preserves_workflow_e
             adapter: &adapter,
             egress: &egress,
             delivery_sink: &sink,
+            require_direct_message_target: false,
         },
     )
     .await
@@ -1192,6 +1201,7 @@ async fn target_metadata_failure_marks_attempt_failed_without_render() {
             adapter: &adapter,
             egress: &egress,
             delivery_sink: &sink,
+            require_direct_message_target: false,
         },
     )
     .await
@@ -1262,6 +1272,7 @@ async fn target_metadata_rejection_errors_mark_attempt_failed_rejected() {
                 adapter: &adapter,
                 egress: &egress,
                 delivery_sink: &sink,
+                require_direct_message_target: false,
             },
         )
         .await
@@ -1322,6 +1333,7 @@ async fn keep_alive_payload_marks_authorized_attempt_failed_without_render() {
             adapter: &adapter,
             egress: &egress,
             delivery_sink: &sink,
+            require_direct_message_target: false,
         },
     )
     .await
@@ -1381,6 +1393,7 @@ async fn adapter_render_failure_is_returned_and_marks_attempt_failed() {
             adapter: &adapter,
             egress: &egress,
             delivery_sink: &sink,
+            require_direct_message_target: false,
         },
     )
     .await
@@ -1462,6 +1475,7 @@ async fn adapter_non_retryable_errors_mark_attempt_failed_rejected() {
                 adapter: &adapter,
                 egress: &egress,
                 delivery_sink: &sink,
+                require_direct_message_target: false,
             },
         )
         .await
@@ -1524,6 +1538,7 @@ async fn adapter_render_failure_preserves_adapter_error_when_status_update_fails
             adapter: &adapter,
             egress: &egress,
             delivery_sink: &sink,
+            require_direct_message_target: false,
         },
     )
     .await
@@ -1584,6 +1599,7 @@ async fn revoked_or_rejected_target_does_not_call_render_or_egress() {
             adapter: &adapter,
             egress: &egress,
             delivery_sink: &sink,
+            require_direct_message_target: false,
         },
     )
     .await
@@ -1629,6 +1645,7 @@ async fn no_delivery_system_event_does_not_call_render_or_egress() {
             adapter: &adapter,
             egress: &egress,
             delivery_sink: &sink,
+            require_direct_message_target: false,
         },
     )
     .await

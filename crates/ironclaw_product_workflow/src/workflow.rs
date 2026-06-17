@@ -1601,6 +1601,7 @@ fn terminal_ack_for_error(error: &ProductWorkflowError) -> Option<ProductInbound
         | ProductWorkflowError::BeforeInboundPolicyFailed {
             permanent: false, ..
         }
+        | ProductWorkflowError::OutboundTargetNotDirectMessage
         | ProductWorkflowError::DuplicateAction { .. } => None,
     }
 }
