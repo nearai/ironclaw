@@ -1,12 +1,17 @@
 use chrono_tz::Tz;
 use ironclaw_extensions::{CapabilityManifest, ExtensionError};
-use ironclaw_host_api::{EffectKind, PermissionMode};
+use ironclaw_host_api::{EffectKind, PermissionMode, ResourceUsage};
+use ironclaw_memory::{
+    MemoryBackend, MemoryContext, MemoryDocumentPath, MemoryWriteOutcome, content_bytes_sha256,
+};
 use serde_json::{Map, Value, json};
 
 use crate::{FirstPartyCapabilityError, FirstPartyCapabilityRequest, FirstPartyCapabilityResult};
 
-use super::memory::MemoryCapabilityState;
-use super::{first_party_capability_manifest, input_error, resource_profile};
+use super::memory::{
+    MAX_MEMORY_PATCH_RETRIES, MemoryCapabilityState, ensure_memory_mount, write_options,
+};
+use super::{first_party_capability_manifest, input_error, operation_error, resource_profile};
 
 pub const PROFILE_SET_CAPABILITY_ID: &str = "builtin.profile_set";
 
@@ -67,23 +72,114 @@ pub(super) async fn dispatch(
     request: &FirstPartyCapabilityRequest,
 ) -> Result<FirstPartyCapabilityResult, FirstPartyCapabilityError> {
     let fields = validated_fields(&request.input)?;
-    // Reuse the memory services/backend resolution; profile_merge_write keys the
-    // doc via the shared profile_scope_and_path helper (agent=None, project=None).
-    super::memory::profile_merge_write(state, request, fields).await
+    // Resolve backend/context/path from state+request, then run the CAS merge loop.
+    profile_merge_write(state, request, fields).await
+}
+
+/// Outer function: resolves the backend, context, and profile path from
+/// `state` and `request`, then delegates to the backend-independent
+/// `profile_merge_into` CAS loop.
+async fn profile_merge_write(
+    state: &MemoryCapabilityState,
+    request: &FirstPartyCapabilityRequest,
+    fields: serde_json::Map<String, serde_json::Value>,
+) -> Result<FirstPartyCapabilityResult, FirstPartyCapabilityError> {
+    use crate::user_profile_source::profile_scope_and_path;
+
+    ensure_memory_mount(request, /* write */ true)?;
+    let (scope, path) = profile_scope_and_path(
+        request.scope.tenant_id.as_str(),
+        request.scope.user_id.as_str(),
+    )
+    .map_err(|_| input_error())?;
+    let context = MemoryContext::new(scope).with_audit_context(
+        request.scope.clone(),
+        ironclaw_host_api::CorrelationId::new(),
+    );
+    let backend = state.backend_for(request)?;
+    profile_merge_into(&*backend, &context, &path, fields).await
+}
+
+/// Inner function: CAS retry loop over an already-resolved backend/context/path.
+/// Separated from `profile_merge_write` so tests can inject a fake backend
+/// directly without needing to construct a full `FirstPartyCapabilityRequest`.
+pub(super) async fn profile_merge_into(
+    backend: &dyn MemoryBackend,
+    context: &MemoryContext,
+    path: &MemoryDocumentPath,
+    fields: serde_json::Map<String, serde_json::Value>,
+) -> Result<FirstPartyCapabilityResult, FirstPartyCapabilityError> {
+    let options = write_options(None);
+
+    // CAS retry loop — mirrors `patch_document`'s MAX_MEMORY_PATCH_RETRIES pattern.
+    // Read current bytes + hash, merge fields, compare-and-write; retry on hash
+    // mismatch (a concurrent writer raced in).
+    for _ in 0..MAX_MEMORY_PATCH_RETRIES {
+        let current = backend
+            .read_document(context, path)
+            .await
+            .map_err(|_| operation_error())?;
+        let expected_hash = current.as_deref().map(content_bytes_sha256);
+        let mut doc: serde_json::Map<String, serde_json::Value> = match &current {
+            Some(bytes) => match serde_json::from_slice(bytes) {
+                Ok(map) => map,
+                Err(error) => {
+                    // FIX-1: corrupt-JSON fail-loud — refuse to overwrite unknown content.
+                    tracing::debug!(%error, "profile doc is not valid JSON; refusing to overwrite");
+                    return Err(operation_error());
+                }
+            },
+            None => serde_json::Map::new(),
+        };
+        for (k, v) in &fields {
+            doc.insert(k.clone(), v.clone());
+        }
+        let bytes =
+            serde_json::to_vec(&serde_json::Value::Object(doc)).map_err(|_| operation_error())?;
+
+        let outcome = backend
+            .compare_and_write_document_with_backend_options(
+                context,
+                path,
+                expected_hash.as_deref(),
+                &bytes,
+                &options,
+            )
+            .await
+            .map_err(|_| operation_error())?;
+        if outcome == MemoryWriteOutcome::Written {
+            return Ok(FirstPartyCapabilityResult::new(
+                json!({ "status": "ok" }),
+                ResourceUsage::default(),
+            ));
+        }
+        // else: hash moved under us — loop and re-merge onto the newer doc.
+    }
+    // FIX-2: CAS-exhaustion debug log.
+    tracing::debug!(
+        retries = MAX_MEMORY_PATCH_RETRIES,
+        "profile merge CAS retries exhausted"
+    );
+    Err(operation_error())
 }
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    };
 
-    use ironclaw_filesystem::InMemoryBackend;
+    use async_trait::async_trait;
+    use ironclaw_filesystem::{FilesystemError, InMemoryBackend};
     use ironclaw_host_api::{
         CapabilityId, InvocationId, MountAlias, MountGrant, MountPermissions, MountView,
         ResourceScope, TenantId, ThreadId, UserId, VirtualPath,
     };
     use ironclaw_memory::{
         FilesystemMemoryDocumentRepository, MemoryBackend, MemoryBackendCapabilities,
-        MemoryContext, RepositoryMemoryBackend,
+        MemoryBackendWriteOptions, MemoryContext, MemoryDocumentPath, MemoryWriteOutcome,
+        RepositoryMemoryBackend,
     };
     use serde_json::{Value, json};
 
@@ -309,6 +405,88 @@ mod tests {
                 Some(ironclaw_host_api::RuntimeDispatchErrorKind::InputEncode)
             ),
             "201-char location must produce InputEncode error, got: {err:?}"
+        );
+    }
+
+    // ── CAS-exhaustion coverage ───────────────────────────────────────────────
+
+    /// A fake `MemoryBackend` whose `compare_and_write_document_with_backend_options`
+    /// always returns `Conflict`, simulating a write that is perpetually raced.
+    /// `read_document` returns a stable empty-object document so the merge loop
+    /// can parse it on every iteration without error.
+    struct AlwaysConflictBackend {
+        attempt_count: Arc<AtomicUsize>,
+    }
+
+    impl AlwaysConflictBackend {
+        fn new() -> (Self, Arc<AtomicUsize>) {
+            let counter = Arc::new(AtomicUsize::new(0));
+            (
+                Self {
+                    attempt_count: Arc::clone(&counter),
+                },
+                counter,
+            )
+        }
+    }
+
+    #[async_trait]
+    impl MemoryBackend for AlwaysConflictBackend {
+        fn capabilities(&self) -> MemoryBackendCapabilities {
+            MemoryBackendCapabilities {
+                file_documents: true,
+                ..MemoryBackendCapabilities::default()
+            }
+        }
+
+        async fn read_document(
+            &self,
+            _context: &MemoryContext,
+            _path: &MemoryDocumentPath,
+        ) -> Result<Option<Vec<u8>>, FilesystemError> {
+            // Return a stable, valid empty-object JSON document.
+            Ok(Some(b"{}".to_vec()))
+        }
+
+        async fn compare_and_write_document_with_backend_options(
+            &self,
+            _context: &MemoryContext,
+            _path: &MemoryDocumentPath,
+            _expected_previous_hash: Option<&str>,
+            _bytes: &[u8],
+            _backend_options: &MemoryBackendWriteOptions,
+        ) -> Result<MemoryWriteOutcome, FilesystemError> {
+            self.attempt_count.fetch_add(1, Ordering::Relaxed);
+            // Always report a hash conflict so the caller retries.
+            Ok(MemoryWriteOutcome::Conflict)
+        }
+    }
+
+    #[tokio::test]
+    async fn profile_merge_into_returns_err_after_cas_budget_exhausted() {
+        use crate::user_profile_source::profile_scope_and_path;
+
+        let (backend, attempt_counter) = AlwaysConflictBackend::new();
+        let (scope, path) = profile_scope_and_path("tenant-cas-test", "user-cas-test").unwrap();
+        let context = MemoryContext::new(scope);
+        let mut fields = serde_json::Map::new();
+        fields.insert("timezone".into(), json!("UTC"));
+
+        let err = profile_merge_into(&backend, &context, &path, fields)
+            .await
+            .unwrap_err();
+
+        assert!(
+            matches!(
+                err.kind(),
+                Some(ironclaw_host_api::RuntimeDispatchErrorKind::OperationFailed)
+            ),
+            "CAS exhaustion must produce OperationFailed, got: {err:?}"
+        );
+        assert_eq!(
+            attempt_counter.load(Ordering::Relaxed),
+            super::MAX_MEMORY_PATCH_RETRIES,
+            "must attempt exactly MAX_MEMORY_PATCH_RETRIES times before giving up"
         );
     }
 }
