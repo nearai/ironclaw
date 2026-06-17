@@ -7,6 +7,7 @@ use std::time::Duration as StdDuration;
 
 use async_trait::async_trait;
 use chrono::{Duration, Utc};
+use ironclaw_attachments::InboundAttachment;
 use ironclaw_auth::{AuthFlowId, CredentialAccountId};
 use ironclaw_conversations::{
     ConversationBindingService as ConversationBindingPort, InMemoryConversationServices,
@@ -3482,6 +3483,41 @@ async fn subscription_request_via_submit_inbound_rejects_before_mutating_ledger(
     let err = workflow.submit_inbound(envelope).await.expect_err(
         "projection subscriptions use the subscribe projection door, not submit_inbound",
     );
+
+    assert!(matches!(
+        err,
+        ProductAdapterError::WorkflowRejected {
+            kind: ProductWorkflowRejectionKind::InvalidRequest,
+            status_code: 400,
+            retryable: false,
+            ..
+        }
+    ));
+    assert_eq!(inbound.accepted_count(), 0);
+    assert_eq!(binding_service.resolve_count(), 0);
+    assert_eq!(ledger.settled_count(), 0);
+    assert_eq!(ledger.in_flight_count(), 0);
+    assert_eq!(ledger.released_count(), 0);
+}
+
+#[tokio::test]
+async fn submit_inbound_with_attachments_rejects_non_user_message_before_mutating_ledger() {
+    // Inline bytes are only landed for user-message payloads. Staging bytes on
+    // any other payload (here a NoOp) must fail closed rather than silently drop
+    // the user's files — and must do so before touching binding or the ledger.
+    let (workflow, inbound, ledger, binding_service) = build_workflow_with_binding();
+    let envelope = sample_noop_envelope("attachments-on-noop");
+    let attachment = InboundAttachment {
+        id: "openai-image-0".to_string(),
+        mime_type: "image/png".to_string(),
+        filename: Some("image-0.png".to_string()),
+        bytes: vec![0x89, b'P', b'N', b'G'],
+    };
+
+    let err = workflow
+        .submit_inbound_with_attachments(envelope, vec![attachment])
+        .await
+        .expect_err("inline attachments on a non-user-message payload must be rejected");
 
     assert!(matches!(
         err,

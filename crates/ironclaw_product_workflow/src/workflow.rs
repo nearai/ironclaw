@@ -7,6 +7,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use chrono::Utc;
+use ironclaw_attachments::InboundAttachment;
 use ironclaw_auth::{AuthFlowId, CredentialAccountId};
 use ironclaw_host_api::{ThreadId, UserId};
 use ironclaw_product_adapters::{
@@ -142,6 +143,62 @@ impl ProductWorkflow for DefaultProductWorkflow {
         &self,
         envelope: ProductInboundEnvelope,
     ) -> Result<ProductInboundAck, ProductAdapterError> {
+        self.submit_inbound_inner(envelope, Vec::new()).await
+    }
+
+    async fn read_projection(
+        &self,
+        request: ProductProjectionReadInput,
+    ) -> Result<ProjectionReadRequest, ProductAdapterError> {
+        let ProductProjectionReadInput {
+            subject,
+            thread_id_hint,
+            after_cursor,
+            limit,
+        } = request;
+        let (actor, scope) =
+            resolve_projection_subject(&*self.binding_service, &subject, thread_id_hint.as_deref())
+                .await?;
+
+        Ok(ProjectionReadRequest {
+            actor,
+            scope,
+            after_cursor,
+            limit,
+        })
+    }
+
+    async fn subscribe_projection(
+        &self,
+        request: ProductProjectionSubscribeInput,
+    ) -> Result<ProjectionSubscriptionRequest, ProductAdapterError> {
+        let ProductProjectionSubscribeInput {
+            subject,
+            thread_id_hint,
+            after_cursor,
+        } = request;
+        let (actor, scope) =
+            resolve_projection_subject(&*self.binding_service, &subject, thread_id_hint.as_deref())
+                .await?;
+
+        Ok(ProjectionSubscriptionRequest {
+            actor,
+            scope,
+            after_cursor,
+        })
+    }
+}
+
+impl DefaultProductWorkflow {
+    /// Shared submit path for both the bytes-free [`ProductWorkflow::submit_inbound`]
+    /// door and the inline-attachment [`Self::submit_inbound_with_attachments`] door.
+    /// `attachments` carry decoded inline bytes (never serialized into the envelope)
+    /// and are landed at message acceptance for `UserMessage` payloads.
+    async fn submit_inbound_inner(
+        &self,
+        envelope: ProductInboundEnvelope,
+        attachments: Vec<InboundAttachment>,
+    ) -> Result<ProductInboundAck, ProductAdapterError> {
         if matches!(
             envelope.payload(),
             ProductInboundPayload::ProjectionRead(_)
@@ -153,6 +210,22 @@ impl ProductWorkflow for DefaultProductWorkflow {
                 retryable: false,
                 reason: RedactedString::new(
                     "projection read/subscribe requests must use ProductWorkflow projection doors",
+                ),
+            });
+        }
+
+        // Inline attachment bytes are only landed for user-message payloads (see
+        // `dispatch_payload`). Fail closed if a caller staged bytes on any other
+        // payload kind rather than silently dropping the user's files.
+        if !attachments.is_empty()
+            && !matches!(envelope.payload(), ProductInboundPayload::UserMessage(_))
+        {
+            return Err(ProductAdapterError::WorkflowRejected {
+                kind: ProductWorkflowRejectionKind::InvalidRequest,
+                status_code: 400,
+                retryable: false,
+                reason: RedactedString::new(
+                    "inline attachments are only supported on user-message payloads",
                 ),
             });
         }
@@ -207,6 +280,7 @@ impl ProductWorkflow for DefaultProductWorkflow {
                         auth_interaction_service: &*self.auth_interaction_service,
                         delivered_gate_routes: &*self.delivered_gate_routes,
                     },
+                    attachments,
                 )
                 .await;
 
@@ -260,47 +334,26 @@ impl ProductWorkflow for DefaultProductWorkflow {
             }
         }
     }
+}
 
-    async fn read_projection(
+impl DefaultProductWorkflow {
+    /// Submit an inbound user message together with host-staged inline
+    /// attachment bytes (vision, #4644).
+    ///
+    /// The decoded `attachments` are a direct argument — they carry bytes and
+    /// must never enter the bytes-free product inbound envelope. They are landed
+    /// at message acceptance (through the wired [`InboundAttachmentLander`]) and
+    /// never serialized. Synchronous host surfaces that receive images inline
+    /// (e.g. the OpenAI-compatible API, via a composition-owned adapter) call
+    /// this instead of [`ProductWorkflow::submit_inbound`].
+    ///
+    /// [`InboundAttachmentLander`]: crate::InboundAttachmentLander
+    pub async fn submit_inbound_with_attachments(
         &self,
-        request: ProductProjectionReadInput,
-    ) -> Result<ProjectionReadRequest, ProductAdapterError> {
-        let ProductProjectionReadInput {
-            subject,
-            thread_id_hint,
-            after_cursor,
-            limit,
-        } = request;
-        let (actor, scope) =
-            resolve_projection_subject(&*self.binding_service, &subject, thread_id_hint.as_deref())
-                .await?;
-
-        Ok(ProjectionReadRequest {
-            actor,
-            scope,
-            after_cursor,
-            limit,
-        })
-    }
-
-    async fn subscribe_projection(
-        &self,
-        request: ProductProjectionSubscribeInput,
-    ) -> Result<ProjectionSubscriptionRequest, ProductAdapterError> {
-        let ProductProjectionSubscribeInput {
-            subject,
-            thread_id_hint,
-            after_cursor,
-        } = request;
-        let (actor, scope) =
-            resolve_projection_subject(&*self.binding_service, &subject, thread_id_hint.as_deref())
-                .await?;
-
-        Ok(ProjectionSubscriptionRequest {
-            actor,
-            scope,
-            after_cursor,
-        })
+        envelope: ProductInboundEnvelope,
+        attachments: Vec<InboundAttachment>,
+    ) -> Result<ProductInboundAck, ProductAdapterError> {
+        self.submit_inbound_inner(envelope, attachments).await
     }
 }
 
@@ -952,12 +1005,17 @@ async fn dispatch_payload(
     action_id: crate::ProductActionId,
     action_fingerprint: ActionFingerprintKey,
     ports: DispatchPorts<'_>,
+    attachments: Vec<InboundAttachment>,
 ) -> Result<DispatchedAction, ProductWorkflowError> {
     match envelope.payload() {
         ProductInboundPayload::UserMessage(_) => {
             match ports
                 .inbound_turn_service
-                .accept_user_message_with_before_policy(envelope, ports.before_inbound_policy)
+                .accept_user_message_with_before_policy_and_attachments(
+                    envelope,
+                    ports.before_inbound_policy,
+                    attachments,
+                )
                 .await?
             {
                 InboundUserMessageDispatch::Accepted(outcome) => {
@@ -1601,6 +1659,7 @@ fn terminal_ack_for_error(error: &ProductWorkflowError) -> Option<ProductInbound
         | ProductWorkflowError::BeforeInboundPolicyFailed {
             permanent: false, ..
         }
+        | ProductWorkflowError::OutboundTargetNotDirectMessage
         | ProductWorkflowError::DuplicateAction { .. } => None,
     }
 }
@@ -1827,6 +1886,13 @@ mod tests {
                 },
             })
             .is_none()
+        );
+    }
+
+    #[test]
+    fn terminal_ack_for_error_keeps_outbound_target_not_direct_message_unsettled() {
+        assert!(
+            terminal_ack_for_error(&ProductWorkflowError::OutboundTargetNotDirectMessage).is_none()
         );
     }
 

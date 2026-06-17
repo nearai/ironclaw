@@ -38,6 +38,7 @@ mod subagent_spawn_port;
 mod system_inference;
 mod token_estimator;
 mod turn_event_publisher;
+pub mod user_profile_context;
 
 pub use budget_accountant::GovernorBackedAccountant;
 pub use budget_cost_table::{ModelCost, ModelCostTable, StaticModelCostTable, ZeroCostTable};
@@ -104,6 +105,7 @@ pub use subagent_spawn_port::{
     SubagentThreadKind, SubagentThreadMetadata, build_spawn_subagent_parameters_schema,
 };
 pub use system_inference::{GuardedSystemInferencePort, ModelGatewayBackedSystemInferencePort};
+pub use user_profile_context::{EmptyUserProfileSource, HostUserProfileSource};
 pub const COMPACTION_SYSTEM_PROMPT: &str =
     include_str!("../prompts/compaction_summarizer_fresh.md");
 pub const ACTIVE_TASK_COMPACTION_SYSTEM_PROMPT: &str = concat!(

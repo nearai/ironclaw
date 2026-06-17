@@ -336,6 +336,14 @@ mod tests {
     }
 
     #[test]
+    fn sidebar_new_chat_label_owns_typography() {
+        let sidebar_nav = asset_text("js/components/sidebar-nav.js");
+
+        assert!(sidebar_nav.contains("<span className=\"text-[13px] font-medium\""));
+        assert!(sidebar_nav.contains("t(\"chat.newThread\")"));
+    }
+
+    #[test]
     fn sidebar_trace_credits_card_assets_are_embedded() {
         // The compact card is mounted in the sidebar above the conversation
         // list and reuses the existing trace-credits hook + endpoint.

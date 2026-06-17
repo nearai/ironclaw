@@ -17,6 +17,7 @@ blake3 = "1"
 futures-util = "0.3"
 glob = "0.3"
 ironclaw_auth = { path = "../ironclaw_auth" }
+ironclaw_extractors = { path = "../ironclaw_extractors" }
 ironclaw_filesystem = { path = "../ironclaw_filesystem" }
 ironclaw_host_api = { path = "../ironclaw_host_api" }
 ironclaw_safety = { path = "../ironclaw_safety" }

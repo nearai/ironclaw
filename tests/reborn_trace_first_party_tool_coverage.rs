@@ -10,13 +10,13 @@ use ironclaw_host_runtime::{
     APPLY_PATCH_CAPABILITY_ID, ECHO_CAPABILITY_ID, GLOB_CAPABILITY_ID, GREP_CAPABILITY_ID,
     HTTP_CAPABILITY_ID, HTTP_SAVE_CAPABILITY_ID, JSON_CAPABILITY_ID, LIST_DIR_CAPABILITY_ID,
     MEMORY_READ_CAPABILITY_ID, MEMORY_SEARCH_CAPABILITY_ID, MEMORY_TREE_CAPABILITY_ID,
-    MEMORY_WRITE_CAPABILITY_ID, READ_FILE_CAPABILITY_ID, SHELL_CAPABILITY_ID,
-    SKILL_INSTALL_CAPABILITY_ID, SKILL_LIST_CAPABILITY_ID, SKILL_REMOVE_CAPABILITY_ID,
-    SPAWN_SUBAGENT_CAPABILITY_ID, TIME_CAPABILITY_ID, TRACE_COMMONS_CREDITS_CAPABILITY_ID,
-    TRACE_COMMONS_ONBOARD_CAPABILITY_ID, TRACE_COMMONS_PROFILE_SET_CAPABILITY_ID,
-    TRACE_COMMONS_PROFILE_TOKEN_CAPABILITY_ID, TRACE_COMMONS_STATUS_CAPABILITY_ID,
-    TRIGGER_CREATE_CAPABILITY_ID, TRIGGER_LIST_CAPABILITY_ID, TRIGGER_REMOVE_CAPABILITY_ID,
-    WRITE_FILE_CAPABILITY_ID, builtin_first_party_package,
+    MEMORY_WRITE_CAPABILITY_ID, PROFILE_SET_CAPABILITY_ID, READ_FILE_CAPABILITY_ID,
+    SHELL_CAPABILITY_ID, SKILL_INSTALL_CAPABILITY_ID, SKILL_LIST_CAPABILITY_ID,
+    SKILL_REMOVE_CAPABILITY_ID, SPAWN_SUBAGENT_CAPABILITY_ID, TIME_CAPABILITY_ID,
+    TRACE_COMMONS_CREDITS_CAPABILITY_ID, TRACE_COMMONS_ONBOARD_CAPABILITY_ID,
+    TRACE_COMMONS_PROFILE_SET_CAPABILITY_ID, TRACE_COMMONS_PROFILE_TOKEN_CAPABILITY_ID,
+    TRACE_COMMONS_STATUS_CAPABILITY_ID, TRIGGER_CREATE_CAPABILITY_ID, TRIGGER_LIST_CAPABILITY_ID,
+    TRIGGER_REMOVE_CAPABILITY_ID, WRITE_FILE_CAPABILITY_ID, builtin_first_party_package,
 };
 use ironclaw_loop_support::{HostManagedModelMessageRole, HostManagedModelResponse};
 use ironclaw_turns::{TurnStatus, run_profile::LoopHostMilestoneKind};
@@ -37,6 +37,7 @@ const REBORN_FIRST_PARTY_E2E_COVERED_CAPABILITIES: &[&str] = &[
     MEMORY_WRITE_CAPABILITY_ID,
     MEMORY_READ_CAPABILITY_ID,
     MEMORY_TREE_CAPABILITY_ID,
+    PROFILE_SET_CAPABILITY_ID,
     SHELL_CAPABILITY_ID,
     READ_FILE_CAPABILITY_ID,
     WRITE_FILE_CAPABILITY_ID,
@@ -122,7 +123,7 @@ async fn reborn_trace_process_first_party_tools_parity() {
         .await
         .expect("submit text");
     harness
-        .wait_for_status(submitted.run_id, TurnStatus::Completed)
+        .wait_for_status_with_config(submitted.run_id, TurnStatus::Completed, reborn_e2e_wait())
         .await
         .expect("completed run");
     harness
@@ -198,7 +199,7 @@ async fn reborn_trace_spawn_subagent_is_surface_text_and_structured_tool() {
         .await
         .expect("submit text");
     harness
-        .wait_for_status(submitted.run_id, TurnStatus::Completed)
+        .wait_for_status_with_config(submitted.run_id, TurnStatus::Completed, reborn_e2e_wait())
         .await
         .expect("completed run");
     harness
@@ -347,7 +348,7 @@ async fn reborn_trace_skill_management_first_party_tools_parity() {
         .await
         .expect("submit text");
     harness
-        .wait_for_status(submitted.run_id, TurnStatus::Completed)
+        .wait_for_status_with_config(submitted.run_id, TurnStatus::Completed, reborn_e2e_wait())
         .await
         .expect("completed run");
     harness
@@ -449,7 +450,7 @@ async fn reborn_trace_trigger_management_first_party_tools_parity() {
         .await
         .expect("submit text");
     harness
-        .wait_for_status(submitted.run_id, TurnStatus::Completed)
+        .wait_for_status_with_config(submitted.run_id, TurnStatus::Completed, reborn_e2e_wait())
         .await
         .expect("completed run");
     harness
@@ -798,6 +799,64 @@ async fn reborn_trace_memory_first_party_tools_parity() {
     harness.shutdown().await;
 }
 
+#[tokio::test]
+async fn reborn_trace_profile_set_first_party_tool_parity() {
+    let profile_set = CapabilityId::new(PROFILE_SET_CAPABILITY_ID).expect("valid capability id");
+    let model_gateway = RebornTraceReplayModelGateway::with_scripted_steps([
+        RebornModelReplayStep::ProviderToolCalls {
+            calls: vec![RebornScriptedProviderToolCall::new(
+                profile_set.clone(),
+                "call_profile_set_first_party",
+                serde_json::json!({"timezone": "Asia/Tokyo", "locale": "ja-JP"}),
+            )],
+            expected_tool_results: Vec::new(),
+        },
+        RebornModelReplayStep::Response {
+            response: HostManagedModelResponse::assistant_reply("profile set trace complete"),
+            expected_tool_results: Vec::new(),
+        },
+    ]);
+    let mut harness = RebornBinaryE2EHarness::with_host_runtime_core_builtin_capabilities(
+        "room-trace-profile-set-first-party-tool",
+        model_gateway,
+    )
+    .await
+    .expect("harness");
+    harness.start();
+
+    let submitted = harness
+        .submit_text(
+            "event-trace-profile-set-first-party-tool",
+            "exercise profile set first-party tool",
+        )
+        .await
+        .expect("submit text");
+    harness
+        .wait_for_status_with_config(
+            submitted.run_id,
+            TurnStatus::Completed,
+            host_runtime_tool_wait(),
+        )
+        .await
+        .expect("completed run");
+    harness
+        .assert_final_reply("profile set trace complete")
+        .await
+        .expect("final reply");
+
+    let invocations = harness.capability_invocations();
+    assert_eq!(invocations.len(), 1);
+    assert_eq!(invocations[0].capability_id, profile_set);
+
+    let results = harness.capability_results();
+    assert_eq!(results.len(), 1);
+    assert_eq!(results[0].capability_id, profile_set);
+    assert_eq!(results[0].output["status"], serde_json::json!("ok"));
+    harness.assert_model_exhausted();
+
+    harness.shutdown().await;
+}
+
 fn skill_md(name: &str, description: &str) -> String {
     format!("---\nname: {name}\ndescription: {description}\n---\nSkill body for {name}.\n")
 }
@@ -808,6 +867,13 @@ fn tool_result_count(request: &ironclaw_loop_support::HostManagedModelRequest) -
         .iter()
         .filter(|message| message.role == HostManagedModelMessageRole::ToolResult)
         .count()
+}
+
+fn reborn_e2e_wait() -> HarnessWaitConfig {
+    HarnessWaitConfig {
+        timeout: Duration::from_secs(15),
+        poll_interval: Duration::from_millis(20),
+    }
 }
 
 fn assert_skill_list_contains(output: &serde_json::Value, expected: &str) {
