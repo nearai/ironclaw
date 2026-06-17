@@ -269,11 +269,9 @@ pub fn resolve_effective_scoped_lifecycle_installations(
             continue;
         }
         let key = package_key(&installation.package_ref);
-        match installation.ownership {
-            ScopedLifecycleOwnership::AdminShared { .. } => {
-                effective.entry(key).or_insert(installation);
-            }
-            ScopedLifecycleOwnership::UserPrivate { .. } => {
+        match effective.get(&key) {
+            Some(existing) if !should_replace_effective_installation(existing, &installation) => {}
+            _ => {
                 effective.insert(key, installation);
             }
         }
@@ -282,6 +280,27 @@ pub fn resolve_effective_scoped_lifecycle_installations(
     EffectiveScopedLifecycleInstallations {
         subject,
         installations: effective.into_values().collect(),
+    }
+}
+
+fn should_replace_effective_installation(
+    existing: &ScopedLifecycleInstallation,
+    candidate: &ScopedLifecycleInstallation,
+) -> bool {
+    match (&existing.ownership, &candidate.ownership) {
+        (
+            ScopedLifecycleOwnership::AdminShared { .. },
+            ScopedLifecycleOwnership::UserPrivate { .. },
+        ) => true,
+        (
+            ScopedLifecycleOwnership::UserPrivate { .. },
+            ScopedLifecycleOwnership::AdminShared { .. },
+        ) => false,
+        _ => {
+            candidate.updated_at > existing.updated_at
+                || (candidate.updated_at == existing.updated_at
+                    && candidate.installation_id < existing.installation_id)
+        }
     }
 }
 
@@ -395,6 +414,93 @@ mod tests {
             resolve_effective_scoped_lifecycle_installations(subject, [shared, private.clone()]);
 
         assert_eq!(effective.installations, vec![private]);
+    }
+
+    #[test]
+    fn effective_resolution_uses_deterministic_same_scope_tie_breaker() {
+        let tenant = tenant("tenant-alpha");
+        let admin = ScopedLifecycleActor::admin(tenant.clone(), user("admin-alpha"));
+        let subject = ScopedLifecycleSubject::new(tenant, user("user-alpha"));
+        let package_ref = package("github");
+        let now = Utc::now();
+
+        let older = ScopedLifecycleInstallation::admin_shared(
+            install_id("shared-older"),
+            package_ref.clone(),
+            admin.clone(),
+            now,
+        )
+        .expect("admin shared install");
+        let mut newer = ScopedLifecycleInstallation::admin_shared(
+            install_id("shared-newer"),
+            package_ref.clone(),
+            admin.clone(),
+            now,
+        )
+        .expect("admin shared install");
+        newer.updated_at = now + chrono::Duration::seconds(1);
+
+        let effective = resolve_effective_scoped_lifecycle_installations(
+            subject.clone(),
+            [newer.clone(), older.clone()],
+        );
+        assert_eq!(effective.installations, vec![newer.clone()]);
+
+        let smaller_id = ScopedLifecycleInstallation::admin_shared(
+            install_id("shared-a"),
+            package_ref.clone(),
+            admin.clone(),
+            now,
+        )
+        .expect("admin shared install");
+        let larger_id = ScopedLifecycleInstallation::admin_shared(
+            install_id("shared-b"),
+            package_ref,
+            admin,
+            now,
+        )
+        .expect("admin shared install");
+
+        let effective = resolve_effective_scoped_lifecycle_installations(
+            subject,
+            [larger_id, smaller_id.clone()],
+        );
+        assert_eq!(effective.installations, vec![smaller_id]);
+    }
+
+    #[test]
+    fn admin_shared_rejects_non_admin_actor() {
+        let tenant = tenant("tenant-alpha");
+        let actor = ScopedLifecycleActor::user(tenant, user("user-alpha"));
+
+        assert_eq!(
+            ScopedLifecycleInstallation::admin_shared(
+                install_id("shared-github"),
+                package("github"),
+                actor,
+                Utc::now()
+            ),
+            Err(ProductWorkflowError::BindingAccessDenied)
+        );
+    }
+
+    #[test]
+    fn effective_resolution_excludes_other_tenant_installations() {
+        let tenant_a = tenant("tenant-alpha");
+        let tenant_b = tenant("tenant-beta");
+        let admin = ScopedLifecycleActor::admin(tenant_a, user("admin-alpha"));
+        let subject = ScopedLifecycleSubject::new(tenant_b, user("user-beta"));
+        let shared = ScopedLifecycleInstallation::admin_shared(
+            install_id("shared-github"),
+            package("github"),
+            admin,
+            Utc::now(),
+        )
+        .expect("admin shared install");
+
+        let effective = resolve_effective_scoped_lifecycle_installations(subject, [shared]);
+
+        assert!(effective.installations.is_empty());
     }
 
     #[test]

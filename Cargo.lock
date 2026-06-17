@@ -4847,6 +4847,7 @@ dependencies = [
  "async-trait",
  "chrono",
  "deadpool-postgres",
+ "hex",
  "ironclaw_filesystem",
  "ironclaw_host_api",
  "ironclaw_product_adapters",
