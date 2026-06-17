@@ -26,8 +26,8 @@ use super::{
     },
     state::{SharedCodingEditLocks, read_scope_key},
     text::{
-        count_matches, decode_text, encode_text, previous_char_boundary, reject_binary_probe,
-        replace_content,
+        count_matches, decode_text, decode_text_lossy, encode_text, previous_char_boundary,
+        reject_binary_probe, reject_binary_probe_lenient, replace_content,
     },
     types::{ListEntry, MatchMethod, ResolvedPath},
 };
@@ -89,8 +89,12 @@ pub(super) async fn read_file(
 }
 
 fn decode_read_file_text(bytes: &[u8]) -> Result<String, CodingCapabilityError> {
-    reject_binary_probe(bytes)?;
-    let (content, _encoding, _line_ending) = decode_text(bytes)?;
+    // Read path is tolerant: reject only genuine (NUL-dense) binaries and decode
+    // the rest lossily, so a text log with a stray NUL or non-UTF-8 byte is still
+    // readable instead of hard-failing into a grep-only fallback. The patch path
+    // keeps the strict probe/decode (byte fidelity for write-back).
+    reject_binary_probe_lenient(bytes)?;
+    let (content, _encoding, _line_ending) = decode_text_lossy(bytes);
     Ok(content)
 }
 

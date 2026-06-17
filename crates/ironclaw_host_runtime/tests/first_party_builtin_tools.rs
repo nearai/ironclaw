@@ -5416,6 +5416,58 @@ async fn read_file_clamps_a_single_line_larger_than_the_whole_budget() {
 }
 
 #[tokio::test]
+async fn read_file_tolerates_stray_nul_and_invalid_utf8_in_text_logs() {
+    // A real syslog-shaped file with one stray NUL and one invalid UTF-8 byte.
+    // The strict probe/decode rejected these, forcing the agent into a grep-only
+    // fallback (pinchbench syslog tasks). The read path must now decode it lossily.
+    let temp = tempfile::tempdir().unwrap();
+    let mut bytes = b"Jan  1 00:00:00 host sshd[1]: Failed password for root\n".to_vec();
+    bytes.push(0u8); // stray NUL
+    bytes.extend_from_slice(b"\xffJan  1 00:00:01 host sshd[1]: more log line\n"); // invalid UTF-8
+    std::fs::write(temp.path().join("syslog.log"), &bytes).unwrap();
+
+    let (filesystem, mounts) = mounted_filesystem(temp.path(), MountPermissions::read_only());
+    let runtime = runtime_with_filesystem(filesystem);
+    let context = execution_context_with_mounts(all_builtin_capability_ids(), mounts);
+
+    let read = invoke_with_context(
+        &runtime,
+        READ_FILE_CAPABILITY_ID,
+        json!({"path": "/workspace/syslog.log"}),
+        context.clone(),
+    )
+    .await
+    .expect("text log with stray NUL / invalid UTF-8 must read, not hard-fail");
+    let content = read["content"].as_str().unwrap();
+    assert!(content.contains("Failed password for root"));
+    assert!(content.contains("more log line"));
+}
+
+#[tokio::test]
+async fn read_file_still_rejects_nul_dense_binary() {
+    // Genuine binary (NUL-dense): must still be kept out of context rather than
+    // dumped as U+FFFD soup. 25% NUL bytes clears both the floor and the ratio.
+    let temp = tempfile::tempdir().unwrap();
+    let bytes: Vec<u8> = (0..4096)
+        .map(|i| if i % 4 == 0 { 0u8 } else { b'A' })
+        .collect();
+    std::fs::write(temp.path().join("blob.bin"), &bytes).unwrap();
+
+    let (filesystem, mounts) = mounted_filesystem(temp.path(), MountPermissions::read_only());
+    let runtime = runtime_with_filesystem(filesystem);
+    let context = execution_context_with_mounts(all_builtin_capability_ids(), mounts);
+
+    invoke_with_context(
+        &runtime,
+        READ_FILE_CAPABILITY_ID,
+        json!({"path": "/workspace/blob.bin"}),
+        context.clone(),
+    )
+    .await
+    .expect_err("NUL-dense binary must still be rejected by read_file");
+}
+
+#[tokio::test]
 async fn builtin_coding_paths_are_relative_to_requested_root_and_zero_values_match_v1() {
     let temp = tempfile::tempdir().unwrap();
     std::fs::create_dir_all(temp.path().join("src/nested")).unwrap();
