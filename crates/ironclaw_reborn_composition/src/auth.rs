@@ -2244,4 +2244,124 @@ mod tests {
         // SharedAuthTestDouble's cancel_flow panics with unreachable! — if we reach
         // here without panic, cancel_flow was never called (as required).
     }
+
+    /// `cancel_blocked_auth_flow` must return `Err(AuthProductError::InvalidRequest)`
+    /// when the supplied `gate_ref` string fails `AuthGateRef::new` validation.
+    ///
+    /// `AuthGateRef` delegates to `validate_public_text`, which rejects empty
+    /// strings ("must not be empty"). An empty `gate_ref` is therefore the
+    /// simplest value that always fails at the facade boundary — regardless of
+    /// whether any flow or source is present.
+    #[tokio::test]
+    async fn cancel_blocked_auth_flow_rejects_invalid_gate_ref() {
+        use ironclaw_host_api::UserId;
+        use ironclaw_turns::{TurnRunId, TurnScope};
+
+        let auth_svc = Arc::new(InMemoryAuthProductServices::new());
+        let services = Arc::new(make_auth_services_with_flow_source(Arc::clone(&auth_svc)));
+
+        let turn_scope = TurnScope::new_with_owner(
+            ironclaw_host_api::TenantId::new("test-tenant").expect("tenant"),
+            Some(ironclaw_host_api::AgentId::new("test-agent").expect("agent")),
+            None,
+            ironclaw_host_api::ThreadId::new("test-thread").expect("thread"),
+            Some(UserId::new("creator-user").expect("owner")),
+        );
+        let owner_user_id = UserId::new("creator-user").expect("owner");
+        let run_id = TurnRunId::new();
+
+        // Empty string is rejected by `validate_public_text` ("must not be empty").
+        let result = services
+            .cancel_blocked_auth_flow(&turn_scope, &owner_user_id, run_id, "")
+            .await;
+
+        match result {
+            Err(AuthProductError::InvalidRequest { reason }) => {
+                assert!(
+                    !reason.is_empty(),
+                    "InvalidRequest reason must be non-empty for an invalid gate ref"
+                );
+                assert!(
+                    reason.contains("invalid gate ref for auth-flow cancel"),
+                    "reason must include the caller-supplied context string; got: {reason}"
+                );
+            }
+            other => panic!("expected Err(InvalidRequest) for empty gate_ref, got: {other:?}"),
+        }
+    }
+
+    /// `cancel_blocked_auth_flow` must propagate `Err` returned by the
+    /// `flow_record_source` — a backend lookup failure must not be silently
+    /// swallowed.
+    ///
+    /// Uses a minimal local stub whose `flow_for_turn_gate` always returns
+    /// `Err(AuthProductError::BackendUnavailable)`.  This exercises the `?`
+    /// on the `source.flow_for_turn_gate(…).await?` call site.
+    #[tokio::test]
+    async fn cancel_blocked_auth_flow_propagates_flow_source_error() {
+        use ironclaw_host_api::UserId;
+        use ironclaw_turns::{TurnRunId, TurnScope};
+
+        /// A flow record source that always errors out.
+        struct AlwaysFailingFlowSource;
+
+        #[async_trait::async_trait]
+        impl AuthFlowRecordSource for AlwaysFailingFlowSource {
+            async fn flow_for_turn_gate(
+                &self,
+                _query: ironclaw_auth::TurnGateAuthFlowQuery,
+            ) -> Result<Option<ironclaw_auth::AuthFlowRecord>, AuthProductError> {
+                Err(AuthProductError::BackendUnavailable)
+            }
+
+            async fn flows_for_owner(
+                &self,
+                _owner: ironclaw_auth::AuthFlowOwnerScope,
+            ) -> Result<Vec<ironclaw_auth::AuthFlowRecord>, AuthProductError> {
+                unreachable!("flow-source-error test does not call flows_for_owner")
+            }
+        }
+
+        let double = Arc::new(SharedAuthTestDouble);
+        let services = Arc::new(
+            RebornProductAuthServices::new(
+                double.clone() as Arc<dyn AuthFlowManager>,
+                double.clone() as Arc<dyn AuthInteractionService>,
+                double.clone() as Arc<dyn CredentialSetupService>,
+                double.clone() as Arc<dyn CredentialAccountService>,
+                double.clone() as Arc<dyn AuthProviderClient>,
+                double.clone() as Arc<dyn SecretCleanupService>,
+                Arc::new(NoopAuthContinuationDispatcher),
+            )
+            .with_flow_record_source(
+                Arc::new(AlwaysFailingFlowSource) as Arc<dyn AuthFlowRecordSource>
+            ),
+        );
+
+        let turn_scope = TurnScope::new_with_owner(
+            ironclaw_host_api::TenantId::new("test-tenant").expect("tenant"),
+            Some(ironclaw_host_api::AgentId::new("test-agent").expect("agent")),
+            None,
+            ironclaw_host_api::ThreadId::new("test-thread").expect("thread"),
+            Some(UserId::new("creator-user").expect("owner")),
+        );
+        let owner_user_id = UserId::new("creator-user").expect("owner");
+        let run_id = TurnRunId::new();
+
+        // A valid gate_ref so the validation step is not the rejection point —
+        // the error must come from the source lookup.
+        let result = services
+            .cancel_blocked_auth_flow(
+                &turn_scope,
+                &owner_user_id,
+                run_id,
+                "gate:source-error-test",
+            )
+            .await;
+
+        assert!(
+            matches!(result, Err(AuthProductError::BackendUnavailable)),
+            "BackendUnavailable from flow_record_source must propagate; got: {result:?}"
+        );
+    }
 }

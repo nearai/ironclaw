@@ -127,10 +127,15 @@ pub struct SlackFinalReplyDeliveryServices {
     /// challenges are surfaced in Slack; other challenge kinds are denied (see the
     /// `BlockedAuth` arm of `notification_for_actionable_state`).
     pub auth_challenges: Option<Arc<dyn AuthChallengeProvider>>,
-    /// Cancels the durable `AuthFlow` record when a `BlockedAuth` run is auto-denied
-    /// (non-OAuth challenge). The Slack path cancels the run directly via
-    /// `TurnCoordinator`, which would otherwise leave the flow record non-terminal
-    /// (#4952); this cancels the flow alongside it. `None` (e.g. no `flow_record_source`
+    /// Cancels the durable `AuthFlow` record whenever a `BlockedAuth` run is
+    /// auto-cancelled by the Slack delivery path. Threaded through the shared
+    /// `cancel_auth_blocked_run` helper, so it covers every caller that cancels a
+    /// blocked-auth run: the live observer non-OAuth deny arm, the triggered
+    /// non-OAuth deny arm, and the OAuth send-time DM backstop. The Slack path
+    /// cancels the run directly via `TurnCoordinator` (it does not go through the
+    /// canonical `AuthInteractionService` deny path), which would otherwise leave
+    /// the flow record non-terminal (#4952); this cancels the flow alongside the
+    /// run, after the run cancel succeeds. `None` (e.g. no `flow_record_source`
     /// wired in) skips the flow cancel and still cancels the run — backward-compatible.
     pub auth_flow_canceller: Option<Arc<dyn BlockedAuthFlowCanceller>>,
     /// Store used to resolve an approval gate's request details (tool/action/reason)
@@ -4679,7 +4684,24 @@ mod tests {
     /// A `BlockedAuthFlowCanceller` that always returns `Err(BackendUnavailable)`.
     /// Used to assert that a flow-cancel error is swallowed and does not break
     /// Slack auto-denial delivery.
-    struct FailingBlockedAuthFlowCanceller;
+    ///
+    /// `call_count` is incremented atomically on every `cancel_blocked_auth_flow`
+    /// invocation so tests can assert the canceller was actually wired and called.
+    struct FailingBlockedAuthFlowCanceller {
+        call_count: std::sync::atomic::AtomicUsize,
+    }
+
+    impl FailingBlockedAuthFlowCanceller {
+        fn new() -> Self {
+            Self {
+                call_count: std::sync::atomic::AtomicUsize::new(0),
+            }
+        }
+
+        fn call_count(&self) -> usize {
+            self.call_count.load(std::sync::atomic::Ordering::SeqCst)
+        }
+    }
 
     #[async_trait]
     impl BlockedAuthFlowCanceller for FailingBlockedAuthFlowCanceller {
@@ -4690,6 +4712,8 @@ mod tests {
             _run_id: TurnRunId,
             _gate_ref: &str,
         ) -> Result<(), ironclaw_auth::AuthProductError> {
+            self.call_count
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             Err(ironclaw_auth::AuthProductError::BackendUnavailable)
         }
     }
@@ -4721,12 +4745,14 @@ mod tests {
             Some("gate:auth-cancel-test"),
         )]));
         // Wire in a canceller that always fails — swallow path under test.
+        // Hold a clone of the Arc so we can inspect call_count after the observer runs.
+        let failing_canceller = Arc::new(FailingBlockedAuthFlowCanceller::new());
         let observer = make_observer_with_canceller(
             Arc::clone(&coordinator) as Arc<dyn TurnCoordinator>,
             egress.clone(),
             outbound,
             install,
-            Some(Arc::new(FailingBlockedAuthFlowCanceller) as Arc<dyn BlockedAuthFlowCanceller>),
+            Some(Arc::clone(&failing_canceller) as Arc<dyn BlockedAuthFlowCanceller>),
         );
         let env = envelope(user_message_payload());
         let ack = ProductInboundAck::Accepted {
@@ -4736,6 +4762,13 @@ mod tests {
         };
 
         observer.observe_workflow_ack(env, ack).await;
+
+        // The canceller must have been invoked exactly once — proving it is wired up.
+        assert_eq!(
+            failing_canceller.call_count(),
+            1,
+            "cancel_blocked_auth_flow must be called exactly once on the failing canceller"
+        );
 
         // The run was still cancelled exactly once — flow-cancel failure does not
         // prevent run cancellation or the auto-denial post.
