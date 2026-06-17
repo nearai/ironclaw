@@ -18,6 +18,11 @@ import {
   recordAcceptedMessageRef,
   removePending,
 } from "../lib/pending-messages.js";
+import {
+  createToolActivityState,
+  failGateToolActivity,
+  resetToolActivityState,
+} from "../lib/tool-activity-state.js";
 import { toRenderAttachment, toWireAttachment } from "../lib/attachments.js";
 import { useHistory } from "./useHistory.js";
 import { useSSE } from "./useSSE.js";
@@ -56,6 +61,17 @@ function threadNeedsSidebarRefresh(threadId) {
 
 function submitResponseResumedTurnGate(response) {
   return response?.continuation?.type === "turn_gate_resume";
+}
+
+function resolveGateOutcome(response) {
+  if (response?.outcome) return response.outcome;
+  const status = String(response?.status || "").toLowerCase();
+  if (status === "queued" || status === "running") return "resumed";
+  if (status === "cancelled" || response?.already_terminal === true) {
+    return "cancelled";
+  }
+  if (response?.already_terminal === false) return "resumed";
+  return null;
 }
 
 function isPendingOAuthGate(gate) {
@@ -119,6 +135,15 @@ export function useChat(threadId) {
     activeRunRef.current = value;
     setActiveRunState(value);
   }, []);
+  // Mirror committed activeRun into the ref. The setActiveRun wrapper keeps
+  // the ref current for back-to-back synchronous reads inside event handlers;
+  // this effect additionally covers paths that set the state directly — the
+  // per-thread reset below uses the raw setter so render stays side-effect
+  // free (no ref mutation during render, which a concurrent render could
+  // discard without rolling back).
+  React.useEffect(() => {
+    activeRunRef.current = activeRun;
+  }, [activeRun]);
   const [channelConnectAction, setChannelConnectAction] = React.useState(null);
 
   const getPendingMessages = React.useCallback(
@@ -149,6 +174,8 @@ export function useChat(threadId) {
 
   const [isProcessing, setIsProcessing] = React.useState(false);
   const [pendingGate, setPendingGate] = React.useState(null);
+  const [stateThreadId, setStateThreadId] = React.useState(threadId);
+  const toolActivityStateRef = React.useRef(createToolActivityState());
   const authTokenSubmitRef = React.useRef({
     gateKey: null,
     credentialRef: null,
@@ -162,11 +189,36 @@ export function useChat(threadId) {
   // back to non-default values if that thread actually has an active
   // run / gate. `cooldownUntil` is intentionally not reset — it's a
   // rate-limit timer that applies across threads.
-  React.useEffect(() => {
+  //
+  // This runs DURING render (not in an effect) on purpose. An effect
+  // fires a beat too late: there is one render where the new threadId is
+  // already in scope but pendingGate / isProcessing still hold the prior
+  // thread's values, and any consumer reading them in that render (the
+  // approval card, and the sidebar state mirror in chat.js) briefly
+  // mis-attributes the old thread's gate to the newly opened one — e.g.
+  // a "needs attention" badge bleeding onto a normal thread. React
+  // supports a conditional setState during render for exactly this
+  // "adjust state when a prop changes" case; it re-renders immediately
+  // without committing the stale output. The previous-threadId guard is
+  // itself state (not a ref) so an aborted concurrent render rolls it
+  // back and the reset re-fires on retry instead of being skipped.
+  //
+  // DO NOT move this into a useEffect — that is the regression it fixes.
+  // Two rules keep this pattern correct, and any change here must preserve
+  // both: (1) the guard must be state, not a ref, so it
+  // is rolled back on a discarded render; (2) only plain state setters may
+  // run here (no ref writes / side effects) — that is why this uses the
+  // raw setActiveRunState rather than the activeRunRef-mutating wrapper.
+  if (stateThreadId !== threadId) {
+    setStateThreadId(threadId);
     setIsProcessing(false);
     setPendingGate(null);
-    setActiveRun(null);
+    setActiveRunState(null);
     setChannelConnectAction(null);
+  }
+
+  React.useEffect(() => {
+    resetToolActivityState(toolActivityStateRef);
   }, [threadId]);
 
   const cooldownSeconds = Math.max(0, Math.ceil((cooldownUntil - now) / 1000));
@@ -239,16 +291,21 @@ export function useChat(threadId) {
     setPendingGate,
     setActiveRun,
     activeRunRef,
+    toolActivityStateRef,
     // Reborn's projection bridge does not yet emit `Text` items for
-    // assistant replies, so the SSE stream only delivers `run_status`.
-    // On terminal success, refetch the timeline so the assistant
-    // message that landed in the thread becomes visible in the UI.
-    // Clear pending optimistic messages first so the real user
-    // message from the server doesn't render alongside its
+    // assistant replies, and never emits `capability_display_preview`
+    // items in the projection state — the assistant reply and the rich
+    // tool input/output cards live only in the thread timeline. Refetch
+    // the timeline on EVERY terminal run (success or not) so both become
+    // visible; a failed/cancelled run still recovers the tool previews for
+    // tools that completed before it terminated. `preserveClientOnly`
+    // keeps the client-side `err-*` failure bubble across the reload.
+    // On success, clear pending optimistic messages first so the real
+    // user message from the server doesn't render alongside its
     // pre-submit optimistic twin.
-    onRunCompleted: () => {
-      setPendingMessages([]);
-      loadHistory();
+    onRunSettled: (_runId, { success }) => {
+      if (success) setPendingMessages([]);
+      loadHistory(undefined, { preserveClientOnly: true });
     },
   });
 
@@ -432,7 +489,7 @@ export function useChat(threadId) {
       if (!runId || !gateRef) {
         throw new Error("resolveGate requires a pending gate with run_id and gate_ref");
       }
-      await resolveGateRequest({
+      const response = await resolveGateRequest({
         threadId,
         runId,
         gateRef,
@@ -440,15 +497,24 @@ export function useChat(threadId) {
         always: opts.always,
         credentialRef: opts.credentialRef,
       });
-      const shouldContinueProcessing =
-        resolution === "approved" || resolution === "credential_provided";
-      setPendingGate(null);
-      setIsProcessing(shouldContinueProcessing);
-      if (!shouldContinueProcessing) {
-        setActiveRun(null);
+      const outcome = resolveGateOutcome(response);
+      if (resolution === "denied" && outcome === "resumed") {
+        failGateToolActivity(setMessages, pendingGate, toolActivityStateRef);
       }
+      setPendingGate(null);
+      if (outcome === "resumed") {
+        setIsProcessing(true);
+        setActiveRun({
+          runId: response?.run_id || runId,
+          threadId: response?.thread_id || threadId,
+          status: response?.status || "queued",
+        });
+        return;
+      }
+      setIsProcessing(false);
+      setActiveRun(null);
     },
-    [pendingGate, threadId],
+    [pendingGate, threadId, setMessages, setActiveRun],
   );
 
   const submitAuthToken = React.useCallback(

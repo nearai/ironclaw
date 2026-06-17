@@ -15,6 +15,7 @@ export function gateFromEvent(eventType, prompt) {
       kind: "gate",
       runId: prompt.turn_run_id,
       gateRef: prompt.gate_ref,
+      invocationId: prompt.invocation_id || null,
       headline: prompt.headline,
       body: prompt.body,
       allowAlways: prompt.allow_always === true,
@@ -39,7 +40,14 @@ export function gateFromEvent(eventType, prompt) {
       // Legacy auth_required prompts predate challenge_kind and are manual
       // token prompts. Explicit unknown/other challenge kinds still route to
       // the neutral auth card in chat.js.
-      challengeKind: prompt.challenge_kind || "manual_token",
+      challengeKind:
+        prompt.challenge_kind ||
+        (prompt.provider ||
+        prompt.account_label ||
+        prompt.authorization_url ||
+        prompt.expires_at
+          ? "other"
+          : "manual_token"),
       runId: prompt.turn_run_id,
       // AuthPromptView carries `auth_request_ref`, but v2's resolve
       // path is `/runs/{run_id}/gates/{gate_ref}/resolve` — auth

@@ -8,6 +8,7 @@
 //! - Detecting secret leakage in outputs
 
 mod credential_detect;
+mod display_redaction;
 mod leak_detector;
 mod policy;
 mod prompt_validation;
@@ -20,6 +21,10 @@ mod validator;
 pub use credential_detect::{
     http_parts_contain_manual_credentials, params_contain_manual_credentials,
 };
+pub use display_redaction::{
+    SHELL_COMMAND_DISPLAY_MAX_BYTES, SafeDisplayText, sanitize_display_text,
+    sanitize_url_for_display, shell_command_display_text,
+};
 pub use leak_detector::{
     LeakAction, LeakDetectionError, LeakDetector, LeakMatch, LeakPattern, LeakScanResult,
     LeakSeverity,
@@ -27,10 +32,11 @@ pub use leak_detector::{
 pub use policy::{Policy, PolicyAction, PolicyRule, Severity};
 pub use prompt_validation::{PromptSafetyRejection, validate_trusted_trigger_prompt};
 pub use provider_validation::{
-    PROVIDER_ARGUMENTS_MAX_BYTES, PROVIDER_TOOL_NAME_MAX_BYTES, ProviderValidationError,
-    is_provider_arguments_too_large_summary, provider_arguments_exceed_max_bytes,
-    validate_optional_provider_metadata_text, validate_provider_arguments,
-    validate_provider_identity, validate_provider_token, validate_provider_tool_name,
+    PROVIDER_ARGUMENTS_MAX_BYTES, PROVIDER_METADATA_TEXT_MAX_BYTES, PROVIDER_TOOL_NAME_MAX_BYTES,
+    ProviderValidationError, is_provider_arguments_too_large_summary,
+    provider_arguments_exceed_max_bytes, validate_optional_provider_metadata_text,
+    validate_provider_arguments, validate_provider_identity, validate_provider_token,
+    validate_provider_tool_name,
 };
 pub use redaction::{redact_exact_values, redaction_values_for_secret};
 pub use sanitizer::{InjectionWarning, SanitizedOutput, Sanitizer};

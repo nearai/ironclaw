@@ -103,3 +103,41 @@ test("gateFromEvent maps approval context into readable approval card props", ()
   ]);
   assert.match(gate.parameters, /Estimated network egress: 4096 bytes/);
 });
+
+test("gateFromEvent keeps modern auth prompts without challenge kind off token card", () => {
+  const { gateFromEvent } = loadGates();
+
+  assert.deepEqual(
+    plain(gateFromEvent("auth_required", {
+      turn_run_id: "run-auth",
+      auth_request_ref: "gate:auth",
+      headline: "Authentication required",
+      body: "Google authentication required",
+      provider: "google",
+    })),
+    {
+      kind: "auth_required",
+      challengeKind: "other",
+      runId: "run-auth",
+      gateRef: "gate:auth",
+      provider: "google",
+      accountLabel: "",
+      authorizationUrl: null,
+      expiresAt: null,
+      headline: "Authentication required",
+      body: "Google authentication required",
+    },
+  );
+});
+
+test("gateFromEvent preserves legacy auth prompts as manual token prompts", () => {
+  const { gateFromEvent } = loadGates();
+
+  assert.equal(
+    gateFromEvent("auth_required", {
+      turn_run_id: "run-auth",
+      auth_request_ref: "gate:auth",
+    }).challengeKind,
+    "manual_token",
+  );
+});

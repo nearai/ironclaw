@@ -13,9 +13,9 @@ use serde::{Deserialize, Deserializer, Serialize};
 use thiserror::Error;
 
 use crate::{
-    AcceptedMessageRef, LoopDiagnosticRef, LoopGateRef, LoopMessageRef, LoopResultRef,
-    ProductTurnContext, RedactedCheckpointPayload, RunProfileVersion, TurnActor, TurnCheckpointId,
-    TurnId, TurnRunId, TurnScope,
+    AcceptedMessageRef, CapabilityActivityId, LoopDiagnosticRef, LoopGateRef, LoopMessageRef,
+    LoopResultRef, ProductTurnContext, RedactedCheckpointPayload, RunProfileVersion, TurnActor,
+    TurnCheckpointId, TurnId, TurnRunId, TurnScope,
 };
 
 use super::{
@@ -2048,6 +2048,11 @@ pub enum LoopProgressEvent {
         gated_count: u32,
         failed_count: u32,
     },
+    CapabilityActivityFailed {
+        activity_id: CapabilityActivityId,
+        capability_id: CapabilityId,
+        reason_kind: CapabilityFailureKind,
+    },
     GateBlocked {
         iteration: u32,
         gate_kind: LoopGateKind,
@@ -2106,6 +2111,7 @@ impl LoopProgressEvent {
             Self::PromptBundleBuilt { .. } => "prompt_bundle_built",
             Self::CapabilityBatchStarted { .. } => "capability_batch_started",
             Self::CapabilityBatchCompleted { .. } => "capability_batch_completed",
+            Self::CapabilityActivityFailed { .. } => "capability_activity_failed",
             Self::GateBlocked { .. } => "gate_blocked",
             Self::CheckpointWritten { .. } => "checkpoint_written",
             Self::CompactionStarted { .. } => "compaction_started",

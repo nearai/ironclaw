@@ -81,19 +81,24 @@ async def _stop_process(proc, *, sig=signal.SIGINT, timeout: float = 10) -> None
         await asyncio.wait_for(proc.wait(), timeout=5)
 
 
-def _write_config_toml(path: Path, mock_llm_server: str) -> None:
+def _write_config_toml(
+    path: Path, mock_llm_server: str, profile: str = "local-dev"
+) -> None:
     """Seed a sparse Reborn config that selects the mock LLM via the `openai` provider.
 
     The built-in `openai` provider speaks the OpenAI Chat Completions wire shape
     (`/v1/chat/completions`) that `mock_llm.py` serves. The `base_url` override
     points it at the mock; `api_key_env` names an env var the server fixture sets.
     Secrets stay out of the file — only the env-var NAME is referenced.
+
+    `profile` selects the composition profile (`local-dev` by default;
+    `local-dev-yolo` gives minimal approvals so workspace writes auto-proceed).
     """
     path.write_text(
         f"""api_version = "ironclaw.runtime/v1"
 
 [boot]
-profile = "local-dev"
+profile = "{profile}"
 
 [identity]
 default_owner = "{USER_ID}"
@@ -348,21 +353,20 @@ async def test_reborn_v2_ui_send_renders_reply(reborn_v2_page, reborn_v2_server)
     )
 
 
-async def test_reborn_v2_messages_show_identity_labels(reborn_v2_page):
-    """User and assistant messages render a persistent identity label."""
+async def test_reborn_v2_messages_omit_identity_labels(reborn_v2_page):
+    """User and assistant messages render content without persistent identity labels."""
     composer = reborn_v2_page.locator(SEL_V2["chat_composer"])
     await composer.fill("hello there")
     await composer.press("Enter")
 
-    # The user bubble carries the "You" identity alongside its content.
+    # Message bubbles retain content while omitting redundant identity labels.
     user_bubble = reborn_v2_page.locator(SEL_V2["msg_user"]).first
     await expect(user_bubble).to_contain_text("hello there", timeout=15000)
-    await expect(user_bubble).to_contain_text("You")
+    await expect(user_bubble).not_to_contain_text("You")
 
-    # The assistant bubble carries the "IronClaw" identity (the canned reply
-    # text itself never contains that string).
     assistant_bubble = reborn_v2_page.locator(SEL_V2["msg_assistant"]).first
-    await expect(assistant_bubble).to_contain_text("IronClaw", timeout=30000)
+    await expect(assistant_bubble).to_contain_text("Hello", timeout=30000)
+    await expect(assistant_bubble).not_to_contain_text("IronClaw")
 
 
 async def test_reborn_v2_response_links_open_in_new_tab(reborn_v2_page):

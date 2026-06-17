@@ -8,6 +8,11 @@ import {
   toolCardFromActivity,
   toolCardFromPreview,
 } from "./history-messages.js";
+import {
+  createToolActivityState,
+  ensureGateToolActivity,
+  upsertToolActivityMessage,
+} from "./tool-activity-state.js";
 
 function useChatEventsSourceForTest() {
   const source = readFileSync(
@@ -35,25 +40,31 @@ function useChatEventsSourceForTest() {
 function createUseChatEventsHarness({
   gateFromEvent = () => null,
   failureMessageForRunStatus = () => "run failed",
+  locallyResolvedGatesRef = { current: new Map() },
 } = {}) {
   let messages = [];
   let pendingGate = null;
   let isProcessing = false;
   let activeRun = null;
   const activeRunRef = { current: null };
-  const completedRuns = [];
+  const toolActivityStateRef = { current: createToolActivityState() };
+  // [{ runId, success }] in fire order; one entry per settled run.
+  const settledRuns = [];
   const context = {
     Date,
     React: {
       useCallback: (fn) => fn,
+      useEffect: (fn) => fn(),
       useRef: (value) => ({ current: value }),
     },
     failureMessageForRunStatus,
     gateFromEvent,
     globalThis: {},
+    ensureGateToolActivity,
     isTerminalToolStatus,
     toolCardFromActivity,
     toolCardFromPreview,
+    upsertToolActivityMessage,
   };
 
   vm.runInNewContext(useChatEventsSourceForTest(), context);
@@ -76,7 +87,9 @@ function createUseChatEventsHarness({
       activeRunRef.current = activeRun;
     },
     activeRunRef,
-    onRunCompleted: (runId) => completedRuns.push(runId),
+    locallyResolvedGatesRef,
+    toolActivityStateRef,
+    onRunSettled: (runId, { success }) => settledRuns.push({ runId, success }),
   });
 
   return {
@@ -97,9 +110,13 @@ function createUseChatEventsHarness({
       activeRun = run;
       activeRunRef.current = run;
     },
-    get completedRuns() {
-      return completedRuns;
+    replaceMessages(next) {
+      messages = next;
     },
+    get settledRuns() {
+      return settledRuns;
+    },
+    toolActivityStateRef,
   };
 }
 
@@ -146,7 +163,7 @@ test("useChatEvents: projection activity preserves reasoning/tool chronology", (
     Array.from(harness.messages, (message) => message.role),
     ["thinking", "tool_activity", "thinking"],
   );
-  assert.equal(harness.messages[1].toolName, "builtin.http");
+  assert.equal(harness.messages[1].toolName, "http");
   assert.equal(harness.messages[1].toolStatus, "running");
   assert.deepEqual(
     Array.from(harness.messages, (message) => message.turnRunId),
@@ -221,6 +238,98 @@ test("useChatEvents: progress clears non-auth gates for the resumed run", () => 
   });
 
   assert.equal(harness.pendingGate, null);
+});
+
+test("useChatEvents: approval gate annotates an existing tool activity", () => {
+  const runId = "run-gated-existing";
+  const gateRef = "gate:web-access";
+  const gate = {
+    kind: "gate",
+    runId,
+    gateRef,
+    toolName: "web-access.search",
+  };
+  const harness = createUseChatEventsHarness({
+    gateFromEvent: () => gate,
+  });
+
+  harness.handleEvent({
+    type: "capability_activity",
+    frame: {
+      activity: {
+        invocation_id: "invocation-web-access",
+        turn_run_id: runId,
+        capability_id: "web-access.search",
+        status: "started",
+      },
+    },
+  });
+  harness.handleEvent({
+    type: "gate",
+    frame: {
+      prompt: {
+        turn_run_id: runId,
+        gate_ref: gateRef,
+      },
+    },
+  });
+
+  assert.equal(harness.messages.length, 1);
+  assert.equal(harness.messages[0].id, "tool-invocation-web-access");
+  assert.equal(harness.messages[0].toolName, "search");
+  assert.equal(harness.messages[0].toolStatus, "running");
+  assert.equal(harness.messages[0].gateRef, gateRef);
+  assert.deepEqual(harness.pendingGate, gate);
+});
+
+test("useChatEvents: approval gate creates activity before invocation metadata arrives", () => {
+  const runId = "run-gated-synthetic";
+  const gateRef = "gate:nearai";
+  const gate = {
+    kind: "gate",
+    runId,
+    gateRef,
+    toolName: "nearai.web_search",
+  };
+  const harness = createUseChatEventsHarness({
+    gateFromEvent: () => gate,
+  });
+
+  harness.handleEvent({
+    type: "gate",
+    frame: {
+      prompt: {
+        turn_run_id: runId,
+        gate_ref: gateRef,
+      },
+    },
+  });
+
+  assert.equal(harness.messages.length, 1);
+  assert.equal(harness.messages[0].id, `tool-gate:${runId}:${gateRef}`);
+  assert.equal(harness.messages[0].toolName, "web_search");
+  assert.equal(harness.messages[0].toolStatus, "running");
+  assert.equal(harness.messages[0].gateRef, gateRef);
+
+  harness.handleEvent({
+    type: "capability_activity",
+    frame: {
+      activity: {
+        invocation_id: "invocation-nearai",
+        turn_run_id: runId,
+        capability_id: "nearai.web_search",
+        status: "started",
+      },
+    },
+  });
+
+  assert.equal(harness.messages.length, 1);
+  assert.equal(harness.messages[0].id, "tool-invocation-nearai");
+  assert.equal(harness.messages[0].invocationId, "invocation-nearai");
+  assert.equal(harness.messages[0].toolName, "web_search");
+  assert.equal(harness.messages[0].toolStatus, "running");
+  assert.equal(harness.messages[0].gateRef, gateRef);
+  assert.equal(harness.messages[0].gateActivity, false);
 });
 
 test("useChatEvents: cleared non-auth gates are not restored by later projections", () => {
@@ -404,6 +513,503 @@ test("useChatEvents: typed failed event appends visible error", () => {
   ]);
 });
 
+test("useChatEvents: locally resolved approval gate is not restored by stale projection", () => {
+  const runId = "run-denied";
+  const gateRef = "gate:approval-denied";
+  const harness = createUseChatEventsHarness({
+    locallyResolvedGatesRef: {
+      current: new Map([[`${runId}\n${gateRef}`, "denied"]]),
+    },
+  });
+  harness.setCurrentActiveRun({
+    runId,
+    threadId: "thread-1",
+    status: "awaiting_gate",
+  });
+
+  harness.handleEvent({
+    type: "projection_update",
+    frame: {
+      state: {
+        items: [
+          { run_status: { run_id: runId, status: "blocked_approval" } },
+          {
+            gate: {
+              gate_ref: gateRef,
+              headline: "Approval required",
+              allow_always: true,
+            },
+          },
+          {
+            capability_activity: {
+              invocation_id: "invocation-denied",
+              turn_run_id: runId,
+              capability_id: "builtin.shell",
+              status: "running",
+            },
+          },
+        ],
+      },
+    },
+  });
+
+  assert.equal(harness.pendingGate, null);
+  assert.equal(harness.isProcessing, false);
+  assert.equal(harness.activeRun, null);
+  assert.equal(harness.messages.length, 1);
+  assert.equal(harness.messages[0].role, "tool_activity");
+  assert.equal(harness.messages[0].toolName, "shell");
+  assert.equal(harness.messages[0].toolStatus, "running");
+});
+
+test("useChatEvents: locally resumed deny allows follow-up activity without restoring gate", () => {
+  const runId = "run-denied-resumed";
+  const gateRef = "gate:approval-denied";
+  const harness = createUseChatEventsHarness({
+    locallyResolvedGatesRef: {
+      current: new Map([
+        [`${runId}\n${gateRef}`, { resolution: "denied", outcome: "resumed" }],
+      ]),
+    },
+  });
+  harness.setCurrentActiveRun({
+    runId,
+    threadId: "thread-1",
+    status: "awaiting_gate",
+  });
+
+  harness.handleEvent({
+    type: "projection_update",
+    frame: {
+      state: {
+        items: [
+          { run_status: { run_id: runId, status: "blocked_approval" } },
+          {
+            gate: {
+              gate_ref: gateRef,
+              headline: "Approval required",
+              allow_always: true,
+            },
+          },
+          {
+            capability_activity: {
+              invocation_id: "invocation-follow-up",
+              turn_run_id: runId,
+              capability_id: "nearai.web_search",
+              status: "running",
+            },
+          },
+        ],
+      },
+    },
+  });
+
+  assert.equal(harness.pendingGate, null);
+  assert.equal(harness.isProcessing, true);
+  assert.deepEqual(plain(harness.activeRun), {
+    runId,
+    threadId: "thread-1",
+    status: "queued",
+  });
+  assert.equal(harness.messages.length, 1);
+  assert.equal(harness.messages[0].id, "tool-invocation-follow-up");
+  assert.equal(harness.messages[0].role, "tool_activity");
+  assert.equal(harness.messages[0].toolName, "web_search");
+  assert.equal(harness.messages[0].toolStatus, "running");
+  assert.equal(harness.messages[0].turnRunId, runId);
+});
+
+test("useChatEvents: parent completion after resumed auth cancel clears typing and refetches", () => {
+  const parentRunId = "turn-run-after-auth-cancel";
+  const authRunId = "auth-run-cancelled";
+  const gateRef = "gate:auth-token";
+  const harness = createUseChatEventsHarness({
+    locallyResolvedGatesRef: {
+      current: new Map([
+        [
+          `${authRunId}\n${gateRef}`,
+          { resolution: "cancelled", outcome: "resumed" },
+        ],
+      ]),
+    },
+  });
+  harness.setCurrentActiveRun({
+    runId: authRunId,
+    threadId: "thread-1",
+    status: "awaiting_gate",
+  });
+
+  harness.handleEvent({
+    type: "projection_update",
+    frame: {
+      state: {
+        items: [
+          { run_status: { run_id: authRunId, status: "blocked_auth" } },
+        ],
+      },
+    },
+  });
+  assert.equal(harness.isProcessing, true);
+  assert.deepEqual(plain(harness.activeRun), {
+    runId: authRunId,
+    threadId: "thread-1",
+    status: "queued",
+  });
+
+  harness.handleEvent({
+    type: "projection_update",
+    frame: {
+      state: {
+        items: [
+          { run_status: { run_id: parentRunId, status: "completed" } },
+        ],
+      },
+    },
+  });
+
+  assert.equal(harness.isProcessing, false);
+  assert.equal(harness.pendingGate, null);
+  assert.equal(harness.activeRun, null);
+  assert.deepEqual(harness.settledRuns, [
+    { runId: parentRunId, success: true },
+  ]);
+});
+
+test("useChatEvents: failed parent terminal after resumed auth cancel clears typing and shows error", () => {
+  const parentRunId = "turn-run-after-auth-cancel-failed";
+  const authRunId = "auth-run-cancelled-before-failure";
+  const gateRef = "gate:auth-token";
+  const harness = createUseChatEventsHarness({
+    locallyResolvedGatesRef: {
+      current: new Map([
+        [
+          `${authRunId}\n${gateRef}`,
+          { resolution: "cancelled", outcome: "resumed" },
+        ],
+      ]),
+    },
+    failureMessageForRunStatus: ({ failureSummary }) =>
+      failureSummary || "run failed after auth cancel",
+  });
+  harness.setCurrentActiveRun({
+    runId: authRunId,
+    threadId: "thread-1",
+    status: "awaiting_gate",
+  });
+
+  harness.handleEvent({
+    type: "projection_update",
+    frame: {
+      state: {
+        items: [
+          { run_status: { run_id: authRunId, status: "blocked_auth" } },
+        ],
+      },
+    },
+  });
+  assert.equal(harness.isProcessing, true);
+
+  harness.handleEvent({
+    type: "projection_update",
+    frame: {
+      state: {
+        items: [
+          {
+            run_status: {
+              run_id: parentRunId,
+              status: "failed",
+              failure_summary:
+                "The run failed after the resolved auth prompt resumed.",
+            },
+          },
+        ],
+      },
+    },
+  });
+
+  assert.equal(harness.isProcessing, false);
+  assert.equal(harness.pendingGate, null);
+  assert.equal(harness.activeRun, null);
+  assert.deepEqual(harness.settledRuns, [
+    { runId: parentRunId, success: false },
+  ]);
+  assert.equal(harness.messages.length, 1);
+  assert.equal(harness.messages[0].id, `err-${parentRunId}`);
+  assert.equal(
+    harness.messages[0].content,
+    "The run failed after the resolved auth prompt resumed.",
+  );
+});
+
+test("useChatEvents: late started activity cannot downgrade remembered failed tool", () => {
+  const runId = "run-terminal-tool";
+  const invocationId = "invocation-terminal-tool";
+  const harness = createUseChatEventsHarness();
+
+  harness.handleEvent({
+    type: "capability_activity",
+    frame: {
+      activity: {
+        invocation_id: invocationId,
+        turn_run_id: runId,
+        capability_id: "nearai.web_search",
+        status: "failed",
+        error_kind: "authorization",
+      },
+    },
+  });
+  assert.equal(harness.messages[0].toolStatus, "error");
+
+  // A full history refresh can temporarily rebuild messages from the
+  // transcript, which does not include capability_display_preview records for
+  // denied gates. The event handler still must remember terminal activity so a
+  // later stale projection replay cannot recreate the same invocation as RUN.
+  harness.replaceMessages([]);
+  harness.handleEvent({
+    type: "projection_update",
+    frame: {
+      state: {
+        items: [
+          {
+            capability_activity: {
+              invocation_id: invocationId,
+              turn_run_id: runId,
+              capability_id: "nearai.web_search",
+              status: "started",
+            },
+          },
+        ],
+      },
+    },
+  });
+
+  assert.equal(harness.messages.length, 1);
+  assert.equal(harness.messages[0].id, `tool-${invocationId}`);
+  assert.equal(harness.messages[0].toolName, "web_search");
+  assert.equal(harness.messages[0].toolStatus, "error");
+  assert.equal(harness.messages[0].toolError, "authorization");
+});
+
+test("useChatEvents: projection order annotates replayed terminal activity", () => {
+  const runId = "run-replayed-order";
+  const harness = createUseChatEventsHarness();
+
+  harness.handleEvent({
+    type: "capability_activity",
+    frame: {
+      activity: {
+        invocation_id: "invocation-nearai",
+        turn_run_id: runId,
+        capability_id: "nearai.web_search",
+        status: "failed",
+        error_kind: "authorization",
+      },
+    },
+  });
+
+  harness.handleEvent({
+    type: "projection_update",
+    frame: {
+      state: {
+        items: [
+          {
+            capability_activity: {
+              invocation_id: "invocation-web",
+              turn_run_id: runId,
+              capability_id: "web-access.search",
+              status: "started",
+              activity_order: 1,
+            },
+          },
+          {
+            capability_activity: {
+              invocation_id: "invocation-install",
+              turn_run_id: runId,
+              capability_id: "builtin.extension_install",
+              status: "started",
+              activity_order: 2,
+            },
+          },
+          {
+            capability_activity: {
+              invocation_id: "invocation-nearai",
+              turn_run_id: runId,
+              capability_id: "nearai.web_search",
+              status: "started",
+              activity_order: 3,
+            },
+          },
+        ],
+      },
+    },
+  });
+
+  const orderById = new Map(
+    harness.messages.map((message) => [message.id, message.activityOrder]),
+  );
+  assert.equal(orderById.get("tool-invocation-web"), 1);
+  assert.equal(orderById.get("tool-invocation-install"), 2);
+  assert.equal(orderById.get("tool-invocation-nearai"), 3);
+  assert.equal(
+    harness.messages.find((message) => message.id === "tool-invocation-nearai")
+      .toolStatus,
+    "error",
+  );
+});
+
+test("useChatEvents: durable activity order updates live activity", () => {
+  const runId = "run-live-then-durable-order";
+  const harness = createUseChatEventsHarness();
+
+  harness.handleEvent({
+    type: "projection_update",
+    frame: {
+      state: {
+        items: [
+          {
+            capability_activity: {
+              invocation_id: "invocation-web",
+              turn_run_id: runId,
+              capability_id: "web-access.search",
+              status: "started",
+            },
+          },
+        ],
+      },
+    },
+  });
+
+  assert.deepEqual(
+    harness.messages.map((message) => [message.id, message.activityOrder]),
+    [["tool-invocation-web", null]],
+  );
+
+  for (const [invocationId, capabilityId, activityOrder] of [
+    ["invocation-extension-a", "builtin.extension_search", 2],
+    ["invocation-extension-b", "builtin.extension_search", 3],
+    ["invocation-web", "web-access.search", 4],
+  ]) {
+    harness.handleEvent({
+      type: "capability_activity",
+      frame: {
+        activity: {
+          invocation_id: invocationId,
+          turn_run_id: runId,
+          capability_id: capabilityId,
+          status: invocationId === "invocation-web" ? "started" : "completed",
+          activity_order: activityOrder,
+        },
+      },
+    });
+  }
+
+  assert.deepEqual(
+    harness.messages.map((message) => [
+      message.id,
+      message.toolName,
+      message.activityOrder,
+    ]),
+    [
+      ["tool-invocation-web", "search", 4],
+      ["tool-invocation-extension-a", "extension_search", 2],
+      ["tool-invocation-extension-b", "extension_search", 3],
+    ],
+  );
+});
+
+test("useChatEvents: durable activity order updates gate activity", () => {
+  const runId = "run-gate-then-snapshot-order";
+  const gateRef = "gate:web-search";
+  const harness = createUseChatEventsHarness({
+    gateFromEvent: () => ({
+      kind: "gate",
+      runId,
+      gateRef,
+      toolName: "web-access.search",
+    }),
+  });
+
+  harness.handleEvent({
+    type: "gate",
+    frame: {
+      prompt: {
+        turn_run_id: runId,
+        approval_request_ref: gateRef,
+      },
+    },
+  });
+  assert.deepEqual(
+    harness.messages.map((message) => [
+      message.id,
+      message.toolName,
+      message.activityOrder,
+      message.activityOrderSource,
+    ]),
+    [[`tool-gate:${runId}:${gateRef}`, "search", undefined, undefined]],
+  );
+
+  harness.handleEvent({
+    type: "projection_update",
+    frame: {
+      state: {
+        items: [
+          {
+            capability_activity: {
+              invocation_id: "invocation-extension-a",
+              turn_run_id: runId,
+              capability_id: "builtin.extension_search",
+              status: "completed",
+              activity_order: 1,
+            },
+          },
+          {
+            capability_activity: {
+              invocation_id: "invocation-extension-b",
+              turn_run_id: runId,
+              capability_id: "builtin.extension_search",
+              status: "completed",
+              activity_order: 2,
+            },
+          },
+          {
+            capability_activity: {
+              invocation_id: `gate:${runId}:${gateRef}`,
+              turn_run_id: runId,
+              capability_id: "web-access.search",
+              status: "started",
+              activity_order: 3,
+            },
+          },
+        ],
+      },
+    },
+  });
+
+  assert.deepEqual(
+    harness.messages.map((message) => [
+      message.id,
+      message.toolName,
+      message.activityOrder,
+      message.activityOrderSource,
+    ]),
+    [
+      [`tool-gate:${runId}:${gateRef}`, "search", 3, "projection"],
+      [
+        "tool-invocation-extension-a",
+        "extension_search",
+        1,
+        "projection",
+      ],
+      [
+        "tool-invocation-extension-b",
+        "extension_search",
+        2,
+        "projection",
+      ],
+    ],
+  );
+});
+
 test("useChatEvents: stale terminal run status does not clear newer run", () => {
   const harness = createUseChatEventsHarness();
 
@@ -551,11 +1157,110 @@ test("useChatEvents: stale completed run status does not refetch timeline", () =
     },
   });
 
-  assert.deepEqual(harness.completedRuns, []);
+  assert.deepEqual(harness.settledRuns, []);
   assert.equal(harness.isProcessing, true);
   assert.deepEqual(plain(harness.activeRun), {
     runId: "run-2",
     threadId: "thread-1",
     status: "running",
   });
+});
+
+test("useChatEvents: terminal success settles the run once", () => {
+  const harness = createUseChatEventsHarness();
+
+  harness.handleEvent({
+    type: "projection_update",
+    frame: {
+      state: {
+        items: [{ run_status: { run_id: "run-1", status: "running" } }],
+      },
+    },
+  });
+  harness.handleEvent({
+    type: "projection_update",
+    frame: {
+      state: {
+        items: [{ run_status: { run_id: "run-1", status: "completed" } }],
+      },
+    },
+  });
+  // Replay of the same terminal projection must not settle twice.
+  harness.handleEvent({
+    type: "projection_update",
+    frame: {
+      state: {
+        items: [{ run_status: { run_id: "run-1", status: "completed" } }],
+      },
+    },
+  });
+
+  assert.deepEqual(harness.settledRuns, [{ runId: "run-1", success: true }]);
+});
+
+test("useChatEvents: terminal failure settles the run as not successful", () => {
+  const harness = createUseChatEventsHarness();
+
+  harness.handleEvent({
+    type: "projection_update",
+    frame: {
+      state: {
+        items: [{ run_status: { run_id: "run-1", status: "running" } }],
+      },
+    },
+  });
+  harness.handleEvent({
+    type: "projection_update",
+    frame: {
+      state: {
+        items: [{ run_status: { run_id: "run-1", status: "failed" } }],
+      },
+    },
+  });
+
+  // A failed run still settles so the timeline reload recovers tool
+  // input/output previews for tools that ran before it terminated.
+  assert.deepEqual(harness.settledRuns, [{ runId: "run-1", success: false }]);
+});
+
+test("useChatEvents: terminal cancellation settles the run as not successful", () => {
+  const harness = createUseChatEventsHarness();
+
+  harness.handleEvent({
+    type: "projection_update",
+    frame: {
+      state: {
+        items: [{ run_status: { run_id: "run-1", status: "running" } }],
+      },
+    },
+  });
+  harness.handleEvent({
+    type: "projection_update",
+    frame: {
+      state: {
+        items: [{ run_status: { run_id: "run-1", status: "cancelled" } }],
+      },
+    },
+  });
+
+  assert.deepEqual(harness.settledRuns, [{ runId: "run-1", success: false }]);
+});
+
+test("useChatEvents: typed failed event settles the run as not successful", () => {
+  const harness = createUseChatEventsHarness();
+
+  harness.handleEvent({
+    type: "failed",
+    frame: {
+      run_state: {
+        run_id: "run-typed-failed-1",
+        status: "Failed",
+        failure: { category: "model_unavailable" },
+      },
+    },
+  });
+
+  assert.deepEqual(harness.settledRuns, [
+    { runId: "run-typed-failed-1", success: false },
+  ]);
 });

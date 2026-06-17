@@ -45,6 +45,7 @@ pub use chat_workflow::{
     OPENAI_COMPAT_CONVERSATION_PREFIX, OpenAiChatCompletionProjection,
     OpenAiChatCompletionProjectionReader, OpenAiChatCompletionProjectionRequest,
     OpenAiChatCompletionsWorkflow, OpenAiChatModelOnlyTools, OpenAiCompatAuthenticatedCaller,
+    OpenAiCompatInboundAttachmentSubmit,
 };
 pub use descriptors::{
     OPENAI_COMPAT_PATTERN_CHAT_COMPLETIONS, OPENAI_COMPAT_PATTERN_RESPONSES_API_CREATE,

@@ -8,7 +8,7 @@
       "type": "string",
       "minLength": 1,
       "maxLength": 100,
-      "description": "GitHub username."
+      "description": "Optional GitHub username. Omit this field, or pass \"me\" / \"@me\", to list repositories visible to the authenticated GitHub account. Passing any other username lists that user's public repositories."
     },
     "page": {
       "type": "integer",
@@ -23,7 +23,5 @@
       "default": 30
     }
   },
-  "required": [
-    "username"
-  ]
+  "required": []
 }

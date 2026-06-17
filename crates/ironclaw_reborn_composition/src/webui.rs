@@ -98,6 +98,13 @@ pub(crate) fn build_webui_services_with_connectable_channels(
                     &workspace_filesystem,
                 )),
             ))
+            // Read-only project filesystem backing directory listing and file
+            // download chips, over the same workspace mount.
+            .with_project_filesystem_reader(Arc::new(
+                crate::project_filesystem_reader::ProjectScopedFilesystemReader::new(Arc::clone(
+                    &workspace_filesystem,
+                )),
+            ))
             // Read counterpart: serves landed attachment bytes back to the
             // browser (image thumbnails) through the same workspace mount.
             .with_inbound_attachment_reader(Arc::new(

@@ -5,7 +5,8 @@ use std::{future::Future, thread};
 
 use anyhow::Context;
 #[cfg(feature = "webui-v2-beta")]
-use ironclaw_reborn_composition::host_api::{AgentId, TenantId, UserId};
+use ironclaw_reborn_composition::host_api::UserId;
+use ironclaw_reborn_composition::host_api::{AgentId, TenantId};
 #[cfg(feature = "webui-v2-beta")]
 use ironclaw_reborn_composition::{
     LocalTriggerAccessReconciliation, LocalTriggerAccessRole, LocalTriggerAccessSource,
@@ -473,6 +474,10 @@ pub(crate) fn build_services_input_with_options(
     {
         services_input = services_input.with_google_oauth_backend(client);
     }
+    let identity = runtime_identity(config_file.as_ref());
+    let tenant_id = TenantId::new(identity.tenant_id).context("invalid runtime tenant identity")?;
+    let agent_id = AgentId::new(identity.agent_id).context("invalid runtime agent identity")?;
+    services_input = services_input.with_local_runtime_identity(tenant_id, agent_id);
 
     Ok(RuntimeServicesInput {
         services_input,

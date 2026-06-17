@@ -58,6 +58,11 @@ use ironclaw_host_runtime::{
     builtin_first_party_handlers_with_trigger_create_hook, builtin_first_party_package,
 };
 #[cfg(any(feature = "libsql", feature = "postgres"))]
+use ironclaw_host_runtime::{
+    builtin_first_party_handlers_with_trigger_create_hook_for_process_backend,
+    builtin_first_party_package_for_process_backend,
+};
+#[cfg(any(feature = "libsql", feature = "postgres"))]
 use ironclaw_loop_support::FilesystemCheckpointStateStore;
 use ironclaw_outbound::CommunicationPreferenceRepository;
 #[cfg(any(feature = "libsql", feature = "postgres"))]
@@ -72,7 +77,9 @@ use ironclaw_outbound::{DeliveredGateRouteStore, OutboundStateStore, TriggeredRu
 ))]
 use ironclaw_outbound::{InMemoryDeliveredGateRouteStore, InMemoryTriggeredRunDeliveryStore};
 use ironclaw_processes::ProcessServices;
-use ironclaw_product_workflow::ProductAuthTurnGateResumeDispatcher;
+use ironclaw_product_workflow::{
+    LifecycleProductSurfaceContext, ProductAuthTurnGateResumeDispatcher,
+};
 use ironclaw_resources::InMemoryResourceGovernor;
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 use ironclaw_resources::{
@@ -112,7 +119,7 @@ use crate::RebornProductAuthServicePorts;
 #[cfg(feature = "slack-v2-host-beta")]
 use crate::available_extensions::slack_manifest_digest;
 use crate::default_system_prompt::seed_default_system_prompt;
-use crate::input::{RebornRuntimeProcessBinding, RebornStorageInput};
+use crate::input::{RebornLocalRuntimeIdentity, RebornRuntimeProcessBinding, RebornStorageInput};
 use crate::lifecycle::{RebornLocalSkillManagementPort, build_local_skill_management_port};
 use crate::local_dev_authorization::local_dev_authorizer;
 use crate::local_dev_capability_policy::{LocalDevCapabilityPolicy, local_dev_capability_policy};
@@ -123,6 +130,7 @@ use crate::local_dev_mounts::{
 use crate::mcp::hosted_http_mcp_runtime;
 use crate::product_auth_providers::{OAuthProviderComposition, compose_provider_client};
 use crate::product_auth_runtime_credentials::ProductAuthRuntimeCredentialResolver;
+use crate::runtime_input::RebornRuntimeIdentity;
 use crate::{
     RebornAuthContinuationDispatcher, RebornBuildError, RebornBuildInput, RebornCompositionProfile,
     RebornFacadeReadiness, RebornProductAuthServices, RebornReadiness, RebornReadinessDiagnostic,
@@ -394,6 +402,7 @@ pub struct RebornLocalDevApprovalTestParts {
 }
 
 pub(crate) struct RebornLocalRuntimeServices {
+    pub(crate) extension_lifecycle_surface_context: LifecycleProductSurfaceContext,
     pub(crate) approval_requests: Arc<LocalDevApprovalRequestStore>,
     pub(crate) capability_leases: Arc<LocalDevCapabilityLeaseStore>,
     pub(crate) runtime_policy: Option<EffectiveRuntimePolicy>,
@@ -570,6 +579,7 @@ struct RebornLocalDevStoreGraph {
 struct RebornLocalDevStoreGraphInput {
     filesystem: Arc<LocalDevRootFilesystem>,
     owner_user_id: UserId,
+    local_runtime_identity: Option<RebornLocalRuntimeIdentity>,
     runtime_policy: Option<EffectiveRuntimePolicy>,
     skill_filesystem: Arc<ScopedFilesystem<LocalDevRootFilesystem>>,
     workspace_filesystem: Arc<ScopedFilesystem<LocalDevRootFilesystem>>,
@@ -693,6 +703,7 @@ async fn build_local_dev(input: RebornBuildInput) -> Result<RebornServices, Rebo
         oauth_dcr_provider_configs,
         nearai_mcp_bootstrap_config,
         owner_id,
+        local_runtime_identity,
         ..
     } = input;
     let RebornStorageInput::LocalDev {
@@ -789,6 +800,7 @@ async fn build_local_dev(input: RebornBuildInput) -> Result<RebornServices, Rebo
     let mut store_graph = build_local_dev_store_graph(RebornLocalDevStoreGraphInput {
         filesystem: Arc::clone(&filesystem),
         owner_user_id,
+        local_runtime_identity,
         runtime_policy: runtime_policy.clone(),
         skill_filesystem,
         workspace_filesystem,
@@ -1206,6 +1218,37 @@ fn copy_local_dev_legacy_skill_entry(
     Ok(())
 }
 
+fn local_dev_extension_lifecycle_surface_context(
+    owner_user_id: UserId,
+    local_runtime_identity: Option<&RebornLocalRuntimeIdentity>,
+) -> Result<LifecycleProductSurfaceContext, RebornBuildError> {
+    let default_identity = RebornRuntimeIdentity::reborn_cli();
+    let default_tenant_id =
+        ironclaw_host_api::TenantId::new(default_identity.tenant_id).map_err(|error| {
+            RebornBuildError::InvalidConfig {
+                reason: error.to_string(),
+            }
+        })?;
+    let default_agent_id =
+        ironclaw_host_api::AgentId::new(default_identity.agent_id).map_err(|error| {
+            RebornBuildError::InvalidConfig {
+                reason: error.to_string(),
+            }
+        })?;
+    let tenant_id = local_runtime_identity
+        .map(|identity| identity.tenant_id.clone())
+        .unwrap_or(default_tenant_id);
+    let agent_id = local_runtime_identity
+        .map(|identity| identity.agent_id.clone())
+        .unwrap_or(default_agent_id);
+    Ok(LifecycleProductSurfaceContext {
+        tenant_id,
+        user_id: owner_user_id,
+        agent_id: Some(agent_id),
+        project_id: None,
+    })
+}
+
 #[cfg(feature = "libsql")]
 fn build_local_dev_store_graph(
     input: RebornLocalDevStoreGraphInput,
@@ -1213,6 +1256,7 @@ fn build_local_dev_store_graph(
     let RebornLocalDevStoreGraphInput {
         filesystem,
         owner_user_id,
+        local_runtime_identity,
         runtime_policy,
         skill_filesystem,
         workspace_filesystem,
@@ -1274,10 +1318,15 @@ fn build_local_dev_store_graph(
         })?;
     #[cfg(feature = "slack-v2-host-beta")]
     let host_state_filesystem = local_dev_slack_host_state_filesystem(Arc::clone(&filesystem));
+    let extension_lifecycle_surface_context = local_dev_extension_lifecycle_surface_context(
+        owner_user_id.clone(),
+        local_runtime_identity.as_ref(),
+    )?;
     let skill_management =
         build_local_skill_management_port(owner_user_id, Arc::clone(&filesystem))?;
     let outbound_stores = local_dev_outbound_store(Arc::clone(&filesystem));
     let local_runtime = Arc::new(RebornLocalRuntimeServices {
+        extension_lifecycle_surface_context,
         approval_requests: Arc::clone(&approval_requests),
         capability_leases: Arc::clone(&capability_leases),
         runtime_policy,
@@ -1348,6 +1397,7 @@ fn build_local_dev_store_graph(
     let RebornLocalDevStoreGraphInput {
         filesystem,
         owner_user_id,
+        local_runtime_identity,
         runtime_policy,
         skill_filesystem,
         workspace_filesystem,
@@ -1396,12 +1446,17 @@ fn build_local_dev_store_graph(
         })?;
     #[cfg(all(feature = "postgres", feature = "slack-v2-host-beta"))]
     let host_state_filesystem = local_dev_slack_host_state_filesystem(Arc::clone(&filesystem));
+    let extension_lifecycle_surface_context = local_dev_extension_lifecycle_surface_context(
+        owner_user_id.clone(),
+        local_runtime_identity.as_ref(),
+    )?;
     let skill_management =
         build_local_skill_management_port(owner_user_id, Arc::clone(&filesystem))?;
     #[cfg(not(any(feature = "libsql", feature = "postgres")))]
     let trigger_conversation_services = local_dev_trigger_conversation_services();
     let outbound_stores = local_dev_outbound_store(Arc::clone(&filesystem));
     let local_runtime = Arc::new(RebornLocalRuntimeServices {
+        extension_lifecycle_surface_context,
         approval_requests: Arc::clone(&approval_requests),
         capability_leases: Arc::clone(&capability_leases),
         runtime_policy,
@@ -2356,6 +2411,25 @@ pub(crate) fn builtin_extension_registry() -> Result<ExtensionRegistry, RebornBu
     Ok(registry)
 }
 
+#[cfg(any(feature = "libsql", feature = "postgres"))]
+fn production_builtin_extension_registry(
+    process_backend: ProcessBackendKind,
+) -> Result<ExtensionRegistry, RebornBuildError> {
+    let mut registry = ExtensionRegistry::new();
+    registry
+        .insert(
+            builtin_first_party_package_for_process_backend(process_backend).map_err(|error| {
+                RebornBuildError::InvalidConfig {
+                    reason: format!("built-in first-party package is invalid: {error}"),
+                }
+            })?,
+        )
+        .map_err(|error| RebornBuildError::InvalidConfig {
+            reason: format!("built-in first-party registry is invalid: {error}"),
+        })?;
+    Ok(registry)
+}
+
 fn builtin_first_party_registry_with_trigger_create_hook(
     trigger_repository: Arc<dyn TriggerRepository>,
     trigger_create_hook: Arc<dyn TriggerCreateHook>,
@@ -2364,6 +2438,22 @@ fn builtin_first_party_registry_with_trigger_create_hook(
         .map_err(|error| RebornBuildError::InvalidConfig {
             reason: format!("built-in first-party handlers are invalid: {error}"),
         })
+}
+
+#[cfg(any(feature = "libsql", feature = "postgres"))]
+fn production_first_party_registry_with_trigger_create_hook(
+    trigger_repository: Arc<dyn TriggerRepository>,
+    trigger_create_hook: Arc<dyn TriggerCreateHook>,
+    process_backend: ProcessBackendKind,
+) -> Result<FirstPartyCapabilityRegistry, RebornBuildError> {
+    builtin_first_party_handlers_with_trigger_create_hook_for_process_backend(
+        trigger_repository,
+        trigger_create_hook,
+        process_backend,
+    )
+    .map_err(|error| RebornBuildError::InvalidConfig {
+        reason: format!("built-in first-party handlers are invalid: {error}"),
+    })
 }
 
 fn local_dev_builtin_extension_registry() -> Result<ExtensionRegistry, RebornBuildError> {
@@ -2545,6 +2635,7 @@ async fn build_production_shaped(
     let RebornBuildInput {
         profile,
         owner_id,
+        local_runtime_identity: _,
         storage,
         production_trust_policy,
         runtime_policy,
@@ -3020,7 +3111,9 @@ where
     let trigger_create_hook = Arc::new(ScopedFilesystemTriggerCreatorPairingHook::new(Arc::clone(
         &stores.scoped_filesystem,
     )));
-    let extension_registry = Arc::new(builtin_extension_registry()?);
+    let process_backend = production_wiring.runtime_policy.process_backend;
+    let extension_registry = production_builtin_extension_registry(process_backend)?;
+    let extension_registry = Arc::new(extension_registry);
     let BudgetSinks {
         budget_event_sink,
         broadcast_budget_event_sink,
@@ -3066,9 +3159,10 @@ where
         audit_log,
     });
     let production_runtime = production_runtime_services(production_runtime_graph);
-    let mut first_party_registry = builtin_first_party_registry_with_trigger_create_hook(
+    let mut first_party_registry = production_first_party_registry_with_trigger_create_hook(
         trigger_repository,
         trigger_create_hook,
+        process_backend,
     )?;
     let product_auth_filesystem = Arc::clone(&stores.scoped_filesystem);
     let services = HostRuntimeServices::new(
@@ -3442,6 +3536,9 @@ mod tests {
             )
             .expect("mount failing backend");
         Arc::new(RebornLocalRuntimeServices {
+            extension_lifecycle_surface_context: base_runtime
+                .extension_lifecycle_surface_context
+                .clone(),
             approval_requests: Arc::clone(&base_runtime.approval_requests),
             capability_leases: Arc::clone(&base_runtime.capability_leases),
             runtime_policy: base_runtime.runtime_policy.clone(),

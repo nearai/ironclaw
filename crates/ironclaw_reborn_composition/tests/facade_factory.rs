@@ -1,9 +1,7 @@
-#[cfg(feature = "libsql")]
-use std::collections::BTreeMap;
 #[cfg(any(feature = "libsql", feature = "postgres"))]
-use std::sync::Arc;
+use std::{collections::BTreeMap, sync::Arc};
 
-#[cfg(feature = "libsql")]
+#[cfg(any(feature = "libsql", feature = "postgres"))]
 use chrono::Utc;
 #[cfg(feature = "postgres")]
 use deadpool_postgres::tokio_postgres;
@@ -15,14 +13,15 @@ use ironclaw_host_api::{
     ProcessBackendKind, RuntimeKind, RuntimeProfile, SecretMode,
     runtime_policy::{ApprovalPolicy, EffectiveRuntimePolicy},
 };
-#[cfg(feature = "libsql")]
+#[cfg(any(feature = "libsql", feature = "postgres"))]
 use ironclaw_host_api::{
     CapabilityGrant, CapabilityGrantId, CapabilityId, CapabilitySet, ExecutionContext, ExtensionId,
     GrantConstraints, MountView, NetworkPolicy, Principal, ResourceEstimate, TrustClass, UserId,
 };
-#[cfg(feature = "libsql")]
+#[cfg(any(feature = "libsql", feature = "postgres"))]
 use ironclaw_host_runtime::{
-    CapabilitySurfacePolicy, RuntimeCapabilityOutcome, RuntimeCapabilityRequest, SurfaceKind,
+    CapabilitySurfacePolicy, RuntimeCapabilityOutcome, RuntimeCapabilityRequest,
+    RuntimeFailureKind, SHELL_CAPABILITY_ID, SPAWN_SUBAGENT_CAPABILITY_ID, SurfaceKind,
     VisibleCapabilityRequest,
 };
 #[cfg(any(feature = "libsql", feature = "postgres"))]
@@ -47,7 +46,7 @@ use ironclaw_reborn_composition::{
 use ironclaw_secrets::SecretMaterial;
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 use ironclaw_trust::{AdminConfig, AdminEntry, HostTrustAssignment, HostTrustPolicy};
-#[cfg(feature = "libsql")]
+#[cfg(any(feature = "libsql", feature = "postgres"))]
 use ironclaw_trust::{AuthorityCeiling, EffectiveTrustClass, TrustDecision, TrustProvenance};
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 use ironclaw_turns::{
@@ -56,7 +55,9 @@ use ironclaw_turns::{
 };
 use secrecy::SecretString;
 #[cfg(feature = "libsql")]
-use serde_json::{Value, json};
+use serde_json::Value;
+#[cfg(any(feature = "libsql", feature = "postgres"))]
+use serde_json::json;
 #[cfg(feature = "libsql")]
 use tokio::sync::Mutex;
 
@@ -142,6 +143,21 @@ fn production_runtime_policy() -> EffectiveRuntimePolicy {
         network_mode: NetworkMode::Allowlist,
         secret_mode: SecretMode::TenantBroker,
         approval_policy: ApprovalPolicy::AskDestructive,
+        audit_mode: AuditMode::Standard,
+    }
+}
+
+#[cfg(any(feature = "libsql", feature = "postgres"))]
+fn hosted_secure_default_runtime_policy() -> EffectiveRuntimePolicy {
+    EffectiveRuntimePolicy {
+        deployment: DeploymentMode::HostedMultiTenant,
+        requested_profile: RuntimeProfile::SecureDefault,
+        resolved_profile: RuntimeProfile::SecureDefault,
+        filesystem_backend: FilesystemBackendKind::ScopedVirtual,
+        process_backend: ProcessBackendKind::None,
+        network_mode: NetworkMode::Brokered,
+        secret_mode: SecretMode::BrokeredHandles,
+        approval_policy: ApprovalPolicy::AskAlways,
         audit_mode: AuditMode::Standard,
     }
 }
@@ -237,7 +253,161 @@ fn local_dev_builtin_visible_request() -> VisibleCapabilityRequest {
         .with_provider_trust(provider_trust)
 }
 
-#[cfg(feature = "libsql")]
+#[cfg(any(feature = "libsql", feature = "postgres"))]
+fn production_builtin_visible_request() -> VisibleCapabilityRequest {
+    let context = production_process_capability_execution_context();
+
+    VisibleCapabilityRequest::new(context, SurfaceKind::new("agent_loop").unwrap())
+        .with_policy(CapabilitySurfacePolicy::allow_all())
+        .with_provider_trust(production_builtin_provider_trust())
+}
+
+#[cfg(any(feature = "libsql", feature = "postgres"))]
+fn production_process_capability_execution_context() -> ExecutionContext {
+    let grants = CapabilitySet {
+        grants: vec![
+            local_dev_grant(
+                SHELL_CAPABILITY_ID,
+                vec![
+                    EffectKind::DispatchCapability,
+                    EffectKind::SpawnProcess,
+                    EffectKind::ExecuteCode,
+                    EffectKind::ReadFilesystem,
+                    EffectKind::WriteFilesystem,
+                    EffectKind::Network,
+                ],
+            ),
+            local_dev_grant(
+                SPAWN_SUBAGENT_CAPABILITY_ID,
+                vec![EffectKind::DispatchCapability, EffectKind::SpawnProcess],
+            ),
+        ],
+    };
+    ExecutionContext::local_default(
+        UserId::new("production-user").unwrap(),
+        ExtensionId::new("caller").unwrap(),
+        RuntimeKind::FirstParty,
+        TrustClass::UserTrusted,
+        grants,
+        MountView::default(),
+    )
+    .unwrap()
+}
+
+#[cfg(any(feature = "libsql", feature = "postgres"))]
+fn production_builtin_provider_trust() -> BTreeMap<ExtensionId, TrustDecision> {
+    let mut provider_trust = BTreeMap::new();
+    provider_trust.insert(
+        ExtensionId::new("builtin").unwrap(),
+        production_builtin_trust_decision(),
+    );
+    provider_trust
+}
+
+#[cfg(any(feature = "libsql", feature = "postgres"))]
+fn production_builtin_trust_decision() -> TrustDecision {
+    TrustDecision {
+        effective_trust: EffectiveTrustClass::user_trusted(),
+        authority_ceiling: AuthorityCeiling {
+            allowed_effects: vec![
+                EffectKind::DispatchCapability,
+                EffectKind::SpawnProcess,
+                EffectKind::ExecuteCode,
+                EffectKind::ReadFilesystem,
+                EffectKind::WriteFilesystem,
+                EffectKind::Network,
+            ],
+            max_resource_ceiling: None,
+        },
+        provenance: TrustProvenance::AdminConfig,
+        evaluated_at: Utc::now(),
+    }
+}
+
+#[cfg(any(feature = "libsql", feature = "postgres"))]
+fn assert_failed_capability(
+    outcome: RuntimeCapabilityOutcome,
+    capability_id: &str,
+    expected_kind: RuntimeFailureKind,
+    expected_message: &str,
+) {
+    let RuntimeCapabilityOutcome::Failed(failure) = outcome else {
+        panic!("expected failed {capability_id} invocation, got {outcome:?}");
+    };
+    assert_eq!(failure.capability_id.as_str(), capability_id);
+    assert_eq!(failure.kind, expected_kind);
+    assert!(
+        failure
+            .message
+            .as_deref()
+            .is_some_and(|message| message.contains(expected_message)),
+        "expected {capability_id} failure message to contain {expected_message:?}, got {:?}",
+        failure.message
+    );
+}
+
+#[cfg(any(feature = "libsql", feature = "postgres"))]
+async fn assert_process_capabilities_unavailable_for_processless_runtime(
+    services: &RebornServices,
+) {
+    let runtime = services
+        .host_runtime
+        .as_deref()
+        .expect("production services expose host runtime");
+    let surface = runtime
+        .visible_capabilities(production_builtin_visible_request())
+        .await
+        .expect("visible capabilities resolve");
+    let ids = surface
+        .capabilities
+        .iter()
+        .map(|capability| capability.descriptor.id.as_str())
+        .collect::<Vec<_>>();
+    assert!(
+        !ids.contains(&SHELL_CAPABILITY_ID),
+        "builtin.shell must not be visible when process_backend == None: {ids:?}"
+    );
+    assert!(
+        !ids.contains(&SPAWN_SUBAGENT_CAPABILITY_ID),
+        "process-effect builtin.spawn_subagent must not be visible when process_backend == None: {ids:?}"
+    );
+
+    let shell_outcome = runtime
+        .invoke_capability(RuntimeCapabilityRequest::new(
+            production_process_capability_execution_context(),
+            CapabilityId::new(SHELL_CAPABILITY_ID).unwrap(),
+            ResourceEstimate::default(),
+            json!({"command": "echo should-not-run"}),
+            production_builtin_trust_decision(),
+        ))
+        .await
+        .expect("shell invocation returns an outcome");
+    assert_failed_capability(
+        shell_outcome,
+        SHELL_CAPABILITY_ID,
+        RuntimeFailureKind::MissingRuntime,
+        "unknown capability",
+    );
+
+    let spawn_outcome = runtime
+        .invoke_capability(RuntimeCapabilityRequest::new(
+            production_process_capability_execution_context(),
+            CapabilityId::new(SPAWN_SUBAGENT_CAPABILITY_ID).unwrap(),
+            ResourceEstimate::default(),
+            json!({}),
+            production_builtin_trust_decision(),
+        ))
+        .await
+        .expect("spawn_subagent invocation returns an outcome");
+    assert_failed_capability(
+        spawn_outcome,
+        SPAWN_SUBAGENT_CAPABILITY_ID,
+        RuntimeFailureKind::Authorization,
+        "ProcessBackendKind::None",
+    );
+}
+
+#[cfg(any(feature = "libsql", feature = "postgres"))]
 fn local_dev_grant(capability: &str, allowed_effects: Vec<EffectKind>) -> CapabilityGrant {
     CapabilityGrant {
         id: CapabilityGrantId::new(),
@@ -1235,6 +1405,64 @@ async fn production_postgres_services_wire_first_party_runtime_http_egress() {
     let services =
         result.expect("production postgres services should build with a sandbox process binding");
     assert_production_services_ready_with_first_party_runtime(&services).await;
+}
+
+#[cfg(feature = "postgres")]
+#[tokio::test]
+async fn production_postgres_secure_default_builds_without_process_port() {
+    let Some((_container, pool, database_url)) = postgres_pool_or_skip().await else {
+        return;
+    };
+    let (notifier, handle) = live_wake_notifier();
+
+    let services = build_reborn_services(
+        RebornBuildInput::postgres(
+            RebornCompositionProfile::Production,
+            "test-owner",
+            pool,
+            SecretMaterial::from(database_url),
+            test_master_key(),
+        )
+        .with_production_trust_policy(production_trust_policy())
+        .with_runtime_policy(hosted_secure_default_runtime_policy())
+        .with_turn_run_wake_notifier(notifier),
+    )
+    .await
+    .expect("postgres secure_default production should not require a process port");
+
+    handle.shutdown().await;
+
+    assert_production_services_ready_with_first_party_runtime(&services).await;
+    assert_process_capabilities_unavailable_for_processless_runtime(&services).await;
+}
+
+#[cfg(feature = "libsql")]
+#[tokio::test]
+async fn production_libsql_secure_default_builds_without_process_port() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = libsql_db_at(dir.path().join("reborn.db")).await;
+    let (notifier, handle) = live_wake_notifier();
+
+    let services = build_reborn_services(
+        RebornBuildInput::libsql(
+            RebornCompositionProfile::Production,
+            "test-owner",
+            db,
+            dir.path().join("events.db").to_string_lossy(),
+            None,
+            test_master_key(),
+        )
+        .with_production_trust_policy(production_trust_policy())
+        .with_runtime_policy(hosted_secure_default_runtime_policy())
+        .with_turn_run_wake_notifier(notifier),
+    )
+    .await
+    .expect("secure_default production should not require a process port");
+
+    handle.shutdown().await;
+
+    assert_production_services_ready_with_first_party_runtime(&services).await;
+    assert_process_capabilities_unavailable_for_processless_runtime(&services).await;
 }
 
 #[cfg(feature = "libsql")]
