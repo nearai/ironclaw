@@ -1432,6 +1432,7 @@ async fn capability_stage_returns_after_batch_summary() {
                         no_progress_count: 0,
                         observed_signatures: vec![signature.clone()],
                         made_progress_signatures: vec![signature],
+                        no_change_signatures: Vec::new(),
                     },
                 )
             );
@@ -1796,6 +1797,7 @@ async fn stop_stage_preserves_ack_and_returns_stop_kind() {
                         no_progress_count: 0,
                         observed_signatures: Vec::new(),
                         made_progress_signatures: Vec::new(),
+                        no_change_signatures: Vec::new(),
                     },
                 ),
                 pending_input_ack,
@@ -2856,11 +2858,17 @@ async fn invalid_provider_tool_failure_appends_structured_model_observation() {
 }
 
 #[tokio::test]
-async fn repeated_model_visible_capability_failures_stop_with_typed_no_progress_failure() {
+async fn repeated_capability_failures_do_not_trip_no_progress_and_run_can_recover() {
+    // PR3: Blocked/failed tool calls are NOT counted as no-progress — failures
+    // route through recovery and are bounded by the budget/iteration limit, not
+    // the no-progress escape. Three failed batches do not fire NoProgressDetected;
+    // once the model recovers with a reply the run completes normally, and the
+    // tool-error results stay in the transcript (work isn't lost).
     let host = MockHost::new(vec![
         provider_calls_response(),
         provider_calls_response(),
         provider_calls_response(),
+        reply_response(),
     ])
     .with_batch_outcomes(
         (0..3)
@@ -2884,34 +2892,30 @@ async fn repeated_model_visible_capability_failures_stop_with_typed_no_progress_
         .await
         .expect("execute");
 
-    // Repeated capability failures trip the no-progress guard. With the nudge
-    // gate off (production default) this is a typed `NoProgressDetected` failure,
-    // not a canned reply finalized as a completed turn. The tool-error results are
-    // still appended to the transcript (asserted below) so the work isn't lost.
-    match exit {
-        LoopExit::Failed(failed) => {
-            assert_eq!(failed.reason_kind, LoopFailureKind::NoProgressDetected);
-            assert!(failed.checkpoint_id.is_some());
-        }
-        other => panic!("expected typed no-progress failure, got {other:?}"),
-    }
-    assert_eq!(host.model_requests().len(), 3);
+    assert!(
+        matches!(exit, LoopExit::Completed(_)),
+        "blocked failures must not fire no-progress; the recovered reply completes the run, got {exit:?}"
+    );
     assert_eq!(host.batch_invocations().len(), 3);
     assert_eq!(host.appended_result_refs().len(), 3);
     assert_eq!(
         final_staged_state(&host)
             .stop_state
             .trailing_no_progress_results,
-        3
+        0,
+        "Blocked/failed results must not count toward the no-progress escape"
     );
 }
 
 #[tokio::test]
-async fn repeated_model_visible_multi_call_failures_stop_with_typed_no_progress_failure() {
+async fn repeated_multi_call_failures_do_not_trip_no_progress_and_run_can_recover() {
+    // PR3 (multi-call variant): batches where every call fails are not counted as
+    // no-progress; the run recovers and completes once the model replies.
     let host = MockHost::new(vec![
         provider_two_calls_response(),
         provider_two_calls_response(),
         provider_two_calls_response(),
+        reply_response(),
     ])
     .with_batch_outcomes(
         (0..3)
@@ -2940,24 +2944,18 @@ async fn repeated_model_visible_multi_call_failures_stop_with_typed_no_progress_
         .await
         .expect("execute");
 
-    // Multi-call repeated failures trip the no-progress guard → typed
-    // `NoProgressDetected` failure (gate off), with all six tool-error results
-    // still appended to the transcript.
-    match exit {
-        LoopExit::Failed(failed) => {
-            assert_eq!(failed.reason_kind, LoopFailureKind::NoProgressDetected);
-            assert!(failed.checkpoint_id.is_some());
-        }
-        other => panic!("expected typed no-progress failure, got {other:?}"),
-    }
-    assert_eq!(host.model_requests().len(), 3);
+    assert!(
+        matches!(exit, LoopExit::Completed(_)),
+        "multi-call blocked failures must not fire no-progress; got {exit:?}"
+    );
     assert_eq!(host.batch_invocations().len(), 3);
     assert_eq!(host.appended_result_refs().len(), 6);
     assert_eq!(
         final_staged_state(&host)
             .stop_state
             .trailing_no_progress_results,
-        3
+        0,
+        "Blocked/failed results must not count toward the no-progress escape"
     );
 }
 
