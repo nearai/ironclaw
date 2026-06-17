@@ -36,6 +36,13 @@
       "when": 1749940000000,
       "tag": "0004_consolidate_scope_bindings",
       "breakpoints": true
+    },
+    {
+      "idx": 5,
+      "version": "7",
+      "when": 1750000000000,
+      "tag": "0005_rename_columns",
+      "breakpoints": true
     }
   ]
 }

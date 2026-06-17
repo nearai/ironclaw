@@ -25,7 +25,7 @@ test.describe("Real stack chat smoke", () => {
     test.slow();
 
     // Mock ironclaw API at browser level (DB operations hang in dev stack)
-    let savedSettings = { tunnelUrl: "", apiToken: "" };
+    let savedSettings = { baseUrl: "", apiToken: "" };
     let connected = false;
 
     await page.route("**/api/rpc/ironclaw/**", async (route) => {
@@ -39,7 +39,7 @@ test.describe("Real stack chat smoke", () => {
         const p = (match ? match[1] : (body?.procedure ?? "")).replace(/\//g, ".");
 
         if (p.includes("settings.get")) {
-          if (!savedSettings.tunnelUrl) {
+          if (!savedSettings.baseUrl) {
             await route.fulfill({ status: 404, body: JSON.stringify({ error: "NOT_FOUND" }) });
             return;
           }
@@ -51,7 +51,7 @@ test.describe("Real stack chat smoke", () => {
           return;
         }
         if (p.includes("settings.update")) {
-          savedSettings = { tunnelUrl: stack.rebornBaseUrl, apiToken: stack.rebornToken };
+          savedSettings = { baseUrl: stack.rebornBaseUrl, apiToken: stack.rebornToken };
           connected = true;
           await route.fulfill({
             status: 200,

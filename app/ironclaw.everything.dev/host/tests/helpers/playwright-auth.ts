@@ -74,7 +74,7 @@ export function setupIronclawApiMock(page: Page, app: RebornAppHost) {
   };
 
   const settingsResponse = {
-    tunnelUrl: app.rebornBaseUrl,
+    baseUrl: app.rebornBaseUrl,
     apiToken: app.rebornToken,
   };
 

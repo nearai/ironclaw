@@ -162,7 +162,7 @@ function OrganizationDetail() {
   const [inviteRole, setInviteRole] = useState<"admin" | "member">("member");
   const [createdApiKey, setCreatedApiKey] = useState<CreatedApiKey | null>(null);
 
-  const [tunnelUrl, setTunnelUrl] = useState("");
+  const [baseUrl, setBaseUrl] = useState("");
   const [apiToken, setApiToken] = useState("");
   const [tokenConfigured, setTokenConfigured] = useState(false);
   const [icLoading, setIcLoading] = useState(true);
@@ -174,7 +174,7 @@ function OrganizationDetail() {
     apiClient.ironclaw.settings
       .get({ scope: "organization" })
       .then((res) => {
-        setTunnelUrl(res.tunnelUrl);
+        setBaseUrl(res.baseUrl);
         setTokenConfigured(res.hasToken ?? false);
         setHasSettings(true);
       })
@@ -381,7 +381,7 @@ function OrganizationDetail() {
     setSaving(true);
     try {
       await apiClient.ironclaw.settings.update({
-        tunnelUrl,
+        baseUrl,
         ...(apiToken ? { apiToken } : {}),
         scope: "organization",
       });
@@ -399,7 +399,7 @@ function OrganizationDetail() {
     setDisconnecting(true);
     try {
       await apiClient.ironclaw.settings.delete({ scope: "organization" });
-      setTunnelUrl("");
+      setBaseUrl("");
       setApiToken("");
       setTokenConfigured(false);
       setHasSettings(false);
@@ -756,8 +756,8 @@ function OrganizationDetail() {
                       </Label>
                       <Input
                         id="org-tunnelUrl"
-                        value={tunnelUrl}
-                        onChange={(e) => setTunnelUrl(e.target.value)}
+                        value={baseUrl}
+                        onChange={(e) => setBaseUrl(e.target.value)}
                         placeholder="https://your-tunnel.ngrok.io"
                         required
                       />
@@ -815,7 +815,7 @@ function OrganizationDetail() {
                           {disconnecting ? "Disconnecting..." : "Disconnect"}
                         </Button>
                       )}
-                      <Button type="submit" disabled={saving || !tunnelUrl}>
+                      <Button type="submit" disabled={saving || !baseUrl}>
                         {saving ? <Loader2 className="h-4 w-4 animate-spin" /> : <Save size={14} />}
                         {saving ? "Saving..." : "Save settings"}
                       </Button>
@@ -835,9 +835,9 @@ function OrganizationDetail() {
                       <p className="text-sm text-muted-foreground">
                         Your organization has an IronClaw tunnel configured by an admin.
                       </p>
-                      {tunnelUrl && (
-                        <p className="text-xs font-mono text-muted-foreground">
-                          Tunnel: {tunnelUrl.replace(/\/\/([^/]+)/, "//***")}
+                      {baseUrl && (
+                        <p className="text-xs text-muted-foreground truncate">
+                          Tunnel: {baseUrl.replace(/\/\/([^/]+)/, "//***")}
                         </p>
                       )}
                     </div>

@@ -18,13 +18,14 @@ import {
 import { createAuthMiddleware } from "./lib/auth";
 import { normalizeThread, normalizeTimelinePage } from "./lib/conversation";
 import { createThreadChatBridge } from "./lib/conversation-live";
+import { decryptApiToken, encryptApiToken } from "./lib/encryption";
 import type { PluginsClient } from "./lib/plugins-types.gen";
 
 function generateId(): string {
   return `hc_${Date.now()}_${Math.random().toString(36).substring(2, 9)}`;
 }
 
-async function lookupCredentialsByScope(db: any, tenantId: string, scopeType: string) {
+async function lookupCredentialsByScope(db: any, tenantId: string, scopeType: string, encryptionKey?: string) {
   const bindings = await db
     .select()
     .from(ironclawScopeBindings)
@@ -40,9 +41,11 @@ async function lookupCredentialsByScope(db: any, tenantId: string, scopeType: st
       .from(ironclawConnections)
       .where(eq(ironclawConnections.id, bindings[0].connectionId));
     if (conns.length > 0) {
+      const rawToken = conns[0].apiTokenEncrypted;
+      const apiToken = encryptionKey ? decryptApiToken(rawToken, encryptionKey) : rawToken;
       return {
-        tunnelUrl: conns[0].tunnelUrl,
-        apiToken: conns[0].apiToken,
+        baseUrl: conns[0].baseUrl,
+        apiToken,
         connectionId: conns[0].id,
       };
     }
@@ -139,6 +142,7 @@ export default createPlugin.withPlugins<PluginsClient>()({
     API_DATABASE_URL: z.string().default("pglite:.bos/api/:memory:"),
     IRONCLAW_BASE_URL: z.string().optional(),
     IRONCLAW_API_TOKEN: z.string().optional(),
+    BETTER_AUTH_SECRET: z.string().min(32).optional(),
   }),
 
   context: z.object({
@@ -196,6 +200,7 @@ export default createPlugin.withPlugins<PluginsClient>()({
   createRouter: (services, builder) => {
     const s = services as any;
     const { requireAuth } = createAuthMiddleware(builder);
+    const encryptionKey = s.secrets?.BETTER_AUTH_SECRET;
 
     const resolveCredentials = builder.middleware(async ({ context, next }) => {
       const { userId, organizationId, apiKey } = context;
@@ -235,10 +240,10 @@ export default createPlugin.withPlugins<PluginsClient>()({
 
           // Priority 1: org-level credentials (when org context is active)
           if (organizationId) {
-            const orgCreds = await lookupCredentialsByScope(s.db, organizationId, "organization");
+            const orgCreds = await lookupCredentialsByScope(s.db, organizationId, "organization", encryptionKey);
             if (orgCreds) {
               return next({
-                context: { ...context, baseUrl: orgCreds.tunnelUrl, apiToken: orgCreds.apiToken },
+                context: { ...context, baseUrl: orgCreds.baseUrl, apiToken: orgCreds.apiToken },
               });
             }
           }
@@ -246,12 +251,12 @@ export default createPlugin.withPlugins<PluginsClient>()({
           // Priority 2: personal credentials (checked regardless of org context)
           const effectiveUserId = userId ?? apiKey?.userId;
           if (effectiveUserId) {
-            const personalCreds = await lookupCredentialsByScope(s.db, effectiveUserId, "personal");
+            const personalCreds = await lookupCredentialsByScope(s.db, effectiveUserId, "personal", encryptionKey);
             if (personalCreds) {
               return next({
                 context: {
                   ...context,
-                  baseUrl: personalCreds.tunnelUrl,
+                  baseUrl: personalCreds.baseUrl,
                   apiToken: personalCreds.apiToken,
                 },
               });
@@ -263,12 +268,13 @@ export default createPlugin.withPlugins<PluginsClient>()({
             s.db,
             "__platform_default__",
             "platform",
+            encryptionKey,
           );
           if (platformCreds) {
             return next({
               context: {
                 ...context,
-                baseUrl: platformCreds.tunnelUrl,
+                baseUrl: platformCreds.baseUrl,
                 apiToken: platformCreds.apiToken,
               },
             });
@@ -446,12 +452,12 @@ export default createPlugin.withPlugins<PluginsClient>()({
                 throw new ORPCError("FORBIDDEN", { message: "Admin access required" });
               }
               const db = s.db;
-              const creds = await lookupCredentialsByScope(db, tenantId, scope);
+              const creds = await lookupCredentialsByScope(db, tenantId, scope, encryptionKey);
               if (!creds) {
                 throw new ORPCError("NOT_FOUND", { message: "No ironclaw settings configured" });
               }
               return {
-                tunnelUrl: creds.tunnelUrl,
+                baseUrl: creds.baseUrl,
                 apiToken: "",
                 hasToken: true,
                 scope,
@@ -477,7 +483,7 @@ export default createPlugin.withPlugins<PluginsClient>()({
 
               let apiToken = input.apiToken;
               if (!apiToken) {
-                const existing = await lookupCredentialsByScope(db, tenantId, scope);
+                const existing = await lookupCredentialsByScope(db, tenantId, scope, encryptionKey);
                 if (existing) apiToken = existing.apiToken;
               }
               if (!apiToken) {
@@ -486,21 +492,25 @@ export default createPlugin.withPlugins<PluginsClient>()({
                 });
               }
 
+              const storedToken = encryptionKey
+                ? encryptApiToken(apiToken, encryptionKey)
+                : apiToken;
+
               const connectionId = `conn_${tenantId}_${scope}`;
               await db
                 .insert(ironclawConnections)
                 .values({
                   id: connectionId,
                   name: `${scope} connection for ${tenantId}`,
-                  tunnelUrl: input.tunnelUrl,
-                  apiToken,
+                  baseUrl: input.baseUrl,
+                  apiTokenEncrypted: storedToken,
                   createdBy: userId,
                 })
                 .onConflictDoUpdate({
                   target: ironclawConnections.id,
                   set: {
-                    tunnelUrl: input.tunnelUrl,
-                    apiToken,
+                    baseUrl: input.baseUrl,
+                    apiTokenEncrypted: storedToken,
                     updatedBy: userId,
                   },
                 });
@@ -536,7 +546,7 @@ export default createPlugin.withPlugins<PluginsClient>()({
                 throw new ORPCError("FORBIDDEN", { message: "Admin access required" });
               }
               const db = s.db;
-              const creds = await lookupCredentialsByScope(db, tenantId, scope);
+              const creds = await lookupCredentialsByScope(db, tenantId, scope, encryptionKey);
               if (creds) {
                 await db
                   .delete(ironclawConnections)

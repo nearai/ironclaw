@@ -21,7 +21,7 @@ function IronclawSettings() {
   const { data: session } = useQuery<SessionData | null>(sessionQueryOptions(auth));
   const { connectionMode } = useConnectionMode();
   const { status: connectionStatus, refetch: refetchStatus } = useIronclawStatus();
-  const [tunnelUrl, setTunnelUrl] = useState("");
+  const [baseUrl, setBaseUrl] = useState("");
   const [apiToken, setApiToken] = useState("");
   const [tokenConfigured, setTokenConfigured] = useState(false);
   const [loading, setLoading] = useState(true);
@@ -42,7 +42,7 @@ function IronclawSettings() {
     apiClient.ironclaw.settings
       .get({ scope })
       .then((res) => {
-        setTunnelUrl(res.tunnelUrl);
+        setBaseUrl(res.baseUrl);
         setTokenConfigured(res.hasToken ?? false);
         setHasSettings(true);
         if (res.scope === "organization" || res.scope === "personal") {
@@ -72,7 +72,7 @@ function IronclawSettings() {
     setSaving(true);
     try {
       await apiClient.ironclaw.settings.update({
-        tunnelUrl,
+        baseUrl,
         scope,
         ...(apiToken ? { apiToken } : {}),
       });
@@ -90,7 +90,7 @@ function IronclawSettings() {
     setDisconnecting(true);
     try {
       await apiClient.ironclaw.settings.delete({ scope });
-      setTunnelUrl("");
+      setBaseUrl("");
       setApiToken("");
       setTokenConfigured(false);
       setHasSettings(false);
@@ -104,8 +104,8 @@ function IronclawSettings() {
   };
 
   const isConnected = connectionStatus === "connected";
-  const canTest = tunnelUrl && (apiToken || tokenConfigured);
-  const canSave = tunnelUrl && (apiToken || tokenConfigured);
+  const canTest = baseUrl && (apiToken || tokenConfigured);
+  const canSave = baseUrl && (apiToken || tokenConfigured);
 
   return (
     <div className="space-y-6">
@@ -215,8 +215,8 @@ function IronclawSettings() {
               </Label>
               <Input
                 id="tunnelUrl"
-                value={tunnelUrl}
-                onChange={(e) => setTunnelUrl(e.target.value)}
+                value={baseUrl}
+                onChange={(e) => setBaseUrl(e.target.value)}
                 placeholder="https://your-tunnel.ngrok.io"
                 required
               />

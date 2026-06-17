@@ -23,7 +23,7 @@ export const Route = createFileRoute("/_layout/_authenticated/admin/ironclaw")({
 
 function AdminIronclaw() {
   const apiClient = useApiClient();
-  const [tunnelUrl, setTunnelUrl] = useState("");
+  const [baseUrl, setBaseUrl] = useState("");
   const [apiToken, setApiToken] = useState("");
   const [tokenConfigured, setTokenConfigured] = useState(false);
   const [loading, setLoading] = useState(true);
@@ -35,7 +35,7 @@ function AdminIronclaw() {
     apiClient.ironclaw.settings
       .get({ scope: "platform" })
       .then((res) => {
-        setTunnelUrl(res.tunnelUrl);
+        setBaseUrl(res.baseUrl);
         setTokenConfigured(res.hasToken ?? false);
         setHasSettings(true);
       })
@@ -50,7 +50,7 @@ function AdminIronclaw() {
     setSaving(true);
     try {
       await apiClient.ironclaw.settings.update({
-        tunnelUrl,
+        baseUrl,
         ...(apiToken ? { apiToken } : {}),
         scope: "platform",
       });
@@ -68,7 +68,7 @@ function AdminIronclaw() {
     setDisconnecting(true);
     try {
       await apiClient.ironclaw.settings.delete({ scope: "platform" });
-      setTunnelUrl("");
+      setBaseUrl("");
       setApiToken("");
       setTokenConfigured(false);
       setHasSettings(false);
@@ -103,8 +103,8 @@ function AdminIronclaw() {
               </Label>
               <Input
                 id="tunnelUrl"
-                value={tunnelUrl}
-                onChange={(e) => setTunnelUrl(e.target.value)}
+                value={baseUrl}
+                onChange={(e) => setBaseUrl(e.target.value)}
                 placeholder="https://your-tunnel.ngrok.io"
                 required
               />
@@ -161,7 +161,7 @@ function AdminIronclaw() {
                   {disconnecting ? "Disconnecting..." : "Disconnect"}
                 </Button>
               )}
-              <Button type="submit" disabled={saving || !tunnelUrl}>
+              <Button type="submit" disabled={saving || !baseUrl}>
                 {saving ? <Loader2 className="h-4 w-4 animate-spin" /> : <Save size={14} />}
                 {saving ? "Saving..." : "Save settings"}
               </Button>

@@ -33,8 +33,8 @@ export const submissions = pgTable(
 
 export const tenantCredentials = pgTable("tenant_credentials", {
   tenantId: text("tenant_id").primaryKey(),
-  tunnelUrl: text("tunnel_url").notNull(),
-  apiToken: text("api_token").notNull(),
+  baseUrl: text("base_url").notNull(),
+  apiTokenEncrypted: text("api_token_encrypted").notNull(),
   updatedAt: timestamp("updated_at", { mode: "date", withTimezone: true }).defaultNow().notNull(),
   updatedBy: text("updated_by"),
 });
@@ -42,8 +42,8 @@ export const tenantCredentials = pgTable("tenant_credentials", {
 export const ironclawConnections = pgTable("ironclaw_connections", {
   id: text("id").primaryKey(),
   name: text("name").notNull().default(""),
-  tunnelUrl: text("tunnel_url").notNull(),
-  apiToken: text("api_token").notNull(),
+  baseUrl: text("base_url").notNull(),
+  apiTokenEncrypted: text("api_token_encrypted").notNull(),
   createdBy: text("created_by"),
   updatedBy: text("updated_by"),
   createdAt: timestamp("created_at", { mode: "date", withTimezone: true }).defaultNow().notNull(),

@@ -13,12 +13,12 @@ test.describe("Chat UI regressions", () => {
     stop: () => Promise<void>;
     setScenario: (name: any) => void;
   };
-  let savedSettings: { tunnelUrl: string; apiToken: string };
+  let savedSettings: { baseUrl: string; apiToken: string };
   let connected: boolean;
 
   test.beforeAll(async () => {
     rebornMock = await startRebornMock({ scenario: "healthy-empty" });
-    savedSettings = { tunnelUrl: "", apiToken: "" };
+    savedSettings = { baseUrl: "", apiToken: "" };
     connected = false;
 
     app = await startBundledHost((urls: BundledHostUrls) => ({
@@ -50,7 +50,7 @@ test.describe("Chat UI regressions", () => {
 
   test.beforeEach(async ({ page }) => {
     // Reset test state before each test
-    savedSettings = { tunnelUrl: "", apiToken: "" };
+    savedSettings = { baseUrl: "", apiToken: "" };
     connected = false;
 
     // Register ironclaw API mocks with shared mutable state
@@ -65,7 +65,7 @@ test.describe("Chat UI regressions", () => {
         const p = (match ? match[1] : (body?.procedure ?? "")).replace(/\//g, ".");
 
         if (p.includes("settings.get")) {
-          if (!savedSettings.tunnelUrl) {
+          if (!savedSettings.baseUrl) {
             await route.fulfill({ status: 404, body: JSON.stringify({ error: "NOT_FOUND" }) });
             return;
           }
@@ -77,7 +77,7 @@ test.describe("Chat UI regressions", () => {
           return;
         }
         if (p.includes("settings.update")) {
-          savedSettings = { tunnelUrl: rebornMock.baseUrl, apiToken: rebornMock.token };
+          savedSettings = { baseUrl: rebornMock.baseUrl, apiToken: rebornMock.token };
           connected = true;
           await route.fulfill({
             status: 200,
@@ -194,7 +194,7 @@ test.describe("Chat UI regressions", () => {
 
   test("createThread opens the created thread", async ({ page }) => {
     await loginAnonymously(page, app.baseUrl);
-    savedSettings = { tunnelUrl: rebornMock.baseUrl, apiToken: rebornMock.token };
+    savedSettings = { baseUrl: rebornMock.baseUrl, apiToken: rebornMock.token };
     connected = true;
 
     await page.goto(`${app.baseUrl}/`, { waitUntil: "domcontentloaded" });
@@ -211,7 +211,7 @@ test.describe("Chat UI regressions", () => {
 
   test("sendMessage uses accepted response to seed run state", async ({ page }) => {
     await loginAnonymously(page, app.baseUrl);
-    savedSettings = { tunnelUrl: rebornMock.baseUrl, apiToken: rebornMock.token };
+    savedSettings = { baseUrl: rebornMock.baseUrl, apiToken: rebornMock.token };
     connected = true;
 
     await page.goto(`${app.baseUrl}/`, { waitUntil: "domcontentloaded" });
@@ -240,7 +240,7 @@ test.describe("Chat UI regressions", () => {
 
   test("final reply renders from SSE", async ({ page }) => {
     await loginAnonymously(page, app.baseUrl);
-    savedSettings = { tunnelUrl: rebornMock.baseUrl, apiToken: rebornMock.token };
+    savedSettings = { baseUrl: rebornMock.baseUrl, apiToken: rebornMock.token };
     connected = true;
 
     await page.goto(`${app.baseUrl}/`, { waitUntil: "domcontentloaded" });

@@ -23,23 +23,24 @@
         "ALLOW_UNTRUSTED_SSR",
         "CSP_STRICT"
       ],
-      "production": "https://elliot-braem-4962-host-ironclaw-nearbuilders-7c4aa3a9d-ze.zephyrcloud.app",
+      "production": "https://elliot-braem-4972-host-ironclaw-nearbuilders-72fd25c50-ze.zephyrcloud.app",
       "integrity": "sha384-uzbBU2DfN9ozBwVXUPjGyv+w29xMfBYmNTYnKuQLsxvzNTufAO6PWH6QrpPa51bB"
     },
     "ui": {
       "development": "local:ui",
-      "ssr": "https://elliot-braem-4959-ui-ironclaw-nearbuilders-b54760a28-ze.zephyrcloud.app",
-      "ssrIntegrity": "sha384-WKbVaR2f7SdYInZDADs1rAnPFMHOzl5q2j3JrTAlyQEn0lEh9r32qBauIjc9p0Bl",
-      "production": "https://elliot-braem-4958-ui-ironclaw-nearbuilders-9047664a9-ze.zephyrcloud.app",
-      "integrity": "sha384-M3O8EGSw5cJedVvXvdo2sVRCerHPMoP137NsPz9yCMrRNgXaXrAFW9Srwt9uWevT"
+      "ssr": "https://elliot-braem-4969-ui-ironclaw-nearbuilders-438b7e7e6-ze.zephyrcloud.app",
+      "ssrIntegrity": "sha384-ySQ2jPHW85amMxkkMGVr9NM5AQC13NSNI12Xnw+u9GK8U71Xp0ysFmtZXIQQl90I",
+      "production": "https://elliot-braem-4968-ui-ironclaw-nearbuilders-3662d2307-ze.zephyrcloud.app",
+      "integrity": "sha384-w0XKGQwzzqY9M6ZyF8du/YwIKbyNTeHwAQAf86t6P/si3ChKeOrrIE63A9bdyhhG"
     },
     "api": {
       "development": "local:api",
       "secrets": [
         "API_DATABASE_URL",
-        "IRONCLAW_BASE_URL"
+        "IRONCLAW_BASE_URL",
+        "BETTER_AUTH_SECRET"
       ],
-      "production": "https://elliot-braem-4960-api-ironclaw-nearbuilders-37cb8f6f1-ze.zephyrcloud.app",
+      "production": "https://elliot-braem-4970-api-ironclaw-nearbuilders-db6d7f662-ze.zephyrcloud.app",
       "integrity": "sha384-PWitij4FsV0uoEwqxwd/jaGV2hGStBJ8rsYekMCHra/7Fz6Q/ZxKba2y+5atjfZz"
     }
   },
@@ -53,7 +54,7 @@
         "IRONCLAW_BASE_URL",
         "IRONCLAW_API_TOKEN"
       ],
-      "production": "https://elliot-braem-4961-every-plugin-ironclaw-ironclaw--496a4384b-ze.zephyrcloud.app",
+      "production": "https://elliot-braem-4971-every-plugin-ironclaw-ironclaw--94d83679b-ze.zephyrcloud.app",
       "integrity": "sha384-C16nqFILTg4xcYT3+kONmbT2jYpD+89JGmTxBvUhCXt9iED4NnuSbwaOCelAedg3"
     }
   }
