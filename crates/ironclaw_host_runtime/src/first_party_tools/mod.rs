@@ -370,6 +370,8 @@ impl FirstPartyCapabilityHandler for BuiltinFirstPartyTools {
                 let mut result = profile_set::dispatch(&self.memory_state, &request).await?;
                 result.usage.output_bytes =
                     bounded_output_bytes(&result.output, FIRST_PARTY_MAX_OUTPUT_BYTES)?;
+                result.usage.wall_clock_ms =
+                    start.elapsed().as_millis().try_into().unwrap_or(u64::MAX);
                 return Ok(result);
             }
             SHELL_CAPABILITY_ID => {

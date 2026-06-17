@@ -252,7 +252,8 @@ pub(crate) fn resolve_builtin_input_schema_ref(reference: &str) -> Option<Value>
                 },
                 "locale": {
                     "type": "string",
-                    "description": "BCP-47 locale tag, e.g. en-US or ja-JP"
+                    "description": "BCP-47 locale tag, e.g. en-US or ja-JP",
+                    "maxLength": 35
                 },
                 "location": {
                     "type": "string",

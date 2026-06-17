@@ -4317,17 +4317,21 @@ async fn text_only_host_factory_threads_user_profile_source_to_runtime_context()
         .unwrap();
 
     // The runtime context is rendered inside the prompt port; retrieve it via
-    // `build_prompt_bundle` and check the content rendered by `LoopRuntimeContext`.
+    // `build_prompt_bundle` + `stream_model`. The materialized system message
+    // content is carried in `HostManagedModelRequest.messages[*].content` as
+    // a plain string after the materialization store resolves the refs — this
+    // is the authoritative path to assert that the profile reached the model.
     let host_dyn: &(dyn AgentLoopDriverHost + Send + Sync) = &host;
     let surface = host_dyn
         .visible_capabilities(VisibleCapabilityRequest)
         .await
         .unwrap();
+    let surface_version = surface.version.clone();
     let bundle = host_dyn
         .build_prompt_bundle(LoopPromptBundleRequest {
             mode: PromptMode::TextOnly,
             context_cursor: None,
-            surface_version: Some(surface.version),
+            surface_version: Some(surface_version.clone()),
             checkpoint_state_ref: None,
             max_messages: Some(8),
             inline_messages: Vec::new(),
@@ -4336,30 +4340,45 @@ async fn text_only_host_factory_threads_user_profile_source_to_runtime_context()
         .await
         .unwrap();
 
+    // Drive the model port so the recording gateway captures the fully
+    // materialized messages (content refs resolved to plain strings).
+    // `run_context().user_profile` does not exist on `LoopRunContext`; the
+    // profile lives inside `LoopRuntimeContext` in the prompt port and is
+    // only observable through the rendered model content.
+    host_dyn
+        .stream_model(LoopModelRequest {
+            messages: bundle.messages,
+            surface_version: Some(surface_version),
+            model_preference: None,
+            capability_view: None,
+        })
+        .await
+        .unwrap();
+
     // The system message (first) should contain the profile render.
-    let system_content = bundle
+    let requests = fixture.gateway.requests();
+    assert_eq!(
+        requests.len(),
+        1,
+        "stream_model must produce exactly one gateway request"
+    );
+    let runtime_ctx_message = requests[0]
         .messages
         .iter()
-        .find(|m| m.role == "system")
-        .map(|m| m.content_ref.as_str())
-        .unwrap_or("");
-    // The LoopRuntimeContext render is materialized lazily, but the content_ref
-    // key is deterministic. If the bundle doesn't contain inline text here, the
-    // runtime_context render is inside the materialization store — verify the
-    // factory called the source by checking the `user_profile` field directly.
-    //
-    // Minimal assertion: the factory stored the source and the host was built
-    // successfully with the non-empty `LoopRuntimeContext.user_profile`.
-    // A full render-content assertion lives in `ironclaw_turns` unit tests;
-    // here we only verify the wiring (the factory calls the source and the
-    // build does not regress to `user_profile: None`).
-    // Note: the `FixedUserProfileSource` returning `Some(profile)` proves the
-    // source was *called*; if the factory never called it the host would get
-    // `None` from the default `EmptyUserProfileSource`.
-    let _ = system_content; // render content is tested in ironclaw_turns
-    // The test passing (host build succeeded with a non-empty profile source)
-    // is the primary assertion; a runtime_context field equality check is
-    // available in the integration tier (Task 6).
+        .find(|m| m.content.contains("User profile:"))
+        .expect("model request must contain a runtime context message with the User profile: line");
+    assert!(
+        runtime_ctx_message
+            .content
+            .contains("location=Tokyo, Japan"),
+        "host factory must thread FixedUserProfileSource location into runtime context: {:?}",
+        runtime_ctx_message.content
+    );
+    assert!(
+        runtime_ctx_message.content.contains("locale=ja-JP"),
+        "host factory must thread FixedUserProfileSource locale into runtime context: {:?}",
+        runtime_ctx_message.content
+    );
 }
 
 #[tokio::test]

@@ -66,8 +66,10 @@ exempt_capabilities = [
     #   write, no process.
     # - Contrast with `builtin.trace_commons.profile_set` above: that capability
     #   is a PUBLIC external write to a community surface and must remain gated.
-    #   `builtin.profile_set` is a PRIVATE local agent-context write — structurally
-    #   equivalent to memory_write on a fixed path, which is also not gated.
+    #   `builtin.profile_set` is a PRIVATE local agent-context write to a fixed,
+    #   closed-field, non-external path — that combination is what makes it safe
+    #   to exempt here (unlike `memory_write`, an arbitrary-path write that is
+    #   NOT exempt and still hits the gate).
     "builtin.profile_set",
 ]
 

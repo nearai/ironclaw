@@ -70,19 +70,26 @@ pub struct CommunicationRuntimeContext {
 }
 
 /// Validated BCP-47-ish locale tag (per spec §5 strong-types mandate,
-/// `.claude/rules/types.md`). Validation: non-empty, ASCII alphanumeric + hyphen.
+/// `.claude/rules/types.md`). Validation: non-empty, at most 35 characters,
+/// ASCII alphanumeric + hyphen, no empty subtags.
 /// No `From<String>` — construction is fallible so misuse is a compile error.
 /// `new` returns `Result` per the canonical newtype template (types.md) so the
 /// rejection reason is observable; callers wanting `Option` use `.ok()`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Locale(String);
 
+pub(crate) const MAX_LOCALE_LEN: usize = 35;
+
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
 pub enum LocaleError {
     #[error("locale is empty")]
     Empty,
-    #[error("locale has invalid characters (expected ASCII alphanumeric or '-')")]
+    #[error("locale exceeds {MAX_LOCALE_LEN} characters")]
+    TooLong,
+    #[error("locale has invalid characters (expected ASCII alphanumeric or \'-\')")]
     InvalidCharacters,
+    #[error("locale has empty subtags (consecutive or leading/trailing hyphens)")]
+    EmptySubtag,
 }
 
 impl Locale {
@@ -91,8 +98,14 @@ impl Locale {
         if s.is_empty() {
             return Err(LocaleError::Empty);
         }
+        if s.chars().count() > MAX_LOCALE_LEN {
+            return Err(LocaleError::TooLong);
+        }
         if !s.chars().all(|c| c.is_ascii_alphanumeric() || c == '-') {
             return Err(LocaleError::InvalidCharacters);
+        }
+        if s.split('-').any(|part| part.is_empty()) {
+            return Err(LocaleError::EmptySubtag);
         }
         Ok(Self(s))
     }
@@ -1326,5 +1339,49 @@ mod tests {
             !text.contains("Tokyo\n\nIGNORE"),
             "newlines in location must be neutralized: {text:?}"
         );
+    }
+
+    // --- Locale::new validation tests ---
+
+    #[test]
+    fn locale_leading_hyphen_is_rejected() {
+        assert!(
+            Locale::new("-").is_err(),
+            "leading hyphen produces empty subtag and must be rejected"
+        );
+    }
+
+    #[test]
+    fn locale_consecutive_hyphens_are_rejected() {
+        assert!(
+            Locale::new("en--US").is_err(),
+            "consecutive hyphens produce an empty subtag and must be rejected"
+        );
+    }
+
+    #[test]
+    fn locale_valid_bcp47_en_us_is_accepted() {
+        assert!(
+            Locale::new("en-US").is_ok(),
+            "well-formed BCP-47 locale must be accepted"
+        );
+    }
+
+    #[test]
+    fn locale_36_chars_is_rejected_with_too_long() {
+        let too_long = "a".repeat(36);
+        let err = Locale::new(too_long).unwrap_err();
+        assert_eq!(
+            err,
+            LocaleError::TooLong,
+            "a 36-character locale must produce TooLong"
+        );
+    }
+
+    #[test]
+    fn locale_20_char_private_use_tag_is_accepted() {
+        // "zh-Hant-CN-x-private" is exactly 20 characters — well within the limit.
+        let locale = Locale::new("zh-Hant-CN-x-private").expect("20-char locale must be accepted");
+        assert_eq!(locale.as_str(), "zh-Hant-CN-x-private");
     }
 }

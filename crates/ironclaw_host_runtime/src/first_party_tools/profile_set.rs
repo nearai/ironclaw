@@ -4,6 +4,7 @@ use ironclaw_host_api::{EffectKind, PermissionMode, ResourceUsage};
 use ironclaw_memory::{
     MemoryBackend, MemoryContext, MemoryDocumentPath, MemoryWriteOutcome, content_bytes_sha256,
 };
+use ironclaw_turns::run_profile::Locale;
 use serde_json::{Map, Value, json};
 
 use crate::{FirstPartyCapabilityError, FirstPartyCapabilityRequest, FirstPartyCapabilityResult};
@@ -44,10 +45,7 @@ fn validated_fields(input: &Value) -> Result<Map<String, Value>, FirstPartyCapab
             }
             "locale" => {
                 let s = value.as_str().ok_or_else(input_error)?;
-                // Light BCP-47 shape check: non-empty, ascii-alnum/hyphen.
-                if s.is_empty() || !s.chars().all(|c| c.is_ascii_alphanumeric() || c == '-') {
-                    return Err(input_error());
-                }
+                Locale::new(s).map_err(|_| input_error())?;
                 out.insert("locale".into(), json!(s));
             }
             "location" => {
@@ -120,7 +118,10 @@ pub(super) async fn profile_merge_into(
         let current = backend
             .read_document(context, path)
             .await
-            .map_err(|_| operation_error())?;
+            .map_err(|error| {
+                tracing::debug!(%error, "profile_set read_document failed");
+                operation_error()
+            })?;
         let expected_hash = current.as_deref().map(content_bytes_sha256);
         let mut doc: serde_json::Map<String, serde_json::Value> = match &current {
             Some(bytes) => match serde_json::from_slice(bytes) {
@@ -148,7 +149,10 @@ pub(super) async fn profile_merge_into(
                 &options,
             )
             .await
-            .map_err(|_| operation_error())?;
+            .map_err(|error| {
+                tracing::debug!(%error, "profile_set compare_and_write failed");
+                operation_error()
+            })?;
         if outcome == MemoryWriteOutcome::Written {
             return Ok(FirstPartyCapabilityResult::new(
                 json!({ "status": "ok" }),
@@ -374,6 +378,22 @@ mod tests {
                 Some(ironclaw_host_api::RuntimeDispatchErrorKind::InputEncode)
             ),
             "locale with space must produce InputEncode error, got: {err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn rejects_too_long_locale() {
+        let state = MemoryCapabilityState::default();
+        // A 36-character locale exceeds the 35-character limit enforced by Locale::new.
+        let too_long = "a".repeat(36);
+        let req = profile_set_request(json!({"locale": too_long}));
+        let err = dispatch(&state, &req).await.unwrap_err();
+        assert!(
+            matches!(
+                err.kind(),
+                Some(ironclaw_host_api::RuntimeDispatchErrorKind::InputEncode)
+            ),
+            "36-char locale must produce InputEncode error via Locale::new, got: {err:?}"
         );
     }
 
