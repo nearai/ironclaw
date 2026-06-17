@@ -121,7 +121,7 @@ impl CapabilityDisplayPreviewStore {
         let input_summary = input_summary(tool_name, arguments);
         let input = CapabilityDisplayInputPreview {
             title: bounded_display_text(tool_name, CAPABILITY_DISPLAY_SUMMARY_MAX_BYTES).text,
-            subtitle: safe_path_subtitle(arguments),
+            subtitle: primary_arg_subtitle(tool_name, arguments),
             truncated: input_summary
                 .as_ref()
                 .is_some_and(|summary| summary.truncated),
@@ -698,6 +698,56 @@ fn safe_path_subtitle(value: &serde_json::Value) -> Option<String> {
         .or_else(|| value.get("target"))?
         .as_str()?;
     safe_display_path(path)
+}
+
+/// A compact, display-safe "primary argument" for the activity row's inline
+/// detail — the single most salient input for a tool, so the row reads like
+/// `nearai.web_search   <query>` / `shell   <command>` / `read_file   <path>`
+/// instead of a bare tool name. Reuses the same sanitizing formatters as
+/// `input_summary` (URL stripping, shell redaction, byte bounds) and falls back
+/// to the path subtitle for tools without a recognized primary argument.
+fn primary_arg_subtitle(capability_id: &str, value: &serde_json::Value) -> Option<String> {
+    // Search-shaped tools → the query string.
+    if (capability_matches(capability_id, "memory_search")
+        || capability_id == "web_search"
+        || capability_id == "llm_context"
+        || capability_id.ends_with(".web_search")
+        || capability_id.ends_with(".search")
+        || capability_id == "web-access.search"
+        || capability_id == "nearai.web_search")
+        && let Some(query) = string_arg(value, &["query", "q", "text", "pattern"])
+    {
+        return non_empty(bounded_summary_value(query).text);
+    }
+
+    // Shell → the command (with the existing secret-redacting formatter).
+    if capability_matches(capability_id, "shell")
+        && let Some(command) = string_arg(value, &["command"])
+    {
+        return non_empty(shell_command_display_text(command).text);
+    }
+
+    // HTTP / fetch → the URL (sensitive parts stripped).
+    if (capability_matches(capability_id, "http")
+        || capability_matches(capability_id, "http.save")
+        || capability_id == "web_fetch"
+        || capability_id.ends_with(".web_fetch")
+        || capability_id == "web-access.get_content")
+        && let Some(url) = string_arg(value, &["url"])
+    {
+        return non_empty(safe_url_display(url).text);
+    }
+
+    // Glob / grep → the pattern.
+    if (capability_matches(capability_id, "glob") || capability_matches(capability_id, "grep"))
+        && let Some(pattern) = string_arg(value, &["pattern"])
+    {
+        return non_empty(bounded_summary_value(pattern).text);
+    }
+
+    // Everything else (read_file, write_file, list_dir, apply_patch, memory_*)
+    // → the path/target.
+    safe_path_subtitle(value)
 }
 
 /// Returns `true` when the path contains characters that are inherently unsafe
