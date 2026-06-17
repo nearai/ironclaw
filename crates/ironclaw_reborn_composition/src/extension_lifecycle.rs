@@ -327,10 +327,24 @@ impl RebornLocalExtensionManagementPort {
     ) -> Result<Option<ExtensionInstallation>, ProductWorkflowError> {
         let installation_id = ExtensionInstallationId::new(extension_id.as_str().to_string())
             .map_err(map_extension_installation_error)?;
-        self.installation_store
+        let installation = self
+            .installation_store
             .get_installation(&installation_id)
             .await
-            .map_err(map_extension_installation_error)
+            .map_err(map_extension_installation_error)?;
+        if installation
+            .as_ref()
+            .is_some_and(|installation| installation.extension_id() != extension_id)
+        {
+            return Err(ProductWorkflowError::InvalidBindingRequest {
+                reason: format!(
+                    "installation {} does not belong to extension {}",
+                    installation_id.as_str(),
+                    extension_id.as_str()
+                ),
+            });
+        }
+        Ok(installation)
     }
 
     pub(crate) async fn install(
@@ -1210,8 +1224,9 @@ fn map_search_credential_stage_error(
             }
         }
         ironclaw_host_api::CredentialStageError::Backend => {
-            ProductWorkflowError::InvalidBindingRequest {
-                reason: "extension product auth credential state is invalid".to_string(),
+            ProductWorkflowError::Transient {
+                reason: "extension product auth credential state is temporarily unavailable"
+                    .to_string(),
             }
         }
     }
@@ -1904,6 +1919,26 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn extension_lifecycle_search_rejects_mismatched_installation_row() {
+        let (_dir, port, _active_registry, _failing_store, _trust_policy) =
+            extension_port_with_failing_store(
+                ExtensionRegistry::new(),
+                DeleteInstallationFailingStore::mismatched_get_installation(),
+                ExtensionLifecycleService::new(ExtensionRegistry::new()),
+            );
+
+        let error = port
+            .search("fixture", None)
+            .await
+            .expect_err("search reports mismatched installation row");
+
+        assert!(matches!(
+            error,
+            ProductWorkflowError::InvalidBindingRequest { .. }
+        ));
+    }
+
+    #[tokio::test]
     async fn active_extension_trust_policy_is_digest_pinned() {
         let (_dir, _storage_root, port, _active_registry, _installation_store, trust_policy) =
             extension_management_port_fixture_with_catalog_service_and_trust(
@@ -2387,6 +2422,38 @@ mod tests {
                 .join("system/extensions/github/wasm/github_tool.wasm")
                 .exists()
         );
+    }
+
+    #[tokio::test]
+    async fn extension_lifecycle_search_reports_credential_backend_failure_as_transient() {
+        let (_dir, _storage_root, facade, _active_registry, _installation_store) =
+            github_extension_lifecycle_fixture();
+        let facade = facade.with_runtime_credential_accounts(Arc::new(
+            BackendUnavailableRuntimeCredentialAccounts,
+        ));
+        let package_ref =
+            LifecyclePackageRef::new(LifecyclePackageKind::Extension, "github").expect("valid ref");
+
+        facade
+            .execute(
+                lifecycle_surface_context(),
+                LifecycleProductAction::ExtensionInstall {
+                    package_ref: package_ref.clone(),
+                },
+            )
+            .await
+            .expect("install extension");
+        let error = facade
+            .execute(
+                lifecycle_surface_context(),
+                LifecycleProductAction::ExtensionSearch {
+                    query: "github".to_string(),
+                },
+            )
+            .await
+            .expect_err("search reports credential backend failure");
+
+        assert!(matches!(error, ProductWorkflowError::Transient { .. }));
     }
 
     #[tokio::test]
@@ -3499,6 +3566,7 @@ mod tests {
         fail_manifest_delete: bool,
         fail_set_activation_enabled: bool,
         fail_get_installation: bool,
+        mismatched_get_installation: bool,
     }
 
     impl DeleteInstallationFailingStore {
@@ -3508,6 +3576,7 @@ mod tests {
                 fail_manifest_delete: true,
                 fail_set_activation_enabled: false,
                 fail_get_installation: false,
+                mismatched_get_installation: false,
             }
         }
 
@@ -3517,6 +3586,7 @@ mod tests {
                 fail_manifest_delete: false,
                 fail_set_activation_enabled: true,
                 fail_get_installation: false,
+                mismatched_get_installation: false,
             }
         }
 
@@ -3526,6 +3596,17 @@ mod tests {
                 fail_manifest_delete: false,
                 fail_set_activation_enabled: false,
                 fail_get_installation: true,
+                mismatched_get_installation: false,
+            }
+        }
+
+        fn mismatched_get_installation() -> Self {
+            Self {
+                inner: InMemoryExtensionInstallationStore::default(),
+                fail_manifest_delete: false,
+                fail_set_activation_enabled: false,
+                fail_get_installation: false,
+                mismatched_get_installation: true,
             }
         }
     }
@@ -3582,6 +3663,19 @@ mod tests {
                 return Err(ExtensionInstallationError::InvalidInstallation {
                     reason: "get installation failed".to_string(),
                 });
+            }
+            if self.mismatched_get_installation {
+                let extension_id = ExtensionId::new("other-fixture").expect("valid extension id");
+                let installation = ExtensionInstallation::new(
+                    installation_id.clone(),
+                    extension_id.clone(),
+                    ExtensionActivationState::Installed,
+                    ExtensionManifestRef::new(extension_id, None),
+                    Vec::new(),
+                    chrono::Utc::now(),
+                )
+                .expect("mismatched installation fixture");
+                return Ok(Some(installation));
             }
             self.inner.get_installation(installation_id).await
         }
@@ -3981,6 +4075,28 @@ mod tests {
                 created_at: now,
                 updated_at: now,
             })
+        }
+    }
+
+    struct BackendUnavailableRuntimeCredentialAccounts;
+
+    #[async_trait]
+    impl crate::product_auth_runtime_credentials::RuntimeCredentialAccountSelectionService
+        for BackendUnavailableRuntimeCredentialAccounts
+    {
+        async fn select_configured_account_for_binding(
+            &self,
+            _lookup: ironclaw_auth::CredentialAccountSelectionRequest,
+            _runtime_scope: ironclaw_auth::AuthProductScope,
+        ) -> Result<ironclaw_auth::CredentialAccount, ironclaw_auth::AuthProductError> {
+            Err(ironclaw_auth::AuthProductError::BackendUnavailable)
+        }
+
+        async fn select_unique_configured_runtime_account(
+            &self,
+            _request: crate::product_auth_runtime_credentials::RuntimeCredentialAccountSelectionRequest,
+        ) -> Result<ironclaw_auth::CredentialAccount, ironclaw_auth::AuthProductError> {
+            Err(ironclaw_auth::AuthProductError::BackendUnavailable)
         }
     }
 
