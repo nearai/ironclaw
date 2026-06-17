@@ -2,8 +2,7 @@ use std::sync::{Arc, OnceLock};
 
 use ironclaw_loop_support::{
     CapabilityAllowSet, CapabilityResolveError, CapabilityResultWrite,
-    CapabilitySurfaceProfileResolver, CapabilityWriteResult, HostIdentityContextBuildError,
-    HostIdentityContextCandidate, HostIdentityContextSource, LoopCapabilityInputResolver,
+    CapabilitySurfaceProfileResolver, CapabilityWriteResult, LoopCapabilityInputResolver,
     LoopCapabilityPortFactory, LoopCapabilityResultWriter,
 };
 use ironclaw_product_workflow::{
@@ -12,22 +11,8 @@ use ironclaw_product_workflow::{
 };
 use ironclaw_turns::run_profile::{
     AgentLoopHostError, AgentLoopHostErrorKind, CapabilityInputRef, LoopCapabilityPort,
-    LoopRunContext, PromptMode,
+    LoopRunContext,
 };
-
-#[derive(Default)]
-pub(super) struct EmptyIdentityContextSource;
-
-#[async_trait::async_trait]
-impl HostIdentityContextSource for EmptyIdentityContextSource {
-    async fn load_identity_candidates(
-        &self,
-        _run_context: &LoopRunContext,
-        _mode: PromptMode,
-    ) -> Result<Vec<HostIdentityContextCandidate>, HostIdentityContextBuildError> {
-        Ok(Vec::new())
-    }
-}
 
 #[derive(Default)]
 pub(super) struct UnavailableCapabilityIo;
