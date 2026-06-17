@@ -56,8 +56,8 @@ impl TurnEventSink for CompositeTurnEventSink {
 
 #[cfg(feature = "root-llm-provider")]
 pub(crate) use learning::{
-    LiveSkillLearnedNotifier, PortSkillWriter, SkillLearnedNotifier, SkillLearningInferenceAdapter,
-    SkillLearningTurnEventSink, SkillWriter,
+    LiveSkillLearnedNotifier, LlmSkillRefiner, PortSkillWriter, SkillLearnedNotifier,
+    SkillLearningInferenceAdapter, SkillLearningTurnEventSink, SkillRefiner, SkillWriter,
 };
 
 #[cfg(feature = "root-llm-provider")]
@@ -70,7 +70,8 @@ mod learning {
     use ironclaw_llm::{ChatMessage, CompletionRequest, LlmProvider};
     use ironclaw_safety::{Sanitizer, validate_trusted_trigger_prompt};
     use ironclaw_skill_learning::{
-        DistillOutcome, DistilledSkill, SkillInferenceError, SkillInferencePort, distill_skill,
+        DistillOutcome, DistilledSkill, RefineOutcome, SkillInferenceError, SkillInferencePort,
+        distill_skill, refine_skill,
     };
     use ironclaw_skills::{ManagedSkillSource, SkillSummary, parse_skill_md};
     use ironclaw_threads::{
@@ -140,14 +141,89 @@ mod learning {
         ) -> Result<String, String>;
     }
 
+    /// What to do with an existing learned skill when a near-duplicate candidate
+    /// is distilled for the same task.
+    #[derive(Debug)]
+    pub(crate) enum MergeAction {
+        /// Update the existing skill with this refined, install-ready content.
+        Replace(String),
+        /// Leave the existing skill unchanged — it already subsumes the candidate.
+        KeepExisting,
+        /// Refinement was unavailable; overwrite the existing skill with the
+        /// candidate (the plain dedup-consolidation behavior).
+        Overwrite,
+    }
+
+    /// Self-improvement seam: merge a freshly distilled candidate into an
+    /// existing learned skill for the same task. Composition implements it over
+    /// the learning model; tests use a stub.
+    #[async_trait]
+    pub(crate) trait SkillRefiner: Send + Sync {
+        /// Decide how to fold `candidate` into the existing skill `existing`,
+        /// whose stored name is `target_name`.
+        async fn merge(&self, existing: &str, candidate: &str, target_name: &str) -> MergeAction;
+    }
+
+    /// [`SkillRefiner`] over the learning model: asks it to combine the existing
+    /// and candidate `SKILL.md` into a strictly better document (accumulated
+    /// gotchas, bumped version), then retargets and injection-scans the result
+    /// before it can be installed.
+    pub(crate) struct LlmSkillRefiner {
+        inference: Arc<dyn SkillInferencePort>,
+    }
+
+    impl LlmSkillRefiner {
+        pub(crate) fn new(inference: Arc<dyn SkillInferencePort>) -> Self {
+            Self { inference }
+        }
+    }
+
+    #[async_trait]
+    impl SkillRefiner for LlmSkillRefiner {
+        async fn merge(&self, existing: &str, candidate: &str, target_name: &str) -> MergeAction {
+            match refine_skill(existing, candidate, self.inference.as_ref()).await {
+                Ok(RefineOutcome::Refined(skill)) => {
+                    // Never trust the model to preserve the name; retarget so
+                    // `update_skill`'s name-consistency check passes.
+                    let retargeted = rewrite_skill_name(&skill.skill_md, target_name);
+                    // The refined document is new trusted prompt text loaded into
+                    // the next run, so injection-scan it before it can install.
+                    if validate_trusted_trigger_prompt(&*SKILL_LEARNING_SAFETY, &retargeted)
+                        .is_err()
+                    {
+                        tracing::debug!(
+                            skill = %target_name,
+                            "skill-learning: refined skill rejected by safety scan; consolidating instead"
+                        );
+                        return MergeAction::Overwrite;
+                    }
+                    MergeAction::Replace(retargeted)
+                }
+                Ok(RefineOutcome::KeepExisting) => MergeAction::KeepExisting,
+                Err(error) => {
+                    tracing::debug!(
+                        %error,
+                        skill = %target_name,
+                        "skill-learning: refinement failed; consolidating instead"
+                    );
+                    MergeAction::Overwrite
+                }
+            }
+        }
+    }
+
     /// [`SkillWriter`] over the runtime's scoped skill-management port.
     pub(crate) struct PortSkillWriter {
         port: Arc<RebornLocalSkillManagementPort>,
+        refiner: Arc<dyn SkillRefiner>,
     }
 
     impl PortSkillWriter {
-        pub(crate) fn new(port: Arc<RebornLocalSkillManagementPort>) -> Self {
-            Self { port }
+        pub(crate) fn new(
+            port: Arc<RebornLocalSkillManagementPort>,
+            refiner: Arc<dyn SkillRefiner>,
+        ) -> Self {
+            Self { port, refiner }
         }
     }
 
@@ -163,19 +239,54 @@ mod learning {
             // task a slightly different name each run, so without this the
             // user's skill list fills with siblings that never get reused
             // together. When an existing learned skill covers the same ground,
-            // refine it in place under its existing name instead of installing a
-            // second one. `update_skill` requires the document's frontmatter
-            // `name` to equal the target, so retarget the content first.
+            // evolve it in place under its existing name instead of installing a
+            // second one — the self-improvement loop: the model folds the new
+            // evidence (more gotchas, clearer steps, a bumped version) into the
+            // existing skill. `update_skill` requires the document's frontmatter
+            // `name` to equal the target, so the merged content is retargeted.
             if let Some(existing_name) = self.find_duplicate(&scope, name, content).await {
-                tracing::debug!(
-                    distilled_name = %name,
-                    merged_into = %existing_name,
-                    "skill-learning: consolidating near-duplicate learned skill"
-                );
-                let retargeted = rewrite_skill_name(content, &existing_name);
+                let existing = self
+                    .port
+                    .read_content_for_scope(scope.clone(), &existing_name)
+                    .await
+                    .ok();
+                let action = match existing.as_ref() {
+                    Some(existing) => {
+                        self.refiner
+                            .merge(&existing.content, content, &existing_name)
+                            .await
+                    }
+                    None => MergeAction::Overwrite,
+                };
+                let merged = match action {
+                    MergeAction::Replace(refined) => {
+                        tracing::debug!(
+                            distilled_name = %name,
+                            refined_into = %existing_name,
+                            "skill-learning: refined existing learned skill from a recurring task"
+                        );
+                        refined
+                    }
+                    MergeAction::KeepExisting => {
+                        tracing::debug!(
+                            distilled_name = %name,
+                            kept = %existing_name,
+                            "skill-learning: existing learned skill already subsumes candidate"
+                        );
+                        return Ok(existing_name);
+                    }
+                    MergeAction::Overwrite => {
+                        tracing::debug!(
+                            distilled_name = %name,
+                            merged_into = %existing_name,
+                            "skill-learning: consolidating near-duplicate learned skill"
+                        );
+                        rewrite_skill_name(content, &existing_name)
+                    }
+                };
                 return self
                     .port
-                    .update_for_scope(scope, &existing_name, &retargeted)
+                    .update_for_scope(scope, &existing_name, &merged)
                     .await
                     .map(|_| existing_name)
                     .map_err(|error| error.to_string());
@@ -992,6 +1103,85 @@ mod learning {
             // The body line that merely starts with `name:` must be untouched.
             assert!(parsed.prompt_content.contains("name: not-the-frontmatter"));
             assert!(parsed.prompt_content.contains("Body."));
+        }
+
+        struct CannedInference {
+            response: String,
+        }
+
+        #[async_trait]
+        impl SkillInferencePort for CannedInference {
+            async fn infer(
+                &self,
+                _system: &str,
+                _user: &str,
+            ) -> Result<String, SkillInferenceError> {
+                Ok(self.response.clone())
+            }
+        }
+
+        const EXISTING_SKILL: &str = "---\nname: file-count\nversion: 1\ndescription: count chars\nactivation:\n  keywords: [file, count]\n---\n\n# File Count\n\n## Steps\n\n1. read the file\n";
+        const REFINED_RESPONSE: &str = "---\nname: file-count\nversion: 2\ndescription: count chars\nactivation:\n  keywords: [file, count, character]\n---\n\n# File Count\n\n## Gotchas\n\n- spaces count too\n";
+
+        fn refiner(response: &str) -> LlmSkillRefiner {
+            LlmSkillRefiner::new(Arc::new(CannedInference {
+                response: response.to_string(),
+            }))
+        }
+
+        #[tokio::test]
+        async fn refiner_replaces_with_refined_and_bumped_skill() {
+            let action = refiner(REFINED_RESPONSE)
+                .merge(EXISTING_SKILL, EXISTING_SKILL, "file-count")
+                .await;
+            match action {
+                MergeAction::Replace(content) => {
+                    assert!(content.contains("name: file-count"));
+                    assert!(content.contains("version: 2"));
+                    assert!(content.contains("spaces count too"));
+                }
+                other => panic!("expected Replace, got {other:?}"),
+            }
+        }
+
+        #[tokio::test]
+        async fn refiner_retargets_a_model_renamed_skill() {
+            // The model returns a refined skill under the WRONG name; merge must
+            // retarget it to the existing name so `update_skill`'s name check
+            // passes instead of erroring.
+            let renamed = REFINED_RESPONSE.replace("name: file-count", "name: file-count-renamed");
+            match refiner(&renamed)
+                .merge(EXISTING_SKILL, EXISTING_SKILL, "file-count")
+                .await
+            {
+                MergeAction::Replace(content) => {
+                    let parsed = parse_skill_md(&content).expect("retargeted skill parses");
+                    assert_eq!(parsed.manifest.name, "file-count");
+                }
+                other => panic!("expected Replace, got {other:?}"),
+            }
+        }
+
+        #[tokio::test]
+        async fn refiner_keeps_existing_on_keep_sentinel() {
+            assert!(matches!(
+                refiner("KEEP")
+                    .merge(EXISTING_SKILL, EXISTING_SKILL, "file-count")
+                    .await,
+                MergeAction::KeepExisting
+            ));
+        }
+
+        #[tokio::test]
+        async fn refiner_overwrites_when_model_output_is_unparseable() {
+            // A chatty/garbage response must not poison the skill; fall back to
+            // plain consolidation (overwrite with the candidate).
+            assert!(matches!(
+                refiner("sure, here is the merged skill")
+                    .merge(EXISTING_SKILL, EXISTING_SKILL, "file-count")
+                    .await,
+                MergeAction::Overwrite
+            ));
         }
     }
 }

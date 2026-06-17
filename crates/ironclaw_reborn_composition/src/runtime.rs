@@ -2593,11 +2593,17 @@ pub async fn build_reborn_runtime(
             ));
         // Reuse the runtime's already-built scoped skill-management port so the
         // learned skill lands exactly where the WebUI lists it and the next run
-        // loads it.
+        // loads it. The writer evolves an existing learned skill in place when a
+        // recurring task is re-learned, using the same learning model to refine
+        // it (accumulated gotchas, bumped version) instead of accreting siblings.
+        let skill_refiner: Arc<dyn crate::skill_learning::SkillRefiner> = Arc::new(
+            crate::skill_learning::LlmSkillRefiner::new(Arc::clone(&inference)),
+        );
         let skill_writer: Arc<dyn crate::skill_learning::SkillWriter> =
-            Arc::new(crate::skill_learning::PortSkillWriter::new(Arc::clone(
-                &local_runtime.skill_management,
-            )));
+            Arc::new(crate::skill_learning::PortSkillWriter::new(
+                Arc::clone(&local_runtime.skill_management),
+                skill_refiner,
+            ));
         // Live "learned a skill" bubble on the run's thread stream (reuses the
         // SkillActivation projection -> existing chat bubble).
         let skill_learned_notifier: Arc<dyn crate::skill_learning::SkillLearnedNotifier> = Arc::new(

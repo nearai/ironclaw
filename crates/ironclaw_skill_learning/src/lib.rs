@@ -20,6 +20,11 @@ use ironclaw_skills::{SkillParseError, parse_skill_md};
 /// to the parser whose output contract it must satisfy.
 const SKILL_EXTRACTION_PROMPT: &str = include_str!("../prompts/skill_extraction.md");
 
+/// The refinement prompt (existing + candidate `SKILL.md` -> improved `SKILL.md`
+/// or a `KEEP` line). Drives the self-evolution step: each time a learned task
+/// recurs, the skill folds in the new evidence and gets strictly better.
+const SKILL_REFINEMENT_PROMPT: &str = include_str!("../prompts/skill_refinement.md");
+
 /// Single-shot inference: system instructions + user content -> text.
 ///
 /// Implemented by the composition layer over the runtime's non-run inference
@@ -107,6 +112,64 @@ pub fn parse_distillation(raw: &str) -> Result<DistillOutcome, DistillError> {
     }
     let parsed = parse_skill_md(cleaned)?;
     Ok(DistillOutcome::Skill(DistilledSkill {
+        name: parsed.manifest.name,
+        skill_md: cleaned.to_string(),
+    }))
+}
+
+/// Outcome of a refinement attempt.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RefineOutcome {
+    /// A refined, validated, installable skill. Its `name` is whatever the model
+    /// emitted (the refinement prompt instructs it to preserve the existing
+    /// name; the caller still retargets defensively before install).
+    Refined(DistilledSkill),
+    /// The existing skill already subsumes the candidate; keep it unchanged.
+    KeepExisting,
+}
+
+/// Refine an existing skill with a freshly distilled candidate for the same kind
+/// of task — the self-evolution step. The model folds the candidate's new
+/// evidence (clearer steps, the union of real gotchas, a bumped version) into the
+/// existing skill, or returns [`RefineOutcome::KeepExisting`] when the existing
+/// already covers everything useful. The produced document is validated with
+/// [`ironclaw_skills::parse_skill_md`], so only an installable skill comes back
+/// as [`RefineOutcome::Refined`].
+pub async fn refine_skill(
+    existing_skill_md: &str,
+    candidate_skill_md: &str,
+    inference: &dyn SkillInferencePort,
+) -> Result<RefineOutcome, DistillError> {
+    let user = format!(
+        "# Existing SKILL.md\n\n{existing_skill_md}\n\n\
+         # Newly distilled candidate SKILL.md (same task)\n\n{candidate_skill_md}"
+    );
+    let raw = inference.infer(SKILL_REFINEMENT_PROMPT, &user).await?;
+    parse_refinement(&raw)
+}
+
+/// Parse a raw refinement response into a [`RefineOutcome`].
+///
+/// Pure and unit-tested: tolerates an accidental ```` ``` ```` fence wrap and a
+/// leading `KEEP` decline, and validates any candidate document with the
+/// install-path parser so only installable skills come back as
+/// [`RefineOutcome::Refined`].
+pub fn parse_refinement(raw: &str) -> Result<RefineOutcome, DistillError> {
+    let cleaned = strip_code_fence(raw.trim());
+    if cleaned.is_empty() {
+        return Err(DistillError::EmptyResponse);
+    }
+    // A real refined document begins with the `---` frontmatter opener, so a
+    // leading `KEEP` (any case) is unambiguously the decline sentinel.
+    if cleaned
+        .lines()
+        .next()
+        .is_some_and(|line| line.trim().to_ascii_uppercase().starts_with("KEEP"))
+    {
+        return Ok(RefineOutcome::KeepExisting);
+    }
+    let parsed = parse_skill_md(cleaned)?;
+    Ok(RefineOutcome::Refined(DistilledSkill {
         name: parsed.manifest.name,
         skill_md: cleaned.to_string(),
     }))
@@ -225,6 +288,69 @@ A new GitHub issue needs labels and a first response.\n";
         match outcome {
             DistillOutcome::Skill(skill) => assert_eq!(skill.name, "github-issue-triage"),
             other => panic!("expected a skill, got {other:?}"),
+        }
+    }
+
+    const REFINED_SKILL: &str = "---\n\
+name: github-issue-triage\n\
+version: 2\n\
+description: Triage incoming GitHub issues\n\
+activation:\n\
+  keywords: [github, issue, label]\n\
+---\n\
+\n\
+# GitHub Issue Triage\n\
+\n\
+## Gotchas\n\
+\n\
+- Rate-limited after 30 calls; back off.\n";
+
+    #[test]
+    fn parse_refinement_accepts_a_refined_skill() {
+        match parse_refinement(REFINED_SKILL).expect("refined skill parses") {
+            RefineOutcome::Refined(skill) => {
+                assert_eq!(skill.name, "github-issue-triage");
+                assert!(skill.skill_md.contains("version: 2"));
+                assert!(skill.skill_md.contains("Rate-limited"));
+            }
+            other => panic!("expected a refined skill, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_refinement_treats_keep_as_keep_existing() {
+        assert_eq!(
+            parse_refinement("KEEP").expect("keep parses"),
+            RefineOutcome::KeepExisting
+        );
+        assert_eq!(
+            parse_refinement("keep — existing already covers it").expect("keep prose parses"),
+            RefineOutcome::KeepExisting
+        );
+    }
+
+    #[test]
+    fn parse_refinement_rejects_chatty_non_skill_output() {
+        assert!(matches!(
+            parse_refinement("Here is the merged skill for you:"),
+            Err(DistillError::Unparseable(_))
+        ));
+    }
+
+    #[tokio::test]
+    async fn refine_skill_runs_inference_then_validates() {
+        let inference = StubInference {
+            response: REFINED_SKILL.to_string(),
+        };
+        let outcome = refine_skill(VALID_SKILL, VALID_SKILL, &inference)
+            .await
+            .expect("refinement succeeds");
+        match outcome {
+            RefineOutcome::Refined(skill) => {
+                assert_eq!(skill.name, "github-issue-triage");
+                assert!(skill.skill_md.contains("version: 2"));
+            }
+            other => panic!("expected a refined skill, got {other:?}"),
         }
     }
 }
