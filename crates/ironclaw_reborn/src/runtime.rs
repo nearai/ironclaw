@@ -7,7 +7,7 @@ use ironclaw_host_api::CapabilityId;
 use ironclaw_loop_support::{
     CapabilitySurfaceProfileResolver, CompositeTurnRunWakeNotifier,
     DecoratingLoopCapabilityPortFactory, HostIdentityContextSource, HostInputQueue,
-    HostManagedModelGateway, HostSkillContextSource, LoopAttachmentReadPort,
+    HostManagedModelGateway, HostSkillContextSource, HostUserProfileSource, LoopAttachmentReadPort,
     LoopCapabilityPortDecorator, LoopCapabilityPortFactory, LoopCapabilityResultWriter,
     ProductLiveCancellationReadiness, RunCancellationFactory, SpawnSubagentFlavorDescriptor,
     SpawnSubagentInputCodec, SubagentDefinitionResolver, SubagentPromptComposer,
@@ -119,6 +119,11 @@ where
     /// a no-op implementation, but the type signature always requires a valid
     /// identity context source.
     pub identity_context_source: Arc<dyn HostIdentityContextSource>,
+    /// Source for the per-user agent-context profile (timezone/locale/location).
+    /// Resolved once at loop start and stamped into `LoopRuntimeContext.user_profile`.
+    /// `EmptyUserProfileSource` (always `None`) is acceptable for compositions
+    /// that do not yet wire a profile backend.
+    pub user_profile_source: Arc<dyn HostUserProfileSource>,
     /// Product-live readiness extensions. `RebornLoopDriverHostFactory`
     /// defaults these to no-op implementations so helper tests keep compiling.
     /// `build_product_live_planned_runtime` fails closed when any of them is
@@ -526,6 +531,7 @@ where
         host_factory = host_factory.with_hook_security_audit_sink(sink);
     }
     host_factory = host_factory.with_identity_context_source(parts.identity_context_source);
+    host_factory = host_factory.with_user_profile_source(parts.user_profile_source);
     let host_factory = Arc::new(host_factory);
 
     let transition_port: Arc<dyn TurnRunTransitionPort> = turn_state;

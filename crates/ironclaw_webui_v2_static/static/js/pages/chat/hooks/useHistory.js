@@ -58,7 +58,7 @@ export function useHistory(threadId, options = {}) {
     loadError: null,
   });
   // Synchronous reentrancy guard, tracked PER THREAD — `isLoading` in state is
-  // async so it can't gate overlapping calls (scroll-to-load + onRunCompleted
+  // async so it can't gate overlapping calls (scroll-to-load + onRunSettled
   // refetch can fire in the same tick). It must be per-thread, not a single
   // boolean: a boolean held by an in-flight load of thread A would block a
   // switch to an uncached thread B, leaving B stuck loading. Each entry is
@@ -71,7 +71,13 @@ export function useHistory(threadId, options = {}) {
   threadIdRef.current = threadId;
 
   const loadHistory = React.useCallback(
-    async (cursor) => {
+    async (cursor, loadOptions = {}) => {
+      // `preserveClientOnly` keeps client-synthesized messages that never
+      // appear in the timeline (run-failure `err-*` bubbles) when a full
+      // reload replaces the list. A settle-triggered reload (any terminal
+      // run status) uses this so recovering tool input/output previews from
+      // the durable timeline doesn't erase a visible failure notice.
+      const { preserveClientOnly = false } = loadOptions;
       if (!threadId) {
         setState({ messages: [], nextCursor: null, isLoading: false, loadError: null });
         return;
@@ -105,18 +111,32 @@ export function useHistory(threadId, options = {}) {
 
         // A full (non-paginated) load can be cached without the previous
         // state, so refresh the cache even if the user has since switched
-        // threads. Always under the issuing identity's key.
+        // threads — the cache write must not be deferred into `setState`,
+        // which bails on a stale thread and would leave the cache stale
+        // (forcing a re-fetch + flicker on return). A preserve-client-only
+        // reload merges over the *cached* messages so the client-only
+        // `err-*` bubbles survive in the cache too. Always under the
+        // issuing identity's key.
         if (!cursor) {
-          putCache(key, { messages: renderable, nextCursor });
+          const cachedMessages = historyCache.get(key)?.messages || [];
+          const cacheMerged = preserveClientOnly
+            ? mergePreservingClientOnly(renderable, cachedMessages)
+            : renderable;
+          putCache(key, { messages: cacheMerged, nextCursor });
         }
 
         setState((prev) => {
           // Stale resolve for a thread that's no longer active: leave the
           // live view alone (the cache above already captured the result).
           if (threadIdRef.current !== threadId) return prev;
-          const merged = cursor
-            ? mergePage(renderable, prev.messages)
-            : renderable;
+          let merged;
+          if (cursor) {
+            merged = mergePage(renderable, prev.messages);
+          } else if (preserveClientOnly) {
+            merged = mergePreservingClientOnly(renderable, prev.messages);
+          } else {
+            merged = renderable;
+          }
           if (cursor) putCache(key, { messages: merged, nextCursor });
           return {
             messages: merged,
@@ -186,4 +206,21 @@ export function useHistory(threadId, options = {}) {
 function mergePage(older, current) {
   const ids = new Set(current.map((m) => m.id));
   return [...older.filter((m) => !ids.has(m.id)), ...current];
+}
+
+// Merge a fresh full timeline over the current view while keeping
+// client-synthesized messages the timeline can't carry. Run-failure
+// bubbles (`err-*`) are appended client-side on a terminal failed/recovery
+// status and never persist as timeline records; a settle-triggered reload
+// must keep them, appended after the authoritative timeline messages.
+function mergePreservingClientOnly(timeline, current) {
+  const ids = new Set(timeline.map((m) => m?.id).filter(Boolean));
+  const preserved = current.filter(
+    (m) =>
+      m &&
+      typeof m.id === "string" &&
+      !ids.has(m.id) &&
+      m.id.startsWith("err-"),
+  );
+  return [...timeline, ...preserved];
 }

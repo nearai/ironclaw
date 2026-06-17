@@ -65,8 +65,39 @@ pub(super) async fn read_file(
         .map_err(|error| {
             filesystem_error_with_summary("read_file", resolved.scoped_path.as_str(), error)
         })?;
-    reject_binary_probe(&bytes)?;
-    let (content, _encoding, _line_ending) = decode_text(&bytes)?;
+
+    let content = match decode_read_file_text(&bytes) {
+        Ok(content) => content,
+        Err(text_error) => {
+            match extract_document_text_for_read_file(&bytes, resolved.scoped_path.as_str())? {
+                Some(content) => content,
+                None => return Err(text_error),
+            }
+        }
+    };
+
+    Ok(read_file_text_output(
+        &content,
+        resolved.scoped_path.as_str(),
+        offset,
+        limit,
+        has_explicit_range,
+    ))
+}
+
+fn decode_read_file_text(bytes: &[u8]) -> Result<String, CodingCapabilityError> {
+    reject_binary_probe(bytes)?;
+    let (content, _encoding, _line_ending) = decode_text(bytes)?;
+    Ok(content)
+}
+
+fn read_file_text_output(
+    content: &str,
+    scoped_path: &str,
+    offset: usize,
+    limit: Option<usize>,
+    has_explicit_range: bool,
+) -> Value {
     let lines: Vec<&str> = content.lines().collect();
     let total_lines = lines.len();
     let start_line = offset.saturating_sub(1).min(total_lines);
@@ -83,13 +114,40 @@ pub(super) async fn read_file(
         .map(|(index, line)| format!("{:>6}│ {}", start_line + index + 1, line))
         .collect();
 
-    Ok(json!({
+    json!({
         "content": selected_lines.join("\n"),
         "total_lines": total_lines,
         "lines_shown": end_line - start_line,
         "truncated_by_default": truncated_by_default,
-        "path": resolved.scoped_path.as_str()
-    }))
+        "path": scoped_path
+    })
+}
+
+fn extract_document_text_for_read_file(
+    bytes: &[u8],
+    scoped_path: &str,
+) -> Result<Option<String>, CodingCapabilityError> {
+    let Some(text) =
+        ironclaw_extractors::extract_document_text_by_filename(bytes, Some(scoped_path)).map_err(
+            |error| {
+                operation_error_with_summary(format!(
+                    "read_file failed for {}: document text extraction failed: {error}",
+                    safe_summary_path(scoped_path)
+                ))
+            },
+        )?
+    else {
+        return Ok(None);
+    };
+
+    let text = text.trim();
+    if text.is_empty() {
+        return Err(operation_error_with_summary(format!(
+            "read_file failed for {}: document text extraction yielded no text",
+            safe_summary_path(scoped_path)
+        )));
+    }
+    Ok(Some(text.to_string()))
 }
 
 pub(super) async fn write_file(

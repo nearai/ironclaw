@@ -103,6 +103,7 @@ export function AttachmentPreviewModal({ attachment, onClose }) {
         html`<a
           href=${view.downloadUrl}
           download=${filename}
+          data-testid="attachment-download"
           className="v2-button inline-flex items-center gap-1.5 rounded-md border border-white/10 px-3 py-1.5 text-xs text-iron-200 hover:border-signal/35 hover:text-white"
         >
           <${Icon} name="download" className="h-3.5 w-3.5" />

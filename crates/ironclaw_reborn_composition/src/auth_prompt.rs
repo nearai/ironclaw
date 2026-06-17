@@ -2,7 +2,7 @@ use async_trait::async_trait;
 use ironclaw_auth::{
     AuthProductError, AuthProviderId, CredentialAccountLabel, OAuthAuthorizationUrl,
 };
-use ironclaw_host_api::UserId;
+use ironclaw_host_api::{RuntimeCredentialAccountSetup, UserId};
 use ironclaw_product_adapters::{
     AuthPromptChallengeKind, AuthPromptView, ProductAdapterError, RedactedString,
 };
@@ -120,8 +120,15 @@ fn auth_prompt_from_credential_requirement(
         return view;
     };
     let provider = requirement.provider.as_str().to_string();
-    view.challenge_kind = Some(AuthPromptChallengeKind::ManualToken);
-    view.provider = Some(provider.clone());
-    view.account_label = Some(provider);
+    match &requirement.setup {
+        RuntimeCredentialAccountSetup::ManualToken => {
+            view.challenge_kind = Some(AuthPromptChallengeKind::ManualToken);
+            view.account_label = Some(provider.clone());
+        }
+        RuntimeCredentialAccountSetup::OAuth { .. } => {
+            view.challenge_kind = Some(AuthPromptChallengeKind::Other);
+        }
+    }
+    view.provider = Some(provider);
     view
 }
