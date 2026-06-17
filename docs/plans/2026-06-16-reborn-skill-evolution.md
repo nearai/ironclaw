@@ -227,6 +227,22 @@ Branch `feat/skill-evolution` off `origin/main`.
 - Consolidate the EXISTING on-disk near-duplicate skills (dedup is forward-looking; it does not
   retroactively merge the three siblings already learned during dogfooding).
 
+### Live validation (2026-06-17, NEAR AI gpt-5.5)
+Ran the full loop end to end against a rebuilt `ironclaw-reborn serve`. Confirmed green:
+- **Refinement + dedup**: a recurring file-character-count task refined the existing
+  `create-read-count-file-characters` skill in place (`refined existing learned skill from a
+  recurring task`), `v1 -> v2`, user-skill count held at 3 (no sibling).
+- **Durable feedback**: the "🎓 I learned a new skill …" note rendered in the timeline at ~T+36s,
+  zero `MessageNotDraft` errors.
+
+Two bugs the in-memory fakes missed, fixed and re-validated live (commit "live-validation fixes"):
+- `announce_learned_skill` reused the run's `turn_run_id`; the durable store dedups assistant drafts
+  by it and returned the run's finalized reply, so `finalize` failed `MessageNotDraft`. Fixed with a
+  distinct `skill-learned:{run_id}` id; the regression test now seeds the run's reply first.
+- Re-learning the SAME skill name fell to a plain overwrite (resetting an evolved `v2` to a fresh
+  `v1`). `find_merge_target` now routes both an exact-name re-learn and a renamed sibling through
+  refinement, so the version climbs consistently.
+
 ### Key API references
 - `LlmProvider::complete(CompletionRequest{messages, model, ...}) -> CompletionResponse{content}`
   (`ironclaw_llm/src/provider.rs:515`); NEAR AI honours the per-request `model` override.
