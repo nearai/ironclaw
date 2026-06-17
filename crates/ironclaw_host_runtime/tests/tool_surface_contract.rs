@@ -571,6 +571,22 @@ async fn visible_surface_resolves_builtin_first_party_input_schema_refs() {
             "replace_all": true
         }))
         .expect("apply_patch schema should accept replace_all with one edit");
+    apply_patch_validator
+        .validate(&json!({
+            "path": "/workspace/main.rs",
+            "old_string": "old",
+            "new_string": "new",
+            "edits": null
+        }))
+        .expect("apply_patch schema should accept null edits placeholder with single edit");
+    apply_patch_validator
+        .validate(&json!({
+            "path": "/workspace/main.rs",
+            "old_string": "old",
+            "new_string": "new",
+            "edits": "null"
+        }))
+        .expect("apply_patch schema should accept string null edits placeholder with single edit");
     assert!(
         apply_patch_validator
             .validate(&json!({
@@ -597,6 +613,16 @@ async fn visible_surface_resolves_builtin_first_party_input_schema_refs() {
         apply_patch_validator
             .validate(&json!({
                 "path": "/workspace/main.rs",
+                "old_string": "old",
+                "edits": [{"oldText": "old", "newText": "new"}]
+            }))
+            .is_err(),
+        "apply_patch schema should reject mixed top-level edit shapes"
+    );
+    assert!(
+        apply_patch_validator
+            .validate(&json!({
+                "path": "/workspace/main.rs",
                 "edits": [{
                     "old_string": "old",
                     "new_string": "new",
@@ -606,6 +632,19 @@ async fn visible_surface_resolves_builtin_first_party_input_schema_refs() {
             }))
             .is_err(),
         "apply_patch schema should reject ambiguous edit aliases"
+    );
+    assert!(
+        apply_patch_validator
+            .validate(&json!({
+                "path": "/workspace/main.rs",
+                "edits": [{
+                    "old_string": "old",
+                    "new_string": "new",
+                    "oldText": "old"
+                }]
+            }))
+            .is_err(),
+        "apply_patch schema should reject partial mixed edit aliases"
     );
 
     let trigger_create = surface

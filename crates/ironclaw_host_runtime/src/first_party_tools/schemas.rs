@@ -314,31 +314,64 @@ pub(crate) fn resolve_builtin_input_schema_ref(reference: &str) -> Option<Value>
                 },
                 "new_string": { "type": "string", "description": "Replacement text for a single targeted edit" },
                 "edits": {
-                    "type": "array",
                     "description": "One or more targeted replacements matched against the original file. Prefer this for multiple disjoint edits.",
-                    "minItems": 1,
-                    "maxItems": 256,
-                    "items": {
-                        "type": "object",
-                        "properties": {
-                            "old_string": { "type": "string", "description": "Text to replace" },
-                            "new_string": { "type": "string", "description": "Replacement text" },
-                            "oldText": { "type": "string", "description": "Compatibility alias for old_string" },
-                            "newText": { "type": "string", "description": "Compatibility alias for new_string" }
+                    "oneOf": [
+                        {
+                            "type": "array",
+                            "minItems": 1,
+                            "maxItems": 256,
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "old_string": { "type": "string", "description": "Text to replace" },
+                                    "new_string": { "type": "string", "description": "Replacement text" },
+                                    "oldText": { "type": "string", "description": "Compatibility alias for old_string" },
+                                    "newText": { "type": "string", "description": "Compatibility alias for new_string" }
+                                },
+                                "oneOf": [
+                                    {
+                                        "required": ["old_string", "new_string"],
+                                        "not": {
+                                            "anyOf": [
+                                                { "required": ["oldText"] },
+                                                { "required": ["newText"] }
+                                            ]
+                                        }
+                                    },
+                                    {
+                                        "required": ["oldText", "newText"],
+                                        "not": {
+                                            "anyOf": [
+                                                { "required": ["old_string"] },
+                                                { "required": ["new_string"] }
+                                            ]
+                                        }
+                                    }
+                                ],
+                                "additionalProperties": false
+                            }
                         },
-                        "oneOf": [
-                            { "required": ["old_string", "new_string"] },
-                            { "required": ["oldText", "newText"] }
-                        ],
-                        "additionalProperties": false
-                    }
+                        { "type": "null" },
+                        { "const": "null" }
+                    ]
                 },
                 "replace_all": { "type": "boolean", "description": "Replace every match instead of exactly one. Only valid with a single targeted edit." }
             },
             "required": ["path"],
             "oneOf": [
                 { "required": ["old_string", "new_string"] },
-                { "required": ["edits"] }
+                {
+                    "properties": {
+                        "edits": { "type": "array" }
+                    },
+                    "required": ["edits"],
+                    "not": {
+                        "anyOf": [
+                            { "required": ["old_string"] },
+                            { "required": ["new_string"] }
+                        ]
+                    }
+                }
             ],
             "allOf": [
                 {
@@ -353,7 +386,10 @@ pub(crate) fn resolve_builtin_input_schema_ref(reference: &str) -> Option<Value>
                             { "required": ["old_string", "new_string"] },
                             {
                                 "properties": {
-                                    "edits": { "maxItems": 1 }
+                                    "edits": {
+                                        "type": "array",
+                                        "maxItems": 1
+                                    }
                                 },
                                 "required": ["edits"]
                             }
