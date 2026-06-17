@@ -1579,20 +1579,14 @@ fn is_credit_exhaustion_error(error: &LlmError) -> bool {
         return true;
     }
     // Fallback for any provider that still surfaces credit exhaustion as a
-    // generic RequestFailed with the signal in the rendered message.
+    // generic RequestFailed with the signal in the rendered message. Delegate to
+    // ironclaw_llm's canonical detector so this list cannot drift from the one
+    // the providers use (it previously missed the real cloud-api 402 body
+    // wording — `insufficient_credits`, `credit limit exceeded`).
     let LlmError::RequestFailed { reason, .. } = error else {
         return false;
     };
-    let lower = reason.to_ascii_lowercase();
-    lower.contains("http 402")
-        || lower.contains("402 payment required")
-        || lower.contains("payment required")
-        || lower.contains("insufficient credit")
-        || lower.contains("insufficient credits")
-        || lower.contains("not enough credit")
-        || lower.contains("not enough credits")
-        || lower.contains("credits exhausted")
-        || lower.contains("out of credits")
+    ironclaw_llm::error::is_payment_required_message(&reason.to_ascii_lowercase())
 }
 
 #[cfg(test)]

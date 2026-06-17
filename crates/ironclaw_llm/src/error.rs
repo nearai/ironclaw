@@ -121,7 +121,9 @@ pub(crate) fn context_length_error(status_code: u16, response_text: &str) -> Opt
 /// avoid false positives (a bare "402" can appear in unrelated text); each
 /// shorter form (`insufficient credit`, `not enough credit`) also matches its
 /// pluralised variant via substring containment.
-pub(crate) fn is_payment_required_message(lower: &str) -> bool {
+/// Shared across crates (e.g. `ironclaw_reborn`'s model gateway) so the
+/// credit-exhaustion string list has a single source of truth and cannot drift.
+pub fn is_payment_required_message(lower: &str) -> bool {
     const PAYMENT_PATTERNS: &[&str] = &[
         "http 402",
         "402 payment required",
