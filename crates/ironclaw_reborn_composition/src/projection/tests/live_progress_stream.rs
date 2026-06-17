@@ -93,6 +93,145 @@ async fn webui_event_stream_drains_live_reasoning_projection_from_update_source(
     }));
 }
 
+// The post-run skill-learning notifier publishes a learned-skill bubble
+// through a `LiveProjectionPublisher` that shares the runtime's live update
+// source. This guards that such a bubble actually drains to the WebUI
+// projection stream as a `SkillActivation` item (regression: the live
+// `SkillActivation` envelope was silently dropped before reaching the SSE
+// drain, so users never saw "learned a skill" feedback).
+#[cfg(feature = "root-llm-provider")]
+#[tokio::test]
+async fn webui_event_stream_drains_skill_learned_projection_from_update_source() {
+    let fixture = live_projection_fixture("webui-skill-learned");
+    let user_id = fixture.user_id.clone();
+    let thread_id = fixture.thread_id.clone();
+    let scope = fixture.scope.clone();
+
+    let publisher = fixture.services.live_projection_publisher(user_id.clone());
+    publisher.publish_skill_learned(
+        Some(&user_id),
+        &scope,
+        TurnRunId::new(),
+        "file-character-count-roundtrip",
+        "I picked this up from the task; it'll speed up similar work next time.",
+    );
+
+    let events = fixture
+        .services
+        .webui_event_stream()
+        .drain(ProjectionSubscriptionRequest {
+            actor: TurnActor::new(user_id),
+            scope,
+            after_cursor: None,
+        })
+        .await
+        .unwrap();
+
+    assert!(
+        events.iter().any(|event| {
+            matches!(
+                event.payload(),
+                ProductOutboundPayload::ProjectionUpdate { state }
+                    if state.thread_id == thread_id.to_string()
+                        && state.items.iter().any(|item| matches!(
+                            item,
+                            ProductProjectionItem::SkillActivation { skill_names, .. }
+                                if skill_names.iter().any(|name| name == "file-character-count-roundtrip")
+                        ))
+            )
+        }),
+        "post-run learned-skill bubble must drain to the WebUI projection stream"
+    );
+}
+
+// Faithful reproduction of the PRODUCTION flow that broke: a run streams
+// durable progress (advancing the runtime cursor) and completes; only
+// AFTERWARD does the post-run skill-learning sink publish the learned-skill
+// bubble. The open SSE stream resumes draining from the advanced durable
+// cursor, so the bubble must still be delivered from that resume point — not
+// only on a fresh `after_cursor: None` subscription. The earlier
+// `*_from_update_source` test (publish-then-fresh-drain) passed while real
+// users still saw nothing, because it never exercised the resume path.
+#[cfg(feature = "root-llm-provider")]
+#[tokio::test]
+async fn skill_learned_bubble_delivers_when_sse_resumes_from_advanced_durable_cursor() {
+    let tenant_id = TenantId::new("skill-resume-tenant").unwrap();
+    let user_id = UserId::new("skill-resume-user").unwrap();
+    let agent_id = AgentId::new("skill-resume-agent").unwrap();
+    let thread_id = ThreadId::new("skill-resume-thread").unwrap();
+    let invocation_id = InvocationId::new();
+    let event_log = Arc::new(InMemoryDurableEventLog::new());
+    event_log
+        .append(RuntimeEvent::model_started(
+            resource_scope(&tenant_id, &user_id, &agent_id, &thread_id, invocation_id),
+            CapabilityId::new("loop.model").unwrap(),
+        ))
+        .await
+        .unwrap();
+    let event_log: Arc<dyn DurableEventLog> = event_log;
+    let services = build_reborn_projection_services(
+        event_log,
+        ReplyTargetBindingRef::new("skill-resume-reply").unwrap(),
+    );
+    let scope = TurnScope::new(tenant_id, Some(agent_id), None, thread_id.clone());
+    let actor = TurnActor::new(user_id.clone());
+
+    // 1. Initial drain consumes the durable run-status snapshot and advances
+    //    the runtime cursor — exactly what the SSE handler does while the run
+    //    is executing.
+    let initial = services
+        .webui_event_stream()
+        .drain(ProjectionSubscriptionRequest {
+            actor: actor.clone(),
+            scope: scope.clone(),
+            after_cursor: None,
+        })
+        .await
+        .unwrap();
+    let resume_cursor = initial
+        .last()
+        .expect("durable snapshot")
+        .projection_cursor()
+        .clone();
+
+    // 2. Post-run, ~seconds later, the skill-learning sink publishes the
+    //    learned-skill bubble onto the same thread's live stream.
+    let publisher = services.live_projection_publisher(user_id.clone());
+    publisher.publish_skill_learned(
+        Some(&user_id),
+        &scope,
+        TurnRunId::from_uuid(invocation_id.as_uuid()),
+        "file-character-count-roundtrip",
+        "Learned from the run; speeds up similar work next time.",
+    );
+
+    // 3. The still-open SSE stream resumes from the advanced durable cursor.
+    let resumed = services
+        .webui_event_stream()
+        .drain(ProjectionSubscriptionRequest {
+            actor,
+            scope,
+            after_cursor: Some(resume_cursor),
+        })
+        .await
+        .unwrap();
+
+    assert!(
+        resumed.iter().any(|event| {
+            matches!(
+                event.payload(),
+                ProductOutboundPayload::ProjectionUpdate { state }
+                    if state.items.iter().any(|item| matches!(
+                        item,
+                        ProductProjectionItem::SkillActivation { skill_names, .. }
+                            if skill_names.iter().any(|name| name == "file-character-count-roundtrip")
+                    ))
+            )
+        }),
+        "learned-skill bubble must deliver when SSE resumes from an advanced durable cursor: {resumed:#?}"
+    );
+}
+
 #[tokio::test]
 async fn webui_event_stream_preserves_live_reasoning_and_tool_start_order() {
     let fixture = live_projection_fixture("webui-live-order");

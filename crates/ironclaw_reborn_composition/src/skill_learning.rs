@@ -62,17 +62,20 @@ pub(crate) use learning::{
 
 #[cfg(feature = "root-llm-provider")]
 mod learning {
+    use std::collections::BTreeSet;
     use std::sync::{Arc, LazyLock};
 
     use async_trait::async_trait;
-    use ironclaw_host_api::{InvocationId, ResourceScope, TenantId, UserId};
+    use ironclaw_host_api::{InvocationId, ResourceScope, TenantId, ThreadId, UserId};
     use ironclaw_llm::{ChatMessage, CompletionRequest, LlmProvider};
     use ironclaw_safety::{Sanitizer, validate_trusted_trigger_prompt};
     use ironclaw_skill_learning::{
         DistillOutcome, DistilledSkill, SkillInferenceError, SkillInferencePort, distill_skill,
     };
+    use ironclaw_skills::{ManagedSkillSource, SkillSummary, parse_skill_md};
     use ironclaw_threads::{
-        ContextWindow, LoadContextWindowRequest, MessageKind, SessionThreadService, ThreadScope,
+        AppendAssistantDraftRequest, ContextWindow, LoadContextWindowRequest, MessageContent,
+        MessageKind, SessionThreadService, ThreadScope,
     };
     use ironclaw_turns::{
         TurnError, TurnEventKind, TurnEventSink, TurnLifecycleEvent, TurnRunId, TurnScope,
@@ -99,6 +102,23 @@ mod learning {
     /// User-facing note shown on the learned-skill bubble.
     const LEARNED_SKILL_FEEDBACK: &str =
         "Learned this skill from the task you just completed — review it under Settings -> Skills.";
+
+    /// Jaccard-similarity floor (over the combined name/keyword/tag token sets)
+    /// above which a freshly distilled skill is treated as a near-duplicate of
+    /// an existing learned skill and consolidated into it rather than installed
+    /// under a new name. Tuned to merge obvious siblings (the model gives the
+    /// same kind of task slightly different names/keywords each run) without
+    /// collapsing genuinely distinct skills.
+    const SKILL_DEDUP_SIMILARITY_THRESHOLD: f64 = 0.45;
+    /// A skill needs at least this many distinctive tokens before dedup runs;
+    /// below it, overlap is too noisy to trust.
+    const MIN_DEDUP_TOKENS: usize = 2;
+    /// Generic tokens stripped before similarity so two skills don't look alike
+    /// merely because both say "run"/"use"/"the".
+    const DEDUP_STOPWORDS: &[&str] = &[
+        "the", "and", "for", "with", "from", "that", "this", "your", "you", "run", "use", "get",
+        "set", "new", "via",
+    ];
 
     /// Injection scanner applied to distilled skill content before install,
     /// mirroring the WebUI facade's `validate_skill_content_safety`.
@@ -139,6 +159,27 @@ mod learning {
             name: &str,
             content: &str,
         ) -> Result<String, String> {
+            // Consolidate near-duplicates: the distiller gives the same kind of
+            // task a slightly different name each run, so without this the
+            // user's skill list fills with siblings that never get reused
+            // together. When an existing learned skill covers the same ground,
+            // refine it in place under its existing name instead of installing a
+            // second one. `update_skill` requires the document's frontmatter
+            // `name` to equal the target, so retarget the content first.
+            if let Some(existing_name) = self.find_duplicate(&scope, name, content).await {
+                tracing::debug!(
+                    distilled_name = %name,
+                    merged_into = %existing_name,
+                    "skill-learning: consolidating near-duplicate learned skill"
+                );
+                let retargeted = rewrite_skill_name(content, &existing_name);
+                return self
+                    .port
+                    .update_for_scope(scope, &existing_name, &retargeted)
+                    .await
+                    .map(|_| existing_name)
+                    .map_err(|error| error.to_string());
+            }
             match self
                 .port
                 .install_for_scope(scope.clone(), Some(name), content)
@@ -155,6 +196,134 @@ mod learning {
                     .map_err(|error| error.to_string()),
             }
         }
+    }
+
+    impl PortSkillWriter {
+        /// Find an existing learned skill at `scope` that the freshly distilled
+        /// `content` is a near-duplicate of, returning its stored name so the
+        /// caller can refine it in place. Best-effort: a parse/listing failure
+        /// returns `None` (fall through to a normal install).
+        async fn find_duplicate(
+            &self,
+            scope: &ResourceScope,
+            name: &str,
+            content: &str,
+        ) -> Option<String> {
+            let parsed = parse_skill_md(content).ok()?;
+            let new_tokens = skill_token_set(
+                &parsed.manifest.name,
+                &parsed.manifest.activation.keywords,
+                &parsed.manifest.activation.tags,
+            );
+            if new_tokens.len() < MIN_DEDUP_TOKENS {
+                return None;
+            }
+            let existing = self.port.list_for_scope(scope.clone()).await.ok()?;
+            select_duplicate_skill(name, &new_tokens, &existing)
+        }
+    }
+
+    /// Pick the existing learned skill most similar to a candidate token set,
+    /// if any clears [`SKILL_DEDUP_SIMILARITY_THRESHOLD`]. Only `User`-source
+    /// skills are merge targets (never system or registry-installed skills),
+    /// and the same-named skill is skipped (that is a plain re-learn, handled by
+    /// the install→update-on-conflict path). Pure so it is unit-testable without
+    /// a filesystem-backed skill port.
+    fn select_duplicate_skill(
+        new_name: &str,
+        new_tokens: &BTreeSet<String>,
+        existing: &[SkillSummary],
+    ) -> Option<String> {
+        let mut best: Option<(f64, &str)> = None;
+        for summary in existing {
+            if !matches!(summary.source, ManagedSkillSource::User) || summary.name == new_name {
+                continue;
+            }
+            let tokens = skill_token_set(&summary.name, &summary.keywords, &summary.tags);
+            let score = jaccard_similarity(new_tokens, &tokens);
+            if score >= SKILL_DEDUP_SIMILARITY_THRESHOLD
+                && best
+                    .as_ref()
+                    .is_none_or(|(best_score, _)| score > *best_score)
+            {
+                best = Some((score, summary.name.as_str()));
+            }
+        }
+        best.map(|(_, name)| name.to_string())
+    }
+
+    /// Distinctive lowercase token set for a skill, drawn from its name,
+    /// keywords, and tags. Splits on non-alphanumeric so `read-file` and
+    /// `character-count` contribute `read`/`file`/`character`/`count`; drops
+    /// short and generic tokens so similarity reflects real subject overlap.
+    fn skill_token_set(name: &str, keywords: &[String], tags: &[String]) -> BTreeSet<String> {
+        let mut tokens = BTreeSet::new();
+        let sources = std::iter::once(name)
+            .chain(keywords.iter().map(String::as_str))
+            .chain(tags.iter().map(String::as_str));
+        for source in sources {
+            for token in source.split(|character: char| !character.is_ascii_alphanumeric()) {
+                if token.len() < 3 {
+                    continue;
+                }
+                let lowered = token.to_ascii_lowercase();
+                if !DEDUP_STOPWORDS.contains(&lowered.as_str()) {
+                    tokens.insert(lowered);
+                }
+            }
+        }
+        tokens
+    }
+
+    /// Jaccard similarity (|intersection| / |union|) of two token sets. Empty
+    /// sets are dissimilar (0.0), never accidentally "identical".
+    fn jaccard_similarity(left: &BTreeSet<String>, right: &BTreeSet<String>) -> f64 {
+        if left.is_empty() || right.is_empty() {
+            return 0.0;
+        }
+        let intersection = left.intersection(right).count();
+        let union = left.len() + right.len() - intersection;
+        if union == 0 {
+            0.0
+        } else {
+            intersection as f64 / union as f64
+        }
+    }
+
+    /// Rewrite the frontmatter `name:` of a `SKILL.md` to `new_name` so the
+    /// document satisfies `update_skill`'s name-consistency check when a
+    /// distilled skill is merged into an existing one. Only the first `name:`
+    /// line inside the leading `---` frontmatter block is touched.
+    fn rewrite_skill_name(content: &str, new_name: &str) -> String {
+        let mut out = String::with_capacity(content.len() + new_name.len());
+        let mut seen_open = false;
+        let mut in_frontmatter = false;
+        let mut replaced = false;
+        for line in content.lines() {
+            if !replaced && line.trim() == "---" {
+                if !seen_open {
+                    seen_open = true;
+                    in_frontmatter = true;
+                } else {
+                    in_frontmatter = false;
+                }
+                out.push_str(line);
+                out.push('\n');
+                continue;
+            }
+            if in_frontmatter && !replaced && line.trim_start().starts_with("name:") {
+                let indent_len = line.len() - line.trim_start().len();
+                out.push_str(&line[..indent_len]);
+                out.push_str("name: ");
+                out.push_str(new_name);
+                out.push('\n');
+                replaced = true;
+                continue;
+            }
+            out.push_str(line);
+            out.push('\n');
+        }
+        out
     }
 
     /// Live "learned a new skill" notification seam. Composition implements it
@@ -258,82 +427,170 @@ mod learning {
             // The full turn scope is needed to publish the learned-skill bubble
             // back to this thread's live stream.
             let event_scope = event.scope.clone();
-            let thread_service = Arc::clone(&self.thread_service);
-            let inference = Arc::clone(&self.inference);
-            let skill_writer = Arc::clone(&self.skill_writer);
-            let notifier = Arc::clone(&self.notifier);
+            let job = ExtractionJob {
+                thread_service: Arc::clone(&self.thread_service),
+                inference: Arc::clone(&self.inference),
+                skill_writer: Arc::clone(&self.skill_writer),
+                notifier: Arc::clone(&self.notifier),
+                scope: read_scope,
+                thread_id,
+                run_id,
+                write_tenant,
+                write_owner,
+                event_scope,
+            };
+            tokio::spawn(job.run());
+            Ok(())
+        }
+    }
 
-            tokio::spawn(async move {
-                // Read the model-context (replay) view, NOT list_thread_history:
-                // the history projection nulls tool-call metadata for product
-                // display, which would hide the very tool actions that make a
-                // run worth distilling.
-                let window = match thread_service
-                    .load_context_window(LoadContextWindowRequest {
-                        scope: read_scope,
-                        thread_id,
-                        max_messages: TRANSCRIPT_READ_LIMIT,
-                    })
-                    .await
-                {
-                    Ok(window) => window,
-                    Err(error) => {
-                        tracing::debug!(%error, run_id = ?run_id, "skill-learning: could not load transcript");
-                        return;
-                    }
-                };
+    /// The post-run extraction work, lifted out of [`SkillLearningTurnEventSink::publish`]
+    /// so it is a single owned future the sink can `tokio::spawn` AND a test can
+    /// drive to completion with `.await` (the spawn is fire-and-forget, so the
+    /// durable announce below is otherwise untestable through its caller).
+    struct ExtractionJob {
+        thread_service: Arc<dyn SessionThreadService>,
+        inference: Arc<dyn SkillInferencePort>,
+        skill_writer: Arc<dyn SkillWriter>,
+        notifier: Arc<dyn SkillLearnedNotifier>,
+        /// Read scope (transcript) and write/announce scope are the same — both
+        /// derive from the turn event.
+        scope: ThreadScope,
+        thread_id: ThreadId,
+        run_id: TurnRunId,
+        write_tenant: TenantId,
+        write_owner: UserId,
+        event_scope: TurnScope,
+    }
 
-                let tool_actions = window
-                    .messages
-                    .iter()
-                    .filter(|message| matches!(message.kind, MessageKind::ToolResultReference))
-                    .count();
-                let message_count = window.messages.len();
-                tracing::debug!(
-                    run_id = ?run_id,
-                    tool_actions,
-                    message_count,
-                    "skill-learning: evaluating completed run for extraction"
-                );
-                if tool_actions < MIN_TOOL_ACTIONS || message_count < MIN_TRANSCRIPT_MESSAGES {
+    impl ExtractionJob {
+        async fn run(self) {
+            // Read the model-context (replay) view, NOT list_thread_history:
+            // the history projection nulls tool-call metadata for product
+            // display, which would hide the very tool actions that make a
+            // run worth distilling.
+            let window = match self
+                .thread_service
+                .load_context_window(LoadContextWindowRequest {
+                    scope: self.scope.clone(),
+                    thread_id: self.thread_id.clone(),
+                    max_messages: TRANSCRIPT_READ_LIMIT,
+                })
+                .await
+            {
+                Ok(window) => window,
+                Err(error) => {
+                    tracing::debug!(%error, run_id = ?self.run_id, "skill-learning: could not load transcript");
                     return;
                 }
+            };
 
-                let transcript = format_transcript(&window);
-                match distill_skill(&transcript, inference.as_ref()).await {
-                    Ok(DistillOutcome::Skill(skill)) => {
-                        if let Some(installed_name) = persist_learned_skill(
-                            skill_writer.as_ref(),
-                            &write_tenant,
-                            &write_owner,
-                            &skill,
-                            run_id,
+            let tool_actions = window
+                .messages
+                .iter()
+                .filter(|message| matches!(message.kind, MessageKind::ToolResultReference))
+                .count();
+            let message_count = window.messages.len();
+            tracing::debug!(
+                run_id = ?self.run_id,
+                tool_actions,
+                message_count,
+                "skill-learning: evaluating completed run for extraction"
+            );
+            if tool_actions < MIN_TOOL_ACTIONS || message_count < MIN_TRANSCRIPT_MESSAGES {
+                return;
+            }
+
+            let transcript = format_transcript(&window);
+            match distill_skill(&transcript, self.inference.as_ref()).await {
+                Ok(DistillOutcome::Skill(skill)) => {
+                    if let Some(installed_name) = persist_learned_skill(
+                        self.skill_writer.as_ref(),
+                        &self.write_tenant,
+                        &self.write_owner,
+                        &skill,
+                        self.run_id,
+                    )
+                    .await
+                    {
+                        // Durable feedback first: a thread message survives a
+                        // page reload and renders from `get_timeline`, so the
+                        // user sees the learned-skill notice even when no live
+                        // stream was connected at publish time. The live bubble
+                        // below is the ephemeral, best-effort fast path.
+                        announce_learned_skill(
+                            self.thread_service.as_ref(),
+                            &self.scope,
+                            &self.thread_id,
+                            self.run_id,
+                            &installed_name,
                         )
-                        .await
-                        {
-                            // Best-effort live bubble on the run's thread stream.
-                            notifier.notify(
-                                &write_owner,
-                                &event_scope,
-                                run_id,
-                                &installed_name,
-                                LEARNED_SKILL_FEEDBACK,
-                            );
-                        }
-                    }
-                    Ok(DistillOutcome::Skipped(reason)) => {
-                        tracing::debug!(
-                            run_id = ?run_id,
-                            ?reason,
-                            "skill-learning: model declined to distill a skill"
+                        .await;
+                        self.notifier.notify(
+                            &self.write_owner,
+                            &self.event_scope,
+                            self.run_id,
+                            &installed_name,
+                            LEARNED_SKILL_FEEDBACK,
                         );
                     }
-                    Err(error) => {
-                        tracing::debug!(%error, run_id = ?run_id, "skill-learning: distillation failed");
-                    }
                 }
-            });
-            Ok(())
+                Ok(DistillOutcome::Skipped(reason)) => {
+                    tracing::debug!(
+                        run_id = ?self.run_id,
+                        ?reason,
+                        "skill-learning: model declined to distill a skill"
+                    );
+                }
+                Err(error) => {
+                    tracing::debug!(%error, run_id = ?self.run_id, "skill-learning: distillation failed");
+                }
+            }
+        }
+    }
+
+    /// Append a durable "learned a new skill" note to the run's thread. Unlike
+    /// the live [`SkillLearnedNotifier`] bubble (ephemeral, only delivered to a
+    /// connected SSE/WS stream), this finalized assistant message is persisted,
+    /// so the user sees the feedback in the conversation on the next timeline
+    /// load even if no stream was open ~seconds after the run when distillation
+    /// finished. Best-effort: every failure exit is `debug!`-only.
+    async fn announce_learned_skill(
+        thread_service: &dyn SessionThreadService,
+        scope: &ThreadScope,
+        thread_id: &ThreadId,
+        run_id: TurnRunId,
+        skill_name: &str,
+    ) {
+        let note = format!(
+            "🎓 I learned a new skill from this task: **{skill_name}**. \
+             I'll apply it automatically on similar requests — manage it under Settings → Skills."
+        );
+        let draft = match thread_service
+            .append_assistant_draft(AppendAssistantDraftRequest {
+                scope: scope.clone(),
+                thread_id: thread_id.clone(),
+                turn_run_id: run_id.to_string(),
+                content: MessageContent::text(note.clone()),
+            })
+            .await
+        {
+            Ok(record) => record,
+            Err(error) => {
+                tracing::debug!(%error, run_id = ?run_id, "skill-learning: could not append learned-skill note");
+                return;
+            }
+        };
+        if let Err(error) = thread_service
+            .finalize_assistant_message(
+                scope,
+                thread_id,
+                draft.message_id,
+                MessageContent::text(note),
+            )
+            .await
+        {
+            tracing::debug!(%error, run_id = ?run_id, "skill-learning: could not finalize learned-skill note");
         }
     }
 
@@ -462,7 +719,9 @@ mod learning {
     mod tests {
         use super::*;
         use ironclaw_host_api::{AgentId, ThreadId};
-        use ironclaw_threads::InMemorySessionThreadService;
+        use ironclaw_threads::{
+            EnsureThreadRequest, InMemorySessionThreadService, ThreadHistoryRequest,
+        };
         use ironclaw_turns::{EventCursor, TurnStatus};
 
         struct StubInference;
@@ -548,6 +807,191 @@ mod learning {
             sink.publish(event(TurnEventKind::Completed, None))
                 .await
                 .expect("ownerless completion is a no-op");
+        }
+
+        // Durable feedback regression: a learned skill must leave a persisted
+        // assistant note in the thread so the user sees it from `get_timeline`
+        // even when no live SSE/WS stream was connected when distillation
+        // finished. (The live bubble is best-effort and ephemeral.)
+        #[tokio::test]
+        async fn appends_durable_learned_skill_note_to_thread() {
+            let service: Arc<dyn SessionThreadService> =
+                Arc::new(InMemorySessionThreadService::default());
+            let scope = ThreadScope {
+                tenant_id: TenantId::new("announce-tenant").expect("tenant"),
+                agent_id: AgentId::new("announce-agent").expect("agent"),
+                project_id: None,
+                owner_user_id: Some(UserId::new("announce-user").expect("user")),
+                mission_id: None,
+            };
+            let thread_id = ThreadId::new("announce-thread").expect("thread");
+            service
+                .ensure_thread(EnsureThreadRequest {
+                    scope: scope.clone(),
+                    thread_id: Some(thread_id.clone()),
+                    created_by_actor_id: "announce-user".to_string(),
+                    title: None,
+                    metadata_json: None,
+                })
+                .await
+                .expect("ensure thread");
+
+            announce_learned_skill(
+                service.as_ref(),
+                &scope,
+                &thread_id,
+                TurnRunId::new(),
+                "file-character-count-roundtrip",
+            )
+            .await;
+
+            let history = service
+                .list_thread_history(ThreadHistoryRequest { scope, thread_id })
+                .await
+                .expect("history");
+            assert!(
+                history.messages.iter().any(|message| {
+                    matches!(message.kind, MessageKind::Assistant)
+                        && message.content.as_deref().is_some_and(|content| {
+                            content.contains("file-character-count-roundtrip")
+                                && content.contains("learned a new skill")
+                        })
+                }),
+                "a durable assistant note naming the learned skill must be persisted: {:#?}",
+                history.messages
+            );
+        }
+
+        fn summary(
+            name: &str,
+            keywords: &[&str],
+            tags: &[&str],
+            source: ManagedSkillSource,
+        ) -> SkillSummary {
+            SkillSummary {
+                name: name.to_string(),
+                version: "1".to_string(),
+                description: String::new(),
+                source,
+                keywords: keywords.iter().map(|k| k.to_string()).collect(),
+                tags: tags.iter().map(|t| t.to_string()).collect(),
+                requires_skills: Vec::new(),
+            }
+        }
+
+        #[test]
+        fn jaccard_similarity_basics() {
+            let a: BTreeSet<String> = ["file", "count", "read"]
+                .iter()
+                .map(|s| s.to_string())
+                .collect();
+            let b = a.clone();
+            assert!((jaccard_similarity(&a, &b) - 1.0).abs() < f64::EPSILON);
+            let disjoint: BTreeSet<String> =
+                ["github", "pull"].iter().map(|s| s.to_string()).collect();
+            assert_eq!(jaccard_similarity(&a, &disjoint), 0.0);
+            assert_eq!(jaccard_similarity(&a, &BTreeSet::new()), 0.0);
+        }
+
+        #[test]
+        fn skill_token_set_splits_lowercases_and_filters() {
+            let tokens = skill_token_set(
+                "Read-File",
+                &["character-count".to_string(), "the".to_string()],
+                &["FS".to_string()],
+            );
+            // hyphen split + lowercase
+            assert!(tokens.contains("read"));
+            assert!(tokens.contains("file"));
+            assert!(tokens.contains("character"));
+            assert!(tokens.contains("count"));
+            // stopword dropped, sub-3-char token dropped
+            assert!(!tokens.contains("the"));
+            assert!(!tokens.contains("fs"));
+        }
+
+        #[test]
+        fn select_duplicate_skill_merges_sibling_file_count_skills() {
+            // The exact demo failure: three near-identical file-character-count
+            // skills accreted under different names. A fourth sibling must
+            // consolidate into the first instead of becoming a fourth.
+            let new_tokens = skill_token_set(
+                "file-character-count-roundtrip",
+                &[
+                    "file".to_string(),
+                    "character-count".to_string(),
+                    "read-file".to_string(),
+                ],
+                &["files".to_string()],
+            );
+            let existing = vec![
+                summary(
+                    "file-create-read-count-summary",
+                    &["file", "read-file", "character-count", "write-file"],
+                    &["files"],
+                    ManagedSkillSource::User,
+                ),
+                summary(
+                    "github-pr-review",
+                    &["github", "pull-request", "review"],
+                    &["git"],
+                    ManagedSkillSource::User,
+                ),
+            ];
+            assert_eq!(
+                select_duplicate_skill("file-character-count-roundtrip", &new_tokens, &existing)
+                    .as_deref(),
+                Some("file-create-read-count-summary")
+            );
+        }
+
+        #[test]
+        fn select_duplicate_skill_skips_system_same_name_and_unrelated() {
+            let new_tokens = skill_token_set(
+                "file-character-count-roundtrip",
+                &["file".to_string(), "character-count".to_string()],
+                &[],
+            );
+            // A system skill with identical tokens is never a merge target.
+            let system_twin = summary(
+                "file-character-count-roundtrip-system",
+                &["file", "character-count"],
+                &[],
+                ManagedSkillSource::System,
+            );
+            // Same-named user skill is a plain re-learn, not a dedup target.
+            let same_name = summary(
+                "file-character-count-roundtrip",
+                &["file", "character-count"],
+                &[],
+                ManagedSkillSource::User,
+            );
+            // Unrelated user skill is below threshold.
+            let unrelated = summary(
+                "send-slack-message",
+                &["slack", "message"],
+                &["chat"],
+                ManagedSkillSource::User,
+            );
+            assert_eq!(
+                select_duplicate_skill(
+                    "file-character-count-roundtrip",
+                    &new_tokens,
+                    &[system_twin, same_name, unrelated]
+                ),
+                None
+            );
+        }
+
+        #[test]
+        fn rewrite_skill_name_retargets_frontmatter_only() {
+            let content = "---\nname: file-character-count-roundtrip\nversion: 1\ndescription: count chars\nactivation:\n  keywords: [file, count]\n---\n\n# Title\n\nname: not-the-frontmatter\nBody.\n";
+            let rewritten = rewrite_skill_name(content, "file-create-read-count-summary");
+            let parsed = parse_skill_md(&rewritten).expect("rewritten skill parses");
+            assert_eq!(parsed.manifest.name, "file-create-read-count-summary");
+            // The body line that merely starts with `name:` must be untouched.
+            assert!(parsed.prompt_content.contains("name: not-the-frontmatter"));
+            assert!(parsed.prompt_content.contains("Body."));
         }
     }
 }
