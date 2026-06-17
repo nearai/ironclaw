@@ -555,11 +555,11 @@ async fn builtin_apply_patch_ignores_null_edits_placeholder_for_single_edit() {
 }
 
 #[tokio::test]
-async fn builtin_apply_patch_replace_all_replaces_exact_and_fuzzy_matches() {
+async fn builtin_apply_patch_replace_all_replaces_fuzzy_matches_when_exact_text_is_absent() {
     let temp = tempfile::tempdir().unwrap();
     std::fs::write(
         temp.path().join("main.txt"),
-        "hello world\nhello\u{00A0}world\n",
+        "hello\u{00A0}world\nhello\u{2003}world\n",
     )
     .unwrap();
 
@@ -595,7 +595,7 @@ async fn builtin_apply_patch_rejects_duplicate_after_fuzzy_normalization() {
     let temp = tempfile::tempdir().unwrap();
     std::fs::write(
         temp.path().join("main.txt"),
-        "hello world\nhello\u{00A0}world\n",
+        "hello\u{00A0}world\nhello\u{2003}world\n",
     )
     .unwrap();
 

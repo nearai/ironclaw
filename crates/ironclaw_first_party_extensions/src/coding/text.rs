@@ -177,22 +177,9 @@ impl<'a> TextMatcher<'a> {
             })
             .collect::<Vec<_>>();
         if !exact_spans.is_empty() {
-            if old_string.trim().is_empty() || !replace_all && exact_spans.len() > 1 {
-                return EditMatches {
-                    occurrence_count: exact_spans.len(),
-                    spans: exact_spans,
-                };
-            }
-
-            let fuzzy_spans = self.find_fuzzy_spans(old_string, match_limit);
-            let occurrence_count = if fuzzy_spans.is_empty() {
-                exact_spans.len()
-            } else {
-                fuzzy_spans.len().max(exact_spans.len())
-            };
             return EditMatches {
-                spans: merge_exact_and_fuzzy_spans(exact_spans, fuzzy_spans),
-                occurrence_count,
+                occurrence_count: exact_spans.len(),
+                spans: exact_spans,
             };
         }
 
@@ -302,24 +289,6 @@ pub(super) fn replace_content(
         replacements: matched_edits.len(),
         match_method,
     })
-}
-
-fn merge_exact_and_fuzzy_spans(
-    mut exact_spans: Vec<MatchSpan>,
-    fuzzy_spans: Vec<MatchSpan>,
-) -> Vec<MatchSpan> {
-    for fuzzy in fuzzy_spans {
-        if exact_spans.iter().any(|exact| spans_overlap(*exact, fuzzy)) {
-            continue;
-        }
-        exact_spans.push(fuzzy);
-    }
-    exact_spans.sort_by_key(|span| (span.start, span.end));
-    exact_spans
-}
-
-fn spans_overlap(left: MatchSpan, right: MatchSpan) -> bool {
-    left.start < right.end && right.start < left.end
 }
 
 fn apply_matched_edits(content: &str, matched_edits: &[MatchedEdit]) -> String {
@@ -484,8 +453,8 @@ mod tests {
     }
 
     #[test]
-    fn replace_all_replaces_exact_and_fuzzy_matches() {
-        let content = "hello world\nhello\u{00A0}world\n";
+    fn replace_all_replaces_fuzzy_matches_when_exact_text_is_absent() {
+        let content = "hello\u{00A0}world\nhello\u{2003}world\n";
         let result = replace_content(
             content,
             &[TextEdit {
