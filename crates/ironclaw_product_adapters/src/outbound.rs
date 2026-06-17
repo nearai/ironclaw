@@ -227,6 +227,12 @@ pub struct CapabilityActivityView {
     pub process_id: Option<ProcessId>,
     pub output_bytes: Option<u64>,
     pub error_kind: Option<String>,
+    /// Inline primary-argument detail for the activity row, surfaced while the
+    /// invocation is still running (the completed card carries its own).
+    pub subtitle: Option<String>,
+    /// Per-tool parameter summary, surfaced while the invocation is still
+    /// running so the row's Parameters tab is populated before the result.
+    pub input_summary: Option<String>,
     pub updated_at: DateTime<Utc>,
     pub activity_order: Option<u64>,
 }
@@ -251,6 +257,10 @@ impl Serialize for CapabilityActivityView {
             process_id: &'a Option<ProcessId>,
             output_bytes: Option<u64>,
             error_kind: &'a Option<String>,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            subtitle: &'a Option<String>,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            input_summary: &'a Option<String>,
             updated_at: &'a DateTime<Utc>,
             #[serde(skip_serializing_if = "Option::is_none")]
             activity_order: Option<u64>,
@@ -267,6 +277,8 @@ impl Serialize for CapabilityActivityView {
             process_id: &self.process_id,
             output_bytes: self.output_bytes,
             error_kind: &self.error_kind,
+            subtitle: &self.subtitle,
+            input_summary: &self.input_summary,
             updated_at: &self.updated_at,
             activity_order: self.activity_order,
         }
@@ -287,6 +299,8 @@ impl CapabilityActivityView {
             process_id: input.process_id,
             output_bytes: input.output_bytes,
             error_kind: input.error_kind,
+            subtitle: input.subtitle,
+            input_summary: input.input_summary,
             updated_at: input.updated_at,
             activity_order: input.activity_order,
         };
@@ -314,6 +328,8 @@ pub struct CapabilityActivityViewInput {
     pub process_id: Option<ProcessId>,
     pub output_bytes: Option<u64>,
     pub error_kind: Option<String>,
+    pub subtitle: Option<String>,
+    pub input_summary: Option<String>,
     pub updated_at: DateTime<Utc>,
     pub activity_order: Option<u64>,
 }
@@ -336,6 +352,10 @@ impl<'de> Deserialize<'de> for CapabilityActivityView {
             process_id: Option<ProcessId>,
             output_bytes: Option<u64>,
             error_kind: Option<String>,
+            #[serde(default)]
+            subtitle: Option<String>,
+            #[serde(default)]
+            input_summary: Option<String>,
             updated_at: DateTime<Utc>,
             activity_order: Option<u64>,
         }
@@ -351,6 +371,8 @@ impl<'de> Deserialize<'de> for CapabilityActivityView {
             process_id: wire.process_id,
             output_bytes: wire.output_bytes,
             error_kind: wire.error_kind,
+            subtitle: wire.subtitle,
+            input_summary: wire.input_summary,
             updated_at: wire.updated_at,
             activity_order: wire.activity_order,
         })
@@ -1377,6 +1399,8 @@ mod tests {
                     process_id: None,
                     output_bytes: None,
                     error_kind: None,
+                    subtitle: None,
+                    input_summary: None,
                     updated_at: Utc::now(),
                     activity_order: None,
                 })
@@ -1707,6 +1731,8 @@ mod tests {
             process_id: None,
             output_bytes: Some(12),
             error_kind: None,
+            subtitle: None,
+            input_summary: None,
             updated_at: Utc::now(),
             activity_order: None,
         })
@@ -1937,6 +1963,8 @@ mod tests {
             process_id: None,
             output_bytes: None,
             error_kind: Some("/tmp/private-host-path".to_string()),
+            subtitle: None,
+            input_summary: None,
             updated_at: Utc::now(),
             activity_order: None,
         };

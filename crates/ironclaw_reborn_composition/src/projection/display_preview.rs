@@ -32,6 +32,12 @@ pub(super) trait CapabilityDisplayPreviewSource: Send + Sync {
         activity: &CapabilityActivityProjection,
     ) -> Result<CapabilityDisplayPreviewResolution, ProductAdapterError>;
 
+    /// Input a still-running invocation should display inline, or `None` if the
+    /// invocation is not in-flight (or has no recorded input). Default `None`.
+    fn running_input(&self, _invocation_id: InvocationId) -> Option<CapabilityRunningInput> {
+        None
+    }
+
     #[cfg(test)]
     async fn preview(
         &self,
@@ -73,6 +79,18 @@ pub(crate) struct CapabilityDisplayPreviewStore {
 struct CapabilityDisplayPendingInputs {
     by_ref: HashMap<String, CapabilityDisplayInputPreview>,
     refs_by_run: HashMap<String, Vec<String>>,
+    /// `invocation_id -> input_ref`, established when the invocation starts
+    /// executing (the activity frame only knows the invocation id, but the
+    /// input was recorded under its ref at registration). Lets the
+    /// still-running activity frame surface the input before the result lands.
+    input_ref_by_invocation: HashMap<String, String>,
+}
+
+/// The input a still-running invocation shows in its activity row.
+#[derive(Debug, Clone, Default)]
+pub(super) struct CapabilityRunningInput {
+    pub(super) subtitle: Option<String>,
+    pub(super) input_summary: Option<String>,
 }
 
 #[derive(Default)]
@@ -173,6 +191,20 @@ impl CapabilityDisplayPreviewStore {
             .push(input_ref);
     }
 
+    /// Link a now-running invocation to the ref its input was recorded under,
+    /// so the running activity frame can surface that input before completion.
+    pub(crate) fn record_running_invocation(
+        &self,
+        invocation_id: InvocationId,
+        input_ref: &CapabilityInputRef,
+    ) {
+        if let Ok(mut pending) = self.pending.lock() {
+            pending
+                .input_ref_by_invocation
+                .insert(invocation_id.to_string(), input_ref.as_str().to_string());
+        }
+    }
+
     #[cfg(test)]
     pub(crate) fn record_result(&self, result: CapabilityDisplayPreviewResult<'_>) {
         self.record_result_with_preview(result, None);
@@ -183,10 +215,15 @@ impl CapabilityDisplayPreviewStore {
         result: CapabilityDisplayPreviewResult<'_>,
         display_preview: Option<&CapabilityDisplayOutputPreview>,
     ) {
-        let input = self
-            .lock_pending_inputs()
-            .by_ref
-            .remove(result.input_ref.as_str());
+        let input = {
+            let mut pending = self.lock_pending_inputs();
+            // The result has landed: drop the running-input link so the
+            // activity frame stops surfacing it as in-flight.
+            pending
+                .input_ref_by_invocation
+                .remove(&result.invocation_id.to_string());
+            pending.by_ref.remove(result.input_ref.as_str())
+        };
         let title = input
             .as_ref()
             .map(|input| input.title.clone())
@@ -223,9 +260,13 @@ impl CapabilityDisplayPreviewStore {
     pub(crate) fn prune_run(&self, run_id: &str) {
         let mut pending = self.lock_pending_inputs();
         if let Some(input_refs) = pending.refs_by_run.remove(run_id) {
-            for input_ref in input_refs {
-                pending.by_ref.remove(&input_ref);
+            let pruned: std::collections::HashSet<String> = input_refs.into_iter().collect();
+            for input_ref in &pruned {
+                pending.by_ref.remove(input_ref);
             }
+            pending
+                .input_ref_by_invocation
+                .retain(|_, input_ref| !pruned.contains(input_ref));
         }
         drop(pending);
 
@@ -266,6 +307,18 @@ impl CapabilityDisplayPreviewSource for CapabilityDisplayPreviewStore {
         activity: &CapabilityActivityProjection,
     ) -> Result<CapabilityDisplayPreviewResolution, ProductAdapterError> {
         capability_display_preview_resolution_from_store(self, activity)
+    }
+
+    fn running_input(&self, invocation_id: InvocationId) -> Option<CapabilityRunningInput> {
+        let pending = self.pending.lock().ok()?;
+        let input_ref = pending
+            .input_ref_by_invocation
+            .get(&invocation_id.to_string())?;
+        let input = pending.by_ref.get(input_ref)?;
+        Some(CapabilityRunningInput {
+            subtitle: input.subtitle.clone(),
+            input_summary: input.input_summary.clone(),
+        })
     }
 }
 

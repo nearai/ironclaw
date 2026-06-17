@@ -145,6 +145,7 @@ impl LiveProjectionPublisher {
 }
 
 pub(super) fn product_items_for_live_update(
+    display_previews: &dyn super::display_preview::CapabilityDisplayPreviewSource,
     update: &ThreadLiveProjectionUpdate,
 ) -> Vec<ProductProjectionItem> {
     update
@@ -162,31 +163,36 @@ pub(super) fn product_items_for_live_update(
                 run_id,
                 invocation_id,
                 capability_id,
-            } => match CapabilityActivityView::new(CapabilityActivityViewInput {
-                invocation_id: *invocation_id,
-                turn_run_id: Some(*run_id),
-                thread_id: Some(update.thread_id.clone()),
-                capability_id: capability_id.clone(),
-                status: CapabilityActivityStatusView::Started,
-                provider: None,
-                runtime: None,
-                process_id: None,
-                output_bytes: None,
-                error_kind: None,
-                updated_at: Utc::now(),
-                activity_order: None,
-            }) {
-                Ok(activity) => Some(ProductProjectionItem::CapabilityActivity(activity)),
-                Err(error) => {
-                    tracing::debug!(
-                        error = %error,
-                        invocation_id = %invocation_id,
-                        capability_id = %capability_id,
-                        "live capability activity rejected by product adapter boundary"
-                    );
-                    None
+            } => {
+                let running = display_previews.running_input(*invocation_id);
+                match CapabilityActivityView::new(CapabilityActivityViewInput {
+                    invocation_id: *invocation_id,
+                    turn_run_id: Some(*run_id),
+                    thread_id: Some(update.thread_id.clone()),
+                    capability_id: capability_id.clone(),
+                    status: CapabilityActivityStatusView::Started,
+                    provider: None,
+                    runtime: None,
+                    process_id: None,
+                    output_bytes: None,
+                    error_kind: None,
+                    subtitle: running.as_ref().and_then(|input| input.subtitle.clone()),
+                    input_summary: running.and_then(|input| input.input_summary),
+                    updated_at: Utc::now(),
+                    activity_order: None,
+                }) {
+                    Ok(activity) => Some(ProductProjectionItem::CapabilityActivity(activity)),
+                    Err(error) => {
+                        tracing::debug!(
+                            error = %error,
+                            invocation_id = %invocation_id,
+                            capability_id = %capability_id,
+                            "live capability activity rejected by product adapter boundary"
+                        );
+                        None
+                    }
                 }
-            },
+            }
             ThreadLiveProjectionItem::WorkSummary {
                 id,
                 run_id,

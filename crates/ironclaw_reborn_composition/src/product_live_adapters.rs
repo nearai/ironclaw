@@ -14,8 +14,8 @@ use thiserror::Error;
 use uuid::Uuid;
 
 use ironclaw_host_api::{
-    CapabilityId, CapabilitySet, EffectKind, ExecutionContext, ExtensionId, MountView, RuntimeKind,
-    TrustClass, UserId,
+    CapabilityId, CapabilitySet, EffectKind, ExecutionContext, ExtensionId, InvocationId,
+    MountView, RuntimeKind, TrustClass, UserId,
 };
 use ironclaw_host_runtime::{
     CapabilitySurfacePolicy, HostRuntime, SurfaceKind, VisibleCapabilityRequest,
@@ -300,6 +300,16 @@ impl LoopCapabilityResultWriter for ProductLiveCapabilityIo {
             display_preview.as_ref(),
         );
         Ok((result_ref, byte_len as u64))
+    }
+
+    fn record_running_invocation(
+        &self,
+        _run_context: &LoopRunContext,
+        invocation_id: InvocationId,
+        input_ref: &CapabilityInputRef,
+    ) {
+        self.display_previews
+            .record_running_invocation(invocation_id, input_ref);
     }
 
     async fn update_capability_result(

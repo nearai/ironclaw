@@ -208,9 +208,11 @@ export function toolCardFromPreview(preview) {
 }
 
 // Map a `CapabilityActivityView` (SSE lifecycle frame) into the same
-// card shape. Activity frames carry only metadata — no title, no
-// parameters, no output — so the resulting card is intentionally
-// sparse and is meant to be enriched by the next preview frame.
+// card shape. While the invocation is still running the backend now
+// carries the staged input on the activity frame (`subtitle` =
+// inline primary argument, `input_summary` = parameters), so the row
+// shows `tool   <arg>` live instead of a bare name. Output fields stay
+// empty until the preview frame lands at completion.
 export function toolCardFromActivity(activity) {
   const activityOrder = numericActivityOrder(activity.activity_order);
   return {
@@ -219,8 +221,8 @@ export function toolCardFromActivity(activity) {
     capabilityId: activity.capability_id || null,
     toolName: toolDisplayName(activity.capability_id) || "tool",
     toolStatus: toolStatusFromActivityStatus(activity.status),
-    toolDetail: null,
-    toolParameters: null,
+    toolDetail: activity.subtitle || null,
+    toolParameters: activity.input_summary || null,
     toolResultPreview: null,
     toolError: activity.error_kind || null,
     toolDurationMs: null,

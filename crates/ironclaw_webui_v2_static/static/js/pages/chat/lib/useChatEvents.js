@@ -665,3 +665,35 @@ function isLocallyResolvedGate(locallyResolvedGatesRef, runId, gateRef) {
   if (!runId || !gateRef) return false;
   return Boolean(locallyResolvedGatesRef?.current?.has(`${runId}\n${gateRef}`));
 }
+
+function upsertToolFromActivity(setMessages, invocationId, card) {
+  const id = `tool-${invocationId}`;
+  setMessages((prev) => {
+    const existing = prev.findIndex((m) => m.id === id);
+    if (existing >= 0) {
+      const current = prev[existing];
+      // A late lifecycle frame can carry `running` after the preview
+      // already set `success` / `error`. Don't downgrade terminal
+      // state — but do let the next terminal state through.
+      const nextStatus =
+        isTerminalToolStatus(current.toolStatus) && card.toolStatus === "running"
+          ? current.toolStatus
+          : card.toolStatus;
+      const copy = [...prev];
+      copy[existing] = {
+        ...current,
+        toolStatus: nextStatus,
+        toolError: card.toolError || current.toolError,
+        // Enrich with the live input if a later frame carries it and the
+        // current card doesn't yet (e.g. the first frame raced ahead of the
+        // input link). Never clobber a populated value with null.
+        toolDetail: current.toolDetail || card.toolDetail || null,
+        toolParameters: current.toolParameters || card.toolParameters || null,
+        updatedAt: card.updatedAt || current.updatedAt,
+        turnRunId: card.turnRunId || current.turnRunId || null,
+      };
+      return copy;
+    }
+    return [...prev, { id, role: "tool_activity", ...card }];
+  });
+}

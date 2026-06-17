@@ -245,6 +245,20 @@ pub trait LoopCapabilityResultWriter: Send + Sync {
     ) -> Result<(), AgentLoopHostError> {
         Ok(())
     }
+
+    /// Note that the invocation `invocation_id` has started executing with the
+    /// input staged under `input_ref`. Links the two so the still-running
+    /// activity frame can surface the input (inline argument + parameters)
+    /// before the result lands — the input was recorded under `input_ref` at
+    /// registration, but the activity projection only knows the `invocation_id`.
+    /// Default no-op: only writers that own a display-preview store implement it.
+    fn record_running_invocation(
+        &self,
+        _run_context: &LoopRunContext,
+        _invocation_id: InvocationId,
+        _input_ref: &CapabilityInputRef,
+    ) {
+    }
 }
 
 pub struct CapabilityResultWrite<'a> {
@@ -1510,6 +1524,14 @@ impl LoopCapabilityPort for HostRuntimeLoopCapabilityPort {
         let requested_capability_id = request.capability_id.clone();
         let provider = capability.provider.clone();
         let runtime = capability.runtime;
+        // Link this invocation to its staged input ref now that both are known,
+        // so the still-running activity frame can surface the input argument
+        // before the result completes.
+        self.result_writer.record_running_invocation(
+            &self.run_context,
+            invocation_id,
+            effective_input_ref,
+        );
         let capability_activity_id = CapabilityActivityId::from_uuid(invocation_id.as_uuid());
         self.emit_capability_milestone(LoopHostMilestoneKind::CapabilityInvoked {
             activity_id: capability_activity_id,
