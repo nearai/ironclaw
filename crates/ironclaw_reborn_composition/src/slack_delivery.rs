@@ -342,7 +342,7 @@ impl SlackFinalReplyDeliveryObserver {
             let next_blocked_marker = blocked_actionable_marker(&actionable_state);
             let event_kind = notification.event_kind;
             let gate_ref_for_routing = notification.gate_ref_for_routing.clone();
-            let posted_messages = self
+            let posted_messages = match self
                 .deliver_run_notification(
                     &envelope,
                     &scope,
@@ -351,7 +351,21 @@ impl SlackFinalReplyDeliveryObserver {
                     &actionable_state,
                     notification,
                 )
-                .await?;
+                .await?
+            {
+                LiveDeliveryOutcome::Posted(messages) => messages,
+                LiveDeliveryOutcome::AuthTargetNotDirectMessage => {
+                    // Terminal: OAuth URL suppressed, run cancelled, auth-unavailable
+                    // notice posted. Stop the loop — do not record a gate route or
+                    // re-poll for the (now cancelled) run.
+                    self.delete_slack_message_if_present(working_message.take())
+                        .await;
+                    for message in messages_to_delete_after_final {
+                        self.delete_slack_message(message).await;
+                    }
+                    return Ok(());
+                }
+            };
             if (event_kind == RunNotificationEventKind::ApprovalNeeded
                 || event_kind == RunNotificationEventKind::AuthRequired)
                 && let Some(gate_ref_str) = gate_ref_for_routing.as_deref()
@@ -478,11 +492,14 @@ impl SlackFinalReplyDeliveryObserver {
                 // credential into Slack, so deny it: cancel the run (same outcome
                 // as `auth deny`) and redirect them to the web app.
                 if view.authorization_url.is_some() {
+                    // Keep the OAuth `authorization_url` on the payload. Whether it is
+                    // safe to post is decided structurally at send time by the resolver
+                    // (`require_direct_message_target` → personal-DM check on the EXACT
+                    // resolved binding), not by an inbound-trigger heuristic — see
+                    // `deliver_run_notification` (#5009).
                     SlackActionableNotification {
                         event_kind: RunNotificationEventKind::AuthRequired,
-                        payload: ProductOutboundPayload::AuthPrompt(slack_auth_prompt_view(
-                            envelope, view,
-                        )),
+                        payload: ProductOutboundPayload::AuthPrompt(view),
                         gate_ref_for_routing: Some(gate_ref.as_str().to_string()),
                     }
                 } else {
@@ -550,12 +567,21 @@ impl SlackFinalReplyDeliveryObserver {
         run_id: TurnRunId,
         state: &TurnRunState,
         notification: SlackActionableNotification,
-    ) -> Result<Vec<PostedSlackMessage>, SlackFinalReplyDeliveryError> {
+    ) -> Result<LiveDeliveryOutcome, SlackFinalReplyDeliveryError> {
         let SlackActionableNotification {
             event_kind,
             payload,
             gate_ref_for_routing: _,
         } = notification;
+        // An OAuth `authorization_url` may only be posted to a verified personal DM.
+        // Require it structurally so the send-time resolver guard
+        // (`ObservedSlackReplyTargetAuthority` → `slack_reply_target_is_personal_dm`)
+        // fails closed against the EXACT resolved binding — the same contract the
+        // triggered path enforces (#4953/#5009), not an inbound-trigger heuristic.
+        let require_direct_message_target = matches!(
+            &payload,
+            ProductOutboundPayload::AuthPrompt(view) if view.authorization_url.is_some()
+        );
         let reply_target = state.reply_target_binding_ref.clone();
         let target_authority = ObservedSlackReplyTargetAuthority {
             scope: scope.clone(),
@@ -592,7 +618,7 @@ impl SlackFinalReplyDeliveryObserver {
             attempted_at: Utc::now(),
         };
         let tracked_egress = TrackingSlackPostEgress::new(self.services.egress.clone());
-        let _outcome = prepare_and_render_product_outbound(
+        let render_result = prepare_and_render_product_outbound(
             &outbound_policy,
             self.services.communication_preferences.as_ref(),
             &target_authority,
@@ -606,11 +632,52 @@ impl SlackFinalReplyDeliveryObserver {
                 adapter: self.services.adapter.as_ref(),
                 egress: &tracked_egress,
                 delivery_sink: self.services.delivery_sink.as_ref(),
-                require_direct_message_target: false,
+                require_direct_message_target,
             },
         )
-        .await?;
-        Ok(tracked_egress.take_posted_messages())
+        .await;
+        match render_result {
+            Ok(_outcome) => Ok(LiveDeliveryOutcome::Posted(
+                tracked_egress.take_posted_messages(),
+            )),
+            Err(error) if is_outbound_target_not_direct_message(&error) => {
+                // Fail closed: the payload carried an OAuth `authorization_url` but the
+                // send-time resolved target is not a personal DM. The resolver guards
+                // before egress, so nothing was posted — suppress the URL, cancel the
+                // blocked run, and post the auth-unavailable notice. Same terminal
+                // outcome as the triggered path's `OAuthTargetNotDm` arm (#5009).
+                tracing::debug!(
+                    target = "ironclaw::reborn::slack_delivery",
+                    %run_id,
+                    "live OAuth authorization_url suppressed: send-time target is not a \
+                     personal DM; cancelling run"
+                );
+                if let Some(gate_ref) = state.gate_ref.as_ref() {
+                    self.cancel_slack_auth_blocked_run(
+                        scope,
+                        actor.clone(),
+                        run_id,
+                        gate_ref.as_str(),
+                    )
+                    .await?;
+                }
+                if let Err(post_err) = post_slack_message(
+                    self.services.egress.as_ref(),
+                    envelope.external_conversation_ref(),
+                    SLACK_AUTH_UNAVAILABLE_MESSAGE,
+                )
+                .await
+                {
+                    tracing::debug!(
+                        target = "ironclaw::reborn::slack_delivery",
+                        error = %post_err,
+                        "failed to post Slack auth-unavailable notice (best-effort)"
+                    );
+                }
+                Ok(LiveDeliveryOutcome::AuthTargetNotDirectMessage)
+            }
+            Err(error) => Err(error.into()),
+        }
     }
 
     async fn wait_for_actionable(
@@ -1091,27 +1158,6 @@ fn slack_run_notification_projection_id(
         RunNotificationEventKind::DeliveryStatus => "delivery-status",
     };
     format!("slack-run-notification:{suffix}:{run_id}")
-}
-
-/// Adapts a resolved auth-prompt view for Slack delivery. OAuth setup links are
-/// only safe to post in a private DM, so the `authorization_url` is stripped for
-/// any non-DM (channel) target.
-fn slack_auth_prompt_view(
-    envelope: &ProductInboundEnvelope,
-    mut view: ironclaw_product_adapters::AuthPromptView,
-) -> ironclaw_product_adapters::AuthPromptView {
-    if !slack_auth_setup_link_is_private(envelope) {
-        view.authorization_url = None;
-    }
-    view
-}
-
-fn slack_auth_setup_link_is_private(envelope: &ProductInboundEnvelope) -> bool {
-    matches!(
-        envelope.payload(),
-        ProductInboundPayload::UserMessage(payload)
-            if payload.trigger == ironclaw_product_adapters::ProductTriggerReason::DirectChat
-    )
 }
 
 fn slack_approval_gate_prompt_view(
@@ -2652,6 +2698,32 @@ async fn deliver_triggered_notification(
     Ok(tracked_egress.take_posted_messages())
 }
 
+/// Outcome of a single live (non-triggered) run-notification delivery attempt.
+enum LiveDeliveryOutcome {
+    /// The notification was rendered and posted; carries the posted Slack messages.
+    Posted(Vec<PostedSlackMessage>),
+    /// The payload carried an OAuth `authorization_url` but the send-time resolved
+    /// target was not a personal DM. The URL was suppressed (never posted), the
+    /// blocked run was cancelled, and the auth-unavailable notice was posted. This
+    /// is terminal — the delivery loop must stop rather than re-poll/re-deliver.
+    AuthTargetNotDirectMessage,
+}
+
+/// True when a delivery error is the structural DM guard tripping
+/// (`require_direct_message_target` set but the resolved binding is not a personal
+/// DM). Mirrors the triggered path's [`classify_delivery_error`] arm.
+fn is_outbound_target_not_direct_message(
+    error: &ironclaw_product_workflow::ProductOutboundDeliveryError,
+) -> bool {
+    matches!(
+        error,
+        ironclaw_product_workflow::ProductOutboundDeliveryError::Workflow {
+            source: ProductWorkflowError::OutboundTargetNotDirectMessage,
+            ..
+        }
+    )
+}
+
 /// Classify a [`ProductOutboundDeliveryError`] into the typed
 /// [`TriggeredNotificationFailure`] variants used for outcome recording.
 fn classify_delivery_error(
@@ -2977,6 +3049,10 @@ mod tests {
         /// When set, `cancel_run` returns `Err(TurnError::Unavailable)` instead of
         /// the normal success response. Used to test the OAuth backstop cancel-failure path.
         cancel_should_fail: std::sync::atomic::AtomicBool,
+        /// When set, overrides the default `"reply:test:scripted"` binding ref
+        /// returned by `get_run_state`. Live-observer OAuth tests need a real Slack
+        /// binding ref so `slack_reply_target_is_personal_dm` / the DM guard fires.
+        reply_target_binding_ref: Option<ReplyTargetBindingRef>,
     }
 
     impl ScriptedTurnCoordinator {
@@ -2988,7 +3064,20 @@ mod tests {
                 calls: Mutex::new(0),
                 cancel_calls: Mutex::new(Vec::new()),
                 cancel_should_fail: std::sync::atomic::AtomicBool::new(false),
+                reply_target_binding_ref: None,
             }
+        }
+
+        /// Like `with_states` but overrides the `reply_target_binding_ref` returned
+        /// by `get_run_state`. Live-observer OAuth tests need a real Slack binding
+        /// ref so the DM guard (`slack_reply_target_is_personal_dm`) fires correctly.
+        fn with_states_and_reply_target(
+            states: Vec<ScriptedRunState>,
+            reply_target: ReplyTargetBindingRef,
+        ) -> Self {
+            let mut coordinator = Self::with_states(states);
+            coordinator.reply_target_binding_ref = Some(reply_target);
+            coordinator
         }
 
         fn with_single_status(status: TurnStatus) -> Self {
@@ -3070,6 +3159,9 @@ mod tests {
             *calls += 1;
             let scripted = self.states[idx].clone();
             // Build a minimal-but-valid TurnRunState from the scripted status + gate_ref.
+            let reply_target = self.reply_target_binding_ref.clone().unwrap_or_else(|| {
+                ReplyTargetBindingRef::new("reply:test:scripted").expect("valid ref")
+            });
             Ok(TurnRunState {
                 scope: request.scope.clone(),
                 actor: None,
@@ -3078,8 +3170,7 @@ mod tests {
                 status: scripted.status,
                 accepted_message_ref: AcceptedMessageRef::new("msg:scripted").expect("valid ref"),
                 source_binding_ref: SourceBindingRef::new("src:scripted").expect("valid ref"),
-                reply_target_binding_ref: ReplyTargetBindingRef::new("reply:test:scripted")
-                    .expect("valid ref"),
+                reply_target_binding_ref: reply_target,
                 resolved_run_profile_id: RunProfileId::default_profile(),
                 resolved_run_profile_version: RunProfileVersion::new(1),
                 resolved_model_route: None,
@@ -3986,6 +4077,42 @@ mod tests {
             delivery_sink: Arc::new(FakeOutboundDeliverySink::default()),
             auth_challenges: None,
             auth_flow_canceller,
+            approval_requests: None,
+        };
+        let settings = SlackFinalReplyDeliverySettings {
+            poll_interval: std::time::Duration::ZERO,
+            max_wait: std::time::Duration::from_millis(1),
+            max_concurrent_deliveries: NonZeroUsize::new(1).unwrap(),
+            max_pending_deliveries: NonZeroUsize::new(8).unwrap(),
+        };
+        SlackFinalReplyDeliveryObserver::with_settings(services, settings)
+    }
+
+    /// Like `make_observer` but also wires an `AuthChallengeProvider` so the
+    /// live observer can produce OAuth `authorization_url` views for `BlockedAuth`
+    /// states. Used by the live OAuth DM-parity tests.
+    fn make_observer_with_auth_challenges(
+        coordinator: Arc<dyn TurnCoordinator>,
+        egress: Arc<FakeProtocolHttpEgress>,
+        outbound: Arc<InMemoryOutboundStateStore>,
+        installation_id: &str,
+        auth_challenges: Arc<dyn AuthChallengeProvider>,
+    ) -> SlackFinalReplyDeliveryObserver {
+        use ironclaw_product_workflow::FakeConversationBindingService;
+
+        let thread_service = Arc::new(InMemorySessionThreadService::default());
+        let services = SlackFinalReplyDeliveryServices {
+            binding_service: Arc::new(FakeConversationBindingService::new()),
+            thread_service,
+            turn_coordinator: coordinator,
+            outbound_store: outbound.clone(),
+            route_store: Arc::new(InMemoryDeliveredGateRouteStore::default()),
+            communication_preferences: outbound,
+            adapter: test_adapter(installation_id),
+            egress,
+            delivery_sink: Arc::new(FakeOutboundDeliverySink::default()),
+            auth_challenges: Some(auth_challenges),
+            auth_flow_canceller: None,
             approval_requests: None,
         };
         let settings = SlackFinalReplyDeliverySettings {
@@ -8168,6 +8295,202 @@ mod tests {
         assert!(
             result.is_ok(),
             "personal DM binding + require=true must not be rejected"
+        );
+    }
+
+    // ── Live OAuth DM-parity tests (#5009) ────────────────────────────────────
+    //
+    // Two caller-level tests driving `SlackFinalReplyDeliveryObserver::observe_workflow_ack`
+    // through the LIVE (non-triggered) `BlockedAuth` + OAuth path added by #5009.
+    //
+    // Production change: `deliver_run_notification` sets
+    // `require_direct_message_target = true` when the payload carries an OAuth
+    // `authorization_url`. The resolver (`ObservedSlackReplyTargetAuthority`) then
+    // calls `enforce_direct_message_if_required` against `state.reply_target_binding_ref`.
+    //
+    // DM-ref test (A): the guard passes — the URL is posted, no cancel.
+    // Channel-ref test (B): the guard fails — URL suppressed, run cancelled, notice posted.
+    //
+    // How the DM vs channel target is constructed:
+    //   `ScriptedTurnCoordinator::with_states_and_reply_target` overrides the
+    //   default `"reply:test:scripted"` binding ref with a real Slack ref built
+    //   by `test_slack_binding_ref` (DM, D-prefixed, actor_kind=slack_user) or
+    //   `test_slack_shared_channel_binding_ref` (shared channel, C-prefixed, no actor).
+    //   `deliver_run_notification` takes `state.reply_target_binding_ref` as the
+    //   `LiveSourceRoute` target — no preference lookup — so only the coordinator's
+    //   override matters; no outbound store seeding is required.
+
+    /// (A) Live OAuth auth to a personal DM: the `authorization_url` must be posted
+    /// to Slack and the run must NOT be cancelled.
+    ///
+    /// `ScriptedTurnCoordinator` returns `BlockedAuth` with a DM reply-target
+    /// binding ref (`test_slack_binding_ref` → space=T123, conversation=D456,
+    /// actor_kind=slack_user, actor=U123). `require_direct_message_target = true`
+    /// is set because the payload carries an `authorization_url`. The
+    /// `ObservedSlackReplyTargetAuthority` guard passes because `D456` starts with
+    /// 'D', so the URL is posted.
+    ///
+    /// After the successful post the delivery loop times out (max_wait=1ms) and
+    /// returns `RunWaitTimedOutAfterNotification` — no extra error post, so the only
+    /// `chat.postMessage` in egress is the auth prompt carrying the URL.
+    #[tokio::test]
+    async fn live_oauth_auth_to_personal_dm_posts_authorization_url() {
+        let install = "install_alpha"; // matches what FakeConversationBindingService uses
+        let oauth_url = "https://provider.example/live-oauth-dm";
+
+        // DM binding ref: adapter=slack_v2, space=T123, conversation=D456 (D-prefix),
+        // actor_kind=slack_user, actor=U123 — satisfies slack_reply_target_is_personal_dm.
+        // We use "test-agent" for the agent segment; the live observer derives scope
+        // from FakeConversationBindingService (agent="agent:fake"), but the binding
+        // ref is only validated against itself (expected_target == candidate.target).
+        let dm_binding_ref = test_slack_binding_ref(install, "test-agent");
+
+        // Coordinator: single BlockedAuth state with a gate_ref + the DM binding ref.
+        let coordinator = Arc::new(ScriptedTurnCoordinator::with_states_and_reply_target(
+            vec![scripted_state(
+                TurnStatus::BlockedAuth,
+                Some("gate:live-oauth-dm"),
+            )],
+            dm_binding_ref,
+        ));
+
+        let egress = Arc::new(FakeProtocolHttpEgress::new(vec!["slack.com".to_string()]));
+        egress.allow_credential_handle("slack_bot_token");
+        // Program a valid response for the auth-prompt post so delivery succeeds and
+        // the loop terminates cleanly via RunWaitTimedOutAfterNotification (not an
+        // unexpected error that would trigger the A3 feedback post).
+        egress.program_response(
+            "slack.com",
+            Ok(EgressResponse::new(
+                200,
+                slack_post_ok_json("D456", "live-dm-oauth.1"),
+            )),
+        );
+
+        let outbound = Arc::new(InMemoryOutboundStateStore::default());
+        let observer = make_observer_with_auth_challenges(
+            Arc::clone(&coordinator) as Arc<dyn TurnCoordinator>,
+            egress.clone(),
+            outbound,
+            install,
+            Arc::new(OAuthAuthChallengeProvider {
+                url: oauth_url.to_string(),
+            }),
+        );
+
+        let env = envelope(user_message_payload());
+        let ack = ProductInboundAck::Accepted {
+            accepted_message_ref: AcceptedMessageRef::new("slack:live-oauth-dm-test").expect("ref"),
+            submitted_run_id: TurnRunId::new(),
+        };
+
+        observer.observe_workflow_ack(env, ack).await;
+
+        // The run must NOT be cancelled — the DM guard passed and the URL was posted.
+        assert_eq!(
+            coordinator.cancel_call_count(),
+            0,
+            "live OAuth to personal DM must not cancel the run"
+        );
+
+        let posted: Vec<String> = egress
+            .calls()
+            .iter()
+            .filter(|c| c.path == "/api/chat.postMessage")
+            .map(|c| String::from_utf8_lossy(&c.body).to_string())
+            .collect();
+
+        // The authorization_url must appear in the posted auth-prompt message body.
+        assert!(
+            posted.iter().any(|b| b.contains(oauth_url)),
+            "authorization_url must be posted when the resolved target is a personal DM; \
+             got: {posted:?}"
+        );
+    }
+
+    /// (B) Live OAuth auth to a shared channel: the `authorization_url` must NOT be
+    /// posted; the run must be cancelled and `SLACK_AUTH_UNAVAILABLE_MESSAGE` posted.
+    ///
+    /// `ScriptedTurnCoordinator` returns `BlockedAuth` with a shared-channel reply
+    /// target (`test_slack_shared_channel_binding_ref` → conversation=C0SHARED, no
+    /// actor). The `ObservedSlackReplyTargetAuthority` guard fails because `C0SHARED`
+    /// does not start with 'D', returning `OutboundTargetNotDirectMessage` →
+    /// `LiveDeliveryOutcome::AuthTargetNotDirectMessage`. The loop then cancels the
+    /// run and posts the unavailable notice.
+    #[tokio::test]
+    async fn live_oauth_auth_to_shared_channel_suppresses_authorization_url() {
+        let install = "install_alpha"; // matches what FakeConversationBindingService uses
+        let oauth_url = "https://provider.example/live-oauth-channel";
+
+        // Shared-channel binding ref: adapter=slack_v2, space=T123, conversation=C0SHARED
+        // (C-prefix, no actor) — slack_reply_target_is_personal_dm returns false.
+        let channel_binding_ref = test_slack_shared_channel_binding_ref(install, "test-agent");
+
+        // Coordinator: single BlockedAuth state + shared-channel binding ref.
+        let coordinator = Arc::new(ScriptedTurnCoordinator::with_states_and_reply_target(
+            vec![scripted_state(
+                TurnStatus::BlockedAuth,
+                Some("gate:live-oauth-channel"),
+            )],
+            channel_binding_ref,
+        ));
+
+        let egress = Arc::new(FakeProtocolHttpEgress::new(vec!["slack.com".to_string()]));
+        egress.allow_credential_handle("slack_bot_token");
+        // No programmed response for the unavailable-notice post: `post_slack_message`
+        // silently swallows a response-parse error (best-effort), and the call is still
+        // recorded in egress for assertion. FakeProtocolHttpEgress returns {"ok":true}
+        // by default which is enough to trigger recording and to satisfy the status check.
+
+        let outbound = Arc::new(InMemoryOutboundStateStore::default());
+        let observer = make_observer_with_auth_challenges(
+            Arc::clone(&coordinator) as Arc<dyn TurnCoordinator>,
+            egress.clone(),
+            outbound,
+            install,
+            Arc::new(OAuthAuthChallengeProvider {
+                url: oauth_url.to_string(),
+            }),
+        );
+
+        let env = envelope(user_message_payload());
+        let ack = ProductInboundAck::Accepted {
+            accepted_message_ref: AcceptedMessageRef::new("slack:live-oauth-channel-test")
+                .expect("ref"),
+            submitted_run_id: TurnRunId::new(),
+        };
+
+        observer.observe_workflow_ack(env, ack).await;
+
+        // The run MUST be cancelled — fail-closed suppression cancels the run.
+        assert_eq!(
+            coordinator.cancel_call_count(),
+            1,
+            "live OAuth to shared channel must cancel the run exactly once"
+        );
+
+        let posted: Vec<String> = egress
+            .calls()
+            .iter()
+            .filter(|c| c.path == "/api/chat.postMessage")
+            .map(|c| String::from_utf8_lossy(&c.body).to_string())
+            .collect();
+
+        // The authorization_url must NOT appear in any post.
+        for body in &posted {
+            assert!(
+                !body.contains(oauth_url),
+                "authorization_url must NOT be posted to a shared channel; got: {body}"
+            );
+        }
+
+        // The auth-unavailable notice must be posted.
+        assert!(
+            posted
+                .iter()
+                .any(|b| b.contains(SLACK_AUTH_UNAVAILABLE_MESSAGE)),
+            "auth-unavailable notice must be posted when OAuth is suppressed for a \
+             shared-channel target; got: {posted:?}"
         );
     }
 }
