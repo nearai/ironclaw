@@ -393,6 +393,20 @@ impl NearAiChatProvider {
                 });
             }
 
+            // HTTP 402: the account/key is out of credits (cloud-api.near.ai
+            // returns `{"error":{"type":"insufficient_credits",...}}`). This is
+            // permanent until the user tops up — map it to a dedicated variant
+            // so the retry/circuit-breaker/failover layers leave it alone and
+            // the agent loop aborts immediately with a clear "out of credits"
+            // message instead of churning for minutes. The body is dropped: it
+            // can carry account/billing detail that must not cross the channel
+            // boundary.
+            if status_code == 402 {
+                return Err(LlmError::PaymentRequired {
+                    provider: "nearai_chat".to_string(),
+                });
+            }
+
             if status_code == 429 {
                 // Preserve existing rate-limit behavior: fall back to a 60s
                 // default when the server omits Retry-After. Long sleeps are
@@ -1418,6 +1432,67 @@ mod tests {
             262144,
         )
         .await;
+    }
+
+    #[tokio::test]
+    async fn complete_maps_http_402_to_payment_required() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base_url = format!("http://{}", listener.local_addr().unwrap());
+        tokio::spawn(async move {
+            loop {
+                let Ok((mut socket, _)) = listener.accept().await else {
+                    break;
+                };
+                let mut request = vec![0_u8; 4096];
+                let Ok(n) = socket.read(&mut request).await else {
+                    continue;
+                };
+                let request = String::from_utf8_lossy(&request[..n]);
+                let (status, body) = if request.starts_with("POST /v1/chat/completions ") {
+                    (
+                        "402 Payment Required",
+                        // The exact shape cloud-api.near.ai returns on 402.
+                        serde_json::json!({
+                            "error": {
+                                "message": "Credit limit exceeded. Top up to continue.",
+                                "type": "insufficient_credits"
+                            }
+                        })
+                        .to_string(),
+                    )
+                } else {
+                    ("200 OK", serde_json::json!({ "models": [] }).to_string())
+                };
+                let response = format!(
+                    "HTTP/1.1 {status}\r\ncontent-type: application/json\r\ncontent-length: {}\r\n\r\n{}",
+                    body.len(),
+                    body
+                );
+                let _ = socket.write_all(response.as_bytes()).await;
+            }
+        });
+
+        let provider = NearAiChatProvider::new(test_nearai_config(&base_url), test_session())
+            .expect("provider");
+        let err = provider
+            .complete(CompletionRequest::new(vec![ChatMessage::user("hi")]))
+            .await
+            .expect_err("402 should fail the completion");
+
+        // The billing detail in the response body must NOT cross the error
+        // boundary (see `.claude/rules/error-handling.md`).
+        let rendered = err.to_string();
+        assert!(
+            !rendered.contains("Credit limit exceeded"),
+            "402 body must not leak into the error: {rendered}"
+        );
+        match err {
+            LlmError::PaymentRequired { provider } => assert_eq!(provider, "nearai_chat"),
+            other => panic!("expected PaymentRequired, got {other:?}"),
+        }
     }
 
     #[test]

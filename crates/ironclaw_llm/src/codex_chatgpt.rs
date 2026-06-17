@@ -575,6 +575,21 @@ impl CodexChatGptProvider {
             });
         }
 
+        // HTTP 402: the account/key is out of credits. Permanent until the
+        // user tops up — map it to a dedicated variant so the
+        // retry/circuit-breaker/failover layers leave it alone and the loop
+        // aborts immediately with a clear "out of credits" message. Handled
+        // before reading the body so account/billing detail can't be carried
+        // across the channel boundary. (The OpenAI Codex provider can be
+        // pointed at metered NEAR AI cloud endpoints, which return 402.)
+        if status.as_u16() == 402 {
+            // Drain the body to release the connection back to the pool.
+            let _ = tokio::time::timeout(Duration::from_secs(5), resp.text()).await;
+            return Err(LlmError::PaymentRequired {
+                provider: "codex_chatgpt".to_string(),
+            });
+        }
+
         if !status.is_success() {
             // Read the error body with a timeout to avoid hanging
             let body_text = tokio::time::timeout(Duration::from_secs(5), resp.text())
@@ -1572,6 +1587,32 @@ data: {"response":{"usage":{"input_tokens":3,"output_tokens":2}}}
     }
 
     #[tokio::test]
+    async fn complete_maps_http_402_to_payment_required() {
+        let base_url = responses_api_test_server::spawn_with_responses_status(
+            "402 Payment Required",
+            r#"{"error":{"message":"Credit limit exceeded","type":"insufficient_credits"}}"#,
+        )
+        .await;
+        let provider = CodexChatGptProvider::new(&base_url, "test-key", "gpt-4o");
+
+        let err = provider
+            .complete(CompletionRequest::new(vec![ChatMessage::user("hi")]))
+            .await
+            .expect_err("402 should fail the completion");
+
+        // The billing detail in the body must NOT cross the error boundary.
+        let rendered = err.to_string();
+        assert!(
+            !rendered.contains("Credit limit exceeded"),
+            "402 body must not leak into the error: {rendered}"
+        );
+        match err {
+            LlmError::PaymentRequired { provider } => assert_eq!(provider, "codex_chatgpt"),
+            other => panic!("expected PaymentRequired, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
     async fn complete_with_tools_accepts_data_only_text_response() {
         let base_url = responses_api_test_server::spawn(
             r#"data: {"type":"response.output_text.delta","delta":"Hello from data-only SSE."}
@@ -1716,13 +1757,64 @@ data: {"response":{"usage":{"input_tokens":5,"output_tokens":5}}}
             format!("http://{addr}")
         }
 
+        /// Variant of [`spawn`] that returns a caller-chosen HTTP status for
+        /// `POST /responses` (model resolution via `GET /models` still
+        /// succeeds). Used to exercise error-status mapping at the real HTTP
+        /// boundary.
+        pub(super) async fn spawn_with_responses_status(
+            status_line: &'static str,
+            body: &'static str,
+        ) -> String {
+            let listener = TcpListener::bind("127.0.0.1:0")
+                .await
+                .expect("bind test server");
+            let addr = listener.local_addr().expect("local addr");
+            tokio::spawn(async move {
+                for _ in 0..4 {
+                    let Ok((mut socket, _)) = listener.accept().await else {
+                        break;
+                    };
+                    let mut request = [0u8; 4096];
+                    let Ok(bytes_read) = socket.read(&mut request).await else {
+                        continue;
+                    };
+                    let request = String::from_utf8_lossy(&request[..bytes_read]);
+                    if request.starts_with("GET /models") {
+                        write_status_response(
+                            &mut socket,
+                            "200 OK",
+                            "application/json",
+                            r#"{"models":[{"slug":"gpt-4o"}]}"#,
+                        )
+                        .await;
+                    } else if request.starts_with("POST /responses") {
+                        write_status_response(&mut socket, status_line, "application/json", body)
+                            .await;
+                    } else {
+                        write_status_response(&mut socket, "404 Not Found", "text/plain", "nope")
+                            .await;
+                    }
+                }
+            });
+            format!("http://{addr}")
+        }
+
         async fn write_response(
             socket: &mut tokio::net::TcpStream,
             content_type: &str,
             body: &str,
         ) {
+            write_status_response(socket, "200 OK", content_type, body).await;
+        }
+
+        async fn write_status_response(
+            socket: &mut tokio::net::TcpStream,
+            status_line: &str,
+            content_type: &str,
+            body: &str,
+        ) {
             let response = format!(
-                "HTTP/1.1 200 OK\r\ncontent-type: {content_type}\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                "HTTP/1.1 {status_line}\r\ncontent-type: {content_type}\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
                 body.len()
             );
             socket

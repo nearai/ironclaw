@@ -43,6 +43,21 @@ pub enum LlmError {
         retry_after: Option<Duration>,
     },
 
+    /// Upstream provider rejected the request with HTTP 402 (Payment Required):
+    /// the account or key is out of credits, or has hit its spend limit.
+    ///
+    /// This is a *permanent* failure until the user tops up. It must NOT be
+    /// retried by [`crate::retry`], must NOT count as a transient backend
+    /// failure in [`crate::circuit_breaker`], and must NOT trigger provider
+    /// failover in [`crate::failover`] — sibling providers usually share the
+    /// same billing account, and even when they don't, burning retries on an
+    /// out-of-credits key only delays the user-visible "out of credits"
+    /// message that motivated this variant. The response body is intentionally
+    /// NOT carried: upstream 402 bodies can contain account/billing detail that
+    /// must not cross the channel boundary (see `.claude/rules/error-handling.md`).
+    #[error("Provider {provider} payment required (HTTP 402): account is out of credits")]
+    PaymentRequired { provider: String },
+
     #[error("Invalid response from {provider}: {reason}")]
     InvalidResponse { provider: String, reason: String },
 
@@ -90,6 +105,38 @@ pub(crate) fn context_length_error(status_code: u16, response_text: &str) -> Opt
 
     let (used, limit) = parse_context_token_counts(&lower);
     Some(LlmError::ContextLengthExceeded { used, limit })
+}
+
+/// Detect an HTTP 402 / out-of-credits signal in a *lowercased* provider error
+/// message.
+///
+/// Direct-HTTP providers (`nearai_chat`, `codex_chatgpt`) match the 402 status
+/// code directly and never need this. It exists for string-only error paths —
+/// e.g. [`crate::rig_adapter`]'s `map_rig_error`, which only sees a rendered
+/// message — so a credit-exhaustion failure there is still classified as
+/// [`LlmError::PaymentRequired`] instead of a retryable `RequestFailed` that
+/// the retry/circuit-breaker/failover layers would churn on for minutes.
+///
+/// The substrings are chosen to be specific to billing/credit exhaustion to
+/// avoid false positives (a bare "402" can appear in unrelated text); each
+/// shorter form (`insufficient credit`, `not enough credit`) also matches its
+/// pluralised variant via substring containment.
+pub(crate) fn is_payment_required_message(lower: &str) -> bool {
+    const PAYMENT_PATTERNS: &[&str] = &[
+        "http 402",
+        "402 payment required",
+        "payment required",
+        "insufficient_credits",
+        "insufficient credit",
+        "not enough credit",
+        "credit limit exceeded",
+        "credits exhausted",
+        "out of credits",
+    ];
+
+    PAYMENT_PATTERNS
+        .iter()
+        .any(|pattern| lower.contains(pattern))
 }
 
 pub(crate) fn is_context_length_error_message(lower: &str) -> bool {
@@ -287,6 +334,52 @@ mod tests {
         assert!(auth_guidance("groq").contains("GROQ_API_KEY"));
         assert!(auth_guidance("ollama").contains("Ollama is running"));
         assert!(auth_guidance("bedrock").contains("AWS"));
+    }
+
+    #[test]
+    fn payment_required_error_renders_without_leaking_body() {
+        let err = LlmError::PaymentRequired {
+            provider: "nearai_chat".to_string(),
+        };
+        let msg = err.to_string();
+        assert!(
+            msg.contains("nearai_chat"),
+            "should name the provider: {msg}"
+        );
+        assert!(msg.contains("402"), "should mention the HTTP status: {msg}");
+        assert!(
+            msg.contains("out of credits"),
+            "should give the actionable cause: {msg}"
+        );
+    }
+
+    #[test]
+    fn is_payment_required_message_matches_credit_exhaustion_signals() {
+        // The exact shape returned by cloud-api.near.ai on 402 (see repro in
+        // the bug report): {"error":{"message":"Credit limit exceeded...",
+        // "type":"insufficient_credits"}}.
+        assert!(is_payment_required_message(
+            r#"{"error":{"message":"credit limit exceeded for this key","type":"insufficient_credits"}}"#
+        ));
+        assert!(is_payment_required_message("http 402 payment required"));
+        assert!(is_payment_required_message("payment required"));
+        assert!(is_payment_required_message("insufficient credits"));
+        assert!(is_payment_required_message("insufficient credit"));
+        assert!(is_payment_required_message("not enough credits remaining"));
+        assert!(is_payment_required_message("you are out of credits"));
+    }
+
+    #[test]
+    fn is_payment_required_message_ignores_unrelated_text() {
+        // A bare "402" or generic failure must not be misread as out-of-credits.
+        assert!(!is_payment_required_message(
+            "http 500 internal server error"
+        ));
+        assert!(!is_payment_required_message(
+            "request 402 of 1000 processed"
+        ));
+        assert!(!is_payment_required_message("rate limit exceeded"));
+        assert!(!is_payment_required_message("connection refused"));
     }
 
     #[test]
