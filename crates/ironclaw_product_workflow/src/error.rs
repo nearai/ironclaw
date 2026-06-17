@@ -340,4 +340,22 @@ mod tests {
             }
         }
     }
+
+    #[test]
+    fn outbound_target_not_direct_message_maps_to_workflow_rejected() {
+        let err: ProductAdapterError = ProductWorkflowError::OutboundTargetNotDirectMessage.into();
+        match err {
+            ProductAdapterError::WorkflowRejected {
+                kind,
+                status_code,
+                retryable,
+                ..
+            } => {
+                assert_eq!(kind, ProductWorkflowRejectionKind::Unauthorized);
+                assert_eq!(status_code, 403);
+                assert!(!retryable);
+            }
+            other => panic!("expected typed workflow rejection, got {other:?}"),
+        }
+    }
 }

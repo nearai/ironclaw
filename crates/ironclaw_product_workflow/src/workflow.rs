@@ -1832,6 +1832,13 @@ mod tests {
     }
 
     #[test]
+    fn terminal_ack_for_error_keeps_outbound_target_not_direct_message_unsettled() {
+        assert!(
+            terminal_ack_for_error(&ProductWorkflowError::OutboundTargetNotDirectMessage).is_none()
+        );
+    }
+
+    #[test]
     fn terminal_success_ack_excludes_deferred_busy() {
         assert!(should_settle_ack(&ProductInboundAck::NoOp));
         assert!(!should_settle_ack(&ProductInboundAck::DeferredBusy {
