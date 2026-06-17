@@ -199,6 +199,11 @@ pub(crate) fn build_webui_services_with_connectable_channels(
                 .with_scheduler_enabled(services.readiness.workers.trigger_poller),
         ));
     }
+    // First-class projects + membership (ACL). The local-dev graph builds the
+    // access-controlled facade once; production wiring is a follow-up.
+    if let Some(local_runtime) = &services.local_runtime {
+        api = api.with_project_service(Arc::clone(&local_runtime.project_service));
+    }
     if let Some(local_runtime) = &services.local_runtime {
         api = api.with_outbound_preferences_facade(Arc::new(RebornOutboundPreferencesFacade::new(
             Arc::clone(&local_runtime.outbound_preferences),

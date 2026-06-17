@@ -78,8 +78,9 @@ use ironclaw_outbound::{DeliveredGateRouteStore, OutboundStateStore, TriggeredRu
 use ironclaw_outbound::{InMemoryDeliveredGateRouteStore, InMemoryTriggeredRunDeliveryStore};
 use ironclaw_processes::ProcessServices;
 use ironclaw_product_workflow::{
-    LifecycleProductSurfaceContext, ProductAuthTurnGateResumeDispatcher,
+    LifecycleProductSurfaceContext, ProductAuthTurnGateResumeDispatcher, ProjectService,
 };
+use ironclaw_projects::ProjectRepository;
 use ironclaw_resources::InMemoryResourceGovernor;
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 use ironclaw_resources::{
@@ -413,6 +414,9 @@ pub(crate) struct RebornLocalRuntimeServices {
     pub(crate) persistent_approval_policies: Arc<LocalDevPersistentApprovalPolicyStore>,
     pub(crate) turn_state: Arc<LocalDevTurnStateStore>,
     pub(crate) trigger_repository: Arc<dyn TriggerRepository>,
+    /// Facade-shaped handle (not the raw `ProjectRepository`): composition
+    /// modules wire the access-controlled service, never the substrate repo.
+    pub(crate) project_service: Arc<dyn ProjectService>,
     pub(crate) outbound_preferences: Arc<dyn CommunicationPreferenceRepository>,
     #[cfg(feature = "slack-v2-host-beta")]
     pub(crate) outbound_state: Arc<dyn OutboundStateStore>,
@@ -587,6 +591,7 @@ struct RebornLocalDevStoreGraphInput {
     local_dev_storage_root: PathBuf,
     default_system_prompt_path: PathBuf,
     trigger_repository: Arc<dyn TriggerRepository>,
+    project_repository: Arc<dyn ProjectRepository>,
     /// Raw libSQL substrate handle, carried so the canonical Reborn identity
     /// store rides the same `reborn-local-dev.db` instead of opening a second
     /// handle (see `RebornRuntime::open_reborn_identity_resolver`).
@@ -786,6 +791,51 @@ async fn build_local_dev(input: RebornBuildInput) -> Result<RebornServices, Rebo
         local_dev_trigger_repository(Arc::clone(&filesystem_bundle.database)).await?;
     #[cfg(not(feature = "libsql"))]
     let trigger_repository = local_dev_trigger_repository();
+    // Projects persist over the control-plane `ScopedFilesystem` substrate (no
+    // SQL in the crate); the backend is whatever the local-dev root filesystem
+    // dispatches to. Tenant is supplied per call, so the scope carries only the
+    // control-plane user/agent identity. Without a durable backend the runtime
+    // has no scoped substrate, so projects ride an ephemeral in-memory backend —
+    // parity with the in-memory trigger repository.
+    let project_agent_id = ironclaw_host_api::AgentId::new("reborn-projects").map_err(|error| {
+        RebornBuildError::InvalidConfig {
+            reason: format!("invalid project agent id: {error}"),
+        }
+    })?;
+    #[cfg(any(feature = "libsql", feature = "postgres"))]
+    let project_repository: Arc<dyn ProjectRepository> =
+        Arc::new(ironclaw_projects::FilesystemProjectRepository::new(
+            crate::wrap_scoped(Arc::clone(&filesystem)),
+            owner_user_id.clone(),
+            project_agent_id,
+        ));
+    #[cfg(not(any(feature = "libsql", feature = "postgres")))]
+    let project_repository: Arc<dyn ProjectRepository> = {
+        use ironclaw_host_api::{MountAlias, MountGrant, MountPermissions, MountView, VirtualPath};
+        let view = MountView::new(vec![MountGrant::new(
+            MountAlias::new("/tenant-shared").map_err(|error| RebornBuildError::InvalidConfig {
+                reason: format!("invalid project mount alias: {error}"),
+            })?,
+            VirtualPath::new("/tenants/local/shared").map_err(|error| {
+                RebornBuildError::InvalidConfig {
+                    reason: format!("invalid project virtual path: {error}"),
+                }
+            })?,
+            MountPermissions::read_write_list_delete(),
+        )])
+        .map_err(|error| RebornBuildError::InvalidConfig {
+            reason: format!("invalid project mount view: {error}"),
+        })?;
+        let scoped = Arc::new(ScopedFilesystem::with_fixed_view(
+            Arc::new(ironclaw_filesystem::InMemoryBackend::default()),
+            view,
+        ));
+        Arc::new(ironclaw_projects::FilesystemProjectRepository::new(
+            scoped,
+            owner_user_id.clone(),
+            project_agent_id,
+        ))
+    };
     let (skill_filesystem, workspace_filesystem, runtime_workspace_mounts) =
         build_workspace_filesystems(
             Arc::clone(&filesystem),
@@ -808,6 +858,7 @@ async fn build_local_dev(input: RebornBuildInput) -> Result<RebornServices, Rebo
         local_dev_storage_root: root.clone(),
         default_system_prompt_path,
         trigger_repository,
+        project_repository,
         #[cfg(feature = "libsql")]
         identity_substrate_db,
     })?;
@@ -1264,6 +1315,7 @@ fn build_local_dev_store_graph(
         local_dev_storage_root,
         default_system_prompt_path,
         trigger_repository,
+        project_repository,
         identity_substrate_db,
     } = input;
     let scoped_filesystem = local_dev_scoped_filesystem(Arc::clone(&filesystem));
@@ -1334,6 +1386,9 @@ fn build_local_dev_store_graph(
         persistent_approval_policies: Arc::clone(&persistent_approval_policies),
         turn_state: Arc::clone(&turn_state),
         trigger_repository: Arc::clone(&trigger_repository),
+        project_service: Arc::new(crate::project_service::RebornProjectService::new(
+            Arc::clone(&project_repository),
+        )),
         outbound_preferences: outbound_stores.outbound_preferences,
         #[cfg(feature = "slack-v2-host-beta")]
         outbound_state: outbound_stores.outbound_state,
@@ -1405,6 +1460,7 @@ fn build_local_dev_store_graph(
         local_dev_storage_root,
         default_system_prompt_path,
         trigger_repository,
+        project_repository,
     } = input;
     #[cfg(feature = "postgres")]
     let subagent_goal_filesystem = local_dev_scoped_filesystem(Arc::clone(&filesystem));
@@ -1464,6 +1520,9 @@ fn build_local_dev_store_graph(
         persistent_approval_policies: Arc::clone(&persistent_approval_policies),
         turn_state: Arc::clone(&turn_state),
         trigger_repository: Arc::clone(&trigger_repository),
+        project_service: Arc::new(crate::project_service::RebornProjectService::new(
+            Arc::clone(&project_repository),
+        )),
         outbound_preferences: outbound_stores.outbound_preferences,
         #[cfg(feature = "slack-v2-host-beta")]
         outbound_state: outbound_stores.outbound_state,
@@ -3546,6 +3605,7 @@ mod tests {
             persistent_approval_policies: Arc::clone(&base_runtime.persistent_approval_policies),
             turn_state: Arc::clone(&base_runtime.turn_state),
             trigger_repository: Arc::clone(&base_runtime.trigger_repository),
+            project_service: Arc::clone(&base_runtime.project_service),
             outbound_preferences: Arc::clone(&base_runtime.outbound_preferences),
             #[cfg(feature = "slack-v2-host-beta")]
             outbound_state: Arc::clone(&base_runtime.outbound_state),
