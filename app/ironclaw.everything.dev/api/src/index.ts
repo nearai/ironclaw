@@ -756,6 +756,10 @@ export default createPlugin.withPlugins<PluginsClient>()({
             .use(requireAuth)
             .use(ic.credentials)
             .handler(h0(services, (ic) => ic.auth.logout)),
+          submitManualToken: builder.ironclaw.auth.submitManualToken
+            .use(requireAuth)
+            .use(ic.credentials)
+            .handler(h1(services, (ic) => ic.auth.submitManualToken)),
         },
 
         operator: {
@@ -829,13 +833,24 @@ export default createPlugin.withPlugins<PluginsClient>()({
           .use(ic.credentials)
           .handler(async ({ input, context }: any) => {
             const ic = s.ironclaw(context);
-            await ic.threads.resolveGate({
+            const args: any = {
               id: input.threadId,
               runId: input.runId,
               gateRef: input.gateRef,
-              resolution: input.approved ? "approved" : "denied",
-            });
+              resolution: input.resolution,
+            };
+            if (input.always !== undefined) args.always = input.always;
+            if (input.credentialRef) args.credentialRef = input.credentialRef;
+            await ic.threads.resolveGate(args);
             return { success: true };
+          }),
+
+        submitManualToken: builder.conversation.submitManualToken
+          .use(requireAuth)
+          .use(ic.credentials)
+          .handler(async ({ input, context }: any) => {
+            const ic = s.ironclaw(context);
+            return await ic.auth.submitManualToken(input);
           }),
       },
     };

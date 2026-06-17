@@ -1,12 +1,12 @@
 import type { UIMessage } from "@tanstack/ai-react";
 import { createFileRoute, Link, useNavigate } from "@tanstack/react-router";
 import {
+  ChevronDown,
   ChevronLeft,
   ChevronRight,
   MessageSquare,
   Plus,
   RefreshCw,
-  ShieldCheck,
   Trash2,
   Unplug,
   Zap,
@@ -14,7 +14,12 @@ import {
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { toast } from "sonner";
 import { useApiClient } from "@/app";
+import { ApprovalCard } from "@/components/approval-card";
+import { AuthGenericCard } from "@/components/auth-generic-card";
+import { AuthOauthCard } from "@/components/auth-oauth-card";
+import { AuthTokenCard } from "@/components/auth-token-card";
 import { ChatIdentityBar } from "@/components/chat-identity-bar";
+import { SubagentRow } from "@/components/thread-sidebar-row";
 import { ChatInput } from "@/components/chat-input";
 import { ChatMessage } from "@/components/chat-message";
 import { ChatMessageList } from "@/components/chat-message-list";
@@ -56,7 +61,6 @@ function ChatArea(props: {
 }) {
   const apiClient = useApiClient();
   const [initialMessages, setInitialMessages] = useState<UIMessage[]>([]);
-  const [loadingInitial, setLoadingInitial] = useState(true);
   useEffect(() => {
     const params = new URLSearchParams(window.location.search);
     const loginTicket = params.get("loginTicket");
@@ -77,36 +81,17 @@ function ChatArea(props: {
 
   useEffect(() => {
     let cancelled = false;
-    setLoadingInitial(true);
     setInitialMessages([]);
     (async () => {
       try {
         const messages = await fetchThreadMessages();
         if (!cancelled) setInitialMessages(messages);
       } catch {}
-      if (!cancelled) setLoadingInitial(false);
     })();
     return () => {
       cancelled = true;
     };
   }, [fetchThreadMessages]);
-
-  if (loadingInitial) {
-    return (
-      <>
-        <ChatIdentityBar
-          threadState={null}
-          onOpenMobileSidebar={props.onOpenMobileSidebar}
-          onToggleDesktopSidebar={props.onToggleDesktopSidebar}
-          verbose={props.verbose}
-          onToggleVerbose={props.onToggleVerbose}
-        />
-        <ChatMessageList loading>
-          <div />
-        </ChatMessageList>
-      </>
-    );
-  }
 
   return <ChatAreaCore {...props} initialMessages={initialMessages} />;
 }
@@ -144,6 +129,7 @@ function ChatAreaCore({
   );
 
   const firstPendingApproval = chat.pendingApprovals[0];
+  const firstAuthGate = chat.authGates[0];
   const showLoading = chat.isLoading;
 
   const threadState = threadMeta
@@ -173,30 +159,68 @@ function ChatAreaCore({
         onToggleVerbose={onToggleVerbose}
         onCopyConversation={chat.copyConversation}
       />
-      {firstPendingApproval ? (
-        <div className="flex w-full items-center gap-2 border-b border-amber-500/20 bg-amber-500/5 px-4 py-2 text-xs text-amber-600">
-          <ShieldCheck size={12} className="shrink-0" />
-          <span className="flex-1 min-w-0 truncate">{firstPendingApproval.headline}</span>
-          <Button
-            size="sm"
-            variant="outline"
-            className="h-7 shrink-0 border-amber-500/30 bg-amber-500/10 px-2.5 text-xs font-medium text-amber-600 hover:bg-amber-500/20"
-            onClick={() =>
-              chat.runId && chat.resolveGate(chat.runId, firstPendingApproval.gateRef, true)
+      {firstAuthGate ? (
+        firstAuthGate.challengeKind === "oauth_url"
+          ? (
+            <div className="border-b border-border px-4 py-3">
+              <AuthOauthCard
+                gate={firstAuthGate}
+                onCancel={() =>
+                  chat.runId && chat.resolveGate(chat.runId, firstAuthGate.gateRef, "cancelled")
+                }
+              />
+            </div>
+          )
+          : firstAuthGate.challengeKind === "manual_token"
+            ? (
+              <div className="border-b border-border px-4 py-3">
+                <AuthTokenCard
+                  gate={firstAuthGate}
+                  onSubmit={async (token) => {
+                    if (chat.runId) {
+                      await chat.submitAuthToken(
+                        chat.runId,
+                        firstAuthGate.gateRef,
+                        firstAuthGate.provider ?? "",
+                        firstAuthGate.accountLabel ?? "",
+                        token,
+                      );
+                    }
+                  }}
+                  onCancel={() =>
+                    chat.runId && chat.resolveGate(chat.runId, firstAuthGate.gateRef, "cancelled")
+                  }
+                />
+              </div>
+            )
+            : (
+              <div className="border-b border-border px-4 py-3">
+                <AuthGenericCard
+                  gate={firstAuthGate}
+                  onCancel={() =>
+                    chat.runId && chat.resolveGate(chat.runId, firstAuthGate.gateRef, "cancelled")
+                  }
+                />
+              </div>
+            )
+      ) : firstPendingApproval ? (
+        <div className="border-b border-border px-4 py-3">
+          <ApprovalCard
+            approval={firstPendingApproval}
+            onApprove={() =>
+              chat.runId && chat.resolveGate(chat.runId, firstPendingApproval.gateRef, "approved")
             }
-          >
-            Approve
-          </Button>
-          <Button
-            size="sm"
-            variant="outline"
-            className="h-7 shrink-0 border-amber-500/30 bg-amber-500/10 px-2.5 text-xs font-medium text-amber-600 hover:bg-amber-500/20"
-            onClick={() =>
-              chat.runId && chat.resolveGate(chat.runId, firstPendingApproval.gateRef, false)
+            onDeny={() =>
+              chat.runId && chat.resolveGate(chat.runId, firstPendingApproval.gateRef, "denied")
             }
-          >
-            Deny
-          </Button>
+            onAlways={
+              firstPendingApproval.allowAlways
+                ? () =>
+                  chat.runId &&
+                  chat.resolveGate(chat.runId, firstPendingApproval.gateRef, "approved", { always: true })
+                : undefined
+            }
+          />
         </div>
       ) : null}
 
@@ -356,6 +380,42 @@ function ChatPage() {
     [sidebarWidth, sidebarOpen],
   );
 
+  const [expandedParents, setExpandedParents] = useState<Set<string>>(() => new Set());
+
+  const subagentMap = useMemo(() => {
+    const map = new Map<string, ConversationThread[]>();
+    for (const thread of threads) {
+      if (thread.isSubagent && thread.parentThreadId) {
+        const children = map.get(thread.parentThreadId) ?? [];
+        children.push(thread);
+        map.set(thread.parentThreadId, children);
+      }
+    }
+    return map;
+  }, [threads]);
+
+  const rootThreads = useMemo(
+    () => threads.filter((t) => !t.isSubagent),
+    [threads],
+  );
+
+  const orphanedSubagents = useMemo(() => {
+    const parentIds = new Set(threads.map((t) => t.threadId));
+    return threads.filter((t) => t.isSubagent && (!t.parentThreadId || !parentIds.has(t.parentThreadId)));
+  }, [threads]);
+
+  const toggleParent = useCallback((threadId: string) => {
+    setExpandedParents((prev) => {
+      const next = new Set(prev);
+      if (next.has(threadId)) {
+        next.delete(threadId);
+      } else {
+        next.add(threadId);
+      }
+      return next;
+    });
+  }, []);
+
   const statusDotClass =
     connectionStatus === "connected"
       ? "bg-[color:var(--near-green)]"
@@ -396,48 +456,107 @@ function ChatPage() {
             No threads yet. Create one to start chatting.
           </p>
         ) : (
-          threads.map((thread) => (
-            <div
-              key={thread.threadId}
-              role="button"
-              tabIndex={0}
-              onClick={() => {
-                openThread(thread.threadId);
-                setSheetOpen(false);
-              }}
-              onKeyDown={(e) => {
-                if (e.key === "Enter" || e.key === " ") {
-                  e.preventDefault();
-                  openThread(thread.threadId);
-                  setSheetOpen(false);
-                }
-              }}
-              className={`group flex w-full items-center gap-2 rounded-lg px-3 py-2.5 text-left text-sm transition-colors cursor-pointer touch-manipulation ${
-                activeThreadId === thread.threadId
-                  ? "bg-accent text-accent-foreground"
-                  : "text-muted-foreground hover:bg-muted active:bg-muted"
-              }`}
-            >
-              <MessageSquare size={14} className="shrink-0" />
-              <span className="flex-1 truncate text-xs">
-                {thread.title ?? `Thread ${thread.threadId.slice(0, 8)}`}
-              </span>
-              <button
-                type="button"
-                onClick={(e) => {
-                  e.stopPropagation();
-                  deleteThread(thread.threadId);
-                }}
-                className="shrink-0 p-1 -m-1 opacity-0 group-hover:opacity-100 focus:opacity-100 transition-opacity touch-manipulation"
-                aria-label="Delete thread"
-              >
-                <Trash2
-                  size={12}
-                  className="text-muted-foreground/40 hover:text-destructive transition-colors"
-                />
-              </button>
+          rootThreads.map((thread) => {
+            const children = subagentMap.get(thread.threadId) ?? [];
+            const isExpanded = expandedParents.has(thread.threadId);
+            const hasChildren = children.length > 0;
+            return (
+              <div key={thread.threadId} className="relative">
+                <div
+                  role="button"
+                  tabIndex={0}
+                  onClick={() => {
+                    openThread(thread.threadId);
+                    setSheetOpen(false);
+                  }}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter" || e.key === " ") {
+                      e.preventDefault();
+                      openThread(thread.threadId);
+                      setSheetOpen(false);
+                    }
+                  }}
+                  className={`group flex w-full items-center gap-2 rounded-lg px-3 py-2.5 text-left text-sm transition-colors cursor-pointer touch-manipulation ${
+                    activeThreadId === thread.threadId
+                      ? "bg-accent text-accent-foreground"
+                      : "text-muted-foreground hover:bg-muted active:bg-muted"
+                  }`}
+                >
+                  <div className="flex items-center gap-1.5 min-w-0 flex-1">
+                    {hasChildren && (
+                      <button
+                        type="button"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          toggleParent(thread.threadId);
+                        }}
+                        className="shrink-0 p-0.5 hover:text-foreground transition-colors touch-manipulation"
+                        aria-label={isExpanded ? "Collapse sub-agents" : "Expand sub-agents"}
+                      >
+                        <ChevronDown
+                          size={12}
+                          className={`transition-transform ${isExpanded ? "" : "-rotate-90"}`}
+                        />
+                      </button>
+                    )}
+                    <MessageSquare size={14} className="shrink-0" />
+                    <span className="truncate text-xs">
+                      {thread.title ?? `Thread ${thread.threadId.slice(0, 8)}`}
+                    </span>
+                    {hasChildren && (
+                      <span className="shrink-0 rounded-full bg-muted-foreground/10 px-1.5 text-[10px] font-medium text-muted-foreground/60">
+                        {children.length}
+                      </span>
+                    )}
+                  </div>
+                  <button
+                    type="button"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      deleteThread(thread.threadId);
+                    }}
+                    className="shrink-0 p-1 -m-1 opacity-0 group-hover:opacity-100 focus:opacity-100 transition-opacity touch-manipulation"
+                    aria-label="Delete thread"
+                  >
+                    <Trash2
+                      size={12}
+                      className="text-muted-foreground/40 hover:text-destructive transition-colors"
+                    />
+                  </button>
+                </div>
+                {hasChildren && isExpanded && (
+                  <div className="ml-4 border-l border-border/50 pl-1">
+                    {children.map((child) => (
+                      <SubagentRow
+                        key={child.threadId}
+                        thread={child}
+                        isActive={activeThreadId === child.threadId}
+                        onClick={(id) => { openThread(id); setSheetOpen(false); }}
+                        onDelete={deleteThread}
+                      />
+                    ))}
+                  </div>
+                )}
+              </div>
+            );
+          })
+        )}
+        {orphanedSubagents.length > 0 && (
+          <div className="pt-2">
+            <div className="px-3 py-1 text-[10px] font-medium uppercase tracking-wider text-muted-foreground/50">
+              Orphaned sub-agents
             </div>
-          ))
+            {orphanedSubagents.map((child) => (
+              <SubagentRow
+                key={child.threadId}
+                thread={child}
+                isActive={activeThreadId === child.threadId}
+                indented
+                onClick={(id) => { openThread(id); setSheetOpen(false); }}
+                onDelete={deleteThread}
+              />
+            ))}
+          </div>
         )}
       </div>
     </ScrollArea>
@@ -516,7 +635,7 @@ function ChatPage() {
           </>
         ) : (
           <div className="flex flex-col items-center gap-1 py-2">
-            {threads.slice(0, 8).map((thread) => (
+            {rootThreads.slice(0, 8).map((thread) => (
               <button
                 key={thread.threadId}
                 type="button"

@@ -21,6 +21,8 @@ export interface ConversationThread {
   createdByActorId: string;
   createdAt: string | null;
   updatedAt: string | null;
+  parentThreadId: string | null;
+  isSubagent: boolean;
 }
 
 const THREADS_KEY = ["conversation", "threads"] as const;
@@ -36,7 +38,7 @@ export function useConversationThreads() {
     },
     initialPageParam: null as string | null,
     getNextPageParam: () => null,
-    staleTime: 30_000,
+    staleTime: 5_000,
   });
 }
 

@@ -288,8 +288,8 @@ export const ChatEventSchema = z.object({
       approvalContext: z
         .object({
           toolName: z.string(),
-          action: z.string(),
-          scope: z.string(),
+          action: z.unknown(),
+          scope: z.unknown(),
           reason: z.string().optional(),
           destination: z.unknown().optional(),
           details: z.array(z.unknown()).optional(),
@@ -654,6 +654,7 @@ export const contract = oc.router({
           gateRef: z.string().catch(""),
           resolution: GateResolutionSchema,
           always: z.boolean().optional(),
+          credentialRef: z.string().optional(),
         }),
       )
       .output(z.object({ success: z.boolean() }))
@@ -932,6 +933,25 @@ export const contract = oc.router({
     logout: oc
       .route({ method: "POST", path: "/auth/logout", summary: "Logout / revoke session" })
       .output(z.object({ success: z.boolean() }))
+      .errors(Errors),
+
+    submitManualToken: oc
+      .route({
+        method: "POST",
+        path: "/product-auth/manual-token/submit",
+        summary: "Submit a manual token for credential storage",
+      })
+      .input(
+        z.object({
+          provider: z.string(),
+          accountLabel: z.string(),
+          token: z.string(),
+          threadId: z.string(),
+          runId: z.string(),
+          gateRef: z.string(),
+        }),
+      )
+      .output(z.object({ credentialRef: z.string() }))
       .errors(Errors),
   },
 });

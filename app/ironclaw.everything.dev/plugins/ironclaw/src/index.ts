@@ -183,7 +183,7 @@ export default createPlugin({
         resolveGate: builder.threads.resolveGate.use(requireAuth).handler(
           ri(async (svc, input) => {
             await Effect.runPromise(
-              svc.resolveGate(input.id, input.runId, input.gateRef, input.resolution, input.always),
+              svc.resolveGate(input.id, input.runId, input.gateRef, input.resolution, input.always, input.credentialRef),
             );
             return { success: true };
           }),
@@ -341,6 +341,12 @@ export default createPlugin({
             await Effect.runPromise(svc.logout());
             return { success: true };
           }),
+        ),
+
+        submitManualToken: builder.auth.submitManualToken.handler(
+          ri((svc, input) =>
+            Effect.runPromise(svc.submitManualToken(input)),
+          ),
         ),
       },
 

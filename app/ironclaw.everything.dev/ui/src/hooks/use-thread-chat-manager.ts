@@ -1,6 +1,51 @@
 import type { UIMessage } from "@tanstack/ai";
 import type { StreamChunk } from "@tanstack/ai";
 
+export interface ApprovalAction {
+  label?: string;
+  method?: string;
+}
+
+export interface ApprovalScope {
+  label?: string;
+  reusable?: boolean;
+}
+
+export interface ApprovalDestination {
+  label?: string;
+  url?: string;
+  domain?: string;
+}
+
+export interface ApprovalDetail {
+  label?: string;
+  value?: string;
+}
+
+export interface PendingApproval {
+  gateRef: string;
+  headline: string;
+  toolName?: string;
+  description?: string;
+  allowAlways?: boolean;
+  action?: ApprovalAction;
+  scope?: ApprovalScope;
+  destination?: ApprovalDestination;
+  details?: ApprovalDetail[];
+}
+
+export interface AuthGate {
+  runId: string;
+  gateRef: string;
+  challengeKind: string;
+  provider?: string;
+  accountLabel?: string;
+  authorizationUrl?: string;
+  expiresAt?: string;
+  headline?: string;
+  body?: string;
+}
+
 export interface ThreadSession {
   messages: UIMessage[];
   isLoading: boolean;
@@ -9,7 +54,8 @@ export interface ThreadSession {
   listeners: Set<() => void>;
   connectedAt: number;
   runId: string | null;
-  pendingApprovals: Array<{ gateRef: string; headline: string }>;
+  pendingApprovals: PendingApproval[];
+  authGates: AuthGate[];
   lastRunErrorData: unknown;
   version: number;
 }
@@ -132,6 +178,7 @@ function handleChunk(threadId: string, chunk: any) {
   if (chunk.type === "RUN_FINISHED" || chunk.type === "RUN_ERROR") {
     session.runId = null;
     session.pendingApprovals = [];
+    session.authGates = [];
     for (const msg of session.messages) {
       if (msg.role !== "assistant") continue;
       for (let i = msg.parts.length - 1; i >= 0; i--) {
@@ -269,12 +316,74 @@ function handleChunk(threadId: string, chunk: any) {
   }
 
   if (chunk.type === "CUSTOM" && chunk.name === "approval-requested") {
+    const val = (chunk.value as any) ?? {};
+    const approval = val.approval ?? {};
     session.pendingApprovals.push({
-      gateRef: String((chunk.value as any)?.approval?.id ?? ""),
-      headline: String((chunk.value as any)?.input ?? "Approval required"),
+      gateRef: String(approval.id ?? val.toolCallId ?? ""),
+      headline: String(val.input ?? "Approval required"),
+      toolName: approval.toolName ?? val.toolName ?? undefined,
+      description: approval.description ?? undefined,
+      allowAlways: approval.allowAlways === true,
+      action: approval.action ?? undefined,
+      scope: approval.scope ?? undefined,
+      destination: approval.destination ?? undefined,
+      details: approval.details ?? undefined,
     });
     session.version++;
     notify(threadId);
+    return;
+  }
+
+  if (chunk.type === "CUSTOM" && chunk.name === "ironclaw.auth-required") {
+    const authPrompt = (chunk.value as any) ?? {};
+    session.authGates.push({
+      runId: String(authPrompt.runId ?? authPrompt.turnRunId ?? ""),
+      gateRef: String(authPrompt.authRequestRef ?? authPrompt.auth_request_ref ?? ""),
+      challengeKind: String(authPrompt.challengeKind ?? "other"),
+      provider: authPrompt.provider ?? undefined,
+      accountLabel: authPrompt.accountLabel ?? undefined,
+      authorizationUrl: authPrompt.authorizationUrl ?? undefined,
+      expiresAt: authPrompt.expiresAt ?? undefined,
+      headline: authPrompt.headline ?? undefined,
+      body: authPrompt.body ?? undefined,
+    });
+    session.version++;
+    notify(threadId);
+    return;
+  }
+
+  if (chunk.type === "CUSTOM" && chunk.name === "ironclaw.skill-activation") {
+    const val = (chunk.value as any) ?? {};
+    const skillNames: string[] = val.skillNames ?? [];
+    const feedback: string[] = val.feedback ?? [];
+    const content = [...skillNames.map((n) => `Skill activated: ${n}`), ...feedback]
+      .filter(Boolean)
+      .join("\n");
+    if (content) {
+      session.messages.push({
+        id: `skill-${val.id ?? Date.now()}`,
+        role: "system",
+        parts: [{ type: "text", content }],
+      });
+      session.version++;
+      notify(threadId);
+    }
+    return;
+  }
+
+  if (chunk.type === "CUSTOM" && chunk.name === "ironclaw.thinking") {
+    const val = (chunk.value as any) ?? {};
+    const body = String(val.body ?? "");
+    if (body) {
+      const lastAssistant = [...session.messages]
+        .reverse()
+        .find((m) => m.role === "assistant");
+      if (lastAssistant) {
+        lastAssistant.parts.push({ type: "thinking", content: body });
+        session.version++;
+        notify(threadId);
+      }
+    }
     return;
   }
 
@@ -298,6 +407,7 @@ export const threadChatManager = {
       connectedAt: Date.now(),
       runId: null,
       pendingApprovals: [],
+      authGates: [],
       lastRunErrorData: null,
       version: 0,
     };
@@ -319,7 +429,8 @@ export const threadChatManager = {
 
   hydrate(threadId: string, messages: UIMessage[]) {
     const session = this.getOrCreate(threadId);
-    if (session.messages.length === 0 && !session.isLoading) {
+    const shouldOverwrite = !session.isLoading || messages.length > session.messages.length;
+    if (shouldOverwrite && messages.length > 0) {
       session.messages = messages;
       session.version++;
       notify(threadId);

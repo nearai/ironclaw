@@ -77,6 +77,8 @@ const ConversationThreadSchema = z.object({
   createdByActorId: z.string(),
   createdAt: z.string().nullable().optional(),
   updatedAt: z.string().nullable().optional(),
+  parentThreadId: z.string().nullable(),
+  isSubagent: z.boolean(),
 });
 
 const ConversationMessagePageSchema = z.object({
@@ -127,7 +129,18 @@ const ThreadApproveInputSchema = z.object({
   threadId: z.string(),
   runId: z.string(),
   gateRef: z.string(),
-  approved: z.boolean(),
+  resolution: z.enum(["approved", "denied", "cancelled", "credential_provided"]),
+  always: z.boolean().optional(),
+  credentialRef: z.string().optional(),
+});
+
+const SubmitManualTokenInputSchema = z.object({
+  provider: z.string(),
+  accountLabel: z.string(),
+  token: z.string(),
+  threadId: z.string(),
+  runId: z.string(),
+  gateRef: z.string(),
 });
 
 export const ConversationLiveChunkSchema = z.object({
@@ -350,10 +363,20 @@ export const contract = oc.router({
       .route({
         method: "POST",
         path: "/conversation/threads/{threadId}/approve",
-        summary: "Approve or deny a gate/prompt",
+        summary: "Resolve a gate (approve/deny/cancel/credential_provided)",
       })
       .input(ThreadApproveInputSchema)
       .output(z.object({ success: z.boolean() }))
+      .errors({ UNAUTHORIZED, NOT_FOUND }),
+
+    submitManualToken: oc
+      .route({
+        method: "POST",
+        path: "/conversation/threads/{threadId}/manual-token",
+        summary: "Submit a manual token to store a credential",
+      })
+      .input(SubmitManualTokenInputSchema)
+      .output(z.object({ credentialRef: z.string() }))
       .errors({ UNAUTHORIZED, NOT_FOUND }),
   },
 });

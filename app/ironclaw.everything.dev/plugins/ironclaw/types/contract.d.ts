@@ -386,8 +386,8 @@ export declare const ChatEventSchema: z.ZodObject<{
         allowAlways: z.ZodOptional<z.ZodBoolean>;
         approvalContext: z.ZodOptional<z.ZodObject<{
             toolName: z.ZodString;
-            action: z.ZodString;
-            scope: z.ZodString;
+            action: z.ZodUnknown;
+            scope: z.ZodUnknown;
             reason: z.ZodOptional<z.ZodString>;
             destination: z.ZodOptional<z.ZodUnknown>;
             details: z.ZodOptional<z.ZodArray<z.ZodUnknown>>;
@@ -955,6 +955,7 @@ export declare const contract: {
                 cancelled: "cancelled";
             }>;
             always: z.ZodOptional<z.ZodBoolean>;
+            credentialRef: z.ZodOptional<z.ZodString>;
         }, z.core.$strip>, z.ZodObject<{
             success: z.ZodBoolean;
         }, z.core.$strip>, import("@orpc/contract").MergedErrorMap<Record<never, never>, import("@orpc/contract").MergedErrorMap<Record<never, never>, {
@@ -1058,8 +1059,8 @@ export declare const contract: {
                 allowAlways?: boolean | undefined;
                 approvalContext?: {
                     toolName: string;
-                    action: string;
-                    scope: string;
+                    action: unknown;
+                    scope: unknown;
                     reason?: string | undefined;
                     destination?: unknown;
                     details?: unknown[] | undefined;
@@ -1172,8 +1173,8 @@ export declare const contract: {
                 allowAlways?: boolean | undefined;
                 approvalContext?: {
                     toolName: string;
-                    action: string;
-                    scope: string;
+                    action: unknown;
+                    scope: unknown;
                     reason?: string | undefined;
                     destination?: unknown;
                     details?: unknown[] | undefined;
@@ -2209,6 +2210,37 @@ export declare const contract: {
         }>>, Record<never, never>>;
         logout: import("@orpc/contract").ContractProcedure<import("@orpc/contract").Schema<unknown, unknown>, z.ZodObject<{
             success: z.ZodBoolean;
+        }, z.core.$strip>, import("@orpc/contract").MergedErrorMap<Record<never, never>, import("@orpc/contract").MergedErrorMap<Record<never, never>, {
+            UNAUTHORIZED: {
+                status: number;
+                message: string;
+            };
+            NOT_FOUND: {
+                status: number;
+                message: string;
+            };
+            BAD_REQUEST: {
+                status: number;
+                message: string;
+            };
+            CONFLICT: {
+                status: number;
+                message: string;
+            };
+            GATEWAY_ERROR: {
+                status: number;
+                message: string;
+            };
+        }>>, Record<never, never>>;
+        submitManualToken: import("@orpc/contract").ContractProcedure<z.ZodObject<{
+            provider: z.ZodString;
+            accountLabel: z.ZodString;
+            token: z.ZodString;
+            threadId: z.ZodString;
+            runId: z.ZodString;
+            gateRef: z.ZodString;
+        }, z.core.$strip>, z.ZodObject<{
+            credentialRef: z.ZodString;
         }, z.core.$strip>, import("@orpc/contract").MergedErrorMap<Record<never, never>, import("@orpc/contract").MergedErrorMap<Record<never, never>, {
             UNAUTHORIZED: {
                 status: number;

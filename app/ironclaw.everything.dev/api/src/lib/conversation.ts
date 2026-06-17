@@ -7,6 +7,8 @@ export interface ConversationThread {
   createdByActorId: string;
   createdAt: string | null;
   updatedAt: string | null;
+  parentThreadId: string | null;
+  isSubagent: boolean;
 }
 
 export interface ConversationAttachmentRef {
@@ -45,17 +47,46 @@ export interface ConversationSendAck {
   eventCursor?: number;
 }
 
+function parseSubagentMetadata(raw: any): {
+  parentThreadId: string | null;
+  isSubagent: boolean;
+  displayTitle: string | null;
+} {
+  const metaStr = raw.metadataJson ?? raw.metadata_json ?? raw.metadata ?? null;
+  if (!metaStr) return { parentThreadId: null, isSubagent: false, displayTitle: null };
+  try {
+    const meta: Record<string, unknown> = typeof metaStr === "string" ? JSON.parse(metaStr) : metaStr;
+    if (meta.kind === "subagent") {
+      const displayTitle = typeof meta.flavor === "string"
+        ? meta.flavor.replace(/-/g, " ")
+        : null;
+      return {
+        parentThreadId: (meta.parentThreadId ?? meta.parent_thread_id ?? null) as string | null,
+        isSubagent: true,
+        displayTitle,
+      };
+    }
+  } catch {}
+  return { parentThreadId: null, isSubagent: false, displayTitle: null };
+}
+
 export function normalizeThread(raw: any): ConversationThread {
   const scope = raw.scope ?? {};
+  const subagent = parseSubagentMetadata(raw);
+  const title = raw.title === "Subagent" && subagent.displayTitle
+    ? subagent.displayTitle
+    : (raw.title ?? null);
   return {
     threadId: raw.threadId ?? raw.thread_id ?? "",
-    title: raw.title ?? null,
+    title,
     tenantId: scope.tenantId ?? scope.tenant_id ?? "",
     agentId: scope.agentId ?? scope.agent_id ?? "",
     projectId: scope.projectId ?? scope.project_id ?? null,
     createdByActorId: raw.createdByActorId ?? raw.created_by_actor_id ?? "",
     createdAt: raw.createdAt ?? raw.created_at ?? null,
     updatedAt: raw.updatedAt ?? raw.updated_at ?? null,
+    parentThreadId: subagent.parentThreadId,
+    isSubagent: subagent.isSubagent,
   };
 }
 

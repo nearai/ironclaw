@@ -514,11 +514,13 @@ export class IronclawService {
     gateRef: string,
     resolution: string,
     always?: boolean,
+    credentialRef?: string,
   ): Effect.Effect<void, Error> {
     return Effect.tryPromise({
       try: () => {
         const body: Record<string, unknown> = { resolution };
         if (always !== undefined) body.always = always;
+        if (credentialRef !== undefined) body.credential_ref = credentialRef;
         return this.request<void>(
           "POST",
           `/api/webchat/v2/threads/${encodeURIComponent(id)}/runs/${encodeURIComponent(runId)}/gates/${encodeURIComponent(gateRef)}/resolve`,
@@ -1264,6 +1266,33 @@ export class IronclawService {
       catch: (error: unknown) =>
         new Error(
           `Failed to get attachment: ${error instanceof Error ? error.message : String(error)}`,
+        ),
+    });
+  }
+
+  submitManualToken(params: {
+    provider: string;
+    accountLabel: string;
+    token: string;
+    threadId: string;
+    runId: string;
+    gateRef: string;
+  }): Effect.Effect<{ credentialRef: string }, Error> {
+    return Effect.tryPromise({
+      try: async () => {
+        const raw: any = await this.request("POST", "/api/reborn/product-auth/manual-token/submit", {
+          provider: params.provider,
+          account_label: params.accountLabel,
+          token: params.token,
+          thread_id: params.threadId,
+          run_id: params.runId,
+          gate_ref: params.gateRef,
+        });
+        return { credentialRef: raw.credential_ref };
+      },
+      catch: (error: unknown) =>
+        new Error(
+          `Failed to submit manual token: ${error instanceof Error ? error.message : String(error)}`,
         ),
     });
   }

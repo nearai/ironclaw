@@ -96,6 +96,7 @@ function extractEventRunId(event: ChatEvent): string | undefined {
       event.progress?.turnRunId ||
       event.activity?.turnRunId ||
       event.preview?.turnRunId ||
+      event.prompt?.turnRunId ||
       undefined)
   );
 }
@@ -132,6 +133,12 @@ function getProjectionCapabilityActivity(
 
 function getProjectionGate(item: Record<string, unknown>): Record<string, unknown> | undefined {
   return projVal(item, "gate", "Gate") as Record<string, unknown> | undefined;
+}
+
+function getProjectionSkillActivation(
+  item: Record<string, unknown>,
+): Record<string, unknown> | undefined {
+  return projVal(item, "skillActivation", "skill_activation") as Record<string, unknown> | undefined;
 }
 
 function findAssistantTextForRun(entries: any[], runId: string): string | undefined {
@@ -444,6 +451,7 @@ export function createThreadChatBridge(services: { ironclaw: (ctx: any) => any }
           const toolName = approvalContext?.toolName ?? "approval";
           const gateRef = prompt?.gateRef;
           const gateToolCallId = gateRef ?? `gate-${toolName}-${eventRunId}`;
+          const description = approvalContext?.reason ?? prompt?.body ?? "";
           const chunk = emitRunStarted(eventRunId);
           if (chunk) yield chunk;
           yield emitToolStart(gateToolCallId, toolName, eventRunId);
@@ -458,8 +466,18 @@ export function createThreadChatBridge(services: { ironclaw: (ctx: any) => any }
             {
               toolCallId: gateToolCallId,
               toolName,
-              input: approvalContext,
-              approval: { id: gateRef ?? gateToolCallId, needsApproval: true },
+              input: description || prompt?.headline || "Approval required",
+              approval: {
+                id: gateRef ?? gateToolCallId,
+                needsApproval: true,
+                allowAlways: prompt?.allowAlways ?? false,
+                toolName,
+                description,
+                action: approvalContext?.action ?? undefined,
+                scope: approvalContext?.scope ?? undefined,
+                destination: approvalContext?.destination ?? undefined,
+                details: approvalContext?.details ?? undefined,
+              },
             },
             eventRunId,
           );
@@ -559,6 +577,7 @@ export function createThreadChatBridge(services: { ironclaw: (ctx: any) => any }
             const thinkingItems: Array<Record<string, unknown>> = [];
             const capActivities: Array<Record<string, unknown>> = [];
             const gateItems: Array<Record<string, unknown>> = [];
+            const skillActivationItems: Array<Record<string, unknown>> = [];
 
             for (const item of items) {
               const rs = getProjectionRunStatus(item);
@@ -594,6 +613,11 @@ export function createThreadChatBridge(services: { ironclaw: (ctx: any) => any }
               const g = getProjectionGate(item);
               if (g) {
                 gateItems.push(g);
+                continue;
+              }
+              const sa = getProjectionSkillActivation(item);
+              if (sa) {
+                skillActivationItems.push(sa);
                 continue;
               }
             }
@@ -673,7 +697,13 @@ export function createThreadChatBridge(services: { ironclaw: (ctx: any) => any }
                     toolCallId: gateToolCallId,
                     toolName: "approval",
                     input: headline,
-                    approval: { id: gateRef, needsApproval: true },
+                    approval: {
+                      id: gateRef,
+                      needsApproval: true,
+                      allowAlways: true,
+                      toolName: "approval",
+                      description: headline,
+                    },
                   },
                   projRunId,
                 );
@@ -711,6 +741,19 @@ export function createThreadChatBridge(services: { ironclaw: (ctx: any) => any }
                 runId: tx.runId,
                 messageId: msgId,
               });
+            }
+
+            for (const sa of skillActivationItems) {
+              const skillNames = (sa.skillNames ?? sa.skill_names) as string[] | undefined;
+              const feedback = (sa.feedback ?? []) as string[];
+              const id = (sa.id as string) ?? crypto.randomUUID();
+              if (skillNames && skillNames.length > 0) {
+                yield emitCustom(
+                  "ironclaw.skill-activation",
+                  { id, skillNames, feedback, runId: projRunId },
+                  projRunId,
+                );
+              }
             }
 
             for (const rs of runStatuses) {

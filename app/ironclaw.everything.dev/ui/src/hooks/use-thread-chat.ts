@@ -2,11 +2,16 @@ import { useSyncExternalStore, useCallback, useEffect, useRef } from "react";
 import type { UIMessage } from "@tanstack/ai";
 import { useApiClient } from "@/app";
 import type { StagedAttachment } from "@/lib/attachments";
-import { threadChatManager } from "./use-thread-chat-manager";
+import { threadChatManager, type PendingApproval, type AuthGate } from "./use-thread-chat-manager";
 
 interface UseThreadChatOptions {
   threadId: string;
   initialMessages: UIMessage[];
+}
+
+interface GateResolutionOpts {
+  always?: boolean;
+  credentialRef?: string;
 }
 
 export function useThreadChat({ threadId, initialMessages }: UseThreadChatOptions) {
@@ -27,7 +32,8 @@ export function useThreadChat({ threadId, initialMessages }: UseThreadChatOption
       isLoading: session?.isLoading ?? false,
       error: session?.error ?? null,
       runId: session?.runId ?? null,
-      pendingApprovals: session?.pendingApprovals ?? [],
+      pendingApprovals: session?.pendingApprovals ?? ([] as PendingApproval[]),
+      authGates: session?.authGates ?? ([] as AuthGate[]),
     };
     return snapshotRef.current;
   }, [threadId]);
@@ -45,22 +51,35 @@ export function useThreadChat({ threadId, initialMessages }: UseThreadChatOption
     }
   }, [threadId, initialMessages]);
 
-  useEffect(() => {
-    return () => {
-      threadChatManager.destroy(threadId);
-    };
-  }, [threadId]);
+  type GateResolution = "approved" | "denied" | "credential_provided" | "cancelled";
 
   const resolveGate = useCallback(
-    async (runId: string, gateRef: string, approved: boolean) => {
+    async (runId: string, gateRef: string, resolution: GateResolution, opts?: GateResolutionOpts) => {
       await apiClient.conversation.threadApprove({
         threadId,
         runId,
         gateRef,
-        approved,
+        resolution,
+        always: opts?.always,
+        credentialRef: opts?.credentialRef,
       });
     },
     [apiClient, threadId],
+  );
+
+  const submitAuthToken = useCallback(
+    async (runId: string, gateRef: string, provider: string, accountLabel: string, token: string) => {
+      const { credentialRef } = await apiClient.conversation.submitManualToken({
+        provider,
+        accountLabel,
+        token,
+        threadId,
+        runId,
+        gateRef,
+      });
+      await resolveGate(runId, gateRef, "credential_provided", { credentialRef });
+    },
+    [apiClient, threadId, resolveGate],
   );
 
   const sendMessage = useCallback(
@@ -107,9 +126,11 @@ export function useThreadChat({ threadId, initialMessages }: UseThreadChatOption
     error: state.error,
     runId: state.runId,
     pendingApprovals: state.pendingApprovals,
+    authGates: state.authGates,
     sendMessage,
     stop,
     resolveGate,
+    submitAuthToken,
     copyConversation,
     threadId,
   };
