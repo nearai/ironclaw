@@ -54,7 +54,7 @@ use ironclaw_secrets::InMemorySecretStore;
 use ironclaw_triggers::{
     ClaimDueFireRequest, ClearActiveFireRequest, FireAcceptedRequest, InMemoryTriggerRepository,
     MAX_TRIGGER_NAME_BYTES, MAX_TRIGGER_PROMPT_BYTES, TriggerError, TriggerRecord,
-    TriggerRepository, TriggerRunHistoryStatus, TriggerRunRecord,
+    TriggerRepository, TriggerRunHistoryStatus, TriggerRunRecord, TriggerState,
 };
 use ironclaw_trust::{
     AdminConfig, AdminEntry, AuthorityCeiling, EffectiveTrustClass, HostTrustAssignment,
@@ -320,7 +320,9 @@ async fn builtin_trigger_create_stamps_caller_scope_and_persists_record() {
     assert_eq!(trigger["agent_id"], json!("default"));
     assert_eq!(trigger["project_id"], json!("bootstrap"));
     assert_eq!(trigger["last_status"], Value::Null);
-    assert_eq!(trigger["is_active"], json!(false));
+    assert_eq!(trigger["is_enabled"], json!(true));
+    assert_eq!(trigger["is_active"], json!(true));
+    assert_eq!(trigger["has_active_fire"], json!(false));
     assert!(trigger.get("last_fired_slot").is_none());
     assert!(trigger.get("active_fire_slot").is_none());
     assert!(trigger.get("active_run_ref").is_none());
@@ -749,7 +751,9 @@ async fn builtin_trigger_list_and_remove_are_caller_scoped() {
     .unwrap();
     assert_eq!(owner_list["triggers"].as_array().unwrap().len(), 1);
     assert!(owner_list["triggers"][0].get("last_status").is_some());
-    assert_eq!(owner_list["triggers"][0]["is_active"], json!(false));
+    assert_eq!(owner_list["triggers"][0]["is_enabled"], json!(true));
+    assert_eq!(owner_list["triggers"][0]["is_active"], json!(true));
+    assert_eq!(owner_list["triggers"][0]["has_active_fire"], json!(false));
     assert!(owner_list["triggers"][0].get("prompt").is_none());
     assert!(owner_list["triggers"][0].get("tenant_id").is_none());
     assert!(owner_list["triggers"][0].get("creator_user_id").is_none());
@@ -782,7 +786,7 @@ async fn builtin_trigger_list_and_remove_are_caller_scoped() {
 }
 
 #[tokio::test]
-async fn builtin_trigger_list_shows_active_state_without_run_identifiers() {
+async fn builtin_trigger_list_separates_enabled_state_from_active_fire_state() {
     let repository = Arc::new(InMemoryTriggerRepository::default());
     let runtime = runtime_with_trigger_repository(repository.clone());
     let context = execution_context([TRIGGER_CREATE_CAPABILITY_ID, TRIGGER_LIST_CAPABILITY_ID]);
@@ -800,23 +804,45 @@ async fn builtin_trigger_list_shows_active_state_without_run_identifiers() {
     )
     .await
     .unwrap();
-    assert_eq!(created["trigger"]["is_active"], json!(false));
+    assert_eq!(created["trigger"]["is_enabled"], json!(true));
+    assert_eq!(created["trigger"]["is_active"], json!(true));
+    assert_eq!(created["trigger"]["has_active_fire"], json!(false));
 
     let mut records = repository
         .list_triggers(context.resource_scope.tenant_id.clone())
         .await
         .unwrap();
     assert_eq!(records.len(), 1);
-    records[0].active_fire_slot = Some(records[0].next_run_at);
-    records[0].active_run_ref =
-        Some(TurnRunId::parse("01890f0f-9b6f-7a85-9e5b-9f21a93c4f5a").unwrap());
-    repository.upsert_trigger(records.remove(0)).await.unwrap();
+    let mut record = records.remove(0);
+    record.state = TriggerState::Paused;
+    repository.upsert_trigger(record.clone()).await.unwrap();
+
+    let listed_paused = invoke_with_context(
+        &runtime,
+        TRIGGER_LIST_CAPABILITY_ID,
+        json!({}),
+        context.clone(),
+    )
+    .await
+    .unwrap();
+    let paused_trigger = &listed_paused["triggers"][0];
+    assert_eq!(paused_trigger["state"], json!("paused"));
+    assert_eq!(paused_trigger["is_enabled"], json!(false));
+    assert_eq!(paused_trigger["is_active"], json!(false));
+    assert_eq!(paused_trigger["has_active_fire"], json!(false));
+
+    record.state = TriggerState::Scheduled;
+    record.active_fire_slot = Some(record.next_run_at);
+    record.active_run_ref = Some(TurnRunId::parse("01890f0f-9b6f-7a85-9e5b-9f21a93c4f5a").unwrap());
+    repository.upsert_trigger(record).await.unwrap();
 
     let listed = invoke_with_context(&runtime, TRIGGER_LIST_CAPABILITY_ID, json!({}), context)
         .await
         .unwrap();
     let trigger = &listed["triggers"][0];
+    assert_eq!(trigger["is_enabled"], json!(true));
     assert_eq!(trigger["is_active"], json!(true));
+    assert_eq!(trigger["has_active_fire"], json!(true));
     assert!(trigger.get("active_fire_slot").is_none());
     assert!(trigger.get("active_run_ref").is_none());
 }
@@ -868,7 +894,9 @@ async fn builtin_trigger_create_list_and_remove_use_full_request_scope() {
     assert!(trigger.get("creator_user_id").is_none());
     assert_eq!(trigger["agent_id"], json!("scoped-agent"));
     assert_eq!(trigger["project_id"], json!("scoped-project"));
-    assert_eq!(trigger["is_active"], json!(false));
+    assert_eq!(trigger["is_enabled"], json!(true));
+    assert_eq!(trigger["is_active"], json!(true));
+    assert_eq!(trigger["has_active_fire"], json!(false));
     assert!(trigger.get("prompt").is_none());
     assert!(trigger.get("last_fired_slot").is_none());
     assert!(trigger.get("active_fire_slot").is_none());
@@ -949,7 +977,9 @@ async fn builtin_trigger_create_round_trips_nullable_agent_and_project_scope() {
 
     assert_eq!(created["trigger"]["agent_id"], Value::Null);
     assert_eq!(created["trigger"]["project_id"], Value::Null);
-    assert_eq!(created["trigger"]["is_active"], json!(false));
+    assert_eq!(created["trigger"]["is_enabled"], json!(true));
+    assert_eq!(created["trigger"]["is_active"], json!(true));
+    assert_eq!(created["trigger"]["has_active_fire"], json!(false));
 }
 
 #[tokio::test]
