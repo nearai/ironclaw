@@ -9,7 +9,10 @@ export const defaultRoute = "/chat";
 export const primaryRoutes = [
   { id: "chat", path: "/chat", labelKey: "nav.chat" },
   { id: "workspace", path: "/workspace", labelKey: "nav.workspace" },
-  { id: "projects", path: "/projects", labelKey: "nav.projects", hidden: true },
+  // Un-hidden: its lib/projects-api.js now calls the real v2
+  // `/api/webchat/v2/projects` endpoints (list/create/read/update/delete +
+  // membership ACL). Per-project missions/threads remain stubbed (empty panels).
+  { id: "projects", path: "/projects", labelKey: "nav.projects" },
   { id: "jobs", path: "/jobs", labelKey: "nav.jobs", hidden: true },
   { id: "routines", path: "/routines", labelKey: "nav.routines", hidden: true },
   { id: "automations", path: "/automations", labelKey: "nav.automations" },

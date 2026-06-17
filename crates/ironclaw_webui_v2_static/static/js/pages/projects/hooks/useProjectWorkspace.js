@@ -48,7 +48,9 @@ export function useProjectWorkspace(projectId) {
   }, [projectId, queryClient]);
 
   return {
-    project: projectQuery.data?.project || null,
+    // `fetchProjectDetail` returns the page-shaped project object directly
+    // (not wrapped in `{ project }`), matching `fetchProjectsOverview` entries.
+    project: projectQuery.data || null,
     missions: missionsQuery.data?.missions || [],
     threads: threadsQuery.data?.threads || [],
     widgets: widgetsQuery.data || [],
