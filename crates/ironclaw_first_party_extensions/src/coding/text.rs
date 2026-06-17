@@ -146,7 +146,6 @@ struct MatchedEdit {
 struct NormalizedText {
     text: String,
     spans: Vec<SourceSpan>,
-    byte_starts: Vec<usize>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -372,7 +371,6 @@ fn normalize_for_fuzzy_match(value: &str) -> String {
 fn normalize_with_source_map(value: &str) -> NormalizedText {
     let mut text = String::new();
     let mut spans = Vec::new();
-    let mut byte_starts = Vec::new();
     let mut base_offset = 0usize;
 
     for segment in value.split_inclusive('\n') {
@@ -384,29 +382,28 @@ fn normalize_with_source_map(value: &str) -> NormalizedText {
         };
         let mut line_text = String::new();
         let mut line_spans = Vec::new();
-        let mut line_byte_starts = Vec::new();
         for (offset, ch) in line.char_indices() {
             let source_span = SourceSpan {
                 start: base_offset + offset,
                 end: base_offset + offset + ch.len_utf8(),
             };
             for normalized in normalize_char_for_fuzzy_match(ch) {
-                line_byte_starts.push(line_text.len());
                 line_text.push(normalized);
-                line_spans.push(source_span);
+                line_spans.extend(std::iter::repeat_n(source_span, normalized.len_utf8()));
             }
         }
-        while line_text.chars().last().is_some_and(char::is_whitespace) {
+        while let Some(last_char) = line_text.chars().last() {
+            if !last_char.is_whitespace() {
+                break;
+            }
             line_text.pop();
-            line_spans.pop();
-            line_byte_starts.pop();
+            for _ in 0..last_char.len_utf8() {
+                line_spans.pop();
+            }
         }
-        let text_base = text.len();
         text.push_str(&line_text);
-        byte_starts.extend(line_byte_starts.into_iter().map(|start| text_base + start));
         spans.extend(line_spans);
         if has_newline {
-            byte_starts.push(text.len());
             text.push('\n');
             spans.push(SourceSpan {
                 start: base_offset + segment.len() - 1,
@@ -416,11 +413,7 @@ fn normalize_with_source_map(value: &str) -> NormalizedText {
         base_offset += segment.len();
     }
 
-    NormalizedText {
-        text,
-        spans,
-        byte_starts,
-    }
+    NormalizedText { text, spans }
 }
 
 fn normalize_char_for_fuzzy_match(ch: char) -> Vec<char> {
@@ -448,31 +441,20 @@ fn normalized_span_to_source_span(
     start: usize,
     end: usize,
 ) -> Option<SourceSpan> {
-    let start_char = normalized.byte_starts.binary_search(&start).ok()?;
-    let end_char = if end == normalized.text.len() {
-        normalized.spans.len()
-    } else {
-        normalized.byte_starts.binary_search(&end).ok()?
-    };
-    if start_char >= end_char {
+    if start >= end || end > normalized.spans.len() {
         return None;
     }
-    if start_char > 0
-        && same_source_span(
-            normalized.spans[start_char],
-            normalized.spans[start_char - 1],
-        )
-    {
+    if start > 0 && same_source_span(normalized.spans[start], normalized.spans[start - 1]) {
         return None;
     }
-    if end_char < normalized.spans.len()
-        && same_source_span(normalized.spans[end_char], normalized.spans[end_char - 1])
+    if end < normalized.spans.len()
+        && same_source_span(normalized.spans[end], normalized.spans[end - 1])
     {
         return None;
     }
     Some(SourceSpan {
-        start: normalized.spans.get(start_char)?.start,
-        end: normalized.spans.get(end_char - 1)?.end,
+        start: normalized.spans.get(start)?.start,
+        end: normalized.spans.get(end - 1)?.end,
     })
 }
 

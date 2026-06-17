@@ -17,6 +17,7 @@ use super::{
     diff_preview::{file_diff_preview, will_use_large_diff_path},
     input_error,
     inputs::{optional_usize, required_str},
+    operation_error_with_summary,
     patch::{parse_apply_patch_input, replacement_error},
     paths::{
         create_parent_dir_unless_sensitive, deny_sensitive_existing_path, filesystem_error,
