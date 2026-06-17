@@ -979,6 +979,28 @@ async fn bundled_github_wasm_builds_create_repo_fork_and_release_requests() {
         None,
     );
 
+    let get_authenticated_user_http = Arc::new(RecordingWasmHostHttp::ok(WasmHttpResponse {
+        status: 200,
+        headers_json: "{}".to_string(),
+        body: br#"{"login":"serrrfirat","type":"User"}"#.to_vec(),
+    }));
+    let get_authenticated_user = execute_bundled_github_wasm(
+        "github.get_authenticated_user",
+        json!({}),
+        Arc::clone(&get_authenticated_user_http),
+    );
+    assert_eq!(get_authenticated_user.error, None);
+    let authenticated_user: serde_json::Value =
+        serde_json::from_str(get_authenticated_user.output_json.as_deref().unwrap()).unwrap();
+    assert_eq!(authenticated_user["login"], json!("serrrfirat"));
+    assert_eq!(authenticated_user["type"], json!("User"));
+    assert_single_wasm_request(
+        &get_authenticated_user_http,
+        "GET",
+        "https://api.github.com/user",
+        None,
+    );
+
     let fork_http = Arc::new(RecordingWasmHostHttp::ok(WasmHttpResponse {
         status: 202,
         headers_json: "{}".to_string(),

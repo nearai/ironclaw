@@ -517,6 +517,10 @@ pub(crate) fn merge_pull_request(
     github_request("PUT", &path, Some(req_body.to_string()))
 }
 
+pub(crate) fn get_authenticated_user() -> Result<String, String> {
+    github_request("GET", "/user", None)
+}
+
 pub(crate) fn list_repos(
     username: Option<&str>,
     page: Option<u32>,

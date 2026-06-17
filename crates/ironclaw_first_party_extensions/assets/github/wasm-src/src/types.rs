@@ -144,6 +144,8 @@ pub(crate) enum GitHubAction {
         commit_message: Option<String>,
         merge_method: Option<MergeMethod>,
     },
+    #[serde(rename = "get_authenticated_user")]
+    GetAuthenticatedUser {},
     #[serde(rename = "list_repos")]
     ListRepos {
         username: Option<String>,
