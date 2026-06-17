@@ -1456,10 +1456,16 @@ impl BlockedAuthFlowCanceller for RebornProductAuthServices {
         let Some(flow) = flow else {
             return Ok(());
         };
-        self.flow_manager
-            .cancel_flow(&flow.scope, flow.id)
-            .await
-            .map(|_| ())
+        match self.flow_manager.cancel_flow(&flow.scope, flow.id).await {
+            Ok(_) => Ok(()),
+            // The flow terminalized between our non-terminal read above and this
+            // cancel (a concurrent OAuth callback or another canceller). Already
+            // terminal is the desired end state, so honor the documented graceful
+            // no-op contract instead of surfacing the race as an error. Real
+            // lookup/scope/backend errors still propagate.
+            Err(AuthProductError::Canceled | AuthProductError::FlowAlreadyTerminal) => Ok(()),
+            Err(err) => Err(err),
+        }
     }
 }
 
@@ -1983,6 +1989,219 @@ mod tests {
             auth_svc.flow_records_snapshot().is_empty(),
             "no flow must exist after a no-op cancel"
         );
+    }
+
+    /// `cancel_blocked_auth_flow` must treat `Err(AuthProductError::Canceled)` and
+    /// `Err(AuthProductError::FlowAlreadyTerminal)` from `flow_manager.cancel_flow`
+    /// as `Ok(())` — these represent a concurrent terminal race where the flow
+    /// completed between the non-terminal read and the cancel call.
+    ///
+    /// Also asserts a negative case: a real backend error (e.g. `BackendUnavailable`)
+    /// still propagates as `Err` to confirm the normalization is not over-broad.
+    #[tokio::test]
+    async fn cancel_blocked_auth_flow_treats_terminal_race_as_ok() {
+        use ironclaw_auth::{
+            AuthFlowId, AuthFlowRecord, AuthProductError, AuthProductScope,
+            OAuthCallbackClaimRequest, OAuthCallbackFailureInput, OAuthCallbackInput, Timestamp,
+        };
+        use ironclaw_host_api::UserId;
+        use ironclaw_turns::TurnScope;
+
+        /// A `AuthFlowManager` whose `cancel_flow` returns a caller-supplied error
+        /// while all other methods forward to the real in-memory store.  Used to
+        /// simulate the terminal race without needing to actually put the flow in
+        /// a terminal state before the call.
+        struct TerminalRaceFlowManager {
+            inner: Arc<InMemoryAuthProductServices>,
+            cancel_error: tokio::sync::Mutex<Option<AuthProductError>>,
+        }
+
+        impl TerminalRaceFlowManager {
+            fn returning(
+                inner: Arc<InMemoryAuthProductServices>,
+                error: AuthProductError,
+            ) -> Arc<Self> {
+                Arc::new(Self {
+                    inner,
+                    cancel_error: tokio::sync::Mutex::new(Some(error)),
+                })
+            }
+        }
+
+        #[async_trait::async_trait]
+        impl AuthFlowManager for TerminalRaceFlowManager {
+            async fn create_flow(
+                &self,
+                request: NewAuthFlow,
+            ) -> Result<AuthFlowRecord, AuthProductError> {
+                self.inner.create_flow(request).await
+            }
+
+            async fn get_flow(
+                &self,
+                scope: &AuthProductScope,
+                flow_id: AuthFlowId,
+            ) -> Result<Option<AuthFlowRecord>, AuthProductError> {
+                self.inner.get_flow(scope, flow_id).await
+            }
+
+            async fn cancel_flow(
+                &self,
+                _scope: &AuthProductScope,
+                _flow_id: AuthFlowId,
+            ) -> Result<AuthFlowRecord, AuthProductError> {
+                let err = self
+                    .cancel_error
+                    .lock()
+                    .await
+                    .take()
+                    .expect("cancel_flow called more than once on TerminalRaceFlowManager");
+                Err(err)
+            }
+
+            async fn claim_oauth_callback(
+                &self,
+                _scope: &AuthProductScope,
+                _request: OAuthCallbackClaimRequest,
+            ) -> Result<AuthFlowRecord, AuthProductError> {
+                unreachable!("terminal-race test does not call claim_oauth_callback")
+            }
+
+            async fn complete_oauth_callback(
+                &self,
+                _scope: &AuthProductScope,
+                _input: OAuthCallbackInput,
+            ) -> Result<AuthFlowRecord, AuthProductError> {
+                unreachable!("terminal-race test does not call complete_oauth_callback")
+            }
+
+            async fn complete_credential_selection(
+                &self,
+                _scope: &AuthProductScope,
+                _input: ironclaw_auth::CredentialSelectionInput,
+            ) -> Result<AuthFlowRecord, AuthProductError> {
+                unreachable!("terminal-race test does not call complete_credential_selection")
+            }
+
+            async fn complete_manual_token(
+                &self,
+                _scope: &AuthProductScope,
+                _input: ironclaw_auth::ManualTokenCompletionInput,
+            ) -> Result<AuthFlowRecord, AuthProductError> {
+                unreachable!("terminal-race test does not call complete_manual_token")
+            }
+
+            async fn cancel_manual_token(
+                &self,
+                _scope: &AuthProductScope,
+                _interaction_id: AuthInteractionId,
+            ) -> Result<Option<AuthFlowRecord>, AuthProductError> {
+                unreachable!("terminal-race test does not call cancel_manual_token")
+            }
+
+            async fn fail_oauth_callback(
+                &self,
+                _scope: &AuthProductScope,
+                _input: OAuthCallbackFailureInput,
+            ) -> Result<AuthFlowRecord, AuthProductError> {
+                unreachable!("terminal-race test does not call fail_oauth_callback")
+            }
+
+            async fn mark_continuation_dispatched(
+                &self,
+                _scope: &AuthProductScope,
+                _flow_id: AuthFlowId,
+                _emitted_at: Timestamp,
+            ) -> Result<AuthFlowRecord, AuthProductError> {
+                unreachable!("terminal-race test does not call mark_continuation_dispatched")
+            }
+        }
+
+        // Helper: build services with a custom flow_manager but real flow_record_source.
+        let build_services_with_manager =
+            |auth_svc: Arc<InMemoryAuthProductServices>, manager: Arc<dyn AuthFlowManager>| {
+                let double = Arc::new(SharedAuthTestDouble);
+                RebornProductAuthServices::new(
+                    manager,
+                    double.clone() as Arc<dyn AuthInteractionService>,
+                    double.clone() as Arc<dyn CredentialSetupService>,
+                    double.clone() as Arc<dyn CredentialAccountService>,
+                    double.clone() as Arc<dyn AuthProviderClient>,
+                    double.clone() as Arc<dyn SecretCleanupService>,
+                    Arc::new(NoopAuthContinuationDispatcher),
+                )
+                .with_flow_record_source(auth_svc as Arc<dyn AuthFlowRecordSource>)
+            };
+
+        let turn_scope = TurnScope::new_with_owner(
+            ironclaw_host_api::TenantId::new("test-tenant").expect("tenant"),
+            Some(ironclaw_host_api::AgentId::new("test-agent").expect("agent")),
+            None,
+            ironclaw_host_api::ThreadId::new("test-thread").expect("thread"),
+            Some(UserId::new("creator-user").expect("owner")),
+        );
+        let owner_user_id = UserId::new("creator-user").expect("owner");
+        let run_id = TurnRunId::new();
+        let gate_ref_str = "gate:terminal-race-test";
+        let scope_resource = test_auth_product_scope();
+
+        // ── Case 1: cancel_flow returns Err(FlowAlreadyTerminal) → Ok(()) ───────────
+        {
+            let auth_svc = Arc::new(InMemoryAuthProductServices::new());
+            // Seed a non-terminal flow so flow_record_source returns Some(…).
+            create_test_flow(&auth_svc, scope_resource.clone(), run_id, gate_ref_str).await;
+            let manager = TerminalRaceFlowManager::returning(
+                Arc::clone(&auth_svc),
+                AuthProductError::FlowAlreadyTerminal,
+            );
+            let services = Arc::new(build_services_with_manager(auth_svc, manager));
+
+            let result = services
+                .cancel_blocked_auth_flow(&turn_scope, &owner_user_id, run_id, gate_ref_str)
+                .await;
+            assert!(
+                result.is_ok(),
+                "FlowAlreadyTerminal from cancel_flow must be normalized to Ok(()); got: {result:?}"
+            );
+        }
+
+        // ── Case 2: cancel_flow returns Err(Canceled) → Ok(()) ──────────────────────
+        {
+            let auth_svc = Arc::new(InMemoryAuthProductServices::new());
+            create_test_flow(&auth_svc, scope_resource.clone(), run_id, gate_ref_str).await;
+            let manager = TerminalRaceFlowManager::returning(
+                Arc::clone(&auth_svc),
+                AuthProductError::Canceled,
+            );
+            let services = Arc::new(build_services_with_manager(auth_svc, manager));
+
+            let result = services
+                .cancel_blocked_auth_flow(&turn_scope, &owner_user_id, run_id, gate_ref_str)
+                .await;
+            assert!(
+                result.is_ok(),
+                "Canceled from cancel_flow must be normalized to Ok(()); got: {result:?}"
+            );
+        }
+
+        // ── Negative case: cancel_flow returns a real error → Err propagates ─────────
+        {
+            let auth_svc = Arc::new(InMemoryAuthProductServices::new());
+            create_test_flow(&auth_svc, scope_resource, run_id, gate_ref_str).await;
+            let manager = TerminalRaceFlowManager::returning(
+                Arc::clone(&auth_svc),
+                AuthProductError::BackendUnavailable,
+            );
+            let services = Arc::new(build_services_with_manager(auth_svc, manager));
+
+            let result = services
+                .cancel_blocked_auth_flow(&turn_scope, &owner_user_id, run_id, gate_ref_str)
+                .await;
+            assert!(
+                matches!(result, Err(AuthProductError::BackendUnavailable)),
+                "BackendUnavailable from cancel_flow must propagate as Err; got: {result:?}"
+            );
+        }
     }
 
     /// `cancel_blocked_auth_flow` is a no-op (returns `Ok`) when the service

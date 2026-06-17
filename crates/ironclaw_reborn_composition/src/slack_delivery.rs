@@ -4676,6 +4676,93 @@ mod tests {
         );
     }
 
+    /// A `BlockedAuthFlowCanceller` that always returns `Err(BackendUnavailable)`.
+    /// Used to assert that a flow-cancel error is swallowed and does not break
+    /// Slack auto-denial delivery.
+    struct FailingBlockedAuthFlowCanceller;
+
+    #[async_trait]
+    impl BlockedAuthFlowCanceller for FailingBlockedAuthFlowCanceller {
+        async fn cancel_blocked_auth_flow(
+            &self,
+            _scope: &ironclaw_turns::TurnScope,
+            _owner_user_id: &ironclaw_host_api::UserId,
+            _run_id: TurnRunId,
+            _gate_ref: &str,
+        ) -> Result<(), ironclaw_auth::AuthProductError> {
+            Err(ironclaw_auth::AuthProductError::BackendUnavailable)
+        }
+    }
+
+    /// A flow-cancel failure must be swallowed: a failing `BlockedAuthFlowCanceller`
+    /// must not break Slack auto-denial.
+    ///
+    /// After `cancel_run` succeeds, `cancel_auth_blocked_run` attempts a best-effort
+    /// `cancel_blocked_auth_flow`.  When that returns `Err`, the error is debug-logged
+    /// and the function still returns `Ok(())` — so the `SLACK_AUTH_UNAVAILABLE_MESSAGE`
+    /// post still goes out and the coordinator cancel count is still 1.
+    #[tokio::test]
+    async fn blocked_auth_canceller_failure_is_swallowed() {
+        let install = "test-install";
+        let egress = Arc::new(FakeProtocolHttpEgress::new(vec!["slack.com".to_string()]));
+        egress.allow_credential_handle("slack_bot_token");
+        egress.program_response(
+            "slack.com",
+            Ok(EgressResponse::new(
+                200,
+                slack_post_ok_json("D123", "6007.1"),
+            )),
+        );
+
+        let outbound = Arc::new(InMemoryOutboundStateStore::default());
+        // cancel_run SUCCEEDS (cancel_should_fail is NOT set, matching the default).
+        let coordinator = Arc::new(ScriptedTurnCoordinator::with_states(vec![scripted_state(
+            TurnStatus::BlockedAuth,
+            Some("gate:auth-cancel-test"),
+        )]));
+        // Wire in a canceller that always fails — swallow path under test.
+        let observer = make_observer_with_canceller(
+            Arc::clone(&coordinator) as Arc<dyn TurnCoordinator>,
+            egress.clone(),
+            outbound,
+            install,
+            Some(Arc::new(FailingBlockedAuthFlowCanceller) as Arc<dyn BlockedAuthFlowCanceller>),
+        );
+        let env = envelope(user_message_payload());
+        let ack = ProductInboundAck::Accepted {
+            accepted_message_ref: AcceptedMessageRef::new("slack:canceller-fail-swallowed-test")
+                .expect("ref"),
+            submitted_run_id: TurnRunId::new(),
+        };
+
+        observer.observe_workflow_ack(env, ack).await;
+
+        // The run was still cancelled exactly once — flow-cancel failure does not
+        // prevent run cancellation or the auto-denial post.
+        assert_eq!(
+            coordinator.cancel_call_count(),
+            1,
+            "cancel_run must be called exactly once even when flow-cancel fails"
+        );
+
+        // The SLACK_AUTH_UNAVAILABLE_MESSAGE post must still go out.
+        let calls = egress.calls();
+        let post_calls: Vec<_> = calls
+            .iter()
+            .filter(|c| c.path == "/api/chat.postMessage")
+            .collect();
+        assert_eq!(
+            post_calls.len(),
+            1,
+            "expected exactly one chat.postMessage despite flow-cancel failure"
+        );
+        let body = std::str::from_utf8(&post_calls[0].body).expect("utf8 body");
+        assert!(
+            body.contains(SLACK_AUTH_UNAVAILABLE_MESSAGE),
+            "body must contain SLACK_AUTH_UNAVAILABLE_MESSAGE text, got: {body}"
+        );
+    }
+
     /// DeferredBusy + UserMessage + BlockedApproval with no gate_ref → fallback wording
     /// without a specific gate command.
     #[tokio::test]
