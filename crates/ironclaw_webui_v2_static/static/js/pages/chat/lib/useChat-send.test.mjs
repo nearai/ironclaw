@@ -629,6 +629,85 @@ test("useChat.approve treats already_terminal false as resumed", async () => {
   ]);
 });
 
+test("useChat.approve deny with already_terminal true does not synthesize failed activity", async () => {
+  const threadId = "thread-1";
+  const runId = "run-already-terminal-true";
+  const gateRef = "gate-already-terminal-true";
+  let renderedMessages = [
+    {
+      id: "tool-existing-terminal",
+      role: "tool_activity",
+      turnRunId: runId,
+      gateRef,
+      toolStatus: "ok",
+      toolName: "search",
+    },
+  ];
+
+  const context = {
+    AbortController,
+    Date,
+    Error,
+    Map,
+    Math,
+    React: createReactStub({
+      initialByIndex: new Map([
+        [2, { runId, threadId, status: "awaiting_gate" }],
+        [4, false],
+        [5, { runId, gateRef, kind: "gate", toolName: "nearai.web_search" }],
+      ]),
+    }),
+    addPending,
+    cancelRunRequest: async () => {},
+    clearTimeout,
+    createThreadRequest: async () => {
+      throw new Error("createThread should not run");
+    },
+    createToolActivityState,
+    failGateToolActivity,
+    globalThis: {},
+    listConnectableChannels: async () => ({ channels: [] }),
+    looksLikeChannelConnectCommand,
+    queryClient: {
+      fetchQuery: async () => ({ channels: [] }),
+      invalidateQueries: () => {},
+    },
+    recordAcceptedMessageRef,
+    removePending,
+    resolveChannelConnectCommand,
+    resolveGateRequest: async () => ({ run_id: runId, already_terminal: true }),
+    resetToolActivityState,
+    sendMessage: async () => {
+      throw new Error("sendMessage should not run");
+    },
+    setInterval,
+    setTimeout,
+    submitManualToken: async () => {},
+    useChatEvents: () => () => {},
+    useHistory: () => ({
+      messages: renderedMessages,
+      hasMore: false,
+      nextCursor: null,
+      isLoading: false,
+      loadHistory: () => {},
+      setMessages: (updater) => {
+        renderedMessages =
+          typeof updater === "function" ? updater(renderedMessages) : updater;
+      },
+    }),
+    useSSE: () => ({ status: "idle" }),
+  };
+
+  runUseChatSource(context);
+
+  const chat = context.globalThis.__testExports.useChat(threadId);
+  await chat.approve(null, "deny", "gate");
+
+  assert.equal(renderedMessages.length, 1);
+  assert.equal(renderedMessages[0].toolStatus, "ok");
+  assert.equal(renderedMessages[0].toolError, undefined);
+});
+
 test("useChat.cancelRun completion does not clear a newer run", async () => {
   const threadId = "thread-1";
   const stateUpdates = [];

@@ -463,10 +463,10 @@ export function useChat(threadId) {
         always: opts.always,
         credentialRef: opts.credentialRef,
       });
-      if (resolution === "denied") {
+      const outcome = resolveGateOutcome(response);
+      if (resolution === "denied" && outcome === "resumed") {
         failGateToolActivity(setMessages, pendingGate, toolActivityStateRef);
       }
-      const outcome = resolveGateOutcome(response);
       // Every gate resolution (approved, denied, credential_provided, cancelled)
       // resumes the run on the backend. Keep processing and preserve activeRun so
       // the browser stays in sync with the continuing run. The terminal run_status
