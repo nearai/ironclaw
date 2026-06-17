@@ -29,15 +29,18 @@ use ironclaw_host_runtime::{
     GREP_CAPABILITY_ID, HTTP_CAPABILITY_ID, HTTP_SAVE_CAPABILITY_ID, HostRuntime,
     HostRuntimeServices, JSON_CAPABILITY_ID, LIST_DIR_CAPABILITY_ID, MEMORY_READ_CAPABILITY_ID,
     MEMORY_SEARCH_CAPABILITY_ID, MEMORY_TREE_CAPABILITY_ID, MEMORY_WRITE_CAPABILITY_ID,
-    READ_FILE_CAPABILITY_ID, RuntimeCapabilityFailure, RuntimeCapabilityOutcome,
-    RuntimeCapabilityRequest, RuntimeFailureKind, RuntimeProcessError, RuntimeProcessPort,
-    SHELL_CAPABILITY_ID, SKILL_INSTALL_CAPABILITY_ID, SKILL_LIST_CAPABILITY_ID,
+    PROFILE_SET_CAPABILITY_ID, READ_FILE_CAPABILITY_ID, RuntimeCapabilityFailure,
+    RuntimeCapabilityOutcome, RuntimeCapabilityRequest, RuntimeFailureKind, RuntimeProcessError,
+    RuntimeProcessPort, SHELL_CAPABILITY_ID, SKILL_INSTALL_CAPABILITY_ID, SKILL_LIST_CAPABILITY_ID,
     SKILL_REMOVE_CAPABILITY_ID, SPAWN_SUBAGENT_CAPABILITY_ID, SandboxCommandTransport, SurfaceKind,
-    TIME_CAPABILITY_ID, TRIGGER_CREATE_CAPABILITY_ID, TRIGGER_LIST_CAPABILITY_ID,
+    TIME_CAPABILITY_ID, TRACE_COMMONS_CREDITS_CAPABILITY_ID, TRACE_COMMONS_ONBOARD_CAPABILITY_ID,
+    TRACE_COMMONS_PROFILE_SET_CAPABILITY_ID, TRACE_COMMONS_PROFILE_TOKEN_CAPABILITY_ID,
+    TRACE_COMMONS_STATUS_CAPABILITY_ID, TRIGGER_CREATE_CAPABILITY_ID, TRIGGER_LIST_CAPABILITY_ID,
     TRIGGER_REMOVE_CAPABILITY_ID, TenantSandboxProcessPort, ToolCallHttpEgress, TriggerCreateHook,
     VisibleCapabilityAccess, VisibleCapabilityRequest, WRITE_FILE_CAPABILITY_ID,
-    builtin_first_party_handlers, builtin_first_party_handlers_with_trigger_create_hook,
-    builtin_first_party_package,
+    builtin_first_party_handlers, builtin_first_party_handlers_for_process_backend,
+    builtin_first_party_handlers_with_trigger_create_hook, builtin_first_party_package,
+    builtin_first_party_package_for_process_backend,
 };
 #[cfg(feature = "test-support")]
 use ironclaw_host_runtime::{
@@ -52,7 +55,7 @@ use ironclaw_secrets::InMemorySecretStore;
 use ironclaw_triggers::{
     ClaimDueFireRequest, ClearActiveFireRequest, FireAcceptedRequest, InMemoryTriggerRepository,
     MAX_TRIGGER_NAME_BYTES, MAX_TRIGGER_PROMPT_BYTES, TriggerError, TriggerRecord,
-    TriggerRepository, TriggerRunHistoryStatus, TriggerRunRecord,
+    TriggerRepository, TriggerRunHistoryStatus, TriggerRunRecord, TriggerState,
 };
 use ironclaw_trust::{
     AdminConfig, AdminEntry, AuthorityCeiling, EffectiveTrustClass, HostTrustAssignment,
@@ -82,7 +85,10 @@ async fn builtin_first_party_package_declares_expected_capabilities() {
             | SKILL_INSTALL_CAPABILITY_ID
             | SKILL_REMOVE_CAPABILITY_ID
             | TRIGGER_CREATE_CAPABILITY_ID
-            | TRIGGER_REMOVE_CAPABILITY_ID => PermissionMode::Ask,
+            | TRIGGER_REMOVE_CAPABILITY_ID
+            | TRACE_COMMONS_ONBOARD_CAPABILITY_ID
+            | TRACE_COMMONS_PROFILE_SET_CAPABILITY_ID
+            | TRACE_COMMONS_PROFILE_TOKEN_CAPABILITY_ID => PermissionMode::Ask,
             _ => PermissionMode::Allow,
         };
         assert_eq!(descriptor.default_permission, expected_permission);
@@ -118,6 +124,11 @@ async fn builtin_first_party_package_declares_expected_capabilities() {
         http.effects,
         vec![EffectKind::DispatchCapability, EffectKind::Network]
     );
+    assert!(
+        http.description
+            .contains("Prefer GitHub extension capabilities"),
+        "builtin.http should steer GitHub repository API tasks toward the GitHub extension"
+    );
     let http_save = package
         .capabilities
         .iter()
@@ -130,6 +141,12 @@ async fn builtin_first_party_package_declares_expected_capabilities() {
             EffectKind::Network,
             EffectKind::WriteFilesystem
         ]
+    );
+    assert!(
+        http_save
+            .description
+            .contains("Prefer GitHub extension capabilities"),
+        "builtin.http.save should steer GitHub repository API tasks toward the GitHub extension"
     );
 
     let memory_write = package
@@ -159,6 +176,55 @@ async fn builtin_first_party_package_declares_expected_capabilities() {
     for id in all_builtin_capability_ids() {
         assert!(handlers.contains_handler(&capability_id(id)));
     }
+}
+
+#[tokio::test]
+async fn builtin_first_party_processless_package_and_handlers_omit_process_port_backed_shell() {
+    let package =
+        builtin_first_party_package_for_process_backend(ProcessBackendKind::None).unwrap();
+    let ids = package
+        .capabilities
+        .iter()
+        .map(|descriptor| descriptor.id.as_str())
+        .collect::<Vec<_>>();
+    assert!(!ids.contains(&SHELL_CAPABILITY_ID));
+    assert!(ids.contains(&SPAWN_SUBAGENT_CAPABILITY_ID));
+    assert!(ids.contains(&ECHO_CAPABILITY_ID));
+    assert!(
+        !package
+            .manifest
+            .capabilities
+            .iter()
+            .any(|capability| capability.id.as_str() == SHELL_CAPABILITY_ID)
+    );
+
+    let handlers = builtin_first_party_handlers_for_process_backend(
+        Arc::new(InMemoryTriggerRepository::default()),
+        ProcessBackendKind::None,
+    )
+    .unwrap();
+    assert!(!handlers.contains_handler(&capability_id(SHELL_CAPABILITY_ID)));
+    assert!(handlers.contains_handler(&capability_id(SPAWN_SUBAGENT_CAPABILITY_ID)));
+    assert!(handlers.contains_handler(&capability_id(ECHO_CAPABILITY_ID)));
+}
+
+#[tokio::test]
+async fn builtin_first_party_process_backend_package_and_handlers_keep_shell() {
+    let package =
+        builtin_first_party_package_for_process_backend(ProcessBackendKind::TenantSandbox).unwrap();
+    assert!(
+        package
+            .capabilities
+            .iter()
+            .any(|descriptor| descriptor.id.as_str() == SHELL_CAPABILITY_ID)
+    );
+
+    let handlers = builtin_first_party_handlers_for_process_backend(
+        Arc::new(InMemoryTriggerRepository::default()),
+        ProcessBackendKind::TenantSandbox,
+    )
+    .unwrap();
+    assert!(handlers.contains_handler(&capability_id(SHELL_CAPABILITY_ID)));
 }
 
 fn assert_coding_manifest_contract(descriptor: &CapabilityDescriptor) {
@@ -285,7 +351,8 @@ async fn builtin_trigger_create_stamps_caller_scope_and_persists_record() {
         json!({
             "name": "Daily summary",
             "prompt": "Summarize yesterday",
-            "cron": "0 8 * * *"
+            "cron": "0 8 * * *",
+            "timezone": "UTC"
         }),
         context.clone(),
     )
@@ -303,7 +370,9 @@ async fn builtin_trigger_create_stamps_caller_scope_and_persists_record() {
     assert_eq!(trigger["agent_id"], json!("default"));
     assert_eq!(trigger["project_id"], json!("bootstrap"));
     assert_eq!(trigger["last_status"], Value::Null);
-    assert_eq!(trigger["is_active"], json!(false));
+    assert_eq!(trigger["is_enabled"], json!(true));
+    assert_eq!(trigger["is_active"], json!(true));
+    assert_eq!(trigger["has_active_fire"], json!(false));
     assert!(trigger.get("last_fired_slot").is_none());
     assert!(trigger.get("active_fire_slot").is_none());
     assert!(trigger.get("active_run_ref").is_none());
@@ -332,7 +401,8 @@ async fn builtin_trigger_create_runs_create_hook_after_persistence() {
         json!({
             "name": "Hooked trigger",
             "prompt": "Pair trigger creator",
-            "cron": "0 8 * * *"
+            "cron": "0 8 * * *",
+            "timezone": "UTC"
         }),
         context.clone(),
     )
@@ -376,7 +446,8 @@ async fn builtin_trigger_create_maps_create_hook_error_to_backend_and_rolls_back
         json!({
             "name": "Hook failure",
             "prompt": "Do not persist this trigger",
-            "cron": "0 8 * * *"
+            "cron": "0 8 * * *",
+            "timezone": "UTC"
         }),
         context.clone(),
     )
@@ -408,7 +479,8 @@ async fn builtin_trigger_create_surfaces_rollback_error_when_cleanup_fails() {
         json!({
             "name": "Rollback failure",
             "prompt": "Surface the rollback failure as the user-visible cause",
-            "cron": "0 8 * * *"
+            "cron": "0 8 * * *",
+            "timezone": "UTC"
         }),
         context.clone(),
     )
@@ -442,7 +514,8 @@ async fn builtin_trigger_create_rejects_sub_minute_schedule_before_persistence()
         json!({
             "name": "Too fast",
             "prompt": "Run constantly",
-            "cron": "* * * * * *"
+            "cron": "* * * * * *",
+            "timezone": "UTC"
         }),
         context.clone(),
     )
@@ -479,7 +552,8 @@ async fn builtin_trigger_create_rejects_schedule_with_no_future_slot_before_pers
         json!({
             "name": "Expired finite schedule",
             "prompt": "Run once in the finite year",
-            "cron": format!("0 0 8 * * * {future_year}")
+            "cron": format!("0 0 8 * * * {future_year}"),
+            "timezone": "UTC"
         }),
         context.clone(),
     )
@@ -507,7 +581,8 @@ async fn builtin_trigger_create_rejects_malformed_input_before_persistence() {
         TRIGGER_CREATE_CAPABILITY_ID,
         json!({
             "name": "Missing prompt",
-            "cron": "0 8 * * *"
+            "cron": "0 8 * * *",
+            "timezone": "UTC"
         }),
         context.clone(),
     )
@@ -525,6 +600,37 @@ async fn builtin_trigger_create_rejects_malformed_input_before_persistence() {
 }
 
 #[tokio::test]
+async fn builtin_trigger_create_rejects_invalid_timezone_before_persistence() {
+    let repository = Arc::new(InMemoryTriggerRepository::default());
+    let runtime = runtime_with_trigger_repository(repository.clone());
+    let context = execution_context([TRIGGER_CREATE_CAPABILITY_ID]);
+
+    let error = invoke_with_context(
+        &runtime,
+        TRIGGER_CREATE_CAPABILITY_ID,
+        json!({
+            "name": "Invalid timezone trigger",
+            "prompt": "Run something",
+            "cron": "0 9 * * *",
+            "timezone": "Not/A/Timezone"
+        }),
+        context.clone(),
+    )
+    .await
+    .unwrap_err();
+
+    assert_eq!(error, RuntimeFailureKind::InvalidInput);
+    assert!(
+        repository
+            .list_triggers(context.resource_scope.tenant_id)
+            .await
+            .unwrap()
+            .is_empty(),
+        "no trigger should be persisted when timezone is invalid"
+    );
+}
+
+#[tokio::test]
 async fn builtin_trigger_create_rejects_blank_name_or_prompt_before_persistence() {
     let repository = Arc::new(InMemoryTriggerRepository::default());
     let runtime = runtime_with_trigger_repository(repository.clone());
@@ -534,12 +640,14 @@ async fn builtin_trigger_create_rejects_blank_name_or_prompt_before_persistence(
         json!({
             "name": " ",
             "prompt": "Run work",
-            "cron": "0 8 * * *"
+            "cron": "0 8 * * *",
+            "timezone": "UTC"
         }),
         json!({
             "name": "Blank prompt",
             "prompt": " ",
-            "cron": "0 8 * * *"
+            "cron": "0 8 * * *",
+            "timezone": "UTC"
         }),
     ] {
         let error = invoke_with_context(
@@ -572,12 +680,14 @@ async fn builtin_trigger_create_rejects_oversized_name_or_prompt_before_persiste
         json!({
             "name": "x".repeat(MAX_TRIGGER_NAME_BYTES + 1),
             "prompt": "Run work",
-            "cron": "0 8 * * *"
+            "cron": "0 8 * * *",
+            "timezone": "UTC"
         }),
         json!({
             "name": "Oversized prompt",
             "prompt": "x".repeat(MAX_TRIGGER_PROMPT_BYTES + 1),
-            "cron": "0 8 * * *"
+            "cron": "0 8 * * *",
+            "timezone": "UTC"
         }),
     ] {
         let error = invoke_with_context(
@@ -613,6 +723,7 @@ async fn builtin_trigger_create_applies_first_party_input_size_bound() {
             "name": "Large ignored field",
             "prompt": "Run work",
             "cron": "0 8 * * *",
+            "timezone": "UTC",
             "padding": "x".repeat(1_048_576)
         }),
         context.clone(),
@@ -650,7 +761,8 @@ async fn builtin_trigger_list_and_remove_are_caller_scoped() {
         json!({
             "name": "Owned trigger",
             "prompt": "Run owned work",
-            "cron": "0 8 * * *"
+            "cron": "0 8 * * *",
+            "timezone": "UTC"
         }),
         owner_context.clone(),
     )
@@ -689,7 +801,9 @@ async fn builtin_trigger_list_and_remove_are_caller_scoped() {
     .unwrap();
     assert_eq!(owner_list["triggers"].as_array().unwrap().len(), 1);
     assert!(owner_list["triggers"][0].get("last_status").is_some());
-    assert_eq!(owner_list["triggers"][0]["is_active"], json!(false));
+    assert_eq!(owner_list["triggers"][0]["is_enabled"], json!(true));
+    assert_eq!(owner_list["triggers"][0]["is_active"], json!(true));
+    assert_eq!(owner_list["triggers"][0]["has_active_fire"], json!(false));
     assert!(owner_list["triggers"][0].get("prompt").is_none());
     assert!(owner_list["triggers"][0].get("tenant_id").is_none());
     assert!(owner_list["triggers"][0].get("creator_user_id").is_none());
@@ -722,7 +836,7 @@ async fn builtin_trigger_list_and_remove_are_caller_scoped() {
 }
 
 #[tokio::test]
-async fn builtin_trigger_list_shows_active_state_without_run_identifiers() {
+async fn builtin_trigger_list_separates_enabled_state_from_active_fire_state() {
     let repository = Arc::new(InMemoryTriggerRepository::default());
     let runtime = runtime_with_trigger_repository(repository.clone());
     let context = execution_context([TRIGGER_CREATE_CAPABILITY_ID, TRIGGER_LIST_CAPABILITY_ID]);
@@ -733,29 +847,52 @@ async fn builtin_trigger_list_shows_active_state_without_run_identifiers() {
         json!({
             "name": "Active trigger",
             "prompt": "Run active work",
-            "cron": "0 8 * * *"
+            "cron": "0 8 * * *",
+            "timezone": "UTC"
         }),
         context.clone(),
     )
     .await
     .unwrap();
-    assert_eq!(created["trigger"]["is_active"], json!(false));
+    assert_eq!(created["trigger"]["is_enabled"], json!(true));
+    assert_eq!(created["trigger"]["is_active"], json!(true));
+    assert_eq!(created["trigger"]["has_active_fire"], json!(false));
 
     let mut records = repository
         .list_triggers(context.resource_scope.tenant_id.clone())
         .await
         .unwrap();
     assert_eq!(records.len(), 1);
-    records[0].active_fire_slot = Some(records[0].next_run_at);
-    records[0].active_run_ref =
-        Some(TurnRunId::parse("01890f0f-9b6f-7a85-9e5b-9f21a93c4f5a").unwrap());
-    repository.upsert_trigger(records.remove(0)).await.unwrap();
+    let mut record = records.remove(0);
+    record.state = TriggerState::Paused;
+    repository.upsert_trigger(record.clone()).await.unwrap();
+
+    let listed_paused = invoke_with_context(
+        &runtime,
+        TRIGGER_LIST_CAPABILITY_ID,
+        json!({}),
+        context.clone(),
+    )
+    .await
+    .unwrap();
+    let paused_trigger = &listed_paused["triggers"][0];
+    assert_eq!(paused_trigger["state"], json!("paused"));
+    assert_eq!(paused_trigger["is_enabled"], json!(false));
+    assert_eq!(paused_trigger["is_active"], json!(false));
+    assert_eq!(paused_trigger["has_active_fire"], json!(false));
+
+    record.state = TriggerState::Scheduled;
+    record.active_fire_slot = Some(record.next_run_at);
+    record.active_run_ref = Some(TurnRunId::parse("01890f0f-9b6f-7a85-9e5b-9f21a93c4f5a").unwrap());
+    repository.upsert_trigger(record).await.unwrap();
 
     let listed = invoke_with_context(&runtime, TRIGGER_LIST_CAPABILITY_ID, json!({}), context)
         .await
         .unwrap();
     let trigger = &listed["triggers"][0];
+    assert_eq!(trigger["is_enabled"], json!(true));
     assert_eq!(trigger["is_active"], json!(true));
+    assert_eq!(trigger["has_active_fire"], json!(true));
     assert!(trigger.get("active_fire_slot").is_none());
     assert!(trigger.get("active_run_ref").is_none());
 }
@@ -795,7 +932,8 @@ async fn builtin_trigger_create_list_and_remove_use_full_request_scope() {
         json!({
             "name": "Scoped trigger",
             "prompt": "Run scoped work",
-            "cron": "0 8 * * *"
+            "cron": "0 8 * * *",
+            "timezone": "UTC"
         }),
         owner_context.clone(),
     )
@@ -806,7 +944,9 @@ async fn builtin_trigger_create_list_and_remove_use_full_request_scope() {
     assert!(trigger.get("creator_user_id").is_none());
     assert_eq!(trigger["agent_id"], json!("scoped-agent"));
     assert_eq!(trigger["project_id"], json!("scoped-project"));
-    assert_eq!(trigger["is_active"], json!(false));
+    assert_eq!(trigger["is_enabled"], json!(true));
+    assert_eq!(trigger["is_active"], json!(true));
+    assert_eq!(trigger["has_active_fire"], json!(false));
     assert!(trigger.get("prompt").is_none());
     assert!(trigger.get("last_fired_slot").is_none());
     assert!(trigger.get("active_fire_slot").is_none());
@@ -877,7 +1017,8 @@ async fn builtin_trigger_create_round_trips_nullable_agent_and_project_scope() {
         json!({
             "name": "Unscoped trigger",
             "prompt": "Run unscoped work",
-            "cron": "0 8 * * *"
+            "cron": "0 8 * * *",
+            "timezone": "UTC"
         }),
         context,
     )
@@ -886,7 +1027,9 @@ async fn builtin_trigger_create_round_trips_nullable_agent_and_project_scope() {
 
     assert_eq!(created["trigger"]["agent_id"], Value::Null);
     assert_eq!(created["trigger"]["project_id"], Value::Null);
-    assert_eq!(created["trigger"]["is_active"], json!(false));
+    assert_eq!(created["trigger"]["is_enabled"], json!(true));
+    assert_eq!(created["trigger"]["is_active"], json!(true));
+    assert_eq!(created["trigger"]["has_active_fire"], json!(false));
 }
 
 #[tokio::test]
@@ -902,7 +1045,8 @@ async fn builtin_trigger_list_applies_user_surface_limit_boundaries() {
             json!({
                 "name": format!("Trigger {index}"),
                 "prompt": "Run work",
-                "cron": "0 8 * * *"
+                "cron": "0 8 * * *",
+                "timezone": "UTC"
             }),
             context.clone(),
         )
@@ -964,7 +1108,8 @@ async fn builtin_trigger_list_embeds_recent_run_history_with_run_limit() {
         json!({
             "name": "Historical trigger",
             "prompt": "Create history rows",
-            "cron": "0 8 * * *"
+            "cron": "0 8 * * *",
+            "timezone": "UTC"
         }),
         context.clone(),
     )
@@ -994,6 +1139,7 @@ async fn builtin_trigger_list_embeds_recent_run_history_with_run_limit() {
             trigger_id: record.trigger_id,
             fire_slot: first_fire_slot,
             run_id: first_run_id,
+            thread_id: ThreadId::new("01890f0f-0001-7000-8000-000000000001").unwrap(),
             submitted_at: first_fire_slot + chrono::Duration::seconds(1),
             next_run_at: first_fire_slot + chrono::Duration::minutes(1),
         })
@@ -1027,6 +1173,7 @@ async fn builtin_trigger_list_embeds_recent_run_history_with_run_limit() {
             trigger_id: record.trigger_id,
             fire_slot: second_fire_slot,
             run_id: second_run_id,
+            thread_id: ThreadId::new("01890f0f-0002-7000-8000-000000000002").unwrap(),
             submitted_at: second_fire_slot + chrono::Duration::seconds(1),
             next_run_at: second_fire_slot + chrono::Duration::minutes(1),
         })
@@ -1060,6 +1207,7 @@ async fn builtin_trigger_list_embeds_recent_run_history_with_run_limit() {
             trigger_id: record.trigger_id,
             fire_slot: third_fire_slot,
             run_id: third_run_id,
+            thread_id: ThreadId::new("01890f0f-0003-7000-8000-000000000003").unwrap(),
             submitted_at: third_fire_slot + chrono::Duration::seconds(1),
             next_run_at: third_fire_slot + chrono::Duration::minutes(1),
         })
@@ -1086,10 +1234,9 @@ async fn builtin_trigger_list_embeds_recent_run_history_with_run_limit() {
     assert_eq!(runs[2]["run_id"], json!(first_run_id.to_string()));
     assert_eq!(runs[2]["status"], json!("ok"));
     assert_ne!(runs[2]["completed_at"], Value::Null);
-    assert_eq!(
-        runs[0]["thread_id"].as_str().unwrap().len(),
-        64,
-        "trigger route thread ids are deterministic hex identifiers"
+    assert!(
+        uuid::Uuid::parse_str(runs[0]["thread_id"].as_str().unwrap()).is_ok(),
+        "run thread ids are canonical conversation thread UUIDs, not route placeholders"
     );
 }
 
@@ -1105,7 +1252,8 @@ async fn builtin_trigger_list_with_zero_run_limit_returns_empty_recent_runs() {
         json!({
             "name": "Zero run limit trigger",
             "prompt": "Create history rows",
-            "cron": "0 8 * * *"
+            "cron": "0 8 * * *",
+            "timezone": "UTC"
         }),
         context.clone(),
     )
@@ -1144,7 +1292,8 @@ async fn builtin_trigger_list_clamps_oversized_run_limit_to_max() {
         json!({
             "name": "Oversized run limit trigger",
             "prompt": "Create many history rows",
-            "cron": "0 8 * * *"
+            "cron": "0 8 * * *",
+            "timezone": "UTC"
         }),
         context.clone(),
     )
@@ -1200,6 +1349,7 @@ async fn seed_completed_trigger_runs(
                 trigger_id: record.trigger_id,
                 fire_slot,
                 run_id,
+                thread_id: ThreadId::new("01890f0f-0004-7000-8000-000000000004").unwrap(),
                 submitted_at: fire_slot + chrono::Duration::seconds(1),
                 next_run_at: fire_slot + chrono::Duration::minutes(1),
             })
@@ -1321,7 +1471,8 @@ async fn builtin_trigger_management_maps_repository_errors_to_backend() {
         json!({
             "name": "Backend create",
             "prompt": "Run work",
-            "cron": "0 8 * * *"
+            "cron": "0 8 * * *",
+            "timezone": "UTC"
         }),
         context.clone(),
     )
@@ -1362,7 +1513,8 @@ async fn builtin_trigger_list_maps_batch_run_history_repository_error_to_backend
         json!({
             "name": "Batch history failure",
             "prompt": "Create trigger before listing history",
-            "cron": "0 8 * * *"
+            "cron": "0 8 * * *",
+            "timezone": "UTC"
         }),
         context.clone(),
     )
@@ -1815,6 +1967,49 @@ async fn memory_write_requires_memory_mount_authority() {
     )
     .await
     .unwrap_err();
+    assert_eq!(failure, RuntimeFailureKind::Authorization);
+}
+
+#[tokio::test]
+async fn builtin_profile_set_rejects_missing_memory_mount_authority() {
+    // profile_set routes through ensure_memory_mount(request, /*write*/ true) in
+    // profile_merge_write. This test verifies that the guard fires when the invocation
+    // context carries only a /workspace mount (no /memory write grant), mirroring
+    // the memory_write_requires_memory_mount_authority test above.
+    let runtime = runtime_with_filesystem(InMemoryBackend::new());
+    let (_filesystem, workspace_mounts) =
+        in_memory_mounted_filesystem(MountPermissions::read_write_list_delete());
+    let failure = invoke_with_context(
+        &runtime,
+        PROFILE_SET_CAPABILITY_ID,
+        json!({"timezone": "Asia/Tokyo"}),
+        execution_context_with_mounts([PROFILE_SET_CAPABILITY_ID], workspace_mounts),
+    )
+    .await
+    .unwrap_err();
+    // ensure_memory_mount returns FilesystemDenied, which maps to RuntimeFailureKind::Authorization.
+    assert_eq!(failure, RuntimeFailureKind::Authorization);
+}
+
+#[tokio::test]
+async fn builtin_profile_set_rejects_memory_mount_without_delete_permission() {
+    // ensure_memory_mount(write=true) requires read + list + write + delete.
+    // A /memory grant with read+list+write but NO delete must be rejected with
+    // Authorization, locking the current contract.
+    // MountPermissions::read_write() has read=true, write=true, list=true, delete=false.
+    let runtime = runtime_with_filesystem(InMemoryBackend::new());
+    let failure = invoke_with_context(
+        &runtime,
+        PROFILE_SET_CAPABILITY_ID,
+        json!({"timezone": "Asia/Tokyo"}),
+        execution_context_with_mounts(
+            [PROFILE_SET_CAPABILITY_ID],
+            memory_mounts(MountPermissions::read_write()),
+        ),
+    )
+    .await
+    .unwrap_err();
+    // ensure_memory_mount rejects write without delete (FilesystemDenied → Authorization).
     assert_eq!(failure, RuntimeFailureKind::Authorization);
 }
 
@@ -2820,18 +3015,18 @@ async fn builtin_http_does_not_inline_huge_binary_payloads() {
     .await
     .unwrap();
 
-    let body_base64 = output["body_base64"].as_str().expect("binary response");
     assert_eq!(output["body_truncated"], json!(true));
-    assert!(body_base64.len() <= 4096);
-    assert_eq!(output["body_bytes_returned"], json!(3072));
+    assert_eq!(output["body_base64_omitted"], json!(true));
+    assert_eq!(output["body_bytes_returned"], json!(0));
     assert_eq!(output["truncation"]["body"], json!(true));
-    assert_eq!(output["truncation"]["bytes_returned"], json!(3072));
+    assert_eq!(output["truncation"]["bytes_returned"], json!(0));
     assert!(
         output["body_truncation_hint"]
             .as_str()
             .expect("hint")
             .contains("builtin.http.save")
     );
+    assert!(output.get("body_base64").is_none());
     assert!(output.get("body_text").is_none());
     assert!(serialized_json_len(&output) <= 6_000);
 }
@@ -2865,11 +3060,11 @@ async fn builtin_http_truncates_tiny_binary_responses_without_panicking() {
 
 #[tokio::test]
 async fn builtin_http_final_budget_trim_preserves_base64_alignment() {
-    let headers = (0..4)
+    let headers = (0..2)
         .map(|index| (format!("x-large-{index}"), "h".repeat(512)))
         .collect::<Vec<_>>();
     let egress =
-        Arc::new(RecordingRuntimeHttpEgress::with_body(vec![0xFF; 4 * 1024]).with_headers(headers));
+        Arc::new(RecordingRuntimeHttpEgress::with_body(vec![0xFF; 512]).with_headers(headers));
     let runtime = runtime_with_http_egress(Arc::clone(&egress));
 
     let output = invoke_with_context(
@@ -2877,7 +3072,7 @@ async fn builtin_http_final_budget_trim_preserves_base64_alignment() {
         HTTP_CAPABILITY_ID,
         json!({
             "url": "https://api.example.test/v1/items",
-            "response_body_limit": 4096
+            "response_body_limit": 512
         }),
         execution_context_with_network([HTTP_CAPABILITY_ID], http_test_policy()),
     )
@@ -2887,10 +3082,10 @@ async fn builtin_http_final_budget_trim_preserves_base64_alignment() {
     let body_base64 = output["body_base64"].as_str().expect("binary response");
     assert_eq!(output["body_truncated"], json!(true));
     assert!(!body_base64.is_empty());
-    assert!(body_base64.len() < 4096);
+    assert!(body_base64.len() < 684);
     assert_eq!(body_base64.len() % 4, 0);
     assert_eq!(output["truncation"]["body"], json!(true));
-    assert!(serialized_json_len(&output) <= 6_000);
+    assert!(serialized_json_len(&output) <= 3_000);
 }
 
 #[tokio::test]
@@ -6486,6 +6681,15 @@ fn trigger_backend_error() -> ironclaw_triggers::TriggerError {
 
 #[async_trait]
 impl TriggerRepository for RemoveFailingTriggerRepository {
+    async fn find_trigger_run_by_thread_id(
+        &self,
+        _tenant_id: TenantId,
+        _thread_id: &ThreadId,
+    ) -> Result<Option<(TriggerRecord, TriggerRunRecord)>, TriggerError> {
+        // Trigger-thread lookup is not exercised by this fake.
+        Ok(None)
+    }
+
     async fn upsert_trigger(
         &self,
         record: ironclaw_triggers::TriggerRecord,
@@ -6618,6 +6822,15 @@ impl TriggerRepository for RemoveFailingTriggerRepository {
 
 #[async_trait]
 impl TriggerRepository for BatchRunHistoryFailingTriggerRepository {
+    async fn find_trigger_run_by_thread_id(
+        &self,
+        _tenant_id: TenantId,
+        _thread_id: &ThreadId,
+    ) -> Result<Option<(TriggerRecord, TriggerRunRecord)>, TriggerError> {
+        // Trigger-thread lookup is not exercised by this fake.
+        Ok(None)
+    }
+
     async fn upsert_trigger(
         &self,
         record: ironclaw_triggers::TriggerRecord,
@@ -6758,6 +6971,15 @@ impl TriggerRepository for BatchRunHistoryFailingTriggerRepository {
 
 #[async_trait]
 impl TriggerRepository for FailingTriggerRepository {
+    async fn find_trigger_run_by_thread_id(
+        &self,
+        _tenant_id: TenantId,
+        _thread_id: &ThreadId,
+    ) -> Result<Option<(TriggerRecord, TriggerRunRecord)>, TriggerError> {
+        // Trigger-thread lookup is not exercised by this fake.
+        Ok(None)
+    }
+
     async fn upsert_trigger(
         &self,
         _record: ironclaw_triggers::TriggerRecord,
@@ -7157,6 +7379,12 @@ fn all_builtin_capability_ids() -> Vec<&'static str> {
         HTTP_SAVE_CAPABILITY_ID,
         SHELL_CAPABILITY_ID,
         SPAWN_SUBAGENT_CAPABILITY_ID,
+        TRACE_COMMONS_ONBOARD_CAPABILITY_ID,
+        TRACE_COMMONS_STATUS_CAPABILITY_ID,
+        TRACE_COMMONS_CREDITS_CAPABILITY_ID,
+        TRACE_COMMONS_PROFILE_TOKEN_CAPABILITY_ID,
+        TRACE_COMMONS_PROFILE_SET_CAPABILITY_ID,
+        PROFILE_SET_CAPABILITY_ID,
         MEMORY_SEARCH_CAPABILITY_ID,
         MEMORY_WRITE_CAPABILITY_ID,
         MEMORY_READ_CAPABILITY_ID,
@@ -7745,6 +7973,7 @@ fn builtin_effects() -> Vec<EffectKind> {
         EffectKind::Network,
         EffectKind::SpawnProcess,
         EffectKind::ExecuteCode,
+        // Required by builtin.trace_commons.onboard.
         EffectKind::ExternalWrite,
     ]
 }

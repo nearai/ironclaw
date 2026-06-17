@@ -997,6 +997,33 @@ mod tests {
         assert_eq!(std::fs::read_to_string(&file_path).unwrap(), "hello world");
     }
 
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_write_file_rejects_dangling_final_symlink() {
+        use std::os::unix::fs::symlink;
+
+        let sandbox = TempDir::new().unwrap();
+        let outside = TempDir::new().unwrap();
+        let outside_target = outside.path().join("owned.txt");
+        symlink(&outside_target, sandbox.path().join("jump")).unwrap();
+
+        let tool = WriteFileTool::new().with_base_dir(sandbox.path().to_path_buf());
+        let ctx = JobContext::default();
+
+        let result = tool
+            .execute(
+                serde_json::json!({
+                    "path": "jump",
+                    "content": "pwned"
+                }),
+                &ctx,
+            )
+            .await;
+
+        assert!(result.is_err());
+        assert!(!outside_target.exists());
+    }
+
     #[tokio::test]
     async fn test_apply_patch() {
         let dir = TempDir::new().unwrap();

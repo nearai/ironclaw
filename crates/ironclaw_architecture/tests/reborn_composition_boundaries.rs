@@ -112,6 +112,55 @@ fn composition_public_api_is_facade_shaped() {
     }
 }
 
+#[test]
+fn legacy_main_does_not_compose_reborn_runtime() {
+    let root = workspace_root();
+    let legacy_main =
+        std::fs::read_to_string(root.join("src/main.rs")).expect("legacy main.rs readable");
+
+    for forbidden in [
+        "ironclaw_reborn_composition",
+        "ironclaw_reborn_cli",
+        "build_reborn_runtime",
+        "build_reborn_services",
+        "RebornBuildInput",
+        "RebornRuntimeInput",
+        "RebornCompositionProfile",
+    ] {
+        assert!(
+            !legacy_main.contains(forbidden),
+            "legacy src/main.rs must stay on the v1/AppBuilder path and must not compose \
+             Reborn runtime startup directly; found `{forbidden}`"
+        );
+    }
+}
+
+#[test]
+fn reborn_binary_main_is_thin_bootstrap() {
+    let root = workspace_root();
+    let reborn_main = std::fs::read_to_string(root.join("crates/ironclaw_reborn_cli/src/main.rs"))
+        .expect("reborn cli main.rs readable");
+
+    assert!(
+        reborn_main.contains("cli::run()"),
+        "ironclaw-reborn main.rs should delegate to the clap command root"
+    );
+    for forbidden in [
+        "build_reborn_runtime",
+        "build_reborn_services",
+        "axum::serve",
+        "TcpListener::bind",
+        "src/channels/web",
+        "ironclaw::channels::web",
+    ] {
+        assert!(
+            !reborn_main.contains(forbidden),
+            "ironclaw-reborn main.rs must stay a thin bootstrap over Reborn-owned command \
+             modules and factories; found `{forbidden}`"
+        );
+    }
+}
+
 /// The third-party hook-projection path MUST install installed-tier bindings
 /// EXCLUSIVELY through `HookRegistrar::install`, never any lower-level
 /// `HookDispatcherBuilder` primitive that could mint an `Installed`-tier binding

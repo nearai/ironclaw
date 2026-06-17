@@ -1,14 +1,31 @@
 import { React, html } from "../../lib/html.js";
 import { useT } from "../../lib/i18n.js";
+import { AutomationDeliveryDefaultsPanel } from "./components/automation-delivery-defaults-panel.js";
 import { AutomationsList } from "./components/automations-list.js";
 import { AutomationsSummaryStrip } from "./components/automations-summary-strip.js";
 import { useAutomations } from "./hooks/useAutomations.js";
+import { useOutboundDeliveryDefaults } from "./hooks/useOutboundDeliveryDefaults.js";
 
 export function AutomationsPage() {
   const t = useT();
   const [filter, setFilter] = React.useState("all");
   const [selectedAutomationId, setSelectedAutomationId] = React.useState(null);
   const automationsState = useAutomations();
+  const deliveryState = useOutboundDeliveryDefaults();
+
+  // A local refetch can resolve almost instantly, leaving the spinner to flash
+  // imperceptibly. Hold a minimum spin window so a manual refresh always reads
+  // as a deliberate action.
+  const [minSpin, setMinSpin] = React.useState(false);
+  const minSpinTimer = React.useRef(null);
+  React.useEffect(() => () => clearTimeout(minSpinTimer.current), []);
+  const handleRefresh = React.useCallback(() => {
+    setMinSpin(true);
+    clearTimeout(minSpinTimer.current);
+    minSpinTimer.current = setTimeout(() => setMinSpin(false), 1000);
+    automationsState.refetch();
+  }, [automationsState.refetch]);
+  const isRefreshing = automationsState.isRefreshing || minSpin;
   const showErrorOnly =
     automationsState.error &&
     !automationsState.isLoading &&
@@ -43,7 +60,27 @@ export function AutomationsPage() {
           ${showErrorOnly
             ? null
             : html`
-                <${AutomationsSummaryStrip} summary=${automationsState.summary} />
+                ${!automationsState.isLoading &&
+                !automationsState.schedulerEnabled &&
+                html`
+                  <div
+                    role="status"
+                    className="rounded-xl border border-amber-400/30 bg-amber-500/10 px-4 py-3"
+                  >
+                    <div className="text-sm font-semibold text-amber-200">
+                      ${t("automations.schedulerOff.title")}
+                    </div>
+                    <div className="mt-0.5 text-xs leading-5 text-amber-200/80">
+                      ${t("automations.schedulerOff.description")}
+                    </div>
+                  </div>
+                `}
+                <${AutomationsSummaryStrip}
+                  summary=${automationsState.summary}
+                  activeFilter=${filter}
+                  onSelectFilter=${setFilter}
+                />
+                <${AutomationDeliveryDefaultsPanel} deliveryState=${deliveryState} />
 
                 ${automationsState.isLoading
                   ? html`
@@ -62,8 +99,8 @@ export function AutomationsPage() {
                         automations=${automationsState.automations}
                         filter=${filter}
                         onFilterChange=${setFilter}
-                        onRefresh=${automationsState.refetch}
-                        isRefreshing=${automationsState.isRefreshing}
+                        onRefresh=${handleRefresh}
+                        isRefreshing=${isRefreshing}
                         selectedAutomationId=${selectedAutomationId}
                         onSelectAutomation=${setSelectedAutomationId}
                       />

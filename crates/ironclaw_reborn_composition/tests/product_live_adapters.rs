@@ -15,13 +15,13 @@ use ironclaw_host_runtime::{
     VisibleCapabilityRequest as HostVisibleCapabilityRequest,
 };
 use ironclaw_loop_support::{
-    CapabilityResultWrite, HostIdentityContextBuildError, HostIdentityContextCandidate,
-    HostIdentityContextSource, HostInputBatch, HostInputEnvelope, HostInputQueue,
-    HostInputQueueError, HostManagedModelError, HostManagedModelErrorKind, HostManagedModelGateway,
-    HostManagedModelRequest, HostManagedModelResponse, JsonSpawnSubagentInputCodec,
-    LoopCapabilityInputResolver, LoopCapabilityResultWriter, ProductLiveCancellationProbe,
-    RunCancellationFactory, RunCancellationHandle, loop_driver_execution_extension_id,
-    verify_product_live_cancellation_probe,
+    CapabilityResultWrite, EmptyUserProfileSource, HostIdentityContextBuildError,
+    HostIdentityContextCandidate, HostIdentityContextSource, HostInputBatch, HostInputEnvelope,
+    HostInputQueue, HostInputQueueError, HostManagedModelError, HostManagedModelErrorKind,
+    HostManagedModelGateway, HostManagedModelRequest, HostManagedModelResponse,
+    JsonSpawnSubagentInputCodec, LoopCapabilityInputResolver, LoopCapabilityResultWriter,
+    ProductLiveCancellationProbe, RunCancellationFactory, RunCancellationHandle,
+    loop_driver_execution_extension_id, verify_product_live_cancellation_probe,
 };
 use ironclaw_reborn::{
     loop_exit_applier::ThreadCheckpointLoopExitEvidencePort,
@@ -470,6 +470,7 @@ async fn local_dev_adapter_invokes_builtin_echo_through_host_runtime_port() {
             capability_id: capability_id.clone(),
             input_ref,
             approval_resume: None,
+            auth_resume: None,
         })
         .await
         .unwrap();
@@ -585,6 +586,7 @@ async fn local_dev_adapter_invokes_builtin_shell_through_product_live_surface() 
             capability_id: capability_id.clone(),
             input_ref,
             approval_resume: None,
+            auth_resume: None,
         })
         .await
         .unwrap();
@@ -671,6 +673,7 @@ async fn local_dev_adapter_invokes_extension_scoped_grants_with_loop_driver_prin
             capability_id,
             input_ref,
             approval_resume: None,
+            auth_resume: None,
         })
         .await
         .unwrap();
@@ -801,6 +804,7 @@ async fn local_dev_adapter_registers_provider_tool_calls_as_run_scoped_inputs() 
             capability_id,
             input_ref: candidate.input_ref,
             approval_resume: None,
+            auth_resume: None,
         })
         .await
         .unwrap();
@@ -1041,6 +1045,7 @@ async fn local_dev_adapter_invokes_read_file_with_configured_mounts() {
             capability_id,
             input_ref,
             approval_resume: None,
+            auth_resume: None,
         })
         .await
         .unwrap();
@@ -1270,6 +1275,7 @@ async fn adapter_bundle_satisfies_product_live_runtime_readiness_gate() {
     let turn_state_for_evidence: Arc<dyn TurnStateStore> = turn_state.clone();
     let loop_checkpoint_for_evidence: Arc<dyn LoopCheckpointStore> = loop_checkpoint_store.clone();
     let composition = build_product_live_planned_runtime(DefaultPlannedRuntimeParts {
+        attachment_read_port: None,
         turn_state,
         thread_service: Arc::clone(&thread_service) as Arc<dyn SessionThreadService>,
         thread_scope: thread_scope.clone(),
@@ -1299,12 +1305,14 @@ async fn adapter_bundle_satisfies_product_live_runtime_readiness_gate() {
         skill_context_source: None,
         input_queue: Some(adapters.input_queue),
         identity_context_source: adapters.identity_context_source,
+        user_profile_source: Arc::new(EmptyUserProfileSource),
         model_policy_guard: Some(adapters.model_policy_guard),
         model_budget_accountant: Some(adapters.model_budget_accountant),
         safety_context: Some(adapters.safety_context),
         hook_dispatcher_builder_factory: None,
         hook_security_audit_sink: None,
         turn_event_sink: None,
+        communication_context_provider: None,
     })
     .expect("adapter bundle should satisfy the product-live readiness gate");
 

@@ -205,6 +205,13 @@ fn workflow_rejection_maps_each_kind_to_stable_openai_error() {
             OpenAiCompatErrorType::ConflictError,
             OpenAiCompatErrorCode::Conflict,
         ),
+        (
+            K::Ambiguous,
+            409,
+            false,
+            OpenAiCompatErrorType::ConflictError,
+            OpenAiCompatErrorCode::Conflict,
+        ),
     ];
 
     for (kind, status, retryable, error_type, code) in cases {

@@ -11,6 +11,8 @@ export function MessageList({
   hasMore,
   onLoadMore,
   onRetryMessage,
+  threadId,
+  pending = false,
   children,
 }) {
   const t = useT();
@@ -18,11 +20,20 @@ export function MessageList({
   const shouldScrollRef = React.useRef(true);
   const [atBottom, setAtBottom] = React.useState(true);
 
+  // Keep the latest content in view. Re-runs on new messages and when the
+  // run state flips — the typing indicator / streamed reply are rendered as
+  // children (not in `messages`), so they wouldn't trigger this otherwise.
+  // The rAF defers the scroll until after layout so `scrollHeight` reflects
+  // the just-rendered row (markdown, code blocks).
   React.useEffect(() => {
     const el = containerRef.current;
     if (!el || !shouldScrollRef.current) return;
-    el.scrollTop = el.scrollHeight;
-  }, [messages]);
+    const raf = window.requestAnimationFrame(() => {
+      const node = containerRef.current;
+      if (node) node.scrollTop = node.scrollHeight;
+    });
+    return () => window.cancelAnimationFrame(raf);
+  }, [messages, pending]);
 
   const onScroll = React.useCallback(() => {
     const el = containerRef.current;
@@ -48,13 +59,13 @@ export function MessageList({
   const grouped = React.useMemo(() => groupMessages(messages), [messages]);
 
   return html`
-    <div className="relative flex min-h-0 flex-1">
+    <div className="relative flex min-h-0 min-w-0 flex-1">
     <div
       ref=${containerRef}
       onScroll=${onScroll}
-      className="flex flex-1 overflow-y-auto px-4 py-6 sm:px-5 lg:px-8"
+      className="flex min-w-0 flex-1 overflow-y-auto px-4 pt-6 pb-14 sm:px-5 lg:px-8"
     >
-      <div className="mx-auto flex w-full max-w-5xl flex-col gap-5">
+      <div className="mx-auto flex w-full min-w-0 max-w-5xl flex-col gap-5">
         ${hasMore &&
         html`
           <div className="text-center">
@@ -76,6 +87,7 @@ export function MessageList({
                 key=${item.id}
                 message=${item.message}
                 onRetry=${onRetryMessage}
+                threadId=${threadId}
               />`
         )}
         ${children}

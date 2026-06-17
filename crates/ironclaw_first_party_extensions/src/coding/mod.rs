@@ -10,6 +10,7 @@ mod file;
 mod glob_tool;
 mod grep_tool;
 mod inputs;
+mod patch;
 mod paths;
 mod state;
 mod text;
@@ -186,6 +187,15 @@ fn bound_safe_summary(summary: String) -> String {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
+    use ironclaw_filesystem::{LocalFilesystem, RootFilesystem};
+    use ironclaw_host_api::{
+        HostPath, InvocationId, MountAlias, MountGrant, MountPermissions, MountView, ResourceScope,
+        RuntimeDispatchErrorKind, UserId, VirtualPath,
+    };
+    use serde_json::json;
+
     #[test]
     fn coding_tools_do_not_select_runtime_backends() {
         let sources = [
@@ -213,5 +223,149 @@ mod tests {
         let input = "x".repeat(512);
 
         assert_eq!(super::bound_safe_summary(input.clone()), input);
+    }
+
+    #[tokio::test]
+    async fn coding_file_tools_treat_bare_workspace_prefix_as_scoped_alias() {
+        let temp_root = tempfile::TempDir::new().expect("temp root");
+        let mut local_filesystem = LocalFilesystem::new();
+        local_filesystem
+            .mount_local(
+                VirtualPath::new("/projects").expect("virtual path"),
+                HostPath::from_path_buf(temp_root.path().to_path_buf()),
+            )
+            .expect("projects mount");
+        let filesystem: Arc<dyn RootFilesystem> = Arc::new(local_filesystem);
+        let mounts = workspace_mounts();
+        let scope = ResourceScope::local_default(
+            UserId::new("workspace-alias-user").expect("user id"),
+            InvocationId::new(),
+        )
+        .expect("resource scope");
+        let state = super::CodingCapabilityState::default();
+
+        let write_input = json!({
+            "path": "workspace/demo/a.txt",
+            "content": "hello"
+        });
+        let write_request = super::CodingCapabilityRequest::new(
+            super::CodingCapabilityKind::WriteFile,
+            &scope,
+            Some(&mounts),
+            Arc::clone(&filesystem),
+            &write_input,
+        );
+        let write_output = state.dispatch(&write_request).await.expect("write file");
+
+        assert_eq!(
+            write_output.output["path"].as_str(),
+            Some("/workspace/demo/a.txt")
+        );
+        let write_preview = write_output
+            .display_preview
+            .as_ref()
+            .expect("write preview");
+        assert_eq!(
+            write_preview.subtitle.as_deref(),
+            Some("/workspace/demo/a.txt")
+        );
+        assert!(
+            write_preview
+                .output_preview
+                .contains("--- a/workspace/demo/a.txt\n+++ b/workspace/demo/a.txt"),
+            "preview should use normalized path, got: {}",
+            write_preview.output_preview
+        );
+        assert_eq!(
+            filesystem
+                .read_file(
+                    &VirtualPath::new("/projects/workspace/demo/a.txt").expect("virtual path")
+                )
+                .await
+                .expect("normalized write path exists"),
+            b"hello".to_vec()
+        );
+        assert!(temp_root.path().join("workspace/demo/a.txt").exists());
+        assert!(
+            !temp_root
+                .path()
+                .join("workspace/workspace/demo/a.txt")
+                .exists()
+        );
+
+        let read_input = json!({ "path": "workspace/demo/a.txt" });
+        let read_request = super::CodingCapabilityRequest::new(
+            super::CodingCapabilityKind::ReadFile,
+            &scope,
+            Some(&mounts),
+            Arc::clone(&filesystem),
+            &read_input,
+        );
+        let read_output = state.dispatch(&read_request).await.expect("read file");
+
+        assert_eq!(
+            read_output.output["path"].as_str(),
+            Some("/workspace/demo/a.txt")
+        );
+        assert_eq!(
+            read_output.output["content"].as_str(),
+            Some("     1│ hello")
+        );
+
+        let url_like_input = json!({
+            "path": "workspace/http://example.com/a.txt",
+            "content": "blocked"
+        });
+        let url_like_request = super::CodingCapabilityRequest::new(
+            super::CodingCapabilityKind::WriteFile,
+            &scope,
+            Some(&mounts),
+            Arc::clone(&filesystem),
+            &url_like_input,
+        );
+        let err = state
+            .dispatch(&url_like_request)
+            .await
+            .expect_err("URL-like workspace alias path rejected");
+
+        assert_eq!(err.kind(), RuntimeDispatchErrorKind::InputEncode);
+        assert!(
+            !temp_root
+                .path()
+                .join("workspace/http:/example.com/a.txt")
+                .exists(),
+            "URL-like path must not be normalized into a writable scoped path"
+        );
+
+        let reserved_workspace_file_input = json!({
+            "path": "workspace//HEARTBEAT.md",
+            "content": "blocked"
+        });
+        let reserved_workspace_file_request = super::CodingCapabilityRequest::new(
+            super::CodingCapabilityKind::WriteFile,
+            &scope,
+            Some(&mounts),
+            filesystem,
+            &reserved_workspace_file_input,
+        );
+        let err = state
+            .dispatch(&reserved_workspace_file_request)
+            .await
+            .expect_err("empty alias segments preserve reserved workspace file guard");
+
+        assert_eq!(err.kind(), RuntimeDispatchErrorKind::InputEncode);
+        assert!(
+            !temp_root.path().join("workspace/HEARTBEAT.md").exists(),
+            "reserved workspace memory file must not be written through empty alias segments"
+        );
+    }
+
+    fn workspace_mounts() -> MountView {
+        MountView::new(vec![MountGrant::new(
+            MountAlias::new("/workspace").expect("mount alias"),
+            VirtualPath::new("/projects/workspace").expect("virtual path"),
+            MountPermissions::read_write(),
+        )])
+        .expect("mount view")
     }
 }

@@ -54,7 +54,10 @@ mod sandbox_process;
 mod services;
 mod surface;
 mod turn_scheduler;
+mod user_profile_source;
 mod wasm_credentials;
+
+pub use user_profile_source::{MemoryBackedUserProfileSource, PROFILE_DOCUMENT_PATH};
 
 pub use capability_catalog::{
     HotCapabilityCatalog, HotCapabilityRecord, MAX_HOT_PROMPT_BYTES, MAX_HOT_SCHEMA_BYTES,
@@ -78,12 +81,17 @@ pub use first_party_tools::{
     ECHO_CAPABILITY_ID, GLOB_CAPABILITY_ID, GREP_CAPABILITY_ID, HTTP_CAPABILITY_ID,
     HTTP_SAVE_CAPABILITY_ID, JSON_CAPABILITY_ID, LIST_DIR_CAPABILITY_ID, MEMORY_READ_CAPABILITY_ID,
     MEMORY_SEARCH_CAPABILITY_ID, MEMORY_TREE_CAPABILITY_ID, MEMORY_WRITE_CAPABILITY_ID,
-    READ_FILE_CAPABILITY_ID, SHELL_CAPABILITY_ID, SKILL_INSTALL_CAPABILITY_ID,
-    SKILL_LIST_CAPABILITY_ID, SKILL_REMOVE_CAPABILITY_ID, SPAWN_SUBAGENT_CAPABILITY_ID,
-    TIME_CAPABILITY_ID, TRIGGER_CREATE_CAPABILITY_ID, TRIGGER_LIST_CAPABILITY_ID,
-    TRIGGER_REMOVE_CAPABILITY_ID, TriggerCreateHook, WRITE_FILE_CAPABILITY_ID,
-    builtin_first_party_handlers, builtin_first_party_handlers_with_trigger_create_hook,
-    builtin_first_party_package,
+    PROFILE_SET_CAPABILITY_ID, READ_FILE_CAPABILITY_ID, SHELL_CAPABILITY_ID,
+    SKILL_INSTALL_CAPABILITY_ID, SKILL_LIST_CAPABILITY_ID, SKILL_REMOVE_CAPABILITY_ID,
+    SPAWN_SUBAGENT_CAPABILITY_ID, TIME_CAPABILITY_ID, TRACE_COMMONS_CREDITS_CAPABILITY_ID,
+    TRACE_COMMONS_ONBOARD_CAPABILITY_ID, TRACE_COMMONS_PROFILE_SET_CAPABILITY_ID,
+    TRACE_COMMONS_PROFILE_TOKEN_CAPABILITY_ID, TRACE_COMMONS_STATUS_CAPABILITY_ID,
+    TRIGGER_CREATE_CAPABILITY_ID, TRIGGER_LIST_CAPABILITY_ID, TRIGGER_REMOVE_CAPABILITY_ID,
+    TriggerCreateHook, WRITE_FILE_CAPABILITY_ID, builtin_first_party_handlers,
+    builtin_first_party_handlers_for_process_backend,
+    builtin_first_party_handlers_with_trigger_create_hook,
+    builtin_first_party_handlers_with_trigger_create_hook_for_process_backend,
+    builtin_first_party_package, builtin_first_party_package_for_process_backend,
 };
 #[cfg(any(test, feature = "test-support"))]
 pub use first_party_tools::{
@@ -405,6 +413,53 @@ impl RuntimeCapabilityResumeRequest {
             input,
             idempotency_key: None,
             trust_decision,
+        }
+    }
+
+    pub fn with_idempotency_key(mut self, key: IdempotencyKey) -> Self {
+        self.idempotency_key = Some(key);
+        self
+    }
+}
+
+/// Auth-gate resume request.
+///
+/// Re-dispatches a capability that was previously blocked by an auth gate,
+/// reusing the original `invocation_id` encoded in the `context`. When the
+/// invocation also passed a prior approval gate, `approval_request_id` is set
+/// so the host can locate and claim the matching fingerprinted lease.
+#[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
+pub struct RuntimeCapabilityAuthResumeRequest {
+    pub context: ExecutionContext,
+    pub capability_id: CapabilityId,
+    pub estimate: ResourceEstimate,
+    pub input: Value,
+    pub idempotency_key: Option<IdempotencyKey>,
+    pub trust_decision: TrustDecision,
+    /// Present when the invocation previously passed an approval gate.
+    /// Used to locate and claim the matching fingerprinted approval lease
+    /// so the re-dispatch does not require a second approval.
+    pub approval_request_id: Option<ApprovalRequestId>,
+}
+
+impl RuntimeCapabilityAuthResumeRequest {
+    pub fn new(
+        context: ExecutionContext,
+        capability_id: CapabilityId,
+        estimate: ResourceEstimate,
+        input: Value,
+        trust_decision: TrustDecision,
+        approval_request_id: Option<ApprovalRequestId>,
+    ) -> Self {
+        Self {
+            context,
+            capability_id,
+            estimate,
+            input,
+            idempotency_key: None,
+            trust_decision,
+            approval_request_id,
         }
     }
 
@@ -893,6 +948,31 @@ pub trait HostRuntime: Send + Sync {
         &self,
         request: RuntimeCapabilityResumeRequest,
     ) -> Result<RuntimeCapabilityOutcome, HostRuntimeError>;
+
+    /// Re-dispatch after an auth gate has been resolved.
+    ///
+    /// Production hosts override this to route through
+    /// `CapabilityHost::auth_resume_json` which handles the `BlockedAuth`
+    /// run-state and optionally claims the prior approval lease.
+    ///
+    /// The default implementation returns an explicit `Failed` outcome so that
+    /// test stubs that do not override this method fail loudly instead of
+    /// silently falling back to a fresh `invoke_capability` call (which would
+    /// bypass run-state validation and the approval-lease-claim path).  Any
+    /// `HostRuntime` implementation that participates in auth-resume flows must
+    /// provide an explicit override.
+    async fn auth_resume_capability(
+        &self,
+        request: RuntimeCapabilityAuthResumeRequest,
+    ) -> Result<RuntimeCapabilityOutcome, HostRuntimeError> {
+        Ok(RuntimeCapabilityOutcome::Failed(
+            RuntimeCapabilityFailure::new(
+                request.capability_id,
+                RuntimeFailureKind::Unavailable,
+                Some("capability auth-resume is unsupported by this host runtime".to_string()),
+            ),
+        ))
+    }
 
     async fn resume_spawn_capability(
         &self,

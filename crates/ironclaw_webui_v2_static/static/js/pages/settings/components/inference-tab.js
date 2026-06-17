@@ -7,6 +7,7 @@ import { filterSettingsSections, matchesSearch } from "../lib/settings-search.js
 import { ProviderManagement } from "./provider-management.js";
 import { SettingsGroup } from "./settings-field.js";
 import { SettingsSearchEmpty } from "./settings-search-empty.js";
+import { useLlmProviders } from "../hooks/useLlmProviders.js";
 
 export function InferenceTab({
   settings,
@@ -17,12 +18,28 @@ export function InferenceTab({
   searchQuery = "",
 }) {
   const t = useT();
+  // Source the active backend/model from the `/llm/providers` snapshot (the
+  // same query the provider list below renders from) rather than the empty
+  // settings/gatewayStatus stubs, which left the Model field showing "—".
+  // Shares the `["llm-providers"]` react-query cache, so no extra fetch.
+  const { activeProviderId, selectedModel, providers, hasActiveProvider } = useLlmProviders({
+    settings,
+    gatewayStatus,
+  });
   if (isLoading) {
     return html`<${SettingsSkeleton} />`;
   }
 
-  const backend = settings.llm_backend || gatewayStatus?.llm_backend || "nearai";
-  const model = settings.selected_model || gatewayStatus?.llm_model || "";
+  // `activeProviderId` falls back to `nearai` for downstream defaults, so the
+  // summary must gate on `hasActiveProvider` — otherwise a first-run/unconfigured
+  // deployment shows `nearai` with a positive Active badge that isn't true.
+  const backend = hasActiveProvider ? activeProviderId : "";
+  // Match the provider card's fallback (active model → provider default_model)
+  // so the summary never shows "—" while the list below shows a model.
+  const activeProvider = providers.find((provider) => provider.id === activeProviderId);
+  const model = hasActiveProvider
+    ? selectedModel || activeProvider?.default_model || settings.selected_model || ""
+    : "";
   const sections = filterSettingsSections(INFERENCE_FIELDS, settings, searchQuery, t);
   const showProviderSummary = matchesSearch(searchQuery, [
     t("inference.provider"),
@@ -57,8 +74,10 @@ export function InferenceTab({
           <div className="rounded-md border border-[var(--v2-panel-border)] bg-[var(--v2-surface-soft)] px-4 py-3">
             <div className="text-xs text-[var(--v2-text-muted)]">${t("inference.backend")}</div>
             <div className="mt-1 flex items-center gap-2">
-              <span className="font-mono text-lg font-semibold text-[var(--v2-text-strong)]">${backend}</span>
-              <${Badge} tone="positive" label=${t("inference.active")} size="sm" />
+              <span className="font-mono text-lg font-semibold text-[var(--v2-text-strong)]">${backend || t("inference.none")}</span>
+              ${hasActiveProvider
+                ? html`<${Badge} tone="positive" label=${t("inference.active")} size="sm" />`
+                : html`<${Badge} tone="muted" label=${t("llm.notConfigured")} size="sm" />`}
             </div>
           </div>
           <div className="rounded-md border border-[var(--v2-panel-border)] bg-[var(--v2-surface-soft)] px-4 py-3">

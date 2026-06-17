@@ -35,6 +35,17 @@ function findComponent(node, component) {
   return null;
 }
 
+function findNode(node, predicate) {
+  if (!node || typeof node !== "object") return null;
+  if (Array.isArray(node.strings) && predicate(node)) return node;
+  if (!Array.isArray(node.values)) return null;
+  for (const value of node.values) {
+    const found = findNode(value, predicate);
+    if (found) return found;
+  }
+  return null;
+}
+
 function componentProps(node, component) {
   const props = {};
   const start = node.values.indexOf(component);
@@ -69,12 +80,23 @@ function renderChat({ hookState, activeThreadId = "thread-1" }) {
       useState: (initial) => [initial, () => {}],
     },
     THREAD_STATE: { NEEDS_ATTENTION: "needs_attention", RUNNING: "running" },
+    buildScopedLogsPath: (
+      { threadId, runId } = {},
+      { absolute = false } = {},
+    ) => {
+      const params = [];
+      if (threadId) params.push(`thread_id=${encodeURIComponent(threadId)}`);
+      if (runId) params.push(`run_id=${encodeURIComponent(runId)}`);
+      const query = params.length > 0 ? `?${params.join("&")}` : "";
+      return `${absolute ? "/v2" : ""}/logs${query}`;
+    },
     buildRuntimeContext: () => ({}),
     clearThreadState: () => {},
     globalThis: {},
     html: (strings, ...values) => ({ strings: Array.from(strings), values }),
     setThreadState: () => {},
     useChat: () => hookState,
+    useT: () => (key) => key,
   };
 
   vm.runInNewContext(chatSourceForTest(), context);
@@ -183,6 +205,76 @@ test("Chat keeps composer cancel disabled while a gate owns the run decision", (
   const chatInput = findComponent(tree, components.ChatInput);
   const props = componentProps(chatInput, components.ChatInput);
   assert.equal(props.canCancel, false);
+});
+
+test("Chat renders a timeline load failure as an alert instead of the empty landing", () => {
+  const historyLoadError = "Failed to load conversation history.";
+  const { tree, components } = renderChat({
+    hookState: {
+      messages: [],
+      isProcessing: false,
+      pendingGate: null,
+      channelConnectAction: null,
+      suggestions: [],
+      sseStatus: "open",
+      historyLoading: false,
+      historyLoadError,
+      hasMore: false,
+      cooldownSeconds: 0,
+      recoveryNotice: null,
+      activeRun: null,
+      send: async () => ({}),
+      cancelRun: async () => {},
+      retryMessage: () => {},
+      approve: () => {},
+      recoverHistory: () => {},
+      loadMore: () => {},
+      setSuggestions: () => {},
+      submitAuthToken: async () => {},
+      dismissChannelConnectAction: () => {},
+    },
+  });
+
+  const alert = findNode(tree, (node) =>
+    node.strings.some((part) => part.includes('role="alert"')),
+  );
+  assert.ok(alert, "history load failure should render a role=alert banner");
+  assert.ok(alert.values.includes(historyLoadError));
+  assert.equal(findComponent(tree, components.EmptyState), null);
+});
+
+test("Chat links to scoped logs for the active thread run", () => {
+  const { tree } = renderChat({
+    hookState: {
+      messages: [{ id: "message-1" }],
+      isProcessing: true,
+      pendingGate: null,
+      channelConnectAction: null,
+      suggestions: [],
+      sseStatus: "open",
+      historyLoading: false,
+      hasMore: false,
+      cooldownSeconds: 0,
+      recoveryNotice: null,
+      activeRun: { runId: "run-1", threadId: "thread-1", status: "running" },
+      send: async () => ({}),
+      cancelRun: async () => {},
+      retryMessage: () => {},
+      approve: () => {},
+      recoverHistory: () => {},
+      loadMore: () => {},
+      setSuggestions: () => {},
+      submitAuthToken: async () => {},
+      dismissChannelConnectAction: () => {},
+    },
+  });
+
+  const logsLink = findNode(tree, (node) =>
+    node.strings.some((part) => part.includes("<a") && part.includes("href=")),
+  );
+  assert.ok(logsLink, "active chat should render a scoped logs link");
+  assert.ok(logsLink.values.includes("/v2/logs?thread_id=thread-1&run_id=run-1"));
+  assert.ok(logsLink.values.includes("nav.logs"));
 });
 
 test("Chat deny gate callback routes through approve compatibility path", () => {

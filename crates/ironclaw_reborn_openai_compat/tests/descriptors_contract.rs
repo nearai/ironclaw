@@ -37,7 +37,8 @@ fn expected_table() -> Vec<Expected> {
             route_id: OPENAI_COMPAT_ROUTE_CHAT_COMPLETIONS,
             method: NetworkMethod::Post,
             pattern: "/v1/chat/completions",
-            body_limit: body_limit_kib(1024),
+            // 14 MiB to admit base64-inline images (vision, #4644).
+            body_limit: body_limit_kib(14 * 1024),
             rate_limit_max: 60,
             streaming: StreamingMode::Sse,
             effect_path: AllowedEffectPath::ProductWorkflow,

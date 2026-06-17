@@ -16,6 +16,10 @@ const FALLBACK_AUTH_SUMMARY: &str = "Authentication required";
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AuthInteractionRejectionKind {
     MissingAuth,
+    /// More than one pending auth gate exists for the same bare-reply
+    /// conversation. The user must supply an explicit `auth gate:<ref>` to
+    /// disambiguate.
+    AmbiguousAuth,
     StaleAuth,
     CrossScopeDenied,
     InvalidGateRef,
@@ -30,6 +34,9 @@ impl AuthInteractionRejectionKind {
     pub fn sanitized_reason(self) -> &'static str {
         match self {
             Self::MissingAuth => "auth interaction was not found",
+            Self::AmbiguousAuth => {
+                "multiple auth interactions are pending — use auth gate:<ref> to specify which one"
+            }
             Self::StaleAuth => "auth interaction is stale",
             Self::CrossScopeDenied => "auth interaction is not visible to this caller",
             Self::InvalidGateRef => "auth gate reference is invalid",
@@ -44,6 +51,7 @@ impl AuthInteractionRejectionKind {
     pub fn workflow_rejection_kind(self) -> ProductWorkflowRejectionKind {
         match self {
             Self::MissingAuth => ProductWorkflowRejectionKind::ScopeNotFound,
+            Self::AmbiguousAuth => ProductWorkflowRejectionKind::Ambiguous,
             Self::StaleAuth => ProductWorkflowRejectionKind::Conflict,
             Self::CrossScopeDenied => ProductWorkflowRejectionKind::Unauthorized,
             Self::InvalidGateRef
@@ -59,7 +67,7 @@ impl AuthInteractionRejectionKind {
         match self {
             Self::MissingAuth => 404,
             Self::CrossScopeDenied => 403,
-            Self::StaleAuth => 409,
+            Self::AmbiguousAuth | Self::StaleAuth => 409,
             Self::FlowUnavailable => 503,
             Self::InvalidGateRef
             | Self::InvalidCredentialRef

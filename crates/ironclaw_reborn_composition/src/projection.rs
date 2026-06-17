@@ -28,6 +28,7 @@ use ironclaw_product_adapters::{
     ProjectionCursor as ProductProjectionCursor, ProjectionStream, ProjectionSubscriptionRequest,
     RedactedString,
 };
+use ironclaw_run_state::ApprovalRequestStore;
 use ironclaw_turns::{
     ReplyTargetBindingRef, SanitizedFailure, TurnActor, TurnCoordinator, TurnEventProjectionCursor,
     TurnEventProjectionSource, TurnRunId, TurnScope, run_profile::LoopHostMilestoneSink,
@@ -50,6 +51,9 @@ use runtime_replay::{
     DeliveredRuntimePayload, RuntimePayloadCandidate, RuntimePayloadResolution, RuntimePayloads,
     replay_payload_candidates, snapshot_payload_candidates,
 };
+// Only the Slack delivery path (feature-gated) consumes this re-export.
+#[cfg(feature = "slack-v2-host-beta")]
+pub(crate) use turn_events::approval_prompt_context_view;
 use turn_events::{
     FailureExplanationProvider, ModelFailureExplanationProvider, TurnEventBridge, TurnEventPayload,
 };
@@ -68,6 +72,7 @@ pub(crate) struct RebornProjectionServices {
     event_stream_manager: Arc<EventStreamManager>,
     live_updates: Arc<InMemoryProjectionUpdateSource>,
     turn_events: TurnEventBridge,
+    approval_requests: Option<Arc<dyn ApprovalRequestStore>>,
     display_previews: Arc<dyn CapabilityDisplayPreviewSource>,
     webui_reply_target_binding_ref: ReplyTargetBindingRef,
     auth_challenges: Option<Arc<dyn AuthChallengeProvider>>,
@@ -79,7 +84,22 @@ impl RebornProjectionServices {
         turn_event_source: Arc<dyn TurnEventProjectionSource>,
         turn_coordinator: Arc<dyn TurnCoordinator>,
     ) -> Self {
-        self.turn_events = TurnEventBridge::enabled(turn_event_source, turn_coordinator);
+        self.turn_events = TurnEventBridge::enabled(
+            turn_event_source,
+            turn_coordinator,
+            self.approval_requests.clone(),
+        );
+        self
+    }
+
+    pub(crate) fn with_approval_requests(
+        mut self,
+        approval_requests: Arc<dyn ApprovalRequestStore>,
+    ) -> Self {
+        self.approval_requests = Some(approval_requests.clone());
+        self.turn_events = self
+            .turn_events
+            .with_approval_requests(Some(approval_requests));
         self
     }
 
@@ -174,6 +194,7 @@ pub(crate) fn build_reborn_projection_services(
         event_stream_manager,
         live_updates,
         turn_events: TurnEventBridge::default(),
+        approval_requests: None,
         display_previews: Arc::new(NoopCapabilityDisplayPreviewSource),
         webui_reply_target_binding_ref,
         auth_challenges: None,
@@ -863,6 +884,7 @@ async fn runtime_payload_from_candidate(
             Ok(RuntimePayloadResolution::Payload(Box::new(payload)))
         }
         RuntimePayloadCandidate::CapabilityActivity(activity) => {
+            let activity_order = activity.activity_order_cursor().as_u64();
             CapabilityActivityView::new(CapabilityActivityViewInput {
                 invocation_id: activity.invocation_id,
                 turn_run_id: activity
@@ -877,6 +899,7 @@ async fn runtime_payload_from_candidate(
                 output_bytes: activity.output_bytes,
                 error_kind: activity.error_kind,
                 updated_at: activity.updated_at,
+                activity_order: Some(activity_order),
             })
             .map(ProductOutboundPayload::CapabilityActivity)
             .map(Box::new)

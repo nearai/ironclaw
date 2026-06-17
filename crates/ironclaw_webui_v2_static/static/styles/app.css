@@ -358,29 +358,58 @@ input:focus, select:focus, textarea:focus {
 .v2-typing-dot:nth-child(2) { animation-delay: 0.15s !important; }
 .v2-typing-dot:nth-child(3) { animation-delay: 0.3s  !important; }
 
+/* Refresh / in-flight spinner. Like the typing dots, this is an intentional
+   exception to the static-motion policy above: the class selector + !important
+   outranks the universal `animation: none` rule so a loading control can spin.
+   Suppressed under prefers-reduced-motion. */
+@keyframes v2-spin {
+  to { transform: rotate(360deg); }
+}
+.v2-spin {
+  animation: v2-spin 0.8s linear infinite !important;
+}
+
 @media (prefers-reduced-motion: reduce) {
   .v2-typing-dot { animation: none !important; }
+  .v2-spin { animation: none !important; }
 }
 
 /* ── Markdown body ───────────────────────────────────────────────── */
 
+.markdown-body {
+  max-width: 100%;
+  min-width: 0;
+}
 .markdown-body h1,.markdown-body h2,.markdown-body h3,.markdown-body h4 {
   margin-top: 1em; margin-bottom: 0.5em; font-weight: 600;
   color: var(--v2-text-strong);
 }
-.markdown-body p              { margin-bottom: 0.75em; line-height: 1.65; }
+.markdown-body                { font-size: 1em; line-height: 1.7; }
+.markdown-body p              { margin-bottom: 0.8em; line-height: inherit; }
 .markdown-body ul,.markdown-body ol { margin-bottom: 0.75em; padding-left: 1.5em; }
 .markdown-body li             { margin-bottom: 0.25em; }
 .markdown-body code {
   font-family: "Geist Mono","SF Mono","JetBrains Mono",ui-monospace,monospace;
-  font-size: 0.875em; background: var(--v2-surface-muted);
+  font-size: 0.9em; background: var(--v2-surface-muted);
   padding: 0.15em 0.4em; border-radius: 4px;
+}
+.markdown-code-frame {
+  position: relative;
+  width: 100%;
+  max-width: 100%;
+  min-width: 0;
+  overflow: hidden;
 }
 .markdown-body pre {
   background: var(--v2-surface-soft); border: 1px solid var(--v2-panel-border);
-  border-radius: 8px; padding: 0.75em 1em; overflow-x: auto; margin-bottom: 0.75em;
+  border-radius: 8px; box-sizing: border-box; width: 100%; max-width: 100%;
+  min-width: 0; padding: 0.75em 1em;
+  overflow-x: auto; white-space: pre; margin-bottom: 0.75em;
 }
-.markdown-body pre code { background: transparent; padding: 0; border-radius: 0; font-size: 0.8125em; }
+.markdown-body pre code {
+  display: inline; background: transparent; padding: 0; border-radius: 0;
+  font-size: 0.9em; line-height: 1.65; white-space: inherit;
+}
 .markdown-body blockquote {
   border-left: 3px solid var(--v2-panel-border); padding-left: 1em;
   margin-left: 0; margin-bottom: 0.75em; color: var(--v2-text-muted);
@@ -393,3 +422,46 @@ input:focus, select:focus, textarea:focus {
 }
 .markdown-body th { background: var(--v2-surface-soft); font-weight: 600; }
 .markdown-body hr { border: 0; border-top: 1px solid var(--v2-panel-border); margin: 1em 0; }
+.markdown-body pre code { color: var(--v2-text); }
+.markdown-body pre code.hljs {
+  display: block;
+  background: transparent;
+  color: var(--v2-text);
+}
+.markdown-body .hljs-keyword,
+.markdown-body .hljs-selector-tag,
+.markdown-body .hljs-built_in,
+.markdown-body .hljs-type {
+  color: var(--v2-accent-text);
+}
+.markdown-body .hljs-string,
+.markdown-body .hljs-regexp,
+.markdown-body .hljs-template-variable {
+  color: var(--v2-positive-text);
+}
+.markdown-body .hljs-number,
+.markdown-body .hljs-literal,
+.markdown-body .hljs-symbol,
+.markdown-body .hljs-bullet {
+  color: var(--v2-warning-text);
+}
+.markdown-body .hljs-comment,
+.markdown-body .hljs-quote {
+  color: var(--v2-text-muted);
+  font-style: italic;
+}
+.markdown-body .hljs-title,
+.markdown-body .hljs-section,
+.markdown-body .hljs-name {
+  color: var(--v2-info-text);
+}
+.markdown-body .hljs-attr,
+.markdown-body .hljs-attribute,
+.markdown-body .hljs-variable,
+.markdown-body .hljs-params {
+  color: var(--v2-text-strong);
+}
+.markdown-body .hljs-meta,
+.markdown-body .hljs-doctag {
+  color: var(--v2-danger-text);
+}

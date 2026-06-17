@@ -5,31 +5,35 @@ use std::sync::{
 };
 
 use async_trait::async_trait;
-use ironclaw_host_api::{AgentId, CapabilityId, MissionId, ProjectId, TenantId, ThreadId, UserId};
+use ironclaw_host_api::{
+    AgentId, CapabilityId, MissionId, ProjectId, ResourceScope, TenantId, ThreadId, UserId,
+};
 use ironclaw_loop_support::{
     EmptyLoopCapabilityPort, HostIdentityContextBuildError, HostIdentityContextCandidate,
     HostIdentityContextSource, HostIdentityMessageContent, HostManagedModelError,
     HostManagedModelErrorKind, HostManagedModelGateway, HostManagedModelMessageRole,
     HostManagedModelRequest, HostManagedModelResponse, HostManagedToolResultContent,
     HostSkillContextBuildError, HostSkillContextCandidate, HostSkillContextSource,
-    IdentityApplicability, IdentityBudget, IdentityFileName, PromptContextTokenBudget,
-    SkillBundleContextSource, SkillBundleDescriptor, SkillBundleId, SkillBundleSource,
-    SkillBundleSourceError, SkillFilePath, SkillSourceKind, ThreadBackedLoopContextPort,
-    ThreadBackedLoopModelPort, ThreadBackedLoopTranscriptPort, ThreadContextWindowCache,
-    build_skill_run_snapshot, identity_message_ref,
+    IdentityApplicability, IdentityBudget, IdentityFileName, LoopAttachmentReadError,
+    LoopAttachmentReadPort, PromptContextTokenBudget, SkillBundleContextSource,
+    SkillBundleDescriptor, SkillBundleId, SkillBundleSource, SkillBundleSourceError, SkillFilePath,
+    SkillSourceKind, ThreadBackedLoopContextPort, ThreadBackedLoopModelPort,
+    ThreadBackedLoopTranscriptPort, ThreadContextWindowCache, build_skill_run_snapshot,
+    identity_message_ref,
 };
 use ironclaw_skills::SkillTrust;
 use ironclaw_threads::{
     AcceptInboundMessageRequest, AcceptedInboundMessage, AcceptedInboundMessageReplay,
     AppendAssistantDraftRequest, AppendCapabilityDisplayPreviewRequest,
-    AppendToolResultReferenceRequest, ContextMessage, ContextMessages, ContextWindow,
-    CreateSummaryArtifactRequest, EnsureThreadRequest, InMemorySessionThreadService,
-    LoadContextMessagesRequest, MessageContent, MessageKind, MessageStatus,
-    ProviderToolCallReferenceEnvelope, RedactMessageRequest, ReplayAcceptedInboundMessageRequest,
-    SessionThreadError, SessionThreadRecord, SessionThreadService, SummaryArtifact,
-    SummaryModelContextPolicy, ThreadHistory, ThreadHistoryRequest, ThreadMessageId,
-    ThreadMessageRecord, ThreadScope, ToolResultReferenceEnvelope, ToolResultSafeSummary,
-    UpdateAssistantDraftRequest, UpdateToolResultReferenceRequest,
+    AppendToolResultReferenceRequest, AttachmentKind, AttachmentRef, ContextMessage,
+    ContextMessages, ContextWindow, CreateSummaryArtifactRequest, EnsureThreadRequest,
+    InMemorySessionThreadService, LoadContextMessagesRequest, MessageContent, MessageKind,
+    MessageStatus, ProviderToolCallReferenceEnvelope, RedactMessageRequest,
+    ReplayAcceptedInboundMessageRequest, SessionThreadError, SessionThreadRecord,
+    SessionThreadService, SummaryArtifact, SummaryModelContextPolicy, ThreadHistory,
+    ThreadHistoryRequest, ThreadMessageId, ThreadMessageRecord, ThreadScope,
+    ToolResultReferenceEnvelope, ToolResultSafeSummary, UpdateAssistantDraftRequest,
+    UpdateToolResultReferenceRequest,
 };
 use ironclaw_turns::{
     LoopMessageRef, LoopResultRef, RunProfileResolutionRequest, RunProfileResolver, TurnActor,
@@ -286,6 +290,7 @@ async fn context_window_cache_does_not_cross_thread_scope_boundaries() {
                     kind: MessageKind::User,
                     tool_result_provider_call: None,
                     content: "mission a transcript".to_string(),
+                    image_attachments: Vec::new(),
                 },
             ),
             (
@@ -297,6 +302,7 @@ async fn context_window_cache_does_not_cross_thread_scope_boundaries() {
                     kind: MessageKind::User,
                     tool_result_provider_call: None,
                     content: "mission b transcript".to_string(),
+                    image_attachments: Vec::new(),
                 },
             ),
         ],
@@ -2753,6 +2759,7 @@ async fn empty_capability_port_exposes_empty_surface_and_rejects_invocations() {
             capability_id: CapabilityId::new("demo.echo").unwrap(),
             input_ref: CapabilityInputRef::new("input:opaque").unwrap(),
             approval_resume: None,
+            auth_resume: None,
         })
         .await
         .unwrap_err();
@@ -2772,6 +2779,7 @@ async fn empty_capability_batch_returns_typed_denial_reason() {
                 capability_id: CapabilityId::new("demo.echo").unwrap(),
                 input_ref: CapabilityInputRef::new("input:opaque").unwrap(),
                 approval_resume: None,
+                auth_resume: None,
             }],
             stop_on_first_suspension: true,
         })
@@ -2796,6 +2804,7 @@ async fn empty_capability_batch_rejects_stale_surface() {
                 capability_id: CapabilityId::new("demo.echo").unwrap(),
                 input_ref: CapabilityInputRef::new("input:opaque").unwrap(),
                 approval_resume: None,
+                auth_resume: None,
             }],
             stop_on_first_suspension: true,
         })
@@ -2845,6 +2854,105 @@ async fn model_port_resolves_thread_message_refs_and_delegates_to_gateway() {
     assert_eq!(calls[0].turn_id, fixture.run_context.turn_id);
     assert_eq!(calls[0].messages[0].role, HostManagedModelMessageRole::User);
     assert_eq!(calls[0].messages[0].content, "hello reborn");
+}
+
+/// Records every storage key the model port asks it to read and returns a fixed
+/// byte payload, so a test can assert the producer (`read_image_parts`) both
+/// consulted the read port and threaded the raw bytes it returned.
+struct StubImageReader {
+    bytes: Vec<u8>,
+    reads: Mutex<Vec<String>>,
+}
+
+#[async_trait]
+impl LoopAttachmentReadPort for StubImageReader {
+    async fn read_attachment_bytes(
+        &self,
+        _scope: &ResourceScope,
+        storage_key: &str,
+    ) -> Result<Vec<u8>, LoopAttachmentReadError> {
+        self.reads.lock().unwrap().push(storage_key.to_string());
+        Ok(self.bytes.clone())
+    }
+}
+
+/// Producer-side coverage for the image-vision path: a landed image attachment
+/// on a resolved user message must be read back through the
+/// [`LoopAttachmentReadPort`] and threaded to the gateway as a base64 image
+/// part. The consumer side (`convert_messages` -> `ContentPart::ImageUrl`) is
+/// unit-tested in `ironclaw_reborn`; this closes the loop on the read side per
+/// the "test through the caller" rule (the read port gates a side effect with
+/// the model port wrapper between).
+#[tokio::test]
+async fn model_port_reads_image_attachment_bytes_into_model_image_parts() {
+    let fixture = ThreadFixture::new().await;
+    let image = AttachmentRef {
+        id: "att-img-0".to_string(),
+        kind: AttachmentKind::Image,
+        mime_type: "image/png".to_string(),
+        filename: Some("diagram.png".to_string()),
+        size_bytes: Some(4),
+        storage_key: Some("/workspace/attachments/2026-06-14/m1-0-diagram.png".to_string()),
+        extracted_text: None,
+    };
+    let accepted = fixture
+        .thread_service
+        .accept_inbound_message(AcceptInboundMessageRequest {
+            scope: fixture.thread_scope.clone(),
+            thread_id: fixture.thread_id.clone(),
+            actor_id: "user-loop-support".to_string(),
+            source_binding_id: Some("source-web".to_string()),
+            reply_target_binding_id: Some("reply-web".to_string()),
+            external_event_id: Some("event-image".to_string()),
+            content: MessageContent::with_attachments("look at this", vec![image]),
+        })
+        .await
+        .unwrap();
+
+    let reader = Arc::new(StubImageReader {
+        bytes: vec![1, 2, 3, 4],
+        reads: Mutex::new(Vec::new()),
+    });
+    let gateway = Arc::new(RecordingGateway::reply("looks like a diagram"));
+    let port = ThreadBackedLoopModelPort::new(
+        Arc::clone(&fixture.thread_service),
+        fixture.thread_scope.clone(),
+        fixture.run_context.clone(),
+        gateway.clone(),
+        16,
+    )
+    .with_attachment_read_port(reader.clone());
+
+    let messages = vec![LoopModelMessage {
+        role: "user".to_string(),
+        content_ref: LoopMessageRef::new(format!("msg:{}", accepted.message_id)).unwrap(),
+    }];
+    issue_prompt_grant(&fixture.run_context, &messages);
+
+    port.stream_model(LoopModelRequest {
+        messages,
+        surface_version: None,
+        model_preference: None,
+        capability_view: None,
+    })
+    .await
+    .unwrap();
+
+    // The read port was consulted exactly once, for the landed storage key.
+    assert_eq!(
+        reader.reads.lock().unwrap().as_slice(),
+        &["/workspace/attachments/2026-06-14/m1-0-diagram.png".to_string()]
+    );
+
+    // The producer threaded the raw bytes the reader returned to the gateway as
+    // a typed image part on the resolved user message (base64 encoding happens
+    // later, in the gateway, and only for a vision model).
+    let calls = gateway.calls.lock().unwrap();
+    assert_eq!(calls.len(), 1);
+    let image_parts = &calls[0].messages[0].image_parts;
+    assert_eq!(image_parts.len(), 1);
+    assert_eq!(image_parts[0].mime_type, "image/png");
+    assert_eq!(image_parts[0].bytes, vec![1, 2, 3, 4]);
 }
 
 #[tokio::test]
@@ -3009,6 +3117,7 @@ async fn prompt_port_builds_bundle_with_tool_result_reference_context() {
         kind: MessageKind::ToolResultReference,
         tool_result_provider_call: None,
         content: "tool result content".to_string(),
+        image_attachments: Vec::new(),
     }));
     let context_port = Arc::new(ThreadBackedLoopContextPort::new(
         thread_service,
@@ -3058,6 +3167,7 @@ async fn model_port_round_trips_tool_result_reference_context_as_typed_model_inp
         kind: MessageKind::ToolResultReference,
         tool_result_provider_call: None,
         content: envelope_content.clone(),
+        image_attachments: Vec::new(),
     }));
     let context_port = ThreadBackedLoopContextPort::new(
         thread_service.clone(),
@@ -3129,6 +3239,7 @@ async fn model_port_rejects_malformed_tool_result_reference_content() {
         kind: MessageKind::ToolResultReference,
         tool_result_provider_call: None,
         content: "not a tool-result reference envelope".to_string(),
+        image_attachments: Vec::new(),
     }));
     let gateway = Arc::new(RecordingGateway::reply("model says hi"));
     let model_port = ThreadBackedLoopModelPort::new(
@@ -3953,14 +4064,14 @@ impl SessionThreadService for GatedFinalizeThreadService {
             .await
     }
 
-    async fn mark_message_deferred_busy(
+    async fn mark_message_rejected_busy(
         &self,
         scope: &ThreadScope,
         thread_id: &ThreadId,
         message_id: ThreadMessageId,
     ) -> Result<ThreadMessageRecord, SessionThreadError> {
         self.inner
-            .mark_message_deferred_busy(scope, thread_id, message_id)
+            .mark_message_rejected_busy(scope, thread_id, message_id)
             .await
     }
 
@@ -4080,6 +4191,7 @@ impl StaticContextThreadService {
                 kind: MessageKind::User,
                 tool_result_provider_call: None,
                 content: String::new(),
+                image_attachments: Vec::new(),
             });
         Self {
             context_message,
@@ -4134,13 +4246,13 @@ impl SessionThreadService for StaticContextThreadService {
         panic!("static context service does not mark submitted")
     }
 
-    async fn mark_message_deferred_busy(
+    async fn mark_message_rejected_busy(
         &self,
         _scope: &ThreadScope,
         _thread_id: &ThreadId,
         _message_id: ThreadMessageId,
     ) -> Result<ThreadMessageRecord, SessionThreadError> {
-        panic!("static context service does not defer messages")
+        panic!("static context service does not reject messages")
     }
 
     async fn append_assistant_draft(

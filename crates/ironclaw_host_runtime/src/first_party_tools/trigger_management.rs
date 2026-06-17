@@ -32,11 +32,13 @@ pub const TRIGGER_CREATE_CAPABILITY_ID: &str = "builtin.trigger_create";
 pub const TRIGGER_LIST_CAPABILITY_ID: &str = "builtin.trigger_list";
 pub const TRIGGER_REMOVE_CAPABILITY_ID: &str = "builtin.trigger_remove";
 
+const TRIGGER_CREATE_DESCRIPTION: &str = "Create a caller-scoped scheduled trigger. If the user asks for routine or trigger results to be sent through an outbound product or channel, use the visible outbound delivery target capabilities to select that delivery target before creating the trigger; delivery routing is not encoded in this input.";
+
 pub(super) fn manifests() -> Result<Vec<CapabilityManifest>, ExtensionError> {
     Ok(vec![
         first_party_capability_manifest(
             TRIGGER_CREATE_CAPABILITY_ID,
-            "Create a caller-scoped scheduled trigger",
+            TRIGGER_CREATE_DESCRIPTION,
             vec![EffectKind::DispatchCapability, EffectKind::ExternalWrite],
             PermissionMode::Ask,
             resource_profile(),
@@ -197,6 +199,7 @@ struct TriggerCreateInput {
     name: String,
     prompt: String,
     cron: String,
+    timezone: String,
 }
 
 #[derive(Deserialize)]
@@ -218,7 +221,8 @@ async fn create_trigger(
     now: DateTime<Utc>,
 ) -> Result<Value, FirstPartyCapabilityError> {
     let input: TriggerCreateInput = serde_json::from_value(input).map_err(|_| input_error())?;
-    let schedule = TriggerSchedule::cron(input.cron).map_err(trigger_input_error)?;
+    let schedule = TriggerSchedule::cron_with_timezone(input.cron, input.timezone)
+        .map_err(trigger_input_error)?;
     let next_run_at = next_run_at_for_schedule(&schedule, now)?;
     let record = TriggerRecord {
         trigger_id: TriggerId::new(),
@@ -331,6 +335,8 @@ async fn remove_trigger(
 }
 
 fn trigger_output(record: &TriggerRecord, recent_runs: &[TriggerRunRecord]) -> Value {
+    let is_enabled = record.state == TriggerState::Scheduled;
+    let has_active_fire = record.has_active_fire();
     json!({
         "trigger_id": record.trigger_id.to_string(),
         "agent_id": record.agent_id.as_ref().map(|id| id.as_str()),
@@ -344,7 +350,11 @@ fn trigger_output(record: &TriggerRecord, recent_runs: &[TriggerRunRecord]) -> V
         "last_run_at": record.last_run_at,
         "last_status": record.last_status,
         "recent_runs": recent_runs.iter().map(trigger_run_output).collect::<Vec<_>>(),
-        "is_active": record.has_active_fire(),
+        // Model-facing trigger status: `is_active` means the trigger is enabled
+        // to fire. In-flight run state is exposed separately as `has_active_fire`.
+        "is_enabled": is_enabled,
+        "is_active": is_enabled,
+        "has_active_fire": has_active_fire,
         "created_at": record.created_at,
     })
 }
@@ -353,7 +363,7 @@ fn trigger_run_output(run: &TriggerRunRecord) -> Value {
     json!({
         "fire_slot": run.fire_slot,
         "run_id": run.run_id.as_ref().map(ToString::to_string),
-        "thread_id": run.thread_id.as_str(),
+        "thread_id": run.thread_id.as_ref().map(|t| t.as_str()),
         "status": run.status,
         "submitted_at": run.submitted_at,
         "completed_at": run.completed_at,
@@ -475,5 +485,55 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn trigger_create_input_rejects_missing_timezone() {
+        let input = serde_json::json!({
+            "name": "daily",
+            "prompt": "check mail",
+            "cron": "0 9 * * *"
+        });
+        let result: Result<TriggerCreateInput, _> = serde_json::from_value(input);
+        assert!(
+            result.is_err(),
+            "missing timezone must fail deserialization"
+        );
+    }
+
+    #[test]
+    fn trigger_create_input_rejects_invalid_timezone() {
+        let input = serde_json::json!({
+            "name": "daily",
+            "prompt": "check mail",
+            "cron": "0 9 * * *",
+            "timezone": "Not/A/Timezone"
+        });
+        let parsed: TriggerCreateInput = serde_json::from_value(input).expect("deserialize");
+        let result = TriggerSchedule::cron_with_timezone(parsed.cron, parsed.timezone);
+        assert!(result.is_err(), "invalid timezone must be rejected");
+        let error_msg = result.unwrap_err().to_string();
+        assert!(
+            error_msg.contains("invalid timezone"),
+            "error should name the problem: {error_msg}"
+        );
+    }
+
+    #[test]
+    fn trigger_create_input_accepts_valid_timezone() {
+        let input = serde_json::json!({
+            "name": "daily",
+            "prompt": "check mail",
+            "cron": "0 9 * * *",
+            "timezone": "America/Los_Angeles"
+        });
+        let parsed: TriggerCreateInput = serde_json::from_value(input).expect("deserialize");
+        let schedule = TriggerSchedule::cron_with_timezone(parsed.cron, &parsed.timezone)
+            .expect("valid timezone accepted");
+        match &schedule {
+            TriggerSchedule::Cron { timezone, .. } => {
+                assert_eq!(timezone, "America/Los_Angeles");
+            }
+        }
     }
 }

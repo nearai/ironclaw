@@ -46,14 +46,14 @@ pub(super) enum LineEnding {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum MatchMethod {
     Exact,
-    TrailingWhitespace,
-    QuoteNormalization,
-    Both,
+    FuzzyNormalization,
 }
 
-#[derive(Debug)]
-pub(super) struct FuzzyMatch {
-    pub(super) start: usize,
-    pub(super) end: usize,
-    pub(super) method: MatchMethod,
+impl MatchMethod {
+    pub(super) fn as_wire_name(self) -> &'static str {
+        match self {
+            MatchMethod::Exact => "Exact",
+            MatchMethod::FuzzyNormalization => "FuzzyNormalization",
+        }
+    }
 }

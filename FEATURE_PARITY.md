@@ -241,7 +241,7 @@ This document tracks feature parity between IronClaw (Rust implementation) and O
 | `browser` | ✅ | ❌ | P3 | Browser automation |
 | `sandbox` | ✅ | ✅ | - | WASM sandbox |
 | `doctor` | ✅ | 🚧 | P2 | 16 subsystem checks |
-| `logs` | ✅ | 🚧 | P3 | `logs` (gateway.log tail), `--follow` (SSE live stream), `--level` (get/set). No DB-persisted log history. |
+| `logs` | ✅ | 🚧 | P3 | `logs` (gateway.log tail), `--follow` (SSE live stream), `--level` (get/set). WebUI v2 operator logs expose bounded in-memory entries with level/target and run/thread/turn/tool/source scoped filters. No DB-persisted log history. |
 | `traces` | ➖ | 🚧 | - | <ul><li>IronClaw-native Trace Commons client MVP, not an OpenClaw parity feature.</li><li>Local opt-in capture, redaction, queueing, queue-status diagnostics, scoped web APIs, revocation, and periodic credit notices.</li><li>CLI opt-in writes the runtime/web user-scope policy that autonomous capture reads, and credentialed submit/status/revoke calls use bounded no-redirect HTTP.</li><li>Authenticated web paths are user-scoped and keep ingestion endpoint/credential settings out of user-managed policy updates.</li><li>Private TraceDAO server ingest/review/export/audit/retention/vector/credit infrastructure now lives in the standalone `tracedao-server` repository, with IronClaw retaining CLI/client integration wrappers.</li></ul> |
 | `update` | ✅ | ❌ | P3 | Self-update; `OPENCLAW_NO_AUTO_UPDATE=1` kill-switch |
 | `completion` | ✅ | ✅ | - | Shell completion |
@@ -338,7 +338,7 @@ Trace Commons issuer/TenantCtx note: the server-side `zmanian/tracedao-server` s
 | Plugin tools | ✅ | ✅ | WASM tools |
 | GSuite WASM tools | ✅ | 🚧 | Reborn bundles operation-level Google Drive/Docs/Sheets/Slides WASM packages with host-mediated HTTP egress, product-auth scoped bearer injection, and manifest-declared Google OAuth setup metadata; full live-recorded parity remains follow-up |
 | Hosted MCP extensions | ✅ | 🚧 | Reborn composes host-mediated MCP runtime, bundles the current Notion MCP supported tool set, wires Notion ProductAuth OAuth exchange/refresh, can use Reborn ProductAuth DCR OAuth setup through the host callback origin, and can activate hosted MCP packages with live `tools/list` schema discovery through host-staged product-auth credentials |
-| NEAR AI MCP extension | ✅ | 🚧 | Host-bundled Reborn MCP extension exposes `nearai.search` via host-mediated HTTP and `llm_nearai_api_key`; manifest-declared product-auth credentials can now be staged through the hosted MCP runtime/discovery bridge, while NEAR remains a static supported-tool adapter |
+| NEAR AI MCP extension | ✅ | 🚧 | Host-bundled Reborn MCP extension exposes `nearai.web_search` via host-mediated HTTP and `llm_nearai_api_key`; local-dev startup now auto-seeds product-auth and activates the bundled MCP extension when `NEARAI_BASE_URL` plus `NEARAI_API_KEY` are configured, while NEAR remains a static supported-tool adapter |
 | Tool policies (allow/deny) | ✅ | ✅ | Reborn now stores scoped persistent `AlwaysAllow` approval policies for manifest-allow capabilities and replays them at the current sandbox scope; product-facing revoke paths remain follow-up while the policy-store revoke interface is available |
 | Exec approvals (`/approve`) | ✅ | ✅ | TUI approval overlay |
 | Tool inventory cache | ✅ | ❌ | Coalesced effective-tool inventory cache with channel-registry invalidation |
@@ -472,7 +472,7 @@ Trace Commons issuer/TenantCtx note: the server-side `zmanian/tracedao-server` s
 | Audio transcription | ✅ | ❌ | P2 | Multiple providers (see TTS/STT subsection in Section 6) |
 | Video support | ✅ | ❌ | P3 | OpenRouter native video gen, MiniMax video, Google Veo, fal Seedance, OpenAI Sora |
 | PDF analysis tool | ✅ | ❌ | P2 | Native Anthropic/Gemini path with text/image extraction fallback; bundled `document-extract` plugin owns `pdfjs-dist` |
-| PDF parsing | ✅ | 🚧 | P2 | Uploaded document attachments parse via `pdf-extract`; no `pdfjs-dist` fallback path |
+| PDF parsing | ✅ | 🚧 | P2 | Uploaded document attachments and Reborn `builtin.read_file` parse PDFs via `pdf-extract`; no `pdfjs-dist` fallback path |
 | MIME detection | ✅ | ❌ | P2 | Bounded MIME sniff + ZIP archive preflight |
 | Media caching | ✅ | ❌ | P3 | |
 | Vision model integration | ✅ | ❌ | P2 | Image understanding; `agents.defaults.imageModel`, Codex app-server image turns, configured-provider exact match |
@@ -674,7 +674,7 @@ Trace Commons issuer/TenantCtx note: the server-side `zmanian/tracedao-server` s
 | Feature | OpenClaw | IronClaw | Priority | Notes |
 |---------|----------|----------|----------|-------|
 | Cron jobs | ✅ | ✅ | - | Routines with cron trigger; runtime state split into `jobs-state.json`; `sessionTarget: "current"`/`session:<id>` bindings |
-| Reborn scheduled trigger loop | ➖ | 🚧 | P2 | Reborn-native trigger persistence, backend parity, atomic fire claim/update APIs, poller core, caller-level harness, first-party `trigger_*` capabilities, and composition-owned worker lifecycle are in progress; external result delivery, production readiness policy, active-run retention/tombstone semantics, and production jitter source selection remain follow-up |
+| Reborn scheduled trigger loop | ➖ | 🚧 | P2 | Reborn-native trigger persistence, backend parity, atomic fire claim/update APIs, poller core, caller-level harness, first-party `trigger_*` capabilities, and composition-owned worker lifecycle are in progress; automation panel runs now link canonical thread ids; trigger-owned threads are openable, watchable, approvable, and cancelable by automation owners via automation-visibility authorization; remaining follow-ups: one-shot `completion_policy` work, legacy pre-fix rows without a stored thread_id remain unopenable, external result delivery, production readiness policy, active-run retention/tombstone semantics, and production jitter source selection |
 | Per-job model fallback override | ✅ | ❌ | P2 | `payload.fallbacks` overrides agent-level fallbacks |
 | Cron stagger controls | ✅ | ❌ | P3 | Default stagger for scheduled jobs |
 | Cron finished-run webhook | ✅ | ❌ | P3 | Webhook on job completion |
@@ -823,7 +823,7 @@ Trace Commons issuer/TenantCtx note: the server-side `zmanian/tracedao-server` s
 
 ### P1 - High Priority
 
-- 🚧 Slack channel (real implementation): Reborn host-beta route can be explicitly mounted by `ironclaw-reborn serve` with Slack Events API signing, DM/app-mention routing through Product Workflow/Reborn, final-reply delivery, host-state-backed personal binding pairing, WebUI v2 admin-managed allowed-channel picker, durable WebUI channel-route assignment APIs, provider-side default outbound target inventory for shared channels and explicitly provisioned personal DMs, and deterministic chat-side connect action metadata; DMs execute as the paired actor, while shared channel turns route to allowed dynamic or static channel subjects and fail closed for unrouted channels in admin-managed mode; production install/setup hardening and fuller E2E coverage remain follow-up.
+- 🚧 Slack channel (real implementation): Reborn host-beta route can be explicitly mounted by `ironclaw-reborn serve` with Slack Events API signing, DM/app-mention routing through Product Workflow/Reborn, final-reply delivery, host-state-backed personal binding pairing, WebUI v2 admin-managed allowed-channel picker, durable WebUI channel-route assignment APIs, provider-side default outbound target inventory for shared channels and explicitly provisioned personal DMs, a host-bundled Reborn extension manifest declaring the Slack ProductAdapter host API, and deterministic chat-side connect action metadata; DMs execute as the paired actor, while shared channel turns route to allowed dynamic or static channel subjects and fail closed for unrouted channels in admin-managed mode; production install/setup hardening and fuller E2E coverage remain follow-up.
 - ✅ Telegram channel (WASM, polling-first setup, DM pairing, caption, /start)
 - ❌ WhatsApp channel
 - ✅ Multi-provider failover (`FailoverProvider` with retryable error classification)

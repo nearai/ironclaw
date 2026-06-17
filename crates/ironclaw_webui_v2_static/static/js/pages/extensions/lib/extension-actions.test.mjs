@@ -1,7 +1,11 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { primaryExtensionAction, setupReadyForActivation } from "./extension-actions.js";
+import {
+  extensionIsActive,
+  primaryExtensionAction,
+  setupReadyForActivation,
+} from "./extension-actions.js";
 
 const notionRef = { kind: "extension", id: "notion" };
 
@@ -27,6 +31,56 @@ test("primaryExtensionAction activates configured inactive MCP extensions", () =
   );
 });
 
+test("primaryExtensionAction activates manifest-backed channels and suppresses legacy wasm channels", () => {
+  assert.equal(
+    primaryExtensionAction({
+      package_ref: { kind: "extension", id: "slack" },
+      kind: "channel",
+      activation_status: "installed",
+    }),
+    "activate",
+  );
+  assert.equal(
+    primaryExtensionAction({
+      package_ref: { kind: "extension", id: "telegram" },
+      kind: "wasm_channel",
+      activation_status: "installed",
+    }),
+    null,
+  );
+});
+
+test("primaryExtensionAction suppresses Activate for channel kind in pairing states", () => {
+  assert.equal(
+    primaryExtensionAction({
+      package_ref: { kind: "extension", id: "slack" },
+      kind: "channel",
+      onboarding_state: "pairing_required",
+    }),
+    null,
+    "kind:channel + pairing_required should return null (pairing section owns it)",
+  );
+  assert.equal(
+    primaryExtensionAction({
+      package_ref: { kind: "extension", id: "slack" },
+      kind: "channel",
+      onboarding_state: "pairing",
+    }),
+    null,
+    "kind:channel + pairing should return null (pairing section owns it)",
+  );
+  // Installed state must still return activate — this is the manifest-backed channel activation path.
+  assert.equal(
+    primaryExtensionAction({
+      package_ref: { kind: "extension", id: "slack" },
+      kind: "channel",
+      activation_status: "installed",
+    }),
+    "activate",
+    "kind:channel + installed should still return activate",
+  );
+});
+
 test("primaryExtensionAction hides activation for active extensions", () => {
   assert.equal(
     primaryExtensionAction({
@@ -36,6 +90,12 @@ test("primaryExtensionAction hides activation for active extensions", () => {
     }),
     null,
   );
+});
+
+test("extensionIsActive accepts card payload lifecycle fields", () => {
+  assert.equal(extensionIsActive({ active: true }), true);
+  assert.equal(extensionIsActive({ activationStatus: "ready" }), true);
+  assert.equal(extensionIsActive({ onboardingState: "auth_required" }), false);
 });
 
 test("setupReadyForActivation waits until all setup secrets are provided", () => {
@@ -57,6 +117,14 @@ test("setupReadyForActivation waits until all setup secrets are provided", () =>
     setupReadyForActivation({
       secrets: [{ provided: true }],
       fields: [{ name: "workspace" }],
+    }),
+    false,
+  );
+  assert.equal(
+    setupReadyForActivation({
+      extension: { active: true },
+      secrets: [{ provided: true }],
+      fields: [],
     }),
     false,
   );

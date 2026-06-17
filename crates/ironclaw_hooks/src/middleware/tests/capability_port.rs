@@ -547,6 +547,7 @@ async fn pause_auth_decision_surfaces_as_auth_required() {
         CapabilityOutcome::AuthRequired {
             gate_ref,
             safe_summary,
+            ..
         } => {
             assert!(gate_ref.as_str().starts_with("gate:hook-auth-"));
             assert_eq!(safe_summary, "needs auth for this capability");
