@@ -36,7 +36,7 @@ use crate::product_auth_runtime_credentials::{
     RuntimeCredentialAccountRefreshPort, RuntimeCredentialAccountRefreshService,
     RuntimeCredentialAccountSelectionService,
 };
-use crate::{AuthChallengeProvider, AuthChallengeView};
+use crate::{AuthChallengeProvider, AuthChallengeView, BlockedAuthFlowCanceller};
 
 pub(crate) const AUTH_CONTINUATION_DISPATCH_FAILED_CODE: &str = "auth_continuation_dispatch_failed";
 
@@ -745,6 +745,25 @@ impl RebornProductAuthServices {
         }
     }
 
+    /// Expose this service as an `Arc<dyn BlockedAuthFlowCanceller>` so the Slack
+    /// delivery path can cancel the durable `AuthFlow` record alongside the run
+    /// when it auto-denies a non-OAuth auth challenge (issue #4952).
+    ///
+    /// Returns `None` when no `flow_record_source` is configured — same condition
+    /// as [`Self::as_auth_challenge_provider`], since both depend on the flow
+    /// projection source. In that case the Slack path simply skips flow cancel and
+    /// still cancels the run, which is backward-compatible.
+    #[doc(hidden)]
+    pub fn as_blocked_auth_flow_canceller(
+        self: &Arc<Self>,
+    ) -> Option<Arc<dyn BlockedAuthFlowCanceller>> {
+        if self.flow_record_source.is_some() {
+            Some(Arc::clone(self) as Arc<dyn BlockedAuthFlowCanceller>)
+        } else {
+            None
+        }
+    }
+
     /// Refresh a credential account through the injected product-auth port.
     ///
     /// Concrete account services own the durable account update and provider
@@ -1391,6 +1410,50 @@ impl AuthChallengeProvider for RebornProductAuthServices {
             return Ok(None);
         };
         Ok(Some(auth_challenge_to_view(challenge, &flow)))
+    }
+}
+
+#[async_trait]
+impl BlockedAuthFlowCanceller for RebornProductAuthServices {
+    async fn cancel_blocked_auth_flow(
+        &self,
+        scope: &TurnScope,
+        owner_user_id: &UserId,
+        run_id: TurnRunId,
+        gate_ref: &str,
+    ) -> Result<(), AuthProductError> {
+        let gate_ref = AuthGateRef::new(gate_ref.to_string())
+            .map_err(|_| AuthProductError::BackendUnavailable)?;
+        let Some(source) = self.flow_record_source.as_ref() else {
+            // No projection source wired in: nothing to cancel here.
+            return Ok(());
+        };
+        // `include_terminal: false` means an already-terminal flow (or a missing
+        // one) resolves to `None`, so the OAuth-callback race — where the flow
+        // completes just before auto-deny — is a graceful no-op rather than an
+        // error. We only ever cancel a flow that is still non-terminal.
+        let flow = source
+            .flow_for_turn_gate(TurnGateAuthFlowQuery {
+                owner: AuthFlowOwnerScope {
+                    tenant_id: scope.tenant_id.clone(),
+                    user_id: owner_user_id.clone(),
+                    agent_id: scope.agent_id.clone(),
+                    project_id: scope.project_id.clone(),
+                    thread_id: scope.thread_id.clone(),
+                },
+                turn_run_ref: TurnRunRef::new(run_id.to_string())
+                    .map_err(|_| AuthProductError::BackendUnavailable)?,
+                gate_ref,
+                include_terminal: false,
+            })
+            .await?;
+        let Some(flow) = flow else {
+            return Ok(());
+        };
+        self.flow_manager
+            .cancel_flow(&flow.scope, flow.id)
+            .await
+            .map(|_| ())
     }
 }
 
