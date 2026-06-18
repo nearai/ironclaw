@@ -11,22 +11,23 @@ use ironclaw_host_api::{
 };
 use ironclaw_host_runtime::{
     CapabilityFailureDisposition, HostRuntime, HostRuntimeError, IdempotencyKey,
-    RuntimeBlockedReason, RuntimeCapabilityFailure, RuntimeCapabilityOutcome,
-    RuntimeCapabilityRequest, RuntimeCapabilityResumeRequest, RuntimeFailureKind,
+    RuntimeBlockedReason, RuntimeCapabilityAuthResumeRequest, RuntimeCapabilityFailure,
+    RuntimeCapabilityOutcome, RuntimeCapabilityRequest, RuntimeCapabilityResumeRequest,
+    RuntimeFailureKind,
 };
 use ironclaw_process_sandbox::{SandboxProcessPlan, ValidatedSandboxProcessPlan};
 use ironclaw_turns::{
     CapabilityActivityId, LoopGateRef, LoopResultRef,
     run_profile::{
-        AgentLoopHostError, AgentLoopHostErrorKind, CapabilityBatchInvocation,
-        CapabilityBatchOutcome, CapabilityDenied, CapabilityDeniedReasonKind,
-        CapabilityDescriptorView, CapabilityFailure, CapabilityFailureKind, CapabilityInputRef,
-        CapabilityInvocation, CapabilityOutcome, CapabilityResultMessage, CapabilityResumeToken,
-        ConcurrencyHint, LoopCapabilityPort, LoopHostMilestone, LoopHostMilestoneKind,
-        LoopHostMilestoneSink, LoopProcessRef, LoopRunContext, LoopSafeSummary,
-        ProcessHandleSummary, ProviderToolCall, ProviderToolCallCapabilityIds,
-        ProviderToolCallReplay, ProviderToolDefinition, VisibleCapabilityRequest,
-        VisibleCapabilitySurface,
+        AgentLoopHostError, AgentLoopHostErrorKind, CapabilityApprovalResume, CapabilityAuthResume,
+        CapabilityBatchInvocation, CapabilityBatchOutcome, CapabilityDenied,
+        CapabilityDeniedReasonKind, CapabilityDescriptorView, CapabilityFailure,
+        CapabilityFailureKind, CapabilityInputRef, CapabilityInvocation, CapabilityOutcome,
+        CapabilityResultMessage, CapabilityResumeToken, ConcurrencyHint, ContentDigest,
+        LoopCapabilityPort, LoopHostMilestone, LoopHostMilestoneKind, LoopHostMilestoneSink,
+        LoopProcessRef, LoopRunContext, LoopSafeSummary, ProcessHandleSummary, ProviderToolCall,
+        ProviderToolCallCapabilityIds, ProviderToolCallReplay, ProviderToolDefinition,
+        VisibleCapabilityRequest, VisibleCapabilitySurface,
     },
 };
 use serde_json::Value;
@@ -53,6 +54,37 @@ use self::surface_snapshot::{
 // existing adapter boundary.
 const PROVIDER_TOOL_NAME_DIGEST_BYTES: usize = 32;
 const PROVIDER_TOOL_CALL_INPUT_REF_PREFIX: &str = "input:provider-tool-";
+
+/// Observes a capability invocation's resolved input (arguments) as the host
+/// loop executes it, for trajectory capture by downstream consumers (benchmark
+/// harnesses, debuggers, UI). `call_id` is the capability input ref.
+///
+/// **Input-only.** This layer stages completed outcomes through
+/// [`LoopCapabilityResultWriter`], not through the port, so it does not observe
+/// results: result events belong to whichever result-writer the composition
+/// installs (e.g. reborn's `LocalDevCapabilityIo`), keyed back to `call_id`.
+/// Keeping the substrate observer input-only avoids advertising a result
+/// callback this layer would never fire.
+///
+/// Best-effort and side-effect-free. The callback fires inline on the
+/// per-capability hot path, so an implementation **must never block** (do I/O,
+/// contend on a lock): hand the event to a non-blocking queue and return. A
+/// callback that panics is caught at the call site and the event is dropped —
+/// it cannot unwind or fail the run — but it must not rely on that.
+pub trait CapabilityTrajectoryObserver: std::fmt::Debug + Send + Sync {
+    /// A model tool call resolved to a capability invocation: `capability_id` is
+    /// the resolved capability (e.g. `builtin.shell`), `arguments` the tool-call
+    /// input JSON resolved from the input ref. This fires before schema
+    /// normalization/coercion, so `arguments` is the raw model-emitted input
+    /// (what the trajectory should record), not the post-validation execution
+    /// payload.
+    fn on_capability_input(
+        &self,
+        call_id: &str,
+        capability_id: &str,
+        arguments: &serde_json::Value,
+    );
+}
 const MAX_IN_MEMORY_PROVIDER_TOOL_CALL_EFFECTIVE_CAPABILITY_IDS: usize = 128;
 
 #[async_trait]
@@ -72,6 +104,29 @@ pub trait LoopCapabilityInputResolver: Send + Sync {
             AgentLoopHostErrorKind::InvalidInvocation,
             "provider tool-call input registration is not supported",
         ))
+    }
+
+    /// Record the display-preview input for a provider tool call under
+    /// `input_ref`, keyed for display by the resolved dotted `capability_id`
+    /// (e.g. `nearai.web_search`) — NOT the provider tool name
+    /// (`nearai__web_search`), which is a lossy, digest-suffixed encoding that
+    /// both renders badly and defeats the per-tool summary/subtitle matchers.
+    ///
+    /// `ProviderToolCallInputResolver` decorates this trait and owns the
+    /// canonical (digest-based) `input_ref`; it stages the arguments itself and
+    /// does NOT delegate `register_provider_tool_call_input` to the inner
+    /// resolver, so it forwards this hook to `inner` instead. The caller
+    /// (`register_provider_tool_call`) drives it after registration because that
+    /// is where the resolved `capability_id` and the canonical `input_ref` are
+    /// both in hand. Default no-op: only resolvers that own a display-preview
+    /// store implement it.
+    fn record_provider_tool_call_display_input(
+        &self,
+        _run_context: &LoopRunContext,
+        _input_ref: &CapabilityInputRef,
+        _capability_id: &CapabilityId,
+        _tool_call: &ProviderToolCall,
+    ) {
     }
 }
 
@@ -139,19 +194,37 @@ impl LoopCapabilityInputResolver for ProviderToolCallInputResolver {
         }
         Ok(input_ref)
     }
+
+    fn record_provider_tool_call_display_input(
+        &self,
+        run_context: &LoopRunContext,
+        input_ref: &CapabilityInputRef,
+        capability_id: &CapabilityId,
+        tool_call: &ProviderToolCall,
+    ) {
+        // This decorator bypasses the inner `register_provider_tool_call_input`,
+        // so forward the display-recording side effect to `inner` (the resolver
+        // that owns the display-preview store).
+        self.inner.record_provider_tool_call_display_input(
+            run_context,
+            input_ref,
+            capability_id,
+            tool_call,
+        );
+    }
 }
 
 #[async_trait]
 pub trait LoopCapabilityResultWriter: Send + Sync {
     /// Write the result of a completed capability invocation.
     ///
-    /// Returns a tuple of `(LoopResultRef, u64)` where the `u64` is the
-    /// serialized byte length of the staged result JSON, for downstream
-    /// per-capability byte accounting (no PII; pure size).
+    /// Returns metadata for the staged output: the result ref, serialized byte
+    /// length for per-capability byte accounting, and an optional normalized
+    /// content digest for future output-aware progress detection.
     async fn write_capability_result(
         &self,
         write: CapabilityResultWrite<'_>,
-    ) -> Result<(LoopResultRef, u64), AgentLoopHostError>;
+    ) -> Result<CapabilityWriteResult, AgentLoopHostError>;
 
     async fn update_capability_result(
         &self,
@@ -172,6 +245,20 @@ pub trait LoopCapabilityResultWriter: Send + Sync {
     ) -> Result<(), AgentLoopHostError> {
         Ok(())
     }
+
+    /// Note that the invocation `invocation_id` has started executing with the
+    /// input staged under `input_ref`. Links the two so the still-running
+    /// activity frame can surface the input (inline argument + parameters)
+    /// before the result lands — the input was recorded under `input_ref` at
+    /// registration, but the activity projection only knows the `invocation_id`.
+    /// Default no-op: only writers that own a display-preview store implement it.
+    fn record_running_invocation(
+        &self,
+        _run_context: &LoopRunContext,
+        _invocation_id: InvocationId,
+        _input_ref: &CapabilityInputRef,
+    ) {
+    }
 }
 
 pub struct CapabilityResultWrite<'a> {
@@ -181,6 +268,48 @@ pub struct CapabilityResultWrite<'a> {
     pub capability_id: &'a CapabilityId,
     pub output: serde_json::Value,
     pub display_preview: Option<CapabilityDisplayOutputPreview>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CapabilityWriteResult {
+    pub result_ref: LoopResultRef,
+    pub byte_len: u64,
+    pub output_digest: Option<ContentDigest>,
+}
+
+impl CapabilityWriteResult {
+    pub fn without_output_digest(result_ref: LoopResultRef, byte_len: u64) -> Self {
+        Self {
+            result_ref,
+            byte_len,
+            output_digest: None,
+        }
+    }
+
+    pub fn from_output(
+        result_ref: LoopResultRef,
+        byte_len: u64,
+        output: &serde_json::Value,
+    ) -> Self {
+        // The output digest is a best-effort progress hint (consumed by output-aware
+        // no-progress detection in a later change). A failure to compute it must NEVER
+        // fail an otherwise-successful capability write — degrade to `None` instead.
+        let output_digest = match ContentDigest::from_json_value(output) {
+            Ok(digest) => Some(digest),
+            Err(error) => {
+                tracing::debug!(
+                    %error,
+                    "capability result output digest could not be built; recording result without it"
+                );
+                None
+            }
+        };
+        Self {
+            result_ref,
+            byte_len,
+            output_digest,
+        }
+    }
 }
 
 #[async_trait]
@@ -241,6 +370,7 @@ pub struct HostRuntimeLoopCapabilityPortFactory {
     milestone_sink: Arc<dyn LoopHostMilestoneSink>,
     execution_mounts: MountView,
     capability_execution_mounts: HashMap<CapabilityId, MountView>,
+    trajectory_observer: Option<Arc<dyn CapabilityTrajectoryObserver>>,
 }
 
 impl HostRuntimeLoopCapabilityPortFactory {
@@ -259,7 +389,18 @@ impl HostRuntimeLoopCapabilityPortFactory {
             milestone_sink,
             execution_mounts: MountView::default(),
             capability_execution_mounts: HashMap::new(),
+            trajectory_observer: None,
         }
+    }
+
+    /// Attach a [`CapabilityTrajectoryObserver`] that every port built by this
+    /// factory forwards capability inputs to. No-op when unset.
+    pub fn with_trajectory_observer(
+        mut self,
+        observer: Option<Arc<dyn CapabilityTrajectoryObserver>>,
+    ) -> Self {
+        self.trajectory_observer = observer;
+        self
     }
 
     pub fn with_execution_mounts(mut self, mounts: MountView) -> Self {
@@ -292,6 +433,7 @@ impl HostRuntimeLoopCapabilityPortFactory {
         )
         .with_execution_mounts(self.execution_mounts.clone())
         .with_capability_execution_mounts(self.capability_execution_mounts.clone())
+        .with_trajectory_observer(self.trajectory_observer.clone())
     }
 }
 
@@ -354,6 +496,11 @@ struct RuntimeOutcomeConversion<'a> {
     correlation_id: CorrelationId,
     requested_capability_id: &'a CapabilityId,
     outcome: RuntimeCapabilityOutcome,
+}
+
+struct CapabilityReplayInput<'a> {
+    input: &'a Value,
+    estimate: &'a ResourceEstimate,
 }
 
 impl<'a> RuntimeOutcomeCompletion<'a> {
@@ -591,6 +738,7 @@ pub struct HostRuntimeLoopCapabilityPort {
     current_surface_version: Mutex<Option<String>>,
     dispatch_records: Mutex<DispatchRecordStore>,
     provider_tool_call_effective_capability_ids: Mutex<ProviderToolCallEffectiveCapabilityIdStore>,
+    trajectory_observer: Option<Arc<dyn CapabilityTrajectoryObserver>>,
 }
 
 /// Lock a poisoned-aware `Mutex` and wrap a poison error as the canonical
@@ -635,7 +783,18 @@ impl HostRuntimeLoopCapabilityPort {
             provider_tool_call_effective_capability_ids: Mutex::new(
                 ProviderToolCallEffectiveCapabilityIdStore::default(),
             ),
+            trajectory_observer: None,
         }
+    }
+
+    /// Attach a [`CapabilityTrajectoryObserver`] notified of each capability's
+    /// resolved input as this port executes it. No-op when unset.
+    pub fn with_trajectory_observer(
+        mut self,
+        observer: Option<Arc<dyn CapabilityTrajectoryObserver>>,
+    ) -> Self {
+        self.trajectory_observer = observer;
+        self
     }
 
     pub fn with_execution_mounts(mut self, mounts: MountView) -> Self {
@@ -960,7 +1119,7 @@ impl HostRuntimeLoopCapabilityPort {
             }
             Err(error) => return Err(error),
         };
-        let (result_ref, byte_len) = self
+        let write_result = self
             .result_writer
             .write_capability_result(CapabilityResultWrite {
                 run_context: &self.run_context,
@@ -972,11 +1131,12 @@ impl HostRuntimeLoopCapabilityPort {
             })
             .await?;
         Ok(CapabilityOutcome::Completed(CapabilityResultMessage {
-            result_ref,
+            result_ref: write_result.result_ref,
             safe_summary: "capability info returned".to_string(),
             progress: ironclaw_turns::run_profile::CapabilityProgress::MadeProgress,
             terminate_hint: false,
-            byte_len,
+            byte_len: write_result.byte_len,
+            output_digest: write_result.output_digest,
         }))
     }
 
@@ -1066,6 +1226,16 @@ impl LoopCapabilityPort for HostRuntimeLoopCapabilityPort {
             .input_resolver
             .register_provider_tool_call_input(&self.run_context, &normalized_tool_call)
             .await?;
+        // Record the activity-card display input now that both the canonical
+        // `input_ref` and the resolved dotted `capability_id` are in hand, so
+        // the card shows `nearai.web_search   <query>` (not the lossy provider
+        // tool name `nearai__web_search`) and the per-tool summary matches.
+        self.input_resolver.record_provider_tool_call_display_input(
+            &self.run_context,
+            &input_ref,
+            &prepared.capability_id,
+            &normalized_tool_call,
+        );
         if prepared.capability_id.as_str() == crate::capability_info::CAPABILITY_ID {
             self.record_provider_tool_call_effective_capability_ids(
                 &input_ref,
@@ -1266,13 +1436,35 @@ impl LoopCapabilityPort for HostRuntimeLoopCapabilityPort {
                 safe_summary: "capability provider trust is unavailable".to_string(),
             }));
         };
-        let (input, estimate) = if let Some(resume) = request.approval_resume.as_ref() {
-            (resume.input.clone(), resume.estimate.clone())
+        let (input, estimate) = if let Some(replay) = invocation_replay_input(&request) {
+            (replay.input.clone(), replay.estimate.clone())
         } else {
             let input = self
                 .input_resolver
                 .resolve_capability_input(&self.run_context, effective_input_ref)
                 .await?;
+            // Trajectory capture: the resolved input is the model's tool
+            // arguments, and this is the one place they are visible (the provider
+            // tool-call decorator stages them upstream and bypasses the input
+            // resolver hook).
+            if let Some(observer) = &self.trajectory_observer {
+                // Best-effort, inline on the capability hot path: a panicking
+                // observer must never unwind the invocation before dispatch.
+                // (Blocking is the observer's own contract.)
+                let caught = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    observer.on_capability_input(
+                        effective_input_ref.as_str(),
+                        request.capability_id.as_str(),
+                        &input,
+                    );
+                }));
+                if caught.is_err() {
+                    tracing::warn!(
+                        capability_id = request.capability_id.as_str(),
+                        "trajectory observer on_capability_input panicked; dropping event"
+                    );
+                }
+            }
             let input = match prepare_provider_arguments_with_detail(
                 &input,
                 &capability.parameters_schema,
@@ -1308,31 +1500,89 @@ impl LoopCapabilityPort for HostRuntimeLoopCapabilityPort {
             &trust_decision.authority_ceiling.allowed_effects,
             self.execution_mounts_for(&request.capability_id),
         )?;
-        if let Some(resume) = request.approval_resume.as_ref() {
-            let resume_invocation_id = invocation_id_from_resume_token(&resume.resume_token)?;
-            invocation_context.invocation_id = resume_invocation_id;
-            invocation_context.correlation_id = resume.correlation_id;
-            invocation_context.resource_scope.invocation_id = resume_invocation_id;
-            invocation_context.validate().map_err(|_| {
-                AgentLoopHostError::new(
+        // Normalize the two mutually-exclusive resume fields into a single
+        // local value BEFORE touching `invocation_context`, so an illegal
+        // both-set invocation is rejected before any state mutation occurs.
+        enum ResolvedResumeMode<'a> {
+            Approval(&'a CapabilityApprovalResume),
+            Auth(&'a CapabilityAuthResume),
+            None,
+        }
+        let resume_mode = match (
+            request.approval_resume.as_ref(),
+            request.auth_resume.as_ref(),
+        ) {
+            (Some(_), Some(_)) => {
+                // Both resume modes set simultaneously is an illegal invocation:
+                // approval_resume and auth_resume are mutually exclusive paths.
+                // Fail closed — do not dispatch, and do not mutate context.
+                return Err(AgentLoopHostError::new(
                     AgentLoopHostErrorKind::InvalidInvocation,
-                    "capability approval resume context is invalid",
-                )
-            })?;
+                    "capability invocation has both approval_resume and auth_resume set; \
+                     these resume modes are mutually exclusive",
+                ));
+            }
+            (Some(resume), _) => ResolvedResumeMode::Approval(resume),
+            (_, Some(auth_resume)) => ResolvedResumeMode::Auth(auth_resume),
+            (Option::None, Option::None) => ResolvedResumeMode::None,
+        };
+        match &resume_mode {
+            ResolvedResumeMode::Approval(resume) => {
+                let resume_invocation_id = invocation_id_from_resume_token(&resume.resume_token)?;
+                invocation_context.invocation_id = resume_invocation_id;
+                invocation_context.correlation_id = resume.correlation_id;
+                invocation_context.resource_scope.invocation_id = resume_invocation_id;
+                invocation_context.validate().map_err(|_| {
+                    AgentLoopHostError::new(
+                        AgentLoopHostErrorKind::InvalidInvocation,
+                        "capability approval resume context is invalid",
+                    )
+                })?;
+            }
+            ResolvedResumeMode::Auth(auth_resume) => {
+                // Reuse original invocation identifier so the fingerprinted
+                // approval lease (scoped to that identifier) can still be matched
+                // and claimed.
+                let resume_invocation_id =
+                    invocation_id_from_resume_token(&auth_resume.resume_token)?;
+                invocation_context.invocation_id = resume_invocation_id;
+                invocation_context.resource_scope.invocation_id = resume_invocation_id;
+                // Restore original correlation identifier when a prior approval is
+                // present so the same trace-correlation identifier flows through
+                // the full capability lifecycle (mirrors the approval-resume path).
+                if let Some(pa) = auth_resume.prior_approval.as_ref() {
+                    invocation_context.correlation_id = pa.correlation_id;
+                }
+                invocation_context.validate().map_err(|_| {
+                    AgentLoopHostError::new(
+                        AgentLoopHostErrorKind::InvalidInvocation,
+                        "capability auth resume context is invalid",
+                    )
+                })?;
+            }
+            ResolvedResumeMode::None => {}
         }
         let invocation_id = invocation_context.invocation_id;
         let correlation_id = invocation_context.correlation_id;
         let requested_capability_id = request.capability_id.clone();
         let provider = capability.provider.clone();
         let runtime = capability.runtime;
+        // Link this invocation to its staged input ref now that both are known,
+        // so the still-running activity frame can surface the input argument
+        // before the result completes.
+        self.result_writer.record_running_invocation(
+            &self.run_context,
+            invocation_id,
+            effective_input_ref,
+        );
         let capability_activity_id = CapabilityActivityId::from_uuid(invocation_id.as_uuid());
         self.emit_capability_milestone(LoopHostMilestoneKind::CapabilityInvoked {
             activity_id: capability_activity_id,
             capability_id: request.capability_id.clone(),
         })
         .await?;
-        let outcome = match request.approval_resume.as_ref() {
-            Some(resume) => {
+        let outcome = match resume_mode {
+            ResolvedResumeMode::Approval(resume) => {
                 let runtime_request = RuntimeCapabilityResumeRequest::new(
                     invocation_context,
                     resume.approval_request_id,
@@ -1344,7 +1594,30 @@ impl LoopCapabilityPort for HostRuntimeLoopCapabilityPort {
                 .with_idempotency_key(idempotency_key.clone());
                 dispatch_runtime_capability_resume(self.runtime.as_ref(), runtime_request).await
             }
-            None => {
+            ResolvedResumeMode::Auth(auth_resume) => {
+                let prior_approval_id = auth_resume
+                    .prior_approval
+                    .as_ref()
+                    .map(|pa| pa.approval_request_id);
+                tracing::debug!(
+                    invocation_id = %invocation_id,
+                    auth_resume = true,
+                    approval_request_id = prior_approval_id.map(|id| id.to_string()).as_deref().unwrap_or("none"),
+                    "capability auth-resume re-dispatch with preserved invocation identity"
+                );
+                let runtime_request = RuntimeCapabilityAuthResumeRequest::new(
+                    invocation_context,
+                    request.capability_id,
+                    estimate.clone(),
+                    input.clone(),
+                    trust_decision,
+                    prior_approval_id,
+                )
+                .with_idempotency_key(idempotency_key.clone());
+                dispatch_runtime_capability_auth_resume(self.runtime.as_ref(), runtime_request)
+                    .await
+            }
+            ResolvedResumeMode::None => {
                 let runtime_request = RuntimeCapabilityRequest::new(
                     invocation_context,
                     request.capability_id,
@@ -1443,6 +1716,15 @@ async fn dispatch_runtime_capability_resume(
     } else {
         runtime.resume_capability(request).await
     }
+}
+
+/// Auth-resume dispatch: always uses `auth_resume_capability` (no spawn
+/// variant; sandbox spawns do not go through approval/auth gates).
+async fn dispatch_runtime_capability_auth_resume(
+    runtime: &(dyn HostRuntime + Send + Sync),
+    request: RuntimeCapabilityAuthResumeRequest,
+) -> Result<RuntimeCapabilityOutcome, HostRuntimeError> {
+    runtime.auth_resume_capability(request).await
 }
 
 fn host_runtime_input_for_capability(
@@ -1774,16 +2056,28 @@ fn invocation_idempotency_key(
     request: &CapabilityInvocation,
     input_ref: &CapabilityInputRef,
 ) -> Result<IdempotencyKey, AgentLoopHostError> {
-    let resume_scope = request
-        .approval_resume
-        .as_ref()
-        .map(|resume| {
-            format!(
-                "resume:{}:{}",
-                resume.approval_request_id, resume.resume_token
-            )
-        })
-        .unwrap_or_else(|| "dispatch".to_string());
+    // Each mode must hash to a distinct key: a colliding key would replay the
+    // prior mode's recorded outcome (e.g. an auth re-dispatch receiving the
+    // original cached ApprovalRequired gate) instead of dispatching.
+    let resume_scope = match (
+        request.approval_resume.as_ref(),
+        request.auth_resume.as_ref(),
+    ) {
+        (Some(resume), _) => format!(
+            "resume:{}:{}",
+            resume.approval_request_id, resume.resume_token
+        ),
+        (None, Some(auth_resume)) => format!(
+            "auth-resume:{}:{}",
+            auth_resume
+                .prior_approval
+                .as_ref()
+                .map(|pa| pa.approval_request_id.to_string())
+                .unwrap_or_else(|| "none".to_string()),
+            auth_resume.resume_token
+        ),
+        (None, None) => "dispatch".to_string(),
+    };
     let payload = format!(
         "loop-capability\nrun={}\nsurface={}\ncapability={}\ninput={}\nmode={}",
         run_context.run_id,
@@ -1858,6 +2152,43 @@ fn loop_surface_version(
     })
 }
 
+fn runtime_resume_replay<'a>(
+    input: Option<&'a Value>,
+    estimate: Option<&'a ResourceEstimate>,
+    gate_kind: &'static str,
+) -> Result<CapabilityReplayInput<'a>, AgentLoopHostError> {
+    let input = input.ok_or_else(|| {
+        AgentLoopHostError::new(
+            AgentLoopHostErrorKind::Internal,
+            format!("{gate_kind} resume replay input is unavailable"),
+        )
+    })?;
+    let estimate = estimate.ok_or_else(|| {
+        AgentLoopHostError::new(
+            AgentLoopHostErrorKind::Internal,
+            format!("{gate_kind} resume replay estimate is unavailable"),
+        )
+    })?;
+    Ok(CapabilityReplayInput { input, estimate })
+}
+
+fn invocation_replay_input(request: &CapabilityInvocation) -> Option<CapabilityReplayInput<'_>> {
+    if let Some(resume) = request.approval_resume.as_ref() {
+        return Some(CapabilityReplayInput {
+            input: &resume.input,
+            estimate: &resume.estimate,
+        });
+    }
+    request
+        .auth_resume
+        .as_ref()
+        .and_then(|resume| resume.replay.as_ref())
+        .map(|replay| CapabilityReplayInput {
+            input: &replay.input,
+            estimate: &replay.estimate,
+        })
+}
+
 async fn runtime_outcome_to_loop(
     run_context: &LoopRunContext,
     result_writer: &(dyn LoopCapabilityResultWriter + Send + Sync),
@@ -1866,7 +2197,7 @@ async fn runtime_outcome_to_loop(
     ensure_runtime_outcome_matches(conversion.requested_capability_id, &conversion.outcome)?;
     Ok(match conversion.outcome {
         RuntimeCapabilityOutcome::Completed(completed) => {
-            let (result_ref, byte_len) = result_writer
+            let write_result = result_writer
                 .write_capability_result(CapabilityResultWrite {
                     run_context,
                     input_ref: conversion.input_ref,
@@ -1877,26 +2208,16 @@ async fn runtime_outcome_to_loop(
                 })
                 .await?;
             CapabilityOutcome::Completed(CapabilityResultMessage {
-                result_ref,
+                result_ref: write_result.result_ref,
                 safe_summary: "capability completed".to_string(),
                 progress: ironclaw_turns::run_profile::CapabilityProgress::MadeProgress,
                 terminate_hint: false,
-                byte_len,
+                byte_len: write_result.byte_len,
+                output_digest: write_result.output_digest,
             })
         }
         RuntimeCapabilityOutcome::ApprovalRequired(gate) => {
-            let input = conversion.input.ok_or_else(|| {
-                AgentLoopHostError::new(
-                    AgentLoopHostErrorKind::Internal,
-                    "approval resume replay input is unavailable",
-                )
-            })?;
-            let estimate = conversion.estimate.ok_or_else(|| {
-                AgentLoopHostError::new(
-                    AgentLoopHostErrorKind::Internal,
-                    "approval resume replay estimate is unavailable",
-                )
-            })?;
+            let replay = runtime_resume_replay(conversion.input, conversion.estimate, "approval")?;
             CapabilityOutcome::ApprovalRequired {
                 gate_ref: loop_gate_ref("approval", gate.approval_request_id.to_string())?,
                 safe_summary: blocked_summary(gate.reason).to_string(),
@@ -1905,16 +2226,27 @@ async fn runtime_outcome_to_loop(
                     resume_token: resume_token_from_invocation_id(conversion.invocation_id)?,
                     correlation_id: conversion.correlation_id,
                     input_ref: conversion.input_ref.clone(),
-                    input: input.clone(),
-                    estimate: estimate.clone(),
+                    input: replay.input.clone(),
+                    estimate: replay.estimate.clone(),
                 }),
             }
         }
-        RuntimeCapabilityOutcome::AuthRequired(gate) => CapabilityOutcome::AuthRequired {
-            gate_ref: loop_gate_ref("auth", gate.gate_id.to_string())?,
-            credential_requirements: gate.credential_requirements,
-            safe_summary: blocked_summary(gate.reason).to_string(),
-        },
+        RuntimeCapabilityOutcome::AuthRequired(gate) => {
+            let replay = runtime_resume_replay(conversion.input, conversion.estimate, "auth")?;
+            CapabilityOutcome::AuthRequired {
+                gate_ref: loop_gate_ref("auth", gate.gate_id.to_string())?,
+                credential_requirements: gate.credential_requirements,
+                safe_summary: blocked_summary(gate.reason).to_string(),
+                auth_resume: Some(ironclaw_turns::run_profile::CapabilityAuthResume {
+                    resume_token: resume_token_from_invocation_id(conversion.invocation_id)?,
+                    prior_approval: None,
+                    replay: Some(ironclaw_turns::run_profile::CapabilityAuthResumeReplay {
+                        input: replay.input.clone(),
+                        estimate: replay.estimate.clone(),
+                    }),
+                }),
+            }
+        }
         RuntimeCapabilityOutcome::ResourceBlocked(gate) => CapabilityOutcome::ResourceBlocked {
             gate_ref: loop_gate_ref("resource", gate.gate_id.to_string())?,
             safe_summary: blocked_summary(gate.reason).to_string(),
@@ -2014,7 +2346,7 @@ fn runtime_model_visible_failure_to_loop(
         RuntimeFailureKind::Authorization | RuntimeFailureKind::PolicyDenied
     ) {
         return Ok(CapabilityOutcome::Denied(CapabilityDenied {
-            reason_kind: capability_denied_reason_kind(failure.kind.as_str())?,
+            reason_kind: denied_reason_kind_for(failure.kind)?,
             safe_summary: runtime_failure_safe_summary(&failure, "capability authorization denied"),
         }));
     }
@@ -2089,6 +2421,31 @@ fn ensure_runtime_outcome_matches(
         ));
     }
     Ok(())
+}
+
+/// Maps an authorization/policy runtime failure to a leak-safe denied reason
+/// identifier.
+///
+/// `RuntimeFailureKind::Authorization.as_str()` is the literal string
+/// `"authorization"`, which the loop-safe identifier validator rejects as a
+/// sensitive marker (it guards against leaking `Authorization:` header
+/// material into identifiers). Passing it straight into
+/// `capability_denied_reason_kind` therefore turned every authorization denial
+/// into an internal "could not be represented" error, which the executor
+/// mapped to `HostUnavailable` and the planned driver recorded as a terminal
+/// "driver unavailable" failure — borking the whole run (observed when a Gmail
+/// extension activation failed authorization on auth-resume). Use stable,
+/// non-leaky tags so the denial surfaces to the model as a clean `Denied`
+/// outcome instead.
+fn denied_reason_kind_for(
+    kind: RuntimeFailureKind,
+) -> Result<CapabilityDeniedReasonKind, AgentLoopHostError> {
+    let reason = match kind {
+        RuntimeFailureKind::Authorization => "auth_denied",
+        RuntimeFailureKind::PolicyDenied => "policy_denied",
+        other => other.as_str(),
+    };
+    capability_denied_reason_kind(reason)
 }
 
 fn capability_denied_reason_kind(
@@ -2462,6 +2819,27 @@ mod tests {
             CapabilityOutcome::Denied(denied)
                 if denied.reason_kind.as_str() == "policy_denied"
                     && denied.safe_summary == "policy denied request"
+        ));
+
+        // Regression: RuntimeFailureKind::Authorization.as_str() is the literal
+        // "authorization", which the loop-safe identifier validator rejects as a
+        // sensitive marker. Feeding it straight into the denied reason kind used
+        // to fail conversion with an internal "could not be represented" error,
+        // which the executor mapped to HostUnavailable and the planned driver
+        // turned into a terminal "driver unavailable" failure — borking the run
+        // (e.g. a Gmail activation that failed authorization on auth-resume).
+        // The conversion must instead yield a clean, leak-safe Denied outcome.
+        let auth_denied = runtime_failure_to_loop(RuntimeCapabilityFailure::new(
+            capability_id.clone(),
+            RuntimeFailureKind::Authorization,
+            Some("capability requires authentication".to_string()),
+        ))
+        .expect("convert authorization denial without borking the run");
+        assert!(matches!(
+            auth_denied,
+            CapabilityOutcome::Denied(denied)
+                if denied.reason_kind.as_str() == "auth_denied"
+                    && denied.safe_summary == "capability requires authentication"
         ));
 
         let operation_failed = runtime_failure_to_loop(RuntimeCapabilityFailure::new(
@@ -3356,6 +3734,43 @@ mod tests {
         }
     }
 
+    /// Inner resolver that records every
+    /// `record_provider_tool_call_display_input` call, so a test can assert the
+    /// `ProviderToolCallInputResolver` decorator forwards the display hook with
+    /// the resolved capability id.
+    #[derive(Default)]
+    struct DisplayInputRecordingResolver {
+        recorded: Mutex<Vec<(String, String, serde_json::Value)>>,
+    }
+
+    #[async_trait]
+    impl LoopCapabilityInputResolver for DisplayInputRecordingResolver {
+        async fn resolve_capability_input(
+            &self,
+            _run_context: &LoopRunContext,
+            _input_ref: &CapabilityInputRef,
+        ) -> Result<serde_json::Value, AgentLoopHostError> {
+            Err(AgentLoopHostError::new(
+                AgentLoopHostErrorKind::InvalidInvocation,
+                "inner resolver should not resolve in this test",
+            ))
+        }
+
+        fn record_provider_tool_call_display_input(
+            &self,
+            _run_context: &LoopRunContext,
+            input_ref: &CapabilityInputRef,
+            capability_id: &CapabilityId,
+            tool_call: &ProviderToolCall,
+        ) {
+            self.recorded.lock().expect("recorded lock").push((
+                input_ref.as_str().to_string(),
+                capability_id.as_str().to_string(),
+                tool_call.arguments.clone(),
+            ));
+        }
+    }
+
     #[tokio::test]
     async fn provider_tool_call_input_resolver_stages_arguments() {
         let run_context = loop_run_context(&execution_context("thread-provider-input")).await;
@@ -3373,6 +3788,125 @@ mod tests {
 
         assert!(input_ref.as_str().starts_with("input:provider-tool-"));
         assert_eq!(resolved, serde_json::json!({"message":"hello"}));
+    }
+
+    /// Regression (#activity-card-args): the decorator bypasses the inner
+    /// `register_provider_tool_call_input`, so it MUST forward the
+    /// display-preview hook to the inner resolver — and key it by the resolved
+    /// dotted capability id (`nearai.web_search`), not the lossy provider tool
+    /// name (`nearai__web_search`). Otherwise the activity card renders the
+    /// wrong name and the per-tool summary/subtitle matchers miss.
+    #[tokio::test]
+    async fn provider_tool_call_input_resolver_forwards_display_input_hook_with_capability_id() {
+        let run_context = loop_run_context(&execution_context("thread-display-input")).await;
+        let inner = Arc::new(DisplayInputRecordingResolver::default());
+        let resolver = ProviderToolCallInputResolver::new(inner.clone());
+        let call = provider_tool_call();
+        let input_ref = provider_tool_call_input_ref(&run_context, &call).expect("ref");
+        let capability_id = CapabilityId::new("nearai.web_search").expect("capability id");
+
+        resolver.record_provider_tool_call_display_input(
+            &run_context,
+            &input_ref,
+            &capability_id,
+            &call,
+        );
+
+        let recorded = inner.recorded.lock().expect("recorded lock").clone();
+        assert_eq!(recorded.len(), 1, "display input forwarded exactly once");
+        let (recorded_ref, recorded_capability, recorded_args) = &recorded[0];
+        assert_eq!(
+            recorded_ref,
+            input_ref.as_str(),
+            "display input must be recorded under the canonical ref the result write later uses",
+        );
+        assert_eq!(
+            recorded_capability, "nearai.web_search",
+            "display input must be keyed by the resolved dotted capability id",
+        );
+        assert_eq!(recorded_args, &call.arguments);
+    }
+
+    /// Captures every input callback the port forwards, so tests can drive the
+    /// real `invoke_capability` call site and assert the observer fired.
+    #[derive(Debug, Default)]
+    struct RecordingTrajectoryObserver {
+        inputs: Mutex<Vec<(String, String, serde_json::Value)>>,
+    }
+
+    impl CapabilityTrajectoryObserver for RecordingTrajectoryObserver {
+        fn on_capability_input(
+            &self,
+            call_id: &str,
+            capability_id: &str,
+            arguments: &serde_json::Value,
+        ) {
+            self.inputs.lock().expect("inputs lock").push((
+                call_id.to_string(),
+                capability_id.to_string(),
+                arguments.clone(),
+            ));
+        }
+    }
+
+    #[tokio::test]
+    async fn invoke_capability_forwards_resolved_input_to_trajectory_observer() {
+        let capability_id = CapabilityId::new("demo.echo").expect("valid capability id");
+        let provider_id = ExtensionId::new("demo").expect("valid provider id");
+        let observer = Arc::new(RecordingTrajectoryObserver::default());
+
+        // Mirror `runtime_capability_port`, but attach the trajectory observer
+        // to the factory via `with_trajectory_observer` so the port forwards the
+        // resolved tool-call input when a capability is invoked.
+        let mut context = execution_context("thread-trajectory-observer-input");
+        let run_context = loop_run_context(&context).await;
+        let loop_driver_extension =
+            loop_driver_execution_extension_id(&run_context).expect("valid extension id");
+        context.grants.grants.push(dispatch_capability_grant(
+            &capability_id,
+            &loop_driver_extension,
+        ));
+        let port = HostRuntimeLoopCapabilityPortFactory::new(
+            Arc::new(RecordingHostRuntime::new(vec![visible_capability(
+                capability_id.clone(),
+                provider_id.clone(),
+            )])),
+            visible_request(context).with_provider_trust(std::collections::BTreeMap::from([(
+                provider_id.clone(),
+                dispatch_trust_decision(),
+            )])),
+            dummy_input_resolver(),
+            Arc::new(RecordingResultWriter::default()),
+            dummy_milestone_sink(),
+        )
+        .with_trajectory_observer(Some(
+            observer.clone() as Arc<dyn CapabilityTrajectoryObserver>
+        ))
+        .port_for_run_context(run_context);
+
+        let outcome = invoke_visible_runtime_capability(&port)
+            .await
+            .expect("capability invocation succeeds");
+        assert!(matches!(outcome, CapabilityOutcome::Completed(_)));
+
+        let inputs = observer.inputs.lock().expect("inputs lock");
+        assert_eq!(
+            inputs.len(),
+            1,
+            "observer should see exactly one capability input"
+        );
+        let (call_id, observed_capability, arguments) = &inputs[0];
+        assert!(!call_id.is_empty(), "call_id (input ref) should be present");
+        assert_eq!(
+            observed_capability,
+            capability_id.as_str(),
+            "observer should receive the resolved capability id"
+        );
+        assert_eq!(
+            arguments,
+            &serde_json::json!({"message": "hello"}),
+            "observer should receive the resolved tool-call arguments"
+        );
     }
 
     #[tokio::test]
@@ -3758,6 +4292,7 @@ mod tests {
             capability_id: candidate.capability_id,
             input_ref: candidate.input_ref,
             approval_resume: None,
+            auth_resume: None,
         };
         let outcome = port
             .invoke_capability(invocation.clone())
@@ -3769,6 +4304,7 @@ mod tests {
                 capability_id: invocation.capability_id,
                 input_ref: invocation.input_ref,
                 approval_resume: None,
+                auth_resume: None,
             })
             .await
             .expect("capability_info invocation replays");
@@ -3820,6 +4356,7 @@ mod tests {
             capability_id: candidate.capability_id,
             input_ref: candidate.input_ref,
             approval_resume: None,
+            auth_resume: None,
         };
 
         let error = port
@@ -3889,6 +4426,7 @@ mod tests {
             capability_id: candidate.capability_id,
             input_ref: candidate.input_ref,
             approval_resume: None,
+            auth_resume: None,
         })
         .await
         .expect("capability_info invocation succeeds");
@@ -3965,6 +4503,7 @@ mod tests {
                     capability_id: candidate.capability_id,
                     input_ref: candidate.input_ref,
                     approval_resume: None,
+                    auth_resume: None,
                 })
                 .await
                 .expect("invalid arguments should return a capability failure, not a host error");
@@ -4046,6 +4585,7 @@ mod tests {
                     capability_id: candidate.capability_id,
                     input_ref: candidate.input_ref,
                     approval_resume: None,
+                    auth_resume: None,
                 })
                 .await
                 .expect("invalid name should return a capability failure, not a host error");
@@ -4126,6 +4666,7 @@ mod tests {
                 capability_id: candidate.capability_id,
                 input_ref: candidate.input_ref,
                 approval_resume: None,
+                auth_resume: None,
             })
             .await
             .expect("unknown target should return a capability failure, not a host error");
@@ -4190,6 +4731,7 @@ mod tests {
                 input_ref: CapabilityInputRef::new("input:direct-capability-info")
                     .expect("test input ref"),
                 approval_resume: None,
+                auth_resume: None,
             })
             .await
             .expect("unstaged synthetic invocation should return a model-visible failure");
@@ -4269,6 +4811,7 @@ mod tests {
                     .expect("synthetic capability id"),
                 input_ref,
                 approval_resume: None,
+                auth_resume: None,
             })
             .await
             .expect("excluded target should return a model-visible failure");
@@ -4414,6 +4957,7 @@ mod tests {
                 capability_id: candidate.capability_id,
                 input_ref: candidate.input_ref,
                 approval_resume: None,
+                auth_resume: None,
             })
             .await
             .expect("capability_info invocation succeeds");
@@ -4479,6 +5023,7 @@ mod tests {
             input_ref: CapabilityInputRef::new("input:old-builtin-capability-info")
                 .expect("valid input ref"),
             approval_resume: None,
+            auth_resume: None,
         })
         .await
         .expect("runtime capability invocation succeeds");
@@ -4597,6 +5142,7 @@ mod tests {
             capability_id: override_id.clone(),
             input_ref: input_ref.clone(),
             approval_resume: None,
+            auth_resume: None,
         })
         .await
         .expect("override invocation succeeds");
@@ -4605,6 +5151,7 @@ mod tests {
             capability_id: default_id.clone(),
             input_ref,
             approval_resume: None,
+            auth_resume: None,
         })
         .await
         .expect("default invocation succeeds");
@@ -4665,6 +5212,7 @@ mod tests {
                 input_ref: CapabilityInputRef::new("input:process-sandbox-plan")
                     .expect("valid input ref"),
                 approval_resume: None,
+                auth_resume: None,
             })
             .await
             .expect("process sandbox invocation succeeds");
@@ -4763,6 +5311,7 @@ mod tests {
                 input_ref: CapabilityInputRef::new("input:direct-invalid")
                     .expect("valid input ref"),
                 approval_resume: None,
+                auth_resume: None,
             })
             .await
             .expect_err("invalid direct input should fail before runtime dispatch");
@@ -4836,6 +5385,7 @@ mod tests {
                 capability_id,
                 input_ref: candidate.input_ref,
                 approval_resume: None,
+                auth_resume: None,
             })
             .await
             .expect("schema-invalid provider calls should produce a capability failure");
@@ -4930,6 +5480,7 @@ mod tests {
                 capability_id,
                 input_ref: candidate.input_ref,
                 approval_resume: None,
+                auth_resume: None,
             })
             .await
             .expect("schema-invalid provider calls should produce a capability failure");
@@ -5024,6 +5575,7 @@ mod tests {
                 capability_id,
                 input_ref: candidate.input_ref,
                 approval_resume: None,
+                auth_resume: None,
             })
             .await
             .expect("schema-invalid provider calls should produce a capability failure");
@@ -5100,6 +5652,7 @@ mod tests {
             capability_id,
             input_ref: CapabilityInputRef::new("input:direct-normalized").expect("valid input ref"),
             approval_resume: None,
+            auth_resume: None,
         })
         .await
         .expect("valid direct input should dispatch");
@@ -5156,6 +5709,7 @@ mod tests {
                 input_ref: CapabilityInputRef::new("input:invalid-process-sandbox-plan")
                     .expect("valid input ref"),
                 approval_resume: None,
+                auth_resume: None,
             })
             .await
             .expect_err("invalid process sandbox plan must fail before runtime dispatch");
@@ -5212,6 +5766,7 @@ mod tests {
                 input_ref: CapabilityInputRef::new("input:malformed-process-sandbox-plan")
                     .expect("valid input ref"),
                 approval_resume: None,
+                auth_resume: None,
             })
             .await
             .expect_err("malformed process sandbox plan must fail before runtime dispatch");
@@ -5503,6 +6058,73 @@ mod tests {
         assert_eq!(invocation_context.trust, TrustClass::UserTrusted);
         assert_eq!(invocation_context.mounts, MountView::default());
         assert_eq!(invocation_context.grants.grants.len(), 1);
+    }
+
+    /// Guard: a `CapabilityInvocation` with both `approval_resume` and `auth_resume` set
+    /// must be rejected fail-closed with `InvalidInvocation` — the two resume modes are
+    /// mutually exclusive and simultaneous presence indicates a malformed invocation.
+    #[tokio::test]
+    async fn invoke_capability_rejects_both_resume_modes_set() {
+        use ironclaw_host_api::ApprovalRequestId;
+        use ironclaw_turns::run_profile::{CapabilityApprovalResume, CapabilityAuthResume};
+
+        let capability_id = CapabilityId::new("demo.echo").expect("valid capability id");
+        let provider_id = ExtensionId::new("demo").expect("valid provider id");
+        let port = runtime_capability_port(
+            &capability_id,
+            &provider_id,
+            Arc::new(RecordingHostRuntime::new(vec![visible_capability(
+                capability_id.clone(),
+                provider_id.clone(),
+            )])),
+            dummy_result_writer(),
+            dummy_milestone_sink(),
+            "thread-both-resume-modes-set",
+        )
+        .await;
+
+        // Obtain a valid surface_version and input_ref so the invocation
+        // reaches the dispatch match — the guard fires there.
+        let invocation = visible_runtime_invocation(&port).await;
+
+        let resume_token =
+            CapabilityResumeToken::new(InvocationId::new().to_string()).expect("valid token");
+        let dual_resume_invocation = CapabilityInvocation {
+            surface_version: invocation.surface_version,
+            capability_id: invocation.capability_id,
+            input_ref: invocation.input_ref,
+            approval_resume: Some(CapabilityApprovalResume {
+                approval_request_id: ApprovalRequestId::new(),
+                resume_token: resume_token.clone(),
+                correlation_id: CorrelationId::new(),
+                input_ref: CapabilityInputRef::new("input:test-dual-resume")
+                    .expect("valid input ref"),
+                input: serde_json::json!({}),
+                estimate: ResourceEstimate::default(),
+            }),
+            auth_resume: Some(CapabilityAuthResume {
+                resume_token,
+                prior_approval: None,
+                replay: None,
+            }),
+        };
+
+        let err = port
+            .invoke_capability(dual_resume_invocation)
+            .await
+            .expect_err("dual-resume invocation must be rejected");
+
+        assert_eq!(
+            err.kind,
+            AgentLoopHostErrorKind::InvalidInvocation,
+            "expected InvalidInvocation, got {:?}",
+            err.kind
+        );
+        assert!(
+            err.safe_summary.contains("mutually exclusive"),
+            "error message should name the mutual-exclusion constraint: {:?}",
+            err.safe_summary
+        );
     }
 
     fn visible_request(
@@ -5809,6 +6431,7 @@ mod tests {
             capability_id: candidate.capability_id,
             input_ref: candidate.input_ref,
             approval_resume: None,
+            auth_resume: None,
         }
     }
 
@@ -6107,14 +6730,14 @@ mod tests {
         async fn write_capability_result(
             &self,
             _write: CapabilityResultWrite<'_>,
-        ) -> Result<(LoopResultRef, u64), AgentLoopHostError> {
+        ) -> Result<CapabilityWriteResult, AgentLoopHostError> {
             let result_ref = LoopResultRef::new("result:mount-test").map_err(|_| {
                 AgentLoopHostError::new(
                     AgentLoopHostErrorKind::Internal,
                     "result ref could not be built",
                 )
             })?;
-            Ok((result_ref, 0))
+            Ok(CapabilityWriteResult::without_output_digest(result_ref, 0))
         }
     }
 
@@ -6134,7 +6757,7 @@ mod tests {
         async fn write_capability_result(
             &self,
             _write: CapabilityResultWrite<'_>,
-        ) -> Result<(LoopResultRef, u64), AgentLoopHostError> {
+        ) -> Result<CapabilityWriteResult, AgentLoopHostError> {
             if self.attempts.fetch_add(1, Ordering::SeqCst) == 0 {
                 return Err(AgentLoopHostError::new(
                     AgentLoopHostErrorKind::TranscriptWriteFailed,
@@ -6147,7 +6770,7 @@ mod tests {
                     "result ref could not be built",
                 )
             })?;
-            Ok((result_ref, 0))
+            Ok(CapabilityWriteResult::without_output_digest(result_ref, 0))
         }
     }
 
@@ -6175,7 +6798,13 @@ mod tests {
         async fn write_capability_result(
             &self,
             write: CapabilityResultWrite<'_>,
-        ) -> Result<(LoopResultRef, u64), AgentLoopHostError> {
+        ) -> Result<CapabilityWriteResult, AgentLoopHostError> {
+            let output_digest = ContentDigest::from_json_value(&write.output).map_err(|error| {
+                AgentLoopHostError::new(
+                    AgentLoopHostErrorKind::Internal,
+                    format!("capability result output digest could not be built: {error}"),
+                )
+            })?;
             self.records
                 .lock()
                 .expect("records lock")
@@ -6190,7 +6819,11 @@ mod tests {
                     "result ref could not be built",
                 )
             })?;
-            Ok((result_ref, 0))
+            Ok(CapabilityWriteResult {
+                result_ref,
+                byte_len: 0,
+                output_digest: Some(output_digest),
+            })
         }
     }
 
@@ -6256,7 +6889,7 @@ mod tests {
         async fn write_capability_result(
             &self,
             _write: CapabilityResultWrite<'_>,
-        ) -> Result<(LoopResultRef, u64), AgentLoopHostError> {
+        ) -> Result<CapabilityWriteResult, AgentLoopHostError> {
             unreachable!("noop capability io should not be called")
         }
     }

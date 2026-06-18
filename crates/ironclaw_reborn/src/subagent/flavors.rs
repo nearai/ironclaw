@@ -535,6 +535,7 @@ mod tests {
                     progress: ironclaw_turns::run_profile::CapabilityProgress::MadeProgress,
                     terminate_hint: false,
                     byte_len: 0,
+                    output_digest: None,
                 }))
             }
 
@@ -610,6 +611,7 @@ mod tests {
                 capability_id: cap(capability),
                 input_ref: CapabilityInputRef::new("input:test").expect("valid input ref"),
                 approval_resume: None,
+                auth_resume: None,
             }
         }
 

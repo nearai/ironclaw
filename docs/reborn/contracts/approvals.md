@@ -38,6 +38,15 @@ CapabilityHost::resume_json
   -> compares the replayed invocation fingerprint
   -> claims the lease before runtime dispatch
   -> dispatches and consumes the claimed lease on success
+
+CapabilityHost::auth_resume_json
+  -> validates run record is BlockedAuth
+  -> when approval_request_id is Some: locates matching fingerprinted lease
+     (Active on first arrival, Claimed after a prior auth bounce claimed it)
+  -> transitions lease to Dispatching via begin_dispatch_claimed (single-winner CAS)
+  -> dispatches; on success consumes the Dispatching lease
+  -> on non-terminal BlockedAuth re-bounce: reverts Dispatching → Claimed via abort_dispatch_claimed
+     so the next auth_resume_json call can reuse the same lease without a second approval
 ```
 
 ---
@@ -122,14 +131,24 @@ The lease adds host-managed lifecycle state:
 pub enum CapabilityLeaseStatus {
     Active,
     Claimed,
+    Dispatching,
     Consumed,
     Revoked,
 }
 ```
 
+`Dispatching` is a transient state set by `begin_dispatch_claimed` during `auth_resume_json` to enforce single-winner concurrent reuse of a `Claimed` lease.  A second concurrent `auth_resume_json` call that finds the lease already in `Dispatching` receives `InactiveLease`, mirroring the loser of a concurrent `Active` `claim()` race.  `abort_dispatch_claimed` reverts `Dispatching` back to `Claimed` when a non-terminal auth re-bounce requires the lease to remain available for the next attempt.
+
+`CapabilityLeaseStore` exposes two new operations:
+
+- `begin_dispatch_claimed(scope, lease_id, fingerprint)` — atomically transitions a `Claimed`, fingerprint-matched, non-expired lease to `Dispatching`.
+- `abort_dispatch_claimed(scope, lease_id)` — reverts a `Dispatching` lease to `Claimed`; no-op-safe if the lease is already `Claimed`.
+
+`consume` and `revoke` treat both `Claimed` and `Dispatching` as valid source states (i.e., a terminal outcome can consume or revoke from either).
+
 V1 includes in-memory and filesystem-backed lease stores with exact tenant/user/agent/invocation scoped lookup, claim, consumption, and revocation. Filesystem leases persist under `/engine/tenants/{tenant_id}/users/{user_id}/agents/{agent_id-or-_none}/capability-leases/{invocation_id}/{lease_id}.json`. Lease lookup, claim, consumption, and revocation are not global by ID; the authorizer asks for unexpired active leases visible to the current `ExecutionContext.resource_scope`. This slice treats issued approval leases as one-off invocation leases: a lease only authorizes a context with the same invocation ID as the approved request. Broader reusable approval scopes are a later policy slice.
 
-Leases preserve the approval request fingerprint so resume can validate that the replayed invocation request matches what was approved. Fingerprinted approval leases are not converted into generic grants for plain `invoke_json`; they can only be used by `resume_json`, which compares the fingerprint and claims the exact lease before dispatch.
+Leases preserve the approval request fingerprint so resume can validate that the replayed invocation request matches what was approved. Fingerprinted approval leases are not converted into generic grants for plain `invoke_json`; they can only be used by `resume_json` or `auth_resume_json`, which compare the fingerprint and claim the exact lease before dispatch.
 
 Claiming enforces that the lease is active, unexpired, not exhausted, and fingerprint-equal to the replayed request. A claimed lease is hidden from generic authorization so a second concurrent resume cannot also dispatch with the same one-shot approval lease.
 
@@ -256,8 +275,14 @@ This slice intentionally keeps approval resolution narrow:
 - no approval support for actions other than dispatch and one-shot spawn yet
 - persistent approval policies cover dispatch and `Action::SpawnCapability`
   approval interaction decisions at the current Reborn sandbox scope
-  (`tenant_id`, `user_id`, optional `agent_id`, and `project_id` when present,
-  otherwise `thread_id`)
+  (`tenant_id`, `user_id`, optional `agent_id`, and optional `project_id`);
+  `thread_id` never participates in the scope, so an "always allow" granted in
+  one thread applies to all of that user's threads with the same agent (and
+  project, when present) and is channel-agnostic — a WebUI grant is honored for
+  a Slack message resolving to the same `(user, agent)`. Existing local
+  thread-scoped approval-policy files from pre-DB testing are intentionally not
+  migrated or read through a compatibility fallback; wipe local approval state
+  when moving to this scope shape
 - persistent approval is fail-closed by manifest policy: the current default
   only allows durable reuse for capabilities whose manifest
   `default_permission` is `allow`; `ask` and `deny` remain one-shot approval

@@ -1,7 +1,7 @@
 schema_version = "reborn.extension_manifest.v2"
 id = "github"
 name = "GitHub"
-version = "0.2.6"
+version = "0.2.7"
 description = "GitHub repository, issue, pull request, search, branch, file, release, workflow, fork, and webhook capabilities."
 trust = "first_party_requested"
 
@@ -26,7 +26,7 @@ effects = ["network", "use_secret"]
 runtime_credentials = [
   { handle = "github_runtime_token", source = { type = "product_auth_account", provider = "github" }, audience = { scheme = "https", host_pattern = "api.github.com" }, target = { type = "header", name = "authorization", prefix = "Bearer " } },
 ]
-default_permission = "ask"
+default_permission = "allow"
 visibility = "model"
 input_schema_ref = "schemas/github/get_repo.input.v1.json"
 output_schema_ref = "schemas/github/raw_output.v1.json"
@@ -54,7 +54,7 @@ effects = ["network", "use_secret"]
 runtime_credentials = [
   { handle = "github_runtime_token", source = { type = "product_auth_account", provider = "github" }, audience = { scheme = "https", host_pattern = "api.github.com" }, target = { type = "header", name = "authorization", prefix = "Bearer " } },
 ]
-default_permission = "ask"
+default_permission = "allow"
 visibility = "model"
 input_schema_ref = "schemas/github/list_issues.input.v1.json"
 output_schema_ref = "schemas/github/raw_output.v1.json"
@@ -82,7 +82,7 @@ effects = ["network", "use_secret"]
 runtime_credentials = [
   { handle = "github_runtime_token", source = { type = "product_auth_account", provider = "github" }, audience = { scheme = "https", host_pattern = "api.github.com" }, target = { type = "header", name = "authorization", prefix = "Bearer " } },
 ]
-default_permission = "ask"
+default_permission = "allow"
 visibility = "model"
 input_schema_ref = "schemas/github/get_issue.input.v1.json"
 output_schema_ref = "schemas/github/raw_output.v1.json"
@@ -96,7 +96,7 @@ effects = ["network", "use_secret"]
 runtime_credentials = [
   { handle = "github_runtime_token", source = { type = "product_auth_account", provider = "github" }, audience = { scheme = "https", host_pattern = "api.github.com" }, target = { type = "header", name = "authorization", prefix = "Bearer " } },
 ]
-default_permission = "ask"
+default_permission = "allow"
 visibility = "model"
 input_schema_ref = "schemas/github/list_issue_comments.input.v1.json"
 output_schema_ref = "schemas/github/raw_output.v1.json"
@@ -138,7 +138,7 @@ effects = ["network", "use_secret"]
 runtime_credentials = [
   { handle = "github_runtime_token", source = { type = "product_auth_account", provider = "github" }, audience = { scheme = "https", host_pattern = "api.github.com" }, target = { type = "header", name = "authorization", prefix = "Bearer " } },
 ]
-default_permission = "ask"
+default_permission = "allow"
 visibility = "model"
 input_schema_ref = "schemas/github/list_pull_requests.input.v1.json"
 output_schema_ref = "schemas/github/raw_output.v1.json"
@@ -166,7 +166,7 @@ effects = ["network", "use_secret"]
 runtime_credentials = [
   { handle = "github_runtime_token", source = { type = "product_auth_account", provider = "github" }, audience = { scheme = "https", host_pattern = "api.github.com" }, target = { type = "header", name = "authorization", prefix = "Bearer " } },
 ]
-default_permission = "ask"
+default_permission = "allow"
 visibility = "model"
 input_schema_ref = "schemas/github/get_pull_request.input.v1.json"
 output_schema_ref = "schemas/github/raw_output.v1.json"
@@ -180,7 +180,7 @@ effects = ["network", "use_secret"]
 runtime_credentials = [
   { handle = "github_runtime_token", source = { type = "product_auth_account", provider = "github" }, audience = { scheme = "https", host_pattern = "api.github.com" }, target = { type = "header", name = "authorization", prefix = "Bearer " } },
 ]
-default_permission = "ask"
+default_permission = "allow"
 visibility = "model"
 input_schema_ref = "schemas/github/get_pull_request_files.input.v1.json"
 output_schema_ref = "schemas/github/raw_output.v1.json"
@@ -208,7 +208,7 @@ effects = ["network", "use_secret"]
 runtime_credentials = [
   { handle = "github_runtime_token", source = { type = "product_auth_account", provider = "github" }, audience = { scheme = "https", host_pattern = "api.github.com" }, target = { type = "header", name = "authorization", prefix = "Bearer " } },
 ]
-default_permission = "ask"
+default_permission = "allow"
 visibility = "model"
 input_schema_ref = "schemas/github/list_pull_request_comments.input.v1.json"
 output_schema_ref = "schemas/github/raw_output.v1.json"
@@ -236,7 +236,7 @@ effects = ["network", "use_secret"]
 runtime_credentials = [
   { handle = "github_runtime_token", source = { type = "product_auth_account", provider = "github" }, audience = { scheme = "https", host_pattern = "api.github.com" }, target = { type = "header", name = "authorization", prefix = "Bearer " } },
 ]
-default_permission = "ask"
+default_permission = "allow"
 visibility = "model"
 input_schema_ref = "schemas/github/get_pull_request_reviews.input.v1.json"
 output_schema_ref = "schemas/github/raw_output.v1.json"
@@ -250,7 +250,7 @@ effects = ["network", "use_secret"]
 runtime_credentials = [
   { handle = "github_runtime_token", source = { type = "product_auth_account", provider = "github" }, audience = { scheme = "https", host_pattern = "api.github.com" }, target = { type = "header", name = "authorization", prefix = "Bearer " } },
 ]
-default_permission = "ask"
+default_permission = "allow"
 visibility = "model"
 input_schema_ref = "schemas/github/get_combined_status.input.v1.json"
 output_schema_ref = "schemas/github/raw_output.v1.json"
@@ -272,13 +272,27 @@ prompt_doc_ref = "prompts/github/merge_pull_request.md"
 required_host_ports = ["host.runtime.http_egress"]
 
 [[capability_provider.tools.capabilities]]
-id = "github.list_repos"
-description = "List public repositories for a user."
+id = "github.get_authenticated_user"
+description = "Get the authenticated GitHub user for the configured token."
 effects = ["network", "use_secret"]
 runtime_credentials = [
   { handle = "github_runtime_token", source = { type = "product_auth_account", provider = "github" }, audience = { scheme = "https", host_pattern = "api.github.com" }, target = { type = "header", name = "authorization", prefix = "Bearer " } },
 ]
-default_permission = "ask"
+default_permission = "allow"
+visibility = "model"
+input_schema_ref = "schemas/github/get_authenticated_user.input.v1.json"
+output_schema_ref = "schemas/github/raw_output.v1.json"
+prompt_doc_ref = "prompts/github/get_authenticated_user.md"
+required_host_ports = ["host.runtime.http_egress"]
+
+[[capability_provider.tools.capabilities]]
+id = "github.list_repos"
+description = "List repositories visible to the authenticated GitHub user, or public repositories for a named user or organization."
+effects = ["network", "use_secret"]
+runtime_credentials = [
+  { handle = "github_runtime_token", source = { type = "product_auth_account", provider = "github" }, audience = { scheme = "https", host_pattern = "api.github.com" }, target = { type = "header", name = "authorization", prefix = "Bearer " } },
+]
+default_permission = "allow"
 visibility = "model"
 input_schema_ref = "schemas/github/list_repos.input.v1.json"
 output_schema_ref = "schemas/github/raw_output.v1.json"
@@ -292,7 +306,7 @@ effects = ["network", "use_secret"]
 runtime_credentials = [
   { handle = "github_runtime_token", source = { type = "product_auth_account", provider = "github" }, audience = { scheme = "https", host_pattern = "api.github.com" }, target = { type = "header", name = "authorization", prefix = "Bearer " } },
 ]
-default_permission = "ask"
+default_permission = "allow"
 visibility = "model"
 input_schema_ref = "schemas/github/search_repositories.input.v1.json"
 output_schema_ref = "schemas/github/raw_output.v1.json"
@@ -320,7 +334,7 @@ effects = ["network", "use_secret"]
 runtime_credentials = [
   { handle = "github_runtime_token", source = { type = "product_auth_account", provider = "github" }, audience = { scheme = "https", host_pattern = "api.github.com" }, target = { type = "header", name = "authorization", prefix = "Bearer " } },
 ]
-default_permission = "ask"
+default_permission = "allow"
 visibility = "model"
 input_schema_ref = "schemas/github/search_issues.input.v1.json"
 output_schema_ref = "schemas/github/raw_output.v1.json"
@@ -334,7 +348,7 @@ effects = ["network", "use_secret"]
 runtime_credentials = [
   { handle = "github_runtime_token", source = { type = "product_auth_account", provider = "github" }, audience = { scheme = "https", host_pattern = "api.github.com" }, target = { type = "header", name = "authorization", prefix = "Bearer " } },
 ]
-default_permission = "ask"
+default_permission = "allow"
 visibility = "model"
 input_schema_ref = "schemas/github/search_issues_pull_requests.input.v1.json"
 output_schema_ref = "schemas/github/raw_output.v1.json"
@@ -348,7 +362,7 @@ effects = ["network", "use_secret"]
 runtime_credentials = [
   { handle = "github_runtime_token", source = { type = "product_auth_account", provider = "github" }, audience = { scheme = "https", host_pattern = "api.github.com" }, target = { type = "header", name = "authorization", prefix = "Bearer " } },
 ]
-default_permission = "ask"
+default_permission = "allow"
 visibility = "model"
 input_schema_ref = "schemas/github/list_branches.input.v1.json"
 output_schema_ref = "schemas/github/raw_output.v1.json"
@@ -376,7 +390,7 @@ effects = ["network", "use_secret"]
 runtime_credentials = [
   { handle = "github_runtime_token", source = { type = "product_auth_account", provider = "github" }, audience = { scheme = "https", host_pattern = "api.github.com" }, target = { type = "header", name = "authorization", prefix = "Bearer " } },
 ]
-default_permission = "ask"
+default_permission = "allow"
 visibility = "model"
 input_schema_ref = "schemas/github/get_file_content.input.v1.json"
 output_schema_ref = "schemas/github/raw_output.v1.json"
@@ -418,7 +432,7 @@ effects = ["network", "use_secret"]
 runtime_credentials = [
   { handle = "github_runtime_token", source = { type = "product_auth_account", provider = "github" }, audience = { scheme = "https", host_pattern = "api.github.com" }, target = { type = "header", name = "authorization", prefix = "Bearer " } },
 ]
-default_permission = "ask"
+default_permission = "allow"
 visibility = "model"
 input_schema_ref = "schemas/github/list_releases.input.v1.json"
 output_schema_ref = "schemas/github/raw_output.v1.json"
@@ -460,7 +474,7 @@ effects = ["network", "use_secret"]
 runtime_credentials = [
   { handle = "github_runtime_token", source = { type = "product_auth_account", provider = "github" }, audience = { scheme = "https", host_pattern = "api.github.com" }, target = { type = "header", name = "authorization", prefix = "Bearer " } },
 ]
-default_permission = "ask"
+default_permission = "allow"
 visibility = "model"
 input_schema_ref = "schemas/github/get_workflow_runs.input.v1.json"
 output_schema_ref = "schemas/github/raw_output.v1.json"

@@ -252,7 +252,9 @@ fn staged_secret_for_injection(
 }
 
 fn runtime_reuses_staged_credentials(runtime: RuntimeKind) -> bool {
-    runtime == RuntimeKind::Mcp
+    // Multi-call runtimes borrow invocation-scoped staged credentials until
+    // the capability dispatch completes or aborts.
+    matches!(runtime, RuntimeKind::Mcp | RuntimeKind::Wasm)
 }
 
 fn missing_runtime_credential(

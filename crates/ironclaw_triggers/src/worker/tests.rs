@@ -662,6 +662,53 @@ async fn tick_records_failed_terminal_active_run_as_error() {
 }
 
 #[tokio::test]
+async fn tick_clears_blocked_active_run_and_unblocks_schedule() {
+    // Regression for #4986: a recurring fire parked on an approval/auth gate
+    // must not hold the active lock forever. The poller clears it, records the
+    // fire as failed, and the trigger is left schedulable again.
+    let repo = Arc::new(InMemoryTriggerRepository::default());
+    let trigger_id = TriggerId::parse("01HZZZZZZZZZZZZZZZZZZZZZZX").expect("ulid");
+    let fire_slot = ts(1_704_067_200);
+    let run_id = TurnRunId::parse("01890f0f-9b6f-7a85-9e5b-9f21a93c4f5e").expect("run id");
+    let mut record = sample_record(trigger_id, tenant("tenant-a"), ts(1_704_067_260));
+    record.active_fire_slot = Some(fire_slot);
+    record.active_run_ref = Some(run_id);
+    repo.upsert_trigger(record).await.expect("insert active");
+    let worker = worker(
+        repo.clone(),
+        Arc::new(RecordingMaterializer::success("content:trigger-fire")),
+        Arc::new(RecordingSubmitter::with_outcomes(Vec::new())),
+        Arc::new(RecordingActiveRunLookup::with_state(
+            TriggerActiveRunState::Blocked,
+        )),
+    );
+
+    let report = worker.tick_once(fire_slot).await.expect("tick succeeds");
+
+    assert_eq!(
+        report.results.last().map(|result| &result.outcome),
+        Some(&TriggerPollerFireOutcome::ClearedBlockedActive { run_id })
+    );
+    let persisted = repo
+        .get_trigger(tenant("tenant-a"), trigger_id)
+        .await
+        .expect("load")
+        .expect("record present");
+    // Active lock released, so the next due slot can fire.
+    assert_eq!(persisted.active_fire_slot, None);
+    assert_eq!(persisted.active_run_ref, None);
+    assert_eq!(persisted.state, TriggerState::Scheduled);
+    let runs = repo
+        .list_trigger_run_history(tenant("tenant-a"), trigger_id, 10)
+        .await
+        .expect("list run history");
+    assert_eq!(runs.len(), 1);
+    assert_eq!(runs[0].run_id, Some(run_id));
+    assert_eq!(runs[0].status, TriggerRunHistoryStatus::Error);
+    assert!(runs[0].completed_at.is_some());
+}
+
+#[tokio::test]
 async fn tick_active_cleanup_cursor_reaches_terminal_rows_after_blocked_page() {
     let repo = Arc::new(InMemoryTriggerRepository::default());
     let first_id = TriggerId::parse("01HZZZZZZZZZZZZZZZZZZZZZZZ").expect("ulid");

@@ -37,6 +37,7 @@ ironclaw_processes = { path = "../ironclaw_processes" }
 ironclaw_product_adapter_registry = { path = "../ironclaw_product_adapter_registry" }
 ironclaw_prompt_envelope = { path = "../ironclaw_prompt_envelope" }
 ironclaw_reborn_event_store = { path = "../ironclaw_reborn_event_store" }
+ironclaw_reborn_traces = { path = "../ironclaw_reborn_traces" }
 ironclaw_resources = { path = "../ironclaw_resources" }
 ironclaw_run_state = { path = "../ironclaw_run_state" }
 ironclaw_runtime_policy = { path = "../ironclaw_runtime_policy" }
@@ -64,10 +65,14 @@ uuid = { version = "1", features = ["v4"] }
 zip = { version = "2", default-features = false, features = ["deflate"] }
 
 [dev-dependencies]
+axum = { version = "0.8", features = ["json"] }
+hex = "0.4"
 ironclaw_event_projections = { path = "../ironclaw_event_projections" }
+sha2 = "0.10"
 tempfile = "3"
 tokio = { version = "1", features = ["macros", "rt", "sync", "time"] }
 tokio-postgres = "0.7"
+tracing-subscriber = "0.3"
 zeroize = "1"
 wat = "1.245.1"
 wit-component = "0.245.1"

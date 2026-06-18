@@ -219,10 +219,18 @@ The per-poll ownership probe goes through `SessionThreadService::read_thread`
 not reload the full message transcript every second.
 
 `capability_activity` SSE frames are projection-derived lifecycle metadata for
-tool/capability execution. They expose only the safe activity DTO
+tool/capability execution. They expose the safe activity DTO
 (`invocation_id`, `capability_id`, status, provider/runtime/process metadata,
-byte counts, sanitized error kind, timestamp) and must not carry raw tool
-arguments, raw results, command strings, host paths, or provider payloads.
+byte counts, sanitized error kind, timestamp) plus — while the invocation is
+still running — the optional `subtitle` (inline primary argument) and
+`input_summary` (parameter summary). These two carry the **same bounded,
+sanitized input projection the `capability_display_preview` frame already
+exposes** (secret-redacted via `sanitize_text`, host paths rejected/relativized,
+URLs stripped, byte-bounded); they exist so the running tool row can show
+`tool   <arg>` before the result lands instead of a bare tool name. They must
+never carry the *raw, unsanitized* tool arguments, raw results, host paths, or
+provider payloads — only the projection-sanitized summaries. Full output stays
+behind the scoped `result_ref` fetch path.
 
 `capability_display_preview` SSE frames are separate sanitized display artifacts
 for WebUI tool blocks. They may carry bounded summaries/previews only: summaries

@@ -44,7 +44,8 @@ pub(crate) fn classify_inbound_error(error: &InboundTurnError) -> TrustedTrigger
                 | TurnError::Unauthorized
                 | TurnError::InvalidRequest { .. }
                 | TurnError::InvalidTransition { .. }
-                | TurnError::LeaseMismatch,
+                | TurnError::LeaseMismatch
+                | TurnError::InvalidRunOriginAdapter,
         } => TrustedTriggerInboundFailureKind::SubmitRejected,
         InboundTurnError::InvalidExternalRef { .. }
         | InboundTurnError::BindingRequired { .. }

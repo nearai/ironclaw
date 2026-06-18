@@ -472,7 +472,7 @@ Trace Commons issuer/TenantCtx note: the server-side `zmanian/tracedao-server` s
 | Audio transcription | ✅ | ❌ | P2 | Multiple providers (see TTS/STT subsection in Section 6) |
 | Video support | ✅ | ❌ | P3 | OpenRouter native video gen, MiniMax video, Google Veo, fal Seedance, OpenAI Sora |
 | PDF analysis tool | ✅ | ❌ | P2 | Native Anthropic/Gemini path with text/image extraction fallback; bundled `document-extract` plugin owns `pdfjs-dist` |
-| PDF parsing | ✅ | 🚧 | P2 | Uploaded document attachments parse via `pdf-extract`; no `pdfjs-dist` fallback path |
+| PDF parsing | ✅ | 🚧 | P2 | Uploaded document attachments and Reborn `builtin.read_file` parse PDFs via `pdf-extract`; no `pdfjs-dist` fallback path |
 | MIME detection | ✅ | ❌ | P2 | Bounded MIME sniff + ZIP archive preflight |
 | Media caching | ✅ | ❌ | P3 | |
 | Vision model integration | ✅ | ❌ | P2 | Image understanding; `agents.defaults.imageModel`, Codex app-server image turns, configured-provider exact match |
@@ -823,7 +823,7 @@ Trace Commons issuer/TenantCtx note: the server-side `zmanian/tracedao-server` s
 
 ### P1 - High Priority
 
-- 🚧 Slack channel (real implementation): Reborn host-beta route can be explicitly mounted by `ironclaw-reborn serve` with Slack Events API signing, DM/app-mention routing through Product Workflow/Reborn, final-reply delivery, host-state-backed personal binding pairing, WebUI v2 admin-managed allowed-channel picker, durable WebUI channel-route assignment APIs, provider-side default outbound target inventory for shared channels and explicitly provisioned personal DMs, and deterministic chat-side connect action metadata; DMs execute as the paired actor, while shared channel turns route to allowed dynamic or static channel subjects and fail closed for unrouted channels in admin-managed mode; production install/setup hardening and fuller E2E coverage remain follow-up.
+- 🚧 Slack channel (real implementation): Reborn host-beta route can be explicitly mounted by `ironclaw-reborn serve` with Slack Events API signing, DM/app-mention routing through Product Workflow/Reborn, final-reply delivery, host-state-backed personal binding pairing, WebUI v2 admin-managed allowed-channel picker, durable WebUI channel-route assignment APIs, provider-side default outbound target inventory for shared channels and explicitly provisioned personal DMs, a host-bundled Reborn extension manifest declaring the Slack ProductAdapter host API, and deterministic chat-side connect action metadata; DMs execute as the paired actor, while shared channel turns route to allowed dynamic or static channel subjects and fail closed for unrouted channels in admin-managed mode; production install/setup hardening and fuller E2E coverage remain follow-up.
 - ✅ Telegram channel (WASM, polling-first setup, DM pairing, caption, /start)
 - ❌ WhatsApp channel
 - ✅ Multi-provider failover (`FailoverProvider` with retryable error classification)

@@ -98,6 +98,7 @@ ironclaw_auth = { path = "../ironclaw_auth" }
 ironclaw_common = { path = "../ironclaw_common" }
 ironclaw_capabilities = { path = "../ironclaw_capabilities" }
 ironclaw_approvals = { path = "../ironclaw_approvals" }
+ironclaw_attachments = { path = "../ironclaw_attachments" }
 ironclaw_authorization = { path = "../ironclaw_authorization" }
 ironclaw_conversations = { path = "../ironclaw_conversations" }
 ironclaw_event_projections = { path = "../ironclaw_event_projections" }
@@ -116,6 +117,7 @@ ironclaw_network = { path = "../ironclaw_network" }
 ironclaw_outbound = { path = "../ironclaw_outbound" }
 ironclaw_processes = { path = "../ironclaw_processes" }
 ironclaw_product_adapters = { path = "../ironclaw_product_adapters" }
+ironclaw_product_adapter_registry = { path = "../ironclaw_product_adapter_registry" }
 ironclaw_product_workflow = { path = "../ironclaw_product_workflow" }
 ironclaw_product_workflow_storage = { path = "../ironclaw_product_workflow_storage", optional = true }
 ironclaw_reborn = { path = "../ironclaw_reborn" }
@@ -124,6 +126,7 @@ ironclaw_reborn_identity = { path = "../ironclaw_reborn_identity", optional = tr
 ironclaw_reborn_event_store = { path = "../ironclaw_reborn_event_store" }
 ironclaw_reborn_openai_compat = { path = "../ironclaw_reborn_openai_compat", optional = true }
 ironclaw_reborn_openai_compat_storage = { path = "../ironclaw_reborn_openai_compat_storage", optional = true }
+ironclaw_reborn_traces = { path = "../ironclaw_reborn_traces" }
 ironclaw_first_party_extension_ports = { path = "../ironclaw_first_party_extension_ports" }
 ironclaw_resources = { path = "../ironclaw_resources" }
 ironclaw_run_state = { path = "../ironclaw_run_state" }
@@ -134,8 +137,10 @@ ironclaw_skills = { path = "../ironclaw_skills" }
 ironclaw_slack_v2_adapter = { path = "../ironclaw_slack_v2_adapter", optional = true }
 ironclaw_threads = { path = "../ironclaw_threads" }
 ironclaw_triggers = { path = "../ironclaw_triggers" }
+ironclaw_projects = { path = "../ironclaw_projects" }
 ironclaw_trust = { path = "../ironclaw_trust" }
 ironclaw_turns = { path = "../ironclaw_turns" }
+ironclaw_product_context = { path = "../ironclaw_product_context", version = "0.1.0" }
 # WebUI v2 route surface — feature-gated; only used by `webui_serve`.
 ironclaw_webui_v2 = { path = "../ironclaw_webui_v2", optional = true }
 # WebUI v2 static SPA bundle — feature-gated; mounted under `/v2`.

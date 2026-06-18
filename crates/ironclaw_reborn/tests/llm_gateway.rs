@@ -1,4 +1,7 @@
-use std::sync::{Arc, Mutex};
+use std::{
+    collections::VecDeque,
+    sync::{Arc, Mutex},
+};
 
 use async_trait::async_trait;
 use ironclaw_host_api::{AgentId, CapabilityId, ProjectId, TenantId, ThreadId, UserId};
@@ -106,6 +109,7 @@ async fn gateway_coalesces_late_system_messages_before_provider_call() {
         content_ref: LoopMessageRef::new("msg:33333333-3333-3333-3333-333333333333").unwrap(),
         tool_result_provider_call: None,
         tool_result_content: None,
+        image_parts: Vec::new(),
     });
 
     gateway.stream_model(request).await.unwrap();
@@ -524,40 +528,116 @@ async fn gateway_rejects_unknown_provider_tool_call_before_registration() {
 }
 
 #[tokio::test]
-async fn gateway_rejects_invalid_provider_tool_batch_before_any_registration() {
-    let provider = Arc::new(ToolAwareProvider::tool_calls(vec![
-        ToolCall {
-            id: "call_1".to_string(),
-            name: "demo__echo".to_string(),
-            arguments: serde_json::json!({"message":"one"}),
-            reasoning: None,
-            signature: None,
-            arguments_parse_error: None,
+async fn gateway_repairs_oversized_provider_tool_arguments_before_registration() {
+    // Must exceed the host provider-argument limit so the gateway exercises its
+    // repair path. Sized off the real constant (raised to 64 KiB in the
+    // provider-validation relaxation) so this never drifts when the cap moves.
+    let oversized_message = "x".repeat(ironclaw_safety::PROVIDER_ARGUMENTS_MAX_BYTES + 1024);
+    let provider = Arc::new(ToolAwareProvider::tool_response_sequence(vec![
+        ToolCompletionResponse {
+            content: None,
+            tool_calls: vec![
+                ToolCall {
+                    id: "call_1".to_string(),
+                    name: "demo__echo".to_string(),
+                    arguments: serde_json::json!({"message":"one"}),
+                    reasoning: Some("valid call reasoning".to_string()),
+                    signature: None,
+                    arguments_parse_error: None,
+                },
+                ToolCall {
+                    id: "call_2".to_string(),
+                    name: "demo__echo".to_string(),
+                    arguments: serde_json::json!({"message": oversized_message}),
+                    reasoning: Some("oversized call reasoning".to_string()),
+                    signature: None,
+                    arguments_parse_error: None,
+                },
+            ],
+            input_tokens: 1,
+            output_tokens: 1,
+            finish_reason: FinishReason::ToolUse,
+            cache_read_input_tokens: 0,
+            cache_creation_input_tokens: 0,
+            reasoning: Some("response reasoning".to_string()),
         },
-        ToolCall {
-            id: "call_2".to_string(),
-            name: "demo__echo".to_string(),
-            arguments: serde_json::json!({"message":"x".repeat(20 * 1024)}),
+        ToolCompletionResponse {
+            content: Some("Finished after repair.".to_string()),
+            tool_calls: Vec::new(),
+            input_tokens: 2,
+            output_tokens: 2,
+            finish_reason: FinishReason::Stop,
+            cache_read_input_tokens: 0,
+            cache_creation_input_tokens: 0,
             reasoning: None,
-            signature: None,
-            arguments_parse_error: None,
         },
     ]));
     let gateway = LlmProviderModelGateway::with_provider_identity(
         STATIC_PROVIDER_ID,
-        provider,
+        provider.clone(),
         LlmModelProfilePolicy::new()
             .allow_model_profile(interactive_model(), Some("host-selected-model".to_string())),
     );
     let capabilities = Arc::new(GatewayCapabilityPort::with_tool_surface());
 
-    let error = gateway
+    let response = gateway
         .stream_model_with_capabilities(model_request(interactive_model()), capabilities.clone())
         .await
-        .unwrap_err();
+        .unwrap();
 
-    assert_eq!(error.kind, HostManagedModelErrorKind::InvalidOutput);
+    let usage = response
+        .usage
+        .expect("repaired response reports accumulated provider usage");
+    assert_eq!(usage.input_tokens, 3);
+    assert_eq!(usage.output_tokens, 3);
+
+    let ParentLoopOutput::AssistantReply(reply) = response.output else {
+        panic!("expected repaired assistant reply");
+    };
+    assert_eq!(reply.content, "Finished after repair.");
     assert!(capabilities.registered.lock().unwrap().is_empty());
+
+    let tool_requests = provider.tool_requests.lock().unwrap();
+    assert_eq!(tool_requests.len(), 2);
+    let repair_messages = &tool_requests[1].messages;
+    let repair_assistant = repair_messages
+        .iter()
+        .find(|message| message.role == Role::Assistant && message.tool_calls.is_some())
+        .expect("repair request includes assistant tool call replay");
+    let repair_tool_calls = repair_assistant
+        .tool_calls
+        .as_ref()
+        .expect("tool calls replayed");
+    assert_eq!(repair_tool_calls.len(), 2);
+    assert_eq!(
+        repair_tool_calls[0].arguments,
+        serde_json::json!({"message":"one"})
+    );
+    assert_eq!(
+        repair_tool_calls[1].arguments,
+        serde_json::json!({
+            "error": "arguments omitted because they exceeded the host provider-tool limit"
+        })
+    );
+    assert_eq!(
+        repair_tool_calls[0].reasoning.as_deref(),
+        Some("valid call reasoning")
+    );
+    assert_eq!(
+        repair_tool_calls[1].reasoning.as_deref(),
+        Some("oversized call reasoning")
+    );
+    let repair_tool_result = repair_messages
+        .iter()
+        .find(|message| {
+            message.role == Role::Tool && message.tool_call_id.as_deref() == Some("call_2")
+        })
+        .expect("repair request includes rejected tool result");
+    assert!(repair_tool_result.content.contains(&format!(
+        "provider tool arguments exceed {} bytes",
+        ironclaw_safety::PROVIDER_ARGUMENTS_MAX_BYTES
+    )));
+    assert!(!repair_tool_result.content.contains("xxxxx"));
 }
 
 #[tokio::test]
@@ -646,6 +726,7 @@ async fn gateway_reconstructs_provider_tool_roundtrip_from_tool_result_reference
         content_ref: LoopMessageRef::new("msg:33333333-3333-3333-3333-333333333333").unwrap(),
         tool_result_provider_call: Some(provider_call),
         tool_result_content: tool_result_reference_content(&envelope),
+        image_parts: Vec::new(),
     }];
 
     gateway.stream_model(request).await.unwrap();
@@ -722,6 +803,7 @@ async fn gateway_replays_model_observation_from_tool_result_reference_before_saf
         content_ref: LoopMessageRef::new("msg:33333333-3333-3333-3333-333333333336").unwrap(),
         tool_result_provider_call: Some(provider_call),
         tool_result_content: tool_result_reference_content(&envelope),
+        image_parts: Vec::new(),
     }];
 
     gateway.stream_model(request).await.unwrap();
@@ -775,6 +857,7 @@ async fn gateway_falls_back_to_safe_summary_for_invalid_model_observation() {
         content_ref: LoopMessageRef::new("msg:33333333-3333-3333-3333-333333333338").unwrap(),
         tool_result_provider_call: Some(provider_call),
         tool_result_content: tool_result_reference_content(&envelope),
+        image_parts: Vec::new(),
     }];
 
     gateway.stream_model(request).await.unwrap();
@@ -815,6 +898,7 @@ async fn gateway_replays_resolved_tool_result_content_instead_of_summary() {
         content_ref: LoopMessageRef::new("msg:33333333-3333-3333-3333-333333333334").unwrap(),
         tool_result_provider_call: Some(provider_call),
         tool_result_content: resolved_tool_result_content(),
+        image_parts: Vec::new(),
     }];
 
     gateway.stream_model(request).await.unwrap();
@@ -845,6 +929,7 @@ async fn gateway_degrades_resolved_orphan_tool_result_to_safe_summary() {
         content_ref: LoopMessageRef::new("msg:33333333-3333-3333-3333-333333333334").unwrap(),
         tool_result_provider_call: None,
         tool_result_content: resolved_tool_result_content(),
+        image_parts: Vec::new(),
     }];
 
     gateway.stream_model(request).await.unwrap();
@@ -894,6 +979,7 @@ async fn gateway_replays_model_observation_for_orphan_tool_reference() {
         content_ref: LoopMessageRef::new("msg:33333333-3333-3333-3333-333333333337").unwrap(),
         tool_result_provider_call: None,
         tool_result_content: tool_result_reference_content(&envelope),
+        image_parts: Vec::new(),
     }];
 
     gateway.stream_model(request).await.unwrap();
@@ -930,6 +1016,7 @@ async fn gateway_rejects_tool_result_without_typed_replay_content() {
         content_ref: LoopMessageRef::new("msg:33333333-3333-3333-3333-333333333335").unwrap(),
         tool_result_provider_call: None,
         tool_result_content: None,
+        image_parts: Vec::new(),
     }];
 
     let error = gateway.stream_model(request).await.unwrap_err();
@@ -990,6 +1077,7 @@ async fn gateway_reconstructs_multi_tool_provider_turn_from_grouped_result_refer
             content_ref: LoopMessageRef::new("msg:33333333-3333-3333-3333-333333333333").unwrap(),
             tool_result_provider_call: Some(first_provider_call),
             tool_result_content: tool_result_reference_content(&first_envelope),
+            image_parts: Vec::new(),
         },
         HostManagedModelMessage {
             role: HostManagedModelMessageRole::ToolResult,
@@ -997,6 +1085,7 @@ async fn gateway_reconstructs_multi_tool_provider_turn_from_grouped_result_refer
             content_ref: LoopMessageRef::new("msg:44444444-4444-4444-4444-444444444444").unwrap(),
             tool_result_provider_call: Some(second_provider_call),
             tool_result_content: tool_result_reference_content(&second_envelope),
+            image_parts: Vec::new(),
         },
     ];
 
@@ -1081,6 +1170,7 @@ async fn gateway_splits_adjacent_provider_tool_results_from_different_turns() {
             content_ref: LoopMessageRef::new("msg:33333333-3333-3333-3333-333333333333").unwrap(),
             tool_result_provider_call: Some(first_provider_call),
             tool_result_content: tool_result_reference_content(&first_envelope),
+            image_parts: Vec::new(),
         },
         HostManagedModelMessage {
             role: HostManagedModelMessageRole::ToolResult,
@@ -1088,6 +1178,7 @@ async fn gateway_splits_adjacent_provider_tool_results_from_different_turns() {
             content_ref: LoopMessageRef::new("msg:44444444-4444-4444-4444-444444444444").unwrap(),
             tool_result_provider_call: Some(second_provider_call),
             tool_result_content: tool_result_reference_content(&second_envelope),
+            image_parts: Vec::new(),
         },
     ];
 
@@ -1196,6 +1287,7 @@ async fn gateway_keeps_same_turn_provider_roundtrip_when_plain_tool_result_is_in
             content_ref: LoopMessageRef::new("msg:33333333-3333-3333-3333-333333333333").unwrap(),
             tool_result_provider_call: Some(first_provider_call),
             tool_result_content: tool_result_reference_content(&first_envelope),
+            image_parts: Vec::new(),
         },
         HostManagedModelMessage {
             role: HostManagedModelMessageRole::ToolResult,
@@ -1203,6 +1295,7 @@ async fn gateway_keeps_same_turn_provider_roundtrip_when_plain_tool_result_is_in
             content_ref: LoopMessageRef::new("msg:55555555-5555-5555-5555-555555555555").unwrap(),
             tool_result_provider_call: None,
             tool_result_content: tool_result_reference_content(&plain_envelope),
+            image_parts: Vec::new(),
         },
         HostManagedModelMessage {
             role: HostManagedModelMessageRole::ToolResult,
@@ -1210,6 +1303,7 @@ async fn gateway_keeps_same_turn_provider_roundtrip_when_plain_tool_result_is_in
             content_ref: LoopMessageRef::new("msg:44444444-4444-4444-4444-444444444444").unwrap(),
             tool_result_provider_call: Some(second_provider_call),
             tool_result_content: tool_result_reference_content(&second_envelope),
+            image_parts: Vec::new(),
         },
     ];
 
@@ -1274,6 +1368,7 @@ async fn gateway_degrades_provider_tool_replay_from_different_provider_route_to_
         content_ref: LoopMessageRef::new("msg:33333333-3333-3333-3333-333333333333").unwrap(),
         tool_result_provider_call: Some(provider_call),
         tool_result_content: tool_result_reference_content(&envelope),
+        image_parts: Vec::new(),
     }];
 
     let response = gateway.stream_model(request).await.unwrap();
@@ -1321,6 +1416,7 @@ async fn gateway_degrades_resolved_provider_mismatch_to_safe_summary() {
         content_ref: LoopMessageRef::new("msg:33333333-3333-3333-3333-333333333335").unwrap(),
         tool_result_provider_call: Some(provider_call),
         tool_result_content: resolved_tool_result_content(),
+        image_parts: Vec::new(),
     }];
 
     gateway.stream_model(request).await.unwrap();
@@ -1594,7 +1690,9 @@ async fn production_loop_model_request_includes_runtime_context() {
     .with_instruction_materialization_store(store_for_port)
     .with_runtime_context(LoopRuntimeContext {
         loop_started_at_utc,
-        user_timezone: None,
+        communication: None,
+        product_context: None,
+        user_profile: None,
     });
 
     let bundle = prompt_port
@@ -2512,6 +2610,7 @@ fn model_request(model_profile_id: ModelProfileId) -> HostManagedModelRequest {
                     .unwrap(),
                 tool_result_provider_call: None,
                 tool_result_content: None,
+                image_parts: Vec::new(),
             },
             HostManagedModelMessage {
                 role: HostManagedModelMessageRole::User,
@@ -2520,6 +2619,7 @@ fn model_request(model_profile_id: ModelProfileId) -> HostManagedModelRequest {
                     .unwrap(),
                 tool_result_provider_call: None,
                 tool_result_content: None,
+                image_parts: Vec::new(),
             },
         ],
         surface_version: None,
@@ -2753,7 +2853,7 @@ struct ToolAwareProvider {
     complete_requests: Mutex<Vec<CompletionRequest>>,
     tool_requests: Mutex<Vec<ToolCompletionRequest>>,
     plain_response: Mutex<Option<CompletionResponse>>,
-    tool_response: Mutex<Option<ToolCompletionResponse>>,
+    tool_responses: Mutex<VecDeque<ToolCompletionResponse>>,
 }
 
 impl ToolAwareProvider {
@@ -2770,7 +2870,7 @@ impl ToolAwareProvider {
                 cache_read_input_tokens: 0,
                 cache_creation_input_tokens: 0,
             })),
-            tool_response: Mutex::new(None),
+            tool_responses: Mutex::new(VecDeque::new()),
         }
     }
 
@@ -2801,11 +2901,15 @@ impl ToolAwareProvider {
     }
 
     fn tool_response(response: ToolCompletionResponse) -> Self {
+        Self::tool_response_sequence(vec![response])
+    }
+
+    fn tool_response_sequence(responses: Vec<ToolCompletionResponse>) -> Self {
         Self {
             complete_requests: Mutex::new(Vec::new()),
             tool_requests: Mutex::new(Vec::new()),
             plain_response: Mutex::new(None),
-            tool_response: Mutex::new(Some(response)),
+            tool_responses: Mutex::new(responses.into()),
         }
     }
 }
@@ -2836,10 +2940,10 @@ impl LlmProvider for ToolAwareProvider {
     ) -> Result<ToolCompletionResponse, LlmError> {
         self.tool_requests.lock().unwrap().push(request);
         Ok(self
-            .tool_response
+            .tool_responses
             .lock()
             .unwrap()
-            .take()
+            .pop_front()
             .expect("tool response configured"))
     }
 }
@@ -2899,10 +3003,15 @@ impl LoopCapabilityPort for GatewayCapabilityPort {
                 )
             })?
             .len();
-        if arguments_len > 16 * 1024 {
+        if arguments_len > ironclaw_safety::PROVIDER_ARGUMENTS_MAX_BYTES {
+            // Mirror the production summary exactly so the gateway recognizes this
+            // as a repairable oversized-args error (is_provider_arguments_too_large_summary).
             return Err(ironclaw_turns::run_profile::AgentLoopHostError::new(
                 AgentLoopHostErrorKind::InvalidInvocation,
-                "provider tool arguments exceed 16384 bytes",
+                format!(
+                    "provider tool arguments exceed {} bytes",
+                    ironclaw_safety::PROVIDER_ARGUMENTS_MAX_BYTES
+                ),
             ));
         }
         Ok(())

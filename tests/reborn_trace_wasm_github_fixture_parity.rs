@@ -277,6 +277,11 @@ fn github_capability_calls() -> Vec<RebornScriptedProviderToolCall> {
             }),
         ),
         call(
+            "github.get_authenticated_user",
+            "get-authenticated-user",
+            json!({}),
+        ),
+        call(
             "github.list_repos",
             "list-repos",
             json!({"username": "nearai", "limit": 11, "page": 2}),
@@ -403,7 +408,9 @@ fn expected_github_http_requests() -> Vec<ExpectedGithubHttpRequest> {
                 "license_template": "mit"
             }),
         ),
-        get("https://api.github.com/repos/nearai/ironclaw/issues?state=closed&per_page=7&page=2"),
+        get(
+            "https://api.github.com/search/issues?q=repo%3Anearai%2Fironclaw%20state%3Aclosed%20is%3Aissue&per_page=7&page=2&sort=created&order=desc",
+        ),
         request(
             "POST",
             "https://api.github.com/repos/nearai/ironclaw/issues",
@@ -452,6 +459,7 @@ fn expected_github_http_requests() -> Vec<ExpectedGithubHttpRequest> {
                 "commit_message": "merge body"
             }),
         ),
+        get("https://api.github.com/user"),
         get("https://api.github.com/users/nearai/repos?per_page=11&page=2"),
         get(
             "https://api.github.com/search/repositories?q=org%3Anearai%20ironclaw&per_page=12&page=3&sort=updated&order=desc",

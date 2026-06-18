@@ -10,20 +10,22 @@ use ironclaw_turns::{
     AcceptedMessageRef, AgentLoopDriver, AgentLoopDriverDescriptor, AgentLoopDriverError,
     DefaultTurnCoordinator, IdempotencyKey, InMemoryTurnStateStore, LoopBlocked, LoopBlockedKind,
     LoopCompleted, LoopCompletionKind, LoopExit, LoopExitId, LoopGateRef, LoopMessageRef,
-    LoopResultRef, ReplyTargetBindingRef, RunProfileRequest, RunProfileVersion, SourceBindingRef,
-    SubmitTurnRequest, SubmitTurnResponse, TurnActor, TurnCheckpointId, TurnCoordinator,
-    TurnLeaseToken, TurnRunId, TurnRunState, TurnRunnerId, TurnStatus,
+    LoopResultRef, ProductTurnContext, ReplyTargetBindingRef, RunOriginAdapter, RunProfileRequest,
+    RunProfileVersion, SourceBindingRef, SubmitTurnRequest, SubmitTurnResponse, TurnActor,
+    TurnCheckpointId, TurnCoordinator, TurnLeaseToken, TurnOriginKind, TurnOwner, TurnRunId,
+    TurnRunState, TurnRunnerId, TurnStatus,
     events::EventCursor,
     run_profile::{
         AgentLoopDriverHost, AgentLoopHostError, AgentLoopHostErrorKind, AssistantReply,
         BatchPolicyKind, CapabilityBatchInvocation, CapabilityBatchOutcome, CapabilityDenied,
         CapabilityDeniedReasonKind, CapabilityDescriptorView, CapabilityInputRef,
         CapabilityInvocation, CapabilityOutcome, CapabilityProgress, CapabilityResultMessage,
-        CapabilitySurfaceVersion, ConcurrencyHint, FinalizeAssistantMessage,
-        HostManagedLoopModelPort, HostManagedLoopPromptPort,
-        InMemoryInstructionMaterializationStore, InMemoryLoopHostMilestoneSink,
-        InstructionBundleBuilder, InstructionBundleFingerprint, InstructionBundleRequest,
-        InstructionMaterializationStore, InstructionSafetyContext,
+        CapabilitySurfaceVersion, CommunicationRuntimeContext, ConcurrencyHint,
+        ConnectedChannelSummary, ConnectedChannelsState, DeliveryTargetState,
+        DeliveryTargetSummary, FinalizeAssistantMessage, HostManagedLoopModelPort,
+        HostManagedLoopPromptPort, InMemoryInstructionMaterializationStore,
+        InMemoryLoopHostMilestoneSink, InstructionBundleBuilder, InstructionBundleFingerprint,
+        InstructionBundleRequest, InstructionMaterializationStore, InstructionSafetyContext,
         LOOP_CONTEXT_SNIPPET_MODEL_CONTENT_MAX_BYTES, LoopCancellationPort, LoopCancellationSignal,
         LoopCapabilityPort, LoopCheckpointKind, LoopCheckpointPort, LoopCheckpointRequest,
         LoopCheckpointStateRef, LoopCompactionError, LoopCompactionOutcome, LoopCompactionPort,
@@ -524,7 +526,9 @@ async fn instruction_bundle_renders_runtime_context_section() {
             loop_started_at_utc: chrono::Utc
                 .with_ymd_and_hms(2026, 6, 11, 21, 32, 0)
                 .unwrap(),
-            user_timezone: None,
+            communication: None,
+            product_context: None,
+            user_profile: None,
         }),
     };
 
@@ -609,7 +613,9 @@ async fn instruction_bundle_runtime_fingerprint_stable_within_minute() {
             loop_started_at_utc: chrono::Utc
                 .with_ymd_and_hms(2026, 6, 11, 21, 32, 7)
                 .unwrap(),
-            user_timezone: None,
+            communication: None,
+            product_context: None,
+            user_profile: None,
         }),
     };
 
@@ -622,7 +628,9 @@ async fn instruction_bundle_runtime_fingerprint_stable_within_minute() {
             loop_started_at_utc: chrono::Utc
                 .with_ymd_and_hms(2026, 6, 11, 21, 32, 46)
                 .unwrap(),
-            user_timezone: None,
+            communication: None,
+            product_context: None,
+            user_profile: None,
         }),
     };
 
@@ -689,7 +697,9 @@ async fn instruction_bundle_renders_runtime_context_exactly_once_per_build() {
             loop_started_at_utc: chrono::Utc
                 .with_ymd_and_hms(2026, 6, 11, 21, 32, 0)
                 .unwrap(),
-            user_timezone: None,
+            communication: None,
+            product_context: None,
+            user_profile: None,
         }),
     };
 
@@ -779,7 +789,9 @@ async fn instruction_bundle_without_runtime_context_renders_no_runtime_section()
             loop_started_at_utc: chrono::Utc
                 .with_ymd_and_hms(2026, 6, 11, 21, 32, 0)
                 .unwrap(),
-            user_timezone: None,
+            communication: None,
+            product_context: None,
+            user_profile: None,
         }),
         ..request
     };
@@ -2137,6 +2149,8 @@ async fn loop_prompt_bundle_public_serialization_hides_raw_content() {
         credential_requirements: Vec::new(),
         failure: None,
         event_cursor: EventCursor(0),
+        product_context: None,
+        resume_disposition: None,
     };
     let public_json = serde_json::to_string(&(bundle, host.milestones(), status)).unwrap();
     assert!(public_json.contains("prompt_bundle_built"));
@@ -2202,6 +2216,7 @@ async fn capability_invocations_must_cite_visible_surface_before_host_dispatch()
             capability_id: foreign,
             input_ref: CapabilityInputRef::new("input:opaque-agent-loop-host-sentinel").unwrap(),
             approval_resume: None,
+            auth_resume: None,
         })
         .await
         .unwrap_err();
@@ -2515,6 +2530,7 @@ impl AgentLoopDriver for CapabilityDriver {
                 capability_id: surface.descriptors[0].capability_id.clone(),
                 input_ref: CapabilityInputRef::new("input:opaque-tool-arguments").unwrap(),
                 approval_resume: None,
+                auth_resume: None,
             })
             .await
             .map_err(driver_error)?;
@@ -3081,6 +3097,7 @@ async fn claimed_run_context() -> LoopRunContext {
             parent_run_id: None,
             subagent_depth: 0,
             spawn_tree_root_run_id: None,
+            product_context: None,
         })
         .await
         .unwrap();
@@ -3700,4 +3717,368 @@ async fn error_kind_mapping_through_host_managed_port() {
         );
         assert_eq!(error.safe_summary, summary);
     }
+}
+
+// ── ProductTurnContext serde round-trips ──────────────────────────────────────
+
+#[test]
+fn product_turn_context_serde_round_trips_all_origin_kinds() {
+    let web_ui = ProductTurnContext::new(
+        TurnOriginKind::WebUi,
+        None,
+        None,
+        TurnOwner::Personal {
+            user: UserId::new("user-serde-rt").unwrap(),
+        },
+    );
+    let json = serde_json::to_value(&web_ui).unwrap();
+    assert_eq!(
+        serde_json::from_value::<ProductTurnContext>(json).unwrap(),
+        web_ui
+    );
+
+    let inbound = ProductTurnContext::new(
+        TurnOriginKind::Inbound,
+        None,
+        Some(RunOriginAdapter::new("slack").unwrap()),
+        TurnOwner::Personal {
+            user: UserId::new("user-serde-rt").unwrap(),
+        },
+    );
+    let json = serde_json::to_value(&inbound).unwrap();
+    assert_eq!(
+        serde_json::from_value::<ProductTurnContext>(json).unwrap(),
+        inbound
+    );
+
+    let trigger = ProductTurnContext::new(
+        TurnOriginKind::ScheduledTrigger,
+        None,
+        None,
+        TurnOwner::Personal {
+            user: UserId::new("user-serde-rt").unwrap(),
+        },
+    );
+    let json = serde_json::to_value(&trigger).unwrap();
+    assert_eq!(
+        serde_json::from_value::<ProductTurnContext>(json).unwrap(),
+        trigger
+    );
+}
+
+#[test]
+fn submit_turn_request_product_context_defaults_to_none_when_missing_from_json() {
+    // Old payloads without product_context must deserialize successfully with None.
+    let json = serde_json::json!({
+        "scope": {
+            "tenant_id": "tenant-serde",
+            "thread_id": "thread-serde"
+        },
+        "actor": {"user_id": "user-serde"},
+        "accepted_message_ref": "accepted-serde",
+        "source_binding_ref": "source-serde",
+        "reply_target_binding_ref": "reply-serde",
+        "idempotency_key": "idem-serde",
+        "received_at": "2026-06-11T21:32:00Z"
+    });
+    let request: SubmitTurnRequest = serde_json::from_value(json).unwrap();
+    assert!(
+        request.product_context.is_none(),
+        "product_context must default to None when absent from JSON"
+    );
+}
+
+#[tokio::test]
+async fn turn_run_state_product_context_defaults_to_none_when_missing_from_json() {
+    // Old persisted TurnRunState payloads without product_context must deserialize with None.
+    let context = claimed_run_context().await;
+    let state = TurnRunState {
+        scope: context.scope.clone(),
+        actor: None,
+        turn_id: ironclaw_turns::TurnId::new(),
+        run_id: context.run_id,
+        status: TurnStatus::Queued,
+        accepted_message_ref: AcceptedMessageRef::new("accepted-origin-serde").unwrap(),
+        source_binding_ref: SourceBindingRef::new("source-origin-serde").unwrap(),
+        reply_target_binding_ref: ReplyTargetBindingRef::new("reply-origin-serde").unwrap(),
+        resolved_run_profile_id: context.resolved_run_profile.profile_id.clone(),
+        resolved_run_profile_version: context.resolved_run_profile.profile_version,
+        resolved_model_route: None,
+        received_at: Utc.with_ymd_and_hms(2026, 6, 11, 21, 32, 0).unwrap(),
+        checkpoint_id: None,
+        gate_ref: None,
+        credential_requirements: Vec::new(),
+        failure: None,
+        event_cursor: EventCursor(0),
+        product_context: None,
+        resume_disposition: None,
+    };
+
+    // Serialize without the product_context field (simulate old wire).
+    let mut json = serde_json::to_value(&state).unwrap();
+    json.as_object_mut().unwrap().remove("product_context");
+    let decoded: TurnRunState = serde_json::from_value(json).unwrap();
+    assert!(
+        decoded.product_context.is_none(),
+        "product_context must default to None when absent from legacy JSON"
+    );
+
+    // Verify round-trip with a value present.
+    let ctx_value = ProductTurnContext::new(
+        TurnOriginKind::ScheduledTrigger,
+        None,
+        None,
+        TurnOwner::Personal {
+            user: UserId::new("user-origin-serde").unwrap(),
+        },
+    );
+    let state_with_ctx = TurnRunState {
+        product_context: Some(ctx_value.clone()),
+        ..state
+    };
+    let json_with_ctx = serde_json::to_value(&state_with_ctx).unwrap();
+    assert!(
+        json_with_ctx["product_context"].is_object(),
+        "product_context must serialize as an object"
+    );
+    let decoded_with: TurnRunState = serde_json::from_value(json_with_ctx).unwrap();
+    assert_eq!(decoded_with.product_context, Some(ctx_value));
+}
+
+#[tokio::test]
+async fn turn_run_state_resume_disposition_defaults_to_none_when_missing_from_json() {
+    // Guard the #[serde(default)] backward-compat contract for resume_disposition
+    // (serialized under the legacy key "auth_resume_disposition"):
+    // old persisted TurnRunState payloads that pre-date the field must deserialize
+    // cleanly with resume_disposition == None.
+    let context = claimed_run_context().await;
+    let state = TurnRunState {
+        scope: context.scope.clone(),
+        actor: None,
+        turn_id: ironclaw_turns::TurnId::new(),
+        run_id: context.run_id,
+        status: TurnStatus::Queued,
+        accepted_message_ref: AcceptedMessageRef::new("accepted-ard-serde").unwrap(),
+        source_binding_ref: SourceBindingRef::new("source-ard-serde").unwrap(),
+        reply_target_binding_ref: ReplyTargetBindingRef::new("reply-ard-serde").unwrap(),
+        resolved_run_profile_id: context.resolved_run_profile.profile_id.clone(),
+        resolved_run_profile_version: context.resolved_run_profile.profile_version,
+        resolved_model_route: None,
+        received_at: Utc.with_ymd_and_hms(2026, 6, 11, 21, 32, 0).unwrap(),
+        checkpoint_id: None,
+        gate_ref: None,
+        credential_requirements: Vec::new(),
+        failure: None,
+        event_cursor: EventCursor(0),
+        product_context: None,
+        resume_disposition: None,
+    };
+
+    // Serialize, remove the auth_resume_disposition key (simulates a legacy checkpoint
+    // that was written before the field existed), then deserialize — must succeed with None.
+    let mut json = serde_json::to_value(&state).unwrap();
+    // The field is skip_serializing_if = "Option::is_none", so it may already be absent;
+    // either way, ensure it is absent before decoding.
+    json.as_object_mut()
+        .unwrap()
+        .remove("auth_resume_disposition");
+    let decoded: TurnRunState = serde_json::from_value(json).unwrap();
+    assert!(
+        decoded.resume_disposition.is_none(),
+        "resume_disposition must default to None when absent from legacy JSON"
+    );
+}
+
+// ── Communication runtime context rendering (integration with bundle) ─────────
+
+#[tokio::test]
+async fn instruction_bundle_runtime_communication_none_is_byte_identical_to_4795_baseline() {
+    // Regression guard: communication: None must not change the rendered output or
+    // fingerprint relative to the #4795 time-only baseline.
+    let context = claimed_run_context().await;
+    let builder = InstructionBundleBuilder::new(context);
+
+    let base_bundle = LoopContextBundle {
+        identity_messages: vec![LoopContextMessage {
+            message_ref: Some(LoopMessageRef::new("msg:identity-comm").unwrap()),
+            role: "system".to_string(),
+            safe_summary: "identity comm".to_string(),
+            compaction: None,
+        }],
+        messages: Vec::new(),
+        compaction_message_index: Vec::new(),
+        instruction_snippets: Vec::new(),
+        memory_snippets: Vec::new(),
+    };
+
+    let request_with_comm_none = InstructionBundleRequest {
+        context_bundle: base_bundle.clone(),
+        visible_surface: None,
+        safety_context: None,
+        inline_messages: Vec::new(),
+        runtime_context: Some(LoopRuntimeContext {
+            loop_started_at_utc: Utc.with_ymd_and_hms(2026, 6, 11, 21, 32, 0).unwrap(),
+            communication: None,
+            product_context: None,
+            user_profile: None,
+        }),
+    };
+
+    let bundle = builder.build(request_with_comm_none).unwrap();
+    let runtime_msg = bundle
+        .materialized_messages
+        .iter()
+        .find(|m| m.content_ref.as_str().starts_with("msg:runtime."))
+        .expect("runtime section must exist");
+
+    // Should contain the time line and nothing else (no channel/delivery/origin lines).
+    assert!(
+        runtime_msg
+            .model_content
+            .contains("Current date/time at loop start:"),
+        "{}",
+        runtime_msg.model_content
+    );
+    assert!(
+        !runtime_msg.model_content.contains("Connected channels"),
+        "no channel line when communication is None: {}",
+        runtime_msg.model_content
+    );
+    assert!(
+        !runtime_msg.model_content.contains("Outbound delivery"),
+        "no delivery line when communication is None: {}",
+        runtime_msg.model_content
+    );
+}
+
+#[tokio::test]
+async fn instruction_bundle_runtime_communication_renders_all_fields() {
+    let context = claimed_run_context().await;
+    let builder = InstructionBundleBuilder::new(context);
+
+    let request = InstructionBundleRequest {
+        context_bundle: LoopContextBundle {
+            identity_messages: vec![LoopContextMessage {
+                message_ref: Some(LoopMessageRef::new("msg:identity-full-comm").unwrap()),
+                role: "system".to_string(),
+                safe_summary: "identity full comm".to_string(),
+                compaction: None,
+            }],
+            messages: Vec::new(),
+            compaction_message_index: Vec::new(),
+            instruction_snippets: Vec::new(),
+            memory_snippets: Vec::new(),
+        },
+        visible_surface: None,
+        safety_context: None,
+        inline_messages: Vec::new(),
+        runtime_context: Some(LoopRuntimeContext {
+            loop_started_at_utc: Utc.with_ymd_and_hms(2026, 6, 11, 21, 32, 0).unwrap(),
+            communication: Some(CommunicationRuntimeContext {
+                connected_channels: ConnectedChannelsState::Known(vec![ConnectedChannelSummary {
+                    name: "Slack".to_string(),
+                    authenticated: true,
+                    active: true,
+                }]),
+                delivery_target: DeliveryTargetState::Set(DeliveryTargetSummary {
+                    display_name: "#general".to_string(),
+                    channel: "slack".to_string(),
+                }),
+                delivery_tools_visible: true,
+            }),
+            product_context: Some(ProductTurnContext::new(
+                TurnOriginKind::ScheduledTrigger,
+                None,
+                None,
+                TurnOwner::Personal {
+                    user: UserId::new("test-user").unwrap(),
+                },
+            )),
+            user_profile: None,
+        }),
+    };
+
+    let bundle = builder.build(request).unwrap();
+    let runtime_msg = bundle
+        .materialized_messages
+        .iter()
+        .find(|m| m.content_ref.as_str().starts_with("msg:runtime."))
+        .expect("runtime section must exist");
+
+    let content = &runtime_msg.model_content;
+    assert!(
+        content.contains("Current date/time at loop start:"),
+        "{content}"
+    );
+    assert!(
+        content.contains("Connected channels: Slack (authenticated, active)."),
+        "{content}"
+    );
+    assert!(
+        content.contains("Outbound delivery target: #general (slack)"),
+        "{content}"
+    );
+    assert!(
+        content.contains("Run origin: scheduled trigger fire."),
+        "{content}"
+    );
+    // No warning because delivery is Set (not NoneSet).
+    assert!(!content.contains("Warning:"), "{content}");
+}
+
+#[tokio::test]
+async fn instruction_bundle_runtime_scheduled_trigger_with_no_delivery_emits_warning() {
+    let context = claimed_run_context().await;
+    let builder = InstructionBundleBuilder::new(context);
+
+    let request = InstructionBundleRequest {
+        context_bundle: LoopContextBundle {
+            identity_messages: vec![LoopContextMessage {
+                message_ref: Some(LoopMessageRef::new("msg:identity-trigger-warn").unwrap()),
+                role: "system".to_string(),
+                safe_summary: "identity trigger warn".to_string(),
+                compaction: None,
+            }],
+            messages: Vec::new(),
+            compaction_message_index: Vec::new(),
+            instruction_snippets: Vec::new(),
+            memory_snippets: Vec::new(),
+        },
+        visible_surface: None,
+        safety_context: None,
+        inline_messages: Vec::new(),
+        runtime_context: Some(LoopRuntimeContext {
+            loop_started_at_utc: Utc.with_ymd_and_hms(2026, 6, 11, 21, 32, 0).unwrap(),
+            communication: Some(CommunicationRuntimeContext {
+                connected_channels: ConnectedChannelsState::Unknown,
+                delivery_target: DeliveryTargetState::NoneSet,
+                delivery_tools_visible: true,
+            }),
+            product_context: Some(ProductTurnContext::new(
+                TurnOriginKind::ScheduledTrigger,
+                None,
+                None,
+                TurnOwner::Personal {
+                    user: UserId::new("test-user").unwrap(),
+                },
+            )),
+            user_profile: None,
+        }),
+    };
+
+    let bundle = builder.build(request).unwrap();
+    let runtime_msg = bundle
+        .materialized_messages
+        .iter()
+        .find(|m| m.content_ref.as_str().starts_with("msg:runtime."))
+        .expect("runtime section must exist");
+    let content = &runtime_msg.model_content;
+    assert!(
+        content.contains("Warning: no delivery target is set"),
+        "{content}"
+    );
+    assert!(
+        content.contains("builtin__outbound_delivery_target_set"),
+        "{content}"
+    );
 }

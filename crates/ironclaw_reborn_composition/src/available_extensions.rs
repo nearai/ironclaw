@@ -1,5 +1,5 @@
 use ironclaw_extensions::{
-    CapabilityDeclV2, CapabilityVisibility, ExtensionAssetPath, ExtensionManifest,
+    CapabilityDeclV2, CapabilityVisibility, ExtensionAssetPath, ExtensionManifestRecord,
     ExtensionPackage, ExtensionRuntime, ManifestSource,
 };
 use ironclaw_filesystem::{FileType, FilesystemError, RootFilesystem};
@@ -7,10 +7,13 @@ use ironclaw_first_party_extensions::is_gsuite_extension_id;
 use ironclaw_host_api::{
     CapabilityId, ExtensionId, RuntimeCredentialAccountProviderId, VirtualPath, sha256_digest_token,
 };
+use ironclaw_product_adapter_registry::product_adapter_sections;
+use ironclaw_product_adapters::ProductSurfaceKind;
 use ironclaw_product_workflow::{
     LifecycleExtensionCredentialRequirement, LifecycleExtensionCredentialSetup,
     LifecycleExtensionOnboarding, LifecycleExtensionRuntimeKind, LifecycleExtensionSource,
-    LifecycleExtensionSummary, LifecyclePackageKind, LifecyclePackageRef, ProductWorkflowError,
+    LifecycleExtensionSummary, LifecycleExtensionSurfaceKind, LifecyclePackageKind,
+    LifecyclePackageRef, ProductWorkflowError,
 };
 use toml::Value;
 
@@ -56,6 +59,9 @@ const WEB_ACCESS_MANIFEST: &str =
     include_str!("../../ironclaw_first_party_extensions/assets/web-access/manifest.toml");
 const NEARAI_MCP_MANIFEST: &str =
     include_str!("../../ironclaw_first_party_extensions/assets/nearai-mcp/manifest.toml");
+#[cfg(feature = "slack-v2-host-beta")]
+const SLACK_MANIFEST: &str =
+    include_str!("../../ironclaw_first_party_extensions/assets/slack/manifest.toml");
 
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) struct AvailableExtensionAsset {
@@ -74,6 +80,12 @@ pub(crate) struct AvailableExtensionPackage {
     pub(crate) package_ref: LifecyclePackageRef,
     pub(crate) manifest_toml: String,
     pub(crate) package: ExtensionPackage,
+    /// Surface kinds projected once from the manifest record at construction and
+    /// cached here. Deliberately not re-derived in `summary()`: the projection
+    /// (`product_adapter_sections`) needs the full `ExtensionManifestRecord`, and
+    /// each loader parses the manifest exactly once (see
+    /// `surface_kinds_from_manifest_record`). Keep in sync at construction.
+    pub(crate) surface_kinds: Vec<LifecycleExtensionSurfaceKind>,
     pub(crate) assets: Vec<AvailableExtensionAsset>,
 }
 
@@ -92,6 +104,7 @@ impl AvailableExtensionPackage {
             description: self.package.manifest.description.clone(),
             source: LifecycleExtensionSource::HostBundled,
             runtime_kind: runtime_kind(&self.package.manifest.runtime),
+            surface_kinds: self.surface_kinds.clone(),
             visible_capability_ids,
             visible_read_only_capability_ids,
             credential_requirements: credential_requirements(self),
@@ -105,48 +118,40 @@ fn onboarding(package_id: &str) -> Option<LifecycleExtensionOnboarding> {
         "github" => Some(onboarding_message(
             "GitHub needs a personal access token before its repository and pull request tools can run.",
             Some(
-                "Install GitHub first. Activation will open the secure credential prompt for a GitHub personal access token with the repository permissions you want IronClaw to use.",
+                "Create a GitHub personal access token with the repository permissions you want IronClaw to use, then paste it here.",
             ),
             Some("https://github.com/settings/personal-access-tokens/new"),
-            "Install GitHub, then activate it to open the token prompt and publish its tools.",
+            "After saving the token, activate GitHub to publish its tools.",
         )),
         "gmail" => Some(onboarding_message(
             "Gmail needs Google OAuth authorization before mail tools can run.",
-            Some(
-                "Install Gmail first. Activation will open the Google OAuth prompt for the account IronClaw should use.",
-            ),
+            Some("Authorize the Google account that IronClaw should use for Gmail."),
             None,
-            "Install Gmail, then activate it to open OAuth and publish its tools.",
+            "After authorization completes, activate Gmail to publish its tools.",
         )),
         "google-calendar" => Some(onboarding_message(
             "Google Calendar needs Google OAuth authorization before calendar tools can run.",
-            Some(
-                "Install Google Calendar first. Activation will open the Google OAuth prompt for calendar access.",
-            ),
+            Some("Authorize the Google account that IronClaw should use for Google Calendar."),
             None,
-            "Install Google Calendar, then activate it to open OAuth and publish its tools.",
+            "After authorization completes, activate Google Calendar to publish its tools.",
         )),
         "notion" => Some(onboarding_message(
             "Notion needs OAuth authorization before MCP tools can run.",
-            Some(
-                "Install Notion first. Activation will open the OAuth prompt for the workspace IronClaw should access.",
-            ),
+            Some("Authorize the Notion workspace that IronClaw should access."),
             None,
-            "Install Notion, then activate it to open OAuth and publish its MCP tools.",
+            "After authorization completes, activate Notion to publish its MCP tools.",
         )),
         "nearai" => Some(onboarding_message(
             "NEAR AI needs an API key before its MCP tools can run.",
-            Some(
-                "Install NEAR AI first. Activation will open the secure credential prompt for the API key IronClaw should use.",
-            ),
+            Some("Paste the NEAR AI API key IronClaw should use."),
             None,
-            "Install NEAR AI, then activate it to open the API key prompt and publish its MCP tools.",
+            "After saving the API key, activate NEAR AI to publish its MCP tools.",
         )),
         "web-access" => Some(onboarding_message(
             "Web Access does not need credentials. Activate it to make web search and saved-result retrieval tools available.",
             Some("No credentials are required for Web Access."),
             None,
-            "Install Web Access, then activate it to publish its tools.",
+            "Activate Web Access to publish its tools.",
         )),
         _ => None,
     }
@@ -261,7 +266,8 @@ impl AvailableExtensionCatalog {
     pub(crate) fn from_first_party_assets_with_nearai_mcp_config(
         nearai_mcp_config: Option<&NearAiMcpBootstrapConfig>,
     ) -> Result<Self, ProductWorkflowError> {
-        Ok(Self::from_packages(vec![
+        #[cfg_attr(not(feature = "slack-v2-host-beta"), allow(unused_mut))]
+        let mut packages = vec![
             github_package()?,
             notion_mcp_package()?,
             web_access_package()?,
@@ -272,7 +278,10 @@ impl AvailableExtensionCatalog {
             google_sheets_package()?,
             google_slides_package()?,
             gmail_package()?,
-        ]))
+        ];
+        #[cfg(feature = "slack-v2-host-beta")]
+        packages.push(slack_package()?);
+        Ok(Self::from_packages(packages))
     }
 
     pub(crate) fn extend(&mut self, other: Self) {
@@ -446,6 +455,11 @@ fn gmail_package() -> Result<AvailableExtensionPackage, ProductWorkflowError> {
     bundled_extension_package("gmail", "Gmail", GMAIL_MANIFEST, gmail_assets())
 }
 
+#[cfg(feature = "slack-v2-host-beta")]
+fn slack_package() -> Result<AvailableExtensionPackage, ProductWorkflowError> {
+    bundled_extension_package("slack", "Slack", SLACK_MANIFEST, slack_assets())
+}
+
 pub(crate) fn google_calendar_manifest_digest() -> String {
     sha256_digest_token(GOOGLE_CALENDAR_MANIFEST.as_bytes())
 }
@@ -476,6 +490,11 @@ pub(crate) fn notion_mcp_manifest_digest() -> String {
 
 pub(crate) fn web_access_manifest_digest() -> String {
     sha256_digest_token(WEB_ACCESS_MANIFEST.as_bytes())
+}
+
+#[cfg(feature = "slack-v2-host-beta")]
+pub(crate) fn slack_manifest_digest() -> String {
+    sha256_digest_token(SLACK_MANIFEST.as_bytes())
 }
 
 pub(crate) fn nearai_mcp_manifest_toml_for_config(
@@ -558,27 +577,53 @@ fn bundled_extension_package(
                 reason: format!("host API contracts rejected bundled {label} extension: {error}"),
             }
         })?;
-    let manifest = ExtensionManifest::parse_with_optional_host_api_contracts(
+    let record = ExtensionManifestRecord::from_toml_with_contracts(
         manifest_toml,
         ManifestSource::HostBundled,
         &host_ports,
+        None,
         &contracts,
     )
     .map_err(|error| ProductWorkflowError::InvalidBindingRequest {
         reason: format!("bundled {label} extension manifest is invalid: {error}"),
     })?;
-    let package =
-        ExtensionPackage::from_manifest_toml(manifest, root, manifest_toml).map_err(|error| {
-            ProductWorkflowError::InvalidBindingRequest {
-                reason: format!("bundled {label} extension package is invalid: {error}"),
-            }
-        })?;
+    let surface_kinds = surface_kinds_from_manifest_record(&record, label)?;
+    let manifest = record.manifest().clone().try_into().map_err(|error| {
+        ProductWorkflowError::InvalidBindingRequest {
+            reason: format!("bundled {label} extension manifest is invalid: {error}"),
+        }
+    })?;
+    let package = ExtensionPackage::from_manifest_toml(manifest, root, record.raw_toml()).map_err(
+        |error| ProductWorkflowError::InvalidBindingRequest {
+            reason: format!("bundled {label} extension package is invalid: {error}"),
+        },
+    )?;
     Ok(AvailableExtensionPackage {
         package_ref,
-        manifest_toml: manifest_toml.to_string(),
+        manifest_toml: record.raw_toml().to_string(),
         package,
+        surface_kinds,
         assets,
     })
+}
+
+fn surface_kinds_from_manifest_record(
+    record: &ExtensionManifestRecord,
+    label: &str,
+) -> Result<Vec<LifecycleExtensionSurfaceKind>, ProductWorkflowError> {
+    let adapters = product_adapter_sections(record).map_err(|error| {
+        ProductWorkflowError::InvalidBindingRequest {
+            reason: format!("{label} ProductAdapter manifest projection is invalid: {error}"),
+        }
+    })?;
+    let mut surface_kinds = Vec::new();
+    if adapters
+        .iter()
+        .any(|adapter| adapter.surface_kind() == ProductSurfaceKind::ExternalChannel)
+    {
+        surface_kinds.push(LifecycleExtensionSurfaceKind::ExternalChannel);
+    }
+    Ok(surface_kinds)
 }
 
 fn github_assets() -> Vec<AvailableExtensionAsset> {
@@ -627,6 +672,7 @@ fn github_assets() -> Vec<AvailableExtensionAsset> {
         github_schema_asset!("get_pull_request_files.input.v1.json"),
         github_schema_asset!("get_pull_request_reviews.input.v1.json"),
         github_schema_asset!("get_repo.input.v1.json"),
+        github_schema_asset!("get_authenticated_user.input.v1.json"),
         github_schema_asset!("get_workflow_runs.input.v1.json"),
         github_schema_asset!("handle_webhook.input.v1.json"),
         github_schema_asset!("list_branches.input.v1.json"),
@@ -663,6 +709,7 @@ fn github_assets() -> Vec<AvailableExtensionAsset> {
         github_prompt_asset!("get_pull_request_files.md"),
         github_prompt_asset!("get_pull_request_reviews.md"),
         github_prompt_asset!("get_repo.md"),
+        github_prompt_asset!("get_authenticated_user.md"),
         github_prompt_asset!("get_workflow_runs.md"),
         github_prompt_asset!("handle_webhook.md"),
         github_prompt_asset!("list_branches.md"),
@@ -1251,6 +1298,11 @@ fn gmail_assets() -> Vec<AvailableExtensionAsset> {
     ]
 }
 
+#[cfg(feature = "slack-v2-host-beta")]
+fn slack_assets() -> Vec<AvailableExtensionAsset> {
+    vec![bytes_asset("manifest.toml", SLACK_MANIFEST.as_bytes())]
+}
+
 fn bytes_asset(path: &str, bytes: &[u8]) -> AvailableExtensionAsset {
     AvailableExtensionAsset {
         path: path.to_string(),
@@ -1381,18 +1433,25 @@ where
                 reason: format!("available extension manifest is not UTF-8: {error}"),
             }
         })?;
-        let manifest = ExtensionManifest::parse_with_optional_host_api_contracts(
-            &manifest_toml,
+        let record = ExtensionManifestRecord::from_toml_with_contracts(
+            manifest_toml,
             ManifestSource::HostBundled,
             &host_ports,
+            None,
             &contracts,
         )
         .map_err(map_binding_error)?;
-        let package = ExtensionPackage::from_manifest_toml(manifest, entry.path, &manifest_toml)
+        let surface_kinds = surface_kinds_from_manifest_record(&record, entry.name.as_str())?;
+        let manifest = record
+            .manifest()
+            .clone()
+            .try_into()
+            .map_err(map_binding_error)?;
+        let package = ExtensionPackage::from_manifest_toml(manifest, entry.path, record.raw_toml())
             .map_err(map_binding_error)?;
         let mut assets = vec![AvailableExtensionAsset {
             path: "manifest.toml".to_string(),
-            content: AvailableExtensionAssetContent::Bytes(manifest_toml.as_bytes().to_vec()),
+            content: AvailableExtensionAssetContent::Bytes(record.raw_toml().as_bytes().to_vec()),
         }];
         if let ExtensionRuntime::Wasm { module } = &package.manifest.runtime {
             let module_path = module
@@ -1408,8 +1467,9 @@ where
                 LifecyclePackageKind::Extension,
                 package.id.as_str(),
             )?,
-            manifest_toml,
+            manifest_toml: record.raw_toml().to_string(),
             package,
+            surface_kinds,
             assets,
         });
     }
@@ -1419,7 +1479,7 @@ where
 fn reserved_host_bundled_extension_id(extension_id: &ExtensionId) -> bool {
     matches!(
         extension_id.as_str(),
-        "github" | "notion" | "web-access" | "nearai"
+        "github" | "notion" | "web-access" | "nearai" | "slack"
     ) || is_gsuite_extension_id(extension_id)
 }
 
@@ -1481,7 +1541,7 @@ mod tests {
         InMemoryBackend,
     };
     use ironclaw_host_api::{
-        EffectKind, HostPortCatalog, RuntimeCredentialAccountSetup,
+        EffectKind, HostPortCatalog, PermissionMode, RuntimeCredentialAccountSetup,
         RuntimeCredentialRequirementSource,
     };
 
@@ -1594,6 +1654,83 @@ mod tests {
     }
 
     #[test]
+    fn bundled_github_read_only_capabilities_default_allow_without_relaxing_writes() {
+        let catalog = AvailableExtensionCatalog::from_first_party_assets().unwrap();
+        let package_ref =
+            LifecyclePackageRef::new(LifecyclePackageKind::Extension, "github").unwrap();
+        let github = catalog.resolve(&package_ref).unwrap();
+        let mut allowed_read_only = BTreeSet::new();
+        let mut ask_required = BTreeSet::new();
+        let sensitive_token_backed_reads = BTreeSet::from(["github.search_code"]);
+
+        for capability in &github.package.manifest.capabilities {
+            let requires_explicit_approval = capability.effects.iter().any(|effect| {
+                effect.is_write() || matches!(effect, EffectKind::DispatchCapability)
+            }) || sensitive_token_backed_reads
+                .contains(capability.id.as_str());
+            if requires_explicit_approval {
+                assert_eq!(
+                    capability.default_permission,
+                    PermissionMode::Ask,
+                    "{} should still ask before effectful or broad token-backed GitHub actions",
+                    capability.id
+                );
+                ask_required.insert(capability.id.as_str());
+            } else {
+                assert_eq!(
+                    capability.default_permission,
+                    PermissionMode::Allow,
+                    "{} should not require an extra approval prompt for GitHub reads",
+                    capability.id
+                );
+                allowed_read_only.insert(capability.id.as_str());
+            }
+        }
+
+        assert!(allowed_read_only.contains("github.get_repo"));
+        assert!(allowed_read_only.contains("github.get_authenticated_user"));
+        assert!(allowed_read_only.contains("github.list_branches"));
+        assert!(ask_required.contains("github.search_code"));
+        assert!(ask_required.contains("github.create_issue"));
+        assert!(ask_required.contains("github.handle_webhook"));
+    }
+
+    #[test]
+    fn bundled_web_access_defers_github_repository_tasks_to_github_extension() {
+        let catalog = AvailableExtensionCatalog::from_first_party_assets().unwrap();
+        let package_ref =
+            LifecyclePackageRef::new(LifecyclePackageKind::Extension, "web-access").unwrap();
+        let package = catalog.resolve(&package_ref).unwrap();
+        let search = package
+            .package
+            .manifest
+            .capabilities
+            .iter()
+            .find(|capability| capability.id.as_str() == "web-access.search")
+            .expect("web access search capability");
+        assert!(
+            search
+                .description
+                .contains("Prefer GitHub extension capabilities"),
+            "web-access.search description should route GitHub repository data to GitHub tools"
+        );
+
+        let prompt_asset = package
+            .assets
+            .iter()
+            .find(|asset| asset.path == "prompts/web-access/search.md")
+            .expect("web access search prompt");
+        let AvailableExtensionAssetContent::Bytes(bytes) = &prompt_asset.content else {
+            panic!("web access prompt should be bundled bytes");
+        };
+        let prompt = std::str::from_utf8(bytes).expect("prompt should be UTF-8");
+        assert!(
+            prompt.contains("prefer the GitHub extension capabilities"),
+            "web-access.search prompt should route GitHub repository data to GitHub tools"
+        );
+    }
+
+    #[test]
     fn bundled_extension_summaries_include_onboarding_messages() {
         let catalog = AvailableExtensionCatalog::from_first_party_assets().unwrap();
 
@@ -1625,13 +1762,65 @@ mod tests {
                 onboarding.credential_next_step.is_some(),
                 "{extension_id} must include the next user step"
             );
-            assert!(
-                onboarding
-                    .credential_next_step
-                    .as_deref()
-                    .is_some_and(|step| step.contains("Install") && step.contains("activate")),
-                "{extension_id} onboarding should preserve install-then-activate ordering"
-            );
+            if matches!(extension_id, "gmail" | "google-calendar" | "notion") {
+                assert!(
+                    onboarding
+                        .credential_instructions
+                        .as_deref()
+                        .is_some_and(|instructions| {
+                            instructions.starts_with("Authorize ")
+                                && !instructions.contains("Install")
+                        }),
+                    "{extension_id} configure onboarding should not repeat install-first copy"
+                );
+                assert!(
+                    onboarding
+                        .credential_next_step
+                        .as_deref()
+                        .is_some_and(|step| {
+                            step.starts_with("After authorization completes")
+                                && step.contains("activate")
+                                && !step.contains("Install")
+                        }),
+                    "{extension_id} configure next step should describe post-authorization activation"
+                );
+            } else if matches!(extension_id, "github" | "nearai") {
+                assert!(
+                    onboarding
+                        .credential_instructions
+                        .as_deref()
+                        .is_some_and(|instructions| {
+                            (instructions.contains("Paste") || instructions.contains("paste"))
+                                && !instructions.contains("Install")
+                        }),
+                    "{extension_id} configure onboarding should describe token entry without install-first copy"
+                );
+                assert!(
+                    onboarding
+                        .credential_next_step
+                        .as_deref()
+                        .is_some_and(|step| {
+                            step.starts_with("After saving")
+                                && step.contains("activate")
+                                && !step.contains("Install")
+                        }),
+                    "{extension_id} configure next step should describe activation after saving credentials"
+                );
+            } else if extension_id == "web-access" {
+                assert_eq!(
+                    onboarding.credential_next_step.as_deref(),
+                    Some("Activate Web Access to publish its tools."),
+                    "web-access configure next step should not repeat install-first copy"
+                );
+            } else {
+                assert!(
+                    onboarding
+                        .credential_next_step
+                        .as_deref()
+                        .is_some_and(|step| step.contains("Install") && step.contains("activate")),
+                    "{extension_id} onboarding should preserve install-then-activate ordering"
+                );
+            }
         }
     }
 
@@ -1770,6 +1959,70 @@ mod tests {
         assert!(upload_file.effects.contains(&EffectKind::ExternalWrite));
     }
 
+    #[cfg(feature = "slack-v2-host-beta")]
+    #[test]
+    fn bundled_slack_package_declares_product_adapter_channel_surface() {
+        let catalog = AvailableExtensionCatalog::from_first_party_assets().unwrap();
+        let package_ref =
+            LifecyclePackageRef::new(LifecyclePackageKind::Extension, "slack").unwrap();
+        let package = catalog.resolve(&package_ref).unwrap();
+
+        assert_eq!(package.package.manifest.id.as_str(), "slack");
+        assert!(matches!(
+            package.package.manifest.runtime,
+            ExtensionRuntime::FirstParty { ref service } if service == "slack_v2_host_beta"
+        ));
+        assert_eq!(package.package.manifest.capabilities.len(), 0);
+        assert!(package.package.manifest.host_apis.iter().any(|host_api| {
+            host_api.id.as_str() == "ironclaw.product_adapter/v1"
+                && host_api.section.as_str() == "product_adapter.inbound"
+        }));
+
+        let summary = package.summary();
+        assert_eq!(
+            summary.surface_kinds,
+            vec![LifecycleExtensionSurfaceKind::ExternalChannel]
+        );
+        assert_eq!(summary.visible_capability_ids, Vec::<String>::new());
+    }
+
+    #[test]
+    fn non_channel_product_adapter_surface_does_not_project_channel_surface() {
+        const MANIFEST: &str = r#"
+schema_version = "reborn.extension_manifest.v2"
+id = "web-product"
+name = "Web Product"
+version = "0.1.0"
+description = "A web product adapter."
+trust = "first_party_requested"
+
+[runtime]
+kind = "first_party"
+service = "web_product"
+
+[[host_api]]
+id = "ironclaw.product_adapter/v1"
+section = "product_adapter.web"
+
+[product_adapter.web]
+surface_kind = "web"
+
+[product_adapter.web.auth]
+kind = "bearer_token"
+
+[product_adapter.web.capabilities]
+flags = ["inbound_messages"]
+
+[[product_adapter.web.required_credentials]]
+handle = "web_token"
+"#;
+
+        let package = bundled_extension_package("web-product", "Web Product", MANIFEST, Vec::new())
+            .expect("valid package");
+
+        assert_eq!(package.summary().surface_kinds, Vec::new());
+    }
+
     #[tokio::test]
     async fn materialize_bundled_github_writes_manifest_schema_refs() {
         let fs = InMemoryBackend::default();
@@ -1810,6 +2063,8 @@ mod tests {
         assert!(google_sheets_manifest_digest().starts_with("sha256:"));
         assert!(google_slides_manifest_digest().starts_with("sha256:"));
         assert!(gmail_manifest_digest().starts_with("sha256:"));
+        #[cfg(feature = "slack-v2-host-beta")]
+        assert!(slack_manifest_digest().starts_with("sha256:"));
     }
 
     #[test]
@@ -1970,6 +2225,12 @@ mod tests {
         )
         .await
         .unwrap();
+        fs.write_file(
+            &VirtualPath::new("/system/extensions/slack/manifest.toml").unwrap(),
+            b"not parsed because slack is host-bundled",
+        )
+        .await
+        .unwrap();
 
         let catalog = AvailableExtensionCatalog::from_filesystem_root(
             &fs,
@@ -1979,6 +2240,70 @@ mod tests {
         .unwrap();
 
         assert_eq!(catalog.search("").count(), 0);
+        assert_eq!(catalog.search("slack").count(), 0);
+    }
+
+    #[tokio::test]
+    async fn filesystem_manifest_external_channel_surface_kind_projects_to_lifecycle_surface() {
+        const MANIFEST: &str = r#"
+schema_version = "reborn.extension_manifest.v2"
+id = "channel-ext"
+name = "Channel Ext"
+version = "0.1.0"
+description = "A filesystem-discovered external channel extension."
+trust = "first_party_requested"
+
+[runtime]
+kind = "first_party"
+service = "channel_ext_host"
+
+[[host_api]]
+id = "ironclaw.product_adapter/v1"
+section = "product_adapter.inbound"
+
+[product_adapter.inbound]
+surface_kind = "external_channel"
+
+[product_adapter.inbound.auth]
+kind = "request_signature"
+header_name = "X-Channel-Signature"
+timestamp_header_name = "X-Channel-Timestamp"
+
+[product_adapter.inbound.capabilities]
+flags = ["inbound_messages"]
+
+[[product_adapter.inbound.required_credentials]]
+handle = "channel_ext_token"
+
+[[product_adapter.inbound.egress]]
+host = "example.com"
+credential_handle = "channel_ext_token"
+"#;
+
+        let fs = InMemoryBackend::default();
+        fs.write_file(
+            &VirtualPath::new("/system/extensions/channel-ext/manifest.toml").unwrap(),
+            MANIFEST.as_bytes(),
+        )
+        .await
+        .unwrap();
+
+        let catalog = AvailableExtensionCatalog::from_filesystem_root(
+            &fs,
+            &VirtualPath::new("/system/extensions").unwrap(),
+        )
+        .await
+        .unwrap();
+
+        let results = catalog.search("channel-ext").collect::<Vec<_>>();
+        assert_eq!(results.len(), 1, "filesystem manifest should be loaded");
+
+        let package = results.into_iter().next().unwrap();
+        assert_eq!(
+            package.summary().surface_kinds,
+            vec![LifecycleExtensionSurfaceKind::ExternalChannel],
+            "filesystem-loaded external_channel manifest must project ExternalChannel surface kind"
+        );
     }
 
     #[derive(Default)]
@@ -2155,6 +2480,7 @@ output_schema_ref = "schemas/write.output.json"
                 .unwrap(),
             manifest_toml: MANIFEST.to_string(),
             package,
+            surface_kinds: Vec::new(),
             assets: vec![
                 AvailableExtensionAsset {
                     path: "manifest.toml".to_string(),

@@ -5,7 +5,7 @@ use ironclaw_turns::{
     LoopResultRef,
     run_profile::{
         AgentLoopDriverHost, AppendCapabilityResultRef, CapabilityApprovalResume,
-        CapabilityCallCandidate, CapabilityDescriptorView, CapabilityFailure,
+        CapabilityAuthResume, CapabilityCallCandidate, CapabilityDescriptorView, CapabilityFailure,
         CapabilityFailureDetail, CapabilityFailureKind, CapabilityInputIssue,
         CapabilityInputIssueCode, CapabilityInputRepair, CapabilityInvocation,
         CapabilityRecoveryHint, CapabilityResultMessage, CapabilitySurfaceVersion,
@@ -36,6 +36,39 @@ pub(super) fn capability_invocation_from_candidate(
         capability_id: call.capability_id,
         input_ref: call.input_ref,
         approval_resume,
+        auth_resume: None,
+    }
+}
+
+/// Builds a `CapabilityInvocation` from an auth-resumed candidate.
+///
+/// When `pending_auth.resume_token` is set (i.e., the invocation previously
+/// passed an approval gate), the returned invocation carries a
+/// `CapabilityAuthResume` so the host can reuse the original invocation
+/// identifier and claim any matching approval lease.
+pub(super) fn capability_invocation_from_auth_resume_candidate(
+    call: CapabilityCallCandidate,
+    pending_auth: &PendingAuthResume,
+) -> CapabilityInvocation {
+    let auth_resume = pending_auth
+        .resume_token
+        .as_ref()
+        .map(|token| CapabilityAuthResume {
+            resume_token: token.clone(),
+            prior_approval: pending_auth.prior_approval.as_ref().map(|pa| {
+                ironclaw_turns::run_profile::AuthResumeApprovalIdentity {
+                    approval_request_id: pa.approval_request_id,
+                    correlation_id: pa.correlation_id,
+                }
+            }),
+            replay: pending_auth.replay.clone(),
+        });
+    CapabilityInvocation {
+        surface_version: call.surface_version,
+        capability_id: call.capability_id,
+        input_ref: call.input_ref,
+        approval_resume: None,
+        auth_resume,
     }
 }
 
@@ -471,7 +504,7 @@ pub(super) fn push_completed_result(
 mod tests {
     use super::*;
     use crate::test_support::test_run_context;
-    use ironclaw_turns::run_profile::CapabilityProgress;
+    use ironclaw_turns::run_profile::{CapabilityProgress, CapabilitySurfaceVersion};
 
     #[test]
     fn push_completed_result_accumulates_bytes_per_capability() {
@@ -485,6 +518,7 @@ mod tests {
             progress: CapabilityProgress::MadeProgress,
             terminate_hint: false,
             byte_len: 1000,
+            output_digest: None,
         };
         let result_a2 = CapabilityResultMessage {
             result_ref: ironclaw_turns::LoopResultRef::new("result:a2".to_string()).unwrap(),
@@ -492,6 +526,7 @@ mod tests {
             progress: CapabilityProgress::MadeProgress,
             terminate_hint: false,
             byte_len: 500,
+            output_digest: None,
         };
         let result_b = CapabilityResultMessage {
             result_ref: ironclaw_turns::LoopResultRef::new("result:b".to_string()).unwrap(),
@@ -499,6 +534,7 @@ mod tests {
             progress: CapabilityProgress::MadeProgress,
             terminate_hint: false,
             byte_len: 2000,
+            output_digest: None,
         };
         push_completed_result(&mut state, &cap_a, result_a1);
         push_completed_result(&mut state, &cap_a, result_a2);
@@ -534,6 +570,11 @@ mod tests {
             input_ref: CapabilityInputRef::new("input:test").unwrap(),
             effective_capability_ids: vec![cap_a.clone(), cap_b.clone()],
             provider_replay: None,
+            resume_token: None,
+            activity_id: None,
+            prior_approval: None,
+            replay: None,
+            disposition: None,
         };
         let surface_version = CapabilitySurfaceVersion::new("surface:v1").unwrap();
 
@@ -543,6 +584,130 @@ mod tests {
             candidate.effective_capability_ids,
             vec![cap_a, cap_b],
             "pending_auth_resume_candidate must propagate all effective_capability_ids"
+        );
+    }
+
+    /// When both `resume_token` and `prior_approval` are set (the invocation
+    /// previously passed both an approval gate and is now being resumed after an
+    /// auth gate), the resulting `CapabilityInvocation` must:
+    /// - carry `auth_resume: Some(...)` with the resume token,
+    /// - carry `auth_resume.prior_approval: Some(...)` with both the
+    ///   `approval_request_id` and `correlation_id` from `prior_approval`,
+    /// - carry `approval_resume: None` (the approval-resume path is separate).
+    #[test]
+    fn capability_invocation_from_auth_resume_candidate_with_both_token_and_prior_approval() {
+        use ironclaw_host_api::{ApprovalRequestId, CorrelationId};
+        use ironclaw_turns::run_profile::{
+            AuthResumeApprovalIdentity, CapabilityInputRef, CapabilityResumeToken,
+        };
+
+        let cap = CapabilityId::new("test.cap").unwrap();
+        let resume_token =
+            CapabilityResumeToken::new("00000000-0000-0000-0000-000000000002").unwrap();
+        let approval_request_id = ApprovalRequestId::new();
+        let correlation_id = CorrelationId::new();
+
+        let resume = PendingAuthResume {
+            gate_ref: ironclaw_turns::LoopGateRef::new("gate:auth-both-fields").unwrap(),
+            capability_id: cap.clone(),
+            surface_version: CapabilitySurfaceVersion::new("surface:v1").unwrap(),
+            input_ref: CapabilityInputRef::new("input:both-fields").unwrap(),
+            effective_capability_ids: vec![cap.clone()],
+            provider_replay: None,
+            resume_token: Some(resume_token.clone()),
+            activity_id: None,
+            prior_approval: Some(AuthResumeApprovalIdentity {
+                approval_request_id,
+                correlation_id,
+            }),
+            replay: None,
+            disposition: None,
+        };
+        let surface_version = CapabilitySurfaceVersion::new("surface:v1").unwrap();
+        let call = CapabilityCallCandidate {
+            surface_version,
+            capability_id: cap.clone(),
+            input_ref: CapabilityInputRef::new("input:both-fields").unwrap(),
+            effective_capability_ids: vec![cap],
+            provider_replay: None,
+        };
+
+        let invocation = capability_invocation_from_auth_resume_candidate(call, &resume);
+
+        // The auth_resume field must be present with the correct resume token.
+        let auth_resume = invocation
+            .auth_resume
+            .as_ref()
+            .expect("auth_resume must be Some when resume_token is set");
+        assert_eq!(
+            auth_resume.resume_token, resume_token,
+            "auth_resume.resume_token must match the pending resume token"
+        );
+
+        // The prior_approval correlation must be carried through.
+        let prior_approval = auth_resume
+            .prior_approval
+            .as_ref()
+            .expect("auth_resume.prior_approval must be Some when prior_approval is set");
+        assert_eq!(
+            prior_approval.approval_request_id, approval_request_id,
+            "prior_approval.approval_request_id must be propagated from PendingAuthResume"
+        );
+        assert_eq!(
+            prior_approval.correlation_id, correlation_id,
+            "prior_approval.correlation_id must be propagated from PendingAuthResume"
+        );
+
+        // The approval_resume field must be None on the auth-resume path.
+        assert!(
+            invocation.approval_resume.is_none(),
+            "approval_resume must be None for auth-resume path invocations; got {:?}",
+            invocation.approval_resume
+        );
+    }
+
+    #[test]
+    fn capability_invocation_from_auth_resume_candidate_with_none_resume_token_sets_auth_resume_none()
+     {
+        // When `PendingAuthResume.resume_token` is None (the invocation never
+        // passed an approval gate), the returned `CapabilityInvocation` must
+        // carry `auth_resume: None` so the host routes through `invoke_json`
+        // with a fresh invocation_id rather than the auth-resume path.
+        use ironclaw_turns::run_profile::CapabilityInputRef;
+
+        let cap = CapabilityId::new("test.cap").unwrap();
+        let resume = PendingAuthResume {
+            gate_ref: ironclaw_turns::LoopGateRef::new("gate:auth-none-token").unwrap(),
+            capability_id: cap.clone(),
+            surface_version: CapabilitySurfaceVersion::new("surface:v1").unwrap(),
+            input_ref: CapabilityInputRef::new("input:none-token").unwrap(),
+            effective_capability_ids: vec![cap.clone()],
+            provider_replay: None,
+            resume_token: None, // no prior approval — the key precondition
+            activity_id: None,
+            prior_approval: None,
+            replay: None,
+            disposition: None,
+        };
+        let surface_version = CapabilitySurfaceVersion::new("surface:v1").unwrap();
+        let call = CapabilityCallCandidate {
+            surface_version,
+            capability_id: cap.clone(),
+            input_ref: CapabilityInputRef::new("input:none-token").unwrap(),
+            effective_capability_ids: vec![cap],
+            provider_replay: None,
+        };
+
+        let invocation = capability_invocation_from_auth_resume_candidate(call, &resume);
+
+        assert!(
+            invocation.auth_resume.is_none(),
+            "auth_resume must be None when resume_token is None; got {:?}",
+            invocation.auth_resume
+        );
+        assert!(
+            invocation.approval_resume.is_none(),
+            "approval_resume must be None for auth-resume path invocations"
         );
     }
 }

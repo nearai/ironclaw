@@ -358,10 +358,25 @@ impl TurnRunnerWorker {
     }
 
     /// Execute a claimed run: heartbeat, invoke driver, apply exit.
+    ///
+    /// Instrumented with a `thread_id` + `run_id` span so every tracing event
+    /// emitted while the run executes (driver, tool dispatch, exit) inherits
+    /// those correlation fields. `OperatorLogLayer` reads them via `from_root`,
+    /// which is what populates the operator Logs panel's scoped (thread/run)
+    /// view; without the span, scoped queries match nothing.
+    #[tracing::instrument(
+        name = "turn_run",
+        skip_all,
+        fields(
+            thread_id = %claimed.state.scope.thread_id,
+            run_id = %claimed.state.run_id,
+        )
+    )]
     async fn execute_claimed_run(&self, claimed: ClaimedTurnRun, cancel: &CancellationToken) {
         let run_id = claimed.state.run_id;
         let runner_id = claimed.runner_id;
         let lease_token = claimed.lease_token;
+        tracing::debug!("turn run started");
 
         let exit_result = {
             let heartbeat_cancel = CancellationToken::new();
@@ -414,6 +429,7 @@ impl TurnRunnerWorker {
                     .await;
             }
         }
+        tracing::debug!("turn run finished");
     }
 
     /// Resolve driver from registry and invoke it.
@@ -467,6 +483,7 @@ impl TurnRunnerWorker {
                     run_id,
                     checkpoint_id,
                     resolved_run_profile: claimed.resolved_run_profile.clone(),
+                    resume_disposition: claimed.state.resume_disposition.clone(),
                 };
                 driver
                     .resume(request, host.as_ref())

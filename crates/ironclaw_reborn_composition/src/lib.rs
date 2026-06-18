@@ -22,6 +22,7 @@ use std::sync::Arc;
 
 #[cfg(test)]
 mod approval_test_support;
+mod attachment_landing;
 mod auth;
 #[cfg(test)]
 mod auth_dcr_tests;
@@ -31,6 +32,7 @@ mod available_extensions;
 mod budget;
 mod budget_events;
 mod bundled_skills;
+mod communication_context;
 mod default_system_prompt;
 mod error;
 mod extension_activation_credentials;
@@ -38,6 +40,8 @@ mod extension_credential_requirements;
 mod extension_installation_store;
 mod extension_lifecycle;
 mod extension_lifecycle_capabilities;
+#[cfg(test)]
+mod extension_lifecycle_capabilities_auth_tests;
 mod extension_lifecycle_command;
 mod factory;
 mod failure_summary;
@@ -61,6 +65,7 @@ mod local_runtime_profile;
 mod manual_token_flow;
 mod mcp;
 mod mcp_discovery;
+mod mount_filesystem_reader;
 #[cfg(all(feature = "root-llm-provider", feature = "webui-v2-beta"))]
 mod nearai_login_serve;
 mod nearai_mcp;
@@ -72,6 +77,7 @@ mod oauth_provider_client;
 #[cfg(feature = "openai-compat-beta")]
 mod openai_compat_serve;
 mod operator_logs;
+mod outbound_delivery_capability_surface;
 mod outbound_preferences;
 mod product_auth_durable;
 mod product_auth_providers;
@@ -83,8 +89,11 @@ mod product_live_adapters;
 mod production_runtime_policy;
 mod profile;
 mod profile_approval_authorization;
+mod project_filesystem_reader;
+mod project_service;
 mod projection;
-pub use auth_prompt::{AuthChallengeProvider, AuthChallengeView};
+mod trajectory_observer;
+pub use auth_prompt::{AuthChallengeProvider, AuthChallengeView, BlockedAuthFlowCanceller};
 #[cfg(feature = "slack-v2-host-beta")]
 mod delivered_gate_routing;
 #[cfg(feature = "root-llm-provider")]
@@ -130,6 +139,7 @@ mod slack_personal_binding_serve;
 pub mod slack_serve;
 #[cfg(feature = "test-support")]
 pub mod test_support;
+mod trace_capture;
 mod trigger_poller;
 mod trigger_poller_trusted_submit;
 mod web_access;
@@ -180,7 +190,7 @@ pub use input::{OAuthClientConfig, RebornBuildInput, RebornRuntimeProcessBinding
 pub use ironclaw_auth::GoogleOAuthRouteConfig;
 pub use ironclaw_product_workflow::{
     LifecycleExtensionSource, LifecycleExtensionSummary, LifecyclePhase, LifecycleProductPayload,
-    LifecycleProductResponse,
+    LifecycleProductResponse, LifecycleSearchExtensionSummary,
 };
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 pub use ironclaw_runtime_policy::{
@@ -236,18 +246,20 @@ pub use readiness::{
     RebornReadinessDiagnosticComponent, RebornReadinessDiagnosticReason,
     RebornReadinessDiagnosticStatus, RebornReadinessState, RebornWorkerReadiness,
 };
+#[cfg(any(test, feature = "test-support"))]
+pub use runtime::RebornTurnDriveOutcome;
 pub use runtime::{
     AssistantReply, ConversationId, RebornRuntime, RebornRuntimeError, RebornSkillActivation,
     RebornSkillActivationMode, RebornSkillAsset, RebornSkillBundle, RebornSkillExecutionPlan,
     RebornSkillExecutionResult, RebornSkillSourceKind, build_reborn_runtime,
 };
-#[cfg(feature = "root-llm-provider")]
-pub use runtime_input::ResolvedRebornLlm;
 pub use runtime_input::{
     DEFAULT_TURN_RUNNER_HEARTBEAT_INTERVAL, DEFAULT_TURN_RUNNER_POLL_INTERVAL, PollSettings,
     RebornRuntimeIdentity, RebornRuntimeInput, TriggerFireAccessCheck, TriggerFireAccessChecker,
     TriggerFireAccessDecision, TriggerFireAccessError, TriggerPollerSettings, TurnRunnerSettings,
 };
+#[cfg(feature = "root-llm-provider")]
+pub use runtime_input::{RebornProviderFactory, ResolvedRebornLlm};
 pub use skill_listing::{RebornSkillListError, list_reborn_local_skills};
 #[cfg(feature = "slack-v2-host-beta")]
 pub use slack_actor_identity::{
@@ -318,6 +330,7 @@ pub use slack_serve::{
     SlackInstallationSelector, SlackTeamId, slack_events_route_descriptors,
     slack_events_route_mount,
 };
+pub use trajectory_observer::RebornTrajectoryObserver;
 pub use webui::{RebornWebuiBundle, build_webui_services};
 #[cfg(feature = "webui-v2-beta")]
 pub use webui_rate_limit::RateLimitConfigError;
@@ -329,11 +342,10 @@ pub use webui_serve::{
 };
 
 /// Re-exported identity vocabulary host binaries need to construct
-/// [`WebuiServeConfig`] (and any other public type on this crate whose
-/// signature mentions a host-api identity). Kept narrow on purpose —
-/// the composition CLAUDE.md says "Expose facade-shaped handles only";
-/// these four newtypes are the WebUI gateway's host-identity facade.
-#[cfg(feature = "webui-v2-beta")]
+/// public runtime/WebUI types whose signatures mention a host-api identity.
+/// Kept narrow on purpose — the composition CLAUDE.md says "Expose
+/// facade-shaped handles only"; these four newtypes are the host-identity
+/// facade.
 pub mod host_api {
     pub use ironclaw_host_api::{AgentId, ProjectId, TenantId, UserId};
 }

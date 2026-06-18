@@ -265,6 +265,12 @@ fn active_run_index(
                 TriggerActiveRunState::Terminal {
                     status: terminal_run_history_status(run.status),
                 }
+            } else if is_human_interaction_gate(run.status) {
+                // A scheduled fire runs unattended, so an approval/auth gate
+                // will never be answered. Surface it as Blocked so the poller
+                // clears the active fire instead of letting one stuck run block
+                // every future scheduled run of the trigger (#4986).
+                TriggerActiveRunState::Blocked
             } else {
                 TriggerActiveRunState::Nonterminal
             };
@@ -284,6 +290,19 @@ fn active_run_state_from_index(
         .get(&(request.tenant_id.clone(), request.run_id))
         .copied()
         .unwrap_or(TriggerActiveRunState::Missing)
+}
+
+/// A run parked on a gate that needs a human to act (tool-approval or auth).
+/// An unattended scheduled fire cannot satisfy these, so the poller treats
+/// them as non-advancing and clears the fire. `BlockedResource` and
+/// `BlockedDependentRun` are deliberately excluded — those resolve on their
+/// own as the resource frees up or the dependent run finishes, so they stay
+/// `Nonterminal` and keep their place in the schedule.
+fn is_human_interaction_gate(status: TurnStatus) -> bool {
+    matches!(
+        status,
+        TurnStatus::BlockedApproval | TurnStatus::BlockedAuth
+    )
 }
 
 fn terminal_run_history_status(status: TurnStatus) -> TriggerRunHistoryStatus {
@@ -563,6 +582,52 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn human_interaction_gates_map_to_blocked_other_blocks_stay_nonterminal() {
+        // #4986: approval/auth gates can never be answered by an unattended
+        // fire, so they must surface as Blocked (poller clears the fire).
+        // Resource/dependent-run waits resolve on their own and stay
+        // Nonterminal so they keep their schedule slot.
+        let tenant_id = TenantId::new("trigger-blocked-state-tenant").expect("tenant id");
+        let approval_run = TurnRunId::new();
+        let auth_run = TurnRunId::new();
+        let resource_run = TurnRunId::new();
+        let dependent_run = TurnRunId::new();
+        let snapshot_source = Arc::new(StaticSnapshotSource {
+            snapshot: TurnPersistenceSnapshot {
+                runs: vec![
+                    turn_run_record(&tenant_id, approval_run, TurnStatus::BlockedApproval),
+                    turn_run_record(&tenant_id, auth_run, TurnStatus::BlockedAuth),
+                    turn_run_record(&tenant_id, resource_run, TurnStatus::BlockedResource),
+                    turn_run_record(&tenant_id, dependent_run, TurnStatus::BlockedDependentRun),
+                ],
+                ..TurnPersistenceSnapshot::default()
+            },
+        });
+        let lookup = SnapshotActiveRunLookup::new(snapshot_source);
+        let fire_slot = Utc::now();
+        let request = |run_id| TriggerActiveRunStateRequest {
+            tenant_id: tenant_id.clone(),
+            trigger_id: TriggerId::new(),
+            fire_slot,
+            run_id,
+        };
+
+        let results = lookup
+            .active_run_states(vec![
+                request(approval_run),
+                request(auth_run),
+                request(resource_run),
+                request(dependent_run),
+            ])
+            .await;
+
+        assert!(matches!(results[0], Ok(TriggerActiveRunState::Blocked)));
+        assert!(matches!(results[1], Ok(TriggerActiveRunState::Blocked)));
+        assert!(matches!(results[2], Ok(TriggerActiveRunState::Nonterminal)));
+        assert!(matches!(results[3], Ok(TriggerActiveRunState::Nonterminal)));
+    }
+
+    #[tokio::test]
     async fn active_run_batch_lookup_returns_empty_without_snapshot() {
         let snapshot_source = Arc::new(CountingSnapshotSource::default());
         let lookup = SnapshotActiveRunLookup::new(snapshot_source.clone());
@@ -645,6 +710,8 @@ mod tests {
             parent_run_id: None,
             subagent_depth: 0,
             spawn_tree_root_run_id: None,
+            product_context: None,
+            resume_disposition: None,
         }
     }
 

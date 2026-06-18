@@ -4,9 +4,74 @@ import test from "node:test";
 import {
   automationSummary,
   filterAutomations,
-  normalizeAutomations,
-  scheduleLabel,
+  normalizeAutomations as normalizeAutomationsRaw,
+  runStatusBreakdown,
+  runSummaryView,
+  scheduleLabel as scheduleLabelRaw,
+  summarizeRuns,
 } from "./automations-presenters.js";
+
+// Schedule labels are now localized: the presenter takes a translator + locale.
+// Mirror the en.js `automations.schedule.*` templates so these tests exercise
+// the real key→template→interpolation path and assert human-readable English.
+const EN_SCHEDULE = {
+  "automations.schedule.custom": "Custom schedule",
+  "automations.schedule.everyMinute": "Every minute",
+  "automations.schedule.everyMinutes": "Every {count} minutes",
+  "automations.schedule.hourlyAt": "Hourly at :{minute}",
+  "automations.schedule.everyDayAt": "Every day at {time}",
+  "automations.schedule.weekdaysAt": "Weekdays at {time}",
+  "automations.schedule.weekdayAt": "{weekday} at {time}",
+  "automations.schedule.monthlyAt": "Day {day} of each month at {time}",
+  "automations.schedule.dateAt": "{date} at {time}",
+  // Status / state / date-fallback labels are now localized too; mirror en.js
+  // so assertions read human English.
+  "automations.state.active": "Active",
+  "automations.state.scheduled": "Scheduled",
+  "automations.state.paused": "Paused",
+  "automations.state.disabled": "Disabled",
+  "automations.state.inactive": "Inactive",
+  "automations.state.completed": "Completed",
+  "automations.state.unknown": "Unknown",
+  "automations.lastStatus.done": "Done",
+  "automations.lastStatus.error": "Error",
+  "automations.lastStatus.running": "Running",
+  "automations.lastStatus.none": "No result",
+  "automations.runStatus.ok": "OK",
+  "automations.runStatus.error": "Error",
+  "automations.runStatus.running": "Running",
+  "automations.runStatus.unknown": "Unknown",
+  "automations.date.unknown": "Unknown",
+  "automations.date.notScheduled": "Not scheduled",
+  "automations.date.noRuns": "No runs yet",
+  "automations.date.unscheduled": "Unscheduled",
+  "automations.date.notSubmitted": "Not submitted",
+  "automations.date.notCompleted": "Not completed",
+  "automations.untitled": "Untitled automation",
+  "automations.successRate.none": "No completed runs",
+  "automations.successRate.visible": "{percent}% visible runs",
+  // Run-summary labels (mirror en.js) so runSummaryView assertions read English.
+  "automations.runs.total": "Recent runs: {count}",
+  "automations.runs.ok": "OK: {count}",
+  "automations.runs.error": "Failed: {count}",
+  "automations.runs.running": "Running: {count}",
+  "automations.runs.unknown": "Unknown: {count}",
+};
+const t = (key, params = {}) =>
+  (EN_SCHEDULE[key] || key).replace(/\{(\w+)\}/g, (m, k) =>
+    params[k] !== undefined ? params[k] : m,
+  );
+// Intl may separate the clock time from AM/PM with a narrow no-break space
+// (U+202F) depending on the ICU build; normalize so assertions are stable.
+const norm = (value) =>
+  typeof value === "string" ? value.replace(/[\u202f\u00a0]/g, " ") : value;
+const scheduleLabel = (cron, timezone, locale = "en") =>
+  norm(scheduleLabelRaw(cron, timezone, t, locale));
+const normalizeAutomations = (response, locale = "en") =>
+  normalizeAutomationsRaw(response, t, locale).map((automation) => ({
+    ...automation,
+    schedule_label: norm(automation.schedule_label),
+  }));
 
 test("normalizeAutomations keeps only schedule rows and avoids raw schedule text", () => {
   const automations = normalizeAutomations({
@@ -111,30 +176,43 @@ test("scheduleLabel presents common recurring schedules in friendly language", (
   assert.equal(scheduleLabel("30 14 * * *"), "Every day at 2:30 PM");
   assert.equal(scheduleLabel("0 30 14 * * *"), "Every day at 2:30 PM");
   assert.equal(scheduleLabel("00 30 14 * * * *"), "Every day at 2:30 PM");
-  assert.equal(scheduleLabel("0 8 * * 1"), "Mondays at 8:00 AM");
-  assert.equal(scheduleLabel("0 8 * * MON"), "Mondays at 8:00 AM");
-  assert.equal(scheduleLabel("0 8 * * 7"), "Sundays at 8:00 AM");
+  assert.equal(scheduleLabel("0 8 * * 1"), "Monday at 8:00 AM");
+  assert.equal(scheduleLabel("0 8 * * MON"), "Monday at 8:00 AM");
+  assert.equal(scheduleLabel("0 8 * * 7"), "Sunday at 8:00 AM");
   assert.equal(scheduleLabel("0 9 * * MON-FRI"), "Weekdays at 9:00 AM");
-  assert.equal(scheduleLabel("0 17 1 * *"), "1st day of each month at 5:00 PM");
-  assert.equal(scheduleLabel("0 17 11 * *"), "11th day of each month at 5:00 PM");
-  assert.equal(scheduleLabel("0 17 12 * *"), "12th day of each month at 5:00 PM");
-  assert.equal(scheduleLabel("0 17 13 * *"), "13th day of each month at 5:00 PM");
+  assert.equal(scheduleLabel("0 17 1 * *"), "Day 1 of each month at 5:00 PM");
+  assert.equal(scheduleLabel("0 17 11 * *"), "Day 11 of each month at 5:00 PM");
+  assert.equal(scheduleLabel("0 17 12 * *"), "Day 12 of each month at 5:00 PM");
+  assert.equal(scheduleLabel("0 17 13 * *"), "Day 13 of each month at 5:00 PM");
   assert.equal(scheduleLabel("0 0 9 1 1 * 2027"), "Jan 1, 2027 at 9:00 AM");
-  assert.equal(scheduleLabel("*/5 * * * *"), "Custom schedule");
+  // Feb 29 with no year must not roll over to Mar 1 (placeholder year must be
+  // a leap year).
+  assert.equal(scheduleLabel("0 0 29 2 *"), "Feb 29 at 12:00 AM");
   assert.equal(scheduleLabel("* 0 9 * * *"), "Custom schedule");
   assert.equal(scheduleLabel("0 24 * * *"), "Custom schedule");
   assert.equal(scheduleLabel("0 0 32 * *"), "Custom schedule");
   assert.equal(scheduleLabel("0 0 * 13 *"), "Custom schedule");
 });
 
+test("scheduleLabel labels sub-hourly and hourly cadences", () => {
+  assert.equal(scheduleLabel("* * * * *"), "Every minute");
+  assert.equal(scheduleLabel("*/1 * * * *"), "Every minute");
+  assert.equal(scheduleLabel("*/5 * * * *"), "Every 5 minutes");
+  assert.equal(scheduleLabel("*/15 * * * *"), "Every 15 minutes");
+  assert.equal(scheduleLabel("0 * * * *"), "Hourly at :00");
+  assert.equal(scheduleLabel("30 * * * *"), "Hourly at :30");
+  // Minute/hour cadences are timezone-independent — no suffix appended.
+  assert.equal(scheduleLabel("*/15 * * * *", "America/New_York"), "Every 15 minutes");
+});
+
 test("scheduleLabel appends timezone suffix when timezone is provided", () => {
   assert.equal(scheduleLabel("0 9 * * *", "America/New_York"), "Every day at 9:00 AM (America/New_York)");
   assert.equal(scheduleLabel("0 9 * * MON-FRI", "Europe/London"), "Weekdays at 9:00 AM (Europe/London)");
-  assert.equal(scheduleLabel("0 9 * * 1", "Asia/Tokyo"), "Mondays at 9:00 AM (Asia/Tokyo)");
-  assert.equal(scheduleLabel("0 17 1 * *", "America/Chicago"), "1st day of each month at 5:00 PM (America/Chicago)");
+  assert.equal(scheduleLabel("0 9 * * 1", "Asia/Tokyo"), "Monday at 9:00 AM (Asia/Tokyo)");
+  assert.equal(scheduleLabel("0 17 1 * *", "America/Chicago"), "Day 1 of each month at 5:00 PM (America/Chicago)");
   assert.equal(scheduleLabel("0 0 9 1 1 * 2027", "UTC"), "Jan 1, 2027 at 9:00 AM (UTC)");
   // Custom schedule does not append timezone suffix
-  assert.equal(scheduleLabel("*/5 * * * *", "America/New_York"), "Custom schedule");
+  assert.equal(scheduleLabel("* 0 9 * * *", "America/New_York"), "Custom schedule");
   // No timezone argument — no suffix
   assert.equal(scheduleLabel("0 9 * * *"), "Every day at 9:00 AM");
   // Null/undefined timezone — no suffix
@@ -380,4 +458,110 @@ test("normalizeAutomations emits chat_path for any status when thread_id is pres
     "/chat/550e8400-e29b-41d4-a716-446655440000",
     "accepted run with thread_id must produce a chat_path",
   );
+});
+
+test("summarizeRuns counts runs by normalized status", () => {
+  const counts = summarizeRuns([
+    { status: "ok" },
+    { status: "ok" },
+    { status: "error" },
+    { status: "running" },
+    { status: "weird-unknown-status" },
+    {},
+  ]);
+  assert.deepEqual(counts, {
+    total: 6,
+    ok: 2,
+    error: 1,
+    running: 1,
+    // both the unrecognized status and the missing status fold into "unknown"
+    unknown: 2,
+  });
+});
+
+test("summarizeRuns tolerates non-array input", () => {
+  assert.deepEqual(summarizeRuns(undefined), {
+    total: 0,
+    ok: 0,
+    error: 0,
+    running: 0,
+    unknown: 0,
+  });
+});
+
+// Regression for #4988: the recent-run summary chips render straight from
+// runStatusBreakdown. Every counted status — including the `unknown` bucket
+// produced by unrecognized/missing statuses — must appear, so a future edit
+// can't silently drop a bucket from what the UI shows.
+test("runStatusBreakdown surfaces every non-empty bucket incl. unknown", () => {
+  const parts = runStatusBreakdown([
+    { status: "ok" },
+    { status: "ok" },
+    { status: "error" },
+    { status: "running" },
+    { status: "mystery-status" }, // unrecognized -> unknown
+    {}, // missing -> unknown
+  ]);
+  const byKey = Object.fromEntries(parts.map((part) => [part.key, part.count]));
+  assert.deepEqual(byKey, { ok: 2, error: 1, running: 1, unknown: 2 });
+  assert.ok(
+    parts.some((part) => part.key === "unknown"),
+    "unknown bucket must be present when unknown-status runs exist",
+  );
+  // Chips must sum to the same total the summary header shows.
+  const total = parts.reduce((sum, part) => sum + part.count, 0);
+  assert.equal(total, summarizeRuns([
+    { status: "ok" },
+    { status: "ok" },
+    { status: "error" },
+    { status: "running" },
+    { status: "mystery-status" },
+    {},
+  ]).total);
+});
+
+test("runStatusBreakdown omits zero-count buckets", () => {
+  const parts = runStatusBreakdown([{ status: "ok" }]);
+  assert.deepEqual(parts.map((part) => part.key), ["ok"]);
+});
+
+// Drives the exact data RunHistorySummary renders (the component maps this 1:1,
+// with no logic of its own). With an unrecognized + a missing status present,
+// the rendered chips must include the localized unknown chip and must sum to
+// the total shown in the header. Guards #4988 at the render path, not just the
+// counting helper.
+test("runSummaryView renders the unknown chip and chips sum to total", () => {
+  const runs = [
+    { status: "ok" },
+    { status: "ok" },
+    { status: "error" },
+    { status: "running" },
+    { status: "mystery-status" }, // unrecognized -> unknown
+    {}, // missing -> unknown
+  ];
+  const view = runSummaryView(runs, t);
+
+  assert.equal(view.total, 6);
+  assert.equal(view.totalText, "Recent runs: 6");
+
+  const unknownChip = view.chips.find((chip) => chip.key === "unknown");
+  assert.ok(unknownChip, "rendered chips must include the unknown bucket");
+  assert.equal(unknownChip.text, "Unknown: 2");
+
+  const renderedTexts = view.chips.map((chip) => chip.text);
+  assert.deepEqual(renderedTexts, [
+    "OK: 2",
+    "Failed: 1",
+    "Running: 1",
+    "Unknown: 2",
+  ]);
+
+  const chipSum = view.chips.reduce((sum, chip) => sum + chip.count, 0);
+  assert.equal(chipSum, view.total, "displayed chips must sum to the total");
+});
+
+test("runSummaryView reports zero total for an empty history", () => {
+  const view = runSummaryView([], t);
+  assert.equal(view.total, 0);
+  assert.deepEqual(view.chips, []);
 });

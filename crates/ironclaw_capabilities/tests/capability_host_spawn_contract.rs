@@ -4,6 +4,7 @@ use async_trait::async_trait;
 use ironclaw_approvals::*;
 use ironclaw_authorization::*;
 use ironclaw_capabilities::*;
+use ironclaw_extensions::{ExtensionManifest, ExtensionPackage, ExtensionRegistry, ManifestSource};
 use ironclaw_host_api::*;
 use ironclaw_processes::*;
 use ironclaw_run_state::*;
@@ -61,6 +62,102 @@ async fn capability_host_blocks_spawn_for_approval_without_starting_process() {
             InvocationFingerprint::for_spawn(&scope, &capability_id(), &estimate, &input).unwrap()
         )
     );
+}
+
+#[tokio::test]
+async fn capability_host_adds_sanitized_shell_command_to_spawn_approval_reason() {
+    let manifest_toml = r#"
+schema_version = "reborn.extension_manifest.v2"
+id = "acme"
+name = "Acme"
+version = "0.1.0"
+description = "Acme test extension"
+trust = "third_party"
+
+[runtime]
+kind = "wasm"
+module = "acme.wasm"
+
+[[capabilities]]
+id = "acme.shell"
+description = "Runs a shell command."
+effects = ["dispatch_capability", "spawn_process", "execute_code", "network"]
+default_permission = "ask"
+visibility = "model"
+input_schema_ref = "schemas/shell.input.v1.json"
+output_schema_ref = "schemas/shell.output.v1.json"
+"#;
+    let manifest = ExtensionManifest::parse(
+        manifest_toml,
+        ManifestSource::InstalledLocal,
+        &HostPortCatalog::empty(),
+    )
+    .unwrap();
+    let package = ExtensionPackage::from_manifest(
+        manifest,
+        VirtualPath::new("/system/extensions/acme").unwrap(),
+    )
+    .unwrap();
+    let mut registry = ExtensionRegistry::new();
+    registry.insert(package).unwrap();
+    let dispatcher = RecordingDispatcher::default();
+    let process_manager = RecordingProcessManager::default();
+    let run_state = InMemoryRunStateStore::new();
+    let approval_requests = InMemoryApprovalRequestStore::new();
+    let host = CapabilityHost::new(&registry, &dispatcher, &ShellSpawnApprovalAuthorizer)
+        .with_process_manager(&process_manager)
+        .with_run_state(&run_state)
+        .with_approval_requests(&approval_requests);
+    let context = execution_context(CapabilitySet::default());
+    let scope = context.resource_scope.clone();
+    let invocation_id = context.invocation_id;
+    let capability_id = CapabilityId::new("acme.shell").unwrap();
+    let input = json!({
+        "command": "curl -H 'Authorization: Bearer sk-secret' https://example.test/reset/sk-secret?token=secret"
+    });
+
+    let err = host
+        .spawn_json(CapabilitySpawnRequest {
+            context,
+            capability_id,
+            estimate: ResourceEstimate::default(),
+            input,
+            trust_decision: trust_decision(),
+        })
+        .await
+        .unwrap_err();
+
+    assert!(matches!(
+        err,
+        CapabilityInvocationError::AuthorizationRequiresApproval { .. }
+    ));
+    assert!(!process_manager.has_start());
+    let approval_id = run_state
+        .get(&scope, invocation_id)
+        .await
+        .unwrap()
+        .unwrap()
+        .approval_request_id
+        .unwrap();
+    let approval = approval_requests
+        .get(&scope, approval_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        approval
+            .request
+            .reason
+            .contains("Command:\ncurl -H 'Authorization: [redacted]'")
+    );
+    assert!(
+        approval
+            .request
+            .reason
+            .contains("https://example.test/reset/[redacted]?...")
+    );
+    assert!(!approval.request.reason.contains("sk-secret"));
+    assert!(!approval.request.reason.contains("token=secret"));
 }
 
 #[tokio::test]
@@ -402,6 +499,46 @@ impl TrustAwareCapabilityDispatchAuthorizer for SpawnApprovalAuthorizer {
                 requested_by: Principal::Extension(context.extension_id.clone()),
                 action: Box::new(Action::SpawnCapability {
                     capability: capability_id(),
+                    estimated_resources: estimate.clone(),
+                }),
+                invocation_fingerprint: None,
+                reason: "spawn approval required".to_string(),
+                reusable_scope: None,
+            },
+        }
+    }
+}
+
+struct ShellSpawnApprovalAuthorizer;
+
+#[async_trait]
+impl TrustAwareCapabilityDispatchAuthorizer for ShellSpawnApprovalAuthorizer {
+    async fn authorize_dispatch_with_trust(
+        &self,
+        _context: &ExecutionContext,
+        _descriptor: &CapabilityDescriptor,
+        _estimate: &ResourceEstimate,
+        _trust_decision: &ironclaw_trust::TrustDecision,
+    ) -> Decision {
+        Decision::Deny {
+            reason: DenyReason::MissingGrant,
+        }
+    }
+
+    async fn authorize_spawn_with_trust(
+        &self,
+        context: &ExecutionContext,
+        descriptor: &CapabilityDescriptor,
+        estimate: &ResourceEstimate,
+        _trust_decision: &ironclaw_trust::TrustDecision,
+    ) -> Decision {
+        Decision::RequireApproval {
+            request: ApprovalRequest {
+                id: ApprovalRequestId::new(),
+                correlation_id: context.correlation_id,
+                requested_by: Principal::Extension(context.extension_id.clone()),
+                action: Box::new(Action::SpawnCapability {
+                    capability: descriptor.id.clone(),
                     estimated_resources: estimate.clone(),
                 }),
                 invocation_fingerprint: None,

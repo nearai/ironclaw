@@ -9,6 +9,11 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use crate::ack_helpers::internal_refs_from_ack;
+use crate::content_parts::{
+    DecodedInlineImage, content_value_to_text_and_images, image_mime_extension,
+    sanitize_product_text_fragment,
+};
+use crate::descriptors::MAX_CHAT_BODY_BYTES;
 use crate::error::product_rejection_to_openai_error;
 use crate::identity::{
     OPENAI_COMPAT_ACTOR_KIND, OPENAI_COMPAT_ADAPTER_ID, OPENAI_COMPAT_INSTALLATION_ID,
@@ -30,17 +35,36 @@ use async_trait::async_trait;
 use axum::Json;
 use axum::response::{IntoResponse, Response};
 use chrono::Utc;
+use ironclaw_attachments::InboundAttachment;
 use ironclaw_product_adapters::{
     AdapterInstallationId, ExternalActorRef, ExternalConversationRef, ExternalEventId,
-    ParsedProductInbound, ProductAdapterId, ProductInboundAck, ProductInboundEnvelope,
-    ProductInboundPayload, ProductProjectionReadInput, ProductProjectionSubject,
-    ProductProjectionSubscribeInput, ProductRejection, ProductTriggerReason, ProductWorkflow,
-    ProjectionReadRequest, ProtocolAuthEvidence, TrustedInboundContext, UserMessagePayload,
+    ParsedProductInbound, ProductAdapterError, ProductAdapterId, ProductInboundAck,
+    ProductInboundEnvelope, ProductInboundPayload, ProductProjectionReadInput,
+    ProductProjectionSubject, ProductProjectionSubscribeInput, ProductRejection,
+    ProductTriggerReason, ProductWorkflow, ProjectionReadRequest, ProtocolAuthEvidence,
+    TrustedInboundContext, UserMessagePayload,
 };
+
+/// Host-supplied native door for submitting a user message together with
+/// host-staged inline attachment bytes (vision, #4644).
+///
+/// Defined in this route crate (mirroring [`OpenAiCompatProjectionStreamer`])
+/// and implemented by host composition, because the route surface may only talk
+/// to `ironclaw_product_adapters` traits — never the `ironclaw_product_workflow`
+/// crate (enforced by `reborn_dependency_boundaries`). The decoded bytes are
+/// landed at message acceptance by the host and never enter the bytes-free
+/// product inbound envelope.
+#[async_trait]
+pub trait OpenAiCompatInboundAttachmentSubmit: Send + Sync {
+    async fn submit_inbound_with_attachments(
+        &self,
+        envelope: ProductInboundEnvelope,
+        attachments: Vec<InboundAttachment>,
+    ) -> Result<ProductInboundAck, ProductAdapterError>;
+}
 
 const DEFAULT_CHAT_WAIT_TIMEOUT: Duration = Duration::from_secs(30);
 const DEFAULT_BIND_INTERNAL_REFS_TIMEOUT: Duration = Duration::from_secs(2);
-const MAX_CHAT_BODY_BYTES: usize = 4 * 1024 * 1024;
 const MAX_CHAT_COMPLETION_MESSAGES: usize = 1_000;
 pub const OPENAI_COMPAT_CONVERSATION_PREFIX: &str = "chat_completion";
 
@@ -104,6 +128,13 @@ pub struct OpenAiChatCompletionsWorkflow {
     /// arch-exempt: optional Arc, streaming is a staged #4446 capability layered
     /// onto the non-streaming #4444 workflow.
     projection_streamer: Option<Arc<dyn OpenAiCompatProjectionStreamer>>,
+    /// Native door for submitting a user message with host-staged inline image
+    /// bytes. Wired by host composition; when `None`, inline images fall back to
+    /// the bytes-free submit path (and the model sees only the `[image omitted]`
+    /// transcript marker).
+    /// arch-exempt: optional Arc, vision is a staged #4644 capability layered
+    /// onto the text-only chat workflow; a deployment may run without it.
+    attachment_submit: Option<Arc<dyn OpenAiCompatInboundAttachmentSubmit>>,
     wait_timeout: Duration,
     adapter_id: ProductAdapterId,
     installation_id: AdapterInstallationId,
@@ -120,6 +151,7 @@ impl OpenAiChatCompletionsWorkflow {
             ref_store,
             projection_reader,
             projection_streamer: None,
+            attachment_submit: None,
             wait_timeout: DEFAULT_CHAT_WAIT_TIMEOUT,
             adapter_id: ProductAdapterId::new(OPENAI_COMPAT_ADAPTER_ID)
                 .expect("OPENAI_COMPAT_ADAPTER_ID is valid"), // safety: hard-coded non-empty product adapter id literal.
@@ -138,6 +170,16 @@ impl OpenAiChatCompletionsWorkflow {
         projection_streamer: Arc<dyn OpenAiCompatProjectionStreamer>,
     ) -> Self {
         self.projection_streamer = Some(projection_streamer);
+        self
+    }
+
+    /// Wire the native door that lands inline image bytes into project storage
+    /// before submission, enabling vision for `image_url` content parts.
+    pub fn with_attachment_submit(
+        mut self,
+        attachment_submit: Arc<dyn OpenAiCompatInboundAttachmentSubmit>,
+    ) -> Self {
+        self.attachment_submit = Some(attachment_submit);
         self
     }
 
@@ -182,7 +224,8 @@ impl OpenAiChatCompletionsWorkflow {
             )));
         }
 
-        let user_message_payload = chat_user_message_payload(&request)?;
+        let (user_message_payload, attachments) =
+            chat_user_message_and_attachments(&request, self.attachment_submit.is_some())?;
         let model_only_tools = OpenAiChatModelOnlyTools::from_request(&request);
 
         let request_fingerprint = OpenAiCompatRequestFingerprint::from_body_bytes(raw_body);
@@ -202,7 +245,12 @@ impl OpenAiChatCompletionsWorkflow {
                     return Err(OpenAiCompatHttpError::internal());
                 };
                 let accepted_ack = self
-                    .submit_chat_and_record_ack(&caller, &public_id, user_message_payload)
+                    .submit_chat_and_record_ack(
+                        &caller,
+                        &public_id,
+                        user_message_payload,
+                        attachments,
+                    )
                     .await?;
                 (public_id, accepted_ack, created_at)
             }
@@ -214,8 +262,13 @@ impl OpenAiChatCompletionsWorkflow {
                 let accepted_ack = match mapping.accepted_ack {
                     Some(accepted_ack) => accepted_ack,
                     None => {
-                        self.submit_chat_and_record_ack(&caller, &public_id, user_message_payload)
-                            .await?
+                        self.submit_chat_and_record_ack(
+                            &caller,
+                            &public_id,
+                            user_message_payload,
+                            attachments,
+                        )
+                        .await?
                     }
                 };
                 (public_id, accepted_ack, created_at)
@@ -325,7 +378,8 @@ impl OpenAiChatCompletionsWorkflow {
             )));
         }
 
-        let user_message_payload = chat_user_message_payload(&request)?;
+        let (user_message_payload, attachments) =
+            chat_user_message_and_attachments(&request, self.attachment_submit.is_some())?;
         let model_only_tools = OpenAiChatModelOnlyTools::from_request(&request);
         let request_fingerprint = OpenAiCompatRequestFingerprint::from_body_bytes(raw_body);
         let reservation = self
@@ -343,7 +397,12 @@ impl OpenAiChatCompletionsWorkflow {
                     return Err(OpenAiCompatHttpError::internal());
                 };
                 let accepted_ack = self
-                    .submit_chat_and_record_ack(&caller, public_id, user_message_payload)
+                    .submit_chat_and_record_ack(
+                        &caller,
+                        public_id,
+                        user_message_payload,
+                        attachments,
+                    )
                     .await?;
                 (mapping, accepted_ack)
             }
@@ -354,8 +413,13 @@ impl OpenAiChatCompletionsWorkflow {
                 let accepted_ack = match mapping.accepted_ack.clone() {
                     Some(accepted_ack) => accepted_ack,
                     None => {
-                        self.submit_chat_and_record_ack(&caller, public_id, user_message_payload)
-                            .await?
+                        self.submit_chat_and_record_ack(
+                            &caller,
+                            public_id,
+                            user_message_payload,
+                            attachments,
+                        )
+                        .await?
                     }
                 };
                 (mapping, accepted_ack)
@@ -400,9 +464,31 @@ impl OpenAiChatCompletionsWorkflow {
         caller: &OpenAiCompatAuthenticatedCaller,
         public_id: &OpenAiChatCompletionId,
         user_message_payload: UserMessagePayload,
+        attachments: Vec<InboundAttachment>,
     ) -> Result<ProductInboundAck, OpenAiCompatHttpError> {
         let envelope = self.chat_product_envelope(caller, public_id, user_message_payload)?;
-        let ack = self.product_workflow.submit_inbound(envelope).await?;
+        let ack = match self.attachment_submit.as_ref() {
+            // Inline images decoded from the request: land them via the native
+            // door (bytes never enter the bytes-free product envelope).
+            Some(attachment_submit) if !attachments.is_empty() => {
+                attachment_submit
+                    .submit_inbound_with_attachments(envelope, attachments)
+                    .await?
+            }
+            // No images, or no native door wired. If images were decoded but no
+            // door is wired (unwired/test path), they are not carried; the
+            // transcript text already routed them through the bytes-free path.
+            _ => {
+                if !attachments.is_empty() {
+                    tracing::debug!(
+                        target = "ironclaw::reborn::openai_compat",
+                        image_count = attachments.len(),
+                        "inline images dropped: attachment-submit door not wired"
+                    );
+                }
+                self.product_workflow.submit_inbound(envelope).await?
+            }
+        };
         let accepted_ack = accepted_ack_from_ack(ack)?;
         self.ref_store
             .record_accepted_ack(OpenAiCompatRecordAcceptedAck::new(
@@ -608,6 +694,15 @@ fn accepted_ack_from_ack(
                     None,
                 ));
             }
+            ProductInboundAck::RejectedBusy { .. } => {
+                // terminal/settled, not retryable — client must issue a new request
+                return Err(OpenAiCompatHttpError::from_kind(
+                    429,
+                    false,
+                    crate::OpenAiCompatErrorKind::RateLimited,
+                    None,
+                ));
+            }
             ProductInboundAck::Rejected(rejection) => return Err(error_from_rejection(rejection)),
             ProductInboundAck::CommandResult { .. } | ProductInboundAck::NoOp => {
                 return Err(OpenAiCompatHttpError::internal());
@@ -632,9 +727,10 @@ pub(crate) fn parse_chat_request(
         .map_err(|_| OpenAiCompatHttpError::invalid_request(Some("body".to_string())))
 }
 
-fn chat_messages_to_product_text(
+fn chat_messages_to_product_text_and_images(
     request: &OpenAiChatCompletionRequest,
-) -> Result<String, OpenAiCompatHttpError> {
+    enable_attachments: bool,
+) -> Result<(String, Vec<DecodedInlineImage>), OpenAiCompatHttpError> {
     if request.messages.is_empty() {
         return Err(OpenAiCompatHttpError::invalid_request(Some(
             "messages".to_string(),
@@ -646,10 +742,14 @@ fn chat_messages_to_product_text(
         )));
     }
     let mut rendered_messages = Vec::with_capacity(request.messages.len());
+    let mut images = Vec::new();
     for message in &request.messages {
+        let (content_text, mut message_images) =
+            content_value_to_text_and_images(message.content.as_ref(), enable_attachments);
+        images.append(&mut message_images);
         rendered_messages.push(serde_json::json!({
             "role": chat_role_label(&message.role),
-            "content": content_value_to_text(message.content.as_ref()),
+            "content": content_text,
             "tool_call_id": message
                 .tool_call_id
                 .as_ref()
@@ -657,11 +757,12 @@ fn chat_messages_to_product_text(
             "assistant_tool_call_count": message.tool_calls.as_ref().map(Vec::len),
         }));
     }
-    serde_json::to_string(&serde_json::json!({
+    let text = serde_json::to_string(&serde_json::json!({
         "format": "openai_compat.chat_messages.v1",
         "messages": rendered_messages,
     }))
-    .map_err(|_| OpenAiCompatHttpError::internal())
+    .map_err(|_| OpenAiCompatHttpError::internal())?;
+    Ok((text, images))
 }
 
 fn chat_role_label(role: &OpenAiChatMessageRole) -> &'static str {
@@ -674,40 +775,57 @@ fn chat_role_label(role: &OpenAiChatMessageRole) -> &'static str {
     }
 }
 
-fn chat_user_message_payload(
+fn chat_user_message_and_attachments(
     request: &OpenAiChatCompletionRequest,
-) -> Result<UserMessagePayload, OpenAiCompatHttpError> {
-    Ok(UserMessagePayload::new(
-        chat_messages_to_product_text(request)?,
-        vec![],
-        ProductTriggerReason::DirectChat,
-    )?)
+    enable_attachments: bool,
+) -> Result<(UserMessagePayload, Vec<InboundAttachment>), OpenAiCompatHttpError> {
+    let (text, images) = chat_messages_to_product_text_and_images(request, enable_attachments)?;
+    let attachments = images
+        .into_iter()
+        .enumerate()
+        .map(|(index, image)| InboundAttachment {
+            id: format!("openai-image-{index}"),
+            filename: Some(format!(
+                "image-{index}.{}",
+                image_mime_extension(&image.mime_type)
+            )),
+            mime_type: image.mime_type,
+            bytes: image.bytes,
+        })
+        .collect();
+    let payload = UserMessagePayload::new(text, vec![], ProductTriggerReason::DirectChat)?;
+    Ok((payload, attachments))
 }
 
-fn content_value_to_text(content: Option<&serde_json::Value>) -> String {
-    match content {
-        Some(serde_json::Value::String(text)) => sanitize_product_text_fragment(text),
-        Some(serde_json::Value::Array(items)) => items
-            .iter()
-            .filter_map(content_array_item_text)
-            .collect::<Vec<_>>()
-            .join(" "),
-        Some(value) if !value.is_null() => "[non_text_content]".to_string(),
-        _ => String::new(),
+#[cfg(test)]
+mod tests {
+    use ironclaw_product_adapters::ProductInboundAck;
+    use ironclaw_turns::{AcceptedMessageRef, TurnRunId};
+
+    use super::accepted_ack_from_ack;
+
+    #[test]
+    fn deferred_busy_ack_is_retryable_429() {
+        let ack = ProductInboundAck::DeferredBusy {
+            accepted_message_ref: AcceptedMessageRef::new("msg:deferred-busy").expect("ref"),
+            active_run_id: TurnRunId::new(),
+        };
+        let err = accepted_ack_from_ack(ack).unwrap_err();
+        assert_eq!(err.status_code(), 429);
+        assert!(err.retryable(), "DeferredBusy must be retryable");
     }
-}
 
-fn content_array_item_text(value: &serde_json::Value) -> Option<String> {
-    let object = value.as_object()?;
-    match object.get("type").and_then(serde_json::Value::as_str) {
-        Some("text" | "input_text" | "output_text") => object
-            .get("text")
-            .and_then(serde_json::Value::as_str)
-            .map(sanitize_product_text_fragment),
-        _ => Some("[non_text_content]".to_string()),
+    #[test]
+    fn rejected_busy_ack_is_non_retryable_429() {
+        let ack = ProductInboundAck::RejectedBusy {
+            accepted_message_ref: AcceptedMessageRef::new("msg:rejected-busy").expect("ref"),
+            active_run_id: None,
+        };
+        let err = accepted_ack_from_ack(ack).unwrap_err();
+        assert_eq!(err.status_code(), 429);
+        assert!(
+            !err.retryable(),
+            "RejectedBusy is terminal — must not be retryable"
+        );
     }
-}
-
-fn sanitize_product_text_fragment(value: &str) -> String {
-    value.replace(['\n', '\r', '\u{2028}', '\u{2029}'], " ")
 }

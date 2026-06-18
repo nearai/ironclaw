@@ -18,14 +18,14 @@ use ironclaw_hooks::middleware::{
 use ironclaw_host_api::ExtensionId;
 use ironclaw_loop_support::{
     ACTIVE_TASK_COMPACTION_SYSTEM_PROMPT, CapabilityResolveError, CapabilitySurfaceProfileFilter,
-    CapabilitySurfaceProfileResolver, EmptyLoopCapabilityPort, GuardedSystemInferencePort,
-    HostIdentityContextSource, HostInputQueue, HostManagedModelGateway, HostQueueLoopInputPort,
-    HostSkillContextSource, LoopCapabilityInputResolver, LoopCapabilityPortFactory,
-    ModelGatewayBackedSystemInferencePort, RunCancellationFactory, RunCancellationObservationKind,
-    RunStateLoopCancellationPort, SubagentLoopPromptPort, SubagentPromptComposer,
-    ThreadBackedLoopContextPort, ThreadBackedLoopTranscriptPort, ThreadContextWindowCache,
-    TurnStateRunCancellationFactory, active_task_compaction_prompt_id,
-    host_managed_loop_compaction_port_with_prompt_id,
+    CapabilitySurfaceProfileResolver, EmptyLoopCapabilityPort, EmptyUserProfileSource,
+    GuardedSystemInferencePort, HostIdentityContextSource, HostInputQueue, HostManagedModelGateway,
+    HostQueueLoopInputPort, HostSkillContextSource, HostUserProfileSource, LoopAttachmentReadPort,
+    LoopCapabilityInputResolver, LoopCapabilityPortFactory, ModelGatewayBackedSystemInferencePort,
+    RunCancellationFactory, RunCancellationObservationKind, RunStateLoopCancellationPort,
+    SubagentLoopPromptPort, SubagentPromptComposer, ThreadBackedLoopContextPort,
+    ThreadBackedLoopTranscriptPort, ThreadContextWindowCache, TurnStateRunCancellationFactory,
+    active_task_compaction_prompt_id, host_managed_loop_compaction_port_with_prompt_id,
 };
 use ironclaw_threads::{SessionThreadService, ThreadScope};
 
@@ -61,21 +61,21 @@ use ironclaw_turns::{
     run_profile::{
         AgentLoopHostError, AgentLoopHostErrorKind, AppendCapabilityResultRef, BeginAssistantDraft,
         CapabilityBatchInvocation, CapabilityBatchOutcome, CapabilityInvocation, CapabilityOutcome,
-        FinalizeAssistantMessage, HookMilestoneSink, HostManagedLoopModelPort,
-        HostManagedLoopPromptPort, InMemoryInstructionMaterializationStore,
-        InstructionBundleMaterializedMessage, InstructionMaterializationStore,
-        InstructionSafetyContext, LoadCheckpointPayloadRequest, LoadedCheckpointPayload,
-        LoopCancellationPort, LoopCancellationSignal, LoopCapabilityPort, LoopCheckpointPort,
-        LoopCheckpointRequest, LoopCompactionError, LoopCompactionOutcome, LoopCompactionPort,
-        LoopCompactionRequest, LoopContextBundle, LoopContextPort, LoopContextRequest,
-        LoopHostMilestoneSink, LoopInputAckToken, LoopInputBatch, LoopInputCursor, LoopInputPort,
-        LoopModelBudgetAccountant, LoopModelPolicyGuard, LoopModelPort, LoopModelRequest,
-        LoopModelResponse, LoopProgressEvent, LoopProgressPort, LoopPromptBundle,
-        LoopPromptBundleAuthority, LoopPromptBundleRequest, LoopPromptPort, LoopRunContext,
-        LoopRunInfoPort, LoopRuntimeContext, LoopTranscriptPort, NoOpBudgetAccountant,
-        NoOpPolicyGuard, ProviderToolCall, ProviderToolDefinition, RunScopedHookMilestoneSink,
-        StageCheckpointPayloadRequest, SystemInferencePort, UpdateAssistantDraft,
-        VisibleCapabilityRequest, VisibleCapabilitySurface,
+        CommunicationContextProvider, FinalizeAssistantMessage, HookMilestoneSink,
+        HostManagedLoopModelPort, HostManagedLoopPromptPort,
+        InMemoryInstructionMaterializationStore, InstructionBundleMaterializedMessage,
+        InstructionMaterializationStore, InstructionSafetyContext, LoadCheckpointPayloadRequest,
+        LoadedCheckpointPayload, LoopCancellationPort, LoopCancellationSignal, LoopCapabilityPort,
+        LoopCheckpointPort, LoopCheckpointRequest, LoopCompactionError, LoopCompactionOutcome,
+        LoopCompactionPort, LoopCompactionRequest, LoopContextBundle, LoopContextPort,
+        LoopContextRequest, LoopHostMilestoneSink, LoopInputAckToken, LoopInputBatch,
+        LoopInputCursor, LoopInputPort, LoopModelBudgetAccountant, LoopModelPolicyGuard,
+        LoopModelPort, LoopModelRequest, LoopModelResponse, LoopProgressEvent, LoopProgressPort,
+        LoopPromptBundle, LoopPromptBundleAuthority, LoopPromptBundleRequest, LoopPromptPort,
+        LoopRunContext, LoopRunInfoPort, LoopRuntimeContext, LoopTranscriptPort,
+        NoOpBudgetAccountant, NoOpPolicyGuard, ProviderToolCall, ProviderToolDefinition,
+        RunScopedHookMilestoneSink, StageCheckpointPayloadRequest, SystemInferencePort,
+        UpdateAssistantDraft, VisibleCapabilityRequest, VisibleCapabilitySurface,
     },
     runner::ClaimedTurnRun,
 };
@@ -899,6 +899,7 @@ where
     cancellation_factory: Arc<dyn RunCancellationFactory>,
     config: TextOnlyLoopHostConfig,
     skill_context_source: Option<Arc<dyn HostSkillContextSource>>,
+    attachment_read_port: Option<Arc<dyn LoopAttachmentReadPort>>,
     /// Optional hook dispatcher factory. When set, the factory invokes the
     /// closure on every `build_text_only_host*` call to obtain a fresh
     /// `HookDispatcher`, wraps it in `Arc`, and then plumbs it through
@@ -947,6 +948,12 @@ where
     event_subscription: Option<EventTriggeredHookSubscription>,
     safety_context: InstructionSafetyContext,
     identity_context_source: Option<Arc<dyn HostIdentityContextSource>>,
+    /// Per-run user agent-context profile source. Resolved once at loop start;
+    /// result is stamped into `LoopRuntimeContext.user_profile`. Defaults to
+    /// `EmptyUserProfileSource` (returns `None`) so callers that do not wire a
+    /// profile source degrade gracefully rather than failing.
+    user_profile_source: Arc<dyn HostUserProfileSource>,
+    communication_context_provider: Option<Arc<dyn CommunicationContextProvider>>,
     input_queue: Option<Arc<dyn HostInputQueue>>,
     profiled_capabilities: Option<ProfiledCapabilityHostRuntime>,
     subagent_prompt_composer: Option<SubagentPromptComposer>,
@@ -1001,6 +1008,7 @@ where
             cancellation_factory,
             config,
             skill_context_source: None,
+            attachment_read_port: None,
             hook_dispatcher_factory: None,
             hook_dispatcher_builder_factory: None,
             hook_security_audit_sink: None,
@@ -1010,6 +1018,8 @@ where
             event_subscription: None,
             safety_context,
             identity_context_source: None,
+            user_profile_source: Arc::new(EmptyUserProfileSource),
+            communication_context_provider: None,
             input_queue: None,
             profiled_capabilities: None,
             subagent_prompt_composer: None,
@@ -1072,6 +1082,11 @@ where
 
     pub fn with_skill_context_source(mut self, source: Arc<dyn HostSkillContextSource>) -> Self {
         self.skill_context_source = Some(source);
+        self
+    }
+
+    pub fn with_attachment_read_port(mut self, port: Arc<dyn LoopAttachmentReadPort>) -> Self {
+        self.attachment_read_port = Some(port);
         self
     }
 
@@ -1269,6 +1284,23 @@ where
         self
     }
 
+    /// Installs the per-user profile source. The source is resolved once at
+    /// loop start; its result is stamped into `LoopRuntimeContext.user_profile`
+    /// so the model sees the user's timezone/locale/location every turn.
+    /// When not called the factory defaults to `EmptyUserProfileSource`.
+    pub fn with_user_profile_source(mut self, source: Arc<dyn HostUserProfileSource>) -> Self {
+        self.user_profile_source = source;
+        self
+    }
+
+    pub fn with_communication_context_provider(
+        mut self,
+        provider: Arc<dyn CommunicationContextProvider>,
+    ) -> Self {
+        self.communication_context_provider = Some(provider);
+        self
+    }
+
     pub fn with_profiled_capability_port_factory(
         mut self,
         capability_factory: Arc<dyn LoopCapabilityPortFactory>,
@@ -1357,6 +1389,22 @@ where
 
         let max_messages = self.config.max_messages.max(1);
         let run_context = self.attach_model_route_snapshot(request.loop_run_context)?;
+
+        // Kick off the advisory communication-context fetch immediately so its
+        // latency + timeout budget overlaps the gate/dispatcher construction and
+        // capability-surface computation below, rather than blocking prompt
+        // construction. Joined (and stamped with `delivery_tools_visible`) at the
+        // prompt-build site once the surface is known.
+        let communication_fetch = self
+            .communication_context_provider
+            .as_ref()
+            .map(|provider| {
+                provider.begin_communication_context(
+                    run_context.scope.clone(),
+                    run_context.actor().cloned(),
+                )
+            });
+
         let context_window_cache = Arc::new(ThreadContextWindowCache::default());
         let mut context_adapter = ThreadBackedLoopContextPort::new(
             Arc::clone(&self.thread_service),
@@ -1489,12 +1537,40 @@ where
                 hooked
             };
         }
-        capabilities
+        let visible_surface = capabilities
             .visible_capabilities(VisibleCapabilityRequest)
             .await
             .map_err(|error| RebornLoopDriverHostError::InvalidRequest {
                 reason: error.safe_summary,
             })?;
+        // The rendered guidance names BOTH the lister and the setter; require both
+        // capabilities to be visible before setting the flag, so we never prompt
+        // the model to call a tool that is not actually in the surface.
+        let delivery_tools_visible = {
+            let ids: std::collections::HashSet<&str> = visible_surface
+                .descriptors
+                .iter()
+                .map(|d| d.capability_id.as_str())
+                .collect();
+            ids.contains("builtin.outbound_delivery_target_set")
+                && ids.contains("builtin.outbound_delivery_targets_list")
+        };
+        // Join the fetch started at loop entry and stamp the surface-derived
+        // `delivery_tools_visible` flag. In the common case the fetch has already
+        // resolved during the work above, so this adds no critical-path latency.
+        let communication = match communication_fetch {
+            Some(fetch) => fetch.resolve(delivery_tools_visible).await,
+            None => None,
+        };
+        // Resolve the per-user profile once at loop start (a single bounded
+        // memory read). Performance: acceptable here — the existing
+        // `communication` slice already does backend fetches at loop start.
+        // If this becomes a critical-path concern a follow-up can move it
+        // onto the same concurrent fetch budget as `CommunicationContextProvider`.
+        let user_profile = self
+            .user_profile_source
+            .resolve_user_profile(&run_context)
+            .await;
         let prompt_authority = LoopPromptBundleAuthority::shared();
         let surface_state_for_prompt = Arc::clone(&surface_state);
         let prompt_port = HostManagedLoopPromptPort::new(
@@ -1510,7 +1586,9 @@ where
         // Stamped once per loop spawn; a resume creates a new host and restamps.
         .with_runtime_context(LoopRuntimeContext {
             loop_started_at_utc: chrono::Utc::now(),
-            user_timezone: None,
+            communication,
+            product_context: run_context.product_context.clone(),
+            user_profile,
         });
         let mut prompt: Arc<dyn LoopPromptPort> = Arc::new(prompt_port);
         if let Some(dispatcher) = per_build_dispatcher.as_ref() {
@@ -1565,6 +1643,7 @@ where
             capabilities: Some(Arc::clone(&capabilities)),
             prompt_authority,
             context_window_cache: Some(context_window_cache),
+            attachment_read_port: self.attachment_read_port.clone(),
         });
         let mut model: Arc<dyn LoopModelPort> = Arc::new(HostManagedLoopModelPort::with_guards(
             run_context.clone(),
@@ -1994,6 +2073,9 @@ where
         if let Some(snapshot) = claimed.state.resolved_model_route.clone() {
             loop_run_context = loop_run_context.with_resolved_model_route(snapshot);
         }
+        if let Some(product_context) = claimed.state.product_context.clone() {
+            loop_run_context = loop_run_context.with_product_context(product_context);
+        }
         let request = RebornLoopDriverHostRequest {
             claimed_run: claimed.clone(),
             loop_run_context,
@@ -2265,6 +2347,13 @@ fn turn_error_to_host_error(error: TurnError) -> AgentLoopHostError {
                 &error,
             )
         }
+        TurnError::InvalidRunOriginAdapter => ironclaw_loop_support::raw_agent_loop_host_error(
+            "checkpoint_state",
+            "request",
+            AgentLoopHostErrorKind::InvalidInvocation,
+            "checkpoint state request contains an invalid run origin adapter",
+            &error,
+        ),
     }
 }
 
@@ -2310,6 +2399,7 @@ mod hook_resolver_adapter_tests {
             capability_id: CapabilityId::new("cap.test").expect("capability id literal valid"),
             input_ref: CapabilityInputRef::new(input_ref).expect("input ref literal valid"),
             approval_resume: None,
+            auth_resume: None,
         }
     }
 

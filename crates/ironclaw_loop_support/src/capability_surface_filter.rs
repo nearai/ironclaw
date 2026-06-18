@@ -636,6 +636,7 @@ mod tests {
             capability_id: capability_id(capability),
             input_ref: input_ref(input),
             approval_resume: None,
+            auth_resume: None,
         }
     }
 
@@ -698,6 +699,7 @@ mod tests {
             progress: ironclaw_turns::run_profile::CapabilityProgress::MadeProgress,
             terminate_hint: false,
             byte_len: 0,
+            output_digest: None,
         })
     }
 
@@ -1067,6 +1069,7 @@ mod tests {
                 capability_id: candidate.capability_id,
                 input_ref: candidate.input_ref,
                 approval_resume: None,
+                auth_resume: None,
             })
             .await
             .expect("staged capability_info invocation should pass");
@@ -1118,6 +1121,7 @@ mod tests {
                     capability_id: candidate.capability_id,
                     input_ref: candidate.input_ref,
                     approval_resume: None,
+                    auth_resume: None,
                 }],
                 stop_on_first_suspension: true,
             })

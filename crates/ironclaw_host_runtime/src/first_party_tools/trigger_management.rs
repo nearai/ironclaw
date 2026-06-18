@@ -32,11 +32,13 @@ pub const TRIGGER_CREATE_CAPABILITY_ID: &str = "builtin.trigger_create";
 pub const TRIGGER_LIST_CAPABILITY_ID: &str = "builtin.trigger_list";
 pub const TRIGGER_REMOVE_CAPABILITY_ID: &str = "builtin.trigger_remove";
 
+const TRIGGER_CREATE_DESCRIPTION: &str = "Create a caller-scoped scheduled trigger. If the user asks for routine or trigger results to be sent through an outbound product or channel, use the visible outbound delivery target capabilities to select that delivery target before creating the trigger; delivery routing is not encoded in this input.";
+
 pub(super) fn manifests() -> Result<Vec<CapabilityManifest>, ExtensionError> {
     Ok(vec![
         first_party_capability_manifest(
             TRIGGER_CREATE_CAPABILITY_ID,
-            "Create a caller-scoped scheduled trigger",
+            TRIGGER_CREATE_DESCRIPTION,
             vec![EffectKind::DispatchCapability, EffectKind::ExternalWrite],
             PermissionMode::Ask,
             resource_profile(),
@@ -333,6 +335,8 @@ async fn remove_trigger(
 }
 
 fn trigger_output(record: &TriggerRecord, recent_runs: &[TriggerRunRecord]) -> Value {
+    let is_enabled = record.state == TriggerState::Scheduled;
+    let has_active_fire = record.has_active_fire();
     json!({
         "trigger_id": record.trigger_id.to_string(),
         "agent_id": record.agent_id.as_ref().map(|id| id.as_str()),
@@ -346,7 +350,11 @@ fn trigger_output(record: &TriggerRecord, recent_runs: &[TriggerRunRecord]) -> V
         "last_run_at": record.last_run_at,
         "last_status": record.last_status,
         "recent_runs": recent_runs.iter().map(trigger_run_output).collect::<Vec<_>>(),
-        "is_active": record.has_active_fire(),
+        // Model-facing trigger status: `is_active` means the trigger is enabled
+        // to fire. In-flight run state is exposed separately as `has_active_fire`.
+        "is_enabled": is_enabled,
+        "is_active": is_enabled,
+        "has_active_fire": has_active_fire,
         "created_at": record.created_at,
     })
 }

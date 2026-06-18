@@ -5,7 +5,8 @@ use std::{future::Future, thread};
 
 use anyhow::Context;
 #[cfg(feature = "webui-v2-beta")]
-use ironclaw_reborn_composition::host_api::{AgentId, TenantId, UserId};
+use ironclaw_reborn_composition::host_api::UserId;
+use ironclaw_reborn_composition::host_api::{AgentId, TenantId};
 #[cfg(feature = "webui-v2-beta")]
 use ironclaw_reborn_composition::{
     LocalTriggerAccessReconciliation, LocalTriggerAccessRole, LocalTriggerAccessSource,
@@ -33,15 +34,31 @@ use trigger_poller::trigger_poller_settings;
 
 pub(crate) fn init_tracing() {
     use tracing_subscriber::EnvFilter;
+    use tracing_subscriber::Layer;
     use tracing_subscriber::fmt;
     use tracing_subscriber::prelude::*;
-    let filter = EnvFilter::try_from_env("IRONCLAW_REBORN_LOG").unwrap_or_else(|_| {
+    // stderr/fmt layer: operator-facing console output. Stays at `info` by
+    // default so `debug!` diagnostics never reach (and corrupt) a REPL/TUI
+    // terminal — the repo's logging invariant. Override via IRONCLAW_REBORN_LOG.
+    let stderr_filter = EnvFilter::try_from_env("IRONCLAW_REBORN_LOG").unwrap_or_else(|_| {
         EnvFilter::new("info,ironclaw_reborn=info,ironclaw_reborn_composition=info")
     });
+    // Operator Logs buffer: captures run diagnostics at `debug` for the
+    // ironclaw run-path crates so the scoped (thread/run) Logs panel is
+    // populated, while those `debug!` events are NOT written to stderr. This is
+    // a *separate* per-layer filter, so terminal safety and Logs-panel
+    // visibility are decoupled. Override via IRONCLAW_REBORN_OPERATOR_LOG.
+    let operator_filter =
+        EnvFilter::try_from_env("IRONCLAW_REBORN_OPERATOR_LOG").unwrap_or_else(|_| {
+            EnvFilter::new("info,ironclaw_reborn=debug,ironclaw_host_runtime=debug")
+        });
     let _ = tracing_subscriber::registry()
-        .with(filter)
-        .with(fmt::layer().with_writer(std::io::stderr))
-        .with(OperatorLogLayer)
+        .with(
+            fmt::layer()
+                .with_writer(std::io::stderr)
+                .with_filter(stderr_filter),
+        )
+        .with(OperatorLogLayer.with_filter(operator_filter))
         .try_init();
 }
 
@@ -363,6 +380,7 @@ pub(crate) fn build_runtime_input_with_options(
         .with_runner_settings(runner_settings(runtime_services.config_file.as_ref())?)
         .with_trigger_poller_settings(trigger_poller_settings(
             runtime_services.config_file.as_ref(),
+            caller,
         )?)
         .with_poll_settings(PollSettings {
             interval: Duration::from_millis(200),
@@ -472,6 +490,10 @@ pub(crate) fn build_services_input_with_options(
     {
         services_input = services_input.with_google_oauth_backend(client);
     }
+    let identity = runtime_identity(config_file.as_ref());
+    let tenant_id = TenantId::new(identity.tenant_id).context("invalid runtime tenant identity")?;
+    let agent_id = AgentId::new(identity.agent_id).context("invalid runtime agent identity")?;
+    services_input = services_input.with_local_runtime_identity(tenant_id, agent_id);
 
     Ok(RuntimeServicesInput {
         services_input,
