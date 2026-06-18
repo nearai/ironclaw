@@ -19,6 +19,8 @@ use crate::types::project::ProjectId;
 
 use super::{OwnerId, default_user_id};
 
+const LLM_USAGE_METADATA_USER_ID_MAX_LEN: usize = 255;
+
 /// Strongly-typed thread identifier.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct ThreadId(pub Uuid);
@@ -328,9 +330,11 @@ impl Thread {
     pub fn llm_usage_metadata(&self, purpose: LlmCallPurpose) -> HashMap<String, String> {
         let mut metadata = HashMap::from([
             ("thread_id".to_string(), self.id.0.to_string()),
-            ("user_id".to_string(), self.user_id.clone()),
             ("purpose".to_string(), purpose.as_str().to_string()),
         ]);
+        if !self.user_id.is_empty() && self.user_id.len() <= LLM_USAGE_METADATA_USER_ID_MAX_LEN {
+            metadata.insert("user_id".to_string(), self.user_id.clone());
+        }
 
         if let Some(scope) = self
             .metadata
@@ -636,6 +640,18 @@ mod tests {
             Some(&"conv-1".to_string())
         );
         assert!(!metadata.contains_key("ignored_non_string"));
+    }
+
+    #[test]
+    fn llm_usage_metadata_omits_invalid_user_id() {
+        let mut thread = make_thread();
+        thread.user_id = "u".repeat(LLM_USAGE_METADATA_USER_ID_MAX_LEN + 1);
+
+        let metadata = thread.llm_usage_metadata(LlmCallPurpose::Chat);
+
+        assert!(!metadata.contains_key("user_id"));
+        assert_eq!(metadata.get("thread_id"), Some(&thread.id.0.to_string()));
+        assert_eq!(metadata.get("purpose"), Some(&"chat".to_string()));
     }
 
     // ── Title derivation ─────────────────────────────────────

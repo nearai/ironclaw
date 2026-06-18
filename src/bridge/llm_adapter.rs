@@ -23,6 +23,7 @@ use ironclaw_llm::{
 const EMPTY_CLEANED_RESPONSE_FALLBACK: &str = "I'm not sure how to respond to that.";
 const LLM_CALL_PURPOSE_CHAT: &str = "chat";
 const LLM_CALL_PURPOSE_MAX_LEN: usize = 32;
+const LLM_METADATA_USER_ID_MAX_LEN: usize = 255;
 
 /// Compute the USD cost of a single completion response, honoring the
 /// provider's prompt-caching pricing. Mirrors the formula in
@@ -123,18 +124,10 @@ impl LlmUsageRecorder {
         tokens: LlmTokenBuckets,
     ) -> Result<(), EngineError> {
         let model = provider.effective_model_name(config.model.as_deref());
+        let purpose = validate_llm_call_purpose(config.metadata.get("purpose"))?;
+        let user_id = validate_llm_metadata_user_id(config.metadata.get("user_id"))?;
         let db = self.db.as_ref();
-        let purpose = if db.is_some() {
-            validate_llm_call_purpose(config.metadata.get("purpose"))?
-        } else {
-            None
-        };
-        let cost_per_token = if config.model.is_some() {
-            None
-        } else {
-            Some(provider.cost_per_token())
-        };
-        let user_id = config.metadata.get("user_id");
+        let cost_per_token = Some(provider.cost_per_token());
         let cost = match user_id {
             Some(user_id) => {
                 self.cost_guard
@@ -192,6 +185,9 @@ impl LlmUsageRecorder {
             purpose,
         };
 
+        // Keep usage accounting fail-loud and per-call. Batching this path
+        // would need a durable queue plus backpressure so accepted LLM calls
+        // cannot disappear before admin usage aggregation sees them.
         db.record_llm_call(&record)
             .await
             .map_err(|e| EngineError::Store {
@@ -219,6 +215,26 @@ fn validate_llm_call_purpose(value: Option<&String>) -> Result<Option<&str>, Eng
         });
     }
     Ok(Some(purpose))
+}
+
+fn validate_llm_metadata_user_id(value: Option<&String>) -> Result<Option<&str>, EngineError> {
+    let Some(user_id) = value.map(String::as_str) else {
+        return Ok(None);
+    };
+    if user_id.is_empty() {
+        return Err(EngineError::Store {
+            reason: "invalid engine v2 LLM usage user_id: empty".to_string(),
+        });
+    }
+    if user_id.len() > LLM_METADATA_USER_ID_MAX_LEN {
+        return Err(EngineError::Store {
+            reason: format!(
+                "invalid engine v2 LLM usage user_id: length {} exceeds {LLM_METADATA_USER_ID_MAX_LEN}",
+                user_id.len()
+            ),
+        });
+    }
+    Ok(Some(user_id))
 }
 
 impl LlmBridgeAdapter {
@@ -1182,6 +1198,51 @@ mod tests {
         assert!(
             err.to_string()
                 .contains("invalid engine v2 LLM usage purpose"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn complete_rejects_invalid_engine_v2_usage_purpose_without_db() {
+        let provider: Arc<dyn LlmProvider> = Arc::new(PricedProvider);
+        let adapter = LlmBridgeAdapter::new_without_usage_recorder_for_testing(provider, None);
+        let mut config = LlmCallConfig::default();
+        config
+            .metadata
+            .insert("purpose".to_string(), "billing".to_string());
+
+        let err = adapter
+            .complete(&[ThreadMessage::user("hello")], &[], &config)
+            .await
+            .expect_err("invalid usage purpose must fail before DB availability checks");
+
+        assert!(matches!(err, EngineError::Store { .. }));
+        assert!(
+            err.to_string()
+                .contains("invalid engine v2 LLM usage purpose"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn complete_rejects_overlong_engine_v2_usage_user_id() {
+        let provider: Arc<dyn LlmProvider> = Arc::new(PricedProvider);
+        let adapter = LlmBridgeAdapter::new_without_usage_recorder_for_testing(provider, None);
+        let mut config = LlmCallConfig::default();
+        config.metadata.insert(
+            "user_id".to_string(),
+            "u".repeat(LLM_METADATA_USER_ID_MAX_LEN + 1),
+        );
+
+        let err = adapter
+            .complete(&[ThreadMessage::user("hello")], &[], &config)
+            .await
+            .expect_err("overlong usage user_id must fail");
+
+        assert!(matches!(err, EngineError::Store { .. }));
+        assert!(
+            err.to_string()
+                .contains("invalid engine v2 LLM usage user_id"),
             "unexpected error: {err}"
         );
     }
@@ -2225,6 +2286,43 @@ And also check the token price:\n\
             "expected cost_usd ≈ {EXPECTED_COST_USD}, got {}",
             output.usage.cost_usd
         );
+    }
+
+    #[tokio::test]
+    async fn complete_model_override_records_provider_pricing_in_cost_guard() {
+        use crate::agent::cost_guard::{CostGuard, CostGuardConfig};
+
+        let cost_guard = Arc::new(CostGuard::new(CostGuardConfig::default()));
+        let provider: Arc<dyn LlmProvider> = Arc::new(PricedProvider);
+        let adapter = LlmBridgeAdapter::new(
+            provider,
+            None,
+            Arc::new(LlmUsageRecorder::new(
+                None,
+                Arc::clone(&cost_guard),
+                "test-disabled",
+            )),
+        );
+        let mut config = LlmCallConfig {
+            model: Some("unknown-override-model".to_string()),
+            ..LlmCallConfig::default()
+        };
+        config
+            .metadata
+            .insert("purpose".to_string(), "chat".to_string());
+
+        adapter
+            .complete(&[ThreadMessage::user("hi")], &[], &config)
+            .await
+            .expect("complete");
+
+        let usage = cost_guard.model_usage().await;
+        let tokens = usage
+            .get("unknown-override-model")
+            .expect("model override usage");
+        assert_eq!(tokens.input_tokens, 1000);
+        assert_eq!(tokens.output_tokens, 500);
+        assert_eq!(tokens.cost, rust_decimal_macros::dec!(0.010500));
     }
 
     #[tokio::test]
