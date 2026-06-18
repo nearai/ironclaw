@@ -67,6 +67,12 @@ impl fmt::Display for SecretLeaseId {
 pub struct SecretMetadata {
     pub scope: ResourceScope,
     pub handle: SecretHandle,
+    /// When the secret material expires, if known.
+    ///
+    /// Populated only for access tokens written through [`SecretStore::put`] with a
+    /// non-`None` `expires_at` argument (e.g. OAuth access tokens). Legacy records
+    /// and secrets written without a TTL leave this `None`.
+    pub expires_at: Option<Timestamp>,
 }
 
 /// Lease lifecycle for one secret access.
@@ -988,11 +994,15 @@ pub trait SecretStore: Send + Sync {
     /// Intended for trusted setup, composition, migration, or storage-code paths that are already
     /// allowed to manage secret material. This low-level primitive intentionally does not authorize
     /// arbitrary runtime/plugin callers.
+    ///
+    /// `expires_at` should be set for time-bounded secrets such as OAuth access tokens. Pass
+    /// `None` for secrets without a known expiry (e.g. refresh tokens, API keys).
     async fn put(
         &self,
         scope: ResourceScope,
         handle: SecretHandle,
         material: SecretMaterial,
+        expires_at: Option<Timestamp>,
     ) -> Result<SecretMetadata, SecretStoreError>;
 
     /// Returns redacted metadata for a secret without exposing material.
@@ -1158,6 +1168,7 @@ where
         scope: ResourceScope,
         handle: SecretHandle,
         material: SecretMaterial,
+        _expires_at: Option<Timestamp>,
     ) -> Result<SecretMetadata, SecretStoreError> {
         self.inner
             .create(
@@ -1166,7 +1177,11 @@ where
             )
             .await
             .map_err(map_legacy_secret_error)?;
-        Ok(SecretMetadata { scope, handle })
+        Ok(SecretMetadata {
+            scope,
+            handle,
+            expires_at: None,
+        })
     }
 
     async fn metadata(
@@ -1182,6 +1197,7 @@ where
             Ok(_) => Ok(Some(SecretMetadata {
                 scope: scope.clone(),
                 handle: handle.clone(),
+                expires_at: None,
             })),
             Err(SecretError::NotFound(_)) => Ok(None),
             Err(error) => Err(map_legacy_secret_error(error)),
@@ -1402,8 +1418,9 @@ impl SecretStore for InMemorySecretStore {
         scope: ResourceScope,
         handle: SecretHandle,
         material: SecretMaterial,
+        _expires_at: Option<Timestamp>,
     ) -> Result<SecretMetadata, SecretStoreError> {
-        self.inner.put(scope, handle, material).await
+        self.inner.put(scope, handle, material, None).await
     }
 
     async fn metadata(
@@ -1507,6 +1524,7 @@ mod tests {
                 owner.clone(),
                 handle.clone(),
                 SecretMaterial::from("owner-secret"),
+                None,
             )
             .await
             .unwrap();
@@ -1515,6 +1533,7 @@ mod tests {
                 other.clone(),
                 handle.clone(),
                 SecretMaterial::from("other-secret"),
+                None,
             )
             .await
             .unwrap();
@@ -1940,6 +1959,7 @@ mod tests {
                 scope.clone(),
                 handle.clone(),
                 SecretMaterial::from("sk-live-sentinel".to_string()),
+                None,
             )
             .await
             .unwrap();
@@ -1987,6 +2007,7 @@ mod tests {
                 scope.clone(),
                 handle.clone(),
                 SecretMaterial::from("super-secret"),
+                None,
             )
             .await
             .unwrap();
@@ -2018,6 +2039,7 @@ mod tests {
                 scope.clone(),
                 handle.clone(),
                 SecretMaterial::from("super-secret"),
+                None,
             )
             .await
             .unwrap();
@@ -2042,6 +2064,7 @@ mod tests {
                 scope.clone(),
                 handle.clone(),
                 SecretMaterial::from("super-secret"),
+                None,
             )
             .await
             .unwrap();

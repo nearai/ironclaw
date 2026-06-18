@@ -1924,6 +1924,7 @@ async fn production_host_http_egress_rejects_direct_secret_store_lease_before_tr
         scope.clone(),
         handle.clone(),
         SecretMaterial::from("sk-direct-lease"),
+        None,
     ))
     .unwrap();
     let service = services.host_http_egress(network);

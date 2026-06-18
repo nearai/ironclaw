@@ -38,7 +38,7 @@ impl LlmKeyStore {
     ) -> Result<(), LlmKeyStoreError> {
         let handle = handle_for(provider_id)?;
         self.store
-            .put(scope(), handle, value)
+            .put(scope(), handle, value, None)
             .await
             .map_err(LlmKeyStoreError::Store)?;
         Ok(())

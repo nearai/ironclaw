@@ -8288,6 +8288,7 @@ impl SecretStore for CountingErrorSecretStore {
         _scope: ResourceScope,
         _handle: SecretHandle,
         _material: SecretMaterial,
+        _expires_at: Option<ironclaw_host_api::Timestamp>,
     ) -> Result<SecretMetadata, SecretStoreError> {
         Err(SecretStoreError::StoreUnavailable {
             reason: "simulated backend failure".to_string(),

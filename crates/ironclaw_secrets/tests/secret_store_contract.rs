@@ -16,6 +16,7 @@ async fn secret_store_returns_metadata_without_secret_material() {
             scope.clone(),
             handle.clone(),
             SecretMaterial::from("ghp_secret_token"),
+            None,
         )
         .await
         .unwrap();
@@ -35,6 +36,7 @@ async fn secret_store_consumes_one_shot_secret_lease() {
             scope.clone(),
             handle.clone(),
             SecretMaterial::from("super-secret"),
+            None,
         )
         .await
         .unwrap();
@@ -61,6 +63,7 @@ async fn consuming_one_lease_does_not_delete_underlying_secret() {
             scope.clone(),
             handle.clone(),
             SecretMaterial::from("refresh-secret"),
+            None,
         )
         .await
         .unwrap();
@@ -104,6 +107,7 @@ async fn secret_store_isolates_same_handle_between_tenants() {
             tenant_a.clone(),
             handle.clone(),
             SecretMaterial::from("tenant-a-secret"),
+            None,
         )
         .await
         .unwrap();
@@ -112,6 +116,7 @@ async fn secret_store_isolates_same_handle_between_tenants() {
             tenant_b.clone(),
             handle.clone(),
             SecretMaterial::from("tenant-b-secret"),
+            None,
         )
         .await
         .unwrap();
@@ -154,6 +159,7 @@ async fn secret_store_delete_is_idempotent_and_scope_isolated() {
             owner.clone(),
             handle.clone(),
             SecretMaterial::from("owner-secret"),
+            None,
         )
         .await
         .unwrap();
@@ -162,6 +168,7 @@ async fn secret_store_delete_is_idempotent_and_scope_isolated() {
             other.clone(),
             handle.clone(),
             SecretMaterial::from("other-secret"),
+            None,
         )
         .await
         .unwrap();
@@ -197,6 +204,7 @@ async fn secret_store_isolates_same_handle_between_users_and_projects() {
             user_a.clone(),
             handle.clone(),
             SecretMaterial::from("user-a-project-a-secret"),
+            None,
         )
         .await
         .unwrap();
@@ -205,6 +213,7 @@ async fn secret_store_isolates_same_handle_between_users_and_projects() {
             user_b.clone(),
             handle.clone(),
             SecretMaterial::from("user-b-project-a-secret"),
+            None,
         )
         .await
         .unwrap();
@@ -213,6 +222,7 @@ async fn secret_store_isolates_same_handle_between_users_and_projects() {
             project_b.clone(),
             handle.clone(),
             SecretMaterial::from("user-a-project-b-secret"),
+            None,
         )
         .await
         .unwrap();
@@ -268,6 +278,7 @@ async fn secret_store_isolates_same_handle_between_agents() {
             agent_a.clone(),
             handle.clone(),
             SecretMaterial::from("agent-a-secret"),
+            None,
         )
         .await
         .unwrap();
@@ -276,6 +287,7 @@ async fn secret_store_isolates_same_handle_between_agents() {
             agent_b.clone(),
             handle.clone(),
             SecretMaterial::from("agent-b-secret"),
+            None,
         )
         .await
         .unwrap();
@@ -313,6 +325,7 @@ async fn revoked_secret_lease_cannot_be_consumed() {
             scope.clone(),
             handle.clone(),
             SecretMaterial::from("super-secret"),
+            None,
         )
         .await
         .unwrap();

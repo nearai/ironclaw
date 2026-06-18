@@ -399,6 +399,7 @@ impl SecretStore for RecordingSecretStore {
         scope: ResourceScope,
         handle: SecretHandle,
         _material: SecretMaterial,
+        _expires_at: Option<ironclaw_host_api::Timestamp>,
     ) -> Result<SecretMetadata, SecretStoreError> {
         let handle_string = handle.as_str().to_string();
         self.puts.lock().unwrap().push(handle_string.clone());
@@ -407,7 +408,11 @@ impl SecretStore for RecordingSecretStore {
                 reason: "refresh write failed".to_string(),
             });
         }
-        Ok(SecretMetadata { scope, handle })
+        Ok(SecretMetadata {
+            scope,
+            handle,
+            expires_at: None,
+        })
     }
 
     async fn metadata(

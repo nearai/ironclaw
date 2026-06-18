@@ -2,6 +2,7 @@ use std::fmt;
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use chrono::Utc;
 use ironclaw_auth::{
     AuthFlowId, AuthProductError, AuthProviderClient, CredentialAccountId, OAuthClientId,
     OAuthProviderCallbackRequest, OAuthProviderExchange, OAuthProviderExchangeContext,
@@ -15,7 +16,7 @@ use ironclaw_host_api::{
     CapabilityId, CapabilitySet, CorrelationId, ExtensionId, MountView, NetworkMethod,
     NetworkPolicy, NetworkScheme, NetworkTargetPattern, Obligation, ResourceEstimate,
     ResourceScope, RuntimeCredentialInjection, RuntimeHttpEgress, RuntimeHttpEgressRequest,
-    RuntimeKind, SecretHandle, TrustClass,
+    RuntimeKind, SecretHandle, Timestamp, TrustClass,
 };
 use ironclaw_secrets::SecretStore;
 use secrecy::{ExposeSecret, SecretString};
@@ -333,25 +334,34 @@ impl HostOAuthProviderClient {
         refresh_secret: Option<SecretHandle>,
         tokens: OAuthTokenResponse,
     ) -> Result<StoredOAuthTokens, AuthProductError> {
+        // Compute access-token expiry from the server-reported TTL.
+        // Saturating cast: guard against u64 values that exceed i64::MAX (a
+        // theoretical extreme) by clamping to i64::MAX seconds before converting.
+        let access_expires_at: Option<Timestamp> =
+            tokens.expires_in_seconds.map(|secs| {
+                let signed_secs = secs.min(i64::MAX as u64) as i64;
+                Utc::now() + chrono::Duration::seconds(signed_secs)
+            });
+
         let refresh_token = tokens.refresh_token;
-        self.secret_store
-            .put(scope.clone(), access_secret.clone(), tokens.access_token)
-            .await
-            .map_err(map_secret_store_error)?;
+
+        // Crash-safety write order: persist the rotated REFRESH secret FIRST,
+        // then the ACCESS secret that carries `expires_at`.
+        //
+        // If a crash occurs between the two writes, the old (possibly
+        // expired/soon-expired) access secret remains in place. The next
+        // dispatch will detect the expiry and trigger a fresh refresh — safe.
+        // A fresh `expires_at` is never paired with a stale refresh token
+        // because the access record is written last.
         let refresh_secret = match (refresh_secret, refresh_token) {
             (Some(handle), Some(refresh_token)) => {
+                // Write refresh first (no expiry — refresh-token idle death is
+                // server-side, not a stored timestamp we can predict).
                 if let Err(error) = self
                     .secret_store
-                    .put(scope.clone(), handle.clone(), refresh_token)
+                    .put(scope.clone(), handle.clone(), refresh_token, None)
                     .await
                 {
-                    cleanup_written_access(
-                        &self.secret_store,
-                        &scope,
-                        &access_secret,
-                        self.spec.provider_id,
-                    )
-                    .await;
                     return Err(map_secret_store_error(error));
                 }
                 Some(handle)
@@ -359,6 +369,34 @@ impl HostOAuthProviderClient {
             (None, None) => None,
             _ => return Err(AuthProductError::BackendUnavailable),
         };
+
+        // Write access secret last, carrying the expiry so the inline refresh
+        // path can skip an unnecessary token-endpoint round-trip when the token
+        // is still valid.
+        if let Err(error) = self
+            .secret_store
+            .put(
+                scope.clone(),
+                access_secret.clone(),
+                tokens.access_token,
+                access_expires_at,
+            )
+            .await
+        {
+            // Clean up the refresh secret written above so callers see a
+            // consistent state (both or neither).
+            if let Some(ref handle) = refresh_secret {
+                cleanup_written_access(
+                    &self.secret_store,
+                    &scope,
+                    handle,
+                    self.spec.provider_id,
+                )
+                .await;
+            }
+            return Err(map_secret_store_error(error));
+        }
+
         Ok(StoredOAuthTokens {
             access_secret,
             refresh_secret,
