@@ -23,7 +23,6 @@ use ironclaw_loop_support::{
 };
 use ironclaw_product_workflow::{OutboundPreferencesProductFacade, ProjectService};
 
-use crate::project_service::RebornProjectService;
 use ironclaw_run_state::ApprovalRequestStore;
 use ironclaw_threads::{
     AppendCapabilityDisplayPreviewRequest, CapabilityDisplayPreviewEnvelope,
@@ -105,13 +104,11 @@ pub(super) fn capability_wiring(
     );
     let extension_surface_source =
         LocalDevExtensionSurfaceSource::new(local_runtime.extension_management.clone());
-    // First-class project creation routed through the same access-controlled
-    // `ProjectService` the WebUI v2 facade uses, so an agent-created project is
-    // a real entity that appears in the Projects list. The local-dev graph
-    // always carries the durable project repository.
-    let project_service: Arc<dyn ProjectService> = Arc::new(RebornProjectService::new(Arc::clone(
-        &local_runtime.project_repository,
-    )));
+    // First-class project creation reuses the same access-controlled
+    // `ProjectService` facade the WebUI v2 surface wires (composition owns the
+    // service, never the raw repository), so an agent-created project is a real
+    // entity that appears in the Projects list.
+    let project_service: Arc<dyn ProjectService> = Arc::clone(&local_runtime.project_service);
     let display_previews = Arc::new(CapabilityDisplayPreviewStore::default());
     let capability_io = Arc::new(
         LocalDevCapabilityIo::new_with_durable_previews(

@@ -1078,9 +1078,7 @@ mod tests {
             trajectory_observer: None,
             outbound_preferences_facade: None,
             outbound_delivery_target_set_requires_approval: false,
-            project_service: Arc::new(crate::project_service::RebornProjectService::new(
-                Arc::clone(&local_runtime.project_repository),
-            )),
+            project_service: Arc::clone(&local_runtime.project_service),
             approval_requests: local_runtime.approval_requests.clone(),
             capability_leases: local_runtime.capability_leases.clone(),
         };
@@ -1246,9 +1244,7 @@ mod tests {
             result_writer,
             milestone_sink: Arc::new(InMemoryLoopHostMilestoneSink::default()),
             skill_activation_source: None,
-            project_service: Arc::new(crate::project_service::RebornProjectService::new(
-                Arc::clone(&local_runtime.project_repository),
-            )),
+            project_service: Arc::clone(&local_runtime.project_service),
             trajectory_observer: None,
             outbound_preferences_facade: None,
             outbound_delivery_target_set_requires_approval: false,
@@ -1335,14 +1331,22 @@ mod tests {
         );
 
         // The capability writes a real control-plane entity, not a workspace
-        // file: the owner can now see the project through the repository.
-        let projects = local_runtime
-            .project_repository
-            .list_projects_for_user(&tenant_id, &owner_user_id, 10)
+        // file: the owner can now see the project through the same
+        // access-controlled `ProjectService` facade the WebUI lists from.
+        let listed = local_runtime
+            .project_service
+            .list_projects(
+                ironclaw_product_workflow::ProjectCaller {
+                    tenant_id: tenant_id.clone(),
+                    user_id: owner_user_id.clone(),
+                },
+                ironclaw_product_workflow::RebornListProjectsRequest { limit: None },
+            )
             .await
             .expect("list projects for owner");
         assert!(
-            projects
+            listed
+                .projects
                 .iter()
                 .any(|project| project.name == "Build /api <svc>"),
             "agent-created project must be visible to its owner"
@@ -1416,9 +1420,7 @@ mod tests {
             trajectory_observer: None,
             outbound_preferences_facade: Some(outbound_preferences_facade),
             outbound_delivery_target_set_requires_approval: true,
-            project_service: Arc::new(crate::project_service::RebornProjectService::new(
-                Arc::clone(&local_runtime.project_repository),
-            )),
+            project_service: Arc::clone(&local_runtime.project_service),
             approval_requests: local_runtime.approval_requests.clone(),
             capability_leases: local_runtime.capability_leases.clone(),
         };
@@ -1879,9 +1881,7 @@ mod tests {
             trajectory_observer: None,
             outbound_preferences_facade: None,
             outbound_delivery_target_set_requires_approval: false,
-            project_service: Arc::new(crate::project_service::RebornProjectService::new(
-                Arc::clone(&local_runtime.project_repository),
-            )),
+            project_service: Arc::clone(&local_runtime.project_service),
             approval_requests: local_runtime.approval_requests.clone(),
             capability_leases: local_runtime.capability_leases.clone(),
         };
@@ -1979,9 +1979,7 @@ mod tests {
             trajectory_observer: None,
             outbound_preferences_facade: None,
             outbound_delivery_target_set_requires_approval: false,
-            project_service: Arc::new(crate::project_service::RebornProjectService::new(
-                Arc::clone(&local_runtime.project_repository),
-            )),
+            project_service: Arc::clone(&local_runtime.project_service),
             approval_requests: local_runtime.approval_requests.clone(),
             capability_leases: local_runtime.capability_leases.clone(),
         };
@@ -2209,9 +2207,7 @@ mod tests {
             trajectory_observer: None,
             outbound_preferences_facade: None,
             outbound_delivery_target_set_requires_approval: false,
-            project_service: Arc::new(crate::project_service::RebornProjectService::new(
-                Arc::clone(&local_runtime.project_repository),
-            )),
+            project_service: Arc::clone(&local_runtime.project_service),
             approval_requests: local_runtime.approval_requests.clone(),
             capability_leases: local_runtime.capability_leases.clone(),
         };
@@ -2309,9 +2305,7 @@ mod tests {
             trajectory_observer: None,
             outbound_preferences_facade: None,
             outbound_delivery_target_set_requires_approval: false,
-            project_service: Arc::new(crate::project_service::RebornProjectService::new(
-                Arc::clone(&local_runtime.project_repository),
-            )),
+            project_service: Arc::clone(&local_runtime.project_service),
             approval_requests: local_runtime.approval_requests.clone(),
             capability_leases: local_runtime.capability_leases.clone(),
         };
