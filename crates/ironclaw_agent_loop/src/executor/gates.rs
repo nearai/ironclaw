@@ -73,29 +73,38 @@ impl ExecutorStage<GateInput> for GateStage {
                     .and_then(capability_activity_id_from_resume_token);
                 let auth_replay = auth_resume.and_then(|r| r.replay.clone());
                 let auth_prior_approval = auth_resume.and_then(|r| r.prior_approval.clone());
-                let approval_resume = input.approval_resume;
-                state.pending_approval_resume = approval_resume.map(|resume| {
-                    let activity_id =
-                        capability_activity_id_from_resume_token(&resume.resume_token);
-                    PendingApprovalResume {
-                        gate_ref: gate_ref.clone(),
-                        capability_id: call.capability_id.clone(),
-                        approval_request_id: resume.approval_request_id,
-                        resume_token: resume.resume_token,
-                        activity_id,
-                        correlation_id: resume.correlation_id,
-                        surface_version: call.surface_version.clone(),
-                        input_ref: resume.input_ref,
-                        effective_capability_ids: call.effective_capability_ids.clone(),
-                        provider_replay: call.provider_replay.clone(),
-                        input: resume.input,
-                        estimate: resume.estimate,
-                        // Disposition is stamped by PlannedDriver at resume time;
-                        // GateStage writes the initial (blocking) checkpoint where
-                        // no denial has occurred yet.
-                        disposition: None,
-                    }
-                });
+                if matches!(kind, GateKind::Approval) {
+                    let approval_resume = input.approval_resume;
+                    state.pending_approval_resume = approval_resume.map(|resume| {
+                        let activity_id =
+                            capability_activity_id_from_resume_token(&resume.resume_token);
+                        PendingApprovalResume {
+                            gate_ref: gate_ref.clone(),
+                            capability_id: call.capability_id.clone(),
+                            approval_request_id: resume.approval_request_id,
+                            resume_token: resume.resume_token,
+                            activity_id,
+                            correlation_id: resume.correlation_id,
+                            surface_version: call.surface_version.clone(),
+                            input_ref: resume.input_ref,
+                            effective_capability_ids: call.effective_capability_ids.clone(),
+                            provider_replay: call.provider_replay.clone(),
+                            input: resume.input,
+                            estimate: resume.estimate,
+                            // Disposition is stamped by PlannedDriver at resume time;
+                            // GateStage writes the initial (blocking) checkpoint where
+                            // no denial has occurred yet.
+                            disposition: None,
+                        }
+                    });
+                } else if matches!(kind, GateKind::Auth) {
+                    // Auth gates fold any prior approval identity into
+                    // pending_auth_resume.prior_approval below. Keeping a
+                    // pending approval slot for the same gate makes resume
+                    // disposition stamping ambiguous and can re-dispatch the
+                    // approval path before the auth denial is consumed.
+                    state.pending_approval_resume = None;
+                }
                 if matches!(kind, GateKind::Auth) {
                     // CapabilityStage shapes auth-resume metadata; GateStage
                     // only persists it at the blocking checkpoint.

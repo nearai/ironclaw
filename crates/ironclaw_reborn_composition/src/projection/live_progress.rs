@@ -6,7 +6,8 @@ use std::sync::{
 use async_trait::async_trait;
 use chrono::Utc;
 use ironclaw_event_projections::{
-    ProjectionCursor as EventProjectionCursor, ProjectionScope as EventProjectionScope,
+    CapabilityActivityStatus, ProjectionCursor as EventProjectionCursor,
+    ProjectionScope as EventProjectionScope,
 };
 use ironclaw_event_streams::{
     InMemoryProjectionUpdateSource, ProductProjectionEnvelope, ThreadLiveProjectionItem,
@@ -14,7 +15,7 @@ use ironclaw_event_streams::{
 };
 use ironclaw_events::{EventCursor, EventStreamKey, ReadScope};
 use ironclaw_first_party_extension_ports::{SkillActivationObservedEvent, SkillActivationObserver};
-use ironclaw_host_api::{CapabilityId, InvocationId, UserId};
+use ironclaw_host_api::{CapabilityId, ExtensionId, InvocationId, RuntimeKind, UserId};
 use ironclaw_product_adapters::{
     CapabilityActivityStatusView, CapabilityActivityView, CapabilityActivityViewInput,
     PROJECTION_SKILL_ACTIVATION_MAX_ITEMS, PROJECTION_SKILL_FEEDBACK_MAX_BYTES,
@@ -163,6 +164,11 @@ pub(super) fn product_items_for_live_update(
                 run_id,
                 invocation_id,
                 capability_id,
+                status,
+                provider,
+                runtime,
+                output_bytes,
+                error_kind,
             } => {
                 let running = display_previews.running_input(*invocation_id);
                 match CapabilityActivityView::new(CapabilityActivityViewInput {
@@ -170,12 +176,12 @@ pub(super) fn product_items_for_live_update(
                     turn_run_id: Some(*run_id),
                     thread_id: Some(update.thread_id.clone()),
                     capability_id: capability_id.clone(),
-                    status: CapabilityActivityStatusView::Started,
-                    provider: None,
-                    runtime: None,
+                    status: live_capability_activity_status(*status),
+                    provider: provider.clone(),
+                    runtime: *runtime,
                     process_id: None,
-                    output_bytes: None,
-                    error_kind: None,
+                    output_bytes: *output_bytes,
+                    error_kind: error_kind.clone(),
                     subtitle: running.as_ref().and_then(|input| input.subtitle.clone()),
                     input_summary: running.and_then(|input| input.input_summary),
                     updated_at: Utc::now(),
@@ -257,6 +263,8 @@ impl LiveProgressMilestoneSink {
         milestone: &LoopHostMilestone,
         invocation_id: InvocationId,
         capability_id: &CapabilityId,
+        status: CapabilityActivityStatus,
+        terminal: TerminalCapabilityActivity,
     ) {
         let sequence = self.publisher.next_live_sequence();
         self.publisher.publish_live_item(
@@ -267,6 +275,11 @@ impl LiveProgressMilestoneSink {
                 run_id: milestone.run_id,
                 invocation_id,
                 capability_id: capability_id.clone(),
+                status,
+                provider: terminal.provider,
+                runtime: terminal.runtime,
+                output_bytes: terminal.output_bytes,
+                error_kind: terminal.error_kind,
             },
         );
     }
@@ -367,6 +380,48 @@ impl LoopHostMilestoneSink for LiveProgressMilestoneSink {
                     &milestone,
                     InvocationId::from_uuid(activity_id.as_uuid()),
                     capability_id,
+                    CapabilityActivityStatus::Started,
+                    TerminalCapabilityActivity::default(),
+                );
+            }
+            LoopHostMilestoneKind::CapabilityCompleted {
+                activity_id,
+                capability_id,
+                provider,
+                runtime,
+                output_bytes,
+            } => {
+                self.publish_capability_activity(
+                    &milestone,
+                    InvocationId::from_uuid(activity_id.as_uuid()),
+                    capability_id,
+                    CapabilityActivityStatus::Completed,
+                    TerminalCapabilityActivity {
+                        provider: Some(provider.clone()),
+                        runtime: Some(*runtime),
+                        output_bytes: Some(*output_bytes),
+                        error_kind: None,
+                    },
+                );
+            }
+            LoopHostMilestoneKind::CapabilityFailed {
+                activity_id,
+                capability_id,
+                provider,
+                runtime,
+                reason_kind,
+            } => {
+                self.publish_capability_activity(
+                    &milestone,
+                    InvocationId::from_uuid(activity_id.as_uuid()),
+                    capability_id,
+                    CapabilityActivityStatus::Failed,
+                    TerminalCapabilityActivity {
+                        provider: provider.clone(),
+                        runtime: *runtime,
+                        output_bytes: None,
+                        error_kind: Some(reason_kind.as_str().to_string()),
+                    },
                 );
             }
             LoopHostMilestoneKind::DriverNote { kind, safe_summary } => {
@@ -375,6 +430,26 @@ impl LoopHostMilestoneSink for LiveProgressMilestoneSink {
             _ => {}
         }
         Ok(())
+    }
+}
+
+#[derive(Default)]
+struct TerminalCapabilityActivity {
+    provider: Option<ExtensionId>,
+    runtime: Option<RuntimeKind>,
+    output_bytes: Option<u64>,
+    error_kind: Option<String>,
+}
+
+fn live_capability_activity_status(
+    status: CapabilityActivityStatus,
+) -> CapabilityActivityStatusView {
+    match status {
+        CapabilityActivityStatus::Started => CapabilityActivityStatusView::Started,
+        CapabilityActivityStatus::Running => CapabilityActivityStatusView::Running,
+        CapabilityActivityStatus::Completed => CapabilityActivityStatusView::Completed,
+        CapabilityActivityStatus::Failed => CapabilityActivityStatusView::Failed,
+        CapabilityActivityStatus::Killed => CapabilityActivityStatusView::Killed,
     }
 }
 
