@@ -20,7 +20,7 @@ import { classifyRisk } from "../lib/approval-risk.js";
 const APPROVAL_PAYLOAD_PREVIEW_LIMIT = 480;
 
 function approvalPayloadIsLong(parameters, approvalDetails) {
-  if (approvalDetails.length > 0) {
+  if (approvalDetails && approvalDetails.length > 0) {
     return approvalDetails.some(
       (detail) =>
         typeof detail?.value === "string" && detail.value.length > APPROVAL_PAYLOAD_PREVIEW_LIMIT,
