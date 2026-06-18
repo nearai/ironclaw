@@ -1078,6 +1078,9 @@ mod tests {
             trajectory_observer: None,
             outbound_preferences_facade: None,
             outbound_delivery_target_set_requires_approval: false,
+            project_service: Arc::new(crate::project_service::RebornProjectService::new(
+                Arc::clone(&local_runtime.project_repository),
+            )),
             approval_requests: local_runtime.approval_requests.clone(),
             capability_leases: local_runtime.capability_leases.clone(),
         };
@@ -1216,6 +1219,123 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn local_dev_project_create_tool_persists_project_visible_to_owner() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let services = crate::build_reborn_services(crate::RebornBuildInput::local_dev(
+            "local-dev-project-create-owner",
+            dir.path().join("local-dev"),
+        ))
+        .await
+        .expect("local-dev services build");
+        let runtime = services.host_runtime.clone().expect("host runtime");
+        let local_runtime = services
+            .local_runtime
+            .as_ref()
+            .expect("local runtime substrate");
+        let capability_io = Arc::new(LocalDevCapabilityIo::default());
+        let input_resolver: Arc<dyn LoopCapabilityInputResolver> = capability_io.clone();
+        let result_writer: Arc<dyn LoopCapabilityResultWriter> = capability_io.clone();
+        let factory = LocalDevLoopCapabilityPortFactory {
+            runtime,
+            fallback_user_id: UserId::new("project-create-fallback-user").expect("user id"),
+            policy: Arc::clone(&local_runtime.capability_policy),
+            workspace_mounts: local_runtime.workspace_mounts.clone(),
+            memory_mounts: local_runtime.memory_mounts.clone(),
+            extension_surface_source: LocalDevExtensionSurfaceSource::default(),
+            input_resolver,
+            result_writer,
+            milestone_sink: Arc::new(InMemoryLoopHostMilestoneSink::default()),
+            skill_activation_source: None,
+            project_service: Arc::new(crate::project_service::RebornProjectService::new(
+                Arc::clone(&local_runtime.project_repository),
+            )),
+            trajectory_observer: None,
+            outbound_preferences_facade: None,
+            outbound_delivery_target_set_requires_approval: false,
+            approval_requests: local_runtime.approval_requests.clone(),
+            capability_leases: local_runtime.capability_leases.clone(),
+        };
+
+        let tenant_id = TenantId::new("tenant-project-create").expect("tenant id");
+        let owner_user_id = UserId::new("project-create-owner").expect("user id");
+        let run_context = run_context_with_scope(TurnScope::new_with_owner(
+            tenant_id.clone(),
+            Some(AgentId::new("agent-project-create").expect("agent id")),
+            Some(ProjectId::new("project-project-create").expect("project id")),
+            ThreadId::new("thread-project-create").expect("thread id"),
+            Some(owner_user_id.clone()),
+        ))
+        .await;
+
+        let port = factory
+            .create_capability_port(&run_context)
+            .await
+            .expect("capability port");
+        let surface = port
+            .visible_capabilities(VisibleCapabilityRequest {})
+            .await
+            .expect("visible surface");
+        assert!(
+            surface
+                .descriptors
+                .iter()
+                .any(|descriptor| descriptor.capability_id.as_str()
+                    == PROJECT_CREATE_CAPABILITY_ID),
+            "project_create should be an exposed synthetic capability"
+        );
+
+        let candidate = port
+            .register_provider_tool_call(provider_tool_call_with_name(
+                "builtin__project_create",
+                serde_json::json!({
+                    "name": "Build IronClaw",
+                    "description": "Ship the project feature"
+                }),
+            ))
+            .await
+            .expect("project_create call stages");
+        let outcome = port
+            .invoke_capability(CapabilityInvocation {
+                surface_version: candidate.surface_version,
+                capability_id: candidate.capability_id,
+                input_ref: candidate.input_ref,
+                approval_resume: None,
+                auth_resume: None,
+            })
+            .await
+            .expect("project_create invokes");
+        let result_ref = match outcome {
+            CapabilityOutcome::Completed(message) => message.result_ref,
+            outcome => panic!("project_create should complete, got {outcome:?}"),
+        };
+        let output = capability_io
+            .result_output(result_ref.as_str())
+            .expect("result read succeeds")
+            .expect("result output exists");
+        assert_eq!(output["name"], "Build IronClaw");
+        assert!(
+            output["project_id"]
+                .as_str()
+                .is_some_and(|id| !id.is_empty()),
+            "tool output should carry the new project id"
+        );
+
+        // The capability writes a real control-plane entity, not a workspace
+        // file: the owner can now see the project through the repository.
+        let projects = local_runtime
+            .project_repository
+            .list_projects_for_user(&tenant_id, &owner_user_id, 10)
+            .await
+            .expect("list projects for owner");
+        assert!(
+            projects
+                .iter()
+                .any(|project| project.name == "Build IronClaw"),
+            "agent-created project must be visible to its owner"
+        );
+    }
+
+    #[tokio::test]
     async fn local_dev_outbound_delivery_capabilities_use_provider_backed_facade() {
         let dir = tempfile::tempdir().expect("tempdir");
         let services = crate::build_reborn_services(crate::RebornBuildInput::local_dev(
@@ -1282,6 +1402,9 @@ mod tests {
             trajectory_observer: None,
             outbound_preferences_facade: Some(outbound_preferences_facade),
             outbound_delivery_target_set_requires_approval: true,
+            project_service: Arc::new(crate::project_service::RebornProjectService::new(
+                Arc::clone(&local_runtime.project_repository),
+            )),
             approval_requests: local_runtime.approval_requests.clone(),
             capability_leases: local_runtime.capability_leases.clone(),
         };
@@ -1742,6 +1865,9 @@ mod tests {
             trajectory_observer: None,
             outbound_preferences_facade: None,
             outbound_delivery_target_set_requires_approval: false,
+            project_service: Arc::new(crate::project_service::RebornProjectService::new(
+                Arc::clone(&local_runtime.project_repository),
+            )),
             approval_requests: local_runtime.approval_requests.clone(),
             capability_leases: local_runtime.capability_leases.clone(),
         };
@@ -1839,6 +1965,9 @@ mod tests {
             trajectory_observer: None,
             outbound_preferences_facade: None,
             outbound_delivery_target_set_requires_approval: false,
+            project_service: Arc::new(crate::project_service::RebornProjectService::new(
+                Arc::clone(&local_runtime.project_repository),
+            )),
             approval_requests: local_runtime.approval_requests.clone(),
             capability_leases: local_runtime.capability_leases.clone(),
         };
@@ -2066,6 +2195,9 @@ mod tests {
             trajectory_observer: None,
             outbound_preferences_facade: None,
             outbound_delivery_target_set_requires_approval: false,
+            project_service: Arc::new(crate::project_service::RebornProjectService::new(
+                Arc::clone(&local_runtime.project_repository),
+            )),
             approval_requests: local_runtime.approval_requests.clone(),
             capability_leases: local_runtime.capability_leases.clone(),
         };
@@ -2163,6 +2295,9 @@ mod tests {
             trajectory_observer: None,
             outbound_preferences_facade: None,
             outbound_delivery_target_set_requires_approval: false,
+            project_service: Arc::new(crate::project_service::RebornProjectService::new(
+                Arc::clone(&local_runtime.project_repository),
+            )),
             approval_requests: local_runtime.approval_requests.clone(),
             capability_leases: local_runtime.capability_leases.clone(),
         };
