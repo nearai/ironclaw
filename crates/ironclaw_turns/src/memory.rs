@@ -6,7 +6,7 @@ use std::{
 };
 
 use chrono::{Duration as ChronoDuration, Utc};
-use ironclaw_host_api::UserId;
+use ironclaw_host_api::{TenantId, UserId};
 
 use crate::{
     AcceptedMessageRef, AdmissionRejection, AdmissionRejectionReason,
@@ -157,9 +157,9 @@ struct Inner {
     /// Counts runs currently in `TurnStatus::Running` per (TenantId, UserId).
     /// Actor-fallback and ownerless runs are never counted.
     running_by_user: HashMap<(ironclaw_host_api::TenantId, ironclaw_host_api::UserId), u32>,
-    /// Counts runs currently in `TurnStatus::Running` per OriginClass.
+    /// Counts runs currently in `TurnStatus::Running` per (TenantId, OriginClass).
     /// Runs without `product_context` are never counted.
-    running_by_origin_class: HashMap<OriginClass, u32>,
+    running_by_origin_class: HashMap<(ironclaw_host_api::TenantId, OriginClass), u32>,
 }
 
 enum AppliedLoopTransition {
@@ -380,37 +380,39 @@ impl InMemoryTurnStateStore {
         }
     }
 
-    /// Returns the number of runs currently in `TurnStatus::Running` with `ScheduledTrigger` origin.
-    /// Intended for testing and observability.
-    pub fn running_trigger_count(&self) -> u32 {
+    /// Returns the number of runs currently in `TurnStatus::Running` with `ScheduledTrigger` origin
+    /// for the given tenant. Intended for testing and observability.
+    pub fn running_trigger_count(&self, tenant: &TenantId) -> u32 {
+        let key = (tenant.clone(), OriginClass::Trigger);
         match self.inner.lock() {
             Ok(inner) => inner
                 .running_by_origin_class
-                .get(&OriginClass::Trigger)
+                .get(&key)
                 .copied()
                 .unwrap_or(0),
             Err(poisoned) => poisoned
                 .into_inner()
                 .running_by_origin_class
-                .get(&OriginClass::Trigger)
+                .get(&key)
                 .copied()
                 .unwrap_or(0),
         }
     }
 
-    /// Returns the number of runs currently in `TurnStatus::Running` with `Inbound` or `WebUi` origin.
-    /// Intended for testing and observability.
-    pub fn running_conversation_count(&self) -> u32 {
+    /// Returns the number of runs currently in `TurnStatus::Running` with `Inbound` or `WebUi` origin
+    /// for the given tenant. Intended for testing and observability.
+    pub fn running_conversation_count(&self, tenant: &TenantId) -> u32 {
+        let key = (tenant.clone(), OriginClass::Conversation);
         match self.inner.lock() {
             Ok(inner) => inner
                 .running_by_origin_class
-                .get(&OriginClass::Conversation)
+                .get(&key)
                 .copied()
                 .unwrap_or(0),
             Err(poisoned) => poisoned
                 .into_inner()
                 .running_by_origin_class
-                .get(&OriginClass::Conversation)
+                .get(&key)
                 .copied()
                 .unwrap_or(0),
         }
@@ -1725,12 +1727,13 @@ impl Inner {
         }
 
         // Rebuild per-origin-class running counter from restored records.
-        let mut running_by_origin_class: HashMap<OriginClass, u32> = HashMap::new();
+        let mut running_by_origin_class: HashMap<(ironclaw_host_api::TenantId, OriginClass), u32> =
+            HashMap::new();
         for record in records.values() {
             if holds_running_slot(record.status.get())
-                && let Some(cls) = Self::run_origin_class(record)
+                && let Some(key) = Self::run_origin_key(record)
             {
-                *running_by_origin_class.entry(cls).or_insert(0u32) += 1;
+                *running_by_origin_class.entry(key).or_insert(0u32) += 1;
             }
         }
 
@@ -2054,6 +2057,10 @@ impl Inner {
         }
     }
 
+    fn run_origin_key(record: &RunRecord) -> Option<(ironclaw_host_api::TenantId, OriginClass)> {
+        Self::run_origin_class(record).map(|cls| (record.scope.tenant_id.clone(), cls))
+    }
+
     fn apply_status_transition(&mut self, transition: StatusTransition, record: &RunRecord) {
         match transition {
             StatusTransition::EnteredRunning => self.on_run_entered_running(record),
@@ -2066,8 +2073,8 @@ impl Inner {
         if let Some(key) = Self::run_user_key(&record.scope) {
             *self.running_by_user.entry(key).or_insert(0) += 1;
         }
-        if let Some(cls) = Self::run_origin_class(record) {
-            *self.running_by_origin_class.entry(cls).or_insert(0) += 1;
+        if let Some(key) = Self::run_origin_key(record) {
+            *self.running_by_origin_class.entry(key).or_insert(0) += 1;
         }
     }
 
@@ -2080,12 +2087,12 @@ impl Inner {
                 self.running_by_user.remove(&key);
             }
         }
-        if let Some(cls) = Self::run_origin_class(record)
-            && let Some(count) = self.running_by_origin_class.get_mut(&cls)
+        if let Some(key) = Self::run_origin_key(record)
+            && let Some(count) = self.running_by_origin_class.get_mut(&key)
         {
             *count = count.saturating_sub(1);
             if *count == 0 {
-                self.running_by_origin_class.remove(&cls);
+                self.running_by_origin_class.remove(&key);
             }
         }
     }
@@ -2108,23 +2115,23 @@ impl Inner {
                     Some(key) => self.running_by_user.get(&key).copied().unwrap_or(0) < cap.get(),
                 },
             };
-            let origin_ok = match Self::run_origin_class(record) {
+            let origin_ok = match Self::run_origin_key(record) {
                 None => true,
-                Some(OriginClass::Trigger) => {
+                Some((ref tenant_id, OriginClass::Trigger)) => {
                     self.limits.max_concurrent_trigger_runs.is_none_or(|cap| {
                         self.running_by_origin_class
-                            .get(&OriginClass::Trigger)
+                            .get(&(tenant_id.clone(), OriginClass::Trigger))
                             .copied()
                             .unwrap_or(0)
                             < cap.get()
                     })
                 }
-                Some(OriginClass::Conversation) => self
+                Some((ref tenant_id, OriginClass::Conversation)) => self
                     .limits
                     .max_concurrent_conversation_runs
                     .is_none_or(|cap| {
                         self.running_by_origin_class
-                            .get(&OriginClass::Conversation)
+                            .get(&(tenant_id.clone(), OriginClass::Conversation))
                             .copied()
                             .unwrap_or(0)
                             < cap.get()
