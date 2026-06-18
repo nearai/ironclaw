@@ -750,6 +750,9 @@ fn reject_unsupported_runtime_sections(
     }
 }
 
+const MAX_WORKER_COUNT: usize = 32;
+const DEFAULT_WORKER_COUNT: usize = 4;
+
 fn runner_settings(
     config_file: Option<&ironclaw_reborn_config::RebornConfigFile>,
 ) -> anyhow::Result<TurnRunnerSettings> {
@@ -769,6 +772,33 @@ fn runner_settings(
             }
             settings.poll_interval = Duration::from_millis(ms);
         }
+        // worker_count: None or Some(0) → default 4; clamp at 32.
+        let raw_worker_count = runner.worker_count.unwrap_or(0);
+        let resolved_count = if raw_worker_count == 0 {
+            DEFAULT_WORKER_COUNT
+        } else if raw_worker_count > MAX_WORKER_COUNT {
+            tracing::debug!(
+                requested = raw_worker_count,
+                clamped = MAX_WORKER_COUNT,
+                "config file [runner].worker_count exceeds maximum; clamping"
+            );
+            MAX_WORKER_COUNT
+        } else {
+            raw_worker_count
+        };
+        // SAFETY: resolved_count is always in [1, 32], both non-zero.
+        settings.worker_count =
+            std::num::NonZeroUsize::new(resolved_count).expect("resolved_count is non-zero");
+
+        // max_concurrent_runs_per_user: Some(0) → None (unlimited).
+        settings.max_concurrent_runs_per_user =
+            runner.max_concurrent_runs_per_user.and_then(std::num::NonZeroU32::new);
+        // max_concurrent_trigger_runs: Some(0) → None (unlimited).
+        settings.max_concurrent_trigger_runs =
+            runner.max_concurrent_trigger_runs.and_then(std::num::NonZeroU32::new);
+        // max_concurrent_conversation_runs: Some(0) → None (unlimited).
+        settings.max_concurrent_conversation_runs =
+            runner.max_concurrent_conversation_runs.and_then(std::num::NonZeroU32::new);
     }
     Ok(settings)
 }
@@ -788,9 +818,80 @@ mod tests {
     #[cfg(feature = "webui-v2-beta")]
     use super::with_run_local_trigger_fire_access_checker;
     use super::{
-        RuntimeInputCaller, RuntimeInputOptions, block_on_cli, build_runtime_input,
-        build_runtime_input_with_options, no_assistant_text_message, resolve_google_oauth_config,
+        DEFAULT_WORKER_COUNT, MAX_WORKER_COUNT, RuntimeInputCaller, RuntimeInputOptions, block_on_cli,
+        build_runtime_input, build_runtime_input_with_options, no_assistant_text_message,
+        resolve_google_oauth_config, runner_settings,
     };
+
+    fn parse_runner_section(toml: &str) -> ironclaw_reborn_config::RebornConfigFile {
+        ironclaw_reborn_config::RebornConfigFile::parse_text(
+            toml,
+            &std::path::PathBuf::from("/test/config.toml"),
+        )
+        .expect("must parse")
+    }
+
+    #[test]
+    fn runner_settings_absent_runner_gives_defaults() {
+        let settings = runner_settings(None).expect("should succeed");
+        assert_eq!(settings.worker_count.get(), DEFAULT_WORKER_COUNT);
+        assert!(settings.max_concurrent_runs_per_user.is_none());
+        assert!(settings.max_concurrent_trigger_runs.is_none());
+        assert!(settings.max_concurrent_conversation_runs.is_none());
+    }
+
+    #[test]
+    fn runner_settings_zero_worker_count_gives_default() {
+        let cfg = parse_runner_section("[runner]\nworker_count = 0\n");
+        let settings = runner_settings(Some(&cfg)).expect("should succeed");
+        assert_eq!(settings.worker_count.get(), DEFAULT_WORKER_COUNT);
+    }
+
+    #[test]
+    fn runner_settings_present_worker_count_round_trips() {
+        let cfg = parse_runner_section("[runner]\nworker_count = 7\n");
+        let settings = runner_settings(Some(&cfg)).expect("should succeed");
+        assert_eq!(settings.worker_count.get(), 7);
+    }
+
+    #[test]
+    fn runner_settings_clamps_worker_count_at_max() {
+        let toml = format!("[runner]\nworker_count = {}\n", MAX_WORKER_COUNT + 10);
+        let cfg = parse_runner_section(&toml);
+        let settings = runner_settings(Some(&cfg)).expect("should succeed");
+        assert_eq!(settings.worker_count.get(), MAX_WORKER_COUNT);
+    }
+
+    #[test]
+    fn runner_settings_zero_caps_become_none_unlimited() {
+        let cfg = parse_runner_section(
+            "[runner]\nmax_concurrent_runs_per_user = 0\nmax_concurrent_trigger_runs = 0\nmax_concurrent_conversation_runs = 0\n",
+        );
+        let settings = runner_settings(Some(&cfg)).expect("should succeed");
+        assert!(settings.max_concurrent_runs_per_user.is_none());
+        assert!(settings.max_concurrent_trigger_runs.is_none());
+        assert!(settings.max_concurrent_conversation_runs.is_none());
+    }
+
+    #[test]
+    fn runner_settings_nonzero_caps_round_trip() {
+        let cfg = parse_runner_section(
+            "[runner]\nmax_concurrent_runs_per_user = 3\nmax_concurrent_trigger_runs = 5\nmax_concurrent_conversation_runs = 2\n",
+        );
+        let settings = runner_settings(Some(&cfg)).expect("should succeed");
+        assert_eq!(
+            settings.max_concurrent_runs_per_user.map(|v| v.get()),
+            Some(3)
+        );
+        assert_eq!(
+            settings.max_concurrent_trigger_runs.map(|v| v.get()),
+            Some(5)
+        );
+        assert_eq!(
+            settings.max_concurrent_conversation_runs.map(|v| v.get()),
+            Some(2)
+        );
+    }
 
     fn clear_trigger_poller_env() -> (EnvGuard, EnvGuard) {
         (

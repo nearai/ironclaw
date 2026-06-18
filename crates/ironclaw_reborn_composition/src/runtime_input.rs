@@ -197,6 +197,17 @@ impl ResolvedRebornLlm {
 pub struct TurnRunnerSettings {
     pub heartbeat_interval: Duration,
     pub poll_interval: Duration,
+    /// Number of concurrent turn-runner worker tasks.
+    pub worker_count: std::num::NonZeroUsize,
+    /// Max runs in `TurnStatus::Running` per (tenant_id, owner user_id).
+    /// `None` = unlimited. Owner-less / actor-fallback runs are never counted.
+    pub max_concurrent_runs_per_user: Option<std::num::NonZeroU32>,
+    /// Max runs in `TurnStatus::Running` for `ScheduledTrigger` origin.
+    /// `None` = unlimited.
+    pub max_concurrent_trigger_runs: Option<std::num::NonZeroU32>,
+    /// Max runs in `TurnStatus::Running` for `Inbound` or `WebUi` origin.
+    /// `None` = unlimited.
+    pub max_concurrent_conversation_runs: Option<std::num::NonZeroU32>,
 }
 
 impl Default for TurnRunnerSettings {
@@ -204,6 +215,10 @@ impl Default for TurnRunnerSettings {
         Self {
             heartbeat_interval: DEFAULT_TURN_RUNNER_HEARTBEAT_INTERVAL,
             poll_interval: DEFAULT_TURN_RUNNER_POLL_INTERVAL,
+            worker_count: std::num::NonZeroUsize::new(4).expect("4 is non-zero"),
+            max_concurrent_runs_per_user: None,
+            max_concurrent_trigger_runs: None,
+            max_concurrent_conversation_runs: None,
         }
     }
 }
