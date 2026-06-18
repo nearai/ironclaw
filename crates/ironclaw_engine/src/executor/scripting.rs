@@ -3940,8 +3940,15 @@ except Exception as e:
     // ── llm_query model parameter plumbing ─────────────────────
 
     /// LLM backend that records every call's model + prompt for assertions.
+    #[derive(Clone)]
+    struct CapturedLlmCall {
+        model: Option<String>,
+        prompt: String,
+        metadata: HashMap<String, String>,
+    }
+
     struct CapturingLlm {
-        calls: tokio::sync::Mutex<Vec<(Option<String>, String, HashMap<String, String>)>>,
+        calls: tokio::sync::Mutex<Vec<CapturedLlmCall>>,
     }
 
     impl CapturingLlm {
@@ -3969,11 +3976,11 @@ except Exception as e:
                 .find(|m| matches!(m.role, crate::types::message::MessageRole::User))
                 .map(|m| m.content.clone())
                 .unwrap_or_default();
-            self.calls.lock().await.push((
-                config.model.clone(),
-                user_prompt.clone(),
-                config.metadata.clone(),
-            ));
+            self.calls.lock().await.push(CapturedLlmCall {
+                model: config.model.clone(),
+                prompt: user_prompt.clone(),
+                metadata: config.metadata.clone(),
+            });
             Ok(crate::traits::llm::LlmOutput {
                 response: crate::types::step::LlmResponse::Text(format!(
                     "ack:{}:{user_prompt}",
@@ -4014,8 +4021,8 @@ except Exception as e:
 
         let calls = llm.calls.lock().await;
         assert_eq!(calls.len(), 1);
-        assert_eq!(calls[0].0.as_deref(), Some("gpt-4o"));
-        assert_eq!(calls[0].1, "what is 2+2?");
+        assert_eq!(calls[0].model.as_deref(), Some("gpt-4o"));
+        assert_eq!(calls[0].prompt, "what is 2+2?");
     }
 
     #[tokio::test]
@@ -4032,7 +4039,7 @@ except Exception as e:
 
         let calls = llm.calls.lock().await;
         assert_eq!(calls.len(), 1);
-        assert_eq!(calls[0].0, None);
+        assert_eq!(calls[0].model, None);
     }
 
     #[tokio::test]
@@ -4078,8 +4085,11 @@ answer = await llm_query("summarize")
         );
         let calls = llm.calls.lock().await;
         assert_eq!(calls.len(), 1);
-        assert_eq!(calls[0].1, "summarize");
-        assert_eq!(calls[0].2, thread.llm_usage_metadata(LlmCallPurpose::Chat));
+        assert_eq!(calls[0].prompt, "summarize");
+        assert_eq!(
+            calls[0].metadata,
+            thread.llm_usage_metadata(LlmCallPurpose::Chat)
+        );
     }
 
     #[tokio::test]
@@ -4112,11 +4122,11 @@ answer = await llm_query("summarize")
         }
 
         let mut calls = llm.calls.lock().await;
-        calls.sort_by(|a, b| a.0.cmp(&b.0));
+        calls.sort_by(|a, b| a.model.cmp(&b.model));
         assert_eq!(calls.len(), 3);
-        assert_eq!(calls[0].0.as_deref(), Some("claude-sonnet-4-20250514"));
-        assert_eq!(calls[1].0.as_deref(), Some("gpt-4o"));
-        assert_eq!(calls[2].0.as_deref(), Some("llama-3.1-70b-instruct"));
+        assert_eq!(calls[0].model.as_deref(), Some("claude-sonnet-4-20250514"));
+        assert_eq!(calls[1].model.as_deref(), Some("gpt-4o"));
+        assert_eq!(calls[2].model.as_deref(), Some("llama-3.1-70b-instruct"));
     }
 
     #[tokio::test]
@@ -4140,7 +4150,11 @@ answer = await llm_query("summarize")
 
         let calls = llm.calls.lock().await;
         assert_eq!(calls.len(), 2);
-        assert!(calls.iter().all(|(m, _, _)| m.as_deref() == Some("gpt-4o")));
+        assert!(
+            calls
+                .iter()
+                .all(|call| call.model.as_deref() == Some("gpt-4o"))
+        );
     }
 
     #[tokio::test]
@@ -4166,7 +4180,7 @@ answer = await llm_query("summarize")
 
         let calls = llm.calls.lock().await;
         assert_eq!(calls.len(), 1);
-        assert_eq!(calls[0].0, None);
+        assert_eq!(calls[0].model, None);
     }
 
     #[tokio::test]
@@ -4209,7 +4223,7 @@ answer = await llm_query("summarize")
 
         let calls = llm.calls.lock().await;
         assert_eq!(calls.len(), 2);
-        assert!(calls.iter().all(|(m, _, _)| m.is_none()));
+        assert!(calls.iter().all(|call| call.model.is_none()));
     }
 
     #[tokio::test]
@@ -4242,7 +4256,11 @@ answer = await llm_query("summarize")
 
         let calls = llm.calls.lock().await;
         assert_eq!(calls.len(), 2);
-        assert!(calls.iter().all(|(m, _, _)| m.as_deref() == Some("gpt-4o")));
+        assert!(
+            calls
+                .iter()
+                .all(|call| call.model.as_deref() == Some("gpt-4o"))
+        );
     }
 
     #[tokio::test]
@@ -4271,10 +4289,10 @@ answer = await llm_query("summarize")
 
         assert!(matches!(result, ExtFunctionResult::Return(_)));
         let mut calls = llm.calls.lock().await;
-        calls.sort_by(|a, b| a.0.cmp(&b.0));
+        calls.sort_by(|a, b| a.model.cmp(&b.model));
         assert_eq!(calls.len(), 2);
-        assert_eq!(calls[0].0.as_deref(), Some("claude-sonnet-4-6"));
-        assert_eq!(calls[1].0.as_deref(), Some("gpt-4o"));
+        assert_eq!(calls[0].model.as_deref(), Some("claude-sonnet-4-6"));
+        assert_eq!(calls[1].model.as_deref(), Some("gpt-4o"));
     }
 
     #[tokio::test]
@@ -4299,7 +4317,7 @@ answer = await llm_query("summarize")
         assert!(matches!(result, ExtFunctionResult::Return(_)));
         let calls = llm.calls.lock().await;
         assert_eq!(calls.len(), 1);
-        assert_eq!(calls[0].0, None);
+        assert_eq!(calls[0].model, None);
     }
 
     #[tokio::test]
@@ -4373,10 +4391,16 @@ answer = await llm_query("summarize")
         let calls = llm.calls.lock().await;
         assert_eq!(calls.len(), 2);
         // Slot 0 was None — must remain None, not become "claude-sonnet-4-20250514".
-        let slot_a = calls.iter().find(|(_, p, _)| p == "a").expect("call for a");
-        let slot_b = calls.iter().find(|(_, p, _)| p == "b").expect("call for b");
-        assert_eq!(slot_a.0, None);
-        assert_eq!(slot_b.0.as_deref(), Some("gpt-4o"));
+        let slot_a = calls
+            .iter()
+            .find(|call| call.prompt == "a")
+            .expect("call for a");
+        let slot_b = calls
+            .iter()
+            .find(|call| call.prompt == "b")
+            .expect("call for b");
+        assert_eq!(slot_a.model, None);
+        assert_eq!(slot_b.model.as_deref(), Some("gpt-4o"));
     }
 
     #[tokio::test]

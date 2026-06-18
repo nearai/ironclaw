@@ -1783,10 +1783,11 @@ pub async fn init_engine(agent: &Agent) -> Result<(), Error> {
         Arc::clone(&agent.deps.cost_guard),
         agent.deps.llm_backend.clone(),
     ));
-    let llm_adapter = Arc::new(
-        LlmBridgeAdapter::new(agent.llm().clone(), Some(agent.cheap_llm().clone()))
-            .with_usage_recorder(usage_recorder),
-    );
+    let llm_adapter = Arc::new(LlmBridgeAdapter::new(
+        agent.llm().clone(),
+        Some(agent.cheap_llm().clone()),
+        usage_recorder,
+    ));
 
     let effect_adapter = Arc::new(
         EffectBridgeAdapter::new(

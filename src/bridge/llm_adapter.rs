@@ -85,9 +85,7 @@ pub struct LlmBridgeAdapter {
     provider: Arc<dyn LlmProvider>,
     /// Optional cheaper provider for sub-calls (depth > 0).
     cheap_provider: Option<Arc<dyn LlmProvider>>,
-    /// Optional for unit tests and hostless adapter use; production engine
-    /// initialization attaches a recorder in `bridge::router::init_engine`.
-    usage_recorder: Option<Arc<LlmUsageRecorder>>,
+    usage_recorder: Arc<LlmUsageRecorder>,
 }
 
 pub struct LlmUsageRecorder {
@@ -193,17 +191,31 @@ impl LlmBridgeAdapter {
     pub fn new(
         provider: Arc<dyn LlmProvider>,
         cheap_provider: Option<Arc<dyn LlmProvider>>,
+        usage_recorder: Arc<LlmUsageRecorder>,
     ) -> Self {
         Self {
             provider,
             cheap_provider,
-            usage_recorder: None,
+            usage_recorder,
         }
     }
 
-    pub fn with_usage_recorder(mut self, usage_recorder: Arc<LlmUsageRecorder>) -> Self {
-        self.usage_recorder = Some(usage_recorder);
-        self
+    #[cfg(test)]
+    fn new_without_usage_recorder_for_testing(
+        provider: Arc<dyn LlmProvider>,
+        cheap_provider: Option<Arc<dyn LlmProvider>>,
+    ) -> Self {
+        Self::new(
+            provider,
+            cheap_provider,
+            Arc::new(LlmUsageRecorder::new(
+                None,
+                Arc::new(crate::agent::cost_guard::CostGuard::new(
+                    crate::agent::cost_guard::CostGuardConfig::default(),
+                )),
+                "test-disabled",
+            )),
+        )
     }
 
     fn provider_for_depth(&self, depth: u32) -> &Arc<dyn LlmProvider> {
@@ -220,10 +232,7 @@ impl LlmBridgeAdapter {
         config: &LlmCallConfig,
         tokens: LlmTokenBuckets,
     ) -> Result<(), EngineError> {
-        if let Some(recorder) = self.usage_recorder.as_ref() {
-            recorder.record(provider, config, tokens).await?;
-        }
-        Ok(())
+        self.usage_recorder.record(provider, config, tokens).await
     }
 }
 
@@ -887,7 +896,7 @@ mod tests {
         let provider: Arc<dyn LlmProvider> = Arc::new(CapturingProvider {
             state: state.clone(),
         });
-        let adapter = LlmBridgeAdapter::new(provider, None);
+        let adapter = LlmBridgeAdapter::new_without_usage_recorder_for_testing(provider, None);
         let messages = vec![
             ThreadMessage::user("Find the docs"),
             ThreadMessage::assistant("I checked a tool earlier."),
@@ -924,7 +933,7 @@ mod tests {
         let provider: Arc<dyn LlmProvider> = Arc::new(CapturingProvider {
             state: state.clone(),
         });
-        let adapter = LlmBridgeAdapter::new(provider, None);
+        let adapter = LlmBridgeAdapter::new_without_usage_recorder_for_testing(provider, None);
         let messages = vec![
             ThreadMessage::user("Find the docs"),
             ThreadMessage::assistant("I checked a tool earlier."),
@@ -1022,13 +1031,15 @@ mod tests {
 
         let cost_guard = Arc::new(CostGuard::new(CostGuardConfig::default()));
         let provider: Arc<dyn LlmProvider> = Arc::new(PricedUsageProvider);
-        let adapter = LlmBridgeAdapter::new(provider, None).with_usage_recorder(Arc::new(
-            LlmUsageRecorder::new(
+        let adapter = LlmBridgeAdapter::new(
+            provider,
+            None,
+            Arc::new(LlmUsageRecorder::new(
                 Some(Arc::clone(&db)),
                 Arc::clone(&cost_guard),
                 "test-backend",
-            ),
-        ));
+            )),
+        );
         let mut config = LlmCallConfig::default();
         config
             .metadata
@@ -1083,9 +1094,11 @@ mod tests {
         let db: Arc<dyn Database> = Arc::new(backend);
         let cost_guard = Arc::new(CostGuard::new(CostGuardConfig::default()));
         let provider: Arc<dyn LlmProvider> = Arc::new(PricedProvider);
-        let adapter = LlmBridgeAdapter::new(provider, None).with_usage_recorder(Arc::new(
-            LlmUsageRecorder::new(Some(db), cost_guard, "test-backend"),
-        ));
+        let adapter = LlmBridgeAdapter::new(
+            provider,
+            None,
+            Arc::new(LlmUsageRecorder::new(Some(db), cost_guard, "test-backend")),
+        );
 
         let err = adapter
             .complete(
@@ -1110,7 +1123,7 @@ mod tests {
         let provider: Arc<dyn LlmProvider> = Arc::new(CapturingProvider {
             state: state.clone(),
         });
-        let adapter = LlmBridgeAdapter::new(provider, None);
+        let adapter = LlmBridgeAdapter::new_without_usage_recorder_for_testing(provider, None);
         let messages = vec![
             ThreadMessage::user("Find the docs"),
             ThreadMessage::assistant_with_actions(
@@ -1232,7 +1245,7 @@ mod tests {
         let provider: Arc<dyn LlmProvider> = Arc::new(FlattenedToolCallProvider {
             content: "Now let me list your installed extensions and start Pi:\n\n[Called tool `shell` with arguments: {\"command\":\"pi list 2>&1\",\"timeout\":10,\"workdir\":\".\"}]".to_string(),
         });
-        let adapter = LlmBridgeAdapter::new(provider, None);
+        let adapter = LlmBridgeAdapter::new_without_usage_recorder_for_testing(provider, None);
 
         let output = adapter
             .complete(
@@ -1262,7 +1275,7 @@ mod tests {
         let provider: Arc<dyn LlmProvider> = Arc::new(FlattenedToolCallProvider {
             content: "Let me check.\n[Called tool `unknown_tool` with arguments: {}]".to_string(),
         });
-        let adapter = LlmBridgeAdapter::new(provider, None);
+        let adapter = LlmBridgeAdapter::new_without_usage_recorder_for_testing(provider, None);
 
         let output = adapter
             .complete(
@@ -1323,7 +1336,7 @@ mod tests {
         let provider: Arc<dyn LlmProvider> = Arc::new(FlattenedPlainTextProvider {
             content: "Let me check.\n[Called tool `shell` with arguments: {}]".to_string(),
         });
-        let adapter = LlmBridgeAdapter::new(provider, None);
+        let adapter = LlmBridgeAdapter::new_without_usage_recorder_for_testing(provider, None);
 
         let output = adapter
             .complete(
@@ -1347,7 +1360,7 @@ mod tests {
         let provider: Arc<dyn LlmProvider> = Arc::new(FlattenedToolCallProvider {
             content: "[Called tool `unknown_tool` with arguments: {}]".to_string(),
         });
-        let adapter = LlmBridgeAdapter::new(provider, None);
+        let adapter = LlmBridgeAdapter::new_without_usage_recorder_for_testing(provider, None);
 
         let output = adapter
             .complete(
@@ -1371,7 +1384,7 @@ mod tests {
         let provider: Arc<dyn LlmProvider> = Arc::new(FlattenedPlainTextProvider {
             content: "[Called tool `shell` with arguments: {}]".to_string(),
         });
-        let adapter = LlmBridgeAdapter::new(provider, None);
+        let adapter = LlmBridgeAdapter::new_without_usage_recorder_for_testing(provider, None);
 
         let output = adapter
             .complete(
@@ -1396,7 +1409,7 @@ mod tests {
         let provider: Arc<dyn LlmProvider> = Arc::new(CapturingProvider {
             state: state.clone(),
         });
-        let adapter = LlmBridgeAdapter::new(provider, None);
+        let adapter = LlmBridgeAdapter::new_without_usage_recorder_for_testing(provider, None);
 
         let config = ironclaw_engine::LlmCallConfig {
             model: Some("gpt-4o".into()),
@@ -1439,7 +1452,7 @@ mod tests {
         let provider: Arc<dyn LlmProvider> = Arc::new(CapturingProvider {
             state: state.clone(),
         });
-        let adapter = LlmBridgeAdapter::new(provider, None);
+        let adapter = LlmBridgeAdapter::new_without_usage_recorder_for_testing(provider, None);
 
         adapter
             .complete(
@@ -1473,7 +1486,7 @@ mod tests {
         let provider: Arc<dyn LlmProvider> = Arc::new(CapturingProvider {
             state: state.clone(),
         });
-        let adapter = LlmBridgeAdapter::new(provider, None);
+        let adapter = LlmBridgeAdapter::new_without_usage_recorder_for_testing(provider, None);
 
         let result = adapter
             .complete(
@@ -1543,7 +1556,7 @@ mod tests {
         let provider: Arc<dyn LlmProvider> = Arc::new(CapturingProvider {
             state: state.clone(),
         });
-        let adapter = LlmBridgeAdapter::new(provider, None);
+        let adapter = LlmBridgeAdapter::new_without_usage_recorder_for_testing(provider, None);
 
         let result = adapter
             .complete(
@@ -2018,7 +2031,7 @@ And also check the token price:\n\
     #[tokio::test]
     async fn complete_resolves_template_refs_through_adapter() {
         let provider: Arc<dyn LlmProvider> = Arc::new(TemplateRefProvider);
-        let adapter = LlmBridgeAdapter::new(provider, None);
+        let adapter = LlmBridgeAdapter::new_without_usage_recorder_for_testing(provider, None);
 
         // Conversation history: user asked to create a project, tool returned
         // a result with project_id, now the LLM wants to create a mission
@@ -2127,7 +2140,7 @@ And also check the token price:\n\
     #[tokio::test]
     async fn complete_no_tools_populates_cost_usd_through_adapter() {
         let provider: Arc<dyn LlmProvider> = Arc::new(PricedProvider);
-        let adapter = LlmBridgeAdapter::new(provider, None);
+        let adapter = LlmBridgeAdapter::new_without_usage_recorder_for_testing(provider, None);
 
         let output = adapter
             .complete(
@@ -2148,7 +2161,7 @@ And also check the token price:\n\
     #[tokio::test]
     async fn complete_with_tools_populates_cost_usd_through_adapter() {
         let provider: Arc<dyn LlmProvider> = Arc::new(PricedProvider);
-        let adapter = LlmBridgeAdapter::new(provider, None);
+        let adapter = LlmBridgeAdapter::new_without_usage_recorder_for_testing(provider, None);
 
         let output = adapter
             .complete(
@@ -2205,7 +2218,8 @@ And also check the token price:\n\
 
         let primary: Arc<dyn LlmProvider> = Arc::new(PricedProvider);
         let cheap: Arc<dyn LlmProvider> = Arc::new(ZeroProvider);
-        let adapter = LlmBridgeAdapter::new(primary, Some(cheap));
+        let adapter =
+            LlmBridgeAdapter::new_without_usage_recorder_for_testing(primary, Some(cheap));
 
         let output = adapter
             .complete(
@@ -2264,7 +2278,7 @@ And also check the token price:\n\
         }
 
         let provider: Arc<dyn LlmProvider> = Arc::new(SubscriptionProvider);
-        let adapter = LlmBridgeAdapter::new(provider, None);
+        let adapter = LlmBridgeAdapter::new_without_usage_recorder_for_testing(provider, None);
 
         let output = adapter
             .complete(&[ThreadMessage::user("hi")], &[], &LlmCallConfig::default())
@@ -2335,7 +2349,7 @@ And also check the token price:\n\
         }
 
         let provider: Arc<dyn LlmProvider> = Arc::new(AnthropicCachingProvider);
-        let adapter = LlmBridgeAdapter::new(provider, None);
+        let adapter = LlmBridgeAdapter::new_without_usage_recorder_for_testing(provider, None);
 
         let output = adapter
             .complete(&[ThreadMessage::user("hi")], &[], &LlmCallConfig::default())
