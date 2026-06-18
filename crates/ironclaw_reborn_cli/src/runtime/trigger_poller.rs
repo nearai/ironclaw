@@ -82,11 +82,10 @@ fn truncate_env_value_for_display(raw: &str) -> String {
 ///    absent here falls through to the compiled default.
 /// 3. Compiled default — `TriggerPollerSettings::default()` (all limits at the
 ///    `ironclaw_triggers` crate defaults). The `enabled` default depends on the
-///    caller/profile: `serve` enables the scheduler by default for profiles
-///    with runtime poller wiring (local-dev and production) so scheduled
-///    automations actually run, while every other caller defaults to disabled.
-///    Config and env still override this (an env kill-switch wins), because
-///    this layer is applied first.
+///    caller/profile: local-dev `serve` enables the scheduler by default so
+///    scheduled automations actually run during local use, while production and
+///    every non-serve caller default to disabled. Config and env still override
+///    this (an env kill-switch wins), because this layer is applied first.
 ///
 /// V1 invariant: `max_concurrent_fires_per_trigger` must be exactly 1. Passing
 /// any other value (via config or, were an env override ever added, env) returns
@@ -99,13 +98,13 @@ pub(super) fn trigger_poller_settings(
     caller: RuntimeInputCaller,
     profile: RebornProfile,
 ) -> anyhow::Result<TriggerPollerSettings> {
-    // Layer 3: compiled default. `enabled` is on by default for runtime
-    // `serve` profiles that wire the trigger poller, and off everywhere else.
+    // Layer 3: compiled default. `enabled` is on by default for local-dev
+    // `serve`, and off everywhere else.
     let mut settings = TriggerPollerSettings::default();
     if caller == RuntimeInputCaller::Serve
         && matches!(
             profile,
-            RebornProfile::LocalDev | RebornProfile::LocalDevYolo | RebornProfile::Production
+            RebornProfile::LocalDev | RebornProfile::LocalDevYolo
         )
     {
         settings.enabled = true;
@@ -274,10 +273,10 @@ mod tests {
     }
 
     #[test]
-    fn trigger_poller_settings_production_serve_default_is_enabled() {
-        // Production `serve` wires the poller through durable stores, so the
-        // compiled default should run scheduled automations without requiring
-        // an explicit [trigger_poller] section.
+    fn trigger_poller_settings_production_serve_default_is_disabled() {
+        // Production must fail closed: durable poller wiring exists, but
+        // operators must explicitly opt in with config/env before scheduled
+        // automations run.
         let _lock = lock_trigger_env();
         let _enabled = EnvGuard::clear("IRONCLAW_TRIGGER_POLLER_ENABLED");
         let _interval = EnvGuard::clear("IRONCLAW_TRIGGER_POLLER_INTERVAL_SECS");
@@ -290,8 +289,8 @@ mod tests {
         .expect("production serve trigger poller settings");
 
         assert!(
-            settings.enabled,
-            "production serve must default the scheduler on"
+            !settings.enabled,
+            "production serve must default the scheduler off"
         );
     }
 
@@ -314,9 +313,8 @@ mod tests {
 
     #[test]
     fn trigger_poller_settings_production_explicit_config_enabled_still_wins() {
-        // Keep layer precedence simple: explicit production config remains
-        // visible even though the compiled production serve default is already
-        // enabled.
+        // Keep layer precedence simple: explicit production config can opt in
+        // even though the compiled production serve default is disabled.
         let _lock = lock_trigger_env();
         let _enabled = EnvGuard::clear("IRONCLAW_TRIGGER_POLLER_ENABLED");
         let _interval = EnvGuard::clear("IRONCLAW_TRIGGER_POLLER_INTERVAL_SECS");

@@ -376,11 +376,12 @@ pub struct BudgetSection {
 #[serde(deny_unknown_fields)]
 pub struct TriggerPollerConfigSection {
     /// Enable or disable the trigger poller. When omitted, the consuming CLI
-    /// applies the caller/profile default: `serve` enables it for wired
-    /// runtime profiles such as `local-dev` and `production`, while `run` and
-    /// `migration-dry-run` leave it disabled. Set `enabled = false` as an
-    /// explicit config kill switch, or use `IRONCLAW_TRIGGER_POLLER_ENABLED=0`
-    /// for the highest-precedence deployment kill switch.
+    /// applies the caller/profile default: local-dev `serve` enables it, while
+    /// production, `run`, and `migration-dry-run` leave it disabled. Set
+    /// `enabled = true` to opt production into scheduled trigger firing, set
+    /// `enabled = false` as an explicit config kill switch, or use
+    /// `IRONCLAW_TRIGGER_POLLER_ENABLED=0` for the highest-precedence
+    /// deployment kill switch.
     pub enabled: Option<bool>,
     /// How often the poller ticks, in seconds. Default in composition is 30.
     /// Range `1..=3600` is enforced at boot by the CLI settings layer;

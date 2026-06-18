@@ -1277,7 +1277,7 @@ default_profile = "secure_default"
 
     #[cfg(feature = "postgres")]
     #[test]
-    fn build_runtime_input_production_serve_defaults_trigger_poller_enabled() {
+    fn build_runtime_input_production_serve_defaults_trigger_poller_disabled() {
         let _lock = lock_trigger_env();
         let (_enabled, _interval) = clear_trigger_poller_env();
         let _postgres_url = EnvGuard::set(
@@ -1303,8 +1303,8 @@ default_profile = "secure_default"
         let runtime_input =
             build_runtime_input(&config, RuntimeInputCaller::Serve).expect("runtime input");
         assert!(
-            runtime_input.trigger_poller.enabled,
-            "production serve must default the trigger poller on"
+            !runtime_input.trigger_poller.enabled,
+            "production serve must default the trigger poller off"
         );
         let services = runtime_input.services.expect("services input");
         assert_eq!(services.profile(), RebornCompositionProfile::Production);

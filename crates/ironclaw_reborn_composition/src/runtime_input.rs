@@ -122,6 +122,85 @@ pub trait TriggerFireAccessChecker: Send + Sync {
     ) -> Result<TriggerFireAccessDecision, TriggerFireAccessError>;
 }
 
+/// Fire-time trigger access checker for a single trusted host-configured scope.
+///
+/// This checker is intentionally narrow: every scope dimension must match the
+/// configured tenant, creator, optional agent, and optional project exactly.
+/// `None` remains a real no-value dimension, not a wildcard.
+#[derive(Debug, Clone)]
+pub struct ExactScopeTriggerFireAccessChecker {
+    tenant_id: TenantId,
+    creator_user_id: UserId,
+    agent_id: Option<AgentId>,
+    project_id: Option<ProjectId>,
+}
+
+impl ExactScopeTriggerFireAccessChecker {
+    pub fn new(
+        tenant_id: TenantId,
+        creator_user_id: UserId,
+        agent_id: Option<AgentId>,
+        project_id: Option<ProjectId>,
+    ) -> Self {
+        Self {
+            tenant_id,
+            creator_user_id,
+            agent_id,
+            project_id,
+        }
+    }
+
+    pub fn for_default_agent(
+        tenant_id: TenantId,
+        creator_user_id: UserId,
+        default_agent_id: AgentId,
+        default_project_id: Option<ProjectId>,
+    ) -> Self {
+        Self::new(
+            tenant_id,
+            creator_user_id,
+            Some(default_agent_id),
+            default_project_id,
+        )
+    }
+
+    fn deny(reason: impl Into<String>) -> TriggerFireAccessDecision {
+        TriggerFireAccessDecision::Denied {
+            reason: reason.into(),
+        }
+    }
+}
+
+#[async_trait]
+impl TriggerFireAccessChecker for ExactScopeTriggerFireAccessChecker {
+    async fn check_trigger_fire_access(
+        &self,
+        request: TriggerFireAccessCheck,
+    ) -> Result<TriggerFireAccessDecision, TriggerFireAccessError> {
+        if request.tenant_id != self.tenant_id {
+            return Ok(Self::deny(
+                "trigger tenant does not match configured trigger-fire scope",
+            ));
+        }
+        if request.creator_user_id != self.creator_user_id {
+            return Ok(Self::deny(
+                "trigger creator does not match configured trigger-fire scope",
+            ));
+        }
+        if request.agent_id != self.agent_id {
+            return Ok(Self::deny(
+                "trigger agent does not match configured trigger-fire scope",
+            ));
+        }
+        if request.project_id != self.project_id {
+            return Ok(Self::deny(
+                "trigger project does not match configured trigger-fire scope",
+            ));
+        }
+        Ok(TriggerFireAccessDecision::Allowed)
+    }
+}
+
 #[cfg(feature = "root-llm-provider")]
 #[derive(Clone)]
 pub struct ResolvedRebornLlm {
@@ -547,5 +626,88 @@ impl RebornRuntimeInput {
     ) -> Self {
         self.model_cost_table_override = Some(cost_table);
         self
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn exact_scope_trigger_fire_checker_allows_exact_scope() {
+        let tenant_id = TenantId::new("exact-tenant").expect("tenant");
+        let user_id = UserId::new("exact-user").expect("user");
+        let agent_id = AgentId::new("exact-agent").expect("agent");
+        let project_id = ProjectId::new("exact-project").expect("project");
+        let checker = ExactScopeTriggerFireAccessChecker::for_default_agent(
+            tenant_id.clone(),
+            user_id.clone(),
+            agent_id.clone(),
+            Some(project_id.clone()),
+        );
+
+        let decision = checker
+            .check_trigger_fire_access(TriggerFireAccessCheck {
+                tenant_id,
+                creator_user_id: user_id,
+                agent_id: Some(agent_id),
+                project_id: Some(project_id),
+                trigger_id: TriggerId::new(),
+                fire_slot: chrono::Utc::now(),
+            })
+            .await
+            .expect("check trigger fire access");
+
+        assert_eq!(decision, TriggerFireAccessDecision::Allowed);
+    }
+
+    #[tokio::test]
+    async fn exact_scope_trigger_fire_checker_denies_scope_mismatch() {
+        let tenant_id = TenantId::new("exact-tenant").expect("tenant");
+        let user_id = UserId::new("exact-user").expect("user");
+        let agent_id = AgentId::new("exact-agent").expect("agent");
+        let project_id = ProjectId::new("exact-project").expect("project");
+        let checker = ExactScopeTriggerFireAccessChecker::for_default_agent(
+            tenant_id.clone(),
+            user_id.clone(),
+            agent_id.clone(),
+            Some(project_id.clone()),
+        );
+
+        let other_user_decision = checker
+            .check_trigger_fire_access(TriggerFireAccessCheck {
+                tenant_id: tenant_id.clone(),
+                creator_user_id: UserId::new("other-user").expect("user"),
+                agent_id: Some(agent_id.clone()),
+                project_id: Some(project_id.clone()),
+                trigger_id: TriggerId::new(),
+                fire_slot: chrono::Utc::now(),
+            })
+            .await
+            .expect("check trigger fire access");
+        assert_eq!(
+            other_user_decision,
+            TriggerFireAccessDecision::Denied {
+                reason: "trigger creator does not match configured trigger-fire scope".to_string(),
+            }
+        );
+
+        let other_project_decision = checker
+            .check_trigger_fire_access(TriggerFireAccessCheck {
+                tenant_id,
+                creator_user_id: user_id,
+                agent_id: Some(agent_id),
+                project_id: Some(ProjectId::new("other-project").expect("project")),
+                trigger_id: TriggerId::new(),
+                fire_slot: chrono::Utc::now(),
+            })
+            .await
+            .expect("check trigger fire access");
+        assert_eq!(
+            other_project_decision,
+            TriggerFireAccessDecision::Denied {
+                reason: "trigger project does not match configured trigger-fire scope".to_string(),
+            }
+        );
     }
 }

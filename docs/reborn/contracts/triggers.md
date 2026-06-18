@@ -245,12 +245,14 @@ A trigger fire is synthetic inbound, not a parallel agent loop.
   reactivated. The seeded row is exact
   `tenant_id`/`creator_user_id`/`agent_id`/`project_id` access; a missing
   project is not a wildcard.
-- Production `serve` with env-bearer WebUI auth may satisfy that contract by
-  wiring an exact secure-tenant checker over the trusted host tenant, the
-  authenticated WebUI user/runtime owner, the default agent, and the optional
-  default project. This checker is not a multi-tenant membership source of
-  truth; it intentionally authorizes only the configured single-operator scope
-  and denies any trigger persisted for another tenant, creator, agent, or
+- Production `serve` defaults the trigger poller off; operators must explicitly
+  opt in with `[trigger_poller].enabled = true` or the deployment environment.
+  When enabled with env-bearer WebUI auth, it may satisfy the fire-time access
+  contract by wiring an exact secure-tenant checker over the trusted host tenant,
+  the authenticated WebUI user/runtime owner, the default agent, and the
+  optional default project. This checker is not a multi-tenant membership source
+  of truth; it intentionally authorizes only the configured single-operator
+  scope and denies any trigger persisted for another tenant, creator, agent, or
   project.
 - The trusted inbound request is a host-owned synthetic inbound shape around the ordinary inbound fields. It carries only ingress identity and turn scope data needed to create the canonical turn, and it has no adapter-supplied requested-scope hints before binding resolution.
 - It must not encode delivery targets, notification targets, or any other outbound routing policy.
