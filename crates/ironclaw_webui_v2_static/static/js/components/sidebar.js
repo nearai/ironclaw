@@ -47,6 +47,7 @@ export function Sidebar({
           activeThreadId=${threadsState.activeThreadId}
           onSelect=${onSelectThread}
           onDelete=${onDeleteThread}
+          onNavigate=${onClose}
         />
       </div>
 
