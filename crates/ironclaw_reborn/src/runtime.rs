@@ -30,6 +30,11 @@ use ironclaw_turns::{
     runner::TurnRunTransitionPort,
 };
 
+use ironclaw_host_runtime::{
+    SchedulerTurnRunWakeNotifier, TurnRunScheduler, TurnRunSchedulerConfig, TurnRunSchedulerHandle,
+};
+use ironclaw_turns::TurnRunWakeNotifyError;
+
 use crate::{
     app_loop_family::build_loop_family_registry,
     driver_registry::{DriverRegistry, DriverRegistryError},
@@ -50,12 +55,46 @@ use crate::{
         prompt_material::GateBackedSubagentPromptMaterialSource,
     },
     text_loop_driver::TextOnlyModelReplyDriverConfig,
-    turn_runner::{
-        TurnRunnerWakeReceiver, TurnRunnerWakeSender, TurnRunnerWorker, TurnRunnerWorkerConfig,
-    },
+    turn_run_executor::RebornTurnRunExecutor,
+    turn_runner::TurnRunnerWorkerConfig,
 };
 
-type PlannedRuntimeWakeChannel = (TurnRunnerWakeSender, TurnRunnerWakeReceiver);
+/// A deferred wake notifier that forwards to the real notifier once it is set.
+///
+/// This breaks the coordinator → wake_notifier ← scheduler_notifier ← scheduler →
+/// executor → host_factory → capability_factory → coordinator cycle. The coordinator
+/// is built with this notifier early; the real scheduler notifier is wired in after
+/// the scheduler starts. Any notify calls before wiring return `Ok(())` — the
+/// scheduler's poll tick picks up queued runs within one poll interval.
+struct LateWireWakeNotifier {
+    inner: std::sync::OnceLock<Arc<dyn TurnRunWakeNotifier>>,
+}
+
+impl LateWireWakeNotifier {
+    fn new() -> Self {
+        Self {
+            inner: std::sync::OnceLock::new(),
+        }
+    }
+
+    fn set(&self, notifier: Arc<dyn TurnRunWakeNotifier>) {
+        // Ignore if already set (should not happen in practice).
+        let _ = self.inner.set(notifier);
+    }
+}
+
+impl TurnRunWakeNotifier for LateWireWakeNotifier {
+    fn notify_queued_run(
+        &self,
+        wake: ironclaw_turns::TurnRunWake,
+    ) -> Result<(), TurnRunWakeNotifyError> {
+        match self.inner.get() {
+            Some(notifier) => notifier.notify_queued_run(wake),
+            // Scheduler not started yet; run will be picked up on first poll tick.
+            None => Ok(()),
+        }
+    }
+}
 
 /// Default number of turn-runner worker tasks spawned per runtime instance.
 ///
@@ -183,8 +222,8 @@ where
     pub run_profile_resolver: Arc<dyn RunProfileResolver>,
     pub coordinator: Arc<dyn ironclaw_turns::TurnCoordinator>,
     pub host_factory: Arc<RebornLoopDriverHostFactory<S, G>>,
-    pub workers: Vec<Arc<TurnRunnerWorker>>,
-    pub wake_sender: TurnRunnerWakeSender,
+    pub scheduler_handle: TurnRunSchedulerHandle,
+    pub scheduler_notifier: Arc<SchedulerTurnRunWakeNotifier>,
 }
 
 #[derive(Debug)]
@@ -376,25 +415,11 @@ pub fn build_default_planned_runtime<G>(
 where
     G: HostManagedModelGateway + ?Sized + Send + Sync + 'static,
 {
-    build_default_planned_runtime_with_optional_wake_channel(parts, None)
+    build_default_planned_runtime_inner(parts)
 }
 
-pub fn build_default_planned_runtime_with_wake_channel<G>(
+fn build_default_planned_runtime_inner<G>(
     parts: DefaultPlannedRuntimeParts<G>,
-    wake_channel: PlannedRuntimeWakeChannel,
-) -> Result<
-    RebornRuntimeLoopComposition<dyn SessionThreadService, G>,
-    DefaultPlannedRuntimeBuildError,
->
-where
-    G: HostManagedModelGateway + ?Sized + Send + Sync + 'static,
-{
-    build_default_planned_runtime_with_optional_wake_channel(parts, Some(wake_channel))
-}
-
-fn build_default_planned_runtime_with_optional_wake_channel<G>(
-    parts: DefaultPlannedRuntimeParts<G>,
-    wake_channel: Option<PlannedRuntimeWakeChannel>,
 ) -> Result<
     RebornRuntimeLoopComposition<dyn SessionThreadService, G>,
     DefaultPlannedRuntimeBuildError,
@@ -423,19 +448,21 @@ where
     );
     let run_profile_resolver: Arc<dyn RunProfileResolver> = resolver;
 
-    let (wake_sender, wake_receiver) = wake_channel.unwrap_or_else(TurnRunnerWakeReceiver::new);
-    let worker_wake_notifier: Arc<dyn TurnRunWakeNotifier> = Arc::new(wake_sender.clone());
+    // Build a LateWireWakeNotifier to break the coordinator → scheduler → executor →
+    // host_factory → capability_factory → coordinator cycle. The coordinator is given
+    // this notifier now; the real scheduler notifier is wired in after the scheduler
+    // starts. Any notify calls before wiring return Ok(()) harmlessly — the scheduler's
+    // poll tick picks up queued runs within one poll interval.
+    let late_wire_notifier = Arc::new(LateWireWakeNotifier::new());
+    let late_wire_base: Arc<dyn TurnRunWakeNotifier> = late_wire_notifier.clone();
     // When a cancellation factory is supplied, fan-out each coordinator wake to
-    // BOTH the worker AND the factory's `notify_run_wake` observer. Without
-    // this composite, the worker still wakes but retained product run handles
+    // BOTH the scheduler AND the factory's `notify_run_wake` observer. Without
+    // this composite, the scheduler still wakes but retained product run handles
     // never flip on `cancel_run` — breaking end-to-end product-live
     // cancellation observation.
     let wake_notifier: Arc<dyn TurnRunWakeNotifier> = match parts.cancellation_factory.clone() {
-        Some(factory) => Arc::new(CompositeTurnRunWakeNotifier::new(
-            worker_wake_notifier,
-            factory,
-        )),
-        None => worker_wake_notifier,
+        Some(factory) => Arc::new(CompositeTurnRunWakeNotifier::new(late_wire_base, factory)),
+        None => late_wire_base,
     };
     let turn_state_for_observer: Arc<dyn TurnSpawnTreeStateStore> = parts.turn_state.clone();
     let completion_observer = Arc::new(SubagentCompletionObserver::new_unbound(
@@ -564,18 +591,27 @@ where
         parts.loop_exit_evidence,
     ));
     let worker_count = parts.config.worker_count.get();
-    let workers: Vec<Arc<TurnRunnerWorker>> = (0..worker_count)
-        .map(|_| {
-            Arc::new(TurnRunnerWorker::new(
-                parts.config.worker.clone(),
-                Arc::clone(&transition_port),
-                Arc::clone(&loop_exit_applier),
-                Arc::clone(&driver_registry),
-                host_factory.clone(),
-                wake_receiver.clone(),
-            ))
-        })
-        .collect();
+    let executor = Arc::new(RebornTurnRunExecutor::new(
+        Arc::clone(&loop_exit_applier),
+        Arc::clone(&driver_registry),
+        host_factory.clone() as Arc<dyn crate::turn_runner::HostFactory>,
+    ));
+    let scheduler_config = TurnRunSchedulerConfig::default()
+        .with_max_concurrent_runs(worker_count)
+        .with_runner_heartbeat_interval(parts.config.worker.heartbeat_interval)
+        .with_poll_interval(parts.config.worker.poll_interval);
+    let scheduler_handle = TurnRunScheduler::new(
+        Arc::clone(&transition_port),
+        executor,
+        scheduler_config,
+    )
+    .start();
+    let scheduler_notifier = scheduler_handle.wake_notifier();
+
+    // Wire the late-wire notifier to forward to the real scheduler notifier.
+    // This fills the OnceLock set during coordinator construction; from here on
+    // every `notify_queued_run` call goes straight to the scheduler.
+    late_wire_notifier.set(scheduler_notifier.clone() as Arc<dyn TurnRunWakeNotifier>);
 
     Ok(
         RebornRuntimeLoopComposition::<dyn SessionThreadService, G> {
@@ -583,8 +619,8 @@ where
             run_profile_resolver,
             coordinator,
             host_factory,
-            workers,
-            wake_sender,
+            scheduler_handle,
+            scheduler_notifier,
         },
     )
 }

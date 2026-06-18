@@ -220,6 +220,10 @@ impl TurnRunSchedulerHandle {
         Arc::clone(&self.notifier)
     }
 
+    pub fn is_stopped(&self) -> bool {
+        self.supervisor.is_finished()
+    }
+
     pub async fn shutdown(self) {
         let _ = self.command_tx.send(SchedulerCommand::Shutdown).await;
         let _ = self.supervisor.await;
@@ -433,6 +437,12 @@ fn spawn_executor_task(
             tracing::debug!("turn run started");
             let mut heartbeat_tick = interval(runner_heartbeat_interval);
             heartbeat_tick.set_missed_tick_behavior(MissedTickBehavior::Delay);
+            // Consume the immediate first tick so the heartbeat loop never fires
+            // at t=0. The run's lease was just issued and valid; a t=0 heartbeat
+            // would fail on CancelRequested status (heartbeat only accepts Running)
+            // and prematurely terminate the executor task before the driver has a
+            // chance to observe cancellation and write its reply to thread history.
+            heartbeat_tick.tick().await;
             let executor_result =
                 AssertUnwindSafe(executor.execute_claimed_run(claimed, Arc::clone(&transitions)))
                     .catch_unwind();

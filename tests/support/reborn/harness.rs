@@ -4,7 +4,7 @@
 //! ports:
 //!
 //! inbound bytes -> ProductAdapter -> DefaultProductWorkflow ->
-//! DefaultInboundTurnService -> DefaultTurnCoordinator -> TurnRunnerWorker ->
+//! DefaultInboundTurnService -> DefaultTurnCoordinator -> TurnRunScheduler ->
 //! Reborn planned agent loop -> model/capability/transcript evidence.
 //!
 //! Documented test-support substitutions:
@@ -91,6 +91,7 @@ use ironclaw_reborn::subagent::{
     flavors::StaticSubagentDefinitionResolver, gate_resolution::BoundedSubagentGateResolutionStore,
     goal_store::InMemoryBoundedSubagentGoalStore,
 };
+use ironclaw_host_runtime::{SchedulerTurnRunWakeNotifier, TurnRunSchedulerHandle};
 use ironclaw_reborn::{
     loop_exit_applier::{
         BlockedEvidenceRequest, CompletionEvidenceRequest, FailureEvidenceRequest,
@@ -100,7 +101,7 @@ use ironclaw_reborn::{
         DefaultPlannedRuntimeConfig, DefaultPlannedRuntimeParts, RebornRuntimeLoopComposition,
         RuntimeTurnStateStore, build_default_planned_runtime,
     },
-    turn_runner::{TurnRunnerWakeSender, TurnRunnerWorker, TurnRunnerWorkerConfig},
+    turn_runner::TurnRunnerWorkerConfig,
 };
 use ironclaw_reborn_composition::{
     ProductLiveCapabilityIo, ProductLiveVisibleCapabilityRequestConfig, RebornBuildInput,
@@ -136,8 +137,6 @@ use ironclaw_turns::{
 };
 use ironclaw_wasm::{WitToolHost, WitToolRuntimeConfig};
 use serde_json::json;
-use tokio::task::JoinHandle;
-use tokio_util::sync::CancellationToken;
 
 use super::{
     config::WaitConfig,
@@ -181,11 +180,9 @@ pub struct RebornBinaryE2EHarness {
     model_gateway: RebornTraceReplayModelGateway,
     capability_recorder: HarnessCapabilityRecorder,
     milestone_sink: Arc<ironclaw_turns::run_profile::InMemoryLoopHostMilestoneSink>,
-    worker: Arc<TurnRunnerWorker>,
-    cancel: CancellationToken,
-    worker_tasks: Vec<JoinHandle<()>>,
+    scheduler_handle: Option<TurnRunSchedulerHandle>,
+    scheduler_notifier: Arc<SchedulerTurnRunWakeNotifier>,
     _turn_root: Arc<tempfile::TempDir>,
-    _wake_sender: TurnRunnerWakeSender,
 }
 
 pub struct SubmittedTurn {
@@ -1030,6 +1027,7 @@ impl RebornBinaryE2EHarness {
         turn_root: Arc<tempfile::TempDir>,
     ) -> Self {
         let coordinator = Arc::clone(&composition.coordinator);
+        let scheduler_notifier = composition.scheduler_notifier.clone();
         Self {
             ingress,
             workflow,
@@ -1044,35 +1042,25 @@ impl RebornBinaryE2EHarness {
             model_gateway,
             capability_recorder,
             milestone_sink,
-            worker: Arc::clone(&composition.workers[0]),
-            cancel: CancellationToken::new(),
-            worker_tasks: Vec::new(),
+            scheduler_handle: Some(composition.scheduler_handle),
+            scheduler_notifier,
             _turn_root: turn_root,
-            _wake_sender: composition.wake_sender,
         }
     }
 
     pub fn start(&mut self) {
-        self.start_workers(1);
+        // The scheduler is started automatically inside build_default_planned_runtime.
+        // This method is kept for API compatibility.
     }
 
-    pub fn start_workers(&mut self, count: usize) {
-        if !self.worker_tasks.is_empty() {
-            return;
-        }
-        for _ in 0..count.max(1) {
-            let worker = Arc::clone(&self.worker);
-            let cancel = self.cancel.clone();
-            self.worker_tasks.push(tokio::spawn(async move {
-                worker.run(cancel).await;
-            }));
-        }
+    pub fn start_workers(&mut self, _count: usize) {
+        // The scheduler is started automatically inside build_default_planned_runtime.
+        // Worker count is configured via DefaultPlannedRuntimeConfig.worker_count.
     }
 
     pub async fn shutdown(&mut self) {
-        self.cancel.cancel();
-        for task in self.worker_tasks.drain(..) {
-            let _ = task.await;
+        if let Some(scheduler) = self.scheduler_handle.take() {
+            scheduler.shutdown().await;
         }
     }
 

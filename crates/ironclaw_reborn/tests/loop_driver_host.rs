@@ -3164,7 +3164,7 @@ async fn default_planned_runtime_composes_no_profile_coordinator_and_profiled_ho
 
     let claimed = turn_store
         .claim_next_run(ClaimRunRequest {
-            runner_id: composition.workers[0].runner_id(),
+            runner_id: TurnRunnerId::new(),
             lease_token: TurnLeaseToken::new(),
             scope_filter: Some(fixture.context.scope.clone()),
         })
