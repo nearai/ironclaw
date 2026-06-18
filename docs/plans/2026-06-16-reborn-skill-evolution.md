@@ -253,3 +253,41 @@ Two bugs the in-memory fakes missed, fixed and re-validated live (commit "live-v
 ### Verification gate (run per increment)
 `cargo check` (default + `root-llm-provider`) 0 warnings; `cargo test` + `cargo clippy`
 (`root-llm-provider,test-support,libsql`) green.
+
+## Increment 9 — global "auto-activate learned skills" master switch (instant)
+
+The other half of "安全/控制": a global toggle that disables default auto-activation
+while keeping explicit `/name` invocation. ON (default) = `ExplicitAndCriteria`; OFF =
+`ExplicitOnly`. Takes effect **live** (next turn, no restart) and is **not** persisted —
+resets to ON on restart (persistence deliberately deferred; no new storage file).
+
+Mechanism — one process-global `Arc<AtomicBool>` shared by reference between the two
+sides, so a Settings write is observed by the selector on the very next turn:
+- Created in `factory.rs` on `RebornLocalRuntimeServices.skill_auto_activate_learned`
+  (default `true`); confirmed single instance (never rebuilt).
+- Selector side: threaded through `selectable_skill_runtime_with_setup_markers`
+  (`skills.rs`) into `SelectableSkillContextSource.auto_activate_learned`; read each turn
+  in `select_skill_activations` (`activation.rs`), gating the criteria branch
+  (`auto_activate_learned && mode == ExplicitAndCriteria`). Explicit mentions always work.
+- Facade side: `LocalSkillsProductFacade` holds `Option<Arc<AtomicBool>>`;
+  `set_auto_activate_learned` stores into it, `list_skills` surfaces it via
+  `RebornSkillListResponse.auto_activate_learned` (DTO, `serde(default = true)`).
+- Wire: `POST /api/webchat/v2/skills/auto-activate-learned` → handler →
+  `RebornServicesApi::set_auto_activate_learned` → facade. Frontend: `LearnedAutoActivateCard`
+  master switch in Settings → Skills.
+
+Review finding fixed before commit (caught by an adversarial multi-lens review of the diff):
+in the **production** assembly the skills facade is mounted but no selector reads the flag,
+so the earlier `unwrap_or_else(|| Arc::new(AtomicBool::new(true)))` fabricated an *orphan*
+flag — the toggle would silently no-op on write and report `true` on read ("a control that
+lies to the operator"). Fixed by making the facade flag `Option<Arc<AtomicBool>>`, wired only
+from the real shared runtime flag; with no selector (`None`) the toggle **fails closed**
+(503 unavailable) instead of pretending to work. Locked by
+`set_auto_activate_learned_fails_closed_when_no_selector_is_wired`.
+
+Tests: `global_auto_activate_flag_gates_criteria_and_honors_live_toggle` (drives the real
+selector with a live flag flip: off → empty selection, flip on → skill activates),
+`set_auto_activate_learned_flips_shared_flag_and_surfaces_in_list`,
+`set_auto_activate_learned_forwards_enabled_flag_to_facade` (handler-through-the-caller),
+descriptor contract row. Live-validated end to end against `ironclaw-reborn serve` (NEAR AI):
+`GET skills` round-trip `auto_activate_learned` True → toggle OFF → False → toggle ON → True.
