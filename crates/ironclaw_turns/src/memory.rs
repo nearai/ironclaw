@@ -45,6 +45,9 @@ pub struct InMemoryTurnStateStoreLimits {
     pub max_terminal_records: usize,
     pub max_idempotency_records: usize,
     pub runner_lease_ttl: ChronoDuration,
+    /// Max runs in `TurnStatus::Running` per (tenant_id, owner user_id).
+    /// `None` = unlimited (current behavior). Owner-less / actor-fallback runs are never counted.
+    pub max_concurrent_runs_per_user: Option<std::num::NonZeroU32>,
 }
 
 impl Default for InMemoryTurnStateStoreLimits {
@@ -54,6 +57,7 @@ impl Default for InMemoryTurnStateStoreLimits {
             max_terminal_records: MAX_TERMINAL_RECORDS,
             max_idempotency_records: MAX_IDEMPOTENCY_RECORDS,
             runner_lease_ttl: ChronoDuration::seconds(DEFAULT_RUNNER_LEASE_TTL_SECONDS),
+            max_concurrent_runs_per_user: None,
         }
     }
 }
@@ -94,6 +98,9 @@ struct Inner {
     admission_reservations: HashMap<TurnRunId, TurnAdmissionReservationRecord>,
     tree_reservations: HashMap<SpawnTreeReservationKey, u64>,
     limits: InMemoryTurnStateStoreLimits,
+    /// Counts runs currently in `TurnStatus::Running` per (TenantId, UserId).
+    /// Actor-fallback and ownerless runs are never counted.
+    running_by_user: HashMap<(ironclaw_host_api::TenantId, ironclaw_host_api::UserId), u32>,
 }
 
 enum AppliedLoopTransition {
@@ -290,6 +297,37 @@ impl InMemoryTurnStateStore {
             Ok(inner) => inner.persistence_snapshot(),
             Err(poisoned) => poisoned.into_inner().persistence_snapshot(),
         }
+    }
+
+    /// Returns the number of runs currently in `TurnStatus::Running` for the given
+    /// (tenant, user) pair. Intended for testing and observability.
+    pub fn running_count_for_user(
+        &self,
+        tenant: &ironclaw_host_api::TenantId,
+        user: &ironclaw_host_api::UserId,
+    ) -> u32 {
+        match self.inner.lock() {
+            Ok(inner) => inner
+                .running_by_user
+                .get(&(tenant.clone(), user.clone()))
+                .copied()
+                .unwrap_or(0),
+            Err(poisoned) => poisoned
+                .into_inner()
+                .running_by_user
+                .get(&(tenant.clone(), user.clone()))
+                .copied()
+                .unwrap_or(0),
+        }
+    }
+
+    #[cfg(test)]
+    pub fn debug_running_count(
+        &self,
+        tenant: &ironclaw_host_api::TenantId,
+        user: &ironclaw_host_api::UserId,
+    ) -> u32 {
+        self.running_count_for_user(tenant, user)
     }
 
     pub fn blocked_approval_runs_for_actor(
@@ -1239,6 +1277,7 @@ impl TurnRunTransitionPort for InMemoryTurnStateStore {
         record.claim_count = record.claim_count.saturating_add(1);
         record.event_cursor = inner.next_cursor();
         inner.update_active_lock(&record, now);
+        inner.increment_running(&record.scope);
         let claimed = ClaimedTurnRun {
             state: record.state(),
             resolved_run_profile: record.profile.resolved.clone(),
@@ -1328,6 +1367,8 @@ impl TurnRunTransitionPort for InMemoryTurnStateStore {
                     to: request.reason.status(),
                 });
             }
+            // Running → Blocked: decrement per-user running counter.
+            inner.decrement_running(&record.scope);
             record.status = request.reason.status();
             record.checkpoint_id = Some(request.checkpoint_id);
             record.gate_ref = Some(request.reason.gate_ref().clone());
@@ -1587,6 +1628,16 @@ impl Inner {
             );
         }
 
+        // Rebuild per-user running counter from restored records.
+        let mut running_by_user = HashMap::new();
+        for record in records.values() {
+            if record.status == TurnStatus::Running
+                && let Some(key) = Self::run_user_key(&record.scope)
+            {
+                *running_by_user.entry(key).or_insert(0u32) += 1;
+            }
+        }
+
         Ok(Self {
             cursor,
             turns,
@@ -1610,6 +1661,7 @@ impl Inner {
             admission_reservations,
             tree_reservations,
             limits,
+            running_by_user,
         })
     }
 
@@ -1763,6 +1815,14 @@ impl Inner {
             let Some(mut record) = self.records.remove(&run_id) else {
                 continue;
             };
+            // Running and CancelRequested both hold a runner-claimed lease (incremented at
+            // claim). Decrement for both since the lease expiry terminates the run.
+            if matches!(
+                record.status,
+                TurnStatus::Running | TurnStatus::CancelRequested
+            ) {
+                self.decrement_running(&record.scope);
+            }
             let outcome = expired_lease_terminal_outcome(record.status);
             record.status = outcome.status;
             record.failure = outcome.failure;
@@ -1884,6 +1944,32 @@ impl Inner {
         self.records.remove(&run_id).ok_or(TurnError::ScopeNotFound)
     }
 
+    fn run_user_key(
+        scope: &TurnScope,
+    ) -> Option<(ironclaw_host_api::TenantId, ironclaw_host_api::UserId)> {
+        scope
+            .thread_owner
+            .explicit_owner_user_id()
+            .map(|user| (scope.tenant_id.clone(), user.clone()))
+    }
+
+    fn increment_running(&mut self, scope: &TurnScope) {
+        if let Some(key) = Self::run_user_key(scope) {
+            *self.running_by_user.entry(key).or_insert(0) += 1;
+        }
+    }
+
+    fn decrement_running(&mut self, scope: &TurnScope) {
+        if let Some(key) = Self::run_user_key(scope)
+            && let Some(count) = self.running_by_user.get_mut(&key)
+        {
+            *count = count.saturating_sub(1);
+            if *count == 0 {
+                self.running_by_user.remove(&key);
+            }
+        }
+    }
+
     fn pop_matching_queued_run(&mut self, scope_filter: Option<&TurnScope>) -> Option<TurnRunId> {
         let queued_count = self.queued_runs.len();
         for _ in 0..queued_count {
@@ -1894,7 +1980,15 @@ impl Inner {
             if record.status != TurnStatus::Queued {
                 continue;
             }
-            if scope_filter.is_none_or(|scope| scope == &record.scope) {
+            let scope_ok = scope_filter.is_none_or(|scope| scope == &record.scope);
+            let user_ok = match self.limits.max_concurrent_runs_per_user {
+                None => true,
+                Some(cap) => match Self::run_user_key(&record.scope) {
+                    None => true, // owner-less / actor-fallback runs are never capped
+                    Some(key) => self.running_by_user.get(&key).copied().unwrap_or(0) < cap.get(),
+                },
+            };
+            if scope_ok && user_ok {
                 return Some(run_id);
             }
             self.queued_runs.push_back(run_id);
@@ -2050,6 +2144,9 @@ impl Inner {
                     to: TurnStatus::Cancelled,
                 });
             }
+            // CancelRequested → Cancelled: the run was Running when it was incremented at
+            // claim; decrement now that the runner is fully releasing it.
+            self.decrement_running(&record.scope);
             record.status = TurnStatus::Cancelled;
             record.failure = None;
             record.runner_id = None;
@@ -2086,6 +2183,9 @@ impl Inner {
                     to: status,
                 });
             }
+            // Old status must be Running (only non-CancelRequested, non-terminal status with a
+            // lease); decrement the per-user running counter.
+            self.decrement_running(&record.scope);
             record.status = status;
             record.failure = failure.clone();
             record.runner_id = None;
@@ -2178,6 +2278,8 @@ impl Inner {
                 },
             };
         }
+        // Running → Completed: decrement per-user running counter.
+        self.decrement_running(&record.scope);
         record.status = TurnStatus::Completed;
         record.failure = None;
         record.runner_id = None;
@@ -2207,6 +2309,9 @@ impl Inner {
                 },
             };
         }
+        // CancelRequested → Cancelled via loop exit: the run was Running when incremented at
+        // claim; decrement now that the runner is fully releasing it.
+        self.decrement_running(&record.scope);
         record.status = TurnStatus::Cancelled;
         record.failure = None;
         record.runner_id = None;
@@ -2242,6 +2347,8 @@ impl Inner {
                 },
             };
         }
+        // Running → Blocked: decrement per-user running counter.
+        self.decrement_running(&record.scope);
         let now = Utc::now();
         record.status = reason.status();
         record.checkpoint_id = Some(checkpoint_id);
@@ -2283,6 +2390,8 @@ impl Inner {
                 },
             };
         }
+        // Running → Failed: decrement per-user running counter.
+        self.decrement_running(&record.scope);
         record.status = TurnStatus::Failed;
         record.failure = Some(failure.clone());
         record.runner_id = None;
@@ -2366,10 +2475,15 @@ impl Inner {
             }
             let (status, failure, event_kind) = match record.status {
                 TurnStatus::Running => {
+                    // Running → Queued (relinquish): decrement per-user running counter.
+                    self.decrement_running(&record.scope);
                     requeue = true;
                     (TurnStatus::Queued, None, TurnEventKind::RunnerHeartbeat)
                 }
                 TurnStatus::CancelRequested => {
+                    // CancelRequested → Cancelled (relinquish): the run was Running when
+                    // incremented at claim; decrement now.
+                    self.decrement_running(&record.scope);
                     (TurnStatus::Cancelled, None, TurnEventKind::Cancelled)
                 }
                 _ => unreachable!("status checked above"),
