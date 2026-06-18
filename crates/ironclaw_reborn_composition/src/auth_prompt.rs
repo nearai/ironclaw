@@ -178,11 +178,11 @@ fn with_google_oauth_refresh_guidance(
     mut view: AuthPromptView,
     credential_requirements: &[ironclaw_host_api::RuntimeCredentialAuthRequirement],
 ) -> AuthPromptView {
-    if credential_requirements
-        .iter()
-        .any(is_google_oauth_requirement)
-        && !view.body.contains(GOOGLE_OAUTH_REFRESH_GUIDANCE)
-    {
+    let should_append = matches!(
+        credential_requirements,
+        [requirement] if is_google_oauth_requirement(requirement)
+    );
+    if should_append && !view.body.contains(GOOGLE_OAUTH_REFRESH_GUIDANCE) {
         if !view.body.trim().is_empty() {
             view.body.push_str("\n\n");
         }
