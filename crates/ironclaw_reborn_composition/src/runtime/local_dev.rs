@@ -91,6 +91,8 @@ pub(super) fn capability_wiring(
     let local_runtime = services.local_runtime.as_ref()?;
     let workspace_mounts = local_runtime.workspace_mounts.clone();
     let memory_mounts = local_runtime.memory_mounts.clone();
+    let system_extensions_lifecycle_mounts =
+        local_runtime.system_extensions_lifecycle_mounts.clone();
     let approval_requests: Arc<dyn ApprovalRequestStore> = local_runtime.approval_requests.clone();
     let capability_leases: Arc<dyn CapabilityLeaseStore> = local_runtime.capability_leases.clone();
     let outbound_delivery_target_set_requires_approval = local_dev_effects_require_approval(
@@ -118,6 +120,7 @@ pub(super) fn capability_wiring(
             policy,
             workspace_mounts,
             memory_mounts,
+            system_extensions_lifecycle_mounts,
             extension_surface_source,
             input_resolver: Arc::clone(&capability_input_resolver),
             result_writer: Arc::clone(&capability_result_writer),
@@ -149,6 +152,7 @@ struct LocalDevLoopCapabilityPortFactory {
     policy: Arc<LocalDevCapabilityPolicy>,
     workspace_mounts: MountView,
     memory_mounts: MountView,
+    system_extensions_lifecycle_mounts: MountView,
     extension_surface_source: LocalDevExtensionSurfaceSource,
     input_resolver: Arc<dyn LoopCapabilityInputResolver>,
     result_writer: Arc<dyn LoopCapabilityResultWriter>,
@@ -180,6 +184,7 @@ impl LoopCapabilityPortFactory for LocalDevLoopCapabilityPortFactory {
             workspace_mounts: self.workspace_mounts.clone(),
             skill_mounts,
             memory_mounts: self.memory_mounts.clone(),
+            system_extensions_lifecycle_mounts: self.system_extensions_lifecycle_mounts.clone(),
             extension_surface_source: self.extension_surface_source.clone(),
             input_resolver: Arc::clone(&self.input_resolver),
             result_writer: Arc::clone(&self.result_writer),
@@ -823,6 +828,7 @@ fn local_dev_visible_capability_request(
     workspace_mounts: MountView,
     skill_mounts: MountView,
     memory_mounts: MountView,
+    system_extensions_lifecycle_mounts: MountView,
     policy: &LocalDevCapabilityPolicy,
     extension_surface: &LocalDevExtensionSurface,
 ) -> Result<HostVisibleCapabilityRequest, AgentLoopHostError> {
@@ -832,6 +838,7 @@ fn local_dev_visible_capability_request(
         &workspace_mounts,
         &skill_mounts,
         &memory_mounts,
+        &system_extensions_lifecycle_mounts,
     );
     grants
         .grants

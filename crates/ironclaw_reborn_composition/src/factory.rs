@@ -128,7 +128,7 @@ use crate::local_dev_authorization::local_dev_authorizer;
 use crate::local_dev_capability_policy::{LocalDevCapabilityPolicy, local_dev_capability_policy};
 use crate::local_dev_mounts::{
     ambient_workspace_mount_view, memory_mount_view, scoped_skill_context_mount_view,
-    skill_management_mount_view, workspace_mount_view,
+    skill_management_mount_view, system_extensions_lifecycle_mount_view, workspace_mount_view,
 };
 use crate::mcp::hosted_http_mcp_runtime;
 use crate::product_auth_providers::{OAuthProviderComposition, compose_provider_client};
@@ -489,6 +489,7 @@ pub(crate) struct RebornLocalRuntimeServices {
     pub(crate) host_runtime_http_egress: Option<HostRuntimeHttpEgressPort>,
     pub(crate) skill_mounts: MountView,
     pub(crate) memory_mounts: MountView,
+    pub(crate) system_extensions_lifecycle_mounts: MountView,
     pub(crate) skill_filesystem: Arc<ScopedFilesystem<LocalDevRootFilesystem>>,
     pub(crate) workspace_filesystem: Arc<ScopedFilesystem<LocalDevRootFilesystem>>,
     #[cfg(all(
@@ -1382,6 +1383,12 @@ fn build_local_dev_store_graph(
                 reason: error.to_string(),
             }
         })?;
+    let system_extensions_lifecycle_mounts =
+        system_extensions_lifecycle_mount_view().map_err(|error| {
+            RebornBuildError::InvalidConfig {
+                reason: error.to_string(),
+            }
+        })?;
     #[cfg(feature = "slack-v2-host-beta")]
     let host_state_filesystem = local_dev_slack_host_state_filesystem(Arc::clone(&filesystem));
     let extension_lifecycle_surface_context = local_dev_extension_lifecycle_surface_context(
@@ -1429,6 +1436,7 @@ fn build_local_dev_store_graph(
         host_runtime_http_egress: None,
         skill_mounts,
         memory_mounts,
+        system_extensions_lifecycle_mounts,
         skill_filesystem,
         workspace_filesystem,
         #[cfg(feature = "slack-v2-host-beta")]
@@ -1514,6 +1522,12 @@ fn build_local_dev_store_graph(
                 reason: error.to_string(),
             }
         })?;
+    let system_extensions_lifecycle_mounts =
+        system_extensions_lifecycle_mount_view().map_err(|error| {
+            RebornBuildError::InvalidConfig {
+                reason: error.to_string(),
+            }
+        })?;
     #[cfg(all(feature = "postgres", feature = "slack-v2-host-beta"))]
     let host_state_filesystem = local_dev_slack_host_state_filesystem(Arc::clone(&filesystem));
     let extension_lifecycle_surface_context = local_dev_extension_lifecycle_surface_context(
@@ -1563,6 +1577,7 @@ fn build_local_dev_store_graph(
         host_runtime_http_egress: None,
         skill_mounts,
         memory_mounts,
+        system_extensions_lifecycle_mounts,
         skill_filesystem,
         workspace_filesystem,
         #[cfg(all(feature = "postgres", feature = "slack-v2-host-beta"))]
@@ -3704,6 +3719,9 @@ mod tests {
             host_runtime_http_egress: base_runtime.host_runtime_http_egress.clone(),
             skill_mounts: base_runtime.skill_mounts.clone(),
             memory_mounts: base_runtime.memory_mounts.clone(),
+            system_extensions_lifecycle_mounts: base_runtime
+                .system_extensions_lifecycle_mounts
+                .clone(),
             skill_filesystem: Arc::clone(&base_runtime.skill_filesystem),
             workspace_filesystem: Arc::clone(&base_runtime.workspace_filesystem),
             #[cfg(feature = "slack-v2-host-beta")]
@@ -4275,6 +4293,7 @@ mod tests {
                 &local_runtime.workspace_mounts,
                 &local_runtime.skill_mounts,
                 &local_runtime.memory_mounts,
+                &local_runtime.system_extensions_lifecycle_mounts,
             ),
             Err(LocalDevCapabilityPolicyError::MissingGrant { .. })
         ));

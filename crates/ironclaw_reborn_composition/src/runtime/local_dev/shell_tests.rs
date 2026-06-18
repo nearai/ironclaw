@@ -92,6 +92,9 @@ async fn local_dev_yolo_shell_translates_workspace_workdir_without_scoped_mounts
         policy,
         workspace_mounts,
         memory_mounts,
+        system_extensions_lifecycle_mounts: local_runtime
+            .system_extensions_lifecycle_mounts
+            .clone(),
         extension_surface_source: LocalDevExtensionSurfaceSource::default(),
         input_resolver,
         result_writer,

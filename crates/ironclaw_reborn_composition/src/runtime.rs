@@ -2825,6 +2825,7 @@ pub async fn build_reborn_runtime(
                         local_runtime.workspace_mounts.clone(),
                         local_runtime.skill_mounts.clone(),
                         local_runtime.memory_mounts.clone(),
+                        local_runtime.system_extensions_lifecycle_mounts.clone(),
                         local_dev::extension_surface::LocalDevExtensionSurfaceSource::new(
                             local_runtime.extension_management.clone(),
                         ),
