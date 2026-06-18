@@ -848,3 +848,46 @@ async fn trigger_cap_is_per_tenant_not_global() {
     assert_eq!(store.running_trigger_count(&t1), 0);
     assert_eq!(store.running_trigger_count(&t2), 0);
 }
+
+// ---------------------------------------------------------------------------
+// B6b — snapshot rebuild restores non-zero origin-class counter
+// ---------------------------------------------------------------------------
+
+/// Snapshot taken WHILE a trigger run is Running → restored store sees counter = 1
+/// immediately, exercising the non-zero rebuild branch in `from_persistence_snapshot`.
+#[tokio::test]
+async fn snapshot_rebuild_restores_nonzero_origin_class_counter() {
+    let store = InMemoryTurnStateStore::default();
+    let run_id = submit_trigger(&store, "orig-snapshot-running", "orig-snapshot-running").await;
+
+    // Claim → run is now Running, trigger counter = 1.
+    let (runner_id, lease_token, _) = claim(&store).await;
+    assert_eq!(store.running_trigger_count(&tenant()), 1);
+
+    // Snapshot WHILE the run is Running.
+    let snapshot = store.persistence_snapshot();
+
+    // Restore from snapshot — the rebuilt store must already see counter = 1.
+    let restored = InMemoryTurnStateStore::from_persistence_snapshot(
+        snapshot,
+        InMemoryTurnStateStoreLimits::default(),
+    )
+    .unwrap();
+    assert_eq!(
+        restored.running_trigger_count(&tenant()),
+        1,
+        "snapshot rebuild must restore non-zero trigger counter"
+    );
+    assert_eq!(restored.running_conversation_count(&tenant()), 0);
+
+    // Complete in the original store.
+    store
+        .complete_run(CompleteRunRequest {
+            run_id,
+            runner_id,
+            lease_token,
+        })
+        .await
+        .unwrap();
+    assert_eq!(store.running_trigger_count(&tenant()), 0);
+}

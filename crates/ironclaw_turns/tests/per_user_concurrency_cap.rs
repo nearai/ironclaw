@@ -558,24 +558,26 @@ async fn claim_skips_user_at_concurrency_cap() {
     assert_eq!(store.running_count_for_user(&tenant(), &user_v()), 0);
 }
 
-/// Actor-fallback (ownerless) runs are never counted against any cap.
+/// Truly ownerless (`TurnThreadOwner::Ownerless`) runs are never counted against any cap.
 #[tokio::test]
 async fn ownerless_runs_are_not_counted_against_cap() {
     let store = make_capped_store(1);
     let actor = TurnActor::new(user_u());
 
-    // Two plain scopes (ActorFallback owner — no explicit owner).
-    let plain_scope1 = TurnScope::new(
+    // Two ownerless scopes (Ownerless — owner_user_id = None).
+    let ownerless_scope1 = TurnScope::new_with_owner(
         tenant(),
         Some(AgentId::new("agent1").unwrap()),
         Some(ProjectId::new("project1").unwrap()),
         ThreadId::new("cap-ownerless-thread1").unwrap(),
+        None, // Ownerless
     );
-    let plain_scope2 = TurnScope::new(
+    let ownerless_scope2 = TurnScope::new_with_owner(
         tenant(),
         Some(AgentId::new("agent1").unwrap()),
         Some(ProjectId::new("project1").unwrap()),
         ThreadId::new("cap-ownerless-thread2").unwrap(),
+        None, // Ownerless
     );
 
     let make_req = |scope: TurnScope, key: &'static str| SubmitTurnRequest {
@@ -596,7 +598,7 @@ async fn ownerless_runs_are_not_counted_against_cap() {
 
     let resp1 = store
         .submit_turn(
-            make_req(plain_scope1, "ownerless-1"),
+            make_req(ownerless_scope1, "ownerless-1"),
             &AllowAllTurnAdmissionPolicy,
             &resolver(),
         )
@@ -605,7 +607,7 @@ async fn ownerless_runs_are_not_counted_against_cap() {
     let _run1 = accepted_run_id(&resp1);
     let resp2 = store
         .submit_turn(
-            make_req(plain_scope2, "ownerless-2"),
+            make_req(ownerless_scope2, "ownerless-2"),
             &AllowAllTurnAdmissionPolicy,
             &resolver(),
         )
@@ -644,6 +646,221 @@ async fn ownerless_runs_are_not_counted_against_cap() {
         })
         .await
         .unwrap();
-    // Complete the first (we don't have the run_id easily, just relinquish or let it be).
     let _ = (runner1, lease1); // suppress unused warnings
+}
+
+/// Actor-fallback runs ARE capped under the submitting actor's user_id.
+/// With cap = 1: after run1 is claimed (actor = user_u), claiming run2
+/// (also actor = user_u) must be blocked — even though neither scope has
+/// an explicit `ExplicitUser` owner.
+#[tokio::test]
+async fn actor_fallback_runs_are_capped_under_actor_user_id() {
+    let store = make_capped_store(1);
+    let actor_u = TurnActor::new(user_u());
+    let actor_v = TurnActor::new(user_v());
+
+    // Two actor-fallback scopes for user_u (TurnScope::new gives ActorFallback).
+    let scope1 = TurnScope::new(
+        tenant(),
+        Some(AgentId::new("agent1").unwrap()),
+        Some(ProjectId::new("project1").unwrap()),
+        ThreadId::new("cap-actor-fallback-thread1").unwrap(),
+    );
+    let scope2 = TurnScope::new(
+        tenant(),
+        Some(AgentId::new("agent1").unwrap()),
+        Some(ProjectId::new("project1").unwrap()),
+        ThreadId::new("cap-actor-fallback-thread2").unwrap(),
+    );
+    // One actor-fallback scope for user_v (different actor).
+    let scope_v = TurnScope::new(
+        tenant(),
+        Some(AgentId::new("agent1").unwrap()),
+        Some(ProjectId::new("project1").unwrap()),
+        ThreadId::new("cap-actor-fallback-thread-v").unwrap(),
+    );
+
+    let make_req = |scope: TurnScope, actor: TurnActor, key: &'static str| SubmitTurnRequest {
+        scope,
+        actor,
+        accepted_message_ref: AcceptedMessageRef::new(format!("msg-{key}")).unwrap(),
+        source_binding_ref: SourceBindingRef::new("src").unwrap(),
+        reply_target_binding_ref: ReplyTargetBindingRef::new("rply").unwrap(),
+        requested_run_profile: Some(RunProfileRequest::new("default").unwrap()),
+        idempotency_key: IdempotencyKey::new(key).unwrap(),
+        received_at: Utc.with_ymd_and_hms(2026, 6, 18, 0, 0, 0).unwrap(),
+        requested_run_id: None,
+        parent_run_id: None,
+        subagent_depth: 0,
+        spawn_tree_root_run_id: None,
+        product_context: None,
+    };
+
+    let resp1 = store
+        .submit_turn(
+            make_req(scope1, actor_u.clone(), "actor-fallback-u1"),
+            &AllowAllTurnAdmissionPolicy,
+            &resolver(),
+        )
+        .await
+        .unwrap();
+    let run1 = accepted_run_id(&resp1);
+
+    let resp2 = store
+        .submit_turn(
+            make_req(scope2, actor_u.clone(), "actor-fallback-u2"),
+            &AllowAllTurnAdmissionPolicy,
+            &resolver(),
+        )
+        .await
+        .unwrap();
+    let run2 = accepted_run_id(&resp2);
+
+    let resp_v = store
+        .submit_turn(
+            make_req(scope_v, actor_v, "actor-fallback-v1"),
+            &AllowAllTurnAdmissionPolicy,
+            &resolver(),
+        )
+        .await
+        .unwrap();
+    let run_v = accepted_run_id(&resp_v);
+
+    // Claim first run for user_u → counter = 1 for user_u.
+    let runner1 = TurnRunnerId::new();
+    let lease1 = TurnLeaseToken::new();
+    let claimed1 = store
+        .claim_next_run(ClaimRunRequest {
+            runner_id: runner1,
+            lease_token: lease1,
+            scope_filter: None,
+        })
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(claimed1.state.run_id, run1);
+    assert_eq!(
+        store.running_count_for_user(&tenant(), &user_u()),
+        1,
+        "actor-fallback run should be counted under actor's user_id"
+    );
+
+    // Second claim — user_u is at cap (1), so run2 is skipped; run_v (user_v) should be claimed.
+    let runner2 = TurnRunnerId::new();
+    let lease2 = TurnLeaseToken::new();
+    let claimed2 = store
+        .claim_next_run(ClaimRunRequest {
+            runner_id: runner2,
+            lease_token: lease2,
+            scope_filter: None,
+        })
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        claimed2.state.run_id, run_v,
+        "run2 for user_u must be skipped (at cap); run_v for user_v must be claimed"
+    );
+
+    // run2 is still queued.
+    let state2 = store
+        .get_run_state(GetRunStateRequest {
+            run_id: run2,
+            scope: TurnScope::new(
+                tenant(),
+                Some(AgentId::new("agent1").unwrap()),
+                Some(ProjectId::new("project1").unwrap()),
+                ThreadId::new("cap-actor-fallback-thread2").unwrap(),
+            ),
+        })
+        .await
+        .unwrap();
+    assert_eq!(state2.status, TurnStatus::Queued);
+
+    // Complete run1 → user_u below cap again.
+    store
+        .complete_run(CompleteRunRequest {
+            run_id: run1,
+            runner_id: runner1,
+            lease_token: lease1,
+        })
+        .await
+        .unwrap();
+    assert_eq!(store.running_count_for_user(&tenant(), &user_u()), 0);
+
+    // Now run2 for user_u can be claimed.
+    let runner3 = TurnRunnerId::new();
+    let lease3 = TurnLeaseToken::new();
+    let claimed3 = store
+        .claim_next_run(ClaimRunRequest {
+            runner_id: runner3,
+            lease_token: lease3,
+            scope_filter: None,
+        })
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(claimed3.state.run_id, run2);
+
+    // Clean up.
+    store
+        .complete_run(CompleteRunRequest {
+            run_id: run2,
+            runner_id: runner3,
+            lease_token: lease3,
+        })
+        .await
+        .unwrap();
+    store
+        .complete_run(CompleteRunRequest {
+            run_id: run_v,
+            runner_id: runner2,
+            lease_token: lease2,
+        })
+        .await
+        .unwrap();
+}
+
+// ---------------------------------------------------------------------------
+// Task A2 Step 6b — snapshot rebuild restores non-zero running counter
+// ---------------------------------------------------------------------------
+
+/// Snapshot taken WHILE a run is Running → restored store has counter = 1
+/// immediately, without needing to claim again. This exercises the non-zero
+/// rebuild branch in `from_persistence_snapshot`.
+#[tokio::test]
+async fn snapshot_rebuild_restores_nonzero_running_counter() {
+    let store = make_store();
+    let scope = owned_scope("cap-snapshot-running", &user_u());
+    let run_id = submit(&store, scope.clone(), "cap-snapshot-running").await;
+
+    // Claim → run is now Running, counter = 1.
+    let (runner_id, lease_token) = claim(&store).await;
+    assert_eq!(store.running_count_for_user(&tenant(), &user_u()), 1);
+
+    // Snapshot WHILE the run is Running.
+    let snapshot = store.persistence_snapshot();
+
+    // Restore from snapshot — the rebuilt store must already see counter = 1.
+    let restored = InMemoryTurnStateStore::from_persistence_snapshot(
+        snapshot,
+        InMemoryTurnStateStoreLimits::default(),
+    )
+    .unwrap();
+    assert_eq!(
+        restored.running_count_for_user(&tenant(), &user_u()),
+        1,
+        "snapshot rebuild must restore non-zero running counter"
+    );
+
+    // Complete in the ORIGINAL store (restored has a detached copy of the lease).
+    store
+        .complete_run(CompleteRunRequest {
+            run_id,
+            runner_id,
+            lease_token,
+        })
+        .await
+        .unwrap();
+    assert_eq!(store.running_count_for_user(&tenant(), &user_u()), 0);
 }
