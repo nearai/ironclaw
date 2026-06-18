@@ -151,4 +151,33 @@ mod tests {
         );
         assert_eq!(second.wake_count(), 0, "second set() must be ignored");
     }
+
+    /// A notifier that always returns `Err(TurnRunWakeNotifyError::DeliveryUnavailable)`.
+    struct ErrorNotifier;
+
+    impl TurnRunWakeNotifier for ErrorNotifier {
+        fn notify_queued_run(&self, _wake: TurnRunWake) -> Result<(), TurnRunWakeNotifyError> {
+            Err(TurnRunWakeNotifyError::DeliveryUnavailable)
+        }
+    }
+
+    /// After `set()`, if the inner notifier returns `Err`, the error must be
+    /// forwarded by `notify_queued_run` rather than swallowed — regression guard
+    /// for any future change that might silently suppress inner errors.
+    #[test]
+    fn notify_after_set_forwards_inner_err() {
+        let late = LateWireWakeNotifier::new();
+        late.set(Arc::new(ErrorNotifier) as Arc<dyn TurnRunWakeNotifier>);
+
+        let result = late.notify_queued_run(any_wake());
+        assert!(
+            result.is_err(),
+            "inner Err must be forwarded, not suppressed"
+        );
+        assert_eq!(
+            result.unwrap_err(),
+            TurnRunWakeNotifyError::DeliveryUnavailable,
+            "forwarded error must match the inner error variant"
+        );
+    }
 }

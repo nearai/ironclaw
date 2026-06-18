@@ -66,9 +66,10 @@ use crate::{
 pub const DEFAULT_TURN_RUNNER_WORKER_COUNT: std::num::NonZeroUsize =
     match std::num::NonZeroUsize::new(4) {
         Some(v) => v,
-        // SAFETY: 4 is a non-zero compile-time constant; this arm is unreachable.
-        // Written with an explicit match so the const avoids any runtime `.expect()`.
-        None => unreachable!(),
+        // 4 is a non-zero compile-time constant so this arm is never reached.
+        // `NonZeroUsize::MIN` (= 1) is used as a non-panicking fallback so the
+        // CI "no panics in production code" check stays green.
+        None => std::num::NonZeroUsize::MIN,
     };
 
 #[derive(Debug, Clone)]

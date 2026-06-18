@@ -297,10 +297,15 @@ mod tests {
     use ironclaw_host_api::{TenantId, ThreadId};
     use ironclaw_host_runtime::TurnRunExecutor;
     use ironclaw_turns::{
-        AcceptedMessageRef, AgentLoopDriverDescriptor, EventCursor, ReplyTargetBindingRef,
+        AcceptedMessageRef, AgentLoopDriver, AgentLoopDriverDescriptor, AgentLoopDriverError,
+        AgentLoopDriverResumeRequest, AgentLoopDriverRunRequest, EventCursor, LoopCompleted,
+        LoopCompletionKind, LoopExit, LoopExitId, LoopMessageRef, ReplyTargetBindingRef,
         RunProfileVersion, SourceBindingRef, TurnError, TurnId, TurnRunId, TurnRunState, TurnScope,
         TurnStatus,
-        run_profile::{CheckpointSchemaId, LoopDriverId},
+        run_profile::{
+            AgentLoopDriverHost, AgentLoopHostError, CheckpointSchemaId, LoopDriverId,
+            LoopModelRouteSnapshot, LoopRunContext,
+        },
         runner::{
             ApplyValidatedLoopExitRequest, BlockRunRequest, CancelRunCompletionRequest,
             ClaimRunRequest, ClaimedTurnRun, CompleteRunRequest, FailRunRequest, HeartbeatRequest,
@@ -310,7 +315,7 @@ mod tests {
     };
 
     use crate::{
-        driver_registry::DriverRegistry,
+        driver_registry::{DriverKind, DriverRegistry, DriverRequirements},
         loop_exit_applier::{InMemoryLoopExitEvidencePort, LoopExitApplier},
         turn_runner::HostFactoryError,
     };
@@ -586,5 +591,386 @@ mod tests {
         assert_eq!(first.failure_category(), "unknown_failure");
         // Same pointer — OnceLock must not re-initialize.
         assert!(std::ptr::eq(first, second));
+    }
+
+    // ── FIX 2: host-creation failure + snapshot-persistence failure tests ─────
+
+    /// A minimal completing driver whose descriptor matches `test_descriptor`.
+    struct CompletingDriver {
+        descriptor: AgentLoopDriverDescriptor,
+    }
+
+    impl CompletingDriver {
+        fn new(descriptor: AgentLoopDriverDescriptor) -> Self {
+            Self { descriptor }
+        }
+    }
+
+    #[async_trait]
+    impl AgentLoopDriver for CompletingDriver {
+        fn descriptor(&self) -> AgentLoopDriverDescriptor {
+            self.descriptor.clone()
+        }
+
+        async fn run(
+            &self,
+            _request: AgentLoopDriverRunRequest,
+            _host: &(dyn AgentLoopDriverHost + Send + Sync),
+        ) -> Result<LoopExit, AgentLoopDriverError> {
+            Ok(LoopExit::Completed(LoopCompleted {
+                completion_kind: LoopCompletionKind::FinalReply,
+                reply_message_refs: vec![LoopMessageRef::new("msg:test").expect("valid")],
+                result_refs: vec![],
+                final_checkpoint_id: None,
+                usage_summary_ref: None,
+                exit_id: LoopExitId::new("exit:test").expect("valid"),
+            }))
+        }
+
+        async fn resume(
+            &self,
+            _request: AgentLoopDriverResumeRequest,
+            _host: &(dyn AgentLoopDriverHost + Send + Sync),
+        ) -> Result<LoopExit, AgentLoopDriverError> {
+            Ok(LoopExit::Completed(LoopCompleted {
+                completion_kind: LoopCompletionKind::FinalReply,
+                reply_message_refs: vec![LoopMessageRef::new("msg:test").expect("valid")],
+                result_refs: vec![],
+                final_checkpoint_id: None,
+                usage_summary_ref: None,
+                exit_id: LoopExitId::new("exit:test").expect("valid"),
+            }))
+        }
+    }
+
+    /// A `HostFactory` that succeeds and returns a stub host with a model route
+    /// snapshot set, so `persist_model_route_snapshot` is triggered.
+    struct SucceedingHostFactoryWithSnapshot;
+
+    #[async_trait]
+    impl crate::turn_runner::HostFactory for SucceedingHostFactoryWithSnapshot {
+        async fn create_host(
+            &self,
+            claimed: &ClaimedTurnRun,
+        ) -> Result<
+            Box<dyn ironclaw_turns::run_profile::AgentLoopDriverHost + Send + Sync>,
+            HostFactoryError,
+        > {
+            let context = LoopRunContext::new(
+                claimed.state.scope.clone(),
+                claimed.state.turn_id,
+                claimed.state.run_id,
+                claimed.resolved_run_profile.clone(),
+            )
+            .with_resolved_model_route(LoopModelRouteSnapshot::new(
+                "test_provider",
+                "test_model",
+                "config:v1",
+                "auth:v1",
+            ));
+            Ok(Box::new(StubDriverHost { context }))
+        }
+    }
+
+    /// Minimal stub host: only `run_context()` is used by the executor.
+    struct StubDriverHost {
+        context: LoopRunContext,
+    }
+
+    impl ironclaw_turns::run_profile::LoopRunInfoPort for StubDriverHost {
+        fn run_context(&self) -> &LoopRunContext {
+            &self.context
+        }
+    }
+
+    #[async_trait]
+    impl ironclaw_turns::run_profile::LoopContextPort for StubDriverHost {
+        async fn load_loop_context(
+            &self,
+            _request: ironclaw_turns::run_profile::LoopContextRequest,
+        ) -> Result<ironclaw_turns::run_profile::LoopContextBundle, AgentLoopHostError> {
+            unimplemented!("stub: not called by executor")
+        }
+    }
+
+    #[async_trait]
+    impl ironclaw_turns::run_profile::LoopPromptPort for StubDriverHost {
+        async fn build_prompt_bundle(
+            &self,
+            _request: ironclaw_turns::run_profile::LoopPromptBundleRequest,
+        ) -> Result<ironclaw_turns::run_profile::LoopPromptBundle, AgentLoopHostError> {
+            unimplemented!("stub: not called by executor")
+        }
+    }
+
+    #[async_trait]
+    impl ironclaw_turns::run_profile::LoopInputPort for StubDriverHost {
+        async fn poll_inputs(
+            &self,
+            _after: ironclaw_turns::run_profile::LoopInputCursor,
+            _limit: usize,
+        ) -> Result<ironclaw_turns::run_profile::LoopInputBatch, AgentLoopHostError> {
+            unimplemented!("stub: not called by executor")
+        }
+
+        async fn ack_inputs(
+            &self,
+            _tokens: Vec<ironclaw_turns::run_profile::LoopInputAckToken>,
+        ) -> Result<(), AgentLoopHostError> {
+            unimplemented!("stub: not called by executor")
+        }
+    }
+
+    #[async_trait]
+    impl ironclaw_turns::run_profile::LoopModelPort for StubDriverHost {
+        async fn stream_model(
+            &self,
+            _request: ironclaw_turns::run_profile::LoopModelRequest,
+        ) -> Result<ironclaw_turns::run_profile::LoopModelResponse, AgentLoopHostError> {
+            unimplemented!("stub: not called by executor")
+        }
+    }
+
+    #[async_trait]
+    impl ironclaw_turns::run_profile::LoopCompactionPort for StubDriverHost {
+        async fn compact_loop_context(
+            &self,
+            _request: ironclaw_turns::run_profile::LoopCompactionRequest,
+        ) -> Result<
+            ironclaw_turns::run_profile::LoopCompactionOutcome,
+            ironclaw_turns::run_profile::LoopCompactionError,
+        > {
+            unimplemented!("stub: not called by executor")
+        }
+    }
+
+    #[async_trait]
+    impl ironclaw_turns::run_profile::LoopCapabilityPort for StubDriverHost {
+        async fn visible_capabilities(
+            &self,
+            _request: ironclaw_turns::run_profile::VisibleCapabilityRequest,
+        ) -> Result<ironclaw_turns::run_profile::VisibleCapabilitySurface, AgentLoopHostError>
+        {
+            unimplemented!("stub: not called by executor")
+        }
+
+        async fn invoke_capability(
+            &self,
+            _request: ironclaw_turns::run_profile::CapabilityInvocation,
+        ) -> Result<ironclaw_turns::run_profile::CapabilityOutcome, AgentLoopHostError> {
+            unimplemented!("stub: not called by executor")
+        }
+
+        async fn invoke_capability_batch(
+            &self,
+            _request: ironclaw_turns::run_profile::CapabilityBatchInvocation,
+        ) -> Result<ironclaw_turns::run_profile::CapabilityBatchOutcome, AgentLoopHostError>
+        {
+            unimplemented!("stub: not called by executor")
+        }
+    }
+
+    #[async_trait]
+    impl ironclaw_turns::run_profile::LoopTranscriptPort for StubDriverHost {
+        async fn finalize_assistant_message(
+            &self,
+            _request: ironclaw_turns::run_profile::FinalizeAssistantMessage,
+        ) -> Result<LoopMessageRef, AgentLoopHostError> {
+            unimplemented!("stub: not called by executor")
+        }
+    }
+
+    #[async_trait]
+    impl ironclaw_turns::run_profile::LoopCheckpointPort for StubDriverHost {
+        async fn checkpoint(
+            &self,
+            _request: ironclaw_turns::run_profile::LoopCheckpointRequest,
+        ) -> Result<ironclaw_turns::TurnCheckpointId, AgentLoopHostError> {
+            unimplemented!("stub: not called by executor")
+        }
+    }
+
+    #[async_trait]
+    impl ironclaw_turns::run_profile::LoopProgressPort for StubDriverHost {
+        async fn emit_loop_progress(
+            &self,
+            _event: ironclaw_turns::run_profile::LoopProgressEvent,
+        ) -> Result<(), AgentLoopHostError> {
+            unimplemented!("stub: not called by executor")
+        }
+    }
+
+    #[async_trait]
+    impl ironclaw_turns::run_profile::LoopCancellationPort for StubDriverHost {
+        fn observe_cancellation(
+            &self,
+        ) -> Option<ironclaw_turns::run_profile::LoopCancellationSignal> {
+            None
+        }
+
+        async fn cancellation_requested(
+            &self,
+        ) -> ironclaw_turns::run_profile::LoopCancellationSignal {
+            std::future::pending().await
+        }
+    }
+
+    /// A `TurnRunTransitionPort` that returns `Err` from
+    /// `record_model_route_snapshot`, and records whether `fail_run` was called.
+    #[derive(Default)]
+    struct FailingSnapshotTransitionPort {
+        fail_run_calls: Mutex<Vec<FailRunRequest>>,
+    }
+
+    impl FailingSnapshotTransitionPort {
+        fn fail_run_call_count(&self) -> usize {
+            self.fail_run_calls.lock().unwrap().len()
+        }
+    }
+
+    #[async_trait]
+    impl TurnRunTransitionPort for FailingSnapshotTransitionPort {
+        async fn claim_next_run(
+            &self,
+            _request: ClaimRunRequest,
+        ) -> Result<Option<ClaimedTurnRun>, TurnError> {
+            Ok(None)
+        }
+
+        async fn heartbeat(&self, _request: HeartbeatRequest) -> Result<EventCursor, TurnError> {
+            Ok(EventCursor(0))
+        }
+
+        async fn recover_expired_leases(
+            &self,
+            _request: RecoverExpiredLeasesRequest,
+        ) -> Result<RecoverExpiredLeasesResponse, TurnError> {
+            Ok(RecoverExpiredLeasesResponse { recovered: vec![] })
+        }
+
+        async fn record_model_route_snapshot(
+            &self,
+            _request: RecordModelRouteSnapshotRequest,
+        ) -> Result<TurnRunState, TurnError> {
+            // Simulate a persistence failure.
+            Err(TurnError::Unavailable {
+                reason: "simulated snapshot persistence error".to_string(),
+            })
+        }
+
+        async fn block_run(&self, _request: BlockRunRequest) -> Result<TurnRunState, TurnError> {
+            Ok(fake_run_state())
+        }
+
+        async fn complete_run(
+            &self,
+            _request: CompleteRunRequest,
+        ) -> Result<TurnRunState, TurnError> {
+            Ok(fake_run_state())
+        }
+
+        async fn cancel_run(
+            &self,
+            _request: CancelRunCompletionRequest,
+        ) -> Result<TurnRunState, TurnError> {
+            Ok(fake_run_state())
+        }
+
+        async fn fail_run(&self, request: FailRunRequest) -> Result<TurnRunState, TurnError> {
+            self.fail_run_calls.lock().unwrap().push(request);
+            Ok(fake_run_state())
+        }
+
+        async fn relinquish_run(
+            &self,
+            _request: RelinquishRunRequest,
+        ) -> Result<TurnRunState, TurnError> {
+            Ok(fake_run_state())
+        }
+
+        async fn apply_validated_loop_exit(
+            &self,
+            _request: ApplyValidatedLoopExitRequest,
+        ) -> Result<TurnRunState, TurnError> {
+            Ok(fake_run_state())
+        }
+    }
+
+    fn make_executor_with_driver(
+        host_factory: Arc<dyn crate::turn_runner::HostFactory>,
+    ) -> RebornTurnRunExecutor {
+        let transitions: Arc<dyn TurnRunTransitionPort> =
+            Arc::new(RecordingTransitionPort::default());
+        let evidence = Arc::new(InMemoryLoopExitEvidencePort::new());
+        let loop_exit_applier = Arc::new(LoopExitApplier::new(transitions, evidence));
+        // Register a driver matching `test_claimed_run`'s descriptor.
+        let mut registry = DriverRegistry::new();
+        registry
+            .register_driver(
+                Arc::new(CompletingDriver::new(test_descriptor())),
+                DriverRequirements::all_optional(),
+                DriverKind::Production,
+            )
+            .expect("driver registration must succeed");
+        let driver_registry = Arc::new(registry);
+        RebornTurnRunExecutor::new(loop_exit_applier, driver_registry, host_factory)
+    }
+
+    /// When `HostFactory::create_host` returns `Err`, `execute_claimed_run` must
+    /// return `Err(TurnRunExecutorError)` with category `"host_creation_failed"`.
+    /// The executor must NOT itself call `fail_run` — that is the scheduler's job.
+    #[tokio::test]
+    async fn host_creation_failure_returns_err_without_calling_fail_run() {
+        let executor = make_executor_with_driver(Arc::new(FailingHostFactory));
+        let transitions = Arc::new(RecordingTransitionPort::default());
+
+        let result = executor
+            .execute_claimed_run(
+                test_claimed_run(),
+                transitions.clone() as Arc<dyn TurnRunTransitionPort>,
+            )
+            .await;
+
+        let err = result.expect_err("expected Err for host creation failure");
+        assert_eq!(
+            err.failure_category(),
+            "host_creation_failed",
+            "error category must be host_creation_failed"
+        );
+        assert_eq!(
+            transitions.fail_run_call_count(),
+            0,
+            "executor must NOT call fail_run; scheduler owns terminal failure recording"
+        );
+    }
+
+    /// When `persist_model_route_snapshot` fails (the transition port returns
+    /// `Err` from `record_model_route_snapshot`), `execute_claimed_run` must
+    /// return `Err(TurnRunExecutorError)` with category
+    /// `"route_snapshot_persistence_failed"`.
+    /// The executor must NOT itself call `fail_run` on this path.
+    #[tokio::test]
+    async fn model_route_snapshot_persistence_failure_returns_err_without_calling_fail_run() {
+        let executor = make_executor_with_driver(Arc::new(SucceedingHostFactoryWithSnapshot));
+        let transitions = Arc::new(FailingSnapshotTransitionPort::default());
+
+        let result = executor
+            .execute_claimed_run(
+                test_claimed_run(),
+                transitions.clone() as Arc<dyn TurnRunTransitionPort>,
+            )
+            .await;
+
+        let err = result.expect_err("expected Err for snapshot persistence failure");
+        assert_eq!(
+            err.failure_category(),
+            "route_snapshot_persistence_failed",
+            "error category must be route_snapshot_persistence_failed"
+        );
+        assert_eq!(
+            transitions.fail_run_call_count(),
+            0,
+            "executor must NOT call fail_run; scheduler owns terminal failure recording"
+        );
     }
 }

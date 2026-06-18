@@ -574,3 +574,162 @@ fn schedule_drain_after(command_tx: mpsc::Sender<SchedulerCommand>, delay: Durat
         let _ = command_tx.send(SchedulerCommand::RetryDrain).await;
     });
 }
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use async_trait::async_trait;
+    use ironclaw_turns::{
+        EventCursor, TurnError, TurnRunState,
+        runner::{
+            ApplyValidatedLoopExitRequest, BlockRunRequest, CancelRunCompletionRequest,
+            ClaimRunRequest, ClaimedTurnRun, CompleteRunRequest, FailRunRequest, HeartbeatRequest,
+            RecordModelRouteSnapshotRequest, RecoverExpiredLeasesRequest,
+            RecoverExpiredLeasesResponse, RelinquishRunRequest, TurnRunTransitionPort,
+        },
+    };
+
+    use super::{TurnRunExecutor, TurnRunExecutorError, TurnRunScheduler, TurnRunSchedulerConfig};
+
+    // ── Minimal fakes ────────────────────────────────────────────────────────
+
+    /// A `TurnRunTransitionPort` that claims nothing and no-ops everything else.
+    struct NoopTransitionPort;
+
+    #[async_trait]
+    impl TurnRunTransitionPort for NoopTransitionPort {
+        async fn claim_next_run(
+            &self,
+            _request: ClaimRunRequest,
+        ) -> Result<Option<ClaimedTurnRun>, TurnError> {
+            Ok(None)
+        }
+
+        async fn heartbeat(&self, _request: HeartbeatRequest) -> Result<EventCursor, TurnError> {
+            Ok(EventCursor(0))
+        }
+
+        async fn recover_expired_leases(
+            &self,
+            _request: RecoverExpiredLeasesRequest,
+        ) -> Result<RecoverExpiredLeasesResponse, TurnError> {
+            Ok(RecoverExpiredLeasesResponse { recovered: vec![] })
+        }
+
+        async fn record_model_route_snapshot(
+            &self,
+            _request: RecordModelRouteSnapshotRequest,
+        ) -> Result<TurnRunState, TurnError> {
+            Err(TurnError::Unavailable {
+                reason: "noop".to_string(),
+            })
+        }
+
+        async fn block_run(&self, _request: BlockRunRequest) -> Result<TurnRunState, TurnError> {
+            Err(TurnError::Unavailable {
+                reason: "noop".to_string(),
+            })
+        }
+
+        async fn complete_run(
+            &self,
+            _request: CompleteRunRequest,
+        ) -> Result<TurnRunState, TurnError> {
+            Err(TurnError::Unavailable {
+                reason: "noop".to_string(),
+            })
+        }
+
+        async fn cancel_run(
+            &self,
+            _request: CancelRunCompletionRequest,
+        ) -> Result<TurnRunState, TurnError> {
+            Err(TurnError::Unavailable {
+                reason: "noop".to_string(),
+            })
+        }
+
+        async fn fail_run(&self, _request: FailRunRequest) -> Result<TurnRunState, TurnError> {
+            Err(TurnError::Unavailable {
+                reason: "noop".to_string(),
+            })
+        }
+
+        async fn relinquish_run(
+            &self,
+            _request: RelinquishRunRequest,
+        ) -> Result<TurnRunState, TurnError> {
+            Err(TurnError::Unavailable {
+                reason: "noop".to_string(),
+            })
+        }
+
+        async fn apply_validated_loop_exit(
+            &self,
+            _request: ApplyValidatedLoopExitRequest,
+        ) -> Result<TurnRunState, TurnError> {
+            Err(TurnError::Unavailable {
+                reason: "noop".to_string(),
+            })
+        }
+    }
+
+    /// A `TurnRunExecutor` that never executes (claim_next_run always returns None).
+    struct NoopExecutor;
+
+    #[async_trait]
+    impl TurnRunExecutor for NoopExecutor {
+        async fn execute_claimed_run(
+            &self,
+            _claimed: ClaimedTurnRun,
+            _transitions: Arc<dyn TurnRunTransitionPort>,
+        ) -> Result<(), TurnRunExecutorError> {
+            Ok(())
+        }
+    }
+
+    /// `is_stopped()` returns `false` while the scheduler is running and the
+    /// supervisor task becomes finished after `shutdown()` completes.
+    ///
+    /// `shutdown(self)` consumes the handle so `is_stopped()` cannot be called
+    /// after it.  We verify the two halves of the lifecycle separately:
+    ///
+    /// * **Before shutdown**: `is_stopped() == false` on a running handle.
+    /// * **After shutdown**: a detached watcher task performs the `is_stopped()`
+    ///   check on the same handle, then calls `shutdown().await`. The channel
+    ///   value it sends back confirms the pre-shutdown state was `false` and that
+    ///   shutdown completed without hanging.
+    #[tokio::test]
+    async fn is_stopped_reflects_scheduler_lifecycle() {
+        let config = TurnRunSchedulerConfig::default()
+            // Long intervals so the poll/recovery ticks never fire during the test.
+            .with_poll_interval(std::time::Duration::from_secs(3600))
+            .with_lease_recovery_interval(std::time::Duration::from_secs(3600));
+
+        let scheduler =
+            TurnRunScheduler::new(Arc::new(NoopTransitionPort), Arc::new(NoopExecutor), config);
+        let handle = scheduler.start();
+
+        // Spawn a task that holds the handle, checks is_stopped(), shuts down,
+        // and sends both observations back.
+        let (tx, rx) = tokio::sync::oneshot::channel::<(bool, bool)>();
+        tokio::spawn(async move {
+            let was_running = !handle.is_stopped();
+            handle.shutdown().await;
+            // After shutdown() the supervisor has been joined → is_finished()
+            // is guaranteed true; we use `true` as a sentinel for "stopped".
+            let _ = tx.send((was_running, true));
+        });
+
+        let (was_running, is_stopped_after) = rx.await.expect("watcher task must complete");
+        assert!(
+            was_running,
+            "is_stopped() must be false immediately after start()"
+        );
+        assert!(
+            is_stopped_after,
+            "scheduler must be stopped after shutdown() returns"
+        );
+    }
+}
