@@ -318,6 +318,60 @@ async fn builtin_first_party_surface_lists_allowed_tools_in_registry_order() {
 }
 
 #[tokio::test]
+async fn builtin_trigger_create_input_schema_declares_completion_policy_enum() {
+    let runtime = runtime_with_trigger_repository(Arc::new(InMemoryTriggerRepository::default()));
+    let request = VisibleCapabilityRequest::new(
+        execution_context(all_builtin_capability_ids()),
+        SurfaceKind::new("agent_loop").unwrap(),
+    )
+    .with_policy(CapabilitySurfacePolicy::allow_all())
+    .with_provider_trust(provider_trust());
+
+    let surface = runtime.visible_capabilities(request).await.unwrap();
+
+    let trigger_create = surface
+        .capabilities
+        .iter()
+        .find(|capability| capability.descriptor.id.as_str() == TRIGGER_CREATE_CAPABILITY_ID)
+        .expect("trigger_create must appear in surface");
+
+    let schema = &trigger_create.descriptor.parameters_schema;
+
+    // `completion_policy` must be listed in the `required` array.
+    let required = schema
+        .get("required")
+        .and_then(Value::as_array)
+        .expect("trigger_create schema must have a required array");
+    let required_names: Vec<&str> = required.iter().filter_map(|v| v.as_str()).collect();
+    assert!(
+        required_names.contains(&"completion_policy"),
+        "completion_policy must be listed in required; got {required_names:?}"
+    );
+
+    // The `completion_policy` property must declare exactly the two allowed enum values.
+    let enum_values = schema
+        .get("properties")
+        .and_then(|p| p.get("completion_policy"))
+        .and_then(|cp| cp.get("enum"))
+        .and_then(Value::as_array)
+        .expect("trigger_create schema completion_policy must have an enum array");
+    let enum_strings: Vec<&str> = enum_values.iter().filter_map(|v| v.as_str()).collect();
+    assert!(
+        enum_strings.contains(&"recurring"),
+        "completion_policy enum must contain 'recurring'; got {enum_strings:?}"
+    );
+    assert!(
+        enum_strings.contains(&"complete_after_first_fire"),
+        "completion_policy enum must contain 'complete_after_first_fire'; got {enum_strings:?}"
+    );
+    assert_eq!(
+        enum_strings.len(),
+        2,
+        "completion_policy enum must have exactly two values; got {enum_strings:?}"
+    );
+}
+
+#[tokio::test]
 async fn builtin_first_party_surface_hides_runtime_policy_impossible_tools() {
     let runtime = runtime_with_policy(network_denied_policy());
     let request = VisibleCapabilityRequest::new(
@@ -751,6 +805,38 @@ async fn builtin_trigger_create_applies_first_party_input_size_bound() {
             .await
             .unwrap()
             .is_empty()
+    );
+}
+
+#[tokio::test]
+async fn builtin_trigger_create_rejects_invalid_completion_policy_before_persistence() {
+    let repository = Arc::new(InMemoryTriggerRepository::default());
+    let runtime = runtime_with_trigger_repository(repository.clone());
+    let context = execution_context([TRIGGER_CREATE_CAPABILITY_ID]);
+
+    let error = invoke_with_context(
+        &runtime,
+        TRIGGER_CREATE_CAPABILITY_ID,
+        json!({
+            "name": "Invalid policy trigger",
+            "prompt": "Run work",
+            "cron": "0 8 * * *",
+            "timezone": "UTC",
+            "completion_policy": "sometimes"
+        }),
+        context.clone(),
+    )
+    .await
+    .unwrap_err();
+
+    assert_eq!(error, RuntimeFailureKind::InvalidInput);
+    assert!(
+        repository
+            .list_triggers(context.resource_scope.tenant_id)
+            .await
+            .unwrap()
+            .is_empty(),
+        "no trigger should be persisted when completion_policy is an unknown value"
     );
 }
 

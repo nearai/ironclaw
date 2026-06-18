@@ -1416,16 +1416,6 @@ async fn mark_successful_fire_result(
     conn: &libsql::Connection,
     update: SuccessfulFireResultUpdate<'_>,
 ) -> Result<Option<TriggerRecord>, TriggerError> {
-    // Guard: reject (next_run_at = None, Recurring) before touching the database.
-    // Fetch the claimed record to learn its completion_policy; if the record is
-    // missing or not currently active for this fire_slot, the guard is a no-op and
-    // the subsequent UPDATE will correctly produce no-row (None).
-    if update.next_run_at.is_none()
-        && let Some(record) = fetch_record(conn, update.tenant_id, update.trigger_id).await?
-        && record.active_fire_slot == Some(update.fire_slot)
-    {
-        reject_missing_next_run_at_for_recurring(record.completion_policy, update.next_run_at)?;
-    }
     let fire_slot_text = fmt_ts(&update.fire_slot);
     let result_at = fmt_ts(&update.result_at);
     let next_run_at_val = opt_ts(update.next_run_at.as_ref());
@@ -1433,6 +1423,17 @@ async fn mark_successful_fire_result(
     let last_status = status_text(TriggerRunStatus::Ok);
     begin_immediate(conn, "begin successful trigger fire result").await?;
     let update_result = async {
+        // Guard: reject (next_run_at = None, Recurring) inside the write transaction
+        // so the completion_policy read is under the same BEGIN IMMEDIATE lock as the
+        // UPDATE below — eliminating the TOCTOU race that existed when this read
+        // happened before begin_immediate. Only runs on the uncommon path where
+        // next_run_at is None to avoid an extra query on every successful fire.
+        if update.next_run_at.is_none()
+            && let Some(record) = fetch_record(conn, update.tenant_id, update.trigger_id).await?
+            && record.active_fire_slot == Some(update.fire_slot)
+        {
+            reject_missing_next_run_at_for_recurring(record.completion_policy, update.next_run_at)?;
+        }
         let mut rows = conn
             .query(
                 &format!(
