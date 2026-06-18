@@ -95,6 +95,7 @@ mod tests {
             &MountView::default(),
             &MountView::default(),
             &MountView::default(),
+            &MountView::default(),
         );
         let context = ironclaw_host_api::ExecutionContext::local_default(
             ironclaw_host_api::UserId::new("test-user").expect("user id"),

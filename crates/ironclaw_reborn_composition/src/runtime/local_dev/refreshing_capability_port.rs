@@ -34,6 +34,7 @@ pub(super) struct RefreshingLocalDevCapabilityPortConfig {
     pub(super) workspace_mounts: MountView,
     pub(super) skill_mounts: MountView,
     pub(super) memory_mounts: MountView,
+    pub(super) system_extensions_lifecycle_mounts: MountView,
     pub(super) extension_surface_source: LocalDevExtensionSurfaceSource,
     pub(super) input_resolver: Arc<dyn LoopCapabilityInputResolver>,
     pub(super) result_writer: Arc<dyn LoopCapabilityResultWriter>,
@@ -57,6 +58,7 @@ pub(super) async fn create_refreshing_local_dev_capability_port(
         workspace_mounts: config.workspace_mounts,
         skill_mounts: config.skill_mounts,
         memory_mounts: config.memory_mounts,
+        system_extensions_lifecycle_mounts: config.system_extensions_lifecycle_mounts,
         extension_surface_source: config.extension_surface_source,
         input_resolver: config.input_resolver,
         result_writer: config.result_writer,
@@ -86,6 +88,7 @@ struct RefreshingLocalDevCapabilityPort {
     workspace_mounts: MountView,
     skill_mounts: MountView,
     memory_mounts: MountView,
+    system_extensions_lifecycle_mounts: MountView,
     extension_surface_source: LocalDevExtensionSurfaceSource,
     input_resolver: Arc<dyn LoopCapabilityInputResolver>,
     result_writer: Arc<dyn LoopCapabilityResultWriter>,
@@ -113,6 +116,7 @@ impl RefreshingLocalDevCapabilityPort {
             self.workspace_mounts.clone(),
             self.skill_mounts.clone(),
             self.memory_mounts.clone(),
+            self.system_extensions_lifecycle_mounts.clone(),
             &self.policy,
             &extension_surface,
         )?;
@@ -139,6 +143,12 @@ impl RefreshingLocalDevCapabilityPort {
         for capability_id in self.policy.memory_capability_ids() {
             factory = factory
                 .with_capability_execution_mount(capability_id.clone(), self.memory_mounts.clone());
+        }
+        for capability_id in self.policy.system_extensions_lifecycle_capability_ids() {
+            factory = factory.with_capability_execution_mount(
+                capability_id.clone(),
+                self.system_extensions_lifecycle_mounts.clone(),
+            );
         }
         let port = factory.for_run_context(self.run_context.clone());
         let mut synthetic_capabilities = match &self.skill_activation_source {

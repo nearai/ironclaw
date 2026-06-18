@@ -119,6 +119,14 @@ pub(crate) fn memory_mount_view(permissions: MountPermissions) -> Result<MountVi
     MountView::new(vec![grant(MEMORY_ALIAS, MEMORY_TARGET, permissions)?])
 }
 
+pub(crate) fn system_extensions_lifecycle_mount_view() -> Result<MountView, HostApiError> {
+    MountView::new(vec![grant(
+        "/system/extensions",
+        "/system/extensions",
+        MountPermissions::read_write_list_delete(),
+    )?])
+}
+
 /// Read-only mount view backing the standalone WebUI filesystem viewer.
 ///
 /// Spans every mount the read-only browser can navigate — the workspace
