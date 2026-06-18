@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use chrono::Utc;
 use ironclaw_auth::{
     AuthProductError, AuthProductScope, AuthProviderId, AuthSurface, CredentialAccount,
     CredentialAccountRecordSource, CredentialAccountSelectionRequest, CredentialAccountStatus,
@@ -15,6 +16,11 @@ use ironclaw_host_runtime::{
     RuntimeCredentialAccessSecret, RuntimeCredentialAccountRequest,
     RuntimeCredentialAccountResolver,
 };
+
+/// Minimum time remaining before an access token is considered fresh enough
+/// to skip an inline refresh round-trip.
+// TODO(#5071 WS4): wire from CredentialRefreshSettings/config
+const DEFAULT_ACCESS_REFRESH_MARGIN: std::time::Duration = std::time::Duration::from_secs(5 * 60);
 
 #[derive(Clone)]
 pub(crate) struct ProductAuthRuntimeCredentialResolver {
@@ -216,11 +222,18 @@ impl RuntimeCredentialAccountVisibilityPolicy for DefaultRuntimeCredentialAccoun
 
 pub(crate) struct ProductAuthRuntimeCredentialAccountRefresher {
     refresh_accounts: Arc<dyn RuntimeCredentialAccountRefreshPort>,
+    secret_store: Arc<dyn ironclaw_secrets::SecretStore>,
 }
 
 impl ProductAuthRuntimeCredentialAccountRefresher {
-    pub(crate) fn new(refresh_accounts: Arc<dyn RuntimeCredentialAccountRefreshPort>) -> Self {
-        Self { refresh_accounts }
+    pub(crate) fn new(
+        refresh_accounts: Arc<dyn RuntimeCredentialAccountRefreshPort>,
+        secret_store: Arc<dyn ironclaw_secrets::SecretStore>,
+    ) -> Self {
+        Self {
+            refresh_accounts,
+            secret_store,
+        }
     }
 }
 
@@ -374,9 +387,31 @@ impl RuntimeCredentialAccountRefreshService for ProductAuthRuntimeCredentialAcco
         }
         let account_id = account.id;
 
-        // Access-token expiry is not part of the credential account record, so
-        // refresh each OAuth staging instead of reusing a previously staged
-        // access secret indefinitely.
+        // A2: If the access secret has a known expiry that is still outside
+        // the refresh margin, skip the token-endpoint round-trip and reuse the
+        // staged token. We always re-read from the store (never cache).
+        // Skip only when `expires_at` is present — absent means legacy record
+        // or cleanup deleted it, both are fail-safe: proceed with refresh.
+        if let Some(access_handle) = &account.access_secret {
+            let metadata = self
+                .secret_store
+                .metadata(&account.scope.resource, access_handle)
+                .await
+                .unwrap_or(None); // metadata errors are non-fatal; fall through to refresh
+            if let Some(meta) = metadata
+                && let Some(expires_at) = meta.expires_at
+            {
+                let margin = chrono::Duration::from_std(DEFAULT_ACCESS_REFRESH_MARGIN)
+                    .unwrap_or(chrono::Duration::seconds(300));
+                if expires_at - margin > Utc::now() {
+                    tracing::debug!(
+                        provider = %account.provider,
+                        "oauth access token still fresh, skipping inline refresh"
+                    );
+                    return Ok(account);
+                }
+            }
+        }
         let mut refresh_request = CredentialRefreshRequest::new(
             account.scope.clone(),
             account.provider.clone(),

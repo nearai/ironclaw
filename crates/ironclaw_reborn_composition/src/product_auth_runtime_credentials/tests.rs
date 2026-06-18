@@ -1,3 +1,4 @@
+use chrono::Utc;
 use ironclaw_auth::{
     CredentialAccountLabel, CredentialAccountService, CredentialOwnership,
     InMemoryAuthProductServices, NewCredentialAccount,
@@ -5,7 +6,11 @@ use ironclaw_auth::{
 use ironclaw_host_api::{
     ExtensionId, InvocationId, MissionId, ResourceScope, RuntimeCredentialAccountProviderId,
     RuntimeCredentialAccountSetup, RuntimeCredentialAuthRequirement, SecretHandle, ThreadId,
-    UserId,
+    Timestamp, UserId,
+};
+use ironclaw_secrets::{
+    InMemorySecretStore, SecretLease, SecretLeaseId, SecretMaterial, SecretMetadata, SecretStore,
+    SecretStoreError,
 };
 
 use super::*;
@@ -33,9 +38,10 @@ fn resolver_with_refresh(
                 Arc::new(crate::gsuite::GsuiteRuntimeCredentialAccountVisibilityPolicy),
             ),
         ),
-        Arc::new(ProductAuthRuntimeCredentialAccountRefresher::new(Arc::new(
-            TestRuntimeCredentialRefreshPort(accounts),
-        ))),
+        Arc::new(ProductAuthRuntimeCredentialAccountRefresher::new(
+            Arc::new(TestRuntimeCredentialRefreshPort(accounts)),
+            Arc::new(InMemorySecretStore::new()),
+        )),
     )
 }
 
@@ -1151,4 +1157,220 @@ async fn resolver_uses_most_recent_account_across_multiple_reusable_logins() {
         .expect("runtime must resolve to the most-recent reusable account, not re-prompt");
 
     assert_eq!(resolved.handle, latest_secret);
+}
+
+fn resolver_with_refresh_and_store(
+    accounts: Arc<InMemoryAuthProductServices>,
+    secret_store: Arc<ExpiryAwareSecretStore>,
+) -> ProductAuthRuntimeCredentialResolver {
+    ProductAuthRuntimeCredentialResolver::new_with_refresh(
+        Arc::new(
+            ProductAuthRuntimeCredentialAccountSelector::new_with_visibility(
+                accounts.clone(),
+                Arc::new(crate::gsuite::GsuiteRuntimeCredentialAccountVisibilityPolicy),
+            ),
+        ),
+        Arc::new(ProductAuthRuntimeCredentialAccountRefresher::new(
+            Arc::new(TestRuntimeCredentialRefreshPort(accounts)),
+            secret_store,
+        )),
+    )
+}
+
+/// A secret store that tracks `expires_at` in memory for test purposes.
+/// `InMemorySecretStore` discards expires_at, so we need this wrapper.
+struct ExpiryAwareSecretStore {
+    expiries: std::sync::Mutex<std::collections::HashMap<String, Timestamp>>,
+    inner: InMemorySecretStore,
+}
+
+impl ExpiryAwareSecretStore {
+    fn new() -> Self {
+        Self {
+            expiries: std::sync::Mutex::new(std::collections::HashMap::new()),
+            inner: InMemorySecretStore::new(),
+        }
+    }
+
+    async fn put_with_expiry(
+        &self,
+        scope: ResourceScope,
+        handle: SecretHandle,
+        expires_at: Timestamp,
+    ) {
+        let key = format!("{}/{}", scope.user_id.as_str(), handle.as_str());
+        self.expiries.lock().unwrap().insert(key, expires_at);
+        // Also write to inner store (required for metadata() to return Some)
+        self.inner
+            .put(
+                scope,
+                handle,
+                ironclaw_secrets::SecretMaterial::from("[placeholder]".to_string()),
+                None,
+            )
+            .await
+            .ok();
+    }
+}
+
+#[async_trait::async_trait]
+impl SecretStore for ExpiryAwareSecretStore {
+    async fn put(
+        &self,
+        scope: ResourceScope,
+        handle: SecretHandle,
+        material: SecretMaterial,
+        expires_at: Option<Timestamp>,
+    ) -> Result<SecretMetadata, SecretStoreError> {
+        if let Some(exp) = expires_at {
+            let key = format!("{}/{}", scope.user_id.as_str(), handle.as_str());
+            self.expiries.lock().unwrap().insert(key, exp);
+        }
+        let mut meta = self.inner.put(scope.clone(), handle.clone(), material, None).await?;
+        meta.expires_at = expires_at;
+        Ok(meta)
+    }
+
+    async fn metadata(
+        &self,
+        scope: &ResourceScope,
+        handle: &SecretHandle,
+    ) -> Result<Option<SecretMetadata>, SecretStoreError> {
+        let inner_meta = self.inner.metadata(scope, handle).await?;
+        let Some(mut meta) = inner_meta else {
+            return Ok(None);
+        };
+        let key = format!("{}/{}", scope.user_id.as_str(), handle.as_str());
+        meta.expires_at = self.expiries.lock().unwrap().get(&key).copied();
+        Ok(Some(meta))
+    }
+
+    async fn delete(
+        &self,
+        scope: &ResourceScope,
+        handle: &SecretHandle,
+    ) -> Result<bool, SecretStoreError> {
+        self.inner.delete(scope, handle).await
+    }
+
+    async fn lease_once(
+        &self,
+        scope: &ResourceScope,
+        handle: &SecretHandle,
+    ) -> Result<SecretLease, SecretStoreError> {
+        self.inner.lease_once(scope, handle).await
+    }
+
+    async fn consume(
+        &self,
+        scope: &ResourceScope,
+        lease_id: SecretLeaseId,
+    ) -> Result<SecretMaterial, SecretStoreError> {
+        self.inner.consume(scope, lease_id).await
+    }
+
+    async fn revoke(
+        &self,
+        scope: &ResourceScope,
+        lease_id: SecretLeaseId,
+    ) -> Result<SecretLease, SecretStoreError> {
+        self.inner.revoke(scope, lease_id).await
+    }
+
+    async fn leases_for_scope(
+        &self,
+        scope: &ResourceScope,
+    ) -> Result<Vec<SecretLease>, SecretStoreError> {
+        self.inner.leases_for_scope(scope).await
+    }
+}
+
+#[tokio::test]
+async fn resolver_skips_inline_refresh_when_access_token_is_fresh() {
+    // A2: An access secret with expires_at far in the future (> margin) must
+    // cause the inline refresh to be SKIPPED entirely. The returned handle must
+    // be the original access handle, not an "oauth-refreshed-*" handle.
+    let accounts = Arc::new(InMemoryAuthProductServices::new());
+    let scope =
+        ResourceScope::local_default(UserId::new("alice").unwrap(), InvocationId::new()).unwrap();
+    let auth_scope = AuthProductScope::new(scope.clone(), AuthSurface::Api);
+    let access_secret = SecretHandle::new("google_fresh_access").unwrap();
+    let drive_scope = ProviderScope::new("https://www.googleapis.com/auth/drive.readonly").unwrap();
+    ConfiguredAccount::new(auth_scope, "google")
+        .access_secret(Some(access_secret.clone()))
+        .refresh_secret(SecretHandle::new("google_refresh").unwrap())
+        .scopes(&["https://www.googleapis.com/auth/drive.readonly"])
+        .create(&accounts)
+        .await;
+
+    // Pre-populate the secret store with a fresh expiry (1 hour from now).
+    let secret_store = Arc::new(ExpiryAwareSecretStore::new());
+    secret_store
+        .put_with_expiry(
+            scope.clone(),
+            access_secret.clone(),
+            Utc::now() + chrono::Duration::hours(1),
+        )
+        .await;
+
+    let resolver = resolver_with_refresh_and_store(accounts.clone(), secret_store);
+
+    let resolved = resolver
+        .resolve_access_secret(RuntimeCredentialAccountRequest {
+            scope: &scope,
+            provider: &RuntimeCredentialAccountProviderId::new("google").unwrap(),
+            setup: &RuntimeCredentialAccountSetup::OAuth { scopes: Vec::new() },
+            provider_scopes: &[drive_scope.as_str().to_string()],
+            requester_extension: &ExtensionId::new("google-drive").unwrap(),
+        })
+        .await
+        .expect("fresh OAuth token should be reused without refresh");
+
+    // Must be the original handle — refresh was skipped.
+    assert_eq!(resolved.handle, access_secret);
+}
+
+#[tokio::test]
+async fn resolver_refreshes_when_access_token_is_within_margin() {
+    // A2: An access secret with expires_at within the margin (or expired)
+    // must trigger a refresh. The returned handle must be a new refreshed handle.
+    let accounts = Arc::new(InMemoryAuthProductServices::new());
+    let scope =
+        ResourceScope::local_default(UserId::new("alice").unwrap(), InvocationId::new()).unwrap();
+    let auth_scope = AuthProductScope::new(scope.clone(), AuthSurface::Api);
+    let stale_access = SecretHandle::new("google_expiring_access").unwrap();
+    let drive_scope = ProviderScope::new("https://www.googleapis.com/auth/drive.readonly").unwrap();
+    ConfiguredAccount::new(auth_scope, "google")
+        .access_secret(Some(stale_access.clone()))
+        .refresh_secret(SecretHandle::new("google_refresh_expiring").unwrap())
+        .scopes(&["https://www.googleapis.com/auth/drive.readonly"])
+        .create(&accounts)
+        .await;
+
+    // Pre-populate the secret store with an expiry within the margin (2 minutes from now).
+    let secret_store = Arc::new(ExpiryAwareSecretStore::new());
+    secret_store
+        .put_with_expiry(
+            scope.clone(),
+            stale_access.clone(),
+            Utc::now() + chrono::Duration::minutes(2),
+        )
+        .await;
+
+    let resolver = resolver_with_refresh_and_store(accounts.clone(), secret_store);
+
+    let resolved = resolver
+        .resolve_access_secret(RuntimeCredentialAccountRequest {
+            scope: &scope,
+            provider: &RuntimeCredentialAccountProviderId::new("google").unwrap(),
+            setup: &RuntimeCredentialAccountSetup::OAuth { scopes: Vec::new() },
+            provider_scopes: &[drive_scope.as_str().to_string()],
+            requester_extension: &ExtensionId::new("google-drive").unwrap(),
+        })
+        .await
+        .expect("within-margin OAuth token should trigger refresh");
+
+    // Must be a new refreshed handle — refresh ran.
+    assert_ne!(resolved.handle, stale_access);
+    assert!(resolved.handle.as_str().starts_with("oauth-refreshed-access"));
 }

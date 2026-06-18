@@ -457,6 +457,10 @@ pub struct RebornProductAuthServices {
     cleanup_service: Arc<dyn SecretCleanupService>,
     continuation_dispatcher: Arc<dyn RebornAuthContinuationDispatcher>,
     security_audit_sink: Option<Arc<dyn SecurityAuditSink>>,
+    /// Secret store forwarded to the inline-refresh margin check (A2). `None`
+    /// falls back to a no-expiry in-memory store so the refresher always runs
+    /// on records with no stored expiry — safe and backward-compatible.
+    secret_store: Option<Arc<dyn ironclaw_secrets::SecretStore>>,
     dcr_oauth_registry: Option<Arc<OAuthDcrProviderRegistry>>,
     oauth_gate_registry: Option<Arc<GoogleOAuthGateProviderRegistry>>,
     /// Optional read projection for WebUI/local-dev auth interactions.
@@ -502,6 +506,7 @@ impl std::fmt::Debug for RebornProductAuthServices {
                 &"Arc<dyn RebornAuthContinuationDispatcher>",
             )
             .field("security_audit_sink", &self.security_audit_sink.is_some())
+            .field("secret_store", &self.secret_store.is_some())
             .field("flow_record_source", &self.flow_record_source.is_some())
             .field("dcr_oauth_registry", &self.dcr_oauth_registry.is_some())
             .field("oauth_gate_registry", &self.oauth_gate_registry.is_some())
@@ -535,6 +540,7 @@ impl RebornProductAuthServices {
             cleanup_service,
             continuation_dispatcher,
             security_audit_sink: None,
+            secret_store: None,
             dcr_oauth_registry: None,
             oauth_gate_registry: None,
             flow_record_source: None,
@@ -647,8 +653,18 @@ impl RebornProductAuthServices {
         self: &Arc<Self>,
     ) -> Arc<dyn RuntimeCredentialAccountRefreshService> {
         let refresh_port: Arc<dyn RuntimeCredentialAccountRefreshPort> = self.clone();
+        // A2: Forward the secret store so the refresher can read `expires_at`
+        // metadata and skip the token-endpoint round-trip when the access token
+        // is still fresh. Fall back to a no-expiry in-memory store when no
+        // store is wired — every refresh will proceed unconditionally, which
+        // is the safe, backward-compatible default.
+        let secret_store: Arc<dyn ironclaw_secrets::SecretStore> = self
+            .secret_store
+            .clone()
+            .unwrap_or_else(|| Arc::new(ironclaw_secrets::InMemorySecretStore::new()));
         Arc::new(ProductAuthRuntimeCredentialAccountRefresher::new(
             refresh_port,
+            secret_store,
         ))
     }
 
@@ -712,6 +728,16 @@ impl RebornProductAuthServices {
 
     pub fn with_security_audit_sink(mut self, sink: Arc<dyn SecurityAuditSink>) -> Self {
         self.security_audit_sink = Some(sink);
+        self
+    }
+
+    /// Wire the secret store used by the inline OAuth refresh margin check
+    /// (A2). When set, the refresher reads `expires_at` metadata from the
+    /// store and skips an unnecessary token-endpoint round-trip when the
+    /// access token is still fresh. When absent, every refresh call proceeds
+    /// unconditionally (safe, backward-compatible default).
+    pub fn with_secret_store(mut self, store: Arc<dyn ironclaw_secrets::SecretStore>) -> Self {
+        self.secret_store = Some(store);
         self
     }
 

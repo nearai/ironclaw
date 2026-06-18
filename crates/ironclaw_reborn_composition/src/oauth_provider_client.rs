@@ -258,13 +258,27 @@ impl HostOAuthProviderClient {
             .await
             .map_err(|_| AuthProductError::BackendUnavailable)?;
         if !(200..300).contains(&response.status) {
-            return Err(if (500..600).contains(&response.status) {
-                AuthProductError::BackendUnavailable
-            } else if refresh_request {
-                AuthProductError::RefreshFailed
-            } else {
-                AuthProductError::TokenExchangeFailed
-            });
+            if (500..600).contains(&response.status) {
+                return Err(AuthProductError::BackendUnavailable);
+            }
+            // For 4xx errors on a refresh request, check for invalid_grant to
+            // distinguish permanent revocation from transient failure.
+            // REDACTION: extract only the `error` code string — never log, serialize,
+            // or return the raw body, access token, refresh token, or any secret.
+            if refresh_request {
+                let error_code = serde_json::from_slice::<OAuthErrorResponseBody>(&response.body)
+                    .ok()
+                    .and_then(|body| body.error);
+                if error_code.as_deref() == Some("invalid_grant") {
+                    tracing::debug!(
+                        oauth_error_code = "invalid_grant",
+                        "oauth refresh token revoked by provider"
+                    );
+                    return Err(AuthProductError::InvalidGrant);
+                }
+                return Err(AuthProductError::RefreshFailed);
+            }
+            return Err(AuthProductError::TokenExchangeFailed);
         }
         parse_token_response(&response.body).map_err(|error| {
             if refresh_request {
@@ -552,6 +566,14 @@ impl AuthProviderClient for HostOAuthProviderClient {
 struct StoredOAuthTokens {
     access_secret: SecretHandle,
     refresh_secret: Option<SecretHandle>,
+}
+
+/// Minimal OAuth error response — we extract only the `error` code field.
+/// The full body is never logged or returned to callers.
+#[derive(Debug, Deserialize)]
+struct OAuthErrorResponseBody {
+    #[serde(default)]
+    error: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]

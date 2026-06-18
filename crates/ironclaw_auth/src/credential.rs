@@ -933,6 +933,30 @@ impl CredentialAccountService for ProviderBackedCredentialAccountService {
                     self.report_for(&updated, request.requester_extension.as_ref(), true)
                         .await
                 }
+                Err(AuthProductError::InvalidGrant) => {
+                    let current = self
+                        .accounts
+                        .get_account(lookup_request.clone())
+                        .await?
+                        .ok_or(AuthProductError::CredentialMissing)?;
+                    if current != account {
+                        return self
+                            .report_for(&current, request.requester_extension.as_ref(), false)
+                            .await;
+                    }
+                    let updated = self
+                        .setup
+                        .create_or_update_account(Self::account_update(
+                            &current,
+                            current.access_secret.clone(),
+                            current.refresh_secret.clone(),
+                            CredentialAccountStatus::Revoked,
+                            current.scopes.clone(),
+                        ))
+                        .await?;
+                    self.report_for(&updated, request.requester_extension.as_ref(), false)
+                        .await
+                }
                 Err(AuthProductError::RefreshFailed | AuthProductError::TokenExchangeFailed) => {
                     let current = self
                         .accounts

@@ -1445,6 +1445,7 @@ async fn filesystem_cleanup_for_lifecycle_deactivates_owner_and_revokes_on_unins
             scope.resource.clone(),
             access.clone(),
             SecretString::from("access-material"),
+            None,
         )
         .await
         .unwrap();
@@ -1453,6 +1454,7 @@ async fn filesystem_cleanup_for_lifecycle_deactivates_owner_and_revokes_on_unins
             scope.resource.clone(),
             refresh.clone(),
             SecretString::from("refresh-material"),
+            None,
         )
         .await
         .unwrap();
@@ -1763,6 +1765,7 @@ async fn filesystem_oauth_reauth_purges_previous_provider_secrets() {
             scope.resource.clone(),
             access_v1.clone(),
             SecretMaterial::from("access-token-v1"),
+            None,
         )
         .await
         .unwrap();
@@ -1771,6 +1774,7 @@ async fn filesystem_oauth_reauth_purges_previous_provider_secrets() {
             scope.resource.clone(),
             refresh_v1.clone(),
             SecretMaterial::from("refresh-token-v1"),
+            None,
         )
         .await
         .unwrap();
@@ -1865,6 +1869,7 @@ async fn filesystem_oauth_reauth_purges_previous_provider_secrets() {
             scope.resource.clone(),
             access_v2.clone(),
             SecretMaterial::from("access-token-v2"),
+            None,
         )
         .await
         .unwrap();
@@ -1873,6 +1878,7 @@ async fn filesystem_oauth_reauth_purges_previous_provider_secrets() {
             scope.resource.clone(),
             refresh_v2.clone(),
             SecretMaterial::from("refresh-token-v2"),
+            None,
         )
         .await
         .unwrap();
@@ -3108,6 +3114,7 @@ async fn filesystem_oauth_cas_conflict_branch_purges_previous_secrets() {
             scope.resource.clone(),
             old_access.clone(),
             SecretMaterial::from("old-access-token"),
+            None,
         )
         .await
         .unwrap();
@@ -3116,6 +3123,7 @@ async fn filesystem_oauth_cas_conflict_branch_purges_previous_secrets() {
             scope.resource.clone(),
             old_refresh.clone(),
             SecretMaterial::from("old-refresh-token"),
+            None,
         )
         .await
         .unwrap();
