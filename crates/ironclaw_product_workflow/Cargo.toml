@@ -40,7 +40,7 @@ ironclaw_product_context = { path = "../ironclaw_product_context", version = "0.
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 secrecy = { version = "0.10", features = ["serde"] }
-sha2 = "0.10"
+sha2 = "0.11"
 thiserror = "2"
 tokio = { version = "1", features = ["macros", "time"] }
 tracing = "0.1"

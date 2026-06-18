@@ -29,7 +29,7 @@ tracing = "0.1"
 deadpool-postgres = "0.14"
 ironclaw_filesystem = { path = "../ironclaw_filesystem", features = ["libsql", "postgres"] }
 ironclaw_product_adapters = { path = "../ironclaw_product_adapters" }
-libsql = { version = "0.6", default-features = false, features = ["core", "replication", "remote", "tls"] }
+libsql = { version = "0.9", default-features = false, features = ["core", "replication", "remote", "tls"] }
 tempfile = "3"
 tokio = { version = "1", features = ["macros", "rt", "sync", "time"] }
 tokio-postgres = "0.7"

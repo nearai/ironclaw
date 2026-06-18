@@ -16,7 +16,7 @@ ironclaw_host_api = { path = "../ironclaw_host_api", version = "0.1.0" }
 ironclaw_product_adapters = { path = "../ironclaw_product_adapters", version = "0.1.0" }
 serde = { version = "1", features = ["derive"] }
 thiserror = "2"
-toml = "0.8"
+toml = "1.1"
 
 [dev-dependencies]
 chrono = { version = "0.4", features = ["serde"] }
