@@ -141,16 +141,41 @@ pub(crate) fn build_webui_services_with_connectable_channels(
             },
         );
     }
-    if let Some(local_runtime) = &services.local_runtime {
-        let mut lifecycle_facade =
-            RebornLocalLifecycleFacade::new(local_runtime.skill_management.clone());
-        if let Some(extension_management) = &local_runtime.extension_management {
-            lifecycle_facade =
-                lifecycle_facade.with_extension_management(extension_management.clone());
+    if let Some(skill_management) = &services.skill_management {
+        let mut lifecycle_facade = RebornLocalLifecycleFacade::new(Arc::clone(skill_management));
+        let extension_management = {
+            let from_local = services
+                .local_runtime
+                .as_ref()
+                .and_then(|local_runtime| local_runtime.extension_management.clone());
+            #[cfg(any(feature = "libsql", feature = "postgres"))]
+            let from_local = from_local.or_else(|| {
+                services
+                    .production_runtime
+                    .as_ref()
+                    .map(|production_runtime| production_runtime.extension_management())
+            });
+            from_local
+        };
+        if let Some(extension_management) = extension_management {
+            lifecycle_facade = lifecycle_facade.with_extension_management(extension_management);
         }
-        if let Some(runtime_http_egress) = &local_runtime.runtime_http_egress {
-            lifecycle_facade =
-                lifecycle_facade.with_runtime_http_egress(runtime_http_egress.clone());
+        let runtime_http_egress = {
+            let from_local = services
+                .local_runtime
+                .as_ref()
+                .and_then(|local_runtime| local_runtime.runtime_http_egress.clone());
+            #[cfg(any(feature = "libsql", feature = "postgres"))]
+            let from_local = from_local.or_else(|| {
+                services
+                    .production_runtime
+                    .as_ref()
+                    .map(|production_runtime| production_runtime.runtime_http_egress())
+            });
+            from_local
+        };
+        if let Some(runtime_http_egress) = runtime_http_egress {
+            lifecycle_facade = lifecycle_facade.with_runtime_http_egress(runtime_http_egress);
         }
         if let Some(product_auth) = &services.product_auth {
             lifecycle_facade = lifecycle_facade.with_runtime_credential_accounts(

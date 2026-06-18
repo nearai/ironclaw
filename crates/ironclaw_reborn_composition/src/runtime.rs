@@ -5545,6 +5545,96 @@ mod tests {
         runtime.shutdown().await.expect("runtime shutdown");
     }
 
+    #[cfg(all(feature = "libsql", feature = "webui-v2-beta"))]
+    #[tokio::test]
+    async fn production_webui_extension_registry_lists_bundled_extensions() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db = Arc::new(
+            libsql::Builder::new_local(dir.path().join("reborn.db"))
+                .build()
+                .await
+                .expect("libsql db"),
+        );
+        let gateway = Arc::new(RecordingGateway {
+            reply: "production extension registry".to_string(),
+            requests: Arc::new(StdMutex::new(Vec::new())),
+        });
+
+        let input = RebornRuntimeInput::from_services(
+            RebornBuildInput::libsql(
+                crate::RebornCompositionProfile::Production,
+                "runtime-production-extensions-owner",
+                db,
+                dir.path().join("events.db").to_string_lossy(),
+                None,
+                ironclaw_secrets::SecretMaterial::from("01234567890123456789012345678901"),
+            )
+            .with_production_trust_policy(Arc::new(
+                crate::builtin_first_party_trust_policy().expect("trust policy"),
+            ))
+            .with_runtime_policy(EffectiveRuntimePolicy {
+                deployment: DeploymentMode::HostedMultiTenant,
+                requested_profile: RuntimeProfile::SecureDefault,
+                resolved_profile: RuntimeProfile::SecureDefault,
+                filesystem_backend: FilesystemBackendKind::ScopedVirtual,
+                process_backend: ProcessBackendKind::TenantSandbox,
+                network_mode: NetworkMode::Deny,
+                secret_mode: SecretMode::BrokeredHandles,
+                approval_policy: ApprovalPolicy::AskAlways,
+                audit_mode: AuditMode::Standard,
+            })
+            .with_runtime_process_binding(RebornRuntimeProcessBinding::tenant_sandbox(Arc::new(
+                ironclaw_host_runtime::TenantSandboxProcessPort::new(Arc::new(
+                    RecordingSandboxTransport,
+                )),
+            ))),
+        )
+        .with_identity(RebornRuntimeIdentity {
+            tenant_id: "runtime-production-extensions-tenant".to_string(),
+            agent_id: "runtime-production-extensions-agent".to_string(),
+            source_binding_id: "runtime-production-extensions-source".to_string(),
+            reply_target_binding_id: "runtime-production-extensions-reply".to_string(),
+        })
+        .with_model_gateway_override(gateway);
+
+        let runtime = build_reborn_runtime(input)
+            .await
+            .expect("production runtime starts");
+        let bundle = build_webui_services(&runtime, None).expect("webui bundle");
+        let caller = WebUiAuthenticatedCaller::new(
+            TenantId::new("runtime-production-extensions-tenant").expect("tenant"),
+            UserId::new("runtime-production-extensions-user").expect("user"),
+            Some(AgentId::new("runtime-production-extensions-agent").expect("agent")),
+            None,
+        );
+
+        let registry = bundle
+            .api
+            .list_extension_registry(caller)
+            .await
+            .expect("production WebUI registry");
+        let package_ids = registry
+            .entries
+            .iter()
+            .map(|entry| entry.package_ref.id.as_str())
+            .collect::<Vec<_>>();
+
+        assert!(
+            package_ids.contains(&"web-access"),
+            "production WebUI registry should include bundled Web Access extension, got {package_ids:?}"
+        );
+        assert!(
+            package_ids.contains(&"github"),
+            "production WebUI registry should include bundled GitHub extension, got {package_ids:?}"
+        );
+        assert!(
+            package_ids.contains(&"notion"),
+            "production WebUI registry should include bundled Notion MCP extension, got {package_ids:?}"
+        );
+
+        runtime.shutdown().await.expect("runtime shutdown");
+    }
+
     /// Regression guard for Firat's review: a trajectory observer is only wired
     /// through the local-dev capability path, so supplying one to a production
     /// runtime (no local runtime to observe) must fail fast rather than silently

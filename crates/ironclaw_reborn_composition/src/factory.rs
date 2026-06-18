@@ -31,6 +31,7 @@ use ironclaw_events::{DurableAuditLog, DurableEventLog};
 use ironclaw_events::{InMemoryDurableAuditLog, InMemoryDurableEventLog};
 use ironclaw_extensions::{
     ExtensionInstallationStore, ExtensionLifecycleService, ExtensionRegistry,
+    SharedExtensionRegistry,
 };
 #[cfg(not(feature = "libsql"))]
 use ironclaw_filesystem::InMemoryBackend;
@@ -104,7 +105,9 @@ use ironclaw_triggers::{
     TRIGGER_TRUSTED_ADAPTER_INSTALLATION_ID, TRIGGER_TRUSTED_ADAPTER_KIND,
     TRIGGER_TRUSTED_EXTERNAL_ACTOR_NAMESPACE, TriggerError, TriggerRecord, TriggerRepository,
 };
-use ironclaw_trust::{AdminConfig, AdminEntry, HostTrustAssignment, HostTrustPolicy};
+use ironclaw_trust::{
+    AdminConfig, AdminEntry, HostTrustAssignment, HostTrustPolicy, InvalidationBus,
+};
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 use ironclaw_turns::FilesystemTurnStateStore;
 #[cfg(any(feature = "libsql", feature = "postgres"))]
@@ -337,6 +340,61 @@ where
         })
 }
 
+async fn build_extension_management_port(
+    filesystem: Arc<dyn RootFilesystem>,
+    active_registry: Arc<SharedExtensionRegistry>,
+    trust_policy: Arc<HostTrustPolicy>,
+    trust_invalidation_bus: Arc<InvalidationBus>,
+    nearai_mcp_bootstrap_config: Option<&crate::nearai_mcp::NearAiMcpBootstrapConfig>,
+) -> Result<Arc<RebornLocalExtensionManagementPort>, RebornBuildError> {
+    let mut available_extensions = AvailableExtensionCatalog::from_filesystem_root(
+        filesystem.as_ref(),
+        &VirtualPath::new("/system/extensions")?,
+    )
+    .await
+    .map_err(|error| RebornBuildError::InvalidConfig {
+        reason: format!("available extension catalog could not be loaded: {error}"),
+    })?;
+    available_extensions.extend(
+        AvailableExtensionCatalog::from_first_party_assets_with_nearai_mcp_config(
+            nearai_mcp_bootstrap_config,
+        )
+        .map_err(|error| RebornBuildError::InvalidConfig {
+            reason: format!("first-party extension catalog could not be loaded: {error}"),
+        })?,
+    );
+    let extension_installation_store: Arc<dyn ExtensionInstallationStore> = Arc::new(
+        FilesystemExtensionInstallationStore::load(Arc::clone(&filesystem))
+            .await
+            .map_err(|error| RebornBuildError::InvalidConfig {
+                reason: format!("extension installation state could not be loaded: {error}"),
+            })?,
+    );
+    let extension_lifecycle_service = Arc::new(tokio::sync::Mutex::new(
+        ExtensionLifecycleService::new(active_registry.snapshot_owned()),
+    ));
+    let active_extensions =
+        ActiveExtensionPublisher::new(active_registry, trust_policy, trust_invalidation_bus);
+    restore_extension_lifecycle_state(
+        &available_extensions,
+        &filesystem,
+        &extension_installation_store,
+        &extension_lifecycle_service,
+        &active_extensions,
+    )
+    .await
+    .map_err(|error| RebornBuildError::InvalidConfig {
+        reason: format!("extension lifecycle state could not be restored: {error}"),
+    })?;
+    Ok(Arc::new(RebornLocalExtensionManagementPort::new(
+        filesystem,
+        available_extensions,
+        extension_installation_store,
+        extension_lifecycle_service,
+        active_extensions,
+    )))
+}
+
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 pub(crate) fn apply_production_runtime_process_binding<F, G, S, R>(
     services: HostRuntimeServices<F, G, S, R>,
@@ -527,6 +585,8 @@ where
     pub(crate) checkpoint_state_store: Arc<dyn CheckpointStateStore>,
     pub(crate) thread_service: Arc<dyn SessionThreadService>,
     pub(crate) trigger_repository: Arc<dyn TriggerRepository>,
+    pub(crate) extension_management: Arc<RebornLocalExtensionManagementPort>,
+    pub(crate) runtime_http_egress: Arc<dyn RuntimeHttpEgress>,
     pub(crate) resource_governor: Arc<dyn ResourceGovernor>,
     pub(crate) budget_gate_store: Arc<dyn BudgetGateStore>,
     pub(crate) broadcast_budget_event_sink: Arc<BroadcastBudgetEventSink>,
@@ -545,6 +605,24 @@ impl RebornProductionRuntimeServices {
             Self::LibSql(graph) => Arc::clone(&graph.trigger_repository),
             #[cfg(feature = "postgres")]
             Self::Postgres(graph) => Arc::clone(&graph.trigger_repository),
+        }
+    }
+
+    pub(crate) fn extension_management(&self) -> Arc<RebornLocalExtensionManagementPort> {
+        match self {
+            #[cfg(feature = "libsql")]
+            Self::LibSql(graph) => Arc::clone(&graph.extension_management),
+            #[cfg(feature = "postgres")]
+            Self::Postgres(graph) => Arc::clone(&graph.extension_management),
+        }
+    }
+
+    pub(crate) fn runtime_http_egress(&self) -> Arc<dyn RuntimeHttpEgress> {
+        match self {
+            #[cfg(feature = "libsql")]
+            Self::LibSql(graph) => Arc::clone(&graph.runtime_http_egress),
+            #[cfg(feature = "postgres")]
+            Self::Postgres(graph) => Arc::clone(&graph.runtime_http_egress),
         }
     }
 
@@ -959,57 +1037,15 @@ async fn build_local_dev(input: RebornBuildInput) -> Result<RebornServices, Rebo
             product_auth.runtime_credential_account_refresh_service(),
         ),
     ));
-    let mut available_extensions = AvailableExtensionCatalog::from_filesystem_root(
-        filesystem.as_ref(),
-        &VirtualPath::new("/system/extensions")?,
-    )
-    .await
-    .map_err(|error| RebornBuildError::InvalidConfig {
-        reason: format!("available extension catalog could not be loaded: {error}"),
-    })?;
-    available_extensions.extend(
-        AvailableExtensionCatalog::from_first_party_assets_with_nearai_mcp_config(
-            nearai_mcp_bootstrap_config.as_ref(),
-        )
-        .map_err(|error| RebornBuildError::InvalidConfig {
-            reason: format!("first-party extension catalog could not be loaded: {error}"),
-        })?,
-    );
     let extension_filesystem: Arc<dyn RootFilesystem> = filesystem.clone();
-    let extension_installation_store: Arc<dyn ExtensionInstallationStore> = Arc::new(
-        FilesystemExtensionInstallationStore::load(extension_filesystem.clone())
-            .await
-            .map_err(|error| RebornBuildError::InvalidConfig {
-                reason: format!("extension installation state could not be loaded: {error}"),
-            })?,
-    );
-    let extension_lifecycle_service = Arc::new(tokio::sync::Mutex::new(
-        ExtensionLifecycleService::new(services.shared_extension_registry().snapshot_owned()),
-    ));
-    let active_registry = services.shared_extension_registry();
-    let active_extensions = ActiveExtensionPublisher::new(
-        active_registry,
+    let extension_management = build_extension_management_port(
+        extension_filesystem,
+        services.shared_extension_registry(),
         local_dev_trust_policy,
         local_dev_trust_invalidation_bus,
-    );
-    restore_extension_lifecycle_state(
-        &available_extensions,
-        &extension_filesystem,
-        &extension_installation_store,
-        &extension_lifecycle_service,
-        &active_extensions,
+        nearai_mcp_bootstrap_config.as_ref(),
     )
-    .await
-    .map_err(|error| RebornBuildError::InvalidConfig {
-        reason: format!("extension lifecycle state could not be restored: {error}"),
-    })?;
-    let extension_management = Arc::new(RebornLocalExtensionManagementPort::new(
-        extension_filesystem,
-        available_extensions,
-        extension_installation_store,
-        extension_lifecycle_service,
-        active_extensions,
-    ));
+    .await?;
     crate::nearai_mcp::bootstrap_local_dev_nearai_mcp(
         nearai_mcp_bootstrap_config,
         &product_auth,
@@ -2433,14 +2469,19 @@ fn production_builtin_extension_registry(
     process_backend: ProcessBackendKind,
 ) -> Result<ExtensionRegistry, RebornBuildError> {
     let mut registry = ExtensionRegistry::new();
+    let package =
+        builtin_first_party_package_for_process_backend(process_backend).map_err(|error| {
+            RebornBuildError::InvalidConfig {
+                reason: format!("built-in first-party package is invalid: {error}"),
+            }
+        })?;
+    let package = extend_builtin_first_party_package(package).map_err(|error| {
+        RebornBuildError::InvalidConfig {
+            reason: format!("production extension lifecycle package is invalid: {error}"),
+        }
+    })?;
     registry
-        .insert(
-            builtin_first_party_package_for_process_backend(process_backend).map_err(|error| {
-                RebornBuildError::InvalidConfig {
-                    reason: format!("built-in first-party package is invalid: {error}"),
-                }
-            })?,
-        )
+        .insert(package)
         .map_err(|error| RebornBuildError::InvalidConfig {
             reason: format!("built-in first-party registry is invalid: {error}"),
         })?;
@@ -3162,26 +3203,13 @@ where
     .await?;
     let event_log = Arc::clone(&event_stores.events);
     let audit_log = Arc::clone(&event_stores.audit);
-    let production_runtime_graph = Arc::new(RebornProductionRuntimeStoreGraph {
-        scoped_filesystem: Arc::clone(&stores.scoped_filesystem),
-        extension_registry: Arc::clone(&extension_registry),
-        turn_state: Arc::clone(&turn_state),
-        checkpoint_state_store: Arc::clone(&checkpoint_state_store),
-        thread_service,
-        trigger_repository: Arc::clone(&trigger_repository),
-        resource_governor: production_resource_governor,
-        budget_gate_store,
-        broadcast_budget_event_sink,
-        event_log,
-        audit_log,
-    });
-    let production_runtime = production_runtime_services(production_runtime_graph);
     let mut first_party_registry = production_first_party_registry_with_trigger_create_hook(
-        trigger_repository,
+        Arc::clone(&trigger_repository),
         trigger_create_hook,
         process_backend,
     )?;
     let product_auth_filesystem = Arc::clone(&stores.scoped_filesystem);
+    let production_trust_policy = Arc::clone(&production_wiring.trust_policy);
     let services = HostRuntimeServices::new(
         Arc::clone(&extension_registry),
         Arc::clone(&stores.filesystem),
@@ -3190,7 +3218,7 @@ where
         ProcessServices::filesystem(Arc::clone(&stores.scoped_filesystem)),
         CapabilitySurfaceVersion::new("reborn-app-v1")?,
     )
-    .with_trust_policy(production_wiring.trust_policy)
+    .with_trust_policy(Arc::clone(&production_trust_policy))
     .with_runtime_policy(production_wiring.runtime_policy)
     .with_capability_leases(stores.leases)
     .with_persistent_approval_policies(stores.persistent_approval_policies)
@@ -3222,6 +3250,15 @@ where
         production_wiring.runtime_process_binding,
     );
     let services = attach_wasm_runtime(services)?;
+    let extension_filesystem: Arc<dyn RootFilesystem> = stores.filesystem.clone();
+    let extension_management = build_extension_management_port(
+        extension_filesystem,
+        services.shared_extension_registry(),
+        production_trust_policy,
+        Arc::new(InvalidationBus::new()),
+        None,
+    )
+    .await?;
     let security_audit_sink = services.security_audit_sink();
 
     let turn_coordinator: Arc<dyn ironclaw_turns::TurnCoordinator> =
@@ -3268,10 +3305,39 @@ where
     .map_err(|error| RebornBuildError::InvalidConfig {
         reason: format!("GSuite first-party handlers are invalid: {error}"),
     })?;
+    register_bundled_web_access_first_party_handlers(&mut first_party_registry).map_err(
+        |error| RebornBuildError::InvalidConfig {
+            reason: format!("web access first-party handlers are invalid: {error}"),
+        },
+    )?;
+    insert_extension_lifecycle_handlers(
+        &mut first_party_registry,
+        Arc::clone(&extension_management),
+        product_auth_services.runtime_credential_account_selection_service(),
+    )
+    .map_err(|error| RebornBuildError::InvalidConfig {
+        reason: format!("production extension lifecycle handlers are invalid: {error}"),
+    })?;
     let services = services.with_first_party_capabilities(Arc::new(first_party_registry));
 
     let host_runtime: Arc<dyn ironclaw_host_runtime::HostRuntime> =
         Arc::new(services.host_runtime_for_production(&wiring_config)?);
+    let production_runtime_graph = Arc::new(RebornProductionRuntimeStoreGraph {
+        scoped_filesystem: Arc::clone(&stores.scoped_filesystem),
+        extension_registry: Arc::clone(&extension_registry),
+        turn_state: Arc::clone(&turn_state),
+        checkpoint_state_store: Arc::clone(&checkpoint_state_store),
+        thread_service,
+        trigger_repository,
+        extension_management,
+        runtime_http_egress: product_auth_runtime_ports.runtime_http_egress(),
+        resource_governor: production_resource_governor,
+        budget_gate_store,
+        broadcast_budget_event_sink,
+        event_log,
+        audit_log,
+    });
+    let production_runtime = production_runtime_services(production_runtime_graph);
 
     Ok(RebornServices {
         host_runtime: Some(host_runtime),

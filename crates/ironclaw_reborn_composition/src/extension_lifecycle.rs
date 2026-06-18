@@ -41,13 +41,13 @@ pub(crate) use active_publication::ActiveExtensionPublisher;
 #[cfg(test)]
 use active_publication::extension_trust_policy_input;
 
-// This port is deliberately scoped to LocalSingleUser composition. The
-// lifecycle service models the installed extension set, while active_registry
-// is the model-visible capability surface read by host runtime dispatch.
-// install/remove keep the lifecycle set durable; activate/remove are the only
-// local-dev writers that should mirror lifecycle-managed packages into or out
-// of active_registry. Production and multi-tenant reuse require scoped storage
-// and registry ownership first; tracked in #4091.
+// The name is historical: this port started in LocalSingleUser composition,
+// but the same filesystem-backed lifecycle store and active registry publisher
+// are now used by production composition too. The lifecycle service models the
+// installed extension set, while active_registry is the model-visible
+// capability surface read by host runtime dispatch. install/remove keep the
+// lifecycle set durable; activate/remove mirror lifecycle-managed packages into
+// or out of active_registry.
 pub(crate) struct RebornLocalExtensionManagementPort {
     filesystem: Arc<dyn RootFilesystem>,
     catalog: AvailableExtensionCatalog,
