@@ -24,6 +24,7 @@ use ironclaw_auth::{
     CredentialAccount, CredentialAccountId, CredentialAccountOwnerScope,
     CredentialAccountSelectionRequest, CredentialAccountStatus, NewCredentialAccount,
 };
+use ironclaw_host_api::VirtualPath;
 
 use self::domain::validate_new_credential_account;
 use self::paths::{
@@ -78,6 +79,14 @@ where
     F: RootFilesystem,
 {
     filesystem: Arc<ScopedFilesystem<F>>,
+    /// Raw root filesystem held separately for deployment-wide scans (B1).
+    ///
+    /// `ScopedFilesystem` does not expose its inner `RootFilesystem`, so
+    /// this field is wired explicitly by the factory (`new_with_root`).
+    /// `None` in test/local-dev paths that do not need cross-tenant listing —
+    /// `list_refresh_candidates` returns an empty vec in that case (safe: no
+    /// accounts are refreshed, which is benign for local/test deployments).
+    root: Option<Arc<F>>,
     secret_store: Arc<dyn SecretStore>,
     locks: Mutex<HashMap<String, Weak<tokio::sync::Mutex<()>>>>,
 }
@@ -92,6 +101,26 @@ where
     ) -> Self {
         Self {
             filesystem,
+            root: None,
+            secret_store,
+            locks: Mutex::new(HashMap::new()),
+        }
+    }
+
+    /// Create the service with explicit access to the backing `RootFilesystem`.
+    ///
+    /// Production composition calls this so `list_refresh_candidates` (B1) can
+    /// enumerate accounts across all owners without going through the per-user
+    /// `ResourceScope` resolution layer. Pass the same `Arc<F>` that was used
+    /// to construct the `ScopedFilesystem`.
+    pub(crate) fn new_with_root(
+        filesystem: Arc<ScopedFilesystem<F>>,
+        root: Arc<F>,
+        secret_store: Arc<dyn SecretStore>,
+    ) -> Self {
+        Self {
+            filesystem,
+            root: Some(root),
             secret_store,
             locks: Mutex::new(HashMap::new()),
         }
@@ -503,6 +532,210 @@ where
             (None, true) => Err(AuthProductError::CrossScopeDenied),
             (None, false) => Err(AuthProductError::CredentialMissing),
         }
+    }
+
+    /// Enumerate all Google credential accounts across all owners on this
+    /// deployment that are candidates for proactive keepalive refresh (B1).
+    ///
+    /// Filters in-memory to:
+    /// - provider == `GOOGLE_PROVIDER_ID`
+    /// - status == `Configured`
+    /// - `refresh_secret.is_some()`
+    ///
+    /// Idle-threshold filtering (by `updated_at`) is left to the caller (the
+    /// credential-refresh worker) so this method stays narrowly focused on
+    /// enumeration.
+    ///
+    /// Returns an empty vec when the root filesystem was not wired (local-dev /
+    /// test path). Partial read failures on individual account files are
+    /// silently skipped so a single corrupt record does not block the whole
+    /// sweep.
+    ///
+    /// **Never projects secret handles or material.** The returned
+    /// `CredentialAccount` values contain only metadata (id, scope, provider,
+    /// status, updated_at, refresh_secret handle-presence flag). Secret values
+    /// are never returned through this path.
+    pub(crate) async fn list_refresh_candidates(&self) -> Vec<CredentialAccount> {
+        let Some(root) = &self.root else {
+            // Local-dev / test path: no root wired, nothing to enumerate.
+            return Vec::new();
+        };
+
+        // Walk /tenants → /tenants/<t>/users → /tenants/<t>/users/<u>/secrets/product-auth/...
+        let tenants_path = match VirtualPath::new("/tenants") {
+            Ok(p) => p,
+            Err(error) => {
+                tracing::debug!(%error, "list_refresh_candidates: /tenants is not a valid virtual path");
+                return Vec::new();
+            }
+        };
+        let tenant_entries = match root.list_dir(&tenants_path).await {
+            Ok(entries) => entries,
+            Err(FilesystemError::NotFound { .. } | FilesystemError::Unsupported { .. }) => {
+                return Vec::new();
+            }
+            Err(error) => {
+                tracing::debug!(%error, "list_refresh_candidates: failed to list /tenants");
+                return Vec::new();
+            }
+        };
+
+        let mut candidates = Vec::new();
+        for tenant_entry in tenant_entries {
+            if tenant_entry.file_type != FileType::Directory {
+                continue;
+            }
+            let users_path_str = format!("/tenants/{}/users", tenant_entry.name);
+            let users_path = match VirtualPath::new(&users_path_str) {
+                Ok(p) => p,
+                Err(_) => continue,
+            };
+            let user_entries = match root.list_dir(&users_path).await {
+                Ok(entries) => entries,
+                Err(FilesystemError::NotFound { .. } | FilesystemError::Unsupported { .. }) => {
+                    continue;
+                }
+                Err(error) => {
+                    tracing::debug!(
+                        tenant = %tenant_entry.name,
+                        %error,
+                        "list_refresh_candidates: failed to list users for tenant"
+                    );
+                    continue;
+                }
+            };
+            for user_entry in user_entries {
+                if user_entry.file_type != FileType::Directory {
+                    continue;
+                }
+                self.collect_accounts_for_user(
+                    root,
+                    &tenant_entry.name,
+                    &user_entry.name,
+                    &mut candidates,
+                )
+                .await;
+            }
+        }
+        // Stable ordering by account id; dedup in case the same account somehow
+        // appeared under multiple tree paths (shouldn't happen, but defensive).
+        candidates.sort_by_key(|a| a.id);
+        candidates.dedup_by_key(|a| a.id);
+        candidates
+    }
+
+    /// Scan all product-auth account files for a single `(tenant, user)` pair.
+    async fn collect_accounts_for_user(
+        &self,
+        root: &Arc<F>,
+        tenant: &str,
+        user: &str,
+        out: &mut Vec<CredentialAccount>,
+    ) {
+        // product-auth root for a plain user (no agent/project nesting):
+        // /tenants/<t>/users/<u>/secrets/product-auth
+        let product_auth_root_str =
+            format!("/tenants/{tenant}/users/{user}/secrets/product-auth");
+        let product_auth_root = match VirtualPath::new(&product_auth_root_str) {
+            Ok(p) => p,
+            Err(_) => return,
+        };
+        let surface_entries = match root.list_dir(&product_auth_root).await {
+            Ok(entries) => entries,
+            Err(FilesystemError::NotFound { .. } | FilesystemError::Unsupported { .. }) => {
+                return;
+            }
+            Err(error) => {
+                tracing::debug!(
+                    tenant,
+                    user,
+                    %error,
+                    "list_refresh_candidates: failed to list product-auth root for user"
+                );
+                return;
+            }
+        };
+        for surface_entry in surface_entries {
+            if surface_entry.file_type != FileType::Directory {
+                continue;
+            }
+            self.collect_accounts_under_surface(
+                root,
+                tenant,
+                user,
+                &surface_entry.name,
+                out,
+            )
+            .await;
+        }
+    }
+
+    /// Read all `.json` account files under one surface directory and push
+    /// Google/Configured/has-refresh-token records into `out`.
+    async fn collect_accounts_under_surface(
+        &self,
+        root: &Arc<F>,
+        tenant: &str,
+        user: &str,
+        surface: &str,
+        out: &mut Vec<CredentialAccount>,
+    ) {
+        let accounts_dir_str = format!(
+            "/tenants/{tenant}/users/{user}/secrets/product-auth/{surface}/accounts"
+        );
+        let accounts_dir = match VirtualPath::new(&accounts_dir_str) {
+            Ok(p) => p,
+            Err(_) => return,
+        };
+        let account_entries = match root.list_dir(&accounts_dir).await {
+            Ok(entries) => entries,
+            Err(FilesystemError::NotFound { .. } | FilesystemError::Unsupported { .. }) => {
+                return;
+            }
+            Err(error) => {
+                tracing::debug!(
+                    tenant,
+                    user,
+                    surface,
+                    %error,
+                    "list_refresh_candidates: failed to list accounts dir"
+                );
+                return;
+            }
+        };
+        const MAX_CONCURRENT_READS: usize = 8;
+        let reads: Vec<_> = account_entries
+            .into_iter()
+            .filter(|e| e.name.ends_with(".json") && e.file_type == FileType::File)
+            .map(|entry| {
+                let path_str = format!(
+                    "/tenants/{tenant}/users/{user}/secrets/product-auth/{surface}/accounts/{}",
+                    entry.name
+                );
+                async move {
+                    let path = VirtualPath::new(&path_str).ok()?;
+                    let versioned = root.get(&path).await.ok()??;
+                    let account: CredentialAccount =
+                        serde_json::from_slice(&versioned.entry.body).ok()?;
+                    // Filter: Google provider + Configured + has refresh token
+                    if account.provider.as_str() != ironclaw_auth::GOOGLE_PROVIDER_ID {
+                        return None;
+                    }
+                    if account.status != CredentialAccountStatus::Configured {
+                        return None;
+                    }
+                    account.refresh_secret.as_ref()?;
+                    Some(account)
+                }
+            })
+            .collect();
+
+        // Process in bounded batches to avoid exhausting connections.
+        let results: Vec<Option<CredentialAccount>> = stream::iter(reads)
+            .buffer_unordered(MAX_CONCURRENT_READS)
+            .collect()
+            .await;
+        out.extend(results.into_iter().flatten());
     }
 
     async fn create_account_with_id(

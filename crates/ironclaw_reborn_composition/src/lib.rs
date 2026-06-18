@@ -33,6 +33,8 @@ mod budget;
 mod budget_events;
 mod bundled_skills;
 mod communication_context;
+#[cfg(any(feature = "libsql", feature = "postgres"))]
+mod credential_refresh_worker;
 mod default_system_prompt;
 mod error;
 mod extension_activation_credentials;
@@ -1243,6 +1245,7 @@ mod two_tenant_isolation_tests {
                 scope_a.clone(),
                 handle.clone(),
                 SecretMaterial::from("alice-secret".to_string()),
+                None,
             )
             .await
             .unwrap();
@@ -1251,6 +1254,7 @@ mod two_tenant_isolation_tests {
                 scope_b.clone(),
                 handle.clone(),
                 SecretMaterial::from("bob-secret".to_string()),
+                None,
             )
             .await
             .unwrap();

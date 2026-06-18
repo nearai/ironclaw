@@ -372,6 +372,13 @@ pub struct RebornServices {
     /// rather than standing up a second authority.
     #[cfg(feature = "root-llm-provider")]
     pub(crate) secret_store: Arc<dyn SecretStore>,
+    /// Deployment-wide credential account enumerator for the background
+    /// keepalive worker (B1). `None` on local-dev paths that do not need
+    /// cross-owner enumeration. MUST stay private — the worker is the only
+    /// consumer; this field must never leak through any public facade.
+    #[cfg(any(feature = "libsql", feature = "postgres"))]
+    pub(crate) credential_refresh_candidate_source:
+        Option<Arc<dyn crate::credential_refresh_worker::CredentialRefreshCandidateSource>>,
 }
 
 impl RebornServices {
@@ -614,6 +621,8 @@ impl std::fmt::Debug for RebornServices {
     }
 }
 
+// arch-exempt: optional field added to struct literal — covered by disabled() and build_*.
+
 impl RebornServices {
     pub fn disabled() -> Self {
         Self {
@@ -627,6 +636,8 @@ impl RebornServices {
             production_runtime: None,
             #[cfg(feature = "root-llm-provider")]
             secret_store: Arc::new(ironclaw_secrets::InMemorySecretStore::new()),
+            #[cfg(any(feature = "libsql", feature = "postgres"))]
+            credential_refresh_candidate_source: None,
         }
     }
 }
@@ -1126,6 +1137,9 @@ async fn build_local_dev(input: RebornBuildInput) -> Result<RebornServices, Rebo
         production_runtime: None,
         #[cfg(feature = "root-llm-provider")]
         secret_store,
+        // Local-dev is single-user; no cross-owner enumeration needed.
+        #[cfg(any(feature = "libsql", feature = "postgres"))]
+        credential_refresh_candidate_source: None,
     })
 }
 
@@ -3285,19 +3299,36 @@ where
 
     let turn_coordinator: Arc<dyn ironclaw_turns::TurnCoordinator> =
         Arc::new(services.turn_coordinator_for_production()?);
-    let product_auth_ports = product_auth_ports.unwrap_or_else(|| {
-        let durable = Arc::new(FilesystemAuthProductServices::new(
-            product_auth_filesystem,
-            Arc::clone(&secret_store),
-        ));
-        RebornProductAuthServicePorts::from_shared_with_provider(
-            durable,
-            provider_composition
-                .client
-                .clone()
-                .unwrap_or_else(|| Arc::new(UnavailableAuthProviderClient)),
-        )
-    });
+    // B1: track the durable FilesystemAuthProductServices so the credential-
+    // refresh worker can enumerate candidates across all owners.  When a
+    // caller pre-supplies product_auth_ports, we do not create a durable
+    // instance here, so the candidate source is None (worker finds no
+    // candidates, which is safe for override/test callers).
+    let credential_refresh_candidate_source: Option<
+        Arc<dyn crate::credential_refresh_worker::CredentialRefreshCandidateSource>,
+    >;
+    let product_auth_ports = match product_auth_ports {
+        Some(ports) => {
+            credential_refresh_candidate_source = None;
+            ports
+        }
+        None => {
+            let durable = Arc::new(FilesystemAuthProductServices::new_with_root(
+                product_auth_filesystem,
+                Arc::clone(&stores.filesystem),
+                Arc::clone(&secret_store),
+            ));
+            credential_refresh_candidate_source =
+                Some(Arc::clone(&durable) as Arc<dyn crate::credential_refresh_worker::CredentialRefreshCandidateSource>);
+            RebornProductAuthServicePorts::from_shared_with_provider(
+                durable,
+                provider_composition
+                    .client
+                    .clone()
+                    .unwrap_or_else(|| Arc::new(UnavailableAuthProviderClient)),
+            )
+        }
+    };
     let product_auth_services = compose_product_auth_services(
         product_auth_ports,
         turn_coordinator.clone(),
@@ -3348,6 +3379,8 @@ where
         production_runtime: Some(production_runtime),
         #[cfg(feature = "root-llm-provider")]
         secret_store,
+        #[cfg(any(feature = "libsql", feature = "postgres"))]
+        credential_refresh_candidate_source,
     })
 }
 

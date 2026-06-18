@@ -408,6 +408,9 @@ pub struct RebornRuntime {
     worker_handle: JoinHandle<()>,
     worker_cancel: CancellationToken,
     trigger_poller_handle: Option<TriggerPollerRuntimeHandle>,
+    #[cfg(any(feature = "libsql", feature = "postgres"))]
+    credential_refresh_worker_handle:
+        Option<crate::credential_refresh_worker::CredentialRefreshWorkerRuntimeHandle>,
     trace_flush_worker: crate::trace_capture::TraceQueueFlushWorkerHandle,
     /// Late-binding slot shared with the poller's `PostSubmitHookWrappedSubmitter`.
     /// `set_trigger_post_submit_hook` fills this after `build_reborn_runtime` returns.
@@ -1676,6 +1679,14 @@ impl RebornRuntime {
                 .shutdown(TRIGGER_POLLER_SHUTDOWN_TIMEOUT)
                 .await;
         }
+        #[cfg(any(feature = "libsql", feature = "postgres"))]
+        if let Some(credential_refresh_worker) = self.credential_refresh_worker_handle {
+            credential_refresh_worker
+                .shutdown(
+                    crate::credential_refresh_worker::CREDENTIAL_REFRESH_WORKER_SHUTDOWN_TIMEOUT,
+                )
+                .await;
+        }
         self.trace_flush_worker.shutdown().await;
         self.worker_cancel.cancel();
         if let Some(projection) = self.budget_event_projection {
@@ -2162,6 +2173,7 @@ pub async fn build_reborn_runtime(
         boot,
         runner,
         trigger_poller,
+        credential_refresh,
         trigger_fire_access_checker,
         poll,
         identity,
@@ -2938,6 +2950,31 @@ pub async fn build_reborn_runtime(
     let worker_handle = tokio::spawn(async move {
         worker.run(worker_cancel_clone).await;
     });
+
+    // Spawn the background Google OAuth credential keepalive worker (B4).
+    // Gated on the db features: the candidate source and the advisory-locked
+    // refresh port are only available on production paths (libsql / postgres).
+    // Local-dev has neither, so the worker is silently skipped.
+    #[cfg(any(feature = "libsql", feature = "postgres"))]
+    let credential_refresh_worker_handle = match (
+        services.credential_refresh_candidate_source.take(),
+        services.product_auth.clone(),
+    ) {
+        (Some(candidate_source), Some(refresh_port)) => {
+            crate::credential_refresh_worker::spawn_credential_refresh_worker(
+                credential_refresh,
+                crate::credential_refresh_worker::CredentialRefreshWorkerDeps {
+                    candidate_source,
+                    refresh_port,
+                },
+            )
+        }
+        _ => None,
+    };
+    // When no db feature is active, silence the unused-variable warning.
+    #[cfg(not(any(feature = "libsql", feature = "postgres")))]
+    let _ = credential_refresh;
+
     let trace_flush_worker =
         crate::trace_capture::spawn_trace_queue_flush_worker(trace_capture_scopes);
     services.readiness.workers.turn_runner = true;
@@ -2972,6 +3009,8 @@ pub async fn build_reborn_runtime(
         worker_handle,
         worker_cancel,
         trigger_poller_handle,
+        #[cfg(any(feature = "libsql", feature = "postgres"))]
+        credential_refresh_worker_handle,
         trace_flush_worker,
         #[cfg(feature = "slack-v2-host-beta")]
         post_submit_hook_slot: runtime_post_submit_hook_slot,
