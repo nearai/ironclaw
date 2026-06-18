@@ -4,14 +4,29 @@ import { apiFetch } from "../../../lib/api.js";
 // LLM, extension, and skills reads use v2 endpoints. Remaining settings APIs
 // are TODO stubs.
 
-export function fetchSettingsExport() {
-  return Promise.resolve({ settings: {}, todo: true });
+// Operator config (#4776): the v2 operator-config channel backs the persisted
+// settings the WebUI can write today. `list` projects the wired keys (currently
+// `agent.auto_approve_tools`) into the flat `{ settings: { key: value } }` shape
+// the settings page consumes; per-key get/set ride the `{key}` route.
+export async function fetchSettingsExport() {
+  const response = await apiFetch("/api/webchat/v2/operator/config");
+  const settings = {};
+  for (const entry of response?.entries || []) {
+    settings[entry.key] = entry.value;
+  }
+  return { settings };
 }
-export function fetchSetting(_key) {
-  return Promise.resolve(null);
+export async function fetchSetting(key) {
+  const response = await apiFetch(
+    `/api/webchat/v2/operator/config/${encodeURIComponent(key)}`
+  );
+  return response?.entry?.value ?? null;
 }
-export function updateSetting(_key, _value) {
-  return Promise.resolve({ success: false, message: "TODO: requires v2 settings endpoint" });
+export function updateSetting(key, value) {
+  return apiFetch(`/api/webchat/v2/operator/config/${encodeURIComponent(key)}`, {
+    method: "POST",
+    body: JSON.stringify({ value }),
+  });
 }
 export function importSettings(_payload) {
   return Promise.resolve({ success: false, message: "TODO: requires v2 settings endpoint" });

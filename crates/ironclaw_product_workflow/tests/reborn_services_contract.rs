@@ -9050,3 +9050,112 @@ async fn submit_turn_rejects_attachments_when_no_lander_is_wired() {
         .expect_err("attachments without a lander must be rejected");
     assert_eq!(err.kind, RebornServicesErrorKind::ServiceUnavailable);
 }
+
+// ── #4776: global auto-approve toggle via the operator-config facade ──────────
+
+fn auto_approve_services() -> RebornServices {
+    let threads: Arc<dyn SessionThreadService> = Arc::new(InMemorySessionThreadService::default());
+    let coordinator = Arc::new(FakeTurnCoordinator::default());
+    RebornServices::new(threads, coordinator).with_approval_settings_stores(
+        Arc::new(ironclaw_approvals::InMemoryAutoApproveSettingStore::new()),
+        Arc::new(ironclaw_approvals::InMemoryToolPermissionOverrideStore::new()),
+    )
+}
+
+fn auto_approve_set(value: bool) -> ironclaw_product_workflow::RebornOperatorConfigSetRequest {
+    ironclaw_product_workflow::RebornOperatorConfigSetRequest {
+        value: serde_json::Value::Bool(value),
+    }
+}
+
+#[tokio::test]
+async fn auto_approve_toggle_round_trips_through_operator_config_facade() {
+    let services = auto_approve_services();
+    let key = "agent.auto_approve_tools".to_string();
+
+    // Defaults to disabled.
+    let initial = services
+        .get_operator_config_key(caller(), key.clone())
+        .await
+        .expect("get default");
+    assert_eq!(initial.entry.value, serde_json::Value::Bool(false));
+    assert!(initial.entry.mutable);
+
+    // Enabling persists and is reflected by both get and the settings-export list.
+    let set = services
+        .set_operator_config_key(caller(), key.clone(), auto_approve_set(true))
+        .await
+        .expect("set enabled");
+    assert_eq!(set.entry.value, serde_json::Value::Bool(true));
+
+    let listed = services
+        .list_operator_config(caller())
+        .await
+        .expect("list");
+    let entry = listed
+        .entries
+        .iter()
+        .find(|entry| entry.key == key)
+        .expect("auto-approve entry present in settings export");
+    assert_eq!(entry.value, serde_json::Value::Bool(true));
+
+    // Disabling round-trips back.
+    services
+        .set_operator_config_key(caller(), key.clone(), auto_approve_set(false))
+        .await
+        .expect("set disabled");
+    let after = services
+        .get_operator_config_key(caller(), key.clone())
+        .await
+        .expect("get after disable");
+    assert_eq!(after.entry.value, serde_json::Value::Bool(false));
+}
+
+#[tokio::test]
+async fn auto_approve_toggle_is_isolated_per_user() {
+    let services = auto_approve_services();
+    let key = "agent.auto_approve_tools".to_string();
+
+    services
+        .set_operator_config_key(caller_for_user("alice"), key.clone(), auto_approve_set(true))
+        .await
+        .expect("alice enables");
+
+    let bob = services
+        .get_operator_config_key(caller_for_user("bob"), key.clone())
+        .await
+        .expect("bob get");
+    assert_eq!(
+        bob.entry.value,
+        serde_json::Value::Bool(false),
+        "auto-approve must not leak across users"
+    );
+}
+
+#[tokio::test]
+async fn auto_approve_set_rejects_non_boolean_value() {
+    let services = auto_approve_services();
+    let err = services
+        .set_operator_config_key(
+            caller(),
+            "agent.auto_approve_tools".to_string(),
+            ironclaw_product_workflow::RebornOperatorConfigSetRequest {
+                value: serde_json::Value::String("yes".to_string()),
+            },
+        )
+        .await
+        .expect_err("non-boolean value must be rejected");
+    assert_eq!(err.status_code, 400);
+}
+
+#[tokio::test]
+async fn auto_approve_unavailable_without_store() {
+    let threads: Arc<dyn SessionThreadService> = Arc::new(InMemorySessionThreadService::default());
+    let coordinator = Arc::new(FakeTurnCoordinator::default());
+    let services = RebornServices::new(threads, coordinator);
+    let err = services
+        .get_operator_config_key(caller(), "agent.auto_approve_tools".to_string())
+        .await
+        .expect_err("no store wired => unavailable");
+    assert_eq!(err.kind, RebornServicesErrorKind::ServiceUnavailable);
+}

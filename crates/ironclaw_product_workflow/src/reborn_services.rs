@@ -1475,6 +1475,11 @@ pub struct RebornServices {
     skill_activation_recorder: Option<Arc<SkillActivationRecorder>>,
     skill_activation_clearer: Option<Arc<SkillActivationClearer>>,
     llm_config: Option<Arc<dyn LlmConfigService>>,
+    /// Per-(tenant,user) approval settings stores (#4776). The SAME instances
+    /// the dispatch approval authorizer reads, so a change made here is observed
+    /// by the gate without a restart.
+    auto_approve_settings: Option<Arc<dyn ironclaw_approvals::AutoApproveSettingStore>>,
+    tool_permission_overrides: Option<Arc<dyn ironclaw_approvals::ToolPermissionOverrideStore>>,
     thread_operation_locks: Arc<ThreadOperationLocks>,
 }
 
@@ -1508,6 +1513,8 @@ impl RebornServices {
             skill_activation_recorder: None,
             skill_activation_clearer: None,
             llm_config: None,
+            auto_approve_settings: None,
+            tool_permission_overrides: None,
             thread_operation_locks: Arc::new(StdMutex::new(HashMap::new())),
         }
     }
@@ -1552,6 +1559,20 @@ impl RebornServices {
 
     pub fn with_llm_config_service(mut self, llm_config: Arc<dyn LlmConfigService>) -> Self {
         self.llm_config = Some(llm_config);
+        self
+    }
+
+    /// Wire the per-(tenant,user) approval-settings stores so the WebUI settings
+    /// surface reads/writes the SAME instances the dispatch approval authorizer
+    /// consults (#4776). Without these, the auto-approve / tool-permission
+    /// settings routes report unavailable.
+    pub fn with_approval_settings_stores(
+        mut self,
+        auto_approve_settings: Arc<dyn ironclaw_approvals::AutoApproveSettingStore>,
+        tool_permission_overrides: Arc<dyn ironclaw_approvals::ToolPermissionOverrideStore>,
+    ) -> Self {
+        self.auto_approve_settings = Some(auto_approve_settings);
+        self.tool_permission_overrides = Some(tool_permission_overrides);
         self
     }
 
@@ -1694,8 +1715,118 @@ impl RebornServices {
     }
 }
 
+/// Operator-config key backed by the per-user auto-approve store (#4776).
+const AUTO_APPROVE_TOOLS_KEY: &str = "agent.auto_approve_tools";
+
+/// Build a lookup `ResourceScope` from an authenticated WebUI caller. The
+/// auto-approve store keys on `(tenant, user)` only, so agent/project/thread are
+/// carried through but do not affect the resolved setting.
+fn caller_resource_scope(caller: &WebUiAuthenticatedCaller) -> ironclaw_host_api::ResourceScope {
+    ironclaw_host_api::ResourceScope {
+        tenant_id: caller.tenant_id.clone(),
+        user_id: caller.user_id.clone(),
+        agent_id: caller.agent_id.clone(),
+        project_id: caller.project_id.clone(),
+        mission_id: None,
+        thread_id: None,
+        invocation_id: ironclaw_host_api::InvocationId::new(),
+    }
+}
+
+fn auto_approve_config_entry(enabled: bool) -> RebornOperatorConfigEntry {
+    RebornOperatorConfigEntry {
+        key: AUTO_APPROVE_TOOLS_KEY.to_string(),
+        value: serde_json::Value::Bool(enabled),
+        source: "db".to_string(),
+        redacted: false,
+        mutable: true,
+    }
+}
+
+fn auto_approve_config_response(enabled: bool) -> RebornOperatorConfigGetResponse {
+    RebornOperatorConfigGetResponse {
+        entry: auto_approve_config_entry(enabled),
+    }
+}
+
 #[async_trait]
 impl RebornServicesApi for RebornServices {
+    /// Surfaces the per-user `agent.auto_approve_tools` entry (#4776) so the
+    /// WebUI settings export reflects the stored toggle. Other operator-config
+    /// keys remain not-yet-wired.
+    async fn list_operator_config(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+    ) -> Result<RebornOperatorConfigListResponse, RebornServicesError> {
+        let mut entries = Vec::new();
+        if let Some(store) = &self.auto_approve_settings {
+            let enabled = store
+                .is_enabled(&caller_resource_scope(&caller))
+                .await
+                .map_err(RebornServicesError::internal_from)?;
+            entries.push(auto_approve_config_entry(enabled));
+        }
+        Ok(RebornOperatorConfigListResponse {
+            entries,
+            precedence: Vec::new(),
+            diagnostics: Vec::new(),
+        })
+    }
+
+    /// `agent.auto_approve_tools` is served from the per-user auto-approve store
+    /// (#4776) — the same store the dispatch approval authorizer reads, so the
+    /// toggle takes effect on the next turn. Any other key falls through to the
+    /// not-yet-wired operator-config surface.
+    async fn get_operator_config_key(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        key: String,
+    ) -> Result<RebornOperatorConfigGetResponse, RebornServicesError> {
+        if key == AUTO_APPROVE_TOOLS_KEY {
+            let store = self
+                .auto_approve_settings
+                .as_ref()
+                .ok_or_else(|| RebornServicesError::service_unavailable(false))?;
+            let enabled = store
+                .is_enabled(&caller_resource_scope(&caller))
+                .await
+                .map_err(RebornServicesError::internal_from)?;
+            return Ok(auto_approve_config_response(enabled));
+        }
+        Err(RebornServicesError::service_unavailable(false))
+    }
+
+    async fn set_operator_config_key(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        key: String,
+        request: RebornOperatorConfigSetRequest,
+    ) -> Result<RebornOperatorConfigGetResponse, RebornServicesError> {
+        if key == AUTO_APPROVE_TOOLS_KEY {
+            let store = self
+                .auto_approve_settings
+                .as_ref()
+                .ok_or_else(|| RebornServicesError::service_unavailable(false))?;
+            let enabled = request.value.as_bool().ok_or_else(|| {
+                RebornServicesError::validation(WebUiInboundValidationError::new(
+                    "value",
+                    WebUiInboundValidationCode::InvalidValue,
+                ))
+            })?;
+            store
+                .set(ironclaw_approvals::AutoApproveSettingInput {
+                    scope: caller_resource_scope(&caller),
+                    enabled,
+                    updated_by: ironclaw_host_api::Principal::User(caller.user_id.clone()),
+                })
+                .await
+                .map_err(RebornServicesError::internal_from)?;
+            return Ok(auto_approve_config_response(enabled));
+        }
+        let _ = request;
+        Err(RebornServicesError::service_unavailable(false))
+    }
+
     async fn get_operator_setup(
         &self,
         caller: WebUiAuthenticatedCaller,

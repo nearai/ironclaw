@@ -121,6 +121,14 @@ use crate::available_extensions::slack_manifest_digest;
 use crate::default_system_prompt::seed_default_system_prompt;
 use crate::input::{RebornLocalRuntimeIdentity, RebornRuntimeProcessBinding, RebornStorageInput};
 use crate::lifecycle::{RebornLocalSkillManagementPort, build_local_skill_management_port};
+use ironclaw_approvals::{AutoApproveSettingStore, ToolPermissionOverrideStore};
+#[cfg(feature = "libsql")]
+use ironclaw_approvals::{
+    FilesystemAutoApproveSettingStore, FilesystemToolPermissionOverrideStore,
+};
+#[cfg(not(feature = "libsql"))]
+use ironclaw_approvals::{InMemoryAutoApproveSettingStore, InMemoryToolPermissionOverrideStore};
+
 use crate::local_dev_authorization::{StoreApprovalSettingsProvider, local_dev_authorizer};
 use crate::local_dev_capability_policy::{LocalDevCapabilityPolicy, local_dev_capability_policy};
 use crate::local_dev_mounts::{
@@ -411,6 +419,12 @@ pub(crate) struct RebornLocalRuntimeServices {
     #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) capability_policy: Arc<LocalDevCapabilityPolicy>,
     pub(crate) persistent_approval_policies: Arc<LocalDevPersistentApprovalPolicyStore>,
+    /// Per-(tenant,user,capability) explicit permission overrides and the global
+    /// auto-approve toggle (#4776). Shared between the dispatch approval
+    /// authorizer and the WebUI settings facade so a UI change is observed by
+    /// the gate without a restart.
+    pub(crate) tool_permission_overrides: Arc<dyn ToolPermissionOverrideStore>,
+    pub(crate) auto_approve_settings: Arc<dyn AutoApproveSettingStore>,
     pub(crate) turn_state: Arc<LocalDevTurnStateStore>,
     pub(crate) trigger_repository: Arc<dyn TriggerRepository>,
     pub(crate) outbound_preferences: Arc<dyn CommunicationPreferenceRepository>,
@@ -828,27 +842,12 @@ async fn build_local_dev(input: RebornBuildInput) -> Result<RebornServices, Rebo
     let local_dev_trust_invalidation_bus = Arc::new(ironclaw_trust::InvalidationBus::new());
     let extension_registry = Arc::new(local_dev_builtin_extension_registry()?);
     // Per-(tenant,user) approval settings resolved live at each dispatch gate
-    // so a WebUI change applies without a restart (#4959). Mirrors the
-    // persistent-approval store's cfg split: filesystem-backed (shared with the
-    // webui facade) in durable builds, in-memory otherwise.
-    #[cfg(any(feature = "libsql", feature = "postgres"))]
-    let approval_settings_provider = {
-        let approval_settings_filesystem = crate::wrap_scoped(Arc::clone(&filesystem));
-        Arc::new(StoreApprovalSettingsProvider::new(
-            Arc::new(
-                ironclaw_approvals::FilesystemToolPermissionOverrideStore::new(Arc::clone(
-                    &approval_settings_filesystem,
-                )),
-            ),
-            Arc::new(ironclaw_approvals::FilesystemAutoApproveSettingStore::new(
-                approval_settings_filesystem,
-            )),
-        ))
-    };
-    #[cfg(not(any(feature = "libsql", feature = "postgres")))]
+    // so a WebUI change applies without a restart (#4959). Uses the SAME store
+    // instances the WebUI settings facade writes through (#4960), shared via the
+    // store graph.
     let approval_settings_provider = Arc::new(StoreApprovalSettingsProvider::new(
-        Arc::new(ironclaw_approvals::InMemoryToolPermissionOverrideStore::new()),
-        Arc::new(ironclaw_approvals::InMemoryAutoApproveSettingStore::new()),
+        Arc::clone(&store_graph.local_runtime.tool_permission_overrides),
+        Arc::clone(&store_graph.local_runtime.auto_approve_settings),
     ));
     let authorizer = local_dev_authorizer(
         runtime_policy.as_ref(),
@@ -1303,6 +1302,12 @@ fn build_local_dev_store_graph(
     let persistent_approval_policies = Arc::new(FilesystemPersistentApprovalPolicyStore::new(
         Arc::clone(&scoped_filesystem),
     ));
+    let tool_permission_overrides: Arc<dyn ToolPermissionOverrideStore> = Arc::new(
+        FilesystemToolPermissionOverrideStore::new(Arc::clone(&scoped_filesystem)),
+    );
+    let auto_approve_settings: Arc<dyn AutoApproveSettingStore> = Arc::new(
+        FilesystemAutoApproveSettingStore::new(Arc::clone(&scoped_filesystem)),
+    );
     let turn_state = Arc::new(FilesystemTurnStateStore::new(Arc::clone(
         &scoped_filesystem,
     )));
@@ -1356,6 +1361,8 @@ fn build_local_dev_store_graph(
         runtime_policy,
         capability_policy: Arc::clone(&capability_policy),
         persistent_approval_policies: Arc::clone(&persistent_approval_policies),
+        tool_permission_overrides: Arc::clone(&tool_permission_overrides),
+        auto_approve_settings: Arc::clone(&auto_approve_settings),
         turn_state: Arc::clone(&turn_state),
         trigger_repository: Arc::clone(&trigger_repository),
         outbound_preferences: outbound_stores.outbound_preferences,
@@ -1438,6 +1445,10 @@ fn build_local_dev_store_graph(
     let approval_requests = Arc::new(InMemoryApprovalRequestStore::new());
     let capability_leases = Arc::new(InMemoryCapabilityLeaseStore::new());
     let persistent_approval_policies = Arc::new(InMemoryPersistentApprovalPolicyStore::new());
+    let tool_permission_overrides: Arc<dyn ToolPermissionOverrideStore> =
+        Arc::new(InMemoryToolPermissionOverrideStore::new());
+    let auto_approve_settings: Arc<dyn AutoApproveSettingStore> =
+        Arc::new(InMemoryAutoApproveSettingStore::new());
     let turn_state = Arc::new(InMemoryTurnStateStore::default());
     let checkpoint_state_store: Arc<dyn CheckpointStateStore> =
         Arc::new(InMemoryCheckpointStateStore::default());
@@ -1486,6 +1497,8 @@ fn build_local_dev_store_graph(
         runtime_policy,
         capability_policy: Arc::clone(&capability_policy),
         persistent_approval_policies: Arc::clone(&persistent_approval_policies),
+        tool_permission_overrides: Arc::clone(&tool_permission_overrides),
+        auto_approve_settings: Arc::clone(&auto_approve_settings),
         turn_state: Arc::clone(&turn_state),
         trigger_repository: Arc::clone(&trigger_repository),
         outbound_preferences: outbound_stores.outbound_preferences,
@@ -3568,6 +3581,8 @@ mod tests {
             runtime_policy: base_runtime.runtime_policy.clone(),
             capability_policy: Arc::clone(&base_runtime.capability_policy),
             persistent_approval_policies: Arc::clone(&base_runtime.persistent_approval_policies),
+            tool_permission_overrides: Arc::clone(&base_runtime.tool_permission_overrides),
+            auto_approve_settings: Arc::clone(&base_runtime.auto_approve_settings),
             turn_state: Arc::clone(&base_runtime.turn_state),
             trigger_repository: Arc::clone(&base_runtime.trigger_repository),
             outbound_preferences: Arc::clone(&base_runtime.outbound_preferences),
