@@ -988,15 +988,16 @@ mod tests {
             visible_read_only_capability_ids: vec!["nearai.web_search".to_string()],
             credential_requirements: Vec::new(),
             onboarding: Some(LifecycleExtensionOnboarding {
-                instructions:
-                    "NEAR AI MCP uses the NEAR AI credentials configured for the assistant."
-                        .to_string(),
+                instructions: "NEAR AI MCP uses the NEAR AI credentials configured for the assistant. If NEAR AI is not configured yet, add a NEAR AI API key in assistant inference settings before activating this extension."
+                    .to_string(),
                 credential_instructions: Some(
-                    "No separate MCP credentials are required.".to_string(),
+                    "Configure NEAR AI for the assistant with an API key; MCP reuses that credential."
+                        .to_string(),
                 ),
                 setup_url: None,
                 credential_next_step: Some(
-                    "Activate NEAR AI to publish its MCP tools.".to_string(),
+                    "After NEAR AI is configured for the assistant, activate NEAR AI MCP to publish its tools."
+                        .to_string(),
                 ),
             }),
         }

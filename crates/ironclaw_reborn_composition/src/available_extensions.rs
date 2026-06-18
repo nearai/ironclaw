@@ -117,10 +117,12 @@ impl AvailableExtensionPackage {
 fn onboarding(package_ref: &LifecyclePackageRef) -> Option<LifecycleExtensionOnboarding> {
     if is_host_managed_credential_extension(package_ref) {
         return Some(onboarding_message(
-            "NEAR AI MCP uses the NEAR AI credentials configured for the assistant. Activate it to publish its MCP tools.",
-            Some("No separate MCP credentials are required."),
+            "NEAR AI MCP uses the NEAR AI credentials configured for the assistant. If NEAR AI is not configured yet, add a NEAR AI API key in assistant inference settings before activating this extension.",
+            Some(
+                "Configure NEAR AI for the assistant with an API key; MCP reuses that credential.",
+            ),
             None,
-            "Activate NEAR AI to publish its MCP tools.",
+            "After NEAR AI is configured for the assistant, activate NEAR AI MCP to publish its tools.",
         ));
     }
 
@@ -1830,11 +1832,15 @@ mod tests {
             } else if extension_id == NEARAI_EXTENSION_ID {
                 assert_eq!(
                     onboarding.credential_instructions.as_deref(),
-                    Some("No separate MCP credentials are required.")
+                    Some(
+                        "Configure NEAR AI for the assistant with an API key; MCP reuses that credential."
+                    )
                 );
                 assert_eq!(
                     onboarding.credential_next_step.as_deref(),
-                    Some("Activate NEAR AI to publish its MCP tools.")
+                    Some(
+                        "After NEAR AI is configured for the assistant, activate NEAR AI MCP to publish its tools."
+                    )
                 );
             } else if extension_id == "web-access" {
                 assert_eq!(
