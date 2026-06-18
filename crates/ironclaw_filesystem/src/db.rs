@@ -73,7 +73,7 @@ pub(crate) fn direct_children(
     Ok(entries.into_values().collect())
 }
 
-#[cfg(any(feature = "postgres", feature = "libsql"))]
+#[cfg(feature = "libsql")]
 pub(crate) fn child_path_like_pattern(path: &VirtualPath) -> String {
     let mut pattern = String::new();
     for character in path.as_str().trim_end_matches('/').chars() {

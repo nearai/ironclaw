@@ -5,11 +5,10 @@ use ironclaw_host_api::VirtualPath;
 
 use crate::backend::EventRecord;
 use crate::db::{
-    child_path_like_pattern, db_error, direct_children, directory_append_error,
-    directory_write_error, escape_like_literal, escape_like_with_trailing_wildcard,
-    infrastructure_error, infrastructure_pg_error, is_not_found, not_found, page_offset_to_i64,
-    record_version_from_i64, record_version_to_i64, sql_index_name, system_time_from_unix_seconds,
-    virtual_path_prefixes,
+    db_error, direct_children, directory_append_error, directory_write_error, escape_like_literal,
+    escape_like_with_trailing_wildcard, infrastructure_error, infrastructure_pg_error,
+    is_not_found, not_found, page_offset_to_i64, record_version_from_i64, record_version_to_i64,
+    sql_index_name, system_time_from_unix_seconds, virtual_path_prefixes,
 };
 use crate::vector::{cosine_similarity, decode_embedding_blob};
 use crate::{
@@ -389,9 +388,10 @@ impl RootFilesystem for PostgresRootFilesystem {
         }
         let mut params: Vec<Box<dyn tokio_postgres::types::ToSql + Sync + Send>> = Vec::new();
         let path_str = path.as_str().to_string();
-        let prefix_pattern = escape_like_with_trailing_wildcard(&format!("{}/%", path.as_str()));
+        let (prefix_lower, prefix_upper) = descendant_path_range(path);
         params.push(Box::new(path_str));
-        params.push(Box::new(prefix_pattern));
+        params.push(Box::new(prefix_lower));
+        params.push(Box::new(prefix_upper));
 
         let mut conditions = String::new();
         translate_filter(path, filter, &mut conditions, &mut params)?;
@@ -399,7 +399,7 @@ impl RootFilesystem for PostgresRootFilesystem {
         let mut sql = String::from(
             "SELECT path, contents, content_type, kind, indexed, version \
              FROM root_filesystem_entries \
-             WHERE is_dir = FALSE AND (path = $1 OR path LIKE $2 ESCAPE '!')",
+             WHERE is_dir = FALSE AND (path = $1 OR (path >= $2 AND path < $3))",
         );
         if !conditions.is_empty() {
             sql.push_str(" AND ");
@@ -637,11 +637,11 @@ impl RootFilesystem for PostgresRootFilesystem {
 
     async fn delete(&self, path: &VirtualPath) -> Result<(), FilesystemError> {
         let client = self.client().await?;
-        let child_pattern = child_path_like_pattern(path);
+        let (prefix_lower, prefix_upper) = descendant_path_range(path);
         let deleted = client
             .execute(
-                "DELETE FROM root_filesystem_entries WHERE path = $1 OR path LIKE $2 ESCAPE '!'",
-                &[&path.as_str(), &child_pattern],
+                "DELETE FROM root_filesystem_entries WHERE path = $1 OR (path >= $2 AND path < $3)",
+                &[&path.as_str(), &prefix_lower, &prefix_upper],
             )
             .await
             .map_err(|error| db_error(path.clone(), FilesystemOperation::Delete, error))?;
@@ -836,11 +836,11 @@ impl PostgresRootFilesystem {
         parent: &VirtualPath,
         operation: FilesystemOperation,
     ) -> Result<Vec<(VirtualPath, u64, FileType)>, FilesystemError> {
-        let pattern = child_path_like_pattern(parent);
+        let (prefix_lower, prefix_upper) = descendant_path_range(parent);
         let rows = client
             .query(
-                "SELECT path, OCTET_LENGTH(contents)::bigint AS len, is_dir FROM root_filesystem_entries WHERE path LIKE $1 ESCAPE '!' ORDER BY path",
-                &[&pattern],
+                "SELECT path, OCTET_LENGTH(contents)::bigint AS len, is_dir FROM root_filesystem_entries WHERE path >= $1 AND path < $2 ORDER BY path",
+                &[&prefix_lower, &prefix_upper],
             )
             .await
             .map_err(|error| db_error(parent.clone(), operation, error))?;
@@ -867,11 +867,11 @@ impl PostgresRootFilesystem {
         client: &tokio_postgres::Client,
         parent: &VirtualPath,
     ) -> Result<bool, FilesystemError> {
-        let pattern = child_path_like_pattern(parent);
+        let (prefix_lower, prefix_upper) = descendant_path_range(parent);
         let row = client
             .query_opt(
-                "SELECT 1 FROM root_filesystem_entries WHERE path LIKE $1 ESCAPE '!' LIMIT 1",
-                &[&pattern],
+                "SELECT 1 FROM root_filesystem_entries WHERE path >= $1 AND path < $2 LIMIT 1",
+                &[&prefix_lower, &prefix_upper],
             )
             .await
             .map_err(|error| db_error(parent.clone(), FilesystemOperation::Stat, error))?;
@@ -895,13 +895,13 @@ impl PostgresRootFilesystem {
         limit: u32,
     ) -> Result<Vec<VersionedEntry>, FilesystemError> {
         let client = self.client().await?;
-        let prefix_pattern = escape_like_with_trailing_wildcard(&format!("{}/%", path.as_str()));
+        let (prefix_lower, prefix_upper) = descendant_path_range(path);
         let rows = client
             .query(
                 "SELECT path, indexed, version \
                  FROM root_filesystem_entries \
-                 WHERE is_dir = FALSE AND (path = $1 OR path LIKE $2 ESCAPE '!')",
-                &[&path.as_str(), &prefix_pattern],
+                 WHERE is_dir = FALSE AND (path = $1 OR (path >= $2 AND path < $3))",
+                &[&path.as_str(), &prefix_lower, &prefix_upper],
             )
             .await
             .map_err(|error| db_error(path.clone(), FilesystemOperation::Query, error))?;
@@ -990,6 +990,15 @@ impl PostgresRootFilesystem {
         })
         .transpose()
     }
+}
+
+#[cfg(feature = "postgres")]
+fn descendant_path_range(path: &VirtualPath) -> (String, String) {
+    let prefix = path.as_str().trim_end_matches('/');
+    // Descendants share the literal "{prefix}/" component boundary. The
+    // exclusive upper bound "{prefix}0" works because '/' sorts before '0'
+    // in the normalized virtual path alphabet used by these storage paths.
+    (format!("{prefix}/"), format!("{prefix}0"))
 }
 
 /// Translate a [`Filter`] tree into a postgres WHERE-clause fragment.
