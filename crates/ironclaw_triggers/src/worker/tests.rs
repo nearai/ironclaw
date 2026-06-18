@@ -2098,6 +2098,222 @@ async fn tick_fire_once_trigger_becomes_completed_after_clear() {
 }
 
 #[tokio::test]
+async fn tick_fire_once_blocked_active_run_is_left_pending() {
+    // Regression guard: a fire-once trigger parked on a human-interaction gate
+    // (Blocked) must NOT be cleared by the poller. The gate is still answerable;
+    // clearing it would mark it Completed prematurely (before it ever fired
+    // successfully). The active_fire_slot and active_run_ref must be retained so
+    // the gate can still be resolved. The outcome must be SkippedAlreadyActive
+    // (the pending/skip path), not ClearedBlockedActive.
+    let repo = Arc::new(InMemoryTriggerRepository::default());
+    let trigger_id = TriggerId::parse("01HZZZZZZZZZZZZZZZZZZZZZZZ").expect("ulid");
+    let fire_slot = ymd_hms(2025, 1, 1, 8, 0, 0);
+    let run_id = TurnRunId::parse("01890f0f-9b6f-7a85-9e5b-9f21a93c4f5a").expect("run id");
+    let mut record = sample_record(trigger_id, tenant("tenant-a"), fire_slot);
+    record.completion_policy = TriggerCompletionPolicy::CompleteAfterFirstFire;
+    record.active_fire_slot = Some(fire_slot);
+    record.active_run_ref = Some(run_id);
+    repo.upsert_trigger(record).await.expect("insert");
+    let worker = worker(
+        repo.clone(),
+        Arc::new(RecordingMaterializer::success("content:fire-once")),
+        Arc::new(RecordingSubmitter::with_outcomes(Vec::new())),
+        Arc::new(RecordingActiveRunLookup::with_state(
+            TriggerActiveRunState::Blocked,
+        )),
+    );
+
+    let report = worker.tick_once(fire_slot).await.expect("tick succeeds");
+
+    // The outcome must be the pending/skip path, not ClearedBlockedActive.
+    assert!(
+        matches!(
+            report.results.last().map(|r| &r.outcome),
+            Some(TriggerPollerFireOutcome::SkippedAlreadyActive { .. })
+        ),
+        "fire-once blocked run must produce SkippedAlreadyActive, not ClearedBlockedActive"
+    );
+    let persisted = repo
+        .get_trigger(tenant("tenant-a"), trigger_id)
+        .await
+        .expect("load")
+        .expect("record present");
+    // Active lock must be retained so the gate remains answerable.
+    assert_eq!(
+        persisted.active_fire_slot,
+        Some(fire_slot),
+        "fire-once blocked run must retain active_fire_slot"
+    );
+    assert_eq!(
+        persisted.active_run_ref,
+        Some(run_id),
+        "fire-once blocked run must retain active_run_ref"
+    );
+    // Must NOT be Completed — it never fired successfully.
+    assert_ne!(
+        persisted.state,
+        TriggerState::Completed,
+        "fire-once blocked run must not be marked Completed"
+    );
+}
+
+#[tokio::test]
+async fn tick_fire_once_terminal_ok_active_run_clears_to_completed() {
+    // Regression guard: a fire-once trigger whose run reaches Terminal with Ok
+    // must be cleared and moved to Completed — the normal one-shot completion path.
+    let repo = Arc::new(InMemoryTriggerRepository::default());
+    let trigger_id = TriggerId::parse("01HZZZZZZZZZZZZZZZZZZZZZZY").expect("ulid");
+    let fire_slot = ymd_hms(2025, 1, 1, 8, 0, 0);
+    let run_id = TurnRunId::parse("01890f0f-9b6f-7a85-9e5b-9f21a93c4f5b").expect("run id");
+    let mut record = sample_record(trigger_id, tenant("tenant-a"), fire_slot);
+    record.completion_policy = TriggerCompletionPolicy::CompleteAfterFirstFire;
+    record.active_fire_slot = Some(fire_slot);
+    record.active_run_ref = Some(run_id);
+    repo.upsert_trigger(record).await.expect("insert");
+    let worker = worker(
+        repo.clone(),
+        Arc::new(RecordingMaterializer::success("content:fire-once")),
+        Arc::new(RecordingSubmitter::with_outcomes(Vec::new())),
+        Arc::new(RecordingActiveRunLookup::with_state(
+            TriggerActiveRunState::Terminal {
+                status: TriggerRunHistoryStatus::Ok,
+            },
+        )),
+    );
+
+    let report = worker.tick_once(fire_slot).await.expect("tick succeeds");
+
+    assert_eq!(
+        report.results.last().map(|r| &r.outcome),
+        Some(&TriggerPollerFireOutcome::ClearedTerminalActive { run_id }),
+        "fire-once terminal-ok run must produce ClearedTerminalActive"
+    );
+    let persisted = repo
+        .get_trigger(tenant("tenant-a"), trigger_id)
+        .await
+        .expect("load")
+        .expect("record present");
+    assert_eq!(
+        persisted.state,
+        TriggerState::Completed,
+        "fire-once terminal-ok run must be Completed after clear"
+    );
+    assert_eq!(persisted.active_fire_slot, None);
+    assert_eq!(persisted.active_run_ref, None);
+    let runs = repo
+        .list_trigger_run_history(tenant("tenant-a"), trigger_id, 10)
+        .await
+        .expect("list run history");
+    assert_eq!(runs.len(), 1);
+    assert_eq!(runs[0].status, TriggerRunHistoryStatus::Ok);
+}
+
+#[tokio::test]
+async fn tick_fire_once_terminal_error_active_run_clears_to_completed() {
+    // Regression guard: a fire-once trigger whose run reaches Terminal with Error
+    // (ran and errored) must also be cleared and moved to Completed — the one-shot
+    // is exhausted regardless of the run's own error status.
+    let repo = Arc::new(InMemoryTriggerRepository::default());
+    let trigger_id = TriggerId::parse("01HZZZZZZZZZZZZZZZZZZZZZZY").expect("ulid");
+    let fire_slot = ymd_hms(2025, 1, 1, 8, 0, 0);
+    let run_id = TurnRunId::parse("01890f0f-9b6f-7a85-9e5b-9f21a93c4f5c").expect("run id");
+    let mut record = sample_record(trigger_id, tenant("tenant-a"), fire_slot);
+    record.completion_policy = TriggerCompletionPolicy::CompleteAfterFirstFire;
+    record.active_fire_slot = Some(fire_slot);
+    record.active_run_ref = Some(run_id);
+    repo.upsert_trigger(record).await.expect("insert");
+    let worker = worker(
+        repo.clone(),
+        Arc::new(RecordingMaterializer::success("content:fire-once")),
+        Arc::new(RecordingSubmitter::with_outcomes(Vec::new())),
+        Arc::new(RecordingActiveRunLookup::with_state(
+            TriggerActiveRunState::Terminal {
+                status: TriggerRunHistoryStatus::Error,
+            },
+        )),
+    );
+
+    let report = worker.tick_once(fire_slot).await.expect("tick succeeds");
+
+    assert_eq!(
+        report.results.last().map(|r| &r.outcome),
+        Some(&TriggerPollerFireOutcome::ClearedTerminalActive { run_id }),
+        "fire-once terminal-error run must produce ClearedTerminalActive"
+    );
+    let persisted = repo
+        .get_trigger(tenant("tenant-a"), trigger_id)
+        .await
+        .expect("load")
+        .expect("record present");
+    assert_eq!(
+        persisted.state,
+        TriggerState::Completed,
+        "fire-once terminal-error run must be Completed after clear (one-shot exhausted)"
+    );
+    assert_eq!(persisted.active_fire_slot, None);
+    assert_eq!(persisted.active_run_ref, None);
+    let runs = repo
+        .list_trigger_run_history(tenant("tenant-a"), trigger_id, 10)
+        .await
+        .expect("list run history");
+    assert_eq!(runs.len(), 1);
+    assert_eq!(runs[0].status, TriggerRunHistoryStatus::Error);
+}
+
+#[tokio::test]
+async fn tick_recurring_blocked_active_run_clears_as_failed() {
+    // Regression guard: the fire-once exemption in the Blocked arm must NOT affect
+    // recurring triggers. A recurring trigger parked on a gate must still be cleared
+    // with Error and left Scheduled so its next slot can fire.
+    // This is the same scenario as tick_clears_blocked_active_run_and_unblocks_schedule
+    // but re-stated here as an explicit policy regression guard for the Recurring branch.
+    let repo = Arc::new(InMemoryTriggerRepository::default());
+    let trigger_id = TriggerId::parse("01HZZZZZZZZZZZZZZZZZZZZZZX").expect("ulid");
+    let fire_slot = ts(1_704_067_200);
+    let run_id = TurnRunId::parse("01890f0f-9b6f-7a85-9e5b-9f21a93c4f5d").expect("run id");
+    let mut record = sample_record(trigger_id, tenant("tenant-a"), ts(1_704_067_260));
+    assert_eq!(record.completion_policy, TriggerCompletionPolicy::Recurring);
+    record.active_fire_slot = Some(fire_slot);
+    record.active_run_ref = Some(run_id);
+    repo.upsert_trigger(record).await.expect("insert");
+    let worker = worker(
+        repo.clone(),
+        Arc::new(RecordingMaterializer::success("content:trigger-fire")),
+        Arc::new(RecordingSubmitter::with_outcomes(Vec::new())),
+        Arc::new(RecordingActiveRunLookup::with_state(
+            TriggerActiveRunState::Blocked,
+        )),
+    );
+
+    let report = worker.tick_once(fire_slot).await.expect("tick succeeds");
+
+    assert_eq!(
+        report.results.last().map(|r| &r.outcome),
+        Some(&TriggerPollerFireOutcome::ClearedBlockedActive { run_id }),
+        "recurring blocked run must produce ClearedBlockedActive"
+    );
+    let persisted = repo
+        .get_trigger(tenant("tenant-a"), trigger_id)
+        .await
+        .expect("load")
+        .expect("record present");
+    assert_eq!(
+        persisted.state,
+        TriggerState::Scheduled,
+        "recurring blocked run must stay Scheduled after clear so the next slot can fire"
+    );
+    assert_eq!(persisted.active_fire_slot, None);
+    assert_eq!(persisted.active_run_ref, None);
+    let runs = repo
+        .list_trigger_run_history(tenant("tenant-a"), trigger_id, 10)
+        .await
+        .expect("list run history");
+    assert_eq!(runs.len(), 1);
+    assert_eq!(runs[0].run_id, Some(run_id));
+    assert_eq!(runs[0].status, TriggerRunHistoryStatus::Error);
+}
+
+#[tokio::test]
 async fn tick_fire_once_permanent_submit_failure_is_terminal() {
     // A CompleteAfterFirstFire trigger whose trusted submitter returns a
     // Permanent failure must produce PermanentFailed (terminal) and must NOT
