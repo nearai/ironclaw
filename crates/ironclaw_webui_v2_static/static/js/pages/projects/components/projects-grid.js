@@ -37,8 +37,7 @@ function ProjectCard({ project, onOpen, t }) {
       <div className="mt-5 grid gap-3 sm:grid-cols-2">
         <div className="rounded-2xl border border-iron-700 bg-iron-950/55 p-3">
           <div className="font-mono text-[10px] uppercase tracking-[0.16em] text-iron-300">${t("projects.card.runtime")}</div>
-          <div className="mt-2 text-sm text-iron-100">${compactCount(project.active_missions || 0, "mission")}</div>
-          <div className="mt-1 text-xs text-iron-300">
+          <div className="mt-2 text-sm text-iron-100">
             ${t("projects.card.threadsToday", { count: compactCount(project.threads_today || 0, "thread") })}
           </div>
         </div>
@@ -74,9 +73,6 @@ function GeneralProjectCard({ project, onOpen, t }) {
           </p>
         </div>
         <div className="flex flex-wrap gap-3">
-          <div className="rounded-2xl border border-iron-700 bg-iron-950/55 px-4 py-3 text-sm text-iron-200">
-            ${compactCount(project.active_missions || 0, "active mission")}
-          </div>
           <div className="rounded-2xl border border-iron-700 bg-iron-950/55 px-4 py-3 text-sm text-iron-200">
             ${compactCount(project.threads_today || 0, "thread")} today
           </div>

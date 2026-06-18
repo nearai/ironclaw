@@ -16,13 +16,13 @@ export function ProjectsPage() {
   const t = useT();
   const navigate = useNavigate();
   const { threadsState } = useOutletContext();
-  const { projectId = null, missionId = null, threadId = null } = useParams();
+  const { projectId = null, threadId = null } = useParams();
   const [search, setSearch] = React.useState("");
   const [chatFlowError, setChatFlowError] = React.useState(null);
 
   const overviewState = useProjectsOverview();
   const workspaceState = useProjectWorkspace(projectId);
-  const inspectorState = useProjectInspector({ projectId, missionId, threadId });
+  const inspectorState = useProjectInspector({ projectId, threadId });
 
   const filteredProjects = React.useMemo(() => {
     const query = search.trim().toLowerCase();
@@ -74,10 +74,6 @@ export function ProjectsPage() {
     });
   }, [navigate, threadsState]);
 
-  const handleOpenMission = React.useCallback((nextMissionId) => {
-    navigate(`/projects/${projectId}/missions/${nextMissionId}`);
-  }, [navigate, projectId]);
-
   const handleOpenThread = React.useCallback((nextThreadId) => {
     navigate(`/projects/${projectId}/threads/${nextThreadId}`);
   }, [navigate, projectId]);
@@ -114,11 +110,8 @@ export function ProjectsPage() {
       content = html`
         <${ProjectWorkspaceShell}
           project=${workspaceState.project || selectedOverviewProject}
-          missions=${workspaceState.missions}
           threads=${workspaceState.threads}
-          selectedMissionId=${missionId}
           selectedThreadId=${threadId}
-          onSelectMission=${handleOpenMission}
           onSelectThread=${handleOpenThread}
         />
       `;

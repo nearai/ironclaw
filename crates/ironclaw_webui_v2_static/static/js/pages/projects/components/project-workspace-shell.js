@@ -1,5 +1,4 @@
 import { html } from "../../../lib/html.js";
-import { ProjectMissionsColumn } from "./project-missions-column.js";
 import { ProjectActivityColumn } from "./project-activity-column.js";
 import { ProjectFilesystemPanel } from "./project-filesystem-panel.js";
 
@@ -13,15 +12,7 @@ function representativeThreadId(threads) {
   return sorted[0]?.id || null;
 }
 
-export function ProjectWorkspaceShell({
-  project,
-  missions,
-  threads,
-  selectedMissionId,
-  selectedThreadId,
-  onSelectMission,
-  onSelectThread,
-}) {
+export function ProjectWorkspaceShell({ project, threads, selectedThreadId, onSelectThread }) {
   const fsThreadId = representativeThreadId(threads);
 
   return html`
@@ -38,12 +29,6 @@ export function ProjectWorkspaceShell({
           threads=${threads}
           selectedThreadId=${selectedThreadId}
           onSelectThread=${onSelectThread}
-        />
-
-        <${ProjectMissionsColumn}
-          missions=${missions}
-          selectedMissionId=${selectedMissionId}
-          onSelectMission=${onSelectMission}
         />
       </div>
 

@@ -51,7 +51,7 @@ export function ProjectActivityColumn({ threads, selectedThreadId, onSelectThrea
             })
           : html`
               <div className="rounded-[20px] border border-dashed border-white/10 px-4 py-8 text-sm leading-6 text-iron-300">
-                No project threads yet. When a mission runs or you open scoped chat work inside this project, activity will appear here.
+                No project threads yet. When an automation runs or scoped chat work happens inside this project, activity will appear here.
               </div>
             `}
       </div>
