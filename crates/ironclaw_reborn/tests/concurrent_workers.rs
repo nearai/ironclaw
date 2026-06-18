@@ -1,0 +1,468 @@
+/// Concurrency test: two workers execute two runs simultaneously.
+///
+/// A barrier-blocking driver blocks inside `run()` until a `Barrier(2)` is
+/// reached, using a shared atomic entry counter to prove both runs are
+/// executing simultaneously. With a single worker the second run is never
+/// claimed while the first is blocked, so the barrier is never filled — the
+/// test would deadlock at the wait. With two workers both runs are claimed
+/// concurrently, both enter the barrier, and both eventually finish.
+use std::sync::{
+    Arc,
+    atomic::{AtomicU32, Ordering},
+};
+
+use async_trait::async_trait;
+use chrono::Utc;
+use ironclaw_host_api::{AgentId, ProjectId, TenantId, ThreadId, UserId};
+use ironclaw_loop_support::{
+    EmptyUserProfileSource, HostIdentityContextBuildError, HostIdentityContextCandidate,
+    HostIdentityContextSource, HostManagedModelError, HostManagedModelErrorKind,
+    HostManagedModelGateway, HostManagedModelRequest, HostManagedModelResponse,
+    HostUserProfileSource,
+};
+use ironclaw_reborn::{
+    driver_registry::{DriverKind, DriverRegistry, DriverRequirements},
+    loop_driver_host::{RebornLoopDriverHostFactory, TextOnlyLoopHostConfig},
+    loop_exit_applier::{
+        LoopExitApplier, LoopExitEvidencePort, ThreadCheckpointLoopExitEvidencePort,
+    },
+    turn_runner::{TurnRunnerWakeReceiver, TurnRunnerWorker, TurnRunnerWorkerConfig},
+};
+use ironclaw_threads::{
+    AcceptInboundMessageRequest, EnsureThreadRequest, InMemorySessionThreadService, MessageContent,
+    SessionThreadService, ThreadScope,
+};
+use ironclaw_turns::{
+    AcceptedMessageRef, AgentLoopDriver, AgentLoopDriverDescriptor, AgentLoopDriverError,
+    AgentLoopDriverResumeRequest, AgentLoopDriverRunRequest, AllowAllTurnAdmissionPolicy,
+    GetRunStateRequest, IdempotencyKey, InMemoryCheckpointStateStore, InMemoryRunProfileResolver,
+    InMemoryTurnStateStore, InMemoryTurnStateStoreLimits, LoopCheckpointStore, LoopExit,
+    ReplyTargetBindingRef, RunProfileResolutionRequest, RunProfileResolver, SourceBindingRef,
+    SubmitTurnRequest, SubmitTurnResponse, TurnActor, TurnRunId, TurnScope, TurnStateStore,
+    TurnStatus,
+    run_profile::{
+        AgentLoopDriverHost, InMemoryLoopHostMilestoneSink, InstructionSafetyContext,
+        LoopRunContext, PromptMode,
+    },
+    runner::TurnRunTransitionPort,
+};
+use tokio::sync::Barrier;
+use tokio_util::sync::CancellationToken;
+
+// ---------------------------------------------------------------------------
+// Barrier-blocking driver
+//
+// Each invocation of `run()` atomically increments `entry_count` then blocks
+// on `barrier`. The test waits until `entry_count == 2` before the barrier
+// can proceed, which proves both drivers are inside `run()` simultaneously.
+//
+// The driver intentionally returns `Err(AgentLoopDriverError::Failed{..})`
+// after the barrier. That path is always valid (the worker records a
+// controlled failure) so there are no loop-protocol constraints to satisfy.
+// What matters for this test is that both runs reach `Running` and BOTH
+// enter the barrier concurrently — single-worker execution would block
+// forever at `barrier.wait()` because the second run can never be claimed
+// while the first is blocked.
+// ---------------------------------------------------------------------------
+
+struct BarrierDriver {
+    descriptor: AgentLoopDriverDescriptor,
+    barrier: Arc<Barrier>,
+    /// Incremented when each driver enters `run()` — lets the test observe
+    /// concurrent execution without polling turn-state timings.
+    entry_count: Arc<AtomicU32>,
+}
+
+#[async_trait]
+impl AgentLoopDriver for BarrierDriver {
+    fn descriptor(&self) -> AgentLoopDriverDescriptor {
+        self.descriptor.clone()
+    }
+
+    async fn run(
+        &self,
+        _request: AgentLoopDriverRunRequest,
+        _host: &(dyn AgentLoopDriverHost + Send + Sync),
+    ) -> Result<LoopExit, AgentLoopDriverError> {
+        // Signal that this invocation is inside run() — counter reaches 2
+        // when both workers have claimed and entered simultaneously.
+        self.entry_count.fetch_add(1, Ordering::SeqCst);
+        // Block until the peer invocation also enters — proves concurrency.
+        self.barrier.wait().await;
+        // Return an error (controlled fail) — always valid, no host evidence needed.
+        Err(AgentLoopDriverError::Failed {
+            reason_kind: "test_concurrent_barrier".to_string(),
+        })
+    }
+
+    async fn resume(
+        &self,
+        request: AgentLoopDriverResumeRequest,
+        host: &(dyn AgentLoopDriverHost + Send + Sync),
+    ) -> Result<LoopExit, AgentLoopDriverError> {
+        self.run(
+            AgentLoopDriverRunRequest {
+                turn_id: request.turn_id,
+                run_id: request.run_id,
+                resolved_run_profile: request.resolved_run_profile,
+            },
+            host,
+        )
+        .await
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Minimal gateway (never called; barrier driver doesn't hit the model)
+// ---------------------------------------------------------------------------
+
+struct NoOpGateway;
+
+#[async_trait]
+impl HostManagedModelGateway for NoOpGateway {
+    async fn stream_model(
+        &self,
+        _request: HostManagedModelRequest,
+    ) -> Result<HostManagedModelResponse, HostManagedModelError> {
+        Err(HostManagedModelError::new(
+            HostManagedModelErrorKind::Unavailable,
+            "NoOpGateway: model not available in barrier test",
+        ))
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Minimal identity context source (returns nothing; barrier driver skips model)
+// ---------------------------------------------------------------------------
+
+struct EmptyIdentityContextSource;
+
+#[async_trait]
+impl HostIdentityContextSource for EmptyIdentityContextSource {
+    async fn load_identity_candidates(
+        &self,
+        _run_context: &LoopRunContext,
+        _mode: PromptMode,
+    ) -> Result<Vec<HostIdentityContextCandidate>, HostIdentityContextBuildError> {
+        Ok(Vec::new())
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Test helpers
+// ---------------------------------------------------------------------------
+
+async fn submit_run_on_thread(
+    thread_id: &ThreadId,
+    thread_service: &InMemorySessionThreadService,
+    thread_scope: &ThreadScope,
+    turn_store: &InMemoryTurnStateStore,
+    resolver: &InMemoryRunProfileResolver,
+    idempotency_key: &str,
+    user_id: &UserId,
+) -> TurnRunId {
+    thread_service
+        .ensure_thread(EnsureThreadRequest {
+            scope: thread_scope.clone(),
+            thread_id: Some(thread_id.clone()),
+            created_by_actor_id: user_id.to_string(),
+            title: None,
+            metadata_json: None,
+        })
+        .await
+        .unwrap();
+    let accepted = thread_service
+        .accept_inbound_message(AcceptInboundMessageRequest {
+            scope: thread_scope.clone(),
+            thread_id: thread_id.clone(),
+            actor_id: user_id.to_string(),
+            source_binding_id: Some("source-web".to_string()),
+            reply_target_binding_id: Some("reply-web".to_string()),
+            external_event_id: Some(format!("event-{idempotency_key}")),
+            content: MessageContent::text("barrier test message"),
+        })
+        .await
+        .unwrap();
+
+    let turn_scope = TurnScope::new(
+        thread_scope.tenant_id.clone(),
+        Some(thread_scope.agent_id.clone()),
+        thread_scope.project_id.clone(),
+        thread_id.clone(),
+    );
+    let submit = turn_store
+        .submit_turn(
+            SubmitTurnRequest {
+                scope: turn_scope,
+                actor: TurnActor::new(user_id.clone()),
+                accepted_message_ref: AcceptedMessageRef::new(format!(
+                    "accepted-{idempotency_key}"
+                ))
+                .unwrap(),
+                source_binding_ref: SourceBindingRef::new("source-web").unwrap(),
+                reply_target_binding_ref: ReplyTargetBindingRef::new("reply-web").unwrap(),
+                requested_run_profile: None,
+                idempotency_key: IdempotencyKey::new(idempotency_key).unwrap(),
+                received_at: Utc::now(),
+                requested_run_id: None,
+                parent_run_id: None,
+                subagent_depth: 0,
+                spawn_tree_root_run_id: None,
+                product_context: None,
+            },
+            &AllowAllTurnAdmissionPolicy,
+            resolver,
+        )
+        .await
+        .unwrap();
+
+    let SubmitTurnResponse::Accepted {
+        turn_id, run_id, ..
+    } = submit;
+    // Mark the accepted message as submitted so the thread service has a
+    // run_id association, matching what queue_fixture_turn does.
+    thread_service
+        .mark_message_submitted(
+            thread_scope,
+            thread_id,
+            accepted.message_id,
+            turn_id.to_string(),
+            run_id.to_string(),
+        )
+        .await
+        .unwrap();
+    run_id
+}
+
+async fn wait_for_status(
+    store: &InMemoryTurnStateStore,
+    scope: &TurnScope,
+    run_id: TurnRunId,
+    expected: TurnStatus,
+    timeout_secs: u64,
+    label: &str,
+) {
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(timeout_secs);
+    loop {
+        let state = store
+            .get_run_state(GetRunStateRequest {
+                scope: scope.clone(),
+                run_id,
+            })
+            .await
+            .unwrap();
+        if state.status == expected {
+            return;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "{label}: timed out waiting for {expected:?}; last={:?} failure={:?}",
+            state.status,
+            state.failure,
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+}
+
+// ---------------------------------------------------------------------------
+// The concurrency test
+// ---------------------------------------------------------------------------
+
+/// Two workers execute two distinct-thread runs simultaneously.
+///
+/// The barrier driver blocks inside `run()` until both invocations arrive.
+/// With `worker_count = 2` both runs are claimed concurrently and the barrier
+/// unblocks. With `worker_count = 1` only one run is ever claimed while the
+/// other stays Queued, so the barrier is never filled — the test would time
+/// out at the `Running` assertion for run_b.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn two_workers_execute_two_runs_concurrently() {
+    let tenant_id = TenantId::new("tenant-concurrent").unwrap();
+    let agent_id = AgentId::new("agent-concurrent").unwrap();
+    let project_id = ProjectId::new("project-concurrent").unwrap();
+    let user_id = UserId::new("user-concurrent").unwrap();
+
+    let thread_service = Arc::new(InMemorySessionThreadService::default());
+    let thread_scope = ThreadScope {
+        tenant_id: tenant_id.clone(),
+        agent_id: agent_id.clone(),
+        project_id: Some(project_id.clone()),
+        owner_user_id: None,
+        mission_id: None,
+    };
+
+    let turn_store = Arc::new(InMemoryTurnStateStore::with_limits(
+        InMemoryTurnStateStoreLimits::default(),
+    ));
+    let resolver = InMemoryRunProfileResolver::default();
+
+    // Submit run 1 on thread A.
+    let thread_id_a = ThreadId::new("concurrent-thread-a").unwrap();
+    let run_id_a = submit_run_on_thread(
+        &thread_id_a,
+        &thread_service,
+        &thread_scope,
+        &turn_store,
+        &resolver,
+        "idem-concurrent-a",
+        &user_id,
+    )
+    .await;
+
+    // Submit run 2 on thread B (different thread_id = different scope).
+    let thread_id_b = ThreadId::new("concurrent-thread-b").unwrap();
+    let run_id_b = submit_run_on_thread(
+        &thread_id_b,
+        &thread_service,
+        &thread_scope,
+        &turn_store,
+        &resolver,
+        "idem-concurrent-b",
+        &user_id,
+    )
+    .await;
+
+    // Build the barrier driver (barrier size 2: needs both workers inside run()).
+    let barrier = Arc::new(Barrier::new(2));
+    let entry_count = Arc::new(AtomicU32::new(0));
+    let resolved = resolver
+        .resolve_run_profile(RunProfileResolutionRequest::interactive_default())
+        .await
+        .unwrap();
+    let descriptor = resolved.loop_driver.clone();
+
+    let mut registry = DriverRegistry::new();
+    registry
+        .register_driver(
+            Arc::new(BarrierDriver {
+                descriptor,
+                barrier: Arc::clone(&barrier),
+                entry_count: Arc::clone(&entry_count),
+            }),
+            DriverRequirements::all_required(),
+            DriverKind::Reference,
+        )
+        .unwrap();
+    let registry = Arc::new(registry);
+
+    // Build shared deps for both workers.
+    let checkpoint_state_store = Arc::new(InMemoryCheckpointStateStore::default());
+    let loop_checkpoint_store: Arc<dyn LoopCheckpointStore> = turn_store.clone();
+    let milestone_sink = Arc::new(InMemoryLoopHostMilestoneSink::default());
+    let gateway = Arc::new(NoOpGateway);
+
+    let transition_port: Arc<dyn TurnRunTransitionPort> = turn_store.clone();
+    let loop_exit_applier = Arc::new(LoopExitApplier::new(
+        Arc::clone(&transition_port),
+        Arc::new(ThreadCheckpointLoopExitEvidencePort::new(
+            Arc::clone(&thread_service),
+            turn_store.clone(),
+            loop_checkpoint_store.clone(),
+        )) as Arc<dyn LoopExitEvidencePort>,
+    ));
+
+    let host_factory = Arc::new(
+        RebornLoopDriverHostFactory::new(
+            Arc::clone(&thread_service),
+            thread_scope.clone(),
+            Arc::clone(&gateway),
+            checkpoint_state_store,
+            turn_store.clone() as Arc<dyn TurnStateStore>,
+            loop_checkpoint_store,
+            milestone_sink,
+            TextOnlyLoopHostConfig {
+                max_messages: 8,
+                require_model_route_snapshot: false,
+            },
+            InstructionSafetyContext::local_development_noop(),
+        )
+        .with_identity_context_source(
+            Arc::new(EmptyIdentityContextSource) as Arc<dyn HostIdentityContextSource>
+        )
+        .with_user_profile_source(
+            Arc::new(EmptyUserProfileSource) as Arc<dyn HostUserProfileSource>
+        ),
+    );
+
+    // Build 2 workers sharing the same wake receiver.
+    let (_wake_sender, wake_receiver) = TurnRunnerWakeReceiver::new();
+    let worker_config = TurnRunnerWorkerConfig {
+        heartbeat_interval: std::time::Duration::from_millis(20),
+        poll_interval: std::time::Duration::from_millis(10),
+        scope_filter: None, // no scope filter — both thread scopes accepted
+    };
+
+    let worker_a = TurnRunnerWorker::new(
+        worker_config.clone(),
+        Arc::clone(&transition_port),
+        Arc::clone(&loop_exit_applier),
+        Arc::clone(&registry),
+        host_factory.clone(),
+        wake_receiver.clone(),
+    );
+    let worker_b = TurnRunnerWorker::new(
+        worker_config,
+        Arc::clone(&transition_port),
+        Arc::clone(&loop_exit_applier),
+        Arc::clone(&registry),
+        host_factory.clone(),
+        wake_receiver,
+    );
+
+    let cancel = CancellationToken::new();
+    let cancel_a = cancel.clone();
+    let cancel_b = cancel.clone();
+
+    let handle_a = tokio::spawn(async move { worker_a.run(cancel_a).await });
+    let handle_b = tokio::spawn(async move { worker_b.run(cancel_b).await });
+
+    // Compute scopes for polling.
+    let scope_a = TurnScope::new(
+        tenant_id.clone(),
+        Some(agent_id.clone()),
+        Some(project_id.clone()),
+        thread_id_a,
+    );
+    let scope_b = TurnScope::new(
+        tenant_id.clone(),
+        Some(agent_id.clone()),
+        Some(project_id.clone()),
+        thread_id_b,
+    );
+
+    // Both runs must reach Failed (the barrier driver returns Err after both
+    // entries). With 2 workers: both are claimed simultaneously, both enter
+    // the barrier, entry_count reaches 2, then both fail.
+    // With 1 worker: only run_a would be claimed and would block forever at
+    // barrier.wait() (run_b stays Queued, barrier never fills) — the test
+    // would time out here.
+    wait_for_status(
+        &turn_store,
+        &scope_a,
+        run_id_a,
+        TurnStatus::Failed,
+        10,
+        "run_a should fail after barrier releases (2 workers present)",
+    )
+    .await;
+    wait_for_status(
+        &turn_store,
+        &scope_b,
+        run_id_b,
+        TurnStatus::Failed,
+        10,
+        "run_b should fail after barrier releases (proves concurrency)",
+    )
+    .await;
+
+    // Both drivers entered run() simultaneously — proves N=2 concurrency.
+    assert_eq!(
+        entry_count.load(Ordering::SeqCst),
+        2,
+        "both driver invocations should have entered run() concurrently"
+    );
+
+    cancel.cancel();
+    handle_a.await.unwrap();
+    handle_b.await.unwrap();
+}

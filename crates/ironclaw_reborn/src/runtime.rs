@@ -57,11 +57,23 @@ use crate::{
 
 type PlannedRuntimeWakeChannel = (TurnRunnerWakeSender, TurnRunnerWakeReceiver);
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct DefaultPlannedRuntimeConfig {
     pub worker: TurnRunnerWorkerConfig,
+    pub worker_count: std::num::NonZeroUsize,
     pub text_only_driver: TextOnlyModelReplyDriverConfig,
     pub host: TextOnlyLoopHostConfig,
+}
+
+impl Default for DefaultPlannedRuntimeConfig {
+    fn default() -> Self {
+        Self {
+            worker: TurnRunnerWorkerConfig::default(),
+            worker_count: std::num::NonZeroUsize::new(4).expect("4 is non-zero"),
+            text_only_driver: TextOnlyModelReplyDriverConfig::default(),
+            host: TextOnlyLoopHostConfig::default(),
+        }
+    }
 }
 
 pub trait RuntimeTurnStateStore:
@@ -159,7 +171,7 @@ where
     pub run_profile_resolver: Arc<dyn RunProfileResolver>,
     pub coordinator: Arc<dyn ironclaw_turns::TurnCoordinator>,
     pub host_factory: Arc<RebornLoopDriverHostFactory<S, G>>,
-    pub worker: Arc<TurnRunnerWorker>,
+    pub workers: Vec<Arc<TurnRunnerWorker>>,
     pub wake_sender: TurnRunnerWakeSender,
 }
 
@@ -539,14 +551,19 @@ where
         Arc::clone(&transition_port),
         parts.loop_exit_evidence,
     ));
-    let worker = Arc::new(TurnRunnerWorker::new(
-        parts.config.worker,
-        transition_port,
-        loop_exit_applier,
-        Arc::clone(&driver_registry),
-        host_factory.clone(),
-        wake_receiver,
-    ));
+    let worker_count = parts.config.worker_count.get();
+    let workers: Vec<Arc<TurnRunnerWorker>> = (0..worker_count)
+        .map(|_| {
+            Arc::new(TurnRunnerWorker::new(
+                parts.config.worker.clone(),
+                Arc::clone(&transition_port),
+                Arc::clone(&loop_exit_applier),
+                Arc::clone(&driver_registry),
+                host_factory.clone(),
+                wake_receiver.clone(),
+            ))
+        })
+        .collect();
 
     Ok(
         RebornRuntimeLoopComposition::<dyn SessionThreadService, G> {
@@ -554,7 +571,7 @@ where
             run_profile_resolver,
             coordinator,
             host_factory,
-            worker,
+            workers,
             wake_sender,
         },
     )
