@@ -5,6 +5,7 @@
 //! dispatch runtime work.
 
 mod policy;
+mod tool_permission;
 
 use ironclaw_authorization::{CapabilityLease, CapabilityLeaseError, CapabilityLeaseStore};
 use ironclaw_events::AuditSink;
@@ -22,6 +23,12 @@ pub use policy::{
     PersistentApprovalPolicyInput, PersistentApprovalPolicyKey, PersistentApprovalPolicyStore,
     PersistentApprovalScope, permission_mode_allows_persistent_approval,
     persistent_approval_grant_issuer,
+};
+pub use tool_permission::{
+    FilesystemToolPermissionOverrideStore, InMemoryToolPermissionOverrideStore,
+    ToolPermissionOverride, ToolPermissionOverrideInput, ToolPermissionOverrideKey,
+    ToolPermissionOverrideRecord, ToolPermissionOverrideStore, ToolPermissionState,
+    ToolPermissionStoreError,
 };
 
 pub struct ApprovalResolver<'a, A, L>
