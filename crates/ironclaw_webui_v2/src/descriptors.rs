@@ -354,7 +354,7 @@ fn list_fs_mounts_descriptor() -> IngressRouteDescriptor {
         read_policy(
             read_rate_limit(),
             AuditTraceClass::UserAction,
-            AllowedEffectPath::ProjectionOnly,
+            AllowedEffectPath::ProductWorkflow,
             StreamingMode::None,
         ),
     )
@@ -368,7 +368,7 @@ fn browse_fs_dir_descriptor() -> IngressRouteDescriptor {
         read_policy(
             read_rate_limit(),
             AuditTraceClass::UserAction,
-            AllowedEffectPath::ProjectionOnly,
+            AllowedEffectPath::ProductWorkflow,
             StreamingMode::None,
         ),
     )
@@ -382,7 +382,7 @@ fn stat_fs_path_descriptor() -> IngressRouteDescriptor {
         read_policy(
             read_rate_limit(),
             AuditTraceClass::UserAction,
-            AllowedEffectPath::ProjectionOnly,
+            AllowedEffectPath::ProductWorkflow,
             StreamingMode::None,
         ),
     )
@@ -396,7 +396,7 @@ fn read_fs_file_descriptor() -> IngressRouteDescriptor {
         read_policy(
             read_rate_limit(),
             AuditTraceClass::UserAction,
-            AllowedEffectPath::ProjectionOnly,
+            AllowedEffectPath::ProductWorkflow,
             StreamingMode::None,
         ),
     )

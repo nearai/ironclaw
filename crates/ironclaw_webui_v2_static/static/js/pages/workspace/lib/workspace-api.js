@@ -18,6 +18,11 @@ const FS_BASE = "/api/webchat/v2/fs";
 // offered as a download instead of being read into the page.
 const MAX_INLINE_TEXT_BYTES = 1024 * 1024;
 
+// Largest image we will fetch and base64-expand into a data URL for inline
+// preview. Above this, offer a download instead so a huge image can't hang the
+// tab by being read into memory.
+const MAX_INLINE_IMAGE_BYTES = 8 * 1024 * 1024;
+
 function splitQualified(qualifiedPath) {
   const segments = String(qualifiedPath || "")
     .split("/")
@@ -148,6 +153,11 @@ export async function readWorkspaceFile(qualifiedPath) {
   }
 
   if (isImageMime(mime)) {
+    // Gate by size before fetching/base64-expanding: an oversized image is
+    // offered as a download rather than inlined into memory.
+    if (sizeBytes > MAX_INLINE_IMAGE_BYTES) {
+      return { ...base, kind: "binary" };
+    }
     const image_data_url = await fetchAttachmentDataUrl(download);
     return { ...base, kind: "image", image_data_url };
   }

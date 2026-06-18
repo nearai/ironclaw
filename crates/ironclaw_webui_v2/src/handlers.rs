@@ -287,8 +287,11 @@ pub async fn browse_fs_dir(
 ) -> Result<Json<RebornFsListResponse>, WebUiV2HttpError> {
     let request = RebornFsListRequest {
         mount: query.mount,
-        // Blank/absent path lists the mount root.
-        path: query.path.unwrap_or_default(),
+        // Absent, empty, or whitespace-only path lists the mount root.
+        path: query
+            .path
+            .filter(|path| !path.trim().is_empty())
+            .unwrap_or_default(),
     };
     let response = state.services().browse_fs_dir(caller, request).await?;
     Ok(Json(response))

@@ -64,6 +64,8 @@ function TreeNode({ entry, depth, selectedPath, expandedPaths, filter, onToggleD
           <div className="space-y-1">
             ${childQuery.isLoading
               ? html`<div className="px-4 py-2 text-xs text-iron-400">${t("workspace.loading")}</div>`
+              : childQuery.isError
+              ? html`<div className="px-4 py-2 text-xs text-red-300">${t("workspace.unableOpenDirectory")}</div>`
               : children.map((child) => html`
                   <${TreeNode}
                     key=${child.path}

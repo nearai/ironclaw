@@ -1,17 +1,15 @@
 import { html } from "../../../lib/html.js";
-import {
-  areaDisplayName,
-  pathSegments,
-  routeForWorkspacePath,
-  WORKSPACE_ROOT_LABEL,
-} from "../lib/workspace-presenters.js";
+import { useT } from "../../../lib/i18n.js";
+import { areaDisplayName, pathSegments, routeForWorkspacePath } from "../lib/workspace-presenters.js";
 
 // Path breadcrumb shared by the file viewer and the directory listing. The root
-// is shown as "workspace" (both areas live under it); the first segment is a
-// storage area, rendered by its display name ("home"/"memory") while still
-// navigating by its real id. Every crumb uses the same URL-as-state path the
-// tree uses, so breadcrumb clicks, tree clicks, and direct links stay in sync.
+// is shown as the localized "workspace" label (both areas live under it); the
+// first segment is a storage area, rendered by its display name ("home"/"memory")
+// while still navigating by its real id. Every crumb uses the same URL-as-state
+// path the tree uses, so breadcrumb clicks, tree clicks, and direct links stay
+// in sync.
 export function WorkspaceBreadcrumb({ path, onNavigate }) {
+  const t = useT();
   const parts = pathSegments(path);
   let current = "";
 
@@ -22,7 +20,7 @@ export function WorkspaceBreadcrumb({ path, onNavigate }) {
         onClick=${() => onNavigate("/workspace")}
         className="text-signal hover:underline"
       >
-        ${WORKSPACE_ROOT_LABEL}
+        ${t("workspace.breadcrumbRoot")}
       </button>
       ${parts.map((part, index) => {
         current = current ? `${current}/${part}` : part;

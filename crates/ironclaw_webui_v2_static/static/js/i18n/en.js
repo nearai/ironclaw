@@ -569,7 +569,6 @@ registerPack("en", {
   "workspace.title": "Workspace",
   "workspace.subtitle": "Memory, files & attachments",
   "workspace.readOnly": "Read-only",
-  "workspace.mountsLabel": "Mounts",
   "workspace.filterPlaceholder": "Filter by name…",
   "workspace.emptyDir": "This folder is empty.",
   "workspace.refresh": "Refresh",
@@ -577,10 +576,9 @@ registerPack("en", {
   "workspace.loading": "Loading...",
   "workspace.noFiles": "No files here.",
   "workspace.noMatches": "Nothing matches that filter.",
-  "workspace.breadcrumbRoot": "mounts",
+  "workspace.breadcrumbRoot": "workspace",
   "workspace.pickFileTitle": "Pick a file",
-  "workspace.pickFileDesc":
-    "Choose a file from the tree to preview or download it. This viewer is read-only.",
+  "workspace.pickFileDesc": "Choose a file from the tree to preview or download it. This viewer is read-only.",
   "workspace.parent": "Parent: {path}",
   "workspace.download": "Download",
   "workspace.binaryPreviewUnavailable":

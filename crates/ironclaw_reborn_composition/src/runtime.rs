@@ -1251,7 +1251,20 @@ impl RebornRuntime {
     ) -> Option<Arc<ironclaw_filesystem::ScopedFilesystem<crate::factory::LocalDevRootFilesystem>>>
     {
         let rt = self.services.local_runtime.as_ref()?;
-        let view = crate::local_dev_mounts::browse_mount_view().ok()?;
+        let view = match crate::local_dev_mounts::browse_mount_view() {
+            Ok(view) => view,
+            Err(error) => {
+                // Built from static aliases/targets, so this should never fail;
+                // if it does, log loudly rather than silently disabling the
+                // filesystem viewer with a bare `None`.
+                tracing::error!(
+                    target = "ironclaw_reborn_composition::webui",
+                    %error,
+                    "failed to build webui browse mount view; filesystem viewer unavailable",
+                );
+                return None;
+            }
+        };
         Some(Arc::new(
             ironclaw_filesystem::ScopedFilesystem::with_fixed_view(
                 Arc::clone(&rt.extension_filesystem),

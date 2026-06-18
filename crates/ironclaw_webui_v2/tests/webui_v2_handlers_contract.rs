@@ -4358,8 +4358,22 @@ async fn list_fs_mounts_returns_browsable_mounts() {
 
     assert_eq!(response.status(), StatusCode::OK);
     let body = read_json(response).await;
-    assert_eq!(body["mounts"][0]["mount"], "memory");
-    assert_eq!(body["mounts"][1]["mount"], "workspace");
+    // Assert set membership, not index order, so a semantically-equivalent
+    // ordering change does not fail spuriously.
+    let mounts: Vec<&str> = body["mounts"]
+        .as_array()
+        .expect("mounts array")
+        .iter()
+        .map(|m| m["mount"].as_str().expect("mount string"))
+        .collect();
+    assert!(
+        mounts.contains(&"memory"),
+        "memory mount present: {mounts:?}"
+    );
+    assert!(
+        mounts.contains(&"workspace"),
+        "workspace mount present: {mounts:?}"
+    );
 }
 
 #[tokio::test]
@@ -4433,6 +4447,48 @@ async fn read_fs_file_rejects_blank_path() {
             Request::builder()
                 .method(Method::GET)
                 .uri("/api/webchat/v2/fs/content?mount=memory")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn stat_fs_path_returns_metadata() {
+    let services = Arc::new(StubServices::default());
+    let router = router_with(services);
+
+    let response = router
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri("/api/webchat/v2/fs/stat?mount=memory&path=daily/today.md")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = read_json(response).await;
+    assert_eq!(body["stat"]["path"], "daily/today.md");
+    assert_eq!(body["stat"]["kind"], "file");
+    assert_eq!(body["stat"]["mime_type"], "text/markdown");
+}
+
+#[tokio::test]
+async fn stat_fs_path_rejects_blank_path() {
+    let services = Arc::new(StubServices::default());
+    let router = router_with(services);
+
+    let response = router
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri("/api/webchat/v2/fs/stat?mount=memory")
                 .body(Body::empty())
                 .expect("request"),
         )

@@ -529,13 +529,12 @@ registerPack("ar", {
   // Workspace page
   "workspace.title": "مساحة العمل",
   "workspace.readOnly": "للقراءة فقط",
-  "workspace.mountsLabel": "نقاط التحميل",
   "workspace.filterPlaceholder": "التصفية حسب الاسم…",
   "workspace.emptyDir": "هذا المجلد فارغ.",
   "workspace.noMatches": "لا شيء يطابق هذه التصفية.",
   "workspace.download": "تنزيل",
   "workspace.binaryPreviewUnavailable": "لا توجد معاينة مضمّنة لهذا النوع من الملفات. نزّله لعرض المحتوى.",
-  "workspace.fileMeta": "{mime} · {size} bytes",
+  "workspace.fileMeta": "{mime} · {size} بايت",
   "workspace.subtitle": "ذاكرة دائمة",
   "workspace.refresh": "تحديث",
   "workspace.refreshing": "جارٍ التحديث",
@@ -543,7 +542,7 @@ registerPack("ar", {
   "workspace.noFiles": "لا توجد ملفات في مساحة العمل.",
   "workspace.breadcrumbRoot": "مساحة العمل",
   "workspace.pickFileTitle": "اختر ملفًا من مساحة العمل",
-  "workspace.pickFileDesc": "اختر وثيقة ذاكرة من الشجرة أو نتائج البحث لعرضها وتحريرها.",
+  "workspace.pickFileDesc": "اختر ملفًا من الشجرة لمعاينته أو تنزيله. هذا العارض للقراءة فقط.",
   "workspace.parent": "الأصل: {path}",
   "workspace.unableOpenDirectory": "تعذر فتح المجلد",
 

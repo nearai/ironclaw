@@ -2,10 +2,6 @@
 // The browser then drills in by area.
 export const DEFAULT_WORKSPACE_PATH = "";
 
-// The whole surface is "the workspace"; both areas live under it, so the root
-// is presented as "workspace".
-export const WORKSPACE_ROOT_LABEL = "workspace";
-
 // Display names for the storage areas shown at the root. Internally the first
 // path segment is the backend area id (used for routing and the URL); the UI
 // renders these friendlier names instead — the local project directory shows

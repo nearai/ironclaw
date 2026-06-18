@@ -3791,9 +3791,6 @@ fn map_ownership_probe_error(error: SessionThreadError) -> RebornServicesError {
     }
 }
 
-/// Map a project-filesystem read error to the sanitized facade error taxonomy.
-/// No host paths or backend strings cross this boundary — only coarse
-/// transport/status shape.
 /// Derive the read-only browse scope from the authenticated caller.
 ///
 /// The standalone filesystem viewer is not thread-bound, so the scope comes
@@ -3813,6 +3810,9 @@ fn caller_browse_scope(caller: &WebUiAuthenticatedCaller) -> ResourceScope {
     }
 }
 
+/// Map a project-filesystem read error to the sanitized facade error taxonomy.
+/// No host paths or backend strings cross this boundary — only coarse
+/// transport/status shape.
 fn map_project_fs_error(error: ProjectFsError) -> RebornServicesError {
     match error {
         ProjectFsError::NotFound => {

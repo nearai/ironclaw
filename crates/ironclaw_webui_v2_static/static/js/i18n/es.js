@@ -529,7 +529,6 @@ registerPack("es", {
   // Workspace page
   "workspace.title": "Workspace",
   "workspace.readOnly": "Solo lectura",
-  "workspace.mountsLabel": "Montajes",
   "workspace.filterPlaceholder": "Filtrar por nombre…",
   "workspace.emptyDir": "Esta carpeta está vacía.",
   "workspace.noMatches": "Nada coincide con el filtro.",
@@ -541,9 +540,9 @@ registerPack("es", {
   "workspace.refreshing": "Actualizando",
   "workspace.loading": "Cargando...",
   "workspace.noFiles": "No hay archivos en el workspace.",
-  "workspace.breadcrumbRoot": "workspace",
+  "workspace.breadcrumbRoot": "espacio de trabajo",
   "workspace.pickFileTitle": "Elige un archivo del workspace",
-  "workspace.pickFileDesc": "Elige un documento de memoria del árbol o de la búsqueda para inspeccionarlo y editarlo.",
+  "workspace.pickFileDesc": "Elige un archivo del árbol para previsualizarlo o descargarlo. Este visor es de solo lectura.",
   "workspace.parent": "Padre: {path}",
   "workspace.unableOpenDirectory": "No se pudo abrir el directorio",
 

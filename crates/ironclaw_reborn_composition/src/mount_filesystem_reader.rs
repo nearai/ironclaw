@@ -118,7 +118,9 @@ impl<F: RootFilesystem> FilesystemBrowseReader for MountScopedFilesystemReader<F
             // denied. Keeps list/stat/read consistent on what is reachable.
             .filter_map(|entry: DirEntry| {
                 let scoped_child = format!("{scoped_base}/{}", entry.name);
-                if ironclaw_safety::sensitive_paths::is_sensitive_path_str(&scoped_child) {
+                if is_internal_browse_path(&scoped_child)
+                    || ironclaw_safety::sensitive_paths::is_sensitive_path_str(&scoped_child)
+                {
                     return None;
                 }
                 let path = Self::relativize(alias, &scoped_child);
@@ -139,6 +141,9 @@ impl<F: RootFilesystem> FilesystemBrowseReader for MountScopedFilesystemReader<F
     ) -> Result<ProjectFsFile, ProjectFsError> {
         let alias = Self::require_alias(mount)?;
         let file = Self::scoped_path(alias, path)?;
+        if is_internal_browse_path(file.as_str()) {
+            return Err(ProjectFsError::Denied);
+        }
         let stat = self
             .filesystem
             .stat(scope, &file)
@@ -177,6 +182,9 @@ impl<F: RootFilesystem> FilesystemBrowseReader for MountScopedFilesystemReader<F
     ) -> Result<ProjectFsStat, ProjectFsError> {
         let alias = Self::require_alias(mount)?;
         let target = Self::scoped_path(alias, path)?;
+        if is_internal_browse_path(target.as_str()) {
+            return Err(ProjectFsError::Denied);
+        }
         let stat = self
             .filesystem
             .stat(scope, &target)
@@ -193,6 +201,16 @@ impl<F: RootFilesystem> FilesystemBrowseReader for MountScopedFilesystemReader<F
             path: Self::relativize(alias, &scoped_str),
         })
     }
+}
+
+/// Internal/hidden paths the browser must never expose: any path segment that
+/// begins with "." (`.system/` engine state, `.git/`, dotfiles). The UI hides
+/// these too, but this is the authoritative backend gate so a direct `/fs/*`
+/// request cannot read engine internals out from under the cosmetic UI filter.
+/// Memory/identity markdown (AGENTS.md, SOUL.md, USER.md, MEMORY.md, …) has no
+/// leading dot and stays visible — surfacing it is the point of the memory view.
+fn is_internal_browse_path(scoped: &str) -> bool {
+    scoped.split('/').any(|segment| segment.starts_with('.'))
 }
 
 /// Resolve a directory listing, treating a `NotFound` on the **mount root** as
@@ -213,6 +231,9 @@ fn list_dir_or_empty_root(
         Err(error) => {
             let mapped = map_filesystem_error(error);
             if is_root && mapped == ProjectFsError::NotFound {
+                // silent-ok: list_dir on a browse mount root that was never
+                // written returns NotFound on some backends (libsql); the viewer
+                // must render an empty mount. Subpaths still propagate NotFound.
                 Ok(Vec::new())
             } else {
                 Err(mapped)
@@ -369,5 +390,59 @@ mod tests {
             .await
             .expect_err("traversal must be rejected");
         assert_eq!(err, ProjectFsError::InvalidPath);
+    }
+
+    #[tokio::test]
+    async fn internal_and_sensitive_paths_are_hidden_and_denied() {
+        let rw = rw_fs();
+        let scope = scope();
+        // A regular memory file, a credential-bearing dotfile, and an engine
+        // internals path under `.system/`.
+        for (path, body) in [
+            ("public.md", &b"# notes"[..]),
+            (".env", b"SECRET=value"),
+            (".system/engine/state.json", b"{}"),
+        ] {
+            rw.write_bytes(
+                &scope,
+                &ScopedPath::new(format!("{BROWSE_MEMORY_ALIAS}/{path}")).unwrap(),
+                body.to_vec(),
+            )
+            .await
+            .expect("seed file");
+        }
+
+        let reader = MountScopedFilesystemReader {
+            filesystem: rw,
+            max_read_bytes: DEFAULT_MAX_ATTACHMENT_BYTES as u64,
+        };
+
+        // Listing surfaces the public file but neither the dotfile nor `.system`.
+        let names: Vec<String> = reader
+            .list_dir(&scope, FsMount::Memory, "")
+            .await
+            .expect("list memory root")
+            .into_iter()
+            .map(|entry| entry.name)
+            .collect();
+        assert!(names.contains(&"public.md".to_string()));
+        assert!(!names.contains(&".env".to_string()));
+        assert!(!names.contains(&".system".to_string()));
+
+        // stat/read on internal paths are denied (not just hidden from listing).
+        assert_eq!(
+            reader
+                .stat(&scope, FsMount::Memory, ".env")
+                .await
+                .expect_err("sensitive stat denied"),
+            ProjectFsError::Denied,
+        );
+        assert_eq!(
+            reader
+                .read_file(&scope, FsMount::Memory, ".system/engine/state.json")
+                .await
+                .expect_err("internal read denied"),
+            ProjectFsError::Denied,
+        );
     }
 }
