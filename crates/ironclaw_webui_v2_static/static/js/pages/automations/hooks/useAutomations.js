@@ -6,6 +6,7 @@ import { useI18n } from "../../../lib/i18n.js";
 import {
   automationSummary,
   normalizeAutomations,
+  soonestNextRunAt,
 } from "../lib/automations-presenters.js";
 
 const AUTOMATIONS_PAGE_LIMIT = 50;
@@ -34,6 +35,10 @@ export function useAutomations() {
     () => automationSummary(automations),
     [automations]
   );
+  const nextRunAt = React.useMemo(
+    () => soonestNextRunAt(automations),
+    [automations]
+  );
 
   // The scheduler (trigger poller) may be turned off, in which case listed
   // automations never fire. Treat an absent flag as enabled so we don't show a
@@ -43,6 +48,7 @@ export function useAutomations() {
   return {
     automations,
     summary,
+    nextRunAt,
     schedulerEnabled,
     isLoading: query.isLoading,
     isRefreshing: query.isFetching,

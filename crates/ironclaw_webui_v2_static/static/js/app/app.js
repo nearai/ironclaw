@@ -119,6 +119,7 @@ export function App() {
           <${Route} path="routines" element=${html`<${RoutinesPage} />`} />
           <${Route} path="routines/:routineId" element=${html`<${RoutinesPage} />`} />
           <${Route} path="automations" element=${html`<${AutomationsPage} />`} />
+          <${Route} path="automations/:automationId" element=${html`<${AutomationsPage} />`} />
           <${Route} path="extensions" element=${html`<${ExtensionsPage} />`} />
           <${Route} path="extensions/:tab" element=${html`<${ExtensionsPage} />`} />
           <${Route} path="logs" element=${html`<${LogsPage} />`} />

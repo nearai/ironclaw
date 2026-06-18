@@ -309,9 +309,20 @@ mod tests {
 
         let page = asset_text("js/pages/automations/automations-page.js");
         assert!(page.contains("AutomationsSummaryStrip"));
-        assert!(page.contains("AutomationDeliveryDefaultsPanel"));
         assert!(page.contains("useOutboundDeliveryDefaults"));
+        // Delivery defaults moved off the page into a modal opened from the list
+        // header; the page now threads the hook state down as `deliveryState`.
+        assert!(page.contains("deliveryState"));
         assert!(page.contains("AutomationsList"));
+
+        // The list owns the delivery entrypoint + modal.
+        let list = asset_text("js/pages/automations/components/automations-list.js");
+        assert!(list.contains("AutomationDeliveryDefaultsModal"));
+
+        // The modal renders the shared delivery form content.
+        let defaults_modal =
+            asset_text("js/pages/automations/components/automation-delivery-defaults-modal.js");
+        assert!(defaults_modal.contains("DeliveryDefaultsContent"));
 
         let defaults_panel =
             asset_text("js/pages/automations/components/automation-delivery-defaults-panel.js");

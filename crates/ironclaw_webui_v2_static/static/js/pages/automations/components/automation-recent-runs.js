@@ -27,7 +27,7 @@ export function RunDots({ runs = [] }) {
 
   return html`
     <div
-      className="flex items-center gap-1.5"
+      className="flex items-center gap-1"
       aria-label=${t("automations.runs.showingOf", { shown: visibleRuns.length, total: runs.length })}
     >
       ${visibleRuns.map((run) => html`
@@ -35,17 +35,18 @@ export function RunDots({ runs = [] }) {
           key=${recentRunKey(run)}
           title=${`${run.status_label} · ${run.fired_label}`}
           className=${cn(
-            "h-3 w-3 rounded-full border",
-            run.status === "ok" && "border-emerald-300/50 bg-emerald-400",
-            run.status === "error" && "border-red-300/50 bg-red-400",
-            run.status === "running" && "border-sky-300/60 bg-sky-400",
-            run.status === "unknown" && "border-iron-500 bg-iron-600"
+            "h-2.5 w-2.5 rounded-full ring-1 ring-inset",
+            run.status === "ok" && "bg-emerald-400 ring-emerald-300/40",
+            run.status === "error" && "bg-red-400 ring-red-300/40",
+            run.status === "running" &&
+              "bg-sky-400 ring-sky-300/50 animate-[v2-breathe_2s_ease-in-out_infinite]",
+            run.status === "unknown" && "bg-iron-600 ring-iron-500/40"
           )}
         />
       `)}
       ${overflow > 0 &&
       html`<span
-        className="ml-0.5 font-mono text-[11px] text-iron-400"
+        className="ml-1 inline-flex h-5 items-center rounded-full bg-[var(--v2-surface-soft)] px-1.5 font-mono text-[10px] tabular-nums text-iron-400"
         title=${t("automations.runs.showingOf", { shown: visibleRuns.length, total: runs.length })}
       >
         +${overflow}
@@ -54,13 +55,14 @@ export function RunDots({ runs = [] }) {
   `;
 }
 
-// Compact textual breakdown of recent-run statuses ("12 runs · 9 OK · 2 failed
-// · 1 running"). Zero-count categories are omitted. This is the "run count
-// summary" the dot strip alone can't convey at a glance (#4988).
+// Aggregate view of recent-run health: total + success rate, a proportional
+// fill bar, and a dot-led legend of per-status counts. Replaces the old plain
+// "12 runs · 9 OK · 2 failed" text line with something that reads at a glance
+// while keeping every counted bucket visible (#4988). All chip/segment/bucket
+// decisions live in runSummaryView (pure + tested); this component only maps
+// the resolved view to markup.
 export function RunHistorySummary({ runs = [], className = "" }) {
   const t = useT();
-  // All chip/text/bucket decisions live in runSummaryView (pure + tested); this
-  // component only maps the resolved view to spans.
   const view = runSummaryView(runs, t);
   if (!view.total) {
     return html`<span className=${cn("text-[11px] text-iron-400", className)}>
@@ -68,12 +70,54 @@ export function RunHistorySummary({ runs = [], className = "" }) {
     </span>`;
   }
 
+  const rateTone =
+    view.successRate == null
+      ? "text-iron-300"
+      : view.successRate >= 90
+        ? "text-emerald-300"
+        : view.successRate >= 50
+          ? "text-amber-300"
+          : "text-red-300";
+
   return html`
-    <div className=${cn("flex flex-wrap items-center gap-x-2 gap-y-1 text-[11px]", className)}>
-      <span className="text-iron-300">${view.totalText}</span>
-      ${view.chips.map(
-        (chip) => html`<span key=${chip.key} className=${chip.tone}>${chip.text}</span>`
-      )}
+    <div className=${cn("w-full max-w-[15rem]", className)}>
+      <div className="flex items-baseline justify-between gap-3">
+        <span className="text-[11px] text-iron-300">${view.totalText}</span>
+        ${view.successRate != null &&
+        html`<span
+          className=${cn("text-[11px] font-semibold tabular-nums", rateTone)}
+          title=${view.successRateText}
+        >
+          ${view.successRate}%
+        </span>`}
+      </div>
+
+      <div
+        className="mt-1.5 flex h-2 w-full overflow-hidden rounded-full bg-[var(--v2-surface-muted)]"
+        role="img"
+        aria-label=${view.successRateText || view.totalText}
+      >
+        ${view.segments.map(
+          (segment) => html`<div
+            key=${segment.key}
+            className=${cn("h-full", segment.barClass)}
+            style=${{ flexGrow: segment.count }}
+            title=${segment.text}
+          />`
+        )}
+      </div>
+
+      <div className="mt-2 flex flex-wrap items-center gap-x-3 gap-y-1">
+        ${view.chips.map(
+          (chip) => html`<span
+            key=${chip.key}
+            className="inline-flex items-center gap-1.5 text-[11px] text-iron-300"
+          >
+            <span className=${cn("h-1.5 w-1.5 rounded-full", chip.barClass)} />
+            ${chip.text}
+          </span>`
+        )}
+      </div>
     </div>
   `;
 }

@@ -1,6 +1,7 @@
+import { useParams } from "react-router";
 import { React, html } from "../../lib/html.js";
 import { useT } from "../../lib/i18n.js";
-import { AutomationDeliveryDefaultsPanel } from "./components/automation-delivery-defaults-panel.js";
+import { AutomationDetailPage } from "./components/automation-detail-page.js";
 import { AutomationsList } from "./components/automations-list.js";
 import { AutomationsSummaryStrip } from "./components/automations-summary-strip.js";
 import { useAutomations } from "./hooks/useAutomations.js";
@@ -8,8 +9,8 @@ import { useOutboundDeliveryDefaults } from "./hooks/useOutboundDeliveryDefaults
 
 export function AutomationsPage() {
   const t = useT();
+  const { automationId } = useParams();
   const [filter, setFilter] = React.useState("all");
-  const [selectedAutomationId, setSelectedAutomationId] = React.useState(null);
   const automationsState = useAutomations();
   const deliveryState = useOutboundDeliveryDefaults();
 
@@ -31,18 +32,19 @@ export function AutomationsPage() {
     !automationsState.isLoading &&
     automationsState.automations.length === 0;
 
-  React.useEffect(() => {
-    if (!automationsState.automations.length) {
-      setSelectedAutomationId(null);
-      return;
-    }
-    const stillExists = automationsState.automations.some(
-      (automation) => automation.automation_id === selectedAutomationId
-    );
-    if (!stillExists) {
-      setSelectedAutomationId(automationsState.automations[0].automation_id);
-    }
-  }, [automationsState.automations, selectedAutomationId]);
+  // Full-screen, persistent detail view for a single automation. Reached by
+  // popping out of the list's detail modal or by deep link.
+  if (automationId) {
+    const automation =
+      automationsState.automations.find(
+        (item) => item.automation_id === automationId
+      ) || null;
+    return html`<${AutomationDetailPage}
+      automation=${automation}
+      isLoading=${automationsState.isLoading}
+      error=${automationsState.error}
+    />`;
+  }
 
   return html`
     <div className="flex h-full flex-col overflow-y-auto">
@@ -77,10 +79,10 @@ export function AutomationsPage() {
                 `}
                 <${AutomationsSummaryStrip}
                   summary=${automationsState.summary}
+                  nextRunAt=${automationsState.nextRunAt}
                   activeFilter=${filter}
                   onSelectFilter=${setFilter}
                 />
-                <${AutomationDeliveryDefaultsPanel} deliveryState=${deliveryState} />
 
                 ${automationsState.isLoading
                   ? html`
@@ -101,8 +103,7 @@ export function AutomationsPage() {
                         onFilterChange=${setFilter}
                         onRefresh=${handleRefresh}
                         isRefreshing=${isRefreshing}
-                        selectedAutomationId=${selectedAutomationId}
-                        onSelectAutomation=${setSelectedAutomationId}
+                        deliveryState=${deliveryState}
                       />
                     `}
               `}

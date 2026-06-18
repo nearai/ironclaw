@@ -732,6 +732,7 @@ registerPack("en", {
   "automations.successRate.none": "No completed runs",
   "automations.successRate.visible": "{percent}% visible runs",
   "automations.delivery.eyebrow": "Delivery defaults",
+  "automations.delivery.setDefaults": "Set defaults",
   "automations.delivery.title": "Where triggered results are sent",
   "automations.delivery.explainer":
     "Choose where automation results are delivered when a triggered run finishes.",
@@ -773,6 +774,7 @@ registerPack("en", {
   "automations.summary.filterAction": "Show {label}",
   "automations.summary.nextRun": "Next run",
   "automations.summary.none": "None",
+  "automations.summary.nextRunDue": "Due now",
   "automations.summary.nextRunDetail": "Soonest scheduled run in this list.",
   "automations.empty.matchingTitle": "No matching automations",
   "automations.empty.matchingDescription": "Try a different status filter.",
@@ -806,7 +808,7 @@ registerPack("en", {
   "automations.runs.unknown": "Unknown: {count}",
   "automations.runs.showingOf": "Showing {shown} of {total} recent runs",
   "automations.status.running": "Running",
-  "automations.status.needsReview": "Needs review",
+  "automations.status.needsReview": "To review",
   "automations.detail.emptyTitle": "Select an automation",
   "automations.detail.emptyDescription":
     "Choose a schedule to inspect recent runs.",
@@ -818,9 +820,16 @@ registerPack("en", {
   "automations.detail.recentRuns": "Recent runs",
   "automations.detail.noRuns": "This automation has not produced any visible runs yet.",
   "automations.detail.openRun": "Open run",
+  "automations.detail.openFullView": "Open full view",
+  "automations.detail.backToList": "Back to automations",
+  "automations.detail.viewLogs": "View logs",
+  "automations.detail.notFoundTitle": "Automation not found",
+  "automations.detail.notFoundDescription":
+    "This automation is no longer available, or you don't have access to it.",
   "automations.detail.thread": "thread",
   "automations.detail.run": "run",
   "automations.detail.noThread": "No thread attached",
+  "automations.row.lastRun": "Last run",
 
   // Routines page
   "routines.explorer": "Tasks",
