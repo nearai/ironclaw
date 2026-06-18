@@ -419,6 +419,7 @@ pub fn build_triggered_run_delivery_hook(
         egress,
         delivery_sink,
         auth_challenges: runtime.auth_challenge_provider(),
+        auth_flow_canceller: runtime.blocked_auth_flow_canceller(),
         approval_requests: Some(Arc::clone(&local_runtime.approval_requests)
             as Arc<dyn ironclaw_run_state::ApprovalRequestStore>),
     };
@@ -753,6 +754,7 @@ fn build_slack_events_route_mount_with_resolvers(
             egress,
             delivery_sink,
             auth_challenges: runtime.auth_challenge_provider(),
+            auth_flow_canceller: runtime.blocked_auth_flow_canceller(),
             approval_requests: Some(Arc::clone(&local_runtime.approval_requests)
                 as Arc<dyn ironclaw_run_state::ApprovalRequestStore>),
         },

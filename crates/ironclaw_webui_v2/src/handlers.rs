@@ -24,12 +24,14 @@ use axum::response::{IntoResponse, Response};
 use futures::SinkExt;
 use futures::stream::Stream;
 use ironclaw_product_workflow::{
-    CodexLoginStart, LifecyclePackageKind, LifecyclePackageRef, LlmConfigSnapshot, LlmModelsResult,
-    LlmProbeRequest, LlmProbeResult, NearAiLoginRequest, NearAiLoginStart,
-    NearAiWalletLoginRequest, NearAiWalletLoginResult, ProductWorkflowError, ProjectionCursor,
-    RebornAttachmentRequest, RebornCancelRunResponse, RebornConnectableChannelListResponse,
-    RebornCreateThreadResponse, RebornDeleteThreadRequest, RebornDeleteThreadResponse,
-    RebornExtensionActionResponse, RebornExtensionListResponse, RebornExtensionRegistryResponse,
+    CodexLoginStart, FsMount, LifecyclePackageKind, LifecyclePackageRef, LlmConfigSnapshot,
+    LlmModelsResult, LlmProbeRequest, LlmProbeResult, NearAiLoginRequest, NearAiLoginStart,
+    NearAiWalletLoginRequest, NearAiWalletLoginResult, ProductWorkflowError, ProjectFsFile,
+    ProjectionCursor, RebornAttachmentRequest, RebornCancelRunResponse,
+    RebornConnectableChannelListResponse, RebornCreateThreadResponse, RebornDeleteThreadRequest,
+    RebornDeleteThreadResponse, RebornExtensionActionResponse, RebornExtensionListResponse,
+    RebornExtensionRegistryResponse, RebornFsListRequest, RebornFsListResponse,
+    RebornFsMountsResponse, RebornFsReadRequest, RebornFsStatRequest, RebornFsStatResponse,
     RebornListAutomationsResponse, RebornListThreadsResponse, RebornOperatorCommandPlaneResponse,
     RebornOperatorConfigGetResponse, RebornOperatorConfigListResponse,
     RebornOperatorConfigSetRequest, RebornOperatorConfigValidateRequest,
@@ -221,6 +223,14 @@ pub async fn read_project_file(
         path: require_project_fs_path(query.path)?,
     };
     let file = state.services().read_project_file(caller, request).await?;
+    project_fs_download_response(file)
+}
+
+/// Build the always-attachment, `nosniff` download response shared by the
+/// thread-scoped project-file route and the standalone filesystem-browser route.
+/// Serving every file as an attachment with `nosniff` means a generated
+/// `.html`/`.svg` cannot execute in the app origin.
+fn project_fs_download_response(file: ProjectFsFile) -> Result<Response, WebUiV2HttpError> {
     let filename = sanitized_download_filename(file.filename.as_deref());
     Response::builder()
         .status(StatusCode::OK)
@@ -243,6 +253,94 @@ pub async fn read_project_file(
             );
             WebUiV2HttpError::from(RebornServicesError::internal())
         })
+}
+
+/// Query parameters for the standalone filesystem-browser read routes. `mount`
+/// selects which logical mount to read (memory/workspace/…); `path` is a
+/// mount-relative path (absent/blank means the mount root for listing).
+#[derive(Debug, Deserialize)]
+pub struct FsBrowseQuery {
+    pub mount: FsMount,
+    #[serde(default)]
+    pub path: Option<String>,
+}
+
+/// `GET /api/webchat/v2/fs/mounts`
+///
+/// List the mounts the read-only filesystem viewer can browse for this caller.
+pub async fn list_fs_mounts(
+    State(state): State<WebUiV2State>,
+    Extension(caller): Extension<WebUiAuthenticatedCaller>,
+) -> Result<Json<RebornFsMountsResponse>, WebUiV2HttpError> {
+    let response = state.services().list_fs_mounts(caller).await?;
+    Ok(Json(response))
+}
+
+/// `GET /api/webchat/v2/fs/list?mount=…&path=…`
+///
+/// List a directory on a browsable mount. Caller-scoped read-only navigation
+/// over the agent's internal filesystem.
+pub async fn browse_fs_dir(
+    State(state): State<WebUiV2State>,
+    Extension(caller): Extension<WebUiAuthenticatedCaller>,
+    Query(query): Query<FsBrowseQuery>,
+) -> Result<Json<RebornFsListResponse>, WebUiV2HttpError> {
+    let request = RebornFsListRequest {
+        mount: query.mount,
+        // Absent, empty, or whitespace-only path lists the mount root.
+        path: query
+            .path
+            .filter(|path| !path.trim().is_empty())
+            .unwrap_or_default(),
+    };
+    let response = state.services().browse_fs_dir(caller, request).await?;
+    Ok(Json(response))
+}
+
+/// `GET /api/webchat/v2/fs/stat?mount=…&path=…`
+///
+/// Return metadata for a path on a browsable mount.
+pub async fn stat_fs_path(
+    State(state): State<WebUiV2State>,
+    Extension(caller): Extension<WebUiAuthenticatedCaller>,
+    Query(query): Query<FsBrowseQuery>,
+) -> Result<Json<RebornFsStatResponse>, WebUiV2HttpError> {
+    let request = RebornFsStatRequest {
+        mount: query.mount,
+        path: require_fs_browse_path(query.path)?,
+    };
+    let response = state.services().stat_fs_path(caller, request).await?;
+    Ok(Json(response))
+}
+
+/// `GET /api/webchat/v2/fs/content?mount=…&path=…`
+///
+/// Download/preview a file's bytes from a browsable mount. Served as an
+/// attachment with `nosniff`, exactly like the project-file route.
+pub async fn read_fs_file(
+    State(state): State<WebUiV2State>,
+    Extension(caller): Extension<WebUiAuthenticatedCaller>,
+    Query(query): Query<FsBrowseQuery>,
+) -> Result<Response, WebUiV2HttpError> {
+    let request = RebornFsReadRequest {
+        mount: query.mount,
+        path: require_fs_browse_path(query.path)?,
+    };
+    let file = state.services().read_fs_file(caller, request).await?;
+    project_fs_download_response(file)
+}
+
+/// Reject a missing/blank `?path=` on the stat/download fs-browse routes with a
+/// field-scoped 400, mirroring [`require_project_fs_path`].
+fn require_fs_browse_path(path: Option<String>) -> Result<String, WebUiV2HttpError> {
+    match path {
+        Some(path) if !path.trim().is_empty() => Ok(path),
+        _ => Err(RebornServicesError::from(WebUiInboundValidationError::new(
+            "path",
+            WebUiInboundValidationCode::Blank,
+        ))
+        .into()),
+    }
 }
 
 /// Reject a missing or blank `?path=` on the stat/download routes with a

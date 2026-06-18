@@ -88,7 +88,10 @@ pub use first_party_tools::{
     TRACE_COMMONS_PROFILE_TOKEN_CAPABILITY_ID, TRACE_COMMONS_STATUS_CAPABILITY_ID,
     TRIGGER_CREATE_CAPABILITY_ID, TRIGGER_LIST_CAPABILITY_ID, TRIGGER_REMOVE_CAPABILITY_ID,
     TriggerCreateHook, WRITE_FILE_CAPABILITY_ID, builtin_first_party_handlers,
-    builtin_first_party_handlers_with_trigger_create_hook, builtin_first_party_package,
+    builtin_first_party_handlers_for_process_backend,
+    builtin_first_party_handlers_with_trigger_create_hook,
+    builtin_first_party_handlers_with_trigger_create_hook_for_process_backend,
+    builtin_first_party_package, builtin_first_party_package_for_process_backend,
 };
 #[cfg(any(test, feature = "test-support"))]
 pub use first_party_tools::{

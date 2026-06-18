@@ -20,7 +20,8 @@ mod tests {
         WRITE_FILE_CAPABILITY_ID,
     };
     use ironclaw_loop_support::{
-        CapabilityResultStatus, HostManagedModelMessage, HostSkillContextSource,
+        CapabilityResultStatus, CapabilityWriteResult, HostManagedModelMessage,
+        HostSkillContextSource,
     };
     use ironclaw_outbound::CommunicationPreferenceKey;
     use ironclaw_product_workflow::{
@@ -591,7 +592,7 @@ mod tests {
         let invocation_id = InvocationId::new();
 
         let capability_id = CapabilityId::new("builtin.echo").expect("capability id");
-        let (result_ref, _byte_len) = capability_io
+        let CapabilityWriteResult { result_ref, .. } = capability_io
             .write_capability_result(CapabilityResultWrite {
                 run_context: &run_context,
                 input_ref: &input_ref,
@@ -662,7 +663,7 @@ mod tests {
         let invocation_id = InvocationId::new();
 
         let capability_id = CapabilityId::new("builtin.echo").expect("capability id");
-        let (result_ref, _byte_len) = capability_io
+        let CapabilityWriteResult { result_ref, .. } = capability_io
             .write_capability_result(CapabilityResultWrite {
                 run_context: &run_context,
                 input_ref: &input_ref,

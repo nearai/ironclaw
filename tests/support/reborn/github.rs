@@ -28,6 +28,7 @@ pub fn capability_ids() -> GithubSupportResult<Vec<CapabilityId>> {
         CapabilityId::new("github.get_pull_request_reviews")?,
         CapabilityId::new("github.get_combined_status")?,
         CapabilityId::new("github.merge_pull_request")?,
+        CapabilityId::new("github.get_authenticated_user")?,
         CapabilityId::new("github.list_repos")?,
         CapabilityId::new("github.search_repositories")?,
         CapabilityId::new("github.search_code")?,

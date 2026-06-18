@@ -145,6 +145,7 @@ impl LiveProjectionPublisher {
 }
 
 pub(super) fn product_items_for_live_update(
+    display_previews: &dyn super::display_preview::CapabilityDisplayPreviewSource,
     update: &ThreadLiveProjectionUpdate,
 ) -> Vec<ProductProjectionItem> {
     update
@@ -168,30 +169,36 @@ pub(super) fn product_items_for_live_update(
                 process_id,
                 output_bytes,
                 error_kind,
-            } => match CapabilityActivityView::new(CapabilityActivityViewInput {
-                invocation_id: *invocation_id,
-                turn_run_id: Some(*run_id),
-                thread_id: Some(update.thread_id.clone()),
-                capability_id: capability_id.clone(),
-                status: live_capability_status_to_product_status(*status),
-                provider: provider.clone(),
-                runtime: *runtime,
-                process_id: *process_id,
-                output_bytes: *output_bytes,
-                error_kind: error_kind.clone(),
-                updated_at: Utc::now(),
-            }) {
-                Ok(activity) => Some(ProductProjectionItem::CapabilityActivity(activity)),
-                Err(error) => {
-                    tracing::debug!(
-                        error = %error,
-                        invocation_id = %invocation_id,
-                        capability_id = %capability_id,
-                        "live capability activity rejected by product adapter boundary"
-                    );
-                    None
+            } => {
+                let running = display_previews.running_input(*invocation_id);
+                match CapabilityActivityView::new(CapabilityActivityViewInput {
+                    invocation_id: *invocation_id,
+                    turn_run_id: Some(*run_id),
+                    thread_id: Some(update.thread_id.clone()),
+                    capability_id: capability_id.clone(),
+                    status: live_capability_status_to_product_status(*status),
+                    provider: provider.clone(),
+                    runtime: *runtime,
+                    process_id: *process_id,
+                    output_bytes: *output_bytes,
+                    error_kind: error_kind.clone(),
+                    subtitle: running.as_ref().and_then(|input| input.subtitle.clone()),
+                    input_summary: running.and_then(|input| input.input_summary),
+                    updated_at: Utc::now(),
+                    activity_order: None,
+                }) {
+                    Ok(activity) => Some(ProductProjectionItem::CapabilityActivity(activity)),
+                    Err(error) => {
+                        tracing::debug!(
+                            error = %error,
+                            invocation_id = %invocation_id,
+                            capability_id = %capability_id,
+                            "live capability activity rejected by product adapter boundary"
+                        );
+                        None
+                    }
                 }
-            },
+            }
             ThreadLiveProjectionItem::WorkSummary {
                 id,
                 run_id,
@@ -491,6 +498,7 @@ fn driver_note_kind_to_live_work_summary_phase(
 mod tests {
     use super::*;
 
+    use super::super::display_preview::NoopCapabilityDisplayPreviewSource;
     use ironclaw_event_streams::{
         ProjectionLiveUpdateRequest, ProjectionTarget, ProjectionUpdateSource, ProjectionViewClass,
     };
@@ -523,8 +531,9 @@ mod tests {
         let ProductProjectionEnvelope::ThreadLiveUpdate(update) = envelope.as_ref() else {
             panic!("expected thread live update");
         };
+        let display_previews = NoopCapabilityDisplayPreviewSource;
         let ProductProjectionItem::CapabilityActivity(activity) =
-            product_items_for_live_update(update)
+            product_items_for_live_update(&display_previews, update)
                 .into_iter()
                 .next()
                 .expect("capability activity")
@@ -567,8 +576,9 @@ mod tests {
         let ProductProjectionEnvelope::ThreadLiveUpdate(update) = envelope.as_ref() else {
             panic!("expected thread live update");
         };
+        let display_previews = NoopCapabilityDisplayPreviewSource;
         let ProductProjectionItem::CapabilityActivity(activity) =
-            product_items_for_live_update(update)
+            product_items_for_live_update(&display_previews, update)
                 .into_iter()
                 .next()
                 .expect("capability activity")

@@ -65,6 +65,7 @@ mod local_runtime_profile;
 mod manual_token_flow;
 mod mcp;
 mod mcp_discovery;
+mod mount_filesystem_reader;
 #[cfg(all(feature = "root-llm-provider", feature = "webui-v2-beta"))]
 mod nearai_login_serve;
 mod nearai_mcp;
@@ -89,9 +90,10 @@ mod production_runtime_policy;
 mod profile;
 mod profile_approval_authorization;
 mod project_filesystem_reader;
+mod project_service;
 mod projection;
 mod trajectory_observer;
-pub use auth_prompt::{AuthChallengeProvider, AuthChallengeView};
+pub use auth_prompt::{AuthChallengeProvider, AuthChallengeView, BlockedAuthFlowCanceller};
 #[cfg(feature = "slack-v2-host-beta")]
 mod delivered_gate_routing;
 #[cfg(feature = "root-llm-provider")]
@@ -188,7 +190,7 @@ pub use input::{OAuthClientConfig, RebornBuildInput, RebornRuntimeProcessBinding
 pub use ironclaw_auth::GoogleOAuthRouteConfig;
 pub use ironclaw_product_workflow::{
     LifecycleExtensionSource, LifecycleExtensionSummary, LifecyclePhase, LifecycleProductPayload,
-    LifecycleProductResponse,
+    LifecycleProductResponse, LifecycleSearchExtensionSummary,
 };
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 pub use ironclaw_runtime_policy::{

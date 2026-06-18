@@ -88,6 +88,16 @@ fn caller() -> WebUiAuthenticatedCaller {
     caller_for_user("user-alpha")
 }
 
+/// Wait until the wall clock is strictly past `floor`, so the next thread
+/// created/used gets a later activity timestamp — deterministic regardless
+/// of clock resolution. Uses async sleep to avoid blocking the test runtime
+/// (`std::thread::sleep` would block the tokio executor).
+async fn wait_until_after(floor: chrono::DateTime<Utc>) {
+    while Utc::now() <= floor {
+        tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+    }
+}
+
 fn caller_for_user(user_id: &str) -> WebUiAuthenticatedCaller {
     caller_for_user_with_project(user_id, Some("project-alpha"))
 }
@@ -146,6 +156,8 @@ fn fake_thread_history(owner: &WebUiAuthenticatedCaller, thread_id: &str) -> Thr
             title: Some("M2 facade contract thread".to_string()),
             metadata_json: None,
             goal: None,
+            created_at: None,
+            updated_at: None,
         },
         messages: vec![ThreadMessageRecord {
             message_id: ThreadMessageId::new(),
@@ -1558,6 +1570,8 @@ impl SessionThreadService for ScriptedThreadService {
                     title: None,
                     metadata_json: None,
                     goal: None,
+                    created_at: None,
+                    updated_at: None,
                 },
                 messages: Vec::new(),
                 summary_artifacts: Vec::new(),
@@ -8199,6 +8213,8 @@ async fn list_threads_breaks_out_when_cursor_does_not_advance_for_automation_thr
             "trigger-scheduled-summary",
         )),
         goal: None,
+        created_at: None,
+        updated_at: None,
     };
     let stalled_cursor = "cursor-stalled".to_string();
     let thread_service = Arc::new(ScriptedThreadService::list_pages(vec![
@@ -8262,6 +8278,8 @@ async fn list_threads_caps_filtered_pages_when_automation_threads_dominate() {
             "trigger-scheduled-summary",
         )),
         goal: None,
+        created_at: None,
+        updated_at: None,
     };
     let responses = (0..20)
         .map(|index| ListThreadsForScopeResponse {
@@ -8322,6 +8340,34 @@ async fn list_threads_skips_hidden_automation_threads_when_filling_page() {
     let second_visible_thread_id =
         ThreadId::new("thread-c-visible").expect("second visible thread id");
 
+    // Threads list newest-activity first, so create them oldest → newest:
+    // second visible, then first visible, then the automation thread last.
+    // That yields a candidate order of [automation, first, second], so the
+    // facade has to skip the leading hidden automation thread while filling
+    // the first page — the behavior under test. Waiting past each stamp
+    // keeps the `created_at` order strict regardless of clock resolution.
+    let second = thread_service
+        .ensure_thread(EnsureThreadRequest {
+            scope: thread_scope_for(&caller),
+            thread_id: Some(second_visible_thread_id.clone()),
+            created_by_actor_id: caller.user_id.as_str().to_string(),
+            title: Some("Second visible chat".to_string()),
+            metadata_json: Some(json!({ "source": "webui" }).to_string()),
+        })
+        .await
+        .expect("second visible thread");
+    wait_until_after(second.updated_at.expect("activity stamp")).await;
+    let first = thread_service
+        .ensure_thread(EnsureThreadRequest {
+            scope: thread_scope_for(&caller),
+            thread_id: Some(first_visible_thread_id.clone()),
+            created_by_actor_id: caller.user_id.as_str().to_string(),
+            title: Some("First visible chat".to_string()),
+            metadata_json: Some(json!({ "source": "webui" }).to_string()),
+        })
+        .await
+        .expect("first visible thread");
+    wait_until_after(first.updated_at.expect("activity stamp")).await;
     thread_service
         .ensure_thread(EnsureThreadRequest {
             scope: thread_scope_for(&caller),
@@ -8334,26 +8380,6 @@ async fn list_threads_skips_hidden_automation_threads_when_filling_page() {
         })
         .await
         .expect("automation thread");
-    thread_service
-        .ensure_thread(EnsureThreadRequest {
-            scope: thread_scope_for(&caller),
-            thread_id: Some(first_visible_thread_id.clone()),
-            created_by_actor_id: caller.user_id.as_str().to_string(),
-            title: Some("First visible chat".to_string()),
-            metadata_json: Some(json!({ "source": "webui" }).to_string()),
-        })
-        .await
-        .expect("first visible thread");
-    thread_service
-        .ensure_thread(EnsureThreadRequest {
-            scope: thread_scope_for(&caller),
-            thread_id: Some(second_visible_thread_id.clone()),
-            created_by_actor_id: caller.user_id.as_str().to_string(),
-            title: Some("Second visible chat".to_string()),
-            metadata_json: Some(json!({ "source": "webui" }).to_string()),
-        })
-        .await
-        .expect("second visible thread");
 
     let first_page = services
         .list_threads(

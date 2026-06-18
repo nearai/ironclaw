@@ -20,6 +20,8 @@ use ironclaw_turns::{
 };
 use serde_json::json;
 
+use crate::capability_port::CapabilityWriteResult;
+
 use super::*;
 
 struct StaticInputResolver {
@@ -242,6 +244,7 @@ impl LoopCapabilityPort for SurfacePrimedSpawnAuthPort {
             progress: ironclaw_turns::run_profile::CapabilityProgress::MadeProgress,
             terminate_hint: false,
             byte_len: 0,
+            output_digest: None,
         }))
     }
 
@@ -363,6 +366,7 @@ impl LoopCapabilityPort for AuthPassPort {
             progress: ironclaw_turns::run_profile::CapabilityProgress::MadeProgress,
             terminate_hint: false,
             byte_len: 0,
+            output_digest: None,
         }))
     }
 
@@ -511,8 +515,11 @@ impl LoopCapabilityResultWriter for NoopResultWriter {
     async fn write_capability_result(
         &self,
         _write: CapabilityResultWrite<'_>,
-    ) -> Result<(LoopResultRef, u64), AgentLoopHostError> {
-        Ok((LoopResultRef::new("result:spawn").unwrap(), 0))
+    ) -> Result<CapabilityWriteResult, AgentLoopHostError> {
+        Ok(CapabilityWriteResult::without_output_digest(
+            LoopResultRef::new("result:spawn").unwrap(),
+            0,
+        ))
     }
 }
 
@@ -1179,6 +1186,7 @@ fn completed_outcome(label: &str) -> CapabilityOutcome {
         progress: ironclaw_turns::run_profile::CapabilityProgress::MadeProgress,
         terminate_hint: false,
         byte_len: 0,
+        output_digest: None,
     })
 }
 
@@ -2875,8 +2883,8 @@ impl LoopCapabilityResultWriter for FixedByteResultWriter {
     async fn write_capability_result(
         &self,
         _write: CapabilityResultWrite<'_>,
-    ) -> Result<(LoopResultRef, u64), AgentLoopHostError> {
-        Ok((
+    ) -> Result<CapabilityWriteResult, AgentLoopHostError> {
+        Ok(CapabilityWriteResult::without_output_digest(
             LoopResultRef::new("result:fixed-bytes").unwrap(),
             self.byte_len,
         ))

@@ -27,16 +27,19 @@ use ironclaw_product_adapters::{
     ProgressKind, ProgressUpdateView, ProjectionCursor,
 };
 use ironclaw_product_workflow::{
-    LifecyclePackageRef, LifecyclePhase, LlmActiveSelection, LlmConfigSnapshot, LlmModelsResult,
-    LlmProbeRequest, LlmProbeResult, LlmProviderView, RebornAttachmentBytes,
+    FsMount, LifecyclePackageRef, LifecyclePhase, LlmActiveSelection, LlmConfigSnapshot,
+    LlmModelsResult, LlmProbeRequest, LlmProbeResult, LlmProviderView, ProjectFsEntry,
+    ProjectFsEntryKind, ProjectFsFile, ProjectFsStat, RebornAttachmentBytes,
     RebornAttachmentRequest, RebornAutomationInfo, RebornAutomationRecentRunInfo,
     RebornAutomationRecentRunStatus, RebornAutomationSource, RebornAutomationState,
     RebornCancelRunResponse, RebornChannelConnectAction, RebornChannelConnectStrategy,
     RebornConnectableChannelInfo, RebornConnectableChannelListResponse, RebornCreateThreadResponse,
     RebornDeleteThreadRequest, RebornDeleteThreadResponse, RebornExtensionActionResponse,
-    RebornExtensionListResponse, RebornExtensionRegistryResponse, RebornGetRunStateRequest,
-    RebornGetRunStateResponse, RebornListAutomationsResponse, RebornListThreadsResponse,
-    RebornOperatorArea, RebornOperatorCommandPlaneResponse, RebornOperatorConfigDiagnostic,
+    RebornExtensionListResponse, RebornExtensionRegistryResponse, RebornFsListRequest,
+    RebornFsListResponse, RebornFsMountInfo, RebornFsMountsResponse, RebornFsReadRequest,
+    RebornFsStatRequest, RebornFsStatResponse, RebornGetRunStateRequest, RebornGetRunStateResponse,
+    RebornListAutomationsResponse, RebornListThreadsResponse, RebornOperatorArea,
+    RebornOperatorCommandPlaneResponse, RebornOperatorConfigDiagnostic,
     RebornOperatorConfigDiagnosticSeverity, RebornOperatorConfigEntry,
     RebornOperatorConfigGetResponse, RebornOperatorConfigListResponse,
     RebornOperatorConfigSetRequest, RebornOperatorConfigValidateRequest,
@@ -354,6 +357,8 @@ impl RebornServicesApi for StubServices {
                     .as_ref()
                     .map(|id| format!("{{\"client_action_id\":\"{id}\"}}")),
                 goal: None,
+                created_at: None,
+                updated_at: None,
             },
         })
     }
@@ -424,10 +429,75 @@ impl RebornServicesApi for StubServices {
                 title: None,
                 metadata_json: None,
                 goal: None,
+                created_at: None,
+                updated_at: None,
             },
             messages: Vec::new(),
             summary_artifacts: Vec::new(),
             next_cursor: None,
+        })
+    }
+
+    async fn list_fs_mounts(
+        &self,
+        _caller: WebUiAuthenticatedCaller,
+    ) -> Result<RebornFsMountsResponse, RebornServicesError> {
+        Ok(RebornFsMountsResponse {
+            mounts: vec![
+                RebornFsMountInfo {
+                    mount: FsMount::Memory,
+                    label: "Memory".to_string(),
+                },
+                RebornFsMountInfo {
+                    mount: FsMount::Workspace,
+                    label: "Workspace files".to_string(),
+                },
+            ],
+        })
+    }
+
+    async fn browse_fs_dir(
+        &self,
+        _caller: WebUiAuthenticatedCaller,
+        request: RebornFsListRequest,
+    ) -> Result<RebornFsListResponse, RebornServicesError> {
+        Ok(RebornFsListResponse {
+            mount: request.mount,
+            path: request.path,
+            entries: vec![ProjectFsEntry {
+                name: "today.md".to_string(),
+                path: "daily/today.md".to_string(),
+                kind: ProjectFsEntryKind::File,
+            }],
+        })
+    }
+
+    async fn stat_fs_path(
+        &self,
+        _caller: WebUiAuthenticatedCaller,
+        request: RebornFsStatRequest,
+    ) -> Result<RebornFsStatResponse, RebornServicesError> {
+        Ok(RebornFsStatResponse {
+            stat: ProjectFsStat {
+                path: request.path,
+                kind: ProjectFsEntryKind::File,
+                size_bytes: 7,
+                mime_type: "text/markdown".to_string(),
+            },
+        })
+    }
+
+    async fn read_fs_file(
+        &self,
+        _caller: WebUiAuthenticatedCaller,
+        request: RebornFsReadRequest,
+    ) -> Result<ProjectFsFile, RebornServicesError> {
+        Ok(ProjectFsFile {
+            path: request.path,
+            filename: Some("today.md".to_string()),
+            mime_type: "text/markdown".to_string(),
+            size_bytes: 7,
+            bytes: b"# notes".to_vec(),
         })
     }
 
@@ -3579,7 +3649,10 @@ fn make_capability_activity_envelope(cursor: &str) -> ProductOutboundEnvelope {
             process_id: None,
             output_bytes: None,
             error_kind: None,
+            subtitle: None,
+            input_summary: None,
             updated_at: chrono::Utc::now(),
+            activity_order: None,
         }),
     )
 }
@@ -4267,4 +4340,162 @@ async fn operator_setup_accepts_secret_request_without_echoing_values() {
             true,
         )]
     );
+}
+
+#[tokio::test]
+async fn list_fs_mounts_returns_browsable_mounts() {
+    let services = Arc::new(StubServices::default());
+    let router = router_with(services);
+
+    let response = router
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri("/api/webchat/v2/fs/mounts")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = read_json(response).await;
+    // Assert set membership, not index order, so a semantically-equivalent
+    // ordering change does not fail spuriously.
+    let mounts: Vec<&str> = body["mounts"]
+        .as_array()
+        .expect("mounts array")
+        .iter()
+        .map(|m| m["mount"].as_str().expect("mount string"))
+        .collect();
+    assert!(
+        mounts.contains(&"memory"),
+        "memory mount present: {mounts:?}"
+    );
+    assert!(
+        mounts.contains(&"workspace"),
+        "workspace mount present: {mounts:?}"
+    );
+}
+
+#[tokio::test]
+async fn browse_fs_dir_lists_mount_relative_entries() {
+    let services = Arc::new(StubServices::default());
+    let router = router_with(services);
+
+    let response = router
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri("/api/webchat/v2/fs/list?mount=memory&path=daily")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = read_json(response).await;
+    assert_eq!(body["mount"], "memory");
+    assert_eq!(body["entries"][0]["name"], "today.md");
+    assert_eq!(body["entries"][0]["path"], "daily/today.md");
+}
+
+#[tokio::test]
+async fn read_fs_file_serves_attachment_with_nosniff() {
+    let services = Arc::new(StubServices::default());
+    let router = router_with(services);
+
+    let response = router
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri("/api/webchat/v2/fs/content?mount=memory&path=daily/today.md")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        response
+            .headers()
+            .get("x-content-type-options")
+            .and_then(|v| v.to_str().ok()),
+        Some("nosniff"),
+    );
+    assert!(
+        response
+            .headers()
+            .get("content-disposition")
+            .and_then(|v| v.to_str().ok())
+            .is_some_and(|value| value.contains("attachment")),
+        "fs download must be served as an attachment",
+    );
+    let body = to_bytes(response.into_body(), 64 * 1024)
+        .await
+        .expect("body bytes");
+    assert_eq!(&body[..], b"# notes");
+}
+
+#[tokio::test]
+async fn read_fs_file_rejects_blank_path() {
+    let services = Arc::new(StubServices::default());
+    let router = router_with(services);
+
+    let response = router
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri("/api/webchat/v2/fs/content?mount=memory")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn stat_fs_path_returns_metadata() {
+    let services = Arc::new(StubServices::default());
+    let router = router_with(services);
+
+    let response = router
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri("/api/webchat/v2/fs/stat?mount=memory&path=daily/today.md")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = read_json(response).await;
+    assert_eq!(body["stat"]["path"], "daily/today.md");
+    assert_eq!(body["stat"]["kind"], "file");
+    assert_eq!(body["stat"]["mime_type"], "text/markdown");
+}
+
+#[tokio::test]
+async fn stat_fs_path_rejects_blank_path() {
+    let services = Arc::new(StubServices::default());
+    let router = router_with(services);
+
+    let response = router
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri("/api/webchat/v2/fs/stat?mount=memory")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
 }

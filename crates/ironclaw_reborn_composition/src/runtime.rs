@@ -1100,6 +1100,16 @@ impl RebornRuntime {
             .and_then(|product_auth| product_auth.as_auth_challenge_provider())
     }
 
+    #[cfg(feature = "slack-v2-host-beta")]
+    pub(crate) fn blocked_auth_flow_canceller(
+        &self,
+    ) -> Option<Arc<dyn crate::BlockedAuthFlowCanceller>> {
+        self.services
+            .product_auth
+            .as_ref()
+            .and_then(|product_auth| product_auth.as_blocked_auth_flow_canceller())
+    }
+
     pub(crate) fn webui_event_stream(&self) -> Arc<dyn ProjectionStream> {
         self.projection_services.webui_event_stream()
     }
@@ -1226,6 +1236,41 @@ impl RebornRuntime {
                 rt.workspace_mounts.clone(),
             ))
         })
+    }
+
+    /// Read-only scoped filesystem spanning every mount the standalone WebUI
+    /// filesystem viewer can browse (workspace files + persistent memory), over
+    /// the same composite root the agent's tools resolve through. `None` when no
+    /// local runtime is composed, or when the browse mount view can't be built.
+    ///
+    /// Distinct from [`Self::webui_workspace_filesystem`]: that handle is the
+    /// read-write workspace-only view used to land attachments, whereas this is
+    /// a strictly read-only, multi-mount navigation view.
+    pub(crate) fn webui_browse_filesystem(
+        &self,
+    ) -> Option<Arc<ironclaw_filesystem::ScopedFilesystem<crate::factory::LocalDevRootFilesystem>>>
+    {
+        let rt = self.services.local_runtime.as_ref()?;
+        let view = match crate::local_dev_mounts::browse_mount_view() {
+            Ok(view) => view,
+            Err(error) => {
+                // Built from static aliases/targets, so this should never fail;
+                // if it does, log loudly rather than silently disabling the
+                // filesystem viewer with a bare `None`.
+                tracing::error!(
+                    target = "ironclaw_reborn_composition::webui",
+                    %error,
+                    "failed to build webui browse mount view; filesystem viewer unavailable",
+                );
+                return None;
+            }
+        };
+        Some(Arc::new(
+            ironclaw_filesystem::ScopedFilesystem::with_fixed_view(
+                Arc::clone(&rt.extension_filesystem),
+                view,
+            ),
+        ))
     }
 
     /// Test-only handle on the resource governor backing the budget

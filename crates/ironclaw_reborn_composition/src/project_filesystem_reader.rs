@@ -181,7 +181,7 @@ impl<F: RootFilesystem> ProjectFilesystemReader for ProjectScopedFilesystemReade
 
 /// Reject anything that is not a downloadable, non-sensitive, in-budget regular
 /// file before its bytes are materialized.
-fn guard_readable_file(stat: &FileStat, max_bytes: u64) -> Result<(), ProjectFsError> {
+pub(crate) fn guard_readable_file(stat: &FileStat, max_bytes: u64) -> Result<(), ProjectFsError> {
     if stat.sensitive {
         return Err(ProjectFsError::Denied);
     }
@@ -197,7 +197,7 @@ fn guard_readable_file(stat: &FileStat, max_bytes: u64) -> Result<(), ProjectFsE
     Ok(())
 }
 
-fn map_kind(file_type: FileType) -> ProjectFsEntryKind {
+pub(crate) fn map_kind(file_type: FileType) -> ProjectFsEntryKind {
     match file_type {
         FileType::File => ProjectFsEntryKind::File,
         FileType::Directory => ProjectFsEntryKind::Directory,
@@ -210,11 +210,11 @@ fn file_name_str(path: &str) -> Option<&str> {
     path.rsplit('/').find(|segment| !segment.is_empty())
 }
 
-fn file_name_of(path: &str) -> Option<String> {
+pub(crate) fn file_name_of(path: &str) -> Option<String> {
     file_name_str(path).map(|segment| segment.to_string())
 }
 
-fn mime_for_path(path: &str) -> String {
+pub(crate) fn mime_for_path(path: &str) -> String {
     file_name_str(path)
         .and_then(|name| {
             name.rsplit_once('.')
@@ -226,7 +226,7 @@ fn mime_for_path(path: &str) -> String {
 
 /// Map a substrate filesystem error to the sanitized port error. Host paths and
 /// backend reasons never cross this boundary.
-fn map_filesystem_error(error: FilesystemError) -> ProjectFsError {
+pub(crate) fn map_filesystem_error(error: FilesystemError) -> ProjectFsError {
     match error {
         FilesystemError::NotFound { .. } => ProjectFsError::NotFound,
         FilesystemError::PermissionDenied { .. }

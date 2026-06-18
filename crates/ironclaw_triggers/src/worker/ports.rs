@@ -112,7 +112,15 @@ pub struct TriggerActiveRunStateRequest {
 pub enum TriggerActiveRunState {
     Missing,
     Nonterminal,
-    Terminal { status: TriggerRunHistoryStatus },
+    /// The run is parked on a gate that needs human interaction (tool-approval
+    /// or auth) which an unattended scheduled fire cannot satisfy. Left as a
+    /// non-advancing active fire it would block every later scheduled run of
+    /// the same trigger indefinitely, so the poller clears it and records the
+    /// fire as failed instead. See #4986.
+    Blocked,
+    Terminal {
+        status: TriggerRunHistoryStatus,
+    },
 }
 
 #[async_trait]

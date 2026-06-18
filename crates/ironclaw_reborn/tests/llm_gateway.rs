@@ -529,7 +529,10 @@ async fn gateway_rejects_unknown_provider_tool_call_before_registration() {
 
 #[tokio::test]
 async fn gateway_repairs_oversized_provider_tool_arguments_before_registration() {
-    let oversized_message = "x".repeat(20 * 1024);
+    // Must exceed the host provider-argument limit so the gateway exercises its
+    // repair path. Sized off the real constant (raised to 64 KiB in the
+    // provider-validation relaxation) so this never drifts when the cap moves.
+    let oversized_message = "x".repeat(ironclaw_safety::PROVIDER_ARGUMENTS_MAX_BYTES + 1024);
     let provider = Arc::new(ToolAwareProvider::tool_response_sequence(vec![
         ToolCompletionResponse {
             content: None,
@@ -630,11 +633,10 @@ async fn gateway_repairs_oversized_provider_tool_arguments_before_registration()
             message.role == Role::Tool && message.tool_call_id.as_deref() == Some("call_2")
         })
         .expect("repair request includes rejected tool result");
-    assert!(
-        repair_tool_result
-            .content
-            .contains("provider tool arguments exceed 16384 bytes")
-    );
+    assert!(repair_tool_result.content.contains(&format!(
+        "provider tool arguments exceed {} bytes",
+        ironclaw_safety::PROVIDER_ARGUMENTS_MAX_BYTES
+    )));
     assert!(!repair_tool_result.content.contains("xxxxx"));
 }
 
@@ -3001,10 +3003,15 @@ impl LoopCapabilityPort for GatewayCapabilityPort {
                 )
             })?
             .len();
-        if arguments_len > 16 * 1024 {
+        if arguments_len > ironclaw_safety::PROVIDER_ARGUMENTS_MAX_BYTES {
+            // Mirror the production summary exactly so the gateway recognizes this
+            // as a repairable oversized-args error (is_provider_arguments_too_large_summary).
             return Err(ironclaw_turns::run_profile::AgentLoopHostError::new(
                 AgentLoopHostErrorKind::InvalidInvocation,
-                "provider tool arguments exceed 16384 bytes",
+                format!(
+                    "provider tool arguments exceed {} bytes",
+                    ironclaw_safety::PROVIDER_ARGUMENTS_MAX_BYTES
+                ),
             ));
         }
         Ok(())
