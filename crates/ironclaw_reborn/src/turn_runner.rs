@@ -47,7 +47,7 @@ use crate::{
 /// All categories used here are lowercase ASCII with underscores, satisfying
 /// validation invariants. Returning `None` is only possible if a static literal
 /// is changed to an invalid category.
-pub fn sanitized_failure(category: &'static str) -> Option<SanitizedFailure> {
+pub(crate) fn sanitized_failure(category: &'static str) -> Option<SanitizedFailure> {
     match SanitizedFailure::new(category) {
         Ok(failure) => Some(failure),
         Err(error) => {
@@ -63,7 +63,7 @@ pub fn sanitized_failure(category: &'static str) -> Option<SanitizedFailure> {
     }
 }
 
-pub fn sanitized_driver_failure(reason_kind: &str) -> Option<SanitizedFailure> {
+pub(crate) fn sanitized_driver_failure(reason_kind: &str) -> Option<SanitizedFailure> {
     if matches!(
         reason_kind,
         MODEL_CREDITS_EXHAUSTED_CATEGORY | MODEL_CREDENTIALS_UNAVAILABLE_CATEGORY
@@ -466,7 +466,10 @@ impl TurnRunnerWorker {
             .host_factory
             .create_host(claimed)
             .await
-            .map_err(|err| DriverInvocationError::HostCreationFailed { reason: err.reason })?;
+            // Carry the full Display of the cause, not just the `.reason` field.
+            .map_err(|err| DriverInvocationError::HostCreationFailed {
+                reason: err.to_string(),
+            })?;
         self.persist_model_route_snapshot(claimed, host.as_ref())
             .await?;
 

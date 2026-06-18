@@ -33,11 +33,11 @@ use ironclaw_turns::{
 use ironclaw_host_runtime::{
     SchedulerTurnRunWakeNotifier, TurnRunScheduler, TurnRunSchedulerConfig, TurnRunSchedulerHandle,
 };
-use ironclaw_turns::TurnRunWakeNotifyError;
 
 use crate::{
     app_loop_family::build_loop_family_registry,
     driver_registry::{DriverRegistry, DriverRegistryError},
+    late_wire_notifier::LateWireWakeNotifier,
     loop_driver_host::{
         HookDispatcherBuilderFactory, RebornLoopDriverHostFactory, TextOnlyLoopHostConfig,
     },
@@ -58,43 +58,6 @@ use crate::{
     turn_run_executor::RebornTurnRunExecutor,
     turn_runner::TurnRunnerWorkerConfig,
 };
-
-/// A deferred wake notifier that forwards to the real notifier once it is set.
-///
-/// This breaks the coordinator → wake_notifier ← scheduler_notifier ← scheduler →
-/// executor → host_factory → capability_factory → coordinator cycle. The coordinator
-/// is built with this notifier early; the real scheduler notifier is wired in after
-/// the scheduler starts. Any notify calls before wiring return `Ok(())` — the
-/// scheduler's poll tick picks up queued runs within one poll interval.
-struct LateWireWakeNotifier {
-    inner: std::sync::OnceLock<Arc<dyn TurnRunWakeNotifier>>,
-}
-
-impl LateWireWakeNotifier {
-    fn new() -> Self {
-        Self {
-            inner: std::sync::OnceLock::new(),
-        }
-    }
-
-    fn set(&self, notifier: Arc<dyn TurnRunWakeNotifier>) {
-        // Ignore if already set (should not happen in practice).
-        let _ = self.inner.set(notifier);
-    }
-}
-
-impl TurnRunWakeNotifier for LateWireWakeNotifier {
-    fn notify_queued_run(
-        &self,
-        wake: ironclaw_turns::TurnRunWake,
-    ) -> Result<(), TurnRunWakeNotifyError> {
-        match self.inner.get() {
-            Some(notifier) => notifier.notify_queued_run(wake),
-            // Scheduler not started yet; run will be picked up on first poll tick.
-            None => Ok(()),
-        }
-    }
-}
 
 /// Default number of turn-runner worker tasks spawned per runtime instance.
 ///
