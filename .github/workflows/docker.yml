@@ -39,7 +39,7 @@ jobs:
   build:
     name: Build & Push
     if: github.repository == 'nearai/ironclaw'
-    runs-on: ubuntu-24.04
+    runs-on: [self-hosted, ci-release]
     permissions:
       contents: read
       packages: read

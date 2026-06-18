@@ -41,7 +41,7 @@ env:
 jobs:
   package-matrix:
     name: Discover Reborn package crates
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, ci-standard]
     outputs:
       packages: ${{ steps.packages.outputs.packages }}
     steps:
@@ -89,7 +89,7 @@ jobs:
   crate-tests:
     name: Test ${{ matrix.package }}
     needs: package-matrix
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, ci-standard]
     timeout-minutes: 30
     env:
       ANTHROPIC_API_KEY: ""
@@ -136,7 +136,7 @@ jobs:
 
   root-reborn-parity-tests:
     name: Reborn root tests (${{ matrix.partition }})
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, ci-standard]
     timeout-minutes: 45
     env:
       ANTHROPIC_API_KEY: ""
@@ -181,7 +181,7 @@ jobs:
 
   reborn-integration-crate-tests:
     name: Reborn Integration Binary Crate Tests
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, ci-standard]
     if: always()
     needs:
       - package-matrix

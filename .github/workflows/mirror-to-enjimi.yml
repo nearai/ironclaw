@@ -11,7 +11,7 @@ permissions:
 jobs:
   mirror:
     if: github.repository == 'theredspoon/ironclaw'
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, ci-standard]
     env:
       ENJIMI_REPOSITORY: enjimi/ironclaw
       MIRROR_BRANCH: mirror/native-matrix-channel-pilot

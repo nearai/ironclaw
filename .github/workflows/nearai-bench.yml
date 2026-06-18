@@ -50,7 +50,7 @@ jobs:
         startsWith(github.event.comment.body, '/benchmark ')
         || github.event.comment.body == '/benchmark'
       )
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, ci-standard]
     outputs:
       suite: ${{ steps.parse.outputs.suite }}
       model: ${{ steps.parse.outputs.model }}

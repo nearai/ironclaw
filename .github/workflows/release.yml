@@ -46,7 +46,7 @@ on:
 jobs:
   # Run 'dist plan' (or host) to determine what tasks we need to do
   plan:
-    runs-on: "ubuntu-22.04"
+    runs-on: [self-hosted, ci-release]
     outputs:
       val: ${{ steps.plan.outputs.manifest }}
       tag: ${{ !github.event.pull_request && github.ref_name || '' }}
@@ -221,7 +221,7 @@ jobs:
     needs:
       - plan
       - build-local-artifacts
-    runs-on: "ubuntu-22.04"
+    runs-on: [self-hosted, ci-release]
     env:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       BUILD_MANIFEST_NAME: target/distrib/global-dist-manifest.json
@@ -270,7 +270,7 @@ jobs:
     needs:
       - plan
     if: ${{ needs.plan.outputs.publishing == 'true' }}
-    runs-on: "ubuntu-22.04"
+    runs-on: [self-hosted, ci-release]
     env:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     steps:
@@ -408,7 +408,7 @@ jobs:
       contents: write
     env:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-    runs-on: "ubuntu-22.04"
+    runs-on: [self-hosted, ci-release]
     outputs:
       val: ${{ steps.host.outputs.manifest }}
     steps:
@@ -491,7 +491,7 @@ jobs:
       - host
       - build-wasm-extensions
     if: ${{ always() && needs.host.result == 'success' && needs.build-wasm-extensions.result == 'success' }}
-    runs-on: "ubuntu-22.04"
+    runs-on: [self-hosted, ci-release]
     permissions:
       contents: write
       pull-requests: write
@@ -568,7 +568,7 @@ jobs:
     # still allowing individual publish jobs to skip themselves (for prereleases).
     # "host" however must run to completion, no skipping allowed!
     if: ${{ always() && needs.host.result == 'success' }}
-    runs-on: "ubuntu-22.04"
+    runs-on: [self-hosted, ci-release]
     env:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     steps:

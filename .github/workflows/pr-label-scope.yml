@@ -15,7 +15,7 @@ concurrency:
 
 jobs:
   scope:
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, ci-standard]
     steps:
       - name: Ensure DB MIGRATION label exists
         env:

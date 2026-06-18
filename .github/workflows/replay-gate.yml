@@ -30,7 +30,7 @@ permissions:
 jobs:
   replay-snapshots:
     name: Replay snapshot gate
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, ci-standard]
     timeout-minutes: 25
     steps:
       - name: Checkout repository
