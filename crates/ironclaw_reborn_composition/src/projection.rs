@@ -420,6 +420,22 @@ impl WebuiProjectionBatch {
         true
     }
 
+    fn push_runtime_cursor_advance(&mut self, cursor: EventProjectionCursor) -> bool {
+        if self
+            .cursor
+            .runtime
+            .as_ref()
+            .is_some_and(|current| current.runtime >= cursor.runtime)
+        {
+            return true;
+        }
+        self.cursor.runtime = Some(cursor);
+        self.cursor.runtime_item = None;
+        self.cursor.runtime_payloads_delivered = 0;
+        self.push(ProductOutboundPayload::KeepAlive);
+        true
+    }
+
     async fn push_runtime_item(
         &mut self,
         item: ProjectionStreamItem,
@@ -452,6 +468,9 @@ impl WebuiProjectionBatch {
                 }
                 RuntimePayloadItem::Live { cursor, payload } => {
                     return Ok(self.push_live_payload(cursor, payload));
+                }
+                RuntimePayloadItem::CursorAdvance { cursor } => {
+                    return Ok(self.push_runtime_cursor_advance(cursor));
                 }
             }
         }
@@ -688,6 +707,9 @@ enum RuntimePayloadItem {
         cursor: EventProjectionCursor,
         payload: ProductOutboundPayload,
     },
+    CursorAdvance {
+        cursor: EventProjectionCursor,
+    },
 }
 
 type RuntimePayloadItemResult = Result<Option<RuntimePayloadItem>, ProductAdapterError>;
@@ -727,7 +749,7 @@ async fn snapshot_payloads(
     )
     .await?;
     if all_payloads.is_empty() {
-        return Ok(None);
+        return Ok(Some(RuntimePayloadItem::CursorAdvance { cursor }));
     }
     let total = all_payloads.total();
     let already_delivered =
@@ -767,7 +789,7 @@ async fn replay_payloads(
     )
     .await?;
     if all_payloads.is_empty() {
-        return Ok(None);
+        return Ok(Some(RuntimePayloadItem::CursorAdvance { cursor }));
     }
     let total = all_payloads.total();
     let already_delivered =
