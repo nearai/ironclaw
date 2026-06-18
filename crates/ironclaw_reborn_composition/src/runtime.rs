@@ -651,14 +651,14 @@ impl LocalDevApprovalTurnRunLocator {
     async fn snapshot(
         &self,
     ) -> Result<TurnPersistenceSnapshot, ironclaw_product_workflow::ProductWorkflowError> {
-        #[cfg(feature = "libsql")]
+        #[cfg(any(feature = "libsql", feature = "postgres"))]
         {
             self.turn_state
                 .persistence_snapshot()
                 .await
                 .map_err(|_| approval_turn_locator_unavailable())
         }
-        #[cfg(not(feature = "libsql"))]
+        #[cfg(not(any(feature = "libsql", feature = "postgres")))]
         {
             Ok(self.turn_state.persistence_snapshot())
         }
@@ -800,7 +800,7 @@ fn snapshot_run_actor_matches(
         .any(|turn| turn.turn_id == run.turn_id && turn.scope == run.scope && turn.actor == *actor)
 }
 
-#[cfg(feature = "libsql")]
+#[cfg(any(feature = "libsql", feature = "postgres"))]
 fn approval_turn_locator_unavailable() -> ironclaw_product_workflow::ProductWorkflowError {
     ironclaw_product_workflow::ProductWorkflowError::Transient {
         reason: "approval turn-run locator unavailable".to_string(),

@@ -824,6 +824,8 @@ async fn build_local_dev(input: RebornBuildInput) -> Result<RebornServices, Rebo
         storage_backend_input,
     )
     .await?;
+    let extension_installation_state_path =
+        local_dev_extension_installation_state_path(profile, local_runtime_identity.as_ref())?;
     // Clone the raw libSQL handle for the canonical identity store before
     // `filesystem` moves out of the bundle, so the resolver rides the same
     // substrate DB the runtime owns rather than a second handle.
@@ -1058,11 +1060,14 @@ async fn build_local_dev(input: RebornBuildInput) -> Result<RebornServices, Rebo
     );
     let extension_filesystem: Arc<dyn RootFilesystem> = filesystem.clone();
     let extension_installation_store: Arc<dyn ExtensionInstallationStore> = Arc::new(
-        FilesystemExtensionInstallationStore::load(extension_filesystem.clone())
-            .await
-            .map_err(|error| RebornBuildError::InvalidConfig {
-                reason: format!("extension installation state could not be loaded: {error}"),
-            })?,
+        FilesystemExtensionInstallationStore::load_at(
+            extension_filesystem.clone(),
+            extension_installation_state_path,
+        )
+        .await
+        .map_err(|error| RebornBuildError::InvalidConfig {
+            reason: format!("extension installation state could not be loaded: {error}"),
+        })?,
     );
     let extension_lifecycle_service = Arc::new(tokio::sync::Mutex::new(
         ExtensionLifecycleService::new(services.shared_extension_registry().snapshot_owned()),
@@ -1344,6 +1349,37 @@ fn local_dev_extension_lifecycle_surface_context(
         user_id: owner_user_id,
         agent_id: Some(agent_id),
         project_id: None,
+    })
+}
+
+fn local_dev_extension_installation_state_path(
+    profile: RebornCompositionProfile,
+    local_runtime_identity: Option<&RebornLocalRuntimeIdentity>,
+) -> Result<VirtualPath, RebornBuildError> {
+    if profile != RebornCompositionProfile::HostedSingleTenant {
+        return FilesystemExtensionInstallationStore::default_state_path().map_err(|error| {
+            RebornBuildError::InvalidConfig {
+                reason: format!("extension installation state path is invalid: {error}"),
+            }
+        });
+    }
+
+    let default_identity = RebornRuntimeIdentity::reborn_cli();
+    let default_tenant_id =
+        ironclaw_host_api::TenantId::new(default_identity.tenant_id).map_err(|error| {
+            RebornBuildError::InvalidConfig {
+                reason: error.to_string(),
+            }
+        })?;
+    let tenant_id = local_runtime_identity
+        .map(|identity| identity.tenant_id.clone())
+        .unwrap_or(default_tenant_id);
+    VirtualPath::new(format!(
+        "/tenants/{}/system/extensions/.installations/state.json",
+        tenant_id.as_str()
+    ))
+    .map_err(|error| RebornBuildError::InvalidConfig {
+        reason: format!("hosted extension installation state path is invalid: {error}"),
     })
 }
 
@@ -3573,6 +3609,36 @@ mod tests {
         },
         runtime::SKILL_ACTIVATE_CAPABILITY_ID,
     };
+
+    #[test]
+    fn extension_installation_state_path_stays_legacy_for_local_dev() {
+        let path =
+            local_dev_extension_installation_state_path(RebornCompositionProfile::LocalDev, None)
+                .expect("state path");
+
+        assert_eq!(
+            path.as_str(),
+            "/system/extensions/.installations/state.json"
+        );
+    }
+
+    #[test]
+    fn extension_installation_state_path_uses_durable_tenant_root_for_hosted() {
+        let identity = RebornLocalRuntimeIdentity {
+            tenant_id: TenantId::new("acme").expect("tenant id"),
+            agent_id: ironclaw_host_api::AgentId::new("agent").expect("agent id"),
+        };
+        let path = local_dev_extension_installation_state_path(
+            RebornCompositionProfile::HostedSingleTenant,
+            Some(&identity),
+        )
+        .expect("state path");
+
+        assert_eq!(
+            path.as_str(),
+            "/tenants/acme/system/extensions/.installations/state.json"
+        );
+    }
 
     struct FailingConversationActorPairingService;
 

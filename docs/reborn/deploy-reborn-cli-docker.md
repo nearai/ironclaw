@@ -105,10 +105,11 @@ to a non-loopback host. Use `hosted-single-tenant` for the preview deployment
 path that keeps the local-dev product surface while storing runtime state in
 Postgres.
 
-Set `IRONCLAW_REBORN_HOME` to a mounted volume path if state should survive
-redeploys. The hosted single-tenant profile stores runtime/control-plane state
-in Postgres, but project files, system extension packages, and current skill
-file storage still live under the local filesystem root. The image default is
+Set `IRONCLAW_REBORN_HOME` to a mounted volume path if local files should
+survive redeploys. The hosted single-tenant profile stores runtime/control-plane
+state, including extension installation/activation state, in Postgres; project
+files, materialized system extension packages, and current skill file storage
+still live under the local filesystem root. The image default is
 `/data/ironclaw-reborn`; without a Railway volume, that path is ephemeral. The
 container workdir is `/workspace` so the workspace root stays separate from
 Reborn's state and skill roots.
