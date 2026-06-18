@@ -850,9 +850,7 @@ I18n.register('ko', {
 
   // 기술 (동적)
   'skills.confirmInstallHub': 'ClawHub에서 기술 "{name}"을(를) 설치하시겠습니까?',
-  'skills.nameLabel': '기술 이름',
   'skills.nameRequired': '기술 이름은 필수입니다',
-  'skills.urlLabel': '기술 URL',
   'skills.httpsRequired': 'URL은 HTTPS를 사용해야 합니다',
   'skills.confirmInstall': '기술 "{name}"을(를) 설치하시겠습니까?',
 
