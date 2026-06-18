@@ -472,6 +472,7 @@ mod tests {
             channel_routes: Vec::new(),
             signing_secret_env: Some("IRONCLAW_TEST_SLACK_SIGNING_SECRET_MAPPED_USER".to_string()),
             bot_token_env: Some("IRONCLAW_TEST_SLACK_BOT_TOKEN_MAPPED_USER".to_string()),
+            ..Default::default()
         };
 
         let resolved = resolve_slack_host_beta_config(
@@ -511,6 +512,7 @@ mod tests {
                 "IRONCLAW_TEST_SLACK_SIGNING_SECRET_DIVERGENT_USER".to_string(),
             ),
             bot_token_env: Some("IRONCLAW_TEST_SLACK_BOT_TOKEN_DIVERGENT_USER".to_string()),
+            ..Default::default()
         };
 
         let resolved = resolve_slack_host_beta_config(
@@ -556,6 +558,7 @@ mod tests {
                 "IRONCLAW_TEST_SLACK_SIGNING_SECRET_CHANNEL_ROUTES".to_string(),
             ),
             bot_token_env: Some("IRONCLAW_TEST_SLACK_BOT_TOKEN_CHANNEL_ROUTES".to_string()),
+            ..Default::default()
         };
 
         let resolved = resolve_slack_host_beta_config(
@@ -727,6 +730,7 @@ mod tests {
             channel_routes: Vec::new(),
             signing_secret_env: Some("IRONCLAW_TEST_SLACK_SIGNING_SECRET_INVALID_USER".to_string()),
             bot_token_env: Some("IRONCLAW_TEST_SLACK_BOT_TOKEN_INVALID_USER".to_string()),
+            ..Default::default()
         };
 
         let error = resolve_slack_host_beta_config(

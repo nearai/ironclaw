@@ -18,8 +18,8 @@ use ironclaw_reborn_composition::{
 };
 #[cfg(feature = "slack-v2-host-beta")]
 use ironclaw_reborn_composition::{
-    SlackOperatorRouteVisibility, build_slack_host_beta_mounts,
-    build_webui_services_with_slack_host_beta_mounts,
+    SlackOperatorRouteVisibility, build_slack_events_host_ingress_mount,
+    build_slack_host_beta_mounts, build_webui_services_with_slack_host_beta_mounts,
 };
 use ironclaw_reborn_config::{IdentitySection, seed_default_config_file_if_missing};
 use ironclaw_reborn_webui_ingress::{
@@ -179,6 +179,12 @@ impl ServeCommand {
         )?;
         #[cfg(not(feature = "slack-v2-host-beta"))]
         let _ = slack_host_beta_config;
+        #[cfg(feature = "slack-v2-host-beta")]
+        let slack_host_ingress_mode = config_file
+            .as_ref()
+            .and_then(|file| file.slack.as_ref())
+            .map(|slack| slack.host_ingress_mode)
+            .unwrap_or_default();
 
         // Resolve listen address with explicit precedence:
         //   CLI flag (Some(...)) > config file > compile-time default.
@@ -359,10 +365,28 @@ impl ServeCommand {
                 .context("failed to assemble Reborn runtime for `serve`")?;
             #[cfg(feature = "slack-v2-host-beta")]
             let slack_mounts = if let Some(slack_config) = slack_host_beta_config {
-                Some(
+                Some(if slack_host_ingress_mode.is_generic_shadow() {
+                    let mounts = build_slack_host_beta_mounts(&runtime, slack_config.clone())
+                        .context("failed to compose Slack host-beta routes")?;
+                    build_slack_events_host_ingress_mount(&runtime, slack_config).context(
+                        "failed to validate generic Slack host-ingress events route in shadow mode",
+                    )?;
+                    tracing::debug!(
+                        target = "ironclaw::reborn::cli::serve",
+                        "generic shadow validated",
+                    );
+                    mounts
+                } else if slack_host_ingress_mode.is_generic() {
+                    let mut mounts = build_slack_host_beta_mounts(&runtime, slack_config.clone())
+                        .context("failed to compose Slack host-beta routes")?;
+                    mounts.events =
+                        build_slack_events_host_ingress_mount(&runtime, slack_config)
+                            .context("failed to compose generic Slack host-ingress events route")?;
+                    mounts
+                } else {
                     build_slack_host_beta_mounts(&runtime, slack_config)
-                        .context("failed to compose Slack host-beta routes")?,
-                )
+                        .context("failed to compose Slack host-beta routes")?
+                })
             } else {
                 None
             };
