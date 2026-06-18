@@ -165,7 +165,9 @@ jobs:
         uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
           key: reborn-tests-${{ matrix.package }}
-          save-if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+          # Keep saves to protected-branch and merge_group runs so the ~10 GB
+          # repo cache LRU is seeded by shared states, not arbitrary PR branches.
+          save-if: ${{ (github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'merge_group' }}
 
       - name: Run crate tests
         env:
@@ -224,7 +226,9 @@ jobs:
         uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
           key: reborn-tests-root-${{ matrix.partition }}
-          save-if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+          # Keep saves to protected-branch and merge_group runs so the ~10 GB
+          # repo cache LRU is seeded by shared states, not arbitrary PR branches.
+          save-if: ${{ (github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'merge_group' }}
 
       - name: Run Reborn root tests
         run: scripts/ci/run-reborn-root-partition.sh
