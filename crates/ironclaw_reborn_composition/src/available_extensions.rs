@@ -1497,9 +1497,8 @@ where
 fn reserved_host_bundled_extension_id(extension_id: &ExtensionId) -> bool {
     matches!(
         extension_id.as_str(),
-        "github" | "notion" | "web-access" | "slack"
-    ) || extension_id.as_str() == NEARAI_EXTENSION_ID
-        || is_gsuite_extension_id(extension_id)
+        "github" | "notion" | "web-access" | "slack" | NEARAI_EXTENSION_ID
+    ) || is_gsuite_extension_id(extension_id)
 }
 
 fn extension_asset_path(
