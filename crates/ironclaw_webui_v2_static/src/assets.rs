@@ -172,14 +172,16 @@ mod tests {
     }
 
     #[test]
-    fn chat_cancelled_gate_resolution_exits_processing_state() {
+    fn chat_gate_resolution_uses_resume_outcome() {
         let use_chat = asset_text("js/pages/chat/hooks/useChat.js");
-        assert!(
-            use_chat
-                .contains("resolution === \"approved\" || resolution === \"credential_provided\"")
-        );
-        assert!(use_chat.contains("setIsProcessing(shouldContinueProcessing);"));
+        // Gate resolution normally resumes the run, but stale/terminal gate
+        // responses must not synthesize a processing state.
+        assert!(use_chat.contains("const outcome = resolveGateOutcome(response);"));
+        assert!(use_chat.contains("if (outcome === \"resumed\")"));
+        assert!(use_chat.contains("setIsProcessing(true);"));
+        assert!(use_chat.contains("setIsProcessing(false);"));
         assert!(use_chat.contains("setActiveRun(null);"));
+        assert!(!use_chat.contains("setIsProcessing(shouldContinueProcessing);"));
 
         let events = asset_text("js/pages/chat/lib/useChatEvents.js");
         assert!(events.contains("TERMINAL_RUN_STATUSES.has(status)"));
@@ -334,6 +336,14 @@ mod tests {
         assert!(presenter.contains("source?.type === \"schedule\""));
         assert!(presenter.contains("Custom schedule"));
         assert!(!presenter.contains("Webhook"));
+    }
+
+    #[test]
+    fn sidebar_new_chat_label_owns_typography() {
+        let sidebar_nav = asset_text("js/components/sidebar-nav.js");
+
+        assert!(sidebar_nav.contains("<span className=\"text-[13px] font-medium\""));
+        assert!(sidebar_nav.contains("t(\"chat.newThread\")"));
     }
 
     #[test]

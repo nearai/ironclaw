@@ -486,9 +486,11 @@ mod tests {
                 .contains(&EffectKind::SpawnProcess)
         );
         // onboard is exempt (it runs its own in-turn confirmed=true consent
-        // before the network POST); profile_set is deliberately NOT exempt —
-        // publishing a public community profile must hit the runtime approval
-        // gate, with its model-controlled confirmed=true only as defense-in-depth.
+        // before the network POST); trace_commons.profile_set is deliberately NOT
+        // exempt — publishing a public community profile must hit the runtime
+        // approval gate, with its model-controlled confirmed=true only as
+        // defense-in-depth. builtin.profile_set IS exempt: private local write
+        // only (no network/external_write), analogous to memory_write on a fixed path.
         assert!(
             policy
                 .approval_gate_exempt_capabilities()
@@ -500,6 +502,14 @@ mod tests {
                 .approval_gate_exempt_capabilities()
                 .iter()
                 .any(|capability| capability.as_str() == "builtin.trace_commons.profile_set")
+        );
+        assert!(
+            policy
+                .approval_gate_exempt_capabilities()
+                .iter()
+                .any(|capability| capability.as_str() == "builtin.profile_set"),
+            "builtin.profile_set must be in the exempt list (private local write, no \
+             network/external_write — analogous to memory_write on a fixed path)"
         );
         assert!(
             policy
@@ -582,8 +592,25 @@ mod tests {
             assert_eq!(grant.mounts, LocalDevMountProfile::Ambient);
             assert_eq!(grant.network, LocalDevNetworkProfile::Default);
         }
+        // builtin.profile_set writes context/profile.json under the memory mount.
+        // It mirrors memory_write's effect set (read+write filesystem, memory mount,
+        // default network) and must be present here or it is denied as MissingGrant.
+        let builtin_profile_set = policy
+            .grant(&CapabilityId::new("builtin.profile_set").expect("capability id"))
+            .expect("builtin.profile_set grant must be present");
+        assert_eq!(
+            builtin_profile_set.effects,
+            vec![
+                EffectKind::DispatchCapability,
+                EffectKind::ReadFilesystem,
+                EffectKind::WriteFilesystem,
+            ]
+        );
+        assert_eq!(builtin_profile_set.mounts, LocalDevMountProfile::Memory);
+        assert_eq!(builtin_profile_set.network, LocalDevNetworkProfile::Default);
+
         // profile_token writes profile_token.jwt (0600), so its grant carries
-        // WriteFilesystem; profile_set only reads policy + posts, so it does not.
+        // WriteFilesystem; trace_commons.profile_set only reads policy + posts, so it does not.
         let profile_token = policy
             .grant(
                 &CapabilityId::new("builtin.trace_commons.profile_token").expect("capability id"),

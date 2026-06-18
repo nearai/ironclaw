@@ -1,9 +1,7 @@
 import { React, html } from "../../../lib/html.js";
 import { MarkdownRenderer } from "./markdown-renderer.js";
 import { ToolActivity } from "./tool-activity.js";
-import { Avatar } from "./avatar.js";
 import { Icon } from "../../../design-system/icons.js";
-import { useT } from "../../../lib/i18n.js";
 import { toast } from "../../../lib/toast.js";
 import { ProjectFileChips } from "./project-file-chips.js";
 import { AttachmentChip } from "./attachment-chip.js";
@@ -60,7 +58,6 @@ function ThinkingDisclosure({ content }) {
 function MessageBubbleImpl({ message, onRetry, threadId }) {
   const { role, content, images, attachments, generatedImages, isOptimistic, status, error, toolCalls, timestamp } = message;
   const isUser = role === "user";
-  const t = useT();
   const [copied, setCopied] = React.useState(false);
   // The attachment currently open in the preview modal (null when closed).
   const [previewAttachment, setPreviewAttachment] = React.useState(null);
@@ -120,12 +117,6 @@ function MessageBubbleImpl({ message, onRetry, threadId }) {
   const isNotice = role === "system" || role === "error";
   const bubbleWidthClass = isUser ? "max-w-[85%]" : isNotice ? "mx-auto max-w-[85%]" : "w-full max-w-[85%]";
   const contentWidthClass = isUser ? "" : "w-full min-w-0 max-w-full";
-  // Persistent identity for the two conversational roles; system / error
-  // stay as centered notices without an avatar.
-  const showIdentity = role === "user" || role === "assistant";
-  const identityName = isUser
-    ? t("chat.identityUser")
-    : t("chat.identityAssistant");
 
   return html`
     <div
@@ -133,20 +124,6 @@ function MessageBubbleImpl({ message, onRetry, threadId }) {
       className=${["group flex w-full min-w-0 flex-col", isUser ? "items-end" : "items-start"].join(" ")}
     >
       <div className=${["flex min-w-0 flex-col gap-2", bubbleWidthClass].join(" ")}>
-        ${showIdentity &&
-        html`
-          <div
-            className=${[
-              "flex items-center gap-2 px-1",
-              isUser ? "flex-row-reverse" : "",
-            ].join(" ")}
-          >
-            <${Avatar} role=${role} />
-            <span className="text-xs font-medium text-[var(--v2-text-muted)]">
-              ${identityName}
-            </span>
-          </div>
-        `}
         <div
           className=${[
             "text-base leading-7",

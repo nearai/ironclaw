@@ -829,9 +829,9 @@ impl<'a> LoopDelegate for ChatDelegate<'a> {
         _metadata: ironclaw_llm::ResponseMetadata,
         _reason_ctx: &mut ReasoningContext,
     ) -> TextAction {
-        // Strip internal "[Called tool ...]" text that can leak when
-        // provider flattening (e.g. NEAR AI) converts tool_calls to
-        // plain text and the LLM echoes it back.
+        // Strip internal "[Called tool ...]" text that can leak when legacy
+        // provider compatibility flattening converts tool_calls to plain text
+        // and the LLM echoes it back.
         let sanitized = strip_internal_tool_call_text(text);
         TextAction::Return(LoopOutcome::Response(sanitized))
     }
@@ -1765,8 +1765,8 @@ fn compact_messages_for_retry(messages: &[ChatMessage]) -> Vec<ChatMessage> {
 
 /// Strip internal `[Called tool ...]` and `[Tool ... returned: ...]` markers
 /// from a response string. These markers are inserted by provider-level message
-/// flattening (e.g. NEAR AI) and can leak into the user-visible response when
-/// the LLM echoes them back.
+/// flattening and can leak into the user-visible response when the LLM echoes
+/// them back.
 fn strip_internal_tool_call_text(text: &str) -> String {
     // Remove lines that are purely internal tool-call markers.
     // Pattern: lines matching `[Called tool <name>(...)]` or `[Tool <name> returned: ...]`

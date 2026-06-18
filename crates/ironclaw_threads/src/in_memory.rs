@@ -4,6 +4,7 @@ use std::{
 };
 
 use async_trait::async_trait;
+use chrono::Utc;
 use ironclaw_host_api::ThreadId;
 use tokio::sync::Mutex;
 use uuid::Uuid;
@@ -85,6 +86,7 @@ impl SessionThreadService for InMemorySessionThreadService {
             return Ok(existing.record.clone());
         }
 
+        let now = Utc::now();
         let record = SessionThreadRecord {
             scope: request.scope,
             thread_id: thread_id.clone(),
@@ -92,6 +94,8 @@ impl SessionThreadService for InMemorySessionThreadService {
             title: request.title,
             metadata_json: request.metadata_json,
             goal: None,
+            created_at: Some(now),
+            updated_at: Some(now),
         };
         state.threads.insert(
             thread_id,
@@ -144,10 +148,17 @@ impl SessionThreadService for InMemorySessionThreadService {
         let key = InboundIdempotencyKey::from_request(&request);
         let thread = get_thread_mut(&mut state, &request.scope, &request.thread_id)?;
         let message_id = ThreadMessageId::new();
-        let sequence = thread.next_sequence;
-        thread.next_sequence += 1;
+        // Validate the payload before mutating any thread state. A rejected
+        // attachment must not increment the sequence or bump the
+        // last-activity stamp, or an invalid message would surface the
+        // thread at the top of the sidebar without being appended.
         let (content_text, attachments) = request.content.into_parts();
         crate::contract::validate_attachment_refs(&attachments)?;
+        let sequence = thread.next_sequence;
+        thread.next_sequence += 1;
+        // Appending a message is thread activity; bump the last-activity
+        // stamp so activity-ordered listings surface this thread first.
+        thread.record.updated_at = Some(Utc::now());
         thread.messages.push(ThreadMessageRecord {
             message_id,
             thread_id: request.thread_id.clone(),
@@ -283,6 +294,9 @@ impl SessionThreadService for InMemorySessionThreadService {
             redaction_ref: None,
         };
         thread.next_sequence += 1;
+        // Appending a message is thread activity; bump the last-activity
+        // stamp so activity-ordered listings surface this thread first.
+        thread.record.updated_at = Some(Utc::now());
         thread.messages.push(message.clone());
         Ok(message)
     }
@@ -364,6 +378,9 @@ impl SessionThreadService for InMemorySessionThreadService {
             redaction_ref: None,
         };
         thread.next_sequence += 1;
+        // Appending a message is thread activity; bump the last-activity
+        // stamp so activity-ordered listings surface this thread first.
+        thread.record.updated_at = Some(Utc::now());
         thread.messages.push(message.clone());
         Ok(message)
     }
@@ -412,6 +429,9 @@ impl SessionThreadService for InMemorySessionThreadService {
             redaction_ref: None,
         };
         thread.next_sequence += 1;
+        // Appending a message is thread activity; bump the last-activity
+        // stamp so activity-ordered listings surface this thread first.
+        thread.record.updated_at = Some(Utc::now());
         thread.messages.push(message.clone());
         Ok(message)
     }
@@ -727,24 +747,31 @@ impl SessionThreadService for InMemorySessionThreadService {
                 record
             })
             .collect();
-        // Stable order so opaque cursor → resumption is deterministic.
-        matching.sort_by(|a, b| a.thread_id.as_str().cmp(b.thread_id.as_str()));
+        // Newest activity first (`updated_at`, falling back to
+        // `created_at`); legacy records without timestamps sort last.
+        // Tie-break on thread_id ascending so the order is stable and
+        // opaque cursors stay resumable, matching the filesystem backend
+        // and the web sidebar's `byActivityDesc` comparator.
+        matching.sort_by(|a, b| {
+            let a_key = a.updated_at.or(a.created_at);
+            let b_key = b.updated_at.or(b.created_at);
+            std::cmp::Reverse(a_key)
+                .cmp(&std::cmp::Reverse(b_key))
+                .then_with(|| a.thread_id.as_str().cmp(b.thread_id.as_str()))
+        });
 
+        // Opaque cursor is the last thread_id of the previous page; find
+        // it in the activity-sorted list and resume after it. A cursor
+        // that no longer resolves ends the stream rather than restarting.
         let start_index = match request.cursor.as_deref() {
             Some(cursor) => matching
                 .iter()
-                .position(|record| record.thread_id.as_str() > cursor)
+                .position(|record| record.thread_id.as_str() == cursor)
+                .map(|index| index + 1)
                 .unwrap_or(matching.len()),
             None => 0,
         };
         let end_index = start_index.saturating_add(limit).min(matching.len());
-        // Cursor reflects the last *attempted* id in the slice (vs. the
-        // last successful), so a page that ends up empty due to
-        // upstream filtering still produces a cursor that moves
-        // forward. Today every entry in `matching` survives because
-        // the scope filter is the only predicate, but lining this up
-        // with the filesystem backend keeps the contract identical
-        // when future predicates land.
         let next_cursor = if end_index < matching.len() {
             matching[start_index..end_index]
                 .last()

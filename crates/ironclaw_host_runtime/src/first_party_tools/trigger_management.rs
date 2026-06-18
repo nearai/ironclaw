@@ -335,6 +335,8 @@ async fn remove_trigger(
 }
 
 fn trigger_output(record: &TriggerRecord, recent_runs: &[TriggerRunRecord]) -> Value {
+    let is_enabled = record.state == TriggerState::Scheduled;
+    let has_active_fire = record.has_active_fire();
     json!({
         "trigger_id": record.trigger_id.to_string(),
         "agent_id": record.agent_id.as_ref().map(|id| id.as_str()),
@@ -348,7 +350,11 @@ fn trigger_output(record: &TriggerRecord, recent_runs: &[TriggerRunRecord]) -> V
         "last_run_at": record.last_run_at,
         "last_status": record.last_status,
         "recent_runs": recent_runs.iter().map(trigger_run_output).collect::<Vec<_>>(),
-        "is_active": record.has_active_fire(),
+        // Model-facing trigger status: `is_active` means the trigger is enabled
+        // to fire. In-flight run state is exposed separately as `has_active_fire`.
+        "is_enabled": is_enabled,
+        "is_active": is_enabled,
+        "has_active_fire": has_active_fire,
         "created_at": record.created_at,
     })
 }

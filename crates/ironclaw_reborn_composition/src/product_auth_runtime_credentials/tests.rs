@@ -518,7 +518,7 @@ async fn resolver_refreshes_gsuite_owned_account_with_owner_authority_for_siblin
 }
 
 #[tokio::test]
-async fn resolver_does_not_refresh_same_oauth_account_twice_during_runtime_staging() {
+async fn resolver_refreshes_oauth_account_for_each_runtime_staging() {
     let accounts = Arc::new(InMemoryAuthProductServices::new());
     let scope =
         ResourceScope::local_default(UserId::new("alice").unwrap(), InvocationId::new()).unwrap();
@@ -555,9 +555,9 @@ async fn resolver_does_not_refresh_same_oauth_account_twice_during_runtime_stagi
             requester_extension: &requester_extension,
         })
         .await
-        .expect("second OAuth staging reuses refreshed account");
+        .expect("second OAuth staging refreshes again");
 
-    assert_eq!(second.handle, first.handle);
+    assert_ne!(second.handle, first.handle);
 }
 
 #[tokio::test]

@@ -18,6 +18,7 @@ pub(crate) fn schema() -> String {
         include_str!("../../schemas/github/get_pull_request_reviews.input.v1.json"),
         include_str!("../../schemas/github/get_combined_status.input.v1.json"),
         include_str!("../../schemas/github/merge_pull_request.input.v1.json"),
+        include_str!("../../schemas/github/get_authenticated_user.input.v1.json"),
         include_str!("../../schemas/github/list_repos.input.v1.json"),
         include_str!("../../schemas/github/search_repositories.input.v1.json"),
         include_str!("../../schemas/github/search_code.input.v1.json"),

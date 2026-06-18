@@ -76,7 +76,7 @@ pub(super) async fn list_extension_registry(
         entries: registry_entries
             .iter()
             .cloned()
-            .map(|summary| registry_entry(summary, &installed_ids))
+            .map(|extension| registry_entry(extension.summary, &installed_ids))
             .collect(),
     })
 }
@@ -369,8 +369,8 @@ mod tests {
         LifecycleExtensionCredentialRequirement, LifecycleExtensionCredentialSetup,
         LifecycleExtensionOnboarding, LifecycleExtensionRuntimeKind, LifecycleExtensionSource,
         LifecycleExtensionSurfaceKind, LifecycleInstalledExtensionSummary, LifecyclePackageKind,
-        ProductWorkflowError, RebornExtensionOnboardingState, RebornServicesErrorCode,
-        RebornServicesErrorKind,
+        LifecycleSearchExtensionSummary, ProductWorkflowError, RebornExtensionOnboardingState,
+        RebornServicesErrorCode, RebornServicesErrorKind,
     };
 
     #[tokio::test]
@@ -627,7 +627,10 @@ mod tests {
                 summary: installed_summary,
                 phase: LifecyclePhase::Active,
             },
-            registry: vec![registry_installed_summary, registry_uninstalled_summary],
+            registry: vec![
+                search_extension_summary(registry_installed_summary),
+                search_extension_summary(registry_uninstalled_summary),
+            ],
             calls: Mutex::new(Vec::new()),
         };
 
@@ -819,7 +822,7 @@ mod tests {
 
     struct RegistryListingFacade {
         installed: LifecycleInstalledExtensionSummary,
-        registry: Vec<LifecycleExtensionSummary>,
+        registry: Vec<LifecycleSearchExtensionSummary>,
         calls: Mutex<Vec<(LifecycleProductContext, LifecycleProductAction)>>,
     }
 
@@ -996,6 +999,15 @@ mod tests {
                     "Activate NEAR AI to publish its MCP tools.".to_string(),
                 ),
             }),
+        }
+    }
+
+    fn search_extension_summary(
+        summary: LifecycleExtensionSummary,
+    ) -> LifecycleSearchExtensionSummary {
+        LifecycleSearchExtensionSummary {
+            summary,
+            installation_phase: None,
         }
     }
 }

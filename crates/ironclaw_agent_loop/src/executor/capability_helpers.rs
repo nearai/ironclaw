@@ -518,6 +518,7 @@ mod tests {
             progress: CapabilityProgress::MadeProgress,
             terminate_hint: false,
             byte_len: 1000,
+            output_digest: None,
         };
         let result_a2 = CapabilityResultMessage {
             result_ref: ironclaw_turns::LoopResultRef::new("result:a2".to_string()).unwrap(),
@@ -525,6 +526,7 @@ mod tests {
             progress: CapabilityProgress::MadeProgress,
             terminate_hint: false,
             byte_len: 500,
+            output_digest: None,
         };
         let result_b = CapabilityResultMessage {
             result_ref: ironclaw_turns::LoopResultRef::new("result:b".to_string()).unwrap(),
@@ -532,6 +534,7 @@ mod tests {
             progress: CapabilityProgress::MadeProgress,
             terminate_hint: false,
             byte_len: 2000,
+            output_digest: None,
         };
         push_completed_result(&mut state, &cap_a, result_a1);
         push_completed_result(&mut state, &cap_a, result_a2);
@@ -568,6 +571,7 @@ mod tests {
             effective_capability_ids: vec![cap_a.clone(), cap_b.clone()],
             provider_replay: None,
             resume_token: None,
+            activity_id: None,
             prior_approval: None,
             replay: None,
             disposition: None,
@@ -611,6 +615,7 @@ mod tests {
             effective_capability_ids: vec![cap.clone()],
             provider_replay: None,
             resume_token: Some(resume_token.clone()),
+            activity_id: None,
             prior_approval: Some(AuthResumeApprovalIdentity {
                 approval_request_id,
                 correlation_id,
@@ -679,6 +684,7 @@ mod tests {
             effective_capability_ids: vec![cap.clone()],
             provider_replay: None,
             resume_token: None, // no prior approval — the key precondition
+            activity_id: None,
             prior_approval: None,
             replay: None,
             disposition: None,

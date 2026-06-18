@@ -59,6 +59,35 @@ pub trait AuthChallengeProvider: Send + Sync {
     ) -> Result<Option<AuthChallengeView>, AuthProductError>;
 }
 
+/// Cancels the durable `AuthFlow` record behind a blocked-auth turn gate.
+///
+/// When a Slack run blocked on interactive auth is auto-denied (a non-OAuth
+/// challenge the Slack surface can't satisfy), the delivery path cancels the run
+/// directly via `TurnCoordinator` rather than through the canonical
+/// `AuthInteractionService` deny path (which *resumes* the run with a denied
+/// disposition instead of cancelling it). Without this port the underlying
+/// `AuthFlow` record lingers non-terminal (`Pending`/`AwaitingUser`) until it
+/// expires — see issue #4952. Implemented by `RebornProductAuthServices` when a
+/// `flow_record_source` is wired in; a no-op when it isn't.
+///
+/// Implementations MUST scope the lookup by caller user, run id, gate ref, and
+/// tenant/agent/project/thread, and MUST treat an already-terminal (or absent)
+/// flow as a graceful no-op so the OAuth-callback race — where the flow completes
+/// just before auto-deny — does not surface an error.
+#[async_trait]
+pub trait BlockedAuthFlowCanceller: Send + Sync {
+    /// Cancel the non-terminal auth flow backing `(scope, run_id, gate_ref)`.
+    /// Returns `Ok(())` when the flow was cancelled, was already terminal, or
+    /// could not be found (nothing to cancel).
+    async fn cancel_blocked_auth_flow(
+        &self,
+        scope: &TurnScope,
+        owner_user_id: &UserId,
+        run_id: TurnRunId,
+        gate_ref: &str,
+    ) -> Result<(), AuthProductError>;
+}
+
 pub(crate) async fn auth_prompt_view_for_blocked_auth(
     fallback_owner_user_id: &UserId,
     scope: &TurnScope,

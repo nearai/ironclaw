@@ -353,21 +353,20 @@ async def test_reborn_v2_ui_send_renders_reply(reborn_v2_page, reborn_v2_server)
     )
 
 
-async def test_reborn_v2_messages_show_identity_labels(reborn_v2_page):
-    """User and assistant messages render a persistent identity label."""
+async def test_reborn_v2_messages_omit_identity_labels(reborn_v2_page):
+    """User and assistant messages render content without persistent identity labels."""
     composer = reborn_v2_page.locator(SEL_V2["chat_composer"])
     await composer.fill("hello there")
     await composer.press("Enter")
 
-    # The user bubble carries the "You" identity alongside its content.
+    # Message bubbles retain content while omitting redundant identity labels.
     user_bubble = reborn_v2_page.locator(SEL_V2["msg_user"]).first
     await expect(user_bubble).to_contain_text("hello there", timeout=15000)
-    await expect(user_bubble).to_contain_text("You")
+    await expect(user_bubble).not_to_contain_text("You")
 
-    # The assistant bubble carries the "IronClaw" identity (the canned reply
-    # text itself never contains that string).
     assistant_bubble = reborn_v2_page.locator(SEL_V2["msg_assistant"]).first
-    await expect(assistant_bubble).to_contain_text("IronClaw", timeout=30000)
+    await expect(assistant_bubble).to_contain_text("Hello", timeout=30000)
+    await expect(assistant_bubble).not_to_contain_text("IronClaw")
 
 
 async def test_reborn_v2_response_links_open_in_new_tab(reborn_v2_page):

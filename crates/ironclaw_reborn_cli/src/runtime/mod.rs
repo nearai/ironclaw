@@ -34,15 +34,31 @@ use trigger_poller::trigger_poller_settings;
 
 pub(crate) fn init_tracing() {
     use tracing_subscriber::EnvFilter;
+    use tracing_subscriber::Layer;
     use tracing_subscriber::fmt;
     use tracing_subscriber::prelude::*;
-    let filter = EnvFilter::try_from_env("IRONCLAW_REBORN_LOG").unwrap_or_else(|_| {
+    // stderr/fmt layer: operator-facing console output. Stays at `info` by
+    // default so `debug!` diagnostics never reach (and corrupt) a REPL/TUI
+    // terminal — the repo's logging invariant. Override via IRONCLAW_REBORN_LOG.
+    let stderr_filter = EnvFilter::try_from_env("IRONCLAW_REBORN_LOG").unwrap_or_else(|_| {
         EnvFilter::new("info,ironclaw_reborn=info,ironclaw_reborn_composition=info")
     });
+    // Operator Logs buffer: captures run diagnostics at `debug` for the
+    // ironclaw run-path crates so the scoped (thread/run) Logs panel is
+    // populated, while those `debug!` events are NOT written to stderr. This is
+    // a *separate* per-layer filter, so terminal safety and Logs-panel
+    // visibility are decoupled. Override via IRONCLAW_REBORN_OPERATOR_LOG.
+    let operator_filter =
+        EnvFilter::try_from_env("IRONCLAW_REBORN_OPERATOR_LOG").unwrap_or_else(|_| {
+            EnvFilter::new("info,ironclaw_reborn=debug,ironclaw_host_runtime=debug")
+        });
     let _ = tracing_subscriber::registry()
-        .with(filter)
-        .with(fmt::layer().with_writer(std::io::stderr))
-        .with(OperatorLogLayer)
+        .with(
+            fmt::layer()
+                .with_writer(std::io::stderr)
+                .with_filter(stderr_filter),
+        )
+        .with(OperatorLogLayer.with_filter(operator_filter))
         .try_init();
 }
 

@@ -8,7 +8,9 @@ mod slots;
 pub use bounded_ring::BoundedRing;
 pub use ironclaw_turns::LoopFailureKind;
 pub use ironclaw_turns::run_profile::AuthResumeApprovalIdentity;
-pub use signature::{ArgsHash, CapabilityCallSignature, CapabilityCallSignatureError};
+pub use signature::{
+    ArgsHash, CapabilityCallSignature, CapabilityCallSignatureError, CapabilityOutputObservation,
+};
 pub use slots::{
     CapabilityStrategyState, CompactionPromptSnapshot, CompactionStrategyState,
     ContextStrategyState, DeferredCompactionWatermark, GateStrategyState, GoalRefreshStrategyState,
@@ -22,7 +24,7 @@ use ironclaw_host_api::{ApprovalRequestId, CapabilityId, CorrelationId, Resource
 use ironclaw_turns::{
     LoopGateRef, LoopMessageRef, LoopResultRef,
     run_profile::{
-        CapabilityApprovalResume, CapabilityInputRef, CapabilityResumeToken,
+        CapabilityActivityId, CapabilityApprovalResume, CapabilityInputRef, CapabilityResumeToken,
         CapabilitySurfaceVersion, LoopInputCursor, LoopRunContext, ProviderToolCallReplay,
     },
 };
@@ -58,6 +60,8 @@ pub struct LoopExecutionState {
 
     // executor-observed (populated by executor; read-only to strategies)
     pub recent_call_signatures: BoundedRing<CapabilityCallSignature, 8>,
+    #[serde(default)]
+    pub seen_capability_output_digests: BoundedRing<CapabilityOutputObservation, 64>,
     pub recent_failure_kinds: BoundedRing<LoopFailureKind, 8>,
     /// Rolling window of assistant-output token counts (from
     /// `LoopModelResponse::usage.output_tokens`). The default stop
@@ -103,6 +107,11 @@ pub struct PendingApprovalResume {
     pub capability_id: CapabilityId,
     pub approval_request_id: ApprovalRequestId,
     pub resume_token: CapabilityResumeToken,
+    /// Activity identifier for the parked invocation. This is stored explicitly
+    /// so resume handling does not need to know how invocation ids are encoded
+    /// into resume tokens.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub activity_id: Option<CapabilityActivityId>,
     #[serde(default = "CorrelationId::new")]
     pub correlation_id: CorrelationId,
     pub surface_version: CapabilitySurfaceVersion,
@@ -112,9 +121,19 @@ pub struct PendingApprovalResume {
     pub provider_replay: Option<ProviderToolCallReplay>,
     pub input: serde_json::Value,
     pub estimate: ResourceEstimate,
+    /// Set when the user denied this approval gate. The loop surfaces a
+    /// model-visible failure for the parked call instead of re-dispatching.
+    /// See the field-name note on `PendingAuthResume::disposition`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub disposition: Option<ironclaw_turns::GateResumeDisposition>,
 }
 
 impl PendingApprovalResume {
+    pub(crate) fn activity_id_for_resume(&self) -> Option<CapabilityActivityId> {
+        self.activity_id
+            .or_else(|| capability_activity_id_from_resume_token(&self.resume_token))
+    }
+
     /// Converts this pending resume into the neutral wire DTO used by the
     /// capability port.  Centralising the field-by-field mapping here removes
     /// the two manual conversion sites in the executor and ensures any new
@@ -147,10 +166,11 @@ impl PendingApprovalResume {
 /// authorization failure for the parked call and SKIPS re-dispatch; in that
 /// case `resume_token` and `replay` are unused.
 ///
-/// Field-name note: `PendingAuthResume::disposition` is intentionally kept
-/// short because the enclosing type already scopes it to auth-resume context.
-/// Turn-layer structs that carry a similar field from a wider scope use the
-/// qualified name `auth_resume_disposition` to avoid ambiguity.
+/// Field-name note: each pending-resume type scopes `disposition` to ONE
+/// parked gate (auth or approval), so the short name is unambiguous within
+/// the struct.  Turn-layer records that are gate-agnostic use the fuller
+/// `resume_disposition` to distinguish the field from other disposition-like
+/// values in a wider context.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct PendingAuthResume {
     pub gate_ref: LoopGateRef,
@@ -166,6 +186,11 @@ pub struct PendingAuthResume {
     /// re-dispatch can reuse it instead of minting a fresh one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub resume_token: Option<CapabilityResumeToken>,
+    /// Activity identifier for the parked invocation when the invocation was
+    /// previously assigned one. Token-less auth gates can still be resumed, but
+    /// they have no persisted activity to finalize on denial.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub activity_id: Option<CapabilityActivityId>,
     /// Prior-approval identity, set together with `resume_token` when the
     /// invocation had previously passed a one-shot approval gate.
     /// `approval_request_id` and `correlation_id` are always set as a pair;
@@ -179,7 +204,23 @@ pub struct PendingAuthResume {
     /// Set when the user denied this auth gate. The loop surfaces a
     /// model-visible failure for the parked call instead of re-dispatching.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub disposition: Option<ironclaw_turns::AuthResumeDisposition>,
+    pub disposition: Option<ironclaw_turns::GateResumeDisposition>,
+}
+
+impl PendingAuthResume {
+    pub(crate) fn activity_id_for_resume(&self) -> Option<CapabilityActivityId> {
+        self.activity_id.or_else(|| {
+            self.resume_token
+                .as_ref()
+                .and_then(capability_activity_id_from_resume_token)
+        })
+    }
+}
+
+pub(crate) fn capability_activity_id_from_resume_token(
+    resume_token: &CapabilityResumeToken,
+) -> Option<CapabilityActivityId> {
+    CapabilityActivityId::parse(resume_token.as_str()).ok()
 }
 
 impl LoopExecutionState {
@@ -200,6 +241,7 @@ impl LoopExecutionState {
             input_cursor: LoopInputCursor::origin_for_run(context),
             surface_version: None,
             recent_call_signatures: BoundedRing::new(),
+            seen_capability_output_digests: BoundedRing::new(),
             recent_failure_kinds: BoundedRing::new(),
             recent_output_token_counts: BoundedRing::new(),
             final_answer_nudges_used: 0,
@@ -275,7 +317,7 @@ pub enum CheckpointPayloadError {
 mod tests {
     use ironclaw_host_api::{CapabilityId, TenantId, ThreadId};
     use ironclaw_turns::{
-        AgentLoopDriverDescriptor, AuthResumeDisposition, RunProfileId, RunProfileVersion, TurnId,
+        AgentLoopDriverDescriptor, GateResumeDisposition, RunProfileId, RunProfileVersion, TurnId,
         TurnRunId, TurnScope,
         run_profile::{
             CancellationPolicy, CapabilitySurfaceProfileId, CheckpointPolicy, CheckpointSchemaId,
@@ -527,6 +569,68 @@ mod tests {
     }
 
     #[test]
+    fn seen_capability_output_digests_round_trips_through_checkpoint_payload() {
+        let context = test_run_context();
+        let mut state = LoopExecutionState::initial_for_run(&context);
+        let signature = CapabilityCallSignature::from_call(
+            CapabilityId::new("demo.echo").expect("valid capability id"),
+            &json!({"message": "hi"}),
+        )
+        .expect("signature builds");
+        state
+            .seen_capability_output_digests
+            .push(CapabilityOutputObservation {
+                signature,
+                output_digest: ironclaw_turns::run_profile::ContentDigest(42),
+            });
+
+        let payload = encode_payload(&state);
+        let restored =
+            LoopExecutionState::from_checkpoint_payload(&payload, CheckpointKind::BeforeBlock)
+                .expect("decode checkpoint payload");
+
+        assert_eq!(
+            restored.seen_capability_output_digests, state.seen_capability_output_digests,
+            "seen_capability_output_digests must survive checkpoint encode/decode"
+        );
+    }
+
+    #[test]
+    fn checkpoint_payload_without_output_digest_ring_decodes_to_empty() {
+        let context = test_run_context();
+        let mut state = LoopExecutionState::initial_for_run(&context);
+        let signature = CapabilityCallSignature::from_call(
+            CapabilityId::new("demo.echo").expect("valid capability id"),
+            &json!({"message": "hi"}),
+        )
+        .expect("signature builds");
+        state
+            .seen_capability_output_digests
+            .push(CapabilityOutputObservation {
+                signature,
+                output_digest: ironclaw_turns::run_profile::ContentDigest(42),
+            });
+
+        let payload = encode_payload(&state);
+        let mut value: serde_json::Value = serde_json::from_slice(&payload).expect("parse");
+        value
+            .as_object_mut()
+            .expect("state serializes as object")
+            .remove("seen_capability_output_digests");
+        let stripped_payload = serde_json::to_vec(&value).expect("re-encode");
+        let from_legacy = LoopExecutionState::from_checkpoint_payload(
+            &stripped_payload,
+            CheckpointKind::BeforeBlock,
+        )
+        .expect("decode legacy checkpoint payload without seen_capability_output_digests");
+
+        assert!(
+            from_legacy.seen_capability_output_digests.is_empty(),
+            "legacy checkpoint missing seen_capability_output_digests must decode to an empty ring"
+        );
+    }
+
+    #[test]
     fn compaction_prompt_snapshot_round_trips_through_checkpoints() {
         let context = test_run_context();
         let mut state = LoopExecutionState::initial_for_run(&context);
@@ -728,6 +832,7 @@ mod tests {
             effective_capability_ids: vec![],
             provider_replay: None,
             resume_token: None,
+            activity_id: None,
             prior_approval: None,
             replay: None,
             disposition: None,
@@ -758,9 +863,10 @@ mod tests {
             effective_capability_ids: vec![],
             provider_replay: None,
             resume_token: None,
+            activity_id: None,
             prior_approval: None,
             replay: None,
-            disposition: Some(AuthResumeDisposition::Denied),
+            disposition: Some(GateResumeDisposition::Denied),
         });
         let payload = encode_payload(&state);
         let restored =
@@ -771,7 +877,7 @@ mod tests {
                 .pending_auth_resume
                 .as_ref()
                 .and_then(|r| r.disposition.as_ref()),
-            Some(&AuthResumeDisposition::Denied),
+            Some(&GateResumeDisposition::Denied),
             "PendingAuthResume with Denied disposition must survive checkpoint encode/decode"
         );
         assert_eq!(
@@ -866,6 +972,8 @@ mod tests {
         // Build a PendingAuthResume with all optional fields set.
         let resume_token = CapabilityResumeToken::new("00000000-0000-0000-0000-000000000001")
             .expect("valid resume token");
+        let activity_id = CapabilityActivityId::parse(resume_token.as_str())
+            .expect("resume token fixture is an activity id");
         let approval_request_id = ApprovalRequestId::new();
         let correlation_id = CorrelationId::new();
         state.pending_auth_resume = Some(PendingAuthResume {
@@ -877,6 +985,7 @@ mod tests {
             effective_capability_ids: vec![],
             provider_replay: None,
             resume_token: Some(resume_token.clone()),
+            activity_id: Some(activity_id),
             prior_approval: Some(AuthResumeApprovalIdentity {
                 approval_request_id,
                 correlation_id,
@@ -900,6 +1009,11 @@ mod tests {
             pending.resume_token,
             Some(resume_token),
             "resume_token must survive checkpoint encode/decode"
+        );
+        assert_eq!(
+            pending.activity_id,
+            Some(activity_id),
+            "activity_id must survive checkpoint encode/decode"
         );
         let pa = pending
             .prior_approval
@@ -929,6 +1043,7 @@ mod tests {
             .as_object_mut()
             .expect("pending_auth_resume is object");
         auth_resume.remove("resume_token");
+        auth_resume.remove("activity_id");
         auth_resume.remove("prior_approval");
         auth_resume.remove("replay");
         // Also strip `disposition` — it was added later and must also default
@@ -950,6 +1065,10 @@ mod tests {
             "resume_token absent from checkpoint payload must decode to None"
         );
         assert!(
+            legacy_pending.activity_id.is_none(),
+            "activity_id absent from checkpoint payload must decode to None"
+        );
+        assert!(
             legacy_pending.prior_approval.is_none(),
             "prior_approval absent from checkpoint payload must decode to None"
         );
@@ -960,6 +1079,110 @@ mod tests {
         assert!(
             legacy_pending.disposition.is_none(),
             "disposition absent from checkpoint payload must decode to None"
+        );
+    }
+
+    #[test]
+    fn pending_approval_resume_denied_disposition_round_trips_through_checkpoint_payload() {
+        // Mirror of `pending_auth_resume_denied_disposition_round_trips_through_checkpoint_payload`.
+        // The `Some(Denied)` disposition stamped on `pending_approval_resume` before the
+        // capability stage must survive the checkpoint encode/decode cycle so that a
+        // resumed run still sees the approval denial.
+        use ironclaw_host_api::{ApprovalRequestId, CorrelationId, ResourceEstimate};
+        use ironclaw_turns::run_profile::CapabilityResumeToken;
+
+        let context = test_run_context();
+        let mut state = LoopExecutionState::initial_for_run(&context);
+        let resume_token =
+            CapabilityResumeToken::new("00000000-0000-0000-0000-000000000099").expect("valid");
+        let activity_id = CapabilityActivityId::parse(resume_token.as_str())
+            .expect("resume token fixture is an activity id");
+        state.pending_approval_resume = Some(super::PendingApprovalResume {
+            gate_ref: LoopGateRef::new("gate:approval-denied-test").expect("valid gate ref"),
+            capability_id: CapabilityId::new("extensions.install").expect("valid cap id"),
+            approval_request_id: ApprovalRequestId::new(),
+            resume_token,
+            activity_id: Some(activity_id),
+            correlation_id: CorrelationId::new(),
+            surface_version: CapabilitySurfaceVersion::new("surface-v1")
+                .expect("valid surface version"),
+            input_ref: CapabilityInputRef::new("input:approval-denied").expect("valid input ref"),
+            effective_capability_ids: vec![],
+            provider_replay: None,
+            input: serde_json::json!({"extension_id": "slack"}),
+            estimate: ResourceEstimate::default(),
+            disposition: Some(GateResumeDisposition::Denied),
+        });
+        let payload = encode_payload(&state);
+        let restored =
+            LoopExecutionState::from_checkpoint_payload(&payload, CheckpointKind::BeforeBlock)
+                .expect("decode checkpoint payload");
+        assert_eq!(
+            restored
+                .pending_approval_resume
+                .as_ref()
+                .and_then(|r| r.disposition.as_ref()),
+            Some(&GateResumeDisposition::Denied),
+            "PendingApprovalResume with Denied disposition must survive checkpoint encode/decode"
+        );
+        assert_eq!(
+            restored.pending_approval_resume, state.pending_approval_resume,
+            "entire PendingApprovalResume must round-trip without loss when disposition is Some(Denied)"
+        );
+
+        // Compat: strip the `disposition` field to simulate a checkpoint written
+        // before the field was added. Decoding must yield `None`, not an error.
+        let mut value: serde_json::Value = serde_json::from_slice(&payload).expect("parse");
+        value
+            .as_object_mut()
+            .expect("state is object")
+            .get_mut("pending_approval_resume")
+            .expect("pending_approval_resume present")
+            .as_object_mut()
+            .expect("pending_approval_resume is object")
+            .remove("disposition");
+        let stripped = serde_json::to_vec(&value).expect("re-encode");
+        let from_legacy =
+            LoopExecutionState::from_checkpoint_payload(&stripped, CheckpointKind::BeforeBlock)
+                .expect("decode legacy checkpoint without disposition field");
+        assert!(
+            from_legacy
+                .pending_approval_resume
+                .as_ref()
+                .is_some_and(|r| r.disposition.is_none()),
+            "disposition absent from legacy checkpoint must decode to None"
+        );
+
+        // Compat: older checkpoints are also missing the explicit activity id.
+        // They can still recover it from the historical resume-token encoding.
+        let mut value_without_activity: serde_json::Value =
+            serde_json::from_slice(&payload).expect("parse");
+        value_without_activity
+            .as_object_mut()
+            .expect("state is object")
+            .get_mut("pending_approval_resume")
+            .expect("pending_approval_resume present")
+            .as_object_mut()
+            .expect("pending_approval_resume is object")
+            .remove("activity_id");
+        let stripped_activity = serde_json::to_vec(&value_without_activity).expect("re-encode");
+        let legacy_without_activity = LoopExecutionState::from_checkpoint_payload(
+            &stripped_activity,
+            CheckpointKind::BeforeBlock,
+        )
+        .expect("decode legacy checkpoint without activity_id field");
+        let legacy_resume = legacy_without_activity
+            .pending_approval_resume
+            .as_ref()
+            .expect("pending_approval_resume present");
+        assert_eq!(
+            legacy_resume.activity_id, None,
+            "activity_id absent from legacy checkpoint must decode to None"
+        );
+        assert_eq!(
+            legacy_resume.activity_id_for_resume(),
+            Some(activity_id),
+            "legacy approval resume must recover activity_id from resume_token"
         );
     }
 }

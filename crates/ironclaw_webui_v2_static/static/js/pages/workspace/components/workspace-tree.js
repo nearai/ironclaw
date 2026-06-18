@@ -1,9 +1,8 @@
 import { useQuery } from "@tanstack/react-query";
-import { React, html } from "../../../lib/html.js";
+import { html } from "../../../lib/html.js";
 import { useT } from "../../../lib/i18n.js";
-import { StatusPill } from "../../../design-system/primitives.js";
 import { listWorkspace } from "../lib/workspace-api.js";
-import { formatWorkspaceDate, snippetFor } from "../lib/workspace-presenters.js";
+import { sortEntries } from "../lib/workspace-presenters.js";
 
 function isUiHiddenWorkspacePath(path = "") {
   return String(path)
@@ -11,7 +10,25 @@ function isUiHiddenWorkspacePath(path = "") {
     .some((segment) => segment.startsWith("."));
 }
 
-function TreeNode({ entry, depth, selectedPath, expandedPaths, onToggleDirectory, onSelectFile }) {
+// Narrow a level's entries by the name filter. Hidden (".") paths are always
+// dropped. With a filter active, a non-matching directory is still kept when
+// it is expanded, so an already-drilled branch stays reachable to its matching
+// descendants rather than vanishing mid-path. Filtering only sees loaded
+// levels — it does not auto-expand to search unloaded subtrees.
+function visibleEntries(entries, filter, expandedPaths) {
+  const needle = String(filter || "").trim().toLowerCase();
+  const filtered = (entries || [])
+    .filter((entry) => !isUiHiddenWorkspacePath(entry.path))
+    .filter((entry) => {
+      if (!needle) return true;
+      if (entry.name.toLowerCase().includes(needle)) return true;
+      return entry.is_dir && expandedPaths.has(entry.path);
+    });
+  // Same folders-first, alphabetical order the main listing uses.
+  return sortEntries(filtered);
+}
+
+function TreeNode({ entry, depth, selectedPath, expandedPaths, filter, onToggleDirectory, onSelectFile }) {
   const t = useT();
   const isExpanded = expandedPaths.has(entry.path);
   const childQuery = useQuery({
@@ -21,12 +38,22 @@ function TreeNode({ entry, depth, selectedPath, expandedPaths, onToggleDirectory
   });
 
   if (entry.is_dir) {
+    const children = visibleEntries(childQuery.data?.entries, filter, expandedPaths);
     return html`
       <div>
         <button
           type="button"
-          onClick=${() => onToggleDirectory(entry.path)}
-          className="flex min-h-8 w-full items-center gap-2 rounded-md px-2 text-left text-sm text-iron-200 hover:bg-white/[0.05] hover:text-white"
+          onClick=${() => {
+            // Navigate so the main pane lists this folder, and toggle its
+            // expansion in the tree — one click drives both the master (tree)
+            // and detail (pane); clicking again collapses it.
+            onSelectFile(entry.path);
+            onToggleDirectory(entry.path);
+          }}
+          className=${[
+            "flex min-h-8 w-full items-center gap-2 rounded-md px-2 text-left text-sm hover:bg-white/[0.05] hover:text-white",
+            selectedPath === entry.path ? "bg-signal/10 text-signal" : "text-iron-200",
+          ].join(" ")}
           style=${{ paddingLeft: `${8 + depth * 16}px` }}
           aria-expanded=${isExpanded}
         >
@@ -37,15 +64,16 @@ function TreeNode({ entry, depth, selectedPath, expandedPaths, onToggleDirectory
           <div className="space-y-1">
             ${childQuery.isLoading
               ? html`<div className="px-4 py-2 text-xs text-iron-400">${t("workspace.loading")}</div>`
-              : (childQuery.data?.entries || [])
-                .filter((child) => !isUiHiddenWorkspacePath(child.path))
-                .map((child) => html`
+              : childQuery.isError
+              ? html`<div className="px-4 py-2 text-xs text-red-300">${t("workspace.unableOpenDirectory")}</div>`
+              : children.map((child) => html`
                   <${TreeNode}
                     key=${child.path}
                     entry=${child}
                     depth=${depth + 1}
                     selectedPath=${selectedPath}
                     expandedPaths=${expandedPaths}
+                    filter=${filter}
                     onToggleDirectory=${onToggleDirectory}
                     onSelectFile=${onSelectFile}
                   />
@@ -75,6 +103,7 @@ export function WorkspaceTree({
   entries,
   selectedPath,
   expandedPaths,
+  filter,
   onToggleDirectory,
   onSelectFile,
   isLoading,
@@ -84,56 +113,28 @@ export function WorkspaceTree({
     return html`<div className="space-y-2 p-3">${[1, 2, 3, 4].map((i) => html`<div key=${i} className="v2-skeleton h-8 rounded-md" />`)}</div>`;
   }
 
-  const visibleEntries = entries.filter((entry) => !isUiHiddenWorkspacePath(entry.path));
-
-  if (!visibleEntries.length) {
+  const rootEntries = sortEntries(
+    entries.filter((entry) => !isUiHiddenWorkspacePath(entry.path))
+  );
+  if (!rootEntries.length) {
     return html`<div className="px-4 py-8 text-sm text-iron-300">${t("workspace.noFiles")}</div>`;
   }
 
+  // Mounts (the tree roots) are always shown so the picker never disappears;
+  // the filter narrows their contents as you drill in.
   return html`
     <div className="space-y-1 p-2">
-      ${visibleEntries.map((entry) => html`
+      ${rootEntries.map((entry) => html`
         <${TreeNode}
           key=${entry.path}
           entry=${entry}
           depth=${0}
           selectedPath=${selectedPath}
           expandedPaths=${expandedPaths}
+          filter=${filter}
           onToggleDirectory=${onToggleDirectory}
           onSelectFile=${onSelectFile}
         />
-      `)}
-    </div>
-  `;
-}
-
-export function WorkspaceSearchResults({ results, query, onSelectFile, isSearching }) {
-  const t = useT();
-  if (isSearching) {
-    return html`<div className="p-4 text-sm text-iron-300">${t("workspace.searching")}</div>`;
-  }
-
-  const visibleResults = results.filter((result) => !isUiHiddenWorkspacePath(result.path));
-
-  if (!visibleResults.length) {
-    return html`<div className="p-4 text-sm text-iron-300">${t("workspace.noResults")}</div>`;
-  }
-
-  return html`
-    <div className="space-y-2 p-2">
-      ${visibleResults.map((result) => html`
-        <button
-          key=${result.path}
-          type="button"
-          onClick=${() => onSelectFile(result.path)}
-          className="w-full rounded-md border border-white/8 bg-white/[0.025] p-3 text-left hover:border-signal/25 hover:bg-white/[0.05]"
-        >
-          <div className="flex items-center justify-between gap-2">
-            <div className="min-w-0 truncate font-mono text-xs text-signal">${result.path}</div>
-            <${StatusPill} tone="muted" label=${Number(result.score || 0).toFixed(2)} />
-          </div>
-          <div className="mt-2 line-clamp-2 text-xs leading-5 text-iron-300">${snippetFor(result.content, query)}</div>
-        </button>
       `)}
     </div>
   `;

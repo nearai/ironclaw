@@ -680,6 +680,7 @@ fn github_assets() -> Vec<AvailableExtensionAsset> {
         github_schema_asset!("get_pull_request_files.input.v1.json"),
         github_schema_asset!("get_pull_request_reviews.input.v1.json"),
         github_schema_asset!("get_repo.input.v1.json"),
+        github_schema_asset!("get_authenticated_user.input.v1.json"),
         github_schema_asset!("get_workflow_runs.input.v1.json"),
         github_schema_asset!("handle_webhook.input.v1.json"),
         github_schema_asset!("list_branches.input.v1.json"),
@@ -716,6 +717,7 @@ fn github_assets() -> Vec<AvailableExtensionAsset> {
         github_prompt_asset!("get_pull_request_files.md"),
         github_prompt_asset!("get_pull_request_reviews.md"),
         github_prompt_asset!("get_repo.md"),
+        github_prompt_asset!("get_authenticated_user.md"),
         github_prompt_asset!("get_workflow_runs.md"),
         github_prompt_asset!("handle_webhook.md"),
         github_prompt_asset!("list_branches.md"),
@@ -1694,6 +1696,7 @@ mod tests {
         }
 
         assert!(allowed_read_only.contains("github.get_repo"));
+        assert!(allowed_read_only.contains("github.get_authenticated_user"));
         assert!(allowed_read_only.contains("github.list_branches"));
         assert!(ask_required.contains("github.search_code"));
         assert!(ask_required.contains("github.create_issue"));
