@@ -241,6 +241,7 @@ export function listProjects({ limit } = {}) {
 }
 
 export function createProject({ name, description, icon, color, metadata } = {}) {
+  if (!name) return Promise.reject(new Error("name is required"));
   const body = { name };
   if (description != null) body.description = description;
   if (icon != null) body.icon = icon;
@@ -280,6 +281,7 @@ export function addProjectMember({ projectId, userId, role } = {}) {
   if (!projectId || !userId) {
     return Promise.reject(new Error("projectId and userId are required"));
   }
+  if (!role) return Promise.reject(new Error("role is required"));
   return apiFetch(`${projectPath(projectId)}/members`, {
     method: "POST",
     body: JSON.stringify({ user_id: userId, role }),
@@ -290,6 +292,7 @@ export function updateProjectMemberRole({ projectId, userId, role } = {}) {
   if (!projectId || !userId) {
     return Promise.reject(new Error("projectId and userId are required"));
   }
+  if (!role) return Promise.reject(new Error("role is required"));
   return apiFetch(`${projectPath(projectId)}/members/${encodeURIComponent(userId)}`, {
     method: "POST",
     body: JSON.stringify({ role }),

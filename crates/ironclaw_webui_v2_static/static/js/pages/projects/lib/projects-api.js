@@ -21,7 +21,15 @@ import {
 // extensible `metadata` bag.
 function toPageProject(project) {
   if (!project) return null;
-  const metadata = project.metadata && typeof project.metadata === "object" ? project.metadata : {};
+  // The server constrains `metadata` to a JSON object or null
+  // (`ProjectRecord::validate`), but guard against arrays defensively
+  // (`typeof [] === "object"`) so the page always treats it as an object bag.
+  const metadata =
+    project.metadata &&
+    typeof project.metadata === "object" &&
+    !Array.isArray(project.metadata)
+      ? project.metadata
+      : {};
   return {
     id: project.project_id,
     name: project.name,
