@@ -55,7 +55,8 @@ use ironclaw_secrets::InMemorySecretStore;
 use ironclaw_triggers::{
     ClaimDueFireRequest, ClearActiveFireRequest, FireAcceptedRequest, InMemoryTriggerRepository,
     MAX_TRIGGER_NAME_BYTES, MAX_TRIGGER_PROMPT_BYTES, TriggerCompletionPolicy, TriggerError,
-    TriggerRecord, TriggerRepository, TriggerRunHistoryStatus, TriggerRunRecord, TriggerState,
+    TriggerRecord, TriggerRepository, TriggerRunHistoryStatus, TriggerRunRecord, TriggerSchedule,
+    TriggerState,
 };
 use ironclaw_trust::{
     AdminConfig, AdminEntry, AuthorityCeiling, EffectiveTrustClass, HostTrustAssignment,
@@ -837,6 +838,78 @@ async fn builtin_trigger_create_rejects_invalid_completion_policy_before_persist
             .unwrap()
             .is_empty(),
         "no trigger should be persisted when completion_policy is an unknown value"
+    );
+}
+
+/// Positive path: a FUTURE 7-field year-pinned cron with
+/// `completion_policy = complete_after_first_fire` must be accepted, persisted,
+/// and round-trip the schedule and policy fields correctly.
+///
+/// Year 2099 is used so the cron always has a future slot regardless of the
+/// real wall-clock — no fixed test clock is needed.  The cron crate ceiling is
+/// 2100, so 2099 is safely within range.
+#[tokio::test]
+async fn builtin_trigger_create_accepts_year_pinned_complete_after_first_fire() {
+    let repository = Arc::new(InMemoryTriggerRepository::default());
+    let runtime = runtime_with_trigger_repository(repository.clone());
+    let context = execution_context([TRIGGER_CREATE_CAPABILITY_ID]);
+
+    // "0 0 17 24 6 * 2099" — fires at 17:00 UTC on 24 Jun 2099.
+    // Seven-field cron: sec min hour day month weekday year.
+    let cron_expr = "0 0 17 24 6 * 2099";
+
+    let output = invoke_with_context(
+        &runtime,
+        TRIGGER_CREATE_CAPABILITY_ID,
+        json!({
+            "name": "One-shot reminder 2099",
+            "prompt": "Check the archives",
+            "cron": cron_expr,
+            "timezone": "UTC",
+            "completion_policy": "complete_after_first_fire"
+        }),
+        context.clone(),
+    )
+    .await
+    .expect("year-pinned complete_after_first_fire trigger must be accepted");
+
+    // The response must surface the policy correctly.
+    let trigger = &output["trigger"];
+    assert_eq!(trigger["name"], json!("One-shot reminder 2099"));
+    assert_eq!(
+        trigger["completion_policy"],
+        json!("complete_after_first_fire")
+    );
+    assert_eq!(trigger["state"], json!("scheduled"));
+
+    // The record must be persisted with the correct policy and schedule.
+    let records = repository
+        .list_triggers(context.resource_scope.tenant_id.clone())
+        .await
+        .unwrap();
+    assert_eq!(records.len(), 1, "exactly one trigger must be persisted");
+
+    let record = &records[0];
+    assert_eq!(
+        record.completion_policy,
+        TriggerCompletionPolicy::CompleteAfterFirstFire,
+        "persisted record must carry CompleteAfterFirstFire policy"
+    );
+    assert_eq!(record.name, "One-shot reminder 2099");
+    assert_eq!(record.prompt, "Check the archives");
+
+    // Verify the stored schedule matches the submitted cron expression and timezone.
+    let TriggerSchedule::Cron {
+        expression,
+        timezone,
+    } = &record.schedule;
+    assert_eq!(
+        expression, cron_expr,
+        "stored cron expression must match the submitted value"
+    );
+    assert_eq!(
+        timezone, "UTC",
+        "stored timezone must match the submitted value"
     );
 }
 
