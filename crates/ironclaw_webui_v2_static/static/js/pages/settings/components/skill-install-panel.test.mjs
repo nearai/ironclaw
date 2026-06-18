@@ -41,17 +41,41 @@ function html(strings, ...values) {
   return { strings: Array.from(strings), values };
 }
 
-function componentProps(rendered, component) {
+function visit(node, fn) {
+  if (Array.isArray(node)) {
+    for (const item of node) visit(item, fn);
+    return;
+  }
+  if (!node || typeof node !== "object") return;
+  fn(node);
+  if (Array.isArray(node.values)) {
+    for (const value of node.values) visit(value, fn);
+  }
+}
+
+function collectScalars(root) {
+  const scalars = [];
+  visit(root, (node) => {
+    if (!Array.isArray(node.values)) return;
+    for (const value of node.values) {
+      if (typeof value === "string" || typeof value === "number" || typeof value === "boolean") {
+        scalars.push(value);
+      }
+    }
+  });
+  return scalars;
+}
+
+function componentProps(rendered, component, allComponents) {
   const props = [];
   for (let index = 0; index < rendered.values.length; index += 1) {
     if (rendered.values[index] !== component) continue;
     const current = {};
     for (let propIndex = index + 1; propIndex < rendered.values.length; propIndex += 1) {
+      if (allComponents.has(rendered.values[propIndex])) break;
       const name = rendered.strings[propIndex]?.match(/([A-Za-z][A-Za-z0-9-]*)=\s*$/)?.[1];
       if (name) {
         current[name] = rendered.values[propIndex];
-      } else if (typeof rendered.values[propIndex] === "function") {
-        break;
       }
     }
     props.push(current);
@@ -108,6 +132,7 @@ function createHarness({ onInstall = async () => ({ success: true }) } = {}) {
     },
   };
   vm.runInNewContext(skillInstallPanelSourceForTest(), context);
+  const allComponents = new Set([Button, Card, FormField, Icon, Input, Textarea]);
 
   return {
     Button,
@@ -115,10 +140,13 @@ function createHarness({ onInstall = async () => ({ success: true }) } = {}) {
     Input,
     Textarea,
     installs,
-    render() {
+    props(rendered, component) {
+      return componentProps(rendered, component, allComponents);
+    },
+    render({ isInstalling = false } = {}) {
       cursor = 0;
       return context.globalThis.__testExports.SkillInstallPanel({
-        isInstalling: false,
+        isInstalling,
         onInstall: async (payload) => {
           installs.push(payload);
           return onInstall(payload);
@@ -132,37 +160,101 @@ test("SkillInstallPanel clears required-field errors when fields become valid", 
   const harness = createHarness();
   let rendered = harness.render();
 
-  await componentProps(rendered, harness.Button)[0].onClick();
+  await harness.props(rendered, harness.Button)[0].onClick();
   assert.deepEqual(harness.installs, []);
 
   rendered = harness.render();
-  let fields = componentProps(rendered, harness.FormField);
+  let fields = harness.props(rendered, harness.FormField);
+  let inputs = harness.props(rendered, harness.Input);
+  let textareas = harness.props(rendered, harness.Textarea);
   assert.equal(fields[0].error, "Skill name is required.");
   assert.equal(fields[1].error, "SKILL.md content is required.");
+  assert.equal(inputs[0].error, true);
+  assert.equal(inputs[0]["aria-invalid"], "true");
+  assert.equal(textareas[0].error, true);
+  assert.equal(textareas[0]["aria-invalid"], "true");
 
-  componentProps(rendered, harness.Input)[0].onInput({
+  inputs[0].onInput({
     currentTarget: { value: "summarizer" },
   });
 
   rendered = harness.render();
-  fields = componentProps(rendered, harness.FormField);
+  fields = harness.props(rendered, harness.FormField);
+  inputs = harness.props(rendered, harness.Input);
+  textareas = harness.props(rendered, harness.Textarea);
   assert.equal(fields[0].error, "");
   assert.equal(fields[1].error, "SKILL.md content is required.");
+  assert.equal(inputs[0].error, false);
+  assert.equal(inputs[0]["aria-invalid"], undefined);
+  assert.equal(textareas[0].error, true);
+  assert.equal(textareas[0]["aria-invalid"], "true");
 
-  componentProps(rendered, harness.Textarea)[0].onInput({
+  textareas[0].onInput({
     currentTarget: { value: "---\nname: summarizer\n---\nSummarize documents." },
   });
 
   rendered = harness.render();
-  fields = componentProps(rendered, harness.FormField);
+  fields = harness.props(rendered, harness.FormField);
+  inputs = harness.props(rendered, harness.Input);
+  textareas = harness.props(rendered, harness.Textarea);
   assert.equal(fields[0].error, "");
   assert.equal(fields[1].error, "");
+  assert.equal(inputs[0].error, false);
+  assert.equal(inputs[0]["aria-invalid"], undefined);
+  assert.equal(textareas[0].error, false);
+  assert.equal(textareas[0]["aria-invalid"], undefined);
 
-  await componentProps(rendered, harness.Button)[0].onClick();
+  await harness.props(rendered, harness.Button)[0].onClick();
   assert.deepEqual(JSON.parse(JSON.stringify(harness.installs)), [
     {
       name: "summarizer",
       content: "---\nname: summarizer\n---\nSummarize documents.",
     },
   ]);
+
+  rendered = harness.render();
+  assert.equal(harness.props(rendered, harness.Input)[0].value, "");
+  assert.equal(harness.props(rendered, harness.Textarea)[0].value, "");
+  assert.ok(collectScalars(rendered).includes('Added skill "summarizer"'));
+});
+
+test("SkillInstallPanel displays install failures without resetting entered values", async () => {
+  const harness = createHarness({
+    onInstall: async () => ({ success: false, message: "Skill already exists." }),
+  });
+  let rendered = harness.render();
+
+  harness.props(rendered, harness.Input)[0].onInput({
+    currentTarget: { value: "summarizer" },
+  });
+  rendered = harness.render();
+  harness.props(rendered, harness.Textarea)[0].onInput({
+    currentTarget: { value: "---\nname: summarizer\n---\nSummarize documents." },
+  });
+  rendered = harness.render();
+
+  await harness.props(rendered, harness.Button)[0].onClick();
+
+  rendered = harness.render();
+  assert.deepEqual(JSON.parse(JSON.stringify(harness.installs)), [
+    {
+      name: "summarizer",
+      content: "---\nname: summarizer\n---\nSummarize documents.",
+    },
+  ]);
+  assert.equal(harness.props(rendered, harness.Input)[0].value, "summarizer");
+  assert.equal(
+    harness.props(rendered, harness.Textarea)[0].value,
+    "---\nname: summarizer\n---\nSummarize documents."
+  );
+  assert.ok(collectScalars(rendered).includes("Skill already exists."));
+});
+
+test("SkillInstallPanel disables submit and changes label while installing", () => {
+  const harness = createHarness();
+  const rendered = harness.render({ isInstalling: true });
+  const button = harness.props(rendered, harness.Button)[0];
+
+  assert.equal(button.disabled, true);
+  assert.ok(collectScalars(rendered).includes("Importing..."));
 });

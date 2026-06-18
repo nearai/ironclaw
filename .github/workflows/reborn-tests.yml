@@ -247,7 +247,17 @@ jobs:
           node-version: "22"
 
       - name: Run Reborn settings JS tests
-        run: node --test 'crates/ironclaw_webui_v2_static/static/js/pages/settings/**/*.test.mjs' 'crates/ironclaw_webui_v2_static/static/js/pages/settings/**/*.test.js'
+        run: |
+          mapfile -t tests < <(
+            find crates/ironclaw_webui_v2_static/static/js/pages/settings \
+              -type f \( -name '*.test.mjs' -o -name '*.test.js' \) \
+              | sort
+          )
+          if [ "${#tests[@]}" -eq 0 ]; then
+            echo "No Reborn settings JS tests found"
+            exit 1
+          fi
+          node --test "${tests[@]}"
 
   reborn-tests:
     name: Tests (Reborn)
