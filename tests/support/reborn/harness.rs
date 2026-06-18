@@ -67,6 +67,7 @@ use ironclaw_host_runtime::{
     VisibleCapabilitySurface as RuntimeVisibleCapabilitySurface, WRITE_FILE_CAPABILITY_ID,
     builtin_first_party_handlers, builtin_first_party_package,
 };
+use ironclaw_host_runtime::{SchedulerTurnRunWakeNotifier, TurnRunSchedulerHandle};
 use ironclaw_loop_support::{
     CapabilityAllowSet, CapabilityResolveError, CapabilityResultWrite,
     CapabilitySurfaceProfileResolver, CapabilityWriteResult, DEFAULT_SPAWN_SUBAGENT_CAPABILITY_ID,
@@ -91,7 +92,6 @@ use ironclaw_reborn::subagent::{
     flavors::StaticSubagentDefinitionResolver, gate_resolution::BoundedSubagentGateResolutionStore,
     goal_store::InMemoryBoundedSubagentGoalStore,
 };
-use ironclaw_host_runtime::{SchedulerTurnRunWakeNotifier, TurnRunSchedulerHandle};
 use ironclaw_reborn::{
     loop_exit_applier::{
         BlockedEvidenceRequest, CompletionEvidenceRequest, FailureEvidenceRequest,
@@ -1430,7 +1430,11 @@ impl RebornBinaryE2EHarness {
 
 impl Drop for RebornBinaryE2EHarness {
     fn drop(&mut self) {
-        self.cancel.cancel();
+        // Scheduler handle is Option<TurnRunSchedulerHandle>; shutdown is async
+        // and cannot be called from Drop. The handle is taken in shutdown() and
+        // here we just let it drop. The scheduler supervisor task exits when the
+        // command channel closes on drop.
+        let _ = self.scheduler_handle.take();
     }
 }
 

@@ -600,12 +600,8 @@ where
         .with_max_concurrent_runs(worker_count)
         .with_runner_heartbeat_interval(parts.config.worker.heartbeat_interval)
         .with_poll_interval(parts.config.worker.poll_interval);
-    let scheduler_handle = TurnRunScheduler::new(
-        Arc::clone(&transition_port),
-        executor,
-        scheduler_config,
-    )
-    .start();
+    let scheduler_handle =
+        TurnRunScheduler::new(Arc::clone(&transition_port), executor, scheduler_config).start();
     let scheduler_notifier = scheduler_handle.wake_notifier();
 
     // Wire the late-wire notifier to forward to the real scheduler notifier.

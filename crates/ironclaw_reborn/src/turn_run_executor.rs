@@ -83,9 +83,9 @@ impl TurnRunExecutor for RebornTurnRunExecutor {
             }
             Err(err) => {
                 let sanitized = match &err {
-                    DriverInvocationError::DriverError(
-                        AgentLoopDriverError::Failed { reason_kind },
-                    ) => sanitized_driver_failure(reason_kind),
+                    DriverInvocationError::DriverError(AgentLoopDriverError::Failed {
+                        reason_kind,
+                    }) => sanitized_driver_failure(reason_kind),
                     DriverInvocationError::DriverNotFound { .. } => {
                         sanitized_failure("driver_not_found")
                     }
@@ -95,12 +95,12 @@ impl TurnRunExecutor for RebornTurnRunExecutor {
                     DriverInvocationError::RouteSnapshotPersistenceFailed(_) => {
                         sanitized_failure("route_snapshot_persistence_failed")
                     }
-                    DriverInvocationError::DriverError(
-                        AgentLoopDriverError::InvalidRequest { .. },
-                    ) => sanitized_failure("driver_invalid_request"),
-                    DriverInvocationError::DriverError(
-                        AgentLoopDriverError::Unavailable { .. },
-                    ) => sanitized_failure("driver_unavailable"),
+                    DriverInvocationError::DriverError(AgentLoopDriverError::InvalidRequest {
+                        ..
+                    }) => sanitized_failure("driver_invalid_request"),
+                    DriverInvocationError::DriverError(AgentLoopDriverError::Unavailable {
+                        ..
+                    }) => sanitized_failure("driver_unavailable"),
                 };
                 match sanitized {
                     Some(f) => Err(TurnRunExecutorError::new(f.category()).unwrap_or_else(|_| {

@@ -43,6 +43,7 @@ use ironclaw_host_api::{
     AuditStage, CapabilityId, CorrelationId, DecisionSummary, EffectKind, InvocationId,
     ResourceScope, TenantId, ThreadId, UserId,
 };
+use ironclaw_host_runtime::{SchedulerTurnRunWakeNotifier, TurnRunSchedulerHandle};
 use ironclaw_loop_support::{
     CapabilityAllowSet, CapabilityResolveError, CapabilitySurfaceProfileResolver,
     EmptyUserProfileSource, FilesystemSkillBundleSource, HostIdentityContextSource,
@@ -74,7 +75,6 @@ use ironclaw_reborn::subagent::goal_store::InMemoryBoundedSubagentGoalStore;
 use ironclaw_reborn::subagent::{
     flavors::StaticSubagentDefinitionResolver, gate_resolution::BoundedSubagentGateResolutionStore,
 };
-use ironclaw_host_runtime::{SchedulerTurnRunWakeNotifier, TurnRunSchedulerHandle};
 use ironclaw_reborn::turn_runner::TurnRunnerWorkerConfig;
 use ironclaw_threads::{
     AcceptInboundMessageRequest, EnsureThreadRequest, MessageContent, MessageKind, MessageStatus,
@@ -1512,7 +1512,7 @@ impl RebornRuntime {
             .ok()
             .as_ref()
             .and_then(|g| g.as_ref())
-            .map_or(true, |h| h.is_stopped())
+            .is_none_or(|h| h.is_stopped())
         {
             return Err(RebornRuntimeError::WorkerStopped);
         }
@@ -1755,7 +1755,7 @@ impl RebornRuntime {
                 .ok()
                 .as_ref()
                 .and_then(|g| g.as_ref())
-                .map_or(true, |h| h.is_stopped())
+                .is_none_or(|h| h.is_stopped())
             {
                 return Err(RebornRuntimeError::WorkerStopped);
             }
@@ -1822,7 +1822,7 @@ impl RebornRuntime {
                 .ok()
                 .as_ref()
                 .and_then(|g| g.as_ref())
-                .map_or(true, |h| h.is_stopped())
+                .is_none_or(|h| h.is_stopped())
             {
                 return Err(RebornRuntimeError::WorkerStopped);
             }
