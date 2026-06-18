@@ -232,9 +232,10 @@ async fn webui_event_stream_projects_live_tool_failure() {
     let activity = events
         .iter()
         .filter_map(|event| match event.payload() {
-            ProductOutboundPayload::ProjectionUpdate { state } => state.items.first(),
+            ProductOutboundPayload::ProjectionUpdate { state } => Some(state.items.iter()),
             _ => None,
         })
+        .flatten()
         .find_map(|item| match item {
             ProductProjectionItem::CapabilityActivity(activity) => Some(activity),
             _ => None,
@@ -248,5 +249,6 @@ async fn webui_event_stream_projects_live_tool_failure() {
     assert_eq!(activity.thread_id.as_ref(), Some(&thread_id));
     assert_eq!(&activity.capability_id, &capability_id);
     assert_eq!(activity.status, CapabilityActivityStatusView::Failed);
+    assert_eq!(activity.runtime.as_ref(), Some(&RuntimeKind::FirstParty));
     assert_eq!(activity.error_kind.as_deref(), Some("authorization"));
 }
