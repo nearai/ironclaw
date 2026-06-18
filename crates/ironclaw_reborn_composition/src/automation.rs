@@ -194,12 +194,11 @@ impl AutomationProductFacade for RebornAutomationProductFacade {
     }
 }
 
-/// Returns `true` when `trigger` would appear in the caller's `list_automations`
-/// response — i.e. the trigger matches the exact caller scope that
-/// `list_scoped_triggers` enforces (tenant_id + creator_user_id + agent_id +
-/// project_id).  This mirrors the filter in
-/// `InMemoryTriggerRepository::list_scoped_triggers` and the SQL WHERE clause
-/// used by the libSQL and PostgreSQL backends:
+/// Returns `true` when `trigger` belongs to the caller — i.e. the trigger
+/// matches the exact caller scope that `list_scoped_triggers` enforces
+/// (tenant_id + creator_user_id + agent_id + project_id).  This mirrors the
+/// filter in `InMemoryTriggerRepository::list_scoped_triggers` and the SQL
+/// WHERE clause used by the libSQL and PostgreSQL backends:
 ///
 /// ```text
 /// WHERE tenant_id    = <caller.tenant_id>
@@ -207,6 +206,17 @@ impl AutomationProductFacade for RebornAutomationProductFacade {
 ///   AND agent_id    IS <caller.agent_id>   -- NULL-safe equality
 ///   AND project_id  IS <caller.project_id> -- NULL-safe equality
 /// ```
+///
+/// **Visibility for listing vs. thread authorization are deliberately
+/// decoupled.**  The default `list_automations` response excludes
+/// `TriggerState::Completed` triggers (soft-completed fire-once triggers) to
+/// avoid cluttering the active automations panel.  However, completed triggers
+/// remain queryable (`include_completed = true` / `trigger_list` model tool)
+/// and their run threads remain accessible — the history is retained user data.
+/// This resolver intentionally does NOT filter on trigger state: a completed
+/// trigger's run threads must stay resolvable so the user can always reach
+/// their own trigger history.  Adding a `Completed` exclusion here would
+/// regress access to run threads that are still valid retained data.
 ///
 /// **None-agent triggers are never visible** through this path.
 /// `ProductAgentBoundCaller` always carries a concrete `AgentId` (it is a

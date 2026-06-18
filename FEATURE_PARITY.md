@@ -674,7 +674,7 @@ Trace Commons issuer/TenantCtx note: the server-side `zmanian/tracedao-server` s
 | Feature | OpenClaw | IronClaw | Priority | Notes |
 |---------|----------|----------|----------|-------|
 | Cron jobs | ✅ | ✅ | - | Routines with cron trigger; runtime state split into `jobs-state.json`; `sessionTarget: "current"`/`session:<id>` bindings |
-| Reborn scheduled trigger loop | ➖ | 🚧 | P2 | Reborn-native trigger persistence, backend parity, atomic fire claim/update APIs, poller core, caller-level harness, first-party `trigger_*` capabilities, and composition-owned worker lifecycle are in progress; automation panel runs now link canonical thread ids; trigger-owned threads are openable, watchable, approvable, and cancelable by automation owners via automation-visibility authorization; remaining follow-ups: one-shot `completion_policy` work, legacy pre-fix rows without a stored thread_id remain unopenable, external result delivery, production readiness policy, active-run retention/tombstone semantics, and production jitter source selection |
+| Reborn scheduled trigger loop | ➖ | 🚧 | P2 | Reborn-native trigger persistence, backend parity, atomic fire claim/update APIs, poller core, caller-level harness, first-party `trigger_*` capabilities, and composition-owned worker lifecycle are in progress; automation panel runs now link canonical thread ids; trigger-owned threads are openable, watchable, approvable, and cancelable by automation owners via automation-visibility authorization; one-shot via year-pinned cron + `complete_after_first_fire` completion policy is implemented; remaining follow-ups: legacy pre-fix rows without a stored thread_id remain unopenable, external result delivery, production readiness policy, active-run retention/tombstone semantics, and production jitter source selection |
 | Per-job model fallback override | ✅ | ❌ | P2 | `payload.fallbacks` overrides agent-level fallbacks |
 | Cron stagger controls | ✅ | ❌ | P3 | Default stagger for scheduled jobs |
 | Cron finished-run webhook | ✅ | ❌ | P3 | Webhook on job completion |
@@ -684,7 +684,7 @@ Trace Commons issuer/TenantCtx note: the server-side `zmanian/tracedao-server` s
 | Cron `nested` lane | ✅ | ❌ | P3 | `cron.maxConcurrentRuns` applies to dedicated `cron-nested` lane; non-cron flows keep their own lane |
 | Cron stuck-session timeout | ✅ | ❌ | P3 | Aborts/cleans timed-out isolated turns before recording timeout |
 | Timezone support | ✅ | ✅ | - | Via cron expressions; `--at` honors local wall-clock time across DST |
-| One-shot/recurring jobs | ✅ | ✅ | - | Manual + cron triggers |
+| One-shot/recurring jobs | ✅ | ✅ | - | Manual + cron triggers; Reborn one-shot uses year-pinned cron + `completion_policy: complete_after_first_fire` |
 | Channel health monitor | ✅ | ❌ | P2 | Auto-restart with configurable interval |
 | `beforeInbound` hook | ✅ | ✅ | P2 | |
 | `beforeOutbound` hook | ✅ | ✅ | P2 | |

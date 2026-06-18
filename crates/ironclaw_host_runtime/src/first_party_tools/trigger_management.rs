@@ -200,7 +200,6 @@ struct TriggerCreateInput {
     prompt: String,
     cron: String,
     timezone: String,
-    #[serde(default)]
     completion_policy: TriggerCompletionPolicy,
 }
 
@@ -543,18 +542,17 @@ mod tests {
     }
 
     #[test]
-    fn trigger_create_input_defaults_to_recurring_when_completion_policy_absent() {
+    fn trigger_create_input_rejects_missing_completion_policy() {
         let input = serde_json::json!({
             "name": "daily",
             "prompt": "check mail",
             "cron": "0 9 * * *",
             "timezone": "America/New_York"
         });
-        let parsed: TriggerCreateInput =
-            serde_json::from_value(input).expect("missing completion_policy should default");
+        let result: Result<TriggerCreateInput, _> = serde_json::from_value(input);
         assert!(
-            matches!(parsed.completion_policy, TriggerCompletionPolicy::Recurring),
-            "omitting completion_policy must default to Recurring"
+            result.is_err(),
+            "omitting completion_policy must fail deserialization"
         );
     }
 

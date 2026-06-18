@@ -3705,3 +3705,94 @@ mod find_trigger_run_by_thread_id_contract {
         super::clear_postgres_triggers(&pool).await;
     }
 }
+
+// ---------------------------------------------------------------------------
+// list_scoped_triggers excluded_states parity
+// ---------------------------------------------------------------------------
+
+mod list_scoped_triggers_excluded_states_contract {
+    use super::*;
+
+    async fn assert_list_scoped_triggers_excludes_states(repo: &impl TriggerRepository) {
+        let scheduled = sample_record(
+            TriggerId::parse("01J00000000000000000000050").expect("ulid"),
+            tenant("tenant-excl"),
+            ts(1_704_067_200),
+        );
+        let mut completed = sample_record(
+            TriggerId::parse("01J00000000000000000000051").expect("ulid"),
+            tenant("tenant-excl"),
+            ts(1_704_067_260),
+        );
+        completed.state = TriggerState::Completed;
+
+        repo.upsert_trigger(scheduled.clone())
+            .await
+            .expect("insert scheduled trigger");
+        repo.upsert_trigger(completed.clone())
+            .await
+            .expect("insert completed trigger");
+
+        // Excluding Completed must return only the Scheduled trigger.
+        let excluded = repo
+            .list_scoped_triggers(
+                tenant("tenant-excl"),
+                user("user-a"),
+                Some(AgentId::new("agent-a").expect("valid agent")),
+                Some(ProjectId::new("project-a").expect("valid project")),
+                10,
+                &[TriggerState::Completed],
+            )
+            .await
+            .expect("list with Completed excluded");
+        assert_eq!(
+            excluded.iter().map(|r| r.trigger_id).collect::<Vec<_>>(),
+            vec![scheduled.trigger_id],
+            "only the Scheduled trigger must be returned when Completed is excluded"
+        );
+
+        // Empty exclusion list must return both triggers.
+        let all_records = repo
+            .list_scoped_triggers(
+                tenant("tenant-excl"),
+                user("user-a"),
+                Some(AgentId::new("agent-a").expect("valid agent")),
+                Some(ProjectId::new("project-a").expect("valid project")),
+                10,
+                &[],
+            )
+            .await
+            .expect("list with empty excluded_states");
+        assert_eq!(
+            all_records.iter().map(|r| r.trigger_id).collect::<Vec<_>>(),
+            vec![scheduled.trigger_id, completed.trigger_id],
+            "both triggers must be returned when excluded_states is empty"
+        );
+    }
+
+    // In-memory backend.
+    #[tokio::test]
+    async fn in_memory_list_scoped_triggers_excludes_completed_rows() {
+        let repo = InMemoryTriggerRepository::default();
+        assert_list_scoped_triggers_excludes_states(&repo).await;
+    }
+
+    #[cfg(feature = "libsql")]
+    #[tokio::test]
+    async fn libsql_list_scoped_triggers_excludes_completed_rows() {
+        let (_dir, repo) = super::build_libsql_repo().await;
+        assert_list_scoped_triggers_excludes_states(&repo).await;
+    }
+
+    #[cfg(feature = "postgres")]
+    #[tokio::test]
+    async fn postgres_list_scoped_triggers_excludes_completed_rows() {
+        let Some((_container, pool)) = super::postgres_pool_or_skip().await else {
+            return;
+        };
+        let repo = PostgresTriggerRepository::new(pool.clone());
+        repo.run_migrations().await.expect("run migrations");
+        assert_list_scoped_triggers_excludes_states(&repo).await;
+        super::clear_postgres_triggers(&pool).await;
+    }
+}
