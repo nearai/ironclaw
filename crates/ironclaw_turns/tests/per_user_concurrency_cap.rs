@@ -362,6 +362,44 @@ async fn running_counter_decrements_via_apply_validated_loop_exit_completed() {
     assert_eq!(store.running_count_for_user(&tenant(), &user_u()), 0);
 }
 
+/// apply_validated_loop_exit → Cancelled path (via CancelRequested) decrements.
+#[tokio::test]
+async fn running_counter_decrements_via_apply_validated_loop_exit_cancelled() {
+    let store = make_store();
+    let scope = owned_scope("cap-loop-exit-cancel", &user_u());
+    let run_id = submit(&store, scope.clone(), "cap-loop-exit-cancel").await;
+
+    let (runner_id, lease_token) = claim(&store).await;
+    assert_eq!(store.running_count_for_user(&tenant(), &user_u()), 1);
+
+    // Running → CancelRequested (runner still holds slot).
+    store
+        .request_cancel(ironclaw_turns::CancelRunRequest {
+            scope: scope.clone(),
+            actor: actor_for(&user_u()),
+            run_id,
+            reason: SanitizedCancelReason::UserRequested,
+            idempotency_key: IdempotencyKey::new("cap-loop-exit-cancel-req").unwrap(),
+        })
+        .await
+        .unwrap();
+    assert_eq!(store.running_count_for_user(&tenant(), &user_u()), 1);
+
+    // apply_validated_loop_exit with Cancelled routes through cancel_or_fail_claimed_record
+    // which calls cancel_claimed_record (CancelRequested → Cancelled).
+    store
+        .apply_validated_loop_exit(ApplyValidatedLoopExitRequest {
+            run_id,
+            runner_id,
+            lease_token,
+            mapping: LoopExitMapping::RunnerOutcome(TurnRunnerOutcome::Cancelled),
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(store.running_count_for_user(&tenant(), &user_u()), 0);
+}
+
 // ---------------------------------------------------------------------------
 // Task A2 Step 6 — snapshot rebuild restores running_by_user
 // ---------------------------------------------------------------------------
@@ -370,13 +408,9 @@ async fn running_counter_decrements_via_apply_validated_loop_exit_completed() {
 async fn snapshot_rebuild_restores_running_counter() {
     let store = make_store();
     let scope = owned_scope("cap-snapshot", &user_u());
-    submit(&store, scope.clone(), "cap-snapshot").await;
+    let run_id = submit(&store, scope.clone(), "cap-snapshot").await;
 
-    // Claim (Running) — counter = 1.
-    claim(&store).await;
-    assert_eq!(store.running_count_for_user(&tenant(), &user_u()), 1);
-
-    // Snapshot while the run is Running.
+    // Snapshot BEFORE claiming (run is still Queued).
     let snapshot = store.persistence_snapshot();
 
     // Restore from snapshot.
@@ -386,8 +420,23 @@ async fn snapshot_rebuild_restores_running_counter() {
     )
     .unwrap();
 
-    // The restored store must know about the running run.
+    // Counter is 0 before claim.
+    assert_eq!(restored.running_count_for_user(&tenant(), &user_u()), 0);
+
+    // Claim in the restored store → counter goes to 1.
+    let (runner_id, lease_token) = claim(&restored).await;
     assert_eq!(restored.running_count_for_user(&tenant(), &user_u()), 1);
+
+    // Complete → counter drops to 0.
+    restored
+        .complete_run(CompleteRunRequest {
+            run_id,
+            runner_id,
+            lease_token,
+        })
+        .await
+        .unwrap();
+    assert_eq!(restored.running_count_for_user(&tenant(), &user_u()), 0);
 }
 
 // ---------------------------------------------------------------------------

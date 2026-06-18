@@ -416,6 +416,49 @@ async fn trigger_counter_decrements_via_apply_validated_loop_exit() {
     assert_eq!(store.running_trigger_count(), 0);
 }
 
+/// apply_validated_loop_exit → Cancelled path (via CancelRequested) decrements trigger counter.
+#[tokio::test]
+async fn trigger_counter_decrements_via_apply_validated_loop_exit_cancelled() {
+    let store = InMemoryTurnStateStore::default();
+    let s = scope("orig-loop-exit-cancel", &user_u());
+    let run_id = submit_with_context(
+        &store,
+        s.clone(),
+        "orig-loop-exit-cancel",
+        Some(trigger_context(&user_u())),
+    )
+    .await;
+
+    let (runner_id, lease_token, _) = claim(&store).await;
+    assert_eq!(store.running_trigger_count(), 1);
+
+    // Running → CancelRequested.
+    store
+        .request_cancel(ironclaw_turns::CancelRunRequest {
+            scope: s.clone(),
+            actor: actor_for(&user_u()),
+            run_id,
+            reason: SanitizedCancelReason::UserRequested,
+            idempotency_key: IdempotencyKey::new("orig-loop-exit-cancel-req").unwrap(),
+        })
+        .await
+        .unwrap();
+    assert_eq!(store.running_trigger_count(), 1);
+
+    // apply_validated_loop_exit Cancelled → cancel_or_fail_claimed_record → cancel_claimed_record.
+    store
+        .apply_validated_loop_exit(ApplyValidatedLoopExitRequest {
+            run_id,
+            runner_id,
+            lease_token,
+            mapping: LoopExitMapping::RunnerOutcome(TurnRunnerOutcome::Cancelled),
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(store.running_trigger_count(), 0);
+}
+
 // ---------------------------------------------------------------------------
 // B3 — trigger cap enforcement: trigger runs blocked, conversation proceeds
 // ---------------------------------------------------------------------------
@@ -685,33 +728,33 @@ async fn snapshot_rebuild_restores_origin_class_counter() {
     let store = InMemoryTurnStateStore::default();
     let run_id = submit_trigger(&store, "orig-snapshot", "orig-snapshot").await;
 
-    claim(&store).await;
-    assert_eq!(store.running_trigger_count(), 1);
-
+    // Snapshot BEFORE claiming (run is still Queued).
     let snapshot = store.persistence_snapshot();
 
+    // Restore from snapshot.
     let restored = InMemoryTurnStateStore::from_persistence_snapshot(
         snapshot,
         InMemoryTurnStateStoreLimits::default(),
     )
     .unwrap();
 
-    assert_eq!(restored.running_trigger_count(), 1);
+    // Counter is 0 before claim.
+    assert_eq!(restored.running_trigger_count(), 0);
     assert_eq!(restored.running_conversation_count(), 0);
 
-    // Completing in the restored store should decrement cleanly.
-    let (runner_id2, lease_token2) = {
-        let runner_id = TurnRunnerId::new();
-        let lease_token = TurnLeaseToken::new();
-        // Find the run already in Running state from the snapshot — we need to complete it
-        // using the runner that claimed it. Since we can't re-claim from a restored snapshot
-        // (the runner_id/lease are stored in the snapshot), just verify the counter.
-        // The counter is 1 → snapshot faithfully restored.
-        let _ = (run_id, runner_id, lease_token);
-        (TurnRunnerId::new(), TurnLeaseToken::new())
-    };
-    let _ = (runner_id2, lease_token2); // suppress unused warnings
-
-    // Verify trigger count is 1 (already verified above).
+    // Claim in the restored store → counter goes to 1.
+    let (runner_id, lease_token, claimed_run_id) = claim(&restored).await;
+    assert_eq!(claimed_run_id, run_id);
     assert_eq!(restored.running_trigger_count(), 1);
+
+    // Complete → counter drops to 0.
+    restored
+        .complete_run(CompleteRunRequest {
+            run_id,
+            runner_id,
+            lease_token,
+        })
+        .await
+        .unwrap();
+    assert_eq!(restored.running_trigger_count(), 0);
 }

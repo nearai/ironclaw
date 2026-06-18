@@ -59,8 +59,8 @@ mod run_status_cell {
             self.0
         }
         pub(super) fn set(&mut self, new: TurnStatus) -> StatusTransition {
-            let held_slot = matches!(self.0, TurnStatus::Running | TurnStatus::CancelRequested);
-            let new_holds_slot = matches!(new, TurnStatus::Running | TurnStatus::CancelRequested);
+            let held_slot = super::holds_running_slot(self.0);
+            let new_holds_slot = super::holds_running_slot(new);
             self.0 = new;
             match (held_slot, new_holds_slot) {
                 (false, true) => StatusTransition::EnteredRunning,
@@ -71,6 +71,10 @@ mod run_status_cell {
     }
 }
 use run_status_cell::{RunStatusCell, StatusTransition};
+
+fn holds_running_slot(status: TurnStatus) -> bool {
+    matches!(status, TurnStatus::Running | TurnStatus::CancelRequested)
+}
 
 const MAX_EVENTS: usize = 10_000;
 const MAX_TERMINAL_RECORDS: usize = 10_000;
@@ -374,15 +378,6 @@ impl InMemoryTurnStateStore {
                 .copied()
                 .unwrap_or(0),
         }
-    }
-
-    #[cfg(test)]
-    pub fn debug_running_count(
-        &self,
-        tenant: &ironclaw_host_api::TenantId,
-        user: &ironclaw_host_api::UserId,
-    ) -> u32 {
-        self.running_count_for_user(tenant, user)
     }
 
     /// Returns the number of runs currently in `TurnStatus::Running` with `ScheduledTrigger` origin.
@@ -1722,7 +1717,7 @@ impl Inner {
         // Rebuild per-user running counter from restored records.
         let mut running_by_user = HashMap::new();
         for record in records.values() {
-            if record.status.get() == TurnStatus::Running
+            if holds_running_slot(record.status.get())
                 && let Some(key) = Self::run_user_key(&record.scope)
             {
                 *running_by_user.entry(key).or_insert(0u32) += 1;
@@ -1732,7 +1727,7 @@ impl Inner {
         // Rebuild per-origin-class running counter from restored records.
         let mut running_by_origin_class: HashMap<OriginClass, u32> = HashMap::new();
         for record in records.values() {
-            if record.status.get() == TurnStatus::Running
+            if holds_running_slot(record.status.get())
                 && let Some(cls) = Self::run_origin_class(record)
             {
                 *running_by_origin_class.entry(cls).or_insert(0u32) += 1;
@@ -2085,8 +2080,9 @@ impl Inner {
                 self.running_by_user.remove(&key);
             }
         }
-        if let Some(cls) = Self::run_origin_class(record) {
-            let count = self.running_by_origin_class.entry(cls).or_insert(0);
+        if let Some(cls) = Self::run_origin_class(record)
+            && let Some(count) = self.running_by_origin_class.get_mut(&cls)
+        {
             *count = count.saturating_sub(1);
             if *count == 0 {
                 self.running_by_origin_class.remove(&cls);
