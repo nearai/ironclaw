@@ -34,10 +34,54 @@ use crate::{
     },
 };
 
+mod run_status_cell {
+    use crate::TurnStatus;
+
+    /// The sole owner of a run's status. The only way to change it is `set`,
+    /// which returns a `#[must_use]` receipt — so no status transition can skip
+    /// concurrency-slot accounting. A new exit point physically cannot compile
+    /// without consuming the receipt.
+    #[derive(Debug, Clone)]
+    pub(super) struct RunStatusCell(TurnStatus);
+
+    #[must_use = "a status transition may change a concurrency slot; pass it to apply_status_transition"]
+    pub(super) enum StatusTransition {
+        EnteredRunning,
+        LeftRunning,
+        Unchanged,
+    }
+
+    impl RunStatusCell {
+        pub(super) fn new(status: TurnStatus) -> Self {
+            Self(status)
+        }
+        pub(super) fn get(&self) -> TurnStatus {
+            self.0
+        }
+        pub(super) fn set(&mut self, new: TurnStatus) -> StatusTransition {
+            let held_slot = matches!(self.0, TurnStatus::Running | TurnStatus::CancelRequested);
+            let new_holds_slot = matches!(new, TurnStatus::Running | TurnStatus::CancelRequested);
+            self.0 = new;
+            match (held_slot, new_holds_slot) {
+                (false, true) => StatusTransition::EnteredRunning,
+                (true, false) => StatusTransition::LeftRunning,
+                _ => StatusTransition::Unchanged,
+            }
+        }
+    }
+}
+use run_status_cell::{RunStatusCell, StatusTransition};
+
 const MAX_EVENTS: usize = 10_000;
 const MAX_TERMINAL_RECORDS: usize = 10_000;
 const MAX_IDEMPOTENCY_RECORDS: usize = 10_000;
 const DEFAULT_RUNNER_LEASE_TTL_SECONDS: i64 = 90;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+enum OriginClass {
+    Trigger,      // TurnOriginKind::ScheduledTrigger
+    Conversation, // TurnOriginKind::Inbound | TurnOriginKind::WebUi
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct InMemoryTurnStateStoreLimits {
@@ -48,6 +92,12 @@ pub struct InMemoryTurnStateStoreLimits {
     /// Max runs in `TurnStatus::Running` per (tenant_id, owner user_id).
     /// `None` = unlimited (current behavior). Owner-less / actor-fallback runs are never counted.
     pub max_concurrent_runs_per_user: Option<std::num::NonZeroU32>,
+    /// Max runs in `TurnStatus::Running` for `ScheduledTrigger` origin.
+    /// `None` = unlimited. Runs without `product_context` are never counted.
+    pub max_concurrent_trigger_runs: Option<std::num::NonZeroU32>,
+    /// Max runs in `TurnStatus::Running` for `Inbound` or `WebUi` origin.
+    /// `None` = unlimited. Runs without `product_context` are never counted.
+    pub max_concurrent_conversation_runs: Option<std::num::NonZeroU32>,
 }
 
 impl Default for InMemoryTurnStateStoreLimits {
@@ -58,6 +108,8 @@ impl Default for InMemoryTurnStateStoreLimits {
             max_idempotency_records: MAX_IDEMPOTENCY_RECORDS,
             runner_lease_ttl: ChronoDuration::seconds(DEFAULT_RUNNER_LEASE_TTL_SECONDS),
             max_concurrent_runs_per_user: None,
+            max_concurrent_trigger_runs: None,
+            max_concurrent_conversation_runs: None,
         }
     }
 }
@@ -101,6 +153,9 @@ struct Inner {
     /// Counts runs currently in `TurnStatus::Running` per (TenantId, UserId).
     /// Actor-fallback and ownerless runs are never counted.
     running_by_user: HashMap<(ironclaw_host_api::TenantId, ironclaw_host_api::UserId), u32>,
+    /// Counts runs currently in `TurnStatus::Running` per OriginClass.
+    /// Runs without `product_context` are never counted.
+    running_by_origin_class: HashMap<OriginClass, u32>,
 }
 
 enum AppliedLoopTransition {
@@ -121,7 +176,7 @@ struct RunRecord {
     actor: TurnActor,
     turn_id: crate::TurnId,
     run_id: TurnRunId,
-    status: TurnStatus,
+    status: RunStatusCell,
     profile: TurnRunProfile,
     resolved_model_route: Option<crate::run_profile::LoopModelRouteSnapshot>,
     accepted_message_ref: AcceptedMessageRef,
@@ -330,6 +385,42 @@ impl InMemoryTurnStateStore {
         self.running_count_for_user(tenant, user)
     }
 
+    /// Returns the number of runs currently in `TurnStatus::Running` with `ScheduledTrigger` origin.
+    /// Intended for testing and observability.
+    pub fn running_trigger_count(&self) -> u32 {
+        match self.inner.lock() {
+            Ok(inner) => inner
+                .running_by_origin_class
+                .get(&OriginClass::Trigger)
+                .copied()
+                .unwrap_or(0),
+            Err(poisoned) => poisoned
+                .into_inner()
+                .running_by_origin_class
+                .get(&OriginClass::Trigger)
+                .copied()
+                .unwrap_or(0),
+        }
+    }
+
+    /// Returns the number of runs currently in `TurnStatus::Running` with `Inbound` or `WebUi` origin.
+    /// Intended for testing and observability.
+    pub fn running_conversation_count(&self) -> u32 {
+        match self.inner.lock() {
+            Ok(inner) => inner
+                .running_by_origin_class
+                .get(&OriginClass::Conversation)
+                .copied()
+                .unwrap_or(0),
+            Err(poisoned) => poisoned
+                .into_inner()
+                .running_by_origin_class
+                .get(&OriginClass::Conversation)
+                .copied()
+                .unwrap_or(0),
+        }
+    }
+
     pub fn blocked_approval_runs_for_actor(
         &self,
         scope: &TurnScope,
@@ -342,7 +433,7 @@ impl InMemoryTurnStateStore {
             .filter(|record| {
                 record.scope == *scope
                     && record.actor == *actor
-                    && record.status == TurnStatus::BlockedApproval
+                    && record.status.get() == TurnStatus::BlockedApproval
                     && record.gate_ref.is_some()
             })
             .map(RunRecord::state)
@@ -364,7 +455,7 @@ impl InMemoryTurnStateStore {
             .find(|record| {
                 record.scope == *scope
                     && record.actor == *actor
-                    && record.status == TurnStatus::BlockedApproval
+                    && record.status.get() == TurnStatus::BlockedApproval
                     && record.gate_ref.as_ref() == Some(gate_ref)
             })
             .map(|record| record.run_id);
@@ -641,7 +732,7 @@ impl TurnStateStore for InMemoryTurnStateStore {
             actor: request.actor,
             turn_id,
             run_id,
-            status: TurnStatus::Queued,
+            status: RunStatusCell::new(TurnStatus::Queued),
             profile: profile.clone(),
             resolved_model_route: None,
             accepted_message_ref: request.accepted_message_ref.clone(),
@@ -1061,7 +1152,7 @@ impl TurnSpawnTreeStateStore for InMemoryTurnStateStore {
             actor: request.actor,
             turn_id,
             run_id,
-            status: TurnStatus::Queued,
+            status: RunStatusCell::new(TurnStatus::Queued),
             profile: profile.clone(),
             resolved_model_route: None,
             accepted_message_ref: request.accepted_message_ref.clone(),
@@ -1242,7 +1333,7 @@ impl TurnSpawnTreeStateStore for InMemoryTurnStateStore {
             && inner
                 .records
                 .get(&canonical_root_run_id)
-                .is_some_and(|record| record.status.is_terminal())
+                .is_some_and(|record| record.status.get().is_terminal())
             && !inner.terminal_runs.contains(&canonical_root_run_id)
         {
             if inner.terminal_runs.len() >= inner.limits.max_terminal_records {
@@ -1269,7 +1360,7 @@ impl TurnRunTransitionPort for InMemoryTurnStateStore {
         };
         let mut record = inner.take_record(run_id)?;
         let now = Utc::now();
-        record.status = TurnStatus::Running;
+        let transition = record.status.set(TurnStatus::Running);
         record.runner_id = Some(request.runner_id);
         record.lease_token = Some(request.lease_token);
         record.lease_expires_at = Some(inner.next_lease_expiry(now));
@@ -1277,7 +1368,7 @@ impl TurnRunTransitionPort for InMemoryTurnStateStore {
         record.claim_count = record.claim_count.saturating_add(1);
         record.event_cursor = inner.next_cursor();
         inner.update_active_lock(&record, now);
-        inner.increment_running(&record.scope);
+        inner.apply_status_transition(transition, &record);
         let claimed = ClaimedTurnRun {
             state: record.state(),
             resolved_run_profile: record.profile.resolved.clone(),
@@ -1295,9 +1386,9 @@ impl TurnRunTransitionPort for InMemoryTurnStateStore {
         let result = (|| {
             let now = Utc::now();
             ensure_active_lease(&record, request.runner_id, request.lease_token, now)?;
-            if record.status != TurnStatus::Running {
+            if record.status.get() != TurnStatus::Running {
                 return Err(TurnError::InvalidTransition {
-                    from: record.status,
+                    from: record.status.get(),
                     to: TurnStatus::Running,
                 });
             }
@@ -1329,9 +1420,9 @@ impl TurnRunTransitionPort for InMemoryTurnStateStore {
         let result = (|| {
             let now = Utc::now();
             ensure_active_lease(&record, request.runner_id, request.lease_token, now)?;
-            if record.status != TurnStatus::Running {
+            if record.status.get() != TurnStatus::Running {
                 return Err(TurnError::InvalidTransition {
-                    from: record.status,
+                    from: record.status.get(),
                     to: TurnStatus::Running,
                 });
             }
@@ -1361,15 +1452,15 @@ impl TurnRunTransitionPort for InMemoryTurnStateStore {
         let result = (|| {
             let now = Utc::now();
             ensure_active_lease(&record, request.runner_id, request.lease_token, now)?;
-            if !matches!(record.status, TurnStatus::Running) {
+            if !matches!(record.status.get(), TurnStatus::Running) {
                 return Err(TurnError::InvalidTransition {
-                    from: record.status,
+                    from: record.status.get(),
                     to: request.reason.status(),
                 });
             }
             // Running → Blocked: decrement per-user running counter.
-            inner.decrement_running(&record.scope);
-            record.status = request.reason.status();
+            let transition = record.status.set(request.reason.status());
+            inner.apply_status_transition(transition, &record);
             record.checkpoint_id = Some(request.checkpoint_id);
             record.gate_ref = Some(request.reason.gate_ref().clone());
             record.credential_requirements = request.reason.credential_requirements().to_vec();
@@ -1495,7 +1586,7 @@ impl Inner {
                     actor,
                     turn_id: run.turn_id,
                     run_id: run.run_id,
-                    status: run.status,
+                    status: RunStatusCell::new(run.status),
                     profile: run.profile,
                     resolved_model_route: run.resolved_model_route,
                     accepted_message_ref: run.accepted_message_ref,
@@ -1590,13 +1681,13 @@ impl Inner {
             let Some(record) = records.get(&reservation.run_id) else {
                 continue;
             };
-            if record.status.is_terminal() {
+            if record.status.get().is_terminal() {
                 reservation.released = true;
             }
             admission_reservations.insert(reservation.run_id, reservation);
         }
         for record in records.values() {
-            if record.status.keeps_active_lock() {
+            if record.status.get().keeps_active_lock() {
                 let admission_class = record.profile.admission_class.clone();
                 let buckets = admission_buckets(&record.scope, &record.actor, &admission_class);
                 let needs_canonical_reservation = admission_reservations
@@ -1631,10 +1722,20 @@ impl Inner {
         // Rebuild per-user running counter from restored records.
         let mut running_by_user = HashMap::new();
         for record in records.values() {
-            if record.status == TurnStatus::Running
+            if record.status.get() == TurnStatus::Running
                 && let Some(key) = Self::run_user_key(&record.scope)
             {
                 *running_by_user.entry(key).or_insert(0u32) += 1;
+            }
+        }
+
+        // Rebuild per-origin-class running counter from restored records.
+        let mut running_by_origin_class: HashMap<OriginClass, u32> = HashMap::new();
+        for record in records.values() {
+            if record.status.get() == TurnStatus::Running
+                && let Some(cls) = Self::run_origin_class(record)
+            {
+                *running_by_origin_class.entry(cls).or_insert(0u32) += 1;
             }
         }
 
@@ -1662,6 +1763,7 @@ impl Inner {
             tree_reservations,
             limits,
             running_by_user,
+            running_by_origin_class,
         })
     }
 
@@ -1683,7 +1785,7 @@ impl Inner {
     ) {
         let blocked_gate = if kind == TurnEventKind::Blocked {
             record.gate_ref.clone().and_then(|gate_ref| {
-                crate::events::TurnBlockedGateKind::from_status(record.status).map(|gate_kind| {
+                crate::events::TurnBlockedGateKind::from_status(record.status.get()).map(|gate_kind| {
                     crate::events::TurnBlockedGateMetadata {
                         gate_ref,
                         gate_kind,
@@ -1703,7 +1805,7 @@ impl Inner {
                 Some(&record.actor.user_id),
             ),
             run_id: record.run_id,
-            status: record.status,
+            status: record.status.get(),
             kind,
             blocked_gate,
             sanitized_reason,
@@ -1788,7 +1890,7 @@ impl Inner {
             .iter()
             .filter_map(|(run_id, record)| {
                 if !matches!(
-                    record.status,
+                    record.status.get(),
                     TurnStatus::Running | TurnStatus::CancelRequested
                 ) {
                     return None;
@@ -1817,14 +1919,9 @@ impl Inner {
             };
             // Running and CancelRequested both hold a runner-claimed lease (incremented at
             // claim). Decrement for both since the lease expiry terminates the run.
-            if matches!(
-                record.status,
-                TurnStatus::Running | TurnStatus::CancelRequested
-            ) {
-                self.decrement_running(&record.scope);
-            }
-            let outcome = expired_lease_terminal_outcome(record.status);
-            record.status = outcome.status;
+            let outcome = expired_lease_terminal_outcome(record.status.get());
+            let transition = record.status.set(outcome.status);
+            self.apply_status_transition(transition, &record);
             record.failure = outcome.failure;
             record.runner_id = None;
             record.lease_token = None;
@@ -1953,19 +2050,46 @@ impl Inner {
             .map(|user| (scope.tenant_id.clone(), user.clone()))
     }
 
-    fn increment_running(&mut self, scope: &TurnScope) {
-        if let Some(key) = Self::run_user_key(scope) {
-            *self.running_by_user.entry(key).or_insert(0) += 1;
+    fn run_origin_class(record: &RunRecord) -> Option<OriginClass> {
+        match record.product_context.as_ref()?.origin {
+            crate::TurnOriginKind::ScheduledTrigger => Some(OriginClass::Trigger),
+            crate::TurnOriginKind::Inbound | crate::TurnOriginKind::WebUi => {
+                Some(OriginClass::Conversation)
+            }
         }
     }
 
-    fn decrement_running(&mut self, scope: &TurnScope) {
-        if let Some(key) = Self::run_user_key(scope)
+    fn apply_status_transition(&mut self, transition: StatusTransition, record: &RunRecord) {
+        match transition {
+            StatusTransition::EnteredRunning => self.on_run_entered_running(record),
+            StatusTransition::LeftRunning => self.on_run_left_running(record),
+            StatusTransition::Unchanged => {}
+        }
+    }
+
+    fn on_run_entered_running(&mut self, record: &RunRecord) {
+        if let Some(key) = Self::run_user_key(&record.scope) {
+            *self.running_by_user.entry(key).or_insert(0) += 1;
+        }
+        if let Some(cls) = Self::run_origin_class(record) {
+            *self.running_by_origin_class.entry(cls).or_insert(0) += 1;
+        }
+    }
+
+    fn on_run_left_running(&mut self, record: &RunRecord) {
+        if let Some(key) = Self::run_user_key(&record.scope)
             && let Some(count) = self.running_by_user.get_mut(&key)
         {
             *count = count.saturating_sub(1);
             if *count == 0 {
                 self.running_by_user.remove(&key);
+            }
+        }
+        if let Some(cls) = Self::run_origin_class(record) {
+            let count = self.running_by_origin_class.entry(cls).or_insert(0);
+            *count = count.saturating_sub(1);
+            if *count == 0 {
+                self.running_by_origin_class.remove(&cls);
             }
         }
     }
@@ -1977,7 +2101,7 @@ impl Inner {
             let Some(record) = self.records.get(&run_id) else {
                 continue;
             };
-            if record.status != TurnStatus::Queued {
+            if record.status.get() != TurnStatus::Queued {
                 continue;
             }
             let scope_ok = scope_filter.is_none_or(|scope| scope == &record.scope);
@@ -1988,7 +2112,30 @@ impl Inner {
                     Some(key) => self.running_by_user.get(&key).copied().unwrap_or(0) < cap.get(),
                 },
             };
-            if scope_ok && user_ok {
+            let origin_ok = match Self::run_origin_class(record) {
+                None => true,
+                Some(OriginClass::Trigger) => self
+                    .limits
+                    .max_concurrent_trigger_runs
+                    .is_none_or(|cap| {
+                        self.running_by_origin_class
+                            .get(&OriginClass::Trigger)
+                            .copied()
+                            .unwrap_or(0)
+                            < cap.get()
+                    }),
+                Some(OriginClass::Conversation) => self
+                    .limits
+                    .max_concurrent_conversation_runs
+                    .is_none_or(|cap| {
+                        self.running_by_origin_class
+                            .get(&OriginClass::Conversation)
+                            .copied()
+                            .unwrap_or(0)
+                            < cap.get()
+                    }),
+            };
+            if scope_ok && user_ok && origin_ok {
                 return Some(run_id);
             }
             self.queued_runs.push_back(run_id);
@@ -2011,9 +2158,9 @@ impl Inner {
                 return Err(TurnError::ScopeNotFound);
             }
             let resumable_status = match request.precondition.required_status() {
-                Some(required) => record.status == required,
+                Some(required) => record.status.get() == required,
                 None => matches!(
-                    record.status,
+                    record.status.get(),
                     TurnStatus::BlockedApproval
                         | TurnStatus::BlockedAuth
                         | TurnStatus::BlockedResource
@@ -2021,7 +2168,7 @@ impl Inner {
             };
             if !resumable_status {
                 return Err(TurnError::InvalidTransition {
-                    from: record.status,
+                    from: record.status.get(),
                     to: TurnStatus::Queued,
                 });
             }
@@ -2034,7 +2181,8 @@ impl Inner {
                 });
             }
             let now = Utc::now();
-            record.status = TurnStatus::Queued;
+            let transition = record.status.set(TurnStatus::Queued);
+            self.apply_status_transition(transition, &record);
             record.resume_disposition = request.resume_disposition.clone();
             record.gate_ref = None;
             record.credential_requirements = Vec::new();
@@ -2045,7 +2193,7 @@ impl Inner {
             self.queued_runs.push_back(record.run_id);
             let response = ResumeTurnResponse {
                 run_id: record.run_id,
-                status: record.status,
+                status: record.status.get(),
                 event_cursor: record.event_cursor,
             };
             self.push_event(&record, TurnEventKind::Resumed, None);
@@ -2067,16 +2215,16 @@ impl Inner {
             if record.actor != request.actor {
                 return Err(TurnError::Unauthorized);
             }
-            if record.status.is_terminal() {
+            if record.status.get().is_terminal() {
                 return Ok(CancelRunResponse {
                     run_id: record.run_id,
-                    status: record.status,
+                    status: record.status.get(),
                     event_cursor: record.event_cursor,
                     already_terminal: true,
                     actor: Some(record.actor.clone()),
                 });
             }
-            let (next_status, event_kind) = match record.status {
+            let (next_status, event_kind) = match record.status.get() {
                 TurnStatus::Queued
                 | TurnStatus::BlockedApproval
                 | TurnStatus::BlockedAuth
@@ -2098,8 +2246,9 @@ impl Inner {
                 }
             };
             let now = Utc::now();
-            record.status = next_status;
-            if record.status.is_terminal() {
+            let transition = record.status.set(next_status);
+            self.apply_status_transition(transition, &record);
+            if record.status.get().is_terminal() {
                 record.failure = None;
                 self.release_active_lock(&record);
                 self.remove_queued_run(record.run_id);
@@ -2109,7 +2258,7 @@ impl Inner {
             record.event_cursor = self.next_cursor();
             let response = CancelRunResponse {
                 run_id: record.run_id,
-                status: record.status,
+                status: record.status.get(),
                 event_cursor: record.event_cursor,
                 already_terminal: false,
                 actor: Some(record.actor.clone()),
@@ -2119,7 +2268,7 @@ impl Inner {
                 event_kind,
                 Some(request.reason.category().to_string()),
             );
-            if record.status.is_terminal() {
+            if record.status.get().is_terminal() {
                 self.mark_terminal(record.run_id);
             }
             Ok(response)
@@ -2138,16 +2287,16 @@ impl Inner {
         let mut record = self.take_record(run_id)?;
         let result = (|| {
             ensure_active_lease(&record, runner_id, lease_token, Utc::now())?;
-            if record.status != TurnStatus::CancelRequested {
+            if record.status.get() != TurnStatus::CancelRequested {
                 return Err(TurnError::InvalidTransition {
-                    from: record.status,
+                    from: record.status.get(),
                     to: TurnStatus::Cancelled,
                 });
             }
             // CancelRequested → Cancelled: the run was Running when it was incremented at
             // claim; decrement now that the runner is fully releasing it.
-            self.decrement_running(&record.scope);
-            record.status = TurnStatus::Cancelled;
+            let transition = record.status.set(TurnStatus::Cancelled);
+            self.apply_status_transition(transition, &record);
             record.failure = None;
             record.runner_id = None;
             record.lease_token = None;
@@ -2177,16 +2326,16 @@ impl Inner {
         let mut record = self.take_record(run_id)?;
         let result = (|| {
             ensure_active_lease(&record, runner_id, lease_token, Utc::now())?;
-            if record.status == TurnStatus::CancelRequested || record.status.is_terminal() {
+            if record.status.get() == TurnStatus::CancelRequested || record.status.get().is_terminal() {
                 return Err(TurnError::InvalidTransition {
-                    from: record.status,
+                    from: record.status.get(),
                     to: status,
                 });
             }
             // Old status must be Running (only non-CancelRequested, non-terminal status with a
             // lease); decrement the per-user running counter.
-            self.decrement_running(&record.scope);
-            record.status = status;
+            let transition = record.status.set(status);
+            self.apply_status_transition(transition, &record);
             record.failure = failure.clone();
             record.runner_id = None;
             record.lease_token = None;
@@ -2268,8 +2417,8 @@ impl Inner {
     }
 
     fn complete_claimed_record(&mut self, mut record: RunRecord) -> AppliedLoopTransition {
-        if record.status != TurnStatus::Running {
-            let from = record.status;
+        if record.status.get() != TurnStatus::Running {
+            let from = record.status.get();
             return AppliedLoopTransition::Rejected {
                 record: Box::new(record),
                 error: TurnError::InvalidTransition {
@@ -2279,8 +2428,8 @@ impl Inner {
             };
         }
         // Running → Completed: decrement per-user running counter.
-        self.decrement_running(&record.scope);
-        record.status = TurnStatus::Completed;
+        let transition = record.status.set(TurnStatus::Completed);
+        self.apply_status_transition(transition, &record);
         record.failure = None;
         record.runner_id = None;
         record.lease_token = None;
@@ -2299,8 +2448,8 @@ impl Inner {
     }
 
     fn cancel_claimed_record(&mut self, mut record: RunRecord) -> AppliedLoopTransition {
-        if record.status != TurnStatus::CancelRequested {
-            let from = record.status;
+        if record.status.get() != TurnStatus::CancelRequested {
+            let from = record.status.get();
             return AppliedLoopTransition::Rejected {
                 record: Box::new(record),
                 error: TurnError::InvalidTransition {
@@ -2311,8 +2460,8 @@ impl Inner {
         }
         // CancelRequested → Cancelled via loop exit: the run was Running when incremented at
         // claim; decrement now that the runner is fully releasing it.
-        self.decrement_running(&record.scope);
-        record.status = TurnStatus::Cancelled;
+        let transition = record.status.set(TurnStatus::Cancelled);
+        self.apply_status_transition(transition, &record);
         record.failure = None;
         record.runner_id = None;
         record.lease_token = None;
@@ -2337,8 +2486,8 @@ impl Inner {
         state_ref: crate::run_profile::LoopCheckpointStateRef,
         reason: BlockedReason,
     ) -> AppliedLoopTransition {
-        if record.status != TurnStatus::Running {
-            let from = record.status;
+        if record.status.get() != TurnStatus::Running {
+            let from = record.status.get();
             return AppliedLoopTransition::Rejected {
                 record: Box::new(record),
                 error: TurnError::InvalidTransition {
@@ -2348,9 +2497,9 @@ impl Inner {
             };
         }
         // Running → Blocked: decrement per-user running counter.
-        self.decrement_running(&record.scope);
         let now = Utc::now();
-        record.status = reason.status();
+        let transition = record.status.set(reason.status());
+        self.apply_status_transition(transition, &record);
         record.checkpoint_id = Some(checkpoint_id);
         record.gate_ref = Some(reason.gate_ref().clone());
         record.credential_requirements = reason.credential_requirements().to_vec();
@@ -2380,8 +2529,8 @@ impl Inner {
         mut record: RunRecord,
         failure: SanitizedFailure,
     ) -> AppliedLoopTransition {
-        if record.status != TurnStatus::Running {
-            let from = record.status;
+        if record.status.get() != TurnStatus::Running {
+            let from = record.status.get();
             return AppliedLoopTransition::Rejected {
                 record: Box::new(record),
                 error: TurnError::InvalidTransition {
@@ -2391,8 +2540,8 @@ impl Inner {
             };
         }
         // Running → Failed: decrement per-user running counter.
-        self.decrement_running(&record.scope);
-        record.status = TurnStatus::Failed;
+        let transition = record.status.set(TurnStatus::Failed);
+        self.apply_status_transition(transition, &record);
         record.failure = Some(failure.clone());
         record.runner_id = None;
         record.lease_token = None;
@@ -2419,7 +2568,7 @@ impl Inner {
         record: RunRecord,
         failure: SanitizedFailure,
     ) -> AppliedLoopTransition {
-        let from = record.status;
+        let from = record.status.get();
         match from {
             TurnStatus::Running => self.fail_claimed_record(record, failure),
             TurnStatus::CancelRequested => self.cancel_claimed_record(record),
@@ -2465,30 +2614,29 @@ impl Inner {
         let result = (|| {
             ensure_active_lease(&record, runner_id, lease_token, now)?;
             if !matches!(
-                record.status,
+                record.status.get(),
                 TurnStatus::Running | TurnStatus::CancelRequested
             ) {
                 return Err(TurnError::InvalidTransition {
-                    from: record.status,
+                    from: record.status.get(),
                     to: TurnStatus::Queued,
                 });
             }
-            let (status, failure, event_kind) = match record.status {
+            let (new_status, failure, event_kind) = match record.status.get() {
                 TurnStatus::Running => {
                     // Running → Queued (relinquish): decrement per-user running counter.
-                    self.decrement_running(&record.scope);
                     requeue = true;
                     (TurnStatus::Queued, None, TurnEventKind::RunnerHeartbeat)
                 }
                 TurnStatus::CancelRequested => {
                     // CancelRequested → Cancelled (relinquish): the run was Running when
                     // incremented at claim; decrement now.
-                    self.decrement_running(&record.scope);
                     (TurnStatus::Cancelled, None, TurnEventKind::Cancelled)
                 }
                 _ => unreachable!("status checked above"),
             };
-            record.status = status;
+            let transition = record.status.set(new_status);
+            self.apply_status_transition(transition, &record);
             record.failure = failure;
             record.runner_id = None;
             record.lease_token = None;
@@ -2525,7 +2673,7 @@ impl Inner {
         if let Some(lock) = self.active_locks.get_mut(&lock_key)
             && lock.run_id == record.run_id
         {
-            lock.status = record.status;
+            lock.status = record.status.get();
             lock.lock_version = lock.lock_version.incremented();
             lock.updated_at = updated_at;
         }
@@ -2543,9 +2691,9 @@ impl Inner {
     fn thread_busy(&self, lock_key: &TurnActiveLockKey) -> Option<ThreadBusy> {
         let active_lock = self.active_locks.get(lock_key)?;
         let record = self.records.get(&active_lock.run_id)?;
-        record.status.keeps_active_lock().then_some(ThreadBusy {
+        record.status.get().keeps_active_lock().then_some(ThreadBusy {
             active_run_id: active_lock.run_id,
-            status: record.status,
+            status: record.status.get(),
             event_cursor: record.event_cursor,
         })
     }
@@ -2638,7 +2786,7 @@ impl Inner {
             run_id: record.run_id,
             scope: Some(record.scope.clone()),
             sequence,
-            status: record.status,
+            status: record.status.get(),
             gate_ref,
             kind: crate::run_profile::LoopCheckpointKind::BeforeBlock,
             state_ref,
@@ -2670,7 +2818,7 @@ impl Inner {
             if self
                 .records
                 .get(&run_id)
-                .is_some_and(|record| record.status.is_terminal())
+                .is_some_and(|record| record.status.get().is_terminal())
                 && !self
                     .tree_reservations
                     .keys()
@@ -2692,7 +2840,7 @@ impl RunRecord {
             accepted_message_ref: self.accepted_message_ref.clone(),
             source_binding_ref: self.source_binding_ref.clone(),
             reply_target_binding_ref: self.reply_target_binding_ref.clone(),
-            status: self.status,
+            status: self.status.get(),
             profile: self.profile.clone(),
             resolved_model_route: self.resolved_model_route.clone(),
             checkpoint_id: self.checkpoint_id,
@@ -2720,7 +2868,7 @@ impl RunRecord {
             actor: Some(self.actor.clone()),
             turn_id: self.turn_id,
             run_id: self.run_id,
-            status: self.status,
+            status: self.status.get(),
             accepted_message_ref: self.accepted_message_ref.clone(),
             source_binding_ref: self.source_binding_ref.clone(),
             reply_target_binding_ref: self.reply_target_binding_ref.clone(),
