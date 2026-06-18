@@ -21,6 +21,8 @@ use ironclaw_llm::{
 };
 
 const EMPTY_CLEANED_RESPONSE_FALLBACK: &str = "I'm not sure how to respond to that.";
+const LLM_CALL_PURPOSE_CHAT: &str = "chat";
+const LLM_CALL_PURPOSE_MAX_LEN: usize = 32;
 
 /// Compute the USD cost of a single completion response, honoring the
 /// provider's prompt-caching pricing. Mirrors the formula in
@@ -100,10 +102,17 @@ impl LlmUsageRecorder {
         cost_guard: Arc<CostGuard>,
         provider_name: impl Into<String>,
     ) -> Self {
+        let provider_name = provider_name.into();
+        if db.is_none() && provider_name != "test-disabled" {
+            tracing::warn!(
+                provider = %provider_name,
+                "engine v2 LLM usage recorder initialized without database; durable usage persistence disabled"
+            );
+        }
         Self {
             db,
             cost_guard,
-            provider_name: provider_name.into(),
+            provider_name,
         }
     }
 
@@ -114,6 +123,12 @@ impl LlmUsageRecorder {
         tokens: LlmTokenBuckets,
     ) -> Result<(), EngineError> {
         let model = provider.effective_model_name(config.model.as_deref());
+        let db = self.db.as_ref();
+        let purpose = if db.is_some() {
+            validate_llm_call_purpose(config.metadata.get("purpose"))?
+        } else {
+            None
+        };
         let cost_per_token = if config.model.is_some() {
             None
         } else {
@@ -152,7 +167,7 @@ impl LlmUsageRecorder {
             }
         };
 
-        let Some(db) = self.db.as_ref() else {
+        let Some(db) = db else {
             return Ok(());
         };
 
@@ -166,7 +181,6 @@ impl LlmUsageRecorder {
                     .get("conversation_scope")
                     .and_then(|value| Uuid::parse_str(value).ok())
             });
-        let purpose = config.metadata.get("purpose").map(String::as_str);
         let record = LlmCallRecord {
             job_id: None,
             conversation_id,
@@ -185,6 +199,26 @@ impl LlmUsageRecorder {
             })?;
         Ok(())
     }
+}
+
+fn validate_llm_call_purpose(value: Option<&String>) -> Result<Option<&str>, EngineError> {
+    let Some(purpose) = value.map(String::as_str) else {
+        return Ok(None);
+    };
+    if purpose.len() > LLM_CALL_PURPOSE_MAX_LEN {
+        return Err(EngineError::Store {
+            reason: format!(
+                "invalid engine v2 LLM usage purpose: length {} exceeds {LLM_CALL_PURPOSE_MAX_LEN}",
+                purpose.len()
+            ),
+        });
+    }
+    if purpose != LLM_CALL_PURPOSE_CHAT {
+        return Err(EngineError::Store {
+            reason: format!("invalid engine v2 LLM usage purpose: {purpose}"),
+        });
+    }
+    Ok(Some(purpose))
 }
 
 impl LlmBridgeAdapter {
@@ -1113,6 +1147,41 @@ mod tests {
         assert!(
             err.to_string()
                 .contains("failed to persist engine v2 LLM usage"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[cfg(feature = "libsql")]
+    #[tokio::test]
+    async fn complete_rejects_invalid_engine_v2_usage_purpose() {
+        use crate::agent::cost_guard::{CostGuard, CostGuardConfig};
+        use crate::db::Database;
+
+        let backend = crate::db::libsql::LibSqlBackend::new_memory()
+            .await
+            .expect("LibSqlBackend");
+        let db: Arc<dyn Database> = Arc::new(backend);
+        let cost_guard = Arc::new(CostGuard::new(CostGuardConfig::default()));
+        let provider: Arc<dyn LlmProvider> = Arc::new(PricedProvider);
+        let adapter = LlmBridgeAdapter::new(
+            provider,
+            None,
+            Arc::new(LlmUsageRecorder::new(Some(db), cost_guard, "test-backend")),
+        );
+        let mut config = LlmCallConfig::default();
+        config
+            .metadata
+            .insert("purpose".to_string(), "billing".to_string());
+
+        let err = adapter
+            .complete(&[ThreadMessage::user("hello")], &[], &config)
+            .await
+            .expect_err("invalid durable usage purpose must fail");
+
+        assert!(matches!(err, EngineError::Store { .. }));
+        assert!(
+            err.to_string()
+                .contains("invalid engine v2 LLM usage purpose"),
             "unexpected error: {err}"
         );
     }

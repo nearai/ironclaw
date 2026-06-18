@@ -59,6 +59,13 @@ const EXTERNAL_TOOL_CATALOG_SWEEP_INTERVAL: std::time::Duration =
 /// it. One hour matches typical pending-gate TTLs and gives callers
 /// plenty of headroom to resume a paused tool call.
 const EXTERNAL_TOOL_CATALOG_TTL: chrono::Duration = chrono::Duration::hours(1);
+/// Bound v1 conversation lookup before spawning Engine V2 work.
+///
+/// Two seconds keeps this optional enrichment below the normal interactive
+/// request budget while still giving cold libSQL/Postgres lookups room to
+/// complete. If it expires, the Engine V2 thread remains the durable source of
+/// truth and the v1 history mirror is skipped with a warning rather than
+/// blocking the user turn.
 const ENGINE_METADATA_V1_CONVERSATION_RESOLVE_TIMEOUT: std::time::Duration =
     std::time::Duration::from_secs(2);
 
@@ -1504,7 +1511,8 @@ async fn resolve_v1_conversation_for_engine_metadata(
         }
         Err(_) => {
             // silent-ok: v1 conversation resolution for engine metadata is bounded so a
-            // slow DB cannot block engine v2 execution; usage is still recorded by thread.
+            // slow DB cannot block engine v2 execution; the engine thread remains the
+            // durable source of truth and v1 history mirroring is skipped later.
             tracing::warn!(
                 message_id = %message.id,
                 timeout_ms = ENGINE_METADATA_V1_CONVERSATION_RESOLVE_TIMEOUT.as_millis(),
@@ -4852,6 +4860,9 @@ async fn handle_with_engine_inner(
                     .await;
             }
             None => {
+                // silent-ok: when the bounded v1 lookup fails, the Engine V2 thread
+                // store remains the durable source for this turn. The v1 gateway
+                // history mirror cannot attach the user message without a conversation id.
                 tracing::warn!(
                     message_id = %message.id,
                     "failed to persist user message because v1 conversation was not resolved"
