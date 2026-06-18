@@ -121,7 +121,7 @@ use crate::available_extensions::slack_manifest_digest;
 use crate::default_system_prompt::seed_default_system_prompt;
 use crate::input::{RebornLocalRuntimeIdentity, RebornRuntimeProcessBinding, RebornStorageInput};
 use crate::lifecycle::{RebornLocalSkillManagementPort, build_local_skill_management_port};
-use crate::local_dev_authorization::local_dev_authorizer;
+use crate::local_dev_authorization::{StoreApprovalSettingsProvider, local_dev_authorizer};
 use crate::local_dev_capability_policy::{LocalDevCapabilityPolicy, local_dev_capability_policy};
 use crate::local_dev_mounts::{
     ambient_workspace_mount_view, memory_mount_view, scoped_skill_context_mount_view,
@@ -827,9 +827,33 @@ async fn build_local_dev(input: RebornBuildInput) -> Result<RebornServices, Rebo
     let local_dev_trust_policy = Arc::new(builtin_first_party_trust_policy()?);
     let local_dev_trust_invalidation_bus = Arc::new(ironclaw_trust::InvalidationBus::new());
     let extension_registry = Arc::new(local_dev_builtin_extension_registry()?);
+    // Per-(tenant,user) approval settings resolved live at each dispatch gate
+    // so a WebUI change applies without a restart (#4959). Mirrors the
+    // persistent-approval store's cfg split: filesystem-backed (shared with the
+    // webui facade) in durable builds, in-memory otherwise.
+    #[cfg(any(feature = "libsql", feature = "postgres"))]
+    let approval_settings_provider = {
+        let approval_settings_filesystem = crate::wrap_scoped(Arc::clone(&filesystem));
+        Arc::new(StoreApprovalSettingsProvider::new(
+            Arc::new(
+                ironclaw_approvals::FilesystemToolPermissionOverrideStore::new(Arc::clone(
+                    &approval_settings_filesystem,
+                )),
+            ),
+            Arc::new(ironclaw_approvals::FilesystemAutoApproveSettingStore::new(
+                approval_settings_filesystem,
+            )),
+        ))
+    };
+    #[cfg(not(any(feature = "libsql", feature = "postgres")))]
+    let approval_settings_provider = Arc::new(StoreApprovalSettingsProvider::new(
+        Arc::new(ironclaw_approvals::InMemoryToolPermissionOverrideStore::new()),
+        Arc::new(ironclaw_approvals::InMemoryAutoApproveSettingStore::new()),
+    ));
     let authorizer = local_dev_authorizer(
         runtime_policy.as_ref(),
         Arc::clone(&store_graph.local_runtime.capability_policy),
+        approval_settings_provider,
     );
     let mut services = HostRuntimeServices::new(
         Arc::clone(&extension_registry),

@@ -4,6 +4,7 @@
 //! authorization leases. It does not prompt users, execute capabilities, or
 //! dispatch runtime work.
 
+mod auto_approve;
 mod policy;
 mod tool_permission;
 
@@ -17,6 +18,10 @@ use ironclaw_host_api::{
 use ironclaw_run_state::{ApprovalRecord, ApprovalRequestStore, ApprovalStatus, RunStateError};
 use thiserror::Error;
 
+pub use auto_approve::{
+    AutoApproveSettingInput, AutoApproveSettingKey, AutoApproveSettingRecord,
+    AutoApproveSettingStore, FilesystemAutoApproveSettingStore, InMemoryAutoApproveSettingStore,
+};
 pub use policy::{
     FilesystemPersistentApprovalPolicyStore, InMemoryPersistentApprovalPolicyStore,
     PersistentApprovalAction, PersistentApprovalPolicy, PersistentApprovalPolicyError,

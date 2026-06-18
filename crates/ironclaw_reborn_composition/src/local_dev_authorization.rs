@@ -1,20 +1,28 @@
 use std::sync::Arc;
 
+use async_trait::async_trait;
+use ironclaw_approvals::{
+    AutoApproveSettingStore, ToolPermissionOverrideKey, ToolPermissionOverrideStore,
+};
 use ironclaw_authorization::TrustAwareCapabilityDispatchAuthorizer;
 use ironclaw_host_api::{
-    EffectKind,
+    CapabilityId, EffectKind, ResourceScope,
     runtime_policy::{ApprovalPolicy, EffectiveRuntimePolicy, RuntimeProfile},
 };
 
 use crate::{
     local_dev_capability_policy::LocalDevCapabilityPolicy,
-    profile_approval_authorization::{ProfileApprovalGatePolicy, profile_approval_authorizer},
+    profile_approval_authorization::{
+        ApprovalSettingsProvider, ProfileApprovalGatePolicy, ResolvedApprovalSettings,
+        profile_approval_authorizer,
+    },
     runtime_profile_approval_policy::RuntimeProfileApprovalGatePolicy,
 };
 
 pub(crate) fn local_dev_authorizer(
     runtime_policy: Option<&EffectiveRuntimePolicy>,
     capability_policy: Arc<LocalDevCapabilityPolicy>,
+    settings: Arc<dyn ApprovalSettingsProvider>,
 ) -> Arc<dyn TrustAwareCapabilityDispatchAuthorizer> {
     let (approval_policy, resolved_profile) = local_dev_approval_policy(runtime_policy);
     let gate_effects = capability_policy.approval_gate_effects();
@@ -23,7 +31,59 @@ pub(crate) fn local_dev_authorizer(
         RuntimeProfileApprovalGatePolicy::new(resolved_profile, gate_effects)
             .with_exempt_capabilities(exempt_capabilities),
     );
-    profile_approval_authorizer(approval_policy, gate_policy)
+    profile_approval_authorizer(approval_policy, gate_policy, settings)
+}
+
+/// Live [`ApprovalSettingsProvider`] backed by the durable per-user approval
+/// stores. Queried on every dispatch gate decision so a WebUI change takes
+/// effect without a process restart (#4959).
+pub(crate) struct StoreApprovalSettingsProvider {
+    overrides: Arc<dyn ToolPermissionOverrideStore>,
+    auto_approve: Arc<dyn AutoApproveSettingStore>,
+}
+
+impl StoreApprovalSettingsProvider {
+    pub(crate) fn new(
+        overrides: Arc<dyn ToolPermissionOverrideStore>,
+        auto_approve: Arc<dyn AutoApproveSettingStore>,
+    ) -> Self {
+        Self {
+            overrides,
+            auto_approve,
+        }
+    }
+}
+
+#[async_trait]
+impl ApprovalSettingsProvider for StoreApprovalSettingsProvider {
+    async fn resolve(
+        &self,
+        scope: &ResourceScope,
+        capability_id: &CapabilityId,
+    ) -> ResolvedApprovalSettings {
+        // Fail safe: a store read error resolves to "no override, auto-approve
+        // off" so the gate falls back to asking rather than silently
+        // auto-approving or denying. The error is logged, not swallowed.
+        let key = ToolPermissionOverrideKey::new(scope, capability_id.clone());
+        let tool_override = match self.overrides.get(&key).await {
+            Ok(record) => record.map(|record| record.state),
+            Err(error) => {
+                tracing::warn!(%error, "tool permission override lookup failed; defaulting to ask");
+                None
+            }
+        };
+        let global_auto_approve = match self.auto_approve.is_enabled(scope).await {
+            Ok(enabled) => enabled,
+            Err(error) => {
+                tracing::warn!(%error, "auto-approve setting lookup failed; defaulting to off");
+                false
+            }
+        };
+        ResolvedApprovalSettings {
+            tool_override,
+            global_auto_approve,
+        }
+    }
 }
 
 pub(crate) fn local_dev_effects_require_approval(
@@ -121,7 +181,11 @@ mod tests {
             provenance: TrustProvenance::AdminConfig,
             evaluated_at: chrono::Utc::now(),
         };
-        let authorizer = local_dev_authorizer(None, policy);
+        let authorizer = local_dev_authorizer(
+            None,
+            policy,
+            Arc::new(crate::profile_approval_authorization::EmptyApprovalSettingsProvider),
+        );
         authorizer
             .authorize_dispatch_with_trust(
                 &context,
