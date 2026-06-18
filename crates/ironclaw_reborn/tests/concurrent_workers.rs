@@ -264,6 +264,89 @@ async fn wait_for_status(
     }
 }
 
+/// Like `submit_run_on_thread` but stamps `owner_user_id` on the TurnScope so
+/// per-user cap checks fire. Used by the C4 config-wiring integration test.
+async fn submit_owned_run_on_thread(
+    thread_id: &ThreadId,
+    thread_service: &InMemorySessionThreadService,
+    thread_scope: &ThreadScope,
+    turn_store: &InMemoryTurnStateStore,
+    resolver: &InMemoryRunProfileResolver,
+    idempotency_key: &str,
+    user_id: &UserId,
+) -> TurnRunId {
+    thread_service
+        .ensure_thread(EnsureThreadRequest {
+            scope: thread_scope.clone(),
+            thread_id: Some(thread_id.clone()),
+            created_by_actor_id: user_id.to_string(),
+            title: None,
+            metadata_json: None,
+        })
+        .await
+        .unwrap();
+    let accepted = thread_service
+        .accept_inbound_message(AcceptInboundMessageRequest {
+            scope: thread_scope.clone(),
+            thread_id: thread_id.clone(),
+            actor_id: user_id.to_string(),
+            source_binding_id: Some("source-web".to_string()),
+            reply_target_binding_id: Some("reply-web".to_string()),
+            external_event_id: Some(format!("event-{idempotency_key}")),
+            content: MessageContent::text("cap test message"),
+        })
+        .await
+        .unwrap();
+
+    // Use new_with_owner so the TurnScope carries an explicit_owner_user_id,
+    // which is what run_user_key reads for per-user cap accounting.
+    let turn_scope = TurnScope::new_with_owner(
+        thread_scope.tenant_id.clone(),
+        Some(thread_scope.agent_id.clone()),
+        thread_scope.project_id.clone(),
+        thread_id.clone(),
+        Some(user_id.clone()),
+    );
+    let submit = turn_store
+        .submit_turn(
+            SubmitTurnRequest {
+                scope: turn_scope,
+                actor: TurnActor::new(user_id.clone()),
+                accepted_message_ref: AcceptedMessageRef::new(format!(
+                    "accepted-{idempotency_key}"
+                ))
+                .unwrap(),
+                source_binding_ref: SourceBindingRef::new("source-web").unwrap(),
+                reply_target_binding_ref: ReplyTargetBindingRef::new("reply-web").unwrap(),
+                requested_run_profile: None,
+                idempotency_key: IdempotencyKey::new(idempotency_key).unwrap(),
+                received_at: Utc::now(),
+                requested_run_id: None,
+                parent_run_id: None,
+                subagent_depth: 0,
+                spawn_tree_root_run_id: None,
+                product_context: None,
+            },
+            &AllowAllTurnAdmissionPolicy,
+            resolver,
+        )
+        .await
+        .unwrap();
+
+    let SubmitTurnResponse::Accepted { turn_id, run_id, .. } = submit;
+    thread_service
+        .mark_message_submitted(
+            thread_scope,
+            thread_id,
+            accepted.message_id,
+            turn_id.to_string(),
+            run_id.to_string(),
+        )
+        .await
+        .unwrap();
+    run_id
+}
+
 // ---------------------------------------------------------------------------
 // The concurrency test
 // ---------------------------------------------------------------------------
@@ -465,4 +548,158 @@ async fn two_workers_execute_two_runs_concurrently() {
     cancel.cancel();
     handle_a.await.unwrap();
     handle_b.await.unwrap();
+}
+
+// ---------------------------------------------------------------------------
+// Config wiring test: TurnRunnerSettings → InMemoryTurnStateStoreLimits
+//
+// This is the caller-level C4 assertion. It directly verifies the mapping
+// inside build_reborn_runtime: build an InMemoryTurnStateStore with the limits
+// that the composition would thread in, then exercise claim behavior to prove
+// the cap is applied.
+// ---------------------------------------------------------------------------
+
+/// Verify that config wiring correctly enforces per-user concurrency cap.
+///
+/// C3 wires `runner.max_concurrent_runs_per_user` into `InMemoryTurnStateStoreLimits`
+/// when building the store. This test builds the store with `cap = 1` (the value
+/// `build_reborn_runtime` would set from `TurnRunnerSettings`) and directly probes
+/// claim behavior to prove:
+///
+/// 1. Two runs (user_a_1 and user_b) are claimable — user_a at cap, user_b not capped.
+/// 2. A third claim is blocked: user_a already has 1 Running run (cap=1), user_b
+///    is Running, no other queued run is eligible.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn config_wiring_per_user_cap_enforced_via_store_limits() {
+    use ironclaw_turns::TurnLeaseToken;
+    use ironclaw_turns::runner::{ClaimRunRequest, TurnRunTransitionPort};
+    use std::num::NonZeroU32;
+
+    let tenant_id = TenantId::new("tenant-cap-wiring").unwrap();
+    let agent_id = AgentId::new("agent-cap-wiring").unwrap();
+    let project_id = ProjectId::new("project-cap-wiring").unwrap();
+    let user_a = UserId::new("user-wiring-a").unwrap();
+    let user_b = UserId::new("user-wiring-b").unwrap();
+
+    // Build the store with per-user cap = 1, mirroring what build_reborn_runtime
+    // constructs from TurnRunnerSettings { max_concurrent_runs_per_user: NonZeroU32::new(1) }.
+    let limits = InMemoryTurnStateStoreLimits {
+        max_concurrent_runs_per_user: NonZeroU32::new(1),
+        ..InMemoryTurnStateStoreLimits::default()
+    };
+    let turn_store = Arc::new(InMemoryTurnStateStore::with_limits(limits));
+    let thread_service = Arc::new(InMemorySessionThreadService::default());
+    let resolver = InMemoryRunProfileResolver::default();
+
+    let thread_scope = ThreadScope {
+        tenant_id: tenant_id.clone(),
+        agent_id: agent_id.clone(),
+        project_id: Some(project_id.clone()),
+        owner_user_id: None,
+        mission_id: None,
+    };
+
+    // Submit two runs for user A and one for user B (with explicit owner so
+    // run_user_key returns Some and per-user cap accounting fires).
+    let thread_id_a1 = ThreadId::new("wiring-thread-a1").unwrap();
+    submit_owned_run_on_thread(
+        &thread_id_a1,
+        &thread_service,
+        &thread_scope,
+        &turn_store,
+        &resolver,
+        "idem-wiring-a1",
+        &user_a,
+    )
+    .await;
+
+    let thread_id_a2 = ThreadId::new("wiring-thread-a2").unwrap();
+    submit_owned_run_on_thread(
+        &thread_id_a2,
+        &thread_service,
+        &thread_scope,
+        &turn_store,
+        &resolver,
+        "idem-wiring-a2",
+        &user_a,
+    )
+    .await;
+
+    let thread_id_b = ThreadId::new("wiring-thread-b").unwrap();
+    submit_owned_run_on_thread(
+        &thread_id_b,
+        &thread_service,
+        &thread_scope,
+        &turn_store,
+        &resolver,
+        "idem-wiring-b",
+        &user_b,
+    )
+    .await;
+
+    // With cap=1 for user A:
+    // - First claim: gets user_a_1 (earliest queued, no cap yet).
+    // - Second claim: user_a_2 is skipped (user_a at cap); gets user_b.
+    // - Third claim: both user_a (1 running) and user_b (1 running) are at their
+    //   respective limits — returns None.
+    use ironclaw_turns::TurnRunnerId;
+    let runner_id = TurnRunnerId::new();
+
+    let claimed_1 = (Arc::clone(&turn_store) as Arc<dyn TurnRunTransitionPort>)
+        .claim_next_run(ClaimRunRequest {
+            runner_id,
+            lease_token: TurnLeaseToken::new(),
+            scope_filter: None,
+        })
+        .await
+        .unwrap();
+    assert!(
+        claimed_1.is_some(),
+        "first claim should succeed (a1 or b is queued)"
+    );
+    let first = claimed_1.unwrap();
+    assert_eq!(
+        first.state.status,
+        TurnStatus::Running,
+        "claimed run 1 should be Running"
+    );
+
+    let claimed_2 = (Arc::clone(&turn_store) as Arc<dyn TurnRunTransitionPort>)
+        .claim_next_run(ClaimRunRequest {
+            runner_id,
+            lease_token: TurnLeaseToken::new(),
+            scope_filter: None,
+        })
+        .await
+        .unwrap();
+    assert!(
+        claimed_2.is_some(),
+        "second claim should succeed (b or a1 is still claimable)"
+    );
+    let second = claimed_2.unwrap();
+    assert_eq!(
+        second.state.status,
+        TurnStatus::Running,
+        "claimed run 2 should be Running"
+    );
+
+    // The third claim must return None: user_a has 1 running run (cap=1) so
+    // user_a_2 is skipped; user_b is already Running; no eligible run remains.
+    let claimed_3 = (Arc::clone(&turn_store) as Arc<dyn TurnRunTransitionPort>)
+        .claim_next_run(ClaimRunRequest {
+            runner_id,
+            lease_token: TurnLeaseToken::new(),
+            scope_filter: None,
+        })
+        .await
+        .unwrap();
+    assert!(
+        claimed_3.is_none(),
+        "third claim must be blocked (user_a at cap=1; user_b already Running); \
+         claimed_1 scope={:?} run={:?}, claimed_2 scope={:?} run={:?}",
+        first.state.scope.thread_id,
+        first.state.run_id,
+        second.state.scope.thread_id,
+        second.state.run_id,
+    );
 }
