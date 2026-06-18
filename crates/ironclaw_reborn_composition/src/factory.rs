@@ -661,6 +661,13 @@ fn compose_product_auth_services(
     turn_coordinator: Arc<dyn ironclaw_turns::TurnCoordinator>,
     provider_composition: OAuthProviderComposition,
     security_audit_sink: Option<Arc<dyn ironclaw_events::SecurityAuditSink>>,
+    // A4: optional Postgres pool for cross-process advisory-lock serialization
+    // of per-account credential refresh.  `None` on the libsql / local-dev
+    // path — `runtime_credential_account_refresh_service` degrades to a pure
+    // pass-through.  This parameter is intentionally NOT part of any public
+    // API; it is threaded only through the private `build_postgres_production`
+    // → `build_backend_production` path.
+    #[cfg(feature = "postgres")] refresh_lock_pool: Option<deadpool_postgres::Pool>,
 ) -> Arc<RebornProductAuthServices> {
     let ports = match provider_composition.client {
         Some(provider_client) => ports.with_provider_client(provider_client),
@@ -675,6 +682,10 @@ fn compose_product_auth_services(
     }
     if let Some(registry) = provider_composition.gate_registry {
         services = services.with_oauth_gate_registry(registry);
+    }
+    #[cfg(feature = "postgres")]
+    if let Some(pool) = refresh_lock_pool {
+        services = services.with_refresh_lock_pool(pool);
     }
     Arc::new(services)
 }
@@ -931,6 +942,9 @@ async fn build_local_dev(input: RebornBuildInput) -> Result<RebornServices, Rebo
             turn_coordinator.clone(),
             provider_composition,
             security_audit_sink.clone(),
+            // local-dev path: no Postgres pool; advisory lock degrades to pass-through.
+            #[cfg(feature = "postgres")]
+            None,
         ),
         None => {
             #[cfg(any(feature = "libsql", feature = "postgres"))]
@@ -3144,6 +3158,9 @@ async fn build_backend_production<F>(
     production_runtime_services: impl FnOnce(
         Arc<RebornProductionRuntimeStoreGraph<F>>,
     ) -> RebornProductionRuntimeServices,
+    // A4: optional Postgres pool for cross-process advisory-lock serialization
+    // of per-account credential refresh.  `None` on the libsql path.
+    #[cfg(feature = "postgres")] refresh_lock_pool: Option<deadpool_postgres::Pool>,
 ) -> Result<RebornServices, RebornBuildError>
 where
     F: RootFilesystem + 'static,
@@ -3286,6 +3303,11 @@ where
         turn_coordinator.clone(),
         provider_composition,
         security_audit_sink,
+        // A4: thread the Postgres pool clone so the advisory-lock wrapper can
+        // acquire per-account session-scoped locks around credential refresh.
+        // libsql callers pass None → pass-through.
+        #[cfg(feature = "postgres")]
+        refresh_lock_pool,
     );
     let product_auth_ready = true;
     // Wire ProductAuthAccount runtime credential resolver before
@@ -3362,6 +3384,9 @@ async fn build_libsql_production(
         stores,
         trigger_repository,
         RebornProductionRuntimeServices::LibSql,
+        // libsql path: no Postgres pool; advisory lock degrades to pass-through.
+        #[cfg(feature = "postgres")]
+        None,
     )
     .await
 }
@@ -3376,6 +3401,11 @@ async fn build_postgres_production(
 ) -> Result<RebornServices, RebornBuildError> {
     use ironclaw_filesystem::PostgresRootFilesystem;
 
+    // A4: Clone the pool before it is moved into PostgresTriggerRepository so we
+    // can thread it to the auth-services composition for cross-process
+    // advisory-lock serialization of per-account credential refresh.
+    // This clone stays PRIVATE — it is never exposed through any public facade.
+    let pool_for_refresh_lock = pool.clone();
     let filesystem = Arc::new(PostgresRootFilesystem::new(pool.clone()));
     filesystem.run_migrations().await?;
     let trigger_repository = Arc::new(ironclaw_triggers::PostgresTriggerRepository::new(pool));
@@ -3396,6 +3426,10 @@ async fn build_postgres_production(
         stores,
         trigger_repository,
         RebornProductionRuntimeServices::Postgres,
+        // A4: hand the pool clone to auth-services for cross-process advisory
+        // locking.  It stays private inside RebornProductAuthServices.
+        #[cfg(feature = "postgres")]
+        Some(pool_for_refresh_lock),
     )
     .await
 }

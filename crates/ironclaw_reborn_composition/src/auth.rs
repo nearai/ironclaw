@@ -475,6 +475,13 @@ pub struct RebornProductAuthServices {
     /// by product-auth issue #4112 and remains genuinely optional until the
     /// durable backend exposes the same scoped projection as the in-memory port.
     flow_record_source: Option<Arc<dyn AuthFlowRecordSource>>,
+    /// Postgres pool for cross-process advisory-lock serialization of
+    /// per-account credential refresh (A4).  `None` on the libsql / local-dev
+    /// path — `runtime_credential_account_refresh_service` degrades to
+    /// pass-through in that case.  MUST stay private; never exposed through
+    /// any public API or the composition facade.
+    #[cfg(feature = "postgres")]
+    refresh_lock_pool: Option<deadpool_postgres::Pool>,
 }
 
 impl std::fmt::Debug for RebornProductAuthServices {
@@ -510,6 +517,15 @@ impl std::fmt::Debug for RebornProductAuthServices {
             .field("flow_record_source", &self.flow_record_source.is_some())
             .field("dcr_oauth_registry", &self.dcr_oauth_registry.is_some())
             .field("oauth_gate_registry", &self.oauth_gate_registry.is_some())
+            .field(
+                "refresh_lock_pool",
+                &{
+                    #[cfg(feature = "postgres")]
+                    { self.refresh_lock_pool.is_some() }
+                    #[cfg(not(feature = "postgres"))]
+                    { false }
+                },
+            )
             .finish()
     }
 }
@@ -544,6 +560,8 @@ impl RebornProductAuthServices {
             dcr_oauth_registry: None,
             oauth_gate_registry: None,
             flow_record_source: None,
+            #[cfg(feature = "postgres")]
+            refresh_lock_pool: None,
         }
     }
 
@@ -652,7 +670,33 @@ impl RebornProductAuthServices {
     pub(crate) fn runtime_credential_account_refresh_service(
         self: &Arc<Self>,
     ) -> Arc<dyn RuntimeCredentialAccountRefreshService> {
-        let refresh_port: Arc<dyn RuntimeCredentialAccountRefreshPort> = self.clone();
+        // A4: Wrap the raw refresh port in the cross-process advisory-lock
+        // serializer.  On the Postgres path the pool is present and a
+        // pg_try_advisory_lock guards each per-account refresh.  On the libsql /
+        // local-dev path the pool is absent and AdvisoryLockedCredentialRefresh
+        // is a pure identity pass-through.
+        //
+        // The inner `ProviderBackedCredentialAccountService::refresh_locks` (an
+        // in-process tokio::sync::Mutex) is retained as an intra-process stampede
+        // guard — it prevents multiple tokio tasks in one process from
+        // simultaneously hitting the token endpoint.  This outer advisory-lock
+        // wrapper adds the cross-process layer; the two do not conflict.
+        let inner_port: Arc<dyn RuntimeCredentialAccountRefreshPort> = self.clone();
+        let refresh_port: Arc<dyn RuntimeCredentialAccountRefreshPort> = {
+            #[cfg(feature = "postgres")]
+            if let Some(pool) = self.refresh_lock_pool.clone() {
+                Arc::new(
+                    crate::product_auth_refresh_lock::AdvisoryLockedCredentialRefresh::new(
+                        inner_port,
+                        pool,
+                    ),
+                )
+            } else {
+                inner_port
+            }
+            #[cfg(not(feature = "postgres"))]
+            inner_port
+        };
         // A2: Forward the secret store so the refresher can read `expires_at`
         // metadata and skip the token-endpoint round-trip when the access token
         // is still fresh. Fall back to a no-expiry in-memory store when no
@@ -699,6 +743,18 @@ impl RebornProductAuthServices {
         registry: Arc<GoogleOAuthGateProviderRegistry>,
     ) -> Self {
         self.oauth_gate_registry = Some(registry);
+        self
+    }
+
+    /// Wire a Postgres pool for cross-process per-account advisory-lock
+    /// serialization of credential refresh (A4).
+    ///
+    /// MUST be called only from `compose_product_auth_services` on the Postgres
+    /// path.  The pool is intentionally NOT exposed through any public API or
+    /// the composition facade — it stays entirely within this struct.
+    #[cfg(feature = "postgres")]
+    pub(crate) fn with_refresh_lock_pool(mut self, pool: deadpool_postgres::Pool) -> Self {
+        self.refresh_lock_pool = Some(pool);
         self
     }
 
