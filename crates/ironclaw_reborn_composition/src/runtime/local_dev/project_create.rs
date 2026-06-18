@@ -90,7 +90,7 @@ impl LocalDevSyntheticCapabilityHandler for ProjectCreateHandler {
             "name": project.name,
         });
         let safe_summary = format!("created project \"{}\"", project.name);
-        let (result_ref, byte_len) = invocation
+        let write_result = invocation
             .result_writer
             .write_capability_result(CapabilityResultWrite {
                 run_context: &invocation.run_context,
@@ -102,11 +102,12 @@ impl LocalDevSyntheticCapabilityHandler for ProjectCreateHandler {
             })
             .await?;
         Ok(CapabilityOutcome::Completed(CapabilityResultMessage {
-            result_ref,
+            result_ref: write_result.result_ref,
             safe_summary,
             progress: CapabilityProgress::MadeProgress,
             terminate_hint: false,
-            byte_len,
+            byte_len: write_result.byte_len,
+            output_digest: write_result.output_digest,
         }))
     }
 }
