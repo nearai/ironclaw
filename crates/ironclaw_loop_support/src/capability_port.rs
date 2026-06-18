@@ -23,9 +23,9 @@ use ironclaw_turns::{
         CapabilityBatchInvocation, CapabilityBatchOutcome, CapabilityDenied,
         CapabilityDeniedReasonKind, CapabilityDescriptorView, CapabilityFailure,
         CapabilityFailureKind, CapabilityInputRef, CapabilityInvocation, CapabilityOutcome,
-        CapabilityResultMessage, CapabilityResumeToken, ConcurrencyHint, LoopCapabilityPort,
-        LoopHostMilestone, LoopHostMilestoneKind, LoopHostMilestoneSink, LoopProcessRef,
-        LoopRunContext, LoopSafeSummary, ProcessHandleSummary, ProviderToolCall,
+        CapabilityResultMessage, CapabilityResumeToken, ConcurrencyHint, ContentDigest,
+        LoopCapabilityPort, LoopHostMilestone, LoopHostMilestoneKind, LoopHostMilestoneSink,
+        LoopProcessRef, LoopRunContext, LoopSafeSummary, ProcessHandleSummary, ProviderToolCall,
         ProviderToolCallCapabilityIds, ProviderToolCallReplay, ProviderToolDefinition,
         VisibleCapabilityRequest, VisibleCapabilitySurface,
     },
@@ -105,6 +105,29 @@ pub trait LoopCapabilityInputResolver: Send + Sync {
             "provider tool-call input registration is not supported",
         ))
     }
+
+    /// Record the display-preview input for a provider tool call under
+    /// `input_ref`, keyed for display by the resolved dotted `capability_id`
+    /// (e.g. `nearai.web_search`) — NOT the provider tool name
+    /// (`nearai__web_search`), which is a lossy, digest-suffixed encoding that
+    /// both renders badly and defeats the per-tool summary/subtitle matchers.
+    ///
+    /// `ProviderToolCallInputResolver` decorates this trait and owns the
+    /// canonical (digest-based) `input_ref`; it stages the arguments itself and
+    /// does NOT delegate `register_provider_tool_call_input` to the inner
+    /// resolver, so it forwards this hook to `inner` instead. The caller
+    /// (`register_provider_tool_call`) drives it after registration because that
+    /// is where the resolved `capability_id` and the canonical `input_ref` are
+    /// both in hand. Default no-op: only resolvers that own a display-preview
+    /// store implement it.
+    fn record_provider_tool_call_display_input(
+        &self,
+        _run_context: &LoopRunContext,
+        _input_ref: &CapabilityInputRef,
+        _capability_id: &CapabilityId,
+        _tool_call: &ProviderToolCall,
+    ) {
+    }
 }
 
 struct ProviderToolCallInputResolver {
@@ -171,19 +194,37 @@ impl LoopCapabilityInputResolver for ProviderToolCallInputResolver {
         }
         Ok(input_ref)
     }
+
+    fn record_provider_tool_call_display_input(
+        &self,
+        run_context: &LoopRunContext,
+        input_ref: &CapabilityInputRef,
+        capability_id: &CapabilityId,
+        tool_call: &ProviderToolCall,
+    ) {
+        // This decorator bypasses the inner `register_provider_tool_call_input`,
+        // so forward the display-recording side effect to `inner` (the resolver
+        // that owns the display-preview store).
+        self.inner.record_provider_tool_call_display_input(
+            run_context,
+            input_ref,
+            capability_id,
+            tool_call,
+        );
+    }
 }
 
 #[async_trait]
 pub trait LoopCapabilityResultWriter: Send + Sync {
     /// Write the result of a completed capability invocation.
     ///
-    /// Returns a tuple of `(LoopResultRef, u64)` where the `u64` is the
-    /// serialized byte length of the staged result JSON, for downstream
-    /// per-capability byte accounting (no PII; pure size).
+    /// Returns metadata for the staged output: the result ref, serialized byte
+    /// length for per-capability byte accounting, and an optional normalized
+    /// content digest for future output-aware progress detection.
     async fn write_capability_result(
         &self,
         write: CapabilityResultWrite<'_>,
-    ) -> Result<(LoopResultRef, u64), AgentLoopHostError>;
+    ) -> Result<CapabilityWriteResult, AgentLoopHostError>;
 
     async fn update_capability_result(
         &self,
@@ -204,6 +245,20 @@ pub trait LoopCapabilityResultWriter: Send + Sync {
     ) -> Result<(), AgentLoopHostError> {
         Ok(())
     }
+
+    /// Note that the invocation `invocation_id` has started executing with the
+    /// input staged under `input_ref`. Links the two so the still-running
+    /// activity frame can surface the input (inline argument + parameters)
+    /// before the result lands — the input was recorded under `input_ref` at
+    /// registration, but the activity projection only knows the `invocation_id`.
+    /// Default no-op: only writers that own a display-preview store implement it.
+    fn record_running_invocation(
+        &self,
+        _run_context: &LoopRunContext,
+        _invocation_id: InvocationId,
+        _input_ref: &CapabilityInputRef,
+    ) {
+    }
 }
 
 pub struct CapabilityResultWrite<'a> {
@@ -213,6 +268,48 @@ pub struct CapabilityResultWrite<'a> {
     pub capability_id: &'a CapabilityId,
     pub output: serde_json::Value,
     pub display_preview: Option<CapabilityDisplayOutputPreview>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CapabilityWriteResult {
+    pub result_ref: LoopResultRef,
+    pub byte_len: u64,
+    pub output_digest: Option<ContentDigest>,
+}
+
+impl CapabilityWriteResult {
+    pub fn without_output_digest(result_ref: LoopResultRef, byte_len: u64) -> Self {
+        Self {
+            result_ref,
+            byte_len,
+            output_digest: None,
+        }
+    }
+
+    pub fn from_output(
+        result_ref: LoopResultRef,
+        byte_len: u64,
+        output: &serde_json::Value,
+    ) -> Self {
+        // The output digest is a best-effort progress hint (consumed by output-aware
+        // no-progress detection in a later change). A failure to compute it must NEVER
+        // fail an otherwise-successful capability write — degrade to `None` instead.
+        let output_digest = match ContentDigest::from_json_value(output) {
+            Ok(digest) => Some(digest),
+            Err(error) => {
+                tracing::debug!(
+                    %error,
+                    "capability result output digest could not be built; recording result without it"
+                );
+                None
+            }
+        };
+        Self {
+            result_ref,
+            byte_len,
+            output_digest,
+        }
+    }
 }
 
 #[async_trait]
@@ -1022,7 +1119,7 @@ impl HostRuntimeLoopCapabilityPort {
             }
             Err(error) => return Err(error),
         };
-        let (result_ref, byte_len) = self
+        let write_result = self
             .result_writer
             .write_capability_result(CapabilityResultWrite {
                 run_context: &self.run_context,
@@ -1034,11 +1131,12 @@ impl HostRuntimeLoopCapabilityPort {
             })
             .await?;
         Ok(CapabilityOutcome::Completed(CapabilityResultMessage {
-            result_ref,
+            result_ref: write_result.result_ref,
             safe_summary: "capability info returned".to_string(),
             progress: ironclaw_turns::run_profile::CapabilityProgress::MadeProgress,
             terminate_hint: false,
-            byte_len,
+            byte_len: write_result.byte_len,
+            output_digest: write_result.output_digest,
         }))
     }
 
@@ -1128,6 +1226,16 @@ impl LoopCapabilityPort for HostRuntimeLoopCapabilityPort {
             .input_resolver
             .register_provider_tool_call_input(&self.run_context, &normalized_tool_call)
             .await?;
+        // Record the activity-card display input now that both the canonical
+        // `input_ref` and the resolved dotted `capability_id` are in hand, so
+        // the card shows `nearai.web_search   <query>` (not the lossy provider
+        // tool name `nearai__web_search`) and the per-tool summary matches.
+        self.input_resolver.record_provider_tool_call_display_input(
+            &self.run_context,
+            &input_ref,
+            &prepared.capability_id,
+            &normalized_tool_call,
+        );
         if prepared.capability_id.as_str() == crate::capability_info::CAPABILITY_ID {
             self.record_provider_tool_call_effective_capability_ids(
                 &input_ref,
@@ -1459,6 +1567,14 @@ impl LoopCapabilityPort for HostRuntimeLoopCapabilityPort {
         let requested_capability_id = request.capability_id.clone();
         let provider = capability.provider.clone();
         let runtime = capability.runtime;
+        // Link this invocation to its staged input ref now that both are known,
+        // so the still-running activity frame can surface the input argument
+        // before the result completes.
+        self.result_writer.record_running_invocation(
+            &self.run_context,
+            invocation_id,
+            effective_input_ref,
+        );
         let capability_activity_id = CapabilityActivityId::from_uuid(invocation_id.as_uuid());
         self.emit_capability_milestone(LoopHostMilestoneKind::CapabilityInvoked {
             activity_id: capability_activity_id,
@@ -2081,7 +2197,7 @@ async fn runtime_outcome_to_loop(
     ensure_runtime_outcome_matches(conversion.requested_capability_id, &conversion.outcome)?;
     Ok(match conversion.outcome {
         RuntimeCapabilityOutcome::Completed(completed) => {
-            let (result_ref, byte_len) = result_writer
+            let write_result = result_writer
                 .write_capability_result(CapabilityResultWrite {
                     run_context,
                     input_ref: conversion.input_ref,
@@ -2092,11 +2208,12 @@ async fn runtime_outcome_to_loop(
                 })
                 .await?;
             CapabilityOutcome::Completed(CapabilityResultMessage {
-                result_ref,
+                result_ref: write_result.result_ref,
                 safe_summary: "capability completed".to_string(),
                 progress: ironclaw_turns::run_profile::CapabilityProgress::MadeProgress,
                 terminate_hint: false,
-                byte_len,
+                byte_len: write_result.byte_len,
+                output_digest: write_result.output_digest,
             })
         }
         RuntimeCapabilityOutcome::ApprovalRequired(gate) => {
@@ -2229,7 +2346,7 @@ fn runtime_model_visible_failure_to_loop(
         RuntimeFailureKind::Authorization | RuntimeFailureKind::PolicyDenied
     ) {
         return Ok(CapabilityOutcome::Denied(CapabilityDenied {
-            reason_kind: capability_denied_reason_kind(failure.kind.as_str())?,
+            reason_kind: denied_reason_kind_for(failure.kind)?,
             safe_summary: runtime_failure_safe_summary(&failure, "capability authorization denied"),
         }));
     }
@@ -2304,6 +2421,31 @@ fn ensure_runtime_outcome_matches(
         ));
     }
     Ok(())
+}
+
+/// Maps an authorization/policy runtime failure to a leak-safe denied reason
+/// identifier.
+///
+/// `RuntimeFailureKind::Authorization.as_str()` is the literal string
+/// `"authorization"`, which the loop-safe identifier validator rejects as a
+/// sensitive marker (it guards against leaking `Authorization:` header
+/// material into identifiers). Passing it straight into
+/// `capability_denied_reason_kind` therefore turned every authorization denial
+/// into an internal "could not be represented" error, which the executor
+/// mapped to `HostUnavailable` and the planned driver recorded as a terminal
+/// "driver unavailable" failure — borking the whole run (observed when a Gmail
+/// extension activation failed authorization on auth-resume). Use stable,
+/// non-leaky tags so the denial surfaces to the model as a clean `Denied`
+/// outcome instead.
+fn denied_reason_kind_for(
+    kind: RuntimeFailureKind,
+) -> Result<CapabilityDeniedReasonKind, AgentLoopHostError> {
+    let reason = match kind {
+        RuntimeFailureKind::Authorization => "auth_denied",
+        RuntimeFailureKind::PolicyDenied => "policy_denied",
+        other => other.as_str(),
+    };
+    capability_denied_reason_kind(reason)
 }
 
 fn capability_denied_reason_kind(
@@ -2677,6 +2819,27 @@ mod tests {
             CapabilityOutcome::Denied(denied)
                 if denied.reason_kind.as_str() == "policy_denied"
                     && denied.safe_summary == "policy denied request"
+        ));
+
+        // Regression: RuntimeFailureKind::Authorization.as_str() is the literal
+        // "authorization", which the loop-safe identifier validator rejects as a
+        // sensitive marker. Feeding it straight into the denied reason kind used
+        // to fail conversion with an internal "could not be represented" error,
+        // which the executor mapped to HostUnavailable and the planned driver
+        // turned into a terminal "driver unavailable" failure — borking the run
+        // (e.g. a Gmail activation that failed authorization on auth-resume).
+        // The conversion must instead yield a clean, leak-safe Denied outcome.
+        let auth_denied = runtime_failure_to_loop(RuntimeCapabilityFailure::new(
+            capability_id.clone(),
+            RuntimeFailureKind::Authorization,
+            Some("capability requires authentication".to_string()),
+        ))
+        .expect("convert authorization denial without borking the run");
+        assert!(matches!(
+            auth_denied,
+            CapabilityOutcome::Denied(denied)
+                if denied.reason_kind.as_str() == "auth_denied"
+                    && denied.safe_summary == "capability requires authentication"
         ));
 
         let operation_failed = runtime_failure_to_loop(RuntimeCapabilityFailure::new(
@@ -3571,6 +3734,43 @@ mod tests {
         }
     }
 
+    /// Inner resolver that records every
+    /// `record_provider_tool_call_display_input` call, so a test can assert the
+    /// `ProviderToolCallInputResolver` decorator forwards the display hook with
+    /// the resolved capability id.
+    #[derive(Default)]
+    struct DisplayInputRecordingResolver {
+        recorded: Mutex<Vec<(String, String, serde_json::Value)>>,
+    }
+
+    #[async_trait]
+    impl LoopCapabilityInputResolver for DisplayInputRecordingResolver {
+        async fn resolve_capability_input(
+            &self,
+            _run_context: &LoopRunContext,
+            _input_ref: &CapabilityInputRef,
+        ) -> Result<serde_json::Value, AgentLoopHostError> {
+            Err(AgentLoopHostError::new(
+                AgentLoopHostErrorKind::InvalidInvocation,
+                "inner resolver should not resolve in this test",
+            ))
+        }
+
+        fn record_provider_tool_call_display_input(
+            &self,
+            _run_context: &LoopRunContext,
+            input_ref: &CapabilityInputRef,
+            capability_id: &CapabilityId,
+            tool_call: &ProviderToolCall,
+        ) {
+            self.recorded.lock().expect("recorded lock").push((
+                input_ref.as_str().to_string(),
+                capability_id.as_str().to_string(),
+                tool_call.arguments.clone(),
+            ));
+        }
+    }
+
     #[tokio::test]
     async fn provider_tool_call_input_resolver_stages_arguments() {
         let run_context = loop_run_context(&execution_context("thread-provider-input")).await;
@@ -3588,6 +3788,43 @@ mod tests {
 
         assert!(input_ref.as_str().starts_with("input:provider-tool-"));
         assert_eq!(resolved, serde_json::json!({"message":"hello"}));
+    }
+
+    /// Regression (#activity-card-args): the decorator bypasses the inner
+    /// `register_provider_tool_call_input`, so it MUST forward the
+    /// display-preview hook to the inner resolver — and key it by the resolved
+    /// dotted capability id (`nearai.web_search`), not the lossy provider tool
+    /// name (`nearai__web_search`). Otherwise the activity card renders the
+    /// wrong name and the per-tool summary/subtitle matchers miss.
+    #[tokio::test]
+    async fn provider_tool_call_input_resolver_forwards_display_input_hook_with_capability_id() {
+        let run_context = loop_run_context(&execution_context("thread-display-input")).await;
+        let inner = Arc::new(DisplayInputRecordingResolver::default());
+        let resolver = ProviderToolCallInputResolver::new(inner.clone());
+        let call = provider_tool_call();
+        let input_ref = provider_tool_call_input_ref(&run_context, &call).expect("ref");
+        let capability_id = CapabilityId::new("nearai.web_search").expect("capability id");
+
+        resolver.record_provider_tool_call_display_input(
+            &run_context,
+            &input_ref,
+            &capability_id,
+            &call,
+        );
+
+        let recorded = inner.recorded.lock().expect("recorded lock").clone();
+        assert_eq!(recorded.len(), 1, "display input forwarded exactly once");
+        let (recorded_ref, recorded_capability, recorded_args) = &recorded[0];
+        assert_eq!(
+            recorded_ref,
+            input_ref.as_str(),
+            "display input must be recorded under the canonical ref the result write later uses",
+        );
+        assert_eq!(
+            recorded_capability, "nearai.web_search",
+            "display input must be keyed by the resolved dotted capability id",
+        );
+        assert_eq!(recorded_args, &call.arguments);
     }
 
     /// Captures every input callback the port forwards, so tests can drive the
@@ -6493,14 +6730,14 @@ mod tests {
         async fn write_capability_result(
             &self,
             _write: CapabilityResultWrite<'_>,
-        ) -> Result<(LoopResultRef, u64), AgentLoopHostError> {
+        ) -> Result<CapabilityWriteResult, AgentLoopHostError> {
             let result_ref = LoopResultRef::new("result:mount-test").map_err(|_| {
                 AgentLoopHostError::new(
                     AgentLoopHostErrorKind::Internal,
                     "result ref could not be built",
                 )
             })?;
-            Ok((result_ref, 0))
+            Ok(CapabilityWriteResult::without_output_digest(result_ref, 0))
         }
     }
 
@@ -6520,7 +6757,7 @@ mod tests {
         async fn write_capability_result(
             &self,
             _write: CapabilityResultWrite<'_>,
-        ) -> Result<(LoopResultRef, u64), AgentLoopHostError> {
+        ) -> Result<CapabilityWriteResult, AgentLoopHostError> {
             if self.attempts.fetch_add(1, Ordering::SeqCst) == 0 {
                 return Err(AgentLoopHostError::new(
                     AgentLoopHostErrorKind::TranscriptWriteFailed,
@@ -6533,7 +6770,7 @@ mod tests {
                     "result ref could not be built",
                 )
             })?;
-            Ok((result_ref, 0))
+            Ok(CapabilityWriteResult::without_output_digest(result_ref, 0))
         }
     }
 
@@ -6561,7 +6798,13 @@ mod tests {
         async fn write_capability_result(
             &self,
             write: CapabilityResultWrite<'_>,
-        ) -> Result<(LoopResultRef, u64), AgentLoopHostError> {
+        ) -> Result<CapabilityWriteResult, AgentLoopHostError> {
+            let output_digest = ContentDigest::from_json_value(&write.output).map_err(|error| {
+                AgentLoopHostError::new(
+                    AgentLoopHostErrorKind::Internal,
+                    format!("capability result output digest could not be built: {error}"),
+                )
+            })?;
             self.records
                 .lock()
                 .expect("records lock")
@@ -6576,7 +6819,11 @@ mod tests {
                     "result ref could not be built",
                 )
             })?;
-            Ok((result_ref, 0))
+            Ok(CapabilityWriteResult {
+                result_ref,
+                byte_len: 0,
+                output_digest: Some(output_digest),
+            })
         }
     }
 
@@ -6642,7 +6889,7 @@ mod tests {
         async fn write_capability_result(
             &self,
             _write: CapabilityResultWrite<'_>,
-        ) -> Result<(LoopResultRef, u64), AgentLoopHostError> {
+        ) -> Result<CapabilityWriteResult, AgentLoopHostError> {
             unreachable!("noop capability io should not be called")
         }
     }

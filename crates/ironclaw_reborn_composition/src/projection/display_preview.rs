@@ -1,4 +1,7 @@
-use std::{collections::HashMap, sync::Mutex};
+use std::{
+    collections::HashMap,
+    sync::{Mutex, MutexGuard},
+};
 
 use async_trait::async_trait;
 use ironclaw_event_projections::{CapabilityActivityProjection, CapabilityActivityStatus};
@@ -9,6 +12,10 @@ use ironclaw_host_api::{
 use ironclaw_product_adapters::{
     CAPABILITY_DISPLAY_PREVIEW_MAX_BYTES, CAPABILITY_DISPLAY_SUMMARY_MAX_BYTES,
     CapabilityDisplayPreviewView, CapabilityDisplayPreviewViewInput, ProductAdapterError,
+};
+use ironclaw_safety::{
+    sanitize_display_text as safety_sanitize_text, sanitize_url_for_display,
+    shell_command_display_text,
 };
 use ironclaw_threads::ThreadMessageId;
 use ironclaw_turns::{TurnRunId, run_profile::CapabilityInputRef};
@@ -24,6 +31,12 @@ pub(super) trait CapabilityDisplayPreviewSource: Send + Sync {
         &self,
         activity: &CapabilityActivityProjection,
     ) -> Result<CapabilityDisplayPreviewResolution, ProductAdapterError>;
+
+    /// Input a still-running invocation should display inline, or `None` if the
+    /// invocation is not in-flight (or has no recorded input). Default `None`.
+    fn running_input(&self, _invocation_id: InvocationId) -> Option<CapabilityRunningInput> {
+        None
+    }
 
     #[cfg(test)]
     async fn preview(
@@ -66,6 +79,18 @@ pub(crate) struct CapabilityDisplayPreviewStore {
 struct CapabilityDisplayPendingInputs {
     by_ref: HashMap<String, CapabilityDisplayInputPreview>,
     refs_by_run: HashMap<String, Vec<String>>,
+    /// `invocation_id -> input_ref`, established when the invocation starts
+    /// executing (the activity frame only knows the invocation id, but the
+    /// input was recorded under its ref at registration). Lets the
+    /// still-running activity frame surface the input before the result lands.
+    input_ref_by_invocation: HashMap<String, String>,
+}
+
+/// The input a still-running invocation shows in its activity row.
+#[derive(Debug, Clone, Default)]
+pub(super) struct CapabilityRunningInput {
+    pub(super) subtitle: Option<String>,
+    pub(super) input_summary: Option<String>,
 }
 
 #[derive(Default)]
@@ -107,6 +132,39 @@ pub(crate) struct CapabilityDisplayPreviewResult<'a> {
 }
 
 impl CapabilityDisplayPreviewStore {
+    fn lock_pending_inputs(&self) -> MutexGuard<'_, CapabilityDisplayPendingInputs> {
+        self.pending.lock().unwrap_or_else(|poisoned| {
+            tracing::debug!(
+                "capability display preview pending input store was poisoned; recovering"
+            );
+            poisoned.into_inner()
+        })
+    }
+
+    fn lock_completed_previews(&self) -> MutexGuard<'_, CapabilityDisplayCompletedPreviews> {
+        self.completed.lock().unwrap_or_else(|poisoned| {
+            tracing::debug!(
+                "capability display preview completed preview store was poisoned; recovering"
+            );
+            poisoned.into_inner()
+        })
+    }
+
+    fn has_pending_input_for_activity(&self, activity: &CapabilityActivityProjection) -> bool {
+        let Some(run_id) = activity.run_id else {
+            return false;
+        };
+        let pending = self.lock_pending_inputs();
+        pending
+            .refs_by_run
+            .get(&run_id.to_string())
+            .is_some_and(|input_refs| {
+                input_refs
+                    .iter()
+                    .any(|input_ref| pending.by_ref.contains_key(input_ref))
+            })
+    }
+
     pub(crate) fn record_input(
         &self,
         run_id: &str,
@@ -114,24 +172,36 @@ impl CapabilityDisplayPreviewStore {
         tool_name: &str,
         arguments: &serde_json::Value,
     ) {
+        let mut pending = self.lock_pending_inputs();
         let input_summary = input_summary(tool_name, arguments);
         let input = CapabilityDisplayInputPreview {
             title: bounded_display_text(tool_name, CAPABILITY_DISPLAY_SUMMARY_MAX_BYTES).text,
-            subtitle: safe_path_subtitle(arguments),
+            subtitle: primary_arg_subtitle(tool_name, arguments),
             truncated: input_summary
                 .as_ref()
                 .is_some_and(|summary| summary.truncated),
             input_summary: input_summary.map(|summary| summary.text),
         };
-        if let Ok(mut pending) = self.pending.lock() {
-            let input_ref = input_ref.as_str().to_string();
-            pending.by_ref.insert(input_ref.clone(), input);
-            pending
-                .refs_by_run
-                .entry(run_id.to_string())
-                .or_default()
-                .push(input_ref);
-        }
+        let input_ref = input_ref.as_str().to_string();
+        pending.by_ref.insert(input_ref.clone(), input);
+        pending
+            .refs_by_run
+            .entry(run_id.to_string())
+            .or_default()
+            .push(input_ref);
+    }
+
+    /// Link a now-running invocation to the ref its input was recorded under,
+    /// so the running activity frame can surface that input before completion.
+    pub(crate) fn record_running_invocation(
+        &self,
+        invocation_id: InvocationId,
+        input_ref: &CapabilityInputRef,
+    ) {
+        let mut pending = self.lock_pending_inputs();
+        pending
+            .input_ref_by_invocation
+            .insert(invocation_id.to_string(), input_ref.as_str().to_string());
     }
 
     #[cfg(test)]
@@ -144,11 +214,15 @@ impl CapabilityDisplayPreviewStore {
         result: CapabilityDisplayPreviewResult<'_>,
         display_preview: Option<&CapabilityDisplayOutputPreview>,
     ) {
-        let input = self
-            .pending
-            .lock()
-            .ok()
-            .and_then(|mut pending| pending.by_ref.remove(result.input_ref.as_str()));
+        let input = {
+            let mut pending = self.lock_pending_inputs();
+            // The result has landed: drop the running-input link so the
+            // activity frame stops surfacing it as in-flight.
+            pending
+                .input_ref_by_invocation
+                .remove(&result.invocation_id.to_string());
+            pending.by_ref.remove(result.input_ref.as_str())
+        };
         let title = input
             .as_ref()
             .map(|input| input.title.clone())
@@ -170,30 +244,33 @@ impl CapabilityDisplayPreviewStore {
             result_ref: Some(result.result_ref.to_string()),
             truncated: input.as_ref().is_some_and(|input| input.truncated) || output.truncated,
         };
-        if let Ok(mut completed) = self.completed.lock() {
-            let invocation_id = result.invocation_id.to_string();
-            completed
-                .by_invocation
-                .insert(invocation_id.clone(), record);
-            completed
-                .invocations_by_run
-                .entry(result.run_id.to_string())
-                .or_default()
-                .push(invocation_id);
-        }
+        let mut completed = self.lock_completed_previews();
+        let invocation_id = result.invocation_id.to_string();
+        completed
+            .by_invocation
+            .insert(invocation_id.clone(), record);
+        completed
+            .invocations_by_run
+            .entry(result.run_id.to_string())
+            .or_default()
+            .push(invocation_id);
     }
 
     pub(crate) fn prune_run(&self, run_id: &str) {
-        if let Ok(mut pending) = self.pending.lock()
-            && let Some(input_refs) = pending.refs_by_run.remove(run_id)
-        {
-            for input_ref in input_refs {
-                pending.by_ref.remove(&input_ref);
+        let mut pending = self.lock_pending_inputs();
+        if let Some(input_refs) = pending.refs_by_run.remove(run_id) {
+            let pruned: std::collections::HashSet<String> = input_refs.into_iter().collect();
+            for input_ref in &pruned {
+                pending.by_ref.remove(input_ref);
             }
+            pending
+                .input_ref_by_invocation
+                .retain(|_, input_ref| !pruned.contains(input_ref));
         }
-        if let Ok(mut completed) = self.completed.lock()
-            && let Some(invocation_ids) = completed.invocations_by_run.remove(run_id)
-        {
+        drop(pending);
+
+        let mut completed = self.lock_completed_previews();
+        if let Some(invocation_ids) = completed.invocations_by_run.remove(run_id) {
             for invocation_id in invocation_ids {
                 completed.by_invocation.remove(&invocation_id);
             }
@@ -204,12 +281,10 @@ impl CapabilityDisplayPreviewStore {
         &self,
         invocation_id: InvocationId,
     ) -> Option<CapabilityDisplayPreviewRecord> {
-        self.completed.lock().ok().and_then(|completed| {
-            completed
-                .by_invocation
-                .get(&invocation_id.to_string())
-                .cloned()
-        })
+        self.lock_completed_previews()
+            .by_invocation
+            .get(&invocation_id.to_string())
+            .cloned()
     }
 
     pub(crate) fn attach_timeline_message_id(
@@ -217,9 +292,8 @@ impl CapabilityDisplayPreviewStore {
         invocation_id: InvocationId,
         timeline_message_id: ThreadMessageId,
     ) {
-        if let Ok(mut completed) = self.completed.lock()
-            && let Some(record) = completed.by_invocation.get_mut(&invocation_id.to_string())
-        {
+        let mut completed = self.lock_completed_previews();
+        if let Some(record) = completed.by_invocation.get_mut(&invocation_id.to_string()) {
             record.timeline_message_id = Some(timeline_message_id);
         }
     }
@@ -232,6 +306,18 @@ impl CapabilityDisplayPreviewSource for CapabilityDisplayPreviewStore {
         activity: &CapabilityActivityProjection,
     ) -> Result<CapabilityDisplayPreviewResolution, ProductAdapterError> {
         capability_display_preview_resolution_from_store(self, activity)
+    }
+
+    fn running_input(&self, invocation_id: InvocationId) -> Option<CapabilityRunningInput> {
+        let pending = self.lock_pending_inputs();
+        let input_ref = pending
+            .input_ref_by_invocation
+            .get(&invocation_id.to_string())?;
+        let input = pending.by_ref.get(input_ref)?;
+        Some(CapabilityRunningInput {
+            subtitle: input.subtitle.clone(),
+            input_summary: input.input_summary.clone(),
+        })
     }
 }
 
@@ -262,7 +348,9 @@ fn capability_display_preview_resolution_from_store(
             CapabilityActivityStatus::Failed | CapabilityActivityStatus::Killed
         ) {
             failed_capability_display_preview(activity)
-        } else if completed_preview_may_still_arrive(activity) {
+        } else if store.has_pending_input_for_activity(activity)
+            && completed_preview_may_still_arrive(activity)
+        {
             Ok(CapabilityDisplayPreviewResolution::Pending)
         } else {
             Ok(CapabilityDisplayPreviewResolution::NotApplicable)
@@ -287,6 +375,7 @@ fn capability_display_preview_resolution_from_store(
         result_ref: record.result_ref,
         truncated: record.truncated,
         updated_at: activity.updated_at,
+        activity_order: Some(activity.activity_order_cursor().as_u64()),
     })
     .map(Box::new)
     .map(CapabilityDisplayPreviewResolution::Ready)
@@ -326,6 +415,7 @@ fn failed_capability_display_preview(
         result_ref: None,
         truncated: false,
         updated_at: activity.updated_at,
+        activity_order: Some(activity.activity_order_cursor().as_u64()),
     })
     .map(Box::new)
     .map(CapabilityDisplayPreviewResolution::Ready)
@@ -396,20 +486,187 @@ fn output_preview_from_display(value: &CapabilityDisplayOutputPreview) -> Output
 }
 
 fn input_summary(capability_id: &str, value: &serde_json::Value) -> Option<CapabilityDisplayText> {
-    if (capability_id == "read_file"
-        || capability_id == "builtin.read_file"
-        || capability_id.ends_with(".read_file"))
-        && let Some(path) = safe_path_subtitle(value)
+    if capability_matches(capability_id, "shell")
+        && let Some(command) = value.get("command").and_then(serde_json::Value::as_str)
     {
-        let mut summary = format!("path: {path}");
-        if let Some(max_bytes) = value.get("max_bytes").and_then(serde_json::Value::as_u64) {
-            summary.push_str(&format!("\nmax_bytes: {max_bytes}"));
-        }
-        return Some(bounded_display_text(
-            &summary,
+        let command = shell_command_display_text(command);
+        let mut summary = bounded_display_text(
+            &format!("command: {}", command.text),
             CAPABILITY_DISPLAY_SUMMARY_MAX_BYTES,
-        ));
+        );
+        summary.truncated |= command.truncated;
+        return Some(summary);
     }
+
+    if capability_matches(capability_id, "http")
+        || capability_matches(capability_id, "http.save")
+        || capability_id == "web_fetch"
+        || capability_id.ends_with(".web_fetch")
+        || capability_id == "web-access.get_content"
+    {
+        let mut summary = SummaryBuilder::default();
+        if let Some(method) = string_arg(value, &["method"]) {
+            summary.push(
+                "method",
+                bounded_summary_value(&method.to_ascii_uppercase()).text,
+            );
+        }
+        if let Some(url) = string_arg(value, &["url"]) {
+            let url = safe_url_display(url);
+            summary.push_with_truncation("url", url.text, url.truncated);
+        }
+        if let Some(save_to) = safe_path_arg(value, &["save_to", "output_path", "path"]) {
+            summary.push("save_to", save_to);
+        }
+        if let Some(response_body_limit) = u64_arg(value, &["response_body_limit"]) {
+            summary.push("response_body_limit", response_body_limit.to_string());
+        }
+        if let Some(timeout_ms) = u64_arg(value, &["timeout_ms"]) {
+            summary.push("timeout_ms", timeout_ms.to_string());
+        }
+        if let Some(summary) = summary.finish() {
+            return Some(summary);
+        }
+    }
+
+    if capability_matches(capability_id, "read_file")
+        || capability_matches(capability_id, "memory_read")
+        || capability_matches(capability_id, "memory_tree")
+    {
+        let mut summary = SummaryBuilder::default();
+        let path = safe_path_arg(value, &["path", "file_path", "target"])
+            .or_else(|| capability_matches(capability_id, "memory_tree").then(|| "/".to_string()));
+        if let Some(path) = path {
+            summary.push("path", path);
+        }
+        if let Some(offset) = u64_arg(value, &["offset"]) {
+            summary.push("offset", offset.to_string());
+        }
+        if let Some(limit) = u64_arg(value, &["limit", "max_bytes"]) {
+            summary.push("limit", limit.to_string());
+        }
+        if let Some(summary) = summary.finish() {
+            return Some(summary);
+        }
+    }
+
+    if capability_matches(capability_id, "write_file") {
+        let mut summary = SummaryBuilder::default();
+        if let Some(path) = safe_path_arg(value, &["path", "file_path", "target"]) {
+            summary.push("path", path);
+        }
+        if let Some(content) = string_arg(value, &["content"]) {
+            summary.push("content_bytes", content.len().to_string());
+        }
+        if let Some(summary) = summary.finish() {
+            return Some(summary);
+        }
+    }
+
+    if capability_matches(capability_id, "list_dir") {
+        let mut summary = SummaryBuilder::default();
+        if let Some(path) = safe_path_arg(value, &["path"]) {
+            summary.push("path", path);
+        }
+        if let Some(recursive) = bool_arg(value, &["recursive"]) {
+            summary.push("recursive", recursive.to_string());
+        }
+        if let Some(max_depth) = u64_arg(value, &["max_depth"]) {
+            summary.push("max_depth", max_depth.to_string());
+        }
+        if let Some(summary) = summary.finish() {
+            return Some(summary);
+        }
+    }
+
+    if capability_matches(capability_id, "glob") {
+        let mut summary = SummaryBuilder::default();
+        push_text_arg(&mut summary, value, "pattern", &["pattern"]);
+        if let Some(path) = safe_path_arg(value, &["path"]) {
+            summary.push("path", path);
+        }
+        if let Some(max_results) = u64_arg(value, &["max_results"]) {
+            summary.push("max_results", max_results.to_string());
+        }
+        if let Some(summary) = summary.finish() {
+            return Some(summary);
+        }
+    }
+
+    if capability_matches(capability_id, "grep") {
+        let mut summary = SummaryBuilder::default();
+        push_text_arg(&mut summary, value, "pattern", &["pattern"]);
+        if let Some(path) = safe_path_arg(value, &["path"]) {
+            summary.push("path", path);
+        }
+        push_text_arg(&mut summary, value, "glob", &["glob"]);
+        push_text_arg(&mut summary, value, "output_mode", &["output_mode"]);
+        push_number_arg(&mut summary, value, "head_limit", &["head_limit"]);
+        push_number_arg(&mut summary, value, "offset", &["offset"]);
+        if let Some(summary) = summary.finish() {
+            return Some(summary);
+        }
+    }
+
+    if capability_matches(capability_id, "apply_patch") {
+        let mut summary = SummaryBuilder::default();
+        if let Some(path) = safe_path_arg(value, &["path", "file_path", "target"]) {
+            summary.push("path", path);
+        }
+        if let Some(old_string) = string_arg(value, &["old_string"]) {
+            summary.push("old_bytes", old_string.len().to_string());
+        }
+        if let Some(new_string) = string_arg(value, &["new_string"]) {
+            summary.push("new_bytes", new_string.len().to_string());
+        }
+        if let Some(replace_all) = bool_arg(value, &["replace_all"]) {
+            summary.push("replace_all", replace_all.to_string());
+        }
+        if let Some(summary) = summary.finish() {
+            return Some(summary);
+        }
+    }
+
+    if capability_matches(capability_id, "memory_search")
+        || capability_id == "web_search"
+        || capability_id == "llm_context"
+        || capability_id.ends_with(".web_search")
+        || capability_id.ends_with(".search")
+        || capability_id == "web-access.search"
+        || capability_id == "nearai.web_search"
+    {
+        let mut summary = SummaryBuilder::default();
+        push_text_arg(
+            &mut summary,
+            value,
+            "query",
+            &["query", "q", "text", "pattern"],
+        );
+        push_number_arg(&mut summary, value, "limit", &["limit", "max_results"]);
+        if let Some(summary) = summary.finish() {
+            return Some(summary);
+        }
+    }
+
+    if capability_matches(capability_id, "memory_write") {
+        let mut summary = SummaryBuilder::default();
+        if let Some(target) = safe_path_arg(value, &["target", "path"]) {
+            summary.push("target", target);
+        }
+        if value.get("old_string").is_some() || value.get("new_string").is_some() {
+            summary.push("mode", "patch");
+        }
+        if let Some(append) = bool_arg(value, &["append"]) {
+            summary.push("append", append.to_string());
+        }
+        if let Some(content) = string_arg(value, &["content"]) {
+            summary.push("content_bytes", content.len().to_string());
+        }
+        if let Some(summary) = summary.finish() {
+            return Some(summary);
+        }
+    }
+
     let safe_value = sanitize_json_value_with_truncation(value);
     serde_json::to_string_pretty(&safe_value.value)
         .ok()
@@ -418,6 +675,99 @@ fn input_summary(capability_id: &str, value: &serde_json::Value) -> Option<Capab
             summary.truncated |= safe_value.truncated;
             summary
         })
+}
+
+#[derive(Default)]
+struct SummaryBuilder {
+    lines: Vec<String>,
+    truncated: bool,
+}
+
+impl SummaryBuilder {
+    fn push(&mut self, label: &str, value: impl Into<String>) {
+        self.push_with_truncation(label, value.into(), false);
+    }
+
+    fn push_with_truncation(&mut self, label: &str, value: String, truncated: bool) {
+        if value.is_empty() {
+            return;
+        }
+        self.truncated |= truncated;
+        self.lines.push(format!("{label}: {value}"));
+    }
+
+    fn finish(self) -> Option<CapabilityDisplayText> {
+        if self.lines.is_empty() {
+            return None;
+        }
+        let mut summary =
+            bounded_display_text(&self.lines.join("\n"), CAPABILITY_DISPLAY_SUMMARY_MAX_BYTES);
+        summary.truncated |= self.truncated;
+        Some(summary)
+    }
+}
+
+fn capability_matches(capability_id: &str, short_name: &str) -> bool {
+    capability_id == short_name
+        || capability_id == format!("builtin.{short_name}")
+        || capability_id.ends_with(&format!(".{short_name}"))
+}
+
+fn string_arg<'a>(value: &'a serde_json::Value, keys: &[&str]) -> Option<&'a str> {
+    keys.iter()
+        .find_map(|key| value.get(*key).and_then(serde_json::Value::as_str))
+        .filter(|text| !text.is_empty())
+}
+
+fn u64_arg(value: &serde_json::Value, keys: &[&str]) -> Option<u64> {
+    keys.iter()
+        .find_map(|key| value.get(*key).and_then(serde_json::Value::as_u64))
+}
+
+fn bool_arg(value: &serde_json::Value, keys: &[&str]) -> Option<bool> {
+    keys.iter()
+        .find_map(|key| value.get(*key).and_then(serde_json::Value::as_bool))
+}
+
+fn safe_path_arg(value: &serde_json::Value, keys: &[&str]) -> Option<String> {
+    keys.iter()
+        .find_map(|key| value.get(*key).and_then(serde_json::Value::as_str))
+        .and_then(safe_display_path)
+}
+
+fn push_text_arg(
+    summary: &mut SummaryBuilder,
+    value: &serde_json::Value,
+    label: &str,
+    keys: &[&str],
+) {
+    if let Some(text) = string_arg(value, keys) {
+        let value = bounded_summary_value(text);
+        summary.push_with_truncation(label, value.text, value.truncated);
+    }
+}
+
+fn push_number_arg(
+    summary: &mut SummaryBuilder,
+    value: &serde_json::Value,
+    label: &str,
+    keys: &[&str],
+) {
+    if let Some(number) = u64_arg(value, keys) {
+        summary.push(label, number.to_string());
+    }
+}
+
+fn bounded_summary_value(text: &str) -> CapabilityDisplayText {
+    bounded_display_text(text, CAPABILITY_DISPLAY_SUMMARY_MAX_BYTES / 2)
+}
+
+fn safe_url_display(url: &str) -> CapabilityDisplayText {
+    bounded_summary_value(&strip_url_sensitive_parts(url))
+}
+
+fn strip_url_sensitive_parts(url: &str) -> String {
+    sanitize_url_for_display(url)
 }
 
 fn safe_capability_title(capability_id: &str) -> &str {
@@ -434,6 +784,52 @@ fn safe_path_subtitle(value: &serde_json::Value) -> Option<String> {
         .or_else(|| value.get("target"))?
         .as_str()?;
     safe_display_path(path)
+}
+
+/// A compact, display-safe "primary argument" for the activity row's inline
+/// detail — the single most salient input for a tool, so the row reads like
+/// `nearai.web_search   <query>` / `shell   <command>` / `read_file   <path>`
+/// instead of a bare tool name. Reuses the same sanitizing formatters as
+/// `input_summary` (URL stripping, shell redaction, byte bounds) and falls back
+/// to the path subtitle for tools without a recognized primary argument.
+fn primary_arg_subtitle(capability_id: &str, value: &serde_json::Value) -> Option<String> {
+    // Search-shaped tools → the query string.
+    if (capability_matches(capability_id, "memory_search")
+        || capability_matches(capability_id, "web_search")
+        || capability_matches(capability_id, "search")
+        || capability_matches(capability_id, "llm_context"))
+        && let Some(query) = string_arg(value, &["query", "q", "text", "pattern"])
+    {
+        return non_empty(bounded_summary_value(query).text);
+    }
+
+    // Shell → the command (with the existing secret-redacting formatter).
+    if capability_matches(capability_id, "shell")
+        && let Some(command) = string_arg(value, &["command"])
+    {
+        return non_empty(shell_command_display_text(command).text);
+    }
+
+    // HTTP / fetch → the URL (sensitive parts stripped).
+    if (capability_matches(capability_id, "http")
+        || capability_matches(capability_id, "http.save")
+        || capability_matches(capability_id, "web_fetch")
+        || capability_matches(capability_id, "get_content"))
+        && let Some(url) = string_arg(value, &["url"])
+    {
+        return non_empty(safe_url_display(url).text);
+    }
+
+    // Glob / grep → the pattern.
+    if (capability_matches(capability_id, "glob") || capability_matches(capability_id, "grep"))
+        && let Some(pattern) = string_arg(value, &["pattern"])
+    {
+        return non_empty(bounded_summary_value(pattern).text);
+    }
+
+    // Everything else (read_file, write_file, list_dir, apply_patch, memory_*)
+    // → the path/target.
+    safe_path_subtitle(value)
 }
 
 /// Returns `true` when the path contains characters that are inherently unsafe
@@ -590,135 +986,40 @@ fn truncate_bytes(text: &str, max_bytes: usize) -> CapabilityDisplayText {
 }
 
 pub(crate) fn sanitize_text(text: &str) -> String {
-    let mut out = String::with_capacity(text.len());
-    let mut redact_next_value = false;
-    for token in text.split_inclusive(char::is_whitespace) {
-        let trimmed = token.trim_end();
-        if trimmed.is_empty() {
-            push_safe_text(&mut out, token);
-            continue;
-        }
-        let suffix = &token[trimmed.len()..];
-        let redact_current =
-            redact_next_value || is_secret_like(trimmed) || is_unsafe_path_like(trimmed);
-        if redact_current {
-            out.push_str("[redacted]");
-            push_safe_text(&mut out, suffix);
-        } else {
-            push_safe_text(&mut out, token);
-        }
-        redact_next_value = credential_key_expects_value(trimmed) && !suffix.is_empty();
+    safety_sanitize_text(text)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::panic::{AssertUnwindSafe, catch_unwind};
+
+    use serde_json::json;
+
+    use super::*;
+
+    #[test]
+    fn record_input_recovers_from_poisoned_pending_input_lock() {
+        let store = CapabilityDisplayPreviewStore::default();
+        let poison_result = catch_unwind(AssertUnwindSafe(|| {
+            let _guard = store.pending.lock().expect("pending input lock");
+            panic!("poison pending input lock");
+        }));
+        assert!(poison_result.is_err());
+
+        let input_ref = CapabilityInputRef::new("input:poisoned-preview").expect("input ref");
+        store.record_input(
+            "run-poisoned-preview",
+            &input_ref,
+            "shell",
+            &json!({ "command": "echo hi" }),
+        );
+
+        let pending = store.lock_pending_inputs();
+        let input = pending
+            .by_ref
+            .get(input_ref.as_str())
+            .expect("input preview should be recorded after poisoned lock recovery");
+        assert_eq!(input.title, "shell");
+        assert_eq!(input.input_summary.as_deref(), Some("command: echo hi"));
     }
-    out
-}
-
-fn push_safe_text(out: &mut String, text: &str) {
-    out.extend(
-        text.chars().filter(|character| {
-            *character == '\n' || *character == '\t' || !character.is_control()
-        }),
-    );
-}
-
-fn is_secret_like(token: &str) -> bool {
-    let trimmed = token.trim_matches(token_boundary_punctuation);
-    let lower = trimmed.to_ascii_lowercase();
-    lower.starts_with("sk-")
-        || lower.starts_with("ghp_")
-        || lower.starts_with("gho_")
-        || lower.starts_with("ghu_")
-        || lower.starts_with("ghs_")
-        || lower.starts_with("xoxb-")
-        || lower.starts_with("xoxa-")
-        || lower.starts_with("xoxp-")
-        || looks_like_aws_access_key(trimmed)
-        || looks_like_jwt(trimmed)
-        || lower.contains("api_key=")
-        || lower.contains("api_key:")
-        || lower.contains("apikey=")
-        || lower.contains("apikey:")
-        || lower.contains("access_token=")
-        || lower.contains("access_token:")
-        || lower.contains("secret=")
-        || lower.contains("secret:")
-        || lower.contains("password=")
-        || lower.contains("password:")
-        || lower.contains("token=")
-        || lower.contains("token:")
-}
-
-fn is_unsafe_path_like(token: &str) -> bool {
-    let token = token.trim_matches(token_boundary_punctuation);
-    token.to_ascii_lowercase().starts_with("file:/")
-        || token_contains_absolute_posix_path(token)
-        || token.starts_with("\\\\")
-        || token.contains("\\\\")
-        || token.get(1..3) == Some(":\\")
-}
-
-fn credential_key_expects_value(token: &str) -> bool {
-    let lower = token
-        .trim_matches(non_credential_boundary_punctuation)
-        .to_ascii_lowercase();
-    matches!(
-        lower.as_str(),
-        "api_key:"
-            | "api_key="
-            | "apikey:"
-            | "apikey="
-            | "access_token:"
-            | "access_token="
-            | "secret:"
-            | "secret="
-            | "password:"
-            | "password="
-            | "token:"
-            | "token="
-    )
-}
-
-fn non_credential_boundary_punctuation(character: char) -> bool {
-    matches!(
-        character,
-        '"' | '\'' | '`' | ',' | ';' | '(' | ')' | '[' | ']' | '{' | '}'
-    )
-}
-
-fn looks_like_aws_access_key(token: &str) -> bool {
-    (token.starts_with("AKIA") || token.starts_with("ASIA"))
-        && token.len() >= 16
-        && token
-            .chars()
-            .all(|character| character.is_ascii_alphanumeric())
-}
-
-fn looks_like_jwt(token: &str) -> bool {
-    token.starts_with("eyJ")
-        && token.matches('.').count() >= 2
-        && token.chars().all(|character| {
-            character.is_ascii_alphanumeric() || matches!(character, '-' | '_' | '.')
-        })
-}
-
-fn token_contains_absolute_posix_path(token: &str) -> bool {
-    let mut previous = None;
-    let mut characters = token.chars().peekable();
-    while let Some(character) = characters.next() {
-        if character == '/'
-            && previous.is_none_or(token_boundary_punctuation)
-            && !matches!(previous, Some('/'))
-            && !matches!(characters.peek(), Some('/'))
-        {
-            return true;
-        }
-        previous = Some(character);
-    }
-    false
-}
-
-fn token_boundary_punctuation(character: char) -> bool {
-    matches!(
-        character,
-        '"' | '\'' | '`' | ',' | ';' | ':' | '=' | '(' | ')' | '[' | ']' | '{' | '}'
-    )
 }

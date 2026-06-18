@@ -143,7 +143,7 @@ pub(crate) fn execute_inner(params: &str, context: Option<&str>) -> Result<Strin
             username,
             page,
             limit,
-        } => list_repos(&username, page, limit),
+        } => list_repos(username.as_deref(), page, limit),
         GitHubAction::SearchRepositories {
             query,
             page,

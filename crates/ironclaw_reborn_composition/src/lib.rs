@@ -40,6 +40,8 @@ mod extension_credential_requirements;
 mod extension_installation_store;
 mod extension_lifecycle;
 mod extension_lifecycle_capabilities;
+#[cfg(test)]
+mod extension_lifecycle_capabilities_auth_tests;
 mod extension_lifecycle_command;
 mod factory;
 mod failure_summary;
@@ -86,9 +88,10 @@ mod product_live_adapters;
 mod production_runtime_policy;
 mod profile;
 mod profile_approval_authorization;
+mod project_filesystem_reader;
 mod projection;
 mod trajectory_observer;
-pub use auth_prompt::{AuthChallengeProvider, AuthChallengeView};
+pub use auth_prompt::{AuthChallengeProvider, AuthChallengeView, BlockedAuthFlowCanceller};
 #[cfg(feature = "slack-v2-host-beta")]
 mod delivered_gate_routing;
 #[cfg(feature = "root-llm-provider")]
@@ -186,7 +189,7 @@ pub use input::{OAuthClientConfig, RebornBuildInput, RebornRuntimeProcessBinding
 pub use ironclaw_auth::GoogleOAuthRouteConfig;
 pub use ironclaw_product_workflow::{
     LifecycleExtensionSource, LifecycleExtensionSummary, LifecyclePhase, LifecycleProductPayload,
-    LifecycleProductResponse,
+    LifecycleProductResponse, LifecycleSearchExtensionSummary,
 };
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 pub use ironclaw_runtime_policy::{
@@ -338,11 +341,10 @@ pub use webui_serve::{
 };
 
 /// Re-exported identity vocabulary host binaries need to construct
-/// [`WebuiServeConfig`] (and any other public type on this crate whose
-/// signature mentions a host-api identity). Kept narrow on purpose —
-/// the composition CLAUDE.md says "Expose facade-shaped handles only";
-/// these four newtypes are the WebUI gateway's host-identity facade.
-#[cfg(feature = "webui-v2-beta")]
+/// public runtime/WebUI types whose signatures mention a host-api identity.
+/// Kept narrow on purpose — the composition CLAUDE.md says "Expose
+/// facade-shaped handles only"; these four newtypes are the host-identity
+/// facade.
 pub mod host_api {
     pub use ironclaw_host_api::{AgentId, ProjectId, TenantId, UserId};
 }

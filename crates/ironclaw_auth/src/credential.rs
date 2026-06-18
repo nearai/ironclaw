@@ -577,6 +577,40 @@ impl CredentialAccountOwnerScope {
     }
 }
 
+/// True iff `account` is owned by the owner of `scope`, ignoring transient
+/// invocation provenance.
+///
+/// OAuth/manual-token reconnect binding and the subsequent bound-account update
+/// must resolve at durable owner granularity: the flow `scope` carries a fresh
+/// per-flow `invocation_id` (and possibly a thread/mission) that the account —
+/// created in an earlier flow — does not share. Comparing those transient
+/// fields (the old `scope_matches` full-equality) rejected every legitimate
+/// reconnect and forked a duplicate account (#4935 defect A). This keeps
+/// tenant/user/agent/project hard-required (via [`CredentialAccountOwnerScope`])
+/// and `session_id` matched (it is path-segmenting), while clearing
+/// `thread_id`/`mission_id` and ignoring `invocation_id` (which
+/// [`CredentialAccountOwnerScope`] does not compare). Requester authorization is
+/// enforced separately by the callers; this is only the owner-boundary check.
+///
+/// `session_id` and `surface` are compared for **exact** equality (including
+/// `None == None` for session), NOT wildcarded the way
+/// `CredentialAccountOwnerScope::matches` wildcards a `None` owner session for
+/// runtime reads. The bind/update *write* path is segmented on disk by both
+/// `surface` and `session_id` (`product_auth_durable` keys account records by
+/// surface path segment + session), and the update reads the account at the
+/// flow scope's surface/session path — so binding a flow to an account stored
+/// on a different surface (or session) would select a record the callback can
+/// never read or update, and would surface as a spurious `CredentialMissing`
+/// that aborts the reconnect instead of an unbound fresh flow. Require exact
+/// surface and session equality so a cross-surface / cross-session account is
+/// never bound.
+pub fn binding_scope_owns_account(scope: &AuthProductScope, account: &CredentialAccount) -> bool {
+    let owner_scope = scope.to_credential_owner();
+    CredentialAccountOwnerScope::from_scope(&owner_scope).matches(account)
+        && account.scope.session_id.as_ref() == owner_scope.session_id.as_ref()
+        && account.scope.surface == owner_scope.surface
+}
+
 /// Read-only credential-account projection source for account owner queries.
 ///
 /// This intentionally does not encode host-runtime credential selection. It

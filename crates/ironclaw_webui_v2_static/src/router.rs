@@ -200,23 +200,23 @@ fn render_index_with_nonce() -> Response {
     // `SetResponseHeaderLayer::if_not_present`, which honors the
     // header we set here instead of overwriting it.
     //
-    // The CDN origins below match `index.html`: React + react-router
-    // + react-query + htm + react-hook-form from esm.sh, Tailwind
-    // browser runtime from jsdelivr, dompurify + marked + highlight.js
-    // from cdnjs, Google Fonts CSS + woff files. Those origins are
-    // allowed under `script-src` / `style-src` (the directives module
-    // loading actually consults) but NOT under `connect-src`. The
-    // SPA itself only `fetch`es from the same-origin v2 API; leaving
-    // the CDNs out of `connect-src` cuts off the most direct path
-    // for any XSS-injected script to use those origins as
-    // exfiltration channels.
+    // Every sub-resource the shell loads is now same-origin: the
+    // esbuild app bundle (`/v2/dist/app.js`) folds in React + router +
+    // query + htm + react-hook-form, and Tailwind / dompurify / marked /
+    // highlight.js / the web fonts are vendored under `/v2/vendor/`
+    // (see `frontend/`). So `script-src` / `style-src` / `font-src`
+    // collapse to `'self'` — no CDN origins, no third-party fetches.
+    // `'unsafe-inline'` stays on `style-src` only: the Tailwind browser
+    // runtime injects a generated `<style>` and the shell carries an
+    // inline `text/tailwindcss` theme block; scripts still rely on the
+    // per-request nonce, never `'unsafe-inline'`.
     let csp = format!(
         "default-src 'self'; \
-         script-src 'self' 'nonce-{nonce}' https://esm.sh https://cdn.jsdelivr.net https://cdnjs.cloudflare.com; \
-         script-src-elem 'self' 'nonce-{nonce}' https://esm.sh https://cdn.jsdelivr.net https://cdnjs.cloudflare.com; \
-         style-src 'self' 'unsafe-inline' https://fonts.googleapis.com https://cdn.jsdelivr.net; \
-         style-src-elem 'self' 'unsafe-inline' https://fonts.googleapis.com https://cdn.jsdelivr.net; \
-         font-src 'self' https://fonts.gstatic.com data:; \
+         script-src 'self' 'nonce-{nonce}'; \
+         script-src-elem 'self' 'nonce-{nonce}'; \
+         style-src 'self' 'unsafe-inline'; \
+         style-src-elem 'self' 'unsafe-inline'; \
+         font-src 'self'; \
          img-src 'self' data:; \
          media-src 'self' data:; \
          frame-src 'self' blob:; \
@@ -361,11 +361,12 @@ mod tests {
 
     #[tokio::test]
     async fn spa_document_csp_allowlist_is_locked() {
-        // The SPA loads React / Tailwind / fonts from CDNs at runtime, so
-        // the document CSP carries a deliberate allowlist. Lock its exact
-        // shape (security-parity 03 row 3b): a regression that added
-        // `unsafe-eval`, allowed `'unsafe-inline'` scripts, or widened the
-        // CDN origin set must fail here, not ship silently.
+        // Every sub-resource the SPA loads is now same-origin (the esbuild
+        // bundle under `/v2/dist/` plus vendored Tailwind / dompurify /
+        // marked / highlight.js / fonts under `/v2/vendor/`). Lock that in:
+        // a regression that re-introduced a third-party CDN origin, added
+        // `unsafe-eval`, or allowed `'unsafe-inline'` scripts must fail
+        // here, not ship silently. (security-parity 03 row 3b.)
         let app = static_router();
         let response = app
             .oneshot(
@@ -386,15 +387,23 @@ mod tests {
             .expect("CSP ASCII")
             .to_string();
 
-        // The exact documented `script-src` CDN origins — no more, no less.
-        for origin in [
-            "https://esm.sh",
-            "https://cdn.jsdelivr.net",
-            "https://cdnjs.cloudflare.com",
+        // No third-party origin may appear anywhere in the document CSP —
+        // the SPA is fully self-hosted. The previous esm.sh / jsdelivr /
+        // cdnjs / fonts.google* allowances are gone; assert they stay gone
+        // (and that no other scheme-host slips in) by banning any `http`
+        // token outside the same-origin keywords.
+        for banned in [
+            "esm.sh",
+            "jsdelivr",
+            "cdnjs",
+            "fonts.googleapis.com",
+            "fonts.gstatic.com",
+            "https://",
+            "http://",
         ] {
             assert!(
-                csp.contains(origin),
-                "document CSP must allow CDN script origin `{origin}`; got `{csp}`",
+                !csp.contains(banned),
+                "document CSP must not reference `{banned}` (all assets are same-origin); got `{csp}`",
             );
         }
         assert!(
@@ -431,6 +440,26 @@ mod tests {
             Some("'self' data:"),
             "document CSP must keep the exact img-src allowlist; got `{csp}`",
         );
+        // Lock the same-origin directives to their EXACT source lists. A
+        // substring ban misses valid-but-remote CSP forms (`https:`, `*`,
+        // `cdn.example.com`); pinning the whole source list fails closed if
+        // any new source — scheme, wildcard, or host — is ever appended.
+        for (directive, expected) in [
+            ("default-src", "'self'"),
+            ("style-src", "'self' 'unsafe-inline'"),
+            ("style-src-elem", "'self' 'unsafe-inline'"),
+            ("font-src", "'self'"),
+            ("connect-src", "'self'"),
+            ("object-src", "'none'"),
+            ("frame-ancestors", "'none'"),
+            ("base-uri", "'self'"),
+        ] {
+            assert_eq!(
+                directives.get(directive).copied(),
+                Some(expected),
+                "document CSP must keep the exact {directive} allowlist; got `{csp}`",
+            );
+        }
         // Scripts must NOT be executable via eval or arbitrary inline —
         // the document relies on the nonce, not `'unsafe-inline'`.
         assert!(

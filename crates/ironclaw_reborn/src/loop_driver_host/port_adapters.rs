@@ -349,6 +349,15 @@ impl LoopProgressPort for HostManagedLoopProgressPort {
                     )
                     .await
             }
+            LoopProgressEvent::CapabilityActivityFailed {
+                activity_id,
+                capability_id,
+                reason_kind,
+            } => {
+                emitter
+                    .capability_failed(activity_id, capability_id, None, None, reason_kind)
+                    .await
+            }
             LoopProgressEvent::GateBlocked {
                 iteration,
                 gate_kind,

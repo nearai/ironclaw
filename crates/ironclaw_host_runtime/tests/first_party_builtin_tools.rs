@@ -29,17 +29,18 @@ use ironclaw_host_runtime::{
     GREP_CAPABILITY_ID, HTTP_CAPABILITY_ID, HTTP_SAVE_CAPABILITY_ID, HostRuntime,
     HostRuntimeServices, JSON_CAPABILITY_ID, LIST_DIR_CAPABILITY_ID, MEMORY_READ_CAPABILITY_ID,
     MEMORY_SEARCH_CAPABILITY_ID, MEMORY_TREE_CAPABILITY_ID, MEMORY_WRITE_CAPABILITY_ID,
-    READ_FILE_CAPABILITY_ID, RuntimeCapabilityFailure, RuntimeCapabilityOutcome,
-    RuntimeCapabilityRequest, RuntimeFailureKind, RuntimeProcessError, RuntimeProcessPort,
-    SHELL_CAPABILITY_ID, SKILL_INSTALL_CAPABILITY_ID, SKILL_LIST_CAPABILITY_ID,
+    PROFILE_SET_CAPABILITY_ID, READ_FILE_CAPABILITY_ID, RuntimeCapabilityFailure,
+    RuntimeCapabilityOutcome, RuntimeCapabilityRequest, RuntimeFailureKind, RuntimeProcessError,
+    RuntimeProcessPort, SHELL_CAPABILITY_ID, SKILL_INSTALL_CAPABILITY_ID, SKILL_LIST_CAPABILITY_ID,
     SKILL_REMOVE_CAPABILITY_ID, SPAWN_SUBAGENT_CAPABILITY_ID, SandboxCommandTransport, SurfaceKind,
     TIME_CAPABILITY_ID, TRACE_COMMONS_CREDITS_CAPABILITY_ID, TRACE_COMMONS_ONBOARD_CAPABILITY_ID,
     TRACE_COMMONS_PROFILE_SET_CAPABILITY_ID, TRACE_COMMONS_PROFILE_TOKEN_CAPABILITY_ID,
     TRACE_COMMONS_STATUS_CAPABILITY_ID, TRIGGER_CREATE_CAPABILITY_ID, TRIGGER_LIST_CAPABILITY_ID,
     TRIGGER_REMOVE_CAPABILITY_ID, TenantSandboxProcessPort, ToolCallHttpEgress, TriggerCreateHook,
     VisibleCapabilityAccess, VisibleCapabilityRequest, WRITE_FILE_CAPABILITY_ID,
-    builtin_first_party_handlers, builtin_first_party_handlers_with_trigger_create_hook,
-    builtin_first_party_package,
+    builtin_first_party_handlers, builtin_first_party_handlers_for_process_backend,
+    builtin_first_party_handlers_with_trigger_create_hook, builtin_first_party_package,
+    builtin_first_party_package_for_process_backend,
 };
 #[cfg(feature = "test-support")]
 use ironclaw_host_runtime::{
@@ -54,7 +55,7 @@ use ironclaw_secrets::InMemorySecretStore;
 use ironclaw_triggers::{
     ClaimDueFireRequest, ClearActiveFireRequest, FireAcceptedRequest, InMemoryTriggerRepository,
     MAX_TRIGGER_NAME_BYTES, MAX_TRIGGER_PROMPT_BYTES, TriggerError, TriggerRecord,
-    TriggerRepository, TriggerRunHistoryStatus, TriggerRunRecord,
+    TriggerRepository, TriggerRunHistoryStatus, TriggerRunRecord, TriggerState,
 };
 use ironclaw_trust::{
     AdminConfig, AdminEntry, AuthorityCeiling, EffectiveTrustClass, HostTrustAssignment,
@@ -86,6 +87,7 @@ async fn builtin_first_party_package_declares_expected_capabilities() {
             | TRIGGER_CREATE_CAPABILITY_ID
             | TRIGGER_REMOVE_CAPABILITY_ID
             | TRACE_COMMONS_ONBOARD_CAPABILITY_ID
+            | TRACE_COMMONS_PROFILE_SET_CAPABILITY_ID
             | TRACE_COMMONS_PROFILE_TOKEN_CAPABILITY_ID => PermissionMode::Ask,
             _ => PermissionMode::Allow,
         };
@@ -174,6 +176,55 @@ async fn builtin_first_party_package_declares_expected_capabilities() {
     for id in all_builtin_capability_ids() {
         assert!(handlers.contains_handler(&capability_id(id)));
     }
+}
+
+#[tokio::test]
+async fn builtin_first_party_processless_package_and_handlers_omit_process_port_backed_shell() {
+    let package =
+        builtin_first_party_package_for_process_backend(ProcessBackendKind::None).unwrap();
+    let ids = package
+        .capabilities
+        .iter()
+        .map(|descriptor| descriptor.id.as_str())
+        .collect::<Vec<_>>();
+    assert!(!ids.contains(&SHELL_CAPABILITY_ID));
+    assert!(ids.contains(&SPAWN_SUBAGENT_CAPABILITY_ID));
+    assert!(ids.contains(&ECHO_CAPABILITY_ID));
+    assert!(
+        !package
+            .manifest
+            .capabilities
+            .iter()
+            .any(|capability| capability.id.as_str() == SHELL_CAPABILITY_ID)
+    );
+
+    let handlers = builtin_first_party_handlers_for_process_backend(
+        Arc::new(InMemoryTriggerRepository::default()),
+        ProcessBackendKind::None,
+    )
+    .unwrap();
+    assert!(!handlers.contains_handler(&capability_id(SHELL_CAPABILITY_ID)));
+    assert!(handlers.contains_handler(&capability_id(SPAWN_SUBAGENT_CAPABILITY_ID)));
+    assert!(handlers.contains_handler(&capability_id(ECHO_CAPABILITY_ID)));
+}
+
+#[tokio::test]
+async fn builtin_first_party_process_backend_package_and_handlers_keep_shell() {
+    let package =
+        builtin_first_party_package_for_process_backend(ProcessBackendKind::TenantSandbox).unwrap();
+    assert!(
+        package
+            .capabilities
+            .iter()
+            .any(|descriptor| descriptor.id.as_str() == SHELL_CAPABILITY_ID)
+    );
+
+    let handlers = builtin_first_party_handlers_for_process_backend(
+        Arc::new(InMemoryTriggerRepository::default()),
+        ProcessBackendKind::TenantSandbox,
+    )
+    .unwrap();
+    assert!(handlers.contains_handler(&capability_id(SHELL_CAPABILITY_ID)));
 }
 
 fn assert_coding_manifest_contract(descriptor: &CapabilityDescriptor) {
@@ -319,7 +370,9 @@ async fn builtin_trigger_create_stamps_caller_scope_and_persists_record() {
     assert_eq!(trigger["agent_id"], json!("default"));
     assert_eq!(trigger["project_id"], json!("bootstrap"));
     assert_eq!(trigger["last_status"], Value::Null);
-    assert_eq!(trigger["is_active"], json!(false));
+    assert_eq!(trigger["is_enabled"], json!(true));
+    assert_eq!(trigger["is_active"], json!(true));
+    assert_eq!(trigger["has_active_fire"], json!(false));
     assert!(trigger.get("last_fired_slot").is_none());
     assert!(trigger.get("active_fire_slot").is_none());
     assert!(trigger.get("active_run_ref").is_none());
@@ -748,7 +801,9 @@ async fn builtin_trigger_list_and_remove_are_caller_scoped() {
     .unwrap();
     assert_eq!(owner_list["triggers"].as_array().unwrap().len(), 1);
     assert!(owner_list["triggers"][0].get("last_status").is_some());
-    assert_eq!(owner_list["triggers"][0]["is_active"], json!(false));
+    assert_eq!(owner_list["triggers"][0]["is_enabled"], json!(true));
+    assert_eq!(owner_list["triggers"][0]["is_active"], json!(true));
+    assert_eq!(owner_list["triggers"][0]["has_active_fire"], json!(false));
     assert!(owner_list["triggers"][0].get("prompt").is_none());
     assert!(owner_list["triggers"][0].get("tenant_id").is_none());
     assert!(owner_list["triggers"][0].get("creator_user_id").is_none());
@@ -781,7 +836,7 @@ async fn builtin_trigger_list_and_remove_are_caller_scoped() {
 }
 
 #[tokio::test]
-async fn builtin_trigger_list_shows_active_state_without_run_identifiers() {
+async fn builtin_trigger_list_separates_enabled_state_from_active_fire_state() {
     let repository = Arc::new(InMemoryTriggerRepository::default());
     let runtime = runtime_with_trigger_repository(repository.clone());
     let context = execution_context([TRIGGER_CREATE_CAPABILITY_ID, TRIGGER_LIST_CAPABILITY_ID]);
@@ -799,23 +854,45 @@ async fn builtin_trigger_list_shows_active_state_without_run_identifiers() {
     )
     .await
     .unwrap();
-    assert_eq!(created["trigger"]["is_active"], json!(false));
+    assert_eq!(created["trigger"]["is_enabled"], json!(true));
+    assert_eq!(created["trigger"]["is_active"], json!(true));
+    assert_eq!(created["trigger"]["has_active_fire"], json!(false));
 
     let mut records = repository
         .list_triggers(context.resource_scope.tenant_id.clone())
         .await
         .unwrap();
     assert_eq!(records.len(), 1);
-    records[0].active_fire_slot = Some(records[0].next_run_at);
-    records[0].active_run_ref =
-        Some(TurnRunId::parse("01890f0f-9b6f-7a85-9e5b-9f21a93c4f5a").unwrap());
-    repository.upsert_trigger(records.remove(0)).await.unwrap();
+    let mut record = records.remove(0);
+    record.state = TriggerState::Paused;
+    repository.upsert_trigger(record.clone()).await.unwrap();
+
+    let listed_paused = invoke_with_context(
+        &runtime,
+        TRIGGER_LIST_CAPABILITY_ID,
+        json!({}),
+        context.clone(),
+    )
+    .await
+    .unwrap();
+    let paused_trigger = &listed_paused["triggers"][0];
+    assert_eq!(paused_trigger["state"], json!("paused"));
+    assert_eq!(paused_trigger["is_enabled"], json!(false));
+    assert_eq!(paused_trigger["is_active"], json!(false));
+    assert_eq!(paused_trigger["has_active_fire"], json!(false));
+
+    record.state = TriggerState::Scheduled;
+    record.active_fire_slot = Some(record.next_run_at);
+    record.active_run_ref = Some(TurnRunId::parse("01890f0f-9b6f-7a85-9e5b-9f21a93c4f5a").unwrap());
+    repository.upsert_trigger(record).await.unwrap();
 
     let listed = invoke_with_context(&runtime, TRIGGER_LIST_CAPABILITY_ID, json!({}), context)
         .await
         .unwrap();
     let trigger = &listed["triggers"][0];
+    assert_eq!(trigger["is_enabled"], json!(true));
     assert_eq!(trigger["is_active"], json!(true));
+    assert_eq!(trigger["has_active_fire"], json!(true));
     assert!(trigger.get("active_fire_slot").is_none());
     assert!(trigger.get("active_run_ref").is_none());
 }
@@ -867,7 +944,9 @@ async fn builtin_trigger_create_list_and_remove_use_full_request_scope() {
     assert!(trigger.get("creator_user_id").is_none());
     assert_eq!(trigger["agent_id"], json!("scoped-agent"));
     assert_eq!(trigger["project_id"], json!("scoped-project"));
-    assert_eq!(trigger["is_active"], json!(false));
+    assert_eq!(trigger["is_enabled"], json!(true));
+    assert_eq!(trigger["is_active"], json!(true));
+    assert_eq!(trigger["has_active_fire"], json!(false));
     assert!(trigger.get("prompt").is_none());
     assert!(trigger.get("last_fired_slot").is_none());
     assert!(trigger.get("active_fire_slot").is_none());
@@ -948,7 +1027,9 @@ async fn builtin_trigger_create_round_trips_nullable_agent_and_project_scope() {
 
     assert_eq!(created["trigger"]["agent_id"], Value::Null);
     assert_eq!(created["trigger"]["project_id"], Value::Null);
-    assert_eq!(created["trigger"]["is_active"], json!(false));
+    assert_eq!(created["trigger"]["is_enabled"], json!(true));
+    assert_eq!(created["trigger"]["is_active"], json!(true));
+    assert_eq!(created["trigger"]["has_active_fire"], json!(false));
 }
 
 #[tokio::test]
@@ -1886,6 +1967,49 @@ async fn memory_write_requires_memory_mount_authority() {
     )
     .await
     .unwrap_err();
+    assert_eq!(failure, RuntimeFailureKind::Authorization);
+}
+
+#[tokio::test]
+async fn builtin_profile_set_rejects_missing_memory_mount_authority() {
+    // profile_set routes through ensure_memory_mount(request, /*write*/ true) in
+    // profile_merge_write. This test verifies that the guard fires when the invocation
+    // context carries only a /workspace mount (no /memory write grant), mirroring
+    // the memory_write_requires_memory_mount_authority test above.
+    let runtime = runtime_with_filesystem(InMemoryBackend::new());
+    let (_filesystem, workspace_mounts) =
+        in_memory_mounted_filesystem(MountPermissions::read_write_list_delete());
+    let failure = invoke_with_context(
+        &runtime,
+        PROFILE_SET_CAPABILITY_ID,
+        json!({"timezone": "Asia/Tokyo"}),
+        execution_context_with_mounts([PROFILE_SET_CAPABILITY_ID], workspace_mounts),
+    )
+    .await
+    .unwrap_err();
+    // ensure_memory_mount returns FilesystemDenied, which maps to RuntimeFailureKind::Authorization.
+    assert_eq!(failure, RuntimeFailureKind::Authorization);
+}
+
+#[tokio::test]
+async fn builtin_profile_set_rejects_memory_mount_without_delete_permission() {
+    // ensure_memory_mount(write=true) requires read + list + write + delete.
+    // A /memory grant with read+list+write but NO delete must be rejected with
+    // Authorization, locking the current contract.
+    // MountPermissions::read_write() has read=true, write=true, list=true, delete=false.
+    let runtime = runtime_with_filesystem(InMemoryBackend::new());
+    let failure = invoke_with_context(
+        &runtime,
+        PROFILE_SET_CAPABILITY_ID,
+        json!({"timezone": "Asia/Tokyo"}),
+        execution_context_with_mounts(
+            [PROFILE_SET_CAPABILITY_ID],
+            memory_mounts(MountPermissions::read_write()),
+        ),
+    )
+    .await
+    .unwrap_err();
+    // ensure_memory_mount rejects write without delete (FilesystemDenied → Authorization).
     assert_eq!(failure, RuntimeFailureKind::Authorization);
 }
 
@@ -2891,18 +3015,18 @@ async fn builtin_http_does_not_inline_huge_binary_payloads() {
     .await
     .unwrap();
 
-    let body_base64 = output["body_base64"].as_str().expect("binary response");
     assert_eq!(output["body_truncated"], json!(true));
-    assert!(body_base64.len() <= 4096);
-    assert_eq!(output["body_bytes_returned"], json!(3072));
+    assert_eq!(output["body_base64_omitted"], json!(true));
+    assert_eq!(output["body_bytes_returned"], json!(0));
     assert_eq!(output["truncation"]["body"], json!(true));
-    assert_eq!(output["truncation"]["bytes_returned"], json!(3072));
+    assert_eq!(output["truncation"]["bytes_returned"], json!(0));
     assert!(
         output["body_truncation_hint"]
             .as_str()
             .expect("hint")
             .contains("builtin.http.save")
     );
+    assert!(output.get("body_base64").is_none());
     assert!(output.get("body_text").is_none());
     assert!(serialized_json_len(&output) <= 6_000);
 }
@@ -2936,11 +3060,11 @@ async fn builtin_http_truncates_tiny_binary_responses_without_panicking() {
 
 #[tokio::test]
 async fn builtin_http_final_budget_trim_preserves_base64_alignment() {
-    let headers = (0..4)
+    let headers = (0..2)
         .map(|index| (format!("x-large-{index}"), "h".repeat(512)))
         .collect::<Vec<_>>();
     let egress =
-        Arc::new(RecordingRuntimeHttpEgress::with_body(vec![0xFF; 4 * 1024]).with_headers(headers));
+        Arc::new(RecordingRuntimeHttpEgress::with_body(vec![0xFF; 512]).with_headers(headers));
     let runtime = runtime_with_http_egress(Arc::clone(&egress));
 
     let output = invoke_with_context(
@@ -2948,7 +3072,7 @@ async fn builtin_http_final_budget_trim_preserves_base64_alignment() {
         HTTP_CAPABILITY_ID,
         json!({
             "url": "https://api.example.test/v1/items",
-            "response_body_limit": 4096
+            "response_body_limit": 512
         }),
         execution_context_with_network([HTTP_CAPABILITY_ID], http_test_policy()),
     )
@@ -2958,10 +3082,10 @@ async fn builtin_http_final_budget_trim_preserves_base64_alignment() {
     let body_base64 = output["body_base64"].as_str().expect("binary response");
     assert_eq!(output["body_truncated"], json!(true));
     assert!(!body_base64.is_empty());
-    assert!(body_base64.len() < 4096);
+    assert!(body_base64.len() < 684);
     assert_eq!(body_base64.len() % 4, 0);
     assert_eq!(output["truncation"]["body"], json!(true));
-    assert!(serialized_json_len(&output) <= 6_000);
+    assert!(serialized_json_len(&output) <= 3_000);
 }
 
 #[tokio::test]
@@ -5251,6 +5375,186 @@ async fn builtin_coding_tools_match_v1_read_write_list_glob_and_grep_shapes() {
 }
 
 #[tokio::test]
+async fn read_file_enforces_byte_budget_on_long_lines_and_offers_continuation() {
+    // A few very long lines: only 6 lines (well under the 2000-line cap) but
+    // ~180 KB total, the shape that let a 310 KB log dump into context and
+    // exhaust the pinchbench turn budget. The byte cap must truncate it.
+    let temp = tempfile::tempdir().unwrap();
+    let wide_line = "x".repeat(30 * 1024);
+    let body = (0..6)
+        .map(|_| wide_line.as_str())
+        .collect::<Vec<_>>()
+        .join("\n");
+    std::fs::write(temp.path().join("wide.log"), format!("{body}\n")).unwrap();
+
+    let (filesystem, mounts) = mounted_filesystem(temp.path(), MountPermissions::read_only());
+    let runtime = runtime_with_filesystem(filesystem);
+    let context = execution_context_with_mounts(all_builtin_capability_ids(), mounts);
+
+    let read = invoke_with_context(
+        &runtime,
+        READ_FILE_CAPABILITY_ID,
+        json!({"path": "/workspace/wide.log"}),
+        context.clone(),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(read["total_lines"], json!(6));
+    assert_eq!(read["truncated"], json!(true));
+    assert_eq!(read["truncated_by"], json!("bytes"));
+    // Stopped well before all 6 lines, and the body stays inside the budget
+    // including the continuation notice.
+    let shown = read["lines_shown"].as_u64().unwrap();
+    assert!(
+        (1..6).contains(&shown),
+        "expected partial read, got {shown}"
+    );
+    let content = read["content"].as_str().unwrap();
+    assert!(
+        content.len() <= 64 * 1024,
+        "body exceeded byte budget: {} bytes",
+        content.len()
+    );
+    let next = read["next_offset"].as_u64().unwrap();
+    assert_eq!(next, shown + 1);
+    assert!(content.contains(&format!("Use offset={next} to continue")));
+
+    // Resuming from next_offset advances past the already-shown lines.
+    let resumed = invoke_with_context(
+        &runtime,
+        READ_FILE_CAPABILITY_ID,
+        json!({"path": "/workspace/wide.log", "offset": next}),
+        context.clone(),
+    )
+    .await
+    .unwrap();
+    let resumed_first = resumed["content"].as_str().unwrap();
+    assert!(resumed_first.starts_with(&format!("{:>6}│", next)));
+}
+
+#[tokio::test]
+async fn read_file_saturates_large_limit_without_overflow() {
+    let temp = tempfile::tempdir().unwrap();
+    std::fs::write(temp.path().join("lines.txt"), "first\nsecond\nthird\n").unwrap();
+
+    let (filesystem, mounts) = mounted_filesystem(temp.path(), MountPermissions::read_only());
+    let runtime = runtime_with_filesystem(filesystem);
+    let context = execution_context_with_mounts(all_builtin_capability_ids(), mounts);
+
+    let read = invoke_with_context(
+        &runtime,
+        READ_FILE_CAPABILITY_ID,
+        json!({
+            "path": "/workspace/lines.txt",
+            "offset": 2,
+            "limit": usize::MAX,
+        }),
+        context,
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(read["total_lines"], json!(3));
+    assert_eq!(read["lines_shown"], json!(2));
+    assert_eq!(read["truncated"], json!(false));
+    assert!(read["truncated_by"].is_null());
+    assert!(read["next_offset"].is_null());
+    let content = read["content"].as_str().unwrap();
+    assert!(content.starts_with("     2│ second"));
+    assert!(content.contains("     3│ third"));
+    assert!(!content.contains("     1│ first"));
+}
+
+#[tokio::test]
+async fn read_file_clamps_a_single_line_larger_than_the_whole_budget() {
+    // One line bigger than the entire byte budget must still return something
+    // (clamped on a UTF-8 boundary) and advance the cursor rather than emit empty.
+    let temp = tempfile::tempdir().unwrap();
+    std::fs::write(
+        temp.path().join("blob.txt"),
+        format!("{}\nnext\n", "y".repeat(100 * 1024)),
+    )
+    .unwrap();
+
+    let (filesystem, mounts) = mounted_filesystem(temp.path(), MountPermissions::read_only());
+    let runtime = runtime_with_filesystem(filesystem);
+    let context = execution_context_with_mounts(all_builtin_capability_ids(), mounts);
+
+    let read = invoke_with_context(
+        &runtime,
+        READ_FILE_CAPABILITY_ID,
+        json!({"path": "/workspace/blob.txt"}),
+        context.clone(),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(read["lines_shown"], json!(1));
+    assert_eq!(read["truncated_by"], json!("bytes"));
+    assert_eq!(read["next_offset"], json!(2));
+    let content = read["content"].as_str().unwrap();
+    assert!(content.contains("[line truncated]"));
+    assert!(
+        content.len() <= 64 * 1024,
+        "body exceeded byte budget: {} bytes",
+        content.len()
+    );
+}
+
+#[tokio::test]
+async fn read_file_tolerates_stray_nul_and_invalid_utf8_in_text_logs() {
+    // A real syslog-shaped file with one stray NUL and one invalid UTF-8 byte.
+    // The strict probe/decode rejected these, forcing the agent into a grep-only
+    // fallback (pinchbench syslog tasks). The read path must now decode it lossily.
+    let temp = tempfile::tempdir().unwrap();
+    let mut bytes = b"Jan  1 00:00:00 host sshd[1]: Failed password for root\n".to_vec();
+    bytes.push(0u8); // stray NUL
+    bytes.extend_from_slice(b"\xffJan  1 00:00:01 host sshd[1]: more log line\n"); // invalid UTF-8
+    std::fs::write(temp.path().join("syslog.log"), &bytes).unwrap();
+
+    let (filesystem, mounts) = mounted_filesystem(temp.path(), MountPermissions::read_only());
+    let runtime = runtime_with_filesystem(filesystem);
+    let context = execution_context_with_mounts(all_builtin_capability_ids(), mounts);
+
+    let read = invoke_with_context(
+        &runtime,
+        READ_FILE_CAPABILITY_ID,
+        json!({"path": "/workspace/syslog.log"}),
+        context.clone(),
+    )
+    .await
+    .expect("text log with stray NUL / invalid UTF-8 must read, not hard-fail");
+    let content = read["content"].as_str().unwrap();
+    assert!(content.contains("Failed password for root"));
+    assert!(content.contains("more log line"));
+}
+
+#[tokio::test]
+async fn read_file_still_rejects_nul_dense_binary() {
+    // Genuine binary (NUL-dense): must still be kept out of context rather than
+    // dumped as U+FFFD soup. 25% NUL bytes clears both the floor and the ratio.
+    let temp = tempfile::tempdir().unwrap();
+    let bytes: Vec<u8> = (0..4096)
+        .map(|i| if i % 4 == 0 { 0u8 } else { b'A' })
+        .collect();
+    std::fs::write(temp.path().join("blob.bin"), &bytes).unwrap();
+
+    let (filesystem, mounts) = mounted_filesystem(temp.path(), MountPermissions::read_only());
+    let runtime = runtime_with_filesystem(filesystem);
+    let context = execution_context_with_mounts(all_builtin_capability_ids(), mounts);
+
+    invoke_with_context(
+        &runtime,
+        READ_FILE_CAPABILITY_ID,
+        json!({"path": "/workspace/blob.bin"}),
+        context.clone(),
+    )
+    .await
+    .expect_err("NUL-dense binary must still be rejected by read_file");
+}
+
+#[tokio::test]
 async fn builtin_coding_paths_are_relative_to_requested_root_and_zero_values_match_v1() {
     let temp = tempfile::tempdir().unwrap();
     std::fs::create_dir_all(temp.path().join("src/nested")).unwrap();
@@ -7260,6 +7564,7 @@ fn all_builtin_capability_ids() -> Vec<&'static str> {
         TRACE_COMMONS_CREDITS_CAPABILITY_ID,
         TRACE_COMMONS_PROFILE_TOKEN_CAPABILITY_ID,
         TRACE_COMMONS_PROFILE_SET_CAPABILITY_ID,
+        PROFILE_SET_CAPABILITY_ID,
         MEMORY_SEARCH_CAPABILITY_ID,
         MEMORY_WRITE_CAPABILITY_ID,
         MEMORY_READ_CAPABILITY_ID,

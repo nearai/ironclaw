@@ -1490,7 +1490,7 @@ async fn product_auth_google_oauth_callback_rejects_disallowed_scopes() {
 
     assert_eq!(response.status(), StatusCode::BAD_REQUEST);
     let body = read_body_string(response).await;
-    assert!(body.contains("\"code\":\"malformed_callback\""));
+    assert!(body.contains("\"code\":\"provider_denied\""));
     assert!(!body.contains(&state));
     assert!(!body.contains("google-auth-code"));
     assert!(!body.contains(DISALLOWED_GOOGLE_SCOPE));
@@ -1560,7 +1560,7 @@ async fn product_auth_google_oauth_callback_rejects_empty_parsed_scopes() {
 
     assert_eq!(response.status(), StatusCode::BAD_REQUEST);
     let body = read_body_string(response).await;
-    assert!(body.contains("\"code\":\"malformed_callback\""));
+    assert!(body.contains("\"code\":\"provider_denied\""));
     assert!(!body.contains(&state));
     assert!(!body.contains("google-auth-code"));
     assert!(dispatcher.events().is_empty());

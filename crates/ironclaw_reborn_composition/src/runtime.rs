@@ -46,9 +46,10 @@ use ironclaw_host_api::{
 };
 use ironclaw_loop_support::{
     CapabilityAllowSet, CapabilityResolveError, CapabilitySurfaceProfileResolver,
-    FilesystemSkillBundleSource, HostIdentityContextSource, HostSkillContextSource,
-    JsonSpawnSubagentInputCodec, LoopCapabilityInputResolver, LoopCapabilityPortFactory,
-    LoopCapabilityResultWriter, ModelGatewayBackedSystemInferencePort,
+    EmptyUserProfileSource, FilesystemSkillBundleSource, HostIdentityContextSource,
+    HostSkillContextSource, HostUserProfileSource, JsonSpawnSubagentInputCodec,
+    LoopCapabilityInputResolver, LoopCapabilityPortFactory, LoopCapabilityResultWriter,
+    ModelGatewayBackedSystemInferencePort,
 };
 use ironclaw_product_adapters::ProjectionStream;
 use ironclaw_product_workflow::{
@@ -91,6 +92,9 @@ use ironclaw_turns::{
     run_profile::{LoopHostMilestoneSink, LoopRunContext},
 };
 
+use ironclaw_host_runtime::MemoryBackedUserProfileSource;
+use ironclaw_turns::run_profile::UserProfileContext;
+
 use crate::default_system_prompt::DefaultSystemPromptIdentitySource;
 use crate::factory::{LocalDevRootFilesystem, LocalDevTurnStateStore, builtin_extension_registry};
 use crate::local_dev_capability_policy::local_dev_capability_policy;
@@ -122,6 +126,27 @@ use production::{
 };
 
 const MAX_DESCENDANT_CANCEL_NODES: usize = 1_000;
+
+// Adapter: wraps `MemoryBackedUserProfileSource` (in `ironclaw_host_runtime`) and
+// implements `HostUserProfileSource` (in `ironclaw_loop_support`). A direct
+// `impl HostUserProfileSource for MemoryBackedUserProfileSource` is forbidden by
+// the orphan rule — neither the trait nor the type is defined in this crate. The
+// newtype wrapper is defined here, so the impl is allowed. This mirrors how
+// `WorkspaceIdentityContextSource` (defined in `src/workspace/`) implements
+// `HostIdentityContextSource` (defined in `ironclaw_loop_support`) — the impl
+// lives in the crate that owns the *concrete type* and can see the trait.
+struct MemoryBackedUserProfileSourceAdapter(MemoryBackedUserProfileSource);
+
+#[async_trait::async_trait]
+impl HostUserProfileSource for MemoryBackedUserProfileSourceAdapter {
+    async fn resolve_user_profile(
+        &self,
+        run_context: &LoopRunContext,
+    ) -> Option<UserProfileContext> {
+        // Delegate to the inherent method on `MemoryBackedUserProfileSource`.
+        self.0.resolve_user_profile(run_context).await
+    }
+}
 
 struct RuntimeStoreParts<'a> {
     local_runtime: Option<&'a crate::factory::RebornLocalRuntimeServices>,
@@ -1073,6 +1098,16 @@ impl RebornRuntime {
             .product_auth
             .as_ref()
             .and_then(|product_auth| product_auth.as_auth_challenge_provider())
+    }
+
+    #[cfg(feature = "slack-v2-host-beta")]
+    pub(crate) fn blocked_auth_flow_canceller(
+        &self,
+    ) -> Option<Arc<dyn crate::BlockedAuthFlowCanceller>> {
+        self.services
+            .product_auth
+            .as_ref()
+            .and_then(|product_auth| product_auth.as_blocked_auth_flow_canceller())
     }
 
     pub(crate) fn webui_event_stream(&self) -> Arc<dyn ProjectionStream> {
@@ -2147,6 +2182,11 @@ pub async fn build_reborn_runtime(
         None
     };
 
+    let validated_identity = validate_runtime_identity(identity)?;
+    services_input = services_input.with_local_runtime_identity(
+        validated_identity.tenant_id.clone(),
+        validated_identity.agent_id.clone(),
+    );
     let trusted_laptop_access = services_input.grants_trusted_laptop_access();
     let owner_id = services_input.owner_id().to_string();
     let mut services = build_reborn_services(services_input).await?;
@@ -2210,7 +2250,6 @@ pub async fn build_reborn_runtime(
         subagent_goal_store,
         trigger_repository: _trigger_repository,
     } = runtime_parts;
-    let validated_identity = validate_runtime_identity(identity)?;
     let (skill_context_source, skill_activation_source, skill_execution_adapter) =
         match (configured_skill_context_source, local_runtime) {
             (Some(source), _) => (Some(source), None, None),
@@ -2703,6 +2742,30 @@ pub async fn build_reborn_runtime(
                 })?,
             ) as Arc<dyn HostIdentityContextSource>,
             None => Arc::new(EmptyIdentityContextSource) as Arc<dyn HostIdentityContextSource>,
+        },
+        // Resolve the per-user agent-context profile (timezone/locale/location) from
+        // `context/profile.json` via the workspace filesystem. When a local-dev workspace
+        // filesystem is available, the `MemoryBackedUserProfileSource` adapter reads it;
+        // otherwise `EmptyUserProfileSource` degrades gracefully to `None` (profile unknown).
+        // `extension_filesystem` is the raw `Arc<LocalDevRootFilesystem>` (=
+        // `CompositeRootFilesystem`) — the underlying RootFilesystem the workspace
+        // mounts are built from. `MemoryBackedUserProfileSource` constructs its own
+        // full virtual paths via `profile_scope_and_path` and does not use the
+        // `ScopedFilesystem` mount view, so the raw `RootFilesystem` is correct here.
+        //
+        // NOTE: this `Some(local_runtime) => real / None => Empty` guard intentionally
+        // mirrors `identity_context_source` directly above. The production-graph path
+        // (`production_runtime_parts`, `local_runtime: None`) currently wires NEITHER the
+        // identity source NOR this profile source — both degrade to Empty there today.
+        // Wiring the production-graph composition for these optional context sources is a
+        // single deferred follow-up (identity + profile together, to keep them paired);
+        // do not wire only one of them here, or they will diverge. See issue #5013.
+        user_profile_source: match local_runtime {
+            Some(local_runtime) => Arc::new(MemoryBackedUserProfileSourceAdapter(
+                MemoryBackedUserProfileSource::new(Arc::clone(&local_runtime.extension_filesystem)
+                    as Arc<dyn ironclaw_filesystem::RootFilesystem>),
+            )) as Arc<dyn HostUserProfileSource>,
+            None => Arc::new(EmptyUserProfileSource) as Arc<dyn HostUserProfileSource>,
         },
         model_policy_guard: None,
         model_budget_accountant,
@@ -8668,6 +8731,14 @@ mod tests {
     impl crate::product_auth_runtime_credentials::RuntimeCredentialAccountSelectionService
         for MultiToolConfiguredCredentials
     {
+        async fn select_configured_account_for_binding(
+            &self,
+            _lookup: ironclaw_auth::CredentialAccountSelectionRequest,
+            _runtime_scope: ironclaw_auth::AuthProductScope,
+        ) -> Result<ironclaw_auth::CredentialAccount, ironclaw_auth::AuthProductError> {
+            Err(ironclaw_auth::AuthProductError::CredentialMissing)
+        }
+
         async fn select_unique_configured_runtime_account(
             &self,
             _request: crate::product_auth_runtime_credentials::RuntimeCredentialAccountSelectionRequest,

@@ -786,7 +786,7 @@ impl SubagentSpawnCapabilityPort {
             "spawned",
             false,
         );
-        let (result_ref, byte_len) = self
+        let write_result = self
             .deps
             .result_writer
             .write_capability_result(CapabilityResultWrite {
@@ -798,6 +798,7 @@ impl SubagentSpawnCapabilityPort {
                 display_preview: None,
             })
             .await?;
+        let result_ref = write_result.result_ref;
         compensation.result_written = Some(result_ref.clone());
         let child_thread = self
             .deps
@@ -928,7 +929,7 @@ impl SubagentSpawnCapabilityPort {
             gate_ref: loop_gate_ref,
             result_ref,
             safe_summary: safe_summary("subagent spawned; waiting for completion"),
-            byte_len,
+            byte_len: write_result.byte_len,
         })
     }
 
