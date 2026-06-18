@@ -4950,6 +4950,7 @@ mod project_error_mapping_tests {
 
         let unavailable = map_project_service_error(ProjectServiceError::Unavailable);
         assert_eq!(unavailable.code, RebornServicesErrorCode::Unavailable);
+        assert_eq!(unavailable.status_code, 503);
         assert!(unavailable.retryable, "unavailable is retryable");
 
         let internal = map_project_service_error(ProjectServiceError::Internal);
@@ -4957,11 +4958,15 @@ mod project_error_mapping_tests {
         assert_eq!(internal.status_code, 500);
     }
 
-    /// The default (unwired) facade reports project methods as unavailable so a
-    /// runtime without a wired `ProjectService` returns a clean 503, not a panic.
+    /// `require_project_service` returns `service_unavailable(false)` when no
+    /// project service is wired (see the helper in this file). This locks the
+    /// full shape of that sentinel — a clean, non-retryable 503 — so an unwired
+    /// runtime returns a stable error rather than a panic or a 500.
     #[test]
-    fn unwired_project_service_is_unavailable() {
+    fn unwired_project_service_sentinel_is_503() {
         let unavailable = RebornServicesError::service_unavailable(false);
         assert_eq!(unavailable.code, RebornServicesErrorCode::Unavailable);
+        assert_eq!(unavailable.status_code, 503);
+        assert!(!unavailable.retryable, "false-arg sentinel is non-retryable");
     }
 }
