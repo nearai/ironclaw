@@ -72,11 +72,21 @@ fn cost_usd_from(
     cost.to_f64().unwrap_or(0.0)
 }
 
+#[derive(Clone, Copy)]
+struct LlmTokenBuckets {
+    input_tokens: u32,
+    output_tokens: u32,
+    cache_read_input_tokens: u32,
+    cache_creation_input_tokens: u32,
+}
+
 /// Wraps an existing `LlmProvider` to implement the engine's `LlmBackend` trait.
 pub struct LlmBridgeAdapter {
     provider: Arc<dyn LlmProvider>,
     /// Optional cheaper provider for sub-calls (depth > 0).
     cheap_provider: Option<Arc<dyn LlmProvider>>,
+    /// Optional for unit tests and hostless adapter use; production engine
+    /// initialization attaches a recorder in `bridge::router::init_engine`.
     usage_recorder: Option<Arc<LlmUsageRecorder>>,
 }
 
@@ -99,16 +109,12 @@ impl LlmUsageRecorder {
         }
     }
 
-    #[allow(clippy::too_many_arguments)]
     async fn record(
         &self,
         provider: &Arc<dyn LlmProvider>,
         config: &LlmCallConfig,
-        input_tokens: u32,
-        output_tokens: u32,
-        cache_read_input_tokens: u32,
-        cache_creation_input_tokens: u32,
-    ) {
+        tokens: LlmTokenBuckets,
+    ) -> Result<(), EngineError> {
         let model = provider.effective_model_name(config.model.as_deref());
         let cost_per_token = if config.model.is_some() {
             None
@@ -122,10 +128,10 @@ impl LlmUsageRecorder {
                     .record_llm_call_for_user(
                         user_id,
                         &model,
-                        input_tokens,
-                        output_tokens,
-                        cache_read_input_tokens,
-                        cache_creation_input_tokens,
+                        tokens.input_tokens,
+                        tokens.output_tokens,
+                        tokens.cache_read_input_tokens,
+                        tokens.cache_creation_input_tokens,
                         provider.cache_read_discount(),
                         provider.cache_write_multiplier(),
                         cost_per_token,
@@ -136,10 +142,10 @@ impl LlmUsageRecorder {
                 self.cost_guard
                     .record_llm_call(
                         &model,
-                        input_tokens,
-                        output_tokens,
-                        cache_read_input_tokens,
-                        cache_creation_input_tokens,
+                        tokens.input_tokens,
+                        tokens.output_tokens,
+                        tokens.cache_read_input_tokens,
+                        tokens.cache_creation_input_tokens,
                         provider.cache_read_discount(),
                         provider.cache_write_multiplier(),
                         cost_per_token,
@@ -149,29 +155,37 @@ impl LlmUsageRecorder {
         };
 
         let Some(db) = self.db.as_ref() else {
-            return;
+            return Ok(());
         };
 
         let conversation_id = config
             .metadata
             .get("v1_conversation_id")
-            .or_else(|| config.metadata.get("conversation_scope"))
-            .and_then(|value| Uuid::parse_str(value).ok());
+            .and_then(|value| Uuid::parse_str(value).ok())
+            .or_else(|| {
+                config
+                    .metadata
+                    .get("conversation_scope")
+                    .and_then(|value| Uuid::parse_str(value).ok())
+            });
         let purpose = config.metadata.get("purpose").map(String::as_str);
         let record = LlmCallRecord {
             job_id: None,
             conversation_id,
             provider: &self.provider_name,
             model: &model,
-            input_tokens,
-            output_tokens,
+            input_tokens: tokens.input_tokens,
+            output_tokens: tokens.output_tokens,
             cost,
             purpose,
         };
 
-        if let Err(e) = db.record_llm_call(&record).await {
-            tracing::warn!("Failed to persist engine v2 LLM call to DB: {e}");
-        }
+        db.record_llm_call(&record)
+            .await
+            .map_err(|e| EngineError::Store {
+                reason: format!("failed to persist engine v2 LLM usage: {e}"),
+            })?;
+        Ok(())
     }
 }
 
@@ -204,23 +218,12 @@ impl LlmBridgeAdapter {
         &self,
         provider: &Arc<dyn LlmProvider>,
         config: &LlmCallConfig,
-        input_tokens: u32,
-        output_tokens: u32,
-        cache_read_input_tokens: u32,
-        cache_creation_input_tokens: u32,
-    ) {
+        tokens: LlmTokenBuckets,
+    ) -> Result<(), EngineError> {
         if let Some(recorder) = self.usage_recorder.as_ref() {
-            recorder
-                .record(
-                    provider,
-                    config,
-                    input_tokens,
-                    output_tokens,
-                    cache_read_input_tokens,
-                    cache_creation_input_tokens,
-                )
-                .await;
+            recorder.record(provider, config, tokens).await?;
         }
+        Ok(())
     }
 }
 
@@ -284,12 +287,14 @@ impl LlmBackend for LlmBridgeAdapter {
             self.record_usage(
                 provider,
                 config,
-                response.input_tokens,
-                response.output_tokens,
-                response.cache_read_input_tokens,
-                response.cache_creation_input_tokens,
+                LlmTokenBuckets {
+                    input_tokens: response.input_tokens,
+                    output_tokens: response.output_tokens,
+                    cache_read_input_tokens: response.cache_read_input_tokens,
+                    cache_creation_input_tokens: response.cache_creation_input_tokens,
+                },
             )
-            .await;
+            .await?;
 
             let cleaned_text = clean_response(&response.content);
 
@@ -336,12 +341,14 @@ impl LlmBackend for LlmBridgeAdapter {
         self.record_usage(
             provider,
             config,
-            response.input_tokens,
-            response.output_tokens,
-            response.cache_read_input_tokens,
-            response.cache_creation_input_tokens,
+            LlmTokenBuckets {
+                input_tokens: response.input_tokens,
+                output_tokens: response.output_tokens,
+                cache_read_input_tokens: response.cache_read_input_tokens,
+                cache_creation_input_tokens: response.cache_creation_input_tokens,
+            },
         )
-        .await;
+        .await?;
 
         // Convert response — check for code blocks (CodeAct/RLM pattern)
         let llm_response = if !response.tool_calls.is_empty() {
@@ -1026,8 +1033,11 @@ mod tests {
         config
             .metadata
             .insert("user_id".to_string(), "alice".to_string());
+        config
+            .metadata
+            .insert("v1_conversation_id".to_string(), "not-a-uuid".to_string());
         config.metadata.insert(
-            "v1_conversation_id".to_string(),
+            "conversation_scope".to_string(),
             conversation_id.to_string(),
         );
         config
@@ -1059,6 +1069,39 @@ mod tests {
         assert_eq!(summaries[0].user_id, "alice");
         assert!(summaries[0].last_active_at.is_some());
         assert_eq!(cost_guard.actions_this_hour().await, 1);
+    }
+
+    #[cfg(feature = "libsql")]
+    #[tokio::test]
+    async fn complete_fails_when_engine_v2_usage_persistence_fails() {
+        use crate::agent::cost_guard::{CostGuard, CostGuardConfig};
+        use crate::db::Database;
+
+        let backend = crate::db::libsql::LibSqlBackend::new_memory()
+            .await
+            .expect("LibSqlBackend");
+        let db: Arc<dyn Database> = Arc::new(backend);
+        let cost_guard = Arc::new(CostGuard::new(CostGuardConfig::default()));
+        let provider: Arc<dyn LlmProvider> = Arc::new(PricedProvider);
+        let adapter = LlmBridgeAdapter::new(provider, None).with_usage_recorder(Arc::new(
+            LlmUsageRecorder::new(Some(db), cost_guard, "test-backend"),
+        ));
+
+        let err = adapter
+            .complete(
+                &[ThreadMessage::user("hello")],
+                &[],
+                &LlmCallConfig::default(),
+            )
+            .await
+            .expect_err("unmigrated DB must fail durable usage recording");
+
+        assert!(matches!(err, EngineError::Store { .. }));
+        assert!(
+            err.to_string()
+                .contains("failed to persist engine v2 LLM usage"),
+            "unexpected error: {err}"
+        );
     }
 
     #[tokio::test]

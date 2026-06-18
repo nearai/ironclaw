@@ -59,6 +59,8 @@ const EXTERNAL_TOOL_CATALOG_SWEEP_INTERVAL: std::time::Duration =
 /// it. One hour matches typical pending-gate TTLs and gives callers
 /// plenty of headroom to resume a paused tool call.
 const EXTERNAL_TOOL_CATALOG_TTL: chrono::Duration = chrono::Duration::hours(1);
+const ENGINE_METADATA_V1_CONVERSATION_RESOLVE_TIMEOUT: std::time::Duration =
+    std::time::Duration::from_secs(2);
 
 /// Check if the engine v2 is enabled via `ENGINE_V2=true` environment variable.
 pub fn is_engine_v2_enabled() -> bool {
@@ -1478,6 +1480,39 @@ async fn resolve_v1_conversation_for_message(
 
     db.get_or_create_assistant_conversation(&message.user_id, &message.channel)
         .await
+}
+
+async fn resolve_v1_conversation_for_engine_metadata(
+    db: &Arc<dyn crate::db::Database>,
+    message: &IncomingMessage,
+) -> Option<uuid::Uuid> {
+    match tokio::time::timeout(
+        ENGINE_METADATA_V1_CONVERSATION_RESOLVE_TIMEOUT,
+        resolve_v1_conversation_for_message(db, message),
+    )
+    .await
+    {
+        Ok(Ok(cid)) => Some(cid),
+        Ok(Err(e)) => {
+            // silent-ok: v1 conversation resolution for engine metadata only enriches
+            // admin usage joins; engine v2 execution can proceed without this optional id.
+            tracing::warn!(
+                message_id = %message.id,
+                "failed to resolve v1 conversation for engine metadata: {e}"
+            );
+            None
+        }
+        Err(_) => {
+            // silent-ok: v1 conversation resolution for engine metadata is bounded so a
+            // slow DB cannot block engine v2 execution; usage is still recorded by thread.
+            tracing::warn!(
+                message_id = %message.id,
+                timeout_ms = ENGINE_METADATA_V1_CONVERSATION_RESOLVE_TIMEOUT.as_millis(),
+                "timed out resolving v1 conversation for engine metadata"
+            );
+            None
+        }
+    }
 }
 
 async fn reconcile_pending_gate_state(
@@ -4694,16 +4729,7 @@ async fn handle_with_engine_inner(
     // bridge's post-spawn `transfer` and miss caller tools on the
     // first turn.
     let v1_conversation_id = if let Some(ref db) = state.db {
-        match resolve_v1_conversation_for_message(db, message).await {
-            Ok(cid) => Some(cid),
-            Err(e) => {
-                tracing::warn!(
-                    message_id = %message.id,
-                    "failed to resolve v1 conversation for engine metadata: {e}"
-                );
-                None
-            }
-        }
+        resolve_v1_conversation_for_engine_metadata(db, message).await
     } else {
         None
     };

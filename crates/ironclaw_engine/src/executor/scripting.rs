@@ -68,7 +68,7 @@ use crate::types::error::EngineError;
 use crate::types::event::EventKind;
 use crate::types::message::{MessageRole, ThreadMessage};
 use crate::types::step::{ActionResult, CodeExecutionFailure, LlmResponse, TokenUsage};
-use crate::types::thread::Thread;
+use crate::types::thread::{LlmCallPurpose, Thread};
 use ironclaw_common::ValidTimezone;
 
 // ── Configuration ───────────────────────────────────────────
@@ -600,7 +600,7 @@ async fn execute_code_with_skills_inner(
     let mut events = Vec::new();
     let mut recursive_tokens = TokenUsage::default();
     let mut final_answer: Option<String> = None;
-    let llm_metadata = thread.llm_usage_metadata("chat");
+    let llm_metadata = thread.llm_usage_metadata(LlmCallPurpose::Chat);
 
     // Build context variables including persisted state from prior steps
     let (input_names, input_values) = build_context_inputs(thread, persisted_state);
@@ -3941,7 +3941,7 @@ except Exception as e:
 
     /// LLM backend that records every call's model + prompt for assertions.
     struct CapturingLlm {
-        calls: tokio::sync::Mutex<Vec<(Option<String>, String)>>,
+        calls: tokio::sync::Mutex<Vec<(Option<String>, String, HashMap<String, String>)>>,
     }
 
     impl CapturingLlm {
@@ -3969,10 +3969,11 @@ except Exception as e:
                 .find(|m| matches!(m.role, crate::types::message::MessageRole::User))
                 .map(|m| m.content.clone())
                 .unwrap_or_default();
-            self.calls
-                .lock()
-                .await
-                .push((config.model.clone(), user_prompt.clone()));
+            self.calls.lock().await.push((
+                config.model.clone(),
+                user_prompt.clone(),
+                config.metadata.clone(),
+            ));
             Ok(crate::traits::llm::LlmOutput {
                 response: crate::types::step::LlmResponse::Text(format!(
                     "ack:{}:{user_prompt}",
@@ -4035,6 +4036,53 @@ except Exception as e:
     }
 
     #[tokio::test]
+    async fn execute_code_llm_query_forwards_thread_usage_metadata() {
+        let llm = Arc::new(CapturingLlm::new());
+        let effects: Arc<dyn EffectExecutor> = Arc::new(MockEffects::new(vec![], vec![]));
+        let leases = LeaseManager::new();
+        let policy = PolicyEngine::new();
+        let mut thread = make_test_thread();
+        let conversation_scope = uuid::Uuid::new_v4();
+        let v1_conversation_id = uuid::Uuid::new_v4();
+        thread.metadata = serde_json::json!({
+            "conversation_scope": conversation_scope.to_string(),
+            "v1_conversation_id": v1_conversation_id.to_string(),
+        });
+        let ctx = make_exec_context(&thread);
+
+        leases
+            .grant(thread.id, "tools", GrantedActions::All, None, None)
+            .await
+            .unwrap();
+
+        let result = execute_code(
+            r#"
+answer = await llm_query("summarize")
+"#,
+            &thread,
+            &(Arc::clone(&llm) as Arc<dyn crate::traits::llm::LlmBackend>),
+            &effects,
+            &leases,
+            &policy,
+            &ctx,
+            &[],
+            &serde_json::json!({}),
+        )
+        .await
+        .unwrap();
+
+        assert!(
+            result.failure.is_none(),
+            "unexpected failure: {:?}",
+            result.failure
+        );
+        let calls = llm.calls.lock().await;
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].1, "summarize");
+        assert_eq!(calls[0].2, thread.llm_usage_metadata(LlmCallPurpose::Chat));
+    }
+
+    #[tokio::test]
     async fn llm_query_batched_broadcasts_with_models_list() {
         let llm = Arc::new(CapturingLlm::new());
         let mut tokens = crate::types::step::TokenUsage::default();
@@ -4092,7 +4140,7 @@ except Exception as e:
 
         let calls = llm.calls.lock().await;
         assert_eq!(calls.len(), 2);
-        assert!(calls.iter().all(|(m, _)| m.as_deref() == Some("gpt-4o")));
+        assert!(calls.iter().all(|(m, _, _)| m.as_deref() == Some("gpt-4o")));
     }
 
     #[tokio::test]
@@ -4161,7 +4209,7 @@ except Exception as e:
 
         let calls = llm.calls.lock().await;
         assert_eq!(calls.len(), 2);
-        assert!(calls.iter().all(|(m, _)| m.is_none()));
+        assert!(calls.iter().all(|(m, _, _)| m.is_none()));
     }
 
     #[tokio::test]
@@ -4194,7 +4242,7 @@ except Exception as e:
 
         let calls = llm.calls.lock().await;
         assert_eq!(calls.len(), 2);
-        assert!(calls.iter().all(|(m, _)| m.as_deref() == Some("gpt-4o")));
+        assert!(calls.iter().all(|(m, _, _)| m.as_deref() == Some("gpt-4o")));
     }
 
     #[tokio::test]
@@ -4325,8 +4373,8 @@ except Exception as e:
         let calls = llm.calls.lock().await;
         assert_eq!(calls.len(), 2);
         // Slot 0 was None — must remain None, not become "claude-sonnet-4-20250514".
-        let slot_a = calls.iter().find(|(_, p)| p == "a").expect("call for a");
-        let slot_b = calls.iter().find(|(_, p)| p == "b").expect("call for b");
+        let slot_a = calls.iter().find(|(_, p, _)| p == "a").expect("call for a");
+        let slot_b = calls.iter().find(|(_, p, _)| p == "b").expect("call for b");
         assert_eq!(slot_a.0, None);
         assert_eq!(slot_b.0.as_deref(), Some("gpt-4o"));
     }

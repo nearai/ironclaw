@@ -111,6 +111,19 @@ pub enum ThreadType {
     Mission,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum LlmCallPurpose {
+    Chat,
+}
+
+impl LlmCallPurpose {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Chat => "chat",
+        }
+    }
+}
+
 // ── Thread configuration ────────────────────────────────────
 
 /// Execution parameters for a thread.
@@ -311,11 +324,11 @@ impl Thread {
     }
 
     /// Metadata attached to engine LLM usage accounting records.
-    pub fn llm_usage_metadata(&self, purpose: &str) -> HashMap<String, String> {
+    pub fn llm_usage_metadata(&self, purpose: LlmCallPurpose) -> HashMap<String, String> {
         let mut metadata = HashMap::from([
             ("thread_id".to_string(), self.id.0.to_string()),
             ("user_id".to_string(), self.user_id.clone()),
-            ("purpose".to_string(), purpose.to_string()),
+            ("purpose".to_string(), purpose.as_str().to_string()),
         ]);
 
         if let Some(scope) = self
@@ -608,7 +621,7 @@ mod tests {
             "ignored_non_string": 123,
         });
 
-        let metadata = thread.llm_usage_metadata("chat");
+        let metadata = thread.llm_usage_metadata(LlmCallPurpose::Chat);
 
         assert_eq!(metadata.get("thread_id"), Some(&thread.id.0.to_string()));
         assert_eq!(metadata.get("user_id"), Some(&thread.user_id));
