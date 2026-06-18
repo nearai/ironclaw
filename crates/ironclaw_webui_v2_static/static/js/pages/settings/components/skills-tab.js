@@ -184,22 +184,27 @@ export function SkillsTab({ searchQuery = "" }) {
   `;
 }
 
-// Global master switch for auto-activating learned skills. When off, every
-// learned skill stays invokable via an explicit /name mention but no longer
-// auto-activates by keyword/criteria. Mirrors the per-skill toggle on
-// `SkillCard`, but applies to the whole set.
+// Global master switch for keyword/criteria skill activation. When off, EVERY
+// skill (learned, user-authored, and bundled) stays invokable via an explicit
+// /name mention but no longer auto-activates by keyword. This is a true global
+// default, not learned-only; the per-skill toggle on `SkillCard` is the
+// per-skill counterpart.
 function LearnedAutoActivateCard({ enabled, isSaving, onToggle }) {
+  // When auto-activation is off, give the whole card a light-red background as a
+  // persistent "default is off" cue. Inline style overrides the Card variant's
+  // own background reliably (no Tailwind class-ordering ambiguity).
+  const cardStyle = enabled ? undefined : { background: "var(--v2-danger-soft)" };
   return html`
-    <${Card} padding="md">
+    <${Card} padding="md" style=${cardStyle}>
       <div className="flex items-start justify-between gap-4">
         <div className="min-w-0">
-          <div className="text-sm font-medium text-[var(--v2-text)]">
-            Auto-activate learned skills
+          <div className="text-sm font-medium text-[var(--v2-text-strong)]">
+            ${`Default skill auto-activation ${enabled ? "enabled" : "disabled"}`}
           </div>
           <div className="mt-1 text-xs text-[var(--v2-text-muted)]">
             ${enabled
-              ? "Learned skills run automatically on matching requests. Turn off to make them explicit-only (/name)."
-              : "Learned skills run only when you type /name. Turn on to let them auto-activate by keyword."}
+              ? "Skills auto-activate by keyword on matching requests. Turn off to require an explicit /name."
+              : "Skills run only when you type /name. Turn on to let them auto-activate by keyword."}
           </div>
         </div>
         <div className="shrink-0">
