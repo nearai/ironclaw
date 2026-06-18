@@ -1,3 +1,7 @@
+mod support;
+
+use support::legacy_capability_fixture_to_v2;
+
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
@@ -19,14 +23,16 @@ async fn dispatcher_routes_wasm_capability_through_registered_adapter() {
     let governor = InMemoryResourceGovernor::new();
     let scope = sample_scope();
     let account = ResourceAccount::tenant(scope.tenant_id.clone());
-    governor.set_limit(
-        account.clone(),
-        ResourceLimits {
-            max_concurrency_slots: Some(1),
-            max_output_bytes: Some(10_000),
-            ..ResourceLimits::default()
-        },
-    );
+    governor
+        .set_limit(
+            account.clone(),
+            ResourceLimits {
+                max_concurrency_slots: Some(1),
+                max_output_bytes: Some(10_000),
+                ..ResourceLimits::default()
+            },
+        )
+        .unwrap();
 
     let dispatcher = RuntimeDispatcher::new(&registry, &fs, &governor)
         .with_runtime_adapter(RuntimeKind::Wasm, &adapter);
@@ -81,15 +87,17 @@ async fn dispatcher_routes_script_capability_through_registered_adapter() {
     let governor = InMemoryResourceGovernor::new();
     let scope = sample_scope();
     let account = ResourceAccount::tenant(scope.tenant_id.clone());
-    governor.set_limit(
-        account.clone(),
-        ResourceLimits {
-            max_concurrency_slots: Some(1),
-            max_process_count: Some(10),
-            max_output_bytes: Some(10_000),
-            ..ResourceLimits::default()
-        },
-    );
+    governor
+        .set_limit(
+            account.clone(),
+            ResourceLimits {
+                max_concurrency_slots: Some(1),
+                max_process_count: Some(10),
+                max_output_bytes: Some(10_000),
+                ..ResourceLimits::default()
+            },
+        )
+        .unwrap();
 
     let dispatcher = RuntimeDispatcher::new(&registry, &fs, &governor)
         .with_runtime_adapter(RuntimeKind::Script, &adapter);
@@ -133,15 +141,17 @@ async fn dispatcher_redacts_runtime_adapter_failure_details() {
         RecordingAdapter::failing(RuntimeKind::Script, RuntimeDispatchErrorKind::ExitFailure);
     let governor = InMemoryResourceGovernor::new();
     let scope = sample_scope();
-    governor.set_limit(
-        ResourceAccount::tenant(scope.tenant_id.clone()),
-        ResourceLimits {
-            max_concurrency_slots: Some(1),
-            max_process_count: Some(10),
-            max_output_bytes: Some(10_000),
-            ..ResourceLimits::default()
-        },
-    );
+    governor
+        .set_limit(
+            ResourceAccount::tenant(scope.tenant_id.clone()),
+            ResourceLimits {
+                max_concurrency_slots: Some(1),
+                max_process_count: Some(10),
+                max_output_bytes: Some(10_000),
+                ..ResourceLimits::default()
+            },
+        )
+        .unwrap();
 
     let dispatcher = RuntimeDispatcher::new(&registry, &fs, &governor)
         .with_runtime_adapter(RuntimeKind::Script, &adapter);
@@ -189,15 +199,17 @@ async fn dispatcher_routes_mcp_capability_through_registered_adapter() {
     let governor = InMemoryResourceGovernor::new();
     let scope = sample_scope();
     let account = ResourceAccount::tenant(scope.tenant_id.clone());
-    governor.set_limit(
-        account.clone(),
-        ResourceLimits {
-            max_concurrency_slots: Some(1),
-            max_process_count: Some(1),
-            max_output_bytes: Some(10_000),
-            ..ResourceLimits::default()
-        },
-    );
+    governor
+        .set_limit(
+            account.clone(),
+            ResourceLimits {
+                max_concurrency_slots: Some(1),
+                max_process_count: Some(1),
+                max_output_bytes: Some(10_000),
+                ..ResourceLimits::default()
+            },
+        )
+        .unwrap();
 
     let dispatcher = RuntimeDispatcher::new(&registry, &fs, &governor)
         .with_runtime_adapter(RuntimeKind::Mcp, &adapter);
@@ -485,6 +497,7 @@ impl RuntimeAdapter<LocalFilesystem, InMemoryResourceGovernor> for RecordingAdap
             })?;
         Ok(RuntimeAdapterResult {
             output: self.output.clone(),
+            display_preview: None,
             output_bytes: usage.output_bytes,
             usage,
             receipt,
@@ -519,9 +532,19 @@ fn mounted_empty_extension_root() -> LocalFilesystem {
 }
 
 fn package_from_manifest(manifest: &str) -> ExtensionPackage {
-    let manifest = ExtensionManifest::parse(manifest).unwrap();
+    let manifest = parse_manifest(manifest);
     let root = VirtualPath::new(format!("/system/extensions/{}", manifest.id.as_str())).unwrap();
     ExtensionPackage::from_manifest(manifest, root).unwrap()
+}
+
+fn parse_manifest(manifest: &str) -> ExtensionManifest {
+    let manifest = legacy_capability_fixture_to_v2(manifest);
+    ExtensionManifest::parse(
+        &manifest,
+        ManifestSource::InstalledLocal,
+        &HostPortCatalog::empty(),
+    )
+    .unwrap()
 }
 
 fn sample_scope() -> ResourceScope {

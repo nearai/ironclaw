@@ -3,6 +3,7 @@
 //! In Phase 1, this is a simple factory that creates the built-in widgets.
 //! Future phases will support loading custom widget manifests from
 //! `tui/widgets/{id}/manifest.json` in the workspace.
+#![allow(dead_code)] // Scaffolding; some items kept for future use.
 
 use crate::layout::TuiLayout;
 
@@ -21,7 +22,7 @@ use super::thread_picker::ThreadPickerWidget;
 use super::tool_panel::ToolPanelWidget;
 
 /// Create the default set of built-in widgets.
-pub fn create_default_widgets(layout: &TuiLayout) -> BuiltinWidgets {
+pub(crate) fn create_default_widgets(layout: &TuiLayout) -> BuiltinWidgets {
     let theme = layout.resolve_theme();
 
     BuiltinWidgets {
@@ -45,7 +46,7 @@ pub fn create_default_widgets(layout: &TuiLayout) -> BuiltinWidgets {
 ///
 /// We use concrete types instead of `Box<dyn TuiWidget>` so callers can
 /// access widget-specific methods (e.g., `input_box.take_input()`).
-pub struct BuiltinWidgets {
+pub(crate) struct BuiltinWidgets {
     pub header: HeaderWidget,
     pub tab_bar: TabBarWidget,
     pub conversation: ConversationWidget,
@@ -63,7 +64,7 @@ pub struct BuiltinWidgets {
 
 /// Get references to all widgets as trait objects for generic iteration.
 impl BuiltinWidgets {
-    pub fn all(&self) -> Vec<&dyn TuiWidget> {
+    pub(crate) fn all(&self) -> Vec<&dyn TuiWidget> {
         vec![
             &self.header,
             &self.tab_bar,

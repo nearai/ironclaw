@@ -6,8 +6,8 @@ use wasmtime_wasi::{ResourceTable, WasiCtx, WasiCtxBuilder, WasiCtxView, WasiVie
 use crate::bindings;
 use crate::config::{DEFAULT_HTTP_TIMEOUT_MS, MAX_LOG_MESSAGE_BYTES, MAX_LOGS_PER_EXECUTION};
 use crate::host::{WasmHttpRequest, WitToolHost};
-use crate::limiter::WasmResourceLimiter;
 use crate::types::{WasmLogLevel, WasmLogRecord};
+use ironclaw_wasm_limiter::WasmResourceLimiter;
 
 pub(crate) struct StoreData {
     host: WitToolHost,

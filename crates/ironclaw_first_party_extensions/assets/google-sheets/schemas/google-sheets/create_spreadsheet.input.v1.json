@@ -1,0 +1,24 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Google Sheets create_spreadsheet",
+  "description": "Create a new spreadsheet.",
+  "type": "object",
+  "required": [
+    "title"
+  ],
+  "properties": {
+    "title": {
+      "type": "string",
+      "description": "Spreadsheet title."
+    },
+    "sheet_names": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "description": "Sheet name."
+      },
+      "description": "Names of sheets to create."
+    }
+  },
+  "additionalProperties": false
+}

@@ -15,7 +15,7 @@ use crate::widgets::AppState;
 
 /// Mutable state for the model picker modal.
 #[derive(Debug, Clone, Default)]
-pub struct ModelPickerState {
+pub(crate) struct ModelPickerState {
     /// Whether the picker is visible.
     pub visible: bool,
     /// Filter derived from the text after `/model`.
@@ -30,25 +30,25 @@ pub struct ModelPickerState {
 
 impl ModelPickerState {
     /// Create state with a known model list.
-    pub fn with_models(models: Vec<String>) -> Self {
+    pub(crate) fn with_models(models: Vec<String>) -> Self {
         let mut state = Self::default();
         state.set_models(models);
         state
     }
 
     /// Replace the available model list and reset filter state.
-    pub fn set_models(&mut self, models: Vec<String>) {
+    pub(crate) fn set_models(&mut self, models: Vec<String>) {
         self.models = models;
         self.close();
     }
 
     /// Whether the picker has model data to show.
-    pub fn has_models(&self) -> bool {
+    pub(crate) fn has_models(&self) -> bool {
         !self.models.is_empty()
     }
 
     /// Recompute `filtered` from the current `filter` text.
-    pub fn update_filter(&mut self, filter: &str) {
+    pub(crate) fn update_filter(&mut self, filter: &str) {
         self.filter = filter.to_string();
         let needle = filter.trim().to_lowercase();
         self.filtered = self
@@ -80,13 +80,13 @@ impl ModelPickerState {
     }
 
     /// Open the picker with an optional filter.
-    pub fn open(&mut self, filter: &str) {
+    pub(crate) fn open(&mut self, filter: &str) {
         self.visible = true;
         self.update_filter(filter);
     }
 
     /// Close the picker and reset the filter.
-    pub fn close(&mut self) {
+    pub(crate) fn close(&mut self) {
         self.visible = false;
         self.filter.clear();
         self.filtered = (0..self.models.len()).collect();
@@ -94,7 +94,7 @@ impl ModelPickerState {
     }
 
     /// Move the selection up.
-    pub fn move_up(&mut self) {
+    pub(crate) fn move_up(&mut self) {
         if self.filtered.is_empty() {
             return;
         }
@@ -106,7 +106,7 @@ impl ModelPickerState {
     }
 
     /// Move the selection down.
-    pub fn move_down(&mut self) {
+    pub(crate) fn move_down(&mut self) {
         if self.filtered.is_empty() {
             return;
         }
@@ -114,7 +114,7 @@ impl ModelPickerState {
     }
 
     /// Get the currently selected model, if any.
-    pub fn selected_model(&self) -> Option<&str> {
+    pub(crate) fn selected_model(&self) -> Option<&str> {
         self.filtered
             .get(self.selected)
             .and_then(|&idx| self.models.get(idx).map(String::as_str))
@@ -122,17 +122,17 @@ impl ModelPickerState {
 }
 
 /// Renders the model picker modal overlay.
-pub struct ModelPickerWidget {
+pub(crate) struct ModelPickerWidget {
     theme: Theme,
 }
 
 impl ModelPickerWidget {
-    pub fn new(theme: Theme) -> Self {
+    pub(crate) fn new(theme: Theme) -> Self {
         Self { theme }
     }
 
     /// Compute a centered modal area sized for the current model list.
-    pub fn modal_area(terminal: Rect, item_count: usize) -> Rect {
+    pub(crate) fn modal_area(terminal: Rect, item_count: usize) -> Rect {
         let width = (terminal.width * 3 / 4)
             .max(50)
             .min(terminal.width.saturating_sub(4));
@@ -146,7 +146,7 @@ impl ModelPickerWidget {
     }
 
     /// Render the picker into the given area.
-    pub fn render_picker(&self, area: Rect, buf: &mut Buffer, state: &AppState) {
+    pub(crate) fn render_picker(&self, area: Rect, buf: &mut Buffer, state: &AppState) {
         let picker = &state.model_picker;
         if !picker.visible || area.height < 7 || area.width < 24 {
             return;

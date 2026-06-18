@@ -5,6 +5,26 @@ function rememberSseEventId(event) {
   window.__e2e.lastSseEventId = event.lastEventId;
 }
 
+function countVisibleRunReplyMessages() {
+  const container = document.getElementById('chat-messages');
+  if (!container) return 0;
+  return container.querySelectorAll('.message.assistant, .message.system').length;
+}
+
+function appendMissingRunReplyFallback(expectedThreadId, previousReplyCount) {
+  if (!currentThreadId || currentThreadId !== expectedThreadId) return;
+  const container = document.getElementById('chat-messages');
+  if (!container) return;
+  const replyCount = countVisibleRunReplyMessages();
+  if (replyCount > previousReplyCount) return;
+  const messages = container.querySelectorAll('.message');
+  const lastMessage = messages.length > 0 ? messages[messages.length - 1] : null;
+  if (!lastMessage || !lastMessage.classList.contains('user')) return;
+  finalizeActivityGroup();
+  addMessage('system', I18n.t('chat.runFinishedWithoutReply'));
+  enableChatInput();
+}
+
 function connectSSE(lastEventIdOverride) {
   if (eventSource) eventSource.close();
   cleanupConnectionState();
@@ -384,12 +404,19 @@ function connectSSE(lastEventIdOverride) {
       // Safety net (#2079): if "Done" arrives but we never received a
       // `response` event for this turn, the message may have been lost
       // (broadcast lag, proxy buffering, brief SSE disconnect). Reload
-      // history after a short delay so the user sees the answer.
+      // history after a short delay so the user sees the answer. If
+      // history still has no assistant/system reply for the completed turn,
+      // append a visible fallback instead of leaving the turn silent.
       if (!_turnResponseReceived && data.message === 'Done') {
         if (!_doneWithoutResponseTimer) {
+          const threadIdAtDone = currentThreadId;
+          const previousReplyCount = countVisibleRunReplyMessages();
           _doneWithoutResponseTimer = setTimeout(() => {
             _doneWithoutResponseTimer = null;
-            if (currentThreadId) loadHistory();
+            if (!threadIdAtDone || currentThreadId !== threadIdAtDone) return;
+            Promise.resolve(loadHistory()).then(() => {
+              appendMissingRunReplyFallback(threadIdAtDone, previousReplyCount);
+            });
           }, DONE_WITHOUT_RESPONSE_TIMEOUT_MS);
         }
       }

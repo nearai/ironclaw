@@ -15,8 +15,12 @@ integrations/abound/tests/source_env_vars.sh
 # Stale insta snapshot proposals (review via `cargo insta review`)
 *.snap.new
 
+# Added by review-implementation skill
+.review/
+
 # Claude Code worktrees and lock files
 .claude/worktrees/
+.cr-worktrees/
 .claude/scheduled_tasks.lock
 
 # Sidecar tool data
@@ -42,6 +46,7 @@ artifacts/
 
 # WASM build artifacts (loaded from disk, not bundled)
 *.wasm
+!crates/ironclaw_first_party_extensions/assets/*/wasm/*.wasm
 
 # Traces
 trace_*.json
@@ -50,6 +55,12 @@ trace_*.json
 .claude/settings.local.json
 .worktrees/
 .ironclaw/
+.review/
+
+# Local-dev workspace artifacts: the WebChat v2 attachment lander writes
+# uploaded files under a project workspace; when `serve` runs from the repo
+# root they land in ./attachments/. These are user uploads, never source.
+/attachments/
 
 # Python cache
 __pycache__/
@@ -63,3 +74,7 @@ tests/fixtures/llm_traces/live/github_dev_workflow_full_loop.log
 # tests locally. Only the .json fixtures for each scenario are checked
 # in; the .log files are local debugging artifacts.
 tests/fixtures/llm_traces/live/*.log
+
+# Local test artifacts
+.anvil/
+.codegraph/

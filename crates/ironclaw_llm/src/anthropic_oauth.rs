@@ -14,13 +14,14 @@ use rust_decimal::Decimal;
 use secrecy::{ExposeSecret, SecretString};
 use serde::{Deserialize, Serialize};
 
+use crate::anthropic_thinking::{AnthropicThinking, thinking_for_request};
 use crate::config::RegistryProviderConfig;
 use crate::costs;
 use crate::error::LlmError;
 use crate::provider::{
-    ChatMessage, CompletionRequest, CompletionResponse, FinishReason, LlmProvider, Role, ToolCall,
-    ToolCompletionRequest, ToolCompletionResponse, strip_unsupported_completion_params,
-    strip_unsupported_tool_params,
+    ChatMessage, CompletionRequest, CompletionResponse, ContentPart, FinishReason, LlmProvider,
+    Role, ToolCall, ToolCompletionRequest, ToolCompletionResponse,
+    strip_unsupported_completion_params, strip_unsupported_tool_params,
 };
 
 /// Read a fresh `claude login` OAuth token from the OS credential store.
@@ -75,7 +76,7 @@ const ANTHROPIC_OAUTH_BETA: &str = "oauth-2025-04-20";
 const DEFAULT_MAX_TOKENS: u32 = 8192;
 
 /// Anthropic provider using OAuth Bearer authentication.
-pub struct AnthropicOAuthProvider {
+pub(crate) struct AnthropicOAuthProvider {
     client: Client,
     /// OAuth token, wrapped in RwLock so it can be updated after a successful
     /// Keychain refresh (fixes #1136: stale token reuse after expiry).
@@ -88,7 +89,7 @@ pub struct AnthropicOAuthProvider {
 }
 
 impl AnthropicOAuthProvider {
-    pub fn new(config: &RegistryProviderConfig) -> Result<Self, LlmError> {
+    pub(crate) fn new(config: &RegistryProviderConfig) -> Result<Self, LlmError> {
         let token = config
             .oauth_token
             .clone()
@@ -290,19 +291,21 @@ impl LlmProvider for AnthropicOAuthProvider {
             .unwrap_or_else(|| self.active_model_name());
         self.strip_unsupported_completion_params(&mut req);
         let (system, messages) = convert_messages(req.messages);
+        let max_tokens = req.max_tokens.unwrap_or(DEFAULT_MAX_TOKENS);
 
         let request = AnthropicRequest {
+            thinking: thinking_for_request(&model, max_tokens, req.temperature, false),
             model,
             messages,
             system,
-            max_tokens: req.max_tokens.unwrap_or(DEFAULT_MAX_TOKENS),
+            max_tokens,
             temperature: req.temperature,
             tools: None,
             tool_choice: None,
         };
 
         let response: AnthropicResponse = self.send_request(&request).await?;
-        let (content, _tool_calls) = extract_response_content(&response);
+        let extracted = extract_response_content(&response);
 
         let finish_reason = match response.stop_reason.as_deref() {
             Some("end_turn") | Some("stop") => FinishReason::Stop,
@@ -312,10 +315,11 @@ impl LlmProvider for AnthropicOAuthProvider {
         };
 
         Ok(CompletionResponse {
-            content: content.unwrap_or_default(),
+            content: extracted.content.unwrap_or_default(),
             finish_reason,
             input_tokens: response.usage.input_tokens,
             output_tokens: response.usage.output_tokens,
+            reasoning: extracted.reasoning,
             cache_creation_input_tokens: response.usage.cache_creation_input_tokens,
             cache_read_input_tokens: response.usage.cache_read_input_tokens,
         })
@@ -360,26 +364,39 @@ impl LlmProvider for AnthropicOAuthProvider {
                 name: Some(specific.to_string()),
             },
         });
+        let max_tokens = req.max_tokens.unwrap_or(DEFAULT_MAX_TOKENS);
+
+        // Suppress thinking for tool-capable requests to avoid signature round-trip issues.
+        // Anthropic requires signed thinking blocks to be echoed back on subsequent tool_result
+        // turns; without round-tripping the signature, the next turn fails. Reasoning is
+        // preserved on text-only turns via `complete()`.
+        let has_tools = !tools.is_empty();
+        let opt_tools = if has_tools { Some(tools) } else { None };
 
         let request = AnthropicRequest {
+            thinking: if has_tools {
+                None
+            } else {
+                thinking_for_request(&model, max_tokens, req.temperature, false)
+            },
             model,
             messages,
             system,
-            max_tokens: req.max_tokens.unwrap_or(DEFAULT_MAX_TOKENS),
+            max_tokens,
             temperature: req.temperature,
-            tools: if tools.is_empty() { None } else { Some(tools) },
+            tools: opt_tools,
             tool_choice,
         };
 
         let response: AnthropicResponse = self.send_request(&request).await?;
-        let (content, tool_calls) = extract_response_content(&response);
+        let extracted = extract_response_content(&response);
 
         let finish_reason = match response.stop_reason.as_deref() {
             Some("end_turn") | Some("stop") => FinishReason::Stop,
             Some("max_tokens") => FinishReason::Length,
             Some("tool_use") => FinishReason::ToolUse,
             _ => {
-                if !tool_calls.is_empty() {
+                if !extracted.tool_calls.is_empty() {
                     FinishReason::ToolUse
                 } else {
                     FinishReason::Unknown
@@ -388,13 +405,13 @@ impl LlmProvider for AnthropicOAuthProvider {
         };
 
         Ok(ToolCompletionResponse {
-            content,
-            tool_calls,
+            content: extracted.content,
+            tool_calls: extracted.tool_calls,
             finish_reason,
             input_tokens: response.usage.input_tokens,
             output_tokens: response.usage.output_tokens,
             cache_creation_input_tokens: response.usage.cache_creation_input_tokens,
-            reasoning: None,
+            reasoning: extracted.reasoning,
             cache_read_input_tokens: response.usage.cache_read_input_tokens,
         })
     }
@@ -440,6 +457,8 @@ struct AnthropicRequest {
     #[serde(skip_serializing_if = "Option::is_none")]
     temperature: Option<f32>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    thinking: Option<AnthropicThinking>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     tools: Option<Vec<AnthropicTool>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     tool_choice: Option<AnthropicToolChoice>,
@@ -464,6 +483,8 @@ enum AnthropicContent {
 enum AnthropicContentBlock {
     #[serde(rename = "text")]
     Text { text: String },
+    #[serde(rename = "image")]
+    Image { source: AnthropicImageSource },
     #[serde(rename = "tool_use")]
     ToolUse {
         id: String,
@@ -475,6 +496,15 @@ enum AnthropicContentBlock {
         tool_use_id: String,
         content: String,
     },
+}
+
+/// Inline base64 image source for an Anthropic `image` content block.
+#[derive(Debug, Serialize)]
+struct AnthropicImageSource {
+    #[serde(rename = "type")]
+    source_type: &'static str,
+    media_type: String,
+    data: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -505,12 +535,25 @@ struct AnthropicResponse {
 enum AnthropicResponseBlock {
     #[serde(rename = "text")]
     Text { text: String },
+    #[serde(rename = "thinking")]
+    Thinking {
+        #[serde(default)]
+        thinking: Option<String>,
+        #[serde(default)]
+        summary: Option<String>,
+        #[serde(default, rename = "signature")]
+        _signature: Option<String>,
+    },
+    #[serde(rename = "redacted_thinking")]
+    RedactedThinking {},
     #[serde(rename = "tool_use")]
     ToolUse {
         id: String,
         name: String,
         input: serde_json::Value,
     },
+    #[serde(other)]
+    Other,
 }
 
 #[derive(Debug, Deserialize)]
@@ -523,6 +566,29 @@ struct AnthropicUsage {
     cache_creation_input_tokens: u32,
     #[serde(default)]
     cache_read_input_tokens: u32,
+}
+
+/// Build Anthropic `image` content blocks from a user message's multimodal
+/// parts. Only inline base64 `data:` images are forwarded (the Anthropic
+/// messages API also accepts `url` sources, but the model gateway always emits
+/// `data:` URLs); anything else is skipped so the text still reaches the model.
+fn user_image_blocks(parts: &[ContentPart]) -> Vec<AnthropicContentBlock> {
+    parts
+        .iter()
+        .filter_map(|part| match part {
+            ContentPart::ImageUrl { image_url } => {
+                let (media_type, data) = image_url.decode_data_url()?;
+                Some(AnthropicContentBlock::Image {
+                    source: AnthropicImageSource {
+                        source_type: "base64",
+                        media_type: media_type.to_string(),
+                        data: data.to_string(),
+                    },
+                })
+            }
+            ContentPart::Text { .. } => None,
+        })
+        .collect()
 }
 
 /// Convert ChatMessage list to Anthropic format.
@@ -542,9 +608,22 @@ fn convert_messages(messages: Vec<ChatMessage>) -> (Option<String>, Vec<Anthropi
                 }
             }
             Role::User => {
+                let content = match user_image_blocks(&msg.content_parts) {
+                    // Text-only (or no inline images): keep the compact string form.
+                    blocks if blocks.is_empty() => AnthropicContent::Text(msg.content),
+                    // Multimodal: text block first (when present), then images.
+                    image_blocks => {
+                        let mut blocks = Vec::with_capacity(1 + image_blocks.len());
+                        if !msg.content.is_empty() {
+                            blocks.push(AnthropicContentBlock::Text { text: msg.content });
+                        }
+                        blocks.extend(image_blocks);
+                        AnthropicContent::Blocks(blocks)
+                    }
+                };
                 anthropic_msgs.push(AnthropicMessage {
                     role: "user".to_string(),
-                    content: AnthropicContent::Text(msg.content),
+                    content,
                 });
             }
             Role::Assistant => {
@@ -582,12 +661,18 @@ fn convert_messages(messages: Vec<ChatMessage>) -> (Option<String>, Vec<Anthropi
                     tool_use_id: tool_call_id,
                     content: msg.content,
                 };
-                // If the last message is already a user message with blocks,
-                // append to it (Anthropic requires consecutive tool results
-                // in one user message).
+                // If the last message is already a user message of *only*
+                // tool-result blocks, append to it (Anthropic requires
+                // consecutive tool results in one user message). Crucially, do
+                // not merge into a multimodal user prompt (text + image
+                // blocks) — that would fold a tool result into a different
+                // conversational turn.
                 if let Some(last) = anthropic_msgs.last_mut()
                     && last.role == "user"
                     && let AnthropicContent::Blocks(ref mut blocks) = last.content
+                    && blocks
+                        .iter()
+                        .all(|b| matches!(b, AnthropicContentBlock::ToolResult { .. }))
                 {
                     blocks.push(block);
                     continue;
@@ -609,9 +694,17 @@ fn convert_messages(messages: Vec<ChatMessage>) -> (Option<String>, Vec<Anthropi
     (system, anthropic_msgs)
 }
 
+#[derive(Debug, Default)]
+struct ExtractedAnthropicResponse {
+    content: Option<String>,
+    reasoning: Option<String>,
+    tool_calls: Vec<ToolCall>,
+}
+
 /// Extract text content and tool calls from an Anthropic response.
-fn extract_response_content(response: &AnthropicResponse) -> (Option<String>, Vec<ToolCall>) {
+fn extract_response_content(response: &AnthropicResponse) -> ExtractedAnthropicResponse {
     let mut text_parts: Vec<String> = Vec::new();
+    let mut reasoning_parts: Vec<String> = Vec::new();
     let mut tool_calls: Vec<ToolCall> = Vec::new();
 
     for block in &response.content {
@@ -619,6 +712,24 @@ fn extract_response_content(response: &AnthropicResponse) -> (Option<String>, Ve
             AnthropicResponseBlock::Text { text } => {
                 text_parts.push(text.clone());
             }
+            AnthropicResponseBlock::Thinking {
+                thinking,
+                summary,
+                _signature: _,
+            } => {
+                if let Some(reasoning) = summary
+                    .as_deref()
+                    .filter(|summary| !summary.trim().is_empty())
+                    .or_else(|| {
+                        thinking
+                            .as_deref()
+                            .filter(|thinking| !thinking.trim().is_empty())
+                    })
+                {
+                    reasoning_parts.push(reasoning.to_string());
+                }
+            }
+            AnthropicResponseBlock::RedactedThinking {} | AnthropicResponseBlock::Other => {}
             AnthropicResponseBlock::ToolUse { id, name, input } => {
                 tool_calls.push(ToolCall {
                     id: id.clone(),
@@ -626,6 +737,7 @@ fn extract_response_content(response: &AnthropicResponse) -> (Option<String>, Ve
                     arguments: input.clone(),
                     reasoning: None,
                     signature: None,
+                    arguments_parse_error: None,
                 });
             }
         }
@@ -637,7 +749,17 @@ fn extract_response_content(response: &AnthropicResponse) -> (Option<String>, Ve
         Some(text_parts.join(""))
     };
 
-    (content, tool_calls)
+    let reasoning = if reasoning_parts.is_empty() {
+        None
+    } else {
+        Some(reasoning_parts.join("\n"))
+    };
+
+    ExtractedAnthropicResponse {
+        content,
+        reasoning,
+        tool_calls,
+    }
 }
 
 #[cfg(test)]
@@ -669,6 +791,40 @@ mod tests {
     }
 
     #[test]
+    fn test_convert_messages_user_image_becomes_base64_image_block() {
+        let messages = vec![ChatMessage::user_with_parts(
+            "what is this?",
+            vec![ContentPart::ImageUrl {
+                image_url: crate::provider::ImageUrl {
+                    url: "data:image/png;base64,AQIDBA==".to_string(),
+                    detail: None,
+                },
+            }],
+        )];
+        let (_system, msgs) = convert_messages(messages);
+        assert_eq!(msgs.len(), 1);
+        // Text rides as the first block, the image as a base64 `image` block.
+        let value = serde_json::to_value(&msgs[0]).expect("serialize");
+        let blocks = value["content"].as_array().expect("content blocks");
+        assert_eq!(blocks.len(), 2);
+        assert_eq!(blocks[0]["type"], "text");
+        assert_eq!(blocks[0]["text"], "what is this?");
+        assert_eq!(blocks[1]["type"], "image");
+        assert_eq!(blocks[1]["source"]["type"], "base64");
+        assert_eq!(blocks[1]["source"]["media_type"], "image/png");
+        assert_eq!(blocks[1]["source"]["data"], "AQIDBA==");
+    }
+
+    #[test]
+    fn test_convert_messages_text_only_user_stays_a_string() {
+        let messages = vec![ChatMessage::user("just text")];
+        let (_system, msgs) = convert_messages(messages);
+        let value = serde_json::to_value(&msgs[0]).expect("serialize");
+        // No inline images → compact string content, not a blocks array.
+        assert_eq!(value["content"], "just text");
+    }
+
+    #[test]
     fn test_convert_messages_tool_calls() {
         let tool_calls = vec![ToolCall {
             id: "call_1".to_string(),
@@ -676,6 +832,7 @@ mod tests {
             arguments: serde_json::json!({"q": "test"}),
             reasoning: None,
             signature: None,
+            arguments_parse_error: None,
         }];
         let messages = vec![
             ChatMessage::user("Search for test"),
@@ -705,9 +862,9 @@ mod tests {
                 cache_read_input_tokens: 0,
             },
         };
-        let (content, tool_calls) = extract_response_content(&response);
-        assert_eq!(content, Some("Hello!".to_string()));
-        assert!(tool_calls.is_empty());
+        let extracted = extract_response_content(&response);
+        assert_eq!(extracted.content, Some("Hello!".to_string()));
+        assert!(extracted.tool_calls.is_empty());
     }
 
     #[test]
@@ -731,10 +888,67 @@ mod tests {
                 cache_read_input_tokens: 0,
             },
         };
-        let (content, tool_calls) = extract_response_content(&response);
-        assert_eq!(content, Some("Let me search.".to_string()));
-        assert_eq!(tool_calls.len(), 1);
-        assert_eq!(tool_calls[0].name, "search");
+        let extracted = extract_response_content(&response);
+        assert_eq!(extracted.content, Some("Let me search.".to_string()));
+        assert_eq!(extracted.tool_calls.len(), 1);
+        assert_eq!(extracted.tool_calls[0].name, "search");
+    }
+
+    #[test]
+    fn test_extract_response_preserves_thinking_as_reasoning() {
+        let response = AnthropicResponse {
+            content: vec![
+                AnthropicResponseBlock::Thinking {
+                    thinking: Some("Raw thinking".to_string()),
+                    summary: Some("Summarized thinking".to_string()),
+                    _signature: Some("sig".to_string()),
+                },
+                AnthropicResponseBlock::Text {
+                    text: "Done.".to_string(),
+                },
+            ],
+            stop_reason: Some("end_turn".to_string()),
+            usage: AnthropicUsage {
+                input_tokens: 20,
+                output_tokens: 15,
+                cache_creation_input_tokens: 0,
+                cache_read_input_tokens: 0,
+            },
+        };
+        let extracted = extract_response_content(&response);
+        assert_eq!(extracted.content, Some("Done.".to_string()));
+        assert_eq!(extracted.reasoning, Some("Summarized thinking".to_string()));
+    }
+
+    #[test]
+    fn test_extract_response_uses_thinking_when_summary_absent() {
+        let response = AnthropicResponse {
+            content: vec![
+                AnthropicResponseBlock::Thinking {
+                    thinking: Some("Raw thinking fallback".to_string()),
+                    summary: None,
+                    _signature: Some("sig".to_string()),
+                },
+                AnthropicResponseBlock::Text {
+                    text: "Done.".to_string(),
+                },
+            ],
+            stop_reason: Some("end_turn".to_string()),
+            usage: AnthropicUsage {
+                input_tokens: 20,
+                output_tokens: 15,
+                cache_creation_input_tokens: 0,
+                cache_read_input_tokens: 0,
+            },
+        };
+
+        let extracted = extract_response_content(&response);
+
+        assert_eq!(extracted.content, Some("Done.".to_string()));
+        assert_eq!(
+            extracted.reasoning,
+            Some("Raw thinking fallback".to_string())
+        );
     }
 
     /// Regression test for #1136: token field must be mutable via RwLock

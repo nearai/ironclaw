@@ -1,0 +1,23 @@
+{
+  "model_name": "runtime-policy-hosted-dev-no-shell",
+  "expects": {
+    "tools_not_used": ["shell", "read_file", "write_file", "apply_patch", "list_dir", "http"],
+    "min_responses": 1
+  },
+  "turns": [
+    {
+      "user_input": "Briefly summarize what you can do under this deployment.",
+      "steps": [
+        {
+          "request_hint": { "last_user_message_contains": "summarize" },
+          "response": {
+            "type": "text",
+            "content": "I can help you reason and write summaries within this tenant sandbox.",
+            "input_tokens": 60,
+            "output_tokens": 18
+          }
+        }
+      ]
+    }
+  ]
+}

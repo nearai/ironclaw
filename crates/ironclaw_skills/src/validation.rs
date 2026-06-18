@@ -1,5 +1,7 @@
 //! Name validation and content escaping for skills.
 
+use std::path::{Component, Path, PathBuf};
+
 use regex::Regex;
 
 use crate::types::{SkillCredentialSpec, SkillOAuthConfig};
@@ -120,6 +122,46 @@ static SKILL_VERSION_PATTERN: std::sync::LazyLock<Regex> =
 /// Validate a skill version string. See [`SKILL_VERSION_PATTERN`].
 pub fn validate_skill_version(version: &str) -> bool {
     SKILL_VERSION_PATTERN.is_match(version)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SafeRelativePathError {
+    Empty,
+    Absolute,
+    NonUtf8,
+    NonAscii,
+    Traversal,
+}
+
+pub fn normalize_safe_relative_path(path: &Path) -> Result<PathBuf, SafeRelativePathError> {
+    if path.as_os_str().is_empty() || path.is_absolute() {
+        return Err(SafeRelativePathError::Empty);
+    }
+
+    let mut normalized = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::Normal(part) => {
+                let part = part.to_str().ok_or(SafeRelativePathError::NonUtf8)?;
+                if part.is_empty() {
+                    return Err(SafeRelativePathError::Empty);
+                }
+                if !part.is_ascii() {
+                    return Err(SafeRelativePathError::NonAscii);
+                }
+                normalized.push(part);
+            }
+            Component::CurDir => {}
+            Component::ParentDir | Component::RootDir | Component::Prefix(_) => {
+                return Err(SafeRelativePathError::Traversal);
+            }
+        }
+    }
+
+    if normalized.as_os_str().is_empty() {
+        return Err(SafeRelativePathError::Empty);
+    }
+    Ok(normalized)
 }
 
 /// Regex for credential names: lowercase alphanumeric + underscores.

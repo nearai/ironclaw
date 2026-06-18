@@ -56,6 +56,12 @@ impl Tool for GlobTool {
         "glob"
     }
 
+    fn runtime_affordance(&self) -> crate::tools::ToolRuntimeAffordance {
+        // glob walks the local filesystem — host-filesystem read
+        // (#3243 MED tool-affordance coverage).
+        crate::tools::ToolRuntimeAffordance::HostFilesystem
+    }
+
     fn description(&self) -> &str {
         "Fast file pattern matching. Find files by glob pattern (e.g. `**/*.rs`, `src/**/*.ts`). \
          Results sorted by modification time (newest first). \

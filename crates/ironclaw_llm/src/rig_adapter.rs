@@ -53,6 +53,187 @@ pub struct RigAdapter<M: CompletionModel> {
     /// Default additional parameters merged into every request.
     /// Used by providers that need extra top-level fields (e.g., Ollama `think: true`).
     default_additional_params: Option<serde_json::Value>,
+    /// Optional model-discovery endpoint. When set, [`LlmProvider::list_models`]
+    /// issues a `GET` instead of returning the empty default. rig-core's
+    /// `CompletionModel` does not expose model discovery, so this is wired
+    /// explicitly per protocol (OpenAI-compatible, Anthropic, Ollama).
+    models_endpoint: Option<ModelsEndpoint>,
+}
+
+/// Auth scheme applied to a model-discovery request.
+#[derive(Clone)]
+pub(crate) enum ModelsAuth {
+    /// `Authorization: Bearer <key>` (OpenAI-compatible, NEAR AI).
+    Bearer(String),
+    /// `x-api-key: <key>` plus an `anthropic-version` header (Anthropic).
+    AnthropicKey { api_key: String, version: String },
+    /// No auth header (Ollama).
+    None,
+}
+
+/// Response body shape returned by a model-discovery endpoint.
+#[derive(Clone, Copy)]
+pub(crate) enum ModelsShape {
+    /// OpenAI / Anthropic: `{ "data": [ { "id": ... } ] }`.
+    OpenAiData,
+    /// Ollama `/api/tags`: `{ "models": [ { "name": ... } ] }`.
+    OllamaTags,
+}
+
+/// Connection details for a provider model-discovery request.
+#[derive(Clone)]
+pub(crate) struct ModelsEndpoint {
+    /// Provider id, used for error/log context.
+    pub(crate) provider_id: String,
+    /// Fully-built request URL (base + discovery path).
+    pub(crate) url: String,
+    /// Auth scheme for the request.
+    pub(crate) auth: ModelsAuth,
+    /// Response body shape to parse.
+    pub(crate) shape: ModelsShape,
+    /// Extra headers applied to every request to this provider.
+    pub(crate) extra_headers: reqwest::header::HeaderMap,
+}
+
+impl ModelsEndpoint {
+    /// Issue the model-discovery `GET` and return the model ids.
+    ///
+    /// Validates the URL against the baseline SSRF guard, applies the
+    /// adapter-specific auth scheme, and parses the adapter-specific response
+    /// shape. Network, auth, and parse failures map to `LlmError` so the caller
+    /// can surface a real message instead of an empty list.
+    async fn fetch_models(&self) -> Result<Vec<String>, LlmError> {
+        let validated = crate::url_check::check_models_url(&self.provider_id, &self.url).await?;
+
+        // `check_models_url` validates only the initial URL. Disable redirect
+        // following so a host that passes the guard cannot 3xx-redirect the
+        // request to a blocked target (e.g. the cloud-metadata IP) — a 3xx is
+        // surfaced as a non-success status below instead of being chased. The
+        // shared builder also bypasses the proxy for loopback providers.
+        let mut builder = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(30))
+            .redirect(reqwest::redirect::Policy::none());
+        // Pin the client to the addresses the guard validated, so the
+        // connect-time resolver can't rebind the hostname to a blocked IP after
+        // the check passed (DNS TOCTOU). `None` for literal-IP / proxy-resolved
+        // hosts, where there is nothing to pin.
+        if let Some((host, addrs)) = &validated.pin {
+            builder = builder.resolve_to_addrs(host, addrs);
+        }
+        let client = crate::url_check::build_http_client(&self.provider_id, &self.url, builder)?;
+
+        let mut builder = client.get(&self.url).headers(self.extra_headers.clone());
+        builder = match &self.auth {
+            ModelsAuth::Bearer(key) => builder.bearer_auth(key),
+            ModelsAuth::AnthropicKey { api_key, version } => builder
+                .header("x-api-key", api_key)
+                .header("anthropic-version", version),
+            ModelsAuth::None => builder,
+        };
+
+        let response = builder.send().await.map_err(|e| LlmError::RequestFailed {
+            provider: self.provider_id.clone(),
+            reason: format!("request to {} failed: {e}", self.url),
+        })?;
+
+        let status = response.status();
+        if status == reqwest::StatusCode::UNAUTHORIZED || status == reqwest::StatusCode::FORBIDDEN {
+            return Err(LlmError::AuthFailed {
+                provider: self.provider_id.clone(),
+            });
+        }
+        if !status.is_success() {
+            return Err(LlmError::RequestFailed {
+                provider: self.provider_id.clone(),
+                reason: format!("{} returned HTTP {}", self.url, status.as_u16()),
+            });
+        }
+
+        // Bound the body: a model list is a few KB, but an operator-configured
+        // (or compromised) endpoint could slow-drip megabytes within the 30s
+        // timeout. Reject a declared oversize length up front, then stream with
+        // a hard cap so memory stays bounded even when content-length is absent.
+        use futures::StreamExt;
+        const MAX_MODELS_BODY_BYTES: usize = 4 * 1024 * 1024;
+        if let Some(len) = response.content_length()
+            && len > MAX_MODELS_BODY_BYTES as u64
+        {
+            return Err(LlmError::InvalidResponse {
+                provider: self.provider_id.clone(),
+                reason: format!("models response too large ({len} bytes)"),
+            });
+        }
+        let mut body = Vec::new();
+        let mut stream = response.bytes_stream();
+        while let Some(chunk) = stream.next().await {
+            let chunk = chunk.map_err(|e| LlmError::InvalidResponse {
+                provider: self.provider_id.clone(),
+                reason: format!("could not read models response: {e}"),
+            })?;
+            if body.len() + chunk.len() > MAX_MODELS_BODY_BYTES {
+                return Err(LlmError::InvalidResponse {
+                    provider: self.provider_id.clone(),
+                    reason: "models response exceeded 4 MiB cap".to_string(),
+                });
+            }
+            body.extend_from_slice(&chunk);
+        }
+        parse_models_response(&self.provider_id, self.shape, &body)
+    }
+}
+
+/// Extract model ids from a model-discovery response body. Empty/whitespace
+/// ids are dropped.
+///
+/// Split out from the HTTP call so the parsing contract is unit-testable
+/// without a live endpoint. `ModelsShape` selects the JSON shape:
+/// OpenAI/Anthropic `{ "data": [{ "id" }] }` vs Ollama
+/// `{ "models": [{ "name" }] }`.
+fn parse_models_response(
+    provider_id: &str,
+    shape: ModelsShape,
+    body: &[u8],
+) -> Result<Vec<String>, LlmError> {
+    #[derive(serde::Deserialize)]
+    struct OpenAiResponse {
+        #[serde(default)]
+        data: Vec<OpenAiEntry>,
+    }
+    #[derive(serde::Deserialize)]
+    struct OpenAiEntry {
+        id: String,
+    }
+    #[derive(serde::Deserialize)]
+    struct OllamaResponse {
+        #[serde(default)]
+        models: Vec<OllamaEntry>,
+    }
+    #[derive(serde::Deserialize)]
+    struct OllamaEntry {
+        name: String,
+    }
+
+    let parse_err = |e: serde_json::Error| LlmError::InvalidResponse {
+        provider: provider_id.to_string(),
+        reason: format!("could not parse models response: {e}"),
+    };
+
+    let ids = match shape {
+        ModelsShape::OpenAiData => serde_json::from_slice::<OpenAiResponse>(body)
+            .map_err(parse_err)?
+            .data
+            .into_iter()
+            .map(|entry| entry.id)
+            .collect::<Vec<_>>(),
+        ModelsShape::OllamaTags => serde_json::from_slice::<OllamaResponse>(body)
+            .map_err(parse_err)?
+            .models
+            .into_iter()
+            .map(|entry| entry.name)
+            .collect::<Vec<_>>(),
+    };
+
+    Ok(ids.into_iter().filter(|id| !id.trim().is_empty()).collect())
 }
 
 impl<M: CompletionModel> RigAdapter<M> {
@@ -69,7 +250,19 @@ impl<M: CompletionModel> RigAdapter<M> {
             cache_retention: CacheRetention::None,
             unsupported_params: HashSet::new(),
             default_additional_params: None,
+            models_endpoint: None,
         }
+    }
+
+    /// Enable model discovery for [`LlmProvider::list_models`].
+    ///
+    /// Without this, `list_models` falls back to the trait default (an empty
+    /// list). The provider factories build a protocol-specific [`ModelsEndpoint`]
+    /// (URL, auth scheme, response shape) so the "Fetch models" UI returns the
+    /// provider's catalog.
+    pub(crate) fn with_model_listing(mut self, endpoint: ModelsEndpoint) -> Self {
+        self.models_endpoint = Some(endpoint);
+        self
     }
 
     /// Set Anthropic prompt cache retention policy.
@@ -440,6 +633,7 @@ fn extract_response(
                     // them. Without this, Gemini 2.5+ rejects the next
                     // request with HTTP 400. See #3225.
                     signature: tc.signature.clone(),
+                    arguments_parse_error: None,
                 });
             }
             AssistantContent::Reasoning(r) if !r.reasoning.is_empty() => {
@@ -621,6 +815,15 @@ where
         (self.input_cost, self.output_cost)
     }
 
+    async fn list_models(&self) -> Result<Vec<String>, LlmError> {
+        let Some(endpoint) = self.models_endpoint.as_ref() else {
+            // No discovery endpoint wired (e.g. Anthropic/Ollama paths); preserve
+            // the trait default rather than guessing a URL.
+            return Ok(Vec::new());
+        };
+        endpoint.fetch_models().await
+    }
+
     fn cache_write_multiplier(&self) -> Decimal {
         match self.cache_retention {
             CacheRetention::None => Decimal::ONE,
@@ -676,6 +879,7 @@ where
             input_tokens: saturate_u32(response.usage.input_tokens),
             output_tokens: saturate_u32(response.usage.output_tokens),
             finish_reason: finish,
+            reasoning: None,
             cache_read_input_tokens: saturate_u32(response.usage.cached_input_tokens),
             cache_creation_input_tokens: extract_cache_creation(&response.raw_response),
         };
@@ -745,6 +949,13 @@ where
             }
         }
 
+        // Strict-mode tool schemas advertise every optional as required+nullable,
+        // so the model fills unset optionals with `null`. Strip those placeholders
+        // against each tool's original schema so only provided values reach the
+        // tool. `false`: rig providers send `null`, not `""`, so a deliberately
+        // empty string from the model is preserved.
+        crate::tool_schema::strip_unset_optional_fields(&mut tool_calls, &request.tools, false);
+
         let resp = ToolCompletionResponse {
             content: text,
             tool_calls,
@@ -798,45 +1009,14 @@ fn map_rig_error(model_name: &str, e: impl std::fmt::Display) -> LlmError {
     let msg = e.to_string();
     let lower = msg.to_ascii_lowercase();
 
-    const CONTEXT_PATTERNS: &[&str] = &[
-        "context_length_exceeded",
-        "maximum context length",
-        "too many tokens",
-        "payload too large",
-    ];
-
-    if CONTEXT_PATTERNS.iter().any(|p| lower.contains(p)) {
-        let (used, limit) = parse_token_counts(&lower);
+    if crate::error::is_context_length_error_message(&lower) {
+        let (used, limit) = crate::error::parse_context_token_counts(&lower);
         return LlmError::ContextLengthExceeded { used, limit };
     }
     LlmError::RequestFailed {
         provider: model_name.to_string(),
         reason: msg,
     }
-}
-
-/// Try to extract token counts from a context-length error message.
-///
-/// Handles patterns like:
-/// - "maximum context length is 128000 tokens. However, your messages resulted in 150000 tokens."
-/// - "context_length_exceeded ... 150000 tokens ... limit 128000"
-///
-/// Returns `(0, 0)` if parsing fails.
-pub(crate) fn parse_token_counts(lower: &str) -> (usize, usize) {
-    // OpenAI pattern: "maximum context length is {limit} tokens. ... resulted in {used} tokens"
-    if lower.contains("maximum context length") {
-        let numbers: Vec<usize> = lower
-            .split(|c: char| !c.is_ascii_digit())
-            .filter(|s| !s.is_empty())
-            .filter_map(|s| s.parse().ok())
-            .filter(|&n| n > 0)
-            .collect();
-        if numbers.len() >= 2 {
-            // First large number is typically the limit, second is the used count
-            return (numbers[1], numbers[0]);
-        }
-    }
-    (0, 0)
 }
 
 /// Normalize a tool call name returned by an OpenAI-compatible provider.
@@ -861,6 +1041,140 @@ fn normalize_tool_name(name: &str, known_tools: &HashSet<String>) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rig::completion::CompletionError;
+    use rig::streaming::StreamingCompletionResponse;
+
+    #[test]
+    fn parse_models_response_openai_extracts_ids() {
+        let body =
+            br#"{"object":"list","data":[{"id":"gpt-4o","object":"model"},{"id":"gpt-4o-mini"}]}"#;
+        let models =
+            parse_models_response("openai", ModelsShape::OpenAiData, body).expect("parses");
+        assert_eq!(models, vec!["gpt-4o", "gpt-4o-mini"]);
+    }
+
+    #[test]
+    fn parse_models_response_ollama_extracts_names() {
+        let body = br#"{"models":[{"name":"llama3.2:latest"},{"name":"qwen2.5"}]}"#;
+        let models =
+            parse_models_response("ollama", ModelsShape::OllamaTags, body).expect("parses");
+        assert_eq!(models, vec!["llama3.2:latest", "qwen2.5"]);
+    }
+
+    #[test]
+    fn parse_models_response_drops_blank_ids_and_tolerates_missing_data() {
+        let with_blank = br#"{"data":[{"id":"a"},{"id":"  "},{"id":""}]}"#;
+        assert_eq!(
+            parse_models_response("openai", ModelsShape::OpenAiData, with_blank).expect("parses"),
+            vec!["a"]
+        );
+        // A successful response with no `data` key yields an empty list, not an error.
+        let no_data = br#"{"object":"list"}"#;
+        assert!(
+            parse_models_response("openai", ModelsShape::OpenAiData, no_data)
+                .expect("parses")
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn parse_models_response_rejects_malformed_json() {
+        let err = parse_models_response("openai", ModelsShape::OpenAiData, b"not json")
+            .expect_err("rejects");
+        assert!(matches!(err, LlmError::InvalidResponse { .. }));
+    }
+
+    // Serve one canned HTTP response on a loopback port and return the endpoint
+    // pointed at it. The response is written verbatim, so callers control the
+    // status line and headers.
+    async fn endpoint_against_canned_response(raw_response: &'static str) -> ModelsEndpoint {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind loopback");
+        let addr = listener.local_addr().expect("addr");
+        tokio::spawn(async move {
+            if let Ok((mut sock, _)) = listener.accept().await {
+                let mut buf = [0u8; 1024];
+                let _ = sock.read(&mut buf).await;
+                let _ = sock.write_all(raw_response.as_bytes()).await;
+                let _ = sock.flush().await;
+            }
+        });
+        ModelsEndpoint {
+            provider_id: "p".to_string(),
+            url: format!("http://{addr}/models"),
+            auth: ModelsAuth::Bearer("k".to_string()),
+            shape: ModelsShape::OpenAiData,
+            extra_headers: reqwest::header::HeaderMap::new(),
+        }
+    }
+
+    #[tokio::test]
+    async fn fetch_models_maps_401_to_auth_failed() {
+        let endpoint = endpoint_against_canned_response(
+            "HTTP/1.1 401 Unauthorized\r\nContent-Length: 0\r\n\r\n",
+        )
+        .await;
+        let err = endpoint.fetch_models().await.expect_err("401 is an error");
+        assert!(matches!(err, LlmError::AuthFailed { .. }), "got {err:?}");
+    }
+
+    #[tokio::test]
+    async fn fetch_models_maps_403_to_auth_failed() {
+        let endpoint =
+            endpoint_against_canned_response("HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\n\r\n")
+                .await;
+        let err = endpoint.fetch_models().await.expect_err("403 is an error");
+        assert!(matches!(err, LlmError::AuthFailed { .. }), "got {err:?}");
+    }
+
+    #[tokio::test]
+    async fn fetch_models_does_not_follow_redirects() {
+        // A host that passed the SSRF guard must not be able to 3xx-redirect the
+        // request elsewhere (e.g. the metadata IP). With redirects disabled the
+        // 301 surfaces as a non-success status, not a followed hop.
+        let endpoint = endpoint_against_canned_response(
+            "HTTP/1.1 301 Moved Permanently\r\nLocation: http://169.254.169.254/\r\nContent-Length: 0\r\n\r\n",
+        )
+        .await;
+        let err = endpoint
+            .fetch_models()
+            .await
+            .expect_err("redirect is not followed");
+        assert!(matches!(err, LlmError::RequestFailed { .. }), "got {err:?}");
+    }
+
+    #[derive(Clone)]
+    struct FailingCompletionModel;
+
+    impl CompletionModel for FailingCompletionModel {
+        type Response = serde_json::Value;
+        type StreamingResponse = ();
+        type Client = ();
+
+        fn make(_client: &Self::Client, _model: impl Into<String>) -> Self {
+            Self
+        }
+
+        async fn completion(
+            &self,
+            _request: RigRequest,
+        ) -> Result<rig::completion::CompletionResponse<Self::Response>, CompletionError> {
+            Err(CompletionError::ProviderError(
+                "HTTP 400 Bad Request: The input (314325 tokens) is longer than the model's context length (262144 tokens).".to_string(),
+            ))
+        }
+
+        async fn stream(
+            &self,
+            _request: RigRequest,
+        ) -> Result<StreamingCompletionResponse<Self::StreamingResponse>, CompletionError> {
+            Err(CompletionError::ProviderError(
+                "stream unsupported".to_string(),
+            ))
+        }
+    }
 
     #[test]
     fn test_round_f32_to_f64_no_precision_artifacts() {
@@ -1617,6 +1931,7 @@ mod tests {
             arguments: serde_json::json!({"query": "test"}),
             reasoning: None,
             signature: None,
+            arguments_parse_error: None,
         };
         let msg = ChatMessage::assistant_with_tool_calls(Some("thinking".to_string()), vec![tc]);
         let messages = vec![msg];
@@ -1809,6 +2124,7 @@ mod tests {
             arguments: serde_json::json!({"query": "test"}),
             reasoning: None,
             signature: None,
+            arguments_parse_error: None,
         };
         let messages = vec![ChatMessage::assistant_with_tool_calls(None, vec![tc])];
         let (_preamble, history) = convert_messages(&messages);
@@ -1842,6 +2158,7 @@ mod tests {
             arguments: serde_json::json!({"query": "test"}),
             reasoning: None,
             signature: None,
+            arguments_parse_error: None,
         };
         let messages = vec![ChatMessage::assistant_with_tool_calls(None, vec![tc])];
         let (_preamble, history) = convert_messages(&messages);
@@ -1877,6 +2194,7 @@ mod tests {
             arguments: serde_json::json!({"query": "test"}),
             reasoning: None,
             signature: None,
+            arguments_parse_error: None,
         };
         let assistant_msg = ChatMessage::assistant_with_tool_calls(None, vec![tc]);
         let tool_result_msg = ChatMessage {
@@ -2199,6 +2517,7 @@ mod tests {
             arguments: serde_json::json!({"q": "rust"}),
             reasoning: None,
             signature: None,
+            arguments_parse_error: None,
         };
         let tc2 = IronToolCall {
             id: "call_b".to_string(),
@@ -2206,6 +2525,7 @@ mod tests {
             arguments: serde_json::json!({"url": "https://example.com"}),
             reasoning: None,
             signature: None,
+            arguments_parse_error: None,
         };
         let assistant = ChatMessage::assistant_with_tool_calls(None, vec![tc1, tc2]);
         let result_a = ChatMessage::tool_result("call_a", "search", "search results");
@@ -2511,6 +2831,40 @@ mod tests {
     }
 
     #[test]
+    fn test_map_rig_error_detects_longer_than_model_context_length() {
+        let err = map_rig_error(
+            "nearai",
+            "HTTP 400 Bad Request: The input (314325 tokens) is longer than the model's context length (262144 tokens).",
+        );
+        match err {
+            LlmError::ContextLengthExceeded { used, limit } => {
+                assert_eq!(used, 314325);
+                assert_eq!(limit, 262144);
+            }
+            other => panic!("Expected ContextLengthExceeded, got: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn complete_maps_longer_than_context_error_to_context_length_exceeded() {
+        let adapter = RigAdapter::new(FailingCompletionModel, "nearai");
+        let err = adapter
+            .complete(CompletionRequest::new(vec![ChatMessage::user(
+                "read my email",
+            )]))
+            .await
+            .expect_err("context overflow should fail the completion");
+
+        match err {
+            LlmError::ContextLengthExceeded { used, limit } => {
+                assert_eq!(used, 314325);
+                assert_eq!(limit, 262144);
+            }
+            other => panic!("expected context-length error, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn test_map_rig_error_bare_413_no_false_positive() {
         // Bare "413" should NOT trigger ContextLengthExceeded — avoids false
         // positives on timestamps ("2026-04-13"), token counts ("used 1413"),
@@ -2540,7 +2894,7 @@ mod tests {
     #[test]
     fn test_parse_token_counts_openai_format() {
         let msg = "this model's maximum context length is 128000 tokens. however, your messages resulted in 150000 tokens.";
-        let (used, limit) = parse_token_counts(msg);
+        let (used, limit) = crate::error::parse_context_token_counts(msg);
         assert_eq!(limit, 128000);
         assert_eq!(used, 150000);
     }
@@ -2548,7 +2902,7 @@ mod tests {
     #[test]
     fn test_parse_token_counts_unparseable_returns_zero() {
         let msg = "context_length_exceeded";
-        let (used, limit) = parse_token_counts(msg);
+        let (used, limit) = crate::error::parse_context_token_counts(msg);
         assert_eq!(used, 0);
         assert_eq!(limit, 0);
     }

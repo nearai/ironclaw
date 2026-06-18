@@ -1,7 +1,7 @@
 # IronClaw Reborn MCP adapter contract
 
-**Date:** 2026-04-25
-**Status:** V1 contract slice
+**Date:** 2026-06-02
+**Status:** Hosted HTTP/SSE discovery slice
 **Crate:** `crates/ironclaw_mcp`
 **Depends on:** `docs/reborn/contracts/host-api.md`, `docs/reborn/contracts/extensions.md`, `docs/reborn/contracts/resources.md`, `docs/reborn/contracts/dispatcher.md`
 
@@ -67,6 +67,7 @@ The dispatcher then maps this into `CapabilityDispatchResult` with `runtime = Ru
 #[async_trait]
 pub trait McpClient: Send + Sync {
     async fn call_tool(&self, request: McpClientRequest) -> Result<McpClientOutput, String>;
+    async fn discover_tools(&self, request: McpClientRequest) -> Result<McpToolDiscoveryOutput, String>;
 }
 ```
 
@@ -150,15 +151,70 @@ Transport-specific policy is a host adapter responsibility:
 
 - stdio process spawning should reuse the mediated process/sandbox substrate where appropriate
 - HTTP/SSE transport must go through host network policy, not ambient network access
-- secret injection must be explicit and audited in a later auth/secrets slice
+- HTTP/SSE credential planning is host-owned. The MCP client plans the real
+  `tools/call` / `tools/list` JSON-RPC body once before the handshake, rejects direct
+  `SecretStoreLease` sources before any transport request, and threads the
+  approved staged plan into the eventual `tools/call` / `tools/list` send.
+- Planner-visible headers exclude the dynamic MCP session header. The protocol
+  client appends `Mcp-Session-Id` after planning when the server establishes a
+  session.
+- Hosted providers may require authentication on the whole JSON-RPC session,
+  including `initialize`, `notifications/initialized`, `tools/list`, and
+  `tools/call`. Staged credentials for MCP runtime egress therefore remain
+  reusable for the scoped capability invocation and are discarded by the normal
+  capability completion/abort cleanup.
+- MCP protocol code consumes `RuntimeCredentialInjection` plans only; product
+  auth account selection belongs to composition, not to the MCP crate.
+
+## 7. Hosted schema discovery
+
+`McpClient::discover_tools(...)` performs the same hosted HTTP/SSE handshake as
+`call_tool`, then sends `tools/list` through the host-mediated egress boundary.
+The protocol client parses the server result into bounded `McpDiscoveredTool`
+records:
+
+- tool names must be directly publishable as Reborn capability suffixes
+  (lowercase ASCII name segments separated by dots); unsupported names are
+  rejected rather than normalized so discovery cannot create ambiguous or
+  colliding capability IDs
+- descriptions are bounded and control-character-free
+  except for normal formatting whitespace (`\n`, `\r`, `\t`)
+- `inputSchema` must be an object-shaped JSON schema
+- MCP annotations are parsed as behavior hints. `destructiveHint` and
+  `sideEffectsHint` mark the discovered capability as `external_write`;
+  `readOnlyHint` suppresses that effect when no stronger write hint is present.
+  If annotations are absent and the bundled provider manifest declares any
+  write-capable MCP tool, discovery keeps `external_write` as a conservative
+  provider-level over-approximation.
+- direct `SecretStoreLease` credential sources fail before the handshake
+- staged product-auth credentials are allowed for `tools/list` when the host
+  planner supplies them
+
+Extension activation must choose an explicit activation mode. Static activation
+publishes the bundled package; hosted MCP discovery activation performs
+discovery before lifecycle state is committed. The discovery call runs outside
+the lifecycle operation lock, then activation reacquires the lock and verifies
+the installed package did not change before publishing. Successful discovery
+replaces the provider package's capability declarations in the active
+`SharedExtensionRegistry`; failed discovery fails activation instead of
+publishing stale bundled schema guesses.
+
+Discovered packages are built through the extension package constructor for
+host-bundled inline dynamic schemas. The published descriptors carry inline
+input schemas, while all non-schema descriptor fields must still match the
+manifest projection exactly. This avoids fake schema files for hosted MCP
+discovery without weakening ordinary extension descriptor consistency.
+
+Discovery must be invoked with a real caller/run scope and host-staged
+obligations. Reborn startup must not create an ambient scope, bypass the
+network-policy store, or probe hosted MCP servers directly.
 
 ---
 
-## 7. Non-goals
+## 8. Non-goals
 
 This slice does not implement:
 
-- MCP protocol handshakes or schema discovery
 - long-lived MCP server lifecycle management
 - OAuth/auth flows for MCP servers
 - raw secret injection

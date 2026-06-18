@@ -1,0 +1,27 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "GitHub list_repos input",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "username": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 100,
+      "description": "Optional GitHub user or organization login. Omit this field, or pass \"me\" / \"@me\", to list repositories visible to the authenticated GitHub user. Passing any other login lists public repositories for that user or organization. Do not use repository owners from this result as the authenticated identity; call github.get_authenticated_user for identity."
+    },
+    "page": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 100,
+      "default": 1
+    },
+    "limit": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 100,
+      "default": 30
+    }
+  },
+  "required": []
+}

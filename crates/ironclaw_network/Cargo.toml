@@ -7,9 +7,12 @@ publish = false
 [dependencies]
 async-trait = "0.1"
 ironclaw_host_api = { path = "../ironclaw_host_api" }
-reqwest = { version = "0.12", default-features = false, features = ["blocking", "rustls-tls-native-roots"] }
+percent-encoding = "2"
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls-native-roots"] }
 thiserror = "2"
+tokio = { version = "1", features = ["rt"] }
 url = "2"
+zeroize = "1"
 
 [dev-dependencies]
-tokio = { version = "1", features = ["macros", "rt"] }
+tokio = { version = "1", features = ["macros", "rt", "time"] }

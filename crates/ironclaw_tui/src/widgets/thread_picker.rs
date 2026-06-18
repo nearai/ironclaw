@@ -13,17 +13,17 @@ use crate::theme::Theme;
 use crate::widgets::{AppState, ThreadPickerState};
 
 /// Renders the thread picker modal overlay.
-pub struct ThreadPickerWidget {
+pub(crate) struct ThreadPickerWidget {
     theme: Theme,
 }
 
 impl ThreadPickerWidget {
-    pub fn new(theme: Theme) -> Self {
+    pub(crate) fn new(theme: Theme) -> Self {
         Self { theme }
     }
 
     /// Compute a centered modal area sized to fit the thread list.
-    pub fn modal_area(terminal: Rect, item_count: usize) -> Rect {
+    pub(crate) fn modal_area(terminal: Rect, item_count: usize) -> Rect {
         let width = (terminal.width * 3 / 4)
             .max(50)
             .min(terminal.width.saturating_sub(4));
@@ -36,7 +36,7 @@ impl ThreadPickerWidget {
     }
 
     /// Render the thread picker into the given area.
-    pub fn render_picker(&self, area: Rect, buf: &mut Buffer, state: &AppState) {
+    pub(crate) fn render_picker(&self, area: Rect, buf: &mut Buffer, state: &AppState) {
         let Some(ref picker) = state.pending_thread_picker else {
             return;
         };
@@ -138,7 +138,7 @@ impl ThreadPickerWidget {
 }
 
 /// Navigate the thread picker selection up.
-pub fn thread_picker_up(picker: &mut ThreadPickerState) {
+pub(crate) fn thread_picker_up(picker: &mut ThreadPickerState) {
     if picker.threads.is_empty() {
         return;
     }
@@ -150,7 +150,7 @@ pub fn thread_picker_up(picker: &mut ThreadPickerState) {
 }
 
 /// Navigate the thread picker selection down.
-pub fn thread_picker_down(picker: &mut ThreadPickerState) {
+pub(crate) fn thread_picker_down(picker: &mut ThreadPickerState) {
     if picker.threads.is_empty() {
         return;
     }
@@ -158,6 +158,6 @@ pub fn thread_picker_down(picker: &mut ThreadPickerState) {
 }
 
 /// Get the thread ID of the currently selected thread.
-pub fn thread_picker_selected_id(picker: &ThreadPickerState) -> Option<&str> {
+pub(crate) fn thread_picker_selected_id(picker: &ThreadPickerState) -> Option<&str> {
     picker.threads.get(picker.selected).map(|t| t.id.as_str())
 }

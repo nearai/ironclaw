@@ -1,0 +1,39 @@
+[package]
+name = "ironclaw_telegram_v2_adapter"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.92"
+description = "Telegram WASM v2 ProductAdapter for IronClaw Reborn (#3285 tracer-bullet)"
+authors = ["NEAR AI <support@near.ai>"]
+license = "MIT OR Apache-2.0"
+homepage = "https://github.com/nearai/ironclaw"
+repository = "https://github.com/nearai/ironclaw"
+publish = false
+
+[dependencies]
+async-trait = "0.1"
+chrono = { version = "0.4", features = ["serde"] }
+# Production deps only. `tracing` was previously listed here with no call
+# sites in `src/` and has been dropped (Copilot #4). `uuid` moved to
+# dev-deps because its only `src/` references live inside
+# `#[cfg(test)] mod tests {}` blocks. `ironclaw_wasm_product_adapters`
+# moved to dev-deps because it is only referenced from the integration
+# contract test crate, not from the adapter library itself.
+ironclaw_product_adapters = { path = "../ironclaw_product_adapters", version = "0.1.0" }
+ironclaw_turns = { path = "../ironclaw_turns", version = "0.1.0" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+
+[dev-dependencies]
+# `test-support` exposes `FakeProtocolHttpEgress` / `FakeOutboundDeliverySink`
+# used by the `adapter::tests` mod. `host-auth-mint` exposes
+# `mark_shared_secret_header_verified` used by `payload::tests` to mint
+# verified evidence (sealed in production code; tests stand in for the
+# host). The integration contract suite that previously pulled in
+# `http`, `ironclaw_host_api`, and `ironclaw_wasm_product_adapters` has
+# been removed pending the post-#3352 fixture port — re-add those when
+# the contract suite returns.
+ironclaw_product_adapters = { path = "../ironclaw_product_adapters", version = "0.1.0", features = ["test-support", "host-auth-mint"] }
+tokio = { version = "1", features = ["macros", "rt", "sync"] }
+uuid = { version = "1", features = ["v4", "serde"] }

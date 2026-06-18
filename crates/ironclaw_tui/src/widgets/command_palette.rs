@@ -13,13 +13,13 @@ use ratatui::widgets::{Clear, Widget};
 use crate::theme::Theme;
 
 /// A slash command entry.
-pub struct SlashCommand {
+pub(crate) struct SlashCommand {
     pub name: &'static str,
     pub description: &'static str,
 }
 
 /// Static list of known slash commands.
-pub const COMMANDS: &[SlashCommand] = &[
+pub(crate) const COMMANDS: &[SlashCommand] = &[
     SlashCommand {
         name: "/help",
         description: "Show this help",
@@ -112,7 +112,7 @@ pub const COMMANDS: &[SlashCommand] = &[
 
 /// Mutable state for the command palette.
 #[derive(Debug, Clone)]
-pub struct CommandPaletteState {
+pub(crate) struct CommandPaletteState {
     /// Whether the palette is visible.
     pub visible: bool,
     /// Text after the leading `/`, used for filtering.
@@ -136,7 +136,7 @@ impl Default for CommandPaletteState {
 
 impl CommandPaletteState {
     /// Recompute `filtered` from the current `filter` text.
-    pub fn update_filter(&mut self, filter: &str) {
+    pub(crate) fn update_filter(&mut self, filter: &str) {
         self.filter = filter.to_string();
         let lower = filter.to_lowercase();
         self.filtered = COMMANDS
@@ -154,7 +154,7 @@ impl CommandPaletteState {
     }
 
     /// Move selection up.
-    pub fn move_up(&mut self) {
+    pub(crate) fn move_up(&mut self) {
         if !self.filtered.is_empty() {
             self.selected = if self.selected == 0 {
                 self.filtered.len() - 1
@@ -165,27 +165,27 @@ impl CommandPaletteState {
     }
 
     /// Move selection down.
-    pub fn move_down(&mut self) {
+    pub(crate) fn move_down(&mut self) {
         if !self.filtered.is_empty() {
             self.selected = (self.selected + 1) % self.filtered.len();
         }
     }
 
     /// Get the name of the currently selected command, if any.
-    pub fn selected_command(&self) -> Option<&'static str> {
+    pub(crate) fn selected_command(&self) -> Option<&'static str> {
         self.filtered
             .get(self.selected)
             .map(|&idx| COMMANDS[idx].name)
     }
 
     /// Open the palette and reset state.
-    pub fn open(&mut self, filter: &str) {
+    pub(crate) fn open(&mut self, filter: &str) {
         self.visible = true;
         self.update_filter(filter);
     }
 
     /// Close the palette.
-    pub fn close(&mut self) {
+    pub(crate) fn close(&mut self) {
         self.visible = false;
         self.filter.clear();
         self.filtered = (0..COMMANDS.len()).collect();
@@ -194,12 +194,12 @@ impl CommandPaletteState {
 }
 
 /// Renders the command palette overlay.
-pub struct CommandPaletteWidget {
+pub(crate) struct CommandPaletteWidget {
     theme: Theme,
 }
 
 impl CommandPaletteWidget {
-    pub fn new(theme: Theme) -> Self {
+    pub(crate) fn new(theme: Theme) -> Self {
         Self { theme }
     }
 
@@ -210,7 +210,7 @@ impl CommandPaletteWidget {
     ///
     /// `input_area` is the full input row (including border). The palette
     /// floats above it within `terminal`.
-    pub fn palette_area(terminal: Rect, input_area: Rect, item_count: usize) -> Rect {
+    pub(crate) fn palette_area(terminal: Rect, input_area: Rect, item_count: usize) -> Rect {
         let rows = (item_count).min(Self::MAX_VISIBLE) as u16;
         if rows == 0 {
             return Rect::default();
@@ -222,7 +222,7 @@ impl CommandPaletteWidget {
     }
 
     /// Render the palette into the given area using the provided state.
-    pub fn render_palette(
+    pub(crate) fn render_palette(
         &self,
         area: Rect,
         buf: &mut Buffer,

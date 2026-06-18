@@ -65,45 +65,42 @@ const SENSITIVE_FILENAMES: &[&str] = &[
 /// make this function async and use `tokio::fs::canonicalize`.
 pub fn is_sensitive_path(path: &Path) -> bool {
     let resolved = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
-    let path_str = resolved
-        .to_string_lossy()
-        .replace('\\', "/")
-        .to_ascii_lowercase();
+    is_sensitive_path_str(&resolved.to_string_lossy())
+}
+
+/// Check whether an already-resolved or virtual path string looks sensitive.
+///
+/// Unlike [`is_sensitive_path`], this function performs no filesystem access.
+/// Use it for scoped/virtual paths where callers must not touch the host kernel.
+pub fn is_sensitive_path_str(path: &str) -> bool {
+    let path_str = path.replace('\\', "/").to_ascii_lowercase();
+    let filename_lower = path_str.rsplit('/').next().unwrap_or(path_str.as_str());
 
     // Block .env files (except safe suffixes like .env.example)
     // Must NOT match .envrc, .environment, etc. — only exact ".env" or ".env.<variant>"
-    if let Some(filename) = resolved.file_name().and_then(|f| f.to_str()) {
-        let filename_lower = filename.to_ascii_lowercase();
-        if filename_lower == ".env" || filename_lower.starts_with(".env.") {
-            let remainder = filename_lower.strip_prefix(".env").unwrap_or("");
-            let is_safe = ENV_SAFE_SUFFIXES.contains(&remainder);
-            if !is_safe {
-                return true;
-            }
+    if filename_lower == ".env" || filename_lower.starts_with(".env.") {
+        let remainder = filename_lower.strip_prefix(".env").unwrap_or("");
+        let is_safe = ENV_SAFE_SUFFIXES.contains(&remainder);
+        if !is_safe {
+            return true;
         }
     }
 
     // Check sensitive file extensions (e.g. .pem, .key, .p12)
-    if let Some(filename) = resolved.file_name().and_then(|f| f.to_str()) {
-        let filename_lower = filename.to_ascii_lowercase();
-        // Skip files with safe suffixes (e.g. server.key.dist)
-        let has_safe_suffix = SAFE_SUFFIXES.iter().any(|s| filename_lower.ends_with(s));
-        if !has_safe_suffix {
-            let has_sensitive_ext = SENSITIVE_EXTENSIONS
-                .iter()
-                .any(|ext| filename_lower.ends_with(ext));
-            if has_sensitive_ext {
-                return true;
-            }
+    // Skip files with safe suffixes (e.g. server.key.dist)
+    let has_safe_suffix = SAFE_SUFFIXES.iter().any(|s| filename_lower.ends_with(s));
+    if !has_safe_suffix {
+        let has_sensitive_ext = SENSITIVE_EXTENSIONS
+            .iter()
+            .any(|ext| filename_lower.ends_with(ext));
+        if has_sensitive_ext {
+            return true;
         }
     }
 
     // Check sensitive filenames by exact match (e.g. id_rsa, authorized_keys)
-    if let Some(filename) = resolved.file_name().and_then(|f| f.to_str()) {
-        let filename_lower = filename.to_ascii_lowercase();
-        if SENSITIVE_FILENAMES.iter().any(|&f| filename_lower == f) {
-            return true;
-        }
+    if SENSITIVE_FILENAMES.contains(&filename_lower) {
+        return true;
     }
 
     // Check sensitive path patterns.
@@ -120,6 +117,15 @@ pub fn is_sensitive_path(path: &Path) -> bool {
 mod tests {
     use super::*;
     use std::path::PathBuf;
+
+    #[test]
+    fn pure_scoped_path_check_uses_same_sensitive_patterns_without_canonicalize() {
+        assert!(is_sensitive_path_str("/workspace/.env"));
+        assert!(is_sensitive_path_str("/workspace/.ssh/config"));
+        assert!(is_sensitive_path_str("/workspace/server.key"));
+        assert!(!is_sensitive_path_str("/workspace/.env.example"));
+        assert!(!is_sensitive_path_str("/workspace/grid_rsa_data"));
+    }
 
     #[test]
     fn blocks_dotenv() {

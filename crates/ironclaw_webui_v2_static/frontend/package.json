@@ -1,0 +1,23 @@
+{
+  "name": "ironclaw-webui-v2-frontend",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Build tooling for the WebUI v2 SPA. Bundles the local ES modules and the React ecosystem into static/dist via esbuild. NOT a runtime npm package — cargo never invokes this. Run ./build.sh by hand after editing static/js/** or to refresh vendored deps; the outputs under static/dist and static/vendor are committed so cargo build needs no network or node.",
+  "type": "module",
+  "scripts": {
+    "build": "node build.mjs",
+    "vendor": "bash vendor.sh",
+    "all": "bash build.sh"
+  },
+  "dependencies": {
+    "@tanstack/react-query": "5.87.4",
+    "htm": "3.1.1",
+    "react": "19.1.0",
+    "react-dom": "19.1.0",
+    "react-hook-form": "7.62.0",
+    "react-router": "7.9.1"
+  },
+  "devDependencies": {
+    "esbuild": "0.25.0"
+  }
+}

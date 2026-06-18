@@ -1,0 +1,21 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Google Drive remove_permission",
+  "description": "Revoke a file permission.",
+  "type": "object",
+  "required": [
+    "file_id",
+    "permission_id"
+  ],
+  "properties": {
+    "file_id": {
+      "type": "string",
+      "description": "The file ID."
+    },
+    "permission_id": {
+      "type": "string",
+      "description": "The permission ID to remove."
+    }
+  },
+  "additionalProperties": false
+}

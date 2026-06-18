@@ -114,6 +114,15 @@ impl Tool for ReadFileTool {
          For large files, use offset and limit for partial reads."
     }
 
+    fn runtime_affordance(&self) -> crate::tools::ToolRuntimeAffordance {
+        // Touches the local host filesystem. Hosted-multi-tenant policies
+        // that resolve to `TenantWorkspace` (and similar non-host
+        // filesystem backends) must hide this tool from the model — the
+        // memory_* tools are the cross-deployment portable surface
+        // (#3243 MED tool-affordance coverage).
+        crate::tools::ToolRuntimeAffordance::HostFilesystem
+    }
+
     fn parameters_schema(&self) -> serde_json::Value {
         serde_json::json!({
             "type": "object",
@@ -308,6 +317,12 @@ impl Tool for WriteFileTool {
         "write_file"
     }
 
+    fn runtime_affordance(&self) -> crate::tools::ToolRuntimeAffordance {
+        // See `ReadFileTool::runtime_affordance` — host-filesystem write
+        // (#3243 MED tool-affordance coverage).
+        crate::tools::ToolRuntimeAffordance::HostFilesystem
+    }
+
     fn description(&self) -> &str {
         "Write content to a file on the LOCAL FILESYSTEM. **Only use for creating new files \
          or complete rewrites.** For targeted edits, use apply_patch instead — it's safer \
@@ -462,6 +477,12 @@ impl ListDirTool {
 impl Tool for ListDirTool {
     fn name(&self) -> &str {
         "list_dir"
+    }
+
+    fn runtime_affordance(&self) -> crate::tools::ToolRuntimeAffordance {
+        // See `ReadFileTool::runtime_affordance` — host-filesystem read
+        // (#3243 MED tool-affordance coverage).
+        crate::tools::ToolRuntimeAffordance::HostFilesystem
     }
 
     fn description(&self) -> &str {
@@ -683,6 +704,12 @@ impl ApplyPatchTool {
 impl Tool for ApplyPatchTool {
     fn name(&self) -> &str {
         "apply_patch"
+    }
+
+    fn runtime_affordance(&self) -> crate::tools::ToolRuntimeAffordance {
+        // See `ReadFileTool::runtime_affordance` — host-filesystem write
+        // (#3243 MED tool-affordance coverage).
+        crate::tools::ToolRuntimeAffordance::HostFilesystem
     }
 
     fn description(&self) -> &str {
@@ -968,6 +995,33 @@ mod tests {
 
         assert!(result.result.get("success").unwrap().as_bool().unwrap());
         assert_eq!(std::fs::read_to_string(&file_path).unwrap(), "hello world");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_write_file_rejects_dangling_final_symlink() {
+        use std::os::unix::fs::symlink;
+
+        let sandbox = TempDir::new().unwrap();
+        let outside = TempDir::new().unwrap();
+        let outside_target = outside.path().join("owned.txt");
+        symlink(&outside_target, sandbox.path().join("jump")).unwrap();
+
+        let tool = WriteFileTool::new().with_base_dir(sandbox.path().to_path_buf());
+        let ctx = JobContext::default();
+
+        let result = tool
+            .execute(
+                serde_json::json!({
+                    "path": "jump",
+                    "content": "pwned"
+                }),
+                &ctx,
+            )
+            .await;
+
+        assert!(result.is_err());
+        assert!(!outside_target.exists());
     }
 
     #[tokio::test]

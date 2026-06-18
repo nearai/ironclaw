@@ -85,7 +85,8 @@ pub struct SourceMatch {
 }
 
 /// Default host-controlled policy. Composes layered sources in priority order;
-/// the first source returning `Some` wins. No source ⇒ non-privileged default.
+/// the first source returning `Some` wins. No source ⇒ fail-closed default
+/// (`Sandbox` + empty authority ceiling + `Default` provenance).
 ///
 /// The clock is injectable so policy evaluation is deterministic in tests
 /// and audit-replay harnesses; production wiring uses [`SystemClock`].
@@ -103,8 +104,27 @@ impl HostTrustPolicy {
         Self::with_clock(sources, Box::new(SystemClock))
     }
 
-    pub fn empty() -> Self {
+    /// Construct an explicit fail-closed policy with no host-controlled
+    /// sources. Every input falls through to `Sandbox` effective trust, an
+    /// empty authority ceiling, and `Default` provenance.
+    ///
+    /// Use this at composition boundaries only as a safe placeholder until a
+    /// real host policy is attached. It is never an allow-all policy.
+    pub fn fail_closed() -> Self {
         Self::from_parts_unchecked(Vec::new(), Box::new(SystemClock))
+    }
+
+    pub fn has_sources(&self) -> bool {
+        !self.sources.is_empty()
+    }
+
+    /// Compatibility alias for [`Self::fail_closed`].
+    ///
+    /// The name is historical; semantics are deny-by-default, not vacuous
+    /// success. New production composition should call [`Self::fail_closed`]
+    /// so the security posture is obvious at the call site.
+    pub fn empty() -> Self {
+        Self::fail_closed()
     }
 
     /// Construct with an explicit clock. Tests inject `FixedClock` here so
