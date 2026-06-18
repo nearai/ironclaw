@@ -92,8 +92,9 @@ where
         let Some(versioned) = self.filesystem.get(scope, path).await.map_err(fs_backend)? else {
             return Ok(None);
         };
-        let value = serde_json::from_slice(&versioned.entry.body)
-            .map_err(|error| ProjectError::backend("decode project record", error))?;
+        let value = serde_json::from_slice(&versioned.entry.body).map_err(|error| {
+            ProjectError::backend(&format!("decode record at {}", path.as_str()), error)
+        })?;
         Ok(Some(value))
     }
 
@@ -110,7 +111,10 @@ where
         let body =
             serde_json::to_vec(value).map_err(|error| FilesystemError::BackendInfrastructure {
                 operation: FilesystemOperation::WriteFile,
-                reason: format!("project record could not be serialized: {error}"),
+                reason: format!(
+                    "record at {} could not be serialized: {error}",
+                    path.as_str()
+                ),
             })?;
         self.filesystem
             .put(
@@ -209,14 +213,17 @@ where
             Err(FilesystemError::NotFound { .. }) => return Ok(None),
             Err(error) => return Err(fs_backend(error)),
         }
+        // Fail loud: a member delete that errors (anything but NotFound) leaves an
+        // orphaned grant under /members/...; if the project id is ever reused, a
+        // stale active grant could reappear as real access. Propagate instead of
+        // warn-and-continue (see .claude/rules/error-handling.md).
         for member_path in self
             .child_record_paths(&scope, &members_dir(tenant_id, project_id)?)
             .await?
         {
-            if let Err(error) = self.filesystem.delete(&scope, &member_path).await
-                && !matches!(error, FilesystemError::NotFound { .. })
-            {
-                tracing::warn!(error = %error, "failed to delete project member during project delete");
+            match self.filesystem.delete(&scope, &member_path).await {
+                Ok(()) | Err(FilesystemError::NotFound { .. }) => {}
+                Err(error) => return Err(fs_backend(error)),
             }
         }
         Ok(Some(record))
@@ -228,6 +235,9 @@ where
         user_id: &UserId,
         limit: usize,
     ) -> Result<Vec<ProjectRecord>, ProjectError> {
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
         let scope = self.scope_for(tenant_id);
         let mut projects = Vec::new();
         for path in self
@@ -285,10 +295,18 @@ where
         Ok(members)
     }
 
-    async fn upsert_member(&self, record: ProjectMemberRecord) -> Result<(), ProjectError> {
+    async fn upsert_member(&self, mut record: ProjectMemberRecord) -> Result<(), ProjectError> {
         record.validate()?;
         let scope = self.scope_for(&record.tenant_id);
         let path = member_path(&record.tenant_id, &record.project_id, &record.user_id)?;
+        // `created_at` is immutable: a role/status update must not rewrite the
+        // grant's original creation time (preserves audit ordering).
+        if let Some(existing) = self
+            .read_record::<ProjectMemberRecord>(&scope, &path)
+            .await?
+        {
+            record.created_at = existing.created_at;
+        }
         self.write_record(&scope, &path, &record, CasExpectation::Any)
             .await
             .map_err(fs_backend)

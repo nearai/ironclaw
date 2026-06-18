@@ -94,7 +94,9 @@ pub struct ProjectMemberRecord {
 }
 ```
 
-`ProjectRepository` trait (dual-backend: in-memory / Postgres / libSQL, feature-gated):
+`ProjectRepository` trait (single `FilesystemProjectRepository` over the Reborn
+`ScopedFilesystem`; backend selection is the host's `RootFilesystem` concern, so
+no SQL in this crate):
 
 - `create_project`, `get_project`, `update_project`, `delete_project`
 - `list_projects_for_user(tenant, user, limit)` — owner OR active grant
@@ -113,7 +115,8 @@ unchanged.
 ## Implementation — layer by layer (dependency order)
 
 1. **`crates/ironclaw_projects/`** (this PR) — entity + repo trait + error +
-   in-memory + Postgres + libSQL impls + unit tests. Register in workspace.
+   `FilesystemProjectRepository` over `ScopedFilesystem` + contract tests.
+   Register in workspace.
 2. **Port** — `ironclaw_product_workflow/src/reborn_services/projects.rs`:
    `ProjectService` trait + sanitized DTOs + `ProjectServiceError`. Re-export.
 3. **Facade** — `RebornServicesApi`: `Option<Arc<dyn ProjectService>>` field +

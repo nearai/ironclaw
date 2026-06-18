@@ -107,6 +107,30 @@ async fn run_contract(repo: &dyn ProjectRepository) {
         1
     );
 
+    // Regression: `created_at` is immutable across a member upsert update — a
+    // role/status change must not rewrite the grant's original creation time.
+    let member_created = repo.list_members(&tenant(), &project_id).await.unwrap()[0].created_at;
+    let mut rebumped = member(
+        &project_id,
+        &bob,
+        &owner,
+        ProjectRole::Viewer,
+        ProjectMemberStatus::Active,
+    );
+    rebumped.created_at = member_created + chrono::Duration::days(7);
+    repo.upsert_member(rebumped).await.unwrap();
+    let after_upsert = repo.list_members(&tenant(), &project_id).await.unwrap();
+    assert_eq!(after_upsert.len(), 1);
+    assert_eq!(
+        after_upsert[0].created_at, member_created,
+        "member created_at must be immutable across upsert update"
+    );
+    assert_eq!(
+        after_upsert[0].role,
+        ProjectRole::Viewer,
+        "role update still persists across upsert"
+    );
+
     // Update persists; metadata bag round-trips.
     let mut updated = repo
         .get_project(&tenant(), &project_id)
@@ -209,8 +233,8 @@ async fn run_contract(repo: &dyn ProjectRepository) {
         "cross-tenant access must be none"
     );
 
-    // Listing is newest-first by created_at and honors the limit cap — exercised
-    // on the SQL path, not just the in-memory unit tests.
+    // Listing is newest-first by created_at and honors the limit cap, exercised
+    // through the repository over the in-memory `RootFilesystem`.
     let mut newer = ProjectRecord::new(other_tenant.clone(), owner.clone(), "Newer", "").unwrap();
     newer.created_at = other_created + chrono::Duration::seconds(10);
     let newer_id = newer.project_id.clone();
