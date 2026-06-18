@@ -84,11 +84,12 @@ use ironclaw_threads::{
     SessionThreadService, ThreadHistoryRequest, ThreadScope,
 };
 use ironclaw_turns::{
-    AcceptedMessageRef, CancelRunRequest, CancelRunResponse, GetRunStateRequest, IdempotencyKey,
-    LoopGateRef, ReplyTargetBindingRef, RunProfileResolutionRequest, SanitizedCancelReason,
-    SourceBindingRef, SubmitTurnRequest, SubmitTurnResponse, TurnActor, TurnCoordinator, TurnError,
-    TurnEventProjectionSource, TurnId, TurnPersistenceSnapshot, TurnRunId, TurnRunRecord,
-    TurnRunState, TurnScope, TurnSpawnTreeStateStore, TurnStatus,
+    AcceptedMessageRef, CancelRunRequest, CancelRunResponse, GetRunStateRequest,
+    IdempotencyKey, InMemoryTurnStateStoreLimits, LoopGateRef, ReplyTargetBindingRef,
+    RunProfileResolutionRequest, SanitizedCancelReason, SourceBindingRef, SubmitTurnRequest,
+    SubmitTurnResponse, TurnActor, TurnCoordinator, TurnError, TurnEventProjectionSource,
+    TurnId, TurnPersistenceSnapshot, TurnRunId, TurnRunRecord, TurnRunState, TurnScope,
+    TurnSpawnTreeStateStore, TurnStatus,
     run_profile::{LoopHostMilestoneSink, LoopRunContext},
 };
 
@@ -2226,6 +2227,16 @@ pub async fn build_reborn_runtime(
     );
     let trusted_laptop_access = services_input.grants_trusted_laptop_access();
     let owner_id = services_input.owner_id().to_string();
+    // Thread per-user and per-origin concurrency caps from TurnRunnerSettings into the
+    // turn-state store. The factory reads these when constructing the store so limits
+    // are applied from the very first claim.
+    let turn_state_limits = InMemoryTurnStateStoreLimits {
+        max_concurrent_runs_per_user: runner.max_concurrent_runs_per_user,
+        max_concurrent_trigger_runs: runner.max_concurrent_trigger_runs,
+        max_concurrent_conversation_runs: runner.max_concurrent_conversation_runs,
+        ..InMemoryTurnStateStoreLimits::default()
+    };
+    services_input = services_input.with_turn_state_store_limits(turn_state_limits);
     let mut services = build_reborn_services(services_input).await?;
     #[cfg(feature = "root-llm-provider")]
     let llm =
@@ -2701,6 +2712,7 @@ pub async fn build_reborn_runtime(
                 poll_interval: runner.poll_interval,
                 scope_filter: None,
             },
+            worker_count: runner.worker_count,
             ..DefaultPlannedRuntimeConfig::default()
         },
         model_route_resolver: None,

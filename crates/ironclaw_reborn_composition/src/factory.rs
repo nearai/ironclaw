@@ -592,6 +592,8 @@ struct RebornLocalDevStoreGraphInput {
     default_system_prompt_path: PathBuf,
     trigger_repository: Arc<dyn TriggerRepository>,
     project_repository: Arc<dyn ProjectRepository>,
+    /// Concurrency limits for the in-memory (or filesystem-backed) turn-state store.
+    turn_state_store_limits: ironclaw_turns::InMemoryTurnStateStoreLimits,
     /// Raw libSQL substrate handle, carried so the canonical Reborn identity
     /// store rides the same `reborn-local-dev.db` instead of opening a second
     /// handle (see `RebornRuntime::open_reborn_identity_resolver`).
@@ -709,6 +711,7 @@ async fn build_local_dev(input: RebornBuildInput) -> Result<RebornServices, Rebo
         nearai_mcp_bootstrap_config,
         owner_id,
         local_runtime_identity,
+        turn_state_store_limits,
         ..
     } = input;
     let RebornStorageInput::LocalDev {
@@ -859,6 +862,7 @@ async fn build_local_dev(input: RebornBuildInput) -> Result<RebornServices, Rebo
         default_system_prompt_path,
         trigger_repository,
         project_repository,
+        turn_state_store_limits,
         #[cfg(feature = "libsql")]
         identity_substrate_db,
     })?;
@@ -1316,6 +1320,7 @@ fn build_local_dev_store_graph(
         default_system_prompt_path,
         trigger_repository,
         project_repository,
+        turn_state_store_limits,
         identity_substrate_db,
     } = input;
     let scoped_filesystem = local_dev_scoped_filesystem(Arc::clone(&filesystem));
@@ -1331,9 +1336,10 @@ fn build_local_dev_store_graph(
     let persistent_approval_policies = Arc::new(FilesystemPersistentApprovalPolicyStore::new(
         Arc::clone(&scoped_filesystem),
     ));
-    let turn_state = Arc::new(FilesystemTurnStateStore::new(Arc::clone(
-        &scoped_filesystem,
-    )));
+    let turn_state = Arc::new(
+        FilesystemTurnStateStore::new(Arc::clone(&scoped_filesystem))
+            .with_limits(turn_state_store_limits),
+    );
     let checkpoint_state_store: Arc<dyn CheckpointStateStore> = Arc::new(
         FilesystemCheckpointStateStore::new(Arc::clone(&scoped_filesystem)),
     );
@@ -1461,6 +1467,7 @@ fn build_local_dev_store_graph(
         default_system_prompt_path,
         trigger_repository,
         project_repository,
+        turn_state_store_limits,
     } = input;
     #[cfg(feature = "postgres")]
     let subagent_goal_filesystem = local_dev_scoped_filesystem(Arc::clone(&filesystem));
@@ -1470,7 +1477,7 @@ fn build_local_dev_store_graph(
     let approval_requests = Arc::new(InMemoryApprovalRequestStore::new());
     let capability_leases = Arc::new(InMemoryCapabilityLeaseStore::new());
     let persistent_approval_policies = Arc::new(InMemoryPersistentApprovalPolicyStore::new());
-    let turn_state = Arc::new(InMemoryTurnStateStore::default());
+    let turn_state = Arc::new(InMemoryTurnStateStore::with_limits(turn_state_store_limits));
     let checkpoint_state_store: Arc<dyn CheckpointStateStore> =
         Arc::new(InMemoryCheckpointStateStore::default());
     let loop_checkpoint_store: Arc<dyn LoopCheckpointStore> =
@@ -2709,6 +2716,7 @@ async fn build_production_shaped(
         oauth_provider_configs,
         oauth_dcr_provider_configs,
         nearai_mcp_bootstrap_config: _,
+        turn_state_store_limits,
     } = input;
     #[cfg(any(feature = "libsql", feature = "postgres"))]
     let wiring_config = production_config(
@@ -2729,6 +2737,7 @@ async fn build_production_shaped(
         product_auth_ports,
         oauth_provider_configs,
         oauth_dcr_provider_configs,
+        turn_state_store_limits,
     );
 
     match storage {
@@ -2762,6 +2771,7 @@ async fn build_production_shaped(
                 oauth_provider_configs,
                 oauth_dcr_provider_configs,
                 owner_id,
+                turn_state_store_limits,
             };
             build_libsql_production(context, db, path_or_url, auth_token, secret_master_key).await
         }
@@ -2787,6 +2797,7 @@ async fn build_production_shaped(
                 oauth_provider_configs,
                 oauth_dcr_provider_configs,
                 owner_id,
+                turn_state_store_limits,
             };
             build_postgres_production(context, pool, url, tls_options, secret_master_key).await
         }
@@ -2819,6 +2830,7 @@ struct RebornProductionBuildContext {
     oauth_provider_configs: Vec<crate::input::OAuthProviderBackendConfig>,
     oauth_dcr_provider_configs: Vec<crate::input::OAuthDcrProviderBackendConfig>,
     owner_id: String,
+    turn_state_store_limits: ironclaw_turns::InMemoryTurnStateStoreLimits,
 }
 
 #[cfg(any(feature = "libsql", feature = "postgres"))]
@@ -3156,6 +3168,7 @@ where
         oauth_provider_configs,
         oauth_dcr_provider_configs,
         owner_id,
+        turn_state_store_limits,
     } = context;
     let owner_user_id = UserId::new(owner_id).map_err(|error| RebornBuildError::InvalidConfig {
         reason: error.to_string(),
@@ -3178,9 +3191,10 @@ where
         broadcast_budget_event_sink,
         ..
     } = build_budget_sinks();
-    let turn_state = Arc::new(FilesystemTurnStateStore::new(Arc::clone(
-        &stores.scoped_filesystem,
-    )));
+    let turn_state = Arc::new(
+        FilesystemTurnStateStore::new(Arc::clone(&stores.scoped_filesystem))
+            .with_limits(turn_state_store_limits),
+    );
     let checkpoint_state_store: Arc<dyn CheckpointStateStore> = Arc::new(
         FilesystemCheckpointStateStore::new(Arc::clone(&stores.scoped_filesystem)),
     );
