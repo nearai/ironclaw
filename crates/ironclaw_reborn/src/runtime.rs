@@ -57,6 +57,18 @@ use crate::{
 
 type PlannedRuntimeWakeChannel = (TurnRunnerWakeSender, TurnRunnerWakeReceiver);
 
+/// Default number of turn-runner worker tasks spawned per runtime instance.
+///
+/// Used by [`DefaultPlannedRuntimeConfig`] and [`TurnRunnerSettings`] so the
+/// value is defined exactly once and shared across all crates in the stack.
+pub const DEFAULT_TURN_RUNNER_WORKER_COUNT: std::num::NonZeroUsize =
+    match std::num::NonZeroUsize::new(4) {
+        Some(v) => v,
+        // SAFETY: 4 is a non-zero compile-time constant; this arm is unreachable.
+        // Written with an explicit match so the const avoids any runtime `.expect()`.
+        None => unreachable!(),
+    };
+
 #[derive(Debug, Clone)]
 pub struct DefaultPlannedRuntimeConfig {
     pub worker: TurnRunnerWorkerConfig,
@@ -69,7 +81,7 @@ impl Default for DefaultPlannedRuntimeConfig {
     fn default() -> Self {
         Self {
             worker: TurnRunnerWorkerConfig::default(),
-            worker_count: std::num::NonZeroUsize::new(4).expect("4 is non-zero"),
+            worker_count: DEFAULT_TURN_RUNNER_WORKER_COUNT,
             text_only_driver: TextOnlyModelReplyDriverConfig::default(),
             host: TextOnlyLoopHostConfig::default(),
         }

@@ -7,16 +7,16 @@ use anyhow::Context;
 #[cfg(feature = "webui-v2-beta")]
 use ironclaw_reborn_composition::host_api::UserId;
 use ironclaw_reborn_composition::host_api::{AgentId, TenantId};
+use ironclaw_reborn_composition::{
+    DEFAULT_TURN_RUNNER_WORKER_COUNT, OAuthClientConfig, OperatorLogLayer, PollSettings,
+    RebornBuildInput, RebornCompositionProfile, RebornLocalRuntimeProfileOptions,
+    RebornRuntimeIdentity, RebornRuntimeInput, TurnRunnerSettings, build_reborn_runtime,
+    local_runtime_build_input_with_options, nearai_mcp_bootstrap_config_from_env,
+};
 #[cfg(feature = "webui-v2-beta")]
 use ironclaw_reborn_composition::{
     LocalTriggerAccessReconciliation, LocalTriggerAccessRole, LocalTriggerAccessSource,
     open_local_trigger_access_store,
-};
-use ironclaw_reborn_composition::{
-    OAuthClientConfig, OperatorLogLayer, PollSettings, RebornBuildInput, RebornCompositionProfile,
-    RebornLocalRuntimeProfileOptions, RebornRuntimeIdentity, RebornRuntimeInput,
-    TurnRunnerSettings, build_reborn_runtime, local_runtime_build_input_with_options,
-    nearai_mcp_bootstrap_config_from_env,
 };
 use ironclaw_reborn_config::{
     REBORN_PROFILE_ENV, RebornBootConfig, RebornProfile, seed_default_config_file_if_missing,
@@ -751,7 +751,6 @@ fn reject_unsupported_runtime_sections(
 }
 
 const MAX_WORKER_COUNT: usize = 32;
-const DEFAULT_WORKER_COUNT: usize = 4;
 
 fn runner_settings(
     config_file: Option<&ironclaw_reborn_config::RebornConfigFile>,
@@ -772,23 +771,26 @@ fn runner_settings(
             }
             settings.poll_interval = Duration::from_millis(ms);
         }
-        // worker_count: None or Some(0) → default 4; clamp at 32.
+        // worker_count: None or Some(0) → default; clamp at MAX_WORKER_COUNT.
         let raw_worker_count = runner.worker_count.unwrap_or(0);
-        let resolved_count = if raw_worker_count == 0 {
-            DEFAULT_WORKER_COUNT
-        } else if raw_worker_count > MAX_WORKER_COUNT {
-            tracing::debug!(
-                requested = raw_worker_count,
-                clamped = MAX_WORKER_COUNT,
-                "config file [runner].worker_count exceeds maximum; clamping"
-            );
-            MAX_WORKER_COUNT
+        settings.worker_count = if raw_worker_count == 0 {
+            DEFAULT_TURN_RUNNER_WORKER_COUNT
         } else {
-            raw_worker_count
+            let clamped = raw_worker_count.min(MAX_WORKER_COUNT);
+            if clamped < raw_worker_count {
+                tracing::debug!(
+                    requested = raw_worker_count,
+                    clamped = MAX_WORKER_COUNT,
+                    "config file [runner].worker_count exceeds maximum; clamping"
+                );
+            }
+            // clamped is in [1, 32]: guaranteed non-zero by min() + the zero branch above.
+            std::num::NonZeroUsize::new(clamped).ok_or_else(|| {
+                anyhow::anyhow!(
+                    "config file [runner].worker_count resolved to zero (raw={raw_worker_count})"
+                )
+            })?
         };
-        // SAFETY: resolved_count is always in [1, 32], both non-zero.
-        settings.worker_count =
-            std::num::NonZeroUsize::new(resolved_count).expect("resolved_count is non-zero");
 
         // max_concurrent_runs_per_user: Some(0) → None (unlimited).
         settings.max_concurrent_runs_per_user = runner
@@ -821,10 +823,11 @@ mod tests {
     #[cfg(feature = "webui-v2-beta")]
     use super::with_run_local_trigger_fire_access_checker;
     use super::{
-        DEFAULT_WORKER_COUNT, MAX_WORKER_COUNT, RuntimeInputCaller, RuntimeInputOptions,
-        block_on_cli, build_runtime_input, build_runtime_input_with_options,
-        no_assistant_text_message, resolve_google_oauth_config, runner_settings,
+        MAX_WORKER_COUNT, RuntimeInputCaller, RuntimeInputOptions, block_on_cli,
+        build_runtime_input, build_runtime_input_with_options, no_assistant_text_message,
+        resolve_google_oauth_config, runner_settings,
     };
+    use ironclaw_reborn_composition::DEFAULT_TURN_RUNNER_WORKER_COUNT;
 
     fn parse_runner_section(toml: &str) -> ironclaw_reborn_config::RebornConfigFile {
         ironclaw_reborn_config::RebornConfigFile::parse_text(
@@ -837,7 +840,10 @@ mod tests {
     #[test]
     fn runner_settings_absent_runner_gives_defaults() {
         let settings = runner_settings(None).expect("should succeed");
-        assert_eq!(settings.worker_count.get(), DEFAULT_WORKER_COUNT);
+        assert_eq!(
+            settings.worker_count.get(),
+            DEFAULT_TURN_RUNNER_WORKER_COUNT.get()
+        );
         assert!(settings.max_concurrent_runs_per_user.is_none());
         assert!(settings.max_concurrent_trigger_runs.is_none());
         assert!(settings.max_concurrent_conversation_runs.is_none());
@@ -847,7 +853,10 @@ mod tests {
     fn runner_settings_zero_worker_count_gives_default() {
         let cfg = parse_runner_section("[runner]\nworker_count = 0\n");
         let settings = runner_settings(Some(&cfg)).expect("should succeed");
-        assert_eq!(settings.worker_count.get(), DEFAULT_WORKER_COUNT);
+        assert_eq!(
+            settings.worker_count.get(),
+            DEFAULT_TURN_RUNNER_WORKER_COUNT.get()
+        );
     }
 
     #[test]

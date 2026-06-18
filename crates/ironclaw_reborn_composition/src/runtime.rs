@@ -1506,7 +1506,9 @@ impl RebornRuntime {
     ) -> Result<SubmittedTurn, RebornRuntimeError> {
         let send_lock = self.send_lock_for(conversation).await;
         let _send_guard = send_lock.lock_owned().await;
-        if self.worker_handles.iter().any(|h| h.is_finished()) {
+        // Stopped only when every worker has exited; a single crashed worker must not
+        // reject submissions while others run.
+        if self.worker_handles.iter().all(|h| h.is_finished()) {
             return Err(RebornRuntimeError::WorkerStopped);
         }
         let scope = self.turn_scope_for(&conversation.0);
@@ -1739,7 +1741,7 @@ impl RebornRuntime {
     ) -> Result<TurnRunState, RebornRuntimeError> {
         let start = std::time::Instant::now();
         loop {
-            if self.worker_handles.iter().any(|h| h.is_finished()) {
+            if self.worker_handles.iter().all(|h| h.is_finished()) {
                 return Err(RebornRuntimeError::WorkerStopped);
             }
             let state = self
@@ -1799,7 +1801,7 @@ impl RebornRuntime {
     ) -> Result<TurnRunState, RebornRuntimeError> {
         let start = std::time::Instant::now();
         loop {
-            if self.worker_handles.iter().any(|h| h.is_finished()) {
+            if self.worker_handles.iter().all(|h| h.is_finished()) {
                 return Err(RebornRuntimeError::WorkerStopped);
             }
             let state = self
