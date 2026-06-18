@@ -25,15 +25,27 @@ function approvalCardSourceForTest() {
 
 function renderApprovalCard({ expandedPayload = false, gate = defaultApprovalGate() } = {}) {
   let stateCalls = 0;
+  const effects = [];
+  const expandedPayloadUpdates = [];
   const context = {
     globalThis: {},
     html: (strings, ...values) => ({ strings: Array.from(strings), values }),
     React: {
       useCallback: (fn) => fn,
+      useEffect: (fn, deps) => {
+        effects.push({ fn, deps });
+      },
       useMemo: (fn) => fn(),
       useState: (initial) => {
         stateCalls += 1;
-        if (stateCalls === 2) return [expandedPayload, () => {}];
+        if (stateCalls === 2) {
+          return [
+            expandedPayload,
+            (value) => {
+              expandedPayloadUpdates.push(value);
+            },
+          ];
+        }
         return [typeof initial === "function" ? initial() : initial, () => {}];
       },
     },
@@ -53,9 +65,8 @@ function renderApprovalCard({ expandedPayload = false, gate = defaultApprovalGat
     classifyRisk: () => ({ key: "tool.riskExec", tone: "danger" }),
   };
   vm.runInNewContext(approvalCardSourceForTest(), context);
-  return context.globalThis.__testExports.ApprovalCard({
-    gate,
-  });
+  const rendered = context.globalThis.__testExports.ApprovalCard({ gate });
+  return { rendered, effects, expandedPayloadUpdates };
 }
 
 function defaultApprovalGate() {
@@ -86,7 +97,7 @@ function collectStrings(node, output = []) {
 }
 
 test("ApprovalCard truncates long command details by default", () => {
-  const rendered = renderApprovalCard();
+  const { rendered } = renderApprovalCard();
   const text = collectStrings(rendered).join("\n");
 
   assert.match(text, /View full command/);
@@ -96,7 +107,7 @@ test("ApprovalCard truncates long command details by default", () => {
 });
 
 test("ApprovalCard can render full long command details when expanded", () => {
-  const rendered = renderApprovalCard({ expandedPayload: true });
+  const { rendered } = renderApprovalCard({ expandedPayload: true });
   const text = collectStrings(rendered).join("\n");
 
   assert.match(text, /Show preview/);
@@ -104,7 +115,7 @@ test("ApprovalCard can render full long command details when expanded", () => {
 });
 
 test("ApprovalCard ignores long parameters when approval details are rendered", () => {
-  const rendered = renderApprovalCard({
+  const { rendered } = renderApprovalCard({
     gate: {
       toolName: "builtin.shell",
       description: "Run shell command",
@@ -121,4 +132,22 @@ test("ApprovalCard ignores long parameters when approval details are rendered", 
   assert.doesNotMatch(text, /View full command/);
   assert.doesNotMatch(text, new RegExp(`python -c ${"x".repeat(640)}`));
   assert.match(text, /echo ok/);
+});
+
+test("ApprovalCard resets expanded command details when the gate changes", () => {
+  const gate = defaultApprovalGate();
+  const { rendered, effects, expandedPayloadUpdates } = renderApprovalCard({
+    expandedPayload: true,
+    gate,
+  });
+  const text = collectStrings(rendered).join("\n");
+
+  assert.match(text, /Show preview/);
+  assert.equal(effects.length, 1);
+  assert.equal(effects[0].deps.length, 1);
+  assert.equal(effects[0].deps[0].toolName, gate.toolName);
+  assert.equal(effects[0].deps[0].approvalDetails[1].value, gate.approvalDetails[1].value);
+
+  effects[0].fn();
+  assert.deepEqual(expandedPayloadUpdates, [false]);
 });

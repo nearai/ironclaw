@@ -41,6 +41,10 @@ export function ApprovalCard({ gate, onApprove, onDeny, onAlways }) {
   const [always, setAlways] = React.useState(false);
   const [expandedPayload, setExpandedPayload] = React.useState(false);
 
+  React.useEffect(() => {
+    setExpandedPayload(false);
+  }, [gate]);
+
   const risk = React.useMemo(
     () => classifyRisk(toolName, description, parameters),
     [toolName, description, parameters]
