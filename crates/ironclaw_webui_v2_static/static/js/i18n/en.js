@@ -131,6 +131,8 @@ registerPack("en", {
   "approval.approveAndAlways": "Approve & always allow",
   "approval.alwaysAllowToolLabel": "Always allow {tool} without asking",
   "approval.thisTool": "this tool",
+  "approval.viewFullCommand": "View full command",
+  "approval.showCommandPreview": "Show preview",
   // Chat — tool activity
   "tool.tabDetails": "Details",
   "tool.tabParameters": "Parameters",

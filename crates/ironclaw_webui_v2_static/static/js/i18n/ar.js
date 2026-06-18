@@ -126,6 +126,8 @@ registerPack("ar", {
   "approval.approveAndAlways": "موافقة والسماح دائمًا",
   "approval.alwaysAllowToolLabel": "السماح دائمًا بـ {tool} دون طلب",
   "approval.thisTool": "هذه الأداة",
+  "approval.viewFullCommand": "عرض الأمر الكامل",
+  "approval.showCommandPreview": "إظهار المعاينة",
   // Chat — tool activity
   "tool.tabDetails": "التفاصيل",
   "tool.tabParameters": "المعلمات",
