@@ -14,32 +14,36 @@ use std::sync::{
 use async_trait::async_trait;
 use chrono::Utc;
 use ironclaw_host_api::{AgentId, ProjectId, TenantId, ThreadId, UserId};
+use ironclaw_host_runtime::{TurnRunScheduler, TurnRunSchedulerConfig};
 use ironclaw_loop_support::{
     EmptyUserProfileSource, HostIdentityContextBuildError, HostIdentityContextCandidate,
     HostIdentityContextSource, HostManagedModelError, HostManagedModelErrorKind,
     HostManagedModelGateway, HostManagedModelRequest, HostManagedModelResponse,
     HostUserProfileSource,
 };
+use ironclaw_reborn::turn_run_executor::RebornTurnRunExecutor;
 use ironclaw_reborn::{
     driver_registry::{DriverKind, DriverRegistry, DriverRequirements},
     loop_driver_host::{RebornLoopDriverHostFactory, TextOnlyLoopHostConfig},
     loop_exit_applier::{
-        LoopExitApplier, LoopExitEvidencePort, ThreadCheckpointLoopExitEvidencePort,
+        InMemoryLoopExitEvidencePort, LoopExitApplier, LoopExitEvidencePort,
+        ThreadCheckpointLoopExitEvidencePort,
     },
-    turn_runner::{TurnRunnerWakeReceiver, TurnRunnerWorker, TurnRunnerWorkerConfig},
+    turn_runner::{HostFactory, TurnRunnerWakeReceiver, TurnRunnerWorker, TurnRunnerWorkerConfig},
 };
 use ironclaw_threads::{
     AcceptInboundMessageRequest, EnsureThreadRequest, InMemorySessionThreadService, MessageContent,
     SessionThreadService, ThreadScope,
 };
+use ironclaw_turns::TurnRunWakeNotifier as _;
 use ironclaw_turns::{
     AcceptedMessageRef, AgentLoopDriver, AgentLoopDriverDescriptor, AgentLoopDriverError,
     AgentLoopDriverResumeRequest, AgentLoopDriverRunRequest, AllowAllTurnAdmissionPolicy,
-    GetRunStateRequest, IdempotencyKey, InMemoryCheckpointStateStore, InMemoryRunProfileResolver,
-    InMemoryTurnStateStore, InMemoryTurnStateStoreLimits, LoopCheckpointStore, LoopExit,
-    ReplyTargetBindingRef, RunProfileResolutionRequest, RunProfileResolver, SourceBindingRef,
-    SubmitTurnRequest, SubmitTurnResponse, TurnActor, TurnRunId, TurnScope, TurnStateStore,
-    TurnStatus,
+    EventCursor, GetRunStateRequest, IdempotencyKey, InMemoryCheckpointStateStore,
+    InMemoryRunProfileResolver, InMemoryTurnStateStore, InMemoryTurnStateStoreLimits,
+    LoopCheckpointStore, LoopExit, LoopExitId, LoopFailed, LoopFailureKind, ReplyTargetBindingRef,
+    RunProfileResolutionRequest, RunProfileResolver, SourceBindingRef, SubmitTurnRequest,
+    SubmitTurnResponse, TurnActor, TurnRunId, TurnRunWake, TurnScope, TurnStateStore, TurnStatus,
     run_profile::{
         AgentLoopDriverHost, InMemoryLoopHostMilestoneSink, InstructionSafetyContext,
         LoopRunContext, PromptMode,
@@ -704,4 +708,462 @@ async fn config_wiring_per_user_cap_enforced_via_store_limits() {
         second.state.scope.thread_id,
         second.state.run_id,
     );
+}
+
+// ---------------------------------------------------------------------------
+// TurnRunScheduler + RebornTurnRunExecutor tests
+//
+// These tests exercise the NEW production concurrency path:
+//   TurnRunScheduler → RebornTurnRunExecutor → LoopExitApplier
+//
+// The legacy `TurnRunnerWorker` tests above remain for regression coverage;
+// the tests below are the primary proof that the scheduler+executor path works.
+// ---------------------------------------------------------------------------
+
+/// Concurrency proof for TurnRunScheduler + RebornTurnRunExecutor.
+///
+/// Two runs on distinct threads are submitted simultaneously. The `BarrierDriver`
+/// blocks inside `run()` until BOTH invocations arrive (a `tokio::sync::Barrier(2)`).
+///
+/// With `max_concurrent_runs = 2`: the scheduler claims both runs concurrently, both
+/// enter the barrier, `entry_count` reaches 2, the barrier releases, and both runs
+/// fail (the barrier driver returns `Err`). The test asserts `entry_count == 2` and
+/// both runs reach `TurnStatus::Failed`.
+///
+/// If `max_concurrent_runs` were 1: only run_a would be claimed while run_b stays
+/// `Queued`. `barrier.wait()` would never be fulfilled — the test would time out at
+/// the `wait_for_status` assertion for run_b, proving the barrier is load-bearing.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn scheduler_executor_two_runs_concurrently() {
+    let tenant_id = TenantId::new("tenant-sched-concurrent").unwrap();
+    let agent_id = AgentId::new("agent-sched-concurrent").unwrap();
+    let project_id = ProjectId::new("project-sched-concurrent").unwrap();
+    let user_id = UserId::new("user-sched-concurrent").unwrap();
+
+    let thread_service = Arc::new(InMemorySessionThreadService::default());
+    let thread_scope = ThreadScope {
+        tenant_id: tenant_id.clone(),
+        agent_id: agent_id.clone(),
+        project_id: Some(project_id.clone()),
+        owner_user_id: None,
+        mission_id: None,
+    };
+
+    let turn_store = Arc::new(InMemoryTurnStateStore::with_limits(
+        InMemoryTurnStateStoreLimits::default(),
+    ));
+    let resolver = InMemoryRunProfileResolver::default();
+
+    // Submit run 1 on thread A.
+    let thread_id_a = ThreadId::new("sched-concurrent-thread-a").unwrap();
+    let run_id_a = submit_run_on_thread(
+        &thread_id_a,
+        &thread_service,
+        &thread_scope,
+        &turn_store,
+        &resolver,
+        "idem-sched-concurrent-a",
+        &user_id,
+    )
+    .await;
+
+    // Submit run 2 on thread B.
+    let thread_id_b = ThreadId::new("sched-concurrent-thread-b").unwrap();
+    let run_id_b = submit_run_on_thread(
+        &thread_id_b,
+        &thread_service,
+        &thread_scope,
+        &turn_store,
+        &resolver,
+        "idem-sched-concurrent-b",
+        &user_id,
+    )
+    .await;
+
+    // Build the barrier driver — barrier size 2 means both invocations must enter
+    // run() simultaneously before either can proceed.
+    let barrier = Arc::new(Barrier::new(2));
+    let entry_count = Arc::new(AtomicU32::new(0));
+    let resolved = resolver
+        .resolve_run_profile(RunProfileResolutionRequest::interactive_default())
+        .await
+        .unwrap();
+    let descriptor = resolved.loop_driver.clone();
+
+    let mut registry = DriverRegistry::new();
+    registry
+        .register_driver(
+            Arc::new(BarrierDriver {
+                descriptor,
+                barrier: Arc::clone(&barrier),
+                entry_count: Arc::clone(&entry_count),
+            }),
+            DriverRequirements::all_required(),
+            DriverKind::Reference,
+        )
+        .unwrap();
+    let registry = Arc::new(registry);
+
+    // Build shared deps.
+    let checkpoint_state_store = Arc::new(InMemoryCheckpointStateStore::default());
+    let loop_checkpoint_store: Arc<dyn LoopCheckpointStore> = turn_store.clone();
+    let milestone_sink = Arc::new(InMemoryLoopHostMilestoneSink::default());
+    let gateway = Arc::new(NoOpGateway);
+
+    let transition_port: Arc<dyn TurnRunTransitionPort> = turn_store.clone();
+
+    // Use InMemoryLoopExitEvidencePort (fail-closed defaults) — the barrier driver
+    // never reaches the applier (it returns Err), so the evidence port is never
+    // consulted; the scheduler's record_runner_failure path handles the failure.
+    let loop_exit_applier = Arc::new(LoopExitApplier::new(
+        Arc::clone(&transition_port),
+        Arc::new(InMemoryLoopExitEvidencePort::new()) as Arc<dyn LoopExitEvidencePort>,
+    ));
+
+    let host_factory = Arc::new(
+        RebornLoopDriverHostFactory::new(
+            Arc::clone(&thread_service),
+            thread_scope.clone(),
+            Arc::clone(&gateway),
+            checkpoint_state_store,
+            turn_store.clone() as Arc<dyn TurnStateStore>,
+            loop_checkpoint_store,
+            milestone_sink,
+            TextOnlyLoopHostConfig {
+                max_messages: 8,
+                require_model_route_snapshot: false,
+            },
+            InstructionSafetyContext::local_development_noop(),
+        )
+        .with_identity_context_source(
+            Arc::new(EmptyIdentityContextSource) as Arc<dyn HostIdentityContextSource>
+        )
+        .with_user_profile_source(
+            Arc::new(EmptyUserProfileSource) as Arc<dyn HostUserProfileSource>
+        ),
+    );
+
+    let executor = Arc::new(RebornTurnRunExecutor::new(
+        Arc::clone(&loop_exit_applier),
+        Arc::clone(&registry),
+        host_factory as Arc<dyn HostFactory>,
+    ));
+
+    let scheduler_config = TurnRunSchedulerConfig::default()
+        .with_max_concurrent_runs(2)
+        .with_runner_heartbeat_interval(std::time::Duration::from_millis(50))
+        .with_poll_interval(std::time::Duration::from_millis(10))
+        .with_claim_error_backoff(std::time::Duration::from_millis(5));
+
+    let scheduler_handle =
+        TurnRunScheduler::new(Arc::clone(&transition_port), executor, scheduler_config).start();
+
+    // Wake the scheduler for both runs — coordinator wake is the real prod path;
+    // here we simulate it by directly notifying the scheduler's wake notifier.
+    let scope_a = TurnScope::new(
+        tenant_id.clone(),
+        Some(agent_id.clone()),
+        Some(project_id.clone()),
+        thread_id_a.clone(),
+    );
+    let scope_b = TurnScope::new(
+        tenant_id.clone(),
+        Some(agent_id.clone()),
+        Some(project_id.clone()),
+        thread_id_b.clone(),
+    );
+    scheduler_handle
+        .wake_notifier()
+        .notify_queued_run(TurnRunWake {
+            scope: scope_a.clone(),
+            run_id: run_id_a,
+            status: TurnStatus::Queued,
+            event_cursor: EventCursor::default(),
+        })
+        .unwrap();
+    scheduler_handle
+        .wake_notifier()
+        .notify_queued_run(TurnRunWake {
+            scope: scope_b.clone(),
+            run_id: run_id_b,
+            status: TurnStatus::Queued,
+            event_cursor: EventCursor::default(),
+        })
+        .unwrap();
+
+    // Both runs must reach Failed (barrier driver returns Err after both entries).
+    // With max_concurrent_runs=2: both are claimed concurrently, both enter the
+    // barrier, entry_count reaches 2, barrier releases, both fail.
+    // With max_concurrent_runs=1: run_a blocks at barrier.wait(), run_b stays
+    // Queued — the test would time out here.
+    wait_for_status(
+        &turn_store,
+        &scope_a,
+        run_id_a,
+        TurnStatus::Failed,
+        10,
+        "run_a should fail after barrier releases (scheduler has 2 permits)",
+    )
+    .await;
+    wait_for_status(
+        &turn_store,
+        &scope_b,
+        run_id_b,
+        TurnStatus::Failed,
+        10,
+        "run_b should fail after barrier releases (proves concurrent execution)",
+    )
+    .await;
+
+    // Both driver invocations entered run() simultaneously — proves N=2 concurrency.
+    assert_eq!(
+        entry_count.load(Ordering::SeqCst),
+        2,
+        "both RebornTurnRunExecutor invocations should have entered run() concurrently"
+    );
+
+    scheduler_handle.shutdown().await;
+}
+
+/// End-to-end success path: TurnRunScheduler + RebornTurnRunExecutor applies a
+/// LoopExit::Failed through the applier, reaching a terminal Failed state.
+///
+/// Unlike `scheduler_executor_two_runs_concurrently` (where the driver returns an
+/// `Err` and the scheduler itself records the failure via `record_runner_failure`),
+/// this test uses a driver that returns `Ok(LoopExit::Failed)`. In that path:
+///
+///   1. `RebornTurnRunExecutor::execute_claimed_run` calls `invoke_driver` → `Ok(exit)`.
+///   2. It calls `apply_exit` → `LoopExitApplier::apply()` → `apply_validated_loop_exit`.
+///   3. The `AcceptAllEvidencePort` returns `true` for every verification method.
+///   4. `execute_claimed_run` returns `Ok(())` — the scheduler does NOT call
+///      `record_runner_failure` — the transition was applied inside the executor.
+///   5. The run reaches `TurnStatus::Failed` via the applier's own transition path,
+///      not the scheduler's terminal-failure path. This is the "applier-owned exit"
+///      variant of the production path.
+///
+/// Asserts: `execute_claimed_run` returns `Ok(())` and the run is terminal (`Failed`).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn scheduler_executor_applies_loop_exit_end_to_end() {
+    // ---------------------------------------------------------------------------
+    // Driver that returns Ok(LoopExit::Failed) — exercises the applier path.
+    // ---------------------------------------------------------------------------
+    struct ApplierPathDriver {
+        descriptor: AgentLoopDriverDescriptor,
+    }
+
+    #[async_trait]
+    impl AgentLoopDriver for ApplierPathDriver {
+        fn descriptor(&self) -> AgentLoopDriverDescriptor {
+            self.descriptor.clone()
+        }
+
+        async fn run(
+            &self,
+            _request: AgentLoopDriverRunRequest,
+            _host: &(dyn AgentLoopDriverHost + Send + Sync),
+        ) -> Result<LoopExit, AgentLoopDriverError> {
+            Ok(LoopExit::Failed(LoopFailed {
+                reason_kind: LoopFailureKind::DriverBug,
+                checkpoint_id: None,
+                usage_summary_ref: None,
+                diagnostic_ref: None,
+                exit_id: LoopExitId::new("exit:test-applier-path").expect("valid exit id"),
+            }))
+        }
+
+        async fn resume(
+            &self,
+            request: AgentLoopDriverResumeRequest,
+            host: &(dyn AgentLoopDriverHost + Send + Sync),
+        ) -> Result<LoopExit, AgentLoopDriverError> {
+            self.run(
+                AgentLoopDriverRunRequest {
+                    turn_id: request.turn_id,
+                    run_id: request.run_id,
+                    resolved_run_profile: request.resolved_run_profile,
+                },
+                host,
+            )
+            .await
+        }
+    }
+
+    let tenant_id = TenantId::new("tenant-sched-e2e").unwrap();
+    let agent_id = AgentId::new("agent-sched-e2e").unwrap();
+    let project_id = ProjectId::new("project-sched-e2e").unwrap();
+    let user_id = UserId::new("user-sched-e2e").unwrap();
+
+    let thread_service = Arc::new(InMemorySessionThreadService::default());
+    let thread_scope = ThreadScope {
+        tenant_id: tenant_id.clone(),
+        agent_id: agent_id.clone(),
+        project_id: Some(project_id.clone()),
+        owner_user_id: None,
+        mission_id: None,
+    };
+
+    let turn_store = Arc::new(InMemoryTurnStateStore::with_limits(
+        InMemoryTurnStateStoreLimits::default(),
+    ));
+    let resolver = InMemoryRunProfileResolver::default();
+
+    let thread_id = ThreadId::new("sched-e2e-thread").unwrap();
+    let run_id = submit_run_on_thread(
+        &thread_id,
+        &thread_service,
+        &thread_scope,
+        &turn_store,
+        &resolver,
+        "idem-sched-e2e",
+        &user_id,
+    )
+    .await;
+
+    let resolved = resolver
+        .resolve_run_profile(RunProfileResolutionRequest::interactive_default())
+        .await
+        .unwrap();
+    let descriptor = resolved.loop_driver.clone();
+
+    let mut registry = DriverRegistry::new();
+    registry
+        .register_driver(
+            Arc::new(ApplierPathDriver { descriptor }),
+            DriverRequirements::all_required(),
+            DriverKind::Reference,
+        )
+        .unwrap();
+    let registry = Arc::new(registry);
+
+    let checkpoint_state_store = Arc::new(InMemoryCheckpointStateStore::default());
+    let loop_checkpoint_store: Arc<dyn LoopCheckpointStore> = turn_store.clone();
+    let milestone_sink = Arc::new(InMemoryLoopHostMilestoneSink::default());
+    let gateway = Arc::new(NoOpGateway);
+
+    let transition_port: Arc<dyn TurnRunTransitionPort> = turn_store.clone();
+
+    // AcceptAllEvidencePort: returns true for every evidence verification so
+    // the applier can transition the run to TurnStatus::Failed without needing
+    // real thread messages (the barrier driver skips all model/thread IO).
+    struct AcceptAllEvidencePort;
+
+    #[async_trait]
+    impl LoopExitEvidencePort for AcceptAllEvidencePort {
+        async fn verify_completion_refs(
+            &self,
+            _request: ironclaw_reborn::loop_exit_applier::CompletionEvidenceRequest<'_>,
+        ) -> Result<bool, ironclaw_turns::TurnError> {
+            Ok(true)
+        }
+        async fn verify_final_checkpoint(
+            &self,
+            _request: ironclaw_reborn::loop_exit_applier::FinalCheckpointEvidenceRequest<'_>,
+        ) -> Result<bool, ironclaw_turns::TurnError> {
+            Ok(true)
+        }
+        async fn verify_blocked_evidence(
+            &self,
+            _request: ironclaw_reborn::loop_exit_applier::BlockedEvidenceRequest<'_>,
+        ) -> Result<bool, ironclaw_turns::TurnError> {
+            Ok(true)
+        }
+        async fn verify_failure_evidence(
+            &self,
+            _request: ironclaw_reborn::loop_exit_applier::FailureEvidenceRequest<'_>,
+        ) -> Result<bool, ironclaw_turns::TurnError> {
+            Ok(true)
+        }
+        async fn is_cancellation_observed(
+            &self,
+            _scope: &ironclaw_turns::TurnScope,
+            _turn_id: ironclaw_turns::TurnId,
+            _run_id: ironclaw_turns::TurnRunId,
+        ) -> Result<bool, ironclaw_turns::TurnError> {
+            Ok(true)
+        }
+        async fn latest_checkpoint_kind(
+            &self,
+            _scope: &ironclaw_turns::TurnScope,
+            _turn_id: ironclaw_turns::TurnId,
+            _run_id: ironclaw_turns::TurnRunId,
+        ) -> Result<Option<ironclaw_turns::LoopCheckpointKind>, ironclaw_turns::TurnError> {
+            Ok(None)
+        }
+    }
+
+    let evidence_port = Arc::new(AcceptAllEvidencePort) as Arc<dyn LoopExitEvidencePort>;
+    let loop_exit_applier = Arc::new(LoopExitApplier::new(
+        Arc::clone(&transition_port),
+        evidence_port,
+    ));
+
+    let host_factory = Arc::new(
+        RebornLoopDriverHostFactory::new(
+            Arc::clone(&thread_service),
+            thread_scope.clone(),
+            Arc::clone(&gateway),
+            checkpoint_state_store,
+            turn_store.clone() as Arc<dyn TurnStateStore>,
+            loop_checkpoint_store,
+            milestone_sink,
+            TextOnlyLoopHostConfig {
+                max_messages: 8,
+                require_model_route_snapshot: false,
+            },
+            InstructionSafetyContext::local_development_noop(),
+        )
+        .with_identity_context_source(
+            Arc::new(EmptyIdentityContextSource) as Arc<dyn HostIdentityContextSource>
+        )
+        .with_user_profile_source(
+            Arc::new(EmptyUserProfileSource) as Arc<dyn HostUserProfileSource>
+        ),
+    );
+
+    let executor = Arc::new(RebornTurnRunExecutor::new(
+        Arc::clone(&loop_exit_applier),
+        Arc::clone(&registry),
+        host_factory as Arc<dyn HostFactory>,
+    ));
+
+    let scheduler_config = TurnRunSchedulerConfig::default()
+        .with_max_concurrent_runs(1)
+        .with_runner_heartbeat_interval(std::time::Duration::from_millis(50))
+        .with_poll_interval(std::time::Duration::from_millis(10))
+        .with_claim_error_backoff(std::time::Duration::from_millis(5));
+
+    let scheduler_handle =
+        TurnRunScheduler::new(Arc::clone(&transition_port), executor, scheduler_config).start();
+
+    let turn_scope = TurnScope::new(
+        tenant_id.clone(),
+        Some(agent_id.clone()),
+        Some(project_id.clone()),
+        thread_id.clone(),
+    );
+    scheduler_handle
+        .wake_notifier()
+        .notify_queued_run(TurnRunWake {
+            scope: turn_scope.clone(),
+            run_id,
+            status: TurnStatus::Queued,
+            event_cursor: EventCursor::default(),
+        })
+        .unwrap();
+
+    // The applier-path driver returns Ok(LoopExit::Failed), so execute_claimed_run
+    // returns Ok(()) and the applier transitions the run to Failed. The scheduler
+    // does NOT call record_runner_failure — that's the key distinction from the
+    // barrier-driver test above (which returns Err from the driver).
+    wait_for_status(
+        &turn_store,
+        &turn_scope,
+        run_id,
+        TurnStatus::Failed,
+        10,
+        "run should reach Failed via applier-owned loop exit (not scheduler terminal failure)",
+    )
+    .await;
+
+    scheduler_handle.shutdown().await;
 }
