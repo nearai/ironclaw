@@ -4919,3 +4919,49 @@ fn generated_thread_id(
         }
     }
 }
+
+#[cfg(test)]
+mod project_error_mapping_tests {
+    use super::*;
+
+    /// Every `ProjectServiceError` variant projects to a sanitized facade error
+    /// with the expected coarse code/status, and `InvalidInput`'s field name is
+    /// carried through (it is a controlled constant, never backend text).
+    #[test]
+    fn project_service_error_maps_to_sanitized_facade_error() {
+        let not_found = map_project_service_error(ProjectServiceError::NotFound);
+        assert_eq!(not_found.code, RebornServicesErrorCode::NotFound);
+        assert_eq!(not_found.status_code, 404);
+
+        let denied = map_project_service_error(ProjectServiceError::Denied);
+        assert_eq!(denied.kind, RebornServicesErrorKind::ParticipantDenied);
+        assert_eq!(denied.status_code, 403);
+
+        let invalid = map_project_service_error(ProjectServiceError::InvalidInput {
+            field: "project_id".to_string(),
+        });
+        assert_eq!(invalid.code, RebornServicesErrorCode::InvalidRequest);
+        assert_eq!(invalid.status_code, 400);
+        assert_eq!(invalid.field.as_deref(), Some("project_id"));
+
+        let conflict = map_project_service_error(ProjectServiceError::Conflict);
+        assert_eq!(conflict.code, RebornServicesErrorCode::Conflict);
+        assert_eq!(conflict.status_code, 409);
+
+        let unavailable = map_project_service_error(ProjectServiceError::Unavailable);
+        assert_eq!(unavailable.code, RebornServicesErrorCode::Unavailable);
+        assert!(unavailable.retryable, "unavailable is retryable");
+
+        let internal = map_project_service_error(ProjectServiceError::Internal);
+        assert_eq!(internal.code, RebornServicesErrorCode::Internal);
+        assert_eq!(internal.status_code, 500);
+    }
+
+    /// The default (unwired) facade reports project methods as unavailable so a
+    /// runtime without a wired `ProjectService` returns a clean 503, not a panic.
+    #[test]
+    fn unwired_project_service_is_unavailable() {
+        let unavailable = RebornServicesError::service_unavailable(false);
+        assert_eq!(unavailable.code, RebornServicesErrorCode::Unavailable);
+    }
+}

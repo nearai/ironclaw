@@ -14,6 +14,7 @@
 //! `ironclaw_filesystem::FileType`).
 
 use async_trait::async_trait;
+use chrono::{DateTime, Utc};
 use ironclaw_host_api::{TenantId, UserId};
 use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
@@ -28,7 +29,8 @@ pub struct ProjectCaller {
     pub user_id: UserId,
 }
 
-/// Access role a user holds on a project. Ordered `viewer < editor < owner`.
+/// Access role a user holds on a project. Privilege order, highest first:
+/// `Owner > Editor > Viewer` (matches the variant declaration order).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RebornProjectRole {
@@ -68,8 +70,10 @@ pub struct RebornProjectInfo {
     pub state: RebornProjectState,
     /// The calling user's effective role on this project.
     pub role: RebornProjectRole,
-    pub created_at: String,
-    pub updated_at: String,
+    /// RFC3339 on the wire (serde-serialized `DateTime<Utc>`); typed here to
+    /// match the other WebUI facade DTOs rather than an ambiguous `String`.
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
 }
 
 /// Sanitized membership grant view returned to the WebUI.
@@ -79,8 +83,8 @@ pub struct RebornProjectMemberInfo {
     pub role: RebornProjectRole,
     pub status: RebornProjectMemberStatus,
     pub granted_by: String,
-    pub created_at: String,
-    pub updated_at: String,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
 }
 
 /// Browser body for listing the caller's projects.
@@ -186,9 +190,14 @@ pub struct RebornUpdateMemberRoleRequest {
 }
 
 /// Browser body for revoking a member.
+///
+/// `project_id` and `user_id` come from the route path (handler-overridden), so
+/// both carry `#[serde(default)]` like [`RebornUpdateMemberRoleRequest`].
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RebornRemoveMemberRequest {
+    #[serde(default)]
     pub project_id: String,
+    #[serde(default)]
     pub user_id: String,
 }
 
@@ -204,7 +213,7 @@ pub enum ProjectServiceError {
     NotFound,
     #[error("caller is not permitted to perform this project operation")]
     Denied,
-    #[error("invalid project input")]
+    #[error("invalid project input: {field}")]
     InvalidInput { field: String },
     #[error("project already exists")]
     Conflict,
