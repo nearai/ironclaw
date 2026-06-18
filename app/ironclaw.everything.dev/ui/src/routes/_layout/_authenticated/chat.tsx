@@ -242,25 +242,15 @@ function ChatLayout() {
         ? "bg-muted-foreground animate-pulse"
         : "bg-destructive";
 
-  const threadRowClass = (isActive: boolean) =>
-    `group flex w-full items-center gap-2 rounded-lg px-3 py-2.5 text-left text-sm transition-colors cursor-pointer touch-manipulation border-l-2 ${
-      isActive
-        ? "border-l-primary bg-primary/10 text-foreground"
-        : "border-l-transparent text-muted-foreground hover:bg-muted active:bg-muted"
-    }`;
+  const linkBase = "group flex min-w-0 w-full items-center gap-2 rounded-lg transition-colors cursor-pointer touch-manipulation relative text-muted-foreground hover:bg-muted active:bg-muted";
 
-  const subagentRowClass = (isActive: boolean, indented = false) =>
-    `group flex w-full items-center gap-2 rounded-lg px-3 py-1.5 text-left text-xs transition-colors cursor-pointer touch-manipulation border-l-2 ${
-      indented ? "pl-7" : ""
-    } ${
-      isActive
-        ? "border-l-primary bg-primary/10 text-foreground"
-        : "border-l-transparent text-muted-foreground hover:bg-muted active:bg-muted"
-    }`;
+  const threadLinkClass = `${linkBase} px-3 py-2.5 text-left text-sm`;
+  const subagentLinkClass = `${linkBase} px-3 py-1.5 text-left text-xs`;
+  const indentClass = `pl-7`;
 
   const threadListContent = (
-    <>
-      {sidebarOpen && !isDisconnected && (
+    <div className="flex flex-col min-h-0">
+      {!isDisconnected && (
         <div className="px-2 pt-1.5 pb-1">
           <div className="relative">
             <Search size={12} className="absolute left-2.5 top-1/2 -translate-y-1/2 text-muted-foreground/50" />
@@ -310,14 +300,15 @@ function ChatLayout() {
             const children = subagentMap.get(thread.threadId) ?? [];
             const isExpanded = expandedParents.has(thread.threadId);
             const hasChildren = children.length > 0;
-            const isActive = activeThreadId === thread.threadId;
             return (
               <div key={thread.threadId} className="relative">
                 <Link
                   to="/chat/$threadId"
                   params={{ threadId: thread.threadId }}
-                  className={threadRowClass(isActive)}
+                  className={threadLinkClass}
+                  activeProps={{ className: "bg-primary/15 text-foreground" }}
                 >
+                  <span className="absolute left-px top-1/2 -translate-y-1/2 h-6 w-[3px] rounded-full group-data-[status=active]:bg-primary" />
                   <div className="flex items-center gap-1.5 min-w-0 flex-1">
                     {hasChildren && (
                       <button
@@ -373,14 +364,15 @@ function ChatLayout() {
                 {hasChildren && isExpanded && (
                   <div className="ml-4 border-l border-border/50 pl-1">
                     {children.map((child) => {
-                      const isChildActive = activeThreadId === child.threadId;
                       return (
                         <Link
                           key={child.threadId}
                           to="/chat/$threadId"
                           params={{ threadId: child.threadId }}
-                          className={subagentRowClass(isChildActive)}
+                          className={subagentLinkClass}
+                          activeProps={{ className: "bg-primary/15 text-foreground" }}
                         >
+                          <span className="absolute left-px top-1/2 -translate-y-1/2 h-5 w-[3px] rounded-full group-data-[status=active]:bg-primary" />
                           <SubagentRow thread={child} onDelete={deleteThread} />
                         </Link>
                       );
@@ -397,14 +389,15 @@ function ChatLayout() {
               Orphaned sub-agents
             </div>
             {orphanedSubagents.map((child) => {
-              const isChildActive = activeThreadId === child.threadId;
               return (
                 <Link
                   key={child.threadId}
                   to="/chat/$threadId"
                   params={{ threadId: child.threadId }}
-                  className={subagentRowClass(isChildActive, true)}
+                  className={`${subagentLinkClass} ${indentClass}`}
+                  activeProps={{ className: "bg-primary/15 text-foreground" }}
                 >
+                  <span className="absolute left-px top-1/2 -translate-y-1/2 h-5 w-[3px] rounded-full group-data-[status=active]:bg-primary" />
                   <SubagentRow thread={child} onDelete={deleteThread} />
                 </Link>
               );
@@ -413,7 +406,7 @@ function ChatLayout() {
         )}
       </div>
     </ScrollArea>
-    </>
+    </div>
   );
 
   const desktopSidebarHeader = (
@@ -505,7 +498,7 @@ function ChatLayout() {
                   }}
                   className={`w-8 h-8 rounded-lg flex items-center justify-center transition-colors touch-manipulation ${
                     activeThreadId === thread.threadId
-                      ? "bg-primary/10 text-foreground"
+                      ? "bg-primary/15 text-foreground"
                       : "text-muted-foreground hover:bg-muted"
                   }`}
                   title={thread.title ?? `Thread ${thread.threadId.slice(0, 8)}`}

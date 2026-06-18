@@ -209,8 +209,9 @@ if [ "$MODE" = "local" ]; then
   export IRONCLAW_API_TOKEN="$IRONCLAW_REBORN_WEBUI_TOKEN"
   export IRONCLAW_REBORN_CORS_ORIGINS="http://localhost:3000"
 
-  echo "==> Starting ironclaw-reborn on http://$REBORN_HOST:$REBORN_PORT"
-  "${CARGO[@]}" serve --confirm-host-access --host "$REBORN_HOST" --port "$REBORN_PORT" &
+  REBORN_LOG="$(mktemp)"
+  echo "==> Starting ironclaw-reborn on http://$REBORN_HOST:$REBORN_PORT (log: $REBORN_LOG)"
+  "${CARGO[@]}" serve --confirm-host-access --host "$REBORN_HOST" --port "$REBORN_PORT" > "$REBORN_LOG" 2>&1 &
   REBORN_PID=$!
   sleep 1
 
@@ -226,6 +227,7 @@ if [ "$MODE" = "local" ]; then
   API        : http://$REBORN_HOST:$REBORN_PORT
   Token      : $IRONCLAW_REBORN_WEBUI_TOKEN
   Reborn home: $IRONCLAW_REBORN_HOME
+  Reborn log : $REBORN_LOG
 
   Press Ctrl+C to stop
 
@@ -233,6 +235,8 @@ BANNER
 
   echo "==> Starting everything-dev dev stack..."
   cd "$EVDEV_DIR"
+  tail -f "$REBORN_LOG" &
+  TAIL_PID=$!
   bun run dev || true
   cleanup
 fi

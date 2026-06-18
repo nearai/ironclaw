@@ -214,7 +214,7 @@ function Layout() {
             <Outlet />
           </main>
 
-          {pathname !== "/chat" && (
+          {!pathname.startsWith("/chat") && (
             <footer
               className="shrink-0 flex justify-center py-6"
               style={{
