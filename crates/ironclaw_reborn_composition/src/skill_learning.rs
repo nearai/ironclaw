@@ -76,7 +76,7 @@ mod learning {
     use ironclaw_skills::{ManagedSkillSource, SkillSummary, parse_skill_md};
     use ironclaw_threads::{
         AppendAssistantDraftRequest, ContextWindow, LoadContextWindowRequest, MessageContent,
-        MessageKind, SessionThreadService, ThreadScope,
+        MessageKind, SessionThreadService, ThreadHistoryRequest, ThreadScope,
     };
     use ironclaw_turns::{
         TurnError, TurnEventKind, TurnEventSink, TurnLifecycleEvent, TurnRunId, TurnScope,
@@ -605,10 +605,39 @@ mod learning {
                 }
             };
 
-            let tool_actions = window
+            // Eligibility counts tool actions from THIS run only, not the whole
+            // thread window: `window` is the recent thread slice with no run
+            // filter, so a trivial follow-up turn after a tool-heavy task would
+            // otherwise re-pass the gate on the previous run's stale tool results
+            // and re-distill it (wasted inference + a stale-transcript refine that
+            // can regress an evolved skill). `window` is still used below as the
+            // multi-turn distillation CONTEXT (intentional). The per-run COUNT
+            // comes from the history projection, which keeps message `kind` +
+            // `turn_run_id` and only nulls the tool metadata the transcript needs
+            // (hence the separate window read above). The producer writes
+            // `turn_run_id = run_id.to_string()`, matching `self.run_id`.
+            let run_id_str = self.run_id.to_string();
+            let history = match self
+                .thread_service
+                .list_thread_history(ThreadHistoryRequest {
+                    scope: self.scope.clone(),
+                    thread_id: self.thread_id.clone(),
+                })
+                .await
+            {
+                Ok(history) => history,
+                Err(error) => {
+                    tracing::debug!(%error, run_id = ?self.run_id, "skill-learning: could not load history for run-scoped eligibility");
+                    return;
+                }
+            };
+            let tool_actions = history
                 .messages
                 .iter()
-                .filter(|message| matches!(message.kind, MessageKind::ToolResultReference))
+                .filter(|message| {
+                    matches!(message.kind, MessageKind::ToolResultReference)
+                        && message.turn_run_id.as_deref() == Some(run_id_str.as_str())
+                })
                 .count();
             let message_count = window.messages.len();
             tracing::debug!(
@@ -844,9 +873,11 @@ mod learning {
         use super::*;
         use ironclaw_host_api::{AgentId, ThreadId};
         use ironclaw_threads::{
-            EnsureThreadRequest, InMemorySessionThreadService, MessageStatus, ThreadHistoryRequest,
+            AppendToolResultReferenceRequest, EnsureThreadRequest, InMemorySessionThreadService,
+            MessageStatus, ThreadHistoryRequest, ToolResultSafeSummary,
         };
         use ironclaw_turns::{EventCursor, TurnStatus};
+        use std::sync::atomic::{AtomicUsize, Ordering};
 
         struct StubInference;
 
@@ -1021,6 +1052,175 @@ mod learning {
                 matches!(note.status, MessageStatus::Finalized),
                 "the note must finalize (not stay a draft): {:?}",
                 note.status
+            );
+        }
+
+        struct RecordingInference {
+            calls: Arc<AtomicUsize>,
+        }
+
+        #[async_trait]
+        impl SkillInferencePort for RecordingInference {
+            async fn infer(
+                &self,
+                _system: &str,
+                _user: &str,
+            ) -> Result<String, SkillInferenceError> {
+                self.calls.fetch_add(1, Ordering::Relaxed);
+                // The return value is irrelevant: this test only asserts WHETHER
+                // the eligibility gate let inference run for the given run.
+                Ok("SKIP: test stub".to_string())
+            }
+        }
+
+        // P2a regression: extraction eligibility must count tool actions from the
+        // COMPLETED run only, not the whole thread window. The window is the
+        // recent thread slice (no run filter), so a trivial follow-up turn after a
+        // tool-heavy task would otherwise re-pass the gate on the previous run's
+        // stale tool results and re-distill it.
+        #[tokio::test]
+        async fn eligibility_counts_tool_actions_for_the_completed_run_only() {
+            async fn seed_tool_result(
+                service: &dyn SessionThreadService,
+                scope: &ThreadScope,
+                thread_id: &ThreadId,
+                run_id: &TurnRunId,
+                result_ref: &str,
+            ) {
+                service
+                    .append_tool_result_reference(AppendToolResultReferenceRequest {
+                        scope: scope.clone(),
+                        thread_id: thread_id.clone(),
+                        turn_run_id: run_id.to_string(),
+                        result_ref: format!("result:{result_ref}"),
+                        safe_summary: ToolResultSafeSummary::new("tool ran").expect("summary"),
+                        provider_call: None,
+                        model_observation: None,
+                    })
+                    .await
+                    .expect("seed tool result");
+            }
+
+            async fn seed_filler_message(
+                service: &dyn SessionThreadService,
+                scope: &ThreadScope,
+                thread_id: &ThreadId,
+                run_id: &TurnRunId,
+            ) {
+                let draft = service
+                    .append_assistant_draft(AppendAssistantDraftRequest {
+                        scope: scope.clone(),
+                        thread_id: thread_id.clone(),
+                        turn_run_id: run_id.to_string(),
+                        content: MessageContent::text("ok"),
+                    })
+                    .await
+                    .expect("seed filler draft");
+                service
+                    .finalize_assistant_message(
+                        scope,
+                        thread_id,
+                        draft.message_id,
+                        MessageContent::text("ok"),
+                    )
+                    .await
+                    .expect("finalize filler");
+            }
+
+            fn job(
+                service: Arc<dyn SessionThreadService>,
+                scope: &ThreadScope,
+                thread_id: &ThreadId,
+                run_id: TurnRunId,
+                inference: Arc<dyn SkillInferencePort>,
+            ) -> ExtractionJob {
+                ExtractionJob {
+                    thread_service: service,
+                    inference,
+                    skill_writer: Arc::new(StubWriter),
+                    notifier: Arc::new(StubNotifier),
+                    scope: scope.clone(),
+                    thread_id: thread_id.clone(),
+                    run_id,
+                    write_tenant: scope.tenant_id.clone(),
+                    write_owner: scope.owner_user_id.clone().expect("owner"),
+                    event_scope: TurnScope::new_with_owner(
+                        scope.tenant_id.clone(),
+                        Some(scope.agent_id.clone()),
+                        None,
+                        thread_id.clone(),
+                        scope.owner_user_id.clone(),
+                    ),
+                }
+            }
+
+            let service: Arc<dyn SessionThreadService> =
+                Arc::new(InMemorySessionThreadService::default());
+            let scope = ThreadScope {
+                tenant_id: TenantId::new("p2a-tenant").expect("tenant"),
+                agent_id: AgentId::new("p2a-agent").expect("agent"),
+                project_id: None,
+                owner_user_id: Some(UserId::new("p2a-user").expect("user")),
+                mission_id: None,
+            };
+            let thread_id = ThreadId::new("p2a-thread").expect("thread");
+            service
+                .ensure_thread(EnsureThreadRequest {
+                    scope: scope.clone(),
+                    thread_id: Some(thread_id.clone()),
+                    created_by_actor_id: "p2a-user".to_string(),
+                    title: None,
+                    metadata_json: None,
+                })
+                .await
+                .expect("ensure thread");
+
+            let prior_run = TurnRunId::new();
+            let current_run = TurnRunId::new();
+
+            // A tool-heavy PRIOR run, then a trivial follow-up (the CURRENT run).
+            seed_tool_result(service.as_ref(), &scope, &thread_id, &prior_run, "r1").await;
+            seed_tool_result(service.as_ref(), &scope, &thread_id, &prior_run, "r2").await;
+            seed_filler_message(service.as_ref(), &scope, &thread_id, &current_run).await;
+
+            // The window has enough messages and >= MIN_TOOL_ACTIONS tool results
+            // overall, but NONE belong to the current run → no distillation.
+            let trivial_calls = Arc::new(AtomicUsize::new(0));
+            job(
+                Arc::clone(&service),
+                &scope,
+                &thread_id,
+                current_run,
+                Arc::new(RecordingInference {
+                    calls: Arc::clone(&trivial_calls),
+                }),
+            )
+            .run()
+            .await;
+            assert_eq!(
+                trivial_calls.load(Ordering::Relaxed),
+                0,
+                "a trivial follow-up turn must not re-distill the previous run's stale tool work"
+            );
+
+            // Control: a run that DID its own tool work stays eligible.
+            seed_tool_result(service.as_ref(), &scope, &thread_id, &current_run, "r3").await;
+            seed_tool_result(service.as_ref(), &scope, &thread_id, &current_run, "r4").await;
+            let substantive_calls = Arc::new(AtomicUsize::new(0));
+            job(
+                Arc::clone(&service),
+                &scope,
+                &thread_id,
+                current_run,
+                Arc::new(RecordingInference {
+                    calls: Arc::clone(&substantive_calls),
+                }),
+            )
+            .run()
+            .await;
+            assert!(
+                substantive_calls.load(Ordering::Relaxed) >= 1,
+                "a run with its own tool actions must reach distillation"
             );
         }
 
