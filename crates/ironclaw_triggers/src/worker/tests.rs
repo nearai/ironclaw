@@ -2314,11 +2314,12 @@ async fn tick_recurring_blocked_active_run_clears_as_failed() {
 }
 
 #[tokio::test]
-async fn tick_fire_once_permanent_submit_failure_is_terminal() {
-    // A CompleteAfterFirstFire trigger whose trusted submitter returns a
-    // Permanent failure must produce PermanentFailed (terminal) and must NOT
-    // advance next_run_at. This is the fire-once analog of the recurring
-    // `tick_permanent_submit_failure_advances_next_slot` test.
+async fn tick_fire_once_permanent_submit_failure_stays_scheduled_for_retry() {
+    // A CompleteAfterFirstFire trigger whose submitter returns a Permanent
+    // failure (e.g. unpaired actor, bad materialization) has NOT fired — the
+    // one-shot must remain Scheduled so it can retry once the cause is fixed.
+    // It must NOT be marked Completed; that only happens via clear_active_fire
+    // after a real run terminates.
     let repo = Arc::new(InMemoryTriggerRepository::default());
     let trigger_id = TriggerId::parse("01HZZZZZZZZZZZZZZZZZZZZZZZ").expect("ulid");
     let fire_slot = ts(1_704_067_200);
@@ -2339,24 +2340,29 @@ async fn tick_fire_once_permanent_submit_failure_is_terminal() {
 
     let report = worker.tick_once(fire_slot).await.expect("tick succeeds");
 
+    // Permanent pre-submission failure for a fire-once triggers Retryable (fail-closed).
     assert!(
         matches!(
             report.results.last().map(|r| &r.outcome),
-            Some(TriggerPollerFireOutcome::PermanentFailed { .. })
+            Some(TriggerPollerFireOutcome::RetryableFailed { .. })
         ),
-        "fire-once permanent submit failure must produce PermanentFailed"
+        "fire-once permanent submit failure must produce RetryableFailed (fail-closed, not PermanentFailed)"
     );
     let persisted = repo
         .get_trigger(tenant("tenant-a"), trigger_id)
         .await
         .expect("load")
         .expect("record present");
-    assert_eq!(
+    assert_ne!(
         persisted.state,
         TriggerState::Completed,
-        "fire-once permanent failure must transition to Completed (terminal)"
+        "fire-once that never fired must NOT be Completed — it must remain Scheduled"
     );
-    assert_eq!(persisted.last_status, Some(TriggerRunStatus::Error));
+    assert_eq!(
+        persisted.state,
+        TriggerState::Scheduled,
+        "fire-once permanent submit failure must leave trigger Scheduled"
+    );
     assert_eq!(
         persisted.next_run_at, original_next_run_at,
         "fire-once trigger must NOT advance next_run_at on permanent failure"

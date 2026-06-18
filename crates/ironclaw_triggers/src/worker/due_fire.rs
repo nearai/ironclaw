@@ -89,13 +89,19 @@ impl TriggerPollerWorker {
         };
 
         // Build failure disposition respecting fire-once semantics.
-        // Fire-once permanent failures go Terminal (no reschedule slot); retryable stays retryable.
+        // Fire-once permanent pre-submission failures (unpaired actor, source/materialize/submit
+        // error) must NOT mark the trigger Completed — the one-shot never actually fired.
+        // Leave it Scheduled (Retryable) so it can retry once the cause is fixed. A fire-once
+        // only completes after a real run terminates via clear_active_fire. Recurring behavior
+        // is unchanged: Permanent → PermanentReschedule(next_run_at).
         let failure_disposition = |kind: SubmitFailureKind| -> FireFailureDisposition {
             match kind {
                 SubmitFailureKind::Retryable => FireFailureDisposition::Retryable,
                 SubmitFailureKind::Permanent => {
                     if is_fire_once {
-                        FireFailureDisposition::PermanentTerminal
+                        // Fail closed: keep Scheduled so the trigger retries when the
+                        // underlying cause (e.g. unpaired actor) is resolved.
+                        FireFailureDisposition::Retryable
                     } else {
                         // recurring_next_run_at is Some when is_fire_once is false
                         // (we computed it above and would have returned early on error)
