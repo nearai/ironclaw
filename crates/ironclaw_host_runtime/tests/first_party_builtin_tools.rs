@@ -841,6 +841,37 @@ async fn builtin_trigger_create_rejects_invalid_completion_policy_before_persist
     );
 }
 
+#[tokio::test]
+async fn builtin_trigger_create_rejects_missing_completion_policy_before_persistence() {
+    let repository = Arc::new(InMemoryTriggerRepository::default());
+    let runtime = runtime_with_trigger_repository(repository.clone());
+    let context = execution_context([TRIGGER_CREATE_CAPABILITY_ID]);
+
+    let error = invoke_with_context(
+        &runtime,
+        TRIGGER_CREATE_CAPABILITY_ID,
+        json!({
+            "name": "Missing policy trigger",
+            "prompt": "Run work",
+            "cron": "0 8 * * *",
+            "timezone": "UTC"
+        }),
+        context.clone(),
+    )
+    .await
+    .unwrap_err();
+
+    assert_eq!(error, RuntimeFailureKind::InvalidInput);
+    assert!(
+        repository
+            .list_triggers(context.resource_scope.tenant_id)
+            .await
+            .unwrap()
+            .is_empty(),
+        "no trigger should be persisted when completion_policy is absent"
+    );
+}
+
 /// Positive path: a FUTURE 7-field year-pinned cron with
 /// `completion_policy = complete_after_first_fire` must be accepted, persisted,
 /// and round-trip the schedule and policy fields correctly.

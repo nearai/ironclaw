@@ -3938,4 +3938,84 @@ mod list_scoped_triggers_excluded_states_contract {
         assert_list_scoped_triggers_excludes_states(&repo).await;
         super::clear_postgres_triggers(&pool).await;
     }
+
+    // Prove that exclusion happens BEFORE the LIMIT is applied.
+    //
+    // Seeds two triggers for the same scope with the Completed row
+    // ordered FIRST by (created_at, trigger_id).  With limit = 1 and
+    // Completed excluded the backend must still surface the Scheduled
+    // row.  A backend that filters AFTER LIMIT would fetch the
+    // Completed row first, drop it, and return an empty page.
+    async fn assert_list_scoped_triggers_exclusion_precedes_limit(repo: &impl TriggerRepository) {
+        // Completed row: earlier created_at → sorts first under ORDER BY created_at, trigger_id.
+        let mut completed = sample_record(
+            TriggerId::parse("01J00000000000000000000052").expect("ulid"),
+            tenant("tenant-excl-limit"),
+            ts(1_704_067_200),
+        );
+        completed.state = TriggerState::Completed;
+        completed.created_at = ts(1_704_067_100); // earlier than the scheduled row
+
+        // Scheduled row: later created_at → sorts second.
+        let scheduled = sample_record(
+            TriggerId::parse("01J00000000000000000000053").expect("ulid"),
+            tenant("tenant-excl-limit"),
+            ts(1_704_067_200),
+        );
+        // scheduled.created_at stays at ts(1_704_067_200) — the sample_record default.
+
+        repo.upsert_trigger(completed.clone())
+            .await
+            .expect("insert completed trigger (excl-limit)");
+        repo.upsert_trigger(scheduled.clone())
+            .await
+            .expect("insert scheduled trigger (excl-limit)");
+
+        // With limit = 1 and Completed excluded the Scheduled row must be returned.
+        // If the backend filtered AFTER LIMIT it would pick up the Completed row
+        // first (it sorts first), discard it, and return an empty page.
+        let result = repo
+            .list_scoped_triggers(
+                tenant("tenant-excl-limit"),
+                user("user-a"),
+                Some(AgentId::new("agent-a").expect("valid agent")),
+                Some(ProjectId::new("project-a").expect("valid project")),
+                1,
+                &[TriggerState::Completed],
+            )
+            .await
+            .expect("list with limit=1 and Completed excluded");
+        assert_eq!(
+            result.iter().map(|r| r.trigger_id).collect::<Vec<_>>(),
+            vec![scheduled.trigger_id],
+            "exclusion must happen before LIMIT: the Scheduled row must be returned \
+             even though the Completed row sorts first and would consume the budget \
+             if filtering happened after LIMIT"
+        );
+    }
+
+    #[tokio::test]
+    async fn in_memory_list_scoped_triggers_exclusion_precedes_limit() {
+        let repo = InMemoryTriggerRepository::default();
+        assert_list_scoped_triggers_exclusion_precedes_limit(&repo).await;
+    }
+
+    #[cfg(feature = "libsql")]
+    #[tokio::test]
+    async fn libsql_list_scoped_triggers_exclusion_precedes_limit() {
+        let (_dir, repo) = super::build_libsql_repo().await;
+        assert_list_scoped_triggers_exclusion_precedes_limit(&repo).await;
+    }
+
+    #[cfg(feature = "postgres")]
+    #[tokio::test]
+    async fn postgres_list_scoped_triggers_exclusion_precedes_limit() {
+        let Some((_container, pool)) = super::postgres_pool_or_skip().await else {
+            return;
+        };
+        let repo = PostgresTriggerRepository::new(pool.clone());
+        repo.run_migrations().await.expect("run migrations");
+        assert_list_scoped_triggers_exclusion_precedes_limit(&repo).await;
+        super::clear_postgres_triggers(&pool).await;
+    }
 }
