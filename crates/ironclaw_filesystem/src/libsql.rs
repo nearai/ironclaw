@@ -933,12 +933,25 @@ impl RootFilesystem for LibSqlRootFilesystem {
         path: &VirtualPath,
         from: SeqNo,
     ) -> Result<Vec<EventRecord>, FilesystemError> {
+        self.tail_bounded(path, from, usize::MAX).await
+    }
+
+    async fn tail_bounded(
+        &self,
+        path: &VirtualPath,
+        from: SeqNo,
+        max_records: usize,
+    ) -> Result<Vec<EventRecord>, FilesystemError> {
+        if max_records == 0 {
+            return Ok(Vec::new());
+        }
         let conn = self.connect().await?;
         let from_raw = i64::try_from(from.get()).map_err(|_| FilesystemError::Backend {
             path: path.clone(),
             operation: FilesystemOperation::Tail,
             reason: "tail cursor exceeds i64".to_string(),
         })?;
+        let limit_raw = i64::try_from(max_records).unwrap_or(i64::MAX);
         let mut rows = conn
             .query(
                 r#"
@@ -946,8 +959,9 @@ impl RootFilesystem for LibSqlRootFilesystem {
                 FROM root_filesystem_events
                 WHERE path = ?1 AND seq > ?2
                 ORDER BY seq ASC
+                LIMIT ?3
                 "#,
-                libsql::params![path.as_str(), from_raw],
+                libsql::params![path.as_str(), from_raw, limit_raw],
             )
             .await
             .map_err(|error| libsql_db_error(path.clone(), FilesystemOperation::Tail, error))?;

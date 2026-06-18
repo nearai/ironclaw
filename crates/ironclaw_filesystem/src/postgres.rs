@@ -673,6 +673,18 @@ impl RootFilesystem for PostgresRootFilesystem {
         path: &VirtualPath,
         from: SeqNo,
     ) -> Result<Vec<EventRecord>, FilesystemError> {
+        self.tail_bounded(path, from, usize::MAX).await
+    }
+
+    async fn tail_bounded(
+        &self,
+        path: &VirtualPath,
+        from: SeqNo,
+        max_records: usize,
+    ) -> Result<Vec<EventRecord>, FilesystemError> {
+        if max_records == 0 {
+            return Ok(Vec::new());
+        }
         let client = self.client().await?;
         let from_raw = i64::try_from(from.get()).map_err(|_| {
             backend_error(
@@ -681,6 +693,7 @@ impl RootFilesystem for PostgresRootFilesystem {
                 "tail cursor exceeds i64",
             )
         })?;
+        let limit_raw = i64::try_from(max_records).unwrap_or(i64::MAX);
         let rows = client
             .query(
                 r#"
@@ -688,8 +701,9 @@ impl RootFilesystem for PostgresRootFilesystem {
                 FROM root_filesystem_events
                 WHERE path = $1 AND id > $2
                 ORDER BY id ASC
+                LIMIT $3
                 "#,
-                &[&path.as_str(), &from_raw],
+                &[&path.as_str(), &from_raw, &limit_raw],
             )
             .await
             .map_err(|error| db_error(path.clone(), FilesystemOperation::Tail, error))?;

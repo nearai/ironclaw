@@ -194,6 +194,20 @@ where
         self.root.tail(&virtual_path, from).await
     }
 
+    /// Read at most `max_records` events at `path` starting just after `from`.
+    pub async fn tail_bounded(
+        &self,
+        scope: &ResourceScope,
+        path: &ScopedPath,
+        from: SeqNo,
+        max_records: usize,
+    ) -> Result<Vec<EventRecord>, FilesystemError> {
+        let virtual_path = self.resolve_with_permission(scope, path, FilesystemOperation::Tail)?;
+        self.root
+            .tail_bounded(&virtual_path, from, max_records)
+            .await
+    }
+
     /// Return the highest seq present at `path` with `seq > from`, or `None`
     /// when the gap is empty. SQL-backed mounts serve this with an O(1)
     /// `MAX(seq)` query; see [`RootFilesystem::head_seq`].
