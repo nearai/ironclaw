@@ -20,10 +20,11 @@ use ironclaw_threads::{
     AppendCapabilityDisplayPreviewRequest, AttachmentKind, AttachmentRef,
     CapabilityDisplayPreviewEnvelope, CapabilityDisplayPreviewEnvelopeInput,
     CapabilityDisplayPreviewStatus, CreateSummaryArtifactRequest, EnsureThreadRequest,
-    FilesystemSessionThreadService, LoadContextMessagesRequest, LoadContextWindowRequest,
-    MessageContent, MessageKind, MessageStatus, RedactMessageRequest,
-    ReplayAcceptedInboundMessageRequest, SessionThreadError, SessionThreadService, SummaryKind,
-    SummaryModelContextPolicy, ThreadHistoryRequest, ThreadScope, UpdateAssistantDraftRequest,
+    FilesystemSessionThreadService, FinalizedAssistantMessageByRunRequest,
+    LoadContextMessagesRequest, LoadContextWindowRequest, MessageContent, MessageKind,
+    MessageStatus, RedactMessageRequest, ReplayAcceptedInboundMessageRequest, SessionThreadError,
+    SessionThreadService, SummaryKind, SummaryModelContextPolicy, ThreadHistoryRequest,
+    ThreadScope, UpdateAssistantDraftRequest,
 };
 
 #[tokio::test]
@@ -131,6 +132,66 @@ async fn filesystem_delete_thread_removes_inbound_idempotency_records() {
         .expect("deleted thread must not leave stale idempotency records");
 
     assert!(replay.is_none());
+}
+
+#[tokio::test]
+async fn filesystem_finalized_assistant_lookup_by_run_uses_persisted_message() {
+    let backend = Arc::new(InMemoryBackend::new());
+    let scoped = scoped_threads_fs_at(backend, "tenant-finalized-by-run", "alice");
+    let service = FilesystemSessionThreadService::new(scoped);
+    let scope = scope("finalized-by-run");
+    let thread = service
+        .ensure_thread(EnsureThreadRequest {
+            scope: scope.clone(),
+            thread_id: Some(ThreadId::new("thread-finalized-by-run").unwrap()),
+            created_by_actor_id: "actor-a".into(),
+            title: None,
+            metadata_json: None,
+        })
+        .await
+        .unwrap();
+    let draft = service
+        .append_assistant_draft(AppendAssistantDraftRequest {
+            scope: scope.clone(),
+            thread_id: thread.thread_id.clone(),
+            turn_run_id: "run-finalized-lookup".into(),
+            content: MessageContent::text("draft"),
+        })
+        .await
+        .unwrap();
+
+    let before_finalize = service
+        .finalized_assistant_message_by_run(FinalizedAssistantMessageByRunRequest {
+            scope: scope.clone(),
+            thread_id: thread.thread_id.clone(),
+            turn_run_id: "run-finalized-lookup".into(),
+        })
+        .await
+        .unwrap();
+    assert!(before_finalize.is_none());
+
+    service
+        .finalize_assistant_message(
+            &scope,
+            &thread.thread_id,
+            draft.message_id,
+            MessageContent::text("final"),
+        )
+        .await
+        .unwrap();
+
+    let finalized = service
+        .finalized_assistant_message_by_run(FinalizedAssistantMessageByRunRequest {
+            scope,
+            thread_id: thread.thread_id,
+            turn_run_id: "run-finalized-lookup".into(),
+        })
+        .await
+        .unwrap()
+        .expect("finalized assistant message is indexed by run");
+    assert_eq!(finalized.message_id, draft.message_id);
+    assert_eq!(finalized.status, MessageStatus::Finalized);
+    assert_eq!(finalized.content.as_deref(), Some("final"));
 }
 
 #[tokio::test]

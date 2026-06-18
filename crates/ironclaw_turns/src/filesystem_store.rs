@@ -84,6 +84,7 @@ where
     filesystem: Arc<ScopedFilesystem<F>>,
     limits: InMemoryTurnStateStoreLimits,
     admission_limit_provider: Arc<dyn TurnAdmissionLimitProvider>,
+    snapshot_cache: Mutex<Option<(TurnPersistenceSnapshot, Option<RecordVersion>)>>,
 }
 
 impl<F> FilesystemTurnStateStore<F>
@@ -95,6 +96,7 @@ where
             filesystem,
             limits: InMemoryTurnStateStoreLimits::default(),
             admission_limit_provider: Arc::new(AllowAllTurnAdmissionLimitProvider),
+            snapshot_cache: Mutex::new(None),
         }
     }
 
@@ -136,13 +138,36 @@ where
         // scoped filesystem. Tenant/user isolation comes from the mount view
         // that resolves `/turns/state.json` to the backend virtual path; the
         // snapshot body then scopes records by agent/project/thread.
-        match self.filesystem.get(&ResourceScope::system(), &path).await {
+        let snapshot = match self.filesystem.get(&ResourceScope::system(), &path).await {
             Ok(Some(versioned)) => {
                 let snapshot = deserialize_snapshot(&versioned.entry.body)?;
                 Ok((snapshot, Some(versioned.version)))
             }
             Ok(None) => Ok((TurnPersistenceSnapshot::default(), None)),
             Err(error) => Err(fs_error(error)),
+        }?;
+        self.store_snapshot_cache(snapshot.clone());
+        Ok(snapshot)
+    }
+
+    fn cached_snapshot(&self) -> Option<(TurnPersistenceSnapshot, Option<RecordVersion>)> {
+        match self.snapshot_cache.lock() {
+            Ok(guard) => guard.clone(),
+            Err(poisoned) => poisoned.into_inner().clone(),
+        }
+    }
+
+    fn store_snapshot_cache(&self, snapshot: (TurnPersistenceSnapshot, Option<RecordVersion>)) {
+        match self.snapshot_cache.lock() {
+            Ok(mut guard) => *guard = Some(snapshot),
+            Err(poisoned) => *poisoned.into_inner() = Some(snapshot),
+        }
+    }
+
+    fn clear_snapshot_cache(&self) {
+        match self.snapshot_cache.lock() {
+            Ok(mut guard) => *guard = None,
+            Err(poisoned) => *poisoned.into_inner() = None,
         }
     }
 
@@ -173,13 +198,27 @@ where
         let path = snapshot_path()?;
         let record_lock = filesystem_record_lock(self.filesystem.as_ref(), &path);
         let _guard = record_lock.lock().await;
-        for _ in 0..FILESYSTEM_CAS_RETRIES {
-            let (snapshot, version) = self.read_snapshot_unlocked().await?;
+        for attempt in 0..FILESYSTEM_CAS_RETRIES {
+            let cached = if attempt == 0 {
+                self.cached_snapshot()
+            } else {
+                None
+            };
+            let used_cached = cached.is_some();
+            let (snapshot, version) = if let Some(snapshot) = cached {
+                snapshot
+            } else {
+                self.read_snapshot_unlocked().await?
+            };
             let old_snapshot = snapshot.clone();
             let store = self.build_in_memory_store(snapshot)?;
             let (outcome, store) = apply(store).await;
             let new_snapshot = store.persistence_snapshot();
             if new_snapshot == old_snapshot {
+                if used_cached {
+                    self.clear_snapshot_cache();
+                    continue;
+                }
                 return outcome;
             }
             let entry = snapshot_entry(&new_snapshot)?;
@@ -188,8 +227,14 @@ where
                 None => CasExpectation::Absent,
             };
             match put_with_cas(self.filesystem.as_ref(), &path, entry, cas).await {
-                Ok(()) => return outcome,
-                Err(PutError::VersionMismatch) => continue,
+                Ok(version) => {
+                    self.store_snapshot_cache((new_snapshot, Some(version)));
+                    return outcome;
+                }
+                Err(PutError::VersionMismatch) => {
+                    self.clear_snapshot_cache();
+                    continue;
+                }
                 Err(PutError::Other(error)) => return Err(error),
             }
         }
@@ -718,14 +763,14 @@ async fn put_with_cas<F>(
     path: &ScopedPath,
     entry: Entry,
     cas: CasExpectation,
-) -> Result<(), PutError>
+) -> Result<RecordVersion, PutError>
 where
     F: RootFilesystem,
 {
     let fallback_entry = entry.clone();
     let scope = ResourceScope::system();
     match filesystem.put(&scope, path, entry, cas).await {
-        Ok(_) => Ok(()),
+        Ok(version) => Ok(version),
         Err(FilesystemError::VersionMismatch { .. }) => Err(PutError::VersionMismatch),
         Err(FilesystemError::Unsupported {
             operation: FilesystemOperation::WriteFile,
@@ -733,7 +778,6 @@ where
         }) => filesystem
             .put(&scope, path, fallback_entry, CasExpectation::Any)
             .await
-            .map(|_| ())
             .map_err(|error| PutError::Other(fs_error(error))),
         Err(error) => Err(PutError::Other(fs_error(error))),
     }

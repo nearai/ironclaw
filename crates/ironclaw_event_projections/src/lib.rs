@@ -5,8 +5,8 @@
 //! implementation is replay-derived over [`ironclaw_events::DurableEventLog`]
 //! so it stays independent of concrete JSONL/PostgreSQL/libSQL adapters.
 
-use std::collections::HashSet;
-use std::sync::Arc;
+use std::collections::{BTreeMap, HashMap, HashSet};
+use std::sync::{Arc, Mutex, MutexGuard};
 
 use async_trait::async_trait;
 use chrono::Utc;
@@ -38,6 +38,7 @@ mod runtime_projection;
 use runtime_projection::{RuntimeProjectionState, capability_activity_transition_for_entry};
 
 const STATE_REPLAY_PAGE_LIMIT: usize = 256;
+const RUNTIME_PROJECTION_CHECKPOINTS_PER_SCOPE: usize = 256;
 
 /// Hard ceiling on how many runtime-prefix events `updates()` will fold while
 /// reconstructing run state for touched invocations on a single call.
@@ -68,7 +69,7 @@ pub const MAX_PROJECTION_PAGE_LIMIT: usize = 1_000;
 /// The stream key selects the durable `(tenant, user, agent)` partition. The
 /// read scope tightens access within that partition so product callers cannot
 /// observe neighboring project/thread/process records.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct ProjectionScope {
     pub stream: EventStreamKey,
     pub read_scope: ReadScope,
@@ -1181,8 +1182,18 @@ impl std::fmt::Debug for EventStreamManager {
 }
 
 #[derive(Clone)]
+struct RuntimeProjectionCheckpoint {
+    cursor: EventCursor,
+    state: RuntimeProjectionState,
+}
+
+type RuntimeProjectionCheckpointCache =
+    HashMap<ProjectionScope, BTreeMap<EventCursor, RuntimeProjectionState>>;
+
+#[derive(Clone)]
 pub struct ReplayEventProjectionService {
     runtime_log: Arc<dyn DurableEventLog>,
+    runtime_checkpoints: Arc<Mutex<RuntimeProjectionCheckpointCache>>,
 }
 
 impl ReplayEventProjectionService {
@@ -1191,11 +1202,21 @@ impl ReplayEventProjectionService {
         T: DurableEventLog + 'static,
     {
         let runtime_log: Arc<dyn DurableEventLog> = runtime_log;
-        Self { runtime_log }
+        Self::from_runtime_log(runtime_log)
     }
 
     pub fn from_runtime_log(runtime_log: Arc<dyn DurableEventLog>) -> Self {
-        Self { runtime_log }
+        Self {
+            runtime_log,
+            runtime_checkpoints: Arc::new(Mutex::new(HashMap::new())),
+        }
+    }
+
+    fn lock_runtime_checkpoints(&self) -> MutexGuard<'_, RuntimeProjectionCheckpointCache> {
+        match self.runtime_checkpoints.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        }
     }
 
     async fn read_runtime(
@@ -1266,6 +1287,63 @@ impl ReplayEventProjectionService {
         })
     }
 
+    async fn runtime_checkpoint_at_or_before(
+        &self,
+        scope: &ProjectionScope,
+        cursor: EventCursor,
+    ) -> RuntimeProjectionCheckpoint {
+        let checkpoints = self.lock_runtime_checkpoints();
+        checkpoints
+            .get(scope)
+            .and_then(|scope_checkpoints| {
+                scope_checkpoints
+                    .range(..=cursor)
+                    .next_back()
+                    .map(|(cursor, state)| RuntimeProjectionCheckpoint {
+                        cursor: *cursor,
+                        state: state.clone(),
+                    })
+            })
+            .unwrap_or_else(origin_runtime_checkpoint)
+    }
+
+    async fn latest_runtime_checkpoint(
+        &self,
+        scope: &ProjectionScope,
+    ) -> RuntimeProjectionCheckpoint {
+        let checkpoints = self.lock_runtime_checkpoints();
+        checkpoints
+            .get(scope)
+            .and_then(|scope_checkpoints| {
+                scope_checkpoints.last_key_value().map(|(cursor, state)| {
+                    RuntimeProjectionCheckpoint {
+                        cursor: *cursor,
+                        state: state.clone(),
+                    }
+                })
+            })
+            .unwrap_or_else(origin_runtime_checkpoint)
+    }
+
+    async fn store_runtime_checkpoint(
+        &self,
+        scope: &ProjectionScope,
+        checkpoint: &RuntimeProjectionCheckpoint,
+    ) {
+        if checkpoint.cursor == EventCursor::origin() {
+            return;
+        }
+        let mut checkpoints = self.lock_runtime_checkpoints();
+        let scope_checkpoints = checkpoints.entry(scope.clone()).or_default();
+        scope_checkpoints.insert(checkpoint.cursor, checkpoint.state.clone());
+        while scope_checkpoints.len() > RUNTIME_PROJECTION_CHECKPOINTS_PER_SCOPE {
+            let Some(first) = scope_checkpoints.keys().next().copied() else {
+                break;
+            };
+            scope_checkpoints.remove(&first);
+        }
+    }
+
     /// Fold the entire scoped runtime stream into the current run-state
     /// projection for every invocation visible under `scope`.
     ///
@@ -1289,10 +1367,7 @@ impl ReplayEventProjectionService {
         scope: &ProjectionScope,
         capability_activity_output_limit: usize,
     ) -> Result<RuntimeProjectionState, ProjectionError> {
-        let mut state = RuntimeProjectionState::with_capability_activity_output_limit(
-            capability_activity_output_limit,
-        );
-        let mut after: Option<EventCursor> = None;
+        let mut checkpoint = self.latest_runtime_checkpoint(scope).await;
         let mut scanned: usize = 0;
         loop {
             let replay = self
@@ -1300,14 +1375,24 @@ impl ReplayEventProjectionService {
                 .read_after_cursor(
                     &scope.stream,
                     &scope.read_scope,
-                    after,
+                    after_for_checkpoint(checkpoint.cursor),
                     STATE_REPLAY_PAGE_LIMIT,
                 )
                 .await
                 .map_err(|error| {
-                    map_projection_error(error, after, "snapshot run-state replay", scope)
+                    map_projection_error(
+                        error,
+                        after_for_checkpoint(checkpoint.cursor),
+                        "snapshot run-state replay",
+                        scope,
+                    )
                 })?;
             if replay.entries.is_empty() {
+                if replay.next_cursor > checkpoint.cursor {
+                    checkpoint.cursor = replay.next_cursor;
+                    self.store_runtime_checkpoint(scope, &checkpoint).await;
+                    continue;
+                }
                 break;
             }
             for entry in &replay.entries {
@@ -1321,15 +1406,18 @@ impl ReplayEventProjectionService {
                         )),
                     });
                 }
-                state.apply(entry);
+                checkpoint.state.apply(entry);
             }
-            if after == Some(replay.next_cursor) {
+            if replay.next_cursor == checkpoint.cursor {
                 // The durable log made no progress — stream exhausted.
                 break;
             }
-            after = Some(replay.next_cursor);
+            checkpoint.cursor = replay.next_cursor;
+            self.store_runtime_checkpoint(scope, &checkpoint).await;
         }
-        Ok(state)
+        Ok(checkpoint
+            .state
+            .with_output_limit(capability_activity_output_limit))
     }
 
     /// Fold the runtime-event prefix `(origin, until]` for `scope` into the
@@ -1348,33 +1436,47 @@ impl ReplayEventProjectionService {
         until: EventCursor,
         touched: &HashSet<InvocationId>,
     ) -> Result<RuntimeProjectionState, ProjectionError> {
-        let mut state = RuntimeProjectionState::without_capability_activity_output_limit();
         if touched.is_empty() || until == EventCursor::origin() {
-            return Ok(state);
+            return Ok(RuntimeProjectionState::without_capability_activity_output_limit());
         }
 
-        let mut after = None;
+        let mut checkpoint = self.runtime_checkpoint_at_or_before(scope, until).await;
         let mut scanned: usize = 0;
         loop {
+            if checkpoint.cursor >= until {
+                break;
+            }
+            let page_start_cursor = checkpoint.cursor;
             let replay = self
                 .runtime_log
                 .read_after_cursor(
                     &scope.stream,
                     &scope.read_scope,
-                    after,
+                    after_for_checkpoint(checkpoint.cursor),
                     STATE_REPLAY_PAGE_LIMIT,
                 )
                 .await
                 .map_err(|error| {
-                    map_projection_error(error, after, "runtime state replay", scope)
+                    map_projection_error(
+                        error,
+                        after_for_checkpoint(checkpoint.cursor),
+                        "runtime state replay",
+                        scope,
+                    )
                 })?;
             if replay.entries.is_empty() {
+                if replay.next_cursor > checkpoint.cursor {
+                    checkpoint.cursor = replay.next_cursor.min(until);
+                    self.store_runtime_checkpoint(scope, &checkpoint).await;
+                    continue;
+                }
                 break;
             }
 
             for entry in &replay.entries {
                 if entry.cursor > until {
-                    return Ok(state);
+                    checkpoint.state.retain_invocations(touched);
+                    return Ok(checkpoint.state);
                 }
                 scanned = scanned.saturating_add(1);
                 if scanned > STATE_REPLAY_MAX_EVENTS {
@@ -1386,20 +1488,24 @@ impl ReplayEventProjectionService {
                         )),
                     });
                 }
-                if touched.contains(&entry.record.scope.invocation_id) {
-                    state.apply(entry);
-                }
-                if entry.cursor >= until {
-                    return Ok(state);
-                }
+                checkpoint.state.apply(entry);
+                checkpoint.cursor = entry.cursor;
             }
 
-            if replay.next_cursor >= until || after == Some(replay.next_cursor) {
+            if replay.next_cursor > checkpoint.cursor {
+                checkpoint.cursor = if replay.next_cursor > until {
+                    until
+                } else {
+                    replay.next_cursor
+                };
+            }
+            self.store_runtime_checkpoint(scope, &checkpoint).await;
+            if checkpoint.cursor >= until || checkpoint.cursor == page_start_cursor {
                 break;
             }
-            after = Some(replay.next_cursor);
         }
-        Ok(state)
+        checkpoint.state.retain_invocations(touched);
+        Ok(checkpoint.state)
     }
 }
 
@@ -1408,7 +1514,23 @@ impl std::fmt::Debug for ReplayEventProjectionService {
         formatter
             .debug_struct("ReplayEventProjectionService")
             .field("runtime_log", &"<durable_event_log>")
+            .field("runtime_checkpoints", &"<runtime_projection_checkpoints>")
             .finish()
+    }
+}
+
+fn origin_runtime_checkpoint() -> RuntimeProjectionCheckpoint {
+    RuntimeProjectionCheckpoint {
+        cursor: EventCursor::origin(),
+        state: RuntimeProjectionState::without_capability_activity_output_limit(),
+    }
+}
+
+fn after_for_checkpoint(cursor: EventCursor) -> Option<EventCursor> {
+    if cursor == EventCursor::origin() {
+        None
+    } else {
+        Some(cursor)
     }
 }
 

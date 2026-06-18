@@ -3492,15 +3492,17 @@ async fn build_libsql_production(
 async fn build_postgres_production(
     context: RebornProductionBuildContext,
     pool: deadpool_postgres::Pool,
-    url: ironclaw_secrets::SecretMaterial,
-    tls_options: ironclaw_reborn_event_store::PostgresPoolTlsOptions,
+    _url: ironclaw_secrets::SecretMaterial,
+    _tls_options: ironclaw_reborn_event_store::PostgresPoolTlsOptions,
     secret_master_key: ironclaw_secrets::SecretMaterial,
 ) -> Result<RebornServices, RebornBuildError> {
     use ironclaw_filesystem::PostgresRootFilesystem;
 
     let filesystem = Arc::new(PostgresRootFilesystem::new(pool.clone()));
     filesystem.run_migrations().await?;
-    let trigger_repository = Arc::new(ironclaw_triggers::PostgresTriggerRepository::new(pool));
+    let trigger_repository = Arc::new(ironclaw_triggers::PostgresTriggerRepository::new(
+        pool.clone(),
+    ));
     trigger_repository
         .run_migrations()
         .await
@@ -3510,7 +3512,7 @@ async fn build_postgres_production(
     let stores = ProductionStoreBundle::new(
         filesystem,
         secret_master_key,
-        ironclaw_reborn_event_store::RebornEventStoreConfig::Postgres { url, tls_options },
+        ironclaw_reborn_event_store::RebornEventStoreConfig::PostgresPool { pool },
     )?;
 
     build_backend_production(

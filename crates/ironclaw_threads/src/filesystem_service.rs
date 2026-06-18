@@ -135,6 +135,12 @@ struct InboundIdempotencyRecord {
     message_id: ThreadMessageId,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct MessageLookupIndexRecord {
+    thread_id: ThreadId,
+    message_id: ThreadMessageId,
+}
+
 /// Filesystem-backed [`SessionThreadService`].
 ///
 /// Construct with an [`Arc<ScopedFilesystem<F>>`](ScopedFilesystem) over
@@ -235,6 +241,70 @@ where
             .await
     }
 
+    async fn write_message_lookup_indexes(
+        &self,
+        scope: &ThreadScope,
+        thread_id: &ThreadId,
+        message: &ThreadMessageRecord,
+    ) -> Result<(), SessionThreadError> {
+        if message.kind == MessageKind::Assistant
+            && let Some(turn_run_id) = message.turn_run_id.as_deref()
+        {
+            self.write_message_lookup_index(
+                scope,
+                &assistant_run_index_path(scope, thread_id, turn_run_id)?,
+                thread_id,
+                message.message_id,
+            )
+            .await?;
+        }
+        if message.kind == MessageKind::ToolResultReference
+            && let (Some(turn_run_id), Some(result_ref)) = (
+                message.turn_run_id.as_deref(),
+                message.tool_result_ref.as_deref(),
+            )
+        {
+            self.write_message_lookup_index(
+                scope,
+                &tool_result_index_path(scope, thread_id, turn_run_id, result_ref)?,
+                thread_id,
+                message.message_id,
+            )
+            .await?;
+        }
+        Ok(())
+    }
+
+    async fn write_message_lookup_index(
+        &self,
+        scope: &ThreadScope,
+        path: &ScopedPath,
+        thread_id: &ThreadId,
+        message_id: ThreadMessageId,
+    ) -> Result<(), SessionThreadError> {
+        let record = MessageLookupIndexRecord {
+            thread_id: thread_id.clone(),
+            message_id,
+        };
+        let body = serialize_pretty(&record)?;
+        let entry = Entry::bytes(body).with_content_type(ContentType::json());
+        put_with_cas(
+            self.filesystem.as_ref(),
+            &scope.to_resource_scope(),
+            path,
+            entry,
+            CasExpectation::Any,
+        )
+        .await
+        .map_err(|error| match error {
+            PutError::VersionMismatch => SessionThreadError::Backend(format!(
+                "filesystem CAS Any rejected message lookup index at {}",
+                path.as_str()
+            )),
+            PutError::Other(error) => error,
+        })
+    }
+
     async fn write_new_message(
         &self,
         scope: &ThreadScope,
@@ -255,6 +325,8 @@ where
         {
             Ok(()) => {
                 self.write_message_sequence_index(scope, thread_id, message)
+                    .await?;
+                self.write_message_lookup_indexes(scope, thread_id, message)
                     .await
             }
             Err(PutError::VersionMismatch) => Err(SessionThreadError::Backend(format!(
@@ -304,6 +376,91 @@ where
         }
         messages.sort_by_key(|message| message.sequence);
         Ok(messages)
+    }
+
+    async fn read_message_lookup_index(
+        &self,
+        scope: &ThreadScope,
+        thread_id: &ThreadId,
+        path: &ScopedPath,
+    ) -> Result<Option<ThreadMessageRecord>, SessionThreadError> {
+        let Some(versioned) = self
+            .filesystem
+            .get(&scope.to_resource_scope(), path)
+            .await?
+        else {
+            return Ok(None);
+        };
+        let record = deserialize::<MessageLookupIndexRecord>(&versioned.entry.body)?;
+        if &record.thread_id != thread_id {
+            return Ok(None);
+        }
+        Ok(self
+            .read_message_versioned(scope, thread_id, record.message_id)
+            .await?
+            .map(|(message, _)| message))
+    }
+
+    async fn find_assistant_message_by_run(
+        &self,
+        scope: &ThreadScope,
+        thread_id: &ThreadId,
+        turn_run_id: &str,
+        required_status: Option<MessageStatus>,
+    ) -> Result<Option<ThreadMessageRecord>, SessionThreadError> {
+        let path = assistant_run_index_path(scope, thread_id, turn_run_id)?;
+        if let Some(message) = self
+            .read_message_lookup_index(scope, thread_id, &path)
+            .await?
+            && message.kind == MessageKind::Assistant
+            && message.turn_run_id.as_deref() == Some(turn_run_id)
+            && required_status.is_none_or(|status| message.status == status)
+        {
+            return Ok(Some(message));
+        }
+
+        let found = self
+            .list_thread_messages(scope, thread_id)
+            .await?
+            .into_iter()
+            .find(|message| {
+                message.kind == MessageKind::Assistant
+                    && message.turn_run_id.as_deref() == Some(turn_run_id)
+                    && required_status.is_none_or(|status| message.status == status)
+            });
+        if let Some(message) = found.as_ref() {
+            self.write_message_lookup_indexes(scope, thread_id, message)
+                .await?;
+        }
+        Ok(found)
+    }
+
+    async fn find_tool_result_reference_message(
+        &self,
+        scope: &ThreadScope,
+        thread_id: &ThreadId,
+        turn_run_id: &str,
+        result_ref: &str,
+    ) -> Result<Option<ThreadMessageRecord>, SessionThreadError> {
+        let path = tool_result_index_path(scope, thread_id, turn_run_id, result_ref)?;
+        if let Some(message) = self
+            .read_message_lookup_index(scope, thread_id, &path)
+            .await?
+            && matches_tool_result_reference(&message, turn_run_id, result_ref)
+        {
+            return Ok(Some(message));
+        }
+
+        let found = self
+            .list_thread_messages(scope, thread_id)
+            .await?
+            .into_iter()
+            .find(|message| matches_tool_result_reference(message, turn_run_id, result_ref));
+        if let Some(message) = found.as_ref() {
+            self.write_message_lookup_indexes(scope, thread_id, message)
+                .await?;
+        }
+        Ok(found)
     }
 
     async fn list_thread_messages_range_indexed(
@@ -610,7 +767,11 @@ where
             )
             .await
             {
-                Ok(()) => return Ok(message),
+                Ok(()) => {
+                    self.write_message_lookup_indexes(scope, thread_id, &message)
+                        .await?;
+                    return Ok(message);
+                }
                 Err(PutError::VersionMismatch) => continue,
                 Err(PutError::Other(error)) => return Err(error),
             }
@@ -936,18 +1097,19 @@ where
         &self,
         request: AppendAssistantDraftRequest,
     ) -> Result<ThreadMessageRecord, SessionThreadError> {
-        // Dedup-by-turn-run-id: scan existing messages and return the
-        // matching draft if one is already present. This matches the
-        // legacy in-memory semantics where retrying a draft append with
-        // the same `turn_run_id` returned the existing record rather than
-        // creating a sibling.
-        let existing = self
-            .list_thread_messages(&request.scope, &request.thread_id)
-            .await?;
-        if let Some(existing) = existing.into_iter().find(|message| {
-            message.kind == MessageKind::Assistant
-                && message.turn_run_id.as_deref() == Some(request.turn_run_id.as_str())
-        }) {
+        // Dedup-by-turn-run-id: read the secondary index first and fall back
+        // to the legacy scan for rows written before the index existed.
+        // Retrying a draft append with the same `turn_run_id` returns the
+        // existing record rather than creating a sibling.
+        if let Some(existing) = self
+            .find_assistant_message_by_run(
+                &request.scope,
+                &request.thread_id,
+                &request.turn_run_id,
+                None,
+            )
+            .await?
+        {
             return Ok(existing);
         }
         let sequence = self
@@ -991,15 +1153,15 @@ where
             request.model_observation,
         )
         .map_err(SessionThreadError::Serialization)?;
-        let existing = self
-            .list_thread_messages(&request.scope, &request.thread_id)
-            .await?;
-        if let Some(existing) = existing.into_iter().find(|message| {
-            message.kind == MessageKind::ToolResultReference
-                && message.status == MessageStatus::Finalized
-                && message.turn_run_id.as_deref() == Some(request.turn_run_id.as_str())
-                && message.tool_result_ref.as_deref() == Some(envelope.result_ref.as_str())
-        }) {
+        if let Some(existing) = self
+            .find_tool_result_reference_message(
+                &request.scope,
+                &request.thread_id,
+                &request.turn_run_id,
+                &envelope.result_ref,
+            )
+            .await?
+        {
             // Idempotent replay. If new provider metadata arrives, validate
             // and attach it (or reject on conflict) — matching the in-memory
             // contract semantics.
@@ -1171,14 +1333,14 @@ where
         &self,
         request: UpdateToolResultReferenceRequest,
     ) -> Result<ThreadMessageRecord, SessionThreadError> {
-        let existing = self
-            .list_thread_messages(&request.scope, &request.thread_id)
-            .await?;
-        let message = existing
-            .into_iter()
-            .find(|message| {
-                matches_tool_result_reference(message, &request.turn_run_id, &request.result_ref)
-            })
+        let message = self
+            .find_tool_result_reference_message(
+                &request.scope,
+                &request.thread_id,
+                &request.turn_run_id,
+                &request.result_ref,
+            )
+            .await?
             .ok_or_else(|| {
                 SessionThreadError::Backend(format!(
                     "tool result reference {} was not found in thread {}",
@@ -1396,6 +1558,29 @@ where
             .into_iter()
             .rev()
             .find(|message| message.kind == request.kind && message.status == request.status)
+        else {
+            return Ok(None);
+        };
+        Ok(Some(history_message(&message)))
+    }
+
+    async fn finalized_assistant_message_by_run(
+        &self,
+        request: crate::FinalizedAssistantMessageByRunRequest,
+    ) -> Result<Option<ThreadMessageRecord>, SessionThreadError> {
+        self.read_thread_versioned(&request.scope, &request.thread_id)
+            .await?
+            .ok_or_else(|| SessionThreadError::UnknownThread {
+                thread_id: request.thread_id.clone(),
+            })?;
+        let Some(message) = self
+            .find_assistant_message_by_run(
+                &request.scope,
+                &request.thread_id,
+                &request.turn_run_id,
+                Some(MessageStatus::Finalized),
+            )
+            .await?
         else {
             return Ok(None);
         };
@@ -1800,6 +1985,46 @@ fn message_record_path(
     ))
 }
 
+fn assistant_run_index_path(
+    scope: &ThreadScope,
+    thread_id: &ThreadId,
+    turn_run_id: &str,
+) -> Result<ScopedPath, SessionThreadError> {
+    #[derive(Serialize)]
+    struct AssistantRunIndexKey<'a> {
+        turn_run_id: &'a str,
+    }
+    let key = lookup_index_key("assistant-run", &AssistantRunIndexKey { turn_run_id })?;
+    scoped_path(&format!(
+        "{}/indexes/assistant-runs/{key}.json",
+        thread_root_string(scope, thread_id)
+    ))
+}
+
+fn tool_result_index_path(
+    scope: &ThreadScope,
+    thread_id: &ThreadId,
+    turn_run_id: &str,
+    result_ref: &str,
+) -> Result<ScopedPath, SessionThreadError> {
+    #[derive(Serialize)]
+    struct ToolResultIndexKey<'a> {
+        turn_run_id: &'a str,
+        result_ref: &'a str,
+    }
+    let key = lookup_index_key(
+        "tool-result",
+        &ToolResultIndexKey {
+            turn_run_id,
+            result_ref,
+        },
+    )?;
+    scoped_path(&format!(
+        "{}/indexes/tool-results/{key}.json",
+        thread_root_string(scope, thread_id)
+    ))
+}
+
 fn summaries_root(
     scope: &ThreadScope,
     thread_id: &ThreadId,
@@ -1827,6 +2052,20 @@ fn idempotency_root() -> Result<ScopedPath, SessionThreadError> {
 
 fn idempotency_record_path(record_key: &str) -> Result<ScopedPath, SessionThreadError> {
     scoped_path(&format!("{}/idempotency/{record_key}.json", THREADS_PREFIX))
+}
+
+fn lookup_index_key<T: Serialize>(prefix: &str, key: &T) -> Result<String, SessionThreadError> {
+    let payload = serialize_pretty(key)?;
+    let digest = Sha256::digest(&payload);
+    let mut output = String::with_capacity(prefix.len() + 1 + digest.len() * 2);
+    output.push_str(prefix);
+    output.push('-');
+    for byte in digest {
+        use std::fmt::Write as _;
+        write!(&mut output, "{byte:02x}")
+            .map_err(|error| SessionThreadError::Serialization(error.to_string()))?;
+    }
+    Ok(output)
 }
 
 /// Build the alias-relative per-thread root for a scope under `/threads`.

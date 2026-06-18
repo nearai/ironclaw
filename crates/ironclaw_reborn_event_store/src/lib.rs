@@ -138,6 +138,12 @@ pub enum RebornEventStoreConfig {
         url: SecretString,
         tls_options: PostgresPoolTlsOptions,
     },
+    /// PostgreSQL backend configuration using an already-opened pool.
+    ///
+    /// Hosted production uses this to avoid opening a second independent
+    /// Postgres pool for event logs when the substrate already owns a pool.
+    #[cfg(feature = "postgres")]
+    PostgresPool { pool: deadpool_postgres::Pool },
     /// libSQL backend configuration. The store opens a
     /// [`LibSqlRootFilesystem`](ironclaw_filesystem::LibSqlRootFilesystem)
     /// over the provided local path or remote URL and runs durable-log ops
@@ -252,6 +258,10 @@ pub async fn build_reborn_event_stores(
                     backend: "postgres",
                 })
             }
+        }
+        #[cfg(feature = "postgres")]
+        RebornEventStoreConfig::PostgresPool { pool } => {
+            postgres_backed::build_from_pool(pool).await
         }
         RebornEventStoreConfig::Libsql {
             path_or_url,
@@ -548,6 +558,12 @@ mod postgres_backed {
         tls_options: PostgresPoolTlsOptions,
     ) -> Result<RebornEventStores, RebornEventStoreError> {
         let pool = build_pool(url, super::DEFAULT_POSTGRES_POOL_MAX_SIZE, tls_options)?;
+        build_from_pool(pool).await
+    }
+
+    pub(super) async fn build_from_pool(
+        pool: Pool,
+    ) -> Result<RebornEventStores, RebornEventStoreError> {
         let filesystem = Arc::new(PostgresRootFilesystem::new(pool));
         filesystem.run_migrations().await.map_err(|source| {
             RebornEventStoreError::backend("postgres", "run migrations", source)
