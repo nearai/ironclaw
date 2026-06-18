@@ -268,7 +268,9 @@ impl RebornBuildInput {
     ) -> Self {
         debug_assert!(matches!(
             profile,
-            RebornCompositionProfile::LocalDev | RebornCompositionProfile::LocalDevYolo
+            RebornCompositionProfile::LocalDev
+                | RebornCompositionProfile::LocalDevYolo
+                | RebornCompositionProfile::HostedSingleTenantVolume
         ));
         Self::new(
             profile,

@@ -1,9 +1,12 @@
+#[cfg(feature = "libsql")]
+use ironclaw_reborn_composition::hosted_single_tenant_volume_build_input;
 use ironclaw_reborn_composition::{
     RebornBuildInput, RebornCompositionProfile, RebornFacadeReadiness,
     RebornLocalRuntimeProfileOptions, RebornReadiness, RebornReadinessDiagnostic,
     RebornReadinessDiagnosticComponent, RebornReadinessDiagnosticReason,
     RebornReadinessDiagnosticStatus, RebornReadinessState, RebornWorkerReadiness,
-    build_reborn_services, local_dev_yolo_runtime_policy, local_runtime_build_input_with_options,
+    build_reborn_services, hosted_single_tenant_volume_runtime_policy,
+    local_dev_yolo_runtime_policy, local_runtime_build_input_with_options,
 };
 
 use ironclaw_host_api::runtime_policy::{FilesystemBackendKind, RuntimeProfile, SecretMode};
@@ -76,6 +79,17 @@ fn local_dev_yolo_runtime_policy_requires_disclosure() {
             profile: RuntimeProfile::LocalYolo
         }
     );
+}
+
+#[test]
+fn hosted_single_tenant_volume_runtime_policy_is_processless_secure_default() {
+    let policy =
+        hosted_single_tenant_volume_runtime_policy().expect("hosted volume policy resolves");
+
+    assert_eq!(policy.process_backend.as_str(), "none");
+    assert_eq!(policy.filesystem_backend.as_str(), "scoped_virtual");
+    assert_eq!(policy.secret_mode.as_str(), "brokered_handles");
+    assert_eq!(policy.network_mode.as_str(), "brokered");
 }
 
 #[test]
@@ -265,6 +279,7 @@ fn production_blocker_rejects_non_production_shaped_profiles() {
         RebornCompositionProfile::Disabled,
         RebornCompositionProfile::LocalDev,
         RebornCompositionProfile::LocalDevYolo,
+        RebornCompositionProfile::HostedSingleTenantVolume,
     ] {
         let diagnostic = RebornReadinessDiagnostic::production_blocker(
             profile,
@@ -287,6 +302,10 @@ fn dev_only_profiles_are_visible_non_production_in_readiness() {
             RebornCompositionProfile::LocalDevYolo,
             RebornReadinessDiagnostic::local_dev_yolo(),
         ),
+        (
+            RebornCompositionProfile::HostedSingleTenantVolume,
+            RebornReadinessDiagnostic::hosted_single_tenant_volume(),
+        ),
     ] {
         assert_eq!(diagnostic.profile, profile);
         assert_eq!(
@@ -300,6 +319,28 @@ fn dev_only_profiles_are_visible_non_production_in_readiness() {
         assert_eq!(diagnostic.status, RebornReadinessDiagnosticStatus::Blocking);
         assert!(diagnostic.blocks_production);
     }
+}
+
+#[cfg(feature = "libsql")]
+#[tokio::test]
+async fn hosted_single_tenant_volume_factory_readiness_includes_preview_diagnostic() {
+    let dir = tempfile::tempdir().unwrap();
+    let input = hosted_single_tenant_volume_build_input(
+        "readiness-contract-owner",
+        dir.path().to_path_buf(),
+    )
+    .unwrap();
+    let services = build_reborn_services(input).await.unwrap();
+
+    assert_eq!(
+        services.readiness.profile,
+        RebornCompositionProfile::HostedSingleTenantVolume
+    );
+    assert_eq!(services.readiness.state, RebornReadinessState::DevOnly);
+    assert_eq!(
+        services.readiness.diagnostics,
+        vec![RebornReadinessDiagnostic::hosted_single_tenant_volume()]
+    );
 }
 
 #[tokio::test]
@@ -468,6 +509,7 @@ fn production_wiring_report_skipped_for_non_production_profiles() {
         RebornCompositionProfile::Disabled,
         RebornCompositionProfile::LocalDev,
         RebornCompositionProfile::LocalDevYolo,
+        RebornCompositionProfile::HostedSingleTenantVolume,
     ] {
         assert!(
             RebornReadinessDiagnostic::from_production_wiring_report(profile, &report).is_empty()

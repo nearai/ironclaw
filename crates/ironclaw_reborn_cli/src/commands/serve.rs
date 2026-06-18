@@ -21,7 +21,7 @@ use ironclaw_reborn_composition::{
     SlackOperatorRouteVisibility, build_slack_host_beta_mounts,
     build_webui_services_with_slack_host_beta_mounts,
 };
-use ironclaw_reborn_config::{IdentitySection, seed_default_config_file_if_missing};
+use ironclaw_reborn_config::{IdentitySection, RebornProfile, seed_default_config_file_if_missing};
 use ironclaw_reborn_webui_ingress::{
     EnvBearerAuthenticator, RebornWebuiServeOptions, serve_webui_v2,
 };
@@ -81,6 +81,8 @@ impl ServeCommand {
         let config_file =
             ironclaw_reborn_config::RebornConfigFile::load(&boot_config.home().config_file_path())
                 .map_err(anyhow::Error::from)?;
+        let effective_profile =
+            crate::runtime::effective_profile(boot_config, config_file.as_ref())?;
 
         // Tenant id is host-trusted (operator-owned config), never
         // browser-influenced. Falls back to the same default the CLI's
@@ -265,6 +267,7 @@ impl ServeCommand {
         // the login wiring are assembled inside the async runtime below,
         // because opening the libSQL user store is async.
         let sso_startup = crate::commands::serve_sso::sso_startup_config_from_env(listen_addr)?;
+        reject_hosted_volume_without_sso(effective_profile, host, sso_startup.as_ref())?;
         // When SSO is enabled this same token keys the stateless session
         // HMAC, so a weak value becomes an OFFLINE forgery target: an
         // attacker who completes one legitimate login holds a
@@ -285,11 +288,9 @@ impl ServeCommand {
         // access store used to seed default-user and SSO-user trigger access;
         // canonical identity itself lives on the runtime's scoped filesystem,
         // not in this file.
-        let user_store_path = boot_config
-            .home()
-            .path()
-            .join("local-dev")
-            .join("reborn-local-dev.db");
+        let user_store_path =
+            crate::runtime::local_runtime_storage_root(boot_config, effective_profile)
+                .join("reborn-local-dev.db");
         // CORS allow-origin list. Empty = fail-closed on every
         // cross-origin preflight; operators MUST opt in to the
         // specific origins the host installation actually serves.
@@ -553,6 +554,26 @@ fn reject_non_loopback_privileged_local_runtime(
          process, direct network, inherited environment). Bind to a loopback host such as \
          127.0.0.1 or ::1, or choose a less privileged profile."
     );
+}
+
+fn reject_hosted_volume_without_sso(
+    profile: RebornProfile,
+    host: IpAddr,
+    sso_startup: Option<&crate::commands::serve_sso::SsoStartupConfig>,
+) -> anyhow::Result<()> {
+    if profile != RebornProfile::HostedSingleTenantVolume
+        || host.is_loopback()
+        || sso_startup.is_some()
+    {
+        return Ok(());
+    }
+
+    anyhow::bail!(
+        "profile=hosted-single-tenant-volume requires WebUI SSO when binding to non-loopback \
+         address {host}. Configure IRONCLAW_REBORN_WEBUI_BASE_URL, \
+         IRONCLAW_REBORN_WEBUI_GOOGLE_CLIENT_ID, IRONCLAW_REBORN_WEBUI_GOOGLE_CLIENT_SECRET, \
+         and IRONCLAW_REBORN_WEBUI_ALLOWED_EMAIL_DOMAINS before exposing this profile."
+    )
 }
 
 fn with_notion_dcr_oauth_backend(
@@ -830,6 +851,31 @@ mod tests {
         let message = error.to_string();
         assert!(message.contains("reborn-cli"), "message: {message}");
         assert!(message.contains("local-user"), "message: {message}");
+    }
+
+    #[test]
+    fn hosted_volume_public_listener_requires_sso() {
+        let err = reject_hosted_volume_without_sso(
+            RebornProfile::HostedSingleTenantVolume,
+            "0.0.0.0".parse().expect("ip"),
+            None,
+        )
+        .expect_err("public hosted-volume profile must require SSO");
+
+        assert!(
+            err.to_string().contains("requires WebUI SSO"),
+            "error: {err:#}"
+        );
+    }
+
+    #[test]
+    fn hosted_volume_loopback_listener_can_start_without_sso() {
+        reject_hosted_volume_without_sso(
+            RebornProfile::HostedSingleTenantVolume,
+            "127.0.0.1".parse().expect("ip"),
+            None,
+        )
+        .expect("loopback hosted-volume debug listener can use env bearer auth");
     }
 
     #[tokio::test]

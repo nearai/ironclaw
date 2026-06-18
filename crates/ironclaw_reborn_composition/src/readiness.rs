@@ -277,6 +277,10 @@ impl RebornReadinessDiagnostic {
         Self::dev_only_profile(RebornCompositionProfile::LocalDevYolo)
     }
 
+    pub fn hosted_single_tenant_volume() -> Self {
+        Self::dev_only_profile(RebornCompositionProfile::HostedSingleTenantVolume)
+    }
+
     fn dev_only_profile(profile: RebornCompositionProfile) -> Self {
         Self {
             profile,

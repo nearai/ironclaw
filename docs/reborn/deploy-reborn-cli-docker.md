@@ -96,10 +96,35 @@ token/user variables are missing. The bundled config selects NearAI as the
 default LLM provider, so set `NEARAI_API_KEY` unless a custom mounted config
 selects a different provider.
 
+For `IRONCLAW_REBORN_PROFILE=hosted-single-tenant-volume` on
+`IRONCLAW_REBORN_SERVE_HOST=0.0.0.0`, also set the WebUI SSO variables before
+startup:
+
+```bash
+IRONCLAW_REBORN_WEBUI_BASE_URL=https://<railway-domain>
+IRONCLAW_REBORN_WEBUI_GOOGLE_CLIENT_ID=<google-client-id>
+IRONCLAW_REBORN_WEBUI_GOOGLE_CLIENT_SECRET=<google-client-secret>
+IRONCLAW_REBORN_WEBUI_ALLOWED_EMAIL_DOMAINS=near.ai
+```
+
+For a single-tenant Railway preview with durable volume state, set:
+
+```bash
+IRONCLAW_REBORN_PROFILE=hosted-single-tenant-volume
+RAILWAY_VOLUME_MOUNT_PATH=/data
+```
+
+The entrypoint seeds
+`config.hosted-single-tenant-volume.toml`, stores the local-runtime libSQL
+database under `$IRONCLAW_REBORN_HOME/hosted-single-tenant-volume`, requires the
+home to live under the Railway volume, and the CLI refuses non-loopback
+hosted-volume serve without WebUI SSO configured. This profile disables
+process-backed built-ins such as shell through the secure-default runtime policy
+but is still a preview profile, not the PostgreSQL production composition.
+
 Do not use `IRONCLAW_REBORN_PROFILE=local-dev-yolo` for a public Railway
 listener. That profile grants trusted host access and `serve` refuses to bind it
-to a non-loopback host. Use the default `local-dev` container config until the
-production Reborn deployment profile is fully wired for this service.
+to a non-loopback host.
 
 Set `IRONCLAW_REBORN_HOME` to a mounted volume path if state should survive
 redeploys. The image default is `/data/ironclaw-reborn`; without a Railway

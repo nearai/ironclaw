@@ -9,8 +9,6 @@ use ironclaw_host_api::{ExtensionId, VirtualPath};
 use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex;
 
-const INSTALLATION_STATE_PATH: &str = "/system/extensions/.installations/state.json";
-
 pub(crate) struct FilesystemExtensionInstallationStore {
     filesystem: std::sync::Arc<dyn RootFilesystem>,
     state_path: VirtualPath,
@@ -19,14 +17,10 @@ pub(crate) struct FilesystemExtensionInstallationStore {
 }
 
 impl FilesystemExtensionInstallationStore {
-    pub(crate) async fn load(
+    pub(crate) async fn load_at(
         filesystem: std::sync::Arc<dyn RootFilesystem>,
+        state_path: VirtualPath,
     ) -> Result<Self, ExtensionInstallationError> {
-        let state_path = VirtualPath::new(INSTALLATION_STATE_PATH).map_err(|error| {
-            ExtensionInstallationError::InvalidInstallation {
-                reason: error.to_string(),
-            }
-        })?;
         let inner = InMemoryExtensionInstallationStore::default();
         match filesystem.read_file(&state_path).await {
             Ok(bytes) => {

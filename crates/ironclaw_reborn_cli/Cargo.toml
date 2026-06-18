@@ -56,6 +56,10 @@ openai-compat-beta = [
 postgres = [
     "ironclaw_reborn_composition/postgres",
 ]
+# Enable embedded libSQL storage composition for volume-backed hosted previews.
+libsql = [
+    "ironclaw_reborn_composition/libsql",
+]
 [dependencies]
 anyhow = "1"
 async-trait = { version = "0.1", optional = true }

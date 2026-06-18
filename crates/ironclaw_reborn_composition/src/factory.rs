@@ -52,10 +52,12 @@ use ironclaw_host_api::{
 };
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 use ironclaw_host_api::{HostApiError, MountAlias, MountGrant, ResourceScope};
+#[cfg(not(any(feature = "libsql", feature = "postgres")))]
+use ironclaw_host_runtime::builtin_first_party_handlers_with_trigger_create_hook;
 use ironclaw_host_runtime::{
     CapabilitySurfaceVersion, FirstPartyCapabilityRegistry, HostRuntimeHttpEgressPort,
     HostRuntimeServices, LocalHostProcessPort, ProductAuthProviderRuntimePorts, TriggerCreateHook,
-    builtin_first_party_handlers_with_trigger_create_hook, builtin_first_party_package,
+    builtin_first_party_package,
 };
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 use ironclaw_host_runtime::{
@@ -641,9 +643,9 @@ pub async fn build_reborn_services(
     );
     match input.profile {
         RebornCompositionProfile::Disabled => Ok(RebornServices::disabled()),
-        RebornCompositionProfile::LocalDev | RebornCompositionProfile::LocalDevYolo => {
-            build_local_dev(input).await
-        }
+        RebornCompositionProfile::LocalDev
+        | RebornCompositionProfile::LocalDevYolo
+        | RebornCompositionProfile::HostedSingleTenantVolume => build_local_dev(input).await,
         RebornCompositionProfile::Production | RebornCompositionProfile::MigrationDryRun => {
             build_production_shaped(input).await
         }
@@ -791,6 +793,8 @@ async fn build_local_dev(input: RebornBuildInput) -> Result<RebornServices, Rebo
         local_dev_trigger_repository(Arc::clone(&filesystem_bundle.database)).await?;
     #[cfg(not(feature = "libsql"))]
     let trigger_repository = local_dev_trigger_repository();
+    let extension_installation_state_path =
+        local_dev_extension_installation_state_path(profile, local_runtime_identity.as_ref())?;
     // Projects persist over the control-plane `ScopedFilesystem` substrate (no
     // SQL in the crate); the backend is whatever the local-dev root filesystem
     // dispatches to. Tenant is supplied per call, so the scope carries only the
@@ -877,7 +881,13 @@ async fn build_local_dev(input: RebornBuildInput) -> Result<RebornServices, Rebo
     let secret_store: Arc<dyn SecretStore> = Arc::new(ironclaw_secrets::InMemorySecretStore::new());
     let local_dev_trust_policy = Arc::new(builtin_first_party_trust_policy()?);
     let local_dev_trust_invalidation_bus = Arc::new(ironclaw_trust::InvalidationBus::new());
-    let extension_registry = Arc::new(local_dev_builtin_extension_registry()?);
+    let local_dev_process_backend = runtime_policy
+        .as_ref()
+        .map(|policy| policy.process_backend)
+        .unwrap_or(ProcessBackendKind::LocalHost);
+    let extension_registry = Arc::new(local_dev_builtin_extension_registry(
+        local_dev_process_backend,
+    )?);
     let authorizer = local_dev_authorizer(
         runtime_policy.as_ref(),
         Arc::clone(&store_graph.local_runtime.capability_policy),
@@ -1011,11 +1021,14 @@ async fn build_local_dev(input: RebornBuildInput) -> Result<RebornServices, Rebo
     );
     let extension_filesystem: Arc<dyn RootFilesystem> = filesystem.clone();
     let extension_installation_store: Arc<dyn ExtensionInstallationStore> = Arc::new(
-        FilesystemExtensionInstallationStore::load(extension_filesystem.clone())
-            .await
-            .map_err(|error| RebornBuildError::InvalidConfig {
-                reason: format!("extension installation state could not be loaded: {error}"),
-            })?,
+        FilesystemExtensionInstallationStore::load_at(
+            extension_filesystem.clone(),
+            extension_installation_state_path,
+        )
+        .await
+        .map_err(|error| RebornBuildError::InvalidConfig {
+            reason: format!("extension installation state could not be loaded: {error}"),
+        })?,
     );
     let extension_lifecycle_service = Arc::new(tokio::sync::Mutex::new(
         ExtensionLifecycleService::new(services.shared_extension_registry().snapshot_owned()),
@@ -1066,9 +1079,10 @@ async fn build_local_dev(input: RebornBuildInput) -> Result<RebornServices, Rebo
         });
     }
     let trigger_create_hook = local_dev_trigger_create_hook(&store_graph.local_runtime);
-    let mut first_party_registry = builtin_first_party_registry_with_trigger_create_hook(
+    let mut first_party_registry = local_dev_first_party_registry_with_trigger_create_hook(
         Arc::clone(&store_graph.trigger_repository),
         trigger_create_hook,
+        local_dev_process_backend,
     )?;
     register_bundled_gsuite_first_party_handlers(
         &mut first_party_registry,
@@ -2489,6 +2503,7 @@ fn production_builtin_extension_registry(
     Ok(registry)
 }
 
+#[cfg(not(any(feature = "libsql", feature = "postgres")))]
 fn builtin_first_party_registry_with_trigger_create_hook(
     trigger_repository: Arc<dyn TriggerRepository>,
     trigger_create_hook: Arc<dyn TriggerCreateHook>,
@@ -2515,8 +2530,44 @@ fn production_first_party_registry_with_trigger_create_hook(
     })
 }
 
-fn local_dev_builtin_extension_registry() -> Result<ExtensionRegistry, RebornBuildError> {
-    let mut registry = builtin_extension_registry()?;
+fn local_dev_first_party_registry_with_trigger_create_hook(
+    trigger_repository: Arc<dyn TriggerRepository>,
+    trigger_create_hook: Arc<dyn TriggerCreateHook>,
+    process_backend: ProcessBackendKind,
+) -> Result<FirstPartyCapabilityRegistry, RebornBuildError> {
+    #[cfg(any(feature = "libsql", feature = "postgres"))]
+    {
+        return production_first_party_registry_with_trigger_create_hook(
+            trigger_repository,
+            trigger_create_hook,
+            process_backend,
+        );
+    }
+
+    #[cfg(not(any(feature = "libsql", feature = "postgres")))]
+    {
+        let _ = process_backend;
+        builtin_first_party_registry_with_trigger_create_hook(
+            trigger_repository,
+            trigger_create_hook,
+        )
+    }
+}
+
+fn local_dev_builtin_extension_registry(
+    process_backend: ProcessBackendKind,
+) -> Result<ExtensionRegistry, RebornBuildError> {
+    let mut registry = {
+        #[cfg(any(feature = "libsql", feature = "postgres"))]
+        {
+            production_builtin_extension_registry(process_backend)?
+        }
+        #[cfg(not(any(feature = "libsql", feature = "postgres")))]
+        {
+            let _ = process_backend;
+            builtin_extension_registry()?
+        }
+    };
     let builtin_id =
         ExtensionId::new("builtin").map_err(|error| RebornBuildError::InvalidConfig {
             reason: format!("built-in first-party package id is invalid: {error}"),
@@ -2537,6 +2588,24 @@ fn local_dev_builtin_extension_registry() -> Result<ExtensionRegistry, RebornBui
             reason: format!("local-dev built-in first-party registry is invalid: {error}"),
         })?;
     Ok(registry)
+}
+
+fn local_dev_extension_installation_state_path(
+    profile: RebornCompositionProfile,
+    local_runtime_identity: Option<&RebornLocalRuntimeIdentity>,
+) -> Result<VirtualPath, RebornBuildError> {
+    let raw_path = match profile {
+        RebornCompositionProfile::HostedSingleTenantVolume => {
+            let tenant_id = local_runtime_identity
+                .map(|identity| identity.tenant_id.as_str())
+                .unwrap_or("reborn-cli");
+            format!("/tenants/{tenant_id}/system/extensions/.installations/state.json")
+        }
+        _ => "/system/extensions/.installations/state.json".to_string(),
+    };
+    VirtualPath::new(raw_path).map_err(|error| RebornBuildError::InvalidConfig {
+        reason: format!("extension installation state path is invalid: {error}"),
+    })
 }
 
 pub fn builtin_first_party_trust_policy() -> Result<HostTrustPolicy, RebornBuildError> {
@@ -3418,6 +3487,10 @@ fn readiness_for(
         RebornCompositionProfile::LocalDevYolo => (
             RebornReadinessState::DevOnly,
             vec![RebornReadinessDiagnostic::local_dev_yolo()],
+        ),
+        RebornCompositionProfile::HostedSingleTenantVolume => (
+            RebornReadinessState::DevOnly,
+            vec![RebornReadinessDiagnostic::hosted_single_tenant_volume()],
         ),
         RebornCompositionProfile::Production => {
             (RebornReadinessState::ProductionValidated, Vec::new())

@@ -15,8 +15,8 @@ use ironclaw_reborn_composition::{
 use ironclaw_reborn_composition::{
     OAuthClientConfig, OperatorLogLayer, PollSettings, RebornBuildInput, RebornCompositionProfile,
     RebornLocalRuntimeProfileOptions, RebornRuntimeIdentity, RebornRuntimeInput,
-    TurnRunnerSettings, build_reborn_runtime, local_runtime_build_input_with_options,
-    nearai_mcp_bootstrap_config_from_env,
+    TurnRunnerSettings, build_reborn_runtime, hosted_single_tenant_volume_build_input,
+    local_runtime_build_input_with_options, nearai_mcp_bootstrap_config_from_env,
 };
 use ironclaw_reborn_config::{
     REBORN_PROFILE_ENV, RebornBootConfig, RebornProfile, seed_default_config_file_if_missing,
@@ -144,6 +144,7 @@ async fn with_run_local_trigger_fire_access_checker(
         }
 
         let config_file = read_config_file(config)?;
+        let profile = effective_profile(config, config_file.as_ref())?;
         let tenant_id = TenantId::new(&runtime_input.identity.tenant_id).with_context(|| {
             format!(
                 "[identity].tenant `{}` is invalid",
@@ -161,7 +162,7 @@ async fn with_run_local_trigger_fire_access_checker(
         let user_store_path = config
             .home()
             .path()
-            .join("local-dev")
+            .join(local_runtime_storage_dir_name(profile))
             .join("reborn-local-dev.db");
         let access_store = open_local_trigger_access_store(&user_store_path)
             .await
@@ -446,25 +447,21 @@ pub(crate) fn build_services_input_with_options(
     let profile = effective_profile(config, config_file.as_ref())?;
     reject_unsupported_runtime_sections(config_file.as_ref(), caller, profile)?;
     let mut services_input = match profile {
-        RebornProfile::LocalDev | RebornProfile::LocalDevYolo => {
-            let local_dev_root: PathBuf = config.home().path().join("local-dev");
+        RebornProfile::LocalDev
+        | RebornProfile::LocalDevYolo
+        | RebornProfile::HostedSingleTenantVolume => {
+            let local_dev_root = local_runtime_storage_root(config, profile);
             let workspace_root = std::env::current_dir()
                 .context("failed to resolve current directory for local-dev workspace")?;
-            let mut services_input = local_runtime_build_input_with_options(
-                composition_profile(profile),
-                owner_id,
-                local_dev_root,
-                RebornLocalRuntimeProfileOptions {
-                    confirm_host_access: options.confirm_host_access,
-                },
-            )
-            .with_context(|| {
-                format!(
-                    "ironclaw-reborn run currently supports profile=local-dev or profile=local-dev-yolo; \
-                     got profile={profile}."
-                )
-            })?
-            .with_local_dev_workspace_root(workspace_root);
+            let mut services_input =
+                local_runtime_build_input_for_profile(profile, owner_id, local_dev_root, options)
+                    .with_context(|| {
+                        format!(
+                            "ironclaw-reborn run currently supports local-runtime profiles; \
+                             got profile={profile}."
+                        )
+                    })?
+                    .with_local_dev_workspace_root(workspace_root);
             if services_input.requires_local_dev_confirmed_host_home_root() {
                 let host_home_root =
                     confirmed_host_home_root(options).context("local-dev-yolo host access")?;
@@ -624,8 +621,49 @@ fn composition_profile(profile: RebornProfile) -> RebornCompositionProfile {
     match profile {
         RebornProfile::LocalDev => RebornCompositionProfile::LocalDev,
         RebornProfile::LocalDevYolo => RebornCompositionProfile::LocalDevYolo,
+        RebornProfile::HostedSingleTenantVolume => {
+            RebornCompositionProfile::HostedSingleTenantVolume
+        }
         RebornProfile::Production => RebornCompositionProfile::Production,
         RebornProfile::MigrationDryRun => RebornCompositionProfile::MigrationDryRun,
+    }
+}
+
+pub(crate) fn local_runtime_storage_root(
+    config: &RebornBootConfig,
+    profile: RebornProfile,
+) -> PathBuf {
+    config
+        .home()
+        .path()
+        .join(local_runtime_storage_dir_name(profile))
+}
+
+fn local_runtime_storage_dir_name(profile: RebornProfile) -> &'static str {
+    match profile {
+        RebornProfile::HostedSingleTenantVolume => "hosted-single-tenant-volume",
+        _ => "local-dev",
+    }
+}
+
+fn local_runtime_build_input_for_profile(
+    profile: RebornProfile,
+    owner_id: &str,
+    root: PathBuf,
+    options: RuntimeInputOptions,
+) -> Result<RebornBuildInput, ironclaw_reborn_composition::RebornLocalRuntimeProfileError> {
+    match profile {
+        RebornProfile::HostedSingleTenantVolume => {
+            hosted_single_tenant_volume_build_input(owner_id, root)
+        }
+        _ => local_runtime_build_input_with_options(
+            composition_profile(profile),
+            owner_id,
+            root,
+            RebornLocalRuntimeProfileOptions {
+                confirm_host_access: options.confirm_host_access,
+            },
+        ),
     }
 }
 
@@ -784,6 +822,8 @@ mod tests {
     };
     use ironclaw_reborn_config::RebornBootConfig;
 
+    #[cfg(feature = "libsql")]
+    use super::local_runtime_storage_root;
     use super::test_env::{EnvGuard, lock_trigger_env};
     #[cfg(feature = "webui-v2-beta")]
     use super::with_run_local_trigger_fire_access_checker;
@@ -958,6 +998,44 @@ regex_activation_enabled = false
             "host_workspace_and_home"
         );
         assert_eq!(policy.secret_mode.as_str(), "inherited_env");
+    }
+
+    #[cfg(feature = "libsql")]
+    #[test]
+    fn build_runtime_input_accepts_hosted_single_tenant_volume_profile() {
+        let _lock = lock_trigger_env();
+        let (_enabled, _interval) = clear_trigger_poller_env();
+
+        let temp = tempfile::tempdir().expect("tempdir");
+        let reborn_home = temp.path().join("reborn-home");
+        std::fs::create_dir_all(&reborn_home).expect("mkdir");
+        let config = RebornBootConfig::resolve_from_env_parts(
+            Some(reborn_home.clone().into_os_string()),
+            None,
+            None,
+            Some("hosted-single-tenant-volume".into()),
+        )
+        .expect("boot config");
+
+        let runtime_input =
+            build_runtime_input(&config, RuntimeInputCaller::Run).expect("runtime input");
+        assert!(!runtime_input.grants_trusted_laptop_access());
+        let services = runtime_input.services.expect("services input");
+        let policy = services.runtime_policy().expect("runtime policy");
+
+        assert_eq!(
+            services.profile(),
+            RebornCompositionProfile::HostedSingleTenantVolume
+        );
+        assert_eq!(policy.process_backend.as_str(), "none");
+        assert_eq!(policy.filesystem_backend.as_str(), "scoped_virtual");
+        assert_eq!(
+            local_runtime_storage_root(
+                &config,
+                ironclaw_reborn_config::RebornProfile::HostedSingleTenantVolume,
+            ),
+            reborn_home.join("hosted-single-tenant-volume")
+        );
     }
 
     #[cfg(feature = "postgres")]

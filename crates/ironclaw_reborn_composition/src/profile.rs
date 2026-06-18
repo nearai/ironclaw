@@ -10,6 +10,7 @@ pub enum RebornCompositionProfile {
     Disabled,
     LocalDev,
     LocalDevYolo,
+    HostedSingleTenantVolume,
     Production,
     MigrationDryRun,
 }
@@ -20,6 +21,7 @@ impl RebornCompositionProfile {
             Self::Disabled => "disabled",
             Self::LocalDev => "local-dev",
             Self::LocalDevYolo => "local-dev-yolo",
+            Self::HostedSingleTenantVolume => "hosted-single-tenant-volume",
             Self::Production => "production",
             Self::MigrationDryRun => "migration-dry-run",
         }
@@ -35,7 +37,10 @@ impl RebornCompositionProfile {
 
     pub fn to_event_store_profile(self) -> ironclaw_reborn_event_store::RebornProfile {
         match self {
-            Self::Disabled | Self::LocalDev | Self::LocalDevYolo => {
+            Self::Disabled
+            | Self::LocalDev
+            | Self::LocalDevYolo
+            | Self::HostedSingleTenantVolume => {
                 ironclaw_reborn_event_store::RebornProfile::LocalDev
             }
             Self::Production | Self::MigrationDryRun => {
@@ -54,6 +59,7 @@ impl FromStr for RebornCompositionProfile {
             "disabled" => Ok(Self::Disabled),
             "local-dev" => Ok(Self::LocalDev),
             "local-dev-yolo" => Ok(Self::LocalDevYolo),
+            "hosted-single-tenant-volume" => Ok(Self::HostedSingleTenantVolume),
             "production" => Ok(Self::Production),
             "migration-dry-run" => Ok(Self::MigrationDryRun),
             _ => Err(RebornCompositionProfileParseError { value: normalized }),

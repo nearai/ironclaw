@@ -659,6 +659,24 @@ async fn local_dev_builds_facades_without_production_claim() {
     assert!(services.product_auth.is_some());
 }
 
+#[cfg(feature = "libsql")]
+#[tokio::test]
+async fn hosted_single_tenant_volume_hides_process_capabilities() {
+    let dir = tempfile::tempdir().unwrap();
+    let input = ironclaw_reborn_composition::hosted_single_tenant_volume_build_input(
+        "hosted-volume-owner",
+        dir.path().to_path_buf(),
+    )
+    .unwrap();
+    let services = build_reborn_services(input).await.unwrap();
+
+    assert_eq!(
+        services.readiness.profile,
+        RebornCompositionProfile::HostedSingleTenantVolume
+    );
+    assert_process_capabilities_unavailable_for_processless_runtime(&services).await;
+}
+
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 fn test_sandbox_process_binding() -> RebornRuntimeProcessBinding {
     let process_port = Arc::new(ironclaw_host_runtime::TenantSandboxProcessPort::new(

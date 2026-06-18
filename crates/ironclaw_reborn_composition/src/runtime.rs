@@ -252,7 +252,9 @@ fn enforce_runtime_cutover_gate(
         RebornCompositionProfile::Disabled => Err(RebornRuntimeError::InvalidArgument {
             reason: "profile=disabled must not start live Reborn runtime traffic".to_string(),
         }),
-        RebornCompositionProfile::LocalDev | RebornCompositionProfile::LocalDevYolo => Ok(()),
+        RebornCompositionProfile::LocalDev
+        | RebornCompositionProfile::LocalDevYolo
+        | RebornCompositionProfile::HostedSingleTenantVolume => Ok(()),
     }
 }
 
@@ -2147,7 +2149,8 @@ impl RebornRuntime {
 /// the returned `RebornRuntime` is ready to accept `send_user_message` calls.
 ///
 /// **Currently supported profiles:** `RebornCompositionProfile::LocalDev`,
-/// `RebornCompositionProfile::LocalDevYolo`, and
+/// `RebornCompositionProfile::LocalDevYolo`,
+/// `RebornCompositionProfile::HostedSingleTenantVolume`, and
 /// `RebornCompositionProfile::Production` are wired end-to-end here. Production
 /// starts only after readiness diagnostics validate that live traffic can be
 /// exposed without a partial cutover.
@@ -2186,6 +2189,7 @@ pub async fn build_reborn_runtime(
     match profile {
         RebornCompositionProfile::LocalDev
         | RebornCompositionProfile::LocalDevYolo
+        | RebornCompositionProfile::HostedSingleTenantVolume
         | RebornCompositionProfile::Production => {}
         RebornCompositionProfile::MigrationDryRun => {
             return Err(RebornRuntimeError::InvalidArgument {
@@ -2231,7 +2235,9 @@ pub async fn build_reborn_runtime(
     enforce_runtime_cutover_gate(profile, &services.readiness)?;
 
     let runtime_parts = match profile {
-        RebornCompositionProfile::LocalDev | RebornCompositionProfile::LocalDevYolo => {
+        RebornCompositionProfile::LocalDev
+        | RebornCompositionProfile::LocalDevYolo
+        | RebornCompositionProfile::HostedSingleTenantVolume => {
             let local_runtime =
                 services
                     .local_runtime
