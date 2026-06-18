@@ -22,6 +22,15 @@ root-llm-provider = [
     "ironclaw_llm/registry-provider-factory",
     "ironclaw_reborn/root-llm-provider",
 ]
+# Compile in the AWS Bedrock provider (native Converse API via the AWS
+# SDK). Implies `root-llm-provider` because the Bedrock backend is only
+# reachable once a real LLM gateway is wired, and forwards the heavy
+# `aws-*` dependency gate to `ironclaw_llm`. Off by default so substrate
+# and non-AWS builds don't link the AWS SDK.
+bedrock = [
+    "root-llm-provider",
+    "ironclaw_llm/bedrock",
+]
 # Expose test-only helpers (mock LLM gateway, budget runtime accessors)
 # so integration tests in this crate's `tests/` directory and downstream
 # crates can drive `build_reborn_runtime` with a stub model gateway
