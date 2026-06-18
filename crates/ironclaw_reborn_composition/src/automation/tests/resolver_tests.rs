@@ -97,7 +97,7 @@ async fn seed_accepted_run(
         run_id,
         thread_id,
         submitted_at: fire_slot,
-        next_run_at,
+        next_run_at: Some(next_run_at),
     })
     .await
     .expect("mark fire accepted");
@@ -144,6 +144,7 @@ impl TriggerRepository for FailingThreadLookupRepository {
         _: Option<AgentId>,
         _: Option<ProjectId>,
         _: usize,
+        _: &[ironclaw_triggers::TriggerState],
     ) -> Result<Vec<TriggerRecord>, TriggerError> {
         Err(TriggerError::Backend {
             reason: "stub".to_string(),
@@ -398,7 +399,7 @@ async fn resolve_run_thread_scope_returns_none_for_trigger_with_no_agent_id() {
         run_id,
         thread_id: thread_id.clone(),
         submitted_at: fire_slot,
-        next_run_at,
+        next_run_at: Some(next_run_at),
     })
     .await
     .expect("mark fire accepted");

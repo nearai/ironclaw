@@ -4500,6 +4500,7 @@ async fn list_automation_dispatches_through_product_facade() {
             WebUiListAutomationsRequest {
                 limit: Some(10),
                 run_limit: None,
+                ..Default::default()
             },
         )
         .await
@@ -5248,6 +5249,7 @@ async fn list_automations_rejects_missing_agent_id() {
             WebUiListAutomationsRequest {
                 limit: Some(10),
                 run_limit: None,
+                ..Default::default()
             },
         )
         .await
@@ -5273,6 +5275,7 @@ async fn list_automations_clamps_oversize_limit_before_product_facade() {
             WebUiListAutomationsRequest {
                 limit: Some(u32::MAX),
                 run_limit: None,
+                ..Default::default()
             },
         )
         .await
@@ -5302,6 +5305,7 @@ async fn list_automations_clamps_zero_limit_before_product_facade() {
             WebUiListAutomationsRequest {
                 limit: Some(0),
                 run_limit: None,
+                ..Default::default()
             },
         )
         .await
@@ -5330,6 +5334,7 @@ async fn list_automations_uses_default_limit_when_omitted() {
             WebUiListAutomationsRequest {
                 limit: None,
                 run_limit: None,
+                ..Default::default()
             },
         )
         .await
@@ -5359,6 +5364,7 @@ async fn list_automations_clamps_oversize_run_limit_before_product_facade() {
             WebUiListAutomationsRequest {
                 limit: None,
                 run_limit: Some(u32::MAX),
+                ..Default::default()
             },
         )
         .await
@@ -5388,6 +5394,7 @@ async fn list_automations_allows_zero_run_limit_before_product_facade() {
             WebUiListAutomationsRequest {
                 limit: None,
                 run_limit: Some(0),
+                ..Default::default()
             },
         )
         .await

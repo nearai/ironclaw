@@ -1292,7 +1292,8 @@ async fn local_dev_services_dispatch_trigger_management_through_composed_runtime
             "name": "Daily production summary",
             "prompt": "Summarize production state",
             "cron": "0 8 * * *",
-            "timezone": "UTC"
+            "timezone": "UTC",
+            "completion_policy": "recurring"
         }),
     )
     .await;

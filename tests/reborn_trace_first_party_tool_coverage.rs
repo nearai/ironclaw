@@ -406,7 +406,8 @@ async fn reborn_trace_trigger_management_first_party_tools_parity() {
                     "name": "Daily trace summary",
                     "prompt": "Summarize trace state",
                     "cron": "0 8 * * *",
-                    "timezone": "UTC"
+                    "timezone": "UTC",
+                    "completion_policy": "recurring"
                 }),
             )],
             expected_tool_results: Vec::new(),

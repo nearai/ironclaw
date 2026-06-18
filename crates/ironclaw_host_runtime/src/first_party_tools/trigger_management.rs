@@ -32,7 +32,7 @@ pub const TRIGGER_CREATE_CAPABILITY_ID: &str = "builtin.trigger_create";
 pub const TRIGGER_LIST_CAPABILITY_ID: &str = "builtin.trigger_list";
 pub const TRIGGER_REMOVE_CAPABILITY_ID: &str = "builtin.trigger_remove";
 
-const TRIGGER_CREATE_DESCRIPTION: &str = "Create a caller-scoped scheduled trigger. If the user asks for routine or trigger results to be sent through an outbound product or channel, use the visible outbound delivery target capabilities to select that delivery target before creating the trigger; delivery routing is not encoded in this input.";
+const TRIGGER_CREATE_DESCRIPTION: &str = "Create a caller-scoped scheduled trigger (one-time or recurring). If the user asks for routine or trigger results to be sent through an outbound product or channel, use the visible outbound delivery target capabilities to select that delivery target before creating the trigger; delivery routing is not encoded in this input.";
 
 pub(super) fn manifests() -> Result<Vec<CapabilityManifest>, ExtensionError> {
     Ok(vec![
@@ -200,6 +200,8 @@ struct TriggerCreateInput {
     prompt: String,
     cron: String,
     timezone: String,
+    #[serde(default)]
+    completion_policy: TriggerCompletionPolicy,
 }
 
 #[derive(Deserialize)]
@@ -233,7 +235,7 @@ async fn create_trigger(
         name: input.name,
         source: TriggerSourceKind::Schedule,
         schedule,
-        completion_policy: TriggerCompletionPolicy::Recurring,
+        completion_policy: input.completion_policy,
         prompt: input.prompt,
         state: TriggerState::Scheduled,
         next_run_at,
@@ -288,6 +290,7 @@ async fn list_triggers(
             scope.agent_id.clone(),
             scope.project_id.clone(),
             limit,
+            &[],
         )
         .await
         .map_err(|error| trigger_repository_error("list_scoped_triggers", error))?;
@@ -507,7 +510,8 @@ mod tests {
             "name": "daily",
             "prompt": "check mail",
             "cron": "0 9 * * *",
-            "timezone": "Not/A/Timezone"
+            "timezone": "Not/A/Timezone",
+            "completion_policy": "recurring"
         });
         let parsed: TriggerCreateInput = serde_json::from_value(input).expect("deserialize");
         let result = TriggerSchedule::cron_with_timezone(parsed.cron, parsed.timezone);
@@ -525,7 +529,8 @@ mod tests {
             "name": "daily",
             "prompt": "check mail",
             "cron": "0 9 * * *",
-            "timezone": "America/Los_Angeles"
+            "timezone": "America/Los_Angeles",
+            "completion_policy": "recurring"
         });
         let parsed: TriggerCreateInput = serde_json::from_value(input).expect("deserialize");
         let schedule = TriggerSchedule::cron_with_timezone(parsed.cron, &parsed.timezone)
@@ -535,5 +540,41 @@ mod tests {
                 assert_eq!(timezone, "America/Los_Angeles");
             }
         }
+    }
+
+    #[test]
+    fn trigger_create_input_defaults_to_recurring_when_completion_policy_absent() {
+        let input = serde_json::json!({
+            "name": "daily",
+            "prompt": "check mail",
+            "cron": "0 9 * * *",
+            "timezone": "America/New_York"
+        });
+        let parsed: TriggerCreateInput =
+            serde_json::from_value(input).expect("missing completion_policy should default");
+        assert!(
+            matches!(parsed.completion_policy, TriggerCompletionPolicy::Recurring),
+            "omitting completion_policy must default to Recurring"
+        );
+    }
+
+    #[test]
+    fn trigger_create_input_honors_complete_after_first_fire() {
+        let input = serde_json::json!({
+            "name": "one-off reminder",
+            "prompt": "remind me about the meeting",
+            "cron": "0 0 17 24 6 * 2099",
+            "timezone": "UTC",
+            "completion_policy": "complete_after_first_fire"
+        });
+        let parsed: TriggerCreateInput =
+            serde_json::from_value(input).expect("deserialize one-shot input");
+        assert!(
+            matches!(
+                parsed.completion_policy,
+                TriggerCompletionPolicy::CompleteAfterFirstFire
+            ),
+            "completion_policy should be CompleteAfterFirstFire"
+        );
     }
 }

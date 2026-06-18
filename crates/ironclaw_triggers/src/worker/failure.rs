@@ -17,15 +17,6 @@ pub(super) enum FireFailureDisposition {
     PermanentTerminal,
 }
 
-impl FireFailureDisposition {
-    pub(super) fn from_kind(kind: SubmitFailureKind, next_run_at: Timestamp) -> Self {
-        match kind {
-            SubmitFailureKind::Retryable => Self::Retryable,
-            SubmitFailureKind::Permanent => Self::PermanentReschedule(next_run_at),
-        }
-    }
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) struct FailureClassification {
     pub(super) kind: SubmitFailureKind,

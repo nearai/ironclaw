@@ -475,6 +475,10 @@ impl ProductAgentBoundCaller {
 pub struct AutomationListRequest {
     pub limit: usize,
     pub run_limit: usize,
+    /// When `true`, soft-completed automations are included (exclusion slice is
+    /// empty). When `false` (default), `TriggerState::Completed` entries are
+    /// excluded at the SQL layer so LIMIT is applied after filtering.
+    pub include_completed: bool,
 }
 
 /// Stored scope of a trigger-fired thread, returned by
@@ -2443,7 +2447,14 @@ impl RebornServicesApi for RebornServices {
         let scheduler_enabled = self.automation_facade.scheduler_enabled();
         let automations = self
             .automation_facade
-            .list_automations(caller, AutomationListRequest { limit, run_limit })
+            .list_automations(
+                caller,
+                AutomationListRequest {
+                    limit,
+                    run_limit,
+                    include_completed: request.include_completed,
+                },
+            )
             .await?;
         Ok(RebornListAutomationsResponse {
             automations,

@@ -94,6 +94,21 @@ impl AutomationProductFacade for RebornAutomationProductFacade {
         // Both repository calls share one deadline so the panel read budget is
         // backend_timeout total, not per call.
         let deadline = tokio::time::Instant::now() + self.backend_timeout;
+        // Soft-completed one-shots have fired and will never run again. By
+        // default exclude them from the active automations panel so they do
+        // not clutter the list with stale entries. When `include_completed` is
+        // set the exclusion slice is empty, returning all states including
+        // Completed. The exclusion is pushed to the SQL layer so LIMIT is
+        // applied after filtering (fixes pagination undercount).
+        //
+        // Scheduled and Paused triggers are always kept; Paused triggers may be
+        // resumed by the user and still have a meaningful next_run_at slot to
+        // display.
+        let excluded_states: &[TriggerState] = if request.include_completed {
+            &[]
+        } else {
+            &[TriggerState::Completed]
+        };
         let records = tokio::time::timeout_at(
             deadline,
             self.trigger_repository.list_scoped_triggers(
@@ -102,6 +117,7 @@ impl AutomationProductFacade for RebornAutomationProductFacade {
                 Some(caller.agent_id.clone()),
                 caller.project_id.clone(),
                 request.limit,
+                excluded_states,
             ),
         )
         .await

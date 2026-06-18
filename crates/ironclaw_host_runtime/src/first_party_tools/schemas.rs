@@ -475,8 +475,13 @@ pub(crate) fn resolve_builtin_input_schema_ref(reference: &str) -> Option<Value>
                     "type": "string",
                     "description": "Prompt submitted when the trigger fires. Runtime validation caps UTF-8 content at 32768 bytes. Do not embed delivery routing here; when the user asks to send routine or trigger results through an outbound product/channel, first select the target through the visible outbound delivery target capabilities, then create the trigger."
                 },
-                "cron": { "type": "string", "description": "Five-, six-, or seven-field cron expression; fire cadence must be at least one minute" },
-                "timezone": { "type": "string", "description": "IANA timezone name for cron evaluation (e.g. 'America/New_York', 'Europe/London', 'UTC'). The cron expression is evaluated in this timezone; fire times are stored and compared in UTC. If the user's timezone is already known from the conversation or their settings, use it without asking; if unknown, ask the user before creating the trigger. Never silently assume UTC — a trigger that fires at the wrong local time is worse than no trigger." }
+                "cron": { "type": "string", "description": "Five-, six-, or seven-field cron expression; fire cadence must be at least one minute. For one-time fires, use a year-pinned seven-field cron (sec min hour day month dow year), e.g. '0 0 17 24 6 * 2027' fires once at 17:00 on 24 Jun 2027. Fields: second minute hour day-of-month month day-of-week year." },
+                "timezone": { "type": "string", "description": "IANA timezone name for cron evaluation (e.g. 'America/New_York', 'Europe/London', 'UTC'). The cron expression is evaluated in this timezone; fire times are stored and compared in UTC. If the user's timezone is already known from the conversation or their settings, use it without asking; if unknown, ask the user before creating the trigger. Never silently assume UTC — a trigger that fires at the wrong local time is worse than no trigger." },
+                "completion_policy": {
+                    "type": "string",
+                    "enum": ["recurring", "complete_after_first_fire"],
+                    "description": "Whether the trigger repeats or fires exactly once. Defaults to 'recurring'. Use 'complete_after_first_fire' when the user asks for a one-time action, one-off reminder, 'do X at <specific date/time>', or 'next <weekday>' — pair it with a year-pinned seven-field cron to pin the exact datetime (e.g. '0 0 17 24 6 * 2027' = 17:00 on 24 Jun 2027; one-shot dates may be scheduled up to year 2100). Use 'recurring' for ongoing or repeating schedules."
+                }
             },
             "required": ["name", "prompt", "cron", "timezone"],
             "additionalProperties": false

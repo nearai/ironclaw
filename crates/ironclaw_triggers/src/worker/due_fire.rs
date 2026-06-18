@@ -1,14 +1,16 @@
 use crate::{
     ClaimDueFireOutcome, ClaimDueFireRequest, FireAcceptedRequest, FirePermanentFailedRequest,
-    FireReplayedRequest, FireRetryableFailedRequest, FireTerminalFailedRequest, TriggerError,
-    TriggerRecord,
+    FireReplayedRequest, FireRetryableFailedRequest, FireTerminalFailedRequest,
+    TriggerCompletionPolicy, TriggerError, TriggerRecord,
 };
 use ironclaw_host_api::Timestamp;
 
 use super::{
     TriggerPollerFailureReason, TriggerPollerFireOutcome, TriggerPollerWorker,
     TrustedTriggerFireSubmitOutcome, TrustedTriggerSubmitRequest,
-    failure::{FireFailureDisposition, classify_failure, next_run_at_after_fire},
+    failure::{
+        FireFailureDisposition, SubmitFailureKind, classify_failure, next_run_at_after_fire,
+    },
 };
 
 impl TriggerPollerWorker {
@@ -62,20 +64,49 @@ impl TriggerPollerWorker {
         fire_slot: Timestamp,
         now: Timestamp,
     ) -> Result<TriggerPollerFireOutcome, TriggerError> {
-        let next_run_at = match next_run_at_after_fire(&record, fire_slot) {
-            Ok(next_run_at) => next_run_at,
-            Err(error) => {
-                let classification = classify_failure(&error);
-                return self
-                    .persist_failed_fire(
-                        record,
-                        fire_slot,
-                        FireFailureDisposition::PermanentTerminal,
-                        classification.reason,
-                    )
-                    .await;
+        let is_fire_once =
+            record.completion_policy == TriggerCompletionPolicy::CompleteAfterFirstFire;
+
+        // For recurring triggers, compute next slot up front (terminal-fail if unavailable).
+        // For fire-once triggers, next_run_at is None (no next slot by design).
+        let recurring_next_run_at: Option<Timestamp> = if is_fire_once {
+            None
+        } else {
+            match next_run_at_after_fire(&record, fire_slot) {
+                Ok(next) => Some(next),
+                Err(error) => {
+                    let classification = classify_failure(&error);
+                    return self
+                        .persist_failed_fire(
+                            record,
+                            fire_slot,
+                            FireFailureDisposition::PermanentTerminal,
+                            classification.reason,
+                        )
+                        .await;
+                }
             }
         };
+
+        // Build failure disposition respecting fire-once semantics.
+        // Fire-once permanent failures go Terminal (no reschedule slot); retryable stays retryable.
+        let failure_disposition = |kind: SubmitFailureKind| -> FireFailureDisposition {
+            match kind {
+                SubmitFailureKind::Retryable => FireFailureDisposition::Retryable,
+                SubmitFailureKind::Permanent => {
+                    if is_fire_once {
+                        FireFailureDisposition::PermanentTerminal
+                    } else {
+                        // recurring_next_run_at is Some when is_fire_once is false
+                        // (we computed it above and would have returned early on error)
+                        FireFailureDisposition::PermanentReschedule(
+                            recurring_next_run_at.unwrap_or(fire_slot),
+                        )
+                    }
+                }
+            }
+        };
+
         let fire = match self.deps.source_provider.evaluate(&record, now).await {
             Ok(Some(fire)) => fire,
             Ok(None) => {
@@ -83,7 +114,7 @@ impl TriggerPollerWorker {
                     .persist_failed_fire(
                         record,
                         fire_slot,
-                        FireFailureDisposition::PermanentReschedule(next_run_at),
+                        failure_disposition(SubmitFailureKind::Permanent),
                         TriggerPollerFailureReason::SourceNoFire,
                     )
                     .await;
@@ -94,7 +125,7 @@ impl TriggerPollerWorker {
                     .persist_failed_fire(
                         record,
                         fire_slot,
-                        FireFailureDisposition::from_kind(classification.kind, next_run_at),
+                        failure_disposition(classification.kind),
                         classification.reason,
                     )
                     .await;
@@ -113,7 +144,7 @@ impl TriggerPollerWorker {
                     .persist_failed_fire(
                         record,
                         fire_slot,
-                        FireFailureDisposition::from_kind(classification.kind, next_run_at),
+                        failure_disposition(classification.kind),
                         classification.reason,
                     )
                     .await;
@@ -144,7 +175,7 @@ impl TriggerPollerWorker {
                         run_id,
                         thread_id: turn_scope.thread_id,
                         submitted_at,
-                        next_run_at,
+                        next_run_at: recurring_next_run_at,
                     })
                     .await?;
                 if updated.is_none() {
@@ -170,7 +201,7 @@ impl TriggerPollerWorker {
                         original_run_id,
                         thread_id,
                         replayed_at,
-                        next_run_at,
+                        next_run_at: recurring_next_run_at,
                     })
                     .await?;
                 if updated.is_none() {
@@ -186,7 +217,7 @@ impl TriggerPollerWorker {
                 self.persist_failed_fire(
                     record,
                     fire_slot,
-                    FireFailureDisposition::from_kind(classification.kind, next_run_at),
+                    failure_disposition(classification.kind),
                     classification.reason,
                 )
                 .await

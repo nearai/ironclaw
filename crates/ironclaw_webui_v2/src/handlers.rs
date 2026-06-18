@@ -653,6 +653,7 @@ pub async fn list_automations(
     let request = WebUiListAutomationsRequest {
         limit: query.limit,
         run_limit: query.run_limit,
+        include_completed: query.include_completed,
     };
     let response = state.services().list_automations(caller, request).await?;
     Ok(Json(response))
@@ -666,6 +667,11 @@ pub struct ListAutomationsQuery {
     /// Optional maximum number of recent runs to return per automation row.
     #[serde(default)]
     pub run_limit: Option<u32>,
+    /// When `true`, soft-completed (fire-once) automations are included
+    /// alongside active ones. Absent or unparseable values default to `false`
+    /// (active-only), preserving the behavior of existing callers.
+    #[serde(default)]
+    pub include_completed: bool,
 }
 
 /// `GET /api/webchat/v2/traces/credit`

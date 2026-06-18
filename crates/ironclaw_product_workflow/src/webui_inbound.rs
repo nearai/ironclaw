@@ -251,6 +251,11 @@ pub struct WebUiListAutomationsRequest {
     pub limit: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub run_limit: Option<u32>,
+    /// When `true`, soft-completed (fire-once) automations are included in the
+    /// response alongside active ones. Defaults to `false` (active-only) so
+    /// existing callers that do not set this flag are unaffected.
+    #[serde(default)]
+    pub include_completed: bool,
 }
 
 /// Browser body for WebUI extension-setup interaction.

@@ -334,14 +334,19 @@ async fn trigger_poller_drives_trusted_ingress_for_due_scheduled_trigger() {
     }
 
     // Wait for the settle writes (mark_fire_accepted sets last_fired_slot, last_run_at)
-    // to become visible. The first-pass loop breaks as soon as the claim+prompt are seen;
-    // the settle may still be in flight.
+    // and for clear_active_fire to run (which transitions state to Completed for
+    // CompleteAfterFirstFire triggers). The first-pass loop breaks as soon as the
+    // claim+prompt are seen; the settle may still be in flight.
     let final_record = wait_for_settled(
         &repo,
         &tenant_id,
         record.trigger_id,
         Duration::from_secs(5),
-        |r| r.last_fired_slot.is_some() && r.last_run_at.is_some(),
+        |r| {
+            r.last_fired_slot.is_some()
+                && r.last_run_at.is_some()
+                && r.state == TriggerState::Completed
+        },
     )
     .await;
 
@@ -360,11 +365,6 @@ async fn trigger_poller_drives_trusted_ingress_for_due_scheduled_trigger() {
         "LLM gateway never received a request containing the trigger prompt within 15s \
          — captured_messages: {captured_contents:?}"
     );
-    // CompleteAfterFirstFire: the settle write (mark_fire_accepted) records last_fired_slot
-    // and last_run_at. `state` transitions to `Completed` only when the terminal-failure
-    // path runs (`mark_fire_terminally_failed`); the policy field is currently stored but
-    // never consulted by `mark_fire_accepted` — see issue #4420 for the production gap.
-    // Once that is fixed, tighten this to `assert_eq!(state, TriggerState::Completed, ...)`.
     assert!(
         final_record.last_fired_slot.is_some(),
         "CompleteAfterFirstFire policy: last_fired_slot should be set after fire — record: {final_record:?}",
@@ -377,6 +377,11 @@ async fn trigger_poller_drives_trusted_ingress_for_due_scheduled_trigger() {
         final_record.last_status,
         Some(TriggerRunStatus::Ok),
         "CompleteAfterFirstFire policy: last_status should be Ok after fire — record: {final_record:?}",
+    );
+    assert_eq!(
+        final_record.state,
+        TriggerState::Completed,
+        "CompleteAfterFirstFire policy: state must be Completed after clear_active_fire — record: {final_record:?}",
     );
 }
 
@@ -405,7 +410,8 @@ async fn builtin_trigger_create_pairs_creator_and_poller_submits_turn() {
             "name": "trigger-e2e-created-by-tool",
             "prompt": TRIGGER_PROMPT,
             "cron": "* * * * *",
-            "timezone": "UTC"
+            "timezone": "UTC",
+            "completion_policy": "recurring"
         }),
     )
     .await;

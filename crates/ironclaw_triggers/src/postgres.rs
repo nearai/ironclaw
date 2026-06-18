@@ -197,6 +197,7 @@ impl TriggerRepository for PostgresTriggerRepository {
         agent_id: Option<AgentId>,
         project_id: Option<ProjectId>,
         limit: usize,
+        excluded_states: &[TriggerState],
     ) -> Result<Vec<TriggerRecord>, TriggerError> {
         if limit == 0 {
             return Ok(Vec::new());
@@ -205,6 +206,7 @@ impl TriggerRepository for PostgresTriggerRepository {
         let limit = limit.min(crate::MAX_TRIGGER_LIST_LIMIT) as i64;
         let agent_id = agent_id.as_ref().map(AgentId::as_str);
         let project_id = project_id.as_ref().map(ProjectId::as_str);
+        let excluded_texts: Vec<&str> = excluded_states.iter().map(|s| state_text(*s)).collect();
         let rows = client
             .query(
                 &format!(
@@ -214,6 +216,7 @@ impl TriggerRepository for PostgresTriggerRepository {
                        AND creator_user_id = $2
                        AND agent_id IS NOT DISTINCT FROM $3
                        AND project_id IS NOT DISTINCT FROM $4
+                       AND ($6::text[] IS NULL OR state != ALL($6))
                      ORDER BY created_at, trigger_id
                      LIMIT $5"
                 ),
@@ -223,6 +226,11 @@ impl TriggerRepository for PostgresTriggerRepository {
                     &agent_id,
                     &project_id,
                     &limit,
+                    &if excluded_texts.is_empty() {
+                        None::<Vec<&str>>
+                    } else {
+                        Some(excluded_texts)
+                    },
                 ],
             )
             .await
@@ -474,9 +482,11 @@ impl TriggerRepository for PostgresTriggerRepository {
             reject_run_ref_rewrite(active_run_ref, request.run_id)?;
             return Ok(Some(record));
         }
-        reject_non_future_next_run_at(request.fire_slot, request.next_run_at)?;
+        if let Some(next_run_at) = request.next_run_at {
+            reject_non_future_next_run_at(request.fire_slot, next_run_at)?;
+        }
 
-        let record = mark_successful_fire_result(
+        let Some(record) = mark_successful_fire_result(
             &tx,
             SuccessfulFireResultUpdate {
                 tenant_id: request.tenant_id.as_str(),
@@ -488,7 +498,13 @@ impl TriggerRepository for PostgresTriggerRepository {
                 operation: "mark accepted trigger fire",
             },
         )
-        .await?;
+        .await?
+        else {
+            tx.rollback()
+                .await
+                .map_err(|error| backend_error("rollback accepted trigger fire", error))?;
+            return Ok(None);
+        };
         let mut run_record = TriggerRunRecord::running(
             request.tenant_id.clone(),
             request.trigger_id,
@@ -525,9 +541,11 @@ impl TriggerRepository for PostgresTriggerRepository {
             reject_run_ref_rewrite(active_run_ref, request.original_run_id)?;
             return Ok(Some(record));
         }
-        reject_non_future_next_run_at(request.fire_slot, request.next_run_at)?;
+        if let Some(next_run_at) = request.next_run_at {
+            reject_non_future_next_run_at(request.fire_slot, next_run_at)?;
+        }
 
-        let record = mark_successful_fire_result(
+        let Some(record) = mark_successful_fire_result(
             &tx,
             SuccessfulFireResultUpdate {
                 tenant_id: request.tenant_id.as_str(),
@@ -539,7 +557,13 @@ impl TriggerRepository for PostgresTriggerRepository {
                 operation: "mark replayed trigger fire",
             },
         )
-        .await?;
+        .await?
+        else {
+            tx.rollback()
+                .await
+                .map_err(|error| backend_error("rollback replayed trigger fire", error))?;
+            return Ok(None);
+        };
         let mut run_record = TriggerRunRecord::running(
             request.tenant_id.clone(),
             request.trigger_id,
@@ -573,7 +597,9 @@ impl TriggerRepository for PostgresTriggerRepository {
             return Ok(None);
         }
         reject_failed_result_after_active_run(record.active_run_ref)?;
-        if record.next_run_at > request.fire_slot {
+        if record.completion_policy == TriggerCompletionPolicy::Recurring
+            && record.next_run_at > request.fire_slot
+        {
             return Err(TriggerError::InvalidRecord {
                 reason: "retryable fire failure must leave next_run_at at or before the failed fire slot"
                     .to_string(),
@@ -773,7 +799,8 @@ impl TriggerRepository for PostgresTriggerRepository {
                 &format!(
                     "UPDATE {TRIGGER_TABLE}
                      SET active_fire_slot = NULL,
-                         active_run_ref = NULL
+                         active_run_ref = NULL,
+                         state = CASE WHEN completion_policy = 'complete_after_first_fire' THEN 'completed' ELSE state END
                      WHERE tenant_id = $1
                        AND trigger_id = $2
                        AND active_fire_slot = $3
@@ -949,26 +976,27 @@ async fn locked_record(
 async fn mark_successful_fire_result(
     tx: &tokio_postgres::Transaction<'_>,
     update: SuccessfulFireResultUpdate<'_>,
-) -> Result<TriggerRecord, TriggerError> {
+) -> Result<Option<TriggerRecord>, TriggerError> {
     let result_at = fmt_ts(&update.result_at);
     let fire_slot = fmt_ts(&update.fire_slot);
-    let next_run_at = fmt_ts(&update.next_run_at);
+    let next_run_at = update.next_run_at.as_ref().map(fmt_ts);
     let active_run_ref = update.run_id.to_string();
     let last_status = status_text(TriggerRunStatus::Ok);
     let row = tx
-        .query_one(
+        .query_opt(
             &format!(
                 "UPDATE {TRIGGER_TABLE}
                  SET last_run_at = $3,
                      last_fired_slot = $4,
                      last_status = $5,
-                     next_run_at = $6,
+                     next_run_at = COALESCE($6, next_run_at),
                      active_fire_slot = $4,
                      active_run_ref = $7
                  WHERE tenant_id = $1
                    AND trigger_id = $2
                    AND active_fire_slot = $4
                    AND active_run_ref IS NULL
+                   AND ($6 IS NULL OR $6 > $4)
                  RETURNING {TRIGGER_COLUMNS}"
             ),
             &[
@@ -983,7 +1011,7 @@ async fn mark_successful_fire_result(
         )
         .await
         .map_err(|error| backend_error(update.operation, error))?;
-    row_to_record(&row)
+    row.map(|row| row_to_record(&row)).transpose()
 }
 
 struct SuccessfulFireResultUpdate<'a> {
@@ -992,7 +1020,7 @@ struct SuccessfulFireResultUpdate<'a> {
     fire_slot: Timestamp,
     run_id: TurnRunId,
     result_at: Timestamp,
-    next_run_at: Timestamp,
+    next_run_at: Option<Timestamp>,
     operation: &'static str,
 }
 

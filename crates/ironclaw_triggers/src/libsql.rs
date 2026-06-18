@@ -399,6 +399,7 @@ impl TriggerRepository for LibSqlTriggerRepository {
         agent_id: Option<AgentId>,
         project_id: Option<ProjectId>,
         limit: usize,
+        excluded_states: &[TriggerState],
     ) -> Result<Vec<TriggerRecord>, TriggerError> {
         if limit == 0 {
             return Ok(Vec::new());
@@ -407,6 +408,19 @@ impl TriggerRepository for LibSqlTriggerRepository {
         let conn = self.connect().await?;
         let agent_id = agent_id.as_ref().map(AgentId::as_str);
         let project_id = project_id.as_ref().map(ProjectId::as_str);
+        let excluded_states_json: libsql::Value = if excluded_states.is_empty() {
+            libsql::Value::Null
+        } else {
+            let states_json = format!(
+                "[{}]",
+                excluded_states
+                    .iter()
+                    .map(|s| format!("\"{}\"", state_text(*s)))
+                    .collect::<Vec<_>>()
+                    .join(",")
+            );
+            libsql::Value::Text(states_json)
+        };
         let mut rows = conn
             .query(
                 &format!(
@@ -416,16 +430,18 @@ impl TriggerRepository for LibSqlTriggerRepository {
                        AND creator_user_id = ?2
                        AND agent_id IS ?3
                        AND project_id IS ?4
+                       AND (?6 IS NULL OR state NOT IN (SELECT value FROM json_each(?6)))
                      ORDER BY created_at, trigger_id
                      LIMIT ?5"
                 ),
-                params![
-                    tenant_id.as_str(),
-                    creator_user_id.as_str(),
-                    agent_id,
-                    project_id,
-                    limit
-                ],
+                libsql::params_from_iter([
+                    libsql::Value::Text(tenant_id.as_str().to_string()),
+                    libsql::Value::Text(creator_user_id.as_str().to_string()),
+                    agent_id.map_or(libsql::Value::Null, |v| libsql::Value::Text(v.to_string())),
+                    project_id.map_or(libsql::Value::Null, |v| libsql::Value::Text(v.to_string())),
+                    libsql::Value::Integer(limit),
+                    excluded_states_json,
+                ]),
             )
             .await
             .map_err(|error| backend_error("query scoped trigger records", error))?;
@@ -761,7 +777,9 @@ impl TriggerRepository for LibSqlTriggerRepository {
             return Ok(None);
         }
         reject_failed_result_after_active_run(record.active_run_ref)?;
-        if record.next_run_at > fire_slot {
+        if record.completion_policy == TriggerCompletionPolicy::Recurring
+            && record.next_run_at > fire_slot
+        {
             return Err(TriggerError::InvalidRecord {
                 reason: "retryable fire failure must leave next_run_at at or before the failed fire slot"
                     .to_string(),
@@ -995,7 +1013,8 @@ impl TriggerRepository for LibSqlTriggerRepository {
                     &format!(
                         "UPDATE {TRIGGER_TABLE}
                          SET active_fire_slot = NULL,
-                             active_run_ref = NULL
+                             active_run_ref = NULL,
+                             state = CASE WHEN completion_policy = 'complete_after_first_fire' THEN 'completed' ELSE state END
                          WHERE tenant_id = ?1
                            AND trigger_id = ?2
                            AND active_fire_slot = ?3
@@ -1381,7 +1400,9 @@ async fn resolve_missed_fire_result_update(
         }
         reject_failed_result_after_active_run(Some(active_run_ref))?;
     }
-    if let Some(next_run_at) = next_run_at {
+    if let Some(next_run_at) = next_run_at
+        && record.completion_policy == TriggerCompletionPolicy::Recurring
+    {
         reject_non_future_next_run_at(fire_slot, next_run_at)?;
     }
     Err(backend_error(
@@ -1397,7 +1418,7 @@ async fn mark_successful_fire_result(
 ) -> Result<Option<TriggerRecord>, TriggerError> {
     let fire_slot_text = fmt_ts(&update.fire_slot);
     let result_at = fmt_ts(&update.result_at);
-    let next_run_at_text = fmt_ts(&update.next_run_at);
+    let next_run_at_val = opt_ts(update.next_run_at.as_ref());
     let active_run_ref = update.run_id.to_string();
     let last_status = status_text(TriggerRunStatus::Ok);
     begin_immediate(conn, "begin successful trigger fire result").await?;
@@ -1409,25 +1430,25 @@ async fn mark_successful_fire_result(
                      SET last_run_at = ?3,
                          last_fired_slot = ?4,
                          last_status = ?5,
-                         next_run_at = ?6,
+                         next_run_at = COALESCE(?6, next_run_at),
                          active_fire_slot = ?4,
                          active_run_ref = ?7
                      WHERE tenant_id = ?1
                        AND trigger_id = ?2
                        AND active_fire_slot = ?4
                        AND active_run_ref IS NULL
-                       AND ?6 > ?4
+                       AND (?6 IS NULL OR ?6 > ?4)
                      RETURNING {TRIGGER_COLUMNS}"
                 ),
-                params![
-                    update.tenant_id.as_str(),
-                    update.trigger_id.to_string(),
-                    result_at,
-                    fire_slot_text,
-                    last_status,
-                    next_run_at_text,
-                    active_run_ref,
-                ],
+                libsql::params_from_iter([
+                    libsql::Value::Text(update.tenant_id.as_str().to_string()),
+                    libsql::Value::Text(update.trigger_id.to_string()),
+                    libsql::Value::Text(result_at),
+                    libsql::Value::Text(fire_slot_text),
+                    libsql::Value::Text(last_status.to_string()),
+                    next_run_at_val,
+                    libsql::Value::Text(active_run_ref),
+                ]),
             )
             .await
             .map_err(|error| backend_error(update.update_operation, error))?;
@@ -1463,7 +1484,7 @@ async fn mark_successful_fire_result(
         update.trigger_id,
         update.fire_slot,
         Some(update.run_id),
-        Some(update.next_run_at),
+        update.next_run_at,
     )
     .await
 }
@@ -1480,7 +1501,7 @@ struct SuccessfulFireResultUpdate<'a> {
     /// submission outcome resolved.
     thread_id: Option<ThreadId>,
     result_at: Timestamp,
-    next_run_at: Timestamp,
+    next_run_at: Option<Timestamp>,
     update_operation: &'static str,
     read_operation: &'static str,
 }

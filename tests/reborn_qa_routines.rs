@@ -81,6 +81,7 @@ async fn run_routine_creation(case: RoutineCreationCase) {
                     "prompt": case.prompt,
                     "cron": case.cron,
                     "timezone": "UTC",
+                    "completion_policy": "recurring",
                 }),
             )],
             expected_tool_results: Vec::new(),
@@ -309,6 +310,7 @@ async fn reborn_qa_routine_created_by_tool_fires_and_runs_routine_prompt() {
             "prompt": QA_ROUTINE_PROMPT,
             "cron": "*/5 * * * *",
             "timezone": "UTC",
+            "completion_policy": "recurring",
         }),
     )
     .await;
@@ -464,6 +466,7 @@ async fn reborn_qa_fired_routine_executes_action_and_finalizes_reply() {
             "prompt": QA_ROUTINE_PROMPT,
             "cron": "*/5 * * * *",
             "timezone": "UTC",
+            "completion_policy": "recurring",
         }),
     )
     .await;

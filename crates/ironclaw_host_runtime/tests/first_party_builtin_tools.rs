@@ -54,8 +54,8 @@ use ironclaw_resources::{InMemoryResourceGovernor, ResourceAccount};
 use ironclaw_secrets::InMemorySecretStore;
 use ironclaw_triggers::{
     ClaimDueFireRequest, ClearActiveFireRequest, FireAcceptedRequest, InMemoryTriggerRepository,
-    MAX_TRIGGER_NAME_BYTES, MAX_TRIGGER_PROMPT_BYTES, TriggerError, TriggerRecord,
-    TriggerRepository, TriggerRunHistoryStatus, TriggerRunRecord, TriggerState,
+    MAX_TRIGGER_NAME_BYTES, MAX_TRIGGER_PROMPT_BYTES, TriggerCompletionPolicy, TriggerError,
+    TriggerRecord, TriggerRepository, TriggerRunHistoryStatus, TriggerRunRecord, TriggerState,
 };
 use ironclaw_trust::{
     AdminConfig, AdminEntry, AuthorityCeiling, EffectiveTrustClass, HostTrustAssignment,
@@ -1141,7 +1141,7 @@ async fn builtin_trigger_list_embeds_recent_run_history_with_run_limit() {
             run_id: first_run_id,
             thread_id: ThreadId::new("01890f0f-0001-7000-8000-000000000001").unwrap(),
             submitted_at: first_fire_slot + chrono::Duration::seconds(1),
-            next_run_at: first_fire_slot + chrono::Duration::minutes(1),
+            next_run_at: Some(first_fire_slot + chrono::Duration::minutes(1)),
         })
         .await
         .unwrap();
@@ -1175,7 +1175,7 @@ async fn builtin_trigger_list_embeds_recent_run_history_with_run_limit() {
             run_id: second_run_id,
             thread_id: ThreadId::new("01890f0f-0002-7000-8000-000000000002").unwrap(),
             submitted_at: second_fire_slot + chrono::Duration::seconds(1),
-            next_run_at: second_fire_slot + chrono::Duration::minutes(1),
+            next_run_at: Some(second_fire_slot + chrono::Duration::minutes(1)),
         })
         .await
         .unwrap();
@@ -1209,7 +1209,7 @@ async fn builtin_trigger_list_embeds_recent_run_history_with_run_limit() {
             run_id: third_run_id,
             thread_id: ThreadId::new("01890f0f-0003-7000-8000-000000000003").unwrap(),
             submitted_at: third_fire_slot + chrono::Duration::seconds(1),
-            next_run_at: third_fire_slot + chrono::Duration::minutes(1),
+            next_run_at: Some(third_fire_slot + chrono::Duration::minutes(1)),
         })
         .await
         .unwrap();
@@ -1326,6 +1326,120 @@ async fn builtin_trigger_list_clamps_oversized_run_limit_to_max() {
     );
 }
 
+/// Regression guard: `builtin.trigger_list` (model-facing) must return triggers
+/// in ALL states, including `Completed` (soft-completed fire-once triggers).
+/// The model needs to see completed one-shots so it can report their history.
+///
+/// Contrast with `list_automations` (panel-facing) which EXCLUDES Completed.
+/// The difference is encoded by `list_triggers` passing `&[]` (no exclusions)
+/// while `list_automations` passes `&[TriggerState::Completed]`.
+#[tokio::test]
+async fn builtin_trigger_list_includes_completed_fire_once_triggers() {
+    let repository = Arc::new(InMemoryTriggerRepository::default());
+    let runtime = runtime_with_trigger_repository(repository.clone());
+    let context = execution_context([TRIGGER_CREATE_CAPABILITY_ID, TRIGGER_LIST_CAPABILITY_ID]);
+
+    // Create a fire-once trigger so it can be soft-completed.
+    let created = invoke_with_context(
+        &runtime,
+        TRIGGER_CREATE_CAPABILITY_ID,
+        json!({
+            "name": "One-shot reminder",
+            "prompt": "Remind me about the meeting",
+            "cron": "0 8 * * *",
+            "timezone": "UTC",
+            "completion_policy": "complete_after_first_fire"
+        }),
+        context.clone(),
+    )
+    .await
+    .unwrap();
+    let trigger_id_str = created["trigger"]["trigger_id"]
+        .as_str()
+        .expect("trigger_id in create output");
+
+    // Transition the trigger to Completed via a fire cycle (claim → clear).
+    let record = repository
+        .list_triggers(context.resource_scope.tenant_id.clone())
+        .await
+        .unwrap()
+        .pop()
+        .expect("persisted fire-once trigger");
+    assert_eq!(
+        record.completion_policy,
+        TriggerCompletionPolicy::CompleteAfterFirstFire
+    );
+    let fire_slot = record.next_run_at;
+    let run_id = ironclaw_turns::TurnRunId::new();
+
+    repository
+        .claim_due_fire(ClaimDueFireRequest {
+            tenant_id: record.tenant_id.clone(),
+            trigger_id: record.trigger_id,
+            fire_slot,
+            now: fire_slot,
+        })
+        .await
+        .unwrap();
+    repository
+        .mark_fire_accepted(FireAcceptedRequest {
+            tenant_id: record.tenant_id.clone(),
+            trigger_id: record.trigger_id,
+            fire_slot,
+            run_id,
+            thread_id: ironclaw_host_api::ThreadId::new("01890f0f-fire-7000-8000-000000000001")
+                .unwrap(),
+            submitted_at: fire_slot,
+            next_run_at: None, // fire-once: no next slot
+        })
+        .await
+        .unwrap();
+    repository
+        .clear_active_fire(ClearActiveFireRequest {
+            tenant_id: record.tenant_id.clone(),
+            trigger_id: record.trigger_id,
+            fire_slot,
+            run_id,
+            status: TriggerRunHistoryStatus::Ok,
+        })
+        .await
+        .unwrap();
+
+    // Verify the repository has Completed state.
+    let persisted = repository
+        .get_trigger(record.tenant_id.clone(), record.trigger_id)
+        .await
+        .unwrap()
+        .expect("trigger record after clear");
+    assert_eq!(
+        persisted.state,
+        TriggerState::Completed,
+        "fire-once trigger must be Completed after clear_active_fire"
+    );
+
+    // trigger_list must include Completed triggers (model needs the history).
+    let listed = invoke_with_context(&runtime, TRIGGER_LIST_CAPABILITY_ID, json!({}), context)
+        .await
+        .unwrap();
+
+    let triggers = listed["triggers"].as_array().expect("triggers array");
+    assert_eq!(
+        triggers.len(),
+        1,
+        "trigger_list must return the completed fire-once trigger"
+    );
+    assert_eq!(
+        triggers[0]["trigger_id"].as_str().unwrap(),
+        trigger_id_str,
+        "trigger_list must include the completed fire-once trigger by id"
+    );
+    assert_eq!(
+        triggers[0]["state"],
+        json!("completed"),
+        "trigger_list must expose the Completed state to the model"
+    );
+}
+
 async fn seed_completed_trigger_runs(
     repository: &InMemoryTriggerRepository,
     record: &TriggerRecord,
@@ -1351,7 +1465,7 @@ async fn seed_completed_trigger_runs(
                 run_id,
                 thread_id: ThreadId::new("01890f0f-0004-7000-8000-000000000004").unwrap(),
                 submitted_at: fire_slot + chrono::Duration::seconds(1),
-                next_run_at: fire_slot + chrono::Duration::minutes(1),
+                next_run_at: Some(fire_slot + chrono::Duration::minutes(1)),
             })
             .await
             .unwrap();
@@ -6719,9 +6833,17 @@ impl TriggerRepository for RemoveFailingTriggerRepository {
         agent_id: Option<AgentId>,
         project_id: Option<ProjectId>,
         limit: usize,
+        excluded_states: &[ironclaw_triggers::TriggerState],
     ) -> Result<Vec<ironclaw_triggers::TriggerRecord>, ironclaw_triggers::TriggerError> {
         self.inner
-            .list_scoped_triggers(tenant_id, creator_user_id, agent_id, project_id, limit)
+            .list_scoped_triggers(
+                tenant_id,
+                creator_user_id,
+                agent_id,
+                project_id,
+                limit,
+                excluded_states,
+            )
             .await
     }
 
@@ -6860,9 +6982,17 @@ impl TriggerRepository for BatchRunHistoryFailingTriggerRepository {
         agent_id: Option<AgentId>,
         project_id: Option<ProjectId>,
         limit: usize,
+        excluded_states: &[ironclaw_triggers::TriggerState],
     ) -> Result<Vec<ironclaw_triggers::TriggerRecord>, ironclaw_triggers::TriggerError> {
         self.inner
-            .list_scoped_triggers(tenant_id, creator_user_id, agent_id, project_id, limit)
+            .list_scoped_triggers(
+                tenant_id,
+                creator_user_id,
+                agent_id,
+                project_id,
+                limit,
+                excluded_states,
+            )
             .await
     }
 
@@ -7009,6 +7139,7 @@ impl TriggerRepository for FailingTriggerRepository {
         _agent_id: Option<AgentId>,
         _project_id: Option<ProjectId>,
         _limit: usize,
+        _excluded_states: &[ironclaw_triggers::TriggerState],
     ) -> Result<Vec<ironclaw_triggers::TriggerRecord>, ironclaw_triggers::TriggerError> {
         Err(trigger_backend_error())
     }

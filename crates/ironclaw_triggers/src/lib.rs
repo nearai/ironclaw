@@ -413,9 +413,10 @@ pub enum TriggerState {
     Completed,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum TriggerCompletionPolicy {
+    #[default]
     Recurring,
     CompleteAfterFirstFire,
 }
@@ -600,7 +601,10 @@ pub struct FireAcceptedRequest {
     /// panel can open the correct chat thread from `recent_runs[].thread_id`.
     pub thread_id: ThreadId,
     pub submitted_at: Timestamp,
-    pub next_run_at: Timestamp,
+    /// `Some` = next scheduled fire slot for the trigger (must be strictly
+    /// after `fire_slot`); `None` = fire-once, leave the stored `next_run_at`
+    /// unchanged.
+    pub next_run_at: Option<Timestamp>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -618,7 +622,10 @@ pub struct FireReplayedRequest {
     /// no chat link.
     pub thread_id: Option<ThreadId>,
     pub replayed_at: Timestamp,
-    pub next_run_at: Timestamp,
+    /// `Some` = next scheduled fire slot for the trigger (must be strictly
+    /// after `fire_slot`); `None` = fire-once, leave the stored `next_run_at`
+    /// unchanged.
+    pub next_run_at: Option<Timestamp>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -736,6 +743,11 @@ pub trait TriggerRepository: Send + Sync {
     async fn list_triggers(&self, tenant_id: TenantId) -> Result<Vec<TriggerRecord>, TriggerError>;
 
     /// Returns caller-scoped triggers in creation order, capped for user-facing surfaces.
+    ///
+    /// `excluded_states` is a slice of states to omit from the result. Pass
+    /// `&[]` to include all states (model-facing paths) or
+    /// `&[TriggerState::Completed]` to exclude soft-completed one-shots from
+    /// user-facing panels.
     async fn list_scoped_triggers(
         &self,
         tenant_id: TenantId,
@@ -743,6 +755,7 @@ pub trait TriggerRepository: Send + Sync {
         agent_id: Option<AgentId>,
         project_id: Option<ProjectId>,
         limit: usize,
+        excluded_states: &[TriggerState],
     ) -> Result<Vec<TriggerRecord>, TriggerError>;
 
     async fn remove_trigger(
@@ -1018,6 +1031,7 @@ impl TriggerRepository for InMemoryTriggerRepository {
         agent_id: Option<AgentId>,
         project_id: Option<ProjectId>,
         limit: usize,
+        excluded_states: &[TriggerState],
     ) -> Result<Vec<TriggerRecord>, TriggerError> {
         if limit == 0 {
             return Ok(Vec::new());
@@ -1032,6 +1046,7 @@ impl TriggerRepository for InMemoryTriggerRepository {
                     && record.creator_user_id == creator_user_id
                     && record.agent_id == agent_id
                     && record.project_id == project_id
+                    && !excluded_states.contains(&record.state)
             })
             .cloned()
             .collect::<Vec<_>>();
@@ -1217,11 +1232,13 @@ impl TriggerRepository for InMemoryTriggerRepository {
                     reject_run_ref_rewrite(active_run_ref, request.run_id)?;
                     return Ok(());
                 }
-                reject_non_future_next_run_at(request.fire_slot, request.next_run_at)?;
+                if let Some(nra) = request.next_run_at {
+                    reject_non_future_next_run_at(request.fire_slot, nra)?;
+                    record.next_run_at = nra;
+                }
                 record.last_run_at = Some(request.submitted_at);
                 record.last_fired_slot = Some(request.fire_slot);
                 record.last_status = Some(TriggerRunStatus::Ok);
-                record.next_run_at = request.next_run_at;
                 record.active_fire_slot = Some(request.fire_slot);
                 record.active_run_ref = Some(request.run_id);
                 Ok(())
@@ -1254,11 +1271,13 @@ impl TriggerRepository for InMemoryTriggerRepository {
                     reject_run_ref_rewrite(active_run_ref, request.original_run_id)?;
                     return Ok(());
                 }
-                reject_non_future_next_run_at(request.fire_slot, request.next_run_at)?;
+                if let Some(nra) = request.next_run_at {
+                    reject_non_future_next_run_at(request.fire_slot, nra)?;
+                    record.next_run_at = nra;
+                }
                 record.last_run_at = Some(request.replayed_at);
                 record.last_fired_slot = Some(request.fire_slot);
                 record.last_status = Some(TriggerRunStatus::Ok);
-                record.next_run_at = request.next_run_at;
                 record.active_fire_slot = Some(request.fire_slot);
                 record.active_run_ref = Some(request.original_run_id);
                 Ok(())
@@ -1288,7 +1307,9 @@ impl TriggerRepository for InMemoryTriggerRepository {
             request.fire_slot,
             |record| {
                 reject_failed_result_after_active_run(record.active_run_ref)?;
-                if record.next_run_at > request.fire_slot {
+                if record.completion_policy == TriggerCompletionPolicy::Recurring
+                    && record.next_run_at > request.fire_slot
+                {
                     return Err(TriggerError::InvalidRecord {
                         reason: "retryable fire failure must leave next_run_at at or before the failed fire slot"
                             .to_string(),
@@ -1393,6 +1414,9 @@ impl TriggerRepository for InMemoryTriggerRepository {
         }
         record.active_fire_slot = None;
         record.active_run_ref = None;
+        if record.completion_policy == TriggerCompletionPolicy::CompleteAfterFirstFire {
+            record.state = TriggerState::Completed;
+        }
         let record = record.clone();
         let completed_at = Utc::now();
         state
@@ -2476,7 +2500,7 @@ mod tests {
                 thread_id: ThreadId::new("01890f0f-test-7000-8000-000000000002")
                     .expect("valid thread id"),
                 submitted_at: fire_slot,
-                next_run_at: ts(1_704_067_260),
+                next_run_at: Some(ts(1_704_067_260)),
             })
             .await
             .expect_err("poisoned mutex maps to backend through accepted-result API");
@@ -2499,7 +2523,7 @@ mod tests {
                     .expect("valid run"),
                 thread_id: None,
                 replayed_at: fire_slot,
-                next_run_at: ts(1_704_067_260),
+                next_run_at: Some(ts(1_704_067_260)),
             })
             .await
             .expect_err("poisoned mutex maps to backend through replayed-result API");
@@ -2541,6 +2565,111 @@ mod tests {
             .await
             .expect_err("poisoned mutex maps to backend through permanent-failure API");
         assert!(matches!(error, TriggerError::Backend { .. }));
+    }
+
+    #[tokio::test]
+    async fn fire_once_trigger_completes_after_clear_active_fire() {
+        let repo = InMemoryTriggerRepository::default();
+        let trigger_id = TriggerId::parse("01HZZZZZZZZZZZZZZZZZZZZZZZ").expect("ulid");
+        let fire_slot = ts(1_704_067_200);
+        let run_id = TurnRunId::parse("01890f0f-9b6f-7a85-9e5b-9f21a93c4f5a").expect("valid run");
+        // Insert a fire-once trigger with an active fire already in progress.
+        let mut record = sample_record(trigger_id, tenant("tenant-a"), fire_slot);
+        record.completion_policy = TriggerCompletionPolicy::CompleteAfterFirstFire;
+        record.active_fire_slot = Some(fire_slot);
+        record.active_run_ref = Some(run_id);
+        repo.upsert_trigger(record).await.expect("insert");
+
+        // Clearing the active fire must transition state to Completed for fire-once.
+        let cleared = repo
+            .clear_active_fire(ClearActiveFireRequest {
+                tenant_id: tenant("tenant-a"),
+                trigger_id,
+                fire_slot,
+                run_id,
+                status: TriggerRunHistoryStatus::Ok,
+            })
+            .await
+            .expect("clear_active_fire succeeds")
+            .expect("record returned");
+        assert_eq!(cleared.state, TriggerState::Completed);
+        assert_eq!(cleared.active_fire_slot, None);
+        assert_eq!(cleared.active_run_ref, None);
+
+        // Persisted record must also be Completed.
+        let persisted = repo
+            .get_trigger(tenant("tenant-a"), trigger_id)
+            .await
+            .expect("load")
+            .expect("record present");
+        assert_eq!(persisted.state, TriggerState::Completed);
+    }
+
+    #[tokio::test]
+    async fn fire_once_trigger_not_due_after_completing() {
+        let repo = InMemoryTriggerRepository::default();
+        let trigger_id = TriggerId::parse("01HZZZZZZZZZZZZZZZZZZZZZZZ").expect("ulid");
+        let fire_slot = ts(1_704_067_200);
+        let run_id = TurnRunId::parse("01890f0f-9b6f-7a85-9e5b-9f21a93c4f5a").expect("valid run");
+        // Insert fire-once trigger with an active fire.
+        let mut record = sample_record(trigger_id, tenant("tenant-a"), fire_slot);
+        record.completion_policy = TriggerCompletionPolicy::CompleteAfterFirstFire;
+        record.active_fire_slot = Some(fire_slot);
+        record.active_run_ref = Some(run_id);
+        repo.upsert_trigger(record).await.expect("insert");
+
+        // Clear the fire to move trigger to Completed.
+        repo.clear_active_fire(ClearActiveFireRequest {
+            tenant_id: tenant("tenant-a"),
+            trigger_id,
+            fire_slot,
+            run_id,
+            status: TriggerRunHistoryStatus::Ok,
+        })
+        .await
+        .expect("clear_active_fire succeeds");
+
+        // Trigger must not appear in the due list — is_due_at requires state == Scheduled.
+        let due_records = repo
+            .list_due_triggers(fire_slot, 10)
+            .await
+            .expect("list due");
+        assert!(
+            due_records.iter().all(|r| r.trigger_id != trigger_id),
+            "completed fire-once trigger must not be due"
+        );
+    }
+
+    #[tokio::test]
+    async fn recurring_trigger_reschedules_after_clear_active_fire() {
+        // Regression guard: clear_active_fire must NOT transition Recurring triggers to Completed.
+        let repo = InMemoryTriggerRepository::default();
+        let trigger_id = TriggerId::parse("01HZZZZZZZZZZZZZZZZZZZZZZZ").expect("ulid");
+        let fire_slot = ts(1_704_067_200);
+        let next_slot = ts(1_704_067_260);
+        let run_id = TurnRunId::parse("01890f0f-9b6f-7a85-9e5b-9f21a93c4f5a").expect("valid run");
+        let mut record = sample_record(trigger_id, tenant("tenant-a"), next_slot);
+        record.completion_policy = TriggerCompletionPolicy::Recurring;
+        record.active_fire_slot = Some(fire_slot);
+        record.active_run_ref = Some(run_id);
+        repo.upsert_trigger(record).await.expect("insert");
+
+        let cleared = repo
+            .clear_active_fire(ClearActiveFireRequest {
+                tenant_id: tenant("tenant-a"),
+                trigger_id,
+                fire_slot,
+                run_id,
+                status: TriggerRunHistoryStatus::Ok,
+            })
+            .await
+            .expect("clear_active_fire succeeds")
+            .expect("record returned");
+
+        // Recurring triggers must stay Scheduled so the next slot can fire.
+        assert_eq!(cleared.state, TriggerState::Scheduled);
+        assert_eq!(cleared.active_fire_slot, None);
+        assert_eq!(cleared.active_run_ref, None);
     }
 
     #[test]
