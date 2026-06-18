@@ -13,8 +13,8 @@ use crate::{
     FireRetryableFailedRequest, FireTerminalFailedRequest, TriggerCompletionPolicy, TriggerError,
     TriggerId, TriggerRecord, TriggerRepository, TriggerRunHistoryStatus, TriggerRunRecord,
     TriggerRunStatus, TriggerSchedule, TriggerSourceKind, TriggerState,
-    reject_failed_result_after_active_run, reject_non_future_next_run_at, reject_run_ref_rewrite,
-    trigger_run_history_status_text,
+    reject_failed_result_after_active_run, reject_missing_next_run_at_for_recurring,
+    reject_non_future_next_run_at, reject_run_ref_rewrite, trigger_run_history_status_text,
 };
 
 const TRIGGER_TABLE: &str = "trigger_records";
@@ -482,6 +482,7 @@ impl TriggerRepository for PostgresTriggerRepository {
             reject_run_ref_rewrite(active_run_ref, request.run_id)?;
             return Ok(Some(record));
         }
+        reject_missing_next_run_at_for_recurring(record.completion_policy, request.next_run_at)?;
         if let Some(next_run_at) = request.next_run_at {
             reject_non_future_next_run_at(request.fire_slot, next_run_at)?;
         }
@@ -541,6 +542,7 @@ impl TriggerRepository for PostgresTriggerRepository {
             reject_run_ref_rewrite(active_run_ref, request.original_run_id)?;
             return Ok(Some(record));
         }
+        reject_missing_next_run_at_for_recurring(record.completion_policy, request.next_run_at)?;
         if let Some(next_run_at) = request.next_run_at {
             reject_non_future_next_run_at(request.fire_slot, next_run_at)?;
         }

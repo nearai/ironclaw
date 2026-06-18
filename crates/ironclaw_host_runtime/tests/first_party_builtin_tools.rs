@@ -352,7 +352,8 @@ async fn builtin_trigger_create_stamps_caller_scope_and_persists_record() {
             "name": "Daily summary",
             "prompt": "Summarize yesterday",
             "cron": "0 8 * * *",
-            "timezone": "UTC"
+            "timezone": "UTC",
+            "completion_policy": "recurring"
         }),
         context.clone(),
     )
@@ -402,7 +403,8 @@ async fn builtin_trigger_create_runs_create_hook_after_persistence() {
             "name": "Hooked trigger",
             "prompt": "Pair trigger creator",
             "cron": "0 8 * * *",
-            "timezone": "UTC"
+            "timezone": "UTC",
+            "completion_policy": "recurring"
         }),
         context.clone(),
     )
@@ -447,7 +449,8 @@ async fn builtin_trigger_create_maps_create_hook_error_to_backend_and_rolls_back
             "name": "Hook failure",
             "prompt": "Do not persist this trigger",
             "cron": "0 8 * * *",
-            "timezone": "UTC"
+            "timezone": "UTC",
+            "completion_policy": "recurring"
         }),
         context.clone(),
     )
@@ -480,7 +483,8 @@ async fn builtin_trigger_create_surfaces_rollback_error_when_cleanup_fails() {
             "name": "Rollback failure",
             "prompt": "Surface the rollback failure as the user-visible cause",
             "cron": "0 8 * * *",
-            "timezone": "UTC"
+            "timezone": "UTC",
+            "completion_policy": "recurring"
         }),
         context.clone(),
     )
@@ -515,7 +519,8 @@ async fn builtin_trigger_create_rejects_sub_minute_schedule_before_persistence()
             "name": "Too fast",
             "prompt": "Run constantly",
             "cron": "* * * * * *",
-            "timezone": "UTC"
+            "timezone": "UTC",
+            "completion_policy": "recurring"
         }),
         context.clone(),
     )
@@ -553,7 +558,8 @@ async fn builtin_trigger_create_rejects_schedule_with_no_future_slot_before_pers
             "name": "Expired finite schedule",
             "prompt": "Run once in the finite year",
             "cron": format!("0 0 8 * * * {future_year}"),
-            "timezone": "UTC"
+            "timezone": "UTC",
+            "completion_policy": "complete_after_first_fire"
         }),
         context.clone(),
     )
@@ -582,7 +588,8 @@ async fn builtin_trigger_create_rejects_malformed_input_before_persistence() {
         json!({
             "name": "Missing prompt",
             "cron": "0 8 * * *",
-            "timezone": "UTC"
+            "timezone": "UTC",
+            "completion_policy": "recurring"
         }),
         context.clone(),
     )
@@ -612,7 +619,8 @@ async fn builtin_trigger_create_rejects_invalid_timezone_before_persistence() {
             "name": "Invalid timezone trigger",
             "prompt": "Run something",
             "cron": "0 9 * * *",
-            "timezone": "Not/A/Timezone"
+            "timezone": "Not/A/Timezone",
+            "completion_policy": "recurring"
         }),
         context.clone(),
     )
@@ -641,13 +649,15 @@ async fn builtin_trigger_create_rejects_blank_name_or_prompt_before_persistence(
             "name": " ",
             "prompt": "Run work",
             "cron": "0 8 * * *",
-            "timezone": "UTC"
+            "timezone": "UTC",
+            "completion_policy": "recurring"
         }),
         json!({
             "name": "Blank prompt",
             "prompt": " ",
             "cron": "0 8 * * *",
-            "timezone": "UTC"
+            "timezone": "UTC",
+            "completion_policy": "recurring"
         }),
     ] {
         let error = invoke_with_context(
@@ -681,13 +691,15 @@ async fn builtin_trigger_create_rejects_oversized_name_or_prompt_before_persiste
             "name": "x".repeat(MAX_TRIGGER_NAME_BYTES + 1),
             "prompt": "Run work",
             "cron": "0 8 * * *",
-            "timezone": "UTC"
+            "timezone": "UTC",
+            "completion_policy": "recurring"
         }),
         json!({
             "name": "Oversized prompt",
             "prompt": "x".repeat(MAX_TRIGGER_PROMPT_BYTES + 1),
             "cron": "0 8 * * *",
-            "timezone": "UTC"
+            "timezone": "UTC",
+            "completion_policy": "recurring"
         }),
     ] {
         let error = invoke_with_context(
@@ -724,6 +736,7 @@ async fn builtin_trigger_create_applies_first_party_input_size_bound() {
             "prompt": "Run work",
             "cron": "0 8 * * *",
             "timezone": "UTC",
+            "completion_policy": "recurring",
             "padding": "x".repeat(1_048_576)
         }),
         context.clone(),
@@ -762,7 +775,8 @@ async fn builtin_trigger_list_and_remove_are_caller_scoped() {
             "name": "Owned trigger",
             "prompt": "Run owned work",
             "cron": "0 8 * * *",
-            "timezone": "UTC"
+            "timezone": "UTC",
+            "completion_policy": "recurring"
         }),
         owner_context.clone(),
     )
@@ -848,7 +862,8 @@ async fn builtin_trigger_list_separates_enabled_state_from_active_fire_state() {
             "name": "Active trigger",
             "prompt": "Run active work",
             "cron": "0 8 * * *",
-            "timezone": "UTC"
+            "timezone": "UTC",
+            "completion_policy": "recurring"
         }),
         context.clone(),
     )
@@ -933,7 +948,8 @@ async fn builtin_trigger_create_list_and_remove_use_full_request_scope() {
             "name": "Scoped trigger",
             "prompt": "Run scoped work",
             "cron": "0 8 * * *",
-            "timezone": "UTC"
+            "timezone": "UTC",
+            "completion_policy": "recurring"
         }),
         owner_context.clone(),
     )
@@ -1018,7 +1034,8 @@ async fn builtin_trigger_create_round_trips_nullable_agent_and_project_scope() {
             "name": "Unscoped trigger",
             "prompt": "Run unscoped work",
             "cron": "0 8 * * *",
-            "timezone": "UTC"
+            "timezone": "UTC",
+            "completion_policy": "recurring"
         }),
         context,
     )
@@ -1046,7 +1063,8 @@ async fn builtin_trigger_list_applies_user_surface_limit_boundaries() {
                 "name": format!("Trigger {index}"),
                 "prompt": "Run work",
                 "cron": "0 8 * * *",
-                "timezone": "UTC"
+                "timezone": "UTC",
+                "completion_policy": "recurring"
             }),
             context.clone(),
         )
@@ -1109,7 +1127,8 @@ async fn builtin_trigger_list_embeds_recent_run_history_with_run_limit() {
             "name": "Historical trigger",
             "prompt": "Create history rows",
             "cron": "0 8 * * *",
-            "timezone": "UTC"
+            "timezone": "UTC",
+            "completion_policy": "recurring"
         }),
         context.clone(),
     )
@@ -1253,7 +1272,8 @@ async fn builtin_trigger_list_with_zero_run_limit_returns_empty_recent_runs() {
             "name": "Zero run limit trigger",
             "prompt": "Create history rows",
             "cron": "0 8 * * *",
-            "timezone": "UTC"
+            "timezone": "UTC",
+            "completion_policy": "recurring"
         }),
         context.clone(),
     )
@@ -1293,7 +1313,8 @@ async fn builtin_trigger_list_clamps_oversized_run_limit_to_max() {
             "name": "Oversized run limit trigger",
             "prompt": "Create many history rows",
             "cron": "0 8 * * *",
-            "timezone": "UTC"
+            "timezone": "UTC",
+            "completion_policy": "recurring"
         }),
         context.clone(),
     )
@@ -1586,7 +1607,8 @@ async fn builtin_trigger_management_maps_repository_errors_to_backend() {
             "name": "Backend create",
             "prompt": "Run work",
             "cron": "0 8 * * *",
-            "timezone": "UTC"
+            "timezone": "UTC",
+            "completion_policy": "recurring"
         }),
         context.clone(),
     )
@@ -1628,7 +1650,8 @@ async fn builtin_trigger_list_maps_batch_run_history_repository_error_to_backend
             "name": "Batch history failure",
             "prompt": "Create trigger before listing history",
             "cron": "0 8 * * *",
-            "timezone": "UTC"
+            "timezone": "UTC",
+            "completion_policy": "recurring"
         }),
         context.clone(),
     )

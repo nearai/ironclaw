@@ -480,10 +480,10 @@ pub(crate) fn resolve_builtin_input_schema_ref(reference: &str) -> Option<Value>
                 "completion_policy": {
                     "type": "string",
                     "enum": ["recurring", "complete_after_first_fire"],
-                    "description": "Whether the trigger repeats or fires exactly once. Defaults to 'recurring'. Use 'complete_after_first_fire' when the user asks for a one-time action, one-off reminder, 'do X at <specific date/time>', or 'next <weekday>' — pair it with a year-pinned seven-field cron to pin the exact datetime (e.g. '0 0 17 24 6 * 2027' = 17:00 on 24 Jun 2027; one-shot dates may be scheduled up to year 2100). Use 'recurring' for ongoing or repeating schedules."
+                    "description": "Required. Caller must explicitly choose whether the trigger repeats or fires exactly once — there is no default. Use 'complete_after_first_fire' when the user asks for a one-time action, one-off reminder, 'do X at <specific date/time>', or 'next <weekday>' — pair it with a year-pinned seven-field cron to pin the exact datetime (e.g. '0 0 17 24 6 * 2027' = 17:00 on 24 Jun 2027; one-shot dates may be scheduled up to year 2100). Use 'recurring' for ongoing or repeating schedules."
                 }
             },
-            "required": ["name", "prompt", "cron", "timezone"],
+            "required": ["name", "prompt", "cron", "timezone", "completion_policy"],
             "additionalProperties": false
         }),
         "schemas/builtin/trigger_list.input.v1.json" => json!({

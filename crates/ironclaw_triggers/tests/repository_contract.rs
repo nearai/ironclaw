@@ -3560,6 +3560,149 @@ mod fire_claim_contract {
         assert_fire_once_accept_with_none_next_run_at_succeeds(&repo).await;
         super::clear_postgres_triggers(&pool).await;
     }
+
+    // -----------------------------------------------------------------------
+    // (None, Recurring) → InvalidRecord guard
+    // -----------------------------------------------------------------------
+
+    /// Contract: a RECURRING accept with `next_run_at = None` must be rejected
+    /// with `TriggerError::InvalidRecord` on all backends.
+    ///
+    /// This is the core bug guard: a recurring trigger with no next slot would
+    /// leave `next_run_at` pointing at the just-fired slot, causing the poller
+    /// to immediately re-fire the same slot after `clear_active_fire` returns
+    /// the trigger to `Scheduled`.
+    async fn assert_recurring_accept_rejects_none_next_run_at(repo: &impl TriggerRepository) {
+        let trigger_id = TriggerId::parse("01J00000000000000000000050").expect("ulid");
+        let tenant_id = tenant("tenant-recurring-none-accepted");
+        let fire_slot = ts(1_704_067_200);
+        // sample_record uses Recurring by default.
+        let record = sample_record(trigger_id, tenant_id.clone(), fire_slot);
+        assert_eq!(
+            record.completion_policy,
+            TriggerCompletionPolicy::Recurring,
+            "sample_record must be Recurring by default for this test to be meaningful"
+        );
+        repo.upsert_trigger(record)
+            .await
+            .expect("insert recurring record");
+        repo.claim_due_fire(ClaimDueFireRequest {
+            tenant_id: tenant_id.clone(),
+            trigger_id,
+            fire_slot,
+            now: fire_slot,
+        })
+        .await
+        .expect("claim recurring record");
+
+        let result = repo
+            .mark_fire_accepted(FireAcceptedRequest {
+                tenant_id: tenant_id.clone(),
+                trigger_id,
+                fire_slot,
+                run_id: TurnRunId::parse("01890f0f-9b6f-7a85-9e5b-9f21a93c4fa0")
+                    .expect("valid run"),
+                thread_id: ThreadId::new("01890f0f-f001-7000-8000-000000000001")
+                    .expect("valid thread id"),
+                submitted_at: fire_slot,
+                next_run_at: None, // Recurring + None = invalid
+            })
+            .await;
+
+        assert!(
+            matches!(result, Err(TriggerError::InvalidRecord { ref reason }) if reason.contains("recurring fire acceptance requires next_run_at")),
+            "recurring accept with next_run_at=None must return Err(InvalidRecord), got {result:?}"
+        );
+    }
+
+    /// Contract: a RECURRING replay with `next_run_at = None` must be rejected
+    /// with `TriggerError::InvalidRecord` on all backends.
+    async fn assert_recurring_replayed_rejects_none_next_run_at(repo: &impl TriggerRepository) {
+        let trigger_id = TriggerId::parse("01J00000000000000000000051").expect("ulid");
+        let tenant_id = tenant("tenant-recurring-none-replayed");
+        let fire_slot = ts(1_704_067_200);
+        let record = sample_record(trigger_id, tenant_id.clone(), fire_slot);
+        assert_eq!(record.completion_policy, TriggerCompletionPolicy::Recurring);
+        repo.upsert_trigger(record)
+            .await
+            .expect("insert recurring record");
+        repo.claim_due_fire(ClaimDueFireRequest {
+            tenant_id: tenant_id.clone(),
+            trigger_id,
+            fire_slot,
+            now: fire_slot,
+        })
+        .await
+        .expect("claim recurring record");
+
+        let result = repo
+            .mark_fire_replayed(FireReplayedRequest {
+                tenant_id: tenant_id.clone(),
+                trigger_id,
+                fire_slot,
+                original_run_id: TurnRunId::parse("01890f0f-9b6f-7a85-9e5b-9f21a93c4fa1")
+                    .expect("valid run"),
+                thread_id: None,
+                replayed_at: fire_slot,
+                next_run_at: None, // Recurring + None = invalid
+            })
+            .await;
+
+        assert!(
+            matches!(result, Err(TriggerError::InvalidRecord { ref reason }) if reason.contains("recurring fire acceptance requires next_run_at")),
+            "recurring replay with next_run_at=None must return Err(InvalidRecord), got {result:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn in_memory_recurring_accept_rejects_none_next_run_at() {
+        let repo = InMemoryTriggerRepository::default();
+        assert_recurring_accept_rejects_none_next_run_at(&repo).await;
+    }
+
+    #[tokio::test]
+    async fn in_memory_recurring_replayed_rejects_none_next_run_at() {
+        let repo = InMemoryTriggerRepository::default();
+        assert_recurring_replayed_rejects_none_next_run_at(&repo).await;
+    }
+
+    #[cfg(feature = "libsql")]
+    #[tokio::test]
+    async fn libsql_recurring_accept_rejects_none_next_run_at() {
+        let (_dir, repo) = build_libsql_repo().await;
+        assert_recurring_accept_rejects_none_next_run_at(&repo).await;
+    }
+
+    #[cfg(feature = "libsql")]
+    #[tokio::test]
+    async fn libsql_recurring_replayed_rejects_none_next_run_at() {
+        let (_dir, repo) = build_libsql_repo().await;
+        assert_recurring_replayed_rejects_none_next_run_at(&repo).await;
+    }
+
+    #[cfg(feature = "postgres")]
+    #[tokio::test]
+    async fn postgres_recurring_accept_rejects_none_next_run_at() {
+        let Some((_container, pool)) = super::postgres_pool_or_skip().await else {
+            return;
+        };
+        let repo = PostgresTriggerRepository::new(pool.clone());
+        repo.run_migrations().await.expect("run migrations");
+        assert_recurring_accept_rejects_none_next_run_at(&repo).await;
+        super::clear_postgres_triggers(&pool).await;
+    }
+
+    #[cfg(feature = "postgres")]
+    #[tokio::test]
+    async fn postgres_recurring_replayed_rejects_none_next_run_at() {
+        let Some((_container, pool)) = super::postgres_pool_or_skip().await else {
+            return;
+        };
+        let repo = PostgresTriggerRepository::new(pool.clone());
+        repo.run_migrations().await.expect("run migrations");
+        assert_recurring_replayed_rejects_none_next_run_at(&repo).await;
+        super::clear_postgres_triggers(&pool).await;
+    }
 }
 
 // ---------------------------------------------------------------------------

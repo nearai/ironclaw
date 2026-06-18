@@ -1232,6 +1232,10 @@ impl TriggerRepository for InMemoryTriggerRepository {
                     reject_run_ref_rewrite(active_run_ref, request.run_id)?;
                     return Ok(());
                 }
+                reject_missing_next_run_at_for_recurring(
+                    record.completion_policy,
+                    request.next_run_at,
+                )?;
                 if let Some(nra) = request.next_run_at {
                     reject_non_future_next_run_at(request.fire_slot, nra)?;
                     record.next_run_at = nra;
@@ -1271,6 +1275,10 @@ impl TriggerRepository for InMemoryTriggerRepository {
                     reject_run_ref_rewrite(active_run_ref, request.original_run_id)?;
                     return Ok(());
                 }
+                reject_missing_next_run_at_for_recurring(
+                    record.completion_policy,
+                    request.next_run_at,
+                )?;
                 if let Some(nra) = request.next_run_at {
                     reject_non_future_next_run_at(request.fire_slot, nra)?;
                     record.next_run_at = nra;
@@ -1649,6 +1657,27 @@ pub(crate) fn reject_non_future_next_run_at(
     Err(TriggerError::InvalidRecord {
         reason: "fire result next_run_at must be after the claimed fire slot".to_string(),
     })
+}
+
+/// Rejects the combination of `next_run_at = None` with a `Recurring` completion policy.
+///
+/// A recurring trigger always needs a future `next_run_at` on acceptance so the poller
+/// knows when to schedule the next fire. Passing `None` would leave `next_run_at` pointing
+/// at the just-fired slot, causing the poller to immediately re-fire the same slot after
+/// `clear_active_fire` returns the trigger to `Scheduled` state.
+///
+/// Returns `Ok(())` for any `None` + `CompleteAfterFirstFire` combination (fire-once
+/// semantics intentionally leave `next_run_at` unchanged).
+pub(crate) fn reject_missing_next_run_at_for_recurring(
+    completion_policy: TriggerCompletionPolicy,
+    next_run_at: Option<Timestamp>,
+) -> Result<(), TriggerError> {
+    if completion_policy == TriggerCompletionPolicy::Recurring && next_run_at.is_none() {
+        return Err(TriggerError::InvalidRecord {
+            reason: "recurring fire acceptance requires next_run_at".to_string(),
+        });
+    }
+    Ok(())
 }
 
 pub(crate) fn reject_run_ref_rewrite(

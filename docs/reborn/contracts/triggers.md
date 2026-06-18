@@ -100,7 +100,9 @@ It is the source of truth for fire eligibility.
 
 `TriggerRecord.completion_policy` controls what happens after a successful fire:
 
-- `Recurring` (default) — the trigger keeps firing on its cron schedule. After
+- `Recurring` — the trigger keeps firing on its cron schedule. (For
+  `trigger_create`, callers must provide `completion_policy` explicitly; this
+  describes behavioral semantics, not input defaulting.) After
   `clear_active_fire` observes a terminal turn outcome, the trigger stays in
   `Scheduled` and the poller resumes normal cadence.
 - `CompleteAfterFirstFire` — fire-once semantics. After `clear_active_fire`
