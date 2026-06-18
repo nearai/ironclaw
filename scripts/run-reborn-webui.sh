@@ -129,9 +129,15 @@ if [ -n "${IRONCLAW_REBORN_GOOGLE_CLIENT_ID:-}" ] || [ -n "${GOOGLE_CLIENT_ID:-}
   if [ "$redirect_host" = "0.0.0.0" ] || [ "$redirect_host" = "::" ]; then
     redirect_host="127.0.0.1"
   fi
+  # An IPv6 literal (e.g. ::1, fe80::1) must be bracketed in a URL authority:
+  # http://[::1]:3000/... — interpolating it bare yields a malformed redirect.
+  redirect_authority="$redirect_host"
+  case "$redirect_host" in
+    *:*) redirect_authority="[$redirect_host]" ;;
+  esac
   # Honor an explicit redirect URI (prefixed wins, then legacy GOOGLE_OAUTH_REDIRECT_URI)
   # before auto-deriving, so a caller who set either legacy or new var isn't overridden.
-  export IRONCLAW_REBORN_GOOGLE_OAUTH_REDIRECT_URI="${IRONCLAW_REBORN_GOOGLE_OAUTH_REDIRECT_URI:-${GOOGLE_OAUTH_REDIRECT_URI:-http://$redirect_host:$REBORN_PORT$GOOGLE_REDIRECT_PATH}}"
+  export IRONCLAW_REBORN_GOOGLE_OAUTH_REDIRECT_URI="${IRONCLAW_REBORN_GOOGLE_OAUTH_REDIRECT_URI:-${GOOGLE_OAUTH_REDIRECT_URI:-http://$redirect_authority:$REBORN_PORT$GOOGLE_REDIRECT_PATH}}"
   GOOGLE_OAUTH_STATUS="enabled (redirect: $IRONCLAW_REBORN_GOOGLE_OAUTH_REDIRECT_URI)"
   if [ -z "${IRONCLAW_REBORN_GOOGLE_CLIENT_SECRET:-}" ] && [ -z "${GOOGLE_CLIENT_SECRET:-}" ]; then
     GOOGLE_OAUTH_STATUS="$GOOGLE_OAUTH_STATUS [public-client PKCE; no secret set]"
@@ -143,6 +149,17 @@ if [ -n "${IRONCLAW_REBORN_GOOGLE_CLIENT_ID:-}" ] || [ -n "${GOOGLE_CLIENT_ID:-}
     GOOGLE_OAUTH_STATUS="$GOOGLE_OAUTH_STATUS [hd: $google_hd]"
   fi
 else
+  # No client id — but serve still aborts at startup once ANY Google OAuth var
+  # is set (secret, redirect URI, or hosted-domain hint). Catch that partial
+  # config here with an actionable message instead of a later, opaque failure.
+  if [ -n "${IRONCLAW_REBORN_GOOGLE_CLIENT_SECRET:-}" ] || [ -n "${GOOGLE_CLIENT_SECRET:-}" ] \
+    || [ -n "${IRONCLAW_REBORN_GOOGLE_OAUTH_REDIRECT_URI:-}" ] || [ -n "${GOOGLE_OAUTH_REDIRECT_URI:-}" ] \
+    || [ -n "${IRONCLAW_REBORN_GOOGLE_HOSTED_DOMAIN_HINT:-}" ] || [ -n "${GOOGLE_ALLOWED_HD:-}" ]; then
+    echo "error: a Google OAuth var is set but no client id is present." >&2
+    echo "       serve requires IRONCLAW_REBORN_GOOGLE_CLIENT_ID (or legacy GOOGLE_CLIENT_ID)" >&2
+    echo "       once any GOOGLE_* var is set. Set the client id, or unset the others." >&2
+    exit 1
+  fi
   GOOGLE_OAUTH_STATUS="disabled (export IRONCLAW_REBORN_GOOGLE_CLIENT_ID to enable)"
 fi
 
