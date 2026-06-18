@@ -1785,13 +1785,13 @@ impl Inner {
     ) {
         let blocked_gate = if kind == TurnEventKind::Blocked {
             record.gate_ref.clone().and_then(|gate_ref| {
-                crate::events::TurnBlockedGateKind::from_status(record.status.get()).map(|gate_kind| {
-                    crate::events::TurnBlockedGateMetadata {
+                crate::events::TurnBlockedGateKind::from_status(record.status.get()).map(
+                    |gate_kind| crate::events::TurnBlockedGateMetadata {
                         gate_ref,
                         gate_kind,
                         credential_requirements: record.credential_requirements.clone(),
-                    }
-                })
+                    },
+                )
             })
         } else {
             None
@@ -2114,16 +2114,15 @@ impl Inner {
             };
             let origin_ok = match Self::run_origin_class(record) {
                 None => true,
-                Some(OriginClass::Trigger) => self
-                    .limits
-                    .max_concurrent_trigger_runs
-                    .is_none_or(|cap| {
+                Some(OriginClass::Trigger) => {
+                    self.limits.max_concurrent_trigger_runs.is_none_or(|cap| {
                         self.running_by_origin_class
                             .get(&OriginClass::Trigger)
                             .copied()
                             .unwrap_or(0)
                             < cap.get()
-                    }),
+                    })
+                }
                 Some(OriginClass::Conversation) => self
                     .limits
                     .max_concurrent_conversation_runs
@@ -2326,7 +2325,9 @@ impl Inner {
         let mut record = self.take_record(run_id)?;
         let result = (|| {
             ensure_active_lease(&record, runner_id, lease_token, Utc::now())?;
-            if record.status.get() == TurnStatus::CancelRequested || record.status.get().is_terminal() {
+            if record.status.get() == TurnStatus::CancelRequested
+                || record.status.get().is_terminal()
+            {
                 return Err(TurnError::InvalidTransition {
                     from: record.status.get(),
                     to: status,
@@ -2691,11 +2692,15 @@ impl Inner {
     fn thread_busy(&self, lock_key: &TurnActiveLockKey) -> Option<ThreadBusy> {
         let active_lock = self.active_locks.get(lock_key)?;
         let record = self.records.get(&active_lock.run_id)?;
-        record.status.get().keeps_active_lock().then_some(ThreadBusy {
-            active_run_id: active_lock.run_id,
-            status: record.status.get(),
-            event_cursor: record.event_cursor,
-        })
+        record
+            .status
+            .get()
+            .keeps_active_lock()
+            .then_some(ThreadBusy {
+                active_run_id: active_lock.run_id,
+                status: record.status.get(),
+                event_cursor: record.event_cursor,
+            })
     }
 
     fn reserve_admission(

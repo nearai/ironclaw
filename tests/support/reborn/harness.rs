@@ -1044,7 +1044,7 @@ impl RebornBinaryE2EHarness {
             model_gateway,
             capability_recorder,
             milestone_sink,
-            worker: composition.worker,
+            worker: Arc::clone(&composition.workers[0]),
             cancel: CancellationToken::new(),
             worker_tasks: Vec::new(),
             _turn_root: turn_root,

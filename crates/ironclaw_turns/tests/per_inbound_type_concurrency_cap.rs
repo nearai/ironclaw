@@ -75,7 +75,11 @@ fn conversation_context(user: &UserId) -> ProductTurnContext {
     )
 }
 
-fn submit_request(scope: TurnScope, key: &str, product_context: Option<ProductTurnContext>) -> SubmitTurnRequest {
+fn submit_request(
+    scope: TurnScope,
+    key: &str,
+    product_context: Option<ProductTurnContext>,
+) -> SubmitTurnRequest {
     let owner = scope.explicit_owner_user_id().unwrap().clone();
     SubmitTurnRequest {
         actor: actor_for(&owner),
@@ -163,7 +167,9 @@ async fn submit_conversation(
     submit_with_context(store, s, key, Some(ctx)).await
 }
 
-async fn claim(store: &InMemoryTurnStateStore) -> (TurnRunnerId, TurnLeaseToken, ironclaw_turns::TurnRunId) {
+async fn claim(
+    store: &InMemoryTurnStateStore,
+) -> (TurnRunnerId, TurnLeaseToken, ironclaw_turns::TurnRunId) {
     let runner_id = TurnRunnerId::new();
     let lease_token = TurnLeaseToken::new();
     let claimed = store
@@ -193,7 +199,11 @@ async fn trigger_counter_tracks_complete() {
     assert_eq!(store.running_trigger_count(), 1);
 
     store
-        .complete_run(CompleteRunRequest { run_id, runner_id, lease_token })
+        .complete_run(CompleteRunRequest {
+            run_id,
+            runner_id,
+            lease_token,
+        })
         .await
         .unwrap();
 
@@ -228,7 +238,13 @@ async fn trigger_counter_tracks_fail() {
 async fn trigger_counter_decrements_on_block_and_resets_on_resume() {
     let store = InMemoryTurnStateStore::default();
     let s = scope("orig-block-resume", &user_u());
-    let run_id = submit_with_context(&store, s.clone(), "orig-block-resume", Some(trigger_context(&user_u()))).await;
+    let run_id = submit_with_context(
+        &store,
+        s.clone(),
+        "orig-block-resume",
+        Some(trigger_context(&user_u())),
+    )
+    .await;
 
     let (runner_id, lease_token, _) = claim(&store).await;
     assert_eq!(store.running_trigger_count(), 1);
@@ -241,7 +257,9 @@ async fn trigger_counter_decrements_on_block_and_resets_on_resume() {
             lease_token,
             checkpoint_id: TurnCheckpointId::new(),
             state_ref: block_state_ref(),
-            reason: BlockedReason::Approval { gate_ref: gate.clone() },
+            reason: BlockedReason::Approval {
+                gate_ref: gate.clone(),
+            },
         })
         .await
         .unwrap();
@@ -270,7 +288,11 @@ async fn trigger_counter_decrements_on_block_and_resets_on_resume() {
     assert_eq!(store.running_trigger_count(), 1);
 
     store
-        .complete_run(CompleteRunRequest { run_id, runner_id: runner_id2, lease_token: lease_token2 })
+        .complete_run(CompleteRunRequest {
+            run_id,
+            runner_id: runner_id2,
+            lease_token: lease_token2,
+        })
         .await
         .unwrap();
     assert_eq!(store.running_trigger_count(), 0);
@@ -281,7 +303,13 @@ async fn trigger_counter_decrements_on_block_and_resets_on_resume() {
 async fn trigger_counter_decrements_on_cancel_completion() {
     let store = InMemoryTurnStateStore::default();
     let s = scope("orig-cancel", &user_u());
-    let run_id = submit_with_context(&store, s.clone(), "orig-cancel", Some(trigger_context(&user_u()))).await;
+    let run_id = submit_with_context(
+        &store,
+        s.clone(),
+        "orig-cancel",
+        Some(trigger_context(&user_u())),
+    )
+    .await;
 
     let (runner_id, lease_token, _) = claim(&store).await;
     assert_eq!(store.running_trigger_count(), 1);
@@ -302,7 +330,11 @@ async fn trigger_counter_decrements_on_cancel_completion() {
 
     // Runner completes cancellation: CancelRequested → Cancelled.
     store
-        .cancel_run(CancelRunCompletionRequest { run_id, runner_id, lease_token })
+        .cancel_run(CancelRunCompletionRequest {
+            run_id,
+            runner_id,
+            lease_token,
+        })
         .await
         .unwrap();
     assert_eq!(store.running_trigger_count(), 0);
@@ -338,7 +370,11 @@ async fn trigger_counter_decrements_on_relinquish() {
     assert_eq!(store.running_trigger_count(), 1);
 
     store
-        .relinquish_run(RelinquishRunRequest { run_id, runner_id, lease_token })
+        .relinquish_run(RelinquishRunRequest {
+            run_id,
+            runner_id,
+            lease_token,
+        })
         .await
         .unwrap();
     assert_eq!(store.running_trigger_count(), 0);
@@ -348,7 +384,11 @@ async fn trigger_counter_decrements_on_relinquish() {
     assert_eq!(store.running_trigger_count(), 1);
 
     store
-        .complete_run(CompleteRunRequest { run_id, runner_id: runner_id2, lease_token: lease_token2 })
+        .complete_run(CompleteRunRequest {
+            run_id,
+            runner_id: runner_id2,
+            lease_token: lease_token2,
+        })
         .await
         .unwrap();
     assert_eq!(store.running_trigger_count(), 0);
@@ -393,7 +433,11 @@ async fn trigger_runs_capped_while_conversation_proceeds() {
     let runner1 = TurnRunnerId::new();
     let lease1 = TurnLeaseToken::new();
     let claimed1 = store
-        .claim_next_run(ClaimRunRequest { runner_id: runner1, lease_token: lease1, scope_filter: None })
+        .claim_next_run(ClaimRunRequest {
+            runner_id: runner1,
+            lease_token: lease1,
+            scope_filter: None,
+        })
         .await
         .unwrap()
         .unwrap();
@@ -404,7 +448,11 @@ async fn trigger_runs_capped_while_conversation_proceeds() {
     let runner2 = TurnRunnerId::new();
     let lease2 = TurnLeaseToken::new();
     let claimed2 = store
-        .claim_next_run(ClaimRunRequest { runner_id: runner2, lease_token: lease2, scope_filter: None })
+        .claim_next_run(ClaimRunRequest {
+            runner_id: runner2,
+            lease_token: lease2,
+            scope_filter: None,
+        })
         .await
         .unwrap()
         .unwrap();
@@ -416,7 +464,11 @@ async fn trigger_runs_capped_while_conversation_proceeds() {
     let runner3 = TurnRunnerId::new();
     let lease3 = TurnLeaseToken::new();
     let claimed3 = store
-        .claim_next_run(ClaimRunRequest { runner_id: runner3, lease_token: lease3, scope_filter: None })
+        .claim_next_run(ClaimRunRequest {
+            runner_id: runner3,
+            lease_token: lease3,
+            scope_filter: None,
+        })
         .await
         .unwrap();
     assert!(claimed3.is_none());
@@ -424,14 +476,21 @@ async fn trigger_runs_capped_while_conversation_proceeds() {
     // trigger2 is still Queued.
     let scope2 = scope("tri-cap-t2", &user_u());
     let state2 = store
-        .get_run_state(GetRunStateRequest { run_id: trigger2, scope: scope2 })
+        .get_run_state(GetRunStateRequest {
+            run_id: trigger2,
+            scope: scope2,
+        })
         .await
         .unwrap();
     assert_eq!(state2.status, TurnStatus::Queued);
 
     // Complete trigger1 → trigger counter drops below cap.
     store
-        .complete_run(CompleteRunRequest { run_id: trigger1, runner_id: runner1, lease_token: lease1 })
+        .complete_run(CompleteRunRequest {
+            run_id: trigger1,
+            runner_id: runner1,
+            lease_token: lease1,
+        })
         .await
         .unwrap();
     assert_eq!(store.running_trigger_count(), 0);
@@ -440,7 +499,11 @@ async fn trigger_runs_capped_while_conversation_proceeds() {
     let runner4 = TurnRunnerId::new();
     let lease4 = TurnLeaseToken::new();
     let claimed4 = store
-        .claim_next_run(ClaimRunRequest { runner_id: runner4, lease_token: lease4, scope_filter: None })
+        .claim_next_run(ClaimRunRequest {
+            runner_id: runner4,
+            lease_token: lease4,
+            scope_filter: None,
+        })
         .await
         .unwrap()
         .unwrap();
@@ -449,11 +512,19 @@ async fn trigger_runs_capped_while_conversation_proceeds() {
 
     // Clean up.
     store
-        .complete_run(CompleteRunRequest { run_id: trigger2, runner_id: runner4, lease_token: lease4 })
+        .complete_run(CompleteRunRequest {
+            run_id: trigger2,
+            runner_id: runner4,
+            lease_token: lease4,
+        })
         .await
         .unwrap();
     store
-        .complete_run(CompleteRunRequest { run_id: conv, runner_id: runner2, lease_token: lease2 })
+        .complete_run(CompleteRunRequest {
+            run_id: conv,
+            runner_id: runner2,
+            lease_token: lease2,
+        })
         .await
         .unwrap();
     assert_eq!(store.running_trigger_count(), 0);
@@ -477,7 +548,11 @@ async fn conversation_runs_capped_while_triggers_proceed() {
     let runner1 = TurnRunnerId::new();
     let lease1 = TurnLeaseToken::new();
     let claimed1 = store
-        .claim_next_run(ClaimRunRequest { runner_id: runner1, lease_token: lease1, scope_filter: None })
+        .claim_next_run(ClaimRunRequest {
+            runner_id: runner1,
+            lease_token: lease1,
+            scope_filter: None,
+        })
         .await
         .unwrap()
         .unwrap();
@@ -488,7 +563,11 @@ async fn conversation_runs_capped_while_triggers_proceed() {
     let runner2 = TurnRunnerId::new();
     let lease2 = TurnLeaseToken::new();
     let claimed2 = store
-        .claim_next_run(ClaimRunRequest { runner_id: runner2, lease_token: lease2, scope_filter: None })
+        .claim_next_run(ClaimRunRequest {
+            runner_id: runner2,
+            lease_token: lease2,
+            scope_filter: None,
+        })
         .await
         .unwrap()
         .unwrap();
@@ -509,7 +588,11 @@ async fn conversation_runs_capped_while_triggers_proceed() {
 
     // Complete conv1 → conversation drops below cap.
     store
-        .complete_run(CompleteRunRequest { run_id: conv1, runner_id: runner1, lease_token: lease1 })
+        .complete_run(CompleteRunRequest {
+            run_id: conv1,
+            runner_id: runner1,
+            lease_token: lease1,
+        })
         .await
         .unwrap();
     assert_eq!(store.running_conversation_count(), 0);
@@ -518,7 +601,11 @@ async fn conversation_runs_capped_while_triggers_proceed() {
     let runner4 = TurnRunnerId::new();
     let lease4 = TurnLeaseToken::new();
     let claimed4 = store
-        .claim_next_run(ClaimRunRequest { runner_id: runner4, lease_token: lease4, scope_filter: None })
+        .claim_next_run(ClaimRunRequest {
+            runner_id: runner4,
+            lease_token: lease4,
+            scope_filter: None,
+        })
         .await
         .unwrap()
         .unwrap();
@@ -527,11 +614,19 @@ async fn conversation_runs_capped_while_triggers_proceed() {
 
     // Clean up.
     store
-        .complete_run(CompleteRunRequest { run_id: conv2, runner_id: runner4, lease_token: lease4 })
+        .complete_run(CompleteRunRequest {
+            run_id: conv2,
+            runner_id: runner4,
+            lease_token: lease4,
+        })
         .await
         .unwrap();
     store
-        .complete_run(CompleteRunRequest { run_id: trig, runner_id: runner2, lease_token: lease2 })
+        .complete_run(CompleteRunRequest {
+            run_id: trig,
+            runner_id: runner2,
+            lease_token: lease2,
+        })
         .await
         .unwrap();
     assert_eq!(store.running_trigger_count(), 0);
@@ -563,8 +658,22 @@ async fn runs_without_product_context_are_not_capped_by_origin() {
     assert_eq!(store.running_trigger_count(), 0);
 
     // Clean up.
-    store.complete_run(CompleteRunRequest { run_id: run1, runner_id: runner1, lease_token: lease1 }).await.unwrap();
-    store.complete_run(CompleteRunRequest { run_id: run2, runner_id: runner2, lease_token: lease2 }).await.unwrap();
+    store
+        .complete_run(CompleteRunRequest {
+            run_id: run1,
+            runner_id: runner1,
+            lease_token: lease1,
+        })
+        .await
+        .unwrap();
+    store
+        .complete_run(CompleteRunRequest {
+            run_id: run2,
+            runner_id: runner2,
+            lease_token: lease2,
+        })
+        .await
+        .unwrap();
 }
 
 // ---------------------------------------------------------------------------

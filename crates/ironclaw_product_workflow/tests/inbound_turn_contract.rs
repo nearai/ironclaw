@@ -705,7 +705,7 @@ async fn user_message_no_profile_uses_product_live_runtime_and_persists_reply() 
     .expect("product-live runtime should build");
 
     let cancel = CancellationToken::new();
-    let worker = Arc::clone(&composition.worker);
+    let worker = Arc::clone(&composition.workers[0]);
     let worker_cancel = cancel.clone();
     let worker_handle = tokio::spawn(async move { worker.run(worker_cancel).await });
     let service = DefaultInboundTurnService::new(
@@ -876,7 +876,7 @@ async fn user_message_no_profile_can_cancel_product_live_run_from_product_path()
     .expect("product-live runtime should build");
 
     let cancel = CancellationToken::new();
-    let worker = Arc::clone(&composition.worker);
+    let worker = Arc::clone(&composition.workers[0]);
     let worker_cancel = cancel.clone();
     let worker_handle = tokio::spawn(async move { worker.run(worker_cancel).await });
     let service = DefaultInboundTurnService::new(

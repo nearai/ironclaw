@@ -791,14 +791,17 @@ fn runner_settings(
             std::num::NonZeroUsize::new(resolved_count).expect("resolved_count is non-zero");
 
         // max_concurrent_runs_per_user: Some(0) → None (unlimited).
-        settings.max_concurrent_runs_per_user =
-            runner.max_concurrent_runs_per_user.and_then(std::num::NonZeroU32::new);
+        settings.max_concurrent_runs_per_user = runner
+            .max_concurrent_runs_per_user
+            .and_then(std::num::NonZeroU32::new);
         // max_concurrent_trigger_runs: Some(0) → None (unlimited).
-        settings.max_concurrent_trigger_runs =
-            runner.max_concurrent_trigger_runs.and_then(std::num::NonZeroU32::new);
+        settings.max_concurrent_trigger_runs = runner
+            .max_concurrent_trigger_runs
+            .and_then(std::num::NonZeroU32::new);
         // max_concurrent_conversation_runs: Some(0) → None (unlimited).
-        settings.max_concurrent_conversation_runs =
-            runner.max_concurrent_conversation_runs.and_then(std::num::NonZeroU32::new);
+        settings.max_concurrent_conversation_runs = runner
+            .max_concurrent_conversation_runs
+            .and_then(std::num::NonZeroU32::new);
     }
     Ok(settings)
 }
@@ -818,9 +821,9 @@ mod tests {
     #[cfg(feature = "webui-v2-beta")]
     use super::with_run_local_trigger_fire_access_checker;
     use super::{
-        DEFAULT_WORKER_COUNT, MAX_WORKER_COUNT, RuntimeInputCaller, RuntimeInputOptions, block_on_cli,
-        build_runtime_input, build_runtime_input_with_options, no_assistant_text_message,
-        resolve_google_oauth_config, runner_settings,
+        DEFAULT_WORKER_COUNT, MAX_WORKER_COUNT, RuntimeInputCaller, RuntimeInputOptions,
+        block_on_cli, build_runtime_input, build_runtime_input_with_options,
+        no_assistant_text_message, resolve_google_oauth_config, runner_settings,
     };
 
     fn parse_runner_section(toml: &str) -> ironclaw_reborn_config::RebornConfigFile {

@@ -311,7 +311,7 @@ impl ProductLiveAgentLoopHarness {
         .expect("product-live planned AgentLoop harness should build");
 
         let worker_cancel = CancellationToken::new();
-        let worker = Arc::clone(&composition.worker);
+        let worker = Arc::clone(&composition.workers[0]);
         let worker_cancel_clone = worker_cancel.clone();
         let worker_handle = tokio::spawn(async move { worker.run(worker_cancel_clone).await });
 

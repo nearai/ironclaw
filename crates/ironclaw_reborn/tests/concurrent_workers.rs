@@ -333,7 +333,9 @@ async fn submit_owned_run_on_thread(
         .await
         .unwrap();
 
-    let SubmitTurnResponse::Accepted { turn_id, run_id, .. } = submit;
+    let SubmitTurnResponse::Accepted {
+        turn_id, run_id, ..
+    } = submit;
     thread_service
         .mark_message_submitted(
             thread_scope,
