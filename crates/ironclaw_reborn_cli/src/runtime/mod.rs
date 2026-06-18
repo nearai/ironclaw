@@ -772,7 +772,7 @@ fn runner_settings(
             settings.poll_interval = Duration::from_millis(ms);
         }
         // worker_count: None or Some(0) → default; clamp at MAX_WORKER_COUNT.
-        let raw_worker_count = runner.worker_count.unwrap_or(0);
+        let raw_worker_count = runner.worker_count.unwrap_or(0); // silent-ok: settings read [runner].worker_count — None/0 is an explicit "use default worker count" sentinel; clamped to MAX_WORKER_COUNT to protect scheduler capacity.
         settings.worker_count = if raw_worker_count == 0 {
             DEFAULT_TURN_RUNNER_WORKER_COUNT
         } else {
@@ -792,18 +792,15 @@ fn runner_settings(
             })?
         };
 
-        // max_concurrent_runs_per_user: Some(0) → None (unlimited).
         settings.max_concurrent_runs_per_user = runner
             .max_concurrent_runs_per_user
-            .and_then(std::num::NonZeroU32::new);
-        // max_concurrent_trigger_runs: Some(0) → None (unlimited).
+            .and_then(std::num::NonZeroU32::new); // silent-ok: settings read [runner].max_concurrent_runs_per_user — 0 is an explicit "unlimited" sentinel mapped to None.
         settings.max_concurrent_trigger_runs = runner
             .max_concurrent_trigger_runs
-            .and_then(std::num::NonZeroU32::new);
-        // max_concurrent_conversation_runs: Some(0) → None (unlimited).
+            .and_then(std::num::NonZeroU32::new); // silent-ok: settings read [runner].max_concurrent_trigger_runs — 0 is an explicit "unlimited" sentinel mapped to None.
         settings.max_concurrent_conversation_runs = runner
             .max_concurrent_conversation_runs
-            .and_then(std::num::NonZeroU32::new);
+            .and_then(std::num::NonZeroU32::new); // silent-ok: settings read [runner].max_concurrent_conversation_runs — 0 is an explicit "unlimited" sentinel mapped to None.
     }
     Ok(settings)
 }
