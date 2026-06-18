@@ -405,7 +405,7 @@ pub struct RebornRuntime {
     turn_tree_store: Arc<dyn TurnSpawnTreeStateStore>,
     thread_service: Arc<dyn SessionThreadService>,
     thread_scope: ThreadScope,
-    worker_handle: JoinHandle<()>,
+    worker_handles: Vec<JoinHandle<()>>,
     worker_cancel: CancellationToken,
     trigger_poller_handle: Option<TriggerPollerRuntimeHandle>,
     trace_flush_worker: crate::trace_capture::TraceQueueFlushWorkerHandle,
@@ -1506,7 +1506,7 @@ impl RebornRuntime {
     ) -> Result<SubmittedTurn, RebornRuntimeError> {
         let send_lock = self.send_lock_for(conversation).await;
         let _send_guard = send_lock.lock_owned().await;
-        if self.worker_handle.is_finished() {
+        if self.worker_handles.iter().any(|h| h.is_finished()) {
             return Err(RebornRuntimeError::WorkerStopped);
         }
         let scope = self.turn_scope_for(&conversation.0);
@@ -1670,7 +1670,7 @@ impl RebornRuntime {
     /// Stop the turn-runner worker and the budget-event projection.
     /// Awaits both tasks before returning so background state is fully
     /// drained when the runtime drops.
-    pub async fn shutdown(self) -> Result<(), RebornRuntimeError> {
+    pub async fn shutdown(mut self) -> Result<(), RebornRuntimeError> {
         if let Some(trigger_poller) = self.trigger_poller_handle {
             trigger_poller
                 .shutdown(TRIGGER_POLLER_SHUTDOWN_TIMEOUT)
@@ -1681,11 +1681,13 @@ impl RebornRuntime {
         if let Some(projection) = self.budget_event_projection {
             projection.shutdown().await;
         }
-        if let Err(error) = self.worker_handle.await {
-            if error.is_panic() {
-                tracing::error!(%error, "reborn worker task panicked during shutdown");
-            } else {
-                tracing::warn!(%error, "reborn worker task was cancelled during shutdown");
+        for handle in self.worker_handles.drain(..) {
+            if let Err(error) = handle.await {
+                if error.is_panic() {
+                    tracing::error!(%error, "reborn worker task panicked during shutdown");
+                } else {
+                    tracing::warn!(%error, "reborn worker task was cancelled during shutdown");
+                }
             }
         }
         Ok(())
@@ -1737,7 +1739,7 @@ impl RebornRuntime {
     ) -> Result<TurnRunState, RebornRuntimeError> {
         let start = std::time::Instant::now();
         loop {
-            if self.worker_handle.is_finished() {
+            if self.worker_handles.iter().any(|h| h.is_finished()) {
                 return Err(RebornRuntimeError::WorkerStopped);
             }
             let state = self
@@ -1797,7 +1799,7 @@ impl RebornRuntime {
     ) -> Result<TurnRunState, RebornRuntimeError> {
         let start = std::time::Instant::now();
         loop {
-            if self.worker_handle.is_finished() {
+            if self.worker_handles.iter().any(|h| h.is_finished()) {
                 return Err(RebornRuntimeError::WorkerStopped);
             }
             let state = self
@@ -2933,14 +2935,18 @@ pub async fn build_reborn_runtime(
         }
     }
     let worker_cancel = CancellationToken::new();
-    let worker = Arc::clone(&composition.worker);
-    let worker_cancel_clone = worker_cancel.clone();
-    let worker_handle = tokio::spawn(async move {
-        worker.run(worker_cancel_clone).await;
-    });
+    let worker_handles: Vec<JoinHandle<()>> = composition
+        .workers
+        .iter()
+        .map(|worker| {
+            let worker = Arc::clone(worker);
+            let cancel = worker_cancel.clone();
+            tokio::spawn(async move { worker.run(cancel).await })
+        })
+        .collect();
     let trace_flush_worker =
         crate::trace_capture::spawn_trace_queue_flush_worker(trace_capture_scopes);
-    services.readiness.workers.turn_runner = true;
+    services.readiness.workers.turn_runner = !worker_handles.is_empty();
     services.readiness.workers.trigger_poller = trigger_poller_handle.is_some();
     let turn_coordinator = planned_turn_coordinator;
     let wake_sender = composition.wake_sender.clone();
@@ -2969,7 +2975,7 @@ pub async fn build_reborn_runtime(
         turn_tree_store: turn_state_store,
         thread_service,
         thread_scope,
-        worker_handle,
+        worker_handles,
         worker_cancel,
         trigger_poller_handle,
         trace_flush_worker,
@@ -3644,7 +3650,7 @@ mod tests {
     async fn stop_turn_runner_worker_for_manual_state_test(runtime: &super::RebornRuntime) {
         runtime.worker_cancel.cancel();
         tokio::time::timeout(Duration::from_secs(2), async {
-            while !runtime.worker_handle.is_finished() {
+            while !runtime.worker_handles.iter().all(|h| h.is_finished()) {
                 tokio::time::sleep(Duration::from_millis(1)).await;
             }
         })
