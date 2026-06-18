@@ -291,3 +291,43 @@ selector with a live flag flip: off → empty selection, flip on → skill activ
 `set_auto_activate_learned_forwards_enabled_flag_to_facade` (handler-through-the-caller),
 descriptor contract row. Live-validated end to end against `ironclaw-reborn serve` (NEAR AI):
 `GET skills` round-trip `auto_activate_learned` True → toggle OFF → False → toggle ON → True.
+
+## Increment 10 — review-driven hardening (Codex findings)
+
+An independent review surfaced three findings; all were verified real against the code.
+
+**Fixed — extraction eligibility is now run-scoped.** `ExtractionJob` loads the recent
+*thread* window (no run filter), and the eligibility gate previously counted tool-result
+messages across that whole window. A trivial follow-up turn (e.g. "thanks") after a
+tool-heavy task could therefore re-pass the gate on the previous run's stale tool results
+and re-distill it — wasted inference plus a stale-transcript refine that can regress an
+evolved skill. Fix: the gate now counts `ToolResultReference` messages whose `turn_run_id`
+matches the completed run, read from the history projection (which keeps message `kind` +
+`turn_run_id` and only nulls the tool metadata the transcript needs — so the full window is
+still used as the multi-turn distillation *context*, which is intentional). The producer
+writes `turn_run_id = run_id.to_string()`, matching `self.run_id`. Localized to
+`skill_learning.rs`; no change to the shared `ContextMessage` / agent-loop model-context
+path. Locked by `eligibility_counts_tool_actions_for_the_completed_run_only`.
+
+**Fixed — the master switch is now labelled as the global control it is.** The switch gates
+the entire criteria-selection pass, so it affects *all* skills (learned, user-authored, and
+bundled), not only learned ones; the UI card previously said "Auto-activate learned skills".
+Renamed the user-facing card to "Default skill auto-activation" with global wording (frontend
+strings only; behavior unchanged). The wire field name `auto_activate_learned` and route are
+left as-is for now (internal, not user-visible).
+
+**Deferred (documented residual risk) — learned-skill prompt-injection persistence.** Plan
+Decision #3 promised a "stage + one-click approval" pending list before a learned skill
+applies; that gate is consciously deferred. Today a distilled `SKILL.md` is written straight
+to the trusted User skill dir with `auto_activate=true`, gated only by a High/Critical
+pattern injection scan (`validate_trusted_trigger_prompt`). Because the source transcript can
+contain attacker-influenceable tool/web/user content, a subtler-than-High injection could in
+principle survive the scan, become a trusted skill, and auto-activate on a later turn. Risk
+is **medium, narrowed by**: single-operator local-dev, the distiller summarizes rather than
+copies verbatim, the scan catches loud cases, and the new global switch lets the operator
+turn off keyword auto-activation entirely. The full approval gate remains the right fix. Note
+that the obvious low-risk mitigations do NOT apply cleanly: installing learned skills with
+`auto_activate=false` is filtered out by `criteria_skills` so they would never auto-activate
+(destroys the learn→reuse loop), and trust attenuation is not a clean lever because the
+registry maps the whole User dir to `Trusted` uniformly — real attenuation first needs a
+dedicated learned-skill source variant + directory. Tracked as future hardening.
