@@ -2574,6 +2574,16 @@ pub fn builtin_first_party_trust_policy() -> Result<HostTrustPolicy, RebornBuild
         })?;
     #[cfg_attr(not(feature = "slack-v2-host-beta"), allow(unused_mut))]
     let mut entries = vec![
+        AdminEntry::for_bundled(
+            policy.provider.id.clone(),
+            None,
+            HostTrustAssignment::user_trusted(),
+            // Sourced from local_dev_capability_policy.toml `[provider]
+            // authority_effects` so production agent-loop built-ins expose the
+            // same SSO user-scoped authority ceiling as local-dev.
+            policy.provider.authority_effects.clone(),
+            None,
+        ),
         AdminEntry::for_local_manifest(
             policy.provider.id,
             policy.provider.manifest_path,
@@ -5397,6 +5407,38 @@ mod tests {
             digest,
             None,
         )
+    }
+
+    #[test]
+    fn builtin_first_party_trust_policy_includes_bundled_builtin_entry() {
+        let policy = builtin_first_party_trust_policy().expect("trust policy");
+        let expected_policy = crate::local_dev_capability_policy::local_dev_capability_policy()
+            .expect("local-dev capability policy");
+
+        let matching = ironclaw_trust::TrustPolicy::evaluate(
+            &policy,
+            &ironclaw_trust::TrustPolicyInput {
+                identity: ironclaw_host_api::PackageIdentity::new(
+                    ironclaw_host_api::PackageId::new("builtin").expect("builtin package id"),
+                    ironclaw_host_api::PackageSource::Bundled,
+                    None,
+                    None,
+                ),
+                requested_trust: ironclaw_host_api::RequestedTrustClass::FirstPartyRequested,
+                requested_authority: Default::default(),
+            },
+        )
+        .expect("bundled builtin identity should evaluate");
+
+        assert_eq!(matching.effective_trust.class(), TrustClass::UserTrusted);
+        assert_eq!(
+            matching.authority_ceiling.allowed_effects,
+            expected_policy.provider.authority_effects
+        );
+        assert_eq!(
+            matching.provenance,
+            ironclaw_trust::TrustProvenance::AdminConfig
+        );
     }
 
     #[cfg(feature = "slack-v2-host-beta")]

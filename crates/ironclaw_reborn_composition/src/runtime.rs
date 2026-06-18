@@ -3847,6 +3847,13 @@ mod tests {
         requests: Arc<StdMutex<Vec<HostManagedModelRequest>>>,
     }
 
+    #[derive(Debug)]
+    struct ToolSurfaceRecordingGateway {
+        reply: String,
+        capability_ids: Arc<StdMutex<Vec<Vec<String>>>>,
+        tool_names: Arc<StdMutex<Vec<Vec<String>>>>,
+    }
+
     #[derive(Debug, Default)]
     struct FailingSkillContextSource {
         calls: AtomicUsize,
@@ -3913,6 +3920,54 @@ mod tests {
                 .lock()
                 .expect("recording gateway requests lock poisoned")
                 .push(request);
+            Ok(HostManagedModelResponse::assistant_reply(
+                self.reply.clone(),
+            ))
+        }
+    }
+
+    #[async_trait]
+    impl HostManagedModelGateway for ToolSurfaceRecordingGateway {
+        async fn stream_model(
+            &self,
+            _request: HostManagedModelRequest,
+        ) -> Result<HostManagedModelResponse, HostManagedModelError> {
+            Err(HostManagedModelError::safe(
+                HostManagedModelErrorKind::InvalidRequest,
+                "expected capability-aware production model path",
+            ))
+        }
+
+        async fn stream_model_with_capabilities(
+            &self,
+            _request: HostManagedModelRequest,
+            capabilities: Arc<dyn LoopCapabilityPort>,
+        ) -> Result<HostManagedModelResponse, HostManagedModelError> {
+            let surface = capabilities
+                .visible_capabilities(VisibleCapabilityRequest)
+                .await
+                .map_err(model_capability_error)?;
+            let capability_ids = surface
+                .descriptors
+                .iter()
+                .map(|descriptor| descriptor.capability_id.as_str().to_string())
+                .collect::<Vec<_>>();
+            self.capability_ids
+                .lock()
+                .expect("tool surface capability id lock poisoned")
+                .push(capability_ids);
+
+            let tool_names = capabilities
+                .tool_definitions()
+                .map_err(model_capability_error)?
+                .into_iter()
+                .map(|definition| definition.name)
+                .collect::<Vec<_>>();
+            self.tool_names
+                .lock()
+                .expect("tool surface tool name lock poisoned")
+                .push(tool_names);
+
             Ok(HostManagedModelResponse::assistant_reply(
                 self.reply.clone(),
             ))
@@ -5074,6 +5129,125 @@ mod tests {
 
         assert_eq!(reply.status, TurnStatus::Completed);
         assert_eq!(reply.text.as_deref(), Some("validated production runtime"));
+
+        runtime.shutdown().await.expect("runtime shutdown");
+    }
+
+    #[cfg(feature = "libsql")]
+    #[tokio::test]
+    async fn production_hosted_dev_runtime_exposes_direct_coding_tools() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db = Arc::new(
+            libsql::Builder::new_local(dir.path().join("reborn.db"))
+                .build()
+                .await
+                .expect("libsql db"),
+        );
+        let capability_ids = Arc::new(StdMutex::new(Vec::new()));
+        let tool_names = Arc::new(StdMutex::new(Vec::new()));
+        let gateway = Arc::new(ToolSurfaceRecordingGateway {
+            reply: "validated production tools".to_string(),
+            capability_ids: Arc::clone(&capability_ids),
+            tool_names: Arc::clone(&tool_names),
+        });
+
+        let input = RebornRuntimeInput::from_services(
+            RebornBuildInput::libsql(
+                crate::RebornCompositionProfile::Production,
+                "runtime-production-tools-owner",
+                db,
+                dir.path().join("events.db").to_string_lossy(),
+                None,
+                ironclaw_secrets::SecretMaterial::from("01234567890123456789012345678901"),
+            )
+            .with_production_trust_policy(Arc::new(
+                crate::builtin_first_party_trust_policy().expect("trust policy"),
+            ))
+            .with_runtime_policy(EffectiveRuntimePolicy {
+                deployment: DeploymentMode::HostedMultiTenant,
+                requested_profile: RuntimeProfile::HostedDev,
+                resolved_profile: RuntimeProfile::HostedDev,
+                filesystem_backend: FilesystemBackendKind::TenantWorkspace,
+                process_backend: ProcessBackendKind::TenantSandbox,
+                network_mode: NetworkMode::Allowlist,
+                secret_mode: SecretMode::TenantBroker,
+                approval_policy: ApprovalPolicy::AskDestructive,
+                audit_mode: AuditMode::Standard,
+            })
+            .with_runtime_process_binding(RebornRuntimeProcessBinding::tenant_sandbox(Arc::new(
+                ironclaw_host_runtime::TenantSandboxProcessPort::new(Arc::new(
+                    RecordingSandboxTransport,
+                )),
+            ))),
+        )
+        .with_identity(RebornRuntimeIdentity {
+            tenant_id: "runtime-production-tools-tenant".to_string(),
+            agent_id: "runtime-production-tools-agent".to_string(),
+            source_binding_id: "runtime-production-tools-source".to_string(),
+            reply_target_binding_id: "runtime-production-tools-reply".to_string(),
+        })
+        .with_model_gateway_override(gateway);
+
+        let runtime = build_reborn_runtime(input)
+            .await
+            .expect("production HostedDev runtime starts");
+        let conversation = runtime.new_conversation().await.expect("conversation");
+        let reply = tokio::time::timeout(
+            RUNTIME_SEND_TIMEOUT,
+            runtime.send_user_message(&conversation, "what tools do you have access to?"),
+        )
+        .await
+        .expect("production send should finish")
+        .expect("production send should succeed");
+
+        assert_eq!(reply.status, TurnStatus::Completed);
+        let capability_ids = capability_ids
+            .lock()
+            .expect("tool surface capability id lock poisoned");
+        let first_surface = capability_ids
+            .first()
+            .expect("model gateway should receive a capability surface");
+        for capability_id in [
+            ironclaw_host_runtime::READ_FILE_CAPABILITY_ID,
+            ironclaw_host_runtime::WRITE_FILE_CAPABILITY_ID,
+            ironclaw_host_runtime::LIST_DIR_CAPABILITY_ID,
+            ironclaw_host_runtime::GLOB_CAPABILITY_ID,
+            ironclaw_host_runtime::GREP_CAPABILITY_ID,
+            ironclaw_host_runtime::APPLY_PATCH_CAPABILITY_ID,
+            ironclaw_host_runtime::SHELL_CAPABILITY_ID,
+            crate::extension_lifecycle_capabilities::EXTENSION_SEARCH_CAPABILITY_ID,
+            crate::extension_lifecycle_capabilities::EXTENSION_INSTALL_CAPABILITY_ID,
+            crate::extension_lifecycle_capabilities::EXTENSION_ACTIVATE_CAPABILITY_ID,
+            crate::extension_lifecycle_capabilities::EXTENSION_REMOVE_CAPABILITY_ID,
+        ] {
+            assert!(
+                first_surface.iter().any(|id| id == capability_id),
+                "production HostedDev capability surface must include {capability_id}; got {first_surface:?}"
+            );
+        }
+
+        let tool_names = tool_names.lock().expect("tool surface name lock poisoned");
+        let first_tool_names = tool_names
+            .first()
+            .expect("model gateway should receive provider tool definitions");
+        for tool_name in [
+            "builtin__read_file",
+            "builtin__write_file",
+            "builtin__list_dir",
+            "builtin__glob",
+            "builtin__grep",
+            "builtin__apply_patch",
+            "builtin__shell",
+            "builtin__extension_search",
+            "builtin__extension_install",
+            "builtin__extension_activate",
+            "builtin__extension_remove",
+        ] {
+            assert!(
+                first_tool_names.iter().any(|name| name == tool_name),
+                "production HostedDev model tools must include {tool_name}; got {first_tool_names:?}"
+            );
+        }
 
         runtime.shutdown().await.expect("runtime shutdown");
     }
