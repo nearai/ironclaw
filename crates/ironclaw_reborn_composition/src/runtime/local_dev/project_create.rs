@@ -89,7 +89,14 @@ impl LocalDevSyntheticCapabilityHandler for ProjectCreateHandler {
             "project_id": project.project_id,
             "name": project.name,
         });
-        let safe_summary = format!("created project \"{}\"", project.name);
+        // The safe summary must not interpolate the raw, model-controlled project
+        // name: a name containing a payload/path delimiter (`/ < > { } [ ] ` + "`"
+        // + ` \`) fails `ToolResultSafeSummary` validation in
+        // `append_capability_result_ref`, which surfaces as a terminal
+        // `HostUnavailable` that kills the whole turn. The model still gets the
+        // name and id from the result `output`; the summary stays a fixed,
+        // delimiter-free string.
+        let safe_summary = "created project".to_string();
         let write_result = invocation
             .result_writer
             .write_capability_result(CapabilityResultWrite {

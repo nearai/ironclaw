@@ -1284,11 +1284,16 @@ mod tests {
             "project_create should be an exposed synthetic capability"
         );
 
+        // The name deliberately contains payload/path delimiters (`/ < >`), which
+        // are valid in a project name but forbidden in a tool-result safe summary.
+        // A summary that interpolated the raw name would fail validation in
+        // `append_capability_result_ref` and terminate the whole run; this locks
+        // that regression — the capability must still complete.
         let candidate = port
             .register_provider_tool_call(provider_tool_call_with_name(
                 "builtin__project_create",
                 serde_json::json!({
-                    "name": "Build IronClaw",
+                    "name": "Build /api <svc>",
                     "description": "Ship the project feature"
                 }),
             ))
@@ -1304,15 +1309,24 @@ mod tests {
             })
             .await
             .expect("project_create invokes");
-        let result_ref = match outcome {
-            CapabilityOutcome::Completed(message) => message.result_ref,
+        let message = match outcome {
+            CapabilityOutcome::Completed(message) => message,
             outcome => panic!("project_create should complete, got {outcome:?}"),
         };
+        // The executor passes this safe summary to `append_capability_result_ref`,
+        // which validates it through `LoopSafeSummary`/`ToolResultSafeSummary`
+        // before writing the result ref; an unsafe summary there is mapped to a
+        // terminal `HostUnavailable` that kills the whole run. Re-run that exact
+        // validation here so a summary that interpolated the delimiter-bearing
+        // project name (the regression) fails this test.
+        ironclaw_turns::run_profile::LoopSafeSummary::new(message.safe_summary.clone())
+            .expect("capability safe summary must pass result-ref validation");
+        let result_ref = message.result_ref;
         let output = capability_io
             .result_output(result_ref.as_str())
             .expect("result read succeeds")
             .expect("result output exists");
-        assert_eq!(output["name"], "Build IronClaw");
+        assert_eq!(output["name"], "Build /api <svc>");
         assert!(
             output["project_id"]
                 .as_str()
@@ -1330,7 +1344,7 @@ mod tests {
         assert!(
             projects
                 .iter()
-                .any(|project| project.name == "Build IronClaw"),
+                .any(|project| project.name == "Build /api <svc>"),
             "agent-created project must be visible to its owner"
         );
     }
