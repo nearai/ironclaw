@@ -74,7 +74,14 @@ jobs:
             source_ref="${INPUT_SOURCE_REF:-${DEPLOYMENT_BRANCH}}"
           fi
 
-          source_sha="$(git rev-parse "${source_ref}^{commit}")"
+          if source_sha="$(git rev-parse --verify "${source_ref}^{commit}")"; then
+            :
+          elif source_sha="$(git rev-parse --verify "origin/${source_ref}^{commit}")"; then
+            :
+          else
+            echo "::error::source_ref ${source_ref} does not resolve to a commit"
+            exit 1
+          fi
           if ! git merge-base --is-ancestor "${source_sha}" "origin/${DEPLOYMENT_BRANCH}"; then
             echo "::error::source_ref ${source_ref} (${source_sha}) is not reachable from ${DEPLOYMENT_BRANCH}"
             exit 1
