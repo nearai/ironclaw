@@ -127,8 +127,6 @@ jobs:
         run: |
           find crates/ironclaw_gateway/static/js -type f -name '*.js' \
             -exec node --check {} +
-      - name: Run Reborn settings JS tests
-        run: node --test 'crates/ironclaw_webui_v2_static/static/js/pages/settings/**/*.test.mjs' 'crates/ironclaw_webui_v2_static/static/js/pages/settings/**/*.test.js'
 
   deny-check:
     name: cargo-deny

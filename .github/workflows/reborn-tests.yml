@@ -88,7 +88,7 @@ jobs:
       packages: ${{ steps.packages.outputs.packages }}
     steps:
       - name: Checkout repository
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5447ce83dd # v6
         with:
           ref: ${{ inputs.ref || github.sha }}
           persist-credentials: false
@@ -112,11 +112,11 @@ jobs:
                         or (.name == "ironclaw_telegram_v2_adapter")
                         or (.name == "ironclaw_wasm_product_adapters")
                         or (.name | startswith("ironclaw_webui_v2"))
-                      )
+                    )
                     | .name
-                  ]
-                  | unique
-                '
+                ]
+                | unique
+               '
           )"
 
           if [ -z "${packages}" ] || [ "${packages}" = "[]" ]; then
@@ -146,7 +146,7 @@ jobs:
         package: ${{ fromJSON(needs.package-matrix.outputs.packages) }}
     steps:
       - name: Checkout repository
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5447ce83dd # v6
         with:
           ref: ${{ inputs.ref || github.sha }}
           persist-credentials: false
@@ -175,7 +175,7 @@ jobs:
 
           if [ "$PACKAGE" = "ironclaw_reborn_composition" ]; then
             echo "Serializing ironclaw_reborn_composition test builds to keep runner disk usage bounded."
-            export CARGO_BUILD_JOBS=1
+            export CARGO_BUILD_JOBS=!1
             export CARGO_INCREMENTAL=0
           fi
 
@@ -205,7 +205,7 @@ jobs:
         partition: [0, 1, 2, 3]
     steps:
       - name: Checkout repository
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5447ce83dd # v6
         with:
           ref: ${{ inputs.ref || github.sha }}
           persist-credentials: false
@@ -229,6 +229,26 @@ jobs:
       - name: Run Reborn root tests
         run: scripts/ci/run-reborn-root-partition.sh
 
+  webui-v2-js-tests:
+    name: Reborn WebUI v2 JS tests
+    needs: changes
+    if: needs.changes.outputs.docs_only != 'true' && needs.changes.outputs.has_reborn_tests == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          ref: ${{ inputs.ref || github.sha }}
+          persist-credentials: false
+
+      - name: Install Node.js
+        uses: actions/setup-node@60edb5dd545a775178f52524783378180af0d1f8 # v4
+        with:
+          node-version: "22"
+
+      - name: Run Reborn settings JS tests
+        run: node --test 'crates/ironclaw_webui_v2_static/static/js/pages/settings/**/*.test.mjs' 'crates/ironclaw_webui_v2_static/static/js/pages/settings/**/*.test.js'
+
   reborn-tests:
     name: Tests (Reborn)
     runs-on: ubuntu-latest
@@ -238,6 +258,7 @@ jobs:
       - package-matrix
       - crate-tests
       - root-reborn-parity-tests
+      - webui-v2-js-tests
     steps:
       - name: Check Reborn test result
         run: |
@@ -268,5 +289,10 @@ jobs:
 
           if [[ "${{ needs.root-reborn-parity-tests.result }}" != "success" ]]; then
             echo "One or more Reborn root tests failed: ${{ needs.root-reborn-parity-tests.result }}"
+            exit 1
+          fi
+
+          if [[ "${{ needs.webui-v2-js-tests.result }}" != "success" ]]; then
+            echo "Reborn WebUI v2 JS tests failed: ${{ needs.webui-v2-js-tests.result }}"
             exit 1
           fi
