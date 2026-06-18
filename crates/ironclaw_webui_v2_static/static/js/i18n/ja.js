@@ -472,6 +472,7 @@ registerPack("ja", {
   "tools.permissions": "ツール権限",
   "tools.alwaysAllow": "常に許可",
   "tools.askEachTime": "毎回確認",
+  "tools.viaGlobal": "via global",
   "tools.disabled": "無効",
   "tools.default": "デフォルト",
   "tools.saved": "保存済み",

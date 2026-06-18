@@ -472,6 +472,7 @@ registerPack("hi", {
   "tools.permissions": "टूल अनुमतियाँ",
   "tools.alwaysAllow": "हमेशा अनुमति दें",
   "tools.askEachTime": "हर बार पूछें",
+  "tools.viaGlobal": "via global",
   "tools.disabled": "अक्षम",
   "tools.default": "डिफ़ॉल्ट",
   "tools.saved": "सहेजा गया",

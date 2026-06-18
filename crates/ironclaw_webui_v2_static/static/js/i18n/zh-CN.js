@@ -472,6 +472,7 @@ registerPack("zh-CN", {
   "tools.permissions": "工具权限",
   "tools.alwaysAllow": "始终允许",
   "tools.askEachTime": "每次询问",
+  "tools.viaGlobal": "全局默认",
   "tools.disabled": "已禁用",
   "tools.default": "默认",
   "tools.saved": "已保存",

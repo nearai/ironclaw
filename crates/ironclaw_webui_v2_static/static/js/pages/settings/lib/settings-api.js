@@ -4,7 +4,7 @@ import { apiFetch } from "../../../lib/api.js";
 // LLM, extension, and skills reads use v2 endpoints. Remaining settings APIs
 // are TODO stubs.
 
-// Operator config (#4776): the v2 operator-config channel backs the persisted
+// Operator config: the v2 operator-config channel backs the persisted
 // settings the WebUI can write today. `list` projects the wired keys (currently
 // `agent.auto_approve_tools`) into the flat `{ settings: { key: value } }` shape
 // the settings page consumes; per-key get/set ride the `{key}` route.
@@ -94,11 +94,22 @@ export function startCodexLogin() {
     method: "POST",
   });
 }
-export function fetchTools() {
-  return Promise.resolve({ tools: [], todo: true });
+// Per-tool permissions ride the operator-config channel: each tool is a
+// `tool.<capability_id>` entry whose value carries the tools-tab row
+// (state / default_state / description / locked / effective_source). Writes POST
+// the new state to the matching `{key}` route.
+export async function fetchTools() {
+  const response = await apiFetch("/api/webchat/v2/operator/config");
+  const tools = (response?.entries || [])
+    .filter((entry) => typeof entry.key === "string" && entry.key.startsWith("tool."))
+    .map((entry) => entry.value);
+  return { tools };
 }
-export function updateToolPermission(_name, _state) {
-  return Promise.resolve({ success: false, message: "TODO: requires v2 tools endpoint" });
+export function updateToolPermission(name, state) {
+  return apiFetch(`/api/webchat/v2/operator/config/${encodeURIComponent(`tool.${name}`)}`, {
+    method: "POST",
+    body: JSON.stringify({ value: state }),
+  });
 }
 export function fetchExtensions() {
   return apiFetch("/api/webchat/v2/extensions");

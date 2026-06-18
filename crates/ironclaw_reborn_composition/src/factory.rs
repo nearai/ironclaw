@@ -1,4 +1,4 @@
-// arch-exempt: large_file, needs Reborn composition helper extraction, plan #4469
+// arch-exempt: large_file, needs Reborn composition helper extraction, plan
 use std::{
     collections::VecDeque,
     path::{Path, PathBuf},
@@ -372,7 +372,7 @@ pub struct RebornServices {
     pub(crate) skill_management: Option<Arc<RebornLocalSkillManagementPort>>,
     pub(crate) local_runtime: Option<Arc<RebornLocalRuntimeServices>>,
     #[cfg(any(feature = "libsql", feature = "postgres"))]
-    // arch-exempt: optional_arc, local-dev vs production split pending RebornServices split, plan #4471
+    // arch-exempt: optional_arc, local-dev vs production split pending RebornServices split, plan
     pub(crate) production_runtime: Option<RebornProductionRuntimeServices>,
     /// Shared scoped secret store. Exposed so runtime-level features (e.g.
     /// operator LLM-key storage) can reuse the same instance product-auth uses
@@ -420,7 +420,7 @@ pub(crate) struct RebornLocalRuntimeServices {
     pub(crate) capability_policy: Arc<LocalDevCapabilityPolicy>,
     pub(crate) persistent_approval_policies: Arc<LocalDevPersistentApprovalPolicyStore>,
     /// Per-(tenant,user,capability) explicit permission overrides and the global
-    /// auto-approve toggle (#4776). Shared between the dispatch approval
+    /// auto-approve toggle. Shared between the dispatch approval
     /// authorizer and the WebUI settings facade so a UI change is observed by
     /// the gate without a restart.
     pub(crate) tool_permission_overrides: Arc<dyn ToolPermissionOverrideStore>,
@@ -459,13 +459,13 @@ pub(crate) struct RebornLocalRuntimeServices {
     /// Resource governor handle used by the budget accountant. Kept here
     /// separately from the type-erased `dyn HostRuntime` so the runtime
     /// composer can construct a `GovernorBackedAccountant` without losing
-    /// the concrete governor type. Wired through #3841 follow-up "A1: wire
+    /// the concrete governor type. Wired through follow-up "A1: wire
     /// GovernorBackedAccountant into production composition".
     pub(crate) resource_governor: Arc<dyn ironclaw_resources::ResourceGovernor>,
     /// Sink that receives `BudgetEvent`s from the governor. Composition
     /// hands this to downstream consumers (audit log, SSE projection)
     /// without forcing the governor to know about them. Wired through
-    /// #3841 follow-up "A2: project BudgetEvent into the gateway event
+    /// follow-up "A2: project BudgetEvent into the gateway event
     /// stream".
     #[allow(dead_code)]
     pub(crate) budget_event_sink: Arc<dyn ironclaw_resources::BudgetEventSink>,
@@ -491,7 +491,7 @@ pub(crate) struct RebornLocalRuntimeServices {
     pub(crate) skill_management: Arc<RebornLocalSkillManagementPort>,
     // LocalSingleUser-only for now. Production and multi-tenant lifecycle
     // wiring need scoped storage/registry ownership before this is reused
-    // outside local-dev composition. Tracked in #4091.
+    // outside local-dev composition. Tracked in.
     pub(crate) extension_management: Option<Arc<RebornLocalExtensionManagementPort>>,
     pub(crate) runtime_http_egress: Option<Arc<dyn RuntimeHttpEgress>>,
     pub(crate) host_runtime_http_egress: Option<HostRuntimeHttpEgressPort>,
@@ -842,8 +842,8 @@ async fn build_local_dev(input: RebornBuildInput) -> Result<RebornServices, Rebo
     let local_dev_trust_invalidation_bus = Arc::new(ironclaw_trust::InvalidationBus::new());
     let extension_registry = Arc::new(local_dev_builtin_extension_registry()?);
     // Per-(tenant,user) approval settings resolved live at each dispatch gate
-    // so a WebUI change applies without a restart (#4959). Uses the SAME store
-    // instances the WebUI settings facade writes through (#4960), shared via the
+    // so a WebUI change applies without a restart. Uses the SAME store
+    // instances the WebUI settings facade writes through, shared via the
     // store graph.
     let approval_settings_provider = Arc::new(StoreApprovalSettingsProvider::new(
         Arc::clone(&store_graph.local_runtime.tool_permission_overrides),
@@ -3270,7 +3270,7 @@ where
     // host_runtime_for_production so WASM extensions whose manifest declares a
     // ProductAuthAccount runtime credential source resolve through
     // CredentialAccountService. Unconditional in production: product_auth_services
-    // always exists (durable filesystem fallback from #4234).
+    // always exists (durable filesystem fallback from).
     let services = services.with_runtime_credential_account_resolver(Arc::new(
         ProductAuthRuntimeCredentialResolver::new_with_refresh(
             product_auth_services.runtime_credential_account_selection_service(),

@@ -472,6 +472,7 @@ registerPack("es", {
   "tools.permissions": "Permisos de herramientas",
   "tools.alwaysAllow": "Permitir siempre",
   "tools.askEachTime": "Preguntar cada vez",
+  "tools.viaGlobal": "via global",
   "tools.disabled": "Deshabilitado",
   "tools.default": "por defecto",
   "tools.saved": "guardado",

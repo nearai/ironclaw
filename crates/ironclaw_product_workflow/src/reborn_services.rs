@@ -1475,11 +1475,12 @@ pub struct RebornServices {
     skill_activation_recorder: Option<Arc<SkillActivationRecorder>>,
     skill_activation_clearer: Option<Arc<SkillActivationClearer>>,
     llm_config: Option<Arc<dyn LlmConfigService>>,
-    /// Per-(tenant,user) approval settings stores (#4776). The SAME instances
+    /// Per-(tenant,user) approval settings stores. The SAME instances
     /// the dispatch approval authorizer reads, so a change made here is observed
     /// by the gate without a restart.
     auto_approve_settings: Option<Arc<dyn ironclaw_approvals::AutoApproveSettingStore>>,
     tool_permission_overrides: Option<Arc<dyn ironclaw_approvals::ToolPermissionOverrideStore>>,
+    tool_catalog: Option<Arc<dyn ToolCatalogService>>,
     thread_operation_locks: Arc<ThreadOperationLocks>,
 }
 
@@ -1515,6 +1516,7 @@ impl RebornServices {
             llm_config: None,
             auto_approve_settings: None,
             tool_permission_overrides: None,
+            tool_catalog: None,
             thread_operation_locks: Arc::new(StdMutex::new(HashMap::new())),
         }
     }
@@ -1564,7 +1566,7 @@ impl RebornServices {
 
     /// Wire the per-(tenant,user) approval-settings stores so the WebUI settings
     /// surface reads/writes the SAME instances the dispatch approval authorizer
-    /// consults (#4776). Without these, the auto-approve / tool-permission
+    /// consults. Without these, the auto-approve / tool-permission
     /// settings routes report unavailable.
     pub fn with_approval_settings_stores(
         mut self,
@@ -1573,6 +1575,13 @@ impl RebornServices {
     ) -> Self {
         self.auto_approve_settings = Some(auto_approve_settings);
         self.tool_permission_overrides = Some(tool_permission_overrides);
+        self
+    }
+
+    /// Wire the capability catalog so the WebUI tools tab can enumerate tools
+    /// and show each one's resolved per-tool permission.
+    pub fn with_tool_catalog_service(mut self, tool_catalog: Arc<dyn ToolCatalogService>) -> Self {
+        self.tool_catalog = Some(tool_catalog);
         self
     }
 
@@ -1715,8 +1724,33 @@ impl RebornServices {
     }
 }
 
-/// Operator-config key backed by the per-user auto-approve store (#4776).
+/// Operator-config key backed by the per-user auto-approve store.
 const AUTO_APPROVE_TOOLS_KEY: &str = "agent.auto_approve_tools";
+/// Prefix for per-tool permission operator-config keys (`tool.<capability_id>`).
+const TOOL_PERMISSION_KEY_PREFIX: &str = "tool.";
+
+/// One catalog entry the WebUI tools tab can show a permission control for.
+/// Host-shaped (composition computes `default_state`/`locked` from the
+/// capability descriptor) so the product facade never depends on the runtime
+/// capability registry.
+#[derive(Debug, Clone)]
+pub struct ToolCatalogEntry {
+    pub capability_id: String,
+    pub description: String,
+    pub default_state: ironclaw_approvals::ToolPermissionState,
+    /// `true` when the capability cannot be user-reconfigured (admin-denied).
+    pub locked: bool,
+}
+
+/// Enumerates the capabilities the caller may set a per-tool permission for.
+/// Implemented in the composition root over the capability registry.
+#[async_trait]
+pub trait ToolCatalogService: Send + Sync {
+    async fn list_tools(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+    ) -> Result<Vec<ToolCatalogEntry>, RebornServicesError>;
+}
 
 /// Build a lookup `ResourceScope` from an authenticated WebUI caller. The
 /// auto-approve store keys on `(tenant, user)` only, so agent/project/thread are
@@ -1749,22 +1783,85 @@ fn auto_approve_config_response(enabled: bool) -> RebornOperatorConfigGetRespons
     }
 }
 
+/// Build the `tool.<capability_id>` operator-config entry whose JSON value
+/// carries the full tools-tab row: current `state`, the capability's
+/// `default_state`, `description`, `locked`, and `effective_source`
+/// (`override` | `global` | `default`) so the UI can explain why a tool runs
+/// automatically.
+fn tool_permission_config_entry(
+    capability_id: &str,
+    description: &str,
+    state: ironclaw_approvals::ToolPermissionState,
+    default_state: ironclaw_approvals::ToolPermissionState,
+    locked: bool,
+    effective_source: &str,
+) -> RebornOperatorConfigEntry {
+    RebornOperatorConfigEntry {
+        key: format!("{TOOL_PERMISSION_KEY_PREFIX}{capability_id}"),
+        value: serde_json::json!({
+            "name": capability_id,
+            "description": description,
+            "state": state,
+            "default_state": default_state,
+            "locked": locked,
+            "effective_source": effective_source,
+        }),
+        source: "db".to_string(),
+        redacted: false,
+        mutable: !locked,
+    }
+}
+
 #[async_trait]
 impl RebornServicesApi for RebornServices {
-    /// Surfaces the per-user `agent.auto_approve_tools` entry (#4776) so the
+    /// Surfaces the per-user `agent.auto_approve_tools` entry so the
     /// WebUI settings export reflects the stored toggle. Other operator-config
     /// keys remain not-yet-wired.
     async fn list_operator_config(
         &self,
         caller: WebUiAuthenticatedCaller,
     ) -> Result<RebornOperatorConfigListResponse, RebornServicesError> {
+        let scope = caller_resource_scope(&caller);
         let mut entries = Vec::new();
-        if let Some(store) = &self.auto_approve_settings {
-            let enabled = store
-                .is_enabled(&caller_resource_scope(&caller))
-                .await
-                .map_err(RebornServicesError::internal_from)?;
-            entries.push(auto_approve_config_entry(enabled));
+        let global_auto_approve = match &self.auto_approve_settings {
+            Some(store) => {
+                let enabled = store
+                    .is_enabled(&scope)
+                    .await
+                    .map_err(RebornServicesError::internal_from)?;
+                entries.push(auto_approve_config_entry(enabled));
+                enabled
+            }
+            None => false,
+        };
+        // Per-tool rows: resolved (override → global → default) with the source
+        // the UI renders to explain why each tool runs automatically.
+        if let (Some(catalog), Some(overrides)) =
+            (&self.tool_catalog, &self.tool_permission_overrides)
+        {
+            for tool in catalog.list_tools(caller).await? {
+                let capability_id = ironclaw_host_api::CapabilityId::new(&tool.capability_id)
+                    .map_err(RebornServicesError::internal_from)?;
+                let key = ironclaw_approvals::ToolPermissionOverrideKey::new(&scope, capability_id);
+                let override_state = overrides
+                    .get(&key)
+                    .await
+                    .map_err(RebornServicesError::internal_from)?
+                    .map(|record| record.state);
+                let (state, source) = match override_state {
+                    Some(state) => (state, "override"),
+                    None if global_auto_approve && !tool.locked => (tool.default_state, "global"),
+                    None => (tool.default_state, "default"),
+                };
+                entries.push(tool_permission_config_entry(
+                    &tool.capability_id,
+                    &tool.description,
+                    state,
+                    tool.default_state,
+                    tool.locked,
+                    source,
+                ));
+            }
         }
         Ok(RebornOperatorConfigListResponse {
             entries,
@@ -1774,7 +1871,7 @@ impl RebornServicesApi for RebornServices {
     }
 
     /// `agent.auto_approve_tools` is served from the per-user auto-approve store
-    /// (#4776) — the same store the dispatch approval authorizer reads, so the
+    /// — the same store the dispatch approval authorizer reads, so the
     /// toggle takes effect on the next turn. Any other key falls through to the
     /// not-yet-wired operator-config surface.
     async fn get_operator_config_key(
@@ -1822,6 +1919,44 @@ impl RebornServicesApi for RebornServices {
                 .await
                 .map_err(RebornServicesError::internal_from)?;
             return Ok(auto_approve_config_response(enabled));
+        }
+        if let Some(capability_id) = key.strip_prefix(TOOL_PERMISSION_KEY_PREFIX) {
+            let overrides = self
+                .tool_permission_overrides
+                .as_ref()
+                .ok_or_else(|| RebornServicesError::service_unavailable(false))?;
+            let state: ironclaw_approvals::ToolPermissionState =
+                serde_json::from_value(request.value.clone()).map_err(|_| {
+                    RebornServicesError::validation(WebUiInboundValidationError::new(
+                        "value",
+                        WebUiInboundValidationCode::InvalidValue,
+                    ))
+                })?;
+            let capability = ironclaw_host_api::CapabilityId::new(capability_id).map_err(|_| {
+                RebornServicesError::validation(WebUiInboundValidationError::new(
+                    "key",
+                    WebUiInboundValidationCode::InvalidValue,
+                ))
+            })?;
+            overrides
+                .set(ironclaw_approvals::ToolPermissionOverrideInput {
+                    scope: caller_resource_scope(&caller),
+                    capability_id: capability,
+                    state,
+                    updated_by: ironclaw_host_api::Principal::User(caller.user_id.clone()),
+                })
+                .await
+                .map_err(RebornServicesError::internal_from)?;
+            return Ok(RebornOperatorConfigGetResponse {
+                entry: tool_permission_config_entry(
+                    capability_id,
+                    "",
+                    state,
+                    state,
+                    false,
+                    "override",
+                ),
+            });
         }
         let _ = request;
         Err(RebornServicesError::service_unavailable(false))
@@ -3302,9 +3437,9 @@ impl RebornServices {
     /// caller's automation triggers and, if so, returns a `TurnScope` with the
     /// TRUE stored scope (agent_id, project_id, and owner_user_id = creator_user_id).
     ///
-    /// Requires #4754 ("Part A"): `record_trigger_prompt` stores threads with
+    /// Requires ("Part A"): `record_trigger_prompt` stores threads with
     /// `owner_user_id = Some(fire.creator_user_id)` only for new first-fire
-    /// bindings created after #4754 landed. Pre-#4754 (legacy) runs were stored
+    /// bindings created after landed. Pre-#4754 (legacy) runs were stored
     /// with `owner_user_id = None`; their gate/cancel/run-state will NOT match
     /// the reconstructed scope — this is accepted breakage; recreating the
     /// trigger creates a fresh owner-bearing binding.

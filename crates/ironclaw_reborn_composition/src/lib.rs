@@ -90,6 +90,7 @@ mod profile;
 mod profile_approval_authorization;
 mod project_filesystem_reader;
 mod projection;
+mod tool_catalog_service;
 mod trajectory_observer;
 pub use auth_prompt::{AuthChallengeProvider, AuthChallengeView, BlockedAuthFlowCanceller};
 #[cfg(feature = "slack-v2-host-beta")]

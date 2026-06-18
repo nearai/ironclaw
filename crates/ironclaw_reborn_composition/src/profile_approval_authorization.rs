@@ -1,7 +1,7 @@
 use std::{borrow::Cow, sync::Arc};
 
 use async_trait::async_trait;
-use ironclaw_approvals::{ToolPermissionOverride, persistent_approval_grant_issuer};
+use ironclaw_approvals::{ToolPermissionState, persistent_approval_grant_issuer};
 use ironclaw_authorization::{GrantAuthorizer, TrustAwareCapabilityDispatchAuthorizer};
 use ironclaw_host_api::{
     Action, ApprovalRequest, ApprovalRequestId, CapabilityDescriptor, CapabilityGrant,
@@ -21,7 +21,7 @@ pub(crate) trait ProfileApprovalGatePolicy: Send + Sync {
         effects: &[EffectKind],
     ) -> bool;
 
-    /// Hard floor (#4776/#4959): effects that ALWAYS require an explicit
+    /// Hard floor: effects that ALWAYS require an explicit
     /// approval gate and can never be auto-approved or satisfied by a stored
     /// always-allow grant, regardless of `ApprovalPolicy` or the global
     /// auto-approve setting. The reborn equivalent of v1's
@@ -34,11 +34,11 @@ pub(crate) trait ProfileApprovalGatePolicy: Send + Sync {
 
 /// Per-(tenant, user, capability) approval settings resolved live at dispatch
 /// time so a change made in the WebUI takes effect without a process restart
-/// (#4959).
+///.
 #[derive(Debug, Clone, Copy, Default)]
 pub(crate) struct ResolvedApprovalSettings {
     /// Explicit per-tool override the user set, if any.
-    pub(crate) tool_override: Option<ToolPermissionOverride>,
+    pub(crate) tool_override: Option<ToolPermissionState>,
     /// Whether the user's global "auto-approve eligible tools" toggle is on.
     pub(crate) global_auto_approve: bool,
 }
@@ -56,7 +56,7 @@ pub(crate) trait ApprovalSettingsProvider: Send + Sync {
 }
 
 /// No stored overrides and global auto-approve off: the gate behaves exactly as
-/// it did before #4959. Test-only — production wires
+/// it did before. Test-only — production wires
 /// `StoreApprovalSettingsProvider`.
 #[cfg(test)]
 pub(crate) struct EmptyApprovalSettingsProvider;
@@ -124,14 +124,12 @@ impl TrustAwareCapabilityDispatchAuthorizer for ProfileApprovalPolicyAuthorizer 
             .settings
             .resolve(&context.resource_scope, &descriptor.id)
             .await;
-        require_approval_for_profile_policy(
+        self.require_approval_for_profile_policy(
             decision,
             context,
             descriptor,
             estimate,
             ProfileApprovalActionKind::Dispatch,
-            self.approval_policy,
-            self.gate_policy.as_ref(),
             settings,
         )
     }
@@ -151,14 +149,12 @@ impl TrustAwareCapabilityDispatchAuthorizer for ProfileApprovalPolicyAuthorizer 
             .settings
             .resolve(&context.resource_scope, &descriptor.id)
             .await;
-        require_approval_for_profile_policy(
+        self.require_approval_for_profile_policy(
             decision,
             context,
             descriptor,
             estimate,
             ProfileApprovalActionKind::SpawnCapability,
-            self.approval_policy,
-            self.gate_policy.as_ref(),
             settings,
         )
     }
@@ -170,82 +166,88 @@ enum ProfileApprovalActionKind {
     SpawnCapability,
 }
 
-#[allow(clippy::too_many_arguments)]
-// arch-exempt: too_many_args, gate decision needs context+descriptor+estimate+policy+gate+settings, plan #4776
-fn require_approval_for_profile_policy(
-    decision: Decision,
-    context: &ExecutionContext,
-    descriptor: &CapabilityDescriptor,
-    estimate: &ResourceEstimate,
-    action_kind: ProfileApprovalActionKind,
-    approval_policy: ApprovalPolicy,
-    gate_policy: &dyn ProfileApprovalGatePolicy,
-    settings: ResolvedApprovalSettings,
-) -> Decision {
-    // The profile approval gate only ever upgrades an underlying `Allow`; a
-    // `Deny` / `RequireApproval` from the grant authorizer passes through
-    // unchanged.
-    let Decision::Allow { .. } = &decision else {
-        return decision;
-    };
-
-    // A spawn exercises SpawnProcess even when the capability's own descriptor
-    // does not declare it: the underlying GrantAuthorizer authorizes spawns
-    // against `spawn_descriptor`, which adds EffectKind::SpawnProcess. Evaluate
-    // the approval gate against the same elevated effect set so a dispatch-only
-    // capability cannot be spawned as a live process without an approval gate.
-    let gate_effects = approval_gate_effects(action_kind, descriptor);
-
-    let require_approval = || Decision::RequireApproval {
-        request: approval_request(context, descriptor, estimate, action_kind),
-    };
-
-    // Decision precedence (high → low), #4776:
-    // 1. Explicit per-tool `disabled` → deny outright (strongest user intent).
-    if matches!(
-        settings.tool_override,
-        Some(ToolPermissionOverride::Disabled)
-    ) {
-        return Decision::Deny {
-            reason: DenyReason::PolicyDenied,
+impl ProfileApprovalPolicyAuthorizer {
+    fn require_approval_for_profile_policy(
+        &self,
+        decision: Decision,
+        context: &ExecutionContext,
+        descriptor: &CapabilityDescriptor,
+        estimate: &ResourceEstimate,
+        action_kind: ProfileApprovalActionKind,
+        settings: ResolvedApprovalSettings,
+    ) -> Decision {
+        let approval_policy = self.approval_policy;
+        let gate_policy = self.gate_policy.as_ref();
+        // The profile approval gate only ever upgrades an underlying `Allow`; a
+        // `Deny` / `RequireApproval` from the grant authorizer passes through
+        // unchanged.
+        let Decision::Allow { .. } = &decision else {
+            return decision;
         };
+
+        // A spawn exercises SpawnProcess even when the capability's own descriptor
+        // does not declare it: the underlying GrantAuthorizer authorizes spawns
+        // against `spawn_descriptor`, which adds EffectKind::SpawnProcess. Evaluate
+        // the approval gate against the same elevated effect set so a dispatch-only
+        // capability cannot be spawned as a live process without an approval gate.
+        let gate_effects = approval_gate_effects(action_kind, descriptor);
+
+        let require_approval = || Decision::RequireApproval {
+            request: approval_request(context, descriptor, estimate, action_kind),
+        };
+
+        // Decision precedence (high → low):
+        // 1. Explicit per-tool `disabled` → deny outright (strongest user intent).
+        if matches!(settings.tool_override, Some(ToolPermissionState::Disabled)) {
+            return Decision::Deny {
+                reason: DenyReason::PolicyDenied,
+            };
+        }
+        // 2. Hard floor: never auto-approve / never satisfiable by an override or a
+        //    stored grant — beats even an explicit `always_allow`.
+        if gate_policy.effects_force_approval(&gate_effects) {
+            return require_approval();
+        }
+        // 3. Explicit per-tool `ask_each_time` → always gate, ignoring the global
+        //    auto-approve setting and any stored always-allow grant.
+        if matches!(
+            settings.tool_override,
+            Some(ToolPermissionState::AskEachTime)
+        ) {
+            return require_approval();
+        }
+        // 4. Explicit per-tool `always_allow` → auto-run (non-floor effects only).
+        if matches!(
+            settings.tool_override,
+            Some(ToolPermissionState::AlwaysAllow)
+        ) {
+            return decision;
+        }
+        // 5. Capability deliberately exempt from the gate (in-turn consent).
+        if gate_policy.capability_exempt_from_approval(&descriptor.id) {
+            return decision;
+        }
+        // 6. Policy does not require a gate for this effect set.
+        if !gate_policy.effects_require_approval(approval_policy, &gate_effects) {
+            return decision;
+        }
+        // 7. Global auto-approve bypasses an otherwise-gated eligible tool.
+        if settings.global_auto_approve {
+            return decision;
+        }
+        // 8. A matching one-shot lease or persistent always-allow grant satisfies
+        //    the gate.
+        if has_matching_approval_grant(
+            context,
+            descriptor,
+            &gate_effects,
+            approval_policy,
+            gate_policy,
+        ) {
+            return decision;
+        }
+        require_approval()
     }
-    // 2. Hard floor: never auto-approve / never satisfiable by a stored grant.
-    if gate_policy.effects_force_approval(&gate_effects) {
-        return require_approval();
-    }
-    // 3. Explicit per-tool `ask_each_time` → always gate, ignoring the global
-    //    auto-approve setting and any stored always-allow grant.
-    if matches!(
-        settings.tool_override,
-        Some(ToolPermissionOverride::AskEachTime)
-    ) {
-        return require_approval();
-    }
-    // 4. Capability deliberately exempt from the gate (in-turn consent).
-    if gate_policy.capability_exempt_from_approval(&descriptor.id) {
-        return decision;
-    }
-    // 5. Policy does not require a gate for this effect set.
-    if !gate_policy.effects_require_approval(approval_policy, &gate_effects) {
-        return decision;
-    }
-    // 6. Global auto-approve bypasses an otherwise-gated eligible tool.
-    if settings.global_auto_approve {
-        return decision;
-    }
-    // 7. A matching one-shot lease or persistent always-allow grant satisfies
-    //    the gate.
-    if has_matching_approval_grant(
-        context,
-        descriptor,
-        &gate_effects,
-        approval_policy,
-        gate_policy,
-    ) {
-        return decision;
-    }
-    require_approval()
 }
 
 /// Effects the profile approval gate evaluates for `action_kind`.
@@ -381,9 +383,9 @@ mod tests {
     }
 
     /// Returns fixed settings so the gate's per-turn resolution can be driven
-    /// deterministically (#4959).
+    /// deterministically.
     struct StubSettingsProvider {
-        tool_override: Option<ToolPermissionOverride>,
+        tool_override: Option<ToolPermissionState>,
         global_auto_approve: bool,
     }
 
@@ -469,7 +471,7 @@ mod tests {
             ApprovalPolicy::AskDestructive,
             vec![EffectKind::SpawnProcess],
             StubSettingsProvider {
-                tool_override: Some(ToolPermissionOverride::AskEachTime),
+                tool_override: Some(ToolPermissionState::AskEachTime),
                 global_auto_approve: true,
             },
         )
@@ -486,7 +488,7 @@ mod tests {
             ApprovalPolicy::AskDestructive,
             vec![EffectKind::SpawnProcess],
             StubSettingsProvider {
-                tool_override: Some(ToolPermissionOverride::Disabled),
+                tool_override: Some(ToolPermissionState::Disabled),
                 global_auto_approve: true,
             },
         )
@@ -499,6 +501,40 @@ mod tests {
                 }
             ),
             "explicit disabled must deny, got {decision:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn explicit_always_allow_skips_gate() {
+        let decision = dispatch_decision(
+            ApprovalPolicy::AskDestructive,
+            vec![EffectKind::SpawnProcess],
+            StubSettingsProvider {
+                tool_override: Some(ToolPermissionState::AlwaysAllow),
+                global_auto_approve: false,
+            },
+        )
+        .await;
+        assert!(
+            matches!(decision, Decision::Allow { .. }),
+            "explicit always_allow should skip the gate, got {decision:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn hard_floor_beats_explicit_always_allow() {
+        let decision = dispatch_decision(
+            ApprovalPolicy::AskDestructive,
+            vec![EffectKind::Financial],
+            StubSettingsProvider {
+                tool_override: Some(ToolPermissionState::AlwaysAllow),
+                global_auto_approve: false,
+            },
+        )
+        .await;
+        assert!(
+            matches!(decision, Decision::RequireApproval { .. }),
+            "hard floor must gate even when the user set always_allow, got {decision:?}"
         );
     }
 

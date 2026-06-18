@@ -10,7 +10,7 @@ function ToolRow({ tool, onPermissionChange, isSaved }) {
   const t = useT();
   const permissionStates = [
     { value: "always_allow", label: t("tools.alwaysAllow"), tone: "positive" },
-    { value: "ask", label: t("tools.askEachTime"), tone: "warning" },
+    { value: "ask_each_time", label: t("tools.askEachTime"), tone: "warning" },
     { value: "disabled", label: t("tools.disabled"), tone: "danger" },
   ];
 
@@ -18,6 +18,9 @@ function ToolRow({ tool, onPermissionChange, isSaved }) {
   const current =
     permissionStates.find((p) => p.value === tool.state) || permissionStates[1];
   const isDefault = tool.state === tool.default_state;
+  //: explain why a tool runs automatically — by the global Always-Allow
+  // default vs an explicit per-tool override.
+  const viaGlobal = tool.effective_source === "global";
 
   return html`
     <div
@@ -40,6 +43,15 @@ function ToolRow({ tool, onPermissionChange, isSaved }) {
                 className="rounded border border-[var(--v2-panel-border)] bg-[var(--v2-surface-soft)] px-1.5 py-0.5 font-mono text-[10px] text-[var(--v2-text-faint)]"
               >
                 ${t("tools.default")}
+              </span>
+            `}
+            ${viaGlobal &&
+            html`
+              <span
+                title="Runs automatically because the global Always-Allow setting is on"
+                className="rounded border border-[var(--v2-panel-border)] bg-[var(--v2-surface-soft)] px-1.5 py-0.5 font-mono text-[10px] text-[var(--v2-accent-text)]"
+              >
+                ${t("tools.viaGlobal")}
               </span>
             `}
           </div>

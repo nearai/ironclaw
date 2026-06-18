@@ -58,7 +58,7 @@ impl ProfileApprovalGatePolicy for RuntimeProfileApprovalGatePolicy {
     }
 
     fn effects_force_approval(&self, effects: &[EffectKind]) -> bool {
-        // Hard floor (#4776): the highest-risk effects always require an
+        // Hard floor: the highest-risk effects always require an
         // explicit approval gate and can never be auto-approved or satisfied by
         // a stored always-allow grant — independent of profile or policy. Kept
         // deliberately narrow so the yolo/Minimal-bypass behaviour for ordinary

@@ -9088,10 +9088,7 @@ async fn auto_approve_toggle_round_trips_through_operator_config_facade() {
         .expect("set enabled");
     assert_eq!(set.entry.value, serde_json::Value::Bool(true));
 
-    let listed = services
-        .list_operator_config(caller())
-        .await
-        .expect("list");
+    let listed = services.list_operator_config(caller()).await.expect("list");
     let entry = listed
         .entries
         .iter()
@@ -9117,7 +9114,11 @@ async fn auto_approve_toggle_is_isolated_per_user() {
     let key = "agent.auto_approve_tools".to_string();
 
     services
-        .set_operator_config_key(caller_for_user("alice"), key.clone(), auto_approve_set(true))
+        .set_operator_config_key(
+            caller_for_user("alice"),
+            key.clone(),
+            auto_approve_set(true),
+        )
         .await
         .expect("alice enables");
 
@@ -9158,4 +9159,101 @@ async fn auto_approve_unavailable_without_store() {
         .await
         .expect_err("no store wired => unavailable");
     assert_eq!(err.kind, RebornServicesErrorKind::ServiceUnavailable);
+}
+
+// ── #4776: per-tool permission rows via the operator-config list/key channel ──
+
+struct StubToolCatalog;
+
+#[async_trait]
+impl ironclaw_product_workflow::ToolCatalogService for StubToolCatalog {
+    async fn list_tools(
+        &self,
+        _caller: WebUiAuthenticatedCaller,
+    ) -> Result<Vec<ironclaw_product_workflow::ToolCatalogEntry>, RebornServicesError> {
+        Ok(vec![ironclaw_product_workflow::ToolCatalogEntry {
+            capability_id: "builtin.shell".to_string(),
+            description: "Run a shell command".to_string(),
+            default_state: ironclaw_approvals::ToolPermissionState::AskEachTime,
+            locked: false,
+        }])
+    }
+}
+
+fn tool_permission_services() -> RebornServices {
+    auto_approve_services().with_tool_catalog_service(Arc::new(StubToolCatalog))
+}
+
+fn tool_entry(
+    response: &ironclaw_product_workflow::RebornOperatorConfigListResponse,
+) -> serde_json::Value {
+    response
+        .entries
+        .iter()
+        .find(|entry| entry.key == "tool.builtin.shell")
+        .expect("tool entry present")
+        .value
+        .clone()
+}
+
+#[tokio::test]
+async fn tool_permission_set_and_list_round_trips_with_effective_source() {
+    let services = tool_permission_services();
+
+    // Default: no override, global off → source "default", state = catalog default.
+    let listed = services.list_operator_config(caller()).await.expect("list");
+    let entry = tool_entry(&listed);
+    assert_eq!(entry["state"], "ask_each_time");
+    assert_eq!(entry["default_state"], "ask_each_time");
+    assert_eq!(entry["effective_source"], "default");
+
+    // Explicit per-tool override → state + source "override".
+    services
+        .set_operator_config_key(
+            caller(),
+            "tool.builtin.shell".to_string(),
+            ironclaw_product_workflow::RebornOperatorConfigSetRequest {
+                value: serde_json::Value::String("disabled".to_string()),
+            },
+        )
+        .await
+        .expect("set tool permission");
+    let after = tool_entry(&services.list_operator_config(caller()).await.expect("list"));
+    assert_eq!(after["state"], "disabled");
+    assert_eq!(after["effective_source"], "override");
+}
+
+#[tokio::test]
+async fn tool_permission_effective_source_is_global_when_toggle_on_without_override() {
+    let services = tool_permission_services();
+    services
+        .set_operator_config_key(
+            caller(),
+            "agent.auto_approve_tools".to_string(),
+            auto_approve_set(true),
+        )
+        .await
+        .expect("enable global");
+
+    let entry = tool_entry(&services.list_operator_config(caller()).await.expect("list"));
+    assert_eq!(
+        entry["effective_source"], "global",
+        "with global on and no override, the tool runs automatically via global"
+    );
+}
+
+#[tokio::test]
+async fn tool_permission_set_rejects_unknown_state() {
+    let services = tool_permission_services();
+    let err = services
+        .set_operator_config_key(
+            caller(),
+            "tool.builtin.shell".to_string(),
+            ironclaw_product_workflow::RebornOperatorConfigSetRequest {
+                value: serde_json::Value::String("bogus".to_string()),
+            },
+        )
+        .await
+        .expect_err("unknown state rejected");
+    assert_eq!(err.status_code, 400);
 }

@@ -472,6 +472,7 @@ registerPack("ar", {
   "tools.permissions": "أذونات الأدوات",
   "tools.alwaysAllow": "السماح دائمًا",
   "tools.askEachTime": "السؤال كل مرة",
+  "tools.viaGlobal": "via global",
   "tools.disabled": "معطّل",
   "tools.default": "افتراضي",
   "tools.saved": "تم الحفظ",

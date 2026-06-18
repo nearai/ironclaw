@@ -472,6 +472,7 @@ registerPack("ko", {
   "tools.permissions": "도구 권한",
   "tools.alwaysAllow": "항상 허용",
   "tools.askEachTime": "매번 확인",
+  "tools.viaGlobal": "via global",
   "tools.disabled": "비활성화",
   "tools.default": "기본값",
   "tools.saved": "저장됨",

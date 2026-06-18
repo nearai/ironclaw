@@ -472,6 +472,7 @@ registerPack("uk", {
   "tools.permissions": "Дозволи інструментів",
   "tools.alwaysAllow": "Завжди дозволяти",
   "tools.askEachTime": "Питати щоразу",
+  "tools.viaGlobal": "via global",
   "tools.disabled": "Вимкнено",
   "tools.default": "за замовчуванням",
   "tools.saved": "збережено",

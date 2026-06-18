@@ -1,5 +1,5 @@
 //! Global "auto-approve eligible tools" setting for the Reborn settings surface
-//! (#4776 / #4959).
+//!.
 //!
 //! This is a per-(tenant, user) boolean toggle. When enabled, the dispatch
 //! approval gate auto-approves a tool whose effective permission is the

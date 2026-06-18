@@ -31,9 +31,8 @@ pub use policy::{
 };
 pub use tool_permission::{
     FilesystemToolPermissionOverrideStore, InMemoryToolPermissionOverrideStore,
-    ToolPermissionOverride, ToolPermissionOverrideInput, ToolPermissionOverrideKey,
-    ToolPermissionOverrideRecord, ToolPermissionOverrideStore, ToolPermissionState,
-    ToolPermissionStoreError,
+    ToolPermissionOverrideInput, ToolPermissionOverrideKey, ToolPermissionOverrideRecord,
+    ToolPermissionOverrideStore, ToolPermissionState, ToolPermissionStoreError,
 };
 
 pub struct ApprovalResolver<'a, A, L>

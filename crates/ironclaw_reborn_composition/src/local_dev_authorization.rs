@@ -36,7 +36,7 @@ pub(crate) fn local_dev_authorizer(
 
 /// Live [`ApprovalSettingsProvider`] backed by the durable per-user approval
 /// stores. Queried on every dispatch gate decision so a WebUI change takes
-/// effect without a process restart (#4959).
+/// effect without a process restart.
 pub(crate) struct StoreApprovalSettingsProvider {
     overrides: Arc<dyn ToolPermissionOverrideStore>,
     auto_approve: Arc<dyn AutoApproveSettingStore>,

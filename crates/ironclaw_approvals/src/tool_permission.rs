@@ -1,17 +1,15 @@
-//! Per-tool permission overrides for the Reborn settings surface (#4776).
+//! Per-tool permission overrides for the Reborn settings surface.
 //!
-//! Reborn already expresses an "always allow this capability" decision as a
-//! durable [`PersistentApprovalPolicy`](crate::PersistentApprovalPolicy) grant,
-//! which the dispatch approval gate honours through its existing
-//! grant-matching path. The two states that grant model *cannot* express are
-//! the explicit "keep asking" and "never run" user choices. This module owns
-//! those — and only those — as per-(tenant, user, capability) override records.
+//! A user can set an explicit per-(tenant, user, capability) permission from the
+//! WebUI tools tab: [`ToolPermissionState::AlwaysAllow`] (auto-run),
+//! [`ToolPermissionState::AskEachTime`] (always gate), or
+//! [`ToolPermissionState::Disabled`] (never run). The dispatch approval gate
+//! consults this override directly, above the global auto-approve setting, so an
+//! explicit choice always wins.
 //!
-//! The resolved, three-state value surfaced to the WebUI is
-//! [`ToolPermissionState`]; the persisted override is the two-state
-//! [`ToolPermissionOverride`]. `always_allow` is intentionally absent from the
-//! override store: it lives as a persistent approval grant so there is a single
-//! source of truth for auto-run authority.
+//! This is distinct from the gate-prompt "approve & always allow" path, which
+//! issues a durable [`PersistentApprovalPolicy`](crate::PersistentApprovalPolicy)
+//! grant; both are honoured by the gate (either satisfies an `AlwaysAllow`).
 
 use std::{
     collections::HashMap,
@@ -37,37 +35,15 @@ const OVERRIDE_PREFIX: &str = "/approvals/tool-permissions";
 const OVERRIDE_PATH_CACHE_MAX_ENTRIES: usize = 1024;
 const OVERRIDE_CAS_RETRY_ATTEMPTS: usize = 3;
 
-/// Resolved per-tool permission as surfaced to the WebUI settings/tools API.
-///
-/// Wire-stable: serialized as `always_allow` / `ask_each_time` / `disabled`.
-/// `AlwaysAllow` is a *resolved* value (backed by a persistent approval grant),
-/// not something this module persists directly — see [`ToolPermissionOverride`].
+/// Per-tool permission state: the explicit user choice persisted as an override
+/// and surfaced to the WebUI tools tab. Wire-stable: serialized as
+/// `always_allow` / `ask_each_time` / `disabled`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ToolPermissionState {
     AlwaysAllow,
     AskEachTime,
     Disabled,
-}
-
-/// The explicit per-tool override a user can store. `always_allow` is excluded
-/// by construction: it is represented by a persistent approval grant, so the
-/// override store only ever holds the two "do not auto-run" decisions.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ToolPermissionOverride {
-    AskEachTime,
-    Disabled,
-}
-
-impl ToolPermissionOverride {
-    /// The resolved three-state value this override projects to.
-    pub fn as_state(self) -> ToolPermissionState {
-        match self {
-            Self::AskEachTime => ToolPermissionState::AskEachTime,
-            Self::Disabled => ToolPermissionState::Disabled,
-        }
-    }
 }
 
 #[derive(Debug, Error)]
@@ -113,7 +89,7 @@ impl ToolPermissionOverrideKey {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ToolPermissionOverrideRecord {
     pub key: ToolPermissionOverrideKey,
-    pub state: ToolPermissionOverride,
+    pub state: ToolPermissionState,
     pub updated_by: Principal,
     pub created_at: Timestamp,
     pub updated_at: Timestamp,
@@ -123,7 +99,7 @@ pub struct ToolPermissionOverrideRecord {
 pub struct ToolPermissionOverrideInput {
     pub scope: ResourceScope,
     pub capability_id: CapabilityId,
-    pub state: ToolPermissionOverride,
+    pub state: ToolPermissionState,
     pub updated_by: Principal,
 }
 
@@ -494,7 +470,7 @@ mod tests {
         }
     }
 
-    fn input(scope: ResourceScope, state: ToolPermissionOverride) -> ToolPermissionOverrideInput {
+    fn input(scope: ResourceScope, state: ToolPermissionState) -> ToolPermissionOverrideInput {
         ToolPermissionOverrideInput {
             scope,
             capability_id: CapabilityId::new("builtin.shell").unwrap(),
@@ -536,18 +512,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn override_projects_to_resolved_state() {
-        assert_eq!(
-            ToolPermissionOverride::AskEachTime.as_state(),
-            ToolPermissionState::AskEachTime
-        );
-        assert_eq!(
-            ToolPermissionOverride::Disabled.as_state(),
-            ToolPermissionState::Disabled
-        );
-    }
-
     #[tokio::test]
     async fn in_memory_set_get_clear_roundtrip() {
         let store = InMemoryToolPermissionOverrideStore::new();
@@ -557,21 +521,21 @@ mod tests {
         assert!(store.get(&key).await.unwrap().is_none());
 
         let saved = store
-            .set(input(scope.clone(), ToolPermissionOverride::Disabled))
+            .set(input(scope.clone(), ToolPermissionState::Disabled))
             .await
             .unwrap();
-        assert_eq!(saved.state, ToolPermissionOverride::Disabled);
+        assert_eq!(saved.state, ToolPermissionState::Disabled);
         assert_eq!(
             store.get(&key).await.unwrap().map(|record| record.state),
-            Some(ToolPermissionOverride::Disabled)
+            Some(ToolPermissionState::Disabled)
         );
 
         // Updating keeps created_at, advances state.
         let updated = store
-            .set(input(scope, ToolPermissionOverride::AskEachTime))
+            .set(input(scope, ToolPermissionState::AskEachTime))
             .await
             .unwrap();
-        assert_eq!(updated.state, ToolPermissionOverride::AskEachTime);
+        assert_eq!(updated.state, ToolPermissionState::AskEachTime);
         assert_eq!(updated.created_at, saved.created_at);
 
         store.clear(&key).await.unwrap();
@@ -589,7 +553,7 @@ mod tests {
         let key = key_for(&scope);
 
         let saved = store
-            .set(input(scope, ToolPermissionOverride::AskEachTime))
+            .set(input(scope, ToolPermissionState::AskEachTime))
             .await
             .unwrap();
 
@@ -599,7 +563,7 @@ mod tests {
             .unwrap()
             .expect("override persisted across store instances");
         assert_eq!(reloaded, saved);
-        assert_eq!(reloaded.state, ToolPermissionOverride::AskEachTime);
+        assert_eq!(reloaded.state, ToolPermissionState::AskEachTime);
     }
 
     #[tokio::test]
@@ -611,7 +575,7 @@ mod tests {
         let key = key_for(&scope);
 
         store
-            .set(input(scope, ToolPermissionOverride::Disabled))
+            .set(input(scope, ToolPermissionState::Disabled))
             .await
             .unwrap();
         assert!(store.get(&key).await.unwrap().is_some());
@@ -632,7 +596,7 @@ mod tests {
         };
 
         store
-            .set(input(alice.clone(), ToolPermissionOverride::Disabled))
+            .set(input(alice.clone(), ToolPermissionState::Disabled))
             .await
             .unwrap();
 
@@ -648,7 +612,7 @@ mod tests {
         let thread_b = scope(None, Some("thread-b"));
 
         store
-            .set(input(thread_a, ToolPermissionOverride::Disabled))
+            .set(input(thread_a, ToolPermissionState::Disabled))
             .await
             .unwrap();
 

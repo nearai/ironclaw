@@ -491,6 +491,7 @@ registerPack("en", {
   "tools.permissions": "Tool permissions",
   "tools.alwaysAllow": "Always allow",
   "tools.askEachTime": "Ask each time",
+  "tools.viaGlobal": "via global",
   "tools.disabled": "Disabled",
   "tools.default": "default",
   "tools.saved": "saved",

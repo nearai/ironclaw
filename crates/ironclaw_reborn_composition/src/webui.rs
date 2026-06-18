@@ -192,12 +192,17 @@ pub(crate) fn build_webui_services_with_connectable_channels(
         ));
     }
     if let Some(local_runtime) = &services.local_runtime {
-        // Same store instances the dispatch approval authorizer reads (#4776),
+        // Same store instances the dispatch approval authorizer reads,
         // so a settings change is observed by the gate without a restart.
         api = api.with_approval_settings_stores(
             Arc::clone(&local_runtime.auto_approve_settings),
             Arc::clone(&local_runtime.tool_permission_overrides),
         );
+        api = api.with_tool_catalog_service(Arc::new(
+            crate::tool_catalog_service::RebornToolCatalogService::new(Arc::clone(
+                &local_runtime.extension_registry,
+            )),
+        ));
         api = api.with_outbound_preferences_facade(Arc::new(RebornOutboundPreferencesFacade::new(
             Arc::clone(&local_runtime.outbound_preferences),
             Arc::new(OutboundDeliveryTargetRegistry::new(
