@@ -161,6 +161,7 @@ registerPack("zh-CN", {
   "authGate.oauthWaiting": "等待授权完成… 如果您已批准访问，请关闭此弹出标签页。",
   "authGate.expiresAt": "过期时间",
   "authGate.oauthProviderFallback": "该提供商",
+  "authGate.serviceUnavailable": "服务不可用",
   "authGate.pillAuthorize": "授权",
   "authGate.pillEnterToken": "Enter token",
   "authGate.unsupportedChallenge": "请打开设置完成此身份验证步骤。",

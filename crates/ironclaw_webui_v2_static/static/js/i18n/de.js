@@ -161,6 +161,7 @@ registerPack("de", {
   "authGate.oauthWaiting": "Warten auf den Abschluss der Autorisierung… Sie können die Popup-Registerkarte schließen, sobald Sie den Zugriff genehmigt haben.",
   "authGate.expiresAt": "Läuft ab",
   "authGate.oauthProviderFallback": "beim Anbieter",
+  "authGate.serviceUnavailable": "Dienst nicht verfügbar",
   "authGate.pillAuthorize": "Autorisieren",
   "authGate.pillEnterToken": "Token eingeben",
   "authGate.unsupportedChallenge": "Einstellungen öffnen, um diesen Authentifizierungsschritt abzuschließen.",

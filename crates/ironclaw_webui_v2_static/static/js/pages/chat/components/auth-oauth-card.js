@@ -50,7 +50,7 @@ export function AuthOauthCard({ gate, onCancel }) {
     // custom protocol handlers (javascript:, tel:, ms-msdt:, slack:) are
     // never opened even if a future code path writes an unexpected scheme.
     if (!hasHttpsAuthorizationUrl) {
-      setError("Service Unavailable");
+      setError(t("authGate.serviceUnavailable"));
       return;
     }
     // Must be called synchronously in a click handler to be treated as a
