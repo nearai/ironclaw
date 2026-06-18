@@ -1,5 +1,6 @@
 import { React, html } from "../../../lib/html.js";
 import { Card } from "../../../design-system/card.js";
+import { Button } from "../../../design-system/button.js";
 import { useT } from "../../../lib/i18n.js";
 import { useSkills } from "../hooks/useSkills.js";
 import { matchesSearch } from "../lib/settings-search.js";
@@ -12,15 +13,18 @@ export function SkillsTab({ searchQuery = "" }) {
   const {
     skills,
     query,
+    autoActivateLearned,
     fetchSkillContent,
     installSkill,
     removeSkill,
     updateSkill,
     setSkillAutoActivate,
+    setAutoActivateLearned,
     isInstalling,
     isRemoving,
     isUpdating,
     isSettingAutoActivate,
+    isSettingAutoActivateLearned,
   } = useSkills();
   const [actionError, setActionError] = React.useState("");
   const [actionResult, setActionResult] = React.useState("");
@@ -78,6 +82,21 @@ export function SkillsTab({ searchQuery = "" }) {
       setActionError(err.message || t("skills.updateFailed"));
     }
   }, [setSkillAutoActivate, t]);
+
+  const handleSetAutoActivateLearned = React.useCallback(async (enabled) => {
+    setActionError("");
+    setActionResult("");
+    try {
+      const response = await setAutoActivateLearned(enabled);
+      if (!response?.success) {
+        setActionError(response?.message || t("skills.updateFailed"));
+        return;
+      }
+      setActionResult(response.message);
+    } catch (err) {
+      setActionError(err.message || t("skills.updateFailed"));
+    }
+  }, [setAutoActivateLearned, t]);
 
   let body;
   if (query.isLoading) {
@@ -153,10 +172,49 @@ export function SkillsTab({ searchQuery = "" }) {
 
   return html`
     <div className="space-y-4">
+      <${LearnedAutoActivateCard}
+        enabled=${autoActivateLearned}
+        isSaving=${isSettingAutoActivateLearned}
+        onToggle=${handleSetAutoActivateLearned}
+      />
       <${SkillInstallPanel} onInstall=${installSkill} isInstalling=${isInstalling} />
       <${SkillActionResult} error=${actionError} result=${actionResult} />
       ${body}
     </div>
+  `;
+}
+
+// Global master switch for auto-activating learned skills. When off, every
+// learned skill stays invokable via an explicit /name mention but no longer
+// auto-activates by keyword/criteria. Mirrors the per-skill toggle on
+// `SkillCard`, but applies to the whole set.
+function LearnedAutoActivateCard({ enabled, isSaving, onToggle }) {
+  return html`
+    <${Card} padding="md">
+      <div className="flex items-start justify-between gap-4">
+        <div className="min-w-0">
+          <div className="text-sm font-medium text-[var(--v2-text)]">
+            Auto-activate learned skills
+          </div>
+          <div className="mt-1 text-xs text-[var(--v2-text-muted)]">
+            ${enabled
+              ? "Learned skills run automatically on matching requests. Turn off to make them explicit-only (/name)."
+              : "Learned skills run only when you type /name. Turn on to let them auto-activate by keyword."}
+          </div>
+        </div>
+        <div className="shrink-0">
+          <${Button}
+            type="button"
+            variant=${enabled ? "secondary" : "ghost"}
+            size="sm"
+            disabled=${isSaving}
+            onClick=${() => onToggle(!enabled)}
+          >
+            ${enabled ? "Default: On" : "Default: Off"}
+          <//>
+        </div>
+      </div>
+    <//>
   `;
 }
 

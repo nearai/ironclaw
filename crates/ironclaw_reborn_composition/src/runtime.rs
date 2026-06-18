@@ -3101,6 +3101,7 @@ fn local_dev_filesystem_skill_context_source(
     let selectable_skills = extension.selectable_skill_runtime_with_setup_markers(
         selector_config,
         Arc::clone(&local_runtime.workspace_filesystem),
+        Arc::clone(&local_runtime.skill_auto_activate_learned),
     );
     Ok(LocalDevSkillContextSource {
         source: selectable_skills.host_skill_context_source(),

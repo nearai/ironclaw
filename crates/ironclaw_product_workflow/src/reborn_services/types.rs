@@ -1005,6 +1005,11 @@ pub struct RebornExtensionListResponse {
 pub struct RebornSkillListResponse {
     pub skills: Vec<RebornSkillInfo>,
     pub count: usize,
+    /// Global "auto-activate learned skills" master switch. When `false`,
+    /// learned skills activate only via an explicit `/name` mention. Defaults
+    /// to `true` for back-compat with producers that predate the flag.
+    #[serde(default = "default_true")]
+    pub auto_activate_learned: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

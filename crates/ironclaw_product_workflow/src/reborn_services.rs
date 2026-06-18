@@ -335,6 +335,18 @@ pub trait SkillsProductFacade: Send + Sync {
         let _ = (caller, name, enabled);
         Err(RebornServicesError::service_unavailable(false))
     }
+
+    /// Toggle the global "auto-activate learned skills" master switch. Disabling
+    /// leaves every learned skill invokable via an explicit `/name` mention but
+    /// turns off keyword/criteria auto-activation for all of them.
+    async fn set_auto_activate_learned(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        enabled: bool,
+    ) -> Result<RebornSkillActionResponse, RebornServicesError> {
+        let _ = (caller, enabled);
+        Err(RebornServicesError::service_unavailable(false))
+    }
 }
 
 #[derive(Debug, Default)]
@@ -1161,6 +1173,19 @@ pub trait RebornServicesApi: Send + Sync {
         enabled: bool,
     ) -> Result<RebornSkillActionResponse, RebornServicesError> {
         let _ = (caller, name, enabled);
+        Err(RebornServicesError::service_unavailable(false))
+    }
+
+    /// Toggle the global "auto-activate learned skills" master switch (see
+    /// [`SkillsProductFacade::set_auto_activate_learned`]). Defaults to
+    /// unavailable so impls that do not surface skill management inherit a
+    /// fail-closed response.
+    async fn set_auto_activate_learned(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        enabled: bool,
+    ) -> Result<RebornSkillActionResponse, RebornServicesError> {
+        let _ = (caller, enabled);
         Err(RebornServicesError::service_unavailable(false))
     }
 
@@ -2468,6 +2493,16 @@ impl RebornServicesApi for RebornServices {
     ) -> Result<RebornSkillActionResponse, RebornServicesError> {
         self.skills_facade
             .set_skill_auto_activate(caller, name, enabled)
+            .await
+    }
+
+    async fn set_auto_activate_learned(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        enabled: bool,
+    ) -> Result<RebornSkillActionResponse, RebornServicesError> {
+        self.skills_facade
+            .set_auto_activate_learned(caller, enabled)
             .await
     }
 

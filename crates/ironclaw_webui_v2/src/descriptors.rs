@@ -46,6 +46,7 @@ pub const WEBUI_V2_ROUTE_GET_SKILL: &str = "webui.v2.get_skill";
 pub const WEBUI_V2_ROUTE_UPDATE_SKILL: &str = "webui.v2.update_skill";
 pub const WEBUI_V2_ROUTE_REMOVE_SKILL: &str = "webui.v2.remove_skill";
 pub const WEBUI_V2_ROUTE_SET_SKILL_AUTO_ACTIVATE: &str = "webui.v2.set_skill_auto_activate";
+pub const WEBUI_V2_ROUTE_SET_AUTO_ACTIVATE_LEARNED: &str = "webui.v2.set_auto_activate_learned";
 pub const WEBUI_V2_ROUTE_GET_LLM_CONFIG: &str = "webui.v2.get_llm_config";
 pub const WEBUI_V2_ROUTE_UPSERT_LLM_PROVIDER: &str = "webui.v2.upsert_llm_provider";
 pub const WEBUI_V2_ROUTE_DELETE_LLM_PROVIDER: &str = "webui.v2.delete_llm_provider";
@@ -102,6 +103,8 @@ pub const WEBUI_V2_PATTERN_INSTALL_SKILL: &str = "/api/webchat/v2/skills/install
 pub const WEBUI_V2_PATTERN_SKILL_DETAIL: &str = "/api/webchat/v2/skills/{name}";
 pub const WEBUI_V2_PATTERN_SET_SKILL_AUTO_ACTIVATE: &str =
     "/api/webchat/v2/skills/{name}/auto-activate";
+pub const WEBUI_V2_PATTERN_SET_AUTO_ACTIVATE_LEARNED: &str =
+    "/api/webchat/v2/skills/auto-activate-learned";
 pub const WEBUI_V2_PATTERN_GET_LLM_CONFIG: &str = "/api/webchat/v2/llm/providers";
 pub const WEBUI_V2_PATTERN_UPSERT_LLM_PROVIDER: &str = "/api/webchat/v2/llm/providers";
 pub const WEBUI_V2_PATTERN_DELETE_LLM_PROVIDER: &str =
@@ -162,6 +165,7 @@ pub fn webui_v2_routes() -> Vec<IngressRouteDescriptor> {
         update_skill_descriptor(),
         remove_skill_descriptor(),
         set_skill_auto_activate_descriptor(),
+        set_auto_activate_learned_descriptor(),
         get_llm_config_descriptor(),
         upsert_llm_provider_descriptor(),
         delete_llm_provider_descriptor(),
@@ -671,6 +675,20 @@ fn set_skill_auto_activate_descriptor() -> IngressRouteDescriptor {
         WEBUI_V2_ROUTE_SET_SKILL_AUTO_ACTIVATE,
         NetworkMethod::Post,
         WEBUI_V2_PATTERN_SET_SKILL_AUTO_ACTIVATE,
+        mutation_policy(
+            body_limit_kib(4),
+            mutation_rate_limit(),
+            AuditTraceClass::UserAction,
+            AllowedEffectPath::ProductWorkflow,
+        ),
+    )
+}
+
+fn set_auto_activate_learned_descriptor() -> IngressRouteDescriptor {
+    descriptor(
+        WEBUI_V2_ROUTE_SET_AUTO_ACTIVATE_LEARNED,
+        NetworkMethod::Post,
+        WEBUI_V2_PATTERN_SET_AUTO_ACTIVATE_LEARNED,
         mutation_policy(
             body_limit_kib(4),
             mutation_rate_limit(),
