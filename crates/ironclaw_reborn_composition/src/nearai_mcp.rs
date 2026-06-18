@@ -109,6 +109,31 @@ pub fn nearai_mcp_bootstrap_config_from_env()
     NearAiMcpBootstrapConfig::from_optional_parts(configured_base, api_key)
 }
 
+#[cfg(feature = "root-llm-provider")]
+pub(crate) async fn nearai_mcp_bootstrap_config_from_llm_config(
+    config: &ironclaw_llm::LlmConfig,
+) -> Result<Option<NearAiMcpBootstrapConfig>, NearAiMcpBootstrapConfigError> {
+    if config.active_provider_id() != "nearai" {
+        return Ok(None);
+    }
+
+    if let Some(api_key) = &config.nearai.api_key {
+        return NearAiMcpBootstrapConfig::from_optional_parts(
+            Some(config.nearai.base_url.clone()),
+            Some(SecretString::from(api_key.expose_secret().to_string())),
+        );
+    }
+
+    let session = ironclaw_llm::create_session_manager(config.session.clone()).await;
+    if !session.has_token().await {
+        return Ok(None);
+    }
+    let Ok(token) = session.get_token().await else {
+        return Ok(None);
+    };
+    NearAiMcpBootstrapConfig::from_optional_parts(Some(config.nearai.base_url.clone()), Some(token))
+}
+
 pub(crate) fn nearai_mcp_endpoint_from_base(
     configured_base: Option<&str>,
 ) -> Result<NearAiMcpEndpoint, String> {
