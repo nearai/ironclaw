@@ -149,6 +149,32 @@ Notes:
   case, add a contract assertion over the selected tool/request/end state, and
   commit the scrubbed fixture.
 
+## Reborn QA Project-Setup Fixtures
+
+`tests/reborn_qa_project_setup.rs` ports the seven
+`automation-workflows/v1/project-setup` benchmarks into the same Reborn QA
+record/replay shape. The committed scaffold contains ignored recorder,
+contract, and replay tiers; a human records fixtures later with live keys.
+
+Record all project-setup fixtures with:
+
+```bash
+ANTHROPIC_API_KEY=... GITHUB_TOKEN=... \
+  cargo test --test reborn_qa_project_setup record_ \
+    -- --ignored --test-threads=1 --nocapture
+```
+
+Env by scenario:
+
+- `ANTHROPIC_API_KEY`: all seven scenarios.
+- `GITHUB_TOKEN`: `bind-repo-and-workflow` when the live run exercises the
+  GitHub surface while installing `github-workflow`.
+- Google credentials: not required for these project-setup scenarios.
+
+Fixtures land in
+`tests/fixtures/llm_traces/reborn_qa/project_setup/<scenario>.json`.
+Scrub them with the PII checklist above before committing.
+
 ## Adding a New Live Test
 
 1. Add a `#[tokio::test]` + `#[ignore]` (live tier — never runs in the

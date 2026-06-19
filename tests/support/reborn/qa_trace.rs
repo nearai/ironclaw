@@ -27,7 +27,14 @@ use ironclaw_auth::{
 };
 use ironclaw_first_party_extensions::GoogleCredentialResolver;
 use ironclaw_host_api::{
-    AgentId, ExtensionId, InvocationId, ResourceScope, SecretHandle, TenantId, UserId,
+    AgentId, CapabilityGrant, CapabilityGrantId, CapabilityId, CapabilitySet, CorrelationId,
+    EffectKind, ExecutionContext, ExtensionId, GrantConstraints, InvocationId, MountAlias,
+    MountGrant, MountPermissions, MountView, NetworkPolicy, Principal, ResourceScope, RuntimeKind,
+    SecretHandle, TenantId, TrustClass, UserId, VirtualPath,
+};
+use ironclaw_host_runtime::{
+    MEMORY_READ_CAPABILITY_ID, MEMORY_WRITE_CAPABILITY_ID, RuntimeCapabilityOutcome,
+    RuntimeCapabilityRequest,
 };
 use ironclaw_llm::{
     LlmConfig, LlmProvider, NearAiConfig, ProviderProtocol, RegistryProviderConfig, SessionConfig,
@@ -52,8 +59,10 @@ use ironclaw_reborn_composition::{
 };
 use ironclaw_reborn_config::{RebornConfigFile, RebornHome};
 use ironclaw_triggers::TriggerPollerWorkerConfig;
+use ironclaw_trust::{AuthorityCeiling, EffectiveTrustClass, TrustDecision, TrustProvenance};
 use ironclaw_turns::{ReplyTargetBindingRef, TurnStatus, run_profile::ModelProfileId};
 use secrecy::{ExposeSecret, SecretString};
+use serde_json::{Value, json};
 
 use crate::support::trace_llm::{LlmTrace, TraceResponse};
 
@@ -402,6 +411,245 @@ pub async fn send_qa_phrase(runtime: &RebornRuntime, phrase: &str) -> AssistantR
         .send_user_message(&conversation, phrase)
         .await
         .expect("QA phrase turn reaches a terminal state")
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct QaTraceSetupDocument<'a> {
+    pub path: &'a str,
+    pub content: &'a str,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct QaTraceScenarioSetup<'a> {
+    pub identity_prompt: Option<&'a str>,
+    pub memory_documents: &'a [QaTraceSetupDocument<'a>],
+}
+
+impl<'a> QaTraceScenarioSetup<'a> {
+    pub const fn empty() -> Self {
+        Self {
+            identity_prompt: None,
+            memory_documents: &[],
+        }
+    }
+}
+
+/// Seed the Reborn QA scenario world into the local-dev runtime before the
+/// first recorded/replayed turn. Memory documents go through the same
+/// host-runtime memory tool the agent uses, so setup state lands under the
+/// same tenant/user/agent scope as replayed tool calls.
+pub async fn seed_qa_trace_world(
+    root: &tempfile::TempDir,
+    runtime: &RebornRuntime,
+    setup: &QaTraceScenarioSetup<'_>,
+) {
+    if let Some(identity_prompt) = setup.identity_prompt {
+        append_qa_identity_prompt(root, identity_prompt);
+    }
+    for document in setup.memory_documents {
+        write_qa_memory_document(runtime, document.path, document.content).await;
+    }
+}
+
+fn append_qa_identity_prompt(root: &tempfile::TempDir, identity_prompt: &str) {
+    let prompt_path = root
+        .path()
+        .join("local-dev")
+        .join("system/prompts/default-system.md");
+    let mut prompt = std::fs::read_to_string(&prompt_path).unwrap_or_else(|error| {
+        panic!(
+            "QA trace scenario could not read default prompt {}: {error}",
+            prompt_path.display()
+        )
+    });
+    prompt.push_str("\n\n## Scenario Identity (SOUL.md)\n\n");
+    prompt.push_str(identity_prompt);
+    prompt.push('\n');
+    std::fs::write(&prompt_path, prompt).unwrap_or_else(|error| {
+        panic!(
+            "QA trace scenario could not write default prompt {}: {error}",
+            prompt_path.display()
+        )
+    });
+}
+
+pub async fn send_qa_turns(runtime: &RebornRuntime, turns: &[&str]) -> Vec<AssistantReply> {
+    let conversation = runtime
+        .new_conversation()
+        .await
+        .expect("new QA scenario conversation");
+    let mut replies = Vec::new();
+    for turn in turns {
+        replies.push(
+            runtime
+                .send_user_message(&conversation, turn)
+                .await
+                .expect("QA scenario turn reaches a terminal state"),
+        );
+    }
+    replies
+}
+
+pub async fn send_qa_turns_until_gate(
+    runtime: &RebornRuntime,
+    turns: &[&str],
+) -> Vec<RebornTurnDriveOutcome> {
+    let conversation = runtime
+        .new_conversation()
+        .await
+        .expect("new QA scenario conversation");
+    let mut outcomes = Vec::new();
+    for turn in turns {
+        let outcome = runtime
+            .send_user_message_until_gate(&conversation, turn)
+            .await
+            .expect("QA scenario turn reaches a terminal status or a gate");
+        let blocked = matches!(outcome, RebornTurnDriveOutcome::BlockedOnGate { .. });
+        outcomes.push(outcome);
+        if blocked {
+            break;
+        }
+    }
+    outcomes
+}
+
+pub async fn write_qa_memory_document(runtime: &RebornRuntime, path: &str, content: &str) {
+    let output = invoke_qa_memory_tool(
+        runtime,
+        MEMORY_WRITE_CAPABILITY_ID,
+        json!({
+            "target": path,
+            "content": content,
+            "append": false
+        }),
+    )
+    .await;
+    assert_eq!(
+        output.get("status").and_then(Value::as_str),
+        Some("written"),
+        "QA setup memory write to {path:?} should report written; output: {output}"
+    );
+}
+
+pub async fn read_qa_memory_document(runtime: &RebornRuntime, path: &str) -> String {
+    let output =
+        invoke_qa_memory_tool(runtime, MEMORY_READ_CAPABILITY_ID, json!({ "path": path })).await;
+    output
+        .get("content")
+        .and_then(Value::as_str)
+        .unwrap_or_else(|| panic!("QA memory read for {path:?} returned no content: {output}"))
+        .to_string()
+}
+
+async fn invoke_qa_memory_tool(
+    runtime: &RebornRuntime,
+    capability_id: &str,
+    input: Value,
+) -> Value {
+    let host_runtime = runtime
+        .services()
+        .host_runtime
+        .as_ref()
+        .expect("QA trace runtime exposes host runtime");
+    let capability = CapabilityId::new(capability_id).expect("QA capability id");
+    let outcome = host_runtime
+        .invoke_capability(RuntimeCapabilityRequest::new(
+            qa_memory_execution_context([MEMORY_WRITE_CAPABILITY_ID, MEMORY_READ_CAPABILITY_ID]),
+            capability.clone(),
+            ironclaw_host_api::ResourceEstimate::default(),
+            input,
+            qa_memory_trust_decision(),
+        ))
+        .await
+        .expect("QA memory capability invocation reaches host runtime");
+    match outcome {
+        RuntimeCapabilityOutcome::Completed(completed) => completed.output,
+        other => panic!("QA memory capability {capability_id} did not complete: {other:?}"),
+    }
+}
+
+fn qa_memory_execution_context<const N: usize>(capabilities: [&str; N]) -> ExecutionContext {
+    let mounts = MountView::new(vec![MountGrant::new(
+        MountAlias::new("/memory").expect("memory mount alias"),
+        VirtualPath::new("/memory").expect("memory mount target"),
+        MountPermissions::read_write_list_delete(),
+    )])
+    .expect("QA memory mounts");
+    let extension_id = ExtensionId::new("reborn-qa").expect("QA caller extension id");
+    let invocation_id = InvocationId::new();
+    let tenant_id = TenantId::new(QA_TENANT).expect("QA tenant id");
+    let user_id = UserId::new(QA_USER).expect("QA user id");
+    let agent_id = AgentId::new(QA_AGENT).expect("QA agent id");
+    let grants = CapabilitySet {
+        grants: capabilities
+            .into_iter()
+            .map(|capability| CapabilityGrant {
+                id: CapabilityGrantId::new(),
+                capability: CapabilityId::new(capability).expect("QA granted capability id"),
+                grantee: Principal::Extension(extension_id.clone()),
+                issued_by: Principal::HostRuntime,
+                constraints: GrantConstraints {
+                    allowed_effects: qa_memory_effects(),
+                    mounts: mounts.clone(),
+                    network: NetworkPolicy::default(),
+                    secrets: Vec::new(),
+                    resource_ceiling: None,
+                    expires_at: None,
+                    max_invocations: None,
+                },
+            })
+            .collect(),
+    };
+    let resource_scope = ResourceScope {
+        tenant_id: tenant_id.clone(),
+        user_id: user_id.clone(),
+        agent_id: Some(agent_id.clone()),
+        project_id: None,
+        mission_id: None,
+        thread_id: None,
+        invocation_id,
+    };
+    let context = ExecutionContext {
+        invocation_id,
+        correlation_id: CorrelationId::new(),
+        process_id: None,
+        parent_process_id: None,
+        tenant_id,
+        user_id,
+        agent_id: Some(agent_id),
+        project_id: None,
+        mission_id: None,
+        thread_id: None,
+        extension_id,
+        runtime: RuntimeKind::FirstParty,
+        trust: TrustClass::FirstParty,
+        grants,
+        mounts,
+        resource_scope,
+    };
+    context.validate().expect("QA memory execution context");
+    context
+}
+
+fn qa_memory_effects() -> Vec<EffectKind> {
+    vec![
+        EffectKind::DispatchCapability,
+        EffectKind::ReadFilesystem,
+        EffectKind::WriteFilesystem,
+        EffectKind::DeleteFilesystem,
+    ]
+}
+
+fn qa_memory_trust_decision() -> TrustDecision {
+    TrustDecision {
+        effective_trust: EffectiveTrustClass::user_trusted(),
+        authority_ceiling: AuthorityCeiling {
+            allowed_effects: qa_memory_effects(),
+            max_resource_ceiling: None,
+        },
+        provenance: TrustProvenance::Default,
+        evaluated_at: chrono::Utc::now(),
+    }
 }
 
 fn live_credentials_for_fixture(fixture_name: &str) -> &'static [&'static LiveCredentialSeed] {
@@ -1451,6 +1699,107 @@ pub async fn record_qa_phrase(fixture_name: &str, phrase: &str) {
 
     // Give the recording a 2s settle so background turn-state writes finish
     // before the tempdir drops.
+    tokio::time::sleep(Duration::from_secs(2)).await;
+}
+
+/// Record a QA scenario with explicit setup and one or more user turns.
+/// Scenario-specific tool and end-state contracts belong in the test module
+/// that defines the scenario; this helper only records the live trace and
+/// verifies every turn reached a successful terminal reply.
+pub async fn record_qa_scenario(
+    fixture_name: &str,
+    setup: &QaTraceScenarioSetup<'_>,
+    turns: &[&str],
+) {
+    let api_key = std::env::var(QA_RECORD_KEY_ENV).unwrap_or_else(|_| {
+        panic!("{QA_RECORD_KEY_ENV} must be set to record QA traces against the live API")
+    });
+    let model = std::env::var(QA_RECORD_MODEL_ENV)
+        .ok()
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| QA_RECORD_DEFAULT_MODEL.to_string());
+
+    let mut live_secret_values = Vec::new();
+    live_secret_values.push((QA_RECORD_KEY_ENV, api_key.clone()));
+    if let Ok(github_token) = std::env::var("GITHUB_TOKEN")
+        && !github_token.is_empty()
+    {
+        live_secret_values.push(("GITHUB_TOKEN", github_token));
+    }
+
+    let config = anthropic_llm_config(api_key, &model);
+    let session = create_session_manager(config.session.clone()).await;
+    let provider = build_static_provider_chain(&config, session)
+        .await
+        .expect("anthropic provider chain builds");
+
+    let fixture_path = qa_fixture_path(fixture_name);
+    if let Some(parent) = fixture_path.parent() {
+        std::fs::create_dir_all(parent).expect("fixture directory");
+    }
+    let recorder = Arc::new(RecordingLlm::new(
+        provider,
+        fixture_path.clone(),
+        format!("recorded-qa-{fixture_name}"),
+    ));
+
+    let profile = ModelProfileId::new(INTERACTIVE_MODEL_PROFILE).expect("model profile id");
+    let policy = LlmModelProfilePolicy::new().allow_model_profile(profile, None);
+    let gateway =
+        LlmProviderModelGateway::new(Arc::clone(&recorder) as Arc<dyn LlmProvider>, policy);
+
+    let root = tempfile::tempdir().expect("tempdir");
+    let runtime = build_qa_trace_runtime_with_http_interceptor(
+        &root,
+        Arc::new(gateway),
+        Some((recorder.http_interceptor(), TraceHttpNetworkMode::Recording)),
+    )
+    .await;
+    seed_qa_trace_world(&root, &runtime, setup).await;
+    live_secret_values.extend(seed_live_credentials_for_fixture(&runtime, fixture_name).await);
+
+    let outcomes = send_qa_turns_until_gate(&runtime, turns).await;
+    runtime.shutdown().await.expect("runtime shutdown");
+
+    recorder.flush().await.expect("flush recorded QA trace");
+    assert_fixture_does_not_contain_live_secret_values(&fixture_path, &live_secret_values);
+    assert_eq!(
+        outcomes.len(),
+        turns.len(),
+        "recorded QA scenario {fixture_name:?} paused before all turns completed; \
+         trace was flushed to {} for inspection",
+        fixture_path.display()
+    );
+    for (index, outcome) in outcomes.into_iter().enumerate() {
+        match outcome {
+            RebornTurnDriveOutcome::Terminal(reply) if reply.is_successful_final_reply() => {}
+            RebornTurnDriveOutcome::Terminal(reply) => {
+                panic!(
+                    "recorded QA scenario {fixture_name:?} turn {index} ended with non-success \
+                     status {:?}; trace was flushed to {} for inspection",
+                    reply.status,
+                    fixture_path.display()
+                );
+            }
+            RebornTurnDriveOutcome::BlockedOnGate {
+                status, gate_ref, ..
+            } => {
+                panic!(
+                    "recorded QA scenario {fixture_name:?} turn {index} paused at gate status \
+                     {:?} ({}); trace was flushed to {} for inspection",
+                    status,
+                    gate_ref.as_str(),
+                    fixture_path.display()
+                );
+            }
+        }
+    }
+
+    println!(
+        "recorded QA scenario trace {} ({} turn(s))",
+        fixture_path.display(),
+        turns.len()
+    );
     tokio::time::sleep(Duration::from_secs(2)).await;
 }
 
