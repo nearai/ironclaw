@@ -946,11 +946,13 @@ impl RootFilesystem for LibSqlRootFilesystem {
             return Ok(Vec::new());
         }
         let conn = self.connect().await?;
-        let from_raw = i64::try_from(from.get()).map_err(|_| FilesystemError::Backend {
+        let from_raw = i64::try_from(from.get()).map_err(|error| FilesystemError::Backend {
             path: path.clone(),
             operation: FilesystemOperation::Tail,
-            reason: "tail cursor exceeds i64".to_string(),
+            reason: format!("tail cursor exceeds i64: {error}"),
         })?;
+        // silent-ok: callers can request an unbounded tail; saturating keeps the
+        // SQL LIMIT representable without changing the public trait contract.
         let limit_raw = i64::try_from(max_records).unwrap_or(i64::MAX);
         let mut rows = conn
             .query(

@@ -43,6 +43,12 @@ fn profile_parse_accepts_kebab_and_snake_case() {
         RebornCompositionProfile::HostedSingleTenant
     );
     assert_eq!(
+        "hosted-single-tenant"
+            .parse::<RebornCompositionProfile>()
+            .unwrap(),
+        RebornCompositionProfile::HostedSingleTenant
+    );
+    assert_eq!(
         "migration-dry-run"
             .parse::<RebornCompositionProfile>()
             .unwrap(),

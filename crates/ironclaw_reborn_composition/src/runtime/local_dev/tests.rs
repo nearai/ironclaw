@@ -137,16 +137,19 @@ mod tests {
     ) -> HostVisibleCapabilityRequest {
         let policy = crate::local_dev_capability_policy::local_dev_capability_policy()
             .expect("policy parses");
+        let empty_mounts = MountView::default();
 
         local_dev_visible_capability_request(
             run_context,
             fallback_user_id,
-            MountView::default(),
-            MountView::default(),
-            MountView::default(),
-            MountView::default(),
-            &policy,
-            &LocalDevExtensionSurface::default(),
+            LocalDevVisibleCapabilityInputs {
+                workspace_mounts: &empty_mounts,
+                skill_mounts: &empty_mounts,
+                memory_mounts: &empty_mounts,
+                system_extensions_lifecycle_mounts: &empty_mounts,
+                policy: &policy,
+                extension_surface: &LocalDevExtensionSurface::default(),
+            },
         )
         .expect("visible request")
     }

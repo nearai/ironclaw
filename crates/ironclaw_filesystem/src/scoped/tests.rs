@@ -476,7 +476,7 @@ async fn scoped_txn_allows_put_inside_mount_prefix() {
 }
 
 #[tokio::test]
-async fn scoped_txn_per_op_acl_blocks_write_without_write_permission() {
+async fn scoped_txn_per_op_acl_blocks_delete_without_delete_permission() {
     let scoped = scoped_txn_stub(MountPermissions::read_write());
     let mut txn = scoped
         .begin(&test_scope(), &ScopedPath::new("/workspace").unwrap())

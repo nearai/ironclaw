@@ -5,10 +5,10 @@ use ironclaw_host_api::VirtualPath;
 
 use crate::backend::EventRecord;
 use crate::db::{
-    db_error, direct_children, directory_append_error, directory_write_error, error_chain_reason,
-    escape_like_literal, escape_like_with_trailing_wildcard, infrastructure_error,
-    infrastructure_pg_error, is_not_found, not_found, page_offset_to_i64, record_version_from_i64,
-    record_version_to_i64, sql_index_name, system_time_from_unix_seconds, virtual_path_prefixes,
+    db_error, direct_children, directory_append_error, directory_write_error, escape_like_literal,
+    escape_like_with_trailing_wildcard, infrastructure_pg_error, is_not_found, not_found,
+    page_offset_to_i64, record_version_from_i64, record_version_to_i64, sql_index_name,
+    system_time_from_unix_seconds, virtual_path_prefixes,
 };
 use crate::vector::{cosine_similarity, decode_embedding_blob};
 use crate::{
@@ -39,7 +39,14 @@ impl PostgresRootFilesystem {
 
     async fn client(&self) -> Result<deadpool_postgres::Object, FilesystemError> {
         self.pool.get().await.map_err(|error| {
-            infrastructure_error(FilesystemOperation::Connect, error_chain_reason(&error))
+            tracing::debug!(
+                %error,
+                "postgres root filesystem pool checkout failed"
+            );
+            FilesystemError::BackendInfrastructure {
+                operation: FilesystemOperation::Connect,
+                reason: "postgres backend infrastructure error".to_string(),
+            }
         })
     }
 }
@@ -1248,4 +1255,6 @@ const POSTGRES_ROOT_FILESYSTEM_SCHEMA: &str = concat!(
     include_str!("../../../migrations/V29__root_filesystem_index_specs.sql"),
     "\n",
     include_str!("../../../migrations/V30__root_filesystem_events.sql"),
+    "\n",
+    include_str!("../../../migrations/V31__root_filesystem_path_collation.sql"),
 );

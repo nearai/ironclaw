@@ -671,8 +671,11 @@ pub(crate) fn local_runtime_storage_root(
     profile: RebornProfile,
 ) -> PathBuf {
     match profile {
+        RebornProfile::LocalDev
+        | RebornProfile::LocalDevYolo
+        | RebornProfile::Production
+        | RebornProfile::MigrationDryRun => config.home().path().join("local-dev"),
         RebornProfile::HostedSingleTenant => config.home().path().join("hosted-single-tenant"),
-        _ => config.home().path().join("local-dev"),
     }
 }
 

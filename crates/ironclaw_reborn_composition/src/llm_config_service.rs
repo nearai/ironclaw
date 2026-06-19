@@ -176,7 +176,7 @@ impl RebornLlmConfigService {
         let list = self.admin_list_async().await.map_err(map_admin_error)?;
         let builtin_registry = ironclaw_llm::ProviderRegistry::try_load_from_path(None)
             .map_err(|_| LlmConfigServiceError::Unavailable)?;
-        let stored_key_provider_ids = self.stored_key_provider_ids_for_snapshot().await;
+        let stored_key_provider_ids = self.stored_key_provider_ids_for_snapshot().await?;
 
         let mut providers = Vec::with_capacity(list.providers.len());
         let mut active = None;
@@ -223,15 +223,17 @@ impl RebornLlmConfigService {
         Ok(LlmConfigSnapshot { providers, active })
     }
 
-    async fn stored_key_provider_ids_for_snapshot(&self) -> HashSet<String> {
+    async fn stored_key_provider_ids_for_snapshot(
+        &self,
+    ) -> Result<HashSet<String>, LlmConfigServiceError> {
         match self.keys.stored_provider_ids().await {
-            Ok(stored_key_provider_ids) => stored_key_provider_ids,
+            Ok(stored_key_provider_ids) => Ok(stored_key_provider_ids),
             Err(error) => {
-                tracing::warn!(
+                tracing::error!(
                     error = %error,
-                    "LLM provider snapshot could not list stored key metadata; reporting stored api_key_set=false"
+                    "LLM provider snapshot could not list stored key metadata"
                 );
-                HashSet::new()
+                Err(LlmConfigServiceError::Unavailable)
             }
         }
     }
@@ -1696,26 +1698,21 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn snapshot_survives_stored_key_metadata_unavailable() {
+    async fn snapshot_fails_when_stored_key_metadata_unavailable() {
         let temp = tempfile::tempdir().expect("tempdir");
         let reborn_home = temp.path().join("reborn-home");
         let boot = boot_for_home(&reborn_home);
         let keys = LlmKeyStore::new(Arc::new(MetadataUnavailableSecretStore::new()));
         let service = RebornLlmConfigService::new(boot, keys);
 
-        let snapshot = service
-            .upsert_provider(caller(), upsert_request("acme", Some("sk-acme"), false))
+        let error = service
+            .snapshot(caller())
             .await
-            .expect("provider snapshot must remain available");
-        let acme = snapshot
-            .providers
-            .iter()
-            .find(|provider| provider.id == "acme")
-            .expect("custom provider in snapshot");
+            .expect_err("stored-key metadata failures must fail loud");
 
         assert!(
-            !acme.api_key_set,
-            "unavailable stored-key metadata must degrade to api_key_set=false"
+            matches!(error, LlmConfigServiceError::Unavailable),
+            "expected unavailable error, got {error:?}"
         );
     }
 

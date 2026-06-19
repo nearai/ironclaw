@@ -252,9 +252,18 @@ fn enforce_runtime_cutover_gate(
         RebornCompositionProfile::Disabled => Err(RebornRuntimeError::InvalidArgument {
             reason: "profile=disabled must not start live Reborn runtime traffic".to_string(),
         }),
-        RebornCompositionProfile::LocalDev
-        | RebornCompositionProfile::LocalDevYolo
-        | RebornCompositionProfile::HostedSingleTenant => Ok(()),
+        RebornCompositionProfile::HostedSingleTenant => {
+            if readiness.state != RebornReadinessState::HostedSingleTenantValidated {
+                return Err(RebornRuntimeError::InvalidArgument {
+                    reason: format!(
+                        "profile=hosted-single-tenant cannot start Reborn runtime before hosted single-tenant readiness is validated; state={:?}",
+                        readiness.state
+                    ),
+                });
+            }
+            Ok(())
+        }
+        RebornCompositionProfile::LocalDev | RebornCompositionProfile::LocalDevYolo => Ok(()),
     }
 }
 
@@ -656,7 +665,13 @@ impl LocalDevApprovalTurnRunLocator {
             self.turn_state
                 .persistence_snapshot()
                 .await
-                .map_err(|_| approval_turn_locator_unavailable())
+                .map_err(|error| {
+                    tracing::debug!(
+                        %error,
+                        "approval turn-run locator could not read turn persistence snapshot"
+                    );
+                    approval_turn_locator_unavailable()
+                })
         }
         #[cfg(not(any(feature = "libsql", feature = "postgres")))]
         {
@@ -3581,6 +3596,44 @@ mod tests {
 
         super::enforce_runtime_cutover_gate(RebornCompositionProfile::LocalDev, &readiness)
             .expect("local-dev runtime is not production traffic");
+    }
+
+    #[test]
+    fn runtime_cutover_gate_allows_hosted_single_tenant_readiness() {
+        let readiness = readiness_for_runtime_gate(
+            RebornCompositionProfile::HostedSingleTenant,
+            RebornReadinessState::HostedSingleTenantValidated,
+            Vec::new(),
+        );
+
+        super::enforce_runtime_cutover_gate(
+            RebornCompositionProfile::HostedSingleTenant,
+            &readiness,
+        )
+        .expect("validated hosted single-tenant runtime can start");
+    }
+
+    #[test]
+    fn runtime_cutover_gate_rejects_local_dev_readiness_for_hosted_single_tenant() {
+        let readiness = readiness_for_runtime_gate(
+            RebornCompositionProfile::HostedSingleTenant,
+            RebornReadinessState::DevOnly,
+            vec![crate::RebornReadinessDiagnostic::local_dev()],
+        );
+
+        let error = super::enforce_runtime_cutover_gate(
+            RebornCompositionProfile::HostedSingleTenant,
+            &readiness,
+        )
+        .expect_err("hosted single-tenant runtime requires hosted readiness");
+        let RebornRuntimeError::InvalidArgument { reason } = error else {
+            panic!("expected invalid argument, got {error:?}");
+        };
+        assert!(reason.contains("hosted-single-tenant"), "reason: {reason}");
+        assert!(
+            reason.contains("HostedSingleTenantValidated"),
+            "reason: {reason}"
+        );
     }
     use ironclaw_authorization::CapabilityLeaseStore;
     use ironclaw_events::{EventStreamKey, ReadScope};

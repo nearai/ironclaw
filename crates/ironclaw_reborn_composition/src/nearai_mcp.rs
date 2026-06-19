@@ -217,7 +217,7 @@ pub(crate) async fn bootstrap_local_dev_nearai_mcp(
             return Ok(());
         }
         other => {
-            tracing::warn!(
+            tracing::debug!(
                 phase = ?other,
                 "NEAR AI MCP credentials are present, but the extension is not in an auto-activatable phase"
             );
@@ -238,7 +238,7 @@ pub(crate) async fn bootstrap_local_dev_nearai_mcp(
         ExtensionId::new("nearai").map_err(|error| RebornBuildError::InvalidConfig {
             reason: format!("NEAR AI MCP requester extension id is invalid: {error}"),
         })?;
-    let existing_account = product_auth
+    let existing_accounts = product_auth
         .credential_account_record_source()
         .accounts_for_owner(&scope)
         .await
@@ -247,50 +247,47 @@ pub(crate) async fn bootstrap_local_dev_nearai_mcp(
         })?
         .into_iter()
         .filter(|account| account.provider == provider)
-        .max_by_key(|account| (account.updated_at, account.created_at, account.id));
+        .collect::<Vec<_>>();
 
-    if existing_account.as_ref().is_some_and(|account| {
-        nearai_mcp_bootstrap_account_is_usable(account, &requester_extension)
-    }) {
-        tracing::debug!("NEAR AI MCP credential already exists; skipping boot-time token update");
-    } else {
-        let existing_account =
-            existing_account
-                .as_ref()
-                .map(|account| CredentialAccountUpdateBinding {
-                    account_id: account.id,
-                    ownership: account.ownership,
-                    owner_extension: account.owner_extension.clone(),
-                    granted_extensions: account.granted_extensions.clone(),
+    match nearai_mcp_bootstrap_existing_credential_decision(
+        &existing_accounts,
+        &requester_extension,
+    ) {
+        NearAiMcpBootstrapExistingCredentialDecision::ReuseUsable => {
+            tracing::debug!(
+                "NEAR AI MCP credential already exists; skipping boot-time token update"
+            );
+        }
+        NearAiMcpBootstrapExistingCredentialDecision::Submit { existing_account } => {
+            let credential_submit =
+                ProductAuthExtensionCredentialSetup::new(Arc::clone(product_auth))
+                    .submit_manual_token(ExtensionCredentialSubmitRequest {
+                        scope,
+                        provider,
+                        label: "NEAR AI API key".to_string(),
+                        requester_extension,
+                        existing_account,
+                        secret: config.api_key,
+                    })
+                    .await;
+            if let Err(error) = credential_submit {
+                if is_nearai_mcp_disabled_or_removed(&error) {
+                    tracing::debug!(
+                        "NEAR AI MCP credentials are present, but the extension participant is disabled or removed; preserving explicit operator state"
+                    );
+                    return Ok(());
+                }
+                if is_nearai_mcp_product_auth_temporarily_unavailable(&error) {
+                    tracing::debug!(
+                        error = ?error,
+                        "NEAR AI MCP credential bootstrap is temporarily unavailable; continuing without auto-activating the extension"
+                    );
+                    return Ok(());
+                }
+                return Err(RebornBuildError::InvalidConfig {
+                    reason: format!("NEAR AI MCP product-auth credential submit failed: {error:?}"),
                 });
-
-        let credential_submit = ProductAuthExtensionCredentialSetup::new(Arc::clone(product_auth))
-            .submit_manual_token(ExtensionCredentialSubmitRequest {
-                scope,
-                provider,
-                label: "NEAR AI API key".to_string(),
-                requester_extension,
-                existing_account,
-                secret: config.api_key,
-            })
-            .await;
-        if let Err(error) = credential_submit {
-            if is_nearai_mcp_disabled_or_removed(&error) {
-                tracing::debug!(
-                    "NEAR AI MCP credentials are present, but the extension participant is disabled or removed; preserving explicit operator state"
-                );
-                return Ok(());
             }
-            if is_nearai_mcp_product_auth_temporarily_unavailable(&error) {
-                tracing::warn!(
-                    error = ?error,
-                    "NEAR AI MCP credential bootstrap is temporarily unavailable; continuing without auto-activating the extension"
-                );
-                return Ok(());
-            }
-            return Err(RebornBuildError::InvalidConfig {
-                reason: format!("NEAR AI MCP product-auth credential submit failed: {error:?}"),
-            });
         }
     }
 
@@ -332,6 +329,37 @@ fn nearai_mcp_bootstrap_account_is_usable(
     account.status == CredentialAccountStatus::Configured
         && account.access_secret.is_some()
         && account.is_authorized_for_requester(Some(requester_extension))
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum NearAiMcpBootstrapExistingCredentialDecision {
+    ReuseUsable,
+    Submit {
+        existing_account: Option<CredentialAccountUpdateBinding>,
+    },
+}
+
+fn nearai_mcp_bootstrap_existing_credential_decision(
+    existing_accounts: &[CredentialAccount],
+    requester_extension: &ExtensionId,
+) -> NearAiMcpBootstrapExistingCredentialDecision {
+    if existing_accounts
+        .iter()
+        .any(|account| nearai_mcp_bootstrap_account_is_usable(account, requester_extension))
+    {
+        return NearAiMcpBootstrapExistingCredentialDecision::ReuseUsable;
+    }
+
+    let existing_account = existing_accounts
+        .iter()
+        .max_by_key(|account| (account.updated_at, account.created_at, account.id))
+        .map(|account| CredentialAccountUpdateBinding {
+            account_id: account.id,
+            ownership: account.ownership,
+            owner_extension: account.owner_extension.clone(),
+            granted_extensions: account.granted_extensions.clone(),
+        });
+    NearAiMcpBootstrapExistingCredentialDecision::Submit { existing_account }
 }
 
 fn is_nearai_mcp_disabled_or_removed(error: &RebornServicesError) -> bool {
@@ -383,6 +411,92 @@ mod tests {
             ironclaw_common::env_helpers::remove_runtime_env("NEARAI_BASE_URL");
             ironclaw_common::env_helpers::remove_runtime_env("NEARAI_API_KEY");
         }
+    }
+
+    fn account_for_bootstrap_decision(
+        requester_extension: &ExtensionId,
+        status: CredentialAccountStatus,
+        access_secret: Option<&str>,
+        updated_at_secs: i64,
+    ) -> CredentialAccount {
+        let user_id = UserId::new("nearai-account-user").expect("user");
+        CredentialAccount {
+            id: ironclaw_auth::CredentialAccountId::new(),
+            scope: AuthProductScope::new(
+                ResourceScope::local_default(user_id, InvocationId::new()).expect("scope"),
+                AuthSurface::Api,
+            ),
+            provider: AuthProviderId::new("nearai").expect("provider"),
+            label: ironclaw_auth::CredentialAccountLabel::new("NEAR AI").expect("label"),
+            status,
+            ownership: ironclaw_auth::CredentialOwnership::ExtensionOwned,
+            owner_extension: Some(requester_extension.clone()),
+            granted_extensions: Vec::new(),
+            access_secret: access_secret
+                .map(|handle| ironclaw_host_api::SecretHandle::new(handle).expect("secret handle")),
+            refresh_secret: None,
+            scopes: Vec::new(),
+            created_at: chrono::DateTime::from_timestamp(updated_at_secs, 0).expect("timestamp"),
+            updated_at: chrono::DateTime::from_timestamp(updated_at_secs, 0).expect("timestamp"),
+        }
+    }
+
+    #[test]
+    fn bootstrap_existing_credential_decision_reuses_any_usable_account() {
+        let requester_extension = ExtensionId::new("nearai").expect("extension");
+        let older_usable = account_for_bootstrap_decision(
+            &requester_extension,
+            CredentialAccountStatus::Configured,
+            Some("nearai-access-secret"),
+            10,
+        );
+        let newer_unusable = account_for_bootstrap_decision(
+            &requester_extension,
+            CredentialAccountStatus::PendingSetup,
+            None,
+            20,
+        );
+
+        let decision = nearai_mcp_bootstrap_existing_credential_decision(
+            &[newer_unusable, older_usable],
+            &requester_extension,
+        );
+
+        assert_eq!(
+            decision,
+            NearAiMcpBootstrapExistingCredentialDecision::ReuseUsable
+        );
+    }
+
+    #[test]
+    fn bootstrap_existing_credential_decision_updates_newest_when_none_are_usable() {
+        let requester_extension = ExtensionId::new("nearai").expect("extension");
+        let older_unusable = account_for_bootstrap_decision(
+            &requester_extension,
+            CredentialAccountStatus::PendingSetup,
+            None,
+            10,
+        );
+        let newer_unusable = account_for_bootstrap_decision(
+            &requester_extension,
+            CredentialAccountStatus::PendingSetup,
+            None,
+            20,
+        );
+        let expected_account_id = newer_unusable.id;
+
+        let decision = nearai_mcp_bootstrap_existing_credential_decision(
+            &[newer_unusable, older_unusable],
+            &requester_extension,
+        );
+
+        let NearAiMcpBootstrapExistingCredentialDecision::Submit {
+            existing_account: Some(existing_account),
+        } = decision
+        else {
+            panic!("expected newest account update binding, got {decision:?}");
+        };
+        assert_eq!(existing_account.account_id, expected_account_id);
     }
 
     #[test]

@@ -728,6 +728,15 @@ async fn build_local_dev(input: RebornBuildInput) -> Result<RebornServices, Rebo
     } = input;
     let (root, workspace_root, host_home_root, storage_backend_input, secret_master_key) =
         match storage {
+            RebornStorageInput::LocalDev { .. }
+                if profile == RebornCompositionProfile::HostedSingleTenant =>
+            {
+                return Err(RebornBuildError::InvalidConfig {
+                    reason:
+                        "profile=hosted-single-tenant requires local-runtime postgres storage input"
+                            .to_string(),
+                });
+            }
             RebornStorageInput::LocalDev {
                 root,
                 workspace_root,
@@ -1946,7 +1955,7 @@ async fn build_default_local_dev_database_roots(
     #[cfg(not(feature = "libsql"))]
     {
         let _ = root;
-        tracing::warn!(
+        tracing::debug!(
             "local-dev: control-plane filesystem roots are backed by InMemoryBackend; runtime state is ephemeral and will be lost on restart"
         );
         mount_local_dev_database_roots(composite, Arc::new(InMemoryBackend::new()))?;
@@ -3892,6 +3901,30 @@ mod tests {
                 .is_some()
         );
         assert_eq!(services.readiness.state, RebornReadinessState::DevOnly);
+    }
+
+    #[tokio::test]
+    async fn hosted_single_tenant_rejects_local_dev_storage_input() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut input = RebornBuildInput::local_dev(
+            "hosted-single-tenant-local-storage-owner",
+            dir.path().join("local-dev"),
+        );
+        input.profile = RebornCompositionProfile::HostedSingleTenant;
+
+        let error = match build_reborn_services(input).await {
+            Ok(_) => {
+                panic!("hosted single-tenant must use durable local-runtime postgres storage")
+            }
+            Err(error) => error,
+        };
+        let RebornBuildError::InvalidConfig { reason } = error else {
+            panic!("expected invalid config, got {error:?}");
+        };
+        assert!(
+            reason.contains("local-runtime postgres storage input"),
+            "reason: {reason}"
+        );
     }
 
     #[tokio::test]

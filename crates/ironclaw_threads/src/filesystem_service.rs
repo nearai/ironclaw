@@ -344,6 +344,7 @@ where
             .list_thread_messages(scope, thread_id)
             .await?
             .into_iter()
+            .rev()
             .find(|message| assistant_message_matches_run(message, turn_run_id, required_status));
         if let Some(message) = found.as_ref() {
             self.write_message_lookup_indexes(scope, thread_id, message)

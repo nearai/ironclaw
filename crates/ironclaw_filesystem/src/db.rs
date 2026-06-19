@@ -152,27 +152,17 @@ pub(crate) fn infrastructure_error(
     }
 }
 
-#[cfg(any(feature = "postgres", feature = "libsql"))]
-pub(crate) fn error_chain_reason(error: &(dyn std::error::Error + 'static)) -> String {
-    let mut reason = error.to_string();
-    let mut current = error.source();
-    while let Some(source) = current {
-        let detail = source.to_string();
-        if !detail.is_empty() && !reason.contains(&detail) {
-            reason.push_str(": ");
-            reason.push_str(&detail);
-        }
-        current = source.source();
-    }
-    reason
-}
-
 #[cfg(feature = "postgres")]
 pub(crate) fn infrastructure_pg_error(
     operation: FilesystemOperation,
     error: tokio_postgres::Error,
 ) -> FilesystemError {
-    infrastructure_error(operation, error_chain_reason(&error))
+    tracing::debug!(
+        %operation,
+        error = %error,
+        "postgres root filesystem infrastructure error"
+    );
+    infrastructure_error(operation, "postgres backend infrastructure error")
 }
 
 #[cfg(feature = "libsql")]
