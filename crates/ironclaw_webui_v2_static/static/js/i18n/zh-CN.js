@@ -126,6 +126,8 @@ registerPack("zh-CN", {
   "approval.approveAndAlways": "批准并始终允许",
   "approval.alwaysAllowToolLabel": "始终允许 {tool} （不再询问）",
   "approval.thisTool": "此工具",
+  "approval.viewFullCommand": "查看完整命令",
+  "approval.showCommandPreview": "显示预览",
   // Chat — tool activity
   "tool.tabDetails": "详情",
   "tool.tabParameters": "参数",
@@ -161,6 +163,7 @@ registerPack("zh-CN", {
   "authGate.oauthWaiting": "等待授权完成… 如果您已批准访问，请关闭此弹出标签页。",
   "authGate.expiresAt": "过期时间",
   "authGate.oauthProviderFallback": "该提供商",
+  "authGate.serviceUnavailable": "服务不可用",
   "authGate.pillAuthorize": "授权",
   "authGate.pillEnterToken": "Enter token",
   "authGate.unsupportedChallenge": "请打开设置完成此身份验证步骤。",

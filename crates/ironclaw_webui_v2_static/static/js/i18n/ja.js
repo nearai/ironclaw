@@ -126,6 +126,8 @@ registerPack("ja", {
   "approval.approveAndAlways": "承認して常に許可",
   "approval.alwaysAllowToolLabel": "確認せずに {tool} を常に許可",
   "approval.thisTool": "このツール",
+  "approval.viewFullCommand": "コマンド全体を表示",
+  "approval.showCommandPreview": "プレビューを表示",
   // Chat — tool activity
   "tool.tabDetails": "詳細",
   "tool.tabParameters": "パラメーター",
@@ -161,6 +163,7 @@ registerPack("ja", {
   "authGate.oauthWaiting": "認証が完了するまで待機しています... アクセスを承認したら、ポップアップ タブを閉じることができます。",
   "authGate.expiresAt": "有効期限",
   "authGate.oauthProviderFallback": "プロバイダー",
+  "authGate.serviceUnavailable": "サービスを利用できません",
   "authGate.pillAuthorize": "承認",
   "authGate.pillEnterToken": "トークンを入力",
   "authGate.unsupportedChallenge": "設定を開いてこの認証手順を完了します。",

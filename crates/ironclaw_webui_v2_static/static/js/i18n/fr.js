@@ -126,6 +126,8 @@ registerPack("fr", {
   "approval.approveAndAlways": "Approuver et toujours autoriser",
   "approval.alwaysAllowToolLabel": "Toujours autoriser {tool} sans demander",
   "approval.thisTool": "cet outil",
+  "approval.viewFullCommand": "Voir la commande complete",
+  "approval.showCommandPreview": "Afficher l'aperçu",
   // Chat — tool activity
   "tool.tabDetails": "Détails",
   "tool.tabParameters": "Paramètres",
@@ -161,6 +163,7 @@ registerPack("fr", {
   "authGate.oauthWaiting": "En attente de la fin de l'autorisation… Vous pouvez fermer l'onglet contextuel une fois que vous avez approuvé l'accès.",
   "authGate.expiresAt": "Expire",
   "authGate.oauthProviderFallback": "le fournisseur",
+  "authGate.serviceUnavailable": "Service indisponible",
   "authGate.pillAuthorize": "Autoriser",
   "authGate.pillEnterToken": "Entrer le jeton",
   "authGate.unsupportedChallenge": "Ouvrir les paramètres pour terminer cette étape d'authentification.",

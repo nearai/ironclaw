@@ -131,6 +131,8 @@ registerPack("en", {
   "approval.approveAndAlways": "Approve & always allow",
   "approval.alwaysAllowToolLabel": "Always allow {tool} without asking",
   "approval.thisTool": "this tool",
+  "approval.viewFullCommand": "View full command",
+  "approval.showCommandPreview": "Show preview",
   // Chat — tool activity
   "tool.tabDetails": "Details",
   "tool.tabParameters": "Parameters",
@@ -166,6 +168,7 @@ registerPack("en", {
   "authGate.oauthWaiting": "Waiting for authorization to complete\u2026 You can close the popup tab once you\u2019ve approved access.",
   "authGate.expiresAt": "Expires",
   "authGate.oauthProviderFallback": "the provider",
+  "authGate.serviceUnavailable": "Service unavailable",
   "authGate.pillAuthorize": "Authorize",
   "authGate.pillEnterToken": "Enter token",
   "authGate.unsupportedChallenge": "Open settings to complete this authentication step.",

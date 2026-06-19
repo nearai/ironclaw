@@ -126,6 +126,8 @@ registerPack("hi", {
   "approval.approveAndAlways": "स्वीकृत करें और हमेशा अनुमति दें",
   "approval.alwaysAllowToolLabel": "बिना पूछे हमेशा {tool} की अनुमति दें",
   "approval.thisTool": "यह टूल",
+  "approval.viewFullCommand": "पूरा कमांड देखें",
+  "approval.showCommandPreview": "पूर्वावलोकन दिखाएँ",
   // Chat — tool activity
   "tool.tabDetails": "विवरण",
   "tool.tabParameters": "पैरामीटर्स",
@@ -161,6 +163,7 @@ registerPack("hi", {
   "authGate.oauthWaiting": "प्राधिकरण पूरा होने की प्रतीक्षा कर रहा है... एक बार पहुंच स्वीकृत हो जाने के बाद आप पॉपअप टैब बंद कर सकते हैं।",
   "authGate.expiresAt": "समाप्त हो रहा है",
   "authGate.oauthProviderFallback": "प्रदाता",
+  "authGate.serviceUnavailable": "सेवा उपलब्ध नहीं है",
   "authGate.pillAuthorize": "अधिकृत करें",
   "authGate.pillEnterToken": "टोकन दर्ज करें",
   "authGate.unsupportedChallenge": "इस प्रमाणीकरण चरण को पूरा करने के लिए सेटिंग्स खोलें।",

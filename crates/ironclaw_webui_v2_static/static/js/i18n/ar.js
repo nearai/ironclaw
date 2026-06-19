@@ -126,6 +126,8 @@ registerPack("ar", {
   "approval.approveAndAlways": "موافقة والسماح دائمًا",
   "approval.alwaysAllowToolLabel": "السماح دائمًا بـ {tool} دون طلب",
   "approval.thisTool": "هذه الأداة",
+  "approval.viewFullCommand": "عرض الأمر الكامل",
+  "approval.showCommandPreview": "إظهار المعاينة",
   // Chat — tool activity
   "tool.tabDetails": "التفاصيل",
   "tool.tabParameters": "المعلمات",
@@ -161,6 +163,7 @@ registerPack("ar", {
   "authGate.oauthWaiting": "في انتظار اكتمال التفويض... يمكنك إغلاق علامة التبويب المنبثقة بمجرد الموافقة على الوصول.",
   "authGate.expiresAt": "انتهاء الصلاحية",
   "authGate.oauthProviderFallback": "الموفر",
+  "authGate.serviceUnavailable": "الخدمة غير متوفرة",
   "authGate.pillAuthorize": "التفويض",
   "authGate.pillEnterToken": "أدخل الرمز المميز",
   "authGate.unsupportedChallenge": "افتح الإعدادات لإكمال خطوة المصادقة هذه.",

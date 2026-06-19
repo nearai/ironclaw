@@ -126,6 +126,8 @@ registerPack("uk", {
   "approval.approveAndAlways": "Затверджувати та завжди дозволяти",
   "approval.alwaysAllowToolLabel": "Завжди дозволяти {tool} без запиту",
   "approval.thisTool": "цей інструмент",
+  "approval.viewFullCommand": "Переглянути повну команду",
+  "approval.showCommandPreview": "Показати попередній перегляд",
   // Chat — tool activity
   "tool.tabDetails": "Деталі",
   "tool.tabParameters": "Параметри",
@@ -161,6 +163,7 @@ registerPack("uk", {
   "authGate.oauthWaiting": "Очікування завершення авторизації… Ви можете закрити спливаючу вкладку, коли схвалите доступ.",
   "authGate.expiresAt": "Термін дії закінчується",
   "authGate.oauthProviderFallback": "постачальник",
+  "authGate.serviceUnavailable": "Сервіс недоступний",
   "authGate.pillAuthorize": "Авторизуватися",
   "authGate.pillEnterToken": "Введіть маркер",
   "authGate.unsupportedChallenge": "Відкрийте налаштування, щоб завершити цей крок автентифікації.",

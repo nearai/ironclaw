@@ -126,6 +126,8 @@ registerPack("ko", {
   "approval.approveAndAlways": "승인 및 항상 허용",
   "approval.alwaysAllowToolLabel": "묻지 않고 항상 {tool} 허용",
   "approval.thisTool": "이 도구",
+  "approval.viewFullCommand": "전체 명령 보기",
+  "approval.showCommandPreview": "미리보기 표시",
   // Chat — tool activity
   "tool.tabDetails": "세부 정보",
   "tool.tabParameters": "매개 변수",
@@ -161,6 +163,7 @@ registerPack("ko", {
   "authGate.oauthWaiting": "승인이 완료되기를 기다리는 중… 액세스를 승인한 후 팝업 탭을 닫을 수 있습니다.",
   "authGate.expiresAt": "만료",
   "authGate.oauthProviderFallback": "공급자",
+  "authGate.serviceUnavailable": "서비스를 사용할 수 없습니다",
   "authGate.pillAuthorize": "승인",
   "authGate.pillEnterToken": "토큰 입력",
   "authGate.unsupportedChallenge": "이 인증 단계를 완료하려면 설정을 엽니다.",

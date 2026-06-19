@@ -126,6 +126,8 @@ registerPack("es", {
   "approval.approveAndAlways": "Aprobar y permitir siempre",
   "approval.alwaysAllowToolLabel": "Permitir siempre {tool} sin preguntar",
   "approval.thisTool": "esta herramienta",
+  "approval.viewFullCommand": "Ver comando completo",
+  "approval.showCommandPreview": "Mostrar vista previa",
   // Chat — tool activity
   "tool.tabDetails": "Detalles",
   "tool.tabParameters": "Parámetros",
@@ -161,6 +163,7 @@ registerPack("es", {
   "authGate.oauthWaiting": "Esperando a que se complete la autorización... Puede cerrar la pestaña emergente una vez que haya aprobado el acceso.",
   "authGate.expiresAt": "Caduca",
   "authGate.oauthProviderFallback": "el proveedor",
+  "authGate.serviceUnavailable": "Servicio no disponible",
   "authGate.pillAuthorize": "Autorizar",
   "authGate.pillEnterToken": "Ingresar token",
   "authGate.unsupportedChallenge": "Abrir configuración para completar este paso de autenticación.",
