@@ -7100,6 +7100,7 @@ mod tests {
                 WebUiCreateThreadRequest {
                     client_action_id: Some("create-webui-stream-thread".to_string()),
                     requested_thread_id: None,
+                    project_id: None,
                 },
             )
             .await
@@ -7784,6 +7785,7 @@ mod tests {
                 WebUiCreateThreadRequest {
                     client_action_id: Some("create-webui-approval-thread".to_string()),
                     requested_thread_id: None,
+                    project_id: None,
                 },
             )
             .await
@@ -7851,6 +7853,7 @@ mod tests {
                 WebUiCreateThreadRequest {
                     client_action_id: Some("create-webui-auth-thread".to_string()),
                     requested_thread_id: None,
+                    project_id: None,
                 },
             )
             .await
@@ -7917,6 +7920,7 @@ mod tests {
                 WebUiCreateThreadRequest {
                     client_action_id: Some("create-webui-audit-thread".to_string()),
                     requested_thread_id: None,
+                    project_id: None,
                 },
             )
             .await
@@ -8142,6 +8146,7 @@ mod tests {
                 WebUiCreateThreadRequest {
                     client_action_id: Some("create-webui-skill-thread".to_string()),
                     requested_thread_id: None,
+                    project_id: None,
                 },
             )
             .await
@@ -8484,6 +8489,7 @@ mod tests {
                 WebUiCreateThreadRequest {
                     client_action_id: Some("create-rejected-busy-thread".to_string()),
                     requested_thread_id: None,
+                    project_id: None,
                 },
             )
             .await
