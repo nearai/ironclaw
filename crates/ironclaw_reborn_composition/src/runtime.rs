@@ -8799,6 +8799,8 @@ mod tests {
             .await
             .expect("runtime builds for liveness test");
 
+        let conversation = runtime.new_conversation().await.expect("conversation");
+
         // Invariant 1: Before shutdown, the atomic stopped flag must be false.
         assert!(
             !runtime
@@ -8807,32 +8809,62 @@ mod tests {
             "scheduler_stopped must be false on a freshly built runtime"
         );
 
-        // Invariant 2: While `scheduler_handle` mutex is held by another task,
-        // `try_lock()` would fail — but `scheduler_stopped` is still false, so
-        // the liveness guard must NOT return WorkerStopped.
+        // Invariant 2: While `scheduler_handle` mutex is held (simulating
+        // shutdown/scheduler contention), the public submit path must NOT
+        // return `WorkerStopped`.
         //
-        // We hold the tokio Mutex in a background task and verify the atomic
-        // flag while lock is held: the guard reads the atomic *first*, so
-        // contention is irrelevant when the flag is false.
+        // `submit_user_turn` uses `try_lock()` (non-blocking) on `scheduler_handle`,
+        // not `lock().await`, so holding the lock here cannot deadlock. Tokio's
+        // Mutex is non-re-entrant: `try_lock()` inside `send_user_message` will
+        // fail (returning `Err`) because the current task already holds the guard.
+        // The guard falls through to "alive" because `scheduler_stopped` is false.
+        //
+        // We allow any error EXCEPT `WorkerStopped` — the turn will likely fail
+        // for other reasons (no active LLM, turn submission error, etc.) but the
+        // liveness guard must not fire.
         {
-            let stopped_flag = Arc::clone(&runtime.scheduler_stopped);
-            let mutex_ref = &runtime.scheduler_handle;
+            // Hold the tokio Mutex for the duration of the submit call.
+            let _guard = runtime.scheduler_handle.lock().await;
 
-            // Hold the lock briefly.
-            let _guard = mutex_ref.lock().await;
-
-            // While the lock is held, the atomic flag must still be false.
+            let result = runtime
+                .send_user_message(&conversation, "liveness-probe")
+                .await;
             assert!(
-                !stopped_flag.load(std::sync::atomic::Ordering::Acquire),
-                "scheduler_stopped must remain false while mutex is merely contended"
+                !matches!(result, Err(super::RebornRuntimeError::WorkerStopped)),
+                "send_user_message must NOT return WorkerStopped while scheduler_handle is merely \
+                 contended (scheduler_stopped=false); got: {result:?}"
             );
-        } // lock released here
+        } // guard released here — scheduler_handle is free again
 
-        // Invariant 3: After graceful shutdown, the atomic flag must be true.
+        // Invariant 3: After the worker is stopped (flag = true), the public
+        // submit path MUST return `WorkerStopped`.
+        //
+        // We use `stop_turn_runner_worker_for_manual_state_test` instead of
+        // `shutdown()` because `shutdown()` consumes `self`, which would prevent
+        // us from calling `send_user_message` afterward to exercise the guard.
+        stop_turn_runner_worker_for_manual_state_test(&runtime).await;
+
+        assert!(
+            runtime
+                .scheduler_stopped
+                .load(std::sync::atomic::Ordering::Acquire),
+            "scheduler_stopped must be true after stop helper"
+        );
+
+        let result_after_stop = runtime
+            .send_user_message(&conversation, "post-stop-probe")
+            .await;
+        assert!(
+            matches!(
+                result_after_stop,
+                Err(super::RebornRuntimeError::WorkerStopped)
+            ),
+            "send_user_message must return WorkerStopped after scheduler is stopped; \
+             got: {result_after_stop:?}"
+        );
+
+        // shutdown() handles the already-taken scheduler handle gracefully.
         runtime.shutdown().await.expect("runtime shutdown");
-        // NOTE: `runtime` is consumed by `shutdown()`, so we can't access it here.
-        // The invariant is validated indirectly: `stop_turn_runner_worker_for_manual_state_test`
-        // and `shutdown()` both set the flag — covered by the test below.
     }
 
     /// Companion test: `stop_turn_runner_worker_for_manual_state_test` (the test-only
