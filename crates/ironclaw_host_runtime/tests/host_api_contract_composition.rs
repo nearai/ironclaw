@@ -5,6 +5,7 @@ use ironclaw_filesystem::LocalFilesystem;
 use ironclaw_host_api::{
     CapabilityId, ExtensionId, HOST_RUNTIME_HTTP_EGRESS_PORT_ID, HostPath, HostPortId, VirtualPath,
 };
+use ironclaw_host_ingress_registry::HOST_INGRESS_HOST_API_ID;
 use ironclaw_host_runtime::discover_extensions_with_default_host_api_contracts;
 use ironclaw_product_adapter_registry::PRODUCT_ADAPTER_HOST_API_ID;
 use tempfile::tempdir;
@@ -69,6 +70,31 @@ async fn default_host_api_contracts_discover_product_adapter_manifest() {
         "product_adapter.inbound"
     );
     assert!(package.capabilities.is_empty());
+}
+
+#[tokio::test]
+async fn default_host_api_contracts_discover_host_ingress_manifest() {
+    let (_storage, fs) = mounted_extension_fs("slack-v2", HOST_INGRESS_MANIFEST);
+
+    let registry = discover_extensions_with_default_host_api_contracts(
+        &fs,
+        &VirtualPath::new("/system/extensions").unwrap(),
+    )
+    .await
+    .unwrap();
+
+    let package = registry
+        .get_extension(&ExtensionId::new("slack-v2").unwrap())
+        .unwrap();
+    assert_eq!(package.manifest.host_apis.len(), 1);
+    assert_eq!(
+        package.manifest.host_apis[0].id.as_str(),
+        HOST_INGRESS_HOST_API_ID
+    );
+    assert_eq!(
+        package.manifest.host_apis[0].section.as_str(),
+        "host_ingress.events"
+    );
 }
 
 #[tokio::test]
@@ -170,4 +196,37 @@ handle = "telegram_bot_token"
 [[product_adapter.inbound.egress]]
 host = "api.telegram.org"
 credential_handle = "telegram_bot_token"
+"#;
+
+const HOST_INGRESS_MANIFEST: &str = r#"schema_version = "reborn.extension_manifest.v2"
+id = "slack-v2"
+name = "Slack"
+version = "0.1.0"
+description = "Slack product adapter"
+trust = "third_party"
+
+[runtime]
+kind = "wasm"
+module = "adapters/slack-v2.wasm"
+
+[[host_api]]
+id = "ironclaw.host_ingress/v1"
+section = "host_ingress.events"
+
+[host_ingress.events]
+route_id = "slack.events"
+method = "post"
+path = "/webhooks/slack/events"
+policy_profile = "slack_events"
+ack = "immediate"
+drain = "drain_before_runtime_shutdown"
+
+[host_ingress.events.target]
+type = "product_adapter_inbound"
+capability_id = "slack.events"
+product_adapter_section = "product_adapter.inbound"
+
+[host_ingress.events.auth]
+scheme = "slack_v0_hmac"
+credential_handles = ["slack_signing_secret"]
 "#;

@@ -13,6 +13,10 @@ service = "slack_v2_host_beta"
 id = "ironclaw.product_adapter/v1"
 section = "product_adapter.inbound"
 
+[[host_api]]
+id = "ironclaw.host_ingress/v1"
+section = "host_ingress.events"
+
 [product_adapter.inbound]
 surface_kind = "external_channel"
 
@@ -35,3 +39,20 @@ handle = "slack_bot_token"
 [[product_adapter.inbound.egress]]
 host = "slack.com"
 credential_handle = "slack_bot_token"
+
+[host_ingress.events]
+route_id = "slack.events"
+method = "post"
+path = "/webhooks/slack/events"
+policy_profile = "slack_events"
+ack = "immediate"
+drain = "drain_before_runtime_shutdown"
+
+[host_ingress.events.target]
+type = "product_adapter_inbound"
+capability_id = "slack.events"
+product_adapter_section = "product_adapter.inbound"
+
+[host_ingress.events.auth]
+scheme = "slack_v0_hmac"
+credential_handles = ["slack_signing_secret"]

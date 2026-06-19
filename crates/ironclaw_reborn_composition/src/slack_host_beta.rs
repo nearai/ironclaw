@@ -10,10 +10,17 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use ironclaw_conversations::InMemoryConversationServices;
-use ironclaw_host_api::ingress::IngressCredentialHandle;
-use ironclaw_host_api::{
-    AgentId, InvocationId, ProjectId, ResourceScope, SecretHandle, TenantId, UserId,
+use ironclaw_extensions::{
+    ExtensionActivationState, ExtensionCredentialBinding, ExtensionCredentialHandle,
+    ExtensionInstallation, ExtensionInstallationId,
 };
+use ironclaw_host_api::ingress::{
+    HostIngressRouteDeclaration, HostIngressTarget, IngressCredentialHandle,
+};
+use ironclaw_host_api::{
+    AgentId, ExtensionId, InvocationId, ProjectId, ResourceScope, SecretHandle, TenantId, UserId,
+};
+use ironclaw_host_ingress_registry::{SLACK_EVENTS_ROUTE_ID, list_enabled_host_ingress_entries};
 use ironclaw_outbound::{DeliveredGateRouteStore, OutboundStateStore, TriggeredRunDeliveryStore};
 use ironclaw_product_adapters::{
     AdapterInstallationId, DeclaredEgressHost, DeclaredEgressTarget, DeliveryStatus,
@@ -22,9 +29,10 @@ use ironclaw_product_adapters::{
 };
 use ironclaw_product_workflow::{
     ConversationBindingService, DefaultInboundTurnService, DefaultProductWorkflow,
-    ProductActorUserResolutionRequest, ProductActorUserResolver, ProductConversationBindingService,
-    ProductConversationRouteKey, ProductConversationSubjectRouteResolver, ProductInstallationKey,
-    ProductInstallationScope, ProductWorkflowError, ResolveBindingRequest, ResolvedBinding,
+    LifecyclePackageKind, LifecyclePackageRef, ProductActorUserResolutionRequest,
+    ProductActorUserResolver, ProductConversationBindingService, ProductConversationRouteKey,
+    ProductConversationSubjectRouteResolver, ProductInstallationKey, ProductInstallationScope,
+    ProductWorkflowError, ResolveBindingRequest, ResolvedBinding,
     StaticProductInstallationResolver,
 };
 use ironclaw_product_workflow_storage::RebornFilesystemIdempotencyLedger;
@@ -54,7 +62,13 @@ use crate::slack_delivery::{
     SlackFinalReplyDeliveryObserver, SlackFinalReplyDeliveryServices,
     SlackFinalReplyDeliverySettings, TriggeredRunDeliveryDriver,
 };
-use crate::slack_egress::{SlackProtocolHttpEgress, StaticSlackEgressCredentialProvider};
+use crate::slack_egress::{
+    SecretStoreSlackEgressCredentialProvider, SlackEgressCredentialProvider,
+    SlackProtocolHttpEgress, StaticSlackEgressCredentialProvider,
+};
+use crate::slack_extension_settings::{
+    FilesystemSlackExtensionSettingsStore, SlackExtensionInstallationSettings,
+};
 use crate::slack_host_ingress::{
     ExtensionInstallationIngressCredentialBinding, ExtensionInstallationIngressCredentialResolver,
     SlackEventsIngressHandler, SlackHostIngressInstallation,
@@ -354,6 +368,19 @@ pub enum SlackHostBetaBuildError {
     RuntimeHttpEgressUnavailable,
     #[error("Slack host-beta requires durable host state")]
     DurableHostStateUnavailable,
+    #[error("Slack host-beta requires extension lifecycle state")]
+    ExtensionLifecycleUnavailable,
+    #[error("Slack host-beta requires the shared host secret store")]
+    SecretStoreUnavailable,
+    #[error("Slack host-beta extension installation state failed: {reason}")]
+    ExtensionInstallation { reason: String },
+    #[error("Slack host-beta extension settings failed: {reason}")]
+    ExtensionSettings { reason: String },
+    #[error("Slack host-beta host ingress projection failed: {source}")]
+    HostIngressProjection {
+        #[from]
+        source: ironclaw_host_ingress_registry::Error,
+    },
     #[error("Slack host-beta outbound delivery target registration failed: {reason}")]
     OutboundDeliveryTargetRegistration { reason: String },
     #[error(
@@ -372,6 +399,14 @@ pub enum SlackHostBetaBuildError {
     },
     #[error("invalid Slack host-beta config field {field}: {reason}")]
     InvalidConfig { field: &'static str, reason: String },
+}
+
+impl From<crate::slack_extension_settings::Error> for SlackHostBetaBuildError {
+    fn from(source: crate::slack_extension_settings::Error) -> Self {
+        Self::ExtensionSettings {
+            reason: source.to_string(),
+        }
+    }
 }
 
 #[non_exhaustive]
@@ -444,6 +479,300 @@ pub fn build_slack_events_host_ingress_mount(
         slack_events_host_ingress_registrations(handler)?,
         resolver,
     )?)
+}
+
+pub async fn import_slack_host_beta_config_as_extension_installation(
+    runtime: &RebornRuntime,
+    config: &SlackHostBetaConfig,
+) -> Result<(), SlackHostBetaBuildError> {
+    let local_runtime = runtime
+        .services()
+        .local_runtime
+        .as_ref()
+        .ok_or(SlackHostBetaBuildError::DurableHostStateUnavailable)?;
+    let extension_management = local_runtime
+        .extension_management
+        .as_ref()
+        .ok_or(SlackHostBetaBuildError::ExtensionLifecycleUnavailable)?;
+    let secret_store = local_runtime
+        .secret_store
+        .clone()
+        .ok_or(SlackHostBetaBuildError::SecretStoreUnavailable)?;
+    let store = extension_management.installation_store();
+    let extension_id = slack_extension_id()?;
+    let installation_id = slack_extension_installation_id()?;
+    if store
+        .get_installation(&installation_id)
+        .await
+        .map_err(map_extension_installation_error)?
+        .is_none()
+    {
+        extension_management
+            .install(slack_lifecycle_package_ref()?)
+            .await
+            .map_err(|error| SlackHostBetaBuildError::ExtensionInstallation {
+                reason: error.to_string(),
+            })?;
+    }
+
+    let settings = SlackExtensionInstallationSettings::from_host_beta_config(config)?;
+    let settings_store = FilesystemSlackExtensionSettingsStore::new(Arc::clone(
+        &local_runtime.host_state_filesystem,
+    ));
+    settings_store.upsert(&installation_id, &settings).await?;
+
+    let secret_scope = settings.secret_scope();
+    let signing_secret_handle = SecretHandle::new(SLACK_SIGNING_SECRET_HANDLE)
+        .map_err(|reason| invalid_config("slack_signing_secret_handle", reason.to_string()))?;
+    let bot_token_handle = SecretHandle::new(SLACK_BOT_TOKEN_HANDLE)
+        .map_err(|reason| invalid_config("slack_bot_token_handle", reason.to_string()))?;
+    secret_store
+        .put(
+            secret_scope.clone(),
+            signing_secret_handle.clone(),
+            SecretMaterial::from(config.signing_secret.expose_secret().to_string()),
+        )
+        .await?;
+    secret_store
+        .put(
+            secret_scope,
+            bot_token_handle.clone(),
+            SecretMaterial::from(config.bot_token.expose_secret().to_string()),
+        )
+        .await?;
+
+    let current = store
+        .get_installation(&installation_id)
+        .await
+        .map_err(map_extension_installation_error)?
+        .ok_or_else(|| SlackHostBetaBuildError::ExtensionInstallation {
+            reason: "Slack extension installation was not available after import install"
+                .to_string(),
+        })?;
+    let imported = ExtensionInstallation::new(
+        current.installation_id().clone(),
+        extension_id,
+        ExtensionActivationState::Enabled,
+        current.manifest_ref().clone(),
+        vec![
+            ExtensionCredentialBinding::new(
+                ExtensionCredentialHandle::new(SLACK_SIGNING_SECRET_HANDLE)
+                    .map_err(map_extension_installation_error)?,
+                signing_secret_handle,
+            ),
+            ExtensionCredentialBinding::new(
+                ExtensionCredentialHandle::new(SLACK_BOT_TOKEN_HANDLE)
+                    .map_err(map_extension_installation_error)?,
+                bot_token_handle,
+            ),
+        ],
+        chrono::Utc::now(),
+    )
+    .map_err(map_extension_installation_error)?;
+    store
+        .upsert_installation(imported)
+        .await
+        .map_err(map_extension_installation_error)?;
+    Ok(())
+}
+
+pub async fn build_slack_events_host_ingress_mount_from_enabled_extensions(
+    runtime: &RebornRuntime,
+) -> Result<Option<PublicRouteMount>, SlackHostBetaBuildError> {
+    let local_runtime = runtime
+        .services()
+        .local_runtime
+        .as_ref()
+        .ok_or(SlackHostBetaBuildError::DurableHostStateUnavailable)?;
+    let extension_management = local_runtime
+        .extension_management
+        .as_ref()
+        .ok_or(SlackHostBetaBuildError::ExtensionLifecycleUnavailable)?;
+    let secret_store = local_runtime
+        .secret_store
+        .clone()
+        .ok_or(SlackHostBetaBuildError::SecretStoreUnavailable)?;
+    let store = extension_management.installation_store();
+    let settings_store = FilesystemSlackExtensionSettingsStore::new(Arc::clone(
+        &local_runtime.host_state_filesystem,
+    ));
+    let entries = list_enabled_host_ingress_entries(store.as_ref()).await?;
+    let mut installations = Vec::new();
+    let mut credential_bindings = Vec::new();
+    let slack_extension_id = slack_extension_id()?;
+
+    for entry in entries {
+        let installation = entry.installation();
+        if installation.extension_id() != &slack_extension_id {
+            continue;
+        }
+        if !is_slack_events_declaration(entry.declaration()) {
+            continue;
+        }
+        let settings = settings_store
+            .get(installation.installation_id())
+            .await?
+            .ok_or_else(|| SlackHostBetaBuildError::ExtensionInstallation {
+                reason: format!(
+                    "enabled Slack extension installation `{}` is missing host-owned settings; rerun Slack extension setup/import",
+                    installation.installation_id()
+                ),
+            })?;
+        let secret_scope = settings.secret_scope();
+        let bot_secret_handle =
+            extension_secret_handle(installation, SLACK_BOT_TOKEN_HANDLE)?.clone();
+        let bot_token =
+            read_secret_string(Arc::clone(&secret_store), &secret_scope, &bot_secret_handle)
+                .await?;
+        let config = slack_config_from_extension_settings(&settings, bot_token)?;
+        let (actor_user_resolver, subject_route_resolver) =
+            build_slack_host_beta_event_resolvers(runtime, &config)?;
+        let token_handle = slack_bot_token_handle()?;
+        let egress_credentials: Arc<dyn SlackEgressCredentialProvider> =
+            Arc::new(SecretStoreSlackEgressCredentialProvider::new(
+                Arc::clone(&secret_store),
+                secret_scope.clone(),
+                token_handle.clone(),
+                bot_secret_handle,
+            ));
+        let assembly = build_slack_events_route_assembly_with_credentials(
+            runtime,
+            config,
+            actor_user_resolver,
+            Some(subject_route_resolver),
+            egress_credentials,
+            b"host-ingress-preverified".to_vec(),
+        )?;
+        let credential_handles = declaration_credential_handles(entry.declaration());
+        for ingress_credential_handle in &credential_handles {
+            let secret_handle =
+                extension_secret_handle(installation, ingress_credential_handle.as_str())?;
+            credential_bindings.push(ExtensionInstallationIngressCredentialBinding {
+                candidate_id: assembly.installation_id.as_str().to_string(),
+                ingress_credential_handle: ingress_credential_handle.clone(),
+                secret_scope: secret_scope.clone(),
+                secret_handle: secret_handle.clone(),
+            });
+        }
+        installations.push(
+            SlackHostIngressInstallation::new(
+                assembly.tenant_id,
+                assembly.installation_id,
+                assembly.installation_selector,
+                credential_handles,
+                assembly.runner,
+            )?
+            .with_workflow_observer(assembly.observer),
+        );
+    }
+
+    if installations.is_empty() {
+        return Ok(None);
+    }
+
+    let handler = Arc::new(SlackEventsIngressHandler::new(installations)?);
+    let resolver = Arc::new(ExtensionInstallationIngressCredentialResolver::new(
+        secret_store,
+        credential_bindings,
+    )?);
+    Ok(Some(public_ingress_route_mount(
+        slack_events_host_ingress_registrations(handler)?,
+        resolver,
+    )?))
+}
+
+fn is_slack_events_declaration(declaration: &HostIngressRouteDeclaration) -> bool {
+    if declaration.route().route_id().as_str() != SLACK_EVENTS_ROUTE_ID {
+        return false;
+    }
+    matches!(
+        declaration.target(),
+        HostIngressTarget::ProductAdapterInbound {
+            product_adapter_section,
+            ..
+        } if product_adapter_section == "product_adapter.inbound"
+    )
+}
+
+fn declaration_credential_handles(
+    declaration: &HostIngressRouteDeclaration,
+) -> Vec<IngressCredentialHandle> {
+    declaration
+        .auth()
+        .iter()
+        .flat_map(|binding| binding.credential_handles().iter().cloned())
+        .collect()
+}
+
+fn extension_secret_handle<'a>(
+    installation: &'a ExtensionInstallation,
+    credential_handle: &str,
+) -> Result<&'a SecretHandle, SlackHostBetaBuildError> {
+    installation
+        .credential_bindings()
+        .iter()
+        .find(|binding| binding.credential_handle().as_str() == credential_handle)
+        .map(|binding| binding.secret_handle())
+        .ok_or_else(|| SlackHostBetaBuildError::ExtensionInstallation {
+            reason: format!(
+                "enabled Slack extension installation `{}` is missing credential binding `{credential_handle}`",
+                installation.installation_id()
+            ),
+        })
+}
+
+async fn read_secret_string(
+    secret_store: Arc<dyn SecretStore>,
+    scope: &ResourceScope,
+    handle: &SecretHandle,
+) -> Result<SecretString, SlackHostBetaBuildError> {
+    let lease = secret_store.lease_once(scope, handle).await?;
+    Ok(secret_store.consume(scope, lease.id).await?)
+}
+
+fn slack_config_from_extension_settings(
+    settings: &SlackExtensionInstallationSettings,
+    bot_token: SecretString,
+) -> Result<SlackHostBetaConfig, SlackHostBetaBuildError> {
+    Ok(SlackHostBetaConfig {
+        tenant_id: settings.tenant_id.clone(),
+        agent_id: settings.agent_id.clone(),
+        project_id: settings.project_id.clone(),
+        installation_id: settings.adapter_installation_id.clone(),
+        team_id: settings.team_id.clone(),
+        installation_selector: SlackInstallationSelector::app_team(
+            settings.api_app_id.clone(),
+            settings.team_id.as_str().to_string(),
+        ),
+        slack_actor: settings.slack_actor()?,
+        user_id: settings.user_id.clone(),
+        shared_subject_user_id: settings.shared_subject_user_id.clone(),
+        channel_routes: settings.channel_routes.clone(),
+        signing_secret: SecretString::from("host-ingress-preverified"),
+        bot_token,
+    })
+}
+
+fn slack_extension_id() -> Result<ExtensionId, SlackHostBetaBuildError> {
+    ExtensionId::new("slack").map_err(|reason| invalid_config("extension_id", reason.to_string()))
+}
+
+fn slack_extension_installation_id() -> Result<ExtensionInstallationId, SlackHostBetaBuildError> {
+    ExtensionInstallationId::new("slack").map_err(map_extension_installation_error)
+}
+
+fn slack_lifecycle_package_ref() -> Result<LifecyclePackageRef, SlackHostBetaBuildError> {
+    LifecyclePackageRef::new(LifecyclePackageKind::Extension, "slack").map_err(|error| {
+        SlackHostBetaBuildError::ExtensionInstallation {
+            reason: error.to_string(),
+        }
+    })
+}
+
+fn map_extension_installation_error(error: impl std::fmt::Display) -> SlackHostBetaBuildError {
+    SlackHostBetaBuildError::ExtensionInstallation {
+        reason: error.to_string(),
+    }
 }
 
 #[allow(dead_code)] // Used by the generic builder once step 6b wires it into serve.
@@ -810,6 +1139,30 @@ fn build_slack_events_route_assembly(
     actor_user_resolver: Arc<dyn ProductActorUserResolver>,
     subject_route_resolver: Option<Arc<dyn ProductConversationSubjectRouteResolver>>,
 ) -> Result<SlackEventsRouteAssembly, SlackHostBetaBuildError> {
+    let token_handle = slack_bot_token_handle()?;
+    let egress_credentials: Arc<dyn SlackEgressCredentialProvider> =
+        Arc::new(StaticSlackEgressCredentialProvider::new(
+            token_handle,
+            config.bot_token.expose_secret().to_string(),
+        ));
+    build_slack_events_route_assembly_with_credentials(
+        runtime,
+        config.clone(),
+        actor_user_resolver,
+        subject_route_resolver,
+        egress_credentials,
+        config.signing_secret.expose_secret().as_bytes().to_vec(),
+    )
+}
+
+fn build_slack_events_route_assembly_with_credentials(
+    runtime: &RebornRuntime,
+    config: SlackHostBetaConfig,
+    actor_user_resolver: Arc<dyn ProductActorUserResolver>,
+    subject_route_resolver: Option<Arc<dyn ProductConversationSubjectRouteResolver>>,
+    egress_credentials: Arc<dyn SlackEgressCredentialProvider>,
+    runner_signing_secret: Vec<u8>,
+) -> Result<SlackEventsRouteAssembly, SlackHostBetaBuildError> {
     // The resolver controls inbound Slack actor binding. `config.user_id`
     // scopes host-mediated Slack bot-token egress and legacy static actor
     // mapping. Shared Slack channel execution is configured separately.
@@ -907,7 +1260,7 @@ fn build_slack_events_route_assembly(
         WebhookAuth::Hmac(HmacWebhookAuth::new(
             SLACK_SIGNATURE_HEADER,
             SLACK_TIMESTAMP_HEADER,
-            config.signing_secret.expose_secret().as_bytes().to_vec(),
+            runner_signing_secret,
             config.installation_id.as_str(),
         )),
         NativeProductAdapterRunnerConfig::new(
@@ -917,7 +1270,8 @@ fn build_slack_events_route_assembly(
         ),
     ));
 
-    let egress = slack_protocol_egress(runtime, &config, token_handle)?;
+    let egress =
+        slack_protocol_egress_with_provider(runtime, &config, token_handle, egress_credentials)?;
     let outbound_store: Arc<dyn OutboundStateStore> = Arc::clone(&local_runtime.outbound_state);
     let preferences: Arc<dyn ironclaw_outbound::CommunicationPreferenceRepository> =
         Arc::clone(&local_runtime.outbound_preferences);
@@ -967,6 +1321,20 @@ fn slack_protocol_egress(
     config: &SlackHostBetaConfig,
     token_handle: EgressCredentialHandle,
 ) -> Result<Arc<dyn ProtocolHttpEgress>, SlackHostBetaBuildError> {
+    let credentials: Arc<dyn SlackEgressCredentialProvider> =
+        Arc::new(StaticSlackEgressCredentialProvider::new(
+            token_handle.clone(),
+            config.bot_token.expose_secret().to_string(),
+        ));
+    slack_protocol_egress_with_provider(runtime, config, token_handle, credentials)
+}
+
+fn slack_protocol_egress_with_provider(
+    runtime: &RebornRuntime,
+    config: &SlackHostBetaConfig,
+    token_handle: EgressCredentialHandle,
+    credentials: Arc<dyn SlackEgressCredentialProvider>,
+) -> Result<Arc<dyn ProtocolHttpEgress>, SlackHostBetaBuildError> {
     let local_runtime = runtime
         .services()
         .local_runtime
@@ -978,10 +1346,7 @@ fn slack_protocol_egress(
         .ok_or(SlackHostBetaBuildError::RuntimeHttpEgressUnavailable)?;
     Ok(Arc::new(SlackProtocolHttpEgress::new(
         host_egress,
-        Arc::new(StaticSlackEgressCredentialProvider::new(
-            token_handle.clone(),
-            config.bot_token.expose_secret().to_string(),
-        )),
+        credentials,
         EgressPolicy::new(slack_declared_egress_targets(token_handle)?),
         slack_egress_scope_template(config),
     )))
@@ -1508,6 +1873,85 @@ mod tests {
                 &runtime,
                 Some(UserId::new(USER).expect("user")),
                 "forged generic",
+            )
+            .await,
+            0
+        );
+
+        runtime.shutdown().await.expect("runtime shuts down");
+    }
+
+    #[tokio::test]
+    async fn extension_projected_host_ingress_dispatches_signed_event_callback() {
+        let egress = Arc::new(RecordingRuntimeHttpEgress::default());
+        let (runtime, _root) = runtime_with_host_egress_override(Some(Some(
+            host_egress_port_for_test(Arc::clone(&egress)),
+        )))
+        .await;
+        let config = config();
+        import_slack_host_beta_config_as_extension_installation(&runtime, &config)
+            .await
+            .expect("Slack config imports into extension state");
+        let mount = build_slack_events_host_ingress_mount_from_enabled_extensions(&runtime)
+            .await
+            .expect("extension projection builds")
+            .expect("enabled Slack extension projects events route");
+        let body = r#"{
+            "type":"event_callback",
+            "team_id":"T0HOST",
+            "api_app_id":"A0HOST",
+            "event_id":"Ev-host-beta-extension-dispatch",
+            "event":{"type":"message","channel_type":"im","user":"U0HOST","channel":"D0HOST","text":"hello from extension","ts":"1710000000.000014"}
+        }"#;
+        post_signed_slack_event(&mount, body).await;
+        if let Some(drain) = mount.drain.as_ref() {
+            drain.drain().await;
+        }
+
+        let history = wait_for_slack_thread_history(&runtime).await;
+        let inbound_message = history
+            .messages
+            .iter()
+            .find(|message| message.content.as_deref() == Some("hello from extension"))
+            .expect("inbound Slack message should be recorded");
+        assert_eq!(
+            inbound_message.source_binding_id.as_deref(),
+            Some(
+                "adapter:8:slack_v2;installation:17:install_host_beta;agent:16:agent:slack-host;project:18:project:slack-host;space:6:T0HOST;conversation:6:D0HOST;topic:0:;"
+            )
+        );
+
+        let forged_body = r#"{
+            "type":"event_callback",
+            "team_id":"T0HOST",
+            "api_app_id":"A0HOST",
+            "event_id":"Ev-host-beta-extension-forged",
+            "event":{"type":"message","channel_type":"im","user":"U0HOST","channel":"D0HOST","text":"forged extension","ts":"1710000000.000015"}
+        }"#;
+        let forged_response = mount
+            .router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(SLACK_EVENTS_PATH)
+                    .header(SLACK_TIMESTAMP_HEADER, current_unix_timestamp().to_string())
+                    .header(SLACK_SIGNATURE_HEADER, "v0=deadbeef")
+                    .body(Body::from(forged_body))
+                    .expect("forged request builds"),
+            )
+            .await
+            .expect("router responds to forged request");
+
+        assert_eq!(forged_response.status(), StatusCode::UNAUTHORIZED);
+        if let Some(drain) = mount.drain.as_ref() {
+            drain.drain().await;
+        }
+        assert_eq!(
+            slack_message_count_with_text(
+                &runtime,
+                Some(UserId::new(USER).expect("user")),
+                "forged extension",
             )
             .await,
             0

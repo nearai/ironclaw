@@ -256,6 +256,10 @@ impl RebornLocalExtensionManagementPort {
             .collect())
     }
 
+    pub(crate) fn installation_store(&self) -> Arc<dyn ExtensionInstallationStore> {
+        Arc::clone(&self.installation_store)
+    }
+
     pub(crate) async fn activation_credential_requirements(
         &self,
         package_ref: &LifecyclePackageRef,

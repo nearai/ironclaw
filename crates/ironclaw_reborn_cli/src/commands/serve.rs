@@ -18,8 +18,9 @@ use ironclaw_reborn_composition::{
 };
 #[cfg(feature = "slack-v2-host-beta")]
 use ironclaw_reborn_composition::{
-    SlackOperatorRouteVisibility, build_slack_events_host_ingress_mount,
+    SlackOperatorRouteVisibility, build_slack_events_host_ingress_mount_from_enabled_extensions,
     build_slack_host_beta_mounts, build_webui_services_with_slack_host_beta_mounts,
+    import_slack_host_beta_config_as_extension_installation,
 };
 use ironclaw_reborn_config::{IdentitySection, seed_default_config_file_if_missing};
 use ironclaw_reborn_webui_ingress::{
@@ -364,30 +365,55 @@ impl ServeCommand {
                 .await
                 .context("failed to assemble Reborn runtime for `serve`")?;
             #[cfg(feature = "slack-v2-host-beta")]
+            let extension_slack_events_mount;
+            #[cfg(feature = "slack-v2-host-beta")]
             let slack_mounts = if let Some(slack_config) = slack_host_beta_config {
+                import_slack_host_beta_config_as_extension_installation(&runtime, &slack_config)
+                    .await
+                    .context("failed to import Slack config into extension state")?;
+                let projected_slack_events_mount = if slack_host_ingress_mode.is_generic_shadow()
+                    || slack_host_ingress_mode.is_generic()
+                {
+                    build_slack_events_host_ingress_mount_from_enabled_extensions(&runtime)
+                        .await
+                        .context("failed to compose Slack extension host-ingress events route")?
+                } else {
+                    None
+                };
                 Some(if slack_host_ingress_mode.is_generic_shadow() {
                     let mounts = build_slack_host_beta_mounts(&runtime, slack_config.clone())
                         .context("failed to compose Slack host-beta routes")?;
-                    build_slack_events_host_ingress_mount(&runtime, slack_config).context(
-                        "failed to validate generic Slack host-ingress events route in shadow mode",
-                    )?;
+                    if projected_slack_events_mount.is_none() {
+                        anyhow::bail!(
+                            "Slack config import did not produce an enabled Slack extension events route"
+                        );
+                    }
                     tracing::debug!(
                         target = "ironclaw::reborn::cli::serve",
-                        "generic shadow validated",
+                        "Slack extension host-ingress route projection validated",
                     );
+                    extension_slack_events_mount = projected_slack_events_mount;
                     mounts
                 } else if slack_host_ingress_mode.is_generic() {
                     let mut mounts = build_slack_host_beta_mounts(&runtime, slack_config.clone())
                         .context("failed to compose Slack host-beta routes")?;
-                    mounts.events =
-                        build_slack_events_host_ingress_mount(&runtime, slack_config)
-                            .context("failed to compose generic Slack host-ingress events route")?;
+                    mounts.events = projected_slack_events_mount.ok_or_else(|| {
+                        anyhow!(
+                            "Slack config import did not produce an enabled Slack extension events route"
+                        )
+                    })?;
+                    extension_slack_events_mount = None;
                     mounts
                 } else {
+                    extension_slack_events_mount = projected_slack_events_mount;
                     build_slack_host_beta_mounts(&runtime, slack_config)
                         .context("failed to compose Slack host-beta routes")?
                 })
             } else {
+                extension_slack_events_mount =
+                    build_slack_events_host_ingress_mount_from_enabled_extensions(&runtime)
+                        .await
+                        .context("failed to compose Slack extension host-ingress events route")?;
                 None
             };
             #[cfg(feature = "slack-v2-host-beta")]
@@ -511,6 +537,8 @@ impl ServeCommand {
                     .with_public_route_mount(slack_mounts.events)
                     .with_slack_personal_binding_pairing(slack_mounts.personal_binding_pairing)
                     .with_slack_channel_routes(slack_mounts.channel_routes);
+            } else if let Some(events_mount) = extension_slack_events_mount {
+                serve_config = serve_config.with_public_route_mount(events_mount);
             }
             // Public NEAR AI login callback route (token redirect target). Built
             // from the runtime's LLM seam; absent when no LLM was wired.

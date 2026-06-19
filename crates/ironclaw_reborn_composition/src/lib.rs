@@ -120,6 +120,8 @@ mod slack_dm_open;
 #[cfg(feature = "slack-v2-host-beta")]
 mod slack_egress;
 #[cfg(feature = "slack-v2-host-beta")]
+mod slack_extension_settings;
+#[cfg(feature = "slack-v2-host-beta")]
 mod slack_host_beta;
 #[cfg(feature = "slack-v2-host-beta")]
 pub mod slack_host_ingress;
@@ -295,8 +297,9 @@ pub use slack_egress::{
 pub use slack_host_beta::{
     SlackHostBetaBuildError, SlackHostBetaChannelRoute, SlackHostBetaConfig,
     SlackHostBetaConfigInput, SlackHostBetaMounts, build_slack_events_host_ingress_mount,
-    build_slack_events_route_mount, build_slack_events_route_mount_with_actor_user_resolver,
-    build_slack_host_beta_mounts, build_triggered_run_delivery_hook,
+    build_slack_events_host_ingress_mount_from_enabled_extensions, build_slack_events_route_mount,
+    build_slack_events_route_mount_with_actor_user_resolver, build_slack_host_beta_mounts,
+    build_triggered_run_delivery_hook, import_slack_host_beta_config_as_extension_installation,
 };
 #[cfg(feature = "slack-v2-host-beta")]
 pub use slack_personal_binding::{
@@ -787,6 +790,13 @@ pub(crate) fn slack_host_state_mount_view(
             MountPermissions::read_write_list_delete(),
         ),
         MountGrant::new(
+            MountAlias::new("/tenant-shared/slack-extension-installations")?,
+            VirtualPath::new(format!(
+                "/tenants/{tenant_id}/shared/slack-extension-installations"
+            ))?,
+            MountPermissions::read_write_list_delete(),
+        ),
+        MountGrant::new(
             MountAlias::new("/engine/product_workflow/idempotency")?,
             VirtualPath::new(format!(
                 "/tenants/{tenant_id}/shared/slack-product-workflow/idempotency"
@@ -1039,6 +1049,11 @@ mod mount_view_tests {
                 "/tenant-shared/slack-channel-routes",
                 "/tenant-shared/slack-channel-routes/install/team/route.json",
                 "slack-channel-routes/install/team/route.json",
+            ),
+            (
+                "/tenant-shared/slack-extension-installations",
+                "/tenant-shared/slack-extension-installations/install.json",
+                "slack-extension-installations/install.json",
             ),
             (
                 "/engine/product_workflow/idempotency",

@@ -122,8 +122,13 @@ Then open **`http://127.0.0.1:3000/v2`** and log in with the
 (the **CLI flag only**) tells the OS to pick a free ephemeral port — useful for
 test harnesses, though the banner still prints `:0`. `[webui].listen_port = 0`
 in `config.toml` is **rejected**, since a config-driven ephemeral port is almost
-always a mistake. For the Slack host-beta ingress, build with
-`--features slack-v2-host-beta` (it includes `webui-v2-beta`).
+always a mistake. Slack host-beta support is still compile-gated: build with
+`--features slack-v2-host-beta` (it includes `webui-v2-beta`). When `[slack]`
+is configured, `serve` imports that config into the bundled Slack extension and
+projects the events webhook route from enabled extension state in generic
+host-ingress mode. If the Slack extension is already enabled with host-owned
+settings and secret bindings, `serve` can mount that extension-projected events
+route without a `[slack]` mount config.
 
 ### Choose your model provider
 

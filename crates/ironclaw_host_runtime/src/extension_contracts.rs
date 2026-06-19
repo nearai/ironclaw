@@ -9,6 +9,7 @@ use ironclaw_host_api::{
     HOST_RUNTIME_HTTP_EGRESS_PORT_ID, HostApiError, HostPortCatalog, HostPortCatalogEntry,
     HostPortId, VirtualPath,
 };
+use ironclaw_host_ingress_registry::HostIngressHostApiContract;
 use ironclaw_product_adapter_registry::ProductAdapterHostApiContract;
 
 /// Build the host-runtime default set of Extension Manifest v2 host API contracts.
@@ -23,6 +24,11 @@ pub fn default_host_api_contract_registry() -> Result<HostApiContractRegistry, M
             reason: format!("product adapter host API contract registration failed: {error}"),
         })?;
     registry.register(Arc::new(product_adapter_contract))?;
+    let host_ingress_contract =
+        HostIngressHostApiContract::new().map_err(|error| ManifestV2Error::Invalid {
+            reason: format!("host ingress host API contract registration failed: {error}"),
+        })?;
+    registry.register(Arc::new(host_ingress_contract))?;
     Ok(registry)
 }
 

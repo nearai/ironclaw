@@ -371,7 +371,7 @@ pub fn slack_events_host_ingress_declaration(
         descriptor,
         HostIngressTarget::ProductAdapterInbound {
             capability_id,
-            product_adapter_section: "events".to_string(),
+            product_adapter_section: "product_adapter.inbound".to_string(),
         },
         vec![auth],
         IngressAckMode::Immediate,

@@ -23,6 +23,7 @@ use ironclaw_product_adapters::{
     ProtocolHttpEgressError, RedactedString,
 };
 use ironclaw_secrets::SecretMaterial;
+use ironclaw_secrets::{SecretStore, SecretStoreError};
 use ironclaw_wasm_product_adapters::{EgressPolicy, EgressPolicyError, EgressPolicyTarget};
 use secrecy::{ExposeSecret, SecretString};
 use thiserror::Error;
@@ -94,6 +95,56 @@ impl SlackEgressCredentialProvider for StaticSlackEgressCredentialProvider {
                 handle: handle.as_str().to_string(),
             })
         }
+    }
+}
+
+pub(crate) struct SecretStoreSlackEgressCredentialProvider {
+    secret_store: Arc<dyn SecretStore>,
+    scope: ResourceScope,
+    egress_handle: EgressCredentialHandle,
+    secret_handle: SecretHandle,
+}
+
+impl SecretStoreSlackEgressCredentialProvider {
+    pub(crate) fn new(
+        secret_store: Arc<dyn SecretStore>,
+        scope: ResourceScope,
+        egress_handle: EgressCredentialHandle,
+        secret_handle: SecretHandle,
+    ) -> Self {
+        Self {
+            secret_store,
+            scope,
+            egress_handle,
+            secret_handle,
+        }
+    }
+}
+
+#[async_trait]
+impl SlackEgressCredentialProvider for SecretStoreSlackEgressCredentialProvider {
+    async fn resolve_slack_egress_credential(
+        &self,
+        handle: &EgressCredentialHandle,
+    ) -> Result<SlackEgressCredential, SlackEgressCredentialError> {
+        if handle != &self.egress_handle {
+            return Err(SlackEgressCredentialError::UnknownHandle {
+                handle: handle.as_str().to_string(),
+            });
+        }
+        let lease = self
+            .secret_store
+            .lease_once(&self.scope, &self.secret_handle)
+            .await
+            .map_err(map_secret_store_credential_error)?;
+        let material = self
+            .secret_store
+            .consume(&self.scope, lease.id)
+            .await
+            .map_err(map_secret_store_credential_error)?;
+        Ok(SlackEgressCredential::bearer_token(
+            material.expose_secret().to_string(),
+        ))
     }
 }
 
@@ -303,6 +354,23 @@ fn map_credential_error(error: SlackEgressCredentialError) -> ProtocolHttpEgress
         SlackEgressCredentialError::Unavailable => ProtocolHttpEgressError::Network(
             RedactedString::new("Slack credential backend unavailable"),
         ),
+    }
+}
+
+fn map_secret_store_credential_error(error: SecretStoreError) -> SlackEgressCredentialError {
+    match error {
+        SecretStoreError::UnknownSecret { handle, .. } => {
+            SlackEgressCredentialError::UnknownHandle {
+                handle: handle.as_str().to_string(),
+            }
+        }
+        SecretStoreError::UnknownLease { .. }
+        | SecretStoreError::LeaseConsumed { .. }
+        | SecretStoreError::LeaseRevoked { .. }
+        | SecretStoreError::LeaseExpired { .. }
+        | SecretStoreError::SecretExpired
+        | SecretStoreError::BackendMisconfigured { .. }
+        | SecretStoreError::StoreUnavailable { .. } => SlackEgressCredentialError::Unavailable,
     }
 }
 
