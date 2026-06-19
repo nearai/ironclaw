@@ -130,12 +130,6 @@ api_key_env = "OPENAI_API_KEY"
 `[identity]`, `[runner]`, and `[skills]`; `config init` writes commented
 guidance for the supported fields.
 
-The `[runner]` section controls worker liveness. `heartbeat_interval_secs` and
-`poll_interval_ms` control lease maintenance and fallback polling;
-`max_driver_duration_secs` bounds one driver invocation before the run is failed
-with `driver_timeout` so a wedged LLM/tool call cannot hold the thread active
-lock indefinitely.
-
 If `config.toml` is missing, the first stateful runtime start through `run`,
 `repl`, or `serve` seeds a sparse file with `api_version` and the safe
 `local-dev` boot profile. Read-only commands and `run --dry-run` stay

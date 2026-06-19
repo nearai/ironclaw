@@ -68,7 +68,6 @@ impl Default for RebornRuntimeIdentity {
 
 pub const DEFAULT_TURN_RUNNER_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(5);
 pub const DEFAULT_TURN_RUNNER_POLL_INTERVAL: Duration = Duration::from_millis(200);
-pub const DEFAULT_TURN_RUNNER_MAX_DRIVER_DURATION: Duration = Duration::from_secs(300);
 
 /// Fire-time access request for a persisted trigger.
 ///
@@ -198,7 +197,6 @@ impl ResolvedRebornLlm {
 pub struct TurnRunnerSettings {
     pub heartbeat_interval: Duration,
     pub poll_interval: Duration,
-    pub max_driver_duration: Duration,
 }
 
 impl Default for TurnRunnerSettings {
@@ -206,7 +204,6 @@ impl Default for TurnRunnerSettings {
         Self {
             heartbeat_interval: DEFAULT_TURN_RUNNER_HEARTBEAT_INTERVAL,
             poll_interval: DEFAULT_TURN_RUNNER_POLL_INTERVAL,
-            max_driver_duration: DEFAULT_TURN_RUNNER_MAX_DRIVER_DURATION,
         }
     }
 }

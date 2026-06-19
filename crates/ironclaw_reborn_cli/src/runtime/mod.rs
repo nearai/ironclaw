@@ -826,14 +826,6 @@ fn runner_settings(
             }
             settings.poll_interval = Duration::from_millis(ms);
         }
-        if let Some(secs) = runner.max_driver_duration_secs {
-            if secs == 0 {
-                anyhow::bail!(
-                    "config file [runner].max_driver_duration_secs must be greater than 0"
-                );
-            }
-            settings.max_driver_duration = Duration::from_secs(secs);
-        }
     }
     Ok(settings)
 }

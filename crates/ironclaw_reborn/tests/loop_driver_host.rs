@@ -1659,7 +1659,6 @@ async fn turn_runner_worker_completes_queued_run_after_turn_store_reopen() {
         TurnRunnerWorkerConfig {
             heartbeat_interval: std::time::Duration::from_millis(20),
             poll_interval: std::time::Duration::from_millis(10),
-            max_driver_duration: std::time::Duration::from_secs(60),
             scope_filter: Some(fixture.context.scope.clone()),
         },
         reopened_turn_store.clone(),
@@ -1756,7 +1755,6 @@ async fn turn_runner_worker_emits_thread_run_correlated_operator_log() {
         TurnRunnerWorkerConfig {
             heartbeat_interval: std::time::Duration::from_millis(20),
             poll_interval: std::time::Duration::from_millis(10),
-            max_driver_duration: std::time::Duration::from_secs(60),
             scope_filter: Some(fixture.context.scope.clone()),
         },
         turn_store.clone(),
@@ -1955,7 +1953,6 @@ async fn turn_runner_worker_completes_after_libsql_turn_and_thread_services_reop
         TurnRunnerWorkerConfig {
             heartbeat_interval: std::time::Duration::from_millis(20),
             poll_interval: std::time::Duration::from_millis(10),
-            max_driver_duration: std::time::Duration::from_secs(60),
             scope_filter: Some(turn_scope.clone()),
         },
         turn_store.clone(),
@@ -2095,7 +2092,6 @@ async fn turn_runner_worker_drives_full_text_only_model_transcript_completion_af
         TurnRunnerWorkerConfig {
             heartbeat_interval: std::time::Duration::from_millis(20),
             poll_interval: std::time::Duration::from_millis(10),
-            max_driver_duration: std::time::Duration::from_secs(60),
             scope_filter: Some(fixture.context.scope.clone()),
         },
         turn_store.clone(),
@@ -2247,7 +2243,6 @@ async fn turn_runner_worker_drives_script_capability_through_real_host_runtime()
         TurnRunnerWorkerConfig {
             heartbeat_interval: std::time::Duration::from_millis(20),
             poll_interval: std::time::Duration::from_millis(10),
-            max_driver_duration: std::time::Duration::from_secs(60),
             scope_filter: Some(fixture.context.scope.clone()),
         },
         turn_store.clone(),
@@ -2365,7 +2360,6 @@ async fn turn_runner_rejects_driver_fabricated_approval_block_without_durable_ga
         TurnRunnerWorkerConfig {
             heartbeat_interval: std::time::Duration::from_millis(20),
             poll_interval: std::time::Duration::from_millis(10),
-            max_driver_duration: std::time::Duration::from_secs(60),
             scope_filter: Some(fixture.context.scope.clone()),
         },
         turn_store.clone(),
@@ -2448,7 +2442,6 @@ async fn turn_runner_blocks_on_approval_then_coordinator_resume_completes_same_r
         TurnRunnerWorkerConfig {
             heartbeat_interval: std::time::Duration::from_millis(20),
             poll_interval: std::time::Duration::from_millis(10),
-            max_driver_duration: std::time::Duration::from_secs(60),
             scope_filter: Some(fixture.context.scope.clone()),
         },
         turn_store.clone(),
@@ -2708,7 +2701,6 @@ async fn turn_runner_worker_fails_when_real_host_factory_rejects_claimed_scope()
         TurnRunnerWorkerConfig {
             heartbeat_interval: std::time::Duration::from_millis(20),
             poll_interval: std::time::Duration::from_millis(10),
-            max_driver_duration: std::time::Duration::from_secs(60),
             scope_filter: Some(fixture.context.scope.clone()),
         },
         turn_store.clone(),
@@ -3125,7 +3117,6 @@ async fn default_planned_runtime_composes_no_profile_coordinator_and_profiled_ho
             worker: TurnRunnerWorkerConfig {
                 heartbeat_interval: std::time::Duration::from_millis(20),
                 poll_interval: std::time::Duration::from_millis(10),
-                max_driver_duration: std::time::Duration::from_secs(60),
                 scope_filter: Some(fixture.context.scope.clone()),
             },
             ..DefaultPlannedRuntimeConfig::default()

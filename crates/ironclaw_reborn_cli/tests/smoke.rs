@@ -3294,37 +3294,6 @@ poll_interval_ms = 0
 }
 
 #[test]
-fn run_rejects_zero_runner_max_driver_duration() {
-    let temp = tempfile::tempdir().expect("tempdir");
-    let reborn_home = temp.path().join("reborn-home");
-    std::fs::create_dir_all(&reborn_home).expect("mkdir");
-    std::fs::write(
-        reborn_home.join("config.toml"),
-        r#"
-[runner]
-max_driver_duration_secs = 0
-"#,
-    )
-    .expect("write config");
-
-    let output = Command::new(reborn_bin())
-        .args(["run", "-m", "ping"])
-        .env_remove("USERPROFILE")
-        .env("IRONCLAW_REBORN_HOME", &reborn_home)
-        .output()
-        .expect("ironclaw-reborn run should not crash");
-    assert!(
-        !output.status.success(),
-        "zero max driver duration must fail"
-    );
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(
-        stderr.contains("max_driver_duration_secs") && stderr.contains("greater than 0"),
-        "stderr should explain max driver duration rejection; got: {stderr}"
-    );
-}
-
-#[test]
 fn run_resolves_provider_from_config_and_demands_api_key_env() {
     let temp = tempfile::tempdir().expect("tempdir");
     let reborn_home = temp.path().join("reborn-home");

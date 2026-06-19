@@ -15,7 +15,6 @@ default_profile = "secure_default"
 [runner]
 heartbeat_interval_secs = 5
 poll_interval_ms = 200
-max_driver_duration_secs = 300
 
 [skills]
 regex_activation_enabled = true

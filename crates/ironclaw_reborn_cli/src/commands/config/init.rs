@@ -183,7 +183,6 @@ default_owner  = "reborn-cli"
 [runner]
 heartbeat_interval_secs = 5
 poll_interval_ms        = 200
-max_driver_duration_secs = 300
 
 [skills]
 # When false, regex activation criteria do not auto-load full skill

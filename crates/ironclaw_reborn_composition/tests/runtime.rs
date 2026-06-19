@@ -102,7 +102,6 @@ async fn stub_gateway_send_cancels_recovery_required_and_releases_conversation()
     .with_runner_settings(TurnRunnerSettings {
         heartbeat_interval: Duration::from_millis(25),
         poll_interval: Duration::from_secs(60),
-        max_driver_duration: Duration::from_secs(60),
     });
 
     let runtime = build_reborn_runtime(input).await.unwrap();
@@ -162,7 +161,6 @@ async fn send_user_message_with_cancellation_cancels_submitted_run() {
     .with_runner_settings(TurnRunnerSettings {
         heartbeat_interval: Duration::from_secs(60),
         poll_interval: Duration::from_secs(60),
-        max_driver_duration: Duration::from_secs(60),
     })
     .with_poll_settings(PollSettings {
         interval: Duration::from_secs(60),
@@ -300,7 +298,6 @@ async fn build_reborn_runtime_wires_third_party_hooks_when_enabled() {
     .with_runner_settings(TurnRunnerSettings {
         heartbeat_interval: Duration::from_millis(25),
         poll_interval: Duration::from_secs(60),
-        max_driver_duration: Duration::from_secs(60),
     });
 
     // Build succeeds: the third-party discovery + projection + dispatcher factory

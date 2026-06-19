@@ -162,6 +162,7 @@ enum TransitionCall {
 struct MockTransitionPort {
     claim_results: Mutex<Vec<Result<Option<ClaimedTurnRun>, TurnError>>>,
     heartbeat_result: Mutex<Result<EventCursor, TurnError>>,
+    heartbeat_delay: Mutex<Option<Duration>>,
     recover_result: Mutex<Result<RecoverExpiredLeasesResponse, TurnError>>,
     apply_exit_result: Mutex<Result<TurnRunState, TurnError>>,
     runner_failure_result: Mutex<Result<TurnRunState, TurnError>>,
@@ -182,6 +183,7 @@ impl MockTransitionPort {
         Self {
             claim_results: Mutex::new(Vec::new()),
             heartbeat_result: Mutex::new(Ok(EventCursor(1))),
+            heartbeat_delay: Mutex::new(None),
             recover_result: Mutex::new(Ok(RecoverExpiredLeasesResponse {
                 recovered: Vec::new(),
             })),
@@ -207,6 +209,11 @@ impl MockTransitionPort {
 
     fn with_heartbeat_result(self, result: Result<EventCursor, TurnError>) -> Self {
         *self.heartbeat_result.lock().expect("lock") = result;
+        self
+    }
+
+    fn with_heartbeat_delay(self, delay: Duration) -> Self {
+        *self.heartbeat_delay.lock().expect("lock") = Some(delay);
         self
     }
 
@@ -254,6 +261,10 @@ impl TurnRunTransitionPort for MockTransitionPort {
             .expect("lock")
             .push(TransitionCall::Heartbeat);
         self.heartbeat_requests.lock().expect("lock").push(request);
+        let delay = *self.heartbeat_delay.lock().expect("lock");
+        if let Some(delay) = delay {
+            tokio::time::sleep(delay).await;
+        }
         self.heartbeat_result.lock().expect("lock").clone()
     }
 
@@ -744,7 +755,6 @@ async fn worker_recovers_expired_leases_before_claiming() {
     let config = TurnRunnerWorkerConfig {
         heartbeat_interval: Duration::from_secs(60),
         poll_interval: Duration::from_secs(60),
-        max_driver_duration: Duration::from_secs(60),
         scope_filter: None,
     };
 
@@ -793,7 +803,6 @@ async fn worker_reuses_claim_runner_and_lease_for_heartbeat_and_exit() {
     let config = TurnRunnerWorkerConfig {
         heartbeat_interval: Duration::from_millis(25),
         poll_interval: Duration::from_secs(60),
-        max_driver_duration: Duration::from_secs(60),
         scope_filter: None,
     };
 
@@ -858,7 +867,6 @@ async fn worker_resumes_claimed_run_with_checkpoint() {
         TurnRunnerWorkerConfig {
             heartbeat_interval: Duration::from_secs(60),
             poll_interval: Duration::from_secs(60),
-            max_driver_duration: Duration::from_secs(60),
             scope_filter: None,
         },
         port.clone(),
@@ -904,7 +912,6 @@ async fn worker_resumes_requeued_claimed_run_with_checkpoint() {
         TurnRunnerWorkerConfig {
             heartbeat_interval: Duration::from_secs(60),
             poll_interval: Duration::from_secs(60),
-            max_driver_duration: Duration::from_secs(60),
             scope_filter: None,
         },
         port.clone(),
@@ -952,7 +959,6 @@ async fn worker_persists_host_model_route_snapshot_before_driver_exit() {
         TurnRunnerWorkerConfig {
             heartbeat_interval: Duration::from_secs(60),
             poll_interval: Duration::from_secs(60),
-            max_driver_duration: Duration::from_secs(60),
             scope_filter: None,
         },
         port.clone(),
@@ -999,7 +1005,6 @@ async fn worker_rejects_unvalidated_host_route_snapshot_before_persist() {
         TurnRunnerWorkerConfig {
             heartbeat_interval: Duration::from_secs(60),
             poll_interval: Duration::from_secs(60),
-            max_driver_duration: Duration::from_secs(60),
             scope_filter: None,
         },
         port.clone(),
@@ -1075,7 +1080,6 @@ async fn worker_claims_and_completes_run() {
     let config = TurnRunnerWorkerConfig {
         heartbeat_interval: Duration::from_secs(60),
         poll_interval: Duration::from_millis(50),
-        max_driver_duration: Duration::from_secs(60),
         scope_filter: None,
     };
 
@@ -1122,7 +1126,6 @@ async fn worker_records_terminal_failure_when_heartbeat_fails() {
     let config = TurnRunnerWorkerConfig {
         heartbeat_interval: Duration::from_millis(10),
         poll_interval: Duration::from_millis(50),
-        max_driver_duration: Duration::from_secs(60),
         scope_filter: None,
     };
 
@@ -1152,19 +1155,22 @@ async fn worker_records_terminal_failure_when_heartbeat_fails() {
 }
 
 #[tokio::test]
-async fn worker_records_terminal_failure_when_driver_times_out() {
+async fn worker_records_terminal_failure_when_heartbeat_call_times_out() {
     let desc = test_descriptor();
     let driver = Arc::new(MockDriver::completing(desc.clone()).with_delay(Duration::from_secs(60)));
     let registry = Arc::new(setup_registry(driver));
     let claimed = make_claimed_run(&desc, test_scope(), TurnStatus::Queued);
     let run_id = claimed.state.run_id;
-    let port = Arc::new(MockTransitionPort::new().with_claim_result(Ok(Some(claimed))));
+    let port = Arc::new(
+        MockTransitionPort::new()
+            .with_claim_result(Ok(Some(claimed)))
+            .with_heartbeat_delay(Duration::from_secs(60)),
+    );
 
-    let (_wake_sender, wake_receiver) = TurnRunnerWakeReceiver::new();
+    let (_ws, wake_receiver) = TurnRunnerWakeReceiver::new();
     let config = TurnRunnerWorkerConfig {
         heartbeat_interval: Duration::from_millis(10),
         poll_interval: Duration::from_millis(50),
-        max_driver_duration: Duration::from_millis(50),
         scope_filter: None,
     };
 
@@ -1182,15 +1188,16 @@ async fn worker_records_terminal_failure_when_driver_times_out() {
         worker.try_claim_and_run(&CancellationToken::new()),
     )
     .await
-    .expect("driver timeout should stop active driver promptly");
+    .expect("heartbeat timeout should stop active driver promptly");
 
     assert!(
         result.expect("worker should complete claim"),
         "worker should report a claimed run"
     );
+    assert!(port.calls().contains(&TransitionCall::Heartbeat));
     assert!(port.calls().contains(&TransitionCall::RecordRunnerFailure));
     assert_first_terminal_failure_matches_first_claim(&port, run_id);
-    assert_eq!(first_terminal_failure_category(&port), "driver_timeout");
+    assert_eq!(first_terminal_failure_category(&port), "heartbeat_failed");
 }
 
 #[tokio::test]
@@ -1206,7 +1213,6 @@ async fn worker_cancellation_relinquishes_run() {
     let config = TurnRunnerWorkerConfig {
         heartbeat_interval: Duration::from_secs(60),
         poll_interval: Duration::from_millis(50),
-        max_driver_duration: Duration::from_secs(60),
         scope_filter: None,
     };
 
@@ -1267,7 +1273,6 @@ async fn worker_records_terminal_failure_on_driver_error() {
     let config = TurnRunnerWorkerConfig {
         heartbeat_interval: Duration::from_secs(60),
         poll_interval: Duration::from_millis(50),
-        max_driver_duration: Duration::from_secs(60),
         scope_filter: None,
     };
 
@@ -1311,7 +1316,6 @@ async fn worker_preserves_model_credit_exhaustion_failure_category() {
         TurnRunnerWorkerConfig {
             heartbeat_interval: Duration::from_secs(60),
             poll_interval: Duration::from_millis(50),
-            max_driver_duration: Duration::from_secs(60),
             scope_filter: None,
         },
         port.clone(),
@@ -1349,7 +1353,6 @@ async fn worker_records_terminal_failure_on_driver_panic() {
     let config = TurnRunnerWorkerConfig {
         heartbeat_interval: Duration::from_secs(60),
         poll_interval: Duration::from_millis(50),
-        max_driver_duration: Duration::from_secs(60),
         scope_filter: None,
     };
 
@@ -1386,7 +1389,6 @@ async fn worker_records_terminal_failure_on_host_factory_error() {
     let config = TurnRunnerWorkerConfig {
         heartbeat_interval: Duration::from_secs(60),
         poll_interval: Duration::from_millis(50),
-        max_driver_duration: Duration::from_secs(60),
         scope_filter: None,
     };
 
@@ -1431,7 +1433,6 @@ async fn worker_records_terminal_failure_when_driver_not_found() {
     let config = TurnRunnerWorkerConfig {
         heartbeat_interval: Duration::from_secs(60),
         poll_interval: Duration::from_millis(50),
-        max_driver_duration: Duration::from_secs(60),
         scope_filter: None,
     };
 
@@ -1467,7 +1468,6 @@ async fn worker_continues_when_no_runs_available() {
     let config = TurnRunnerWorkerConfig {
         heartbeat_interval: Duration::from_secs(60),
         poll_interval: Duration::from_millis(50),
-        max_driver_duration: Duration::from_secs(60),
         scope_filter: None,
     };
 
@@ -1516,7 +1516,6 @@ async fn wake_signal_drains_available_runs_until_queue_empty() {
     let config = TurnRunnerWorkerConfig {
         heartbeat_interval: Duration::from_secs(60),
         poll_interval: Duration::from_secs(60),
-        max_driver_duration: Duration::from_secs(60),
         scope_filter: None,
     };
 
@@ -1568,7 +1567,6 @@ async fn wake_signal_triggers_claim_attempt() {
     let config = TurnRunnerWorkerConfig {
         heartbeat_interval: Duration::from_secs(60),
         poll_interval: Duration::from_secs(60), // very long so wake is the trigger
-        max_driver_duration: Duration::from_secs(60),
         scope_filter: None,
     };
 
@@ -1607,7 +1605,6 @@ async fn heartbeat_runs_during_driver_execution() {
     let config = TurnRunnerWorkerConfig {
         heartbeat_interval: Duration::from_millis(50), // fast heartbeats
         poll_interval: Duration::from_millis(50),
-        max_driver_duration: Duration::from_secs(60),
         scope_filter: None,
     };
 
