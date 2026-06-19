@@ -19,6 +19,8 @@ mod content_parts;
 mod descriptors;
 mod error;
 #[cfg(feature = "openai-compat-beta")]
+mod external_tools;
+#[cfg(feature = "openai-compat-beta")]
 mod handlers;
 #[cfg(feature = "openai-compat-beta")]
 mod identity;
@@ -67,6 +69,11 @@ pub use descriptors::{
 pub use error::{
     OpenAiCompatError, OpenAiCompatErrorCode, OpenAiCompatErrorKind, OpenAiCompatErrorResponse,
     OpenAiCompatErrorType, OpenAiCompatHttpError,
+};
+#[cfg(feature = "openai-compat-beta")]
+pub use external_tools::{
+    OpenAiCompatExternalToolResume, OpenAiCompatExternalToolResumeRequest,
+    OpenAiCompatExternalToolSpec, OpenAiCompatExternalToolStore,
 };
 #[cfg(feature = "openai-compat-beta")]
 pub use handlers::{

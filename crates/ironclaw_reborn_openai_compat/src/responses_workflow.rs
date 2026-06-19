@@ -14,6 +14,7 @@ use crate::content_parts::{
     content_array_item_text, non_text_part_marker, sanitize_product_text_fragment,
 };
 use crate::error::product_rejection_to_openai_error;
+use crate::external_tools::parse_external_tools;
 use crate::identity::{
     OPENAI_COMPAT_ACTOR_KIND, OPENAI_COMPAT_ADAPTER_ID, OPENAI_COMPAT_INSTALLATION_ID,
 };
@@ -22,12 +23,14 @@ use crate::projection_helpers::{
 };
 use crate::{
     OpenAiCompatActorScope, OpenAiCompatAuthenticatedCaller, OpenAiCompatBindInternalRefs,
-    OpenAiCompatHttpError, OpenAiCompatIdempotencyKey, OpenAiCompatInternalRefs,
-    OpenAiCompatProjectionRef, OpenAiCompatProjectionStreamer, OpenAiCompatPublicId,
-    OpenAiCompatRecordAcceptedAck, OpenAiCompatRefLookup, OpenAiCompatRefOperation,
-    OpenAiCompatRefReservation, OpenAiCompatRefReservationOutcome, OpenAiCompatRefStore,
-    OpenAiCompatRequestFingerprint, OpenAiCompatResourceBinding, OpenAiCompatResourceMapping,
-    OpenAiCompatRouteSurface, OpenAiCompatTurnRunRef, OpenAiResponseId, OpenAiResponseObject,
+    OpenAiCompatExternalToolResume, OpenAiCompatExternalToolResumeRequest,
+    OpenAiCompatExternalToolSpec, OpenAiCompatExternalToolStore, OpenAiCompatHttpError,
+    OpenAiCompatIdempotencyKey, OpenAiCompatInternalRefs, OpenAiCompatProjectionRef,
+    OpenAiCompatProjectionStreamer, OpenAiCompatPublicId, OpenAiCompatRecordAcceptedAck,
+    OpenAiCompatRefLookup, OpenAiCompatRefOperation, OpenAiCompatRefReservation,
+    OpenAiCompatRefReservationOutcome, OpenAiCompatRefStore, OpenAiCompatRequestFingerprint,
+    OpenAiCompatResourceBinding, OpenAiCompatResourceMapping, OpenAiCompatRouteSurface,
+    OpenAiCompatTurnRunRef, OpenAiResponseId, OpenAiResponseObject,
     OpenAiResponseProjectionStreamRequest, OpenAiResponsesCreateRequest, OpenAiResponsesInput,
     OpenAiResponsesInputItem, OpenAiResponsesMessageRole,
 };
@@ -61,6 +64,16 @@ pub struct OpenAiResponsesWorkflow {
     /// arch-exempt: optional Arc, streaming is a staged #4446 capability layered
     /// onto the non-streaming #4445 workflow.
     projection_streamer: Option<Arc<dyn OpenAiCompatProjectionStreamer>>,
+    /// Wired by host composition when client-supplied ("external") tools are
+    /// enabled. When `None`, `tools`/`tool_choice` and `function_call_output`
+    /// resume inputs fail closed with a stable `400`.
+    /// arch-exempt: optional_arc, external tools are a staged #4447 capability the
+    /// binary may legitimately ship without; absence is a real fail-closed mode.
+    external_tool_store: Option<Arc<dyn OpenAiCompatExternalToolStore>>,
+    /// Wired alongside `external_tool_store`; resumes a parked external-tool run
+    /// once its client outputs are submitted.
+    /// arch-exempt: optional_arc, paired with external_tool_store (same #4447 gate).
+    external_tool_resume: Option<Arc<dyn OpenAiCompatExternalToolResume>>,
     wait_timeout: Duration,
     adapter_id: ProductAdapterId,
     installation_id: AdapterInstallationId,
@@ -77,6 +90,8 @@ impl OpenAiResponsesWorkflow {
             ref_store,
             projection_reader,
             projection_streamer: None,
+            external_tool_store: None,
+            external_tool_resume: None,
             wait_timeout: DEFAULT_RESPONSES_WAIT_TIMEOUT,
             adapter_id: ProductAdapterId::new(OPENAI_COMPAT_ADAPTER_ID)
                 .expect("OPENAI_COMPAT_ADAPTER_ID is valid"), // safety: hard-coded non-empty product adapter id literal.
@@ -96,6 +111,23 @@ impl OpenAiResponsesWorkflow {
     ) -> Self {
         self.projection_streamer = Some(projection_streamer);
         self
+    }
+
+    /// Enable client-supplied ("external") tools: register specs at submit,
+    /// submit client outputs, and resume parked runs. Both ports must be wired
+    /// together; wiring only one leaves the surface fail-closed on `tools`.
+    pub fn with_external_tools(
+        mut self,
+        store: Arc<dyn OpenAiCompatExternalToolStore>,
+        resume: Arc<dyn OpenAiCompatExternalToolResume>,
+    ) -> Self {
+        self.external_tool_store = Some(store);
+        self.external_tool_resume = Some(resume);
+        self
+    }
+
+    fn external_tools_enabled(&self) -> bool {
+        self.external_tool_store.is_some() && self.external_tool_resume.is_some()
     }
 
     pub async fn create_response(
@@ -136,7 +168,7 @@ impl OpenAiResponsesWorkflow {
         idempotency_key: Option<OpenAiCompatIdempotencyKey>,
         surface: OpenAiCompatRouteSurface,
     ) -> Result<OpenAiResponseObject, OpenAiCompatHttpError> {
-        validate_responses_request(&request)?;
+        self.validate_responses_request(&request)?;
 
         let previous_mapping = if let Some(previous_response_id) = &request.previous_response_id {
             Some(
@@ -151,6 +183,27 @@ impl OpenAiResponsesWorkflow {
             None
         };
 
+        // A continuation that carries `function_call_output` for a prior parked
+        // run resumes that run rather than submitting a new turn (the parked run
+        // still holds the thread's active lock, so a fresh submit would be
+        // rejected busy). Requires external tools wired and the prior response.
+        if self.external_tools_enabled()
+            && request_has_function_call_output(&request)
+            && let Some(previous_mapping) = previous_mapping.as_ref()
+        {
+            return self
+                .resume_response_request(
+                    &caller,
+                    &request,
+                    raw_body,
+                    idempotency_key,
+                    surface,
+                    previous_mapping,
+                )
+                .await;
+        }
+
+        let external_tool_specs = self.parse_request_external_tools(&request)?;
         let user_message_payload = responses_user_message_payload(&request)?;
         let request_fingerprint = OpenAiCompatRequestFingerprint::from_body_bytes(raw_body);
         let reservation = self
@@ -245,6 +298,12 @@ impl OpenAiResponsesWorkflow {
             }
         };
         let public_id = response_public_id(&mapping)?;
+        // Register the run's client tools right after submit so the model is
+        // offered them on its first planning step. The submit only enqueues the
+        // turn; this in-memory register lands before the loop resolves its
+        // capability surface. No-op when the request declared no tools.
+        self.register_external_tools(&mapping, &external_tool_specs)
+            .await?;
         let projection_read = self
             .response_projection_read_request(&caller, &mapping, previous_mapping.as_ref())
             .await?;
@@ -263,7 +322,7 @@ impl OpenAiResponsesWorkflow {
                 .wait_for_response_completion(OpenAiResponseWaitRequest {
                     public_id: public_id.clone(),
                     actor_scope: caller.scope().clone(),
-                    accepted_ack,
+                    accepted_ack: Some(accepted_ack),
                     requested_model: request.model.clone(),
                     projection_read: projection_read.clone(),
                     mapping,
@@ -771,13 +830,227 @@ impl OpenAiResponsesWorkflow {
         )?;
         ProductInboundEnvelope::from_trusted_parse(context, parsed).map_err(Into::into)
     }
+
+    fn validate_responses_request(
+        &self,
+        request: &OpenAiResponsesCreateRequest,
+    ) -> Result<(), OpenAiCompatHttpError> {
+        if request.stream.unwrap_or(false) {
+            return Err(OpenAiCompatHttpError::invalid_request(Some(
+                "stream".to_string(),
+            )));
+        }
+        // Client `tools`/`tool_choice` are accepted only when external tools are
+        // wired; otherwise they fail closed with a stable 400 (unchanged for
+        // deployments without the capability). When wired, `tool_choice` stays a
+        // model-only hint (the engine decides tool use) and `tools` are validated
+        // at registration.
+        if self.external_tools_enabled() {
+            return Ok(());
+        }
+        validate_responses_supported_fields(request)
+    }
+
+    fn parse_request_external_tools(
+        &self,
+        request: &OpenAiResponsesCreateRequest,
+    ) -> Result<Vec<OpenAiCompatExternalToolSpec>, OpenAiCompatHttpError> {
+        let Some(tools) = request.tools.as_ref().filter(|tools| !tools.is_empty()) else {
+            return Ok(Vec::new());
+        };
+        if !self.external_tools_enabled() {
+            return Err(OpenAiCompatHttpError::invalid_request(Some(
+                "tools".to_string(),
+            )));
+        }
+        parse_external_tools(tools)
+    }
+
+    async fn register_external_tools(
+        &self,
+        mapping: &OpenAiCompatResourceMapping,
+        specs: &[OpenAiCompatExternalToolSpec],
+    ) -> Result<(), OpenAiCompatHttpError> {
+        if specs.is_empty() {
+            return Ok(());
+        }
+        let Some(store) = self.external_tool_store.as_ref() else {
+            return Err(OpenAiCompatHttpError::invalid_request(Some(
+                "tools".to_string(),
+            )));
+        };
+        let run_ref = response_turn_run_ref(mapping)?;
+        store.register_tools(run_ref, specs.to_vec()).await
+    }
+
+    /// Resume a parked external-tool run from a continuation request carrying
+    /// `function_call_output`. Reserves a continuation response id bound to the
+    /// same run/thread as the parked response, submits the client outputs, and
+    /// resumes the run, then waits for it to complete (or park on a further call).
+    async fn resume_response_request(
+        &self,
+        caller: &OpenAiCompatAuthenticatedCaller,
+        request: &OpenAiResponsesCreateRequest,
+        raw_body: &[u8],
+        idempotency_key: Option<OpenAiCompatIdempotencyKey>,
+        surface: OpenAiCompatRouteSurface,
+        previous_mapping: &OpenAiCompatResourceMapping,
+    ) -> Result<OpenAiResponseObject, OpenAiCompatHttpError> {
+        let request_fingerprint = OpenAiCompatRequestFingerprint::from_body_bytes(raw_body);
+        let reservation = self
+            .ref_store
+            .reserve(OpenAiCompatRefReservation::new(
+                caller.scope().clone(),
+                surface,
+                request_fingerprint,
+                idempotency_key,
+            ))
+            .await?;
+        let mapping = match reservation {
+            OpenAiCompatRefReservationOutcome::Created(mapping) => {
+                self.bind_and_drive_resume(caller, request, previous_mapping, mapping)
+                    .await?
+            }
+            // An identical replay that already bound its run/thread refs was
+            // fully processed; do not re-submit outputs or re-resume — just read.
+            OpenAiCompatRefReservationOutcome::Replayed(mapping)
+                if matches!(mapping.binding, OpenAiCompatResourceBinding::Bound { .. }) =>
+            {
+                mapping
+            }
+            OpenAiCompatRefReservationOutcome::Replayed(mapping) => {
+                self.bind_and_drive_resume(caller, request, previous_mapping, mapping)
+                    .await?
+            }
+            OpenAiCompatRefReservationOutcome::Conflict(_) => {
+                return Err(OpenAiCompatHttpError::conflict(Some(
+                    "idempotency_key".to_string(),
+                )));
+            }
+        };
+
+        let public_id = response_public_id(&mapping)?;
+        let projection_read = self
+            .response_projection_read_request(caller, &mapping, Some(previous_mapping))
+            .await?;
+        let mapping = self
+            .ensure_response_projection_ref(
+                caller.scope().clone(),
+                public_id.clone(),
+                mapping,
+                &projection_read,
+            )
+            .await?;
+        let wait_result = tokio::time::timeout(
+            self.wait_timeout,
+            self.projection_reader
+                .wait_for_response_completion(OpenAiResponseWaitRequest {
+                    public_id,
+                    actor_scope: caller.scope().clone(),
+                    accepted_ack: None,
+                    requested_model: request.model.clone(),
+                    projection_read,
+                    mapping,
+                }),
+        )
+        .await
+        .map_err(|_| {
+            OpenAiCompatHttpError::from_kind(
+                503,
+                true,
+                crate::OpenAiCompatErrorKind::ServiceUnavailable,
+                None,
+            )
+        })??;
+        Ok(wait_result.response)
+    }
+
+    /// Bind the continuation response to the parked run/thread, submit the
+    /// client tool outputs, and resume the run.
+    async fn bind_and_drive_resume(
+        &self,
+        caller: &OpenAiCompatAuthenticatedCaller,
+        request: &OpenAiResponsesCreateRequest,
+        previous_mapping: &OpenAiCompatResourceMapping,
+        mapping: OpenAiCompatResourceMapping,
+    ) -> Result<OpenAiCompatResourceMapping, OpenAiCompatHttpError> {
+        let store = self
+            .external_tool_store
+            .as_ref()
+            .ok_or_else(OpenAiCompatHttpError::not_wired)?;
+        let resume = self
+            .external_tool_resume
+            .as_ref()
+            .ok_or_else(OpenAiCompatHttpError::not_wired)?;
+        let run_ref = response_turn_run_ref(previous_mapping)?;
+        let thread_id = projection_thread_id(previous_mapping)?.ok_or_else(|| {
+            OpenAiCompatHttpError::conflict(Some("previous_response_id".to_string()))
+        })?;
+        let public_id = response_public_id(&mapping)?;
+        // Reuse the parked response's bound refs so the continuation reads the
+        // same (now resumed) run's projection.
+        let internal_refs = previous_mapping
+            .binding
+            .internal_refs()
+            .cloned()
+            .ok_or_else(|| {
+                OpenAiCompatHttpError::conflict(Some("previous_response_id".to_string()))
+            })?;
+        let mapping = self
+            .bind_internal_refs(caller.scope().clone(), public_id, internal_refs)
+            .await?
+            .ok_or_else(bind_internal_refs_unavailable)?;
+        for (call_id, output) in function_call_outputs(request) {
+            store
+                .submit_tool_output(run_ref.clone(), call_id, output)
+                .await?;
+        }
+        resume
+            .resume_external_tool_run(OpenAiCompatExternalToolResumeRequest {
+                actor_scope: caller.scope().clone(),
+                run_ref,
+                thread_id: thread_id.as_str().to_string(),
+            })
+            .await?;
+        Ok(mapping)
+    }
+}
+
+fn request_has_function_call_output(request: &OpenAiResponsesCreateRequest) -> bool {
+    matches!(
+        &request.input,
+        OpenAiResponsesInput::Items(items)
+            if items
+                .iter()
+                .any(|item| matches!(item, OpenAiResponsesInputItem::FunctionCallOutput { .. }))
+    )
+}
+
+fn function_call_outputs(
+    request: &OpenAiResponsesCreateRequest,
+) -> Vec<(String, serde_json::Value)> {
+    match &request.input {
+        OpenAiResponsesInput::Items(items) => items
+            .iter()
+            .filter_map(|item| match item {
+                OpenAiResponsesInputItem::FunctionCallOutput { call_id, output } => {
+                    Some((call_id.clone(), output.clone()))
+                }
+                _ => None,
+            })
+            .collect(),
+        OpenAiResponsesInput::Text(_) => Vec::new(),
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct OpenAiResponseWaitRequest {
     pub public_id: OpenAiResponseId,
     pub actor_scope: OpenAiCompatActorScope,
-    pub accepted_ack: ProductInboundAck,
+    /// The accepted submit ack for a freshly-created response, or `None` for an
+    /// external-tool resume (which reuses the parked run, with no new ack). The
+    /// run id is read from `mapping`'s bound refs either way.
+    pub accepted_ack: Option<ProductInboundAck>,
     pub requested_model: String,
     pub projection_read: ProjectionReadRequest,
     pub mapping: OpenAiCompatResourceMapping,
@@ -846,17 +1119,6 @@ fn projection_thread_id(
     ThreadId::new(thread_id)
         .map(Some)
         .map_err(|_| OpenAiCompatHttpError::internal())
-}
-
-fn validate_responses_request(
-    request: &OpenAiResponsesCreateRequest,
-) -> Result<(), OpenAiCompatHttpError> {
-    if request.stream.unwrap_or(false) {
-        return Err(OpenAiCompatHttpError::invalid_request(Some(
-            "stream".to_string(),
-        )));
-    }
-    validate_responses_supported_fields(request)
 }
 
 fn validate_responses_stream_request(

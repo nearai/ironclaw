@@ -17,7 +17,10 @@ use ironclaw_threads::{
     AppendAssistantDraftRequest, AppendToolResultReferenceRequest, EnsureThreadRequest,
     InMemorySessionThreadService, MessageContent, ToolResultSafeSummary,
 };
-use ironclaw_turns::{ReplyTargetBindingRef, TurnActor, TurnRunId, TurnScope};
+use ironclaw_turns::{
+    ExternalToolCatalog, InMemoryExternalToolCatalog, PendingExternalCall, ReplyTargetBindingRef,
+    TurnActor, TurnRunId, TurnScope,
+};
 
 #[tokio::test]
 async fn openai_responses_retrieve_returns_failed_projection_status() {
@@ -30,6 +33,7 @@ async fn openai_responses_retrieve_returns_failed_projection_status() {
             run_id,
             "failed",
         )])),
+        no_external_tools(),
     );
 
     let response = reader
@@ -53,6 +57,7 @@ async fn openai_responses_retrieve_returns_cancelled_projection_status() {
             run_id,
             "cancelled",
         )])),
+        no_external_tools(),
     );
 
     let response = reader
@@ -76,6 +81,7 @@ async fn openai_responses_retrieve_ignores_other_run_statuses() {
             TurnRunId::new(),
             "failed",
         )])),
+        no_external_tools(),
     );
 
     let response = reader
@@ -103,6 +109,7 @@ async fn openai_responses_retrieve_keeps_finalized_message_completion() {
             run_id,
             "running",
         )])),
+        no_external_tools(),
     );
 
     let response = reader
@@ -126,6 +133,7 @@ async fn openai_responses_retrieve_keeps_completed_projection_in_progress_until_
             run_id,
             "completed",
         )])),
+        no_external_tools(),
     );
 
     let response = reader
@@ -149,6 +157,7 @@ async fn openai_responses_wait_returns_terminal_projection_status_without_messag
             run_id,
             "failed",
         )])),
+        no_external_tools(),
     );
 
     let projection = reader
@@ -175,8 +184,11 @@ async fn openai_responses_wait_advances_projection_cursor_between_polls() {
             "failed",
         )],
     ]));
-    let mut reader =
-        OpenAiResponsesThreadProjectionReader::new(fixture.threads.clone(), stream.clone());
+    let mut reader = OpenAiResponsesThreadProjectionReader::new(
+        fixture.threads.clone(),
+        stream.clone(),
+        no_external_tools(),
+    );
     reader.poll_interval = Duration::from_millis(1);
 
     let projection = reader
@@ -186,6 +198,90 @@ async fn openai_responses_wait_advances_projection_cursor_between_polls() {
 
     assert_eq!(projection.response.status, OpenAiResponseStatus::Failed);
     assert_eq!(stream.after_cursors(), vec![None, Some(first_cursor)]);
+}
+
+#[tokio::test]
+async fn openai_responses_retrieve_surfaces_parked_external_tool_call() {
+    let fixture = ResponseReaderFixture::new("blocked-ext").await;
+    let run_id = TurnRunId::new();
+    let catalog = Arc::new(InMemoryExternalToolCatalog::new());
+    catalog
+        .record_pending_call(
+            run_id,
+            PendingExternalCall::new("call_abc", "get_weather", serde_json::json!({"city": "SF"})),
+        )
+        .await
+        .expect("record pending call");
+    let reader = OpenAiResponsesThreadProjectionReader::new(
+        fixture.threads.clone(),
+        Arc::new(StaticProjectionStream::new(vec![run_status_envelope(
+            fixture.thread_id.as_str(),
+            run_id,
+            "blocked_external_tool",
+        )])),
+        catalog,
+    );
+
+    let response = reader
+        .read_response(fixture.read_request(run_id))
+        .await
+        .expect("read response");
+
+    // A run parked on a client tool reads as a completed turn whose output is
+    // the pending `function_call` the client must fulfil.
+    assert_eq!(response.status, OpenAiResponseStatus::Completed);
+    assert_eq!(response.output.len(), 1);
+    match &response.output[0] {
+        OpenAiResponseOutputItem::FunctionCall {
+            call_id,
+            name,
+            arguments,
+            ..
+        } => {
+            assert_eq!(call_id, "call_abc");
+            assert_eq!(name, "get_weather");
+            assert!(arguments.contains("SF"), "arguments: {arguments}");
+        }
+        other => panic!("expected a function_call item, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn openai_responses_wait_surfaces_parked_external_tool_call() {
+    let fixture = ResponseReaderFixture::new("blocked-ext-wait").await;
+    let run_id = TurnRunId::new();
+    let catalog = Arc::new(InMemoryExternalToolCatalog::new());
+    catalog
+        .record_pending_call(
+            run_id,
+            PendingExternalCall::new("call_xyz", "lookup", serde_json::json!({"q": "rust"})),
+        )
+        .await
+        .expect("record pending call");
+    let reader = OpenAiResponsesThreadProjectionReader::new(
+        fixture.threads.clone(),
+        Arc::new(StaticProjectionStream::new(vec![run_status_envelope(
+            fixture.thread_id.as_str(),
+            run_id,
+            "blocked_external_tool",
+        )])),
+        catalog,
+    );
+
+    let projection = reader
+        .wait_for_response_completion(fixture.wait_request(run_id))
+        .await
+        .expect("wait response");
+
+    assert_eq!(projection.response.status, OpenAiResponseStatus::Completed);
+    assert_eq!(projection.response.output.len(), 1);
+    match &projection.response.output[0] {
+        OpenAiResponseOutputItem::FunctionCall { call_id, name, .. } => {
+            assert_eq!(call_id, "call_xyz");
+            assert_eq!(name, "lookup");
+        }
+        other => panic!("expected a function_call item, got {other:?}"),
+    }
 }
 
 struct ResponseReaderFixture {
@@ -262,11 +358,11 @@ impl ResponseReaderFixture {
         OpenAiResponseWaitRequest {
             public_id: OpenAiResponseId::new("resp_test").expect("response id"),
             actor_scope: self.actor_scope.clone(),
-            accepted_ack: ProductInboundAck::Accepted {
+            accepted_ack: Some(ProductInboundAck::Accepted {
                 accepted_message_ref: ironclaw_turns::AcceptedMessageRef::new("accepted:test")
                     .expect("accepted ref"),
                 submitted_run_id: run_id,
-            },
+            }),
             requested_model: "reborn-test".to_string(),
             projection_read: self.projection_read.clone(),
             mapping: self.mapping(run_id),
@@ -513,7 +609,12 @@ fn run_output_reader(
     OpenAiResponsesThreadProjectionReader::new(
         service,
         Arc::new(StaticProjectionStream::new(vec![])),
+        no_external_tools(),
     )
+}
+
+fn no_external_tools() -> Arc<dyn ExternalToolCatalog> {
+    Arc::new(InMemoryExternalToolCatalog::new())
 }
 
 #[tokio::test]

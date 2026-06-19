@@ -18,6 +18,8 @@ use ironclaw_product_adapters::{
 };
 use ironclaw_reborn_openai_compat::{
     InMemoryOpenAiCompatRefStore, OpenAiCompatActorScope, OpenAiCompatAuthenticatedCaller,
+    OpenAiCompatExternalToolResume, OpenAiCompatExternalToolResumeRequest,
+    OpenAiCompatExternalToolSpec, OpenAiCompatExternalToolStore, OpenAiCompatHttpError,
     OpenAiCompatInternalRefs, OpenAiCompatProductActionRef, OpenAiCompatProjectionRef,
     OpenAiCompatRouterState, OpenAiCompatTurnRunRef, OpenAiResponseId, OpenAiResponseObject,
     OpenAiResponseOutputItem, OpenAiResponseOutputItemStatus, OpenAiResponseProjection,
@@ -1396,6 +1398,255 @@ impl OpenAiResponsesProjectionReader for RecordingResponsesReader {
             ..self.response.clone()
         })
     }
+}
+
+/// A completed reader that does NOT rebind internal refs on `wait` — matching
+/// the production composition reader, which returns a projection without refs so
+/// the run id bound from the accept ack persists. (`StaticResponsesReader`
+/// rebinds a fresh random run id, which is fine for its own tests but would
+/// sever the create→resume run-ref link this test asserts.)
+struct CompletedNoRebindReader;
+
+#[async_trait]
+impl OpenAiResponsesProjectionReader for CompletedNoRebindReader {
+    async fn wait_for_response_completion(
+        &self,
+        request: OpenAiResponseWaitRequest,
+    ) -> Result<OpenAiResponseProjection, OpenAiCompatHttpError> {
+        Ok(OpenAiResponseProjection::new(completed_response(
+            request.public_id,
+            "done",
+        )))
+    }
+
+    async fn read_response(
+        &self,
+        request: OpenAiResponseReadRequest,
+    ) -> Result<OpenAiResponseObject, OpenAiCompatHttpError> {
+        Ok(completed_response(request.public_id, "done"))
+    }
+}
+
+#[derive(Default)]
+struct RecordingExternalToolStore {
+    registered: Mutex<Vec<(String, Vec<OpenAiCompatExternalToolSpec>)>>,
+    outputs: Mutex<Vec<(String, String, Value)>>,
+}
+
+#[async_trait]
+impl OpenAiCompatExternalToolStore for RecordingExternalToolStore {
+    async fn register_tools(
+        &self,
+        run_ref: OpenAiCompatTurnRunRef,
+        specs: Vec<OpenAiCompatExternalToolSpec>,
+    ) -> Result<(), OpenAiCompatHttpError> {
+        self.registered
+            .lock()
+            .expect("registered lock")
+            .push((run_ref.as_str().to_string(), specs));
+        Ok(())
+    }
+
+    async fn submit_tool_output(
+        &self,
+        run_ref: OpenAiCompatTurnRunRef,
+        call_id: String,
+        output: Value,
+    ) -> Result<(), OpenAiCompatHttpError> {
+        self.outputs.lock().expect("outputs lock").push((
+            run_ref.as_str().to_string(),
+            call_id,
+            output,
+        ));
+        Ok(())
+    }
+}
+
+#[derive(Default)]
+struct RecordingExternalToolResume {
+    resumed: Mutex<Vec<String>>,
+}
+
+#[async_trait]
+impl OpenAiCompatExternalToolResume for RecordingExternalToolResume {
+    async fn resume_external_tool_run(
+        &self,
+        request: OpenAiCompatExternalToolResumeRequest,
+    ) -> Result<(), OpenAiCompatHttpError> {
+        self.resumed
+            .lock()
+            .expect("resumed lock")
+            .push(request.run_ref.as_str().to_string());
+        Ok(())
+    }
+}
+
+fn router_with_external_tools(
+    workflow: Arc<FakeProductWorkflow>,
+    ref_store: Arc<InMemoryOpenAiCompatRefStore>,
+    reader: Arc<dyn OpenAiResponsesProjectionReader>,
+    store: Arc<dyn OpenAiCompatExternalToolStore>,
+    resume: Arc<dyn OpenAiCompatExternalToolResume>,
+) -> axum::Router {
+    workflow.program_projection_read_resolution(sample_projection_read_request());
+    let service = OpenAiResponsesWorkflow::new(workflow, ref_store, reader)
+        .with_external_tools(store, resume);
+    openai_compat_router_with_state(OpenAiCompatRouterState::with_responses(Arc::new(service)))
+        .layer(axum::Extension(caller()))
+}
+
+#[tokio::test]
+async fn responses_with_external_tools_registers_specs_after_submit() {
+    let workflow = Arc::new(FakeProductWorkflow::new());
+    let store = Arc::new(RecordingExternalToolStore::default());
+    let resume = Arc::new(RecordingExternalToolResume::default());
+    let router = router_with_external_tools(
+        workflow.clone(),
+        Arc::new(InMemoryOpenAiCompatRefStore::new()),
+        Arc::new(StaticResponsesReader::completed("ok")),
+        store.clone(),
+        resume.clone(),
+    );
+
+    let response = router
+        .oneshot(response_create_request(
+            "/api/v1/responses",
+            json!({
+                "model": "gpt-reborn",
+                "input": "what's the weather?",
+                "tools": [{
+                    "type": "function",
+                    "name": "get_weather",
+                    "description": "Look up weather",
+                    "parameters": {"type": "object", "properties": {"city": {"type": "string"}}}
+                }]
+            }),
+            None,
+        ))
+        .await
+        .expect("response");
+
+    // Tools are accepted (no longer a 400) when the store is wired, and the
+    // submit still reaches the product workflow exactly once.
+    assert_eq!(response.status(), http::StatusCode::OK);
+    assert_eq!(workflow.accepted_count(), 1);
+    // The specs are registered against the submitted run after the create.
+    let registered = store.registered.lock().expect("registered lock");
+    assert_eq!(registered.len(), 1);
+    assert!(!registered[0].0.is_empty(), "run ref must be bound");
+    assert_eq!(registered[0].1.len(), 1);
+    assert_eq!(registered[0].1[0].name, "get_weather");
+    // No resume on a fresh create.
+    assert!(resume.resumed.lock().expect("resumed lock").is_empty());
+}
+
+#[tokio::test]
+async fn responses_function_call_output_resumes_parked_run_without_new_submit() {
+    let workflow = Arc::new(FakeProductWorkflow::new());
+    let ref_store = Arc::new(InMemoryOpenAiCompatRefStore::new());
+    let store = Arc::new(RecordingExternalToolStore::default());
+    let resume = Arc::new(RecordingExternalToolResume::default());
+    let router = router_with_external_tools(
+        workflow.clone(),
+        ref_store,
+        Arc::new(CompletedNoRebindReader),
+        store.clone(),
+        resume.clone(),
+    );
+
+    // Create the (would-be parked) response that declares the tool.
+    let created = json_body(
+        router
+            .clone()
+            .oneshot(response_create_request(
+                "/api/v1/responses",
+                json!({
+                    "model": "gpt-reborn",
+                    "input": "what's the weather?",
+                    "tools": [{"type": "function", "name": "get_weather", "parameters": {"type": "object"}}]
+                }),
+                None,
+            ))
+            .await
+            .expect("create"),
+    )
+    .await;
+    let id = created["id"].as_str().expect("id").to_string();
+    assert_eq!(workflow.accepted_count(), 1);
+    let registered_run_ref = store.registered.lock().expect("registered lock")[0]
+        .0
+        .clone();
+
+    // Continue with the client tool output: resumes the parked run rather than
+    // submitting a fresh turn.
+    let resumed = router
+        .oneshot(response_create_request(
+            "/api/v1/responses",
+            json!({
+                "model": "gpt-reborn",
+                "previous_response_id": id,
+                "input": [{"type": "function_call_output", "call_id": "call_abc", "output": "72F"}]
+            }),
+            None,
+        ))
+        .await
+        .expect("resume");
+
+    assert_eq!(resumed.status(), http::StatusCode::OK);
+    // Critically: NO second product-workflow submit — the parked run is resumed.
+    assert_eq!(workflow.accepted_count(), 1);
+    // The client output was submitted against the parked run, then resumed.
+    let outputs = store.outputs.lock().expect("outputs lock");
+    assert_eq!(outputs.len(), 1);
+    assert_eq!(outputs[0].0, registered_run_ref);
+    assert_eq!(outputs[0].1, "call_abc");
+    assert_eq!(outputs[0].2, json!("72F"));
+    let resumed_runs = resume.resumed.lock().expect("resumed lock");
+    assert_eq!(resumed_runs.len(), 1);
+    assert_eq!(resumed_runs[0], registered_run_ref);
+}
+
+#[tokio::test]
+async fn responses_function_call_output_without_external_tools_is_a_normal_submit() {
+    // With no external-tool store wired, a `function_call_output` continuation is
+    // NOT a resume — it serializes into the transcript and submits a new turn.
+    let workflow = Arc::new(FakeProductWorkflow::new());
+    let ref_store = Arc::new(InMemoryOpenAiCompatRefStore::new());
+    let router = router_with_store(
+        workflow.clone(),
+        ref_store,
+        Arc::new(StaticResponsesReader::completed("ok")),
+    );
+    let created = json_body(
+        router
+            .clone()
+            .oneshot(response_create_request(
+                "/api/v1/responses",
+                json!({"model": "gpt-reborn", "input": "hi"}),
+                None,
+            ))
+            .await
+            .expect("create"),
+    )
+    .await;
+    let id = created["id"].as_str().expect("id").to_string();
+
+    let follow_up = router
+        .oneshot(response_create_request(
+            "/api/v1/responses",
+            json!({
+                "model": "gpt-reborn",
+                "previous_response_id": id,
+                "input": [{"type": "function_call_output", "call_id": "call_1", "output": "x"}]
+            }),
+            None,
+        ))
+        .await
+        .expect("follow up");
+
+    assert_eq!(follow_up.status(), http::StatusCode::OK);
+    // Two submits: the create and the (non-resume) continuation.
+    assert_eq!(workflow.accepted_count(), 2);
 }
 
 fn assert_error_body_excludes_redaction_sentinels(rendered: &str) {

@@ -27,7 +27,6 @@ use ironclaw_host_api::{CapabilityId, InvocationId, RuntimeKind};
 use ironclaw_loop_support::{
     CapabilityResultWrite, LoopCapabilityInputResolver, LoopCapabilityResultWriter,
 };
-use ironclaw_turns::ExternalToolCatalog;
 use ironclaw_turns::run_profile::{
     AgentLoopHostError, AgentLoopHostErrorKind, CapabilityBatchInvocation, CapabilityBatchOutcome,
     CapabilityCallCandidate, CapabilityInvocation, CapabilityOutcome, CapabilityProgress,
@@ -36,6 +35,7 @@ use ironclaw_turns::run_profile::{
     ProviderToolDefinition, RegisterProviderToolCallRequest, VisibleCapabilityRequest,
     VisibleCapabilitySurface,
 };
+use ironclaw_turns::{ExternalToolCatalog, PendingExternalCall};
 use ironclaw_turns::{LoopGateRef, TurnRunId};
 
 /// Wrap `inner` so the per-run external tools in `catalog` are offered to the
@@ -205,6 +205,12 @@ impl ExternalToolCapabilityPort {
                     display_preview: None,
                 })
                 .await?;
+            // The parked call is resolved: drop its pending-call record so a run
+            // that parks again on a later call does not re-surface this one.
+            self.catalog
+                .clear_pending_call(self.run_id, &call_id)
+                .await
+                .map_err(catalog_error)?;
             return Ok(CapabilityOutcome::Completed(CapabilityResultMessage {
                 result_ref: write.result_ref,
                 safe_summary: "external tool output".to_string(),
@@ -303,6 +309,22 @@ impl LoopCapabilityPort for ExternalToolCapabilityPort {
                 self.run_id,
                 input_ref.as_str().to_string(),
                 tool_call.id.clone(),
+            )
+            .await
+            .map_err(catalog_error)?;
+        // Record the call (name/arguments/call_id) so a parked
+        // `BlockedExternalTool` run can render it as a `function_call` output
+        // item — the loop checkpoint that also holds this data has no external
+        // read path. Cleared in `complete_or_park` once the client output is
+        // consumed on resume.
+        self.catalog
+            .record_pending_call(
+                self.run_id,
+                PendingExternalCall::new(
+                    tool_call.id.clone(),
+                    tool_call.name.clone(),
+                    tool_call.arguments.clone(),
+                ),
             )
             .await
             .map_err(catalog_error)?;
