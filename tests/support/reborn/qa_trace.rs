@@ -42,6 +42,7 @@ use ironclaw_network::{
     NetworkHttpEgress, NetworkHttpError, NetworkHttpRequest, NetworkHttpResponse, NetworkUsage,
     PolicyNetworkHttpEgress, ReqwestNetworkTransport,
 };
+use ironclaw_product_workflow::RebornOutboundDeliveryTargetId;
 use ironclaw_reborn::model_gateway::{LlmModelProfilePolicy, LlmProviderModelGateway};
 use ironclaw_reborn_composition::{
     AssistantReply, RebornCompositionProfile, RebornLocalRuntimeProfileOptions,
@@ -51,7 +52,7 @@ use ironclaw_reborn_composition::{
 };
 use ironclaw_reborn_config::{RebornConfigFile, RebornHome};
 use ironclaw_triggers::TriggerPollerWorkerConfig;
-use ironclaw_turns::run_profile::ModelProfileId;
+use ironclaw_turns::{ReplyTargetBindingRef, TurnStatus, run_profile::ModelProfileId};
 use secrecy::{ExposeSecret, SecretString};
 
 use crate::support::trace_llm::{LlmTrace, TraceResponse};
@@ -99,13 +100,21 @@ const GOOGLE_LIVE_CREDENTIAL: LiveCredentialSeed = LiveCredentialSeed {
 struct TraceHttpNetworkEgress {
     interceptor: Arc<dyn HttpInterceptor>,
     inner: PolicyNetworkHttpEgress<ReqwestNetworkTransport>,
+    mode: TraceHttpNetworkMode,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum TraceHttpNetworkMode {
+    Recording,
+    Replay,
 }
 
 impl TraceHttpNetworkEgress {
-    fn new(interceptor: Arc<dyn HttpInterceptor>) -> Self {
+    fn new(interceptor: Arc<dyn HttpInterceptor>, mode: TraceHttpNetworkMode) -> Self {
         Self {
             interceptor,
             inner: PolicyNetworkHttpEgress::new(ReqwestNetworkTransport::default()),
+            mode,
         }
     }
 }
@@ -121,6 +130,17 @@ impl NetworkHttpEgress for TraceHttpNetworkEgress {
             return Ok(network_response_from_http_exchange_response(
                 response, &request,
             ));
+        }
+
+        if matches!(self.mode, TraceHttpNetworkMode::Replay) {
+            return Err(NetworkHttpError::Transport {
+                reason: format!(
+                    "QA HTTP replay fixture did not contain a matching exchange for {} {}",
+                    request.method, request.url
+                ),
+                request_bytes: request.body.len() as u64,
+                response_bytes: 0,
+            });
         }
 
         let response = self.inner.execute(request).await?;
@@ -243,7 +263,15 @@ pub async fn build_qa_trace_runtime(
     root: &tempfile::TempDir,
     gateway: Arc<dyn HostManagedModelGateway>,
 ) -> RebornRuntime {
-    build_qa_trace_runtime_with_http_interceptor(root, gateway, None).await
+    build_qa_trace_runtime_with_http_interceptor(
+        root,
+        gateway,
+        Some((
+            Arc::new(ReplayingHttpInterceptor::new(Vec::new())) as Arc<dyn HttpInterceptor>,
+            TraceHttpNetworkMode::Replay,
+        )),
+    )
+    .await
 }
 
 pub async fn build_qa_trace_runtime_with_http_exchanges(
@@ -251,9 +279,15 @@ pub async fn build_qa_trace_runtime_with_http_exchanges(
     gateway: Arc<dyn HostManagedModelGateway>,
     exchanges: Vec<HttpExchange>,
 ) -> RebornRuntime {
-    let interceptor = (!exchanges.is_empty())
-        .then(|| Arc::new(ReplayingHttpInterceptor::new(exchanges)) as Arc<dyn HttpInterceptor>);
-    build_qa_trace_runtime_with_http_interceptor(root, gateway, interceptor).await
+    build_qa_trace_runtime_with_http_interceptor(
+        root,
+        gateway,
+        Some((
+            Arc::new(ReplayingHttpInterceptor::new(exchanges)) as Arc<dyn HttpInterceptor>,
+            TraceHttpNetworkMode::Replay,
+        )),
+    )
+    .await
 }
 
 pub async fn build_qa_trace_runtime_with_http_exchanges_and_trigger_poller(
@@ -261,12 +295,13 @@ pub async fn build_qa_trace_runtime_with_http_exchanges_and_trigger_poller(
     gateway: Arc<dyn HostManagedModelGateway>,
     exchanges: Vec<HttpExchange>,
 ) -> RebornRuntime {
-    let interceptor = (!exchanges.is_empty())
-        .then(|| Arc::new(ReplayingHttpInterceptor::new(exchanges)) as Arc<dyn HttpInterceptor>);
     build_qa_trace_runtime_with_http_interceptor_and_trigger_poller(
         root,
         gateway,
-        interceptor,
+        Some((
+            Arc::new(ReplayingHttpInterceptor::new(exchanges)) as Arc<dyn HttpInterceptor>,
+            TraceHttpNetworkMode::Replay,
+        )),
         true,
     )
     .await
@@ -275,7 +310,7 @@ pub async fn build_qa_trace_runtime_with_http_exchanges_and_trigger_poller(
 async fn build_qa_trace_runtime_with_http_interceptor(
     root: &tempfile::TempDir,
     gateway: Arc<dyn HostManagedModelGateway>,
-    http_interceptor: Option<Arc<dyn HttpInterceptor>>,
+    http_interceptor: Option<(Arc<dyn HttpInterceptor>, TraceHttpNetworkMode)>,
 ) -> RebornRuntime {
     build_qa_trace_runtime_with_http_interceptor_and_trigger_poller(
         root,
@@ -289,7 +324,7 @@ async fn build_qa_trace_runtime_with_http_interceptor(
 async fn build_qa_trace_runtime_with_http_interceptor_and_trigger_poller(
     root: &tempfile::TempDir,
     gateway: Arc<dyn HostManagedModelGateway>,
-    http_interceptor: Option<Arc<dyn HttpInterceptor>>,
+    http_interceptor: Option<(Arc<dyn HttpInterceptor>, TraceHttpNetworkMode)>,
     trigger_poller_enabled: bool,
 ) -> RebornRuntime {
     let host_home_root = root.path().join("host-home");
@@ -304,9 +339,11 @@ async fn build_qa_trace_runtime_with_http_interceptor_and_trigger_poller(
     )
     .expect("local-yolo runtime input")
     .with_local_dev_confirmed_host_home_root(host_home_root);
-    if let Some(interceptor) = http_interceptor {
-        input = input
-            .with_network_http_egress_for_test(Arc::new(TraceHttpNetworkEgress::new(interceptor)));
+    if let Some((interceptor, mode)) = http_interceptor {
+        input = input.with_network_http_egress_for_test(Arc::new(TraceHttpNetworkEgress::new(
+            interceptor,
+            mode,
+        )));
     }
     let mut input = RebornRuntimeInput::from_services(input)
         .with_identity(RebornRuntimeIdentity {
@@ -334,21 +371,22 @@ fn seed_static_outbound_delivery_targets(runtime: &RebornRuntime) {
     runtime
         .register_static_outbound_delivery_target_for_test(
             "qa-trace-slack",
-            "slack:qa-trace-dm",
+            RebornOutboundDeliveryTargetId::new("slack:qa-trace-dm").expect("QA Slack target id"),
             "slack",
             "Slack DM",
             Some("QA trace Slack direct message"),
-            "reply:qa-trace:slack-dm",
+            ReplyTargetBindingRef::new("reply:qa-trace:slack-dm").expect("QA Slack reply binding"),
         )
         .expect("seed QA Slack delivery target");
     runtime
         .register_static_outbound_delivery_target_for_test(
             "qa-trace-email",
-            "email:qa-trace-inbox",
+            RebornOutboundDeliveryTargetId::new("email:qa-trace-inbox")
+                .expect("QA email target id"),
             "email",
             "Email",
             Some("QA trace email inbox"),
-            "reply:qa-trace:email",
+            ReplyTargetBindingRef::new("reply:qa-trace:email").expect("QA email reply binding"),
         )
         .expect("seed QA email delivery target");
 }
@@ -783,26 +821,45 @@ async fn select_source_credential_account(
         ))
         .await
     {
-        Ok(account) => return account,
+        Ok(account) => account,
         Err(selection_error) => {
             let visible_accounts = record_source
                 .accounts_for_owner(source_auth_scope)
                 .await
-                .unwrap_or_default();
+                .unwrap_or_else(|accounts_error| {
+                    panic!(
+                        "recording fixture {fixture_name:?} could not list visible Reborn \
+                         product-auth accounts for provider {:?} after selection failed: \
+                         {selection_error}; list error: {accounts_error}",
+                        provider.as_str()
+                    )
+                });
             if let Some(account) =
                 select_unique_visible_source_account(visible_accounts.clone(), source, &provider)
             {
                 return account;
             }
             #[cfg(feature = "libsql")]
-            if let Some(account) = scan_local_dev_db_for_source_account(source, &provider).await {
-                eprintln!(
-                    "[RebornQaTrace] product-auth record source did not select provider {} \
-                     ({selection_error}); using matching local-dev account record from {}",
-                    provider.as_str(),
-                    source.local_dev_root.display()
-                );
-                return account;
+            match scan_local_dev_db_for_source_account(source, &provider).await {
+                Ok(Some(account)) => {
+                    eprintln!(
+                        "[RebornQaTrace] product-auth record source did not select provider {} \
+                         ({selection_error}); using matching local-dev account record from {}",
+                        provider.as_str(),
+                        source.local_dev_root.display()
+                    );
+                    return account;
+                }
+                Ok(None) => {}
+                Err(error) => {
+                    panic!(
+                        "recording fixture {fixture_name:?} could not scan local-dev product-auth \
+                         accounts for provider {:?} in {} after selection failed: \
+                         {selection_error}; scan error: {error}",
+                        provider.as_str(),
+                        source.local_dev_root.display()
+                    );
+                }
             }
             panic!(
                 "recording fixture {fixture_name:?} requires exactly one configured \
@@ -842,13 +899,18 @@ fn select_unique_visible_source_account(
 async fn scan_local_dev_db_for_source_account(
     source: &RebornQaCredentialSource,
     provider: &AuthProviderId,
-) -> Option<CredentialAccount> {
+) -> Result<Option<CredentialAccount>, String> {
     let db_path = source.local_dev_root.join("reborn-local-dev.db");
     if !db_path.exists() {
-        return None;
+        return Ok(None);
     }
-    let db = libsql::Builder::new_local(db_path).build().await.ok()?;
-    let conn = db.connect().ok()?;
+    let db = libsql::Builder::new_local(db_path.clone())
+        .build()
+        .await
+        .map_err(|error| format!("open local-dev DB {} failed: {error}", db_path.display()))?;
+    let conn = db
+        .connect()
+        .map_err(|error| format!("connect local-dev DB {} failed: {error}", db_path.display()))?;
     let mut rows = conn
         .query(
             "SELECT contents FROM root_filesystem_entries \
@@ -857,16 +919,36 @@ async fn scan_local_dev_db_for_source_account(
             (),
         )
         .await
-        .ok()?;
+        .map_err(|error| {
+            format!(
+                "query local-dev credential account records in {} failed: {error}",
+                db_path.display()
+            )
+        })?;
     let mut accounts = Vec::new();
-    while let Some(row) = rows.next().await.ok()? {
-        let contents: Vec<u8> = row.get(0).ok()?;
-        let Ok(account) = serde_json::from_slice::<CredentialAccount>(&contents) else {
-            continue;
-        };
+    while let Some(row) = rows.next().await.map_err(|error| {
+        format!(
+            "iterate local-dev credential account records in {} failed: {error}",
+            db_path.display()
+        )
+    })? {
+        let contents: Vec<u8> = row.get(0).map_err(|error| {
+            format!(
+                "read local-dev credential account record contents from {} failed: {error}",
+                db_path.display()
+            )
+        })?;
+        let account = serde_json::from_slice::<CredentialAccount>(&contents).map_err(|error| {
+            format!(
+                "deserialize local-dev credential account record from {} failed: {error}",
+                db_path.display()
+            )
+        })?;
         accounts.push(account);
     }
-    select_unique_visible_source_account(accounts, source, provider)
+    Ok(select_unique_visible_source_account(
+        accounts, source, provider,
+    ))
 }
 
 #[derive(serde::Deserialize)]
@@ -891,8 +973,17 @@ async fn resolve_source_secret_scope(
     kind: &str,
 ) -> ResourceScope {
     #[cfg(feature = "libsql")]
-    if let Some(scope) = scan_local_dev_db_for_secret_scope(source, handle).await {
-        return scope;
+    match scan_local_dev_db_for_secret_scope(source, handle).await {
+        Ok(Some(scope)) => return scope,
+        Ok(None) => {}
+        Err(error) => {
+            panic!(
+                "scan local-dev DB for {kind} secret {} scope on source account {:?} failed: \
+                 {error}",
+                handle.as_str(),
+                account.id
+            );
+        }
     }
 
     eprintln!(
@@ -908,13 +999,18 @@ async fn resolve_source_secret_scope(
 async fn scan_local_dev_db_for_secret_scope(
     source: &RebornQaCredentialSource,
     handle: &SecretHandle,
-) -> Option<ResourceScope> {
+) -> Result<Option<ResourceScope>, String> {
     let db_path = source.local_dev_root.join("reborn-local-dev.db");
     if !db_path.exists() {
-        return None;
+        return Ok(None);
     }
-    let db = libsql::Builder::new_local(db_path).build().await.ok()?;
-    let conn = db.connect().ok()?;
+    let db = libsql::Builder::new_local(db_path.clone())
+        .build()
+        .await
+        .map_err(|error| format!("open local-dev DB {} failed: {error}", db_path.display()))?;
+    let conn = db
+        .connect()
+        .map_err(|error| format!("connect local-dev DB {} failed: {error}", db_path.display()))?;
     let secret_path_pattern = format!("%/secrets/{}.json", handle.as_str());
     let mut rows = conn
         .query(
@@ -924,21 +1020,44 @@ async fn scan_local_dev_db_for_secret_scope(
             libsql::params![secret_path_pattern],
         )
         .await
-        .ok()?;
+        .map_err(|error| {
+            format!(
+                "query local-dev secret scope records for {} in {} failed: {error}",
+                handle.as_str(),
+                db_path.display()
+            )
+        })?;
     let mut matching = Vec::new();
-    while let Some(row) = rows.next().await.ok()? {
-        let contents: Vec<u8> = row.get(0).ok()?;
-        let Ok(record) = serde_json::from_slice::<StoredSecretScopeRecord>(&contents) else {
-            continue;
-        };
+    while let Some(row) = rows.next().await.map_err(|error| {
+        format!(
+            "iterate local-dev secret scope records for {} in {} failed: {error}",
+            handle.as_str(),
+            db_path.display()
+        )
+    })? {
+        let contents: Vec<u8> = row.get(0).map_err(|error| {
+            format!(
+                "read local-dev secret scope record contents for {} from {} failed: {error}",
+                handle.as_str(),
+                db_path.display()
+            )
+        })?;
+        let record =
+            serde_json::from_slice::<StoredSecretScopeRecord>(&contents).map_err(|error| {
+                format!(
+                    "deserialize local-dev secret scope record for {} from {} failed: {error}",
+                    handle.as_str(),
+                    db_path.display()
+                )
+            })?;
         if record.handle == *handle && source.matches_secret_owner(&record.scope) {
             matching.push(record.scope);
         }
     }
-    match matching.len() {
+    Ok(match matching.len() {
         1 => matching.pop(),
         _ => None,
-    }
+    })
 }
 
 #[cfg(feature = "libsql")]
@@ -947,7 +1066,7 @@ async fn read_local_dev_db_secret_material(
     handle: &SecretHandle,
 ) -> Result<ironclaw_secrets::SecretMaterial, String> {
     let record = scan_local_dev_db_for_secret_material_record(source, handle)
-        .await
+        .await?
         .ok_or_else(|| {
             format!(
                 "no matching encrypted local-dev secret metadata for handle {} in {}",
@@ -976,13 +1095,18 @@ async fn read_local_dev_db_secret_material(
 async fn scan_local_dev_db_for_secret_material_record(
     source: &RebornQaCredentialSource,
     handle: &SecretHandle,
-) -> Option<StoredSecretMaterialRecord> {
+) -> Result<Option<StoredSecretMaterialRecord>, String> {
     let db_path = source.local_dev_root.join("reborn-local-dev.db");
     if !db_path.exists() {
-        return None;
+        return Ok(None);
     }
-    let db = libsql::Builder::new_local(db_path).build().await.ok()?;
-    let conn = db.connect().ok()?;
+    let db = libsql::Builder::new_local(db_path.clone())
+        .build()
+        .await
+        .map_err(|error| format!("open local-dev DB {} failed: {error}", db_path.display()))?;
+    let conn = db
+        .connect()
+        .map_err(|error| format!("connect local-dev DB {} failed: {error}", db_path.display()))?;
     let secret_path_pattern = format!("%/secrets/{}.json", handle.as_str());
     let mut rows = conn
         .query(
@@ -992,21 +1116,44 @@ async fn scan_local_dev_db_for_secret_material_record(
             libsql::params![secret_path_pattern],
         )
         .await
-        .ok()?;
+        .map_err(|error| {
+            format!(
+                "query local-dev encrypted secret records for {} in {} failed: {error}",
+                handle.as_str(),
+                db_path.display()
+            )
+        })?;
     let mut matching = Vec::new();
-    while let Some(row) = rows.next().await.ok()? {
-        let contents: Vec<u8> = row.get(0).ok()?;
-        let Ok(record) = serde_json::from_slice::<StoredSecretMaterialRecord>(&contents) else {
-            continue;
-        };
+    while let Some(row) = rows.next().await.map_err(|error| {
+        format!(
+            "iterate local-dev encrypted secret records for {} in {} failed: {error}",
+            handle.as_str(),
+            db_path.display()
+        )
+    })? {
+        let contents: Vec<u8> = row.get(0).map_err(|error| {
+            format!(
+                "read local-dev encrypted secret record contents for {} from {} failed: {error}",
+                handle.as_str(),
+                db_path.display()
+            )
+        })?;
+        let record =
+            serde_json::from_slice::<StoredSecretMaterialRecord>(&contents).map_err(|error| {
+                format!(
+                    "deserialize local-dev encrypted secret record for {} from {} failed: {error}",
+                    handle.as_str(),
+                    db_path.display()
+                )
+            })?;
         if record.handle == *handle && source.matches_secret_owner(&record.scope) {
             matching.push(record);
         }
     }
-    match matching.len() {
+    Ok(match matching.len() {
         1 => matching.pop(),
         _ => None,
-    }
+    })
 }
 
 #[cfg(feature = "libsql")]
@@ -1242,7 +1389,7 @@ pub async fn record_qa_phrase(fixture_name: &str, phrase: &str) {
     let runtime = build_qa_trace_runtime_with_http_interceptor(
         &root,
         Arc::new(gateway),
-        Some(recorder.http_interceptor()),
+        Some((recorder.http_interceptor(), TraceHttpNetworkMode::Recording)),
     )
     .await;
     live_secret_values.extend(seed_live_credentials_for_fixture(&runtime, fixture_name).await);
@@ -1477,8 +1624,10 @@ fn assert_blocked_auth_outcome(
     outcome: &RebornTurnDriveOutcome,
 ) {
     match outcome {
-        RebornTurnDriveOutcome::BlockedOnGate { status, .. }
-            if format!("{status:?}") == "BlockedAuth" => {}
+        RebornTurnDriveOutcome::BlockedOnGate {
+            status: TurnStatus::BlockedAuth,
+            ..
+        } => {}
         RebornTurnDriveOutcome::BlockedOnGate {
             status, gate_ref, ..
         } => {
@@ -1649,7 +1798,10 @@ mod tests {
 
     #[tokio::test]
     async fn trace_http_network_egress_replays_intercepted_response() {
-        let egress = TraceHttpNetworkEgress::new(Arc::new(StaticHttpInterceptor));
+        let egress = TraceHttpNetworkEgress::new(
+            Arc::new(StaticHttpInterceptor),
+            TraceHttpNetworkMode::Replay,
+        );
         let response = egress
             .execute(NetworkHttpRequest {
                 scope: ResourceScope {

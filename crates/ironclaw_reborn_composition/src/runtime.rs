@@ -1181,17 +1181,12 @@ impl RebornRuntime {
     pub fn register_static_outbound_delivery_target_for_test(
         &self,
         provider_key: impl Into<String>,
-        target_id: &str,
+        target_id: RebornOutboundDeliveryTargetId,
         channel: &str,
         display_name: &str,
         description: Option<&str>,
-        reply_target_binding: &str,
+        reply_target_binding_ref: ReplyTargetBindingRef,
     ) -> Result<(), RebornRuntimeError> {
-        let target_id = RebornOutboundDeliveryTargetId::new(target_id).map_err(|error| {
-            RebornRuntimeError::InvalidArgument {
-                reason: format!("invalid outbound delivery target id: {error}"),
-            }
-        })?;
         let summary = RebornOutboundDeliveryTargetSummary::new(
             target_id,
             channel,
@@ -1201,12 +1196,6 @@ impl RebornRuntime {
         .map_err(|error| RebornRuntimeError::InvalidArgument {
             reason: format!("invalid outbound delivery target summary: {error}"),
         })?;
-        let reply_target_binding_ref =
-            ReplyTargetBindingRef::new(reply_target_binding).map_err(|error| {
-                RebornRuntimeError::InvalidArgument {
-                    reason: format!("invalid reply target binding ref: {error}"),
-                }
-            })?;
         self.register_outbound_delivery_target_provider(
             provider_key,
             Arc::new(StaticOutboundDeliveryTargetProvider {

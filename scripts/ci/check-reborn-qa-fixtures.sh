@@ -16,7 +16,7 @@ import re
 import sys
 
 fixture_dir = pathlib.Path(sys.argv[1])
-files = sorted(fixture_dir.glob("*.json"))
+files = sorted(fixture_dir.rglob("*.json"))
 if not files:
     print(f"no Reborn QA fixture JSON files found under {fixture_dir}", file=sys.stderr)
     sys.exit(1)
