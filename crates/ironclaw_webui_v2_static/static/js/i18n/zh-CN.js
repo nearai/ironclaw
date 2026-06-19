@@ -126,6 +126,8 @@ registerPack("zh-CN", {
   "approval.approveAndAlways": "批准并始终允许",
   "approval.alwaysAllowToolLabel": "始终允许 {tool} （不再询问）",
   "approval.thisTool": "此工具",
+  "approval.viewFullCommand": "查看完整命令",
+  "approval.showCommandPreview": "显示预览",
   // Chat — tool activity
   "tool.tabDetails": "详情",
   "tool.tabParameters": "参数",

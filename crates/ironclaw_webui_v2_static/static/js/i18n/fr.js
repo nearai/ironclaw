@@ -126,6 +126,8 @@ registerPack("fr", {
   "approval.approveAndAlways": "Approuver et toujours autoriser",
   "approval.alwaysAllowToolLabel": "Toujours autoriser {tool} sans demander",
   "approval.thisTool": "cet outil",
+  "approval.viewFullCommand": "Voir la commande complete",
+  "approval.showCommandPreview": "Afficher l'aperçu",
   // Chat — tool activity
   "tool.tabDetails": "Détails",
   "tool.tabParameters": "Paramètres",

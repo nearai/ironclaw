@@ -126,6 +126,8 @@ registerPack("ja", {
   "approval.approveAndAlways": "承認して常に許可",
   "approval.alwaysAllowToolLabel": "確認せずに {tool} を常に許可",
   "approval.thisTool": "このツール",
+  "approval.viewFullCommand": "コマンド全体を表示",
+  "approval.showCommandPreview": "プレビューを表示",
   // Chat — tool activity
   "tool.tabDetails": "詳細",
   "tool.tabParameters": "パラメーター",
