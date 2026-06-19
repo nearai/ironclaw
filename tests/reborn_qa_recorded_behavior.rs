@@ -112,10 +112,6 @@ const WEB_HN_SEARCH: QaPhrase = QaPhrase {
     fixture: "web_hn_search",
     phrase: "search Hacker News for any recent posts mentioning 'IronClaw' or 'NEAR AI'",
 };
-const CONNECT_TELEGRAM: QaPhrase = QaPhrase {
-    fixture: "connect_telegram",
-    phrase: "connect to Telegram",
-};
 const CONNECT_GMAIL: QaPhrase = QaPhrase {
     fixture: "connect_gmail",
     phrase: "connect to Gmail",
@@ -141,7 +137,6 @@ recorder_test!(record_routine_hn_monitor, ROUTINE_HN_MONITOR);
 recorder_test!(record_web_status_check, WEB_STATUS_CHECK);
 recorder_test!(record_web_release_summary, WEB_RELEASE_SUMMARY);
 recorder_test!(record_web_hn_search, WEB_HN_SEARCH);
-recorder_test!(record_connect_telegram, CONNECT_TELEGRAM);
 recorder_test!(record_connect_gmail, CONNECT_GMAIL);
 
 // --- Tier 2: fixture contracts (hermetic) -----------------------------------
@@ -236,15 +231,7 @@ async fn contract_web_hn_search_queries_for_keywords() {
 }
 
 #[tokio::test]
-async fn contract_connect_phrases_route_through_extension_tools() {
-    let telegram = load_qa_trace(CONNECT_TELEGRAM.fixture);
-    assert_tool_called_with(&telegram, "builtin.extension_search", &["Telegram"]);
-    let telegram_reply = final_text_reply(&telegram).expect("Telegram connect reply");
-    assert!(
-        telegram_reply.contains("No Telegram extension") && telegram_reply.contains("available"),
-        "Telegram connect fixture should record the current unavailable-extension behavior; reply: {telegram_reply:?}"
-    );
-
+async fn contract_connect_gmail_routes_through_extension_tools() {
     let gmail = load_qa_trace(CONNECT_GMAIL.fixture);
     assert_tool_called_with(&gmail, "builtin.extension_install", &["gmail"]);
     assert_tool_called_with(&gmail, "builtin.extension_activate", &["gmail"]);

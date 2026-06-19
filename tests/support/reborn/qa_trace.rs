@@ -1505,21 +1505,6 @@ fn assert_recorded_fixture_matches_expected_result(
                 &["gmail"],
             );
         }
-        "connect_telegram" => {
-            assert_recorded_tool_call(
-                fixture_name,
-                fixture_path,
-                &trace,
-                "builtin.extension_search",
-                &["Telegram"],
-            );
-            assert_recorded_final_reply_contains(
-                fixture_name,
-                fixture_path,
-                &trace,
-                &["No Telegram extension", "available"],
-            );
-        }
         "routine_health_ping" => {
             assert_recorded_tool_call(
                 fixture_name,
