@@ -27,24 +27,28 @@ use ironclaw_product_workflow::{
     CodexLoginStart, FsMount, LifecyclePackageKind, LifecyclePackageRef, LlmConfigSnapshot,
     LlmModelsResult, LlmProbeRequest, LlmProbeResult, NearAiLoginRequest, NearAiLoginStart,
     NearAiWalletLoginRequest, NearAiWalletLoginResult, ProductWorkflowError, ProjectFsFile,
-    ProjectionCursor, RebornAttachmentRequest, RebornCancelRunResponse,
-    RebornConnectableChannelListResponse, RebornCreateThreadResponse, RebornDeleteThreadRequest,
-    RebornDeleteThreadResponse, RebornExtensionActionResponse, RebornExtensionListResponse,
-    RebornExtensionRegistryResponse, RebornFsListRequest, RebornFsListResponse,
-    RebornFsMountsResponse, RebornFsReadRequest, RebornFsStatRequest, RebornFsStatResponse,
-    RebornListAutomationsResponse, RebornListThreadsResponse, RebornOperatorCommandPlaneResponse,
-    RebornOperatorConfigGetResponse, RebornOperatorConfigListResponse,
-    RebornOperatorConfigSetRequest, RebornOperatorConfigValidateRequest,
-    RebornOperatorConfigValidateResponse, RebornOperatorLogsQuery,
-    RebornOperatorServiceLifecycleRequest, RebornOperatorSetupRequest, RebornOperatorSetupResponse,
-    RebornOutboundDeliveryTargetListResponse, RebornOutboundPreferencesResponse,
-    RebornProjectFsListRequest, RebornProjectFsListResponse, RebornProjectFsReadRequest,
-    RebornProjectFsStatRequest, RebornProjectFsStatResponse, RebornResolveGateResponse,
-    RebornServicesApi, RebornServicesError, RebornServicesErrorCode, RebornServicesErrorKind,
-    RebornSetOutboundPreferencesRequest, RebornSetupExtensionResponse, RebornSkillActionResponse,
-    RebornSkillContentResponse, RebornSkillListResponse, RebornSkillSearchResponse,
-    RebornStreamEventsRequest, RebornSubmitTurnResponse, RebornTimelineRequest,
-    RebornTimelineResponse, RebornTraceCreditsResponse, RebornTraceHoldAuthorizeResponse,
+    ProjectionCursor, RebornAddMemberRequest, RebornAttachmentRequest, RebornCancelRunResponse,
+    RebornConnectableChannelListResponse, RebornCreateProjectRequest, RebornCreateThreadResponse,
+    RebornDeleteProjectRequest, RebornDeleteThreadRequest, RebornDeleteThreadResponse,
+    RebornExtensionActionResponse, RebornExtensionListResponse, RebornExtensionRegistryResponse,
+    RebornFsListRequest, RebornFsListResponse, RebornFsMountsResponse, RebornFsReadRequest,
+    RebornFsStatRequest, RebornFsStatResponse, RebornGetProjectRequest,
+    RebornListAutomationsResponse, RebornListMembersRequest, RebornListMembersResponse,
+    RebornListProjectsRequest, RebornListProjectsResponse, RebornListThreadsResponse,
+    RebornOperatorCommandPlaneResponse, RebornOperatorConfigGetResponse,
+    RebornOperatorConfigListResponse, RebornOperatorConfigSetRequest,
+    RebornOperatorConfigValidateRequest, RebornOperatorConfigValidateResponse,
+    RebornOperatorLogsQuery, RebornOperatorServiceLifecycleRequest, RebornOperatorSetupRequest,
+    RebornOperatorSetupResponse, RebornOutboundDeliveryTargetListResponse,
+    RebornOutboundPreferencesResponse, RebornProjectFsListRequest, RebornProjectFsListResponse,
+    RebornProjectFsReadRequest, RebornProjectFsStatRequest, RebornProjectFsStatResponse,
+    RebornProjectMemberInfo, RebornProjectResponse, RebornRemoveMemberRequest,
+    RebornResolveGateResponse, RebornServicesApi, RebornServicesError, RebornServicesErrorCode,
+    RebornServicesErrorKind, RebornSetOutboundPreferencesRequest, RebornSetupExtensionResponse,
+    RebornSkillActionResponse, RebornSkillContentResponse, RebornSkillListResponse,
+    RebornSkillSearchResponse, RebornStreamEventsRequest, RebornSubmitTurnResponse,
+    RebornTimelineRequest, RebornTimelineResponse, RebornTraceCreditsResponse,
+    RebornTraceHoldAuthorizeResponse, RebornUpdateMemberRoleRequest, RebornUpdateProjectRequest,
     SetActiveLlmRequest, UpsertLlmProviderRequest, WebUiAttachmentCapabilities,
     WebUiAuthenticatedCaller, WebUiCancelRunRequest, WebUiCreateThreadRequest,
     WebUiInboundValidationCode, WebUiInboundValidationError, WebUiListAutomationsRequest,
@@ -365,6 +369,135 @@ fn require_project_fs_path(path: Option<String>) -> Result<String, WebUiV2HttpEr
         ))
         .into()),
     }
+}
+
+/// Query parameters for `list_projects`.
+#[derive(Debug, Default, Deserialize)]
+pub struct ListProjectsQuery {
+    #[serde(default)]
+    pub limit: Option<u32>,
+}
+
+/// `GET /api/webchat/v2/projects`
+pub async fn list_projects(
+    State(state): State<WebUiV2State>,
+    Extension(caller): Extension<WebUiAuthenticatedCaller>,
+    Query(query): Query<ListProjectsQuery>,
+) -> Result<Json<RebornListProjectsResponse>, WebUiV2HttpError> {
+    let request = RebornListProjectsRequest { limit: query.limit };
+    let response = state.services().list_projects(caller, request).await?;
+    Ok(Json(response))
+}
+
+/// `POST /api/webchat/v2/projects`
+pub async fn create_project(
+    State(state): State<WebUiV2State>,
+    Extension(caller): Extension<WebUiAuthenticatedCaller>,
+    Json(body): Json<RebornCreateProjectRequest>,
+) -> Result<Json<RebornProjectResponse>, WebUiV2HttpError> {
+    let response = state.services().create_project(caller, body).await?;
+    Ok(Json(response))
+}
+
+/// `GET /api/webchat/v2/projects/{project_id}`
+pub async fn get_project(
+    State(state): State<WebUiV2State>,
+    Extension(caller): Extension<WebUiAuthenticatedCaller>,
+    Path(project_id): Path<String>,
+) -> Result<Json<RebornProjectResponse>, WebUiV2HttpError> {
+    let response = state
+        .services()
+        .get_project(caller, RebornGetProjectRequest { project_id })
+        .await?;
+    Ok(Json(response))
+}
+
+/// `POST /api/webchat/v2/projects/{project_id}` — update (path `project_id`
+/// overrides any body value).
+pub async fn update_project(
+    State(state): State<WebUiV2State>,
+    Extension(caller): Extension<WebUiAuthenticatedCaller>,
+    Path(project_id): Path<String>,
+    Json(mut body): Json<RebornUpdateProjectRequest>,
+) -> Result<Json<RebornProjectResponse>, WebUiV2HttpError> {
+    body.project_id = project_id;
+    let response = state.services().update_project(caller, body).await?;
+    Ok(Json(response))
+}
+
+/// `DELETE /api/webchat/v2/projects/{project_id}`
+pub async fn delete_project(
+    State(state): State<WebUiV2State>,
+    Extension(caller): Extension<WebUiAuthenticatedCaller>,
+    Path(project_id): Path<String>,
+) -> Result<StatusCode, WebUiV2HttpError> {
+    state
+        .services()
+        .delete_project(caller, RebornDeleteProjectRequest { project_id })
+        .await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// `GET /api/webchat/v2/projects/{project_id}/members`
+pub async fn list_project_members(
+    State(state): State<WebUiV2State>,
+    Extension(caller): Extension<WebUiAuthenticatedCaller>,
+    Path(project_id): Path<String>,
+) -> Result<Json<RebornListMembersResponse>, WebUiV2HttpError> {
+    let response = state
+        .services()
+        .list_project_members(caller, RebornListMembersRequest { project_id })
+        .await?;
+    Ok(Json(response))
+}
+
+/// `POST /api/webchat/v2/projects/{project_id}/members` — grant a member
+/// (path `project_id` overrides any body value).
+pub async fn add_project_member(
+    State(state): State<WebUiV2State>,
+    Extension(caller): Extension<WebUiAuthenticatedCaller>,
+    Path(project_id): Path<String>,
+    Json(mut body): Json<RebornAddMemberRequest>,
+) -> Result<Json<RebornProjectMemberInfo>, WebUiV2HttpError> {
+    body.project_id = project_id;
+    let response = state.services().add_project_member(caller, body).await?;
+    Ok(Json(response))
+}
+
+/// `POST /api/webchat/v2/projects/{project_id}/members/{user_id}` — change a
+/// member's role (path ids override any body value).
+pub async fn update_project_member(
+    State(state): State<WebUiV2State>,
+    Extension(caller): Extension<WebUiAuthenticatedCaller>,
+    Path((project_id, user_id)): Path<(String, String)>,
+    Json(mut body): Json<RebornUpdateMemberRoleRequest>,
+) -> Result<Json<RebornProjectMemberInfo>, WebUiV2HttpError> {
+    body.project_id = project_id;
+    body.user_id = user_id;
+    let response = state
+        .services()
+        .update_project_member_role(caller, body)
+        .await?;
+    Ok(Json(response))
+}
+
+/// `DELETE /api/webchat/v2/projects/{project_id}/members/{user_id}`
+pub async fn remove_project_member(
+    State(state): State<WebUiV2State>,
+    Extension(caller): Extension<WebUiAuthenticatedCaller>,
+    Path((project_id, user_id)): Path<(String, String)>,
+) -> Result<StatusCode, WebUiV2HttpError> {
+    state
+        .services()
+        .remove_project_member(
+            caller,
+            RebornRemoveMemberRequest {
+                project_id,
+                user_id,
+            },
+        )
+        .await?;
+    Ok(StatusCode::NO_CONTENT)
 }
 
 /// Upper bound on the sanitized `Content-Disposition` filename. A filesystem can
