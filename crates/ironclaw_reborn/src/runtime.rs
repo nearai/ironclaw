@@ -37,7 +37,6 @@ use ironclaw_host_runtime::{
 use crate::{
     app_loop_family::build_loop_family_registry,
     driver_registry::{DriverRegistry, DriverRegistryError},
-    late_wire_notifier::LateWireWakeNotifier,
     loop_driver_host::{
         HookDispatcherBuilderFactory, RebornLoopDriverHostFactory, TextOnlyLoopHostConfig,
     },
@@ -412,21 +411,27 @@ where
     );
     let run_profile_resolver: Arc<dyn RunProfileResolver> = resolver;
 
-    // Build a LateWireWakeNotifier to break the coordinator → scheduler → executor →
-    // host_factory → capability_factory → coordinator cycle. The coordinator is given
-    // this notifier now; the real scheduler notifier is wired in after the scheduler
-    // starts. Any notify calls before wiring return Ok(()) harmlessly — the scheduler's
-    // poll tick picks up queued runs within one poll interval.
-    let late_wire_notifier = Arc::new(LateWireWakeNotifier::new());
-    let late_wire_base: Arc<dyn TurnRunWakeNotifier> = late_wire_notifier.clone();
+    // Mint the scheduler notifier and its paired wake channel BEFORE building
+    // the coordinator, breaking the coordinator↔scheduler build-order cycle.
+    // The coordinator receives the real notifier immediately; the channel is
+    // held here and passed to `start_with_channel` after the executor is built.
+    // Use the default wake-channel capacity; the full scheduler config is built
+    // below once the executor is ready.
+    let (scheduler_notifier, wake_channel) = SchedulerTurnRunWakeNotifier::channel(
+        TurnRunSchedulerConfig::default().wake_channel_capacity(),
+    );
+    let scheduler_notifier_base: Arc<dyn TurnRunWakeNotifier> = scheduler_notifier.clone();
     // When a cancellation factory is supplied, fan-out each coordinator wake to
     // BOTH the scheduler AND the factory's `notify_run_wake` observer. Without
     // this composite, the scheduler still wakes but retained product run handles
     // never flip on `cancel_run` — breaking end-to-end product-live
     // cancellation observation.
     let wake_notifier: Arc<dyn TurnRunWakeNotifier> = match parts.cancellation_factory.clone() {
-        Some(factory) => Arc::new(CompositeTurnRunWakeNotifier::new(late_wire_base, factory)),
-        None => late_wire_base,
+        Some(factory) => Arc::new(CompositeTurnRunWakeNotifier::new(
+            scheduler_notifier_base,
+            factory,
+        )),
+        None => scheduler_notifier_base,
     };
     let turn_state_for_observer: Arc<dyn TurnSpawnTreeStateStore> = parts.turn_state.clone();
     let completion_observer = Arc::new(SubagentCompletionObserver::new_unbound(
@@ -554,24 +559,18 @@ where
         Arc::clone(&transition_port),
         parts.loop_exit_evidence,
     ));
-    let worker_count = parts.config.worker_count.get();
     let executor = Arc::new(RebornTurnRunExecutor::new(
         Arc::clone(&loop_exit_applier),
         Arc::clone(&driver_registry),
         host_factory.clone() as Arc<dyn crate::turn_runner::HostFactory>,
     ));
     let scheduler_config = TurnRunSchedulerConfig::default()
-        .with_max_concurrent_runs(worker_count)
+        .with_max_concurrent_runs(parts.config.worker_count.get())
         .with_runner_heartbeat_interval(parts.config.worker.heartbeat_interval)
         .with_poll_interval(parts.config.worker.poll_interval);
     let scheduler_handle =
-        TurnRunScheduler::new(Arc::clone(&transition_port), executor, scheduler_config).start();
-    let scheduler_notifier = scheduler_handle.wake_notifier();
-
-    // Wire the late-wire notifier to forward to the real scheduler notifier.
-    // This fills the OnceLock set during coordinator construction; from here on
-    // every `notify_queued_run` call goes straight to the scheduler.
-    late_wire_notifier.set(scheduler_notifier.clone() as Arc<dyn TurnRunWakeNotifier>);
+        TurnRunScheduler::new(Arc::clone(&transition_port), executor, scheduler_config)
+            .start_with_channel(scheduler_notifier.clone(), wake_channel);
 
     Ok(
         RebornRuntimeLoopComposition::<dyn SessionThreadService, G> {

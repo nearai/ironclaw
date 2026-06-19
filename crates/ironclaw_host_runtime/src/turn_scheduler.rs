@@ -170,10 +170,24 @@ impl TurnRunScheduler {
     }
 
     pub fn start(self) -> TurnRunSchedulerHandle {
-        let (command_tx, command_rx) = mpsc::channel(self.config.wake_channel_capacity());
-        let notifier = Arc::new(SchedulerTurnRunWakeNotifier {
-            command_tx: command_tx.clone(),
-        });
+        let capacity = self.config.wake_channel_capacity();
+        let (notifier, channel) = SchedulerTurnRunWakeNotifier::channel(capacity);
+        self.start_with_channel(notifier, channel)
+    }
+
+    /// Start with a pre-created wake channel (from
+    /// [`SchedulerTurnRunWakeNotifier::channel`]), consuming both the notifier
+    /// and the channel. This is the cycle-breaking entry point used when the
+    /// coordinator needs the notifier before the scheduler starts.
+    pub fn start_with_channel(
+        self,
+        notifier: Arc<SchedulerTurnRunWakeNotifier>,
+        channel: TurnRunWakeChannel,
+    ) -> TurnRunSchedulerHandle {
+        let TurnRunWakeChannel {
+            command_tx,
+            command_rx,
+        } = channel;
         let supervisor = tokio::spawn(run_scheduler_loop(
             command_rx,
             command_tx.clone(),
@@ -190,9 +204,43 @@ impl TurnRunScheduler {
     }
 }
 
+/// The receiver half of a pre-created wake channel, paired with a
+/// [`SchedulerTurnRunWakeNotifier`].
+///
+/// Created by [`SchedulerTurnRunWakeNotifier::channel`] to break the
+/// coordinator↔scheduler build-order cycle. The caller mints both the
+/// notifier and this channel before building the coordinator, then passes
+/// the channel to [`TurnRunScheduler::start_with_channel`].
+pub struct TurnRunWakeChannel {
+    command_tx: mpsc::Sender<SchedulerCommand>,
+    command_rx: mpsc::Receiver<SchedulerCommand>,
+}
+
 #[derive(Clone)]
 pub struct SchedulerTurnRunWakeNotifier {
     command_tx: mpsc::Sender<SchedulerCommand>,
+}
+
+impl SchedulerTurnRunWakeNotifier {
+    /// Create a notifier and its paired wake channel before the scheduler is
+    /// started, breaking the coordinator↔scheduler build-order cycle.
+    ///
+    /// The returned notifier can be given to the turn coordinator immediately.
+    /// Pass the channel to [`TurnRunScheduler::start_with_channel`] later to
+    /// wire the scheduler loop.
+    pub fn channel(capacity: usize) -> (Arc<SchedulerTurnRunWakeNotifier>, TurnRunWakeChannel) {
+        let (command_tx, command_rx) = mpsc::channel(capacity.max(1));
+        let notifier = Arc::new(SchedulerTurnRunWakeNotifier {
+            command_tx: command_tx.clone(),
+        });
+        (
+            notifier,
+            TurnRunWakeChannel {
+                command_tx,
+                command_rx,
+            },
+        )
+    }
 }
 
 impl fmt::Debug for SchedulerTurnRunWakeNotifier {

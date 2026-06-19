@@ -1706,10 +1706,12 @@ impl RebornRuntime {
                 .await;
         }
         self.trace_flush_worker.shutdown().await;
+        // Set stopped BEFORE draining the scheduler so any concurrent
+        // submit_user_turn/wait observes stopped immediately.
+        self.scheduler_stopped.store(true, Ordering::Release);
         if let Some(scheduler) = self.scheduler_handle.lock().await.take() {
             scheduler.shutdown().await;
         }
-        self.scheduler_stopped.store(true, Ordering::Release);
         if let Some(projection) = self.budget_event_projection {
             projection.shutdown().await;
         }
@@ -2260,10 +2262,6 @@ pub async fn build_reborn_runtime(
                 .to_string(),
         });
     }
-
-    // The scheduler (TurnRunScheduler) creates its own wake channel internally;
-    // no pre-built wake channel is needed. The scheduler notifier is wired into
-    // services after composition via `composition.scheduler_notifier`.
 
     let validated_identity = validate_runtime_identity(identity)?;
     services_input = services_input.with_local_runtime_identity(
@@ -8867,8 +8865,52 @@ mod tests {
             "scheduler_stopped must be true after stop_turn_runner_worker_for_manual_state_test"
         );
 
-        // Clean up remaining runtime resources (without calling shutdown, which
-        // would try to re-take the already-taken scheduler handle).
-        drop(runtime);
+        // shutdown() handles the already-taken scheduler handle gracefully
+        // via the `if let Some` guard — safe to call after the test helper.
+        runtime.shutdown().await.expect("runtime shutdown");
+    }
+
+    /// After `stop_turn_runner_worker_for_manual_state_test` sets
+    /// `scheduler_stopped = true`, `send_user_message` must immediately return
+    /// `Err(RebornRuntimeError::WorkerStopped)` without submitting the turn.
+    #[tokio::test]
+    async fn scheduler_stopped_rejects_send_user_message() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let gateway = Arc::new(RecordingGateway {
+            reply: "stopped-reject-reply".to_string(),
+            requests: Arc::new(StdMutex::new(Vec::new())),
+        });
+
+        let input = RebornRuntimeInput::from_services(
+            RebornBuildInput::local_dev(
+                "scheduler-stopped-reject-owner",
+                root.path().join("local-dev"),
+            )
+            .with_runtime_policy(local_dev_runtime_policy()),
+        )
+        .with_identity(RebornRuntimeIdentity {
+            tenant_id: "scheduler-stopped-reject-tenant".to_string(),
+            agent_id: "scheduler-stopped-reject-agent".to_string(),
+            source_binding_id: "scheduler-stopped-reject-source".to_string(),
+            reply_target_binding_id: "scheduler-stopped-reject-reply".to_string(),
+        })
+        .with_model_gateway_override(gateway);
+
+        let runtime = build_reborn_runtime(input)
+            .await
+            .expect("runtime builds for stopped-reject test");
+
+        let conversation = runtime.new_conversation().await.expect("conversation");
+
+        stop_turn_runner_worker_for_manual_state_test(&runtime).await;
+
+        let result = runtime.send_user_message(&conversation, "hi").await;
+        assert!(
+            matches!(result, Err(RebornRuntimeError::WorkerStopped)),
+            "send_user_message must return WorkerStopped when scheduler is stopped, got: {result:?}"
+        );
+
+        // shutdown() handles the already-taken scheduler handle gracefully.
+        runtime.shutdown().await.expect("runtime shutdown");
     }
 }

@@ -20,7 +20,6 @@ pub mod app_loop_family;
 pub mod driver_registry;
 pub mod failure_categories;
 pub mod hook_gate_refs;
-pub(crate) mod late_wire_notifier;
 #[cfg(feature = "webui-user-store")]
 pub mod local_trigger_access;
 pub mod loop_driver_host;
