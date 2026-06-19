@@ -285,7 +285,6 @@ pub struct TriggerRecord {
     pub name: String,
     pub source: TriggerSourceKind,
     pub schedule: TriggerSchedule,
-    pub completion_policy: TriggerCompletionPolicy,
     pub prompt: String,
     pub state: TriggerState,
     pub next_run_at: Timestamp,
@@ -344,6 +343,10 @@ pub enum TriggerSchedule {
         expression: String,
         timezone: String,
     },
+    Once {
+        at: chrono::DateTime<chrono::Utc>,
+        timezone: String,
+    },
 }
 
 impl TriggerSchedule {
@@ -365,6 +368,19 @@ impl TriggerSchedule {
         Ok(schedule)
     }
 
+    /// Create a one-shot schedule that fires at the given UTC timestamp.
+    pub fn once(
+        at: chrono::DateTime<chrono::Utc>,
+        timezone: impl Into<String>,
+    ) -> Result<Self, TriggerError> {
+        let schedule = Self::Once {
+            at,
+            timezone: timezone.into(),
+        };
+        schedule.validate()?;
+        Ok(schedule)
+    }
+
     pub fn validate(&self) -> Result<(), TriggerError> {
         match self {
             Self::Cron {
@@ -373,6 +389,10 @@ impl TriggerSchedule {
             } => {
                 parse_timezone(timezone)?;
                 parse_cron_schedule(expression)?;
+                Ok(())
+            }
+            Self::Once { timezone, .. } => {
+                parse_timezone(timezone)?;
                 Ok(())
             }
         }
@@ -395,6 +415,7 @@ impl TriggerSchedule {
                 };
                 Ok(next)
             }
+            Self::Once { at, .. } => Ok(if *at > after { Some(*at) } else { None }),
         }
     }
 }
@@ -411,14 +432,6 @@ pub enum TriggerState {
     Scheduled,
     Paused,
     Completed,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum TriggerCompletionPolicy {
-    #[default]
-    Recurring,
-    CompleteAfterFirstFire,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -601,10 +614,6 @@ pub struct FireAcceptedRequest {
     /// panel can open the correct chat thread from `recent_runs[].thread_id`.
     pub thread_id: ThreadId,
     pub submitted_at: Timestamp,
-    /// `Some` = next scheduled fire slot for the trigger (must be strictly
-    /// after `fire_slot`); `None` = fire-once, leave the stored `next_run_at`
-    /// unchanged.
-    pub next_run_at: Option<Timestamp>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -622,10 +631,6 @@ pub struct FireReplayedRequest {
     /// no chat link.
     pub thread_id: Option<ThreadId>,
     pub replayed_at: Timestamp,
-    /// `Some` = next scheduled fire slot for the trigger (must be strictly
-    /// after `fire_slot`); `None` = fire-once, leave the stored `next_run_at`
-    /// unchanged.
-    pub next_run_at: Option<Timestamp>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1232,11 +1237,7 @@ impl TriggerRepository for InMemoryTriggerRepository {
                     reject_run_ref_rewrite(active_run_ref, request.run_id)?;
                     return Ok(());
                 }
-                reject_missing_next_run_at_for_recurring(
-                    record.completion_policy,
-                    request.next_run_at,
-                )?;
-                if let Some(nra) = request.next_run_at {
+                if let Some(nra) = record.schedule.next_slot_after(request.fire_slot)? {
                     reject_non_future_next_run_at(request.fire_slot, nra)?;
                     record.next_run_at = nra;
                 }
@@ -1275,11 +1276,7 @@ impl TriggerRepository for InMemoryTriggerRepository {
                     reject_run_ref_rewrite(active_run_ref, request.original_run_id)?;
                     return Ok(());
                 }
-                reject_missing_next_run_at_for_recurring(
-                    record.completion_policy,
-                    request.next_run_at,
-                )?;
-                if let Some(nra) = request.next_run_at {
+                if let Some(nra) = record.schedule.next_slot_after(request.fire_slot)? {
                     reject_non_future_next_run_at(request.fire_slot, nra)?;
                     record.next_run_at = nra;
                 }
@@ -1315,7 +1312,7 @@ impl TriggerRepository for InMemoryTriggerRepository {
             request.fire_slot,
             |record| {
                 reject_failed_result_after_active_run(record.active_run_ref)?;
-                if record.completion_policy == TriggerCompletionPolicy::Recurring
+                if matches!(record.schedule, TriggerSchedule::Cron { .. })
                     && record.next_run_at > request.fire_slot
                 {
                     return Err(TriggerError::InvalidRecord {
@@ -1420,11 +1417,17 @@ impl TriggerRepository for InMemoryTriggerRepository {
         {
             return Ok(None);
         }
+        let next = record.schedule.next_slot_after(request.fire_slot)?;
         record.active_fire_slot = None;
         record.active_run_ref = None;
-        if record.completion_policy == TriggerCompletionPolicy::CompleteAfterFirstFire {
-            record.state = TriggerState::Completed;
+        if let Some(t) = next {
+            record.next_run_at = t;
         }
+        record.state = if next.is_some() {
+            TriggerState::Scheduled
+        } else {
+            TriggerState::Completed
+        };
         let record = record.clone();
         let completed_at = Utc::now();
         state
@@ -1659,27 +1662,6 @@ pub(crate) fn reject_non_future_next_run_at(
     })
 }
 
-/// Rejects the combination of `next_run_at = None` with a `Recurring` completion policy.
-///
-/// A recurring trigger always needs a future `next_run_at` on acceptance so the poller
-/// knows when to schedule the next fire. Passing `None` would leave `next_run_at` pointing
-/// at the just-fired slot, causing the poller to immediately re-fire the same slot after
-/// `clear_active_fire` returns the trigger to `Scheduled` state.
-///
-/// Returns `Ok(())` for any `None` + `CompleteAfterFirstFire` combination (fire-once
-/// semantics intentionally leave `next_run_at` unchanged).
-pub(crate) fn reject_missing_next_run_at_for_recurring(
-    completion_policy: TriggerCompletionPolicy,
-    next_run_at: Option<Timestamp>,
-) -> Result<(), TriggerError> {
-    if completion_policy == TriggerCompletionPolicy::Recurring && next_run_at.is_none() {
-        return Err(TriggerError::InvalidRecord {
-            reason: "recurring fire acceptance requires next_run_at".to_string(),
-        });
-    }
-    Ok(())
-}
-
 pub(crate) fn reject_run_ref_rewrite(
     active_run_ref: TurnRunId,
     incoming_run_ref: TurnRunId,
@@ -1874,7 +1856,6 @@ mod tests {
             name: "daily summary".to_string(),
             source: TriggerSourceKind::Schedule,
             schedule: TriggerSchedule::cron("0 8 * * *").expect("valid cron"),
-            completion_policy: TriggerCompletionPolicy::Recurring,
             prompt: "summarize unread mail".to_string(),
             state: TriggerState::Scheduled,
             next_run_at,
@@ -2002,10 +1983,6 @@ mod tests {
         assert_eq!(
             to_value(TriggerState::Scheduled).unwrap(),
             json!("scheduled")
-        );
-        assert_eq!(
-            to_value(TriggerCompletionPolicy::CompleteAfterFirstFire).unwrap(),
-            json!("complete_after_first_fire")
         );
         assert_eq!(to_value(TriggerRunStatus::Ok).unwrap(), json!("ok"));
         assert_eq!(
@@ -2529,7 +2506,6 @@ mod tests {
                 thread_id: ThreadId::new("01890f0f-test-7000-8000-000000000002")
                     .expect("valid thread id"),
                 submitted_at: fire_slot,
-                next_run_at: Some(ts(1_704_067_260)),
             })
             .await
             .expect_err("poisoned mutex maps to backend through accepted-result API");
@@ -2552,7 +2528,6 @@ mod tests {
                     .expect("valid run"),
                 thread_id: None,
                 replayed_at: fire_slot,
-                next_run_at: Some(ts(1_704_067_260)),
             })
             .await
             .expect_err("poisoned mutex maps to backend through replayed-result API");
@@ -2604,7 +2579,7 @@ mod tests {
         let run_id = TurnRunId::parse("01890f0f-9b6f-7a85-9e5b-9f21a93c4f5a").expect("valid run");
         // Insert a fire-once trigger with an active fire already in progress.
         let mut record = sample_record(trigger_id, tenant("tenant-a"), fire_slot);
-        record.completion_policy = TriggerCompletionPolicy::CompleteAfterFirstFire;
+        record.schedule = TriggerSchedule::once(fire_slot, "UTC").expect("valid once");
         record.active_fire_slot = Some(fire_slot);
         record.active_run_ref = Some(run_id);
         repo.upsert_trigger(record).await.expect("insert");
@@ -2642,7 +2617,7 @@ mod tests {
         let run_id = TurnRunId::parse("01890f0f-9b6f-7a85-9e5b-9f21a93c4f5a").expect("valid run");
         // Insert fire-once trigger with an active fire.
         let mut record = sample_record(trigger_id, tenant("tenant-a"), fire_slot);
-        record.completion_policy = TriggerCompletionPolicy::CompleteAfterFirstFire;
+        record.schedule = TriggerSchedule::once(fire_slot, "UTC").expect("valid once");
         record.active_fire_slot = Some(fire_slot);
         record.active_run_ref = Some(run_id);
         repo.upsert_trigger(record).await.expect("insert");
@@ -2678,7 +2653,6 @@ mod tests {
         let next_slot = ts(1_704_067_260);
         let run_id = TurnRunId::parse("01890f0f-9b6f-7a85-9e5b-9f21a93c4f5a").expect("valid run");
         let mut record = sample_record(trigger_id, tenant("tenant-a"), next_slot);
-        record.completion_policy = TriggerCompletionPolicy::Recurring;
         record.active_fire_slot = Some(fire_slot);
         record.active_run_ref = Some(run_id);
         repo.upsert_trigger(record).await.expect("insert");
@@ -2705,6 +2679,45 @@ mod tests {
     fn cron_schedule_rejects_invalid_timezone() {
         let error = TriggerSchedule::cron_with_timezone("0 9 * * *", "Not/A/Timezone")
             .expect_err("invalid timezone rejected");
+        assert!(
+            error.to_string().contains("invalid timezone"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[test]
+    fn once_schedule_next_slot_after_returns_some_when_future() {
+        let at = Utc.with_ymd_and_hms(2025, 6, 1, 12, 0, 0).unwrap();
+        let schedule = TriggerSchedule::once(at, "UTC").expect("valid once");
+        let before = Utc.with_ymd_and_hms(2025, 6, 1, 11, 0, 0).unwrap();
+        let next = schedule
+            .next_slot_after(before)
+            .expect("next slot")
+            .expect("some");
+        assert_eq!(next, at);
+    }
+
+    #[test]
+    fn once_schedule_next_slot_after_returns_none_when_past() {
+        let at = Utc.with_ymd_and_hms(2025, 6, 1, 12, 0, 0).unwrap();
+        let schedule = TriggerSchedule::once(at, "UTC").expect("valid once");
+        let after = Utc.with_ymd_and_hms(2025, 6, 1, 13, 0, 0).unwrap();
+        let next = schedule.next_slot_after(after).expect("next slot");
+        assert!(next.is_none());
+    }
+
+    #[test]
+    fn once_schedule_next_slot_after_returns_none_when_equal() {
+        let at = Utc.with_ymd_and_hms(2025, 6, 1, 12, 0, 0).unwrap();
+        let schedule = TriggerSchedule::once(at, "UTC").expect("valid once");
+        let next = schedule.next_slot_after(at).expect("next slot");
+        assert!(next.is_none());
+    }
+
+    #[test]
+    fn once_schedule_rejects_invalid_timezone() {
+        let at = Utc.with_ymd_and_hms(2025, 6, 1, 12, 0, 0).unwrap();
+        let error = TriggerSchedule::once(at, "Not/A/Timezone").expect_err("invalid tz rejected");
         assert!(
             error.to_string().contains("invalid timezone"),
             "unexpected error: {error}"

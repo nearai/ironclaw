@@ -14,9 +14,9 @@ use crate::{
     ClearActiveFireRequest, FireAcceptedRequest, FirePermanentFailedRequest, FireReplayedRequest,
     FireRetryableFailedRequest, FireTerminalFailedRequest, InMemoryTriggerRepository,
     TRIGGER_TRUSTED_ADAPTER_INSTALLATION_ID, TRIGGER_TRUSTED_ADAPTER_KIND,
-    TRIGGER_TRUSTED_EXTERNAL_ACTOR_NAMESPACE, TriggerCompletionPolicy, TriggerError, TriggerFire,
-    TriggerId, TriggerInboundContentRef, TriggerMaterializedPrompt, TriggerPromptMaterializer,
-    TriggerRecord, TriggerRepository, TriggerRunHistoryStatus, TriggerRunRecord, TriggerRunStatus,
+    TRIGGER_TRUSTED_EXTERNAL_ACTOR_NAMESPACE, TriggerError, TriggerFire, TriggerId,
+    TriggerInboundContentRef, TriggerMaterializedPrompt, TriggerPromptMaterializer, TriggerRecord,
+    TriggerRepository, TriggerRunHistoryStatus, TriggerRunRecord, TriggerRunStatus,
     TriggerSchedule, TriggerSourceKind, TriggerSourceProvider, TriggerState,
 };
 
@@ -61,7 +61,6 @@ fn sample_record(
         name: "daily summary".to_string(),
         source: TriggerSourceKind::Schedule,
         schedule: TriggerSchedule::cron("0 8 * * *").expect("valid cron"),
-        completion_policy: TriggerCompletionPolicy::Recurring,
         prompt: "summarize unread mail".to_string(),
         state: TriggerState::Scheduled,
         next_run_at,
@@ -1967,14 +1966,22 @@ async fn tick_source_provider_errors_report_bounded_permanent_reasons() {
 
 #[tokio::test]
 async fn tick_permanent_failure_without_next_slot_completes_trigger() {
+    // When a Cron trigger's next_slot_after returns None (schedule exhausted), a
+    // permanent pre-submission failure must be treated as Retryable (fail-closed)
+    // rather than completing the trigger. This keeps the trigger Scheduled so it
+    // can be investigated or removed manually.
     let repo = Arc::new(InMemoryTriggerRepository::default());
     let trigger_id = TriggerId::parse("01HZZZZZZZZZZZZZZZZZZZZZZZ").expect("ulid");
+    // Far-future fire slot whose daily Cron has no valid next slot after it.
     let fire_slot = ymd_hms(9999, 12, 31, 8, 0, 0);
     repo.upsert_trigger(sample_record(trigger_id, tenant("tenant-a"), fire_slot))
         .await
         .expect("insert");
-    let worker = worker(
+    // Use a source provider that returns None (SourceNoFire): a permanent failure
+    // that, because next_slot_after is None, must resolve to Retryable (fail-closed).
+    let worker = worker_with_source_provider(
         repo.clone(),
+        Arc::new(NullSourceProvider),
         Arc::new(RecordingMaterializer::success("content:trigger-fire")),
         Arc::new(RecordingSubmitter::with_outcomes(Vec::new())),
         Arc::new(RecordingActiveRunLookup::default()),
@@ -1982,18 +1989,23 @@ async fn tick_permanent_failure_without_next_slot_completes_trigger() {
 
     let report = worker.tick_once(fire_slot).await.expect("tick succeeds");
 
-    assert!(matches!(
-        report.results.last().map(|result| &result.outcome),
-        Some(TriggerPollerFireOutcome::PermanentFailed {
-            reason: TriggerPollerFailureReason::InvalidSchedule,
-        })
-    ));
+    // Fail-closed: permanent failure on an exhausted schedule stays Retryable.
+    assert!(
+        matches!(
+            report.results.last().map(|result| &result.outcome),
+            Some(TriggerPollerFireOutcome::RetryableFailed {
+                reason: TriggerPollerFailureReason::SourceNoFire,
+            })
+        ),
+        "exhausted-cron permanent failure must be retryable (fail-closed)"
+    );
     let persisted = repo
         .get_trigger(tenant("tenant-a"), trigger_id)
         .await
         .expect("load")
         .expect("record present");
-    assert_eq!(persisted.state, TriggerState::Completed);
+    // Trigger remains Scheduled (not Completed) so it can be manually removed.
+    assert_eq!(persisted.state, TriggerState::Scheduled);
     assert_eq!(persisted.last_status, Some(TriggerRunStatus::Error));
     assert_eq!(persisted.active_fire_slot, None);
     assert_eq!(persisted.active_run_ref, None);
@@ -2009,7 +2021,7 @@ async fn tick_fire_once_trigger_submits_without_terminal_error() {
     // Use a specific year-pinned timestamp far in the past: the schedule has no next slot.
     let fire_slot = ymd_hms(2025, 1, 1, 8, 0, 0);
     let mut record = sample_record(trigger_id, tenant("tenant-a"), fire_slot);
-    record.completion_policy = TriggerCompletionPolicy::CompleteAfterFirstFire;
+    record.schedule = TriggerSchedule::once(fire_slot, "UTC").expect("valid once");
     repo.upsert_trigger(record).await.expect("insert");
     let run_id = TurnRunId::parse("01890f0f-9b6f-7a85-9e5b-9f21a93c4f5a").expect("run id");
     let submitter = Arc::new(RecordingSubmitter::with_outcomes(vec![Ok(
@@ -2061,7 +2073,7 @@ async fn tick_fire_once_trigger_becomes_completed_after_clear() {
     let run_id = TurnRunId::parse("01890f0f-9b6f-7a85-9e5b-9f21a93c4f5a").expect("run id");
     // Start with an already-active fire-once trigger (simulating state after submit).
     let mut record = sample_record(trigger_id, tenant("tenant-a"), fire_slot);
-    record.completion_policy = TriggerCompletionPolicy::CompleteAfterFirstFire;
+    record.schedule = TriggerSchedule::once(fire_slot, "UTC").expect("valid once");
     record.active_fire_slot = Some(fire_slot);
     record.active_run_ref = Some(run_id);
     repo.upsert_trigger(record).await.expect("insert");
@@ -2110,7 +2122,7 @@ async fn tick_fire_once_blocked_active_run_is_left_pending() {
     let fire_slot = ymd_hms(2025, 1, 1, 8, 0, 0);
     let run_id = TurnRunId::parse("01890f0f-9b6f-7a85-9e5b-9f21a93c4f5a").expect("run id");
     let mut record = sample_record(trigger_id, tenant("tenant-a"), fire_slot);
-    record.completion_policy = TriggerCompletionPolicy::CompleteAfterFirstFire;
+    record.schedule = TriggerSchedule::once(fire_slot, "UTC").expect("valid once");
     record.active_fire_slot = Some(fire_slot);
     record.active_run_ref = Some(run_id);
     repo.upsert_trigger(record).await.expect("insert");
@@ -2166,7 +2178,7 @@ async fn tick_fire_once_terminal_ok_active_run_clears_to_completed() {
     let fire_slot = ymd_hms(2025, 1, 1, 8, 0, 0);
     let run_id = TurnRunId::parse("01890f0f-9b6f-7a85-9e5b-9f21a93c4f5b").expect("run id");
     let mut record = sample_record(trigger_id, tenant("tenant-a"), fire_slot);
-    record.completion_policy = TriggerCompletionPolicy::CompleteAfterFirstFire;
+    record.schedule = TriggerSchedule::once(fire_slot, "UTC").expect("valid once");
     record.active_fire_slot = Some(fire_slot);
     record.active_run_ref = Some(run_id);
     repo.upsert_trigger(record).await.expect("insert");
@@ -2218,7 +2230,7 @@ async fn tick_fire_once_terminal_error_active_run_clears_to_completed() {
     let fire_slot = ymd_hms(2025, 1, 1, 8, 0, 0);
     let run_id = TurnRunId::parse("01890f0f-9b6f-7a85-9e5b-9f21a93c4f5c").expect("run id");
     let mut record = sample_record(trigger_id, tenant("tenant-a"), fire_slot);
-    record.completion_policy = TriggerCompletionPolicy::CompleteAfterFirstFire;
+    record.schedule = TriggerSchedule::once(fire_slot, "UTC").expect("valid once");
     record.active_fire_slot = Some(fire_slot);
     record.active_run_ref = Some(run_id);
     repo.upsert_trigger(record).await.expect("insert");
@@ -2272,7 +2284,7 @@ async fn tick_recurring_blocked_active_run_clears_as_failed() {
     let fire_slot = ts(1_704_067_200);
     let run_id = TurnRunId::parse("01890f0f-9b6f-7a85-9e5b-9f21a93c4f5d").expect("run id");
     let mut record = sample_record(trigger_id, tenant("tenant-a"), ts(1_704_067_260));
-    assert_eq!(record.completion_policy, TriggerCompletionPolicy::Recurring);
+    assert!(matches!(record.schedule, TriggerSchedule::Cron { .. }));
     record.active_fire_slot = Some(fire_slot);
     record.active_run_ref = Some(run_id);
     repo.upsert_trigger(record).await.expect("insert");
@@ -2324,7 +2336,7 @@ async fn tick_fire_once_permanent_submit_failure_stays_scheduled_for_retry() {
     let trigger_id = TriggerId::parse("01HZZZZZZZZZZZZZZZZZZZZZZZ").expect("ulid");
     let fire_slot = ts(1_704_067_200);
     let mut record = sample_record(trigger_id, tenant("tenant-a"), fire_slot);
-    record.completion_policy = TriggerCompletionPolicy::CompleteAfterFirstFire;
+    record.schedule = TriggerSchedule::once(fire_slot, "UTC").expect("valid once");
     let original_next_run_at = record.next_run_at;
     repo.upsert_trigger(record).await.expect("insert");
     let worker = worker(
@@ -2379,7 +2391,7 @@ async fn tick_recurring_trigger_reschedules_unchanged() {
     let trigger_id = TriggerId::parse("01HZZZZZZZZZZZZZZZZZZZZZZZ").expect("ulid");
     let fire_slot = ts(1_704_067_200);
     let record = sample_record(trigger_id, tenant("tenant-a"), fire_slot);
-    assert_eq!(record.completion_policy, TriggerCompletionPolicy::Recurring);
+    assert!(matches!(record.schedule, TriggerSchedule::Cron { .. }));
     let expected_next_run_at = record
         .schedule
         .next_slot_after(fire_slot)
@@ -4011,7 +4023,6 @@ async fn timezone_aware_firing_harness() {
         name: "daily 9am eastern".to_string(),
         source: TriggerSourceKind::Schedule,
         schedule: schedule.clone(),
-        completion_policy: TriggerCompletionPolicy::Recurring,
         prompt: "run daily summary".to_string(),
         state: TriggerState::Scheduled,
         next_run_at: computed_seed,

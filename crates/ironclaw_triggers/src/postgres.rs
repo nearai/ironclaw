@@ -10,10 +10,9 @@ use tokio_postgres::Row;
 use crate::{
     ActiveTriggerScanCursor, ClaimDueFireOutcome, ClaimDueFireRequest, ClaimedTriggerFire,
     ClearActiveFireRequest, FireAcceptedRequest, FirePermanentFailedRequest, FireReplayedRequest,
-    FireRetryableFailedRequest, FireTerminalFailedRequest, TriggerCompletionPolicy, TriggerError,
-    TriggerId, TriggerRecord, TriggerRepository, TriggerRunHistoryStatus, TriggerRunRecord,
-    TriggerRunStatus, TriggerSchedule, TriggerSourceKind, TriggerState,
-    reject_failed_result_after_active_run, reject_missing_next_run_at_for_recurring,
+    FireRetryableFailedRequest, FireTerminalFailedRequest, TriggerError, TriggerId, TriggerRecord,
+    TriggerRepository, TriggerRunHistoryStatus, TriggerRunRecord, TriggerRunStatus,
+    TriggerSchedule, TriggerSourceKind, TriggerState, reject_failed_result_after_active_run,
     reject_non_future_next_run_at, reject_run_ref_rewrite, trigger_run_history_status_text,
 };
 
@@ -21,7 +20,7 @@ const TRIGGER_TABLE: &str = "trigger_records";
 const TRIGGER_RUN_TABLE: &str = "trigger_run_history";
 const TRIGGER_COLUMNS: &str = "\
     trigger_id, tenant_id, creator_user_id, agent_id, project_id, \
-    name, source, schedule_expression, schedule_timezone, completion_policy, prompt, \
+    name, source, schedule_expression, schedule_timezone, schedule_kind, prompt, \
     state, next_run_at, last_run_at, last_fired_slot, last_status, \
     active_fire_slot, active_run_ref, created_at";
 const TRIGGER_RUN_COLUMNS: &str = "\
@@ -79,7 +78,7 @@ impl TriggerRepository for PostgresTriggerRepository {
         let source = source_kind_text(record.source);
         let schedule_expression = schedule_expression_text(&record.schedule);
         let schedule_timezone = schedule_timezone_text(&record.schedule);
-        let completion_policy = completion_policy_text(record.completion_policy);
+        let schedule_kind = schedule_kind_text(&record.schedule);
         let state = state_text(record.state);
         let next_run_at = fmt_ts(&record.next_run_at);
         let last_run_at = record.last_run_at.as_ref().map(fmt_ts);
@@ -94,7 +93,7 @@ impl TriggerRepository for PostgresTriggerRepository {
                 r#"
                 INSERT INTO trigger_records (
                     trigger_id, tenant_id, creator_user_id, agent_id, project_id,
-                    name, source, schedule_expression, schedule_timezone, completion_policy, prompt,
+                    name, source, schedule_expression, schedule_timezone, schedule_kind, prompt,
                     state, next_run_at, last_run_at, last_fired_slot, last_status,
                     active_fire_slot, active_run_ref, created_at
                 ) VALUES (
@@ -111,7 +110,7 @@ impl TriggerRepository for PostgresTriggerRepository {
                     source = EXCLUDED.source,
                     schedule_expression = EXCLUDED.schedule_expression,
                     schedule_timezone = EXCLUDED.schedule_timezone,
-                    completion_policy = EXCLUDED.completion_policy,
+                    schedule_kind = EXCLUDED.schedule_kind,
                     prompt = EXCLUDED.prompt,
                     state = EXCLUDED.state,
                     next_run_at = EXCLUDED.next_run_at,
@@ -131,7 +130,7 @@ impl TriggerRepository for PostgresTriggerRepository {
                     &source,
                     &schedule_expression,
                     &schedule_timezone,
-                    &completion_policy,
+                    &schedule_kind,
                     &record.prompt,
                     &state,
                     &next_run_at,
@@ -482,9 +481,9 @@ impl TriggerRepository for PostgresTriggerRepository {
             reject_run_ref_rewrite(active_run_ref, request.run_id)?;
             return Ok(Some(record));
         }
-        reject_missing_next_run_at_for_recurring(record.completion_policy, request.next_run_at)?;
-        if let Some(next_run_at) = request.next_run_at {
-            reject_non_future_next_run_at(request.fire_slot, next_run_at)?;
+        let next_run_at = record.schedule.next_slot_after(request.fire_slot)?;
+        if let Some(nra) = next_run_at {
+            reject_non_future_next_run_at(request.fire_slot, nra)?;
         }
 
         let Some(record) = mark_successful_fire_result(
@@ -495,7 +494,7 @@ impl TriggerRepository for PostgresTriggerRepository {
                 fire_slot: request.fire_slot,
                 run_id: request.run_id,
                 result_at: request.submitted_at,
-                next_run_at: request.next_run_at,
+                next_run_at,
                 operation: "mark accepted trigger fire",
             },
         )
@@ -542,9 +541,9 @@ impl TriggerRepository for PostgresTriggerRepository {
             reject_run_ref_rewrite(active_run_ref, request.original_run_id)?;
             return Ok(Some(record));
         }
-        reject_missing_next_run_at_for_recurring(record.completion_policy, request.next_run_at)?;
-        if let Some(next_run_at) = request.next_run_at {
-            reject_non_future_next_run_at(request.fire_slot, next_run_at)?;
+        let next_run_at = record.schedule.next_slot_after(request.fire_slot)?;
+        if let Some(nra) = next_run_at {
+            reject_non_future_next_run_at(request.fire_slot, nra)?;
         }
 
         let Some(record) = mark_successful_fire_result(
@@ -555,7 +554,7 @@ impl TriggerRepository for PostgresTriggerRepository {
                 fire_slot: request.fire_slot,
                 run_id: request.original_run_id,
                 result_at: request.replayed_at,
-                next_run_at: request.next_run_at,
+                next_run_at,
                 operation: "mark replayed trigger fire",
             },
         )
@@ -599,7 +598,7 @@ impl TriggerRepository for PostgresTriggerRepository {
             return Ok(None);
         }
         reject_failed_result_after_active_run(record.active_run_ref)?;
-        if record.completion_policy == TriggerCompletionPolicy::Recurring
+        if matches!(record.schedule, TriggerSchedule::Cron { .. })
             && record.next_run_at > request.fire_slot
         {
             return Err(TriggerError::InvalidRecord {
@@ -802,7 +801,7 @@ impl TriggerRepository for PostgresTriggerRepository {
                     "UPDATE {TRIGGER_TABLE}
                      SET active_fire_slot = NULL,
                          active_run_ref = NULL,
-                         state = CASE WHEN completion_policy = 'complete_after_first_fire' THEN 'completed' ELSE state END
+                         state = CASE WHEN schedule_kind = 'once' THEN 'completed' ELSE state END
                      WHERE tenant_id = $1
                        AND trigger_id = $2
                        AND active_fire_slot = $3
@@ -1184,9 +1183,10 @@ fn row_to_record(row: &Row) -> Result<TriggerRecord, TriggerError> {
             ProjectId::new(value).map_err(|error| invalid_record("project_id", error.to_string()))
         })
         .transpose()?;
-    let schedule = TriggerSchedule::cron_with_timezone(
-        required_text(row, "schedule_expression")?,
-        required_text(row, "schedule_timezone")?,
+    let schedule = parse_schedule(
+        &required_text(row, "schedule_kind")?,
+        &required_text(row, "schedule_expression")?,
+        &required_text(row, "schedule_timezone")?,
     )?;
     let last_run_at = optional_text(row, "last_run_at")?
         .map(|value| parse_timestamp(&value, "last_run_at"))
@@ -1213,7 +1213,6 @@ fn row_to_record(row: &Row) -> Result<TriggerRecord, TriggerError> {
         name: required_text(row, "name")?,
         source: parse_source_kind(&required_text(row, "source")?)?,
         schedule,
-        completion_policy: parse_completion_policy(&required_text(row, "completion_policy")?)?,
         prompt: required_text(row, "prompt")?,
         state: parse_state(&required_text(row, "state")?)?,
         next_run_at: parse_timestamp(&required_text(row, "next_run_at")?, "next_run_at")?,
@@ -1292,24 +1291,6 @@ fn parse_state(value: &str) -> Result<TriggerState, TriggerError> {
     }
 }
 
-fn completion_policy_text(value: TriggerCompletionPolicy) -> &'static str {
-    match value {
-        TriggerCompletionPolicy::Recurring => "recurring",
-        TriggerCompletionPolicy::CompleteAfterFirstFire => "complete_after_first_fire",
-    }
-}
-
-fn parse_completion_policy(value: &str) -> Result<TriggerCompletionPolicy, TriggerError> {
-    match value {
-        "recurring" => Ok(TriggerCompletionPolicy::Recurring),
-        "complete_after_first_fire" => Ok(TriggerCompletionPolicy::CompleteAfterFirstFire),
-        other => Err(invalid_record(
-            "completion_policy",
-            format!("unsupported completion policy `{other}`"),
-        )),
-    }
-}
-
 fn status_text(value: TriggerRunStatus) -> &'static str {
     match value {
         TriggerRunStatus::Ok => "ok",
@@ -1340,15 +1321,50 @@ fn parse_run_history_status(value: &str) -> Result<TriggerRunHistoryStatus, Trig
     }
 }
 
+fn schedule_kind_text(schedule: &TriggerSchedule) -> &'static str {
+    match schedule {
+        TriggerSchedule::Cron { .. } => "cron",
+        TriggerSchedule::Once { .. } => "once",
+    }
+}
+
 fn schedule_expression_text(schedule: &TriggerSchedule) -> String {
     match schedule {
         TriggerSchedule::Cron { expression, .. } => expression.clone(),
+        TriggerSchedule::Once { at, .. } => at.to_rfc3339_opts(chrono::SecondsFormat::Nanos, true),
     }
 }
 
 fn schedule_timezone_text(schedule: &TriggerSchedule) -> String {
     match schedule {
-        TriggerSchedule::Cron { timezone, .. } => timezone.clone(),
+        TriggerSchedule::Cron { timezone, .. } | TriggerSchedule::Once { timezone, .. } => {
+            timezone.clone()
+        }
+    }
+}
+
+fn parse_schedule(
+    kind: &str,
+    expression: &str,
+    timezone: &str,
+) -> Result<TriggerSchedule, TriggerError> {
+    match kind {
+        "cron" => TriggerSchedule::cron_with_timezone(expression, timezone),
+        "once" => {
+            let at = chrono::DateTime::parse_from_rfc3339(expression)
+                .map(|dt| dt.with_timezone(&chrono::Utc))
+                .map_err(|error| {
+                    invalid_record(
+                        "schedule_expression",
+                        format!("invalid once timestamp: {error}"),
+                    )
+                })?;
+            TriggerSchedule::once(at, timezone)
+        }
+        other => Err(invalid_record(
+            "schedule_kind",
+            format!("unsupported schedule kind `{other}`"),
+        )),
     }
 }
 
@@ -1375,7 +1391,7 @@ CREATE TABLE IF NOT EXISTS trigger_records (
     source TEXT NOT NULL,
     schedule_expression TEXT NOT NULL,
     schedule_timezone TEXT NOT NULL DEFAULT 'UTC',
-    completion_policy TEXT NOT NULL,
+    schedule_kind TEXT NOT NULL DEFAULT 'cron',
     prompt TEXT NOT NULL,
     state TEXT NOT NULL,
     next_run_at TEXT NOT NULL,
@@ -1389,6 +1405,7 @@ CREATE TABLE IF NOT EXISTS trigger_records (
 );
 
 ALTER TABLE trigger_records ADD COLUMN IF NOT EXISTS schedule_timezone TEXT NOT NULL DEFAULT 'UTC';
+ALTER TABLE trigger_records ADD COLUMN IF NOT EXISTS schedule_kind TEXT NOT NULL DEFAULT 'cron';
 
 CREATE INDEX IF NOT EXISTS trigger_records_state_next_run_at_idx
     ON trigger_records (state, next_run_at, tenant_id, trigger_id);

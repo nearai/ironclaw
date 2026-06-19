@@ -16,10 +16,9 @@ use libsql::params;
 use crate::{
     ActiveTriggerScanCursor, ClaimDueFireOutcome, ClaimDueFireRequest, ClaimedTriggerFire,
     ClearActiveFireRequest, FireAcceptedRequest, FirePermanentFailedRequest, FireReplayedRequest,
-    FireRetryableFailedRequest, FireTerminalFailedRequest, TriggerCompletionPolicy, TriggerError,
-    TriggerId, TriggerRecord, TriggerRepository, TriggerRunHistoryStatus, TriggerRunRecord,
-    TriggerRunStatus, TriggerSchedule, TriggerSourceKind, TriggerState,
-    reject_failed_result_after_active_run, reject_missing_next_run_at_for_recurring,
+    FireRetryableFailedRequest, FireTerminalFailedRequest, TriggerError, TriggerId, TriggerRecord,
+    TriggerRepository, TriggerRunHistoryStatus, TriggerRunRecord, TriggerRunStatus,
+    TriggerSchedule, TriggerSourceKind, TriggerState, reject_failed_result_after_active_run,
     reject_non_future_next_run_at, reject_run_ref_rewrite, trigger_run_history_status_text,
 };
 
@@ -31,7 +30,7 @@ const TRIGGER_RUN_TABLE: &str = "trigger_run_history";
 #[cfg(feature = "libsql")]
 const TRIGGER_COLUMNS: &str = "\
     trigger_id, tenant_id, creator_user_id, agent_id, project_id, \
-    name, source, schedule_expression, schedule_timezone, completion_policy, prompt, \
+    name, source, schedule_expression, schedule_timezone, schedule_kind, prompt, \
     state, next_run_at, last_run_at, last_fired_slot, last_status, \
     active_fire_slot, active_run_ref, created_at";
 
@@ -54,7 +53,7 @@ const SCHEDULE_EXPRESSION_COL: usize = 7;
 #[cfg(feature = "libsql")]
 const SCHEDULE_TIMEZONE_COL: usize = 8;
 #[cfg(feature = "libsql")]
-const COMPLETION_POLICY_COL: usize = 9;
+const SCHEDULE_KIND_COL: usize = 9;
 #[cfg(feature = "libsql")]
 const PROMPT_COL: usize = 10;
 #[cfg(feature = "libsql")]
@@ -124,7 +123,8 @@ impl LibSqlTriggerRepository {
                         name TEXT NOT NULL,
                         source TEXT NOT NULL,
                         schedule_expression TEXT NOT NULL,
-                        completion_policy TEXT NOT NULL,
+                        schedule_timezone TEXT NOT NULL DEFAULT 'UTC',
+                        schedule_kind TEXT NOT NULL DEFAULT 'cron',
                         prompt TEXT NOT NULL,
                         state TEXT NOT NULL,
                         next_run_at TEXT NOT NULL,
@@ -236,6 +236,21 @@ impl LibSqlTriggerRepository {
                 let msg = error.to_string();
                 if !msg.contains("duplicate column") && !msg.contains("already exists") {
                     return Err(backend_error("add schedule_timezone column", error));
+                }
+            }
+            // Add schedule_kind column if it doesn't already exist (idempotent migration).
+            if let Err(error) = conn
+                .execute(
+                    &format!(
+                        "ALTER TABLE {TRIGGER_TABLE} ADD COLUMN schedule_kind TEXT NOT NULL DEFAULT 'cron'"
+                    ),
+                    (),
+                )
+                .await
+            {
+                let msg = error.to_string();
+                if !msg.contains("duplicate column") && !msg.contains("already exists") {
+                    return Err(backend_error("add schedule_kind column", error));
                 }
             }
             // Make thread_id nullable in trigger_run_history if it was created NOT NULL.
@@ -730,7 +745,6 @@ impl TriggerRepository for LibSqlTriggerRepository {
                 run_id: request.run_id,
                 thread_id: Some(request.thread_id),
                 result_at: request.submitted_at,
-                next_run_at: request.next_run_at,
                 update_operation: "mark accepted trigger fire",
                 read_operation: "read accepted trigger fire",
             },
@@ -752,7 +766,6 @@ impl TriggerRepository for LibSqlTriggerRepository {
                 run_id: request.original_run_id,
                 thread_id: request.thread_id,
                 result_at: request.replayed_at,
-                next_run_at: request.next_run_at,
                 update_operation: "mark replayed trigger fire",
                 read_operation: "read replayed trigger fire",
             },
@@ -777,8 +790,7 @@ impl TriggerRepository for LibSqlTriggerRepository {
             return Ok(None);
         }
         reject_failed_result_after_active_run(record.active_run_ref)?;
-        if record.completion_policy == TriggerCompletionPolicy::Recurring
-            && record.next_run_at > fire_slot
+        if matches!(record.schedule, TriggerSchedule::Cron { .. }) && record.next_run_at > fire_slot
         {
             return Err(TriggerError::InvalidRecord {
                 reason: "retryable fire failure must leave next_run_at at or before the failed fire slot"
@@ -842,8 +854,7 @@ impl TriggerRepository for LibSqlTriggerRepository {
                 return Err(error);
             }
         }
-        resolve_missed_fire_result_update(&conn, &tenant_id, trigger_id, fire_slot, None, None)
-            .await
+        resolve_missed_fire_result_update(&conn, &tenant_id, trigger_id, fire_slot, None).await
     }
 
     async fn mark_fire_permanently_failed(
@@ -924,8 +935,7 @@ impl TriggerRepository for LibSqlTriggerRepository {
                 return Err(error);
             }
         }
-        resolve_missed_fire_result_update(&conn, &tenant_id, trigger_id, fire_slot, None, None)
-            .await
+        resolve_missed_fire_result_update(&conn, &tenant_id, trigger_id, fire_slot, None).await
     }
 
     async fn mark_fire_terminally_failed(
@@ -996,8 +1006,7 @@ impl TriggerRepository for LibSqlTriggerRepository {
                 return Err(error);
             }
         }
-        resolve_missed_fire_result_update(&conn, &tenant_id, trigger_id, fire_slot, None, None)
-            .await
+        resolve_missed_fire_result_update(&conn, &tenant_id, trigger_id, fire_slot, None).await
     }
 
     async fn clear_active_fire(
@@ -1014,7 +1023,7 @@ impl TriggerRepository for LibSqlTriggerRepository {
                         "UPDATE {TRIGGER_TABLE}
                          SET active_fire_slot = NULL,
                              active_run_ref = NULL,
-                             state = CASE WHEN completion_policy = 'complete_after_first_fire' THEN 'completed' ELSE state END
+                             state = CASE WHEN schedule_kind = 'once' THEN 'completed' ELSE state END
                          WHERE tenant_id = ?1
                            AND trigger_id = ?2
                            AND active_fire_slot = ?3
@@ -1208,7 +1217,8 @@ fn row_to_record(row: &libsql::Row) -> Result<TriggerRecord, TriggerError> {
         .transpose()?;
     let schedule_expression = required_text(row, SCHEDULE_EXPRESSION_COL, "schedule_expression")?;
     let schedule_timezone = required_text(row, SCHEDULE_TIMEZONE_COL, "schedule_timezone")?;
-    let schedule = TriggerSchedule::cron_with_timezone(schedule_expression, schedule_timezone)?;
+    let schedule_kind = required_text(row, SCHEDULE_KIND_COL, "schedule_kind")?;
+    let schedule = parse_schedule(&schedule_kind, &schedule_expression, &schedule_timezone)?;
     let last_run_at = optional_text(row, LAST_RUN_AT_COL, "last_run_at")?
         .map(|value| parse_timestamp(&value, "last_run_at"))
         .transpose()?;
@@ -1234,11 +1244,6 @@ fn row_to_record(row: &libsql::Row) -> Result<TriggerRecord, TriggerError> {
         name: required_text(row, NAME_COL, "name")?,
         source: parse_source_kind(&required_text(row, SOURCE_COL, "source")?)?,
         schedule,
-        completion_policy: parse_completion_policy(&required_text(
-            row,
-            COMPLETION_POLICY_COL,
-            "completion_policy",
-        )?)?,
         prompt: required_text(row, PROMPT_COL, "prompt")?,
         state: parse_state(&required_text(row, STATE_COL, "state")?)?,
         next_run_at: parse_timestamp(
@@ -1329,7 +1334,7 @@ async fn write_record(
         &format!(
             "INSERT INTO {TRIGGER_TABLE} (
                 trigger_id, tenant_id, creator_user_id, agent_id, project_id,
-                name, source, schedule_expression, schedule_timezone, completion_policy, prompt,
+                name, source, schedule_expression, schedule_timezone, schedule_kind, prompt,
                 state, next_run_at, last_run_at, last_fired_slot, last_status,
                 active_fire_slot, active_run_ref, created_at
             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19)
@@ -1341,7 +1346,7 @@ async fn write_record(
                 source = excluded.source,
                 schedule_expression = excluded.schedule_expression,
                 schedule_timezone = excluded.schedule_timezone,
-                completion_policy = excluded.completion_policy,
+                schedule_kind = excluded.schedule_kind,
                 prompt = excluded.prompt,
                 state = excluded.state,
                 next_run_at = excluded.next_run_at,
@@ -1361,7 +1366,7 @@ async fn write_record(
             source_kind_text(record.source),
             schedule_expression_text(&record.schedule),
             schedule_timezone_text(&record.schedule),
-            completion_policy_text(record.completion_policy),
+            schedule_kind_text(&record.schedule),
             record.prompt.clone(),
             state_text(record.state),
             fmt_ts(&record.next_run_at),
@@ -1385,7 +1390,6 @@ async fn resolve_missed_fire_result_update(
     trigger_id: TriggerId,
     fire_slot: Timestamp,
     expected_run_ref: Option<TurnRunId>,
-    next_run_at: Option<Timestamp>,
 ) -> Result<Option<TriggerRecord>, TriggerError> {
     let Some(record) = fetch_record(conn, tenant_id, trigger_id).await? else {
         return Ok(None);
@@ -1400,11 +1404,6 @@ async fn resolve_missed_fire_result_update(
         }
         reject_failed_result_after_active_run(Some(active_run_ref))?;
     }
-    if let Some(next_run_at) = next_run_at
-        && record.completion_policy == TriggerCompletionPolicy::Recurring
-    {
-        reject_non_future_next_run_at(fire_slot, next_run_at)?;
-    }
     Err(backend_error(
         "reconcile missed trigger fire result update",
         "update predicate failed while claimed fire remained active without a run ref",
@@ -1418,51 +1417,78 @@ async fn mark_successful_fire_result(
 ) -> Result<Option<TriggerRecord>, TriggerError> {
     let fire_slot_text = fmt_ts(&update.fire_slot);
     let result_at = fmt_ts(&update.result_at);
-    let next_run_at_val = opt_ts(update.next_run_at.as_ref());
     let active_run_ref = update.run_id.to_string();
     let last_status = status_text(TriggerRunStatus::Ok);
     begin_immediate(conn, "begin successful trigger fire result").await?;
     let update_result = async {
-        // Guard: reject (next_run_at = None, Recurring) inside the write transaction
-        // so the completion_policy read is under the same BEGIN IMMEDIATE lock as the
-        // UPDATE below — eliminating the TOCTOU race that existed when this read
-        // happened before begin_immediate. Only runs on the uncommon path where
-        // next_run_at is None to avoid an extra query on every successful fire.
-        if update.next_run_at.is_none()
-            && let Some(record) = fetch_record(conn, update.tenant_id, update.trigger_id).await?
-            && record.active_fire_slot == Some(update.fire_slot)
-        {
-            reject_missing_next_run_at_for_recurring(record.completion_policy, update.next_run_at)?;
-        }
-        let mut rows = conn
-            .query(
-                &format!(
-                    "UPDATE {TRIGGER_TABLE}
-                     SET last_run_at = ?3,
-                         last_fired_slot = ?4,
-                         last_status = ?5,
-                         next_run_at = COALESCE(?6, next_run_at),
-                         active_fire_slot = ?4,
-                         active_run_ref = ?7
-                     WHERE tenant_id = ?1
-                       AND trigger_id = ?2
-                       AND active_fire_slot = ?4
-                       AND active_run_ref IS NULL
-                       AND (?6 IS NULL OR ?6 > ?4)
-                     RETURNING {TRIGGER_COLUMNS}"
-                ),
-                libsql::params_from_iter([
-                    libsql::Value::Text(update.tenant_id.as_str().to_string()),
-                    libsql::Value::Text(update.trigger_id.to_string()),
-                    libsql::Value::Text(result_at),
-                    libsql::Value::Text(fire_slot_text),
-                    libsql::Value::Text(last_status.to_string()),
-                    next_run_at_val,
-                    libsql::Value::Text(active_run_ref),
-                ]),
-            )
-            .await
-            .map_err(|error| backend_error(update.update_operation, error))?;
+        // Fetch the record inside the transaction so we can compute next_run_at
+        // atomically (no TOCTOU race between the schedule read and the UPDATE).
+        let Some(current) = fetch_record(conn, update.tenant_id, update.trigger_id).await? else {
+            return Ok(None);
+        };
+        let next_run_at = current.schedule.next_slot_after(update.fire_slot)?;
+        let mut rows = match next_run_at {
+            Some(next) => {
+                let next_run_at_text = fmt_ts(&next);
+                conn.query(
+                    &format!(
+                        "UPDATE {TRIGGER_TABLE}
+                         SET last_run_at = ?3,
+                             last_fired_slot = ?4,
+                             last_status = ?5,
+                             next_run_at = ?6,
+                             active_fire_slot = ?4,
+                             active_run_ref = ?7
+                         WHERE tenant_id = ?1
+                           AND trigger_id = ?2
+                           AND active_fire_slot = ?4
+                           AND active_run_ref IS NULL
+                           AND ?6 > ?4
+                         RETURNING {TRIGGER_COLUMNS}"
+                    ),
+                    libsql::params_from_iter([
+                        libsql::Value::Text(update.tenant_id.as_str().to_string()),
+                        libsql::Value::Text(update.trigger_id.to_string()),
+                        libsql::Value::Text(result_at),
+                        libsql::Value::Text(fire_slot_text),
+                        libsql::Value::Text(last_status.to_string()),
+                        libsql::Value::Text(next_run_at_text),
+                        libsql::Value::Text(active_run_ref),
+                    ]),
+                )
+                .await
+                .map_err(|error| backend_error(update.update_operation, error))?
+            }
+            None => {
+                // Once trigger (or exhausted schedule): omit next_run_at from the SET
+                // clause entirely so the column keeps its current value.
+                conn.query(
+                    &format!(
+                        "UPDATE {TRIGGER_TABLE}
+                         SET last_run_at = ?3,
+                             last_fired_slot = ?4,
+                             last_status = ?5,
+                             active_fire_slot = ?4,
+                             active_run_ref = ?6
+                         WHERE tenant_id = ?1
+                           AND trigger_id = ?2
+                           AND active_fire_slot = ?4
+                           AND active_run_ref IS NULL
+                         RETURNING {TRIGGER_COLUMNS}"
+                    ),
+                    libsql::params_from_iter([
+                        libsql::Value::Text(update.tenant_id.as_str().to_string()),
+                        libsql::Value::Text(update.trigger_id.to_string()),
+                        libsql::Value::Text(result_at),
+                        libsql::Value::Text(fire_slot_text),
+                        libsql::Value::Text(last_status.to_string()),
+                        libsql::Value::Text(active_run_ref),
+                    ]),
+                )
+                .await
+                .map_err(|error| backend_error(update.update_operation, error))?
+            }
+        };
         let Some(record) = returned_record(&mut rows, update.read_operation).await? else {
             return Ok(None);
         };
@@ -1495,7 +1521,6 @@ async fn mark_successful_fire_result(
         update.trigger_id,
         update.fire_slot,
         Some(update.run_id),
-        update.next_run_at,
     )
     .await
 }
@@ -1512,7 +1537,6 @@ struct SuccessfulFireResultUpdate<'a> {
     /// submission outcome resolved.
     thread_id: Option<ThreadId>,
     result_at: Timestamp,
-    next_run_at: Option<Timestamp>,
     update_operation: &'static str,
     read_operation: &'static str,
 }
@@ -1781,26 +1805,6 @@ fn parse_state(value: &str) -> Result<TriggerState, TriggerError> {
 }
 
 #[cfg(feature = "libsql")]
-fn completion_policy_text(value: TriggerCompletionPolicy) -> &'static str {
-    match value {
-        TriggerCompletionPolicy::Recurring => "recurring",
-        TriggerCompletionPolicy::CompleteAfterFirstFire => "complete_after_first_fire",
-    }
-}
-
-#[cfg(feature = "libsql")]
-fn parse_completion_policy(value: &str) -> Result<TriggerCompletionPolicy, TriggerError> {
-    match value {
-        "recurring" => Ok(TriggerCompletionPolicy::Recurring),
-        "complete_after_first_fire" => Ok(TriggerCompletionPolicy::CompleteAfterFirstFire),
-        other => Err(invalid_record(
-            "completion_policy",
-            format!("unsupported completion policy `{other}`"),
-        )),
-    }
-}
-
-#[cfg(feature = "libsql")]
 fn status_text(value: TriggerRunStatus) -> &'static str {
     match value {
         TriggerRunStatus::Ok => "ok",
@@ -1834,16 +1838,53 @@ fn parse_run_history_status(value: &str) -> Result<TriggerRunHistoryStatus, Trig
 }
 
 #[cfg(feature = "libsql")]
+fn schedule_kind_text(schedule: &TriggerSchedule) -> &'static str {
+    match schedule {
+        TriggerSchedule::Cron { .. } => "cron",
+        TriggerSchedule::Once { .. } => "once",
+    }
+}
+
+#[cfg(feature = "libsql")]
 fn schedule_expression_text(schedule: &TriggerSchedule) -> String {
     match schedule {
         TriggerSchedule::Cron { expression, .. } => expression.clone(),
+        TriggerSchedule::Once { at, .. } => at.to_rfc3339_opts(chrono::SecondsFormat::Nanos, true),
     }
 }
 
 #[cfg(feature = "libsql")]
 fn schedule_timezone_text(schedule: &TriggerSchedule) -> String {
     match schedule {
-        TriggerSchedule::Cron { timezone, .. } => timezone.clone(),
+        TriggerSchedule::Cron { timezone, .. } | TriggerSchedule::Once { timezone, .. } => {
+            timezone.clone()
+        }
+    }
+}
+
+#[cfg(feature = "libsql")]
+fn parse_schedule(
+    kind: &str,
+    expression: &str,
+    timezone: &str,
+) -> Result<TriggerSchedule, TriggerError> {
+    match kind {
+        "cron" => TriggerSchedule::cron_with_timezone(expression, timezone),
+        "once" => {
+            let at = chrono::DateTime::parse_from_rfc3339(expression)
+                .map(|dt| dt.with_timezone(&chrono::Utc))
+                .map_err(|error| {
+                    invalid_record(
+                        "schedule_expression",
+                        format!("invalid once timestamp: {error}"),
+                    )
+                })?;
+            TriggerSchedule::once(at, timezone)
+        }
+        other => Err(invalid_record(
+            "schedule_kind",
+            format!("unsupported schedule kind `{other}`"),
+        )),
     }
 }
 
