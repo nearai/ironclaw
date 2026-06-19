@@ -153,9 +153,12 @@ export function fetchSession() {
   return apiFetch(`${V2_BASE}/session`);
 }
 
-export function createThread({ clientActionId: clientId, requestedThreadId } = {}) {
+export function createThread({ clientActionId: clientId, requestedThreadId, projectId } = {}) {
   const body = { client_action_id: clientId || clientActionId() };
   if (requestedThreadId) body.requested_thread_id = requestedThreadId;
+  // The backend authorizes the caller's access to this project before scoping
+  // the new thread to it; the body only proposes it.
+  if (projectId) body.project_id = projectId;
   return apiFetch(`${V2_BASE}/threads`, {
     method: "POST",
     body: JSON.stringify(body),

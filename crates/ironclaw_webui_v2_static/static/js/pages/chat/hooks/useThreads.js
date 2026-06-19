@@ -22,13 +22,13 @@ export function useThreads() {
   const [isCreating, setIsCreating] = React.useState(false);
   const createInFlightRef = React.useRef(null);
 
-  const handleCreateThread = React.useCallback(async () => {
+  const handleCreateThread = React.useCallback(async (projectId) => {
     if (createInFlightRef.current) return createInFlightRef.current;
 
     setIsCreating(true);
     const createPromise = (async () => {
       try {
-        const data = await createThreadRequest();
+        const data = await createThreadRequest(projectId ? { projectId } : undefined);
         queryClient.invalidateQueries({ queryKey: ["threads"] });
         // RebornCreateThreadResponse → { thread: SessionThreadRecord }.
         // SessionThreadRecord uses `thread_id`, not `id`.

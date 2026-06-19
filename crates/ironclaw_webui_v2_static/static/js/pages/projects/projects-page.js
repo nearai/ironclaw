@@ -78,6 +78,23 @@ export function ProjectsPage() {
     navigate(`/projects/${projectId}/threads/${nextThreadId}`);
   }, [navigate, projectId]);
 
+  // Start a new conversation scoped to this project: the backend authorizes the
+  // caller's access to `projectId` before scoping the thread to it, so the new
+  // thread shows up under the project. Then open it in chat.
+  const handleStartConversation = React.useCallback(async () => {
+    setChatFlowError(null);
+    try {
+      const newThreadId = await threadsState.createThread(projectId);
+      navigate("/chat", { state: { threadId: newThreadId } });
+      workspaceState.invalidate();
+    } catch (error) {
+      setChatFlowError({
+        type: "error",
+        message: error.message || t("projects.chatAutoFail"),
+      });
+    }
+  }, [navigate, threadsState, projectId, workspaceState, t]);
+
   const handleClearInspector = React.useCallback(() => {
     navigate(`/projects/${projectId}`);
   }, [navigate, projectId]);
@@ -113,6 +130,8 @@ export function ProjectsPage() {
           threads=${workspaceState.threads}
           selectedThreadId=${threadId}
           onSelectThread=${handleOpenThread}
+          onNewConversation=${handleStartConversation}
+          isStartingConversation=${threadsState.isCreating}
         />
       `;
     }

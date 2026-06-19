@@ -12,7 +12,14 @@ function representativeThreadId(threads) {
   return sorted[0]?.id || null;
 }
 
-export function ProjectWorkspaceShell({ project, threads, selectedThreadId, onSelectThread }) {
+export function ProjectWorkspaceShell({
+  project,
+  threads,
+  selectedThreadId,
+  onSelectThread,
+  onNewConversation,
+  isStartingConversation,
+}) {
   const fsThreadId = representativeThreadId(threads);
 
   return html`
@@ -29,6 +36,8 @@ export function ProjectWorkspaceShell({ project, threads, selectedThreadId, onSe
           threads=${threads}
           selectedThreadId=${selectedThreadId}
           onSelectThread=${onSelectThread}
+          onNewConversation=${onNewConversation}
+          isStartingConversation=${isStartingConversation}
         />
       </div>
 

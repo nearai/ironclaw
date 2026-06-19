@@ -1967,6 +1967,13 @@ impl RebornServicesApi for RebornServices {
         caller: WebUiAuthenticatedCaller,
         request: WebUiCreateThreadRequest,
     ) -> Result<RebornCreateThreadResponse, RebornServicesError> {
+        // A browser may propose a project for the new thread; authorize the
+        // caller's access to it (never trust the body alone) and adopt it as the
+        // thread's scope for this request only. Without a proposed project the
+        // caller's default scope is used unchanged.
+        let caller = self
+            .authorize_create_thread_project(caller, request.project_id.clone())
+            .await?;
         let command = request.into_command(caller)?;
         let WebUiInboundCommand::CreateThread {
             caller,
@@ -3762,6 +3769,40 @@ impl RebornServices {
         self.project_service
             .as_ref()
             .ok_or_else(|| RebornServicesError::service_unavailable(false))
+    }
+
+    /// Authorize a browser-proposed project for a new thread and, on success,
+    /// adopt it as the caller's scope for that thread only.
+    ///
+    /// The project must never be trusted from the request body alone: the
+    /// proposed id is authorized through the same access-controlled
+    /// [`get_project`](RebornServicesApi::get_project) read the project detail
+    /// route uses (`Ok` only when the caller can access the project, otherwise a
+    /// not-found/denied error). Without a proposed project the caller's default
+    /// scope is returned unchanged.
+    async fn authorize_create_thread_project(
+        &self,
+        mut caller: WebUiAuthenticatedCaller,
+        requested_project_id: Option<String>,
+    ) -> Result<WebUiAuthenticatedCaller, RebornServicesError> {
+        let Some(raw) = requested_project_id else {
+            return Ok(caller);
+        };
+        let project_id = ProjectId::new(raw).map_err(|_| {
+            RebornServicesError::validation(WebUiInboundValidationError::new(
+                "project_id",
+                WebUiInboundValidationCode::InvalidId,
+            ))
+        })?;
+        self.get_project(
+            caller.clone(),
+            RebornGetProjectRequest {
+                project_id: project_id.as_str().to_string(),
+            },
+        )
+        .await?;
+        caller.project_id = Some(project_id);
+        Ok(caller)
     }
 
     /// Verify the caller may access the thread and return the project-scoped
