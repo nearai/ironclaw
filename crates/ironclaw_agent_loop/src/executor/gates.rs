@@ -10,7 +10,7 @@ use ironclaw_turns::{
 use crate::{
     state::{
         CheckpointKind, LoopExecutionState, PendingApprovalResume, PendingAuthResume,
-        capability_activity_id_from_resume_token,
+        PendingExternalToolResume, capability_activity_id_from_resume_token,
     },
     strategies::{GateKind, GateOutcome},
 };
@@ -18,8 +18,8 @@ use crate::{
 use super::{
     AgentLoopExecutorError, BatchStep, CancelCheck, CheckpointStage, ExecutorStage, StageContext,
     append_capability_result_ref, append_capability_safe_summary_ref, blocked_kind,
-    clear_matching_pending_auth_resume, exit_id, failed_exit, gate_tool_result_summary,
-    loop_gate_kind, push_completed_result,
+    clear_matching_pending_auth_resume, clear_matching_pending_external_tool_resume, exit_id,
+    failed_exit, gate_tool_result_summary, loop_gate_kind, push_completed_result,
 };
 
 #[derive(Debug, Default, Clone, Copy)]
@@ -122,6 +122,20 @@ impl ExecutorStage<GateInput> for GateStage {
                         disposition: None,
                     });
                 }
+                if matches!(kind, GateKind::ExternalTool) {
+                    // Park the client-tool call so resume re-dispatches it; the
+                    // host decorator completes it from the catalog's submitted
+                    // output. Disposition is stamped by PlannedDriver on resume.
+                    state.pending_external_tool_resume = Some(PendingExternalToolResume {
+                        gate_ref: gate_ref.clone(),
+                        capability_id: call.capability_id.clone(),
+                        surface_version: call.surface_version.clone(),
+                        input_ref: call.input_ref.clone(),
+                        effective_capability_ids: call.effective_capability_ids.clone(),
+                        provider_replay: call.provider_replay.clone(),
+                        disposition: None,
+                    });
+                }
                 // Non-auth blocks do not invalidate a pending auth resume: a resource or
                 // approval gate can fire mid-re-dispatch, and clearing here would erase the
                 // record before it is consumed. Clearing on completion happens in the
@@ -157,6 +171,7 @@ impl ExecutorStage<GateInput> for GateStage {
                 // pending_auth_resume for this call would survive and trigger an
                 // infinite re-dispatch loop on the next prompt iteration.
                 clear_matching_pending_auth_resume(&mut state, &call);
+                clear_matching_pending_external_tool_resume(&mut state, &call);
                 append_capability_safe_summary_ref(
                     ctx.host,
                     &mut state,
@@ -175,6 +190,7 @@ impl ExecutorStage<GateInput> for GateStage {
                 // Clear any pending auth resume so a stale record does not persist
                 // into the Final checkpoint for an aborted capability.
                 clear_matching_pending_auth_resume(&mut state, &call);
+                clear_matching_pending_external_tool_resume(&mut state, &call);
                 append_capability_safe_summary_ref(
                     ctx.host,
                     &mut state,

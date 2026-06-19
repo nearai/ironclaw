@@ -267,29 +267,35 @@ fn stamp_resume_disposition(
         .pending_approval_resume
         .as_ref()
         .is_some_and(|p| p.gate_ref == last_gate);
-    // Explicit 4-way match — fail closed when both slots claim the same gate.
-    match (auth_matches, approval_matches) {
-        (true, false) => {
-            if let Some(pending) = state.pending_auth_resume.as_mut() {
-                pending.disposition = Some(disposition);
-            }
-        }
-        (false, true) => {
-            if let Some(pending) = state.pending_approval_resume.as_mut() {
-                pending.disposition = Some(disposition);
-            }
-        }
-        (false, false) => {
-            // Neither slot matches last_gate — stamp neither (defensive no-op).
-        }
-        (true, true) => {
-            // Should never happen: two pending slots share the same gate_ref.
-            // Refuse to stamp either rather than misattribute the denial.
+    let external_tool_matches = state
+        .pending_external_tool_resume
+        .as_ref()
+        .is_some_and(|p| p.gate_ref == last_gate);
+    // Exactly one pending slot may own a given gate_ref. Fail closed (stamp
+    // nothing) when zero or more than one slot claims it, rather than
+    // misattribute the disposition.
+    let match_count = usize::from(auth_matches)
+        + usize::from(approval_matches)
+        + usize::from(external_tool_matches);
+    if match_count != 1 {
+        if match_count > 1 {
             tracing::debug!(
                 ?last_gate,
                 "ambiguous gate resume disposition; refusing to stamp"
             );
         }
+        return;
+    }
+    if auth_matches {
+        if let Some(pending) = state.pending_auth_resume.as_mut() {
+            pending.disposition = Some(disposition);
+        }
+    } else if approval_matches {
+        if let Some(pending) = state.pending_approval_resume.as_mut() {
+            pending.disposition = Some(disposition);
+        }
+    } else if let Some(pending) = state.pending_external_tool_resume.as_mut() {
+        pending.disposition = Some(disposition);
     }
 }
 

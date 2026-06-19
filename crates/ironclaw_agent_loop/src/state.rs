@@ -99,6 +99,8 @@ pub struct LoopExecutionState {
     pub pending_approval_resume: Option<PendingApprovalResume>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pending_auth_resume: Option<PendingAuthResume>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pending_external_tool_resume: Option<PendingExternalToolResume>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -223,6 +225,31 @@ pub(crate) fn capability_activity_id_from_resume_token(
     CapabilityActivityId::parse(resume_token.as_str()).ok()
 }
 
+/// Client-supplied ("external") tool call parked at a `BlockedExternalTool`
+/// checkpoint. Unlike auth/approval, external-tool resume carries no resume
+/// token: the run is re-dispatched as a plain invocation and the host's
+/// external-tool decorator completes it from the run-scoped catalog (which holds
+/// the client-submitted output keyed by provider call id). The `provider_replay`
+/// is re-registered on resume so the decorator re-binds `input_ref -> call_id`
+/// and the model's tool arguments are re-staged.
+///
+/// When `disposition` is `Some(Denied)`, the executor surfaces a model-visible
+/// failure for the parked call and SKIPS re-dispatch (so a cancelled external
+/// tool cannot re-block forever).
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct PendingExternalToolResume {
+    pub gate_ref: LoopGateRef,
+    pub capability_id: CapabilityId,
+    pub surface_version: CapabilitySurfaceVersion,
+    pub input_ref: CapabilityInputRef,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub effective_capability_ids: Vec<CapabilityId>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_replay: Option<ProviderToolCallReplay>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub disposition: Option<ironclaw_turns::GateResumeDisposition>,
+}
+
 impl LoopExecutionState {
     /// Builds the initial state at the start of a fresh run.
     ///
@@ -258,6 +285,7 @@ impl LoopExecutionState {
             gate_state: GateStrategyState::default(),
             pending_approval_resume: None,
             pending_auth_resume: None,
+            pending_external_tool_resume: None,
         }
     }
 

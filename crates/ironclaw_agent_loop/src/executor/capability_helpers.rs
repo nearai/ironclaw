@@ -18,6 +18,7 @@ use ironclaw_turns::{
 use crate::{
     state::{
         CapabilityCallSignature, LoopExecutionState, PendingApprovalResume, PendingAuthResume,
+        PendingExternalToolResume,
     },
     strategies::{CapabilityCallSummary, CapabilityErrorSummary, CapabilityFilter, GateKind},
 };
@@ -478,6 +479,62 @@ pub(super) fn clear_matching_pending_auth_resume(
     {
         state.pending_auth_resume = None;
     }
+}
+
+pub(super) fn clear_matching_pending_external_tool_resume(
+    state: &mut LoopExecutionState,
+    call: &CapabilityCallCandidate,
+) {
+    if state
+        .pending_external_tool_resume
+        .as_ref()
+        .is_some_and(|resume| resume.capability_id == call.capability_id)
+    {
+        state.pending_external_tool_resume = None;
+    }
+}
+
+/// Reconstruct the parked external-tool call on resume.
+///
+/// Re-registers the provider tool call (via the stored replay) so the host's
+/// external-tool decorator re-binds `input_ref -> call_id` and re-stages the
+/// model's arguments, then the re-dispatched invocation completes from the
+/// run-scoped catalog's client-submitted output. Falls back to a staged-input
+/// candidate when no provider replay was captured.
+pub(super) async fn pending_external_tool_resume_candidate(
+    host: &(dyn AgentLoopDriverHost + Send + Sync),
+    resume: &PendingExternalToolResume,
+    surface_version: CapabilitySurfaceVersion,
+) -> Result<CapabilityCallCandidate, AgentLoopExecutorError> {
+    if let Some(replay) = resume.provider_replay.as_ref() {
+        let candidate = host
+            .register_provider_tool_call(ProviderToolCall {
+                provider_id: replay.provider_id.clone(),
+                provider_model_id: replay.provider_model_id.clone(),
+                turn_id: Some(replay.provider_turn_id.clone()),
+                id: replay.provider_call_id.clone(),
+                name: replay.provider_tool_name.clone(),
+                arguments: replay.arguments.clone(),
+                response_reasoning: replay.response_reasoning.clone(),
+                reasoning: replay.reasoning.clone(),
+                signature: replay.signature.clone(),
+            })
+            .await
+            .map_err(capability_host_error)?;
+        if candidate.capability_id != resume.capability_id {
+            return Err(AgentLoopExecutorError::PlannerContract {
+                detail: "external tool resume provider replay no longer matches blocked capability",
+            });
+        }
+        return Ok(candidate);
+    }
+    Ok(CapabilityCallCandidate {
+        surface_version,
+        capability_id: resume.capability_id.clone(),
+        input_ref: resume.input_ref.clone(),
+        effective_capability_ids: resume.effective_capability_ids.clone(),
+        provider_replay: resume.provider_replay.clone(),
+    })
 }
 
 pub(super) fn push_completed_result(

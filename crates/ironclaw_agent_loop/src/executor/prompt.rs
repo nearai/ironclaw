@@ -23,6 +23,7 @@ use super::{
     AgentLoopExecutorError, CancelCheck, CheckpointStage, ExecutorStage, HostStage,
     PendingInputAck, StageContext, apply_capability_filter, cancelled_exit, debug_host_unavailable,
     failed_exit, pending_approval_resume_candidate, pending_auth_resume_candidate,
+    pending_external_tool_resume_candidate,
 };
 
 #[derive(Debug, Default, Clone, Copy)]
@@ -66,6 +67,13 @@ pub(super) enum PromptStep {
     /// (Completed, SpawnedChild, AuthRequired, error/retry paths) and at gate
     /// SkipAndContinue/Abort outcomes — never consumed via `take_if` here.
     ResumeAuth(Box<ApprovalResumePromptOutput>),
+    /// Re-dispatch a client-supplied ("external") tool call without a model turn.
+    ///
+    /// Emitted when `pending_external_tool_resume` is set on the incoming state
+    /// (the client has resumed a parked `BlockedExternalTool` run). The parked
+    /// call is re-dispatched as a plain invocation; the host's external-tool
+    /// decorator completes it from the run-scoped catalog's submitted output.
+    ResumeExternalTool(Box<ApprovalResumePromptOutput>),
     Exit(LoopExit),
     /// Compaction-only turn: PromptCompactionStep ran (forced by the
     /// `skip_model_this_iteration` flag), no prompt was assembled, no
@@ -262,6 +270,24 @@ impl<'a> PromptPlanningPipeline<'a> {
                 pending_auth_resume_candidate(self.ctx.host, resume, surface.version.clone())
                     .await?;
             return Ok(PromptStep::ResumeAuth(Box::new(
+                ApprovalResumePromptOutput {
+                    state: self.state,
+                    pending_input_ack: self.pending_input_ack,
+                    surface,
+                    call,
+                },
+            )));
+        }
+        // External-tool resume: re-dispatch the parked client-tool call so the
+        // host decorator completes it from the catalog's submitted output.
+        if let Some(resume) = self.state.pending_external_tool_resume.as_ref() {
+            let call = pending_external_tool_resume_candidate(
+                self.ctx.host,
+                resume,
+                surface.version.clone(),
+            )
+            .await?;
+            return Ok(PromptStep::ResumeExternalTool(Box::new(
                 ApprovalResumePromptOutput {
                     state: self.state,
                     pending_input_ack: self.pending_input_ack,

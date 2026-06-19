@@ -298,7 +298,9 @@ impl DefaultExecutorPipeline {
                     state.iteration = state.iteration.saturating_add(1);
                 }
 
-                PromptStep::ResumeApproval(resume) | PromptStep::ResumeAuth(resume) => {
+                PromptStep::ResumeApproval(resume)
+                | PromptStep::ResumeAuth(resume)
+                | PromptStep::ResumeExternalTool(resume) => {
                     let resume = *resume;
                     pending_input_ack = resume.pending_input_ack;
                     pending_input_ack.ack(host).await?;
