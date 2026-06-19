@@ -35,7 +35,7 @@ fn unknown_failure_error() -> &'static TurnRunExecutorError {
         // every validation invariant. If this ever fails the binary is
         // fundamentally broken, so a panic here is acceptable at process start.
         TurnRunExecutorError::new("unknown_failure")
-            .expect("'unknown_failure' is a valid static executor error category")
+            .expect("'unknown_failure' is a valid static executor error category") // safety: compile-time-constant category (lowercase ASCII + underscore) always passes validation; runs once at process start
     })
 }
 
