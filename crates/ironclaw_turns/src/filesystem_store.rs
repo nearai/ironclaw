@@ -671,25 +671,6 @@ impl RunProfileResolver for PreResolvedRunProfileResolver {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn cached_snapshot_freshness_is_bounded() {
-        let snapshot = TurnPersistenceSnapshot::default();
-        let fresh = CachedSnapshot::new(snapshot.clone(), None);
-        assert!(fresh.is_fresh());
-
-        let stale = CachedSnapshot {
-            snapshot,
-            version: None,
-            loaded_at: Instant::now() - SNAPSHOT_READ_CACHE_TTL - Duration::from_millis(1),
-        };
-        assert!(!stale.is_fresh());
-    }
-}
-
 fn snapshot_path() -> Result<ScopedPath, TurnError> {
     ScopedPath::new(format!("{TURNS_PREFIX}/{TURNS_SNAPSHOT_FILE}")).map_err(|error| {
         TurnError::Unavailable {
@@ -844,5 +825,24 @@ where
             .await
             .map_err(|error| PutError::Other(fs_error(error))),
         Err(error) => Err(PutError::Other(fs_error(error))),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cached_snapshot_freshness_is_bounded() {
+        let snapshot = TurnPersistenceSnapshot::default();
+        let fresh = CachedSnapshot::new(snapshot.clone(), None);
+        assert!(fresh.is_fresh());
+
+        let stale = CachedSnapshot {
+            snapshot,
+            version: None,
+            loaded_at: Instant::now() - SNAPSHOT_READ_CACHE_TTL - Duration::from_millis(1),
+        };
+        assert!(!stale.is_fresh());
     }
 }
