@@ -85,37 +85,68 @@ Use for:
 
 ## 4. Namespace roots
 
-V1 canonical virtual roots:
+Frozen V1 canonical virtual roots (aligned with `storage-placement.md`):
 
 ```text
 /engine
+/system/settings
 /system/extensions
+/system/skills
 /users
 /projects
 /memory
+/artifacts
+/tmp
+/secrets
+/events
+/processes
+/authorization
+/outbound
+/run-state
+/approvals
+/threads
+/conversations
+/turns
+/resources
+/tenant-shared
+/tenants
 ```
 
 Recommended meaning:
 
 | Root | Purpose |
 |---|---|
-| `/engine` | host-owned engine config, schemas, migrations, and service metadata |
+| `/engine` | host-owned runtime state, schemas, migrations, and service metadata |
+| `/system/settings` | typed settings repository and optional settings projections |
 | `/system/extensions` | installed extension packages and extension-local config/state/cache roots |
+| `/system/skills` | skill manifests, registries, and installed skill state |
 | `/users` | user-owned durable profile/config areas |
-| `/projects` | project workspaces, missions, thread state, artifacts, and project-local config |
+| `/projects` | project workspaces, missions, thread state, and project-local config |
 | `/memory` | durable memory namespace, initially file-like even if backed by another store |
+| `/artifacts` | artifact/object storage for process output refs and durable generated files |
+| `/tmp` | process/invocation-local temporary data |
+| `/secrets` | encrypted secret records and redacted secret projections only |
+| `/events` | durable event/audit append log and projections |
+| `/processes` | background-process records and result/output blobs (consumer-store mount alias under `ironclaw_processes`) |
+| `/authorization` | capability lease records (consumer-store mount alias under `ironclaw_authorization`) |
+| `/outbound` | outbound delivery policy/subscription/attempt records (consumer-store mount alias under `ironclaw_outbound`) |
+| `/run-state` | invocation-lifecycle run-state records (consumer-store mount alias under `ironclaw_run_state`) |
+| `/approvals` | approval-request lifecycle records (sibling consumer-store mount alias under `ironclaw_run_state`) |
+| `/threads` | canonical session-thread and transcript records (consumer-store mount alias under `ironclaw_threads`) |
+| `/conversations` | conversation binding and session-thread state records (consumer-store mount alias under `ironclaw_conversations`) |
+| `/turns` | turn-coordination persistence snapshot (consumer-store mount alias under `ironclaw_turns`) |
+| `/resources` | resource-governor reservation/usage snapshots (consumer-store mount alias under `ironclaw_resources`) |
+| `/tenant-shared` | data shared between users/agents in the same tenant; resolves to `/tenants/<tenant_id>/shared/...` per [scoped-filesystem-tenant-isolation](../../plans/2026-05-16-scoped-filesystem-tenant-isolation.md) |
+| `/tenants` | reserved root for tenant-scoped target subtrees written by the per-invocation `MountView` (`/tenants/<tenant_id>/users/<user_id>/<alias>/...`); not consumed directly by stores |
 
-Extension-visible aliases should be scoped aliases such as:
+Extension-visible workspace-style names should be scoped aliases such as:
 
 ```text
 /workspace
 /project
-/memory
 /extension/config
 /extension/state
 /extension/cache
-/tmp
-/artifacts
 ```
 
 Aliases are resolved by `MountView`; they are not global virtual roots by themselves.
@@ -170,7 +201,7 @@ Rules:
 
 1. Use longest alias match for `ScopedPath -> VirtualPath`.
 2. Alias match must be exact or segment-boundary prefixed.
-3. Path normalization rejects `..`, NUL/control characters, URLs, and raw host paths before backend resolution.
+3. Path normalization rejects `..`, NUL/control characters, URLs, and raw host paths before backend resolution, except trusted local single-user `MountView`s may accept an already-authorized raw host prefix that is explicitly present as a mount alias. Hosted and extension-declared mounts must continue to use stable scoped aliases such as `/workspace` or `/host`.
 4. `VirtualPath` must begin with a known root.
 5. Backend mount selection must use longest virtual mount prefix.
 6. If two backend mounts match with the same prefix length, fail closed.
@@ -374,10 +405,17 @@ Backend errors may keep raw errors for logs, but public/display errors should us
 
 ## 14. Initial Rust API sketch
 
+`read_file_bounded` returns `Ok(None)` when the file exceeds the caller's limit; streaming backends should enforce that without allocating the full file first.
+
 ```rust
 #[async_trait]
 pub trait RootFilesystem {
     async fn read_file(&self, path: &VirtualPath) -> Result<Vec<u8>, FilesystemError>;
+    async fn read_file_bounded(
+        &self,
+        path: &VirtualPath,
+        max_bytes: usize,
+    ) -> Result<Option<Vec<u8>>, FilesystemError>;
     async fn write_file(&self, path: &VirtualPath, bytes: &[u8]) -> Result<(), FilesystemError>;
     async fn list_dir(&self, path: &VirtualPath) -> Result<Vec<DirEntry>, FilesystemError>;
     async fn stat(&self, path: &VirtualPath) -> Result<FileStat, FilesystemError>;

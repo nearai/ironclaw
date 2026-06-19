@@ -254,7 +254,7 @@ impl ExtensionName {
 /// generated UUID strings, Telegram chat IDs, and comparable channel-specific
 /// thread tokens, while still bounding what we'll accept from an external
 /// system.
-pub const MAX_EXTERNAL_THREAD_ID_LEN: usize = 512;
+const MAX_EXTERNAL_THREAD_ID_LEN: usize = 512;
 
 /// Why a candidate string is not a valid external thread id.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]

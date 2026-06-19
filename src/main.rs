@@ -384,7 +384,21 @@ async fn async_main() -> anyhow::Result<()> {
     // defers gracefully, and AppBuilder::build_all() re-resolves after loading
     // secrets from the encrypted DB.
     let toml_path = cli.config.as_deref();
-    let config = match Config::from_env_with_toml(toml_path).await {
+    let runtime_overrides = ironclaw::config::RuntimeConfigOverrides {
+        deployment: cli.deployment_mode,
+        profile: cli.runtime_profile,
+        // The CLI flag is a bare boolean: `--yolo-disclosure` sets it to
+        // true, absence leaves it None so env-var fallback applies.
+        yolo_disclosure_acknowledged: if cli.yolo_disclosure {
+            Some(true)
+        } else {
+            None
+        },
+    };
+    let config = match Config::from_env_with_toml(toml_path)
+        .await
+        .and_then(|c| c.with_runtime_overrides(&runtime_overrides))
+    {
         Ok(c) => c,
         Err(ironclaw::error::ConfigError::MissingRequired { key, hint }) => {
             anyhow::bail!(
@@ -704,6 +718,20 @@ async fn async_main() -> anyhow::Result<()> {
         } else {
             startup_active_channels.iter().cloned().collect()
         };
+
+        // Runtime-tier Telegram v1/v2 exclusivity check. The config-resolve
+        // call earlier (in `ChannelsConfig::resolve`) only sees the env-var
+        // view of v1. Persisted `activated_channels` rows can carry
+        // `telegram` independently of `WASM_CHANNELS`, and
+        // `setup_wasm_channels` auto-loads them — so an env-only guard
+        // would let v1 stand up alongside v2 for the same webhook
+        // installation. Re-running the validator here with the persisted
+        // set closes that gap (issue #3285, follow-up to PR #3356 review
+        // by @henrypark133).
+        ironclaw::config::validate_telegram_v1_v2_exclusivity(
+            &config.channels,
+            Some(&startup_active_wasm_channels),
+        )?;
 
         let wasm_result = ironclaw::channels::wasm::setup_wasm_channels(
             &config,
@@ -1366,6 +1394,12 @@ async fn async_main() -> anyhow::Result<()> {
             config.agent.max_llm_concurrent_per_user.unwrap_or(4),
             config.agent.max_jobs_concurrent_per_user.unwrap_or(3),
         )),
+        // Resolved at config load time by `Config::with_runtime_overrides`.
+        // The dispatcher routes the model-facing tool list through
+        // `tool_definitions_visible_under(policy)` so profile-impossible
+        // capabilities (e.g. provider-host shell under hosted multi-tenant)
+        // are hidden before the model call. (#3045 PR 4 + PR 5).
+        runtime_policy: Some(config.runtime.effective_policy.clone()),
     };
 
     let channels_for_warnings = Arc::clone(&channels);

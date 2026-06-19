@@ -8,10 +8,13 @@
 //! scoped mounts.
 
 use serde::{Deserialize, Serialize};
+use std::collections::HashSet;
 
 use crate::ApprovalRequest;
 use crate::{
-    HostApiError, MountView, NetworkPolicy, ResourceCeiling, ResourceReservationId, SecretHandle,
+    CapabilityId, ExtensionId, HostApiError, MountView, NetworkPolicy, ResourceCeiling,
+    ResourceReservationId, RuntimeCredentialAccountProviderId, RuntimeCredentialAccountSetup,
+    SecretHandle,
 };
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -53,6 +56,18 @@ pub enum Obligation {
     InjectSecretOnce {
         handle: SecretHandle,
     },
+    InjectCredentialAccountOnce {
+        handle: SecretHandle,
+        provider: RuntimeCredentialAccountProviderId,
+        #[serde(default)]
+        setup: RuntimeCredentialAccountSetup,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        provider_scopes: Vec<String>,
+        requester_extension: ExtensionId,
+    },
+    FirstPartyCredentialStagedViaHostPort {
+        capability_id: CapabilityId,
+    },
     ApplyNetworkPolicy {
         policy: NetworkPolicy,
     },
@@ -64,6 +79,16 @@ pub enum Obligation {
     },
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RuntimeCredentialAuthRequirement {
+    pub provider: RuntimeCredentialAccountProviderId,
+    #[serde(default)]
+    pub setup: RuntimeCredentialAccountSetup,
+    pub requester_extension: ExtensionId,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub provider_scopes: Vec<String>,
+}
+
 /// Canonical obligation evaluation classes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -72,6 +97,8 @@ pub enum ObligationKind {
     UseScopedMounts,
     ApplyNetworkPolicy,
     InjectSecretOnce,
+    InjectCredentialAccountOnce,
+    FirstPartyCredentialStagedViaHostPort,
     AuditBefore,
     RedactOutput,
     EnforceResourceCeiling,
@@ -85,6 +112,8 @@ pub const OBLIGATION_EVALUATION_ORDER: &[ObligationKind] = &[
     ObligationKind::UseScopedMounts,
     ObligationKind::ApplyNetworkPolicy,
     ObligationKind::InjectSecretOnce,
+    ObligationKind::InjectCredentialAccountOnce,
+    ObligationKind::FirstPartyCredentialStagedViaHostPort,
     ObligationKind::AuditBefore,
     ObligationKind::RedactOutput,
     ObligationKind::EnforceResourceCeiling,
@@ -120,6 +149,13 @@ impl Obligations {
                 .iter()
                 .filter(|obligation| obligation.kind() == *kind);
             if let Some(first) = matching.next() {
+                if matches!(
+                    *kind,
+                    ObligationKind::InjectSecretOnce | ObligationKind::InjectCredentialAccountOnce
+                ) {
+                    normalize_multi_inject(first, matching, kind, &mut normalized)?;
+                    continue;
+                }
                 if matching.next().is_some() {
                     return Err(HostApiError::invariant(format!(
                         "duplicate or conflicting {kind:?} obligations are not allowed"
@@ -150,6 +186,40 @@ impl Default for Obligations {
     }
 }
 
+/// Normalize obligations for multi-inject kinds (`InjectSecretOnce`, `InjectCredentialAccountOnce`).
+///
+/// Both kinds allow multiple obligations (one per injection slot) and share identical
+/// deduplication logic: seed `seen_handles` from the first obligation, then verify no
+/// duplicate handles appear among the rest. Only the variant pattern differs.
+fn normalize_multi_inject<'a>(
+    first: &'a Obligation,
+    rest: impl Iterator<Item = &'a Obligation>,
+    kind: &ObligationKind,
+    normalized: &mut Vec<Obligation>,
+) -> Result<(), HostApiError> {
+    let mut seen_handles = HashSet::new();
+    seen_handles.insert(extract_inject_handle(first, kind));
+    normalized.push(first.clone());
+    for obligation in rest {
+        let handle = extract_inject_handle(obligation, kind);
+        if !seen_handles.insert(handle) {
+            return Err(HostApiError::invariant(format!(
+                "duplicate {kind:?} obligations for the same handle are not allowed"
+            )));
+        }
+        normalized.push(obligation.clone());
+    }
+    Ok(())
+}
+
+fn extract_inject_handle(obligation: &Obligation, kind: &ObligationKind) -> SecretHandle {
+    match obligation {
+        Obligation::InjectSecretOnce { handle } => handle.clone(),
+        Obligation::InjectCredentialAccountOnce { handle, .. } => handle.clone(),
+        _ => unreachable!("extract_inject_handle called for {kind:?}"),
+    }
+}
+
 impl<'de> Deserialize<'de> for Obligations {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
@@ -169,6 +239,10 @@ impl Obligation {
             Self::ReserveResources { .. } => ObligationKind::ReserveResources,
             Self::UseScopedMounts { .. } => ObligationKind::UseScopedMounts,
             Self::InjectSecretOnce { .. } => ObligationKind::InjectSecretOnce,
+            Self::InjectCredentialAccountOnce { .. } => ObligationKind::InjectCredentialAccountOnce,
+            Self::FirstPartyCredentialStagedViaHostPort { .. } => {
+                ObligationKind::FirstPartyCredentialStagedViaHostPort
+            }
             Self::ApplyNetworkPolicy { .. } => ObligationKind::ApplyNetworkPolicy,
             Self::EnforceResourceCeiling { .. } => ObligationKind::EnforceResourceCeiling,
             Self::EnforceOutputLimit { .. } => ObligationKind::EnforceOutputLimit,

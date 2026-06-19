@@ -30,6 +30,20 @@ Auto-triggered onboarding uses **quick mode** by default.
 
 The `--no-onboard` CLI flag suppresses auto-detection.
 
+### Reborn Standalone Onboarding
+
+```
+ironclaw-reborn onboard [--force] [--dry-run] [--import-history]
+```
+
+This command is owned by the standalone Reborn binary, not by `src/setup`.
+It initializes `IRONCLAW_REBORN_HOME` / `~/.ironclaw/reborn`, creates or
+preserves Reborn `config.toml` and `providers.json`, and writes the Reborn
+`.onboard-completed.json` marker without reading or mutating v1 database,
+channel, settings, or setup state. The detailed Reborn-specific contract lives
+in `docs/reborn/onboarding.md`; changes to `ironclaw-reborn onboard` should keep
+that document and this boundary note in sync.
+
 ---
 
 ## Startup Sequence (main.rs)
@@ -122,6 +136,10 @@ with the running assistant (not during the wizard). The `## First-Run Bootstrap`
 `src/workspace/mod.rs` injects onboarding instructions from `BOOTSTRAP.md` into the system
 prompt on first run. Once the agent writes a profile via `memory_write` and deletes
 `BOOTSTRAP.md`, the block stops injecting.
+
+**Web UI onboarding** (`/onboarding` in WebUI v2) presents a curated provider
+picker for first-run browser users. NEAR AI setup offers both API-key entry and
+SSO; SSO choices (NEAR Wallet, GitHub, Google) are kept behind the setup menu.
 
 ---
 

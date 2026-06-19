@@ -1,0 +1,31 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "GitHub handle_webhook input",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "webhook": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "headers": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          }
+        },
+        "body_json": {
+          "type": "object",
+          "additionalProperties": true
+        }
+      },
+      "required": [
+        "headers",
+        "body_json"
+      ]
+    }
+  },
+  "required": [
+    "webhook"
+  ]
+}

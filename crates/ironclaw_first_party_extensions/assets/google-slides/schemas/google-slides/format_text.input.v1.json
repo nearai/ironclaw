@@ -1,0 +1,77 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Google Slides format_text",
+  "description": "Format text in a shape.",
+  "type": "object",
+  "required": [
+    "presentation_id",
+    "object_id"
+  ],
+  "properties": {
+    "presentation_id": {
+      "type": "string",
+      "description": "The presentation ID."
+    },
+    "object_id": {
+      "type": "string",
+      "description": "Shape object ID."
+    },
+    "start_index": {
+      "type": [
+        "integer",
+        "null"
+      ],
+      "description": "Start index."
+    },
+    "end_index": {
+      "type": [
+        "integer",
+        "null"
+      ],
+      "description": "End index."
+    },
+    "bold": {
+      "type": [
+        "boolean",
+        "null"
+      ],
+      "description": "Bold text."
+    },
+    "italic": {
+      "type": [
+        "boolean",
+        "null"
+      ],
+      "description": "Italic text."
+    },
+    "underline": {
+      "type": [
+        "boolean",
+        "null"
+      ],
+      "description": "Underline text."
+    },
+    "font_size": {
+      "type": [
+        "number",
+        "null"
+      ],
+      "description": "Font size."
+    },
+    "font_family": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "description": "Font family."
+    },
+    "foreground_color": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "description": "Text color hex."
+    }
+  },
+  "additionalProperties": false
+}

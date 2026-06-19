@@ -1,0 +1,30 @@
+schema_version = "reborn.extension_manifest.v2"
+id = "web-access"
+name = "Web Access"
+version = "0.1.0"
+description = "Zero-config web search through Exa MCP for Reborn."
+trust = "first_party_requested"
+
+[runtime]
+kind = "first_party"
+service = "web-access"
+
+[[capabilities]]
+id = "web-access.search"
+description = "Search the web with zero-config Exa MCP and return cited source results. Prefer GitHub extension capabilities for GitHub repository, issue, pull request, release, or workflow data when they are available."
+effects = ["dispatch_capability", "network"]
+default_permission = "allow"
+visibility = "model"
+input_schema_ref = "schemas/web-access/search.input.v1.json"
+output_schema_ref = "schemas/web-access/search.output.v1.json"
+prompt_doc_ref = "prompts/web-access/search.md"
+
+[[capabilities]]
+id = "web-access.get_content"
+description = "Retrieve full content saved from a previous web search response."
+effects = ["dispatch_capability"]
+default_permission = "allow"
+visibility = "model"
+input_schema_ref = "schemas/web-access/get_content.input.v1.json"
+output_schema_ref = "schemas/web-access/get_content.output.v1.json"
+prompt_doc_ref = "prompts/web-access/get_content.md"

@@ -1,0 +1,41 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "GitHub search_code input",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "query": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 512,
+      "description": "GitHub search query."
+    },
+    "sort": {
+      "type": "string",
+      "description": "Optional GitHub sort field."
+    },
+    "order": {
+      "type": "string",
+      "enum": [
+        "asc",
+        "desc"
+      ],
+      "default": "desc"
+    },
+    "page": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 100,
+      "default": 1
+    },
+    "limit": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 100,
+      "default": 30
+    }
+  },
+  "required": [
+    "query"
+  ]
+}

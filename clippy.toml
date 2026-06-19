@@ -6,3 +6,7 @@ cognitive-complexity-threshold = 15  # default: 25 (only active when lint is ena
 too-many-lines-threshold = 100      # default: 100 (only active when lint is enabled)
 too-many-arguments-threshold = 7    # default: 7 (keep default, avoids new violations)
 type-complexity-threshold = 250     # default: 250 (keep default, avoids new violations)
+
+[[disallowed-methods]]
+path = "ironclaw_outbound::FilesystemOutboundStateStore::new"
+reason = "outbound stores are composition-owned: take handles from RebornLocalRuntimeServices (built once in ironclaw_reborn_composition::factory). A second store over a different mount silently splits reads from writes (see docs/plans/2026-05-29-trigger-loop-delivery-resolution-implementation.md carry-forward)."

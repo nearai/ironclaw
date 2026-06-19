@@ -44,10 +44,23 @@ impl ImageUrl {
     pub fn normalized_openai_detail(&self) -> String {
         normalize_openai_image_detail(self.detail.as_deref())
     }
+
+    /// Decode an inline base64 `data:` URL into its `(media_type, base64_data)`
+    /// parts (e.g. `"data:image/png;base64,AQIDBA=="` →
+    /// `("image/png", "AQIDBA==")`). Returns `None` for a non-`data:` URL or a
+    /// `data:` URL that is not base64-encoded — callers that only support inline
+    /// bytes (Anthropic, Gemini, Bedrock) use this to forward the image and skip
+    /// remote URLs they can't fetch. The single shared parser keeps every
+    /// provider adapter consistent with the `data:` URL the model gateway emits.
+    pub fn decode_data_url(&self) -> Option<(&str, &str)> {
+        let rest = self.url.strip_prefix("data:")?;
+        let (media_type, data) = rest.split_once(";base64,")?;
+        Some((media_type, data))
+    }
 }
 
 /// Normalize an OpenAI image detail hint, defaulting to `"auto"` when absent.
-pub fn normalize_openai_image_detail(detail: Option<&str>) -> String {
+pub(crate) fn normalize_openai_image_detail(detail: Option<&str>) -> String {
     match detail
         .map(str::trim)
         .filter(|detail| !detail.is_empty())
@@ -254,6 +267,9 @@ pub struct CompletionResponse {
     pub input_tokens: u32,
     pub output_tokens: u32,
     pub finish_reason: FinishReason,
+    /// Provider-emitted reasoning content, when the text-completion API returns
+    /// a separate reasoning artifact.
+    pub reasoning: Option<String>,
     /// Tokens read from the provider's server-side prompt cache (Anthropic).
     /// Zero when caching is not supported or on a cache miss.
     pub cache_read_input_tokens: u32,
@@ -299,6 +315,24 @@ pub struct ToolCall {
     /// See #3225.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub signature: Option<String>,
+    /// Provider-emitted parse failure for the model's tool-call arguments
+    /// JSON. `Some(reason)` when the wire payload was not valid JSON and the
+    /// provider fell back to an empty object; `None` on successful parse.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub arguments_parse_error: Option<String>,
+}
+
+impl Default for ToolCall {
+    fn default() -> Self {
+        Self {
+            id: String::new(),
+            name: String::new(),
+            arguments: serde_json::Value::Object(serde_json::Map::new()),
+            reasoning: None,
+            signature: None,
+            arguments_parse_error: None,
+        }
+    }
 }
 
 /// Generate a tool-call ID that satisfies all providers.
@@ -364,6 +398,28 @@ impl ToolCompletionRequest {
             stop_sequences: None,
             tool_choice: None,
             metadata: std::collections::HashMap::new(),
+        }
+    }
+
+    /// Create a tool-aware request from the common completion envelope.
+    pub fn from_completion_request(request: CompletionRequest, tools: Vec<ToolDefinition>) -> Self {
+        let CompletionRequest {
+            messages,
+            model,
+            max_tokens,
+            temperature,
+            stop_sequences,
+            metadata,
+        } = request;
+        Self {
+            messages,
+            tools,
+            model,
+            max_tokens,
+            temperature,
+            stop_sequences,
+            tool_choice: None,
+            metadata,
         }
     }
 
@@ -675,7 +731,7 @@ pub fn sanitize_tool_messages(messages: &mut [ChatMessage]) {
 /// This typed enum replaces stringly-typed parameter names across the codebase,
 /// providing type safety and single-point-of-maintenance for parameter handling.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum UnsupportedParam {
+pub(crate) enum UnsupportedParam {
     Temperature,
     MaxTokens,
     StopSequences,
@@ -683,7 +739,7 @@ pub enum UnsupportedParam {
 
 impl UnsupportedParam {
     /// Get the string name of this parameter for config/error messages.
-    pub fn name(&self) -> &'static str {
+    pub(crate) fn name(&self) -> &'static str {
         match self {
             UnsupportedParam::Temperature => "temperature",
             UnsupportedParam::MaxTokens => "max_tokens",
@@ -696,7 +752,7 @@ impl UnsupportedParam {
 ///
 /// This is the single helper function used by all providers to remove
 /// parameters they don't support, replacing duplicate stringly-typed logic.
-pub fn strip_unsupported_completion_params(
+pub(crate) fn strip_unsupported_completion_params(
     unsupported: &std::collections::HashSet<String>,
     req: &mut CompletionRequest,
 ) {
@@ -719,7 +775,7 @@ pub fn strip_unsupported_completion_params(
 /// This is the single helper function used by all providers to remove
 /// parameters they don't support from tool calls, replacing duplicate stringly-typed logic.
 ///
-pub fn strip_unsupported_tool_params(
+pub(crate) fn strip_unsupported_tool_params(
     unsupported: &std::collections::HashSet<String>,
     req: &mut ToolCompletionRequest,
 ) {
@@ -849,6 +905,7 @@ mod tests {
             arguments: serde_json::json!({}),
             reasoning: None,
             signature: None,
+            arguments_parse_error: None,
         };
         let mut messages = vec![
             ChatMessage::user("hello"),
@@ -894,6 +951,7 @@ mod tests {
             arguments: serde_json::json!({}),
             reasoning: None,
             signature: None,
+            arguments_parse_error: None,
         };
         let mut messages = vec![
             ChatMessage::user("test"),
@@ -921,6 +979,7 @@ mod tests {
             arguments: serde_json::json!({"q": "test"}),
             reasoning: None,
             signature: None,
+            arguments_parse_error: None,
         };
         let tc2 = ToolCall {
             id: "call_sel_2".to_string(),
@@ -928,6 +987,7 @@ mod tests {
             arguments: serde_json::json!({"url": "https://example.com"}),
             reasoning: None,
             signature: None,
+            arguments_parse_error: None,
         };
         let mut messages = vec![
             ChatMessage::system("You are a helpful assistant."),
@@ -973,6 +1033,48 @@ mod tests {
         assert!(messages[2].content.contains("200 OK"));
         assert!(messages[2].tool_call_id.is_none());
         assert!(messages[2].name.is_none());
+    }
+
+    #[test]
+    fn tool_call_legacy_json_without_arguments_parse_error_deserializes() {
+        // Pre-Phase-B trace recordings have no `arguments_parse_error` field.
+        // The #[serde(default)] annotation must keep them deserializing as None.
+        let legacy = r#"{
+            "id": "call_abc",
+            "name": "do_thing",
+            "arguments": {"x": 1}
+        }"#;
+        let tc: ToolCall = serde_json::from_str(legacy).expect("legacy payload should deserialize");
+        assert_eq!(tc.id, "call_abc");
+        assert_eq!(tc.name, "do_thing");
+        assert_eq!(tc.arguments["x"], 1);
+        assert!(tc.reasoning.is_none());
+        assert!(tc.signature.is_none());
+        assert!(tc.arguments_parse_error.is_none());
+    }
+
+    #[test]
+    fn tool_call_with_arguments_parse_error_round_trips() {
+        let original = ToolCall {
+            id: "call_xyz".to_string(),
+            name: "broken_tool".to_string(),
+            arguments: serde_json::json!({}),
+            reasoning: None,
+            signature: None,
+            arguments_parse_error: Some(
+                "failed to parse tool-call arguments JSON: expected value at line 1 column 1"
+                    .to_string(),
+            ),
+        };
+        let json = serde_json::to_string(&original).expect("should serialize");
+        // Confirm the field is present in the serialized form (skip_serializing_if guards None,
+        // so Some must be emitted).
+        assert!(json.contains("arguments_parse_error"));
+        let decoded: ToolCall = serde_json::from_str(&json).expect("should round-trip");
+        assert_eq!(
+            decoded.arguments_parse_error.as_deref(),
+            Some(original.arguments_parse_error.as_deref().unwrap())
+        );
     }
 
     #[test]

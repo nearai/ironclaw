@@ -32,11 +32,14 @@ Commands:
   help        Print this message or the help of the given subcommand(s)
 
 Options:
-      --cli-only           Run in interactive CLI mode only (disable other channels)
-      --no-db              Skip database connection (for testing)
-  -m, --message <MESSAGE>  Single message mode - send one message and exit
-  -c, --config <CONFIG>    Configuration file path (optional, uses env vars by default)
-      --no-onboard         Skip first-run onboarding check
-      --auto-approve       Auto-approve tool execution (shell, file writes, HTTP, etc.)
-  -h, --help               Print help (see more with '--help')
-  -V, --version            Print version
+      --cli-only                   Run in interactive CLI mode only (disable other channels)
+      --no-db                      Skip database connection (for testing)
+  -m, --message <MESSAGE>          Single message mode - send one message and exit
+  -c, --config <CONFIG>            Configuration file path (optional, uses env vars by default)
+      --no-onboard                 Skip first-run onboarding check
+      --auto-approve               Auto-approve tool execution (shell, file writes, HTTP, etc.)
+      --deployment-mode <MODE>     Deployment mode: where IronClaw is running and who owns the machine boundary
+      --runtime-profile <PROFILE>  Requested runtime profile (#3045)
+      --yolo-disclosure            Acknowledge the disclosure required by `*_yolo*` profiles
+  -h, --help                       Print help (see more with '--help')
+  -V, --version                    Print version

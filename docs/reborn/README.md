@@ -10,12 +10,20 @@ The `reborn-integration` branch currently exposes Reborn structure primarily thr
 
 | Need | Start with |
 | --- | --- |
+| Standalone Reborn binary | `docs/reborn-binary.md` |
+| Standalone Reborn onboarding | `docs/reborn/onboarding.md` |
+| Production cutover readiness closeout | `docs/reborn/production-cutover-readiness-closeout.md` |
+| Standalone Reborn Slack setup | `docs/reborn/setup-slack-for-reborn-binary.md` |
+| Porting v1 channels to Reborn surfaces/ProductAdapters | `docs/reborn/how-to-port-channel-to-reborn.md` |
+| Proposed subagent spawn design | `docs/reborn/subagent-spawn/README.md` |
 | Host API vocabulary | `crates/ironclaw_host_api/` |
 | Host API local rules | `crates/ironclaw_host_api/CLAUDE.md` |
 | Host/runtime composition and shared runtime HTTP egress | `crates/ironclaw_host_runtime/` |
 | Architecture dependency guardrails | `crates/ironclaw_architecture/` |
 | Reborn dependency-boundary tests | `crates/ironclaw_architecture/tests/reborn_dependency_boundaries.rs` |
 | Events substrate | `crates/ironclaw_events/` |
+| Event projection read models | `crates/ironclaw_event_projections/` |
+| Standalone durable event/audit stores | `crates/ironclaw_reborn_event_store/` |
 | Filesystem substrate | `crates/ironclaw_filesystem/` |
 | Network policy and HTTP transport substrate | `crates/ironclaw_network/` |
 | Secrets metadata and one-shot leases | `crates/ironclaw_secrets/` |
@@ -41,9 +49,11 @@ docs/reborn/contracts/host-api.md
 docs/reborn/contracts/capability-access.md
 docs/reborn/contracts/dispatcher.md
 docs/reborn/contracts/events-projections.md
+docs/reborn/contracts/triggers.md
 docs/reborn/contracts/memory.md
 docs/reborn/contracts/secrets.md
 docs/reborn/contracts/network.md
+docs/reborn/contracts/skills-extension.md
 docs/reborn/contracts/migration-compatibility.md
 ```
 
@@ -98,3 +108,4 @@ Preserve these Reborn boundaries unless the relevant contract or architecture te
 - Reborn substrate/cutover parent: #2987
 - Reborn compatibility gate: #3020
 - Reborn product-surface migration: #3031
+- Reborn lifecycle UX realignment: `docs/reborn/2026-05-24-3288-lifecycle-ux-realignment.md`

@@ -1,5 +1,5 @@
 [workspace]
-members = [".", "crates/ironclaw_common", "crates/ironclaw_host_api", "crates/ironclaw_filesystem", "crates/ironclaw_memory", "crates/ironclaw_events", "crates/ironclaw_extensions", "crates/ironclaw_processes", "crates/ironclaw_dispatcher", "crates/ironclaw_scripts", "crates/ironclaw_mcp", "crates/ironclaw_wasm", "crates/ironclaw_capabilities", "crates/ironclaw_secrets", "crates/ironclaw_network", "crates/ironclaw_host_runtime", "crates/ironclaw_authorization", "crates/ironclaw_run_state", "crates/ironclaw_approvals", "crates/ironclaw_resources", "crates/ironclaw_trust", "crates/ironclaw_architecture", "crates/ironclaw_safety", "crates/ironclaw_skills", "crates/ironclaw_oauth", "crates/ironclaw_llm", "crates/ironclaw_embeddings", "crates/ironclaw_engine", "crates/ironclaw_gateway", "crates/ironclaw_tui"]
+members = [".", "crates/ironclaw_common", "crates/ironclaw_host_api", "crates/ironclaw_filesystem", "crates/ironclaw_attachments", "crates/ironclaw_extractors", "crates/ironclaw_memory", "crates/ironclaw_events", "crates/ironclaw_event_projections", "crates/ironclaw_event_streams", "crates/ironclaw_reborn_event_store", "crates/ironclaw_extensions", "crates/ironclaw_processes", "crates/ironclaw_dispatcher", "crates/ironclaw_scripts", "crates/ironclaw_process_sandbox", "crates/ironclaw_mcp", "crates/ironclaw_wasm", "crates/ironclaw_wasm_sandbox_core", "crates/ironclaw_wasm_limiter", "crates/ironclaw_capabilities", "crates/ironclaw_secrets", "crates/ironclaw_network", "crates/ironclaw_host_runtime", "crates/ironclaw_runtime_policy", "crates/ironclaw_authorization", "crates/ironclaw_run_state", "crates/ironclaw_approvals", "crates/ironclaw_resources", "crates/ironclaw_auth", "crates/ironclaw_trust", "crates/ironclaw_turns", "crates/ironclaw_agent_loop", "crates/ironclaw_threads", "crates/ironclaw_prompt_envelope", "crates/ironclaw_hooks", "crates/ironclaw_hooks_postgres", "crates/ironclaw_hooks_libsql", "crates/ironclaw_hooks_parity", "crates/ironclaw_loop_support", "crates/ironclaw_reborn", "crates/ironclaw_reborn_config", "crates/ironclaw_reborn_composition", "crates/ironclaw_reborn_identity", "crates/ironclaw_first_party_extensions", "crates/ironclaw_reborn_cli", "crates/ironclaw_reborn_traces", "crates/ironclaw_reborn_webui_ingress", "crates/ironclaw_reborn_openai_compat", "crates/ironclaw_reborn_openai_compat_storage", "crates/ironclaw_conversations", "crates/ironclaw_product_adapters", "crates/ironclaw_product_context", "crates/ironclaw_product_workflow", "crates/ironclaw_product_workflow_storage", "crates/ironclaw_product_adapter_registry", "crates/ironclaw_wasm_product_adapters", "crates/ironclaw_telegram_v2_adapter", "crates/ironclaw_slack_v2_adapter", "crates/ironclaw_outbound", "crates/ironclaw_triggers", "crates/ironclaw_projects", "crates/ironclaw_architecture", "crates/ironclaw_safety", "crates/ironclaw_skills", "crates/ironclaw_oauth", "crates/ironclaw_llm", "crates/ironclaw_embeddings", "crates/ironclaw_engine", "crates/ironclaw_gateway", "crates/ironclaw_tui", "crates/ironclaw_webui_v2", "crates/ironclaw_webui_v2_static"]
 exclude = [
     "channels-src/discord",
     "channels-src/feishu",
@@ -22,9 +22,25 @@ exclude = [
     "crates/ironclaw_safety/fuzz",
 ]
 
+# Maintainability guardrails against dead/speculative public API
+# (the "Theme 1" anti-pattern from the maintainability audit: accessors,
+# `_dyn` variants, and getters with zero callers that needlessly expand the
+# stable surface). These are `warn`, not `deny`, and are *opted into*
+# per-crate via `[lints] workspace = true` so they do not flood the build
+# with pre-existing noise across the whole workspace. Currently scoped to the
+# hook/reborn crates.
+#
+# - `unreachable_pub`: flags `pub` items that are not reachable outside their
+#   crate — the classic "this should be `pub(crate)`" smell.
+# - `dead_code`: warn on never-used items (this is the rustc default, declared
+#   here so it survives any future `#![allow(dead_code)]` creep at the crate root).
+[workspace.lints.rust]
+unreachable_pub = "warn"
+dead_code = "warn"
+
 [package]
 name = "ironclaw"
-version = "0.29.0"
+version = "0.29.1"
 edition = "2024"
 rust-version = "1.92"
 description = "Secure personal AI assistant that protects your data and expands its capabilities on the fly"
@@ -117,6 +133,13 @@ jsonschema = { version = "0.45", default-features = false }
 
 # Shared types
 ironclaw_common = { path = "crates/ironclaw_common", version = "0.4.2" }
+ironclaw_extractors = { path = "crates/ironclaw_extractors", version = "0.1.0" }
+ironclaw_host_api = { path = "crates/ironclaw_host_api", version = "0.1.0" }
+ironclaw_loop_support = { path = "crates/ironclaw_loop_support", version = "0.1.0" }
+ironclaw_memory = { path = "crates/ironclaw_memory", version = "0.1.0" }
+ironclaw_resources = { path = "crates/ironclaw_resources", version = "0.1.0" }
+ironclaw_runtime_policy = { path = "crates/ironclaw_runtime_policy", version = "0.1.0" }
+ironclaw_turns = { path = "crates/ironclaw_turns", version = "0.1.0" }
 
 # Safety/sanitization
 ironclaw_engine = { path = "crates/ironclaw_engine", version = "0.1.0" }
@@ -124,6 +147,7 @@ ironclaw_gateway = { path = "crates/ironclaw_gateway", version = "0.1.0" }
 ironclaw_llm = { path = "crates/ironclaw_llm", version = "0.1.0" }
 ironclaw_embeddings = { path = "crates/ironclaw_embeddings", version = "0.1.0" }
 ironclaw_oauth = { path = "crates/ironclaw_oauth", version = "0.1.0" }
+ironclaw_reborn_traces = { path = "crates/ironclaw_reborn_traces", version = "0.1.0" }
 ironclaw_safety = { path = "crates/ironclaw_safety", version = "0.2.2" }
 ironclaw_skills = { path = "crates/ironclaw_skills", version = "0.3.0" }
 ironclaw_tui = { path = "crates/ironclaw_tui", optional = true, version = "0.1.0" }
@@ -166,9 +190,14 @@ open = "5"
 # The postgres feature provides ToSql/FromSql for postgres-types (shared by tokio-postgres)
 pgvector = { version = "0.4", features = ["postgres"], optional = true }
 
-# WASM sandbox for untrusted tool execution
-wasmtime = { version = "44.0.2", features = ["component-model"] }
-wasmtime-wasi = "44.0.2"  # WASI support for component model
+# WASM sandbox for untrusted tool execution.
+# Floor 44.0.3: minimum patch containing the fix for RUSTSEC-2026-0182
+# (leak in the WASIp1 `fd_renumber` implementation). Also retains the
+# fix for RUSTSEC-2026-0149 (path_open(TRUNCATE) bypassing
+# FilePerms::WRITE), first available in 44.0.2; 43.x is end-of-life for
+# these advisories.
+wasmtime = { version = "44.0.3", features = ["component-model"] }
+wasmtime-wasi = "44.0.3"  # WASI support for component model
 wasmparser = "0.246.2"  # WASM binary parsing for validation
 
 # Cryptography for secrets management
@@ -196,8 +225,8 @@ bollard = "0.18"
 flate2 = "1"
 tar = "0.4"
 
-# Document text extraction
-pdf-extract = "0.7"
+# Document text extraction lives in `crates/ironclaw_extractors` (pdf-extract,
+# etc.); `zip` is kept here because `src/tools/builtin/skill_tools.rs` uses it.
 zip = { version = "2", default-features = false, features = ["deflate"] }
 
 # HTTP proxy for sandboxed network access
@@ -248,6 +277,25 @@ insta = { version = "1.46.3", features = ["yaml"] }
 # Pull the LLM crate's `testing` feature in only for tests so `StubLlm` and
 # fault-injection helpers don't ship in release binaries.
 ironclaw_llm = { path = "crates/ironclaw_llm", version = "0.1.0", features = ["testing"] }
+ironclaw_auth = { path = "crates/ironclaw_auth", version = "0.1.0" }
+ironclaw_approvals = { path = "crates/ironclaw_approvals", version = "0.1.0" }
+ironclaw_authorization = { path = "crates/ironclaw_authorization", version = "0.1.0" }
+ironclaw_extensions = { path = "crates/ironclaw_extensions", version = "0.1.0" }
+ironclaw_filesystem = { path = "crates/ironclaw_filesystem", version = "0.1.0" }
+ironclaw_host_runtime = { path = "crates/ironclaw_host_runtime", version = "0.1.0" }
+ironclaw_network = { path = "crates/ironclaw_network", version = "0.1.0" }
+ironclaw_processes = { path = "crates/ironclaw_processes", version = "0.1.0" }
+ironclaw_resources = { path = "crates/ironclaw_resources", version = "0.1.0" }
+ironclaw_secrets = { path = "crates/ironclaw_secrets", version = "0.1.0" }
+ironclaw_product_adapters = { path = "crates/ironclaw_product_adapters", version = "0.1.0", features = ["test-support"] }
+ironclaw_product_workflow = { path = "crates/ironclaw_product_workflow", version = "0.1.0", features = ["test-support"] }
+ironclaw_reborn = { path = "crates/ironclaw_reborn", version = "0.1.0", features = ["root-llm-provider"] }
+ironclaw_reborn_composition = { path = "crates/ironclaw_reborn_composition", version = "0.1.0", features = ["test-support"] }
+ironclaw_run_state = { path = "crates/ironclaw_run_state", version = "0.1.0" }
+ironclaw_threads = { path = "crates/ironclaw_threads", version = "0.1.0" }
+ironclaw_triggers = { path = "crates/ironclaw_triggers", version = "0.1.0" }
+ironclaw_trust = { path = "crates/ironclaw_trust", version = "0.1.0" }
+ironclaw_wasm = { path = "crates/ironclaw_wasm", version = "0.1.0" }
 # Same idea for embeddings: `MockEmbeddings` is only reachable in dev builds.
 ironclaw_embeddings = { path = "crates/ironclaw_embeddings", version = "0.1.0", features = ["testing"] }
 
@@ -288,6 +336,29 @@ matrix-sdk-channel = ["dep:matrix-sdk"]
 # NOTE: The pilot follows matrix-rust-sdk main so E2EE can stay enabled while the
 # release line catches up with the vodozemac fix and current compiler behavior.
 matrix-e2ee = ["matrix-sdk-channel"]
+# Conditional gate for memory-substrate regression tests that anticipate
+# specific guards: `ensure_path_matches_context`/`ensure_scope_matches_context`
+# fail-closed checks, deterministic tie-breaking by path ascending,
+# `.system/engine/orchestrator/*` protected-path registration, and
+# min_score-after-normalization. #3180 as merged delivers the substrate
+# skeleton but NOT these specific behaviors — the followup PR(s) that
+# implement them must enable this feature in their merge commit so the
+# gated tests fire in CI. Mirrors the same-named feature on
+# `ironclaw_memory`.
+#
+# Empirical note (2026-05-12): enabling `pr3180-ready` on the current
+# `reborn-integration` HEAD surfaces 7 gated tests as failing, because
+# the anticipated APIs do not exist in the merged substrate yet. Do not
+# enable in CI until the followup landings.
+pr3180-ready = []
+# Conditional gate for caller-tier (tool-dispatcher → substrate) tests.
+# Distinct from `pr3180-ready` because the substrate-level guards and
+# the tool-routing migration are separate landings: PR 7 routes
+# `memory_write` through `ironclaw_memory`'s `PromptWriteSafetyPolicy`,
+# so until PR 7 lands, tool-layer rejection tests run against the
+# legacy host-workspace path which doesn't consult the substrate.
+# PR 7 must enable this feature in its merge commit.
+pr7-ready = []
 
 [[test]]
 name = "e2e_thread_scheduling"

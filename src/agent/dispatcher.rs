@@ -85,12 +85,16 @@ fn chat_job_context(
     message: &IncomingMessage,
     thread_id: Uuid,
     user_tz: chrono_tz::Tz,
+    skill_scope_owner_id: Option<&str>,
 ) -> JobContext {
     let mut job_ctx = JobContext::with_user(&message.user_id, "chat", "Interactive chat session")
         .with_requester_id(&message.sender_id);
     job_ctx.conversation_id = Some(thread_id);
     job_ctx.user_timezone = user_tz.name().to_string();
     job_ctx.metadata = crate::agent::agent_loop::chat_tool_execution_metadata(message);
+    if let Some(owner_id) = skill_scope_owner_id {
+        job_ctx.metadata["skill_scope_owner_id"] = serde_json::Value::String(owner_id.to_string());
+    }
     job_ctx
 }
 
@@ -290,12 +294,23 @@ impl Agent {
         }
 
         // Create a JobContext for tool execution (chat doesn't have a real job)
-        let mut job_ctx = chat_job_context(message, thread_id, user_tz);
+        let skill_scope_owner_id = self.config.multi_tenant.then(|| self.owner_id());
+        let mut job_ctx = chat_job_context(message, thread_id, user_tz, skill_scope_owner_id);
         job_ctx.http_interceptor = self.deps.http_interceptor.clone();
 
         // Build system prompts once for this turn. Two variants: with tools
         // (normal iterations) and without (force_text final iteration).
-        let initial_tool_defs = self.tools().tool_definitions().await;
+        //
+        // Tool list is filtered by the resolved `EffectiveRuntimePolicy` when
+        // present so the model never sees a tool whose runtime affordance the
+        // policy would refuse to grant (#3045 PR 4). Hosted multi-tenant
+        // deployments cannot surface provider-host shell affordances to the
+        // model. Action-time authorization in `ironclaw_authorization` still
+        // gates every invocation that reaches dispatch.
+        let initial_tool_defs = match &self.deps.runtime_policy {
+            Some(policy) => self.tools().tool_definitions_visible_under(policy).await,
+            None => self.tools().tool_definitions().await,
+        };
         let initial_tool_defs = if !active_skills.is_empty() {
             crate::skills::attenuate_tools(&initial_tool_defs, &active_skills).tools
         } else {
@@ -490,8 +505,22 @@ impl<'a> LoopDelegate for ChatDelegate<'a> {
 
         let force_text = iteration >= self.force_text_at;
 
-        // Refresh tool definitions each iteration so newly built tools become visible
-        let tool_defs = self.agent.tools().tool_definitions().await;
+        // Refresh tool definitions each iteration so newly built tools become
+        // visible. **Use the policy-filtered variant when a runtime policy is
+        // configured** so the visibility filter applies to *every* iteration,
+        // not just iteration 1 (zmanian #3243 HIGH iteration-2 gap). Without
+        // this, hosted-multi-tenant deployments would surface
+        // provider-host-class tools (e.g. `shell` once any tool builder
+        // registers it) to the model after the first turn.
+        let tool_defs = match &self.agent.deps.runtime_policy {
+            Some(policy) => {
+                self.agent
+                    .tools()
+                    .tool_definitions_visible_under(policy)
+                    .await
+            }
+            None => self.agent.tools().tool_definitions().await,
+        };
 
         // Apply trust-based tool attenuation if skills are active.
         let tool_defs = if !self.active_skills.is_empty() {
@@ -800,9 +829,9 @@ impl<'a> LoopDelegate for ChatDelegate<'a> {
         _metadata: ironclaw_llm::ResponseMetadata,
         _reason_ctx: &mut ReasoningContext,
     ) -> TextAction {
-        // Strip internal "[Called tool ...]" text that can leak when
-        // provider flattening (e.g. NEAR AI) converts tool_calls to
-        // plain text and the LLM echoes it back.
+        // Strip internal "[Called tool ...]" text that can leak when legacy
+        // provider compatibility flattening converts tool_calls to plain text
+        // and the LLM echoes it back.
         let sanitized = strip_internal_tool_call_text(text);
         TextAction::Return(LoopOutcome::Response(sanitized))
     }
@@ -1736,8 +1765,8 @@ fn compact_messages_for_retry(messages: &[ChatMessage]) -> Vec<ChatMessage> {
 
 /// Strip internal `[Called tool ...]` and `[Tool ... returned: ...]` markers
 /// from a response string. These markers are inserted by provider-level message
-/// flattening (e.g. NEAR AI) and can leak into the user-visible response when
-/// the LLM echoes them back.
+/// flattening and can leak into the user-visible response when the LLM echoes
+/// them back.
 fn strip_internal_tool_call_text(text: &str) -> String {
     // Remove lines that are purely internal tool-call markers.
     // Pattern: lines matching `[Called tool <name>(...)]` or `[Tool <name> returned: ...]`
@@ -1907,6 +1936,7 @@ mod tests {
                 input_tokens: 0,
                 output_tokens: 0,
                 finish_reason: FinishReason::Stop,
+                reasoning: None,
                 cache_read_input_tokens: 0,
                 cache_creation_input_tokens: 0,
             })
@@ -1950,6 +1980,7 @@ mod tests {
                 input_tokens: 12,
                 output_tokens: 3,
                 finish_reason: FinishReason::Stop,
+                reasoning: None,
                 cache_read_input_tokens: 0,
                 cache_creation_input_tokens: 0,
             })
@@ -1993,6 +2024,7 @@ mod tests {
                 input_tokens: 0,
                 output_tokens: 0,
                 finish_reason: FinishReason::Stop,
+                reasoning: None,
                 cache_read_input_tokens: 0,
                 cache_creation_input_tokens: 0,
             })
@@ -2024,6 +2056,7 @@ mod tests {
                         arguments: serde_json::json!({}),
                         reasoning: None,
                         signature: None,
+                        arguments_parse_error: None,
                     },
                     ToolCall {
                         id: ironclaw_llm::generate_tool_call_id(0, 1),
@@ -2031,6 +2064,7 @@ mod tests {
                         arguments: serde_json::json!({"target": "danger"}),
                         reasoning: None,
                         signature: None,
+                        arguments_parse_error: None,
                     },
                 ],
                 input_tokens: 0,
@@ -2143,6 +2177,7 @@ mod tests {
             builder: None,
             llm_backend: "nearai".to_string(),
             tenant_rates: Arc::new(crate::tenant::TenantRateRegistry::new(4, 3)),
+            runtime_policy: None,
         };
 
         Agent::new(
@@ -2377,6 +2412,7 @@ mod tests {
                     arguments: serde_json::json!({"url": "https://example.com"}),
                     reasoning: None,
                     signature: None,
+                    arguments_parse_error: None,
                 },
                 ToolCall {
                     id: "call_3".to_string(),
@@ -2384,6 +2420,7 @@ mod tests {
                     arguments: serde_json::json!({"message": "done"}),
                     reasoning: None,
                     signature: None,
+                    arguments_parse_error: None,
                 },
             ],
             selected_auth_prompt: Some(crate::agent::session::PendingAuthPrompt::new(
@@ -2452,6 +2489,7 @@ mod tests {
             builder: None,
             llm_backend: "nearai".to_string(),
             tenant_rates: Arc::new(crate::tenant::TenantRateRegistry::new(4, 3)),
+            runtime_policy: None,
         };
 
         let agent = Agent::new(
@@ -2802,7 +2840,7 @@ mod tests {
         let thread_id = Uuid::new_v4();
         let message = IncomingMessage::new("web", "test-user", "/plan Ship it");
 
-        let job_ctx = super::chat_job_context(&message, thread_id, chrono_tz::UTC);
+        let job_ctx = super::chat_job_context(&message, thread_id, chrono_tz::UTC, None);
 
         assert_eq!(job_ctx.conversation_id, Some(thread_id));
         assert_eq!(job_ctx.user_timezone, "UTC");
@@ -2888,6 +2926,7 @@ mod tests {
                     arguments: serde_json::json!({"message": "hi"}),
                     reasoning: None,
                     signature: None,
+                    arguments_parse_error: None,
                 }],
             ),
             ChatMessage::tool_result("call_1", "echo", "hi"),
@@ -2982,6 +3021,7 @@ mod tests {
                         arguments: serde_json::json!({}),
                         reasoning: None,
                         signature: None,
+                        arguments_parse_error: None,
                     },
                     ToolCall {
                         id: "c2".to_string(),
@@ -2989,6 +3029,7 @@ mod tests {
                         arguments: serde_json::json!({}),
                         reasoning: None,
                         signature: None,
+                        arguments_parse_error: None,
                     },
                 ],
             ),
@@ -3024,6 +3065,7 @@ mod tests {
                     arguments: serde_json::json!({}),
                     reasoning: None,
                     signature: None,
+                    arguments_parse_error: None,
                 }],
             ),
             ChatMessage::tool_result("c1", "echo", "done"),
@@ -3126,6 +3168,7 @@ mod tests {
                 input_tokens: 0,
                 output_tokens: 5,
                 finish_reason: FinishReason::Stop,
+                reasoning: None,
                 cache_read_input_tokens: 0,
                 cache_creation_input_tokens: 0,
             })
@@ -3157,6 +3200,7 @@ mod tests {
                     arguments: serde_json::json!({"message": "looping"}),
                     reasoning: None,
                     signature: None,
+                    arguments_parse_error: None,
                 }],
                 input_tokens: 0,
                 output_tokens: 5,
@@ -3446,6 +3490,7 @@ mod tests {
                 input_tokens: 0,
                 output_tokens: 2,
                 finish_reason: FinishReason::Stop,
+                reasoning: None,
                 cache_read_input_tokens: 0,
                 cache_creation_input_tokens: 0,
             })
@@ -3476,6 +3521,7 @@ mod tests {
                     arguments: serde_json::json!({}),
                     reasoning: None,
                     signature: None,
+                    arguments_parse_error: None,
                 }],
                 input_tokens: 0,
                 output_tokens: 5,
@@ -3511,6 +3557,7 @@ mod tests {
                 input_tokens: 0,
                 output_tokens: 1,
                 finish_reason: FinishReason::Stop,
+                reasoning: None,
                 cache_read_input_tokens: 0,
                 cache_creation_input_tokens: 0,
             })
@@ -3568,6 +3615,7 @@ mod tests {
             builder: None,
             llm_backend: "nearai".to_string(),
             tenant_rates: Arc::new(crate::tenant::TenantRateRegistry::new(4, 3)),
+            runtime_policy: None,
         };
 
         Agent::new(
@@ -3717,6 +3765,7 @@ mod tests {
             builder: None,
             llm_backend: "nearai".to_string(),
             tenant_rates: Arc::new(crate::tenant::TenantRateRegistry::new(4, 3)),
+            runtime_policy: None,
         };
 
         let agent = Agent::new(
@@ -3852,6 +3901,7 @@ mod tests {
                 builder: None,
                 llm_backend: "nearai".to_string(),
                 tenant_rates: Arc::new(crate::tenant::TenantRateRegistry::new(4, 3)),
+                runtime_policy: None,
             };
 
             Agent::new(

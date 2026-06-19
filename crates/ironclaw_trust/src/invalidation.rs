@@ -12,6 +12,7 @@
 //! publishing thread. If any listener panics, the panic propagates — the
 //! caller of `publish` must observe a failure rather than continue believing
 //! invalidation succeeded.
+#![allow(dead_code)] // Scaffolding; some items kept for future use.
 
 use std::collections::BTreeSet;
 use std::sync::{Arc, RwLock};
@@ -196,7 +197,7 @@ impl Default for InvalidationBus {
 /// Returns true when two package identities differ in any field that should
 /// invalidate retained grants. Used by PR3's grant store to decide whether
 /// an existing grant survives a re-evaluation.
-pub fn identity_changed(prev: &PackageIdentity, curr: &PackageIdentity) -> bool {
+pub(crate) fn identity_changed(prev: &PackageIdentity, curr: &PackageIdentity) -> bool {
     prev.package_id != curr.package_id
         || prev.source != curr.source
         || prev.digest != curr.digest
@@ -221,14 +222,17 @@ pub fn identity_changed(prev: &PackageIdentity, curr: &PackageIdentity) -> bool 
 /// authority* but different list-canonicalization fired this check
 /// unnecessarily. Set typing closes that gap at the type level — the
 /// duplicates literally cannot exist.
-pub fn authority_changed(prev: &BTreeSet<CapabilityId>, curr: &BTreeSet<CapabilityId>) -> bool {
+pub(crate) fn authority_changed(
+    prev: &BTreeSet<CapabilityId>,
+    curr: &BTreeSet<CapabilityId>,
+) -> bool {
     prev != curr
 }
 
 /// Returns true when an existing grant may be retained across a
 /// re-evaluation: identity stable, effective trust unchanged, and requested
 /// authority unchanged. Any drift forces grant reissue per AC #7.
-pub fn grant_retention_eligible(
+pub(crate) fn grant_retention_eligible(
     prev_identity: &PackageIdentity,
     curr_identity: &PackageIdentity,
     prev_trust: EffectiveTrustClass,

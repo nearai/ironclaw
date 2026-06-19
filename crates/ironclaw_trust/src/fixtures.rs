@@ -12,17 +12,17 @@ use crate::decision::EffectiveTrustClass;
 use crate::sources::{AdminEntry, BundledEntry, admin_entry_with_trust, bundled_entry_with_trust};
 
 /// Test fixture: privileged effective trust at the `FirstParty` ceiling.
-pub fn effective_first_party_for_test() -> EffectiveTrustClass {
+pub(crate) fn effective_first_party_for_test() -> EffectiveTrustClass {
     EffectiveTrustClass::first_party()
 }
 
 /// Test fixture: privileged effective trust at the `System` ceiling.
-pub fn effective_system_for_test() -> EffectiveTrustClass {
+pub(crate) fn effective_system_for_test() -> EffectiveTrustClass {
     EffectiveTrustClass::system()
 }
 
 /// Test fixture: a [`BundledEntry`] at the given effective trust ceiling.
-pub fn bundled_entry_for_test(
+pub(crate) fn bundled_entry_for_test(
     package_id: PackageId,
     digest: Option<String>,
     effective_trust: EffectiveTrustClass,
@@ -33,7 +33,7 @@ pub fn bundled_entry_for_test(
 
 /// Test fixture: a [`BundledEntry`] with an explicit resource ceiling.
 #[allow(dead_code)]
-pub fn bundled_entry_with_resource_ceiling_for_test(
+pub(crate) fn bundled_entry_with_resource_ceiling_for_test(
     package_id: PackageId,
     digest: Option<String>,
     effective_trust: EffectiveTrustClass,
@@ -54,7 +54,7 @@ pub fn bundled_entry_with_resource_ceiling_for_test(
 /// Tests must spell the source explicitly so that the source-pin invariant
 /// in `AdminConfig::evaluate` is exercised end-to-end. The fixture exists
 /// to keep test bodies short, not to hide the source binding.
-pub fn admin_entry_for_test(
+pub(crate) fn admin_entry_for_test(
     package_id: PackageId,
     source: PackageSource,
     effective_trust: EffectiveTrustClass,
@@ -71,7 +71,7 @@ pub fn admin_entry_for_test(
 }
 
 /// Test fixture: an [`AdminEntry`] with an explicit digest pin.
-pub fn admin_entry_with_digest_for_test(
+pub(crate) fn admin_entry_with_digest_for_test(
     package_id: PackageId,
     source: PackageSource,
     digest: String,

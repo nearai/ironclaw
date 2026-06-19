@@ -283,6 +283,8 @@ impl ConversationStore for LibSqlBackend {
         routine_name: &str,
         user_id: &str,
     ) -> Result<Uuid, DatabaseError> {
+        #[cfg(test)]
+        let _test_write_guard = crate::db::libsql::TEST_WRITE_LOCK.lock().await;
         let conn = self.connect().await?;
         let rid = routine_id.to_string();
 
@@ -385,6 +387,8 @@ impl ConversationStore for LibSqlBackend {
         &self,
         user_id: &str,
     ) -> Result<Uuid, DatabaseError> {
+        #[cfg(test)]
+        let _test_write_guard = crate::db::libsql::TEST_WRITE_LOCK.lock().await;
         let conn = self.connect().await?;
 
         conn.execute("BEGIN IMMEDIATE", params![])

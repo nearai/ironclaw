@@ -52,13 +52,13 @@ impl CachedRenderedMessage {
     }
 }
 
-pub struct ConversationWidget {
+pub(crate) struct ConversationWidget {
     theme: Theme,
     render_cache: RwLock<ConversationRenderCache>,
 }
 
 impl ConversationWidget {
-    pub fn new(theme: Theme) -> Self {
+    pub(crate) fn new(theme: Theme) -> Self {
         Self {
             theme,
             render_cache: RwLock::new(ConversationRenderCache::default()),
@@ -878,7 +878,7 @@ impl ConversationWidget {
     }
 
     /// Handle scroll up/down with clamping and auto-follow management.
-    pub fn scroll(&self, state: &mut AppState, delta: i16) {
+    pub(crate) fn scroll(&self, state: &mut AppState, delta: i16) {
         let max_scroll = {
             let cache = match self.render_cache.read() {
                 Ok(c) => c,

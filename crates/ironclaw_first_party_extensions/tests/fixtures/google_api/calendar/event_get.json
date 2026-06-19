@@ -1,0 +1,18 @@
+{
+  "kind": "calendar#event",
+  "etag": "\"3500000000000000\"",
+  "id": "evt-standup-001",
+  "iCalUID": "evt-standup-001@google.com",
+  "sequence": 3,
+  "status": "confirmed",
+  "htmlLink": "https://calendar.google.com/event?eid=evt-standup-001",
+  "summary": "Daily standup",
+  "description": "Quick sync",
+  "location": "Room 4",
+  "start": { "dateTime": "2026-05-21T09:00:00-04:00", "timeZone": "America/New_York" },
+  "end": { "dateTime": "2026-05-21T09:15:00-04:00", "timeZone": "America/New_York" },
+  "attendees": [
+    { "email": "ada@example.com", "responseStatus": "accepted", "organizer": true }
+  ],
+  "reminders": { "useDefault": true }
+}

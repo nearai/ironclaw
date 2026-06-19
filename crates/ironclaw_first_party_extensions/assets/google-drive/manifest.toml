@@ -1,0 +1,178 @@
+schema_version = "reborn.extension_manifest.v2"
+id = "google-drive"
+name = "Google Drive"
+version = "0.1.0"
+description = "Google Drive capabilities for searching, accessing, uploading, sharing, and organizing files and folders."
+trust = "first_party_requested"
+
+[runtime]
+kind = "wasm"
+module = "wasm/google_drive_tool.wasm"
+
+[[capabilities]]
+id = "google-drive.list_files"
+description = "Search or list files and folders."
+effects = ["dispatch_capability", "network", "use_secret"]
+runtime_credentials = [
+  { handle = "google_runtime_token", source = { type = "product_auth_account", provider = "google", setup = { kind = "oauth", scopes = ["https://www.googleapis.com/auth/drive.readonly"] } }, provider_scopes = ["https://www.googleapis.com/auth/drive.readonly"], audience = { scheme = "https", host_pattern = "www.googleapis.com" }, target = { type = "header", name = "authorization", prefix = "Bearer " } },
+]
+default_permission = "ask"
+visibility = "model"
+input_schema_ref = "schemas/google-drive/list_files.input.v1.json"
+output_schema_ref = "schemas/google-drive/raw_output.v1.json"
+prompt_doc_ref = "prompts/google-drive/list_files.md"
+required_host_ports = ["host.runtime.http_egress"]
+
+[[capabilities]]
+id = "google-drive.get_file"
+description = "Get file metadata."
+effects = ["dispatch_capability", "network", "use_secret"]
+runtime_credentials = [
+  { handle = "google_runtime_token", source = { type = "product_auth_account", provider = "google", setup = { kind = "oauth", scopes = ["https://www.googleapis.com/auth/drive.readonly"] } }, provider_scopes = ["https://www.googleapis.com/auth/drive.readonly"], audience = { scheme = "https", host_pattern = "www.googleapis.com" }, target = { type = "header", name = "authorization", prefix = "Bearer " } },
+]
+default_permission = "ask"
+visibility = "model"
+input_schema_ref = "schemas/google-drive/get_file.input.v1.json"
+output_schema_ref = "schemas/google-drive/raw_output.v1.json"
+prompt_doc_ref = "prompts/google-drive/get_file.md"
+required_host_ports = ["host.runtime.http_egress"]
+
+[[capabilities]]
+id = "google-drive.download_file"
+description = "Download file content as text or export a Google Workspace file."
+effects = ["dispatch_capability", "network", "use_secret"]
+runtime_credentials = [
+  { handle = "google_runtime_token", source = { type = "product_auth_account", provider = "google", setup = { kind = "oauth", scopes = ["https://www.googleapis.com/auth/drive.readonly"] } }, provider_scopes = ["https://www.googleapis.com/auth/drive.readonly"], audience = { scheme = "https", host_pattern = "www.googleapis.com" }, target = { type = "header", name = "authorization", prefix = "Bearer " } },
+]
+default_permission = "ask"
+visibility = "model"
+input_schema_ref = "schemas/google-drive/download_file.input.v1.json"
+output_schema_ref = "schemas/google-drive/raw_output.v1.json"
+prompt_doc_ref = "prompts/google-drive/download_file.md"
+required_host_ports = ["host.runtime.http_egress"]
+
+[[capabilities]]
+id = "google-drive.upload_file"
+description = "Upload a new text file."
+effects = ["dispatch_capability", "network", "use_secret", "external_write"]
+runtime_credentials = [
+  { handle = "google_runtime_token", source = { type = "product_auth_account", provider = "google", setup = { kind = "oauth", scopes = ["https://www.googleapis.com/auth/drive"] } }, provider_scopes = ["https://www.googleapis.com/auth/drive"], audience = { scheme = "https", host_pattern = "www.googleapis.com" }, target = { type = "header", name = "authorization", prefix = "Bearer " } },
+]
+default_permission = "ask"
+visibility = "model"
+input_schema_ref = "schemas/google-drive/upload_file.input.v1.json"
+output_schema_ref = "schemas/google-drive/raw_output.v1.json"
+prompt_doc_ref = "prompts/google-drive/upload_file.md"
+required_host_ports = ["host.runtime.http_egress"]
+
+[[capabilities]]
+id = "google-drive.update_file"
+description = "Update file metadata or move/star a file."
+effects = ["dispatch_capability", "network", "use_secret", "external_write"]
+runtime_credentials = [
+  { handle = "google_runtime_token", source = { type = "product_auth_account", provider = "google", setup = { kind = "oauth", scopes = ["https://www.googleapis.com/auth/drive"] } }, provider_scopes = ["https://www.googleapis.com/auth/drive"], audience = { scheme = "https", host_pattern = "www.googleapis.com" }, target = { type = "header", name = "authorization", prefix = "Bearer " } },
+]
+default_permission = "ask"
+visibility = "model"
+input_schema_ref = "schemas/google-drive/update_file.input.v1.json"
+output_schema_ref = "schemas/google-drive/raw_output.v1.json"
+prompt_doc_ref = "prompts/google-drive/update_file.md"
+required_host_ports = ["host.runtime.http_egress"]
+
+[[capabilities]]
+id = "google-drive.create_folder"
+description = "Create a folder."
+effects = ["dispatch_capability", "network", "use_secret", "external_write"]
+runtime_credentials = [
+  { handle = "google_runtime_token", source = { type = "product_auth_account", provider = "google", setup = { kind = "oauth", scopes = ["https://www.googleapis.com/auth/drive"] } }, provider_scopes = ["https://www.googleapis.com/auth/drive"], audience = { scheme = "https", host_pattern = "www.googleapis.com" }, target = { type = "header", name = "authorization", prefix = "Bearer " } },
+]
+default_permission = "ask"
+visibility = "model"
+input_schema_ref = "schemas/google-drive/create_folder.input.v1.json"
+output_schema_ref = "schemas/google-drive/raw_output.v1.json"
+prompt_doc_ref = "prompts/google-drive/create_folder.md"
+required_host_ports = ["host.runtime.http_egress"]
+
+[[capabilities]]
+id = "google-drive.delete_file"
+description = "Permanently delete a file or folder."
+effects = ["dispatch_capability", "network", "use_secret", "external_write"]
+runtime_credentials = [
+  { handle = "google_runtime_token", source = { type = "product_auth_account", provider = "google", setup = { kind = "oauth", scopes = ["https://www.googleapis.com/auth/drive"] } }, provider_scopes = ["https://www.googleapis.com/auth/drive"], audience = { scheme = "https", host_pattern = "www.googleapis.com" }, target = { type = "header", name = "authorization", prefix = "Bearer " } },
+]
+default_permission = "ask"
+visibility = "model"
+input_schema_ref = "schemas/google-drive/delete_file.input.v1.json"
+output_schema_ref = "schemas/google-drive/raw_output.v1.json"
+prompt_doc_ref = "prompts/google-drive/delete_file.md"
+required_host_ports = ["host.runtime.http_egress"]
+
+[[capabilities]]
+id = "google-drive.trash_file"
+description = "Move a file or folder to trash."
+effects = ["dispatch_capability", "network", "use_secret", "external_write"]
+runtime_credentials = [
+  { handle = "google_runtime_token", source = { type = "product_auth_account", provider = "google", setup = { kind = "oauth", scopes = ["https://www.googleapis.com/auth/drive"] } }, provider_scopes = ["https://www.googleapis.com/auth/drive"], audience = { scheme = "https", host_pattern = "www.googleapis.com" }, target = { type = "header", name = "authorization", prefix = "Bearer " } },
+]
+default_permission = "ask"
+visibility = "model"
+input_schema_ref = "schemas/google-drive/trash_file.input.v1.json"
+output_schema_ref = "schemas/google-drive/raw_output.v1.json"
+prompt_doc_ref = "prompts/google-drive/trash_file.md"
+required_host_ports = ["host.runtime.http_egress"]
+
+[[capabilities]]
+id = "google-drive.share_file"
+description = "Share a file or folder with someone."
+effects = ["dispatch_capability", "network", "use_secret", "external_write"]
+runtime_credentials = [
+  { handle = "google_runtime_token", source = { type = "product_auth_account", provider = "google", setup = { kind = "oauth", scopes = ["https://www.googleapis.com/auth/drive"] } }, provider_scopes = ["https://www.googleapis.com/auth/drive"], audience = { scheme = "https", host_pattern = "www.googleapis.com" }, target = { type = "header", name = "authorization", prefix = "Bearer " } },
+]
+default_permission = "ask"
+visibility = "model"
+input_schema_ref = "schemas/google-drive/share_file.input.v1.json"
+output_schema_ref = "schemas/google-drive/raw_output.v1.json"
+prompt_doc_ref = "prompts/google-drive/share_file.md"
+required_host_ports = ["host.runtime.http_egress"]
+
+[[capabilities]]
+id = "google-drive.list_permissions"
+description = "List file permissions."
+effects = ["dispatch_capability", "network", "use_secret"]
+runtime_credentials = [
+  { handle = "google_runtime_token", source = { type = "product_auth_account", provider = "google", setup = { kind = "oauth", scopes = ["https://www.googleapis.com/auth/drive.readonly"] } }, provider_scopes = ["https://www.googleapis.com/auth/drive.readonly"], audience = { scheme = "https", host_pattern = "www.googleapis.com" }, target = { type = "header", name = "authorization", prefix = "Bearer " } },
+]
+default_permission = "ask"
+visibility = "model"
+input_schema_ref = "schemas/google-drive/list_permissions.input.v1.json"
+output_schema_ref = "schemas/google-drive/raw_output.v1.json"
+prompt_doc_ref = "prompts/google-drive/list_permissions.md"
+required_host_ports = ["host.runtime.http_egress"]
+
+[[capabilities]]
+id = "google-drive.remove_permission"
+description = "Revoke a file permission."
+effects = ["dispatch_capability", "network", "use_secret", "external_write"]
+runtime_credentials = [
+  { handle = "google_runtime_token", source = { type = "product_auth_account", provider = "google", setup = { kind = "oauth", scopes = ["https://www.googleapis.com/auth/drive"] } }, provider_scopes = ["https://www.googleapis.com/auth/drive"], audience = { scheme = "https", host_pattern = "www.googleapis.com" }, target = { type = "header", name = "authorization", prefix = "Bearer " } },
+]
+default_permission = "ask"
+visibility = "model"
+input_schema_ref = "schemas/google-drive/remove_permission.input.v1.json"
+output_schema_ref = "schemas/google-drive/raw_output.v1.json"
+prompt_doc_ref = "prompts/google-drive/remove_permission.md"
+required_host_ports = ["host.runtime.http_egress"]
+
+[[capabilities]]
+id = "google-drive.list_shared_drives"
+description = "List shared drives."
+effects = ["dispatch_capability", "network", "use_secret"]
+runtime_credentials = [
+  { handle = "google_runtime_token", source = { type = "product_auth_account", provider = "google", setup = { kind = "oauth", scopes = ["https://www.googleapis.com/auth/drive.readonly"] } }, provider_scopes = ["https://www.googleapis.com/auth/drive.readonly"], audience = { scheme = "https", host_pattern = "www.googleapis.com" }, target = { type = "header", name = "authorization", prefix = "Bearer " } },
+]
+default_permission = "ask"
+visibility = "model"
+input_schema_ref = "schemas/google-drive/list_shared_drives.input.v1.json"
+output_schema_ref = "schemas/google-drive/raw_output.v1.json"
+prompt_doc_ref = "prompts/google-drive/list_shared_drives.md"
+required_host_ports = ["host.runtime.http_egress"]

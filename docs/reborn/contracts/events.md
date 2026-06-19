@@ -47,12 +47,20 @@ pub enum RuntimeEventKind {
     RuntimeSelected,
     DispatchSucceeded,
     DispatchFailed,
+    ModelStarted,
+    ModelCompleted,
+    ModelFailed,
+    AssistantReplyFinalized,
+    LoopCompleted,
+    LoopFailed,
     ProcessStarted,
     ProcessCompleted,
     ProcessFailed,
     ProcessKilled,
 }
 ```
+
+Model/reply milestone events are metadata-only loop milestones. `ModelFailed` is attempt-level progress and does not by itself mean the loop/run is terminally failed; trusted terminal status comes from validated `LoopCompleted` / `LoopFailed` milestones or a later trusted turn-run transition source. These events carry scope, capability id, and sanitized failure kind when applicable; they do not carry raw prompts, assistant content, provider errors, host paths, secrets, or message payloads.
 
 Approval-specific runtime event kinds are deliberately absent. Approval resolution belongs to the audit envelope contract.
 

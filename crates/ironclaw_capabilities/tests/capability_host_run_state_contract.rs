@@ -5,6 +5,7 @@ use async_trait::async_trait;
 use ironclaw_approvals::*;
 use ironclaw_authorization::*;
 use ironclaw_capabilities::*;
+use ironclaw_extensions::{ExtensionManifest, ExtensionPackage, ExtensionRegistry, ManifestSource};
 use ironclaw_host_api::*;
 use ironclaw_run_state::*;
 use serde_json::json;
@@ -58,6 +59,193 @@ async fn capability_host_blocks_for_approval_without_dispatch() {
             InvocationFingerprint::for_dispatch(&scope, &capability_id(), &estimate, &input)
                 .unwrap()
         )
+    );
+}
+
+#[tokio::test]
+async fn capability_host_adds_sanitized_shell_command_to_approval_reason() {
+    let manifest_toml = r#"
+schema_version = "reborn.extension_manifest.v2"
+id = "builtin"
+name = "Builtin"
+version = "0.1.0"
+description = "Builtin test extension"
+trust = "third_party"
+
+[runtime]
+kind = "wasm"
+module = "builtin.wasm"
+
+[[capabilities]]
+id = "builtin.shell"
+description = "Runs a shell command."
+effects = ["dispatch_capability", "spawn_process", "execute_code", "network"]
+default_permission = "ask"
+visibility = "model"
+input_schema_ref = "schemas/shell.input.v1.json"
+output_schema_ref = "schemas/shell.output.v1.json"
+"#;
+    let manifest = ExtensionManifest::parse(
+        manifest_toml,
+        ManifestSource::InstalledLocal,
+        &HostPortCatalog::empty(),
+    )
+    .unwrap();
+    let package = ExtensionPackage::from_manifest(
+        manifest,
+        VirtualPath::new("/system/extensions/builtin").unwrap(),
+    )
+    .unwrap();
+    let mut registry = ExtensionRegistry::new();
+    registry.insert(package).unwrap();
+    let dispatcher = RecordingDispatcher::default();
+    let run_state = InMemoryRunStateStore::new();
+    let approval_requests = InMemoryApprovalRequestStore::new();
+    let host = CapabilityHost::new(&registry, &dispatcher, &ApprovalAuthorizer)
+        .with_run_state(&run_state)
+        .with_approval_requests(&approval_requests);
+    let context = execution_context(CapabilitySet::default());
+    let scope = context.resource_scope.clone();
+    let invocation_id = context.invocation_id;
+    let capability_id = CapabilityId::new("builtin.shell").unwrap();
+    let input = json!({
+        "command": "pwd && curl -H 'Authorization: Bearer sk-secret' https://example.test/path?token=secret"
+    });
+
+    let err = host
+        .invoke_json(CapabilityInvocationRequest {
+            context,
+            capability_id,
+            estimate: ResourceEstimate::default(),
+            input,
+            trust_decision: trust_decision(),
+        })
+        .await
+        .unwrap_err();
+
+    assert!(matches!(
+        err,
+        CapabilityInvocationError::AuthorizationRequiresApproval { .. }
+    ));
+    let approval_id = run_state
+        .get(&scope, invocation_id)
+        .await
+        .unwrap()
+        .unwrap()
+        .approval_request_id
+        .unwrap();
+    let approval = approval_requests
+        .get(&scope, approval_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(approval.request.reason.contains("Command:\npwd && curl"));
+    assert!(
+        approval
+            .request
+            .reason
+            .contains("-H 'Authorization: [redacted]'")
+    );
+    assert!(
+        approval
+            .request
+            .reason
+            .contains("https://example.test/path?...")
+    );
+    assert!(!approval.request.reason.contains("sk-secret"));
+    assert!(!approval.request.reason.contains("token=secret"));
+}
+
+#[tokio::test]
+async fn capability_host_uses_combined_store_for_atomic_approval_block() {
+    let registry = registry_with_echo_capability();
+    let dispatcher = RecordingDispatcher::default();
+    let store = RecordingCombinedRunStateApprovalStore::new();
+    let host = CapabilityHost::new(&registry, &dispatcher, &ApprovalAuthorizer)
+        .with_run_state_approval_store(&store);
+    let context = execution_context(CapabilitySet::default());
+    let scope = context.resource_scope.clone();
+    let invocation_id = context.invocation_id;
+    let estimate = ResourceEstimate::default();
+    let input = json!({"message": "needs atomic approval"});
+
+    let err = host
+        .invoke_json(CapabilityInvocationRequest {
+            context,
+            capability_id: capability_id(),
+            estimate: estimate.clone(),
+            input: input.clone(),
+            trust_decision: trust_decision(),
+        })
+        .await
+        .unwrap_err();
+
+    assert!(matches!(
+        err,
+        CapabilityInvocationError::AuthorizationRequiresApproval { .. }
+    ));
+    assert_eq!(store.combined_calls(), 1);
+    assert_eq!(store.separate_save_calls(), 0);
+    let run = RunStateStore::get(&store, &scope, invocation_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(run.status, RunStatus::BlockedApproval);
+    let approval_id = run.approval_request_id.unwrap();
+    let approval = ApprovalRequestStore::get(&store, &scope, approval_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(approval.status, ApprovalStatus::Pending);
+    assert_eq!(
+        approval.request.invocation_fingerprint,
+        Some(
+            InvocationFingerprint::for_dispatch(&scope, &capability_id(), &estimate, &input)
+                .unwrap()
+        )
+    );
+}
+
+#[tokio::test]
+async fn capability_host_separate_store_setters_clear_combined_atomic_path() {
+    let registry = registry_with_echo_capability();
+    let dispatcher = RecordingDispatcher::default();
+    let combined = RecordingCombinedRunStateApprovalStore::new();
+    let separate_run_state = InMemoryRunStateStore::new();
+    let host = CapabilityHost::new(&registry, &dispatcher, &ApprovalAuthorizer)
+        .with_run_state_approval_store(&combined)
+        .with_run_state(&separate_run_state);
+    let context = execution_context(CapabilitySet::default());
+    let scope = context.resource_scope.clone();
+    let invocation_id = context.invocation_id;
+    let estimate = ResourceEstimate::default();
+    let input = json!({"message": "split stores by explicit setter order"});
+
+    let err = host
+        .invoke_json(CapabilityInvocationRequest {
+            context,
+            capability_id: capability_id(),
+            estimate,
+            input,
+            trust_decision: trust_decision(),
+        })
+        .await
+        .unwrap_err();
+
+    assert!(matches!(
+        err,
+        CapabilityInvocationError::AuthorizationRequiresApproval { .. }
+    ));
+    assert_eq!(combined.combined_calls(), 0);
+    assert_eq!(combined.separate_save_calls(), 1);
+    assert_eq!(
+        separate_run_state
+            .get(&scope, invocation_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .status,
+        RunStatus::BlockedApproval
     );
 }
 
@@ -763,10 +951,19 @@ async fn capability_host_revokes_claimed_lease_when_dispatch_fails_after_resume(
 
     assert!(matches!(
         err,
-        CapabilityInvocationError::Dispatch { ref kind } if kind == "Backend"
+        CapabilityInvocationError::Dispatch {
+            kind: DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::Backend),
+            safe_summary: None,
+        }
     ));
+    // Per PR #4236 disposition policy, the capability host no longer
+    // transitions run state on dispatch failures — the higher host_runtime
+    // layer consults `capability_failure_disposition` and either retries
+    // (for `Backend`/`RetrySameCall`) or surfaces the failure to the model
+    // (`ModelVisibleToolError`). The run therefore stays in its prior state
+    // (`BlockedApproval`, set by the initial invoke).
     let run = run_state.get(&scope, invocation_id).await.unwrap().unwrap();
-    assert_eq!(run.status, RunStatus::Failed);
+    assert_eq!(run.status, RunStatus::BlockedApproval);
     let revoked = leases.get(&scope, lease.grant.id).await.unwrap();
     assert_eq!(revoked.status, CapabilityLeaseStatus::Revoked);
 }
@@ -1284,6 +1481,160 @@ impl ApprovalRequestStore for HangingSaveApprovalRequestStore {
     }
 }
 
+struct RecordingCombinedRunStateApprovalStore {
+    runs: InMemoryRunStateStore,
+    approvals: InMemoryApprovalRequestStore,
+    combined_calls: AtomicUsize,
+    separate_save_calls: AtomicUsize,
+}
+
+impl RecordingCombinedRunStateApprovalStore {
+    fn new() -> Self {
+        Self {
+            runs: InMemoryRunStateStore::new(),
+            approvals: InMemoryApprovalRequestStore::new(),
+            combined_calls: AtomicUsize::new(0),
+            separate_save_calls: AtomicUsize::new(0),
+        }
+    }
+
+    fn combined_calls(&self) -> usize {
+        self.combined_calls.load(Ordering::SeqCst)
+    }
+
+    fn separate_save_calls(&self) -> usize {
+        self.separate_save_calls.load(Ordering::SeqCst)
+    }
+}
+
+#[async_trait]
+impl RunStateStore for RecordingCombinedRunStateApprovalStore {
+    async fn start(&self, start: RunStart) -> Result<RunRecord, RunStateError> {
+        self.runs.start(start).await
+    }
+
+    async fn block_approval(
+        &self,
+        scope: &ResourceScope,
+        invocation_id: InvocationId,
+        approval: ApprovalRequest,
+    ) -> Result<RunRecord, RunStateError> {
+        self.runs
+            .block_approval(scope, invocation_id, approval)
+            .await
+    }
+
+    async fn block_auth(
+        &self,
+        scope: &ResourceScope,
+        invocation_id: InvocationId,
+        error_kind: String,
+    ) -> Result<RunRecord, RunStateError> {
+        self.runs.block_auth(scope, invocation_id, error_kind).await
+    }
+
+    async fn complete(
+        &self,
+        scope: &ResourceScope,
+        invocation_id: InvocationId,
+    ) -> Result<RunRecord, RunStateError> {
+        self.runs.complete(scope, invocation_id).await
+    }
+
+    async fn fail(
+        &self,
+        scope: &ResourceScope,
+        invocation_id: InvocationId,
+        error_kind: String,
+    ) -> Result<RunRecord, RunStateError> {
+        self.runs.fail(scope, invocation_id, error_kind).await
+    }
+
+    async fn get(
+        &self,
+        scope: &ResourceScope,
+        invocation_id: InvocationId,
+    ) -> Result<Option<RunRecord>, RunStateError> {
+        self.runs.get(scope, invocation_id).await
+    }
+
+    async fn records_for_scope(
+        &self,
+        scope: &ResourceScope,
+    ) -> Result<Vec<RunRecord>, RunStateError> {
+        self.runs.records_for_scope(scope).await
+    }
+}
+
+#[async_trait]
+impl ApprovalRequestStore for RecordingCombinedRunStateApprovalStore {
+    async fn save_pending(
+        &self,
+        scope: ResourceScope,
+        request: ApprovalRequest,
+    ) -> Result<ApprovalRecord, RunStateError> {
+        self.separate_save_calls.fetch_add(1, Ordering::SeqCst);
+        self.approvals.save_pending(scope, request).await
+    }
+
+    async fn get(
+        &self,
+        scope: &ResourceScope,
+        request_id: ApprovalRequestId,
+    ) -> Result<Option<ApprovalRecord>, RunStateError> {
+        self.approvals.get(scope, request_id).await
+    }
+
+    async fn approve(
+        &self,
+        scope: &ResourceScope,
+        request_id: ApprovalRequestId,
+    ) -> Result<ApprovalRecord, RunStateError> {
+        self.approvals.approve(scope, request_id).await
+    }
+
+    async fn deny(
+        &self,
+        scope: &ResourceScope,
+        request_id: ApprovalRequestId,
+    ) -> Result<ApprovalRecord, RunStateError> {
+        self.approvals.deny(scope, request_id).await
+    }
+
+    async fn discard_pending(
+        &self,
+        scope: &ResourceScope,
+        request_id: ApprovalRequestId,
+    ) -> Result<ApprovalRecord, RunStateError> {
+        self.approvals.discard_pending(scope, request_id).await
+    }
+
+    async fn records_for_scope(
+        &self,
+        scope: &ResourceScope,
+    ) -> Result<Vec<ApprovalRecord>, RunStateError> {
+        self.approvals.records_for_scope(scope).await
+    }
+}
+
+#[async_trait]
+impl RunStateApprovalStore for RecordingCombinedRunStateApprovalStore {
+    async fn save_pending_and_block_approval(
+        &self,
+        scope: ResourceScope,
+        invocation_id: InvocationId,
+        approval: ApprovalRequest,
+    ) -> Result<RunRecord, RunStateError> {
+        self.combined_calls.fetch_add(1, Ordering::SeqCst);
+        self.approvals
+            .save_pending(scope.clone(), approval.clone())
+            .await?;
+        self.runs
+            .block_approval(&scope, invocation_id, approval)
+            .await
+    }
+}
+
 struct FailCompleteRunStateStore {
     inner: InMemoryRunStateStore,
 }
@@ -1654,6 +2005,25 @@ impl CapabilityLeaseStore for CoordinatedClaimConflictLeaseStore {
         self.inner.consume(scope, lease_id).await
     }
 
+    async fn begin_dispatch_claimed(
+        &self,
+        scope: &ResourceScope,
+        lease_id: CapabilityGrantId,
+        invocation_fingerprint: &InvocationFingerprint,
+    ) -> Result<CapabilityLease, CapabilityLeaseError> {
+        self.inner
+            .begin_dispatch_claimed(scope, lease_id, invocation_fingerprint)
+            .await
+    }
+
+    async fn abort_dispatch_claimed(
+        &self,
+        scope: &ResourceScope,
+        lease_id: CapabilityGrantId,
+    ) -> Result<CapabilityLease, CapabilityLeaseError> {
+        self.inner.abort_dispatch_claimed(scope, lease_id).await
+    }
+
     async fn leases_for_scope(&self, scope: &ResourceScope) -> Vec<CapabilityLease> {
         self.inner.leases_for_scope(scope).await
     }
@@ -1716,6 +2086,25 @@ impl CapabilityLeaseStore for ConsumeFailingLeaseStore {
         Err(CapabilityLeaseError::Persistence {
             reason: format!("consume failed for {lease_id}"),
         })
+    }
+
+    async fn begin_dispatch_claimed(
+        &self,
+        scope: &ResourceScope,
+        lease_id: CapabilityGrantId,
+        invocation_fingerprint: &InvocationFingerprint,
+    ) -> Result<CapabilityLease, CapabilityLeaseError> {
+        self.inner
+            .begin_dispatch_claimed(scope, lease_id, invocation_fingerprint)
+            .await
+    }
+
+    async fn abort_dispatch_claimed(
+        &self,
+        scope: &ResourceScope,
+        lease_id: CapabilityGrantId,
+    ) -> Result<CapabilityLease, CapabilityLeaseError> {
+        self.inner.abort_dispatch_claimed(scope, lease_id).await
     }
 
     async fn leases_for_scope(&self, scope: &ResourceScope) -> Vec<CapabilityLease> {
