@@ -58,6 +58,15 @@ slack-v2-host-beta = [
     "dep:ironclaw_wasm_product_adapters",
     "dep:ironclaw_product_workflow_storage",
 ]
+# Telegram Bot API webhook host-ingress, projected from extension state through
+# the generic host-ingress registry (mirrors slack-v2-host-beta). `host-auth-mint`
+# is inherited transitively via `ironclaw_wasm_product_adapters`.
+telegram-v2-host-beta = [
+    "webui-v2-beta",
+    "dep:ironclaw_telegram_v2_adapter",
+    "dep:ironclaw_wasm_product_adapters",
+    "dep:ironclaw_product_workflow_storage",
+]
 openai-compat-beta = [
     "webui-v2-beta",
     "dep:ironclaw_reborn_openai_compat",
@@ -136,6 +145,7 @@ ironclaw_safety = { path = "../ironclaw_safety" }
 ironclaw_secrets = { path = "../ironclaw_secrets" }
 ironclaw_skills = { path = "../ironclaw_skills" }
 ironclaw_slack_v2_adapter = { path = "../ironclaw_slack_v2_adapter", optional = true }
+ironclaw_telegram_v2_adapter = { path = "../ironclaw_telegram_v2_adapter", optional = true }
 ironclaw_threads = { path = "../ironclaw_threads" }
 ironclaw_triggers = { path = "../ironclaw_triggers" }
 ironclaw_trust = { path = "../ironclaw_trust" }

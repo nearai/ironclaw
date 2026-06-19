@@ -50,6 +50,13 @@ pub const SLACK_EVENTS_BODY_LIMIT_BYTES: u64 = 1024 * 1024;
 pub const SLACK_EVENTS_MAX_REQUESTS: u32 = 12_000;
 pub const SLACK_EVENTS_RATE_WINDOW_SECONDS: u32 = 60;
 
+pub const TELEGRAM_UPDATES_POLICY_PROFILE: &str = "telegram_updates";
+pub const TELEGRAM_UPDATES_ROUTE_ID: &str = "telegram.updates";
+pub const TELEGRAM_UPDATES_PATH: &str = "/webhooks/telegram/updates";
+pub const TELEGRAM_UPDATES_BODY_LIMIT_BYTES: u64 = 1024 * 1024;
+pub const TELEGRAM_UPDATES_MAX_REQUESTS: u32 = 12_000;
+pub const TELEGRAM_UPDATES_RATE_WINDOW_SECONDS: u32 = 60;
+
 pub fn parse_host_ingress_manifest_record(
     raw_toml: impl Into<String>,
     source: ManifestSource,
@@ -157,6 +164,7 @@ pub async fn list_enabled_host_ingress_entries(
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum IngressPolicyProfile {
     SlackEvents,
+    TelegramUpdates,
 }
 
 impl IngressPolicyProfile {
@@ -164,6 +172,7 @@ impl IngressPolicyProfile {
         let name = name.into();
         match name.as_str() {
             SLACK_EVENTS_POLICY_PROFILE => Ok(Self::SlackEvents),
+            TELEGRAM_UPDATES_POLICY_PROFILE => Ok(Self::TelegramUpdates),
             _ => Err(Error::UnknownPolicyProfile { profile: name }),
         }
     }
@@ -171,12 +180,14 @@ impl IngressPolicyProfile {
     pub fn as_str(self) -> &'static str {
         match self {
             Self::SlackEvents => SLACK_EVENTS_POLICY_PROFILE,
+            Self::TelegramUpdates => TELEGRAM_UPDATES_POLICY_PROFILE,
         }
     }
 
     pub fn route_descriptor(self) -> Result<IngressRouteDescriptor, Error> {
         match self {
             Self::SlackEvents => slack_events_route_descriptor(),
+            Self::TelegramUpdates => telegram_updates_route_descriptor(),
         }
     }
 }
@@ -235,6 +246,63 @@ fn slack_events_policy() -> Result<IngressPolicy, Error> {
     })
     .map_err(|source| Error::ProfileBuild {
         profile: IngressPolicyProfile::SlackEvents,
+        source,
+    })
+}
+
+fn telegram_updates_route_descriptor() -> Result<IngressRouteDescriptor, Error> {
+    IngressRouteDescriptor::new(
+        TELEGRAM_UPDATES_ROUTE_ID,
+        NetworkMethod::Post,
+        TELEGRAM_UPDATES_PATH,
+        telegram_updates_policy()?,
+    )
+    .map_err(|source| Error::ProfileBuild {
+        profile: IngressPolicyProfile::TelegramUpdates,
+        source,
+    })
+}
+
+fn telegram_updates_policy() -> Result<IngressPolicy, Error> {
+    IngressPolicy::new(IngressPolicyParts {
+        listener_class: ListenerClass::PublicWebhook,
+        // A Telegram webhook authenticates via the shared-secret header
+        // (`X-Telegram-Bot-Api-Secret-Token`), but the policy vocabulary models
+        // every public-webhook auth as `WebhookSignature` (the scheme-name
+        // string + the handler's chosen verifier carry the HMAC-vs-shared-secret
+        // distinction). Mirror Slack here.
+        auth: IngressAuthPolicy::Required {
+            schemes: vec![IngressAuthScheme::WebhookSignature],
+        },
+        scope_source: IngressScopeSource::HostResolved,
+        body_limit: BodyLimitPolicy::Limited {
+            max_bytes: nonzero_u64(
+                TELEGRAM_UPDATES_BODY_LIMIT_BYTES,
+                IngressPolicyProfile::TelegramUpdates,
+                "body_limit.max_bytes",
+            )?,
+        },
+        rate_limit: RateLimitPolicy::Limited {
+            scope: RateLimitScope::Global,
+            max_requests: nonzero_u32(
+                TELEGRAM_UPDATES_MAX_REQUESTS,
+                IngressPolicyProfile::TelegramUpdates,
+                "rate_limit.max_requests",
+            )?,
+            window_seconds: nonzero_u32(
+                TELEGRAM_UPDATES_RATE_WINDOW_SECONDS,
+                IngressPolicyProfile::TelegramUpdates,
+                "rate_limit.window_seconds",
+            )?,
+        },
+        cors: CorsPolicy::NotApplicable,
+        websocket_origin: WebSocketOriginPolicy::NotApplicable,
+        streaming: StreamingMode::None,
+        audit: AuditTraceClass::PublicCallback,
+        effect_path: AllowedEffectPath::ProductWorkflow,
+    })
+    .map_err(|source| Error::ProfileBuild {
+        profile: IngressPolicyProfile::TelegramUpdates,
         source,
     })
 }
@@ -753,6 +821,65 @@ credential_handles = ["slack_signing_secret"]
         assert_eq!(policy.effect_path(), &AllowedEffectPath::ProductWorkflow);
         // TODO(step): add a composition-side cross-check against
         // `slack_events_policy()` once this dormant registry is wired there.
+    }
+
+    #[test]
+    fn telegram_updates_profile_projects_expected_policy_constants() {
+        let descriptor = IngressPolicyProfile::TelegramUpdates
+            .route_descriptor()
+            .expect("Telegram updates profile must build");
+
+        assert_eq!(descriptor.route_id().as_str(), TELEGRAM_UPDATES_ROUTE_ID);
+        assert_eq!(descriptor.method(), NetworkMethod::Post);
+        assert_eq!(descriptor.route_pattern().as_str(), TELEGRAM_UPDATES_PATH);
+
+        let policy = descriptor.policy();
+        assert_eq!(policy.listener_class(), ListenerClass::PublicWebhook);
+        assert_eq!(
+            policy.auth(),
+            &IngressAuthPolicy::Required {
+                schemes: vec![IngressAuthScheme::WebhookSignature],
+            }
+        );
+        assert_eq!(policy.scope_source(), IngressScopeSource::HostResolved);
+        assert_eq!(
+            policy.body_limit(),
+            BodyLimitPolicy::Limited {
+                max_bytes: NonZeroU64::new(TELEGRAM_UPDATES_BODY_LIMIT_BYTES)
+                    .expect("test value must be non-zero"),
+            }
+        );
+        assert_eq!(
+            policy.rate_limit(),
+            &RateLimitPolicy::Limited {
+                scope: RateLimitScope::Global,
+                max_requests: NonZeroU32::new(TELEGRAM_UPDATES_MAX_REQUESTS)
+                    .expect("test value must be non-zero"),
+                window_seconds: NonZeroU32::new(TELEGRAM_UPDATES_RATE_WINDOW_SECONDS)
+                    .expect("test value must be non-zero"),
+            }
+        );
+        assert_eq!(policy.cors(), CorsPolicy::NotApplicable);
+        assert_eq!(
+            policy.websocket_origin(),
+            WebSocketOriginPolicy::NotApplicable
+        );
+        assert_eq!(policy.streaming(), StreamingMode::None);
+        assert_eq!(policy.audit(), AuditTraceClass::PublicCallback);
+        assert_eq!(policy.effect_path(), &AllowedEffectPath::ProductWorkflow);
+    }
+
+    #[test]
+    fn telegram_updates_profile_resolves_from_manifest_name() {
+        assert_eq!(
+            IngressPolicyProfile::from_manifest_name(TELEGRAM_UPDATES_POLICY_PROFILE)
+                .expect("telegram_updates profile name must resolve"),
+            IngressPolicyProfile::TelegramUpdates
+        );
+        assert_eq!(
+            IngressPolicyProfile::TelegramUpdates.as_str(),
+            TELEGRAM_UPDATES_POLICY_PROFILE
+        );
     }
 
     #[tokio::test]

@@ -29,6 +29,7 @@ pub fn build_webui_services_with_slack_host_beta_mounts(
     event_stream: Option<Arc<dyn ProjectionStream>>,
     slack_mounts: Option<&SlackHostBetaMounts>,
     operator_route_visibility: SlackOperatorRouteVisibility,
+    extra_connectable_channels: Vec<RebornConnectableChannelInfo>,
 ) -> Result<RebornWebuiBundle, RebornBuildError> {
     let visibility = match (slack_mounts.is_some(), operator_route_visibility) {
         (false, _) => SlackConnectableChannelVisibility::Hidden,
@@ -44,12 +45,29 @@ pub fn build_webui_services_with_slack_host_beta_mounts(
             reason: "outbound delivery target providers require local runtime services".to_string(),
         });
     }
-    build_webui_services_with_connectable_channels(
-        runtime,
-        event_stream,
-        slack_connectable_channels(visibility),
-        Vec::new(),
-    )
+    // Merge any additional host-feature channels (e.g. Telegram) into the single
+    // connectable facade — the builder accepts exactly one facade, so chaining
+    // separate facades would silently drop all but the last.
+    let mut channels = slack_connectable_channel_infos(visibility);
+    channels.extend(extra_connectable_channels);
+    let connectable = (!channels.is_empty()).then(|| {
+        Arc::new(StaticConnectableChannelsProductFacade::new(channels))
+            as Arc<dyn ConnectableChannelsProductFacade>
+    });
+    build_webui_services_with_connectable_channels(runtime, event_stream, connectable, Vec::new())
+}
+
+fn slack_connectable_channel_infos(
+    visibility: SlackConnectableChannelVisibility,
+) -> Vec<RebornConnectableChannelInfo> {
+    if visibility == SlackConnectableChannelVisibility::Hidden {
+        return Vec::new();
+    }
+    let mut channels = vec![slack_inbound_proof_code_connectable_channel()];
+    if visibility == SlackConnectableChannelVisibility::PersonalPairingAndAdminChannelManagement {
+        channels.push(slack_admin_managed_channel_connectable_channel());
+    }
+    channels
 }
 
 #[cfg(test)]
@@ -66,15 +84,12 @@ fn build_webui_services_with_slack_connectable_channel(
     )
 }
 
+#[cfg(test)]
 fn slack_connectable_channels(
     visibility: SlackConnectableChannelVisibility,
 ) -> Option<Arc<dyn ConnectableChannelsProductFacade>> {
-    (visibility != SlackConnectableChannelVisibility::Hidden).then(|| {
-        let mut channels = vec![slack_inbound_proof_code_connectable_channel()];
-        if visibility == SlackConnectableChannelVisibility::PersonalPairingAndAdminChannelManagement
-        {
-            channels.push(slack_admin_managed_channel_connectable_channel());
-        }
+    let channels = slack_connectable_channel_infos(visibility);
+    (!channels.is_empty()).then(|| {
         Arc::new(StaticConnectableChannelsProductFacade::new(channels))
             as Arc<dyn ConnectableChannelsProductFacade>
     })

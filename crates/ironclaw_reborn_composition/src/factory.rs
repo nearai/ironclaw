@@ -113,6 +113,8 @@ use ironclaw_turns::{
 use crate::RebornProductAuthServicePorts;
 #[cfg(feature = "slack-v2-host-beta")]
 use crate::available_extensions::slack_manifest_digest;
+#[cfg(feature = "telegram-v2-host-beta")]
+use crate::available_extensions::telegram_manifest_digest;
 use crate::default_system_prompt::seed_default_system_prompt;
 use crate::input::{RebornLocalRuntimeIdentity, RebornRuntimeProcessBinding, RebornStorageInput};
 use crate::lifecycle::{RebornLocalSkillManagementPort, build_local_skill_management_port};
@@ -483,7 +485,7 @@ pub(crate) struct RebornLocalRuntimeServices {
     pub(crate) workspace_filesystem: Arc<ScopedFilesystem<LocalDevRootFilesystem>>,
     #[cfg(all(
         any(feature = "libsql", feature = "postgres"),
-        feature = "slack-v2-host-beta"
+        any(feature = "slack-v2-host-beta", feature = "telegram-v2-host-beta")
     ))]
     pub(crate) host_state_filesystem: Arc<ScopedFilesystem<LocalDevRootFilesystem>>,
     #[cfg(any(feature = "libsql", feature = "postgres"))]
@@ -1319,7 +1321,7 @@ fn build_local_dev_store_graph(
                 reason: error.to_string(),
             }
         })?;
-    #[cfg(feature = "slack-v2-host-beta")]
+    #[cfg(any(feature = "slack-v2-host-beta", feature = "telegram-v2-host-beta"))]
     let host_state_filesystem = local_dev_slack_host_state_filesystem(Arc::clone(&filesystem));
     let extension_lifecycle_surface_context = local_dev_extension_lifecycle_surface_context(
         owner_user_id.clone(),
@@ -1366,7 +1368,7 @@ fn build_local_dev_store_graph(
         memory_mounts,
         skill_filesystem,
         workspace_filesystem,
-        #[cfg(feature = "slack-v2-host-beta")]
+        #[cfg(any(feature = "slack-v2-host-beta", feature = "telegram-v2-host-beta"))]
         host_state_filesystem,
         subagent_goal_filesystem: Arc::clone(&scoped_filesystem),
         identity_filesystem: Arc::clone(&scoped_filesystem),
@@ -1448,7 +1450,10 @@ fn build_local_dev_store_graph(
                 reason: error.to_string(),
             }
         })?;
-    #[cfg(all(feature = "postgres", feature = "slack-v2-host-beta"))]
+    #[cfg(all(
+        feature = "postgres",
+        any(feature = "slack-v2-host-beta", feature = "telegram-v2-host-beta")
+    ))]
     let host_state_filesystem = local_dev_slack_host_state_filesystem(Arc::clone(&filesystem));
     let extension_lifecycle_surface_context = local_dev_extension_lifecycle_surface_context(
         owner_user_id.clone(),
@@ -1497,7 +1502,10 @@ fn build_local_dev_store_graph(
         memory_mounts,
         skill_filesystem,
         workspace_filesystem,
-        #[cfg(all(feature = "postgres", feature = "slack-v2-host-beta"))]
+        #[cfg(all(
+            feature = "postgres",
+            any(feature = "slack-v2-host-beta", feature = "telegram-v2-host-beta")
+        ))]
         host_state_filesystem,
         #[cfg(feature = "postgres")]
         subagent_goal_filesystem,
@@ -2218,7 +2226,7 @@ fn local_dev_outbound_store(_filesystem: Arc<LocalDevRootFilesystem>) -> LocalDe
 
 #[cfg(all(
     any(feature = "libsql", feature = "postgres"),
-    feature = "slack-v2-host-beta"
+    any(feature = "slack-v2-host-beta", feature = "telegram-v2-host-beta")
 ))]
 fn local_dev_slack_host_state_filesystem(
     filesystem: Arc<LocalDevRootFilesystem>,
@@ -2557,6 +2565,17 @@ pub fn builtin_first_party_trust_policy() -> Result<HostTrustPolicy, RebornBuild
         })?,
         "/system/extensions/slack/manifest.toml".to_string(),
         Some(slack_manifest_digest()),
+        HostTrustAssignment::first_party(),
+        Vec::new(),
+        None,
+    ));
+    #[cfg(feature = "telegram-v2-host-beta")]
+    entries.push(AdminEntry::for_local_manifest(
+        PackageId::new("telegram").map_err(|error| RebornBuildError::InvalidConfig {
+            reason: format!("Telegram first-party package id is invalid: {error}"),
+        })?,
+        "/system/extensions/telegram/manifest.toml".to_string(),
+        Some(telegram_manifest_digest()),
         HostTrustAssignment::first_party(),
         Vec::new(),
         None,
@@ -3541,7 +3560,7 @@ mod tests {
             memory_mounts: base_runtime.memory_mounts.clone(),
             skill_filesystem: Arc::clone(&base_runtime.skill_filesystem),
             workspace_filesystem: Arc::clone(&base_runtime.workspace_filesystem),
-            #[cfg(feature = "slack-v2-host-beta")]
+            #[cfg(any(feature = "slack-v2-host-beta", feature = "telegram-v2-host-beta"))]
             host_state_filesystem: Arc::clone(&base_runtime.host_state_filesystem),
             #[cfg(feature = "libsql")]
             identity_filesystem: Arc::clone(&base_runtime.identity_filesystem),

@@ -88,6 +88,11 @@ pub struct RebornConfigFile {
     /// Slack host-beta feature. Secrets are env-only; this section stores
     /// IDs and environment variable names.
     pub slack: Option<SlackSection>,
+    /// Telegram Bot API webhook host-ingress route settings. Consumed by
+    /// `ironclaw-reborn serve` only when the binary is built with the
+    /// `telegram-v2-host-beta` feature. Secrets are env-only; this section
+    /// stores IDs and environment variable names.
+    pub telegram: Option<TelegramSection>,
     /// Cost-based budgets. Composition seeds defaults on first reservation
     /// for each user/project; per-account overrides happen through the
     /// `budget_set` tool or CLI at runtime. Setting any limit to `0` means
@@ -353,6 +358,66 @@ pub struct SlackSection {
 pub struct SlackChannelRouteSection {
     pub channel_id: Option<String>,
     pub subject_user_id: Option<String>,
+}
+
+/// Telegram host-ingress mount mode. Unlike Slack there is no legacy Reborn
+/// Telegram route, so the off state is named `disabled` and cannot be mistaken
+/// for "legacy Telegram works". `generic_shadow` builds and validates the
+/// extension-projected route without serving it; `generic` mounts it live.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TelegramHostIngressMode {
+    #[default]
+    Disabled,
+    GenericShadow,
+    Generic,
+}
+
+impl TelegramHostIngressMode {
+    pub fn is_generic_shadow(self) -> bool {
+        matches!(self, Self::GenericShadow)
+    }
+
+    pub fn is_generic(self) -> bool {
+        matches!(self, Self::Generic)
+    }
+}
+
+/// Telegram Bot API webhook host-beta configuration. `enabled = true` plus
+/// `host_ingress_mode = "generic"` imports this config into the bundled Telegram
+/// extension and projects the `/webhooks/telegram/updates` route from extension
+/// state. Bot token and webhook secret values stay env-only: `bot_token_env` and
+/// `secret_token_env` are variable names, never the secrets themselves.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TelegramSection {
+    /// Explicit host-beta enablement gate. Omitted/false means the Telegram
+    /// route is not mounted by `ironclaw-reborn serve`.
+    pub enabled: Option<bool>,
+    /// Telegram-specific mount mode. Defaults to `disabled`.
+    #[serde(default)]
+    pub host_ingress_mode: TelegramHostIngressMode,
+    /// Adapter installation id for this Telegram bot installation.
+    pub installation_id: Option<String>,
+    /// Bot username without a leading `@`, used for group mention triggers.
+    pub bot_username: Option<String>,
+    /// Stable bot user id, used to detect reply-to-bot triggers.
+    pub bot_user_id: Option<i64>,
+    /// Reborn user id this bot's private chats map to, and the local host owner
+    /// used for Telegram host-mediated egress.
+    pub user_id: Option<String>,
+    /// Optional Reborn user id whose scope owns shared/group Telegram turns.
+    pub shared_subject_user_id: Option<String>,
+    /// Recognized bot commands without a leading `/` (group command triggers).
+    #[serde(default)]
+    pub recognized_commands: Vec<String>,
+    /// Advertise progress (typing) push on outbound progress envelopes.
+    pub progress_push_enabled: Option<bool>,
+    /// Environment variable name containing the Telegram bot token.
+    pub bot_token_env: Option<String>,
+    /// Environment variable name containing the webhook shared secret
+    /// (`X-Telegram-Bot-Api-Secret-Token`).
+    pub secret_token_env: Option<String>,
 }
 
 /// `[budget]` section. All limits in USD. **0 = unlimited.**
@@ -833,6 +898,14 @@ impl RebornConfigFile {
             }
             if let Some(bot_token_env) = &slack.bot_token_env {
                 check(Cow::Borrowed("slack.bot_token_env"), bot_token_env)?;
+            }
+        }
+        if let Some(telegram) = &self.telegram {
+            if let Some(bot_token_env) = &telegram.bot_token_env {
+                check(Cow::Borrowed("telegram.bot_token_env"), bot_token_env)?;
+            }
+            if let Some(secret_token_env) = &telegram.secret_token_env {
+                check(Cow::Borrowed("telegram.secret_token_env"), secret_token_env)?;
             }
         }
         if let Some(budget) = &self.budget {
