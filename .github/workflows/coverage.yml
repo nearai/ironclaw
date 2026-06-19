@@ -44,7 +44,7 @@ env:
 jobs:
   coverage:
     name: Coverage (${{ matrix.name }})
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, ci-standard]
     env:
       CARGO_PROFILE_DEV_DEBUG: 0
       CARGO_PROFILE_TEST_DEBUG: 0
@@ -141,7 +141,7 @@ jobs:
 
   e2e-coverage:
     name: E2E Coverage
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, ci-standard]
     timeout-minutes: 60
     permissions:
       id-token: write
@@ -242,7 +242,7 @@ jobs:
 
   coverage-gate:
     name: Coverage
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, ci-standard]
     if: always()
     needs: [coverage, e2e-coverage]
     steps:

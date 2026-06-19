@@ -45,7 +45,7 @@ jobs:
   build:
     name: Build pilot artifact
     if: github.repository == 'enjimi/ironclaw'
-    runs-on: ubuntu-22.04
+    runs-on: [self-hosted, ci-release]
     steps:
       - name: Check out deployment source
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
@@ -74,7 +74,14 @@ jobs:
             source_ref="${INPUT_SOURCE_REF:-${DEPLOYMENT_BRANCH}}"
           fi
 
-          source_sha="$(git rev-parse "${source_ref}^{commit}")"
+          if source_sha="$(git rev-parse --verify "${source_ref}^{commit}")"; then
+            :
+          elif source_sha="$(git rev-parse --verify "origin/${source_ref}^{commit}")"; then
+            :
+          else
+            echo "::error::source_ref ${source_ref} does not resolve to a commit"
+            exit 1
+          fi
           if ! git merge-base --is-ancestor "${source_sha}" "origin/${DEPLOYMENT_BRANCH}"; then
             echo "::error::source_ref ${source_ref} (${source_sha}) is not reachable from ${DEPLOYMENT_BRANCH}"
             exit 1

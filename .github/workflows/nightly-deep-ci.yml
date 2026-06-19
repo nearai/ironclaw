@@ -38,7 +38,7 @@ jobs:
 
   nightly-alert:
     name: Nightly Deep CI Alert
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, ci-standard]
     if: always() && github.event_name == 'schedule'
     permissions:
       actions: read
