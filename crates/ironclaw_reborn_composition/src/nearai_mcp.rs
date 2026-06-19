@@ -249,10 +249,13 @@ pub(crate) async fn bootstrap_local_dev_nearai_mcp(
         .filter(|account| account.provider == provider)
         .collect::<Vec<_>>();
 
-    match nearai_mcp_bootstrap_existing_credential_decision(
-        &existing_accounts,
-        &requester_extension,
-    ) {
+    let credential_decision =
+        nearai_mcp_bootstrap_existing_credential_decision(&existing_accounts, &requester_extension);
+    let reusing_existing_credential = matches!(
+        credential_decision,
+        NearAiMcpBootstrapExistingCredentialDecision::ReuseUsable
+    );
+    match credential_decision {
         NearAiMcpBootstrapExistingCredentialDecision::ReuseUsable => {
             tracing::debug!(
                 "NEAR AI MCP credential already exists; skipping boot-time token update"
@@ -289,6 +292,13 @@ pub(crate) async fn bootstrap_local_dev_nearai_mcp(
                 });
             }
         }
+    }
+
+    if phase == LifecyclePhase::Discovered && reusing_existing_credential {
+        tracing::debug!(
+            "NEAR AI MCP credential already exists, but the extension is not installed; preserving explicit removed state"
+        );
+        return Ok(());
     }
 
     if phase == LifecyclePhase::Discovered {
