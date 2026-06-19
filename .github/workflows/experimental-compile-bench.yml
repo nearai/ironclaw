@@ -1,0 +1,657 @@
+name: Experimental Compile Benchmark
+
+on:
+  pull_request:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: experimental-compile-bench-${{ github.event_name }}-${{ github.head_ref || github.ref }}
+  cancel-in-progress: true
+
+env:
+  IRONCLAW_DISABLE_OS_KEYCHAIN: "1"
+  CARGO_PROFILE_DEV_DEBUG: "0"
+  CARGO_PROFILE_TEST_DEBUG: "0"
+
+jobs:
+  compile-variant:
+    name: Compile A/B (${{ matrix.label }})
+    runs-on: ${{ matrix.runs_on }}
+    timeout-minutes: 150
+    env:
+      CARGO_INCREMENTAL: "0"
+      RUSTC_WRAPPER: sccache
+      RUSTFLAGS: "-C linker=clang -C link-arg=--ld-path=/usr/bin/mold"
+      SCCACHE_GHA_ENABLED: "true"
+      ARCHIVE_TIMEOUT: 5400s
+      PROFILE_TIMEOUT: 3600s
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - label: llvm-baseline
+            toolchain: stable
+            backend: llvm
+            runs_on: ubuntu-latest
+          - label: cranelift
+            toolchain: nightly
+            backend: cranelift
+            runs_on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          persist-credentials: false
+
+      - name: Free runner disk space
+        run: |
+          set -euo pipefail
+          df -h /
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /usr/local/.ghcup /usr/local/share/boost /opt/hostedtoolcache/CodeQL || true
+          docker system prune -af || true
+          df -h /
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable/nightly
+        with:
+          toolchain: ${{ matrix.toolchain }}
+          targets: wasm32-wasip2
+
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@62b0f2dec647a8e604c6a0fda0e38530180dce20 # v2
+        with:
+          tool: cargo-nextest
+
+      - name: Install mold and clang
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y clang mold
+          clang --version
+          mold --version
+
+      - name: Verify mold linker works
+        run: |
+          set -euo pipefail
+          MOLD_BIN="$(command -v mold)"
+          echo "Using mold at: ${MOLD_BIN}"
+          # 1) Positive proof mold is invoked. clang forwards the linker's stdout,
+          #    so -Wl,--version prints mold's banner. Use explicit --ld-path: unlike
+          #    -fuse-ld=mold it needs no ld.mold name resolution and cannot silently
+          #    fall back to GNU ld.
+          printf 'int main(void) { return 0; }\n' > /tmp/mold-probe.c
+          clang --ld-path="${MOLD_BIN}" -Wl,--version /tmp/mold-probe.c -o /tmp/mold-probe 2>&1 | tee /tmp/mold-probe.log || true
+          if ! grep -iq mold /tmp/mold-probe.log; then
+            echo "::error::clang --ld-path did not invoke mold"
+            cat /tmp/mold-probe.log
+            exit 1
+          fi
+          # 2) End-to-end: rustc -> clang -> mold must produce a runnable binary.
+          #    rustc swallows the linker's stdout on a successful link, so assert a
+          #    working link instead of grepping output for "mold" (that grep was a
+          #    false-negative trap: it can never match a silent successful link).
+          printf 'fn main() { println!("ok"); }\n' > /tmp/rust-mold-probe.rs
+          RUSTC_WRAPPER= rustc /tmp/rust-mold-probe.rs \
+            -C linker=clang \
+            -C link-arg=--ld-path="${MOLD_BIN}" \
+            -o /tmp/rust-mold-probe
+          test -x /tmp/rust-mold-probe
+          /tmp/rust-mold-probe
+
+      - name: Start sccache
+        uses: mozilla-actions/sccache-action@1583d6b38d7be47f593cb472781bbb21cab4321e # v0.0.10
+
+      - name: Restore Rust cache
+        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          key: experimental-compile-bench-${{ matrix.label }}-${{ matrix.toolchain }}-${{ matrix.backend }}
+
+      - name: Prepare backend and verify selection
+        env:
+          LABEL: ${{ matrix.label }}
+          TOOLCHAIN: ${{ matrix.toolchain }}
+          BACKEND: ${{ matrix.backend }}
+        run: |
+          set -euo pipefail
+
+          backend_active="false"
+          backend_status="unverified"
+          backend_note=""
+          component_status=""
+          probe_status=""
+          verify_log="backend-verify-${LABEL}.log"
+          : > "${verify_log}"
+
+          if [ "${BACKEND}" = "llvm" ]; then
+            rustc -vV | tee -a "${verify_log}"
+            if grep -q '^LLVM version:' "${verify_log}"; then
+              backend_active="true"
+              backend_status="active"
+              backend_note="stable rustc reports LLVM and no codegen-backend override is configured"
+            else
+              backend_status="not-active"
+              backend_note="stable rustc did not report an LLVM version"
+            fi
+          elif [ "${BACKEND}" = "cranelift" ]; then
+            set +e
+            rustup component add rustc-codegen-cranelift-preview --toolchain nightly 2>&1 | tee -a "${verify_log}"
+            component_status="${PIPESTATUS[0]}"
+            set -e
+
+            if [ "${component_status}" -eq 0 ]; then
+              mkdir -p .cargo
+              cat > .cargo/config.toml <<'EOF'
+          [unstable]
+          codegen-backend = true
+
+          [profile.dev]
+          codegen-backend = "cranelift"
+
+          [profile.test]
+          codegen-backend = "cranelift"
+          EOF
+
+              probe_dir="${RUNNER_TEMP}/cranelift-backend-probe"
+              rm -rf "${probe_dir}" "${RUNNER_TEMP}/cranelift-backend-probe-target"
+              mkdir -p "${probe_dir}/src"
+              cat > "${probe_dir}/Cargo.toml" <<'EOF'
+          [package]
+          name = "cranelift_backend_probe"
+          version = "0.0.0"
+          edition = "2024"
+          EOF
+              cat > "${probe_dir}/src/main.rs" <<'EOF'
+          fn main() {
+              println!("backend probe");
+          }
+          EOF
+
+              set +e
+              CARGO_TARGET_DIR="${RUNNER_TEMP}/cranelift-backend-probe-target" \
+                cargo +nightly build --manifest-path "${probe_dir}/Cargo.toml" -vv 2>&1 | tee -a "${verify_log}"
+              probe_status="${PIPESTATUS[0]}"
+              set -e
+
+              if [ "${probe_status}" -eq 0 ] && grep -Eq -- 'codegen-backend(=|[[:space:]]+)cranelift|-Zcodegen-backend=cranelift' "${verify_log}"; then
+                backend_active="true"
+                backend_status="active"
+                backend_note="cargo verbose probe showed cranelift codegen-backend in the rustc invocation"
+              else
+                backend_status="not-active"
+                backend_note="cranelift probe did not show codegen-backend=cranelift in the rustc invocation"
+              fi
+            else
+              backend_status="not-active"
+              backend_note="rustup could not install rustc-codegen-cranelift-preview"
+            fi
+          else
+            backend_status="not-active"
+            backend_note="unknown backend ${BACKEND}"
+          fi
+
+          {
+            echo "BACKEND_ACTIVE=${backend_active}"
+            echo "BACKEND_STATUS=${backend_status}"
+            echo "BACKEND_COMPONENT_STATUS=${component_status}"
+            echo "BACKEND_PROBE_STATUS=${probe_status}"
+            echo "BACKEND_NOTE<<EOF"
+            echo "${backend_note}"
+            echo "EOF"
+          } >> "${GITHUB_ENV}"
+
+          if [ "${backend_active}" != "true" ]; then
+            echo "::warning::${LABEL} backend is ${backend_status}: ${backend_note}"
+          fi
+
+      - name: Run nextest archive measurement
+        env:
+          LABEL: ${{ matrix.label }}
+          TOOLCHAIN: ${{ matrix.toolchain }}
+          BACKEND: ${{ matrix.backend }}
+          RUNS_ON_LABEL: ${{ matrix.runs_on }}
+        run: |
+          set -euo pipefail
+
+          archive_file="nextest-${LABEL}.tar.zst"
+          build_json="build-${LABEL}.json"
+          build_log="build-${LABEL}.log"
+          sccache_stats="sccache-stats-${LABEL}.txt"
+          : > "${build_log}"
+
+          status=""
+          build_seconds=""
+          compile_status="not-run"
+
+          if [ "${BACKEND_ACTIVE}" != "true" ]; then
+            compile_status="not-active"
+            echo "::warning::Skipping ${LABEL} timing because ${BACKEND} backend verification did not pass: ${BACKEND_NOTE}" | tee -a "${build_log}"
+          else
+            start="$(date +%s)"
+            set +e
+            timeout "${ARCHIVE_TIMEOUT}" cargo nextest archive \
+              --profile ci \
+              --workspace \
+              --all-targets \
+              --all-features \
+              --archive-file "${archive_file}" \
+              2>&1 | tee -a "${build_log}"
+            status="${PIPESTATUS[0]}"
+            set -e
+            end="$(date +%s)"
+            build_seconds="$((end - start))"
+
+            if [ "${status}" -eq 0 ]; then
+              compile_status="success"
+            elif [ "${status}" -eq 124 ]; then
+              compile_status="timed-out"
+              echo "::warning::${LABEL} compile timed out after ${ARCHIVE_TIMEOUT}; recording measurement data and keeping job green"
+            else
+              compile_status="failed"
+              echo "::warning::${LABEL} compile failed with exit ${status}; recording measurement data and keeping job green"
+            fi
+          fi
+
+          sccache --show-stats | tee "${sccache_stats}" || true
+
+          export ARCHIVE_STATUS="${status}"
+          export BUILD_SECONDS="${build_seconds}"
+          export COMPILE_STATUS="${compile_status}"
+          export BUILD_LOG="${build_log}"
+          export SCCACHE_STATS="${sccache_stats}"
+
+          python3 - "${build_json}" <<'PY'
+          import json
+          import os
+          import re
+          import sys
+
+          output_path = sys.argv[1]
+          log_path = os.environ["BUILD_LOG"]
+          stats_path = os.environ["SCCACHE_STATS"]
+
+          def int_or_none(value):
+              value = (value or "").strip()
+              return int(value) if value else None
+
+          def bool_env(name):
+              return os.environ.get(name, "").lower() == "true"
+
+          def read_text(path):
+              try:
+                  with open(path, encoding="utf-8", errors="replace") as f:
+                      return f.read()
+              except OSError:
+                  return ""
+
+          log_text = read_text(log_path)
+          stats_text = read_text(stats_path)
+
+          failing_crate = None
+          for pattern in (
+              r"error: could not compile [`']([^`']+)[`']",
+              r"could not compile [`']([^`']+)[`']",
+          ):
+              match = re.search(pattern, log_text)
+              if match:
+                  failing_crate = match.group(1)
+                  break
+
+          def stat(name):
+              match = re.search(rf"^{re.escape(name)}\s+(\d+)\s*$", stats_text, re.MULTILINE)
+              return int(match.group(1)) if match else None
+
+          hits = stat("Cache hits")
+          misses = stat("Cache misses")
+          requests = (hits or 0) + (misses or 0)
+          hit_rate = (hits / requests) if requests else None
+
+          payload = {
+              "label": os.environ["LABEL"],
+              "toolchain": os.environ["TOOLCHAIN"],
+              "backend": os.environ["BACKEND"],
+              "runs_on": os.environ["RUNS_ON_LABEL"],
+              "build_seconds": int_or_none(os.environ.get("BUILD_SECONDS")),
+              "backend_active": bool_env("BACKEND_ACTIVE"),
+              "backend_status": os.environ.get("BACKEND_STATUS"),
+              "backend_note": os.environ.get("BACKEND_NOTE"),
+              "backend_component_status": int_or_none(os.environ.get("BACKEND_COMPONENT_STATUS")),
+              "backend_probe_status": int_or_none(os.environ.get("BACKEND_PROBE_STATUS")),
+              "compile_status": os.environ["COMPILE_STATUS"],
+              "exit_code": int_or_none(os.environ.get("ARCHIVE_STATUS")),
+              "failing_crate": failing_crate,
+              "mold_active": True,
+              "rustflags": os.environ.get("RUSTFLAGS", ""),
+              "sccache_hits": hits,
+              "sccache_misses": misses,
+              "sccache_hit_rate": hit_rate,
+          }
+
+          with open(output_path, "w", encoding="utf-8") as f:
+              json.dump(payload, f, indent=2, sort_keys=True)
+              f.write("\n")
+          PY
+
+          echo "Recorded ${LABEL}: ${compile_status}"
+
+      - name: Profile llvm-baseline long poles
+        if: always() && matrix.label == 'llvm-baseline'
+        run: |
+          set -euo pipefail
+
+          timings_target="target/timings-llvm-baseline"
+          timings_log="cargo-timings.log"
+          timings_json_log="cargo-timings-json.log"
+          long_poles_json="compile-long-poles.json"
+          rm -rf "${timings_target}"
+          : > "${timings_log}"
+          : > "${timings_json_log}"
+
+          set +e
+          RUSTC_WRAPPER= CARGO_TARGET_DIR="${timings_target}" \
+            timeout "${PROFILE_TIMEOUT}" cargo build --tests --workspace --all-features --timings \
+            2>&1 | tee "${timings_log}"
+          timings_status="${PIPESTATUS[0]}"
+
+          RUSTC_WRAPPER= CARGO_TARGET_DIR="${timings_target}" \
+            timeout 300s cargo build --tests --workspace --all-features --timings=json -Zunstable-options \
+            > "${timings_json_log}" 2>&1
+          timings_json_status="$?"
+          set -e
+
+          export TIMINGS_STATUS="${timings_status}"
+          export TIMINGS_JSON_STATUS="${timings_json_status}"
+          export TIMINGS_TARGET="${timings_target}"
+          export TIMINGS_LOG="${timings_log}"
+          export TIMINGS_JSON_LOG="${timings_json_log}"
+
+          python3 - "${long_poles_json}" <<'PY'
+          import glob
+          import json
+          import os
+          import re
+          import sys
+          from pathlib import Path
+
+          output_path = sys.argv[1]
+          target = Path(os.environ["TIMINGS_TARGET"])
+          note = None
+          units = []
+
+          def add_unit(unit_name, seconds):
+              try:
+                  seconds = float(seconds)
+              except (TypeError, ValueError):
+                  return
+              units.append({"unit": str(unit_name), "seconds": round(seconds, 3)})
+
+          json_log = Path(os.environ["TIMINGS_JSON_LOG"])
+          if os.environ.get("TIMINGS_JSON_STATUS") == "0" and json_log.exists():
+              try:
+                  for line in json_log.read_text(encoding="utf-8", errors="replace").splitlines():
+                      line = line.strip()
+                      if not line.startswith("{"):
+                          continue
+                      try:
+                          event = json.loads(line)
+                      except json.JSONDecodeError:
+                          continue
+                      unit = event.get("unit") or event.get("target") or event.get("package_id")
+                      seconds = event.get("duration") or event.get("duration_secs") or event.get("seconds")
+                      if unit is not None and seconds is not None:
+                          add_unit(unit, seconds)
+              except OSError as exc:
+                  note = f"could not read cargo timings JSON log: {exc}"
+
+          if not units:
+              html_paths = sorted(
+                  glob.glob(str(target / "cargo-timings" / "cargo-timing*.html")),
+                  key=lambda p: os.path.getmtime(p),
+              )
+              if not html_paths:
+                  note = note or "cargo did not produce timing HTML"
+              else:
+                  html_path = Path(html_paths[-1])
+                  try:
+                      text = html_path.read_text(encoding="utf-8", errors="replace")
+                      match = re.search(
+                          r"const UNIT_DATA\s*=\s*(\[.*?\]);\s*const CONCURRENCY_DATA",
+                          text,
+                          re.DOTALL,
+                      )
+                      if not match:
+                          note = f"could not find UNIT_DATA in {html_path}"
+                      else:
+                          for unit in json.loads(match.group(1)):
+                              name = unit.get("name") or "unknown"
+                              version = unit.get("version") or ""
+                              target_name = (unit.get("target") or "").strip()
+                              mode = unit.get("mode") or ""
+                              pieces = [name]
+                              if version:
+                                  pieces.append(version)
+                              if target_name:
+                                  pieces.append(target_name)
+                              if mode and mode != "todo":
+                                  pieces.append(f"mode={mode}")
+                              add_unit(" ".join(pieces), unit.get("duration"))
+                  except (OSError, json.JSONDecodeError) as exc:
+                      note = f"could not parse cargo timing HTML: {exc}"
+
+          units.sort(key=lambda row: row["seconds"], reverse=True)
+          if units:
+              payload = units[:15]
+          else:
+              payload = {
+                  "note": note or f"no parseable timing units; cargo status {os.environ.get('TIMINGS_STATUS')}",
+                  "units": [],
+              }
+
+          with open(output_path, "w", encoding="utf-8") as f:
+              json.dump(payload, f, indent=2, sort_keys=True)
+              f.write("\n")
+          PY
+
+          echo "Profiling status: ${timings_status}; JSON timing status: ${timings_json_status}"
+
+      - name: Upload variant measurement
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: compile-bench-build-${{ matrix.label }}
+          path: |
+            build-${{ matrix.label }}.json
+            build-${{ matrix.label }}.log
+            backend-verify-${{ matrix.label }}.log
+            sccache-stats-${{ matrix.label }}.txt
+          if-no-files-found: warn
+          retention-days: 14
+
+      - name: Upload compile timings
+        if: always() && matrix.label == 'llvm-baseline'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: compile-timings-html
+          path: |
+            target/timings-llvm-baseline/cargo-timings/cargo-timing*.html
+            compile-long-poles.json
+            cargo-timings.log
+            cargo-timings-json.log
+          if-no-files-found: warn
+          retention-days: 14
+
+  report:
+    name: Compile benchmark report
+    needs:
+      - compile-variant
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Download variant measurements
+        continue-on-error: true
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          pattern: compile-bench-build-*
+          path: artifacts/build
+          merge-multiple: true
+
+      - name: Download compile timings
+        continue-on-error: true
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: compile-timings-html
+          path: artifacts/timings
+
+      - name: Write comparison report
+        run: |
+          set -euo pipefail
+          python3 <<'PY'
+          import glob
+          import json
+          import math
+          import os
+
+          labels = ["llvm-baseline", "cranelift"]
+          builds = {}
+          for path in glob.glob("artifacts/build/build-*.json"):
+              try:
+                  with open(path, encoding="utf-8") as f:
+                      data = json.load(f)
+              except (OSError, json.JSONDecodeError):
+                  continue
+              label = data.get("label")
+              if label:
+                  builds[label] = data
+
+          def seconds(value):
+              if not isinstance(value, (int, float)):
+                  return "n/a"
+              return f"{int(value)}s"
+
+          def trusted(row):
+              return (
+                  row
+                  and row.get("backend_active") is True
+                  and row.get("compile_status") == "success"
+                  and isinstance(row.get("build_seconds"), (int, float))
+              )
+
+          baseline = builds.get("llvm-baseline")
+          baseline_seconds = baseline.get("build_seconds") if trusted(baseline) else None
+
+          def delta(row):
+              if not trusted(row) or not isinstance(baseline_seconds, (int, float)) or baseline_seconds <= 0:
+                  return "n/a"
+              current = row["build_seconds"]
+              pct = (baseline_seconds - current) / baseline_seconds * 100
+              if row.get("label") == "llvm-baseline":
+                  return "baseline"
+              if math.isclose(pct, 0.0, abs_tol=0.05):
+                  return "flat"
+              return f"{pct:.1f}% faster" if pct > 0 else f"{abs(pct):.1f}% slower"
+
+          def status_cell(row):
+              if not row:
+                  return "missing"
+              status = row.get("compile_status") or "unknown"
+              if row.get("failing_crate"):
+                  status += f" ({row['failing_crate']})"
+              if row.get("backend_active") is not True:
+                  status += " / backend not active"
+              return status
+
+          long_poles_path = "artifacts/timings/compile-long-poles.json"
+          long_poles = []
+          long_poles_note = None
+          try:
+              with open(long_poles_path, encoding="utf-8") as f:
+                  payload = json.load(f)
+              if isinstance(payload, list):
+                  long_poles = payload
+              elif isinstance(payload, dict):
+                  long_poles = payload.get("units") or []
+                  long_poles_note = payload.get("note")
+          except (OSError, json.JSONDecodeError) as exc:
+              long_poles_note = f"compile-long-poles.json unavailable: {exc}"
+
+          rows = labels + sorted(label for label in builds if label not in labels)
+          summary = os.environ["GITHUB_STEP_SUMMARY"]
+          with open(summary, "a", encoding="utf-8") as out:
+              out.write("# Experimental compile benchmark\n\n")
+              out.write(
+                  "This workflow is non-blocking measurement. Compile failures in a lever are recorded as data; "
+                  "only harness/setup failures should make the workflow red.\n\n"
+              )
+              out.write("> Runner A/B skipped: no larger GitHub-hosted Linux runner label was found in existing workflows.\n\n")
+              out.write("| Variant | toolchain | backend | runner | compile status | build seconds | delta vs llvm-baseline |\n")
+              out.write("| --- | --- | --- | --- | --- | ---: | --- |\n")
+              for label in rows:
+                  row = builds.get(label)
+                  out.write(
+                      f"| `{label}` | {row.get('toolchain', 'n/a') if row else 'n/a'} | "
+                      f"{row.get('backend', 'n/a') if row else 'n/a'} | "
+                      f"{row.get('runs_on', 'n/a') if row else 'n/a'} | "
+                      f"{status_cell(row)} | {seconds(row.get('build_seconds') if row else None)} | {delta(row)} |\n"
+                  )
+
+              out.write("\n## Top 15 slowest compilation units\n\n")
+              if long_poles:
+                  out.write("| Rank | Unit | seconds |\n")
+                  out.write("| ---: | --- | ---: |\n")
+                  for index, item in enumerate(long_poles[:15], 1):
+                      unit = str(item.get("unit", "unknown")).replace("|", "\\|")
+                      out.write(f"| {index} | `{unit}` | {seconds(item.get('seconds'))} |\n")
+              else:
+                  out.write(f"No parseable long-pole data. {long_poles_note or ''}\n")
+
+              trusted_nonbaseline = [
+                  row for label, row in builds.items()
+                  if label != "llvm-baseline" and trusted(row)
+              ]
+              if trusted(baseline) and trusted_nonbaseline:
+                  best = min(trusted_nonbaseline, key=lambda row: row["build_seconds"])
+                  best_delta = delta(best)
+                  if best["build_seconds"] < baseline_seconds:
+                      lever_sentence = (
+                          f"`{best['label']}` is the best trusted lever in this run at "
+                          f"{seconds(best['build_seconds'])}, {best_delta} than `llvm-baseline`."
+                      )
+                  else:
+                      lever_sentence = (
+                          "No non-baseline lever beat `llvm-baseline` in this run; keep LLVM+mold as the control."
+                      )
+              elif trusted(baseline):
+                  lever_sentence = (
+                      "No non-baseline lever produced a trusted successful timing in this run; treat those arms as compatibility data, not speed data."
+                  )
+              else:
+                  lever_sentence = (
+                      "No trusted `llvm-baseline` timing was captured, so the run cannot compute reliable deltas."
+                  )
+
+              if long_poles:
+                  top_units = ", ".join(f"`{item.get('unit', 'unknown')}`" for item in long_poles[:3])
+                  lower_units = " ".join(str(item.get("unit", "")).lower() for item in long_poles[:15])
+                  if " test" in lower_units or "tests" in lower_units:
+                      move_sentence = (
+                          f"The structural next move should start with consolidate-test-binaries around the top units ({top_units}), "
+                          "then use feature-gating or cargo-hakari if repeated dependency builds dominate the remaining list."
+                      )
+                  else:
+                      move_sentence = (
+                          f"The structural next move should target the top units ({top_units}) with feature-gating and cargo-hakari first; "
+                          "consolidate test binaries if follow-up timings show many separate test targets."
+                      )
+              else:
+                  move_sentence = (
+                      "Long-pole parsing did not produce unit data, so inspect the uploaded timing HTML before choosing between consolidate-test-binaries, feature-gating, or cargo-hakari."
+                  )
+
+              out.write("\n## Verdict\n\n")
+              out.write(f"{lever_sentence} {move_sentence}\n")
+          PY
