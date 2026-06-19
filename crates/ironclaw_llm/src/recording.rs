@@ -493,10 +493,14 @@ impl HttpInterceptor for ReplayingHttpInterceptor {
             .iter()
             .position(|exchange| http_replay_request_matches(&exchange.request, request))
         {
-            let exchange = queue
-                .remove(position)
-                .expect("matched HTTP replay exchange position remains");
-            Some(exchange.response)
+            match queue.remove(position) {
+                Some(exchange) => Some(exchange.response),
+                None => Some(HttpExchangeResponse {
+                    status: 599,
+                    headers: Vec::new(),
+                    body: "trace replay: matched HTTP exchange disappeared".to_string(),
+                }),
+            }
         } else {
             let redacted_incoming_url = redact_url(&request.url);
             tracing::error!(
