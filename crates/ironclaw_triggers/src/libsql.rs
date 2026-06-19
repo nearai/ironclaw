@@ -253,6 +253,23 @@ impl LibSqlTriggerRepository {
                     return Err(backend_error("add schedule_kind column", error));
                 }
             }
+            // Drop the legacy `completion_policy` column on tables created before the
+            // schedule-derived rework. Completion is now derived from the schedule
+            // (`Once` / exhausted cron), so the column is no longer written; leaving it
+            // NOT NULL on an existing table would fail every insert that omits it.
+            // Idempotent: ignore "no such column" when it was never present / already dropped.
+            if let Err(error) = conn
+                .execute(
+                    &format!("ALTER TABLE {TRIGGER_TABLE} DROP COLUMN completion_policy"),
+                    (),
+                )
+                .await
+            {
+                let msg = error.to_string();
+                if !msg.contains("no such column") && !msg.contains("does not exist") {
+                    return Err(backend_error("drop legacy completion_policy column", error));
+                }
+            }
             // Make thread_id nullable in trigger_run_history if it was created NOT NULL.
             // SQLite does not support ALTER COLUMN, so we rebuild the table when the
             // notnull constraint is still set on that column.

@@ -1406,6 +1406,10 @@ CREATE TABLE IF NOT EXISTS trigger_records (
 
 ALTER TABLE trigger_records ADD COLUMN IF NOT EXISTS schedule_timezone TEXT NOT NULL DEFAULT 'UTC';
 ALTER TABLE trigger_records ADD COLUMN IF NOT EXISTS schedule_kind TEXT NOT NULL DEFAULT 'cron';
+-- Completion is derived from the schedule (Once / exhausted cron); the legacy
+-- completion_policy column is no longer written and is dropped so inserts that
+-- omit it do not violate its NOT NULL constraint on pre-rework tables.
+ALTER TABLE trigger_records DROP COLUMN IF EXISTS completion_policy;
 
 CREATE INDEX IF NOT EXISTS trigger_records_state_next_run_at_idx
     ON trigger_records (state, next_run_at, tenant_id, trigger_id);

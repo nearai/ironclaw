@@ -54,9 +54,8 @@ use ironclaw_resources::{InMemoryResourceGovernor, ResourceAccount};
 use ironclaw_secrets::InMemorySecretStore;
 use ironclaw_triggers::{
     ClaimDueFireRequest, ClearActiveFireRequest, FireAcceptedRequest, InMemoryTriggerRepository,
-    MAX_TRIGGER_NAME_BYTES, MAX_TRIGGER_PROMPT_BYTES, TriggerCompletionPolicy, TriggerError,
-    TriggerRecord, TriggerRepository, TriggerRunHistoryStatus, TriggerRunRecord, TriggerSchedule,
-    TriggerState,
+    MAX_TRIGGER_NAME_BYTES, MAX_TRIGGER_PROMPT_BYTES, TriggerError, TriggerRecord,
+    TriggerRepository, TriggerRunHistoryStatus, TriggerRunRecord, TriggerSchedule, TriggerState,
 };
 use ironclaw_trust::{
     AdminConfig, AdminEntry, AuthorityCeiling, EffectiveTrustClass, HostTrustAssignment,
@@ -319,7 +318,7 @@ async fn builtin_first_party_surface_lists_allowed_tools_in_registry_order() {
 }
 
 #[tokio::test]
-async fn builtin_trigger_create_input_schema_declares_completion_policy_enum() {
+async fn builtin_trigger_create_input_schema_declares_schedule_one_of() {
     let runtime = runtime_with_trigger_repository(Arc::new(InMemoryTriggerRepository::default()));
     let request = VisibleCapabilityRequest::new(
         execution_context(all_builtin_capability_ids()),
@@ -338,37 +337,52 @@ async fn builtin_trigger_create_input_schema_declares_completion_policy_enum() {
 
     let schema = &trigger_create.descriptor.parameters_schema;
 
-    // `completion_policy` must be listed in the `required` array.
+    // `schedule` must be listed in the `required` array.
     let required = schema
         .get("required")
         .and_then(Value::as_array)
         .expect("trigger_create schema must have a required array");
     let required_names: Vec<&str> = required.iter().filter_map(|v| v.as_str()).collect();
     assert!(
-        required_names.contains(&"completion_policy"),
-        "completion_policy must be listed in required; got {required_names:?}"
+        required_names.contains(&"schedule"),
+        "schedule must be listed in required; got {required_names:?}"
+    );
+    assert!(
+        !required_names.contains(&"completion_policy"),
+        "completion_policy must NOT be in required; got {required_names:?}"
     );
 
-    // The `completion_policy` property must declare exactly the two allowed enum values.
-    let enum_values = schema
+    // The `schedule` property must have a `oneOf`.
+    let one_of = schema
         .get("properties")
-        .and_then(|p| p.get("completion_policy"))
-        .and_then(|cp| cp.get("enum"))
+        .and_then(|p| p.get("schedule"))
+        .and_then(|s| s.get("oneOf"))
         .and_then(Value::as_array)
-        .expect("trigger_create schema completion_policy must have an enum array");
-    let enum_strings: Vec<&str> = enum_values.iter().filter_map(|v| v.as_str()).collect();
-    assert!(
-        enum_strings.contains(&"recurring"),
-        "completion_policy enum must contain 'recurring'; got {enum_strings:?}"
-    );
-    assert!(
-        enum_strings.contains(&"complete_after_first_fire"),
-        "completion_policy enum must contain 'complete_after_first_fire'; got {enum_strings:?}"
-    );
+        .expect("trigger_create schema schedule must have a oneOf array");
     assert_eq!(
-        enum_strings.len(),
+        one_of.len(),
         2,
-        "completion_policy enum must have exactly two values; got {enum_strings:?}"
+        "schedule oneOf must have exactly 2 variants; got {}",
+        one_of.len()
+    );
+
+    // Confirm the two kinds are "cron" and "once".
+    let kinds: Vec<&str> = one_of
+        .iter()
+        .filter_map(|v| {
+            v.get("properties")
+                .and_then(|p| p.get("kind"))
+                .and_then(|k| k.get("const"))
+                .and_then(Value::as_str)
+        })
+        .collect();
+    assert!(
+        kinds.contains(&"cron"),
+        "schedule oneOf must have a cron variant; got {kinds:?}"
+    );
+    assert!(
+        kinds.contains(&"once"),
+        "schedule oneOf must have an once variant; got {kinds:?}"
     );
 }
 
@@ -406,9 +420,7 @@ async fn builtin_trigger_create_stamps_caller_scope_and_persists_record() {
         json!({
             "name": "Daily summary",
             "prompt": "Summarize yesterday",
-            "cron": "0 8 * * *",
-            "timezone": "UTC",
-            "completion_policy": "recurring"
+            "schedule": { "kind": "cron", "expression": "0 8 * * *", "timezone": "UTC" }
         }),
         context.clone(),
     )
@@ -419,7 +431,7 @@ async fn builtin_trigger_create_stamps_caller_scope_and_persists_record() {
     assert_eq!(trigger["name"], json!("Daily summary"));
     assert!(trigger.get("prompt").is_none());
     assert_eq!(trigger["source"], json!("schedule"));
-    assert_eq!(trigger["completion_policy"], json!("recurring"));
+    assert_eq!(trigger["schedule"]["kind"], json!("cron"));
     assert_eq!(trigger["state"], json!("scheduled"));
     assert!(trigger.get("tenant_id").is_none());
     assert!(trigger.get("creator_user_id").is_none());
@@ -457,9 +469,7 @@ async fn builtin_trigger_create_runs_create_hook_after_persistence() {
         json!({
             "name": "Hooked trigger",
             "prompt": "Pair trigger creator",
-            "cron": "0 8 * * *",
-            "timezone": "UTC",
-            "completion_policy": "recurring"
+            "schedule": { "kind": "cron", "expression": "0 8 * * *", "timezone": "UTC" }
         }),
         context.clone(),
     )
@@ -503,9 +513,7 @@ async fn builtin_trigger_create_maps_create_hook_error_to_backend_and_rolls_back
         json!({
             "name": "Hook failure",
             "prompt": "Do not persist this trigger",
-            "cron": "0 8 * * *",
-            "timezone": "UTC",
-            "completion_policy": "recurring"
+            "schedule": { "kind": "cron", "expression": "0 8 * * *", "timezone": "UTC" }
         }),
         context.clone(),
     )
@@ -537,9 +545,7 @@ async fn builtin_trigger_create_surfaces_rollback_error_when_cleanup_fails() {
         json!({
             "name": "Rollback failure",
             "prompt": "Surface the rollback failure as the user-visible cause",
-            "cron": "0 8 * * *",
-            "timezone": "UTC",
-            "completion_policy": "recurring"
+            "schedule": { "kind": "cron", "expression": "0 8 * * *", "timezone": "UTC" }
         }),
         context.clone(),
     )
@@ -573,9 +579,7 @@ async fn builtin_trigger_create_rejects_sub_minute_schedule_before_persistence()
         json!({
             "name": "Too fast",
             "prompt": "Run constantly",
-            "cron": "* * * * * *",
-            "timezone": "UTC",
-            "completion_policy": "recurring"
+            "schedule": { "kind": "cron", "expression": "* * * * * *", "timezone": "UTC" }
         }),
         context.clone(),
     )
@@ -612,9 +616,7 @@ async fn builtin_trigger_create_rejects_schedule_with_no_future_slot_before_pers
         json!({
             "name": "Expired finite schedule",
             "prompt": "Run once in the finite year",
-            "cron": format!("0 0 8 * * * {future_year}"),
-            "timezone": "UTC",
-            "completion_policy": "complete_after_first_fire"
+            "schedule": { "kind": "cron", "expression": format!("0 0 8 * * * {future_year}"), "timezone": "UTC" }
         }),
         context.clone(),
     )
@@ -642,9 +644,7 @@ async fn builtin_trigger_create_rejects_malformed_input_before_persistence() {
         TRIGGER_CREATE_CAPABILITY_ID,
         json!({
             "name": "Missing prompt",
-            "cron": "0 8 * * *",
-            "timezone": "UTC",
-            "completion_policy": "recurring"
+            "schedule": { "kind": "cron", "expression": "0 8 * * *", "timezone": "UTC" }
         }),
         context.clone(),
     )
@@ -673,9 +673,7 @@ async fn builtin_trigger_create_rejects_invalid_timezone_before_persistence() {
         json!({
             "name": "Invalid timezone trigger",
             "prompt": "Run something",
-            "cron": "0 9 * * *",
-            "timezone": "Not/A/Timezone",
-            "completion_policy": "recurring"
+            "schedule": { "kind": "cron", "expression": "0 9 * * *", "timezone": "Not/A/Timezone" }
         }),
         context.clone(),
     )
@@ -703,16 +701,12 @@ async fn builtin_trigger_create_rejects_blank_name_or_prompt_before_persistence(
         json!({
             "name": " ",
             "prompt": "Run work",
-            "cron": "0 8 * * *",
-            "timezone": "UTC",
-            "completion_policy": "recurring"
+            "schedule": { "kind": "cron", "expression": "0 8 * * *", "timezone": "UTC" }
         }),
         json!({
             "name": "Blank prompt",
             "prompt": " ",
-            "cron": "0 8 * * *",
-            "timezone": "UTC",
-            "completion_policy": "recurring"
+            "schedule": { "kind": "cron", "expression": "0 8 * * *", "timezone": "UTC" }
         }),
     ] {
         let error = invoke_with_context(
@@ -745,16 +739,12 @@ async fn builtin_trigger_create_rejects_oversized_name_or_prompt_before_persiste
         json!({
             "name": "x".repeat(MAX_TRIGGER_NAME_BYTES + 1),
             "prompt": "Run work",
-            "cron": "0 8 * * *",
-            "timezone": "UTC",
-            "completion_policy": "recurring"
+            "schedule": { "kind": "cron", "expression": "0 8 * * *", "timezone": "UTC" }
         }),
         json!({
             "name": "Oversized prompt",
             "prompt": "x".repeat(MAX_TRIGGER_PROMPT_BYTES + 1),
-            "cron": "0 8 * * *",
-            "timezone": "UTC",
-            "completion_policy": "recurring"
+            "schedule": { "kind": "cron", "expression": "0 8 * * *", "timezone": "UTC" }
         }),
     ] {
         let error = invoke_with_context(
@@ -789,9 +779,7 @@ async fn builtin_trigger_create_applies_first_party_input_size_bound() {
         json!({
             "name": "Large ignored field",
             "prompt": "Run work",
-            "cron": "0 8 * * *",
-            "timezone": "UTC",
-            "completion_policy": "recurring",
+            "schedule": { "kind": "cron", "expression": "0 8 * * *", "timezone": "UTC" },
             "padding": "x".repeat(1_048_576)
         }),
         context.clone(),
@@ -810,7 +798,7 @@ async fn builtin_trigger_create_applies_first_party_input_size_bound() {
 }
 
 #[tokio::test]
-async fn builtin_trigger_create_rejects_invalid_completion_policy_before_persistence() {
+async fn builtin_trigger_create_rejects_invalid_schedule_kind_before_persistence() {
     let repository = Arc::new(InMemoryTriggerRepository::default());
     let runtime = runtime_with_trigger_repository(repository.clone());
     let context = execution_context([TRIGGER_CREATE_CAPABILITY_ID]);
@@ -819,11 +807,9 @@ async fn builtin_trigger_create_rejects_invalid_completion_policy_before_persist
         &runtime,
         TRIGGER_CREATE_CAPABILITY_ID,
         json!({
-            "name": "Invalid policy trigger",
+            "name": "Invalid schedule kind trigger",
             "prompt": "Run work",
-            "cron": "0 8 * * *",
-            "timezone": "UTC",
-            "completion_policy": "sometimes"
+            "schedule": { "kind": "monthly", "expression": "0 8 1 * *", "timezone": "UTC" }
         }),
         context.clone(),
     )
@@ -837,12 +823,12 @@ async fn builtin_trigger_create_rejects_invalid_completion_policy_before_persist
             .await
             .unwrap()
             .is_empty(),
-        "no trigger should be persisted when completion_policy is an unknown value"
+        "no trigger should be persisted when schedule kind is invalid"
     );
 }
 
 #[tokio::test]
-async fn builtin_trigger_create_rejects_missing_completion_policy_before_persistence() {
+async fn builtin_trigger_create_rejects_missing_schedule_before_persistence() {
     let repository = Arc::new(InMemoryTriggerRepository::default());
     let runtime = runtime_with_trigger_repository(repository.clone());
     let context = execution_context([TRIGGER_CREATE_CAPABILITY_ID]);
@@ -851,10 +837,8 @@ async fn builtin_trigger_create_rejects_missing_completion_policy_before_persist
         &runtime,
         TRIGGER_CREATE_CAPABILITY_ID,
         json!({
-            "name": "Missing policy trigger",
-            "prompt": "Run work",
-            "cron": "0 8 * * *",
-            "timezone": "UTC"
+            "name": "Missing schedule trigger",
+            "prompt": "Run work"
         }),
         context.clone(),
     )
@@ -868,26 +852,20 @@ async fn builtin_trigger_create_rejects_missing_completion_policy_before_persist
             .await
             .unwrap()
             .is_empty(),
-        "no trigger should be persisted when completion_policy is absent"
+        "no trigger should be persisted when schedule is absent"
     );
 }
 
-/// Positive path: a FUTURE 7-field year-pinned cron with
-/// `completion_policy = complete_after_first_fire` must be accepted, persisted,
-/// and round-trip the schedule and policy fields correctly.
+/// Positive path: a future `once` schedule must be accepted, persisted,
+/// and round-trip the TriggerSchedule::Once variant correctly.
 ///
-/// Year 2099 is used so the cron always has a future slot regardless of the
-/// real wall-clock — no fixed test clock is needed.  The cron crate ceiling is
-/// 2100, so 2099 is safely within range.
+/// Year 2099 is used so the `at` datetime always has a future slot regardless
+/// of the real wall-clock — no fixed test clock is needed.
 #[tokio::test]
-async fn builtin_trigger_create_accepts_year_pinned_complete_after_first_fire() {
+async fn builtin_trigger_create_accepts_once_schedule() {
     let repository = Arc::new(InMemoryTriggerRepository::default());
     let runtime = runtime_with_trigger_repository(repository.clone());
     let context = execution_context([TRIGGER_CREATE_CAPABILITY_ID]);
-
-    // "0 0 17 24 6 * 2099" — fires at 17:00 UTC on 24 Jun 2099.
-    // Seven-field cron: sec min hour day month weekday year.
-    let cron_expr = "0 0 17 24 6 * 2099";
 
     let output = invoke_with_context(
         &runtime,
@@ -895,25 +873,22 @@ async fn builtin_trigger_create_accepts_year_pinned_complete_after_first_fire() 
         json!({
             "name": "One-shot reminder 2099",
             "prompt": "Check the archives",
-            "cron": cron_expr,
-            "timezone": "UTC",
-            "completion_policy": "complete_after_first_fire"
+            "schedule": { "kind": "once", "at": "2099-06-24T17:00:00", "timezone": "UTC" }
         }),
         context.clone(),
     )
     .await
-    .expect("year-pinned complete_after_first_fire trigger must be accepted");
+    .expect("once schedule trigger must be accepted");
 
-    // The response must surface the policy correctly.
+    // The response must surface the schedule kind correctly.
     let trigger = &output["trigger"];
     assert_eq!(trigger["name"], json!("One-shot reminder 2099"));
-    assert_eq!(
-        trigger["completion_policy"],
-        json!("complete_after_first_fire")
-    );
+    assert_eq!(trigger["schedule"]["kind"], json!("once"));
     assert_eq!(trigger["state"], json!("scheduled"));
+    // completion_policy must NOT appear in the output
+    assert!(trigger.get("completion_policy").is_none() || trigger["completion_policy"].is_null());
 
-    // The record must be persisted with the correct policy and schedule.
+    // The record must be persisted as TriggerSchedule::Once.
     let records = repository
         .list_triggers(context.resource_scope.tenant_id.clone())
         .await
@@ -921,27 +896,25 @@ async fn builtin_trigger_create_accepts_year_pinned_complete_after_first_fire() 
     assert_eq!(records.len(), 1, "exactly one trigger must be persisted");
 
     let record = &records[0];
-    assert_eq!(
-        record.completion_policy,
-        TriggerCompletionPolicy::CompleteAfterFirstFire,
-        "persisted record must carry CompleteAfterFirstFire policy"
-    );
     assert_eq!(record.name, "One-shot reminder 2099");
     assert_eq!(record.prompt, "Check the archives");
 
-    // Verify the stored schedule matches the submitted cron expression and timezone.
-    let TriggerSchedule::Cron {
-        expression,
-        timezone,
-    } = &record.schedule;
-    assert_eq!(
-        expression, cron_expr,
-        "stored cron expression must match the submitted value"
-    );
-    assert_eq!(
-        timezone, "UTC",
-        "stored timezone must match the submitted value"
-    );
+    // Verify the stored schedule is Once with the correct UTC instant.
+    match &record.schedule {
+        TriggerSchedule::Once { at, timezone } => {
+            // 2099-06-24T17:00:00 UTC
+            assert_eq!(
+                at.to_rfc3339(),
+                "2099-06-24T17:00:00+00:00",
+                "stored at must match the submitted wall-clock converted to UTC"
+            );
+            assert_eq!(
+                timezone, "UTC",
+                "stored timezone must match the submitted value"
+            );
+        }
+        TriggerSchedule::Cron { .. } => panic!("expected Once schedule variant"),
+    }
 }
 
 #[tokio::test]
@@ -964,9 +937,7 @@ async fn builtin_trigger_list_and_remove_are_caller_scoped() {
         json!({
             "name": "Owned trigger",
             "prompt": "Run owned work",
-            "cron": "0 8 * * *",
-            "timezone": "UTC",
-            "completion_policy": "recurring"
+            "schedule": { "kind": "cron", "expression": "0 8 * * *", "timezone": "UTC" }
         }),
         owner_context.clone(),
     )
@@ -1051,9 +1022,7 @@ async fn builtin_trigger_list_separates_enabled_state_from_active_fire_state() {
         json!({
             "name": "Active trigger",
             "prompt": "Run active work",
-            "cron": "0 8 * * *",
-            "timezone": "UTC",
-            "completion_policy": "recurring"
+            "schedule": { "kind": "cron", "expression": "0 8 * * *", "timezone": "UTC" }
         }),
         context.clone(),
     )
@@ -1137,9 +1106,7 @@ async fn builtin_trigger_create_list_and_remove_use_full_request_scope() {
         json!({
             "name": "Scoped trigger",
             "prompt": "Run scoped work",
-            "cron": "0 8 * * *",
-            "timezone": "UTC",
-            "completion_policy": "recurring"
+            "schedule": { "kind": "cron", "expression": "0 8 * * *", "timezone": "UTC" }
         }),
         owner_context.clone(),
     )
@@ -1223,9 +1190,7 @@ async fn builtin_trigger_create_round_trips_nullable_agent_and_project_scope() {
         json!({
             "name": "Unscoped trigger",
             "prompt": "Run unscoped work",
-            "cron": "0 8 * * *",
-            "timezone": "UTC",
-            "completion_policy": "recurring"
+            "schedule": { "kind": "cron", "expression": "0 8 * * *", "timezone": "UTC" }
         }),
         context,
     )
@@ -1252,9 +1217,7 @@ async fn builtin_trigger_list_applies_user_surface_limit_boundaries() {
             json!({
                 "name": format!("Trigger {index}"),
                 "prompt": "Run work",
-                "cron": "0 8 * * *",
-                "timezone": "UTC",
-                "completion_policy": "recurring"
+                "schedule": { "kind": "cron", "expression": "0 8 * * *", "timezone": "UTC" }
             }),
             context.clone(),
         )
@@ -1316,9 +1279,7 @@ async fn builtin_trigger_list_embeds_recent_run_history_with_run_limit() {
         json!({
             "name": "Historical trigger",
             "prompt": "Create history rows",
-            "cron": "0 8 * * *",
-            "timezone": "UTC",
-            "completion_policy": "recurring"
+            "schedule": { "kind": "cron", "expression": "* * * * *", "timezone": "UTC" }
         }),
         context.clone(),
     )
@@ -1350,7 +1311,6 @@ async fn builtin_trigger_list_embeds_recent_run_history_with_run_limit() {
             run_id: first_run_id,
             thread_id: ThreadId::new("01890f0f-0001-7000-8000-000000000001").unwrap(),
             submitted_at: first_fire_slot + chrono::Duration::seconds(1),
-            next_run_at: Some(first_fire_slot + chrono::Duration::minutes(1)),
         })
         .await
         .unwrap();
@@ -1384,7 +1344,6 @@ async fn builtin_trigger_list_embeds_recent_run_history_with_run_limit() {
             run_id: second_run_id,
             thread_id: ThreadId::new("01890f0f-0002-7000-8000-000000000002").unwrap(),
             submitted_at: second_fire_slot + chrono::Duration::seconds(1),
-            next_run_at: Some(second_fire_slot + chrono::Duration::minutes(1)),
         })
         .await
         .unwrap();
@@ -1418,7 +1377,6 @@ async fn builtin_trigger_list_embeds_recent_run_history_with_run_limit() {
             run_id: third_run_id,
             thread_id: ThreadId::new("01890f0f-0003-7000-8000-000000000003").unwrap(),
             submitted_at: third_fire_slot + chrono::Duration::seconds(1),
-            next_run_at: Some(third_fire_slot + chrono::Duration::minutes(1)),
         })
         .await
         .unwrap();
@@ -1461,9 +1419,7 @@ async fn builtin_trigger_list_with_zero_run_limit_returns_empty_recent_runs() {
         json!({
             "name": "Zero run limit trigger",
             "prompt": "Create history rows",
-            "cron": "0 8 * * *",
-            "timezone": "UTC",
-            "completion_policy": "recurring"
+            "schedule": { "kind": "cron", "expression": "0 8 * * *", "timezone": "UTC" }
         }),
         context.clone(),
     )
@@ -1502,9 +1458,7 @@ async fn builtin_trigger_list_clamps_oversized_run_limit_to_max() {
         json!({
             "name": "Oversized run limit trigger",
             "prompt": "Create many history rows",
-            "cron": "0 8 * * *",
-            "timezone": "UTC",
-            "completion_policy": "recurring"
+            "schedule": { "kind": "cron", "expression": "0 8 * * *", "timezone": "UTC" }
         }),
         context.clone(),
     )
@@ -1557,9 +1511,7 @@ async fn builtin_trigger_list_includes_completed_fire_once_triggers() {
         json!({
             "name": "One-shot reminder",
             "prompt": "Remind me about the meeting",
-            "cron": "0 8 * * *",
-            "timezone": "UTC",
-            "completion_policy": "complete_after_first_fire"
+            "schedule": { "kind": "once", "at": "2099-06-24T17:00:00", "timezone": "UTC" }
         }),
         context.clone(),
     )
@@ -1576,9 +1528,9 @@ async fn builtin_trigger_list_includes_completed_fire_once_triggers() {
         .unwrap()
         .pop()
         .expect("persisted fire-once trigger");
-    assert_eq!(
-        record.completion_policy,
-        TriggerCompletionPolicy::CompleteAfterFirstFire
+    assert!(
+        matches!(record.schedule, TriggerSchedule::Once { .. }),
+        "persisted record must have an Once schedule"
     );
     let fire_slot = record.next_run_at;
     let run_id = ironclaw_turns::TurnRunId::new();
@@ -1601,7 +1553,6 @@ async fn builtin_trigger_list_includes_completed_fire_once_triggers() {
             thread_id: ironclaw_host_api::ThreadId::new("01890f0f-fire-7000-8000-000000000001")
                 .unwrap(),
             submitted_at: fire_slot,
-            next_run_at: None, // fire-once: no next slot
         })
         .await
         .unwrap();
@@ -1656,8 +1607,16 @@ async fn seed_completed_trigger_runs(
     record: &TriggerRecord,
     count: usize,
 ) {
-    for index in 0..count {
-        let fire_slot = record.next_run_at + chrono::Duration::minutes(index as i64);
+    // Re-derive each fire slot from the trigger's CURRENT next_run_at: clear_active_fire
+    // advances next_run_at via the schedule, so we follow whatever cadence the schedule
+    // dictates instead of assuming consecutive one-minute slots.
+    for _ in 0..count {
+        let current = repository
+            .get_trigger(record.tenant_id.clone(), record.trigger_id)
+            .await
+            .unwrap()
+            .expect("trigger present while seeding runs");
+        let fire_slot = current.next_run_at;
         let run_id = TurnRunId::new();
         repository
             .claim_due_fire(ClaimDueFireRequest {
@@ -1676,7 +1635,6 @@ async fn seed_completed_trigger_runs(
                 run_id,
                 thread_id: ThreadId::new("01890f0f-0004-7000-8000-000000000004").unwrap(),
                 submitted_at: fire_slot + chrono::Duration::seconds(1),
-                next_run_at: Some(fire_slot + chrono::Duration::minutes(1)),
             })
             .await
             .unwrap();
@@ -1796,9 +1754,7 @@ async fn builtin_trigger_management_maps_repository_errors_to_backend() {
         json!({
             "name": "Backend create",
             "prompt": "Run work",
-            "cron": "0 8 * * *",
-            "timezone": "UTC",
-            "completion_policy": "recurring"
+            "schedule": { "kind": "cron", "expression": "0 8 * * *", "timezone": "UTC" }
         }),
         context.clone(),
     )
@@ -1839,9 +1795,7 @@ async fn builtin_trigger_list_maps_batch_run_history_repository_error_to_backend
         json!({
             "name": "Batch history failure",
             "prompt": "Create trigger before listing history",
-            "cron": "0 8 * * *",
-            "timezone": "UTC",
-            "completion_policy": "recurring"
+            "schedule": { "kind": "cron", "expression": "0 8 * * *", "timezone": "UTC" }
         }),
         context.clone(),
     )

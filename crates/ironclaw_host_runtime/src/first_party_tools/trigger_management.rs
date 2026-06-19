@@ -1,15 +1,16 @@
 use std::{sync::Arc, time::Instant};
 
 use async_trait::async_trait;
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, NaiveDateTime, TimeZone, Utc};
+use chrono_tz::Tz;
 use ironclaw_extensions::{CapabilityManifest, ExtensionError};
 use ironclaw_host_api::{
     CapabilityId, EffectKind, HostApiError, PermissionMode, ResourceScope, ResourceUsage,
     RuntimeDispatchErrorKind,
 };
 use ironclaw_triggers::{
-    TriggerCompletionPolicy, TriggerError, TriggerId, TriggerRecord, TriggerRepository,
-    TriggerRunRecord, TriggerSchedule, TriggerSourceKind, TriggerState,
+    TriggerError, TriggerId, TriggerRecord, TriggerRepository, TriggerRunRecord, TriggerSchedule,
+    TriggerSourceKind, TriggerState,
 };
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -195,12 +196,23 @@ impl FirstPartyCapabilityHandler for TriggerManagementToolHandler {
 }
 
 #[derive(Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+enum TriggerScheduleInput {
+    Cron {
+        expression: String,
+        timezone: String,
+    },
+    Once {
+        at: String,
+        timezone: String,
+    },
+}
+
+#[derive(Deserialize)]
 struct TriggerCreateInput {
     name: String,
     prompt: String,
-    cron: String,
-    timezone: String,
-    completion_policy: TriggerCompletionPolicy,
+    schedule: TriggerScheduleInput,
 }
 
 #[derive(Deserialize)]
@@ -222,8 +234,7 @@ async fn create_trigger(
     now: DateTime<Utc>,
 ) -> Result<Value, FirstPartyCapabilityError> {
     let input: TriggerCreateInput = serde_json::from_value(input).map_err(|_| input_error())?;
-    let schedule = TriggerSchedule::cron_with_timezone(input.cron, input.timezone)
-        .map_err(trigger_input_error)?;
+    let schedule = build_trigger_schedule(input.schedule).map_err(trigger_input_error)?;
     let next_run_at = next_run_at_for_schedule(&schedule, now)?;
     let record = TriggerRecord {
         trigger_id: TriggerId::new(),
@@ -234,7 +245,6 @@ async fn create_trigger(
         name: input.name,
         source: TriggerSourceKind::Schedule,
         schedule,
-        completion_policy: input.completion_policy,
         prompt: input.prompt,
         state: TriggerState::Scheduled,
         next_run_at,
@@ -346,7 +356,6 @@ fn trigger_output(record: &TriggerRecord, recent_runs: &[TriggerRunRecord]) -> V
         "name": record.name,
         "source": record.source,
         "schedule": record.schedule,
-        "completion_policy": record.completion_policy,
         "state": record.state,
         "next_run_at": record.next_run_at,
         "last_run_at": record.last_run_at,
@@ -377,6 +386,38 @@ fn trigger_remove_output(record: &TriggerRecord) -> Value {
         "trigger_id": record.trigger_id.to_string(),
         "name": record.name,
     })
+}
+
+fn build_trigger_schedule(input: TriggerScheduleInput) -> Result<TriggerSchedule, TriggerError> {
+    match input {
+        TriggerScheduleInput::Cron {
+            expression,
+            timezone,
+        } => TriggerSchedule::cron_with_timezone(expression, timezone),
+        TriggerScheduleInput::Once { at, timezone } => {
+            let tz: Tz = timezone.parse().map_err(|_| TriggerError::InvalidSchedule {
+                reason: format!(
+                    "invalid timezone '{timezone}': must be a valid IANA timezone name (e.g. 'America/New_York', 'UTC')"
+                ),
+            })?;
+            let naive = NaiveDateTime::parse_from_str(&at, "%Y-%m-%dT%H:%M:%S")
+                .map_err(|_| TriggerError::InvalidSchedule {
+                    reason: format!(
+                        "invalid 'at' value '{at}': must be a local wall-clock datetime in format YYYY-MM-DDTHH:MM:SS"
+                    ),
+                })?;
+            let at_utc = tz
+                .from_local_datetime(&naive)
+                .earliest()
+                .ok_or_else(|| TriggerError::InvalidSchedule {
+                    reason: format!(
+                        "datetime '{at}' in timezone '{tz}' is ambiguous or does not exist (e.g. falls in a DST gap)"
+                    ),
+                })?
+                .with_timezone(&Utc);
+            TriggerSchedule::once(at_utc, tz.name())
+        }
+    }
 }
 
 fn next_run_at_for_schedule(
@@ -494,7 +535,7 @@ mod tests {
         let input = serde_json::json!({
             "name": "daily",
             "prompt": "check mail",
-            "cron": "0 9 * * *"
+            "schedule": { "kind": "cron", "expression": "0 9 * * *" }  // missing timezone
         });
         let result: Result<TriggerCreateInput, _> = serde_json::from_value(input);
         assert!(
@@ -508,12 +549,10 @@ mod tests {
         let input = serde_json::json!({
             "name": "daily",
             "prompt": "check mail",
-            "cron": "0 9 * * *",
-            "timezone": "Not/A/Timezone",
-            "completion_policy": "recurring"
+            "schedule": { "kind": "cron", "expression": "0 9 * * *", "timezone": "Not/A/Timezone" }
         });
         let parsed: TriggerCreateInput = serde_json::from_value(input).expect("deserialize");
-        let result = TriggerSchedule::cron_with_timezone(parsed.cron, parsed.timezone);
+        let result = build_trigger_schedule(parsed.schedule);
         assert!(result.is_err(), "invalid timezone must be rejected");
         let error_msg = result.unwrap_err().to_string();
         assert!(
@@ -527,52 +566,43 @@ mod tests {
         let input = serde_json::json!({
             "name": "daily",
             "prompt": "check mail",
-            "cron": "0 9 * * *",
-            "timezone": "America/Los_Angeles",
-            "completion_policy": "recurring"
+            "schedule": { "kind": "cron", "expression": "0 9 * * *", "timezone": "America/Los_Angeles" }
         });
         let parsed: TriggerCreateInput = serde_json::from_value(input).expect("deserialize");
-        let schedule = TriggerSchedule::cron_with_timezone(parsed.cron, &parsed.timezone)
-            .expect("valid timezone accepted");
+        let schedule = build_trigger_schedule(parsed.schedule).expect("valid timezone accepted");
         match &schedule {
             TriggerSchedule::Cron { timezone, .. } => {
                 assert_eq!(timezone, "America/Los_Angeles");
             }
+            TriggerSchedule::Once { .. } => panic!("expected Cron"),
         }
     }
 
     #[test]
-    fn trigger_create_input_rejects_missing_completion_policy() {
+    fn trigger_create_input_rejects_missing_schedule() {
         let input = serde_json::json!({
             "name": "daily",
-            "prompt": "check mail",
-            "cron": "0 9 * * *",
-            "timezone": "America/New_York"
+            "prompt": "check mail"
         });
         let result: Result<TriggerCreateInput, _> = serde_json::from_value(input);
         assert!(
             result.is_err(),
-            "omitting completion_policy must fail deserialization"
+            "omitting schedule must fail deserialization"
         );
     }
 
     #[test]
-    fn trigger_create_input_honors_complete_after_first_fire() {
+    fn trigger_create_input_accepts_once_schedule() {
         let input = serde_json::json!({
             "name": "one-off reminder",
             "prompt": "remind me about the meeting",
-            "cron": "0 0 17 24 6 * 2099",
-            "timezone": "UTC",
-            "completion_policy": "complete_after_first_fire"
+            "schedule": { "kind": "once", "at": "2099-06-24T17:00:00", "timezone": "UTC" }
         });
         let parsed: TriggerCreateInput =
             serde_json::from_value(input).expect("deserialize one-shot input");
         assert!(
-            matches!(
-                parsed.completion_policy,
-                TriggerCompletionPolicy::CompleteAfterFirstFire
-            ),
-            "completion_policy should be CompleteAfterFirstFire"
+            matches!(parsed.schedule, TriggerScheduleInput::Once { .. }),
+            "schedule should be Once"
         );
     }
 }

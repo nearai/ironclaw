@@ -3480,7 +3480,6 @@ mod tests {
             source: ironclaw_triggers::TriggerSourceKind::Schedule,
             schedule: ironclaw_triggers::TriggerSchedule::cron("* * * * *")
                 .expect("valid cron expression"),
-            completion_policy: ironclaw_triggers::TriggerCompletionPolicy::Recurring,
             prompt: "pairing test prompt".to_string(),
             state: ironclaw_triggers::TriggerState::Scheduled,
             next_run_at: chrono::Utc::now(),

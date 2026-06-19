@@ -75,7 +75,6 @@ fn make_record(
             expression: cron.to_string(),
             timezone: "UTC".to_string(),
         },
-        completion_policy: ironclaw_triggers::TriggerCompletionPolicy::Recurring,
         prompt: "run the daily task".to_string(),
         state,
         next_run_at: now(),

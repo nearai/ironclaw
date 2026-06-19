@@ -281,6 +281,10 @@ fn automation_source_from_record(record: &TriggerRecord) -> Option<RebornAutomat
                 cron: expression.clone(),
                 timezone: timezone.clone(),
             }),
+            TriggerSchedule::Once { at, timezone } => Some(RebornAutomationSource::Once {
+                at: at.to_rfc3339(),
+                timezone: timezone.clone(),
+            }),
         },
     }
 }

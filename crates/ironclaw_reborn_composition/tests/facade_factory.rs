@@ -1291,9 +1291,7 @@ async fn local_dev_services_dispatch_trigger_management_through_composed_runtime
         json!({
             "name": "Daily production summary",
             "prompt": "Summarize production state",
-            "cron": "0 8 * * *",
-            "timezone": "UTC",
-            "completion_policy": "recurring"
+            "schedule": { "kind": "cron", "expression": "0 8 * * *", "timezone": "UTC" }
         }),
     )
     .await;
