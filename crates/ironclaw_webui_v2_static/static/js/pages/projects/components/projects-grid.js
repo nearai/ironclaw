@@ -11,7 +11,18 @@ import {
 
 function ProjectCard({ project, onOpen, t }) {
   return html`
-    <article className="group rounded-xl border border-iron-700 bg-iron-800/60 p-5 hover:border-signal/30 hover:bg-iron-800/80">
+    <article
+      onClick=${() => onOpen(project.id)}
+      role="button"
+      tabIndex=${0}
+      onKeyDown=${(event) => {
+        if (event.key === "Enter" || event.key === " ") {
+          event.preventDefault();
+          onOpen(project.id);
+        }
+      }}
+      className="group cursor-pointer rounded-xl border border-iron-700 bg-iron-800/60 p-5 transition hover:border-signal/30 hover:bg-iron-800/80 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--v2-accent)]/40"
+    >
       <div className="flex items-start justify-between gap-3">
         <div className="min-w-0">
           <h3 className="truncate font-serif text-2xl font-semibold tracking-[-0.03em] text-iron-100">${project.name}</h3>
@@ -55,7 +66,13 @@ function ProjectCard({ project, onOpen, t }) {
           <div>${t("projects.card.spendToday", { value: formatCurrency(project.cost_today_usd || 0) })}</div>
           <div className="mt-1 text-xs uppercase tracking-[0.16em] text-iron-500">${formatProjectRelativeTime(project.last_activity)}</div>
         </div>
-        <${Button} variant="secondary" onClick=${() => onOpen(project.id)}>${t("projects.openWorkspace")}<//>
+        <${Button}
+          variant="secondary"
+          onClick=${(event) => {
+            event.stopPropagation();
+            onOpen(project.id);
+          }}
+        >${t("projects.openWorkspace")}<//>
       </div>
     </article>
   `;
@@ -63,7 +80,18 @@ function ProjectCard({ project, onOpen, t }) {
 
 function GeneralProjectCard({ project, onOpen, t }) {
   return html`
-    <${Panel} className="overflow-hidden p-5 sm:p-6">
+    <${Panel}
+      onClick=${() => onOpen(project.id)}
+      role="button"
+      tabIndex=${0}
+      onKeyDown=${(event) => {
+        if (event.key === "Enter" || event.key === " ") {
+          event.preventDefault();
+          onOpen(project.id);
+        }
+      }}
+      className="cursor-pointer overflow-hidden p-5 transition hover:border-signal/30 sm:p-6"
+    >
       <div className="flex flex-col gap-6 xl:flex-row xl:items-end xl:justify-between">
         <div className="max-w-3xl">
           <div className="font-mono text-[11px] uppercase tracking-[0.18em] text-signal">${t("projects.general.label")}</div>
@@ -76,7 +104,13 @@ function GeneralProjectCard({ project, onOpen, t }) {
           <div className="rounded-2xl border border-iron-700 bg-iron-950/55 px-4 py-3 text-sm text-iron-200">
             ${compactCount(project.threads_today || 0, "thread")} today
           </div>
-          <${Button} variant="secondary" onClick=${() => onOpen(project.id)}>${t("projects.openGeneralWorkspace")}<//>
+          <${Button}
+            variant="secondary"
+            onClick=${(event) => {
+              event.stopPropagation();
+              onOpen(project.id);
+            }}
+          >${t("projects.openGeneralWorkspace")}<//>
         </div>
       </div>
     <//>
