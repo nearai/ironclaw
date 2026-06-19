@@ -164,6 +164,19 @@ where
     /// behaves exactly as it did before hooks existed.
     pub hook_dispatcher_builder_factory: Option<HookDispatcherBuilderFactory>,
     pub communication_context_provider: Option<Arc<dyn CommunicationContextProvider>>,
+    /// Pre-minted scheduler notifier and its paired wake channel.
+    ///
+    /// When `Some`, the inner build skips its own `SchedulerTurnRunWakeNotifier::channel` call
+    /// and uses the provided pair instead. This lets callers mint the notifier before
+    /// composing the rest of the runtime (e.g. to satisfy a separate wiring validation gate)
+    /// while still ensuring the scheduler loop consumes the exact same channel.
+    ///
+    /// When `None` (the default), the notifier and channel are minted internally, which is
+    /// correct for local-dev and any composition that does not need to pre-mint.
+    pub scheduler_wake_channel: Option<(
+        Arc<SchedulerTurnRunWakeNotifier>,
+        ironclaw_host_runtime::TurnRunWakeChannel,
+    )>,
 }
 
 pub trait RuntimeSubagentGoalStore:
@@ -417,9 +430,17 @@ where
     // held here and passed to `start_with_channel` after the executor is built.
     // Use the default wake-channel capacity; the full scheduler config is built
     // below once the executor is ready.
-    let (scheduler_notifier, wake_channel) = SchedulerTurnRunWakeNotifier::channel(
-        TurnRunSchedulerConfig::default().wake_channel_capacity(),
-    );
+    //
+    // When a caller pre-minted the pair (e.g. the production composition path
+    // that must satisfy `HostRuntimeServices.with_turn_run_wake_notifier_dyn`
+    // before this function runs), use it directly so the coordinator and the
+    // scheduler share the exact same channel.
+    let (scheduler_notifier, wake_channel) = match parts.scheduler_wake_channel {
+        Some(pair) => pair,
+        None => SchedulerTurnRunWakeNotifier::channel(
+            TurnRunSchedulerConfig::default().wake_channel_capacity(),
+        ),
+    };
     let scheduler_notifier_base: Arc<dyn TurnRunWakeNotifier> = scheduler_notifier.clone();
     // When a cancellation factory is supplied, fan-out each coordinator wake to
     // BOTH the scheduler AND the factory's `notify_run_wake` observer. Without

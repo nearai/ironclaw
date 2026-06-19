@@ -3134,6 +3134,7 @@ async fn default_planned_runtime_composes_no_profile_coordinator_and_profiled_ho
         communication_context_provider: None,
         hook_security_audit_sink: None,
         turn_event_sink: Some(event_sink.clone()),
+        scheduler_wake_channel: None,
     })
     .unwrap();
 
@@ -3309,6 +3310,7 @@ async fn build_runtime_host_with_optional_hooks(
         turn_event_sink: None,
         hook_dispatcher_builder_factory: hook_factory,
         communication_context_provider: None,
+        scheduler_wake_channel: None,
     })
     .unwrap();
 
@@ -3652,6 +3654,7 @@ async fn product_live_runtime_builds_when_all_required_adapters_are_present() {
         communication_context_provider: None,
         hook_security_audit_sink: None,
         turn_event_sink: None,
+        scheduler_wake_channel: None,
     })
     .expect("all product-live adapters should satisfy readiness");
 
@@ -3767,6 +3770,7 @@ async fn product_live_parts_for_gate_test(
         communication_context_provider: None,
         hook_security_audit_sink: None,
         turn_event_sink: None,
+        scheduler_wake_channel: None,
     }
 }
 
