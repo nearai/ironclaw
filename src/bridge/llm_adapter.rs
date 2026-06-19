@@ -127,7 +127,11 @@ impl LlmUsageRecorder {
         let purpose = validate_llm_call_purpose(config.metadata.get("purpose"))?;
         let user_id = validate_llm_metadata_user_id(config.metadata.get("user_id"))?;
         let db = self.db.as_ref();
-        let cost_per_token = Some(provider.cost_per_token());
+        let cost_per_token = if config.model.is_some() {
+            None
+        } else {
+            Some(provider.cost_per_token())
+        };
         let cost = match user_id {
             Some(user_id) => {
                 self.cost_guard
@@ -2289,7 +2293,7 @@ And also check the token price:\n\
     }
 
     #[tokio::test]
-    async fn complete_model_override_records_provider_pricing_in_cost_guard() {
+    async fn complete_model_override_uses_static_pricing_in_cost_guard() {
         use crate::agent::cost_guard::{CostGuard, CostGuardConfig};
 
         let cost_guard = Arc::new(CostGuard::new(CostGuardConfig::default()));
@@ -2304,7 +2308,7 @@ And also check the token price:\n\
             )),
         );
         let mut config = LlmCallConfig {
-            model: Some("unknown-override-model".to_string()),
+            model: Some("gpt-4o-mini".to_string()),
             ..LlmCallConfig::default()
         };
         config
@@ -2317,12 +2321,10 @@ And also check the token price:\n\
             .expect("complete");
 
         let usage = cost_guard.model_usage().await;
-        let tokens = usage
-            .get("unknown-override-model")
-            .expect("model override usage");
+        let tokens = usage.get("gpt-4o-mini").expect("model override usage");
         assert_eq!(tokens.input_tokens, 1000);
         assert_eq!(tokens.output_tokens, 500);
-        assert_eq!(tokens.cost, rust_decimal_macros::dec!(0.010500));
+        assert_eq!(tokens.cost, rust_decimal_macros::dec!(0.00045));
     }
 
     #[tokio::test]
