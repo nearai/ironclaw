@@ -3788,7 +3788,11 @@ impl RebornServices {
         let Some(raw) = requested_project_id else {
             return Ok(caller);
         };
-        let project_id = ProjectId::new(raw).map_err(|_| {
+        let project_id = ProjectId::new(raw).map_err(|error| {
+            // Carry the cause to the server log before mapping to the
+            // sanitized validation error (.claude/rules/error-handling.md —
+            // never `map_err(|_| …)` on a parse/validation failure).
+            tracing::debug!(?error, "create_thread received an invalid project_id");
             RebornServicesError::validation(WebUiInboundValidationError::new(
                 "project_id",
                 WebUiInboundValidationCode::InvalidId,

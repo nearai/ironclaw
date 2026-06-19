@@ -77,7 +77,9 @@ export function ProjectFilesystemPanel({ threadId }) {
         setDownloadError(error?.message || "Unable to download file");
       }
     },
-    [threadId, t]
+    // `t` is not referenced in this callback; depending on it would recreate
+    // the handler on every locale change for no reason.
+    [threadId]
   );
 
   const segments = relSegments(path);

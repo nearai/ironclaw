@@ -189,9 +189,15 @@ fn project_service_outcome(
     error: ProjectServiceError,
 ) -> Result<CapabilityOutcome, AgentLoopHostError> {
     let (error_kind, safe_summary) = match error {
-        ProjectServiceError::InvalidInput { field } => (
+        // Keep the safe summary fixed and host-authored — `field` is a
+        // free-form `String` and could carry a forbidden delimiter/marker
+        // that would remap this recoverable arm into a terminal
+        // `HostUnavailable` (see .claude/rules/agent-loop-capabilities.md,
+        // Invariant 2). The offending field name is the model's own input,
+        // which it already has; it does not belong in the summary.
+        ProjectServiceError::InvalidInput { .. } => (
             CapabilityFailureKind::InvalidInput,
-            format!("invalid project {field}"),
+            "invalid project input".to_string(),
         ),
         ProjectServiceError::Conflict => (
             CapabilityFailureKind::OperationFailed,

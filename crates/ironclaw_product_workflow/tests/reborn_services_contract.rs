@@ -2040,7 +2040,7 @@ async fn create_thread_rejects_unauthorized_project() {
         allowed_project_id: "project-allowed".to_string(),
     }));
 
-    services
+    let err = services
         .create_thread(
             caller_with_project(Some("project-alpha")),
             serde_json::from_value::<WebUiCreateThreadRequest>(json!({
@@ -2052,6 +2052,12 @@ async fn create_thread_rejects_unauthorized_project() {
         )
         .await
         .expect_err("a project the caller cannot access must be rejected");
+
+    // Fail closed on the deny→not-found contract: a project the caller can't
+    // access collapses to NotFound/404 (no existence oracle), not some
+    // unrelated internal error that `expect_err` alone would also accept.
+    assert_eq!(err.code, RebornServicesErrorCode::NotFound);
+    assert_eq!(err.status_code, 404);
 }
 
 #[tokio::test]

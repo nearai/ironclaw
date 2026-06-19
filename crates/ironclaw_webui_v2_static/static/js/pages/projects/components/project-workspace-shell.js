@@ -6,7 +6,7 @@ import { ProjectFilesystemPanel } from "./project-filesystem-panel.js";
 // the project shares the same bind-mounted `/workspace` folder, so the most
 // recent one is enough to list the project's scoped filesystem.
 function representativeThreadId(threads) {
-  const sorted = [...threads].sort(
+  const sorted = [...(threads || [])].sort(
     (a, b) => new Date(b.updated_at || b.created_at) - new Date(a.updated_at || a.created_at)
   );
   return sorted[0]?.id || null;

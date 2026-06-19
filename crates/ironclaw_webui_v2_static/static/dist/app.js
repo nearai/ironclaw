@@ -2539,7 +2539,7 @@ ${$e}`;if(J.current.gateKey!==Ke&&(J.current={gateKey:Ke,credentialRef:null,inFl
       onClick=${()=>t(e.id)}
       role="button"
       tabIndex=${0}
-      onKeyDown=${n=>{(n.key==="Enter"||n.key===" ")&&(n.preventDefault(),t(e.id))}}
+      onKeyDown=${n=>{n.currentTarget===n.target&&(n.key==="Enter"||n.key===" ")&&(n.preventDefault(),t(e.id))}}
       className="group cursor-pointer rounded-xl border border-iron-700 bg-iron-800/60 p-5 transition hover:border-signal/30 hover:bg-iron-800/80 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--v2-accent)]/40"
     >
       <div className="flex items-start justify-between gap-3">
@@ -2594,7 +2594,7 @@ ${$e}`;if(J.current.gateKey!==Ke&&(J.current={gateKey:Ke,credentialRef:null,inFl
       onClick=${()=>t(e.id)}
       role="button"
       tabIndex=${0}
-      onKeyDown=${n=>{(n.key==="Enter"||n.key===" ")&&(n.preventDefault(),t(e.id))}}
+      onKeyDown=${n=>{n.currentTarget===n.target&&(n.key==="Enter"||n.key===" ")&&(n.preventDefault(),t(e.id))}}
       className="cursor-pointer overflow-hidden p-5 transition hover:border-signal/30 sm:p-6"
     >
       <div className="flex flex-col gap-6 xl:flex-row xl:items-end xl:justify-between">
@@ -2706,7 +2706,7 @@ ${$e}`;if(J.current.gateKey!==Ke&&(J.current={gateKey:Ke,credentialRef:null,inFl
             `}
       </div>
     <//>
-  `}var PA="/workspace";function FA(e){let t=a=>a.kind==="directory"?0:1;return[...e].sort((a,n)=>t(a)-t(n)||a.name.localeCompare(n.name,void 0,{sensitivity:"base"}))}function zA(e){return e?String(e).replace(/^\/workspace\/?/,"").split("/").filter(Boolean):[]}function F2({threadId:e}){let t=k(),[a,n]=h.default.useState(void 0),[r,s]=h.default.useState(null),i=z({queryKey:["project-files",e||"",a||""],queryFn:()=>ux({threadId:e,path:a}),enabled:!!e}),o=h.default.useMemo(()=>FA(i.data?.entries||[]),[i.data]),u=h.default.useCallback(async f=>{if(f.kind==="directory"){s(null),n(f.path);return}try{s(null);let m=await Sa(tc({threadId:e,path:f.path})),p=URL.createObjectURL(m),b=document.createElement("a");b.href=p,b.download=f.name,document.body.appendChild(b),b.click(),b.remove(),URL.revokeObjectURL(p)}catch(m){s(m?.message||"Unable to download file")}},[e,t]),c=zA(a),d=l`
+  `}var PA="/workspace";function FA(e){let t=a=>a.kind==="directory"?0:1;return[...e].sort((a,n)=>t(a)-t(n)||a.name.localeCompare(n.name,void 0,{sensitivity:"base"}))}function zA(e){return e?String(e).replace(/^\/workspace\/?/,"").split("/").filter(Boolean):[]}function F2({threadId:e}){let t=k(),[a,n]=h.default.useState(void 0),[r,s]=h.default.useState(null),i=z({queryKey:["project-files",e||"",a||""],queryFn:()=>ux({threadId:e,path:a}),enabled:!!e}),o=h.default.useMemo(()=>FA(i.data?.entries||[]),[i.data]),u=h.default.useCallback(async f=>{if(f.kind==="directory"){s(null),n(f.path);return}try{s(null);let m=await Sa(tc({threadId:e,path:f.path})),p=URL.createObjectURL(m),b=document.createElement("a");b.href=p,b.download=f.name,document.body.appendChild(b),b.click(),b.remove(),URL.revokeObjectURL(p)}catch(m){s(m?.message||"Unable to download file")}},[e]),c=zA(a),d=l`
     <div className="flex flex-wrap items-center justify-between gap-3">
       <div className="flex items-center gap-2">
         <div className="font-mono text-[11px] uppercase tracking-[0.16em] text-iron-300">
@@ -2788,7 +2788,7 @@ ${$e}`;if(J.current.gateKey!==Ke&&(J.current={gateKey:Ke,credentialRef:null,inFl
           ${"No files yet \u2014 they appear once a thread has run in this project."}
         </div>
       <//>
-    `}function qA(e){return[...e].sort((a,n)=>new Date(n.updated_at||n.created_at)-new Date(a.updated_at||a.created_at))[0]?.id||null}function z2({project:e,threads:t,selectedThreadId:a,onSelectThread:n,onNewConversation:r,isStartingConversation:s}){let i=qA(t);return l`
+    `}function qA(e){return[...e||[]].sort((a,n)=>new Date(n.updated_at||n.created_at)-new Date(a.updated_at||a.created_at))[0]?.id||null}function z2({project:e,threads:t,selectedThreadId:a,onSelectThread:n,onNewConversation:r,isStartingConversation:s}){let i=qA(t);return l`
     <div className="grid gap-5 xl:grid-cols-[minmax(0,1.15fr)_minmax(340px,0.85fr)]">
       <div className="space-y-5">
         <div className="min-w-0">

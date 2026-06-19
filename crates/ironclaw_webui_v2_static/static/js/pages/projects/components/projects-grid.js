@@ -16,6 +16,11 @@ function ProjectCard({ project, onOpen, t }) {
       role="button"
       tabIndex=${0}
       onKeyDown=${(event) => {
+        // Only act on key events targeting the card itself. The nested
+        // "Open workspace" button is also focusable, and its Enter/Space
+        // keydown bubbles up here — without this guard, keyboard activation
+        // on that button would fire onOpen twice.
+        if (event.currentTarget !== event.target) return;
         if (event.key === "Enter" || event.key === " ") {
           event.preventDefault();
           onOpen(project.id);
@@ -85,6 +90,11 @@ function GeneralProjectCard({ project, onOpen, t }) {
       role="button"
       tabIndex=${0}
       onKeyDown=${(event) => {
+        // Only act on key events targeting the card itself. The nested
+        // "Open workspace" button is also focusable, and its Enter/Space
+        // keydown bubbles up here — without this guard, keyboard activation
+        // on that button would fire onOpen twice.
+        if (event.currentTarget !== event.target) return;
         if (event.key === "Enter" || event.key === " ") {
           event.preventDefault();
           onOpen(project.id);
