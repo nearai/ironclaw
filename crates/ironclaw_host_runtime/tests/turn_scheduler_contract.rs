@@ -1229,6 +1229,47 @@ async fn shutdown_aborts_in_flight_executor_tasks() {
         .expect("scheduler shutdown should not detach hanging executor tasks");
 }
 
+/// Verifies that graceful scheduler shutdown relinquishes in-flight runs back
+/// to Queued so a restart can retry them instead of letting lease expiry fail
+/// them.
+#[tokio::test]
+async fn shutdown_relinquishes_in_flight_runs_to_queued() {
+    let store = Arc::new(InMemoryTurnStateStore::default());
+    let transitions: Arc<dyn TurnRunTransitionPort> = store.clone();
+    // HangingExecutor blocks indefinitely so the run stays Running through shutdown.
+    let executor = Arc::new(HangingExecutor::default());
+    let scheduler = TurnRunScheduler::new(
+        Arc::clone(&transitions),
+        executor.clone(),
+        fast_config().with_poll_interval(Duration::from_secs(60)),
+    );
+    let handle = scheduler.start();
+    let coordinator =
+        DefaultTurnCoordinator::new(store.clone()).with_wake_notifier(handle.wake_notifier());
+
+    let request = submit_turn_request("thread-relinquish-shutdown", "idem-relinquish-shutdown");
+    let scope = request.scope.clone();
+    let run_id = accepted_run_id(coordinator.submit_turn(request).await.unwrap());
+
+    // Wait until the executor has actually claimed and started the run (Running).
+    executor.wait_for_started().await;
+
+    // Shutdown aborts the in-flight task and must relinquish the run to Queued.
+    timeout(Duration::from_secs(2), handle.shutdown())
+        .await
+        .expect("scheduler shutdown should not hang when relinquishing in-flight runs");
+
+    let state = store
+        .get_run_state(GetRunStateRequest { scope, run_id })
+        .await
+        .unwrap();
+    assert_eq!(
+        state.status,
+        TurnStatus::Queued,
+        "in-flight run must be relinquished back to Queued on shutdown, not left Running or Failed"
+    );
+}
+
 #[tokio::test]
 async fn poller_recovers_queued_run_after_missed_wake() {
     let store = Arc::new(InMemoryTurnStateStore::default());

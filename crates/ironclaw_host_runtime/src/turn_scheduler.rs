@@ -1,14 +1,16 @@
-use std::{error::Error, fmt, panic::AssertUnwindSafe, sync::Arc, time::Duration};
+use std::{
+    collections::HashMap, error::Error, fmt, panic::AssertUnwindSafe, sync::Arc, time::Duration,
+};
 
 use async_trait::async_trait;
 use chrono::Utc;
 use futures_util::FutureExt;
 use ironclaw_turns::{
-    SanitizedFailure, TurnError, TurnRunWake, TurnRunWakeNotifier, TurnRunWakeNotifyError,
-    TurnRunnerId, TurnScope,
+    SanitizedFailure, TurnError, TurnLeaseToken, TurnRunId, TurnRunWake, TurnRunWakeNotifier,
+    TurnRunWakeNotifyError, TurnRunnerId, TurnScope,
     runner::{
         ClaimRunRequest, ClaimedTurnRun, HeartbeatRequest, RecordRunnerFailureRequest,
-        RecoverExpiredLeasesRequest, TurnRunTransitionPort,
+        RecoverExpiredLeasesRequest, RelinquishRunRequest, TurnRunTransitionPort,
     },
 };
 use tokio::{
@@ -286,6 +288,13 @@ enum SchedulerCommand {
     Shutdown,
 }
 
+/// Identity fields needed to relinquish a claimed run back to Queued.
+struct RelinquishIdentity {
+    run_id: TurnRunId,
+    runner_id: TurnRunnerId,
+    lease_token: TurnLeaseToken,
+}
+
 struct SchedulerDrainContext {
     transitions: Arc<dyn TurnRunTransitionPort>,
     executor: Arc<dyn TurnRunExecutor>,
@@ -304,7 +313,9 @@ async fn run_scheduler_loop(
     runner_id: TurnRunnerId,
 ) {
     let semaphore = Arc::new(Semaphore::new(config.max_concurrent_runs()));
-    let mut executor_tasks = JoinSet::new();
+    let mut executor_tasks: JoinSet<TurnRunId> = JoinSet::new();
+    // Tracks every in-flight run so we can relinquish on shutdown.
+    let mut active_runs: HashMap<TurnRunId, RelinquishIdentity> = HashMap::new();
     let mut poll_tick = interval(config.poll_interval());
     poll_tick.set_missed_tick_behavior(MissedTickBehavior::Delay);
     let mut recovery_tick = interval(config.lease_recovery_interval());
@@ -331,6 +342,7 @@ async fn run_scheduler_loop(
                                 &context,
                                 Some(wake.scope),
                                 &mut executor_tasks,
+                                &mut active_runs,
                             ).await
                         {
                             claim_retry_pending = true;
@@ -344,6 +356,7 @@ async fn run_scheduler_loop(
                                 &context,
                                 None,
                                 &mut executor_tasks,
+                                &mut active_runs,
                             ).await
                         {
                             claim_retry_pending = true;
@@ -359,6 +372,7 @@ async fn run_scheduler_loop(
                                 &context,
                                 None,
                                 &mut executor_tasks,
+                                &mut active_runs,
                             ).await
                         {
                             claim_retry_pending = true;
@@ -374,6 +388,7 @@ async fn run_scheduler_loop(
                             &context,
                             None,
                             &mut executor_tasks,
+                            &mut active_runs,
                         ).await {
                             claim_retry_pending = true;
                             schedule_drain_after(
@@ -383,7 +398,29 @@ async fn run_scheduler_loop(
                         }
                     }
                     SchedulerCommand::Shutdown => {
+                        // Abort all in-flight tasks first so there is no race
+                        // between them completing a transition and our relinquish.
                         executor_tasks.shutdown().await;
+                        // Best-effort relinquish: return each aborted run to Queued
+                        // so a restart can pick it up instead of letting lease expiry
+                        // mark it Failed.
+                        for (_run_id, identity) in active_runs {
+                            let result = context
+                                .transitions
+                                .relinquish_run(RelinquishRunRequest {
+                                    run_id: identity.run_id,
+                                    runner_id: identity.runner_id,
+                                    lease_token: identity.lease_token,
+                                })
+                                .await;
+                            if let Err(error) = result {
+                                debug!(
+                                    run_id = %identity.run_id,
+                                    error = %error,
+                                    "turn run scheduler could not relinquish in-flight run on shutdown"
+                                );
+                            }
+                        }
                         break;
                     },
                 }
@@ -394,6 +431,7 @@ async fn run_scheduler_loop(
                         &context,
                         None,
                         &mut executor_tasks,
+                        &mut active_runs,
                     ).await
                 {
                     claim_retry_pending = true;
@@ -404,8 +442,13 @@ async fn run_scheduler_loop(
                 }
             }
             Some(result) = executor_tasks.join_next(), if !executor_tasks.is_empty() => {
-                if let Err(error) = result {
-                    debug!(error = %error, "turn run scheduler executor supervisor task failed");
+                match result {
+                    Ok(completed_run_id) => {
+                        active_runs.remove(&completed_run_id);
+                    }
+                    Err(error) => {
+                        debug!(error = %error, "turn run scheduler executor supervisor task failed");
+                    }
                 }
             }
             _ = recovery_tick.tick() => {
@@ -418,7 +461,8 @@ async fn run_scheduler_loop(
 async fn drain_queued_runs(
     context: &SchedulerDrainContext,
     scope_filter: Option<TurnScope>,
-    executor_tasks: &mut JoinSet<()>,
+    executor_tasks: &mut JoinSet<TurnRunId>,
+    active_runs: &mut HashMap<TurnRunId, RelinquishIdentity>,
 ) -> bool {
     loop {
         let Ok(permit) = Arc::clone(&context.semaphore).try_acquire_owned() else {
@@ -434,6 +478,15 @@ async fn drain_queued_runs(
             .await;
         match claim {
             Ok(Some(claimed)) => {
+                let run_id = claimed.state.run_id;
+                active_runs.insert(
+                    run_id,
+                    RelinquishIdentity {
+                        run_id,
+                        runner_id: claimed.runner_id,
+                        lease_token: claimed.lease_token,
+                    },
+                );
                 spawn_executor_task(
                     claimed,
                     Arc::clone(&context.transitions),
@@ -465,7 +518,7 @@ fn spawn_executor_task(
     command_tx: mpsc::Sender<SchedulerCommand>,
     permit: tokio::sync::OwnedSemaphorePermit,
     runner_heartbeat_interval: Duration,
-    executor_tasks: &mut JoinSet<()>,
+    executor_tasks: &mut JoinSet<TurnRunId>,
 ) {
     // Tag every tracing event emitted while this run executes with its
     // `thread_id` + `run_id` so the operator Logs panel's scoped (thread/run)
@@ -543,6 +596,8 @@ fn spawn_executor_task(
             tracing::debug!("turn run finished");
             drop(permit);
             let _ = command_tx.send(SchedulerCommand::Drain).await;
+            // Return the run_id so the scheduler loop can remove it from active_runs.
+            recovery_run_id
         }
         .instrument(run_span),
     );
