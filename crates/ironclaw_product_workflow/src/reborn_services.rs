@@ -4921,7 +4921,7 @@ fn generated_thread_id(
 }
 
 #[cfg(test)]
-mod project_error_mapping_tests {
+mod tests {
     use super::*;
 
     /// Every `ProjectServiceError` variant projects to a sanitized facade error
@@ -4967,6 +4967,9 @@ mod project_error_mapping_tests {
         let unavailable = RebornServicesError::service_unavailable(false);
         assert_eq!(unavailable.code, RebornServicesErrorCode::Unavailable);
         assert_eq!(unavailable.status_code, 503);
-        assert!(!unavailable.retryable, "false-arg sentinel is non-retryable");
+        assert!(
+            !unavailable.retryable,
+            "false-arg sentinel is non-retryable"
+        );
     }
 }

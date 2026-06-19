@@ -1934,8 +1934,8 @@ impl ProjectService for AuthorizingProjectService {
                     metadata: serde_json::json!({}),
                     state: RebornProjectState::Active,
                     role: RebornProjectRole::Owner,
-                    created_at: "1970-01-01T00:00:00Z".to_string(),
-                    updated_at: "1970-01-01T00:00:00Z".to_string(),
+                    created_at: "1970-01-01T00:00:00Z".parse().expect("created at"),
+                    updated_at: "1970-01-01T00:00:00Z".parse().expect("updated at"),
                 },
             })
         } else {

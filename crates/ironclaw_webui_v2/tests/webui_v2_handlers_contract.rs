@@ -4622,8 +4622,8 @@ fn sample_project_info(project_id: &str) -> RebornProjectInfo {
         metadata: serde_json::json!({}),
         state: RebornProjectState::Active,
         role: RebornProjectRole::Owner,
-        created_at: "2026-06-17T00:00:00Z".to_string(),
-        updated_at: "2026-06-17T00:00:00Z".to_string(),
+        created_at: "2026-06-17T00:00:00Z".parse().expect("created at"),
+        updated_at: "2026-06-17T00:00:00Z".parse().expect("updated at"),
     }
 }
 
@@ -4633,8 +4633,8 @@ fn sample_member_info(user_id: &str) -> RebornProjectMemberInfo {
         role: RebornProjectRole::Editor,
         status: RebornProjectMemberStatus::Active,
         granted_by: "user-alpha".to_string(),
-        created_at: "2026-06-17T00:00:00Z".to_string(),
-        updated_at: "2026-06-17T00:00:00Z".to_string(),
+        created_at: "2026-06-17T00:00:00Z".parse().expect("created at"),
+        updated_at: "2026-06-17T00:00:00Z".parse().expect("updated at"),
     }
 }
 
