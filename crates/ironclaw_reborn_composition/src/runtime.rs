@@ -2958,14 +2958,16 @@ pub async fn build_reborn_runtime(
     #[cfg(any(feature = "libsql", feature = "postgres"))]
     let credential_refresh_worker_handle = match (
         services.credential_refresh_candidate_source.take(),
+        services.credential_refresh_leader_lock.take(),
         services.product_auth.clone(),
     ) {
-        (Some(candidate_source), Some(refresh_port)) => {
+        (Some(candidate_source), Some(leader_lock), Some(refresh_port)) => {
             crate::credential_refresh_worker::spawn_credential_refresh_worker(
                 credential_refresh,
                 crate::credential_refresh_worker::CredentialRefreshWorkerDeps {
                     candidate_source,
                     refresh_port,
+                    leader_lock: std::sync::Arc::new(leader_lock),
                 },
             )
         }

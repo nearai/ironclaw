@@ -1,9 +1,38 @@
 # Reborn — Proactive Google OAuth Token Refresh (issue #5071)
 
-**Status:** Plan
+**Status:** Implemented
 **Date:** 2026-06-18
 **Issue:** nearai/ironclaw#5071 — "[Reborn] Proactively refresh Google OAuth tokens before expiry"
 **Labels:** bug, risk: high, scope: worker, scope: secrets, reborn, OAuth
+
+## Design update (as implemented — supersedes §A4 / §B where they differ)
+
+After code review the cross-process guard was simplified from a **per-account blocking
+advisory lock on the inline + worker paths** to a **leader-election lock used by the worker
+only**:
+
+- The keepalive worker, per tick, calls `CredentialRefreshLeaderLock::run_as_leader` which
+  acquires ONE deployment-wide `pg_try_advisory_lock` on a fixed key (`KEEPALIVE_LOCK_KEY`).
+  Non-leaders skip the tick (`LeaderOutcome::NotLeader`); the leader holds exactly one pooled
+  connection for its sequential sweep, then releases. libsql / no-pool path = trivial leader.
+  Lives in `product_auth_refresh_lock.rs` (gated `any(libsql, postgres)`).
+- The **inline** dispatch path no longer takes any cross-process lock — it reverts to the
+  existing in-process `refresh_locks` guard on `ProviderBackedCredentialAccountService`, plus
+  the margin-skip (read stored `expires_at`, refresh only within margin). No DB connection is
+  held on the hot path. Trade-off: a rare concurrent inline refresh of the *same* account
+  across processes isn't serialized, but it's margin-gated + worker-warmed and any resulting
+  `invalid_grant` is classified → reauth, self-healing next tick.
+- **D2 (production activation):** `CredentialRefreshSettings::default()` stays disabled; the
+  CLI (`ironclaw_reborn_cli/src/runtime/mod.rs`) enables it for the `Serve` caller via
+  `credential_refresh_settings`, with `IRONCLAW_CREDENTIAL_REFRESH_ENABLED` (1/true/0/false)
+  as an operator kill-switch — mirrors the trigger-poller pattern.
+- Review simplifications also applied: `RebornProductAuthServices::secret_store` is now
+  non-optional (removes a silent margin-skip no-op); the inline refresh margin is a config
+  field (`CredentialRefreshSettings::access_refresh_margin`, default 5 min).
+
+Known: the pre-existing `runtime::tests::local_dev_runtime_*` suite is flaky under high test
+parallelism (one case already fails on `main`); the suite passes serially. Not introduced by
+this change.
 
 ## Problem
 

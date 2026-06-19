@@ -19,8 +19,9 @@ use ironclaw_host_runtime::{
 
 /// Minimum time remaining before an access token is considered fresh enough
 /// to skip an inline refresh round-trip.
-// TODO(#5071 WS4): wire from CredentialRefreshSettings/config
-const DEFAULT_ACCESS_REFRESH_MARGIN: std::time::Duration = std::time::Duration::from_secs(5 * 60);
+/// Fixed policy: see `CredentialRefreshSettings::access_refresh_margin`
+pub(crate) const DEFAULT_ACCESS_REFRESH_MARGIN: std::time::Duration =
+    std::time::Duration::from_secs(5 * 60);
 
 #[derive(Clone)]
 pub(crate) struct ProductAuthRuntimeCredentialResolver {
@@ -223,16 +224,19 @@ impl RuntimeCredentialAccountVisibilityPolicy for DefaultRuntimeCredentialAccoun
 pub(crate) struct ProductAuthRuntimeCredentialAccountRefresher {
     refresh_accounts: Arc<dyn RuntimeCredentialAccountRefreshPort>,
     secret_store: Arc<dyn ironclaw_secrets::SecretStore>,
+    access_refresh_margin: std::time::Duration,
 }
 
 impl ProductAuthRuntimeCredentialAccountRefresher {
     pub(crate) fn new(
         refresh_accounts: Arc<dyn RuntimeCredentialAccountRefreshPort>,
         secret_store: Arc<dyn ironclaw_secrets::SecretStore>,
+        access_refresh_margin: std::time::Duration,
     ) -> Self {
         Self {
             refresh_accounts,
             secret_store,
+            access_refresh_margin,
         }
     }
 }
@@ -397,11 +401,11 @@ impl RuntimeCredentialAccountRefreshService for ProductAuthRuntimeCredentialAcco
                 .secret_store
                 .metadata(&account.scope.resource, access_handle)
                 .await
-                .unwrap_or(None); // metadata errors are non-fatal; fall through to refresh
+                .unwrap_or(None); // silent-ok: metadata unavailability is non-fatal — fall through to refresh
             if let Some(meta) = metadata
                 && let Some(expires_at) = meta.expires_at
             {
-                let margin = chrono::Duration::from_std(DEFAULT_ACCESS_REFRESH_MARGIN)
+                let margin = chrono::Duration::from_std(self.access_refresh_margin)
                     .unwrap_or(chrono::Duration::seconds(300));
                 if expires_at - margin > Utc::now() {
                     tracing::debug!(

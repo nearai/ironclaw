@@ -379,6 +379,13 @@ pub struct RebornServices {
     #[cfg(any(feature = "libsql", feature = "postgres"))]
     pub(crate) credential_refresh_candidate_source:
         Option<Arc<dyn crate::credential_refresh_worker::CredentialRefreshCandidateSource>>,
+    /// Leader lock for the background credential keepalive worker. Only the
+    /// process that acquires this per-tick lock runs the sweep. MUST stay
+    /// private. `None` when the worker candidate source is absent (local-dev /
+    /// no-db-feature paths).
+    #[cfg(any(feature = "libsql", feature = "postgres"))]
+    pub(crate) credential_refresh_leader_lock:
+        Option<crate::product_auth_refresh_lock::CredentialRefreshLeaderLock>,
 }
 
 impl RebornServices {
@@ -638,6 +645,8 @@ impl RebornServices {
             secret_store: Arc::new(ironclaw_secrets::InMemorySecretStore::new()),
             #[cfg(any(feature = "libsql", feature = "postgres"))]
             credential_refresh_candidate_source: None,
+            #[cfg(any(feature = "libsql", feature = "postgres"))]
+            credential_refresh_leader_lock: None,
         }
     }
 }
@@ -672,13 +681,6 @@ fn compose_product_auth_services(
     turn_coordinator: Arc<dyn ironclaw_turns::TurnCoordinator>,
     provider_composition: OAuthProviderComposition,
     security_audit_sink: Option<Arc<dyn ironclaw_events::SecurityAuditSink>>,
-    // A4: optional Postgres pool for cross-process advisory-lock serialization
-    // of per-account credential refresh.  `None` on the libsql / local-dev
-    // path — `runtime_credential_account_refresh_service` degrades to a pure
-    // pass-through.  This parameter is intentionally NOT part of any public
-    // API; it is threaded only through the private `build_postgres_production`
-    // → `build_backend_production` path.
-    #[cfg(feature = "postgres")] refresh_lock_pool: Option<deadpool_postgres::Pool>,
 ) -> Arc<RebornProductAuthServices> {
     let ports = match provider_composition.client {
         Some(provider_client) => ports.with_provider_client(provider_client),
@@ -693,10 +695,6 @@ fn compose_product_auth_services(
     }
     if let Some(registry) = provider_composition.gate_registry {
         services = services.with_oauth_gate_registry(registry);
-    }
-    #[cfg(feature = "postgres")]
-    if let Some(pool) = refresh_lock_pool {
-        services = services.with_refresh_lock_pool(pool);
     }
     Arc::new(services)
 }
@@ -953,9 +951,6 @@ async fn build_local_dev(input: RebornBuildInput) -> Result<RebornServices, Rebo
             turn_coordinator.clone(),
             provider_composition,
             security_audit_sink.clone(),
-            // local-dev path: no Postgres pool; advisory lock degrades to pass-through.
-            #[cfg(feature = "postgres")]
-            None,
         ),
         None => {
             #[cfg(any(feature = "libsql", feature = "postgres"))]
@@ -1015,7 +1010,9 @@ async fn build_local_dev(input: RebornBuildInput) -> Result<RebornServices, Rebo
     services = services.with_runtime_credential_account_resolver(Arc::new(
         ProductAuthRuntimeCredentialResolver::new_with_refresh(
             product_auth.runtime_credential_account_selection_service(),
-            product_auth.runtime_credential_account_refresh_service(),
+            product_auth.runtime_credential_account_refresh_service(
+                crate::product_auth_runtime_credentials::DEFAULT_ACCESS_REFRESH_MARGIN,
+            ),
         ),
     ));
     let mut available_extensions = AvailableExtensionCatalog::from_filesystem_root(
@@ -1137,9 +1134,11 @@ async fn build_local_dev(input: RebornBuildInput) -> Result<RebornServices, Rebo
         production_runtime: None,
         #[cfg(feature = "root-llm-provider")]
         secret_store,
-        // Local-dev is single-user; no cross-owner enumeration needed.
+        // Local-dev is single-user; no cross-owner enumeration or leader lock needed.
         #[cfg(any(feature = "libsql", feature = "postgres"))]
         credential_refresh_candidate_source: None,
+        #[cfg(any(feature = "libsql", feature = "postgres"))]
+        credential_refresh_leader_lock: None,
     })
 }
 
@@ -3172,9 +3171,10 @@ async fn build_backend_production<F>(
     production_runtime_services: impl FnOnce(
         Arc<RebornProductionRuntimeStoreGraph<F>>,
     ) -> RebornProductionRuntimeServices,
-    // A4: optional Postgres pool for cross-process advisory-lock serialization
-    // of per-account credential refresh.  `None` on the libsql path.
-    #[cfg(feature = "postgres")] refresh_lock_pool: Option<deadpool_postgres::Pool>,
+    // Leader lock for the background credential keepalive worker. The worker
+    // uses this to elect one process per tick as the sweep leader. `None`
+    // pool → always-leader (libsql / single-process). Stays private.
+    leader_lock: crate::product_auth_refresh_lock::CredentialRefreshLeaderLock,
 ) -> Result<RebornServices, RebornBuildError>
 where
     F: RootFilesystem + 'static,
@@ -3318,8 +3318,8 @@ where
                 Arc::clone(&stores.filesystem),
                 Arc::clone(&secret_store),
             ));
-            credential_refresh_candidate_source =
-                Some(Arc::clone(&durable) as Arc<dyn crate::credential_refresh_worker::CredentialRefreshCandidateSource>);
+            credential_refresh_candidate_source = Some(Arc::clone(&durable)
+                as Arc<dyn crate::credential_refresh_worker::CredentialRefreshCandidateSource>);
             RebornProductAuthServicePorts::from_shared_with_provider(
                 durable,
                 provider_composition
@@ -3334,11 +3334,6 @@ where
         turn_coordinator.clone(),
         provider_composition,
         security_audit_sink,
-        // A4: thread the Postgres pool clone so the advisory-lock wrapper can
-        // acquire per-account session-scoped locks around credential refresh.
-        // libsql callers pass None → pass-through.
-        #[cfg(feature = "postgres")]
-        refresh_lock_pool,
     );
     let product_auth_ready = true;
     // Wire ProductAuthAccount runtime credential resolver before
@@ -3349,7 +3344,9 @@ where
     let services = services.with_runtime_credential_account_resolver(Arc::new(
         ProductAuthRuntimeCredentialResolver::new_with_refresh(
             product_auth_services.runtime_credential_account_selection_service(),
-            product_auth_services.runtime_credential_account_refresh_service(),
+            product_auth_services.runtime_credential_account_refresh_service(
+                crate::product_auth_runtime_credentials::DEFAULT_ACCESS_REFRESH_MARGIN,
+            ),
         ),
     ));
     register_bundled_gsuite_first_party_handlers(
@@ -3381,6 +3378,10 @@ where
         secret_store,
         #[cfg(any(feature = "libsql", feature = "postgres"))]
         credential_refresh_candidate_source,
+        // The leader lock is passed in from the caller (one per backend path).
+        // `None` when candidate_source is None (caller-supplied product_auth_ports).
+        #[cfg(any(feature = "libsql", feature = "postgres"))]
+        credential_refresh_leader_lock: Some(leader_lock),
     })
 }
 
@@ -3417,9 +3418,16 @@ async fn build_libsql_production(
         stores,
         trigger_repository,
         RebornProductionRuntimeServices::LibSql,
-        // libsql path: no Postgres pool; advisory lock degrades to pass-through.
-        #[cfg(feature = "postgres")]
-        None,
+        {
+            #[cfg(feature = "postgres")]
+            {
+                crate::product_auth_refresh_lock::CredentialRefreshLeaderLock::new(None)
+            }
+            #[cfg(not(feature = "postgres"))]
+            {
+                crate::product_auth_refresh_lock::CredentialRefreshLeaderLock::always_leader()
+            }
+        },
     )
     .await
 }
@@ -3435,8 +3443,8 @@ async fn build_postgres_production(
     use ironclaw_filesystem::PostgresRootFilesystem;
 
     // A4: Clone the pool before it is moved into PostgresTriggerRepository so we
-    // can thread it to the auth-services composition for cross-process
-    // advisory-lock serialization of per-account credential refresh.
+    // can thread it to the credential keepalive worker as a leader-lock for
+    // sweep serialization.
     // This clone stays PRIVATE — it is never exposed through any public facade.
     let pool_for_refresh_lock = pool.clone();
     let filesystem = Arc::new(PostgresRootFilesystem::new(pool.clone()));
@@ -3459,10 +3467,9 @@ async fn build_postgres_production(
         stores,
         trigger_repository,
         RebornProductionRuntimeServices::Postgres,
-        // A4: hand the pool clone to auth-services for cross-process advisory
-        // locking.  It stays private inside RebornProductAuthServices.
-        #[cfg(feature = "postgres")]
-        Some(pool_for_refresh_lock),
+        crate::product_auth_refresh_lock::CredentialRefreshLeaderLock::new(Some(
+            pool_for_refresh_lock,
+        )),
     )
     .await
 }

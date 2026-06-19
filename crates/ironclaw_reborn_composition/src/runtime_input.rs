@@ -235,9 +235,8 @@ impl Default for PollSettings {
 /// [`DEFAULT_ACCESS_REFRESH_MARGIN`]: crate::product_auth_runtime_credentials::DEFAULT_ACCESS_REFRESH_MARGIN
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CredentialRefreshSettings {
-    /// Whether the worker is enabled. Defaults to `true` (on by default for
-    /// production composition paths). Set to `false` for local-dev or test
-    /// environments that do not need background refresh.
+    /// Whether the worker is enabled. Defaults to `false`; use
+    /// `CredentialRefreshSettings::enabled()` to turn on.
     pub enabled: bool,
     /// How often the worker wakes and sweeps for idle accounts.
     ///
@@ -264,6 +263,12 @@ pub struct CredentialRefreshSettings {
     ///
     /// Default: 10.
     pub max_per_tick: usize,
+    /// Minimum remaining lifetime an access token must have before the inline
+    /// refresh path skips a token-endpoint round-trip. Tokens expiring within
+    /// this window are refreshed proactively.
+    ///
+    /// Default: 5 minutes.
+    pub access_refresh_margin: Duration,
 }
 
 impl Default for CredentialRefreshSettings {
@@ -275,6 +280,7 @@ impl Default for CredentialRefreshSettings {
             startup_jitter_max: Duration::ZERO,
             tick_jitter_max: Duration::ZERO,
             max_per_tick: 10,
+            access_refresh_margin: Duration::from_secs(5 * 60),
         }
     }
 }
@@ -285,6 +291,8 @@ impl CredentialRefreshSettings {
     pub fn enabled() -> Self {
         Self {
             enabled: true,
+            // 5-minute spread prevents fleet-wide sweep storms on simultaneous startup.
+            startup_jitter_max: Duration::from_secs(300),
             ..Self::default()
         }
     }

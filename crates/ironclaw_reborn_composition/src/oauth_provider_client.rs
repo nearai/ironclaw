@@ -351,11 +351,10 @@ impl HostOAuthProviderClient {
         // Compute access-token expiry from the server-reported TTL.
         // Saturating cast: guard against u64 values that exceed i64::MAX (a
         // theoretical extreme) by clamping to i64::MAX seconds before converting.
-        let access_expires_at: Option<Timestamp> =
-            tokens.expires_in_seconds.map(|secs| {
-                let signed_secs = secs.min(i64::MAX as u64) as i64;
-                Utc::now() + chrono::Duration::seconds(signed_secs)
-            });
+        let access_expires_at: Option<Timestamp> = tokens.expires_in_seconds.map(|secs| {
+            let signed_secs = secs.min(i64::MAX as u64) as i64;
+            Utc::now() + chrono::Duration::seconds(signed_secs)
+        });
 
         let refresh_token = tokens.refresh_token;
 
@@ -397,16 +396,11 @@ impl HostOAuthProviderClient {
             )
             .await
         {
-            // Clean up the refresh secret written above so callers see a
-            // consistent state (both or neither).
+            // Access write failed: delete the refresh secret written above so
+            // callers see a consistent state (both written or neither written).
             if let Some(ref handle) = refresh_secret {
-                cleanup_written_access(
-                    &self.secret_store,
-                    &scope,
-                    handle,
-                    self.spec.provider_id,
-                )
-                .await;
+                cleanup_written_access(&self.secret_store, &scope, handle, self.spec.provider_id)
+                    .await;
             }
             return Err(map_secret_store_error(error));
         }
@@ -792,7 +786,7 @@ async fn cleanup_written_access(
         tracing::warn!(
             provider_id,
             secret_store_reason = delete_error.stable_reason(),
-            "oauth callback cleanup failed after refresh token write failure"
+            "oauth token-secret cleanup failed"
         );
     }
 }

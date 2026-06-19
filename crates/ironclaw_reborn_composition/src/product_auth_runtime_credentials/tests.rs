@@ -41,6 +41,7 @@ fn resolver_with_refresh(
         Arc::new(ProductAuthRuntimeCredentialAccountRefresher::new(
             Arc::new(TestRuntimeCredentialRefreshPort(accounts)),
             Arc::new(InMemorySecretStore::new()),
+            std::time::Duration::from_secs(5 * 60),
         )),
     )
 }
@@ -1173,6 +1174,7 @@ fn resolver_with_refresh_and_store(
         Arc::new(ProductAuthRuntimeCredentialAccountRefresher::new(
             Arc::new(TestRuntimeCredentialRefreshPort(accounts)),
             secret_store,
+            std::time::Duration::from_secs(5 * 60),
         )),
     )
 }
@@ -1226,7 +1228,10 @@ impl SecretStore for ExpiryAwareSecretStore {
             let key = format!("{}/{}", scope.user_id.as_str(), handle.as_str());
             self.expiries.lock().unwrap().insert(key, exp);
         }
-        let mut meta = self.inner.put(scope.clone(), handle.clone(), material, None).await?;
+        let mut meta = self
+            .inner
+            .put(scope.clone(), handle.clone(), material, None)
+            .await?;
         meta.expires_at = expires_at;
         Ok(meta)
     }
@@ -1372,5 +1377,10 @@ async fn resolver_refreshes_when_access_token_is_within_margin() {
 
     // Must be a new refreshed handle — refresh ran.
     assert_ne!(resolved.handle, stale_access);
-    assert!(resolved.handle.as_str().starts_with("oauth-refreshed-access"));
+    assert!(
+        resolved
+            .handle
+            .as_str()
+            .starts_with("oauth-refreshed-access")
+    );
 }

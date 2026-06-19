@@ -7,16 +7,16 @@ use anyhow::Context;
 #[cfg(feature = "webui-v2-beta")]
 use ironclaw_reborn_composition::host_api::UserId;
 use ironclaw_reborn_composition::host_api::{AgentId, TenantId};
+use ironclaw_reborn_composition::{
+    CredentialRefreshSettings, OAuthClientConfig, OperatorLogLayer, PollSettings, RebornBuildInput,
+    RebornCompositionProfile, RebornLocalRuntimeProfileOptions, RebornRuntimeIdentity,
+    RebornRuntimeInput, TurnRunnerSettings, build_reborn_runtime,
+    local_runtime_build_input_with_options, nearai_mcp_bootstrap_config_from_env,
+};
 #[cfg(feature = "webui-v2-beta")]
 use ironclaw_reborn_composition::{
     LocalTriggerAccessReconciliation, LocalTriggerAccessRole, LocalTriggerAccessSource,
     open_local_trigger_access_store,
-};
-use ironclaw_reborn_composition::{
-    OAuthClientConfig, OperatorLogLayer, PollSettings, RebornBuildInput, RebornCompositionProfile,
-    RebornLocalRuntimeProfileOptions, RebornRuntimeIdentity, RebornRuntimeInput,
-    TurnRunnerSettings, build_reborn_runtime, local_runtime_build_input_with_options,
-    nearai_mcp_bootstrap_config_from_env,
 };
 use ironclaw_reborn_config::{
     REBORN_PROFILE_ENV, RebornBootConfig, RebornProfile, seed_default_config_file_if_missing,
@@ -368,6 +368,41 @@ pub(crate) fn build_runtime_input(
     build_runtime_input_with_options(config, caller, RuntimeInputOptions::default())
 }
 
+/// Build [`CredentialRefreshSettings`] for the proactive Google OAuth keepalive
+/// worker.
+///
+/// Enabled by default on the local `serve` surface (so refresh tokens stay warm
+/// for long-running deployments) and disabled for every other caller, mirroring
+/// the trigger-poller default. `IRONCLAW_CREDENTIAL_REFRESH_ENABLED` is an
+/// operator override: `1`/`true` forces it on, `0`/`false` is a kill-switch; a
+/// present-but-blank value falls through to the caller default.
+fn credential_refresh_settings(
+    caller: RuntimeInputCaller,
+) -> anyhow::Result<CredentialRefreshSettings> {
+    let mut settings = if caller == RuntimeInputCaller::Serve {
+        CredentialRefreshSettings::enabled()
+    } else {
+        CredentialRefreshSettings::default()
+    };
+
+    match std::env::var("IRONCLAW_CREDENTIAL_REFRESH_ENABLED") {
+        Ok(raw) => match raw.trim().to_ascii_lowercase().as_str() {
+            "" => {}
+            "1" | "true" => settings.enabled = true,
+            "0" | "false" => settings.enabled = false,
+            _ => anyhow::bail!(
+                "IRONCLAW_CREDENTIAL_REFRESH_ENABLED must be one of 1, true, 0, false"
+            ),
+        },
+        Err(std::env::VarError::NotPresent) => {}
+        Err(std::env::VarError::NotUnicode(_)) => {
+            anyhow::bail!("IRONCLAW_CREDENTIAL_REFRESH_ENABLED contains non-UTF-8 bytes")
+        }
+    }
+
+    Ok(settings)
+}
+
 pub(crate) fn build_runtime_input_with_options(
     config: &RebornBootConfig,
     caller: RuntimeInputCaller,
@@ -382,6 +417,7 @@ pub(crate) fn build_runtime_input_with_options(
             runtime_services.config_file.as_ref(),
             caller,
         )?)
+        .with_credential_refresh_settings(credential_refresh_settings(caller)?)
         .with_poll_settings(PollSettings {
             interval: Duration::from_millis(200),
             max_total: Duration::from_secs(180),

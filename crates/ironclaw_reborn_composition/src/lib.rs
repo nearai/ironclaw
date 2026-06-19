@@ -34,6 +34,7 @@ mod budget_events;
 mod bundled_skills;
 mod communication_context;
 #[cfg(any(feature = "libsql", feature = "postgres"))]
+#[cfg(any(feature = "libsql", feature = "postgres"))]
 mod credential_refresh_worker;
 mod default_system_prompt;
 mod error;
@@ -83,6 +84,7 @@ mod outbound_delivery_capability_surface;
 mod outbound_preferences;
 mod product_auth_durable;
 mod product_auth_providers;
+#[cfg(any(feature = "libsql", feature = "postgres"))]
 mod product_auth_refresh_lock;
 mod product_auth_runtime_credentials;
 #[cfg(feature = "webui-v2-beta")]
@@ -257,9 +259,10 @@ pub use runtime::{
     RebornSkillExecutionResult, RebornSkillSourceKind, build_reborn_runtime,
 };
 pub use runtime_input::{
-    DEFAULT_TURN_RUNNER_HEARTBEAT_INTERVAL, DEFAULT_TURN_RUNNER_POLL_INTERVAL, PollSettings,
-    RebornRuntimeIdentity, RebornRuntimeInput, TriggerFireAccessCheck, TriggerFireAccessChecker,
-    TriggerFireAccessDecision, TriggerFireAccessError, TriggerPollerSettings, TurnRunnerSettings,
+    CredentialRefreshSettings, DEFAULT_TURN_RUNNER_HEARTBEAT_INTERVAL,
+    DEFAULT_TURN_RUNNER_POLL_INTERVAL, PollSettings, RebornRuntimeIdentity, RebornRuntimeInput,
+    TriggerFireAccessCheck, TriggerFireAccessChecker, TriggerFireAccessDecision,
+    TriggerFireAccessError, TriggerPollerSettings, TurnRunnerSettings,
 };
 #[cfg(feature = "root-llm-provider")]
 pub use runtime_input::{RebornProviderFactory, ResolvedRebornLlm};

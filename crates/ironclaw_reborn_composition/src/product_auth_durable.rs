@@ -634,8 +634,7 @@ where
     ) {
         // product-auth root for a plain user (no agent/project nesting):
         // /tenants/<t>/users/<u>/secrets/product-auth
-        let product_auth_root_str =
-            format!("/tenants/{tenant}/users/{user}/secrets/product-auth");
+        let product_auth_root_str = format!("/tenants/{tenant}/users/{user}/secrets/product-auth");
         let product_auth_root = match VirtualPath::new(&product_auth_root_str) {
             Ok(p) => p,
             Err(_) => return,
@@ -659,14 +658,8 @@ where
             if surface_entry.file_type != FileType::Directory {
                 continue;
             }
-            self.collect_accounts_under_surface(
-                root,
-                tenant,
-                user,
-                &surface_entry.name,
-                out,
-            )
-            .await;
+            self.collect_accounts_under_surface(root, tenant, user, &surface_entry.name, out)
+                .await;
         }
     }
 
@@ -680,9 +673,8 @@ where
         surface: &str,
         out: &mut Vec<CredentialAccount>,
     ) {
-        let accounts_dir_str = format!(
-            "/tenants/{tenant}/users/{user}/secrets/product-auth/{surface}/accounts"
-        );
+        let accounts_dir_str =
+            format!("/tenants/{tenant}/users/{user}/secrets/product-auth/{surface}/accounts");
         let accounts_dir = match VirtualPath::new(&accounts_dir_str) {
             Ok(p) => p,
             Err(_) => return,

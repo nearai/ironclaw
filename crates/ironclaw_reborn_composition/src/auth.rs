@@ -457,10 +457,8 @@ pub struct RebornProductAuthServices {
     cleanup_service: Arc<dyn SecretCleanupService>,
     continuation_dispatcher: Arc<dyn RebornAuthContinuationDispatcher>,
     security_audit_sink: Option<Arc<dyn SecurityAuditSink>>,
-    /// Secret store forwarded to the inline-refresh margin check (A2). `None`
-    /// falls back to a no-expiry in-memory store so the refresher always runs
-    /// on records with no stored expiry — safe and backward-compatible.
-    secret_store: Option<Arc<dyn ironclaw_secrets::SecretStore>>,
+    /// Secret store forwarded to the inline-refresh margin check (A2).
+    secret_store: Arc<dyn ironclaw_secrets::SecretStore>,
     dcr_oauth_registry: Option<Arc<OAuthDcrProviderRegistry>>,
     oauth_gate_registry: Option<Arc<GoogleOAuthGateProviderRegistry>>,
     /// Optional read projection for WebUI/local-dev auth interactions.
@@ -475,13 +473,6 @@ pub struct RebornProductAuthServices {
     /// by product-auth issue #4112 and remains genuinely optional until the
     /// durable backend exposes the same scoped projection as the in-memory port.
     flow_record_source: Option<Arc<dyn AuthFlowRecordSource>>,
-    /// Postgres pool for cross-process advisory-lock serialization of
-    /// per-account credential refresh (A4).  `None` on the libsql / local-dev
-    /// path — `runtime_credential_account_refresh_service` degrades to
-    /// pass-through in that case.  MUST stay private; never exposed through
-    /// any public API or the composition facade.
-    #[cfg(feature = "postgres")]
-    refresh_lock_pool: Option<deadpool_postgres::Pool>,
 }
 
 impl std::fmt::Debug for RebornProductAuthServices {
@@ -513,19 +504,10 @@ impl std::fmt::Debug for RebornProductAuthServices {
                 &"Arc<dyn RebornAuthContinuationDispatcher>",
             )
             .field("security_audit_sink", &self.security_audit_sink.is_some())
-            .field("secret_store", &self.secret_store.is_some())
+            .field("secret_store", &"<wired>")
             .field("flow_record_source", &self.flow_record_source.is_some())
             .field("dcr_oauth_registry", &self.dcr_oauth_registry.is_some())
             .field("oauth_gate_registry", &self.oauth_gate_registry.is_some())
-            .field(
-                "refresh_lock_pool",
-                &{
-                    #[cfg(feature = "postgres")]
-                    { self.refresh_lock_pool.is_some() }
-                    #[cfg(not(feature = "postgres"))]
-                    { false }
-                },
-            )
             .finish()
     }
 }
@@ -556,12 +538,10 @@ impl RebornProductAuthServices {
             cleanup_service,
             continuation_dispatcher,
             security_audit_sink: None,
-            secret_store: None,
+            secret_store: Arc::new(ironclaw_secrets::InMemorySecretStore::new()),
             dcr_oauth_registry: None,
             oauth_gate_registry: None,
             flow_record_source: None,
-            #[cfg(feature = "postgres")]
-            refresh_lock_pool: None,
         }
     }
 
@@ -669,46 +649,23 @@ impl RebornProductAuthServices {
 
     pub(crate) fn runtime_credential_account_refresh_service(
         self: &Arc<Self>,
+        access_refresh_margin: std::time::Duration,
     ) -> Arc<dyn RuntimeCredentialAccountRefreshService> {
-        // A4: Wrap the raw refresh port in the cross-process advisory-lock
-        // serializer.  On the Postgres path the pool is present and a
-        // pg_try_advisory_lock guards each per-account refresh.  On the libsql /
-        // local-dev path the pool is absent and AdvisoryLockedCredentialRefresh
-        // is a pure identity pass-through.
+        // Inline dispatch path: use the plain provider-backed service wrapped
+        // only in the in-process `refresh_locks` guard that
+        // `ProviderBackedCredentialAccountService` already owns. Cross-process
+        // serialization is handled by the background keepalive worker's leader
+        // lock (`CredentialRefreshLeaderLock`), not here.
         //
-        // The inner `ProviderBackedCredentialAccountService::refresh_locks` (an
-        // in-process tokio::sync::Mutex) is retained as an intra-process stampede
-        // guard — it prevents multiple tokio tasks in one process from
-        // simultaneously hitting the token endpoint.  This outer advisory-lock
-        // wrapper adds the cross-process layer; the two do not conflict.
-        let inner_port: Arc<dyn RuntimeCredentialAccountRefreshPort> = self.clone();
-        let refresh_port: Arc<dyn RuntimeCredentialAccountRefreshPort> = {
-            #[cfg(feature = "postgres")]
-            if let Some(pool) = self.refresh_lock_pool.clone() {
-                Arc::new(
-                    crate::product_auth_refresh_lock::AdvisoryLockedCredentialRefresh::new(
-                        inner_port,
-                        pool,
-                    ),
-                )
-            } else {
-                inner_port
-            }
-            #[cfg(not(feature = "postgres"))]
-            inner_port
-        };
         // A2: Forward the secret store so the refresher can read `expires_at`
         // metadata and skip the token-endpoint round-trip when the access token
-        // is still fresh. Fall back to a no-expiry in-memory store when no
-        // store is wired — every refresh will proceed unconditionally, which
-        // is the safe, backward-compatible default.
-        let secret_store: Arc<dyn ironclaw_secrets::SecretStore> = self
-            .secret_store
-            .clone()
-            .unwrap_or_else(|| Arc::new(ironclaw_secrets::InMemorySecretStore::new()));
+        // is still fresh.
+        let inner_port: Arc<dyn RuntimeCredentialAccountRefreshPort> = self.clone();
+        let secret_store: Arc<dyn ironclaw_secrets::SecretStore> = self.secret_store.clone();
         Arc::new(ProductAuthRuntimeCredentialAccountRefresher::new(
-            refresh_port,
+            inner_port,
             secret_store,
+            access_refresh_margin,
         ))
     }
 
@@ -746,18 +703,6 @@ impl RebornProductAuthServices {
         self
     }
 
-    /// Wire a Postgres pool for cross-process per-account advisory-lock
-    /// serialization of credential refresh (A4).
-    ///
-    /// MUST be called only from `compose_product_auth_services` on the Postgres
-    /// path.  The pool is intentionally NOT exposed through any public API or
-    /// the composition facade — it stays entirely within this struct.
-    #[cfg(feature = "postgres")]
-    pub(crate) fn with_refresh_lock_pool(mut self, pool: deadpool_postgres::Pool) -> Self {
-        self.refresh_lock_pool = Some(pool);
-        self
-    }
-
     fn with_manual_token_flow_service(
         mut self,
         service: Arc<dyn RebornManualTokenFlowService>,
@@ -790,10 +735,10 @@ impl RebornProductAuthServices {
     /// Wire the secret store used by the inline OAuth refresh margin check
     /// (A2). When set, the refresher reads `expires_at` metadata from the
     /// store and skips an unnecessary token-endpoint round-trip when the
-    /// access token is still fresh. When absent, every refresh call proceeds
-    /// unconditionally (safe, backward-compatible default).
+    /// access token is still fresh. Defaults to an in-memory store (always
+    /// refreshes unconditionally — safe, backward-compatible).
     pub fn with_secret_store(mut self, store: Arc<dyn ironclaw_secrets::SecretStore>) -> Self {
-        self.secret_store = Some(store);
+        self.secret_store = store;
         self
     }
 

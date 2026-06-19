@@ -1,228 +1,212 @@
-//! Cross-process per-account serialization for OAuth credential refresh.
+//! Deployment-wide leader-lock for the background credential keepalive worker.
+//!
+//! # Leader-lock model
+//!
+//! Only ONE process per deployment should sweep all Google credential accounts
+//! and refresh idle tokens per tick. This module provides a utility the worker
+//! uses to elect a single leader per tick:
+//!
+//! - **Postgres path**: the worker calls [`CredentialRefreshLeaderLock::run_as_leader`]
+//!   each tick. That call tries `pg_try_advisory_lock` using a single fixed
+//!   deployment-wide key. If the lock is already held by another process, the
+//!   current process is not the leader — it skips the sweep and returns
+//!   [`LeaderOutcome::NotLeader`]. If the lock is acquired, the sweep runs,
+//!   then the lock is explicitly released and [`LeaderOutcome::Ran`] is
+//!   returned. A single connection is held only for the duration of the sweep;
+//!   because the worker ticks at ~6 h the connection cost is negligible.
+//! - **libsql / single-process path** (`pool = None`): this process is
+//!   trivially the only process, so the sweep always runs. No connection is
+//!   held.
 //!
 //! # Two-layer concurrency ownership
 //!
-//! This wrapper owns the **cross-process** serialization contract:
-//! it acquires a Postgres session-scoped advisory lock (a BLOCKING
-//! `pg_advisory_lock`) keyed on the `CredentialAccountId` UUID before
-//! delegating to the inner refresh port. If another process already holds
-//! the lock for the same account, this wrapper WAITS until that process
-//! finishes, then refreshes — by which point the winner has persisted its
-//! (possibly rotated) refresh token, so the serialized second refresh reads
-//! the fresh token from the store and cannot hit `invalid_grant`. Two
-//! processes therefore never reach Google's token endpoint for the same
-//! account simultaneously.
+//! - **Cross-process** (this module): one leader per deployment tick; all
+//!   other processes skip.
+//! - **Intra-process** (in [`ironclaw_auth::ProviderBackedCredentialAccountService`]):
+//!   the existing `refresh_locks: Mutex<HashMap<CredentialAccountId, …>>` prevents
+//!   multiple tokio tasks inside one process from racing to the token endpoint.
+//!   That guard is retained and is NOT removed.
 //!
-//! The pre-existing in-process `refresh_locks` on
-//! `ProviderBackedCredentialAccountService` (ironclaw_auth::credential)
-//! is **retained** as a strictly *intra-process* stampede guard: it
-//! prevents multiple tokio tasks inside one process from all racing to
-//! the token endpoint.  That is a local optimization layered _under_
-//! this wrapper, not a competing source of truth.  Do not remove it.
+//! The inline dispatch path (hot path) is **unaffected** by this module: it
+//! uses only the in-process `refresh_locks` guard and never acquires a DB
+//! connection.
 //!
-//! # libsql / no-pool path
+//! # Advisory lock key
 //!
-//! When the pool is `None` (libsql, local-dev), this wrapper is a pure
-//! identity pass-through: all refresh calls reach the inner port
-//! unconditionally.  libsql is single-writer by deployment topology so
-//! no cross-process lock is needed.
+//! Postgres advisory locks live in ONE global 64-bit namespace shared by all
+//! connections in the cluster. The key is two `i32` values (`(key1, key2)`)
+//! that together form a 64-bit slot. We use two fixed literal constants chosen
+//! to be statistically unlikely to alias with other advisory-lock users in the
+//! same cluster (hooks predicate, etc.). This is the same approach as
+//! `ironclaw_hooks_postgres` — collision avoidance by statistical improbability,
+//! not structural isolation.
 //!
-//! # Infra-error fallback
+//! # Pool / connection error fallback
 //!
-//! If the Postgres pool returns a connection error, or the `pg_advisory_lock`
-//! query itself fails, this wrapper logs at `debug!` and proceeds to
-//! the inner refresh without the lock.  Availability trumps strict
-//! serialization: a transient infrastructure failure must not silently
-//! block all refreshes.  The intra-process lock still guards against
-//! local stampede.
+//! If the pool returns a connection error, or `pg_try_advisory_lock` itself
+//! fails, the worker logs at `debug!` and runs the sweep anyway (single-process
+//! availability over strict cross-process serialization). The in-process guard
+//! still prevents local stampede.
 
-// Key-derivation note:
-// `advisory_lock_key_bytes` below uses the same first-8-bytes-as-two-i32 scheme
-// as the canonical `advisory_lock_key_from_bytes` in
-// `crates/ironclaw_hooks_postgres/src/backend.rs:701`.
-// The two uses are in **disjoint namespaces** (credential-refresh vs.
-// hooks-predicate-eviction), so they never alias.  If `ironclaw_hooks_postgres`
-// is ever added as a dep of this crate, replace this local helper with a
-// call to the exported version.
-
-use std::sync::Arc;
-
-use async_trait::async_trait;
-use ironclaw_auth::{AuthProductError, CredentialRefreshReport, CredentialRefreshRequest};
 #[cfg(feature = "postgres")]
 use tracing::debug;
 
-use crate::product_auth_runtime_credentials::RuntimeCredentialAccountRefreshPort;
+// ---------------------------------------------------------------------------
+// Fixed deployment-wide advisory-lock key
+// ---------------------------------------------------------------------------
+// Two arbitrary i32 literals that uniquely identify "credential keepalive
+// worker leader election" in the Postgres advisory-lock namespace.
+// These were chosen as stable constants; do NOT derive them from a runtime
+// value — the key must be identical across all processes in the deployment.
+#[cfg(feature = "postgres")]
+const KEEPALIVE_LOCK_KEY: (i32, i32) = (0x4B45_4550i32, 0x414C_4956i32); // "KEEP", "ALIV"
 
 // ---------------------------------------------------------------------------
-// Advisory lock key derivation
+// Public outcome type
 // ---------------------------------------------------------------------------
 
-/// Derive the `(i32, i32)` advisory-lock key from an arbitrary byte slice.
-#[cfg_attr(not(any(feature = "postgres", test)), allow(dead_code))]
-///
-/// Uses the same scheme as `advisory_lock_key_from_bytes` in
-/// `crates/ironclaw_hooks_postgres/src/backend.rs:701` — first 4 bytes → `a`,
-/// next 4 bytes → `b`, LE interpretation, zero-padded if the slice is short.
-///
-/// A hash collision across distinct account IDs merely causes two unrelated
-/// accounts to serialize with each other — a rare throughput cost, never a
-/// correctness bug.
-///
-/// For `CredentialAccountId` (UUID = 16 bytes) the first 8 bytes are always
-/// present, so zero-padding never occurs in practice.
-pub(crate) fn advisory_lock_key_bytes(key: &[u8]) -> (i32, i32) {
-    let mut buf = [0u8; 8];
-    let n = key.len().min(8);
-    buf[..n].copy_from_slice(&key[..n]);
-    let a = i32::from_le_bytes([buf[0], buf[1], buf[2], buf[3]]);
-    let b = i32::from_le_bytes([buf[4], buf[5], buf[6], buf[7]]);
-    (a, b)
+/// Outcome of [`CredentialRefreshLeaderLock::run_as_leader`].
+pub(crate) enum LeaderOutcome<T> {
+    /// Another process holds the leader lock; sweep was skipped.
+    ///
+    /// Only constructed on the Postgres path; under non-postgres builds the
+    /// worker is always the trivial leader, so this variant is unreachable.
+    #[cfg_attr(not(feature = "postgres"), allow(dead_code))]
+    NotLeader,
+    /// This process was the leader; the sweep ran and returned `result`.
+    Ran(T),
 }
 
 // ---------------------------------------------------------------------------
-// Advisory-locked wrapper
+// Leader-lock utility
 // ---------------------------------------------------------------------------
 
-/// Wraps a [`RuntimeCredentialAccountRefreshPort`] with a Postgres
-/// session-scoped advisory lock so that only one process at a time can
-/// refresh a given credential account.
+/// Deployment-wide leader-lock for the background credential keepalive worker.
 ///
-/// Constructed by the composition root (`auth.rs`) via
-/// [`AdvisoryLockedCredentialRefresh::new`]; the pool is always `None` on the
-/// libsql path so the wrapper degrades to a pass-through.
-pub(crate) struct AdvisoryLockedCredentialRefresh {
-    inner: Arc<dyn RuntimeCredentialAccountRefreshPort>,
-    /// Postgres pool for advisory-lock acquisition.  `None` on the libsql /
-    /// local-dev path → pure pass-through.
+/// Constructed by the composition root (`runtime.rs`) and threaded into the
+/// worker's [`crate::credential_refresh_worker::CredentialRefreshWorkerDeps`].
+///
+/// The Postgres pool is intentionally `Option`: `None` on the libsql /
+/// local-dev path means this process is trivially the leader (single writer by
+/// deployment topology), so the sweep always runs without touching the DB.
+pub(crate) struct CredentialRefreshLeaderLock {
+    /// Postgres pool for leader-lock acquisition. `None` on the libsql /
+    /// local-dev path → always-leader (pass-through). MUST stay private;
+    /// never exposed through any public API or the composition facade.
     #[cfg(feature = "postgres")]
     pool: Option<deadpool_postgres::Pool>,
+    /// Marker field so the struct is non-empty when the postgres feature is
+    /// off. ZST — zero runtime cost.
+    #[cfg(not(feature = "postgres"))]
+    _marker: (),
 }
 
-impl AdvisoryLockedCredentialRefresh {
-    /// Create a wrapper with a Postgres pool.  On the libsql path, call
-    /// [`Self::passthrough`] instead.
+impl CredentialRefreshLeaderLock {
+    /// Build a leader lock backed by a Postgres pool (Postgres path).
+    ///
+    /// Pass `None` for `pool` to get the always-leader (libsql) behaviour.
     #[cfg(feature = "postgres")]
-    pub(crate) fn new(
-        inner: Arc<dyn RuntimeCredentialAccountRefreshPort>,
-        pool: deadpool_postgres::Pool,
-    ) -> Self {
-        Self {
-            inner,
-            pool: Some(pool),
-        }
+    pub(crate) fn new(pool: Option<deadpool_postgres::Pool>) -> Self {
+        Self { pool }
     }
 
-    /// Create a pass-through wrapper with no pool.  All refresh calls reach
-    /// `inner` unconditionally (libsql / local-dev path).
-    /// Used in tests and the non-postgres path.
-    #[allow(dead_code)]
-    pub(crate) fn passthrough(inner: Arc<dyn RuntimeCredentialAccountRefreshPort>) -> Self {
-        Self {
-            inner,
-            #[cfg(feature = "postgres")]
-            pool: None,
-        }
+    /// Build an always-leader lock (no pool, libsql / local-dev path).
+    #[cfg(not(feature = "postgres"))]
+    pub(crate) fn always_leader() -> Self {
+        Self { _marker: () }
     }
-}
 
-#[async_trait]
-impl RuntimeCredentialAccountRefreshPort for AdvisoryLockedCredentialRefresh {
-    async fn refresh_credential_account(
-        &self,
-        request: CredentialRefreshRequest,
-    ) -> Result<CredentialRefreshReport, AuthProductError> {
+    /// Try to become the deployment-wide sweep leader for one tick.
+    ///
+    /// - On the libsql path (pool is conceptually absent): always invokes
+    ///   `sweep` and returns [`LeaderOutcome::Ran`].
+    /// - On the Postgres path: acquires `pg_try_advisory_lock` (non-blocking).
+    ///   If the lock is not acquired, returns [`LeaderOutcome::NotLeader`]
+    ///   without invoking `sweep`. If acquired, invokes `sweep`, then
+    ///   explicitly releases the lock before returning.
+    ///   On pool/connection errors, falls through to invoke `sweep` anyway
+    ///   (availability over strict serialization).
+    pub(crate) async fn run_as_leader<F, Fut, T>(&self, sweep: F) -> LeaderOutcome<T>
+    where
+        F: FnOnce() -> Fut,
+        Fut: std::future::Future<Output = T>,
+    {
         #[cfg(feature = "postgres")]
         {
             if let Some(pool) = &self.pool {
-                return refresh_with_advisory_lock(&self.inner, pool, request).await;
+                return run_as_leader_postgres(pool, sweep).await;
             }
         }
-        // No pool (libsql / local-dev): identity pass-through.
-        self.inner.refresh_credential_account(request).await
+        // No pool (libsql / local-dev / no-postgres): trivially the leader.
+        LeaderOutcome::Ran(sweep().await)
     }
 }
 
 // ---------------------------------------------------------------------------
-// Postgres advisory-lock acquisition logic (postgres-feature only)
+// Postgres leader-lock logic
 // ---------------------------------------------------------------------------
 
 #[cfg(feature = "postgres")]
-async fn refresh_with_advisory_lock(
-    inner: &Arc<dyn RuntimeCredentialAccountRefreshPort>,
+async fn run_as_leader_postgres<F, Fut, T>(
     pool: &deadpool_postgres::Pool,
-    request: CredentialRefreshRequest,
-) -> Result<CredentialRefreshReport, AuthProductError> {
-    let account_id = request.account_id;
-    let (key_a, key_b) = advisory_lock_key_bytes(account_id.as_uuid().as_bytes());
+    sweep: F,
+) -> LeaderOutcome<T>
+where
+    F: FnOnce() -> Fut,
+    Fut: std::future::Future<Output = T>,
+{
+    let (key_a, key_b) = KEEPALIVE_LOCK_KEY;
 
-    // Obtain a connection from the pool.  On failure, fall through to inner
-    // without the lock (availability over strict serialization — see module doc).
+    // Obtain a connection from the pool.  On failure, fall through and run
+    // the sweep anyway (availability over strict cross-process serialization).
     let conn = match pool.get().await {
         Ok(c) => c,
         Err(err) => {
             debug!(
-                account_id = %account_id,
                 error = %err,
-                "advisory-lock pool error; proceeding without cross-process lock"
+                "credential-refresh leader lock: pool error; running sweep without lock"
             );
-            return inner.refresh_credential_account(request).await;
+            return LeaderOutcome::Ran(sweep().await);
         }
     };
 
-    // Acquire the session-scoped advisory lock with a BLOCKING wait.
-    // `pg_advisory_lock` blocks until the lock is free, so a second process
-    // serializes BEHIND the first rather than racing it to the token endpoint.
-    // This is the property the issue requires: concurrent processes cannot
-    // refresh the same account simultaneously. The wait is bounded by a single
-    // refresh's duration (the holder releases as soon as its inner refresh
-    // returns), and Postgres releases session-scoped advisory locks automatically
-    // if a holding session's connection drops (e.g. the holder process crashes),
-    // so there is no indefinite-wait / stuck-holder hazard.
-    //
-    // Correctness of the serialized second refresh: by the time we acquire the
-    // lock, any concurrent winner has finished and persisted its (possibly
-    // rotated) refresh token. Our inner refresh re-reads the refresh token from
-    // the secret store, so it uses the fresh token and cannot hit invalid_grant.
-    // The second refresh is redundant but safe (we do not skip it, because the
-    // inline caller needs a valid access token returned now; the upstream
-    // margin check in product_auth_runtime_credentials already suppresses most
-    // redundant refreshes before reaching this port).
-    if let Err(err) = conn
-        .query_one("SELECT pg_advisory_lock($1, $2)", &[&key_a, &key_b])
+    // pg_try_advisory_lock is non-blocking: returns true if this session
+    // acquired the lock, false if another session already holds it.
+    let acquired: bool = match conn
+        .query_one("SELECT pg_try_advisory_lock($1, $2)", &[&key_a, &key_b])
         .await
     {
-        debug!(
-            account_id = %account_id,
-            error = %err,
-            "pg_advisory_lock wait failed; proceeding without cross-process lock"
-        );
-        // Cannot acquire the lock — fail safe by proceeding (availability over
-        // strict serialization; the in-process refresh_locks guard still
-        // prevents intra-process stampede).
-        return inner.refresh_credential_account(request).await;
+        Ok(row) => row.get(0),
+        Err(err) => {
+            debug!(
+                error = %err,
+                "credential-refresh leader lock: pg_try_advisory_lock failed; running sweep without lock"
+            );
+            return LeaderOutcome::Ran(sweep().await);
+        }
+    };
+
+    if !acquired {
+        debug!("credential-refresh leader lock: not the leader this tick; skipping sweep");
+        return LeaderOutcome::NotLeader;
     }
 
-    // We hold the advisory lock.  Delegate to inner, then explicitly release
-    // the lock regardless of outcome.
-    let result = inner.refresh_credential_account(request).await;
+    // We are the leader. Run the sweep.
+    let result = sweep().await;
 
-    // Release the lock explicitly so the connection can be returned to the pool
-    // without holding it for its full session lifetime.
+    // Release the lock explicitly so the connection can be returned to the
+    // pool without holding it for its full session lifetime.
     if let Err(err) = conn
         .query_one("SELECT pg_advisory_unlock($1, $2)", &[&key_a, &key_b])
         .await
     {
-        // Unlock failure is non-fatal: the lock will be released when the
-        // connection is dropped / returned to pool.
         debug!(
-            account_id = %account_id,
             error = %err,
-            "pg_advisory_unlock query failed; lock will release on connection drop"
+            "credential-refresh leader lock: pg_advisory_unlock failed; lock will release on connection drop"
         );
     }
 
-    result
+    LeaderOutcome::Ran(result)
 }
 
 // ---------------------------------------------------------------------------
@@ -232,116 +216,52 @@ async fn refresh_with_advisory_lock(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
-
-    use async_trait::async_trait;
-    use ironclaw_auth::{
-        AuthProductError, AuthProviderId, AuthProductScope, AuthSurface, CredentialAccountId,
-        CredentialRefreshReport, CredentialRefreshRequest,
-    };
-    use ironclaw_host_api::{InvocationId, ResourceScope, TenantId, UserId};
+    use std::sync::atomic::{AtomicBool, Ordering};
 
     // ---------------------------------------------------------------------------
-    // Helpers
+    // Always-leader path (no pool)
     // ---------------------------------------------------------------------------
 
-    fn make_request() -> CredentialRefreshRequest {
-        let scope = AuthProductScope::new(
-            ResourceScope {
-                tenant_id: TenantId::new("tenant-test").expect("tenant"),
-                user_id: UserId::new("user-test").expect("user"),
-                agent_id: None,
-                project_id: None,
-                mission_id: None,
-                thread_id: None,
-                invocation_id: InvocationId::new(),
-            },
-            AuthSurface::Api,
-        );
-        let provider = AuthProviderId::new("google").expect("provider");
-        let account_id = CredentialAccountId::new();
-        CredentialRefreshRequest::new(scope, provider, account_id)
-    }
-
-    // A minimal stub that counts how many times it was called.
-    struct CountingRefreshPort {
-        calls: Arc<AtomicUsize>,
-    }
-
-    impl CountingRefreshPort {
-        fn new() -> (Self, Arc<AtomicUsize>) {
-            let calls = Arc::new(AtomicUsize::new(0));
-            (Self { calls: calls.clone() }, calls)
-        }
-    }
-
-    #[async_trait]
-    impl RuntimeCredentialAccountRefreshPort for CountingRefreshPort {
-        async fn refresh_credential_account(
-            &self,
-            _request: CredentialRefreshRequest,
-        ) -> Result<CredentialRefreshReport, AuthProductError> {
-            self.calls.fetch_add(1, Ordering::SeqCst);
-            Err(AuthProductError::BackendUnavailable)
-        }
-    }
-
-    // ---------------------------------------------------------------------------
-    // Key derivation tests
-    // ---------------------------------------------------------------------------
-
-    /// Same byte input always produces the same (a, b) pair.
-    #[test]
-    fn key_derivation_deterministic() {
-        let id = CredentialAccountId::new();
-        let bytes = id.as_uuid().as_bytes().to_vec();
-        let k1 = advisory_lock_key_bytes(&bytes);
-        let k2 = advisory_lock_key_bytes(&bytes);
-        assert_eq!(k1, k2);
-    }
-
-    /// Two different account_ids should (with overwhelming probability) produce
-    /// different keys — they are different 16-byte UUIDs so the first 8 bytes
-    /// virtually never collide.
-    #[test]
-    fn key_derivation_different_ids_differ() {
-        let id1 = CredentialAccountId::new();
-        let id2 = CredentialAccountId::new();
-        let k1 = advisory_lock_key_bytes(id1.as_uuid().as_bytes());
-        let k2 = advisory_lock_key_bytes(id2.as_uuid().as_bytes());
-        // UUIDs are random v4 — extremely unlikely to collide in the first 8 bytes.
-        assert_ne!(k1, k2, "two distinct UUIDs produced the same advisory key");
-    }
-
-    /// Zero-padding: a 4-byte key still produces a stable, total result.
-    #[test]
-    fn key_derivation_short_slice() {
-        let k = advisory_lock_key_bytes(b"abcd");
-        assert_eq!(k, (i32::from_le_bytes(*b"abcd"), 0i32));
-    }
-
-    /// Empty slice: both halves are zero.
-    #[test]
-    fn key_derivation_empty_slice() {
-        let k = advisory_lock_key_bytes(b"");
-        assert_eq!(k, (0i32, 0i32));
-    }
-
-    // ---------------------------------------------------------------------------
-    // Pass-through path (no pool)
-    // ---------------------------------------------------------------------------
-
-    /// With no pool the inner service is always called.
+    /// On the no-pool path the sweep always runs.
     #[tokio::test]
-    async fn passthrough_always_calls_inner() {
-        let (port, calls) = CountingRefreshPort::new();
-        let wrapper = AdvisoryLockedCredentialRefresh::passthrough(Arc::new(port));
+    async fn always_leader_runs_sweep() {
+        #[cfg(not(feature = "postgres"))]
+        let lock = CredentialRefreshLeaderLock::always_leader();
+        #[cfg(feature = "postgres")]
+        let lock = CredentialRefreshLeaderLock::new(None);
 
-        // Call twice.
-        let _ = wrapper.refresh_credential_account(make_request()).await;
-        let _ = wrapper.refresh_credential_account(make_request()).await;
+        let ran = Arc::new(AtomicBool::new(false));
+        let ran_clone = Arc::clone(&ran);
+        let outcome = lock
+            .run_as_leader(|| async move {
+                ran_clone.store(true, Ordering::SeqCst);
+                42u32
+            })
+            .await;
+        assert!(ran.load(Ordering::SeqCst), "sweep must have run");
+        assert!(
+            matches!(outcome, LeaderOutcome::Ran(42)),
+            "outcome must be Ran(42)"
+        );
+    }
 
-        assert_eq!(calls.load(Ordering::SeqCst), 2);
+    /// Sweep runs twice on successive calls (no state leaks between calls).
+    #[tokio::test]
+    async fn always_leader_runs_sweep_twice() {
+        #[cfg(not(feature = "postgres"))]
+        let lock = CredentialRefreshLeaderLock::always_leader();
+        #[cfg(feature = "postgres")]
+        let lock = CredentialRefreshLeaderLock::new(None);
+
+        let count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        for _ in 0..2 {
+            let count_clone = Arc::clone(&count);
+            lock.run_as_leader(|| async move {
+                count_clone.fetch_add(1, Ordering::SeqCst);
+            })
+            .await;
+        }
+        assert_eq!(count.load(Ordering::SeqCst), 2);
     }
 }

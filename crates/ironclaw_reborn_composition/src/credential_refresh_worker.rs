@@ -7,10 +7,11 @@
 //! ## Design
 //!
 //! - **Tick logic (B3):** enumerate all Google/Configured accounts with a
-//!   `refresh_secret` whose `updated_at` is older than `idle_threshold`. For
-//!   each candidate, call `RebornProductAuthServices::refresh_credential_account`
-//!   through the advisory-locked port (A4) so cross-process serialization is
-//!   preserved.
+//!   `refresh_secret` whose `updated_at` is older than `idle_threshold`. The
+//!   worker wraps the sweep in a
+//!   [`crate::product_auth_refresh_lock::CredentialRefreshLeaderLock`]: only
+//!   one process per deployment becomes the leader per tick and runs the sweep;
+//!   non-leaders skip the tick without touching the token endpoint.
 //! - **Scheduling:** mirrors `trigger_poller.rs` exactly — startup jitter,
 //!   inter-tick jitter, `CancellationToken`-aware sleep, `JoinHandle` shutdown.
 //! - **Logging rule:** `debug!` only — never `info!` or `warn!`. The REPL/TUI
@@ -60,10 +61,10 @@ impl CredentialRefreshWorkerRuntimeHandle {
         match tokio::time::timeout(timeout, &mut handle).await {
             Ok(Ok(())) => {}
             Ok(Err(error)) => {
-                tracing::warn!(?error, "credential refresh worker task join failed");
+                tracing::debug!(?error, "credential refresh worker task join failed");
             }
             Err(_) => {
-                tracing::warn!(
+                tracing::debug!(
                     ?timeout,
                     "credential refresh worker did not stop before shutdown timeout; aborting"
                 );
@@ -71,10 +72,7 @@ impl CredentialRefreshWorkerRuntimeHandle {
                 if let Err(error) = handle.await
                     && error.is_panic()
                 {
-                    tracing::warn!(
-                        ?error,
-                        "aborted credential refresh worker task panicked"
-                    );
+                    tracing::debug!(?error, "aborted credential refresh worker task panicked");
                 }
             }
         }
@@ -122,9 +120,14 @@ where
 pub(crate) struct CredentialRefreshWorkerDeps {
     /// Durable product-auth services — used only for `list_refresh_candidates`.
     pub(crate) candidate_source: Arc<dyn CredentialRefreshCandidateSource>,
-    /// Locked refresh port — `refresh_credential_account` goes through the
-    /// advisory-lock wrapper (A4) so multi-process deployments serialize.
+    /// Plain refresh port — `refresh_credential_account` goes through the
+    /// `ProviderBackedCredentialAccountService` in-process guard only. Cross-
+    /// process serialization is provided by the leader lock below.
     pub(crate) refresh_port: Arc<RebornProductAuthServices>,
+    /// Deployment-wide leader lock. Only the process that acquires this each
+    /// tick runs the sweep; others skip. Built from the Postgres pool on
+    /// production paths; always-leader on libsql / local-dev paths.
+    pub(crate) leader_lock: Arc<crate::product_auth_refresh_lock::CredentialRefreshLeaderLock>,
 }
 
 // ---------------------------------------------------------------------------
@@ -178,6 +181,25 @@ async fn run_credential_refresh_worker(
 // ---------------------------------------------------------------------------
 
 async fn tick_once(deps: &CredentialRefreshWorkerDeps, settings: &CredentialRefreshSettings) {
+    use crate::product_auth_refresh_lock::LeaderOutcome;
+
+    // Acquire the deployment-wide leader lock before doing any enumeration
+    // work. Non-leader processes skip this tick entirely.
+    let outcome = deps
+        .leader_lock
+        .run_as_leader(|| sweep_once(deps, settings))
+        .await;
+
+    match outcome {
+        LeaderOutcome::NotLeader => {
+            tracing::debug!("credential refresh worker tick: not the leader; skipping sweep");
+        }
+        LeaderOutcome::Ran(()) => {}
+    }
+}
+
+/// The actual sweep executed only by the leader process.
+async fn sweep_once(deps: &CredentialRefreshWorkerDeps, settings: &CredentialRefreshSettings) {
     let now = Utc::now();
     let idle_threshold = match chrono::Duration::from_std(settings.idle_threshold) {
         Ok(d) => d,
@@ -230,10 +252,8 @@ async fn tick_once(deps: &CredentialRefreshWorkerDeps, settings: &CredentialRefr
                     "credential refresh worker: account refreshed"
                 );
             }
-            // Transient errors (backend unavailable or advisory-lock contention):
-            // AuthProductError::BackendConflict already maps to
-            // AuthErrorCode::BackendUnavailable, so one arm covers both cases.
-            // Leave for the next tick — no status mutation.
+            // Transient errors (backend unavailable): leave for the next tick
+            // — no status mutation.
             Err(ref error) if error.code == AuthErrorCode::BackendUnavailable => {
                 skipped += 1;
                 tracing::debug!(
@@ -318,10 +338,7 @@ mod tests {
         assert_eq!(settings.startup_jitter_max, Duration::ZERO);
         assert_eq!(settings.tick_jitter_max, Duration::ZERO);
         assert_eq!(settings.interval, Duration::from_secs(6 * 3600));
-        assert_eq!(
-            settings.idle_threshold,
-            Duration::from_secs(2 * 24 * 3600)
-        );
+        assert_eq!(settings.idle_threshold, Duration::from_secs(2 * 24 * 3600));
         assert_eq!(settings.max_per_tick, 10);
     }
 
