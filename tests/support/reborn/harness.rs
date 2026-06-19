@@ -960,7 +960,7 @@ impl RebornBinaryE2EHarness {
             loop_exit_evidence: evidence,
             config: DefaultPlannedRuntimeConfig {
                 worker: TurnRunnerWorkerConfig {
-                    heartbeat_interval: Duration::from_millis(20),
+                    heartbeat_interval: Duration::from_millis(200),
                     poll_interval: Duration::from_millis(10),
                     scope_filter: restrict_worker_to_initial_scope.then(|| turn_scope.clone()),
                 },
