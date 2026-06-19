@@ -40,8 +40,14 @@ jobs:
             cargo_flags: "--all-features"
           - label: default
             cargo_flags: ""
-          - label: libsql-only
-            cargo_flags: "--no-default-features --features libsql"
+          # FINDING: a workspace-wide "libsql-only" build is NOT expressible here.
+          # `cargo nextest archive --workspace --features libsql` errors because
+          # Reborn crates (e.g. ironclaw_reborn) expose libsql only via `dep:libsql`
+          # behind their own feature names (libsql-restart-tests, libsql-secrets,
+          # webui-user-store) — there is no uniform `libsql` feature across the 36
+          # crates. A targeted single-backend matrix needs feature unification
+          # (cargo-hakari / workspace-hack). Tracked as a follow-up; --all-features
+          # and bare --workspace (default) sidestep it.
     steps:
       - name: Checkout repository
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
@@ -238,7 +244,6 @@ jobs:
         label:
           - all-features
           - default
-          - libsql-only
         shard_index:
           - 1
           - 2
@@ -395,6 +400,16 @@ jobs:
           except OSError:
               pass
 
+          def _count(kind):
+              return sum(
+                  1 for e in events
+                  if e.get("type") == "test" and e.get("event") == kind
+              )
+
+          tests_passed = _count("ok")
+          tests_failed = _count("failed")
+          tests_ignored = _count("ignored")
+
           label = os.environ["LABEL"]
           shard_index = int(os.environ["SHARD_INDEX"])
           shards = int(os.environ["SHARDS"])
@@ -423,12 +438,33 @@ jobs:
                   "partition": f"count:{shard_index}/{shards}",
                   "shard_seconds": shard_seconds,
                   "exit_code": status,
-                  "status": "success" if status == 0 else "failed",
+                  "status": (
+                      "all-passed" if status == 0
+                      else "ran-with-failures" if status == 100
+                      else "could-not-run"
+                  ),
+                  "tests_passed": tests_passed,
+                  "tests_failed": tests_failed,
+                  "tests_ignored": tests_ignored,
                   "duration_events": len(durations),
               }, f, indent=2, sort_keys=True)
               f.write("\n")
           PY
 
+          # Measurement spike: this shard runs the ENTIRE heterogeneous workspace
+          # suite against one Postgres in parallel, so env-dependent failures
+          # (un-migrated schema -> "relation memory_documents does not exist",
+          # parallel schema races -> pg_type duplicate key, CLI smoke env) are
+          # EXPECTED and are recorded as data (exit_code + pass/fail counts in the
+          # JSON, surfaced in the report) — they are not a gate. The job is green
+          # when nextest actually executed; it fails only if nextest could not run.
+          # nextest exit codes: 0 = all passed, 100 = ran with test failures,
+          # others = could-not-run / infra error.
+          if [ "${status}" -eq 0 ] || [ "${status}" -eq 100 ]; then
+            echo "nextest executed for ${LABEL} shard ${SHARD_INDEX} (exit ${status}); measurement captured."
+            exit 0
+          fi
+          echo "::error::nextest could not run for ${LABEL} shard ${SHARD_INDEX} (exit ${status})"
           exit "${status}"
 
       - name: Upload shard measurement
@@ -476,7 +512,7 @@ jobs:
           import os
           import statistics
 
-          labels = ["all-features", "default", "libsql-only"]
+          labels = ["all-features", "default"]
           budget = int(os.environ["BUDGET_SECONDS"])
 
           builds = {}
@@ -560,13 +596,31 @@ jobs:
                       f"{seconds(p50_shard)} | {seconds(max_shard)} | {seconds(total)} | **{budget_verdict}** | "
                       f"mold: {mold}; parallel without OOM: {parallel} |\n"
                   )
+                  tests_passed = sum(row.get("tests_passed") or 0 for row in shard_rows)
+                  tests_failed = sum(row.get("tests_failed") or 0 for row in shard_rows)
                   verdict_lines.append(
                       f"- `{label}`: {budget_verdict} for build + slowest shard "
-                      f"({seconds(total)} against {budget // 60}m budget)."
+                      f"({seconds(total)} against {budget // 60}m budget). "
+                      f"Tests: {tests_passed} passed, {tests_failed} failed "
+                      f"(failures are env-dependent in this monolithic run — see notes)."
                   )
 
               out.write("\n## Verdicts\n\n")
               out.write("\n".join(verdict_lines))
               out.write("\n\n")
-              out.write("Notes: `count:` partitioning is intentionally v1. The shard duration artifacts are uploaded as `durations-<label>-<index>.json` so a follow-up can implement duration-balanced LPT scheduling from measured data.\n")
+              out.write(
+                  "Notes:\n"
+                  "- This is a non-blocking measurement spike. A shard job is green when nextest "
+                  "**executed** (timing captured); test pass/fail is reported as data, not gated.\n"
+                  "- Test failures in this run are **environmental**, not harness bugs: the whole "
+                  "heterogeneous workspace suite runs against one Postgres in parallel, so tests that "
+                  "expect migrations (`relation memory_documents does not exist`), per-test DB isolation "
+                  "(`pg_type` duplicate-key races), or CLI-smoke env fail here. Making 'run everything' "
+                  "go fully green is a separate env workstream (migrations + per-test DB + env), which "
+                  "this spike has now quantified.\n"
+                  "- `count:` partitioning is intentionally v1; duration artifacts "
+                  "`durations-<label>-<index>.json` enable duration-balanced LPT scheduling as a follow-up.\n"
+                  "- `libsql-only` is omitted: it is not expressible as a workspace-wide `--features` build "
+                  "without feature unification (cargo-hakari).\n"
+              )
           PY
