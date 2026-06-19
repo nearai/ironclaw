@@ -1,0 +1,50 @@
+{
+  "model_name": "recorded-qa-connect_telegram",
+  "steps": [
+    {
+      "response": {
+        "type": "user_input",
+        "content": "connect to Telegram"
+      }
+    },
+    {
+      "request_hint": {
+        "last_user_message_contains": "connect to Telegram",
+        "min_message_count": 2
+      },
+      "response": {
+        "type": "tool_calls",
+        "tool_calls": [
+          {
+            "id": "toolu_01WFuahT3UsiSbjcpNJo7wyn",
+            "name": "builtin__extension_search",
+            "arguments": {
+              "query": "Telegram"
+            }
+          }
+        ],
+        "input_tokens": 12425,
+        "output_tokens": 58
+      }
+    },
+    {
+      "request_hint": {
+        "last_user_message_contains": "connect to Telegram",
+        "min_message_count": 4
+      },
+      "response": {
+        "type": "text",
+        "content": "No Telegram extension is available in the local Reborn extension catalog. There's no built-in Telegram integration to install or activate at this time.\n\n**Options you have:**\n\n1. **Telegram Bot API directly** – If you want to send/receive messages via a Telegram bot, I can help you write code (Python, Node.js, etc.) that calls the [Telegram Bot API](https://core.telegram.org/bots/api) using your bot token.\n\n2. **Webhook integration** – I can help set up a webhook-based Telegram bot that listens for messages and responds.\n\n3. **Script a task** – If you want to automate something with Telegram (send notifications, etc.), tell me what you'd like to do and I'll build it.\n\nWhat would you like to do with Telegram?",
+        "input_tokens": 12510,
+        "output_tokens": 187
+      },
+      "expected_tool_results": [
+        {
+          "tool_call_id": "toolu_01WFuahT3UsiSbjcpNJo7wyn",
+          "name": "builtin__extension_search",
+          "content": " object payload object count 0 extensions array kind extension_search phase discovered"
+        }
+      ]
+    }
+  ]
+}
