@@ -9,8 +9,10 @@
 //!    are the only tests that spend tokens; everything else is hermetic.
 //!
 //!    ```bash
-//!    ANTHROPIC_API_KEY=... cargo test --test reborn_qa_recorded_behavior \
-//!        record_ -- --ignored --test-threads=1 --nocapture
+//!    ANTHROPIC_API_KEY=... \
+//!    IRONCLAW_REBORN_QA_CREDENTIAL_SOURCE_ROOT=/path/to/reborn/local-dev \
+//!      cargo test --test reborn_qa_recorded_behavior record_ \
+//!        -- --ignored --test-threads=1 --nocapture
 //!    ```
 //!
 //!    Fixtures that exercise auth-gated Google integrations import the
@@ -29,6 +31,12 @@
 //!    attended, then review/scrub the fixture per
 //!    `tests/support/LIVE_TESTING.md` before committing.
 //!
+//!    Before committing updated fixtures, run:
+//!
+//!    ```bash
+//!    scripts/ci/check-reborn-qa-fixtures.sh
+//!    ```
+//!
 //! 2. **Contract tests**: parse the committed fixture and pin the agent's
 //!    tool choices for the phrase — which capability, with which key
 //!    arguments. A prompt or tool-surface change that alters behavior shows
@@ -40,8 +48,8 @@
 //!    and assert the end state, e.g. the routine actually exists with the
 //!    right cron after the routine phrases.
 //!
-//! Contract and replay tests are `#[ignore]`d until the first recording run
-//! lands fixtures; flip them on in the same commit that adds the fixtures.
+//! Contract and replay tests are hermetic and run in CI. Recorder tests stay
+//! `#[ignore]` because they spend tokens and may import live credentials.
 
 #[allow(dead_code)]
 #[path = "support/reborn/mod.rs"]
@@ -175,44 +183,37 @@ fn assert_routine_contract(case: &QaPhrase, cron_fragment: &str) {
 }
 
 #[tokio::test]
-#[ignore = "enable once QA fixtures are recorded"]
 async fn contract_routine_health_ping_creates_5_minute_trigger() {
     assert_routine_contract(&ROUTINE_HEALTH_PING, "*/5 * * * *");
 }
 
 #[tokio::test]
-#[ignore = "enable once QA fixtures are recorded"]
 async fn contract_routine_meeting_prep_creates_30_minute_trigger() {
     assert_routine_contract(&ROUTINE_MEETING_PREP, "*/30 * * * *");
 }
 
 #[tokio::test]
-#[ignore = "enable once QA fixtures are recorded"]
 async fn contract_routine_release_watch_creates_5_minute_trigger() {
     assert_routine_contract(&ROUTINE_RELEASE_WATCH, "*/5 * * * *");
 }
 
 #[tokio::test]
-#[ignore = "enable once QA fixtures are recorded"]
 async fn contract_routine_crm_inbox_creates_30_minute_trigger() {
     assert_routine_contract(&ROUTINE_CRM_INBOX, "*/30 * * * *");
 }
 
 #[tokio::test]
-#[ignore = "enable once QA fixtures are recorded"]
 async fn contract_routine_hn_monitor_creates_hourly_trigger() {
     assert_routine_contract(&ROUTINE_HN_MONITOR, "0 * * * *");
 }
 
 #[tokio::test]
-#[ignore = "enable once QA fixtures are recorded"]
 async fn contract_web_status_check_fetches_target_endpoint() {
     let trace = load_qa_trace(WEB_STATUS_CHECK.fixture);
     assert_tool_called_with(&trace, "builtin.http", &["api.github.com"]);
 }
 
 #[tokio::test]
-#[ignore = "enable once QA fixtures are recorded"]
 async fn contract_web_release_summary_fetches_release_data() {
     let trace = load_qa_trace(WEB_RELEASE_SUMMARY.fixture);
     assert_tool_called_with(&trace, "builtin.http", &["nearai/ironclaw"]);
@@ -224,7 +225,6 @@ async fn contract_web_release_summary_fetches_release_data() {
 }
 
 #[tokio::test]
-#[ignore = "enable once QA fixtures are recorded"]
 async fn contract_web_hn_search_queries_for_keywords() {
     let trace = load_qa_trace(WEB_HN_SEARCH.fixture);
     let calls = recorded_tool_calls(&trace);
@@ -236,7 +236,6 @@ async fn contract_web_hn_search_queries_for_keywords() {
 }
 
 #[tokio::test]
-#[ignore = "enable once QA fixtures are recorded"]
 async fn contract_connect_phrases_route_through_extension_tools() {
     let telegram = load_qa_trace(CONNECT_TELEGRAM.fixture);
     assert_tool_called_with(&telegram, "builtin.extension_search", &["Telegram"]);
@@ -436,25 +435,21 @@ async fn replay_routine_phrase_fires(case: &QaPhrase, cron_fragment: &str) {
 }
 
 #[tokio::test]
-#[ignore = "enable once QA fixtures are recorded"]
 async fn replay_routine_health_ping_creates_real_trigger() {
     replay_routine_phrase(&ROUTINE_HEALTH_PING, "*/5 * * * *").await;
 }
 
 #[tokio::test]
-#[ignore = "enable once QA fixtures are recorded"]
 async fn replay_routine_hn_monitor_creates_real_trigger() {
     replay_routine_phrase(&ROUTINE_HN_MONITOR, "0 * * * *").await;
 }
 
 #[tokio::test]
-#[ignore = "enable once QA fixtures are recorded"]
 async fn replay_routine_health_ping_fires_recorded_automation() {
     replay_routine_phrase_fires(&ROUTINE_HEALTH_PING, "*/5 * * * *").await;
 }
 
 #[tokio::test]
-#[ignore = "enable once QA fixtures are recorded"]
 async fn replay_routine_hn_monitor_fires_recorded_automation() {
     replay_routine_phrase_fires(&ROUTINE_HN_MONITOR, "0 * * * *").await;
 }
