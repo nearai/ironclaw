@@ -97,6 +97,7 @@ async fn local_dev_yolo_shell_translates_workspace_workdir_without_scoped_mounts
         result_writer,
         milestone_sink: Arc::new(InMemoryLoopHostMilestoneSink::default()),
         skill_activation_source: None,
+        project_service: Arc::clone(&local_runtime.project_service),
         trajectory_observer: None,
         outbound_preferences_facade: None,
         outbound_delivery_target_set_requires_approval: false,

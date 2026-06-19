@@ -372,8 +372,8 @@ fn project_info(record: ProjectRecord, role: ProjectRole) -> RebornProjectInfo {
         metadata: record.metadata,
         state: project_state_to_product(record.state),
         role: project_role_to_product(role),
-        created_at: record.created_at.to_rfc3339(),
-        updated_at: record.updated_at.to_rfc3339(),
+        created_at: record.created_at,
+        updated_at: record.updated_at,
     }
 }
 
@@ -383,8 +383,8 @@ fn member_info(record: ProjectMemberRecord) -> RebornProjectMemberInfo {
         role: project_role_to_product(record.role),
         status: member_status_to_product(record.status),
         granted_by: record.granted_by.into_string(),
-        created_at: record.created_at.to_rfc3339(),
-        updated_at: record.updated_at.to_rfc3339(),
+        created_at: record.created_at,
+        updated_at: record.updated_at,
     }
 }
 

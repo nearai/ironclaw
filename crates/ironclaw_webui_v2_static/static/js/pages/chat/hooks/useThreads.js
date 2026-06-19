@@ -20,15 +20,21 @@ export function useThreads() {
 
   const [activeThreadId, setActiveThreadId] = React.useState(null);
   const [isCreating, setIsCreating] = React.useState(false);
-  const createInFlightRef = React.useRef(null);
+  // In-flight create promises keyed by project scope. A single ref would
+  // hand a create for project B the pending promise from project A and
+  // mis-route the UI to the wrong project's thread; scope the dedup per
+  // project so only true double-submits within one scope collapse.
+  const createInFlightRef = React.useRef(new Map());
 
-  const handleCreateThread = React.useCallback(async () => {
-    if (createInFlightRef.current) return createInFlightRef.current;
+  const handleCreateThread = React.useCallback(async (projectId) => {
+    const scopeKey = projectId || "__global__";
+    const inFlight = createInFlightRef.current.get(scopeKey);
+    if (inFlight) return inFlight;
 
     setIsCreating(true);
     const createPromise = (async () => {
       try {
-        const data = await createThreadRequest();
+        const data = await createThreadRequest(projectId ? { projectId } : undefined);
         queryClient.invalidateQueries({ queryKey: ["threads"] });
         // RebornCreateThreadResponse → { thread: SessionThreadRecord }.
         // SessionThreadRecord uses `thread_id`, not `id`.
@@ -36,12 +42,12 @@ export function useThreads() {
         if (threadId) setActiveThreadId(threadId);
         return threadId;
       } finally {
-        setIsCreating(false);
-        createInFlightRef.current = null;
+        createInFlightRef.current.delete(scopeKey);
+        setIsCreating(createInFlightRef.current.size > 0);
       }
     })();
 
-    createInFlightRef.current = createPromise;
+    createInFlightRef.current.set(scopeKey, createPromise);
     return createPromise;
   }, []);
 
