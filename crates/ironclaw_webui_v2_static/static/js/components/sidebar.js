@@ -11,6 +11,7 @@ export function Sidebar({
   toggleTheme,
   profile,
   isAdmin,
+  rebornProjectsEnabled = false,
   onSignOut,
   onClose,
   onNewChat,
@@ -45,6 +46,7 @@ export function Sidebar({
         <${SidebarThreads}
           threads=${threadsState.threads}
           activeThreadId=${threadsState.activeThreadId}
+          rebornProjectsEnabled=${rebornProjectsEnabled}
           onSelect=${onSelectThread}
           onDelete=${onDeleteThread}
           onNavigate=${onClose}

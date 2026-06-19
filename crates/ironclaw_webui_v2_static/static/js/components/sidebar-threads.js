@@ -178,7 +178,14 @@ function ThreadGroup({ label, items, activeThreadId, states, pinnedIds, onSelect
   `;
 }
 
-export function SidebarThreads({ threads, activeThreadId, onSelect, onDelete, onNavigate }) {
+export function SidebarThreads({
+  threads,
+  activeThreadId,
+  rebornProjectsEnabled = false,
+  onSelect,
+  onDelete,
+  onNavigate,
+}) {
   const [collapsed, setCollapsed] = React.useState(false);
   const [query, setQuery] = React.useState("");
   const states = useThreadStates();
@@ -258,7 +265,8 @@ export function SidebarThreads({ threads, activeThreadId, onSelect, onDelete, on
             className="h-8 w-full rounded-[8px] border border-[var(--v2-panel-border)] bg-[var(--v2-input-bg)] pl-8 pr-2 text-[12px] text-[var(--v2-text-strong)] outline-none placeholder:text-[var(--v2-text-faint)] focus:border-[var(--v2-accent)]"
           />
         </div>`}
-        <div className="mb-1 px-1">
+        ${rebornProjectsEnabled &&
+        html`<div className="mb-1 px-1">
           <${NavLink}
             to="/projects"
             onClick=${onNavigate}
@@ -273,7 +281,7 @@ export function SidebarThreads({ threads, activeThreadId, onSelect, onDelete, on
             <${Icon} name="folder" className="h-4 w-4 shrink-0" />
             <span className="min-w-0 truncate">${t("nav.projects")}</span>
           <//>
-        </div>
+        </div>`}
         <div
           className="mt-1 flex flex-col gap-2 overflow-y-auto [scrollbar-width:thin]"
         >
