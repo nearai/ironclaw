@@ -8,10 +8,10 @@ use crate::v2::{
 
 /// Credential handle reference reported by one host-api manifest contract.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ReferencedCredential {
-    pub handle: CredentialHandle,
-    pub host_api: HostApiId,
-    pub section: ManifestSectionPath,
+pub(crate) struct ReferencedCredential {
+    handle: CredentialHandle,
+    host_api: HostApiId,
+    section: ManifestSectionPath,
 }
 
 impl HostApiManifestProjection {
@@ -23,10 +23,11 @@ impl HostApiManifestProjection {
         I: IntoIterator<Item = S>,
         S: AsRef<str>,
     {
-        for handle in handles {
-            self.declared_credentials
-                .push(CredentialHandle::new(handle.as_ref())?);
-        }
+        let handles = handles
+            .into_iter()
+            .map(|handle| CredentialHandle::new(handle.as_ref()))
+            .collect::<Result<Vec<_>, _>>()?;
+        self.declared_credentials.extend(handles);
         Ok(())
     }
 
@@ -39,13 +40,17 @@ impl HostApiManifestProjection {
         I: IntoIterator<Item = S>,
         S: AsRef<str>,
     {
-        for handle in handles {
-            self.referenced_credentials.push(ReferencedCredential {
-                handle: CredentialHandle::new(handle.as_ref())?,
-                host_api: host_api.id.clone(),
-                section: host_api.section.clone(),
-            });
-        }
+        let references = handles
+            .into_iter()
+            .map(|handle| {
+                Ok(ReferencedCredential {
+                    handle: CredentialHandle::new(handle.as_ref())?,
+                    host_api: host_api.id.clone(),
+                    section: host_api.section.clone(),
+                })
+            })
+            .collect::<Result<Vec<_>, CredentialHandleError>>()?;
+        self.referenced_credentials.extend(references);
         Ok(())
     }
 }

@@ -428,7 +428,6 @@ pub use v2::{
     HostApiManifestContract, HostApiManifestProjection, HostApiMultiplicity, HostApiRefV2,
     MANIFEST_SCHEMA_VERSION, MAX_HOOK_ENTRY_BYTES, MAX_MANIFEST_BYTES, MAX_MANIFEST_HOOKS,
     ManifestSectionPath, ManifestSource, ManifestV2Error, RESERVED_HOST_BUNDLED_ID_PREFIX,
-    ReferencedCredential,
 };
 
 pub type CapabilityManifest = CapabilityDeclV2;
