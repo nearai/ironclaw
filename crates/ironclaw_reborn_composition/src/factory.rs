@@ -47,11 +47,11 @@ use ironclaw_host_api::runtime_policy::{
     EffectiveRuntimePolicy, FilesystemBackendKind, ProcessBackendKind, SecretMode,
 };
 use ironclaw_host_api::{
-    EffectKind, ExtensionId, HostPath, MountPermissions, MountView, PackageId, RuntimeHttpEgress,
-    UserId, VirtualPath,
+    EffectKind, ExtensionId, HostPath, MountPermissions, MountView, PackageId, ResourceScope,
+    RuntimeHttpEgress, UserId, VirtualPath,
 };
 #[cfg(any(feature = "libsql", feature = "postgres"))]
-use ironclaw_host_api::{HostApiError, MountAlias, MountGrant, ResourceScope};
+use ironclaw_host_api::{HostApiError, MountAlias, MountGrant};
 use ironclaw_host_runtime::{
     CapabilitySurfaceVersion, FirstPartyCapabilityRegistry, HostRuntimeHttpEgressPort,
     HostRuntimeServices, LocalHostProcessPort, ProductAuthProviderRuntimePorts, TriggerCreateHook,
@@ -910,7 +910,11 @@ async fn build_local_runtime(input: RebornBuildInput) -> Result<RebornServices, 
         Arc::clone(&filesystem),
         runtime_workspace_mounts.clone(),
     ));
-    let owner_user_id_for_nearai_mcp = owner_user_id.clone();
+    let nearai_mcp_resource_scope = nearai_mcp_bootstrap_resource_scope(
+        profile,
+        local_runtime_identity.as_ref(),
+        &owner_user_id,
+    )?;
     let mut store_graph = build_local_dev_store_graph(RebornLocalDevStoreGraphInput {
         filesystem: Arc::clone(&filesystem),
         owner_user_id,
@@ -1118,7 +1122,7 @@ async fn build_local_runtime(input: RebornBuildInput) -> Result<RebornServices, 
         nearai_mcp_bootstrap_config,
         &product_auth,
         &extension_management,
-        &owner_user_id_for_nearai_mcp,
+        nearai_mcp_resource_scope,
     )
     .await?;
     nearai_mcp_bootstrap_outcome.log_completion();
@@ -1368,6 +1372,38 @@ fn local_dev_extension_lifecycle_surface_context(
         user_id: owner_user_id,
         agent_id: Some(agent_id),
         project_id: None,
+    })
+}
+
+fn nearai_mcp_bootstrap_resource_scope(
+    profile: RebornCompositionProfile,
+    local_runtime_identity: Option<&RebornLocalRuntimeIdentity>,
+    owner_user_id: &UserId,
+) -> Result<ResourceScope, RebornBuildError> {
+    if profile != RebornCompositionProfile::HostedSingleTenant {
+        return ResourceScope::local_default(
+            owner_user_id.clone(),
+            ironclaw_host_api::InvocationId::new(),
+        )
+        .map_err(|error| RebornBuildError::InvalidConfig {
+            reason: format!("NEAR AI MCP auto-enable scope could not be built: {error}"),
+        });
+    }
+
+    let Some(local_runtime_identity) = local_runtime_identity else {
+        return Err(RebornBuildError::InvalidConfig {
+            reason: "hosted-single-tenant NEAR AI MCP bootstrap requires runtime identity"
+                .to_string(),
+        });
+    };
+    Ok(ResourceScope {
+        tenant_id: local_runtime_identity.tenant_id.clone(),
+        user_id: owner_user_id.clone(),
+        agent_id: Some(local_runtime_identity.agent_id.clone()),
+        project_id: None,
+        mission_id: None,
+        thread_id: None,
+        invocation_id: ironclaw_host_api::InvocationId::new(),
     })
 }
 
@@ -4634,6 +4670,27 @@ mod tests {
         nearai_bootstrap_input_with_base(owner, root, "https://private.near.ai", api_key)
     }
 
+    #[test]
+    fn hosted_single_tenant_nearai_mcp_bootstrap_scope_uses_runtime_identity() {
+        let owner = UserId::new("hosted-nearai-owner").expect("owner");
+        let identity = RebornLocalRuntimeIdentity {
+            tenant_id: ironclaw_host_api::TenantId::new("hosted-nearai-tenant").expect("tenant"),
+            agent_id: ironclaw_host_api::AgentId::new("hosted-nearai-agent").expect("agent"),
+        };
+
+        let scope = nearai_mcp_bootstrap_resource_scope(
+            RebornCompositionProfile::HostedSingleTenant,
+            Some(&identity),
+            &owner,
+        )
+        .expect("hosted NEAR AI bootstrap scope");
+
+        assert_eq!(scope.tenant_id, identity.tenant_id);
+        assert_eq!(scope.user_id, owner);
+        assert_eq!(scope.agent_id, Some(identity.agent_id));
+        assert!(scope.project_id.is_none());
+    }
+
     #[tokio::test]
     async fn local_dev_nearai_mcp_auto_bootstraps_from_injected_config() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -4750,7 +4807,7 @@ mod tests {
             ),
             first.product_auth.as_ref().expect("product auth"),
             extension_management,
-            &UserId::new(owner).unwrap(),
+            auth_scope.resource.clone(),
         )
         .await
         .expect("second NEAR AI MCP bootstrap");
@@ -4785,9 +4842,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn local_dev_nearai_mcp_bootstrap_preserves_removed_extension() {
+    async fn local_dev_nearai_mcp_bootstrap_reinstalls_discovered_reused_credential() {
         let dir = tempfile::tempdir().expect("tempdir");
-        let owner = "local-dev-nearai-mcp-disabled-owner";
+        let owner = "local-dev-nearai-mcp-discovered-owner";
+        let auth_scope = AuthProductScope::new(
+            ResourceScope::local_default(UserId::new(owner).unwrap(), InvocationId::new()).unwrap(),
+            AuthSurface::Api,
+        );
         let nearai_ref =
             LifecyclePackageRef::new(LifecyclePackageKind::Extension, "nearai").expect("valid ref");
 
@@ -4819,19 +4880,19 @@ mod tests {
             ),
             services.product_auth.as_ref().expect("product auth"),
             extension_management,
-            &UserId::new(owner).unwrap(),
+            auth_scope.resource.clone(),
         )
         .await
-        .expect("bootstrap should preserve disabled extension");
+        .expect("bootstrap should reinstall discovered extension");
         assert_eq!(
             outcome,
-            crate::nearai_mcp::NearAiMcpBootstrapOutcome::SkippedPreservedRemoved
+            crate::nearai_mcp::NearAiMcpBootstrapOutcome::Activated
         );
         let projection = extension_management
             .project(nearai_ref)
             .await
             .expect("NEAR AI MCP projected");
-        assert_ne!(projection.phase, LifecyclePhase::Active);
+        assert_eq!(projection.phase, LifecyclePhase::Active);
 
         let capabilities = extension_management
             .active_model_visible_capabilities()
@@ -4840,7 +4901,7 @@ mod tests {
         assert!(
             capabilities
                 .iter()
-                .all(|capability| capability.id.as_str() != "nearai.web_search")
+                .any(|capability| capability.id.as_str() == "nearai.web_search")
         );
     }
 

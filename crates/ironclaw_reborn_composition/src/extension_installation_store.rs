@@ -32,10 +32,14 @@ impl FilesystemExtensionInstallationStore {
             }
             Err(FilesystemError::NotFound { .. }) => {}
             Err(error) => {
-                return Err(invalid_installation_error(format!(
-                    "failed to load extension installation state at {}: {error}",
-                    state_path.as_str()
-                )));
+                tracing::debug!(
+                    ?error,
+                    state_path = %state_path.as_str(),
+                    "extension installation state load failed"
+                );
+                return Err(invalid_installation_error(
+                    "failed to load extension installation state",
+                ));
             }
         }
         Ok(Self {
@@ -287,7 +291,10 @@ mod tests {
         ExtensionActivationState, ExtensionInstallationId, ExtensionManifestRecord,
         ExtensionManifestRef, MANIFEST_SCHEMA_VERSION,
     };
-    use ironclaw_filesystem::{InMemoryBackend, RootFilesystem};
+    use ironclaw_filesystem::{
+        BackendCapabilities, CasExpectation, DirEntry, Entry, FileStat, FilesystemOperation,
+        InMemoryBackend, RecordVersion, RootFilesystem, VersionedEntry,
+    };
     use ironclaw_host_api::HostPortCatalog;
 
     use super::*;
@@ -310,6 +317,25 @@ mod tests {
                 .expect("list installations")
                 .is_empty()
         );
+    }
+
+    #[tokio::test]
+    async fn load_at_sanitizes_filesystem_read_errors() {
+        let filesystem: Arc<dyn RootFilesystem> = Arc::new(ReadFailureFilesystem::new());
+        let state_path =
+            VirtualPath::new("/tenants/acme/system/extensions/.installations/state.json")
+                .expect("valid state path");
+
+        let error =
+            match FilesystemExtensionInstallationStore::load_at(filesystem, state_path).await {
+                Ok(_) => panic!("backend read failure should surface as invalid installation"),
+                Err(error) => error,
+            };
+
+        let rendered = error.to_string();
+        assert!(rendered.contains("failed to load extension installation state"));
+        assert!(!rendered.contains("/tenants/acme"));
+        assert!(!rendered.contains("raw backend detail"));
     }
 
     #[tokio::test]
@@ -392,5 +418,53 @@ prompt_doc_ref = "prompts/gmail/echo.md"
                 .expect("installation read")
                 .is_some()
         );
+    }
+
+    struct ReadFailureFilesystem {
+        inner: InMemoryBackend,
+    }
+
+    impl ReadFailureFilesystem {
+        fn new() -> Self {
+            Self {
+                inner: InMemoryBackend::new(),
+            }
+        }
+    }
+
+    #[async_trait]
+    impl RootFilesystem for ReadFailureFilesystem {
+        fn capabilities(&self) -> BackendCapabilities {
+            self.inner.capabilities()
+        }
+
+        async fn put(
+            &self,
+            path: &VirtualPath,
+            entry: Entry,
+            cas: CasExpectation,
+        ) -> Result<RecordVersion, FilesystemError> {
+            self.inner.put(path, entry, cas).await
+        }
+
+        async fn get(&self, path: &VirtualPath) -> Result<Option<VersionedEntry>, FilesystemError> {
+            Err(FilesystemError::Backend {
+                path: path.clone(),
+                operation: FilesystemOperation::ReadFile,
+                reason: "raw backend detail".to_string(),
+            })
+        }
+
+        async fn list_dir(&self, path: &VirtualPath) -> Result<Vec<DirEntry>, FilesystemError> {
+            self.inner.list_dir(path).await
+        }
+
+        async fn stat(&self, path: &VirtualPath) -> Result<FileStat, FilesystemError> {
+            self.inner.stat(path).await
+        }
+
+        async fn delete(&self, path: &VirtualPath) -> Result<(), FilesystemError> {
+            self.inner.delete(path).await
+        }
     }
 }

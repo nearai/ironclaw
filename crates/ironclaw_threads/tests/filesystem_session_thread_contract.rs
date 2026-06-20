@@ -22,14 +22,14 @@ use ironclaw_host_api::{
 };
 use ironclaw_threads::{
     AcceptInboundMessageRequest, AppendAssistantDraftRequest,
-    AppendCapabilityDisplayPreviewRequest, AttachmentKind, AttachmentRef,
-    CapabilityDisplayPreviewEnvelope, CapabilityDisplayPreviewEnvelopeInput,
+    AppendCapabilityDisplayPreviewRequest, AppendToolResultReferenceRequest, AttachmentKind,
+    AttachmentRef, CapabilityDisplayPreviewEnvelope, CapabilityDisplayPreviewEnvelopeInput,
     CapabilityDisplayPreviewStatus, CreateSummaryArtifactRequest, EnsureThreadRequest,
     FilesystemSessionThreadService, FinalizedAssistantMessageByRunRequest,
     LoadContextMessagesRequest, LoadContextWindowRequest, MessageContent, MessageKind,
     MessageStatus, RedactMessageRequest, ReplayAcceptedInboundMessageRequest, SessionThreadError,
     SessionThreadService, SummaryKind, SummaryModelContextPolicy, ThreadHistoryRequest,
-    ThreadScope, UpdateAssistantDraftRequest,
+    ThreadScope, ToolResultSafeSummary, UpdateAssistantDraftRequest,
 };
 
 #[tokio::test]
@@ -247,6 +247,82 @@ async fn filesystem_lookup_index_write_failure_does_not_fail_message_contract() 
     assert_eq!(finalized.message_id, draft.message_id);
     assert_eq!(finalized.status, MessageStatus::Finalized);
     assert_eq!(finalized.content.as_deref(), Some("final"));
+}
+
+#[tokio::test]
+async fn filesystem_lookup_index_read_failure_falls_back_to_transcript_scan() {
+    let backend = Arc::new(LookupIndexReadFailureBackend::new());
+    let scoped = scoped_threads_fs_at(backend, "tenant-lookup-index-read-failure", "alice");
+    let service = FilesystemSessionThreadService::new(scoped);
+    let scope = scope("lookup-index-read-failure");
+    let thread = service
+        .ensure_thread(EnsureThreadRequest {
+            scope: scope.clone(),
+            thread_id: Some(ThreadId::new("thread-lookup-index-read-failure").unwrap()),
+            created_by_actor_id: "actor-a".into(),
+            title: None,
+            metadata_json: None,
+        })
+        .await
+        .unwrap();
+    let draft = service
+        .append_assistant_draft(AppendAssistantDraftRequest {
+            scope: scope.clone(),
+            thread_id: thread.thread_id.clone(),
+            turn_run_id: "run-lookup-index-read-failure".into(),
+            content: MessageContent::text("draft"),
+        })
+        .await
+        .unwrap();
+    service
+        .finalize_assistant_message(
+            &scope,
+            &thread.thread_id,
+            draft.message_id,
+            MessageContent::text("final"),
+        )
+        .await
+        .unwrap();
+
+    let finalized = service
+        .finalized_assistant_message_by_run(FinalizedAssistantMessageByRunRequest {
+            scope: scope.clone(),
+            thread_id: thread.thread_id.clone(),
+            turn_run_id: "run-lookup-index-read-failure".into(),
+        })
+        .await
+        .expect("assistant lookup should scan after lookup-index read failure")
+        .expect("finalized assistant message should be found");
+    assert_eq!(finalized.message_id, draft.message_id);
+
+    let first_tool_result = service
+        .append_tool_result_reference(AppendToolResultReferenceRequest {
+            scope: scope.clone(),
+            thread_id: thread.thread_id.clone(),
+            turn_run_id: "run-lookup-index-read-failure".into(),
+            result_ref: "result:lookup-index-read-failure".into(),
+            safe_summary: ToolResultSafeSummary::new("safe tool result").unwrap(),
+            provider_call: None,
+            model_observation: None,
+        })
+        .await
+        .unwrap();
+    let duplicate_tool_result = service
+        .append_tool_result_reference(AppendToolResultReferenceRequest {
+            scope,
+            thread_id: thread.thread_id,
+            turn_run_id: "run-lookup-index-read-failure".into(),
+            result_ref: "result:lookup-index-read-failure".into(),
+            safe_summary: ToolResultSafeSummary::new("retry content ignored").unwrap(),
+            provider_call: None,
+            model_observation: None,
+        })
+        .await
+        .expect("tool-result lookup should scan after lookup-index read failure");
+    assert_eq!(
+        duplicate_tool_result.message_id,
+        first_tool_result.message_id
+    );
 }
 
 #[tokio::test]
@@ -1655,6 +1731,18 @@ impl LookupIndexWriteFailureBackend {
     }
 }
 
+struct LookupIndexReadFailureBackend {
+    inner: InMemoryBackend,
+}
+
+impl LookupIndexReadFailureBackend {
+    fn new() -> Self {
+        Self {
+            inner: InMemoryBackend::new(),
+        }
+    }
+}
+
 #[async_trait]
 impl RootFilesystem for LookupIndexWriteFailureBackend {
     fn capabilities(&self) -> BackendCapabilities {
@@ -1678,6 +1766,54 @@ impl RootFilesystem for LookupIndexWriteFailureBackend {
     }
 
     async fn get(&self, path: &VirtualPath) -> Result<Option<VersionedEntry>, FilesystemError> {
+        self.inner.get(path).await
+    }
+
+    async fn list_dir(&self, path: &VirtualPath) -> Result<Vec<DirEntry>, FilesystemError> {
+        self.inner.list_dir(path).await
+    }
+
+    async fn query(
+        &self,
+        path: &VirtualPath,
+        filter: &Filter,
+        page: Page,
+    ) -> Result<Vec<VersionedEntry>, FilesystemError> {
+        self.inner.query(path, filter, page).await
+    }
+
+    async fn stat(&self, path: &VirtualPath) -> Result<FileStat, FilesystemError> {
+        self.inner.stat(path).await
+    }
+
+    async fn delete(&self, path: &VirtualPath) -> Result<(), FilesystemError> {
+        self.inner.delete(path).await
+    }
+}
+
+#[async_trait]
+impl RootFilesystem for LookupIndexReadFailureBackend {
+    fn capabilities(&self) -> BackendCapabilities {
+        self.inner.capabilities()
+    }
+
+    async fn put(
+        &self,
+        path: &VirtualPath,
+        entry: Entry,
+        cas: CasExpectation,
+    ) -> Result<RecordVersion, FilesystemError> {
+        self.inner.put(path, entry, cas).await
+    }
+
+    async fn get(&self, path: &VirtualPath) -> Result<Option<VersionedEntry>, FilesystemError> {
+        if LookupIndexWriteFailureBackend::is_lookup_index_path(path) {
+            return Err(FilesystemError::Backend {
+                path: path.clone(),
+                operation: FilesystemOperation::ReadFile,
+                reason: "lookup index reads disabled by contract test".to_string(),
+            });
+        }
         self.inner.get(path).await
     }
 

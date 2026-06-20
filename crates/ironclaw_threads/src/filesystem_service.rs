@@ -412,9 +412,24 @@ where
         required_status: Option<MessageStatus>,
     ) -> Result<Option<ThreadMessageRecord>, SessionThreadError> {
         let index_store = MessageLookupIndexStore::new(self.filesystem.as_ref());
-        if let Some(message_id) = index_store
+        let indexed_message_id = match index_store
             .read_assistant_run(scope, thread_id, turn_run_id)
-            .await?
+            .await
+        {
+            Ok(message_id) => message_id,
+            Err(error) => {
+                // silent-ok: assistant-run lookup index is acceleration; transcript scan below is authoritative.
+                tracing::debug!(
+                    ?error,
+                    ?scope,
+                    thread_id = %thread_id.as_str(),
+                    turn_run_id,
+                    "assistant lookup index read failed; scanning thread messages",
+                );
+                None
+            }
+        };
+        if let Some(message_id) = indexed_message_id
             && let Some((message, _)) = self
                 .read_message_versioned(scope, thread_id, message_id)
                 .await?
@@ -449,9 +464,25 @@ where
         result_ref: &str,
     ) -> Result<Option<ThreadMessageRecord>, SessionThreadError> {
         let index_store = MessageLookupIndexStore::new(self.filesystem.as_ref());
-        if let Some(message_id) = index_store
+        let indexed_message_id = match index_store
             .read_tool_result(scope, thread_id, turn_run_id, result_ref)
-            .await?
+            .await
+        {
+            Ok(message_id) => message_id,
+            Err(error) => {
+                // silent-ok: tool-result lookup index is acceleration; transcript scan below is authoritative.
+                tracing::debug!(
+                    ?error,
+                    ?scope,
+                    thread_id = %thread_id.as_str(),
+                    turn_run_id,
+                    result_ref,
+                    "tool-result lookup index read failed; scanning thread messages",
+                );
+                None
+            }
+        };
+        if let Some(message_id) = indexed_message_id
             && let Some((message, _)) = self
                 .read_message_versioned(scope, thread_id, message_id)
                 .await?
