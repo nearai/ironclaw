@@ -23,15 +23,14 @@ use ironclaw_extensions::{
 };
 use ironclaw_host_api::{
     HostApiError, HostIngressDeclarationError, HostIngressRouteDeclaration, HostIngressTarget,
-    HostPortCatalog, IngressAuthBinding, IngressAuthScheme, IngressCredentialHandle, IngressPolicy,
+    HostPortCatalog, IngressAckMode, IngressAuthBinding, IngressAuthScheme,
+    IngressCredentialHandle, IngressDrainMode, IngressPolicy, IngressRouteDescriptor,
+    IngressRouteId, IngressRoutePattern, NetworkMethod,
 };
 use serde::Deserialize;
 use thiserror::Error;
 
 pub use ironclaw_extensions::ManifestHash;
-
-mod transport;
-use transport::HostIngressTransport;
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -382,9 +381,15 @@ impl RawHostIngressSection {
         section: &ManifestSectionPath,
     ) -> Result<HostIngressRouteDeclaration, Error> {
         let auth = self.auth.into_binding(section)?;
-        let (descriptor, ack, drain) =
-            self.transport
-                .into_descriptor(self.policy)
+        let HostIngressTransport::Webhook {
+            route_id,
+            method,
+            path,
+            ack,
+            drain,
+        } = self.transport;
+        let descriptor =
+            IngressRouteDescriptor::new(route_id.as_str(), method, path.as_str(), self.policy)
                 .map_err(|source| Error::RouteDescriptorBuild {
                     section: section.clone(),
                     source,
@@ -396,6 +401,18 @@ impl RawHostIngressSection {
             },
         )
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+enum HostIngressTransport {
+    Webhook {
+        route_id: IngressRouteId,
+        method: NetworkMethod,
+        path: IngressRoutePattern,
+        ack: IngressAckMode,
+        drain: IngressDrainMode,
+    },
 }
 
 #[derive(Debug, Deserialize)]
