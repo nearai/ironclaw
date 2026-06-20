@@ -23,7 +23,6 @@
 // arch-exempt: large_file, needs Reborn runtime helper extraction, plan #4471
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use chrono::Utc;
@@ -44,7 +43,6 @@ use ironclaw_host_api::{
     AuditStage, CapabilityId, CorrelationId, DecisionSummary, EffectKind, InvocationId,
     ResourceScope, TenantId, ThreadId, UserId,
 };
-use ironclaw_host_runtime::{SchedulerTurnRunWakeNotifier, TurnRunSchedulerHandle};
 use ironclaw_loop_support::{
     CapabilityAllowSet, CapabilityResolveError, CapabilitySurfaceProfileResolver,
     EmptyUserProfileSource, FilesystemSkillBundleSource, HostIdentityContextSource,
@@ -85,8 +83,8 @@ use ironclaw_turns::{
     InMemoryTurnStateStoreLimits, LoopGateRef, ReplyTargetBindingRef, RunProfileResolutionRequest,
     SanitizedCancelReason, SourceBindingRef, SubmitTurnRequest, SubmitTurnResponse, TurnActor,
     TurnCoordinator, TurnError, TurnEventProjectionSource, TurnId, TurnPersistenceSnapshot,
-    TurnRunId, TurnRunRecord, TurnRunState, TurnRunWake, TurnRunWakeNotifier, TurnScope,
-    TurnSpawnTreeStateStore, TurnStatus,
+    TurnRunId, TurnRunRecord, TurnRunState, TurnRunWake, TurnScope, TurnSpawnTreeStateStore,
+    TurnStatus,
     events::EventCursor,
     run_profile::{LoopHostMilestoneSink, LoopRunContext},
 };
@@ -94,6 +92,7 @@ use ironclaw_turns::{
 use ironclaw_host_runtime::MemoryBackedUserProfileSource;
 use ironclaw_turns::run_profile::UserProfileContext;
 
+use self::runtime_turn_scheduler::RuntimeTurnScheduler;
 use crate::default_system_prompt::DefaultSystemPromptIdentitySource;
 use crate::factory::{LocalDevRootFilesystem, LocalDevTurnStateStore, builtin_extension_registry};
 use crate::local_dev_capability_policy::local_dev_capability_policy;
@@ -268,6 +267,7 @@ mod local_dev;
 #[path = "runtime/tests/outbound_delivery.rs"]
 mod outbound_delivery_tests;
 mod production;
+mod runtime_turn_scheduler;
 mod skills;
 
 #[cfg(test)]
@@ -404,13 +404,7 @@ pub struct RebornRuntime {
     turn_tree_store: Arc<dyn TurnSpawnTreeStateStore>,
     thread_service: Arc<dyn SessionThreadService>,
     thread_scope: ThreadScope,
-    scheduler_handle: Mutex<Option<TurnRunSchedulerHandle>>,
-    /// Set to `true` only after a graceful `shutdown()` or
-    /// `stop_turn_runner_worker_for_manual_state_test()` completes, so liveness
-    /// guards can distinguish "mutex momentarily held" (still alive) from "truly
-    /// stopped" without racing on `try_lock()` contention.
-    scheduler_stopped: Arc<AtomicBool>,
-    scheduler_notifier: Arc<SchedulerTurnRunWakeNotifier>,
+    turn_scheduler: RuntimeTurnScheduler,
     trigger_poller_handle: Option<TriggerPollerRuntimeHandle>,
     trace_flush_worker: crate::trace_capture::TraceQueueFlushWorkerHandle,
     /// Late-binding slot shared with the poller's `PostSubmitHookWrappedSubmitter`.
@@ -1511,22 +1505,9 @@ impl RebornRuntime {
         let _send_guard = send_lock.lock_owned().await;
         // Stopped only when every worker has exited; a single crashed worker must not
         // reject submissions while others run.
-        //
-        // Liveness invariant: mutex contention means the scheduler lock is
-        // momentarily held by another task (e.g. shutdown racing with submit) —
-        // that is NOT a stopped state.  We use a dedicated atomic flag that is
-        // set only after a graceful shutdown completes, so `try_lock` failure
-        // is treated as "alive" rather than "stopped".
-        if self.scheduler_stopped.load(Ordering::Acquire) {
+        if self.turn_scheduler.is_stopped() {
             return Err(RebornRuntimeError::WorkerStopped);
         }
-        if let Ok(guard) = self.scheduler_handle.try_lock() {
-            // Got the lock: check whether the handle was taken (None) or reports stopped.
-            if guard.as_ref().is_none_or(|h| h.is_stopped()) {
-                return Err(RebornRuntimeError::WorkerStopped);
-            }
-        }
-        // try_lock() failure means contention → treat as alive (do not return WorkerStopped).
         let scope = self.turn_scope_for(&conversation.0);
         let accepted = self
             .thread_service
@@ -1631,7 +1612,7 @@ impl RebornRuntime {
             .await?;
             return Err(RebornRuntimeError::OperationCancelled);
         }
-        let _ = self.scheduler_notifier.notify_queued_run(TurnRunWake {
+        self.turn_scheduler.notify(TurnRunWake {
             scope: scope.clone(),
             run_id,
             status: submit_status,
@@ -1705,12 +1686,7 @@ impl RebornRuntime {
                 .await;
         }
         self.trace_flush_worker.shutdown().await;
-        // Set stopped BEFORE draining the scheduler so any concurrent
-        // submit_user_turn/wait observes stopped immediately.
-        self.scheduler_stopped.store(true, Ordering::Release);
-        if let Some(scheduler) = self.scheduler_handle.lock().await.take() {
-            scheduler.shutdown().await;
-        }
+        self.turn_scheduler.shutdown().await;
         if let Some(projection) = self.budget_event_projection {
             projection.shutdown().await;
         }
@@ -1763,14 +1739,7 @@ impl RebornRuntime {
     ) -> Result<TurnRunState, RebornRuntimeError> {
         let start = std::time::Instant::now();
         loop {
-            // See liveness invariant comment in send_user_message: atomic flag
-            // is authoritative for graceful-stopped; try_lock contention → alive.
-            if self.scheduler_stopped.load(Ordering::Acquire) {
-                return Err(RebornRuntimeError::WorkerStopped);
-            }
-            if let Ok(guard) = self.scheduler_handle.try_lock()
-                && guard.as_ref().is_none_or(|h| h.is_stopped())
-            {
+            if self.turn_scheduler.is_stopped() {
                 return Err(RebornRuntimeError::WorkerStopped);
             }
             let state = self
@@ -1830,14 +1799,7 @@ impl RebornRuntime {
     ) -> Result<TurnRunState, RebornRuntimeError> {
         let start = std::time::Instant::now();
         loop {
-            // See liveness invariant comment in send_user_message: atomic flag
-            // is authoritative for graceful-stopped; try_lock contention → alive.
-            if self.scheduler_stopped.load(Ordering::Acquire) {
-                return Err(RebornRuntimeError::WorkerStopped);
-            }
-            if let Ok(guard) = self.scheduler_handle.try_lock()
-                && guard.as_ref().is_none_or(|h| h.is_stopped())
-            {
+            if self.turn_scheduler.is_stopped() {
                 return Err(RebornRuntimeError::WorkerStopped);
             }
             let state = self
@@ -2034,7 +1996,7 @@ impl RebornRuntime {
         if cancellation_accepted {
             self.append_webui_loop_cancelled(scope, run_id).await?;
         }
-        let _ = self.scheduler_notifier.notify_queued_run(TurnRunWake {
+        self.turn_scheduler.notify(TurnRunWake {
             scope: scope.clone(),
             run_id: response.run_id,
             status: response.status,
@@ -2112,7 +2074,7 @@ impl RebornRuntime {
                         state.status,
                         TurnStatus::CancelRequested | TurnStatus::Cancelled
                     ) {
-                        let _ = self.scheduler_notifier.notify_queued_run(TurnRunWake {
+                        self.turn_scheduler.notify(TurnRunWake {
                             scope: child_scope,
                             run_id: child_run_id,
                             status: state.status,
@@ -2130,7 +2092,7 @@ impl RebornRuntime {
                 self.append_webui_loop_cancelled(&child.scope, child_run_id)
                     .await?;
             }
-            let _ = self.scheduler_notifier.notify_queued_run(TurnRunWake {
+            self.turn_scheduler.notify(TurnRunWake {
                 scope: child_scope,
                 run_id: response.run_id,
                 status: response.status,
@@ -3030,9 +2992,7 @@ pub async fn build_reborn_runtime(
         turn_tree_store: turn_state_store,
         thread_service,
         thread_scope,
-        scheduler_handle: Mutex::new(Some(composition.scheduler_handle)),
-        scheduler_stopped: Arc::new(AtomicBool::new(false)),
-        scheduler_notifier,
+        turn_scheduler: RuntimeTurnScheduler::new(composition.scheduler_handle, scheduler_notifier),
         trigger_poller_handle,
         trace_flush_worker,
         #[cfg(feature = "slack-v2-host-beta")]
@@ -3703,14 +3663,7 @@ mod tests {
     const RUNTIME_SEND_TIMEOUT: Duration = Duration::from_secs(10);
 
     async fn stop_turn_runner_worker_for_manual_state_test(runtime: &super::RebornRuntime) {
-        // Shut the scheduler down so it stops claiming new runs, allowing manual
-        // turn-state manipulation in tests without racing with the scheduler.
-        if let Some(scheduler) = runtime.scheduler_handle.lock().await.take() {
-            tokio::time::timeout(Duration::from_secs(2), scheduler.shutdown())
-                .await
-                .expect("turn-runner scheduler should stop before manual turn-state test");
-        }
-        runtime.scheduler_stopped.store(true, Ordering::Release);
+        runtime.turn_scheduler.stop_for_test().await;
     }
 
     fn local_dev_runtime_policy() -> EffectiveRuntimePolicy {
@@ -8769,7 +8722,7 @@ mod tests {
     ///    so the guard correctly treats that as "alive".
     /// 3. After graceful `shutdown()`: liveness check says stopped (atomic flag = true).
     ///
-    /// The `scheduler_stopped` atomic flag is the authoritative signal; `try_lock`
+    /// The `stopped` atomic flag is the authoritative signal; `try_lock`
     /// failure now means "alive" rather than "stopped".
     #[tokio::test]
     async fn scheduler_liveness_not_stopped_under_contention() {
@@ -8799,38 +8752,36 @@ mod tests {
 
         // Invariant 1: Before shutdown, the atomic stopped flag must be false.
         assert!(
-            !runtime
-                .scheduler_stopped
-                .load(std::sync::atomic::Ordering::Acquire),
+            !runtime.turn_scheduler.atomic_stopped(),
             "scheduler_stopped must be false on a freshly built runtime"
         );
 
-        // Invariant 2: While `scheduler_handle` mutex is held (simulating
+        // Invariant 2: While the scheduler handle mutex is held (simulating
         // shutdown/scheduler contention), the public submit path must NOT
         // return `WorkerStopped`.
         //
-        // `submit_user_turn` uses `try_lock()` (non-blocking) on `scheduler_handle`,
+        // `is_stopped()` uses `try_lock()` (non-blocking) on the handle mutex,
         // not `lock().await`, so holding the lock here cannot deadlock. Tokio's
-        // Mutex is non-re-entrant: `try_lock()` inside `send_user_message` will
+        // Mutex is non-re-entrant: `try_lock()` inside `is_stopped()` will
         // fail (returning `Err`) because the current task already holds the guard.
-        // The guard falls through to "alive" because `scheduler_stopped` is false.
+        // The guard falls through to "alive" because the `stopped` flag is false.
         //
         // We allow any error EXCEPT `WorkerStopped` — the turn will likely fail
         // for other reasons (no active LLM, turn submission error, etc.) but the
         // liveness guard must not fire.
         {
             // Hold the tokio Mutex for the duration of the submit call.
-            let _guard = runtime.scheduler_handle.lock().await;
+            let _guard = runtime.turn_scheduler.handle_mutex().lock().await;
 
             let result = runtime
                 .send_user_message(&conversation, "liveness-probe")
                 .await;
             assert!(
                 !matches!(result, Err(super::RebornRuntimeError::WorkerStopped)),
-                "send_user_message must NOT return WorkerStopped while scheduler_handle is merely \
-                 contended (scheduler_stopped=false); got: {result:?}"
+                "send_user_message must NOT return WorkerStopped while scheduler handle is merely \
+                 contended (stopped=false); got: {result:?}"
             );
-        } // guard released here — scheduler_handle is free again
+        } // guard released here — handle mutex is free again
 
         // Invariant 3: After the worker is stopped (flag = true), the public
         // submit path MUST return `WorkerStopped`.
@@ -8841,9 +8792,7 @@ mod tests {
         stop_turn_runner_worker_for_manual_state_test(&runtime).await;
 
         assert!(
-            runtime
-                .scheduler_stopped
-                .load(std::sync::atomic::Ordering::Acquire),
+            runtime.turn_scheduler.atomic_stopped(),
             "scheduler_stopped must be true after stop helper"
         );
 
@@ -8895,9 +8844,7 @@ mod tests {
 
         // Before stopping: not stopped.
         assert!(
-            !runtime
-                .scheduler_stopped
-                .load(std::sync::atomic::Ordering::Acquire),
+            !runtime.turn_scheduler.atomic_stopped(),
             "scheduler_stopped must be false before stop helper runs"
         );
 
@@ -8905,9 +8852,7 @@ mod tests {
 
         // After the test helper stops the worker: flag must be true.
         assert!(
-            runtime
-                .scheduler_stopped
-                .load(std::sync::atomic::Ordering::Acquire),
+            runtime.turn_scheduler.atomic_stopped(),
             "scheduler_stopped must be true after stop_turn_runner_worker_for_manual_state_test"
         );
 
@@ -8948,12 +8893,37 @@ mod tests {
 
         let conversation = runtime.new_conversation().await.expect("conversation");
 
+        // Capture thread history before the stopped-send to verify no side effects.
+        let thread_service = runtime.session_thread_service();
+        let thread_scope = runtime.thread_scope.clone();
+        let history_before = thread_service
+            .list_thread_history(ThreadHistoryRequest {
+                scope: thread_scope.clone(),
+                thread_id: conversation.0.clone(),
+            })
+            .await
+            .expect("list history before stopped send");
+
         stop_turn_runner_worker_for_manual_state_test(&runtime).await;
 
         let result = runtime.send_user_message(&conversation, "hi").await;
         assert!(
             matches!(result, Err(RebornRuntimeError::WorkerStopped)),
             "send_user_message must return WorkerStopped when scheduler is stopped, got: {result:?}"
+        );
+
+        // Assert no side effects: history must not grow after the rejected send.
+        let history_after = thread_service
+            .list_thread_history(ThreadHistoryRequest {
+                scope: thread_scope,
+                thread_id: conversation.0.clone(),
+            })
+            .await
+            .expect("list history after stopped send");
+        assert_eq!(
+            history_before.messages.len(),
+            history_after.messages.len(),
+            "send_user_message must not write any messages when WorkerStopped is returned"
         );
 
         // shutdown() handles the already-taken scheduler handle gracefully.
