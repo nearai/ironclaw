@@ -475,9 +475,11 @@ impl ProductAgentBoundCaller {
 pub struct AutomationListRequest {
     pub limit: usize,
     pub run_limit: usize,
-    /// When `true`, soft-completed automations are included (exclusion slice is
-    /// empty). When `false` (default), `TriggerState::Completed` entries are
-    /// excluded at the SQL layer so LIMIT is applied after filtering.
+    /// When `true`, include completed (fire-once) automations alongside the
+    /// active ones. When `false` (the default), only active automations are
+    /// returned. Facades apply `limit` after this filter, so a full page of
+    /// active automations is returned regardless of how many completed ones
+    /// exist.
     pub include_completed: bool,
 }
 

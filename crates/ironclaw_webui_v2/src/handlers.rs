@@ -644,7 +644,10 @@ pub struct ListThreadsQuery {
 /// Lists the caller-scoped schedule automations visible to the browser. The
 /// optional `?limit=N` and `?run_limit=N` queries are capped by the product
 /// workflow facade; the response is a single bounded page and does not include
-/// a cursor.
+/// a cursor. By default only active automations are returned; pass
+/// `?include_completed=true` to also include soft-completed (fire-once)
+/// automations. See [`ListAutomationsQuery`] for the full per-parameter parse
+/// behavior.
 pub async fn list_automations(
     State(state): State<WebUiV2State>,
     Extension(caller): Extension<WebUiAuthenticatedCaller>,
