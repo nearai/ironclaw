@@ -938,12 +938,6 @@ fn validate_ingress_auth_bindings(
             }
 
             for binding in auth {
-                if binding.credential_handles.is_empty() {
-                    return Err(HostIngressDeclarationError::AuthBindingMissingCredentials {
-                        verifier: binding.verifier,
-                    });
-                }
-
                 if !schemes.contains(&binding.verifier) {
                     return Err(
                         HostIngressDeclarationError::AuthBindingVerifierNotDeclared {

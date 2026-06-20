@@ -1,5 +1,6 @@
 use ironclaw_host_api::{
-    IngressAckMode, IngressDrainMode, IngressRouteId, IngressRoutePattern, NetworkMethod,
+    HostApiError, IngressAckMode, IngressDrainMode, IngressPolicy, IngressRouteDescriptor,
+    IngressRouteId, IngressRoutePattern, NetworkMethod,
 };
 use serde::Deserialize;
 
@@ -13,4 +14,25 @@ pub(crate) enum HostIngressTransport {
         ack: IngressAckMode,
         drain: IngressDrainMode,
     },
+}
+
+impl HostIngressTransport {
+    pub(crate) fn into_descriptor(
+        self,
+        policy: IngressPolicy,
+    ) -> Result<(IngressRouteDescriptor, IngressAckMode, IngressDrainMode), HostApiError> {
+        match self {
+            Self::Webhook {
+                route_id,
+                method,
+                path,
+                ack,
+                drain,
+            } => {
+                let descriptor =
+                    IngressRouteDescriptor::new(route_id.as_str(), method, path.as_str(), policy)?;
+                Ok((descriptor, ack, drain))
+            }
+        }
+    }
 }

@@ -24,7 +24,6 @@ use ironclaw_extensions::{
 use ironclaw_host_api::{
     HostApiError, HostIngressDeclarationError, HostIngressRouteDeclaration, HostIngressTarget,
     HostPortCatalog, IngressAuthBinding, IngressAuthScheme, IngressCredentialHandle, IngressPolicy,
-    IngressRouteDescriptor,
 };
 use serde::Deserialize;
 use thiserror::Error;
@@ -176,8 +175,7 @@ impl HostApiManifestContract for HostIngressHostApiContract {
         host_api: &HostApiRefV2,
         section: &toml::Value,
     ) -> Result<(), String> {
-        HostIngressSection::from_value(host_api, section.clone())
-            .and_then(HostIngressSection::into_declaration)
+        project_host_ingress_section(host_api, section.clone())
             .map(|_| ())
             .map_err(|error| error.to_string())
     }
@@ -313,9 +311,10 @@ fn project_host_ingress_sections(
             continue;
         }
         let section_value = section_value(&value, &host_api.section)?;
-        sections.push(
-            HostIngressSection::from_value(host_api, section_value.clone())?.into_declaration()?,
-        );
+        sections.push(project_host_ingress_section(
+            host_api,
+            section_value.clone(),
+        )?);
     }
     Ok(sections)
 }
@@ -349,63 +348,23 @@ fn is_host_ingress_section_path(section: &ManifestSectionPath) -> bool {
 // Raw deserialization shapes for HostIngress sections
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct HostIngressSection {
-    section: ManifestSectionPath,
-    transport: HostIngressTransport,
-    policy: IngressPolicy,
-    target: HostIngressTarget,
-    auth: IngressAuthBinding,
-}
-
-impl HostIngressSection {
-    fn from_value(host_api: &HostApiRefV2, value: toml::Value) -> Result<Self, Error> {
-        if host_api.id.as_str() != HOST_INGRESS_HOST_API_ID {
-            return Err(Error::UnknownHostApiId {
-                id: host_api.id.as_str().to_owned(),
-            });
-        }
-        let raw: RawHostIngressSection =
-            value
-                .try_into()
-                .map_err(|error: toml::de::Error| Error::ManifestSectionParse {
-                    section: host_api.section.clone(),
-                    reason: error.to_string(),
-                })?;
-        Ok(Self {
-            section: host_api.section.clone(),
-            transport: raw.transport,
-            policy: raw.policy,
-            target: raw.target,
-            auth: raw.auth.into_binding(&host_api.section)?,
-        })
+fn project_host_ingress_section(
+    host_api: &HostApiRefV2,
+    value: toml::Value,
+) -> Result<HostIngressRouteDeclaration, Error> {
+    if host_api.id.as_str() != HOST_INGRESS_HOST_API_ID {
+        return Err(Error::UnknownHostApiId {
+            id: host_api.id.as_str().to_owned(),
+        });
     }
-
-    fn into_declaration(self) -> Result<HostIngressRouteDeclaration, Error> {
-        let HostIngressSection {
-            section,
-            transport,
-            policy,
-            target,
-            auth,
-        } = self;
-        let HostIngressTransport::Webhook {
-            route_id,
-            method,
-            path,
-            ack,
-            drain,
-        } = transport;
-        let descriptor =
-            IngressRouteDescriptor::new(route_id.as_str(), method, path.as_str(), policy).map_err(
-                |source| Error::RouteDescriptorBuild {
-                    section: section.clone(),
-                    source,
-                },
-            )?;
-        HostIngressRouteDeclaration::new(descriptor, target, vec![auth], ack, drain)
-            .map_err(|source| Error::DeclarationValidation { section, source })
-    }
+    let raw: RawHostIngressSection =
+        value
+            .try_into()
+            .map_err(|error: toml::de::Error| Error::ManifestSectionParse {
+                section: host_api.section.clone(),
+                reason: error.to_string(),
+            })?;
+    raw.into_declaration(&host_api.section)
 }
 
 #[derive(Debug, Deserialize)]
@@ -415,6 +374,28 @@ struct RawHostIngressSection {
     policy: IngressPolicy,
     target: HostIngressTarget,
     auth: RawHostIngressAuth,
+}
+
+impl RawHostIngressSection {
+    fn into_declaration(
+        self,
+        section: &ManifestSectionPath,
+    ) -> Result<HostIngressRouteDeclaration, Error> {
+        let auth = self.auth.into_binding(section)?;
+        let (descriptor, ack, drain) =
+            self.transport
+                .into_descriptor(self.policy)
+                .map_err(|source| Error::RouteDescriptorBuild {
+                    section: section.clone(),
+                    source,
+                })?;
+        HostIngressRouteDeclaration::new(descriptor, self.target, vec![auth], ack, drain).map_err(
+            |source| Error::DeclarationValidation {
+                section: section.clone(),
+                source,
+            },
+        )
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -619,7 +600,7 @@ credential_handles = ["telegram_webhook_secret"]
         let value = section_value(&root, &host_api.section)
             .expect("test host ingress section must exist")
             .clone();
-        HostIngressSection::from_value(&host_api, value)?.into_declaration()
+        project_host_ingress_section(&host_api, value)
     }
 
     fn enabled_slack_installation() -> ExtensionInstallation {

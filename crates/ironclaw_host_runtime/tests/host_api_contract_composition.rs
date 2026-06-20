@@ -214,6 +214,9 @@ id = "ironclaw.host_ingress/v1"
 section = "host_ingress.events"
 
 [host_ingress.events]
+
+[host_ingress.events.transport]
+kind = "webhook"
 route_id = "slack.events"
 method = "post"
 path = "/webhooks/slack/events"
@@ -251,6 +254,6 @@ capability_id = "slack.events"
 product_adapter_section = "product_adapter.inbound"
 
 [host_ingress.events.auth]
-scheme = "slack_v0_hmac"
+verifier = "webhook_signature"
 credential_handles = ["slack_signing_secret"]
 "#;
