@@ -2971,7 +2971,20 @@ pub async fn build_reborn_runtime(
                 },
             )
         }
-        _ => None,
+        // Dependencies unavailable. If the operator explicitly enabled the
+        // worker, this is a misconfiguration that silently disables proactive
+        // refresh — surface it loudly at startup rather than no-op'ing. (This
+        // is the serve/composition path, not the interactive REPL, so warn! is
+        // appropriate here.)
+        _ => {
+            if credential_refresh.enabled {
+                tracing::warn!(
+                    "credential refresh worker is enabled but its dependencies are unavailable; \
+                     proactive Google OAuth keepalive will NOT run"
+                );
+            }
+            None
+        }
     };
     // When no db feature is active, silence the unused-variable warning.
     #[cfg(not(any(feature = "libsql", feature = "postgres")))]
