@@ -813,9 +813,9 @@ mod tests {
     use ironclaw_host_api::CapabilityId;
     use ironclaw_host_api::ingress::{
         AllowedEffectPath, AuditTraceClass, BodyLimitPolicy, CorsPolicy, HostIngressTarget,
-        IngressAckMode, IngressAuthBinding, IngressAuthPolicy, IngressAuthScheme,
-        IngressAuthSchemeName, IngressDrainMode, IngressPolicy, IngressPolicyParts,
-        IngressScopeSource, ListenerClass, StreamingMode, WebSocketOriginPolicy,
+        IngressAckMode, IngressAuthBinding, IngressAuthPolicy, IngressAuthScheme, IngressDrainMode,
+        IngressPolicy, IngressPolicyParts, IngressScopeSource, ListenerClass, StreamingMode,
+        WebSocketOriginPolicy,
     };
     use tower::ServiceExt;
 
@@ -940,10 +940,6 @@ mod tests {
         IngressCredentialHandle::new(value).expect("valid credential handle")
     }
 
-    fn auth_scheme() -> IngressAuthSchemeName {
-        IngressAuthSchemeName::new("test-signature").expect("valid auth scheme")
-    }
-
     fn declaration(
         route_id: &'static str,
         path: &'static str,
@@ -952,7 +948,8 @@ mod tests {
         let descriptor =
             IngressRouteDescriptor::new(route_id, NetworkMethod::Post, path, ingress_policy())
                 .expect("valid route descriptor");
-        let binding = IngressAuthBinding::new(auth_scheme(), handles).expect("valid auth binding");
+        let binding = IngressAuthBinding::new(IngressAuthScheme::WebhookSignature, handles)
+            .expect("valid auth binding");
         HostIngressRouteDeclaration::new(
             descriptor,
             HostIngressTarget::HostCapability {

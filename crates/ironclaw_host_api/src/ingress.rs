@@ -548,37 +548,37 @@ pub enum HostIngressTarget {
     },
 }
 
-/// Binding from a code-built verifier name to opaque credential handles.
+/// Binding from a declared verifier kind to opaque credential handles.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(try_from = "IngressAuthBindingWire")]
 pub struct IngressAuthBinding {
-    scheme: IngressAuthSchemeName,
+    verifier: IngressAuthScheme,
     credential_handles: Vec<IngressCredentialHandle>,
 }
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct IngressAuthBindingWire {
-    scheme: IngressAuthSchemeName,
+    verifier: IngressAuthScheme,
     credential_handles: Vec<IngressCredentialHandle>,
 }
 
 impl IngressAuthBinding {
     pub fn new(
-        scheme: IngressAuthSchemeName,
+        verifier: IngressAuthScheme,
         credential_handles: Vec<IngressCredentialHandle>,
     ) -> Result<Self, HostIngressDeclarationError> {
         if credential_handles.is_empty() {
-            return Err(HostIngressDeclarationError::AuthBindingMissingCredentials { scheme });
+            return Err(HostIngressDeclarationError::AuthBindingMissingCredentials { verifier });
         }
         Ok(Self {
-            scheme,
+            verifier,
             credential_handles,
         })
     }
 
-    pub fn scheme(&self) -> &IngressAuthSchemeName {
-        &self.scheme
+    pub fn verifier(&self) -> IngressAuthScheme {
+        self.verifier
     }
 
     pub fn credential_handles(&self) -> &[IngressCredentialHandle] {
@@ -590,71 +590,7 @@ impl TryFrom<IngressAuthBindingWire> for IngressAuthBinding {
     type Error = HostIngressDeclarationError;
 
     fn try_from(value: IngressAuthBindingWire) -> Result<Self, Self::Error> {
-        Self::new(value.scheme, value.credential_handles)
-    }
-}
-
-/// Name of a code-built ingress verifier.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
-#[serde(try_from = "String")]
-pub struct IngressAuthSchemeName(String);
-
-impl IngressAuthSchemeName {
-    fn validate(value: &str) -> Result<(), IngressAuthSchemeNameError> {
-        validate_host_ingress_token(value).map_err(|reason| IngressAuthSchemeNameError::Invalid {
-            value: value.to_owned(),
-            reason,
-        })
-    }
-
-    pub fn new(raw: impl Into<String>) -> Result<Self, IngressAuthSchemeNameError> {
-        let value = raw.into();
-        Self::validate(&value)?;
-        Ok(Self(value))
-    }
-
-    pub fn as_str(&self) -> &str {
-        &self.0
-    }
-
-    pub fn into_inner(self) -> String {
-        self.0
-    }
-
-    pub fn declared_auth_scheme(&self) -> IngressAuthScheme {
-        match self.as_str() {
-            "telegram_secret_token" | "telegram_shared_secret" => {
-                IngressAuthScheme::SharedSecretHeader
-            }
-            _ => IngressAuthScheme::WebhookSignature,
-        }
-    }
-}
-
-impl TryFrom<String> for IngressAuthSchemeName {
-    type Error = IngressAuthSchemeNameError;
-
-    fn try_from(value: String) -> Result<Self, Self::Error> {
-        Self::validate(&value)?;
-        Ok(Self(value))
-    }
-}
-
-impl AsRef<str> for IngressAuthSchemeName {
-    fn as_ref(&self) -> &str {
-        &self.0
-    }
-}
-
-impl fmt::Display for IngressAuthSchemeName {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(&self.0)
-    }
-}
-
-impl From<IngressAuthSchemeName> for String {
-    fn from(id: IngressAuthSchemeName) -> Self {
-        id.0
+        Self::new(value.verifier, value.credential_handles)
     }
 }
 
@@ -737,21 +673,14 @@ pub enum HostIngressDeclarationError {
     RequiredAuthMissingBindings,
     #[error("public ingress auth policy must not declare auth bindings")]
     PublicAuthMustNotDeclareBindings,
-    #[error("ingress auth binding for scheme '{scheme}' must list at least one credential handle")]
-    AuthBindingMissingCredentials { scheme: IngressAuthSchemeName },
     #[error(
-        "ingress auth binding scheme '{scheme}' requires descriptor policy auth scheme '{required:?}'"
+        "ingress auth binding for verifier '{verifier:?}' must list at least one credential handle"
     )]
-    AuthBindingSchemeNotDeclared {
-        scheme: IngressAuthSchemeName,
-        required: IngressAuthScheme,
-    },
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Error)]
-pub enum IngressAuthSchemeNameError {
-    #[error("invalid ingress auth scheme name '{value}': {reason}")]
-    Invalid { value: String, reason: &'static str },
+    AuthBindingMissingCredentials { verifier: IngressAuthScheme },
+    #[error(
+        "ingress auth binding verifier '{verifier:?}' is not declared by descriptor policy auth"
+    )]
+    AuthBindingVerifierNotDeclared { verifier: IngressAuthScheme },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
@@ -1011,16 +940,16 @@ fn validate_ingress_auth_bindings(
             for binding in auth {
                 if binding.credential_handles.is_empty() {
                     return Err(HostIngressDeclarationError::AuthBindingMissingCredentials {
-                        scheme: binding.scheme.clone(),
+                        verifier: binding.verifier,
                     });
                 }
 
-                let required = binding.scheme.declared_auth_scheme();
-                if !schemes.contains(&required) {
-                    return Err(HostIngressDeclarationError::AuthBindingSchemeNotDeclared {
-                        scheme: binding.scheme.clone(),
-                        required,
-                    });
+                if !schemes.contains(&binding.verifier) {
+                    return Err(
+                        HostIngressDeclarationError::AuthBindingVerifierNotDeclared {
+                            verifier: binding.verifier,
+                        },
+                    );
                 }
             }
 
@@ -1207,7 +1136,7 @@ mod tests {
 
     fn hmac_auth_binding() -> IngressAuthBinding {
         IngressAuthBinding::new(
-            IngressAuthSchemeName::new("slack_v0_hmac").expect("valid auth scheme name"),
+            IngressAuthScheme::WebhookSignature,
             vec![
                 IngressCredentialHandle::new("slack_signing_secret")
                     .expect("valid credential handle"),
@@ -1500,7 +1429,10 @@ mod tests {
         assert_eq!(declaration.route().route_id().as_str(), "slack.events");
         assert_eq!(declaration.route().method(), NetworkMethod::Post);
         assert_eq!(declaration.auth().len(), 1);
-        assert_eq!(declaration.auth()[0].scheme().as_str(), "slack_v0_hmac");
+        assert_eq!(
+            declaration.auth()[0].verifier(),
+            IngressAuthScheme::WebhookSignature
+        );
         assert_eq!(declaration.ack(), IngressAckMode::Immediate);
         assert_eq!(
             declaration.drain(),
@@ -1595,28 +1527,14 @@ mod tests {
 
     #[test]
     fn auth_binding_requires_credential_handle() {
-        let err = IngressAuthBinding::new(
-            IngressAuthSchemeName::new("slack_v0_hmac").expect("valid auth scheme name"),
-            Vec::new(),
-        )
-        .expect_err("auth binding without credential handles must reject");
+        let err = IngressAuthBinding::new(IngressAuthScheme::WebhookSignature, Vec::new())
+            .expect_err("auth binding without credential handles must reject");
 
         assert!(err.to_string().contains("credential handle"));
     }
 
     #[test]
-    fn telegram_secret_token_declares_shared_secret_header_auth() {
-        let scheme =
-            IngressAuthSchemeName::new("telegram_secret_token").expect("valid auth scheme name");
-
-        assert_eq!(
-            scheme.declared_auth_scheme(),
-            IngressAuthScheme::SharedSecretHeader
-        );
-    }
-
-    #[test]
-    fn auth_binding_scheme_must_be_declared_by_policy() {
+    fn auth_binding_verifier_must_be_declared_by_policy() {
         let descriptor = IngressRouteDescriptor::new(
             "web_chat.send",
             NetworkMethod::Post,
@@ -1636,9 +1554,8 @@ mod tests {
 
         assert!(matches!(
             err,
-            HostIngressDeclarationError::AuthBindingSchemeNotDeclared {
-                required: IngressAuthScheme::WebhookSignature,
-                ..
+            HostIngressDeclarationError::AuthBindingVerifierNotDeclared {
+                verifier: IngressAuthScheme::WebhookSignature
             }
         ));
     }
@@ -1650,7 +1567,7 @@ mod tests {
         let json = serde_json::to_value(&declaration).expect("serialize declaration");
         assert_eq!(json["route"]["route_id"], "slack.events");
         assert_eq!(json["target"]["type"], "product_adapter_inbound");
-        assert_eq!(json["auth"][0]["scheme"], "slack_v0_hmac");
+        assert_eq!(json["auth"][0]["verifier"], "webhook_signature");
         assert_eq!(json["ack"], "immediate");
         assert_eq!(json["drain"], "drain_before_runtime_shutdown");
 

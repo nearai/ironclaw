@@ -9,9 +9,9 @@ use axum::http::HeaderMap;
 use ironclaw_host_api::ingress::{
     AllowedEffectPath, AuditTraceClass, BodyLimitPolicy, CorsPolicy, HostIngressRouteDeclaration,
     HostIngressTarget, IngressAckMode, IngressAuthBinding, IngressAuthPolicy, IngressAuthScheme,
-    IngressAuthSchemeName, IngressCredentialHandle, IngressDrainMode, IngressPolicy,
-    IngressPolicyParts, IngressRouteDescriptor, IngressScopeSource, ListenerClass, RateLimitPolicy,
-    RateLimitScope, StreamingMode, WebSocketOriginPolicy,
+    IngressCredentialHandle, IngressDrainMode, IngressPolicy, IngressPolicyParts,
+    IngressRouteDescriptor, IngressScopeSource, ListenerClass, RateLimitPolicy, RateLimitScope,
+    StreamingMode, WebSocketOriginPolicy,
 };
 use ironclaw_host_api::{CapabilityId, NetworkMethod, ResourceScope, SecretHandle};
 use ironclaw_product_adapters::{ProtocolAuthEvidence, mark_request_signature_verified};
@@ -355,13 +355,12 @@ pub fn slack_events_host_ingress_declaration(
             "Slack events ingress descriptor did not validate: {error}"
         ))
     })?;
-    let auth = IngressAuthBinding::new(slack_hmac_auth_scheme()?, credential_handles).map_err(
-        |error| {
+    let auth = IngressAuthBinding::new(IngressAuthScheme::WebhookSignature, credential_handles)
+        .map_err(|error| {
             internal(format!(
                 "Slack events ingress auth binding did not validate: {error}"
             ))
-        },
-    )?;
+        })?;
     let capability_id = CapabilityId::new(SLACK_EVENTS_HOST_INGRESS_ROUTE_ID).map_err(|error| {
         internal(format!(
             "Slack events ingress capability id did not validate: {error}"
@@ -453,14 +452,6 @@ fn auth_failed(reason: impl Into<String>) -> HostIngressError {
     HostIngressError::AuthenticationFailed {
         reason: reason.into(),
     }
-}
-
-fn slack_hmac_auth_scheme() -> Result<IngressAuthSchemeName, HostIngressError> {
-    IngressAuthSchemeName::new("slack_v0_hmac").map_err(|error| {
-        internal(format!(
-            "Slack events ingress auth scheme did not validate: {error}"
-        ))
-    })
 }
 
 fn nonzero_u64(value: u64, field: &'static str) -> Result<NonZeroU64, HostIngressError> {
