@@ -917,6 +917,39 @@ async fn builtin_trigger_create_accepts_once_schedule() {
     }
 }
 
+/// Negative path: a `once` schedule whose `at` falls in a DST ambiguous fold
+/// (America/New_York on 2026-11-01 01:30:00 is a known overlap) must be
+/// rejected before any trigger is written to the repository.
+#[tokio::test]
+async fn builtin_trigger_create_rejects_invalid_once_schedule_before_persistence() {
+    let repository = Arc::new(InMemoryTriggerRepository::default());
+    let runtime = runtime_with_trigger_repository(repository.clone());
+    let context = execution_context([TRIGGER_CREATE_CAPABILITY_ID]);
+
+    let error = invoke_with_context(
+        &runtime,
+        TRIGGER_CREATE_CAPABILITY_ID,
+        json!({
+            "name": "DST overlap reminder",
+            "prompt": "This should be rejected",
+            "schedule": { "kind": "once", "at": "2026-11-01T01:30:00", "timezone": "America/New_York" }
+        }),
+        context.clone(),
+    )
+    .await
+    .unwrap_err();
+
+    assert_eq!(error, RuntimeFailureKind::InvalidInput);
+    assert!(
+        repository
+            .list_triggers(context.resource_scope.tenant_id)
+            .await
+            .unwrap()
+            .is_empty(),
+        "no trigger should be persisted when the once schedule is ambiguous (DST overlap)"
+    );
+}
+
 #[tokio::test]
 async fn builtin_trigger_list_and_remove_are_caller_scoped() {
     let repository = Arc::new(InMemoryTriggerRepository::default());

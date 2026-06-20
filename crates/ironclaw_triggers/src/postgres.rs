@@ -817,7 +817,7 @@ impl TriggerRepository for PostgresTriggerRepository {
                 .map_err(|error| backend_error("commit missed clear active trigger fire", error))?;
             return Ok(None);
         }
-        // Compute new state: None from next_slot_after → Completed, Some → stay current.
+        // Compute new state: None from next_slot_after → Completed, Some → preserve current state.
         let next_slot = current.schedule.next_slot_after(request.fire_slot)?;
         let new_state = if next_slot.is_none() {
             crate::state_text_codec(TriggerState::Completed)

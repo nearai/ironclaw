@@ -1060,7 +1060,7 @@ impl TriggerRepository for LibSqlTriggerRepository {
             {
                 return Ok(None);
             }
-            // Compute new state: None from next_slot_after → Completed, Some → stay Scheduled.
+            // Compute new state: None from next_slot_after → Completed, Some → preserve current state.
             let next_slot = current.schedule.next_slot_after(request.fire_slot)?;
             let new_state = if next_slot.is_none() {
                 crate::state_text_codec(TriggerState::Completed)
