@@ -381,6 +381,7 @@ impl TriggerSchedule {
         Ok(schedule)
     }
 
+    #[cfg(any(feature = "libsql", feature = "postgres"))]
     pub(crate) fn timezone_text(&self) -> &str {
         match self {
             Self::Cron { timezone, .. } | Self::Once { timezone, .. } => timezone.as_str(),
@@ -388,6 +389,7 @@ impl TriggerSchedule {
     }
 
     // Returns (kind, expression, schedule_at)
+    #[cfg(any(feature = "libsql", feature = "postgres"))]
     pub(crate) fn to_storage(&self) -> (&'static str, &str, Option<String>) {
         match self {
             Self::Cron { expression, .. } => ("cron", expression.as_str(), None),
@@ -399,6 +401,7 @@ impl TriggerSchedule {
         }
     }
 
+    #[cfg(any(feature = "libsql", feature = "postgres"))]
     pub(crate) fn from_storage(
         kind: &str,
         expression: &str,
@@ -2937,6 +2940,7 @@ mod tests {
         );
     }
 
+    #[cfg(any(feature = "libsql", feature = "postgres"))]
     #[test]
     fn once_schedule_storage_round_trip_uses_schedule_at_column() {
         let at = Utc.with_ymd_and_hms(2026, 6, 15, 10, 0, 0).unwrap();
