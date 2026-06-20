@@ -226,13 +226,16 @@ impl Default for PollSettings {
 
 /// Configuration for the background Google OAuth credential keepalive worker.
 ///
-/// The worker periodically refreshes Google OAuth accounts that are idle (by
-/// `updated_at`) to prevent the 7-day refresh-token death window from expiring
-/// during periods of inactivity. It does NOT participate in the inline
-/// access-token expiry margin logic (that is [`DEFAULT_ACCESS_REFRESH_MARGIN`]
-/// in `product_auth_runtime_credentials.rs`).
+/// The worker handles background keepalive refreshes (B2/B3): it periodically
+/// refreshes Google OAuth accounts that are idle (by `updated_at`) to prevent
+/// the 7-day refresh-token death window from expiring during periods of
+/// inactivity.
 ///
-/// [`DEFAULT_ACCESS_REFRESH_MARGIN`]: crate::product_auth_runtime_credentials::DEFAULT_ACCESS_REFRESH_MARGIN
+/// The `access_refresh_margin` field controls the inline access-token expiry
+/// gate — accounts whose access token expires within this window are refreshed
+/// proactively at the next inline dispatch (in
+/// `product_auth_runtime_credentials.rs`), independently of the background
+/// sweep interval.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CredentialRefreshSettings {
     /// Whether the worker is enabled. Defaults to `false`; use

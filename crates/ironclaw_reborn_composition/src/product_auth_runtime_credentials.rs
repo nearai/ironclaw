@@ -407,7 +407,10 @@ impl RuntimeCredentialAccountRefreshService for ProductAuthRuntimeCredentialAcco
             {
                 let margin = chrono::Duration::from_std(self.access_refresh_margin)
                     .unwrap_or(chrono::Duration::seconds(300));
-                if expires_at - margin > Utc::now() {
+                if expires_at
+                    .checked_sub_signed(margin)
+                    .is_some_and(|cutoff| cutoff > Utc::now())
+                {
                     tracing::debug!(
                         provider = %account.provider,
                         "oauth access token still fresh, skipping inline refresh"

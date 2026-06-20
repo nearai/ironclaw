@@ -34,7 +34,6 @@ mod budget_events;
 mod bundled_skills;
 mod communication_context;
 #[cfg(any(feature = "libsql", feature = "postgres"))]
-#[cfg(any(feature = "libsql", feature = "postgres"))]
 mod credential_refresh_worker;
 mod default_system_prompt;
 mod error;

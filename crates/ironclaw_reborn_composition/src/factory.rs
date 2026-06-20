@@ -628,7 +628,7 @@ impl std::fmt::Debug for RebornServices {
     }
 }
 
-// arch-exempt: optional field added to struct literal — covered by disabled() and build_*.
+// arch-exempt: optional_arc, RebornServices fields are Optional because disabled()/local-dev paths don't wire all production services; proper factories always set them, plan #4469
 
 impl RebornServices {
     pub fn disabled() -> Self {
@@ -3378,8 +3378,9 @@ where
         secret_store,
         #[cfg(any(feature = "libsql", feature = "postgres"))]
         credential_refresh_candidate_source,
-        // The leader lock is passed in from the caller (one per backend path).
-        // `None` when candidate_source is None (caller-supplied product_auth_ports).
+        // The leader lock is always Some on this production path: one advisory
+        // lock per backend (libsql / postgres). The None case applies only to
+        // the caller-supplied product_auth_ports path (disabled() / local_dev).
         #[cfg(any(feature = "libsql", feature = "postgres"))]
         credential_refresh_leader_lock: Some(leader_lock),
     })

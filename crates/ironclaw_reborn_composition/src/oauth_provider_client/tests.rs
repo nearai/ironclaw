@@ -41,10 +41,13 @@ fn authorization_code_body_adds_provider_resource_only_when_configured() {
 }
 
 #[tokio::test]
-async fn token_sink_rolls_back_refresh_token_when_access_write_fails() {
+async fn token_sink_preserves_refresh_token_when_access_write_fails() {
     // Crash-safety write order: refresh is written first, access second.
     // When the access write fails, the refresh secret that was already written
-    // must be cleaned up so callers see consistent state (both or neither).
+    // must NOT be deleted: the account record still references the deterministic
+    // refresh handle and the rotated refresh token is valid. Deleting it would
+    // turn a transient storage hiccup into a permanently unrecoverable credential
+    // (forced re-auth). The next refresh attempt re-reads the stored refresh token.
     let store = Arc::new(RecordingSecretStore::failing_access_put());
     let client = HostOAuthProviderClient::new(
         notion_spec(),
@@ -74,11 +77,8 @@ async fn token_sink_rolls_back_refresh_token_when_access_write_fails() {
         ironclaw_auth::AuthErrorCode::BackendUnavailable
     );
     assert!(
-        store
-            .deleted_handles()
-            .iter()
-            .any(|handle| handle.contains("refresh")),
-        "refresh token written before the failed access token write must be cleaned up"
+        store.deleted_handles().is_empty(),
+        "refresh token must NOT be deleted when access write fails (preserves recoverability)"
     );
 }
 
@@ -713,7 +713,7 @@ async fn refresh_5xx_is_transient_and_does_not_classify_as_invalid_grant() {
         .expect("store refresh token");
     let client = HostOAuthProviderClient::new(
         google_spec(),
-        Arc::new(egress),
+        egress,
         store,
         Arc::new(NoopObligationHandler),
         OAuthClientId::new("google-client").unwrap(),

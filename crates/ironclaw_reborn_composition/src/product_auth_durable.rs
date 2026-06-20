@@ -705,10 +705,10 @@ where
                     entry.name
                 );
                 async move {
-                    let path = VirtualPath::new(&path_str).ok()?;
-                    let versioned = root.get(&path).await.ok()??;
+                    let path = VirtualPath::new(&path_str).ok()?; // silent-ok: invalid path means corrupt entry name; skip this account and continue sweep
+                    let versioned = root.get(&path).await.ok()??; // silent-ok: filesystem read error for one account must not abort the sweep; skip and retry next tick
                     let account: CredentialAccount =
-                        serde_json::from_slice(&versioned.entry.body).ok()?;
+                        serde_json::from_slice(&versioned.entry.body).ok()?; // silent-ok: corrupt JSON for one account must not abort the sweep; skip and continue
                     // Filter: Google provider + Configured + has refresh token
                     if account.provider.as_str() != ironclaw_auth::GOOGLE_PROVIDER_ID {
                         return None;

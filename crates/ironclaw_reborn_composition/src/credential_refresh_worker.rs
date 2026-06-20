@@ -168,7 +168,7 @@ async fn run_credential_refresh_worker(
         return;
     }
     loop {
-        tick_once(&deps, &settings).await;
+        tick_once(&deps, &settings, &cancel).await;
         let delay = settings.interval + jitter_delay(settings.tick_jitter_max);
         if !sleep_or_cancel(delay, &cancel).await {
             return;
@@ -180,14 +180,18 @@ async fn run_credential_refresh_worker(
 // Single tick (B3)
 // ---------------------------------------------------------------------------
 
-async fn tick_once(deps: &CredentialRefreshWorkerDeps, settings: &CredentialRefreshSettings) {
+async fn tick_once(
+    deps: &CredentialRefreshWorkerDeps,
+    settings: &CredentialRefreshSettings,
+    cancel: &CancellationToken,
+) {
     use crate::product_auth_refresh_lock::LeaderOutcome;
 
     // Acquire the deployment-wide leader lock before doing any enumeration
     // work. Non-leader processes skip this tick entirely.
     let outcome = deps
         .leader_lock
-        .run_as_leader(|| sweep_once(deps, settings))
+        .run_as_leader(|| sweep_once(deps, settings, cancel))
         .await;
 
     match outcome {
@@ -199,7 +203,11 @@ async fn tick_once(deps: &CredentialRefreshWorkerDeps, settings: &CredentialRefr
 }
 
 /// The actual sweep executed only by the leader process.
-async fn sweep_once(deps: &CredentialRefreshWorkerDeps, settings: &CredentialRefreshSettings) {
+async fn sweep_once(
+    deps: &CredentialRefreshWorkerDeps,
+    settings: &CredentialRefreshSettings,
+    cancel: &CancellationToken,
+) {
     let now = Utc::now();
     let idle_threshold = match chrono::Duration::from_std(settings.idle_threshold) {
         Ok(d) => d,
@@ -211,7 +219,9 @@ async fn sweep_once(deps: &CredentialRefreshWorkerDeps, settings: &CredentialRef
             return;
         }
     };
-    let idle_cutoff = now - idle_threshold;
+    let idle_cutoff = now
+        .checked_sub_signed(idle_threshold)
+        .unwrap_or(chrono::DateTime::<chrono::Utc>::MIN_UTC);
 
     // B1: enumerate all Google/Configured/has-refresh accounts across all owners.
     let candidates = deps.candidate_source.list_refresh_candidates().await;
@@ -238,6 +248,9 @@ async fn sweep_once(deps: &CredentialRefreshWorkerDeps, settings: &CredentialRef
     let mut failed = 0usize;
 
     for account in to_refresh {
+        if cancel.is_cancelled() {
+            break;
+        }
         let account_id = account.id;
         let request = CredentialRefreshRequest::new(
             account.scope.clone(),
@@ -352,11 +365,12 @@ mod tests {
 
     #[test]
     fn spawn_returns_none_when_disabled() {
+        // spawn_credential_refresh_worker returns None when !enabled, before deps are
+        // accessed. The early-return guard runs before touching candidate_source,
+        // refresh_port, or leader_lock, so no live services need to be wired for this
+        // path. Integration coverage for the spawn path lives in runtime.rs tests.
         let settings = CredentialRefreshSettings::default();
         assert!(!settings.enabled, "default settings must be disabled");
-        // spawn_credential_refresh_worker returns None when !enabled, without
-        // accessing deps. We verify the early-return guard via the flag alone —
-        // full integration coverage lives in the architecture boundary tests.
     }
 
     #[tokio::test]

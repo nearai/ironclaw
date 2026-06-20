@@ -351,9 +351,9 @@ impl HostOAuthProviderClient {
         // Compute access-token expiry from the server-reported TTL.
         // Saturating cast: guard against u64 values that exceed i64::MAX (a
         // theoretical extreme) by clamping to i64::MAX seconds before converting.
-        let access_expires_at: Option<Timestamp> = tokens.expires_in_seconds.map(|secs| {
-            let signed_secs = secs.min(i64::MAX as u64) as i64;
-            Utc::now() + chrono::Duration::seconds(signed_secs)
+        let access_expires_at: Option<Timestamp> = tokens.expires_in_seconds.and_then(|secs| {
+            let signed_secs = secs.min(i32::MAX as u64) as i64;
+            Utc::now().checked_add_signed(chrono::Duration::seconds(signed_secs))
         });
 
         let refresh_token = tokens.refresh_token;
@@ -396,12 +396,13 @@ impl HostOAuthProviderClient {
             )
             .await
         {
-            // Access write failed: delete the refresh secret written above so
-            // callers see a consistent state (both written or neither written).
-            if let Some(ref handle) = refresh_secret {
-                cleanup_written_access(&self.secret_store, &scope, handle, self.spec.provider_id)
-                    .await;
-            }
+            // Access write failed. Do NOT delete the refresh secret that was
+            // just written above: the account record still references the
+            // deterministic refresh handle and the rotated refresh token is
+            // valid. Deleting it would turn a transient storage hiccup into a
+            // permanently unrecoverable credential (forced re-auth). The next
+            // refresh attempt will re-read the stored refresh token and try
+            // again.
             return Err(map_secret_store_error(error));
         }
 
@@ -774,21 +775,6 @@ fn oauth_execution_context(
         .validate()
         .map_err(|_| AuthProductError::BackendUnavailable)?;
     Ok(context)
-}
-
-async fn cleanup_written_access(
-    store: &Arc<dyn SecretStore>,
-    scope: &ResourceScope,
-    access_secret: &SecretHandle,
-    provider_id: &str,
-) {
-    if let Err(delete_error) = store.delete(scope, access_secret).await {
-        tracing::warn!(
-            provider_id,
-            secret_store_reason = delete_error.stable_reason(),
-            "oauth token-secret cleanup failed"
-        );
-    }
 }
 
 fn map_secret_store_error(error: ironclaw_secrets::SecretStoreError) -> AuthProductError {
