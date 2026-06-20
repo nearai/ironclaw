@@ -72,6 +72,9 @@ mod run_status_cell {
 }
 use run_status_cell::{RunStatusCell, StatusTransition};
 
+mod concurrency_limiter;
+use concurrency_limiter::{ConcurrencyLimiter, ConcurrencyLimits, OriginClass, RunSlotInfo};
+
 fn holds_running_slot(status: TurnStatus) -> bool {
     matches!(status, TurnStatus::Running | TurnStatus::CancelRequested)
 }
@@ -80,12 +83,6 @@ const MAX_EVENTS: usize = 10_000;
 const MAX_TERMINAL_RECORDS: usize = 10_000;
 const MAX_IDEMPOTENCY_RECORDS: usize = 10_000;
 const DEFAULT_RUNNER_LEASE_TTL_SECONDS: i64 = 90;
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-enum OriginClass {
-    Trigger,      // TurnOriginKind::ScheduledTrigger
-    Conversation, // TurnOriginKind::Inbound | TurnOriginKind::WebUi
-}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct InMemoryTurnStateStoreLimits {
@@ -160,12 +157,7 @@ struct Inner {
     admission_reservations: HashMap<TurnRunId, TurnAdmissionReservationRecord>,
     tree_reservations: HashMap<SpawnTreeReservationKey, u64>,
     limits: InMemoryTurnStateStoreLimits,
-    /// Counts runs currently in `TurnStatus::Running` per (TenantId, UserId).
-    /// Ownerless runs are never counted; actor-fallback runs are counted under the submitting actor's user_id.
-    running_by_user: HashMap<(ironclaw_host_api::TenantId, ironclaw_host_api::UserId), u32>,
-    /// Counts runs currently in `TurnStatus::Running` per (TenantId, OriginClass).
-    /// Runs without `product_context` are never counted.
-    running_by_origin_class: HashMap<(ironclaw_host_api::TenantId, OriginClass), u32>,
+    concurrency: ConcurrencyLimiter,
 }
 
 enum AppliedLoopTransition {
@@ -289,6 +281,11 @@ impl InMemoryTurnStateStore {
     pub fn with_limits(limits: InMemoryTurnStateStoreLimits) -> Self {
         Self {
             inner: Mutex::new(Inner {
+                concurrency: ConcurrencyLimiter::with_limits(ConcurrencyLimits {
+                    max_concurrent_runs_per_user: limits.max_concurrent_runs_per_user,
+                    max_concurrent_trigger_runs: limits.max_concurrent_trigger_runs,
+                    max_concurrent_conversation_runs: limits.max_concurrent_conversation_runs,
+                }),
                 limits,
                 ..Inner::default()
             }),
@@ -312,6 +309,11 @@ impl InMemoryTurnStateStore {
     ) -> Self {
         Self {
             inner: Mutex::new(Inner {
+                concurrency: ConcurrencyLimiter::with_limits(ConcurrencyLimits {
+                    max_concurrent_runs_per_user: limits.max_concurrent_runs_per_user,
+                    max_concurrent_trigger_runs: limits.max_concurrent_trigger_runs,
+                    max_concurrent_conversation_runs: limits.max_concurrent_conversation_runs,
+                }),
                 limits,
                 ..Inner::default()
             }),
@@ -372,55 +374,32 @@ impl InMemoryTurnStateStore {
         user: &ironclaw_host_api::UserId,
     ) -> u32 {
         match self.inner.lock() {
-            Ok(inner) => inner
-                .running_by_user
-                .get(&(tenant.clone(), user.clone()))
-                .copied()
-                .unwrap_or(0),
+            Ok(inner) => inner.concurrency.count_for_user(tenant, user),
             Err(poisoned) => poisoned
                 .into_inner()
-                .running_by_user
-                .get(&(tenant.clone(), user.clone()))
-                .copied()
-                .unwrap_or(0),
+                .concurrency
+                .count_for_user(tenant, user),
         }
     }
 
     /// Returns the number of runs currently in `TurnStatus::Running` or `TurnStatus::CancelRequested` with `ScheduledTrigger` origin
     /// for the given tenant. Intended for testing and observability.
     pub fn running_trigger_count(&self, tenant: &TenantId) -> u32 {
-        let key = (tenant.clone(), OriginClass::Trigger);
         match self.inner.lock() {
-            Ok(inner) => inner
-                .running_by_origin_class
-                .get(&key)
-                .copied()
-                .unwrap_or(0),
-            Err(poisoned) => poisoned
-                .into_inner()
-                .running_by_origin_class
-                .get(&key)
-                .copied()
-                .unwrap_or(0),
+            Ok(inner) => inner.concurrency.count_for_trigger(tenant),
+            Err(poisoned) => poisoned.into_inner().concurrency.count_for_trigger(tenant),
         }
     }
 
     /// Returns the number of runs currently in `TurnStatus::Running` or `TurnStatus::CancelRequested` with `Inbound` or `WebUi` origin
     /// for the given tenant. Intended for testing and observability.
     pub fn running_conversation_count(&self, tenant: &TenantId) -> u32 {
-        let key = (tenant.clone(), OriginClass::Conversation);
         match self.inner.lock() {
-            Ok(inner) => inner
-                .running_by_origin_class
-                .get(&key)
-                .copied()
-                .unwrap_or(0),
+            Ok(inner) => inner.concurrency.count_for_conversation(tenant),
             Err(poisoned) => poisoned
                 .into_inner()
-                .running_by_origin_class
-                .get(&key)
-                .copied()
-                .unwrap_or(0),
+                .concurrency
+                .count_for_conversation(tenant),
         }
     }
 
@@ -1722,41 +1701,18 @@ impl Inner {
             );
         }
 
-        // Rebuild per-user / per-origin-class running counters from restored
-        // records only when at least one concurrency cap is configured.  The
-        // counters are consulted solely inside `pop_matching_queued_run` when
-        // the corresponding `max_concurrent_*` limit is `Some`; with all caps
-        // `None` (the default) the counters are never read, so leaving them
-        // empty is correct and avoids an O(records) scan on every snapshot
-        // restore (which `FilesystemTurnStateStore::apply` does on every
-        // read-modify-write in the uncapped hot path).
-        let caps_enabled = limits.max_concurrent_runs_per_user.is_some()
-            || limits.max_concurrent_trigger_runs.is_some()
-            || limits.max_concurrent_conversation_runs.is_some();
-
-        let mut running_by_user = HashMap::new();
-        let mut running_by_origin_class: HashMap<(ironclaw_host_api::TenantId, OriginClass), u32> =
-            HashMap::new();
-
-        if caps_enabled {
-            // Rebuild per-user running counter from restored records.
-            for record in records.values() {
-                if holds_running_slot(record.status.get())
-                    && let Some(key) = Self::run_user_key(record)
-                {
-                    *running_by_user.entry(key).or_insert(0u32) += 1;
-                }
-            }
-
-            // Rebuild per-origin-class running counter from restored records.
-            for record in records.values() {
-                if holds_running_slot(record.status.get())
-                    && let Some(key) = Self::run_origin_key(record)
-                {
-                    *running_by_origin_class.entry(key).or_insert(0u32) += 1;
-                }
-            }
-        }
+        let concurrency_limits = ConcurrencyLimits {
+            max_concurrent_runs_per_user: limits.max_concurrent_runs_per_user,
+            max_concurrent_trigger_runs: limits.max_concurrent_trigger_runs,
+            max_concurrent_conversation_runs: limits.max_concurrent_conversation_runs,
+        };
+        let concurrency = ConcurrencyLimiter::rebuild_from(
+            concurrency_limits,
+            records
+                .values()
+                .filter(|record| holds_running_slot(record.status.get()))
+                .map(|record| slot_info_for(record)),
+        );
 
         Ok(Self {
             cursor,
@@ -1781,8 +1737,7 @@ impl Inner {
             admission_reservations,
             tree_reservations,
             limits,
-            running_by_user,
-            running_by_origin_class,
+            concurrency,
         })
     }
 
@@ -2060,66 +2015,15 @@ impl Inner {
         self.records.remove(&run_id).ok_or(TurnError::ScopeNotFound)
     }
 
-    fn run_user_key(
-        record: &RunRecord,
-    ) -> Option<(ironclaw_host_api::TenantId, ironclaw_host_api::UserId)> {
-        match &record.scope.thread_owner {
-            crate::scope::TurnThreadOwner::ExplicitUser { owner_user_id } => {
-                Some((record.scope.tenant_id.clone(), owner_user_id.clone()))
-            }
-            crate::scope::TurnThreadOwner::ActorFallback => {
-                Some((record.scope.tenant_id.clone(), record.actor.user_id.clone()))
-            }
-            crate::scope::TurnThreadOwner::Ownerless => None,
-        }
-    }
-
-    fn run_origin_class(record: &RunRecord) -> Option<OriginClass> {
-        match record.product_context.as_ref()?.origin {
-            crate::TurnOriginKind::ScheduledTrigger => Some(OriginClass::Trigger),
-            crate::TurnOriginKind::Inbound | crate::TurnOriginKind::WebUi => {
-                Some(OriginClass::Conversation)
-            }
-        }
-    }
-
-    fn run_origin_key(record: &RunRecord) -> Option<(ironclaw_host_api::TenantId, OriginClass)> {
-        Self::run_origin_class(record).map(|cls| (record.scope.tenant_id.clone(), cls))
-    }
-
     fn apply_status_transition(&mut self, transition: StatusTransition, record: &RunRecord) {
         match transition {
-            StatusTransition::EnteredRunning => self.on_run_entered_running(record),
-            StatusTransition::LeftRunning => self.on_run_left_running(record),
+            StatusTransition::EnteredRunning => {
+                self.concurrency.on_enter_running(slot_info_for(record));
+            }
+            StatusTransition::LeftRunning => {
+                self.concurrency.on_leave_running(slot_info_for(record));
+            }
             StatusTransition::Unchanged => {}
-        }
-    }
-
-    fn on_run_entered_running(&mut self, record: &RunRecord) {
-        if let Some(key) = Self::run_user_key(record) {
-            *self.running_by_user.entry(key).or_insert(0) += 1;
-        }
-        if let Some(key) = Self::run_origin_key(record) {
-            *self.running_by_origin_class.entry(key).or_insert(0) += 1;
-        }
-    }
-
-    fn on_run_left_running(&mut self, record: &RunRecord) {
-        if let Some(key) = Self::run_user_key(record)
-            && let Some(count) = self.running_by_user.get_mut(&key)
-        {
-            *count = count.saturating_sub(1);
-            if *count == 0 {
-                self.running_by_user.remove(&key);
-            }
-        }
-        if let Some(key) = Self::run_origin_key(record)
-            && let Some(count) = self.running_by_origin_class.get_mut(&key)
-        {
-            *count = count.saturating_sub(1);
-            if *count == 0 {
-                self.running_by_origin_class.remove(&key);
-            }
         }
     }
 
@@ -2134,36 +2038,8 @@ impl Inner {
                 continue;
             }
             let scope_ok = scope_filter.is_none_or(|scope| scope == &record.scope);
-            let user_ok = match self.limits.max_concurrent_runs_per_user {
-                None => true,
-                Some(cap) => match Self::run_user_key(record) {
-                    None => true, // ownerless runs are never capped
-                    Some(key) => self.running_by_user.get(&key).copied().unwrap_or(0) < cap.get(),
-                },
-            };
-            let origin_ok = match Self::run_origin_key(record) {
-                None => true,
-                Some((tenant_id, OriginClass::Trigger)) => {
-                    self.limits.max_concurrent_trigger_runs.is_none_or(|cap| {
-                        self.running_by_origin_class
-                            .get(&(tenant_id, OriginClass::Trigger))
-                            .copied()
-                            .unwrap_or(0)
-                            < cap.get()
-                    })
-                }
-                Some((tenant_id, OriginClass::Conversation)) => self
-                    .limits
-                    .max_concurrent_conversation_runs
-                    .is_none_or(|cap| {
-                        self.running_by_origin_class
-                            .get(&(tenant_id, OriginClass::Conversation))
-                            .copied()
-                            .unwrap_or(0)
-                            < cap.get()
-                    }),
-            };
-            if scope_ok && user_ok && origin_ok {
+            let cap_ok = self.concurrency.can_claim(&slot_info_for(record));
+            if scope_ok && cap_ok {
                 return Some(run_id);
             }
             self.queued_runs.push_back(run_id);
@@ -2918,6 +2794,21 @@ impl RunRecord {
             product_context: self.product_context.clone(),
             resume_disposition: self.resume_disposition.clone(),
         }
+    }
+}
+
+fn slot_info_for(record: &RunRecord) -> RunSlotInfo<'_> {
+    RunSlotInfo {
+        tenant_id: &record.scope.tenant_id,
+        thread_owner: &record.scope.thread_owner,
+        actor_user_id: &record.actor.user_id,
+        product_context: match record.product_context.as_ref().map(|pc| pc.origin) {
+            Some(crate::TurnOriginKind::ScheduledTrigger) => Some(OriginClass::Trigger),
+            Some(crate::TurnOriginKind::Inbound) | Some(crate::TurnOriginKind::WebUi) => {
+                Some(OriginClass::Conversation)
+            }
+            None => None,
+        },
     }
 }
 
