@@ -82,3 +82,16 @@ product_adapter_section = "product_adapter.inbound"
 [host_ingress.updates.auth]
 verifier = "shared_secret_header"
 credential_handles = ["telegram_webhook_secret"]
+
+[[metadata.connectable.channels]]
+channel = "telegram"
+display_name = "Telegram"
+strategy = "inbound_proof_code"
+requires_route_ids = ["telegram.updates"]
+title = "Telegram account connection"
+instructions = "Open your bot in Telegram, send /start (or any message), then enter the pairing code it replies with here."
+input_placeholder = "Enter Telegram pairing code..."
+submit_label = "Connect"
+success_message = "Telegram account connected."
+error_message = "Invalid or expired Telegram pairing code."
+command_aliases = ["telegram", "telegram account", "telegram pairing"]

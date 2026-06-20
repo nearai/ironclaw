@@ -50,6 +50,8 @@ mod gsuite;
 mod hooks;
 #[cfg(any(feature = "slack-v2-host-beta", feature = "telegram-v2-host-beta"))]
 pub mod host_ingress;
+#[cfg(feature = "webui-v2-beta")]
+mod host_ingress_serve_plan;
 mod input;
 mod lifecycle;
 #[cfg(feature = "root-llm-provider")]
@@ -200,6 +202,13 @@ pub use hooks::{
     MAX_TOTAL_HOOKS_PER_TENANT, ThirdPartyDiscoveryInput, build_hook_dispatcher_builder_factory,
     build_hook_dispatcher_builder_factory_for_tenant, build_hook_projection_registry,
     tenant_extension_root,
+};
+#[cfg(feature = "webui-v2-beta")]
+pub use host_ingress_serve_plan::{
+    ConfiguredHostIngressProjectionMode, HostIngressOperatorRouteVisibility, HostIngressServePlan,
+    HostIngressServePlanError, HostIngressServePlanInput,
+    build_host_ingress_mounts_from_enabled_extensions, build_host_ingress_serve_plan,
+    build_webui_services_with_host_ingress_plan,
 };
 pub use input::{OAuthClientConfig, RebornBuildInput, RebornRuntimeProcessBinding};
 #[cfg(feature = "webui-v2-beta")]

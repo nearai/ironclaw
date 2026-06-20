@@ -20,7 +20,7 @@ use ironclaw_host_api::ingress::{
 use ironclaw_host_api::{
     AgentId, ExtensionId, InvocationId, ProjectId, ResourceScope, SecretHandle, TenantId, UserId,
 };
-use ironclaw_host_ingress_registry::list_enabled_host_ingress_entries;
+use ironclaw_host_ingress_registry::{HostIngressRuntimeEntry, list_enabled_host_ingress_entries};
 use ironclaw_outbound::{DeliveredGateRouteStore, OutboundStateStore, TriggeredRunDeliveryStore};
 use ironclaw_product_adapters::{
     AdapterInstallationId, DeclaredEgressHost, DeclaredEgressTarget, DeliveryStatus,
@@ -588,15 +588,27 @@ pub async fn build_slack_events_host_ingress_mount_from_enabled_extensions(
         .extension_management
         .as_ref()
         .ok_or(SlackHostBetaBuildError::ExtensionLifecycleUnavailable)?;
+    let store = extension_management.installation_store();
+    let entries = list_enabled_host_ingress_entries(store.as_ref()).await?;
+    build_slack_events_host_ingress_mount_from_entries(runtime, &entries).await
+}
+
+pub(crate) async fn build_slack_events_host_ingress_mount_from_entries(
+    runtime: &RebornRuntime,
+    entries: &[HostIngressRuntimeEntry],
+) -> Result<Option<PublicRouteMount>, SlackHostBetaBuildError> {
+    let local_runtime = runtime
+        .services()
+        .local_runtime
+        .as_ref()
+        .ok_or(SlackHostBetaBuildError::DurableHostStateUnavailable)?;
     let secret_store = local_runtime
         .secret_store
         .clone()
         .ok_or(SlackHostBetaBuildError::SecretStoreUnavailable)?;
-    let store = extension_management.installation_store();
     let settings_store = FilesystemSlackExtensionSettingsStore::new(Arc::clone(
         &local_runtime.host_state_filesystem,
     ));
-    let entries = list_enabled_host_ingress_entries(store.as_ref()).await?;
     let mut installations = Vec::new();
     let mut credential_bindings = Vec::new();
     let mut projected_declaration = None;

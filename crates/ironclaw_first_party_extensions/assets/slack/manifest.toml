@@ -83,3 +83,28 @@ product_adapter_section = "product_adapter.inbound"
 [host_ingress.events.auth]
 verifier = "webhook_signature"
 credential_handles = ["slack_signing_secret"]
+
+[[metadata.connectable.channels]]
+channel = "slack"
+display_name = "Slack"
+strategy = "inbound_proof_code"
+requires_route_ids = ["slack.events", "webui.v2.extensions.pairing.redeem"]
+title = "Slack account connection"
+instructions = "Message the Slack app, then enter the code here."
+input_placeholder = "Enter Slack pairing code..."
+submit_label = "Connect"
+success_message = "Slack account connected."
+error_message = "Invalid or expired Slack pairing code."
+command_aliases = ["slack", "slack account", "slack pairing"]
+
+[[metadata.connectable.channels]]
+channel = "slack"
+display_name = "Slack"
+strategy = "admin_managed_channels"
+requires_route_ids = ["webui.v2.channels.slack.routes.list"]
+title = "Slack team agents"
+instructions = "Map Slack channels to the team agents that should answer there."
+input_placeholder = "C0123456789"
+submit_label = "Save channels"
+success_message = "Slack channels saved."
+error_message = "Slack channel update failed."

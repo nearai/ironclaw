@@ -30,7 +30,7 @@ use ironclaw_host_api::ingress::{
 use ironclaw_host_api::{
     AgentId, ExtensionId, InvocationId, ProjectId, ResourceScope, SecretHandle, TenantId, UserId,
 };
-use ironclaw_host_ingress_registry::list_enabled_host_ingress_entries;
+use ironclaw_host_ingress_registry::{HostIngressRuntimeEntry, list_enabled_host_ingress_entries};
 use ironclaw_product_adapters::{
     AdapterInstallationId, AuthRequirement, DeclaredEgressHost, DeclaredEgressTarget,
     EgressCredentialHandle, ProductAdapter, ProductAdapterId, ProtocolHttpEgress,
@@ -280,15 +280,27 @@ pub async fn build_telegram_updates_host_ingress_mount_from_enabled_extensions(
         .extension_management
         .as_ref()
         .ok_or(TelegramHostBetaBuildError::ExtensionLifecycleUnavailable)?;
+    let store = extension_management.installation_store();
+    let entries = list_enabled_host_ingress_entries(store.as_ref()).await?;
+    build_telegram_updates_host_ingress_mount_from_entries(runtime, &entries).await
+}
+
+pub(crate) async fn build_telegram_updates_host_ingress_mount_from_entries(
+    runtime: &RebornRuntime,
+    entries: &[HostIngressRuntimeEntry],
+) -> Result<Option<PublicRouteMount>, TelegramHostBetaBuildError> {
+    let local_runtime = runtime
+        .services()
+        .local_runtime
+        .as_ref()
+        .ok_or(TelegramHostBetaBuildError::DurableHostStateUnavailable)?;
     let secret_store = local_runtime
         .secret_store
         .clone()
         .ok_or(TelegramHostBetaBuildError::SecretStoreUnavailable)?;
-    let store = extension_management.installation_store();
     let settings_store = FilesystemTelegramExtensionSettingsStore::new(Arc::clone(
         &local_runtime.host_state_filesystem,
     ));
-    let entries = list_enabled_host_ingress_entries(store.as_ref()).await?;
     let telegram_extension_id = telegram_extension_id()?;
     let mut installations = Vec::new();
     let mut credential_bindings = Vec::new();

@@ -6,7 +6,7 @@
 //! the values never live in the config file.
 
 #[cfg(feature = "telegram-v2-host-beta")]
-use anyhow::anyhow;
+use anyhow::{Context, anyhow};
 
 #[cfg(feature = "telegram-v2-host-beta")]
 use std::env;
@@ -14,7 +14,10 @@ use std::env;
 use std::path::Path;
 
 #[cfg(feature = "telegram-v2-host-beta")]
-use ironclaw_reborn_composition::TelegramHostBetaConfig;
+use ironclaw_reborn_composition::{
+    ConfiguredHostIngressProjectionMode, HostIngressServePlanInput, RebornRuntime,
+    TelegramHostBetaConfig, import_telegram_host_beta_config_as_extension_installation,
+};
 #[cfg(feature = "telegram-v2-host-beta")]
 use secrecy::SecretString;
 
@@ -40,6 +43,63 @@ pub(crate) fn resolve_telegram_config_for_serve(
         default_user_id,
         config_path,
     )
+}
+
+#[cfg(feature = "telegram-v2-host-beta")]
+pub(crate) async fn import_telegram_config_for_serve(
+    runtime: &RebornRuntime,
+    config: &Option<TelegramHostBetaConfig>,
+) -> anyhow::Result<()> {
+    if let Some(config) = config {
+        import_telegram_host_beta_config_as_extension_installation(runtime, config)
+            .await
+            .map_err(anyhow::Error::from)
+            .context("failed to import Telegram config into extension state")?;
+    }
+    Ok(())
+}
+
+#[cfg(not(feature = "telegram-v2-host-beta"))]
+pub(crate) async fn import_telegram_config_for_serve(
+    _runtime: &ironclaw_reborn_composition::RebornRuntime,
+    _config: &Option<()>,
+) -> anyhow::Result<()> {
+    Ok(())
+}
+
+#[cfg(feature = "telegram-v2-host-beta")]
+pub(crate) fn configure_telegram_host_ingress_plan_for_serve(
+    input: HostIngressServePlanInput,
+    config: Option<TelegramHostBetaConfig>,
+    section: Option<&ironclaw_reborn_config::TelegramSection>,
+) -> HostIngressServePlanInput {
+    let Some(_config) = config else {
+        return input;
+    };
+    let mode = section
+        .map(|telegram| telegram.host_ingress_mode)
+        .unwrap_or_default();
+    let projection_mode = match mode {
+        ironclaw_reborn_config::TelegramHostIngressMode::Disabled => {
+            ConfiguredHostIngressProjectionMode::Suppress
+        }
+        ironclaw_reborn_config::TelegramHostIngressMode::GenericShadow => {
+            ConfiguredHostIngressProjectionMode::ValidateOnly
+        }
+        ironclaw_reborn_config::TelegramHostIngressMode::Generic => {
+            ConfiguredHostIngressProjectionMode::Serve
+        }
+    };
+    input.with_telegram_host_beta(projection_mode)
+}
+
+#[cfg(not(feature = "telegram-v2-host-beta"))]
+pub(crate) fn configure_telegram_host_ingress_plan_for_serve(
+    input: ironclaw_reborn_composition::HostIngressServePlanInput,
+    _config: Option<()>,
+    _section: Option<&ironclaw_reborn_config::TelegramSection>,
+) -> ironclaw_reborn_composition::HostIngressServePlanInput {
+    input
 }
 
 #[cfg(not(feature = "telegram-v2-host-beta"))]
