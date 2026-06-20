@@ -49,6 +49,14 @@ slack-v2-host-beta = [
     "webui-v2-beta",
     "ironclaw_reborn_composition/slack-v2-host-beta",
 ]
+# Compile in Telegram host-beta extension/ingress support for `ironclaw-reborn
+# serve`. `[telegram].enabled = true` imports host config into the bundled
+# Telegram extension; an already-enabled Telegram extension can also project its
+# updates route.
+telegram-v2-host-beta = [
+    "webui-v2-beta",
+    "ironclaw_reborn_composition/telegram-v2-host-beta",
+]
 openai-compat-beta = [
     "webui-v2-beta",
     "ironclaw_reborn_composition/openai-compat-beta",

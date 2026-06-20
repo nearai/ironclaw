@@ -22,6 +22,11 @@ use ironclaw_reborn_composition::{
     build_slack_host_beta_mounts, build_webui_services_with_slack_host_beta_mounts,
     import_slack_host_beta_config_as_extension_installation,
 };
+#[cfg(feature = "telegram-v2-host-beta")]
+use ironclaw_reborn_composition::{
+    build_telegram_updates_host_ingress_mount_from_enabled_extensions,
+    import_telegram_host_beta_config_as_extension_installation,
+};
 use ironclaw_reborn_config::{IdentitySection, seed_default_config_file_if_missing};
 use ironclaw_reborn_webui_ingress::{
     EnvBearerAuthenticator, RebornWebuiServeOptions, serve_webui_v2,
@@ -185,6 +190,24 @@ impl ServeCommand {
             .as_ref()
             .and_then(|file| file.slack.as_ref())
             .map(|slack| slack.host_ingress_mode)
+            .unwrap_or_default();
+
+        let telegram_host_beta_config =
+            crate::commands::serve_telegram::resolve_telegram_config_for_serve(
+                config_file.as_ref().and_then(|file| file.telegram.as_ref()),
+                &tenant_id,
+                &default_agent_id,
+                default_project_id.as_ref(),
+                &user_id,
+                &boot_config.home().config_file_path(),
+            )?;
+        #[cfg(not(feature = "telegram-v2-host-beta"))]
+        let _ = telegram_host_beta_config;
+        #[cfg(feature = "telegram-v2-host-beta")]
+        let telegram_host_ingress_mode = config_file
+            .as_ref()
+            .and_then(|file| file.telegram.as_ref())
+            .map(|telegram| telegram.host_ingress_mode)
             .unwrap_or_default();
 
         // Resolve listen address with explicit precedence:
@@ -416,11 +439,66 @@ impl ServeCommand {
                         .context("failed to compose Slack extension host-ingress events route")?;
                 None
             };
+            // Telegram updates webhook route, projected from enabled extension
+            // state. Telegram has no legacy direct-build path, so `generic` mounts
+            // the projected route, `generic_shadow` builds+validates it without
+            // serving, and `disabled` (the default) mounts nothing.
+            #[cfg(feature = "telegram-v2-host-beta")]
+            let extension_telegram_updates_mount = if let Some(telegram_config) =
+                telegram_host_beta_config
+            {
+                import_telegram_host_beta_config_as_extension_installation(&runtime, &telegram_config)
+                    .await
+                    .context("failed to import Telegram config into extension state")?;
+                let projected = if telegram_host_ingress_mode.is_generic_shadow()
+                    || telegram_host_ingress_mode.is_generic()
+                {
+                    build_telegram_updates_host_ingress_mount_from_enabled_extensions(&runtime)
+                        .await
+                        .context("failed to compose Telegram extension host-ingress updates route")?
+                } else {
+                    None
+                };
+                if (telegram_host_ingress_mode.is_generic()
+                    || telegram_host_ingress_mode.is_generic_shadow())
+                    && projected.is_none()
+                {
+                    anyhow::bail!(
+                        "Telegram config import did not produce an enabled Telegram extension updates route"
+                    );
+                }
+                if telegram_host_ingress_mode.is_generic_shadow() {
+                    tracing::debug!(
+                        target = "ironclaw::reborn::cli::serve",
+                        "Telegram extension host-ingress route projection validated",
+                    );
+                    None
+                } else if telegram_host_ingress_mode.is_generic() {
+                    projected
+                } else {
+                    None
+                }
+            } else {
+                // Self-project an already-enabled Telegram extension with no [telegram] config.
+                build_telegram_updates_host_ingress_mount_from_enabled_extensions(&runtime)
+                    .await
+                    .context("failed to compose Telegram extension host-ingress updates route")?
+            };
             #[cfg(feature = "slack-v2-host-beta")]
             let operator_route_visibility = if sso_startup.is_none() {
                 SlackOperatorRouteVisibility::Visible
             } else {
                 SlackOperatorRouteVisibility::Hidden
+            };
+            // Advertise Telegram in `/api/webchat/v2/channels/connectable` only
+            // when its updates route is actually mounted (generic mode).
+            #[cfg(feature = "telegram-v2-host-beta")]
+            let telegram_connectable_channels: Vec<
+                ironclaw_reborn_composition::RebornConnectableChannelInfo,
+            > = if extension_telegram_updates_mount.is_some() {
+                vec![ironclaw_reborn_composition::telegram_inbound_proof_code_connectable_channel()]
+            } else {
+                Vec::new()
             };
             #[cfg(feature = "slack-v2-host-beta")]
             let bundle: RebornWebuiBundle = build_webui_services_with_slack_host_beta_mounts(
@@ -428,8 +506,25 @@ impl ServeCommand {
                 None,
                 slack_mounts.as_ref(),
                 operator_route_visibility,
+                #[cfg(feature = "telegram-v2-host-beta")]
+                telegram_connectable_channels,
+                #[cfg(not(feature = "telegram-v2-host-beta"))]
+                Vec::new(),
             )?;
-            #[cfg(not(feature = "slack-v2-host-beta"))]
+            #[cfg(all(
+                not(feature = "slack-v2-host-beta"),
+                feature = "telegram-v2-host-beta"
+            ))]
+            let bundle: RebornWebuiBundle =
+                ironclaw_reborn_composition::build_webui_services_with_telegram_connectable_channel(
+                    &runtime,
+                    None,
+                    !telegram_connectable_channels.is_empty(),
+                )?;
+            #[cfg(all(
+                not(feature = "slack-v2-host-beta"),
+                not(feature = "telegram-v2-host-beta")
+            ))]
             let bundle: RebornWebuiBundle = build_webui_services(&runtime, None)?;
             #[cfg(feature = "openai-compat-beta")]
             let openai_compat_mount = build_openai_compat_route_mount(
@@ -539,6 +634,10 @@ impl ServeCommand {
                     .with_slack_channel_routes(slack_mounts.channel_routes);
             } else if let Some(events_mount) = extension_slack_events_mount {
                 serve_config = serve_config.with_public_route_mount(events_mount);
+            }
+            #[cfg(feature = "telegram-v2-host-beta")]
+            if let Some(updates_mount) = extension_telegram_updates_mount {
+                serve_config = serve_config.with_public_route_mount(updates_mount);
             }
             // Public NEAR AI login callback route (token redirect target). Built
             // from the runtime's LLM seam; absent when no LLM was wired.

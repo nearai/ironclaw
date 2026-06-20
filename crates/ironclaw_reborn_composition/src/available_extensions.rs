@@ -62,6 +62,9 @@ const NEARAI_MCP_MANIFEST: &str =
 #[cfg(feature = "slack-v2-host-beta")]
 const SLACK_MANIFEST: &str =
     include_str!("../../ironclaw_first_party_extensions/assets/slack/manifest.toml");
+#[cfg(feature = "telegram-v2-host-beta")]
+const TELEGRAM_MANIFEST: &str =
+    include_str!("../../ironclaw_first_party_extensions/assets/telegram/manifest.toml");
 
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) struct AvailableExtensionAsset {
@@ -281,6 +284,8 @@ impl AvailableExtensionCatalog {
         ];
         #[cfg(feature = "slack-v2-host-beta")]
         packages.push(slack_package()?);
+        #[cfg(feature = "telegram-v2-host-beta")]
+        packages.push(telegram_package()?);
         Ok(Self::from_packages(packages))
     }
 
@@ -460,6 +465,11 @@ fn slack_package() -> Result<AvailableExtensionPackage, ProductWorkflowError> {
     bundled_extension_package("slack", "Slack", SLACK_MANIFEST, slack_assets())
 }
 
+#[cfg(feature = "telegram-v2-host-beta")]
+fn telegram_package() -> Result<AvailableExtensionPackage, ProductWorkflowError> {
+    bundled_extension_package("telegram", "Telegram", TELEGRAM_MANIFEST, telegram_assets())
+}
+
 pub(crate) fn google_calendar_manifest_digest() -> String {
     sha256_digest_token(GOOGLE_CALENDAR_MANIFEST.as_bytes())
 }
@@ -495,6 +505,11 @@ pub(crate) fn web_access_manifest_digest() -> String {
 #[cfg(feature = "slack-v2-host-beta")]
 pub(crate) fn slack_manifest_digest() -> String {
     sha256_digest_token(SLACK_MANIFEST.as_bytes())
+}
+
+#[cfg(feature = "telegram-v2-host-beta")]
+pub(crate) fn telegram_manifest_digest() -> String {
+    sha256_digest_token(TELEGRAM_MANIFEST.as_bytes())
 }
 
 pub(crate) fn nearai_mcp_manifest_toml_for_config(
@@ -1299,6 +1314,11 @@ fn gmail_assets() -> Vec<AvailableExtensionAsset> {
 #[cfg(feature = "slack-v2-host-beta")]
 fn slack_assets() -> Vec<AvailableExtensionAsset> {
     vec![bytes_asset("manifest.toml", SLACK_MANIFEST.as_bytes())]
+}
+
+#[cfg(feature = "telegram-v2-host-beta")]
+fn telegram_assets() -> Vec<AvailableExtensionAsset> {
+    vec![bytes_asset("manifest.toml", TELEGRAM_MANIFEST.as_bytes())]
 }
 
 fn bytes_asset(path: &str, bytes: &[u8]) -> AvailableExtensionAsset {

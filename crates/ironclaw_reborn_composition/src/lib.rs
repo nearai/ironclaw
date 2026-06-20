@@ -48,7 +48,7 @@ mod failure_summary;
 mod google_oauth;
 mod gsuite;
 mod hooks;
-#[cfg(feature = "slack-v2-host-beta")]
+#[cfg(any(feature = "slack-v2-host-beta", feature = "telegram-v2-host-beta"))]
 pub mod host_ingress;
 mod input;
 mod lifecycle;
@@ -141,6 +141,18 @@ mod slack_personal_binding_pairing_serve;
 mod slack_personal_binding_serve;
 #[cfg(feature = "slack-v2-host-beta")]
 pub mod slack_serve;
+#[cfg(feature = "telegram-v2-host-beta")]
+mod telegram_connectable_channel;
+#[cfg(feature = "telegram-v2-host-beta")]
+mod telegram_delivery;
+#[cfg(feature = "telegram-v2-host-beta")]
+mod telegram_egress;
+#[cfg(feature = "telegram-v2-host-beta")]
+mod telegram_extension_settings;
+#[cfg(feature = "telegram-v2-host-beta")]
+pub mod telegram_host_beta;
+#[cfg(feature = "telegram-v2-host-beta")]
+pub mod telegram_host_ingress;
 #[cfg(feature = "test-support")]
 pub mod test_support;
 mod trace_capture;
@@ -192,6 +204,10 @@ pub use hooks::{
 pub use input::{OAuthClientConfig, RebornBuildInput, RebornRuntimeProcessBinding};
 #[cfg(feature = "webui-v2-beta")]
 pub use ironclaw_auth::GoogleOAuthRouteConfig;
+#[cfg(feature = "telegram-v2-host-beta")]
+pub use ironclaw_product_adapters::AdapterInstallationId;
+#[cfg(feature = "telegram-v2-host-beta")]
+pub use ironclaw_product_workflow::RebornConnectableChannelInfo;
 pub use ironclaw_product_workflow::{
     LifecycleExtensionSource, LifecycleExtensionSummary, LifecyclePhase, LifecycleProductPayload,
     LifecycleProductResponse,
@@ -334,6 +350,17 @@ pub use slack_serve::{
     SLACK_EVENTS_PATH, SlackEventsRouteState, SlackEventsWebhookDispatcher,
     SlackInstallationSelector, SlackTeamId, slack_events_route_descriptors,
     slack_events_route_mount,
+};
+#[cfg(feature = "telegram-v2-host-beta")]
+pub use telegram_connectable_channel::{
+    build_webui_services_with_telegram_connectable_channel,
+    telegram_inbound_proof_code_connectable_channel,
+};
+#[cfg(feature = "telegram-v2-host-beta")]
+pub use telegram_host_beta::{
+    TelegramHostBetaBuildError, TelegramHostBetaConfig,
+    build_telegram_updates_host_ingress_mount_from_enabled_extensions,
+    import_telegram_host_beta_config_as_extension_installation, telegram_protocol_egress,
 };
 pub use trajectory_observer::RebornTrajectoryObserver;
 pub use webui::{RebornWebuiBundle, build_webui_services};
@@ -770,7 +797,7 @@ fn invocation_mount_view_for_segments(
 
 #[cfg(all(
     any(feature = "libsql", feature = "postgres"),
-    feature = "slack-v2-host-beta"
+    any(feature = "slack-v2-host-beta", feature = "telegram-v2-host-beta")
 ))]
 pub(crate) fn slack_host_state_mount_view(
     scope: &ResourceScope,
@@ -793,6 +820,15 @@ pub(crate) fn slack_host_state_mount_view(
             MountAlias::new("/tenant-shared/slack-extension-installations")?,
             VirtualPath::new(format!(
                 "/tenants/{tenant_id}/shared/slack-extension-installations"
+            ))?,
+            MountPermissions::read_write_list_delete(),
+        ),
+        // Telegram extension-projected host state lives alongside Slack's in the
+        // shared host-state filesystem; grant its installation-settings root.
+        MountGrant::new(
+            MountAlias::new("/tenant-shared/telegram-extension-installations")?,
+            VirtualPath::new(format!(
+                "/tenants/{tenant_id}/shared/telegram-extension-installations"
             ))?,
             MountPermissions::read_write_list_delete(),
         ),
