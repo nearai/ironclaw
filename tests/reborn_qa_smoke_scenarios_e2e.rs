@@ -889,12 +889,9 @@ async fn qa_plugin_browser_mcp_artifact_and_image_capability_surface_smokes() {
 #[tokio::test]
 async fn qa_github_capability_smoke_discovers_actions_without_live_github() {
     let expected = [
-        "github.get_repo",
-        "github.list_issues",
-        "github.create_issue",
-        "github.get_pull_request",
-        "github.create_pr_review",
-        "github.get_workflow_runs",
+        "github.search_issues",
+        "github.get_issue",
+        "github.comment_issue",
     ];
     let model_gateway = RebornTraceReplayModelGateway::with_scripted_steps([
         RebornModelReplayStep::AssertProviderToolsThenResponse {

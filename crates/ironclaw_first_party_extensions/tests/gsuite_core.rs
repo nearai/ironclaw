@@ -1121,6 +1121,11 @@ async fn gsuite_handler_fails_before_egress_when_google_account_is_missing_or_am
     .await;
 
     assert_eq!(error.kind(), RuntimeDispatchErrorKind::Client);
+    assert!(matches!(
+        error.reason(),
+        Some(GsuiteCredentialDispatchReason::Recovery(recovery))
+            if recovery.kind() == ironclaw_auth::CredentialRecoveryKind::AccountSelectionRequired
+    ));
     assert!(egress.requests().is_empty());
 }
 

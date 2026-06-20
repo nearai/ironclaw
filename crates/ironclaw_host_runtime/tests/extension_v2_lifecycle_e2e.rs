@@ -9,8 +9,8 @@ use ironclaw_dispatcher::{
     RuntimeAdapterResult, RuntimeDispatchErrorKind, RuntimeDispatcher,
 };
 use ironclaw_extensions::{
-    ExtensionError, ExtensionLifecycleService, ExtensionManifest, ExtensionPackage,
-    ExtensionRegistry, ExtensionRuntime, ManifestSource, ManifestV2Error,
+    CapabilityVisibility, ExtensionError, ExtensionLifecycleService, ExtensionManifest,
+    ExtensionPackage, ExtensionRegistry, ExtensionRuntime, ManifestSource, ManifestV2Error,
 };
 use ironclaw_filesystem::LocalFilesystem;
 use ironclaw_host_api::{
@@ -161,19 +161,56 @@ async fn github_v2_package_discovers_and_publishes_issue_hot_catalog() {
         &package.manifest.runtime,
         ExtensionRuntime::Wasm { module } if module.as_str() == "wasm/github_tool.wasm"
     ));
+    let declared_capability_ids = package
+        .capabilities
+        .iter()
+        .map(|capability| capability.id.as_str())
+        .collect::<Vec<_>>();
+    for expected in [
+        "github.get_repo",
+        "github.search_issues",
+        "github.get_issue",
+        "github.comment_issue",
+        "github.handle_webhook",
+    ] {
+        assert!(declared_capability_ids.contains(&expected));
+    }
+    let hot_capability_ids = [
+        "github.search_issues",
+        "github.get_issue",
+        "github.comment_issue",
+    ];
+    let mut model_visible_capability_ids = package
+        .manifest
+        .capabilities
+        .iter()
+        .filter(|capability| capability.visibility == CapabilityVisibility::Model)
+        .map(|capability| capability.id.as_str())
+        .collect::<Vec<_>>();
+    model_visible_capability_ids.sort_unstable();
     assert_eq!(
-        package
-            .capabilities
-            .iter()
-            .map(|capability| capability.id.as_str())
-            .collect::<Vec<_>>(),
+        model_visible_capability_ids,
         vec![
-            "github.search_issues",
+            "github.comment_issue",
             "github.get_issue",
-            "github.comment_issue"
+            "github.search_issues"
         ]
     );
-    for capability in &package.manifest.capabilities {
+    assert_eq!(
+        package
+            .manifest
+            .capabilities
+            .iter()
+            .find(|capability| capability.id.as_str() == "github.get_repo")
+            .map(|capability| capability.visibility),
+        Some(CapabilityVisibility::Api)
+    );
+    for capability in package
+        .manifest
+        .capabilities
+        .iter()
+        .filter(|capability| hot_capability_ids.contains(&capability.id.as_str()))
+    {
         let expected_effects = if capability.id.as_str() == "github.comment_issue" {
             vec![
                 EffectKind::DispatchCapability,
@@ -184,8 +221,13 @@ async fn github_v2_package_discovers_and_publishes_issue_hot_catalog() {
         } else {
             vec![EffectKind::Network, EffectKind::UseSecret]
         };
+        let expected_permission = if capability.id.as_str() == "github.comment_issue" {
+            PermissionMode::Ask
+        } else {
+            PermissionMode::Allow
+        };
         assert_eq!(capability.effects, expected_effects);
-        assert_eq!(capability.default_permission, PermissionMode::Ask);
+        assert_eq!(capability.default_permission, expected_permission);
         assert_eq!(
             capability
                 .required_host_ports
@@ -274,7 +316,9 @@ async fn github_v2_package_discovers_and_publishes_issue_hot_catalog() {
         get_issue
             .prompt_doc
             .as_deref()
-            .is_some_and(|doc| doc.contains("github.get_issue") && doc.contains("read-only"))
+            .is_some_and(|doc| doc.contains("github.get_issue")
+                && doc.contains("reads from the GitHub API")
+                && doc.contains("configured GitHub product-auth account"))
     );
 
     let comment_issue = hot_catalog
