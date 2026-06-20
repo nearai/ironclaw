@@ -469,8 +469,8 @@ const _: fn(&CredentialCacheEntry) = |entry| {
 mod tests {
     use super::*;
     use ironclaw_host_api::{
-        InvocationId, NetworkMethod, NetworkPolicy, ResourceScope, RuntimeKind, TenantId, Timestamp,
-        UserId,
+        InvocationId, NetworkMethod, NetworkPolicy, ResourceScope, RuntimeKind, TenantId,
+        Timestamp, UserId,
     };
     use ironclaw_secrets::{
         InMemorySecretStore, SecretLease, SecretLeaseId, SecretMetadata, SecretStoreError,

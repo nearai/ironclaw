@@ -3217,7 +3217,9 @@ async fn filesystem_oauth_cas_conflict_branch_purges_previous_secrets() {
 /// surface used by most fixture helpers). This is only for scope construction;
 /// the surface does not affect the keepalive candidate filter.
 #[cfg(any(feature = "libsql", feature = "postgres"))]
-fn scope_for_resource(resource: ironclaw_host_api::ResourceScope) -> ironclaw_auth::AuthProductScope {
+fn scope_for_resource(
+    resource: ironclaw_host_api::ResourceScope,
+) -> ironclaw_auth::AuthProductScope {
     ironclaw_auth::AuthProductScope::new(resource, AuthSurface::Web)
 }
 
@@ -3415,8 +3417,7 @@ async fn list_refresh_candidates_covers_agent_and_project_scopes() {
     let candidates = service.list_refresh_candidates().await;
 
     // ── Assert: all 4 scope shapes are returned ───────────────────────────────
-    let candidate_ids: std::collections::BTreeSet<_> =
-        candidates.iter().map(|a| a.id).collect();
+    let candidate_ids: std::collections::BTreeSet<_> = candidates.iter().map(|a| a.id).collect();
 
     assert!(
         candidate_ids.contains(&plain_account.id),
