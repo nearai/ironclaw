@@ -101,7 +101,6 @@ use ironclaw_reborn::{
         DefaultPlannedRuntimeConfig, DefaultPlannedRuntimeParts, RebornRuntimeLoopComposition,
         RuntimeTurnStateStore, build_default_planned_runtime,
     },
-    turn_runner::TurnRunnerWorkerConfig,
 };
 use ironclaw_reborn_composition::{
     ProductLiveCapabilityIo, ProductLiveVisibleCapabilityRequestConfig, RebornBuildInput,
@@ -956,11 +955,8 @@ impl RebornBinaryE2EHarness {
             subagent_spawn_limits: ironclaw_loop_support::SubagentSpawnLimits::default(),
             loop_exit_evidence: evidence,
             config: DefaultPlannedRuntimeConfig {
-                worker: TurnRunnerWorkerConfig {
-                    heartbeat_interval: Duration::from_millis(20),
-                    poll_interval: Duration::from_millis(10),
-                    scope_filter: restrict_worker_to_initial_scope.then(|| turn_scope.clone()),
-                },
+                heartbeat_interval: Duration::from_millis(20),
+                poll_interval: Duration::from_millis(10),
                 ..DefaultPlannedRuntimeConfig::default()
             },
             model_route_resolver: None,

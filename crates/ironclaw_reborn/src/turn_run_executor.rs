@@ -93,8 +93,9 @@ impl TurnRunExecutor for RebornTurnRunExecutor {
     ) -> Result<(), TurnRunExecutorError> {
         match self.invoke_driver(&claimed, &transitions).await {
             Ok(exit) => {
-                self.apply_exit(&claimed, exit, &transitions).await;
-                Ok(())
+                self.apply_exit(&claimed, exit, &transitions)
+                    .await
+                    .map_err(|()| unknown_failure_error().clone())
             }
             Err(err) => {
                 let sanitized = match &err {
@@ -237,12 +238,21 @@ impl RebornTurnRunExecutor {
             .map_err(DriverInvocationError::RouteSnapshotPersistenceFailed)
     }
 
+    /// Apply a `LoopExit` through the trusted applier.
+    ///
+    /// Returns:
+    /// - `Ok(())` if the run reached a terminal state (either via successful
+    ///   exit application or via a successful fallback `record_runner_failure`).
+    /// - `Err(())` only when BOTH the exit applier AND the fallback
+    ///   `record_runner_failure` fail — a double-failure that leaves the run in
+    ///   an unknown state. The caller (`execute_claimed_run`) converts this to a
+    ///   `TurnRunExecutorError` so the scheduler can record a terminal failure.
     async fn apply_exit(
         &self,
         claimed: &ClaimedTurnRun,
         exit: LoopExit,
         transitions: &Arc<dyn TurnRunTransitionPort>,
-    ) {
+    ) -> Result<(), ()> {
         let run_id = claimed.state.run_id;
         let runner_id = claimed.runner_id;
         let lease_token = claimed.lease_token;
@@ -255,6 +265,7 @@ impl RebornTurnRunExecutor {
                     status = ?state.status,
                     "loop exit applied successfully"
                 );
+                Ok(())
             }
             Err(err) => {
                 error!(
@@ -263,12 +274,13 @@ impl RebornTurnRunExecutor {
                     error = %err,
                     "failed to apply loop exit"
                 );
-                // FIX 2: use infallible sanitized_failure — it falls back to
-                // "unknown_failure" before returning None, so the run always
-                // reaches a terminal state instead of leaking a slot.
+                // Exit application failed: try recording a terminal failure
+                // through the transitions port so the run is not stranded.
+                // Falls back to "unknown_failure" before returning None so the
+                // run always reaches a terminal state if the port cooperates.
                 let failure = sanitized_failure("exit_application_failed")
                     .unwrap_or_else(|| unknown_failure_error().failure().clone());
-                if let Err(record_err) = transitions
+                match transitions
                     .record_runner_failure(RecordRunnerFailureRequest {
                         run_id,
                         runner_id,
@@ -277,12 +289,19 @@ impl RebornTurnRunExecutor {
                     })
                     .await
                 {
-                    debug!(
-                        runner_id = ?runner_id,
-                        run_id = ?run_id,
-                        error = %record_err,
-                        "failed to record terminal failure after exit application failure"
-                    );
+                    Ok(_) => Ok(()),
+                    Err(record_err) => {
+                        // Double-failure: both the applier and the fallback
+                        // transition failed. Signal the caller so the scheduler
+                        // can attempt its own terminal-failure recording.
+                        error!(
+                            runner_id = ?runner_id,
+                            run_id = ?run_id,
+                            error = %record_err,
+                            "failed to record terminal failure after exit application failure"
+                        );
+                        Err(())
+                    }
                 }
             }
         }
@@ -916,6 +935,104 @@ mod tests {
         RebornTurnRunExecutor::new(loop_exit_applier, driver_registry, host_factory)
     }
 
+    /// Variant that wires the SAME shared `transitions` port into both the
+    /// `LoopExitApplier` and the `execute_claimed_run` call, so tests can
+    /// inspect / control the full exit path with a single spy.
+    fn make_executor_with_driver_and_shared_transitions(
+        host_factory: Arc<dyn crate::turn_runner::HostFactory>,
+        transitions: Arc<dyn TurnRunTransitionPort>,
+    ) -> RebornTurnRunExecutor {
+        let evidence = Arc::new(InMemoryLoopExitEvidencePort::new());
+        let loop_exit_applier =
+            Arc::new(LoopExitApplier::new(Arc::clone(&transitions), evidence));
+        let mut registry = DriverRegistry::new();
+        registry
+            .register_driver(
+                Arc::new(CompletingDriver::new(test_descriptor())),
+                DriverRequirements::all_optional(),
+                DriverKind::Production,
+            )
+            .expect("driver registration must succeed");
+        let driver_registry = Arc::new(registry);
+        RebornTurnRunExecutor::new(loop_exit_applier, driver_registry, host_factory)
+    }
+
+    /// A `TurnRunTransitionPort` that fails on both `apply_validated_loop_exit`
+    /// AND `fail_run` (used by the default `record_runner_failure` impl).
+    ///
+    /// Used to exercise the double-failure path in `apply_exit`.
+    struct DoubleFailingTransitionPort;
+
+    #[async_trait]
+    impl TurnRunTransitionPort for DoubleFailingTransitionPort {
+        async fn claim_next_run(
+            &self,
+            _request: ClaimRunRequest,
+        ) -> Result<Option<ClaimedTurnRun>, TurnError> {
+            Ok(None)
+        }
+
+        async fn heartbeat(&self, _request: HeartbeatRequest) -> Result<EventCursor, TurnError> {
+            Ok(EventCursor(0))
+        }
+
+        async fn recover_expired_leases(
+            &self,
+            _request: RecoverExpiredLeasesRequest,
+        ) -> Result<RecoverExpiredLeasesResponse, TurnError> {
+            Ok(RecoverExpiredLeasesResponse { recovered: vec![] })
+        }
+
+        async fn record_model_route_snapshot(
+            &self,
+            _request: RecordModelRouteSnapshotRequest,
+        ) -> Result<TurnRunState, TurnError> {
+            Ok(fake_run_state())
+        }
+
+        async fn block_run(&self, _request: BlockRunRequest) -> Result<TurnRunState, TurnError> {
+            Ok(fake_run_state())
+        }
+
+        async fn complete_run(
+            &self,
+            _request: CompleteRunRequest,
+        ) -> Result<TurnRunState, TurnError> {
+            Ok(fake_run_state())
+        }
+
+        async fn cancel_run(
+            &self,
+            _request: CancelRunCompletionRequest,
+        ) -> Result<TurnRunState, TurnError> {
+            Ok(fake_run_state())
+        }
+
+        async fn fail_run(&self, _request: FailRunRequest) -> Result<TurnRunState, TurnError> {
+            Err(TurnError::Unavailable {
+                reason: "double-failing: fail_run always returns Err".to_string(),
+            })
+        }
+
+        async fn relinquish_run(
+            &self,
+            _request: RelinquishRunRequest,
+        ) -> Result<TurnRunState, TurnError> {
+            Ok(fake_run_state())
+        }
+
+        /// Fail here so `LoopExitApplier::apply` returns `Err`, triggering the
+        /// fallback `record_runner_failure` path in `apply_exit`.
+        async fn apply_validated_loop_exit(
+            &self,
+            _request: ApplyValidatedLoopExitRequest,
+        ) -> Result<TurnRunState, TurnError> {
+            Err(TurnError::Unavailable {
+                reason: "double-failing: apply_validated_loop_exit always returns Err".to_string(),
+            })
+        }
+    }
+
     /// When `HostFactory::create_host` returns `Err`, `execute_claimed_run` must
     /// return `Err(TurnRunExecutorError)` with category `"host_creation_failed"`.
     /// The executor must NOT itself call `fail_run` — that is the scheduler's job.
@@ -971,6 +1088,37 @@ mod tests {
             transitions.fail_run_call_count(),
             0,
             "executor must NOT call fail_run; scheduler owns terminal failure recording"
+        );
+    }
+
+    /// When BOTH `loop_exit_applier.apply` (via `apply_validated_loop_exit`) AND
+    /// the fallback `transitions.record_runner_failure` (via `fail_run`) fail,
+    /// `execute_claimed_run` must return `Err` so the scheduler can attempt its
+    /// own terminal-failure recording.
+    ///
+    /// Uses `make_executor_with_driver_and_shared_transitions` to wire the same
+    /// `DoubleFailingTransitionPort` into both the `LoopExitApplier` and the
+    /// `execute_claimed_run` call.
+    #[tokio::test]
+    async fn double_failure_in_apply_exit_returns_err() {
+        // SucceedingHostFactoryWithSnapshot: host creation succeeds, driver runs,
+        // returns LoopExit::Completed — so we reach apply_exit.
+        // But DoubleFailingTransitionPort makes both apply_validated_loop_exit
+        // and fail_run return Err, triggering the double-failure path.
+        let transitions: Arc<dyn TurnRunTransitionPort> =
+            Arc::new(DoubleFailingTransitionPort);
+        let executor = make_executor_with_driver_and_shared_transitions(
+            Arc::new(SucceedingHostFactoryWithSnapshot),
+            Arc::clone(&transitions),
+        );
+
+        let result = executor
+            .execute_claimed_run(test_claimed_run(), transitions)
+            .await;
+
+        assert!(
+            result.is_err(),
+            "expected Err when both loop_exit_applier.apply and record_runner_failure fail"
         );
     }
 }
