@@ -1,48 +1,15 @@
+# This repository is a deployment target. Dependency updates flow through
+# upstream source branches and are mirrored here after review.
 version: 2
 updates:
   - package-ecosystem: cargo
     directory: "/"
     schedule:
       interval: weekly
-    open-pull-requests-limit: 10
-    groups:
-      tokio-ecosystem:
-        patterns:
-          - "tokio*"
-          - "hyper*"
-          - "axum*"
-          - "tower*"
-      serialization:
-        patterns:
-          - "serde*"
-          - "prost*"
-      wasm:
-        patterns:
-          - "wasmtime*"
-          - "wit-*"
-          - "wasm-*"
-          - "cargo-component*"
-      everything-else:
-        patterns:
-          - "*"
-        exclude-patterns:
-          - "tokio*"
-          - "hyper*"
-          - "axum*"
-          - "tower*"
-          - "serde*"
-          - "prost*"
-          - "wasmtime*"
-          - "wit-*"
-          - "wasm-*"
-          - "cargo-component*"
+    open-pull-requests-limit: 0
 
   - package-ecosystem: github-actions
     directory: "/"
     schedule:
       interval: weekly
-    open-pull-requests-limit: 5
-    groups:
-      actions:
-        patterns:
-          - "*"
+    open-pull-requests-limit: 0
