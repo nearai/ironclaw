@@ -20,20 +20,20 @@ REPO="${REPO:?REPO is required}"
 set_exclusive_label() {
   local prefix="$1" desired="$2"
 
-  # Fetch current labels on the PR
   local current
-  current=$(gh pr view "$PR_NUMBER" --repo "$REPO" --json labels --jq '.labels[].name')
+  current=$(gh api "repos/${REPO}/issues/${PR_NUMBER}/labels" --jq '.[].name')
 
-  # Remove any existing label with the same prefix
   while IFS= read -r label; do
     [[ -z "$label" ]] && continue
     if [[ "$label" == "${prefix}:"* && "$label" != "$desired" ]]; then
-      gh pr edit "$PR_NUMBER" --repo "$REPO" --remove-label "$label" 2>/dev/null || true
+      local encoded_label
+      encoded_label=$(jq -rn --arg label "$label" '$label | @uri')
+      gh api --method DELETE "repos/${REPO}/issues/${PR_NUMBER}/labels/${encoded_label}" >/dev/null || true
     fi
   done <<< "$current"
 
-  # Add the desired label
-  gh pr edit "$PR_NUMBER" --repo "$REPO" --add-label "$desired"
+  gh api --method POST "repos/${REPO}/issues/${PR_NUMBER}/labels" \
+    --field "labels[]=${desired}" >/dev/null
 }
 
 # ─── size ───────────────────────────────────────────────────────────────────
@@ -41,14 +41,16 @@ set_exclusive_label() {
 classify_size() {
   # Sum changed lines across non-doc files
   local total
-  total=$(gh api "repos/${REPO}/pulls/${PR_NUMBER}/files" \
-    --paginate --jq '
-      [.[]
-        | select(.filename | test("\\.(md|txt|rst|adoc)$") | not)
-        | select(.filename | test("^tests/|_test\\.rs$|_tests\\.rs$|/tests/|\\.test\\.[jt]sx?$|\\.spec\\.[jt]sx?$") | not)
-        | .changes]
-      | add // 0
-    ')
+  total=$(
+    gh api "repos/${REPO}/pulls/${PR_NUMBER}/files" \
+      --paginate --jq '
+        [.[]
+          | select(.filename | test("\\.(md|txt|rst|adoc)$") | not)
+          | select(.filename | test("^tests/|_test\\.rs$|_tests\\.rs$|/tests/|\\.test\\.[jt]sx?$|\\.spec\\.[jt]sx?$") | not)
+          | .changes]
+        | add // 0
+      ' | awk '{ total += $1 } END { print total + 0 }'
+  )
 
   local label
   if   (( total < 10 ));  then label="size: XS"
@@ -67,7 +69,7 @@ classify_size() {
 classify_risk() {
   # If "risk: manual" is present, skip — it's a sticky override
   local current
-  current=$(gh pr view "$PR_NUMBER" --repo "$REPO" --json labels --jq '.labels[].name')
+  current=$(gh api "repos/${REPO}/issues/${PR_NUMBER}/labels" --jq '.[].name')
   if echo "$current" | grep -qx "risk: manual"; then
     echo "Risk: skipped (manual override)"
     return
