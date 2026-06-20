@@ -6,11 +6,10 @@ use ironclaw_extensions::{
     CapabilityVisibility, ExtensionManifestV2, ExtensionRuntimeV2, HostApiContractRegistry,
     HostApiId, HostApiManifestContract, HostApiManifestProjection, HostApiMultiplicity,
     HostApiRefV2, MANIFEST_SCHEMA_VERSION, ManifestSectionPath, ManifestSource, ManifestV2Error,
-    ReferencedCredential,
 };
 use ironclaw_host_api::{
-    CapabilityProfileId, CredentialHandle, ExtensionId, HostPortCatalog, HostPortCatalogEntry,
-    HostPortId, NetworkScheme, NetworkTargetPattern, PermissionMode, RequestedTrustClass,
+    CapabilityProfileId, ExtensionId, HostPortCatalog, HostPortCatalogEntry, HostPortId,
+    NetworkScheme, NetworkTargetPattern, PermissionMode, RequestedTrustClass,
     RuntimeCredentialAccountProviderId, RuntimeCredentialRequirementSource,
     RuntimeCredentialTarget, RuntimeKind, SecretHandle, TrustClass,
 };
@@ -1219,31 +1218,14 @@ impl HostApiManifestContract for FakeHostApiContract {
         section: &toml::Value,
     ) -> Result<HostApiManifestProjection, String> {
         self.validate_section_with_context(context, host_api, section)?;
-        let declared_credentials = self
-            .declared_credentials
-            .iter()
-            .map(|handle| CredentialHandle::new(*handle).map_err(|error| error.to_string()))
-            .collect::<Result<Vec<_>, _>>()?;
-        let referenced_credentials = self
-            .referenced_credentials
-            .iter()
-            .map(|handle| {
-                CredentialHandle::new(*handle)
-                    .map_err(|error| error.to_string())
-                    .map(|handle| {
-                        ReferencedCredential::new(
-                            handle,
-                            host_api.id.clone(),
-                            host_api.section.clone(),
-                        )
-                    })
-            })
-            .collect::<Result<Vec<_>, _>>()?;
-        Ok(HostApiManifestProjection {
-            capabilities: Vec::new(),
-            declared_credentials,
-            referenced_credentials,
-        })
+        let mut projection = HostApiManifestProjection::default();
+        projection
+            .declare_credential_handles(self.declared_credentials.iter().copied())
+            .map_err(|error| error.to_string())?;
+        projection
+            .reference_credential_handles(host_api, self.referenced_credentials.iter().copied())
+            .map_err(|error| error.to_string())?;
+        Ok(projection)
     }
 }
 

@@ -1,8 +1,10 @@
 use std::collections::BTreeSet;
 
-use ironclaw_host_api::CredentialHandle;
+use ironclaw_host_api::{CredentialHandle, CredentialHandleError};
 
-use crate::v2::{HostApiId, ManifestSectionPath, ManifestV2Error};
+use crate::v2::{
+    HostApiId, HostApiManifestProjection, HostApiRefV2, ManifestSectionPath, ManifestV2Error,
+};
 
 /// Credential handle reference reported by one host-api manifest contract.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -12,17 +14,39 @@ pub struct ReferencedCredential {
     pub section: ManifestSectionPath,
 }
 
-impl ReferencedCredential {
-    pub fn new(
-        handle: CredentialHandle,
-        host_api: HostApiId,
-        section: ManifestSectionPath,
-    ) -> Self {
-        Self {
-            handle,
-            host_api,
-            section,
+impl HostApiManifestProjection {
+    pub fn declare_credential_handles<I, S>(
+        &mut self,
+        handles: I,
+    ) -> Result<(), CredentialHandleError>
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<str>,
+    {
+        for handle in handles {
+            self.declared_credentials
+                .push(CredentialHandle::new(handle.as_ref())?);
         }
+        Ok(())
+    }
+
+    pub fn reference_credential_handles<I, S>(
+        &mut self,
+        host_api: &HostApiRefV2,
+        handles: I,
+    ) -> Result<(), CredentialHandleError>
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<str>,
+    {
+        for handle in handles {
+            self.referenced_credentials.push(ReferencedCredential {
+                handle: CredentialHandle::new(handle.as_ref())?,
+                host_api: host_api.id.clone(),
+                section: host_api.section.clone(),
+            });
+        }
+        Ok(())
     }
 }
 
