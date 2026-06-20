@@ -241,12 +241,18 @@ impl MemoryDocumentIndexRepository for InMemoryMemoryDocumentRepository {
         expected_content_hash: &str,
         chunks: &[MemoryChunkWrite],
     ) -> Result<MemoryChunkReplaceOutcome, FilesystemError> {
-        let current = self.read_document(path).await?;
-        let Some(bytes) = current else {
+        let documents = self.documents.lock().map_err(|_| {
+            memory_error(
+                path.virtual_path().unwrap_or_else(|_| valid_memory_path()),
+                FilesystemOperation::ReadFile,
+                "memory document repository lock poisoned",
+            )
+        })?;
+        let Some(bytes) = documents.get(path) else {
             return Ok(MemoryChunkReplaceOutcome::SkippedMissingDocument);
         };
-        let current_hash = String::from_utf8(bytes)
-            .map(|content| content_sha256(&content))
+        let current_hash = std::str::from_utf8(bytes)
+            .map(content_sha256)
             .map_err(|_| {
                 memory_error(
                     path.virtual_path().unwrap_or_else(|_| valid_memory_path()),

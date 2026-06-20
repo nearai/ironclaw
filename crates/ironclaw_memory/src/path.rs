@@ -151,6 +151,46 @@ impl MemoryDocumentPath {
     }
 }
 
+/// Build the canonical relative path for a stable keyed learning document.
+pub fn stable_learning_document_relative_path(
+    category: &str,
+    key: &str,
+) -> Result<String, HostApiError> {
+    Ok(format!(
+        "keyed/{}/{}.md",
+        encode_learning_path_segment(category)?,
+        encode_learning_path_segment(key)?
+    ))
+}
+
+fn encode_learning_path_segment(raw: &str) -> Result<String, HostApiError> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Err(HostApiError::InvalidId {
+            kind: "memory learning path segment",
+            value: raw.to_string(),
+            reason: "segment must not be empty".to_string(),
+        });
+    }
+    let mut encoded = String::new();
+    for byte in trimmed.bytes() {
+        if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.') {
+            encoded.push(char::from(byte));
+        } else {
+            encoded.push('_');
+            encoded.push_str(&format!("{byte:02x}"));
+        }
+    }
+    if encoded == "." || encoded == ".." {
+        return Err(HostApiError::InvalidId {
+            kind: "memory learning path segment",
+            value: raw.to_string(),
+            reason: "segment must not resolve to a reserved path segment".to_string(),
+        });
+    }
+    Ok(encoded)
+}
+
 pub(crate) struct ParsedMemoryPath {
     pub(crate) scope: MemoryDocumentScope,
     pub(crate) relative_path: Option<String>,

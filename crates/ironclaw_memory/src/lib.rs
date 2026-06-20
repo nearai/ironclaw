@@ -41,7 +41,7 @@ pub use metadata::{
     CONFIG_FILE_NAME, DocumentMetadata, HygieneMetadata, LearningMetadata,
     MemoryBackendWriteOptions, MemoryWriteOptions,
 };
-pub use path::{MemoryDocumentPath, MemoryDocumentScope};
+pub use path::{MemoryDocumentPath, MemoryDocumentScope, stable_learning_document_relative_path};
 pub use redaction::redact_sensitive_memory_content;
 pub use repo::{
     FilesystemMemoryDocumentRepository, InMemoryMemoryDocumentRepository, MemoryAppendOutcome,

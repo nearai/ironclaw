@@ -1728,6 +1728,39 @@ async fn memory_write_key_overwrites_same_category_without_search_ghosts() {
 }
 
 #[tokio::test]
+async fn memory_write_rejects_invalid_learning_metadata_inputs() {
+    let runtime = runtime_with_filesystem(InMemoryBackend::new());
+    let context = execution_context_with_mounts(
+        [MEMORY_WRITE_CAPABILITY_ID],
+        memory_mounts(MountPermissions::read_write_list_delete()),
+    );
+
+    let invalid_inputs = [
+        json!({"key": "bad confidence", "confidence": 0, "content": "invalid learning"}),
+        json!({"key": "bad confidence", "confidence": 11, "content": "invalid learning"}),
+        json!({"key": "bad confidence", "confidence": "high", "content": "invalid learning"}),
+        json!({"key": "", "content": "invalid learning"}),
+        json!({"key": "valid", "category": "", "content": "invalid learning"}),
+        json!({"key": "valid", "source": "", "content": "invalid learning"}),
+        json!({"key": "valid", "created_at": "", "content": "invalid learning"}),
+        json!({"key": 42, "content": "invalid learning"}),
+        json!({"key": "valid", "category": 42, "content": "invalid learning"}),
+        json!({"metadata": {"key": "nested", "confidence": 11}, "content": "invalid learning"}),
+        json!({"metadata": {"key": "nested", "confidence": 999}, "content": "invalid learning"}),
+        json!({"metadata": {"key": "nested", "source": ""}, "content": "invalid learning"}),
+        json!({"metadata": {"key": 42, "confidence": 5}, "content": "invalid learning"}),
+    ];
+
+    for input in invalid_inputs {
+        let error =
+            invoke_with_context(&runtime, MEMORY_WRITE_CAPABILITY_ID, input, context.clone())
+                .await
+                .unwrap_err();
+        assert_eq!(error, RuntimeFailureKind::InvalidInput);
+    }
+}
+
+#[tokio::test]
 async fn memory_read_and_search_redact_sensitive_learning_content() {
     let runtime = runtime_with_filesystem(InMemoryBackend::new());
     let context = execution_context_with_mounts(
@@ -1743,8 +1776,10 @@ async fn memory_read_and_search_redact_sensitive_learning_content() {
         &runtime,
         MEMORY_WRITE_CAPABILITY_ID,
         json!({
-            "key": "database access",
-            "category": "fact",
+            "key": "database access postgres://app:swordfish@db.example/app",
+            "category": "secret=hunter2",
+            "source": "OPENAI_API_KEY=sk-proj-test1234567890abcdefghij",
+            "created_at": "client_secret=supersecret",
             "content": "database access marker postgres://app:swordfish@db.example/app region=us-east-1"
         }),
         context.clone(),
@@ -1780,6 +1815,18 @@ async fn memory_read_and_search_redact_sensitive_learning_content() {
     assert!(!result.contains("swordfish"));
     assert!(result.contains("[REDACTED - sensitive]"));
     assert!(result.contains("region=us-east-1"));
+    let result = &search["results"][0];
+    for field in ["key", "category", "source", "created_at"] {
+        let value = result[field].as_str().expect("redacted metadata field");
+        assert!(
+            value.contains("[REDACTED - sensitive]"),
+            "{field} should be redacted: {value}"
+        );
+        assert!(!value.contains("swordfish"));
+        assert!(!value.contains("hunter2"));
+        assert!(!value.contains("sk-proj-test"));
+        assert!(!value.contains("supersecret"));
+    }
 }
 
 #[tokio::test]

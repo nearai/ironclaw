@@ -364,6 +364,9 @@ fn apply_learning_decay_to_results_at(
             .unwrap_or(std::cmp::Ordering::Equal)
             .then_with(|| left.path.relative_path().cmp(right.path.relative_path()))
     });
+    if request.min_score() > 0.0 {
+        decayed.retain(|result| result.score >= request.min_score());
+    }
     decayed.truncate(request.limit());
     decayed
 }
@@ -530,6 +533,62 @@ mod tests {
         ];
         let fused = fuse_memory_search_results(full_text, Vec::new(), &rrf_request(0.0));
         assert_eq!(fused.len(), 3);
+    }
+
+    #[test]
+    fn learning_decay_respects_min_score_after_score_factor() {
+        let request = MemorySearchRequest::new("query")
+            .unwrap()
+            .with_limit(10)
+            .with_min_score(0.5);
+        let fresh = MemorySearchResult {
+            path: MemoryDocumentPath::new("tenant-a", "alice", None, "fresh.md").expect("path"),
+            score: 1.0,
+            snippet: "fresh".to_string(),
+            full_text_rank: Some(1),
+            vector_rank: None,
+            learning: None,
+        };
+        let stale = MemorySearchResult {
+            path: MemoryDocumentPath::new("tenant-a", "alice", None, "stale.md").expect("path"),
+            score: 1.0,
+            snippet: "stale".to_string(),
+            full_text_rank: Some(2),
+            vector_rank: None,
+            learning: None,
+        };
+        let now = Utc::now();
+        let results = apply_learning_decay_to_results_at(
+            vec![
+                (
+                    fresh,
+                    DocumentMetadata {
+                        confidence: Some(10),
+                        created_at: Some(now.to_rfc3339()),
+                        ..DocumentMetadata::default()
+                    },
+                ),
+                (
+                    stale,
+                    DocumentMetadata {
+                        confidence: Some(1),
+                        created_at: Some((now - chrono::Duration::days(400)).to_rfc3339()),
+                        ..DocumentMetadata::default()
+                    },
+                ),
+            ],
+            &request,
+            now,
+        );
+
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].path.relative_path(), "fresh.md");
+        assert!(
+            results
+                .iter()
+                .all(|result| result.score >= request.min_score()),
+            "decayed result scores must still respect min_score"
+        );
     }
 
     #[test]
