@@ -126,6 +126,8 @@ registerPack("ko", {
   "approval.approveAndAlways": "승인 및 항상 허용",
   "approval.alwaysAllowToolLabel": "묻지 않고 항상 {tool} 허용",
   "approval.thisTool": "이 도구",
+  "approval.viewFullCommand": "전체 명령 보기",
+  "approval.showCommandPreview": "미리보기 표시",
   // Chat — tool activity
   "tool.tabDetails": "세부 정보",
   "tool.tabParameters": "매개 변수",

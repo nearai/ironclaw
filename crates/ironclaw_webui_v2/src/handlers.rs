@@ -67,6 +67,10 @@ pub struct WebUiV2SessionResponse {
     pub tenant_id: String,
     pub user_id: String,
     pub capabilities: WebUiV2Capabilities,
+    /// Deployment-wide feature gates the browser uses to show/hide
+    /// not-yet-finished surfaces. Distinct from `capabilities`, which are
+    /// per-token authorization flags.
+    pub features: WebUiV2Features,
     /// Inline-attachment contract (allowed `accept` tokens + size budgets)
     /// the browser advertises on its file picker. Generated from the shared
     /// format registry so the picker can never drift from the server's
@@ -74,8 +78,22 @@ pub struct WebUiV2SessionResponse {
     pub attachments: WebUiAttachmentCapabilities,
 }
 
+/// Deployment-wide WebUI feature gates surfaced to the browser on
+/// `GET /session`. These are global "is this surface ready to show"
+/// toggles, not per-caller authorization — keep authorization in
+/// [`WebUiV2Capabilities`].
+#[derive(Debug, Clone, Copy, Default, Serialize)]
+pub struct WebUiV2Features {
+    /// Reborn Projects surface (the conversations-panel entry + the
+    /// `/projects` route). Hidden unless the deployment sets
+    /// `IRONCLAW_REBORN_PROJECTS`, while the surface is still being
+    /// finished.
+    pub reborn_projects: bool,
+}
+
 /// `GET /api/webchat/v2/session`
 pub async fn get_session(
+    State(state): State<WebUiV2State>,
     Extension(caller): Extension<WebUiAuthenticatedCaller>,
     Extension(capabilities): Extension<WebUiV2Capabilities>,
 ) -> Json<WebUiV2SessionResponse> {
@@ -83,6 +101,9 @@ pub async fn get_session(
         tenant_id: caller.tenant_id.to_string(),
         user_id: caller.user_id.to_string(),
         capabilities,
+        features: WebUiV2Features {
+            reborn_projects: state.reborn_projects_enabled(),
+        },
         attachments: webui_attachment_capabilities(),
     })
 }

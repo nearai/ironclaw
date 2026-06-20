@@ -1,14 +1,13 @@
 name: Live Canary
 
 on:
-  # Every job's `if:` guard matches the one cron below. Adding a new
-  # scheduled slot means also updating those guards, so keep this
-  # block and the job conditions in lockstep.
+  # Scheduled runs are limited to deterministic/mock/owned-auth lanes.
+  # Provider-backed LLM lanes stay manual in this fork because upstream
+  # owns that behavior and Matrix integration should not duplicate paid
+  # LLM canary calls.
   schedule:
-    # Every 6 hours (00, 06, 12, 18 UTC). Every lane runs as parallel
-    # jobs in the same workflow run; one run = one red dot on failure,
-    # one notification, one place to drill into per-lane status.
-    # Job-level `if:` guards below all match this cron.
+    # Every 6 hours (00, 06, 12, 18 UTC). Job-level `if:` guards below
+    # decide which lanes participate in the scheduled run.
     - cron: "0 */6 * * *"
   workflow_dispatch:
     inputs:
@@ -450,14 +449,13 @@ jobs:
   public-smoke:
     name: Public Live Smoke
     if: >
-      (github.event_name == 'schedule' && github.event.schedule == '0 */6 * * *') ||
       (github.event_name == 'workflow_dispatch' && (inputs.lane == 'all' || inputs.lane == 'public-smoke'))
     runs-on: [self-hosted, ci-standard]
     timeout-minutes: 120
     env:
       LLM_BACKEND: anthropic
       ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
-      ANTHROPIC_MODEL: ${{ vars.LIVE_ANTHROPIC_MODEL || 'claude-sonnet-4-6' }}
+      ANTHROPIC_MODEL: ${{ vars.LIVE_ANTHROPIC_MODEL || 'claude-haiku-4-5-20251001' }}
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
         with:
@@ -496,14 +494,13 @@ jobs:
   persona-rotating:
     name: Rotating Persona Live
     if: >
-      (github.event_name == 'schedule' && github.event.schedule == '0 */6 * * *') ||
       (github.event_name == 'workflow_dispatch' && (inputs.lane == 'all' || inputs.lane == 'persona-rotating'))
     runs-on: [self-hosted, ci-standard]
     timeout-minutes: 180
     env:
       LLM_BACKEND: anthropic
       ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
-      ANTHROPIC_MODEL: ${{ vars.LIVE_ANTHROPIC_MODEL || 'claude-sonnet-4-6' }}
+      ANTHROPIC_MODEL: ${{ vars.LIVE_ANTHROPIC_MODEL || 'claude-haiku-4-5-20251001' }}
       # Real third-party credentials forwarded into the persona harness.
       # The harness reads these env vars per
       # tests/e2e_live_personas.rs::PERSONA_CREDENTIALS — present →
@@ -613,7 +610,6 @@ jobs:
   provider-matrix:
     name: Provider Matrix (${{ matrix.provider }})
     if: >
-      (github.event_name == 'schedule' && github.event.schedule == '0 */6 * * *') ||
       (github.event_name == 'workflow_dispatch' && (inputs.lane == 'all' || inputs.lane == 'provider-matrix'))
     runs-on: [self-hosted, ci-standard]
     timeout-minutes: 120
@@ -645,7 +641,7 @@ jobs:
         if: matrix.provider == 'anthropic'
         env:
           LIVE_ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
-          LIVE_ANTHROPIC_MODEL: ${{ vars.LIVE_ANTHROPIC_MODEL || 'claude-sonnet-4-6' }}
+          LIVE_ANTHROPIC_MODEL: ${{ vars.LIVE_ANTHROPIC_MODEL || 'claude-haiku-4-5-20251001' }}
         run: |
           echo "LLM_BACKEND=anthropic" >> "${GITHUB_ENV}"
           echo "ANTHROPIC_MODEL=${LIVE_ANTHROPIC_MODEL}" >> "${GITHUB_ENV}"
@@ -690,7 +686,7 @@ jobs:
     env:
       LLM_BACKEND: anthropic
       ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
-      ANTHROPIC_MODEL: ${{ vars.LIVE_ANTHROPIC_MODEL || 'claude-sonnet-4-6' }}
+      ANTHROPIC_MODEL: ${{ vars.LIVE_ANTHROPIC_MODEL || 'claude-haiku-4-5-20251001' }}
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
         with:

@@ -2298,6 +2298,43 @@ async fn get_session_returns_false_operator_capability_when_capabilities_default
     assert_eq!(body["capabilities"]["operator_webui_config"], false);
 }
 
+// The browser hides the Projects surface (sidebar entry + `/projects` route)
+// unless the deployment opts in. The gate is delivered through the session
+// response's `features.reborn_projects` field, fed from
+// `WebUiV2State::with_reborn_projects_enabled` at composition. Drive the real
+// router (not just the state accessor) so a handler that forgot to surface the
+// flag is caught — see `.claude/rules/testing.md` "Test Through the Caller".
+#[tokio::test]
+async fn get_session_reports_reborn_projects_feature_from_state_flag() {
+    for enabled in [false, true] {
+        let services = Arc::new(StubServices::default());
+        let router = webui_v2_router(
+            WebUiV2State::new(services, DEFAULT_SSE_MAX_CONCURRENT_PER_CALLER)
+                .with_reborn_projects_enabled(enabled),
+        )
+        .layer(axum::Extension(caller()))
+        .layer(axum::Extension(WebUiV2Capabilities::default()));
+
+        let response = router
+            .oneshot(
+                Request::builder()
+                    .method(Method::GET)
+                    .uri("/api/webchat/v2/session")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("oneshot");
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = read_json(response).await;
+        assert_eq!(
+            body["features"]["reborn_projects"], enabled,
+            "features.reborn_projects must mirror the state flag (enabled={enabled})"
+        );
+    }
+}
+
 #[tokio::test]
 async fn operator_routes_dispatch_to_facade_with_body_and_query_inputs() {
     let services = Arc::new(StubServices::default());
@@ -4585,8 +4622,8 @@ fn sample_project_info(project_id: &str) -> RebornProjectInfo {
         metadata: serde_json::json!({}),
         state: RebornProjectState::Active,
         role: RebornProjectRole::Owner,
-        created_at: "2026-06-17T00:00:00Z".to_string(),
-        updated_at: "2026-06-17T00:00:00Z".to_string(),
+        created_at: "2026-06-17T00:00:00Z".parse().expect("created at"),
+        updated_at: "2026-06-17T00:00:00Z".parse().expect("updated at"),
     }
 }
 
@@ -4596,8 +4633,8 @@ fn sample_member_info(user_id: &str) -> RebornProjectMemberInfo {
         role: RebornProjectRole::Editor,
         status: RebornProjectMemberStatus::Active,
         granted_by: "user-alpha".to_string(),
-        created_at: "2026-06-17T00:00:00Z".to_string(),
-        updated_at: "2026-06-17T00:00:00Z".to_string(),
+        created_at: "2026-06-17T00:00:00Z".parse().expect("created at"),
+        updated_at: "2026-06-17T00:00:00Z".parse().expect("updated at"),
     }
 }
 
