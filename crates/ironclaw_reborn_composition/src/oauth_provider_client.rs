@@ -349,8 +349,9 @@ impl HostOAuthProviderClient {
         tokens: OAuthTokenResponse,
     ) -> Result<StoredOAuthTokens, AuthProductError> {
         // Compute access-token expiry from the server-reported TTL.
-        // Saturating cast: guard against u64 values that exceed i64::MAX (a
-        // theoretical extreme) by clamping to i64::MAX seconds before converting.
+        // Clamp to i32::MAX seconds (~68 years) before converting, then use
+        // checked_add_signed so a malformed/huge provider TTL yields None
+        // instead of panicking on chrono/DateTime overflow.
         let access_expires_at: Option<Timestamp> = tokens.expires_in_seconds.and_then(|secs| {
             let signed_secs = secs.min(i32::MAX as u64) as i64;
             Utc::now().checked_add_signed(chrono::Duration::seconds(signed_secs))

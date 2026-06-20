@@ -18,8 +18,8 @@ use ironclaw_host_runtime::{
 };
 
 /// Minimum time remaining before an access token is considered fresh enough
-/// to skip an inline refresh round-trip.
-/// Fixed policy: see `CredentialRefreshSettings::access_refresh_margin`
+/// to skip an inline refresh round-trip. Fixed at 5 minutes — not operator
+/// configurable.
 pub(crate) const DEFAULT_ACCESS_REFRESH_MARGIN: std::time::Duration =
     std::time::Duration::from_secs(5 * 60);
 

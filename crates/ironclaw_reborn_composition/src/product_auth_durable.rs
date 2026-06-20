@@ -534,29 +534,15 @@ where
         }
     }
 
-    /// Enumerate all Google credential accounts across all owners on this
-    /// deployment that are candidates for proactive keepalive refresh (B1).
-    ///
-    /// Filters in-memory to:
-    /// - provider == `GOOGLE_PROVIDER_ID`
-    /// - status == `Configured`
-    /// - `refresh_secret.is_some()`
-    ///
-    /// Idle-threshold filtering (by `updated_at`) is left to the caller (the
-    /// credential-refresh worker) so this method stays narrowly focused on
-    /// enumeration.
-    ///
-    /// Returns an empty vec when the root filesystem was not wired (local-dev /
-    /// test path). Partial read failures on individual account files are
-    /// silently skipped so a single corrupt record does not block the whole
-    /// sweep.
-    ///
-    /// **Never projects secret handles or material.** The returned
-    /// `CredentialAccount` values contain only metadata (id, scope, provider,
-    /// status, updated_at, refresh_secret handle-presence flag). Secret values
-    /// are never returned through this path.
     /// Enumerate all Google OAuth accounts eligible for proactive keepalive
     /// refresh across all tenants, users, agents, and projects.
+    ///
+    /// Filters in-memory to provider == `GOOGLE_PROVIDER_ID`, status ==
+    /// `Configured`, and `refresh_secret.is_some()`. Idle-threshold filtering
+    /// (by `updated_at`) is left to the caller (the credential-refresh worker).
+    /// Returns an empty vec when the root filesystem was not wired (local-dev /
+    /// test path). **Never projects secret handles or material** — only
+    /// metadata fields are returned.
     ///
     /// # Owner-scope enumeration
     ///
