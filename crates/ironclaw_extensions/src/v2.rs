@@ -37,8 +37,7 @@
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::sync::Arc;
 
-pub use crate::credential_coherence::ReferencedCredential;
-use crate::credential_coherence::reject_dangling_credentials;
+use crate::credential_coherence::{ReferencedCredential, reject_dangling_credentials};
 use ironclaw_host_api::{
     CapabilityId, CapabilityProfileId, CapabilityProfileSchemaRef, CredentialHandle, EffectKind,
     ExtensionId, HostApiError, HostPortCatalog, HostPortId, NetworkScheme, NetworkTargetPattern,
@@ -240,8 +239,8 @@ pub struct HostApiManifestContext<'a> {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct HostApiManifestProjection {
     pub capabilities: Vec<CapabilityDeclV2>,
-    pub declared_credentials: Vec<CredentialHandle>,
-    pub referenced_credentials: Vec<ReferencedCredential>,
+    pub(crate) declared_credentials: Vec<CredentialHandle>,
+    pub(crate) referenced_credentials: Vec<ReferencedCredential>,
 }
 
 /// Host API contract validator registered by composition.
