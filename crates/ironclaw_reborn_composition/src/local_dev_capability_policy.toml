@@ -44,6 +44,34 @@ ask_destructive = [
     "external_write",
     "financial",
 ]
+exempt_capabilities = [
+    # Onboarding posts redacted traces only after the first-party tool's own
+    # `confirmed=true` consent gate runs in-turn (see dispatch_onboard). The REPL
+    # approval gate would otherwise block this network+external_write capability
+    # before that consent flow can execute, so it is exempted here.
+    "builtin.trace_commons.onboard",
+    # NOTE: `builtin.trace_commons.profile_set` is deliberately NOT exempt. It
+    # publishes a public community profile (an external write to a public
+    # surface), and the tool's `confirmed=true` input is model-controlled — a
+    # prompt-injected or confused model could supply it. So profile_set must hit
+    # the runtime approval gate (user-controlled consent), with `confirmed=true`
+    # as defense-in-depth rather than the sole control.
+    #
+    # `builtin.profile_set` is safe to exempt (no approval gate needed) because:
+    # - It writes only to a fixed, narrow user-scoped path (context/profile.json)
+    #   under the memory mount, which is already scoped to this user.
+    # - Its field set is closed and validated server-side: only timezone (parsed
+    #   IANA name), locale (BCP-47 shape check), and location (free label, ≤200
+    #   chars). Unknown fields are rejected. No network, no secrets, no external
+    #   write, no process.
+    # - Contrast with `builtin.trace_commons.profile_set` above: that capability
+    #   is a PUBLIC external write to a community surface and must remain gated.
+    #   `builtin.profile_set` is a PRIVATE local agent-context write to a fixed,
+    #   closed-field, non-external path — that combination is what makes it safe
+    #   to exempt here (unlike `memory_write`, an arbitrary-path write that is
+    #   NOT exempt and still hits the gate).
+    "builtin.profile_set",
+]
 
 [approval_defaults.spawn_capability]
 effects = [
@@ -93,6 +121,12 @@ network = "default"
 
 [[grants]]
 capability = "builtin.memory_write"
+effects = ["dispatch_capability", "read_filesystem", "write_filesystem"]
+mounts = "memory"
+network = "default"
+
+[[grants]]
+capability = "builtin.profile_set"
 effects = ["dispatch_capability", "read_filesystem", "write_filesystem"]
 mounts = "memory"
 network = "default"
@@ -217,6 +251,42 @@ network = "default"
 
 [[grants]]
 capability = "builtin.trigger_remove"
+effects = ["dispatch_capability", "external_write"]
+mounts = "ambient"
+network = "default"
+
+[[grants]]
+capability = "builtin.trace_commons.onboard"
+effects = ["dispatch_capability", "read_filesystem", "write_filesystem", "network", "external_write"]
+mounts = "ambient"
+network = "local_dev_wildcard"
+
+[[grants]]
+capability = "builtin.trace_commons.status"
+effects = ["dispatch_capability", "read_filesystem"]
+mounts = "ambient"
+network = "default"
+
+[[grants]]
+capability = "builtin.trace_commons.credits"
+effects = ["dispatch_capability", "read_filesystem"]
+mounts = "ambient"
+network = "default"
+
+[[grants]]
+capability = "builtin.trace_commons.profile_token"
+effects = ["dispatch_capability", "read_filesystem", "write_filesystem", "network", "external_write"]
+mounts = "ambient"
+network = "local_dev_wildcard"
+
+[[grants]]
+capability = "builtin.trace_commons.profile_set"
+effects = ["dispatch_capability", "read_filesystem", "network", "external_write"]
+mounts = "ambient"
+network = "local_dev_wildcard"
+
+[[grants]]
+capability = "builtin.outbound_delivery_target_set"
 effects = ["dispatch_capability", "external_write"]
 mounts = "ambient"
 network = "default"

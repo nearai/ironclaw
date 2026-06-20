@@ -13,9 +13,9 @@ use ironclaw_host_api::{
 use ironclaw_host_runtime::{CapabilitySurfacePolicy, SurfaceKind};
 use ironclaw_loop_support::{
     CapabilityAllowSet, CapabilityResolveError, CapabilitySurfaceProfileResolver,
-    EmptyLoopCapabilityPort, HostIdentityContextBuildError, HostIdentityContextCandidate,
-    HostIdentityContextSource, HostInputBatch, HostInputQueue, HostInputQueueError,
-    HostManagedModelError, HostManagedModelErrorKind, HostManagedModelGateway,
+    EmptyLoopCapabilityPort, EmptyUserProfileSource, HostIdentityContextBuildError,
+    HostIdentityContextCandidate, HostIdentityContextSource, HostInputBatch, HostInputQueue,
+    HostInputQueueError, HostManagedModelError, HostManagedModelErrorKind, HostManagedModelGateway,
     HostManagedModelRequest, HostManagedModelResponse, JsonSpawnSubagentInputCodec,
     LoopCapabilityPortFactory, LoopCapabilityResultWriter, ProductLiveCancellationProbe,
     RunCancellationFactory, RunCancellationHandle,
@@ -259,6 +259,7 @@ impl ProductLiveAgentLoopHarness {
             Arc::new(ProductLiveCapabilityIo::default());
         let turn_state_for_runtime: Arc<dyn RuntimeTurnStateStore> = turn_store.clone();
         let composition = build_product_live_planned_runtime(DefaultPlannedRuntimeParts {
+            attachment_read_port: None,
             turn_state: turn_state_for_runtime,
             thread_service: Arc::new(thread_service.clone()),
             thread_scope: thread_scope.clone(),
@@ -298,10 +299,12 @@ impl ProductLiveAgentLoopHarness {
             skill_context_source: None,
             input_queue: Some(Arc::new(EmptyInputQueue)),
             identity_context_source: Arc::new(EmptyIdentityContextSource),
+            user_profile_source: Arc::new(EmptyUserProfileSource),
             model_policy_guard: Some(Arc::new(NoOpPolicyGuard)),
             model_budget_accountant: Some(Arc::new(NoOpBudgetAccountant)),
             safety_context: Some(test_safety_context()),
             hook_dispatcher_builder_factory: None,
+            communication_context_provider: None,
             hook_security_audit_sink: None,
             turn_event_sink: None,
         })
@@ -815,6 +818,7 @@ impl LoopCapabilityPort for RecordingCapabilityPort {
             progress: ironclaw_turns::run_profile::CapabilityProgress::MadeProgress,
             terminate_hint: self.capability.terminate_hint,
             byte_len: 0,
+            output_digest: None,
         }))
     }
 

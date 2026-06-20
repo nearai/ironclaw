@@ -96,9 +96,10 @@ export!(GitHubTool);
 #[cfg(test)]
 mod tests {
     use super::GitHubTool;
+    use crate::api::issue_items_from_search_response;
     use crate::dispatch::{action_from_context, execute_inner};
     use crate::exports::near::agent::tool::Guest;
-    use crate::request::sanitize_host_error;
+    use crate::request::{sanitize_host_error, test_support};
     use crate::types::{GitHubAction, GitHubWebhookRequest};
     use crate::validation::{normalize_ref_lookup, validate_repo_path};
     use crate::webhook::handle_webhook;
@@ -114,6 +115,11 @@ mod tests {
         assert_eq!(
             action_from_context(Some(r#"{"capability_id":"github.comment_issue"}"#)).unwrap(),
             "create_issue_comment"
+        );
+        assert_eq!(
+            action_from_context(Some(r#"{"capability_id":"github.get_authenticated_user"}"#))
+                .unwrap(),
+            "get_authenticated_user"
         );
     }
 
@@ -211,6 +217,172 @@ mod tests {
             sanitize_host_error("connection reset with token ghp_secret_value"),
             "AuthRequired"
         );
+    }
+
+    #[test]
+    fn list_issues_uses_issue_only_search_pagination() {
+        test_support::set_response(Ok(json!({
+            "total_count": 2,
+            "items": [
+                {
+                    "number": 4806,
+                    "title": "issue one"
+                },
+                {
+                    "number": 4804,
+                    "title": "issue two"
+                }
+            ]
+        })
+        .to_string()));
+
+        let output = execute_inner(
+            r#"{"owner":"nearai","repo":"ironclaw","state":"open","page":2,"limit":2}"#,
+            Some(r#"{"capability_id":"github.list_issues"}"#),
+        )
+        .expect("github.list_issues should return issue-only search items");
+
+        let requests = test_support::requests();
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].method, "GET");
+        assert_eq!(requests[0].body, None);
+        assert_eq!(
+            requests[0].path,
+            "/search/issues?q=repo%3Anearai%2Fironclaw%20state%3Aopen%20is%3Aissue&per_page=2&page=2&sort=created&order=desc"
+        );
+
+        let parsed: serde_json::Value =
+            serde_json::from_str(&output).expect("list_issues output should be JSON");
+        assert_eq!(
+            parsed,
+            json!([
+                {
+                    "number": 4806,
+                    "title": "issue one"
+                },
+                {
+                    "number": 4804,
+                    "title": "issue two"
+                }
+            ])
+        );
+    }
+
+    #[test]
+    fn issue_search_response_projects_items_array() {
+        let search_response = json!({
+            "total_count": 2,
+            "items": [
+                {
+                    "number": 4806,
+                    "title": "issue one"
+                },
+                {
+                    "number": 4804,
+                    "title": "issue two"
+                }
+            ]
+        })
+        .to_string();
+
+        let filtered = issue_items_from_search_response(&search_response)
+            .expect("GitHub issue search response should project items");
+        let parsed: serde_json::Value =
+            serde_json::from_str(&filtered).expect("filtered response should be JSON");
+
+        assert_eq!(
+            parsed,
+            json!([
+                {
+                    "number": 4806,
+                    "title": "issue one"
+                },
+                {
+                    "number": 4804,
+                    "title": "issue two"
+                }
+            ])
+        );
+    }
+
+    #[test]
+    fn list_issues_all_state_omits_state_qualifier() {
+        test_support::set_response(Ok(json!({
+            "total_count": 0,
+            "items": []
+        })
+        .to_string()));
+
+        execute_inner(
+            r#"{"owner":"nearai","repo":"ironclaw","state":"all","limit":1}"#,
+            Some(r#"{"capability_id":"github.list_issues"}"#),
+        )
+        .expect("github.list_issues should accept state=all");
+
+        let requests = test_support::requests();
+        assert_eq!(
+            requests[0].path,
+            "/search/issues?q=repo%3Anearai%2Fironclaw%20is%3Aissue&per_page=1&sort=created&order=desc"
+        );
+    }
+
+    #[test]
+    fn list_repos_uses_authenticated_endpoint_for_me_aliases() {
+        for input in [
+            r#"{"limit":2}"#,
+            r#"{"username":"me","limit":2}"#,
+            r#"{"username":"@me","limit":2}"#,
+        ] {
+            test_support::set_response(Ok(json!([]).to_string()));
+
+            execute_inner(input, Some(r#"{"capability_id":"github.list_repos"}"#))
+                .expect("github.list_repos should list authenticated user repos");
+
+            let requests = test_support::requests();
+            assert_eq!(requests.len(), 1);
+            assert_eq!(requests[0].method, "GET");
+            assert_eq!(requests[0].body, None);
+            assert_eq!(requests[0].path, "/user/repos?per_page=2");
+        }
+    }
+
+    #[test]
+    fn get_authenticated_user_uses_user_endpoint() {
+        test_support::set_response(Ok(json!({
+            "login": "serrrfirat",
+            "type": "User"
+        })
+        .to_string()));
+
+        let output = execute_inner(
+            r#"{}"#,
+            Some(r#"{"capability_id":"github.get_authenticated_user"}"#),
+        )
+        .expect("github.get_authenticated_user should return authenticated user");
+        let output: serde_json::Value =
+            serde_json::from_str(&output).expect("mock output should be JSON");
+        assert_eq!(output["login"], "serrrfirat");
+        assert_eq!(output["type"], "User");
+
+        let requests = test_support::requests();
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].method, "GET");
+        assert_eq!(requests[0].body, None);
+        assert_eq!(requests[0].path, "/user");
+    }
+
+    #[test]
+    fn list_repos_keeps_named_user_public_endpoint() {
+        test_support::set_response(Ok(json!([]).to_string()));
+
+        execute_inner(
+            r#"{"username":"nearai","limit":11,"page":2}"#,
+            Some(r#"{"capability_id":"github.list_repos"}"#),
+        )
+        .expect("github.list_repos should list named user public repos");
+
+        let requests = test_support::requests();
+        assert_eq!(requests[0].path, "/users/nearai/repos?per_page=11&page=2");
     }
 
     #[test]

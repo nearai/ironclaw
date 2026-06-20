@@ -5,14 +5,15 @@ use std::{future::Future, thread};
 
 use anyhow::Context;
 #[cfg(feature = "webui-v2-beta")]
-use ironclaw_reborn_composition::host_api::{AgentId, TenantId, UserId};
+use ironclaw_reborn_composition::host_api::UserId;
+use ironclaw_reborn_composition::host_api::{AgentId, TenantId};
 #[cfg(feature = "webui-v2-beta")]
 use ironclaw_reborn_composition::{
     LocalTriggerAccessReconciliation, LocalTriggerAccessRole, LocalTriggerAccessSource,
     open_local_trigger_access_store,
 };
 use ironclaw_reborn_composition::{
-    OAuthClientConfig, PollSettings, RebornBuildInput, RebornCompositionProfile,
+    OAuthClientConfig, OperatorLogLayer, PollSettings, RebornBuildInput, RebornCompositionProfile,
     RebornLocalRuntimeProfileOptions, RebornRuntimeIdentity, RebornRuntimeInput,
     TurnRunnerSettings, build_reborn_runtime, local_runtime_build_input_with_options,
     nearai_mcp_bootstrap_config_from_env,
@@ -33,13 +34,31 @@ use trigger_poller::trigger_poller_settings;
 
 pub(crate) fn init_tracing() {
     use tracing_subscriber::EnvFilter;
+    use tracing_subscriber::Layer;
     use tracing_subscriber::fmt;
-    let filter = EnvFilter::try_from_env("IRONCLAW_REBORN_LOG").unwrap_or_else(|_| {
+    use tracing_subscriber::prelude::*;
+    // stderr/fmt layer: operator-facing console output. Stays at `info` by
+    // default so `debug!` diagnostics never reach (and corrupt) a REPL/TUI
+    // terminal — the repo's logging invariant. Override via IRONCLAW_REBORN_LOG.
+    let stderr_filter = EnvFilter::try_from_env("IRONCLAW_REBORN_LOG").unwrap_or_else(|_| {
         EnvFilter::new("info,ironclaw_reborn=info,ironclaw_reborn_composition=info")
     });
-    let _ = fmt()
-        .with_env_filter(filter)
-        .with_writer(std::io::stderr)
+    // Operator Logs buffer: captures run diagnostics at `debug` for the
+    // ironclaw run-path crates so the scoped (thread/run) Logs panel is
+    // populated, while those `debug!` events are NOT written to stderr. This is
+    // a *separate* per-layer filter, so terminal safety and Logs-panel
+    // visibility are decoupled. Override via IRONCLAW_REBORN_OPERATOR_LOG.
+    let operator_filter =
+        EnvFilter::try_from_env("IRONCLAW_REBORN_OPERATOR_LOG").unwrap_or_else(|_| {
+            EnvFilter::new("info,ironclaw_reborn=debug,ironclaw_host_runtime=debug")
+        });
+    let _ = tracing_subscriber::registry()
+        .with(
+            fmt::layer()
+                .with_writer(std::io::stderr)
+                .with_filter(stderr_filter),
+        )
+        .with(OperatorLogLayer.with_filter(operator_filter))
         .try_init();
 }
 
@@ -182,9 +201,8 @@ async fn send_once(
         .await?;
     if !reply.is_successful_final_reply() {
         anyhow::bail!(
-            "reborn run did not produce an assistant reply (status={:?}, run_id={})",
-            reply.status,
-            reply.run_id
+            "reborn run did not produce an assistant reply\n{}",
+            no_assistant_text_message(&reply)
         );
     }
     print_reply(&reply);
@@ -233,9 +251,8 @@ async fn run_repl_loop(
                             Ok(reply) if stdin_is_tty => print_reply(&reply),
                             Ok(reply) => {
                                 anyhow::bail!(
-                                    "reborn run did not produce an assistant reply (status={:?}, run_id={})",
-                                    reply.status,
-                                    reply.run_id
+                                    "reborn run did not produce an assistant reply\n{}",
+                                    no_assistant_text_message(&reply)
                                 );
                             }
                             Err(error) if stdin_is_tty => {
@@ -282,10 +299,38 @@ fn print_repl_help() {
 fn print_reply(reply: &ironclaw_reborn_composition::AssistantReply) {
     match reply.text.as_deref() {
         Some(text) => println!("{text}"),
-        None => eprintln!(
-            "(no assistant text; status={:?}, run_id={})",
-            reply.status, reply.run_id
-        ),
+        None => eprintln!("{}", no_assistant_text_message(reply)),
+    }
+}
+
+fn no_assistant_text_message(reply: &ironclaw_reborn_composition::AssistantReply) -> String {
+    let summary = reply_without_text_summary(reply);
+    let failure_category = reply
+        .failure_category
+        .as_deref()
+        .map(|category| format!("\nfailure_category={category}"))
+        .unwrap_or_default();
+    format!(
+        "{summary}{failure_category}\nstatus={:?}; run_id={}",
+        reply.status, reply.run_id
+    )
+}
+
+fn reply_without_text_summary(reply: &ironclaw_reborn_composition::AssistantReply) -> &'static str {
+    match reply.status {
+        ironclaw_reborn_composition::TurnStatus::Failed
+        | ironclaw_reborn_composition::TurnStatus::RecoveryRequired => {
+            ironclaw_reborn_composition::reborn_failure_summary_for_category(
+                reply.failure_category.as_deref(),
+            )
+        }
+        ironclaw_reborn_composition::TurnStatus::Cancelled => {
+            "The run was cancelled before producing a reply."
+        }
+        ironclaw_reborn_composition::TurnStatus::Completed => {
+            "The run completed without producing an assistant reply."
+        }
+        _ => "The run has not produced an assistant reply yet.",
     }
 }
 
@@ -335,6 +380,7 @@ pub(crate) fn build_runtime_input_with_options(
         .with_runner_settings(runner_settings(runtime_services.config_file.as_ref())?)
         .with_trigger_poller_settings(trigger_poller_settings(
             runtime_services.config_file.as_ref(),
+            caller,
         )?)
         .with_poll_settings(PollSettings {
             interval: Duration::from_millis(200),
@@ -444,6 +490,10 @@ pub(crate) fn build_services_input_with_options(
     {
         services_input = services_input.with_google_oauth_backend(client);
     }
+    let identity = runtime_identity(config_file.as_ref());
+    let tenant_id = TenantId::new(identity.tenant_id).context("invalid runtime tenant identity")?;
+    let agent_id = AgentId::new(identity.agent_id).context("invalid runtime agent identity")?;
+    services_input = services_input.with_local_runtime_identity(tenant_id, agent_id);
 
     Ok(RuntimeServicesInput {
         services_input,
@@ -727,9 +777,11 @@ fn runner_settings(
 mod tests {
     use std::collections::HashMap;
 
-    use ironclaw_reborn_composition::RebornCompositionProfile;
     #[cfg(feature = "webui-v2-beta")]
     use ironclaw_reborn_composition::{LocalTriggerAccessRole, LocalTriggerAccessSource};
+    use ironclaw_reborn_composition::{
+        RebornCompositionProfile, TurnStatus, test_support::assistant_reply_without_text_for_test,
+    };
     use ironclaw_reborn_config::RebornBootConfig;
 
     use super::test_env::{EnvGuard, lock_trigger_env};
@@ -737,7 +789,7 @@ mod tests {
     use super::with_run_local_trigger_fire_access_checker;
     use super::{
         RuntimeInputCaller, RuntimeInputOptions, block_on_cli, build_runtime_input,
-        build_runtime_input_with_options, resolve_google_oauth_config,
+        build_runtime_input_with_options, no_assistant_text_message, resolve_google_oauth_config,
     };
 
     fn clear_trigger_poller_env() -> (EnvGuard, EnvGuard) {
@@ -760,6 +812,27 @@ mod tests {
         let value = block_on_cli(async { Ok::<_, anyhow::Error>(42) }).expect("block future");
 
         assert_eq!(value, 42);
+    }
+
+    #[test]
+    fn no_assistant_text_message_formats_failed_reply_with_category() {
+        let reply = assistant_reply_without_text_for_test(TurnStatus::Failed, Some("driver_panic"));
+
+        let message = no_assistant_text_message(&reply);
+
+        assert!(
+            message.contains("The run failed because the execution driver stopped unexpectedly."),
+            "{message}"
+        );
+        assert!(
+            message.contains("failure_category=driver_panic"),
+            "{message}"
+        );
+        assert!(message.contains("status=Failed"), "{message}");
+        assert!(
+            message.contains(&format!("run_id={}", reply.run_id)),
+            "{message}"
+        );
     }
 
     #[test]

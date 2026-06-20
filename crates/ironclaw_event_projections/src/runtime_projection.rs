@@ -60,7 +60,7 @@ fn enforce_capability_activity_output_limit(
     if activities.len() > limit {
         let split_index = limit.saturating_sub(1);
         activities
-            .select_nth_unstable_by(split_index, compare_capability_activities_for_projection);
+            .select_nth_unstable_by(split_index, compare_capability_activities_for_output_window);
         activities.truncate(limit);
     }
     sort_capability_activities_for_projection(activities);
@@ -92,6 +92,18 @@ fn compare_capability_activities_for_projection(
     left: &CapabilityActivityProjection,
     right: &CapabilityActivityProjection,
 ) -> Ordering {
+    compare_projection_order_ascending(
+        left.activity_order_cursor(),
+        right.activity_order_cursor(),
+        &left.invocation_id,
+        &right.invocation_id,
+    )
+}
+
+fn compare_capability_activities_for_output_window(
+    left: &CapabilityActivityProjection,
+    right: &CapabilityActivityProjection,
+) -> Ordering {
     compare_projection_order(
         &left.updated_at,
         &right.updated_at,
@@ -118,6 +130,19 @@ fn compare_projection_order(
                 .as_uuid()
                 .cmp(&right_invocation_id.as_uuid())
         })
+}
+
+fn compare_projection_order_ascending(
+    left_cursor: ironclaw_events::EventCursor,
+    right_cursor: ironclaw_events::EventCursor,
+    left_invocation_id: &InvocationId,
+    right_invocation_id: &InvocationId,
+) -> Ordering {
+    left_cursor.cmp(&right_cursor).then_with(|| {
+        left_invocation_id
+            .as_uuid()
+            .cmp(&right_invocation_id.as_uuid())
+    })
 }
 
 fn preserve_status_on_dispatch_success<S>(
@@ -289,6 +314,7 @@ fn capability_activity_projection_for_entry(
         process_id: event.process_id,
         output_bytes: event.output_bytes,
         error_kind: event.error_kind.clone().map(sanitize_error_kind),
+        first_cursor: entry.cursor,
         last_cursor: entry.cursor,
         updated_at: event.timestamp,
     }

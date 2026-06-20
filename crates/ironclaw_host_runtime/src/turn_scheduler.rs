@@ -16,6 +16,7 @@ use tokio::{
     task::{JoinHandle, JoinSet},
     time::{MissedTickBehavior, interval, sleep},
 };
+use tracing::Instrument;
 use tracing::debug;
 
 #[derive(Debug, Clone)]
@@ -414,64 +415,79 @@ fn spawn_executor_task(
     runner_heartbeat_interval: Duration,
     executor_tasks: &mut JoinSet<()>,
 ) {
-    executor_tasks.spawn(async move {
-        let recovery_run_id = claimed.state.run_id;
-        let recovery_runner_id = claimed.runner_id;
-        let recovery_lease_token = claimed.lease_token;
-        let mut heartbeat_tick = interval(runner_heartbeat_interval);
-        heartbeat_tick.set_missed_tick_behavior(MissedTickBehavior::Delay);
-        let executor_result =
-            AssertUnwindSafe(executor.execute_claimed_run(claimed, Arc::clone(&transitions)))
-                .catch_unwind();
-        tokio::pin!(executor_result);
-        let outcome = loop {
-            tokio::select! {
-                result = &mut executor_result => {
-                    break match result {
-                        Ok(Ok(())) => ExecutorTaskOutcome::Completed,
-                        Ok(Err(error)) => ExecutorTaskOutcome::TerminalFailure(Some(
-                            error.failure().clone(),
-                        )),
-                        Err(_) => ExecutorTaskOutcome::TerminalFailure(scheduler_failure(
-                            "scheduler_executor_panic",
-                        )),
-                    };
+    // Tag every tracing event emitted while this run executes with its
+    // `thread_id` + `run_id` so the operator Logs panel's scoped (thread/run)
+    // view is populated. `OperatorLogLayer` reads these correlation fields from
+    // the enclosing span via `from_root`; without the span, scoped queries
+    // match nothing and the panel shows "0 entries".
+    let run_span = tracing::info_span!(
+        "turn_run",
+        thread_id = %claimed.state.scope.thread_id,
+        run_id = %claimed.state.run_id,
+    );
+    executor_tasks.spawn(
+        async move {
+            let recovery_run_id = claimed.state.run_id;
+            let recovery_runner_id = claimed.runner_id;
+            let recovery_lease_token = claimed.lease_token;
+            tracing::debug!("turn run started");
+            let mut heartbeat_tick = interval(runner_heartbeat_interval);
+            heartbeat_tick.set_missed_tick_behavior(MissedTickBehavior::Delay);
+            let executor_result =
+                AssertUnwindSafe(executor.execute_claimed_run(claimed, Arc::clone(&transitions)))
+                    .catch_unwind();
+            tokio::pin!(executor_result);
+            let outcome = loop {
+                tokio::select! {
+                    result = &mut executor_result => {
+                        break match result {
+                            Ok(Ok(())) => ExecutorTaskOutcome::Completed,
+                            Ok(Err(error)) => ExecutorTaskOutcome::TerminalFailure(Some(
+                                error.failure().clone(),
+                            )),
+                            Err(_) => ExecutorTaskOutcome::TerminalFailure(scheduler_failure(
+                                "scheduler_executor_panic",
+                            )),
+                        };
+                    }
+                    _ = heartbeat_tick.tick() => {
+                        if !heartbeat_claimed_run(
+                            Arc::clone(&transitions),
+                            recovery_run_id,
+                            recovery_runner_id,
+                            recovery_lease_token,
+                        ).await {
+                            break ExecutorTaskOutcome::TerminalFailure(scheduler_failure(
+                                "scheduler_heartbeat_failed",
+                            ));
+                        }
+                    }
                 }
-                _ = heartbeat_tick.tick() => {
-                    if !heartbeat_claimed_run(
+            };
+
+            match outcome {
+                ExecutorTaskOutcome::Completed => {}
+                ExecutorTaskOutcome::TerminalFailure(Some(failure)) => {
+                    record_terminal_failure(
                         Arc::clone(&transitions),
                         recovery_run_id,
                         recovery_runner_id,
                         recovery_lease_token,
-                    ).await {
-                        break ExecutorTaskOutcome::TerminalFailure(scheduler_failure(
-                            "scheduler_heartbeat_failed",
-                        ));
-                    }
+                        failure,
+                    )
+                    .await;
+                }
+                ExecutorTaskOutcome::TerminalFailure(None) => {
+                    debug!("turn run scheduler could not sanitize terminal failure category");
                 }
             }
-        };
 
-        match outcome {
-            ExecutorTaskOutcome::Completed => {}
-            ExecutorTaskOutcome::TerminalFailure(Some(failure)) => {
-                record_terminal_failure(
-                    Arc::clone(&transitions),
-                    recovery_run_id,
-                    recovery_runner_id,
-                    recovery_lease_token,
-                    failure,
-                )
-                .await;
-            }
-            ExecutorTaskOutcome::TerminalFailure(None) => {
-                debug!("turn run scheduler could not sanitize terminal failure category");
-            }
+            tracing::debug!("turn run finished");
+            drop(permit);
+            let _ = command_tx.send(SchedulerCommand::Drain).await;
         }
-
-        drop(permit);
-        let _ = command_tx.send(SchedulerCommand::Drain).await;
-    });
+        .instrument(run_span),
+    );
 }
 
 async fn heartbeat_claimed_run(

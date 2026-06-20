@@ -880,13 +880,20 @@ mod tests {
 
     #[test]
     fn provider_reference_validation_rejects_sensitive_arguments_and_text() {
+        // Arguments carrying a real secret-like token are rejected by the
+        // entropy-based leak scan, which is the canonical guard after #5001
+        // dropped the crude bare-word substring markers.
         let mut envelope = provider_reference();
         let api_key = format!("sk-proj-{}", "a".repeat(24));
         envelope.arguments = serde_json::json!({"api_key": api_key});
         assert!(envelope.validate().is_err());
 
+        // Provider reasoning text flows through the same leak scan, so a leaked
+        // secret-like token there is rejected even though bare words like
+        // "stack trace" are now intentionally allowed (#5001, PinchBench bucket D).
         let mut envelope = provider_reference();
-        envelope.response_reasoning = Some("raw provider error included a stack trace".to_string());
+        envelope.response_reasoning =
+            Some(format!("provider error leaked sk-proj-{}", "b".repeat(24)));
         assert!(envelope.validate().is_err());
     }
 

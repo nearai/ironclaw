@@ -285,11 +285,24 @@ mod tests {
     }
 
     #[test]
-    fn materializes_goal_larger_than_safe_summary_limit() {
+    fn rejects_direction_with_invalid_inline_message_body() {
+        let error = materialize_direction_message("Follow direction\u{0}")
+            .expect_err("invalid direction body should fail loud");
+
+        assert_eq!(error.kind, AgentLoopHostErrorKind::Invalid);
+        assert!(
+            error
+                .safe_summary
+                .contains("invalid subagent direction prompt")
+        );
+    }
+
+    #[test]
+    fn materializes_goal_larger_than_inline_message_body_regression_threshold() {
         let repeated = "inspect this subsystem ".repeat(40);
         assert!(
             repeated.len() > 512,
-            "fixture must exceed LoopSafeSummary budget"
+            "fixture must exceed the legacy 512-byte inline-message regression threshold"
         );
 
         let goal = materialize_goal_message(
@@ -305,11 +318,11 @@ mod tests {
     }
 
     #[test]
-    fn materializes_direction_larger_than_safe_summary_limit() {
+    fn materializes_direction_larger_than_inline_message_body_regression_threshold() {
         let direction = "follow the scoped direction ".repeat(30);
         assert!(
             direction.len() > 512,
-            "fixture must exceed LoopSafeSummary budget"
+            "fixture must exceed the legacy 512-byte inline-message regression threshold"
         );
 
         let message = materialize_direction_message(&direction)

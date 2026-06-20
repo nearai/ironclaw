@@ -14,17 +14,18 @@ use thiserror::Error;
 use uuid::Uuid;
 
 use ironclaw_host_api::{
-    CapabilityId, CapabilitySet, EffectKind, ExecutionContext, ExtensionId, MountView, RuntimeKind,
-    TrustClass, UserId,
+    CapabilityId, CapabilitySet, EffectKind, ExecutionContext, ExtensionId, InvocationId,
+    MountView, RuntimeKind, TrustClass, UserId,
 };
 use ironclaw_host_runtime::{
     CapabilitySurfacePolicy, HostRuntime, SurfaceKind, VisibleCapabilityRequest,
 };
 use ironclaw_loop_support::{
     CapabilityAllowSet, CapabilityResolveError, CapabilityResultWrite,
-    CapabilitySurfaceProfileResolver, HostIdentityContextSource, HostInputQueue,
-    HostRuntimeLoopCapabilityPortFactory, LoopCapabilityInputResolver, LoopCapabilityPortFactory,
-    LoopCapabilityResultWriter, RunCancellationFactory, loop_driver_execution_extension_id,
+    CapabilitySurfaceProfileResolver, CapabilityWriteResult, HostIdentityContextSource,
+    HostInputQueue, HostRuntimeLoopCapabilityPortFactory, LoopCapabilityInputResolver,
+    LoopCapabilityPortFactory, LoopCapabilityResultWriter, RunCancellationFactory,
+    loop_driver_execution_extension_id,
 };
 use ironclaw_reborn::model_routes::{
     ModelRoute, ModelRouteError, ModelRoutePolicy, ModelRouteResolver, ModelSelectionMode,
@@ -212,6 +213,10 @@ impl LoopCapabilityInputResolver for ProductLiveCapabilityIo {
         tool_call: &ProviderToolCall,
     ) -> Result<CapabilityInputRef, AgentLoopHostError> {
         let input_ref = self.stage_input(run_context, tool_call.arguments.clone())?;
+        // Records under this staging ref for direct callers. In the production
+        // loop the resolver is wrapped by `ProviderToolCallInputResolver`, which
+        // owns the canonical (digest) ref and bypasses this method — that path
+        // records via `record_provider_tool_call_display_input` below instead.
         self.display_previews.record_input(
             &run_context.run_id.to_string(),
             &input_ref,
@@ -220,6 +225,26 @@ impl LoopCapabilityInputResolver for ProductLiveCapabilityIo {
         );
         Ok(input_ref)
     }
+
+    fn record_provider_tool_call_display_input(
+        &self,
+        run_context: &LoopRunContext,
+        input_ref: &CapabilityInputRef,
+        capability_id: &CapabilityId,
+        tool_call: &ProviderToolCall,
+    ) {
+        // Driven by the `ProviderToolCallInputResolver` decorator under the
+        // canonical (digest) provider tool-call ref, so the activity-card input
+        // summary lands under the same ref `write_capability_result` later uses.
+        // Key the display by the resolved dotted `capability_id`, not the lossy
+        // provider tool name, so the title and per-tool summary are correct.
+        self.display_previews.record_input(
+            &run_context.run_id.to_string(),
+            input_ref,
+            capability_id.as_str(),
+            &tool_call.arguments,
+        );
+    }
 }
 
 #[async_trait]
@@ -227,7 +252,7 @@ impl LoopCapabilityResultWriter for ProductLiveCapabilityIo {
     async fn write_capability_result(
         &self,
         write: CapabilityResultWrite<'_>,
-    ) -> Result<(LoopResultRef, u64), AgentLoopHostError> {
+    ) -> Result<CapabilityWriteResult, AgentLoopHostError> {
         let CapabilityResultWrite {
             run_context,
             input_ref,
@@ -275,7 +300,21 @@ impl LoopCapabilityResultWriter for ProductLiveCapabilityIo {
             },
             display_preview.as_ref(),
         );
-        Ok((result_ref, byte_len as u64))
+        Ok(CapabilityWriteResult::from_output(
+            result_ref,
+            byte_len as u64,
+            &output,
+        ))
+    }
+
+    fn record_running_invocation(
+        &self,
+        _run_context: &LoopRunContext,
+        invocation_id: InvocationId,
+        input_ref: &CapabilityInputRef,
+    ) {
+        self.display_previews
+            .record_running_invocation(invocation_id, input_ref);
     }
 
     async fn update_capability_result(
@@ -890,6 +929,78 @@ mod tests {
         assert_eq!(record.output_kind.as_deref(), Some("text"));
         let rendered = serde_json::to_string(&record.input_summary).unwrap();
         assert!(!rendered.contains("sk-secret"));
+    }
+
+    /// Regression (#activity-card-args): in production the loop wraps this
+    /// resolver with `ProviderToolCallInputResolver`, which owns the canonical
+    /// (digest) ref and bypasses `register_provider_tool_call_input` — it drives
+    /// the display-preview recording via `record_provider_tool_call_display_input`
+    /// instead. Recording under that canonical ref must still surface
+    /// `input_summary` when the result is written under the same ref; otherwise
+    /// the activity card shows the tool with no arguments.
+    #[tokio::test]
+    async fn capability_io_records_display_input_via_provider_tool_call_hook() {
+        let io = ProductLiveCapabilityIo::default();
+        let run_context = loop_run_context().await;
+        // The model-facing provider tool name is the lossy `__` encoding; the
+        // resolved capability id is the dotted form. The display must key off
+        // the capability id so the card title and per-tool summary are correct.
+        let tool_call = ProviderToolCall {
+            provider_id: "provider".to_string(),
+            provider_model_id: "model".to_string(),
+            turn_id: Some("turn_1".to_string()),
+            id: "call_1".to_string(),
+            name: "nearai__web_search".to_string(),
+            arguments: serde_json::json!({"query": "deploy status"}),
+            response_reasoning: None,
+            reasoning: None,
+            signature: None,
+        };
+        let capability_id = CapabilityId::new("nearai.web_search").unwrap();
+        // The decorator owns this ref; it is NOT produced by
+        // `register_provider_tool_call_input` here.
+        let input_ref = CapabilityInputRef::new(format!(
+            "input:provider-tool-call:{}:digest",
+            run_context.run_id
+        ))
+        .expect("valid ref");
+
+        io.record_provider_tool_call_display_input(
+            &run_context,
+            &input_ref,
+            &capability_id,
+            &tool_call,
+        );
+
+        let invocation_id = InvocationId::new();
+        io.write_capability_result(CapabilityResultWrite {
+            run_context: &run_context,
+            input_ref: &input_ref,
+            invocation_id,
+            capability_id: &capability_id,
+            output: serde_json::json!({"results": []}),
+            display_preview: None,
+        })
+        .await
+        .map(|_| ())
+        .expect("result staged");
+
+        let record = io
+            .display_previews
+            .record_for_invocation(invocation_id)
+            .expect("preview recorded");
+        // Title is the dotted capability id, not the `__` provider tool name.
+        assert_eq!(record.title, "nearai.web_search");
+        // The per-tool web_search matcher fires (query summarized), rather than
+        // falling back to a raw JSON dump.
+        assert!(
+            record
+                .input_summary
+                .as_deref()
+                .is_some_and(|summary| summary.contains("query: deploy status")),
+            "input summary should use the web_search matcher, got {:?}",
+            record.input_summary,
+        );
     }
 
     #[tokio::test]

@@ -4,6 +4,7 @@
 //! into canonical Reborn commands without depending on WebUI route handlers,
 //! product adapters, protocol auth evidence, WASM, or adapter registries.
 
+use ironclaw_attachments::InboundAttachment;
 use ironclaw_host_api::{AgentId, ProjectId, TenantId, ThreadId, UserId};
 use ironclaw_turns::{
     CancelRunRequest, GateRef, IdempotencyKey, SanitizedCancelReason, TurnActor, TurnRunId,
@@ -16,6 +17,48 @@ const CLIENT_ACTION_ID_MAX_BYTES: usize = 256;
 const USER_MESSAGE_TEXT_MAX_BYTES: usize = 64 * 1024;
 const GATE_REF_MAX_BYTES: usize = 256;
 const CREDENTIAL_REF_MAX_BYTES: usize = 512;
+/// Inline-attachment budgets, mirroring the v1 web gateway: at most
+/// `MAX_INLINE_ATTACHMENTS` files, `MAX_INLINE_ATTACHMENT_BYTES` decoded bytes
+/// per file, and `MAX_INLINE_TOTAL_ATTACHMENT_BYTES` decoded bytes total.
+const MAX_INLINE_ATTACHMENTS: usize = 10;
+const MAX_INLINE_ATTACHMENT_BYTES: usize = 5 * 1024 * 1024;
+const MAX_INLINE_TOTAL_ATTACHMENT_BYTES: usize = 10 * 1024 * 1024;
+const ATTACHMENT_FILENAME_MAX_BYTES: usize = 256;
+
+/// Browser-facing inline-attachment contract advertised to the WebUI.
+///
+/// Carries the `accept` tokens generated from the shared
+/// [`ironclaw_common`] format registry (so the file picker can never drift
+/// from the server's allowed MIME set) plus the same budgets
+/// [`WebUiSendMessageRequest::decode_attachments`] enforces. The browser
+/// uses this only for pre-submit hints; the server-side decode remains the
+/// sole authority on what is accepted.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WebUiAttachmentCapabilities {
+    /// HTML file-input `accept` tokens from the shared registry: exact MIME
+    /// types plus extensions, e.g. `["image/png", ".png", "application/pdf",
+    /// ".pdf"]` — never `image/*` wildcards (which would advertise unsupported
+    /// formats, and which break folder navigation in the native macOS picker).
+    pub accept: Vec<String>,
+    /// Maximum number of attachments per message.
+    pub max_count: usize,
+    /// Maximum decoded byte size of a single attachment.
+    pub max_file_bytes: usize,
+    /// Maximum combined decoded byte size of all attachments in one message.
+    pub max_total_bytes: usize,
+}
+
+/// The inline-attachment contract advertised to browsers. Generated from the
+/// shared format registry and the budgets `decode_attachments` enforces, so
+/// the picker and the server stay in lockstep by construction.
+pub fn webui_attachment_capabilities() -> WebUiAttachmentCapabilities {
+    WebUiAttachmentCapabilities {
+        accept: ironclaw_common::accept_tokens(),
+        max_count: MAX_INLINE_ATTACHMENTS,
+        max_file_bytes: MAX_INLINE_ATTACHMENT_BYTES,
+        max_total_bytes: MAX_INLINE_TOTAL_ATTACHMENT_BYTES,
+    }
+}
 
 /// Authenticated WebUI caller after route auth has already completed.
 ///
@@ -68,6 +111,25 @@ pub struct WebUiCreateThreadRequest {
     pub client_action_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub requested_thread_id: Option<String>,
+    /// Optional project the new thread should be scoped to. The browser only
+    /// *proposes* it — the facade authorizes the caller's access to the project
+    /// before adopting it as scope, so the body is never trusted on its own.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project_id: Option<String>,
+}
+
+/// One inline attachment in a browser send-message body.
+///
+/// `data_base64` is the base64-encoded file bytes; `mime_type` is validated
+/// against the shared attachment format registry. This is the only place raw
+/// upload bytes enter the workflow — they are decoded, budgeted, and landed in
+/// storage, never carried on the (serializable) inbound command.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct WebUiInboundAttachment {
+    pub mime_type: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub filename: Option<String>,
+    pub data_base64: String,
 }
 
 /// Browser body for WebUI send-message mutation.
@@ -79,6 +141,90 @@ pub struct WebUiSendMessageRequest {
     pub thread_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub content: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub attachments: Vec<WebUiInboundAttachment>,
+}
+
+impl WebUiSendMessageRequest {
+    /// Validate and decode the inline attachments into bytes-bearing
+    /// [`InboundAttachment`]s ready for landing.
+    ///
+    /// Enforces the per-file / per-message / count budgets and rejects
+    /// unsupported MIME types (per the shared format registry) and malformed
+    /// base64 with a stable validation error. Kept separate from
+    /// [`Self::into_command`] so the serializable command never carries raw
+    /// bytes.
+    pub fn decode_attachments(
+        &self,
+    ) -> Result<Vec<InboundAttachment>, WebUiInboundValidationError> {
+        use base64::Engine;
+
+        if self.attachments.len() > MAX_INLINE_ATTACHMENTS {
+            return Err(WebUiInboundValidationError::new(
+                "attachments",
+                WebUiInboundValidationCode::TooLong,
+            ));
+        }
+
+        let mut decoded = Vec::with_capacity(self.attachments.len());
+        let mut total_bytes = 0usize;
+        for (index, attachment) in self.attachments.iter().enumerate() {
+            let mime = ironclaw_common::normalize_mime_type(&attachment.mime_type);
+            if !ironclaw_common::is_supported_mime(&mime) {
+                return Err(WebUiInboundValidationError::new(
+                    "attachments.mime_type",
+                    WebUiInboundValidationCode::InvalidValue,
+                ));
+            }
+
+            let bytes = base64::engine::general_purpose::STANDARD
+                .decode(attachment.data_base64.as_bytes())
+                .map_err(|_| {
+                    WebUiInboundValidationError::new(
+                        "attachments.data_base64",
+                        WebUiInboundValidationCode::InvalidValue,
+                    )
+                })?;
+            if bytes.len() > MAX_INLINE_ATTACHMENT_BYTES {
+                return Err(WebUiInboundValidationError::new(
+                    "attachments",
+                    WebUiInboundValidationCode::TooLong,
+                ));
+            }
+            total_bytes = total_bytes.saturating_add(bytes.len());
+            if total_bytes > MAX_INLINE_TOTAL_ATTACHMENT_BYTES {
+                return Err(WebUiInboundValidationError::new(
+                    "attachments",
+                    WebUiInboundValidationCode::TooLong,
+                ));
+            }
+
+            let filename = attachment
+                .filename
+                .as_deref()
+                .map(str::trim)
+                .filter(|name| !name.is_empty());
+            if let Some(name) = filename
+                && name.len() > ATTACHMENT_FILENAME_MAX_BYTES
+            {
+                return Err(WebUiInboundValidationError::new(
+                    "attachments.filename",
+                    WebUiInboundValidationCode::TooLong,
+                ));
+            }
+
+            // `kind` and the fallback filename extension are derived from
+            // `mime_type` inside the landing bridge, so the DTO carries only the
+            // raw upload fields here.
+            decoded.push(InboundAttachment {
+                id: format!("webui-attachment-{index}"),
+                mime_type: mime,
+                filename: filename.map(str::to_string),
+                bytes,
+            });
+        }
+        Ok(decoded)
+    }
 }
 
 /// Browser body for WebUI cancel-run mutation.
@@ -180,12 +326,13 @@ pub enum WebUiGateResolution {
         #[serde(default)]
         always: bool,
     },
-    Denied,
+    /// Unified decline variant — covers both user-initiated approval denial
+    /// ("denied") and auth-gate cancellation ("cancelled"). Both legacy wire
+    /// strings deserialize to this variant; new serializations use "declined".
+    #[serde(alias = "denied", alias = "cancelled")]
+    Declined,
     /// A host-stored credential reference, not a raw secret/token.
-    CredentialProvided {
-        credential_ref: String,
-    },
-    Cancelled,
+    CredentialProvided { credential_ref: String },
 }
 
 /// Canonical route-independent WebUI command produced after validation.
@@ -405,7 +552,7 @@ fn parse_gate_resolution(
         "approved" => Ok(WebUiGateResolution::Approved {
             always: always.unwrap_or(false),
         }),
-        "denied" => Ok(WebUiGateResolution::Denied),
+        "denied" | "cancelled" => Ok(WebUiGateResolution::Declined),
         "credential_provided" => Ok(WebUiGateResolution::CredentialProvided {
             credential_ref: required_text(
                 "credential_ref",
@@ -414,7 +561,6 @@ fn parse_gate_resolution(
                 TextMode::Token,
             )?,
         }),
-        "cancelled" => Ok(WebUiGateResolution::Cancelled),
         _ => Err(WebUiInboundValidationError::new(
             "resolution",
             WebUiInboundValidationCode::InvalidValue,

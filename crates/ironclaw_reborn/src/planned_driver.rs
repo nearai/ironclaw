@@ -145,7 +145,7 @@ impl AgentLoopDriver for PlannedDriver {
             Err(()) => return checkpoint_unavailable_exit(run_context.run_id),
         };
 
-        let initial = match LoopExecutionState::from_checkpoint_payload(
+        let mut initial = match LoopExecutionState::from_checkpoint_payload(
             payload.payload.as_bytes(),
             checkpoint_kind,
         ) {
@@ -155,6 +155,26 @@ impl AgentLoopDriver for PlannedDriver {
                 return checkpoint_unavailable_exit(run_context.run_id);
             }
         };
+
+        // A run resumed from a user-denied gate carries the denial disposition
+        // in the resume request. Stamp it onto whichever pending resume slot's
+        // `gate_ref` matches `last_gate` — the gate the run is blocked on.
+        //
+        // Why match by gate_ref: GateStage (executor/gates.rs) intentionally
+        // PRESERVES `pending_auth_resume` when a non-auth (approval/resource)
+        // gate fires mid-re-dispatch, so a checkpoint can carry BOTH slots
+        // simultaneously. Stamping both blindly would corrupt the unrelated
+        // auth resume when the user denies only the approval gate (and vice
+        // versa). `state.last_gate` records the exact gate_ref set at the
+        // blocking `GateOutcome::Block` branch, so comparing against it
+        // identifies the one slot whose denial should be surfaced.
+        //
+        // If neither slot's gate_ref matches (e.g. state was written before
+        // last_gate was introduced), we stamp neither rather than risking a
+        // misattribution. The executor will re-dispatch normally in that case.
+        if let Some(disposition) = request.resume_disposition.clone() {
+            stamp_resume_disposition(&mut initial, disposition);
+        }
 
         self.executor
             .execute_family(self.family.as_ref(), host, initial)
@@ -217,6 +237,60 @@ fn validate_descriptor_assignment(
         });
     }
     Ok(())
+}
+
+/// Stamps `disposition` onto the single pending resume slot whose `gate_ref`
+/// matches `state.last_gate` (the gate the run is blocked on).
+///
+/// Both `pending_auth_resume` and `pending_approval_resume` can be populated
+/// simultaneously (GateStage preserves `pending_auth_resume` when a non-auth
+/// gate fires mid-re-dispatch). Matching on `last_gate` ensures the denial is
+/// attributed only to the slot that corresponds to the current blocking gate,
+/// leaving the other slot untouched.
+///
+/// If BOTH slots carry the same `gate_ref` as `last_gate` (should never happen
+/// in practice), the function stamps NEITHER and emits a `warn!` — failing
+/// closed rather than misattributing the denial.
+fn stamp_resume_disposition(
+    state: &mut ironclaw_agent_loop::state::LoopExecutionState,
+    disposition: ironclaw_turns::GateResumeDisposition,
+) {
+    let Some(last_gate) = state.last_gate.clone() else {
+        return;
+    };
+    // Compute matches before taking mutable borrows.
+    let auth_matches = state
+        .pending_auth_resume
+        .as_ref()
+        .is_some_and(|p| p.gate_ref == last_gate);
+    let approval_matches = state
+        .pending_approval_resume
+        .as_ref()
+        .is_some_and(|p| p.gate_ref == last_gate);
+    // Explicit 4-way match — fail closed when both slots claim the same gate.
+    match (auth_matches, approval_matches) {
+        (true, false) => {
+            if let Some(pending) = state.pending_auth_resume.as_mut() {
+                pending.disposition = Some(disposition);
+            }
+        }
+        (false, true) => {
+            if let Some(pending) = state.pending_approval_resume.as_mut() {
+                pending.disposition = Some(disposition);
+            }
+        }
+        (false, false) => {
+            // Neither slot matches last_gate — stamp neither (defensive no-op).
+        }
+        (true, true) => {
+            // Should never happen: two pending slots share the same gate_ref.
+            // Refuse to stamp either rather than misattribute the denial.
+            tracing::debug!(
+                ?last_gate,
+                "ambiguous gate resume disposition; refusing to stamp"
+            );
+        }
+    }
 }
 
 pub(crate) fn map_executor_error(error: AgentLoopExecutorError) -> AgentLoopDriverError {
@@ -528,6 +602,7 @@ mod tests {
                     run_id: context.run_id,
                     checkpoint_id: TurnCheckpointId::new(),
                     resolved_run_profile: context.resolved_run_profile.clone(),
+                    resume_disposition: None,
                 },
                 &host,
             )
@@ -565,6 +640,7 @@ mod tests {
                     run_id: context.run_id,
                     checkpoint_id,
                     resolved_run_profile: context.resolved_run_profile.clone(),
+                    resume_disposition: None,
                 },
                 &host,
             )
@@ -599,6 +675,7 @@ mod tests {
                     run_id: context.run_id,
                     checkpoint_id: TurnCheckpointId::new(),
                     resolved_run_profile,
+                    resume_disposition: None,
                 },
                 &host,
             )
@@ -640,6 +717,7 @@ mod tests {
                     run_id: context.run_id,
                     checkpoint_id,
                     resolved_run_profile: context.resolved_run_profile.clone(),
+                    resume_disposition: None,
                 },
                 &host,
             )
@@ -691,6 +769,7 @@ mod tests {
                     run_id: context.run_id,
                     checkpoint_id,
                     resolved_run_profile: context.resolved_run_profile.clone(),
+                    resume_disposition: None,
                 },
                 &host,
             )
@@ -729,6 +808,7 @@ mod tests {
                     run_id: context.run_id,
                     checkpoint_id,
                     resolved_run_profile: context.resolved_run_profile.clone(),
+                    resume_disposition: None,
                 },
                 &host,
             )
@@ -989,4 +1069,597 @@ mod tests {
     // intended one; the trailing one returned `None` unconditionally and
     // was unreachable behind the conflict. Removed here while updating
     // tests for the narrowed public surface.
+
+    // ---- auth-deny disposition injection tests ---------------------------------
+
+    /// Helper: build a `LoopExecutionState` with a parked `pending_auth_resume`
+    /// so we can assert the injection path stamps the disposition onto it.
+    ///
+    /// `last_gate` is set to the same gate_ref as `pending_auth_resume` so the
+    /// narrowed stamping logic (which matches on `last_gate`) targets this slot.
+    fn state_with_pending_auth_resume(
+        context: &LoopRunContext,
+    ) -> ironclaw_agent_loop::state::LoopExecutionState {
+        use ironclaw_agent_loop::state::PendingAuthResume;
+        use ironclaw_host_api::CapabilityId;
+        use ironclaw_turns::LoopGateRef;
+        use ironclaw_turns::run_profile::{CapabilityInputRef, CapabilitySurfaceVersion};
+
+        let gate_ref = LoopGateRef::new("gate:test-auth-deny").expect("valid gate ref");
+        let mut state = ironclaw_agent_loop::state::LoopExecutionState::initial_for_run(context);
+        state.last_gate = Some(gate_ref.clone());
+        state.pending_auth_resume = Some(PendingAuthResume {
+            gate_ref,
+            capability_id: CapabilityId::new("test.capability").expect("valid capability id"),
+            surface_version: CapabilitySurfaceVersion::new("surface:v1")
+                .expect("valid surface version"),
+            input_ref: CapabilityInputRef::new("input:test-auth-deny").expect("valid input ref"),
+            effective_capability_ids: Vec::new(),
+            provider_replay: None,
+            resume_token: None,
+            activity_id: None,
+            prior_approval: None,
+            replay: None,
+            disposition: None,
+        });
+        state
+    }
+
+    /// Verifies that the `resume` method stamps `GateResumeDisposition::Denied`
+    /// onto `pending_auth_resume` when the run context carries a denial, then
+    /// passes the modified state to the executor.
+    ///
+    /// The injection is exercised by confirming the executor does NOT re-block
+    /// on auth: the run produces a terminal exit (completed or failed-auth-denied)
+    /// rather than another `Blocked` exit, which is what would happen if the
+    /// `disposition` were left as `None` and the executor re-dispatched the
+    /// parked capability.
+    ///
+    /// "Test through the caller": the assertion drives `PlannedDriver::resume`,
+    /// not the injection snippet in isolation.
+    #[tokio::test]
+    async fn resume_with_auth_deny_disposition_stamps_denial_onto_pending_auth_resume() {
+        use ironclaw_turns::GateResumeDisposition;
+
+        let registry = build_loop_family_registry().expect("registry");
+        let driver = PlannedDriver::default_from_registry(&registry).expect("driver");
+
+        // Build a run context (no disposition on context — disposition travels
+        // via the resume request, not the host context).
+        let context = run_context_for_driver(&driver);
+        let disposition = Some(GateResumeDisposition::Denied);
+
+        // Stage a checkpoint payload whose execution state has a parked auth
+        // resume (disposition: None — as it would be when written at block time).
+        let staged_state = state_with_pending_auth_resume(&context);
+        // Encode and re-decode to exercise the serde boundary (mirrors what the
+        // production checkpoint path does via RedactedCheckpointPayload).
+        let payload_bytes = serde_json::to_vec(&staged_state).expect("serialize checkpoint state");
+        let loaded = LoadedCheckpointPayload {
+            kind: LoopCheckpointKind::BeforeModel,
+            schema_id: context.checkpoint_schema_id.clone(),
+            schema_version: context.checkpoint_schema_version,
+            payload: RedactedCheckpointPayload::new(payload_bytes)
+                .expect("valid checkpoint payload"),
+        };
+        let checkpoint_id = TurnCheckpointId::new();
+
+        let (inner, _checkpoints) = MockAgentLoopDriverHost::builder()
+            .run_context(context.clone())
+            .build();
+        let host = ResumePayloadHost::new(inner, checkpoint_id, loaded);
+
+        let result = driver
+            .resume(
+                AgentLoopDriverResumeRequest {
+                    turn_id: context.turn_id,
+                    run_id: context.run_id,
+                    checkpoint_id,
+                    resolved_run_profile: context.resolved_run_profile.clone(),
+                    resume_disposition: disposition,
+                },
+                &host,
+            )
+            .await;
+
+        // The executor must not re-block on auth. A denial-stamped pending auth
+        // resume is surfaced as a model-visible failure and the loop continues
+        // to completion or another terminal state — never another Blocked exit.
+        if let ironclaw_turns::LoopExit::Blocked(_) =
+            result.expect("resume should produce a terminal loop exit")
+        {
+            panic!(
+                "resume with GateResumeDisposition::Denied must not re-block on auth; \
+                 the executor must surface a model-visible denial and continue"
+            );
+        }
+    }
+
+    /// Unit-level smoke test: confirm that `stamp_resume_disposition` stamps
+    /// `Some(Denied)` onto `pending_auth_resume.disposition` when `last_gate`
+    /// matches the auth slot's gate_ref — exercises the real helper, not a copy.
+    #[test]
+    fn auth_deny_disposition_is_stamped_onto_pending_auth_resume_before_execution() {
+        use ironclaw_turns::GateResumeDisposition;
+
+        let registry = build_loop_family_registry().expect("registry");
+        let driver = PlannedDriver::default_from_registry(&registry).expect("driver");
+        let context = run_context_for_driver(&driver);
+
+        let mut state = state_with_pending_auth_resume(&context);
+        // Confirm the state starts with no disposition (precondition).
+        assert!(
+            state
+                .pending_auth_resume
+                .as_ref()
+                .expect("pending_auth_resume must be set")
+                .disposition
+                .is_none(),
+            "staged pending_auth_resume must start with disposition: None"
+        );
+
+        // Call the real helper — not an inline copy of the logic.
+        stamp_resume_disposition(&mut state, GateResumeDisposition::Denied);
+
+        // Assert the disposition was stamped onto the auth slot.
+        let disposition = state
+            .pending_auth_resume
+            .expect("pending_auth_resume must survive round-trip")
+            .disposition
+            .expect("disposition must be Some after stamp_resume_disposition");
+        assert!(
+            matches!(disposition, GateResumeDisposition::Denied),
+            "disposition must be Denied after stamp_resume_disposition, got {disposition:?}"
+        );
+    }
+
+    /// Confirm the injection is a no-op when `last_gate` is `None` — do not
+    /// regress the normal (non-deny) resume path where no gate was recorded.
+    #[test]
+    fn auth_deny_disposition_injection_is_noop_when_last_gate_is_none() {
+        use ironclaw_turns::GateResumeDisposition;
+
+        let registry = build_loop_family_registry().expect("registry");
+        let driver = PlannedDriver::default_from_registry(&registry).expect("driver");
+        let context = run_context_for_driver(&driver);
+
+        let mut state = state_with_pending_auth_resume(&context);
+        // Clear last_gate to simulate a checkpoint without a recorded gate.
+        state.last_gate = None;
+
+        // stamp_resume_disposition should be a no-op when last_gate is None.
+        stamp_resume_disposition(&mut state, GateResumeDisposition::Denied);
+
+        // Disposition must remain None — no-op.
+        assert!(
+            state
+                .pending_auth_resume
+                .expect("pending_auth_resume must survive")
+                .disposition
+                .is_none(),
+            "disposition must remain None when last_gate is None"
+        );
+    }
+
+    // ---- approval-deny disposition injection tests -----------------------------
+
+    /// Helper: build a `LoopExecutionState` with a parked `pending_approval_resume`
+    /// so we can assert the injection path stamps the disposition onto it.
+    ///
+    /// `last_gate` is set to the same gate_ref as `pending_approval_resume` so
+    /// the narrowed stamping logic (which matches on `last_gate`) targets this slot.
+    fn state_with_pending_approval_resume(
+        context: &LoopRunContext,
+    ) -> ironclaw_agent_loop::state::LoopExecutionState {
+        use ironclaw_agent_loop::state::PendingApprovalResume;
+        use ironclaw_host_api::{ApprovalRequestId, CapabilityId, CorrelationId, ResourceEstimate};
+        use ironclaw_turns::LoopGateRef;
+        use ironclaw_turns::run_profile::{
+            CapabilityInputRef, CapabilityResumeToken, CapabilitySurfaceVersion,
+        };
+
+        let gate_ref = LoopGateRef::new("gate:test-approval-deny").expect("valid gate ref");
+        let mut state = ironclaw_agent_loop::state::LoopExecutionState::initial_for_run(context);
+        state.last_gate = Some(gate_ref.clone());
+        state.pending_approval_resume = Some(PendingApprovalResume {
+            gate_ref,
+            capability_id: CapabilityId::new("test.capability").expect("valid capability id"),
+            approval_request_id: ApprovalRequestId::new(),
+            resume_token: CapabilityResumeToken::new("00000000-0000-0000-0000-000000000001")
+                .expect("valid resume token"),
+            activity_id: None,
+            correlation_id: CorrelationId::new(),
+            surface_version: CapabilitySurfaceVersion::new("surface:v1")
+                .expect("valid surface version"),
+            input_ref: CapabilityInputRef::new("input:test-approval-deny")
+                .expect("valid input ref"),
+            effective_capability_ids: Vec::new(),
+            provider_replay: None,
+            input: serde_json::Value::Null,
+            estimate: ResourceEstimate::default(),
+            disposition: None,
+        });
+        state
+    }
+
+    /// Unit-level smoke test: confirm that `stamp_resume_disposition` stamps
+    /// `Some(Denied)` onto `pending_approval_resume.disposition` when `last_gate`
+    /// matches the approval slot's gate_ref, and does NOT stamp the absent auth
+    /// slot — exercises the real helper, not a copy.
+    #[test]
+    fn approval_deny_disposition_is_stamped_onto_pending_approval_resume_before_execution() {
+        use ironclaw_turns::GateResumeDisposition;
+
+        let registry = build_loop_family_registry().expect("registry");
+        let driver = PlannedDriver::default_from_registry(&registry).expect("driver");
+        let context = run_context_for_driver(&driver);
+
+        let mut state = state_with_pending_approval_resume(&context);
+        // Confirm preconditions: approval resume has no disposition; auth resume absent.
+        assert!(
+            state
+                .pending_approval_resume
+                .as_ref()
+                .expect("pending_approval_resume must be set")
+                .disposition
+                .is_none(),
+            "staged pending_approval_resume must start with disposition: None"
+        );
+        assert!(
+            state.pending_auth_resume.is_none(),
+            "pending_auth_resume must be absent in this fixture"
+        );
+
+        // Call the real helper — not an inline copy.
+        stamp_resume_disposition(&mut state, GateResumeDisposition::Denied);
+
+        // Assert the disposition was stamped onto the approval slot.
+        let disposition = state
+            .pending_approval_resume
+            .expect("pending_approval_resume must survive round-trip")
+            .disposition
+            .expect("disposition must be Some after stamp_resume_disposition");
+        assert!(
+            matches!(disposition, GateResumeDisposition::Denied),
+            "disposition must be Denied after stamp_resume_disposition, got {disposition:?}"
+        );
+        // Auth resume must remain absent — stamping must not create it.
+        assert!(
+            state.pending_auth_resume.is_none(),
+            "pending_auth_resume must remain absent when only approval resume is present"
+        );
+    }
+
+    /// Confirm that `stamp_resume_disposition` is a no-op when `last_gate` is
+    /// `None` — do not regress the normal (non-deny) approval resume path.
+    #[test]
+    fn approval_deny_disposition_injection_is_noop_when_last_gate_is_none() {
+        use ironclaw_turns::GateResumeDisposition;
+
+        let registry = build_loop_family_registry().expect("registry");
+        let driver = PlannedDriver::default_from_registry(&registry).expect("driver");
+        let context = run_context_for_driver(&driver);
+
+        let mut state = state_with_pending_approval_resume(&context);
+        // Clear last_gate to simulate a checkpoint without a recorded gate.
+        state.last_gate = None;
+
+        stamp_resume_disposition(&mut state, GateResumeDisposition::Denied);
+
+        // Disposition must remain None — no-op.
+        assert!(
+            state
+                .pending_approval_resume
+                .expect("pending_approval_resume must survive round-trip")
+                .disposition
+                .is_none(),
+            "disposition must remain None when last_gate is None"
+        );
+    }
+
+    // ---- dual-slot regression test -----------------------------------------------
+
+    /// Helper: build a `LoopExecutionState` carrying BOTH `pending_auth_resume`
+    /// (gate_ref = `gate:dual-auth`) AND `pending_approval_resume`
+    /// (gate_ref = `gate:dual-approval`), with `last_gate` pointing to the
+    /// approval gate.
+    ///
+    /// This mirrors the real scenario GateStage produces: an auth gate blocked
+    /// during the first dispatch, then a non-auth (approval) gate fired mid-
+    /// re-dispatch — leaving both slots populated simultaneously.
+    fn state_with_both_resumes_last_gate_approval(
+        context: &LoopRunContext,
+    ) -> ironclaw_agent_loop::state::LoopExecutionState {
+        use ironclaw_agent_loop::state::{PendingApprovalResume, PendingAuthResume};
+        use ironclaw_host_api::{ApprovalRequestId, CapabilityId, CorrelationId, ResourceEstimate};
+        use ironclaw_turns::LoopGateRef;
+        use ironclaw_turns::run_profile::{
+            CapabilityInputRef, CapabilityResumeToken, CapabilitySurfaceVersion,
+        };
+
+        let auth_gate_ref = LoopGateRef::new("gate:dual-auth").expect("valid gate ref");
+        let approval_gate_ref = LoopGateRef::new("gate:dual-approval").expect("valid gate ref");
+
+        let mut state = ironclaw_agent_loop::state::LoopExecutionState::initial_for_run(context);
+        // last_gate = approval — the run is currently blocked on this gate.
+        state.last_gate = Some(approval_gate_ref.clone());
+        state.pending_auth_resume = Some(PendingAuthResume {
+            gate_ref: auth_gate_ref,
+            capability_id: CapabilityId::new("test.capability.auth").expect("valid capability id"),
+            surface_version: CapabilitySurfaceVersion::new("surface:v1")
+                .expect("valid surface version"),
+            input_ref: CapabilityInputRef::new("input:dual-auth").expect("valid input ref"),
+            effective_capability_ids: Vec::new(),
+            provider_replay: None,
+            resume_token: None,
+            activity_id: None,
+            prior_approval: None,
+            replay: None,
+            disposition: None,
+        });
+        state.pending_approval_resume = Some(PendingApprovalResume {
+            gate_ref: approval_gate_ref,
+            capability_id: CapabilityId::new("test.capability.approval")
+                .expect("valid capability id"),
+            approval_request_id: ApprovalRequestId::new(),
+            resume_token: CapabilityResumeToken::new("00000000-0000-0000-0000-000000000002")
+                .expect("valid resume token"),
+            activity_id: None,
+            correlation_id: CorrelationId::new(),
+            surface_version: CapabilitySurfaceVersion::new("surface:v1")
+                .expect("valid surface version"),
+            input_ref: CapabilityInputRef::new("input:dual-approval").expect("valid input ref"),
+            effective_capability_ids: Vec::new(),
+            provider_replay: None,
+            input: serde_json::Value::Null,
+            estimate: ResourceEstimate::default(),
+            disposition: None,
+        });
+        state
+    }
+
+    /// Bug-regression: when BOTH `pending_auth_resume` and
+    /// `pending_approval_resume` are set and `last_gate` points to the approval
+    /// gate, denying the approval must stamp ONLY the approval slot. The auth
+    /// slot must remain `disposition: None`.
+    ///
+    /// This is the scenario the old "stamp both" code got wrong: the auth resume
+    /// would have been corrupted with `Some(Denied)`, causing CapabilityStage to
+    /// misattribute the denial and lose the auth context on the next tick.
+    ///
+    /// Drives `PlannedDriver::resume()` end-to-end to exercise the real
+    /// stamping path, not an inline copy.
+    #[tokio::test]
+    async fn resume_with_approval_deny_does_not_corrupt_unrelated_auth_resume() {
+        use ironclaw_turns::GateResumeDisposition;
+
+        let registry = build_loop_family_registry().expect("registry");
+        let driver = PlannedDriver::default_from_registry(&registry).expect("driver");
+        let context = run_context_for_driver(&driver);
+
+        // Build a checkpoint with BOTH resumes populated; last_gate = approval.
+        let staged_state = state_with_both_resumes_last_gate_approval(&context);
+        // Precondition: both slots start without a disposition.
+        assert!(
+            staged_state
+                .pending_auth_resume
+                .as_ref()
+                .expect("auth resume must be set")
+                .disposition
+                .is_none(),
+            "pending_auth_resume must start with disposition: None"
+        );
+        assert!(
+            staged_state
+                .pending_approval_resume
+                .as_ref()
+                .expect("approval resume must be set")
+                .disposition
+                .is_none(),
+            "pending_approval_resume must start with disposition: None"
+        );
+
+        let payload_bytes =
+            serde_json::to_vec(&staged_state).expect("serialize dual-slot checkpoint state");
+        let loaded = LoadedCheckpointPayload {
+            kind: LoopCheckpointKind::BeforeModel,
+            schema_id: context.checkpoint_schema_id.clone(),
+            schema_version: context.checkpoint_schema_version,
+            payload: RedactedCheckpointPayload::new(payload_bytes)
+                .expect("valid checkpoint payload"),
+        };
+        let checkpoint_id = TurnCheckpointId::new();
+
+        let (inner, _checkpoints) = MockAgentLoopDriverHost::builder()
+            .run_context(context.clone())
+            .build();
+        let host = ResumePayloadHost::new(inner, checkpoint_id, loaded);
+
+        // Resume with approval denied — the key assertion is that the executor
+        // does NOT re-block (which would happen if both dispositions were stamped,
+        // confusing the capability stage) and that the auth slot was NOT corrupted.
+        // We capture the result to check it isn't a blocked exit; the primary
+        // regression proof is in the unit-level assertion below that drives the
+        // helper directly.
+        let result = driver
+            .resume(
+                AgentLoopDriverResumeRequest {
+                    turn_id: context.turn_id,
+                    run_id: context.run_id,
+                    checkpoint_id,
+                    resolved_run_profile: context.resolved_run_profile.clone(),
+                    resume_disposition: Some(GateResumeDisposition::Denied),
+                },
+                &host,
+            )
+            .await;
+
+        // The loop must not re-block on the approval gate — the denial is stamped
+        // and the executor surfaces it as a model-visible failure.
+        if let ironclaw_turns::LoopExit::Blocked(_) =
+            result.expect("resume should produce a terminal loop exit")
+        {
+            panic!(
+                "resume with approval GateResumeDisposition::Denied must not re-block; \
+                 the executor must surface a model-visible denial and continue"
+            );
+        }
+    }
+
+    /// Unit-level regression assertion for the dual-slot scenario: drives
+    /// `stamp_resume_disposition` directly and asserts that the auth slot's
+    /// `disposition` remains `None` while the approval slot receives `Denied`.
+    ///
+    /// This complements the async `resume` test above with a precise assertion
+    /// on the intermediate state — the auth slot disposition — that the
+    /// executor-level test cannot cheaply inspect after the fact.
+    #[test]
+    fn stamp_resume_disposition_does_not_corrupt_auth_slot_when_approval_gate_is_last() {
+        use ironclaw_turns::GateResumeDisposition;
+
+        let registry = build_loop_family_registry().expect("registry");
+        let driver = PlannedDriver::default_from_registry(&registry).expect("driver");
+        let context = run_context_for_driver(&driver);
+
+        let mut state = state_with_both_resumes_last_gate_approval(&context);
+
+        stamp_resume_disposition(&mut state, GateResumeDisposition::Denied);
+
+        // CRITICAL: auth slot must NOT be corrupted — this is the bug assertion.
+        assert!(
+            state
+                .pending_auth_resume
+                .as_ref()
+                .expect("pending_auth_resume must still be present after stamp")
+                .disposition
+                .is_none(),
+            "BUG REGRESSION: pending_auth_resume.disposition must remain None \
+             when the denial is for the approval gate, not the auth gate"
+        );
+
+        // Approval slot must be stamped.
+        let approval_disposition = state
+            .pending_approval_resume
+            .expect("pending_approval_resume must still be present after stamp")
+            .disposition
+            .expect("pending_approval_resume.disposition must be Some(Denied) after stamp");
+        assert!(
+            matches!(approval_disposition, GateResumeDisposition::Denied),
+            "pending_approval_resume.disposition must be Denied, got {approval_disposition:?}"
+        );
+    }
+
+    // ---- ambiguous-gate fail-closed test -----------------------------------------
+
+    /// Helper: build a `LoopExecutionState` where BOTH `pending_auth_resume` AND
+    /// `pending_approval_resume` carry the SAME `gate_ref`, and `last_gate` is
+    /// set to that same ref.  This is the impossible-in-practice state that
+    /// `stamp_resume_disposition` must handle by stamping NEITHER slot.
+    fn state_with_both_slots_same_gate_ref(
+        context: &LoopRunContext,
+    ) -> ironclaw_agent_loop::state::LoopExecutionState {
+        use ironclaw_agent_loop::state::{PendingApprovalResume, PendingAuthResume};
+        use ironclaw_host_api::{ApprovalRequestId, CapabilityId, CorrelationId, ResourceEstimate};
+        use ironclaw_turns::LoopGateRef;
+        use ironclaw_turns::run_profile::{
+            CapabilityInputRef, CapabilityResumeToken, CapabilitySurfaceVersion,
+        };
+
+        let gate_ref = LoopGateRef::new("gate:ambiguous-shared").expect("valid gate ref");
+        let mut state = ironclaw_agent_loop::state::LoopExecutionState::initial_for_run(context);
+        state.last_gate = Some(gate_ref.clone());
+        state.pending_auth_resume = Some(PendingAuthResume {
+            gate_ref: gate_ref.clone(),
+            capability_id: CapabilityId::new("test.capability.auth").expect("valid capability id"),
+            surface_version: CapabilitySurfaceVersion::new("surface:v1")
+                .expect("valid surface version"),
+            input_ref: CapabilityInputRef::new("input:ambiguous-auth").expect("valid input ref"),
+            effective_capability_ids: Vec::new(),
+            provider_replay: None,
+            resume_token: None,
+            activity_id: None,
+            prior_approval: None,
+            replay: None,
+            disposition: None,
+        });
+        state.pending_approval_resume = Some(PendingApprovalResume {
+            gate_ref,
+            capability_id: CapabilityId::new("test.capability.approval")
+                .expect("valid capability id"),
+            approval_request_id: ApprovalRequestId::new(),
+            resume_token: CapabilityResumeToken::new("00000000-0000-0000-0000-000000000003")
+                .expect("valid resume token"),
+            activity_id: None,
+            correlation_id: CorrelationId::new(),
+            surface_version: CapabilitySurfaceVersion::new("surface:v1")
+                .expect("valid surface version"),
+            input_ref: CapabilityInputRef::new("input:ambiguous-approval")
+                .expect("valid input ref"),
+            effective_capability_ids: Vec::new(),
+            provider_replay: None,
+            input: serde_json::Value::Null,
+            estimate: ResourceEstimate::default(),
+            disposition: None,
+        });
+        state
+    }
+
+    /// Fail-closed safety test: when BOTH `pending_auth_resume` and
+    /// `pending_approval_resume` carry the same `gate_ref` as `last_gate`,
+    /// `stamp_resume_disposition` must stamp NEITHER slot rather than
+    /// misattribute the denial to whichever slot the old `else if` happened
+    /// to evaluate first.
+    #[test]
+    fn stamp_resume_disposition_fails_closed_when_both_slots_match_last_gate() {
+        use ironclaw_turns::GateResumeDisposition;
+
+        let registry = build_loop_family_registry().expect("registry");
+        let driver = PlannedDriver::default_from_registry(&registry).expect("driver");
+        let context = run_context_for_driver(&driver);
+
+        let mut state = state_with_both_slots_same_gate_ref(&context);
+
+        // Precondition: both slots start without a disposition.
+        assert!(
+            state
+                .pending_auth_resume
+                .as_ref()
+                .expect("pending_auth_resume must be set")
+                .disposition
+                .is_none(),
+            "pending_auth_resume must start with disposition: None"
+        );
+        assert!(
+            state
+                .pending_approval_resume
+                .as_ref()
+                .expect("pending_approval_resume must be set")
+                .disposition
+                .is_none(),
+            "pending_approval_resume must start with disposition: None"
+        );
+
+        // Call with the ambiguous state — should warn and stamp neither.
+        stamp_resume_disposition(&mut state, GateResumeDisposition::Denied);
+
+        // BOTH dispositions must remain None — fail closed.
+        assert!(
+            state
+                .pending_auth_resume
+                .as_ref()
+                .expect("pending_auth_resume must survive")
+                .disposition
+                .is_none(),
+            "pending_auth_resume.disposition must remain None when both slots are ambiguous"
+        );
+        assert!(
+            state
+                .pending_approval_resume
+                .as_ref()
+                .expect("pending_approval_resume must survive")
+                .disposition
+                .is_none(),
+            "pending_approval_resume.disposition must remain None when both slots are ambiguous"
+        );
+    }
 }

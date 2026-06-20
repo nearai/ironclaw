@@ -169,6 +169,17 @@ impl WebuiAuthentication {
     }
 }
 
+/// Deployment gate for the Reborn Projects WebUI surface. Read once here
+/// (host-owned config — per the composition crate guardrails, env reads
+/// live in composition and feed builders, not in route handlers) and
+/// delivered to the browser via the `/session` `features.reborn_projects`
+/// field. Hidden by default while the surface is still being finished.
+fn reborn_projects_enabled() -> bool {
+    std::env::var("IRONCLAW_REBORN_PROJECTS")
+        .map(|v| v == "true" || v == "1")
+        .unwrap_or(false)
+}
+
 /// Host-installation composition the Reborn HTTP gateway needs in
 /// addition to the [`RebornWebuiBundle`] it serves over.
 ///
@@ -682,7 +693,8 @@ pub fn webui_v2_app_with_lifecycle(
     } else {
         WebUiV2RouteOptions::without_operator_routes()
     };
-    let v2_state = WebUiV2State::new(bundle.api.clone(), DEFAULT_SSE_MAX_CONCURRENT_PER_CALLER);
+    let v2_state = WebUiV2State::new(bundle.api.clone(), DEFAULT_SSE_MAX_CONCURRENT_PER_CALLER)
+        .with_reborn_projects_enabled(reborn_projects_enabled());
     let v2_inner: Router<()> = webui_v2_router_with_options(v2_state, route_options).with_state(());
 
     let mut protected_inner = Router::new().merge(v2_inner);

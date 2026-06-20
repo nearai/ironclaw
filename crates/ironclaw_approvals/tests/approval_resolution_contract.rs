@@ -893,6 +893,23 @@ impl CapabilityLeaseStore for FailingIssueLeaseStore {
         Err(CapabilityLeaseError::UnknownLease { lease_id })
     }
 
+    async fn begin_dispatch_claimed(
+        &self,
+        _scope: &ResourceScope,
+        lease_id: CapabilityGrantId,
+        _invocation_fingerprint: &InvocationFingerprint,
+    ) -> Result<CapabilityLease, CapabilityLeaseError> {
+        Err(CapabilityLeaseError::UnknownLease { lease_id })
+    }
+
+    async fn abort_dispatch_claimed(
+        &self,
+        _scope: &ResourceScope,
+        lease_id: CapabilityGrantId,
+    ) -> Result<CapabilityLease, CapabilityLeaseError> {
+        Err(CapabilityLeaseError::UnknownLease { lease_id })
+    }
+
     async fn leases_for_scope(&self, _scope: &ResourceScope) -> Vec<CapabilityLease> {
         Vec::new()
     }

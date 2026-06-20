@@ -76,9 +76,14 @@ pub(crate) fn build_webui_services_with_connectable_channels(
     runtime: &RebornRuntime,
     event_stream: Option<Arc<dyn ProjectionStream>>,
     connectable_channels: Option<Arc<dyn ConnectableChannelsProductFacade>>,
-    outbound_delivery_target_providers: Vec<Arc<dyn OutboundDeliveryTargetProvider>>,
+    mut outbound_delivery_target_providers: Vec<Arc<dyn OutboundDeliveryTargetProvider>>,
 ) -> Result<RebornWebuiBundle, RebornBuildError> {
     let services = runtime.services();
+    if services.local_runtime.is_some()
+        && let Some(provider) = runtime.outbound_delivery_target_provider()
+    {
+        outbound_delivery_target_providers.push(provider);
+    }
 
     let mut api = ProductRebornServices::new(
         runtime.webui_thread_service(),
@@ -86,6 +91,34 @@ pub(crate) fn build_webui_services_with_connectable_channels(
     )
     .with_approval_interactions(runtime.webui_approval_interaction_service())
     .with_auth_interactions(runtime.webui_auth_interaction_service());
+    if let Some(workspace_filesystem) = runtime.webui_workspace_filesystem() {
+        api = api
+            .with_inbound_attachments(Arc::new(
+                crate::attachment_landing::ProjectScopedAttachmentLander::new(Arc::clone(
+                    &workspace_filesystem,
+                )),
+            ))
+            // Read-only project filesystem backing directory listing and file
+            // download chips, over the same workspace mount.
+            .with_project_filesystem_reader(Arc::new(
+                crate::project_filesystem_reader::ProjectScopedFilesystemReader::new(Arc::clone(
+                    &workspace_filesystem,
+                )),
+            ))
+            // Read counterpart: serves landed attachment bytes back to the
+            // browser (image thumbnails) through the same workspace mount.
+            .with_inbound_attachment_reader(Arc::new(
+                crate::attachment_landing::ProjectScopedAttachmentReader::new(workspace_filesystem),
+            ));
+    }
+    // Standalone read-only filesystem viewer: browses memory + workspace over a
+    // dedicated read-only multi-mount view (not the read-write workspace handle
+    // above), so navigation can never become a write path.
+    if let Some(browse_filesystem) = runtime.webui_browse_filesystem() {
+        api = api.with_filesystem_browser(Arc::new(
+            crate::mount_filesystem_reader::MountScopedFilesystemReader::new(browse_filesystem),
+        ));
+    }
     if let Some(skill_activation_source) = runtime.webui_skill_activation_source() {
         let activation_recorder = Arc::clone(&skill_activation_source);
         let activation_clearer = skill_activation_source;
@@ -127,6 +160,11 @@ pub(crate) fn build_webui_services_with_connectable_channels(
             lifecycle_facade =
                 lifecycle_facade.with_runtime_http_egress(runtime_http_egress.clone());
         }
+        if let Some(product_auth) = &services.product_auth {
+            lifecycle_facade = lifecycle_facade.with_runtime_credential_accounts(
+                product_auth.runtime_credential_account_selection_service(),
+            );
+        }
         api = api.with_lifecycle_product_facade(Arc::new(lifecycle_facade));
     }
     if let Some(skill_management) = &services.skill_management {
@@ -156,9 +194,15 @@ pub(crate) fn build_webui_services_with_connectable_channels(
         from_local
     };
     if let Some(repository) = automation_repository {
-        api = api.with_automation_product_facade(Arc::new(RebornAutomationProductFacade::new(
-            repository,
-        )));
+        api = api.with_automation_product_facade(Arc::new(
+            RebornAutomationProductFacade::new(repository)
+                .with_scheduler_enabled(services.readiness.workers.trigger_poller),
+        ));
+    }
+    // First-class projects + membership (ACL). The local-dev graph builds the
+    // access-controlled facade once; production wiring is a follow-up.
+    if let Some(local_runtime) = &services.local_runtime {
+        api = api.with_project_service(Arc::clone(&local_runtime.project_service));
     }
     if let Some(local_runtime) = &services.local_runtime {
         api = api.with_outbound_preferences_facade(Arc::new(RebornOutboundPreferencesFacade::new(
@@ -179,6 +223,7 @@ pub(crate) fn build_webui_services_with_connectable_channels(
     api = api.with_operator_status_service(Arc::new(ReadinessOperatorStatusService::new(
         services.readiness.clone(),
     )));
+    api = api.with_operator_logs_service(crate::operator_log_buffer());
 
     // Compose the operator LLM-config settings service when the runtime was
     // assembled with a boot config. The secret store stays private to this

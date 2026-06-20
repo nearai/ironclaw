@@ -66,7 +66,7 @@ is_shared_test_path() {
 is_reborn_test_path() {
   local path="$1"
   case "$path" in
-    docs/reborn/*|scripts/reborn-e2e-rust.sh|scripts/ci/run-reborn-root-partition.sh|tests/reborn_*|tests/support/reborn/*|tests/e2e/scenarios/test_reborn_*)
+    docs/reborn/*|scripts/reborn-e2e-rust.sh|scripts/ci/run-reborn-root-partition.sh|tests/reborn_*|tests/support/reborn/*|tests/fixtures/llm_traces/reborn_qa/*|tests/e2e/scenarios/test_reborn_*)
       return 0
       ;;
     crates/ironclaw_architecture/*)

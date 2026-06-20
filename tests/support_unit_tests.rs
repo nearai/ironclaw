@@ -1150,12 +1150,14 @@ mod reborn_support_tests {
                         capability_id: capability_id.clone(),
                         input_ref: CapabilityInputRef::new("input:first").expect("first input"),
                         approval_resume: None,
+                        auth_resume: None,
                     },
                     CapabilityInvocation {
                         surface_version: surface.version,
                         capability_id,
                         input_ref: CapabilityInputRef::new("input:second").expect("second input"),
                         approval_resume: None,
+                        auth_resume: None,
                     },
                 ],
                 stop_on_first_suspension: true,
@@ -1699,7 +1701,7 @@ mod reborn_support_tests {
     }
 
     #[tokio::test]
-    async fn product_workflow_retries_after_filesystem_deferred_busy_release() {
+    async fn product_workflow_rejects_busy_and_does_not_resubmit_on_filesystem_replay() {
         let product_harness =
             RebornProductWorkflowHarness::filesystem_temp(product_scope("tenant-workflow-busy"))
                 .expect("product workflow harness");
@@ -1722,19 +1724,28 @@ mod reborn_support_tests {
             .accept_inbound(envelope.clone())
             .await
             .expect("busy accept");
-        assert!(matches!(first, ProductInboundAck::DeferredBusy { .. }));
+        assert!(
+            matches!(first, ProductInboundAck::RejectedBusy { .. }),
+            "busy thread must yield RejectedBusy (terminal), got {first:?}"
+        );
         assert_eq!(coordinator.submission_count(), 1);
 
+        // Replay the same envelope after the coordinator becomes accepting.
+        // RejectedBusy is terminal and settled in the idempotency ledger, so
+        // the replay path must return Duplicate — never resubmit.
         coordinator.set_accepting();
-        let second = workflow
+        let replayed = workflow
             .accept_inbound(envelope)
             .await
-            .expect("retry submit");
-        assert!(matches!(second, ProductInboundAck::Accepted { .. }));
+            .expect("replay of rejected-busy envelope");
+        assert!(
+            matches!(replayed, ProductInboundAck::Duplicate { .. }),
+            "RejectedBusy is terminal — a replayed busy rejection must return Duplicate, not resubmit; got {replayed:?}"
+        );
         assert_eq!(
             coordinator.submission_count(),
-            2,
-            "DeferredBusy must release the idempotency reservation for immediate retry"
+            1,
+            "RejectedBusy is terminal — replay must not increment submission_count"
         );
     }
 
@@ -2145,6 +2156,7 @@ mod reborn_support_tests {
             tool_result_content: Some(HostManagedToolResultContent::Resolved {
                 safe_summary: ToolResultSafeSummary::new("tool completed").expect("safe summary"),
             }),
+            image_parts: Vec::new(),
         }
     }
 

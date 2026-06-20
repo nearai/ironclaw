@@ -4,7 +4,7 @@ use ironclaw_host_api::{
     HostApiError, MountAlias, MountGrant, MountPermissions, MountView, ResourceScope, VirtualPath,
 };
 
-const WORKSPACE_ALIAS: &str = "/workspace";
+pub(crate) const WORKSPACE_ALIAS: &str = "/workspace";
 const WORKSPACE_TARGET: &str = "/projects/workspace";
 const HOST_ALIAS: &str = "/host";
 const HOST_TARGET: &str = "/projects/host";
@@ -117,6 +117,28 @@ pub(crate) fn scoped_skill_management_mount_view(
 
 pub(crate) fn memory_mount_view(permissions: MountPermissions) -> Result<MountView, HostApiError> {
     MountView::new(vec![grant(MEMORY_ALIAS, MEMORY_TARGET, permissions)?])
+}
+
+/// Read-only mount view backing the standalone WebUI filesystem viewer.
+///
+/// Spans every mount the read-only browser can navigate — the workspace
+/// (project working files + landed attachments) and the persistent memory store
+/// — over the same targets the agent's own tools resolve through, so the viewer
+/// shows exactly what the agent sees. Read-only by construction: the viewer is a
+/// navigation + preview/download surface, never a write path. The aliases here
+/// are the contract the browse reader confines against; keep them aligned with
+/// [`BROWSE_MEMORY_ALIAS`]/[`WORKSPACE_ALIAS`].
+pub(crate) const BROWSE_MEMORY_ALIAS: &str = MEMORY_ALIAS;
+
+pub(crate) fn browse_mount_view() -> Result<MountView, HostApiError> {
+    MountView::new(vec![
+        grant(
+            WORKSPACE_ALIAS,
+            WORKSPACE_TARGET,
+            MountPermissions::read_only(),
+        )?,
+        grant(MEMORY_ALIAS, MEMORY_TARGET, MountPermissions::read_only())?,
+    ])
 }
 
 fn grant(

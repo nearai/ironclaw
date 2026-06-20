@@ -32,6 +32,12 @@ env:
   # cfg!(test) covers unit tests; this covers integration/e2e that link the
   # non-cfg(test) library.
   IRONCLAW_DISABLE_OS_KEYCHAIN: "1"
+  # PR #5086 measured mold linking the heaviest Reborn build in parallel with
+  # no OOM, so keep Cargo's default parallelism. If runner OOMs recur, restore
+  # the previous one-job Cargo build serialization as the one-line fallback.
+  RUSTFLAGS: "-C linker=clang -C link-arg=--ld-path=/usr/bin/mold"
+  CARGO_PROFILE_DEV_DEBUG: 0
+  CARGO_PROFILE_TEST_DEBUG: 0
 
 jobs:
   package-matrix:
@@ -103,14 +109,26 @@ jobs:
           ref: ${{ inputs.ref || github.sha }}
           persist-credentials: false
 
+      - name: Free disk space
+        run: |
+          df -h /
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /usr/local/.ghcup /usr/local/share/boost /opt/hostedtoolcache/CodeQL || true
+          docker system prune -af || true
+          df -h /
+
       - name: Install Rust
         uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+
+      - name: Install mold and clang
+        run: sudo apt-get update && sudo apt-get install -y clang mold
 
       - name: Restore Rust cache
         uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
           key: reborn-integration-${{ matrix.package }}
-          save-if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/reborn-integration' }}
+          # Keep saves to protected-branch and merge_group runs so the ~10 GB
+          # repo cache LRU is seeded by shared states, not arbitrary PR branches.
+          save-if: ${{ (github.event_name == 'push' && github.ref == 'refs/heads/reborn-integration') || github.event_name == 'merge_group' }}
 
       - name: Run crate tests
         run: |
@@ -123,7 +141,7 @@ jobs:
   root-reborn-parity-tests:
     name: Reborn root tests (${{ matrix.partition }})
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 45
     env:
       ANTHROPIC_API_KEY: ""
       LLM_BACKEND: ""
@@ -132,6 +150,7 @@ jobs:
       OPENAI_API_KEY: ""
       REBORN_ROOT_TEST_PARTITIONS: 4
       REBORN_ROOT_TEST_PARTITION: ${{ matrix.partition }}
+      REBORN_ROOT_TEST_TIMEOUT: 28m
     strategy:
       fail-fast: true
       matrix:
@@ -143,14 +162,42 @@ jobs:
           ref: ${{ inputs.ref || github.sha }}
           persist-credentials: false
 
+      - name: Free disk space
+        run: |
+          df -h /
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /usr/local/.ghcup /usr/local/share/boost /opt/hostedtoolcache/CodeQL || true
+          docker system prune -af || true
+          df -h /
+
       - name: Install Rust
         uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+
+      - name: Install mold and clang
+        run: sudo apt-get update && sudo apt-get install -y clang mold
+
+      - name: Verify mold linker is active
+        run: |
+          clang_output="$(
+            printf 'int main(void) { return 0; }\n' \
+              | clang --ld-path=/usr/bin/mold -Wl,--version -x c - -o /tmp/clang-mold-check 2>&1
+          )"
+          printf '%s\n' "$clang_output"
+          grep -qi mold <<< "$clang_output"
+
+          printf 'fn main() { println!("mold-link-ok"); }\n' > /tmp/mold-link-check.rs
+          rustc /tmp/mold-link-check.rs \
+            -C linker=clang \
+            -C link-arg=--ld-path=/usr/bin/mold \
+            -o /tmp/mold-link-check
+          test "$(/tmp/mold-link-check)" = "mold-link-ok"
 
       - name: Restore Rust cache
         uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
           key: reborn-integration-root-${{ matrix.partition }}
-          save-if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/reborn-integration' }}
+          # Keep saves to protected-branch and merge_group runs so the ~10 GB
+          # repo cache LRU is seeded by shared states, not arbitrary PR branches.
+          save-if: ${{ (github.event_name == 'push' && github.ref == 'refs/heads/reborn-integration') || github.event_name == 'merge_group' }}
 
       - name: Run Reborn root tests
         run: scripts/ci/run-reborn-root-partition.sh

@@ -298,6 +298,7 @@ mod tests {
             run_id,
             scope: run_scope(),
             recorded_at: chrono::Utc::now(),
+            delivered_conversation_fingerprints: Vec::new(),
         };
 
         let route_store = Arc::new(InMemoryDeliveredGateRouteStore::default());
@@ -364,6 +365,7 @@ mod tests {
             run_id,
             scope: run_scope(),
             recorded_at: chrono::Utc::now(),
+            delivered_conversation_fingerprints: Vec::new(),
         };
 
         let route_store = Arc::new(InMemoryDeliveredGateRouteStore::default());
@@ -565,6 +567,7 @@ mod tests {
                 run_id,
                 scope: run_scope.clone(),
                 recorded_at: chrono::Utc::now(),
+                delivered_conversation_fingerprints: Vec::new(),
             })
             .await
             .expect("record delivered gate route");
@@ -582,7 +585,8 @@ mod tests {
             Arc::new(FakeIdempotencyLedger::new()),
             Arc::clone(&binding) as _,
         )
-        .with_approval_interaction_service(routed_approval);
+        .with_approval_interaction_service(routed_approval)
+        .with_delivered_gate_routes(Arc::clone(&route_store) as _);
 
         // 6. Submit an approval resolution envelope (first attempt).
         let envelope = approval_envelope(gate_ref_str);
@@ -699,6 +703,15 @@ mod tests {
             Err("boom".into())
         }
 
+        async fn load_delivered_gate_route_by_conversation_fingerprint(
+            &self,
+            _tenant_id: &ironclaw_host_api::TenantId,
+            _user_id: &ironclaw_host_api::UserId,
+            _conversation_fingerprint: &str,
+        ) -> Result<Vec<DeliveredGateRouteRecord>, String> {
+            Ok(Vec::new())
+        }
+
         async fn remove_delivered_gate_route(
             &self,
             _tenant_id: &ironclaw_host_api::TenantId,
@@ -734,6 +747,7 @@ mod tests {
             scope: run_scope(),
             // Record is 49 hours old — past the 48-hour TTL.
             recorded_at: chrono::Utc::now() - DELIVERED_GATE_ROUTE_TTL - chrono::Duration::hours(1),
+            delivered_conversation_fingerprints: Vec::new(),
         };
 
         let route_store = Arc::new(InMemoryDeliveredGateRouteStore::default());

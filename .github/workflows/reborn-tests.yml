@@ -38,6 +38,12 @@ env:
   # cfg!(test) covers unit tests; this covers integration/e2e that link the
   # non-cfg(test) library.
   IRONCLAW_DISABLE_OS_KEYCHAIN: "1"
+  # PR #5086 measured mold linking the heaviest Reborn build in parallel with
+  # no OOM, so keep Cargo's default parallelism. If runner OOMs recur, restore
+  # the previous one-job Cargo build serialization as the one-line fallback.
+  RUSTFLAGS: "-C linker=clang -C link-arg=--ld-path=/usr/bin/mold"
+  CARGO_PROFILE_DEV_DEBUG: 0
+  CARGO_PROFILE_TEST_DEBUG: 0
 
 jobs:
   changes:
@@ -146,29 +152,51 @@ jobs:
           ref: ${{ inputs.ref || github.sha }}
           persist-credentials: false
 
+      - name: Free disk space
+        run: |
+          df -h /
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /usr/local/.ghcup /usr/local/share/boost /opt/hostedtoolcache/CodeQL || true
+          docker system prune -af || true
+          df -h /
+
       - name: Install Rust
         uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+
+      - name: Install mold and clang
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang mold
+          test -x /usr/bin/mold
 
       - name: Restore Rust cache
         uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
           key: reborn-tests-${{ matrix.package }}
-          save-if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+          # Keep saves to protected-branch and merge_group runs so the ~10 GB
+          # repo cache LRU is seeded by shared states, not arbitrary PR branches.
+          save-if: ${{ (github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'merge_group' }}
 
       - name: Run crate tests
+        env:
+          PACKAGE: ${{ matrix.package }}
         run: |
-          feature_flags="$(scripts/ci/package-feature-flags.sh "${{ matrix.package }}")"
+          feature_flags="$(scripts/ci/package-feature-flags.sh "$PACKAGE")"
+
+          if [ "$PACKAGE" = "ironclaw_reborn_composition" ]; then
+            echo "Disabling incremental compilation for ironclaw_reborn_composition to keep runner disk usage bounded."
+            export CARGO_INCREMENTAL=0
+          fi
 
           # shellcheck disable=SC2086 # feature_flags intentionally expands to zero or more Cargo args.
           timeout --signal=INT --kill-after=30s 28m \
-            cargo test -p "${{ matrix.package }}" ${feature_flags} --all-targets -- --nocapture
+            cargo test -p "$PACKAGE" ${feature_flags} --all-targets -- --nocapture
 
   root-reborn-parity-tests:
     name: Reborn root tests (${{ matrix.partition }})
     needs: changes
     if: needs.changes.outputs.docs_only != 'true' && needs.changes.outputs.has_reborn_tests == 'true'
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 45
     env:
       ANTHROPIC_API_KEY: ""
       LLM_BACKEND: ""
@@ -177,6 +205,8 @@ jobs:
       OPENAI_API_KEY: ""
       REBORN_ROOT_TEST_PARTITIONS: 4
       REBORN_ROOT_TEST_PARTITION: ${{ matrix.partition }}
+      REBORN_ROOT_TEST_TIMEOUT: 28m
+      CARGO_INCREMENTAL: "0"
     strategy:
       fail-fast: true
       matrix:
@@ -188,17 +218,119 @@ jobs:
           ref: ${{ inputs.ref || github.sha }}
           persist-credentials: false
 
+      - name: Free disk space
+        run: |
+          df -h /
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /usr/local/.ghcup /usr/local/share/boost /opt/hostedtoolcache/CodeQL || true
+          docker system prune -af || true
+          df -h /
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+
+      - name: Install mold and clang
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang mold
+          test -x /usr/bin/mold
+
+      - name: Verify mold linker is active
+        run: |
+          clang_output="$(
+            printf 'int main(void) { return 0; }\n' \
+              | clang --ld-path=/usr/bin/mold -Wl,--version -x c - -o /tmp/clang-mold-check 2>&1
+          )"
+          printf '%s\n' "$clang_output"
+          grep -qi mold <<< "$clang_output"
+
+          printf 'fn main() { println!("mold-link-ok"); }\n' > /tmp/mold-link-check.rs
+          rustc /tmp/mold-link-check.rs \
+            -C linker=clang \
+            -C link-arg=--ld-path=/usr/bin/mold \
+            -o /tmp/mold-link-check
+          test "$(/tmp/mold-link-check)" = "mold-link-ok"
+
+      - name: Restore Rust cache
+        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          key: reborn-tests-root-${{ matrix.partition }}
+          # Keep saves to protected-branch and merge_group runs so the ~10 GB
+          # repo cache LRU is seeded by shared states, not arbitrary PR branches.
+          save-if: ${{ (github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'merge_group' }}
+
+      - name: Run Reborn root tests
+        run: scripts/ci/run-reborn-root-partition.sh
+
+  webui-v2-js-tests:
+    name: Reborn WebUI v2 JS tests
+    needs: changes
+    if: needs.changes.outputs.docs_only != 'true' && needs.changes.outputs.has_reborn_tests == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          ref: ${{ inputs.ref || github.sha }}
+          persist-credentials: false
+
+      - name: Install Node.js
+        uses: actions/setup-node@60edb5dd545a775178f52524783378180af0d1f8 # v4
+        with:
+          node-version: "22"
+
+      - name: Run Reborn settings JS tests
+        run: |
+          mapfile -t tests < <(
+            find crates/ironclaw_webui_v2_static/static/js/pages/settings \
+              -type f \( -name '*.test.mjs' -o -name '*.test.js' \) \
+              | sort
+          )
+          if [ "${#tests[@]}" -eq 0 ]; then
+            echo "No Reborn settings JS tests found"
+            exit 1
+          fi
+          node --test "${tests[@]}"
+
+  qa-recorded-fixtures:
+    name: Reborn QA recorded fixtures
+    needs: changes
+    if: needs.changes.outputs.docs_only != 'true' && needs.changes.outputs.has_reborn_tests == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      ANTHROPIC_API_KEY: ""
+      LLM_BACKEND: ""
+      LLM_USE_CODEX_AUTH: "false"
+      OLLAMA_BASE_URL: ""
+      OPENAI_API_KEY: ""
+      CARGO_INCREMENTAL: "0"
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          ref: ${{ inputs.ref || github.sha }}
+          persist-credentials: false
+
+      - name: Install mold
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y mold
+          test -x /usr/bin/mold
+
       - name: Install Rust
         uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
 
       - name: Restore Rust cache
         uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
-          key: reborn-tests-root-${{ matrix.partition }}
-          save-if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+          key: reborn-qa-recorded-fixtures
+          save-if: ${{ (github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'merge_group' }}
 
-      - name: Run Reborn root tests
-        run: scripts/ci/run-reborn-root-partition.sh
+      - name: Scrub Reborn QA fixtures
+        run: scripts/ci/check-reborn-qa-fixtures.sh
+
+      - name: Run Reborn QA fixture contracts and replay
+        run: cargo test --test reborn_qa_recorded_behavior --features libsql -- --nocapture
 
   reborn-tests:
     name: Tests (Reborn)
@@ -209,6 +341,8 @@ jobs:
       - package-matrix
       - crate-tests
       - root-reborn-parity-tests
+      - webui-v2-js-tests
+      - qa-recorded-fixtures
     steps:
       - name: Check Reborn test result
         run: |
@@ -239,5 +373,15 @@ jobs:
 
           if [[ "${{ needs.root-reborn-parity-tests.result }}" != "success" ]]; then
             echo "One or more Reborn root tests failed: ${{ needs.root-reborn-parity-tests.result }}"
+            exit 1
+          fi
+
+          if [[ "${{ needs.webui-v2-js-tests.result }}" != "success" ]]; then
+            echo "Reborn WebUI v2 JS tests failed: ${{ needs.webui-v2-js-tests.result }}"
+            exit 1
+          fi
+
+          if [[ "${{ needs.qa-recorded-fixtures.result }}" != "success" ]]; then
+            echo "Reborn QA recorded fixture tests failed: ${{ needs.qa-recorded-fixtures.result }}"
             exit 1
           fi

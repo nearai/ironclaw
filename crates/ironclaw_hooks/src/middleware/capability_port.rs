@@ -507,6 +507,7 @@ impl HookedLoopCapabilityPort {
                         gate_ref,
                         credential_requirements: Vec::new(),
                         safe_summary: reason.as_str().to_string(),
+                        auth_resume: None,
                     }),
                     Err(_) => Some(fail_closed_gate_ref_unavailable(reason.as_str())),
                 }
@@ -682,6 +683,7 @@ mod tests {
                 progress: ironclaw_turns::run_profile::CapabilityProgress::MadeProgress,
                 terminate_hint: false,
                 byte_len: 0,
+                output_digest: None,
             }))
         }
 
@@ -849,6 +851,7 @@ mod tests {
             )
             .expect("input ref literal is valid"),
             approval_resume: None,
+            auth_resume: None,
         }
     }
 
@@ -895,6 +898,7 @@ mod tests {
             )
             .expect("input ref literal is valid"),
             approval_resume: None,
+            auth_resume: None,
         };
         let digest = invocation_arguments_digest(&invocation);
         let hex: String = digest.iter().map(|b| format!("{b:02x}")).collect();
@@ -956,6 +960,7 @@ mod tests {
             )
             .expect("input ref literal is valid"),
             approval_resume: None,
+            auth_resume: None,
         };
         let ctx = port.hook_context(&invocation, None).await;
         let hex: String = ctx
@@ -1051,12 +1056,14 @@ mod tests {
             capability_id: cap_id.clone(),
             input_ref: ironclaw_turns::run_profile::CapabilityInputRef::new("input:a").expect("ok"),
             approval_resume: None,
+            auth_resume: None,
         };
         let b = CapabilityInvocation {
             surface_version: surface,
             capability_id: cap_id,
             input_ref: ironclaw_turns::run_profile::CapabilityInputRef::new("input:b").expect("ok"),
             approval_resume: None,
+            auth_resume: None,
         };
         assert_ne!(
             invocation_arguments_digest(&a),
@@ -1070,6 +1077,7 @@ mod tests {
             capability_id: CapabilityId::new(capability).expect("ok"),
             input_ref: CapabilityInputRef::new(format!("input:{capability}")).expect("ok"),
             approval_resume: None,
+            auth_resume: None,
         }
     }
 

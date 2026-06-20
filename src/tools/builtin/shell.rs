@@ -337,6 +337,214 @@ fn matches_command_pattern(segment: &str, pattern: &str) -> bool {
     }
 }
 
+fn shell_tokens(segment: &str) -> Vec<String> {
+    let mut tokens = Vec::new();
+    let mut current = String::new();
+    let mut quote: Option<char> = None;
+    let mut escaped = false;
+
+    let mut chars = segment.chars().peekable();
+    while let Some(ch) = chars.next() {
+        if escaped {
+            current.push(ch);
+            escaped = false;
+            continue;
+        }
+
+        if ch == '\\' && quote != Some('\'') {
+            if chars.peek().is_some_and(|next| {
+                next.is_whitespace() || matches!(next, '\'' | '"' | '\\' | '$' | '`')
+            }) {
+                escaped = true;
+            } else {
+                current.push(ch);
+            }
+            continue;
+        }
+
+        if let Some(q) = quote {
+            if ch == q {
+                quote = None;
+            } else {
+                current.push(ch);
+            }
+            continue;
+        }
+
+        match ch {
+            '\'' | '"' => quote = Some(ch),
+            c if c.is_whitespace() => {
+                if !current.is_empty() {
+                    tokens.push(std::mem::take(&mut current));
+                }
+            }
+            _ => current.push(ch),
+        }
+    }
+
+    if !current.is_empty() {
+        tokens.push(current);
+    }
+
+    tokens
+}
+
+fn command_basename(token: &str) -> &str {
+    token.rsplit(['/', '\\']).next().unwrap_or(token)
+}
+
+fn is_env_assignment(token: &str) -> bool {
+    token
+        .split_once('=')
+        .is_some_and(|(name, _)| !name.is_empty() && !name.contains('/') && !name.contains('\\'))
+}
+
+fn shell_script_arg(tokens: &[String], start: usize) -> Option<&str> {
+    let mut idx = start;
+    while idx < tokens.len() {
+        let token = tokens[idx].as_str();
+        if token == "-c" {
+            return tokens.get(idx + 1).map(String::as_str);
+        }
+        if token.starts_with('-')
+            && !token.starts_with("--")
+            && token.contains('c')
+            && token.len() > 2
+        {
+            return tokens.get(idx + 1).map(String::as_str);
+        }
+        idx += 1;
+    }
+    None
+}
+
+fn delegated_env_command(tokens: &[String]) -> Option<Vec<String>> {
+    let mut idx = 1;
+    while idx < tokens.len() {
+        let token = tokens[idx].as_str();
+        if token == "-S" || token == "--split-string" {
+            return Some(
+                tokens
+                    .get(idx + 1)
+                    .map_or_else(Vec::new, |script| shell_tokens(script)),
+            );
+        }
+        if let Some(script) = token.strip_prefix("-S").filter(|script| !script.is_empty()) {
+            return Some(shell_tokens(script));
+        }
+        if let Some(script) = token.strip_prefix("--split-string=") {
+            return Some(shell_tokens(script));
+        }
+        if matches!(
+            token,
+            "-u" | "--unset"
+                | "-C"
+                | "--chdir"
+                | "-P"
+                | "-a"
+                | "--argv0"
+                | "--block-signal"
+                | "--default-signal"
+                | "--ignore-signal"
+        ) {
+            idx += 2;
+            continue;
+        }
+        if token.starts_with('-') {
+            idx += 1;
+            continue;
+        }
+        if is_env_assignment(token) {
+            idx += 1;
+            continue;
+        }
+        return Some(tokens[idx..].to_vec());
+    }
+    None
+}
+
+fn delegated_time_command(tokens: &[String]) -> Option<&[String]> {
+    let mut idx = 1;
+    while idx < tokens.len() {
+        let token = tokens[idx].as_str();
+        if matches!(token, "-o" | "--output" | "-f" | "--format") {
+            idx += 2;
+            continue;
+        }
+        if token.starts_with('-') {
+            idx += 1;
+            continue;
+        }
+        return Some(&tokens[idx..]);
+    }
+    None
+}
+
+fn sort_invokes_external_helper(tokens: &[String]) -> bool {
+    tokens
+        .iter()
+        .skip(1)
+        .any(|token| token == "--compress-program" || token.starts_with("--compress-program="))
+}
+
+fn classify_tokens_for_wrappers(tokens: &[String], depth: usize) -> Option<RiskLevel> {
+    if depth >= 4 || tokens.is_empty() {
+        return None;
+    }
+
+    let command = command_basename(&tokens[0]).to_lowercase();
+    match command.as_str() {
+        "sort" if sort_invokes_external_helper(tokens) => Some(RiskLevel::High),
+        "sh" | "bash" | "zsh" | "dash" => {
+            shell_script_arg(tokens, 1).map(|script| classify_command_risk_inner(script, depth + 1))
+        }
+        "env" => delegated_env_command(tokens).and_then(|delegated| {
+            let Some(delegated_command) = delegated.first() else {
+                return Some(RiskLevel::Medium);
+            };
+            let delegated_command = command_basename(delegated_command).to_lowercase();
+            if matches!(delegated_command.as_str(), "sh" | "bash" | "zsh" | "dash") {
+                classify_tokens_for_wrappers(&delegated, depth + 1)
+            } else {
+                Some(classify_command_risk_inner(&delegated.join(" "), depth + 1))
+            }
+        }),
+        "time" => delegated_time_command(tokens)
+            .map(|delegated| classify_command_risk_inner(&delegated.join(" "), depth + 1)),
+        _ => None,
+    }
+}
+
+fn classify_segment_risk(segment: &str, depth: usize) -> RiskLevel {
+    let seg_lower = segment.to_lowercase();
+    if NEVER_AUTO_APPROVE_PATTERNS
+        .iter()
+        .any(|p| matches_command_pattern(&seg_lower, &p.to_lowercase()))
+    {
+        return RiskLevel::High;
+    }
+
+    let tokens = shell_tokens(segment);
+    if let Some(risk) = classify_tokens_for_wrappers(&tokens, depth) {
+        return risk;
+    }
+
+    if LOW_RISK_PATTERNS
+        .iter()
+        .any(|p| matches_command_pattern(&seg_lower, p))
+    {
+        RiskLevel::Low
+    } else if MEDIUM_RISK_PATTERNS
+        .iter()
+        .any(|p| matches_command_pattern(&seg_lower, p))
+    {
+        RiskLevel::Medium
+    } else {
+        // Unknown commands default to Medium (safer than auto-approving).
+        RiskLevel::Medium
+    }
+}
+
 /// Classify a shell command into a [`RiskLevel`].
 ///
 /// The command is split on `|`, `&`, `;` and each segment is classified
@@ -353,33 +561,16 @@ fn matches_command_pattern(segment: &str, pattern: &str) -> bool {
 /// prevent false positives like `"makeshutdownscript"` matching `"shutdown"` or
 /// `"lsblk"` matching `"ls"`.
 pub fn classify_command_risk(command: &str) -> RiskLevel {
+    classify_command_risk_inner(command, 0)
+}
+
+fn classify_command_risk_inner(command: &str, depth: usize) -> RiskLevel {
     // For pipelines/chains, take the maximum risk across all segments.
-    command
-        .split(['|', '&', ';'])
+    split_shell_segments(command)
+        .into_iter()
         .map(str::trim)
         .filter(|s| !s.is_empty())
-        .map(|segment| {
-            let seg_lower = segment.to_lowercase();
-            if NEVER_AUTO_APPROVE_PATTERNS
-                .iter()
-                .any(|p| matches_command_pattern(&seg_lower, &p.to_lowercase()))
-            {
-                RiskLevel::High
-            } else if LOW_RISK_PATTERNS
-                .iter()
-                .any(|p| matches_command_pattern(&seg_lower, p))
-            {
-                RiskLevel::Low
-            } else if MEDIUM_RISK_PATTERNS
-                .iter()
-                .any(|p| matches_command_pattern(&seg_lower, p))
-            {
-                RiskLevel::Medium
-            } else {
-                // Unknown commands default to Medium (safer than auto-approving).
-                RiskLevel::Medium
-            }
-        })
+        .map(|segment| classify_segment_risk(segment, depth))
         .max()
         .unwrap_or(RiskLevel::Medium)
 }
@@ -604,7 +795,7 @@ fn check_sensitive_file_access(cmd: &str) -> Option<String> {
     None
 }
 
-/// Split a command string on shell separators (`&&`, `||`, `|`, `;`).
+/// Split a command string on shell separators (`&&`, `||`, `|`, `&`, `;`, newline).
 ///
 /// Splits on multi-character operators first to avoid fragmenting `&&` into
 /// empty segments (which would happen with single-char `&` splitting).
@@ -617,7 +808,11 @@ fn split_shell_segments(cmd: &str) -> Vec<&str> {
     while i < len {
         let is_double =
             (bytes[i] == b'&' || bytes[i] == b'|') && i + 1 < len && bytes[i + 1] == bytes[i];
-        let is_single = bytes[i] == b'|' || bytes[i] == b';';
+        let is_single = bytes[i] == b'&'
+            || bytes[i] == b'|'
+            || bytes[i] == b';'
+            || bytes[i] == b'\n'
+            || bytes[i] == b'\r';
         if is_double {
             segments.push(&cmd[start..i]);
             i += 2;
@@ -625,6 +820,9 @@ fn split_shell_segments(cmd: &str) -> Vec<&str> {
         } else if is_single {
             segments.push(&cmd[start..i]);
             i += 1;
+            if bytes[i - 1] == b'\r' && i < len && bytes[i] == b'\n' {
+                i += 1;
+            }
             start = i;
         } else {
             i += 1;

@@ -8,8 +8,8 @@ use ironclaw_approvals::{
 use ironclaw_host_api::{Action, Principal};
 use ironclaw_run_state::ApprovalStatus;
 use ironclaw_turns::{
-    CancelRunRequest, GateRef, ResumeTurnPrecondition, ResumeTurnRequest, SanitizedCancelReason,
-    TurnCoordinator, TurnError, TurnErrorCategory, TurnRunId, TurnStatus,
+    GateRef, GateResumeDisposition, ResumeTurnPrecondition, ResumeTurnRequest, TurnCoordinator,
+    TurnError, TurnErrorCategory, TurnRunId, TurnStatus,
 };
 
 use super::gate_ref::{approval_reply_binding_ref, approval_source_binding_ref};
@@ -215,6 +215,7 @@ impl DefaultApprovalInteractionService {
                 source_binding_ref: approval_source_binding_ref(&request.gate_ref)?,
                 reply_target_binding_ref: approval_reply_binding_ref(&request.gate_ref)?,
                 idempotency_key: request.idempotency_key,
+                resume_disposition: None,
             })
             .await
             .map_err(map_approval_resume_error)
@@ -268,17 +269,7 @@ impl DefaultApprovalInteractionService {
             input.action,
             input.capability_id.clone(),
             input.grantee.clone(),
-        )
-        .map_err(|error| {
-            tracing::warn!(
-                error = %error,
-                approval_request_id = %gate.request().id,
-                "persistent approval policy preparation failed"
-            );
-            ProductWorkflowError::Transient {
-                reason: "persistent approval policy unavailable".to_string(),
-            }
-        })?;
+        );
         Ok(PreparedAllowPolicy { input, key })
     }
 
@@ -322,18 +313,38 @@ impl DefaultApprovalInteractionService {
                 ));
             }
         }
+        // The denial side effect is local to the first-time path; the resume +
+        // response mapping is shared with `replay_denied_gate`.
+        self.resume_denied(request, run_id).await
+    }
+
+    /// Resume a run whose approval gate was denied, carrying
+    /// `GateResumeDisposition::Denied`. Shared by the first-time deny
+    /// (`deny_gate`, after the durable `resolver.deny`) and the idempotent
+    /// replay (`replay_denied_gate`). `TurnCoordinator::resume_turn` replays the
+    /// cached response for a repeated idempotency key, so both callers are safe
+    /// regardless of current run state.
+    async fn resume_denied(
+        &self,
+        request: ResolveApprovalInteractionRequest,
+        run_id: TurnRunId,
+    ) -> Result<ResolveApprovalInteractionResponse, ProductWorkflowError> {
         let response = self
             .turn_coordinator
-            .cancel_run(CancelRunRequest {
+            .resume_turn(ResumeTurnRequest {
                 scope: request.scope,
                 actor: request.actor,
                 run_id,
-                reason: SanitizedCancelReason::UserRequested,
+                gate_resolution_ref: request.gate_ref.clone(),
+                precondition: ResumeTurnPrecondition::BlockedApprovalGate,
+                source_binding_ref: approval_source_binding_ref(&request.gate_ref)?,
+                reply_target_binding_ref: approval_reply_binding_ref(&request.gate_ref)?,
                 idempotency_key: request.idempotency_key,
+                resume_disposition: Some(GateResumeDisposition::Denied),
             })
             .await
             .map_err(map_approval_resume_error)?;
-        Ok(ResolveApprovalInteractionResponse::Denied(response))
+        Ok(ResolveApprovalInteractionResponse::Resumed(response))
     }
 
     async fn replay_approved_gate(
@@ -352,6 +363,7 @@ impl DefaultApprovalInteractionService {
                 source_binding_ref: approval_source_binding_ref(&request.gate_ref)?,
                 reply_target_binding_ref: approval_reply_binding_ref(&request.gate_ref)?,
                 idempotency_key: request.idempotency_key,
+                resume_disposition: None,
             })
             .await
             .map_err(map_approval_resume_error)?;
@@ -363,18 +375,12 @@ impl DefaultApprovalInteractionService {
         request: ResolveApprovalInteractionRequest,
         run_id: TurnRunId,
     ) -> Result<ResolveApprovalInteractionResponse, ProductWorkflowError> {
-        let response = self
-            .turn_coordinator
-            .cancel_run(CancelRunRequest {
-                scope: request.scope,
-                actor: request.actor,
-                run_id,
-                reason: SanitizedCancelReason::UserRequested,
-                idempotency_key: request.idempotency_key,
-            })
-            .await
-            .map_err(map_approval_resume_error)?;
-        Ok(ResolveApprovalInteractionResponse::Denied(response))
+        // Idempotent replay: the SAME idempotency key as the first Deny.
+        // TurnCoordinator::resume_turn returns the cached ResumeTurnResponse for
+        // a repeated key before running the precondition check, so this is
+        // idempotent regardless of current run state. A fresh key on a finished
+        // run still errors via the precondition (correctly StaleGate).
+        self.resume_denied(request, run_id).await
     }
 }
 

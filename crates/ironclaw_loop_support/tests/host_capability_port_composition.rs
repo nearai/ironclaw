@@ -19,8 +19,8 @@ use ironclaw_host_runtime::{
     VisibleCapabilitySurface as HostVisibleCapabilitySurface,
 };
 use ironclaw_loop_support::{
-    CapabilityResultWrite, HostRuntimeLoopCapabilityPortFactory, LoopCapabilityInputResolver,
-    LoopCapabilityResultWriter,
+    CapabilityResultWrite, CapabilityWriteResult, HostRuntimeLoopCapabilityPortFactory,
+    LoopCapabilityInputResolver, LoopCapabilityResultWriter,
 };
 use ironclaw_trust::{AuthorityCeiling, EffectiveTrustClass, TrustDecision, TrustProvenance};
 use ironclaw_turns::{
@@ -217,6 +217,7 @@ async fn factory_stages_provider_tool_call_arguments_without_custom_resolver_ove
             capability_id: candidate.capability_id,
             input_ref: candidate.input_ref,
             approval_resume: None,
+            auth_resume: None,
         })
         .await
         .expect("staged provider input should invoke");
@@ -414,14 +415,14 @@ impl LoopCapabilityResultWriter for UnusedResultWriter {
     async fn write_capability_result(
         &self,
         _write: CapabilityResultWrite<'_>,
-    ) -> Result<(LoopResultRef, u64), AgentLoopHostError> {
+    ) -> Result<CapabilityWriteResult, AgentLoopHostError> {
         let result_ref = LoopResultRef::new("result:factory").map_err(|_| {
             AgentLoopHostError::new(
                 AgentLoopHostErrorKind::Internal,
                 "result ref could not be represented",
             )
         })?;
-        Ok((result_ref, 0))
+        Ok(CapabilityWriteResult::without_output_digest(result_ref, 0))
     }
 }
 

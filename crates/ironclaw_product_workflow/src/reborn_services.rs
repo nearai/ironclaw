@@ -12,19 +12,23 @@ use std::{
 
 use async_trait::async_trait;
 use chrono::Utc;
+use ironclaw_attachments::InboundAttachment;
 use ironclaw_auth::{
     AuthProductScope, AuthProviderId, CredentialAccountId, CredentialAccountProjection,
     CredentialAccountUpdateBinding, ProviderScope,
 };
-use ironclaw_host_api::{AgentId, ExtensionId, ProjectId, TenantId, ThreadId, UserId};
+use ironclaw_host_api::{
+    AgentId, ExtensionId, InvocationId, ProjectId, ResourceScope, TenantId, ThreadId, UserId,
+};
 use ironclaw_product_adapters::{
     ProductAdapterError, ProductWorkflowRejectionKind, ProjectionStream,
     ProjectionSubscriptionRequest,
 };
 use ironclaw_threads::{
-    AcceptInboundMessageRequest, AcceptedInboundMessageReplay, EnsureThreadRequest, MessageContent,
-    MessageStatus, ReplayAcceptedInboundMessageRequest, SessionThreadError, SessionThreadRecord,
-    SessionThreadService, ThreadHistoryRequest, ThreadMessageId, ThreadScope,
+    AcceptInboundMessageRequest, AcceptedInboundMessageReplay, AttachmentRef, EnsureThreadRequest,
+    MessageContent, MessageStatus, ReplayAcceptedInboundMessageRequest, SessionThreadError,
+    SessionThreadRecord, SessionThreadService, ThreadHistory, ThreadHistoryRequest,
+    ThreadMessageId, ThreadScope,
 };
 use ironclaw_turns::{
     AcceptedMessageRef, GateRef, GetRunStateRequest, IdempotencyKey, ResumeTurnPrecondition,
@@ -60,31 +64,55 @@ mod extension_credentials;
 mod extension_onboarding;
 mod extension_setup_credentials;
 mod extensions;
+mod fs_browse;
 mod lifecycle_setup;
 mod llm_config;
+mod project_fs;
+mod projects;
+mod trace_credits;
 mod types;
 
 pub use error::{RebornServicesError, RebornServicesErrorCode, RebornServicesErrorKind};
+pub use trace_credits::{RebornTraceCreditsResponse, RebornTraceHoldAuthorizeResponse};
+
+pub use fs_browse::{
+    FilesystemBrowseReader, FsMount, RebornFsListRequest, RebornFsListResponse, RebornFsMountInfo,
+    RebornFsMountsResponse, RebornFsReadRequest, RebornFsStatRequest, RebornFsStatResponse,
+};
 pub use llm_config::{
     CodexLoginStart, LlmActiveSelection, LlmConfigService, LlmConfigServiceError,
     LlmConfigSnapshot, LlmModelsResult, LlmProbeRequest, LlmProbeResult, LlmProviderView,
     NearAiAuthProvider, NearAiLoginRequest, NearAiLoginStart, NearAiWalletLoginRequest,
     NearAiWalletLoginResult, SetActiveLlmRequest, UpsertLlmProviderRequest,
 };
+pub use project_fs::{
+    ProjectFilesystemReader, ProjectFsEntry, ProjectFsEntryKind, ProjectFsError, ProjectFsFile,
+    ProjectFsStat, RebornProjectFsListRequest, RebornProjectFsListResponse,
+    RebornProjectFsReadRequest, RebornProjectFsStatRequest, RebornProjectFsStatResponse,
+};
+pub use projects::{
+    ProjectCaller, ProjectService, ProjectServiceError, RebornAddMemberRequest,
+    RebornCreateProjectRequest, RebornDeleteProjectRequest, RebornGetProjectRequest,
+    RebornListMembersRequest, RebornListMembersResponse, RebornListProjectsRequest,
+    RebornListProjectsResponse, RebornProjectInfo, RebornProjectMemberInfo,
+    RebornProjectMemberStatus, RebornProjectResponse, RebornProjectRole, RebornProjectState,
+    RebornRemoveMemberRequest, RebornUpdateMemberRoleRequest, RebornUpdateProjectRequest,
+};
 pub use types::{
-    RebornAutomationInfo, RebornAutomationRecentRunInfo, RebornAutomationRecentRunStatus,
-    RebornAutomationRunStatus, RebornAutomationSource, RebornAutomationState,
-    RebornCancelRunResponse, RebornChannelConnectAction, RebornChannelConnectStrategy,
-    RebornConnectableChannelInfo, RebornConnectableChannelListResponse, RebornCreateThreadResponse,
-    RebornDeleteThreadRequest, RebornDeleteThreadResponse, RebornExtensionActionResponse,
-    RebornExtensionCredentialSetup, RebornExtensionInfo, RebornExtensionListResponse,
-    RebornExtensionOnboardingPayload, RebornExtensionOnboardingState, RebornExtensionRegistryEntry,
-    RebornExtensionRegistryResponse, RebornExtensionSetupField, RebornExtensionSetupSecret,
-    RebornGetRunStateRequest, RebornGetRunStateResponse, RebornListAutomationsResponse,
-    RebornListThreadsResponse, RebornLogEntry, RebornLogLevel, RebornLogQueryRequest,
-    RebornLogQueryResponse, RebornOperatorArea, RebornOperatorCommandPlaneResponse,
-    RebornOperatorConfigDiagnostic, RebornOperatorConfigDiagnosticSeverity,
-    RebornOperatorConfigEntry, RebornOperatorConfigGetResponse, RebornOperatorConfigListResponse,
+    RebornAttachmentBytes, RebornAttachmentRequest, RebornAutomationInfo,
+    RebornAutomationRecentRunInfo, RebornAutomationRecentRunStatus, RebornAutomationRunStatus,
+    RebornAutomationSource, RebornAutomationState, RebornCancelRunResponse,
+    RebornChannelConnectAction, RebornChannelConnectStrategy, RebornConnectableChannelInfo,
+    RebornConnectableChannelListResponse, RebornCreateThreadResponse, RebornDeleteThreadRequest,
+    RebornDeleteThreadResponse, RebornExtensionActionResponse, RebornExtensionCredentialSetup,
+    RebornExtensionInfo, RebornExtensionListResponse, RebornExtensionOnboardingPayload,
+    RebornExtensionOnboardingState, RebornExtensionRegistryEntry, RebornExtensionRegistryResponse,
+    RebornExtensionSetupField, RebornExtensionSetupSecret, RebornGetRunStateRequest,
+    RebornGetRunStateResponse, RebornListAutomationsResponse, RebornListThreadsResponse,
+    RebornLogEntry, RebornLogLevel, RebornLogQueryRequest, RebornLogQueryResponse,
+    RebornOperatorArea, RebornOperatorCommandPlaneResponse, RebornOperatorConfigDiagnostic,
+    RebornOperatorConfigDiagnosticSeverity, RebornOperatorConfigEntry,
+    RebornOperatorConfigGetResponse, RebornOperatorConfigListResponse,
     RebornOperatorConfigSetRequest, RebornOperatorConfigValidateRequest,
     RebornOperatorConfigValidateResponse, RebornOperatorLogsQuery,
     RebornOperatorServiceLifecycleAction, RebornOperatorServiceLifecycleRequest,
@@ -116,6 +144,20 @@ const OPERATOR_LOGS_DEFAULT_LIMIT: u32 = 100;
 const OPERATOR_LOGS_MAX_LIMIT: u32 = 500;
 const OPERATOR_LOGS_CURSOR_MAX_BYTES: usize = 512;
 const OPERATOR_LOGS_TARGET_MAX_BYTES: usize = 256;
+const OPERATOR_LOGS_CONTEXT_MAX_BYTES: usize = 256;
+const OPERATOR_LOG_CONTEXT_TRUNCATED_SUFFIX: &str = " ... [truncated]";
+
+const NOTICE_BLOCKED_APPROVAL: &str = "An approval gate is open on this thread — resolve it (approve or deny) before continuing, then resend your message.";
+const NOTICE_BLOCKED_AUTH: &str = "An authentication gate is open on this thread — complete authentication before continuing, then resend your message.";
+const NOTICE_BUSY_GENERIC: &str = "Ironclaw is still working on a previous message — resend yours once the current task finishes.";
+
+fn rejected_busy_notice(status: TurnStatus) -> String {
+    match status {
+        TurnStatus::BlockedApproval => NOTICE_BLOCKED_APPROVAL.to_string(),
+        TurnStatus::BlockedAuth => NOTICE_BLOCKED_AUTH.to_string(),
+        _ => NOTICE_BUSY_GENERIC.to_string(),
+    }
+}
 
 #[async_trait]
 pub trait ConnectableChannelsProductFacade: Send + Sync {
@@ -451,6 +493,27 @@ pub struct AutomationListRequest {
     pub run_limit: usize,
 }
 
+/// Stored scope of a trigger-fired thread, returned by
+/// `AutomationProductFacade::resolve_run_thread_scope`.
+///
+/// Trigger threads are written by `record_trigger_prompt` with:
+///  - `agent_id` = trigger record's `agent_id` (or default agent)
+///  - `project_id` = trigger record's `project_id`
+///  - `owner_user_id` = `Some(creator_user_id)` (the actor that fired it)
+///
+/// These three fields let the caller reconstruct the true `TurnScope` / `ThreadScope`
+/// needed to locate the thread in storage without guessing.
+#[derive(Debug, Clone)]
+pub struct TriggerRunThreadScope {
+    /// `agent_id` stored on the trigger record.
+    pub agent_id: Option<AgentId>,
+    /// `project_id` stored on the trigger record.
+    pub project_id: Option<ProjectId>,
+    /// `creator_user_id` stored on the trigger record, which equals
+    /// `owner_user_id` in the stored thread scope.
+    pub creator_user_id: UserId,
+}
+
 #[async_trait]
 pub trait AutomationProductFacade: Send + Sync {
     async fn list_automations(
@@ -458,6 +521,40 @@ pub trait AutomationProductFacade: Send + Sync {
         caller: ProductAgentBoundCaller,
         request: AutomationListRequest,
     ) -> Result<Vec<RebornAutomationInfo>, RebornServicesError>;
+
+    /// Whether the background trigger poller (scheduler) is running.
+    ///
+    /// Surfaced to the browser so the panel can warn that listed automations
+    /// will not fire while scheduling is off. Defaults to `true` so a facade
+    /// that does not know its scheduler state never produces a false "off"
+    /// notice; the production facade overrides this with the real value.
+    fn scheduler_enabled(&self) -> bool {
+        true
+    }
+
+    /// Looks up the stored trigger-thread scope for a given `thread_id`.
+    ///
+    /// Scans the caller-scoped triggers for one whose run history contains
+    /// `thread_id`, then returns the scope fields from that trigger record.
+    /// The lookup is caller-scoped via `list_scoped_triggers`, so authorization
+    /// is embedded: if the trigger exists for this caller and contains the run,
+    /// the caller is permitted to access it.
+    ///
+    /// Returns `Ok(None)` when no caller-scoped trigger has a run with this
+    /// `thread_id`. Backend lookup failures should return a stable
+    /// `RebornServicesError` so outages do not masquerade as authorization
+    /// misses.
+    ///
+    /// Implementors that do not support trigger-thread access must provide an
+    /// explicit `Ok(None)` body with a short comment noting the unsupported
+    /// state. No default body is provided here so a future production facade
+    /// cannot silently forget to implement this method and degrade
+    /// timeline/SSE/gate/cancel/run-state to 404.
+    async fn resolve_run_thread_scope(
+        &self,
+        caller: ProductAgentBoundCaller,
+        thread_id: &ThreadId,
+    ) -> Result<Option<TriggerRunThreadScope>, RebornServicesError>;
 }
 
 #[derive(Debug)]
@@ -477,6 +574,15 @@ impl AutomationProductFacade for UnsupportedAutomationProductFacade {
         _request: AutomationListRequest,
     ) -> Result<Vec<RebornAutomationInfo>, RebornServicesError> {
         Err(automation_unavailable())
+    }
+
+    async fn resolve_run_thread_scope(
+        &self,
+        _caller: ProductAgentBoundCaller,
+        _thread_id: &ThreadId,
+    ) -> Result<Option<TriggerRunThreadScope>, RebornServicesError> {
+        // Trigger-thread access is unsupported when no automation facade is wired.
+        Ok(None)
     }
 }
 
@@ -523,8 +629,8 @@ impl GateResolutionRoute {
 
     fn from_gate_shape(gate_ref: &GateRef, resolution: &WebUiGateResolution) -> Self {
         match (
-            is_approval_gate_ref(gate_ref),
-            is_auth_gate_ref(gate_ref),
+            is_approval_gate_ref(gate_ref.as_str()),
+            is_auth_gate_ref(gate_ref.as_str()),
             matches!(resolution, WebUiGateResolution::CredentialProvided { .. }),
         ) {
             (true, _, _) => Self::Approval,
@@ -662,6 +768,17 @@ fn setup_response_from_llm_snapshot(
 
 const LLM_BASE_URL_MAX_BYTES: usize = 2048;
 
+/// Validate an operator-supplied LLM `base_url` before it is persisted or
+/// probed.
+///
+/// Mirrors the `AllowPrivateNetwork` posture used at the model-discovery egress
+/// point (`ironclaw_llm`'s `check_models_url`) and the binary's
+/// `validate_operator_base_url`: a self-hosted provider on a loopback or private
+/// address (Ollama, vLLM) is the primary local use case and must be allowed.
+/// Only the never-legitimate classes — cloud metadata / link-local, multicast,
+/// and the unspecified address — are rejected here. DNS-name hosts are resolved,
+/// re-validated, and pinned by the egress guard; this syntactic check only
+/// screens literal IPs.
 fn validate_llm_base_url(base_url: Option<&str>) -> Result<(), RebornServicesError> {
     let Some(raw) = base_url else {
         return Ok(());
@@ -677,10 +794,12 @@ fn validate_llm_base_url(base_url: Option<&str>) -> Result<(), RebornServicesErr
     let Some(host) = parsed.host_str() else {
         return Err(operator_setup_validation_error("base_url"));
     };
-    if host.eq_ignore_ascii_case("localhost") {
-        return Err(operator_setup_validation_error("base_url"));
-    }
-    if let Ok(ip) = host.parse::<IpAddr>()
+    // `localhost` and loopback/private literals are intentionally allowed —
+    // pointing the operator's provider at a self-hosted endpoint is the main
+    // reason this field exists. Only literal IPs in the always-blocked classes
+    // are rejected.
+    let normalized_host = host.trim_start_matches('[').trim_end_matches(']');
+    if let Ok(ip) = normalized_host.parse::<IpAddr>()
         && forbidden_llm_base_url_ip(ip)
     {
         return Err(operator_setup_validation_error("base_url"));
@@ -695,20 +814,25 @@ fn forbidden_llm_base_url_ip(ip: IpAddr) -> bool {
     }
 }
 
+/// Always-blocked IPv4 classes: the unspecified address, multicast, and
+/// link-local (which includes the cloud-metadata endpoint 169.254.169.254).
+/// Loopback and private ranges are allowed so self-hosted providers work.
 fn forbidden_llm_base_url_ipv4(ip: Ipv4Addr) -> bool {
-    ip.is_private()
-        || ip.is_loopback()
-        || ip.is_link_local()
-        || ip.is_unspecified()
-        || ip.is_multicast()
+    ip.is_unspecified() || ip.is_multicast() || ip.is_link_local()
 }
 
+/// Always-blocked IPv6 classes: unspecified, multicast, and link-local.
+/// Loopback (`::1`) and unique-local are allowed so self-hosted providers work.
+/// Embedded-IPv4 forms (`::ffff:a.b.c.d` and `::a.b.c.d`) are unwrapped so an
+/// IPv4-compatible metadata address can't slip through as a "plain" v6 host.
 fn forbidden_llm_base_url_ipv6(ip: Ipv6Addr) -> bool {
-    ip.is_loopback()
-        || ip.is_unspecified()
-        || ip.is_multicast()
-        || ip.is_unique_local()
-        || ip.is_unicast_link_local()
+    if ip.is_unspecified() || ip.is_multicast() || ip.is_unicast_link_local() {
+        return true;
+    }
+    if let Some(v4) = ip.to_ipv4() {
+        return forbidden_llm_base_url_ipv4(v4);
+    }
+    false
 }
 
 fn operator_config_surface_not_wired_diagnostic() -> RebornOperatorConfigDiagnostic {
@@ -833,6 +957,23 @@ pub trait RebornServicesApi: Send + Sync {
         request: RebornTimelineRequest,
     ) -> Result<RebornTimelineResponse, RebornServicesError>;
 
+    /// Read the raw bytes of one landed attachment so the browser can render an
+    /// image thumbnail (or download a file) for a persisted message. The default
+    /// reports the bytes are unavailable; compositions that wire a reader over
+    /// the project workspace filesystem override it. Implementations must derive
+    /// the scope from `caller`, never from the request path values.
+    async fn read_attachment(
+        &self,
+        _caller: WebUiAuthenticatedCaller,
+        _request: RebornAttachmentRequest,
+    ) -> Result<RebornAttachmentBytes, RebornServicesError> {
+        Err(RebornServicesError::from_status(
+            RebornServicesErrorCode::NotFound,
+            404,
+            false,
+        ))
+    }
+
     async fn stream_events(
         &self,
         caller: WebUiAuthenticatedCaller,
@@ -857,6 +998,182 @@ pub trait RebornServicesApi: Send + Sync {
         request: RebornGetRunStateRequest,
     ) -> Result<RebornGetRunStateResponse, RebornServicesError>;
 
+    /// List a directory under the thread's project workspace.
+    ///
+    /// Read-only navigation surface over the same `/workspace` mount the agent's
+    /// file tools and inbound-attachment landing use. Default body reports the
+    /// service unavailable so implementors without a wired project filesystem
+    /// (and existing fakes) compile untouched.
+    async fn list_project_dir(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        request: RebornProjectFsListRequest,
+    ) -> Result<RebornProjectFsListResponse, RebornServicesError> {
+        let _ = (caller, request);
+        Err(RebornServicesError::service_unavailable(false))
+    }
+
+    /// Stat a path under the thread's project workspace.
+    async fn stat_project_path(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        request: RebornProjectFsStatRequest,
+    ) -> Result<RebornProjectFsStatResponse, RebornServicesError> {
+        let _ = (caller, request);
+        Err(RebornServicesError::service_unavailable(false))
+    }
+
+    /// Read (download) a file under the thread's project workspace. The returned
+    /// [`ProjectFsFile`] carries the bytes the HTTP layer streams as the body;
+    /// they are never embedded in a JSON envelope.
+    async fn read_project_file(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        request: RebornProjectFsReadRequest,
+    ) -> Result<ProjectFsFile, RebornServicesError> {
+        let _ = (caller, request);
+        Err(RebornServicesError::service_unavailable(false))
+    }
+
+    /// List the mounts the standalone read-only filesystem viewer can browse
+    /// (memory, workspace files, skills). The set is composition-determined; a
+    /// runtime without a wired browse reader reports an empty list rather than
+    /// erroring, so the UI can render an empty/disabled state.
+    async fn list_fs_mounts(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+    ) -> Result<RebornFsMountsResponse, RebornServicesError> {
+        let _ = caller;
+        Ok(RebornFsMountsResponse { mounts: Vec::new() })
+    }
+
+    /// List a directory on a browsable mount. Read-only navigation over the
+    /// caller-scoped internal filesystem; `path` is mount-relative. Default
+    /// body reports the service unavailable so implementors without a wired
+    /// browse reader (and existing fakes) compile untouched.
+    async fn browse_fs_dir(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        request: RebornFsListRequest,
+    ) -> Result<RebornFsListResponse, RebornServicesError> {
+        let _ = (caller, request);
+        Err(RebornServicesError::service_unavailable(false))
+    }
+
+    /// List the projects the caller can access (owner or active member).
+    ///
+    /// Default body reports the service unavailable so implementors without a
+    /// wired project service (and existing fakes) compile untouched.
+    async fn list_projects(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        request: RebornListProjectsRequest,
+    ) -> Result<RebornListProjectsResponse, RebornServicesError> {
+        let _ = (caller, request);
+        Err(RebornServicesError::service_unavailable(false))
+    }
+
+    /// Stat a path on a browsable mount.
+    async fn stat_fs_path(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        request: RebornFsStatRequest,
+    ) -> Result<RebornFsStatResponse, RebornServicesError> {
+        let _ = (caller, request);
+        Err(RebornServicesError::service_unavailable(false))
+    }
+
+    /// Create a project owned by the caller.
+    async fn create_project(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        request: RebornCreateProjectRequest,
+    ) -> Result<RebornProjectResponse, RebornServicesError> {
+        let _ = (caller, request);
+        Err(RebornServicesError::service_unavailable(false))
+    }
+
+    /// Read (preview/download) a file on a browsable mount. The returned
+    /// [`ProjectFsFile`] carries the bytes the HTTP layer streams as the body.
+    async fn read_fs_file(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        request: RebornFsReadRequest,
+    ) -> Result<ProjectFsFile, RebornServicesError> {
+        let _ = (caller, request);
+        Err(RebornServicesError::service_unavailable(false))
+    }
+
+    /// Fetch a single project the caller can access.
+    async fn get_project(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        request: RebornGetProjectRequest,
+    ) -> Result<RebornProjectResponse, RebornServicesError> {
+        let _ = (caller, request);
+        Err(RebornServicesError::service_unavailable(false))
+    }
+
+    /// Update a project (editor or owner access required).
+    async fn update_project(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        request: RebornUpdateProjectRequest,
+    ) -> Result<RebornProjectResponse, RebornServicesError> {
+        let _ = (caller, request);
+        Err(RebornServicesError::service_unavailable(false))
+    }
+
+    /// Delete a project (owner access required).
+    async fn delete_project(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        request: RebornDeleteProjectRequest,
+    ) -> Result<(), RebornServicesError> {
+        let _ = (caller, request);
+        Err(RebornServicesError::service_unavailable(false))
+    }
+
+    /// List a project's membership grants (viewer access required).
+    async fn list_project_members(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        request: RebornListMembersRequest,
+    ) -> Result<RebornListMembersResponse, RebornServicesError> {
+        let _ = (caller, request);
+        Err(RebornServicesError::service_unavailable(false))
+    }
+
+    /// Grant a user a role on a project (owner access required).
+    async fn add_project_member(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        request: RebornAddMemberRequest,
+    ) -> Result<RebornProjectMemberInfo, RebornServicesError> {
+        let _ = (caller, request);
+        Err(RebornServicesError::service_unavailable(false))
+    }
+
+    /// Change a member's role (owner access required).
+    async fn update_project_member_role(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        request: RebornUpdateMemberRoleRequest,
+    ) -> Result<RebornProjectMemberInfo, RebornServicesError> {
+        let _ = (caller, request);
+        Err(RebornServicesError::service_unavailable(false))
+    }
+
+    /// Revoke a member (owner access required).
+    async fn remove_project_member(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        request: RebornRemoveMemberRequest,
+    ) -> Result<(), RebornServicesError> {
+        let _ = (caller, request);
+        Err(RebornServicesError::service_unavailable(false))
+    }
+
     /// List the caller-scoped threads. Pagination is opaque: callers
     /// echo back the `next_cursor` from a prior response to retrieve
     /// the next page; the cursor encoding is implementation-defined.
@@ -874,6 +1191,67 @@ pub trait RebornServicesApi: Send + Sync {
         caller: WebUiAuthenticatedCaller,
         request: WebUiListAutomationsRequest,
     ) -> Result<RebornListAutomationsResponse, RebornServicesError>;
+
+    /// Read-only Trace Commons credit summary for the authenticated
+    /// caller.
+    ///
+    /// The trace scope derives from the caller's user id only — never
+    /// from request input. Missing or unreadable contributor-local
+    /// state is the normal "not enrolled / nothing submitted yet"
+    /// zero response, never an error. The aggregates are a local view
+    /// as of the last credit sync; the authoritative ledger is
+    /// server-side.
+    ///
+    /// The default body is the production implementation: every facade
+    /// reads the same caller-scoped contributor-local state through
+    /// `ironclaw_reborn_traces`, so impls (including test fakes) only
+    /// override this when they need a non-local credits source.
+    async fn trace_credits(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+    ) -> Result<RebornTraceCreditsResponse, RebornServicesError> {
+        let actor = caller.actor();
+        // Tenant-scope the local state key so the same user id in two tenants
+        // does not share Trace Commons credit/hold state.
+        let scope = ironclaw_reborn_traces::contribution::trace_scope_key(
+            caller.tenant_id.as_str(),
+            actor.user_id.as_str(),
+        );
+        // A genuine local-state read failure must surface as a sanitized 500,
+        // not a misleading zero/not-enrolled view (carry the cause for the
+        // server-side trail per error-handling.md).
+        trace_credits::local_trace_credits_for_user(&scope)
+            .map_err(RebornServicesError::internal_from)
+    }
+
+    /// Authorize the caller's held manual-review trace for submission
+    /// (promote-as-is). The scope is always the authenticated caller's user
+    /// id; the submission id from the request path is never authority to
+    /// cross scopes. A missing/already-resolved hold returns
+    /// `authorized: false`, not an error.
+    async fn authorize_trace_hold(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        submission_id: String,
+    ) -> Result<RebornTraceHoldAuthorizeResponse, RebornServicesError> {
+        let actor = caller.actor();
+        let submission = uuid::Uuid::parse_str(submission_id.trim()).map_err(|_| {
+            RebornServicesError::validation(WebUiInboundValidationError::new(
+                "submission_id",
+                WebUiInboundValidationCode::InvalidId,
+            ))
+        })?;
+        let scope = ironclaw_reborn_traces::contribution::trace_scope_key(
+            caller.tenant_id.as_str(),
+            actor.user_id.as_str(),
+        );
+        let authorized =
+            trace_credits::authorize_trace_hold_for_user(&scope, submission).map_err(|error| {
+                tracing::debug!(%error, "failed to authorize Trace Commons held trace");
+                RebornServicesError::internal_invariant()
+            })?;
+        Ok(RebornTraceHoldAuthorizeResponse { authorized })
+    }
 
     async fn list_connectable_channels(
         &self,
@@ -1197,11 +1575,48 @@ pub trait RebornServicesApi: Send + Sync {
     }
 }
 
+/// Lands inbound attachment bytes into durable, agent-accessible storage and
+/// returns the transcript references to persist on the user message.
+///
+/// Injected by host composition, which owns the project-scoped filesystem
+/// authority. `message_id` is a stable per-message id (the idempotency key)
+/// used only to disambiguate the storage path; the implementation writes
+/// through the same `MountView` the agent's file tools resolve through, so
+/// landed bytes are readable by `file_read`/`list_dir` in later turns.
+#[async_trait]
+pub trait InboundAttachmentLander: Send + Sync {
+    async fn land(
+        &self,
+        thread_scope: &ThreadScope,
+        message_id: &str,
+        attachments: Vec<InboundAttachment>,
+    ) -> Result<Vec<AttachmentRef>, RebornServicesError>;
+}
+
+/// Reads a landed attachment's bytes back for the WebUI bytes endpoint. The
+/// read counterpart of [`InboundAttachmentLander`]: host composition implements
+/// it over the same project-scoped workspace filesystem the lander wrote
+/// through, so `storage_key` is re-scoped through that mount authority and never
+/// treated as a host path.
+#[async_trait]
+pub trait InboundAttachmentReader: Send + Sync {
+    async fn read(
+        &self,
+        thread_scope: &ThreadScope,
+        storage_key: &str,
+    ) -> Result<Vec<u8>, RebornServicesError>;
+}
+
 /// Default facade implementation composed at the WebUI boundary.
 #[derive(Clone)]
 pub struct RebornServices {
     thread_service: Arc<dyn SessionThreadService>,
     turn_coordinator: Arc<dyn TurnCoordinator>,
+    inbound_attachments: Option<Arc<dyn InboundAttachmentLander>>,
+    project_filesystem: Option<Arc<dyn ProjectFilesystemReader>>,
+    filesystem_browser: Option<Arc<dyn FilesystemBrowseReader>>,
+    project_service: Option<Arc<dyn ProjectService>>,
+    inbound_attachment_reader: Option<Arc<dyn InboundAttachmentReader>>,
     event_stream: Option<Arc<dyn ProjectionStream>>,
     lifecycle_facade: Arc<dyn LifecycleProductFacade>,
     automation_facade: Arc<dyn AutomationProductFacade>,
@@ -1228,6 +1643,11 @@ impl RebornServices {
         Self {
             thread_service,
             turn_coordinator,
+            inbound_attachments: None,
+            project_filesystem: None,
+            filesystem_browser: None,
+            project_service: None,
+            inbound_attachment_reader: None,
             event_stream: None,
             lifecycle_facade: Arc::new(UnsupportedLifecycleProductFacade::new_static(
                 "reborn_lifecycle_facade_unwired",
@@ -1253,6 +1673,59 @@ impl RebornServices {
 
     pub fn with_event_stream(mut self, event_stream: Arc<dyn ProjectionStream>) -> Self {
         self.event_stream = Some(event_stream);
+        self
+    }
+
+    /// Wire the port that lands inbound attachment bytes into project storage.
+    /// Without it, a send-message carrying attachments is rejected rather than
+    /// silently dropping the files.
+    pub fn with_inbound_attachments(
+        mut self,
+        inbound_attachments: Arc<dyn InboundAttachmentLander>,
+    ) -> Self {
+        self.inbound_attachments = Some(inbound_attachments);
+        self
+    }
+
+    /// Wire the read-only project-filesystem port backing directory listing and
+    /// file download. Without it, the `list_project_dir` / `stat_project_path` /
+    /// `read_project_file` methods report the service unavailable.
+    pub fn with_project_filesystem_reader(
+        mut self,
+        project_filesystem: Arc<dyn ProjectFilesystemReader>,
+    ) -> Self {
+        self.project_filesystem = Some(project_filesystem);
+        self
+    }
+
+    /// Wire the read-only multi-mount browse port backing the standalone
+    /// filesystem viewer (memory / workspace files / skills). Without it,
+    /// `list_fs_mounts` reports no mounts and the `browse_fs_dir` /
+    /// `stat_fs_path` / `read_fs_file` methods report the service unavailable.
+    pub fn with_filesystem_browser(
+        mut self,
+        filesystem_browser: Arc<dyn FilesystemBrowseReader>,
+    ) -> Self {
+        self.filesystem_browser = Some(filesystem_browser);
+        self
+    }
+
+    /// Wire the project management + membership (ACL) port. Without it, the
+    /// `list_projects` / `create_project` / … methods report the service
+    /// unavailable.
+    pub fn with_project_service(mut self, project_service: Arc<dyn ProjectService>) -> Self {
+        self.project_service = Some(project_service);
+        self
+    }
+
+    /// Wire the port that reads landed attachment bytes back for the WebUI bytes
+    /// endpoint. Without it, `read_attachment` reports the bytes unavailable
+    /// (the timeline still renders the attachment card from its ref).
+    pub fn with_inbound_attachment_reader(
+        mut self,
+        reader: Arc<dyn InboundAttachmentReader>,
+    ) -> Self {
+        self.inbound_attachment_reader = Some(reader);
         self
     }
 
@@ -1494,6 +1967,13 @@ impl RebornServicesApi for RebornServices {
         caller: WebUiAuthenticatedCaller,
         request: WebUiCreateThreadRequest,
     ) -> Result<RebornCreateThreadResponse, RebornServicesError> {
+        // A browser may propose a project for the new thread; authorize the
+        // caller's access to it (never trust the body alone) and adopt it as the
+        // thread's scope for this request only. Without a proposed project the
+        // caller's default scope is used unchanged.
+        let caller = self
+            .authorize_create_thread_project(caller, request.project_id.clone())
+            .await?;
         let command = request.into_command(caller)?;
         let WebUiInboundCommand::CreateThread {
             caller,
@@ -1537,6 +2017,9 @@ impl RebornServicesApi for RebornServices {
         caller: WebUiAuthenticatedCaller,
         request: WebUiSendMessageRequest,
     ) -> Result<RebornSubmitTurnResponse, RebornServicesError> {
+        // Decode + budget inline attachment bytes before the request is
+        // consumed into the (bytes-free, serializable) command.
+        let attachments = request.decode_attachments()?;
         let command = request.into_command(caller)?;
         let WebUiInboundCommand::SendMessage {
             scope,
@@ -1589,6 +2072,23 @@ impl RebornServicesApi for RebornServices {
                         event_cursor: state.event_cursor,
                     });
                 }
+                MessageStatus::RejectedBusy => {
+                    // Idempotent re-rejection: the original busy rejection was
+                    // lost before it reached the client.  The blocking run may
+                    // already be finished, so we cannot recover its run-id or
+                    // cursor.  Return a RejectedBusy with None run metadata so
+                    // the client knows to resend rather than treating this as
+                    // a new submission.  Fabricating a run-id or status here
+                    // would give the client a reference it cannot query.
+                    return Ok(RebornSubmitTurnResponse::RejectedBusy {
+                        thread_id: replay.thread_id,
+                        accepted_message_ref: accepted_message_ref(replay.message_id.to_string())?,
+                        active_run_id: None,
+                        status: None,
+                        event_cursor: None,
+                        notice: NOTICE_BUSY_GENERIC.to_string(),
+                    });
+                }
                 MessageStatus::Accepted | MessageStatus::DeferredBusy => AcceptedWebUiMessage {
                     thread_id: replay.thread_id,
                     message_id: replay.message_id,
@@ -1609,6 +2109,26 @@ impl RebornServicesApi for RebornServices {
                 }
             }
         } else {
+            // Land attachment bytes (if any) into project storage before the
+            // message is accepted, recording each as a transcript reference.
+            // The stable per-message external_event_id is the path's message
+            // segment, so a same-day retry re-lands at the same path; the lander
+            // also partitions by UTC day, so a retry that crosses midnight UTC
+            // lands under the new day's directory (the earlier bytes are left
+            // addressable but unreferenced). Idempotency is enforced at message
+            // acceptance, not by the storage path.
+            let message_content = if attachments.is_empty() {
+                MessageContent::text(content.clone())
+            } else {
+                let lander = self
+                    .inbound_attachments
+                    .as_ref()
+                    .ok_or_else(|| RebornServicesError::service_unavailable(false))?;
+                let refs = lander
+                    .land(&thread_scope, &external_event_id, attachments)
+                    .await?;
+                MessageContent::with_attachments(content.clone(), refs)
+            };
             let accepted = self
                 .thread_service
                 .accept_inbound_message(AcceptInboundMessageRequest {
@@ -1618,7 +2138,7 @@ impl RebornServicesApi for RebornServices {
                     source_binding_id: Some(source_binding_id.clone()),
                     reply_target_binding_id: Some(source_binding_id.clone()),
                     external_event_id: Some(external_event_id),
-                    content: MessageContent::text(content.clone()),
+                    content: message_content,
                 })
                 .await
                 .map_err(map_thread_error)?;
@@ -1638,6 +2158,7 @@ impl RebornServicesApi for RebornServices {
             "webui-reply",
             &handoff.reply_target_binding_id,
         )?;
+        let product_context = ironclaw_product_context::resolve_web_ui(scope.product_owner(&actor));
         let submit = SubmitTurnRequest {
             scope: scope.clone(),
             actor,
@@ -1651,6 +2172,7 @@ impl RebornServicesApi for RebornServices {
             parent_run_id: None,
             subagent_depth: 0,
             spawn_tree_root_run_id: None,
+            product_context: Some(product_context),
         };
 
         self.record_skill_activation_message(&scope, &accepted_message_ref, &content)?;
@@ -1687,20 +2209,21 @@ impl RebornServicesApi for RebornServices {
             }
             Err(TurnError::ThreadBusy(busy)) => {
                 self.clear_skill_activation_message(&scope, &accepted_message_ref)?;
-                mark_message_deferred_busy_or_replay(
+                mark_message_rejected_busy_or_replay(
                     &*self.thread_service,
                     &thread_scope,
                     &handoff,
                     &client_action_id,
                 )
                 .await?;
-
-                Ok(RebornSubmitTurnResponse::DeferredBusy {
+                let notice = rejected_busy_notice(busy.status);
+                Ok(RebornSubmitTurnResponse::RejectedBusy {
                     thread_id: handoff.thread_id,
                     accepted_message_ref,
-                    active_run_id: busy.active_run_id,
-                    status: busy.status,
-                    event_cursor: busy.event_cursor,
+                    active_run_id: Some(busy.active_run_id),
+                    status: Some(busy.status),
+                    event_cursor: Some(busy.event_cursor),
+                    notice,
                 })
             }
             Err(error) => {
@@ -1737,19 +2260,12 @@ impl RebornServicesApi for RebornServices {
         request: RebornTimelineRequest,
     ) -> Result<RebornTimelineResponse, RebornServicesError> {
         let thread_id = parse_thread_id_field("thread_id", request.thread_id)?;
-        let actor = caller.actor();
         let limit = clamp_timeline_limit(request.limit);
         let cursor = parse_timeline_cursor(request.cursor.as_deref())?;
         let scope = caller.turn_scope(thread_id);
-        let thread_scope = thread_scope_from_turn_scope(&scope, Some(actor.user_id.clone()))?;
-        let history = self
-            .thread_service
-            .list_thread_history(ThreadHistoryRequest {
-                scope: thread_scope,
-                thread_id: scope.thread_id.clone(),
-            })
-            .await
-            .map_err(map_timeline_probe_error)?;
+        let (_thread_scope, history) = self
+            .resolve_thread_history_for_caller(caller, &scope)
+            .await?;
 
         let (messages, next_cursor) = paginate_timeline_messages(history.messages, limit, cursor);
         let summary_artifacts = cap_summary_artifacts(history.summary_artifacts);
@@ -1762,6 +2278,314 @@ impl RebornServicesApi for RebornServices {
         })
     }
 
+    async fn list_project_dir(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        request: RebornProjectFsListRequest,
+    ) -> Result<RebornProjectFsListResponse, RebornServicesError> {
+        let reader = self.require_project_filesystem()?;
+        let thread_scope = self
+            .authorize_project_fs_access(caller, request.thread_id)
+            .await?;
+        // dispatch-exempt: read-only, already-authorized workspace listing through
+        // the facade's own port — not an in-turn mutating tool call, so it does
+        // not route through ToolDispatcher.
+        let entries = reader
+            .list_dir(&thread_scope, &request.path)
+            .await
+            .map_err(map_project_fs_error)?;
+        Ok(RebornProjectFsListResponse { entries })
+    }
+
+    async fn stat_project_path(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        request: RebornProjectFsStatRequest,
+    ) -> Result<RebornProjectFsStatResponse, RebornServicesError> {
+        let reader = self.require_project_filesystem()?;
+        let thread_scope = self
+            .authorize_project_fs_access(caller, request.thread_id)
+            .await?;
+        // dispatch-exempt: read-only, already-authorized workspace stat through
+        // the facade's own port — not an in-turn mutating tool call.
+        let stat = reader
+            .stat(&thread_scope, &request.path)
+            .await
+            .map_err(map_project_fs_error)?;
+        Ok(RebornProjectFsStatResponse { stat })
+    }
+
+    async fn read_project_file(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        request: RebornProjectFsReadRequest,
+    ) -> Result<ProjectFsFile, RebornServicesError> {
+        let reader = self.require_project_filesystem()?;
+        let thread_scope = self
+            .authorize_project_fs_access(caller, request.thread_id)
+            .await?;
+        // dispatch-exempt: read-only, already-authorized workspace file download
+        // through the facade's own port — not an in-turn mutating tool call.
+        reader
+            .read_file(&thread_scope, &request.path)
+            .await
+            .map_err(map_project_fs_error)
+    }
+
+    async fn list_fs_mounts(
+        &self,
+        _caller: WebUiAuthenticatedCaller,
+    ) -> Result<RebornFsMountsResponse, RebornServicesError> {
+        // No wired browser is not an error: the UI renders an empty viewer.
+        let mounts = self
+            .filesystem_browser
+            .as_ref()
+            .map(|browser| {
+                browser
+                    .available_mounts()
+                    .into_iter()
+                    .map(|mount| RebornFsMountInfo {
+                        mount,
+                        label: mount.label().to_string(),
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        Ok(RebornFsMountsResponse { mounts })
+    }
+
+    async fn browse_fs_dir(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        request: RebornFsListRequest,
+    ) -> Result<RebornFsListResponse, RebornServicesError> {
+        let browser = self.require_filesystem_browser(request.mount)?;
+        // Scope is derived from the authenticated caller, never the request.
+        let scope = caller_browse_scope(&caller);
+        // dispatch-exempt: read-only, caller-scoped internal-filesystem listing
+        // through the facade's own port — not an in-turn mutating tool call.
+        let entries = browser
+            .list_dir(&scope, request.mount, &request.path)
+            .await
+            .map_err(map_project_fs_error)?;
+        Ok(RebornFsListResponse {
+            mount: request.mount,
+            path: request.path,
+            entries,
+        })
+    }
+
+    async fn stat_fs_path(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        request: RebornFsStatRequest,
+    ) -> Result<RebornFsStatResponse, RebornServicesError> {
+        let browser = self.require_filesystem_browser(request.mount)?;
+        let scope = caller_browse_scope(&caller);
+        // dispatch-exempt: read-only, caller-scoped internal-filesystem stat.
+        let stat = browser
+            .stat(&scope, request.mount, &request.path)
+            .await
+            .map_err(map_project_fs_error)?;
+        Ok(RebornFsStatResponse { stat })
+    }
+
+    async fn read_fs_file(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        request: RebornFsReadRequest,
+    ) -> Result<ProjectFsFile, RebornServicesError> {
+        let browser = self.require_filesystem_browser(request.mount)?;
+        let scope = caller_browse_scope(&caller);
+        // dispatch-exempt: read-only, caller-scoped internal-filesystem download.
+        browser
+            .read_file(&scope, request.mount, &request.path)
+            .await
+            .map_err(map_project_fs_error)
+    }
+
+    async fn list_projects(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        request: RebornListProjectsRequest,
+    ) -> Result<RebornListProjectsResponse, RebornServicesError> {
+        let service = self.require_project_service()?;
+        service
+            .list_projects(project_caller(&caller), request)
+            .await
+            .map_err(map_project_service_error)
+    }
+
+    async fn create_project(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        request: RebornCreateProjectRequest,
+    ) -> Result<RebornProjectResponse, RebornServicesError> {
+        let service = self.require_project_service()?;
+        service
+            .create_project(project_caller(&caller), request)
+            .await
+            .map_err(map_project_service_error)
+    }
+
+    async fn get_project(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        request: RebornGetProjectRequest,
+    ) -> Result<RebornProjectResponse, RebornServicesError> {
+        let service = self.require_project_service()?;
+        service
+            .get_project(project_caller(&caller), request)
+            .await
+            .map_err(map_project_service_error)
+    }
+
+    async fn update_project(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        request: RebornUpdateProjectRequest,
+    ) -> Result<RebornProjectResponse, RebornServicesError> {
+        let service = self.require_project_service()?;
+        service
+            .update_project(project_caller(&caller), request)
+            .await
+            .map_err(map_project_service_error)
+    }
+
+    async fn delete_project(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        request: RebornDeleteProjectRequest,
+    ) -> Result<(), RebornServicesError> {
+        let service = self.require_project_service()?;
+        service
+            .delete_project(project_caller(&caller), request)
+            .await
+            .map_err(map_project_service_error)
+    }
+
+    async fn list_project_members(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        request: RebornListMembersRequest,
+    ) -> Result<RebornListMembersResponse, RebornServicesError> {
+        let service = self.require_project_service()?;
+        service
+            .list_members(project_caller(&caller), request)
+            .await
+            .map_err(map_project_service_error)
+    }
+
+    async fn add_project_member(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        request: RebornAddMemberRequest,
+    ) -> Result<RebornProjectMemberInfo, RebornServicesError> {
+        let service = self.require_project_service()?;
+        service
+            .add_member(project_caller(&caller), request)
+            .await
+            .map_err(map_project_service_error)
+    }
+
+    async fn update_project_member_role(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        request: RebornUpdateMemberRoleRequest,
+    ) -> Result<RebornProjectMemberInfo, RebornServicesError> {
+        let service = self.require_project_service()?;
+        service
+            .update_member_role(project_caller(&caller), request)
+            .await
+            .map_err(map_project_service_error)
+    }
+
+    async fn remove_project_member(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        request: RebornRemoveMemberRequest,
+    ) -> Result<(), RebornServicesError> {
+        let service = self.require_project_service()?;
+        service
+            .remove_member(project_caller(&caller), request)
+            .await
+            .map_err(map_project_service_error)
+    }
+
+    async fn read_attachment(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        request: RebornAttachmentRequest,
+    ) -> Result<RebornAttachmentBytes, RebornServicesError> {
+        let thread_id = parse_thread_id_field("thread_id", request.thread_id)?;
+        let message_id = ThreadMessageId::parse(&request.message_id).map_err(|_| {
+            RebornServicesError::from_status(RebornServicesErrorCode::NotFound, 404, false)
+        })?;
+        let scope = caller.turn_scope(thread_id);
+
+        // Resolve the thread the same way the timeline does (including the
+        // automation-trigger fallback) and read the bytes back through the
+        // scope the history actually lives under — for a trigger-fired thread
+        // that is the creator's scope, not the caller's session scope, so the
+        // reader addresses the right project mount.
+        //
+        // This loads the whole thread history to find one ref, so it is
+        // O(messages) per fetch. Acceptable for now: the cost equals the
+        // timeline load already incurred when the thread is open, and the
+        // browser caches each attachment (private max-age plus the resolved
+        // data/blob URL), so it is one fetch per attachment per session. A
+        // single-message fast path would need a new scope-validated "load one
+        // message *record* by id" service method — `load_context_messages`
+        // projects to `ContextMessage`, which carries only image refs (no
+        // filename, no non-image kinds), so it can't resolve an arbitrary
+        // attachment. Left as a follow-up rather than widening the thread
+        // service contract here.
+        let (thread_scope, history) = self
+            .resolve_thread_history_for_caller(caller, &scope)
+            .await?;
+
+        // The (message, attachment-id) pair is required: an attachment id is
+        // only unique within its message. Resolve the ref server-side so the
+        // browser never supplies the storage path and the Content-Type is
+        // authoritative.
+        let attachment = history
+            .messages
+            .iter()
+            .find(|message| message.message_id == message_id)
+            .and_then(|message| {
+                message
+                    .attachments
+                    .iter()
+                    .find(|attachment| attachment.id == request.attachment_id)
+            })
+            .ok_or_else(|| {
+                RebornServicesError::from_status(RebornServicesErrorCode::NotFound, 404, false)
+            })?;
+
+        let storage_key = attachment.storage_key.as_deref().ok_or_else(|| {
+            // An attachment that never landed has no bytes to serve.
+            RebornServicesError::from_status(RebornServicesErrorCode::NotFound, 404, false)
+        })?;
+
+        // The ref landed (it has a storage_key) but no read port is wired: that
+        // is a composition fault, not an absent file. Surface a retryable 503
+        // rather than a 404 that would make real bytes look gone. (In the
+        // shipped composition the reader and lander are wired together, so this
+        // only trips a misconfigured custom host.)
+        let Some(reader) = self.inbound_attachment_reader.as_ref() else {
+            // Not retryable: a missing port won't appear on a retry, it needs
+            // composition wiring.
+            return Err(RebornServicesError::service_unavailable(false));
+        };
+
+        let bytes = reader.read(&thread_scope, storage_key).await?;
+        Ok(RebornAttachmentBytes {
+            mime_type: attachment.mime_type.clone(),
+            filename: attachment.filename.clone(),
+            bytes,
+        })
+    }
+
     async fn stream_events(
         &self,
         caller: WebUiAuthenticatedCaller,
@@ -1769,17 +2593,20 @@ impl RebornServicesApi for RebornServices {
     ) -> Result<RebornStreamEventsResponse, RebornServicesError> {
         let thread_id = parse_thread_id_field("thread_id", request.thread_id)?;
         let actor = caller.actor();
-        // Metadata-only ownership probe: the SSE handler calls
-        // stream_events once per poll, and using list_thread_history here
-        // would load the full message transcript + summary artifacts per
-        // call — for an active stream that is hundreds of rows per second
-        // per caller. resolve_webui_thread_metadata uses the cheap
-        // read_thread probe; without it a caller sharing
-        // (tenant, agent, project) could still read another user's
-        // projection feed by guessing thread_id, so the probe itself
-        // stays.
-        let (scope, _thread_scope) = self
-            .resolve_webui_thread_metadata(caller.turn_scope(thread_id), &actor)
+        // Ownership probe: the SSE handler calls stream_events once per poll,
+        // so the cheap read_thread probe is used rather than loading the full
+        // transcript. Without it a caller sharing (tenant, agent, project)
+        // could read another user's projection feed by guessing thread_id.
+        // The automation fallback allows the owner of an automation to stream
+        // events for a trigger-fired thread (which is stored under the trigger
+        // creator). The returned scope may contain an explicit owner for
+        // trigger threads.
+        //
+        // Authorization is revalidated on every poll — no caching — so a
+        // caller that loses automation visibility between polls cannot keep
+        // draining the trigger-owned stream.
+        let access = self
+            .resolve_thread_access_for_caller(caller.clone(), caller.turn_scope(thread_id), &actor)
             .await?;
         let Some(event_stream) = &self.event_stream else {
             return Err(RebornServicesError::from_status_kind(
@@ -1789,10 +2616,19 @@ impl RebornServicesApi for RebornServices {
                 false,
             ));
         };
+        // Projection identity must be the thread owner, not necessarily the
+        // caller. Turn events and the runtime event stream are keyed under the
+        // identity of the actor that submitted the run (the trigger creator for
+        // trigger threads; the session user for normal threads). The caller
+        // already proved visibility via automation ownership above; using the
+        // caller's id here would filter to the wrong stream/events.
+        //
+        // For normal session threads `explicit_owner_user_id()` is `None` and
+        // we fall back to the caller's id — behaviour is unchanged.
         let events = event_stream
             .drain(ProjectionSubscriptionRequest {
-                actor,
-                scope,
+                actor: access.run_actor,
+                scope: access.scope,
                 after_cursor: request.after_cursor,
             })
             .await
@@ -1805,14 +2641,24 @@ impl RebornServicesApi for RebornServices {
         caller: WebUiAuthenticatedCaller,
         request: WebUiCancelRunRequest,
     ) -> Result<RebornCancelRunResponse, RebornServicesError> {
+        let caller_for_fallback = caller.clone();
         let command = request.into_command(caller)?;
-        let WebUiInboundCommand::CancelRun { request } = command else {
+        let WebUiInboundCommand::CancelRun { mut request } = command else {
             return Err(RebornServicesError::internal_invariant());
         };
-        // Metadata-only ownership probe — cancel_run has no use for the
-        // message transcript and the load would be wasted work.
-        self.resolve_webui_thread_metadata(request.scope.clone(), &request.actor)
+        // Ownership probe with automation-trigger fallback. If the thread is a
+        // trigger-fired thread belonging to the caller's automation, the probe
+        // succeeds and returns the trigger-owned scope/actor so the cancel
+        // arrives at the actual run, not the browser caller's session scope.
+        let access = self
+            .resolve_thread_access_for_caller(
+                caller_for_fallback,
+                request.scope.clone(),
+                &request.actor,
+            )
             .await?;
+        request.scope = access.scope;
+        request.actor = access.run_actor;
         let response = self
             .turn_coordinator
             .cancel_run(request)
@@ -1826,6 +2672,7 @@ impl RebornServicesApi for RebornServices {
         caller: WebUiAuthenticatedCaller,
         request: WebUiResolveGateRequest,
     ) -> Result<RebornResolveGateResponse, RebornServicesError> {
+        let caller_for_fallback = caller.clone();
         let command = request.into_command(caller)?;
         let WebUiInboundCommand::ResolveGate {
             scope,
@@ -1839,18 +2686,27 @@ impl RebornServicesApi for RebornServices {
             return Err(RebornServicesError::internal_invariant());
         };
 
-        // Metadata-only ownership probe — resolve_gate has no use for
-        // the message transcript and the load would be wasted work.
-        self.resolve_webui_thread_metadata(scope.clone(), &actor)
+        // Ownership probe with automation-trigger fallback. Trigger threads
+        // return the trigger-owned scope and run actor; gate routing and resume
+        // paths must use that run actor while authorization remains tied to the
+        // WebUI caller's automation visibility.
+        let access = self
+            .resolve_thread_access_for_caller(caller_for_fallback, scope, &actor)
             .await?;
         match self
-            .gate_resolution_route(&scope, &actor, run_id, &gate_ref, &resolution)
+            .gate_resolution_route(
+                &access.scope,
+                &access.run_actor,
+                run_id,
+                &gate_ref,
+                &resolution,
+            )
             .await?
         {
             GateResolutionRoute::Approval => {
                 self.resolve_approval_gate(
-                    scope,
-                    actor,
+                    access.scope,
+                    access.run_actor,
                     run_id,
                     gate_ref,
                     client_action_id,
@@ -1859,13 +2715,20 @@ impl RebornServicesApi for RebornServices {
                 .await
             }
             GateResolutionRoute::Auth => {
-                self.resolve_auth_gate(scope, actor, run_id, gate_ref, client_action_id, resolution)
-                    .await
+                self.resolve_auth_gate(
+                    access.scope,
+                    access.run_actor,
+                    run_id,
+                    gate_ref,
+                    client_action_id,
+                    resolution,
+                )
+                .await
             }
             GateResolutionRoute::Generic => {
                 self.resolve_generic_gate(
-                    scope,
-                    actor,
+                    access.scope,
+                    access.run_actor,
                     run_id,
                     gate_ref,
                     client_action_id,
@@ -1885,16 +2748,19 @@ impl RebornServicesApi for RebornServices {
         let run_id = parse_run_id_field("run_id", request.run_id)?;
         let scope = caller.turn_scope(thread_id);
         let actor = caller.actor();
-        // TurnScope has no owner_user_id, so without this gate any caller
-        // sharing the (tenant, agent, project) scope could read another user's
-        // run state by guessing thread_id and run_id. Mirrors the ownership
-        // probe `cancel_run` and `resolve_gate` already perform.
-        // Metadata-only — get_run_state has no use for the transcript.
-        self.resolve_webui_thread_metadata(scope.clone(), &actor)
+        // Ownership probe with automation-trigger fallback. Without this gate
+        // any caller sharing (tenant, agent, project) could read another user's
+        // run state by guessing thread_id and run_id. The fallback also allows
+        // the owner of an automation to poll run state on a trigger-fired thread.
+        let access = self
+            .resolve_thread_access_for_caller(caller, scope, &actor)
             .await?;
         let state = self
             .turn_coordinator
-            .get_run_state(GetRunStateRequest { scope, run_id })
+            .get_run_state(GetRunStateRequest {
+                scope: access.scope,
+                run_id,
+            })
             .await
             .map_err(map_turn_error)?;
         Ok(state.into())
@@ -1940,11 +2806,15 @@ impl RebornServicesApi for RebornServices {
         };
         let limit = clamp_automation_list_limit(request.limit);
         let run_limit = clamp_automation_run_limit(request.run_limit);
+        let scheduler_enabled = self.automation_facade.scheduler_enabled();
         let automations = self
             .automation_facade
             .list_automations(caller, AutomationListRequest { limit, run_limit })
             .await?;
-        Ok(RebornListAutomationsResponse { automations })
+        Ok(RebornListAutomationsResponse {
+            automations,
+            scheduler_enabled,
+        })
     }
 
     async fn list_connectable_channels(
@@ -2513,24 +3383,30 @@ async fn mark_message_submitted_or_replay(
     }
 }
 
-async fn mark_message_deferred_busy_or_replay(
+async fn mark_message_rejected_busy_or_replay(
     thread_service: &dyn SessionThreadService,
     thread_scope: &ThreadScope,
     handoff: &AcceptedWebUiMessage,
     client_action_id: &IdempotencyKey,
 ) -> Result<(), RebornServicesError> {
     match thread_service
-        .mark_message_deferred_busy(thread_scope, &handoff.thread_id, handoff.message_id)
+        .mark_message_rejected_busy(thread_scope, &handoff.thread_id, handoff.message_id)
         .await
     {
         Ok(_) => Ok(()),
         Err(error) => {
+            // Only RejectedBusy is the terminal settled state here.
+            // DeferredBusy is non-terminal legacy — a later replay may
+            // resubmit it, so claiming it settled would violate the
+            // no-resubmit guarantee. Let a DeferredBusy replay fall
+            // through to the `_` arm so the original mark failure
+            // surfaces honestly instead of being masked as settled.
             reconcile_terminal_duplicate(
                 thread_service,
                 thread_scope,
                 handoff,
                 client_action_id,
-                |replay| replay.status == MessageStatus::DeferredBusy,
+                |replay| matches!(replay.status, MessageStatus::RejectedBusy),
                 error,
             )
             .await
@@ -2617,13 +3493,343 @@ async fn replay_accepted_message(
         .map_err(map_thread_error)
 }
 
+struct ResolvedThreadAccess {
+    scope: TurnScope,
+    run_actor: TurnActor,
+}
+
 // Owner-bound thread resolution shared by the WebUI-facing methods that
 // only need to prove a browser thread id belongs to the authenticated actor.
 // The actor is pinned as `owner_user_id` so a caller sharing (tenant, agent,
 // project) cannot act on a thread it does not own; `map_ownership_probe_error`
 // collapses both UnknownThread and ThreadScopeMismatch into NotFound so the
 // response cannot be used as an existence oracle.
+//
+// Automation-trigger threads are an exception: they are stored by
+// `record_trigger_prompt` (trigger_poller_trusted_submit.rs) with
+// `owner_user_id = Some(creator_user_id)` — the actor that fired the trigger
+// — not the WebUI caller's user_id. The user-scoped probe therefore misses
+// them. `resolve_thread_access_for_caller` handles that case via the shared
+// automation fallback path; all interaction endpoints (stream, cancel, gate
+// resolve, run-state) route through it so the reconstructed `TurnScope` (with
+// `owner_user_id = Some(creator_user_id)`) is returned to callers that need
+// to act on a trigger run.
+//
+// Authorization is revalidated on every call — no caching of the authz result
+// — so a caller that loses automation visibility between polls cannot keep
+// accessing the trigger-owned thread.
+//
+// Scope reconstruction field-by-field match against `record_trigger_prompt`
+// (trigger_poller_trusted_submit.rs:285-291):
+//   tenant_id    : resolution.turn_scope.tenant_id == caller's tenant_id (same installation)
+//   agent_id     : resolution.turn_scope.agent_id OR default_agent_id
+//                → trigger_scope.agent_id OR bound_caller.agent_id  (same fallback shape)
+//   project_id   : resolution.turn_scope.project_id == trigger_scope.project_id
+//   owner_user_id: Some(resolution.actor.user_id)
+//                == Some(trigger_scope.creator_user_id)
+//                == Some(fire.creator_user_id) [post-#4754: new first-fire bindings
+//                   persist creator; legacy (pre-#4754) bindings remain owner-None
+//                   and will not match — accepted breakage; recreate trigger to fix].
 impl RebornServices {
+    /// Shared authorization check for automation-trigger threads.
+    ///
+    /// Checks whether `scope.thread_id` belongs to one of the authenticated
+    /// caller's automation triggers and, if so, returns a `TurnScope` with the
+    /// TRUE stored scope (agent_id, project_id, and owner_user_id = creator_user_id).
+    ///
+    /// Requires #4754 ("Part A"): `record_trigger_prompt` stores threads with
+    /// `owner_user_id = Some(fire.creator_user_id)` only for new first-fire
+    /// bindings created after #4754 landed. Pre-#4754 (legacy) runs were stored
+    /// with `owner_user_id = None`; their gate/cancel/run-state will NOT match
+    /// the reconstructed scope — this is accepted breakage; recreating the
+    /// trigger creates a fresh owner-bearing binding.
+    ///
+    /// Delegates to `AutomationProductFacade::resolve_run_thread_scope` which
+    /// is caller-scoped: authorization is embedded in the repository lookup.
+    /// If the trigger exists for this caller and contains the run, the returned
+    /// scope lets all downstream storage lookups (timeline, gate, cancel, SSE)
+    /// find the thread as stored rather than under the caller's session scope.
+    ///
+    /// Authorization is revalidated on every call (no caching) so a caller
+    /// that loses automation visibility cannot keep acting on the thread.
+    ///
+    /// Returns `original_not_found_error` when:
+    ///  - The caller has no bound agent.
+    ///  - `resolve_run_thread_scope` returns `None` (thread not in caller's triggers).
+    ///
+    /// This is the authorization half of the trigger-thread fallback. Callers
+    /// that need the full transcript call `try_automation_trigger_timeline_fallback`.
+    async fn check_automation_trigger_access(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        scope: &TurnScope,
+        original_not_found_error: RebornServicesError,
+    ) -> Result<ResolvedThreadAccess, RebornServicesError> {
+        let Some(bound_caller) = product_agent_bound_caller_from_webui(caller) else {
+            return Err(original_not_found_error);
+        };
+        let thread_id = &scope.thread_id;
+        let Some(trigger_scope) = self
+            .automation_facade
+            .resolve_run_thread_scope(bound_caller.clone(), thread_id)
+            .await?
+        else {
+            return Err(original_not_found_error);
+        };
+        // Use the trigger's stored agent_id; fall back to the caller's agent_id
+        // when the trigger record had no explicit agent.
+        let true_agent_id = trigger_scope
+            .agent_id
+            .or_else(|| Some(bound_caller.agent_id.clone()));
+        let run_actor = TurnActor::new(trigger_scope.creator_user_id.clone());
+        Ok(ResolvedThreadAccess {
+            scope: TurnScope::new_with_owner(
+                scope.tenant_id.clone(),
+                true_agent_id,
+                trigger_scope.project_id,
+                thread_id.clone(),
+                Some(trigger_scope.creator_user_id),
+            ),
+            run_actor,
+        })
+    }
+
+    /// Fallback timeline fetch for automation-trigger threads.
+    ///
+    /// Automation-trigger threads are created under the trigger creator's
+    /// scope, not the caller's session scope. The normal user-scoped
+    /// `list_thread_history` therefore always misses them. This fallback is
+    /// only reached when the user-scoped lookup returned `UnknownThread` or
+    /// `ThreadScopeMismatch`.
+    ///
+    /// Authorization: the thread_id must appear in at least one `recent_run`
+    /// for an automation returned by `list_automations` for this caller. That
+    /// is the same authorization check the Automations list endpoint applies,
+    /// so no new trust boundary is introduced. Authorization is revalidated on
+    /// every call — no caching.
+    ///
+    /// On authorization success, the history is loaded with the trigger-owned
+    /// scope. On authorization failure (thread not in any of the caller's
+    /// automation runs), the `original_not_found_error` is returned so the
+    /// response is indistinguishable from a genuinely absent thread.
+    /// Resolve a caller-visible thread's history together with the thread scope
+    /// it actually lives under.
+    ///
+    /// The primary path is the caller's own session scope. On a 404-class miss
+    /// it applies the automation-trigger fallback: trigger-fired threads are
+    /// stored under the creator's scope, not the WebUI caller's session scope,
+    /// so the user-scoped lookup always misses them. If the thread belongs to
+    /// one of the caller's automations (`list_automations` applies the same
+    /// authorization), the history is re-fetched under the trigger-owned scope.
+    /// Both `UnknownThread` and `ThreadScopeMismatch` are eligible for the
+    /// fallback; backend/serialization errors propagate as-is.
+    ///
+    /// Returning the resolved scope — not just the history — lets callers that
+    /// must do further scope-bound work (e.g. reading attachment bytes through
+    /// the project mount) address the correct scope instead of re-deriving the
+    /// caller's session scope, which would be wrong for a trigger thread.
+    async fn resolve_thread_history_for_caller(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        scope: &TurnScope,
+    ) -> Result<(ThreadScope, ThreadHistory), RebornServicesError> {
+        let thread_scope =
+            thread_scope_from_turn_scope(scope, Some(caller.actor().user_id.clone()))?;
+        match self
+            .thread_service
+            .list_thread_history(ThreadHistoryRequest {
+                scope: thread_scope.clone(),
+                thread_id: scope.thread_id.clone(),
+            })
+            .await
+        {
+            Ok(history) => Ok((thread_scope, history)),
+            Err(
+                SessionThreadError::UnknownThread { .. }
+                | SessionThreadError::ThreadScopeMismatch { .. },
+            ) => {
+                let original_error =
+                    RebornServicesError::from_status(RebornServicesErrorCode::NotFound, 404, false);
+                self.try_automation_trigger_timeline_fallback(caller, scope, original_error)
+                    .await
+            }
+            Err(err) => Err(map_timeline_probe_error(err)),
+        }
+    }
+
+    async fn try_automation_trigger_timeline_fallback(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        scope: &TurnScope,
+        original_not_found_error: RebornServicesError,
+    ) -> Result<(ThreadScope, ThreadHistory), RebornServicesError> {
+        let access = self
+            .check_automation_trigger_access(caller, scope, original_not_found_error)
+            .await?;
+        // Authorized: re-fetch the history using the TRUE stored scope
+        // (owner_user_id = creator_user_id, not the caller's session user) and
+        // return that scope so byte reads address the trigger creator's mount.
+        let true_thread_scope = thread_scope_from_turn_scope(
+            &access.scope,
+            access.scope.explicit_owner_user_id().cloned(),
+        )?;
+        let history = self
+            .thread_service
+            .list_thread_history(ThreadHistoryRequest {
+                scope: true_thread_scope.clone(),
+                thread_id: access.scope.thread_id.clone(),
+            })
+            .await
+            .map_err(map_timeline_probe_error)?;
+        Ok((true_thread_scope, history))
+    }
+
+    /// Ownership probe for interaction endpoints (stream, cancel, gate resolve,
+    /// run-state).
+    ///
+    /// Tries the primary user-scoped `read_thread` probe. On a 404-class miss
+    /// (UnknownThread / ThreadScopeMismatch), falls back to the automation
+    /// trigger authorization check. If the thread belongs to one of the
+    /// caller's automations, returns the trigger-owned `TurnScope` and run
+    /// actor so downstream turn operations address the submitted run. Non-owner
+    /// callers and genuinely absent threads both receive the same canonical
+    /// NotFound response.
+    ///
+    /// Authorization is revalidated on every call — no caching of the authz
+    /// result — so a caller that loses automation visibility cannot keep
+    /// acting on the thread after their access is revoked.
+    async fn resolve_thread_access_for_caller(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        scope: TurnScope,
+        actor: &TurnActor,
+    ) -> Result<ResolvedThreadAccess, RebornServicesError> {
+        let thread_scope = thread_scope_from_turn_scope(&scope, Some(actor.user_id.clone()))?;
+        match self
+            .thread_service
+            .read_thread(ThreadHistoryRequest {
+                scope: thread_scope.clone(),
+                thread_id: scope.thread_id.clone(),
+            })
+            .await
+        {
+            Ok(_) => Ok(ResolvedThreadAccess {
+                scope,
+                run_actor: actor.clone(),
+            }),
+            Err(
+                SessionThreadError::UnknownThread { .. }
+                | SessionThreadError::ThreadScopeMismatch { .. },
+            ) => {
+                let original_error =
+                    RebornServicesError::from_status(RebornServicesErrorCode::NotFound, 404, false);
+                let access = self
+                    .check_automation_trigger_access(caller, &scope, original_error)
+                    .await?;
+                Ok(ResolvedThreadAccess {
+                    scope: access.scope,
+                    run_actor: access.run_actor,
+                })
+            }
+            Err(err) => Err(map_ownership_probe_error(err)),
+        }
+    }
+
+    fn require_project_filesystem(
+        &self,
+    ) -> Result<&Arc<dyn ProjectFilesystemReader>, RebornServicesError> {
+        self.project_filesystem
+            .as_ref()
+            .ok_or_else(|| RebornServicesError::service_unavailable(false))
+    }
+
+    /// Resolve the wired browse reader and verify it serves the requested
+    /// mount. An unwired reader is a 503 (composition fault, retryable-false);
+    /// a known-but-unserved mount is a 404 so probing an unavailable mount
+    /// cannot distinguish "wrong path" from "not wired".
+    fn require_filesystem_browser(
+        &self,
+        mount: FsMount,
+    ) -> Result<&Arc<dyn FilesystemBrowseReader>, RebornServicesError> {
+        let browser = self
+            .filesystem_browser
+            .as_ref()
+            .ok_or_else(|| RebornServicesError::service_unavailable(false))?;
+        if !browser.available_mounts().contains(&mount) {
+            return Err(RebornServicesError::from_status(
+                RebornServicesErrorCode::NotFound,
+                404,
+                false,
+            ));
+        }
+        Ok(browser)
+    }
+
+    fn require_project_service(&self) -> Result<&Arc<dyn ProjectService>, RebornServicesError> {
+        self.project_service
+            .as_ref()
+            .ok_or_else(|| RebornServicesError::service_unavailable(false))
+    }
+
+    /// Authorize a browser-proposed project for a new thread and, on success,
+    /// adopt it as the caller's scope for that thread only.
+    ///
+    /// The project must never be trusted from the request body alone: the
+    /// proposed id is authorized through the same access-controlled
+    /// [`get_project`](RebornServicesApi::get_project) read the project detail
+    /// route uses (`Ok` only when the caller can access the project, otherwise a
+    /// not-found/denied error). Without a proposed project the caller's default
+    /// scope is returned unchanged.
+    async fn authorize_create_thread_project(
+        &self,
+        mut caller: WebUiAuthenticatedCaller,
+        requested_project_id: Option<String>,
+    ) -> Result<WebUiAuthenticatedCaller, RebornServicesError> {
+        let Some(raw) = requested_project_id else {
+            return Ok(caller);
+        };
+        let project_id = ProjectId::new(raw).map_err(|error| {
+            // Carry the cause to the server log before mapping to the
+            // sanitized validation error (.claude/rules/error-handling.md —
+            // never `map_err(|_| …)` on a parse/validation failure).
+            tracing::debug!(?error, "create_thread received an invalid project_id");
+            RebornServicesError::validation(WebUiInboundValidationError::new(
+                "project_id",
+                WebUiInboundValidationCode::InvalidId,
+            ))
+        })?;
+        self.get_project(
+            caller.clone(),
+            RebornGetProjectRequest {
+                project_id: project_id.as_str().to_string(),
+            },
+        )
+        .await?;
+        caller.project_id = Some(project_id);
+        Ok(caller)
+    }
+
+    /// Verify the caller may access the thread and return the project-scoped
+    /// [`ThreadScope`] its workspace files resolve under. Reuses the same
+    /// ownership + automation-trigger fallback probe as event streaming, so a
+    /// caller sharing (tenant, agent, project) cannot read another user's
+    /// project files by guessing a thread id.
+    async fn authorize_project_fs_access(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        thread_id: String,
+    ) -> Result<ThreadScope, RebornServicesError> {
+        let thread_id = parse_thread_id_field("thread_id", thread_id)?;
+        let actor = caller.actor();
+        let access = self
+            .resolve_thread_access_for_caller(caller.clone(), caller.turn_scope(thread_id), &actor)
+            .await?;
+        thread_scope_from_turn_scope(&access.scope, Some(access.run_actor.user_id.clone()))
+    }
+
+    /// Ownership probe for `submit_turn` and `delete_thread` — these only
+    /// operate on session-owned threads (not trigger threads), so the probe
+    /// is user-scoped with no automation fallback.
     async fn resolve_webui_thread_metadata(
         &self,
         scope: TurnScope,
@@ -2662,9 +3868,7 @@ impl RebornServices {
                     ApprovalInteractionDecision::ApproveOnce
                 }
             }
-            WebUiGateResolution::Denied | WebUiGateResolution::Cancelled => {
-                ApprovalInteractionDecision::Deny
-            }
+            WebUiGateResolution::Declined => ApprovalInteractionDecision::Deny,
             WebUiGateResolution::CredentialProvided { .. } => {
                 return Err(blocked_authentication_unavailable());
             }
@@ -2682,11 +3886,9 @@ impl RebornServices {
             .await
             .map_err(|error| map_adapter_error(error.into()))?;
         match response {
-            ResolveApprovalInteractionResponse::Approved(response) => {
+            ResolveApprovalInteractionResponse::Approved(response)
+            | ResolveApprovalInteractionResponse::Resumed(response) => {
                 Ok(RebornResolveGateResponse::Resumed(response.into()))
-            }
-            ResolveApprovalInteractionResponse::Denied(response) => {
-                Ok(RebornResolveGateResponse::Cancelled(response.into()))
             }
         }
     }
@@ -2744,9 +3946,7 @@ impl RebornServices {
                         .map_err(map_auth_interaction_error)?,
                 }
             }
-            WebUiGateResolution::Denied | WebUiGateResolution::Cancelled => {
-                AuthInteractionDecision::Deny
-            }
+            WebUiGateResolution::Declined => AuthInteractionDecision::Deny,
             WebUiGateResolution::Approved { .. } => {
                 return Err(blocked_authentication_unavailable());
             }
@@ -2809,6 +4009,7 @@ impl RebornServices {
                             &binding_id,
                         )?,
                         idempotency_key: client_action_id,
+                        resume_disposition: None,
                     })
                     .await
                     .map_err(map_turn_error)?;
@@ -2817,7 +4018,7 @@ impl RebornServices {
             WebUiGateResolution::CredentialProvided { .. } => {
                 Err(blocked_authentication_unavailable())
             }
-            WebUiGateResolution::Denied | WebUiGateResolution::Cancelled => {
+            WebUiGateResolution::Declined => {
                 assert_generic_run_parked_on_gate(
                     self.turn_coordinator.as_ref(),
                     &scope,
@@ -2858,6 +4059,75 @@ fn map_ownership_probe_error(error: SessionThreadError) -> RebornServicesError {
             RebornServicesError::from_status(RebornServicesErrorCode::NotFound, 404, false)
         }
         _ => map_thread_error(error),
+    }
+}
+
+/// Derive the read-only browse scope from the authenticated caller.
+///
+/// The standalone filesystem viewer is not thread-bound, so the scope comes
+/// straight from the trusted caller identity (tenant/user/agent/project) — never
+/// from the request body. A fresh `invocation_id` is minted per call; the
+/// scoped filesystem namespaces storage by tenant/user/agent/project, so this
+/// addresses the same mount the agent's own tools wrote through.
+fn caller_browse_scope(caller: &WebUiAuthenticatedCaller) -> ResourceScope {
+    ResourceScope {
+        tenant_id: caller.tenant_id.clone(),
+        user_id: caller.user_id.clone(),
+        agent_id: caller.agent_id.clone(),
+        project_id: caller.project_id.clone(),
+        mission_id: None,
+        thread_id: None,
+        invocation_id: InvocationId::new(),
+    }
+}
+
+/// Map a project-filesystem read error to the sanitized facade error taxonomy.
+/// No host paths or backend strings cross this boundary — only coarse
+/// transport/status shape.
+fn map_project_fs_error(error: ProjectFsError) -> RebornServicesError {
+    match error {
+        ProjectFsError::NotFound => {
+            RebornServicesError::from_status(RebornServicesErrorCode::NotFound, 404, false)
+        }
+        ProjectFsError::NotAFile | ProjectFsError::NotADirectory | ProjectFsError::InvalidPath => {
+            RebornServicesError::from_status(RebornServicesErrorCode::InvalidRequest, 400, false)
+        }
+        ProjectFsError::Denied => participant_denied(),
+        ProjectFsError::TooLarge { .. } => {
+            RebornServicesError::from_status(RebornServicesErrorCode::InvalidRequest, 413, false)
+        }
+        ProjectFsError::Unavailable => RebornServicesError::service_unavailable(true),
+        ProjectFsError::Internal => RebornServicesError::internal(),
+    }
+}
+
+fn project_caller(caller: &WebUiAuthenticatedCaller) -> ProjectCaller {
+    ProjectCaller {
+        tenant_id: caller.tenant_id.clone(),
+        user_id: caller.user_id.clone(),
+    }
+}
+
+fn map_project_service_error(error: ProjectServiceError) -> RebornServicesError {
+    match error {
+        ProjectServiceError::NotFound => {
+            RebornServicesError::from_status(RebornServicesErrorCode::NotFound, 404, false)
+        }
+        ProjectServiceError::Denied => participant_denied(),
+        ProjectServiceError::InvalidInput { field } => {
+            let mut error = RebornServicesError::from_status(
+                RebornServicesErrorCode::InvalidRequest,
+                400,
+                false,
+            );
+            error.field = Some(field);
+            error
+        }
+        ProjectServiceError::Conflict => {
+            RebornServicesError::from_status(RebornServicesErrorCode::Conflict, 409, false)
+        }
+        ProjectServiceError::Unavailable => RebornServicesError::service_unavailable(true),
+        ProjectServiceError::Internal => RebornServicesError::internal(),
     }
 }
 
@@ -3337,6 +4607,12 @@ fn map_thread_error(error: SessionThreadError) -> RebornServicesError {
         | SessionThreadError::OverlappingSummaryRange { .. } => {
             RebornServicesError::from_status(RebornServicesErrorCode::Conflict, 409, false)
         }
+        SessionThreadError::InvalidAttachment(_) => RebornServicesError::from_status_kind(
+            RebornServicesErrorCode::InvalidRequest,
+            RebornServicesErrorKind::Validation,
+            400,
+            false,
+        ),
         SessionThreadError::GeneratedThreadId(_)
         | SessionThreadError::Serialization(_)
         | SessionThreadError::Deserialization(_)
@@ -3505,7 +4781,9 @@ fn kind_for_workflow_rejection(kind: ProductWorkflowRejectionKind) -> RebornServ
         ProductWorkflowRejectionKind::Unauthorized => RebornServicesErrorKind::ParticipantDenied,
         ProductWorkflowRejectionKind::InvalidRequest => RebornServicesErrorKind::Validation,
         ProductWorkflowRejectionKind::Unavailable => RebornServicesErrorKind::ServiceUnavailable,
-        ProductWorkflowRejectionKind::Conflict => RebornServicesErrorKind::Conflict,
+        ProductWorkflowRejectionKind::Conflict | ProductWorkflowRejectionKind::Ambiguous => {
+            RebornServicesErrorKind::Conflict
+        }
     }
 }
 
@@ -3529,6 +4807,12 @@ fn bounded_operator_logs_query(query: RebornOperatorLogsQuery) -> RebornLogQuery
         cursor: bounded_operator_logs_string(query.cursor, OPERATOR_LOGS_CURSOR_MAX_BYTES),
         level: query.level,
         target: bounded_operator_logs_string(query.target, OPERATOR_LOGS_TARGET_MAX_BYTES),
+        thread_id: bounded_operator_logs_context_string(query.thread_id),
+        run_id: bounded_operator_logs_context_string(query.run_id),
+        turn_id: bounded_operator_logs_context_string(query.turn_id),
+        tool_call_id: bounded_operator_logs_context_string(query.tool_call_id),
+        tool_name: bounded_operator_logs_context_string(query.tool_name),
+        source: bounded_operator_logs_context_string(query.source),
         tail: false,
     }
 }
@@ -3546,14 +4830,47 @@ fn bounded_operator_logs_string(value: Option<String>, max_bytes: usize) -> Opti
     })
 }
 
+fn bounded_operator_logs_context_string(value: Option<String>) -> Option<String> {
+    value.and_then(|value| {
+        let trimmed = value.trim();
+        if trimmed.is_empty() {
+            None
+        } else {
+            Some(normalize_operator_log_context_value(trimmed))
+        }
+    })
+}
+
+pub fn normalize_operator_log_context_value(value: &str) -> String {
+    truncate_utf8_with_suffix(value, OPERATOR_LOGS_CONTEXT_MAX_BYTES)
+}
+
 fn truncate_utf8_to_bytes(value: &str, max_bytes: usize) -> String {
-    let end = value
-        .char_indices()
-        .map(|(index, _)| index)
-        .take_while(|index| *index <= max_bytes)
-        .last()
-        .unwrap_or(0);
+    let mut end = max_bytes.min(value.len());
+    while end > 0 && !value.is_char_boundary(end) {
+        end -= 1;
+    }
     value[..end].to_string()
+}
+
+fn truncate_utf8_with_suffix(value: &str, max_bytes: usize) -> String {
+    if value.len() <= max_bytes {
+        return value.to_string();
+    }
+
+    if max_bytes <= OPERATOR_LOG_CONTEXT_TRUNCATED_SUFFIX.len() {
+        return OPERATOR_LOG_CONTEXT_TRUNCATED_SUFFIX[..max_bytes].to_string();
+    }
+
+    let mut end = max_bytes - OPERATOR_LOG_CONTEXT_TRUNCATED_SUFFIX.len();
+    while end > 0 && !value.is_char_boundary(end) {
+        end -= 1;
+    }
+
+    let mut truncated = String::with_capacity(max_bytes);
+    truncated.push_str(&value[..end]);
+    truncated.push_str(OPERATOR_LOG_CONTEXT_TRUNCATED_SUFFIX);
+    truncated
 }
 
 fn product_agent_bound_caller_from_webui(
@@ -3600,5 +4917,59 @@ fn generated_thread_id(
             // Fallback remains valid under ThreadId validation rules.
             ThreadId::new("generated-thread-fallback").unwrap_or_else(|_| unreachable!())
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Every `ProjectServiceError` variant projects to a sanitized facade error
+    /// with the expected coarse code/status, and `InvalidInput`'s field name is
+    /// carried through (it is a controlled constant, never backend text).
+    #[test]
+    fn project_service_error_maps_to_sanitized_facade_error() {
+        let not_found = map_project_service_error(ProjectServiceError::NotFound);
+        assert_eq!(not_found.code, RebornServicesErrorCode::NotFound);
+        assert_eq!(not_found.status_code, 404);
+
+        let denied = map_project_service_error(ProjectServiceError::Denied);
+        assert_eq!(denied.kind, RebornServicesErrorKind::ParticipantDenied);
+        assert_eq!(denied.status_code, 403);
+
+        let invalid = map_project_service_error(ProjectServiceError::InvalidInput {
+            field: "project_id".to_string(),
+        });
+        assert_eq!(invalid.code, RebornServicesErrorCode::InvalidRequest);
+        assert_eq!(invalid.status_code, 400);
+        assert_eq!(invalid.field.as_deref(), Some("project_id"));
+
+        let conflict = map_project_service_error(ProjectServiceError::Conflict);
+        assert_eq!(conflict.code, RebornServicesErrorCode::Conflict);
+        assert_eq!(conflict.status_code, 409);
+
+        let unavailable = map_project_service_error(ProjectServiceError::Unavailable);
+        assert_eq!(unavailable.code, RebornServicesErrorCode::Unavailable);
+        assert_eq!(unavailable.status_code, 503);
+        assert!(unavailable.retryable, "unavailable is retryable");
+
+        let internal = map_project_service_error(ProjectServiceError::Internal);
+        assert_eq!(internal.code, RebornServicesErrorCode::Internal);
+        assert_eq!(internal.status_code, 500);
+    }
+
+    /// `require_project_service` returns `service_unavailable(false)` when no
+    /// project service is wired (see the helper in this file). This locks the
+    /// full shape of that sentinel — a clean, non-retryable 503 — so an unwired
+    /// runtime returns a stable error rather than a panic or a 500.
+    #[test]
+    fn unwired_project_service_sentinel_is_503() {
+        let unavailable = RebornServicesError::service_unavailable(false);
+        assert_eq!(unavailable.code, RebornServicesErrorCode::Unavailable);
+        assert_eq!(unavailable.status_code, 503);
+        assert!(
+            !unavailable.retryable,
+            "false-arg sentinel is non-retryable"
+        );
     }
 }

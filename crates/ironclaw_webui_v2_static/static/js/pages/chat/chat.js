@@ -18,7 +18,21 @@ import { RecoveryNotice } from "./components/recovery-notice.js";
 import { SuggestionChips } from "./components/suggestion-chips.js";
 import { TypingIndicator } from "./components/typing-indicator.js";
 import { useChat } from "./hooks/useChat.js";
+import { NEW_DRAFT_KEY } from "./lib/draft-store.js";
 import { buildRuntimeContext } from "./lib/runtime-context.js";
+
+/* Grace window before an active thread's sidebar state is cleared to idle.
+ * Long enough for SSE to rehydrate a gate/run after a thread switch (so a
+ * persisted "needs attention" badge isn't wiped-then-restored), short
+ * enough that a genuinely resolved thread clears promptly.
+ *
+ * Assumption: SSE rehydration of a live gate/run completes within this
+ * window. If it doesn't, a still-pending thread's badge clears here and
+ * reappears when the gate finally arrives — a one-off re-flicker, never a
+ * wrong state. The downside is purely cosmetic and self-correcting, so it
+ * is intentionally not instrumented; revisit this constant (not add
+ * telemetry) if slow links make the re-flicker noticeable. */
+const THREAD_STATE_CLEAR_GRACE_MS = 1500;
 
 export function Chat({
   threads,
@@ -37,6 +51,7 @@ export function Chat({
     suggestions,
     sseStatus,
     historyLoading,
+    historyLoadError,
     hasMore,
     cooldownSeconds,
     recoveryNotice,
@@ -62,10 +77,16 @@ export function Chat({
   );
   const hasMessages =
     messages.length > 0 || isProcessing || Boolean(pendingGate) || Boolean(channelConnectAction);
-  const showLanding = !historyLoading && !hasMessages;
+  // Don't show the landing composer when history failed to load — show the
+  // error banner instead so the user is not misled into thinking the thread
+  // is empty.
+  const showLanding = !historyLoading && !hasMessages && !historyLoadError;
   const composerDisabled = (isProcessing && !pendingGate) || cooldownSeconds > 0;
   const composerStatusText =
     cooldownSeconds > 0 ? `Retry in ${cooldownSeconds}s` : undefined;
+  // Scope the persisted composer draft to the open thread (or the
+  // shared new-conversation slot when there's no active thread yet).
+  const composerDraftKey = activeThreadId || NEW_DRAFT_KEY;
   const canCancelRun = Boolean(
     activeThreadId &&
       activeRun?.runId &&
@@ -73,7 +94,6 @@ export function Chat({
       isProcessing &&
       !pendingGate
   );
-
   const handleSend = React.useCallback(
     async (content, { images = [], attachments = [] } = {}) => {
       const response = await send(content, {
@@ -115,26 +135,39 @@ export function Chat({
    * working.
    *
    * Invariant: useChat resets pendingGate (and isProcessing reaches a
-   * fresh value) on threadId change via the sibling effect at
-   * useChat.js:136-140, so within a single React commit batch we never
-   * observe stale state from a previous thread paired with a new
-   * activeThreadId.
+   * fresh value) on threadId change via the thread-reset effect in
+   * useChat, so within a single React commit batch we never observe
+   * stale state from a previous thread paired with a new activeThreadId.
    *
    * Coverage gap (writer is per-active-thread only): this seam only
    * flags whichever thread the user is currently viewing. Cross-thread
    * visibility — the green/amber dot appearing on background threads
    * — requires either a user-scoped SSE channel or list_threads state
    * enrichment. Both are deferred follow-ups; see
-   * docs/webui-v2-followup-picks-02-05.md. */
+   * docs/webui-v2-followup-picks-02-05.md.
+   *
+   * Clearing is deferred by a short grace period: opening a thread resets
+   * pendingGate to null until SSE rehydrates it, so an immediate clear
+   * would wipe a persisted "needs attention" badge and re-set it a beat
+   * later — a visible flicker on the sidebar row when you click into the
+   * thread. An incoming gate/run cancels the pending clear before it
+   * fires; a genuinely resolved thread still clears, just after the
+   * window. Setting NEEDS_ATTENTION / RUNNING stays immediate. */
   React.useEffect(() => {
-    if (!activeThreadId) return;
+    if (!activeThreadId) return undefined;
     if (pendingGate) {
       setThreadState(activeThreadId, THREAD_STATE.NEEDS_ATTENTION);
-    } else if (isProcessing) {
-      setThreadState(activeThreadId, THREAD_STATE.RUNNING);
-    } else {
-      clearThreadState(activeThreadId);
+      return undefined;
     }
+    if (isProcessing) {
+      setThreadState(activeThreadId, THREAD_STATE.RUNNING);
+      return undefined;
+    }
+    const timer = setTimeout(
+      () => clearThreadState(activeThreadId),
+      THREAD_STATE_CLEAR_GRACE_MS
+    );
+    return () => clearTimeout(timer);
   }, [activeThreadId, pendingGate, isProcessing]);
 
   const [shortcutsOpen, setShortcutsOpen] = React.useState(false);
@@ -160,6 +193,16 @@ export function Chat({
       <div className="flex min-w-0 flex-1 flex-col">
         <${ConnectionStatus} status=${sseStatus} />
 
+        ${historyLoadError &&
+        html`
+          <div
+            className="mx-4 mt-3 rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700 dark:border-red-800 dark:bg-red-950 dark:text-red-300"
+            role="alert"
+          >
+            ${historyLoadError}
+          </div>
+        `}
+
         ${showLanding &&
         html`
           <${EmptyState}
@@ -168,6 +211,7 @@ export function Chat({
             disabled=${composerDisabled}
             initialText=${composerDraft}
             resetKey=${composerResetKey}
+            draftKey=${composerDraftKey}
             context=${runtimeContext}
             statusText=${composerStatusText}
             canCancel=${canCancelRun}
@@ -182,6 +226,8 @@ export function Chat({
             hasMore=${hasMore}
             onLoadMore=${loadMore}
             onRetryMessage=${retryMessage}
+            threadId=${activeThreadId}
+            pending=${isProcessing}
           >
             ${recoveryNotice &&
             html`
@@ -247,6 +293,7 @@ export function Chat({
             disabled=${composerDisabled}
             initialText=${composerDraft}
             resetKey=${composerResetKey}
+            draftKey=${composerDraftKey}
             context=${runtimeContext}
             statusText=${composerStatusText}
             canCancel=${canCancelRun}

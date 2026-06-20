@@ -1725,6 +1725,32 @@ fn dispatch_error_event_kind_pins_auth_required_token() {
 }
 
 #[test]
+fn runtime_credential_auth_requirement_defaults_setup_and_round_trips_oauth() {
+    let old_payload = json!({
+        "provider": "github",
+        "requester_extension": "github",
+        "provider_scopes": []
+    });
+    let parsed: RuntimeCredentialAuthRequirement =
+        serde_json::from_value(old_payload).expect("old auth requirement payload parses");
+    assert_eq!(parsed.setup, RuntimeCredentialAccountSetup::ManualToken);
+
+    let oauth = RuntimeCredentialAuthRequirement {
+        provider: RuntimeCredentialAccountProviderId::new("google").unwrap(),
+        setup: RuntimeCredentialAccountSetup::OAuth {
+            scopes: vec!["https://www.googleapis.com/auth/gmail.readonly".to_string()],
+        },
+        requester_extension: ExtensionId::new("gmail").unwrap(),
+        provider_scopes: vec!["https://www.googleapis.com/auth/gmail.readonly".to_string()],
+    };
+    let round_trip: RuntimeCredentialAuthRequirement =
+        serde_json::from_value(serde_json::to_value(&oauth).expect("auth requirement serializes"))
+            .expect("oauth auth requirement parses");
+
+    assert_eq!(round_trip, oauth);
+}
+
+#[test]
 fn dispatch_error_auth_required_debug_redacts_required_secrets() {
     let handle = SecretHandle::new("google-access-token").unwrap();
     let error = DispatchError::AuthRequired {
@@ -1754,6 +1780,9 @@ fn dispatch_error_auth_required_debug_redacts_required_secrets() {
     );
     let requirement = RuntimeCredentialAuthRequirement {
         provider: RuntimeCredentialAccountProviderId::new("google").unwrap(),
+        setup: RuntimeCredentialAccountSetup::OAuth {
+            scopes: vec!["https://www.googleapis.com/auth/gmail.readonly".to_string()],
+        },
         requester_extension: ExtensionId::new("gmail").unwrap(),
         provider_scopes: vec!["https://www.googleapis.com/auth/gmail.readonly".to_string()],
     };

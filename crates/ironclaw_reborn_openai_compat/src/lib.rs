@@ -14,6 +14,8 @@ mod ack_helpers;
 mod chat;
 #[cfg(feature = "openai-compat-beta")]
 mod chat_workflow;
+#[cfg(feature = "openai-compat-beta")]
+mod content_parts;
 mod descriptors;
 mod error;
 #[cfg(feature = "openai-compat-beta")]
@@ -43,6 +45,7 @@ pub use chat_workflow::{
     OPENAI_COMPAT_CONVERSATION_PREFIX, OpenAiChatCompletionProjection,
     OpenAiChatCompletionProjectionReader, OpenAiChatCompletionProjectionRequest,
     OpenAiChatCompletionsWorkflow, OpenAiChatModelOnlyTools, OpenAiCompatAuthenticatedCaller,
+    OpenAiCompatInboundAttachmentSubmit,
 };
 pub use descriptors::{
     OPENAI_COMPAT_PATTERN_CHAT_COMPLETIONS, OPENAI_COMPAT_PATTERN_RESPONSES_API_CREATE,

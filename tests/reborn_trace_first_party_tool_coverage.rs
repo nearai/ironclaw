@@ -10,11 +10,13 @@ use ironclaw_host_runtime::{
     APPLY_PATCH_CAPABILITY_ID, ECHO_CAPABILITY_ID, GLOB_CAPABILITY_ID, GREP_CAPABILITY_ID,
     HTTP_CAPABILITY_ID, HTTP_SAVE_CAPABILITY_ID, JSON_CAPABILITY_ID, LIST_DIR_CAPABILITY_ID,
     MEMORY_READ_CAPABILITY_ID, MEMORY_SEARCH_CAPABILITY_ID, MEMORY_TREE_CAPABILITY_ID,
-    MEMORY_WRITE_CAPABILITY_ID, READ_FILE_CAPABILITY_ID, SHELL_CAPABILITY_ID,
-    SKILL_INSTALL_CAPABILITY_ID, SKILL_LIST_CAPABILITY_ID, SKILL_REMOVE_CAPABILITY_ID,
-    SPAWN_SUBAGENT_CAPABILITY_ID, TIME_CAPABILITY_ID, TRIGGER_CREATE_CAPABILITY_ID,
-    TRIGGER_LIST_CAPABILITY_ID, TRIGGER_REMOVE_CAPABILITY_ID, WRITE_FILE_CAPABILITY_ID,
-    builtin_first_party_package,
+    MEMORY_WRITE_CAPABILITY_ID, PROFILE_SET_CAPABILITY_ID, READ_FILE_CAPABILITY_ID,
+    SHELL_CAPABILITY_ID, SKILL_INSTALL_CAPABILITY_ID, SKILL_LIST_CAPABILITY_ID,
+    SKILL_REMOVE_CAPABILITY_ID, SPAWN_SUBAGENT_CAPABILITY_ID, TIME_CAPABILITY_ID,
+    TRACE_COMMONS_CREDITS_CAPABILITY_ID, TRACE_COMMONS_ONBOARD_CAPABILITY_ID,
+    TRACE_COMMONS_PROFILE_SET_CAPABILITY_ID, TRACE_COMMONS_PROFILE_TOKEN_CAPABILITY_ID,
+    TRACE_COMMONS_STATUS_CAPABILITY_ID, TRIGGER_CREATE_CAPABILITY_ID, TRIGGER_LIST_CAPABILITY_ID,
+    TRIGGER_REMOVE_CAPABILITY_ID, WRITE_FILE_CAPABILITY_ID, builtin_first_party_package,
 };
 use ironclaw_loop_support::{HostManagedModelMessageRole, HostManagedModelResponse};
 use ironclaw_turns::{TurnStatus, run_profile::LoopHostMilestoneKind};
@@ -35,6 +37,7 @@ const REBORN_FIRST_PARTY_E2E_COVERED_CAPABILITIES: &[&str] = &[
     MEMORY_WRITE_CAPABILITY_ID,
     MEMORY_READ_CAPABILITY_ID,
     MEMORY_TREE_CAPABILITY_ID,
+    PROFILE_SET_CAPABILITY_ID,
     SHELL_CAPABILITY_ID,
     READ_FILE_CAPABILITY_ID,
     WRITE_FILE_CAPABILITY_ID,
@@ -49,6 +52,11 @@ const REBORN_FIRST_PARTY_E2E_COVERED_CAPABILITIES: &[&str] = &[
     TRIGGER_CREATE_CAPABILITY_ID,
     TRIGGER_LIST_CAPABILITY_ID,
     TRIGGER_REMOVE_CAPABILITY_ID,
+    TRACE_COMMONS_ONBOARD_CAPABILITY_ID,
+    TRACE_COMMONS_STATUS_CAPABILITY_ID,
+    TRACE_COMMONS_CREDITS_CAPABILITY_ID,
+    TRACE_COMMONS_PROFILE_TOKEN_CAPABILITY_ID,
+    TRACE_COMMONS_PROFILE_SET_CAPABILITY_ID,
 ];
 
 const SKILL_NAME: &str = "reborn-skill-e2e";
@@ -115,7 +123,7 @@ async fn reborn_trace_process_first_party_tools_parity() {
         .await
         .expect("submit text");
     harness
-        .wait_for_status(submitted.run_id, TurnStatus::Completed)
+        .wait_for_status_with_config(submitted.run_id, TurnStatus::Completed, reborn_e2e_wait())
         .await
         .expect("completed run");
     harness
@@ -191,7 +199,7 @@ async fn reborn_trace_spawn_subagent_is_surface_text_and_structured_tool() {
         .await
         .expect("submit text");
     harness
-        .wait_for_status(submitted.run_id, TurnStatus::Completed)
+        .wait_for_status_with_config(submitted.run_id, TurnStatus::Completed, reborn_e2e_wait())
         .await
         .expect("completed run");
     harness
@@ -340,7 +348,7 @@ async fn reborn_trace_skill_management_first_party_tools_parity() {
         .await
         .expect("submit text");
     harness
-        .wait_for_status(submitted.run_id, TurnStatus::Completed)
+        .wait_for_status_with_config(submitted.run_id, TurnStatus::Completed, reborn_e2e_wait())
         .await
         .expect("completed run");
     harness
@@ -442,7 +450,7 @@ async fn reborn_trace_trigger_management_first_party_tools_parity() {
         .await
         .expect("submit text");
     harness
-        .wait_for_status(submitted.run_id, TurnStatus::Completed)
+        .wait_for_status_with_config(submitted.run_id, TurnStatus::Completed, reborn_e2e_wait())
         .await
         .expect("completed run");
     harness
@@ -483,6 +491,206 @@ async fn reborn_trace_trigger_management_first_party_tools_parity() {
         |kind| matches!(kind, LoopHostMilestoneKind::CapabilityBatchCompleted { .. }),
         |kind| matches!(kind, LoopHostMilestoneKind::AssistantReplyFinalized { .. }),
     );
+    harness.assert_model_exhausted();
+
+    harness.shutdown().await;
+}
+
+#[tokio::test]
+async fn reborn_trace_trace_commons_first_party_tools_parity() {
+    let onboard = CapabilityId::new(TRACE_COMMONS_ONBOARD_CAPABILITY_ID).expect("capability id");
+    let status = CapabilityId::new(TRACE_COMMONS_STATUS_CAPABILITY_ID).expect("capability id");
+    let credits = CapabilityId::new(TRACE_COMMONS_CREDITS_CAPABILITY_ID).expect("capability id");
+    let profile_token =
+        CapabilityId::new(TRACE_COMMONS_PROFILE_TOKEN_CAPABILITY_ID).expect("capability id");
+    let profile_set =
+        CapabilityId::new(TRACE_COMMONS_PROFILE_SET_CAPABILITY_ID).expect("capability id");
+    let model_gateway = RebornTraceReplayModelGateway::with_scripted_steps([
+        // confirmed=false hits the consent gate before any egress wiring is
+        // consulted, so the onboard step is deterministic with no network.
+        RebornModelReplayStep::ProviderToolCalls {
+            calls: vec![RebornScriptedProviderToolCall::new(
+                onboard.clone(),
+                "call_trace_commons_onboard_unconfirmed",
+                serde_json::json!({
+                    "invite_url": "https://tc.example.test/onboard#REBORN-E2E-CODE",
+                    "confirmed": false
+                }),
+            )],
+            expected_tool_results: Vec::new(),
+        },
+        RebornModelReplayStep::ProviderToolCalls {
+            calls: vec![RebornScriptedProviderToolCall::new(
+                status.clone(),
+                "call_trace_commons_status",
+                serde_json::json!({}),
+            )],
+            expected_tool_results: Vec::new(),
+        },
+        RebornModelReplayStep::ProviderToolCalls {
+            calls: vec![RebornScriptedProviderToolCall::new(
+                credits.clone(),
+                "call_trace_commons_credits",
+                serde_json::json!({}),
+            )],
+            expected_tool_results: Vec::new(),
+        },
+        RebornModelReplayStep::ProviderToolCalls {
+            calls: vec![RebornScriptedProviderToolCall::new(
+                profile_token.clone(),
+                "call_trace_commons_profile_token",
+                // confirmed=true clears the hard mint-consent gate so the call
+                // reaches the enrollment check (NotEnrolled here, deterministic,
+                // no network — this scope never onboarded).
+                serde_json::json!({ "confirmed": true }),
+            )],
+            expected_tool_results: Vec::new(),
+        },
+        RebornModelReplayStep::ProviderToolCalls {
+            calls: vec![RebornScriptedProviderToolCall::new(
+                profile_set.clone(),
+                "call_trace_commons_profile_set",
+                serde_json::json!({
+                    "display_handle": "pilot_zaki",
+                    "bio": "Trace Commons pilot contributor",
+                    // confirmed=true clears the public-attribution consent gate so
+                    // the call reaches the enrollment check (which returns
+                    // NotEnrolled here, deterministically and with no network,
+                    // since this scope never onboarded).
+                    "confirmed": true
+                }),
+            )],
+            expected_tool_results: Vec::new(),
+        },
+        RebornModelReplayStep::Response {
+            response: HostManagedModelResponse::assistant_reply(
+                "trace commons tools trace complete",
+            ),
+            expected_tool_results: Vec::new(),
+        },
+    ]);
+    let mut harness = RebornBinaryE2EHarness::with_host_runtime_trace_commons_capabilities(
+        "room-trace-trace-commons-first-party-tools",
+        model_gateway,
+    )
+    .await
+    .expect("harness");
+    harness.start();
+
+    let submitted = harness
+        .submit_text(
+            "event-trace-trace-commons-first-party-tools",
+            "exercise trace commons first-party tools",
+        )
+        .await
+        .expect("submit text");
+    harness
+        .wait_for_status(submitted.run_id, TurnStatus::Completed)
+        .await
+        .expect("completed run");
+    harness
+        .assert_final_reply("trace commons tools trace complete")
+        .await
+        .expect("final reply");
+
+    let invocations = harness.capability_invocations();
+    assert_eq!(invocations.len(), 5);
+    assert_eq!(invocations[0].capability_id, onboard);
+    assert_eq!(invocations[1].capability_id, status);
+    assert_eq!(invocations[2].capability_id, credits);
+    assert_eq!(invocations[3].capability_id, profile_token);
+    assert_eq!(invocations[4].capability_id, profile_set);
+
+    let results = harness.capability_results();
+    assert_eq!(results.len(), 5);
+    assert_eq!(results[0].capability_id, onboard);
+    assert_eq!(results[0].output["enrolled"], serde_json::json!(false));
+    assert_eq!(
+        results[0].output["consent_required"],
+        serde_json::json!(true)
+    );
+    assert_eq!(results[1].capability_id, status);
+    assert_eq!(results[1].output["enrolled"], serde_json::json!(false));
+    assert_eq!(results[2].capability_id, credits);
+    assert_eq!(results[2].output["submissions_total"], serde_json::json!(0));
+    // Serialized f32 zero can carry a negative sign; compare numerically.
+    assert_eq!(
+        results[2].output["pending_credit"]
+            .as_f64()
+            .expect("pending_credit is a number"),
+        0.0
+    );
+    assert_eq!(results[3].capability_id, profile_token);
+    assert_eq!(results[3].output["minted"], serde_json::json!(false));
+    assert_eq!(
+        results[3].output["error_code"],
+        serde_json::json!("NotEnrolled")
+    );
+    assert_eq!(results[4].capability_id, profile_set);
+    assert_eq!(results[4].output["updated"], serde_json::json!(false));
+    assert_eq!(
+        results[4].output["error_code"],
+        serde_json::json!("NotEnrolled")
+    );
+
+    let requests = harness.model_requests();
+    assert_eq!(requests.len(), 6);
+    assert_eq!(tool_result_count(&requests[1]), 1);
+    assert_eq!(tool_result_count(&requests[2]), 2);
+    assert_eq!(tool_result_count(&requests[3]), 3);
+    assert_eq!(tool_result_count(&requests[4]), 4);
+    assert_eq!(tool_result_count(&requests[5]), 5);
+    assert_milestone_order(
+        &harness.milestones(),
+        |kind| matches!(kind, LoopHostMilestoneKind::CapabilityBatchCompleted { .. }),
+        |kind| matches!(kind, LoopHostMilestoneKind::AssistantReplyFinalized { .. }),
+    );
+    harness.assert_model_exhausted();
+
+    harness.shutdown().await;
+}
+
+#[tokio::test]
+async fn reborn_trace_trace_commons_pilot_tools_are_model_visible() {
+    let onboard = CapabilityId::new(TRACE_COMMONS_ONBOARD_CAPABILITY_ID).expect("capability id");
+    let status = CapabilityId::new(TRACE_COMMONS_STATUS_CAPABILITY_ID).expect("capability id");
+    let credits = CapabilityId::new(TRACE_COMMONS_CREDITS_CAPABILITY_ID).expect("capability id");
+    let profile_token =
+        CapabilityId::new(TRACE_COMMONS_PROFILE_TOKEN_CAPABILITY_ID).expect("capability id");
+    let profile_set =
+        CapabilityId::new(TRACE_COMMONS_PROFILE_SET_CAPABILITY_ID).expect("capability id");
+    let model_gateway = RebornTraceReplayModelGateway::with_scripted_steps([
+        RebornModelReplayStep::AssertProviderToolsThenResponse {
+            capability_ids: vec![onboard, status, credits, profile_token, profile_set],
+            response: HostManagedModelResponse::assistant_reply(
+                "trace commons pilot tool surface complete",
+            ),
+            expected_tool_results: Vec::new(),
+        },
+    ]);
+    let mut harness = RebornBinaryE2EHarness::with_host_runtime_trace_commons_capabilities(
+        "room-trace-trace-commons-pilot-tool-surface",
+        model_gateway,
+    )
+    .await
+    .expect("harness");
+    harness.start();
+
+    let submitted = harness
+        .submit_text(
+            "event-trace-trace-commons-pilot-tool-surface",
+            "show trace commons pilot tools",
+        )
+        .await
+        .expect("submit text");
+    harness
+        .wait_for_status(submitted.run_id, TurnStatus::Completed)
+        .await
+        .expect("completed run");
+    harness
+        .assert_final_reply("trace commons pilot tool surface complete")
+        .await
+        .expect("final reply");
     harness.assert_model_exhausted();
 
     harness.shutdown().await;
@@ -591,6 +799,64 @@ async fn reborn_trace_memory_first_party_tools_parity() {
     harness.shutdown().await;
 }
 
+#[tokio::test]
+async fn reborn_trace_profile_set_first_party_tool_parity() {
+    let profile_set = CapabilityId::new(PROFILE_SET_CAPABILITY_ID).expect("valid capability id");
+    let model_gateway = RebornTraceReplayModelGateway::with_scripted_steps([
+        RebornModelReplayStep::ProviderToolCalls {
+            calls: vec![RebornScriptedProviderToolCall::new(
+                profile_set.clone(),
+                "call_profile_set_first_party",
+                serde_json::json!({"timezone": "Asia/Tokyo", "locale": "ja-JP"}),
+            )],
+            expected_tool_results: Vec::new(),
+        },
+        RebornModelReplayStep::Response {
+            response: HostManagedModelResponse::assistant_reply("profile set trace complete"),
+            expected_tool_results: Vec::new(),
+        },
+    ]);
+    let mut harness = RebornBinaryE2EHarness::with_host_runtime_core_builtin_capabilities(
+        "room-trace-profile-set-first-party-tool",
+        model_gateway,
+    )
+    .await
+    .expect("harness");
+    harness.start();
+
+    let submitted = harness
+        .submit_text(
+            "event-trace-profile-set-first-party-tool",
+            "exercise profile set first-party tool",
+        )
+        .await
+        .expect("submit text");
+    harness
+        .wait_for_status_with_config(
+            submitted.run_id,
+            TurnStatus::Completed,
+            host_runtime_tool_wait(),
+        )
+        .await
+        .expect("completed run");
+    harness
+        .assert_final_reply("profile set trace complete")
+        .await
+        .expect("final reply");
+
+    let invocations = harness.capability_invocations();
+    assert_eq!(invocations.len(), 1);
+    assert_eq!(invocations[0].capability_id, profile_set);
+
+    let results = harness.capability_results();
+    assert_eq!(results.len(), 1);
+    assert_eq!(results[0].capability_id, profile_set);
+    assert_eq!(results[0].output["status"], serde_json::json!("ok"));
+    harness.assert_model_exhausted();
+
+    harness.shutdown().await;
+}
+
 fn skill_md(name: &str, description: &str) -> String {
     format!("---\nname: {name}\ndescription: {description}\n---\nSkill body for {name}.\n")
 }
@@ -601,6 +867,13 @@ fn tool_result_count(request: &ironclaw_loop_support::HostManagedModelRequest) -
         .iter()
         .filter(|message| message.role == HostManagedModelMessageRole::ToolResult)
         .count()
+}
+
+fn reborn_e2e_wait() -> HarnessWaitConfig {
+    HarnessWaitConfig {
+        timeout: Duration::from_secs(15),
+        poll_interval: Duration::from_millis(20),
+    }
 }
 
 fn assert_skill_list_contains(output: &serde_json::Value, expected: &str) {

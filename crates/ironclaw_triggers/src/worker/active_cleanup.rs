@@ -1,4 +1,7 @@
-use crate::{ActiveTriggerScanCursor, ClearActiveFireRequest, TriggerError, TriggerRecord};
+use crate::{
+    ActiveTriggerScanCursor, ClearActiveFireRequest, TriggerError, TriggerRecord,
+    TriggerRunHistoryStatus,
+};
 
 use super::{
     TriggerActiveRunState, TriggerActiveRunStateRequest, TriggerPollerFailureReason,
@@ -111,9 +114,27 @@ impl TriggerPollerWorker {
                     continue;
                 }
             };
-            match state {
-                TriggerActiveRunState::Terminal { status } => {
-                    if self
+            // Map the run state to "should this active fire be cleared, and if
+            // so with what status". A blocked run is parked on a human-
+            // interaction gate an unattended fire cannot satisfy, so it clears
+            // as failed; a terminal run clears with whatever status it reached.
+            // Exhaustive (no wildcard) so a new variant forces a compile error.
+            let clear: Option<(TriggerPollerFireOutcome, TriggerRunHistoryStatus)> = match state {
+                TriggerActiveRunState::Terminal { status } => Some((
+                    TriggerPollerFireOutcome::ClearedTerminalActive { run_id },
+                    status,
+                )),
+                TriggerActiveRunState::Blocked => Some((
+                    TriggerPollerFireOutcome::ClearedBlockedActive { run_id },
+                    TriggerRunHistoryStatus::Error,
+                )),
+                // Missing remains conservative until recovery can prove the
+                // active run lookup is not merely stale or temporarily empty.
+                TriggerActiveRunState::Missing | TriggerActiveRunState::Nonterminal => None,
+            };
+            match clear {
+                Some((cleared_outcome, status)) => {
+                    let outcome = if self
                         .deps
                         .repository
                         .clear_active_fire(ClearActiveFireRequest {
@@ -126,24 +147,18 @@ impl TriggerPollerWorker {
                         .await?
                         .is_some()
                     {
-                        report.results.push(TriggerPollerFireReport {
-                            tenant_id: record.tenant_id,
-                            trigger_id: record.trigger_id,
-                            fire_slot,
-                            outcome: TriggerPollerFireOutcome::ClearedTerminalActive { run_id },
-                        });
+                        cleared_outcome
                     } else {
-                        report.results.push(TriggerPollerFireReport {
-                            tenant_id: record.tenant_id,
-                            trigger_id: record.trigger_id,
-                            fire_slot,
-                            outcome: TriggerPollerFireOutcome::SkippedAlreadyCleared { run_id },
-                        });
-                    }
+                        TriggerPollerFireOutcome::SkippedAlreadyCleared { run_id }
+                    };
+                    report.results.push(TriggerPollerFireReport {
+                        tenant_id: record.tenant_id,
+                        trigger_id: record.trigger_id,
+                        fire_slot,
+                        outcome,
+                    });
                 }
-                TriggerActiveRunState::Missing | TriggerActiveRunState::Nonterminal => {
-                    // Missing remains conservative until recovery can prove the
-                    // active run lookup is not merely stale or temporarily empty.
+                None => {
                     report.results.push(TriggerPollerFireReport {
                         tenant_id: record.tenant_id,
                         trigger_id: record.trigger_id,

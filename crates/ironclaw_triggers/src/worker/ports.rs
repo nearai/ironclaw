@@ -1,5 +1,5 @@
 use async_trait::async_trait;
-use ironclaw_host_api::{TenantId, Timestamp};
+use ironclaw_host_api::{TenantId, ThreadId, Timestamp};
 use ironclaw_turns::{TurnRunId, TurnScope};
 
 use crate::{
@@ -82,6 +82,13 @@ pub enum TrustedTriggerFireSubmitOutcome {
     Replayed {
         original_run_id: TurnRunId,
         replayed_at: Timestamp,
+        /// Canonical thread id for the replayed fire.
+        ///
+        /// The submission path resolves conversation binding before determining
+        /// whether a fire is new or replayed, so the canonical `ThreadId` is
+        /// available at this point. `None` means no canonical thread was
+        /// resolved.
+        thread_id: Option<ThreadId>,
     },
 }
 
@@ -105,7 +112,15 @@ pub struct TriggerActiveRunStateRequest {
 pub enum TriggerActiveRunState {
     Missing,
     Nonterminal,
-    Terminal { status: TriggerRunHistoryStatus },
+    /// The run is parked on a gate that needs human interaction (tool-approval
+    /// or auth) which an unattended scheduled fire cannot satisfy. Left as a
+    /// non-advancing active fire it would block every later scheduled run of
+    /// the same trigger indefinitely, so the poller clears it and records the
+    /// fire as failed instead. See #4986.
+    Blocked,
+    Terminal {
+        status: TriggerRunHistoryStatus,
+    },
 }
 
 #[async_trait]

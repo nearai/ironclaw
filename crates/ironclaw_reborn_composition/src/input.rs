@@ -11,9 +11,12 @@ use ironclaw_host_api::runtime_policy::{DeploymentMode, RuntimeProfile};
 use ironclaw_host_api::runtime_policy::{
     EffectiveRuntimePolicy, FilesystemBackendKind, NetworkMode, SecretMode,
 };
+use ironclaw_host_api::{AgentId, TenantId};
 #[cfg(all(test, feature = "slack-v2-host-beta"))]
 use ironclaw_host_runtime::HostRuntimeHttpEgressPort;
 use ironclaw_host_runtime::TenantSandboxProcessPort;
+#[cfg(any(test, feature = "test-support"))]
+use ironclaw_network::NetworkHttpEgress;
 use ironclaw_trust::HostTrustPolicy;
 use ironclaw_turns::TurnRunWakeNotifier;
 use secrecy::SecretString;
@@ -168,6 +171,7 @@ impl RebornRuntimeProcessBinding {
 pub struct RebornBuildInput {
     pub(crate) profile: RebornCompositionProfile,
     pub(crate) owner_id: String,
+    pub(crate) local_runtime_identity: Option<RebornLocalRuntimeIdentity>,
     pub(crate) storage: RebornStorageInput,
     pub(crate) production_trust_policy: Option<Arc<HostTrustPolicy>>,
     pub(crate) runtime_policy: Option<EffectiveRuntimePolicy>,
@@ -178,10 +182,18 @@ pub struct RebornBuildInput {
     pub(crate) require_wasm_credentials: bool,
     #[cfg(all(test, feature = "slack-v2-host-beta"))]
     pub(crate) host_runtime_http_egress_for_test: Option<Option<HostRuntimeHttpEgressPort>>,
+    #[cfg(any(test, feature = "test-support"))]
+    pub(crate) network_http_egress_for_test: Option<Arc<dyn NetworkHttpEgress>>,
     pub(crate) product_auth_ports: Option<RebornProductAuthServicePorts>,
     pub(crate) oauth_provider_configs: Vec<OAuthProviderBackendConfig>,
     pub(crate) oauth_dcr_provider_configs: Vec<OAuthDcrProviderBackendConfig>,
     pub(crate) nearai_mcp_bootstrap_config: Option<crate::nearai_mcp::NearAiMcpBootstrapConfig>,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct RebornLocalRuntimeIdentity {
+    pub(crate) tenant_id: TenantId,
+    pub(crate) agent_id: AgentId,
 }
 
 pub(crate) enum RebornStorageInput {
@@ -228,6 +240,16 @@ impl RebornBuildInput {
     /// wrote to.
     pub fn with_owner_id(mut self, owner_id: impl Into<String>) -> Self {
         self.owner_id = owner_id.into();
+        self
+    }
+
+    /// Override the local runtime tenant/agent identity used by command-style
+    /// facades that need a surface context before a full runtime exists.
+    pub fn with_local_runtime_identity(mut self, tenant_id: TenantId, agent_id: AgentId) -> Self {
+        self.local_runtime_identity = Some(RebornLocalRuntimeIdentity {
+            tenant_id,
+            agent_id,
+        });
         self
     }
 
@@ -531,6 +553,17 @@ impl RebornBuildInput {
         self
     }
 
+    /// Override local-dev host HTTP egress for fixture recording and replay.
+    ///
+    /// This is compiled only for tests/test-support so Reborn QA harnesses can
+    /// route host-mediated integration calls through trace record/replay
+    /// adapters without changing production composition.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn with_network_http_egress_for_test(mut self, egress: Arc<dyn NetworkHttpEgress>) -> Self {
+        self.network_http_egress_for_test = Some(egress);
+        self
+    }
+
     /// Inject Reborn-native product-auth service ports.
     ///
     /// Production callers should provide durable implementations here. The
@@ -620,6 +653,7 @@ impl RebornBuildInput {
         Self {
             profile,
             owner_id: owner_id.into(),
+            local_runtime_identity: None,
             storage,
             production_trust_policy: None,
             runtime_policy: None,
@@ -630,6 +664,8 @@ impl RebornBuildInput {
             require_wasm_credentials: false,
             #[cfg(all(test, feature = "slack-v2-host-beta"))]
             host_runtime_http_egress_for_test: None,
+            #[cfg(any(test, feature = "test-support"))]
+            network_http_egress_for_test: None,
             product_auth_ports: None,
             oauth_provider_configs: Vec::new(),
             oauth_dcr_provider_configs: Vec::new(),

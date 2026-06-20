@@ -75,6 +75,21 @@ function renderChatInput({ onCancel, setCalls = [] } = {}) {
     globalThis: {},
     html: (strings, ...values) => ({ strings: Array.from(strings), values }),
     useT: () => (key) => key,
+    authScope: () => "test-scope",
+    stageFiles: async () => ({ staged: [], errors: [] }),
+    useAttachmentConfig: () => ({
+      accept: [],
+      maxCount: 10,
+      maxFileBytes: 1024,
+      maxTotalBytes: 2048,
+    }),
+    NEW_DRAFT_KEY: "__new__",
+    clearDraft: () => {},
+    clearStagedAttachments: () => {},
+    getDraft: () => "",
+    getStagedAttachments: () => [],
+    setDraft: () => {},
+    setStagedAttachments: () => {},
     window: { requestAnimationFrame: (fn) => fn() },
   };
 
@@ -106,12 +121,12 @@ test("ChatInput cancel button invokes onCancel and resets cancelling state", asy
   const cancelPromise = props.onClick();
 
   assert.equal(cancelCalls, 1);
-  assert.deepEqual(setCalls.slice(0, 1), [{ index: 2, value: true }]);
+  assert.deepEqual(setCalls.slice(0, 1), [{ index: 4, value: true }]);
 
   resolveCancel();
   await cancelPromise;
 
-  assert.deepEqual(setCalls.slice(-1), [{ index: 2, value: false }]);
+  assert.deepEqual(setCalls.slice(-1), [{ index: 4, value: false }]);
 });
 
 test("ChatInput cancel button resets cancelling state after rejection", async () => {
@@ -128,7 +143,7 @@ test("ChatInput cancel button resets cancelling state after rejection", async ()
   await assert.rejects(props.onClick(), /cancel failed/);
 
   assert.deepEqual(setCalls, [
-    { index: 2, value: true },
-    { index: 2, value: false },
+    { index: 4, value: true },
+    { index: 4, value: false },
   ]);
 });

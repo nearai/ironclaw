@@ -9,11 +9,13 @@ use ironclaw_extensions::{
 use ironclaw_filesystem::RootFilesystem;
 use ironclaw_host_api::{
     CapabilityDescriptor, CapabilityId, EffectKind, ExtensionId, PermissionMode, ResourceScope,
-    RuntimeCredentialRequirement, RuntimeHttpEgress, VirtualPath, sha256_digest_token,
+    RuntimeCredentialAuthRequirement, RuntimeCredentialRequirement, RuntimeHttpEgress, VirtualPath,
+    sha256_digest_token,
 };
 use ironclaw_product_workflow::{
-    LifecycleInstalledExtensionSummary, LifecyclePackageKind, LifecyclePackageRef, LifecyclePhase,
-    LifecycleProductPayload, LifecycleProductResponse, ProductWorkflowError,
+    LifecycleExtensionSummary, LifecycleInstalledExtensionSummary, LifecyclePackageKind,
+    LifecyclePackageRef, LifecyclePhase, LifecycleProductPayload, LifecycleProductResponse,
+    LifecycleSearchExtensionSummary, ProductWorkflowError,
 };
 use tokio::sync::Mutex;
 
@@ -25,6 +27,11 @@ use crate::available_extensions::{
     AvailableExtensionCatalog, AvailableExtensionPackage, materialize_available_extension,
     visible_capability_ids,
 };
+use crate::extension_activation_credentials::{
+    ExtensionActivationCredentialGate, RuntimeExtensionActivationCredentialGate,
+    UnavailableExtensionActivationCredentialGate,
+};
+use crate::extension_credential_requirements::package_runtime_credential_auth_requirements;
 use crate::lifecycle::response_with_payload;
 use crate::mcp_discovery::{
     HostedMcpDiscoveryError, discover_hosted_mcp_package, is_hosted_http_mcp_package,
@@ -171,21 +178,29 @@ impl RebornLocalExtensionManagementPort {
     pub(crate) async fn search(
         &self,
         query: &str,
+        credential_gate: Option<&RuntimeExtensionActivationCredentialGate>,
     ) -> Result<LifecycleProductResponse, ProductWorkflowError> {
         let extensions = self.catalog.search(query);
-        let summaries = extensions
-            .into_iter()
-            .map(|extension| extension.summary())
-            .collect::<Vec<_>>();
+        let mut summaries = Vec::new();
+        for extension in extensions {
+            summaries.push(self.search_summary(extension, credential_gate).await?);
+        }
         let count = summaries.len();
-        Ok(response_with_payload(
+        let mut response = response_with_payload(
             None,
             LifecyclePhase::Discovered,
             LifecycleProductPayload::ExtensionSearch {
                 extensions: summaries,
                 count,
             },
-        ))
+        );
+        if extension_search_has_ready_result(response.payload.as_ref()) {
+            response.message = Some(
+                "Search found installed extension results that are already configured or active. Treat those results as ready for this connection request; do not ask the user for credentials unless a later tool call reports auth_required."
+                    .to_string(),
+            );
+        }
+        Ok(response)
     }
 
     pub(crate) async fn list_installed(
@@ -251,6 +266,18 @@ impl RebornLocalExtensionManagementPort {
             .collect())
     }
 
+    pub(crate) async fn activation_credential_requirements(
+        &self,
+        package_ref: &LifecyclePackageRef,
+    ) -> Result<Vec<RuntimeCredentialAuthRequirement>, ProductWorkflowError> {
+        let (extension_id, installation_id) = extension_ids_from_package_ref(package_ref)?;
+        let _operation_guard = self.operation_lock.lock().await;
+        self.load_installation(&extension_id, &installation_id)
+            .await?;
+        let package = self.lifecycle_package(&extension_id).await?;
+        Ok(package_runtime_credential_auth_requirements(&package))
+    }
+
     async fn installed_summaries(
         &self,
     ) -> Result<Vec<LifecycleInstalledExtensionSummary>, ProductWorkflowError> {
@@ -276,6 +303,52 @@ impl RebornLocalExtensionManagementPort {
             });
         }
         Ok(summaries)
+    }
+
+    async fn search_summary(
+        &self,
+        extension: &AvailableExtensionPackage,
+        credential_gate: Option<&RuntimeExtensionActivationCredentialGate>,
+    ) -> Result<LifecycleSearchExtensionSummary, ProductWorkflowError> {
+        let mut summary = extension.summary();
+        suppress_search_credential_onboarding(&mut summary);
+        let Some(installation) = self.search_installation(&extension.package.id).await? else {
+            return Ok(LifecycleSearchExtensionSummary {
+                summary,
+                installation_phase: None,
+            });
+        };
+        let phase = search_installation_phase(extension, &installation, credential_gate).await?;
+        Ok(LifecycleSearchExtensionSummary {
+            summary,
+            installation_phase: Some(phase),
+        })
+    }
+
+    async fn search_installation(
+        &self,
+        extension_id: &ExtensionId,
+    ) -> Result<Option<ExtensionInstallation>, ProductWorkflowError> {
+        let installation_id = ExtensionInstallationId::new(extension_id.as_str().to_string())
+            .map_err(map_extension_installation_error)?;
+        let installation = self
+            .installation_store
+            .get_installation(&installation_id)
+            .await
+            .map_err(map_extension_installation_error)?;
+        if installation
+            .as_ref()
+            .is_some_and(|installation| installation.extension_id() != extension_id)
+        {
+            return Err(ProductWorkflowError::InvalidBindingRequest {
+                reason: format!(
+                    "installation {} does not belong to extension {}",
+                    installation_id.as_str(),
+                    extension_id.as_str()
+                ),
+            });
+        }
+        Ok(installation)
     }
 
     pub(crate) async fn install(
@@ -320,13 +393,17 @@ impl RebornLocalExtensionManagementPort {
         }
 
         Ok(response_with_payload(
-            Some(package_ref),
+            Some(package_ref.clone()),
             LifecyclePhase::Installed,
             LifecycleProductPayload::ExtensionInstall {
                 installed: true,
                 visible_capability_ids: visible_capability_ids(available)
                     .map(|id| id.as_str().to_string())
                     .collect(),
+                next_step: format!(
+                    "Call builtin.extension_activate now with input {{\"extension_id\":\"{}\"}}. Activation publishes the tools and opens the auth gate if credentials are missing.",
+                    package_ref.id.as_str()
+                ),
             },
         ))
     }
@@ -336,6 +413,39 @@ impl RebornLocalExtensionManagementPort {
         package_ref: LifecyclePackageRef,
         mode: ExtensionActivationMode,
     ) -> Result<LifecycleProductResponse, ProductWorkflowError> {
+        let credential_gate = UnavailableExtensionActivationCredentialGate;
+        self.activate_inner(package_ref, mode, &credential_gate)
+            .await
+    }
+
+    pub(crate) async fn activate_with_credential_gate(
+        &self,
+        package_ref: LifecyclePackageRef,
+        mode: ExtensionActivationMode,
+        credential_gate: impl ExtensionActivationCredentialGate,
+    ) -> Result<LifecycleProductResponse, ProductWorkflowError> {
+        self.activate_inner(package_ref, mode, &credential_gate)
+            .await
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn activate_with_prechecked_credentials_for_test(
+        &self,
+        package_ref: LifecyclePackageRef,
+        mode: ExtensionActivationMode,
+    ) -> Result<LifecycleProductResponse, ProductWorkflowError> {
+        let credential_gate =
+            crate::extension_activation_credentials::PrecheckedExtensionActivationCredentialGate;
+        self.activate_inner(package_ref, mode, &credential_gate)
+            .await
+    }
+
+    async fn activate_inner(
+        &self,
+        package_ref: LifecyclePackageRef,
+        mode: ExtensionActivationMode,
+        credential_gate: &dyn ExtensionActivationCredentialGate,
+    ) -> Result<LifecycleProductResponse, ProductWorkflowError> {
         let (extension_id, installation_id) = extension_ids_from_package_ref(&package_ref)?;
 
         let discovery = {
@@ -344,6 +454,7 @@ impl RebornLocalExtensionManagementPort {
                 .load_installation(&extension_id, &installation_id)
                 .await?;
             let package = self.lifecycle_package(&extension_id).await?;
+            credential_gate.ensure_credentials(&package).await?;
             match mode {
                 ExtensionActivationMode::HostedMcpDiscovery {
                     scope,
@@ -400,6 +511,7 @@ impl RebornLocalExtensionManagementPort {
         if current_package != discovery.base_package {
             return Err(hosted_mcp_changed_during_discovery_error());
         };
+        credential_gate.ensure_credentials(&active_package).await?;
         self.commit_activation(
             package_ref,
             &extension_id,
@@ -445,11 +557,21 @@ impl RebornLocalExtensionManagementPort {
             return Err(error);
         }
 
-        Ok(response_with_payload(
+        let visible_capability_ids = package_visible_capability_ids(&active_package);
+
+        let mut response = response_with_payload(
             Some(package_ref),
             LifecyclePhase::Active,
-            LifecycleProductPayload::ExtensionActivate { activated: true },
-        ))
+            LifecycleProductPayload::ExtensionActivate {
+                activated: true,
+                visible_capability_ids,
+            },
+        );
+        response.message = Some(
+            "Extension activation succeeded and its tools are now available. No additional authorization or configuration is needed, including for write-capable tools, unless a later tool call reports auth_required. Do not ask the user for a token, OAuth, authorization, or configuration after activated=true."
+                .to_string(),
+        );
+        Ok(response)
     }
 
     pub(crate) async fn package_requires_hosted_mcp_discovery(
@@ -1026,6 +1148,16 @@ fn available_manifest_hash(
         .map_err(map_extension_installation_error)
 }
 
+fn package_visible_capability_ids(package: &ExtensionPackage) -> Vec<String> {
+    package
+        .manifest
+        .capabilities
+        .iter()
+        .filter(|capability| capability.visibility == CapabilityVisibility::Model)
+        .map(|capability| capability.id.as_str().to_string())
+        .collect()
+}
+
 fn extension_ids_from_package_ref(
     package_ref: &LifecyclePackageRef,
 ) -> Result<(ExtensionId, ExtensionInstallationId), ProductWorkflowError> {
@@ -1045,6 +1177,75 @@ fn phase_for_activation_state(state: ExtensionActivationState) -> LifecyclePhase
         ExtensionActivationState::Enabled => LifecyclePhase::Active,
         ExtensionActivationState::Disabled => LifecyclePhase::Disabled,
         ExtensionActivationState::Installed => LifecyclePhase::Installed,
+    }
+}
+
+async fn search_installation_phase(
+    extension: &AvailableExtensionPackage,
+    installation: &ExtensionInstallation,
+    credential_gate: Option<&RuntimeExtensionActivationCredentialGate>,
+) -> Result<LifecyclePhase, ProductWorkflowError> {
+    let phase = phase_for_activation_state(installation.activation_state());
+    if phase != LifecyclePhase::Installed {
+        return Ok(phase);
+    }
+    if search_credentials_configured(extension, credential_gate).await? {
+        return Ok(LifecyclePhase::Configured);
+    }
+    Ok(phase)
+}
+
+async fn search_credentials_configured(
+    extension: &AvailableExtensionPackage,
+    credential_gate: Option<&RuntimeExtensionActivationCredentialGate>,
+) -> Result<bool, ProductWorkflowError> {
+    let requirements = package_runtime_credential_auth_requirements(&extension.package);
+    if requirements.is_empty() {
+        return Ok(false);
+    }
+    let Some(credential_gate) = credential_gate else {
+        return Ok(false);
+    };
+    Ok(credential_gate
+        .missing_requirements(requirements)
+        .await
+        .map_err(map_search_credential_stage_error)?
+        .is_empty())
+}
+
+fn suppress_search_credential_onboarding(summary: &mut LifecycleExtensionSummary) {
+    summary.credential_requirements.clear();
+    summary.onboarding = None;
+}
+
+fn extension_search_has_ready_result(payload: Option<&LifecycleProductPayload>) -> bool {
+    let Some(LifecycleProductPayload::ExtensionSearch { extensions, .. }) = payload else {
+        return false;
+    };
+    extensions.iter().any(|extension| {
+        matches!(
+            extension.installation_phase,
+            Some(LifecyclePhase::Configured | LifecyclePhase::Active)
+        ) && extension.summary.credential_requirements.is_empty()
+            && extension.summary.onboarding.is_none()
+    })
+}
+
+fn map_search_credential_stage_error(
+    error: ironclaw_host_api::CredentialStageError,
+) -> ProductWorkflowError {
+    match error {
+        ironclaw_host_api::CredentialStageError::AuthRequired => {
+            ProductWorkflowError::InvalidBindingRequest {
+                reason: "extension requires product auth credentials before search can project configured state".to_string(),
+            }
+        }
+        ironclaw_host_api::CredentialStageError::Backend => {
+            ProductWorkflowError::Transient {
+                reason: "extension product auth credential state is temporarily unavailable"
+                    .to_string(),
+            }
+        }
     }
 }
 
@@ -1101,6 +1302,11 @@ fn compensation_failure(
 
 #[cfg(test)]
 mod tests {
+    use std::{
+        collections::BTreeSet,
+        sync::atomic::{AtomicUsize, Ordering},
+    };
+
     use super::hosted_mcp_test_support::HostedMcpDiscoveryEgress;
     use super::*;
     use crate::available_extensions::{
@@ -1118,8 +1324,8 @@ mod tests {
     use ironclaw_host_api::{
         CapabilityId, ExtensionLifecycleOperation, HostPath, HostPortCatalog, InvocationId,
         MountAlias, MountGrant, MountPermissions, MountView, NetworkMethod, ResourceScope,
-        RuntimeHttpEgress, RuntimeHttpEgressError, RuntimeHttpEgressRequest,
-        RuntimeHttpEgressResponse, TenantId, TrustClass, UserId,
+        RuntimeCredentialAccountSetup, RuntimeHttpEgress, RuntimeHttpEgressError,
+        RuntimeHttpEgressRequest, RuntimeHttpEgressResponse, TenantId, TrustClass, UserId,
     };
     use ironclaw_host_runtime::{SPAWN_SUBAGENT_CAPABILITY_ID, builtin_first_party_package};
     use ironclaw_product_workflow::{
@@ -1151,7 +1357,7 @@ mod tests {
         };
         assert_eq!(extensions.len(), 1);
         assert_eq!(
-            extensions[0].visible_read_only_capability_ids,
+            extensions[0].summary.visible_read_only_capability_ids,
             vec!["fixture.search"]
         );
 
@@ -1252,9 +1458,12 @@ mod tests {
         port.install(package_ref.clone())
             .await
             .expect("install fixture extension");
-        port.activate(package_ref, ExtensionActivationMode::Static)
-            .await
-            .expect("activate fixture extension");
+        port.activate_with_prechecked_credentials_for_test(
+            package_ref,
+            ExtensionActivationMode::Static,
+        )
+        .await
+        .expect("activate fixture extension");
 
         let capability_ids = port
             .active_model_visible_capabilities()
@@ -1269,6 +1478,63 @@ mod tests {
         assert!(
             !capability_ids.contains(&CapabilityId::new(SPAWN_SUBAGENT_CAPABILITY_ID).unwrap())
         );
+    }
+
+    #[test]
+    fn activation_credential_requirements_coalesce_google_oauth_scope_sets() {
+        let catalog =
+            AvailableExtensionCatalog::from_first_party_assets().expect("first-party assets");
+        for (extension_id, expected_scopes) in [
+            (
+                "google-calendar",
+                vec![
+                    "https://www.googleapis.com/auth/calendar.events",
+                    "https://www.googleapis.com/auth/calendar.readonly",
+                ],
+            ),
+            (
+                "gmail",
+                vec![
+                    "https://www.googleapis.com/auth/gmail.modify",
+                    "https://www.googleapis.com/auth/gmail.readonly",
+                    "https://www.googleapis.com/auth/gmail.send",
+                ],
+            ),
+        ] {
+            let package_ref =
+                LifecyclePackageRef::new(LifecyclePackageKind::Extension, extension_id)
+                    .expect("valid package ref");
+            let package = catalog
+                .resolve(&package_ref)
+                .expect("bundled Google package");
+
+            let requirements = package_runtime_credential_auth_requirements(&package.package);
+
+            assert_eq!(
+                requirements.len(),
+                1,
+                "{extension_id} should activate with one Google OAuth requirement"
+            );
+            let requirement = &requirements[0];
+            assert_eq!(requirement.provider.as_str(), "google");
+            assert_eq!(requirement.requester_extension.as_str(), extension_id);
+            let expected = expected_scopes
+                .into_iter()
+                .map(str::to_string)
+                .collect::<BTreeSet<_>>();
+            assert_eq!(
+                requirement
+                    .provider_scopes
+                    .iter()
+                    .cloned()
+                    .collect::<BTreeSet<_>>(),
+                expected
+            );
+            let RuntimeCredentialAccountSetup::OAuth { scopes } = &requirement.setup else {
+                panic!("{extension_id} should use OAuth setup");
+            };
+            assert_eq!(scopes.iter().cloned().collect::<BTreeSet<_>>(), expected);
+        }
     }
 
     #[tokio::test]
@@ -1287,7 +1553,7 @@ mod tests {
         port.install(package_ref.clone())
             .await
             .expect("install Notion MCP");
-        port.activate(
+        port.activate_with_prechecked_credentials_for_test(
             package_ref,
             ExtensionActivationMode::HostedMcpDiscovery {
                 scope: ResourceScope::local_default(
@@ -1346,7 +1612,7 @@ mod tests {
             .await
             .expect("install Notion MCP");
         let activate = port
-            .activate(
+            .activate_with_prechecked_credentials_for_test(
                 package_ref,
                 ExtensionActivationMode::HostedMcpDiscovery {
                     scope: hosted_mcp_scope("hosted-mcp-empty-tools"),
@@ -1363,6 +1629,55 @@ mod tests {
                 .get_capability(&CapabilityId::new("notion.notion-search").unwrap())
                 .is_some(),
             "fallback activation must publish bundled Notion capabilities"
+        );
+    }
+
+    #[tokio::test]
+    async fn hosted_mcp_activation_rechecks_credentials_after_discovery_before_publish() {
+        let catalog =
+            AvailableExtensionCatalog::from_first_party_assets().expect("first-party assets");
+        let (_dir, _storage_root, port, active_registry, _installation_store) =
+            extension_management_port_fixture_with_catalog_and_service(
+                catalog,
+                ExtensionLifecycleService::new(ExtensionRegistry::new()),
+            );
+        let package_ref =
+            LifecyclePackageRef::new(LifecyclePackageKind::Extension, "notion").expect("valid ref");
+        let credential_gate = FailsSecondCredentialGate {
+            calls: Arc::new(AtomicUsize::new(0)),
+        };
+        let calls = Arc::clone(&credential_gate.calls);
+
+        port.install(package_ref.clone())
+            .await
+            .expect("install Notion MCP");
+        let error = port
+            .activate_with_credential_gate(
+                package_ref,
+                ExtensionActivationMode::HostedMcpDiscovery {
+                    scope: hosted_mcp_scope("hosted-mcp-credential-recheck"),
+                    runtime_http_egress: Arc::new(HostedMcpDiscoveryEgress::default()),
+                },
+                credential_gate,
+            )
+            .await
+            .expect_err("post-discovery credential recheck should fail activation");
+
+        assert!(matches!(
+            error,
+            ProductWorkflowError::InvalidBindingRequest { .. }
+        ));
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            2,
+            "hosted MCP activation must check credentials before and after discovery"
+        );
+        assert!(
+            active_registry
+                .snapshot()
+                .get_capability(&CapabilityId::new("notion.live-search").unwrap())
+                .is_none(),
+            "discovered tools must not publish after post-discovery credential failure"
         );
     }
 
@@ -1387,7 +1702,7 @@ mod tests {
             let port = Arc::clone(&port);
             let package_ref = package_ref.clone();
             async move {
-                port.activate(
+                port.activate_with_prechecked_credentials_for_test(
                     package_ref,
                     ExtensionActivationMode::HostedMcpDiscovery {
                         scope: hosted_mcp_scope("hosted-mcp-remove-race"),
@@ -1439,9 +1754,12 @@ mod tests {
         port.install(package_ref.clone())
             .await
             .expect("install fixture extension");
-        port.activate(package_ref.clone(), ExtensionActivationMode::Static)
-            .await
-            .expect("activate fixture extension");
+        port.activate_with_prechecked_credentials_for_test(
+            package_ref.clone(),
+            ExtensionActivationMode::Static,
+        )
+        .await
+        .expect("activate fixture extension");
         let active_decision = trust_policy
             .evaluate(&trust_input)
             .expect("active extension trust");
@@ -1598,6 +1916,46 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn extension_lifecycle_search_propagates_installation_store_read_error() {
+        let (_dir, port, _active_registry, _failing_store, _trust_policy) =
+            extension_port_with_failing_store(
+                ExtensionRegistry::new(),
+                DeleteInstallationFailingStore::fail_get_installation(),
+                ExtensionLifecycleService::new(ExtensionRegistry::new()),
+            );
+
+        let error = port
+            .search("fixture", None)
+            .await
+            .expect_err("search reports installation-store read failure");
+
+        assert!(matches!(
+            error,
+            ProductWorkflowError::InvalidBindingRequest { .. }
+        ));
+    }
+
+    #[tokio::test]
+    async fn extension_lifecycle_search_rejects_mismatched_installation_row() {
+        let (_dir, port, _active_registry, _failing_store, _trust_policy) =
+            extension_port_with_failing_store(
+                ExtensionRegistry::new(),
+                DeleteInstallationFailingStore::mismatched_get_installation(),
+                ExtensionLifecycleService::new(ExtensionRegistry::new()),
+            );
+
+        let error = port
+            .search("fixture", None)
+            .await
+            .expect_err("search reports mismatched installation row");
+
+        assert!(matches!(
+            error,
+            ProductWorkflowError::InvalidBindingRequest { .. }
+        ));
+    }
+
+    #[tokio::test]
     async fn active_extension_trust_policy_is_digest_pinned() {
         let (_dir, _storage_root, port, _active_registry, _installation_store, trust_policy) =
             extension_management_port_fixture_with_catalog_service_and_trust(
@@ -1610,9 +1968,12 @@ mod tests {
         port.install(package_ref.clone())
             .await
             .expect("install fixture extension");
-        port.activate(package_ref, ExtensionActivationMode::Static)
-            .await
-            .expect("activate fixture extension");
+        port.activate_with_prechecked_credentials_for_test(
+            package_ref,
+            ExtensionActivationMode::Static,
+        )
+        .await
+        .expect("activate fixture extension");
 
         let changed_package = fixture_extension_package_with_description(
             "Lifecycle fixture extension with changed manifest",
@@ -1645,9 +2006,12 @@ mod tests {
         port.install(package_ref.clone())
             .await
             .expect("install fixture extension");
-        port.activate(package_ref, ExtensionActivationMode::Static)
-            .await
-            .expect("activate fixture extension");
+        port.activate_with_prechecked_credentials_for_test(
+            package_ref,
+            ExtensionActivationMode::Static,
+        )
+        .await
+        .expect("activate fixture extension");
 
         let restored_catalog =
             AvailableExtensionCatalog::from_packages(vec![fixture_extension_package()]);
@@ -1703,9 +2067,12 @@ mod tests {
         port.install(package_ref.clone())
             .await
             .expect("install fixture extension");
-        port.activate(package_ref, ExtensionActivationMode::Static)
-            .await
-            .expect("activate fixture extension");
+        port.activate_with_prechecked_credentials_for_test(
+            package_ref,
+            ExtensionActivationMode::Static,
+        )
+        .await
+        .expect("activate fixture extension");
 
         let wasm_path = storage_root.join("system/extensions/fixture/wasm/fixture.wasm");
         std::fs::write(&wasm_path, b"stale-installed-module").expect("corrupt installed module");
@@ -1750,9 +2117,12 @@ mod tests {
         port.install(package_ref.clone())
             .await
             .expect("install fixture extension");
-        port.activate(package_ref, ExtensionActivationMode::Static)
-            .await
-            .expect("activate fixture extension");
+        port.activate_with_prechecked_credentials_for_test(
+            package_ref,
+            ExtensionActivationMode::Static,
+        )
+        .await
+        .expect("activate fixture extension");
 
         let changed_available = fixture_extension_package_with_description(
             "Lifecycle fixture extension with changed manifest",
@@ -1888,6 +2258,8 @@ mod tests {
     async fn extension_lifecycle_installs_activates_and_removes_github() {
         let (_dir, storage_root, facade, active_registry, _installation_store) =
             github_extension_lifecycle_fixture();
+        let facade =
+            facade.with_runtime_credential_accounts(Arc::new(ConfiguredRuntimeCredentialAccounts));
 
         let search = facade
             .execute(
@@ -1907,18 +2279,21 @@ mod tests {
         assert_eq!(extensions.len(), 1);
         assert!(
             extensions[0]
+                .summary
                 .visible_read_only_capability_ids
                 .iter()
                 .any(|id| id == "github.search_issues")
         );
         assert!(
             extensions[0]
+                .summary
                 .visible_read_only_capability_ids
                 .iter()
                 .any(|id| id == "github.search_issues_pull_requests")
         );
         assert!(
             extensions[0]
+                .summary
                 .visible_read_only_capability_ids
                 .iter()
                 .any(|id| id == "github.get_issue")
@@ -1953,6 +2328,34 @@ mod tests {
                 .is_none()
         );
 
+        let installed_search = facade
+            .execute(
+                lifecycle_surface_context(),
+                LifecycleProductAction::ExtensionSearch {
+                    query: "github".to_string(),
+                },
+            )
+            .await
+            .expect("search installed extension");
+        let Some(LifecycleProductPayload::ExtensionSearch { extensions, .. }) =
+            installed_search.payload.as_ref()
+        else {
+            panic!("expected extension search payload");
+        };
+        let github = extensions
+            .iter()
+            .find(|extension| extension.summary.package_ref.id.as_str() == "github")
+            .expect("github search result");
+        assert_eq!(github.installation_phase, Some(LifecyclePhase::Configured));
+        assert!(
+            github.summary.credential_requirements.is_empty(),
+            "configured inactive GitHub search results must not expose satisfied PAT requirements"
+        );
+        assert!(
+            github.summary.onboarding.is_none(),
+            "configured inactive GitHub search results must not expose stale PAT setup onboarding"
+        );
+
         let activate = facade
             .execute(
                 lifecycle_surface_context(),
@@ -1984,6 +2387,34 @@ mod tests {
                 .is_some()
         );
 
+        let active_search = facade
+            .execute(
+                lifecycle_surface_context(),
+                LifecycleProductAction::ExtensionSearch {
+                    query: "github".to_string(),
+                },
+            )
+            .await
+            .expect("search active extension");
+        let Some(LifecycleProductPayload::ExtensionSearch { extensions, .. }) =
+            active_search.payload.as_ref()
+        else {
+            panic!("expected extension search payload");
+        };
+        let github = extensions
+            .iter()
+            .find(|extension| extension.summary.package_ref.id.as_str() == "github")
+            .expect("github search result");
+        assert_eq!(github.installation_phase, Some(LifecyclePhase::Active));
+        assert!(
+            github.summary.credential_requirements.is_empty(),
+            "active GitHub search results must not expose satisfied PAT requirements"
+        );
+        assert!(
+            github.summary.onboarding.is_none(),
+            "active GitHub search results must not expose stale PAT setup onboarding"
+        );
+
         let remove = facade
             .execute(
                 lifecycle_surface_context(),
@@ -2011,12 +2442,84 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn extension_lifecycle_search_reports_credential_backend_failure_as_transient() {
+        let (_dir, _storage_root, facade, _active_registry, _installation_store) =
+            github_extension_lifecycle_fixture();
+        let facade = facade.with_runtime_credential_accounts(Arc::new(
+            BackendUnavailableRuntimeCredentialAccounts,
+        ));
+        let package_ref =
+            LifecyclePackageRef::new(LifecyclePackageKind::Extension, "github").expect("valid ref");
+
+        facade
+            .execute(
+                lifecycle_surface_context(),
+                LifecycleProductAction::ExtensionInstall {
+                    package_ref: package_ref.clone(),
+                },
+            )
+            .await
+            .expect("install extension");
+        let error = facade
+            .execute(
+                lifecycle_surface_context(),
+                LifecycleProductAction::ExtensionSearch {
+                    query: "github".to_string(),
+                },
+            )
+            .await
+            .expect_err("search reports credential backend failure");
+
+        assert!(matches!(error, ProductWorkflowError::Transient { .. }));
+    }
+
+    #[tokio::test]
+    async fn lifecycle_facade_blocks_credentialed_extension_activation_without_product_auth() {
+        let (_dir, _storage_root, facade, active_registry, _installation_store) =
+            github_extension_lifecycle_fixture();
+        let facade =
+            facade.with_runtime_credential_accounts(Arc::new(MissingRuntimeCredentialAccounts));
+        let package_ref =
+            LifecyclePackageRef::new(LifecyclePackageKind::Extension, "github").expect("valid ref");
+
+        facade
+            .execute(
+                lifecycle_surface_context(),
+                LifecycleProductAction::ExtensionInstall {
+                    package_ref: package_ref.clone(),
+                },
+            )
+            .await
+            .expect("install extension");
+        let error = facade
+            .execute(
+                lifecycle_surface_context(),
+                LifecycleProductAction::ExtensionActivate { package_ref },
+            )
+            .await
+            .expect_err("missing product-auth account blocks activation");
+
+        assert!(matches!(
+            error,
+            ProductWorkflowError::InvalidBindingRequest { .. }
+        ));
+        assert!(
+            active_registry
+                .snapshot()
+                .get_extension(&ExtensionId::new("github").unwrap())
+                .is_none()
+        );
+    }
+
+    #[tokio::test]
     async fn lifecycle_facade_rejects_static_activation_for_hosted_mcp_packages() {
         let (_dir, _storage_root, facade, _active_registry, _installation_store) =
             extension_lifecycle_fixture_with_catalog_and_service(
                 AvailableExtensionCatalog::from_first_party_assets().expect("first-party assets"),
                 ExtensionLifecycleService::new(ExtensionRegistry::new()),
             );
+        let facade =
+            facade.with_runtime_credential_accounts(Arc::new(ConfiguredRuntimeCredentialAccounts));
         let package_ref =
             LifecyclePackageRef::new(LifecyclePackageKind::Extension, "notion").expect("valid ref");
 
@@ -2050,7 +2553,9 @@ mod tests {
                 AvailableExtensionCatalog::from_first_party_assets().expect("first-party assets"),
                 ExtensionLifecycleService::new(ExtensionRegistry::new()),
             );
-        let facade = facade.with_runtime_http_egress(Arc::new(HostedMcpDiscoveryEgress::default()));
+        let facade = facade
+            .with_runtime_credential_accounts(Arc::new(ConfiguredRuntimeCredentialAccounts))
+            .with_runtime_http_egress(Arc::new(HostedMcpDiscoveryEgress::default()));
         let package_ref =
             LifecyclePackageRef::new(LifecyclePackageKind::Extension, "notion").expect("valid ref");
 
@@ -2084,6 +2589,8 @@ mod tests {
     async fn extension_lifecycle_installs_activates_and_removes_gsuite() {
         let (_dir, storage_root, facade, active_registry, _installation_store) =
             github_extension_lifecycle_fixture();
+        let facade =
+            facade.with_runtime_credential_accounts(Arc::new(ConfiguredRuntimeCredentialAccounts));
 
         let search = facade
             .execute(
@@ -2102,11 +2609,12 @@ mod tests {
         };
         let extension_ids = extensions
             .iter()
-            .map(|extension| extension.package_ref.id.as_str())
+            .map(|extension| extension.summary.package_ref.id.as_str())
             .collect::<BTreeSet<_>>();
         assert_eq!(
             extension_ids,
             BTreeSet::from([
+                "gmail",
                 "google-calendar",
                 "google-docs",
                 "google-drive",
@@ -2116,10 +2624,10 @@ mod tests {
         );
         let calendar = extensions
             .iter()
-            .find(|extension| extension.package_ref.id.as_str() == "google-calendar")
+            .find(|extension| extension.summary.package_ref.id.as_str() == "google-calendar")
             .expect("google-calendar search result");
         assert_eq!(
-            calendar.visible_capability_ids,
+            calendar.summary.visible_capability_ids,
             vec![
                 "google-calendar.list_calendars",
                 "google-calendar.list_events",
@@ -2133,7 +2641,7 @@ mod tests {
             ]
         );
         assert_eq!(
-            calendar.visible_read_only_capability_ids,
+            calendar.summary.visible_read_only_capability_ids,
             vec![
                 "google-calendar.list_calendars",
                 "google-calendar.list_events",
@@ -2157,9 +2665,9 @@ mod tests {
             panic!("expected extension search payload");
         };
         assert_eq!(extensions.len(), 1);
-        assert_eq!(extensions[0].package_ref.id.as_str(), "gmail");
+        assert_eq!(extensions[0].summary.package_ref.id.as_str(), "gmail");
         assert_eq!(
-            extensions[0].visible_capability_ids,
+            extensions[0].summary.visible_capability_ids,
             vec![
                 "gmail.list_messages",
                 "gmail.get_message",
@@ -2170,7 +2678,7 @@ mod tests {
             ]
         );
         assert_eq!(
-            extensions[0].visible_read_only_capability_ids,
+            extensions[0].summary.visible_read_only_capability_ids,
             vec!["gmail.list_messages", "gmail.get_message"]
         );
 
@@ -2487,9 +2995,12 @@ mod tests {
         port.install(package_ref.clone())
             .await
             .expect("install extension");
-        port.activate(package_ref.clone(), ExtensionActivationMode::Static)
-            .await
-            .expect("activate extension");
+        port.activate_with_prechecked_credentials_for_test(
+            package_ref.clone(),
+            ExtensionActivationMode::Static,
+        )
+        .await
+        .expect("activate extension");
         let package = fixture_extension_package().package;
         let trust_input = extension_trust_policy_input(&package).expect("trust input");
         assert_eq!(
@@ -2547,9 +3058,12 @@ mod tests {
         port.install(package_ref.clone())
             .await
             .expect("install extension");
-        port.activate(package_ref.clone(), ExtensionActivationMode::Static)
-            .await
-            .expect("activate extension");
+        port.activate_with_prechecked_credentials_for_test(
+            package_ref.clone(),
+            ExtensionActivationMode::Static,
+        )
+        .await
+        .expect("activate extension");
         let package = fixture_extension_package().package;
         let trust_input = extension_trust_policy_input(&package).expect("trust input");
 
@@ -2583,9 +3097,12 @@ mod tests {
         port.install(package_ref.clone())
             .await
             .expect("install extension");
-        port.activate(package_ref.clone(), ExtensionActivationMode::Static)
-            .await
-            .expect("activate extension");
+        port.activate_with_prechecked_credentials_for_test(
+            package_ref.clone(),
+            ExtensionActivationMode::Static,
+        )
+        .await
+        .expect("activate extension");
         let package = fixture_extension_package().package;
         let trust_input = extension_trust_policy_input(&package).expect("trust input");
 
@@ -3065,6 +3582,8 @@ mod tests {
         inner: InMemoryExtensionInstallationStore,
         fail_manifest_delete: bool,
         fail_set_activation_enabled: bool,
+        fail_get_installation: bool,
+        mismatched_get_installation: bool,
     }
 
     impl DeleteInstallationFailingStore {
@@ -3073,6 +3592,8 @@ mod tests {
                 inner: InMemoryExtensionInstallationStore::default(),
                 fail_manifest_delete: true,
                 fail_set_activation_enabled: false,
+                fail_get_installation: false,
+                mismatched_get_installation: false,
             }
         }
 
@@ -3081,6 +3602,28 @@ mod tests {
                 inner: InMemoryExtensionInstallationStore::default(),
                 fail_manifest_delete: false,
                 fail_set_activation_enabled: true,
+                fail_get_installation: false,
+                mismatched_get_installation: false,
+            }
+        }
+
+        fn fail_get_installation() -> Self {
+            Self {
+                inner: InMemoryExtensionInstallationStore::default(),
+                fail_manifest_delete: false,
+                fail_set_activation_enabled: false,
+                fail_get_installation: true,
+                mismatched_get_installation: false,
+            }
+        }
+
+        fn mismatched_get_installation() -> Self {
+            Self {
+                inner: InMemoryExtensionInstallationStore::default(),
+                fail_manifest_delete: false,
+                fail_set_activation_enabled: false,
+                fail_get_installation: false,
+                mismatched_get_installation: true,
             }
         }
     }
@@ -3133,6 +3676,24 @@ mod tests {
             &self,
             installation_id: &ExtensionInstallationId,
         ) -> Result<Option<ExtensionInstallation>, ExtensionInstallationError> {
+            if self.fail_get_installation {
+                return Err(ExtensionInstallationError::InvalidInstallation {
+                    reason: "get installation failed".to_string(),
+                });
+            }
+            if self.mismatched_get_installation {
+                let extension_id = ExtensionId::new("other-fixture").expect("valid extension id");
+                let installation = ExtensionInstallation::new(
+                    installation_id.clone(),
+                    extension_id.clone(),
+                    ExtensionActivationState::Installed,
+                    ExtensionManifestRef::new(extension_id, None),
+                    Vec::new(),
+                    chrono::Utc::now(),
+                )
+                .expect("mismatched installation fixture");
+                return Ok(Some(installation));
+            }
             self.inner.get_installation(installation_id).await
         }
 
@@ -3276,6 +3837,25 @@ mod tests {
             InvocationId::new(),
         )
         .expect("valid local scope")
+    }
+
+    struct FailsSecondCredentialGate {
+        calls: Arc<AtomicUsize>,
+    }
+
+    #[async_trait]
+    impl ExtensionActivationCredentialGate for FailsSecondCredentialGate {
+        async fn ensure_credentials(
+            &self,
+            _package: &ExtensionPackage,
+        ) -> Result<(), ProductWorkflowError> {
+            if self.calls.fetch_add(1, Ordering::SeqCst) == 0 {
+                return Ok(());
+            }
+            Err(ProductWorkflowError::InvalidBindingRequest {
+                reason: "post-discovery credential recheck failed".to_string(),
+            })
+        }
     }
 
     struct EmptyToolsHostedMcpEgress;
@@ -3444,6 +4024,99 @@ mod tests {
         })
     }
 
+    struct MissingRuntimeCredentialAccounts;
+
+    #[async_trait]
+    impl crate::product_auth_runtime_credentials::RuntimeCredentialAccountSelectionService
+        for MissingRuntimeCredentialAccounts
+    {
+        async fn select_configured_account_for_binding(
+            &self,
+            _lookup: ironclaw_auth::CredentialAccountSelectionRequest,
+            _runtime_scope: ironclaw_auth::AuthProductScope,
+        ) -> Result<ironclaw_auth::CredentialAccount, ironclaw_auth::AuthProductError> {
+            Err(ironclaw_auth::AuthProductError::CredentialMissing)
+        }
+
+        async fn select_unique_configured_runtime_account(
+            &self,
+            _request: crate::product_auth_runtime_credentials::RuntimeCredentialAccountSelectionRequest,
+        ) -> Result<ironclaw_auth::CredentialAccount, ironclaw_auth::AuthProductError> {
+            Err(ironclaw_auth::AuthProductError::CredentialMissing)
+        }
+    }
+
+    struct ConfiguredRuntimeCredentialAccounts;
+
+    #[async_trait]
+    impl crate::product_auth_runtime_credentials::RuntimeCredentialAccountSelectionService
+        for ConfiguredRuntimeCredentialAccounts
+    {
+        async fn select_configured_account_for_binding(
+            &self,
+            _lookup: ironclaw_auth::CredentialAccountSelectionRequest,
+            _runtime_scope: ironclaw_auth::AuthProductScope,
+        ) -> Result<ironclaw_auth::CredentialAccount, ironclaw_auth::AuthProductError> {
+            Err(ironclaw_auth::AuthProductError::CredentialMissing)
+        }
+
+        async fn select_unique_configured_runtime_account(
+            &self,
+            _request: crate::product_auth_runtime_credentials::RuntimeCredentialAccountSelectionRequest,
+        ) -> Result<ironclaw_auth::CredentialAccount, ironclaw_auth::AuthProductError> {
+            let now = chrono::Utc::now();
+            Ok(ironclaw_auth::CredentialAccount {
+                id: ironclaw_auth::CredentialAccountId::new(),
+                scope: ironclaw_auth::AuthProductScope::new(
+                    ResourceScope::local_default(
+                        UserId::new("credential-user").expect("valid user"),
+                        InvocationId::new(),
+                    )
+                    .expect("valid scope"),
+                    ironclaw_auth::AuthSurface::Api,
+                ),
+                provider: ironclaw_auth::AuthProviderId::new("test-provider")
+                    .expect("valid provider"),
+                label: ironclaw_auth::CredentialAccountLabel::new("test-provider")
+                    .expect("valid label"),
+                status: ironclaw_auth::CredentialAccountStatus::Configured,
+                ownership: ironclaw_auth::CredentialOwnership::UserReusable,
+                owner_extension: None,
+                granted_extensions: Vec::new(),
+                access_secret: Some(
+                    ironclaw_host_api::SecretHandle::new("test-secret")
+                        .expect("valid secret handle"),
+                ),
+                refresh_secret: None,
+                scopes: Vec::new(),
+                created_at: now,
+                updated_at: now,
+            })
+        }
+    }
+
+    struct BackendUnavailableRuntimeCredentialAccounts;
+
+    #[async_trait]
+    impl crate::product_auth_runtime_credentials::RuntimeCredentialAccountSelectionService
+        for BackendUnavailableRuntimeCredentialAccounts
+    {
+        async fn select_configured_account_for_binding(
+            &self,
+            _lookup: ironclaw_auth::CredentialAccountSelectionRequest,
+            _runtime_scope: ironclaw_auth::AuthProductScope,
+        ) -> Result<ironclaw_auth::CredentialAccount, ironclaw_auth::AuthProductError> {
+            Err(ironclaw_auth::AuthProductError::BackendUnavailable)
+        }
+
+        async fn select_unique_configured_runtime_account(
+            &self,
+            _request: crate::product_auth_runtime_credentials::RuntimeCredentialAccountSelectionRequest,
+        ) -> Result<ironclaw_auth::CredentialAccount, ironclaw_auth::AuthProductError> {
+            Err(ironclaw_auth::AuthProductError::BackendUnavailable)
+        }
+    }
+
     fn lifecycle_surface_context() -> LifecycleProductContext {
         LifecycleProductContext::Surface(LifecycleProductSurfaceContext {
             tenant_id: TenantId::new("lifecycle-tenant").expect("valid tenant"),
@@ -3569,6 +4242,7 @@ output_schema_ref = "schemas/search.output.json"
                 .expect("fixture package ref"),
             manifest_toml: manifest_toml.to_string(),
             package,
+            surface_kinds: Vec::new(),
             assets: vec![
                 AvailableExtensionAsset {
                     path: "manifest.toml".to_string(),

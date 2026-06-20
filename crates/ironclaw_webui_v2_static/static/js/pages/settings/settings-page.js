@@ -1,4 +1,4 @@
-import { Navigate, useNavigate, useOutletContext, useParams } from "react-router";
+import { Navigate, useOutletContext, useParams } from "react-router";
 import { React, html } from "../../lib/html.js";
 import { useT } from "../../lib/i18n.js";
 import { AgentTab } from "./components/agent-tab.js";
@@ -8,28 +8,18 @@ import { LanguageTab } from "./components/language-tab.js";
 import { NetworkingTab } from "./components/networking-tab.js";
 import { RestartBanner } from "./components/restart-banner.js";
 import { SkillsTab } from "./components/skills-tab.js";
-import { SettingsToolbar } from "./components/settings-toolbar.js";
 import { ToolsTab } from "./components/tools-tab.js";
+import { TraceCommonsTab } from "./components/trace-commons-tab.js";
 import { UsersTab } from "./components/users-tab.js";
 import { useSettings } from "./hooks/useSettings.js";
 
 export function SettingsPage() {
   const t = useT();
   const { tab: requestedTab } = useParams();
-  const navigate = useNavigate();
   const { gatewayStatus, gatewayStatusQuery, isAdmin = false } = useOutletContext();
   const defaultTab = isAdmin ? "inference" : "language";
   const tab = requestedTab || defaultTab;
-  const {
-    settings,
-    query,
-    save,
-    savedKeys,
-    needsRestart,
-    importSettings,
-    isImporting,
-    saveError,
-  } = useSettings();
+  const { settings, query, save, savedKeys, needsRestart, saveError } = useSettings();
   const [searchQuery, setSearchQuery] = React.useState("");
 
   React.useEffect(() => {
@@ -64,6 +54,7 @@ export function SettingsPage() {
     />`,
     tools: html`<${ToolsTab} searchQuery=${searchQuery} />`,
     skills: html`<${SkillsTab} searchQuery=${searchQuery} />`,
+    traces: html`<${TraceCommonsTab} searchQuery=${searchQuery} />`,
     users: html`<${UsersTab} searchQuery=${searchQuery} />`,
     language: html`<${LanguageTab} searchQuery=${searchQuery} />`,
   };
@@ -73,10 +64,6 @@ export function SettingsPage() {
   const visibleTabIds = Object.keys(tabContent).filter((id) => isAdmin || !isOperatorTab(id));
   const defaultTabIsVisible = tabContentHas(defaultTab) && visibleTabIds.includes(defaultTab);
   const redirectTab = defaultTabIsVisible ? defaultTab : visibleTabIds[0] || "language";
-
-  const handleBack = React.useCallback(() => {
-    navigate(`/settings/${redirectTab}`);
-  }, [redirectTab, navigate]);
 
   if (!tabContentHas(tab) || (!isAdmin && isOperatorTab(tab))) {
     return html`<${Navigate} to=${`/settings/${redirectTab}`} replace />`;
@@ -95,19 +82,6 @@ export function SettingsPage() {
                 gatewayStatusQuery=${gatewayStatusQuery}
               />
             </div>`}
-
-            ${''
-              // <${SettingsToolbar}
-              //   settingsExport=${query.data}
-              //   onImport=${importSettings}
-              //   isImporting=${isImporting}
-              //   searchQuery=${searchQuery}
-              //   onSearchChange=${setSearchQuery}
-              //   onSearchClear=${() => setSearchQuery("")}
-              //   onBack=${handleBack}
-              //   canGoBack=${tab !== "inference"}
-              // />
-            }
 
             ${saveError &&
             html`

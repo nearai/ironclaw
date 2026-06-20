@@ -9,6 +9,7 @@
 //! store is introduced.
 
 mod compaction;
+mod content_digest;
 mod context_budget;
 mod driver;
 mod host;
@@ -23,6 +24,7 @@ mod prompt;
 mod prompt_text;
 mod refs;
 mod resolver;
+mod runtime_context;
 mod skill_context;
 mod snapshot;
 mod snippet_ref;
@@ -30,10 +32,12 @@ mod system_inference;
 
 pub use crate::CapabilityActivityId;
 
+pub use crate::ProductTurnContext;
 pub use compaction::{
     CompactionInitiator, LoopCompactionError, LoopCompactionMode, LoopCompactionOutcome,
     LoopCompactionPort, LoopCompactionRequest, LoopCompactionResponse, LoopSummaryArtifactId,
 };
+pub use content_digest::{ContentDigest, ContentDigestError, normalize_for_hash};
 pub use context_budget::PromptContextTokenBudget;
 pub use driver::{
     AgentLoopDriver, AgentLoopDriverDescriptor, AgentLoopDriverError, AgentLoopDriverResumeRequest,
@@ -41,8 +45,9 @@ pub use driver::{
 };
 pub use host::{
     AgentLoopDriverHost, AgentLoopHost, AgentLoopHostError, AgentLoopHostErrorKind,
-    AgentLoopHostErrorReasonKind, AppendCapabilityResultRef, AssistantReply, BatchPolicyKind,
-    BeginAssistantDraft, CapabilityApprovalResume, CapabilityBatchInvocation,
+    AgentLoopHostErrorReasonKind, AppendCapabilityResultRef, AssistantReply,
+    AuthResumeApprovalIdentity, BatchPolicyKind, BeginAssistantDraft, CapabilityApprovalResume,
+    CapabilityAuthResume, CapabilityAuthResumeReplay, CapabilityBatchInvocation,
     CapabilityBatchOutcome, CapabilityCallCandidate, CapabilityDenied, CapabilityDeniedReasonKind,
     CapabilityDeniedReasonKindValue, CapabilityDescriptorView, CapabilityFailure,
     CapabilityFailureKind, CapabilityFailureKindValue, CapabilityInputRef, CapabilityInvocation,
@@ -109,6 +114,11 @@ pub use refs::{
 pub use resolver::{
     InMemoryRunProfileRegistry, InMemoryRunProfileResolver, RunProfileDefinition,
     RunProfileRegistryError, RunProfileResolutionRequest, RunProfileResolver,
+};
+pub use runtime_context::{
+    CommunicationContextFetch, CommunicationContextProvider, CommunicationRuntimeContext,
+    ConnectedChannelSummary, ConnectedChannelsState, DeliveryTargetState, DeliveryTargetSummary,
+    Locale, LocaleError, LoopRuntimeContext, UserProfileContext,
 };
 pub use skill_context::{
     InstalledSkillSnapshot, NoopSkillContextSource, SkillActivationState, SkillContextBudget,

@@ -12,11 +12,13 @@ async-trait = "0.1"
 base64 = "0.22.1"
 chrono = { version = "0.4", features = ["serde"] }
 dirs = "6"
+ed25519-dalek = { version = "2.2.0", features = ["std", "rand_core", "zeroize"] }
 hex = "0.4.3"
 ironclaw_common = { path = "../ironclaw_common", version = "0.4.1" }
 ironclaw_llm = { path = "../ironclaw_llm", version = "0.1.0" }
 ironclaw_safety = { path = "../ironclaw_safety", version = "0.2.2" }
 jsonwebtoken = "9"
+rand = "0.8"
 regex = "1"
 reqwest = { version = "0.12", default-features = false, features = ["json", "multipart", "rustls-tls-native-roots", "stream"] }
 rust_decimal = { version = "1", features = ["serde", "serde-with-str", "maths"] }
@@ -30,3 +32,4 @@ uuid = { version = "1", features = ["v4", "v5", "serde"] }
 
 [dev-dependencies]
 axum = { version = "0.8", features = ["ws"] }
+tempfile = "3"

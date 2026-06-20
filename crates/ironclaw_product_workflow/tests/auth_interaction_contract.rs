@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
@@ -22,10 +23,10 @@ use ironclaw_product_workflow::{
 };
 use ironclaw_turns::{
     AcceptedMessageRef, CancelRunRequest, CancelRunResponse, EventCursor, GateRef,
-    GetRunStateRequest, IdempotencyKey, ReplyTargetBindingRef, ResumeTurnPrecondition,
-    ResumeTurnRequest, ResumeTurnResponse, RunProfileId, RunProfileVersion, SourceBindingRef,
-    SubmitTurnRequest, SubmitTurnResponse, TurnActor, TurnCoordinator, TurnError, TurnId,
-    TurnRunId, TurnRunState, TurnScope, TurnStatus,
+    GateResumeDisposition, GetRunStateRequest, IdempotencyKey, ReplyTargetBindingRef,
+    ResumeTurnPrecondition, ResumeTurnRequest, ResumeTurnResponse, RunProfileId, RunProfileVersion,
+    SourceBindingRef, SubmitTurnRequest, SubmitTurnResponse, TurnActor, TurnCoordinator, TurnError,
+    TurnId, TurnRunId, TurnRunState, TurnScope, TurnStatus,
 };
 
 #[derive(Default)]
@@ -234,6 +235,12 @@ struct RecordingTurnCoordinator {
     gate_ref: Mutex<Option<GateRef>>,
     resumes: Mutex<Vec<ResumeTurnRequest>>,
     cancellations: Mutex<Vec<CancelRunRequest>>,
+    get_run_state_error: Mutex<Option<TurnError>>,
+    resume_error: Mutex<Option<TurnError>>,
+    /// Idempotency cache: maps (run_id, idempotency_key) → cached ResumeTurnResponse.
+    /// A second resume_turn call with the same key returns the cached response
+    /// before any precondition or status check, mirroring real TurnCoordinator behaviour.
+    resume_cache: Mutex<HashMap<(TurnRunId, IdempotencyKey), ResumeTurnResponse>>,
 }
 
 impl RecordingTurnCoordinator {
@@ -244,6 +251,9 @@ impl RecordingTurnCoordinator {
             gate_ref: Mutex::new(Some(gate_ref)),
             resumes: Mutex::new(Vec::new()),
             cancellations: Mutex::new(Vec::new()),
+            get_run_state_error: Mutex::new(None),
+            resume_error: Mutex::new(None),
+            resume_cache: Mutex::new(HashMap::new()),
         }
     }
 
@@ -257,6 +267,28 @@ impl RecordingTurnCoordinator {
 
     fn set_status(&self, status: TurnStatus) {
         *self.status.lock().expect("lock") = status;
+    }
+
+    fn set_get_run_state_error(&self, error: TurnError) {
+        *self.get_run_state_error.lock().expect("lock") = Some(error);
+    }
+
+    fn set_resume_error(&self, error: TurnError) {
+        *self.resume_error.lock().expect("lock") = Some(error);
+    }
+
+    /// Pre-seed the idempotency cache so that a replay call with `key` returns
+    /// `response` without needing a real first-Deny call in the same test.
+    fn seed_resume_cache(
+        &self,
+        run_id: TurnRunId,
+        key: IdempotencyKey,
+        response: ResumeTurnResponse,
+    ) {
+        self.resume_cache
+            .lock()
+            .expect("lock")
+            .insert((run_id, key), response);
     }
 }
 
@@ -278,12 +310,33 @@ impl TurnCoordinator for RecordingTurnCoordinator {
         request: ResumeTurnRequest,
     ) -> Result<ResumeTurnResponse, TurnError> {
         let run_id = request.run_id;
+        let cache_key = (run_id, request.idempotency_key.clone());
         self.resumes.lock().expect("lock").push(request);
-        Ok(ResumeTurnResponse {
+        // Idempotency: return cached response for a repeated key before any
+        // other check, matching real TurnCoordinator behaviour.
+        if let Some(cached) = self
+            .resume_cache
+            .lock()
+            .expect("lock")
+            .get(&cache_key)
+            .cloned()
+        {
+            return Ok(cached);
+        }
+        // Explicit error injection fires for fresh (uncached) keys.
+        if let Some(error) = self.resume_error.lock().expect("lock").clone() {
+            return Err(error);
+        }
+        let response = ResumeTurnResponse {
             run_id,
             status: TurnStatus::Queued,
             event_cursor: EventCursor(41),
-        })
+        };
+        self.resume_cache
+            .lock()
+            .expect("lock")
+            .insert(cache_key, response.clone());
+        Ok(response)
     }
 
     async fn cancel_run(&self, request: CancelRunRequest) -> Result<CancelRunResponse, TurnError> {
@@ -299,6 +352,9 @@ impl TurnCoordinator for RecordingTurnCoordinator {
     }
 
     async fn get_run_state(&self, request: GetRunStateRequest) -> Result<TurnRunState, TurnError> {
+        if let Some(error) = self.get_run_state_error.lock().expect("lock").clone() {
+            return Err(error);
+        }
         Ok(TurnRunState {
             scope: request.scope,
             actor: Some(self.actor.clone()),
@@ -317,6 +373,8 @@ impl TurnCoordinator for RecordingTurnCoordinator {
             credential_requirements: Vec::new(),
             failure: None,
             event_cursor: EventCursor(47),
+            product_context: None,
+            resume_disposition: None,
         })
     }
 }
@@ -709,7 +767,53 @@ async fn credential_provided_rejects_completed_flow_without_account_id() {
 }
 
 #[tokio::test]
-async fn denied_auth_cancels_flow_and_run() {
+async fn deny_on_completed_flow_rejects_with_stale_auth() {
+    // Race: OAuth flow completed just as the user clicked Deny.
+    // `cancel_auth_flow_if_active` returns Err(StaleAuth) for Completed flows,
+    // so `resume_denied_auth` short-circuits before touching the coordinator.
+    let actor = TurnActor::new(UserId::new("alice").unwrap());
+    let scope = turn_scope("alice", "thread-a");
+    let run_id = TurnRunId::new();
+    let gate_ref = make_gate_ref("gate:auth-deny-completed");
+    let flow = auth_flow(
+        AuthFlowStatus::Completed,
+        &scope,
+        &actor,
+        run_id,
+        &gate_ref,
+        None,
+        setup_challenge(),
+    );
+    let (service, _flow_manager, coordinator) =
+        service_parts(flow.clone(), vec![flow], actor.clone(), gate_ref.clone());
+
+    let error = service
+        .resolve(ResolveAuthInteractionRequest {
+            scope,
+            actor,
+            run_id_hint: Some(run_id),
+            gate_ref,
+            decision: AuthInteractionDecision::Deny,
+            idempotency_key: IdempotencyKey::new("auth-action-deny-completed").unwrap(),
+        })
+        .await
+        .expect_err("deny on completed flow must be stale");
+
+    assert!(
+        matches!(
+            error,
+            ProductWorkflowError::AuthInteractionRejected {
+                kind: AuthInteractionRejectionKind::StaleAuth
+            }
+        ),
+        "expected StaleAuth, got: {error:?}"
+    );
+    assert!(coordinator.resumes().is_empty());
+    assert!(coordinator.cancellations().is_empty());
+}
+
+#[tokio::test]
+async fn denied_auth_on_parked_gate_cancels_flow_and_resumes_with_denial_disposition() {
     let actor = TurnActor::new(UserId::new("alice").unwrap());
     let scope = turn_scope("alice", "thread-a");
     let run_id = TurnRunId::new();
@@ -736,19 +840,128 @@ async fn denied_auth_cancels_flow_and_run() {
             idempotency_key: IdempotencyKey::new("auth-action-deny").unwrap(),
         })
         .await
-        .expect("deny auth");
+        .expect("deny auth on parked gate");
 
+    // Parked deny must resume (not cancel) so the model can surface the denial.
     assert!(matches!(
         response,
-        ResolveAuthInteractionResponse::Canceled(_)
+        ResolveAuthInteractionResponse::Resumed(_)
     ));
+    // The OAuth flow must be cancelled.
     assert_eq!(flow_manager.cancellations().len(), 1);
-    assert_eq!(coordinator.cancellations().len(), 1);
-    assert!(coordinator.resumes().is_empty());
+    // The run must be resumed, NOT cancelled.
+    let resumes = coordinator.resumes();
+    assert_eq!(resumes.len(), 1);
+    assert_eq!(
+        resumes[0].precondition,
+        ResumeTurnPrecondition::BlockedAuthGate
+    );
+    assert!(matches!(
+        resumes[0].resume_disposition,
+        Some(GateResumeDisposition::Denied)
+    ));
+    assert!(coordinator.cancellations().is_empty());
 }
 
 #[tokio::test]
-async fn denied_auth_without_flow_record_cancels_parked_auth_run() {
+async fn idempotent_auth_deny_replay_returns_same_resumed_response_as_first_deny() {
+    // First Deny (ParkedOnGate + AwaitingUser) produces Resumed(R).
+    // A second resolve() with the SAME idempotency key (NotParkedOnGate + Canceled)
+    // must return the SAME Resumed(R) via resume_turn idempotency caching — even
+    // though the run is no longer parked.
+    let actor = TurnActor::new(UserId::new("alice").unwrap());
+    let scope = turn_scope("alice", "thread-a");
+    let run_id = TurnRunId::new();
+    let gate_ref = make_gate_ref("gate:auth-idem-deny-replay");
+    let flow = auth_flow(
+        AuthFlowStatus::AwaitingUser,
+        &scope,
+        &actor,
+        run_id,
+        &gate_ref,
+        None,
+        setup_challenge(),
+    );
+    let (service, flow_manager, coordinator) =
+        service_parts(flow.clone(), vec![flow], actor.clone(), gate_ref.clone());
+
+    // ── First call: Deny on a parked gate ─────────────────────────────────────
+    let first_response = service
+        .resolve(ResolveAuthInteractionRequest {
+            scope: scope.clone(),
+            actor: actor.clone(),
+            run_id_hint: Some(run_id),
+            gate_ref: gate_ref.clone(),
+            decision: AuthInteractionDecision::Deny,
+            idempotency_key: IdempotencyKey::new("idem-auth-deny").unwrap(),
+        })
+        .await
+        .expect("first deny");
+
+    let first_resumed = match &first_response {
+        ResolveAuthInteractionResponse::Resumed(r) => r.clone(),
+        other => panic!("expected Resumed, got {other:?}"),
+    };
+    assert_eq!(flow_manager.cancellations().len(), 1);
+    assert_eq!(coordinator.resumes().len(), 1);
+
+    // Simulate transition: run moved out of BlockedAuth, flow is now Canceled.
+    coordinator.set_status(TurnStatus::Queued);
+
+    // ── Second call: replay with SAME idempotency key ─────────────────────────
+    // Use a separate fixture with the gate pre-set to Canceled flow status.
+    let canceled_flow = auth_flow(
+        AuthFlowStatus::Canceled,
+        &scope,
+        &actor,
+        run_id,
+        &gate_ref,
+        None,
+        setup_challenge(),
+    );
+    let (service2, _flow_manager2, coordinator2) = service_parts(
+        canceled_flow.clone(),
+        vec![canceled_flow],
+        actor.clone(),
+        gate_ref.clone(),
+    );
+    coordinator2.set_status(TurnStatus::Queued);
+    // Seed the cache with the first Deny's response.
+    coordinator2.seed_resume_cache(
+        run_id,
+        IdempotencyKey::new("idem-auth-deny").unwrap(),
+        ResumeTurnResponse {
+            run_id,
+            status: TurnStatus::Queued,
+            event_cursor: EventCursor(41),
+        },
+    );
+
+    let second_response = service2
+        .resolve(ResolveAuthInteractionRequest {
+            scope,
+            actor,
+            run_id_hint: Some(run_id),
+            gate_ref,
+            decision: AuthInteractionDecision::Deny,
+            idempotency_key: IdempotencyKey::new("idem-auth-deny").unwrap(),
+        })
+        .await
+        .expect("idempotent auth replay must succeed");
+
+    let second_resumed = match &second_response {
+        ResolveAuthInteractionResponse::Resumed(r) => r.clone(),
+        other => panic!("expected Resumed, got {other:?}"),
+    };
+    // Must return the SAME full response as the first (same cached result).
+    assert_eq!(first_resumed, second_resumed);
+    // Replay went through resume_turn (cache hit), not cancel_run.
+    assert_eq!(coordinator2.resumes().len(), 1);
+    assert_eq!(coordinator2.cancellations().len(), 0);
+}
+
+#[tokio::test]
+async fn denied_auth_without_flow_record_resumes_parked_auth_run() {
     let actor = TurnActor::new(UserId::new("alice").unwrap());
     let scope = turn_scope("alice", "thread-a");
     let run_id = TurnRunId::new();
@@ -779,14 +992,23 @@ async fn denied_auth_without_flow_record_cancels_parked_auth_run() {
 
     assert!(matches!(
         response,
-        ResolveAuthInteractionResponse::Canceled(_)
+        ResolveAuthInteractionResponse::Resumed(_)
     ));
     assert!(
         flow_manager.cancellations().is_empty(),
         "no auth flow record should mean there is no flow to cancel"
     );
-    assert_eq!(coordinator.cancellations().len(), 1);
-    assert!(coordinator.resumes().is_empty());
+    assert_eq!(coordinator.cancellations().len(), 0);
+    let resumes = coordinator.resumes();
+    assert_eq!(resumes.len(), 1);
+    assert_eq!(
+        resumes[0].precondition,
+        ResumeTurnPrecondition::BlockedAuthGate
+    );
+    assert!(matches!(
+        resumes[0].resume_disposition,
+        Some(GateResumeDisposition::Denied)
+    ));
 }
 
 #[tokio::test]
@@ -873,7 +1095,11 @@ async fn duplicate_completed_auth_resolution_replays_through_turn_coordinator() 
 }
 
 #[tokio::test]
-async fn duplicate_denied_auth_resolution_replays_through_turn_coordinator() {
+async fn duplicate_denied_auth_on_already_resumed_run_is_idempotent() {
+    // Scenario: first Deny already resolved the gate (flow=Canceled) and
+    // resumed the run (now Queued/Running).  A duplicate Deny (double-click,
+    // lost response, client retry) must NOT cancel the live resumed run.
+    // Expected: Resumed replay reflecting cached response, zero cancel_run calls.
     let actor = TurnActor::new(UserId::new("alice").unwrap());
     let scope = turn_scope("alice", "thread-a");
     let run_id = TurnRunId::new();
@@ -887,9 +1113,23 @@ async fn duplicate_denied_auth_resolution_replays_through_turn_coordinator() {
         None,
         setup_challenge(),
     );
+    // turn_gate_state will return NotParkedOnGate because the run is no
+    // longer BlockedAuth — the first Deny already resumed it.
     let (service, _flow_manager, coordinator) =
         service_parts(flow.clone(), vec![flow], actor.clone(), gate_ref.clone());
     coordinator.set_status(TurnStatus::Queued);
+    // Pre-seed the idempotency cache with the response the first Deny produced.
+    // This models resume_turn returning the cached result for a repeated key
+    // without re-running the precondition check.
+    coordinator.seed_resume_cache(
+        run_id,
+        IdempotencyKey::new("auth-action-replay-denied").unwrap(),
+        ResumeTurnResponse {
+            run_id,
+            status: TurnStatus::Queued,
+            event_cursor: EventCursor(41),
+        },
+    );
 
     let response = service
         .resolve(ResolveAuthInteractionRequest {
@@ -901,14 +1141,210 @@ async fn duplicate_denied_auth_resolution_replays_through_turn_coordinator() {
             idempotency_key: IdempotencyKey::new("auth-action-replay-denied").unwrap(),
         })
         .await
-        .expect("duplicate denied auth resolution replays");
+        .expect("duplicate denied auth resolution must be idempotent");
 
-    assert!(matches!(
-        response,
-        ResolveAuthInteractionResponse::Canceled(_)
-    ));
-    assert_eq!(coordinator.cancellations().len(), 1);
-    assert_eq!(coordinator.resumes().len(), 0);
+    // Must replay the denial outcome, not cancel the live run.
+    assert!(
+        matches!(response, ResolveAuthInteractionResponse::Resumed(_)),
+        "expected Resumed idempotent replay, got: {response:?}"
+    );
+    // The critical invariant: no new cancel_run call must have been issued.
+    assert_eq!(
+        coordinator.cancellations().len(),
+        0,
+        "duplicate Deny must not cancel the already-resumed run"
+    );
+    // The cache hit still counts as a resume_turn call — it returns the cached
+    // result instead of executing the precondition.
+    assert_eq!(
+        coordinator.resumes().len(),
+        1,
+        "replay_denied_auth calls resume_turn once (cache hit)"
+    );
+}
+
+#[tokio::test]
+async fn deny_on_canceled_flow_without_deny_marker_returns_stale_auth() {
+    // Scenario: NotParkedOnGate + Deny, flow=Canceled, run is non-terminal,
+    // but NO idempotency cache entry — the flow was canceled by some other
+    // path (not by our deny).  resume_turn fails precondition → StaleAuth.
+    let actor = TurnActor::new(UserId::new("alice").unwrap());
+    let scope = turn_scope("alice", "thread-a");
+    let run_id = TurnRunId::new();
+    let gate_ref = make_gate_ref("gate:auth-cancel-other-path");
+    let flow = auth_flow(
+        AuthFlowStatus::Canceled,
+        &scope,
+        &actor,
+        run_id,
+        &gate_ref,
+        None,
+        setup_challenge(),
+    );
+    // The run is non-terminal (Queued) and there is no cached response for this
+    // idempotency key — the flow was canceled by a path other than our Deny.
+    let (service, _flow_manager, coordinator) =
+        service_parts(flow.clone(), vec![flow], actor.clone(), gate_ref.clone());
+    coordinator.set_status(TurnStatus::Queued);
+    // Inject the error the real coordinator returns when the precondition fails
+    // (run is no longer BlockedAuth — it was resumed by some other path).
+    coordinator.set_resume_error(TurnError::InvalidRequest {
+        reason: "precondition BlockedAuthGate failed: run is Queued".to_string(),
+    });
+
+    let error = service
+        .resolve(ResolveAuthInteractionRequest {
+            scope,
+            actor,
+            run_id_hint: Some(run_id),
+            gate_ref,
+            decision: AuthInteractionDecision::Deny,
+            idempotency_key: IdempotencyKey::new("auth-action-cancel-other-path").unwrap(),
+        })
+        .await
+        .expect_err("deny on other-path-canceled flow must be stale, not Resumed");
+
+    assert!(
+        matches!(
+            error,
+            ProductWorkflowError::AuthInteractionRejected {
+                kind: AuthInteractionRejectionKind::StaleAuth
+            }
+        ),
+        "expected StaleAuth (no idempotency cache entry), got: {error:?}"
+    );
+    // Must not issue a cancel_run — the run was not parked by us.
+    assert_eq!(
+        coordinator.cancellations().len(),
+        0,
+        "must not call cancel_run when the flow was canceled by another path"
+    );
+    // resume_turn IS called once (records the call, then returns the injected error).
+    assert_eq!(
+        coordinator.resumes().len(),
+        1,
+        "replay_denied_auth calls resume_turn once before precondition rejects"
+    );
+}
+
+#[tokio::test]
+async fn duplicate_denied_auth_on_cancelled_run_with_same_key_returns_resumed() {
+    // Scenario: flow=Canceled (first Deny already resolved the gate) but the
+    // run ended up Cancelled before our Deny could resume it.  A duplicate
+    // Deny with the SAME idempotency key as the first must return the cached
+    // Resumed response — no new cancel_run call.
+    let actor = TurnActor::new(UserId::new("alice").unwrap());
+    let scope = turn_scope("alice", "thread-a");
+    let run_id = TurnRunId::new();
+    let gate_ref = make_gate_ref("gate:auth-replay-denied-terminal");
+    let flow = auth_flow(
+        AuthFlowStatus::Canceled,
+        &scope,
+        &actor,
+        run_id,
+        &gate_ref,
+        None,
+        setup_challenge(),
+    );
+    let (service, _flow_manager, coordinator) =
+        service_parts(flow.clone(), vec![flow], actor.clone(), gate_ref.clone());
+    // Run is already in terminal Cancelled state.
+    coordinator.set_status(TurnStatus::Cancelled);
+    // Seed the cache: the first Deny produced this Resumed response before the
+    // run was cancelled.
+    coordinator.seed_resume_cache(
+        run_id,
+        IdempotencyKey::new("auth-action-replay-denied-terminal").unwrap(),
+        ResumeTurnResponse {
+            run_id,
+            status: TurnStatus::Queued,
+            event_cursor: EventCursor(41),
+        },
+    );
+
+    let response = service
+        .resolve(ResolveAuthInteractionRequest {
+            scope,
+            actor,
+            run_id_hint: Some(run_id),
+            gate_ref,
+            decision: AuthInteractionDecision::Deny,
+            idempotency_key: IdempotencyKey::new("auth-action-replay-denied-terminal").unwrap(),
+        })
+        .await
+        .expect("duplicate denied auth with same key must return cached Resumed");
+
+    // The cached response from the first Deny is returned — Resumed, not Canceled.
+    assert!(
+        matches!(response, ResolveAuthInteractionResponse::Resumed(_)),
+        "expected Resumed (cache hit), got: {response:?}"
+    );
+    assert_eq!(
+        coordinator.cancellations().len(),
+        0,
+        "duplicate Deny must not call cancel_run"
+    );
+    assert_eq!(
+        coordinator.resumes().len(),
+        1,
+        "replay_denied_auth calls resume_turn once (cache hit)"
+    );
+}
+
+#[tokio::test]
+async fn deny_on_cancelled_run_with_fresh_key_returns_stale_auth() {
+    // Scenario: flow=Canceled + run=Cancelled, but using a fresh idempotency
+    // key (not the same as the first Deny).  No cache entry → resume_turn
+    // fails precondition → StaleAuth.
+    let actor = TurnActor::new(UserId::new("alice").unwrap());
+    let scope = turn_scope("alice", "thread-a");
+    let run_id = TurnRunId::new();
+    let gate_ref = make_gate_ref("gate:auth-replay-cancelled-fresh-key");
+    let flow = auth_flow(
+        AuthFlowStatus::Canceled,
+        &scope,
+        &actor,
+        run_id,
+        &gate_ref,
+        None,
+        setup_challenge(),
+    );
+    let (service, _flow_manager, coordinator) =
+        service_parts(flow.clone(), vec![flow], actor.clone(), gate_ref.clone());
+    coordinator.set_status(TurnStatus::Cancelled);
+    // Inject the error the real coordinator returns for a fresh key on a
+    // terminal run (precondition BlockedAuthGate fails).
+    coordinator.set_resume_error(TurnError::InvalidRequest {
+        reason: "precondition BlockedAuthGate failed: run is Cancelled".to_string(),
+    });
+
+    let error = service
+        .resolve(ResolveAuthInteractionRequest {
+            scope,
+            actor,
+            run_id_hint: Some(run_id),
+            gate_ref,
+            decision: AuthInteractionDecision::Deny,
+            idempotency_key: IdempotencyKey::new("auth-action-cancelled-fresh-key").unwrap(),
+        })
+        .await
+        .expect_err("fresh key on Cancelled run must return StaleAuth");
+
+    assert!(
+        matches!(
+            error,
+            ProductWorkflowError::AuthInteractionRejected {
+                kind: AuthInteractionRejectionKind::StaleAuth
+            }
+        ),
+        "expected StaleAuth (fresh key, no cache), got: {error:?}"
+    );
+    assert_eq!(coordinator.cancellations().len(), 0);
+    assert_eq!(
+        coordinator.resumes().len(),
+        1,
+        "replay_denied_auth calls resume_turn once (precondition fails)"
+    );
 }
 
 #[tokio::test]
@@ -1039,6 +1475,148 @@ async fn auth_resolution_rejects_run_state_actor_mismatch() {
     ));
     assert!(coordinator.resumes().is_empty());
     assert!(coordinator.cancellations().is_empty());
+}
+
+/// WebUI-path parity test (deliverable 3).
+///
+/// After a capability round-trips through approval and then hits an auth gate,
+/// the `AuthInteractionService` must resume with `BlockedAuthGate` — not
+/// `BlockedApproval`. Using the wrong precondition would bypass the
+/// executor-level guard and could allow a second re-dispatch loop.
+///
+/// Harness limitation: `auth_interaction_contract.rs` and
+/// `approval_interaction_contract.rs` are separate Rust test binaries and
+/// cannot share fakes. This test therefore cannot drive the full
+/// approval → auth two-service flow in a single binary. The cross-service
+/// loop is validated at the executor tier in
+/// `ironclaw_agent_loop::executor::tests::
+///  auth_resume_after_approval_carries_resume_token_and_approval_request_id`.
+///
+/// The strongest assertion available at THIS tier: verify that
+/// `AuthInteractionService` always emits `BlockedAuthGate` — regardless of
+/// what the run's prior approval state was — and calls the coordinator
+/// exactly once with that precondition.
+#[tokio::test]
+async fn auth_resume_after_approval_uses_blocked_auth_gate_precondition() {
+    let actor = TurnActor::new(UserId::new("alice").unwrap());
+    let scope = turn_scope("alice", "thread-approval-auth");
+    let run_id = TurnRunId::new();
+    let gate_ref = make_gate_ref("gate:auth-after-approval");
+    let account_id = CredentialAccountId::new();
+
+    // Simulate the state AFTER approval resolved: the run is now BlockedAuth.
+    // `service_parts` wires `RecordingTurnCoordinator::blocked_auth`, which
+    // returns `TurnStatus::BlockedAuth` from `get_run_state`.
+    let flow = auth_flow(
+        AuthFlowStatus::Completed,
+        &scope,
+        &actor,
+        run_id,
+        &gate_ref,
+        Some(account_id),
+        setup_challenge(),
+    );
+    let (service, flow_manager, coordinator) =
+        service_parts(flow.clone(), vec![flow], actor.clone(), gate_ref.clone());
+
+    let response = service
+        .resolve(ResolveAuthInteractionRequest {
+            scope,
+            actor,
+            run_id_hint: Some(run_id),
+            gate_ref,
+            decision: AuthInteractionDecision::CredentialProvided {
+                credential_ref: account_id,
+            },
+            idempotency_key: IdempotencyKey::new("auth-after-approval-1").unwrap(),
+        })
+        .await
+        .expect("auth resolve after approval");
+
+    // Auth resolution must succeed and resume the run.
+    assert!(matches!(
+        response,
+        ResolveAuthInteractionResponse::Resumed(_)
+    ));
+
+    // Coordinator must be called exactly ONCE with BlockedAuthGate.
+    // Any other precondition (e.g. BlockedApproval) would bypass the
+    // executor guard that breaks the re-approval loop.
+    let resumes = coordinator.resumes();
+    assert_eq!(resumes.len(), 1, "resume must be called exactly once");
+    assert_eq!(
+        resumes[0].precondition,
+        ResumeTurnPrecondition::BlockedAuthGate,
+        "auth resume must use BlockedAuthGate, not BlockedApproval"
+    );
+
+    // Auth resolution must not cancel the run.
+    assert!(
+        coordinator.cancellations().is_empty(),
+        "auth resume must not cancel the run"
+    );
+
+    // Auth resolution must not touch the flow's cancel path.
+    assert!(
+        flow_manager.cancellations().is_empty(),
+        "auth resume must not cancel the auth flow"
+    );
+}
+
+#[tokio::test]
+async fn denied_auth_on_parked_gate_propagates_get_run_state_error_without_resuming() {
+    // Scenario: first Deny already canceled the flow (flow=Canceled, run no
+    // longer parked), but when we fetch the run state to replay the outcome
+    // the TurnCoordinator returns an error (e.g. backend unavailable).
+    // The service must propagate the error and must NOT call resume_turn.
+    let actor = TurnActor::new(UserId::new("alice").unwrap());
+    let scope = turn_scope("alice", "thread-a");
+    let run_id = TurnRunId::new();
+    let gate_ref = make_gate_ref("gate:auth-deny-get-state-error");
+    let flow = auth_flow(
+        AuthFlowStatus::Canceled,
+        &scope,
+        &actor,
+        run_id,
+        &gate_ref,
+        None,
+        setup_challenge(),
+    );
+    // Run is NotParkedOnGate (not BlockedAuth) so the replay arm is entered.
+    let (service, _flow_manager, coordinator) =
+        service_parts(flow.clone(), vec![flow], actor.clone(), gate_ref.clone());
+    // Inject a get_run_state error so the coordinator fails when the service
+    // tries to fetch current run state for the idempotent replay.
+    coordinator.set_get_run_state_error(TurnError::ScopeNotFound);
+    // The run status and disposition do not matter — the error fires first.
+    coordinator.set_status(TurnStatus::Queued);
+
+    let result = service
+        .resolve(ResolveAuthInteractionRequest {
+            scope,
+            actor,
+            run_id_hint: Some(run_id),
+            gate_ref,
+            decision: AuthInteractionDecision::Deny,
+            idempotency_key: IdempotencyKey::new("auth-action-deny-get-state-error").unwrap(),
+        })
+        .await;
+
+    // Must propagate as an Err — not a spurious Resumed.
+    assert!(
+        result.is_err(),
+        "get_run_state error must propagate as Err, got: {result:?}"
+    );
+    assert!(
+        !matches!(result, Ok(ResolveAuthInteractionResponse::Resumed(_))),
+        "get_run_state error must not produce a spurious Resumed"
+    );
+    // resume_turn must NOT have been called — no live resume should happen.
+    assert_eq!(
+        coordinator.resumes().len(),
+        0,
+        "resume_turn must not be called when get_run_state fails"
+    );
 }
 
 #[test]

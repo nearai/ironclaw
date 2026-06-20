@@ -19,11 +19,14 @@ pub const WEBUI_V2_ROUTE_GET_SESSION: &str = "webui.v2.get_session";
 pub const WEBUI_V2_ROUTE_SEND_MESSAGE: &str = "webui.v2.send_message";
 pub const WEBUI_V2_ROUTE_LIST_THREADS: &str = "webui.v2.list_threads";
 pub const WEBUI_V2_ROUTE_GET_TIMELINE: &str = "webui.v2.get_timeline";
+pub const WEBUI_V2_ROUTE_GET_ATTACHMENT: &str = "webui.v2.get_attachment";
 pub const WEBUI_V2_ROUTE_STREAM_EVENTS: &str = "webui.v2.stream_events";
 pub const WEBUI_V2_ROUTE_STREAM_EVENTS_WS: &str = "webui.v2.stream_events_ws";
 pub const WEBUI_V2_ROUTE_CANCEL_RUN: &str = "webui.v2.cancel_run";
 pub const WEBUI_V2_ROUTE_RESOLVE_GATE: &str = "webui.v2.resolve_gate";
 pub const WEBUI_V2_ROUTE_LIST_AUTOMATIONS: &str = "webui.v2.list_automations";
+pub const WEBUI_V2_ROUTE_TRACE_CREDITS: &str = "webui.v2.trace_credits";
+pub const WEBUI_V2_ROUTE_TRACE_HOLD_AUTHORIZE: &str = "webui.v2.authorize_trace_hold";
 pub const WEBUI_V2_ROUTE_GET_OUTBOUND_PREFERENCES: &str = "webui.v2.get_outbound_preferences";
 pub const WEBUI_V2_ROUTE_SET_OUTBOUND_PREFERENCES: &str = "webui.v2.set_outbound_preferences";
 pub const WEBUI_V2_ROUTE_LIST_OUTBOUND_DELIVERY_TARGETS: &str =
@@ -62,6 +65,22 @@ pub const WEBUI_V2_ROUTE_OPERATOR_DIAGNOSTICS: &str = "webui.v2.operator.diagnos
 pub const WEBUI_V2_ROUTE_OPERATOR_STATUS: &str = "webui.v2.operator.status";
 pub const WEBUI_V2_ROUTE_OPERATOR_LOGS: &str = "webui.v2.operator.logs";
 pub const WEBUI_V2_ROUTE_OPERATOR_SERVICE_LIFECYCLE: &str = "webui.v2.operator.service_lifecycle";
+pub const WEBUI_V2_ROUTE_LIST_PROJECT_FILES: &str = "webui.v2.list_project_files";
+pub const WEBUI_V2_ROUTE_STAT_PROJECT_FILE: &str = "webui.v2.stat_project_file";
+pub const WEBUI_V2_ROUTE_READ_PROJECT_FILE: &str = "webui.v2.read_project_file";
+pub const WEBUI_V2_ROUTE_LIST_FS_MOUNTS: &str = "webui.v2.list_fs_mounts";
+pub const WEBUI_V2_ROUTE_BROWSE_FS_DIR: &str = "webui.v2.browse_fs_dir";
+pub const WEBUI_V2_ROUTE_STAT_FS_PATH: &str = "webui.v2.stat_fs_path";
+pub const WEBUI_V2_ROUTE_READ_FS_FILE: &str = "webui.v2.read_fs_file";
+pub const WEBUI_V2_ROUTE_LIST_PROJECTS: &str = "webui.v2.list_projects";
+pub const WEBUI_V2_ROUTE_CREATE_PROJECT: &str = "webui.v2.create_project";
+pub const WEBUI_V2_ROUTE_GET_PROJECT: &str = "webui.v2.get_project";
+pub const WEBUI_V2_ROUTE_UPDATE_PROJECT: &str = "webui.v2.update_project";
+pub const WEBUI_V2_ROUTE_DELETE_PROJECT: &str = "webui.v2.delete_project";
+pub const WEBUI_V2_ROUTE_LIST_PROJECT_MEMBERS: &str = "webui.v2.list_project_members";
+pub const WEBUI_V2_ROUTE_ADD_PROJECT_MEMBER: &str = "webui.v2.add_project_member";
+pub const WEBUI_V2_ROUTE_UPDATE_PROJECT_MEMBER: &str = "webui.v2.update_project_member";
+pub const WEBUI_V2_ROUTE_REMOVE_PROJECT_MEMBER: &str = "webui.v2.remove_project_member";
 
 pub const WEBUI_V2_PATTERN_CREATE_THREAD: &str = "/api/webchat/v2/threads";
 pub const WEBUI_V2_PATTERN_LIST_THREADS: &str = "/api/webchat/v2/threads";
@@ -69,6 +88,8 @@ pub const WEBUI_V2_PATTERN_DELETE_THREAD: &str = "/api/webchat/v2/threads/{threa
 pub const WEBUI_V2_PATTERN_GET_SESSION: &str = "/api/webchat/v2/session";
 pub const WEBUI_V2_PATTERN_SEND_MESSAGE: &str = "/api/webchat/v2/threads/{thread_id}/messages";
 pub const WEBUI_V2_PATTERN_GET_TIMELINE: &str = "/api/webchat/v2/threads/{thread_id}/timeline";
+pub const WEBUI_V2_PATTERN_GET_ATTACHMENT: &str =
+    "/api/webchat/v2/threads/{thread_id}/messages/{message_id}/attachments/{attachment_id}";
 pub const WEBUI_V2_PATTERN_STREAM_EVENTS: &str = "/api/webchat/v2/threads/{thread_id}/events";
 pub const WEBUI_V2_PATTERN_STREAM_EVENTS_WS: &str = "/api/webchat/v2/threads/{thread_id}/ws";
 pub const WEBUI_V2_PATTERN_CANCEL_RUN: &str =
@@ -76,6 +97,9 @@ pub const WEBUI_V2_PATTERN_CANCEL_RUN: &str =
 pub const WEBUI_V2_PATTERN_RESOLVE_GATE: &str =
     "/api/webchat/v2/threads/{thread_id}/runs/{run_id}/gates/{gate_ref}/resolve";
 pub const WEBUI_V2_PATTERN_LIST_AUTOMATIONS: &str = "/api/webchat/v2/automations";
+pub const WEBUI_V2_PATTERN_TRACE_CREDITS: &str = "/api/webchat/v2/traces/credit";
+pub const WEBUI_V2_PATTERN_TRACE_HOLD_AUTHORIZE: &str =
+    "/api/webchat/v2/traces/holds/{submission_id}/authorize";
 pub const WEBUI_V2_PATTERN_OUTBOUND_PREFERENCES: &str = "/api/webchat/v2/outbound/preferences";
 pub const WEBUI_V2_PATTERN_OUTBOUND_DELIVERY_TARGETS: &str = "/api/webchat/v2/outbound/targets";
 pub const WEBUI_V2_PATTERN_LIST_CONNECTABLE_CHANNELS: &str = "/api/webchat/v2/channels/connectable";
@@ -110,6 +134,21 @@ pub const WEBUI_V2_PATTERN_OPERATOR_DIAGNOSTICS: &str = "/api/webchat/v2/operato
 pub const WEBUI_V2_PATTERN_OPERATOR_STATUS: &str = "/api/webchat/v2/operator/status";
 pub const WEBUI_V2_PATTERN_OPERATOR_LOGS: &str = "/api/webchat/v2/operator/logs";
 pub const WEBUI_V2_PATTERN_OPERATOR_SERVICE_LIFECYCLE: &str = "/api/webchat/v2/operator/service";
+pub const WEBUI_V2_PATTERN_LIST_PROJECT_FILES: &str = "/api/webchat/v2/threads/{thread_id}/files";
+pub const WEBUI_V2_PATTERN_STAT_PROJECT_FILE: &str =
+    "/api/webchat/v2/threads/{thread_id}/files/stat";
+pub const WEBUI_V2_PATTERN_READ_PROJECT_FILE: &str =
+    "/api/webchat/v2/threads/{thread_id}/files/content";
+pub const WEBUI_V2_PATTERN_LIST_FS_MOUNTS: &str = "/api/webchat/v2/fs/mounts";
+pub const WEBUI_V2_PATTERN_BROWSE_FS_DIR: &str = "/api/webchat/v2/fs/list";
+pub const WEBUI_V2_PATTERN_STAT_FS_PATH: &str = "/api/webchat/v2/fs/stat";
+pub const WEBUI_V2_PATTERN_READ_FS_FILE: &str = "/api/webchat/v2/fs/content";
+pub const WEBUI_V2_PATTERN_LIST_PROJECTS: &str = "/api/webchat/v2/projects";
+pub const WEBUI_V2_PATTERN_CREATE_PROJECT: &str = "/api/webchat/v2/projects";
+pub const WEBUI_V2_PATTERN_PROJECT_DETAIL: &str = "/api/webchat/v2/projects/{project_id}";
+pub const WEBUI_V2_PATTERN_PROJECT_MEMBERS: &str = "/api/webchat/v2/projects/{project_id}/members";
+pub const WEBUI_V2_PATTERN_PROJECT_MEMBER_DETAIL: &str =
+    "/api/webchat/v2/projects/{project_id}/members/{user_id}";
 
 /// Return the canonical [`IngressRouteDescriptor`] set for the WebChat v2
 /// beta route surface.
@@ -125,11 +164,14 @@ pub fn webui_v2_routes() -> Vec<IngressRouteDescriptor> {
         send_message_descriptor(),
         list_threads_descriptor(),
         get_timeline_descriptor(),
+        get_attachment_descriptor(),
         stream_events_descriptor(),
         stream_events_ws_descriptor(),
         cancel_run_descriptor(),
         resolve_gate_descriptor(),
         list_automations_descriptor(),
+        trace_credits_descriptor(),
+        authorize_trace_hold_descriptor(),
         get_outbound_preferences_descriptor(),
         set_outbound_preferences_descriptor(),
         list_outbound_delivery_targets_descriptor(),
@@ -166,6 +208,22 @@ pub fn webui_v2_routes() -> Vec<IngressRouteDescriptor> {
         operator_status_descriptor(),
         operator_logs_descriptor(),
         operator_service_lifecycle_descriptor(),
+        list_project_files_descriptor(),
+        stat_project_file_descriptor(),
+        read_project_file_descriptor(),
+        list_fs_mounts_descriptor(),
+        browse_fs_dir_descriptor(),
+        stat_fs_path_descriptor(),
+        read_fs_file_descriptor(),
+        list_projects_descriptor(),
+        create_project_descriptor(),
+        get_project_descriptor(),
+        update_project_descriptor(),
+        delete_project_descriptor(),
+        list_project_members_descriptor(),
+        add_project_member_descriptor(),
+        update_project_member_descriptor(),
+        remove_project_member_descriptor(),
     ]
 }
 
@@ -244,9 +302,11 @@ fn send_message_descriptor() -> IngressRouteDescriptor {
         NetworkMethod::Post,
         WEBUI_V2_PATTERN_SEND_MESSAGE,
         mutation_policy(
-            // Message bodies carry user content. 1 MiB is the same cap the
-            // existing turn admission layer enforces.
-            body_limit_kib(1024),
+            // Message bodies carry user text plus optional base64-encoded inline
+            // attachments. 14 MiB matches the gateway-wide body budget and covers
+            // base64 of the 10 MiB decoded per-message attachment cap (the facade
+            // enforces the 5 MiB-per-file / 10 MiB-total decoded budgets).
+            body_limit_kib(14 * 1024),
             mutation_rate_limit(),
             AuditTraceClass::UserAction,
             AllowedEffectPath::TurnCoordinator,
@@ -268,6 +328,230 @@ fn delete_thread_descriptor() -> IngressRouteDescriptor {
     )
 }
 
+fn list_project_files_descriptor() -> IngressRouteDescriptor {
+    descriptor(
+        WEBUI_V2_ROUTE_LIST_PROJECT_FILES,
+        NetworkMethod::Get,
+        WEBUI_V2_PATTERN_LIST_PROJECT_FILES,
+        read_policy(
+            read_rate_limit(),
+            AuditTraceClass::UserAction,
+            AllowedEffectPath::ProductWorkflow,
+            StreamingMode::None,
+        ),
+    )
+}
+
+fn stat_project_file_descriptor() -> IngressRouteDescriptor {
+    descriptor(
+        WEBUI_V2_ROUTE_STAT_PROJECT_FILE,
+        NetworkMethod::Get,
+        WEBUI_V2_PATTERN_STAT_PROJECT_FILE,
+        read_policy(
+            read_rate_limit(),
+            AuditTraceClass::UserAction,
+            AllowedEffectPath::ProductWorkflow,
+            StreamingMode::None,
+        ),
+    )
+}
+
+fn read_project_file_descriptor() -> IngressRouteDescriptor {
+    descriptor(
+        WEBUI_V2_ROUTE_READ_PROJECT_FILE,
+        NetworkMethod::Get,
+        WEBUI_V2_PATTERN_READ_PROJECT_FILE,
+        read_policy(
+            read_rate_limit(),
+            AuditTraceClass::UserAction,
+            AllowedEffectPath::ProductWorkflow,
+            StreamingMode::None,
+        ),
+    )
+}
+
+fn list_fs_mounts_descriptor() -> IngressRouteDescriptor {
+    descriptor(
+        WEBUI_V2_ROUTE_LIST_FS_MOUNTS,
+        NetworkMethod::Get,
+        WEBUI_V2_PATTERN_LIST_FS_MOUNTS,
+        read_policy(
+            read_rate_limit(),
+            AuditTraceClass::UserAction,
+            AllowedEffectPath::ProductWorkflow,
+            StreamingMode::None,
+        ),
+    )
+}
+
+fn list_projects_descriptor() -> IngressRouteDescriptor {
+    descriptor(
+        WEBUI_V2_ROUTE_LIST_PROJECTS,
+        NetworkMethod::Get,
+        WEBUI_V2_PATTERN_LIST_PROJECTS,
+        read_policy(
+            read_rate_limit(),
+            AuditTraceClass::UserAction,
+            AllowedEffectPath::ProductWorkflow,
+            StreamingMode::None,
+        ),
+    )
+}
+
+fn browse_fs_dir_descriptor() -> IngressRouteDescriptor {
+    descriptor(
+        WEBUI_V2_ROUTE_BROWSE_FS_DIR,
+        NetworkMethod::Get,
+        WEBUI_V2_PATTERN_BROWSE_FS_DIR,
+        read_policy(
+            read_rate_limit(),
+            AuditTraceClass::UserAction,
+            AllowedEffectPath::ProductWorkflow,
+            StreamingMode::None,
+        ),
+    )
+}
+
+fn create_project_descriptor() -> IngressRouteDescriptor {
+    descriptor(
+        WEBUI_V2_ROUTE_CREATE_PROJECT,
+        NetworkMethod::Post,
+        WEBUI_V2_PATTERN_CREATE_PROJECT,
+        mutation_policy(
+            body_limit_kib(16),
+            mutation_rate_limit(),
+            AuditTraceClass::UserAction,
+            AllowedEffectPath::ProductWorkflow,
+        ),
+    )
+}
+
+fn get_project_descriptor() -> IngressRouteDescriptor {
+    descriptor(
+        WEBUI_V2_ROUTE_GET_PROJECT,
+        NetworkMethod::Get,
+        WEBUI_V2_PATTERN_PROJECT_DETAIL,
+        read_policy(
+            read_rate_limit(),
+            AuditTraceClass::UserAction,
+            AllowedEffectPath::ProductWorkflow,
+            StreamingMode::None,
+        ),
+    )
+}
+
+fn stat_fs_path_descriptor() -> IngressRouteDescriptor {
+    descriptor(
+        WEBUI_V2_ROUTE_STAT_FS_PATH,
+        NetworkMethod::Get,
+        WEBUI_V2_PATTERN_STAT_FS_PATH,
+        read_policy(
+            read_rate_limit(),
+            AuditTraceClass::UserAction,
+            AllowedEffectPath::ProductWorkflow,
+            StreamingMode::None,
+        ),
+    )
+}
+
+fn update_project_descriptor() -> IngressRouteDescriptor {
+    descriptor(
+        WEBUI_V2_ROUTE_UPDATE_PROJECT,
+        NetworkMethod::Post,
+        WEBUI_V2_PATTERN_PROJECT_DETAIL,
+        mutation_policy(
+            body_limit_kib(16),
+            mutation_rate_limit(),
+            AuditTraceClass::UserAction,
+            AllowedEffectPath::ProductWorkflow,
+        ),
+    )
+}
+
+fn delete_project_descriptor() -> IngressRouteDescriptor {
+    descriptor(
+        WEBUI_V2_ROUTE_DELETE_PROJECT,
+        NetworkMethod::Delete,
+        WEBUI_V2_PATTERN_PROJECT_DETAIL,
+        mutation_policy(
+            BodyLimitPolicy::NoBody,
+            mutation_rate_limit(),
+            AuditTraceClass::UserAction,
+            AllowedEffectPath::ProductWorkflow,
+        ),
+    )
+}
+
+fn list_project_members_descriptor() -> IngressRouteDescriptor {
+    descriptor(
+        WEBUI_V2_ROUTE_LIST_PROJECT_MEMBERS,
+        NetworkMethod::Get,
+        WEBUI_V2_PATTERN_PROJECT_MEMBERS,
+        read_policy(
+            read_rate_limit(),
+            AuditTraceClass::UserAction,
+            AllowedEffectPath::ProductWorkflow,
+            StreamingMode::None,
+        ),
+    )
+}
+
+fn read_fs_file_descriptor() -> IngressRouteDescriptor {
+    descriptor(
+        WEBUI_V2_ROUTE_READ_FS_FILE,
+        NetworkMethod::Get,
+        WEBUI_V2_PATTERN_READ_FS_FILE,
+        read_policy(
+            read_rate_limit(),
+            AuditTraceClass::UserAction,
+            AllowedEffectPath::ProductWorkflow,
+            StreamingMode::None,
+        ),
+    )
+}
+
+fn add_project_member_descriptor() -> IngressRouteDescriptor {
+    descriptor(
+        WEBUI_V2_ROUTE_ADD_PROJECT_MEMBER,
+        NetworkMethod::Post,
+        WEBUI_V2_PATTERN_PROJECT_MEMBERS,
+        mutation_policy(
+            body_limit_kib(16),
+            mutation_rate_limit(),
+            AuditTraceClass::UserAction,
+            AllowedEffectPath::ProductWorkflow,
+        ),
+    )
+}
+
+fn update_project_member_descriptor() -> IngressRouteDescriptor {
+    descriptor(
+        WEBUI_V2_ROUTE_UPDATE_PROJECT_MEMBER,
+        NetworkMethod::Post,
+        WEBUI_V2_PATTERN_PROJECT_MEMBER_DETAIL,
+        mutation_policy(
+            body_limit_kib(16),
+            mutation_rate_limit(),
+            AuditTraceClass::UserAction,
+            AllowedEffectPath::ProductWorkflow,
+        ),
+    )
+}
+
+fn remove_project_member_descriptor() -> IngressRouteDescriptor {
+    descriptor(
+        WEBUI_V2_ROUTE_REMOVE_PROJECT_MEMBER,
+        NetworkMethod::Delete,
+        WEBUI_V2_PATTERN_PROJECT_MEMBER_DETAIL,
+        mutation_policy(
+            BodyLimitPolicy::NoBody,
+            mutation_rate_limit(),
+            AuditTraceClass::UserAction,
+            AllowedEffectPath::ProductWorkflow,
+        ),
+    )
+}
+
 fn get_timeline_descriptor() -> IngressRouteDescriptor {
     descriptor(
         WEBUI_V2_ROUTE_GET_TIMELINE,
@@ -277,6 +561,23 @@ fn get_timeline_descriptor() -> IngressRouteDescriptor {
             read_rate_limit(),
             AuditTraceClass::UserAction,
             AllowedEffectPath::ProjectionOnly,
+            StreamingMode::None,
+        ),
+    )
+}
+
+fn get_attachment_descriptor() -> IngressRouteDescriptor {
+    descriptor(
+        WEBUI_V2_ROUTE_GET_ATTACHMENT,
+        NetworkMethod::Get,
+        WEBUI_V2_PATTERN_GET_ATTACHMENT,
+        read_policy(
+            read_rate_limit(),
+            AuditTraceClass::UserAction,
+            // Reads workspace-backed attachment bytes through the product
+            // facade — more than a projection read, so the effect path is
+            // ProductWorkflow to keep the fail-closed ingress boundary honest.
+            AllowedEffectPath::ProductWorkflow,
             StreamingMode::None,
         ),
     )
@@ -361,6 +662,35 @@ fn list_automations_descriptor() -> IngressRouteDescriptor {
             AuditTraceClass::UserAction,
             AllowedEffectPath::ProductWorkflow,
             StreamingMode::None,
+        ),
+    )
+}
+
+fn trace_credits_descriptor() -> IngressRouteDescriptor {
+    descriptor(
+        WEBUI_V2_ROUTE_TRACE_CREDITS,
+        NetworkMethod::Get,
+        WEBUI_V2_PATTERN_TRACE_CREDITS,
+        read_policy(
+            read_rate_limit(),
+            AuditTraceClass::UserAction,
+            AllowedEffectPath::ProductWorkflow,
+            StreamingMode::None,
+        ),
+    )
+}
+
+fn authorize_trace_hold_descriptor() -> IngressRouteDescriptor {
+    descriptor(
+        WEBUI_V2_ROUTE_TRACE_HOLD_AUTHORIZE,
+        NetworkMethod::Post,
+        WEBUI_V2_PATTERN_TRACE_HOLD_AUTHORIZE,
+        mutation_policy(
+            // The submission id is in the path; no request body.
+            BodyLimitPolicy::NoBody,
+            mutation_rate_limit(),
+            AuditTraceClass::UserAction,
+            AllowedEffectPath::ProductWorkflow,
         ),
     )
 }

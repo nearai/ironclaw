@@ -1,4 +1,6 @@
 use ironclaw_product_adapters::{ProductAdapterError, ProductWorkflowRejectionKind};
+#[cfg(feature = "openai-compat-beta")]
+use ironclaw_product_adapters::{ProductRejection, ProductRejectionKind};
 use serde::{Deserialize, Serialize};
 
 use crate::OpenAiCompatRefError;
@@ -159,7 +161,9 @@ impl OpenAiCompatHttpError {
             ProductWorkflowRejectionKind::Unauthorized => OpenAiCompatErrorKind::PermissionDenied,
             ProductWorkflowRejectionKind::InvalidRequest => OpenAiCompatErrorKind::Validation,
             ProductWorkflowRejectionKind::Unavailable => OpenAiCompatErrorKind::ServiceUnavailable,
-            ProductWorkflowRejectionKind::Conflict => OpenAiCompatErrorKind::Conflict,
+            ProductWorkflowRejectionKind::Conflict | ProductWorkflowRejectionKind::Ambiguous => {
+                OpenAiCompatErrorKind::Conflict
+            }
         };
         Self::from_kind(status_code, retryable, error_kind, param)
     }
@@ -221,6 +225,56 @@ impl From<OpenAiCompatRefError> for OpenAiCompatHttpError {
             }
             OpenAiCompatRefError::CorruptMapping => Self::internal(),
         }
+    }
+}
+
+/// Translates a [`ProductRejection`] into an [`OpenAiCompatHttpError`].
+///
+/// `param` carries the surface-specific field name for `BindingRequired` and
+/// `InvalidRequest` rejections. Chat passes `Some("messages")`; Responses
+/// passes `Some("input")`.
+#[cfg(feature = "openai-compat-beta")]
+pub(crate) fn product_rejection_to_openai_error(
+    rejection: &ProductRejection,
+    param: Option<&str>,
+) -> OpenAiCompatHttpError {
+    match rejection.kind {
+        ProductRejectionKind::BindingRequired => {
+            OpenAiCompatHttpError::not_found(param.map(str::to_owned))
+        }
+        ProductRejectionKind::AccessDenied | ProductRejectionKind::PolicyDenied => {
+            OpenAiCompatHttpError::from_workflow_rejection(
+                ProductWorkflowRejectionKind::Unauthorized,
+                403,
+                false,
+                None,
+            )
+        }
+        ProductRejectionKind::UnknownInstallation => OpenAiCompatHttpError::from_kind(
+            503,
+            true,
+            OpenAiCompatErrorKind::ServiceUnavailable,
+            None,
+        ),
+        ProductRejectionKind::InvalidRequest => {
+            OpenAiCompatHttpError::invalid_request(param.map(str::to_owned))
+        }
+        ProductRejectionKind::AmbiguousResolution => {
+            OpenAiCompatHttpError::from_workflow_rejection(
+                ProductWorkflowRejectionKind::Ambiguous,
+                409,
+                false,
+                None,
+            )
+        }
+        // The gate already resolved (approved/denied) — the resolution conflicts
+        // with the now-settled state, so surface a 409 Conflict.
+        ProductRejectionKind::StaleGate => OpenAiCompatHttpError::from_workflow_rejection(
+            ProductWorkflowRejectionKind::Conflict,
+            409,
+            false,
+            None,
+        ),
     }
 }
 
@@ -398,4 +452,91 @@ fn contains_no_exposure_sentinel(value: &str) -> bool {
     NO_EXPOSURE_SENTINELS
         .iter()
         .any(|sentinel| value.contains(sentinel))
+}
+
+#[cfg(all(test, feature = "openai-compat-beta"))]
+mod tests {
+    use ironclaw_product_adapters::{ProductRejection, ProductRejectionKind};
+
+    use super::product_rejection_to_openai_error;
+
+    /// `BindingRequired` maps to 404 Not Found (scope lookup failed).
+    #[test]
+    fn binding_required_maps_to_404() {
+        let rejection =
+            ProductRejection::permanent(ProductRejectionKind::BindingRequired, "no binding");
+        let err = product_rejection_to_openai_error(&rejection, Some("messages"));
+        assert_eq!(err.status_code(), 404);
+        assert!(!err.retryable());
+    }
+
+    /// `AccessDenied` maps to 403 Forbidden, non-retryable.
+    #[test]
+    fn access_denied_maps_to_403() {
+        let rejection = ProductRejection::permanent(ProductRejectionKind::AccessDenied, "denied");
+        let err = product_rejection_to_openai_error(&rejection, None);
+        assert_eq!(err.status_code(), 403);
+        assert!(!err.retryable());
+    }
+
+    /// `PolicyDenied` maps to 403 Forbidden, non-retryable.
+    #[test]
+    fn policy_denied_maps_to_403() {
+        let rejection = ProductRejection::permanent(ProductRejectionKind::PolicyDenied, "policy");
+        let err = product_rejection_to_openai_error(&rejection, None);
+        assert_eq!(err.status_code(), 403);
+        assert!(!err.retryable());
+    }
+
+    /// `UnknownInstallation` maps to 503 Service Unavailable, retryable.
+    #[test]
+    fn unknown_installation_maps_to_503_retryable() {
+        let rejection =
+            ProductRejection::retryable(ProductRejectionKind::UnknownInstallation, "unknown");
+        let err = product_rejection_to_openai_error(&rejection, None);
+        assert_eq!(err.status_code(), 503);
+        assert!(err.retryable());
+    }
+
+    /// `InvalidRequest` maps to 400 Bad Request, non-retryable.
+    #[test]
+    fn invalid_request_maps_to_400() {
+        let rejection =
+            ProductRejection::permanent(ProductRejectionKind::InvalidRequest, "bad input");
+        let err = product_rejection_to_openai_error(&rejection, Some("input"));
+        assert_eq!(err.status_code(), 400);
+        assert!(!err.retryable());
+    }
+
+    /// `AmbiguousResolution` maps to 409 Conflict, non-retryable.
+    #[test]
+    fn ambiguous_resolution_maps_to_409() {
+        let rejection =
+            ProductRejection::permanent(ProductRejectionKind::AmbiguousResolution, "ambiguous");
+        let err = product_rejection_to_openai_error(&rejection, None);
+        assert_eq!(err.status_code(), 409);
+        assert!(!err.retryable());
+    }
+
+    /// `StaleGate` maps to 409 Conflict, non-retryable.
+    ///
+    /// The gate already resolved (approved/denied) — the resolution conflicts
+    /// with the now-settled state. Must NOT be retryable (the client must not
+    /// replay the same approval/denial against an already-resolved gate).
+    #[test]
+    fn stale_gate_maps_to_409_conflict_not_retryable() {
+        let rejection =
+            ProductRejection::permanent(ProductRejectionKind::StaleGate, "gate already resolved");
+        let err = product_rejection_to_openai_error(&rejection, None);
+        assert_eq!(
+            err.status_code(),
+            409,
+            "StaleGate must surface as 409 Conflict, got {}",
+            err.status_code()
+        );
+        assert!(
+            !err.retryable(),
+            "StaleGate is a terminal conflict — must not be retryable"
+        );
+    }
 }
