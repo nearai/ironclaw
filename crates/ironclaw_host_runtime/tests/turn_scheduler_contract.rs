@@ -14,8 +14,8 @@ use ironclaw_filesystem::LocalFilesystem;
 use ironclaw_host_api::{AgentId, ProjectId, TenantId, ThreadId, UserId};
 use ironclaw_host_runtime::{
     CapabilitySurfaceVersion, HostRuntimeServices, ProductionWiringComponent,
-    ProductionWiringIssueKind, TurnRunExecutor, TurnRunExecutorError, TurnRunScheduler,
-    TurnRunSchedulerConfig,
+    ProductionWiringIssueKind, SchedulerTurnRunWakeNotifier, TurnRunExecutor, TurnRunExecutorError,
+    TurnRunScheduler, TurnRunSchedulerConfig,
 };
 use ironclaw_processes::ProcessServices;
 use ironclaw_resources::InMemoryResourceGovernor;
@@ -1252,7 +1252,10 @@ async fn shutdown_relinquishes_in_flight_runs_to_queued() {
     let run_id = accepted_run_id(coordinator.submit_turn(request).await.unwrap());
 
     // Wait until the executor has actually claimed and started the run (Running).
-    executor.wait_for_started().await;
+    // Bounded so a regression in claim/start logic cannot hang the test suite.
+    timeout(Duration::from_secs(3), executor.wait_for_started())
+        .await
+        .expect("executor did not start the run within 3s; scheduler may not have claimed the queued run");
 
     // Shutdown aborts the in-flight task and must relinquish the run to Queued.
     timeout(Duration::from_secs(2), handle.shutdown())
@@ -1268,6 +1271,51 @@ async fn shutdown_relinquishes_in_flight_runs_to_queued() {
         TurnStatus::Queued,
         "in-flight run must be relinquished back to Queued on shutdown, not left Running or Failed"
     );
+}
+
+/// Verifies that when a coordinator mints the notifier and channel before
+/// starting the scheduler via `start_with_channel`, the notifier held by the
+/// coordinator and the scheduler's consuming loop share the SAME underlying
+/// mpsc channel. A mismatch would leave the notified run unclaimed.
+#[tokio::test]
+async fn start_with_channel_shares_notifier_with_scheduler_loop() {
+    let store = Arc::new(InMemoryTurnStateStore::default());
+    let transitions: Arc<dyn TurnRunTransitionPort> = store.clone();
+    let executor = Arc::new(CompletingExecutor::default());
+
+    // Mint the notifier and channel BEFORE building the scheduler — this is
+    // the cycle-breaking entry point the coordinator uses so it can hold the
+    // notifier first.
+    let cap = fast_config().wake_channel_capacity();
+    let (notifier, channel) = SchedulerTurnRunWakeNotifier::channel(cap);
+
+    let scheduler = TurnRunScheduler::new(
+        Arc::clone(&transitions),
+        executor.clone(),
+        fast_config().with_poll_interval(Duration::from_secs(60)),
+    );
+    // Pass the pre-minted notifier + channel; do NOT call start() which would
+    // create a fresh channel and break the identity contract under test.
+    let handle = scheduler.start_with_channel(notifier.clone(), channel);
+
+    // Submit a turn through the store directly (no coordinator) so we control
+    // exactly which notifier fires the wake.
+    let coordinator =
+        DefaultTurnCoordinator::new(store.clone()).with_wake_notifier(notifier.clone());
+
+    let request = submit_turn_request("thread-start-with-channel", "idem-start-with-channel");
+    let scope = request.scope.clone();
+    let run_id = accepted_run_id(coordinator.submit_turn(request).await.unwrap());
+
+    // Fire the pre-minted notifier — the one the coordinator holds, not the
+    // one inside the handle.  If the scheduler loop is consuming a different
+    // channel this wake is lost and the run stays Queued indefinitely.
+    timeout(Duration::from_secs(3), executor.wait_for_started(1))
+        .await
+        .expect("executor did not start the run within 3s; notifier and scheduler channel are mismatched");
+
+    wait_for_status(&*store, scope, run_id, TurnStatus::Completed).await;
+    handle.shutdown().await;
 }
 
 #[tokio::test]

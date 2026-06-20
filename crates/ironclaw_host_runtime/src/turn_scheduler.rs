@@ -19,7 +19,7 @@ use tokio::{
     time::{MissedTickBehavior, interval, sleep},
 };
 use tracing::Instrument;
-use tracing::debug;
+use tracing::{debug, warn};
 
 #[derive(Debug, Clone)]
 pub struct TurnRunSchedulerConfig {
@@ -414,10 +414,10 @@ async fn run_scheduler_loop(
                                 })
                                 .await;
                             if let Err(error) = result {
-                                debug!(
+                                warn!(
                                     run_id = %identity.run_id,
                                     error = %error,
-                                    "turn run scheduler could not relinquish in-flight run on shutdown"
+                                    "failed to relinquish in-flight run during scheduler shutdown; run will rely on lease recovery"
                                 );
                             }
                         }
