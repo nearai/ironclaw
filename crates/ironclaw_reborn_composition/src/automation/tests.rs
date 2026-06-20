@@ -688,8 +688,7 @@ async fn automation_source_from_record_maps_cron_schedule() {
     let id = TriggerId::new();
     let record = make_record(id, &c, TriggerState::Scheduled, "Cron test", "*/5 * * * *");
 
-    let source = super::automation_source_from_record(&record)
-        .expect("cron schedule must map to Schedule source");
+    let source = super::automation_source_from_record(&record);
 
     assert_eq!(
         source,
@@ -709,8 +708,7 @@ async fn automation_source_from_record_includes_non_utc_timezone() {
     record.schedule = TriggerSchedule::cron_with_timezone("0 9 * * *", "America/New_York")
         .expect("valid tz schedule");
 
-    let source = super::automation_source_from_record(&record)
-        .expect("cron schedule must map to Schedule source");
+    let source = super::automation_source_from_record(&record);
 
     assert_eq!(
         source,

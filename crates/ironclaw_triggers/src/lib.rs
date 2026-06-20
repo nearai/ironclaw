@@ -381,6 +381,83 @@ impl TriggerSchedule {
         Ok(schedule)
     }
 
+    pub(crate) fn timezone_text(&self) -> &str {
+        match self {
+            Self::Cron { timezone, .. } | Self::Once { timezone, .. } => timezone.as_str(),
+        }
+    }
+
+    // Returns (kind, expression, schedule_at)
+    pub(crate) fn to_storage(&self) -> (&'static str, &str, Option<String>) {
+        match self {
+            Self::Cron { expression, .. } => ("cron", expression.as_str(), None),
+            Self::Once { at, .. } => (
+                "once",
+                "",
+                Some(at.to_rfc3339_opts(chrono::SecondsFormat::Nanos, true)),
+            ),
+        }
+    }
+
+    pub(crate) fn from_storage(
+        kind: &str,
+        expression: &str,
+        schedule_at: Option<&str>,
+        timezone: &str,
+    ) -> Result<Self, TriggerError> {
+        match kind {
+            "cron" => Self::cron_with_timezone(expression, timezone),
+            "once" => {
+                let at_str = schedule_at.unwrap_or(expression);
+                let at = chrono::DateTime::parse_from_rfc3339(at_str)
+                    .map(|dt| dt.with_timezone(&chrono::Utc))
+                    .map_err(|error| TriggerError::InvalidRecord {
+                        reason: format!("schedule_at: invalid once timestamp: {error}"),
+                    })?;
+                Self::once(at, timezone)
+            }
+            other => Err(TriggerError::InvalidRecord {
+                reason: format!("schedule_kind: unsupported schedule kind `{other}`"),
+            }),
+        }
+    }
+
+    pub fn is_recurring(&self) -> bool {
+        matches!(self, Self::Cron { .. })
+    }
+
+    /// Parse a naive wall-clock datetime string, attach the given IANA timezone,
+    /// and convert to UTC. Rejects ambiguous (DST fall-back overlap) and
+    /// non-existent (DST spring-forward gap) local times with InvalidSchedule.
+    pub fn once_from_local(at_str: &str, timezone_str: &str) -> Result<Self, TriggerError> {
+        use chrono::TimeZone as _;
+        let tz = parse_timezone(timezone_str)?;
+        let naive = chrono::NaiveDateTime::parse_from_str(at_str, "%Y-%m-%dT%H:%M:%S").map_err(
+            |error| TriggerError::InvalidSchedule {
+                reason: format!("invalid datetime '{at_str}': {error}"),
+            },
+        )?;
+        let local = tz.from_local_datetime(&naive);
+        let at = match local {
+            chrono::LocalResult::Single(dt) => dt.with_timezone(&chrono::Utc),
+            chrono::LocalResult::Ambiguous(_, _) => {
+                return Err(TriggerError::InvalidSchedule {
+                    reason: format!(
+                        "datetime '{at_str}' is ambiguous in timezone '{timezone_str}' (DST overlap); use an explicit UTC offset"
+                    ),
+                });
+            }
+            chrono::LocalResult::None => {
+                return Err(TriggerError::InvalidSchedule {
+                    reason: format!(
+                        "datetime '{at_str}' does not exist in timezone '{timezone_str}' (DST gap); use an adjacent time"
+                    ),
+                });
+            }
+        };
+        Self::once(at, timezone_str)
+    }
+
     pub fn validate(&self) -> Result<(), TriggerError> {
         match self {
             Self::Cron {
@@ -455,6 +532,77 @@ pub(crate) fn trigger_run_history_status_text(value: TriggerRunHistoryStatus) ->
         TriggerRunHistoryStatus::Running => "running",
         TriggerRunHistoryStatus::Ok => "ok",
         TriggerRunHistoryStatus::Error => "error",
+    }
+}
+
+#[cfg(any(feature = "libsql", feature = "postgres"))]
+pub(crate) fn state_text_codec(value: TriggerState) -> &'static str {
+    match value {
+        TriggerState::Scheduled => "scheduled",
+        TriggerState::Paused => "paused",
+        TriggerState::Completed => "completed",
+    }
+}
+
+#[cfg(any(feature = "libsql", feature = "postgres"))]
+pub(crate) fn parse_state_codec(value: &str) -> Result<TriggerState, TriggerError> {
+    match value {
+        "scheduled" => Ok(TriggerState::Scheduled),
+        "paused" => Ok(TriggerState::Paused),
+        "completed" => Ok(TriggerState::Completed),
+        other => Err(TriggerError::InvalidRecord {
+            reason: format!("state: unsupported trigger state `{other}`"),
+        }),
+    }
+}
+
+#[cfg(any(feature = "libsql", feature = "postgres"))]
+pub(crate) fn source_kind_text_codec(value: TriggerSourceKind) -> &'static str {
+    match value {
+        TriggerSourceKind::Schedule => "schedule",
+    }
+}
+
+#[cfg(any(feature = "libsql", feature = "postgres"))]
+pub(crate) fn parse_source_kind_codec(value: &str) -> Result<TriggerSourceKind, TriggerError> {
+    match value {
+        "schedule" => Ok(TriggerSourceKind::Schedule),
+        other => Err(TriggerError::InvalidRecord {
+            reason: format!("source: unsupported trigger source `{other}`"),
+        }),
+    }
+}
+
+#[cfg(any(feature = "libsql", feature = "postgres"))]
+pub(crate) fn status_text_codec(value: TriggerRunStatus) -> &'static str {
+    match value {
+        TriggerRunStatus::Ok => "ok",
+        TriggerRunStatus::Error => "error",
+    }
+}
+
+#[cfg(any(feature = "libsql", feature = "postgres"))]
+pub(crate) fn parse_run_status_codec(value: &str) -> Result<TriggerRunStatus, TriggerError> {
+    match value {
+        "ok" => Ok(TriggerRunStatus::Ok),
+        "error" => Ok(TriggerRunStatus::Error),
+        other => Err(TriggerError::InvalidRecord {
+            reason: format!("last_status: unsupported trigger run status `{other}`"),
+        }),
+    }
+}
+
+#[cfg(any(feature = "libsql", feature = "postgres"))]
+pub(crate) fn parse_run_history_status_codec(
+    value: &str,
+) -> Result<TriggerRunHistoryStatus, TriggerError> {
+    match value {
+        "running" => Ok(TriggerRunHistoryStatus::Running),
+        "ok" => Ok(TriggerRunHistoryStatus::Ok),
+        "error" => Ok(TriggerRunHistoryStatus::Error),
+        other => Err(TriggerError::InvalidRecord {
+            reason: format!("status: unsupported trigger run history status `{other}`"),
+        }),
     }
 }
 
@@ -2753,5 +2901,85 @@ mod tests {
         let _ = schedule
             .next_slot_after(before_gap)
             .expect("no error during DST gap");
+    }
+
+    #[test]
+    fn once_from_local_valid_time_converts_to_utc() {
+        // 2026-01-15 09:00:00 America/New_York = EST = UTC-5 => 14:00:00 UTC
+        let schedule = TriggerSchedule::once_from_local("2026-01-15T09:00:00", "America/New_York")
+            .expect("valid local time");
+        let expected = Utc.with_ymd_and_hms(2026, 1, 15, 14, 0, 0).unwrap();
+        match schedule {
+            TriggerSchedule::Once { at, .. } => assert_eq!(at, expected),
+            _ => panic!("expected Once schedule"),
+        }
+    }
+
+    #[test]
+    fn once_from_local_ambiguous_dst_overlap_rejected() {
+        // 2026-11-01 01:30:00 America/New_York is ambiguous (clocks fall back at 2am)
+        let error = TriggerSchedule::once_from_local("2026-11-01T01:30:00", "America/New_York")
+            .expect_err("ambiguous DST time rejected");
+        assert!(
+            error.to_string().contains("ambiguous"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[test]
+    fn once_from_local_dst_gap_rejected() {
+        // 2026-03-08 02:30:00 America/New_York is in the DST gap (clocks spring forward from 2am to 3am)
+        let error = TriggerSchedule::once_from_local("2026-03-08T02:30:00", "America/New_York")
+            .expect_err("DST gap time rejected");
+        assert!(
+            error.to_string().contains("does not exist"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[test]
+    fn once_schedule_storage_round_trip_uses_schedule_at_column() {
+        let at = Utc.with_ymd_and_hms(2026, 6, 15, 10, 0, 0).unwrap();
+        let schedule = TriggerSchedule::once(at, "UTC").expect("valid once");
+        let (kind, expression, schedule_at) = schedule.to_storage();
+        assert_eq!(kind, "once");
+        assert_eq!(expression, ""); // schedule_expression is empty for Once
+        assert!(schedule_at.is_some(), "Once must populate schedule_at");
+        // Round-trip via from_storage
+        let restored =
+            TriggerSchedule::from_storage(kind, expression, schedule_at.as_deref(), "UTC")
+                .expect("from_storage round-trip");
+        assert_eq!(restored, schedule);
+    }
+
+    #[tokio::test]
+    async fn exhausted_finite_cron_transitions_to_completed_on_clear_active_fire() {
+        let repo = InMemoryTriggerRepository::default();
+        let trigger_id = TriggerId::parse("01HZZZZZZZZZZZZZZZZZZZZZZZ").expect("ulid");
+        let fire_slot = ts(1_704_067_200);
+        let run_id = TurnRunId::parse("01890f0f-9b6f-7a85-9e5b-9f21a93c4f5a").expect("valid run");
+        let mut record = sample_record(trigger_id, tenant("tenant-a"), fire_slot);
+        record.schedule = TriggerSchedule::once(fire_slot, "UTC").expect("valid once");
+        record.active_fire_slot = Some(fire_slot);
+        record.active_run_ref = Some(run_id);
+        repo.upsert_trigger(record).await.expect("insert");
+
+        let cleared = repo
+            .clear_active_fire(ClearActiveFireRequest {
+                tenant_id: tenant("tenant-a"),
+                trigger_id,
+                fire_slot,
+                run_id,
+                status: TriggerRunHistoryStatus::Ok,
+            })
+            .await
+            .expect("clear succeeds")
+            .expect("record returned");
+
+        assert_eq!(
+            cleared.state,
+            TriggerState::Completed,
+            "exhausted schedule must transition to Completed"
+        );
     }
 }

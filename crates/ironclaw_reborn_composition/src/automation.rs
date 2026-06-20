@@ -127,7 +127,7 @@ impl AutomationProductFacade for RebornAutomationProductFacade {
         if records.is_empty() || request.run_limit == 0 {
             return Ok(records
                 .into_iter()
-                .filter_map(|record| automation_info_from_record(record, &[]))
+                .map(|record| automation_info_from_record(record, &[]))
                 .collect());
         }
 
@@ -147,7 +147,7 @@ impl AutomationProductFacade for RebornAutomationProductFacade {
 
         Ok(records
             .into_iter()
-            .filter_map(|record| {
+            .map(|record| {
                 let runs = runs_by_trigger
                     .remove(&record.trigger_id)
                     .unwrap_or_default();
@@ -242,8 +242,8 @@ fn trigger_is_caller_visible(trigger: &TriggerRecord, caller: &ProductAgentBound
 fn automation_info_from_record(
     record: TriggerRecord,
     runs: &[TriggerRunRecord],
-) -> Option<RebornAutomationInfo> {
-    let source = automation_source_from_record(&record)?;
+) -> RebornAutomationInfo {
+    let source = automation_source_from_record(&record);
     let is_active = record.has_active_fire();
     // Completed is terminal: the stored next_run_at is a stale past slot and
     // would render as a misleading "next run" date. Paused keeps its slot so
@@ -252,7 +252,7 @@ fn automation_info_from_record(
         TriggerState::Completed => None,
         TriggerState::Scheduled | TriggerState::Paused => Some(record.next_run_at),
     };
-    Some(RebornAutomationInfo {
+    RebornAutomationInfo {
         automation_id: record.trigger_id.to_string(),
         name: record.name,
         source,
@@ -263,28 +263,28 @@ fn automation_info_from_record(
         recent_runs: runs.iter().filter_map(map_recent_run).collect(),
         is_active,
         created_at: Some(record.created_at),
-    })
+    }
 }
 
 /// Maps a trigger record's source kind + schedule to the wire DTO source.
 ///
 /// This match is exhaustive on purpose: if `TriggerSourceKind` gains a new
-/// variant, this function must be updated rather than silently returning
-/// `None` for an unknown variant.
-fn automation_source_from_record(record: &TriggerRecord) -> Option<RebornAutomationSource> {
+/// variant or `TriggerSchedule` gains a new arm, the compiler rejects the
+/// build here — preventing any new schedule type from being silently dropped.
+fn automation_source_from_record(record: &TriggerRecord) -> RebornAutomationSource {
     match record.source {
         TriggerSourceKind::Schedule => match &record.schedule {
             TriggerSchedule::Cron {
                 expression,
                 timezone,
-            } => Some(RebornAutomationSource::Schedule {
+            } => RebornAutomationSource::Schedule {
                 cron: expression.clone(),
                 timezone: timezone.clone(),
-            }),
-            TriggerSchedule::Once { at, timezone } => Some(RebornAutomationSource::Once {
+            },
+            TriggerSchedule::Once { at, timezone } => RebornAutomationSource::Once {
                 at: at.to_rfc3339(),
                 timezone: timezone.clone(),
-            }),
+            },
         },
     }
 }

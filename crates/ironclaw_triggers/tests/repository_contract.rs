@@ -3980,3 +3980,35 @@ mod list_scoped_triggers_excluded_states_contract {
         super::clear_postgres_triggers(&pool).await;
     }
 }
+
+#[cfg(feature = "libsql")]
+#[tokio::test]
+async fn libsql_once_trigger_completes_on_clear_active_fire() {
+    let (_dir, repo) = build_libsql_repo().await;
+    let trigger_id = TriggerId::parse("01HZZZZZZZZZZZZZZZZZZZZZZZ").expect("ulid");
+    let fire_slot = ts(1_704_067_200);
+    let run_id = TurnRunId::parse("01890f0f-9b6f-7a85-9e5b-9f21a93c4f5a").expect("valid run");
+    let mut record = sample_record(trigger_id, tenant("tenant-a"), fire_slot);
+    record.schedule = TriggerSchedule::once(fire_slot, "UTC").expect("valid once");
+    record.active_fire_slot = Some(fire_slot);
+    record.active_run_ref = Some(run_id);
+    repo.upsert_trigger(record).await.expect("insert");
+
+    let cleared = repo
+        .clear_active_fire(ClearActiveFireRequest {
+            tenant_id: tenant("tenant-a"),
+            trigger_id,
+            fire_slot,
+            run_id,
+            status: ironclaw_triggers::TriggerRunHistoryStatus::Ok,
+        })
+        .await
+        .expect("clear succeeds")
+        .expect("record returned");
+
+    assert_eq!(
+        cleared.state,
+        TriggerState::Completed,
+        "once trigger must transition to Completed after clear_active_fire"
+    );
+}

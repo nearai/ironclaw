@@ -134,7 +134,7 @@ impl TriggerPollerWorker {
                     status,
                 )),
                 TriggerActiveRunState::Blocked => {
-                    if matches!(record.schedule, crate::TriggerSchedule::Cron { .. }) {
+                    if record.schedule.is_recurring() {
                         Some((
                             TriggerPollerFireOutcome::ClearedBlockedActive { run_id },
                             TriggerRunHistoryStatus::Error,
