@@ -20,7 +20,7 @@ use ironclaw_host_api::ingress::{
 use ironclaw_host_api::{
     AgentId, ExtensionId, InvocationId, ProjectId, ResourceScope, SecretHandle, TenantId, UserId,
 };
-use ironclaw_host_ingress_registry::{SLACK_EVENTS_ROUTE_ID, list_enabled_host_ingress_entries};
+use ironclaw_host_ingress_registry::list_enabled_host_ingress_entries;
 use ironclaw_outbound::{DeliveredGateRouteStore, OutboundStateStore, TriggeredRunDeliveryStore};
 use ironclaw_product_adapters::{
     AdapterInstallationId, DeclaredEgressHost, DeclaredEgressTarget, DeliveryStatus,
@@ -71,7 +71,7 @@ use crate::slack_extension_settings::{
 };
 use crate::slack_host_ingress::{
     ExtensionInstallationIngressCredentialBinding, ExtensionInstallationIngressCredentialResolver,
-    SlackEventsIngressHandler, SlackHostIngressInstallation,
+    SLACK_EVENTS_HOST_INGRESS_ROUTE_ID, SlackEventsIngressHandler, SlackHostIngressInstallation,
     slack_events_host_ingress_registrations,
 };
 use crate::slack_host_state::FilesystemSlackHostState;
@@ -682,7 +682,7 @@ pub async fn build_slack_events_host_ingress_mount_from_enabled_extensions(
 }
 
 fn is_slack_events_declaration(declaration: &HostIngressRouteDeclaration) -> bool {
-    if declaration.route().route_id().as_str() != SLACK_EVENTS_ROUTE_ID {
+    if declaration.route().route_id().as_str() != SLACK_EVENTS_HOST_INGRESS_ROUTE_ID {
         return false;
     }
     matches!(

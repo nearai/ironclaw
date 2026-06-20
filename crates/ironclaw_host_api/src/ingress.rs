@@ -622,7 +622,12 @@ impl IngressAuthSchemeName {
     }
 
     pub fn declared_auth_scheme(&self) -> IngressAuthScheme {
-        IngressAuthScheme::WebhookSignature
+        match self.as_str() {
+            "telegram_secret_token" | "telegram_shared_secret" => {
+                IngressAuthScheme::SharedSecretHeader
+            }
+            _ => IngressAuthScheme::WebhookSignature,
+        }
     }
 }
 
@@ -780,6 +785,7 @@ pub enum IngressAuthScheme {
     Oidc,
     CsrfToken,
     WebhookSignature,
+    SharedSecretHeader,
     OAuthState,
     InternalToken,
 }
@@ -934,10 +940,13 @@ fn validate_listener_auth(
     }
 
     match listener_class {
-        ListenerClass::PublicWebhook => require_auth_scheme(
+        ListenerClass::PublicWebhook => require_any_auth_scheme(
             auth,
-            IngressAuthScheme::WebhookSignature,
-            "public webhook ingress requires webhook signature auth",
+            &[
+                IngressAuthScheme::WebhookSignature,
+                IngressAuthScheme::SharedSecretHeader,
+            ],
+            "public webhook ingress requires webhook signature or shared-secret header auth",
         ),
         ListenerClass::InternalWorker => require_auth_scheme(
             auth,
@@ -1368,6 +1377,10 @@ mod tests {
                 vec![IngressAuthScheme::WebhookSignature],
             ),
             (
+                ListenerClass::PublicWebhook,
+                vec![IngressAuthScheme::SharedSecretHeader],
+            ),
+            (
                 ListenerClass::InternalWorker,
                 vec![IngressAuthScheme::InternalToken],
             ),
@@ -1589,6 +1602,17 @@ mod tests {
         .expect_err("auth binding without credential handles must reject");
 
         assert!(err.to_string().contains("credential handle"));
+    }
+
+    #[test]
+    fn telegram_secret_token_declares_shared_secret_header_auth() {
+        let scheme =
+            IngressAuthSchemeName::new("telegram_secret_token").expect("valid auth scheme name");
+
+        assert_eq!(
+            scheme.declared_auth_scheme(),
+            IngressAuthScheme::SharedSecretHeader
+        );
     }
 
     #[test]

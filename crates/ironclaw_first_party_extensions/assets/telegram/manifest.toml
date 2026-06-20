@@ -43,9 +43,33 @@ credential_handle = "telegram_bot_token"
 route_id = "telegram.updates"
 method = "post"
 path = "/webhooks/telegram/updates"
-policy_profile = "telegram_updates"
 ack = "immediate"
 drain = "drain_before_runtime_shutdown"
+
+[host_ingress.updates.policy]
+listener_class = "public_webhook"
+scope_source = "host_resolved"
+cors = "not_applicable"
+websocket_origin = "not_applicable"
+streaming = "none"
+audit = "public_callback"
+
+[host_ingress.updates.policy.auth]
+type = "required"
+schemes = ["shared_secret_header"]
+
+[host_ingress.updates.policy.body_limit]
+type = "limited"
+max_bytes = 1048576
+
+[host_ingress.updates.policy.rate_limit]
+type = "limited"
+scope = "global"
+max_requests = 12000
+window_seconds = 60
+
+[host_ingress.updates.policy.effect_path]
+type = "product_workflow"
 
 [host_ingress.updates.target]
 type = "product_adapter_inbound"

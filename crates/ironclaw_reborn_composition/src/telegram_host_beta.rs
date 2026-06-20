@@ -6,8 +6,8 @@
 //! extension, and [`build_telegram_updates_host_ingress_mount_from_enabled_extensions`]
 //! projects the `/webhooks/telegram/updates` route from enabled extension state
 //! through the generic host-ingress registry. The mounted route's descriptor is
-//! the single source of truth (the registry `telegram_updates` policy profile),
-//! so there is no hand-maintained path that can drift out of the manifest.
+//! projected from the manifest, so there is no hand-maintained path that can
+//! drift out of the manifest.
 //!
 //! Two distinct secrets flow through here and must never be conflated:
 //! * the **webhook secret** authenticates inbound updates (the host verifies the
@@ -30,9 +30,7 @@ use ironclaw_host_api::ingress::{
 use ironclaw_host_api::{
     AgentId, ExtensionId, InvocationId, ProjectId, ResourceScope, SecretHandle, TenantId, UserId,
 };
-use ironclaw_host_ingress_registry::{
-    TELEGRAM_UPDATES_ROUTE_ID, list_enabled_host_ingress_entries,
-};
+use ironclaw_host_ingress_registry::list_enabled_host_ingress_entries;
 use ironclaw_product_adapters::{
     AdapterInstallationId, AuthRequirement, DeclaredEgressHost, DeclaredEgressTarget,
     EgressCredentialHandle, ProductAdapter, ProductAdapterId, ProtocolHttpEgress,
@@ -64,7 +62,8 @@ use crate::telegram_extension_settings::{
 };
 use crate::telegram_host_ingress::{
     ExtensionInstallationIngressCredentialBinding, ExtensionInstallationIngressCredentialResolver,
-    TELEGRAM_WEBHOOK_SECRET_HEADER, TelegramHostIngressInstallation, TelegramUpdatesIngressHandler,
+    TELEGRAM_UPDATES_HOST_INGRESS_ROUTE_ID, TELEGRAM_WEBHOOK_SECRET_HEADER,
+    TelegramHostIngressInstallation, TelegramUpdatesIngressHandler,
     telegram_updates_host_ingress_registrations,
 };
 use crate::webui_serve::PublicRouteMount;
@@ -370,7 +369,7 @@ pub async fn build_telegram_updates_host_ingress_mount_from_enabled_extensions(
 }
 
 fn is_telegram_updates_declaration(declaration: &HostIngressRouteDeclaration) -> bool {
-    if declaration.route().route_id().as_str() != TELEGRAM_UPDATES_ROUTE_ID {
+    if declaration.route().route_id().as_str() != TELEGRAM_UPDATES_HOST_INGRESS_ROUTE_ID {
         return false;
     }
     matches!(

@@ -217,9 +217,33 @@ section = "host_ingress.events"
 route_id = "slack.events"
 method = "post"
 path = "/webhooks/slack/events"
-policy_profile = "slack_events"
 ack = "immediate"
 drain = "drain_before_runtime_shutdown"
+
+[host_ingress.events.policy]
+listener_class = "public_webhook"
+scope_source = "host_resolved"
+cors = "not_applicable"
+websocket_origin = "not_applicable"
+streaming = "none"
+audit = "public_callback"
+
+[host_ingress.events.policy.auth]
+type = "required"
+schemes = ["webhook_signature"]
+
+[host_ingress.events.policy.body_limit]
+type = "limited"
+max_bytes = 1048576
+
+[host_ingress.events.policy.rate_limit]
+type = "limited"
+scope = "global"
+max_requests = 12000
+window_seconds = 60
+
+[host_ingress.events.policy.effect_path]
+type = "product_workflow"
 
 [host_ingress.events.target]
 type = "product_adapter_inbound"

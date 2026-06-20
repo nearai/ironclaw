@@ -51,9 +51,8 @@ pub const TELEGRAM_UPDATES_HOST_INGRESS_ROUTE_ID: &str = "telegram.updates";
 pub const TELEGRAM_UPDATES_HOST_INGRESS_PATH: &str = "/webhooks/telegram/updates";
 /// Header carrying the per-installation webhook shared secret.
 pub const TELEGRAM_WEBHOOK_SECRET_HEADER: &str = "X-Telegram-Bot-Api-Secret-Token";
-/// Auth scheme name recorded in the route declaration's auth binding. Its
-/// `declared_auth_scheme()` maps to `WebhookSignature`, matching the policy.
-const TELEGRAM_SHARED_SECRET_AUTH_SCHEME: &str = "telegram_shared_secret";
+/// Auth scheme name recorded in the route declaration's auth binding.
+const TELEGRAM_SHARED_SECRET_AUTH_SCHEME: &str = "telegram_secret_token";
 /// Telegram updates can carry large payloads (e.g. captions, inline data); cap
 /// at 1 MiB to bound host memory while comfortably covering real updates.
 const TELEGRAM_UPDATES_BODY_LIMIT_BYTES: u64 = 1024 * 1024;
@@ -324,7 +323,7 @@ fn telegram_updates_ingress_policy() -> Result<IngressPolicy, HostIngressError> 
     IngressPolicy::new(IngressPolicyParts {
         listener_class: ListenerClass::PublicWebhook,
         auth: IngressAuthPolicy::Required {
-            schemes: vec![IngressAuthScheme::WebhookSignature],
+            schemes: vec![IngressAuthScheme::SharedSecretHeader],
         },
         scope_source: IngressScopeSource::HostResolved,
         body_limit: BodyLimitPolicy::Limited {
@@ -551,7 +550,7 @@ mod tests {
         assert_eq!(declaration.auth().len(), 1);
         assert_eq!(
             declaration.auth()[0].scheme().as_str(),
-            "telegram_shared_secret"
+            "telegram_secret_token"
         );
     }
 
@@ -563,11 +562,11 @@ mod tests {
     }
 
     #[test]
-    fn telegram_shared_secret_auth_scheme_declares_webhook_signature() {
+    fn telegram_shared_secret_auth_scheme_declares_shared_secret_header() {
         let scheme = telegram_shared_secret_auth_scheme().expect("scheme validates");
         assert_eq!(
             scheme.declared_auth_scheme(),
-            IngressAuthScheme::WebhookSignature
+            IngressAuthScheme::SharedSecretHeader
         );
     }
 

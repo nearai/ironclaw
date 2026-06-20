@@ -13,7 +13,6 @@
 #![forbid(unsafe_code)]
 
 use std::collections::{BTreeSet, HashMap};
-use std::num::{NonZeroU32, NonZeroU64};
 use std::sync::Arc;
 
 use ironclaw_extensions::{
@@ -23,13 +22,10 @@ use ironclaw_extensions::{
     ManifestSectionPath, ManifestSource, ManifestV2Error,
 };
 use ironclaw_host_api::{
-    AllowedEffectPath, AuditTraceClass, BodyLimitPolicy, CorsPolicy, HostApiError,
-    HostIngressDeclarationError, HostIngressRouteDeclaration, HostIngressTarget, HostPortCatalog,
-    IngressAckMode, IngressAuthBinding, IngressAuthPolicy, IngressAuthScheme,
-    IngressAuthSchemeName, IngressCredentialHandle, IngressDrainMode, IngressPolicy,
-    IngressPolicyParts, IngressRouteDescriptor, IngressRouteId, IngressRoutePattern,
-    IngressScopeSource, ListenerClass, NetworkMethod, RateLimitPolicy, RateLimitScope,
-    StreamingMode, WebSocketOriginPolicy,
+    HostApiError, HostIngressDeclarationError, HostIngressRouteDeclaration, HostIngressTarget,
+    HostPortCatalog, IngressAckMode, IngressAuthBinding, IngressAuthSchemeName,
+    IngressCredentialHandle, IngressDrainMode, IngressPolicy, IngressRouteDescriptor,
+    IngressRouteId, IngressRoutePattern, NetworkMethod,
 };
 use serde::Deserialize;
 use thiserror::Error;
@@ -42,20 +38,6 @@ pub use ironclaw_extensions::ManifestHash;
 
 pub const HOST_INGRESS_HOST_API_ID: &str = "ironclaw.host_ingress/v1";
 pub const HOST_INGRESS_SECTION_PREFIX: &str = "host_ingress";
-
-pub const SLACK_EVENTS_POLICY_PROFILE: &str = "slack_events";
-pub const SLACK_EVENTS_ROUTE_ID: &str = "slack.events";
-pub const SLACK_EVENTS_PATH: &str = "/webhooks/slack/events";
-pub const SLACK_EVENTS_BODY_LIMIT_BYTES: u64 = 1024 * 1024;
-pub const SLACK_EVENTS_MAX_REQUESTS: u32 = 12_000;
-pub const SLACK_EVENTS_RATE_WINDOW_SECONDS: u32 = 60;
-
-pub const TELEGRAM_UPDATES_POLICY_PROFILE: &str = "telegram_updates";
-pub const TELEGRAM_UPDATES_ROUTE_ID: &str = "telegram.updates";
-pub const TELEGRAM_UPDATES_PATH: &str = "/webhooks/telegram/updates";
-pub const TELEGRAM_UPDATES_BODY_LIMIT_BYTES: u64 = 1024 * 1024;
-pub const TELEGRAM_UPDATES_MAX_REQUESTS: u32 = 12_000;
-pub const TELEGRAM_UPDATES_RATE_WINDOW_SECONDS: u32 = 60;
 
 pub fn parse_host_ingress_manifest_record(
     raw_toml: impl Into<String>,
@@ -158,182 +140,6 @@ pub async fn list_enabled_host_ingress_entries(
 }
 
 // ---------------------------------------------------------------------------
-// Policy profiles
-// ---------------------------------------------------------------------------
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
-pub enum IngressPolicyProfile {
-    SlackEvents,
-    TelegramUpdates,
-}
-
-impl IngressPolicyProfile {
-    fn from_manifest_name(name: impl Into<String>) -> Result<Self, Error> {
-        let name = name.into();
-        match name.as_str() {
-            SLACK_EVENTS_POLICY_PROFILE => Ok(Self::SlackEvents),
-            TELEGRAM_UPDATES_POLICY_PROFILE => Ok(Self::TelegramUpdates),
-            _ => Err(Error::UnknownPolicyProfile { profile: name }),
-        }
-    }
-
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::SlackEvents => SLACK_EVENTS_POLICY_PROFILE,
-            Self::TelegramUpdates => TELEGRAM_UPDATES_POLICY_PROFILE,
-        }
-    }
-
-    pub fn route_descriptor(self) -> Result<IngressRouteDescriptor, Error> {
-        match self {
-            Self::SlackEvents => slack_events_route_descriptor(),
-            Self::TelegramUpdates => telegram_updates_route_descriptor(),
-        }
-    }
-}
-
-impl std::fmt::Display for IngressPolicyProfile {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(self.as_str())
-    }
-}
-
-fn slack_events_route_descriptor() -> Result<IngressRouteDescriptor, Error> {
-    IngressRouteDescriptor::new(
-        SLACK_EVENTS_ROUTE_ID,
-        NetworkMethod::Post,
-        SLACK_EVENTS_PATH,
-        slack_events_policy()?,
-    )
-    .map_err(|source| Error::ProfileBuild {
-        profile: IngressPolicyProfile::SlackEvents,
-        source,
-    })
-}
-
-fn slack_events_policy() -> Result<IngressPolicy, Error> {
-    IngressPolicy::new(IngressPolicyParts {
-        listener_class: ListenerClass::PublicWebhook,
-        auth: IngressAuthPolicy::Required {
-            schemes: vec![IngressAuthScheme::WebhookSignature],
-        },
-        scope_source: IngressScopeSource::HostResolved,
-        body_limit: BodyLimitPolicy::Limited {
-            max_bytes: nonzero_u64(
-                SLACK_EVENTS_BODY_LIMIT_BYTES,
-                IngressPolicyProfile::SlackEvents,
-                "body_limit.max_bytes",
-            )?,
-        },
-        rate_limit: RateLimitPolicy::Limited {
-            scope: RateLimitScope::Global,
-            max_requests: nonzero_u32(
-                SLACK_EVENTS_MAX_REQUESTS,
-                IngressPolicyProfile::SlackEvents,
-                "rate_limit.max_requests",
-            )?,
-            window_seconds: nonzero_u32(
-                SLACK_EVENTS_RATE_WINDOW_SECONDS,
-                IngressPolicyProfile::SlackEvents,
-                "rate_limit.window_seconds",
-            )?,
-        },
-        cors: CorsPolicy::NotApplicable,
-        websocket_origin: WebSocketOriginPolicy::NotApplicable,
-        streaming: StreamingMode::None,
-        audit: AuditTraceClass::PublicCallback,
-        effect_path: AllowedEffectPath::ProductWorkflow,
-    })
-    .map_err(|source| Error::ProfileBuild {
-        profile: IngressPolicyProfile::SlackEvents,
-        source,
-    })
-}
-
-fn telegram_updates_route_descriptor() -> Result<IngressRouteDescriptor, Error> {
-    IngressRouteDescriptor::new(
-        TELEGRAM_UPDATES_ROUTE_ID,
-        NetworkMethod::Post,
-        TELEGRAM_UPDATES_PATH,
-        telegram_updates_policy()?,
-    )
-    .map_err(|source| Error::ProfileBuild {
-        profile: IngressPolicyProfile::TelegramUpdates,
-        source,
-    })
-}
-
-fn telegram_updates_policy() -> Result<IngressPolicy, Error> {
-    IngressPolicy::new(IngressPolicyParts {
-        listener_class: ListenerClass::PublicWebhook,
-        // A Telegram webhook authenticates via the shared-secret header
-        // (`X-Telegram-Bot-Api-Secret-Token`), but the policy vocabulary models
-        // every public-webhook auth as `WebhookSignature` (the scheme-name
-        // string + the handler's chosen verifier carry the HMAC-vs-shared-secret
-        // distinction). Mirror Slack here.
-        auth: IngressAuthPolicy::Required {
-            schemes: vec![IngressAuthScheme::WebhookSignature],
-        },
-        scope_source: IngressScopeSource::HostResolved,
-        body_limit: BodyLimitPolicy::Limited {
-            max_bytes: nonzero_u64(
-                TELEGRAM_UPDATES_BODY_LIMIT_BYTES,
-                IngressPolicyProfile::TelegramUpdates,
-                "body_limit.max_bytes",
-            )?,
-        },
-        rate_limit: RateLimitPolicy::Limited {
-            scope: RateLimitScope::Global,
-            max_requests: nonzero_u32(
-                TELEGRAM_UPDATES_MAX_REQUESTS,
-                IngressPolicyProfile::TelegramUpdates,
-                "rate_limit.max_requests",
-            )?,
-            window_seconds: nonzero_u32(
-                TELEGRAM_UPDATES_RATE_WINDOW_SECONDS,
-                IngressPolicyProfile::TelegramUpdates,
-                "rate_limit.window_seconds",
-            )?,
-        },
-        cors: CorsPolicy::NotApplicable,
-        websocket_origin: WebSocketOriginPolicy::NotApplicable,
-        streaming: StreamingMode::None,
-        audit: AuditTraceClass::PublicCallback,
-        effect_path: AllowedEffectPath::ProductWorkflow,
-    })
-    .map_err(|source| Error::ProfileBuild {
-        profile: IngressPolicyProfile::TelegramUpdates,
-        source,
-    })
-}
-
-fn nonzero_u32(
-    value: u32,
-    profile: IngressPolicyProfile,
-    field: &'static str,
-) -> Result<NonZeroU32, Error> {
-    NonZeroU32::new(value).ok_or_else(|| Error::ProfileBuild {
-        profile,
-        source: HostApiError::InvariantViolation {
-            reason: format!("{field} must be non-zero"),
-        },
-    })
-}
-
-fn nonzero_u64(
-    value: u64,
-    profile: IngressPolicyProfile,
-    field: &'static str,
-) -> Result<NonZeroU64, Error> {
-    NonZeroU64::new(value).ok_or_else(|| Error::ProfileBuild {
-        profile,
-        source: HostApiError::InvariantViolation {
-            reason: format!("{field} must be non-zero"),
-        },
-    })
-}
-
-// ---------------------------------------------------------------------------
 // HostIngress host-api contract validator
 // ---------------------------------------------------------------------------
 
@@ -397,32 +203,20 @@ pub enum Error {
     Manifest(#[from] ManifestV2Error),
     #[error("unknown host API id {id} for host ingress section")]
     UnknownHostApiId { id: String },
-    #[error("unknown host ingress policy profile {profile}")]
-    UnknownPolicyProfile { profile: String },
     #[error("host ingress manifest section {section} parse failed: {reason}")]
     ManifestSectionParse {
         section: ManifestSectionPath,
         reason: String,
     },
-    #[error("host ingress profile {profile} failed to build: {source}")]
-    ProfileBuild {
-        profile: IngressPolicyProfile,
+    #[error("host ingress route descriptor failed to build for {section}: {source}")]
+    RouteDescriptorBuild {
+        section: ManifestSectionPath,
         source: HostApiError,
     },
     #[error("host ingress declaration validation failed for {section}: {source}")]
     DeclarationValidation {
         section: ManifestSectionPath,
         source: HostIngressDeclarationError,
-    },
-    #[error(
-        "host ingress section {section} {field} does not match {profile} profile: expected {expected}, actual {actual}"
-    )]
-    ProfileRouteMismatch {
-        section: ManifestSectionPath,
-        profile: IngressPolicyProfile,
-        field: &'static str,
-        expected: String,
-        actual: String,
     },
     #[error("installation references unknown extension manifest {extension_id}")]
     UnknownManifest { extension_id: String },
@@ -559,7 +353,7 @@ struct HostIngressSection {
     route_id: IngressRouteId,
     method: NetworkMethod,
     path: IngressRoutePattern,
-    policy_profile: IngressPolicyProfile,
+    policy: IngressPolicy,
     target: HostIngressTarget,
     auth: IngressAuthBinding,
     ack: IngressAckMode,
@@ -585,7 +379,7 @@ impl HostIngressSection {
             route_id: raw.route_id,
             method: raw.method,
             path: raw.path,
-            policy_profile: IngressPolicyProfile::from_manifest_name(raw.policy_profile)?,
+            policy: raw.policy,
             target: raw.target,
             auth: raw.auth.into_binding(&host_api.section)?,
             ack: raw.ack,
@@ -594,53 +388,26 @@ impl HostIngressSection {
     }
 
     fn into_declaration(self) -> Result<HostIngressRouteDeclaration, Error> {
-        let descriptor = self.policy_profile.route_descriptor()?;
-        self.validate_profile_route_identity(&descriptor)?;
-        HostIngressRouteDeclaration::new(
-            descriptor,
-            self.target,
-            vec![self.auth],
-            self.ack,
-            self.drain,
-        )
-        .map_err(|source| Error::DeclarationValidation {
-            section: self.section,
-            source,
-        })
-    }
-
-    fn validate_profile_route_identity(
-        &self,
-        descriptor: &IngressRouteDescriptor,
-    ) -> Result<(), Error> {
-        if descriptor.route_id().as_str() != self.route_id.as_str() {
-            return Err(Error::ProfileRouteMismatch {
-                section: self.section.clone(),
-                profile: self.policy_profile,
-                field: "route_id",
-                expected: descriptor.route_id().as_str().to_owned(),
-                actual: self.route_id.as_str().to_owned(),
-            });
-        }
-        if descriptor.method() != self.method {
-            return Err(Error::ProfileRouteMismatch {
-                section: self.section.clone(),
-                profile: self.policy_profile,
-                field: "method",
-                expected: descriptor.method().to_string(),
-                actual: self.method.to_string(),
-            });
-        }
-        if descriptor.route_pattern().as_str() != self.path.as_str() {
-            return Err(Error::ProfileRouteMismatch {
-                section: self.section.clone(),
-                profile: self.policy_profile,
-                field: "path",
-                expected: descriptor.route_pattern().as_str().to_owned(),
-                actual: self.path.as_str().to_owned(),
-            });
-        }
-        Ok(())
+        let HostIngressSection {
+            section,
+            route_id,
+            method,
+            path,
+            policy,
+            target,
+            auth,
+            ack,
+            drain,
+        } = self;
+        let descriptor =
+            IngressRouteDescriptor::new(route_id.as_str(), method, path.as_str(), policy).map_err(
+                |source| Error::RouteDescriptorBuild {
+                    section: section.clone(),
+                    source,
+                },
+            )?;
+        HostIngressRouteDeclaration::new(descriptor, target, vec![auth], ack, drain)
+            .map_err(|source| Error::DeclarationValidation { section, source })
     }
 }
 
@@ -650,7 +417,7 @@ struct RawHostIngressSection {
     route_id: IngressRouteId,
     method: NetworkMethod,
     path: IngressRoutePattern,
-    policy_profile: String,
+    policy: IngressPolicy,
     target: HostIngressTarget,
     auth: RawHostIngressAuth,
     ack: IngressAckMode,
@@ -677,13 +444,19 @@ impl RawHostIngressAuth {
 
 #[cfg(test)]
 mod tests {
+    use std::num::{NonZeroU32, NonZeroU64};
+
     use chrono::Utc;
     use ironclaw_extensions::{
         ExtensionActivationState, ExtensionCredentialBinding, ExtensionCredentialHandle,
         ExtensionInstallationId, ExtensionManifestRef, InMemoryExtensionInstallationStore,
         MANIFEST_SCHEMA_VERSION,
     };
-    use ironclaw_host_api::{CapabilityId, SecretHandle};
+    use ironclaw_host_api::{
+        AllowedEffectPath, AuditTraceClass, BodyLimitPolicy, CapabilityId, CorsPolicy,
+        IngressAuthPolicy, IngressAuthScheme, IngressScopeSource, ListenerClass, RateLimitPolicy,
+        RateLimitScope, SecretHandle, StreamingMode, WebSocketOriginPolicy,
+    };
 
     use super::*;
 
@@ -713,9 +486,33 @@ section = "host_ingress.events"
 route_id = "slack.events"
 method = "post"
 path = "/webhooks/slack/events"
-policy_profile = "slack_events"
 ack = "immediate"
 drain = "drain_before_runtime_shutdown"
+
+[host_ingress.events.policy]
+listener_class = "public_webhook"
+scope_source = "host_resolved"
+cors = "not_applicable"
+websocket_origin = "not_applicable"
+streaming = "none"
+audit = "public_callback"
+
+[host_ingress.events.policy.auth]
+type = "required"
+schemes = ["webhook_signature"]
+
+[host_ingress.events.policy.body_limit]
+type = "limited"
+max_bytes = 1048576
+
+[host_ingress.events.policy.rate_limit]
+type = "limited"
+scope = "global"
+max_requests = 12000
+window_seconds = 60
+
+[host_ingress.events.policy.effect_path]
+type = "product_workflow"
 
 [host_ingress.events.target]
 type = "product_adapter_inbound"
@@ -732,6 +529,71 @@ credential_handles = ["slack_signing_secret"]
         )
     }
 
+    fn telegram_manifest(extra: &str) -> String {
+        format!(
+            r#"
+schema_version = "{schema}"
+id = "telegram"
+name = "Telegram"
+version = "0.1.0"
+description = "Telegram product adapter"
+trust = "third_party"
+
+[runtime]
+kind = "wasm"
+module = "adapters/telegram.wasm"
+
+[[host_api]]
+id = "ironclaw.host_ingress/v1"
+section = "host_ingress.updates"
+
+[host_ingress.updates]
+route_id = "telegram.updates"
+method = "post"
+path = "/webhooks/telegram/updates"
+ack = "immediate"
+drain = "drain_before_runtime_shutdown"
+
+[host_ingress.updates.policy]
+listener_class = "public_webhook"
+scope_source = "host_resolved"
+cors = "not_applicable"
+websocket_origin = "not_applicable"
+streaming = "none"
+audit = "public_callback"
+
+[host_ingress.updates.policy.auth]
+type = "required"
+schemes = ["shared_secret_header"]
+
+[host_ingress.updates.policy.body_limit]
+type = "limited"
+max_bytes = 1048576
+
+[host_ingress.updates.policy.rate_limit]
+type = "limited"
+scope = "global"
+max_requests = 12000
+window_seconds = 60
+
+[host_ingress.updates.policy.effect_path]
+type = "product_workflow"
+
+[host_ingress.updates.target]
+type = "product_adapter_inbound"
+capability_id = "telegram.updates"
+product_adapter_section = "product_adapter.inbound"
+
+[host_ingress.updates.auth]
+scheme = "telegram_secret_token"
+credential_handles = ["telegram_webhook_secret"]
+
+{extra}
+"#,
+            schema = MANIFEST_SCHEMA_VERSION,
+        )
+    }
+
     fn parse_slack(raw: &str) -> Result<ExtensionManifestRecord, Error> {
         parse_host_ingress_manifest_record(
             raw,
@@ -741,17 +603,19 @@ credential_handles = ["slack_signing_secret"]
         )
     }
 
-    fn host_ingress_ref() -> HostApiRefV2 {
+    fn host_ingress_ref(section: &str) -> HostApiRefV2 {
         HostApiRefV2 {
             id: HostApiId::new(HOST_INGRESS_HOST_API_ID).expect("test host API id must be valid"),
-            section: ManifestSectionPath::new("host_ingress.events")
-                .expect("test section path must be valid"),
+            section: ManifestSectionPath::new(section).expect("test section path must be valid"),
         }
     }
 
-    fn project_single_section(raw: &str) -> Result<HostIngressRouteDeclaration, Error> {
+    fn project_single_section(
+        raw: &str,
+        section: &str,
+    ) -> Result<HostIngressRouteDeclaration, Error> {
         let root: toml::Value = toml::from_str(raw).expect("test TOML must parse");
-        let host_api = host_ingress_ref();
+        let host_api = host_ingress_ref(section);
         let value = section_value(&root, &host_api.section)
             .expect("test host ingress section must exist")
             .clone();
@@ -778,22 +642,15 @@ credential_handles = ["slack_signing_secret"]
         .expect("test installation must be valid")
     }
 
-    #[test]
-    fn slack_events_profile_projects_expected_policy_constants() {
-        let descriptor = IngressPolicyProfile::SlackEvents
-            .route_descriptor()
-            .expect("Slack events profile must build");
-
-        assert_eq!(descriptor.route_id().as_str(), SLACK_EVENTS_ROUTE_ID);
-        assert_eq!(descriptor.method(), NetworkMethod::Post);
-        assert_eq!(descriptor.route_pattern().as_str(), SLACK_EVENTS_PATH);
-
-        let policy = descriptor.policy();
+    fn assert_public_webhook_policy(
+        policy: &IngressPolicy,
+        expected_schemes: Vec<IngressAuthScheme>,
+    ) {
         assert_eq!(policy.listener_class(), ListenerClass::PublicWebhook);
         assert_eq!(
             policy.auth(),
             &IngressAuthPolicy::Required {
-                schemes: vec![IngressAuthScheme::WebhookSignature],
+                schemes: expected_schemes,
             }
         );
         assert_eq!(policy.scope_source(), IngressScopeSource::HostResolved);
@@ -819,66 +676,35 @@ credential_handles = ["slack_signing_secret"]
         assert_eq!(policy.streaming(), StreamingMode::None);
         assert_eq!(policy.audit(), AuditTraceClass::PublicCallback);
         assert_eq!(policy.effect_path(), &AllowedEffectPath::ProductWorkflow);
-        // TODO(step): add a composition-side cross-check against
-        // `slack_events_policy()` once this dormant registry is wired there.
     }
 
     #[test]
-    fn telegram_updates_profile_projects_expected_policy_constants() {
-        let descriptor = IngressPolicyProfile::TelegramUpdates
-            .route_descriptor()
-            .expect("Telegram updates profile must build");
+    fn slack_events_manifest_projects_policy_from_manifest() {
+        let declaration = project_single_section(&slack_manifest(""), "host_ingress.events")
+            .expect("Slack events manifest policy must project");
 
-        assert_eq!(descriptor.route_id().as_str(), TELEGRAM_UPDATES_ROUTE_ID);
-        assert_eq!(descriptor.method(), NetworkMethod::Post);
-        assert_eq!(descriptor.route_pattern().as_str(), TELEGRAM_UPDATES_PATH);
-
-        let policy = descriptor.policy();
-        assert_eq!(policy.listener_class(), ListenerClass::PublicWebhook);
         assert_eq!(
-            policy.auth(),
-            &IngressAuthPolicy::Required {
-                schemes: vec![IngressAuthScheme::WebhookSignature],
-            }
+            declaration.route().route_pattern().as_str(),
+            "/webhooks/slack/events"
         );
-        assert_eq!(policy.scope_source(), IngressScopeSource::HostResolved);
-        assert_eq!(
-            policy.body_limit(),
-            BodyLimitPolicy::Limited {
-                max_bytes: NonZeroU64::new(TELEGRAM_UPDATES_BODY_LIMIT_BYTES)
-                    .expect("test value must be non-zero"),
-            }
+        assert_public_webhook_policy(
+            declaration.route().policy(),
+            vec![IngressAuthScheme::WebhookSignature],
         );
-        assert_eq!(
-            policy.rate_limit(),
-            &RateLimitPolicy::Limited {
-                scope: RateLimitScope::Global,
-                max_requests: NonZeroU32::new(TELEGRAM_UPDATES_MAX_REQUESTS)
-                    .expect("test value must be non-zero"),
-                window_seconds: NonZeroU32::new(TELEGRAM_UPDATES_RATE_WINDOW_SECONDS)
-                    .expect("test value must be non-zero"),
-            }
-        );
-        assert_eq!(policy.cors(), CorsPolicy::NotApplicable);
-        assert_eq!(
-            policy.websocket_origin(),
-            WebSocketOriginPolicy::NotApplicable
-        );
-        assert_eq!(policy.streaming(), StreamingMode::None);
-        assert_eq!(policy.audit(), AuditTraceClass::PublicCallback);
-        assert_eq!(policy.effect_path(), &AllowedEffectPath::ProductWorkflow);
     }
 
     #[test]
-    fn telegram_updates_profile_resolves_from_manifest_name() {
+    fn telegram_updates_manifest_projects_policy_from_manifest() {
+        let declaration = project_single_section(&telegram_manifest(""), "host_ingress.updates")
+            .expect("Telegram updates manifest policy must project");
+
         assert_eq!(
-            IngressPolicyProfile::from_manifest_name(TELEGRAM_UPDATES_POLICY_PROFILE)
-                .expect("telegram_updates profile name must resolve"),
-            IngressPolicyProfile::TelegramUpdates
+            declaration.route().route_pattern().as_str(),
+            "/webhooks/telegram/updates"
         );
-        assert_eq!(
-            IngressPolicyProfile::TelegramUpdates.as_str(),
-            TELEGRAM_UPDATES_POLICY_PROFILE
+        assert_public_webhook_policy(
+            declaration.route().policy(),
+            vec![IngressAuthScheme::SharedSecretHeader],
         );
     }
 
@@ -935,16 +761,29 @@ credential_handles = ["slack_signing_secret"]
     }
 
     #[test]
-    fn unknown_profile_name_returns_error() {
+    fn unknown_policy_enum_value_is_rejected() {
         let raw = slack_manifest("").replace(
-            r#"policy_profile = "slack_events""#,
-            r#"policy_profile = "other_events""#,
+            r#"listener_class = "public_webhook""#,
+            r#"listener_class = "public_webhooktypo""#,
         );
-        let error = project_single_section(&raw).expect_err("unknown profile must reject");
+        let error = project_single_section(&raw, "host_ingress.events")
+            .expect_err("unknown policy enum value must reject");
 
         assert!(matches!(
             error,
-            Error::UnknownPolicyProfile { ref profile } if profile == "other_events"
+            Error::ManifestSectionParse { ref reason, .. } if reason.contains("public_webhooktypo")
+        ));
+    }
+
+    #[test]
+    fn zero_policy_limit_is_rejected() {
+        let raw = slack_manifest("").replace("max_requests = 12000", "max_requests = 0");
+        let error = project_single_section(&raw, "host_ingress.events")
+            .expect_err("zero rate limit must reject");
+
+        assert!(matches!(
+            error,
+            Error::ManifestSectionParse { ref reason, .. } if reason.contains("nonzero")
         ));
     }
 
@@ -954,8 +793,8 @@ credential_handles = ["slack_signing_secret"]
             r#"drain = "drain_before_runtime_shutdown""#,
             r#"drain = "none""#,
         );
-        let error =
-            project_single_section(&raw).expect_err("immediate ack without drain must reject");
+        let error = project_single_section(&raw, "host_ingress.events")
+            .expect_err("immediate ack without drain must reject");
 
         assert!(matches!(
             error,
