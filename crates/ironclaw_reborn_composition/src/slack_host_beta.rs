@@ -50,7 +50,7 @@ use sha2::{Digest, Sha256};
 use thiserror::Error;
 
 use crate::RebornRuntime;
-use crate::host_ingress::public_ingress_route_mount;
+use crate::host_ingress::{HostIngressRegistration, public_ingress_route_mount};
 use crate::outbound_preferences::{
     OutboundDeliveryTargetProvider, OutboundDeliveryTargetRegistrationOutcome,
 };
@@ -599,6 +599,7 @@ pub async fn build_slack_events_host_ingress_mount_from_enabled_extensions(
     let entries = list_enabled_host_ingress_entries(store.as_ref()).await?;
     let mut installations = Vec::new();
     let mut credential_bindings = Vec::new();
+    let mut projected_declaration = None;
     let slack_extension_id = slack_extension_id()?;
 
     for entry in entries {
@@ -608,6 +609,10 @@ pub async fn build_slack_events_host_ingress_mount_from_enabled_extensions(
         }
         if !is_slack_events_declaration(entry.declaration()) {
             continue;
+        }
+        let declaration = entry.declaration().clone();
+        if projected_declaration.is_none() {
+            projected_declaration = Some(declaration.clone());
         }
         let settings = settings_store
             .get(installation.installation_id())
@@ -643,7 +648,7 @@ pub async fn build_slack_events_host_ingress_mount_from_enabled_extensions(
             egress_credentials,
             b"host-ingress-preverified".to_vec(),
         )?;
-        let credential_handles = declaration_credential_handles(entry.declaration());
+        let credential_handles = declaration_credential_handles(&declaration);
         for ingress_credential_handle in &credential_handles {
             let secret_handle =
                 extension_secret_handle(installation, ingress_credential_handle.as_str())?;
@@ -666,9 +671,9 @@ pub async fn build_slack_events_host_ingress_mount_from_enabled_extensions(
         );
     }
 
-    if installations.is_empty() {
+    let Some(declaration) = projected_declaration else {
         return Ok(None);
-    }
+    };
 
     let handler = Arc::new(SlackEventsIngressHandler::new(installations)?);
     let resolver = Arc::new(ExtensionInstallationIngressCredentialResolver::new(
@@ -676,7 +681,10 @@ pub async fn build_slack_events_host_ingress_mount_from_enabled_extensions(
         credential_bindings,
     )?);
     Ok(Some(public_ingress_route_mount(
-        slack_events_host_ingress_registrations(handler)?,
+        vec![HostIngressRegistration {
+            declaration,
+            handler,
+        }],
         resolver,
     )?))
 }

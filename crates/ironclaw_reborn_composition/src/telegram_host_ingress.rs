@@ -40,7 +40,7 @@ use ironclaw_wasm_product_adapters::{
 
 use crate::host_ingress::{
     HostIngressAuthCandidate, HostIngressCapabilityHandler, HostIngressCredentialResolver,
-    HostIngressError, HostIngressImmediateResponse, HostIngressRegistration, ResolvedIngressSecret,
+    HostIngressError, HostIngressImmediateResponse, ResolvedIngressSecret,
     UnverifiedHostIngressRequest, VerifiedHostIngressRequest,
 };
 
@@ -210,18 +210,6 @@ impl HostIngressCapabilityHandler for TelegramUpdatesIngressHandler {
             futures::future::join_all(drains).await;
         })
     }
-}
-
-pub fn telegram_updates_host_ingress_registrations(
-    handler: Arc<TelegramUpdatesIngressHandler>,
-) -> Result<Vec<HostIngressRegistration>, HostIngressError> {
-    let declaration =
-        telegram_updates_host_ingress_declaration(handler.declared_credential_handles())?;
-    let handler: Arc<dyn HostIngressCapabilityHandler> = handler;
-    Ok(vec![HostIngressRegistration {
-        declaration,
-        handler,
-    }])
 }
 
 pub fn telegram_updates_host_ingress_declaration(
