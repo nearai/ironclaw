@@ -591,6 +591,7 @@ mod tests {
             scope.clone(),
             handle.clone(),
             SecretMaterial::from("sk-test-secret"),
+            None,
         ))
         .unwrap();
 

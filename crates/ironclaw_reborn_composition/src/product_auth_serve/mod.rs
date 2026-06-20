@@ -1845,6 +1845,7 @@ mod tests {
                 flow_secret_handle(&notion_provider_spec(), flow_id, "pkce")
                     .expect("flow secret handle"),
                 SecretMaterial::from(verifier.to_string()),
+                None,
             )
             .await
             .expect("stored DCR PKCE verifier");

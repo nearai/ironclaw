@@ -132,6 +132,7 @@ async fn host_runtime_services_routes_structured_github_wasm_search_through_runt
             scope.clone(),
             account_access_secret,
             SecretMaterial::from("ghp_fake_fixture_token"),
+            None,
         )
         .await
         .unwrap();
@@ -219,6 +220,7 @@ async fn host_runtime_services_restages_github_product_auth_for_multi_request_wa
             scope.clone(),
             account_access_secret,
             SecretMaterial::from("ghp_fake_fixture_token"),
+            None,
         )
         .await
         .unwrap();
@@ -317,6 +319,7 @@ async fn host_runtime_services_routes_google_drive_wasm_list_files_with_scoped_g
             scope.clone(),
             account_access_secret,
             SecretMaterial::from("ya29.fake_fixture_token"),
+            None,
         )
         .await
         .unwrap();
@@ -387,6 +390,7 @@ async fn host_runtime_services_routes_google_docs_wasm_get_document_with_scoped_
             scope.clone(),
             account_access_secret,
             SecretMaterial::from("ya29.fake_fixture_token"),
+            None,
         )
         .await
         .unwrap();
@@ -445,6 +449,7 @@ async fn host_runtime_services_routes_google_sheets_wasm_get_spreadsheet_with_sc
             scope.clone(),
             account_access_secret,
             SecretMaterial::from("ya29.fake_fixture_token"),
+            None,
         )
         .await
         .unwrap();
@@ -504,6 +509,7 @@ async fn host_runtime_services_routes_google_slides_wasm_get_presentation_with_s
             scope.clone(),
             account_access_secret,
             SecretMaterial::from("ya29.fake_fixture_token"),
+            None,
         )
         .await
         .unwrap();
@@ -580,6 +586,7 @@ async fn host_runtime_services_maps_github_wasm_input_errors_to_invalid_input() 
             scope.clone(),
             account_access_secret,
             SecretMaterial::from("ghp_fake_fixture_token"),
+            None,
         )
         .await
         .unwrap();

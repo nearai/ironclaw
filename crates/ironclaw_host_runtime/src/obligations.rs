@@ -2362,6 +2362,7 @@ mod tests {
                 context.resource_scope.clone(),
                 handle.clone(),
                 SecretMaterial::from("runtime-secret"),
+                None,
             )
             .await
             .unwrap();
