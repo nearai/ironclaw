@@ -381,15 +381,6 @@ impl RecordingSecretStore {
         }
     }
 
-    fn failing_refresh_put() -> Self {
-        Self {
-            puts: Mutex::new(Vec::new()),
-            deleted: Mutex::new(Vec::new()),
-            fail_refresh_put: true,
-            fail_access_put: false,
-        }
-    }
-
     fn failing_access_put() -> Self {
         Self {
             puts: Mutex::new(Vec::new()),
