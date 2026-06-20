@@ -1,10 +1,12 @@
 use std::collections::BTreeSet;
 
+use ironclaw_host_api::{CredentialHandle, RuntimeCredentialRequirementSource};
 use serde::Deserialize;
 
 use crate::v2::{
     CapabilityDeclV2, HostApiId, HostApiManifestContext, HostApiManifestContract,
     HostApiManifestProjection, HostApiRefV2, ManifestSectionPath, ManifestV2Error, RawCapabilityV2,
+    ReferencedCredential,
 };
 
 pub const CAPABILITY_PROVIDER_HOST_API_ID: &str = "ironclaw.capability_provider/v1";
@@ -53,11 +55,15 @@ impl HostApiManifestContract for CapabilityProviderHostApiContract {
     fn project_section_with_context(
         &self,
         context: &HostApiManifestContext<'_>,
-        _host_api: &HostApiRefV2,
+        host_api: &HostApiRefV2,
         section: &toml::Value,
     ) -> Result<HostApiManifestProjection, String> {
+        let capabilities = project_capabilities(context, section)?;
+        let referenced_credentials = referenced_runtime_credentials(&capabilities, host_api)?;
         Ok(HostApiManifestProjection {
-            capabilities: project_capabilities(context, section)?,
+            capabilities,
+            declared_credentials: Vec::new(),
+            referenced_credentials,
         })
     }
 }
@@ -89,6 +95,28 @@ fn project_capabilities(
         capabilities.push(capability);
     }
     Ok(capabilities)
+}
+
+fn referenced_runtime_credentials(
+    capabilities: &[CapabilityDeclV2],
+    host_api: &HostApiRefV2,
+) -> Result<Vec<ReferencedCredential>, String> {
+    let mut referenced_credentials = Vec::new();
+    for capability in capabilities {
+        for credential in &capability.runtime_credentials {
+            if credential.source != RuntimeCredentialRequirementSource::SecretHandle {
+                continue;
+            }
+            let handle = CredentialHandle::new(credential.handle.as_str())
+                .map_err(|error| error.to_string())?;
+            referenced_credentials.push(ReferencedCredential::new(
+                handle,
+                host_api.id.clone(),
+                host_api.section.clone(),
+            ));
+        }
+    }
+    Ok(referenced_credentials)
 }
 
 #[derive(Debug, Deserialize)]

@@ -407,6 +407,7 @@ fn descriptors_match_except_schema(
         })
 }
 
+mod credential_coherence;
 pub mod host_api;
 mod hosted_mcp_discovery;
 mod installations;
@@ -427,6 +428,7 @@ pub use v2::{
     HostApiManifestContract, HostApiManifestProjection, HostApiMultiplicity, HostApiRefV2,
     MANIFEST_SCHEMA_VERSION, MAX_HOOK_ENTRY_BYTES, MAX_MANIFEST_BYTES, MAX_MANIFEST_HOOKS,
     ManifestSectionPath, ManifestSource, ManifestV2Error, RESERVED_HOST_BUNDLED_ID_PREFIX,
+    ReferencedCredential,
 };
 
 pub type CapabilityManifest = CapabilityDeclV2;

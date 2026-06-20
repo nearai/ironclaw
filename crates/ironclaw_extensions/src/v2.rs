@@ -37,10 +37,12 @@
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::sync::Arc;
 
+pub use crate::credential_coherence::ReferencedCredential;
+use crate::credential_coherence::reject_dangling_credentials;
 use ironclaw_host_api::{
-    CapabilityId, CapabilityProfileId, CapabilityProfileSchemaRef, EffectKind, ExtensionId,
-    HostApiError, HostPortCatalog, HostPortId, NetworkScheme, NetworkTargetPattern, PermissionMode,
-    RequestedTrustClass, ResourceProfile, RuntimeCredentialRequirement,
+    CapabilityId, CapabilityProfileId, CapabilityProfileSchemaRef, CredentialHandle, EffectKind,
+    ExtensionId, HostApiError, HostPortCatalog, HostPortId, NetworkScheme, NetworkTargetPattern,
+    PermissionMode, RequestedTrustClass, ResourceProfile, RuntimeCredentialRequirement,
     RuntimeCredentialRequirementSource, RuntimeCredentialTarget, RuntimeKind, SecretHandle,
     TrustClass,
 };
@@ -238,6 +240,8 @@ pub struct HostApiManifestContext<'a> {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct HostApiManifestProjection {
     pub capabilities: Vec<CapabilityDeclV2>,
+    pub declared_credentials: Vec<CredentialHandle>,
+    pub referenced_credentials: Vec<ReferencedCredential>,
 }
 
 /// Host API contract validator registered by composition.
@@ -352,8 +356,22 @@ impl HostApiContractRegistry {
                 }
                 projected.capabilities.push(capability);
             }
+            projected
+                .declared_credentials
+                .extend(section_projection.declared_credentials);
+            projected
+                .referenced_credentials
+                .extend(section_projection.referenced_credentials);
         }
         sections.reject_unreferenced_operational_sections(&manifest.host_apis)?;
+        // TODO(move-1-integration): host_ingress contract should report
+        // host_ingress.*.auth.credential_handles as referenced credentials.
+        // Once that lands, tighten this from "no contradiction when a declared
+        // set exists" to "every referenced handle requires a declaration".
+        reject_dangling_credentials(
+            &projected.declared_credentials,
+            &projected.referenced_credentials,
+        )?;
         Ok(projected)
     }
 }
@@ -501,6 +519,14 @@ pub enum ManifestV2Error {
         id: HostApiId,
         section: ManifestSectionPath,
         reason: String,
+    },
+    #[error(
+        "host API {host_api} section {section} references undeclared credential handle {handle}"
+    )]
+    DanglingCredentialHandle {
+        handle: CredentialHandle,
+        host_api: HostApiId,
+        section: ManifestSectionPath,
     },
     #[error("manifest section {section} was referenced by host_api but does not exist")]
     MissingHostApiSection { section: ManifestSectionPath },

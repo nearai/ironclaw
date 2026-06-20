@@ -18,10 +18,11 @@ use std::sync::Arc;
 use ironclaw_extensions::{
     ExtensionInstallation, ExtensionInstallationError, ExtensionInstallationStore,
     ExtensionManifestRecord, ExtensionManifestV2, HostApiContractRegistry, HostApiId,
-    HostApiManifestContext, HostApiManifestContract, HostApiMultiplicity, HostApiRefV2,
-    ManifestSectionPath, ManifestSource, ManifestV2Error,
+    HostApiManifestContext, HostApiManifestContract, HostApiManifestProjection,
+    HostApiMultiplicity, HostApiRefV2, ManifestSectionPath, ManifestSource, ManifestV2Error,
+    ReferencedCredential,
 };
-use ironclaw_host_api::{ExtensionId, HostPortCatalog};
+use ironclaw_host_api::{CredentialHandle, ExtensionId, HostPortCatalog};
 use ironclaw_product_adapters::{
     AuthRequirement, DeclaredEgressTarget, EgressCredentialHandle, ProductAdapterCapabilities,
     ProductAdapterId, ProductCapabilityFlag, ProductSurfaceKind,
@@ -317,6 +318,41 @@ impl HostApiManifestContract for ProductAdapterHostApiContract {
         .map(|_| ())
         .map_err(|e| e.to_string())
     }
+
+    fn project_section_with_context(
+        &self,
+        context: &HostApiManifestContext<'_>,
+        host_api: &HostApiRefV2,
+        section: &toml::Value,
+    ) -> Result<HostApiManifestProjection, String> {
+        let adapter = ProductAdapterHostApiSection::from_value(
+            context.extension_id,
+            host_api.section.clone(),
+            section.clone(),
+        )
+        .map_err(|error| error.to_string())?;
+        let declared_credentials = adapter
+            .required_credentials()
+            .iter()
+            .map(canonical_credential_handle)
+            .collect::<Result<Vec<_>, _>>()?;
+        let referenced_credentials = adapter
+            .declared_egress()
+            .iter()
+            .filter_map(|target| target.credential_handle.as_ref())
+            .map(|handle| {
+                canonical_credential_handle(handle).map(|handle| {
+                    ReferencedCredential::new(handle, host_api.id.clone(), host_api.section.clone())
+                })
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+
+        Ok(HostApiManifestProjection {
+            capabilities: Vec::new(),
+            declared_credentials,
+            referenced_credentials,
+        })
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -417,6 +453,12 @@ fn validate_installation_against_one_manifest(
         }
     }
     Ok(())
+}
+
+fn canonical_credential_handle(
+    handle: &EgressCredentialHandle,
+) -> Result<CredentialHandle, String> {
+    CredentialHandle::new(handle.as_str()).map_err(|error| error.to_string())
 }
 
 fn validate_auth_requirement(requirement: &AuthRequirement) -> Result<(), RegistryError> {
