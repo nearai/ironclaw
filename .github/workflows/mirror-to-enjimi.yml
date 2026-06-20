@@ -31,6 +31,34 @@ jobs:
           owner: enjimi
           repositories: ironclaw
 
+      - name: Disable Dependabot on deployment mirror
+        run: |
+          set -euo pipefail
+          cat > .github/dependabot.yml <<'EOF'
+          # This repository is a deployment target. Dependency updates flow through
+          # upstream source branches and are mirrored here after review.
+          version: 2
+          updates:
+            - package-ecosystem: cargo
+              directory: "/"
+              schedule:
+                interval: weekly
+              open-pull-requests-limit: 0
+
+            - package-ecosystem: github-actions
+              directory: "/"
+              schedule:
+                interval: weekly
+              open-pull-requests-limit: 0
+          EOF
+
+          git config user.name "theredspoon mirror"
+          git config user.email "actions@github.com"
+          git add .github/dependabot.yml
+          if ! git diff --cached --quiet; then
+            git commit -m "ci: disable Dependabot on deployment mirror"
+          fi
+
       - name: Push to enjimi mirror ingress branch
         env:
           ENJIMI_TOKEN: ${{ steps.enjimi_token.outputs.token }}
