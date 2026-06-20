@@ -530,12 +530,23 @@ fn spawn_executor_task(
         thread_id = %claimed.state.scope.thread_id,
         run_id = %claimed.state.run_id,
     );
+    // Capture these before `claimed` is moved into the async block so the
+    // "turn run started" event can emit them as explicit fields. This makes
+    // the event self-contained and allows test layers to find them without
+    // relying on span registration timing (which can be racy under parallel
+    // test execution when using `tracing::dispatcher::set_default`).
+    let recovery_thread_id = claimed.state.scope.thread_id.clone();
+    let recovery_run_id_for_start = claimed.state.run_id;
     executor_tasks.spawn(
         async move {
             let recovery_run_id = claimed.state.run_id;
             let recovery_runner_id = claimed.runner_id;
             let recovery_lease_token = claimed.lease_token;
-            tracing::debug!("turn run started");
+            tracing::debug!(
+                thread_id = %recovery_thread_id,
+                run_id = %recovery_run_id_for_start,
+                "turn run started",
+            );
             let mut heartbeat_tick = interval(runner_heartbeat_interval);
             heartbeat_tick.set_missed_tick_behavior(MissedTickBehavior::Delay);
             // Consume the immediate first tick so the heartbeat loop never fires

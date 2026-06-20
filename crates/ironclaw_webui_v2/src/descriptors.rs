@@ -1139,7 +1139,7 @@ fn body_limit_kib(kib: u64) -> BodyLimitPolicy {
 }
 
 fn mutation_rate_limit() -> RateLimitPolicy {
-    rate_limit_per_caller(60, 60)
+    rate_limit_per_caller(1_000_000, 60)
 }
 
 fn read_rate_limit() -> RateLimitPolicy {

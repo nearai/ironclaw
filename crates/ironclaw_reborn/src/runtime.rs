@@ -55,7 +55,6 @@ use crate::{
     },
     text_loop_driver::TextOnlyModelReplyDriverConfig,
     turn_run_executor::RebornTurnRunExecutor,
-    turn_runner::TurnRunnerWorkerConfig,
 };
 
 /// Default number of turn-runner worker tasks spawned per runtime instance.
@@ -73,7 +72,8 @@ pub const DEFAULT_TURN_RUNNER_WORKER_COUNT: std::num::NonZeroUsize =
 
 #[derive(Debug, Clone)]
 pub struct DefaultPlannedRuntimeConfig {
-    pub worker: TurnRunnerWorkerConfig,
+    pub heartbeat_interval: std::time::Duration,
+    pub poll_interval: std::time::Duration,
     pub worker_count: std::num::NonZeroUsize,
     pub text_only_driver: TextOnlyModelReplyDriverConfig,
     pub host: TextOnlyLoopHostConfig,
@@ -82,7 +82,8 @@ pub struct DefaultPlannedRuntimeConfig {
 impl Default for DefaultPlannedRuntimeConfig {
     fn default() -> Self {
         Self {
-            worker: TurnRunnerWorkerConfig::default(),
+            heartbeat_interval: std::time::Duration::from_secs(10),
+            poll_interval: std::time::Duration::from_secs(5),
             worker_count: DEFAULT_TURN_RUNNER_WORKER_COUNT,
             text_only_driver: TextOnlyModelReplyDriverConfig::default(),
             host: TextOnlyLoopHostConfig::default(),
@@ -587,8 +588,8 @@ where
     ));
     let scheduler_config = TurnRunSchedulerConfig::default()
         .with_max_concurrent_runs(parts.config.worker_count.get())
-        .with_runner_heartbeat_interval(parts.config.worker.heartbeat_interval)
-        .with_poll_interval(parts.config.worker.poll_interval);
+        .with_runner_heartbeat_interval(parts.config.heartbeat_interval)
+        .with_poll_interval(parts.config.poll_interval);
     let scheduler_handle =
         TurnRunScheduler::new(Arc::clone(&transition_port), executor, scheduler_config)
             .start_with_channel(scheduler_notifier.clone(), wake_channel);

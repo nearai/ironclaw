@@ -1,11 +1,11 @@
-/// Concurrency test: two workers execute two runs simultaneously.
-///
-/// A barrier-blocking driver blocks inside `run()` until a `Barrier(2)` is
-/// reached, using a shared atomic entry counter to prove both runs are
-/// executing simultaneously. With a single worker the second run is never
-/// claimed while the first is blocked, so the barrier is never filled — the
-/// test would deadlock at the wait. With two workers both runs are claimed
-/// concurrently, both enter the barrier, and both eventually finish.
+//! Concurrency tests for `TurnRunScheduler` + `RebornTurnRunExecutor`.
+//!
+//! A barrier-blocking driver blocks inside `run()` until a `Barrier(2)` is
+//! reached, using a shared atomic entry counter to prove both runs are
+//! executing simultaneously. With `max_concurrent_runs = 1` the second run is
+//! never claimed while the first is blocked, so the barrier is never filled —
+//! the test would time out. With `max_concurrent_runs = 2` both runs are
+//! claimed concurrently, both enter the barrier, and both eventually finish.
 use std::sync::{
     Arc,
     atomic::{AtomicU32, Ordering},
@@ -25,11 +25,8 @@ use ironclaw_reborn::turn_run_executor::RebornTurnRunExecutor;
 use ironclaw_reborn::{
     driver_registry::{DriverKind, DriverRegistry, DriverRequirements},
     loop_driver_host::{RebornLoopDriverHostFactory, TextOnlyLoopHostConfig},
-    loop_exit_applier::{
-        InMemoryLoopExitEvidencePort, LoopExitApplier, LoopExitEvidencePort,
-        ThreadCheckpointLoopExitEvidencePort,
-    },
-    turn_runner::{HostFactory, TurnRunnerWakeReceiver, TurnRunnerWorker, TurnRunnerWorkerConfig},
+    loop_exit_applier::{InMemoryLoopExitEvidencePort, LoopExitApplier, LoopExitEvidencePort},
+    turn_runner::HostFactory,
 };
 use ironclaw_threads::{
     AcceptInboundMessageRequest, EnsureThreadRequest, InMemorySessionThreadService, MessageContent,
@@ -51,7 +48,6 @@ use ironclaw_turns::{
     runner::TurnRunTransitionPort,
 };
 use tokio::sync::Barrier;
-use tokio_util::sync::CancellationToken;
 
 // ---------------------------------------------------------------------------
 // Barrier-blocking driver
@@ -354,209 +350,6 @@ async fn submit_owned_run_on_thread(
 }
 
 // ---------------------------------------------------------------------------
-// The concurrency test
-// ---------------------------------------------------------------------------
-
-/// Two workers execute two distinct-thread runs simultaneously.
-///
-/// The barrier driver blocks inside `run()` until both invocations arrive.
-/// With `worker_count = 2` both runs are claimed concurrently and the barrier
-/// unblocks. With `worker_count = 1` only one run is ever claimed while the
-/// other stays Queued, so the barrier is never filled — the test would time
-/// out at the `Running` assertion for run_b.
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn two_workers_execute_two_runs_concurrently() {
-    let tenant_id = TenantId::new("tenant-concurrent").unwrap();
-    let agent_id = AgentId::new("agent-concurrent").unwrap();
-    let project_id = ProjectId::new("project-concurrent").unwrap();
-    let user_id = UserId::new("user-concurrent").unwrap();
-
-    let thread_service = Arc::new(InMemorySessionThreadService::default());
-    let thread_scope = ThreadScope {
-        tenant_id: tenant_id.clone(),
-        agent_id: agent_id.clone(),
-        project_id: Some(project_id.clone()),
-        owner_user_id: None,
-        mission_id: None,
-    };
-
-    let turn_store = Arc::new(InMemoryTurnStateStore::with_limits(
-        InMemoryTurnStateStoreLimits::default(),
-    ));
-    let resolver = InMemoryRunProfileResolver::default();
-
-    // Submit run 1 on thread A.
-    let thread_id_a = ThreadId::new("concurrent-thread-a").unwrap();
-    let run_id_a = submit_run_on_thread(
-        &thread_id_a,
-        &thread_service,
-        &thread_scope,
-        &turn_store,
-        &resolver,
-        "idem-concurrent-a",
-        &user_id,
-    )
-    .await;
-
-    // Submit run 2 on thread B (different thread_id = different scope).
-    let thread_id_b = ThreadId::new("concurrent-thread-b").unwrap();
-    let run_id_b = submit_run_on_thread(
-        &thread_id_b,
-        &thread_service,
-        &thread_scope,
-        &turn_store,
-        &resolver,
-        "idem-concurrent-b",
-        &user_id,
-    )
-    .await;
-
-    // Build the barrier driver (barrier size 2: needs both workers inside run()).
-    let barrier = Arc::new(Barrier::new(2));
-    let entry_count = Arc::new(AtomicU32::new(0));
-    let resolved = resolver
-        .resolve_run_profile(RunProfileResolutionRequest::interactive_default())
-        .await
-        .unwrap();
-    let descriptor = resolved.loop_driver.clone();
-
-    let mut registry = DriverRegistry::new();
-    registry
-        .register_driver(
-            Arc::new(BarrierDriver {
-                descriptor,
-                barrier: Arc::clone(&barrier),
-                entry_count: Arc::clone(&entry_count),
-            }),
-            DriverRequirements::all_required(),
-            DriverKind::Reference,
-        )
-        .unwrap();
-    let registry = Arc::new(registry);
-
-    // Build shared deps for both workers.
-    let checkpoint_state_store = Arc::new(InMemoryCheckpointStateStore::default());
-    let loop_checkpoint_store: Arc<dyn LoopCheckpointStore> = turn_store.clone();
-    let milestone_sink = Arc::new(InMemoryLoopHostMilestoneSink::default());
-    let gateway = Arc::new(NoOpGateway);
-
-    let transition_port: Arc<dyn TurnRunTransitionPort> = turn_store.clone();
-    let loop_exit_applier = Arc::new(LoopExitApplier::new(
-        Arc::clone(&transition_port),
-        Arc::new(ThreadCheckpointLoopExitEvidencePort::new(
-            Arc::clone(&thread_service),
-            turn_store.clone(),
-            loop_checkpoint_store.clone(),
-        )) as Arc<dyn LoopExitEvidencePort>,
-    ));
-
-    let host_factory = Arc::new(
-        RebornLoopDriverHostFactory::new(
-            Arc::clone(&thread_service),
-            thread_scope.clone(),
-            Arc::clone(&gateway),
-            checkpoint_state_store,
-            turn_store.clone() as Arc<dyn TurnStateStore>,
-            loop_checkpoint_store,
-            milestone_sink,
-            TextOnlyLoopHostConfig {
-                max_messages: 8,
-                require_model_route_snapshot: false,
-            },
-            InstructionSafetyContext::local_development_noop(),
-        )
-        .with_identity_context_source(
-            Arc::new(EmptyIdentityContextSource) as Arc<dyn HostIdentityContextSource>
-        )
-        .with_user_profile_source(
-            Arc::new(EmptyUserProfileSource) as Arc<dyn HostUserProfileSource>
-        ),
-    );
-
-    // Build 2 workers sharing the same wake receiver.
-    let (_wake_sender, wake_receiver) = TurnRunnerWakeReceiver::new();
-    let worker_config = TurnRunnerWorkerConfig {
-        heartbeat_interval: std::time::Duration::from_millis(20),
-        poll_interval: std::time::Duration::from_millis(10),
-        scope_filter: None, // no scope filter — both thread scopes accepted
-    };
-
-    let worker_a = TurnRunnerWorker::new(
-        worker_config.clone(),
-        Arc::clone(&transition_port),
-        Arc::clone(&loop_exit_applier),
-        Arc::clone(&registry),
-        host_factory.clone(),
-        wake_receiver.clone(),
-    );
-    let worker_b = TurnRunnerWorker::new(
-        worker_config,
-        Arc::clone(&transition_port),
-        Arc::clone(&loop_exit_applier),
-        Arc::clone(&registry),
-        host_factory.clone(),
-        wake_receiver,
-    );
-
-    let cancel = CancellationToken::new();
-    let cancel_a = cancel.clone();
-    let cancel_b = cancel.clone();
-
-    let handle_a = tokio::spawn(async move { worker_a.run(cancel_a).await });
-    let handle_b = tokio::spawn(async move { worker_b.run(cancel_b).await });
-
-    // Compute scopes for polling.
-    let scope_a = TurnScope::new(
-        tenant_id.clone(),
-        Some(agent_id.clone()),
-        Some(project_id.clone()),
-        thread_id_a,
-    );
-    let scope_b = TurnScope::new(
-        tenant_id.clone(),
-        Some(agent_id.clone()),
-        Some(project_id.clone()),
-        thread_id_b,
-    );
-
-    // Both runs must reach Failed (the barrier driver returns Err after both
-    // entries). With 2 workers: both are claimed simultaneously, both enter
-    // the barrier, entry_count reaches 2, then both fail.
-    // With 1 worker: only run_a would be claimed and would block forever at
-    // barrier.wait() (run_b stays Queued, barrier never fills) — the test
-    // would time out here.
-    wait_for_status(
-        &turn_store,
-        &scope_a,
-        run_id_a,
-        TurnStatus::Failed,
-        10,
-        "run_a should fail after barrier releases (2 workers present)",
-    )
-    .await;
-    wait_for_status(
-        &turn_store,
-        &scope_b,
-        run_id_b,
-        TurnStatus::Failed,
-        10,
-        "run_b should fail after barrier releases (proves concurrency)",
-    )
-    .await;
-
-    // Both drivers entered run() simultaneously — proves N=2 concurrency.
-    assert_eq!(
-        entry_count.load(Ordering::SeqCst),
-        2,
-        "both driver invocations should have entered run() concurrently"
-    );
-
-    cancel.cancel();
-    handle_a.await.unwrap();
-    handle_b.await.unwrap();
-}
-
-// ---------------------------------------------------------------------------
 // Config wiring test: TurnRunnerSettings → InMemoryTurnStateStoreLimits
 //
 // This is the caller-level C4 assertion. It directly verifies the mapping
@@ -713,11 +506,8 @@ async fn config_wiring_per_user_cap_enforced_via_store_limits() {
 // ---------------------------------------------------------------------------
 // TurnRunScheduler + RebornTurnRunExecutor tests
 //
-// These tests exercise the NEW production concurrency path:
+// These tests exercise the production concurrency path:
 //   TurnRunScheduler → RebornTurnRunExecutor → LoopExitApplier
-//
-// The legacy `TurnRunnerWorker` tests above remain for regression coverage;
-// the tests below are the primary proof that the scheduler+executor path works.
 // ---------------------------------------------------------------------------
 
 /// Concurrency proof for TurnRunScheduler + RebornTurnRunExecutor.

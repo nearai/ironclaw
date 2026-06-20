@@ -76,7 +76,6 @@ use ironclaw_reborn::subagent::goal_store::InMemoryBoundedSubagentGoalStore;
 use ironclaw_reborn::subagent::{
     flavors::StaticSubagentDefinitionResolver, gate_resolution::BoundedSubagentGateResolutionStore,
 };
-use ironclaw_reborn::turn_runner::TurnRunnerWorkerConfig;
 use ironclaw_threads::{
     AcceptInboundMessageRequest, EnsureThreadRequest, MessageContent, MessageKind, MessageStatus,
     SessionThreadService, ThreadHistoryRequest, ThreadScope,
@@ -2762,11 +2761,8 @@ pub async fn build_reborn_runtime(
         subagent_spawn_limits: ironclaw_loop_support::SubagentSpawnLimits::default(),
         loop_exit_evidence,
         config: DefaultPlannedRuntimeConfig {
-            worker: TurnRunnerWorkerConfig {
-                heartbeat_interval: runner.heartbeat_interval,
-                poll_interval: runner.poll_interval,
-                scope_filter: None,
-            },
+            heartbeat_interval: runner.heartbeat_interval,
+            poll_interval: runner.poll_interval,
             worker_count: runner.worker_count,
             ..DefaultPlannedRuntimeConfig::default()
         },

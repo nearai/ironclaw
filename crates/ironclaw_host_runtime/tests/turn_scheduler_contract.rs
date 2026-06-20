@@ -36,10 +36,6 @@ use ironclaw_turns::{
     },
 };
 use tokio::{sync::Notify, time::timeout};
-use tracing::field::{Field, Visit};
-use tracing_subscriber::{
-    Layer, filter::LevelFilter, layer::Context, layer::SubscriberExt, registry::LookupSpan,
-};
 
 #[derive(Default)]
 struct CompletingExecutor {
@@ -131,115 +127,6 @@ struct DurableTurnStoreStub;
 struct HangingExecutor {
     started: AtomicUsize,
     notify_started: Notify,
-}
-
-#[derive(Clone, Debug)]
-struct CapturedEvent {
-    message: String,
-    fields: Vec<(String, String)>,
-}
-
-#[derive(Clone, Default)]
-struct CorrelatedEventCapture {
-    events: Arc<Mutex<Vec<CapturedEvent>>>,
-}
-
-struct CorrelatedEventLayer {
-    events: Arc<Mutex<Vec<CapturedEvent>>>,
-}
-
-#[derive(Debug, Clone)]
-struct CapturedSpanFields(Vec<(String, String)>);
-
-#[derive(Default)]
-struct CaptureVisitor {
-    message: String,
-    fields: Vec<(String, String)>,
-}
-
-impl CorrelatedEventCapture {
-    fn layer(&self) -> CorrelatedEventLayer {
-        CorrelatedEventLayer {
-            events: Arc::clone(&self.events),
-        }
-    }
-
-    fn contains(&self, message: &str, thread_id: &str, run_id: &str) -> bool {
-        self.events.lock().unwrap().iter().any(|event| {
-            event.message == message
-                && event
-                    .fields
-                    .iter()
-                    .any(|(name, value)| name == "thread_id" && value == thread_id)
-                && event
-                    .fields
-                    .iter()
-                    .any(|(name, value)| name == "run_id" && value == run_id)
-        })
-    }
-}
-
-impl CaptureVisitor {
-    fn record_owned(&mut self, field: &Field, value: String) {
-        if field.name() == "message" {
-            self.message = value;
-        } else {
-            self.fields.push((field.name().to_string(), value));
-        }
-    }
-}
-
-impl Visit for CaptureVisitor {
-    fn record_debug(&mut self, field: &Field, value: &dyn std::fmt::Debug) {
-        let rendered = format!("{value:?}");
-        let value = rendered
-            .strip_prefix('"')
-            .and_then(|value| value.strip_suffix('"'))
-            .unwrap_or(rendered.as_str())
-            .to_string();
-        self.record_owned(field, value);
-    }
-
-    fn record_str(&mut self, field: &Field, value: &str) {
-        self.record_owned(field, value.to_string());
-    }
-}
-
-impl<S> Layer<S> for CorrelatedEventLayer
-where
-    S: tracing::Subscriber + for<'lookup> LookupSpan<'lookup>,
-{
-    fn on_new_span(
-        &self,
-        attrs: &tracing::span::Attributes<'_>,
-        id: &tracing::Id,
-        ctx: Context<'_, S>,
-    ) {
-        let mut visitor = CaptureVisitor::default();
-        attrs.record(&mut visitor);
-        if let Some(span) = ctx.span(id) {
-            span.extensions_mut()
-                .insert(CapturedSpanFields(visitor.fields));
-        }
-    }
-
-    fn on_event(&self, event: &tracing::Event<'_>, ctx: Context<'_, S>) {
-        let mut visitor = CaptureVisitor::default();
-        event.record(&mut visitor);
-        let mut fields = Vec::new();
-        if let Some(scope) = ctx.event_scope(event) {
-            for span in scope.from_root() {
-                if let Some(span_fields) = span.extensions().get::<CapturedSpanFields>() {
-                    fields.extend(span_fields.0.clone());
-                }
-            }
-        }
-        fields.extend(visitor.fields);
-        self.events.lock().unwrap().push(CapturedEvent {
-            message: visitor.message,
-            fields,
-        });
-    }
 }
 
 impl FailingExecutor {
@@ -957,18 +844,22 @@ async fn production_services_scheduler_and_coordinator_execute_turn_end_to_end()
     handle.shutdown().await;
 }
 
-#[tokio::test(flavor = "current_thread")]
+/// Verifies that `TurnRunScheduler` emits a "turn run started" debug event with
+/// `thread_id` and `run_id` correlation fields so the operator Logs panel can
+/// scope entries to a specific run.
+///
+/// # Why `#[traced_test]` instead of `set_default`
+///
+/// `tracing::dispatcher::set_default` is thread-local and subject to a global
+/// `SCOPED_COUNT` fast-path race in `tracing-core`: when parallel tests
+/// decrement the count to 0, spawned async tasks silently fall back to the
+/// no-op global dispatcher. `#[traced_test]` registers a global subscriber
+/// instead, which correctly captures events from spawned tasks regardless of
+/// parallelism. The `no-env-filter` feature is required because the event
+/// originates in this crate's `turn_scheduler` module.
+#[tokio::test]
+#[tracing_test::traced_test]
 async fn scheduler_executor_emits_thread_run_correlated_operator_log() {
-    let capture = CorrelatedEventCapture::default();
-    // Capture at DEBUG to mirror the operator-logs capture filter: run
-    // lifecycle anchors are `debug!` so they never corrupt a REPL/TUI via the
-    // info-level stderr layer, yet stay captured for the Logs panel.
-    let subscriber = tracing_subscriber::registry()
-        .with(LevelFilter::DEBUG)
-        .with(capture.layer());
-    let dispatch = tracing::Dispatch::new(subscriber);
-    let _guard = tracing::dispatcher::set_default(&dispatch);
-
     let store = Arc::new(InMemoryTurnStateStore::default());
     let transitions: Arc<dyn TurnRunTransitionPort> = store.clone();
     let executor = Arc::new(CompletingExecutor::default());
@@ -990,10 +881,29 @@ async fn scheduler_executor_emits_thread_run_correlated_operator_log() {
     wait_for_status(&*store, scope, run_id, TurnStatus::Completed).await;
     handle.shutdown().await;
 
-    assert!(
-        capture.contains("turn run started", &thread_id, &run_id.to_string()),
-        "scheduler executor should emit a run-scoped tracing event carrying thread_id and run_id"
-    );
+    let run_id_str = run_id.to_string();
+    // `logs_assert` gives access to all captured log lines from this test.
+    // We verify that at least one line contains the "turn run started" message
+    // together with the expected thread_id and run_id correlation fields.
+    logs_assert(|lines: &[&str]| {
+        let found = lines.iter().any(|line| {
+            line.contains("turn run started")
+                && line.contains(&format!("thread_id={thread_id}"))
+                && line.contains(&format!("run_id={run_id_str}"))
+        });
+        if found {
+            Ok(())
+        } else {
+            let matching: Vec<_> = lines
+                .iter()
+                .filter(|l| l.contains("turn run started"))
+                .collect();
+            Err(format!(
+                "no log line found with 'turn run started', thread_id={thread_id}, run_id={run_id_str}; \
+                 lines_with_message={matching:?}"
+            ))
+        }
+    });
 }
 
 #[tokio::test]
