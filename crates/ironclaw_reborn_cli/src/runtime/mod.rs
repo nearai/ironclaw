@@ -752,6 +752,23 @@ fn reject_unsupported_runtime_sections(
 
 const MAX_WORKER_COUNT: usize = 32;
 
+/// Resolve a `[runner]` concurrency cap against the in-effect default.
+///
+/// - `None` (field absent from the file) → keep `current_default` (the value
+///   `TurnRunnerSettings::default()` already placed in `settings`).
+/// - `Some(0)` → explicit "unlimited" sentinel → `None`.
+/// - `Some(n)` → that cap.
+fn resolve_concurrency_cap(
+    raw: Option<u32>,
+    current_default: Option<std::num::NonZeroU32>,
+) -> Option<std::num::NonZeroU32> {
+    match raw {
+        None => current_default,
+        Some(0) => None,
+        Some(n) => std::num::NonZeroU32::new(n),
+    }
+}
+
 fn runner_settings(
     config_file: Option<&ironclaw_reborn_config::RebornConfigFile>,
 ) -> anyhow::Result<TurnRunnerSettings> {
@@ -792,15 +809,20 @@ fn runner_settings(
             })?
         };
 
-        settings.max_concurrent_runs_per_user = runner
-            .max_concurrent_runs_per_user
-            .and_then(std::num::NonZeroU32::new); // silent-ok: settings read [runner].max_concurrent_runs_per_user — 0 is an explicit "unlimited" sentinel mapped to None.
-        settings.max_concurrent_trigger_runs = runner
-            .max_concurrent_trigger_runs
-            .and_then(std::num::NonZeroU32::new); // silent-ok: settings read [runner].max_concurrent_trigger_runs — 0 is an explicit "unlimited" sentinel mapped to None.
-        settings.max_concurrent_conversation_runs = runner
-            .max_concurrent_conversation_runs
-            .and_then(std::num::NonZeroU32::new); // silent-ok: settings read [runner].max_concurrent_conversation_runs — 0 is an explicit "unlimited" sentinel mapped to None.
+        // Each cap: absent in the file → keep the struct default already in
+        // `settings`; explicit `0` → "unlimited" sentinel (None); positive → cap.
+        settings.max_concurrent_runs_per_user = resolve_concurrency_cap(
+            runner.max_concurrent_runs_per_user,
+            settings.max_concurrent_runs_per_user,
+        );
+        settings.max_concurrent_trigger_runs = resolve_concurrency_cap(
+            runner.max_concurrent_trigger_runs,
+            settings.max_concurrent_trigger_runs,
+        );
+        settings.max_concurrent_conversation_runs = resolve_concurrency_cap(
+            runner.max_concurrent_conversation_runs,
+            settings.max_concurrent_conversation_runs,
+        );
     }
     Ok(settings)
 }
@@ -841,8 +863,34 @@ mod tests {
             settings.worker_count.get(),
             DEFAULT_TURN_RUNNER_WORKER_COUNT.get()
         );
-        assert!(settings.max_concurrent_runs_per_user.is_none());
-        assert!(settings.max_concurrent_trigger_runs.is_none());
+        // Out-of-box: per-user + trigger caps protect live chat from a
+        // trigger storm; conversations stay uncapped.
+        assert_eq!(
+            settings.max_concurrent_runs_per_user.map(|v| v.get()),
+            Some(3)
+        );
+        assert_eq!(
+            settings.max_concurrent_trigger_runs.map(|v| v.get()),
+            Some(8)
+        );
+        assert!(settings.max_concurrent_conversation_runs.is_none());
+    }
+
+    #[test]
+    fn runner_settings_present_section_absent_caps_keep_defaults() {
+        // A `[runner]` section that only tunes worker_count must NOT silently
+        // wipe the protective cap defaults.
+        let cfg = parse_runner_section("[runner]\nworker_count = 7\n");
+        let settings = runner_settings(Some(&cfg)).expect("should succeed");
+        assert_eq!(settings.worker_count.get(), 7);
+        assert_eq!(
+            settings.max_concurrent_runs_per_user.map(|v| v.get()),
+            Some(3)
+        );
+        assert_eq!(
+            settings.max_concurrent_trigger_runs.map(|v| v.get()),
+            Some(8)
+        );
         assert!(settings.max_concurrent_conversation_runs.is_none());
     }
 

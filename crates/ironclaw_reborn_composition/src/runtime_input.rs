@@ -28,7 +28,10 @@ use ironclaw_host_api::{AgentId, ProjectId, TenantId, Timestamp, UserId};
 #[cfg(any(test, feature = "test-support"))]
 use ironclaw_loop_support::HostManagedModelGateway;
 use ironclaw_loop_support::HostSkillContextSource;
-use ironclaw_reborn::runtime::DEFAULT_TURN_RUNNER_WORKER_COUNT;
+use ironclaw_reborn::runtime::{
+    DEFAULT_MAX_CONCURRENT_RUNS_PER_USER, DEFAULT_MAX_CONCURRENT_TRIGGER_RUNS,
+    DEFAULT_TURN_RUNNER_WORKER_COUNT,
+};
 use ironclaw_reborn_config::BudgetDefaults;
 #[cfg(feature = "root-llm-provider")]
 use ironclaw_reborn_config::RebornBootConfig;
@@ -217,8 +220,9 @@ impl Default for TurnRunnerSettings {
             heartbeat_interval: DEFAULT_TURN_RUNNER_HEARTBEAT_INTERVAL,
             poll_interval: DEFAULT_TURN_RUNNER_POLL_INTERVAL,
             worker_count: DEFAULT_TURN_RUNNER_WORKER_COUNT,
-            max_concurrent_runs_per_user: None,
-            max_concurrent_trigger_runs: None,
+            max_concurrent_runs_per_user: Some(DEFAULT_MAX_CONCURRENT_RUNS_PER_USER),
+            max_concurrent_trigger_runs: Some(DEFAULT_MAX_CONCURRENT_TRIGGER_RUNS),
+            // `None` = conversations may use every slot not held by triggers.
             max_concurrent_conversation_runs: None,
         }
     }

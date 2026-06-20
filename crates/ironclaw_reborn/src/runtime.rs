@@ -62,12 +62,33 @@ use crate::{
 /// Used by [`DefaultPlannedRuntimeConfig`] and [`TurnRunnerSettings`] so the
 /// value is defined exactly once and shared across all crates in the stack.
 pub const DEFAULT_TURN_RUNNER_WORKER_COUNT: std::num::NonZeroUsize =
-    match std::num::NonZeroUsize::new(4) {
+    match std::num::NonZeroUsize::new(16) {
         Some(v) => v,
-        // 4 is a non-zero compile-time constant so this arm is never reached.
+        // 16 is a non-zero compile-time constant so this arm is never reached.
         // `NonZeroUsize::MIN` (= 1) is used as a non-panicking fallback so the
         // CI "no panics in production code" check stays green.
         None => std::num::NonZeroUsize::MIN,
+    };
+
+/// Default per-`(tenant, ScheduledTrigger)` concurrency cap.
+///
+/// Set below [`DEFAULT_TURN_RUNNER_WORKER_COUNT`] so background triggers can
+/// never occupy the whole scheduler pool: `worker_count - trigger_cap` slots
+/// (16 - 8 = 8) stay reserved for live conversation runs.
+pub const DEFAULT_MAX_CONCURRENT_TRIGGER_RUNS: std::num::NonZeroU32 =
+    match std::num::NonZeroU32::new(8) {
+        Some(v) => v,
+        // 8 is a non-zero compile-time constant so this arm is never reached.
+        None => std::num::NonZeroU32::MIN,
+    };
+
+/// Default per-`(tenant, owner user)` concurrency cap so a single user (or a
+/// thread-storm) cannot monopolise the shared scheduler pool.
+pub const DEFAULT_MAX_CONCURRENT_RUNS_PER_USER: std::num::NonZeroU32 =
+    match std::num::NonZeroU32::new(3) {
+        Some(v) => v,
+        // 3 is a non-zero compile-time constant so this arm is never reached.
+        None => std::num::NonZeroU32::MIN,
     };
 
 #[derive(Debug, Clone)]
