@@ -413,7 +413,13 @@ impl RebornProductAuthServicePorts {
     pub(crate) fn into_services(
         self,
         continuation_dispatcher: Arc<dyn RebornAuthContinuationDispatcher>,
+        secret_store: Arc<dyn ironclaw_secrets::SecretStore>,
     ) -> RebornProductAuthServices {
+        // `secret_store` is required here (not defaulted) so the store that the
+        // OAuth provider client writes access-token `expires_at` to is
+        // structurally the same store the inline-refresh margin check (A2)
+        // reads from. Defaulting it would silently split the read/write stores
+        // and make the conditional-refresh skip a no-op in production.
         RebornProductAuthServices::new(
             self.flow_manager,
             self.interaction_service,
@@ -425,6 +431,7 @@ impl RebornProductAuthServicePorts {
         )
         .with_manual_token_flow_service(self.manual_token_flow_service)
         .with_credential_account_record_source(self.credential_account_record_source)
+        .with_secret_store(secret_store)
     }
 
     pub fn with_provider_client(mut self, provider_client: Arc<dyn AuthProviderClient>) -> Self {
@@ -1294,7 +1301,10 @@ impl RebornProductAuthServices {
     ) -> Self {
         let services = Arc::new(InMemoryAuthProductServices::new());
         RebornProductAuthServicePorts::from_shared(services.clone())
-            .into_services(continuation_dispatcher)
+            .into_services(
+                continuation_dispatcher,
+                Arc::new(ironclaw_secrets::InMemorySecretStore::new()),
+            )
             .with_flow_record_source(services)
     }
 }
@@ -1600,7 +1610,10 @@ mod tests {
 
         let ports =
             RebornProductAuthServicePorts::from_shared_with_provider(shared, provider_client);
-        let services = ports.into_services(Arc::new(NoopAuthContinuationDispatcher));
+        let services = ports.into_services(
+            Arc::new(NoopAuthContinuationDispatcher),
+            Arc::new(ironclaw_secrets::InMemorySecretStore::new()),
+        );
 
         assert_eq!(arc_data_ptr(&services.flow_manager()), shared_ptr);
         assert_eq!(arc_data_ptr(&services.interaction_service()), shared_ptr);

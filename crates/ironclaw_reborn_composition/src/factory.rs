@@ -681,12 +681,14 @@ fn compose_product_auth_services(
     turn_coordinator: Arc<dyn ironclaw_turns::TurnCoordinator>,
     provider_composition: OAuthProviderComposition,
     security_audit_sink: Option<Arc<dyn ironclaw_events::SecurityAuditSink>>,
+    secret_store: Arc<dyn SecretStore>,
 ) -> Arc<RebornProductAuthServices> {
     let ports = match provider_composition.client {
         Some(provider_client) => ports.with_provider_client(provider_client),
         None => ports,
     };
-    let mut services = ports.into_services(auth_continuation_dispatcher(turn_coordinator));
+    let mut services =
+        ports.into_services(auth_continuation_dispatcher(turn_coordinator), secret_store);
     if let Some(sink) = security_audit_sink {
         services = services.with_security_audit_sink(sink);
     }
@@ -951,6 +953,7 @@ async fn build_local_dev(input: RebornBuildInput) -> Result<RebornServices, Rebo
             turn_coordinator.clone(),
             provider_composition,
             security_audit_sink.clone(),
+            Arc::clone(&secret_store),
         ),
         None => {
             #[cfg(any(feature = "libsql", feature = "postgres"))]
@@ -967,7 +970,10 @@ async fn build_local_dev(input: RebornBuildInput) -> Result<RebornServices, Rebo
                     Arc::clone(&durable_services),
                     provider_client,
                 )
-                .into_services(auth_continuation_dispatcher(turn_coordinator.clone()))
+                .into_services(
+                    auth_continuation_dispatcher(turn_coordinator.clone()),
+                    Arc::clone(&secret_store),
+                )
                 .with_flow_record_source(durable_services);
                 let services = match provider_composition.dcr_registry.clone() {
                     Some(registry) => services.with_dcr_oauth_registry(registry),
@@ -3332,6 +3338,7 @@ where
         turn_coordinator.clone(),
         provider_composition,
         security_audit_sink,
+        Arc::clone(&secret_store),
     );
     let product_auth_ready = true;
     // Wire ProductAuthAccount runtime credential resolver before
