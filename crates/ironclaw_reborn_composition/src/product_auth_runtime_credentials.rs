@@ -224,19 +224,16 @@ impl RuntimeCredentialAccountVisibilityPolicy for DefaultRuntimeCredentialAccoun
 pub(crate) struct ProductAuthRuntimeCredentialAccountRefresher {
     refresh_accounts: Arc<dyn RuntimeCredentialAccountRefreshPort>,
     secret_store: Arc<dyn ironclaw_secrets::SecretStore>,
-    access_refresh_margin: std::time::Duration,
 }
 
 impl ProductAuthRuntimeCredentialAccountRefresher {
     pub(crate) fn new(
         refresh_accounts: Arc<dyn RuntimeCredentialAccountRefreshPort>,
         secret_store: Arc<dyn ironclaw_secrets::SecretStore>,
-        access_refresh_margin: std::time::Duration,
     ) -> Self {
         Self {
             refresh_accounts,
             secret_store,
-            access_refresh_margin,
         }
     }
 }
@@ -405,7 +402,7 @@ impl RuntimeCredentialAccountRefreshService for ProductAuthRuntimeCredentialAcco
             if let Some(meta) = metadata
                 && let Some(expires_at) = meta.expires_at
             {
-                let margin = chrono::Duration::from_std(self.access_refresh_margin)
+                let margin = chrono::Duration::from_std(DEFAULT_ACCESS_REFRESH_MARGIN)
                     .unwrap_or(chrono::Duration::seconds(300));
                 if expires_at
                     .checked_sub_signed(margin)

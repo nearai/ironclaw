@@ -231,11 +231,9 @@ impl Default for PollSettings {
 /// the 7-day refresh-token death window from expiring during periods of
 /// inactivity.
 ///
-/// The `access_refresh_margin` field controls the inline access-token expiry
-/// gate — accounts whose access token expires within this window are refreshed
-/// proactively at the next inline dispatch (in
-/// `product_auth_runtime_credentials.rs`), independently of the background
-/// sweep interval.
+/// The inline access-token expiry gate is controlled by the fixed
+/// `DEFAULT_ACCESS_REFRESH_MARGIN` constant in
+/// `product_auth_runtime_credentials.rs`; it is not configurable here.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CredentialRefreshSettings {
     /// Whether the worker is enabled. Defaults to `false`; use
@@ -264,14 +262,8 @@ pub struct CredentialRefreshSettings {
     /// work done in a single sweep to avoid a large initial backfill
     /// overloading the token endpoint.
     ///
-    /// Default: 10.
+    /// Default: 5.
     pub max_per_tick: usize,
-    /// Minimum remaining lifetime an access token must have before the inline
-    /// refresh path skips a token-endpoint round-trip. Tokens expiring within
-    /// this window are refreshed proactively.
-    ///
-    /// Default: 5 minutes.
-    pub access_refresh_margin: Duration,
 }
 
 impl Default for CredentialRefreshSettings {
@@ -282,8 +274,7 @@ impl Default for CredentialRefreshSettings {
             idle_threshold: Duration::from_secs(2 * 24 * 3600),
             startup_jitter_max: Duration::ZERO,
             tick_jitter_max: Duration::ZERO,
-            max_per_tick: 10,
-            access_refresh_margin: Duration::from_secs(5 * 60),
+            max_per_tick: 5,
         }
     }
 }

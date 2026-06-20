@@ -1168,19 +1168,21 @@ where
         scope: ResourceScope,
         handle: SecretHandle,
         material: SecretMaterial,
-        _expires_at: Option<Timestamp>,
+        expires_at: Option<Timestamp>,
     ) -> Result<SecretMetadata, SecretStoreError> {
+        let params = if let Some(t) = expires_at {
+            CreateSecretParams::from_secret(handle.to_string(), material).with_expiry(t)
+        } else {
+            CreateSecretParams::from_secret(handle.to_string(), material)
+        };
         self.inner
-            .create(
-                &scoped_legacy_user_id(&scope),
-                CreateSecretParams::from_secret(handle.to_string(), material),
-            )
+            .create(&scoped_legacy_user_id(&scope), params)
             .await
             .map_err(map_legacy_secret_error)?;
         Ok(SecretMetadata {
             scope,
             handle,
-            expires_at: None,
+            expires_at,
         })
     }
 
@@ -1194,10 +1196,10 @@ where
             .get(&scoped_legacy_user_id(scope), handle.as_str())
             .await
         {
-            Ok(_) => Ok(Some(SecretMetadata {
+            Ok(secret) => Ok(Some(SecretMetadata {
                 scope: scope.clone(),
                 handle: handle.clone(),
-                expires_at: None,
+                expires_at: secret.expires_at,
             })),
             Err(SecretError::NotFound(_)) => Ok(None),
             Err(error) => Err(map_legacy_secret_error(error)),
@@ -1418,9 +1420,9 @@ impl SecretStore for InMemorySecretStore {
         scope: ResourceScope,
         handle: SecretHandle,
         material: SecretMaterial,
-        _expires_at: Option<Timestamp>,
+        expires_at: Option<Timestamp>,
     ) -> Result<SecretMetadata, SecretStoreError> {
-        self.inner.put(scope, handle, material, None).await
+        self.inner.put(scope, handle, material, expires_at).await
     }
 
     async fn metadata(

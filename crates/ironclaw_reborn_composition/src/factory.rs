@@ -1010,9 +1010,7 @@ async fn build_local_dev(input: RebornBuildInput) -> Result<RebornServices, Rebo
     services = services.with_runtime_credential_account_resolver(Arc::new(
         ProductAuthRuntimeCredentialResolver::new_with_refresh(
             product_auth.runtime_credential_account_selection_service(),
-            product_auth.runtime_credential_account_refresh_service(
-                crate::product_auth_runtime_credentials::DEFAULT_ACCESS_REFRESH_MARGIN,
-            ),
+            product_auth.runtime_credential_account_refresh_service(),
         ),
     ));
     let mut available_extensions = AvailableExtensionCatalog::from_filesystem_root(
@@ -3344,9 +3342,7 @@ where
     let services = services.with_runtime_credential_account_resolver(Arc::new(
         ProductAuthRuntimeCredentialResolver::new_with_refresh(
             product_auth_services.runtime_credential_account_selection_service(),
-            product_auth_services.runtime_credential_account_refresh_service(
-                crate::product_auth_runtime_credentials::DEFAULT_ACCESS_REFRESH_MARGIN,
-            ),
+            product_auth_services.runtime_credential_account_refresh_service(),
         ),
     ));
     register_bundled_gsuite_first_party_handlers(

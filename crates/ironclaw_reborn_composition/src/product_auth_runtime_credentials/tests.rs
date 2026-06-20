@@ -6,12 +6,9 @@ use ironclaw_auth::{
 use ironclaw_host_api::{
     ExtensionId, InvocationId, MissionId, ResourceScope, RuntimeCredentialAccountProviderId,
     RuntimeCredentialAccountSetup, RuntimeCredentialAuthRequirement, SecretHandle, ThreadId,
-    Timestamp, UserId,
+    UserId,
 };
-use ironclaw_secrets::{
-    InMemorySecretStore, SecretLease, SecretLeaseId, SecretMaterial, SecretMetadata, SecretStore,
-    SecretStoreError,
-};
+use ironclaw_secrets::{InMemorySecretStore, SecretStore};
 
 use super::*;
 
@@ -41,7 +38,6 @@ fn resolver_with_refresh(
         Arc::new(ProductAuthRuntimeCredentialAccountRefresher::new(
             Arc::new(TestRuntimeCredentialRefreshPort(accounts)),
             Arc::new(InMemorySecretStore::new()),
-            std::time::Duration::from_secs(5 * 60),
         )),
     )
 }
@@ -1162,7 +1158,7 @@ async fn resolver_uses_most_recent_account_across_multiple_reusable_logins() {
 
 fn resolver_with_refresh_and_store(
     accounts: Arc<InMemoryAuthProductServices>,
-    secret_store: Arc<ExpiryAwareSecretStore>,
+    secret_store: Arc<InMemorySecretStore>,
 ) -> ProductAuthRuntimeCredentialResolver {
     ProductAuthRuntimeCredentialResolver::new_with_refresh(
         Arc::new(
@@ -1174,120 +1170,8 @@ fn resolver_with_refresh_and_store(
         Arc::new(ProductAuthRuntimeCredentialAccountRefresher::new(
             Arc::new(TestRuntimeCredentialRefreshPort(accounts)),
             secret_store,
-            std::time::Duration::from_secs(5 * 60),
         )),
     )
-}
-
-/// A secret store that tracks `expires_at` in memory for test purposes.
-/// `InMemorySecretStore` discards expires_at, so we need this wrapper.
-struct ExpiryAwareSecretStore {
-    expiries: std::sync::Mutex<std::collections::HashMap<String, Timestamp>>,
-    inner: InMemorySecretStore,
-}
-
-impl ExpiryAwareSecretStore {
-    fn new() -> Self {
-        Self {
-            expiries: std::sync::Mutex::new(std::collections::HashMap::new()),
-            inner: InMemorySecretStore::new(),
-        }
-    }
-
-    async fn put_with_expiry(
-        &self,
-        scope: ResourceScope,
-        handle: SecretHandle,
-        expires_at: Timestamp,
-    ) {
-        let key = format!("{}/{}", scope.user_id.as_str(), handle.as_str());
-        self.expiries.lock().unwrap().insert(key, expires_at);
-        // Also write to inner store (required for metadata() to return Some)
-        self.inner
-            .put(
-                scope,
-                handle,
-                ironclaw_secrets::SecretMaterial::from("[placeholder]".to_string()),
-                None,
-            )
-            .await
-            .ok();
-    }
-}
-
-#[async_trait::async_trait]
-impl SecretStore for ExpiryAwareSecretStore {
-    async fn put(
-        &self,
-        scope: ResourceScope,
-        handle: SecretHandle,
-        material: SecretMaterial,
-        expires_at: Option<Timestamp>,
-    ) -> Result<SecretMetadata, SecretStoreError> {
-        if let Some(exp) = expires_at {
-            let key = format!("{}/{}", scope.user_id.as_str(), handle.as_str());
-            self.expiries.lock().unwrap().insert(key, exp);
-        }
-        let mut meta = self
-            .inner
-            .put(scope.clone(), handle.clone(), material, None)
-            .await?;
-        meta.expires_at = expires_at;
-        Ok(meta)
-    }
-
-    async fn metadata(
-        &self,
-        scope: &ResourceScope,
-        handle: &SecretHandle,
-    ) -> Result<Option<SecretMetadata>, SecretStoreError> {
-        let inner_meta = self.inner.metadata(scope, handle).await?;
-        let Some(mut meta) = inner_meta else {
-            return Ok(None);
-        };
-        let key = format!("{}/{}", scope.user_id.as_str(), handle.as_str());
-        meta.expires_at = self.expiries.lock().unwrap().get(&key).copied();
-        Ok(Some(meta))
-    }
-
-    async fn delete(
-        &self,
-        scope: &ResourceScope,
-        handle: &SecretHandle,
-    ) -> Result<bool, SecretStoreError> {
-        self.inner.delete(scope, handle).await
-    }
-
-    async fn lease_once(
-        &self,
-        scope: &ResourceScope,
-        handle: &SecretHandle,
-    ) -> Result<SecretLease, SecretStoreError> {
-        self.inner.lease_once(scope, handle).await
-    }
-
-    async fn consume(
-        &self,
-        scope: &ResourceScope,
-        lease_id: SecretLeaseId,
-    ) -> Result<SecretMaterial, SecretStoreError> {
-        self.inner.consume(scope, lease_id).await
-    }
-
-    async fn revoke(
-        &self,
-        scope: &ResourceScope,
-        lease_id: SecretLeaseId,
-    ) -> Result<SecretLease, SecretStoreError> {
-        self.inner.revoke(scope, lease_id).await
-    }
-
-    async fn leases_for_scope(
-        &self,
-        scope: &ResourceScope,
-    ) -> Result<Vec<SecretLease>, SecretStoreError> {
-        self.inner.leases_for_scope(scope).await
-    }
 }
 
 #[tokio::test]
@@ -1309,14 +1193,16 @@ async fn resolver_skips_inline_refresh_when_access_token_is_fresh() {
         .await;
 
     // Pre-populate the secret store with a fresh expiry (1 hour from now).
-    let secret_store = Arc::new(ExpiryAwareSecretStore::new());
+    let secret_store = Arc::new(InMemorySecretStore::new());
     secret_store
-        .put_with_expiry(
+        .put(
             scope.clone(),
             access_secret.clone(),
-            Utc::now() + chrono::Duration::hours(1),
+            ironclaw_secrets::SecretMaterial::from("[placeholder]".to_string()),
+            Some(Utc::now() + chrono::Duration::hours(1)),
         )
-        .await;
+        .await
+        .ok();
 
     let resolver = resolver_with_refresh_and_store(accounts.clone(), secret_store);
 
@@ -1353,14 +1239,16 @@ async fn resolver_refreshes_when_access_token_is_within_margin() {
         .await;
 
     // Pre-populate the secret store with an expiry within the margin (2 minutes from now).
-    let secret_store = Arc::new(ExpiryAwareSecretStore::new());
+    let secret_store = Arc::new(InMemorySecretStore::new());
     secret_store
-        .put_with_expiry(
+        .put(
             scope.clone(),
             stale_access.clone(),
-            Utc::now() + chrono::Duration::minutes(2),
+            ironclaw_secrets::SecretMaterial::from("[placeholder]".to_string()),
+            Some(Utc::now() + chrono::Duration::minutes(2)),
         )
-        .await;
+        .await
+        .ok();
 
     let resolver = resolver_with_refresh_and_store(accounts.clone(), secret_store);
 

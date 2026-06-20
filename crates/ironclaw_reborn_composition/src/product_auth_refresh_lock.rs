@@ -44,9 +44,11 @@
 //! # Pool / connection error fallback
 //!
 //! If the pool returns a connection error, or `pg_try_advisory_lock` itself
-//! fails, the worker logs at `debug!` and runs the sweep anyway (single-process
-//! availability over strict cross-process serialization). The in-process guard
-//! still prevents local stampede.
+//! fails, the worker logs at `debug!` and skips the tick entirely
+//! (fail-closed). Keepalive is best-effort: missing one tick is harmless
+//! because the worker retries on the next scheduled interval. The in-process
+//! guard inside `ProviderBackedCredentialAccountService` still prevents local
+//! stampede if connectivity recovers mid-tick.
 
 #[cfg(feature = "postgres")]
 use tracing::debug;
@@ -124,8 +126,8 @@ impl CredentialRefreshLeaderLock {
     ///   If the lock is not acquired, returns [`LeaderOutcome::NotLeader`]
     ///   without invoking `sweep`. If acquired, invokes `sweep`, then
     ///   explicitly releases the lock before returning.
-    ///   On pool/connection errors, falls through to invoke `sweep` anyway
-    ///   (availability over strict serialization).
+    ///   On pool/connection errors, skips the tick and returns
+    ///   [`LeaderOutcome::NotLeader`] (fail-closed; retries next tick).
     pub(crate) async fn run_as_leader<F, Fut, T>(&self, sweep: F) -> LeaderOutcome<T>
     where
         F: FnOnce() -> Fut,
@@ -157,16 +159,16 @@ where
 {
     let (key_a, key_b) = KEEPALIVE_LOCK_KEY;
 
-    // Obtain a connection from the pool.  On failure, fall through and run
-    // the sweep anyway (availability over strict cross-process serialization).
+    // Obtain a connection from the pool. On failure, skip the tick (fail-closed):
+    // keepalive is best-effort and will retry on the next scheduled interval.
     let conn = match pool.get().await {
         Ok(c) => c,
         Err(err) => {
             debug!(
                 error = %err,
-                "credential-refresh leader lock: pool error; running sweep without lock"
+                "credential-refresh leader lock: pool error; skipping tick (fail-closed)"
             );
-            return LeaderOutcome::Ran(sweep().await);
+            return LeaderOutcome::NotLeader;
         }
     };
 
@@ -180,9 +182,9 @@ where
         Err(err) => {
             debug!(
                 error = %err,
-                "credential-refresh leader lock: pg_try_advisory_lock failed; running sweep without lock"
+                "credential-refresh leader lock: pg_try_advisory_lock failed; skipping tick (fail-closed)"
             );
-            return LeaderOutcome::Ran(sweep().await);
+            return LeaderOutcome::NotLeader;
         }
     };
 

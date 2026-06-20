@@ -227,9 +227,21 @@ async fn sweep_once(
     let candidates = deps.candidate_source.list_refresh_candidates().await;
 
     // Filter to idle accounts (by updated_at) and apply per-tick cap.
-    let to_refresh: Vec<_> = candidates
+    let idle_candidates: Vec<_> = candidates
         .into_iter()
         .filter(|account| account.updated_at < idle_cutoff)
+        .collect();
+    let total = idle_candidates.len();
+    if total > settings.max_per_tick {
+        tracing::debug!(
+            dropped = total - settings.max_per_tick,
+            total,
+            max_per_tick = settings.max_per_tick,
+            "credential refresh: candidate list truncated to max_per_tick"
+        );
+    }
+    let to_refresh: Vec<_> = idle_candidates
+        .into_iter()
         .take(settings.max_per_tick)
         .collect();
 
@@ -352,7 +364,7 @@ mod tests {
         assert_eq!(settings.tick_jitter_max, Duration::ZERO);
         assert_eq!(settings.interval, Duration::from_secs(6 * 3600));
         assert_eq!(settings.idle_threshold, Duration::from_secs(2 * 24 * 3600));
-        assert_eq!(settings.max_per_tick, 10);
+        assert_eq!(settings.max_per_tick, 5);
     }
 
     #[test]

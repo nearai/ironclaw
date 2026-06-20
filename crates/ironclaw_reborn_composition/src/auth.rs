@@ -649,7 +649,6 @@ impl RebornProductAuthServices {
 
     pub(crate) fn runtime_credential_account_refresh_service(
         self: &Arc<Self>,
-        access_refresh_margin: std::time::Duration,
     ) -> Arc<dyn RuntimeCredentialAccountRefreshService> {
         // Inline dispatch path: use the plain provider-backed service wrapped
         // only in the in-process `refresh_locks` guard that
@@ -659,13 +658,12 @@ impl RebornProductAuthServices {
         //
         // A2: Forward the secret store so the refresher can read `expires_at`
         // metadata and skip the token-endpoint round-trip when the access token
-        // is still fresh.
+        // is still fresh. The margin is fixed at `DEFAULT_ACCESS_REFRESH_MARGIN`.
         let inner_port: Arc<dyn RuntimeCredentialAccountRefreshPort> = self.clone();
         let secret_store: Arc<dyn ironclaw_secrets::SecretStore> = self.secret_store.clone();
         Arc::new(ProductAuthRuntimeCredentialAccountRefresher::new(
             inner_port,
             secret_store,
-            access_refresh_margin,
         ))
     }
 
