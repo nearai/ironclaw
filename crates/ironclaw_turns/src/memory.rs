@@ -94,7 +94,13 @@ pub struct InMemoryTurnStateStoreLimits {
     pub max_idempotency_records: usize,
     pub runner_lease_ttl: ChronoDuration,
     /// Max runs in `TurnStatus::Running` per (tenant_id, owner user_id).
-    /// `None` = unlimited (current behavior). Ownerless runs are never counted; actor-fallback runs count under the submitting actor's user_id.
+    /// `None` = unlimited (current behavior).
+    ///
+    /// Cap attribution uses the explicit thread owner when present
+    /// (`TurnThreadOwner::ExplicitUser`). For `ActorFallback` owners the
+    /// submitting actor's `user_id` is used instead, so those runs are still
+    /// capped. Only genuinely `Ownerless` runs (no owner at all) are uncapped
+    /// and never contribute to this counter.
     pub max_concurrent_runs_per_user: Option<std::num::NonZeroU32>,
     /// Max runs in `TurnStatus::Running` for `ScheduledTrigger` origin.
     /// `None` = unlimited. Runs without `product_context` are never counted.
@@ -1716,24 +1722,39 @@ impl Inner {
             );
         }
 
-        // Rebuild per-user running counter from restored records.
-        let mut running_by_user = HashMap::new();
-        for record in records.values() {
-            if holds_running_slot(record.status.get())
-                && let Some(key) = Self::run_user_key(record)
-            {
-                *running_by_user.entry(key).or_insert(0u32) += 1;
-            }
-        }
+        // Rebuild per-user / per-origin-class running counters from restored
+        // records only when at least one concurrency cap is configured.  The
+        // counters are consulted solely inside `pop_matching_queued_run` when
+        // the corresponding `max_concurrent_*` limit is `Some`; with all caps
+        // `None` (the default) the counters are never read, so leaving them
+        // empty is correct and avoids an O(records) scan on every snapshot
+        // restore (which `FilesystemTurnStateStore::apply` does on every
+        // read-modify-write in the uncapped hot path).
+        let caps_enabled = limits.max_concurrent_runs_per_user.is_some()
+            || limits.max_concurrent_trigger_runs.is_some()
+            || limits.max_concurrent_conversation_runs.is_some();
 
-        // Rebuild per-origin-class running counter from restored records.
+        let mut running_by_user = HashMap::new();
         let mut running_by_origin_class: HashMap<(ironclaw_host_api::TenantId, OriginClass), u32> =
             HashMap::new();
-        for record in records.values() {
-            if holds_running_slot(record.status.get())
-                && let Some(key) = Self::run_origin_key(record)
-            {
-                *running_by_origin_class.entry(key).or_insert(0u32) += 1;
+
+        if caps_enabled {
+            // Rebuild per-user running counter from restored records.
+            for record in records.values() {
+                if holds_running_slot(record.status.get())
+                    && let Some(key) = Self::run_user_key(record)
+                {
+                    *running_by_user.entry(key).or_insert(0u32) += 1;
+                }
+            }
+
+            // Rebuild per-origin-class running counter from restored records.
+            for record in records.values() {
+                if holds_running_slot(record.status.get())
+                    && let Some(key) = Self::run_origin_key(record)
+                {
+                    *running_by_origin_class.entry(key).or_insert(0u32) += 1;
+                }
             }
         }
 

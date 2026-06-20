@@ -826,8 +826,8 @@ async fn actor_fallback_runs_are_capped_under_actor_user_id() {
 // ---------------------------------------------------------------------------
 
 /// Snapshot taken WHILE a run is Running → restored store has counter = 1
-/// immediately, without needing to claim again. This exercises the non-zero
-/// rebuild branch in `from_persistence_snapshot`.
+/// immediately, without needing to claim again.  The restored store is
+/// configured WITH a per-user cap so the rebuild loop runs.
 #[tokio::test]
 async fn snapshot_rebuild_restores_nonzero_running_counter() {
     let store = make_store();
@@ -841,7 +841,53 @@ async fn snapshot_rebuild_restores_nonzero_running_counter() {
     // Snapshot WHILE the run is Running.
     let snapshot = store.persistence_snapshot();
 
-    // Restore from snapshot — the rebuilt store must already see counter = 1.
+    // Restore with a cap enabled so the rebuild loop executes — counter must
+    // already be 1 without claiming again.
+    let restored = InMemoryTurnStateStore::from_persistence_snapshot(
+        snapshot,
+        InMemoryTurnStateStoreLimits {
+            max_concurrent_runs_per_user: std::num::NonZeroU32::new(10),
+            ..InMemoryTurnStateStoreLimits::default()
+        },
+    )
+    .unwrap();
+    assert_eq!(
+        restored.running_count_for_user(&tenant(), &user_u()),
+        1,
+        "snapshot rebuild must restore non-zero running counter when cap is enabled"
+    );
+
+    // Complete in the ORIGINAL store (restored has a detached copy of the lease).
+    store
+        .complete_run(CompleteRunRequest {
+            run_id,
+            runner_id,
+            lease_token,
+        })
+        .await
+        .unwrap();
+    assert_eq!(store.running_count_for_user(&tenant(), &user_u()), 0);
+}
+
+/// When ALL concurrency caps are `None` (the default), restoring from a
+/// snapshot containing a Running run must NOT rebuild the per-user / per-origin
+/// counters — the rebuild loop is O(records) and is skipped for the uncapped
+/// hot path.  The counter stays at 0 because it is never consulted when caps
+/// are disabled.
+#[tokio::test]
+async fn snapshot_rebuild_skips_counter_when_caps_disabled() {
+    let store = make_store();
+    let scope = owned_scope("cap-snapshot-nocap", &user_u());
+    let run_id = submit(&store, scope.clone(), "cap-snapshot-nocap").await;
+
+    // Claim → run is now Running, live counter = 1.
+    let (runner_id, lease_token) = claim(&store).await;
+    assert_eq!(store.running_count_for_user(&tenant(), &user_u()), 1);
+
+    // Snapshot WHILE the run is Running.
+    let snapshot = store.persistence_snapshot();
+
+    // Restore with ALL caps None — rebuild must be skipped, counter stays 0.
     let restored = InMemoryTurnStateStore::from_persistence_snapshot(
         snapshot,
         InMemoryTurnStateStoreLimits::default(),
@@ -849,11 +895,11 @@ async fn snapshot_rebuild_restores_nonzero_running_counter() {
     .unwrap();
     assert_eq!(
         restored.running_count_for_user(&tenant(), &user_u()),
-        1,
-        "snapshot rebuild must restore non-zero running counter"
+        0,
+        "counter rebuild must be skipped when all concurrency caps are None"
     );
 
-    // Complete in the ORIGINAL store (restored has a detached copy of the lease).
+    // Complete in the original store.
     store
         .complete_run(CompleteRunRequest {
             run_id,

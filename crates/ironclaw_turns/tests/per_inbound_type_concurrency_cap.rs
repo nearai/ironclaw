@@ -855,6 +855,7 @@ async fn trigger_cap_is_per_tenant_not_global() {
 
 /// Snapshot taken WHILE a trigger run is Running → restored store sees counter = 1
 /// immediately, exercising the non-zero rebuild branch in `from_persistence_snapshot`.
+/// The restored store is configured WITH a trigger cap so the rebuild loop runs.
 #[tokio::test]
 async fn snapshot_rebuild_restores_nonzero_origin_class_counter() {
     let store = InMemoryTurnStateStore::default();
@@ -867,16 +868,20 @@ async fn snapshot_rebuild_restores_nonzero_origin_class_counter() {
     // Snapshot WHILE the run is Running.
     let snapshot = store.persistence_snapshot();
 
-    // Restore from snapshot — the rebuilt store must already see counter = 1.
+    // Restore with a trigger cap enabled so the rebuild loop executes — counter
+    // must already be 1 without claiming again.
     let restored = InMemoryTurnStateStore::from_persistence_snapshot(
         snapshot,
-        InMemoryTurnStateStoreLimits::default(),
+        InMemoryTurnStateStoreLimits {
+            max_concurrent_trigger_runs: std::num::NonZeroU32::new(10),
+            ..InMemoryTurnStateStoreLimits::default()
+        },
     )
     .unwrap();
     assert_eq!(
         restored.running_trigger_count(&tenant()),
         1,
-        "snapshot rebuild must restore non-zero trigger counter"
+        "snapshot rebuild must restore non-zero trigger counter when cap is enabled"
     );
     assert_eq!(restored.running_conversation_count(&tenant()), 0);
 
