@@ -23,7 +23,7 @@ use ironclaw_extensions::{
 };
 use ironclaw_host_api::{
     HostApiError, HostIngressDeclarationError, HostIngressRouteDeclaration, HostIngressTarget,
-    HostPortCatalog, IngressAckMode, IngressAuthBinding, IngressAuthSchemeName,
+    HostPortCatalog, IngressAckMode, IngressAuthBinding, IngressAuthScheme,
     IngressCredentialHandle, IngressDrainMode, IngressPolicy, IngressRouteDescriptor,
     IngressRouteId, IngressRoutePattern, NetworkMethod,
 };
@@ -174,8 +174,7 @@ impl HostApiManifestContract for HostIngressHostApiContract {
         host_api: &HostApiRefV2,
         section: &toml::Value,
     ) -> Result<(), String> {
-        HostIngressSection::from_value(host_api, section.clone())
-            .and_then(HostIngressSection::into_declaration)
+        project_host_ingress_section(host_api, section.clone())
             .map(|_| ())
             .map_err(|error| error.to_string())
     }
@@ -311,9 +310,10 @@ fn project_host_ingress_sections(
             continue;
         }
         let section_value = section_value(&value, &host_api.section)?;
-        sections.push(
-            HostIngressSection::from_value(host_api, section_value.clone())?.into_declaration()?,
-        );
+        sections.push(project_host_ingress_section(
+            host_api,
+            section_value.clone(),
+        )?);
     }
     Ok(sections)
 }
@@ -347,93 +347,84 @@ fn is_host_ingress_section_path(section: &ManifestSectionPath) -> bool {
 // Raw deserialization shapes for HostIngress sections
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct HostIngressSection {
-    section: ManifestSectionPath,
-    route_id: IngressRouteId,
-    method: NetworkMethod,
-    path: IngressRoutePattern,
-    policy: IngressPolicy,
-    target: HostIngressTarget,
-    auth: IngressAuthBinding,
-    ack: IngressAckMode,
-    drain: IngressDrainMode,
-}
-
-impl HostIngressSection {
-    fn from_value(host_api: &HostApiRefV2, value: toml::Value) -> Result<Self, Error> {
-        if host_api.id.as_str() != HOST_INGRESS_HOST_API_ID {
-            return Err(Error::UnknownHostApiId {
-                id: host_api.id.as_str().to_owned(),
-            });
-        }
-        let raw: RawHostIngressSection =
-            value
-                .try_into()
-                .map_err(|error: toml::de::Error| Error::ManifestSectionParse {
-                    section: host_api.section.clone(),
-                    reason: error.to_string(),
-                })?;
-        Ok(Self {
-            section: host_api.section.clone(),
-            route_id: raw.route_id,
-            method: raw.method,
-            path: raw.path,
-            policy: raw.policy,
-            target: raw.target,
-            auth: raw.auth.into_binding(&host_api.section)?,
-            ack: raw.ack,
-            drain: raw.drain,
-        })
+fn project_host_ingress_section(
+    host_api: &HostApiRefV2,
+    value: toml::Value,
+) -> Result<HostIngressRouteDeclaration, Error> {
+    if host_api.id.as_str() != HOST_INGRESS_HOST_API_ID {
+        return Err(Error::UnknownHostApiId {
+            id: host_api.id.as_str().to_owned(),
+        });
     }
-
-    fn into_declaration(self) -> Result<HostIngressRouteDeclaration, Error> {
-        let HostIngressSection {
-            section,
-            route_id,
-            method,
-            path,
-            policy,
-            target,
-            auth,
-            ack,
-            drain,
-        } = self;
-        let descriptor =
-            IngressRouteDescriptor::new(route_id.as_str(), method, path.as_str(), policy).map_err(
-                |source| Error::RouteDescriptorBuild {
-                    section: section.clone(),
-                    source,
-                },
-            )?;
-        HostIngressRouteDeclaration::new(descriptor, target, vec![auth], ack, drain)
-            .map_err(|source| Error::DeclarationValidation { section, source })
-    }
+    let raw: RawHostIngressSection =
+        value
+            .try_into()
+            .map_err(|error: toml::de::Error| Error::ManifestSectionParse {
+                section: host_api.section.clone(),
+                reason: error.to_string(),
+            })?;
+    raw.into_declaration(&host_api.section)
 }
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RawHostIngressSection {
-    route_id: IngressRouteId,
-    method: NetworkMethod,
-    path: IngressRoutePattern,
+    transport: HostIngressTransport,
     policy: IngressPolicy,
     target: HostIngressTarget,
     auth: RawHostIngressAuth,
-    ack: IngressAckMode,
-    drain: IngressDrainMode,
+}
+
+impl RawHostIngressSection {
+    fn into_declaration(
+        self,
+        section: &ManifestSectionPath,
+    ) -> Result<HostIngressRouteDeclaration, Error> {
+        let auth = self.auth.into_binding(section)?;
+        let HostIngressTransport::Webhook {
+            route_id,
+            method,
+            path,
+            ack,
+            drain,
+        } = self.transport;
+        let descriptor =
+            IngressRouteDescriptor::new(route_id.as_str(), method, path.as_str(), self.policy)
+                .map_err(|source| Error::RouteDescriptorBuild {
+                    section: section.clone(),
+                    source,
+                })?;
+        HostIngressRouteDeclaration::new(descriptor, self.target, vec![auth], ack, drain).map_err(
+            |source| Error::DeclarationValidation {
+                section: section.clone(),
+                source,
+            },
+        )
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+enum HostIngressTransport {
+    Webhook {
+        route_id: IngressRouteId,
+        method: NetworkMethod,
+        path: IngressRoutePattern,
+        ack: IngressAckMode,
+        drain: IngressDrainMode,
+    },
 }
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RawHostIngressAuth {
-    scheme: IngressAuthSchemeName,
+    verifier: IngressAuthScheme,
     credential_handles: Vec<IngressCredentialHandle>,
 }
 
 impl RawHostIngressAuth {
     fn into_binding(self, section: &ManifestSectionPath) -> Result<IngressAuthBinding, Error> {
-        IngressAuthBinding::new(self.scheme, self.credential_handles).map_err(|source| {
+        IngressAuthBinding::new(self.verifier, self.credential_handles).map_err(|source| {
             Error::DeclarationValidation {
                 section: section.clone(),
                 source,
@@ -454,8 +445,9 @@ mod tests {
     };
     use ironclaw_host_api::{
         AllowedEffectPath, AuditTraceClass, BodyLimitPolicy, CapabilityId, CorsPolicy,
-        IngressAuthPolicy, IngressAuthScheme, IngressScopeSource, ListenerClass, RateLimitPolicy,
-        RateLimitScope, SecretHandle, StreamingMode, WebSocketOriginPolicy,
+        IngressAckMode, IngressAuthPolicy, IngressAuthScheme, IngressDrainMode, IngressScopeSource,
+        ListenerClass, NetworkMethod, RateLimitPolicy, RateLimitScope, SecretHandle, StreamingMode,
+        WebSocketOriginPolicy,
     };
 
     use super::*;
@@ -483,6 +475,9 @@ id = "ironclaw.host_ingress/v1"
 section = "host_ingress.events"
 
 [host_ingress.events]
+
+[host_ingress.events.transport]
+kind = "webhook"
 route_id = "slack.events"
 method = "post"
 path = "/webhooks/slack/events"
@@ -520,7 +515,7 @@ capability_id = "slack.events"
 product_adapter_section = "product_adapter.inbound"
 
 [host_ingress.events.auth]
-scheme = "slack_v0_hmac"
+verifier = "webhook_signature"
 credential_handles = ["slack_signing_secret"]
 
 {extra}
@@ -548,6 +543,9 @@ id = "ironclaw.host_ingress/v1"
 section = "host_ingress.updates"
 
 [host_ingress.updates]
+
+[host_ingress.updates.transport]
+kind = "webhook"
 route_id = "telegram.updates"
 method = "post"
 path = "/webhooks/telegram/updates"
@@ -585,7 +583,7 @@ capability_id = "telegram.updates"
 product_adapter_section = "product_adapter.inbound"
 
 [host_ingress.updates.auth]
-scheme = "telegram_secret_token"
+verifier = "shared_secret_header"
 credential_handles = ["telegram_webhook_secret"]
 
 {extra}
@@ -619,7 +617,7 @@ credential_handles = ["telegram_webhook_secret"]
         let value = section_value(&root, &host_api.section)
             .expect("test host ingress section must exist")
             .clone();
-        HostIngressSection::from_value(&host_api, value)?.into_declaration()
+        project_host_ingress_section(&host_api, value)
     }
 
     fn enabled_slack_installation() -> ExtensionInstallation {
@@ -730,7 +728,10 @@ credential_handles = ["telegram_webhook_secret"]
             }
         );
         assert_eq!(declaration.auth().len(), 1);
-        assert_eq!(declaration.auth()[0].scheme().as_str(), "slack_v0_hmac");
+        assert_eq!(
+            declaration.auth()[0].verifier(),
+            IngressAuthScheme::WebhookSignature
+        );
         assert_eq!(
             declaration.auth()[0].credential_handles()[0].as_str(),
             "slack_signing_secret"
@@ -772,6 +773,54 @@ credential_handles = ["telegram_webhook_secret"]
         assert!(matches!(
             error,
             Error::ManifestSectionParse { ref reason, .. } if reason.contains("public_webhooktypo")
+        ));
+    }
+
+    #[test]
+    fn unknown_auth_verifier_value_is_rejected_at_parse_time() {
+        let raw = slack_manifest("").replace(
+            r#"verifier = "webhook_signature""#,
+            r#"verifier = "webhook_signature_typo""#,
+        );
+        let error = project_single_section(&raw, "host_ingress.events")
+            .expect_err("unknown auth verifier enum value must reject");
+
+        assert!(matches!(
+            error,
+            Error::ManifestSectionParse { ref reason, .. }
+                if reason.contains("webhook_signature_typo")
+        ));
+    }
+
+    #[test]
+    fn auth_binding_verifier_must_be_allowed_by_policy() {
+        let raw = slack_manifest("").replace(
+            r#"verifier = "webhook_signature""#,
+            r#"verifier = "shared_secret_header""#,
+        );
+        let error = project_single_section(&raw, "host_ingress.events")
+            .expect_err("auth verifier outside policy scheme list must reject");
+
+        assert!(matches!(
+            error,
+            Error::DeclarationValidation {
+                source: HostIngressDeclarationError::AuthBindingVerifierNotDeclared {
+                    verifier: IngressAuthScheme::SharedSecretHeader
+                },
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn unsupported_transport_kind_is_rejected_at_parse_time() {
+        let raw = slack_manifest("").replace(r#"kind = "webhook""#, r#"kind = "websocket""#);
+        let error = project_single_section(&raw, "host_ingress.events")
+            .expect_err("unsupported transport kind must reject");
+
+        assert!(matches!(
+            error,
+            Error::ManifestSectionParse { ref reason, .. } if reason.contains("websocket")
         ));
     }
 
