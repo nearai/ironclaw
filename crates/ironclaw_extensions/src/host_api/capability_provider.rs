@@ -1,12 +1,11 @@
 use std::collections::BTreeSet;
 
-use ironclaw_host_api::{CredentialHandle, RuntimeCredentialRequirementSource};
+use ironclaw_host_api::RuntimeCredentialRequirementSource;
 use serde::Deserialize;
 
 use crate::v2::{
     CapabilityDeclV2, HostApiId, HostApiManifestContext, HostApiManifestContract,
     HostApiManifestProjection, HostApiRefV2, ManifestSectionPath, ManifestV2Error, RawCapabilityV2,
-    ReferencedCredential,
 };
 
 pub const CAPABILITY_PROVIDER_HOST_API_ID: &str = "ironclaw.capability_provider/v1";
@@ -59,12 +58,15 @@ impl HostApiManifestContract for CapabilityProviderHostApiContract {
         section: &toml::Value,
     ) -> Result<HostApiManifestProjection, String> {
         let capabilities = project_capabilities(context, section)?;
-        let referenced_credentials = referenced_runtime_credentials(&capabilities, host_api)?;
-        Ok(HostApiManifestProjection {
-            capabilities,
-            declared_credentials: Vec::new(),
-            referenced_credentials,
-        })
+        let mut projection = HostApiManifestProjection::default();
+        projection
+            .reference_credential_handles(
+                host_api,
+                secret_runtime_credential_handles(&capabilities),
+            )
+            .map_err(|error| error.to_string())?;
+        projection.capabilities = capabilities;
+        Ok(projection)
     }
 }
 
@@ -97,26 +99,16 @@ fn project_capabilities(
     Ok(capabilities)
 }
 
-fn referenced_runtime_credentials(
+fn secret_runtime_credential_handles(
     capabilities: &[CapabilityDeclV2],
-    host_api: &HostApiRefV2,
-) -> Result<Vec<ReferencedCredential>, String> {
-    let mut referenced_credentials = Vec::new();
-    for capability in capabilities {
-        for credential in &capability.runtime_credentials {
-            if credential.source != RuntimeCredentialRequirementSource::SecretHandle {
-                continue;
-            }
-            let handle = CredentialHandle::new(credential.handle.as_str())
-                .map_err(|error| error.to_string())?;
-            referenced_credentials.push(ReferencedCredential::new(
-                handle,
-                host_api.id.clone(),
-                host_api.section.clone(),
-            ));
-        }
-    }
-    Ok(referenced_credentials)
+) -> impl Iterator<Item = &str> {
+    capabilities
+        .iter()
+        .flat_map(|capability| capability.runtime_credentials.iter())
+        .filter_map(|credential| {
+            (credential.source == RuntimeCredentialRequirementSource::SecretHandle)
+                .then_some(credential.handle.as_str())
+        })
 }
 
 #[derive(Debug, Deserialize)]

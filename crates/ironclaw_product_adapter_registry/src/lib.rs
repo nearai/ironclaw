@@ -20,9 +20,8 @@ use ironclaw_extensions::{
     ExtensionManifestRecord, ExtensionManifestV2, HostApiContractRegistry, HostApiId,
     HostApiManifestContext, HostApiManifestContract, HostApiManifestProjection,
     HostApiMultiplicity, HostApiRefV2, ManifestSectionPath, ManifestSource, ManifestV2Error,
-    ReferencedCredential,
 };
-use ironclaw_host_api::{CredentialHandle, ExtensionId, HostPortCatalog};
+use ironclaw_host_api::{ExtensionId, HostPortCatalog};
 use ironclaw_product_adapters::{
     AuthRequirement, DeclaredEgressTarget, EgressCredentialHandle, ProductAdapterCapabilities,
     ProductAdapterId, ProductCapabilityFlag, ProductSurfaceKind,
@@ -331,27 +330,27 @@ impl HostApiManifestContract for ProductAdapterHostApiContract {
             section.clone(),
         )
         .map_err(|error| error.to_string())?;
-        let declared_credentials = adapter
-            .required_credentials()
-            .iter()
-            .map(canonical_credential_handle)
-            .collect::<Result<Vec<_>, _>>()?;
-        let referenced_credentials = adapter
-            .declared_egress()
-            .iter()
-            .filter_map(|target| target.credential_handle.as_ref())
-            .map(|handle| {
-                canonical_credential_handle(handle).map(|handle| {
-                    ReferencedCredential::new(handle, host_api.id.clone(), host_api.section.clone())
-                })
-            })
-            .collect::<Result<Vec<_>, _>>()?;
+        let mut projection = HostApiManifestProjection::default();
+        projection
+            .declare_credential_handles(
+                adapter
+                    .required_credentials()
+                    .iter()
+                    .map(EgressCredentialHandle::as_str),
+            )
+            .map_err(|error| error.to_string())?;
+        projection
+            .reference_credential_handles(
+                host_api,
+                adapter
+                    .declared_egress()
+                    .iter()
+                    .filter_map(|target| target.credential_handle.as_ref())
+                    .map(EgressCredentialHandle::as_str),
+            )
+            .map_err(|error| error.to_string())?;
 
-        Ok(HostApiManifestProjection {
-            capabilities: Vec::new(),
-            declared_credentials,
-            referenced_credentials,
-        })
+        Ok(projection)
     }
 }
 
@@ -453,12 +452,6 @@ fn validate_installation_against_one_manifest(
         }
     }
     Ok(())
-}
-
-fn canonical_credential_handle(
-    handle: &EgressCredentialHandle,
-) -> Result<CredentialHandle, String> {
-    CredentialHandle::new(handle.as_str()).map_err(|error| error.to_string())
 }
 
 fn validate_auth_requirement(requirement: &AuthRequirement) -> Result<(), RegistryError> {
