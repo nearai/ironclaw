@@ -1202,7 +1202,7 @@ async fn resolver_skips_inline_refresh_when_access_token_is_fresh() {
             Some(Utc::now() + chrono::Duration::hours(1)),
         )
         .await
-        .ok();
+        .expect("seeding fresh access-token expiry must succeed for this test to exercise the skip path");
 
     let resolver = resolver_with_refresh_and_store(accounts.clone(), secret_store);
 
@@ -1248,7 +1248,7 @@ async fn resolver_refreshes_when_access_token_is_within_margin() {
             Some(Utc::now() + chrono::Duration::minutes(2)),
         )
         .await
-        .ok();
+        .expect("seeding within-margin access-token expiry must succeed for this test to exercise the refresh path");
 
     let resolver = resolver_with_refresh_and_store(accounts.clone(), secret_store);
 

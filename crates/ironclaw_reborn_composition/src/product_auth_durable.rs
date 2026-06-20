@@ -541,8 +541,11 @@ where
     /// `Configured`, and `refresh_secret.is_some()`. Idle-threshold filtering
     /// (by `updated_at`) is left to the caller (the credential-refresh worker).
     /// Returns an empty vec when the root filesystem was not wired (local-dev /
-    /// test path). **Never projects secret handles or material** — only
-    /// metadata fields are returned.
+    /// test path). The returned `CredentialAccount` records carry the
+    /// `access_secret`/`refresh_secret` *handles* (opaque references, never the
+    /// raw token material) because the worker needs them to drive the refresh.
+    /// Callers MUST NOT log or serialize these records; only the handle is ever
+    /// present, and it must stay internal to the refresh path.
     ///
     /// # Owner-scope enumeration
     ///

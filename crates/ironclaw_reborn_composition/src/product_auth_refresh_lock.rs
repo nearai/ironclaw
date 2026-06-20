@@ -7,13 +7,21 @@
 //! uses to elect a single leader per tick:
 //!
 //! - **Postgres path**: the worker calls [`CredentialRefreshLeaderLock::run_as_leader`]
-//!   each tick. That call tries `pg_try_advisory_lock` using a single fixed
-//!   deployment-wide key. If the lock is already held by another process, the
-//!   current process is not the leader — it skips the sweep and returns
-//!   [`LeaderOutcome::NotLeader`]. If the lock is acquired, the sweep runs,
-//!   then the lock is explicitly released and [`LeaderOutcome::Ran`] is
-//!   returned. A single connection is held only for the duration of the sweep;
-//!   because the worker ticks at ~6 h the connection cost is negligible.
+//!   each tick. That call opens a transaction and tries
+//!   `pg_try_advisory_xact_lock` using a single fixed deployment-wide key. If
+//!   the lock is already held by another process, the current process is not the
+//!   leader — it skips the sweep and returns [`LeaderOutcome::NotLeader`]. If the
+//!   lock is acquired, the sweep runs inside the transaction, which is then
+//!   committed (releasing the lock) and [`LeaderOutcome::Ran`] is returned. A
+//!   single connection is held only for the duration of the sweep; because the
+//!   worker ticks at ~6 h the connection cost is negligible.
+//!
+//!   The lock is **transaction-level**, not session-level, on purpose: a
+//!   transaction-level advisory lock is released automatically when the
+//!   transaction ends for any reason — commit, rollback, panic, or the future
+//!   being dropped on shutdown/cancellation. This is cancellation-safe: an
+//!   aborted sweep can never strand the lock on a pooled connection and block
+//!   all future leader elections.
 //! - **libsql / single-process path** (`pool = None`): this process is
 //!   trivially the only process, so the sweep always runs. No connection is
 //!   held.
@@ -122,12 +130,12 @@ impl CredentialRefreshLeaderLock {
     ///
     /// - On the libsql path (pool is conceptually absent): always invokes
     ///   `sweep` and returns [`LeaderOutcome::Ran`].
-    /// - On the Postgres path: acquires `pg_try_advisory_lock` (non-blocking).
-    ///   If the lock is not acquired, returns [`LeaderOutcome::NotLeader`]
-    ///   without invoking `sweep`. If acquired, invokes `sweep`, then
-    ///   explicitly releases the lock before returning.
-    ///   On pool/connection errors, skips the tick and returns
-    ///   [`LeaderOutcome::NotLeader`] (fail-closed; retries next tick).
+    /// - On the Postgres path: opens a transaction and acquires
+    ///   `pg_try_advisory_xact_lock` (non-blocking). If the lock is not acquired,
+    ///   returns [`LeaderOutcome::NotLeader`] without invoking `sweep`. If
+    ///   acquired, invokes `sweep` inside the transaction, then commits to
+    ///   release the lock. On pool/connection/transaction errors, skips the tick
+    ///   and returns [`LeaderOutcome::NotLeader`] (fail-closed; retries next tick).
     pub(crate) async fn run_as_leader<F, Fut, T>(&self, sweep: F) -> LeaderOutcome<T>
     where
         F: FnOnce() -> Fut,
@@ -161,7 +169,7 @@ where
 
     // Obtain a connection from the pool. On failure, skip the tick (fail-closed):
     // keepalive is best-effort and will retry on the next scheduled interval.
-    let conn = match pool.get().await {
+    let mut conn = match pool.get().await {
         Ok(c) => c,
         Err(err) => {
             debug!(
@@ -172,17 +180,40 @@ where
         }
     };
 
-    // pg_try_advisory_lock is non-blocking: returns true if this session
-    // acquired the lock, false if another session already holds it.
-    let acquired: bool = match conn
-        .query_one("SELECT pg_try_advisory_lock($1, $2)", &[&key_a, &key_b])
+    // Acquire the lock as a TRANSACTION-level advisory lock
+    // (`pg_try_advisory_xact_lock`), not a session-level one. A transaction-level
+    // lock is released automatically when the transaction ends for ANY reason —
+    // commit, rollback, or the connection/future being dropped on panic or
+    // cancellation. That makes the leader lock cancellation-safe: a panicking or
+    // aborted sweep can never strand the lock on a pooled connection (which would
+    // block every future tick from electing a leader). The transaction is held
+    // open across the sweep so the lock is owned for the whole leader window; at
+    // ~6 h ticks with a small `max_per_tick` the held connection is negligible.
+    let tx = match conn.transaction().await {
+        Ok(tx) => tx,
+        Err(err) => {
+            debug!(
+                error = %err,
+                "credential-refresh leader lock: begin transaction failed; skipping tick (fail-closed)"
+            );
+            return LeaderOutcome::NotLeader;
+        }
+    };
+
+    // pg_try_advisory_xact_lock is non-blocking: returns true if this transaction
+    // acquired the lock, false if another session/transaction already holds it.
+    let acquired: bool = match tx
+        .query_one(
+            "SELECT pg_try_advisory_xact_lock($1, $2)",
+            &[&key_a, &key_b],
+        )
         .await
     {
         Ok(row) => row.get(0),
         Err(err) => {
             debug!(
                 error = %err,
-                "credential-refresh leader lock: pg_try_advisory_lock failed; skipping tick (fail-closed)"
+                "credential-refresh leader lock: pg_try_advisory_xact_lock failed; skipping tick (fail-closed)"
             );
             return LeaderOutcome::NotLeader;
         }
@@ -190,21 +221,18 @@ where
 
     if !acquired {
         debug!("credential-refresh leader lock: not the leader this tick; skipping sweep");
+        // `tx` drops here → rolled back → no lock is held.
         return LeaderOutcome::NotLeader;
     }
 
-    // We are the leader. Run the sweep.
+    // We are the leader. Run the sweep, then commit to release the xact lock and
+    // return the connection cleanly to the pool. If commit fails, dropping `tx`
+    // rolls the transaction back, which also releases the lock.
     let result = sweep().await;
-
-    // Release the lock explicitly so the connection can be returned to the
-    // pool without holding it for its full session lifetime.
-    if let Err(err) = conn
-        .query_one("SELECT pg_advisory_unlock($1, $2)", &[&key_a, &key_b])
-        .await
-    {
+    if let Err(err) = tx.commit().await {
         debug!(
             error = %err,
-            "credential-refresh leader lock: pg_advisory_unlock failed; lock will release on connection drop"
+            "credential-refresh leader lock: commit failed; lock releases on transaction rollback"
         );
     }
 

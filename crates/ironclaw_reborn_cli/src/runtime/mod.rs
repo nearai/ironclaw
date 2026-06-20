@@ -379,13 +379,25 @@ pub(crate) fn build_runtime_input(
 fn credential_refresh_settings(
     caller: RuntimeInputCaller,
 ) -> anyhow::Result<CredentialRefreshSettings> {
-    let mut settings = if caller == RuntimeInputCaller::Serve {
+    let base = if caller == RuntimeInputCaller::Serve {
         CredentialRefreshSettings::enabled()
     } else {
         CredentialRefreshSettings::default()
     };
+    apply_credential_refresh_override(
+        base,
+        std::env::var("IRONCLAW_CREDENTIAL_REFRESH_ENABLED"),
+    )
+}
 
-    match std::env::var("IRONCLAW_CREDENTIAL_REFRESH_ENABLED") {
+/// Apply the `IRONCLAW_CREDENTIAL_REFRESH_ENABLED` operator override to a base
+/// settings value. Pure (env lookup is passed in) so the override semantics are
+/// unit-testable without mutating process-global environment state.
+fn apply_credential_refresh_override(
+    mut settings: CredentialRefreshSettings,
+    raw: Result<String, std::env::VarError>,
+) -> anyhow::Result<CredentialRefreshSettings> {
+    match raw {
         Ok(raw) => match raw.trim().to_ascii_lowercase().as_str() {
             "" => {}
             "1" | "true" => settings.enabled = true,
@@ -816,7 +828,8 @@ mod tests {
     #[cfg(feature = "webui-v2-beta")]
     use ironclaw_reborn_composition::{LocalTriggerAccessRole, LocalTriggerAccessSource};
     use ironclaw_reborn_composition::{
-        RebornCompositionProfile, TurnStatus, test_support::assistant_reply_without_text_for_test,
+        CredentialRefreshSettings, RebornCompositionProfile, TurnStatus,
+        test_support::assistant_reply_without_text_for_test,
     };
     use ironclaw_reborn_config::RebornBootConfig;
 
@@ -824,9 +837,71 @@ mod tests {
     #[cfg(feature = "webui-v2-beta")]
     use super::with_run_local_trigger_fire_access_checker;
     use super::{
-        RuntimeInputCaller, RuntimeInputOptions, block_on_cli, build_runtime_input,
-        build_runtime_input_with_options, no_assistant_text_message, resolve_google_oauth_config,
+        RuntimeInputCaller, RuntimeInputOptions, apply_credential_refresh_override, block_on_cli,
+        build_runtime_input, build_runtime_input_with_options, no_assistant_text_message,
+        resolve_google_oauth_config,
     };
+
+    #[test]
+    fn credential_refresh_override_keeps_caller_default_without_env() {
+        // Serve base is enabled; absent env leaves it enabled.
+        let serve = apply_credential_refresh_override(
+            CredentialRefreshSettings::enabled(),
+            Err(std::env::VarError::NotPresent),
+        )
+        .expect("absent env is valid");
+        assert!(serve.enabled, "Serve default stays on when env unset");
+        // Non-Serve base is disabled; absent env leaves it disabled.
+        let other = apply_credential_refresh_override(
+            CredentialRefreshSettings::default(),
+            Err(std::env::VarError::NotPresent),
+        )
+        .expect("absent env is valid");
+        assert!(!other.enabled, "non-Serve default stays off when env unset");
+    }
+
+    #[test]
+    fn credential_refresh_override_kill_switch_disables() {
+        for raw in ["0", "false", "FALSE", " 0 "] {
+            let out = apply_credential_refresh_override(
+                CredentialRefreshSettings::enabled(),
+                Ok(raw.to_string()),
+            )
+            .expect("valid kill-switch value");
+            assert!(!out.enabled, "kill-switch {raw:?} must disable");
+        }
+    }
+
+    #[test]
+    fn credential_refresh_override_force_on_enables() {
+        for raw in ["1", "true", "TRUE", " true "] {
+            let out = apply_credential_refresh_override(
+                CredentialRefreshSettings::default(),
+                Ok(raw.to_string()),
+            )
+            .expect("valid force-on value");
+            assert!(out.enabled, "force-on {raw:?} must enable");
+        }
+    }
+
+    #[test]
+    fn credential_refresh_override_blank_falls_through_to_base() {
+        let out = apply_credential_refresh_override(
+            CredentialRefreshSettings::enabled(),
+            Ok("   ".to_string()),
+        )
+        .expect("blank value is valid");
+        assert!(out.enabled, "blank value keeps the caller base");
+    }
+
+    #[test]
+    fn credential_refresh_override_invalid_value_is_error() {
+        let result = apply_credential_refresh_override(
+            CredentialRefreshSettings::default(),
+            Ok("maybe".to_string()),
+        );
+        assert!(result.is_err(), "invalid value must be a hard error");
+    }
 
     fn clear_trigger_poller_env() -> (EnvGuard, EnvGuard) {
         (

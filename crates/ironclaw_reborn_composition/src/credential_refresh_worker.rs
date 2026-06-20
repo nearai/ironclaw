@@ -93,7 +93,9 @@ impl CredentialRefreshWorkerRuntimeHandle {
 pub(crate) trait CredentialRefreshCandidateSource: Send + Sync {
     /// Return all Google/Configured/has-refresh-token accounts across all
     /// owners. Idle-threshold filtering (by `updated_at`) is done by the
-    /// caller. Secret handles and token material must never be projected.
+    /// caller. The records carry secret *handles* (opaque references, never raw
+    /// token material) needed to drive the refresh; callers must not log or
+    /// serialize them.
     async fn list_refresh_candidates(&self) -> Vec<ironclaw_auth::CredentialAccount>;
 }
 
@@ -226,24 +228,17 @@ async fn sweep_once(
     // B1: enumerate all Google/Configured/has-refresh accounts across all owners.
     let candidates = deps.candidate_source.list_refresh_candidates().await;
 
-    // Filter to idle accounts (by updated_at) and apply per-tick cap.
-    let idle_candidates: Vec<_> = candidates
-        .into_iter()
-        .filter(|account| account.updated_at < idle_cutoff)
-        .collect();
-    let total = idle_candidates.len();
-    if total > settings.max_per_tick {
+    // Filter to idle accounts (by updated_at) and apply per-tick cap (pure,
+    // unit-tested helper).
+    let (to_refresh, dropped) =
+        select_idle_candidates(candidates, idle_cutoff, settings.max_per_tick);
+    if dropped > 0 {
         tracing::debug!(
-            dropped = total - settings.max_per_tick,
-            total,
+            dropped,
             max_per_tick = settings.max_per_tick,
             "credential refresh: candidate list truncated to max_per_tick"
         );
     }
-    let to_refresh: Vec<_> = idle_candidates
-        .into_iter()
-        .take(settings.max_per_tick)
-        .collect();
 
     if to_refresh.is_empty() {
         tracing::debug!("credential refresh worker tick: no idle Google accounts found");
@@ -260,16 +255,24 @@ async fn sweep_once(
     let mut failed = 0usize;
 
     for account in to_refresh {
-        if cancel.is_cancelled() {
-            break;
-        }
         let account_id = account.id;
         let request = CredentialRefreshRequest::new(
             account.scope.clone(),
             account.provider.clone(),
             account_id,
         );
-        match deps.refresh_port.refresh_credential_account(request).await {
+        // Race each refresh against cancellation so shutdown does not have to
+        // wait for an in-flight token-endpoint call (which can hang on a slow
+        // network) before stopping. `biased` checks cancellation first.
+        let outcome = tokio::select! {
+            biased;
+            _ = cancel.cancelled() => {
+                tracing::debug!("credential refresh worker: cancelled mid-sweep; stopping");
+                break;
+            }
+            outcome = deps.refresh_port.refresh_credential_account(request) => outcome,
+        };
+        match outcome {
             Ok(_) => {
                 refreshed += 1;
                 tracing::debug!(
@@ -310,6 +313,30 @@ async fn sweep_once(
 }
 
 // ---------------------------------------------------------------------------
+// Pure candidate selection (B3) — unit-testable without a refresh-port seam
+// ---------------------------------------------------------------------------
+
+/// Keep accounts whose `updated_at` is older than `idle_cutoff` (i.e. idle past
+/// the threshold), capped at `max_per_tick`. Returns the selected accounts and
+/// the number dropped by the cap (for the truncation log).
+///
+/// Pure and side-effect-free so the idle/cap policy can be unit-tested directly,
+/// without standing up the leader lock or a refresh port.
+fn select_idle_candidates(
+    candidates: Vec<ironclaw_auth::CredentialAccount>,
+    idle_cutoff: chrono::DateTime<chrono::Utc>,
+    max_per_tick: usize,
+) -> (Vec<ironclaw_auth::CredentialAccount>, usize) {
+    let mut idle: Vec<_> = candidates
+        .into_iter()
+        .filter(|account| account.updated_at < idle_cutoff)
+        .collect();
+    let dropped = idle.len().saturating_sub(max_per_tick);
+    idle.truncate(max_per_tick);
+    (idle, dropped)
+}
+
+// ---------------------------------------------------------------------------
 // Timing helpers — mirrors trigger_poller.rs
 // ---------------------------------------------------------------------------
 
@@ -343,7 +370,73 @@ fn jitter_delay(max: Duration) -> Duration {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use chrono::Utc;
+    use ironclaw_auth::{
+        AuthProductScope, AuthProviderId, AuthSurface, CredentialAccount, CredentialAccountId,
+        CredentialAccountLabel, CredentialAccountStatus, CredentialOwnership,
+    };
+    use ironclaw_host_api::{InvocationId, ResourceScope, SecretHandle, UserId};
     use std::time::Duration;
+
+    /// Build a Google/Configured/has-refresh candidate with a given `updated_at`.
+    fn candidate(updated_at: chrono::DateTime<Utc>) -> CredentialAccount {
+        let resource =
+            ResourceScope::local_default(UserId::new("alice").unwrap(), InvocationId::new())
+                .unwrap();
+        CredentialAccount {
+            id: CredentialAccountId::new(),
+            scope: AuthProductScope::new(resource, AuthSurface::Api),
+            provider: AuthProviderId::new("google").unwrap(),
+            label: CredentialAccountLabel::new("google").unwrap(),
+            status: CredentialAccountStatus::Configured,
+            ownership: CredentialOwnership::UserReusable,
+            owner_extension: None,
+            granted_extensions: Vec::new(),
+            access_secret: Some(SecretHandle::new("google_access").unwrap()),
+            refresh_secret: Some(SecretHandle::new("google_refresh").unwrap()),
+            scopes: Vec::new(),
+            created_at: updated_at,
+            updated_at,
+        }
+    }
+
+    #[test]
+    fn select_idle_candidates_keeps_only_idle_and_respects_cap() {
+        let now = Utc::now();
+        let cutoff = now - chrono::Duration::days(2);
+        // 3 idle (older than cutoff) + 2 fresh (newer than cutoff).
+        let candidates = vec![
+            candidate(now - chrono::Duration::days(5)),
+            candidate(now - chrono::Duration::days(4)),
+            candidate(now - chrono::Duration::days(3)),
+            candidate(now - chrono::Duration::hours(1)),
+            candidate(now),
+        ];
+
+        // Cap above the idle count: all 3 idle selected, none fresh, none dropped.
+        let (selected, dropped) = select_idle_candidates(candidates.clone(), cutoff, 10);
+        assert_eq!(selected.len(), 3, "only idle candidates are selected");
+        assert_eq!(dropped, 0);
+        assert!(
+            selected.iter().all(|a| a.updated_at < cutoff),
+            "every selected candidate must be idle past the cutoff"
+        );
+
+        // Cap below the idle count: truncated to the cap, remainder reported dropped.
+        let (selected, dropped) = select_idle_candidates(candidates, cutoff, 2);
+        assert_eq!(selected.len(), 2, "selection is capped at max_per_tick");
+        assert_eq!(dropped, 1, "one idle candidate dropped by the cap");
+    }
+
+    #[test]
+    fn select_idle_candidates_empty_when_all_fresh() {
+        let now = Utc::now();
+        let cutoff = now - chrono::Duration::days(2);
+        let candidates = vec![candidate(now), candidate(now - chrono::Duration::hours(6))];
+        let (selected, dropped) = select_idle_candidates(candidates, cutoff, 5);
+        assert!(selected.is_empty(), "no idle candidates → empty selection");
+        assert_eq!(dropped, 0);
+    }
 
     #[test]
     fn jitter_is_disabled_when_max_is_zero() {
