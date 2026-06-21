@@ -18,7 +18,6 @@ where
     pub(crate) filesystem: Arc<ScopedFilesystem<F>>,
     path_cache: Mutex<BoundedPathCache<K>>,
     pub(crate) mutation_locks: Mutex<HashMap<K, Arc<tokio::sync::Mutex<()>>>>,
-    unsupported_cas_message: &'static str,
 }
 
 struct BoundedPathCache<K>
@@ -82,16 +81,11 @@ where
     F: RootFilesystem,
     K: Clone + Eq + Hash,
 {
-    pub(crate) fn new(
-        filesystem: Arc<ScopedFilesystem<F>>,
-        cache_max_entries: usize,
-        unsupported_cas_message: &'static str,
-    ) -> Self {
+    pub(crate) fn new(filesystem: Arc<ScopedFilesystem<F>>, cache_max_entries: usize) -> Self {
         Self {
             filesystem,
             path_cache: Mutex::new(BoundedPathCache::new(cache_max_entries)),
             mutation_locks: Mutex::new(HashMap::new()),
-            unsupported_cas_message,
         }
     }
 
@@ -153,25 +147,8 @@ where
         E: From<FilesystemError>,
     {
         let entry = Entry::bytes(body).with_content_type(ContentType::json());
-        match self
-            .filesystem
-            .put(scope, path, entry.clone(), expectation)
-            .await
-        {
+        match self.filesystem.put(scope, path, entry, expectation).await {
             Ok(_) => Ok(()),
-            Err(FilesystemError::Unsupported { .. }) => {
-                tracing::warn!(
-                    path = %path,
-                    "{}",
-                    self.unsupported_cas_message
-                );
-                let opaque = Entry::bytes(entry.body).with_content_type(entry.content_type);
-                self.filesystem
-                    .put(scope, path, opaque, CasExpectation::Any)
-                    .await
-                    .map(|_| ())
-                    .map_err(E::from)
-            }
             Err(error) => Err(E::from(error)),
         }
     }
