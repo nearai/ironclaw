@@ -1149,6 +1149,146 @@ async fn postgres_repository_rejects_malformed_persisted_rows() {
     }
 }
 
+#[cfg(feature = "libsql")]
+#[tokio::test]
+async fn libsql_repository_rejects_corrupted_once_rows() {
+    let (_dir, db, repo) = build_libsql_repo_with_db().await;
+    let trigger_id = TriggerId::parse("01HZZZZZZZZZZZZZZZZZZZZZZZ").expect("ulid");
+    let tenant_id = tenant("tenant-a");
+    let record = sample_record(trigger_id, tenant_id.clone(), ts(1_704_067_260));
+
+    repo.upsert_trigger(record).await.expect("insert record");
+
+    let conn = db.connect().expect("connect raw libsql");
+
+    // Case A: schedule_kind='once' with an unparseable schedule_at value.
+    conn.execute(
+        "UPDATE trigger_records \
+         SET schedule_kind = 'once', schedule_expression = '', schedule_at = 'not-a-timestamp' \
+         WHERE tenant_id = ?1 AND trigger_id = ?2",
+        params![tenant_id.as_str(), trigger_id.to_string()],
+    )
+    .await
+    .expect("corrupt once row: invalid schedule_at");
+
+    assert_malformed_row_error(
+        &repo,
+        tenant_id.clone(),
+        trigger_id,
+        "schedule_at",
+        ReadMode::Get,
+    )
+    .await;
+
+    conn.execute("DELETE FROM trigger_records", ())
+        .await
+        .expect("clear corrupted row");
+    repo.upsert_trigger(sample_record(
+        trigger_id,
+        tenant_id.clone(),
+        ts(1_704_067_260),
+    ))
+    .await
+    .expect("restore valid row");
+
+    // Case B: schedule_kind='once' with a NULL schedule_at.
+    conn.execute(
+        "UPDATE trigger_records \
+         SET schedule_kind = 'once', schedule_expression = '', schedule_at = NULL \
+         WHERE tenant_id = ?1 AND trigger_id = ?2",
+        params![tenant_id.as_str(), trigger_id.to_string()],
+    )
+    .await
+    .expect("corrupt once row: null schedule_at");
+
+    assert_malformed_row_error(
+        &repo,
+        tenant_id.clone(),
+        trigger_id,
+        "schedule_at",
+        ReadMode::Get,
+    )
+    .await;
+
+    conn.execute("DELETE FROM trigger_records", ())
+        .await
+        .expect("clear corrupted row");
+}
+
+#[cfg(feature = "postgres")]
+#[tokio::test]
+async fn postgres_repository_rejects_corrupted_once_rows() {
+    let Some((_container, pool)) = postgres_pool_or_skip().await else {
+        return;
+    };
+    let repo = PostgresTriggerRepository::new(pool.clone());
+    repo.run_migrations().await.expect("run migrations");
+    let trigger_id = TriggerId::parse("01HZZZZZZZZZZZZZZZZZZZZZZZ").expect("ulid");
+    let tenant_id = tenant("tenant-a");
+    let record = sample_record(trigger_id, tenant_id.clone(), ts(1_704_067_260));
+
+    repo.upsert_trigger(record).await.expect("insert record");
+
+    let client = pool.get().await.expect("postgres connection");
+
+    // Case A: schedule_kind='once' with an unparseable schedule_at value.
+    client
+        .execute(
+            "UPDATE trigger_records \
+             SET schedule_kind = 'once', schedule_expression = '', schedule_at = 'not-a-timestamp' \
+             WHERE tenant_id = $1 AND trigger_id = $2",
+            &[&tenant_id.as_str(), &trigger_id.to_string()],
+        )
+        .await
+        .expect("corrupt once row: invalid schedule_at");
+
+    assert_malformed_row_error(
+        &repo,
+        tenant_id.clone(),
+        trigger_id,
+        "schedule_at",
+        ReadMode::Get,
+    )
+    .await;
+
+    client
+        .execute("DELETE FROM trigger_records", &[])
+        .await
+        .expect("clear corrupted row");
+    repo.upsert_trigger(sample_record(
+        trigger_id,
+        tenant_id.clone(),
+        ts(1_704_067_260),
+    ))
+    .await
+    .expect("restore valid row");
+
+    // Case B: schedule_kind='once' with a NULL schedule_at.
+    client
+        .execute(
+            "UPDATE trigger_records \
+             SET schedule_kind = 'once', schedule_expression = '', schedule_at = NULL \
+             WHERE tenant_id = $1 AND trigger_id = $2",
+            &[&tenant_id.as_str(), &trigger_id.to_string()],
+        )
+        .await
+        .expect("corrupt once row: null schedule_at");
+
+    assert_malformed_row_error(
+        &repo,
+        tenant_id.clone(),
+        trigger_id,
+        "schedule_at",
+        ReadMode::Get,
+    )
+    .await;
+
+    client
+        .execute("DELETE FROM trigger_records", &[])
+        .await
+        .expect("clear corrupted row");
+}
+
 #[derive(Clone, Copy)]
 enum ReadMode {
     Get,

@@ -411,7 +411,9 @@ impl TriggerSchedule {
         match kind {
             "cron" => Self::cron_with_timezone(expression, timezone),
             "once" => {
-                let at_str = schedule_at.unwrap_or(expression);
+                let at_str = schedule_at.ok_or_else(|| TriggerError::InvalidRecord {
+                    reason: "schedule_at: missing once timestamp".to_string(),
+                })?;
                 let at = chrono::DateTime::parse_from_rfc3339(at_str)
                     .map(|dt| dt.with_timezone(&chrono::Utc))
                     .map_err(|error| TriggerError::InvalidRecord {
@@ -2938,6 +2940,21 @@ mod tests {
             error.to_string().contains("does not exist"),
             "unexpected error: {error}"
         );
+    }
+
+    #[test]
+    fn once_from_local_rejects_malformed_datetime() {
+        let error = TriggerSchedule::once_from_local("not-a-date", "America/New_York")
+            .expect_err("malformed datetime must be rejected");
+        match error {
+            TriggerError::InvalidSchedule { reason } => {
+                assert!(
+                    reason.contains("not-a-date"),
+                    "reason should name the bad input: {reason}"
+                );
+            }
+            other => panic!("expected InvalidSchedule, got {other:?}"),
+        }
     }
 
     #[cfg(any(feature = "libsql", feature = "postgres"))]

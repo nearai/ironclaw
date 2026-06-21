@@ -1332,6 +1332,8 @@ ALTER TABLE trigger_records ADD COLUMN IF NOT EXISTS schedule_at TEXT;
 -- Completion is derived from the schedule (Once / exhausted cron); the legacy
 -- completion_policy column is no longer written and is dropped so inserts that
 -- omit it do not violate its NOT NULL constraint on pre-rework tables.
+-- completion_policy was only ever an interim (branch-only) column — it never
+-- shipped, so this is dev-database cleanup, not a production migration.
 ALTER TABLE trigger_records DROP COLUMN IF EXISTS completion_policy;
 
 CREATE INDEX IF NOT EXISTS trigger_records_state_next_run_at_idx

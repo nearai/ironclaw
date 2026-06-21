@@ -274,6 +274,8 @@ impl LibSqlTriggerRepository {
             // schedule-derived rework. Completion is now derived from the schedule
             // (`Once` / exhausted cron), so the column is no longer written; leaving it
             // NOT NULL on an existing table would fail every insert that omits it.
+            // `completion_policy` was only ever an interim (branch-only) column — it
+            // never shipped, so this is dev-database cleanup, not a production migration.
             // Idempotent: ignore "no such column" when it was never present / already dropped.
             if let Err(error) = conn
                 .execute(
