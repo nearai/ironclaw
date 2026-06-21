@@ -367,17 +367,14 @@ pub struct RebornServices {
     #[cfg(any(feature = "libsql", feature = "postgres"))]
     // arch-exempt: optional_arc, local-dev vs production split pending RebornServices split, plan #4471
     pub(crate) production_runtime: Option<RebornProductionRuntimeServices>,
-    /// Pre-minted scheduler notifier and paired wake channel for the production
-    /// composition path. Minted in `build_production_shaped` so the notifier can
-    /// satisfy `HostRuntimeServices.with_turn_run_wake_notifier_dyn` before
+    /// Pre-minted scheduler wake wiring for the production composition path.
+    /// Minted in `build_production_shaped` so the notifier can satisfy
+    /// `HostRuntimeServices.with_turn_run_wake_notifier_dyn` before
     /// `build_default_planned_runtime` runs; consumed by `build_reborn_runtime`
-    /// via `DefaultPlannedRuntimeParts.scheduler_wake_channel` so the scheduler
+    /// via `DefaultPlannedRuntimeParts.scheduler_wake_wiring` so the scheduler
     /// loop driven by that function shares the exact same channel.
     #[cfg(any(feature = "libsql", feature = "postgres"))]
-    pub(crate) production_scheduler_wake: Option<(
-        std::sync::Arc<ironclaw_host_runtime::SchedulerTurnRunWakeNotifier>,
-        ironclaw_host_runtime::TurnRunWakeChannel,
-    )>,
+    pub(crate) production_scheduler_wake: Option<ironclaw_reborn::runtime::SchedulerWakeWiring>,
     /// Shared scoped secret store. Exposed so runtime-level features (e.g.
     /// operator LLM-key storage) can reuse the same instance product-auth uses
     /// rather than standing up a second authority.
@@ -2774,23 +2771,18 @@ async fn build_production_shaped(
             auth_token,
             secret_master_key,
         } => {
-            // Mint the scheduler notifier and its paired wake channel here, before
-            // building the coordinator, so:
+            // Mint the scheduler wake wiring here, before building the coordinator, so:
             // 1. The notifier can satisfy `HostRuntimeServices.with_turn_run_wake_notifier_dyn`
             //    (required by `validate_production_wiring` / `turn_coordinator_for_production`).
-            // 2. The wake channel can be threaded through `RebornServices` →
-            //    `DefaultPlannedRuntimeParts.scheduler_wake_channel` so the
+            // 2. The wiring is threaded through `RebornServices` →
+            //    `DefaultPlannedRuntimeParts.scheduler_wake_wiring` so the
             //    `build_default_planned_runtime` scheduler loop consumes the exact same channel,
             //    ensuring the coordinator's notifier and the scheduler share a live queue.
-            let (scheduler_notifier, wake_channel) =
-                ironclaw_host_runtime::SchedulerTurnRunWakeNotifier::channel(
-                    ironclaw_host_runtime::TurnRunSchedulerConfig::default()
-                        .wake_channel_capacity(),
-                );
+            let scheduler_wake_wiring = ironclaw_reborn::runtime::SchedulerWakeWiring::channel();
             let production_wiring = production_wiring(
                 production_trust_policy,
                 runtime_policy,
-                scheduler_notifier.clone(),
+                scheduler_wake_wiring.notifier(),
                 runtime_process_binding,
             )?;
             let secret_master_key = resolve_secret_master_key(secret_master_key).await?;
@@ -2803,8 +2795,7 @@ async fn build_production_shaped(
                 oauth_dcr_provider_configs,
                 owner_id,
                 turn_state_store_limits,
-                scheduler_notifier,
-                scheduler_wake_channel: wake_channel,
+                scheduler_wake_wiring,
             };
             build_libsql_production(context, db, path_or_url, auth_token, secret_master_key).await
         }
@@ -2815,23 +2806,18 @@ async fn build_production_shaped(
             tls_options,
             secret_master_key,
         } => {
-            // Mint the scheduler notifier and its paired wake channel here, before
-            // building the coordinator, so:
+            // Mint the scheduler wake wiring here, before building the coordinator, so:
             // 1. The notifier can satisfy `HostRuntimeServices.with_turn_run_wake_notifier_dyn`
             //    (required by `validate_production_wiring` / `turn_coordinator_for_production`).
-            // 2. The wake channel can be threaded through `RebornServices` →
-            //    `DefaultPlannedRuntimeParts.scheduler_wake_channel` so the
+            // 2. The wiring is threaded through `RebornServices` →
+            //    `DefaultPlannedRuntimeParts.scheduler_wake_wiring` so the
             //    `build_default_planned_runtime` scheduler loop consumes the exact same channel,
             //    ensuring the coordinator's notifier and the scheduler share a live queue.
-            let (scheduler_notifier, wake_channel) =
-                ironclaw_host_runtime::SchedulerTurnRunWakeNotifier::channel(
-                    ironclaw_host_runtime::TurnRunSchedulerConfig::default()
-                        .wake_channel_capacity(),
-                );
+            let scheduler_wake_wiring = ironclaw_reborn::runtime::SchedulerWakeWiring::channel();
             let production_wiring = production_wiring(
                 production_trust_policy,
                 runtime_policy,
-                scheduler_notifier.clone(),
+                scheduler_wake_wiring.notifier(),
                 runtime_process_binding,
             )?;
             let secret_master_key = resolve_secret_master_key(secret_master_key).await?;
@@ -2844,8 +2830,7 @@ async fn build_production_shaped(
                 oauth_dcr_provider_configs,
                 owner_id,
                 turn_state_store_limits,
-                scheduler_notifier,
-                scheduler_wake_channel: wake_channel,
+                scheduler_wake_wiring,
             };
             build_postgres_production(context, pool, url, tls_options, secret_master_key).await
         }
@@ -2879,12 +2864,10 @@ struct RebornProductionBuildContext {
     oauth_dcr_provider_configs: Vec<crate::input::OAuthDcrProviderBackendConfig>,
     owner_id: String,
     turn_state_store_limits: ironclaw_turns::InMemoryTurnStateStoreLimits,
-    /// The pre-minted scheduler notifier (typed) and its paired wake channel to
-    /// carry to `RebornServices` so `build_reborn_runtime` can hand them to
-    /// `build_default_planned_runtime` via
-    /// `DefaultPlannedRuntimeParts.scheduler_wake_channel`.
-    scheduler_notifier: Arc<ironclaw_host_runtime::SchedulerTurnRunWakeNotifier>,
-    scheduler_wake_channel: ironclaw_host_runtime::TurnRunWakeChannel,
+    /// The pre-minted scheduler wake wiring to carry to `RebornServices` so
+    /// `build_reborn_runtime` can hand it to `build_default_planned_runtime` via
+    /// `DefaultPlannedRuntimeParts.scheduler_wake_wiring`.
+    scheduler_wake_wiring: ironclaw_reborn::runtime::SchedulerWakeWiring,
 }
 
 #[cfg(any(feature = "libsql", feature = "postgres"))]
@@ -3223,8 +3206,7 @@ where
         oauth_dcr_provider_configs,
         owner_id,
         turn_state_store_limits,
-        scheduler_notifier,
-        scheduler_wake_channel,
+        scheduler_wake_wiring,
     } = context;
     let owner_user_id = UserId::new(owner_id).map_err(|error| RebornBuildError::InvalidConfig {
         reason: error.to_string(),
@@ -3395,7 +3377,7 @@ where
         #[cfg(any(feature = "libsql", feature = "postgres"))]
         production_runtime: Some(production_runtime),
         #[cfg(any(feature = "libsql", feature = "postgres"))]
-        production_scheduler_wake: Some((scheduler_notifier, scheduler_wake_channel)),
+        production_scheduler_wake: Some(scheduler_wake_wiring),
         #[cfg(feature = "root-llm-provider")]
         secret_store,
     })

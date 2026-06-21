@@ -973,7 +973,7 @@ impl RebornBinaryE2EHarness {
             hook_security_audit_sink: None,
             turn_event_sink: None,
             attachment_read_port: None,
-            scheduler_wake_channel: None,
+            scheduler_wake_wiring: None,
         })?;
         let binding_service: Arc<dyn ConversationBindingService> =
             Arc::new(product_harness.binding_service()?);
@@ -1024,7 +1024,7 @@ impl RebornBinaryE2EHarness {
         turn_root: Arc<tempfile::TempDir>,
     ) -> Self {
         let coordinator = Arc::clone(&composition.coordinator);
-        let scheduler_notifier = composition.scheduler_notifier.clone();
+        let scheduler_notifier = composition.scheduler_handle.wake_notifier();
         Self {
             ingress,
             workflow,

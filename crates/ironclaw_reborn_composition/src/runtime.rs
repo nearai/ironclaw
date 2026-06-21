@@ -2247,17 +2247,14 @@ pub async fn build_reborn_runtime(
         apply_startup_stored_llm_key(llm, crate::LlmKeyStore::new(services.secret_store())).await?;
     enforce_runtime_cutover_gate(profile, &services.readiness)?;
 
-    // Extract the pre-minted scheduler wake pair from the production composition path
+    // Extract the pre-minted scheduler wake wiring from the production composition path
     // (minted in `build_production_shaped`) so it can be handed to
-    // `DefaultPlannedRuntimeParts.scheduler_wake_channel` below. The local-dev path
-    // leaves this `None` and `build_default_planned_runtime` mints its own pair.
+    // `DefaultPlannedRuntimeParts.scheduler_wake_wiring` below. The local-dev path
+    // leaves this `None` and `build_default_planned_runtime` mints its own wiring.
     #[cfg(any(feature = "libsql", feature = "postgres"))]
     let production_scheduler_wake = services.production_scheduler_wake.take();
     #[cfg(not(any(feature = "libsql", feature = "postgres")))]
-    let production_scheduler_wake: Option<(
-        Arc<ironclaw_host_runtime::SchedulerTurnRunWakeNotifier>,
-        ironclaw_host_runtime::TurnRunWakeChannel,
-    )> = None;
+    let production_scheduler_wake: Option<ironclaw_reborn::runtime::SchedulerWakeWiring> = None;
 
     let runtime_parts = match profile {
         RebornCompositionProfile::LocalDev | RebornCompositionProfile::LocalDevYolo => {
@@ -2777,12 +2774,12 @@ pub async fn build_reborn_runtime(
         turn_event_sink: Some(trace_capture_sink),
         hook_dispatcher_builder_factory,
         communication_context_provider,
-        // For the production composition path, use the pre-minted notifier+channel pair
-        // from `build_production_shaped` so the `HostRuntimeServices` notifier (used by
+        // For the production composition path, use the pre-minted wiring from
+        // `build_production_shaped` so the `HostRuntimeServices` notifier (used by
         // `turn_coordinator_for_production`) and the scheduler's wake loop share the
         // exact same channel. For local-dev, `None` causes `build_default_planned_runtime`
-        // to mint its own pair internally (existing behavior).
-        scheduler_wake_channel: production_scheduler_wake,
+        // to mint its own wiring internally (existing behavior).
+        scheduler_wake_wiring: production_scheduler_wake,
     };
     let composition = build_default_planned_runtime(planned_runtime_parts)?;
     let default_resolved_run_profile = composition
@@ -2960,7 +2957,7 @@ pub async fn build_reborn_runtime(
             trigger_conversation_pairing_value = None;
         }
     }
-    let scheduler_notifier = composition.scheduler_notifier.clone();
+    let scheduler_notifier = composition.scheduler_handle.wake_notifier();
     let trace_flush_worker =
         crate::trace_capture::spawn_trace_queue_flush_worker(trace_capture_scopes);
     // Scheduler is running (started inside build_default_planned_runtime); mark readiness.
