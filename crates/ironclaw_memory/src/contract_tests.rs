@@ -327,6 +327,35 @@ where
     );
 }
 
+#[cfg(any(test, feature = "contract-tests"))]
+pub async fn replace_chunks_skips_missing_and_stale_documents<R, F>(factory: F)
+where
+    R: MemoryDocumentRepository + MemoryDocumentIndexRepository,
+    F: Fn() -> R,
+{
+    let repo = factory();
+    let scope = scope_a();
+    let path = path_in(&scope, "notes/chunks.md");
+    let chunks = vec![MemoryChunkWrite {
+        content: "chunk marker".to_string(),
+        embedding: None,
+    }];
+
+    let missing = repo
+        .replace_document_chunks_if_current(&path, "sha256:missing", &chunks)
+        .await
+        .unwrap();
+    assert_eq!(missing, MemoryChunkReplaceOutcome::SkippedMissingDocument);
+
+    let body = "current body";
+    repo.write_document(&path, body.as_bytes()).await.unwrap();
+    let stale = repo
+        .replace_document_chunks_if_current(&path, "sha256:stale", &chunks)
+        .await
+        .unwrap();
+    assert_eq!(stale, MemoryChunkReplaceOutcome::SkippedStaleContentHash);
+}
+
 /// Internal: emit the base (search-agnostic) contract arms shared by
 /// [`contract_test!`] and [`contract_test_indexed!`].
 ///
@@ -440,6 +469,12 @@ macro_rules! contract_test_indexed {
             #[tokio::test]
             async fn search_documents_isolated_across_scopes() {
                 $crate::contract_tests::search_documents_isolated_across_scopes($factory).await;
+            }
+
+            #[tokio::test]
+            async fn replace_chunks_skips_missing_and_stale_documents() {
+                $crate::contract_tests::replace_chunks_skips_missing_and_stale_documents($factory)
+                    .await;
             }
         }
     };

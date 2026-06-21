@@ -80,14 +80,7 @@ impl DocumentMetadata {
     }
 
     pub fn learning_metadata(&self) -> Option<LearningMetadata> {
-        if self.confidence.is_none()
-            && self.created_at.is_none()
-            && self.category.is_none()
-            && self.key.is_none()
-            && self.source.is_none()
-        {
-            return None;
-        }
+        self.key.as_ref()?;
         Some(LearningMetadata {
             confidence: self.confidence,
             created_at: self.created_at.clone(),

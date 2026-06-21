@@ -542,7 +542,8 @@ mod tests {
             .with_limit(10)
             .with_min_score(0.5);
         let fresh = MemorySearchResult {
-            path: MemoryDocumentPath::new("tenant-a", "alice", None, "fresh.md").expect("path"),
+            path: MemoryDocumentPath::new("tenant-a", "alice", None, "keyed/test/fresh.md")
+                .expect("path"),
             score: 1.0,
             snippet: "fresh".to_string(),
             full_text_rank: Some(1),
@@ -550,7 +551,8 @@ mod tests {
             learning: None,
         };
         let stale = MemorySearchResult {
-            path: MemoryDocumentPath::new("tenant-a", "alice", None, "stale.md").expect("path"),
+            path: MemoryDocumentPath::new("tenant-a", "alice", None, "keyed/test/stale.md")
+                .expect("path"),
             score: 1.0,
             snippet: "stale".to_string(),
             full_text_rank: Some(2),
@@ -565,6 +567,7 @@ mod tests {
                     DocumentMetadata {
                         confidence: Some(10),
                         created_at: Some(now.to_rfc3339()),
+                        key: Some("fresh".to_string()),
                         ..DocumentMetadata::default()
                     },
                 ),
@@ -573,6 +576,7 @@ mod tests {
                     DocumentMetadata {
                         confidence: Some(1),
                         created_at: Some((now - chrono::Duration::days(400)).to_rfc3339()),
+                        key: Some("stale".to_string()),
                         ..DocumentMetadata::default()
                     },
                 ),
@@ -582,7 +586,7 @@ mod tests {
         );
 
         assert_eq!(results.len(), 1);
-        assert_eq!(results[0].path.relative_path(), "fresh.md");
+        assert_eq!(results[0].path.relative_path(), "keyed/test/fresh.md");
         assert!(
             results
                 .iter()

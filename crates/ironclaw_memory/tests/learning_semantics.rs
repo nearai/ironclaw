@@ -7,7 +7,7 @@ use ironclaw_memory::{
     InMemoryMemoryDocumentRepository, MemoryBackend, MemoryBackendCapabilities,
     MemoryBackendWriteOptions, MemoryContext, MemoryDocumentPath, MemoryDocumentRepository,
     MemoryDocumentScope, MemorySearchRequest, RepositoryMemoryBackend,
-    redact_sensitive_memory_content,
+    redact_sensitive_memory_content, stable_learning_document_relative_path,
 };
 
 fn scope() -> MemoryDocumentScope {
@@ -83,6 +83,10 @@ fn learning_metadata(
     }
 }
 
+fn learning_path(category: &str, key: &str) -> String {
+    stable_learning_document_relative_path(category, key).expect("valid stable learning path")
+}
+
 async fn write_learning<R>(
     backend: &RepositoryMemoryBackend<R>,
     relative_path: &str,
@@ -128,30 +132,33 @@ where
     R: MemoryDocumentRepository + 'static,
 {
     let now = Utc::now().to_rfc3339();
+    let editor_preference_path = learning_path("preference", "editor");
+    let theme_preference_path = learning_path("preference", "theme");
+    let editor_fact_path = learning_path("fact", "editor");
     write_learning(
         &backend,
-        "keyed/preference/editor.md",
+        &editor_preference_path,
         "editor preference old_unique_marker use nano",
         learning_metadata("editor", "preference", 8, now.clone()),
     )
     .await;
     write_learning(
         &backend,
-        "keyed/preference/editor.md",
+        &editor_preference_path,
         "editor preference new_unique_marker use helix",
         learning_metadata("editor", "preference", 9, now.clone()),
     )
     .await;
     write_learning(
         &backend,
-        "keyed/preference/theme.md",
+        &theme_preference_path,
         "theme preference other_key_marker use dark mode",
         learning_metadata("theme", "preference", 7, now.clone()),
     )
     .await;
     write_learning(
         &backend,
-        "keyed/fact/editor.md",
+        &editor_fact_path,
         "editor fact category_marker is a binary name",
         learning_metadata("editor", "fact", 7, now),
     )
@@ -164,24 +171,18 @@ where
 
     let new_hits = search(&backend, "new_unique_marker").await;
     assert_eq!(new_hits.len(), 1);
-    assert_eq!(
-        new_hits[0].path.relative_path(),
-        "keyed/preference/editor.md"
-    );
+    assert_eq!(new_hits[0].path.relative_path(), editor_preference_path);
 
     let other_key_hits = search(&backend, "other_key_marker").await;
     assert_eq!(other_key_hits.len(), 1);
     assert_eq!(
         other_key_hits[0].path.relative_path(),
-        "keyed/preference/theme.md"
+        theme_preference_path
     );
 
     let category_hits = search(&backend, "category_marker").await;
     assert_eq!(category_hits.len(), 1);
-    assert_eq!(
-        category_hits[0].path.relative_path(),
-        "keyed/fact/editor.md"
-    );
+    assert_eq!(category_hits[0].path.relative_path(), editor_fact_path);
 }
 
 #[tokio::test]
@@ -202,12 +203,12 @@ async fn assert_decay_at_read_ranks_flags_and_does_not_mutate<R>(
 ) where
     R: MemoryDocumentRepository + 'static,
 {
-    let fresh_path = "keyed/preference/fresh.md";
-    let stale_path = "keyed/preference/stale.md";
+    let fresh_path = learning_path("preference", "fresh");
+    let stale_path = learning_path("preference", "stale");
     let now = Utc::now();
     write_learning(
         &backend,
-        stale_path,
+        &stale_path,
         "decay ranking marker stale answer",
         learning_metadata(
             "stale",
@@ -219,13 +220,13 @@ async fn assert_decay_at_read_ranks_flags_and_does_not_mutate<R>(
     .await;
     write_learning(
         &backend,
-        fresh_path,
+        &fresh_path,
         "decay ranking marker fresh answer",
         learning_metadata("fresh", "preference", 10, now.to_rfc3339()),
     )
     .await;
 
-    let stale_doc = doc_path(stale_path);
+    let stale_doc = doc_path(&stale_path);
     let before_bytes = repo
         .read_document(&stale_doc)
         .await
@@ -269,6 +270,48 @@ async fn assert_decay_at_read_ranks_flags_and_does_not_mutate<R>(
     );
 }
 
+async fn assert_non_learning_metadata_does_not_decay_search_results<R>(
+    backend: RepositoryMemoryBackend<R>,
+) where
+    R: MemoryDocumentRepository + 'static,
+{
+    let now = Utc::now();
+    write_learning(
+        &backend,
+        "notes/a-ordinary.md",
+        "ordinary ranking marker stale-looking metadata",
+        DocumentMetadata {
+            confidence: Some(1),
+            created_at: Some((now - Duration::days(400)).to_rfc3339()),
+            ..DocumentMetadata::default()
+        },
+    )
+    .await;
+    write_learning(
+        &backend,
+        "notes/z-ordinary.md",
+        "ordinary ranking marker fresh-looking metadata",
+        DocumentMetadata {
+            confidence: Some(10),
+            created_at: Some(now.to_rfc3339()),
+            ..DocumentMetadata::default()
+        },
+    )
+    .await;
+
+    let results = search(&backend, "ordinary ranking marker").await;
+    assert_eq!(results.len(), 2);
+    assert_eq!(
+        results[0].path.relative_path(),
+        "notes/a-ordinary.md",
+        "ordinary non-keyed metadata must not trigger learning decay re-ranking"
+    );
+    assert!(
+        results.iter().all(|result| result.learning.is_none()),
+        "ordinary non-keyed metadata must not surface learning signals"
+    );
+}
+
 #[tokio::test]
 async fn in_memory_decay_at_read_ranks_flags_and_does_not_mutate() {
     let (repo, backend) = in_memory_backend();
@@ -279,6 +322,18 @@ async fn in_memory_decay_at_read_ranks_flags_and_does_not_mutate() {
 async fn filesystem_decay_at_read_ranks_flags_and_does_not_mutate() {
     let (repo, backend) = filesystem_backend();
     assert_decay_at_read_ranks_flags_and_does_not_mutate(repo, backend).await;
+}
+
+#[tokio::test]
+async fn in_memory_non_learning_metadata_does_not_decay_search_results() {
+    let (_repo, backend) = in_memory_backend();
+    assert_non_learning_metadata_does_not_decay_search_results(backend).await;
+}
+
+#[tokio::test]
+async fn filesystem_non_learning_metadata_does_not_decay_search_results() {
+    let (_repo, backend) = filesystem_backend();
+    assert_non_learning_metadata_does_not_decay_search_results(backend).await;
 }
 
 #[test]

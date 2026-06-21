@@ -4,6 +4,7 @@ use std::sync::OnceLock;
 
 use ironclaw_filesystem::{FilesystemError, FilesystemOperation};
 use ironclaw_host_api::{HostApiError, VirtualPath};
+use sha2::{Digest, Sha256};
 
 /// Tenant/user/agent/project scope for DB-backed memory documents exposed as virtual files.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -158,12 +159,25 @@ pub fn stable_learning_document_relative_path(
 ) -> Result<String, HostApiError> {
     Ok(format!(
         "keyed/{}/{}.md",
-        encode_learning_path_segment(category)?,
-        encode_learning_path_segment(key)?
+        hash_learning_path_segment(category)?,
+        hash_learning_path_segment(key)?
     ))
 }
 
-fn encode_learning_path_segment(raw: &str) -> Result<String, HostApiError> {
+pub(crate) fn is_stable_learning_document_relative_path(path: &str) -> bool {
+    let Some(rest) = path.strip_prefix("keyed/") else {
+        return false;
+    };
+    let Some((category_hash, key_file_name)) = rest.split_once('/') else {
+        return false;
+    };
+    let Some(key_hash) = key_file_name.strip_suffix(".md") else {
+        return false;
+    };
+    is_sha256_hex(category_hash) && is_sha256_hex(key_hash)
+}
+
+fn hash_learning_path_segment(raw: &str) -> Result<String, HostApiError> {
     let trimmed = raw.trim();
     if trimmed.is_empty() {
         return Err(HostApiError::InvalidId {
@@ -172,23 +186,14 @@ fn encode_learning_path_segment(raw: &str) -> Result<String, HostApiError> {
             reason: "segment must not be empty".to_string(),
         });
     }
-    let mut encoded = String::new();
-    for byte in trimmed.bytes() {
-        if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.') {
-            encoded.push(char::from(byte));
-        } else {
-            encoded.push('_');
-            encoded.push_str(&format!("{byte:02x}"));
-        }
-    }
-    if encoded == "." || encoded == ".." {
-        return Err(HostApiError::InvalidId {
-            kind: "memory learning path segment",
-            value: raw.to_string(),
-            reason: "segment must not resolve to a reserved path segment".to_string(),
-        });
-    }
-    Ok(encoded)
+    Ok(format!("{:x}", Sha256::digest(trimmed.as_bytes())))
+}
+
+fn is_sha256_hex(value: &str) -> bool {
+    value.len() == 64
+        && value
+            .bytes()
+            .all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f'))
 }
 
 pub(crate) struct ParsedMemoryPath {
@@ -466,7 +471,10 @@ pub(crate) fn valid_memory_path() -> VirtualPath {
 
 #[cfg(test)]
 mod path_validation_tests {
-    use super::validated_memory_relative_path;
+    use super::{
+        is_stable_learning_document_relative_path, stable_learning_document_relative_path,
+        validated_memory_relative_path,
+    };
 
     /// PR #3679 review fix (finding #5): legal user document paths must
     /// not collide with the repository's sidecar suffix namespace.
@@ -501,5 +509,46 @@ mod path_validation_tests {
             validated_memory_relative_path(ok.to_string())
                 .expect("non-reserved path must be accepted");
         }
+    }
+
+    #[test]
+    fn stable_learning_path_hashes_external_segments_without_aliasing_or_leaking() {
+        let spaced = stable_learning_document_relative_path("preference", "editor preference")
+            .expect("stable path");
+        let escaped = stable_learning_document_relative_path("preference", "editor_20preference")
+            .expect("stable path");
+        let secret = stable_learning_document_relative_path(
+            "secret=hunter2",
+            "database access postgres://app:swordfish@db.example/app",
+        )
+        .expect("stable path");
+
+        assert_ne!(spaced, escaped, "distinct keys must not alias");
+        assert!(is_stable_learning_document_relative_path(&secret));
+        assert!(
+            !is_stable_learning_document_relative_path("keyed/preference/editor.md"),
+            "only canonical hashed keyed paths are stable learning documents"
+        );
+        assert!(
+            !is_stable_learning_document_relative_path(&format!(
+                "keyed/{}/{}.md",
+                "a".repeat(64).to_ascii_uppercase(),
+                "b".repeat(64).to_ascii_uppercase()
+            )),
+            "stable learning paths use canonical lowercase hashes"
+        );
+        for leaked in ["hunter2", "swordfish", "postgres", "database"] {
+            assert!(
+                !secret.contains(leaked),
+                "stable learning path leaked raw input fragment {leaked}: {secret}"
+            );
+        }
+        validated_memory_relative_path(secret).expect("hashed learning path remains valid");
+    }
+
+    #[test]
+    fn stable_learning_path_rejects_empty_segments() {
+        stable_learning_document_relative_path("", "key").expect_err("empty category");
+        stable_learning_document_relative_path("category", "  ").expect_err("empty key");
     }
 }

@@ -11,32 +11,26 @@ struct SensitiveRedactionPattern {
 
 static SENSITIVE_REDACTION_PATTERNS: LazyLock<Vec<SensitiveRedactionPattern>> = LazyLock::new(
     || {
-        let specs = [
-            (
-                r"(?i)\b([a-z][a-z0-9+.-]*://[^/\s:@]+:)([^@\s/]+)(@[^ \r\n\t]*)",
-                "$1[REDACTED - sensitive]$3",
-            ),
-            (
-                r#"(?im)\b(password|passwd|pwd|api[_-]?key|access[_-]?token|auth[_-]?token|secret|client[_-]?secret)\b(\s*[:=]\s*)(["']?)([^"'\s,;]+)(["']?)"#,
-                "$1$2$3[REDACTED - sensitive]$5",
-            ),
-            (r"(?i)\bsk-(?:proj-)?[a-z0-9_-]{12,}\b", SENSITIVE_REDACTION),
-        ];
-
-        let mut patterns = Vec::with_capacity(specs.len());
-        for (pattern, replacement) in specs {
-            match Regex::new(pattern) {
-                Ok(regex) => patterns.push(SensitiveRedactionPattern { regex, replacement }),
-                Err(error) => {
-                    tracing::debug!(
-                        pattern,
-                        error = %error,
-                        "sensitive redaction pattern failed to compile"
-                    );
-                }
-            }
-        }
-        patterns
+        vec![
+            SensitiveRedactionPattern {
+                regex: Regex::new(
+                    r"(?i)\b([a-z][a-z0-9+.-]*://[^/\s:@]+:)([^@\s/]+)(@[^ \r\n\t]*)",
+                )
+                .unwrap(), // safety: hardcoded literal
+                replacement: "$1[REDACTED - sensitive]$3",
+            },
+            SensitiveRedactionPattern {
+                regex: Regex::new(
+                    r#"(?im)\b(password|passwd|pwd|api[_-]?key|access[_-]?token|auth[_-]?token|secret|client[_-]?secret)\b(\s*[:=]\s*)(["']?)([^"'\s,;]+)(["']?)"#,
+                )
+                .unwrap(), // safety: hardcoded literal
+                replacement: "$1$2$3[REDACTED - sensitive]$5",
+            },
+            SensitiveRedactionPattern {
+                regex: Regex::new(r"(?i)\bsk-(?:proj-)?[a-z0-9_-]{12,}\b").unwrap(), // safety: hardcoded literal
+                replacement: SENSITIVE_REDACTION,
+            },
+        ]
     },
 );
 

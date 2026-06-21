@@ -61,6 +61,52 @@ use ironclaw_trust::{
 use ironclaw_turns::TurnRunId;
 use serde_json::{Value, json};
 
+const IRONCLAW_LEARNING_ENABLED_ENV: &str = "IRONCLAW_LEARNING_ENABLED";
+
+static MEMORY_LEARNING_ENV_LOCK: LazyLock<tokio::sync::Mutex<()>> =
+    LazyLock::new(|| tokio::sync::Mutex::new(()));
+
+struct EnvGuard {
+    key: &'static str,
+    previous: Option<String>,
+}
+
+impl EnvGuard {
+    fn set(key: &'static str, value: &str) -> Self {
+        let previous = std::env::var(key).ok();
+        // SAFETY: tests that mutate IRONCLAW_LEARNING_ENABLED hold
+        // MEMORY_LEARNING_ENV_LOCK for the full mutation scope.
+        unsafe {
+            std::env::set_var(key, value);
+        }
+        Self { key, previous }
+    }
+
+    fn clear(key: &'static str) -> Self {
+        let previous = std::env::var(key).ok();
+        // SAFETY: tests that mutate IRONCLAW_LEARNING_ENABLED hold
+        // MEMORY_LEARNING_ENV_LOCK for the full mutation scope.
+        unsafe {
+            std::env::remove_var(key);
+        }
+        Self { key, previous }
+    }
+}
+
+impl Drop for EnvGuard {
+    fn drop(&mut self) {
+        // SAFETY: guard restoration happens while the creating test still
+        // holds MEMORY_LEARNING_ENV_LOCK.
+        unsafe {
+            if let Some(previous) = self.previous.as_ref() {
+                std::env::set_var(self.key, previous);
+            } else {
+                std::env::remove_var(self.key);
+            }
+        }
+    }
+}
+
 #[tokio::test]
 async fn builtin_first_party_package_declares_expected_capabilities() {
     let package = builtin_first_party_package().unwrap();
@@ -249,6 +295,88 @@ async fn builtin_first_party_surface_lists_allowed_tools_in_registry_order() {
     assert!(properties.contains_key("handoff"));
     assert!(!properties.contains_key("mode"));
     assert!(!properties.contains_key("run_in_background"));
+}
+
+#[tokio::test]
+async fn memory_write_learning_fields_are_gated_by_env() {
+    let _lock = MEMORY_LEARNING_ENV_LOCK.lock().await;
+    let runtime = runtime_with_filesystem(InMemoryBackend::new());
+    let context = execution_context_with_mounts(
+        [MEMORY_WRITE_CAPABILITY_ID],
+        memory_mounts(MountPermissions::read_write_list_delete()),
+    );
+
+    {
+        let _learning_env = EnvGuard::clear(IRONCLAW_LEARNING_ENABLED_ENV);
+        let request = VisibleCapabilityRequest::new(
+            execution_context(all_builtin_capability_ids()),
+            SurfaceKind::new("agent_loop").unwrap(),
+        )
+        .with_policy(CapabilitySurfacePolicy::allow_all())
+        .with_provider_trust(provider_trust());
+        let surface = runtime.visible_capabilities(request).await.unwrap();
+        let memory_write = surface
+            .capabilities
+            .iter()
+            .find(|capability| capability.descriptor.id.as_str() == MEMORY_WRITE_CAPABILITY_ID)
+            .expect("memory write capability");
+        let properties = memory_write
+            .descriptor
+            .parameters_schema
+            .get("properties")
+            .and_then(Value::as_object)
+            .expect("memory write schema properties");
+        assert!(!properties.contains_key("key"));
+        assert!(!properties.contains_key("confidence"));
+
+        let error = invoke_with_context(
+            &runtime,
+            MEMORY_WRITE_CAPABILITY_ID,
+            json!({
+                "key": "editor preference",
+                "content": "learning should be gated"
+            }),
+            context.clone(),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(error, RuntimeFailureKind::InvalidInput);
+    }
+
+    let _learning_env = EnvGuard::set(IRONCLAW_LEARNING_ENABLED_ENV, "true");
+    let request = VisibleCapabilityRequest::new(
+        execution_context(all_builtin_capability_ids()),
+        SurfaceKind::new("agent_loop").unwrap(),
+    )
+    .with_policy(CapabilitySurfacePolicy::allow_all())
+    .with_provider_trust(provider_trust());
+    let surface = runtime.visible_capabilities(request).await.unwrap();
+    let memory_write = surface
+        .capabilities
+        .iter()
+        .find(|capability| capability.descriptor.id.as_str() == MEMORY_WRITE_CAPABILITY_ID)
+        .expect("memory write capability");
+    let properties = memory_write
+        .descriptor
+        .parameters_schema
+        .get("properties")
+        .and_then(Value::as_object)
+        .expect("memory write schema properties");
+    assert!(properties.contains_key("key"));
+    assert!(properties.contains_key("confidence"));
+
+    let written = invoke_with_context(
+        &runtime,
+        MEMORY_WRITE_CAPABILITY_ID,
+        json!({
+            "key": "editor preference",
+            "content": "learning is enabled"
+        }),
+        context,
+    )
+    .await
+    .unwrap();
+    assert_eq!(written["append"], json!(false));
 }
 
 #[tokio::test]
@@ -1619,6 +1747,8 @@ async fn memory_write_metadata_overlay_can_skip_search_indexing() {
 
 #[tokio::test]
 async fn memory_write_key_overwrites_same_category_without_search_ghosts() {
+    let _lock = MEMORY_LEARNING_ENV_LOCK.lock().await;
+    let _learning_env = EnvGuard::set(IRONCLAW_LEARNING_ENABLED_ENV, "true");
     let runtime = runtime_with_filesystem(InMemoryBackend::new());
     let context = execution_context_with_mounts(
         [MEMORY_WRITE_CAPABILITY_ID, MEMORY_SEARCH_CAPABILITY_ID],
@@ -1729,6 +1859,8 @@ async fn memory_write_key_overwrites_same_category_without_search_ghosts() {
 
 #[tokio::test]
 async fn memory_write_rejects_invalid_learning_metadata_inputs() {
+    let _lock = MEMORY_LEARNING_ENV_LOCK.lock().await;
+    let _learning_env = EnvGuard::set(IRONCLAW_LEARNING_ENABLED_ENV, "true");
     let runtime = runtime_with_filesystem(InMemoryBackend::new());
     let context = execution_context_with_mounts(
         [MEMORY_WRITE_CAPABILITY_ID],
@@ -1762,6 +1894,8 @@ async fn memory_write_rejects_invalid_learning_metadata_inputs() {
 
 #[tokio::test]
 async fn memory_read_and_search_redact_sensitive_learning_content() {
+    let _lock = MEMORY_LEARNING_ENV_LOCK.lock().await;
+    let _learning_env = EnvGuard::set(IRONCLAW_LEARNING_ENABLED_ENV, "true");
     let runtime = runtime_with_filesystem(InMemoryBackend::new());
     let context = execution_context_with_mounts(
         [
@@ -1788,6 +1922,13 @@ async fn memory_read_and_search_redact_sensitive_learning_content() {
     .unwrap();
 
     let path = write["path"].as_str().expect("written path");
+    assert!(path.starts_with("keyed/"));
+    for leaked in ["swordfish", "hunter2", "postgres", "sk-proj-test"] {
+        assert!(
+            !path.contains(leaked),
+            "stable learning path should not leak raw secret fragment {leaked}: {path}"
+        );
+    }
     let read = invoke_with_context(
         &runtime,
         MEMORY_READ_CAPABILITY_ID,

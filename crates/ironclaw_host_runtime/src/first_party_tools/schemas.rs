@@ -1,5 +1,7 @@
 use serde_json::{Value, json};
 
+use super::learning_gate::learning_enabled;
+
 pub(crate) fn resolve_builtin_input_schema_ref(reference: &str) -> Option<Value> {
     Some(match reference {
         "schemas/builtin/echo.input.v1.json" => json!({
@@ -74,69 +76,7 @@ pub(crate) fn resolve_builtin_input_schema_ref(reference: &str) -> Option<Value>
             "required": ["query"],
             "additionalProperties": false
         }),
-        "schemas/builtin/memory_write.input.v1.json" => json!({
-            "type": "object",
-            "properties": {
-                "content": {
-                    "type": "string",
-                    "description": "Full content to write or append"
-                },
-                "target": {
-                    "type": "string",
-                    "description": "Where to write: 'memory' for MEMORY.md, 'daily_log' for today's log, 'heartbeat' for HEARTBEAT.md checklist, 'bootstrap' to clear BOOTSTRAP.md (content is ignored; the file is always cleared), or a relative memory document path.",
-                    "default": "daily_log"
-                },
-                "append": {
-                    "type": "boolean",
-                    "description": "Append to existing content when true; replace when false",
-                    "default": true
-                },
-                "metadata": {
-                    "type": "object",
-                    "description": "Optional document metadata such as skip_indexing or skip_versioning"
-                },
-                "key": {
-                    "type": "string",
-                    "description": "Stable learning key. When present, writes replace the memory document derived from key and category."
-                },
-                "category": {
-                    "type": "string",
-                    "description": "Optional learning category used with key to keep stable keys distinct across categories."
-                },
-                "confidence": {
-                    "type": "integer",
-                    "minimum": 1,
-                    "maximum": 10,
-                    "description": "Optional learning confidence from 1 to 10."
-                },
-                "created_at": {
-                    "type": "string",
-                    "description": "Optional learning creation timestamp, preferably RFC 3339."
-                },
-                "source": {
-                    "type": "string",
-                    "description": "Optional source label for a learning."
-                },
-                "old_string": {
-                    "type": "string",
-                    "description": "Exact text to replace; switches to patch mode"
-                },
-                "new_string": {
-                    "type": "string",
-                    "description": "Replacement text for patch mode"
-                },
-                "replace_all": {
-                    "type": "boolean",
-                    "description": "Replace every old_string occurrence in patch mode",
-                    "default": false
-                },
-                "timezone": {
-                    "type": "string",
-                    "description": "IANA timezone used only for daily_log target date resolution"
-                }
-            },
-            "additionalProperties": false
-        }),
+        "schemas/builtin/memory_write.input.v1.json" => memory_write_schema(),
         "schemas/builtin/memory_read.input.v1.json" => json!({
             "type": "object",
             "properties": {
@@ -372,6 +312,92 @@ pub(crate) fn resolve_builtin_input_schema_ref(reference: &str) -> Option<Value>
         }),
         _ => return None,
     })
+}
+
+fn memory_write_schema() -> Value {
+    let mut schema = json!({
+        "type": "object",
+        "properties": {
+            "content": {
+                "type": "string",
+                "description": "Full content to write or append"
+            },
+            "target": {
+                "type": "string",
+                "description": "Where to write: 'memory' for MEMORY.md, 'daily_log' for today's log, 'heartbeat' for HEARTBEAT.md checklist, 'bootstrap' to clear BOOTSTRAP.md (content is ignored; the file is always cleared), or a relative memory document path.",
+                "default": "daily_log"
+            },
+            "append": {
+                "type": "boolean",
+                "description": "Append to existing content when true; replace when false",
+                "default": true
+            },
+            "metadata": {
+                "type": "object",
+                "description": "Optional document metadata such as skip_indexing or skip_versioning"
+            },
+            "old_string": {
+                "type": "string",
+                "description": "Exact text to replace; switches to patch mode"
+            },
+            "new_string": {
+                "type": "string",
+                "description": "Replacement text for patch mode"
+            },
+            "replace_all": {
+                "type": "boolean",
+                "description": "Replace every old_string occurrence in patch mode",
+                "default": false
+            },
+            "timezone": {
+                "type": "string",
+                "description": "IANA timezone used only for daily_log target date resolution"
+            }
+        },
+        "additionalProperties": false
+    });
+    if learning_enabled()
+        && let Some(properties) = schema.get_mut("properties").and_then(Value::as_object_mut)
+    {
+        properties.insert(
+            "key".to_string(),
+            json!({
+                "type": "string",
+                "description": "Stable learning key. When present, writes replace the memory document derived from key and category."
+            }),
+        );
+        properties.insert(
+            "category".to_string(),
+            json!({
+                "type": "string",
+                "description": "Optional learning category used with key to keep stable keys distinct across categories."
+            }),
+        );
+        properties.insert(
+            "confidence".to_string(),
+            json!({
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 10,
+                "description": "Optional learning confidence from 1 to 10."
+            }),
+        );
+        properties.insert(
+            "created_at".to_string(),
+            json!({
+                "type": "string",
+                "description": "Optional learning creation timestamp, preferably RFC 3339."
+            }),
+        );
+        properties.insert(
+            "source".to_string(),
+            json!({
+                "type": "string",
+                "description": "Optional source label for a learning."
+            }),
+        );
+    }
+    schema
 }
 
 fn http_schema(require_save_to: bool) -> Value {

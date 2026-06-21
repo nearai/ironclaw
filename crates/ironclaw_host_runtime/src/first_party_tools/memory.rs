@@ -23,6 +23,7 @@ use serde_json::{Value, json};
 
 use crate::{FirstPartyCapabilityError, FirstPartyCapabilityRequest, FirstPartyCapabilityResult};
 
+use super::learning_gate::{LEARNING_FIELD_NAMES, learning_enabled};
 use super::{first_party_capability_manifest, input_error, operation_error, resource_profile};
 
 pub const MEMORY_SEARCH_CAPABILITY_ID: &str = "builtin.memory_search";
@@ -458,11 +459,17 @@ fn parse_write_command(
     scope: &MemoryDocumentScope,
     input: &Value,
 ) -> Result<MemoryWriteCommand, FirstPartyCapabilityError> {
+    if !learning_enabled() && has_top_level_learning_field(input) {
+        return Err(input_error());
+    }
     let metadata_overlay = metadata_overlay(input)?;
     if let Some(key) = metadata_overlay
         .as_ref()
         .and_then(|metadata| metadata.key.as_deref())
     {
+        if !learning_enabled() {
+            return Err(input_error());
+        }
         let category = metadata_overlay
             .as_ref()
             .and_then(|metadata| metadata.category.as_deref())
@@ -530,6 +537,12 @@ fn parse_write_command(
         metadata_overlay,
         operation,
     })
+}
+
+fn has_top_level_learning_field(input: &Value) -> bool {
+    LEARNING_FIELD_NAMES
+        .into_iter()
+        .any(|key| input.get(key).is_some())
 }
 
 fn metadata_overlay(input: &Value) -> Result<Option<DocumentMetadata>, FirstPartyCapabilityError> {

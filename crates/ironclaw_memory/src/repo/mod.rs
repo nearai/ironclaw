@@ -8,8 +8,8 @@ use ironclaw_host_api::VirtualPath;
 
 use crate::metadata::MemoryWriteOptions;
 use crate::path::{
-    MemoryDocumentPath, MemoryDocumentScope, memory_backend_unsupported, memory_error,
-    memory_not_found, valid_memory_path,
+    MemoryDocumentPath, MemoryDocumentScope, is_stable_learning_document_relative_path,
+    memory_backend_unsupported, memory_error, memory_not_found, valid_memory_path,
 };
 use crate::search::{MemorySearchRequest, MemorySearchResult, apply_learning_decay_to_results};
 
@@ -268,13 +268,24 @@ pub(crate) async fn rank_search_results_with_learning_metadata<R>(
 where
     R: MemoryDocumentRepository + ?Sized,
 {
+    if !results
+        .iter()
+        .any(|result| is_stable_learning_document_relative_path(result.path.relative_path()))
+    {
+        return Ok(results);
+    }
+
     let mut with_metadata = Vec::with_capacity(results.len());
     for result in results {
-        let metadata = repository
-            .read_document_metadata(&result.path)
-            .await?
-            .map(|value| crate::metadata::DocumentMetadata::from_value(&value))
-            .unwrap_or_default();
+        let metadata = if is_stable_learning_document_relative_path(result.path.relative_path()) {
+            repository
+                .read_document_metadata(&result.path)
+                .await?
+                .map(|value| crate::metadata::DocumentMetadata::from_value(&value))
+                .unwrap_or_default()
+        } else {
+            crate::metadata::DocumentMetadata::default()
+        };
         with_metadata.push((result, metadata));
     }
     Ok(apply_learning_decay_to_results(with_metadata, request))
