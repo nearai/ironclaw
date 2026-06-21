@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::{collections::BTreeMap, error::Error, time::Duration};
 
 use async_trait::async_trait;
 use ironclaw_host_api::VirtualPath;
@@ -25,31 +25,88 @@ pub struct PostgresRootFilesystem {
 }
 
 #[cfg(feature = "postgres")]
+const POSTGRES_MIGRATION_CONNECT_ATTEMPTS: u32 = 8;
+#[cfg(feature = "postgres")]
+const POSTGRES_MIGRATION_CONNECT_INITIAL_BACKOFF: Duration = Duration::from_millis(100);
+
+#[cfg(feature = "postgres")]
 impl PostgresRootFilesystem {
     pub fn new(pool: deadpool_postgres::Pool) -> Self {
         Self { pool }
     }
 
     pub async fn run_migrations(&self) -> Result<(), FilesystemError> {
-        let client = self.client().await?;
+        let client = self.migration_client_with_retry().await?;
         client
             .batch_execute(POSTGRES_ROOT_FILESYSTEM_SCHEMA)
             .await
             .map_err(|error| infrastructure_pg_error(FilesystemOperation::CreateDirAll, error))
     }
 
+    async fn migration_client_with_retry(
+        &self,
+    ) -> Result<deadpool_postgres::Object, FilesystemError> {
+        let mut last_error = None;
+        for attempt in 0..POSTGRES_MIGRATION_CONNECT_ATTEMPTS {
+            match self.client().await {
+                Ok(client) => return Ok(client),
+                Err(error) => {
+                    last_error = Some(error);
+                    if attempt + 1 < POSTGRES_MIGRATION_CONNECT_ATTEMPTS {
+                        let delay = postgres_migration_connect_backoff(attempt);
+                        tracing::debug!(
+                            attempt = attempt + 1,
+                            max_attempts = POSTGRES_MIGRATION_CONNECT_ATTEMPTS,
+                            retry_after_ms = delay.as_millis(),
+                            "postgres root filesystem migration connect failed; retrying"
+                        );
+                        tokio::time::sleep(delay).await;
+                    }
+                }
+            }
+        }
+
+        Err(last_error.unwrap_or_else(|| FilesystemError::BackendInfrastructure {
+            operation: FilesystemOperation::Connect,
+            reason: format!(
+                "failed to create PostgreSQL filesystem connection after {POSTGRES_MIGRATION_CONNECT_ATTEMPTS} attempts"
+            ),
+        }))
+    }
+
     async fn client(&self) -> Result<deadpool_postgres::Object, FilesystemError> {
         self.pool.get().await.map_err(|error| {
+            let reason = format!(
+                "failed to create PostgreSQL filesystem connection: {}",
+                format_error_chain(&error)
+            );
             tracing::debug!(
-                %error,
+                %reason,
                 "postgres root filesystem pool checkout failed"
             );
             FilesystemError::BackendInfrastructure {
                 operation: FilesystemOperation::Connect,
-                reason: "postgres backend infrastructure error".to_string(),
+                reason,
             }
         })
     }
+}
+
+#[cfg(feature = "postgres")]
+fn postgres_migration_connect_backoff(attempt: u32) -> Duration {
+    POSTGRES_MIGRATION_CONNECT_INITIAL_BACKOFF * 2u32.pow(attempt)
+}
+
+#[cfg(feature = "postgres")]
+fn format_error_chain(error: &(dyn Error + 'static)) -> String {
+    let mut reason = error.to_string();
+    let mut source = error.source();
+    while let Some(error) = source {
+        reason.push_str(": ");
+        reason.push_str(&error.to_string());
+        source = error.source();
+    }
+    reason
 }
 
 #[cfg(feature = "postgres")]

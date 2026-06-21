@@ -157,12 +157,13 @@ pub(crate) fn infrastructure_pg_error(
     operation: FilesystemOperation,
     error: tokio_postgres::Error,
 ) -> FilesystemError {
+    let reason = format!("postgres root filesystem infrastructure error: {error}");
     tracing::debug!(
         %operation,
-        error = %error,
+        %reason,
         "postgres root filesystem infrastructure error"
     );
-    infrastructure_error(operation, "postgres backend infrastructure error")
+    infrastructure_error(operation, reason)
 }
 
 #[cfg(feature = "libsql")]
