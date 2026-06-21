@@ -234,6 +234,11 @@ impl RebornBuildInput {
         &self.owner_id
     }
 
+    #[cfg(feature = "root-llm-provider")]
+    pub(crate) fn has_nearai_mcp_bootstrap_config(&self) -> bool {
+        self.nearai_mcp_bootstrap_config.is_some()
+    }
+
     /// Override the owner id after construction.
     ///
     /// The WebChat v2 serve path uses this to pin the runtime owner to the

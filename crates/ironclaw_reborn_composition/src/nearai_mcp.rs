@@ -3,7 +3,7 @@ use std::{net::IpAddr, sync::Arc};
 use ironclaw_auth::{
     AuthProductScope, AuthProviderId, AuthSurface, CredentialAccountUpdateBinding,
 };
-use ironclaw_host_api::{ExtensionId, InvocationId, ResourceScope, UserId};
+use ironclaw_host_api::{ExtensionId, InvocationId, ResourceScope};
 use ironclaw_product_workflow::{
     ExtensionCredentialSetupService, ExtensionCredentialSubmitRequest, LifecyclePackageKind,
     LifecyclePackageRef, LifecyclePhase, RebornServicesError, RebornServicesErrorCode,
@@ -73,22 +73,13 @@ impl NearAiMcpBootstrapConfig {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
 pub enum NearAiMcpBootstrapConfigError {
+    #[error("NEARAI_API_KEY is required when NEARAI_BASE_URL is set")]
     MissingApiKey,
+    #[error("NEAR AI session token could not be read: {reason}")]
+    SessionTokenRead { reason: String },
 }
-
-impl std::fmt::Display for NearAiMcpBootstrapConfigError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::MissingApiKey => {
-                write!(f, "NEARAI_API_KEY is required when NEARAI_BASE_URL is set")
-            }
-        }
-    }
-}
-
-impl std::error::Error for NearAiMcpBootstrapConfigError {}
 
 pub(crate) fn nearai_mcp_endpoint_from_env() -> Result<NearAiMcpEndpoint, String> {
     let configured_base = ironclaw_common::env_helpers::env_or_override("NEARAI_BASE_URL")
@@ -107,6 +98,33 @@ pub fn nearai_mcp_bootstrap_config_from_env()
         .filter(|value| !value.is_empty())
         .map(SecretString::from);
     NearAiMcpBootstrapConfig::from_optional_parts(configured_base, api_key)
+}
+
+#[cfg(feature = "root-llm-provider")]
+pub(crate) async fn nearai_mcp_bootstrap_config_from_llm_config(
+    config: &ironclaw_llm::LlmConfig,
+) -> Result<Option<NearAiMcpBootstrapConfig>, NearAiMcpBootstrapConfigError> {
+    if config.active_provider_id() != "nearai" {
+        return Ok(None);
+    }
+
+    if let Some(api_key) = &config.nearai.api_key {
+        return NearAiMcpBootstrapConfig::from_optional_parts(
+            Some(config.nearai.base_url.clone()),
+            Some(api_key.clone()),
+        );
+    }
+
+    let session = ironclaw_llm::create_session_manager(config.session.clone()).await;
+    if !session.has_token().await {
+        return Ok(None);
+    }
+    let token = session.get_token().await.map_err(|error| {
+        NearAiMcpBootstrapConfigError::SessionTokenRead {
+            reason: error.to_string(),
+        }
+    })?;
+    NearAiMcpBootstrapConfig::from_optional_parts(Some(config.nearai.base_url.clone()), Some(token))
 }
 
 pub(crate) fn nearai_mcp_endpoint_from_base(
@@ -183,7 +201,7 @@ pub(crate) async fn bootstrap_local_dev_nearai_mcp(
     config: Option<NearAiMcpBootstrapConfig>,
     product_auth: &Arc<RebornProductAuthServices>,
     extension_management: &Arc<RebornLocalExtensionManagementPort>,
-    owner_user_id: &UserId,
+    owner_scope: ResourceScope,
 ) -> Result<(), RebornBuildError> {
     let Some(config) = config else {
         return Ok(());
@@ -224,10 +242,10 @@ pub(crate) async fn bootstrap_local_dev_nearai_mcp(
         }
     }
 
-    let resource_scope = ResourceScope::local_default(owner_user_id.clone(), InvocationId::new())
-        .map_err(|error| RebornBuildError::InvalidConfig {
-        reason: format!("NEAR AI MCP auto-enable scope could not be built: {error}"),
-    })?;
+    let resource_scope = ResourceScope {
+        invocation_id: InvocationId::new(),
+        ..owner_scope.without_thread_and_mission()
+    };
     let scope = AuthProductScope::new(resource_scope.clone(), AuthSurface::Api);
     let provider =
         AuthProviderId::new("nearai").map_err(|error| RebornBuildError::InvalidConfig {
