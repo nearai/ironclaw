@@ -1693,11 +1693,18 @@ fn parse_cron_schedule(expression: &str) -> Result<Schedule, TriggerError> {
 }
 
 fn reject_sub_minute_seconds_field(field: &str) -> Result<(), TriggerError> {
-    if field.trim().parse::<u32>() == Ok(0) {
+    // A plain literal seconds value (e.g. `0` or `30`) fires at most once per
+    // minute, so it is never sub-minute — accept it and let
+    // `reject_sub_minute_cadence` (which measures real fire spacing) be the
+    // guard. Only stepped, ranged, listed, or wildcard seconds (`*`, `/`, `-`,
+    // `,`) can produce a sub-minute cadence; reject those here with a precise
+    // message. (Previously this rejected every non-zero seconds literal, which
+    // wrongly failed valid model-emitted crons like `30 */5 * * * *`.)
+    if field.trim().parse::<u32>().is_ok() {
         return Ok(());
     }
     Err(TriggerError::InvalidSchedule {
-        reason: "cron schedules must not use second-level cadence; use second field `0`"
+        reason: "cron schedules must not use second-level cadence; use a fixed seconds value such as `0`"
             .to_string(),
     })
 }
@@ -1914,12 +1921,8 @@ mod tests {
 
     #[test]
     fn cron_schedule_rejects_sub_minute_seconds_fields() {
-        for expression in [
-            "*/30 * * * * *",
-            "1 * * * * *",
-            "0/15 * * * * * *",
-            "00/15 * * * * *",
-        ] {
+        // Stepped / ranged / wildcard seconds can fire faster than once a minute.
+        for expression in ["*/30 * * * * *", "0/15 * * * * * *", "00/15 * * * * *"] {
             let error = TriggerSchedule::cron(expression).expect_err("sub-minute cron rejected");
             assert!(
                 error.to_string().contains("second-level cadence"),
@@ -1929,9 +1932,17 @@ mod tests {
     }
 
     #[test]
-    fn cron_schedule_accepts_zero_and_zero_padded_seconds_fields() {
-        for expression in ["0 0 * * * *", "00 0 * * * *"] {
-            TriggerSchedule::cron(expression).expect("zero seconds accepted");
+    fn cron_schedule_accepts_literal_seconds_fields() {
+        // A plain literal seconds value fires at most once per minute, so it is
+        // valid: `1 * * * * *` is once-a-minute at :01, and `30 */5 * * * *` is
+        // every five minutes at :30 (the case the old guard wrongly rejected).
+        for expression in [
+            "0 0 * * * *",
+            "00 0 * * * *",
+            "1 * * * * *",
+            "30 */5 * * * *",
+        ] {
+            TriggerSchedule::cron(expression).expect("literal-seconds cron accepted");
         }
     }
 

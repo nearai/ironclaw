@@ -27,6 +27,10 @@ use super::{
 const TRIGGER_LIST_MAX_LIMIT: usize = 100;
 const TRIGGER_RUN_HISTORY_DEFAULT_LIMIT: usize = 25;
 const TRIGGER_RUN_HISTORY_MAX_LIMIT: usize = 100;
+/// Maximum scheduled triggers a single caller scope may hold. `trigger_create`
+/// is exempt from the local-dev approval gate, so this cap is the backstop that
+/// bounds runaway/abusive routine creation.
+const MAX_SCOPED_TRIGGERS: usize = 100;
 
 pub const TRIGGER_CREATE_CAPABILITY_ID: &str = "builtin.trigger_create";
 pub const TRIGGER_LIST_CAPABILITY_ID: &str = "builtin.trigger_list";
@@ -199,7 +203,13 @@ struct TriggerCreateInput {
     name: String,
     prompt: String,
     cron: String,
-    timezone: String,
+    // Optional: a fixed-interval schedule ("every N minutes") is timezone-
+    // independent, so requiring a timezone forced an unnecessary clarifying
+    // round-trip (or a deserialization failure) that read as a routine-creation
+    // failure. Defaults to UTC at the call site; the model should still supply a
+    // real IANA zone for wall-clock schedules (e.g. "daily at 9am") when known.
+    #[serde(default)]
+    timezone: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -221,8 +231,32 @@ async fn create_trigger(
     now: DateTime<Utc>,
 ) -> Result<Value, FirstPartyCapabilityError> {
     let input: TriggerCreateInput = serde_json::from_value(input).map_err(|_| input_error())?;
-    let schedule = TriggerSchedule::cron_with_timezone(input.cron, input.timezone)
-        .map_err(trigger_input_error)?;
+    // Bound the number of triggers per caller scope. `builtin.trigger_create` is
+    // exempt from the local-dev approval gate (so headless routine creation
+    // works), which removes the per-create consent checkpoint — so this cap is
+    // what stops a confused or prompt-injected model from silently creating
+    // unbounded recurring jobs (each fire materializes a prompt and spends model
+    // budget). The genuinely external effect (delivery) is gated separately.
+    let existing = repository
+        .list_scoped_triggers(
+            scope.tenant_id.clone(),
+            scope.user_id.clone(),
+            scope.agent_id.clone(),
+            scope.project_id.clone(),
+            MAX_SCOPED_TRIGGERS,
+        )
+        .await
+        .map_err(|error| trigger_repository_error("list_scoped_triggers", error))?;
+    if existing.len() >= MAX_SCOPED_TRIGGERS {
+        return Err(trigger_input_error(TriggerError::InvalidRecord {
+            reason: format!(
+                "active scheduled-trigger limit reached ({MAX_SCOPED_TRIGGERS} per scope); remove an existing routine before creating another"
+            ),
+        }));
+    }
+    let timezone = input.timezone.as_deref().unwrap_or("UTC");
+    let schedule =
+        TriggerSchedule::cron_with_timezone(input.cron, timezone).map_err(trigger_input_error)?;
     let next_run_at = next_run_at_for_schedule(&schedule, now)?;
     let record = TriggerRecord {
         trigger_id: TriggerId::new(),
@@ -463,6 +497,7 @@ fn elapsed_usage_with_bytes(started: Instant, output_bytes: u64) -> ResourceUsag
 #[cfg(test)]
 mod tests {
     use chrono::{Datelike, TimeZone};
+    use ironclaw_triggers::InMemoryTriggerRepository;
 
     use super::*;
 
@@ -488,17 +523,101 @@ mod tests {
     }
 
     #[test]
-    fn trigger_create_input_rejects_missing_timezone() {
+    fn trigger_create_input_defaults_missing_timezone_to_utc() {
         let input = serde_json::json!({
-            "name": "daily",
-            "prompt": "check mail",
-            "cron": "0 9 * * *"
+            "name": "every-5-min",
+            "prompt": "ping endpoint",
+            "cron": "*/5 * * * *"
         });
-        let result: Result<TriggerCreateInput, _> = serde_json::from_value(input);
-        assert!(
-            result.is_err(),
-            "missing timezone must fail deserialization"
-        );
+        let parsed: TriggerCreateInput =
+            serde_json::from_value(input).expect("missing timezone deserializes (now optional)");
+        assert!(parsed.timezone.is_none(), "missing timezone parses as None");
+        // The create path defaults to UTC for an interval schedule.
+        let timezone = parsed.timezone.as_deref().unwrap_or("UTC");
+        let schedule = TriggerSchedule::cron_with_timezone(parsed.cron, timezone)
+            .expect("interval schedule with default UTC accepted");
+        match &schedule {
+            TriggerSchedule::Cron { timezone, .. } => assert_eq!(timezone, "UTC"),
+        }
+    }
+
+    fn test_scope() -> ResourceScope {
+        ResourceScope::local_default(
+            ironclaw_host_api::UserId::new("test-user").unwrap(),
+            ironclaw_host_api::InvocationId::new(),
+        )
+        .expect("local_default scope")
+    }
+
+    async fn list_scoped(
+        repo: &InMemoryTriggerRepository,
+        scope: &ResourceScope,
+    ) -> Vec<TriggerRecord> {
+        repo.list_scoped_triggers(
+            scope.tenant_id.clone(),
+            scope.user_id.clone(),
+            scope.agent_id.clone(),
+            scope.project_id.clone(),
+            MAX_SCOPED_TRIGGERS + 1,
+        )
+        .await
+        .expect("list scoped")
+    }
+
+    #[tokio::test]
+    async fn create_trigger_persists_with_default_utc_when_timezone_omitted() {
+        // Drive the real create_trigger handler (not the inline deserialize) so
+        // the default-UTC application is exercised end-to-end and persisted.
+        let repo = InMemoryTriggerRepository::default();
+        let scope = test_scope();
+        let input = serde_json::json!({
+            "name": "ping-near",
+            "prompt": "check near.ai",
+            "cron": "*/5 * * * *"
+        });
+        create_trigger(&repo, &NoopTriggerCreateHook, &scope, input, Utc::now())
+            .await
+            .expect("create_trigger with omitted timezone succeeds");
+        let stored = list_scoped(&repo, &scope).await;
+        assert_eq!(stored.len(), 1);
+        match &stored[0].schedule {
+            TriggerSchedule::Cron { timezone, .. } => assert_eq!(timezone, "UTC"),
+        }
+    }
+
+    #[tokio::test]
+    async fn create_trigger_rejects_past_scope_cap() {
+        // trigger_create is approval-gate-exempt, so the per-scope cap is the
+        // only thing bounding runaway creation. Fill the scope to the cap, then
+        // the next create must be rejected (as an input error).
+        let repo = InMemoryTriggerRepository::default();
+        let scope = test_scope();
+        for i in 0..MAX_SCOPED_TRIGGERS {
+            let input = serde_json::json!({
+                "name": format!("routine-{i}"),
+                "prompt": "ping",
+                "cron": "*/5 * * * *"
+            });
+            create_trigger(&repo, &NoopTriggerCreateHook, &scope, input, Utc::now())
+                .await
+                .expect("under-cap create succeeds");
+        }
+        let over = serde_json::json!({
+            "name": "one-too-many",
+            "prompt": "ping",
+            "cron": "*/5 * * * *"
+        });
+        let error = create_trigger(&repo, &NoopTriggerCreateHook, &scope, over, Utc::now())
+            .await
+            .expect_err("create past the per-scope cap is rejected");
+        assert!(matches!(
+            error,
+            FirstPartyCapabilityError::Dispatch {
+                kind: RuntimeDispatchErrorKind::InputEncode,
+                ..
+            }
+        ));
+        assert_eq!(list_scoped(&repo, &scope).await.len(), MAX_SCOPED_TRIGGERS);
     }
 
     #[test]
@@ -510,7 +629,8 @@ mod tests {
             "timezone": "Not/A/Timezone"
         });
         let parsed: TriggerCreateInput = serde_json::from_value(input).expect("deserialize");
-        let result = TriggerSchedule::cron_with_timezone(parsed.cron, parsed.timezone);
+        let timezone = parsed.timezone.as_deref().unwrap_or("UTC");
+        let result = TriggerSchedule::cron_with_timezone(parsed.cron, timezone);
         assert!(result.is_err(), "invalid timezone must be rejected");
         let error_msg = result.unwrap_err().to_string();
         assert!(
@@ -528,7 +648,8 @@ mod tests {
             "timezone": "America/Los_Angeles"
         });
         let parsed: TriggerCreateInput = serde_json::from_value(input).expect("deserialize");
-        let schedule = TriggerSchedule::cron_with_timezone(parsed.cron, &parsed.timezone)
+        let timezone = parsed.timezone.as_deref().expect("timezone present");
+        let schedule = TriggerSchedule::cron_with_timezone(parsed.cron, timezone)
             .expect("valid timezone accepted");
         match &schedule {
             TriggerSchedule::Cron { timezone, .. } => {

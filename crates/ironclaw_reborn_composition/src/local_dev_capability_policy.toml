@@ -50,6 +50,21 @@ exempt_capabilities = [
     # approval gate would otherwise block this network+external_write capability
     # before that consent flow can execute, so it is exempted here.
     "builtin.trace_commons.onboard",
+    # Creating a schedule is an internal control-plane write: it upserts a
+    # TriggerRecord in the local store, and the user's request ("every 5 minutes,
+    # …") IS the consent. The genuinely external side effect — the routine firing
+    # and DELIVERING somewhere (Slack/email) — is gated separately at fire/delivery
+    # time via the outbound delivery capabilities, and a per-scope cap on the
+    # number of triggers (enforced in create_trigger) bounds runaway creation by a
+    # confused or prompt-injected model. Without this exemption the headless
+    # WebChat v2 runtime raised an approval gate that nothing answered, so routine
+    # creation silently produced no record.
+    #   `builtin.trigger_remove` is deliberately NOT exempt: it destructively
+    #   deletes an existing user-owned schedule, so it keeps the approval gate —
+    #   a confused/injected model must not silently tear down the user's routines.
+    #   (Delivery-target selection, `builtin.outbound_delivery_target_set`, is also
+    #   NOT exempt — it routes outbound data and keeps its gate.)
+    "builtin.trigger_create",
     # NOTE: `builtin.trace_commons.profile_set` is deliberately NOT exempt. It
     # publishes a public community profile (an external write to a public
     # surface), and the tool's `confirmed=true` input is model-controlled — a
