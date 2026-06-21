@@ -656,6 +656,7 @@ registerPack("zh-CN", {
   "automations.schedule.weekdayAt": "每周{weekday} {time}",
   "automations.schedule.monthlyAt": "每月 {day} 日 {time}",
   "automations.schedule.dateAt": "{date} {time}",
+  "automations.schedule.onceAt": "于 {datetime} 执行一次",
   "automations.badge.muted": "静默",
   "automations.badge.signal": "信号",
   "automations.badge.info": "信息",

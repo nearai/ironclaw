@@ -656,6 +656,7 @@ registerPack("uk", {
   "automations.schedule.weekdayAt": "{weekday}, о {time}",
   "automations.schedule.monthlyAt": "{day}-го числа щомісяця о {time}",
   "automations.schedule.dateAt": "{date} о {time}",
+  "automations.schedule.onceAt": "Один раз {datetime}",
   "automations.badge.muted": "Без звуку",
   "automations.badge.signal": "Сигнал",
   "automations.badge.info": "Інфо",

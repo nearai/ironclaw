@@ -656,6 +656,7 @@ registerPack("ko", {
   "automations.schedule.weekdayAt": "매주 {weekday} {time}에",
   "automations.schedule.monthlyAt": "매월 {day}일 {time}에",
   "automations.schedule.dateAt": "{date} {time}에",
+  "automations.schedule.onceAt": "{datetime}에 한 번",
   "automations.badge.muted": "음소거",
   "automations.badge.signal": "신호",
   "automations.badge.info": "정보",

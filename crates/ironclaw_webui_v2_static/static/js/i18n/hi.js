@@ -656,6 +656,7 @@ registerPack("hi", {
   "automations.schedule.weekdayAt": "हर {weekday} {time} पर",
   "automations.schedule.monthlyAt": "हर महीने की {day} तारीख को {time} पर",
   "automations.schedule.dateAt": "{date} को {time} पर",
+  "automations.schedule.onceAt": "एक बार {datetime} को",
   "automations.badge.muted": "म्यूट",
   "automations.badge.signal": "सिग्नल",
   "automations.badge.info": "जानकारी",

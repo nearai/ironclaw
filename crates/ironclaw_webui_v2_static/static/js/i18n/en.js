@@ -704,6 +704,7 @@ registerPack("en", {
   "automations.schedule.weekdayAt": "{weekday} at {time}",
   "automations.schedule.monthlyAt": "Day {day} of each month at {time}",
   "automations.schedule.dateAt": "{date} at {time}",
+  "automations.schedule.onceAt": "Once on {datetime}",
   "automations.badge.muted": "Muted",
   "automations.badge.signal": "Signal",
   "automations.badge.info": "Info",

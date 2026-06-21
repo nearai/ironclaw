@@ -656,6 +656,7 @@ registerPack("ar", {
   "automations.schedule.weekdayAt": "{weekday} في {time}",
   "automations.schedule.monthlyAt": "في اليوم {day} من كل شهر في {time}",
   "automations.schedule.dateAt": "{date} في {time}",
+  "automations.schedule.onceAt": "مرة واحدة في {datetime}",
   "automations.badge.muted": "مكتوم",
   "automations.badge.signal": "إشارة",
   "automations.badge.info": "معلومات",

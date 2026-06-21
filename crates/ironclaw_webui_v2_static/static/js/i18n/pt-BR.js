@@ -656,6 +656,7 @@ registerPack("pt-BR", {
   "automations.schedule.weekdayAt": "{weekday} às {time}",
   "automations.schedule.monthlyAt": "No dia {day} de cada mês às {time}",
   "automations.schedule.dateAt": "{date} às {time}",
+  "automations.schedule.onceAt": "Uma vez em {datetime}",
   "automations.badge.muted": "Silenciado",
   "automations.badge.signal": "Sinal",
   "automations.badge.info": "Info",

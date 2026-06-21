@@ -656,6 +656,7 @@ registerPack("ja", {
   "automations.schedule.weekdayAt": "毎週{weekday} {time} に",
   "automations.schedule.monthlyAt": "毎月 {day} 日 {time} に",
   "automations.schedule.dateAt": "{date} {time} に",
+  "automations.schedule.onceAt": "{datetime} に一度",
   "automations.badge.muted": "ミュート",
   "automations.badge.signal": "シグナル",
   "automations.badge.info": "情報",
