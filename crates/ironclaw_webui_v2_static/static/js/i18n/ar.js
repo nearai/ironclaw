@@ -642,6 +642,7 @@ registerPack("ar", {
   "automations.filter.all": "الكل",
   "automations.filter.active": "نشط",
   "automations.filter.paused": "متوقف مؤقتًا",
+  "automations.filter.completed": "مكتمل",
   "automations.refresh": "تحديث عمليات الأتمتة",
   "automations.error.loadFailed": "غير قادر على تحميل عمليات الأتمتة",
   "automations.schedulerOff.title": "تم إيقاف الجدولة",

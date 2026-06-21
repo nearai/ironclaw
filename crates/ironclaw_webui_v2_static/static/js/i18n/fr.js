@@ -642,6 +642,7 @@ registerPack("fr", {
   "automations.filter.all": "Toutes",
   "automations.filter.active": "Actif",
   "automations.filter.paused": "En pause",
+  "automations.filter.completed": "Terminées",
   "automations.refresh": "Actualiser les automatisations",
   "automations.error.loadFailed": "Impossible de charger les automatisations",
   "automations.schedulerOff.title": "La planification est désactivée",

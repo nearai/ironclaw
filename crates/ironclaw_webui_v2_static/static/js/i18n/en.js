@@ -690,6 +690,7 @@ registerPack("en", {
   "automations.filter.running": "Running",
   "automations.filter.failures": "Failures",
   "automations.filter.paused": "Paused",
+  "automations.filter.completed": "Completed",
   "automations.refresh": "Refresh automations",
   "automations.error.loadFailed": "Unable to load automations",
   "automations.schedulerOff.title": "Scheduling is turned off",

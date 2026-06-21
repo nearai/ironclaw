@@ -642,6 +642,7 @@ registerPack("es", {
   "automations.filter.all": "Todas",
   "automations.filter.active": "Activo",
   "automations.filter.paused": "En pausa",
+  "automations.filter.completed": "Completadas",
   "automations.refresh": "Actualizar automatizaciones",
   "automations.error.loadFailed": "No se pueden cargar automatizaciones",
   "automations.schedulerOff.title": "La programación está desactivada",

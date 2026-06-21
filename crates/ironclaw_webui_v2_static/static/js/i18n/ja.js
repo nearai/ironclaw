@@ -642,6 +642,7 @@ registerPack("ja", {
   "automations.filter.all": "すべて",
   "automations.filter.active": "アクティブ",
   "automations.filter.paused": "一時停止",
+  "automations.filter.completed": "完了",
   "automations.refresh": "自動化の更新",
   "automations.error.loadFailed": "自動化をロードできません",
   "automations.schedulerOff.title": "スケジュールは無効です",

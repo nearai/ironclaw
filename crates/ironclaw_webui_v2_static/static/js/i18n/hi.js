@@ -642,6 +642,7 @@ registerPack("hi", {
   "automations.filter.all": "सभी",
   "automations.filter.active": "सक्रिय",
   "automations.filter.paused": "रोका गया",
+  "automations.filter.completed": "पूर्ण",
   "automations.refresh": "ऑटोमेशन ताज़ा करें",
   "automations.error.loadFailed": "ऑटोमेशन लोड करने में असमर्थ",
   "automations.schedulerOff.title": "शेड्यूलिंग बंद है",

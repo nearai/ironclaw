@@ -51,6 +51,7 @@ const EN_SCHEDULE = {
   "automations.untitled": "Untitled automation",
   "automations.successRate.none": "No completed runs",
   "automations.successRate.visible": "{percent}% visible runs",
+  "automations.filter.completed": "Completed",
   // Run-summary labels (mirror en.js) so runSummaryView assertions read English.
   "automations.runs.total": "Recent runs: {count}",
   "automations.runs.ok": "OK: {count}",
@@ -624,6 +625,65 @@ test("once automation with missing at falls back to Custom schedule", () => {
 
   assert.equal(automations.length, 1);
   assert.equal(automations[0].schedule_label, "Custom schedule");
+});
+
+test("AUTOMATION_FILTERS contains a completed entry whose predicate matches only completed rows", () => {
+  // Drive via filterAutomations (which delegates to the predicate in AUTOMATION_FILTERS)
+  // so the test exercises the full filter dispatch without re-importing the module.
+  const automations = normalizeAutomations({
+    automations: [
+      {
+        automation_id: "scheduled-one",
+        name: "Scheduled",
+        source: { type: "schedule", cron: "0 9 * * *" },
+        state: "scheduled",
+        is_active: false,
+        next_run_at: "2026-06-25T09:00:00Z",
+      },
+      {
+        automation_id: "completed-one",
+        name: "Completed one-shot",
+        source: { type: "once", at: "2026-06-10T12:00:00Z", timezone: "UTC" },
+        state: "completed",
+        is_active: false,
+      },
+    ],
+  });
+
+  const completedOnly = filterAutomations(automations, "completed");
+  assert.equal(completedOnly.length, 1, "predicate must keep only completed rows");
+  assert.equal(completedOnly[0].automation_id, "completed-one");
+
+  const scheduledOnly = filterAutomations(automations, "active");
+  assert.ok(
+    !scheduledOnly.some((a) => a.automation_id === "completed-one"),
+    "completed row must not appear in the active filter",
+  );
+});
+
+test("automationSummary excludes completed rows from scheduled count", () => {
+  const automations = normalizeAutomations({
+    automations: [
+      {
+        automation_id: "scheduled-active",
+        name: "Active schedule",
+        source: { type: "schedule", cron: "0 9 * * *" },
+        state: "scheduled",
+        is_active: false,
+        next_run_at: "2026-06-25T09:00:00Z",
+      },
+      {
+        automation_id: "soft-completed",
+        name: "Fired one-shot",
+        source: { type: "once", at: "2026-06-10T12:00:00Z", timezone: "UTC" },
+        state: "completed",
+        is_active: false,
+      },
+    ],
+  });
+
+  const summary = automationSummary(automations);
+  assert.equal(summary.scheduled, 1, "completed row must not count toward scheduled total");
 });
 
 test("once label reflects source timezone wall-clock, not UTC", () => {

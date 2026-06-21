@@ -642,6 +642,7 @@ registerPack("ko", {
   "automations.filter.all": "모두",
   "automations.filter.active": "활성",
   "automations.filter.paused": "일시 중지됨",
+  "automations.filter.completed": "완료됨",
   "automations.refresh": "자동화 새로 고침",
   "automations.error.loadFailed": "자동화를 로드할 수 없음",
   "automations.schedulerOff.title": "예약 실행이 꺼져 있습니다",

@@ -11,14 +11,15 @@ import {
 const AUTOMATIONS_PAGE_LIMIT = 50;
 const AUTOMATION_RUNS_LIMIT = 25;
 
-export function useAutomations() {
+export function useAutomations(includeCompleted = false) {
   const { t, lang } = useI18n();
   const query = useQuery({
-    queryKey: ["automations"],
+    queryKey: ["automations", { includeCompleted }],
     queryFn: () =>
       listAutomations({
         limit: AUTOMATIONS_PAGE_LIMIT,
         runLimit: AUTOMATION_RUNS_LIMIT,
+        includeCompleted,
       }),
     refetchInterval: 30000,
     refetchIntervalInBackground: false,

@@ -642,6 +642,7 @@ registerPack("pt-BR", {
   "automations.filter.all": "Todas",
   "automations.filter.active": "Ativo",
   "automations.filter.paused": "Pausado",
+  "automations.filter.completed": "Concluídas",
   "automations.refresh": "Atualizar automações",
   "automations.error.loadFailed": "Não é possível carregar automações",
   "automations.schedulerOff.title": "O agendamento está desativado",

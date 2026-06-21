@@ -642,6 +642,7 @@ registerPack("uk", {
   "automations.filter.all": "Усі",
   "automations.filter.active": "Активно",
   "automations.filter.paused": "Призупинено",
+  "automations.filter.completed": "Завершені",
   "automations.refresh": "Оновити автоматизації",
   "automations.error.loadFailed": "Неможливо завантажити автоматизації",
   "automations.schedulerOff.title": "Планування вимкнено",

@@ -642,6 +642,7 @@ registerPack("zh-CN", {
   "automations.filter.all": "所有自动化",
   "automations.filter.active": "正激活与就绪",
   "automations.filter.paused": "暂已挂起与暂停的自动化",
+  "automations.filter.completed": "已完成",
   "automations.refresh": "更新最新自动化",
   "automations.error.loadFailed": "提取系统自动化计划列表不成功！",
   "automations.schedulerOff.title": "调度已关闭",
