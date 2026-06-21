@@ -320,11 +320,7 @@ where
 {
     pub fn new(filesystem: Arc<ScopedFilesystem<F>>) -> Self {
         Self {
-            records: FilesystemCasRecordStore::new(
-                filesystem,
-                POLICY_PATH_CACHE_MAX_ENTRIES,
-                "persistent approval policy store does not support versioned CAS; falling back to unconditional write",
-            ),
+            records: FilesystemCasRecordStore::new(filesystem, POLICY_PATH_CACHE_MAX_ENTRIES),
         }
     }
 }
@@ -711,7 +707,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn filesystem_policy_store_updates_and_revokes_on_byte_only_backend() {
+    async fn filesystem_policy_store_rejects_versioned_mutation_on_byte_only_backend() {
         let tempdir = tempfile::tempdir().expect("tempdir");
         let mut backend = LocalFilesystem::new();
         backend
@@ -732,23 +728,19 @@ mod tests {
         let second_source = ApprovalRequestId::new();
         let mut second_input = input(scope);
         second_input.source_approval_request_id = Some(second_source);
-        let second = store
-            .allow(second_input)
-            .await
-            .expect("allow updated policy");
-        let revoked = store.revoke(&key).await.expect("revoke updated policy");
 
-        assert_eq!(second.grant_id, first.grant_id);
-        assert_eq!(second.source_approval_request_id, Some(second_source));
-        assert!(revoked.active_grant().is_none());
-        assert!(
-            store
-                .lookup(&key)
-                .await
-                .expect("lookup revoked policy")
-                .expect("policy")
-                .active_grant()
-                .is_none()
+        assert!(matches!(
+            store.allow(second_input).await,
+            Err(PersistentApprovalPolicyError::Filesystem(_))
+        ));
+        assert!(matches!(
+            store.revoke(&key).await,
+            Err(PersistentApprovalPolicyError::Filesystem(_))
+        ));
+        assert_eq!(
+            store.lookup(&key).await.unwrap().expect("policy"),
+            first,
+            "unsupported versioned mutations must not overwrite the existing policy"
         );
     }
 

@@ -272,11 +272,7 @@ where
 {
     pub fn new(filesystem: Arc<ScopedFilesystem<F>>) -> Self {
         Self {
-            records: FilesystemCasRecordStore::new(
-                filesystem,
-                OVERRIDE_PATH_CACHE_MAX_ENTRIES,
-                "capability permission override store does not support versioned CAS; falling back to unconditional write",
-            ),
+            records: FilesystemCasRecordStore::new(filesystem, OVERRIDE_PATH_CACHE_MAX_ENTRIES),
         }
     }
 }
@@ -415,13 +411,18 @@ fn deserialize_versioned_record(
     CapabilityPermissionStoreError,
 > {
     let record = deserialize::<StoredCapabilityPermissionOverrideRecord>(&versioned.entry.body)?;
-    if &record.key == key {
-        Ok(Some((record, versioned.version)))
-    } else {
+    if &record.key != key {
         Err(CapabilityPermissionStoreError::Integrity(format!(
             "stored key {:?} does not match expected {:?}",
             record.key, key
         )))
+    } else if record.state.is_some() == record.cleared_at.is_some() {
+        Err(CapabilityPermissionStoreError::Integrity(
+            "stored override must be active with no cleared_at or tombstoned with cleared_at"
+                .to_string(),
+        ))
+    } else {
+        Ok(Some((record, versioned.version)))
     }
 }
 
@@ -1027,6 +1028,45 @@ mod tests {
             error,
             CapabilityPermissionStoreError::Integrity(_)
         ));
+    }
+
+    #[test]
+    fn deserialize_versioned_record_rejects_malformed_tombstone_shapes() {
+        let key = key_for(&scope(None, Some("thread-a")));
+        let base = StoredCapabilityPermissionOverrideRecord {
+            key: key.clone(),
+            state: Some(CapabilityPermissionOverride::Disabled),
+            updated_by: Principal::User(UserId::new("alice").unwrap()),
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+            cleared_at: None,
+        };
+
+        for malformed in [
+            StoredCapabilityPermissionOverrideRecord {
+                state: None,
+                cleared_at: None,
+                ..base.clone()
+            },
+            StoredCapabilityPermissionOverrideRecord {
+                cleared_at: Some(Utc::now()),
+                ..base
+            },
+        ] {
+            let versioned = VersionedEntry {
+                path: VirtualPath::new("/engine/record.json").unwrap(),
+                entry: Entry::bytes(serialize(&malformed).unwrap())
+                    .with_content_type(ContentType::json()),
+                version: RecordVersion::from_backend(1),
+            };
+
+            let error = deserialize_versioned_record(&key, versioned).unwrap_err();
+
+            assert!(matches!(
+                error,
+                CapabilityPermissionStoreError::Integrity(_)
+            ));
+        }
     }
 
     #[tokio::test]
