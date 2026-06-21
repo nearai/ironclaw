@@ -288,9 +288,7 @@ impl TurnRunSchedulerHandle {
     }
 
     pub fn is_stopped(&self) -> bool {
-        self.supervisor
-            .as_ref()
-            .is_none_or(|s| s.is_finished())
+        self.supervisor.as_ref().is_none_or(|s| s.is_finished())
     }
 
     /// Graceful shutdown: signal the scheduler loop to stop via the
@@ -965,15 +963,16 @@ mod tests {
 
         // Pre-mint the channel so we can keep a sender copy before starting.
         use super::SchedulerTurnRunWakeNotifier;
-        let (notifier, channel) = SchedulerTurnRunWakeNotifier::channel(config.wake_channel_capacity());
+        let (notifier, channel) =
+            SchedulerTurnRunWakeNotifier::channel(config.wake_channel_capacity());
         // Clone the raw sender out of the channel by using the notifier's internal
         // try_send path — but we need the raw Sender.  The channel struct is
         // consumed by start_with_channel, so we grab a tx clone via the notifier
         // field indirectly: the notifier's command_tx is the same arc; we can
         // saturate via try_send on the notifier itself (which forwards to command_tx).
         // Use a fake wake notify to fill the slot.
-        use ironclaw_turns::{EventCursor, TurnRunId, TurnRunWake, TurnScope, TurnStatus};
         use ironclaw_host_api::{AgentId, ProjectId, TenantId, ThreadId};
+        use ironclaw_turns::{EventCursor, TurnRunId, TurnRunWake, TurnScope, TurnStatus};
         let fake_scope = TurnScope::new(
             TenantId::new("tenant1").unwrap(),
             Some(AgentId::new("agent1").unwrap()),
@@ -1005,11 +1004,8 @@ mod tests {
         drop(handle);
 
         // The token must be cancelled regardless of queue state.
-        tokio::time::timeout(
-            std::time::Duration::from_secs(2),
-            token_clone.cancelled(),
-        )
-        .await
-        .expect("shutdown token must be cancelled even when command queue is saturated");
+        tokio::time::timeout(std::time::Duration::from_secs(2), token_clone.cancelled())
+            .await
+            .expect("shutdown token must be cancelled even when command queue is saturated");
     }
 }

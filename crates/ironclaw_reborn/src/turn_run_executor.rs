@@ -92,11 +92,10 @@ impl TurnRunExecutor for RebornTurnRunExecutor {
         transitions: Arc<dyn TurnRunTransitionPort>,
     ) -> Result<(), TurnRunExecutorError> {
         match self.invoke_driver(&claimed, &transitions).await {
-            Ok(exit) => {
-                self.apply_exit(&claimed, exit, &transitions)
-                    .await
-                    .map_err(|()| unknown_failure_error().clone())
-            }
+            Ok(exit) => self
+                .apply_exit(&claimed, exit, &transitions)
+                .await
+                .map_err(|()| unknown_failure_error().clone()),
             Err(err) => {
                 let sanitized = match &err {
                     DriverInvocationError::DriverError(AgentLoopDriverError::Failed {
@@ -946,8 +945,7 @@ mod tests {
         transitions: Arc<dyn TurnRunTransitionPort>,
     ) -> RebornTurnRunExecutor {
         let evidence = Arc::new(InMemoryLoopExitEvidencePort::new());
-        let loop_exit_applier =
-            Arc::new(LoopExitApplier::new(Arc::clone(&transitions), evidence));
+        let loop_exit_applier = Arc::new(LoopExitApplier::new(Arc::clone(&transitions), evidence));
         let mut registry = DriverRegistry::new();
         registry
             .register_driver(
@@ -1108,8 +1106,7 @@ mod tests {
         // returns LoopExit::Completed — so we reach apply_exit.
         // But DoubleFailingTransitionPort makes both apply_validated_loop_exit
         // and fail_run return Err, triggering the double-failure path.
-        let transitions: Arc<dyn TurnRunTransitionPort> =
-            Arc::new(DoubleFailingTransitionPort);
+        let transitions: Arc<dyn TurnRunTransitionPort> = Arc::new(DoubleFailingTransitionPort);
         let executor = make_executor_with_driver_and_shared_transitions(
             Arc::new(SucceedingHostFactoryWithSnapshot),
             Arc::clone(&transitions),

@@ -642,8 +642,7 @@ where
         .with_max_concurrent_runs(parts.config.worker_count.get())
         .with_runner_heartbeat_interval(parts.config.heartbeat_interval)
         .with_poll_interval(parts.config.poll_interval);
-    let scheduler =
-        TurnRunScheduler::new(Arc::clone(&transition_port), executor, scheduler_config);
+    let scheduler = TurnRunScheduler::new(Arc::clone(&transition_port), executor, scheduler_config);
     let scheduler_handle = wake_wiring.start(scheduler);
 
     Ok(

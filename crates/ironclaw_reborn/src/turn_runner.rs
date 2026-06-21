@@ -12,10 +12,7 @@
 use async_trait::async_trait;
 use tracing::{debug, error};
 
-use ironclaw_turns::{
-    SanitizedFailure,
-    runner::ClaimedTurnRun,
-};
+use ironclaw_turns::{SanitizedFailure, runner::ClaimedTurnRun};
 
 use crate::failure_categories::{
     MODEL_CREDENTIALS_UNAVAILABLE_CATEGORY, MODEL_CREDITS_EXHAUSTED_CATEGORY,
