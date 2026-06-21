@@ -3649,9 +3649,11 @@ mod tests {
     }
     use ironclaw_authorization::CapabilityLeaseStore;
     use ironclaw_events::{EventStreamKey, ReadScope};
+    #[cfg(all(feature = "root-llm-provider", feature = "libsql"))]
+    use ironclaw_host_api::ProjectId;
     use ironclaw_host_api::{
         Action, AgentId, ApprovalRequest, ApprovalRequestId, AuditStage, CapabilityId,
-        CorrelationId, EffectKind, InvocationFingerprint, InvocationId, Principal, ProjectId,
+        CorrelationId, EffectKind, InvocationFingerprint, InvocationId, Principal,
         ResourceEstimate, ResourceScope, TenantId, ThreadId, UserId,
         runtime_policy::{
             ApprovalPolicy, AuditMode, DeploymentMode, EffectiveRuntimePolicy,

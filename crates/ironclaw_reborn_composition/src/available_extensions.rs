@@ -1792,6 +1792,7 @@ mod tests {
                 "Google Calendar needs Google OAuth authorization",
             ),
             ("notion", "Notion needs OAuth authorization"),
+            #[cfg(feature = "root-llm-provider")]
             (
                 NEARAI_EXTENSION_ID,
                 "NEAR AI MCP uses the NEAR AI credentials",
@@ -1900,7 +1901,10 @@ mod tests {
         let mcp_ref = LifecyclePackageRef::new(LifecyclePackageKind::Mcp, NEARAI_EXTENSION_ID)
             .expect("valid MCP ref");
 
+        #[cfg(feature = "root-llm-provider")]
         assert!(is_host_managed_credential_extension(&nearai_ref));
+        #[cfg(not(feature = "root-llm-provider"))]
+        assert!(!is_host_managed_credential_extension(&nearai_ref));
         assert!(!is_host_managed_credential_extension(&notion_ref));
         assert!(!is_host_managed_credential_extension(&mcp_ref));
     }
@@ -1913,10 +1917,17 @@ mod tests {
         let package = catalog.resolve(&package_ref).unwrap();
         let summary = package.summary();
 
+        #[cfg(feature = "root-llm-provider")]
         assert!(
             summary.credential_requirements.is_empty(),
             "NEAR AI MCP uses assistant-level NEAR AI credentials and must not \
              project an extension credential setup prompt"
+        );
+        #[cfg(not(feature = "root-llm-provider"))]
+        assert!(
+            !summary.credential_requirements.is_empty(),
+            "NEAR AI MCP should only suppress extension credential setup prompts \
+             when the root NEAR AI provider owns the credential"
         );
 
         let search = package
