@@ -3547,10 +3547,28 @@ where
         .subject_user_id
         .as_ref()
         .unwrap_or(&binding.actor_user_id);
-    let target = format!(
-        "/engine/tenants/{}/users/{}/turns",
-        binding.tenant_id, owner_user_id
-    );
+    // Include agent_id and project_id in the path when present so that
+    // distinct agents or projects stored under the same tenant/user
+    // (e.g. shared-storage multi-harness tests) get isolated turn state
+    // files and cannot cross-claim each other's queued runs.
+    let target = match (binding.agent_id.as_ref(), binding.project_id.as_ref()) {
+        (Some(agent_id), Some(project_id)) => format!(
+            "/engine/tenants/{}/agents/{}/projects/{}/users/{}/turns",
+            binding.tenant_id, agent_id, project_id, owner_user_id
+        ),
+        (Some(agent_id), None) => format!(
+            "/engine/tenants/{}/agents/{}/users/{}/turns",
+            binding.tenant_id, agent_id, owner_user_id
+        ),
+        (None, Some(project_id)) => format!(
+            "/engine/tenants/{}/projects/{}/users/{}/turns",
+            binding.tenant_id, project_id, owner_user_id
+        ),
+        (None, None) => format!(
+            "/engine/tenants/{}/users/{}/turns",
+            binding.tenant_id, owner_user_id
+        ),
+    };
     let mounts = MountView::new(vec![MountGrant::new(
         MountAlias::new("/turns").expect("valid turns alias"),
         VirtualPath::new(target).expect("valid turns target"),
