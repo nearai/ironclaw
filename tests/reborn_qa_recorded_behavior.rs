@@ -339,8 +339,11 @@ async fn replay_routine_phrase_fires(case: &QaPhrase, cron_fragment: &str) {
     let mut trigger = triggers
         .iter()
         .find(|record| {
-            let ironclaw_triggers::TriggerSchedule::Cron { expression, .. } = &record.schedule;
-            expression.contains(cron_fragment)
+            matches!(
+                &record.schedule,
+                ironclaw_triggers::TriggerSchedule::Cron { expression, .. }
+                    if expression.contains(cron_fragment)
+            )
         })
         .cloned()
         .unwrap_or_else(|| {
