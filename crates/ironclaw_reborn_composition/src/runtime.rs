@@ -2223,7 +2223,9 @@ pub async fn build_reborn_runtime(
         validated_identity.agent_id.clone(),
     );
     #[cfg(feature = "root-llm-provider")]
-    if !services_input.has_nearai_mcp_bootstrap_config()
+    let caller_supplied_nearai_mcp_bootstrap = services_input.has_nearai_mcp_bootstrap_config();
+    #[cfg(feature = "root-llm-provider")]
+    if !caller_supplied_nearai_mcp_bootstrap
         && let Some(llm) = llm.as_ref()
         && let Some(config) =
             crate::nearai_mcp::nearai_mcp_bootstrap_config_from_llm_config(&llm.config)
@@ -2241,7 +2243,9 @@ pub async fn build_reborn_runtime(
     let llm =
         apply_startup_stored_llm_key(llm, crate::LlmKeyStore::new(services.secret_store())).await?;
     #[cfg(feature = "root-llm-provider")]
-    bootstrap_nearai_mcp_from_effective_llm(&services, llm.as_ref(), &owner_id).await?;
+    if !caller_supplied_nearai_mcp_bootstrap {
+        bootstrap_nearai_mcp_from_effective_llm(&services, llm.as_ref(), &owner_id).await?;
+    }
     enforce_runtime_cutover_gate(profile, &services.readiness)?;
 
     let runtime_parts = match profile {

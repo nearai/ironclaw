@@ -76,6 +76,7 @@ impl NearAiMcpBootstrapConfig {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum NearAiMcpBootstrapConfigError {
     MissingApiKey,
+    SessionTokenRead { reason: String },
 }
 
 impl std::fmt::Display for NearAiMcpBootstrapConfigError {
@@ -83,6 +84,9 @@ impl std::fmt::Display for NearAiMcpBootstrapConfigError {
         match self {
             Self::MissingApiKey => {
                 write!(f, "NEARAI_API_KEY is required when NEARAI_BASE_URL is set")
+            }
+            Self::SessionTokenRead { reason } => {
+                write!(f, "NEAR AI session token could not be read: {reason}")
             }
         }
     }
@@ -128,9 +132,11 @@ pub(crate) async fn nearai_mcp_bootstrap_config_from_llm_config(
     if !session.has_token().await {
         return Ok(None);
     }
-    let Ok(token) = session.get_token().await else {
-        return Ok(None);
-    };
+    let token = session.get_token().await.map_err(|error| {
+        NearAiMcpBootstrapConfigError::SessionTokenRead {
+            reason: error.to_string(),
+        }
+    })?;
     NearAiMcpBootstrapConfig::from_optional_parts(Some(config.nearai.base_url.clone()), Some(token))
 }
 
