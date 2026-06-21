@@ -14,6 +14,10 @@ use ironclaw_first_party_extensions::{
 };
 use ironclaw_product_workflow::ProductWorkflowError;
 
+const CONNECTED_SOURCES_EXTENSION_ID: &str = "connected-sources";
+const CONNECTED_SOURCES_READ_CAPABILITY_ID: &str = "connected-sources.read";
+const COMPOSIO_BACKEND_HOST: &str = "backend.composio.dev";
+
 #[derive(Clone, Default)]
 pub(in crate::runtime) struct LocalDevExtensionSurfaceSource {
     extension_management: Option<Arc<RebornLocalExtensionManagementPort>>,
@@ -178,6 +182,19 @@ fn extension_network_policy(capability: &ActiveExtensionCapability) -> NetworkPo
             port: None,
         });
     }
+    let is_connected_sources_read = capability.provider.as_str() == CONNECTED_SOURCES_EXTENSION_ID
+        && capability.id.as_str() == CONNECTED_SOURCES_READ_CAPABILITY_ID;
+    if is_connected_sources_read
+        && !targets
+            .iter()
+            .any(|target| target.host_pattern == COMPOSIO_BACKEND_HOST)
+    {
+        targets.push(NetworkTargetPattern {
+            scheme: Some(NetworkScheme::Https),
+            host_pattern: COMPOSIO_BACKEND_HOST.to_string(),
+            port: None,
+        });
+    }
     NetworkPolicy {
         allowed_targets: targets,
         deny_private_ip_ranges: true,
@@ -263,6 +280,34 @@ mod tests {
         let policy = extension_network_policy(&capability);
 
         assert_eq!(policy, google_api_network_policy());
+    }
+
+    #[test]
+    fn connected_sources_read_gets_composio_backend_network_target_without_credentials() {
+        let capability = ActiveExtensionCapability {
+            id: CapabilityId::new(CONNECTED_SOURCES_READ_CAPABILITY_ID).unwrap(),
+            provider: ExtensionId::new(CONNECTED_SOURCES_EXTENSION_ID).unwrap(),
+            effects: vec![
+                EffectKind::DispatchCapability,
+                EffectKind::Network,
+                EffectKind::UseSecret,
+            ],
+            default_permission: PermissionMode::Allow,
+            runtime_credentials: Vec::new(),
+        };
+
+        let policy = extension_network_policy(&capability);
+
+        assert_eq!(
+            policy.allowed_targets,
+            vec![NetworkTargetPattern {
+                scheme: Some(NetworkScheme::Https),
+                host_pattern: COMPOSIO_BACKEND_HOST.to_string(),
+                port: None,
+            }]
+        );
+        assert!(policy.deny_private_ip_ranges);
+        assert_eq!(policy.max_egress_bytes, None);
     }
 
     #[test]

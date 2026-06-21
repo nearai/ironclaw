@@ -137,6 +137,11 @@ use crate::{
     RebornFacadeReadiness, RebornProductAuthServices, RebornReadiness, RebornReadinessDiagnostic,
     RebornReadinessState, RebornWorkerReadiness,
 };
+#[cfg(feature = "webui-v2-beta")]
+use crate::{
+    available_extensions::connected_sources_manifest_digest,
+    connected_sources::register_bundled_connected_sources_first_party_handlers,
+};
 use crate::{
     available_extensions::{
         AvailableExtensionCatalog, gmail_manifest_digest, google_calendar_manifest_digest,
@@ -1126,6 +1131,22 @@ async fn build_local_dev(input: RebornBuildInput) -> Result<RebornServices, Rebo
             reason: format!("web access first-party handlers are invalid: {error}"),
         },
     )?;
+    #[cfg(feature = "webui-v2-beta")]
+    {
+        let connector_port: Arc<dyn ironclaw_product_workflow::ConnectorReadPort> =
+            Arc::new(crate::connectors::ComposioConnectorPort::new(
+                Arc::clone(&secret_store),
+                product_auth.runtime_credential_account_selection_service(),
+                owner_user_id_for_nearai_mcp.clone(),
+            ));
+        register_bundled_connected_sources_first_party_handlers(
+            &mut first_party_registry,
+            connector_port,
+        )
+        .map_err(|error| RebornBuildError::InvalidConfig {
+            reason: format!("connected sources first-party handlers are invalid: {error}"),
+        })?;
+    }
     insert_extension_lifecycle_handlers(
         &mut first_party_registry,
         extension_management,
@@ -2608,6 +2629,19 @@ pub fn builtin_first_party_trust_policy() -> Result<HostTrustPolicy, RebornBuild
             web_access_allowed_effects(),
             None,
         ),
+        #[cfg(feature = "webui-v2-beta")]
+        AdminEntry::for_local_manifest(
+            PackageId::new("connected-sources").map_err(|error| {
+                RebornBuildError::InvalidConfig {
+                    reason: format!("Connected Sources first-party package id is invalid: {error}"),
+                }
+            })?,
+            "/system/extensions/connected-sources/manifest.toml".to_string(),
+            Some(connected_sources_manifest_digest()),
+            HostTrustAssignment::first_party(),
+            connected_sources_allowed_effects(),
+            None,
+        ),
         AdminEntry::for_local_manifest(
             PackageId::new("google-calendar").map_err(|error| RebornBuildError::InvalidConfig {
                 reason: format!("Google Calendar first-party package id is invalid: {error}"),
@@ -2708,6 +2742,15 @@ fn gsuite_allowed_effects() -> Vec<EffectKind> {
 
 fn web_access_allowed_effects() -> Vec<EffectKind> {
     vec![EffectKind::DispatchCapability, EffectKind::Network]
+}
+
+#[cfg(feature = "webui-v2-beta")]
+fn connected_sources_allowed_effects() -> Vec<EffectKind> {
+    vec![
+        EffectKind::DispatchCapability,
+        EffectKind::Network,
+        EffectKind::UseSecret,
+    ]
 }
 
 fn notion_mcp_allowed_effects() -> Vec<EffectKind> {
@@ -3205,7 +3248,7 @@ where
     let secret_store: Arc<dyn SecretStore> = stores.secret_credentials.secret_store.clone();
     let skill_management_filesystem: Arc<dyn RootFilesystem> = stores.filesystem.clone();
     let skill_management = Arc::new(RebornLocalSkillManagementPort::new_with_mount_resolver(
-        owner_user_id,
+        owner_user_id.clone(),
         skill_management_filesystem,
         Arc::new(production_skill_management_mount_view),
     ));
@@ -3352,6 +3395,22 @@ where
     .map_err(|error| RebornBuildError::InvalidConfig {
         reason: format!("GSuite first-party handlers are invalid: {error}"),
     })?;
+    #[cfg(feature = "webui-v2-beta")]
+    {
+        let connector_port: Arc<dyn ironclaw_product_workflow::ConnectorReadPort> =
+            Arc::new(crate::connectors::ComposioConnectorPort::new(
+                Arc::clone(&secret_store),
+                product_auth_services.runtime_credential_account_selection_service(),
+                owner_user_id,
+            ));
+        register_bundled_connected_sources_first_party_handlers(
+            &mut first_party_registry,
+            connector_port,
+        )
+        .map_err(|error| RebornBuildError::InvalidConfig {
+            reason: format!("connected sources first-party handlers are invalid: {error}"),
+        })?;
+    }
     let services = services.with_first_party_capabilities(Arc::new(first_party_registry));
 
     let host_runtime: Arc<dyn ironclaw_host_runtime::HostRuntime> =
@@ -4434,6 +4493,83 @@ mod tests {
         assert_eq!(failure.kind, RuntimeFailureKind::Backend);
     }
 
+    #[cfg(feature = "webui-v2-beta")]
+    #[tokio::test]
+    async fn local_dev_connected_sources_installs_activates_and_dispatches_through_host_runtime() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let services = build_reborn_services(
+            RebornBuildInput::local_dev_with_profile(
+                RebornCompositionProfile::LocalDev,
+                "local-dev-connected-sources-owner",
+                dir.path().join("local-dev"),
+            )
+            .with_runtime_policy(crate::local_dev_runtime_policy().expect("local-dev policy")),
+        )
+        .await
+        .expect("local-dev services build");
+        let local_runtime = services.local_runtime.as_ref().expect("local runtime");
+        let extension_management = local_runtime
+            .extension_management
+            .as_ref()
+            .expect("extension management");
+        let connected_sources_ref =
+            LifecyclePackageRef::new(LifecyclePackageKind::Extension, "connected-sources")
+                .expect("valid ref");
+
+        extension_management
+            .install(connected_sources_ref.clone())
+            .await
+            .expect("install Connected Sources");
+        extension_management
+            .activate_with_prechecked_credentials_for_test(
+                connected_sources_ref,
+                ExtensionActivationMode::Static,
+            )
+            .await
+            .expect("activate Connected Sources");
+
+        let active = extension_management
+            .active_model_visible_capabilities()
+            .await
+            .expect("active capabilities");
+        let read_capability = active
+            .iter()
+            .find(|capability| capability.id.as_str() == "connected-sources.read")
+            .expect("connected sources read capability active");
+        assert_eq!(read_capability.provider.as_str(), "connected-sources");
+        assert_eq!(read_capability.effects, connected_sources_allowed_effects());
+        assert!(
+            read_capability.runtime_credentials.is_empty(),
+            "connected-sources.read uses the connector proxy's host-side credential resolution, not static runtime credentials"
+        );
+
+        let outcome = services
+            .host_runtime
+            .as_ref()
+            .expect("host runtime")
+            .invoke_capability(RuntimeCapabilityRequest::new(
+                connected_sources_context("connected-sources.read"),
+                CapabilityId::new("connected-sources.read").unwrap(),
+                ResourceEstimate::default(),
+                serde_json::json!({
+                    "toolkit": "gmail",
+                    "tool": "GMAIL_FETCH_EMAILS",
+                    "arguments": { "max_results": 1 }
+                }),
+                connected_sources_trust_decision(),
+            ))
+            .await
+            .expect("runtime invocation completes");
+
+        let RuntimeCapabilityOutcome::Failed(failure) = outcome else {
+            panic!(
+                "expected missing test Composio credential to fail after dispatch, got {outcome:?}"
+            );
+        };
+        assert_eq!(failure.capability_id.as_str(), "connected-sources.read");
+        assert_ne!(failure.kind, RuntimeFailureKind::MissingRuntime);
+    }
+
     fn nearai_bootstrap_input_with_base(
         owner: &str,
         root: PathBuf,
@@ -5176,6 +5312,49 @@ mod tests {
         .expect("valid execution context")
     }
 
+    #[cfg(feature = "webui-v2-beta")]
+    fn connected_sources_context(capability_id: &str) -> ExecutionContext {
+        let extension_id = ExtensionId::new("caller").expect("valid extension id");
+        ExecutionContext::local_default(
+            UserId::new("local-dev-test-user").expect("valid user id"),
+            extension_id.clone(),
+            RuntimeKind::FirstParty,
+            TrustClass::FirstParty,
+            CapabilitySet {
+                grants: vec![CapabilityGrant {
+                    id: CapabilityGrantId::new(),
+                    capability: CapabilityId::new(capability_id).expect("valid capability id"),
+                    grantee: Principal::Extension(extension_id),
+                    issued_by: Principal::HostRuntime,
+                    constraints: GrantConstraints {
+                        allowed_effects: connected_sources_allowed_effects(),
+                        mounts: MountView::new(Vec::new()).expect("valid empty mount view"),
+                        network: connected_sources_network_policy(),
+                        secrets: Vec::new(),
+                        resource_ceiling: None,
+                        expires_at: None,
+                        max_invocations: None,
+                    },
+                }],
+            },
+            MountView::new(Vec::new()).expect("valid empty mount view"),
+        )
+        .expect("valid execution context")
+    }
+
+    #[cfg(feature = "webui-v2-beta")]
+    fn connected_sources_network_policy() -> NetworkPolicy {
+        NetworkPolicy {
+            allowed_targets: vec![NetworkTargetPattern {
+                scheme: Some(NetworkScheme::Https),
+                host_pattern: "backend.composio.dev".to_string(),
+                port: None,
+            }],
+            deny_private_ip_ranges: true,
+            max_egress_bytes: None,
+        }
+    }
+
     fn web_access_network_policy() -> NetworkPolicy {
         NetworkPolicy {
             allowed_targets: vec![NetworkTargetPattern {
@@ -5295,6 +5474,19 @@ mod tests {
             effective_trust: EffectiveTrustClass::user_trusted(),
             authority_ceiling: AuthorityCeiling {
                 allowed_effects: allowed_effects(),
+                max_resource_ceiling: None,
+            },
+            provenance: TrustProvenance::Default,
+            evaluated_at: chrono::Utc::now(),
+        }
+    }
+
+    #[cfg(feature = "webui-v2-beta")]
+    fn connected_sources_trust_decision() -> TrustDecision {
+        TrustDecision {
+            effective_trust: EffectiveTrustClass::user_trusted(),
+            authority_ceiling: AuthorityCeiling {
+                allowed_effects: connected_sources_allowed_effects(),
                 max_resource_ceiling: None,
             },
             provenance: TrustProvenance::Default,

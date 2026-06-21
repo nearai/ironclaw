@@ -1,0 +1,29 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://ironclaw.dev/schemas/connected-sources/read.input.v1.json",
+  "title": "Connected Sources read input",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["toolkit", "tool"],
+  "properties": {
+    "toolkit": {
+      "type": "string",
+      "description": "Connected source toolkit slug, for example gmail, googlecalendar, googledrive, notion, slack, or github.",
+      "minLength": 1,
+      "maxLength": 80
+    },
+    "tool": {
+      "type": "string",
+      "description": "Exact provider tool slug. It must be read-only, for example GMAIL_FETCH_EMAILS or GOOGLECALENDAR_EVENTS_LIST.",
+      "pattern": "^[A-Z0-9]+(?:_[A-Z0-9]+)+$",
+      "minLength": 3,
+      "maxLength": 160
+    },
+    "arguments": {
+      "type": "object",
+      "description": "Arguments forwarded to the read-only provider tool.",
+      "additionalProperties": true,
+      "default": {}
+    }
+  }
+}

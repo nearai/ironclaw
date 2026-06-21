@@ -71,6 +71,13 @@ exempt_capabilities = [
     #   to exempt here (unlike `memory_write`, an arbitrary-path write that is
     #   NOT exempt and still hits the gate).
     "builtin.profile_set",
+    # Connected Sources is the model-visible read bridge for already connected
+    # user data (Gmail, Slack, Drive, Notion, GitHub, etc.). It uses network and
+    # host-side connector credentials, so its raw effect set would otherwise hit
+    # the generic network/use_secret approval gate on every query. Keep this
+    # exemption narrow: the handler only delegates to the read-only connector
+    # route, and mutating provider tools remain rejected by that allowlist.
+    "connected-sources.read",
 ]
 
 [approval_defaults.spawn_capability]

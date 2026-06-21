@@ -3756,6 +3756,13 @@ mod tests {
         requests: StdMutex<Vec<HostManagedModelRequest>>,
     }
 
+    #[cfg(feature = "webui-v2-beta")]
+    #[derive(Debug, Default)]
+    struct ConnectedSourcesToolCallingGateway {
+        calls: StdMutex<usize>,
+        requests: StdMutex<Vec<HostManagedModelRequest>>,
+    }
+
     #[derive(Debug, Default)]
     struct WorkspaceListingGateway {
         calls: StdMutex<usize>,
@@ -4026,6 +4033,105 @@ mod tests {
                     id: "call-auth-gate".to_string(),
                     name: notion_tool.name,
                     arguments: serde_json::json!({ "query": "project notes" }),
+                    response_reasoning: None,
+                    reasoning: None,
+                    signature: None,
+                })
+                .await
+                .map_err(model_capability_error)?;
+            Ok(HostManagedModelResponse::capability_calls(
+                vec![candidate],
+                "",
+            ))
+        }
+    }
+
+    #[cfg(feature = "webui-v2-beta")]
+    #[async_trait]
+    impl HostManagedModelGateway for ConnectedSourcesToolCallingGateway {
+        async fn stream_model(
+            &self,
+            request: HostManagedModelRequest,
+        ) -> Result<HostManagedModelResponse, HostManagedModelError> {
+            self.requests
+                .lock()
+                .expect("connected-sources gateway requests lock poisoned")
+                .push(request);
+            Err(HostManagedModelError::safe(
+                HostManagedModelErrorKind::InvalidRequest,
+                "expected capability-aware model path",
+            ))
+        }
+
+        async fn stream_model_with_capabilities(
+            &self,
+            request: HostManagedModelRequest,
+            capabilities: Arc<dyn LoopCapabilityPort>,
+        ) -> Result<HostManagedModelResponse, HostManagedModelError> {
+            let call_index = {
+                let mut calls = self
+                    .calls
+                    .lock()
+                    .expect("connected-sources gateway lock poisoned");
+                let call_index = *calls;
+                *calls += 1;
+                call_index
+            };
+            self.requests
+                .lock()
+                .expect("connected-sources gateway requests lock poisoned")
+                .push(request.clone());
+            if call_index > 0 {
+                let tool_result = request
+                    .messages
+                    .iter()
+                    .find(|message| message.role == HostManagedModelMessageRole::ToolResult)
+                    .expect("second model call should include connected-sources tool result");
+                assert!(
+                    tool_result.content.contains("connected sources rejected")
+                        || tool_result.content.contains("read-only allowlist")
+                        || tool_result
+                            .content
+                            .contains("capability failed with network"),
+                    "connected-sources failure should be replayed as a model-visible tool result, got {}",
+                    tool_result.content
+                );
+                return Ok(HostManagedModelResponse::assistant_reply(
+                    "connected sources tool path ok",
+                ));
+            }
+
+            let capability_id =
+                CapabilityId::new("connected-sources.read").expect("connected-sources read id");
+            let surface = capabilities
+                .visible_capabilities(VisibleCapabilityRequest)
+                .await
+                .map_err(model_capability_error)?;
+            assert!(
+                surface
+                    .descriptors
+                    .iter()
+                    .any(|descriptor| descriptor.capability_id == capability_id),
+                "connected-sources.read must be visible to the model after activation"
+            );
+            let tool = capabilities
+                .tool_definitions()
+                .map_err(model_capability_error)?
+                .into_iter()
+                .find(|definition| definition.capability_id == capability_id)
+                .expect("connected-sources provider tool definition");
+            let candidate = capabilities
+                .register_provider_tool_call(ProviderToolCall {
+                    provider_id: "test-provider".to_string(),
+                    provider_model_id: "test-model".to_string(),
+                    turn_id: Some("provider-turn-connected-sources".to_string()),
+                    id: "call-connected-sources".to_string(),
+                    name: tool.name,
+                    arguments: serde_json::json!({
+                        "toolkit": "gmail",
+                        "tool": "GMAIL_SEND_EMAIL",
+                        "arguments": { "to": "nobody@example.com" }
+                    }),
                     response_reasoning: None,
                     reasoning: None,
                     signature: None,
@@ -5838,6 +5944,84 @@ mod tests {
             .expect("blocked run state");
         assert_eq!(state.status, TurnStatus::BlockedAuth);
         assert_eq!(state.gate_ref.as_ref(), Some(&gate_ref));
+
+        runtime.shutdown().await.expect("runtime shutdown");
+    }
+
+    #[cfg(feature = "webui-v2-beta")]
+    #[tokio::test]
+    async fn local_dev_runtime_exposes_connected_sources_to_model_tool_calls() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let gateway = Arc::new(ConnectedSourcesToolCallingGateway::default());
+        let gateway_for_runtime: Arc<dyn HostManagedModelGateway> = gateway.clone();
+        let input = RebornRuntimeInput::from_services(
+            RebornBuildInput::local_dev_with_profile(
+                RebornCompositionProfile::LocalDev,
+                "runtime-connected-sources-owner",
+                root.path().join("local-dev"),
+            )
+            .with_runtime_policy(crate::local_dev_runtime_policy().expect("local-dev policy")),
+        )
+        .with_identity(RebornRuntimeIdentity {
+            tenant_id: "runtime-connected-sources-tenant".to_string(),
+            agent_id: "runtime-connected-sources-agent".to_string(),
+            source_binding_id: "runtime-connected-sources-source".to_string(),
+            reply_target_binding_id: "runtime-connected-sources-reply".to_string(),
+        })
+        .with_poll_settings(PollSettings {
+            interval: Duration::from_millis(10),
+            max_total: Duration::from_secs(10),
+        })
+        .with_model_gateway_override(gateway_for_runtime);
+
+        let runtime = build_reborn_runtime(input).await.expect("runtime builds");
+        let local_runtime = runtime
+            .services
+            .local_runtime
+            .as_ref()
+            .expect("local runtime services");
+        let extension_management = local_runtime
+            .extension_management
+            .as_ref()
+            .expect("extension management");
+        let connected_sources_ref =
+            LifecyclePackageRef::new(LifecyclePackageKind::Extension, "connected-sources")
+                .expect("valid connected-sources ref");
+        extension_management
+            .install(connected_sources_ref.clone())
+            .await
+            .expect("install Connected Sources");
+        extension_management
+            .activate_with_prechecked_credentials_for_test(
+                connected_sources_ref,
+                ExtensionActivationMode::Static,
+            )
+            .await
+            .expect("activate Connected Sources");
+
+        let conversation = runtime.new_conversation().await.expect("conversation");
+        let reply = tokio::time::timeout(
+            RUNTIME_SEND_TIMEOUT,
+            runtime.send_user_message(&conversation, "try connected source tool"),
+        )
+        .await
+        .expect("runtime send should finish")
+        .expect("runtime send should succeed");
+
+        assert_eq!(reply.status, TurnStatus::Completed);
+        assert_eq!(
+            reply.text.as_deref(),
+            Some("connected sources tool path ok")
+        );
+        assert_eq!(
+            gateway
+                .requests
+                .lock()
+                .expect("connected-sources gateway requests lock poisoned")
+                .len(),
+            2,
+            "connected-sources tool call should require initial request plus tool-result follow-up"
+        );
 
         runtime.shutdown().await.expect("runtime shutdown");
     }

@@ -57,6 +57,9 @@ const NOTION_MCP_MANIFEST: &str =
     include_str!("../../ironclaw_first_party_extensions/assets/notion-mcp/manifest.toml");
 const WEB_ACCESS_MANIFEST: &str =
     include_str!("../../ironclaw_first_party_extensions/assets/web-access/manifest.toml");
+#[cfg(feature = "webui-v2-beta")]
+const CONNECTED_SOURCES_MANIFEST: &str =
+    include_str!("../../ironclaw_first_party_extensions/assets/connected-sources/manifest.toml");
 const NEARAI_MCP_MANIFEST: &str =
     include_str!("../../ironclaw_first_party_extensions/assets/nearai-mcp/manifest.toml");
 #[cfg(feature = "slack-v2-host-beta")]
@@ -152,6 +155,12 @@ fn onboarding(package_id: &str) -> Option<LifecycleExtensionOnboarding> {
             Some("No credentials are required for Web Access."),
             None,
             "Activate Web Access to publish its tools.",
+        )),
+        "connected-sources" => Some(onboarding_message(
+            "Connected Sources uses your configured connector proxy. Activate it to make one read-only connected-data tool available to Chat.",
+            Some("No separate source credentials are required here."),
+            None,
+            "Install Connected Sources, then activate it to publish its read-only tool.",
         )),
         _ => None,
     }
@@ -271,6 +280,8 @@ impl AvailableExtensionCatalog {
             github_package()?,
             notion_mcp_package()?,
             web_access_package()?,
+            #[cfg(feature = "webui-v2-beta")]
+            connected_sources_package()?,
             nearai_mcp_package(nearai_mcp_config)?,
             google_calendar_package()?,
             google_docs_package()?,
@@ -399,6 +410,16 @@ fn web_access_package() -> Result<AvailableExtensionPackage, ProductWorkflowErro
     )
 }
 
+#[cfg(feature = "webui-v2-beta")]
+fn connected_sources_package() -> Result<AvailableExtensionPackage, ProductWorkflowError> {
+    bundled_extension_package(
+        "connected-sources",
+        "Connected Sources",
+        CONNECTED_SOURCES_MANIFEST,
+        connected_sources_assets(),
+    )
+}
+
 fn nearai_mcp_package(
     config: Option<&NearAiMcpBootstrapConfig>,
 ) -> Result<AvailableExtensionPackage, ProductWorkflowError> {
@@ -490,6 +511,11 @@ pub(crate) fn notion_mcp_manifest_digest() -> String {
 
 pub(crate) fn web_access_manifest_digest() -> String {
     sha256_digest_token(WEB_ACCESS_MANIFEST.as_bytes())
+}
+
+#[cfg(feature = "webui-v2-beta")]
+pub(crate) fn connected_sources_manifest_digest() -> String {
+    sha256_digest_token(CONNECTED_SOURCES_MANIFEST.as_bytes())
 }
 
 #[cfg(feature = "slack-v2-host-beta")]
@@ -850,6 +876,31 @@ fn web_access_assets() -> Vec<AvailableExtensionAsset> {
             "prompts/web-access/get_content.md",
             include_bytes!(
                 "../../ironclaw_first_party_extensions/assets/web-access/prompts/web-access/get_content.md"
+            ),
+        ),
+    ]
+}
+
+#[cfg(feature = "webui-v2-beta")]
+fn connected_sources_assets() -> Vec<AvailableExtensionAsset> {
+    vec![
+        bytes_asset("manifest.toml", CONNECTED_SOURCES_MANIFEST.as_bytes()),
+        bytes_asset(
+            "schemas/connected-sources/read.input.v1.json",
+            include_bytes!(
+                "../../ironclaw_first_party_extensions/assets/connected-sources/schemas/connected-sources/read.input.v1.json"
+            ),
+        ),
+        bytes_asset(
+            "schemas/connected-sources/read.output.v1.json",
+            include_bytes!(
+                "../../ironclaw_first_party_extensions/assets/connected-sources/schemas/connected-sources/read.output.v1.json"
+            ),
+        ),
+        bytes_asset(
+            "prompts/connected-sources/read.md",
+            include_bytes!(
+                "../../ironclaw_first_party_extensions/assets/connected-sources/prompts/connected-sources/read.md"
             ),
         ),
     ]
@@ -1479,7 +1530,7 @@ where
 fn reserved_host_bundled_extension_id(extension_id: &ExtensionId) -> bool {
     matches!(
         extension_id.as_str(),
-        "github" | "notion" | "web-access" | "nearai" | "slack"
+        "github" | "notion" | "web-access" | "connected-sources" | "nearai" | "slack"
     ) || is_gsuite_extension_id(extension_id)
 }
 
@@ -1586,6 +1637,8 @@ mod tests {
             "github",
             "notion",
             "web-access",
+            #[cfg(feature = "webui-v2-beta")]
+            "connected-sources",
             "nearai",
             "google-calendar",
             "google-docs",
@@ -1744,6 +1797,11 @@ mod tests {
             ("notion", "Notion needs OAuth authorization"),
             ("nearai", "NEAR AI needs an API key"),
             ("web-access", "Web Access does not need credentials"),
+            #[cfg(feature = "webui-v2-beta")]
+            (
+                "connected-sources",
+                "Connected Sources uses your configured connector proxy",
+            ),
         ] {
             let package_ref =
                 LifecyclePackageRef::new(LifecyclePackageKind::Extension, extension_id).unwrap();
@@ -2063,6 +2121,8 @@ handle = "web_token"
         assert!(google_sheets_manifest_digest().starts_with("sha256:"));
         assert!(google_slides_manifest_digest().starts_with("sha256:"));
         assert!(gmail_manifest_digest().starts_with("sha256:"));
+        #[cfg(feature = "webui-v2-beta")]
+        assert!(connected_sources_manifest_digest().starts_with("sha256:"));
         #[cfg(feature = "slack-v2-host-beta")]
         assert!(slack_manifest_digest().starts_with("sha256:"));
     }

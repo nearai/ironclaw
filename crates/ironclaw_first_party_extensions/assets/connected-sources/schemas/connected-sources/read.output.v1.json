@@ -1,0 +1,21 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://ironclaw.dev/schemas/connected-sources/read.output.v1.json",
+  "title": "Connected Sources read output",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["successful", "data"],
+  "properties": {
+    "successful": {
+      "type": "boolean",
+      "description": "Whether the upstream read-only connector tool completed successfully."
+    },
+    "data": {
+      "description": "Provider response data returned by the connector proxy."
+    },
+    "error": {
+      "type": "string",
+      "description": "Redacted provider error summary when the connector proxy reports one."
+    }
+  }
+}

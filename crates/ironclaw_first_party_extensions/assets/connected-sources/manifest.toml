@@ -1,0 +1,20 @@
+schema_version = "reborn.extension_manifest.v2"
+id = "connected-sources"
+name = "Connected Sources"
+version = "0.1.0"
+description = "Read-only access to connected business apps through the configured connector proxy."
+trust = "first_party_requested"
+
+[runtime]
+kind = "first_party"
+service = "connected-sources"
+
+[[capabilities]]
+id = "connected-sources.read"
+description = "Run one read-only connector tool against a connected source such as Gmail, Calendar, Drive, Notion, Slack, or GitHub. Never use this capability for sends, drafts, deletes, updates, posts, scheduling, or other mutations."
+effects = ["dispatch_capability", "network", "use_secret"]
+default_permission = "allow"
+visibility = "model"
+input_schema_ref = "schemas/connected-sources/read.input.v1.json"
+output_schema_ref = "schemas/connected-sources/read.output.v1.json"
+prompt_doc_ref = "prompts/connected-sources/read.md"

@@ -34,6 +34,8 @@ mod budget_events;
 mod bundled_skills;
 mod communication_context;
 #[cfg(feature = "webui-v2-beta")]
+mod connected_sources;
+#[cfg(feature = "webui-v2-beta")]
 mod connectors;
 mod default_system_prompt;
 mod error;
