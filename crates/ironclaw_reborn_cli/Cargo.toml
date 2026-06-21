@@ -72,7 +72,7 @@ reqwest = { version = "0.12", default-features = false, features = ["json", "mul
 secrecy = "0.10"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-sha2 = "0.10"
+sha2 = "0.11"
 tempfile = "3"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal", "io-util", "io-std", "sync", "time"] }
 tokio-util = { version = "0.7", features = ["rt"] }

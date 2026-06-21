@@ -54,7 +54,7 @@ ironclaw_host_api = { path = "../ironclaw_host_api" }
 
 async-trait = "0.1"
 chrono = { version = "0.4", features = ["serde"] }
-libsql = { version = "0.6", default-features = false, features = ["core", "replication", "remote", "tls"] }
+libsql = { version = "0.9", default-features = false, features = ["core", "replication", "remote", "tls"] }
 rust_decimal = { version = "1", features = ["serde"] }
 tempfile = "3"
 tokio = { version = "1", features = ["macros", "rt", "rt-multi-thread", "sync"] }
