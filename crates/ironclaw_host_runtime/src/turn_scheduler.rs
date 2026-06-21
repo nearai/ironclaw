@@ -201,7 +201,7 @@ impl TurnRunScheduler {
         TurnRunSchedulerHandle {
             notifier,
             command_tx,
-            supervisor,
+            supervisor: Some(supervisor),
         }
     }
 }
@@ -262,7 +262,11 @@ impl TurnRunWakeNotifier for SchedulerTurnRunWakeNotifier {
 pub struct TurnRunSchedulerHandle {
     notifier: Arc<SchedulerTurnRunWakeNotifier>,
     command_tx: mpsc::Sender<SchedulerCommand>,
-    supervisor: JoinHandle<()>,
+    /// `Option` so that `shutdown()` can `take()` the handle without a
+    /// partial move, which would be disallowed when `Drop` is implemented.
+    /// `None` only after `shutdown()` completes or if construction somehow
+    /// produced an absent supervisor (not possible via the public API).
+    supervisor: Option<JoinHandle<()>>,
 }
 
 impl TurnRunSchedulerHandle {
@@ -271,12 +275,45 @@ impl TurnRunSchedulerHandle {
     }
 
     pub fn is_stopped(&self) -> bool {
-        self.supervisor.is_finished()
+        self.supervisor
+            .as_ref()
+            .map_or(true, |s| s.is_finished())
     }
 
-    pub async fn shutdown(self) {
+    /// Graceful shutdown: signal the scheduler loop to stop, then await the
+    /// supervisor task to completion.  This is the preferred shutdown path
+    /// when the caller can `await`.
+    ///
+    /// If the handle is dropped without calling `shutdown()` — for example
+    /// when a build function returns `Err` after the scheduler has started —
+    /// the `Drop` impl sends a best-effort synchronous shutdown signal instead.
+    pub async fn shutdown(mut self) {
         let _ = self.command_tx.send(SchedulerCommand::Shutdown).await;
-        let _ = self.supervisor.await;
+        if let Some(supervisor) = self.supervisor.take() {
+            let _ = supervisor.await;
+        }
+    }
+}
+
+impl Drop for TurnRunSchedulerHandle {
+    fn drop(&mut self) {
+        // Safety net for error paths: if `shutdown()` was not called (e.g. a
+        // build function failed after starting the scheduler), send a best-effort
+        // synchronous Shutdown command so the background task terminates instead
+        // of running indefinitely with no owner.
+        //
+        // `try_send` is non-blocking and is a no-op on failure (task already
+        // stopped, or channel unexpectedly full).  The graceful `shutdown()` path
+        // awaits task completion and is preferred wherever an async context is
+        // available; Drop is the fallback for synchronous or error-path drops.
+        //
+        // The supervisor `JoinHandle` is `Option` so that `shutdown()` can
+        // `take()` it (avoiding a partial-move from a `Drop`-implementing type).
+        // When Drop fires here the `JoinHandle` — if not already taken by
+        // `shutdown()` — is dropped, which detaches the tokio task.  The
+        // `Shutdown` command above causes the detached task to self-terminate
+        // on its next `select!` iteration.
+        let _ = self.command_tx.try_send(SchedulerCommand::Shutdown);
     }
 }
 
@@ -845,5 +882,47 @@ mod tests {
             is_stopped_after,
             "scheduler must be stopped after shutdown() returns"
         );
+    }
+
+    /// Dropping a `TurnRunSchedulerHandle` without calling `shutdown()` must
+    /// signal the background scheduler task to self-terminate, not leak.
+    ///
+    /// This guards the bug scenario from the PR review: a build function starts
+    /// the scheduler via `build_default_planned_runtime` then fails on a later
+    /// fallible step.  Without Drop-based cleanup the scheduler task would run
+    /// indefinitely after the build error is returned.
+    ///
+    /// Observable proxy: grab a clone of `command_tx` before the drop (the same
+    /// channel the Drop impl tries to send `Shutdown` on), then verify the task
+    /// processes it by waiting for the channel to close — which only happens once
+    /// the scheduler loop breaks out of its `loop` on `Shutdown`.
+    #[tokio::test]
+    async fn drop_without_shutdown_sends_shutdown_signal() {
+        let config = TurnRunSchedulerConfig::default()
+            // Long intervals so poll/recovery ticks never fire during the test.
+            .with_poll_interval(std::time::Duration::from_secs(3600))
+            .with_lease_recovery_interval(std::time::Duration::from_secs(3600));
+
+        let scheduler =
+            TurnRunScheduler::new(Arc::new(NoopTransitionPort), Arc::new(NoopExecutor), config);
+        let handle = scheduler.start();
+
+        // Clone the command sender so we can observe the channel state after drop.
+        let command_tx_clone = handle.command_tx.clone();
+
+        // Drop the handle WITHOUT calling shutdown().
+        // The Drop impl should fire try_send(SchedulerCommand::Shutdown).
+        drop(handle);
+
+        // The scheduler loop is running in a background task.  After receiving
+        // `Shutdown` it breaks and the task ends.  When the task ends, the
+        // internal `command_tx` owned by the loop is dropped, closing the channel.
+        // `closed()` resolves when all senders are gone — i.e. the task exited.
+        tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            command_tx_clone.closed(),
+        )
+        .await
+        .expect("scheduler task must terminate within 2 s when handle is dropped without shutdown");
     }
 }

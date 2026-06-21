@@ -8742,6 +8742,10 @@ mod tests {
             source_binding_id: "scheduler-liveness-source".to_string(),
             reply_target_binding_id: "scheduler-liveness-reply".to_string(),
         })
+        .with_poll_settings(PollSettings {
+            interval: Duration::from_millis(10),
+            max_total: RUNTIME_SEND_TIMEOUT,
+        })
         .with_model_gateway_override(gateway);
 
         let runtime = build_reborn_runtime(input)
@@ -8758,7 +8762,7 @@ mod tests {
 
         // Invariant 2: While the scheduler handle mutex is held (simulating
         // shutdown/scheduler contention), the public submit path must NOT
-        // return `WorkerStopped`.
+        // return `WorkerStopped` — and must complete within a bounded timeout.
         //
         // `is_stopped()` uses `try_lock()` (non-blocking) on the handle mutex,
         // not `lock().await`, so holding the lock here cannot deadlock. Tokio's
@@ -8766,20 +8770,36 @@ mod tests {
         // fail (returning `Err`) because the current task already holds the guard.
         // The guard falls through to "alive" because the `stopped` flag is false.
         //
-        // We allow any error EXCEPT `WorkerStopped` — the turn will likely fail
-        // for other reasons (no active LLM, turn submission error, etc.) but the
-        // liveness guard must not fire.
+        // `notify()` sends through the notifier (not the handle mutex), so the
+        // worker processes the turn while the test holds the handle. The
+        // RecordingGateway resolves the model call synchronously, so the turn
+        // reaches Completed. We assert the full Ok result to catch both the
+        // liveness regression (WorkerStopped) and any other scheduler breakage.
+        //
+        // The surrounding `tokio::time::timeout` is the deadlock-regression
+        // guard: if `is_stopped()` ever regresses from `try_lock()` to
+        // `lock().await`, this test will panic with a clear message instead of
+        // hanging CI indefinitely.
         {
             // Hold the tokio Mutex for the duration of the submit call.
             let _guard = runtime.turn_scheduler.handle_mutex().lock().await;
 
-            let result = runtime
-                .send_user_message(&conversation, "liveness-probe")
-                .await;
+            let result = tokio::time::timeout(
+                RUNTIME_SEND_TIMEOUT,
+                runtime.send_user_message(&conversation, "liveness-probe"),
+            )
+            .await
+            .expect(
+                "send_user_message timed out while handle mutex was held — \
+                 liveness guard likely regressed from try_lock() to lock().await, \
+                 causing a deadlock",
+            );
+
             assert!(
-                !matches!(result, Err(super::RebornRuntimeError::WorkerStopped)),
-                "send_user_message must NOT return WorkerStopped while scheduler handle is merely \
-                 contended (stopped=false); got: {result:?}"
+                result.is_ok(),
+                "send_user_message must succeed (RecordingGateway completes the turn) \
+                 while scheduler handle is merely contended (stopped=false); \
+                 got: {result:?}"
             );
         } // guard released here — handle mutex is free again
 
