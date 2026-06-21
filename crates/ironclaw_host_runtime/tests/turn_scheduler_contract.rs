@@ -1562,6 +1562,148 @@ async fn expired_lease_reconciler_fails_running_run() {
     handle.shutdown().await;
 }
 
+/// A `TurnRunTransitionPort` whose `claim_next_run` blocks until a `Notify` is
+/// signalled, then returns `Ok(None)`.  Used to simulate a slow store claim so
+/// that we can verify the cancellation / drain-exit behaviour.
+struct BarrierClaimTransitions {
+    /// Fired by the test when `claim_next_run` should return.
+    release: Arc<tokio::sync::Notify>,
+    /// Fired by `claim_next_run` once it has entered its blocking await so the
+    /// test knows the drain loop is actually parked inside a claim.
+    entered: Arc<tokio::sync::Notify>,
+}
+
+#[async_trait]
+impl TurnRunTransitionPort for BarrierClaimTransitions {
+    async fn claim_next_run(
+        &self,
+        _request: ClaimRunRequest,
+    ) -> Result<Option<ClaimedTurnRun>, TurnError> {
+        self.entered.notify_waiters();
+        self.release.notified().await;
+        Ok(None)
+    }
+
+    async fn heartbeat(
+        &self,
+        _request: HeartbeatRequest,
+    ) -> Result<ironclaw_turns::EventCursor, TurnError> {
+        panic!("barrier claim transitions should not heartbeat")
+    }
+
+    async fn recover_expired_leases(
+        &self,
+        _request: RecoverExpiredLeasesRequest,
+    ) -> Result<RecoverExpiredLeasesResponse, TurnError> {
+        Ok(RecoverExpiredLeasesResponse { recovered: vec![] })
+    }
+
+    async fn record_model_route_snapshot(
+        &self,
+        _request: RecordModelRouteSnapshotRequest,
+    ) -> Result<TurnRunState, TurnError> {
+        panic!("barrier claim transitions should not record model route snapshots")
+    }
+
+    async fn block_run(&self, _request: BlockRunRequest) -> Result<TurnRunState, TurnError> {
+        panic!("barrier claim transitions should not block runs")
+    }
+
+    async fn complete_run(&self, _request: CompleteRunRequest) -> Result<TurnRunState, TurnError> {
+        panic!("barrier claim transitions should not complete runs")
+    }
+
+    async fn cancel_run(
+        &self,
+        _request: CancelRunCompletionRequest,
+    ) -> Result<TurnRunState, TurnError> {
+        panic!("barrier claim transitions should not cancel runs")
+    }
+
+    async fn fail_run(&self, _request: FailRunRequest) -> Result<TurnRunState, TurnError> {
+        panic!("barrier claim transitions should not fail runs")
+    }
+
+    async fn record_runner_failure(
+        &self,
+        _request: RecordRunnerFailureRequest,
+    ) -> Result<TurnRunState, TurnError> {
+        panic!("barrier claim transitions should not record terminal failure")
+    }
+
+    async fn apply_validated_loop_exit(
+        &self,
+        _request: ApplyValidatedLoopExitRequest,
+    ) -> Result<TurnRunState, TurnError> {
+        panic!("barrier claim transitions should not apply loop exits")
+    }
+}
+
+/// Verifies that scheduler shutdown does not start new `claim_next_run` calls
+/// after cancellation fires, and exits promptly once the in-flight claim returns.
+///
+/// Shape chosen (FIX 1): cancellation is checked at the TOP of each drain
+/// iteration, BEFORE starting a new `claim_next_run`.  This means:
+///  - Any claim already in progress runs to completion so its result is always
+///    tracked in `active_runs` (no leaked claimed-but-untracked run).
+///  - Once that claim returns, the top-of-loop check fires → drain exits without
+///    issuing any further claim calls.
+///  - The outer scheduler select re-enters and observes `cancelled()`, calling
+///    `shutdown_scheduler`.
+///
+/// The test drives this by:
+///  1. Sending a Wake to start a drain → `claim_next_run` blocks on a barrier.
+///  2. Waiting for the drain to be inside the claim await (`entered` notify).
+///  3. Calling `shutdown()` to cancel the token.
+///  4. Releasing the barrier → claim returns `Ok(None)`.
+///  5. Asserting `shutdown()` completes within a short bound after the release.
+#[tokio::test]
+async fn shutdown_completes_promptly_after_stalled_claim_unblocks() {
+    let release = Arc::new(tokio::sync::Notify::new());
+    let entered = Arc::new(tokio::sync::Notify::new());
+    let transitions = Arc::new(BarrierClaimTransitions {
+        release: Arc::clone(&release),
+        entered: Arc::clone(&entered),
+    });
+    let transition_port: Arc<dyn TurnRunTransitionPort> = transitions;
+    let executor = Arc::new(CompletingExecutor::default());
+    let scheduler = TurnRunScheduler::new(
+        transition_port,
+        executor,
+        fast_config()
+            // Long poll interval so only the explicit Wake triggers a drain.
+            .with_poll_interval(Duration::from_secs(3600))
+            .with_lease_recovery_interval(Duration::from_secs(3600)),
+    );
+    let handle = scheduler.start();
+
+    // Trigger a drain by sending a Wake; the barrier claim will block.
+    handle
+        .wake_notifier()
+        .notify_queued_run(fake_wake("thread-stalled-claim"))
+        .unwrap();
+
+    // Wait until the scheduler is actually parked inside claim_next_run.
+    timeout(Duration::from_secs(2), entered.notified())
+        .await
+        .expect("scheduler did not enter claim_next_run within 2 s");
+
+    // Initiate shutdown in the background — the token is cancelled immediately,
+    // but the loop is stuck awaiting the in-flight claim.
+    let shutdown_future = tokio::spawn(async move { handle.shutdown().await });
+
+    // Release the barrier — claim_next_run returns Ok(None).
+    // The top-of-loop cancellation check fires on the next iteration and the
+    // drain returns; the outer loop observes cancelled() and calls shutdown_scheduler.
+    release.notify_waiters();
+
+    // Shutdown must complete promptly (well within 2 s) after we release the barrier.
+    timeout(Duration::from_secs(2), shutdown_future)
+        .await
+        .expect("scheduler shutdown must complete promptly after stalled claim unblocks")
+        .expect("shutdown task must not panic");
+}
+
 fn fast_config() -> TurnRunSchedulerConfig {
     TurnRunSchedulerConfig::default()
         .with_poll_interval(Duration::from_millis(10))

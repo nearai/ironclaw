@@ -958,6 +958,123 @@ mod tests {
         RebornTurnRunExecutor::new(loop_exit_applier, driver_registry, host_factory)
     }
 
+    /// A driver that always returns a caller-supplied `AgentLoopDriverError`.
+    ///
+    /// Used to exercise the error-category mapping in `execute_claimed_run`
+    /// without the overhead of a full host stack.
+    struct ErrorReturningDriver {
+        descriptor: AgentLoopDriverDescriptor,
+        error: AgentLoopDriverError,
+    }
+
+    impl ErrorReturningDriver {
+        fn new(descriptor: AgentLoopDriverDescriptor, error: AgentLoopDriverError) -> Self {
+            Self { descriptor, error }
+        }
+    }
+
+    #[async_trait]
+    impl AgentLoopDriver for ErrorReturningDriver {
+        fn descriptor(&self) -> AgentLoopDriverDescriptor {
+            self.descriptor.clone()
+        }
+
+        async fn run(
+            &self,
+            _request: AgentLoopDriverRunRequest,
+            _host: &(dyn AgentLoopDriverHost + Send + Sync),
+        ) -> Result<LoopExit, AgentLoopDriverError> {
+            Err(self.error.clone())
+        }
+
+        async fn resume(
+            &self,
+            _request: AgentLoopDriverResumeRequest,
+            _host: &(dyn AgentLoopDriverHost + Send + Sync),
+        ) -> Result<LoopExit, AgentLoopDriverError> {
+            Err(self.error.clone())
+        }
+    }
+
+    /// Builds an executor whose registered driver always returns the given error.
+    fn make_executor_with_failing_driver(error: AgentLoopDriverError) -> RebornTurnRunExecutor {
+        let transitions: Arc<dyn TurnRunTransitionPort> =
+            Arc::new(RecordingTransitionPort::default());
+        let evidence = Arc::new(InMemoryLoopExitEvidencePort::new());
+        let loop_exit_applier = Arc::new(LoopExitApplier::new(transitions, evidence));
+        let mut registry = DriverRegistry::new();
+        registry
+            .register_driver(
+                Arc::new(ErrorReturningDriver::new(test_descriptor(), error)),
+                DriverRequirements::all_optional(),
+                DriverKind::Production,
+            )
+            .expect("driver registration must succeed");
+        let driver_registry = Arc::new(registry);
+        RebornTurnRunExecutor::new(
+            loop_exit_applier,
+            driver_registry,
+            Arc::new(SucceedingHostFactoryWithSnapshot),
+        )
+    }
+
+    /// When the driver returns `AgentLoopDriverError::InvalidRequest`, the executor
+    /// must return `Err` with category `"driver_invalid_request"`, and when it
+    /// returns `AgentLoopDriverError::Unavailable`, the category must be
+    /// `"driver_unavailable"`. Both are verified here to confirm the two branches
+    /// in the `DriverInvocationError::DriverError` match arm produce distinct,
+    /// correctly-named categories.
+    #[tokio::test]
+    async fn driver_invalid_request_and_unavailable_record_distinct_categories() {
+        // ── InvalidRequest → driver_invalid_request ───────────────────────────
+        let executor = make_executor_with_failing_driver(AgentLoopDriverError::InvalidRequest {
+            reason: "bad input from test".to_string(),
+        });
+        let transitions = Arc::new(RecordingTransitionPort::default());
+        let result = executor
+            .execute_claimed_run(
+                test_claimed_run(),
+                transitions.clone() as Arc<dyn TurnRunTransitionPort>,
+            )
+            .await;
+
+        let err = result.expect_err("expected Err for InvalidRequest driver error");
+        assert_eq!(
+            err.failure_category(),
+            "driver_invalid_request",
+            "InvalidRequest must map to category driver_invalid_request"
+        );
+        assert_eq!(
+            transitions.fail_run_call_count(),
+            0,
+            "executor must NOT call fail_run; scheduler owns terminal failure recording"
+        );
+
+        // ── Unavailable → driver_unavailable ──────────────────────────────────
+        let executor = make_executor_with_failing_driver(AgentLoopDriverError::Unavailable {
+            reason: "driver temporarily unavailable in test".to_string(),
+        });
+        let transitions = Arc::new(RecordingTransitionPort::default());
+        let result = executor
+            .execute_claimed_run(
+                test_claimed_run(),
+                transitions.clone() as Arc<dyn TurnRunTransitionPort>,
+            )
+            .await;
+
+        let err = result.expect_err("expected Err for Unavailable driver error");
+        assert_eq!(
+            err.failure_category(),
+            "driver_unavailable",
+            "Unavailable must map to category driver_unavailable"
+        );
+        assert_eq!(
+            transitions.fail_run_call_count(),
+            0,
+            "executor must NOT call fail_run; scheduler owns terminal failure recording"
+        );
+    }
+
     /// A `TurnRunTransitionPort` that fails on both `apply_validated_loop_exit`
     /// AND `fail_run` (used by the default `record_runner_failure` impl).
     ///
