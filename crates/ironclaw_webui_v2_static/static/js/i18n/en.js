@@ -131,6 +131,8 @@ registerPack("en", {
   "approval.approveAndAlways": "Approve & always allow",
   "approval.alwaysAllowToolLabel": "Always allow {tool} without asking",
   "approval.thisTool": "this tool",
+  "approval.viewFullCommand": "View full command",
+  "approval.showCommandPreview": "Show preview",
   // Chat — tool activity
   "tool.tabDetails": "Details",
   "tool.tabParameters": "Parameters",
@@ -166,6 +168,7 @@ registerPack("en", {
   "authGate.oauthWaiting": "Waiting for authorization to complete\u2026 You can close the popup tab once you\u2019ve approved access.",
   "authGate.expiresAt": "Expires",
   "authGate.oauthProviderFallback": "the provider",
+  "authGate.serviceUnavailable": "Service unavailable",
   "authGate.pillAuthorize": "Authorize",
   "authGate.pillEnterToken": "Enter token",
   "authGate.unsupportedChallenge": "Open settings to complete this authentication step.",
@@ -859,14 +862,14 @@ registerPack("en", {
   "projects.startProject": "Start a project",
   "projects.searchPlaceholder": "Search projects",
   "projects.creationDraft":
-    "Create a new project for me. I want to set up an autonomous workspace for: ",
+    "Create a new project for me. I want to set up a project for: ",
   "projects.chatAutoFail":
     "Unable to prepare chat automatically. Opening chat anyway.",
-  "projects.openWorkspace": "Open workspace",
-  "projects.openGeneralWorkspace": "Open general workspace",
+  "projects.openWorkspace": "Open project",
+  "projects.openGeneralWorkspace": "Open project",
   "projects.noDescription":
-    "No project description yet. The workspace is still being shaped by active missions and thread history.",
-  "projects.general.label": "General workspace",
+    "No project description yet. The project is still being shaped by recent activity and thread history.",
+  "projects.general.label": "General project",
   "projects.general.title": "Default project control room",
   "projects.general.desc":
     "Shared context, ad hoc work, and the catch-all runtime path for threads that are not yet promoted into a named project.",

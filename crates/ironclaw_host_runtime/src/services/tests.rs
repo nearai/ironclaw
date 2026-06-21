@@ -108,6 +108,7 @@ async fn product_auth_provider_runtime_ports_returns_configured_egress_and_oblig
             scope.clone(),
             handle.clone(),
             SecretMaterial::from("product-auth-material"),
+            None,
         )
         .await
         .expect("test secret should store");
@@ -150,6 +151,7 @@ async fn product_auth_ports_stage_secret_from_source_scope_into_target_scope() {
             source_scope.clone(),
             handle.clone(),
             SecretMaterial::from("product-auth-material"),
+            None,
         )
         .await
         .expect("test secret should store");

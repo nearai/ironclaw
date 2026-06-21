@@ -331,6 +331,7 @@ where
         scope: ResourceScope,
         handle: SecretHandle,
         material: SecretMaterial,
+        expires_at: Option<Timestamp>,
     ) -> Result<SecretMetadata, SecretStoreError> {
         let plaintext = material.expose_secret().as_bytes();
         let aad = filesystem_secret_aad(&scope, &handle);
@@ -344,12 +345,16 @@ where
             handle: handle.clone(),
             encrypted_value,
             key_salt,
-            expires_at: None,
+            expires_at,
             created_at: now,
             updated_at: now,
         };
         self.write_secret(&stored).await?;
-        Ok(SecretMetadata { scope, handle })
+        Ok(SecretMetadata {
+            scope,
+            handle,
+            expires_at,
+        })
     }
 
     async fn metadata(
@@ -363,6 +368,7 @@ where
             .map(|stored| SecretMetadata {
                 scope: stored.scope,
                 handle: stored.handle,
+                expires_at: stored.expires_at,
             }))
     }
 
@@ -1709,6 +1715,7 @@ mod tests {
                 scope.clone(),
                 handle.clone(),
                 SecretMaterial::from("super-secret"),
+                None,
             )
             .await
             .unwrap();
@@ -1743,6 +1750,7 @@ mod tests {
                 scope.clone(),
                 handle.clone(),
                 SecretMaterial::from("sk-operator-wide"),
+                None,
             )
             .await
             .unwrap();
@@ -1766,6 +1774,7 @@ mod tests {
                 scope.clone(),
                 handle.clone(),
                 SecretMaterial::from("super-secret"),
+                None,
             )
             .await
             .unwrap();
@@ -1795,6 +1804,7 @@ mod tests {
                 scope.clone(),
                 handle.clone(),
                 SecretMaterial::from("plaintext-sentinel-7e3d"),
+                None,
             )
             .await
             .unwrap();
@@ -1836,6 +1846,7 @@ mod tests {
                 scope_project_a.clone(),
                 handle.clone(),
                 SecretMaterial::from("aaa"),
+                None,
             )
             .await
             .unwrap();
@@ -1844,6 +1855,7 @@ mod tests {
                 scope_project_b.clone(),
                 handle.clone(),
                 SecretMaterial::from("bbb"),
+                None,
             )
             .await
             .unwrap();
@@ -1867,6 +1879,7 @@ mod tests {
                 scope.clone(),
                 handle.clone(),
                 SecretMaterial::from("super-secret"),
+                None,
             )
             .await
             .unwrap();
@@ -1894,6 +1907,7 @@ mod tests {
                 scope.clone(),
                 handle.clone(),
                 SecretMaterial::from("super-secret"),
+                None,
             )
             .await
             .unwrap();
@@ -1927,6 +1941,7 @@ mod tests {
                 scope.clone(),
                 handle.clone(),
                 SecretMaterial::from("super-secret"),
+                None,
             )
             .await
             .unwrap();
@@ -2249,6 +2264,7 @@ mod tests {
                 scope.clone(),
                 handle.clone(),
                 SecretMaterial::from("super-secret-cas"),
+                None,
             )
             .await
             .unwrap();
@@ -2366,6 +2382,7 @@ mod tests {
                 scope.clone(),
                 handle.clone(),
                 SecretMaterial::from("super-secret-revoke-cas"),
+                None,
             )
             .await
             .unwrap();
@@ -2411,6 +2428,7 @@ mod tests {
                 scope.clone(),
                 handle.clone(),
                 SecretMaterial::from("super-secret-revoke-exhaust"),
+                None,
             )
             .await
             .unwrap();
@@ -2563,6 +2581,7 @@ mod tests {
                 scope_a.clone(),
                 handle.clone(),
                 SecretMaterial::from("tenant-a-secret"),
+                None,
             )
             .await
             .unwrap();
@@ -2638,6 +2657,7 @@ mod tests {
                 writer_scope.clone(),
                 handle.clone(),
                 SecretMaterial::from("cross-invocation-secret"),
+                None,
             )
             .await
             .unwrap();
@@ -2681,6 +2701,7 @@ mod tests {
                 scope.clone(),
                 handle.clone(),
                 SecretMaterial::from("indexed-projection-secret"),
+                None,
             )
             .await
             .unwrap();

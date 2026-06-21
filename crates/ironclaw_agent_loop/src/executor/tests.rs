@@ -4930,6 +4930,10 @@ async fn auth_resume_after_approval_carries_resume_token_and_approval_request_id
         pending_auth_pa.approval_request_id, approval_request_id,
         "pending_auth_resume.prior_approval.approval_request_id must match the approval request"
     );
+    assert!(
+        phase2_bb.pending_approval_resume.is_none(),
+        "phase 2 auth gate must fold prior approval into pending_auth_resume and clear pending_approval_resume"
+    );
 
     // ── Phase 3: auth-resume → Completed ─────────────────────────────────────
     let phase3_exit = executor

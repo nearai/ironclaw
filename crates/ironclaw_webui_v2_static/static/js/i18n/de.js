@@ -126,6 +126,8 @@ registerPack("de", {
   "approval.approveAndAlways": "Genehmigen und immer zulassen",
   "approval.alwaysAllowToolLabel": "{tool} immer ohne Nachfrage zulassen",
   "approval.thisTool": "dieses Tool",
+  "approval.viewFullCommand": "Vollständigen Befehl anzeigen",
+  "approval.showCommandPreview": "Vorschau anzeigen",
   // Chat — tool activity
   "tool.tabDetails": "Details",
   "tool.tabParameters": "Parameter",
@@ -161,6 +163,7 @@ registerPack("de", {
   "authGate.oauthWaiting": "Warten auf den Abschluss der Autorisierung… Sie können die Popup-Registerkarte schließen, sobald Sie den Zugriff genehmigt haben.",
   "authGate.expiresAt": "Läuft ab",
   "authGate.oauthProviderFallback": "beim Anbieter",
+  "authGate.serviceUnavailable": "Dienst nicht verfügbar",
   "authGate.pillAuthorize": "Autorisieren",
   "authGate.pillEnterToken": "Token eingeben",
   "authGate.unsupportedChallenge": "Einstellungen öffnen, um diesen Authentifizierungsschritt abzuschließen.",

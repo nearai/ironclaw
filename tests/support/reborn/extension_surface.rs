@@ -44,6 +44,7 @@ pub const BUNDLED_EXTENSION_CAPABILITY_IDS: &[&str] = &[
     "github.get_pull_request_reviews",
     "github.get_combined_status",
     "github.merge_pull_request",
+    "github.get_authenticated_user",
     "github.list_repos",
     "github.search_repositories",
     "github.search_code",

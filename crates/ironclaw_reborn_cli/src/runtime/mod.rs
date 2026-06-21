@@ -8,10 +8,11 @@ use anyhow::Context;
 use ironclaw_reborn_composition::host_api::UserId;
 use ironclaw_reborn_composition::host_api::{AgentId, TenantId};
 use ironclaw_reborn_composition::{
-    DEFAULT_TURN_RUNNER_WORKER_COUNT, OAuthClientConfig, OperatorLogLayer, PollSettings,
-    RebornBuildInput, RebornCompositionProfile, RebornLocalRuntimeProfileOptions,
-    RebornRuntimeIdentity, RebornRuntimeInput, TurnRunnerSettings, build_reborn_runtime,
-    local_runtime_build_input_with_options, nearai_mcp_bootstrap_config_from_env,
+    CredentialRefreshSettings, DEFAULT_TURN_RUNNER_WORKER_COUNT, OAuthClientConfig,
+    OperatorLogLayer, PollSettings, RebornBuildInput, RebornCompositionProfile,
+    RebornLocalRuntimeProfileOptions, RebornRuntimeIdentity, RebornRuntimeInput, TurnRunnerSettings,
+    build_reborn_runtime, local_runtime_build_input_with_options,
+    nearai_mcp_bootstrap_config_from_env,
 };
 #[cfg(feature = "webui-v2-beta")]
 use ironclaw_reborn_composition::{
@@ -368,6 +369,50 @@ pub(crate) fn build_runtime_input(
     build_runtime_input_with_options(config, caller, RuntimeInputOptions::default())
 }
 
+/// Build [`CredentialRefreshSettings`] for the proactive Google OAuth keepalive
+/// worker.
+///
+/// Enabled by default on the local `serve` surface (so refresh tokens stay warm
+/// for long-running deployments) and disabled for every other caller, mirroring
+/// the trigger-poller default. `IRONCLAW_CREDENTIAL_REFRESH_ENABLED` is an
+/// operator override: `1`/`true` forces it on, `0`/`false` is a kill-switch; a
+/// present-but-blank value falls through to the caller default.
+fn credential_refresh_settings(
+    caller: RuntimeInputCaller,
+) -> anyhow::Result<CredentialRefreshSettings> {
+    let base = if caller == RuntimeInputCaller::Serve {
+        CredentialRefreshSettings::enabled()
+    } else {
+        CredentialRefreshSettings::default()
+    };
+    apply_credential_refresh_override(base, std::env::var("IRONCLAW_CREDENTIAL_REFRESH_ENABLED"))
+}
+
+/// Apply the `IRONCLAW_CREDENTIAL_REFRESH_ENABLED` operator override to a base
+/// settings value. Pure (env lookup is passed in) so the override semantics are
+/// unit-testable without mutating process-global environment state.
+fn apply_credential_refresh_override(
+    mut settings: CredentialRefreshSettings,
+    raw: Result<String, std::env::VarError>,
+) -> anyhow::Result<CredentialRefreshSettings> {
+    match raw {
+        Ok(raw) => match raw.trim().to_ascii_lowercase().as_str() {
+            "" => {}
+            "1" | "true" => settings.enabled = true,
+            "0" | "false" => settings.enabled = false,
+            _ => anyhow::bail!(
+                "IRONCLAW_CREDENTIAL_REFRESH_ENABLED must be one of 1, true, 0, false"
+            ),
+        },
+        Err(std::env::VarError::NotPresent) => {}
+        Err(std::env::VarError::NotUnicode(_)) => {
+            anyhow::bail!("IRONCLAW_CREDENTIAL_REFRESH_ENABLED contains non-UTF-8 bytes")
+        }
+    }
+
+    Ok(settings)
+}
+
 pub(crate) fn build_runtime_input_with_options(
     config: &RebornBootConfig,
     caller: RuntimeInputCaller,
@@ -382,6 +427,7 @@ pub(crate) fn build_runtime_input_with_options(
             runtime_services.config_file.as_ref(),
             caller,
         )?)
+        .with_credential_refresh_settings(credential_refresh_settings(caller)?)
         .with_poll_settings(PollSettings {
             interval: Duration::from_millis(200),
             max_total: Duration::from_secs(180),
@@ -831,20 +877,22 @@ fn runner_settings(
 mod tests {
     use std::collections::HashMap;
 
+    use ironclaw_reborn_composition::{
+        CredentialRefreshSettings, RebornCompositionProfile, TurnStatus,
+        test_support::assistant_reply_without_text_for_test,
+    };
     #[cfg(feature = "webui-v2-beta")]
     use ironclaw_reborn_composition::{LocalTriggerAccessRole, LocalTriggerAccessSource};
-    use ironclaw_reborn_composition::{
-        RebornCompositionProfile, TurnStatus, test_support::assistant_reply_without_text_for_test,
-    };
     use ironclaw_reborn_config::RebornBootConfig;
 
     use super::test_env::{EnvGuard, lock_trigger_env};
     #[cfg(feature = "webui-v2-beta")]
     use super::with_run_local_trigger_fire_access_checker;
     use super::{
-        MAX_WORKER_COUNT, RuntimeInputCaller, RuntimeInputOptions, block_on_cli,
-        build_runtime_input, build_runtime_input_with_options, no_assistant_text_message,
-        resolve_google_oauth_config, runner_settings,
+        MAX_WORKER_COUNT, RuntimeInputCaller, RuntimeInputOptions,
+        apply_credential_refresh_override, block_on_cli, build_runtime_input,
+        build_runtime_input_with_options, no_assistant_text_message, resolve_google_oauth_config,
+        runner_settings,
     };
     use ironclaw_reborn_composition::DEFAULT_TURN_RUNNER_WORKER_COUNT;
 
@@ -948,6 +996,67 @@ mod tests {
             settings.max_concurrent_conversation_runs.map(|v| v.get()),
             Some(2)
         );
+    }
+
+    #[test]
+    fn credential_refresh_override_keeps_caller_default_without_env() {
+        // Serve base is enabled; absent env leaves it enabled.
+        let serve = apply_credential_refresh_override(
+            CredentialRefreshSettings::enabled(),
+            Err(std::env::VarError::NotPresent),
+        )
+        .expect("absent env is valid");
+        assert!(serve.enabled, "Serve default stays on when env unset");
+        // Non-Serve base is disabled; absent env leaves it disabled.
+        let other = apply_credential_refresh_override(
+            CredentialRefreshSettings::default(),
+            Err(std::env::VarError::NotPresent),
+        )
+        .expect("absent env is valid");
+        assert!(!other.enabled, "non-Serve default stays off when env unset");
+    }
+
+    #[test]
+    fn credential_refresh_override_kill_switch_disables() {
+        for raw in ["0", "false", "FALSE", " 0 "] {
+            let out = apply_credential_refresh_override(
+                CredentialRefreshSettings::enabled(),
+                Ok(raw.to_string()),
+            )
+            .expect("valid kill-switch value");
+            assert!(!out.enabled, "kill-switch {raw:?} must disable");
+        }
+    }
+
+    #[test]
+    fn credential_refresh_override_force_on_enables() {
+        for raw in ["1", "true", "TRUE", " true "] {
+            let out = apply_credential_refresh_override(
+                CredentialRefreshSettings::default(),
+                Ok(raw.to_string()),
+            )
+            .expect("valid force-on value");
+            assert!(out.enabled, "force-on {raw:?} must enable");
+        }
+    }
+
+    #[test]
+    fn credential_refresh_override_blank_falls_through_to_base() {
+        let out = apply_credential_refresh_override(
+            CredentialRefreshSettings::enabled(),
+            Ok("   ".to_string()),
+        )
+        .expect("blank value is valid");
+        assert!(out.enabled, "blank value keeps the caller base");
+    }
+
+    #[test]
+    fn credential_refresh_override_invalid_value_is_error() {
+        let result = apply_credential_refresh_override(
+            CredentialRefreshSettings::default(),
+            Ok("maybe".to_string()),
+        );
+        assert!(result.is_err(), "invalid value must be a hard error");
     }
 
     fn clear_trigger_poller_env() -> (EnvGuard, EnvGuard) {

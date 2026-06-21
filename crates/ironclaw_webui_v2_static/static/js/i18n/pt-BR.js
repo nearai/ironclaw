@@ -126,6 +126,8 @@ registerPack("pt-BR", {
   "approval.approveAndAlways": "Aprovar e sempre permitir",
   "approval.alwaysAllowToolLabel": "Sempre permitir {tool} sem perguntar",
   "approval.thisTool": "esta ferramenta",
+  "approval.viewFullCommand": "Ver comando completo",
+  "approval.showCommandPreview": "Mostrar prévia",
   // Chat — tool activity
   "tool.tabDetails": "Detalhes",
   "tool.tabParameters": "Parâmetros",
@@ -161,6 +163,7 @@ registerPack("pt-BR", {
   "authGate.oauthWaiting": "Aguardando a conclusão da autorização… Você pode fechar a guia pop-up depois de aprovar o acesso.",
   "authGate.expiresAt": "Expira",
   "authGate.oauthProviderFallback": "o provedor",
+  "authGate.serviceUnavailable": "Serviço indisponível",
   "authGate.pillAuthorize": "Autorizar",
   "authGate.pillEnterToken": "Insira o token",
   "authGate.unsupportedChallenge": "Abra as configurações para concluir esta etapa de autenticação.",

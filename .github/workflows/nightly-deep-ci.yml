@@ -12,6 +12,14 @@ name: Nightly Deep CI
 # - Windows compile matrix
 # - benchmark compilation
 #
+# The Reborn binary suites are reused the same way:
+# - .github/workflows/reborn-tests.yml: per-crate tests across the Reborn
+#   crate families plus the partitioned root parity tests (with
+#   event_name == schedule, scope detection short-circuits to full scope)
+# - .github/workflows/reborn-e2e.yml: deterministic Rust contract gate
+#   (architecture/runtimes/substrates) plus gateway and WebUI v2 smoke
+#   (workflow_call bypasses the PR path filters, so the full gate runs)
+#
 # Docker is intentionally excluded here because QA/release Docker images are
 # owned by the separate Docker pipeline and need release-team alignment.
 # Full browser E2E is scheduled separately by .github/workflows/e2e.yml.
@@ -36,6 +44,18 @@ jobs:
       ref: ${{ github.sha }}
       include_docker: false
 
+  reborn-tests:
+    name: Reborn Tests
+    uses: ./.github/workflows/reborn-tests.yml
+    with:
+      ref: ${{ github.sha }}
+
+  reborn-e2e:
+    name: Reborn E2E
+    uses: ./.github/workflows/reborn-e2e.yml
+    with:
+      ref: ${{ github.sha }}
+
   nightly-alert:
     name: Nightly Deep CI Alert
     runs-on: ubuntu-latest
@@ -44,7 +64,7 @@ jobs:
       actions: read
       contents: read
       issues: write
-    needs: [deterministic-deep-tests]
+    needs: [deterministic-deep-tests, reborn-tests, reborn-e2e]
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
         with:
@@ -55,5 +75,5 @@ jobs:
           REPO: ${{ github.repository }}
           ALERT_WORKFLOW_NAME: Nightly Deep CI
           ALERT_ISSUE_TITLE: Nightly Deep CI failed
-          ALERT_RESULT: ${{ needs.deterministic-deep-tests.result }}
+          ALERT_RESULT: ${{ (needs.deterministic-deep-tests.result == 'success' && needs.reborn-tests.result == 'success' && needs.reborn-e2e.result == 'success') && 'success' || 'failure' }}
         run: .github/scripts/nightly-alert-issue.sh

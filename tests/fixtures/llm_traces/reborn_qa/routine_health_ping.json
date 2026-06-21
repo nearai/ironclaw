@@ -1,0 +1,107 @@
+{
+  "model_name": "recorded-qa-routine_health_ping",
+  "steps": [
+    {
+      "response": {
+        "type": "user_input",
+        "content": "Every 5 minutes, ping https://cloud-api.near.ai/health and send me a dm in Slack if it does not return a 200."
+      }
+    },
+    {
+      "request_hint": {
+        "last_user_message_contains": "Every 5 minutes, ping https://cloud-api.near.ai/health and send me a dm in Slack",
+        "min_message_count": 2
+      },
+      "response": {
+        "type": "tool_calls",
+        "tool_calls": [
+          {
+            "id": "toolu_013utsgcyqZ2Pkg2RkZDwCq1",
+            "name": "builtin__outbound_delivery_targets_list",
+            "arguments": {
+              "channel": "slack"
+            }
+          }
+        ],
+        "input_tokens": 12460,
+        "output_tokens": 62
+      }
+    },
+    {
+      "request_hint": {
+        "last_user_message_contains": "Every 5 minutes, ping https://cloud-api.near.ai/health and send me a dm in Slack",
+        "min_message_count": 4
+      },
+      "response": {
+        "type": "tool_calls",
+        "tool_calls": [
+          {
+            "id": "toolu_012AaZSqJnhQHwxMKaz24MY1",
+            "name": "builtin__outbound_delivery_target_set",
+            "arguments": {
+              "target_id": "slack:qa-trace-dm"
+            }
+          }
+        ],
+        "input_tokens": 12583,
+        "output_tokens": 69
+      },
+      "expected_tool_results": [
+        {
+          "tool_call_id": "toolu_013utsgcyqZ2Pkg2RkZDwCq1",
+          "name": "builtin__outbound_delivery_targets_list",
+          "content": " object targets array object capabilities object auth_prompts false final_replies true gate_prompts false target object channel slack description QA trace Slack direct message display_name Slack DM target_id slack:qa-trace-dm"
+        }
+      ]
+    },
+    {
+      "request_hint": {
+        "last_user_message_contains": "Every 5 minutes, ping https://cloud-api.near.ai/health and send me a dm in Slack",
+        "min_message_count": 6
+      },
+      "response": {
+        "type": "tool_calls",
+        "tool_calls": [
+          {
+            "id": "toolu_01AVmHbmC6Bt1HTHeJ7yPgNJ",
+            "name": "builtin__trigger_create",
+            "arguments": {
+              "cron": "*/5 * * * *",
+              "name": "NEAR AI Health Check (every 5 min)",
+              "prompt": "Ping https://cloud-api.near.ai/health with an HTTP GET request. If the response status code is NOT 200, send me a Slack DM alerting me that the NEAR AI Cloud API health check failed, including the status code and any response body details. If it returns 200, do nothing and stay silent.",
+              "timezone": "UTC"
+            }
+          }
+        ],
+        "input_tokens": 12711,
+        "output_tokens": 241
+      },
+      "expected_tool_results": [
+        {
+          "tool_call_id": "toolu_012AaZSqJnhQHwxMKaz24MY1",
+          "name": "builtin__outbound_delivery_target_set",
+          "content": " object default_modality text final_reply_target object channel slack description QA trace Slack direct message display_name Slack DM target_id slack:qa-trace-dm final_reply_target_status available"
+        }
+      ]
+    },
+    {
+      "request_hint": {
+        "last_user_message_contains": "Every 5 minutes, ping https://cloud-api.near.ai/health and send me a dm in Slack",
+        "min_message_count": 8
+      },
+      "response": {
+        "type": "text",
+        "content": "All set! Here's what's configured:\n\n- **Trigger:** `NEAR AI Health Check (every 5 min)` — runs every 5 minutes (next fire: `2026-06-19T18:25:00Z`)\n- **Check:** `GET https://cloud-api.near.ai/health`\n- **Alert:** If the response is **not 200**, you'll get a **Slack DM** with the status code and response details\n- **Silence:** No message sent on a healthy 200 response",
+        "input_tokens": 13061,
+        "output_tokens": 124
+      },
+      "expected_tool_results": [
+        {
+          "tool_call_id": "toolu_01AVmHbmC6Bt1HTHeJ7yPgNJ",
+          "name": "builtin__trigger_create",
+          "content": " object trigger object agent_id qa-trace-agent completion_policy recurring created_at 2026-06-19T18:20:47.844369Z has_active_fire false is_active true is_enabled true last_run_at null last_status null name NEAR AI Health Check (every 5 min) next_run_at 2026-06-19T18:25:00Z project_id null recent_runs array schedule object expression * 5 * * * * kind cron timezone UTC source schedule state scheduled trigger_id 01KVGHTCV41JY5WDAJ77MSGKJ3"
+        }
+      ]
+    }
+  ]
+}
