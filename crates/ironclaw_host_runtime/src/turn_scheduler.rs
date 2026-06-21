@@ -209,13 +209,18 @@ impl TurnRunScheduler {
     }
 }
 
-/// The receiver half of a pre-created wake channel, paired with a
-/// [`SchedulerTurnRunWakeNotifier`].
+/// The paired wake-channel bundle (sender + receiver) handed into
+/// [`TurnRunScheduler::start_with_channel`].
 ///
-/// Created by [`SchedulerTurnRunWakeNotifier::channel`] to break the
-/// coordinator↔scheduler build-order cycle. The caller mints both the
-/// notifier and this channel before building the coordinator, then passes
-/// the channel to [`TurnRunScheduler::start_with_channel`].
+/// Created together with a [`SchedulerTurnRunWakeNotifier`] by
+/// [`SchedulerTurnRunWakeNotifier::channel`] to break the
+/// coordinator↔scheduler build-order cycle: the caller mints both the
+/// notifier and this channel before building the coordinator (so the
+/// coordinator can hold the notifier first), then passes this bundle to
+/// [`TurnRunScheduler::start_with_channel`] to wire the scheduler loop.
+/// Both halves of the underlying mpsc channel are carried here so that
+/// `start_with_channel` can clone the sender for internal re-queuing while
+/// moving the receiver into the loop.
 pub struct TurnRunWakeChannel {
     command_tx: mpsc::Sender<SchedulerCommand>,
     command_rx: mpsc::Receiver<SchedulerCommand>,

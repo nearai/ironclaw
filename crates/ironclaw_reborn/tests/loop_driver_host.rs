@@ -71,8 +71,8 @@ use ironclaw_reborn::planned_driver_factory::{
     SUBAGENT_PLANNED_PROFILE_ID, default_planned_run_profile_resolver,
 };
 use ironclaw_reborn::runtime::{
-    DefaultPlannedRuntimeConfig, DefaultPlannedRuntimeParts, build_default_planned_runtime,
-    build_product_live_planned_runtime,
+    DefaultPlannedRuntimeConfig, DefaultPlannedRuntimeParts, SchedulerWakeWiring,
+    build_default_planned_runtime, build_product_live_planned_runtime,
 };
 use ironclaw_reborn::subagent::{
     flavors::StaticSubagentDefinitionResolver, gate_resolution::BoundedSubagentGateResolutionStore,
@@ -3077,6 +3077,146 @@ async fn default_planned_runtime_composes_no_profile_coordinator_and_profiled_ho
             if denied.reason_kind.as_str() == "surface_profile_denied"
     ));
     assert!(runtime.invocations().is_empty());
+}
+
+/// Regression guard: when `DefaultPlannedRuntimeParts.scheduler_wake_wiring` is
+/// `Some(wiring)`, the pre-minted notifier must reach the started scheduler so
+/// that a wake fired by the coordinator (via `submit_turn`) drives the scheduler
+/// loop — not just the fallback poller.
+///
+/// The invariant being tested: the scheduler is started with
+/// `SchedulerWakeWiring::start`, which calls `start_with_channel(notifier,
+/// channel)` using the *same* notifier/channel pair minted before this function
+/// runs. `DefaultTurnCoordinator` receives that notifier and fires it on every
+/// `submit_turn`. If the pre-minted channel were dropped or replaced, the wake
+/// would be lost and the run would stay Queued until the fallback poll fires.
+///
+/// The test uses a 60-second poll interval to ensure the scheduler cannot advance
+/// the run via polling — only a wake delivered through the pre-minted channel
+/// will complete the run within the 5-second assertion window.
+#[tokio::test]
+async fn pre_minted_scheduler_wake_wiring_drives_scheduler_on_coordinator_submit() {
+    // Mint the wiring BEFORE building the runtime so we can inspect the
+    // notifier identity and verify that the composition threads it through.
+    let wiring = SchedulerWakeWiring::channel();
+
+    let fixture = HostFixture::new_unsubmitted("thread-preminted-wake", "hello preminted").await;
+    let turn_store = Arc::new(InMemoryTurnStateStore::default());
+    let allowed_id = CapabilityId::new("demo.preminted").unwrap();
+    let runtime = Arc::new(RecordingHostRuntime::with_surface(host_runtime_surface([
+        capability_descriptor(allowed_id.as_str()),
+    ])));
+    let io = Arc::new(InMemoryCapabilityIo::default());
+    let capability_factory = Arc::new(TestHostRuntimeCapabilityFactory {
+        runtime: runtime.clone(),
+        visible_request: host_runtime_visible_request(&fixture, ["demo"]),
+        io: io.clone(),
+        milestone_sink: fixture.milestone_sink.clone(),
+    });
+    let surface_resolver = Arc::new(StaticCapabilitySurfaceProfileResolver::new(
+        CapabilityAllowSet::allowlist([allowed_id.clone()]),
+    ));
+    let evidence = Arc::new(ThreadCheckpointLoopExitEvidencePort::new(
+        fixture.thread_service.clone(),
+        turn_store.clone(),
+        turn_store.clone(),
+    ));
+    // A 60-second poll interval ensures the scheduler cannot advance the run
+    // via fallback polling within the 5-second assertion window. Only a wake
+    // delivered through the pre-minted channel can complete the run in time.
+    let composition = build_default_planned_runtime(DefaultPlannedRuntimeParts {
+        attachment_read_port: None,
+        turn_state: turn_store.clone(),
+        thread_service: fixture.thread_service.clone() as Arc<dyn SessionThreadService>,
+        thread_scope: fixture.thread_scope.clone(),
+        model_gateway: fixture.gateway.clone(),
+        checkpoint_state_store: fixture.checkpoint_state_store.clone(),
+        loop_checkpoint_store: turn_store.clone(),
+        milestone_sink: fixture.milestone_sink.clone(),
+        capability_factory,
+        capability_surface_resolver: surface_resolver,
+        capability_result_writer: io.clone(),
+        subagent_goal_store: Arc::new(InMemoryBoundedSubagentGoalStore::new()),
+        subagent_gate_store: Arc::new(BoundedSubagentGateResolutionStore::new()),
+        subagent_definition_resolver: Arc::new(StaticSubagentDefinitionResolver),
+        subagent_spawn_input_codec: Arc::new(JsonSpawnSubagentInputCodec::new(io.clone())),
+        subagent_spawn_limits: ironclaw_loop_support::SubagentSpawnLimits::default(),
+        loop_exit_evidence: evidence,
+        config: DefaultPlannedRuntimeConfig {
+            heartbeat_interval: std::time::Duration::from_millis(20),
+            // 60 s: the poller must not fire within the 5 s assertion window.
+            poll_interval: std::time::Duration::from_secs(60),
+            ..DefaultPlannedRuntimeConfig::default()
+        },
+        model_route_resolver: None,
+        cancellation_factory: None,
+        skill_context_source: None,
+        input_queue: None,
+        identity_context_source: Arc::new(StaticIdentityContextSource::new(Vec::new())),
+        user_profile_source: Arc::new(EmptyUserProfileSource),
+        model_policy_guard: None,
+        model_budget_accountant: None,
+        safety_context: None,
+        hook_dispatcher_builder_factory: None,
+        communication_context_provider: None,
+        hook_security_audit_sink: None,
+        turn_event_sink: None,
+        // Hand the pre-minted wiring to the runtime so the coordinator and
+        // the scheduler share the exact same channel.
+        scheduler_wake_wiring: Some(wiring),
+    })
+    .unwrap();
+
+    // submit_turn via the coordinator, which internally fires the pre-minted
+    // notifier on success (DefaultTurnCoordinator::notify_queued_run_best_effort).
+    // If the scheduler loop is consuming the same channel, it will wake
+    // immediately and execute the run to Completed.
+    let SubmitTurnResponse::Accepted { run_id, .. } = composition
+        .coordinator
+        .submit_turn(SubmitTurnRequest {
+            scope: fixture.context.scope.clone(),
+            actor: TurnActor::new(UserId::new("user-preminted-wake").unwrap()),
+            accepted_message_ref: AcceptedMessageRef::new("accepted-preminted").unwrap(),
+            source_binding_ref: SourceBindingRef::new("source-web").unwrap(),
+            reply_target_binding_ref: ReplyTargetBindingRef::new("reply-web").unwrap(),
+            requested_run_profile: None,
+            idempotency_key: IdempotencyKey::new("idem-preminted").unwrap(),
+            received_at: Utc::now(),
+            requested_run_id: None,
+            parent_run_id: None,
+            subagent_depth: 0,
+            spawn_tree_root_run_id: None,
+            product_context: None,
+        })
+        .await
+        .unwrap();
+
+    // Wait up to 5 s for Completed. The 60-second poll interval ensures this
+    // can only succeed if the pre-minted notifier actually woke the scheduler.
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            let state = turn_store
+                .get_run_state(GetRunStateRequest {
+                    scope: fixture.context.scope.clone(),
+                    run_id,
+                })
+                .await
+                .unwrap();
+            if state.status == TurnStatus::Completed {
+                return;
+            }
+            assert!(
+                !matches!(state.status, TurnStatus::Failed),
+                "run unexpectedly failed: {:?}",
+                state
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("run did not reach Completed within 5 s — pre-minted notifier did not drive the scheduler loop");
+
+    composition.scheduler_handle.shutdown().await;
 }
 
 // ─── Hook framework activation (#3934) e2e through build_default_planned_runtime ──

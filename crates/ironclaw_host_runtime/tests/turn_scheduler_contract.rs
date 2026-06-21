@@ -1183,6 +1183,72 @@ async fn shutdown_relinquishes_in_flight_runs_to_queued() {
     );
 }
 
+/// Regression test for `Drop for TurnRunSchedulerHandle`.
+///
+/// When a handle is dropped WITHOUT calling `shutdown()` — for example, when a
+/// build function starts the scheduler and then fails on a later fallible step —
+/// the `Drop` impl must still drive `shutdown_scheduler`, which aborts every
+/// in-flight executor task and relinquishes each active run back to `Queued`.
+///
+/// This complements `shutdown_relinquishes_in_flight_runs_to_queued` (which
+/// covers the explicit `shutdown()` path) by proving the same drain happens on
+/// an implicit, synchronous drop.
+#[tokio::test]
+async fn drop_without_shutdown_relinquishes_in_flight_run_to_queued() {
+    let store = Arc::new(InMemoryTurnStateStore::default());
+    let transitions: Arc<dyn TurnRunTransitionPort> = store.clone();
+    // HangingExecutor parks in `pending::<()>()` so the run stays Running
+    // until the task is aborted, giving the shutdown drain a live in-flight
+    // run to relinquish.
+    let executor = Arc::new(HangingExecutor::default());
+    let scheduler = TurnRunScheduler::new(
+        Arc::clone(&transitions),
+        executor.clone(),
+        fast_config().with_poll_interval(Duration::from_secs(60)),
+    );
+    let handle = scheduler.start();
+    let coordinator =
+        DefaultTurnCoordinator::new(store.clone()).with_wake_notifier(handle.wake_notifier());
+
+    let request = submit_turn_request("thread-drop-relinquish", "idem-drop-relinquish");
+    let scope = request.scope.clone();
+    let run_id = accepted_run_id(coordinator.submit_turn(request).await.unwrap());
+
+    // Wait until the executor has actually claimed and started the run so it
+    // is genuinely in-flight (Running, lease held, tracked in active_runs).
+    timeout(Duration::from_secs(3), executor.wait_for_started())
+        .await
+        .expect("executor did not start the run within 3 s; scheduler may not have claimed it");
+
+    // Drop the handle WITHOUT calling shutdown().
+    // The Drop impl cancels the token, the background loop's `select!` picks
+    // it up, calls `shutdown_scheduler`, aborts executor tasks, and relinquishes
+    // each active run.
+    drop(handle);
+
+    // Give the background loop time to run the shutdown_scheduler drain.
+    // Bounded so a regression cannot hang CI.
+    timeout(Duration::from_secs(3), async {
+        loop {
+            let state = store
+                .get_run_state(GetRunStateRequest {
+                    scope: scope.clone(),
+                    run_id,
+                })
+                .await
+                .unwrap();
+            if state.status == TurnStatus::Queued {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect(
+        "in-flight run must be relinquished back to Queued when handle is dropped without shutdown()",
+    );
+}
+
 /// Verifies that when a coordinator mints the notifier and channel before
 /// starting the scheduler via `start_with_channel`, the notifier held by the
 /// coordinator and the scheduler's consuming loop share the SAME underlying
