@@ -331,6 +331,11 @@ fn select_idle_candidates(
         .into_iter()
         .filter(|account| account.updated_at < idle_cutoff)
         .collect();
+    // Oldest accounts are closest to Google's 7-day refresh-token idle-death, so
+    // they must be served first. Without this sort, a head-of-enumeration subset
+    // (e.g. accounts stuck in transient errors that keep their old updated_at)
+    // could starve tail accounts when more than max_per_tick accounts are idle.
+    idle.sort_by_key(|account| account.updated_at);
     let dropped = idle.len().saturating_sub(max_per_tick);
     idle.truncate(max_per_tick);
     (idle, dropped)
@@ -404,11 +409,16 @@ mod tests {
     fn select_idle_candidates_keeps_only_idle_and_respects_cap() {
         let now = Utc::now();
         let cutoff = now - chrono::Duration::days(2);
+        let ts_5d = now - chrono::Duration::days(5);
+        let ts_4d = now - chrono::Duration::days(4);
+        let ts_3d = now - chrono::Duration::days(3);
         // 3 idle (older than cutoff) + 2 fresh (newer than cutoff).
+        // Deliberately out of chronological order in the input to confirm the
+        // sort is applied (not just enumeration order preservation).
         let candidates = vec![
-            candidate(now - chrono::Duration::days(5)),
-            candidate(now - chrono::Duration::days(4)),
-            candidate(now - chrono::Duration::days(3)),
+            candidate(ts_3d),
+            candidate(ts_5d),
+            candidate(ts_4d),
             candidate(now - chrono::Duration::hours(1)),
             candidate(now),
         ];
@@ -422,10 +432,21 @@ mod tests {
             "every selected candidate must be idle past the cutoff"
         );
 
-        // Cap below the idle count: truncated to the cap, remainder reported dropped.
+        // Cap below the idle count: the TWO OLDEST are selected (oldest-first),
+        // not an arbitrary subset; the remaining 1 idle account is dropped.
         let (selected, dropped) = select_idle_candidates(candidates, cutoff, 2);
         assert_eq!(selected.len(), 2, "selection is capped at max_per_tick");
         assert_eq!(dropped, 1, "one idle candidate dropped by the cap");
+        // Oldest-first: the two selected accounts must be the two with the
+        // smallest updated_at (ts_5d and ts_4d), in ascending order.
+        assert_eq!(
+            selected[0].updated_at, ts_5d,
+            "first selected must be the oldest idle account"
+        );
+        assert_eq!(
+            selected[1].updated_at, ts_4d,
+            "second selected must be the second-oldest idle account"
+        );
     }
 
     #[test]
