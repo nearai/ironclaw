@@ -44,6 +44,13 @@ env:
   RUSTFLAGS: "-C linker=clang -C link-arg=--ld-path=/usr/bin/mold"
   CARGO_PROFILE_DEV_DEBUG: 0
   CARGO_PROFILE_TEST_DEBUG: 0
+  # The 64-crate closure runs ~64 jobs that each resolve+download the dependency
+  # tree from crates.io in parallel, so a transient registry SSL/HTTP2 hiccup
+  # (e.g. "download of <crate> failed: curl [55] SSL_ERROR_SYSCALL") tends to hit
+  # many jobs at once and redden the whole run. Make Cargo retry network failures
+  # (default 3) far more aggressively, and use the git CLI for git deps.
+  CARGO_NET_RETRY: "10"
+  CARGO_NET_GIT_FETCH_WITH_CLI: "true"
 
 jobs:
   changes:
