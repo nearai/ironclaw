@@ -39,10 +39,10 @@ impl RuntimeTurnScheduler {
         if self.stopped.load(Ordering::Acquire) {
             return true;
         }
-        if let Ok(guard) = self.handle.try_lock() {
-            if guard.as_ref().is_none_or(|h| h.is_stopped()) {
-                return true;
-            }
+        if let Ok(guard) = self.handle.try_lock()
+            && guard.as_ref().is_none_or(|h| h.is_stopped())
+        {
+            return true;
         }
         false
     }
