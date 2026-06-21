@@ -41,8 +41,14 @@ fn authorization_code_body_adds_provider_resource_only_when_configured() {
 }
 
 #[tokio::test]
-async fn token_sink_rolls_back_access_token_when_refresh_write_fails() {
-    let store = Arc::new(RecordingSecretStore::failing_refresh_put());
+async fn token_sink_preserves_refresh_token_when_access_write_fails() {
+    // Crash-safety write order: refresh is written first, access second.
+    // When the access write fails, the refresh secret that was already written
+    // must NOT be deleted: the account record still references the deterministic
+    // refresh handle and the rotated refresh token is valid. Deleting it would
+    // turn a transient storage hiccup into a permanently unrecoverable credential
+    // (forced re-auth). The next refresh attempt re-reads the stored refresh token.
+    let store = Arc::new(RecordingSecretStore::failing_access_put());
     let client = HostOAuthProviderClient::new(
         notion_spec(),
         Arc::new(NoopEgress),
@@ -67,15 +73,12 @@ async fn token_sink_rolls_back_access_token_when_refresh_write_fails() {
         .await;
 
     assert_eq!(
-        result.expect_err("refresh write failure").code(),
+        result.expect_err("access write failure").code(),
         ironclaw_auth::AuthErrorCode::BackendUnavailable
     );
     assert!(
-        store
-            .deleted_handles()
-            .iter()
-            .any(|handle| handle.contains("access")),
-        "access token written before the failed refresh token must be cleaned up"
+        store.deleted_handles().is_empty(),
+        "refresh token must NOT be deleted when access write fails (preserves recoverability)"
     );
 }
 
@@ -233,6 +236,7 @@ async fn refresh_request_uses_stored_refresh_token_and_preserves_scope_fallback(
             scope.clone(),
             refresh_secret.clone(),
             SecretString::from("stored-refresh-token".to_string()),
+            None,
         )
         .await
         .expect("store refresh token");
@@ -364,6 +368,7 @@ struct RecordingSecretStore {
     puts: Mutex<Vec<String>>,
     deleted: Mutex<Vec<String>>,
     fail_refresh_put: bool,
+    fail_access_put: bool,
 }
 
 impl RecordingSecretStore {
@@ -372,14 +377,16 @@ impl RecordingSecretStore {
             puts: Mutex::new(Vec::new()),
             deleted: Mutex::new(Vec::new()),
             fail_refresh_put: false,
+            fail_access_put: false,
         }
     }
 
-    fn failing_refresh_put() -> Self {
+    fn failing_access_put() -> Self {
         Self {
             puts: Mutex::new(Vec::new()),
             deleted: Mutex::new(Vec::new()),
-            fail_refresh_put: true,
+            fail_refresh_put: false,
+            fail_access_put: true,
         }
     }
 
@@ -399,15 +406,25 @@ impl SecretStore for RecordingSecretStore {
         scope: ResourceScope,
         handle: SecretHandle,
         _material: SecretMaterial,
+        _expires_at: Option<ironclaw_host_api::Timestamp>,
     ) -> Result<SecretMetadata, SecretStoreError> {
         let handle_string = handle.as_str().to_string();
         self.puts.lock().unwrap().push(handle_string.clone());
+        if self.fail_access_put && handle_string.contains("access") {
+            return Err(SecretStoreError::StoreUnavailable {
+                reason: "access write failed".to_string(),
+            });
+        }
         if self.fail_refresh_put && handle_string.contains("refresh") {
             return Err(SecretStoreError::StoreUnavailable {
                 reason: "refresh write failed".to_string(),
             });
         }
-        Ok(SecretMetadata { scope, handle })
+        Ok(SecretMetadata {
+            scope,
+            handle,
+            expires_at: None,
+        })
     }
 
     async fn metadata(
@@ -611,4 +628,154 @@ impl CapabilityObligationHandler for NoopObligationHandler {
     ) -> Result<(), ironclaw_capabilities::CapabilityObligationError> {
         Ok(())
     }
+}
+
+#[tokio::test]
+async fn refresh_invalid_grant_maps_to_invalid_grant_error() {
+    // A3: A 4xx token-endpoint response with error=invalid_grant must be
+    // classified as InvalidGrant, not generic RefreshFailed.
+    let egress = Arc::new(RecordingEgress::with_status(
+        400,
+        br#"{"error":"invalid_grant","error_description":"Token has been expired or revoked."}"#
+            .to_vec(),
+    ));
+    let store = Arc::new(InMemorySecretStore::new());
+    let scope = sample_scope();
+    let refresh_secret = SecretHandle::new("google-refresh-revoked").unwrap();
+    store
+        .put(
+            scope.clone(),
+            refresh_secret.clone(),
+            SecretString::from("stored-refresh-token".to_string()),
+            None,
+        )
+        .await
+        .expect("store refresh token");
+    let client = HostOAuthProviderClient::new(
+        google_spec(),
+        egress,
+        store,
+        Arc::new(NoopObligationHandler),
+        OAuthClientId::new("google-client").unwrap(),
+        OAuthRedirectUri::new("https://app.example/callback").unwrap(),
+    )
+    .unwrap();
+
+    let error = client
+        .refresh_token(OAuthProviderRefreshRequest {
+            scope: AuthProductScope::new(scope, AuthSurface::Callback),
+            provider: AuthProviderId::new("google").unwrap(),
+            account_id: CredentialAccountId::new(),
+            refresh_secret,
+            scopes: vec![ProviderScope::new("gmail.readonly").unwrap()],
+        })
+        .await
+        .expect_err("invalid_grant must surface as a distinct error");
+
+    assert_eq!(
+        error.code(),
+        ironclaw_auth::AuthErrorCode::RefreshFailed,
+        "invalid_grant maps to RefreshFailed code (same surface code as generic refresh failure)"
+    );
+    assert!(
+        matches!(error, AuthProductError::InvalidGrant),
+        "provider invalid_grant must produce AuthProductError::InvalidGrant"
+    );
+}
+
+#[tokio::test]
+async fn refresh_5xx_is_transient_and_does_not_classify_as_invalid_grant() {
+    // A3: A 5xx response must be BackendUnavailable (transient), not RefreshFailed.
+    let egress = Arc::new(RecordingEgress::with_status(
+        500,
+        br#"{"error":"server_error"}"#.to_vec(),
+    ));
+    let store = Arc::new(InMemorySecretStore::new());
+    let scope = sample_scope();
+    let refresh_secret = SecretHandle::new("google-refresh-5xx").unwrap();
+    store
+        .put(
+            scope.clone(),
+            refresh_secret.clone(),
+            SecretString::from("stored-refresh-token".to_string()),
+            None,
+        )
+        .await
+        .expect("store refresh token");
+    let client = HostOAuthProviderClient::new(
+        google_spec(),
+        egress,
+        store,
+        Arc::new(NoopObligationHandler),
+        OAuthClientId::new("google-client").unwrap(),
+        OAuthRedirectUri::new("https://app.example/callback").unwrap(),
+    )
+    .unwrap();
+
+    let error = client
+        .refresh_token(OAuthProviderRefreshRequest {
+            scope: AuthProductScope::new(scope, AuthSurface::Callback),
+            provider: AuthProviderId::new("google").unwrap(),
+            account_id: CredentialAccountId::new(),
+            refresh_secret,
+            scopes: vec![],
+        })
+        .await
+        .expect_err("5xx must be transient");
+
+    assert_eq!(
+        error.code(),
+        ironclaw_auth::AuthErrorCode::BackendUnavailable,
+        "provider 5xx must remain BackendUnavailable"
+    );
+}
+
+#[tokio::test]
+async fn refresh_error_body_token_string_does_not_appear_in_error_debug() {
+    // A3 redaction: raw error body must not appear in error debug.
+    let body =
+        br#"{"error":"invalid_grant","error_description":"Token eyJhbGciOiJSUzI1Ni_FAKE has been revoked."}"#;
+    let egress = Arc::new(RecordingEgress::with_status(400, body.to_vec()));
+    let store = Arc::new(InMemorySecretStore::new());
+    let scope = sample_scope();
+    let refresh_secret = SecretHandle::new("google-refresh-redact-test").unwrap();
+    store
+        .put(
+            scope.clone(),
+            refresh_secret.clone(),
+            SecretString::from("stored-refresh-token".to_string()),
+            None,
+        )
+        .await
+        .expect("store refresh token");
+    let client = HostOAuthProviderClient::new(
+        google_spec(),
+        egress,
+        store,
+        Arc::new(NoopObligationHandler),
+        OAuthClientId::new("google-client").unwrap(),
+        OAuthRedirectUri::new("https://app.example/callback").unwrap(),
+    )
+    .unwrap();
+
+    let error = client
+        .refresh_token(OAuthProviderRefreshRequest {
+            scope: AuthProductScope::new(scope, AuthSurface::Callback),
+            provider: AuthProviderId::new("google").unwrap(),
+            account_id: CredentialAccountId::new(),
+            refresh_secret,
+            scopes: vec![],
+        })
+        .await
+        .expect_err("invalid_grant must produce an error");
+
+    let debug_str = format!("{error:?}");
+    assert!(
+        !debug_str.contains("eyJhbGciOiJSUzI1Ni"),
+        "raw error_description token material must not appear in error debug: {debug_str}"
+    );
+    assert!(
+        !debug_str.contains("has been revoked"),
+        "raw error_description text must not appear in error debug: {debug_str}"
+    );
 }

@@ -1,0 +1,131 @@
+{
+  "model_name": "recorded-qa-web_status_check",
+  "http_exchanges": [
+    {
+      "request": {
+        "method": "get",
+        "url": "https://api.github.com"
+      },
+      "response": {
+        "status": 403,
+        "headers": [
+          [
+            "cache-control",
+            "no-cache"
+          ],
+          [
+            "content-type",
+            "text/html; charset=utf-8"
+          ],
+          [
+            "strict-transport-security",
+            "max-age=31536000; includeSubDomains; preload"
+          ],
+          [
+            "x-content-type-options",
+            "nosniff"
+          ],
+          [
+            "x-frame-options",
+            "deny"
+          ],
+          [
+            "x-xss-protection",
+            "0"
+          ],
+          [
+            "content-security-policy",
+            "default-src 'none'; style-src 'unsafe-inline'"
+          ]
+        ],
+        "body": "\r\nRequest forbidden by administrative rules. Please make sure your request has a User-Agent header (https://docs.github.com/en/rest/overview/resources-in-the-rest-api#user-agent-required). Check https://developer.github.com for other possible causes.\r\n"
+      }
+    }
+  ],
+  "steps": [
+    {
+      "response": {
+        "type": "user_input",
+        "content": "check if api.github.com returns a 200 status"
+      }
+    },
+    {
+      "request_hint": {
+        "last_user_message_contains": "check if api.github.com returns a 200 status",
+        "min_message_count": 2
+      },
+      "response": {
+        "type": "tool_calls",
+        "tool_calls": [
+          {
+            "id": "toolu_016WnjZnJdion7Ab6dpHigpx",
+            "name": "builtin__http",
+            "arguments": {
+              "method": "get",
+              "response_body_limit": 1024,
+              "timeout_ms": 10000,
+              "url": "https://api.github.com"
+            }
+          }
+        ],
+        "input_tokens": 12439,
+        "output_tokens": 174
+      }
+    },
+    {
+      "request_hint": {
+        "last_user_message_contains": "check if api.github.com returns a 200 status",
+        "min_message_count": 4
+      },
+      "response": {
+        "type": "tool_calls",
+        "tool_calls": [
+          {
+            "id": "toolu_01MTHyEk1pzeoRwXfmNWze4j",
+            "name": "builtin__http",
+            "arguments": {
+              "headers": [
+                {
+                  "name": "User-Agent",
+                  "value": "IronClaw-Agent"
+                }
+              ],
+              "method": "get",
+              "response_body_limit": 1024,
+              "timeout_ms": 10000,
+              "url": "https://api.github.com"
+            }
+          }
+        ],
+        "input_tokens": 12765,
+        "output_tokens": 247
+      },
+      "expected_tool_results": [
+        {
+          "tool_call_id": "toolu_016WnjZnJdion7Ab6dpHigpx",
+          "name": "builtin__http",
+          "content": " object body_text   Request forbidden by administrative rules. Please make sure your request has a User-Agent header (https:  docs.github.com en rest overview resources-in-the-rest-api#user-agent-required). Check https:  developer.github.com for other possible causes.   headers array object name cache-control value no-cache object name content-type value text html; charset=utf-8 object name strict-transport-security value max-age=31536000; includeSubDomains; preload object name x-content-type-options value nosniff object name x-frame-options value deny object name x-xss-protection value 0 object name content-security-policy value default-src 'none'; style-src 'unsafe-inline' redaction_applied false request_bytes 0 response_bytes 252 status 403"
+        }
+      ]
+    },
+    {
+      "request_hint": {
+        "last_user_message_contains": "check if api.github.com returns a 200 status",
+        "min_message_count": 6
+      },
+      "response": {
+        "type": "text",
+        "content": "**✅ `api.github.com` returned HTTP `200 OK`.**\n\nA couple of notes from the test:\n- The **first request** (no `User-Agent`) got a **403** — GitHub requires a `User-Agent` header per their API rules.\n- The **second request** (with `User-Agent: IronClaw-Agent`) succeeded with **200 OK**.\n\nOther details from the successful response:\n| Field | Value |\n|---|---|\n| Server | `github.com` |\n| API Version | `2022-11-28` |\n| Content-Type | `application/json; charset=utf-8` |\n| Rate Limit | 55/60 remaining |",
+        "input_tokens": 13611,
+        "output_tokens": 166
+      },
+      "expected_tool_results": [
+        {
+          "tool_call_id": "toolu_01MTHyEk1pzeoRwXfmNWze4j",
+          "name": "builtin__http",
+          "content": " object body_bytes_returned 10 body_text     \"curre body_truncated true body_truncation_hint Response body was truncated for the model-visible budget. Use builtin.http.save with save_to, then builtin.read_file with offsets, to inspect the full sanitized body. headers array object name date value Fri, 19 Jun 2026 18:23:15 GMT object name cache-control value public, max-age=60, s-maxage=60 object name vary value Accept,Accept-Encoding, Accept, X-Requested-With object name x-github-api-version-selected value 2022-11-28 object name access-control-expose-headers value ETag, Link, Location, Retry-After, X-GitHub-OTP, X-RateLimit-Limit, X-RateLimit-Remaining, X-RateLimit-Used, X-RateLimit-Resource, X-RateLimit-Reset, X-OAuth-Scopes, X-Accepted-OAuth-Scopes, X-Poll-Interval, X-GitHub-Media-Type, X-GitHub-SSO, X-GitHub-Request-Id, Deprecation, Sunset, Warning object name access-control-allow-origin value * object name strict-transport-security value max-age=31536000; includeSubdomains; preload object name x-frame-options value deny object name x-content-type-options value nosniff object name x-xss-protection value 0 object name referrer-policy value origin-when-cross-origin, strict-origin-when-cross-origin object name content-security-policy value default-src 'none' object name server value github.com object name content-type value application json; charset=utf-8 object name x-github-media-type value github.v3; format=json object name etag value W \"4f825cc84e1c733059d46e76e6df9db557ae5254f9625dfe8e1b09499c449438\" object name accept-ranges value bytes object name x-ratelimit-limit value 60 object name x-ratelimit-remaining value 55 object name x-ratelimit-used value 5 object name x-ratelimit-resource value core object name x-ratelimit-reset value 1781894530 object name content-length value 2396 object name x-github-request-id value DC00:227D3C:18F6EE:177CD8:6A358916 redaction_applied false request_bytes 0 response_bytes 1025 status 200 truncation object body true bytes_returned 10 headers false next_step Response body was truncated for the model-visible budget. Use builtin.http.save with save_to, then builtin.read_file with offsets, to inspect the full sanitized body. reason model_visible_budget"
+        }
+      ]
+    }
+  ]
+}

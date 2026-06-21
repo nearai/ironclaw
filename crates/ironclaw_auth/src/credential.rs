@@ -797,6 +797,39 @@ impl ProviderBackedCredentialAccountService {
             refreshed,
         })
     }
+
+    /// Apply a terminal refresh status (`Revoked` for `invalid_grant`,
+    /// `RefreshFailed` for other non-transient failures) to the account and
+    /// return the resulting report. The existing access/refresh handles and
+    /// scopes are preserved; only the status changes. Re-reads the account
+    /// first and bails to a plain report if another writer changed it under us.
+    async fn report_terminal_refresh_status(
+        &self,
+        lookup_request: &CredentialAccountLookupRequest,
+        account: &CredentialAccount,
+        requester_extension: Option<&ExtensionId>,
+        status: CredentialAccountStatus,
+    ) -> Result<CredentialRefreshReport, AuthProductError> {
+        let current = self
+            .accounts
+            .get_account(lookup_request.clone())
+            .await?
+            .ok_or(AuthProductError::CredentialMissing)?;
+        if current != *account {
+            return self.report_for(&current, requester_extension, false).await;
+        }
+        let updated = self
+            .setup
+            .create_or_update_account(Self::account_update(
+                &current,
+                current.access_secret.clone(),
+                current.refresh_secret.clone(),
+                status,
+                current.scopes.clone(),
+            ))
+            .await?;
+        self.report_for(&updated, requester_extension, false).await
+    }
 }
 
 #[async_trait]
@@ -933,29 +966,23 @@ impl CredentialAccountService for ProviderBackedCredentialAccountService {
                     self.report_for(&updated, request.requester_extension.as_ref(), true)
                         .await
                 }
+                Err(AuthProductError::InvalidGrant) => {
+                    self.report_terminal_refresh_status(
+                        &lookup_request,
+                        &account,
+                        request.requester_extension.as_ref(),
+                        CredentialAccountStatus::Revoked,
+                    )
+                    .await
+                }
                 Err(AuthProductError::RefreshFailed | AuthProductError::TokenExchangeFailed) => {
-                    let current = self
-                        .accounts
-                        .get_account(lookup_request.clone())
-                        .await?
-                        .ok_or(AuthProductError::CredentialMissing)?;
-                    if current != account {
-                        return self
-                            .report_for(&current, request.requester_extension.as_ref(), false)
-                            .await;
-                    }
-                    let updated = self
-                        .setup
-                        .create_or_update_account(Self::account_update(
-                            &current,
-                            current.access_secret.clone(),
-                            current.refresh_secret.clone(),
-                            CredentialAccountStatus::RefreshFailed,
-                            current.scopes.clone(),
-                        ))
-                        .await?;
-                    self.report_for(&updated, request.requester_extension.as_ref(), false)
-                        .await
+                    self.report_terminal_refresh_status(
+                        &lookup_request,
+                        &account,
+                        request.requester_extension.as_ref(),
+                        CredentialAccountStatus::RefreshFailed,
+                    )
+                    .await
                 }
                 Err(error) => Err(error),
             }

@@ -17,16 +17,41 @@ import { Badge } from "../../../design-system/badge.js";
 import { Icon } from "../../../design-system/icons.js";
 import { classifyRisk } from "../lib/approval-risk.js";
 
+const APPROVAL_PAYLOAD_PREVIEW_LIMIT = 480;
+
+function approvalPayloadIsLong(parameters, approvalDetails) {
+  if (approvalDetails && approvalDetails.length > 0) {
+    return approvalDetails.some(
+      (detail) =>
+        typeof detail?.value === "string" && detail.value.length > APPROVAL_PAYLOAD_PREVIEW_LIMIT,
+    );
+  }
+  return typeof parameters === "string" && parameters.length > APPROVAL_PAYLOAD_PREVIEW_LIMIT;
+}
+
+function approvalPayloadPreview(value, expanded) {
+  if (typeof value !== "string") return value;
+  if (expanded || value.length <= APPROVAL_PAYLOAD_PREVIEW_LIMIT) return value;
+  return `${value.slice(0, APPROVAL_PAYLOAD_PREVIEW_LIMIT).trimEnd()}\n...`;
+}
+
 export function ApprovalCard({ gate, onApprove, onDeny, onAlways }) {
   const t = useT();
   const { toolName, description, parameters, allowAlways, approvalDetails = [] } = gate;
   const [always, setAlways] = React.useState(false);
+  const [expandedPayload, setExpandedPayload] = React.useState(false);
+
+  React.useEffect(() => {
+    setExpandedPayload(false);
+  }, [gate]);
 
   const risk = React.useMemo(
     () => classifyRisk(toolName, description, parameters),
     [toolName, description, parameters]
   );
   const toolLabel = toolName || t("approval.thisTool");
+  const longPayload = approvalPayloadIsLong(parameters, approvalDetails);
+  const payloadMaxHeight = expandedPayload ? "max-h-72" : "max-h-36";
 
   const onPrimary = React.useCallback(() => {
     if (always && allowAlways) {
@@ -57,19 +82,32 @@ export function ApprovalCard({ gate, onApprove, onDeny, onAlways }) {
       html`<div className="mb-3 break-words text-sm text-iron-200">${description}</div>`}
       ${approvalDetails.length > 0
         ? html`
-            <dl className="mb-3 max-h-56 overflow-y-auto rounded-md border border-iron-800 bg-iron-950/80 text-xs">
+            <dl className=${`mb-2 ${payloadMaxHeight} overflow-y-auto rounded-md border border-iron-800 bg-iron-950/80 text-xs`}>
               ${approvalDetails.map(
                 (detail) => html`
                   <div className="grid gap-1 border-b border-iron-800/70 px-3 py-2 last:border-b-0 sm:grid-cols-[7rem_1fr]">
                     <dt className="font-medium text-iron-400">${detail.label}</dt>
-                    <dd className="min-w-0 break-all font-mono text-iron-100">${detail.value}</dd>
+                    <dd className="min-w-0 whitespace-pre-wrap break-all font-mono text-iron-100">${approvalPayloadPreview(detail.value, expandedPayload)}</dd>
                   </div>
                 `,
               )}
             </dl>
           `
         : parameters &&
-          html`<pre className="mb-3 max-h-56 overflow-auto whitespace-pre-wrap break-all rounded-md bg-iron-950 p-2 font-mono text-xs text-iron-100">${parameters}</pre>`}
+          html`<pre className=${`mb-2 ${payloadMaxHeight} overflow-auto whitespace-pre-wrap break-all rounded-md bg-iron-950 p-2 font-mono text-xs text-iron-100`}>${approvalPayloadPreview(parameters, expandedPayload)}</pre>`}
+
+      ${longPayload &&
+      html`
+        <${Button}
+          variant="ghost"
+          size="sm"
+          className="mb-3 px-0 text-[var(--v2-accent)] hover:bg-transparent"
+          onClick=${() => setExpandedPayload((current) => !current)}
+          type="button"
+        >
+          ${expandedPayload ? t("approval.showCommandPreview") : t("approval.viewFullCommand")}
+        <//>
+      `}
 
       ${allowAlways &&
       html`

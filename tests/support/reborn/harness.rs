@@ -2906,8 +2906,13 @@ impl SecretStore for StaticSecretStore {
         scope: ResourceScope,
         handle: SecretHandle,
         _material: SecretMaterial,
+        _expires_at: Option<ironclaw_host_api::Timestamp>,
     ) -> Result<SecretMetadata, SecretStoreError> {
-        Ok(SecretMetadata { scope, handle })
+        Ok(SecretMetadata {
+            scope,
+            handle,
+            expires_at: None,
+        })
     }
 
     async fn metadata(
@@ -2918,6 +2923,7 @@ impl SecretStore for StaticSecretStore {
         Ok((handle == &self.handle).then(|| SecretMetadata {
             scope: scope.clone(),
             handle: handle.clone(),
+            expires_at: None,
         }))
     }
 

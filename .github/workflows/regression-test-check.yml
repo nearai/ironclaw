@@ -188,6 +188,11 @@ jobs:
             exit 0
           fi
 
+          if grep -qE '^crates/ironclaw_webui_v2_static/static/js/.*\.test\.(js|mjs)$' <<< "$CHANGED_FILES"; then
+            echo "Reborn WebUI v2 JS test file changes found."
+            exit 0
+          fi
+
           # --- 5. No tests found ---
           if [ "$IS_FIX" = true ]; then
             echo "::warning::This PR looks like a bug fix but contains no test changes."
@@ -197,4 +202,3 @@ jobs:
           fi
           echo "::warning::Please add tests exercising the changed behavior, or apply the 'skip-regression-check' label if not feasible."
           exit 1
-

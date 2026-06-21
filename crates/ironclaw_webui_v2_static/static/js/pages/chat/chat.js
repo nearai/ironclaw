@@ -1,5 +1,4 @@
 import { React, html } from "../../lib/html.js";
-import { useT } from "../../lib/i18n.js";
 import {
   THREAD_STATE,
   clearThreadState,
@@ -21,7 +20,6 @@ import { TypingIndicator } from "./components/typing-indicator.js";
 import { useChat } from "./hooks/useChat.js";
 import { NEW_DRAFT_KEY } from "./lib/draft-store.js";
 import { buildRuntimeContext } from "./lib/runtime-context.js";
-import { buildScopedLogsPath } from "../logs/lib/logs-data.js";
 
 /* Grace window before an active thread's sidebar state is cleared to idle.
  * Long enough for SSE to rehydrate a gate/run after a thread switch (so a
@@ -45,7 +43,6 @@ export function Chat({
   composerResetKey = "",
   gatewayStatus,
 }) {
-  const t = useT();
   const {
     messages,
     isProcessing,
@@ -97,16 +94,6 @@ export function Chat({
       isProcessing &&
       !pendingGate
   );
-  const scopedLogsHref = React.useMemo(() => {
-    if (!activeThreadId) return null;
-    const runId =
-      activeRun?.threadId === activeThreadId ? activeRun.runId : null;
-    return buildScopedLogsPath(
-      { threadId: activeThreadId, runId },
-      { absolute: true }
-    );
-  }, [activeRun, activeThreadId]);
-
   const handleSend = React.useCallback(
     async (content, { images = [], attachments = [] } = {}) => {
       const response = await send(content, {
@@ -205,18 +192,6 @@ export function Chat({
     <div className="flex h-full min-h-0 overflow-hidden">
       <div className="flex min-w-0 flex-1 flex-col">
         <${ConnectionStatus} status=${sseStatus} />
-
-        ${scopedLogsHref &&
-        html`
-          <div className="flex justify-end border-b border-[var(--v2-panel-border)] bg-[var(--v2-canvas-strong)] px-4 py-1.5">
-            <a
-              href=${scopedLogsHref}
-              className="rounded-[6px] px-2 py-1 text-xs font-medium text-[var(--v2-text-muted)] hover:bg-[var(--v2-surface-muted)] hover:text-[var(--v2-text-strong)]"
-            >
-              ${t("nav.logs")}
-            </a>
-          </div>
-        `}
 
         ${historyLoadError &&
         html`

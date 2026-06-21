@@ -184,7 +184,9 @@ jobs:
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
           key: ${{ matrix.name }}
-          save-if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+          # Keep saves to protected-branch and merge_group runs so the ~10 GB
+          # repo cache LRU is seeded by shared states, not arbitrary PR branches.
+          save-if: ${{ (github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'merge_group' }}
       - name: Install cargo-component
         uses: ./.github/actions/install-cargo-component
       - name: Build WASM artifacts for integration tests
@@ -230,7 +232,9 @@ jobs:
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
           key: secret-store-contract
-          save-if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+          # Keep saves to protected-branch and merge_group runs so the ~10 GB
+          # repo cache LRU is seeded by shared states, not arbitrary PR branches.
+          save-if: ${{ (github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'merge_group' }}
       - name: Run secret store contract
         run: |
           timeout --signal=INT --kill-after=30s 10m \
@@ -274,7 +278,9 @@ jobs:
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
           key: hooks-parity
-          save-if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+          # Keep saves to protected-branch and merge_group runs so the ~10 GB
+          # repo cache LRU is seeded by shared states, not arbitrary PR branches.
+          save-if: ${{ (github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'merge_group' }}
       # Full parity matrix across all three backends: --features postgres
       # compiles the Postgres leg, --features integration adds the multi-host
       # adversarial suite, and IRONCLAW_REQUIRE_POSTGRES=1 (set above) makes the
@@ -306,7 +312,9 @@ jobs:
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
           key: heavy-integration
-          save-if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+          # Keep saves to protected-branch and merge_group runs so the ~10 GB
+          # repo cache LRU is seeded by shared states, not arbitrary PR branches.
+          save-if: ${{ (github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'merge_group' }}
       - name: Build Telegram WASM channel
         run: cargo build --manifest-path channels-src/telegram/Cargo.toml --target wasm32-wasip2 --release
       - name: Run thread scheduling integration tests
@@ -342,7 +350,9 @@ jobs:
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
           key: telegram-integration-${{ matrix.partition }}
-          save-if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+          # Keep saves to protected-branch and merge_group runs so the ~10 GB
+          # repo cache LRU is seeded by shared states, not arbitrary PR branches.
+          save-if: ${{ (github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'merge_group' }}
       - name: Build Telegram WASM channel
         run: cargo build --manifest-path channels-src/telegram/Cargo.toml --target wasm32-wasip2 --release
       - name: Install cargo-nextest
@@ -405,7 +415,10 @@ jobs:
         uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
-          save-if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+          shared-key: telegram-tests
+          # Keep saves to protected-branch and merge_group runs so the ~10 GB
+          # repo cache LRU is seeded by shared states, not arbitrary PR branches.
+          save-if: ${{ (github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'merge_group' }}
       - name: Run Telegram Channel Tests
         run: |
           timeout --signal=INT --kill-after=30s 10m \
@@ -433,7 +446,9 @@ jobs:
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
           key: slack-integration
-          save-if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+          # Keep saves to protected-branch and merge_group runs so the ~10 GB
+          # repo cache LRU is seeded by shared states, not arbitrary PR branches.
+          save-if: ${{ (github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'merge_group' }}
       - name: Build Slack WASM channel
         run: cargo build --manifest-path channels-src/slack/Cargo.toml --target wasm32-wasip2 --release
       - name: Run Slack integration tests
@@ -495,7 +510,9 @@ jobs:
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
           key: wasm-extensions
-          save-if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+          # Keep saves to protected-branch and merge_group runs so the ~10 GB
+          # repo cache LRU is seeded by shared states, not arbitrary PR branches.
+          save-if: ${{ (github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'merge_group' }}
       - name: Install cargo-component
         uses: ./.github/actions/install-cargo-component
       - name: Build all WASM extensions against current WIT

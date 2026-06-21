@@ -1,13 +1,13 @@
 use std::{
     collections::HashMap,
-    sync::{Arc, Mutex, RwLock},
+    sync::{Arc, RwLock},
 };
 
 use async_trait::async_trait;
 use chrono::Utc;
 use ironclaw_filesystem::{
-    CasExpectation, ContentType, Entry, FilesystemError, RecordVersion, RootFilesystem,
-    ScopedFilesystem, VersionedEntry,
+    CasExpectation, FilesystemError, RecordVersion, RootFilesystem, ScopedFilesystem,
+    VersionedEntry,
 };
 use ironclaw_host_api::{
     Action, ApprovalRequestId, CapabilityGrant, CapabilityGrantId, CapabilityId, GrantConstraints,
@@ -16,6 +16,8 @@ use ironclaw_host_api::{
 };
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
+
+use crate::cas_record::FilesystemCasRecordStore;
 
 const POLICY_PREFIX: &str = "/approvals/persistent";
 const POLICY_PATH_CACHE_MAX_ENTRIES: usize = 1024;
@@ -309,9 +311,7 @@ pub struct FilesystemPersistentApprovalPolicyStore<F>
 where
     F: RootFilesystem,
 {
-    filesystem: Arc<ScopedFilesystem<F>>,
-    path_cache: RwLock<HashMap<PersistentApprovalPolicyKey, ScopedPath>>,
-    mutation_locks: Mutex<HashMap<PersistentApprovalPolicyKey, Arc<tokio::sync::Mutex<()>>>>,
+    records: FilesystemCasRecordStore<F, PersistentApprovalPolicyKey>,
 }
 
 impl<F> FilesystemPersistentApprovalPolicyStore<F>
@@ -320,16 +320,12 @@ where
 {
     pub fn new(filesystem: Arc<ScopedFilesystem<F>>) -> Self {
         Self {
-            filesystem,
-            path_cache: RwLock::new(HashMap::new()),
-            mutation_locks: Mutex::new(HashMap::new()),
+            records: FilesystemCasRecordStore::new(
+                filesystem,
+                POLICY_PATH_CACHE_MAX_ENTRIES,
+                "persistent approval policy store does not support versioned CAS; falling back to unconditional write",
+            ),
         }
-    }
-
-    fn record_entry(
-        policy: &PersistentApprovalPolicy,
-    ) -> Result<Entry, PersistentApprovalPolicyError> {
-        Ok(Entry::bytes(serialize(policy)?).with_content_type(ContentType::json()))
     }
 }
 
@@ -351,7 +347,7 @@ where
             input.grantee,
         );
         let path = self.cached_policy_path(&key)?;
-        let lock = self.mutation_lock(&key);
+        let lock = self.records.mutation_lock(&key);
         let _guard = lock.lock().await;
         for _ in 0..POLICY_CAS_RETRY_ATTEMPTS {
             let existing = self.lookup_versioned(&key).await?;
@@ -401,7 +397,7 @@ where
     ) -> Result<PersistentApprovalPolicy, PersistentApprovalPolicyError> {
         let scope = resource_scope_for_policy_key(key);
         let path = self.cached_policy_path(key)?;
-        let lock = self.mutation_lock(key);
+        let lock = self.records.mutation_lock(key);
         let _guard = lock.lock().await;
         for _ in 0..POLICY_CAS_RETRY_ATTEMPTS {
             let (mut policy, version) = self
@@ -430,7 +426,7 @@ where
     ) -> Result<Option<PersistentApprovalPolicy>, PersistentApprovalPolicyError> {
         let scope = resource_scope_for_policy_key(key);
         let path = self.cached_policy_path(key)?;
-        let lock = self.mutation_lock(key);
+        let lock = self.records.mutation_lock(key);
         let _guard = lock.lock().await;
         for _ in 0..POLICY_CAS_RETRY_ATTEMPTS {
             let Some((mut policy, version)) = self.lookup_versioned(key).await? else {
@@ -476,22 +472,10 @@ where
         path: &ScopedPath,
     ) -> Result<Option<(PersistentApprovalPolicy, RecordVersion)>, PersistentApprovalPolicyError>
     {
-        let Some(versioned) = self.filesystem.get(scope, path).await? else {
+        let Some(versioned) = self.records.get(scope, path).await? else {
             return Ok(None);
         };
         deserialize_versioned_policy(key, versioned)
-    }
-
-    fn mutation_lock(&self, key: &PersistentApprovalPolicyKey) -> Arc<tokio::sync::Mutex<()>> {
-        let mut locks = self
-            .mutation_locks
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        locks.retain(|_, lock| Arc::strong_count(lock) > 1);
-        locks
-            .entry(key.clone())
-            .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
-            .clone()
     }
 
     async fn write_policy_raw(
@@ -501,58 +485,16 @@ where
         policy: &PersistentApprovalPolicy,
         expectation: CasExpectation,
     ) -> Result<(), PersistentApprovalPolicyError> {
-        let entry = Self::record_entry(policy)?;
-        match self
-            .filesystem
-            .put(scope, path, entry.clone(), expectation)
+        self.records
+            .put_json(scope, path, serialize(policy)?, expectation)
             .await
-        {
-            Ok(_) => Ok(()),
-            Err(FilesystemError::Unsupported { .. }) => {
-                tracing::warn!(
-                    path = %path,
-                    "persistent approval policy store does not support versioned CAS; falling back to unconditional write"
-                );
-                let opaque = Entry::bytes(entry.body).with_content_type(entry.content_type);
-                self.filesystem
-                    .put(scope, path, opaque, CasExpectation::Any)
-                    .await
-                    .map(|_| ())
-                    .map_err(PersistentApprovalPolicyError::from)
-            }
-            Err(error) => Err(PersistentApprovalPolicyError::from(error)),
-        }
     }
 
     fn cached_policy_path(
         &self,
         key: &PersistentApprovalPolicyKey,
     ) -> Result<ScopedPath, PersistentApprovalPolicyError> {
-        if let Some(path) = self
-            .path_cache
-            .read()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .get(key)
-            .cloned()
-        {
-            return Ok(path);
-        }
-
-        let path = policy_path(key)?;
-        let mut cache = self
-            .path_cache
-            .write()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        if let Some(path) = cache.get(key).cloned() {
-            return Ok(path);
-        }
-        if cache.len() >= POLICY_PATH_CACHE_MAX_ENTRIES
-            && let Some(evicted) = cache.keys().next().cloned()
-        {
-            cache.remove(&evicted);
-        }
-        cache.insert(key.clone(), path.clone());
-        Ok(path)
+        self.records.cached_path(key, policy_path)
     }
 }
 
@@ -724,6 +666,7 @@ mod tests {
         store.allow(input(scope)).await.expect("allow policy");
         assert_eq!(
             store
+                .records
                 .path_cache
                 .read()
                 .unwrap_or_else(|poisoned| poisoned.into_inner())
@@ -734,6 +677,7 @@ mod tests {
         store.lookup(&key).await.expect("lookup policy");
         assert_eq!(
             store
+                .records
                 .path_cache
                 .read()
                 .unwrap_or_else(|poisoned| poisoned.into_inner())
@@ -757,6 +701,7 @@ mod tests {
 
         assert!(
             store
+                .records
                 .path_cache
                 .read()
                 .unwrap_or_else(|poisoned| poisoned.into_inner())
@@ -824,6 +769,7 @@ mod tests {
 
         assert!(
             store
+                .records
                 .mutation_locks
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner())
@@ -934,9 +880,9 @@ mod tests {
 
     #[test]
     fn project_scoped_policy_key_serialization_is_threadless() {
-        // Criterion 5 (#4825): persistent approvals intentionally ignore
-        // thread_id. There is no backward-compatibility read path for old local
-        // test records, so the key serialization should not retain thread_id.
+        // Persistent approvals intentionally ignore thread_id. There is no
+        // backward-compatibility read path for old local test records, so the
+        // key serialization should not retain thread_id.
         let key = key_for(&scope(Some("project-a"), Some("thread-ignored")));
         let json = serde_json::to_string(&key).expect("serialize policy key");
         assert!(
@@ -957,9 +903,9 @@ mod tests {
 
     #[tokio::test]
     async fn filesystem_project_scoped_policy_matches_in_new_thread_after_reload() {
-        // Criterion 5 (#4825): a project-scoped "always allow" applies across
-        // threads in the same project. A fresh store instance looks the policy
-        // up from a different thread and finds it through the canonical path.
+        // A project-scoped "always allow" applies across threads in the same
+        // project. A fresh store instance looks the policy up from a different
+        // thread and finds it through the canonical path.
         let backend = Arc::new(InMemoryBackend::new());
         let scoped = scoped_fs(Arc::clone(&backend), "tenant-a", "alice");
         let store = FilesystemPersistentApprovalPolicyStore::new(Arc::clone(&scoped));

@@ -231,7 +231,7 @@ impl GoogleOAuthGateProvider {
         material: SecretMaterial,
     ) -> Result<(), AuthProductError> {
         self.secret_store
-            .put(scope.clone(), pkce_secret_handle(flow_id)?, material)
+            .put(scope.clone(), pkce_secret_handle(flow_id)?, material, None)
             .await
             .map(|_| ())
             .map_err(|_| AuthProductError::BackendUnavailable)

@@ -5,8 +5,9 @@
 //! dispatch runtime work.
 
 mod auto_approve;
+mod capability_permission;
+mod cas_record;
 mod policy;
-mod tool_permission;
 
 use ironclaw_authorization::{CapabilityLease, CapabilityLeaseError, CapabilityLeaseStore};
 use ironclaw_events::AuditSink;
@@ -22,6 +23,12 @@ pub use auto_approve::{
     AutoApproveSettingInput, AutoApproveSettingKey, AutoApproveSettingRecord,
     AutoApproveSettingStore, FilesystemAutoApproveSettingStore, InMemoryAutoApproveSettingStore,
 };
+pub use capability_permission::{
+    CapabilityPermissionOverride, CapabilityPermissionOverrideInput,
+    CapabilityPermissionOverrideKey, CapabilityPermissionOverrideRecord,
+    CapabilityPermissionOverrideStore, CapabilityPermissionState, CapabilityPermissionStoreError,
+    FilesystemCapabilityPermissionOverrideStore, InMemoryCapabilityPermissionOverrideStore,
+};
 pub use policy::{
     FilesystemPersistentApprovalPolicyStore, InMemoryPersistentApprovalPolicyStore,
     PersistentApprovalAction, PersistentApprovalPolicy, PersistentApprovalPolicyError,
@@ -29,12 +36,19 @@ pub use policy::{
     PersistentApprovalScope, permission_mode_allows_persistent_approval,
     persistent_approval_grant_issuer,
 };
-pub use tool_permission::{
-    FilesystemToolPermissionOverrideStore, InMemoryToolPermissionOverrideStore,
-    ToolPermissionOverride, ToolPermissionOverrideInput, ToolPermissionOverrideKey,
-    ToolPermissionOverrideRecord, ToolPermissionOverrideStore, ToolPermissionState,
-    ToolPermissionStoreError,
-};
+
+pub type ToolPermissionOverride = CapabilityPermissionOverride;
+pub type ToolPermissionOverrideInput = CapabilityPermissionOverrideInput;
+pub type ToolPermissionOverrideKey = CapabilityPermissionOverrideKey;
+pub type ToolPermissionOverrideRecord = CapabilityPermissionOverrideRecord;
+pub type ToolPermissionState = CapabilityPermissionState;
+pub type ToolPermissionStoreError = CapabilityPermissionStoreError;
+pub type FilesystemToolPermissionOverrideStore<F> = FilesystemCapabilityPermissionOverrideStore<F>;
+pub type InMemoryToolPermissionOverrideStore = InMemoryCapabilityPermissionOverrideStore;
+
+pub trait ToolPermissionOverrideStore: CapabilityPermissionOverrideStore {}
+
+impl<T> ToolPermissionOverrideStore for T where T: CapabilityPermissionOverrideStore + ?Sized {}
 
 pub struct ApprovalResolver<'a, A, L>
 where

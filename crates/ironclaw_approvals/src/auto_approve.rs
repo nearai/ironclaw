@@ -30,7 +30,7 @@ use ironclaw_host_api::{
 };
 use serde::{Deserialize, Serialize};
 
-use crate::tool_permission::ToolPermissionStoreError;
+use crate::CapabilityPermissionStoreError as ToolPermissionStoreError;
 
 const SETTING_PREFIX: &str = "/approvals/auto-approve";
 const SETTING_CAS_RETRY_ATTEMPTS: usize = 3;
