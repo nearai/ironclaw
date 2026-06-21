@@ -47,11 +47,11 @@ use ironclaw_host_api::runtime_policy::{
     EffectiveRuntimePolicy, FilesystemBackendKind, ProcessBackendKind, SecretMode,
 };
 use ironclaw_host_api::{
-    EffectKind, ExtensionId, HostPath, MountPermissions, MountView, PackageId, RuntimeHttpEgress,
-    UserId, VirtualPath,
+    EffectKind, ExtensionId, HostPath, InvocationId, MountPermissions, MountView, PackageId,
+    ResourceScope, RuntimeHttpEgress, UserId, VirtualPath,
 };
 #[cfg(any(feature = "libsql", feature = "postgres"))]
-use ironclaw_host_api::{HostApiError, MountAlias, MountGrant, ResourceScope};
+use ironclaw_host_api::{HostApiError, MountAlias, MountGrant};
 use ironclaw_host_runtime::{
     CapabilitySurfaceVersion, FirstPartyCapabilityRegistry, HostRuntimeHttpEgressPort,
     HostRuntimeServices, LocalHostProcessPort, ProductAuthProviderRuntimePorts, TriggerCreateHook,
@@ -711,6 +711,7 @@ async fn build_local_dev(input: RebornBuildInput) -> Result<RebornServices, Rebo
         local_runtime_identity,
         ..
     } = input;
+    let local_runtime_identity_for_nearai_mcp = local_runtime_identity.clone();
     let RebornStorageInput::LocalDev {
         root,
         workspace_root,
@@ -846,7 +847,10 @@ async fn build_local_dev(input: RebornBuildInput) -> Result<RebornServices, Rebo
         Arc::clone(&filesystem),
         runtime_workspace_mounts.clone(),
     ));
-    let owner_user_id_for_nearai_mcp = owner_user_id.clone();
+    let nearai_mcp_owner_scope = local_dev_nearai_mcp_owner_scope(
+        owner_user_id.clone(),
+        local_runtime_identity_for_nearai_mcp.as_ref(),
+    )?;
     let mut store_graph = build_local_dev_store_graph(RebornLocalDevStoreGraphInput {
         filesystem: Arc::clone(&filesystem),
         owner_user_id,
@@ -1048,7 +1052,7 @@ async fn build_local_dev(input: RebornBuildInput) -> Result<RebornServices, Rebo
         nearai_mcp_bootstrap_config,
         &product_auth,
         &extension_management,
-        &owner_user_id_for_nearai_mcp,
+        nearai_mcp_owner_scope,
     )
     .await?;
     if let Some(local_runtime) = Arc::get_mut(&mut store_graph.local_runtime) {
@@ -1297,6 +1301,23 @@ fn local_dev_extension_lifecycle_surface_context(
         user_id: owner_user_id,
         agent_id: Some(agent_id),
         project_id: None,
+    })
+}
+
+fn local_dev_nearai_mcp_owner_scope(
+    owner_user_id: UserId,
+    local_runtime_identity: Option<&RebornLocalRuntimeIdentity>,
+) -> Result<ResourceScope, RebornBuildError> {
+    let context =
+        local_dev_extension_lifecycle_surface_context(owner_user_id, local_runtime_identity)?;
+    Ok(ResourceScope {
+        tenant_id: context.tenant_id,
+        user_id: context.user_id,
+        agent_id: context.agent_id,
+        project_id: context.project_id,
+        mission_id: None,
+        thread_id: None,
+        invocation_id: InvocationId::new(),
     })
 }
 
@@ -4467,7 +4488,8 @@ mod tests {
         assert_eq!(search.runtime_credentials[0].audience.port, Some(9443));
 
         let auth_scope = AuthProductScope::new(
-            ResourceScope::local_default(UserId::new(owner).unwrap(), InvocationId::new()).unwrap(),
+            local_dev_nearai_mcp_owner_scope(UserId::new(owner).unwrap(), None)
+                .expect("NEAR AI MCP owner scope"),
             AuthSurface::Api,
         );
         let accounts = services
@@ -4506,7 +4528,8 @@ mod tests {
                 .await
                 .expect("second local-dev services build");
         let auth_scope = AuthProductScope::new(
-            ResourceScope::local_default(UserId::new(owner).unwrap(), InvocationId::new()).unwrap(),
+            local_dev_nearai_mcp_owner_scope(UserId::new(owner).unwrap(), None)
+                .expect("NEAR AI MCP owner scope"),
             AuthSurface::Api,
         );
         let accounts = second
@@ -4564,7 +4587,8 @@ mod tests {
             ),
             services.product_auth.as_ref().expect("product auth"),
             extension_management,
-            &UserId::new(owner).unwrap(),
+            local_dev_nearai_mcp_owner_scope(UserId::new(owner).unwrap(), None)
+                .expect("NEAR AI MCP owner scope"),
         )
         .await
         .expect("bootstrap should preserve disabled extension");

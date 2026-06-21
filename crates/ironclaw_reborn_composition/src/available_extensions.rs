@@ -62,7 +62,38 @@ const NEARAI_MCP_MANIFEST: &str =
 #[cfg(feature = "slack-v2-host-beta")]
 const SLACK_MANIFEST: &str =
     include_str!("../../ironclaw_first_party_extensions/assets/slack/manifest.toml");
-const NEARAI_EXTENSION_ID: &str = "nearai";
+const NEARAI_EXTENSION_ID: &str = HostManagedCredentialExtension::NearAi.id();
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum HostManagedCredentialExtension {
+    NearAi,
+}
+
+impl HostManagedCredentialExtension {
+    const fn id(self) -> &'static str {
+        match self {
+            Self::NearAi => "nearai",
+        }
+    }
+
+    fn from_package_ref(package_ref: &LifecyclePackageRef) -> Option<Self> {
+        #[cfg(not(feature = "root-llm-provider"))]
+        {
+            let _ = package_ref;
+            None
+        }
+        #[cfg(feature = "root-llm-provider")]
+        {
+            if package_ref.kind != LifecyclePackageKind::Extension {
+                return None;
+            }
+            match package_ref.id.as_str() {
+                id if id == Self::NearAi.id() => Some(Self::NearAi),
+                _ => None,
+            }
+        }
+    }
+}
 
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) struct AvailableExtensionAsset {
@@ -188,8 +219,7 @@ fn runtime_kind(runtime: &ExtensionRuntime) -> LifecycleExtensionRuntimeKind {
 }
 
 fn is_host_managed_credential_extension(package_ref: &LifecyclePackageRef) -> bool {
-    package_ref.kind == LifecyclePackageKind::Extension
-        && package_ref.id.as_str() == NEARAI_EXTENSION_ID
+    HostManagedCredentialExtension::from_package_ref(package_ref).is_some()
 }
 
 fn credential_requirements(
