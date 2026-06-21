@@ -475,7 +475,7 @@ async fn seed_live_credentials_for_fixture(
         live_secret_values.push((seed.label, access_material.expose_secret().to_string()));
         let access_handle = SecretHandle::new(seed.access_handle).expect("access handle");
         secret_store
-            .put(scope.clone(), access_handle.clone(), access_material)
+            .put(scope.clone(), access_handle.clone(), access_material, None)
             .await
             .expect("seed Reborn access secret");
 
@@ -500,7 +500,7 @@ async fn seed_live_credentials_for_fixture(
                 live_secret_values.push((seed.label, refresh_material.expose_secret().to_string()));
                 let handle = SecretHandle::new(refresh_handle).expect("refresh handle");
                 secret_store
-                    .put(scope.clone(), handle.clone(), refresh_material)
+                    .put(scope.clone(), handle.clone(), refresh_material, None)
                     .await
                     .expect("seed Reborn refresh secret");
                 Some(handle)
