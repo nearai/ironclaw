@@ -100,7 +100,9 @@ jobs:
       - id: packages
         name: Build package matrix from Reborn crate families
         run: |
-          packages="$(
+          # Reborn/product crate families that are always tested, including
+          # crates the shipped binary does not link (channel adapters, webui_v2).
+          allowlist_packages="$(
             cargo metadata --no-deps --format-version 1 \
               | jq -c '
                   [
@@ -118,6 +120,36 @@ jobs:
                   ]
                   | unique
                 '
+          )"
+
+          # The full ironclaw_reborn_cli dependency closure: every workspace
+          # crate the shipped Reborn binary links (normal + build deps). Running
+          # each crate's own suite on every PR is the "run everything on every
+          # PR" gate -- a green reborn-tests run means the whole closure is
+          # green, so the ~43 shared crates (auth, host_runtime, skills,
+          # extensions, ...) can no longer regress unnoticed.
+          closure_packages="$(
+            comm -12 \
+              <(cargo tree -p ironclaw_reborn_cli -e normal,build --prefix none \
+                | grep -oE 'ironclaw_[a-z0-9_]+' \
+                | sort -u) \
+              <(cargo metadata --no-deps --format-version 1 \
+                | jq -r '.packages[].name' \
+                | sort -u) \
+              | jq -R -s -c 'split("\n") | map(select(length > 0))'
+          )"
+
+          if [ -z "${closure_packages}" ] || [ "${closure_packages}" = "[]" ]; then
+            echo "No Reborn CLI workspace dependency closure crates discovered" >&2
+            exit 1
+          fi
+
+          # Union so closure coverage never drops the non-closure allowlist crates.
+          packages="$(
+            jq -n -c \
+              --argjson allowlist "${allowlist_packages}" \
+              --argjson closure "${closure_packages}" \
+              '$allowlist + $closure | unique'
           )"
 
           if [ -z "${packages}" ] || [ "${packages}" = "[]" ]; then
