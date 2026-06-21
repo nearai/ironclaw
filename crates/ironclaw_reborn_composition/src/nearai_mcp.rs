@@ -307,6 +307,104 @@ pub(crate) async fn bootstrap_local_dev_nearai_mcp(
     Ok(())
 }
 
+/// Auto-enable the read-only `connected-sources` extension for the agent loop at
+/// boot, so a configured Composio connector is directly callable by the model
+/// (capability `connected-sources.read`) instead of forcing the agent to
+/// search/install/activate it at runtime (which loops). Gated by
+/// `IRONCLAW_AGENT_CONNECTORS_ENABLED` (default off).
+///
+/// `connected-sources` is READ-ONLY (`connected-sources.read`, the manifest
+/// forbids sends/mutations) and declares no activation credentials — the
+/// Composio key is resolved host-side at invoke time, the same as the
+/// deterministic `/connectors/read` route. So this needs no key at boot and
+/// never exposes writes to the agent (sends stay on the gated write route).
+///
+/// Non-fatal by design: any failure logs and continues booting, leaving the
+/// prior behavior (the agent's extension-lifecycle path) intact.
+#[cfg(feature = "webui-v2-beta")]
+pub(crate) async fn bootstrap_local_dev_agent_connectors(
+    enabled: bool,
+    product_auth: &Arc<RebornProductAuthServices>,
+    extension_management: &Arc<RebornLocalExtensionManagementPort>,
+    owner_user_id: &UserId,
+) {
+    if !enabled {
+        return;
+    }
+    let package_ref =
+        match LifecyclePackageRef::new(LifecyclePackageKind::Extension, "connected-sources") {
+            Ok(package_ref) => package_ref,
+            Err(error) => {
+                tracing::warn!(%error, "agent connectors: connected-sources package ref is invalid");
+                return;
+            }
+        };
+    let phase = match extension_management.project(package_ref.clone()).await {
+        Ok(response) => response.phase,
+        Err(error) => {
+            tracing::warn!(%error, "agent connectors: connected-sources projection failed");
+            return;
+        }
+    };
+    match phase {
+        LifecyclePhase::Discovered | LifecyclePhase::Installed | LifecyclePhase::Active => {}
+        LifecyclePhase::Disabled => {
+            tracing::debug!(
+                "agent connectors: connected-sources is explicitly disabled; preserving operator state"
+            );
+            return;
+        }
+        other => {
+            tracing::warn!(
+                phase = ?other,
+                "agent connectors: connected-sources is not in an auto-activatable phase"
+            );
+            return;
+        }
+    }
+    if phase == LifecyclePhase::Active {
+        tracing::info!("agent connectors: connected-sources already active for the agent loop");
+        return;
+    }
+    let resource_scope =
+        match ResourceScope::local_default(owner_user_id.clone(), InvocationId::new()) {
+            Ok(scope) => scope,
+            Err(error) => {
+                tracing::warn!(%error, "agent connectors: scope could not be built");
+                return;
+            }
+        };
+    if phase == LifecyclePhase::Discovered {
+        if let Err(error) = extension_management.install(package_ref.clone()).await {
+            tracing::warn!(%error, "agent connectors: connected-sources install failed");
+            return;
+        }
+    }
+    match extension_management
+        .activate_with_credential_gate(
+            package_ref,
+            ExtensionActivationMode::Static,
+            RuntimeExtensionActivationCredentialGate::new(
+                resource_scope,
+                product_auth.runtime_credential_account_selection_service(),
+            ),
+        )
+        .await
+    {
+        Ok(_) => {
+            tracing::info!(
+                "agent connectors: connected-sources activated; connected-sources.read is now callable by the agent loop"
+            );
+        }
+        Err(error) => {
+            tracing::warn!(
+                %error,
+                "agent connectors: connected-sources activation failed; agent retains the extension-lifecycle path"
+            );
+        }
+    }
+}
+
 fn is_nearai_mcp_disabled_or_removed(error: &RebornServicesError) -> bool {
     error.code == RebornServicesErrorCode::Forbidden
         && error.kind == RebornServicesErrorKind::ParticipantDenied

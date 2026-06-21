@@ -1146,6 +1146,15 @@ async fn build_local_dev(input: RebornBuildInput) -> Result<RebornServices, Rebo
         .map_err(|error| RebornBuildError::InvalidConfig {
             reason: format!("connected sources first-party handlers are invalid: {error}"),
         })?;
+        crate::nearai_mcp::bootstrap_local_dev_agent_connectors(
+            std::env::var("IRONCLAW_AGENT_CONNECTORS_ENABLED")
+                .map(|value| value == "1" || value.eq_ignore_ascii_case("true"))
+                .unwrap_or(false),
+            &product_auth,
+            &extension_management,
+            &owner_user_id_for_nearai_mcp,
+        )
+        .await;
     }
     insert_extension_lifecycle_handlers(
         &mut first_party_registry,
