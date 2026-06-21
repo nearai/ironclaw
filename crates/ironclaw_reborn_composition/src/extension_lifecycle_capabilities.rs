@@ -69,7 +69,7 @@ fn manifests() -> Result<Vec<CapabilityManifest>, ExtensionError> {
         )?,
         lifecycle_manifest(
             EXTENSION_ACTIVATE_CAPABILITY_ID,
-            "Activate an installed Reborn extension for the model-visible local-dev capability surface. Use after install succeeds or when install reports the extension is already installed. This is the step that opens the credential/auth gate when required; do not ask the user for credentials before calling it. If activation returns activated=true, the extension is ready; ignore earlier search onboarding or credential hints from this turn unless a later tool call raises auth_required.",
+            "Activate an installed Reborn extension for the model-visible local-dev capability surface. Use after install succeeds or when install reports the extension is already installed. This is the step that opens the credential/auth gate when required; do not ask the user for credentials before calling it. If activation returns activated=true, the extension is ready for read and write-capable tools; ignore earlier search/install onboarding or credential hints from this turn unless a later tool call raises auth_required.",
             vec![
                 EffectKind::ReadFilesystem,
                 EffectKind::WriteFilesystem,
@@ -348,7 +348,8 @@ mod tests {
                 && activate.description.contains("activated=true")
                 && activate
                     .description
-                    .contains("ignore earlier search onboarding"),
+                    .contains("ignore earlier search/install onboarding")
+                && activate.description.contains("write-capable tools"),
             "extension_activate description should teach the model to raise auth through activation: {}",
             activate.description
         );
@@ -509,6 +510,30 @@ mod tests {
         .await
         .expect("local-dev services build");
 
+        let available_search = invoke_json(
+            &services,
+            EXTENSION_SEARCH_CAPABILITY_ID,
+            serde_json::json!({"query": "github"}),
+        )
+        .await
+        .expect("available search succeeds");
+        let available_extensions = available_search["payload"]["extensions"]
+            .as_array()
+            .expect("extensions array");
+        let available_github = available_extensions
+            .iter()
+            .find(|extension| extension["package_ref"]["id"] == "github")
+            .expect("github search result");
+        assert_eq!(available_github.get("installation_phase"), None);
+        assert!(
+            available_github.get("credential_requirements").is_none(),
+            "available GitHub model-visible search results must not expose PAT requirements before activation"
+        );
+        assert!(
+            available_github.get("onboarding").is_none(),
+            "available GitHub model-visible search results must not expose PAT setup onboarding before activation"
+        );
+
         invoke_json(
             &services,
             EXTENSION_INSTALL_CAPABILITY_ID,
@@ -533,12 +558,12 @@ mod tests {
             .expect("github search result");
         assert_eq!(installed_github["installation_phase"], "installed");
         assert!(
-            installed_github.get("credential_requirements").is_some(),
-            "installed inactive GitHub model-visible search results should expose PAT requirements"
+            installed_github.get("credential_requirements").is_none(),
+            "installed inactive GitHub model-visible search results must not expose stale PAT requirements before activation"
         );
         assert!(
-            installed_github.get("onboarding").is_some(),
-            "installed inactive GitHub model-visible search results should retain setup onboarding"
+            installed_github.get("onboarding").is_none(),
+            "installed inactive GitHub model-visible search results must not expose stale PAT setup onboarding before activation"
         );
 
         let activate_context = execution_context([EXTENSION_ACTIVATE_CAPABILITY_ID]);

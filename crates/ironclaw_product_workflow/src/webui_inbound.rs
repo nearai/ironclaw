@@ -111,6 +111,11 @@ pub struct WebUiCreateThreadRequest {
     pub client_action_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub requested_thread_id: Option<String>,
+    /// Optional project the new thread should be scoped to. The browser only
+    /// *proposes* it — the facade authorizes the caller's access to the project
+    /// before adopting it as scope, so the body is never trusted on its own.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project_id: Option<String>,
 }
 
 /// One inline attachment in a browser send-message body.

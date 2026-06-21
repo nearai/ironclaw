@@ -126,6 +126,8 @@ registerPack("hi", {
   "approval.approveAndAlways": "स्वीकृत करें और हमेशा अनुमति दें",
   "approval.alwaysAllowToolLabel": "बिना पूछे हमेशा {tool} की अनुमति दें",
   "approval.thisTool": "यह टूल",
+  "approval.viewFullCommand": "पूरा कमांड देखें",
+  "approval.showCommandPreview": "पूर्वावलोकन दिखाएँ",
   // Chat — tool activity
   "tool.tabDetails": "विवरण",
   "tool.tabParameters": "पैरामीटर्स",

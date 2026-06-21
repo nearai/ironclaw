@@ -271,6 +271,7 @@ ironclaw_approvals = { path = "crates/ironclaw_approvals", version = "0.1.0" }
 ironclaw_authorization = { path = "crates/ironclaw_authorization", version = "0.1.0" }
 ironclaw_extensions = { path = "crates/ironclaw_extensions", version = "0.1.0" }
 ironclaw_filesystem = { path = "crates/ironclaw_filesystem", version = "0.1.0" }
+ironclaw_first_party_extensions = { path = "crates/ironclaw_first_party_extensions", version = "0.1.0" }
 ironclaw_host_runtime = { path = "crates/ironclaw_host_runtime", version = "0.1.0" }
 ironclaw_network = { path = "crates/ironclaw_network", version = "0.1.0" }
 ironclaw_processes = { path = "crates/ironclaw_processes", version = "0.1.0" }
@@ -280,6 +281,7 @@ ironclaw_product_adapters = { path = "crates/ironclaw_product_adapters", version
 ironclaw_product_workflow = { path = "crates/ironclaw_product_workflow", version = "0.1.0", features = ["test-support"] }
 ironclaw_reborn = { path = "crates/ironclaw_reborn", version = "0.1.0", features = ["root-llm-provider"] }
 ironclaw_reborn_composition = { path = "crates/ironclaw_reborn_composition", version = "0.1.0", features = ["test-support"] }
+ironclaw_reborn_config = { path = "crates/ironclaw_reborn_config", version = "0.1.0" }
 ironclaw_run_state = { path = "crates/ironclaw_run_state", version = "0.1.0" }
 ironclaw_threads = { path = "crates/ironclaw_threads", version = "0.1.0" }
 ironclaw_triggers = { path = "crates/ironclaw_triggers", version = "0.1.0" }
