@@ -35,7 +35,7 @@ async fn reborn_identity_prompt_scope_isolation_parity() {
         HostManagedModelResponse::assistant_reply("bob scoped reply"),
     ]);
     let mut harness =
-        RebornBinaryE2EHarness::with_model_gateway_identity_source_unscoped_shared_worker(
+        RebornBinaryE2EHarness::with_model_gateway_identity_source_shared(
             SHARED_ROOM,
             model_gateway,
             RecordingTestCapabilityPort::echo(),

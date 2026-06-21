@@ -24,7 +24,7 @@ async fn reborn_direct_chat_user_scope_isolation_parity() {
         Some("project-e2e"),
     );
 
-    let mut alice_harness = RebornBinaryE2EHarness::with_model_gateway_scope_initial_actor_installation_shared_storage_unscoped_worker(
+    let mut alice_harness = RebornBinaryE2EHarness::with_model_gateway_scope_initial_actor_installation_shared_storage(
         DIRECT_ROOM,
         "alice",
         RebornTraceReplayModelGateway::with_responses([HostManagedModelResponse::assistant_reply(
@@ -38,7 +38,7 @@ async fn reborn_direct_chat_user_scope_isolation_parity() {
     )
     .await
     .expect("alice harness");
-    let mut bob_harness = RebornBinaryE2EHarness::with_model_gateway_scope_initial_actor_installation_shared_storage_unscoped_worker(
+    let mut bob_harness = RebornBinaryE2EHarness::with_model_gateway_scope_initial_actor_installation_shared_storage(
         DIRECT_ROOM,
         "bob",
         RebornTraceReplayModelGateway::with_responses([HostManagedModelResponse::assistant_reply(

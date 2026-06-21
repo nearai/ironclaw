@@ -306,44 +306,14 @@ impl RebornBinaryE2EHarness {
             .await
     }
 
-    pub async fn with_model_gateway_unscoped_worker(
-        conversation_id: &str,
-        model_gateway: RebornTraceReplayModelGateway,
-        capability_port: RecordingTestCapabilityPort,
-    ) -> HarnessResult<Self> {
-        Self::with_model_gateway_options_and_worker_scope(
-            conversation_id,
-            model_gateway,
-            capability_port,
-            false,
-            false,
-        )
-        .await
-    }
-
-    pub async fn with_harness_blocked_evidence_unscoped_worker(
-        conversation_id: &str,
-        model_gateway: RebornTraceReplayModelGateway,
-        capability_port: RecordingTestCapabilityPort,
-    ) -> HarnessResult<Self> {
-        Self::with_model_gateway_options_and_worker_scope(
-            conversation_id,
-            model_gateway,
-            capability_port,
-            true,
-            false,
-        )
-        .await
-    }
-
-    pub async fn with_model_gateway_scope_shared_storage_unscoped_worker(
+    pub async fn with_model_gateway_scope_shared_storage(
         conversation_id: &str,
         model_gateway: RebornTraceReplayModelGateway,
         capability_port: RecordingTestCapabilityPort,
         scope: ResourceScope,
         shared_storage: RebornHarnessSharedStorage,
     ) -> HarnessResult<Self> {
-        Self::with_model_gateway_scope_identity_source_trigger_installation_shared_storage_unscoped_worker(
+        Self::with_model_gateway_scope_identity_source_trigger_installation_shared_storage(
             conversation_id,
             model_gateway,
             capability_port,
@@ -358,7 +328,7 @@ impl RebornBinaryE2EHarness {
         .await
     }
 
-    pub async fn with_model_gateway_scope_installation_shared_storage_unscoped_worker(
+    pub async fn with_model_gateway_scope_installation_shared_storage(
         conversation_id: &str,
         model_gateway: RebornTraceReplayModelGateway,
         capability_port: RecordingTestCapabilityPort,
@@ -367,7 +337,7 @@ impl RebornBinaryE2EHarness {
         installation_id: &str,
         shared_storage: RebornHarnessSharedStorage,
     ) -> HarnessResult<Self> {
-        Self::with_model_gateway_scope_initial_actor_installation_shared_storage_unscoped_worker(
+        Self::with_model_gateway_scope_initial_actor_installation_shared_storage(
             conversation_id,
             "alice",
             model_gateway,
@@ -381,7 +351,7 @@ impl RebornBinaryE2EHarness {
     }
 
     #[allow(clippy::too_many_arguments)]
-    pub async fn with_model_gateway_scope_initial_actor_installation_shared_storage_unscoped_worker(
+    pub async fn with_model_gateway_scope_initial_actor_installation_shared_storage(
         conversation_id: &str,
         initial_actor_id: &str,
         model_gateway: RebornTraceReplayModelGateway,
@@ -391,7 +361,7 @@ impl RebornBinaryE2EHarness {
         installation_id: &str,
         shared_storage: RebornHarnessSharedStorage,
     ) -> HarnessResult<Self> {
-        Self::with_model_gateway_scope_identity_source_trigger_installation_shared_storage_unscoped_worker(
+        Self::with_model_gateway_scope_identity_source_trigger_installation_shared_storage(
             conversation_id,
             model_gateway,
             capability_port,
@@ -407,7 +377,7 @@ impl RebornBinaryE2EHarness {
     }
 
     #[allow(clippy::too_many_arguments)]
-    pub async fn with_model_gateway_scope_identity_source_trigger_installation_shared_storage_unscoped_worker(
+    pub async fn with_model_gateway_scope_identity_source_trigger_installation_shared_storage(
         conversation_id: &str,
         model_gateway: RebornTraceReplayModelGateway,
         capability_port: RecordingTestCapabilityPort,
@@ -419,11 +389,10 @@ impl RebornBinaryE2EHarness {
         initial_actor_id: &str,
         shared_storage: RebornHarnessSharedStorage,
     ) -> HarnessResult<Self> {
-        Self::with_model_gateway_capability_mode_identity_source_trigger_worker_scope_storage_and_adapter(
+        Self::with_model_gateway_capability_mode_identity_source_trigger_storage_and_adapter(
             conversation_id,
             model_gateway,
             HarnessCapabilityMode::Recording(capability_port),
-            false,
             false,
             initial_trigger,
             identity_context_source,
@@ -436,35 +405,16 @@ impl RebornBinaryE2EHarness {
         .await
     }
 
-    pub async fn with_model_gateway_identity_source_unscoped_worker(
+    pub async fn with_model_gateway_identity_source_shared(
         conversation_id: &str,
         model_gateway: RebornTraceReplayModelGateway,
         capability_port: RecordingTestCapabilityPort,
         identity_context_source: Arc<dyn HostIdentityContextSource>,
     ) -> HarnessResult<Self> {
-        Self::with_model_gateway_options_identity_source_trigger_and_worker_scope(
+        Self::with_model_gateway_options_identity_source_trigger(
             conversation_id,
             model_gateway,
             capability_port,
-            false,
-            false,
-            ProductTriggerReason::DirectChat,
-            identity_context_source,
-        )
-        .await
-    }
-
-    pub async fn with_model_gateway_identity_source_unscoped_shared_worker(
-        conversation_id: &str,
-        model_gateway: RebornTraceReplayModelGateway,
-        capability_port: RecordingTestCapabilityPort,
-        identity_context_source: Arc<dyn HostIdentityContextSource>,
-    ) -> HarnessResult<Self> {
-        Self::with_model_gateway_options_identity_source_trigger_and_worker_scope(
-            conversation_id,
-            model_gateway,
-            capability_port,
-            false,
             false,
             ProductTriggerReason::BotMention,
             identity_context_source,
@@ -694,69 +644,47 @@ impl RebornBinaryE2EHarness {
         capability_port: RecordingTestCapabilityPort,
         accept_harness_blocked_evidence: bool,
     ) -> HarnessResult<Self> {
-        Self::with_model_gateway_options_and_worker_scope(
+        Self::with_model_gateway_options_identity_source(
             conversation_id,
             model_gateway,
             capability_port,
             accept_harness_blocked_evidence,
-            true,
-        )
-        .await
-    }
-
-    async fn with_model_gateway_options_and_worker_scope(
-        conversation_id: &str,
-        model_gateway: RebornTraceReplayModelGateway,
-        capability_port: RecordingTestCapabilityPort,
-        accept_harness_blocked_evidence: bool,
-        restrict_worker_to_initial_scope: bool,
-    ) -> HarnessResult<Self> {
-        Self::with_model_gateway_options_identity_source_and_worker_scope(
-            conversation_id,
-            model_gateway,
-            capability_port,
-            accept_harness_blocked_evidence,
-            restrict_worker_to_initial_scope,
             Arc::new(EmptyIdentityContextSource),
         )
         .await
     }
 
-    async fn with_model_gateway_options_identity_source_and_worker_scope(
+    async fn with_model_gateway_options_identity_source(
         conversation_id: &str,
         model_gateway: RebornTraceReplayModelGateway,
         capability_port: RecordingTestCapabilityPort,
         accept_harness_blocked_evidence: bool,
-        restrict_worker_to_initial_scope: bool,
         identity_context_source: Arc<dyn HostIdentityContextSource>,
     ) -> HarnessResult<Self> {
-        Self::with_model_gateway_options_identity_source_trigger_and_worker_scope(
+        Self::with_model_gateway_options_identity_source_trigger(
             conversation_id,
             model_gateway,
             capability_port,
             accept_harness_blocked_evidence,
-            restrict_worker_to_initial_scope,
             ProductTriggerReason::DirectChat,
             identity_context_source,
         )
         .await
     }
 
-    async fn with_model_gateway_options_identity_source_trigger_and_worker_scope(
+    async fn with_model_gateway_options_identity_source_trigger(
         conversation_id: &str,
         model_gateway: RebornTraceReplayModelGateway,
         capability_port: RecordingTestCapabilityPort,
         accept_harness_blocked_evidence: bool,
-        restrict_worker_to_initial_scope: bool,
         initial_trigger: ProductTriggerReason,
         identity_context_source: Arc<dyn HostIdentityContextSource>,
     ) -> HarnessResult<Self> {
-        Self::with_model_gateway_capability_mode_identity_source_trigger_and_worker_scope(
+        Self::with_model_gateway_capability_mode_identity_source_trigger(
             conversation_id,
             model_gateway,
             HarnessCapabilityMode::Recording(capability_port),
             accept_harness_blocked_evidence,
-            restrict_worker_to_initial_scope,
             initial_trigger,
             identity_context_source,
         )
@@ -769,69 +697,47 @@ impl RebornBinaryE2EHarness {
         capability_mode: HarnessCapabilityMode,
         accept_harness_blocked_evidence: bool,
     ) -> HarnessResult<Self> {
-        Self::with_model_gateway_capability_mode_and_worker_scope(
+        Self::with_model_gateway_capability_mode_identity_source(
             conversation_id,
             model_gateway,
             capability_mode,
             accept_harness_blocked_evidence,
-            true,
-        )
-        .await
-    }
-
-    async fn with_model_gateway_capability_mode_and_worker_scope(
-        conversation_id: &str,
-        model_gateway: RebornTraceReplayModelGateway,
-        capability_mode: HarnessCapabilityMode,
-        accept_harness_blocked_evidence: bool,
-        restrict_worker_to_initial_scope: bool,
-    ) -> HarnessResult<Self> {
-        Self::with_model_gateway_capability_mode_identity_source_and_worker_scope(
-            conversation_id,
-            model_gateway,
-            capability_mode,
-            accept_harness_blocked_evidence,
-            restrict_worker_to_initial_scope,
             Arc::new(EmptyIdentityContextSource),
         )
         .await
     }
 
-    async fn with_model_gateway_capability_mode_identity_source_and_worker_scope(
+    async fn with_model_gateway_capability_mode_identity_source(
         conversation_id: &str,
         model_gateway: RebornTraceReplayModelGateway,
         capability_mode: HarnessCapabilityMode,
         accept_harness_blocked_evidence: bool,
-        restrict_worker_to_initial_scope: bool,
         identity_context_source: Arc<dyn HostIdentityContextSource>,
     ) -> HarnessResult<Self> {
-        Self::with_model_gateway_capability_mode_identity_source_trigger_and_worker_scope(
+        Self::with_model_gateway_capability_mode_identity_source_trigger(
             conversation_id,
             model_gateway,
             capability_mode,
             accept_harness_blocked_evidence,
-            restrict_worker_to_initial_scope,
             ProductTriggerReason::DirectChat,
             identity_context_source,
         )
         .await
     }
 
-    async fn with_model_gateway_capability_mode_identity_source_trigger_and_worker_scope(
+    async fn with_model_gateway_capability_mode_identity_source_trigger(
         conversation_id: &str,
         model_gateway: RebornTraceReplayModelGateway,
         capability_mode: HarnessCapabilityMode,
         accept_harness_blocked_evidence: bool,
-        restrict_worker_to_initial_scope: bool,
         initial_trigger: ProductTriggerReason,
         identity_context_source: Arc<dyn HostIdentityContextSource>,
     ) -> HarnessResult<Self> {
-        Self::with_model_gateway_capability_mode_identity_source_trigger_worker_scope_storage_and_adapter(
+        Self::with_model_gateway_capability_mode_identity_source_trigger_storage_and_adapter(
             conversation_id,
             model_gateway,
             capability_mode,
             accept_harness_blocked_evidence,
-            restrict_worker_to_initial_scope,
             initial_trigger,
             identity_context_source,
             product_scope(),
@@ -844,12 +750,11 @@ impl RebornBinaryE2EHarness {
     }
 
     #[allow(clippy::too_many_arguments)]
-    async fn with_model_gateway_capability_mode_identity_source_trigger_worker_scope_storage_and_adapter(
+    async fn with_model_gateway_capability_mode_identity_source_trigger_storage_and_adapter(
         conversation_id: &str,
         model_gateway: RebornTraceReplayModelGateway,
         capability_mode: HarnessCapabilityMode,
         accept_harness_blocked_evidence: bool,
-        restrict_worker_to_initial_scope: bool,
         initial_trigger: ProductTriggerReason,
         identity_context_source: Arc<dyn HostIdentityContextSource>,
         product_scope: ResourceScope,

@@ -29,7 +29,7 @@ async fn reborn_tenant_binding_scope_isolation_parity() {
     );
 
     let mut tenant_a =
-        RebornBinaryE2EHarness::with_model_gateway_scope_shared_storage_unscoped_worker(
+        RebornBinaryE2EHarness::with_model_gateway_scope_shared_storage(
             "room-shared-tenant",
             RebornTraceReplayModelGateway::with_responses([
                 HostManagedModelResponse::assistant_reply("tenant alpha isolated reply"),
@@ -41,7 +41,7 @@ async fn reborn_tenant_binding_scope_isolation_parity() {
         .await
         .expect("tenant A harness");
     let mut tenant_b =
-        RebornBinaryE2EHarness::with_model_gateway_scope_shared_storage_unscoped_worker(
+        RebornBinaryE2EHarness::with_model_gateway_scope_shared_storage(
             "room-shared-tenant",
             RebornTraceReplayModelGateway::with_responses([
                 HostManagedModelResponse::assistant_reply("tenant beta isolated reply"),

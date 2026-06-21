@@ -25,7 +25,7 @@ async fn reborn_adapter_installation_scope_isolation_parity() {
         Some("project-e2e"),
     );
 
-    let mut install_a = RebornBinaryE2EHarness::with_model_gateway_scope_installation_shared_storage_unscoped_worker(
+    let mut install_a = RebornBinaryE2EHarness::with_model_gateway_scope_installation_shared_storage(
         ROOM,
         RebornTraceReplayModelGateway::with_responses([HostManagedModelResponse::assistant_reply(
             "installation alpha isolated reply",
@@ -38,7 +38,7 @@ async fn reborn_adapter_installation_scope_isolation_parity() {
     )
     .await
     .expect("install A harness");
-    let mut install_b = RebornBinaryE2EHarness::with_model_gateway_scope_installation_shared_storage_unscoped_worker(
+    let mut install_b = RebornBinaryE2EHarness::with_model_gateway_scope_installation_shared_storage(
         ROOM,
         RebornTraceReplayModelGateway::with_responses([HostManagedModelResponse::assistant_reply(
             "installation beta isolated reply",

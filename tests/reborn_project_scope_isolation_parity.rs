@@ -32,7 +32,7 @@ async fn reborn_project_scope_isolation_parity() {
     );
 
     let mut project_a =
-        RebornBinaryE2EHarness::with_model_gateway_scope_shared_storage_unscoped_worker(
+        RebornBinaryE2EHarness::with_model_gateway_scope_shared_storage(
             ROOM,
             RebornTraceReplayModelGateway::with_responses([
                 HostManagedModelResponse::assistant_reply("project alpha isolated reply"),
@@ -44,7 +44,7 @@ async fn reborn_project_scope_isolation_parity() {
         .await
         .expect("project A harness");
     let mut project_b =
-        RebornBinaryE2EHarness::with_model_gateway_scope_shared_storage_unscoped_worker(
+        RebornBinaryE2EHarness::with_model_gateway_scope_shared_storage(
             ROOM,
             RebornTraceReplayModelGateway::with_responses([
                 HostManagedModelResponse::assistant_reply("project beta isolated reply"),

@@ -46,7 +46,7 @@ async fn reborn_identity_tenant_scope_isolation_parity() {
         Some("project-e2e"),
     );
 
-    let mut alpha = RebornBinaryE2EHarness::with_model_gateway_scope_identity_source_trigger_installation_shared_storage_unscoped_worker(
+    let mut alpha = RebornBinaryE2EHarness::with_model_gateway_scope_identity_source_trigger_installation_shared_storage(
         ROOM,
         RebornTraceReplayModelGateway::with_responses([HostManagedModelResponse::assistant_reply(
             "tenant alpha identity reply",
@@ -62,7 +62,7 @@ async fn reborn_identity_tenant_scope_isolation_parity() {
     )
     .await
     .expect("tenant alpha harness");
-    let mut beta = RebornBinaryE2EHarness::with_model_gateway_scope_identity_source_trigger_installation_shared_storage_unscoped_worker(
+    let mut beta = RebornBinaryE2EHarness::with_model_gateway_scope_identity_source_trigger_installation_shared_storage(
         ROOM,
         RebornTraceReplayModelGateway::with_responses([HostManagedModelResponse::assistant_reply(
             "tenant beta identity reply",
