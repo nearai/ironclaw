@@ -93,16 +93,40 @@ use ironclaw_turns::{
 };
 
 use ironclaw_host_runtime::MemoryBackedUserProfileSource;
+#[cfg(any(test, feature = "test-support"))]
+use ironclaw_product_workflow::{
+    RebornOutboundDeliveryTargetCapabilities, RebornOutboundDeliveryTargetId,
+    RebornOutboundDeliveryTargetSummary, RebornServicesError, WebUiAuthenticatedCaller,
+};
 use ironclaw_turns::run_profile::UserProfileContext;
 
 use crate::default_system_prompt::DefaultSystemPromptIdentitySource;
 use crate::factory::{LocalDevRootFilesystem, LocalDevTurnStateStore, builtin_extension_registry};
 use crate::local_dev_capability_policy::local_dev_capability_policy;
+#[cfg(any(test, feature = "test-support"))]
+use crate::outbound_preferences::OutboundDeliveryTargetEntry;
 use crate::outbound_preferences::{
     MutableOutboundDeliveryTargetRegistry, OutboundDeliveryTargetProvider,
     OutboundDeliveryTargetRegistrationOutcome, RebornOutboundPreferencesFacade,
 };
 use crate::projection::{RebornProjectionServices, build_reborn_projection_services};
+
+#[cfg(any(test, feature = "test-support"))]
+#[derive(Clone)]
+struct StaticOutboundDeliveryTargetProvider {
+    entry: OutboundDeliveryTargetEntry,
+}
+
+#[cfg(any(test, feature = "test-support"))]
+#[async_trait::async_trait]
+impl OutboundDeliveryTargetProvider for StaticOutboundDeliveryTargetProvider {
+    async fn list_outbound_delivery_targets(
+        &self,
+        _caller: &WebUiAuthenticatedCaller,
+    ) -> Result<Vec<OutboundDeliveryTargetEntry>, RebornServicesError> {
+        Ok(vec![self.entry.clone()])
+    }
+}
 use crate::runtime_input::{
     PollSettings, RebornRuntimeIdentity, RebornRuntimeInput, TriggerPollerAuthorizerConfig,
     TriggerPollerSettings,
@@ -1153,6 +1177,42 @@ impl RebornRuntime {
             })
     }
 
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn register_static_outbound_delivery_target_for_test(
+        &self,
+        provider_key: impl Into<String>,
+        target_id: RebornOutboundDeliveryTargetId,
+        channel: &str,
+        display_name: &str,
+        description: Option<&str>,
+        reply_target_binding_ref: ReplyTargetBindingRef,
+    ) -> Result<(), RebornRuntimeError> {
+        let summary = RebornOutboundDeliveryTargetSummary::new(
+            target_id,
+            channel,
+            display_name,
+            description.map(ToOwned::to_owned),
+        )
+        .map_err(|error| RebornRuntimeError::InvalidArgument {
+            reason: format!("invalid outbound delivery target summary: {error}"),
+        })?;
+        self.register_outbound_delivery_target_provider(
+            provider_key,
+            Arc::new(StaticOutboundDeliveryTargetProvider {
+                entry: OutboundDeliveryTargetEntry {
+                    summary,
+                    capabilities: RebornOutboundDeliveryTargetCapabilities {
+                        final_replies: true,
+                        gate_prompts: false,
+                        auth_prompts: false,
+                    },
+                    reply_target_binding_ref,
+                },
+            }),
+        )
+        .map(|_| ())
+    }
+
     #[cfg_attr(not(feature = "slack-v2-host-beta"), allow(dead_code))]
     pub(crate) fn outbound_delivery_target_provider_key_registered(
         &self,
@@ -1236,6 +1296,41 @@ impl RebornRuntime {
                 rt.workspace_mounts.clone(),
             ))
         })
+    }
+
+    /// Read-only scoped filesystem spanning every mount the standalone WebUI
+    /// filesystem viewer can browse (workspace files + persistent memory), over
+    /// the same composite root the agent's tools resolve through. `None` when no
+    /// local runtime is composed, or when the browse mount view can't be built.
+    ///
+    /// Distinct from [`Self::webui_workspace_filesystem`]: that handle is the
+    /// read-write workspace-only view used to land attachments, whereas this is
+    /// a strictly read-only, multi-mount navigation view.
+    pub(crate) fn webui_browse_filesystem(
+        &self,
+    ) -> Option<Arc<ironclaw_filesystem::ScopedFilesystem<crate::factory::LocalDevRootFilesystem>>>
+    {
+        let rt = self.services.local_runtime.as_ref()?;
+        let view = match crate::local_dev_mounts::browse_mount_view() {
+            Ok(view) => view,
+            Err(error) => {
+                // Built from static aliases/targets, so this should never fail;
+                // if it does, log loudly rather than silently disabling the
+                // filesystem viewer with a bare `None`.
+                tracing::error!(
+                    target = "ironclaw_reborn_composition::webui",
+                    %error,
+                    "failed to build webui browse mount view; filesystem viewer unavailable",
+                );
+                return None;
+            }
+        };
+        Some(Arc::new(
+            ironclaw_filesystem::ScopedFilesystem::with_fixed_view(
+                Arc::clone(&rt.extension_filesystem),
+                view,
+            ),
+        ))
     }
 
     /// Test-only handle on the resource governor backing the budget
@@ -7065,6 +7160,7 @@ mod tests {
                 WebUiCreateThreadRequest {
                     client_action_id: Some("create-webui-stream-thread".to_string()),
                     requested_thread_id: None,
+                    project_id: None,
                 },
             )
             .await
@@ -7749,6 +7845,7 @@ mod tests {
                 WebUiCreateThreadRequest {
                     client_action_id: Some("create-webui-approval-thread".to_string()),
                     requested_thread_id: None,
+                    project_id: None,
                 },
             )
             .await
@@ -7816,6 +7913,7 @@ mod tests {
                 WebUiCreateThreadRequest {
                     client_action_id: Some("create-webui-auth-thread".to_string()),
                     requested_thread_id: None,
+                    project_id: None,
                 },
             )
             .await
@@ -7882,6 +7980,7 @@ mod tests {
                 WebUiCreateThreadRequest {
                     client_action_id: Some("create-webui-audit-thread".to_string()),
                     requested_thread_id: None,
+                    project_id: None,
                 },
             )
             .await
@@ -8107,6 +8206,7 @@ mod tests {
                 WebUiCreateThreadRequest {
                     client_action_id: Some("create-webui-skill-thread".to_string()),
                     requested_thread_id: None,
+                    project_id: None,
                 },
             )
             .await
@@ -8449,6 +8549,7 @@ mod tests {
                 WebUiCreateThreadRequest {
                     client_action_id: Some("create-rejected-busy-thread".to_string()),
                     requested_thread_id: None,
+                    project_id: None,
                 },
             )
             .await

@@ -106,6 +106,11 @@ pub(crate) struct CapabilityBatchTurnSummary {
     /// Completed-call signatures that explicitly reported new evidence/state.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub made_progress_signatures: Vec<CapabilityCallSignature>,
+    /// Completed-call signatures whose output repeated this batch (NoChange).
+    /// Used to terminalize the repeated-call warning only on genuine
+    /// output-stagnation, never on failing/blocked calls.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub no_change_signatures: Vec<CapabilityCallSignature>,
 }
 
 impl CapabilityBatchTurnSummary {
@@ -116,6 +121,7 @@ impl CapabilityBatchTurnSummary {
             no_progress_count: 0,
             observed_signatures: Vec::new(),
             made_progress_signatures: Vec::new(),
+            no_change_signatures: Vec::new(),
         }
     }
 
@@ -126,11 +132,12 @@ impl CapabilityBatchTurnSummary {
         terminate_hint: bool,
     ) {
         push_unique_signature(&mut self.observed_signatures, signature.clone());
-        if matches!(
-            progress,
-            CapabilityProgress::NoChange | CapabilityProgress::Blocked
-        ) {
+        // Only genuine NoChange counts as no-progress. `Blocked` is a tool
+        // failure, not a wedged loop — failures route through recovery and are
+        // bounded by the budget/iteration limit, never the no-progress escape.
+        if progress == CapabilityProgress::NoChange {
             self.no_progress_count = self.no_progress_count.saturating_add(1);
+            push_unique_signature(&mut self.no_change_signatures, signature.clone());
         }
         if progress == CapabilityProgress::MadeProgress {
             push_unique_signature(&mut self.made_progress_signatures, signature);
@@ -440,7 +447,7 @@ fn transition_existing_warning(
         RepeatedCallWarningPhase::Rendered => {
             if signature_made_progress(just_completed, &signature) {
                 None
-            } else if signature_observed(just_completed, &signature) {
+            } else if signature_no_change(just_completed, &signature) {
                 Some(RepeatedCallWarningState::terminal_ready(signature))
             } else {
                 Some(RepeatedCallWarningState::rendered(signature))
@@ -452,11 +459,11 @@ fn transition_existing_warning(
     }
 }
 
-fn signature_observed(just_completed: &TurnSummary, signature: &CapabilityCallSignature) -> bool {
+fn signature_no_change(just_completed: &TurnSummary, signature: &CapabilityCallSignature) -> bool {
     just_completed.kind == TurnEndKind::AfterCapabilityBatch
         && just_completed
             .capability_batch
-            .observed_signatures
+            .no_change_signatures
             .contains(signature)
 }
 
@@ -899,7 +906,11 @@ mod tests {
         }
 
         #[tokio::test]
-        async fn rendered_repeated_signature_warning_and_unknown_progress_triggers_no_progress() {
+        async fn rendered_repeated_signature_warning_and_unknown_progress_does_not_terminalize() {
+            // PR3: only a genuine NoChange repeat (the output actually stayed the
+            // same) terminalizes the warning. `Unknown` progress — an older host
+            // or an unclassified result — is NOT treated as no-progress, so the
+            // warning stays Rendered and the loop continues.
             let strategy = DefaultStopConditionStrategy::default();
             let mut state = LoopExecutionState::initial_for_run(&test_run_context());
             let signature = CapabilityCallSignature::from_call(
@@ -918,18 +929,13 @@ mod tests {
 
             let (state, outcome) = observe_and_decide(&strategy, state, summary).await;
 
-            assert!(matches!(
-                outcome,
-                StopOutcome::Stop {
-                    kind: StopKind::NoProgressDetected
-                }
-            ));
+            assert!(matches!(outcome, StopOutcome::Continue { .. }));
             let warning = state
                 .stop_state
                 .repeated_call_warning
-                .expect("repeated call warning should terminalize");
+                .expect("repeated call warning should remain rendered, not terminalize");
             assert_eq!(warning.signature, signature);
-            assert_eq!(warning.phase, RepeatedCallWarningPhase::TerminalReady);
+            assert_eq!(warning.phase, RepeatedCallWarningPhase::Rendered);
         }
 
         #[tokio::test]

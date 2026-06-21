@@ -632,6 +632,18 @@ impl RebornProductAuthServices {
         self.credential_account_record_source.clone()
     }
 
+    /// Test-support access to the owner-scoped credential account record source.
+    ///
+    /// Live fixture recorders use this to copy explicitly requested product-auth
+    /// accounts from a developer's local Reborn store into an isolated test
+    /// runtime without cloning the whole store.
+    #[cfg(feature = "test-support")]
+    pub fn credential_account_record_source_for_test(
+        &self,
+    ) -> Arc<dyn CredentialAccountRecordSource> {
+        self.credential_account_record_source()
+    }
+
     pub(crate) fn runtime_credential_account_selection_service(
         &self,
     ) -> Arc<dyn RuntimeCredentialAccountSelectionService> {

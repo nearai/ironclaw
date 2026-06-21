@@ -65,6 +65,7 @@ mod local_runtime_profile;
 mod manual_token_flow;
 mod mcp;
 mod mcp_discovery;
+mod mount_filesystem_reader;
 #[cfg(all(feature = "root-llm-provider", feature = "webui-v2-beta"))]
 mod nearai_login_serve;
 mod nearai_mcp;
@@ -89,6 +90,7 @@ mod production_runtime_policy;
 mod profile;
 mod profile_approval_authorization;
 mod project_filesystem_reader;
+mod project_service;
 mod projection;
 mod trajectory_observer;
 pub use auth_prompt::{AuthChallengeProvider, AuthChallengeView, BlockedAuthFlowCanceller};

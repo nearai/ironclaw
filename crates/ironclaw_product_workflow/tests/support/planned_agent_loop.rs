@@ -818,6 +818,7 @@ impl LoopCapabilityPort for RecordingCapabilityPort {
             progress: ironclaw_turns::run_profile::CapabilityProgress::MadeProgress,
             terminate_hint: self.capability.terminate_hint,
             byte_len: 0,
+            output_digest: None,
         }))
     }
 

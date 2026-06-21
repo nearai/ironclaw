@@ -1045,6 +1045,27 @@ async fn bundled_github_wasm_builds_create_repo_fork_and_release_requests() {
 }
 
 #[tokio::test]
+async fn bundled_github_wasm_get_authenticated_user_uses_user_endpoint() {
+    let http = Arc::new(RecordingWasmHostHttp::ok(WasmHttpResponse {
+        status: 200,
+        headers_json: "{}".to_string(),
+        body: br#"{"login":"serrrfirat","type":"User"}"#.to_vec(),
+    }));
+    let user = execute_bundled_github_wasm(
+        "github.get_authenticated_user",
+        json!({}),
+        Arc::clone(&http),
+    );
+
+    assert_eq!(user.error, None);
+    let user: serde_json::Value =
+        serde_json::from_str(user.output_json.as_deref().unwrap()).unwrap();
+    assert_eq!(user["login"], json!("serrrfirat"));
+    assert_eq!(user["type"], json!("User"));
+    assert_single_wasm_request(&http, "GET", "https://api.github.com/user", None);
+}
+
+#[tokio::test]
 async fn bundled_github_wasm_rejects_relative_file_path_segments_before_egress() {
     let http = Arc::new(RecordingWasmHostHttp::ok(WasmHttpResponse {
         status: 200,

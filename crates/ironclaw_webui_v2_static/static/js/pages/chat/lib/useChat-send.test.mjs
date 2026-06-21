@@ -1256,7 +1256,15 @@ test("useChat.send: connectable channel fetch failures submit the prompt", async
   assert.equal(loggedErrors[0][0], "Failed to resolve connectable channels:");
 });
 
-function createResolveGateContext({ stateUpdates = [] } = {}) {
+function createResolveGateContext({
+  stateUpdates = [],
+  resolveGateResponse = {
+    outcome: "resumed",
+    run_id: "run-1",
+    thread_id: "thread-1",
+    status: "queued",
+  },
+} = {}) {
   // useChat state call order: cooldownUntil(0), now(1), activeRun(2),
   // channelConnectAction(3), isProcessing(4), pendingGate(5).
   const pendingGate = { runId: "run-1", gateRef: "gate-1" };
@@ -1292,19 +1300,17 @@ function createResolveGateContext({ stateUpdates = [] } = {}) {
     recordAcceptedMessageRef,
     removePending,
     resolveChannelConnectCommand,
-    resolveGateRequest: async () => ({
-      outcome: "resumed",
-      run_id: "run-1",
-      thread_id: "thread-1",
-      status: "queued",
-    }),
+    resolveGateRequest: async () => resolveGateResponse,
     sendMessage: async () => {
       throw new Error("sendMessage should not run");
     },
     setInterval,
     setTimeout,
     submitManualToken: async () => {},
-    useChatEvents: () => () => {},
+    useChatEvents: (args) => {
+      context.chatEventsArgs = args;
+      return () => {};
+    },
     useHistory: () => ({
       messages: [],
       hasMore: false,
@@ -1343,9 +1349,15 @@ test("useChat.resolveGate: denied keeps isProcessing true and does not clear act
     (u) => u.index === 2 && u.value === null,
   );
   assert.equal(activeRunClears.length, 0, "resolveGate must not clear activeRun");
+  assert.deepEqual(
+    JSON.parse(JSON.stringify(
+      context.chatEventsArgs.locallyResolvedGatesRef.current.get("run-1\ngate-1"),
+    )),
+    { resolution: "denied", outcome: "resumed" },
+  );
 });
 
-test("useChat.resolveGate: cancelled keeps isProcessing true and does not clear activeRun", async () => {
+test("useChat.resolveGate: resumed cancelled auth keeps processing until follow-up run settles", async () => {
   const stateUpdates = [];
   const context = createResolveGateContext({ stateUpdates });
 
@@ -1365,6 +1377,46 @@ test("useChat.resolveGate: cancelled keeps isProcessing true and does not clear 
     (u) => u.index === 2 && u.value === null,
   );
   assert.equal(activeRunClears.length, 0, "resolveGate must not clear activeRun");
+  assert.deepEqual(
+    JSON.parse(JSON.stringify(
+      context.chatEventsArgs.locallyResolvedGatesRef.current.get("run-1\ngate-1"),
+    )),
+    { resolution: "cancelled", outcome: "resumed" },
+  );
+});
+
+test("useChat.resolveGate: terminal cancelled clears processing and activeRun", async () => {
+  const stateUpdates = [];
+  const context = createResolveGateContext({
+    stateUpdates,
+    resolveGateResponse: {
+      outcome: "cancelled",
+      run_id: "run-1",
+      thread_id: "thread-1",
+      status: "cancelled",
+    },
+  });
+
+  runUseChatSource(context);
+
+  const chat = context.globalThis.__testExports.useChat("thread-1");
+  await chat.resolveGate("cancelled");
+
+  const isProcessingUpdates = stateUpdates.filter((u) => u.index === 4);
+  assert.ok(isProcessingUpdates.length > 0, "isProcessing should be updated");
+  assert.equal(isProcessingUpdates[isProcessingUpdates.length - 1].value, false);
+
+  const pendingGateUpdates = stateUpdates.filter((u) => u.index === 5);
+  assert.equal(pendingGateUpdates[pendingGateUpdates.length - 1].value, null);
+
+  const activeRunUpdates = stateUpdates.filter((u) => u.index === 2);
+  assert.equal(activeRunUpdates[activeRunUpdates.length - 1].value, null);
+  assert.deepEqual(
+    JSON.parse(JSON.stringify(
+      context.chatEventsArgs.locallyResolvedGatesRef.current.get("run-1\ngate-1"),
+    )),
+    { resolution: "cancelled", outcome: "cancelled" },
+  );
 });
 
 test("useChat.resolveGate: approved also keeps isProcessing true", async () => {

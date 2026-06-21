@@ -621,7 +621,7 @@ async fn item_to_payloads(
                     .await
                 }
                 ironclaw_event_streams::ProductProjectionEnvelope::ThreadLiveUpdate(update) => {
-                    live_update_payloads(scope, update, cursor, last_live_cursor)
+                    live_update_payloads(scope, display_previews, update, cursor, last_live_cursor)
                 }
                 _ => Err(internal_projection_error(
                     "unexpected projection update envelope",
@@ -653,6 +653,7 @@ async fn item_to_payloads(
 
 fn live_update_payloads(
     scope: &TurnScope,
+    display_previews: &dyn CapabilityDisplayPreviewSource,
     update: &ThreadLiveProjectionUpdate,
     cursor: EventProjectionCursor,
     last_live_cursor: Option<EventCursor>,
@@ -660,7 +661,7 @@ fn live_update_payloads(
     if last_live_cursor.is_some_and(|last| cursor.runtime <= last) {
         return Ok(None);
     }
-    let items = product_items_for_live_update(update);
+    let items = product_items_for_live_update(display_previews, update);
     if items.is_empty() {
         return Ok(None);
     }
@@ -885,6 +886,10 @@ async fn runtime_payload_from_candidate(
         }
         RuntimePayloadCandidate::CapabilityActivity(activity) => {
             let activity_order = activity.activity_order_cursor().as_u64();
+            // Surface the staged input on the still-running activity frame so
+            // the row shows `tool   <arg>` (and a populated Parameters tab)
+            // live, instead of a bare tool name until the result lands.
+            let running = display_previews.running_input(activity.invocation_id);
             CapabilityActivityView::new(CapabilityActivityViewInput {
                 invocation_id: activity.invocation_id,
                 turn_run_id: activity
@@ -898,6 +903,8 @@ async fn runtime_payload_from_candidate(
                 process_id: activity.process_id,
                 output_bytes: activity.output_bytes,
                 error_kind: activity.error_kind,
+                subtitle: running.as_ref().and_then(|input| input.subtitle.clone()),
+                input_summary: running.and_then(|input| input.input_summary),
                 updated_at: activity.updated_at,
                 activity_order: Some(activity_order),
             })

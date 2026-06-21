@@ -227,6 +227,12 @@ pub struct CapabilityActivityView {
     pub process_id: Option<ProcessId>,
     pub output_bytes: Option<u64>,
     pub error_kind: Option<String>,
+    /// Inline primary-argument detail for the activity row, surfaced while the
+    /// invocation is still running (the completed card carries its own).
+    pub subtitle: Option<String>,
+    /// Per-tool parameter summary, surfaced while the invocation is still
+    /// running so the row's Parameters tab is populated before the result.
+    pub input_summary: Option<String>,
     pub updated_at: DateTime<Utc>,
     pub activity_order: Option<u64>,
 }
@@ -251,6 +257,10 @@ impl Serialize for CapabilityActivityView {
             process_id: &'a Option<ProcessId>,
             output_bytes: Option<u64>,
             error_kind: &'a Option<String>,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            subtitle: &'a Option<String>,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            input_summary: &'a Option<String>,
             updated_at: &'a DateTime<Utc>,
             #[serde(skip_serializing_if = "Option::is_none")]
             activity_order: Option<u64>,
@@ -267,6 +277,8 @@ impl Serialize for CapabilityActivityView {
             process_id: &self.process_id,
             output_bytes: self.output_bytes,
             error_kind: &self.error_kind,
+            subtitle: &self.subtitle,
+            input_summary: &self.input_summary,
             updated_at: &self.updated_at,
             activity_order: self.activity_order,
         }
@@ -287,6 +299,8 @@ impl CapabilityActivityView {
             process_id: input.process_id,
             output_bytes: input.output_bytes,
             error_kind: input.error_kind,
+            subtitle: input.subtitle,
+            input_summary: input.input_summary,
             updated_at: input.updated_at,
             activity_order: input.activity_order,
         };
@@ -298,6 +312,20 @@ impl CapabilityActivityView {
         if let Some(error_kind) = self.error_kind.as_deref() {
             validate_error_kind("capability_activity_error_kind", error_kind)?;
         }
+        // The running-frame input fields are sanitized/byte-bounded upstream;
+        // re-validate them at the product boundary (as `error_kind` is) so an
+        // upstream regression can't leak unbounded/control-char text to the
+        // browser.
+        validate_optional_display_text(
+            "capability_activity_subtitle",
+            self.subtitle.as_deref(),
+            CAPABILITY_DISPLAY_SUMMARY_MAX_BYTES,
+        )?;
+        validate_optional_display_text(
+            "capability_activity_input_summary",
+            self.input_summary.as_deref(),
+            CAPABILITY_DISPLAY_SUMMARY_MAX_BYTES,
+        )?;
         Ok(())
     }
 }
@@ -314,6 +342,8 @@ pub struct CapabilityActivityViewInput {
     pub process_id: Option<ProcessId>,
     pub output_bytes: Option<u64>,
     pub error_kind: Option<String>,
+    pub subtitle: Option<String>,
+    pub input_summary: Option<String>,
     pub updated_at: DateTime<Utc>,
     pub activity_order: Option<u64>,
 }
@@ -336,6 +366,10 @@ impl<'de> Deserialize<'de> for CapabilityActivityView {
             process_id: Option<ProcessId>,
             output_bytes: Option<u64>,
             error_kind: Option<String>,
+            #[serde(default)]
+            subtitle: Option<String>,
+            #[serde(default)]
+            input_summary: Option<String>,
             updated_at: DateTime<Utc>,
             activity_order: Option<u64>,
         }
@@ -351,6 +385,8 @@ impl<'de> Deserialize<'de> for CapabilityActivityView {
             process_id: wire.process_id,
             output_bytes: wire.output_bytes,
             error_kind: wire.error_kind,
+            subtitle: wire.subtitle,
+            input_summary: wire.input_summary,
             updated_at: wire.updated_at,
             activity_order: wire.activity_order,
         })
@@ -891,8 +927,11 @@ impl<'de> Deserialize<'de> for ApprovalPromptDetailView {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AuthPromptChallengeKind {
-    /// Browser must open `authorization_url` in a new tab and wait for the
-    /// OAuth callback to resume the run server-side.
+    /// Browser-based OAuth challenge. When `authorization_url` is present, the
+    /// browser can open it in a new tab and wait for the OAuth callback to
+    /// resume the run server-side. When the provider is unavailable or
+    /// unconfigured, the URL may be absent so UI can still render an
+    /// OAuth-specific unavailable state instead of the generic auth fallback.
     #[serde(rename = "oauth_url")]
     OAuthUrl,
     /// User must type a manual token (PAT, API key) into the chat form.
@@ -1377,6 +1416,8 @@ mod tests {
                     process_id: None,
                     output_bytes: None,
                     error_kind: None,
+                    subtitle: None,
+                    input_summary: None,
                     updated_at: Utc::now(),
                     activity_order: None,
                 })
@@ -1707,6 +1748,8 @@ mod tests {
             process_id: None,
             output_bytes: Some(12),
             error_kind: None,
+            subtitle: None,
+            input_summary: None,
             updated_at: Utc::now(),
             activity_order: None,
         })
@@ -1937,6 +1980,8 @@ mod tests {
             process_id: None,
             output_bytes: None,
             error_kind: Some("/tmp/private-host-path".to_string()),
+            subtitle: None,
+            input_summary: None,
             updated_at: Utc::now(),
             activity_order: None,
         };
@@ -1965,5 +2010,52 @@ mod tests {
             view.error_kind.as_deref(),
             Some(CAPABILITY_ACTIVITY_UNCLASSIFIED_ERROR_KIND)
         );
+    }
+
+    fn capability_activity_view_input_for_detail_test() -> CapabilityActivityViewInput {
+        CapabilityActivityViewInput {
+            invocation_id: InvocationId::new(),
+            turn_run_id: Some(TurnRunId::new()),
+            thread_id: Some(ThreadId::new("thread-tool-activity").expect("thread id")),
+            capability_id: CapabilityId::new("nearai.web_search").expect("capability id"),
+            status: CapabilityActivityStatusView::Started,
+            provider: None,
+            runtime: None,
+            process_id: None,
+            output_bytes: None,
+            error_kind: None,
+            subtitle: None,
+            input_summary: None,
+            updated_at: Utc::now(),
+            activity_order: None,
+        }
+    }
+
+    #[test]
+    fn capability_activity_view_rejects_oversized_running_input_fields() {
+        let oversized = "a".repeat(CAPABILITY_DISPLAY_SUMMARY_MAX_BYTES + 1);
+
+        let subtitle_input = CapabilityActivityViewInput {
+            subtitle: Some(oversized.clone()),
+            ..capability_activity_view_input_for_detail_test()
+        };
+        assert!(CapabilityActivityView::new(subtitle_input).is_err());
+
+        let summary_input = CapabilityActivityViewInput {
+            input_summary: Some(oversized),
+            ..capability_activity_view_input_for_detail_test()
+        };
+        assert!(CapabilityActivityView::new(summary_input).is_err());
+    }
+
+    #[test]
+    fn capability_activity_view_rejects_control_char_running_input_on_serialize() {
+        let view = CapabilityActivityView {
+            subtitle: Some("query\u{0}with-nul".to_string()),
+            ..CapabilityActivityView::new(capability_activity_view_input_for_detail_test())
+                .expect("base view")
+        };
+
+        assert!(serde_json::to_value(view).is_err());
     }
 }

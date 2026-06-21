@@ -116,6 +116,11 @@ mod tests {
             action_from_context(Some(r#"{"capability_id":"github.comment_issue"}"#)).unwrap(),
             "create_issue_comment"
         );
+        assert_eq!(
+            action_from_context(Some(r#"{"capability_id":"github.get_authenticated_user"}"#))
+                .unwrap(),
+            "get_authenticated_user"
+        );
     }
 
     #[test]
@@ -342,6 +347,31 @@ mod tests {
     }
 
     #[test]
+    fn get_authenticated_user_uses_user_endpoint() {
+        test_support::set_response(Ok(json!({
+            "login": "serrrfirat",
+            "type": "User"
+        })
+        .to_string()));
+
+        let output = execute_inner(
+            r#"{}"#,
+            Some(r#"{"capability_id":"github.get_authenticated_user"}"#),
+        )
+        .expect("github.get_authenticated_user should return authenticated user");
+        let output: serde_json::Value =
+            serde_json::from_str(&output).expect("mock output should be JSON");
+        assert_eq!(output["login"], "serrrfirat");
+        assert_eq!(output["type"], "User");
+
+        let requests = test_support::requests();
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].method, "GET");
+        assert_eq!(requests[0].body, None);
+        assert_eq!(requests[0].path, "/user");
+    }
+
+    #[test]
     fn list_repos_keeps_named_user_public_endpoint() {
         test_support::set_response(Ok(json!([]).to_string()));
 
@@ -352,10 +382,7 @@ mod tests {
         .expect("github.list_repos should list named user public repos");
 
         let requests = test_support::requests();
-        assert_eq!(
-            requests[0].path,
-            "/users/nearai/repos?per_page=11&page=2"
-        );
+        assert_eq!(requests[0].path, "/users/nearai/repos?per_page=11&page=2");
     }
 
     #[test]

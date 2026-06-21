@@ -54,10 +54,11 @@ pub use capability_allow_set::{
     CapabilityAllowSet, CapabilityResolveError, CapabilitySurfaceProfileResolver,
 };
 pub use capability_port::{
-    CapabilityResultWrite, CapabilityTrajectoryObserver, DecoratingLoopCapabilityPortFactory,
-    HostRuntimeLoopCapabilityPort, HostRuntimeLoopCapabilityPortFactory,
-    LoopCapabilityInputResolver, LoopCapabilityPortDecorator, LoopCapabilityPortFactory,
-    LoopCapabilityResultWriter, concurrency_hint_from_effects, loop_driver_execution_extension_id,
+    CapabilityResultWrite, CapabilityTrajectoryObserver, CapabilityWriteResult,
+    DecoratingLoopCapabilityPortFactory, HostRuntimeLoopCapabilityPort,
+    HostRuntimeLoopCapabilityPortFactory, LoopCapabilityInputResolver, LoopCapabilityPortDecorator,
+    LoopCapabilityPortFactory, LoopCapabilityResultWriter, concurrency_hint_from_effects,
+    loop_driver_execution_extension_id,
 };
 pub use capability_surface_filter::{
     CapabilitySurfaceProfileFilter, CapabilitySurfaceVisibleFilter,

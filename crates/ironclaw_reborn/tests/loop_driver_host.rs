@@ -37,16 +37,17 @@ use ironclaw_host_runtime::{
 };
 use ironclaw_loop_support::{
     CapabilityAllowSet, CapabilityResolveError, CapabilityResultWrite,
-    CapabilitySurfaceProfileResolver, EmptyLoopCapabilityPort, EmptyUserProfileSource,
-    HostIdentityContextBuildError, HostIdentityContextCandidate, HostIdentityContextSource,
-    HostIdentityMessageContent, HostInputBatch, HostInputEnvelope, HostInputQueue,
-    HostInputQueueError, HostManagedModelError, HostManagedModelErrorKind, HostManagedModelGateway,
-    HostManagedModelMessageRole, HostManagedModelRequest, HostManagedModelResponse,
-    HostRuntimeLoopCapabilityPort, HostSkillContextBuildError, HostSkillContextCandidate,
-    HostSkillContextSource, HostUserProfileSource, IdentityApplicability, IdentityFileName,
-    JsonSpawnSubagentInputCodec, LoopCapabilityInputResolver, LoopCapabilityPortFactory,
-    LoopCapabilityResultWriter, ProductLiveCancellationProbe, RunCancellationFactory,
-    RunCancellationHandle, identity_message_ref, loop_driver_execution_extension_id,
+    CapabilitySurfaceProfileResolver, CapabilityWriteResult, EmptyLoopCapabilityPort,
+    EmptyUserProfileSource, HostIdentityContextBuildError, HostIdentityContextCandidate,
+    HostIdentityContextSource, HostIdentityMessageContent, HostInputBatch, HostInputEnvelope,
+    HostInputQueue, HostInputQueueError, HostManagedModelError, HostManagedModelErrorKind,
+    HostManagedModelGateway, HostManagedModelMessageRole, HostManagedModelRequest,
+    HostManagedModelResponse, HostRuntimeLoopCapabilityPort, HostSkillContextBuildError,
+    HostSkillContextCandidate, HostSkillContextSource, HostUserProfileSource,
+    IdentityApplicability, IdentityFileName, JsonSpawnSubagentInputCodec,
+    LoopCapabilityInputResolver, LoopCapabilityPortFactory, LoopCapabilityResultWriter,
+    ProductLiveCancellationProbe, RunCancellationFactory, RunCancellationHandle,
+    identity_message_ref, loop_driver_execution_extension_id,
 };
 use ironclaw_processes::ProcessServices;
 use ironclaw_reborn::driver_registry::{
@@ -1764,19 +1765,19 @@ async fn turn_runner_worker_emits_thread_run_correlated_operator_log() {
     );
 
     let cancel = tokio_util::sync::CancellationToken::new();
-    let cancel_clone = cancel.clone();
-    let handle = tokio::spawn(async move { worker.run(cancel_clone).await });
-
-    wait_for_run_status(
-        turn_store.as_ref(),
-        &fixture.context.scope,
-        run_id,
-        TurnStatus::Completed,
-        "turn runner should complete queued run for operator log correlation",
-    )
-    .await;
-    cancel.cancel();
-    handle.await.unwrap();
+    let worker_done = worker.run(cancel.clone());
+    let completion = async {
+        wait_for_run_status(
+            turn_store.as_ref(),
+            &fixture.context.scope,
+            run_id,
+            TurnStatus::Completed,
+            "turn runner should complete queued run for operator log correlation",
+        )
+        .await;
+        cancel.cancel();
+    };
+    tokio::join!(worker_done, completion);
 
     assert!(
         capture.contains(
@@ -7133,7 +7134,7 @@ impl LoopCapabilityResultWriter for InMemoryCapabilityIo {
     async fn write_capability_result(
         &self,
         write: CapabilityResultWrite<'_>,
-    ) -> Result<(LoopResultRef, u64), AgentLoopHostError> {
+    ) -> Result<CapabilityWriteResult, AgentLoopHostError> {
         let mut remaining_failures = self.fail_result_writes_remaining.lock().unwrap();
         if *remaining_failures > 0 {
             *remaining_failures -= 1;
@@ -7143,6 +7144,7 @@ impl LoopCapabilityResultWriter for InMemoryCapabilityIo {
             ));
         }
         drop(remaining_failures);
+        let output = write.output.clone();
         self.results
             .lock()
             .unwrap()
@@ -7159,7 +7161,7 @@ impl LoopCapabilityResultWriter for InMemoryCapabilityIo {
                 "capability result ref could not be represented",
             )
         })?;
-        Ok((result_ref, 0))
+        Ok(CapabilityWriteResult::from_output(result_ref, 0, &output))
     }
 }
 

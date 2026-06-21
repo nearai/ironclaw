@@ -13,7 +13,7 @@ use ironclaw_turns::{
 };
 
 use crate::{
-    state::{CheckpointKind, LoopExecutionState},
+    state::{CapabilityOutputObservation, CheckpointKind, LoopExecutionState},
     strategies::{
         BatchPolicy, CapabilityBatchTurnSummary, CapabilityErrorClass, CapabilityErrorSummary,
         GateKind, RecoveryOutcome, SanitizedStrategySummary, TurnSummary,
@@ -395,6 +395,7 @@ impl ExecutorStage<CapabilityInput> for CapabilityStage {
                             progress: CapabilityProgress::MadeProgress,
                             terminate_hint: false,
                             byte_len,
+                            output_digest: None,
                         };
                         append_completed_capability_result(
                             ctx.host,
@@ -663,6 +664,7 @@ impl CapabilityStage {
                     progress: CapabilityProgress::MadeProgress,
                     terminate_hint: false,
                     byte_len,
+                    output_digest: None,
                 };
                 AwaitDependentRunGateStage
                     .process(
@@ -1165,6 +1167,7 @@ async fn append_spawned_child_result(
         progress: CapabilityProgress::MadeProgress,
         terminate_hint: false,
         byte_len,
+        output_digest: None,
     };
     append_completed_capability_result(host, state, call, result, capability_batch).await
 }
@@ -1196,7 +1199,35 @@ async fn append_completed_capability_result(
 ) -> Result<(), AgentLoopExecutorError> {
     append_capability_result_ref(host, call, &result).await?;
     let signature = capability_call_signature(call)?;
-    capability_batch.record_result(signature, result.progress, result.terminate_hint);
+    // Output-aware progress: if this exact call (same signature) produced an
+    // output we have already observed this run, it advanced nothing — NoChange.
+    // A first-seen output is MadeProgress. Without a digest (synthetic results or
+    // older hosts) fall back to the host-reported progress. The membership check
+    // MUST run before recording the observation, or a first occurrence would
+    // immediately look "seen".
+    let progress = match result.output_digest {
+        Some(output_digest) => {
+            let already_seen = state
+                .seen_capability_output_digests
+                .iter()
+                .any(|observation| {
+                    observation.signature == signature && observation.output_digest == output_digest
+                });
+            if already_seen {
+                CapabilityProgress::NoChange
+            } else {
+                state
+                    .seen_capability_output_digests
+                    .push(CapabilityOutputObservation {
+                        signature: signature.clone(),
+                        output_digest,
+                    });
+                CapabilityProgress::MadeProgress
+            }
+        }
+        None => result.progress,
+    };
+    capability_batch.record_result(signature, progress, result.terminate_hint);
     push_completed_result(state, &call.capability_id, result);
     Ok(())
 }
@@ -1274,6 +1305,7 @@ mod tests {
             progress: CapabilityProgress::MadeProgress,
             terminate_hint: false,
             byte_len: 0,
+            output_digest: None,
         })
     }
 

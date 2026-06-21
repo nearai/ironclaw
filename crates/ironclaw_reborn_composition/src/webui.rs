@@ -111,6 +111,14 @@ pub(crate) fn build_webui_services_with_connectable_channels(
                 crate::attachment_landing::ProjectScopedAttachmentReader::new(workspace_filesystem),
             ));
     }
+    // Standalone read-only filesystem viewer: browses memory + workspace over a
+    // dedicated read-only multi-mount view (not the read-write workspace handle
+    // above), so navigation can never become a write path.
+    if let Some(browse_filesystem) = runtime.webui_browse_filesystem() {
+        api = api.with_filesystem_browser(Arc::new(
+            crate::mount_filesystem_reader::MountScopedFilesystemReader::new(browse_filesystem),
+        ));
+    }
     if let Some(skill_activation_source) = runtime.webui_skill_activation_source() {
         let activation_recorder = Arc::clone(&skill_activation_source);
         let activation_clearer = skill_activation_source;
@@ -190,6 +198,11 @@ pub(crate) fn build_webui_services_with_connectable_channels(
             RebornAutomationProductFacade::new(repository)
                 .with_scheduler_enabled(services.readiness.workers.trigger_poller),
         ));
+    }
+    // First-class projects + membership (ACL). The local-dev graph builds the
+    // access-controlled facade once; production wiring is a follow-up.
+    if let Some(local_runtime) = &services.local_runtime {
+        api = api.with_project_service(Arc::clone(&local_runtime.project_service));
     }
     if let Some(local_runtime) = &services.local_runtime {
         api = api.with_outbound_preferences_facade(Arc::new(RebornOutboundPreferencesFacade::new(

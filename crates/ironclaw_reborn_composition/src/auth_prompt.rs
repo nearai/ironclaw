@@ -155,7 +155,7 @@ fn auth_prompt_from_credential_requirement(
             view.account_label = Some(provider.clone());
         }
         RuntimeCredentialAccountSetup::OAuth { .. } => {
-            view.challenge_kind = Some(AuthPromptChallengeKind::Other);
+            view.challenge_kind = Some(AuthPromptChallengeKind::OAuthUrl);
         }
     }
     view.provider = Some(provider);

@@ -16,13 +16,15 @@ use ironclaw_extensions::{ExtensionManifest, ExtensionPackage, ExtensionRegistry
 use ironclaw_filesystem::{InMemoryBackend, ScopedFilesystem};
 use ironclaw_host_api::*;
 use ironclaw_host_runtime::{
-    CapabilitySurfaceVersion, DefaultHostRuntime, HostRuntime, RuntimeCapabilityRequest,
-    RuntimeFailureKind,
+    CapabilitySurfaceVersion, DefaultHostRuntime, HostRuntime, RuntimeCapabilityAuthResumeRequest,
+    RuntimeCapabilityRequest, RuntimeFailureKind,
 };
 use ironclaw_processes::{
     ProcessError, ProcessManager, ProcessRecord, ProcessStart, ProcessStatus,
 };
-use ironclaw_run_state::{InMemoryApprovalRequestStore, InMemoryRunStateStore};
+use ironclaw_run_state::{
+    InMemoryApprovalRequestStore, InMemoryRunStateStore, RunStart, RunStateStore, RunStatus,
+};
 use ironclaw_trust::{
     AdminConfig, AdminEntry, AuthorityCeiling, EffectiveTrustClass, HostTrustAssignment,
     HostTrustPolicy, TrustDecision, TrustProvenance,
@@ -91,6 +93,110 @@ async fn default_runtime_uses_persistent_policy_as_dispatch_authority() {
         other => panic!("expected Completed outcome, got {:?}", other),
     }
     assert!(dispatcher.has_request());
+}
+
+// Regression: an auth-resume (BlockedAuth → credential supplied → resume) for a
+// capability authorized only by a persistent-approval grant must re-apply that
+// grant on the resume preflight, exactly as the initial dispatch did. Before the
+// fix, `auth_resume_capability` skipped `apply_persistent_approval_policy`, so the
+// resume re-authorized a grant-less context and was denied — the credential gate
+// resumed only to fail authorization (observed when connecting Gmail: OAuth
+// completed, but the `extension_activate` auth-resume failed `authorization`,
+// while a later fresh dispatch succeeded). With `approval_request_id = None`
+// there is no approval lease to carry the grant, so the persistent policy is the
+// only authority and must be re-applied.
+#[tokio::test]
+async fn default_runtime_uses_persistent_policy_as_auth_resume_authority() {
+    let registry = Arc::new(registry_with_echo_capability());
+    let dispatcher = Arc::new(RecordingDispatcher::default());
+    let authorizer: Arc<dyn TrustAwareCapabilityDispatchAuthorizer> = Arc::new(GrantAuthorizer);
+    let run_state = Arc::new(InMemoryRunStateStore::new());
+    let approval_requests = Arc::new(InMemoryApprovalRequestStore::new());
+    let policies = Arc::new(InMemoryPersistentApprovalPolicyStore::new());
+    let context = execution_context_without_grants();
+    let scope = context.resource_scope.clone();
+    let invocation_id = context.invocation_id;
+    policies
+        .allow(PersistentApprovalPolicyInput {
+            scope: context.resource_scope.clone(),
+            action: PersistentApprovalAction::Dispatch,
+            capability_id: capability_id(),
+            grantee: Principal::Extension(context.extension_id.clone()),
+            approved_by: Principal::User(context.user_id.clone()),
+            constraints: GrantConstraints {
+                allowed_effects: vec![EffectKind::DispatchCapability],
+                mounts: MountView::default(),
+                network: NetworkPolicy::default(),
+                secrets: Vec::new(),
+                resource_ceiling: None,
+                expires_at: None,
+                max_invocations: Some(1),
+            },
+            source_approval_request_id: None,
+        })
+        .await
+        .expect("seed persistent policy");
+    let policy_store: Arc<dyn PersistentApprovalPolicyStore> = policies;
+
+    // Park the invocation in BlockedAuth, mirroring the state after the initial
+    // dispatch raised AuthRequired and opened the credential gate.
+    run_state
+        .start(RunStart {
+            invocation_id,
+            capability_id: capability_id(),
+            scope: scope.clone(),
+        })
+        .await
+        .expect("seed running invocation");
+    run_state
+        .block_auth(&scope, invocation_id, "AuthRequired".to_string())
+        .await
+        .expect("park invocation in BlockedAuth");
+
+    let runtime = DefaultHostRuntime::new(
+        registry,
+        dispatcher.clone(),
+        authorizer,
+        CapabilitySurfaceVersion::new("surface-v1").unwrap(),
+        local_test_runtime_policy(),
+    )
+    .with_trust_policy(Arc::new(local_manifest_trust_policy()))
+    .with_run_state(run_state.clone())
+    .with_approval_requests(approval_requests)
+    .with_persistent_approval_policies(policy_store);
+
+    // Auth-resume carries approval_request_id = None: there is no approval lease,
+    // so the persistent-approval grant is the only authority for the re-dispatch.
+    let outcome = runtime
+        .auth_resume_capability(RuntimeCapabilityAuthResumeRequest::new(
+            context,
+            capability_id(),
+            ResourceEstimate::default(),
+            json!({"message": "hello"}),
+            trust_decision_with_dispatch_authority(),
+            None,
+        ))
+        .await
+        .unwrap();
+
+    match outcome {
+        ironclaw_host_runtime::RuntimeCapabilityOutcome::Completed(completed) => {
+            assert_eq!(completed.capability_id, capability_id());
+            assert_eq!(completed.output, json!({"ok": true}));
+        }
+        other => panic!(
+            "expected Completed auth-resume outcome (persistent grant re-applied), got {:?}",
+            other
+        ),
+    }
+    assert!(dispatcher.has_request());
+
+    let resumed = run_state.get(&scope, invocation_id).await.unwrap().unwrap();
+    assert_eq!(
+        resumed.status,
+        RunStatus::Completed,
+        "auth-resume authorized by the persistent grant must complete the run"
+    );
 }
 
 #[tokio::test]
