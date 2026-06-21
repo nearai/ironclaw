@@ -1209,6 +1209,144 @@ mod tests {
         );
     }
 
+    /// A `TurnRunTransitionPort` where `apply_validated_loop_exit` always returns
+    /// `Err` (causing `LoopExitApplier::apply` to fail), but `fail_run` succeeds
+    /// and records the call (the normal recovery path inside `apply_exit`).
+    ///
+    /// Used to verify that a single exit-application failure — without a
+    /// secondary `fail_run` failure — is handled as a successful recovery:
+    /// `apply_exit` returns `Ok(())` and `execute_claimed_run` returns `Ok`.
+    #[derive(Default)]
+    struct FailingApplySucceedingFailRunPort {
+        fail_run_calls: Mutex<Vec<FailRunRequest>>,
+    }
+
+    impl FailingApplySucceedingFailRunPort {
+        fn fail_run_call_count(&self) -> usize {
+            self.fail_run_calls.lock().unwrap().len()
+        }
+
+        fn fail_run_calls(&self) -> Vec<FailRunRequest> {
+            self.fail_run_calls.lock().unwrap().clone()
+        }
+    }
+
+    #[async_trait]
+    impl TurnRunTransitionPort for FailingApplySucceedingFailRunPort {
+        async fn claim_next_run(
+            &self,
+            _request: ClaimRunRequest,
+        ) -> Result<Option<ClaimedTurnRun>, TurnError> {
+            Ok(None)
+        }
+
+        async fn heartbeat(&self, _request: HeartbeatRequest) -> Result<EventCursor, TurnError> {
+            Ok(EventCursor(0))
+        }
+
+        async fn recover_expired_leases(
+            &self,
+            _request: RecoverExpiredLeasesRequest,
+        ) -> Result<RecoverExpiredLeasesResponse, TurnError> {
+            Ok(RecoverExpiredLeasesResponse { recovered: vec![] })
+        }
+
+        async fn record_model_route_snapshot(
+            &self,
+            _request: RecordModelRouteSnapshotRequest,
+        ) -> Result<TurnRunState, TurnError> {
+            Ok(fake_run_state())
+        }
+
+        async fn block_run(&self, _request: BlockRunRequest) -> Result<TurnRunState, TurnError> {
+            Ok(fake_run_state())
+        }
+
+        async fn complete_run(
+            &self,
+            _request: CompleteRunRequest,
+        ) -> Result<TurnRunState, TurnError> {
+            Ok(fake_run_state())
+        }
+
+        async fn cancel_run(
+            &self,
+            _request: CancelRunCompletionRequest,
+        ) -> Result<TurnRunState, TurnError> {
+            Ok(fake_run_state())
+        }
+
+        async fn fail_run(&self, request: FailRunRequest) -> Result<TurnRunState, TurnError> {
+            self.fail_run_calls.lock().unwrap().push(request);
+            Ok(fake_run_state())
+        }
+
+        async fn relinquish_run(
+            &self,
+            _request: RelinquishRunRequest,
+        ) -> Result<TurnRunState, TurnError> {
+            Ok(fake_run_state())
+        }
+
+        /// Always returns `Err` so that `LoopExitApplier::apply` fails and
+        /// `apply_exit` falls through to the `record_runner_failure` recovery arm.
+        async fn apply_validated_loop_exit(
+            &self,
+            _request: ApplyValidatedLoopExitRequest,
+        ) -> Result<TurnRunState, TurnError> {
+            Err(TurnError::Unavailable {
+                reason: "induced: apply_validated_loop_exit always returns Err".to_string(),
+            })
+        }
+    }
+
+    /// When `loop_exit_applier.apply` (via `apply_validated_loop_exit`) fails but
+    /// the fallback `transitions.record_runner_failure` (via `fail_run`) succeeds,
+    /// `apply_exit` must:
+    ///   (a) return `Ok(())` — the run is left terminal via the fallback path, so
+    ///       the executor considers the run handled and does not bubble an error,
+    ///   (b) call `fail_run` exactly once — one recording of the terminal failure.
+    ///
+    /// Uses `make_executor_with_driver_and_shared_transitions` to wire the same
+    /// `FailingApplySucceedingFailRunPort` into both the `LoopExitApplier` (so
+    /// `apply_validated_loop_exit` is the one that fails) and the
+    /// `execute_claimed_run` call (so `fail_run` on the same port is the spy).
+    #[tokio::test]
+    async fn apply_exit_failure_recovers_via_fail_run_records_terminal() {
+        let transitions = Arc::new(FailingApplySucceedingFailRunPort::default());
+        let transitions_arc: Arc<dyn TurnRunTransitionPort> = transitions.clone();
+        let executor = make_executor_with_driver_and_shared_transitions(
+            Arc::new(SucceedingHostFactoryWithSnapshot),
+            Arc::clone(&transitions_arc),
+        );
+
+        let claimed = test_claimed_run();
+        let claimed_run_id = claimed.state.run_id;
+
+        let result = executor.execute_claimed_run(claimed, transitions_arc).await;
+
+        // (a) Recovery succeeded: apply_exit returns Ok(()) → execute_claimed_run
+        //     returns Ok(()).  The run is terminal via the fail_run path.
+        assert!(
+            result.is_ok(),
+            "expected Ok when apply_validated_loop_exit fails but fail_run succeeds; got {result:?}"
+        );
+
+        // (b) fail_run was called exactly once with the correct run id.
+        let calls = transitions.fail_run_calls();
+        assert_eq!(
+            transitions.fail_run_call_count(),
+            1,
+            "fail_run must be called exactly once to record the terminal failure; \
+             got {} call(s)",
+            calls.len()
+        );
+        assert_eq!(
+            calls[0].run_id, claimed_run_id,
+            "fail_run must be called with the claimed run's run_id"
+        );
+    }
+
     /// When BOTH `loop_exit_applier.apply` (via `apply_validated_loop_exit`) AND
     /// the fallback `transitions.record_runner_failure` (via `fail_run`) fail,
     /// `execute_claimed_run` must return `Err` so the scheduler can attempt its

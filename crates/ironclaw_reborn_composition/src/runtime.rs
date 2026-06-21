@@ -278,6 +278,32 @@ fn enforce_runtime_cutover_gate(
     }
 }
 
+/// Guard: production and migration-dry-run compositions always pre-mint
+/// [`SchedulerWakeWiring`] in `build_production_shaped` so the
+/// `HostRuntimeServices` notifier and the scheduler wake loop share exactly one
+/// channel. If the wiring is `None` for those profiles it means the composition
+/// contract was violated (e.g. a code path forgot to mint it), and starting the
+/// runtime would silently create a divergent scheduler-local channel. Extracted
+/// so the negative branch is unit-testable without a full libsql/postgres
+/// substrate.
+#[cfg(any(feature = "libsql", feature = "postgres"))]
+fn check_production_scheduler_wake_wiring(
+    profile: RebornCompositionProfile,
+    wiring: &Option<ironclaw_reborn::runtime::SchedulerWakeWiring>,
+) -> Result<(), RebornRuntimeError> {
+    if wiring.is_none()
+        && matches!(
+            profile,
+            RebornCompositionProfile::Production | RebornCompositionProfile::MigrationDryRun
+        )
+    {
+        return Err(RebornRuntimeError::InvalidArgument {
+            reason: "production runtime missing scheduler wake wiring".to_string(),
+        });
+    }
+    Ok(())
+}
+
 mod approval;
 mod auth_interaction;
 #[cfg(test)]
@@ -2330,16 +2356,7 @@ pub async fn build_reborn_runtime(
         // `HostRuntimeServices` notifier and the scheduler wake loop share one channel.
         // Fail closed if it is missing rather than let `build_default_planned_runtime`
         // mint a divergent scheduler-local channel (silent contract break).
-        if wiring.is_none()
-            && matches!(
-                profile,
-                RebornCompositionProfile::Production | RebornCompositionProfile::MigrationDryRun
-            )
-        {
-            return Err(RebornRuntimeError::InvalidArgument {
-                reason: "production runtime missing scheduler wake wiring".to_string(),
-            });
-        }
+        check_production_scheduler_wake_wiring(profile, &wiring)?;
         wiring
     };
     #[cfg(not(any(feature = "libsql", feature = "postgres")))]
@@ -3710,6 +3727,60 @@ mod tests {
         super::enforce_runtime_cutover_gate(RebornCompositionProfile::LocalDev, &readiness)
             .expect("local-dev runtime is not production traffic");
     }
+
+    // ── scheduler wake wiring guard unit tests ───────────────────────────────
+    // These exercise `check_production_scheduler_wake_wiring` directly so the
+    // fail-closed negative branch is covered without needing a full libsql /
+    // postgres substrate.  The guard is gated on the same `libsql | postgres`
+    // cfg as the production composition path it protects.
+
+    #[cfg(feature = "libsql")]
+    #[test]
+    fn production_scheduler_wake_guard_rejects_production_with_absent_wiring() {
+        let err = super::check_production_scheduler_wake_wiring(
+            RebornCompositionProfile::Production,
+            &None,
+        )
+        .expect_err(
+            "production runtime with absent scheduler wake wiring must be rejected fail-closed",
+        );
+        let RebornRuntimeError::InvalidArgument { reason } = err else {
+            panic!("expected InvalidArgument, got {err:?}");
+        };
+        assert!(
+            reason.contains("production runtime missing scheduler wake wiring"),
+            "reason should name the missing wiring, got: {reason}"
+        );
+    }
+
+    #[cfg(feature = "libsql")]
+    #[test]
+    fn production_scheduler_wake_guard_rejects_migration_dry_run_with_absent_wiring() {
+        let err = super::check_production_scheduler_wake_wiring(
+            RebornCompositionProfile::MigrationDryRun,
+            &None,
+        )
+        .expect_err(
+            "migration-dry-run with absent scheduler wake wiring must be rejected fail-closed",
+        );
+        let RebornRuntimeError::InvalidArgument { reason } = err else {
+            panic!("expected InvalidArgument, got {err:?}");
+        };
+        assert!(
+            reason.contains("production runtime missing scheduler wake wiring"),
+            "reason should name the missing wiring, got: {reason}"
+        );
+    }
+
+    #[cfg(feature = "libsql")]
+    #[test]
+    fn production_scheduler_wake_guard_passes_local_dev_with_absent_wiring() {
+        // Local-dev never mints scheduler wake wiring; the guard must not
+        // reject it (the scheduler loop mints its own channel on that path).
+        super::check_production_scheduler_wake_wiring(RebornCompositionProfile::LocalDev, &None)
+            .expect("local-dev is exempt from the scheduler wake wiring requirement");
+    }
+
     use ironclaw_authorization::CapabilityLeaseStore;
     use ironclaw_events::{EventStreamKey, ReadScope};
     use ironclaw_host_api::{
