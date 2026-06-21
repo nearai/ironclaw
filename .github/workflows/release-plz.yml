@@ -5,6 +5,9 @@ on:
     branches:
       - main
 
+env:
+  RELEASE_CACHE_ROOT: /mnt/static-runner-cache/ironclaw/release-plz
+
 jobs:
 
   # Release unpublished packages.
@@ -21,10 +24,27 @@ jobs:
         with:
           fetch-depth: 0
           persist-credentials: false
+      - &require-release-cache
+        name: Require ci-release mounted cache
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ ! -d /mnt/static-runner-cache || ! -w /mnt/static-runner-cache ]]; then
+            echo "::error::ci-release runner must provide writable /mnt/static-runner-cache"
+            exit 1
+          fi
+          mkdir -p \
+            "${RELEASE_CACHE_ROOT}/cargo-home" \
+            "${RELEASE_CACHE_ROOT}/cargo-target" \
+            "${RELEASE_CACHE_ROOT}/rustup-home"
+          {
+            echo "CARGO_HOME=${RELEASE_CACHE_ROOT}/cargo-home"
+            echo "CARGO_TARGET_DIR=${RELEASE_CACHE_ROOT}/cargo-target"
+            echo "RUSTUP_HOME=${RELEASE_CACHE_ROOT}/rustup-home"
+          } >> "$GITHUB_ENV"
       - &install-rust
         name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
-      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
       # Generating a GitHub token, so that PRs and tags created by
       # the release-plz-action can trigger actions workflows.
       - name: Generate GitHub token
@@ -56,8 +76,8 @@ jobs:
       cancel-in-progress: false
     steps:
       - *checkout
+      - *require-release-cache
       - *install-rust
-      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
       - name: Generate GitHub token
         uses: actions/create-github-app-token@fee1f7d63c2ff003460e3d139729b119787bc349 # v2
         id: generate-token

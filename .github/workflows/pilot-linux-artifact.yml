@@ -35,6 +35,7 @@ env:
   DEFAULT_RELEASE_TAG: pilot-native-matrix-channel-pilot
   DEFAULT_TARGET: x86_64-unknown-linux-gnu
   DEPLOYMENT_BRANCH: deployment-target
+  RELEASE_CACHE_ROOT: /mnt/static-runner-cache/ironclaw/pilot-linux-artifact
   RUST_TOOLCHAIN: 1.93.0
 
 concurrency:
@@ -54,6 +55,24 @@ jobs:
           # Later steps fetch deployment-target again to verify source ancestry in
           # this private repository.
           persist-credentials: true
+
+      - name: Require ci-release mounted cache
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ ! -d /mnt/static-runner-cache || ! -w /mnt/static-runner-cache ]]; then
+            echo "::error::ci-release runner must provide writable /mnt/static-runner-cache"
+            exit 1
+          fi
+          mkdir -p \
+            "${RELEASE_CACHE_ROOT}/cargo-home" \
+            "${RELEASE_CACHE_ROOT}/cargo-target" \
+            "${RELEASE_CACHE_ROOT}/rustup-home"
+          {
+            echo "CARGO_HOME=${RELEASE_CACHE_ROOT}/cargo-home"
+            echo "CARGO_TARGET_DIR=${RELEASE_CACHE_ROOT}/cargo-target"
+            echo "RUSTUP_HOME=${RELEASE_CACHE_ROOT}/rustup-home"
+          } >> "$GITHUB_ENV"
 
       - name: Resolve source inputs
         id: source
@@ -149,12 +168,6 @@ jobs:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
           targets: ${{ steps.source.outputs.target }}
 
-      - name: Cache Rust build outputs
-        if: steps.preflight.outputs.skip != 'true'
-        uses: swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
-        with:
-          key: pilot-${{ steps.source.outputs.target }}-${{ steps.source.outputs.safe_features }}
-
       - name: Check out exact source SHA
         if: steps.preflight.outputs.skip != 'true'
         run: git checkout --detach "${{ steps.source.outputs.source_sha }}"
@@ -188,7 +201,7 @@ jobs:
           stage_dir="${dist_dir}/stage"
           mkdir -p "${stage_dir}"
 
-          cp "target/${TARGET}/release/ironclaw" "${stage_dir}/ironclaw"
+          cp "${CARGO_TARGET_DIR}/${TARGET}/release/ironclaw" "${stage_dir}/ironclaw"
           chmod 0755 "${stage_dir}/ironclaw"
 
           cat > "${stage_dir}/BUILD-INFO.txt" <<EOF
@@ -252,17 +265,6 @@ jobs:
             echo "manifest_path=${dist_dir}/${MANIFEST_NAME}"
             echo "sha256=${archive_sha256}"
           } >> "$GITHUB_OUTPUT"
-
-      - name: Upload workflow artifact
-        if: steps.preflight.outputs.skip != 'true'
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: pilot-linux-artifact-${{ steps.source.outputs.archive_name }}
-          path: |
-            ${{ steps.package.outputs.archive_path }}
-            ${{ steps.package.outputs.checksum_path }}
-            ${{ steps.package.outputs.manifest_path }}
-          retention-days: 30
 
       - name: Verify source is still current before publish
         if: steps.preflight.outputs.skip != 'true'

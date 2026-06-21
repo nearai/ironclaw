@@ -33,6 +33,7 @@ on:
 
 env:
   IMAGE_NAME: nearaidev/ironclaw
+  RELEASE_CACHE_ROOT: /mnt/static-runner-cache/ironclaw/docker-image
   WORKER_IMAGE_NAME: nearaidev/ironclaw-worker
 
 jobs:
@@ -50,6 +51,17 @@ jobs:
         with:
           ref: ${{ github.event_name == 'schedule' && 'main' || '' }}
           persist-credentials: false
+
+      - name: Require ci-release mounted cache
+        run: |
+          set -euo pipefail
+          if [[ ! -d /mnt/static-runner-cache || ! -w /mnt/static-runner-cache ]]; then
+            echo "::error::ci-release runner must provide writable /mnt/static-runner-cache"
+            exit 1
+          fi
+          mkdir -p \
+            "${RELEASE_CACHE_ROOT}/ironclaw" \
+            "${RELEASE_CACHE_ROOT}/ironclaw-worker"
 
       - name: Resolve source git commit
         id: source_sha
@@ -170,8 +182,15 @@ jobs:
           labels: |
             ironclaw.git.sha=${{ steps.source_sha.outputs.sha }}
           platforms: linux/amd64
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          cache-from: type=local,src=${{ env.RELEASE_CACHE_ROOT }}/ironclaw
+          cache-to: type=local,dest=${{ env.RELEASE_CACHE_ROOT }}/ironclaw-next,mode=max
+
+      - name: Rotate local Docker build cache (ironclaw)
+        if: steps.check.outputs.skip != 'true'
+        run: |
+          set -euo pipefail
+          rm -rf "${RELEASE_CACHE_ROOT}/ironclaw"
+          mv "${RELEASE_CACHE_ROOT}/ironclaw-next" "${RELEASE_CACHE_ROOT}/ironclaw"
 
       - name: Build and push (ironclaw-worker)
         if: steps.check.outputs.skip != 'true'
@@ -184,8 +203,15 @@ jobs:
           labels: |
             ironclaw.git.sha=${{ steps.source_sha.outputs.sha }}
           platforms: linux/amd64
-          cache-from: type=gha,scope=worker
-          cache-to: type=gha,mode=max,scope=worker
+          cache-from: type=local,src=${{ env.RELEASE_CACHE_ROOT }}/ironclaw-worker
+          cache-to: type=local,dest=${{ env.RELEASE_CACHE_ROOT }}/ironclaw-worker-next,mode=max
+
+      - name: Rotate local Docker build cache (ironclaw-worker)
+        if: steps.check.outputs.skip != 'true'
+        run: |
+          set -euo pipefail
+          rm -rf "${RELEASE_CACHE_ROOT}/ironclaw-worker"
+          mv "${RELEASE_CACHE_ROOT}/ironclaw-worker-next" "${RELEASE_CACHE_ROOT}/ironclaw-worker"
 
       - name: Create releases-manager app token
         id: app-token

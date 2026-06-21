@@ -14,6 +14,7 @@ on:
 
 env:
   IMAGE_NAME: nearaidev/ironclaw
+  RELEASE_CACHE_ROOT: /mnt/static-runner-cache/ironclaw/rebuild-release-image
 
 jobs:
   build:
@@ -29,6 +30,15 @@ jobs:
         with:
           ref: ${{ inputs.source_ref }}
           persist-credentials: false
+
+      - name: Require ci-release mounted cache
+        run: |
+          set -euo pipefail
+          if [[ ! -d /mnt/static-runner-cache || ! -w /mnt/static-runner-cache ]]; then
+            echo "::error::ci-release runner must provide writable /mnt/static-runner-cache"
+            exit 1
+          fi
+          mkdir -p "${RELEASE_CACHE_ROOT}/runtime"
 
       - name: Extract version from Cargo.toml
         id: version
@@ -97,8 +107,15 @@ jobs:
           tags: ${{ env.IMAGE_NAME }}:${{ inputs.tag }}
           target: runtime
           platforms: linux/amd64
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          cache-from: type=local,src=${{ env.RELEASE_CACHE_ROOT }}/runtime
+          cache-to: type=local,dest=${{ env.RELEASE_CACHE_ROOT }}/runtime-next,mode=max
+
+      - name: Rotate local Docker build cache (runtime target)
+        if: steps.target.outputs.has_runtime_stage == 'true'
+        run: |
+          set -euo pipefail
+          rm -rf "${RELEASE_CACHE_ROOT}/runtime"
+          mv "${RELEASE_CACHE_ROOT}/runtime-next" "${RELEASE_CACHE_ROOT}/runtime"
 
       - name: Build and push (final stage)
         if: steps.target.outputs.has_runtime_stage != 'true'
@@ -108,8 +125,15 @@ jobs:
           push: true
           tags: ${{ env.IMAGE_NAME }}:${{ inputs.tag }}
           platforms: linux/amd64
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          cache-from: type=local,src=${{ env.RELEASE_CACHE_ROOT }}/runtime
+          cache-to: type=local,dest=${{ env.RELEASE_CACHE_ROOT }}/runtime-next,mode=max
+
+      - name: Rotate local Docker build cache (final stage)
+        if: steps.target.outputs.has_runtime_stage != 'true'
+        run: |
+          set -euo pipefail
+          rm -rf "${RELEASE_CACHE_ROOT}/runtime"
+          mv "${RELEASE_CACHE_ROOT}/runtime-next" "${RELEASE_CACHE_ROOT}/runtime"
 
       - name: Summary
         env:
