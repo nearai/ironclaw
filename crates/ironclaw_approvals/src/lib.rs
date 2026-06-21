@@ -4,8 +4,9 @@
 //! authorization leases. It does not prompt users, execute capabilities, or
 //! dispatch runtime work.
 
+mod capability_permission;
+mod cas_record;
 mod policy;
-mod tool_permission;
 
 use ironclaw_authorization::{CapabilityLease, CapabilityLeaseError, CapabilityLeaseStore};
 use ironclaw_events::AuditSink;
@@ -17,18 +18,18 @@ use ironclaw_host_api::{
 use ironclaw_run_state::{ApprovalRecord, ApprovalRequestStore, ApprovalStatus, RunStateError};
 use thiserror::Error;
 
+pub use capability_permission::{
+    CapabilityPermissionOverride, CapabilityPermissionOverrideInput,
+    CapabilityPermissionOverrideKey, CapabilityPermissionOverrideRecord,
+    CapabilityPermissionOverrideStore, CapabilityPermissionState, CapabilityPermissionStoreError,
+    FilesystemCapabilityPermissionOverrideStore, InMemoryCapabilityPermissionOverrideStore,
+};
 pub use policy::{
     FilesystemPersistentApprovalPolicyStore, InMemoryPersistentApprovalPolicyStore,
     PersistentApprovalAction, PersistentApprovalPolicy, PersistentApprovalPolicyError,
     PersistentApprovalPolicyInput, PersistentApprovalPolicyKey, PersistentApprovalPolicyStore,
     PersistentApprovalScope, permission_mode_allows_persistent_approval,
     persistent_approval_grant_issuer,
-};
-pub use tool_permission::{
-    FilesystemToolPermissionOverrideStore, InMemoryToolPermissionOverrideStore,
-    ToolPermissionOverride, ToolPermissionOverrideInput, ToolPermissionOverrideKey,
-    ToolPermissionOverrideRecord, ToolPermissionOverrideStore, ToolPermissionState,
-    ToolPermissionStoreError,
 };
 
 pub struct ApprovalResolver<'a, A, L>
