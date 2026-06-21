@@ -162,7 +162,10 @@ impl RebornTurnRunExecutor {
             .host_factory
             .create_host(claimed)
             .await
-            // `err.to_string()` preserves the full error chain; a narrower field would drop nested cause context.
+            // Use the error's full `Display` (`err.to_string()`) rather than a single
+            // field, so whatever context the host factory embedded in its message
+            // survives into `reason` (HostFactoryError is a flat message with no
+            // `source()` chain of its own).
             .map_err(|err| DriverInvocationError::HostCreationFailed {
                 reason: err.to_string(),
             })?;

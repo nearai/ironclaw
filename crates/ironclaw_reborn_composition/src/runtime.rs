@@ -2252,7 +2252,24 @@ pub async fn build_reborn_runtime(
     // `DefaultPlannedRuntimeParts.scheduler_wake_wiring` below. The local-dev path
     // leaves this `None` and `build_default_planned_runtime` mints its own wiring.
     #[cfg(any(feature = "libsql", feature = "postgres"))]
-    let production_scheduler_wake = services.production_scheduler_wake.take();
+    let production_scheduler_wake = {
+        let wiring = services.production_scheduler_wake.take();
+        // Production and migration-dry-run mint this in `build_production_shaped` so the
+        // `HostRuntimeServices` notifier and the scheduler wake loop share one channel.
+        // Fail closed if it is missing rather than let `build_default_planned_runtime`
+        // mint a divergent scheduler-local channel (silent contract break).
+        if wiring.is_none()
+            && matches!(
+                profile,
+                RebornCompositionProfile::Production | RebornCompositionProfile::MigrationDryRun
+            )
+        {
+            return Err(RebornRuntimeError::InvalidArgument {
+                reason: "production runtime missing scheduler wake wiring".to_string(),
+            });
+        }
+        wiring
+    };
     #[cfg(not(any(feature = "libsql", feature = "postgres")))]
     let production_scheduler_wake: Option<ironclaw_reborn::runtime::SchedulerWakeWiring> = None;
 
