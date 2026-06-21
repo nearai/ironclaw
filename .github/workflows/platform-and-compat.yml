@@ -1,4 +1,4 @@
-name: Tests (Legacy)
+name: Platform & Compat
 on:
   workflow_call:
     inputs:
@@ -27,7 +27,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: legacy-tests-${{ github.event_name }}-${{ github.head_ref || github.ref }}
+  group: platform-and-compat-${{ github.event_name }}-${{ github.head_ref || github.ref }}
   cancel-in-progress: true
 
 env:
@@ -153,19 +153,92 @@ jobs:
             echo "windows_matrix=${FULL}" >> "$GITHUB_OUTPUT"
           fi
 
-  tests:
-    name: Tests (${{ matrix.name }})
-    needs: [changes, matrix-config]
+  hooks-parity-tests:
+    name: Hooks Predicate-Backend Parity Tests
+    needs: changes
     if: needs.changes.outputs.docs_only != 'true' && needs.changes.outputs.has_legacy_tests == 'true' && needs.changes.outputs.has_core_code == 'true'
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 20
+    services:
+      postgres:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: ironclaw_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
     env:
       CARGO_PROFILE_DEV_DEBUG: 0
       CARGO_PROFILE_TEST_DEBUG: 0
+      DATABASE_URL: postgres://postgres:postgres@localhost/ironclaw_test
+      # Turn a missing/unreachable Postgres into a HARD failure so the full
+      # cross-backend matrix (in-memory + libSQL + Postgres) cannot skip-pass.
+      IRONCLAW_REQUIRE_POSTGRES: "1"
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          ref: ${{ inputs.ref || github.sha }}
+          persist-credentials: false
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          key: hooks-parity
+          # Keep saves to protected-branch and merge_group runs so the ~10 GB
+          # repo cache LRU is seeded by shared states, not arbitrary PR branches.
+          save-if: ${{ (github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'merge_group' }}
+      # Full parity matrix across all three backends: --features postgres
+      # compiles the Postgres leg, --features integration adds the multi-host
+      # adversarial suite, and IRONCLAW_REQUIRE_POSTGRES=1 (set above) makes the
+      # Postgres leg mandatory. The libSQL leg always runs (embedded temp-file).
+      - name: Run hooks parity matrix + multi-host adversarial suite (all backends)
+        run: |
+          timeout --signal=INT --kill-after=30s 15m \
+            cargo test -p ironclaw_hooks_parity --features postgres,integration -- --nocapture
+
+  windows-build:
+    name: Windows Build (${{ matrix.name }})
+    needs: [changes, matrix-config]
+    if: needs.changes.outputs.docs_only != 'true' && needs.changes.outputs.has_legacy_tests == 'true' && (github.event_name == 'push' || github.event_name == 'workflow_call')
+    runs-on: windows-latest
     strategy:
       fail-fast: true
       matrix:
-        include: ${{ fromJSON(needs.matrix-config.outputs.test_matrix) }}
+        include: ${{ fromJSON(needs.matrix-config.outputs.windows_matrix) }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          ref: ${{ inputs.ref || github.sha }}
+          persist-credentials: false
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          key: windows-${{ matrix.name }}
+          save-if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+      - name: Check compilation
+        run: cargo check --all --benches --tests --examples ${{ matrix.flags }}
+
+  wasm-wit-compat:
+    name: WASM WIT Compatibility
+    needs: changes
+    if: >
+      needs.changes.outputs.docs_only != 'true' &&
+      needs.changes.outputs.has_legacy_tests == 'true' &&
+      (github.event_name == 'push' || github.event_name == 'workflow_call' || needs.changes.outputs.has_wasm_abi_risk == 'true')
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      CARGO_PROFILE_DEV_DEBUG: 0
+      CARGO_PROFILE_TEST_DEBUG: 0
     steps:
       - name: Checkout repository
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
@@ -183,72 +256,28 @@ jobs:
           targets: wasm32-wasip2
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
-          key: ${{ matrix.name }}
+          key: wasm-extensions
           # Keep saves to protected-branch and merge_group runs so the ~10 GB
           # repo cache LRU is seeded by shared states, not arbitrary PR branches.
           save-if: ${{ (github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'merge_group' }}
       - name: Install cargo-component
         uses: ./.github/actions/install-cargo-component
-      - name: Build WASM artifacts for integration tests
+      - name: Build all WASM extensions against current WIT
+        run: ./scripts/build-wasm-extensions.sh
+      - name: Instantiation test (host linker compatibility)
         run: |
-          ./scripts/build-wasm-extensions.sh --channels
-          ./scripts/build-wasm-extensions.sh --first-party
-      - name: Run Tests
-        run: |
-          timeout --signal=INT --kill-after=30s 40m \
-            cargo test ${{ matrix.flags }} -- --nocapture
-      # The root cargo test invocation above runs only the `ironclaw`
-      # package's tests. Reborn memory regression coverage lives in
-      # `crates/ironclaw_memory/tests/*` and must be explicitly invoked
-      # with `-p ironclaw_memory` (or `--workspace`) — otherwise the
-      # Tier A guards for PR #3180 invariants compile but never run.
-      - name: Run reborn composition substrate tests
-        run: |
-          timeout --signal=INT --kill-after=30s 15m \
-            cargo test -p ironclaw_reborn_composition --no-default-features --features libsql,postgres --tests -- --nocapture
+          timeout --signal=INT --kill-after=30s 20m \
+            cargo test --all-features --test wit_compat -- --nocapture
 
-      - name: Run ironclaw_memory tests
-        run: |
-          timeout --signal=INT --kill-after=30s 15m \
-            cargo test -p ironclaw_memory --tests -- --nocapture
-
-  secret-store-contract-tests:
-    name: Secret Store Contract Tests
-    needs: changes
-    if: needs.changes.outputs.docs_only != 'true' && needs.changes.outputs.has_legacy_tests == 'true' && needs.changes.outputs.has_core_code == 'true'
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
-    env:
-      CARGO_PROFILE_DEV_DEBUG: 0
-      CARGO_PROFILE_TEST_DEBUG: 0
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
-        with:
-          ref: ${{ inputs.ref || github.sha }}
-          persist-credentials: false
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
-      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
-        with:
-          key: secret-store-contract
-          # Keep saves to protected-branch and merge_group runs so the ~10 GB
-          # repo cache LRU is seeded by shared states, not arbitrary PR branches.
-          save-if: ${{ (github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'merge_group' }}
-      - name: Run secret store contract
-        run: |
-          timeout --signal=INT --kill-after=30s 10m \
-            cargo test -p ironclaw_secrets --test secret_store_contract -- --nocapture
-
-  heavy-integration-tests:
-    name: Heavy Integration Tests
+  bench-compile:
+    name: Benchmark Compilation
     needs: changes
     if: >
       needs.changes.outputs.docs_only != 'true' &&
       needs.changes.outputs.has_legacy_tests == 'true' &&
-      (github.event_name == 'push' || github.event_name == 'workflow_call' || needs.changes.outputs.has_runtime_heavy_risk == 'true')
+      (github.event_name == 'push' || github.event_name == 'workflow_call') &&
+      needs.changes.outputs.has_core_code == 'true'
     runs-on: ubuntu-latest
-    timeout-minutes: 20
     steps:
       - name: Checkout repository
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
@@ -257,237 +286,103 @@ jobs:
           persist-credentials: false
       - name: Install Rust
         uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
-        with:
-          targets: wasm32-wasip2
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
-          key: heavy-integration
-          # Keep saves to protected-branch and merge_group runs so the ~10 GB
-          # repo cache LRU is seeded by shared states, not arbitrary PR branches.
-          save-if: ${{ (github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'merge_group' }}
-      - name: Build Telegram WASM channel
-        run: cargo build --manifest-path channels-src/telegram/Cargo.toml --target wasm32-wasip2 --release
-      - name: Run thread scheduling integration tests
-        run: |
-          timeout --signal=INT --kill-after=30s 15m \
-            cargo test --no-default-features --features libsql,integration --test e2e_thread_scheduling -- --nocapture
+          key: bench
+          save-if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+      - name: Compile benchmarks
+        run: cargo bench --all-features --no-run
 
-  telegram-integration-tests:
-    name: Telegram Integration Tests (${{ matrix.partition }})
+  docker-build:
+    name: Docker Build
     needs: changes
     if: >
       needs.changes.outputs.docs_only != 'true' &&
       needs.changes.outputs.has_legacy_tests == 'true' &&
-      (github.event_name == 'push' || github.event_name == 'workflow_call' || needs.changes.outputs.has_runtime_heavy_risk == 'true')
+      (github.event_name == 'push' || (github.event_name == 'workflow_call' && inputs.include_docker))
     runs-on: ubuntu-latest
-    timeout-minutes: 20
-    strategy:
-      fail-fast: true
-      matrix:
-        partition:
-          - 1/2
-          - 2/2
     steps:
       - name: Checkout repository
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
         with:
           ref: ${{ inputs.ref || github.sha }}
           persist-credentials: false
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+      - name: Build Docker image
+        run: docker build --target runtime -t ironclaw-test:ci .
+      - name: Build Reborn Docker image
+        run: docker build -f Dockerfile.reborn -t ironclaw-reborn-test:ci .
+
+  version-check:
+    name: Version Bump Check
+    runs-on: ubuntu-latest
+    needs: changes
+    if: >
+      (github.event_name == 'pull_request' || github.event_name == 'merge_group') &&
+      needs.changes.outputs.docs_only != 'true' &&
+      needs.changes.outputs.has_legacy_tests == 'true'
+    permissions:
+      contents: read
+      pull-requests: read
+      issues: read
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
         with:
-          targets: wasm32-wasip2
-      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
-        with:
-          key: telegram-integration-${{ matrix.partition }}
-          # Keep saves to protected-branch and merge_group runs so the ~10 GB
-          # repo cache LRU is seeded by shared states, not arbitrary PR branches.
-          save-if: ${{ (github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'merge_group' }}
-      - name: Build Telegram WASM channel
-        run: cargo build --manifest-path channels-src/telegram/Cargo.toml --target wasm32-wasip2 --release
-      - name: Install cargo-nextest
-        uses: taiki-e/install-action@62b0f2dec647a8e604c6a0fda0e38530180dce20 # v2
-        with:
-          tool: cargo-nextest
-      - name: Run Telegram integration tests
+          ref: ${{ inputs.ref || github.sha }}
+          persist-credentials: false
+          fetch-depth: 0
+      - name: Resolve version-check skip labels
+        id: skip_labels
         env:
-          NEXTEST_PROFILE: ci
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          BASE_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event.merge_group.base_sha }}
+          HEAD_SHA: ${{ inputs.ref || github.sha }}
+          PR_LABELS: ${{ github.event_name == 'pull_request' && join(github.event.pull_request.labels.*.name, ',') || '' }}
         run: |
-          timeout --signal=INT --kill-after=30s 15m \
-            cargo nextest run \
-              --profile ci \
-              --features integration \
-              --test telegram_auth_integration \
-              --partition hash:${{ matrix.partition }}
-
-  replay-required:
-    name: Replay Required
-    needs: changes
-    if: needs.changes.outputs.docs_only != 'true' && needs.changes.outputs.has_legacy_tests == 'true' && github.event_name != 'push' && (github.event_name == 'workflow_call' || needs.changes.outputs.has_engine_replay_risk == 'true')
-    uses: ./.github/workflows/replay-gate.yml
-    with:
-      ref: ${{ inputs.ref || github.sha }}
-
-  web-e2e-smoke:
-    name: Web E2E Smoke
-    needs: changes
-    if: needs.changes.outputs.docs_only != 'true' && needs.changes.outputs.has_legacy_tests == 'true' && github.event_name == 'pull_request' && needs.changes.outputs.has_web_risk == 'true'
-    uses: ./.github/workflows/e2e.yml
-    with:
-      ref: ${{ inputs.ref || github.sha }}
-      mode: smoke
-
-  web-e2e-full:
-    name: Web E2E Smoke (merge queue)
-    needs: changes
-    if: needs.changes.outputs.docs_only != 'true' && needs.changes.outputs.has_legacy_tests == 'true' && github.event_name == 'merge_group' && needs.changes.outputs.has_web_risk == 'true'
-    uses: ./.github/workflows/e2e.yml
-    with:
-      ref: ${{ inputs.ref || github.sha }}
-      mode: smoke
-
-  telegram-tests:
-    name: Telegram Channel Tests
-    needs: changes
-    if: >
-      needs.changes.outputs.docs_only != 'true' &&
-      needs.changes.outputs.has_legacy_tests == 'true' &&
-      (github.event_name == 'push' || github.event_name == 'workflow_call' || needs.changes.outputs.has_telegram_risk == 'true')
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
-        with:
-          ref: ${{ inputs.ref || github.sha }}
-          persist-credentials: false
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
-      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
-        with:
-          shared-key: telegram-tests
-          # Keep saves to protected-branch and merge_group runs so the ~10 GB
-          # repo cache LRU is seeded by shared states, not arbitrary PR branches.
-          save-if: ${{ (github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'merge_group' }}
-      - name: Run Telegram Channel Tests
-        run: |
-          timeout --signal=INT --kill-after=30s 10m \
-            cargo test --manifest-path channels-src/telegram/Cargo.toml -- --nocapture
-
-  slack-tests:
-    name: Slack Channel Tests
-    needs: changes
-    if: >
-      needs.changes.outputs.docs_only != 'true' &&
-      needs.changes.outputs.has_legacy_tests == 'true' &&
-      (github.event_name == 'push' || github.event_name == 'workflow_call' || needs.changes.outputs.has_slack_risk == 'true')
-    runs-on: ubuntu-latest
-    timeout-minutes: 20
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
-        with:
-          ref: ${{ inputs.ref || github.sha }}
-          persist-credentials: false
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
-        with:
-          targets: wasm32-wasip2
-      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
-        with:
-          key: slack-integration
-          # Keep saves to protected-branch and merge_group runs so the ~10 GB
-          # repo cache LRU is seeded by shared states, not arbitrary PR branches.
-          save-if: ${{ (github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'merge_group' }}
-      - name: Build Slack WASM channel
-        run: cargo build --manifest-path channels-src/slack/Cargo.toml --target wasm32-wasip2 --release
-      - name: Run Slack integration tests
-        run: |
-          timeout --signal=INT --kill-after=30s 15m \
-            cargo test --features integration --test slack_auth_integration -- --nocapture
-
-  run-tests:
-    name: Tests (Legacy)
-    runs-on: ubuntu-latest
-    if: always()
-    needs:
-      - changes
-      - matrix-config
-      - tests
-      - heavy-integration-tests
-      - telegram-integration-tests
-      - replay-required
-      - web-e2e-smoke
-      - web-e2e-full
-      - telegram-tests
-      - slack-tests
-    steps:
-      - run: |
-          require_success() {
-            name="$1"
-            result="$2"
-            if [[ "$result" != "success" ]]; then
-              echo "$name failed: $result"
-              exit 1
-            fi
-          }
-
-          event="${{ github.event_name }}"
-
-          if [[ "${{ needs.changes.result }}" != "success" ]]; then
-            echo "changes failed: ${{ needs.changes.result }}"
-            exit 1
-          fi
-
-          if [[ "${{ needs.changes.outputs.docs_only }}" == "true" ]]; then
-            echo "Docs-only change detected — test roll-up passes fast"
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            echo "labels=${PR_LABELS}" >> "$GITHUB_OUTPUT"
+            echo "allow_skip=true" >> "$GITHUB_OUTPUT"
             exit 0
           fi
 
-          if [[ "${{ needs.changes.outputs.has_legacy_tests }}" != "true" ]]; then
-            echo "No legacy test scope detected — legacy test roll-up passes fast"
+          COMPARE_JSON="$(gh api "repos/${REPO}/compare/${BASE_SHA}...${HEAD_SHA}")"
+          PR_NUMBERS="$(
+            printf '%s' "$COMPARE_JSON" | jq -r '.commits[].sha' \
+            | while read -r sha; do
+                [ -n "$sha" ] || continue
+                gh api "repos/${REPO}/commits/${sha}/pulls" \
+                  -H "Accept: application/vnd.github+json" \
+                  --jq '.[].number' 2>/dev/null || true
+              done \
+            | awk 'NF && !seen[$0]++'
+          )"
+
+          PR_COUNT="$(printf '%s\n' "$PR_NUMBERS" | awk 'NF' | wc -l | tr -d ' ')"
+          if [ "${PR_COUNT}" != "1" ]; then
+            echo "labels=" >> "$GITHUB_OUTPUT"
+            echo "allow_skip=false" >> "$GITHUB_OUTPUT"
             exit 0
           fi
 
-          if [[ "${{ needs.changes.outputs.has_core_code }}" == "true" ]]; then
-            require_success "tests" "${{ needs.tests.result }}"
-          fi
+          LABELS="$(
+            printf '%s\n' "$PR_NUMBERS" \
+            | while read -r pr; do
+                [ -n "$pr" ] || continue
+                gh api "repos/${REPO}/issues/${pr}" --jq '.labels[].name' 2>/dev/null || true
+              done \
+            | awk 'NF && !seen[$0]++'
+          )"
 
-          if [[ "$event" == "push" || "$event" == "workflow_call" || "${{ needs.changes.outputs.has_runtime_heavy_risk }}" == "true" ]]; then
-            require_success "heavy-integration-tests" "${{ needs.heavy-integration-tests.result }}"
-            require_success "telegram-integration-tests" "${{ needs.telegram-integration-tests.result }}"
+          if [ -n "$LABELS" ]; then
+            echo "labels=$(printf '%s\n' "$LABELS" | paste -sd, -)" >> "$GITHUB_OUTPUT"
+          else
+            echo "labels=" >> "$GITHUB_OUTPUT"
           fi
-
-          if [[ "$event" != "push" && ( "$event" == "workflow_call" || "${{ needs.changes.outputs.has_engine_replay_risk }}" == "true" ) ]]; then
-            require_success "replay-required" "${{ needs.replay-required.result }}"
-          fi
-
-          if [[ "$event" == "pull_request" && "${{ needs.changes.outputs.has_web_risk }}" == "true" ]]; then
-            require_success "web-e2e-smoke" "${{ needs.web-e2e-smoke.result }}"
-          fi
-
-          if [[ "$event" == "merge_group" && "${{ needs.changes.outputs.has_web_risk }}" == "true" ]]; then
-            require_success "web-e2e-full" "${{ needs.web-e2e-full.result }}"
-          fi
-
-          if [[ "$event" == "push" || "$event" == "workflow_call" || "${{ needs.changes.outputs.has_telegram_risk }}" == "true" ]]; then
-            require_success "telegram-tests" "${{ needs.telegram-tests.result }}"
-          fi
-
-          if [[ "$event" == "push" || "$event" == "workflow_call" || "${{ needs.changes.outputs.has_slack_risk }}" == "true" ]]; then
-            require_success "slack-tests" "${{ needs.slack-tests.result }}"
-          fi
-
-  run-tests-compat:
-    name: Run Tests
-    runs-on: ubuntu-latest
-    if: always()
-    needs:
-      - run-tests
-    steps:
-      - run: |
-          if [[ "${{ needs.run-tests.result }}" != "success" ]]; then
-            echo "Tests (Legacy) failed: ${{ needs.run-tests.result }}"
-            exit 1
-          fi
-          echo "Compatibility roll-up for the current main required check."
+          echo "allow_skip=true" >> "$GITHUB_OUTPUT"
+      - name: Check version bumps for changed extensions
+        env:
+          PR_LABELS: ${{ steps.skip_labels.outputs.labels }}
+          GITHUB_BASE_REF: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.ref || github.event_name == 'merge_group' && github.event.merge_group.base_ref || '' }}
+          ALLOW_SKIP_VERSION_CHECK: ${{ steps.skip_labels.outputs.allow_skip }}
+        run: ./scripts/check-version-bumps.sh
