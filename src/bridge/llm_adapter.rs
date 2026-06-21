@@ -86,8 +86,17 @@ impl LlmBridgeAdapter {
         }
     }
 
-    fn provider_for_depth(&self, depth: u32) -> &Arc<dyn LlmProvider> {
-        if depth > 0 {
+    /// Pick the provider for a call at `depth`.
+    ///
+    /// Sub-calls (depth > 0) use the cheaper provider to save cost, but ONLY for
+    /// tool-free completions. Cheap/small models (8B/1B) routinely emit
+    /// chain-of-thought prose instead of a structured tool call; with
+    /// `tool_choice="auto"` the bridge then finalizes that prose as the answer
+    /// (B3). Tool-bearing calls must therefore use the primary, tool-capable
+    /// provider — matching the `SmartRoutingProvider`'s "tool use -> primary"
+    /// guard that this depth-based cheap path would otherwise bypass.
+    fn provider_for_depth(&self, depth: u32, has_tools: bool) -> &Arc<dyn LlmProvider> {
+        if depth > 0 && !has_tools {
             self.cheap_provider.as_ref().unwrap_or(&self.provider)
         } else {
             &self.provider
@@ -103,8 +112,6 @@ impl LlmBackend for LlmBridgeAdapter {
         actions: &[ActionDef],
         config: &LlmCallConfig,
     ) -> Result<LlmOutput, EngineError> {
-        let provider = self.provider_for_depth(config.depth);
-
         // Convert messages
         let mut chat_messages: Vec<ChatMessage> = messages.iter().map(thread_msg_to_chat).collect();
         sanitize_tool_messages(&mut chat_messages);
@@ -131,6 +138,11 @@ impl LlmBackend for LlmBridgeAdapter {
                 .map(action_def_to_tool_def)
                 .collect()
         };
+
+        // Select the provider now that tools are known: tool-bearing calls go to
+        // the primary, tool-capable provider even at depth > 0 (see
+        // `provider_for_depth`); tool-free sub-calls still use the cheap one.
+        let provider = self.provider_for_depth(config.depth, !tools.is_empty());
 
         // Build request — match the existing Reasoning.respond_with_tools() defaults
         let max_tokens = config.max_tokens.unwrap_or(4096);
@@ -1916,6 +1928,70 @@ And also check the token price:\n\
             output.usage.cost_usd, 0.0,
             "depth>0 must use cheap provider's pricing (zero), not primary's"
         );
+    }
+
+    /// B3 regression: tool-bearing sub-calls (depth > 0) must use the primary,
+    /// tool-capable provider — never the cheap/small one. Small models (8B/1B)
+    /// emit chain-of-thought prose instead of a structured tool call, and with
+    /// `tool_choice="auto"` the bridge finalizes that prose as the answer. The
+    /// cheap provider here panics on any call, so routing a tool ask to it would
+    /// fail the test loudly. Text-only sub-calls still use the cheap provider
+    /// (covered by `complete_routes_subcalls_through_cheap_provider_for_cost`).
+    #[tokio::test]
+    async fn subcall_tool_asks_route_to_primary_not_cheap_provider() {
+        struct PanickingCheapProvider;
+        #[async_trait]
+        impl LlmProvider for PanickingCheapProvider {
+            fn model_name(&self) -> &str {
+                "cheap-mock"
+            }
+            fn cost_per_token(&self) -> (Decimal, Decimal) {
+                (Decimal::ZERO, Decimal::ZERO)
+            }
+            async fn complete(
+                &self,
+                _req: ironclaw_llm::CompletionRequest,
+            ) -> Result<ironclaw_llm::CompletionResponse, LlmError> {
+                unreachable!("this test sends only a tool ask, never a text sub-call")
+            }
+            async fn complete_with_tools(
+                &self,
+                _req: ToolCompletionRequest,
+            ) -> Result<ToolCompletionResponse, LlmError> {
+                unreachable!("tool-bearing sub-calls must not reach the cheap provider")
+            }
+        }
+
+        let state = Arc::new(CapturingProviderState::default());
+        let primary: Arc<dyn LlmProvider> = Arc::new(CapturingProvider {
+            state: state.clone(),
+        });
+        let cheap: Arc<dyn LlmProvider> = Arc::new(PanickingCheapProvider);
+        let adapter = LlmBridgeAdapter::new(primary, Some(cheap));
+
+        let output = adapter
+            .complete(
+                &[ThreadMessage::user("do the thing")],
+                &[test_action("do_thing")],
+                &LlmCallConfig {
+                    depth: 1,
+                    ..LlmCallConfig::default()
+                },
+            )
+            .await
+            .unwrap();
+
+        // The primary provider's tool path handled the call...
+        assert_eq!(
+            state.tool_requests.lock().await.len(),
+            1,
+            "tool-bearing sub-call must be served by the primary provider"
+        );
+        // ...and its response is surfaced unchanged.
+        match output.response {
+            LlmResponse::Text(ref text) => assert_eq!(text, "ok"),
+            other => panic!("expected text response from primary, got {other:?}"),
+        }
     }
 
     /// Subscription-billed providers (e.g. OpenAI Codex via ChatGPT OAuth)
