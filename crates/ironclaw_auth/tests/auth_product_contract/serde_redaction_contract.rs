@@ -83,6 +83,7 @@ fn backend_failures_are_reported_as_stable_sanitized_codes() {
         AuthProductError::BackendUnavailable,
         AuthProductError::TokenExchangeFailed,
         AuthProductError::RefreshFailed,
+        AuthProductError::InvalidGrant,
     ] {
         let rendered = error.to_string();
         let serialized_code = serde_json::to_string(&error.code()).expect("serialize error code");
@@ -108,6 +109,10 @@ fn backend_failures_are_reported_as_stable_sanitized_codes() {
     );
     assert_eq!(
         serde_json::to_value(AuthProductError::RefreshFailed.code()).expect("serialize"),
+        serde_json::json!("refresh_failed")
+    );
+    assert_eq!(
+        serde_json::to_value(AuthProductError::InvalidGrant.code()).expect("serialize"),
         serde_json::json!("refresh_failed")
     );
 }

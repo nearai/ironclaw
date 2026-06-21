@@ -927,8 +927,11 @@ impl<'de> Deserialize<'de> for ApprovalPromptDetailView {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AuthPromptChallengeKind {
-    /// Browser must open `authorization_url` in a new tab and wait for the
-    /// OAuth callback to resume the run server-side.
+    /// Browser-based OAuth challenge. When `authorization_url` is present, the
+    /// browser can open it in a new tab and wait for the OAuth callback to
+    /// resume the run server-side. When the provider is unavailable or
+    /// unconfigured, the URL may be absent so UI can still render an
+    /// OAuth-specific unavailable state instead of the generic auth fallback.
     #[serde(rename = "oauth_url")]
     OAuthUrl,
     /// User must type a manual token (PAT, API key) into the chat form.

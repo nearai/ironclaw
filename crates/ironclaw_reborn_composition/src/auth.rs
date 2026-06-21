@@ -413,7 +413,13 @@ impl RebornProductAuthServicePorts {
     pub(crate) fn into_services(
         self,
         continuation_dispatcher: Arc<dyn RebornAuthContinuationDispatcher>,
+        secret_store: Arc<dyn ironclaw_secrets::SecretStore>,
     ) -> RebornProductAuthServices {
+        // `secret_store` is required here (not defaulted) so the store that the
+        // OAuth provider client writes access-token `expires_at` to is
+        // structurally the same store the inline-refresh margin check (A2)
+        // reads from. Defaulting it would silently split the read/write stores
+        // and make the conditional-refresh skip a no-op in production.
         RebornProductAuthServices::new(
             self.flow_manager,
             self.interaction_service,
@@ -425,6 +431,7 @@ impl RebornProductAuthServicePorts {
         )
         .with_manual_token_flow_service(self.manual_token_flow_service)
         .with_credential_account_record_source(self.credential_account_record_source)
+        .with_secret_store(secret_store)
     }
 
     pub fn with_provider_client(mut self, provider_client: Arc<dyn AuthProviderClient>) -> Self {
@@ -457,6 +464,8 @@ pub struct RebornProductAuthServices {
     cleanup_service: Arc<dyn SecretCleanupService>,
     continuation_dispatcher: Arc<dyn RebornAuthContinuationDispatcher>,
     security_audit_sink: Option<Arc<dyn SecurityAuditSink>>,
+    /// Secret store forwarded to the inline-refresh margin check (A2).
+    secret_store: Arc<dyn ironclaw_secrets::SecretStore>,
     dcr_oauth_registry: Option<Arc<OAuthDcrProviderRegistry>>,
     oauth_gate_registry: Option<Arc<GoogleOAuthGateProviderRegistry>>,
     /// Optional read projection for WebUI/local-dev auth interactions.
@@ -502,6 +511,7 @@ impl std::fmt::Debug for RebornProductAuthServices {
                 &"Arc<dyn RebornAuthContinuationDispatcher>",
             )
             .field("security_audit_sink", &self.security_audit_sink.is_some())
+            .field("secret_store", &"<wired>")
             .field("flow_record_source", &self.flow_record_source.is_some())
             .field("dcr_oauth_registry", &self.dcr_oauth_registry.is_some())
             .field("oauth_gate_registry", &self.oauth_gate_registry.is_some())
@@ -535,6 +545,7 @@ impl RebornProductAuthServices {
             cleanup_service,
             continuation_dispatcher,
             security_audit_sink: None,
+            secret_store: Arc::new(ironclaw_secrets::InMemorySecretStore::new()),
             dcr_oauth_registry: None,
             oauth_gate_registry: None,
             flow_record_source: None,
@@ -632,6 +643,18 @@ impl RebornProductAuthServices {
         self.credential_account_record_source.clone()
     }
 
+    /// Test-support access to the owner-scoped credential account record source.
+    ///
+    /// Live fixture recorders use this to copy explicitly requested product-auth
+    /// accounts from a developer's local Reborn store into an isolated test
+    /// runtime without cloning the whole store.
+    #[cfg(feature = "test-support")]
+    pub fn credential_account_record_source_for_test(
+        &self,
+    ) -> Arc<dyn CredentialAccountRecordSource> {
+        self.credential_account_record_source()
+    }
+
     pub(crate) fn runtime_credential_account_selection_service(
         &self,
     ) -> Arc<dyn RuntimeCredentialAccountSelectionService> {
@@ -646,9 +669,20 @@ impl RebornProductAuthServices {
     pub(crate) fn runtime_credential_account_refresh_service(
         self: &Arc<Self>,
     ) -> Arc<dyn RuntimeCredentialAccountRefreshService> {
-        let refresh_port: Arc<dyn RuntimeCredentialAccountRefreshPort> = self.clone();
+        // Inline dispatch path: use the plain provider-backed service wrapped
+        // only in the in-process `refresh_locks` guard that
+        // `ProviderBackedCredentialAccountService` already owns. Cross-process
+        // serialization is handled by the background keepalive worker's leader
+        // lock (`CredentialRefreshLeaderLock`), not here.
+        //
+        // A2: Forward the secret store so the refresher can read `expires_at`
+        // metadata and skip the token-endpoint round-trip when the access token
+        // is still fresh. The margin is fixed at `DEFAULT_ACCESS_REFRESH_MARGIN`.
+        let inner_port: Arc<dyn RuntimeCredentialAccountRefreshPort> = self.clone();
+        let secret_store: Arc<dyn ironclaw_secrets::SecretStore> = self.secret_store.clone();
         Arc::new(ProductAuthRuntimeCredentialAccountRefresher::new(
-            refresh_port,
+            inner_port,
+            secret_store,
         ))
     }
 
@@ -712,6 +746,16 @@ impl RebornProductAuthServices {
 
     pub fn with_security_audit_sink(mut self, sink: Arc<dyn SecurityAuditSink>) -> Self {
         self.security_audit_sink = Some(sink);
+        self
+    }
+
+    /// Wire the secret store used by the inline OAuth refresh margin check
+    /// (A2). When set, the refresher reads `expires_at` metadata from the
+    /// store and skips an unnecessary token-endpoint round-trip when the
+    /// access token is still fresh. Defaults to an in-memory store (always
+    /// refreshes unconditionally — safe, backward-compatible).
+    pub fn with_secret_store(mut self, store: Arc<dyn ironclaw_secrets::SecretStore>) -> Self {
+        self.secret_store = store;
         self
     }
 
@@ -1269,7 +1313,10 @@ impl RebornProductAuthServices {
     ) -> Self {
         let services = Arc::new(InMemoryAuthProductServices::new());
         RebornProductAuthServicePorts::from_shared(services.clone())
-            .into_services(continuation_dispatcher)
+            .into_services(
+                continuation_dispatcher,
+                Arc::new(ironclaw_secrets::InMemorySecretStore::new()),
+            )
             .with_flow_record_source(services)
     }
 }
@@ -1575,7 +1622,10 @@ mod tests {
 
         let ports =
             RebornProductAuthServicePorts::from_shared_with_provider(shared, provider_client);
-        let services = ports.into_services(Arc::new(NoopAuthContinuationDispatcher));
+        let services = ports.into_services(
+            Arc::new(NoopAuthContinuationDispatcher),
+            Arc::new(ironclaw_secrets::InMemorySecretStore::new()),
+        );
 
         assert_eq!(arc_data_ptr(&services.flow_manager()), shared_ptr);
         assert_eq!(arc_data_ptr(&services.interaction_service()), shared_ptr);
