@@ -281,12 +281,10 @@ fn deserialize_versioned_record(
     if &record.key == key {
         Ok(Some((record, versioned.version)))
     } else {
-        tracing::error!(
-            stored = ?record.key,
-            expected = ?key,
-            "auto-approve setting key mismatch"
-        );
-        Ok(None)
+        Err(ToolPermissionStoreError::Integrity(format!(
+            "stored key {:?} does not match expected {:?}",
+            record.key, key
+        )))
     }
 }
 
@@ -340,7 +338,9 @@ fn invalid_path(error: HostApiError) -> ToolPermissionStoreError {
 
 #[cfg(test)]
 mod tests {
-    use ironclaw_filesystem::{InMemoryBackend, ScopedFilesystem};
+    use ironclaw_filesystem::{
+        ContentType, Entry, InMemoryBackend, RecordVersion, ScopedFilesystem,
+    };
     use ironclaw_host_api::{
         AgentId, MountAlias, MountGrant, MountPermissions, MountView, ProjectId, VirtualPath,
     };
@@ -442,5 +442,26 @@ mod tests {
 
         let reloaded = FilesystemAutoApproveSettingStore::new(scoped);
         assert!(reloaded.is_enabled(&scope).await.unwrap());
+    }
+
+    #[test]
+    fn deserialize_versioned_record_rejects_key_mismatch() {
+        let expected_key = AutoApproveSettingKey::from_resource_scope(&scope("alice", None, None));
+        let stored_key = AutoApproveSettingKey::from_resource_scope(&scope("bob", None, None));
+        let stored = AutoApproveSettingRecord {
+            key: stored_key,
+            enabled: true,
+            updated_by: Principal::User(UserId::new("bob").unwrap()),
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+        };
+        let versioned = VersionedEntry {
+            path: VirtualPath::new("/engine/record.json").unwrap(),
+            entry: Entry::bytes(serialize(&stored).unwrap()).with_content_type(ContentType::json()),
+            version: RecordVersion::from_backend(1),
+        };
+
+        let error = deserialize_versioned_record(&expected_key, versioned).unwrap_err();
+        assert!(matches!(error, ToolPermissionStoreError::Integrity(_)));
     }
 }
