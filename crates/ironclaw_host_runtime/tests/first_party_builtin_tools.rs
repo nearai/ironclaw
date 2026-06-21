@@ -3707,13 +3707,29 @@ async fn builtin_skill_install_url_path_serializes_concurrent_fetches_from_same_
             context,
         )
     );
-    let mut outcomes = [first.map(|_| ()), second.map(|_| ())];
-    outcomes.sort_by_key(|result| result.is_err());
-
-    assert!(outcomes[0].is_ok());
-    assert_eq!(outcomes[1], Err(RuntimeFailureKind::OperationFailed));
+    // Both concurrent installs of the same URL fetch independently (egress == 2),
+    // then serialize on the per-skill mutation lock in
+    // ironclaw_skills::management::install_skill. Install is idempotent for
+    // identical content (replay-safety, nearai/ironclaw#4385): the second install
+    // observes the first's matching install and returns success instead of a
+    // conflict, so the skill is written exactly once.
+    assert!(
+        first.is_ok(),
+        "first concurrent install must succeed: {first:?}"
+    );
+    assert!(
+        second.is_ok(),
+        "second concurrent install of identical content must succeed idempotently: {second:?}"
+    );
     assert_eq!(egress.requests().len(), 2);
-    assert!(temp.path().join("concurrent-helper/SKILL.md").exists());
+    let installed = temp.path().join("concurrent-helper/SKILL.md");
+    assert!(installed.exists());
+    assert!(
+        std::fs::read_to_string(&installed)
+            .unwrap()
+            .contains("Fetched prompt."),
+        "installed SKILL.md must contain the fetched skill content"
+    );
 }
 
 #[tokio::test]
