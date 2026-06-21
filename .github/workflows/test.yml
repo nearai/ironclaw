@@ -137,26 +137,43 @@ jobs:
     name: Configure matrix
     runs-on: ubuntu-latest
     outputs:
+      has_test_matrix: ${{ steps.set.outputs.has_test_matrix }}
+      legacy_all_features_flags: ${{ steps.set.outputs.legacy_all_features_flags }}
+      legacy_root_matrix: ${{ steps.set.outputs.legacy_root_matrix }}
+      legacy_extra_matrix: ${{ steps.set.outputs.legacy_extra_matrix }}
       test_matrix: ${{ steps.set.outputs.test_matrix }}
       windows_matrix: ${{ steps.set.outputs.windows_matrix }}
     steps:
       - id: set
         run: |
-          FULL='[{"name":"all-features","flags":"--no-default-features --features postgres,libsql,html-to-markdown,bedrock,import"},{"name":"default","flags":""},{"name":"libsql-only","flags":"--no-default-features --features libsql"}]'
-          SLIM='[{"name":"all-features","flags":"--no-default-features --features postgres,libsql,html-to-markdown,bedrock,import"}]'
+          ALL_FEATURES_FLAGS='--no-default-features --features postgres,libsql,html-to-markdown,bedrock,import'
+          FULL='[{"name":"default","flags":""},{"name":"libsql-only","flags":"--no-default-features --features libsql"}]'
+          WINDOWS_FULL='[{"name":"all-features","flags":"--no-default-features --features postgres,libsql,html-to-markdown,bedrock,import"},{"name":"default","flags":""},{"name":"libsql-only","flags":"--no-default-features --features libsql"}]'
+          SLIM='[]'
+
+          # Keep the historic all-features coverage, but split it below
+          # the Tests (Legacy) roll-up so no single shard owns root tests,
+          # reborn composition tests, and memory tests in sequence.
+          ROOT_SHARDS='[{"name":"root unit/doc","kind":"unit-doc","partition":"0"},{"name":"root integration 1/4","kind":"integration","partition":"0"},{"name":"root integration 2/4","kind":"integration","partition":"1"},{"name":"root integration 3/4","kind":"integration","partition":"2"},{"name":"root integration 4/4","kind":"integration","partition":"3"}]'
+          EXTRA_SHARDS='[{"name":"reborn composition","suite":"reborn-composition"},{"name":"ironclaw_memory","suite":"ironclaw-memory"}]'
 
           if [ "${{ github.event_name }}" = "pull_request" ] || [ "${{ github.event_name }}" = "merge_group" ]; then
             echo "test_matrix=${SLIM}" >> "$GITHUB_OUTPUT"
+            echo "has_test_matrix=false" >> "$GITHUB_OUTPUT"
             echo "windows_matrix=${SLIM}" >> "$GITHUB_OUTPUT"
           else
             echo "test_matrix=${FULL}" >> "$GITHUB_OUTPUT"
-            echo "windows_matrix=${FULL}" >> "$GITHUB_OUTPUT"
+            echo "has_test_matrix=true" >> "$GITHUB_OUTPUT"
+            echo "windows_matrix=${WINDOWS_FULL}" >> "$GITHUB_OUTPUT"
           fi
+          echo "legacy_all_features_flags=${ALL_FEATURES_FLAGS}" >> "$GITHUB_OUTPUT"
+          echo "legacy_root_matrix=${ROOT_SHARDS}" >> "$GITHUB_OUTPUT"
+          echo "legacy_extra_matrix=${EXTRA_SHARDS}" >> "$GITHUB_OUTPUT"
 
   tests:
     name: Tests (${{ matrix.name }})
     needs: [changes, matrix-config]
-    if: needs.changes.outputs.docs_only != 'true' && needs.changes.outputs.has_legacy_tests == 'true' && needs.changes.outputs.has_core_code == 'true'
+    if: needs.changes.outputs.docs_only != 'true' && needs.changes.outputs.has_legacy_tests == 'true' && needs.changes.outputs.has_core_code == 'true' && needs.matrix-config.outputs.has_test_matrix == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 45
     env:
@@ -197,20 +214,122 @@ jobs:
         run: |
           timeout --signal=INT --kill-after=30s 40m \
             cargo test ${{ matrix.flags }} -- --nocapture
-      # The root cargo test invocation above runs only the `ironclaw`
-      # package's tests. Reborn memory regression coverage lives in
-      # `crates/ironclaw_memory/tests/*` and must be explicitly invoked
-      # with `-p ironclaw_memory` (or `--workspace`) — otherwise the
-      # Tier A guards for PR #3180 invariants compile but never run.
-      - name: Run reborn composition substrate tests
-        run: |
-          timeout --signal=INT --kill-after=30s 15m \
-            cargo test -p ironclaw_reborn_composition --no-default-features --features libsql,postgres --tests -- --nocapture
 
-      - name: Run ironclaw_memory tests
+  legacy-all-features-root-tests:
+    name: Legacy all-features (${{ matrix.name }})
+    needs: [changes, matrix-config]
+    if: needs.changes.outputs.docs_only != 'true' && needs.changes.outputs.has_legacy_tests == 'true' && needs.changes.outputs.has_core_code == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    env:
+      CARGO_PROFILE_DEV_DEBUG: 0
+      CARGO_PROFILE_TEST_DEBUG: 0
+      LEGACY_ROOT_TEST_FEATURE_FLAGS: ${{ needs.matrix-config.outputs.legacy_all_features_flags }}
+      LEGACY_ROOT_TEST_PARTITIONS: 4
+      LEGACY_ROOT_TEST_PARTITION: ${{ matrix.partition }}
+    strategy:
+      fail-fast: true
+      matrix:
+        include: ${{ fromJSON(needs.matrix-config.outputs.legacy_root_matrix) }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          ref: ${{ inputs.ref || github.sha }}
+          persist-credentials: false
+      - name: Free disk space
+        run: |
+          df -h /
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc
+          df -h /
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+        with:
+          targets: wasm32-wasip2
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          key: legacy-all-features-${{ matrix.name }}
+          save-if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+      - name: Install cargo-component
+        if: matrix.kind == 'integration'
+        uses: ./.github/actions/install-cargo-component
+      - name: Build WASM artifacts for integration tests
+        if: matrix.kind == 'integration'
+        run: |
+          ./scripts/build-wasm-extensions.sh --channels
+          ./scripts/build-wasm-extensions.sh --first-party
+      - name: Run root unit and doctests
+        if: matrix.kind == 'unit-doc'
         run: |
           timeout --signal=INT --kill-after=30s 15m \
-            cargo test -p ironclaw_memory --tests -- --nocapture
+            cargo test ${{ needs.matrix-config.outputs.legacy_all_features_flags }} --lib --bins -- --nocapture
+          timeout --signal=INT --kill-after=30s 10m \
+            cargo test ${{ needs.matrix-config.outputs.legacy_all_features_flags }} --doc -- --nocapture
+      - name: Run root integration test partition
+        if: matrix.kind == 'integration'
+        run: |
+          timeout --signal=INT --kill-after=30s 20m \
+            bash scripts/ci/run-legacy-root-test-partition.sh
+
+  legacy-all-features-extra-tests:
+    name: Legacy all-features extra (${{ matrix.name }})
+    needs: [changes, matrix-config]
+    if: needs.changes.outputs.docs_only != 'true' && needs.changes.outputs.has_legacy_tests == 'true' && needs.changes.outputs.has_core_code == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      CARGO_PROFILE_DEV_DEBUG: 0
+      CARGO_PROFILE_TEST_DEBUG: 0
+    strategy:
+      fail-fast: true
+      matrix:
+        include: ${{ fromJSON(needs.matrix-config.outputs.legacy_extra_matrix) }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          ref: ${{ inputs.ref || github.sha }}
+          persist-credentials: false
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          key: legacy-all-features-extra-${{ matrix.suite }}
+          save-if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+      - name: Run extra legacy shard
+        env:
+          SUITE: ${{ matrix.suite }}
+        run: |
+          case "$SUITE" in
+            reborn-composition)
+              timeout --signal=INT --kill-after=30s 15m \
+                cargo test -p ironclaw_reborn_composition --no-default-features --features libsql,postgres --tests -- --nocapture
+              ;;
+            ironclaw-memory)
+              timeout --signal=INT --kill-after=30s 15m \
+                cargo test -p ironclaw_memory --tests -- --nocapture
+              ;;
+            *)
+              echo "Unknown legacy extra shard: $SUITE" >&2
+              exit 2
+              ;;
+          esac
+
+  legacy-workflow-contract:
+    name: Legacy workflow contract
+    needs: changes
+    if: needs.changes.outputs.docs_only != 'true' && needs.changes.outputs.has_legacy_tests == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          ref: ${{ inputs.ref || github.sha }}
+          persist-credentials: false
+      - name: Validate legacy workflow matrix contract
+        run: python3 scripts/ci/validate-legacy-test-workflow.py
+      - name: Test legacy root partition runner
+        run: bash scripts/ci/test-run-legacy-root-test-partition.sh
 
   secret-store-contract-tests:
     name: Secret Store Contract Tests
@@ -648,6 +767,9 @@ jobs:
       - changes
       - matrix-config
       - tests
+      - legacy-all-features-root-tests
+      - legacy-all-features-extra-tests
+      - legacy-workflow-contract
       - hooks-parity-tests
       - heavy-integration-tests
       - telegram-integration-tests
@@ -690,7 +812,12 @@ jobs:
           fi
 
           if [[ "${{ needs.changes.outputs.has_core_code }}" == "true" ]]; then
-            require_success "tests" "${{ needs.tests.result }}"
+            require_success "legacy-workflow-contract" "${{ needs.legacy-workflow-contract.result }}"
+            require_success "legacy-all-features-root-tests" "${{ needs.legacy-all-features-root-tests.result }}"
+            require_success "legacy-all-features-extra-tests" "${{ needs.legacy-all-features-extra-tests.result }}"
+            if [[ "${{ needs.matrix-config.outputs.has_test_matrix }}" == "true" ]]; then
+              require_success "tests" "${{ needs.tests.result }}"
+            fi
             require_success "hooks-parity-tests" "${{ needs.hooks-parity-tests.result }}"
           fi
 
