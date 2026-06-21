@@ -64,6 +64,13 @@ case "${package}" in
   ironclaw_reborn_webui_ingress)
     printf '%s\n' "--features dev-in-memory-session"
     ;;
+  ironclaw_host_runtime)
+    # Integration tests (tests/) link the lib as a normal dependency, so
+    # cfg(test) is false there; the deterministic test-mode behavior they assert
+    # is gated behind `feature = "test-support"`. libsql exercises the embedded
+    # DB paths without a Postgres server (which the crate-tests job has none of).
+    printf '%s\n' "--features test-support,libsql"
+    ;;
   ironclaw_webui_v2 | ironclaw_webui_v2_static)
     printf '%s\n' "--features webui-v2-beta"
     ;;
