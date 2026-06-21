@@ -384,10 +384,7 @@ fn credential_refresh_settings(
     } else {
         CredentialRefreshSettings::default()
     };
-    apply_credential_refresh_override(
-        base,
-        std::env::var("IRONCLAW_CREDENTIAL_REFRESH_ENABLED"),
-    )
+    apply_credential_refresh_override(base, std::env::var("IRONCLAW_CREDENTIAL_REFRESH_ENABLED"))
 }
 
 /// Apply the `IRONCLAW_CREDENTIAL_REFRESH_ENABLED` operator override to a base
@@ -825,12 +822,12 @@ fn runner_settings(
 mod tests {
     use std::collections::HashMap;
 
-    #[cfg(feature = "webui-v2-beta")]
-    use ironclaw_reborn_composition::{LocalTriggerAccessRole, LocalTriggerAccessSource};
     use ironclaw_reborn_composition::{
         CredentialRefreshSettings, RebornCompositionProfile, TurnStatus,
         test_support::assistant_reply_without_text_for_test,
     };
+    #[cfg(feature = "webui-v2-beta")]
+    use ironclaw_reborn_composition::{LocalTriggerAccessRole, LocalTriggerAccessSource};
     use ironclaw_reborn_config::RebornBootConfig;
 
     use super::test_env::{EnvGuard, lock_trigger_env};

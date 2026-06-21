@@ -2952,39 +2952,29 @@ pub async fn build_reborn_runtime(
     });
 
     // Spawn the background Google OAuth credential keepalive worker (B4).
-    // Gated on the db features: the candidate source and the advisory-locked
-    // refresh port are only available on production paths (libsql / postgres).
-    // Local-dev has neither, so the worker is silently skipped.
+    // Gated on the db features: the worker deps (candidate source + leader lock
+    // + refresh port) are only produced together on production paths (libsql /
+    // postgres), bundled into `CredentialRefreshWorkerReady::Ready`. Local-dev /
+    // override paths are `Absent` and the worker is skipped. The `enabled` policy
+    // flag still gates the actual spawn inside `spawn_credential_refresh_worker`.
     #[cfg(any(feature = "libsql", feature = "postgres"))]
-    let credential_refresh_worker_handle = match (
-        services.credential_refresh_candidate_source.take(),
-        services.credential_refresh_leader_lock.take(),
-        services.product_auth.clone(),
+    let credential_refresh_worker_handle = match std::mem::replace(
+        &mut services.credential_refresh_worker,
+        crate::factory::CredentialRefreshWorkerReady::Absent,
     ) {
-        (Some(candidate_source), Some(leader_lock), Some(refresh_port)) => {
-            crate::credential_refresh_worker::spawn_credential_refresh_worker(
-                credential_refresh,
-                crate::credential_refresh_worker::CredentialRefreshWorkerDeps {
-                    candidate_source,
-                    refresh_port,
-                    leader_lock: std::sync::Arc::new(leader_lock),
-                },
-            )
-        }
-        // Dependencies unavailable. If the operator explicitly enabled the
-        // worker, this is a misconfiguration that silently disables proactive
-        // refresh — surface it loudly at startup rather than no-op'ing. (This
-        // is the serve/composition path, not the interactive REPL, so warn! is
-        // appropriate here.)
-        _ => {
-            if credential_refresh.enabled {
-                tracing::warn!(
-                    "credential refresh worker is enabled but its dependencies are unavailable; \
-                     proactive Google OAuth keepalive will NOT run"
-                );
-            }
-            None
-        }
+        crate::factory::CredentialRefreshWorkerReady::Ready {
+            candidate_source,
+            leader_lock,
+            refresh_port,
+        } => crate::credential_refresh_worker::spawn_credential_refresh_worker(
+            credential_refresh,
+            crate::credential_refresh_worker::CredentialRefreshWorkerDeps {
+                candidate_source,
+                refresh_port,
+                leader_lock: std::sync::Arc::new(leader_lock),
+            },
+        ),
+        crate::factory::CredentialRefreshWorkerReady::Absent => None,
     };
     // When no db feature is active, silence the unused-variable warning.
     #[cfg(not(any(feature = "libsql", feature = "postgres")))]

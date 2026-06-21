@@ -372,20 +372,37 @@ pub struct RebornServices {
     /// rather than standing up a second authority.
     #[cfg(feature = "root-llm-provider")]
     pub(crate) secret_store: Arc<dyn SecretStore>,
-    /// Deployment-wide credential account enumerator for the background
-    /// keepalive worker (B1). `None` on local-dev paths that do not need
-    /// cross-owner enumeration. MUST stay private — the worker is the only
-    /// consumer; this field must never leak through any public facade.
+    /// Readiness of the background credential keepalive worker (B1). Carries the
+    /// worker's dependencies together so "both deps present or neither" is a type
+    /// invariant rather than a runtime check. MUST stay private — the worker is
+    /// the only consumer; this field must never leak through any public facade.
     #[cfg(any(feature = "libsql", feature = "postgres"))]
-    pub(crate) credential_refresh_candidate_source:
-        Option<Arc<dyn crate::credential_refresh_worker::CredentialRefreshCandidateSource>>,
-    /// Leader lock for the background credential keepalive worker. Only the
-    /// process that acquires this per-tick lock runs the sweep. MUST stay
-    /// private. `None` when the worker candidate source is absent (local-dev /
-    /// no-db-feature paths).
-    #[cfg(any(feature = "libsql", feature = "postgres"))]
-    pub(crate) credential_refresh_leader_lock:
-        Option<crate::product_auth_refresh_lock::CredentialRefreshLeaderLock>,
+    pub(crate) credential_refresh_worker: CredentialRefreshWorkerReady,
+}
+
+/// Whether the background credential keepalive worker can be started, with its
+/// dependencies bundled so they cannot be partially wired.
+///
+/// The dependencies (cross-owner candidate enumeration + deployment-wide leader
+/// lock + refresh port) are only ever produced together on the durable
+/// production path. Bundling them into one `Ready` variant makes the
+/// half-configured state — which would silently disable proactive refresh —
+/// unrepresentable, so the runtime spawn site is a clean two-arm match with no
+/// "enabled but deps missing" branch to forget about.
+#[cfg(any(feature = "libsql", feature = "postgres"))]
+pub(crate) enum CredentialRefreshWorkerReady {
+    /// Deps fully wired (durable production path). The only state that can start
+    /// the worker; the `enabled` policy flag still gates the actual spawn.
+    Ready {
+        candidate_source:
+            Arc<dyn crate::credential_refresh_worker::CredentialRefreshCandidateSource>,
+        leader_lock: crate::product_auth_refresh_lock::CredentialRefreshLeaderLock,
+        refresh_port: Arc<RebornProductAuthServices>,
+    },
+    /// Deps intentionally absent: local-dev (single-user, no cross-owner
+    /// enumeration), `disabled()`, or a caller-supplied `product_auth_ports`
+    /// override/test path. The worker never starts.
+    Absent,
 }
 
 impl RebornServices {
@@ -644,9 +661,7 @@ impl RebornServices {
             #[cfg(feature = "root-llm-provider")]
             secret_store: Arc::new(ironclaw_secrets::InMemorySecretStore::new()),
             #[cfg(any(feature = "libsql", feature = "postgres"))]
-            credential_refresh_candidate_source: None,
-            #[cfg(any(feature = "libsql", feature = "postgres"))]
-            credential_refresh_leader_lock: None,
+            credential_refresh_worker: CredentialRefreshWorkerReady::Absent,
         }
     }
 }
@@ -1140,9 +1155,7 @@ async fn build_local_dev(input: RebornBuildInput) -> Result<RebornServices, Rebo
         secret_store,
         // Local-dev is single-user; no cross-owner enumeration or leader lock needed.
         #[cfg(any(feature = "libsql", feature = "postgres"))]
-        credential_refresh_candidate_source: None,
-        #[cfg(any(feature = "libsql", feature = "postgres"))]
-        credential_refresh_leader_lock: None,
+        credential_refresh_worker: CredentialRefreshWorkerReady::Absent,
     })
 }
 
@@ -3340,6 +3353,18 @@ where
         security_audit_sink,
         Arc::clone(&secret_store),
     );
+    // Bundle the keepalive worker deps so they are wired all-or-nothing. The
+    // candidate source is present only when this path built a durable instance
+    // (no caller-supplied product_auth_ports); the leader lock and refresh port
+    // are always available here.
+    let credential_refresh_worker = match credential_refresh_candidate_source {
+        Some(candidate_source) => CredentialRefreshWorkerReady::Ready {
+            candidate_source,
+            leader_lock,
+            refresh_port: Arc::clone(&product_auth_services),
+        },
+        None => CredentialRefreshWorkerReady::Absent,
+    };
     let product_auth_ready = true;
     // Wire ProductAuthAccount runtime credential resolver before
     // host_runtime_for_production so WASM extensions whose manifest declares a
@@ -3379,13 +3404,10 @@ where
         production_runtime: Some(production_runtime),
         #[cfg(feature = "root-llm-provider")]
         secret_store,
-        #[cfg(any(feature = "libsql", feature = "postgres"))]
-        credential_refresh_candidate_source,
-        // The leader lock is always Some on this production path: one advisory
-        // lock per backend (libsql / postgres). The None case applies only to
-        // the caller-supplied product_auth_ports path (disabled() / local_dev).
-        #[cfg(any(feature = "libsql", feature = "postgres"))]
-        credential_refresh_leader_lock: Some(leader_lock),
+        // `Ready` only when this path built a durable candidate source (i.e. no
+        // caller-supplied product_auth_ports override); `Absent` otherwise. The
+        // leader lock is always available on this production path.
+        credential_refresh_worker,
     })
 }
 

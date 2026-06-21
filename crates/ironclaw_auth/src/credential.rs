@@ -816,9 +816,7 @@ impl ProviderBackedCredentialAccountService {
             .await?
             .ok_or(AuthProductError::CredentialMissing)?;
         if current != *account {
-            return self
-                .report_for(&current, requester_extension, false)
-                .await;
+            return self.report_for(&current, requester_extension, false).await;
         }
         let updated = self
             .setup
@@ -830,8 +828,7 @@ impl ProviderBackedCredentialAccountService {
                 current.scopes.clone(),
             ))
             .await?;
-        self.report_for(&updated, requester_extension, false)
-            .await
+        self.report_for(&updated, requester_extension, false).await
     }
 }
 
