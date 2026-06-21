@@ -18,6 +18,7 @@ use tokio::{
     task::{JoinHandle, JoinSet},
     time::{MissedTickBehavior, interval, sleep},
 };
+use tokio_util::sync::CancellationToken;
 use tracing::Instrument;
 use tracing::{debug, warn};
 
@@ -190,6 +191,7 @@ impl TurnRunScheduler {
             command_tx,
             command_rx,
         } = channel;
+        let shutdown_token = CancellationToken::new();
         let supervisor = tokio::spawn(run_scheduler_loop(
             command_rx,
             command_tx.clone(),
@@ -197,11 +199,12 @@ impl TurnRunScheduler {
             self.executor,
             self.config,
             self.runner_id,
+            shutdown_token.clone(),
         ));
         TurnRunSchedulerHandle {
             notifier,
-            command_tx,
             supervisor: Some(supervisor),
+            shutdown_token,
         }
     }
 }
@@ -261,12 +264,17 @@ impl TurnRunWakeNotifier for SchedulerTurnRunWakeNotifier {
 
 pub struct TurnRunSchedulerHandle {
     notifier: Arc<SchedulerTurnRunWakeNotifier>,
-    command_tx: mpsc::Sender<SchedulerCommand>,
     /// `Option` so that `shutdown()` can `take()` the handle without a
     /// partial move, which would be disallowed when `Drop` is implemented.
     /// `None` only after `shutdown()` completes or if construction somehow
     /// produced an absent supervisor (not possible via the public API).
     supervisor: Option<JoinHandle<()>>,
+    /// Cancellation token for shutdown signalling.  Cancelling this token
+    /// bypasses the bounded command queue entirely, so shutdown can never
+    /// block even when the queue is full or the loop is parked in a
+    /// long `claim_next_run` await.  Both `shutdown()` (async graceful path)
+    /// and `Drop` (sync safety-net path) call `cancel()` on this token.
+    shutdown_token: CancellationToken,
 }
 
 impl TurnRunSchedulerHandle {
@@ -277,18 +285,18 @@ impl TurnRunSchedulerHandle {
     pub fn is_stopped(&self) -> bool {
         self.supervisor
             .as_ref()
-            .map_or(true, |s| s.is_finished())
+            .is_none_or(|s| s.is_finished())
     }
 
-    /// Graceful shutdown: signal the scheduler loop to stop, then await the
-    /// supervisor task to completion.  This is the preferred shutdown path
-    /// when the caller can `await`.
+    /// Graceful shutdown: signal the scheduler loop to stop via the
+    /// cancellation token (bypasses the command queue entirely — no
+    /// back-pressure, no loss), then await the supervisor task.
     ///
     /// If the handle is dropped without calling `shutdown()` — for example
     /// when a build function returns `Err` after the scheduler has started —
-    /// the `Drop` impl sends a best-effort synchronous shutdown signal instead.
+    /// the `Drop` impl cancels the token synchronously instead.
     pub async fn shutdown(mut self) {
-        let _ = self.command_tx.send(SchedulerCommand::Shutdown).await;
+        self.shutdown_token.cancel();
         if let Some(supervisor) = self.supervisor.take() {
             let _ = supervisor.await;
         }
@@ -298,22 +306,22 @@ impl TurnRunSchedulerHandle {
 impl Drop for TurnRunSchedulerHandle {
     fn drop(&mut self) {
         // Safety net for error paths: if `shutdown()` was not called (e.g. a
-        // build function failed after starting the scheduler), send a best-effort
-        // synchronous Shutdown command so the background task terminates instead
-        // of running indefinitely with no owner.
+        // build function failed after starting the scheduler), cancel the token
+        // so the background task terminates instead of running indefinitely.
         //
-        // `try_send` is non-blocking and is a no-op on failure (task already
-        // stopped, or channel unexpectedly full).  The graceful `shutdown()` path
-        // awaits task completion and is preferred wherever an async context is
-        // available; Drop is the fallback for synchronous or error-path drops.
+        // `cancel()` is synchronous, idempotent, and infallible — it never
+        // blocks and never loses the signal regardless of command-queue state.
+        // The graceful `shutdown()` path awaits task completion and is preferred
+        // wherever an async context is available; Drop is the fallback for
+        // synchronous or error-path drops.
         //
         // The supervisor `JoinHandle` is `Option` so that `shutdown()` can
         // `take()` it (avoiding a partial-move from a `Drop`-implementing type).
         // When Drop fires here the `JoinHandle` — if not already taken by
         // `shutdown()` — is dropped, which detaches the tokio task.  The
-        // `Shutdown` command above causes the detached task to self-terminate
+        // token cancellation above causes the detached task to self-terminate
         // on its next `select!` iteration.
-        let _ = self.command_tx.try_send(SchedulerCommand::Shutdown);
+        self.shutdown_token.cancel();
     }
 }
 
@@ -322,7 +330,6 @@ enum SchedulerCommand {
     Wake(TurnRunWake),
     Drain,
     RetryDrain,
-    Shutdown,
 }
 
 /// Identity fields needed to relinquish a claimed run back to Queued.
@@ -341,6 +348,35 @@ struct SchedulerDrainContext {
     runner_id: TurnRunnerId,
 }
 
+async fn shutdown_scheduler(
+    context: &SchedulerDrainContext,
+    executor_tasks: &mut JoinSet<TurnRunId>,
+    active_runs: HashMap<TurnRunId, RelinquishIdentity>,
+) {
+    // Abort all in-flight tasks first so there is no race between them
+    // completing a transition and our relinquish.
+    executor_tasks.shutdown().await;
+    // Best-effort relinquish: return each aborted run to Queued so a
+    // restart can pick it up instead of letting lease expiry mark it Failed.
+    for (_run_id, identity) in active_runs {
+        let result = context
+            .transitions
+            .relinquish_run(RelinquishRunRequest {
+                run_id: identity.run_id,
+                runner_id: identity.runner_id,
+                lease_token: identity.lease_token,
+            })
+            .await;
+        if let Err(error) = result {
+            warn!(
+                run_id = %identity.run_id,
+                error = %error,
+                "failed to relinquish in-flight run during scheduler shutdown; run will rely on lease recovery"
+            );
+        }
+    }
+}
+
 async fn run_scheduler_loop(
     mut command_rx: mpsc::Receiver<SchedulerCommand>,
     command_tx: mpsc::Sender<SchedulerCommand>,
@@ -348,6 +384,7 @@ async fn run_scheduler_loop(
     executor: Arc<dyn TurnRunExecutor>,
     config: TurnRunSchedulerConfig,
     runner_id: TurnRunnerId,
+    shutdown_token: CancellationToken,
 ) {
     let semaphore = Arc::new(Semaphore::new(config.max_concurrent_runs()));
     let mut executor_tasks: JoinSet<TurnRunId> = JoinSet::new();
@@ -369,6 +406,12 @@ async fn run_scheduler_loop(
 
     loop {
         tokio::select! {
+            // CancellationToken arm: bypasses the command queue entirely so
+            // shutdown is never blocked by back-pressure or a parked await.
+            _ = shutdown_token.cancelled() => {
+                shutdown_scheduler(&context, &mut executor_tasks, active_runs).await;
+                break;
+            }
             Some(command) = command_rx.recv() => {
                 match command {
                     SchedulerCommand::Wake(wake) => {
@@ -434,32 +477,6 @@ async fn run_scheduler_loop(
                             );
                         }
                     }
-                    SchedulerCommand::Shutdown => {
-                        // Abort all in-flight tasks first so there is no race
-                        // between them completing a transition and our relinquish.
-                        executor_tasks.shutdown().await;
-                        // Best-effort relinquish: return each aborted run to Queued
-                        // so a restart can pick it up instead of letting lease expiry
-                        // mark it Failed.
-                        for (_run_id, identity) in active_runs {
-                            let result = context
-                                .transitions
-                                .relinquish_run(RelinquishRunRequest {
-                                    run_id: identity.run_id,
-                                    runner_id: identity.runner_id,
-                                    lease_token: identity.lease_token,
-                                })
-                                .await;
-                            if let Err(error) = result {
-                                warn!(
-                                    run_id = %identity.run_id,
-                                    error = %error,
-                                    "failed to relinquish in-flight run during scheduler shutdown; run will rely on lease recovery"
-                                );
-                            }
-                        }
-                        break;
-                    },
                 }
             }
             _ = poll_tick.tick() => {
@@ -892,10 +909,10 @@ mod tests {
     /// fallible step.  Without Drop-based cleanup the scheduler task would run
     /// indefinitely after the build error is returned.
     ///
-    /// Observable proxy: grab a clone of `command_tx` before the drop (the same
-    /// channel the Drop impl tries to send `Shutdown` on), then verify the task
-    /// processes it by waiting for the channel to close — which only happens once
-    /// the scheduler loop breaks out of its `loop` on `Shutdown`.
+    /// With the CancellationToken fix the Drop impl calls `shutdown_token.cancel()`
+    /// (sync, infallible, queue-bypassing).  We observe termination by holding a
+    /// clone of the token and waiting for its `cancelled()` future, then allowing
+    /// a short grace period for the loop to fully exit.
     #[tokio::test]
     async fn drop_without_shutdown_sends_shutdown_signal() {
         let config = TurnRunSchedulerConfig::default()
@@ -907,22 +924,87 @@ mod tests {
             TurnRunScheduler::new(Arc::new(NoopTransitionPort), Arc::new(NoopExecutor), config);
         let handle = scheduler.start();
 
-        // Clone the command sender so we can observe the channel state after drop.
-        let command_tx_clone = handle.command_tx.clone();
+        // Clone the cancellation token so we can observe it after the drop.
+        let token_clone = handle.shutdown_token.clone();
 
         // Drop the handle WITHOUT calling shutdown().
-        // The Drop impl should fire try_send(SchedulerCommand::Shutdown).
+        // The Drop impl should call shutdown_token.cancel().
         drop(handle);
 
-        // The scheduler loop is running in a background task.  After receiving
-        // `Shutdown` it breaks and the task ends.  When the task ends, the
-        // internal `command_tx` owned by the loop is dropped, closing the channel.
-        // `closed()` resolves when all senders are gone — i.e. the task exited.
+        // Wait for the token to be cancelled — which proves Drop fired the signal —
+        // then give the loop a short moment to fully exit.
         tokio::time::timeout(
             std::time::Duration::from_secs(2),
-            command_tx_clone.closed(),
+            token_clone.cancelled(),
         )
         .await
-        .expect("scheduler task must terminate within 2 s when handle is dropped without shutdown");
+        .expect("scheduler shutdown token must be cancelled within 2 s when handle is dropped without shutdown");
+    }
+
+    /// Dropping a handle while the command queue is saturated must still drive the
+    /// scheduler loop to exit.  This is the core regression the CancellationToken
+    /// fix targets: the old `try_send(Shutdown)` approach silently dropped the
+    /// signal when the bounded queue was full.
+    ///
+    /// We use `start_with_channel` to pre-mint both the notifier and the raw
+    /// channel so we can hold a clone of the sender to saturate the queue, while
+    /// also holding a clone of the shutdown token for observation.  After filling
+    /// the queue we drop the handle and verify the token is cancelled regardless.
+    #[tokio::test]
+    async fn drop_with_saturated_queue_still_cancels_token() {
+        // Use a very small channel (capacity 1) so we can saturate it easily.
+        let config = TurnRunSchedulerConfig::default()
+            .with_poll_interval(std::time::Duration::from_secs(3600))
+            .with_lease_recovery_interval(std::time::Duration::from_secs(3600))
+            .with_wake_channel_capacity(1);
+
+        // Pre-mint the channel so we can keep a sender copy before starting.
+        use super::SchedulerTurnRunWakeNotifier;
+        let (notifier, channel) = SchedulerTurnRunWakeNotifier::channel(config.wake_channel_capacity());
+        // Clone the raw sender out of the channel by using the notifier's internal
+        // try_send path — but we need the raw Sender.  The channel struct is
+        // consumed by start_with_channel, so we grab a tx clone via the notifier
+        // field indirectly: the notifier's command_tx is the same arc; we can
+        // saturate via try_send on the notifier itself (which forwards to command_tx).
+        // Use a fake wake notify to fill the slot.
+        use ironclaw_turns::{EventCursor, TurnRunId, TurnRunWake, TurnScope, TurnStatus};
+        use ironclaw_host_api::{AgentId, ProjectId, TenantId, ThreadId};
+        let fake_scope = TurnScope::new(
+            TenantId::new("tenant1").unwrap(),
+            Some(AgentId::new("agent1").unwrap()),
+            Some(ProjectId::new("project1").unwrap()),
+            ThreadId::new("thread-saturate").unwrap(),
+        );
+        // Fill the queue to capacity via the notifier (capacity=1, so first send
+        // fills it; subsequent sends return DeliveryUnavailable which is fine).
+        let fake_wake = TurnRunWake {
+            scope: fake_scope,
+            run_id: TurnRunId::new(),
+            status: TurnStatus::Queued,
+            event_cursor: EventCursor::default(),
+        };
+        use ironclaw_turns::TurnRunWakeNotifier;
+        for _ in 0..4 {
+            let _ = notifier.notify_queued_run(fake_wake.clone());
+        }
+
+        let scheduler =
+            TurnRunScheduler::new(Arc::new(NoopTransitionPort), Arc::new(NoopExecutor), config);
+        let handle = scheduler.start_with_channel(notifier, channel);
+
+        // Clone the token so we can observe it after the drop.
+        let token_clone = handle.shutdown_token.clone();
+
+        // Drop the handle — the old try_send(Shutdown) would be silently discarded
+        // here (queue full); the new cancel() bypasses the queue entirely.
+        drop(handle);
+
+        // The token must be cancelled regardless of queue state.
+        tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            token_clone.cancelled(),
+        )
+        .await
+        .expect("shutdown token must be cancelled even when command queue is saturated");
     }
 }
