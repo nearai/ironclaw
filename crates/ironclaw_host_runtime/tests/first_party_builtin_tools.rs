@@ -801,7 +801,7 @@ async fn builtin_trigger_create_rejects_blank_name_or_prompt_before_persistence(
     let runtime = runtime_with_trigger_repository(repository.clone());
     let context = execution_context([TRIGGER_CREATE_CAPABILITY_ID]);
 
-    for (case_name, input, issue_path) in [
+    for (case_name, input, issue_path, expected) in [
         (
             "blank name",
             json!({
@@ -810,6 +810,7 @@ async fn builtin_trigger_create_rejects_blank_name_or_prompt_before_persistence(
                 "schedule": { "kind": "cron", "expression": "0 8 * * *", "timezone": "UTC" }
             }),
             "name",
+            "non-empty trigger name",
         ),
         (
             "blank prompt",
@@ -819,6 +820,7 @@ async fn builtin_trigger_create_rejects_blank_name_or_prompt_before_persistence(
                 "schedule": { "kind": "cron", "expression": "0 8 * * *", "timezone": "UTC" }
             }),
             "prompt",
+            "non-empty trigger prompt",
         ),
     ] {
         let failure = invoke_failure_with_context(
@@ -837,11 +839,7 @@ async fn builtin_trigger_create_rejects_blank_name_or_prompt_before_persistence(
             &failure,
             issue_path,
             DispatchInputIssueCode::InvalidValue,
-            match issue_path {
-                "name" => "non-empty trigger name",
-                "prompt" => "non-empty trigger prompt",
-                _ => unreachable!(),
-            },
+            expected,
             case_name,
         );
     }
