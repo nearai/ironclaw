@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
 
-use crate::GithubIssueStage;
+use crate::{GithubIssueStage, stages::stage_slug};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -89,16 +89,100 @@ pub struct StagePayloadFieldRequirement {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct StageResultContractField {
+    name: &'static str,
+    kind: StageResultContractFieldKind,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StageResultContractFieldKind {
+    Outcome,
+    NonEmptyString,
+    EvidenceArray,
+    StringArray,
+    PayloadObject,
+    OptionalJson,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct StageResultSchemaContract {
     pub schema_version: &'static str,
     pub payload_fields: &'static [StagePayloadFieldRequirement],
 }
+
+const STAGE_RESULT_OUTCOME_VALUES: &[&str] = &[
+    "completed",
+    "needs_human",
+    "gave_up",
+    "exhausted_turns",
+    "not_produced",
+];
+
+const STAGE_RESULT_ENVELOPE_FIELDS: &[StageResultContractField] = &[
+    StageResultContractField {
+        name: "outcome",
+        kind: StageResultContractFieldKind::Outcome,
+    },
+    StageResultContractField {
+        name: "summary",
+        kind: StageResultContractFieldKind::NonEmptyString,
+    },
+    StageResultContractField {
+        name: "evidence",
+        kind: StageResultContractFieldKind::EvidenceArray,
+    },
+    StageResultContractField {
+        name: "next_actions",
+        kind: StageResultContractFieldKind::StringArray,
+    },
+    StageResultContractField {
+        name: "payload",
+        kind: StageResultContractFieldKind::PayloadObject,
+    },
+];
+
+const STAGE_RESULT_EVIDENCE_FIELDS: &[StageResultContractField] = &[
+    StageResultContractField {
+        name: "kind",
+        kind: StageResultContractFieldKind::NonEmptyString,
+    },
+    StageResultContractField {
+        name: "summary",
+        kind: StageResultContractFieldKind::NonEmptyString,
+    },
+    StageResultContractField {
+        name: "data",
+        kind: StageResultContractFieldKind::OptionalJson,
+    },
+];
 
 pub fn stage_result_schema_contract(stage: &GithubIssueStage) -> StageResultSchemaContract {
     StageResultSchemaContract {
         schema_version: stage_result_schema_version(stage),
         payload_fields: required_payload_fields(stage),
     }
+}
+
+pub fn render_stage_result_schema_contract(stage: &GithubIssueStage, result_tool: &str) -> String {
+    let schema = stage_result_schema_contract(stage);
+    let fields = render_payload_field_list(schema.payload_fields);
+    let shape = render_payload_shape(schema.payload_fields);
+    let envelope_shape = render_stage_result_envelope_shape(&shape);
+
+    format!(
+        "Report completion only through `{result_tool}`.\n\
+         Use stage `{stage}` and schema version `{schema_version}`.\n\
+         The `result` argument must be a strict stage result envelope:\n\n\
+         ```json\n\
+         {{\n{envelope_shape}\n\
+         }}\n\
+         ```\n\n\
+         Required payload fields:\n\
+         {fields}\n\n\
+         No unknown payload fields are accepted.",
+        stage = stage_slug(stage),
+        schema_version = schema.schema_version,
+    )
 }
 
 pub fn validate_stage_result(
@@ -307,6 +391,70 @@ fn required_payload_fields(stage: &GithubIssueStage) -> &'static [StagePayloadFi
     }
 }
 
+fn render_payload_field_list(fields: &[StagePayloadFieldRequirement]) -> String {
+    fields
+        .iter()
+        .map(|field| format!("- `{}`: {}", field.name, field.kind.schema_description()))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn render_payload_shape(fields: &[StagePayloadFieldRequirement]) -> String {
+    fields
+        .iter()
+        .map(|field| {
+            format!(
+                "    \"{}\": \"{}\"",
+                field.name,
+                field.kind.schema_description()
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(",\n")
+}
+
+fn render_stage_result_envelope_shape(payload_shape: &str) -> String {
+    let outcome_values = STAGE_RESULT_OUTCOME_VALUES.join(" | ");
+    let evidence_shape = render_evidence_shape();
+
+    STAGE_RESULT_ENVELOPE_FIELDS
+        .iter()
+        .map(|field| match field.kind {
+            StageResultContractFieldKind::Outcome => {
+                format!("  \"{}\": \"{}\"", field.name, outcome_values)
+            }
+            StageResultContractFieldKind::EvidenceArray => {
+                format!("  \"{}\": [{}]", field.name, evidence_shape)
+            }
+            StageResultContractFieldKind::PayloadObject => {
+                format!("  \"{}\": {{\n{payload_shape}\n  }}", field.name)
+            }
+            _ => format!(
+                "  \"{}\": \"{}\"",
+                field.name,
+                field.kind.schema_description()
+            ),
+        })
+        .collect::<Vec<_>>()
+        .join(",\n")
+}
+
+fn render_evidence_shape() -> String {
+    let fields = STAGE_RESULT_EVIDENCE_FIELDS
+        .iter()
+        .map(|field| {
+            format!(
+                "\"{}\": \"{}\"",
+                field.name,
+                field.kind.schema_description()
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+
+    format!("{{{fields}}}")
+}
+
 fn validate_allowed_payload_fields(
     stage: &GithubIssueStage,
     schema_version: &'static str,
@@ -386,6 +534,19 @@ impl StagePayloadFieldKind {
             StagePayloadFieldKind::Bool => "boolean",
             StagePayloadFieldKind::Number => "number",
             StagePayloadFieldKind::String => "non-empty string",
+        }
+    }
+}
+
+impl StageResultContractFieldKind {
+    fn schema_description(self) -> &'static str {
+        match self {
+            StageResultContractFieldKind::Outcome => "stage outcome",
+            StageResultContractFieldKind::NonEmptyString => "non-empty string",
+            StageResultContractFieldKind::EvidenceArray => "evidence array",
+            StageResultContractFieldKind::StringArray => "[\"string\"]",
+            StageResultContractFieldKind::PayloadObject => "payload object",
+            StageResultContractFieldKind::OptionalJson => "optional JSON",
         }
     }
 }

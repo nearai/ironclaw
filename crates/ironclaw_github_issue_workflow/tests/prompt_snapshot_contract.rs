@@ -2,9 +2,10 @@ mod prompt_snapshot_contract {
     use ironclaw_github_issue_workflow::{
         EngineeredWorkflowSnapshot, GithubIssueSnapshot, GithubIssueStage, ProviderContentSummary,
         RepositorySnapshot, StageConstraintSnapshot, StageResultSummary, WorkflowStateSnapshot,
-        WorkflowWorkspaceSnapshot, render_stage_prompt, snapshot_hash,
+        WorkflowWorkspaceSnapshot, render_stage_prompt, snapshot_hash, stage_result_schema_version,
     };
     use sha2::{Digest, Sha256};
+    use std::{fs, path::PathBuf};
 
     fn implementation_snapshot() -> EngineeredWorkflowSnapshot {
         EngineeredWorkflowSnapshot {
@@ -115,6 +116,20 @@ mod prompt_snapshot_contract {
         snapshot
     }
 
+    fn snapshot_for_stage(stage: GithubIssueStage) -> EngineeredWorkflowSnapshot {
+        let mut snapshot = implementation_snapshot();
+        snapshot.workflow.mode = format!("{stage:?}").to_lowercase();
+        snapshot.workflow.active_stage_run_id = Some(format!("stage-run-{stage:?}").to_lowercase());
+        snapshot.constraints.stage = stage.clone();
+        snapshot.constraints.result_schema_version =
+            stage_result_schema_version(&stage).to_string();
+        snapshot
+    }
+
+    fn prompt_pack_dir() -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("prompts/github_issue_bugfix/v1")
+    }
+
     fn sha256_hex(content: &str) -> String {
         let mut hasher = Sha256::new();
         hasher.update(content.as_bytes());
@@ -151,7 +166,7 @@ mod prompt_snapshot_contract {
         let snapshot = implementation_snapshot();
         let bundle = render_stage_prompt(GithubIssueStage::Implementation, &snapshot).unwrap();
 
-        assert_eq!(bundle.prompt_ref, "github_issue_bugfix/v1/implementation");
+        assert_eq!(bundle.prompt_ref, "github_issue_bugfix/v1/implement");
         assert_eq!(bundle.prompt_version, "v1");
         assert_eq!(bundle.snapshot_hash, snapshot_hash(&snapshot).unwrap());
         assert!(
@@ -168,6 +183,66 @@ mod prompt_snapshot_contract {
             bundle
                 .content
                 .contains("No unknown payload fields are accepted.")
+        );
+    }
+
+    #[test]
+    fn prompt_refs_and_asset_paths_use_prompt_pack_file_names() {
+        let expected_prompt_assets = [
+            (GithubIssueStage::Triage, "triage"),
+            (GithubIssueStage::Planning, "plan"),
+            (GithubIssueStage::Implementation, "implement"),
+            (GithubIssueStage::PrSynthesis, "synthesize_pr"),
+            (GithubIssueStage::CiRepair, "repair_ci"),
+            (GithubIssueStage::ReviewResponse, "address_review"),
+        ];
+
+        for (stage, file_stem) in expected_prompt_assets {
+            let snapshot = snapshot_for_stage(stage.clone());
+            let bundle = render_stage_prompt(stage, &snapshot).unwrap();
+
+            assert_eq!(
+                bundle.prompt_ref,
+                format!("github_issue_bugfix/v1/{file_stem}")
+            );
+            assert!(
+                prompt_pack_dir().join(format!("{file_stem}.md")).is_file(),
+                "missing expected prompt asset {file_stem}.md"
+            );
+        }
+
+        for obsolete_file_name in [
+            "planning.md",
+            "implementation.md",
+            "pr_synthesis.md",
+            "ci_repair.md",
+            "review_response.md",
+        ] {
+            assert!(
+                !prompt_pack_dir().join(obsolete_file_name).exists(),
+                "obsolete stage-slug prompt asset should not exist: {obsolete_file_name}"
+            );
+        }
+    }
+
+    #[test]
+    fn prompt_schema_contract_is_owned_by_stage_schemas() {
+        let crate_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let prompts_source = fs::read_to_string(crate_dir.join("src/prompts.rs")).unwrap();
+        let stage_schemas_source =
+            fs::read_to_string(crate_dir.join("src/stage_schemas.rs")).unwrap();
+
+        assert!(stage_schemas_source.contains("pub fn render_stage_result_schema_contract"));
+        assert!(prompts_source.contains("render_stage_result_schema_contract("));
+        assert!(
+            !prompts_source.contains(
+                "\"outcome\": \"completed | needs_human | gave_up | exhausted_turns | not_produced\""
+            ),
+            "prompts.rs must not hard-code the result envelope contract"
+        );
+        assert!(
+            !prompts_source.contains("No unknown payload fields are accepted."),
+            "prompts.rs must not hard-code payload validation text"
         );
     }
 

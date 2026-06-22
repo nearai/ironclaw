@@ -1,9 +1,9 @@
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    EngineeredWorkflowSnapshot, GithubIssueStage, GithubIssueWorkflowError, snapshot_hash,
-    snapshot_serde_error, snapshots::sha256_hex_bytes, stage_result_schema_contract,
-    stages::stage_slug,
+    EngineeredWorkflowSnapshot, GithubIssueStage, GithubIssueWorkflowError,
+    render_stage_result_schema_contract, snapshot_hash, snapshot_serde_error,
+    snapshots::sha256_hex_bytes, stage_result_schema_contract, stages::stage_slug,
 };
 
 const PROMPT_VERSION: &str = "v1";
@@ -25,7 +25,7 @@ pub fn render_stage_prompt(
 ) -> Result<StagePromptBundle, GithubIssueWorkflowError> {
     ensure_snapshot_matches_stage(&stage, snapshot)?;
     let asset = prompt_asset(&stage);
-    let schema_block = render_schema_block(&stage);
+    let schema_block = render_stage_result_schema_contract(&stage, RESULT_TOOL);
     let snapshot_hash = snapshot_hash(snapshot)?;
     let snapshot_json = serde_json::to_string_pretty(snapshot).map_err(snapshot_serde_error)?;
     let content = format!(
@@ -82,49 +82,6 @@ fn ensure_snapshot_matches_stage(
     Ok(())
 }
 
-fn render_schema_block(stage: &GithubIssueStage) -> String {
-    let schema = stage_result_schema_contract(stage);
-    let fields = schema
-        .payload_fields
-        .iter()
-        .map(|field| format!("- `{}`: {}", field.name, field.kind.schema_description()))
-        .collect::<Vec<_>>()
-        .join("\n");
-    let shape = schema
-        .payload_fields
-        .iter()
-        .map(|field| {
-            format!(
-                "    \"{}\": \"{}\"",
-                field.name,
-                field.kind.schema_description()
-            )
-        })
-        .collect::<Vec<_>>()
-        .join(",\n");
-
-    format!(
-        "Report completion only through `{RESULT_TOOL}`.\n\
-         Use stage `{stage}` and schema version `{schema_version}`.\n\
-         The `result` argument must be a strict stage result envelope:\n\n\
-         ```json\n\
-         {{\n\
-           \"outcome\": \"completed | needs_human | gave_up | exhausted_turns | not_produced\",\n\
-           \"summary\": \"non-empty string\",\n\
-           \"evidence\": [{{\"kind\": \"non-empty string\", \"summary\": \"non-empty string\", \"data\": \"optional JSON\"}}],\n\
-           \"next_actions\": [\"string\"],\n\
-           \"payload\": {{\n{shape}\n\
-           }}\n\
-         }}\n\
-         ```\n\n\
-         Required payload fields:\n\
-         {fields}\n\n\
-         No unknown payload fields are accepted.",
-        stage = stage_slug(stage),
-        schema_version = schema.schema_version,
-    )
-}
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct PromptAsset {
     prompt_ref: String,
@@ -132,30 +89,41 @@ struct PromptAsset {
 }
 
 fn prompt_asset(stage: &GithubIssueStage) -> PromptAsset {
-    let slug = stage_slug(stage);
+    let file_stem = prompt_file_stem(stage);
     let template = match stage {
         GithubIssueStage::Triage => {
             include_str!("../prompts/github_issue_bugfix/v1/triage.md")
         }
         GithubIssueStage::Planning => {
-            include_str!("../prompts/github_issue_bugfix/v1/planning.md")
+            include_str!("../prompts/github_issue_bugfix/v1/plan.md")
         }
         GithubIssueStage::Implementation => {
-            include_str!("../prompts/github_issue_bugfix/v1/implementation.md")
+            include_str!("../prompts/github_issue_bugfix/v1/implement.md")
         }
         GithubIssueStage::PrSynthesis => {
-            include_str!("../prompts/github_issue_bugfix/v1/pr_synthesis.md")
+            include_str!("../prompts/github_issue_bugfix/v1/synthesize_pr.md")
         }
         GithubIssueStage::CiRepair => {
-            include_str!("../prompts/github_issue_bugfix/v1/ci_repair.md")
+            include_str!("../prompts/github_issue_bugfix/v1/repair_ci.md")
         }
         GithubIssueStage::ReviewResponse => {
-            include_str!("../prompts/github_issue_bugfix/v1/review_response.md")
+            include_str!("../prompts/github_issue_bugfix/v1/address_review.md")
         }
     };
 
     PromptAsset {
-        prompt_ref: format!("{PROMPT_PACK}/{PROMPT_VERSION}/{slug}"),
+        prompt_ref: format!("{PROMPT_PACK}/{PROMPT_VERSION}/{file_stem}"),
         template,
+    }
+}
+
+fn prompt_file_stem(stage: &GithubIssueStage) -> &'static str {
+    match stage {
+        GithubIssueStage::Triage => "triage",
+        GithubIssueStage::Planning => "plan",
+        GithubIssueStage::Implementation => "implement",
+        GithubIssueStage::PrSynthesis => "synthesize_pr",
+        GithubIssueStage::CiRepair => "repair_ci",
+        GithubIssueStage::ReviewResponse => "address_review",
     }
 }
