@@ -2760,7 +2760,10 @@ pub async fn build_reborn_runtime(
             tenant_id: &validated_identity.tenant_id,
         };
         let projection_registry = crate::hooks::build_hook_projection_registry(
-            builtin_extension_registry()?,
+            builtin_extension_registry(
+                #[cfg(feature = "github-issue-workflow-beta")]
+                github_issue_workflow.enabled,
+            )?,
             Some(third_party_input),
             hooks_config,
         )

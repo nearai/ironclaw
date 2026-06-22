@@ -967,7 +967,10 @@ async fn build_local_dev(input: RebornBuildInput) -> Result<RebornServices, Rebo
     let secret_store: Arc<dyn SecretStore> = Arc::new(ironclaw_secrets::InMemorySecretStore::new());
     let local_dev_trust_policy = Arc::new(builtin_first_party_trust_policy()?);
     let local_dev_trust_invalidation_bus = Arc::new(ironclaw_trust::InvalidationBus::new());
-    let extension_registry = Arc::new(local_dev_builtin_extension_registry()?);
+    let extension_registry = Arc::new(local_dev_builtin_extension_registry(
+        #[cfg(feature = "github-issue-workflow-beta")]
+        github_issue_workflow_first_party_handlers_enabled,
+    )?);
     let authorizer = local_dev_authorizer(
         runtime_policy.as_ref(),
         Arc::clone(&store_graph.local_runtime.capability_policy),
@@ -2614,16 +2617,20 @@ fn paths_overlap(left: &Path, right: &Path) -> bool {
     left == right || left.starts_with(right) || right.starts_with(left)
 }
 
-pub(crate) fn builtin_extension_registry() -> Result<ExtensionRegistry, RebornBuildError> {
+pub(crate) fn builtin_extension_registry(
+    #[cfg(feature = "github-issue-workflow-beta")] github_issue_workflow_enabled: bool,
+) -> Result<ExtensionRegistry, RebornBuildError> {
     // Shared by local-dev and production composition so host-owned first-party
     // capabilities expose the same built-in package contract in both profiles.
     let mut registry = ExtensionRegistry::new();
     registry
         .insert(
-            builtin_first_party_package_for_composition().map_err(|error| {
-                RebornBuildError::InvalidConfig {
-                    reason: format!("built-in first-party package is invalid: {error}"),
-                }
+            builtin_first_party_package_for_composition(
+                #[cfg(feature = "github-issue-workflow-beta")]
+                github_issue_workflow_enabled,
+            )
+            .map_err(|error| RebornBuildError::InvalidConfig {
+                reason: format!("built-in first-party package is invalid: {error}"),
             })?,
         )
         .map_err(|error| RebornBuildError::InvalidConfig {
@@ -2632,11 +2639,17 @@ pub(crate) fn builtin_extension_registry() -> Result<ExtensionRegistry, RebornBu
     Ok(registry)
 }
 
-fn builtin_first_party_package_for_composition() -> Result<ExtensionPackage, ExtensionError> {
+fn builtin_first_party_package_for_composition(
+    #[cfg(feature = "github-issue-workflow-beta")] github_issue_workflow_enabled: bool,
+) -> Result<ExtensionPackage, ExtensionError> {
     let package = builtin_first_party_package()?;
     #[cfg(feature = "github-issue-workflow-beta")]
     {
-        workflow_stage_result_package(package)
+        if github_issue_workflow_enabled {
+            workflow_stage_result_package(package)
+        } else {
+            Ok(package)
+        }
     }
     #[cfg(not(feature = "github-issue-workflow-beta"))]
     {
@@ -2647,11 +2660,16 @@ fn builtin_first_party_package_for_composition() -> Result<ExtensionPackage, Ext
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 fn builtin_first_party_package_for_process_backend_composition(
     process_backend: ProcessBackendKind,
+    #[cfg(feature = "github-issue-workflow-beta")] github_issue_workflow_enabled: bool,
 ) -> Result<ExtensionPackage, ExtensionError> {
     let package = builtin_first_party_package_for_process_backend(process_backend)?;
     #[cfg(feature = "github-issue-workflow-beta")]
     {
-        workflow_stage_result_package(package)
+        if github_issue_workflow_enabled {
+            workflow_stage_result_package(package)
+        } else {
+            Ok(package)
+        }
     }
     #[cfg(not(feature = "github-issue-workflow-beta"))]
     {
@@ -2700,15 +2718,19 @@ fn workflow_stage_result_package(
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 fn production_builtin_extension_registry(
     process_backend: ProcessBackendKind,
+    #[cfg(feature = "github-issue-workflow-beta")] github_issue_workflow_enabled: bool,
 ) -> Result<ExtensionRegistry, RebornBuildError> {
     let mut registry = ExtensionRegistry::new();
     registry
         .insert(
-            builtin_first_party_package_for_process_backend_composition(process_backend).map_err(
-                |error| RebornBuildError::InvalidConfig {
-                    reason: format!("built-in first-party package is invalid: {error}"),
-                },
-            )?,
+            builtin_first_party_package_for_process_backend_composition(
+                process_backend,
+                #[cfg(feature = "github-issue-workflow-beta")]
+                github_issue_workflow_enabled,
+            )
+            .map_err(|error| RebornBuildError::InvalidConfig {
+                reason: format!("built-in first-party package is invalid: {error}"),
+            })?,
         )
         .map_err(|error| RebornBuildError::InvalidConfig {
             reason: format!("built-in first-party registry is invalid: {error}"),
@@ -2785,8 +2807,13 @@ fn production_first_party_registry_with_trigger_create_hook(
     Ok(registry)
 }
 
-fn local_dev_builtin_extension_registry() -> Result<ExtensionRegistry, RebornBuildError> {
-    let mut registry = builtin_extension_registry()?;
+fn local_dev_builtin_extension_registry(
+    #[cfg(feature = "github-issue-workflow-beta")] github_issue_workflow_enabled: bool,
+) -> Result<ExtensionRegistry, RebornBuildError> {
+    let mut registry = builtin_extension_registry(
+        #[cfg(feature = "github-issue-workflow-beta")]
+        github_issue_workflow_enabled,
+    )?;
     let builtin_id =
         ExtensionId::new("builtin").map_err(|error| RebornBuildError::InvalidConfig {
             reason: format!("built-in first-party package id is invalid: {error}"),
@@ -3469,7 +3496,11 @@ where
         &stores.scoped_filesystem,
     )));
     let process_backend = production_wiring.runtime_policy.process_backend;
-    let extension_registry = production_builtin_extension_registry(process_backend)?;
+    let extension_registry = production_builtin_extension_registry(
+        process_backend,
+        #[cfg(feature = "github-issue-workflow-beta")]
+        github_issue_workflow_first_party_handlers_enabled,
+    )?;
     let extension_registry = Arc::new(extension_registry);
     let BudgetSinks {
         budget_event_sink,

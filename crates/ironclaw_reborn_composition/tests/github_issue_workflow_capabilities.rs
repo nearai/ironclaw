@@ -11,6 +11,7 @@ mod github_issue_workflow_capabilities {
         github_issue_workflow_default_builtin_package_capabilities_for_test,
         github_issue_workflow_default_capability_profile_for_test,
         github_issue_workflow_default_first_party_handler_capabilities_for_test,
+        github_issue_workflow_disabled_builtin_package_capabilities_for_test,
         github_issue_workflow_first_party_handler_capabilities_for_test,
         github_issue_workflow_resolved_stage_profile_ids_for_test,
         github_issue_workflow_spawn_subagent_schema_for_test,
@@ -190,6 +191,11 @@ mod github_issue_workflow_capabilities {
             "workflow-enabled composition handlers must include the stage result handler"
         );
 
+        assert!(
+            !github_issue_workflow_disabled_builtin_package_capabilities_for_test()
+                .contains(RESULT_SINK),
+            "workflow-disabled composition package must not declare the workflow-only result tool"
+        );
         assert!(
             !github_issue_workflow_default_builtin_package_capabilities_for_test()
                 .contains(RESULT_SINK),

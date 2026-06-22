@@ -213,8 +213,19 @@ pub fn github_issue_workflow_subagent_allowed_capabilities_for_test(
 #[cfg(feature = "github-issue-workflow-beta")]
 pub fn github_issue_workflow_builtin_package_capabilities_for_test()
 -> std::collections::BTreeSet<String> {
-    crate::factory::builtin_extension_registry()
+    crate::factory::builtin_extension_registry(true)
         .expect("workflow-enabled built-in extension registry builds")
+        .capabilities()
+        .map(|capability| capability.id.as_str().to_string())
+        .collect()
+}
+
+/// Return the workflow-disabled composition built-in package capability ids.
+#[cfg(feature = "github-issue-workflow-beta")]
+pub fn github_issue_workflow_disabled_builtin_package_capabilities_for_test()
+-> std::collections::BTreeSet<String> {
+    crate::factory::builtin_extension_registry(false)
+        .expect("workflow-disabled built-in extension registry builds")
         .capabilities()
         .map(|capability| capability.id.as_str().to_string())
         .collect()

@@ -64,9 +64,32 @@ mod github_issue_workflow_runtime {
 
         assert_eq!(
             failure.kind,
-            RuntimeFailureKind::Backend,
-            "disabled workflow must not expose the workflow result-sink handler"
+            RuntimeFailureKind::MissingRuntime,
+            "disabled workflow must not expose or route the workflow result-sink capability"
         );
+        runtime.shutdown().await.expect("shutdown");
+    }
+
+    #[tokio::test]
+    async fn runtime_disabled_workflow_does_not_declare_result_sink_capability() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let runtime = build_reborn_runtime(local_dev_input(root.path().join("local-dev")))
+            .await
+            .expect("runtime builds");
+        let host_runtime = runtime
+            .services()
+            .host_runtime
+            .as_deref()
+            .expect("host runtime");
+
+        assert!(
+            !visible_capability_ids(host_runtime)
+                .await
+                .iter()
+                .any(|capability| capability == WORKFLOW_REPORT_STAGE_RESULT_CAPABILITY_ID),
+            "disabled workflow must not advertise the workflow result-sink capability"
+        );
+
         runtime.shutdown().await.expect("shutdown");
     }
 
@@ -129,6 +152,33 @@ mod github_issue_workflow_runtime {
         .await;
 
         assert_eq!(failure.kind, RuntimeFailureKind::InvalidInput);
+        runtime.shutdown().await.expect("shutdown");
+    }
+
+    #[tokio::test]
+    async fn runtime_enabled_workflow_declares_result_sink_capability() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let runtime = build_reborn_runtime(
+            local_dev_input(root.path().join("local-dev")).with_github_issue_workflow_settings(
+                GithubIssueWorkflowSettings::enabled_for_tests(),
+            ),
+        )
+        .await
+        .expect("runtime builds");
+        let host_runtime = runtime
+            .services()
+            .host_runtime
+            .as_deref()
+            .expect("host runtime");
+
+        assert!(
+            visible_capability_ids(host_runtime)
+                .await
+                .iter()
+                .any(|capability| capability == WORKFLOW_REPORT_STAGE_RESULT_CAPABILITY_ID),
+            "enabled workflow must advertise the workflow result-sink capability"
+        );
+
         runtime.shutdown().await.expect("shutdown");
     }
 
@@ -262,6 +312,17 @@ mod github_issue_workflow_runtime {
             RuntimeCapabilityOutcome::Failed(failure) => failure,
             other => panic!("unexpected capability outcome: {other:?}"),
         }
+    }
+
+    async fn visible_capability_ids<R: HostRuntime + ?Sized>(runtime: &R) -> Vec<String> {
+        runtime
+            .visible_capabilities(visible_request())
+            .await
+            .expect("visible capabilities resolve")
+            .capabilities
+            .into_iter()
+            .map(|capability| capability.descriptor.id.as_str().to_string())
+            .collect()
     }
 
     fn execution_context<I>(grants: I) -> ExecutionContext
