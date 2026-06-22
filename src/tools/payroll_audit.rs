@@ -42,9 +42,9 @@ fn canonical_tool(tool_name: &str) -> &str {
     tool_name.strip_prefix("t3n_mcp_").unwrap_or(tool_name)
 }
 
-/// True when `tool_name` is one of the four payroll milestone tools (after
-/// stripping the MCP server prefix). Used by the engine seams to gate cheaply
-/// before parsing any tool output.
+/// True when `tool_name` is one of the payroll milestone tools (after stripping
+/// the MCP server prefix). Used by the engine seams to gate cheaply before
+/// parsing any tool output.
 pub fn is_payroll_milestone(tool_name: &str) -> bool {
     matches!(
         canonical_tool(tool_name),
@@ -637,6 +637,7 @@ mod tests {
         assert!(is_payroll_milestone("t3n_mcp_submitEscalationResolutions"));
         // Bare names still match (defensive — either seam form works).
         assert!(is_payroll_milestone(RUN));
+
         // A non-payroll t3n tool does not.
         assert!(!is_payroll_milestone("t3n_mcp_listMyContext"));
 
