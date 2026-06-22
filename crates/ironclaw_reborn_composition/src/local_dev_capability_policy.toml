@@ -214,12 +214,6 @@ mounts = "ambient"
 network = "local_dev_wildcard"
 
 [[grants]]
-capability = "builtin.extension_remove"
-effects = ["dispatch_capability", "read_filesystem", "write_filesystem"]
-mounts = "ambient"
-network = "default"
-
-[[grants]]
 capability = "builtin.skill_list"
 effects = ["dispatch_capability", "read_filesystem", "write_filesystem"]
 mounts = "skill_management"

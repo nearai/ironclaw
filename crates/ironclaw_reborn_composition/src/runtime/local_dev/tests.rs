@@ -919,15 +919,23 @@ mod tests {
             NetworkPolicy::default()
         );
 
-        for capability_id in [
-            EXTENSION_INSTALL_CAPABILITY_ID,
-            EXTENSION_REMOVE_CAPABILITY_ID,
-        ] {
-            let grant = grant_for(capability_id);
-            assert_eq!(grant.constraints.allowed_effects, local_dev_allowed_effects);
-            assert!(grant.constraints.mounts.mounts.is_empty());
-            assert_eq!(grant.constraints.network, NetworkPolicy::default());
-        }
+        let extension_install_grant = grant_for(EXTENSION_INSTALL_CAPABILITY_ID);
+        assert_eq!(
+            extension_install_grant.constraints.allowed_effects,
+            local_dev_allowed_effects
+        );
+        assert!(extension_install_grant.constraints.mounts.mounts.is_empty());
+        assert_eq!(
+            extension_install_grant.constraints.network,
+            NetworkPolicy::default()
+        );
+        assert!(
+            !grants
+                .grants
+                .iter()
+                .any(|grant| { grant.capability.as_str() == EXTENSION_REMOVE_CAPABILITY_ID }),
+            "local-dev profile must not grant builtin.extension_remove"
+        );
         let extension_activate_grant = grant_for(EXTENSION_ACTIVATE_CAPABILITY_ID);
         assert_eq!(
             extension_activate_grant.constraints.allowed_effects,
