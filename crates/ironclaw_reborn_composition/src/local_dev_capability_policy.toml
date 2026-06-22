@@ -250,6 +250,18 @@ mounts = "ambient"
 network = "default"
 
 [[grants]]
+capability = "builtin.trigger_pause"
+effects = ["dispatch_capability", "external_write"]
+mounts = "ambient"
+network = "default"
+
+[[grants]]
+capability = "builtin.trigger_resume"
+effects = ["dispatch_capability", "external_write"]
+mounts = "ambient"
+network = "default"
+
+[[grants]]
 capability = "builtin.trigger_remove"
 effects = ["dispatch_capability", "external_write"]
 mounts = "ambient"

@@ -553,6 +553,16 @@ mod tests {
         );
         assert_trigger_grant(
             &policy,
+            "builtin.trigger_pause",
+            &[EffectKind::DispatchCapability, EffectKind::ExternalWrite],
+        );
+        assert_trigger_grant(
+            &policy,
+            "builtin.trigger_resume",
+            &[EffectKind::DispatchCapability, EffectKind::ExternalWrite],
+        );
+        assert_trigger_grant(
+            &policy,
             "builtin.trigger_remove",
             &[EffectKind::DispatchCapability, EffectKind::ExternalWrite],
         );
