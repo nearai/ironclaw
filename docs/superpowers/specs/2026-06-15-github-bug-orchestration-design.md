@@ -68,7 +68,7 @@ corrections are:
 - Provider bindings and echo suppression are first-class requirements.
 - Leases, cursors, idempotency, and reconciliation are explicit contracts.
 - Workspace records expose scoped workspace/mount refs, not raw host paths.
-- `workflow.report_stage_result` is a sealed, stage-bound result sink.
+- `builtin.workflow_report_stage_result` is a sealed, stage-bound result sink.
 - "Application on top of IronClaw" does not mean a thin cron script. The
   workflow application must retain production-grade output verification,
   replay/recovery, and bounded delegation behavior.
@@ -313,8 +313,8 @@ crates/ironclaw_github_issue_workflow/
 
 crates/ironclaw_github_issue_workflow_storage/
   src/lib.rs
-  src/libsql.rs
-  src/postgres.rs
+  src/filesystem_repository.rs
+  src/filesystem_repository/path.rs
 
 crates/ironclaw_reborn_composition/src/github_issue_workflow.rs
 ```
@@ -329,8 +329,12 @@ Ownership:
 - `ironclaw_github_issue_workflow` is the first-party workflow application
   crate. It owns domain contracts, workflow policy,
   provider action semantics, workflow event normalization, and workflow-owned ports.
-- `ironclaw_github_issue_workflow_storage` owns durable libSQL/PostgreSQL
-  adapters.
+- `ironclaw_github_issue_workflow_storage` owns durable filesystem-backed
+  repository adapters following the `ironclaw_product_workflow_storage` pattern:
+  a shared repository implementation over `RootFilesystem`/`ScopedFilesystem`
+  plus feature-gated libSQL/PostgreSQL constructors. It does not own workflow
+  policy, route registration, runtime construction, product workflow
+  orchestration, GitHub adapter behavior, or LLM-stage policy.
 - `ironclaw_reborn_composition` wires repositories, provider ports, turn
   submitters, workspace manager, event sinks, and runtime settings.
 - IronClaw core/platform crates own only the generic primitives needed by this
@@ -848,7 +852,7 @@ That distinction matters:
   existing dependent-run gate machinery;
 - subagent terminal output does not become a workflow event directly;
 - the workflow policy advances only from workflow-owned events, especially the
-  sealed `workflow.report_stage_result` result and turn/stage terminal refresh;
+  sealed `builtin.workflow_report_stage_result` result and turn/stage terminal refresh;
 - subagent limits, nesting, and capability allowlists stay in IronClaw run
   profile/capability-surface policy;
 - the workflow application chooses the stage-level fan-out budget and validates
@@ -969,7 +973,7 @@ workflow can classify.
 
 ## 15. Sealed Structured Completion
 
-`workflow.report_stage_result` is the workflow application's structured-result
+`builtin.workflow_report_stage_result` is the workflow application's structured-result
 contract with IronClaw. It is a sealed result sink, not a normal free-form tool
 available everywhere.
 
@@ -1149,13 +1153,13 @@ triage
   GitHub read: issue + comments
   filesystem: read/search only
   optional read-only spawn_subagent: explorer | reviewer
-  workflow.report_stage_result
+  builtin.workflow_report_stage_result
 
 planning
   GitHub read: issue + comments
   filesystem: read/search only
   optional read-only spawn_subagent: explorer | planner | reviewer
-  workflow.report_stage_result
+  builtin.workflow_report_stage_result
 
 implementation
   filesystem: read/search/write/apply_patch
@@ -1163,13 +1167,13 @@ implementation
   GitHub read only
   optional read-only spawn_subagent: explorer | reviewer
   writer fan-out only through workflow-managed child stage tasks
-  workflow.report_stage_result
+  builtin.workflow_report_stage_result
 
 pr_synthesis
   filesystem: read/search
   no direct GitHub writes
   optional read-only spawn_subagent: planner | reviewer
-  workflow.report_stage_result
+  builtin.workflow_report_stage_result
 
 ci_repair
   GitHub read: PR status/workflow summary
@@ -1177,7 +1181,7 @@ ci_repair
   shell/test command through runtime policy
   optional read-only spawn_subagent: explorer | reviewer
   writer fan-out only through workflow-managed child stage tasks
-  workflow.report_stage_result
+  builtin.workflow_report_stage_result
 
 review_response
   GitHub read: review comments
@@ -1185,11 +1189,11 @@ review_response
   shell/test command through runtime policy
   optional read-only spawn_subagent: explorer | reviewer
   writer fan-out only through workflow-managed child stage tasks
-  workflow.report_stage_result
+  builtin.workflow_report_stage_result
 ```
 
 GitHub writes happen after stage completion via workflow provider actions.
-Spawned subagents should not receive `workflow.report_stage_result` by default;
+Spawned subagents should not receive `builtin.workflow_report_stage_result` by default;
 their result returns to the parent stage turn as ordinary dependent-run output.
 
 Tests must prove:
@@ -1698,7 +1702,7 @@ Acceptance:
 ### Slice 2 - Real Stage-Turn Vertical Slice
 
 - Add normal scoped stage-turn submitter facade.
-- Add sealed `workflow.report_stage_result`.
+- Add sealed `builtin.workflow_report_stage_result`.
 - Add one minimal triage prompt/result schema.
 - Submit through existing turn infrastructure with a minimal capability
   profile.

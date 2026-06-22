@@ -201,7 +201,7 @@ Composition should wire the system. It should not become the workflow policy eng
 | State-machine orchestration | New workflow policy | Consumes ordered workflow events and emits steps. |
 | Agent execution | Existing IronClaw turns | Stage runner submits normal scoped turns. |
 | In-stage delegation | Existing IronClaw subagents | Optional child turns inside a stage; parent stage turn receives their results through dependent-run gates. |
-| Agent result capture | New sealed workflow tool/capability | `workflow.report_stage_result` accepts structured stage results. |
+| Agent result capture | New sealed workflow tool/capability | `builtin.workflow_report_stage_result` accepts structured stage results. |
 | GitHub writes | New provider action runner over existing GitHub capabilities | Agents propose intent; workflow provider actions perform writes. |
 | Workspace isolation | Existing workspace / host-runtime layers | Workflow stores scoped workspace refs and mount refs only. |
 | Shell/tests/file edits | Existing coding tools under runtime policy | Stage turns receive constrained workspace capabilities. |
@@ -242,7 +242,7 @@ provider capabilities and policy are added later.
 workflow policy starts stage run
   -> stage runner submits normal IronClaw turn
   -> turn runs with stage prompt, result schema, and capability profile
-  -> agent calls sealed workflow.report_stage_result
+  -> agent calls sealed builtin.workflow_report_stage_result
   -> workflow validates result
   -> result becomes a workflow event
   -> workflow policy advances
@@ -386,7 +386,7 @@ not mint trusted trigger inbound requests, bypass admission, bypass auth, or
 pass raw host paths into model-visible context.
 
 The stage agent receives enough context to do the stage, then reports a typed
-result through `workflow.report_stage_result`.
+result through `builtin.workflow_report_stage_result`.
 
 Subagents are optional inside that turn. They are useful for exploration,
 planning, or review, but they are not the orchestration layer. Their

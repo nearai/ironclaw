@@ -12,7 +12,9 @@
 
 ## Global Constraints
 
-- Do not commit any changes while executing this plan unless Ben explicitly reauthorizes commits in a later message. Each task ends with a status checkpoint instead of a commit.
+- Follow the repo Git rules from `AGENTS.md`: work on a non-main branch, stage files explicitly, make focused commits
+  after each meaningful unit of implementation, and do not push without explicit permission. Each task ends with a status
+  checkpoint that includes the commit hash for that task or the reason no commit was made.
 - Keep GitHub bug lifecycle policy out of `ironclaw_agent_loop`, `ironclaw_turns`, `ironclaw_triggers`, `ironclaw_product_workflow`, and the GitHub WASM extension.
 - Stage turns are normal scoped Reborn turns. Do not mint `TrustedInboundTurnRequest`, `TrustedTriggerSubmitRequest`, or trigger-owned trusted ingress from this workflow.
 - Agents do not receive GitHub write capabilities for this workflow. They produce structured intent; workflow provider actions perform GitHub writes.
@@ -72,12 +74,12 @@
 - Create `crates/ironclaw_github_issue_workflow/src/poller.rs` — internal cron-style poller over the workflow ports.
 - Create `crates/ironclaw_github_issue_workflow/src/ports.rs` — GitHub, stage-turn, workspace, project-access, clock ports.
 - Create `crates/ironclaw_github_issue_workflow/src/testing.rs` — test fakes behind `test-support`.
-- Create `crates/ironclaw_github_issue_workflow/prompts/github_bug/triage.v1.md`.
-- Create `crates/ironclaw_github_issue_workflow/prompts/github_bug/planning.v1.md`.
-- Create `crates/ironclaw_github_issue_workflow/prompts/github_bug/implementation.v1.md`.
-- Create `crates/ironclaw_github_issue_workflow/prompts/github_bug/pr_synthesis.v1.md`.
-- Create `crates/ironclaw_github_issue_workflow/prompts/github_bug/ci_repair.v1.md`.
-- Create `crates/ironclaw_github_issue_workflow/prompts/github_bug/review_response.v1.md`.
+- Create `crates/ironclaw_github_issue_workflow/prompts/github_issue_bugfix/v1/triage.md`.
+- Create `crates/ironclaw_github_issue_workflow/prompts/github_issue_bugfix/v1/plan.md`.
+- Create `crates/ironclaw_github_issue_workflow/prompts/github_issue_bugfix/v1/implement.md`.
+- Create `crates/ironclaw_github_issue_workflow/prompts/github_issue_bugfix/v1/synthesize_pr.md`.
+- Create `crates/ironclaw_github_issue_workflow/prompts/github_issue_bugfix/v1/repair_ci.md`.
+- Create `crates/ironclaw_github_issue_workflow/prompts/github_issue_bugfix/v1/address_review.md`.
 - Create `crates/ironclaw_github_issue_workflow/tests/domain_contract.rs`.
 - Create `crates/ironclaw_github_issue_workflow/tests/repository_contract.rs`.
 - Create `crates/ironclaw_github_issue_workflow/tests/provider_action_contract.rs`.
@@ -118,6 +120,9 @@
 - Modify `crates/ironclaw_reborn_composition/src/runtime.rs` — start/stop workflow poller, add readiness bit, wire sealed result sink into host runtime handlers.
 - Modify `crates/ironclaw_reborn_composition/src/factory.rs` — instantiate durable/in-memory workflow repositories and expose them to runtime graph.
 - Modify `crates/ironclaw_reborn_composition/src/local_dev_capability_policy.toml` — add the result capability grant; stage-only visibility is enforced by workflow run-profile capability filtering.
+- Modify `crates/ironclaw_reborn_cli/Cargo.toml` — add `github-issue-workflow-beta` feature forwarding to composition.
+- Create `crates/ironclaw_reborn_cli/src/runtime/github_issue_workflow.rs` — resolve config/env into runtime settings at the CLI edge.
+- Modify `crates/ironclaw_reborn_cli/src/runtime/mod.rs` — pass resolved workflow settings into `RebornRuntimeInput`.
 - Create `crates/ironclaw_reborn_composition/tests/github_issue_workflow_stage_turn.rs`.
 - Create `crates/ironclaw_reborn_composition/tests/github_issue_workflow_capabilities.rs`.
 - Create `crates/ironclaw_reborn_composition/tests/github_issue_workflow_provider.rs`.
@@ -253,6 +258,7 @@ pub trait WorkflowProjectAccess: Send + Sync {
 
 **Files:**
 - Modify: `Cargo.toml`
+- Modify: `crates/ironclaw_architecture/tests/reborn_dependency_boundaries.rs`
 - Create: `crates/ironclaw_github_issue_workflow/Cargo.toml`
 - Create: `crates/ironclaw_github_issue_workflow/src/lib.rs`
 - Create: `crates/ironclaw_github_issue_workflow/src/error.rs`
@@ -268,6 +274,11 @@ pub trait WorkflowProjectAccess: Send + Sync {
 - [ ] **Step 1: Add the crate to the workspace**
 
 Add `"crates/ironclaw_github_issue_workflow"` to the root `Cargo.toml` workspace `members` array next to the other `ironclaw_*` crates.
+Add a dependency-boundary rule for `ironclaw_github_issue_workflow` in
+`crates/ironclaw_architecture/tests/reborn_dependency_boundaries.rs`. The workflow application may depend on stable host
+API/thread/turn types, but it must not depend on the root binary, composition, host runtime, dispatch/runtime worker
+crates, provider extension crates, gateway/web UI/TUI crates, trigger implementation crates, or product workflow
+orchestration crates.
 
 - [ ] **Step 2: Create `crates/ironclaw_github_issue_workflow/Cargo.toml`**
 
@@ -429,7 +440,7 @@ Expected: pass after implementation.
 
 - [ ] **Step 8: Status checkpoint**
 
-Report: crate scaffolded, domain/config contract tests pass, no commits made.
+Report: crate scaffolded, domain/config contract tests pass, and include the task commit hash or the reason no commit was made.
 
 ## Task 2: Workflow Events, Repository Trait, And In-Memory Atomicity
 
@@ -536,7 +547,7 @@ Expected: all tests pass.
 
 - [ ] **Step 6: Status checkpoint**
 
-Report: in-memory repository contracts pass, no commits made.
+Report: in-memory repository contracts pass, and include the task commit hash or the reason no commit was made.
 
 ## Task 3: Provider Bindings, Provider Actions, And Claim Protocol
 
@@ -622,7 +633,7 @@ Expected: all tests pass.
 
 - [ ] **Step 6: Status checkpoint**
 
-Report: provider action contracts pass, no commits made.
+Report: provider action contracts pass, and include the task commit hash or the reason no commit was made.
 
 ## Task 4: Workflow Policy Vertical Slice With Fake Ports
 
@@ -726,7 +737,7 @@ Expected: all tests pass.
 
 - [ ] **Step 6: Status checkpoint**
 
-Report: fake-port workflow policy vertical slice works, no commits made.
+Report: fake-port workflow policy vertical slice works, and include the task commit hash or the reason no commit was made.
 
 ## Task 5: Sealed Structured Result Capability In Host Runtime
 
@@ -820,10 +831,13 @@ In `first_party_tools/mod.rs`:
 
 - add `mod workflow_result;`;
 - export `WORKFLOW_REPORT_STAGE_RESULT_CAPABILITY_ID`, `WorkflowStageResultSink`, `ReportWorkflowStageResultInput`, `WorkflowStageResultAck`;
-- add `workflow_result::manifest()?` to `builtin_first_party_package()`;
+- keep `builtin_first_party_package()` unchanged for default callers;
+- add `pub fn builtin_first_party_package_with_workflow_stage_result()` or an equivalent narrowly named helper that
+  starts from the default package and adds `workflow_result::manifest()?` only for workflow-enabled composition;
 - add `pub fn builtin_first_party_handlers_with_workflow_stage_result_sink(...)` that starts from `builtin_first_party_handlers(trigger_repository)` and then calls `workflow_result::insert_handler`.
 
-Keep existing `builtin_first_party_handlers(...)` behavior unchanged for callers that do not wire this workflow.
+Keep existing `builtin_first_party_package()` and `builtin_first_party_handlers(...)` behavior unchanged for callers that
+do not wire this workflow.
 
 - [ ] **Step 5: Add schema**
 
@@ -843,6 +857,8 @@ Tests:
 - `workflow_result_handler_forwards_to_sink`
 - `workflow_result_handler_rejects_invalid_json_without_calling_sink`
 - `workflow_result_handler_sanitizes_validation_failure`
+- `default_builtin_package_does_not_declare_workflow_result`
+- `workflow_sink_package_declares_result_capability`
 - `default_builtin_handlers_do_not_register_workflow_result_sink`
 - `workflow_sink_handlers_registers_result_capability`
 
@@ -851,7 +867,7 @@ Expected: all tests pass.
 
 - [ ] **Step 7: Status checkpoint**
 
-Report: sealed result platform primitive added and tested, no commits made.
+Report: sealed result platform primitive added and tested, and include the task commit hash or the reason no commit was made.
 
 ## Task 6: Stage Result Validation And Sink Adapter
 
@@ -938,14 +954,14 @@ Expected: all tests pass.
 
 - [ ] **Step 5: Status checkpoint**
 
-Report: strict stage result validation and sink adapter contract pass, no commits made.
+Report: strict stage result validation and sink adapter contract pass, and include the task commit hash or the reason no commit was made.
 
 ## Task 7: Engineered Snapshots And Prompt Pack
 
 **Files:**
 - Create: `crates/ironclaw_github_issue_workflow/src/snapshots.rs`
 - Create: `crates/ironclaw_github_issue_workflow/src/prompts.rs`
-- Create: prompt markdown files under `crates/ironclaw_github_issue_workflow/prompts/github_bug/`
+- Create: prompt markdown files under `crates/ironclaw_github_issue_workflow/prompts/github_issue_bugfix/v1/`
 - Test: `crates/ironclaw_github_issue_workflow/tests/prompt_snapshot_contract.rs`
 
 **Interfaces:**
@@ -1027,7 +1043,7 @@ Expected: all tests pass.
 
 - [ ] **Step 6: Status checkpoint**
 
-Report: context engineering/prompt contracts pass, no commits made.
+Report: context engineering/prompt contracts pass, and include the task commit hash or the reason no commit was made.
 
 ## Task 8: App-Side Stage Turn Submitter Over Threads + TurnCoordinator
 
@@ -1105,7 +1121,7 @@ Expected: all tests pass.
 
 - [ ] **Step 6: Status checkpoint**
 
-Report: stage turns submit through normal thread/turn contracts, no commits made.
+Report: stage turns submit through normal thread/turn contracts, and include the task commit hash or the reason no commit was made.
 
 ## Task 9: Capability Profiles And Read-Only Subagent Guardrails
 
@@ -1190,7 +1206,7 @@ Expected: all tests pass. The `workflow_stage_profiles_do_not_allow_coder_subage
 
 - [ ] **Step 5: Status checkpoint**
 
-Report: capability guardrails tested, no commits made.
+Report: capability guardrails tested, and include the task commit hash or the reason no commit was made.
 
 ## Task 10: Internal Poller And Discovery Flow
 
@@ -1255,7 +1271,7 @@ Expected: all tests pass.
 
 - [ ] **Step 5: Status checkpoint**
 
-Report: internal cron-style poller works with fake GitHub port, no commits made.
+Report: internal cron-style poller works with fake GitHub port, and include the task commit hash or the reason no commit was made.
 
 ## Task 11: GitHub Provider Port Adapter In Composition
 
@@ -1302,12 +1318,13 @@ Expected: all tests pass.
 
 - [ ] **Step 5: Status checkpoint**
 
-Report: GitHub provider adapter works against fake capability dispatch, no commits made.
+Report: GitHub provider adapter works against fake capability dispatch, and include the task commit hash or the reason no commit was made.
 
 ## Task 12: Durable Storage Adapter With libSQL/PostgreSQL Parity
 
 **Files:**
 - Modify: root `Cargo.toml`
+- Modify: `crates/ironclaw_architecture/tests/reborn_dependency_boundaries.rs`
 - Create: `crates/ironclaw_github_issue_workflow_storage/Cargo.toml`
 - Create: `crates/ironclaw_github_issue_workflow_storage/src/lib.rs`
 - Create: `crates/ironclaw_github_issue_workflow_storage/src/filesystem_repository.rs`
@@ -1322,6 +1339,9 @@ Report: GitHub provider adapter works against fake capability dispatch, no commi
 - [ ] **Step 1: Add storage crate to workspace**
 
 Add `"crates/ironclaw_github_issue_workflow_storage"` to root `Cargo.toml`.
+Add a storage-crate dependency-boundary rule in `reborn_dependency_boundaries.rs`. The storage crate may depend on
+`ironclaw_filesystem`, `ironclaw_host_api`, and `ironclaw_github_issue_workflow`; it must not depend on composition,
+host runtime, product workflow, provider extension, route/ingress, gateway, web UI, TUI, or runtime worker crates.
 
 - [ ] **Step 2: Create storage manifest**
 
@@ -1367,7 +1387,9 @@ tokio-postgres = "0.7"
 
 - [ ] **Step 3: Implement filesystem-backed records**
 
-Use `ScopedFilesystem` record APIs and CAS semantics. Store records under a workflow-owned prefix, for example:
+Follow the `ironclaw_product_workflow_storage` pattern: expose production constructors over `RootFilesystem`, derive a
+workflow-owned `ScopedFilesystem` internally, and keep local/test constructors available for already-scoped filesystem
+handles. Use record APIs and CAS semantics. Store records under a workflow-owned prefix, for example:
 
 ```text
 /github_issue_workflow/configs/<tenant>/<project>.json
@@ -1413,7 +1435,7 @@ Expected: libSQL and PostgreSQL tests pass in environments with their backends a
 
 - [ ] **Step 6: Status checkpoint**
 
-Report: durable parity contracts pass or name the unavailable backend explicitly, no commits made.
+Report: durable parity contracts pass or name the unavailable backend explicitly, and include the task commit hash or the reason no commit was made.
 
 ## Task 13: Runtime Config And Composition Wiring
 
@@ -1424,7 +1446,11 @@ Report: durable parity contracts pass or name the unavailable backend explicitly
 - Modify: `crates/ironclaw_reborn_composition/src/runtime.rs`
 - Modify: `crates/ironclaw_reborn_composition/src/factory.rs`
 - Modify: `crates/ironclaw_reborn_composition/Cargo.toml`
+- Modify: `crates/ironclaw_reborn_cli/Cargo.toml`
+- Create: `crates/ironclaw_reborn_cli/src/runtime/github_issue_workflow.rs`
+- Modify: `crates/ironclaw_reborn_cli/src/runtime/mod.rs`
 - Test: `crates/ironclaw_reborn_config/tests/config_file.rs` or existing inline config tests in `config_file.rs`
+- Test: inline tests in `crates/ironclaw_reborn_cli/src/runtime/github_issue_workflow.rs` or the existing runtime module tests
 - Test: `crates/ironclaw_reborn_composition/tests/github_issue_workflow_runtime.rs`
 
 **Interfaces:**
@@ -1486,6 +1512,18 @@ pub struct GithubIssueWorkflowSettings {
 
 Add `GithubIssueWorkflowSettings::disabled()` and `GithubIssueWorkflowSettings::enabled_for_tests()`.
 
+At the CLI edge, mirror the existing runtime config resolver pattern:
+
+- add `github-issue-workflow-beta = ["ironclaw_reborn_composition/github-issue-workflow-beta"]` to
+  `crates/ironclaw_reborn_cli/Cargo.toml`;
+- create `runtime/github_issue_workflow.rs` to merge `[github_issue_workflow]` config and explicit environment
+  overrides such as `IRONCLAW_GITHUB_ISSUE_WORKFLOW_ENABLED` and
+  `IRONCLAW_GITHUB_ISSUE_WORKFLOW_INTERVAL_SECS`;
+- keep `ironclaw_reborn_config` parse-only;
+- pass the resolved `GithubIssueWorkflowSettings` into `RebornRuntimeInput` from `runtime/mod.rs`;
+- fail loudly when config enables the workflow but the binary was built without `github-issue-workflow-beta`, matching
+  the repo's existing feature-gated runtime behavior.
+
 - [ ] **Step 4: Wire storage in factory**
 
 In `factory.rs`, add workflow repository fields to local runtime services and production graph:
@@ -1528,6 +1566,10 @@ Tests:
 - `runtime_starts_github_issue_workflow_when_enabled`
 - `runtime_shutdown_cancels_github_issue_workflow_poller`
 - `runtime_enabled_workflow_registers_result_sink_handler`
+- `cli_runtime_maps_github_issue_workflow_config_to_settings`
+- `cli_runtime_env_overrides_github_issue_workflow_config`
+- `cli_runtime_rejects_invalid_github_issue_workflow_env`
+- `cli_runtime_feature_off_rejects_enabled_github_issue_workflow`
 - `production_enabled_workflow_requires_durable_storage`
 - `production_enabled_workflow_requires_project_access_checker`
 
@@ -1536,7 +1578,7 @@ Expected: all tests pass.
 
 - [ ] **Step 9: Status checkpoint**
 
-Report: binary/runtime wiring works and remains disabled by default, no commits made.
+Report: binary/runtime wiring works and remains disabled by default, and include the task commit hash or the reason no commit was made.
 
 ## Task 14: Workspace Preparation And Implementation Stage Loop
 
@@ -1596,7 +1638,7 @@ Expected: all tests pass.
 
 - [ ] **Step 5: Status checkpoint**
 
-Report: implementation stage can run against isolated workspace refs, no commits made.
+Report: implementation stage can run against isolated workspace refs, and include the task commit hash or the reason no commit was made.
 
 ## Task 15: Draft PR Provider Action And Lifecycle Refresh
 
@@ -1650,7 +1692,7 @@ Expected: all tests pass.
 
 - [ ] **Step 5: Status checkpoint**
 
-Report: draft PR and lifecycle refresh policy pass tests, no commits made.
+Report: draft PR and lifecycle refresh policy pass tests, and include the task commit hash or the reason no commit was made.
 
 ## Task 16: Observability, Redaction, And Smoke Test
 
@@ -1720,7 +1762,7 @@ Expected: all available targeted gates pass. If a backend-specific durable test 
 
 - [ ] **Step 5: Status checkpoint**
 
-Report: smoke flow and targeted gates complete, no commits made.
+Report: smoke flow and targeted gates complete, and include the task commit hash or the reason no commit was made.
 
 ## Task 17: Future Webhook Slot-In Point
 
@@ -1764,7 +1806,7 @@ Expected: all tests pass.
 
 - [ ] **Step 4: Status checkpoint**
 
-Report: webhook slot-in normalizer exists without changing MVP ingress, no commits made.
+Report: webhook slot-in normalizer exists without changing MVP ingress, and include the task commit hash or the reason no commit was made.
 
 ## Execution Order And Review Gates
 
@@ -1807,4 +1849,4 @@ Review gates:
 - Idempotency and leases are covered by Tasks 2, 4, and 12.
 - Agent delegation is handled through existing IronClaw subagents and constrained by Task 9; no subagent runtime is ported.
 - Webhook slot-in is covered by Task 17 without changing the MVP cron ingress.
-- No task contains commit steps, in accordance with Ben's instruction.
+- Task checkpoints follow the repo Git rules from `AGENTS.md` rather than suppressing focused commits.
