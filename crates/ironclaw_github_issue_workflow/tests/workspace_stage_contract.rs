@@ -5,8 +5,9 @@ mod workspace_stage_contract {
     use async_trait::async_trait;
     use chrono::{Duration, TimeZone, Utc};
     use ironclaw_github_issue_workflow::{
-        AcceptStageResultInput, CreateIssueCommentInput, CreateOrGetWorkflowRunInput,
-        CreateOrGetWorkflowRunOutcome, GetAuthenticatedWorkflowActorInput, GithubActorSnapshot,
+        AcceptStageResultInput, CompleteWorkflowStepInput, CreateIssueCommentInput,
+        CreateOrGetWorkflowRunInput, CreateOrGetWorkflowRunOutcome, CreateOrGetWorkflowStepInput,
+        CreateOrGetWorkflowStepOutcome, GetAuthenticatedWorkflowActorInput, GithubActorSnapshot,
         GithubCommentRef, GithubIssueCommentSnapshot, GithubIssueDiscoveredPayload, GithubIssueRef,
         GithubIssueStage, GithubIssueWorkflowError, GithubIssueWorkflowEventType,
         GithubIssueWorkflowMode, GithubIssueWorkflowPolicy, GithubIssueWorkflowPolicyPorts,
@@ -16,9 +17,10 @@ mod workspace_stage_contract {
         PrepareWorkflowWorkspaceOutcome, PrepareWorkflowWorkspaceRequest, RecordWorkflowEventInput,
         RecordWorkflowEventOutcome, StageCompletedPayload, StageTurnSubmitter,
         SubmitStageTurnOutcome, SubmitStageTurnRequest, WorkflowClock, WorkflowEventEnvelope,
-        WorkflowEventSourceKind, WorkflowProjectAccess, WorkflowProjectAccessRequest,
-        WorkflowStepStatus, WorkflowWorkerId, WorkflowWorkspaceManager, WorkflowWorkspaceMountRef,
-        WorkflowWorkspaceRef, issue_binding_ref, issue_discovered_key, stage_result_reported_key,
+        WorkflowEventSourceKind, WorkflowIdempotencyKey, WorkflowProjectAccess,
+        WorkflowProjectAccessRequest, WorkflowStepStatus, WorkflowWorkerId,
+        WorkflowWorkspaceManager, WorkflowWorkspaceMountRef, WorkflowWorkspaceRef,
+        issue_binding_ref, issue_discovered_key, stage_result_reported_key,
     };
     use ironclaw_host_api::{AgentId, ProjectId, TenantId, ThreadId, UserId};
     use ironclaw_turns::TurnRunId;
@@ -331,21 +333,32 @@ mod workspace_stage_contract {
     #[derive(Debug)]
     struct FakeWorkspaceManager {
         requests: Mutex<Vec<PrepareWorkflowWorkspaceRequest>>,
-        failures_remaining: Mutex<usize>,
+        failures: Mutex<VecDeque<GithubIssueWorkflowError>>,
     }
 
     impl FakeWorkspaceManager {
         fn new() -> Self {
             Self {
                 requests: Mutex::new(Vec::new()),
-                failures_remaining: Mutex::new(0),
+                failures: Mutex::new(VecDeque::new()),
             }
         }
 
         fn fail_once() -> Self {
             Self {
                 requests: Mutex::new(Vec::new()),
-                failures_remaining: Mutex::new(1),
+                failures: Mutex::new(VecDeque::from([GithubIssueWorkflowError::Repository {
+                    reason: "workspace backend unavailable".to_string(),
+                }])),
+            }
+        }
+
+        fn denied() -> Self {
+            Self {
+                requests: Mutex::new(Vec::new()),
+                failures: Mutex::new(VecDeque::from([GithubIssueWorkflowError::PolicyDenied {
+                    reason: "workspace access denied".to_string(),
+                }])),
             }
         }
 
@@ -361,14 +374,11 @@ mod workspace_stage_contract {
             request: PrepareWorkflowWorkspaceRequest,
         ) -> Result<PrepareWorkflowWorkspaceOutcome, GithubIssueWorkflowError> {
             self.requests.lock().await.push(request.clone());
-            let mut failures_remaining = self.failures_remaining.lock().await;
-            if *failures_remaining > 0 {
-                *failures_remaining -= 1;
-                return Err(GithubIssueWorkflowError::Repository {
-                    reason: "workspace backend unavailable".to_string(),
-                });
+            let mut failures = self.failures.lock().await;
+            if let Some(error) = failures.pop_front() {
+                return Err(error);
             }
-            drop(failures_remaining);
+            drop(failures);
 
             let workspace_session_id =
                 GithubIssueWorkspaceSessionId::from_trusted("workspace-session-42".to_string())
@@ -614,5 +624,110 @@ mod workspace_stage_contract {
             GithubIssueWorkflowMode::Implementation
         );
         assert_eq!(policy.ports().stage_turns.requests().await.len(), 3);
+    }
+
+    #[tokio::test]
+    async fn workspace_prepare_policy_denial_is_not_retryable() {
+        let workspace = Arc::new(FakeWorkspaceManager::denied());
+        let policy = policy_with_workspace(workspace);
+        let after_planning = planning_completed_run(&policy).await;
+
+        let error = policy
+            .tick(after_planning)
+            .await
+            .expect_err("permanent workspace denial should block through poller error path");
+
+        assert!(matches!(
+            error,
+            GithubIssueWorkflowError::PolicyDenied { .. }
+        ));
+        assert_eq!(policy.ports().stage_turns.requests().await.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn completed_prepare_step_replays_legacy_result_shape() {
+        let workspace = Arc::new(FakeWorkspaceManager::new());
+        let policy = policy_with_workspace(workspace.clone());
+        let after_planning = planning_completed_run(&policy).await;
+
+        let workspace_session_id =
+            GithubIssueWorkspaceSessionId::from_trusted("legacy-workspace-session".to_string())
+                .unwrap();
+        let step_input = serde_json::json!({
+            "workflow_run_id": after_planning.workflow_run_id.clone(),
+            "issue": after_planning.issue_ref.clone(),
+            "policy_version": "workspace-contract-v1",
+        });
+        let idempotency_key = WorkflowIdempotencyKey::from_trusted(format!(
+            "policy-step:workspace-contract-v1:{}:prepare_workspace",
+            after_planning.workflow_run_id
+        ))
+        .unwrap();
+        let step = match policy
+            .ports()
+            .repository
+            .create_or_get_workflow_step(CreateOrGetWorkflowStepInput {
+                workflow_run_id: after_planning.workflow_run_id.clone(),
+                step_name: "prepare_workspace".to_string(),
+                idempotency_key,
+                input_hash: workflow_input_hash("prepare_workspace", &step_input),
+                now: fixed_time(30),
+            })
+            .await
+            .unwrap()
+        {
+            CreateOrGetWorkflowStepOutcome::Created { step }
+            | CreateOrGetWorkflowStepOutcome::Existing { step } => step,
+        };
+        policy
+            .ports()
+            .repository
+            .complete_workflow_step(CompleteWorkflowStepInput {
+                step_run_id: step.step_run_id,
+                status: WorkflowStepStatus::Succeeded,
+                result: Some(serde_json::json!({
+                    "workspace_session_id": workspace_session_id,
+                    "workspace_ref": {
+                        "thread_id": null,
+                        "workspace_session_id": "legacy-workspace-session",
+                        "turn_run_id": null
+                    },
+                    "mount_ref": {
+                        "mount_id": "legacy-workspace-mount",
+                        "alias": "/workspace"
+                    }
+                })),
+                error: None,
+                next_attempt_at: None,
+                now: fixed_time(31),
+            })
+            .await
+            .unwrap();
+
+        let outcome = policy.tick(after_planning).await.unwrap();
+
+        assert_eq!(workspace.request_count().await, 0);
+        assert_eq!(
+            outcome.run.workflow_state.mode,
+            GithubIssueWorkflowMode::Implementation
+        );
+        assert_eq!(
+            outcome
+                .run
+                .workflow_state
+                .current_workspace_mount_ref
+                .as_ref()
+                .map(|mount| mount.mount_id.as_str()),
+            Some("legacy-workspace-mount")
+        );
+    }
+
+    fn workflow_input_hash(label: &str, value: &JsonValue) -> String {
+        use sha2::{Digest, Sha256};
+
+        let mut hasher = Sha256::new();
+        hasher.update(label.as_bytes());
+        hasher.update(serde_json::to_vec(value).unwrap());
+        format!("sha256:{:x}", hasher.finalize())
     }
 }

@@ -13,15 +13,15 @@ use crate::{
     GithubIssueStage, GithubIssueWorkflowError, GithubIssueWorkflowEvent,
     GithubIssueWorkflowEventType, GithubIssueWorkflowMode, GithubIssueWorkflowPort,
     GithubIssueWorkflowRepository, GithubIssueWorkflowRun, GithubIssueWorkflowRunId,
-    GithubIssueWorkflowRunStatus, GithubIssueWorkspaceSession, ListWorkflowEventsAfterInput,
-    PrepareWorkflowWorkspaceOutcome, PrepareWorkflowWorkspaceRequest, ProviderActionRunOutcome,
-    ProviderContentSummary, RepositorySnapshot, StageCompletedPayload, StageConstraintSnapshot,
-    StageTurnIdentity, StageTurnSubmitter, SubmitStageTurnOutcome, SubmitStageTurnRequest,
-    TransitionOutcome, WorkflowActorScope, WorkflowClock, WorkflowIdempotencyKey,
-    WorkflowProjectAccess, WorkflowProjectAccessRequest, WorkflowPromptContent,
-    WorkflowRunTransition, WorkflowStateSnapshot, WorkflowStepRunId, WorkflowWorkerId,
-    WorkflowWorkspaceManager, WorkflowWorkspaceMountRef, WorkflowWorkspaceSnapshot,
-    render_stage_prompt, stage_result_schema_version, stage_slug,
+    GithubIssueWorkflowRunStatus, GithubIssueWorkspaceSession, GithubIssueWorkspaceSessionId,
+    GithubRepositorySelector, ListWorkflowEventsAfterInput, PrepareWorkflowWorkspaceRequest,
+    ProviderActionRunOutcome, ProviderContentSummary, RepositorySnapshot, StageCompletedPayload,
+    StageConstraintSnapshot, StageTurnIdentity, StageTurnSubmitter, SubmitStageTurnOutcome,
+    SubmitStageTurnRequest, TransitionOutcome, WorkflowActorScope, WorkflowClock,
+    WorkflowIdempotencyKey, WorkflowProjectAccess, WorkflowProjectAccessRequest,
+    WorkflowPromptContent, WorkflowRunTransition, WorkflowStateSnapshot, WorkflowStepRunId,
+    WorkflowWorkerId, WorkflowWorkspaceManager, WorkflowWorkspaceMountRef, WorkflowWorkspaceRef,
+    WorkflowWorkspaceSnapshot, render_stage_prompt, stage_result_schema_version, stage_slug,
 };
 
 const DEFAULT_STAGE_ATTEMPT: u32 = 1;
@@ -379,8 +379,11 @@ where
                     reason: "completed prepare_workspace step had no result".to_string(),
                 });
             };
-            let outcome = serde_json::from_value(result).map_err(policy_serde_error)?;
-            let PrepareWorkflowWorkspaceOutcome { session } = outcome;
+            let session = decode_prepare_workspace_outcome(
+                result,
+                run,
+                step.completed_at.unwrap_or(step.started_at),
+            )?;
             return Ok(PrepareWorkspaceStepOutcome::Prepared { session, step });
         }
         let now = self.ports.clock().now();
@@ -405,6 +408,9 @@ where
         {
             Ok(outcome) => outcome,
             Err(error) => {
+                if !workspace_prepare_error_is_retryable(&error) {
+                    return Err(error);
+                }
                 let retry = self
                     .retry_step(
                         step,
@@ -927,6 +933,59 @@ fn workflow_step_waits_for_retry(step: &WorkflowStepRun, now: DateTime<Utc>) -> 
             .next_attempt_at
             .map(|next_attempt_at| next_attempt_at > now)
             .unwrap_or(false)
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+enum PrepareWorkflowWorkspaceOutcomeWire {
+    Current {
+        session: GithubIssueWorkspaceSession,
+    },
+    Legacy {
+        workspace_session_id: GithubIssueWorkspaceSessionId,
+        workspace_ref: WorkflowWorkspaceRef,
+        mount_ref: WorkflowWorkspaceMountRef,
+    },
+}
+
+fn decode_prepare_workspace_outcome(
+    result: JsonValue,
+    run: &GithubIssueWorkflowRun,
+    created_at: DateTime<Utc>,
+) -> Result<GithubIssueWorkspaceSession, GithubIssueWorkflowError> {
+    let wire = serde_json::from_value::<PrepareWorkflowWorkspaceOutcomeWire>(result)
+        .map_err(policy_serde_error)?;
+    Ok(match wire {
+        PrepareWorkflowWorkspaceOutcomeWire::Current { session } => session,
+        PrepareWorkflowWorkspaceOutcomeWire::Legacy {
+            workspace_session_id,
+            workspace_ref,
+            mount_ref,
+        } => GithubIssueWorkspaceSession {
+            workspace_session_id,
+            workflow_run_id: run.workflow_run_id.clone(),
+            repository: GithubRepositorySelector::new(
+                run.issue_ref.owner.clone(),
+                run.issue_ref.repo.clone(),
+            )?,
+            base_branch: run.issue_ref.default_branch.clone(),
+            base_sha: None,
+            working_branch: format!("ironclaw/github-bug/{}", run.workflow_run_id),
+            current_head_sha: None,
+            workspace_ref,
+            mount_ref,
+            created_at,
+        },
+    })
+}
+
+fn workspace_prepare_error_is_retryable(error: &GithubIssueWorkflowError) -> bool {
+    matches!(
+        error,
+        GithubIssueWorkflowError::ProviderRead { .. }
+            | GithubIssueWorkflowError::ProviderRateLimited { .. }
+            | GithubIssueWorkflowError::Repository { .. }
+    )
 }
 
 fn run_with_workspace_session(

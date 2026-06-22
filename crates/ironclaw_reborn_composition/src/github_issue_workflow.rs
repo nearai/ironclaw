@@ -10,14 +10,12 @@ use ironclaw_github_issue_workflow::{
     GithubIssueSearchHit, GithubIssueStage, GithubIssueStageRunId, GithubIssueWorkflowConfig,
     GithubIssueWorkflowConfigSource, GithubIssueWorkflowError, GithubIssueWorkflowPoller,
     GithubIssueWorkflowPollerConfig, GithubIssueWorkflowPollerPorts, GithubIssueWorkflowPort,
-    GithubIssueWorkflowRepository, GithubIssueWorkflowRunId, GithubIssueWorkspaceSession,
-    GithubIssueWorkspaceSessionId, GithubProviderAccountRef, GithubPullRequestRef,
-    GithubRepositorySelector, ListIssueCommentsInput, PrepareWorkflowWorkspaceOutcome,
+    GithubIssueWorkflowRepository, GithubIssueWorkflowRunId, GithubProviderAccountRef,
+    GithubPullRequestRef, ListIssueCommentsInput, PrepareWorkflowWorkspaceOutcome,
     PrepareWorkflowWorkspaceRequest, SearchGithubIssuesInput, StageTurnSubmitter,
     SubmitStageTurnOutcome, SubmitStageTurnRequest, WorkflowActorScope, WorkflowClock,
     WorkflowConfigAccessRequest, WorkflowProjectAccess, WorkflowProjectAccessRequest,
-    WorkflowWorkerId, WorkflowWorkspaceManager, WorkflowWorkspaceMountRef, WorkflowWorkspaceRef,
-    validate_stage_result,
+    WorkflowWorkerId, WorkflowWorkspaceManager, validate_stage_result,
 };
 use ironclaw_host_api::{
     AgentId, CapabilityId, CapabilitySet, ExecutionContext, ExtensionId, MountView,
@@ -666,7 +664,7 @@ pub(crate) fn spawn_github_issue_workflow(
             project_access,
             repository,
             stage_turn_submitter,
-            workspace_manager: Arc::new(IronClawWorkflowWorkspaceManager),
+            workspace_manager: Arc::new(UnconfiguredWorkflowWorkspaceManager),
             worker_id: WorkflowWorkerId::new(),
         },
         GithubIssueWorkflowPollerConfig {
@@ -894,43 +892,16 @@ impl WorkflowProjectAccess for UnconfiguredWorkflowProjectAccess {
     }
 }
 
-struct IronClawWorkflowWorkspaceManager;
+struct UnconfiguredWorkflowWorkspaceManager;
 
 #[async_trait]
-impl WorkflowWorkspaceManager for IronClawWorkflowWorkspaceManager {
+impl WorkflowWorkspaceManager for UnconfiguredWorkflowWorkspaceManager {
     async fn prepare_workspace(
         &self,
-        request: PrepareWorkflowWorkspaceRequest,
+        _request: PrepareWorkflowWorkspaceRequest,
     ) -> Result<PrepareWorkflowWorkspaceOutcome, GithubIssueWorkflowError> {
-        let repository =
-            GithubRepositorySelector::new(request.issue.owner.clone(), request.issue.repo.clone())?;
-        let workflow_run_id = request.workflow_run_id.clone();
-        let workspace_session_id = GithubIssueWorkspaceSessionId::from_trusted(format!(
-            "github-issue-workflow:{}",
-            workflow_run_id
-        ))?;
-        let workspace_ref = WorkflowWorkspaceRef {
-            thread_id: None,
-            workspace_session_id: Some(workspace_session_id.clone()),
-            turn_run_id: None,
-        };
-        let mount_ref = WorkflowWorkspaceMountRef {
-            mount_id: format!("github-issue-workflow:{}", workspace_session_id.as_str()),
-            alias: "/workspace".to_string(),
-        };
-        Ok(PrepareWorkflowWorkspaceOutcome {
-            session: GithubIssueWorkspaceSession {
-                workspace_session_id,
-                workflow_run_id: request.workflow_run_id,
-                repository,
-                base_branch: request.base_branch.clone(),
-                base_sha: None,
-                working_branch: format!("ironclaw/github-bug/{workflow_run_id}"),
-                current_head_sha: None,
-                workspace_ref,
-                mount_ref,
-                created_at: request.requested_at,
-            },
+        Err(GithubIssueWorkflowError::PolicyDenied {
+            reason: "GitHub issue workflow workspace backend is not configured".to_string(),
         })
     }
 }
@@ -1789,12 +1760,13 @@ mod github_issue_workflow_provider_runtime_contract_tests {
     use async_trait::async_trait;
     use chrono::Utc;
     use ironclaw_github_issue_workflow::{
-        GithubIssueWorkflowError, GithubIssueWorkflowPort, GithubProviderAccountRef,
-        SearchGithubIssuesInput,
+        GithubIssueRef, GithubIssueWorkflowError, GithubIssueWorkflowPort,
+        GithubIssueWorkflowRunId, GithubProviderAccountRef, PrepareWorkflowWorkspaceRequest,
+        SearchGithubIssuesInput, WorkflowWorkspaceManager,
     };
     use ironclaw_host_api::{
-        CapabilitySet, EffectKind, ExecutionContext, ExtensionId, MountView, RuntimeKind,
-        TrustClass, UserId,
+        AgentId, CapabilitySet, EffectKind, ExecutionContext, ExtensionId, MountView, ProjectId,
+        RuntimeKind, TenantId, TrustClass, UserId,
     };
     use ironclaw_host_runtime::{
         CancelRuntimeWorkOutcome, CancelRuntimeWorkRequest, HostRuntime, HostRuntimeError,
@@ -1807,6 +1779,40 @@ mod github_issue_workflow_provider_runtime_contract_tests {
     use super::{
         HostRuntimeGithubIssueWorkflowCapabilityDispatcher, IronClawGithubIssueWorkflowPort,
     };
+
+    #[tokio::test]
+    async fn composition_workspace_manager_fails_closed_without_real_backend() {
+        let manager = super::UnconfiguredWorkflowWorkspaceManager;
+
+        let error = manager
+            .prepare_workspace(PrepareWorkflowWorkspaceRequest {
+                tenant_id: TenantId::new("tenant-workspace").unwrap(),
+                creator_user_id: UserId::new("user-workspace").unwrap(),
+                agent_id: Some(AgentId::new("agent-workspace").unwrap()),
+                project_id: Some(ProjectId::new("project-workspace").unwrap()),
+                workflow_run_id: GithubIssueWorkflowRunId::from_trusted(
+                    "workflow-run-workspace".to_string(),
+                )
+                .unwrap(),
+                issue: GithubIssueRef {
+                    owner: "nearai".to_string(),
+                    repo: "ironclaw".to_string(),
+                    number: 42,
+                    node_id: Some("issue-node-42".to_string()),
+                    url: "https://github.com/nearai/ironclaw/issues/42".to_string(),
+                    default_branch: "main".to_string(),
+                },
+                base_branch: "main".to_string(),
+                requested_at: Utc::now(),
+            })
+            .await
+            .expect_err("composition must not advertise synthetic workspace success");
+
+        assert!(matches!(
+            error,
+            GithubIssueWorkflowError::PolicyDenied { .. }
+        ));
+    }
 
     #[tokio::test]
     async fn host_runtime_github_issue_workflow_provider_dispatcher_fails_closed_for_account_selection()

@@ -5,7 +5,9 @@ use ironclaw_github_issue_workflow::{
     BlockWorkflowRunInput, BlockWorkflowRunOutcome, ClaimRunnableWorkflowRunsInput,
     CreateOrGetProviderActionInput, CreateOrGetWorkflowRunOutcome, CreateStageRunInput,
     CreateStageRunOutcome, GithubIssueBlockKind, GithubIssueBlockState, GithubIssueStage,
+    GithubIssueWorkspaceSession, GithubIssueWorkspaceSessionId, GithubRepositorySelector,
     RecordWorkflowEventOutcome, TransitionOutcome, WorkflowIdempotencyKey,
+    WorkflowWorkspaceMountRef, WorkflowWorkspaceRef,
 };
 
 mod support;
@@ -292,6 +294,127 @@ mod durable_repository_contract {
             assert_eq!(
                 advanced.workflow_run_version,
                 claimed.workflow_run_version + 1
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn durable_transition_persists_workspace_session_after_reload() {
+        for case in RepositoryCase::cases("transition-workspace-session").await {
+            let repository = case.open().await;
+            let tenant_id = tenant(&case.name, 1);
+            let issue_ref = issue(&case.name, 42);
+            let run = create_run(
+                repository.as_ref(),
+                &case.name,
+                tenant_id.clone(),
+                issue_ref.clone(),
+            )
+            .await;
+            let claimed = repository
+                .claim_runnable_workflow_runs(claim_input(
+                    &case.name,
+                    tenant_id.clone(),
+                    fixed_time(10),
+                    1,
+                ))
+                .await
+                .expect("claim run")
+                .pop()
+                .expect("one claimed run");
+            let event = match repository
+                .record_workflow_event(event_input(
+                    &case.name,
+                    &run,
+                    "issue:42:changed:workspace-session",
+                    fixed_time(20),
+                ))
+                .await
+                .expect("record event")
+            {
+                RecordWorkflowEventOutcome::Recorded { event } => event,
+                _ => panic!("event must be recorded for {}", case.name),
+            };
+
+            let workspace_session_id = GithubIssueWorkspaceSessionId::from_trusted(format!(
+                "workspace-session-{}",
+                case.name
+            ))
+            .expect("valid workspace session id");
+            let mut input = advance_input(
+                &case.name,
+                &run,
+                claimed.workflow_run_version,
+                event.sequence,
+                fixed_time(30),
+            );
+            input.transition.workspace_session = Some(GithubIssueWorkspaceSession {
+                workspace_session_id: workspace_session_id.clone(),
+                workflow_run_id: run.workflow_run_id.clone(),
+                repository: GithubRepositorySelector {
+                    owner: issue_ref.owner.clone(),
+                    repo: issue_ref.repo.clone(),
+                },
+                base_branch: "main".to_string(),
+                base_sha: Some("base-sha-durable".to_string()),
+                working_branch: format!("ironclaw/github-bug/{}", run.workflow_run_id),
+                current_head_sha: Some("head-sha-durable".to_string()),
+                workspace_ref: WorkflowWorkspaceRef {
+                    thread_id: None,
+                    workspace_session_id: Some(workspace_session_id),
+                    turn_run_id: None,
+                },
+                mount_ref: WorkflowWorkspaceMountRef {
+                    mount_id: format!("workspace-mount-{}", case.name),
+                    alias: "/workspace".to_string(),
+                },
+                created_at: fixed_time(25),
+            });
+
+            let applied = repository
+                .advance_event_cursor_and_transition(input)
+                .await
+                .expect("transition applies");
+            let TransitionOutcome::Applied { .. } = applied else {
+                panic!("workspace transition must apply for {}", case.name);
+            };
+
+            let reopened = case.reopen().await;
+            let reloaded = reopened
+                .create_or_get_workflow_run(workflow_run_input(
+                    &case.name,
+                    tenant_id,
+                    issue_ref,
+                    fixed_time(40),
+                ))
+                .await
+                .expect("reload run");
+            let CreateOrGetWorkflowRunOutcome::Existing { run: reloaded } = reloaded else {
+                panic!("run should exist after reload for {}", case.name);
+            };
+
+            let expected_session_id = format!("workspace-session-{}", case.name);
+            let expected_mount_id = format!("workspace-mount-{}", case.name);
+            assert_eq!(
+                reloaded.workspace_session_id.as_ref().map(|id| id.as_str()),
+                Some(expected_session_id.as_str())
+            );
+            assert_eq!(
+                reloaded
+                    .workflow_state
+                    .current_workspace_ref
+                    .as_ref()
+                    .and_then(|workspace_ref| workspace_ref.workspace_session_id.as_ref())
+                    .map(|id| id.as_str()),
+                Some(expected_session_id.as_str())
+            );
+            assert_eq!(
+                reloaded
+                    .workflow_state
+                    .current_workspace_mount_ref
+                    .as_ref()
+                    .map(|mount| (mount.mount_id.as_str(), mount.alias.as_str())),
+                Some((expected_mount_id.as_str(), "/workspace"))
             );
         }
     }
