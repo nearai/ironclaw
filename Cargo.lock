@@ -4461,6 +4461,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "ironclaw_github_issue_workflow"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "chrono",
+ "ironclaw_host_api",
+ "ironclaw_threads",
+ "ironclaw_turns",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "thiserror 2.0.18",
+ "tokio",
+ "uuid",
+]
+
+[[package]]
 name = "ironclaw_hooks"
 version = "0.1.0"
 dependencies = [

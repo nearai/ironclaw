@@ -1,0 +1,109 @@
+use ironclaw_host_api::{ProjectId, TenantId, UserId};
+use serde::{Deserialize, Serialize};
+
+use crate::GithubIssueWorkflowError;
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GithubIssueWorkflowConfig {
+    pub tenant_id: TenantId,
+    pub project_id: ProjectId,
+    pub owner_user_id: UserId,
+    pub repositories: Vec<GithubRepositorySelector>,
+    pub candidate_selector: GithubIssueCandidateSelector,
+    pub max_active_runs_per_repo: u32,
+    pub default_run_profile: String,
+    pub provider_account_ref: GithubProviderAccountRef,
+}
+
+impl GithubIssueWorkflowConfig {
+    pub fn validate(&self) -> Result<(), GithubIssueWorkflowError> {
+        if self.repositories.is_empty() {
+            return Err(GithubIssueWorkflowError::InvalidConfig {
+                reason: "repositories must not be empty".to_string(),
+            });
+        }
+        for repository in &self.repositories {
+            repository.validate()?;
+        }
+        self.candidate_selector.validate()?;
+        if self.max_active_runs_per_repo == 0 {
+            return Err(GithubIssueWorkflowError::InvalidConfig {
+                reason: "max_active_runs_per_repo must be greater than zero".to_string(),
+            });
+        }
+        validate_non_empty("default_run_profile", &self.default_run_profile)?;
+        self.provider_account_ref.validate()?;
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GithubRepositorySelector {
+    pub owner: String,
+    pub repo: String,
+}
+
+impl GithubRepositorySelector {
+    pub fn new(
+        owner: impl Into<String>,
+        repo: impl Into<String>,
+    ) -> Result<Self, GithubIssueWorkflowError> {
+        let selector = Self {
+            owner: owner.into(),
+            repo: repo.into(),
+        };
+        selector.validate()?;
+        Ok(selector)
+    }
+
+    pub fn validate(&self) -> Result<(), GithubIssueWorkflowError> {
+        validate_non_empty("repository owner", &self.owner)?;
+        validate_non_empty("repository name", &self.repo)?;
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GithubIssueCandidateSelector {
+    pub labels: Vec<String>,
+}
+
+impl GithubIssueCandidateSelector {
+    pub fn validate(&self) -> Result<(), GithubIssueWorkflowError> {
+        for label in &self.labels {
+            validate_non_empty("candidate label", label)?;
+        }
+        Ok(())
+    }
+}
+
+impl Default for GithubIssueCandidateSelector {
+    fn default() -> Self {
+        Self {
+            labels: vec!["bug".to_string()],
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GithubProviderAccountRef {
+    pub provider: String,
+    pub account_id: String,
+}
+
+impl GithubProviderAccountRef {
+    pub fn validate(&self) -> Result<(), GithubIssueWorkflowError> {
+        validate_non_empty("provider", &self.provider)?;
+        validate_non_empty("provider account", &self.account_id)?;
+        Ok(())
+    }
+}
+
+fn validate_non_empty(name: &'static str, value: &str) -> Result<(), GithubIssueWorkflowError> {
+    if value.trim().is_empty() {
+        return Err(GithubIssueWorkflowError::InvalidConfig {
+            reason: format!("{name} must not be empty"),
+        });
+    }
+    Ok(())
+}

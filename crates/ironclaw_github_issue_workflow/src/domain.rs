@@ -1,0 +1,169 @@
+use ironclaw_host_api::{AgentId, ProjectId, TenantId, ThreadId, Timestamp, UserId};
+use ironclaw_turns::TurnRunId;
+use serde::{Deserialize, Serialize};
+
+use crate::{
+    GithubIssueStageRunId, GithubIssueWorkflowRunId, GithubIssueWorkflowRunKey,
+    GithubIssueWorkspaceSessionId, WorkflowWorkerId,
+};
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum GithubIssueWorkflowRunStatus {
+    Active,
+    Blocked,
+    Succeeded,
+    Failed,
+    Cancelled,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum GithubIssueWorkflowMode {
+    New,
+    Claimed,
+    Triage,
+    Planning,
+    Implementation,
+    PrSynthesis,
+    PrOpen,
+    CiRepair,
+    ReviewResponse,
+    Done,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum GithubIssueStage {
+    Triage,
+    Planning,
+    Implementation,
+    PrSynthesis,
+    CiRepair,
+    ReviewResponse,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GithubIssueRef {
+    pub owner: String,
+    pub repo: String,
+    pub number: u64,
+    pub node_id: Option<String>,
+    pub url: String,
+    pub default_branch: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GithubPullRequestRef {
+    pub owner: String,
+    pub repo: String,
+    pub number: u64,
+    pub node_id: Option<String>,
+    pub url: String,
+    pub head_branch: String,
+    pub head_sha: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GithubCommentRef {
+    pub node_id: Option<String>,
+    pub url: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkflowWorkspaceRef {
+    pub thread_id: Option<ThreadId>,
+    pub workspace_session_id: Option<GithubIssueWorkspaceSessionId>,
+    pub turn_run_id: Option<TurnRunId>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum GithubIssueBlockKind {
+    WaitingApproval,
+    WaitingAuth,
+    BlockedHuman,
+    RecoveryRequired,
+    RateLimited,
+    TerminalFailed,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GithubIssueBlockState {
+    pub kind: GithubIssueBlockKind,
+    pub reason: String,
+    pub blocked_at: Timestamp,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum GithubIssuePlanItemStatus {
+    Pending,
+    InProgress,
+    Completed,
+    Skipped,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GithubIssuePlanItem {
+    pub title: String,
+    pub status: GithubIssuePlanItemStatus,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GithubProviderWatermarks {
+    pub issue_updated_at: Option<Timestamp>,
+    pub pull_request_updated_at: Option<Timestamp>,
+    pub checks_updated_at: Option<Timestamp>,
+    pub reviews_updated_at: Option<Timestamp>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GithubIssueWorkflowState {
+    pub mode: GithubIssueWorkflowMode,
+    pub active_block: Option<GithubIssueBlockState>,
+    pub plan: Vec<GithubIssuePlanItem>,
+    pub primary_pr: Option<GithubPullRequestRef>,
+    pub claim_comment: Option<GithubCommentRef>,
+    pub current_workspace_ref: Option<WorkflowWorkspaceRef>,
+    pub last_provider_watermarks: GithubProviderWatermarks,
+}
+
+impl GithubIssueWorkflowState {
+    pub fn new(mode: GithubIssueWorkflowMode) -> Self {
+        Self {
+            mode,
+            active_block: None,
+            plan: Vec::new(),
+            primary_pr: None,
+            claim_comment: None,
+            current_workspace_ref: None,
+            last_provider_watermarks: GithubProviderWatermarks::default(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GithubIssueWorkflowRun {
+    pub workflow_run_id: GithubIssueWorkflowRunId,
+    pub workflow_run_key: GithubIssueWorkflowRunKey,
+    pub tenant_id: TenantId,
+    pub creator_user_id: UserId,
+    pub agent_id: Option<AgentId>,
+    pub project_id: Option<ProjectId>,
+    pub issue_ref: GithubIssueRef,
+    pub workflow_policy_key: String,
+    pub workflow_policy_version: String,
+    pub status: GithubIssueWorkflowRunStatus,
+    pub workflow_state: GithubIssueWorkflowState,
+    pub event_cursor: i64,
+    pub workflow_run_version: i64,
+    pub lease_owner: Option<WorkflowWorkerId>,
+    pub lease_expires_at: Option<Timestamp>,
+    pub last_heartbeat_at: Option<Timestamp>,
+    pub claim_count: u32,
+    pub active_stage_run_id: Option<GithubIssueStageRunId>,
+    pub workspace_session_id: Option<GithubIssueWorkspaceSessionId>,
+    pub created_at: Timestamp,
+    pub updated_at: Timestamp,
+}
