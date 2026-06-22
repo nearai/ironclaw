@@ -406,7 +406,12 @@ fn map_recent_run(run: &TriggerRunRecord) -> Option<RebornAutomationRecentRunInf
 }
 
 fn parse_trigger_id(automation_id: &str) -> Result<TriggerId, RebornServicesError> {
-    TriggerId::parse(automation_id).map_err(|_| {
+    TriggerId::parse(automation_id).map_err(|parse_error| {
+        tracing::debug!(
+            automation_id,
+            error = %parse_error,
+            "failed to parse automation trigger id"
+        );
         services_error(
             RebornServicesErrorCode::InvalidRequest,
             RebornServicesErrorKind::Validation,

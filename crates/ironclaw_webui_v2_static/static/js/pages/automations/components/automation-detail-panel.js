@@ -56,7 +56,7 @@ export function AutomationDetailPanel({
 
   const activeRun = automation.current_run;
   const canResume = automation.state === "paused";
-  const canPause = automation.state !== "paused" && automation.state !== "completed";
+  const canPause = automation.state === "active" || automation.state === "scheduled";
   const actionLabel = canResume ? t("missions.action.resume") : t("missions.action.pause");
   const actionTitle = `${actionLabel}: ${automation.display_name}`;
   const handleAction = () => {

@@ -5779,6 +5779,25 @@ async fn pause_automation_rejects_missing_agent_id() {
 }
 
 #[tokio::test]
+async fn resume_automation_rejects_missing_agent_id() {
+    let automation_facade = Arc::new(RecordingAutomationFacade::default());
+    let services = RebornServices::new(
+        Arc::new(InMemorySessionThreadService::default()),
+        Arc::new(FakeTurnCoordinator::default()),
+    )
+    .with_automation_product_facade(automation_facade.clone());
+
+    let err = services
+        .resume_automation(caller_without_agent(), "trigger-alpha".to_string())
+        .await
+        .expect_err("missing agent id should fail closed");
+
+    assert_eq!(err.code, RebornServicesErrorCode::InvalidRequest);
+    assert_eq!(err.status_code, 400);
+    assert_eq!(automation_facade.mutation_calls().len(), 0);
+}
+
+#[tokio::test]
 async fn delete_automation_rejects_missing_agent_id() {
     let automation_facade = Arc::new(RecordingAutomationFacade::default());
     let services = RebornServices::new(
@@ -5837,6 +5856,10 @@ async fn pause_resume_delete_automation_forward_caller_scope_to_product_facade()
     assert_eq!(calls[0].caller.project_id, caller.project_id);
     assert_eq!(calls[1].action, AutomationMutationAction::Resume);
     assert_eq!(calls[1].automation_id, "trigger-alpha");
+    assert_eq!(calls[1].caller.tenant_id, caller.tenant_id);
+    assert_eq!(calls[1].caller.user_id, caller.user_id);
+    assert_eq!(calls[1].caller.agent_id, expected_agent_id);
+    assert_eq!(calls[1].caller.project_id, caller.project_id);
     assert_eq!(calls[2].action, AutomationMutationAction::Delete);
     assert_eq!(calls[2].automation_id, "trigger-alpha");
     assert_eq!(calls[2].caller.tenant_id, caller.tenant_id);

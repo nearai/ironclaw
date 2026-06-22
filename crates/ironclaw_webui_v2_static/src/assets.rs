@@ -332,7 +332,8 @@ mod tests {
         assert!(detail_panel.contains("onPauseAutomation"));
         assert!(detail_panel.contains("onResumeAutomation"));
         assert!(detail_panel.contains("onDeleteAutomation"));
-        assert!(detail_panel.contains("automation.state !== \"completed\""));
+        assert!(detail_panel.contains("automation.state === \"active\""));
+        assert!(detail_panel.contains("automation.state === \"scheduled\""));
         assert!(detail_panel.contains("primary_status_label"));
         assert!(detail_panel.contains("primary_status_tone"));
         assert!(detail_panel.contains("window.confirm"));
@@ -351,8 +352,16 @@ mod tests {
             app_bundle_contains_encoded_automation_route("resume"),
             "served WebUI bundle must include the automation resume endpoint; run frontend build after editing static/js/**"
         );
+        let app_bundle_contains_encoded_automation_delete = app_bundle
+            .split("/automations/${encodeURIComponent(")
+            .any(|tail| {
+                let near = tail.chars().take(220).collect::<String>();
+                near.contains("method:\"DELETE\"")
+                    && !near.contains("/pause")
+                    && !near.contains("/resume")
+            });
         assert!(
-            app_bundle.contains("method:\"DELETE\""),
+            app_bundle_contains_encoded_automation_delete,
             "served WebUI bundle must include the automation delete endpoint; run frontend build after editing static/js/**"
         );
 
