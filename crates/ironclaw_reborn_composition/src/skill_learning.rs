@@ -73,7 +73,9 @@ mod learning {
         DistillOutcome, DistilledSkill, RefineOutcome, SkillInferenceError, SkillInferencePort,
         distill_skill, refine_skill,
     };
-    use ironclaw_skills::{ManagedSkillSource, SkillSummary, parse_skill_md};
+    use ironclaw_skills::{
+        ManagedSkillSource, SkillManagementErrorKind, SkillSummary, parse_skill_md,
+    };
     use ironclaw_threads::{
         AppendAssistantDraftRequest, ContextWindow, LoadContextWindowRequest, MessageContent,
         MessageKind, SessionThreadService, ThreadHistoryRequest, ThreadScope,
@@ -82,7 +84,7 @@ mod learning {
         TurnError, TurnEventKind, TurnEventSink, TurnLifecycleEvent, TurnRunId, TurnScope,
     };
 
-    use crate::lifecycle::RebornLocalSkillManagementPort;
+    use crate::lifecycle::{RebornLocalSkillManagementError, RebornLocalSkillManagementPort};
     use crate::projection::LiveProjectionPublisher;
 
     /// Cheap pre-filter: skip the (paid) distillation LLM call on runs that
@@ -147,10 +149,13 @@ mod learning {
     pub(crate) enum MergeAction {
         /// Update the existing skill with this refined, install-ready content.
         Replace(String),
-        /// Leave the existing skill unchanged — it already subsumes the candidate.
+        /// Leave the existing skill unchanged — it already subsumes the
+        /// candidate, OR refinement failed and the accumulated skill must not be
+        /// discarded for a single-run candidate (see [`SkillRefiner::merge`]).
         KeepExisting,
-        /// Refinement was unavailable; overwrite the existing skill with the
-        /// candidate (the plain dedup-consolidation behavior).
+        /// There is no meaningful existing content to preserve; write the
+        /// candidate under the existing name. A refiner error or a rejected
+        /// refinement keeps the existing skill instead of overwriting it.
         Overwrite,
     }
 
@@ -191,22 +196,28 @@ mod learning {
                     if validate_trusted_trigger_prompt(&*SKILL_LEARNING_SAFETY, &retargeted)
                         .is_err()
                     {
+                        // A false positive on the MERGED doc must not cost the
+                        // accumulated skill: keep the existing one rather than
+                        // overwrite it with the raw single-run candidate.
                         tracing::debug!(
                             skill = %target_name,
-                            "skill-learning: refined skill rejected by safety scan; consolidating instead"
+                            "skill-learning: refined skill rejected by safety scan; keeping existing skill instead"
                         );
-                        return MergeAction::Overwrite;
+                        return MergeAction::KeepExisting;
                     }
                     MergeAction::Replace(retargeted)
                 }
                 Ok(RefineOutcome::KeepExisting) => MergeAction::KeepExisting,
                 Err(error) => {
+                    // A transient model hiccup or unparseable response is exactly
+                    // when the single-run candidate is least trustworthy, so
+                    // preserve the evolved skill instead of regressing it.
                     tracing::debug!(
                         %error,
                         skill = %target_name,
-                        "skill-learning: refinement failed; consolidating instead"
+                        "skill-learning: refinement failed; keeping existing skill instead"
                     );
-                    MergeAction::Overwrite
+                    MergeAction::KeepExisting
                 }
             }
         }
@@ -296,14 +307,28 @@ mod learning {
                 .await
             {
                 Ok(result) => Ok(result.name),
-                // install is create-only; a name conflict means we are
-                // re-learning an existing skill, so update it in place.
-                Err(_) => self
-                    .port
-                    .update_for_scope(scope, name, content)
-                    .await
-                    .map(|_| name.to_string())
-                    .map_err(|error| error.to_string()),
+                // install is create-only; only a name CONFLICT means a same-named
+                // skill exists (we are re-learning it), so update it in place.
+                Err(RebornLocalSkillManagementError::Skill(error))
+                    if error.kind() == SkillManagementErrorKind::Conflict =>
+                {
+                    self.port
+                        .update_for_scope(scope, name, content)
+                        .await
+                        .map(|_| name.to_string())
+                        .map_err(|error| error.to_string())
+                }
+                // Any other failure class (filesystem, validation, resource) is
+                // NOT a conflict, so overwriting a live skill on it would be data
+                // loss — fail loud instead of clobbering it.
+                Err(error) => {
+                    tracing::debug!(
+                        skill_name = %name,
+                        %error,
+                        "skill-learning: install failed (non-conflict); not overwriting"
+                    );
+                    Err(error.to_string())
+                }
             }
         }
     }
@@ -1425,14 +1450,16 @@ mod learning {
         }
 
         #[tokio::test]
-        async fn refiner_overwrites_when_model_output_is_unparseable() {
-            // A chatty/garbage response must not poison the skill; fall back to
-            // plain consolidation (overwrite with the candidate).
+        async fn refiner_keeps_existing_when_model_output_is_unparseable() {
+            // A chatty/garbage response is exactly when the single-run candidate
+            // is least trustworthy, so the accumulated evolved skill must be kept
+            // — NOT overwritten with the raw candidate (the silent-data-loss path
+            // ilblackdragon flagged).
             assert!(matches!(
                 refiner("sure, here is the merged skill")
                     .merge(EXISTING_SKILL, EXISTING_SKILL, "file-count")
                     .await,
-                MergeAction::Overwrite
+                MergeAction::KeepExisting
             ));
         }
     }
