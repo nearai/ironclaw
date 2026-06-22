@@ -1,6 +1,6 @@
-import { useQuery } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { React } from "../../../lib/html.js";
-import { listAutomations } from "../../../lib/api.js";
+import { listAutomations, pauseAutomation, resumeAutomation } from "../../../lib/api.js";
 import { useI18n } from "../../../lib/i18n.js";
 
 import {
@@ -13,6 +13,7 @@ const AUTOMATION_RUNS_LIMIT = 25;
 
 export function useAutomations(includeCompleted = false) {
   const { t, lang } = useI18n();
+  const queryClient = useQueryClient();
   const query = useQuery({
     queryKey: ["automations", { includeCompleted }],
     queryFn: () =>
@@ -40,6 +41,19 @@ export function useAutomations(includeCompleted = false) {
   // automations never fire. Treat an absent flag as enabled so we don't show a
   // false "off" notice against an older payload.
   const schedulerEnabled = query.data?.scheduler_enabled !== false;
+  const invalidateAutomations = React.useCallback(() => {
+    queryClient.invalidateQueries({
+      predicate: (query) => query.queryKey?.[0] === "automations",
+    });
+  }, [queryClient]);
+  const pauseMutation = useMutation({
+    mutationFn: (automationId) => pauseAutomation({ automationId }),
+    onSuccess: invalidateAutomations,
+  });
+  const resumeMutation = useMutation({
+    mutationFn: (automationId) => resumeAutomation({ automationId }),
+    onSuccess: invalidateAutomations,
+  });
 
   return {
     automations,
@@ -47,7 +61,11 @@ export function useAutomations(includeCompleted = false) {
     schedulerEnabled,
     isLoading: query.isLoading,
     isRefreshing: query.isFetching,
+    isMutating: pauseMutation.isPending || resumeMutation.isPending,
     error: query.error || null,
+    actionError: pauseMutation.error || resumeMutation.error || null,
+    pauseAutomation: pauseMutation.mutate,
+    resumeAutomation: resumeMutation.mutate,
     refetch: query.refetch,
   };
 }

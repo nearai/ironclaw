@@ -230,6 +230,24 @@ export function listAutomations({ limit, runLimit, includeCompleted } = {}) {
   return apiFetch(`${V2_BASE}/automations${query ? `?${query}` : ""}`);
 }
 
+export function pauseAutomation({ automationId } = {}) {
+  if (!automationId) {
+    return Promise.reject(new Error("automationId is required"));
+  }
+  return apiFetch(`${V2_BASE}/automations/${encodeURIComponent(automationId)}/pause`, {
+    method: "POST",
+  });
+}
+
+export function resumeAutomation({ automationId } = {}) {
+  if (!automationId) {
+    return Promise.reject(new Error("automationId is required"));
+  }
+  return apiFetch(`${V2_BASE}/automations/${encodeURIComponent(automationId)}/resume`, {
+    method: "POST",
+  });
+}
+
 // --- Projects (first-class entity + membership ACL) ---
 
 const PROJECTS_BASE = `${V2_BASE}/projects`;
