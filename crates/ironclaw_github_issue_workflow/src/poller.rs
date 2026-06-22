@@ -22,13 +22,13 @@ use crate::{
 const DEFAULT_WORKFLOW_POLICY_KEY: &str = "github-bug-workflow";
 
 pub trait GithubIssueWorkflowPollerPorts: Send + Sync {
-    type Clock: WorkflowClock;
-    type ConfigSource: GithubIssueWorkflowConfigSource;
-    type GithubPort: GithubIssueWorkflowPort;
-    type ProjectAccess: WorkflowProjectAccess;
-    type Repository: GithubIssueWorkflowRepository;
-    type StageTurnSubmitter: StageTurnSubmitter;
-    type WorkspaceManager: WorkflowWorkspaceManager;
+    type Clock: WorkflowClock + ?Sized;
+    type ConfigSource: GithubIssueWorkflowConfigSource + ?Sized;
+    type GithubPort: GithubIssueWorkflowPort + ?Sized;
+    type ProjectAccess: WorkflowProjectAccess + ?Sized;
+    type Repository: GithubIssueWorkflowRepository + ?Sized;
+    type StageTurnSubmitter: StageTurnSubmitter + ?Sized;
+    type WorkspaceManager: WorkflowWorkspaceManager + ?Sized;
 
     fn clock(&self) -> Arc<Self::Clock>;
     fn config_source(&self) -> Arc<Self::ConfigSource>;

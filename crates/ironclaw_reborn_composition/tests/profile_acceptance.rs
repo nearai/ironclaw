@@ -546,6 +546,7 @@ fn readiness_for_contract(
         workers: RebornWorkerReadiness {
             turn_runner: false,
             trigger_poller: false,
+            github_issue_workflow: false,
         },
         diagnostics,
     }

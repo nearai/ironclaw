@@ -52,6 +52,9 @@ openai-compat-beta = [
     "webui-v2-beta",
     "ironclaw_reborn_composition/openai-compat-beta",
 ]
+github-issue-workflow-beta = [
+    "ironclaw_reborn_composition/github-issue-workflow-beta",
+]
 # Enable production PostgreSQL storage composition for `ironclaw-reborn`.
 postgres = [
     "ironclaw_reborn_composition/postgres",

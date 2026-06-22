@@ -1,17 +1,25 @@
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
+use std::time::Duration;
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use ironclaw_github_issue_workflow::{
-    CreateDraftPullRequestInput, CreateIssueCommentInput, GetAuthenticatedWorkflowActorInput,
-    GetGithubIssueInput, GithubActorSnapshot, GithubCommentRef, GithubIssueCommentSnapshot,
-    GithubIssueProviderSnapshot, GithubIssueSearchHit, GithubIssueStage, GithubIssueWorkflowError,
-    GithubIssueWorkflowPort, GithubProviderAccountRef, GithubPullRequestRef,
-    ListIssueCommentsInput, SearchGithubIssuesInput, StageTurnSubmitter, SubmitStageTurnOutcome,
-    SubmitStageTurnRequest, WorkflowActorScope,
+    AcceptStageResultInput, AcceptStageResultOutcome, CreateDraftPullRequestInput,
+    CreateIssueCommentInput, GetAuthenticatedWorkflowActorInput, GetGithubIssueInput,
+    GithubActorSnapshot, GithubCommentRef, GithubIssueCommentSnapshot, GithubIssueProviderSnapshot,
+    GithubIssueSearchHit, GithubIssueStage, GithubIssueStageRunId, GithubIssueWorkflowConfig,
+    GithubIssueWorkflowConfigSource, GithubIssueWorkflowError, GithubIssueWorkflowPoller,
+    GithubIssueWorkflowPollerConfig, GithubIssueWorkflowPollerPorts, GithubIssueWorkflowPort,
+    GithubIssueWorkflowRepository, GithubIssueWorkflowRunId, GithubProviderAccountRef,
+    GithubPullRequestRef, ListIssueCommentsInput, PrepareWorkflowWorkspaceOutcome,
+    PrepareWorkflowWorkspaceRequest, SearchGithubIssuesInput, StageTurnSubmitter,
+    SubmitStageTurnOutcome, SubmitStageTurnRequest, WorkflowActorScope, WorkflowClock,
+    WorkflowConfigAccessRequest, WorkflowProjectAccess, WorkflowProjectAccessRequest,
+    WorkflowWorkerId, WorkflowWorkspaceManager, validate_stage_result,
 };
 use ironclaw_host_api::{
-    AgentId, CapabilityId, ExecutionContext, ResourceEstimate, ThreadId, UserId,
+    AgentId, CapabilityId, CapabilitySet, ExecutionContext, ExtensionId, MountView,
+    ResourceEstimate, RuntimeKind, ThreadId, TrustClass, UserId,
 };
 use ironclaw_host_runtime::{
     FirstPartyCapabilityError, FirstPartyCapabilityHandler, FirstPartyCapabilityRegistry,
@@ -31,6 +39,7 @@ use ironclaw_threads::{
     ThreadScope,
 };
 use ironclaw_trust::TrustDecision;
+use ironclaw_trust::{AuthorityCeiling, EffectiveTrustClass, TrustProvenance};
 use ironclaw_turns::{
     AcceptedMessageRef, IdempotencyKey, ProductTurnContext, ReplyTargetBindingRef,
     RunOriginAdapter, RunProfileRequest, SourceBindingRef, SubmitTurnRequest, SubmitTurnResponse,
@@ -41,6 +50,8 @@ use ironclaw_turns::{
     },
 };
 use serde_json::{Value as JsonValue, json};
+use tokio::task::JoinHandle;
+use tokio_util::sync::CancellationToken;
 
 const WORKFLOW_ADAPTER_ID: &str = "github_issue_workflow";
 const RESULT_SINK_CAPABILITY_ID: &str =
@@ -391,11 +402,14 @@ impl SubagentDefinitionResolver for GithubIssueWorkflowSubagentDefinitionResolve
 pub(crate) fn insert_workflow_stage_result_handler(
     registry: &mut FirstPartyCapabilityRegistry,
     trigger_repository: Arc<dyn ironclaw_triggers::TriggerRepository>,
+    workflow_stage_result_sink_slot: Arc<WorkflowStageResultSinkSlot>,
 ) -> Result<(), ironclaw_host_api::HostApiError> {
     let capability_id = CapabilityId::new(RESULT_SINK_CAPABILITY_ID)?;
+    let workflow_stage_result_sink: Arc<dyn WorkflowStageResultSink> =
+        workflow_stage_result_sink_slot;
     let workflow_registry = builtin_first_party_handlers_with_workflow_stage_result_sink(
         trigger_repository,
-        Arc::new(UnavailableWorkflowStageResultSink),
+        workflow_stage_result_sink,
     )?;
     let handler = workflow_registry.get(&capability_id).ok_or_else(|| {
         ironclaw_host_api::HostApiError::InvariantViolation {
@@ -409,6 +423,46 @@ pub(crate) fn insert_workflow_stage_result_handler(
         Arc::new(DelegatingWorkflowStageResultHandler { inner: handler }),
     );
     Ok(())
+}
+
+pub(crate) const GITHUB_ISSUE_WORKFLOW_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
+
+pub(crate) struct WorkflowStageResultSinkSlot {
+    inner: OnceLock<Arc<dyn WorkflowStageResultSink>>,
+}
+
+impl WorkflowStageResultSinkSlot {
+    pub(crate) fn new() -> Self {
+        Self {
+            inner: OnceLock::new(),
+        }
+    }
+
+    pub(crate) fn set(
+        &self,
+        sink: Arc<dyn WorkflowStageResultSink>,
+    ) -> Result<(), Arc<dyn WorkflowStageResultSink>> {
+        self.inner.set(sink)
+    }
+}
+
+impl Default for WorkflowStageResultSinkSlot {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[async_trait]
+impl WorkflowStageResultSink for WorkflowStageResultSinkSlot {
+    async fn report_stage_result(
+        &self,
+        input: ReportWorkflowStageResultInput,
+    ) -> Result<WorkflowStageResultAck, WorkflowStageResultSinkError> {
+        let Some(sink) = self.inner.get().cloned() else {
+            return Err(WorkflowStageResultSinkError::Unavailable);
+        };
+        sink.report_stage_result(input).await
+    }
 }
 
 struct DelegatingWorkflowStageResultHandler {
@@ -425,15 +479,419 @@ impl FirstPartyCapabilityHandler for DelegatingWorkflowStageResultHandler {
     }
 }
 
-struct UnavailableWorkflowStageResultSink;
+pub(crate) struct GithubWorkflowStageResultSink {
+    repository: Arc<dyn GithubIssueWorkflowRepository>,
+}
+
+impl GithubWorkflowStageResultSink {
+    pub(crate) fn new(repository: Arc<dyn GithubIssueWorkflowRepository>) -> Self {
+        Self { repository }
+    }
+}
 
 #[async_trait]
-impl WorkflowStageResultSink for UnavailableWorkflowStageResultSink {
+impl WorkflowStageResultSink for GithubWorkflowStageResultSink {
     async fn report_stage_result(
         &self,
-        _input: ReportWorkflowStageResultInput,
+        input: ReportWorkflowStageResultInput,
     ) -> Result<WorkflowStageResultAck, WorkflowStageResultSinkError> {
-        Err(WorkflowStageResultSinkError::Unavailable)
+        let workflow_run_id = GithubIssueWorkflowRunId::from_trusted(input.workflow_run_id)
+            .map_err(stage_result_invalid_input)?;
+        let stage_run_id = GithubIssueStageRunId::from_trusted(input.stage_run_id.clone())
+            .map_err(stage_result_invalid_input)?;
+        let _turn_run_id = TurnRunId::parse(&input.turn_run_id).map_err(|error| {
+            WorkflowStageResultSinkError::InvalidInput {
+                reason: format!("invalid turn_run_id: {error}"),
+            }
+        })?;
+        let stage = serde_json::from_value::<GithubIssueStage>(JsonValue::String(input.stage))
+            .map_err(|error| WorkflowStageResultSinkError::InvalidInput {
+                reason: format!("invalid stage: {error}"),
+            })?;
+        if input.completion_nonce.trim().is_empty() {
+            return Err(WorkflowStageResultSinkError::InvalidInput {
+                reason: "completion_nonce must not be empty".to_string(),
+            });
+        }
+        let validated =
+            validate_stage_result(stage, &input.schema_version, input.result).map_err(|error| {
+                WorkflowStageResultSinkError::ValidationFailed {
+                    reason: error.to_string(),
+                }
+            })?;
+        let result = serde_json::to_value(validated).map_err(|error| {
+            WorkflowStageResultSinkError::InvalidInput {
+                reason: format!("validated stage result could not be serialized: {error}"),
+            }
+        })?;
+
+        match self
+            .repository
+            .accept_stage_result(AcceptStageResultInput {
+                workflow_run_id,
+                stage_run_id,
+                result,
+                now: Utc::now(),
+            })
+            .await
+            .map_err(stage_result_repository_error)?
+        {
+            AcceptStageResultOutcome::Accepted { .. } => Ok(WorkflowStageResultAck {
+                accepted: true,
+                duplicate: false,
+                stage_run_id: input.stage_run_id,
+            }),
+            AcceptStageResultOutcome::NotActiveStage { .. } => {
+                Err(WorkflowStageResultSinkError::StageNotActive)
+            }
+            AcceptStageResultOutcome::Terminal => Err(WorkflowStageResultSinkError::StageNotActive),
+        }
+    }
+}
+
+fn stage_result_invalid_input(error: GithubIssueWorkflowError) -> WorkflowStageResultSinkError {
+    WorkflowStageResultSinkError::InvalidInput {
+        reason: error.to_string(),
+    }
+}
+
+fn stage_result_repository_error(error: GithubIssueWorkflowError) -> WorkflowStageResultSinkError {
+    match error {
+        GithubIssueWorkflowError::InvalidId { .. }
+        | GithubIssueWorkflowError::InvalidConfig { .. } => {
+            WorkflowStageResultSinkError::InvalidInput {
+                reason: error.to_string(),
+            }
+        }
+        GithubIssueWorkflowError::PolicyDenied { .. } | GithubIssueWorkflowError::Policy { .. } => {
+            WorkflowStageResultSinkError::MismatchedBinding
+        }
+        GithubIssueWorkflowError::ProviderRead { .. }
+        | GithubIssueWorkflowError::ProviderRateLimited { .. }
+        | GithubIssueWorkflowError::Repository { .. } => WorkflowStageResultSinkError::Unavailable,
+    }
+}
+
+pub(crate) struct GithubIssueWorkflowRuntimeHandle {
+    cancel: CancellationToken,
+    handle: JoinHandle<()>,
+}
+
+impl GithubIssueWorkflowRuntimeHandle {
+    pub(crate) async fn shutdown(self, timeout: Duration) {
+        self.cancel.cancel();
+        let mut handle = self.handle;
+        match tokio::time::timeout(timeout, &mut handle).await {
+            Ok(Ok(())) => {}
+            Ok(Err(error)) => {
+                tracing::warn!(?error, "GitHub issue workflow poller task join failed");
+            }
+            Err(_) => {
+                tracing::warn!(
+                    ?timeout,
+                    "GitHub issue workflow poller did not stop before shutdown timeout; aborting"
+                );
+                handle.abort();
+                if let Err(error) = handle.await
+                    && error.is_panic()
+                {
+                    tracing::warn!(?error, "aborted GitHub issue workflow poller task panicked");
+                }
+            }
+        }
+    }
+}
+
+pub(crate) struct GithubIssueWorkflowRuntimeDeps {
+    pub(crate) repository: Arc<dyn GithubIssueWorkflowRepository>,
+    pub(crate) stage_result_sink_slot: Arc<WorkflowStageResultSinkSlot>,
+    pub(crate) host_runtime: Arc<dyn ironclaw_host_runtime::HostRuntime>,
+    pub(crate) thread_service: Arc<dyn SessionThreadService>,
+    pub(crate) turn_coordinator: Arc<dyn TurnCoordinator>,
+    pub(crate) actor_user_id: UserId,
+    pub(crate) default_agent_id: AgentId,
+}
+
+pub(crate) fn spawn_github_issue_workflow(
+    settings: crate::runtime_input::GithubIssueWorkflowSettings,
+    deps: GithubIssueWorkflowRuntimeDeps,
+) -> Result<Option<GithubIssueWorkflowRuntimeHandle>, GithubIssueWorkflowError> {
+    if !settings.enabled {
+        return Ok(None);
+    }
+    validate_github_issue_workflow_settings(&settings)?;
+    let GithubIssueWorkflowRuntimeDeps {
+        repository,
+        stage_result_sink_slot,
+        host_runtime,
+        thread_service,
+        turn_coordinator,
+        actor_user_id,
+        default_agent_id,
+    } = deps;
+    let sink: Arc<dyn WorkflowStageResultSink> =
+        Arc::new(GithubWorkflowStageResultSink::new(Arc::clone(&repository)));
+    stage_result_sink_slot
+        .set(sink)
+        .map_err(|_| GithubIssueWorkflowError::InvalidConfig {
+            reason: "workflow stage result sink slot was already initialized".to_string(),
+        })?;
+
+    let configured_provider_account_ref = GithubProviderAccountRef {
+        provider: "github".to_string(),
+        account_id: "github-issue-workflow".to_string(),
+    };
+    let dispatcher = Arc::new(HostRuntimeGithubIssueWorkflowCapabilityDispatcher::new(
+        host_runtime,
+        workflow_execution_context(actor_user_id.clone())?,
+        workflow_trust_decision(),
+    ));
+    let github_port = Arc::new(IronClawGithubIssueWorkflowPort::new(
+        configured_provider_account_ref,
+        dispatcher,
+    ));
+    let stage_turn_submitter = Arc::new(IronClawStageTurnSubmitter::new(
+        thread_service,
+        turn_coordinator,
+        actor_user_id,
+        default_agent_id,
+    ));
+    let poller = GithubIssueWorkflowPoller::new(
+        IronClawGithubIssueWorkflowPollerPorts {
+            clock: Arc::new(SystemWorkflowClock),
+            config_source: Arc::new(EmptyGithubIssueWorkflowConfigSource),
+            github_port,
+            project_access: Arc::new(UnconfiguredWorkflowProjectAccess),
+            repository,
+            stage_turn_submitter,
+            workspace_manager: Arc::new(UnconfiguredWorkflowWorkspaceManager),
+            worker_id: WorkflowWorkerId::new(),
+        },
+        GithubIssueWorkflowPollerConfig {
+            enabled: true,
+            poll_interval: settings.poll_interval,
+            max_repos_per_tick: settings.max_repos_per_tick,
+            max_issues_per_repo_per_tick: settings.max_issues_per_repo_per_tick,
+            max_runnable_runs_per_tick: settings.max_runnable_runs_per_tick,
+            lease_duration: settings.lease_duration,
+        },
+        "github-bug-workflow-v1",
+    );
+    let cancel = CancellationToken::new();
+    let task_cancel = cancel.clone();
+    let poll_interval = settings.poll_interval;
+    let handle = tokio::spawn(async move {
+        run_github_issue_workflow_poller(poller, poll_interval, task_cancel).await;
+    });
+    Ok(Some(GithubIssueWorkflowRuntimeHandle { cancel, handle }))
+}
+
+fn validate_github_issue_workflow_settings(
+    settings: &crate::runtime_input::GithubIssueWorkflowSettings,
+) -> Result<(), GithubIssueWorkflowError> {
+    if settings.poll_interval.is_zero() {
+        return Err(GithubIssueWorkflowError::InvalidConfig {
+            reason: "poll_interval must be greater than zero".to_string(),
+        });
+    }
+    if settings.lease_duration.is_zero() {
+        return Err(GithubIssueWorkflowError::InvalidConfig {
+            reason: "lease_duration must be greater than zero".to_string(),
+        });
+    }
+    if settings.max_repos_per_tick == 0 {
+        return Err(GithubIssueWorkflowError::InvalidConfig {
+            reason: "max_repos_per_tick must be greater than zero".to_string(),
+        });
+    }
+    if settings.max_issues_per_repo_per_tick == 0 {
+        return Err(GithubIssueWorkflowError::InvalidConfig {
+            reason: "max_issues_per_repo_per_tick must be greater than zero".to_string(),
+        });
+    }
+    if settings.max_runnable_runs_per_tick == 0 {
+        return Err(GithubIssueWorkflowError::InvalidConfig {
+            reason: "max_runnable_runs_per_tick must be greater than zero".to_string(),
+        });
+    }
+    Ok(())
+}
+
+async fn run_github_issue_workflow_poller<P>(
+    poller: GithubIssueWorkflowPoller<P>,
+    poll_interval: Duration,
+    cancel: CancellationToken,
+) where
+    P: GithubIssueWorkflowPollerPorts + 'static,
+{
+    loop {
+        match poller.tick_once().await {
+            Ok(outcome) => {
+                tracing::debug!(
+                    configs_loaded = outcome.configs_loaded,
+                    repositories_scanned = outcome.repositories_scanned,
+                    issues_seen = outcome.issues_seen,
+                    runnable_runs_claimed = outcome.runnable_runs_claimed,
+                    blocked_configs = outcome.blocked_configs.len(),
+                    blocked_runs = outcome.blocked_runs.len(),
+                    "GitHub issue workflow poller tick completed"
+                );
+            }
+            Err(error) => {
+                tracing::warn!(?error, "GitHub issue workflow poller tick failed");
+            }
+        }
+        if !sleep_or_cancel(poll_interval, &cancel).await {
+            return;
+        }
+    }
+}
+
+async fn sleep_or_cancel(delay: Duration, cancel: &CancellationToken) -> bool {
+    tokio::select! {
+        _ = cancel.cancelled() => false,
+        _ = tokio::time::sleep(delay) => true,
+    }
+}
+
+fn workflow_execution_context(
+    owner_user_id: UserId,
+) -> Result<ExecutionContext, GithubIssueWorkflowError> {
+    ExecutionContext::local_default(
+        owner_user_id,
+        ExtensionId::new("github_issue_workflow").map_err(workflow_invalid_config)?,
+        RuntimeKind::FirstParty,
+        TrustClass::FirstParty,
+        CapabilitySet::default(),
+        MountView::default(),
+    )
+    .map_err(workflow_invalid_config)
+}
+
+fn workflow_trust_decision() -> TrustDecision {
+    TrustDecision {
+        effective_trust: EffectiveTrustClass::user_trusted(),
+        authority_ceiling: AuthorityCeiling {
+            allowed_effects: vec![ironclaw_host_api::EffectKind::DispatchCapability],
+            max_resource_ceiling: None,
+        },
+        provenance: TrustProvenance::Default,
+        evaluated_at: Utc::now(),
+    }
+}
+
+fn workflow_invalid_config(error: impl std::fmt::Display) -> GithubIssueWorkflowError {
+    GithubIssueWorkflowError::InvalidConfig {
+        reason: error.to_string(),
+    }
+}
+
+struct IronClawGithubIssueWorkflowPollerPorts {
+    clock: Arc<dyn WorkflowClock>,
+    config_source: Arc<dyn GithubIssueWorkflowConfigSource>,
+    github_port: Arc<dyn GithubIssueWorkflowPort>,
+    project_access: Arc<dyn WorkflowProjectAccess>,
+    repository: Arc<dyn GithubIssueWorkflowRepository>,
+    stage_turn_submitter: Arc<dyn StageTurnSubmitter>,
+    workspace_manager: Arc<dyn WorkflowWorkspaceManager>,
+    worker_id: WorkflowWorkerId,
+}
+
+impl GithubIssueWorkflowPollerPorts for IronClawGithubIssueWorkflowPollerPorts {
+    type Clock = dyn WorkflowClock;
+    type ConfigSource = dyn GithubIssueWorkflowConfigSource;
+    type GithubPort = dyn GithubIssueWorkflowPort;
+    type ProjectAccess = dyn WorkflowProjectAccess;
+    type Repository = dyn GithubIssueWorkflowRepository;
+    type StageTurnSubmitter = dyn StageTurnSubmitter;
+    type WorkspaceManager = dyn WorkflowWorkspaceManager;
+
+    fn clock(&self) -> Arc<Self::Clock> {
+        Arc::clone(&self.clock)
+    }
+
+    fn config_source(&self) -> Arc<Self::ConfigSource> {
+        Arc::clone(&self.config_source)
+    }
+
+    fn github_port(&self) -> Arc<Self::GithubPort> {
+        Arc::clone(&self.github_port)
+    }
+
+    fn project_access(&self) -> Arc<Self::ProjectAccess> {
+        Arc::clone(&self.project_access)
+    }
+
+    fn repository(&self) -> Arc<Self::Repository> {
+        Arc::clone(&self.repository)
+    }
+
+    fn stage_turn_submitter(&self) -> Arc<Self::StageTurnSubmitter> {
+        Arc::clone(&self.stage_turn_submitter)
+    }
+
+    fn workspace_manager(&self) -> Arc<Self::WorkspaceManager> {
+        Arc::clone(&self.workspace_manager)
+    }
+
+    fn worker_id(&self) -> WorkflowWorkerId {
+        self.worker_id.clone()
+    }
+}
+
+struct SystemWorkflowClock;
+
+impl WorkflowClock for SystemWorkflowClock {
+    fn now(&self) -> DateTime<Utc> {
+        Utc::now()
+    }
+}
+
+struct EmptyGithubIssueWorkflowConfigSource;
+
+#[async_trait]
+impl GithubIssueWorkflowConfigSource for EmptyGithubIssueWorkflowConfigSource {
+    async fn list_enabled_workflow_configs(
+        &self,
+    ) -> Result<Vec<GithubIssueWorkflowConfig>, GithubIssueWorkflowError> {
+        Ok(Vec::new())
+    }
+}
+
+struct UnconfiguredWorkflowProjectAccess;
+
+#[async_trait]
+impl WorkflowProjectAccess for UnconfiguredWorkflowProjectAccess {
+    async fn assert_workflow_config_access(
+        &self,
+        _request: WorkflowConfigAccessRequest,
+    ) -> Result<(), GithubIssueWorkflowError> {
+        Err(GithubIssueWorkflowError::PolicyDenied {
+            reason: "GitHub issue workflow project access checker is not configured".to_string(),
+        })
+    }
+
+    async fn assert_workflow_project_access(
+        &self,
+        _request: WorkflowProjectAccessRequest,
+    ) -> Result<(), GithubIssueWorkflowError> {
+        Err(GithubIssueWorkflowError::PolicyDenied {
+            reason: "GitHub issue workflow project access checker is not configured".to_string(),
+        })
+    }
+}
+
+struct UnconfiguredWorkflowWorkspaceManager;
+
+#[async_trait]
+impl WorkflowWorkspaceManager for UnconfiguredWorkflowWorkspaceManager {
+    async fn prepare_workspace(
+        &self,
+        _request: PrepareWorkflowWorkspaceRequest,
+    ) -> Result<PrepareWorkflowWorkspaceOutcome, GithubIssueWorkflowError> {
+        Err(GithubIssueWorkflowError::PolicyDenied {
+            reason: "GitHub issue workflow workspace manager is not configured".to_string(),
+        })
     }
 }
 

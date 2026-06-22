@@ -292,6 +292,58 @@ impl CredentialRefreshSettings {
     }
 }
 
+/// Configuration for the composition-owned GitHub issue workflow poller.
+///
+/// Like [`TriggerPollerSettings`], this is separate from caller-side
+/// completion polling. It controls a background worker that discovers and
+/// advances GitHub issue workflow runs.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GithubIssueWorkflowSettings {
+    pub enabled: bool,
+    pub poll_interval: Duration,
+    pub max_repos_per_tick: usize,
+    pub max_issues_per_repo_per_tick: usize,
+    pub max_runnable_runs_per_tick: usize,
+    pub lease_duration: Duration,
+    pub(crate) allow_in_memory_for_tests: bool,
+}
+
+impl Default for GithubIssueWorkflowSettings {
+    fn default() -> Self {
+        Self::disabled()
+    }
+}
+
+impl GithubIssueWorkflowSettings {
+    pub fn disabled() -> Self {
+        Self {
+            enabled: false,
+            poll_interval: Duration::from_secs(60),
+            max_repos_per_tick: 20,
+            max_issues_per_repo_per_tick: 10,
+            max_runnable_runs_per_tick: 10,
+            lease_duration: Duration::from_secs(300),
+            allow_in_memory_for_tests: false,
+        }
+    }
+
+    pub fn enabled() -> Self {
+        Self {
+            enabled: true,
+            ..Self::disabled()
+        }
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn enabled_for_tests() -> Self {
+        Self {
+            enabled: true,
+            allow_in_memory_for_tests: true,
+            ..Self::disabled()
+        }
+    }
+}
+
 /// Configuration for the composition-owned scheduled-trigger poller.
 ///
 /// This is intentionally separate from [`PollSettings`], which controls
@@ -364,6 +416,7 @@ pub struct RebornRuntimeInput {
     #[cfg(feature = "root-llm-provider")]
     pub boot: Option<RebornBootConfig>,
     pub runner: TurnRunnerSettings,
+    pub github_issue_workflow: GithubIssueWorkflowSettings,
     pub trigger_poller: TriggerPollerSettings,
     pub credential_refresh: CredentialRefreshSettings,
     pub trigger_fire_access_checker: Option<Arc<dyn TriggerFireAccessChecker>>,
@@ -422,6 +475,7 @@ impl RebornRuntimeInput {
             #[cfg(feature = "root-llm-provider")]
             boot: None,
             runner: TurnRunnerSettings::default(),
+            github_issue_workflow: GithubIssueWorkflowSettings::disabled(),
             trigger_poller: TriggerPollerSettings::default(),
             credential_refresh: CredentialRefreshSettings::default(),
             trigger_fire_access_checker: None,
@@ -526,6 +580,14 @@ impl RebornRuntimeInput {
 
     pub fn with_runner_settings(mut self, runner: TurnRunnerSettings) -> Self {
         self.runner = runner;
+        self
+    }
+
+    pub fn with_github_issue_workflow_settings(
+        mut self,
+        github_issue_workflow: GithubIssueWorkflowSettings,
+    ) -> Self {
+        self.github_issue_workflow = github_issue_workflow;
         self
     }
 

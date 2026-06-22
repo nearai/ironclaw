@@ -244,6 +244,7 @@ pub fn github_issue_workflow_first_party_handler_capabilities_for_test()
     crate::github_issue_workflow::insert_workflow_stage_result_handler(
         &mut registry,
         Arc::new(ironclaw_triggers::InMemoryTriggerRepository::default()),
+        Arc::new(crate::github_issue_workflow::WorkflowStageResultSinkSlot::new()),
     )
     .expect("workflow stage result handler installs");
     workflow_result_handler_ids(&registry)

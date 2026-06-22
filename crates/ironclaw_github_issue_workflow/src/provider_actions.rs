@@ -131,15 +131,15 @@ pub enum ProviderActionRunOutcome {
 }
 
 #[derive(Debug)]
-pub struct GithubIssueProviderActionRunner<R, P> {
+pub struct GithubIssueProviderActionRunner<R: ?Sized, P: ?Sized> {
     repository: Arc<R>,
     port: Arc<P>,
 }
 
 impl<R, P> GithubIssueProviderActionRunner<R, P>
 where
-    R: GithubIssueWorkflowRepository,
-    P: GithubIssueWorkflowPort,
+    R: GithubIssueWorkflowRepository + ?Sized,
+    P: GithubIssueWorkflowPort + ?Sized,
 {
     pub fn new(repository: Arc<R>, port: Arc<P>) -> Self {
         Self { repository, port }

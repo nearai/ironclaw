@@ -110,6 +110,11 @@ use ironclaw_turns::run_profile::UserProfileContext;
 
 use crate::default_system_prompt::DefaultSystemPromptIdentitySource;
 use crate::factory::{LocalDevRootFilesystem, LocalDevTurnStateStore, builtin_extension_registry};
+#[cfg(feature = "github-issue-workflow-beta")]
+use crate::github_issue_workflow::{
+    GITHUB_ISSUE_WORKFLOW_SHUTDOWN_TIMEOUT, GithubIssueWorkflowRuntimeDeps,
+    GithubIssueWorkflowRuntimeHandle, spawn_github_issue_workflow,
+};
 use crate::local_dev_capability_policy::local_dev_capability_policy;
 #[cfg(any(test, feature = "test-support"))]
 use crate::outbound_preferences::OutboundDeliveryTargetEntry;
@@ -193,6 +198,14 @@ struct RuntimeStoreParts<'a> {
     broadcast_budget_event_sink: Arc<ironclaw_resources::BroadcastBudgetEventSink>,
     subagent_goal_store: Arc<dyn RuntimeSubagentGoalStore>,
     trigger_repository: Option<Arc<dyn ironclaw_triggers::TriggerRepository>>,
+    #[cfg(feature = "github-issue-workflow-beta")]
+    workflow_repository:
+        Option<Arc<dyn ironclaw_github_issue_workflow::GithubIssueWorkflowRepository>>,
+    #[cfg(feature = "github-issue-workflow-beta")]
+    workflow_storage_durable: bool,
+    #[cfg(feature = "github-issue-workflow-beta")]
+    workflow_stage_result_sink_slot:
+        Option<Arc<crate::github_issue_workflow::WorkflowStageResultSinkSlot>>,
 }
 
 fn local_runtime_parts(
@@ -219,6 +232,14 @@ fn local_runtime_parts(
         broadcast_budget_event_sink: Arc::clone(&local_runtime.broadcast_budget_event_sink),
         subagent_goal_store,
         trigger_repository: Some(Arc::clone(&local_runtime.trigger_repository)),
+        #[cfg(feature = "github-issue-workflow-beta")]
+        workflow_repository: Some(Arc::clone(&local_runtime.workflow_repository)),
+        #[cfg(feature = "github-issue-workflow-beta")]
+        workflow_storage_durable: local_runtime.workflow_storage_durable,
+        #[cfg(feature = "github-issue-workflow-beta")]
+        workflow_stage_result_sink_slot: Some(Arc::clone(
+            &local_runtime.workflow_stage_result_sink_slot,
+        )),
     }
 }
 
@@ -245,6 +266,12 @@ where
             &graph.scoped_filesystem,
         ))) as Arc<dyn RuntimeSubagentGoalStore>,
         trigger_repository: Some(Arc::clone(&graph.trigger_repository)),
+        #[cfg(feature = "github-issue-workflow-beta")]
+        workflow_repository: Some(Arc::clone(&graph.workflow_repository)),
+        #[cfg(feature = "github-issue-workflow-beta")]
+        workflow_storage_durable: true,
+        #[cfg(feature = "github-issue-workflow-beta")]
+        workflow_stage_result_sink_slot: Some(Arc::clone(&graph.workflow_stage_result_sink_slot)),
     }
 }
 
@@ -440,6 +467,8 @@ pub struct RebornRuntime {
     worker_handle: JoinHandle<()>,
     worker_cancel: CancellationToken,
     trigger_poller_handle: Option<TriggerPollerRuntimeHandle>,
+    #[cfg(feature = "github-issue-workflow-beta")]
+    github_issue_workflow_handle: Option<GithubIssueWorkflowRuntimeHandle>,
     #[cfg(any(feature = "libsql", feature = "postgres"))]
     credential_refresh_worker_handle:
         Option<crate::credential_refresh_worker::CredentialRefreshWorkerRuntimeHandle>,
@@ -1747,6 +1776,12 @@ impl RebornRuntime {
                 .shutdown(TRIGGER_POLLER_SHUTDOWN_TIMEOUT)
                 .await;
         }
+        #[cfg(feature = "github-issue-workflow-beta")]
+        if let Some(github_issue_workflow) = self.github_issue_workflow_handle {
+            github_issue_workflow
+                .shutdown(GITHUB_ISSUE_WORKFLOW_SHUTDOWN_TIMEOUT)
+                .await;
+        }
         #[cfg(any(feature = "libsql", feature = "postgres"))]
         if let Some(credential_refresh_worker) = self.credential_refresh_worker_handle {
             credential_refresh_worker
@@ -2240,6 +2275,7 @@ pub async fn build_reborn_runtime(
         #[cfg(feature = "root-llm-provider")]
         boot,
         runner,
+        github_issue_workflow,
         trigger_poller,
         credential_refresh,
         trigger_fire_access_checker,
@@ -2398,6 +2434,12 @@ pub async fn build_reborn_runtime(
         broadcast_budget_event_sink,
         subagent_goal_store,
         trigger_repository: _trigger_repository,
+        #[cfg(feature = "github-issue-workflow-beta")]
+        workflow_repository,
+        #[cfg(feature = "github-issue-workflow-beta")]
+        workflow_storage_durable,
+        #[cfg(feature = "github-issue-workflow-beta")]
+        workflow_stage_result_sink_slot,
     } = runtime_parts;
     let (skill_context_source, skill_activation_source, skill_execution_adapter) =
         match (configured_skill_context_source, local_runtime) {
@@ -3084,6 +3126,62 @@ pub async fn build_reborn_runtime(
             trigger_conversation_pairing_value = None;
         }
     }
+
+    #[cfg(feature = "github-issue-workflow-beta")]
+    let github_issue_workflow_handle = if github_issue_workflow.enabled {
+        if !github_issue_workflow.allow_in_memory_for_tests && !workflow_storage_durable {
+            return Err(RebornRuntimeError::InvalidArgument {
+                reason: "GitHub issue workflow requires durable storage outside explicit test enablement"
+                    .to_string(),
+            });
+        }
+        if !github_issue_workflow.allow_in_memory_for_tests {
+            return Err(RebornRuntimeError::InvalidArgument {
+                reason:
+                    "GitHub issue workflow requires a project access checker and configured GitHub provider account reference outside explicit test enablement"
+                        .to_string(),
+            });
+        }
+        let repository = workflow_repository.ok_or(RebornRuntimeError::InvalidArgument {
+            reason: "GitHub issue workflow repository is not wired".to_string(),
+        })?;
+        let stage_result_sink_slot =
+            workflow_stage_result_sink_slot.ok_or(RebornRuntimeError::InvalidArgument {
+                reason: "GitHub issue workflow stage result sink slot is not wired".to_string(),
+            })?;
+        let host_runtime = services
+            .host_runtime
+            .as_ref()
+            .cloned()
+            .ok_or(RebornRuntimeError::HostRuntimeUnavailable)?;
+        spawn_github_issue_workflow(
+            github_issue_workflow,
+            GithubIssueWorkflowRuntimeDeps {
+                repository,
+                stage_result_sink_slot,
+                host_runtime,
+                thread_service: Arc::clone(&thread_service),
+                turn_coordinator: Arc::clone(&planned_turn_coordinator),
+                actor_user_id: actor_user_id.clone(),
+                default_agent_id: validated_identity.agent_id.clone(),
+            },
+        )
+        .map_err(|error| RebornRuntimeError::InvalidArgument {
+            reason: format!("GitHub issue workflow could not be started: {error}"),
+        })?
+    } else {
+        None
+    };
+    #[cfg(not(feature = "github-issue-workflow-beta"))]
+    {
+        if github_issue_workflow.enabled {
+            return Err(RebornRuntimeError::InvalidArgument {
+                reason:
+                    "GitHub issue workflow is enabled, but this binary was built without the `github-issue-workflow-beta` feature"
+                        .to_string(),
+            });
+        }
+    }
     let worker_cancel = CancellationToken::new();
     let worker = Arc::clone(&composition.worker);
     let worker_cancel_clone = worker_cancel.clone();
@@ -3124,6 +3222,10 @@ pub async fn build_reborn_runtime(
         crate::trace_capture::spawn_trace_queue_flush_worker(trace_capture_scopes);
     services.readiness.workers.turn_runner = true;
     services.readiness.workers.trigger_poller = trigger_poller_handle.is_some();
+    #[cfg(feature = "github-issue-workflow-beta")]
+    {
+        services.readiness.workers.github_issue_workflow = github_issue_workflow_handle.is_some();
+    }
     let turn_coordinator = planned_turn_coordinator;
     let wake_sender = composition.wake_sender.clone();
 
@@ -3154,6 +3256,8 @@ pub async fn build_reborn_runtime(
         worker_handle,
         worker_cancel,
         trigger_poller_handle,
+        #[cfg(feature = "github-issue-workflow-beta")]
+        github_issue_workflow_handle,
         #[cfg(any(feature = "libsql", feature = "postgres"))]
         credential_refresh_worker_handle,
         trace_flush_worker,
@@ -3729,6 +3833,7 @@ mod tests {
             workers: crate::RebornWorkerReadiness {
                 turn_runner: true,
                 trigger_poller: false,
+                github_issue_workflow: false,
             },
             diagnostics,
         }

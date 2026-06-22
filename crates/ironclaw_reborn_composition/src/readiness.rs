@@ -27,6 +27,7 @@ pub struct RebornFacadeReadiness {
 pub struct RebornWorkerReadiness {
     pub turn_runner: bool,
     pub trigger_poller: bool,
+    pub github_issue_workflow: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -407,6 +408,7 @@ impl RebornReadiness {
             workers: RebornWorkerReadiness {
                 turn_runner: false,
                 trigger_poller: false,
+                github_issue_workflow: false,
             },
             diagnostics: vec![RebornReadinessDiagnostic::disabled()],
         }

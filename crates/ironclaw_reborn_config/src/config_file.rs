@@ -96,6 +96,10 @@ pub struct RebornConfigFile {
     /// Trigger poller lifecycle settings. All fields optional; absent section
     /// leaves the worker at the compiled defaults in the composition root.
     pub trigger_poller: Option<TriggerPollerConfigSection>,
+    /// GitHub issue workflow lifecycle settings. All fields optional; absent
+    /// section leaves the worker disabled at the compiled defaults in the
+    /// composition root.
+    pub github_issue_workflow: Option<GithubIssueWorkflowConfigSection>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -398,6 +402,33 @@ pub struct TriggerPollerConfigSection {
     /// Prevents synchronized thundering-herd across instances. Default 0.
     /// Range `0..=3600` is enforced at boot by the CLI settings layer.
     pub tick_jitter_max_secs: Option<u64>,
+}
+
+/// `[github_issue_workflow]` section. Controls the background GitHub issue
+/// workflow poller.
+///
+/// All fields are optional so a sparse or absent section is valid; the
+/// composition root applies its own compiled defaults for any field not set
+/// here. Env vars (`IRONCLAW_GITHUB_ISSUE_WORKFLOW_*`) override this section.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GithubIssueWorkflowConfigSection {
+    /// Enable or disable the workflow poller. Default `false` (off) in
+    /// composition; operators MUST set `enabled = true` to activate it.
+    pub enabled: Option<bool>,
+    /// How often the poller ticks, in seconds. Default in composition is 60.
+    pub poll_interval_secs: Option<u64>,
+    /// Maximum repositories discovered per tick. Default in composition is 20.
+    pub max_repos_per_tick: Option<usize>,
+    /// Maximum issues inspected per repository per tick. Default in
+    /// composition is 10.
+    pub max_issues_per_repo_per_tick: Option<usize>,
+    /// Maximum runnable workflow runs claimed per tick. Default in composition
+    /// is 10.
+    pub max_runnable_runs_per_tick: Option<usize>,
+    /// Lease duration for runnable workflow claims, in seconds. Default in
+    /// composition is 300.
+    pub lease_duration_secs: Option<u64>,
 }
 
 /// One `[llm.<slot>]` entry. The slot name (typically `"default"` or
@@ -1845,5 +1876,65 @@ not_a_field = true
         let err = RebornConfigFile::parse_text(toml, &attributed())
             .expect_err("deny_unknown_fields must catch typos in [trigger_poller]");
         assert!(matches!(err, RebornConfigFileError::Toml { .. }));
+    }
+
+    #[test]
+    fn github_issue_workflow_full_section_parses() {
+        let toml = r#"
+[github_issue_workflow]
+enabled = true
+poll_interval_secs = 30
+max_repos_per_tick = 5
+max_issues_per_repo_per_tick = 7
+max_runnable_runs_per_tick = 11
+lease_duration_secs = 45
+"#;
+        let cfg = RebornConfigFile::parse_text(toml, &attributed())
+            .expect("full github_issue_workflow section must parse");
+        let workflow = cfg
+            .github_issue_workflow
+            .as_ref()
+            .expect("github_issue_workflow section present");
+        assert_eq!(workflow.enabled, Some(true));
+        assert_eq!(workflow.poll_interval_secs, Some(30));
+        assert_eq!(workflow.max_repos_per_tick, Some(5));
+        assert_eq!(workflow.max_issues_per_repo_per_tick, Some(7));
+        assert_eq!(workflow.max_runnable_runs_per_tick, Some(11));
+        assert_eq!(workflow.lease_duration_secs, Some(45));
+    }
+
+    #[test]
+    fn github_issue_workflow_absent_section_yields_none() {
+        let cfg = RebornConfigFile::parse_text("", &attributed()).expect("empty TOML must parse");
+        assert!(cfg.github_issue_workflow.is_none());
+    }
+
+    #[test]
+    fn github_issue_workflow_rejects_unknown_key() {
+        let toml = r#"
+[github_issue_workflow]
+not_a_field = true
+"#;
+        let err = RebornConfigFile::parse_text(toml, &attributed())
+            .expect_err("deny_unknown_fields must catch typos in [github_issue_workflow]");
+        assert!(matches!(err, RebornConfigFileError::Toml { .. }));
+    }
+
+    #[test]
+    fn github_issue_workflow_section_rejects_inline_secret_strings_if_string_fields_are_added() {
+        let toml = r#"
+[github_issue_workflow]
+provider_account_env = "ghp_deadbeefdeadbeefdeadbeefdeadbeefdead"
+"#;
+        let err = RebornConfigFile::parse_text(toml, &attributed()).expect_err(
+            "future string fields in [github_issue_workflow] must be guarded against inline secrets",
+        );
+        assert!(
+            matches!(
+                err,
+                RebornConfigFileError::Toml { .. } | RebornConfigFileError::InlineSecret { .. }
+            ),
+            "unexpected error shape: {err:?}"
+        );
     }
 }

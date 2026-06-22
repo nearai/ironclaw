@@ -63,12 +63,12 @@ pub struct WorkflowPolicyTickOutcome {
 }
 
 pub trait GithubIssueWorkflowPolicyPorts: Send + Sync {
-    type Clock: WorkflowClock;
-    type GithubPort: GithubIssueWorkflowPort;
-    type ProjectAccess: WorkflowProjectAccess;
-    type Repository: GithubIssueWorkflowRepository;
-    type StageTurnSubmitter: StageTurnSubmitter;
-    type WorkspaceManager: WorkflowWorkspaceManager;
+    type Clock: WorkflowClock + ?Sized;
+    type GithubPort: GithubIssueWorkflowPort + ?Sized;
+    type ProjectAccess: WorkflowProjectAccess + ?Sized;
+    type Repository: GithubIssueWorkflowRepository + ?Sized;
+    type StageTurnSubmitter: StageTurnSubmitter + ?Sized;
+    type WorkspaceManager: WorkflowWorkspaceManager + ?Sized;
 
     fn clock(&self) -> Arc<Self::Clock>;
     fn github_port(&self) -> Arc<Self::GithubPort>;

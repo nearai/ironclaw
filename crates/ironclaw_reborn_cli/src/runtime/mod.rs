@@ -26,10 +26,12 @@ use tokio_util::sync::CancellationToken;
 
 use crate::context::RebornCliContext;
 
+mod github_issue_workflow;
 #[cfg(test)]
 mod test_env;
 mod trigger_poller;
 
+use github_issue_workflow::github_issue_workflow_settings;
 use trigger_poller::trigger_poller_settings;
 
 pub(crate) fn init_tracing() {
@@ -422,6 +424,10 @@ pub(crate) fn build_runtime_input_with_options(
     #[allow(unused_mut)]
     let mut runtime_input = RebornRuntimeInput::from_services(runtime_services.services_input)
         .with_runner_settings(runner_settings(runtime_services.config_file.as_ref())?)
+        .with_github_issue_workflow_settings(github_issue_workflow_settings(
+            runtime_services.config_file.as_ref(),
+            caller,
+        )?)
         .with_trigger_poller_settings(trigger_poller_settings(
             runtime_services.config_file.as_ref(),
             caller,
@@ -2141,6 +2147,174 @@ poll_interval_secs = 15
         assert!(
             err.to_string().contains("IRONCLAW_TRIGGER_POLLER_ENABLED"),
             "caller-level error must surface the env var name, got: {err}",
+        );
+    }
+
+    fn clear_github_issue_workflow_env() -> Vec<EnvGuard> {
+        vec![
+            EnvGuard::clear("IRONCLAW_GITHUB_ISSUE_WORKFLOW_ENABLED"),
+            EnvGuard::clear("IRONCLAW_GITHUB_ISSUE_WORKFLOW_INTERVAL_SECS"),
+            EnvGuard::clear("IRONCLAW_GITHUB_ISSUE_WORKFLOW_MAX_REPOS_PER_TICK"),
+            EnvGuard::clear("IRONCLAW_GITHUB_ISSUE_WORKFLOW_MAX_ISSUES_PER_REPO_PER_TICK"),
+            EnvGuard::clear("IRONCLAW_GITHUB_ISSUE_WORKFLOW_MAX_RUNNABLE_RUNS_PER_TICK"),
+            EnvGuard::clear("IRONCLAW_GITHUB_ISSUE_WORKFLOW_LEASE_DURATION_SECS"),
+        ]
+    }
+
+    #[cfg(feature = "github-issue-workflow-beta")]
+    #[test]
+    fn cli_runtime_maps_github_issue_workflow_config_to_settings() {
+        let _lock = lock_trigger_env();
+        let _guards = clear_github_issue_workflow_env();
+
+        let temp = tempfile::tempdir().expect("tempdir");
+        let reborn_home = temp.path().join("reborn-home");
+        std::fs::create_dir_all(&reborn_home).expect("mkdir");
+        std::fs::write(
+            reborn_home.join("config.toml"),
+            r#"
+[github_issue_workflow]
+enabled = true
+poll_interval_secs = 42
+max_repos_per_tick = 6
+max_issues_per_repo_per_tick = 8
+max_runnable_runs_per_tick = 9
+lease_duration_secs = 300
+"#,
+        )
+        .expect("write config");
+        let config = RebornBootConfig::resolve_from_env_parts(
+            Some(reborn_home.into_os_string()),
+            None,
+            None,
+            None,
+        )
+        .expect("boot config");
+
+        let input = build_runtime_input(&config, RuntimeInputCaller::Run).expect("runtime input");
+
+        assert!(input.github_issue_workflow.enabled);
+        assert_eq!(
+            input.github_issue_workflow.poll_interval,
+            std::time::Duration::from_secs(42)
+        );
+        assert_eq!(input.github_issue_workflow.max_repos_per_tick, 6);
+        assert_eq!(input.github_issue_workflow.max_issues_per_repo_per_tick, 8);
+        assert_eq!(input.github_issue_workflow.max_runnable_runs_per_tick, 9);
+        assert_eq!(
+            input.github_issue_workflow.lease_duration,
+            std::time::Duration::from_secs(300)
+        );
+    }
+
+    #[cfg(feature = "github-issue-workflow-beta")]
+    #[test]
+    fn cli_runtime_env_overrides_github_issue_workflow_config() {
+        let _lock = lock_trigger_env();
+        let mut guards = clear_github_issue_workflow_env();
+        guards.push(EnvGuard::set(
+            "IRONCLAW_GITHUB_ISSUE_WORKFLOW_ENABLED",
+            "true",
+        ));
+        guards.push(EnvGuard::set(
+            "IRONCLAW_GITHUB_ISSUE_WORKFLOW_INTERVAL_SECS",
+            "75",
+        ));
+
+        let temp = tempfile::tempdir().expect("tempdir");
+        let reborn_home = temp.path().join("reborn-home");
+        std::fs::create_dir_all(&reborn_home).expect("mkdir");
+        std::fs::write(
+            reborn_home.join("config.toml"),
+            r#"
+[github_issue_workflow]
+enabled = false
+poll_interval_secs = 15
+"#,
+        )
+        .expect("write config");
+        let config = RebornBootConfig::resolve_from_env_parts(
+            Some(reborn_home.into_os_string()),
+            None,
+            None,
+            None,
+        )
+        .expect("boot config");
+
+        let input = build_runtime_input(&config, RuntimeInputCaller::Run).expect("runtime input");
+
+        assert!(input.github_issue_workflow.enabled);
+        assert_eq!(
+            input.github_issue_workflow.poll_interval,
+            std::time::Duration::from_secs(75)
+        );
+    }
+
+    #[test]
+    fn cli_runtime_rejects_invalid_github_issue_workflow_env() {
+        let _lock = lock_trigger_env();
+        let mut guards = clear_github_issue_workflow_env();
+        guards.push(EnvGuard::set(
+            "IRONCLAW_GITHUB_ISSUE_WORKFLOW_ENABLED",
+            "later",
+        ));
+
+        let temp = tempfile::tempdir().expect("tempdir");
+        let reborn_home = temp.path().join("reborn-home");
+        std::fs::create_dir_all(&reborn_home).expect("mkdir");
+        let config = RebornBootConfig::resolve_from_env_parts(
+            Some(reborn_home.into_os_string()),
+            None,
+            None,
+            None,
+        )
+        .expect("boot config");
+
+        let err = match build_runtime_input(&config, RuntimeInputCaller::Run) {
+            Ok(_) => panic!("invalid env must fail"),
+            Err(err) => err,
+        };
+
+        assert!(
+            err.to_string()
+                .contains("IRONCLAW_GITHUB_ISSUE_WORKFLOW_ENABLED"),
+            "error must mention env var name, got: {err}"
+        );
+    }
+
+    #[cfg(not(feature = "github-issue-workflow-beta"))]
+    #[test]
+    fn cli_runtime_feature_off_rejects_enabled_github_issue_workflow() {
+        let _lock = lock_trigger_env();
+        let _guards = clear_github_issue_workflow_env();
+
+        let temp = tempfile::tempdir().expect("tempdir");
+        let reborn_home = temp.path().join("reborn-home");
+        std::fs::create_dir_all(&reborn_home).expect("mkdir");
+        std::fs::write(
+            reborn_home.join("config.toml"),
+            r#"
+[github_issue_workflow]
+enabled = true
+"#,
+        )
+        .expect("write config");
+        let config = RebornBootConfig::resolve_from_env_parts(
+            Some(reborn_home.into_os_string()),
+            None,
+            None,
+            None,
+        )
+        .expect("boot config");
+
+        let err = match build_runtime_input(&config, RuntimeInputCaller::Run) {
+            Ok(_) => panic!("feature-off build must reject enabled workflow"),
+            Err(err) => err,
+        };
+
+        assert!(
+            err.to_string().contains("github-issue-workflow-beta"),
+            "error must mention missing feature flag, got: {err}"
         );
     }
 

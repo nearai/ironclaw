@@ -44,6 +44,16 @@ use ironclaw_filesystem::{
     MountDescriptor, RootFilesystem, StorageClass,
 };
 use ironclaw_filesystem::{LocalFilesystem, ScopedFilesystem};
+#[cfg(feature = "github-issue-workflow-beta")]
+use ironclaw_github_issue_workflow::GithubIssueWorkflowRepository;
+#[cfg(all(feature = "github-issue-workflow-beta", not(feature = "libsql")))]
+use ironclaw_github_issue_workflow::InMemoryGithubIssueWorkflowRepository;
+#[cfg(all(feature = "github-issue-workflow-beta", feature = "libsql"))]
+use ironclaw_github_issue_workflow_storage::RebornFilesystemGithubIssueWorkflowRepository;
+#[cfg(all(feature = "github-issue-workflow-beta", feature = "libsql"))]
+use ironclaw_github_issue_workflow_storage::RebornLibSqlGithubIssueWorkflowRepository;
+#[cfg(all(feature = "github-issue-workflow-beta", feature = "postgres"))]
+use ironclaw_github_issue_workflow_storage::RebornPostgresGithubIssueWorkflowRepository;
 use ironclaw_host_api::runtime_policy::{
     EffectiveRuntimePolicy, FilesystemBackendKind, ProcessBackendKind, SecretMode,
 };
@@ -470,6 +480,13 @@ pub(crate) struct RebornLocalRuntimeServices {
     pub(crate) persistent_approval_policies: Arc<LocalDevPersistentApprovalPolicyStore>,
     pub(crate) turn_state: Arc<LocalDevTurnStateStore>,
     pub(crate) trigger_repository: Arc<dyn TriggerRepository>,
+    #[cfg(feature = "github-issue-workflow-beta")]
+    pub(crate) workflow_repository: Arc<dyn GithubIssueWorkflowRepository>,
+    #[cfg(feature = "github-issue-workflow-beta")]
+    pub(crate) workflow_storage_durable: bool,
+    #[cfg(feature = "github-issue-workflow-beta")]
+    pub(crate) workflow_stage_result_sink_slot:
+        Arc<crate::github_issue_workflow::WorkflowStageResultSinkSlot>,
     /// Facade-shaped handle (not the raw `ProjectRepository`): composition
     /// modules wire the access-controlled service, never the substrate repo.
     pub(crate) project_service: Arc<dyn ProjectService>,
@@ -587,6 +604,11 @@ where
     pub(crate) checkpoint_state_store: Arc<dyn CheckpointStateStore>,
     pub(crate) thread_service: Arc<dyn SessionThreadService>,
     pub(crate) trigger_repository: Arc<dyn TriggerRepository>,
+    #[cfg(feature = "github-issue-workflow-beta")]
+    pub(crate) workflow_repository: Arc<dyn GithubIssueWorkflowRepository>,
+    #[cfg(feature = "github-issue-workflow-beta")]
+    pub(crate) workflow_stage_result_sink_slot:
+        Arc<crate::github_issue_workflow::WorkflowStageResultSinkSlot>,
     pub(crate) resource_governor: Arc<dyn ResourceGovernor>,
     pub(crate) budget_gate_store: Arc<dyn BudgetGateStore>,
     pub(crate) broadcast_budget_event_sink: Arc<BroadcastBudgetEventSink>,
@@ -1157,6 +1179,8 @@ async fn build_local_dev(input: RebornBuildInput) -> Result<RebornServices, Rebo
     let mut first_party_registry = builtin_first_party_registry_with_trigger_create_hook(
         Arc::clone(&store_graph.trigger_repository),
         trigger_create_hook,
+        #[cfg(feature = "github-issue-workflow-beta")]
+        Arc::clone(&store_graph.local_runtime.workflow_stage_result_sink_slot),
     )?;
     register_bundled_gsuite_first_party_handlers(
         &mut first_party_registry,
@@ -1482,6 +1506,18 @@ fn build_local_dev_store_graph(
         owner_user_id.clone(),
         local_runtime_identity.as_ref(),
     )?;
+    #[cfg(feature = "github-issue-workflow-beta")]
+    let workflow_repository: Arc<dyn GithubIssueWorkflowRepository> =
+        Arc::new(RebornFilesystemGithubIssueWorkflowRepository::new(
+            Arc::clone(&scoped_filesystem),
+            local_dev_nearai_mcp_owner_scope(
+                owner_user_id.clone(),
+                local_runtime_identity.as_ref(),
+            )?,
+        ));
+    #[cfg(feature = "github-issue-workflow-beta")]
+    let workflow_stage_result_sink_slot =
+        Arc::new(crate::github_issue_workflow::WorkflowStageResultSinkSlot::new());
     let skill_management =
         build_local_skill_management_port(owner_user_id, Arc::clone(&filesystem))?;
     let outbound_stores = local_dev_outbound_store(Arc::clone(&filesystem));
@@ -1494,6 +1530,12 @@ fn build_local_dev_store_graph(
         persistent_approval_policies: Arc::clone(&persistent_approval_policies),
         turn_state: Arc::clone(&turn_state),
         trigger_repository: Arc::clone(&trigger_repository),
+        #[cfg(feature = "github-issue-workflow-beta")]
+        workflow_repository,
+        #[cfg(feature = "github-issue-workflow-beta")]
+        workflow_storage_durable: true,
+        #[cfg(feature = "github-issue-workflow-beta")]
+        workflow_stage_result_sink_slot,
         project_service: Arc::new(crate::project_service::RebornProjectService::new(
             Arc::clone(&project_repository),
         )),
@@ -1614,6 +1656,12 @@ fn build_local_dev_store_graph(
         owner_user_id.clone(),
         local_runtime_identity.as_ref(),
     )?;
+    #[cfg(feature = "github-issue-workflow-beta")]
+    let workflow_repository: Arc<dyn GithubIssueWorkflowRepository> =
+        Arc::new(InMemoryGithubIssueWorkflowRepository::default());
+    #[cfg(feature = "github-issue-workflow-beta")]
+    let workflow_stage_result_sink_slot =
+        Arc::new(crate::github_issue_workflow::WorkflowStageResultSinkSlot::new());
     let skill_management =
         build_local_skill_management_port(owner_user_id, Arc::clone(&filesystem))?;
     #[cfg(not(any(feature = "libsql", feature = "postgres")))]
@@ -1628,6 +1676,12 @@ fn build_local_dev_store_graph(
         persistent_approval_policies: Arc::clone(&persistent_approval_policies),
         turn_state: Arc::clone(&turn_state),
         trigger_repository: Arc::clone(&trigger_repository),
+        #[cfg(feature = "github-issue-workflow-beta")]
+        workflow_repository,
+        #[cfg(feature = "github-issue-workflow-beta")]
+        workflow_storage_durable: false,
+        #[cfg(feature = "github-issue-workflow-beta")]
+        workflow_stage_result_sink_slot,
         project_service: Arc::new(crate::project_service::RebornProjectService::new(
             Arc::clone(&project_repository),
         )),
@@ -2667,8 +2721,11 @@ fn production_builtin_extension_registry(
 fn builtin_first_party_registry_with_trigger_create_hook(
     trigger_repository: Arc<dyn TriggerRepository>,
     trigger_create_hook: Arc<dyn TriggerCreateHook>,
+    #[cfg(feature = "github-issue-workflow-beta")] workflow_stage_result_sink_slot: Arc<
+        crate::github_issue_workflow::WorkflowStageResultSinkSlot,
+    >,
 ) -> Result<FirstPartyCapabilityRegistry, RebornBuildError> {
-    let mut registry = builtin_first_party_handlers_with_trigger_create_hook(
+    let registry = builtin_first_party_handlers_with_trigger_create_hook(
         Arc::clone(&trigger_repository),
         trigger_create_hook,
     )
@@ -2676,13 +2733,18 @@ fn builtin_first_party_registry_with_trigger_create_hook(
         reason: format!("built-in first-party handlers are invalid: {error}"),
     })?;
     #[cfg(feature = "github-issue-workflow-beta")]
-    crate::github_issue_workflow::insert_workflow_stage_result_handler(
-        &mut registry,
-        trigger_repository,
-    )
-    .map_err(|error| RebornBuildError::InvalidConfig {
-        reason: format!("workflow stage result handler is invalid: {error}"),
-    })?;
+    let registry = {
+        let mut registry = registry;
+        crate::github_issue_workflow::insert_workflow_stage_result_handler(
+            &mut registry,
+            trigger_repository,
+            workflow_stage_result_sink_slot,
+        )
+        .map_err(|error| RebornBuildError::InvalidConfig {
+            reason: format!("workflow stage result handler is invalid: {error}"),
+        })?;
+        registry
+    };
     Ok(registry)
 }
 
@@ -2691,8 +2753,11 @@ fn production_first_party_registry_with_trigger_create_hook(
     trigger_repository: Arc<dyn TriggerRepository>,
     trigger_create_hook: Arc<dyn TriggerCreateHook>,
     process_backend: ProcessBackendKind,
+    #[cfg(feature = "github-issue-workflow-beta")] workflow_stage_result_sink_slot: Arc<
+        crate::github_issue_workflow::WorkflowStageResultSinkSlot,
+    >,
 ) -> Result<FirstPartyCapabilityRegistry, RebornBuildError> {
-    let mut registry = builtin_first_party_handlers_with_trigger_create_hook_for_process_backend(
+    let registry = builtin_first_party_handlers_with_trigger_create_hook_for_process_backend(
         Arc::clone(&trigger_repository),
         trigger_create_hook,
         process_backend,
@@ -2701,13 +2766,18 @@ fn production_first_party_registry_with_trigger_create_hook(
         reason: format!("built-in first-party handlers are invalid: {error}"),
     })?;
     #[cfg(feature = "github-issue-workflow-beta")]
-    crate::github_issue_workflow::insert_workflow_stage_result_handler(
-        &mut registry,
-        trigger_repository,
-    )
-    .map_err(|error| RebornBuildError::InvalidConfig {
-        reason: format!("workflow stage result handler is invalid: {error}"),
-    })?;
+    let registry = {
+        let mut registry = registry;
+        crate::github_issue_workflow::insert_workflow_stage_result_handler(
+            &mut registry,
+            trigger_repository,
+            workflow_stage_result_sink_slot,
+        )
+        .map_err(|error| RebornBuildError::InvalidConfig {
+            reason: format!("workflow stage result handler is invalid: {error}"),
+        })?;
+        registry
+    };
     Ok(registry)
 }
 
@@ -3172,7 +3242,13 @@ where
     .with_turn_run_wake_notifier(turn_run_wake_notifier)
     .with_filesystem_run_state(Arc::clone(&scoped_filesystem))
     .with_filesystem_turn_state_store(Arc::clone(&scoped_filesystem))
-    .with_run_profile_resolver(planned_run_profile_resolver()?)
+    .with_run_profile_resolver(planned_run_profile_resolver().map_err(|error| {
+        crate::RebornCompositionError::RunProfile(
+            ironclaw_turns::run_profile::RunProfileRegistryError::InvalidProfile {
+                reason: error.to_string(),
+            },
+        )
+    })?)
     .with_reborn_event_store_config(
         ironclaw_reborn_event_store::RebornProfile::Production,
         event_store,
@@ -3340,6 +3416,9 @@ async fn build_backend_production<F>(
     context: RebornProductionBuildContext,
     stores: ProductionStoreBundle<F>,
     trigger_repository: Arc<dyn TriggerRepository>,
+    #[cfg(feature = "github-issue-workflow-beta")] workflow_repository: Arc<
+        dyn GithubIssueWorkflowRepository,
+    >,
     production_runtime_services: impl FnOnce(
         Arc<RebornProductionRuntimeStoreGraph<F>>,
     ) -> RebornProductionRuntimeServices,
@@ -3405,6 +3484,9 @@ where
         stores.event_store,
     )
     .await?;
+    #[cfg(feature = "github-issue-workflow-beta")]
+    let workflow_stage_result_sink_slot =
+        Arc::new(crate::github_issue_workflow::WorkflowStageResultSinkSlot::new());
     let event_log = Arc::clone(&event_stores.events);
     let audit_log = Arc::clone(&event_stores.audit);
     let production_runtime_graph = Arc::new(RebornProductionRuntimeStoreGraph {
@@ -3414,6 +3496,10 @@ where
         checkpoint_state_store: Arc::clone(&checkpoint_state_store),
         thread_service,
         trigger_repository: Arc::clone(&trigger_repository),
+        #[cfg(feature = "github-issue-workflow-beta")]
+        workflow_repository,
+        #[cfg(feature = "github-issue-workflow-beta")]
+        workflow_stage_result_sink_slot: Arc::clone(&workflow_stage_result_sink_slot),
         resource_governor: production_resource_governor,
         budget_gate_store,
         broadcast_budget_event_sink,
@@ -3425,6 +3511,8 @@ where
         trigger_repository,
         trigger_create_hook,
         process_backend,
+        #[cfg(feature = "github-issue-workflow-beta")]
+        workflow_stage_result_sink_slot,
     )?;
     let product_auth_filesystem = Arc::clone(&stores.scoped_filesystem);
     let services = HostRuntimeServices::new(
@@ -3593,11 +3681,17 @@ async fn build_libsql_production(
             auth_token,
         },
     )?;
+    #[cfg(feature = "github-issue-workflow-beta")]
+    let workflow_repository: Arc<dyn GithubIssueWorkflowRepository> = Arc::new(
+        RebornLibSqlGithubIssueWorkflowRepository::new(Arc::clone(&stores.filesystem)),
+    );
 
     build_backend_production(
         context,
         stores,
         trigger_repository,
+        #[cfg(feature = "github-issue-workflow-beta")]
+        workflow_repository,
         RebornProductionRuntimeServices::LibSql,
         {
             #[cfg(feature = "postgres")]
@@ -3642,11 +3736,17 @@ async fn build_postgres_production(
         secret_master_key,
         ironclaw_reborn_event_store::RebornEventStoreConfig::Postgres { url, tls_options },
     )?;
+    #[cfg(feature = "github-issue-workflow-beta")]
+    let workflow_repository: Arc<dyn GithubIssueWorkflowRepository> = Arc::new(
+        RebornPostgresGithubIssueWorkflowRepository::new(Arc::clone(&stores.filesystem)),
+    );
 
     build_backend_production(
         context,
         stores,
         trigger_repository,
+        #[cfg(feature = "github-issue-workflow-beta")]
+        workflow_repository,
         RebornProductionRuntimeServices::Postgres,
         crate::product_auth_refresh_lock::CredentialRefreshLeaderLock::new(Some(
             pool_for_refresh_lock,
@@ -3693,6 +3793,7 @@ fn readiness_for(
         workers: RebornWorkerReadiness {
             turn_runner: false,
             trigger_poller: false,
+            github_issue_workflow: false,
         },
         diagnostics,
     }
@@ -3859,6 +3960,14 @@ mod tests {
             persistent_approval_policies: Arc::clone(&base_runtime.persistent_approval_policies),
             turn_state: Arc::clone(&base_runtime.turn_state),
             trigger_repository: Arc::clone(&base_runtime.trigger_repository),
+            #[cfg(feature = "github-issue-workflow-beta")]
+            workflow_repository: Arc::clone(&base_runtime.workflow_repository),
+            #[cfg(feature = "github-issue-workflow-beta")]
+            workflow_storage_durable: base_runtime.workflow_storage_durable,
+            #[cfg(feature = "github-issue-workflow-beta")]
+            workflow_stage_result_sink_slot: Arc::clone(
+                &base_runtime.workflow_stage_result_sink_slot,
+            ),
             project_service: Arc::clone(&base_runtime.project_service),
             outbound_preferences: Arc::clone(&base_runtime.outbound_preferences),
             #[cfg(feature = "slack-v2-host-beta")]
