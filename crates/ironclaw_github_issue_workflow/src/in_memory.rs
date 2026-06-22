@@ -538,7 +538,7 @@ impl GithubIssueWorkflowRepository for InMemoryGithubIssueWorkflowRepository {
                 action: action.clone(),
             });
         }
-        if !provider_action_lease_is_claimable(action, &input.worker_id, input.now) {
+        if !provider_action_lease_is_claimable(action, input.now) {
             return Ok(ClaimProviderActionOutcome::Busy {
                 action: action.clone(),
             });
@@ -716,11 +716,9 @@ fn provider_action_is_complete(status: &ProviderActionStatus) -> bool {
 
 fn provider_action_lease_is_claimable(
     action: &GithubIssueProviderActionRecord,
-    worker_id: &crate::WorkflowWorkerId,
     now: chrono::DateTime<chrono::Utc>,
 ) -> bool {
     action.lease_owner.is_none()
-        || action.lease_owner.as_ref() == Some(worker_id)
         || action
             .lease_expires_at
             .map(|expires_at| expires_at <= now)

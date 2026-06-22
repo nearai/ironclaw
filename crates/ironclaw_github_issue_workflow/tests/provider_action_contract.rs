@@ -15,7 +15,7 @@ mod provider_action_contract {
         stable_claim_marker,
     };
     use ironclaw_host_api::{AgentId, ProjectId, TenantId, UserId};
-    use tokio::sync::Mutex;
+    use tokio::sync::{Mutex, Notify};
 
     fn fixed_time(seconds: i64) -> chrono::DateTime<Utc> {
         Utc.timestamp_opt(seconds, 0).unwrap()
@@ -99,6 +99,8 @@ mod provider_action_contract {
         create_results: Mutex<VecDeque<Result<GithubCommentRef, GithubIssueWorkflowError>>>,
         create_bodies: Mutex<Vec<String>>,
         list_calls: Mutex<usize>,
+        create_call_observed: Notify,
+        pause_first_create_until: Mutex<Option<Arc<Notify>>>,
     }
 
     impl FakeGithubIssueWorkflowPort {
@@ -116,6 +118,8 @@ mod provider_action_contract {
                 })])),
                 create_bodies: Mutex::new(Vec::new()),
                 list_calls: Mutex::new(0),
+                create_call_observed: Notify::new(),
+                pause_first_create_until: Mutex::new(None),
             }
         }
 
@@ -136,6 +140,19 @@ mod provider_action_contract {
 
         async fn list_call_count(&self) -> usize {
             *self.list_calls.lock().await
+        }
+
+        async fn pause_first_create_until(&self, release: Arc<Notify>) {
+            *self.pause_first_create_until.lock().await = Some(release);
+        }
+
+        async fn wait_for_create_call_count(&self, expected_count: usize) {
+            loop {
+                if self.create_bodies.lock().await.len() >= expected_count {
+                    return;
+                }
+                self.create_call_observed.notified().await;
+            }
         }
     }
 
@@ -160,7 +177,20 @@ mod provider_action_contract {
             &self,
             input: CreateIssueCommentInput,
         ) -> Result<GithubCommentRef, GithubIssueWorkflowError> {
-            self.create_bodies.lock().await.push(input.body);
+            let create_call_count = {
+                let mut create_bodies = self.create_bodies.lock().await;
+                create_bodies.push(input.body);
+                create_bodies.len()
+            };
+            self.create_call_observed.notify_waiters();
+            let release = if create_call_count == 1 {
+                self.pause_first_create_until.lock().await.clone()
+            } else {
+                None
+            };
+            if let Some(release) = release {
+                release.notified().await;
+            }
             self.create_results
                 .lock()
                 .await
@@ -260,6 +290,53 @@ mod provider_action_contract {
         assert_eq!(second_action.status, ProviderActionStatus::Succeeded);
         assert_eq!(port.create_bodies().await.len(), 1);
         assert_eq!(port.list_call_count().await, 1);
+    }
+
+    #[tokio::test]
+    async fn same_worker_running_claim_comment_is_busy_until_lease_expiry() {
+        let repository = Arc::new(InMemoryGithubIssueWorkflowRepository::default());
+        let port = Arc::new(FakeGithubIssueWorkflowPort::new());
+        let release_first_create = Arc::new(Notify::new());
+        port.pause_first_create_until(release_first_create.clone())
+            .await;
+        let run = create_run(&repository, issue()).await;
+        let runner = Arc::new(GithubIssueProviderActionRunner::new(
+            repository,
+            port.clone(),
+        ));
+        let first_runner = runner.clone();
+        let first_run = run.clone();
+        let first_worker = worker(1);
+        let first_handle = tokio::spawn(async move {
+            first_runner
+                .run_claim_comment(request(first_run, first_worker))
+                .await
+        });
+        port.wait_for_create_call_count(1).await;
+
+        let second = runner
+            .run_claim_comment(request(run, worker(1)))
+            .await
+            .unwrap();
+
+        let ProviderActionRunOutcome::Busy {
+            action: second_action,
+        } = second
+        else {
+            panic!("same-worker invocation must not reclaim an unexpired running provider action");
+        };
+        assert_eq!(second_action.status, ProviderActionStatus::Running);
+        assert_eq!(second_action.attempt_count, 1);
+        assert_eq!(port.create_bodies().await.len(), 1);
+        assert_eq!(port.list_call_count().await, 1);
+
+        release_first_create.notify_waiters();
+        let first = first_handle.await.unwrap().unwrap();
+        let ProviderActionRunOutcome::Succeeded { action, .. } = first else {
+            panic!("first claim comment action must still complete after release");
+        };
+        assert_eq!(action.status, ProviderActionStatus::Succeeded);
+        assert_eq!(port.create_bodies().await.len(), 1);
     }
 
     #[tokio::test]
