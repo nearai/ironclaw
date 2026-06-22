@@ -241,6 +241,7 @@ pub struct CompleteWorkflowStepInput {
     pub status: WorkflowStepStatus,
     pub result: Option<JsonValue>,
     pub error: Option<JsonValue>,
+    pub next_attempt_at: Option<DateTime<Utc>>,
     pub now: DateTime<Utc>,
 }
 

@@ -531,6 +531,7 @@ impl GithubIssueWorkflowRepository for InMemoryGithubIssueWorkflowRepository {
             error: None,
             started_at: input.now,
             completed_at: None,
+            next_attempt_at: None,
         };
         let step_key = RunIdempotencyKey {
             workflow_run_id: step.workflow_run_id.clone(),
@@ -566,7 +567,12 @@ impl GithubIssueWorkflowRepository for InMemoryGithubIssueWorkflowRepository {
         step.status = input.status;
         step.result = input.result;
         step.error = input.error;
-        step.completed_at = Some(input.now);
+        step.next_attempt_at = input.next_attempt_at;
+        step.completed_at = if workflow_step_is_complete(&step.status) {
+            Some(input.now)
+        } else {
+            None
+        };
 
         Ok(CompleteWorkflowStepOutcome::Completed { step: step.clone() })
     }

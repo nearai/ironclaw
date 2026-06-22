@@ -1,6 +1,6 @@
 mod policy_contract {
     use std::collections::VecDeque;
-    use std::sync::Arc;
+    use std::sync::{Arc, Mutex as StdMutex};
 
     use async_trait::async_trait;
     use chrono::{Duration, TimeZone, Utc};
@@ -238,12 +238,24 @@ mod policy_contract {
 
     #[derive(Debug)]
     struct FakeClock {
-        now: chrono::DateTime<Utc>,
+        now: StdMutex<chrono::DateTime<Utc>>,
+    }
+
+    impl FakeClock {
+        fn new(now: chrono::DateTime<Utc>) -> Self {
+            Self {
+                now: StdMutex::new(now),
+            }
+        }
+
+        fn set(&self, now: chrono::DateTime<Utc>) {
+            *self.now.lock().unwrap() = now;
+        }
     }
 
     impl WorkflowClock for FakeClock {
         fn now(&self) -> chrono::DateTime<Utc> {
-            self.now
+            self.now.lock().unwrap().to_owned()
         }
     }
 
@@ -449,9 +461,7 @@ mod policy_contract {
                 stage_turns,
                 project_access,
                 workspace: Arc::new(FakeWorkspaceManager::new()),
-                clock: Arc::new(FakeClock {
-                    now: fixed_time(30),
-                }),
+                clock: Arc::new(FakeClock::new(fixed_time(30))),
                 worker_id: worker(),
             }
         }
@@ -651,16 +661,36 @@ mod policy_contract {
         let run = create_claimed_run(&policy.ports().repository).await;
         record_issue_discovered(&policy.ports().repository, &run).await;
 
-        let first = policy.tick(run.clone()).await.unwrap();
-        let second = policy.tick(run).await.unwrap();
+        let first = policy.tick(run).await.unwrap();
+        let immediate_replay = policy.tick(first.run.clone()).await.unwrap();
 
         assert!(first.run.active_stage_run_id.is_some());
-        assert!(
-            second
-                .steps
-                .iter()
-                .any(|step| step.status == WorkflowStepStatus::Blocked)
-        );
+        assert_eq!(first.run.event_cursor, 0);
+        let busy_step = first
+            .steps
+            .iter()
+            .find(|step| step.step_name == "start_stage:triage")
+            .expect("busy stage submission should record the start-stage step");
+        assert_eq!(busy_step.status, WorkflowStepStatus::Retryable);
+        assert_eq!(busy_step.next_attempt_at, Some(fixed_time(60)));
+        assert_eq!(immediate_replay.processed_event_count, 0);
         assert_eq!(stage_turns.requests().await.len(), 1);
+
+        policy.ports().clock.set(fixed_time(61));
+        let retry = policy.tick(first.run).await.unwrap();
+
+        assert_eq!(retry.processed_event_count, 1);
+        assert_eq!(retry.run.event_cursor, 1);
+        assert_eq!(
+            retry.run.workflow_state.mode,
+            GithubIssueWorkflowMode::Claimed
+        );
+        let retried_step = retry
+            .steps
+            .iter()
+            .find(|step| step.step_name == "start_stage:triage")
+            .expect("retry should return the start-stage step");
+        assert_eq!(retried_step.status, WorkflowStepStatus::Succeeded);
+        assert_eq!(stage_turns.requests().await.len(), 2);
     }
 }

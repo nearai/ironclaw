@@ -23,6 +23,7 @@ use crate::{
 
 const DEFAULT_STAGE_ATTEMPT: u32 = 1;
 const DEFAULT_PROVIDER_ACTION_LEASE_SECONDS: i64 = 60;
+const DEFAULT_BUSY_RETRY_SECONDS: i64 = 30;
 const DEFAULT_CAPABILITY_PROFILE_ID: &str = "github_issue_workflow.stage.default";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -37,6 +38,7 @@ pub struct WorkflowStepRun {
     pub error: Option<JsonValue>,
     pub started_at: DateTime<Utc>,
     pub completed_at: Option<DateTime<Utc>>,
+    pub next_attempt_at: Option<DateTime<Utc>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -44,6 +46,7 @@ pub struct WorkflowStepRun {
 pub enum WorkflowStepStatus {
     Pending,
     Running,
+    Retryable,
     Succeeded,
     Failed,
     Blocked,
@@ -165,7 +168,20 @@ where
             });
         }
 
-        let claimed_run = self
+        let (run, start_stage_step) = self
+            .start_stage_step(run, GithubIssueStage::Triage, None)
+            .await?;
+        let stage_submitted = start_stage_step.status == WorkflowStepStatus::Succeeded;
+        steps.push(start_stage_step);
+        if !stage_submitted {
+            return Ok(WorkflowPolicyTickOutcome {
+                run,
+                processed_event_count: 0,
+                steps,
+            });
+        }
+
+        let run = self
             .advance_run_cursor(
                 run,
                 event.sequence,
@@ -176,10 +192,6 @@ where
                 },
             )
             .await?;
-        let (run, start_stage_step) = self
-            .start_stage_step(claimed_run, GithubIssueStage::Triage, None)
-            .await?;
-        steps.push(start_stage_step);
 
         Ok(WorkflowPolicyTickOutcome {
             run,
@@ -201,7 +213,17 @@ where
                     GithubIssueWorkflowMode::Claimed | GithubIssueWorkflowMode::Triage
                 ) =>
             {
-                let planning_run = self
+                let (run, step) = self
+                    .start_stage_step(run, GithubIssueStage::Planning, None)
+                    .await?;
+                if step.status != WorkflowStepStatus::Succeeded {
+                    return Ok(WorkflowPolicyTickOutcome {
+                        run,
+                        processed_event_count: 0,
+                        steps: vec![step],
+                    });
+                }
+                let run = self
                     .advance_run_cursor(
                         run,
                         event.sequence,
@@ -211,9 +233,6 @@ where
                             ..WorkflowRunTransition::default()
                         },
                     )
-                    .await?;
-                let (run, step) = self
-                    .start_stage_step(planning_run, GithubIssueStage::Planning, None)
                     .await?;
                 Ok(WorkflowPolicyTickOutcome {
                     run,
@@ -225,7 +244,21 @@ where
                 if run.workflow_state.mode == GithubIssueWorkflowMode::Planning =>
             {
                 let (workspace, workspace_step) = self.prepare_workspace_step(&run).await?;
-                let implementation_run = self
+                let (run, start_step) = self
+                    .start_stage_step(
+                        run,
+                        GithubIssueStage::Implementation,
+                        Some(workspace.mount_ref),
+                    )
+                    .await?;
+                if start_step.status != WorkflowStepStatus::Succeeded {
+                    return Ok(WorkflowPolicyTickOutcome {
+                        run,
+                        processed_event_count: 0,
+                        steps: vec![workspace_step, start_step],
+                    });
+                }
+                let run = self
                     .advance_run_cursor(
                         run,
                         event.sequence,
@@ -235,13 +268,6 @@ where
                             workspace_session_id: Some(workspace.workspace_session_id.clone()),
                             ..WorkflowRunTransition::default()
                         },
-                    )
-                    .await?;
-                let (run, start_step) = self
-                    .start_stage_step(
-                        implementation_run,
-                        GithubIssueStage::Implementation,
-                        Some(workspace.mount_ref),
                     )
                     .await?;
                 Ok(WorkflowPolicyTickOutcome {
@@ -276,6 +302,10 @@ where
         if workflow_step_replays(&step.status) {
             return Ok(step);
         }
+        let now = self.ports.clock().now();
+        if workflow_step_waits_for_retry(&step, now) {
+            return Ok(step);
+        }
 
         let runner =
             GithubIssueProviderActionRunner::new(self.ports.repository(), self.ports.github_port());
@@ -283,19 +313,27 @@ where
             .run_claim_comment(crate::RunClaimCommentProviderActionRequest {
                 run: run.clone(),
                 worker_id: self.ports.worker_id(),
-                now: self.ports.clock().now(),
+                now,
                 lease_expires_at: self.ports.provider_action_lease_expires_at(),
             })
             .await?;
 
-        let status = match outcome {
+        let status = match &outcome {
             ProviderActionRunOutcome::Succeeded { .. }
             | ProviderActionRunOutcome::Replayed { .. } => WorkflowStepStatus::Succeeded,
-            ProviderActionRunOutcome::Busy { .. }
-            | ProviderActionRunOutcome::NeedsReconciliation { .. } => WorkflowStepStatus::Blocked,
+            ProviderActionRunOutcome::Busy { .. } => WorkflowStepStatus::Retryable,
+            ProviderActionRunOutcome::NeedsReconciliation { .. } => WorkflowStepStatus::Blocked,
             ProviderActionRunOutcome::Failed { .. } => WorkflowStepStatus::Failed,
         };
         let result = serde_json::to_value(&outcome).map_err(policy_serde_error)?;
+        if let ProviderActionRunOutcome::Busy { action } = outcome {
+            let next_attempt_at = action
+                .lease_expires_at
+                .unwrap_or(now + Duration::seconds(DEFAULT_BUSY_RETRY_SECONDS));
+            return self
+                .retry_step(step, Some(result), None, next_attempt_at)
+                .await;
+        }
 
         self.complete_step(step, status, Some(result), None).await
     }
@@ -360,6 +398,10 @@ where
         if workflow_step_replays(&step.status) {
             return Ok((run, step));
         }
+        let now = self.ports.clock().now();
+        if workflow_step_waits_for_retry(&step, now) {
+            return Ok((run, step));
+        }
 
         if let Err(error) = self
             .ports
@@ -392,7 +434,7 @@ where
             .create_stage_run(CreateStageRunInput {
                 workflow_run_id: run.workflow_run_id.clone(),
                 stage: stage.clone(),
-                now: self.ports.clock().now(),
+                now,
             })
             .await?;
         let (stage_run_id, run) = match stage_run {
@@ -442,13 +484,24 @@ where
             })
             .await?;
 
-        let status = match outcome {
+        let status = match &outcome {
             SubmitStageTurnOutcome::Submitted { .. } | SubmitStageTurnOutcome::Replayed { .. } => {
                 WorkflowStepStatus::Succeeded
             }
-            SubmitStageTurnOutcome::Busy { .. } => WorkflowStepStatus::Blocked,
+            SubmitStageTurnOutcome::Busy { .. } => WorkflowStepStatus::Retryable,
         };
         let result = serde_json::to_value(&outcome).map_err(policy_serde_error)?;
+        if let SubmitStageTurnOutcome::Busy { reason } = outcome {
+            let completed = self
+                .retry_step(
+                    step,
+                    Some(result),
+                    Some(json!({ "reason": reason })),
+                    now + Duration::seconds(DEFAULT_BUSY_RETRY_SECONDS),
+                )
+                .await?;
+            return Ok((run, completed));
+        }
         let completed = self.complete_step(step, status, Some(result), None).await?;
 
         Ok((run, completed))
@@ -515,6 +568,34 @@ where
         result: Option<JsonValue>,
         error: Option<JsonValue>,
     ) -> Result<WorkflowStepRun, GithubIssueWorkflowError> {
+        self.update_step(step, status, result, error, None).await
+    }
+
+    async fn retry_step(
+        &self,
+        step: WorkflowStepRun,
+        result: Option<JsonValue>,
+        error: Option<JsonValue>,
+        next_attempt_at: DateTime<Utc>,
+    ) -> Result<WorkflowStepRun, GithubIssueWorkflowError> {
+        self.update_step(
+            step,
+            WorkflowStepStatus::Retryable,
+            result,
+            error,
+            Some(next_attempt_at),
+        )
+        .await
+    }
+
+    async fn update_step(
+        &self,
+        step: WorkflowStepRun,
+        status: WorkflowStepStatus,
+        result: Option<JsonValue>,
+        error: Option<JsonValue>,
+        next_attempt_at: Option<DateTime<Utc>>,
+    ) -> Result<WorkflowStepRun, GithubIssueWorkflowError> {
         let outcome = self
             .ports
             .repository()
@@ -523,6 +604,7 @@ where
                 status,
                 result,
                 error,
+                next_attempt_at,
                 now: self.ports.clock().now(),
             })
             .await?;
@@ -614,6 +696,14 @@ fn workflow_step_replays(status: &WorkflowStepStatus) -> bool {
         status,
         WorkflowStepStatus::Succeeded | WorkflowStepStatus::Failed | WorkflowStepStatus::Blocked
     )
+}
+
+fn workflow_step_waits_for_retry(step: &WorkflowStepRun, now: DateTime<Utc>) -> bool {
+    step.status == WorkflowStepStatus::Retryable
+        && step
+            .next_attempt_at
+            .map(|next_attempt_at| next_attempt_at > now)
+            .unwrap_or(false)
 }
 
 fn run_is_terminal(status: &GithubIssueWorkflowRunStatus) -> bool {
