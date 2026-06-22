@@ -228,6 +228,7 @@ struct StubServices {
     list_automations_calls: Mutex<Vec<WebUiListAutomationsRequest>>,
     pause_automation_calls: Mutex<Vec<String>>,
     resume_automation_calls: Mutex<Vec<String>>,
+    delete_automation_calls: Mutex<Vec<String>>,
     next_list_automations_error: Mutex<Option<RebornServicesError>>,
     get_outbound_preferences_calls: Mutex<usize>,
     set_outbound_preferences_calls: Mutex<Vec<RebornSetOutboundPreferencesRequest>>,
@@ -745,6 +746,21 @@ impl RebornServicesApi for StubServices {
                 "Daily status",
                 "0 9 * * *",
             )),
+        })
+    }
+
+    async fn delete_automation(
+        &self,
+        _caller: WebUiAuthenticatedCaller,
+        automation_id: String,
+    ) -> Result<RebornAutomationMutationResponse, RebornServicesError> {
+        self.delete_automation_calls
+            .lock()
+            .expect("lock")
+            .push(automation_id);
+        Ok(RebornAutomationMutationResponse {
+            updated: true,
+            automation: None,
         })
     }
 
@@ -2072,6 +2088,36 @@ async fn trace_credits_returns_caller_scoped_unenrolled_zero_state() {
             .as_str()
             .expect("note")
             .contains("authoritative ledger is server-side")
+    );
+}
+
+#[tokio::test]
+async fn delete_automation_dispatches_path_id_to_facade() {
+    let services = Arc::new(StubServices::default());
+    let router = router_with(services.clone());
+
+    let response = router
+        .oneshot(
+            Request::builder()
+                .method(Method::DELETE)
+                .uri("/api/webchat/v2/automations/automation-alpha")
+                .body(Body::empty())
+                .expect("delete request"),
+        )
+        .await
+        .expect("delete oneshot");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = read_json(response).await;
+    assert_eq!(body["updated"], true);
+    assert!(body.get("automation").is_none() || body["automation"].is_null());
+    assert_eq!(
+        services
+            .delete_automation_calls
+            .lock()
+            .expect("lock")
+            .clone(),
+        vec!["automation-alpha".to_string()]
     );
 }
 

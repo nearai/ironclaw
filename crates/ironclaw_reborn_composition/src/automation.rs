@@ -174,6 +174,33 @@ impl AutomationProductFacade for RebornAutomationProductFacade {
             .await
     }
 
+    async fn delete_automation(
+        &self,
+        caller: ProductAgentBoundCaller,
+        automation_id: String,
+    ) -> Result<RebornAutomationMutationResponse, RebornServicesError> {
+        let trigger_id = parse_trigger_id(&automation_id)?;
+        let deadline = tokio::time::Instant::now() + self.backend_timeout;
+        let removed = tokio::time::timeout_at(
+            deadline,
+            self.trigger_repository.remove_scoped_trigger(
+                caller.tenant_id,
+                caller.user_id,
+                Some(caller.agent_id),
+                caller.project_id,
+                trigger_id,
+            ),
+        )
+        .await
+        .map_err(|_| backend_timeout_error())?
+        .map_err(map_trigger_error)?;
+
+        Ok(RebornAutomationMutationResponse {
+            updated: removed.is_some(),
+            automation: None,
+        })
+    }
+
     async fn resolve_run_thread_scope(
         &self,
         caller: ProductAgentBoundCaller,

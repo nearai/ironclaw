@@ -1,6 +1,11 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { React } from "../../../lib/html.js";
-import { listAutomations, pauseAutomation, resumeAutomation } from "../../../lib/api.js";
+import {
+  deleteAutomation,
+  listAutomations,
+  pauseAutomation,
+  resumeAutomation,
+} from "../../../lib/api.js";
 import { useI18n } from "../../../lib/i18n.js";
 
 import {
@@ -72,6 +77,10 @@ export function useAutomations(includeCompleted = false) {
     mutationFn: (automationId) => resumeAutomation({ automationId }),
     onSuccess: invalidateAutomations,
   });
+  const deleteMutation = useMutation({
+    mutationFn: (automationId) => deleteAutomation({ automationId }),
+    onSuccess: invalidateAutomations,
+  });
 
   return {
     automations,
@@ -79,11 +88,12 @@ export function useAutomations(includeCompleted = false) {
     schedulerEnabled,
     isLoading: query.isLoading,
     isRefreshing: query.isFetching,
-    isMutating: pauseMutation.isPending || resumeMutation.isPending,
+    isMutating: pauseMutation.isPending || resumeMutation.isPending || deleteMutation.isPending,
     error: query.error || null,
-    actionError: pauseMutation.error || resumeMutation.error || null,
+    actionError: pauseMutation.error || resumeMutation.error || deleteMutation.error || null,
     pauseAutomation: pauseMutation.mutate,
     resumeAutomation: resumeMutation.mutate,
+    deleteAutomation: deleteMutation.mutate,
     refetch: query.refetch,
   };
 }

@@ -27,6 +27,7 @@ pub const WEBUI_V2_ROUTE_RESOLVE_GATE: &str = "webui.v2.resolve_gate";
 pub const WEBUI_V2_ROUTE_LIST_AUTOMATIONS: &str = "webui.v2.list_automations";
 pub const WEBUI_V2_ROUTE_PAUSE_AUTOMATION: &str = "webui.v2.pause_automation";
 pub const WEBUI_V2_ROUTE_RESUME_AUTOMATION: &str = "webui.v2.resume_automation";
+pub const WEBUI_V2_ROUTE_DELETE_AUTOMATION: &str = "webui.v2.delete_automation";
 pub const WEBUI_V2_ROUTE_TRACE_CREDITS: &str = "webui.v2.trace_credits";
 pub const WEBUI_V2_ROUTE_TRACE_HOLD_AUTHORIZE: &str = "webui.v2.authorize_trace_hold";
 pub const WEBUI_V2_ROUTE_GET_OUTBOUND_PREFERENCES: &str = "webui.v2.get_outbound_preferences";
@@ -105,6 +106,7 @@ pub const WEBUI_V2_PATTERN_PAUSE_AUTOMATION: &str =
     "/api/webchat/v2/automations/{automation_id}/pause";
 pub const WEBUI_V2_PATTERN_RESUME_AUTOMATION: &str =
     "/api/webchat/v2/automations/{automation_id}/resume";
+pub const WEBUI_V2_PATTERN_DELETE_AUTOMATION: &str = "/api/webchat/v2/automations/{automation_id}";
 pub const WEBUI_V2_PATTERN_TRACE_CREDITS: &str = "/api/webchat/v2/traces/credit";
 pub const WEBUI_V2_PATTERN_TRACE_HOLD_AUTHORIZE: &str =
     "/api/webchat/v2/traces/holds/{submission_id}/authorize";
@@ -184,6 +186,7 @@ pub fn webui_v2_routes() -> Vec<IngressRouteDescriptor> {
         list_automations_descriptor(),
         pause_automation_descriptor(),
         resume_automation_descriptor(),
+        delete_automation_descriptor(),
         trace_credits_descriptor(),
         authorize_trace_hold_descriptor(),
         get_outbound_preferences_descriptor(),
@@ -701,6 +704,20 @@ fn resume_automation_descriptor() -> IngressRouteDescriptor {
         WEBUI_V2_ROUTE_RESUME_AUTOMATION,
         NetworkMethod::Post,
         WEBUI_V2_PATTERN_RESUME_AUTOMATION,
+        mutation_policy(
+            BodyLimitPolicy::NoBody,
+            mutation_rate_limit(),
+            AuditTraceClass::UserAction,
+            AllowedEffectPath::ProductWorkflow,
+        ),
+    )
+}
+
+fn delete_automation_descriptor() -> IngressRouteDescriptor {
+    descriptor(
+        WEBUI_V2_ROUTE_DELETE_AUTOMATION,
+        NetworkMethod::Delete,
+        WEBUI_V2_PATTERN_DELETE_AUTOMATION,
         mutation_policy(
             BodyLimitPolicy::NoBody,
             mutation_rate_limit(),
