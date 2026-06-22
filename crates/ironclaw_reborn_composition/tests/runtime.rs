@@ -197,7 +197,7 @@ async fn skill_execution_adapter_prepares_filesystem_bundles_end_to_end() {
         skill_md(
             "filesystem-helper",
             "filesystem-helper",
-            "Use filesystem-backed review guidance.",
+            "Use filesystem-backed policy guidance.",
         ),
     )
     .unwrap();
@@ -227,9 +227,19 @@ async fn skill_execution_adapter_prepares_filesystem_bundles_end_to_end() {
     .unwrap()
     .unwrap();
 
-    assert_eq!(result.plan.activations().len(), 1);
+    assert_eq!(
+        result.plan.activations().len(),
+        1,
+        "unexpected activations: {:?}",
+        result.plan.activations()
+    );
     assert_eq!(result.plan.activations()[0].name, "filesystem-helper");
-    assert_eq!(result.plan.active_bundles().len(), 1);
+    assert_eq!(
+        result.plan.active_bundles().len(),
+        1,
+        "unexpected active bundles: {:?}",
+        result.plan.active_bundles()
+    );
     assert_eq!(
         result.plan.active_bundles()[0].source,
         RebornSkillSourceKind::User
