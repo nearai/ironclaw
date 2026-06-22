@@ -7,16 +7,19 @@ use tokio::sync::Mutex;
 use crate::{
     AcceptStageResultInput, AcceptStageResultOutcome, AdvanceWorkflowRunInput,
     ClaimProviderActionInput, ClaimProviderActionOutcome, ClaimRunnableWorkflowRunsInput,
-    CompleteProviderActionInput, CompleteProviderActionOutcome, CreateOrGetProviderActionInput,
-    CreateOrGetWorkflowRunInput, CreateOrGetWorkflowRunOutcome, CreateStageRunInput,
-    CreateStageRunOutcome, GithubIssueProviderActionId, GithubIssueProviderActionRecord,
-    GithubIssueProviderBinding, GithubIssueProviderBindingId, GithubIssueStageRunId,
-    GithubIssueWorkflowError, GithubIssueWorkflowEvent, GithubIssueWorkflowEventId,
-    GithubIssueWorkflowMode, GithubIssueWorkflowRepository, GithubIssueWorkflowRun,
-    GithubIssueWorkflowRunId, GithubIssueWorkflowRunKey, GithubIssueWorkflowRunStatus,
-    GithubIssueWorkflowState, GithubProviderRef, LeaseRenewalOutcome, ProviderActionStatus,
-    RecordWorkflowEventInput, RecordWorkflowEventOutcome, RenewWorkflowRunLeaseInput,
-    TransitionOutcome, UpsertProviderBindingInput, WorkflowIdempotencyKey,
+    CompleteProviderActionInput, CompleteProviderActionOutcome, CompleteWorkflowStepInput,
+    CompleteWorkflowStepOutcome, CreateOrGetProviderActionInput, CreateOrGetWorkflowRunInput,
+    CreateOrGetWorkflowRunOutcome, CreateOrGetWorkflowStepInput, CreateOrGetWorkflowStepOutcome,
+    CreateStageRunInput, CreateStageRunOutcome, GithubIssueProviderActionId,
+    GithubIssueProviderActionRecord, GithubIssueProviderBinding, GithubIssueProviderBindingId,
+    GithubIssueStageRunId, GithubIssueWorkflowError, GithubIssueWorkflowEvent,
+    GithubIssueWorkflowEventId, GithubIssueWorkflowMode, GithubIssueWorkflowRepository,
+    GithubIssueWorkflowRun, GithubIssueWorkflowRunId, GithubIssueWorkflowRunKey,
+    GithubIssueWorkflowRunStatus, GithubIssueWorkflowState, GithubProviderRef, LeaseRenewalOutcome,
+    ListWorkflowEventsAfterInput, ProviderActionStatus, RecordWorkflowEventInput,
+    RecordWorkflowEventOutcome, RenewWorkflowRunLeaseInput, TransitionOutcome,
+    UpsertProviderBindingInput, WorkflowIdempotencyKey, WorkflowStepRun, WorkflowStepRunId,
+    WorkflowStepStatus,
 };
 use ironclaw_host_api::TenantId;
 
@@ -42,6 +45,8 @@ struct InMemoryState {
     event_ids_by_run_key: HashMap<RunIdempotencyKey, GithubIssueWorkflowEventId>,
     next_event_sequence_by_run: HashMap<GithubIssueWorkflowRunId, i64>,
     stage_runs_by_id: HashMap<GithubIssueStageRunId, InMemoryStageRun>,
+    workflow_steps_by_id: HashMap<WorkflowStepRunId, WorkflowStepRun>,
+    workflow_step_ids_by_run_key: HashMap<RunIdempotencyKey, WorkflowStepRunId>,
     provider_actions_by_id: HashMap<GithubIssueProviderActionId, GithubIssueProviderActionRecord>,
     provider_action_ids_by_run_key: HashMap<RunIdempotencyKey, GithubIssueProviderActionId>,
     provider_bindings_by_id: HashMap<GithubIssueProviderBindingId, GithubIssueProviderBinding>,
@@ -211,6 +216,36 @@ impl GithubIssueWorkflowRepository for InMemoryGithubIssueWorkflowRepository {
         state.events_by_id.insert(workflow_event_id, event.clone());
 
         Ok(RecordWorkflowEventOutcome::Recorded { event })
+    }
+
+    async fn list_workflow_events_after(
+        &self,
+        input: ListWorkflowEventsAfterInput,
+    ) -> Result<Vec<GithubIssueWorkflowEvent>, GithubIssueWorkflowError> {
+        if input.limit == 0 {
+            return Ok(Vec::new());
+        }
+
+        let state = self.state.lock().await;
+        if !state.runs_by_id.contains_key(&input.workflow_run_id) {
+            return Err(repository_error(format!(
+                "workflow run `{}` does not exist",
+                input.workflow_run_id
+            )));
+        }
+
+        let mut events: Vec<_> = state
+            .events_by_id
+            .values()
+            .filter(|event| {
+                event.workflow_run_id == input.workflow_run_id
+                    && event.sequence > input.after_sequence
+            })
+            .cloned()
+            .collect();
+        events.sort_by_key(|event| event.sequence);
+        events.truncate(input.limit);
+        Ok(events)
     }
 
     async fn claim_runnable_workflow_runs(
@@ -449,6 +484,91 @@ impl GithubIssueWorkflowRepository for InMemoryGithubIssueWorkflowRepository {
         stage_run.active = false;
 
         Ok(AcceptStageResultOutcome::Accepted { run: updated_run })
+    }
+
+    async fn create_or_get_workflow_step(
+        &self,
+        input: CreateOrGetWorkflowStepInput,
+    ) -> Result<CreateOrGetWorkflowStepOutcome, GithubIssueWorkflowError> {
+        let mut state = self.state.lock().await;
+        if !state.runs_by_id.contains_key(&input.workflow_run_id) {
+            return Err(repository_error(format!(
+                "workflow run `{}` does not exist",
+                input.workflow_run_id
+            )));
+        }
+
+        let step_key = RunIdempotencyKey {
+            workflow_run_id: input.workflow_run_id.clone(),
+            idempotency_key: input.idempotency_key.clone(),
+        };
+        if let Some(existing_step_id) = state.workflow_step_ids_by_run_key.get(&step_key) {
+            let existing = state
+                .workflow_steps_by_id
+                .get(existing_step_id)
+                .cloned()
+                .ok_or_else(|| {
+                    repository_error("workflow step idempotency index pointed to a missing step")
+                })?;
+            if existing.input_hash != input.input_hash {
+                return Err(repository_error(format!(
+                    "workflow step `{}` input hash mismatch for idempotency key `{}`",
+                    existing.step_name, existing.idempotency_key
+                )));
+            }
+            return Ok(CreateOrGetWorkflowStepOutcome::Existing { step: existing });
+        }
+
+        let step_run_id = WorkflowStepRunId::new();
+        let step = WorkflowStepRun {
+            step_run_id: step_run_id.clone(),
+            workflow_run_id: input.workflow_run_id,
+            step_name: input.step_name,
+            idempotency_key: input.idempotency_key,
+            input_hash: input.input_hash,
+            status: WorkflowStepStatus::Pending,
+            result: None,
+            error: None,
+            started_at: input.now,
+            completed_at: None,
+        };
+        let step_key = RunIdempotencyKey {
+            workflow_run_id: step.workflow_run_id.clone(),
+            idempotency_key: step.idempotency_key.clone(),
+        };
+        state
+            .workflow_step_ids_by_run_key
+            .insert(step_key, step_run_id.clone());
+        state.workflow_steps_by_id.insert(step_run_id, step.clone());
+
+        Ok(CreateOrGetWorkflowStepOutcome::Created { step })
+    }
+
+    async fn complete_workflow_step(
+        &self,
+        input: CompleteWorkflowStepInput,
+    ) -> Result<CompleteWorkflowStepOutcome, GithubIssueWorkflowError> {
+        let mut state = self.state.lock().await;
+        let step = state
+            .workflow_steps_by_id
+            .get_mut(&input.step_run_id)
+            .ok_or_else(|| {
+                repository_error(format!(
+                    "workflow step `{}` does not exist",
+                    input.step_run_id
+                ))
+            })?;
+
+        if workflow_step_is_complete(&step.status) {
+            return Ok(CompleteWorkflowStepOutcome::AlreadyCompleted { step: step.clone() });
+        }
+
+        step.status = input.status;
+        step.result = input.result;
+        step.error = input.error;
+        step.completed_at = Some(input.now);
+
+        Ok(CompleteWorkflowStepOutcome::Completed { step: step.clone() })
     }
 
     async fn create_or_get_provider_action(
@@ -711,6 +831,13 @@ fn provider_action_is_complete(status: &ProviderActionStatus) -> bool {
         ProviderActionStatus::Succeeded
             | ProviderActionStatus::Failed
             | ProviderActionStatus::NeedsReconciliation
+    )
+}
+
+fn workflow_step_is_complete(status: &WorkflowStepStatus) -> bool {
+    matches!(
+        status,
+        WorkflowStepStatus::Succeeded | WorkflowStepStatus::Failed | WorkflowStepStatus::Blocked
     )
 }
 

@@ -11,7 +11,8 @@ use crate::{
     GithubIssueWorkflowRun, GithubIssueWorkflowRunId, GithubIssueWorkflowRunStatus,
     GithubIssueWorkspaceSessionId, GithubProviderRef, ProviderActionKind,
     ProviderActionReconciliationStrategy, ProviderActionStatus, WorkflowEventEnvelope,
-    WorkflowIdempotencyKey, WorkflowStepRunId, WorkflowWorkerId,
+    WorkflowIdempotencyKey, WorkflowStepRun, WorkflowStepRunId, WorkflowStepStatus,
+    WorkflowWorkerId,
 };
 
 #[async_trait]
@@ -25,6 +26,11 @@ pub trait GithubIssueWorkflowRepository: Send + Sync {
         &self,
         input: RecordWorkflowEventInput,
     ) -> Result<RecordWorkflowEventOutcome, GithubIssueWorkflowError>;
+
+    async fn list_workflow_events_after(
+        &self,
+        input: ListWorkflowEventsAfterInput,
+    ) -> Result<Vec<GithubIssueWorkflowEvent>, GithubIssueWorkflowError>;
 
     async fn claim_runnable_workflow_runs(
         &self,
@@ -50,6 +56,16 @@ pub trait GithubIssueWorkflowRepository: Send + Sync {
         &self,
         input: AcceptStageResultInput,
     ) -> Result<AcceptStageResultOutcome, GithubIssueWorkflowError>;
+
+    async fn create_or_get_workflow_step(
+        &self,
+        input: CreateOrGetWorkflowStepInput,
+    ) -> Result<CreateOrGetWorkflowStepOutcome, GithubIssueWorkflowError>;
+
+    async fn complete_workflow_step(
+        &self,
+        input: CompleteWorkflowStepInput,
+    ) -> Result<CompleteWorkflowStepOutcome, GithubIssueWorkflowError>;
 
     async fn create_or_get_provider_action(
         &self,
@@ -103,6 +119,13 @@ pub enum RecordWorkflowEventOutcome {
     Recorded { event: GithubIssueWorkflowEvent },
     Duplicate { existing: GithubIssueWorkflowEvent },
     Superseded { existing: GithubIssueWorkflowEvent },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ListWorkflowEventsAfterInput {
+    pub workflow_run_id: GithubIssueWorkflowRunId,
+    pub after_sequence: i64,
+    pub limit: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -194,6 +217,38 @@ pub enum AcceptStageResultOutcome {
     Accepted { run: GithubIssueWorkflowRun },
     NotActiveStage { run: GithubIssueWorkflowRun },
     Terminal,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CreateOrGetWorkflowStepInput {
+    pub workflow_run_id: GithubIssueWorkflowRunId,
+    pub step_name: String,
+    pub idempotency_key: WorkflowIdempotencyKey,
+    pub input_hash: String,
+    pub now: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[allow(clippy::large_enum_variant)]
+pub enum CreateOrGetWorkflowStepOutcome {
+    Created { step: WorkflowStepRun },
+    Existing { step: WorkflowStepRun },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CompleteWorkflowStepInput {
+    pub step_run_id: WorkflowStepRunId,
+    pub status: WorkflowStepStatus,
+    pub result: Option<JsonValue>,
+    pub error: Option<JsonValue>,
+    pub now: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[allow(clippy::large_enum_variant)]
+pub enum CompleteWorkflowStepOutcome {
+    Completed { step: WorkflowStepRun },
+    AlreadyCompleted { step: WorkflowStepRun },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
