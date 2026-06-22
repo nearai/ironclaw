@@ -18,6 +18,12 @@ use ironclaw_loop_support::{
     HostManagedModelError, HostManagedModelErrorKind, HostManagedModelGateway,
     HostManagedModelRequest, HostManagedModelResponse,
 };
+#[cfg(feature = "github-issue-workflow-beta")]
+use ironclaw_loop_support::{SubagentDefinitionResolver, SubagentKindId};
+#[cfg(feature = "github-issue-workflow-beta")]
+use ironclaw_turns::{
+    CapabilitySurfaceProfileId, RunProfileRequest, RunProfileResolutionRequest, RunProfileResolver,
+};
 use ironclaw_turns::{
     TurnRunId, TurnStatus,
     run_profile::{LoopCapabilityPort, LoopModelUsage},
@@ -45,6 +51,111 @@ pub fn github_issue_stage_turn_submitter_for_test(
             default_agent_id,
         ),
     )
+}
+
+/// Test-only projection of one GitHub issue workflow capability profile.
+///
+/// Mirrors the composition-owned stage profile contract without exposing raw
+/// runtime or host-runtime handles to integration tests.
+#[cfg(feature = "github-issue-workflow-beta")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct GithubIssueWorkflowCapabilityProfileForTest {
+    pub profile_id: &'static str,
+    pub allowed_capabilities: &'static [&'static str],
+}
+
+#[cfg(feature = "github-issue-workflow-beta")]
+impl From<crate::github_issue_workflow::GithubIssueWorkflowCapabilityProfile>
+    for GithubIssueWorkflowCapabilityProfileForTest
+{
+    fn from(profile: crate::github_issue_workflow::GithubIssueWorkflowCapabilityProfile) -> Self {
+        Self {
+            profile_id: profile.profile_id,
+            allowed_capabilities: profile.allowed_capabilities,
+        }
+    }
+}
+
+/// Return the composition-owned GitHub issue workflow stage capability profiles.
+#[cfg(feature = "github-issue-workflow-beta")]
+pub fn github_issue_workflow_capability_profiles_for_test()
+-> Vec<GithubIssueWorkflowCapabilityProfileForTest> {
+    crate::github_issue_workflow::stage_capability_profiles()
+        .iter()
+        .copied()
+        .map(Into::into)
+        .collect()
+}
+
+/// Return the non-workflow default profile projection used to assert the stage
+/// result sink is workflow-only.
+#[cfg(feature = "github-issue-workflow-beta")]
+pub fn github_issue_workflow_default_capability_profile_for_test()
+-> GithubIssueWorkflowCapabilityProfileForTest {
+    crate::github_issue_workflow::non_workflow_default_capability_profile().into()
+}
+
+/// Resolve a workflow stage capability-surface profile id to its allowlist.
+#[cfg(feature = "github-issue-workflow-beta")]
+pub fn github_issue_workflow_allowed_capabilities_for_profile_for_test(
+    profile_id: &str,
+) -> Option<std::collections::BTreeSet<String>> {
+    let profile_id = CapabilitySurfaceProfileId::new(profile_id).ok()?;
+    let allow_set =
+        crate::github_issue_workflow::allowed_capabilities_for_stage_profile_id(&profile_id)
+            .ok()
+            .flatten()?;
+    match allow_set {
+        ironclaw_loop_support::CapabilityAllowSet::All => None,
+        ironclaw_loop_support::CapabilityAllowSet::Allowlist(capabilities) => Some(
+            capabilities
+                .into_iter()
+                .map(|capability| capability.as_str().to_string())
+                .collect(),
+        ),
+        _ => None,
+    }
+}
+
+/// Render the workflow-restricted `builtin.spawn_subagent` parameters schema.
+#[cfg(feature = "github-issue-workflow-beta")]
+pub fn github_issue_workflow_spawn_subagent_schema_for_test() -> serde_json::Value {
+    crate::github_issue_workflow::workflow_spawn_subagent_schema()
+}
+
+/// Resolve a workflow subagent flavor to its requested run profile.
+#[cfg(feature = "github-issue-workflow-beta")]
+pub fn github_issue_workflow_subagent_definition_profile_for_test(kind: &str) -> Option<String> {
+    let kind = SubagentKindId::new(kind).ok()?;
+    let resolver = crate::github_issue_workflow::GithubIssueWorkflowSubagentDefinitionResolver;
+    futures::executor::block_on(resolver.resolve_kind(&kind))
+        .ok()
+        .flatten()
+        .map(|definition| definition.requested_run_profile.as_str().to_string())
+}
+
+/// Resolve every workflow stage profile through the composition planned
+/// run-profile registry and return the stage profile ids that round-tripped.
+#[cfg(feature = "github-issue-workflow-beta")]
+pub fn github_issue_workflow_resolved_stage_profile_ids_for_test()
+-> std::collections::BTreeSet<&'static str> {
+    let resolver = crate::github_issue_workflow::planned_run_profile_resolver_with_stage_profiles()
+        .expect("workflow stage planned run-profile resolver builds");
+    crate::github_issue_workflow::stage_capability_profiles()
+        .iter()
+        .filter_map(|profile| {
+            let request = RunProfileRequest::new(profile.profile_id)
+                .expect("static workflow stage profile id is valid");
+            let resolved = futures::executor::block_on(
+                resolver.resolve_run_profile(
+                    RunProfileResolutionRequest::interactive_default()
+                        .with_requested_run_profile(request),
+                ),
+            )
+            .expect("workflow stage profile resolves");
+            (resolved.profile_id.as_str() == profile.profile_id).then_some(profile.profile_id)
+        })
+        .collect()
 }
 
 /// Build a terminal/no-text assistant reply for CLI and product-surface tests.

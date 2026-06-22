@@ -145,7 +145,7 @@ mod github_issue_workflow_stage_turn {
                 .as_ref()
                 .expect("requested profile")
                 .as_str(),
-            request.capability_profile_id
+            "github-bug-triage-v1"
         );
         assert_eq!(
             submitted.source_binding_ref.as_str(),

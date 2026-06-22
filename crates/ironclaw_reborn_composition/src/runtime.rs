@@ -66,16 +66,24 @@ use ironclaw_reborn::milestone_events::{
 };
 use ironclaw_reborn::runtime::{
     DefaultPlannedRuntimeBuildError, DefaultPlannedRuntimeConfig, DefaultPlannedRuntimeParts,
-    RuntimeSubagentGoalStore, RuntimeTurnStateStore, build_default_planned_runtime,
-    build_default_planned_runtime_with_wake_channel,
+    RuntimeSubagentGoalStore, RuntimeTurnStateStore,
 };
+#[cfg(feature = "github-issue-workflow-beta")]
+use ironclaw_reborn::runtime::{
+    DefaultPlannedRuntimeOverrides, build_default_planned_runtime_with_overrides,
+    build_default_planned_runtime_with_wake_channel_and_overrides,
+};
+#[cfg(not(feature = "github-issue-workflow-beta"))]
+use ironclaw_reborn::runtime::{
+    build_default_planned_runtime, build_default_planned_runtime_with_wake_channel,
+};
+#[cfg(not(feature = "github-issue-workflow-beta"))]
+use ironclaw_reborn::subagent::flavors::StaticSubagentDefinitionResolver;
+use ironclaw_reborn::subagent::gate_resolution::BoundedSubagentGateResolutionStore;
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 use ironclaw_reborn::subagent::goal_store::FilesystemSubagentGoalStore;
 #[cfg(not(any(feature = "libsql", feature = "postgres")))]
 use ironclaw_reborn::subagent::goal_store::InMemoryBoundedSubagentGoalStore;
-use ironclaw_reborn::subagent::{
-    flavors::StaticSubagentDefinitionResolver, gate_resolution::BoundedSubagentGateResolutionStore,
-};
 use ironclaw_reborn::turn_runner::{
     TurnRunnerWakeReceiver, TurnRunnerWakeSender, TurnRunnerWorkerConfig,
 };
@@ -2675,6 +2683,13 @@ pub async fn build_reborn_runtime(
             None,
         )
     };
+    #[cfg(feature = "github-issue-workflow-beta")]
+    let capability_surface_resolver = Arc::new(
+        crate::github_issue_workflow::GithubIssueWorkflowCapabilitySurfaceResolver::new(
+            capability_surface_resolver,
+        ),
+    ) as Arc<dyn CapabilitySurfaceProfileResolver>;
+
     // Hook framework activation (#3934 + third-party projection), gated behind
     // the typed `HooksActivationConfig` carried in `RebornRuntimeInput` (master
     // flag default OFF; third-party sub-flag also default OFF). The env vars
@@ -2763,6 +2778,14 @@ pub async fn build_reborn_runtime(
         _ => None,
     };
 
+    #[cfg(feature = "github-issue-workflow-beta")]
+    let subagent_definition_resolver =
+        Arc::new(crate::github_issue_workflow::GithubIssueWorkflowSubagentDefinitionResolver)
+            as Arc<dyn ironclaw_loop_support::SubagentDefinitionResolver>;
+    #[cfg(not(feature = "github-issue-workflow-beta"))]
+    let subagent_definition_resolver = Arc::new(StaticSubagentDefinitionResolver)
+        as Arc<dyn ironclaw_loop_support::SubagentDefinitionResolver>;
+
     let planned_runtime_parts = DefaultPlannedRuntimeParts {
         turn_state: Arc::clone(&turn_state_store),
         thread_service: Arc::clone(&thread_service),
@@ -2789,7 +2812,7 @@ pub async fn build_reborn_runtime(
         capability_result_writer,
         subagent_goal_store,
         subagent_gate_store: Arc::new(BoundedSubagentGateResolutionStore::new()),
-        subagent_definition_resolver: Arc::new(StaticSubagentDefinitionResolver),
+        subagent_definition_resolver,
         subagent_spawn_input_codec: Arc::new(JsonSpawnSubagentInputCodec::new(
             capability_input_resolver,
         )),
@@ -2853,6 +2876,33 @@ pub async fn build_reborn_runtime(
         hook_dispatcher_builder_factory,
         communication_context_provider,
     };
+    #[cfg(feature = "github-issue-workflow-beta")]
+    let planned_runtime_overrides = DefaultPlannedRuntimeOverrides {
+        run_profile_resolver: Some(Arc::new(
+            crate::github_issue_workflow::planned_run_profile_resolver_with_stage_profiles()
+                .map_err(|error| RebornRuntimeError::InvalidArgument {
+                    reason: format!(
+                        "github issue workflow stage run profiles could not be registered: {error}"
+                    ),
+                })?,
+        )),
+        subagent_flavor_catalog: Some(
+            crate::github_issue_workflow::workflow_subagent_flavor_catalog(),
+        ),
+    };
+    #[cfg(feature = "github-issue-workflow-beta")]
+    let composition = match planned_runtime_wake_channel {
+        Some(wake_channel) => build_default_planned_runtime_with_wake_channel_and_overrides(
+            planned_runtime_parts,
+            wake_channel,
+            planned_runtime_overrides,
+        ),
+        None => build_default_planned_runtime_with_overrides(
+            planned_runtime_parts,
+            planned_runtime_overrides,
+        ),
+    }?;
+    #[cfg(not(feature = "github-issue-workflow-beta"))]
     let composition = match planned_runtime_wake_channel {
         Some(wake_channel) => {
             build_default_planned_runtime_with_wake_channel(planned_runtime_parts, wake_channel)

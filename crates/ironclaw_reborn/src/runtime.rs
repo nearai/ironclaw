@@ -64,6 +64,12 @@ pub struct DefaultPlannedRuntimeConfig {
     pub host: TextOnlyLoopHostConfig,
 }
 
+#[derive(Clone, Default)]
+pub struct DefaultPlannedRuntimeOverrides {
+    pub run_profile_resolver: Option<Arc<dyn RunProfileResolver>>,
+    pub subagent_flavor_catalog: Option<Vec<SpawnSubagentFlavorDescriptor>>,
+}
+
 pub trait RuntimeTurnStateStore:
     TurnSpawnTreeStateStore
     + TurnRunTransitionPort
@@ -352,7 +358,24 @@ pub fn build_default_planned_runtime<G>(
 where
     G: HostManagedModelGateway + ?Sized + Send + Sync + 'static,
 {
-    build_default_planned_runtime_with_optional_wake_channel(parts, None)
+    build_default_planned_runtime_with_optional_wake_channel(
+        parts,
+        None,
+        DefaultPlannedRuntimeOverrides::default(),
+    )
+}
+
+pub fn build_default_planned_runtime_with_overrides<G>(
+    parts: DefaultPlannedRuntimeParts<G>,
+    overrides: DefaultPlannedRuntimeOverrides,
+) -> Result<
+    RebornRuntimeLoopComposition<dyn SessionThreadService, G>,
+    DefaultPlannedRuntimeBuildError,
+>
+where
+    G: HostManagedModelGateway + ?Sized + Send + Sync + 'static,
+{
+    build_default_planned_runtime_with_optional_wake_channel(parts, None, overrides)
 }
 
 pub fn build_default_planned_runtime_with_wake_channel<G>(
@@ -365,12 +388,17 @@ pub fn build_default_planned_runtime_with_wake_channel<G>(
 where
     G: HostManagedModelGateway + ?Sized + Send + Sync + 'static,
 {
-    build_default_planned_runtime_with_optional_wake_channel(parts, Some(wake_channel))
+    build_default_planned_runtime_with_optional_wake_channel(
+        parts,
+        Some(wake_channel),
+        DefaultPlannedRuntimeOverrides::default(),
+    )
 }
 
-fn build_default_planned_runtime_with_optional_wake_channel<G>(
+pub fn build_default_planned_runtime_with_wake_channel_and_overrides<G>(
     parts: DefaultPlannedRuntimeParts<G>,
-    wake_channel: Option<PlannedRuntimeWakeChannel>,
+    wake_channel: PlannedRuntimeWakeChannel,
+    overrides: DefaultPlannedRuntimeOverrides,
 ) -> Result<
     RebornRuntimeLoopComposition<dyn SessionThreadService, G>,
     DefaultPlannedRuntimeBuildError,
@@ -378,6 +406,24 @@ fn build_default_planned_runtime_with_optional_wake_channel<G>(
 where
     G: HostManagedModelGateway + ?Sized + Send + Sync + 'static,
 {
+    build_default_planned_runtime_with_optional_wake_channel(parts, Some(wake_channel), overrides)
+}
+
+fn build_default_planned_runtime_with_optional_wake_channel<G>(
+    parts: DefaultPlannedRuntimeParts<G>,
+    wake_channel: Option<PlannedRuntimeWakeChannel>,
+    overrides: DefaultPlannedRuntimeOverrides,
+) -> Result<
+    RebornRuntimeLoopComposition<dyn SessionThreadService, G>,
+    DefaultPlannedRuntimeBuildError,
+>
+where
+    G: HostManagedModelGateway + ?Sized + Send + Sync + 'static,
+{
+    let DefaultPlannedRuntimeOverrides {
+        run_profile_resolver,
+        subagent_flavor_catalog,
+    } = overrides;
     let mut registry = DriverRegistry::new();
     register_default_text_only_driver(&mut registry, parts.config.text_only_driver)?;
     let family_registry = build_loop_family_registry().map_err(|error| {
@@ -393,11 +439,13 @@ where
     register_subagent_planned_driver(&mut registry, family_registry)?;
     let driver_registry = Arc::new(registry);
 
-    let resolver = Arc::new(
-        default_planned_run_profile_resolver()
-            .map_err(|error| DefaultPlannedRuntimeBuildError::RunProfile(error.to_string()))?,
-    );
-    let run_profile_resolver: Arc<dyn RunProfileResolver> = resolver;
+    let run_profile_resolver: Arc<dyn RunProfileResolver> = match run_profile_resolver {
+        Some(resolver) => resolver,
+        None => Arc::new(
+            default_planned_run_profile_resolver()
+                .map_err(|error| DefaultPlannedRuntimeBuildError::RunProfile(error.to_string()))?,
+        ),
+    };
 
     let (wake_sender, wake_receiver) = wake_channel.unwrap_or_else(TurnRunnerWakeReceiver::new);
     let worker_wake_notifier: Arc<dyn TurnRunWakeNotifier> = Arc::new(wake_sender.clone());
@@ -472,7 +520,7 @@ where
             result_writer: Arc::clone(&parts.capability_result_writer),
         },
         parts.subagent_spawn_limits,
-        flavors::builtin_flavor_catalog(),
+        subagent_flavor_catalog.unwrap_or_else(flavors::builtin_flavor_catalog),
     )?);
     let capability_factory: Arc<dyn LoopCapabilityPortFactory> = Arc::new(
         DecoratingLoopCapabilityPortFactory::new(parts.capability_factory)

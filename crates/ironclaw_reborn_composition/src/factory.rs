@@ -2965,13 +2965,16 @@ fn validate_production_process_binding(
 
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 fn planned_run_profile_resolver() -> Result<Arc<InMemoryRunProfileResolver>, RebornBuildError> {
-    Ok(Arc::new(
-        ironclaw_reborn::planned_driver_factory::default_planned_run_profile_resolver().map_err(
-            |error| RebornBuildError::PlannedRunProfileResolver {
-                reason: error.to_string(),
-            },
-        )?,
-    ))
+    #[cfg(feature = "github-issue-workflow-beta")]
+    let resolver = crate::github_issue_workflow::planned_run_profile_resolver_with_stage_profiles();
+    #[cfg(not(feature = "github-issue-workflow-beta"))]
+    let resolver = ironclaw_reborn::planned_driver_factory::default_planned_run_profile_resolver();
+
+    Ok(Arc::new(resolver.map_err(|error| {
+        RebornBuildError::PlannedRunProfileResolver {
+            reason: error.to_string(),
+        }
+    })?))
 }
 
 #[cfg(any(feature = "libsql", feature = "postgres"))]
@@ -3078,9 +3081,7 @@ where
     .with_turn_run_wake_notifier(turn_run_wake_notifier)
     .with_filesystem_run_state(Arc::clone(&scoped_filesystem))
     .with_filesystem_turn_state_store(Arc::clone(&scoped_filesystem))
-    .with_run_profile_resolver(Arc::new(
-        ironclaw_reborn::planned_driver_factory::default_planned_run_profile_resolver()?,
-    ))
+    .with_run_profile_resolver(planned_run_profile_resolver()?)
     .with_reborn_event_store_config(
         ironclaw_reborn_event_store::RebornProfile::Production,
         event_store,

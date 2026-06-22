@@ -196,6 +196,12 @@ mounts = "workspace"
 network = "default"
 
 [[grants]]
+capability = "builtin.workflow_report_stage_result"
+effects = ["dispatch_capability"]
+mounts = "ambient"
+network = "default"
+
+[[grants]]
 capability = "builtin.extension_search"
 effects = ["dispatch_capability", "read_filesystem"]
 mounts = "ambient"

@@ -6,7 +6,12 @@ use ironclaw_github_issue_workflow::{
     GithubIssueStage, GithubIssueWorkflowError, StageTurnSubmitter, SubmitStageTurnOutcome,
     SubmitStageTurnRequest, WorkflowActorScope,
 };
-use ironclaw_host_api::{AgentId, ThreadId, UserId};
+use ironclaw_host_api::{AgentId, CapabilityId, ThreadId, UserId};
+use ironclaw_loop_support::{
+    CapabilityAllowSet, CapabilityResolveError, CapabilitySurfaceProfileResolver,
+    SpawnSubagentFlavorDescriptor, SubagentDefinition, SubagentDefinitionResolver, SubagentKindId,
+    build_spawn_subagent_parameters_schema,
+};
 use ironclaw_product_context::InboundClassification;
 use ironclaw_threads::{
     AcceptInboundMessageRequest, EnsureThreadRequest, MessageContent, MessageStatus,
@@ -17,10 +22,303 @@ use ironclaw_turns::{
     AcceptedMessageRef, IdempotencyKey, ProductTurnContext, ReplyTargetBindingRef,
     RunOriginAdapter, RunProfileRequest, SourceBindingRef, SubmitTurnRequest, SubmitTurnResponse,
     TurnActor, TurnCoordinator, TurnError, TurnRunId, TurnScope, TurnSurfaceType,
+    run_profile::{
+        CapabilitySurfaceProfileId, InMemoryRunProfileRegistry, InMemoryRunProfileResolver,
+        LoopRunContext, RunProfileDefinition, RunProfileRegistryError,
+    },
 };
 use serde_json::json;
 
 const WORKFLOW_ADAPTER_ID: &str = "github_issue_workflow";
+const RESULT_SINK_CAPABILITY_ID: &str =
+    ironclaw_host_runtime::WORKFLOW_REPORT_STAGE_RESULT_CAPABILITY_ID;
+const SPAWN_SUBAGENT_CAPABILITY_ID: &str =
+    ironclaw_loop_support::DEFAULT_SPAWN_SUBAGENT_CAPABILITY_ID;
+const SUBAGENT_RUN_PROFILE_ID: &str =
+    ironclaw_reborn::planned_driver_factory::SUBAGENT_PLANNED_PROFILE_ID;
+
+pub(crate) const GITHUB_BUG_TRIAGE_PROFILE_ID: &str = "github-bug-triage-v1";
+pub(crate) const GITHUB_BUG_PLANNING_PROFILE_ID: &str = "github-bug-planning-v1";
+pub(crate) const GITHUB_BUG_IMPLEMENTATION_PROFILE_ID: &str = "github-bug-implementation-v1";
+pub(crate) const GITHUB_BUG_PR_SYNTHESIS_PROFILE_ID: &str = "github-bug-pr-synthesis-v1";
+pub(crate) const GITHUB_BUG_CI_REPAIR_PROFILE_ID: &str = "github-bug-ci-repair-v1";
+pub(crate) const GITHUB_BUG_REVIEW_RESPONSE_PROFILE_ID: &str = "github-bug-review-response-v1";
+
+const READ_FILE_CAPABILITY_ID: &str = "builtin.read_file";
+const WRITE_FILE_CAPABILITY_ID: &str = "builtin.write_file";
+const APPLY_PATCH_CAPABILITY_ID: &str = "builtin.apply_patch";
+const LIST_DIR_CAPABILITY_ID: &str = "builtin.list_dir";
+const GREP_CAPABILITY_ID: &str = "builtin.grep";
+const GLOB_CAPABILITY_ID: &str = "builtin.glob";
+const SHELL_CAPABILITY_ID: &str = "builtin.shell";
+
+const TRIAGE_PLANNING_CAPABILITIES: &[&str] = &[
+    READ_FILE_CAPABILITY_ID,
+    LIST_DIR_CAPABILITY_ID,
+    GREP_CAPABILITY_ID,
+    GLOB_CAPABILITY_ID,
+    SPAWN_SUBAGENT_CAPABILITY_ID,
+    RESULT_SINK_CAPABILITY_ID,
+];
+
+const IMPLEMENTATION_CAPABILITIES: &[&str] = &[
+    READ_FILE_CAPABILITY_ID,
+    WRITE_FILE_CAPABILITY_ID,
+    APPLY_PATCH_CAPABILITY_ID,
+    LIST_DIR_CAPABILITY_ID,
+    GREP_CAPABILITY_ID,
+    GLOB_CAPABILITY_ID,
+    SHELL_CAPABILITY_ID,
+    SPAWN_SUBAGENT_CAPABILITY_ID,
+    RESULT_SINK_CAPABILITY_ID,
+];
+
+const PR_SYNTHESIS_CAPABILITIES: &[&str] = &[
+    READ_FILE_CAPABILITY_ID,
+    LIST_DIR_CAPABILITY_ID,
+    GREP_CAPABILITY_ID,
+    GLOB_CAPABILITY_ID,
+    SHELL_CAPABILITY_ID,
+    SPAWN_SUBAGENT_CAPABILITY_ID,
+    RESULT_SINK_CAPABILITY_ID,
+];
+
+const NON_WORKFLOW_DEFAULT_CAPABILITIES: &[&str] = &[
+    "builtin.echo",
+    "builtin.time",
+    "builtin.json",
+    "builtin.http",
+    "builtin.http.save",
+    "builtin.memory_search",
+    "builtin.memory_write",
+    "builtin.profile_set",
+    "builtin.memory_read",
+    "builtin.memory_tree",
+    SHELL_CAPABILITY_ID,
+    READ_FILE_CAPABILITY_ID,
+    WRITE_FILE_CAPABILITY_ID,
+    LIST_DIR_CAPABILITY_ID,
+    GLOB_CAPABILITY_ID,
+    GREP_CAPABILITY_ID,
+    APPLY_PATCH_CAPABILITY_ID,
+    SPAWN_SUBAGENT_CAPABILITY_ID,
+];
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct GithubIssueWorkflowCapabilityProfile {
+    pub(crate) profile_id: &'static str,
+    pub(crate) allowed_capabilities: &'static [&'static str],
+}
+
+const GITHUB_ISSUE_WORKFLOW_STAGE_PROFILES: &[GithubIssueWorkflowCapabilityProfile] = &[
+    GithubIssueWorkflowCapabilityProfile {
+        profile_id: GITHUB_BUG_TRIAGE_PROFILE_ID,
+        allowed_capabilities: TRIAGE_PLANNING_CAPABILITIES,
+    },
+    GithubIssueWorkflowCapabilityProfile {
+        profile_id: GITHUB_BUG_PLANNING_PROFILE_ID,
+        allowed_capabilities: TRIAGE_PLANNING_CAPABILITIES,
+    },
+    GithubIssueWorkflowCapabilityProfile {
+        profile_id: GITHUB_BUG_IMPLEMENTATION_PROFILE_ID,
+        allowed_capabilities: IMPLEMENTATION_CAPABILITIES,
+    },
+    GithubIssueWorkflowCapabilityProfile {
+        profile_id: GITHUB_BUG_PR_SYNTHESIS_PROFILE_ID,
+        allowed_capabilities: PR_SYNTHESIS_CAPABILITIES,
+    },
+    GithubIssueWorkflowCapabilityProfile {
+        profile_id: GITHUB_BUG_CI_REPAIR_PROFILE_ID,
+        allowed_capabilities: IMPLEMENTATION_CAPABILITIES,
+    },
+    GithubIssueWorkflowCapabilityProfile {
+        profile_id: GITHUB_BUG_REVIEW_RESPONSE_PROFILE_ID,
+        allowed_capabilities: PR_SYNTHESIS_CAPABILITIES,
+    },
+];
+
+const NON_WORKFLOW_DEFAULT_PROFILE: GithubIssueWorkflowCapabilityProfile =
+    GithubIssueWorkflowCapabilityProfile {
+        profile_id: ironclaw_reborn::planned_driver_factory::PLANNED_DEFAULT_PROFILE_ID,
+        allowed_capabilities: NON_WORKFLOW_DEFAULT_CAPABILITIES,
+    };
+
+pub(crate) fn stage_capability_profile_id(stage: &GithubIssueStage) -> &'static str {
+    match stage {
+        GithubIssueStage::Triage => GITHUB_BUG_TRIAGE_PROFILE_ID,
+        GithubIssueStage::Planning => GITHUB_BUG_PLANNING_PROFILE_ID,
+        GithubIssueStage::Implementation => GITHUB_BUG_IMPLEMENTATION_PROFILE_ID,
+        GithubIssueStage::PrSynthesis => GITHUB_BUG_PR_SYNTHESIS_PROFILE_ID,
+        GithubIssueStage::CiRepair => GITHUB_BUG_CI_REPAIR_PROFILE_ID,
+        GithubIssueStage::ReviewResponse => GITHUB_BUG_REVIEW_RESPONSE_PROFILE_ID,
+    }
+}
+
+pub(crate) fn stage_capability_profiles() -> &'static [GithubIssueWorkflowCapabilityProfile] {
+    GITHUB_ISSUE_WORKFLOW_STAGE_PROFILES
+}
+
+pub(crate) fn non_workflow_default_capability_profile() -> GithubIssueWorkflowCapabilityProfile {
+    NON_WORKFLOW_DEFAULT_PROFILE
+}
+
+fn stage_profile_for_surface_id(
+    profile_id: &CapabilitySurfaceProfileId,
+) -> Option<&'static GithubIssueWorkflowCapabilityProfile> {
+    GITHUB_ISSUE_WORKFLOW_STAGE_PROFILES
+        .iter()
+        .find(|profile| profile.profile_id == profile_id.as_str())
+}
+
+fn capability_allow_set_for_profile(
+    profile: &GithubIssueWorkflowCapabilityProfile,
+) -> Result<CapabilityAllowSet, CapabilityResolveError> {
+    let ids = profile.allowed_capabilities.iter().map(|capability| {
+        CapabilityId::new(*capability).map_err(|reason| {
+            CapabilityResolveError::internal(format!(
+                "invalid static GitHub issue workflow capability id {capability}: {reason}"
+            ))
+        })
+    });
+    ids.collect::<Result<Vec<_>, _>>()
+        .map(CapabilityAllowSet::allowlist)
+}
+
+pub(crate) fn allowed_capabilities_for_stage_profile_id(
+    profile_id: &CapabilitySurfaceProfileId,
+) -> Result<Option<CapabilityAllowSet>, CapabilityResolveError> {
+    stage_profile_for_surface_id(profile_id)
+        .map(capability_allow_set_for_profile)
+        .transpose()
+}
+
+pub(crate) struct GithubIssueWorkflowCapabilitySurfaceResolver {
+    inner: Arc<dyn CapabilitySurfaceProfileResolver>,
+}
+
+impl GithubIssueWorkflowCapabilitySurfaceResolver {
+    pub(crate) fn new(inner: Arc<dyn CapabilitySurfaceProfileResolver>) -> Self {
+        Self { inner }
+    }
+}
+
+#[async_trait]
+impl CapabilitySurfaceProfileResolver for GithubIssueWorkflowCapabilitySurfaceResolver {
+    async fn resolve(
+        &self,
+        run_context: &LoopRunContext,
+    ) -> Result<CapabilityAllowSet, CapabilityResolveError> {
+        if let Some(allow_set) = allowed_capabilities_for_stage_profile_id(
+            &run_context
+                .resolved_run_profile
+                .capability_surface_profile_id,
+        )? {
+            return Ok(allow_set);
+        }
+        self.inner.resolve(run_context).await
+    }
+}
+
+pub(crate) fn workflow_subagent_flavor_catalog() -> Vec<SpawnSubagentFlavorDescriptor> {
+    [
+        (
+            "general",
+            "read-only file exploration (read_file, list_dir, grep)",
+        ),
+        (
+            "explorer",
+            "read + glob over filesystem (read_file, list_dir, grep, glob)",
+        ),
+        (
+            "planner",
+            "read codebase + planning context, returns a structured implementation plan \
+             (read_file, list_dir, grep, glob)",
+        ),
+    ]
+    .into_iter()
+    .map(|(id, summary)| SpawnSubagentFlavorDescriptor {
+        id: SubagentKindId::new(id)
+            .expect("static workflow subagent flavor id is a valid SubagentKindId"),
+        summary: summary.to_string(),
+    })
+    .collect()
+}
+
+pub(crate) fn workflow_spawn_subagent_schema() -> serde_json::Value {
+    build_spawn_subagent_parameters_schema(&workflow_subagent_flavor_catalog())
+}
+
+pub(crate) fn planned_run_profile_resolver_with_stage_profiles()
+-> Result<InMemoryRunProfileResolver, RunProfileRegistryError> {
+    let mut registry = InMemoryRunProfileRegistry::with_builtin_profiles();
+    ironclaw_reborn::planned_driver_factory::register_default_planned_profile(&mut registry)?;
+    ironclaw_reborn::planned_driver_factory::register_subagent_planned_profile(&mut registry)?;
+    register_stage_run_profiles(&mut registry)?;
+    let implicit_default = ironclaw_reborn::planned_driver_factory::planned_default_profile_id()
+        .map_err(invalid_run_profile)?;
+    Ok(InMemoryRunProfileResolver::new_with_implicit_default(
+        registry,
+        implicit_default,
+    ))
+}
+
+fn register_stage_run_profiles(
+    registry: &mut InMemoryRunProfileRegistry,
+) -> Result<(), RunProfileRegistryError> {
+    let descriptor = ironclaw_reborn::planned_driver_factory::planned_driver_descriptor()
+        .map_err(invalid_run_profile)?;
+    let checkpoint_schema_id =
+        ironclaw_reborn::planned_driver_factory::planned_driver_checkpoint_schema_id()
+            .map_err(invalid_run_profile)?;
+    let checkpoint_schema_version =
+        ironclaw_reborn::planned_driver_factory::planned_driver_checkpoint_schema_version();
+
+    for profile in GITHUB_ISSUE_WORKFLOW_STAGE_PROFILES {
+        let profile_id =
+            ironclaw_turns::RunProfileId::new(profile.profile_id).map_err(invalid_run_profile)?;
+        let capability_surface_profile_id =
+            CapabilitySurfaceProfileId::new(profile.profile_id).map_err(invalid_run_profile)?;
+        registry.register(RunProfileDefinition::interactive_like(
+            profile_id,
+            descriptor.clone(),
+            checkpoint_schema_id.clone(),
+            checkpoint_schema_version,
+            capability_surface_profile_id,
+        ))?;
+    }
+    Ok(())
+}
+
+fn invalid_run_profile(reason: String) -> RunProfileRegistryError {
+    RunProfileRegistryError::InvalidProfile { reason }
+}
+
+#[derive(Default)]
+pub(crate) struct GithubIssueWorkflowSubagentDefinitionResolver;
+
+#[async_trait]
+impl SubagentDefinitionResolver for GithubIssueWorkflowSubagentDefinitionResolver {
+    async fn resolve_kind(
+        &self,
+        kind: &SubagentKindId,
+    ) -> Result<Option<SubagentDefinition>, ironclaw_turns::run_profile::AgentLoopHostError> {
+        if !matches!(kind.as_str(), "general" | "explorer" | "planner") {
+            return Ok(None);
+        }
+        let requested_run_profile =
+            RunProfileRequest::new(SUBAGENT_RUN_PROFILE_ID).map_err(|reason| {
+                ironclaw_turns::run_profile::AgentLoopHostError::new(
+                    ironclaw_turns::run_profile::AgentLoopHostErrorKind::Internal,
+                    reason,
+                )
+            })?;
+        Ok(Some(SubagentDefinition {
+            subagent_kind: kind.clone(),
+            allow_nesting: false,
+            requested_run_profile,
+        }))
+    }
+}
 
 pub(crate) struct IronClawStageTurnSubmitter {
     thread_service: Arc<dyn SessionThreadService>,
@@ -178,8 +476,10 @@ impl IronClawStageTurnSubmitter {
         let reply_target_binding_ref =
             ReplyTargetBindingRef::new(request.stage_turn_identity.reply_target_binding_ref())
                 .map_err(invalid_ref)?;
-        let requested_run_profile =
-            RunProfileRequest::new(request.capability_profile_id.clone()).map_err(invalid_ref)?;
+        let requested_run_profile = RunProfileRequest::new(stage_capability_profile_id(
+            &request.stage_turn_identity.stage,
+        ))
+        .map_err(invalid_ref)?;
         let idempotency_key = IdempotencyKey::new(request.idempotency_key.as_str().to_string())
             .map_err(invalid_ref)?;
         let product_context = workflow_product_context(&turn_scope, &actor)?;
