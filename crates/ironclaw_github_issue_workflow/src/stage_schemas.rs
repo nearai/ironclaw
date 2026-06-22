@@ -65,6 +65,13 @@ pub enum StageResultValidationError {
         field: &'static str,
         reason: &'static str,
     },
+
+    #[error("unknown {stage:?} payload field `{field}` for schema `{schema_version}`")]
+    UnknownPayloadField {
+        stage: GithubIssueStage,
+        schema_version: &'static str,
+        field: String,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -101,7 +108,7 @@ pub fn validate_stage_result(
         }
     })?;
     validate_envelope(&stage, &envelope)?;
-    validate_stage_payload(&stage, &envelope.payload)?;
+    validate_stage_payload(&stage, expected_schema_version, &envelope.payload)?;
 
     Ok(ValidatedStageResult {
         stage,
@@ -153,6 +160,7 @@ fn validate_envelope(
 
 fn validate_stage_payload(
     stage: &GithubIssueStage,
+    schema_version: &'static str,
     payload: &JsonValue,
 ) -> Result<(), StageResultValidationError> {
     let Some(payload_object) = payload.as_object() else {
@@ -163,7 +171,10 @@ fn validate_stage_payload(
         });
     };
 
-    for &required_field in required_payload_fields(stage) {
+    let required_fields = required_payload_fields(stage);
+    validate_allowed_payload_fields(stage, schema_version, payload_object, required_fields)?;
+
+    for &required_field in required_fields {
         validate_required_payload_field(stage, payload_object, required_field)?;
     }
 
@@ -281,6 +292,28 @@ fn required_payload_fields(stage: &GithubIssueStage) -> &'static [RequiredPayloa
             },
         ],
     }
+}
+
+fn validate_allowed_payload_fields(
+    stage: &GithubIssueStage,
+    schema_version: &'static str,
+    payload_object: &serde_json::Map<String, JsonValue>,
+    allowed_fields: &[RequiredPayloadField],
+) -> Result<(), StageResultValidationError> {
+    for field in payload_object.keys() {
+        if !allowed_fields
+            .iter()
+            .any(|allowed_field| allowed_field.name == field)
+        {
+            return Err(StageResultValidationError::UnknownPayloadField {
+                stage: stage.clone(),
+                schema_version,
+                field: field.clone(),
+            });
+        }
+    }
+
+    Ok(())
 }
 
 fn validate_required_payload_field(

@@ -34,6 +34,57 @@ mod stage_result_contract {
         })
     }
 
+    fn valid_payload_for(stage: GithubIssueStage) -> (&'static str, Value) {
+        match stage {
+            GithubIssueStage::Triage => (
+                "triage.v1",
+                json!({
+                    "is_reproducible": true,
+                    "suspected_area": "github_issue_workflow",
+                    "risk": "medium",
+                    "recommended_next_stage": "planning",
+                }),
+            ),
+            GithubIssueStage::Planning => (
+                "planning.v1",
+                json!({
+                    "plan_items": ["add strict payload validation"],
+                    "files_to_inspect_or_change": ["crates/ironclaw_github_issue_workflow/src/stage_schemas.rs"],
+                    "test_strategy": "stage result contract regression",
+                    "confidence": 0.91,
+                }),
+            ),
+            GithubIssueStage::Implementation => ("implementation.v1", implementation_payload()),
+            GithubIssueStage::PrSynthesis => (
+                "pr_synthesis.v1",
+                json!({
+                    "title": "Fix strict stage validation",
+                    "body": "Reject unknown payload fields.",
+                    "branch_name": "codex/github-stage-validation",
+                    "base_branch": "main",
+                    "head_sha": "abc123",
+                }),
+            ),
+            GithubIssueStage::CiRepair => (
+                "ci_repair.v1",
+                json!({
+                    "failing_checks": ["clippy"],
+                    "diagnosis": "unknown payload fields were accepted",
+                    "changed_files": ["crates/ironclaw_github_issue_workflow/src/stage_schemas.rs"],
+                    "commands_run": ["cargo test -p ironclaw_github_issue_workflow stage_result_contract"],
+                }),
+            ),
+            GithubIssueStage::ReviewResponse => (
+                "review_response.v1",
+                json!({
+                    "addressed_comments": ["reject unknown stage payload keys"],
+                    "remaining_comments": [],
+                    "commands_run": ["cargo test -p ironclaw_github_issue_workflow stage_result_contract"],
+                }),
+            ),
+        }
+    }
+
     fn binding(stage: GithubIssueStage) -> StageResultBinding {
         StageResultBinding {
             workflow_run_id: workflow_run_id("workflow-run-1"),
@@ -142,6 +193,37 @@ mod stage_result_contract {
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn supported_stage_payloads_reject_unknown_fields() {
+        for stage in [
+            GithubIssueStage::Triage,
+            GithubIssueStage::Planning,
+            GithubIssueStage::Implementation,
+            GithubIssueStage::PrSynthesis,
+            GithubIssueStage::CiRepair,
+            GithubIssueStage::ReviewResponse,
+        ] {
+            let (schema_version, mut payload) = valid_payload_for(stage.clone());
+            payload
+                .as_object_mut()
+                .unwrap()
+                .insert("unexpected_payload_key".to_string(), json!("surprise"));
+
+            let error =
+                validate_stage_result(stage.clone(), schema_version, result(payload)).unwrap_err();
+
+            assert!(matches!(
+                error,
+                StageResultValidationError::UnknownPayloadField {
+                    field,
+                    schema_version: rejected_schema_version,
+                    ..
+                } if field == "unexpected_payload_key"
+                    && rejected_schema_version == schema_version
+            ));
+        }
     }
 
     #[test]
