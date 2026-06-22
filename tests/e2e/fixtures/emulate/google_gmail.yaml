@@ -1,0 +1,25 @@
+tokens:
+  mock-token-mock_auth_code:
+    login: e2e.google@example.com
+    scopes:
+      - https://www.googleapis.com/auth/gmail.readonly
+  mock-refreshed-access-token:
+    login: e2e.google@example.com
+    scopes:
+      - https://www.googleapis.com/auth/gmail.readonly
+
+google:
+  users:
+    - email: e2e.google@example.com
+      name: E2E Google User
+  messages:
+    - id: msg_emulate_unread
+      user_email: e2e.google@example.com
+      from: qa-sender@example.com
+      to: e2e.google@example.com
+      subject: Emulate seeded unread
+      body_text: This message came from the Emulate Google API.
+      date: "2026-06-22T12:00:00.000Z"
+      label_ids:
+        - INBOX
+        - UNREAD

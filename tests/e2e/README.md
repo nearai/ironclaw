@@ -7,6 +7,7 @@ Browser-level end-to-end tests for the IronClaw web gateway using Python + Playw
 - Python 3.11+
 - Rust toolchain (for building ironclaw)
 - Chromium (installed via Playwright)
+- Node.js with `npx` (for Emulate-backed provider fixtures)
 
 ## Setup
 
@@ -56,6 +57,7 @@ Then Playwright drives a headless Chromium browser against the gateway, making D
 | `test_sse_reconnect.py` | SSE reconnection handling, keepalive comments, restart recovery, stale reconnect IDs, and connection-limit coverage |
 | `test_html_injection.py` | HTML injection security |
 | `test_extensions.py` | Extensions tab: install, remove, configure, OAuth, auth card, activate |
+| `test_oauth_refresh.py` | Hosted Gmail/MCP OAuth refresh; the Gmail path refreshes through the proxy and reads seeded Gmail data from Emulate |
 
 ## Adding new scenarios
 

@@ -8,6 +8,7 @@ import asyncio
 import json
 import os
 import signal
+import shutil
 import socket
 import subprocess
 import sys
@@ -56,6 +57,12 @@ _HOME_TMPDIR = tempfile.TemporaryDirectory(prefix="ironclaw-e2e-home-")
 # artifacts into them.
 _WASM_TOOLS_TMPDIR = tempfile.TemporaryDirectory(prefix="ironclaw-e2e-wasm-tools-")
 _WASM_CHANNELS_TMPDIR = tempfile.TemporaryDirectory(prefix="ironclaw-e2e-wasm-channels-")
+
+EMULATE_NPM_PACKAGE = "emulate@0.7.0"
+EMULATE_GOOGLE_SEED = ROOT / "tests/e2e/fixtures/emulate/google_gmail.yaml"
+EMULATE_GOOGLE_READY_TOKEN = "mock-refreshed-access-token"
+EMULATE_STARTUP_ATTEMPTS = 120
+EMULATE_STARTUP_POLL_SECONDS = 0.5
 
 
 def _latest_mtime(path: Path) -> float:
@@ -177,6 +184,12 @@ async def _stop_process(
     except asyncio.TimeoutError:
         pass
     await _drain_pipes()
+
+
+def _emulate_unavailable(reason: str) -> None:
+    if os.environ.get("CI") == "true":
+        pytest.fail(reason)
+    pytest.skip(reason)
 
 
 def _forward_coverage_env(env: dict[str, str]) -> None:
@@ -397,6 +410,75 @@ async def mock_llm_server():
             proc.kill()
 
 
+@pytest.fixture(scope="session")
+async def emulate_google_server():
+    """Start the pinned Emulate Google service for hermetic Gmail API tests."""
+    if shutil.which("npx") is None:
+        _emulate_unavailable("npx is required to run the Emulate Google E2E fixture")
+
+    port = _find_free_port()
+    url = f"http://127.0.0.1:{port}"
+    env = {
+        **os.environ,
+        "NO_COLOR": "1",
+        "EMULATE_PORT": str(port),
+    }
+    proc = await asyncio.create_subprocess_exec(
+        "npx",
+        "--yes",
+        EMULATE_NPM_PACKAGE,
+        "--service",
+        "google",
+        "--port",
+        str(port),
+        "--seed",
+        str(EMULATE_GOOGLE_SEED),
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+        env=env,
+    )
+
+    try:
+        async with httpx.AsyncClient() as client:
+            last_error = ""
+            for _ in range(EMULATE_STARTUP_ATTEMPTS):
+                if proc.returncode is not None:
+                    break
+                try:
+                    response = await client.get(
+                        f"{url}/gmail/v1/users/me/messages",
+                        headers={
+                            "Authorization": f"Bearer {EMULATE_GOOGLE_READY_TOKEN}",
+                        },
+                        timeout=2,
+                    )
+                    if response.status_code == 200:
+                        yield {"url": url}
+                        return
+                    last_error = f"HTTP {response.status_code}: {response.text[:400]}"
+                except httpx.HTTPError as exc:
+                    last_error = str(exc)
+                await asyncio.sleep(EMULATE_STARTUP_POLL_SECONDS)
+
+        stdout = b""
+        stderr = b""
+        try:
+            stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=2)
+        except asyncio.TimeoutError:
+            pass
+        _emulate_unavailable(
+            "Emulate Google failed to start. "
+            f"Last probe error: {last_error}\n"
+            f"stdout:\n{stdout.decode('utf-8', errors='replace')[:2000]}\n"
+            f"stderr:\n{stderr.decode('utf-8', errors='replace')[:2000]}"
+        )
+    finally:
+        if proc.returncode is None:
+            await _stop_process(proc, sig=signal.SIGINT, timeout=5)
+            if proc.returncode is None:
+                await _stop_process(proc, timeout=2)
+
+
 @pytest.fixture(autouse=True)
 async def reset_mock_llm_state(mock_llm_server):
     """Reset mutable mock LLM state between tests.
@@ -581,11 +663,13 @@ async def ironclaw_server(
                     await _stop_process(proc, timeout=2)
 
 
-@pytest.fixture(scope="session")
-async def hosted_oauth_refresh_server(
+async def _run_hosted_oauth_refresh_server(
     ironclaw_binary,
     mock_llm_server,
     wasm_tools_dir,
+    *,
+    extra_env: dict[str, str] | None = None,
+    extra_result: dict[str, str] | None = None,
 ):
     """Start a hosted-mode ironclaw instance for OAuth refresh regression tests."""
     reserved = _reserve_loopback_sockets(2)
@@ -637,6 +721,8 @@ async def hosted_oauth_refresh_server(
             "IRONCLAW_OAUTH_PROXY_ALLOW_LOOPBACK": "1",
             "GOOGLE_OAUTH_CLIENT_ID": "hosted-google-client-id",
         }
+        if extra_env:
+            env.update(extra_env)
         _forward_coverage_env(env)
 
         proc = await asyncio.create_subprocess_exec(
@@ -654,6 +740,7 @@ async def hosted_oauth_refresh_server(
                 "base_url": base_url,
                 "db_path": db_path,
                 "mock_llm_url": mock_llm_server,
+                **(extra_result or {}),
             }
         except TimeoutError:
             if proc.returncode is None:
@@ -685,6 +772,40 @@ async def hosted_oauth_refresh_server(
                 sock.close()
         db_tmpdir.cleanup()
         home_tmpdir.cleanup()
+
+
+@pytest.fixture(scope="session")
+async def hosted_oauth_refresh_server(
+    ironclaw_binary,
+    mock_llm_server,
+    wasm_tools_dir,
+):
+    """Start hosted mode for OAuth refresh tests that do not need provider APIs."""
+    async for server in _run_hosted_oauth_refresh_server(
+        ironclaw_binary,
+        mock_llm_server,
+        wasm_tools_dir,
+    ):
+        yield server
+
+
+@pytest.fixture(scope="session")
+async def hosted_google_oauth_refresh_server(
+    ironclaw_binary,
+    mock_llm_server,
+    emulate_google_server,
+    wasm_tools_dir,
+):
+    """Start hosted mode with Gmail API traffic rewritten to Emulate."""
+    rewrite_map = {"gmail.googleapis.com": emulate_google_server["url"]}
+    async for server in _run_hosted_oauth_refresh_server(
+        ironclaw_binary,
+        mock_llm_server,
+        wasm_tools_dir,
+        extra_env={"IRONCLAW_TEST_HTTP_REWRITE_MAP": json.dumps(rewrite_map)},
+        extra_result={"emulate_google_url": emulate_google_server["url"]},
+    ):
+        yield server
 
 
 @pytest.fixture(scope="session")
