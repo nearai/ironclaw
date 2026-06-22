@@ -3367,7 +3367,7 @@ async fn bootstrap_nearai_mcp_from_effective_llm(
     else {
         return Ok(());
     };
-    crate::nearai_mcp::bootstrap_local_dev_nearai_mcp(
+    let outcome = crate::nearai_mcp::bootstrap_nearai_mcp(
         Some(config),
         product_auth,
         extension_management,
@@ -3376,7 +3376,9 @@ async fn bootstrap_nearai_mcp_from_effective_llm(
     .await
     .map_err(|error| RebornRuntimeError::InvalidArgument {
         reason: format!("NEAR AI MCP bootstrap from LLM config failed: {error}"),
-    })
+    })?;
+    outcome.log_completion();
+    Ok(())
 }
 
 struct ValidatedRuntimeIdentity {

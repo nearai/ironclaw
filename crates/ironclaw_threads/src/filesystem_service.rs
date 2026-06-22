@@ -352,17 +352,20 @@ where
             };
 
             if let Some((_, virtual_path, entry)) = &idempotency_record {
-                if let Err(error) = txn
+                match txn
                     .put(virtual_path, (*entry).clone(), CasExpectation::Absent)
                     .await
                 {
-                    txn.rollback().await;
-                    return match error {
-                        FilesystemError::VersionMismatch { .. } => {
-                            Ok(TransactionalMessageWrite::IdempotencyAlreadyAccepted)
-                        }
-                        error => Err(error.into()),
-                    };
+                    Ok(_) => {}
+                    Err(error) => {
+                        txn.rollback().await;
+                        return match error {
+                            FilesystemError::VersionMismatch { .. } => {
+                                Ok(TransactionalMessageWrite::IdempotencyAlreadyAccepted)
+                            }
+                            error => Err(error.into()),
+                        };
+                    }
                 }
             }
 
