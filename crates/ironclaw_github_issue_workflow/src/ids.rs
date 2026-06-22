@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
 use crate::{GithubIssueRef, GithubIssueWorkflowError};
@@ -99,6 +100,7 @@ macro_rules! uuid_string_id {
 }
 
 uuid_string_id!(GithubIssueWorkflowRunId, "github_issue_workflow_run");
+uuid_string_id!(GithubIssueWorkflowEventId, "github_issue_workflow_event");
 uuid_string_id!(GithubIssueStageRunId, "github_issue_stage_run");
 uuid_string_id!(GithubIssueProviderActionId, "github_issue_provider_action");
 uuid_string_id!(
@@ -121,5 +123,17 @@ impl GithubIssueWorkflowRunKey {
             "github-issue:v1:{}/{}#{}",
             issue_ref.owner, issue_ref.repo, issue_ref.number
         ))
+    }
+}
+
+impl WorkflowIdempotencyKey {
+    pub(crate) fn from_generated(value: String) -> Self {
+        if validate_bounded_string_id("workflow_idempotency_key", &value).is_ok() {
+            return Self(value);
+        }
+
+        let mut hasher = Sha256::new();
+        hasher.update(value.as_bytes());
+        Self(format!("workflow-key-sha256:{:x}", hasher.finalize()))
     }
 }

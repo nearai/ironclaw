@@ -1,1 +1,206 @@
+use async_trait::async_trait;
+use chrono::{DateTime, Utc};
+use ironclaw_host_api::{AgentId, ProjectId, TenantId, UserId};
+use serde::{Deserialize, Serialize};
+use serde_json::Value as JsonValue;
 
+use crate::{
+    GithubIssueBlockState, GithubIssueProviderActionId, GithubIssueProviderActionRecord,
+    GithubIssueProviderBinding, GithubIssueStage, GithubIssueStageRunId, GithubIssueWorkflowError,
+    GithubIssueWorkflowEvent, GithubIssueWorkflowEventType, GithubIssueWorkflowMode,
+    GithubIssueWorkflowRun, GithubIssueWorkflowRunId, GithubIssueWorkflowRunStatus,
+    GithubIssueWorkspaceSessionId, GithubProviderRef, WorkflowEventEnvelope,
+    WorkflowIdempotencyKey, WorkflowStepRunId, WorkflowWorkerId,
+};
+
+#[async_trait]
+pub trait GithubIssueWorkflowRepository: Send + Sync {
+    async fn create_or_get_workflow_run(
+        &self,
+        input: CreateOrGetWorkflowRunInput,
+    ) -> Result<CreateOrGetWorkflowRunOutcome, GithubIssueWorkflowError>;
+
+    async fn record_workflow_event(
+        &self,
+        input: RecordWorkflowEventInput,
+    ) -> Result<RecordWorkflowEventOutcome, GithubIssueWorkflowError>;
+
+    async fn claim_runnable_workflow_runs(
+        &self,
+        input: ClaimRunnableWorkflowRunsInput,
+    ) -> Result<Vec<GithubIssueWorkflowRun>, GithubIssueWorkflowError>;
+
+    async fn renew_workflow_run_lease(
+        &self,
+        input: RenewWorkflowRunLeaseInput,
+    ) -> Result<LeaseRenewalOutcome, GithubIssueWorkflowError>;
+
+    async fn advance_event_cursor_and_transition(
+        &self,
+        input: AdvanceWorkflowRunInput,
+    ) -> Result<TransitionOutcome, GithubIssueWorkflowError>;
+
+    async fn create_stage_run(
+        &self,
+        input: CreateStageRunInput,
+    ) -> Result<CreateStageRunOutcome, GithubIssueWorkflowError>;
+
+    async fn accept_stage_result(
+        &self,
+        input: AcceptStageResultInput,
+    ) -> Result<AcceptStageResultOutcome, GithubIssueWorkflowError>;
+
+    async fn create_or_get_provider_action(
+        &self,
+        input: CreateOrGetProviderActionInput,
+    ) -> Result<GithubIssueProviderActionRecord, GithubIssueWorkflowError>;
+
+    async fn upsert_provider_binding(
+        &self,
+        input: UpsertProviderBindingInput,
+    ) -> Result<GithubIssueProviderBinding, GithubIssueWorkflowError>;
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CreateOrGetWorkflowRunInput {
+    pub tenant_id: TenantId,
+    pub creator_user_id: UserId,
+    pub agent_id: Option<AgentId>,
+    pub project_id: Option<ProjectId>,
+    pub issue_ref: crate::GithubIssueRef,
+    pub workflow_policy_key: String,
+    pub workflow_policy_version: String,
+    pub now: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[allow(clippy::large_enum_variant)]
+pub enum CreateOrGetWorkflowRunOutcome {
+    Created { run: GithubIssueWorkflowRun },
+    Existing { run: GithubIssueWorkflowRun },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RecordWorkflowEventInput {
+    pub workflow_run_id: GithubIssueWorkflowRunId,
+    pub workflow_event_type: GithubIssueWorkflowEventType,
+    pub envelope: WorkflowEventEnvelope<JsonValue>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum RecordWorkflowEventOutcome {
+    Recorded { event: GithubIssueWorkflowEvent },
+    Duplicate { existing: GithubIssueWorkflowEvent },
+    Superseded { existing: GithubIssueWorkflowEvent },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ClaimRunnableWorkflowRunsInput {
+    pub tenant_id: TenantId,
+    pub worker_id: WorkflowWorkerId,
+    pub now: DateTime<Utc>,
+    pub lease_expires_at: DateTime<Utc>,
+    pub limit: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RenewWorkflowRunLeaseInput {
+    pub workflow_run_id: GithubIssueWorkflowRunId,
+    pub worker_id: WorkflowWorkerId,
+    pub now: DateTime<Utc>,
+    pub lease_expires_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[allow(clippy::large_enum_variant)]
+pub enum LeaseRenewalOutcome {
+    Renewed { run: GithubIssueWorkflowRun },
+    NotLeaseOwner,
+    Terminal,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkflowRunTransition {
+    pub status: Option<GithubIssueWorkflowRunStatus>,
+    pub mode: Option<GithubIssueWorkflowMode>,
+    pub active_block: Option<GithubIssueBlockState>,
+    pub clear_active_block: bool,
+    pub workspace_session_id: Option<GithubIssueWorkspaceSessionId>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AdvanceWorkflowRunInput {
+    pub workflow_run_id: GithubIssueWorkflowRunId,
+    pub worker_id: WorkflowWorkerId,
+    pub expected_workflow_run_version: i64,
+    pub expected_event_cursor: i64,
+    pub next_event_cursor: i64,
+    pub transition: WorkflowRunTransition,
+    pub now: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[allow(clippy::large_enum_variant)]
+pub enum TransitionOutcome {
+    Applied { run: GithubIssueWorkflowRun },
+    VersionConflict { current: GithubIssueWorkflowRun },
+    NotLeaseOwner,
+    Terminal,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CreateStageRunInput {
+    pub workflow_run_id: GithubIssueWorkflowRunId,
+    pub stage: GithubIssueStage,
+    pub now: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[allow(clippy::large_enum_variant)]
+pub enum CreateStageRunOutcome {
+    Created {
+        stage_run_id: GithubIssueStageRunId,
+        run: GithubIssueWorkflowRun,
+    },
+    ActiveStageExists {
+        existing_stage_run_id: GithubIssueStageRunId,
+        run: GithubIssueWorkflowRun,
+    },
+    Terminal,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AcceptStageResultInput {
+    pub workflow_run_id: GithubIssueWorkflowRunId,
+    pub stage_run_id: GithubIssueStageRunId,
+    pub result: JsonValue,
+    pub now: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[allow(clippy::large_enum_variant)]
+pub enum AcceptStageResultOutcome {
+    Accepted { run: GithubIssueWorkflowRun },
+    NotActiveStage { run: GithubIssueWorkflowRun },
+    Terminal,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CreateOrGetProviderActionInput {
+    pub workflow_run_id: GithubIssueWorkflowRunId,
+    pub stage_run_id: Option<GithubIssueStageRunId>,
+    pub step_run_id: Option<WorkflowStepRunId>,
+    pub name: String,
+    pub idempotency_key: WorkflowIdempotencyKey,
+    pub input_hash: String,
+    pub now: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UpsertProviderBindingInput {
+    pub workflow_run_id: GithubIssueWorkflowRunId,
+    pub provider_ref: GithubProviderRef,
+    pub role: String,
+    pub created_by_provider_action_id: Option<GithubIssueProviderActionId>,
+    pub created_at: DateTime<Utc>,
+}

@@ -11,4 +11,7 @@ pub enum GithubIssueWorkflowError {
 
     #[error("invalid GitHub issue workflow config: {reason}")]
     InvalidConfig { reason: String },
+
+    #[error("GitHub issue workflow repository error: {reason}")]
+    Repository { reason: String },
 }
