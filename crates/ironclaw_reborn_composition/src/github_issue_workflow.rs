@@ -16,9 +16,8 @@ use ironclaw_host_api::{
 use ironclaw_host_runtime::{
     FirstPartyCapabilityError, FirstPartyCapabilityHandler, FirstPartyCapabilityRegistry,
     FirstPartyCapabilityRequest, FirstPartyCapabilityResult, ReportWorkflowStageResultInput,
-    RuntimeCapabilityOutcome, RuntimeCapabilityRequest, RuntimeFailureKind, WorkflowStageResultAck,
-    WorkflowStageResultSink, WorkflowStageResultSinkError,
-    builtin_first_party_handlers_with_workflow_stage_result_sink,
+    RuntimeFailureKind, WorkflowStageResultAck, WorkflowStageResultSink,
+    WorkflowStageResultSinkError, builtin_first_party_handlers_with_workflow_stage_result_sink,
 };
 use ironclaw_loop_support::{
     CapabilityAllowSet, CapabilityResolveError, CapabilitySurfaceProfileResolver,
@@ -492,66 +491,18 @@ impl GithubIssueWorkflowCapabilityDispatcher
         &self,
         request: GithubIssueWorkflowCapabilityDispatchRequest,
     ) -> Result<JsonValue, GithubIssueWorkflowCapabilityDispatchError> {
-        let capability_id = CapabilityId::new(request.capability_id.clone()).map_err(|reason| {
-            GithubIssueWorkflowCapabilityDispatchError::Backend {
-                kind: "invalid_capability_id".to_string(),
-                message: reason.to_string(),
-            }
-        })?;
-        let outcome = self
-            .host_runtime
-            .invoke_capability(RuntimeCapabilityRequest::new(
-                self.execution_context.clone(),
-                capability_id,
-                self.estimate.clone(),
-                request.input,
-                self.trust_decision.clone(),
-            ))
-            .await
-            .map_err(
-                |error| GithubIssueWorkflowCapabilityDispatchError::Backend {
-                    kind: "host_runtime".to_string(),
-                    message: error.to_string(),
-                },
-            )?;
-
-        match outcome {
-            RuntimeCapabilityOutcome::Completed(completed) => Ok(completed.output),
-            RuntimeCapabilityOutcome::AuthRequired(_) => {
-                Err(GithubIssueWorkflowCapabilityDispatchError::AuthRequired)
-            }
-            RuntimeCapabilityOutcome::ApprovalRequired(_) => {
-                Err(GithubIssueWorkflowCapabilityDispatchError::ApprovalRequired)
-            }
-            RuntimeCapabilityOutcome::Failed(failure) => {
-                Err(GithubIssueWorkflowCapabilityDispatchError::Backend {
-                    kind: failure.kind.as_str().to_string(),
-                    message: failure
-                        .message
-                        .unwrap_or_else(|| failure.kind.as_str().to_string()),
-                })
-            }
-            RuntimeCapabilityOutcome::ResourceBlocked(_) => {
-                Err(GithubIssueWorkflowCapabilityDispatchError::Backend {
-                    kind: RuntimeFailureKind::Resource.as_str().to_string(),
-                    message: "resource blocked".to_string(),
-                })
-            }
-            RuntimeCapabilityOutcome::SpawnedProcess(_) => {
-                Err(GithubIssueWorkflowCapabilityDispatchError::Backend {
-                    kind: "spawned_process".to_string(),
-                    message: "unexpected process outcome".to_string(),
-                })
-            }
-            RuntimeCapabilityOutcome::Unknown(unknown) => {
-                Err(GithubIssueWorkflowCapabilityDispatchError::Backend {
-                    kind: unknown.kind,
-                    message: unknown
-                        .message
-                        .unwrap_or_else(|| "unknown runtime outcome".to_string()),
-                })
-            }
-        }
+        // The current host-runtime credential staging path selects product-auth
+        // accounts by scope/provider/requester only; it has no account-id field
+        // on RuntimeCapabilityRequest or RuntimeCredentialAccountRequest. Failing
+        // closed here prevents silently dispatching under a different GitHub
+        // account than the workflow explicitly selected.
+        Err(GithubIssueWorkflowCapabilityDispatchError::Backend {
+            kind: "provider_account_selection_unavailable".to_string(),
+            message: format!(
+                "host runtime cannot honor explicit GitHub provider account selection for {}",
+                request.capability_id
+            ),
+        })
     }
 }
 
@@ -747,7 +698,10 @@ fn normalize_issue_search_hits(
     owner: &str,
     repo: &str,
 ) -> Result<Vec<GithubIssueSearchHit>, GithubIssueWorkflowError> {
-    let items = required_array(value, &["items"], GITHUB_SEARCH_ISSUES_CAPABILITY_ID)?;
+    let items = match value {
+        JsonValue::Array(items) => items,
+        _ => required_array(value, &["items"], GITHUB_SEARCH_ISSUES_CAPABILITY_ID)?,
+    };
     items
         .iter()
         .map(|item| {
@@ -1327,5 +1281,148 @@ fn map_turn_error(error: TurnError) -> GithubIssueWorkflowError {
 fn invalid_ref(error: impl std::fmt::Display) -> GithubIssueWorkflowError {
     GithubIssueWorkflowError::Policy {
         reason: format!("invalid stage turn request reference: {error}"),
+    }
+}
+
+#[cfg(test)]
+mod github_issue_workflow_provider_runtime_contract_tests {
+    use std::sync::Arc;
+
+    use async_trait::async_trait;
+    use chrono::Utc;
+    use ironclaw_github_issue_workflow::{
+        GithubIssueWorkflowError, GithubIssueWorkflowPort, GithubProviderAccountRef,
+        SearchGithubIssuesInput,
+    };
+    use ironclaw_host_api::{
+        CapabilitySet, EffectKind, ExecutionContext, ExtensionId, MountView, RuntimeKind,
+        TrustClass, UserId,
+    };
+    use ironclaw_host_runtime::{
+        CancelRuntimeWorkOutcome, CancelRuntimeWorkRequest, HostRuntime, HostRuntimeError,
+        HostRuntimeHealth, HostRuntimeStatus, RuntimeCapabilityAuthResumeRequest,
+        RuntimeCapabilityOutcome, RuntimeCapabilityRequest, RuntimeCapabilityResumeRequest,
+        RuntimeStatusRequest, VisibleCapabilityRequest, VisibleCapabilitySurface,
+    };
+    use ironclaw_trust::{AuthorityCeiling, EffectiveTrustClass, TrustDecision, TrustProvenance};
+
+    use super::{
+        HostRuntimeGithubIssueWorkflowCapabilityDispatcher, IronClawGithubIssueWorkflowPort,
+    };
+
+    #[tokio::test]
+    async fn host_runtime_github_issue_workflow_provider_dispatcher_fails_closed_for_account_selection()
+     {
+        let port: Arc<dyn GithubIssueWorkflowPort> =
+            Arc::new(IronClawGithubIssueWorkflowPort::new(
+                provider_account("configured-account"),
+                Arc::new(HostRuntimeGithubIssueWorkflowCapabilityDispatcher::new(
+                    Arc::new(PanickingHostRuntime),
+                    execution_context_for_test(),
+                    trust_decision_for_test(),
+                )),
+            ));
+
+        let error = port
+            .search_open_bug_issues(SearchGithubIssuesInput {
+                provider_account_ref: provider_account("input-account"),
+                owner: "nearai".to_string(),
+                repo: "ironclaw".to_string(),
+                query: "repo:nearai/ironclaw is:issue state:open label:bug".to_string(),
+                limit: 5,
+            })
+            .await
+            .expect_err("production-shaped dispatch should fail closed");
+
+        assert!(matches!(
+            error,
+            GithubIssueWorkflowError::ProviderRead { .. }
+        ));
+        let rendered = error.to_string();
+        assert!(rendered.contains("github.search_issues"));
+        assert!(rendered.contains("provider_account_selection_unavailable"));
+    }
+
+    #[derive(Debug)]
+    struct PanickingHostRuntime;
+
+    #[async_trait]
+    impl HostRuntime for PanickingHostRuntime {
+        async fn invoke_capability(
+            &self,
+            _request: RuntimeCapabilityRequest,
+        ) -> Result<RuntimeCapabilityOutcome, HostRuntimeError> {
+            panic!("host runtime should not be invoked when account selection cannot be honored");
+        }
+
+        async fn resume_capability(
+            &self,
+            _request: RuntimeCapabilityResumeRequest,
+        ) -> Result<RuntimeCapabilityOutcome, HostRuntimeError> {
+            panic!("resume_capability should not be called in this test");
+        }
+
+        async fn auth_resume_capability(
+            &self,
+            _request: RuntimeCapabilityAuthResumeRequest,
+        ) -> Result<RuntimeCapabilityOutcome, HostRuntimeError> {
+            panic!("auth_resume_capability should not be called in this test");
+        }
+
+        async fn visible_capabilities(
+            &self,
+            _request: VisibleCapabilityRequest,
+        ) -> Result<VisibleCapabilitySurface, HostRuntimeError> {
+            panic!("visible_capabilities should not be called in this test");
+        }
+
+        async fn cancel_work(
+            &self,
+            _request: CancelRuntimeWorkRequest,
+        ) -> Result<CancelRuntimeWorkOutcome, HostRuntimeError> {
+            panic!("cancel_work should not be called in this test");
+        }
+
+        async fn runtime_status(
+            &self,
+            _request: RuntimeStatusRequest,
+        ) -> Result<HostRuntimeStatus, HostRuntimeError> {
+            panic!("runtime_status should not be called in this test");
+        }
+
+        async fn health(&self) -> Result<HostRuntimeHealth, HostRuntimeError> {
+            panic!("health should not be called in this test");
+        }
+    }
+
+    fn execution_context_for_test() -> ExecutionContext {
+        ExecutionContext::local_default(
+            UserId::new("workflow-user").unwrap(),
+            ExtensionId::new("github").unwrap(),
+            RuntimeKind::Wasm,
+            TrustClass::UserTrusted,
+            CapabilitySet::default(),
+            MountView::default(),
+        )
+        .unwrap()
+    }
+
+    fn trust_decision_for_test() -> TrustDecision {
+        TrustDecision {
+            effective_trust: EffectiveTrustClass::user_trusted(),
+            authority_ceiling: AuthorityCeiling {
+                allowed_effects: vec![EffectKind::DispatchCapability],
+                max_resource_ceiling: None,
+            },
+            provenance: TrustProvenance::Default,
+            evaluated_at: Utc::now(),
+        }
+    }
+
+    fn provider_account(account_id: &str) -> GithubProviderAccountRef {
+        GithubProviderAccountRef {
+            provider: "github".to_string(),
+            account_id: account_id.to_string(),
+        }
     }
 }

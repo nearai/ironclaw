@@ -19,15 +19,13 @@ mod github_issue_workflow_provider {
 
     #[tokio::test]
     async fn search_open_bug_issues_invokes_search_issues_with_expected_query() {
-        let dispatcher = Arc::new(RecordingDispatcher::with_response(Ok(json!({
-            "items": [
-                {
-                    "number": 42,
-                    "html_url": "https://github.com/nearai/ironclaw/issues/42",
-                    "updated_at": "2026-06-22T10:30:00Z"
-                }
-            ]
-        }))));
+        let dispatcher = Arc::new(RecordingDispatcher::with_response(Ok(json!([
+            {
+                "number": 42,
+                "html_url": "https://github.com/nearai/ironclaw/issues/42",
+                "updated_at": "2026-06-22T10:30:00Z"
+            }
+        ]))));
         let port = github_issue_workflow_provider_port_for_test(
             provider_account("configured-account"),
             dispatcher.clone(),
