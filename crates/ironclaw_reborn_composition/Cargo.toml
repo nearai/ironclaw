@@ -68,6 +68,9 @@ openai-compat-beta = [
     "ironclaw_reborn_openai_compat_storage/libsql",
     "ironclaw_product_adapters/host-auth-mint",
 ]
+github-issue-workflow-beta = [
+    "dep:ironclaw_github_issue_workflow",
+]
 libsql = [
     "dep:libsql",
     "ironclaw_filesystem/libsql",
@@ -128,6 +131,7 @@ ironclaw_reborn_openai_compat = { path = "../ironclaw_reborn_openai_compat", opt
 ironclaw_reborn_openai_compat_storage = { path = "../ironclaw_reborn_openai_compat_storage", optional = true }
 ironclaw_reborn_traces = { path = "../ironclaw_reborn_traces" }
 ironclaw_first_party_extension_ports = { path = "../ironclaw_first_party_extension_ports" }
+ironclaw_github_issue_workflow = { path = "../ironclaw_github_issue_workflow", optional = true }
 ironclaw_resources = { path = "../ironclaw_resources" }
 ironclaw_run_state = { path = "../ironclaw_run_state" }
 ironclaw_runtime_policy = { path = "../ironclaw_runtime_policy" }

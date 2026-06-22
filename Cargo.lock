@@ -5058,6 +5058,7 @@ dependencies = [
  "ironclaw_filesystem",
  "ironclaw_first_party_extension_ports",
  "ironclaw_first_party_extensions",
+ "ironclaw_github_issue_workflow",
  "ironclaw_hooks",
  "ironclaw_host_api",
  "ironclaw_host_runtime",

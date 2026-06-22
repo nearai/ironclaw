@@ -25,6 +25,28 @@ use ironclaw_turns::{
 
 use crate::runtime::{AssistantReply, ConversationId};
 
+/// Build the GitHub issue workflow stage-turn submitter for composition tests.
+///
+/// Production wiring constructs this adapter inside the composition graph once
+/// the workflow runtime is enabled; this helper only lets integration tests
+/// drive the same crate-private adapter over fake thread/turn services.
+#[cfg(feature = "github-issue-workflow-beta")]
+pub fn github_issue_stage_turn_submitter_for_test(
+    thread_service: Arc<dyn ironclaw_threads::SessionThreadService>,
+    turn_coordinator: Arc<dyn ironclaw_turns::TurnCoordinator>,
+    actor_user_id: ironclaw_host_api::UserId,
+    default_agent_id: ironclaw_host_api::AgentId,
+) -> Arc<dyn ironclaw_github_issue_workflow::StageTurnSubmitter> {
+    Arc::new(
+        crate::github_issue_workflow::IronClawStageTurnSubmitter::new(
+            thread_service,
+            turn_coordinator,
+            actor_user_id,
+            default_agent_id,
+        ),
+    )
+}
+
 /// Build a terminal/no-text assistant reply for CLI and product-surface tests.
 ///
 /// Kept behind `test-support` so downstream crates can exercise presentation

@@ -47,6 +47,8 @@ mod extension_lifecycle_capabilities_auth_tests;
 mod extension_lifecycle_command;
 mod factory;
 mod failure_summary;
+#[cfg(feature = "github-issue-workflow-beta")]
+mod github_issue_workflow;
 mod google_oauth;
 mod gsuite;
 mod hooks;
