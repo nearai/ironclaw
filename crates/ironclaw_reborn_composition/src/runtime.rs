@@ -2338,6 +2338,11 @@ pub async fn build_reborn_runtime(
         validated_identity.tenant_id.clone(),
         validated_identity.agent_id.clone(),
     );
+    #[cfg(feature = "github-issue-workflow-beta")]
+    {
+        services_input = services_input
+            .with_github_issue_workflow_first_party_handlers_enabled(github_issue_workflow.enabled);
+    }
     #[cfg(feature = "root-llm-provider")]
     let mut has_nearai_mcp_bootstrap_config = services_input.has_nearai_mcp_bootstrap_config();
     #[cfg(feature = "root-llm-provider")]
@@ -2461,6 +2466,8 @@ pub async fn build_reborn_runtime(
 
     let tenant_id = validated_identity.tenant_id.clone();
     let agent_id = validated_identity.agent_id.clone();
+    #[cfg(feature = "github-issue-workflow-beta")]
+    let github_issue_workflow_default_project_id = default_project_id.clone();
     let thread_scope = ThreadScope {
         tenant_id,
         agent_id,
@@ -3136,6 +3143,13 @@ pub async fn build_reborn_runtime(
             });
         }
         if !github_issue_workflow.allow_in_memory_for_tests {
+            if github_issue_workflow_default_project_id.is_none() {
+                return Err(RebornRuntimeError::InvalidArgument {
+                    reason:
+                        "GitHub issue workflow requires a default project_id outside explicit test enablement"
+                            .to_string(),
+                });
+            }
             return Err(RebornRuntimeError::InvalidArgument {
                 reason:
                     "GitHub issue workflow requires a project access checker and configured GitHub provider account reference outside explicit test enablement"

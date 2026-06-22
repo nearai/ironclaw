@@ -188,6 +188,8 @@ pub struct RebornBuildInput {
     pub(crate) oauth_provider_configs: Vec<OAuthProviderBackendConfig>,
     pub(crate) oauth_dcr_provider_configs: Vec<OAuthDcrProviderBackendConfig>,
     pub(crate) nearai_mcp_bootstrap_config: Option<crate::nearai_mcp::NearAiMcpBootstrapConfig>,
+    #[cfg(feature = "github-issue-workflow-beta")]
+    pub(crate) github_issue_workflow_first_party_handlers_enabled: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -549,6 +551,15 @@ impl RebornBuildInput {
         self
     }
 
+    #[cfg(feature = "github-issue-workflow-beta")]
+    pub(crate) fn with_github_issue_workflow_first_party_handlers_enabled(
+        mut self,
+        enabled: bool,
+    ) -> Self {
+        self.github_issue_workflow_first_party_handlers_enabled = enabled;
+        self
+    }
+
     #[cfg(all(test, feature = "slack-v2-host-beta"))]
     pub(crate) fn with_host_runtime_http_egress_for_test(
         mut self,
@@ -675,6 +686,8 @@ impl RebornBuildInput {
             oauth_provider_configs: Vec::new(),
             oauth_dcr_provider_configs: Vec::new(),
             nearai_mcp_bootstrap_config: None,
+            #[cfg(feature = "github-issue-workflow-beta")]
+            github_issue_workflow_first_party_handlers_enabled: false,
         }
     }
 }

@@ -4,6 +4,8 @@ mod github_issue_workflow_runtime {
     use std::collections::BTreeMap;
     use std::time::Duration;
 
+    #[cfg(feature = "libsql")]
+    use ironclaw_host_api::ProjectId;
     use ironclaw_host_api::runtime_policy::{
         ApprovalPolicy, AuditMode, DeploymentMode, EffectiveRuntimePolicy, FilesystemBackendKind,
         NetworkMode, ProcessBackendKind, RuntimeProfile, SecretMode,
@@ -35,6 +37,34 @@ mod github_issue_workflow_runtime {
         assert!(runtime.services().readiness.workers.turn_runner);
         assert!(!runtime.services().readiness.workers.github_issue_workflow);
 
+        runtime.shutdown().await.expect("shutdown");
+    }
+
+    #[tokio::test]
+    async fn runtime_disabled_workflow_does_not_register_result_sink_handler() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let runtime = build_reborn_runtime(local_dev_input(root.path().join("local-dev")))
+            .await
+            .expect("runtime builds");
+        let host_runtime = runtime
+            .services()
+            .host_runtime
+            .as_deref()
+            .expect("host runtime");
+
+        let failure = invoke_failure_with_context(
+            host_runtime,
+            WORKFLOW_REPORT_STAGE_RESULT_CAPABILITY_ID,
+            json!({}),
+            execution_context([WORKFLOW_REPORT_STAGE_RESULT_CAPABILITY_ID]),
+        )
+        .await;
+
+        assert_eq!(
+            failure.kind,
+            RuntimeFailureKind::Backend,
+            "disabled workflow must not expose the workflow result-sink handler"
+        );
         runtime.shutdown().await.expect("shutdown");
     }
 
@@ -128,6 +158,7 @@ mod github_issue_workflow_runtime {
         let root = tempfile::tempdir().expect("tempdir");
         let err = match build_reborn_runtime(
             local_dev_input(root.path().join("local-dev"))
+                .with_default_project_id(ProjectId::new("workflow-project").expect("project"))
                 .with_github_issue_workflow_settings(GithubIssueWorkflowSettings::enabled()),
         )
         .await
@@ -140,6 +171,26 @@ mod github_issue_workflow_runtime {
 
         assert!(
             matches!(err, RebornRuntimeError::InvalidArgument { ref reason } if reason.contains("project access checker")),
+            "unexpected error: {err:?}"
+        );
+    }
+
+    #[cfg(feature = "libsql")]
+    #[tokio::test]
+    async fn production_enabled_workflow_requires_default_project_id() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let err = match build_reborn_runtime(
+            local_dev_input(root.path().join("local-dev"))
+                .with_github_issue_workflow_settings(GithubIssueWorkflowSettings::enabled()),
+        )
+        .await
+        {
+            Ok(_) => panic!("non-test workflow enablement must fail closed without project scope"),
+            Err(err) => err,
+        };
+
+        assert!(
+            matches!(err, RebornRuntimeError::InvalidArgument { ref reason } if reason.contains("project_id")),
             "unexpected error: {err:?}"
         );
     }

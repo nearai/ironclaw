@@ -49,8 +49,6 @@ use ironclaw_github_issue_workflow::GithubIssueWorkflowRepository;
 #[cfg(all(feature = "github-issue-workflow-beta", not(feature = "libsql")))]
 use ironclaw_github_issue_workflow::InMemoryGithubIssueWorkflowRepository;
 #[cfg(all(feature = "github-issue-workflow-beta", feature = "libsql"))]
-use ironclaw_github_issue_workflow_storage::RebornFilesystemGithubIssueWorkflowRepository;
-#[cfg(all(feature = "github-issue-workflow-beta", feature = "libsql"))]
 use ironclaw_github_issue_workflow_storage::RebornLibSqlGithubIssueWorkflowRepository;
 #[cfg(all(feature = "github-issue-workflow-beta", feature = "postgres"))]
 use ironclaw_github_issue_workflow_storage::RebornPostgresGithubIssueWorkflowRepository;
@@ -795,6 +793,8 @@ async fn build_local_dev(input: RebornBuildInput) -> Result<RebornServices, Rebo
         nearai_mcp_bootstrap_config,
         owner_id,
         local_runtime_identity,
+        #[cfg(feature = "github-issue-workflow-beta")]
+        github_issue_workflow_first_party_handlers_enabled,
         ..
     } = input;
     let local_runtime_identity_for_nearai_mcp = local_runtime_identity.clone();
@@ -1180,6 +1180,8 @@ async fn build_local_dev(input: RebornBuildInput) -> Result<RebornServices, Rebo
         Arc::clone(&store_graph.trigger_repository),
         trigger_create_hook,
         #[cfg(feature = "github-issue-workflow-beta")]
+        github_issue_workflow_first_party_handlers_enabled,
+        #[cfg(feature = "github-issue-workflow-beta")]
         Arc::clone(&store_graph.local_runtime.workflow_stage_result_sink_slot),
     )?;
     register_bundled_gsuite_first_party_handlers(
@@ -1508,13 +1510,9 @@ fn build_local_dev_store_graph(
     )?;
     #[cfg(feature = "github-issue-workflow-beta")]
     let workflow_repository: Arc<dyn GithubIssueWorkflowRepository> =
-        Arc::new(RebornFilesystemGithubIssueWorkflowRepository::new(
-            Arc::clone(&scoped_filesystem),
-            local_dev_nearai_mcp_owner_scope(
-                owner_user_id.clone(),
-                local_runtime_identity.as_ref(),
-            )?,
-        ));
+        Arc::new(RebornLibSqlGithubIssueWorkflowRepository::new(Arc::new(
+            LibSqlRootFilesystem::new(Arc::clone(&identity_substrate_db)),
+        )));
     #[cfg(feature = "github-issue-workflow-beta")]
     let workflow_stage_result_sink_slot =
         Arc::new(crate::github_issue_workflow::WorkflowStageResultSinkSlot::new());
@@ -2721,6 +2719,7 @@ fn production_builtin_extension_registry(
 fn builtin_first_party_registry_with_trigger_create_hook(
     trigger_repository: Arc<dyn TriggerRepository>,
     trigger_create_hook: Arc<dyn TriggerCreateHook>,
+    #[cfg(feature = "github-issue-workflow-beta")] github_issue_workflow_enabled: bool,
     #[cfg(feature = "github-issue-workflow-beta")] workflow_stage_result_sink_slot: Arc<
         crate::github_issue_workflow::WorkflowStageResultSinkSlot,
     >,
@@ -2733,7 +2732,7 @@ fn builtin_first_party_registry_with_trigger_create_hook(
         reason: format!("built-in first-party handlers are invalid: {error}"),
     })?;
     #[cfg(feature = "github-issue-workflow-beta")]
-    let registry = {
+    let registry = if github_issue_workflow_enabled {
         let mut registry = registry;
         crate::github_issue_workflow::insert_workflow_stage_result_handler(
             &mut registry,
@@ -2744,6 +2743,8 @@ fn builtin_first_party_registry_with_trigger_create_hook(
             reason: format!("workflow stage result handler is invalid: {error}"),
         })?;
         registry
+    } else {
+        registry
     };
     Ok(registry)
 }
@@ -2753,6 +2754,7 @@ fn production_first_party_registry_with_trigger_create_hook(
     trigger_repository: Arc<dyn TriggerRepository>,
     trigger_create_hook: Arc<dyn TriggerCreateHook>,
     process_backend: ProcessBackendKind,
+    #[cfg(feature = "github-issue-workflow-beta")] github_issue_workflow_enabled: bool,
     #[cfg(feature = "github-issue-workflow-beta")] workflow_stage_result_sink_slot: Arc<
         crate::github_issue_workflow::WorkflowStageResultSinkSlot,
     >,
@@ -2766,7 +2768,7 @@ fn production_first_party_registry_with_trigger_create_hook(
         reason: format!("built-in first-party handlers are invalid: {error}"),
     })?;
     #[cfg(feature = "github-issue-workflow-beta")]
-    let registry = {
+    let registry = if github_issue_workflow_enabled {
         let mut registry = registry;
         crate::github_issue_workflow::insert_workflow_stage_result_handler(
             &mut registry,
@@ -2776,6 +2778,8 @@ fn production_first_party_registry_with_trigger_create_hook(
         .map_err(|error| RebornBuildError::InvalidConfig {
             reason: format!("workflow stage result handler is invalid: {error}"),
         })?;
+        registry
+    } else {
         registry
     };
     Ok(registry)
@@ -2977,6 +2981,8 @@ async fn build_production_shaped(
         oauth_provider_configs,
         oauth_dcr_provider_configs,
         nearai_mcp_bootstrap_config: _,
+        #[cfg(feature = "github-issue-workflow-beta")]
+        github_issue_workflow_first_party_handlers_enabled,
     } = input;
     #[cfg(any(feature = "libsql", feature = "postgres"))]
     let wiring_config = production_config(
@@ -2997,6 +3003,8 @@ async fn build_production_shaped(
         product_auth_ports,
         oauth_provider_configs,
         oauth_dcr_provider_configs,
+        #[cfg(feature = "github-issue-workflow-beta")]
+        github_issue_workflow_first_party_handlers_enabled,
     );
 
     match storage {
@@ -3030,6 +3038,8 @@ async fn build_production_shaped(
                 oauth_provider_configs,
                 oauth_dcr_provider_configs,
                 owner_id,
+                #[cfg(feature = "github-issue-workflow-beta")]
+                github_issue_workflow_first_party_handlers_enabled,
             };
             build_libsql_production(context, db, path_or_url, auth_token, secret_master_key).await
         }
@@ -3055,6 +3065,8 @@ async fn build_production_shaped(
                 oauth_provider_configs,
                 oauth_dcr_provider_configs,
                 owner_id,
+                #[cfg(feature = "github-issue-workflow-beta")]
+                github_issue_workflow_first_party_handlers_enabled,
             };
             build_postgres_production(context, pool, url, tls_options, secret_master_key).await
         }
@@ -3087,6 +3099,8 @@ struct RebornProductionBuildContext {
     oauth_provider_configs: Vec<crate::input::OAuthProviderBackendConfig>,
     oauth_dcr_provider_configs: Vec<crate::input::OAuthDcrProviderBackendConfig>,
     owner_id: String,
+    #[cfg(feature = "github-issue-workflow-beta")]
+    github_issue_workflow_first_party_handlers_enabled: bool,
 }
 
 #[cfg(any(feature = "libsql", feature = "postgres"))]
@@ -3438,6 +3452,8 @@ where
         oauth_provider_configs,
         oauth_dcr_provider_configs,
         owner_id,
+        #[cfg(feature = "github-issue-workflow-beta")]
+        github_issue_workflow_first_party_handlers_enabled,
     } = context;
     let owner_user_id = UserId::new(owner_id).map_err(|error| RebornBuildError::InvalidConfig {
         reason: error.to_string(),
@@ -3511,6 +3527,8 @@ where
         trigger_repository,
         trigger_create_hook,
         process_backend,
+        #[cfg(feature = "github-issue-workflow-beta")]
+        github_issue_workflow_first_party_handlers_enabled,
         #[cfg(feature = "github-issue-workflow-beta")]
         workflow_stage_result_sink_slot,
     )?;
