@@ -829,6 +829,7 @@ struct ListAutomationCall {
     caller: ProductAgentBoundCaller,
     limit: usize,
     run_limit: usize,
+    include_completed: bool,
 }
 
 #[derive(Default)]
@@ -856,6 +857,7 @@ impl AutomationProductFacade for RecordingAutomationFacade {
                 caller,
                 limit: request.limit,
                 run_limit: request.run_limit,
+                include_completed: request.include_completed,
             });
         Ok(vec![automation_info(
             "trigger-listed",
@@ -4707,6 +4709,7 @@ async fn list_automation_dispatches_through_product_facade() {
             WebUiListAutomationsRequest {
                 limit: Some(10),
                 run_limit: None,
+                ..Default::default()
             },
         )
         .await
@@ -5455,6 +5458,7 @@ async fn list_automations_rejects_missing_agent_id() {
             WebUiListAutomationsRequest {
                 limit: Some(10),
                 run_limit: None,
+                ..Default::default()
             },
         )
         .await
@@ -5480,6 +5484,7 @@ async fn list_automations_clamps_oversize_limit_before_product_facade() {
             WebUiListAutomationsRequest {
                 limit: Some(u32::MAX),
                 run_limit: None,
+                ..Default::default()
             },
         )
         .await
@@ -5509,6 +5514,7 @@ async fn list_automations_clamps_zero_limit_before_product_facade() {
             WebUiListAutomationsRequest {
                 limit: Some(0),
                 run_limit: None,
+                ..Default::default()
             },
         )
         .await
@@ -5537,6 +5543,7 @@ async fn list_automations_uses_default_limit_when_omitted() {
             WebUiListAutomationsRequest {
                 limit: None,
                 run_limit: None,
+                ..Default::default()
             },
         )
         .await
@@ -5566,6 +5573,7 @@ async fn list_automations_clamps_oversize_run_limit_before_product_facade() {
             WebUiListAutomationsRequest {
                 limit: None,
                 run_limit: Some(u32::MAX),
+                ..Default::default()
             },
         )
         .await
@@ -5595,6 +5603,7 @@ async fn list_automations_allows_zero_run_limit_before_product_facade() {
             WebUiListAutomationsRequest {
                 limit: None,
                 run_limit: Some(0),
+                ..Default::default()
             },
         )
         .await
@@ -5605,6 +5614,62 @@ async fn list_automations_allows_zero_run_limit_before_product_facade() {
     assert_eq!(
         list_calls[0].run_limit, 0,
         "explicit zero automation run history limit must disable embedded run history"
+    );
+}
+
+#[tokio::test]
+async fn list_automations_forwards_include_completed_true_to_product_facade() {
+    let automation_facade = Arc::new(RecordingAutomationFacade::default());
+    let services = RebornServices::new(
+        Arc::new(InMemorySessionThreadService::default()),
+        Arc::new(FakeTurnCoordinator::default()),
+    )
+    .with_automation_product_facade(automation_facade.clone());
+
+    services
+        .list_automations(
+            caller(),
+            WebUiListAutomationsRequest {
+                include_completed: true,
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("list automations");
+
+    let list_calls = automation_facade.list_calls();
+    assert_eq!(list_calls.len(), 1);
+    assert!(
+        list_calls[0].include_completed,
+        "include_completed=true must be forwarded to the product facade unchanged"
+    );
+}
+
+#[tokio::test]
+async fn list_automations_forwards_include_completed_false_to_product_facade() {
+    let automation_facade = Arc::new(RecordingAutomationFacade::default());
+    let services = RebornServices::new(
+        Arc::new(InMemorySessionThreadService::default()),
+        Arc::new(FakeTurnCoordinator::default()),
+    )
+    .with_automation_product_facade(automation_facade.clone());
+
+    services
+        .list_automations(
+            caller(),
+            WebUiListAutomationsRequest {
+                include_completed: false,
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("list automations");
+
+    let list_calls = automation_facade.list_calls();
+    assert_eq!(list_calls.len(), 1);
+    assert!(
+        !list_calls[0].include_completed,
+        "include_completed=false must be forwarded to the product facade unchanged"
     );
 }
 

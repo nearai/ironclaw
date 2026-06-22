@@ -14,7 +14,7 @@
 //! Uses async I/O throughout to avoid blocking the tokio runtime.
 
 use std::collections::HashSet;
-use std::io;
+use std::io::{self, Read};
 use std::path::{Path, PathBuf};
 
 use sha2::{Digest, Sha256};
@@ -987,6 +987,7 @@ fn is_hidden_dir_entry(path: &Path) -> bool {
 
 struct CheckedSkillMdPath {
     path: PathBuf,
+    content_hash: String,
     #[cfg(unix)]
     identity: FileIdentity,
 }
@@ -1050,11 +1051,128 @@ async fn checked_skill_md_path(
         });
     }
 
+    #[cfg(unix)]
+    let identity = file_identity(&file_meta);
+    #[cfg(unix)]
+    let content_hash = checked_file_content_hash(&skill_path, expected_name, identity).await?;
+
+    #[cfg(not(unix))]
+    let content_hash = checked_file_content_hash(&skill_path, expected_name).await?;
+
     Ok(CheckedSkillMdPath {
         path: skill_path,
+        content_hash,
         #[cfg(unix)]
-        identity: file_identity(&file_meta),
+        identity,
     })
+}
+
+#[cfg(unix)]
+async fn checked_file_content_hash(
+    path: &Path,
+    expected_name: &str,
+    expected_identity: FileIdentity,
+) -> Result<String, SkillRegistryError> {
+    let path = path.to_path_buf();
+    let display_path = path.display().to_string();
+    let expected_name = expected_name.to_string();
+    tokio::task::spawn_blocking(move || {
+        use std::os::unix::fs::OpenOptionsExt;
+
+        let file = std::fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_NOFOLLOW)
+            .open(&path)
+            .map_err(|error| SkillRegistryError::ReadError {
+                path: display_path.clone(),
+                reason: error.to_string(),
+            })?;
+
+        if !identity_matches(&file, expected_identity).map_err(|error| {
+            SkillRegistryError::ReadError {
+                path: display_path.clone(),
+                reason: error.to_string(),
+            }
+        })? {
+            return Err(SkillRegistryError::CannotUpdate {
+                name: display_path.clone(),
+                reason: "skill file changed during update validation".to_string(),
+            });
+        }
+
+        let bytes = read_file_bytes_limited(file, &display_path, &expected_name)?;
+        Ok(compute_hash_bytes(&bytes))
+    })
+    .await
+    .map_err(|error| SkillRegistryError::ReadError {
+        path: "<skill validation task>".to_string(),
+        reason: error.to_string(),
+    })?
+}
+
+#[cfg(not(unix))]
+async fn checked_file_content_hash(
+    path: &Path,
+    expected_name: &str,
+) -> Result<String, SkillRegistryError> {
+    let bytes = tokio::fs::read(path)
+        .await
+        .map_err(|error| SkillRegistryError::ReadError {
+            path: path.display().to_string(),
+            reason: error.to_string(),
+        })?;
+    if bytes.len() as u64 > MAX_PROMPT_FILE_SIZE {
+        return Err(SkillRegistryError::FileTooLarge {
+            name: expected_name.to_string(),
+            size: bytes.len() as u64,
+            max: MAX_PROMPT_FILE_SIZE,
+        });
+    }
+    Ok(compute_hash_bytes(&bytes))
+}
+
+fn compute_hash_bytes(bytes: &[u8]) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(bytes);
+    let result = hasher.finalize();
+    format!("sha256:{:x}", result)
+}
+
+fn read_file_bytes_limited<R: io::Read>(
+    reader: R,
+    path: &str,
+    name: &str,
+) -> Result<Vec<u8>, SkillRegistryError> {
+    let mut bytes = Vec::new();
+    reader
+        .take(MAX_PROMPT_FILE_SIZE + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|error| SkillRegistryError::ReadError {
+            path: path.to_string(),
+            reason: error.to_string(),
+        })?;
+    if bytes.len() as u64 > MAX_PROMPT_FILE_SIZE {
+        return Err(SkillRegistryError::FileTooLarge {
+            name: name.to_string(),
+            size: bytes.len() as u64,
+            max: MAX_PROMPT_FILE_SIZE,
+        });
+    }
+    Ok(bytes)
+}
+
+fn ensure_content_hash_matches(
+    current_bytes: &[u8],
+    expected_hash: &str,
+    name: String,
+) -> Result<(), SkillRegistryError> {
+    if compute_hash_bytes(current_bytes) != expected_hash {
+        return Err(SkillRegistryError::CannotUpdate {
+            name,
+            reason: "skill file changed during update validation".to_string(),
+        });
+    }
+    Ok(())
 }
 
 #[cfg(unix)]
@@ -1065,10 +1183,11 @@ async fn write_checked_skill_md(
     let path = checked.path;
     let display_path = path.display().to_string();
     tokio::task::spawn_blocking(move || {
-        use std::io::Write;
+        use std::io::{Seek, SeekFrom, Write};
         use std::os::unix::fs::OpenOptionsExt;
 
         let mut file = std::fs::OpenOptions::new()
+            .read(true)
             .write(true)
             .custom_flags(libc::O_NOFOLLOW)
             .open(&path)
@@ -1084,12 +1203,16 @@ async fn write_checked_skill_md(
             }
         })? {
             return Err(SkillRegistryError::CannotUpdate {
-                name: display_path,
+                name: display_path.clone(),
                 reason: "skill file changed during update validation".to_string(),
             });
         }
 
+        let current_bytes = read_file_bytes_limited(&mut file, &display_path, &display_path)?;
+        ensure_content_hash_matches(&current_bytes, &checked.content_hash, display_path.clone())?;
+
         file.set_len(0)
+            .and_then(|()| file.seek(SeekFrom::Start(0)).map(|_| ()))
             .and_then(|()| file.write_all(content.as_bytes()))
             .map_err(|error| SkillRegistryError::WriteError {
                 path: display_path,
@@ -1108,6 +1231,18 @@ async fn write_checked_skill_md(
     checked: CheckedSkillMdPath,
     content: String,
 ) -> Result<(), SkillRegistryError> {
+    let current_bytes =
+        tokio::fs::read(&checked.path)
+            .await
+            .map_err(|error| SkillRegistryError::ReadError {
+                path: checked.path.display().to_string(),
+                reason: error.to_string(),
+            })?;
+    ensure_content_hash_matches(
+        &current_bytes,
+        &checked.content_hash,
+        checked.path.display().to_string(),
+    )?;
     tokio::fs::write(&checked.path, content)
         .await
         .map_err(|e| SkillRegistryError::WriteError {
@@ -1121,7 +1256,6 @@ async fn read_checked_skill_md(checked: CheckedSkillMdPath) -> Result<String, Sk
     let path = checked.path;
     let display_path = path.display().to_string();
     tokio::task::spawn_blocking(move || {
-        use std::io::Read;
         use std::os::unix::fs::OpenOptionsExt;
 
         let mut file = std::fs::OpenOptions::new()
@@ -1140,18 +1274,17 @@ async fn read_checked_skill_md(checked: CheckedSkillMdPath) -> Result<String, Sk
             }
         })? {
             return Err(SkillRegistryError::CannotUpdate {
-                name: display_path,
+                name: display_path.clone(),
                 reason: "skill file changed during update validation".to_string(),
             });
         }
 
-        let mut content = String::new();
-        file.read_to_string(&mut content)
-            .map_err(|error| SkillRegistryError::ReadError {
-                path: display_path,
-                reason: error.to_string(),
-            })?;
-        Ok(content)
+        let bytes = read_file_bytes_limited(&mut file, &display_path, &display_path)?;
+        ensure_content_hash_matches(&bytes, &checked.content_hash, display_path.clone())?;
+        String::from_utf8(bytes).map_err(|error| SkillRegistryError::ReadError {
+            path: display_path,
+            reason: format!("Invalid UTF-8: {}", error),
+        })
     })
     .await
     .map_err(|error| SkillRegistryError::ReadError {
@@ -1162,12 +1295,22 @@ async fn read_checked_skill_md(checked: CheckedSkillMdPath) -> Result<String, Sk
 
 #[cfg(not(unix))]
 async fn read_checked_skill_md(checked: CheckedSkillMdPath) -> Result<String, SkillRegistryError> {
-    tokio::fs::read_to_string(&checked.path)
-        .await
-        .map_err(|e| SkillRegistryError::ReadError {
-            path: checked.path.display().to_string(),
-            reason: e.to_string(),
-        })
+    let bytes =
+        tokio::fs::read(&checked.path)
+            .await
+            .map_err(|e| SkillRegistryError::ReadError {
+                path: checked.path.display().to_string(),
+                reason: e.to_string(),
+            })?;
+    ensure_content_hash_matches(
+        &bytes,
+        &checked.content_hash,
+        checked.path.display().to_string(),
+    )?;
+    String::from_utf8(bytes).map_err(|error| SkillRegistryError::ReadError {
+        path: checked.path.display().to_string(),
+        reason: format!("Invalid UTF-8: {}", error),
+    })
 }
 
 /// Load and validate a single SKILL.md file from disk.
@@ -1314,10 +1457,7 @@ async fn build_loaded_skill(
 
 /// Compute SHA-256 hash of content in the format "sha256:hex...".
 pub fn compute_hash(content: &str) -> String {
-    let mut hasher = Sha256::new();
-    hasher.update(content.as_bytes());
-    let result = hasher.finalize();
-    format!("sha256:{:x}", result)
+    compute_hash_bytes(content.as_bytes())
 }
 
 /// Helper to check gating for a `GatingRequirements`. Useful for callers that
@@ -1761,21 +1901,15 @@ mod tests {
         let skill_dir = dir.path().join("editable-skill");
         fs::create_dir(&skill_dir).unwrap();
         let skill_path = skill_dir.join("SKILL.md");
-        fs::write(
-            &skill_path,
-            "---\nname: editable-skill\n---\n\nBefore prompt.\n",
-        )
-        .unwrap();
+        let original = "---\nname: editable-skill\n---\n\nBefore prompt.\n";
+        let swapped = "---\nname: editable-skill\n---\n\nChange prompt.\n";
+        assert_eq!(original.len(), swapped.len());
+        fs::write(&skill_path, original).unwrap();
 
         let checked = checked_skill_md_path(&skill_dir, "editable-skill")
             .await
             .unwrap();
-        fs::remove_file(&skill_path).unwrap();
-        fs::write(
-            &skill_path,
-            "---\nname: editable-skill\n---\n\nSwapped prompt.\n",
-        )
-        .unwrap();
+        fs::write(&skill_path, swapped).unwrap();
 
         let err = write_checked_skill_md(
             checked,
@@ -1788,7 +1922,7 @@ mod tests {
         assert!(
             fs::read_to_string(skill_path)
                 .unwrap()
-                .contains("Swapped prompt")
+                .contains("Change prompt")
         );
     }
 

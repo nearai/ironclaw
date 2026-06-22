@@ -4022,8 +4022,8 @@ mod tests {
         use ironclaw_conversations::{AdapterInstallationId, AdapterKind, ExternalActorRef};
         use ironclaw_triggers::{
             TRIGGER_TRUSTED_ADAPTER_INSTALLATION_ID, TRIGGER_TRUSTED_ADAPTER_KIND,
-            TRIGGER_TRUSTED_EXTERNAL_ACTOR_NAMESPACE, TriggerCompletionPolicy, TriggerId,
-            TriggerRecord, TriggerSchedule, TriggerSourceKind, TriggerState,
+            TRIGGER_TRUSTED_EXTERNAL_ACTOR_NAMESPACE, TriggerId, TriggerRecord, TriggerSchedule,
+            TriggerSourceKind, TriggerState,
         };
 
         let (runtime, _tmp) = runtime_with_trigger_poller().await;
@@ -4066,7 +4066,6 @@ mod tests {
             name: "hook-wiring-e2e".to_string(),
             source: TriggerSourceKind::Schedule,
             schedule: TriggerSchedule::cron("* * * * *").expect("valid cron"),
-            completion_policy: TriggerCompletionPolicy::CompleteAfterFirstFire,
             prompt: "hook-wiring-e2e-prompt-marker".to_string(),
             state: TriggerState::Scheduled,
             next_run_at: Utc::now() - chrono::Duration::seconds(120),

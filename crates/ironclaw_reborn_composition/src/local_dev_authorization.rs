@@ -2,7 +2,8 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use ironclaw_approvals::{
-    AutoApproveSettingStore, ToolPermissionOverrideKey, ToolPermissionOverrideStore,
+    AutoApproveSettingStore, ToolPermissionOverride, ToolPermissionOverrideKey,
+    ToolPermissionOverrideStore,
 };
 use ironclaw_authorization::TrustAwareCapabilityDispatchAuthorizer;
 use ironclaw_host_api::{
@@ -61,16 +62,19 @@ impl ApprovalSettingsProvider for StoreApprovalSettingsProvider {
         scope: &ResourceScope,
         capability_id: &CapabilityId,
     ) -> ResolvedApprovalSettings {
-        // Fail safe: a store read error resolves to "no override, auto-approve
-        // off" so the gate falls back to asking rather than silently
-        // auto-approving or denying. The error is logged, not swallowed.
+        // Fail safe: a store read error resolves to "ask each time" with
+        // auto-approve off so the gate falls back to asking rather than
+        // silently auto-approving or denying. The error is logged, not swallowed.
         let key = ToolPermissionOverrideKey::new(scope, capability_id.clone());
         let tool_override = match self.overrides.get(&key).await {
             Ok(record) => record.map(|record| record.state),
             Err(error) => {
                 // silent-ok: fail-safe to "ask" on store read error; logged for observability.
                 tracing::warn!(%error, "tool permission override lookup failed; defaulting to ask");
-                None
+                return ResolvedApprovalSettings {
+                    tool_override: Some(ToolPermissionOverride::AskEachTime),
+                    global_auto_approve: false,
+                };
             }
         };
         let global_auto_approve = match self.auto_approve.is_enabled(scope).await {
@@ -116,8 +120,10 @@ fn local_dev_approval_policy(
 #[cfg(test)]
 mod tests {
     use ironclaw_approvals::{
-        AutoApproveSettingInput, InMemoryAutoApproveSettingStore,
-        InMemoryToolPermissionOverrideStore,
+        AutoApproveSettingInput, CapabilityPermissionOverrideInput,
+        CapabilityPermissionOverrideKey, CapabilityPermissionOverrideRecord,
+        CapabilityPermissionOverrideStore, CapabilityPermissionStoreError,
+        InMemoryAutoApproveSettingStore, InMemoryToolPermissionOverrideStore,
     };
     use ironclaw_host_api::{
         CapabilityDescriptor, CapabilityId, EffectKind, ExtensionId, MountView, PermissionMode,
@@ -132,6 +138,39 @@ mod tests {
 
     use super::*;
     use crate::local_dev_capability_policy::local_dev_capability_policy;
+
+    struct ErroringToolPermissionOverrideStore;
+
+    #[async_trait::async_trait]
+    impl CapabilityPermissionOverrideStore for ErroringToolPermissionOverrideStore {
+        async fn set(
+            &self,
+            _input: CapabilityPermissionOverrideInput,
+        ) -> Result<CapabilityPermissionOverrideRecord, CapabilityPermissionStoreError> {
+            Err(CapabilityPermissionStoreError::Filesystem(
+                "injected override store failure".to_string(),
+            ))
+        }
+
+        async fn get(
+            &self,
+            _key: &CapabilityPermissionOverrideKey,
+        ) -> Result<Option<CapabilityPermissionOverrideRecord>, CapabilityPermissionStoreError>
+        {
+            Err(CapabilityPermissionStoreError::Filesystem(
+                "injected override store failure".to_string(),
+            ))
+        }
+
+        async fn clear(
+            &self,
+            _key: &CapabilityPermissionOverrideKey,
+        ) -> Result<(), CapabilityPermissionStoreError> {
+            Err(CapabilityPermissionStoreError::Filesystem(
+                "injected override store failure".to_string(),
+            ))
+        }
+    }
 
     async fn local_dev_shell_decision_with_authorizer(
         authorizer: &dyn TrustAwareCapabilityDispatchAuthorizer,
@@ -363,6 +402,42 @@ mod tests {
         assert!(
             matches!(after, ironclaw_host_api::Decision::Allow { .. }),
             "same authorizer should observe the store update on the next dispatch, got {after:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn local_dev_authorizer_fails_closed_when_override_lookup_errors() {
+        let user_id = UserId::new("test-user").expect("user id");
+        let auto_approve = Arc::new(InMemoryAutoApproveSettingStore::new());
+        let scope = ironclaw_host_api::ResourceScope::local_default(
+            user_id.clone(),
+            ironclaw_host_api::InvocationId::new(),
+        )
+        .expect("local resource scope");
+        auto_approve
+            .set(AutoApproveSettingInput {
+                scope,
+                enabled: true,
+                updated_by: Principal::User(user_id.clone()),
+            })
+            .await
+            .expect("auto-approve setting update");
+
+        let settings = Arc::new(StoreApprovalSettingsProvider::new(
+            Arc::new(ErroringToolPermissionOverrideStore),
+            auto_approve,
+        ));
+        let policy = Arc::new(local_dev_capability_policy().expect("capability policy"));
+        let authorizer = local_dev_authorizer(None, policy, settings);
+
+        let decision =
+            local_dev_shell_decision_with_authorizer(authorizer.as_ref(), &user_id).await;
+        assert!(
+            matches!(
+                decision,
+                ironclaw_host_api::Decision::RequireApproval { .. }
+            ),
+            "override-store read errors must fail closed even when global auto-approve is enabled, got {decision:?}"
         );
     }
 }

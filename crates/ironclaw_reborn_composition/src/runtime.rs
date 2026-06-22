@@ -2294,12 +2294,46 @@ pub async fn build_reborn_runtime(
         validated_identity.tenant_id.clone(),
         validated_identity.agent_id.clone(),
     );
+    #[cfg(feature = "root-llm-provider")]
+    let mut has_nearai_mcp_bootstrap_config = services_input.has_nearai_mcp_bootstrap_config();
+    #[cfg(feature = "root-llm-provider")]
+    if !has_nearai_mcp_bootstrap_config
+        && let Some(llm) = llm.as_ref()
+        && let Some(config) =
+            crate::nearai_mcp::nearai_mcp_bootstrap_config_from_llm_config(&llm.config)
+                .await
+                .map_err(|error| RebornRuntimeError::InvalidArgument {
+                    reason: format!("NEAR AI MCP bootstrap config: {error}"),
+                })?
+    {
+        services_input = services_input.with_nearai_mcp_bootstrap_config(config);
+        has_nearai_mcp_bootstrap_config = true;
+    }
     let trusted_laptop_access = services_input.grants_trusted_laptop_access();
     let owner_id = services_input.owner_id().to_string();
+    let actor_user_id =
+        UserId::new(owner_id.clone()).map_err(|reason| RebornRuntimeError::InvalidArgument {
+            reason: format!("user id: {reason}"),
+        })?;
+    #[cfg(feature = "root-llm-provider")]
+    let nearai_mcp_owner_scope = ResourceScope {
+        tenant_id: validated_identity.tenant_id.clone(),
+        user_id: actor_user_id.clone(),
+        agent_id: Some(validated_identity.agent_id.clone()),
+        project_id: default_project_id.clone(),
+        mission_id: None,
+        thread_id: None,
+        invocation_id: InvocationId::new(),
+    };
     let mut services = build_reborn_services(services_input).await?;
     #[cfg(feature = "root-llm-provider")]
     let llm =
         apply_startup_stored_llm_key(llm, crate::LlmKeyStore::new(services.secret_store())).await?;
+    #[cfg(feature = "root-llm-provider")]
+    if !has_nearai_mcp_bootstrap_config {
+        bootstrap_nearai_mcp_from_effective_llm(&services, llm.as_ref(), nearai_mcp_owner_scope)
+            .await?;
+    }
     enforce_runtime_cutover_gate(profile, &services.readiness)?;
 
     let runtime_parts = match profile {
@@ -2377,10 +2411,6 @@ pub async fn build_reborn_runtime(
 
     let tenant_id = validated_identity.tenant_id.clone();
     let agent_id = validated_identity.agent_id.clone();
-    let actor_user_id =
-        UserId::new(owner_id.clone()).map_err(|reason| RebornRuntimeError::InvalidArgument {
-            reason: format!("user id: {reason}"),
-        })?;
     let thread_scope = ThreadScope {
         tenant_id,
         agent_id,
@@ -3265,6 +3295,52 @@ async fn apply_startup_stored_llm_key(
     Ok(Some(llm))
 }
 
+#[cfg(feature = "root-llm-provider")]
+async fn bootstrap_nearai_mcp_from_effective_llm(
+    services: &RebornServices,
+    llm: Option<&ResolvedRebornLlm>,
+    owner_scope: ResourceScope,
+) -> Result<(), RebornRuntimeError> {
+    let Some(llm) = llm else {
+        return Ok(());
+    };
+    let Some(config) = crate::nearai_mcp::nearai_mcp_bootstrap_config_from_llm_config(&llm.config)
+        .await
+        .map_err(|error| RebornRuntimeError::InvalidArgument {
+            reason: format!("NEAR AI MCP bootstrap config: {error}"),
+        })?
+    else {
+        return Ok(());
+    };
+    if let Err(error) = config.endpoint() {
+        tracing::debug!(
+            %error,
+            "NEAR AI MCP auto-bootstrap skipped because the resolved LLM endpoint is not MCP-compatible"
+        );
+        return Ok(());
+    }
+    let Some(product_auth) = services.product_auth.as_ref() else {
+        return Ok(());
+    };
+    let Some(extension_management) = services
+        .local_runtime
+        .as_ref()
+        .and_then(|local_runtime| local_runtime.extension_management.as_ref())
+    else {
+        return Ok(());
+    };
+    crate::nearai_mcp::bootstrap_local_dev_nearai_mcp(
+        Some(config),
+        product_auth,
+        extension_management,
+        owner_scope,
+    )
+    .await
+    .map_err(|error| RebornRuntimeError::InvalidArgument {
+        reason: format!("NEAR AI MCP bootstrap from LLM config failed: {error}"),
+    })
+}
+
 struct ValidatedRuntimeIdentity {
     tenant_id: TenantId,
     agent_id: AgentId,
@@ -3677,6 +3753,8 @@ mod tests {
     }
     use ironclaw_authorization::CapabilityLeaseStore;
     use ironclaw_events::{EventStreamKey, ReadScope};
+    #[cfg(all(feature = "root-llm-provider", feature = "libsql"))]
+    use ironclaw_host_api::ProjectId;
     use ironclaw_host_api::{
         Action, AgentId, ApprovalRequest, ApprovalRequestId, AuditStage, CapabilityId,
         CorrelationId, EffectKind, InvocationFingerprint, InvocationId, Principal,
@@ -4496,6 +4574,338 @@ mod tests {
             .expect("chat request should be captured")
             .expect("auth header should be sent by capture server");
         assert_eq!(auth_header, "Bearer sess_reborn_env_token");
+    }
+
+    #[cfg(feature = "root-llm-provider")]
+    #[tokio::test]
+    async fn runtime_nearai_mcp_bootstraps_from_nearai_session_token() {
+        let _token_guard = RuntimeEnvGuard::set("NEARAI_SESSION_TOKEN", "sess_reborn_mcp_token");
+        let root = tempfile::tempdir().expect("tempdir");
+        let session_dir = tempfile::tempdir().expect("session tempdir");
+        let local_dev_root = root.path().join("local-dev");
+
+        let config = ironclaw_llm::LlmConfig {
+            backend: "nearai".to_string(),
+            session: ironclaw_llm::SessionConfig {
+                auth_base_url: "https://private.near.ai".to_string(),
+                session_path: session_dir.path().join("session.json"),
+            },
+            nearai: ironclaw_llm::NearAiConfig {
+                model: "test-model".to_string(),
+                cheap_model: None,
+                base_url: "https://private.near.ai".to_string(),
+                api_key: None,
+                fallback_model: None,
+                max_retries: 0,
+                circuit_breaker_threshold: None,
+                circuit_breaker_recovery_secs: 30,
+                response_cache_enabled: false,
+                response_cache_ttl_secs: 3600,
+                response_cache_max_entries: 1000,
+                failover_cooldown_secs: 300,
+                failover_cooldown_threshold: 3,
+                smart_routing_cascade: false,
+            },
+            provider: None,
+            bedrock: None,
+            gemini_oauth: None,
+            openai_codex: None,
+            request_timeout_secs: 5,
+            cheap_model: None,
+            smart_routing_cascade: false,
+            max_retries: 0,
+            circuit_breaker_threshold: None,
+            circuit_breaker_recovery_secs: 30,
+            response_cache_enabled: false,
+            response_cache_ttl_secs: 3600,
+            response_cache_max_entries: 1000,
+        };
+        let llm = crate::runtime_input::ResolvedRebornLlm::from_llm_config(config);
+
+        let input = RebornRuntimeInput::from_services(
+            RebornBuildInput::local_dev("runtime-nearai-session-mcp-owner", local_dev_root)
+                .with_runtime_policy(local_dev_runtime_policy()),
+        )
+        .with_resolved_llm(llm)
+        .with_identity(RebornRuntimeIdentity {
+            tenant_id: "runtime-nearai-session-mcp-tenant".to_string(),
+            agent_id: "runtime-nearai-session-mcp-agent".to_string(),
+            source_binding_id: "runtime-nearai-session-mcp-source".to_string(),
+            reply_target_binding_id: "runtime-nearai-session-mcp-reply".to_string(),
+        });
+
+        let runtime = build_reborn_runtime(input).await.expect("runtime builds");
+        let local_runtime = runtime
+            .services()
+            .local_runtime
+            .as_ref()
+            .expect("local runtime");
+        let extension_management = local_runtime
+            .extension_management
+            .as_ref()
+            .expect("extension management");
+        let nearai_ref =
+            LifecyclePackageRef::new(LifecyclePackageKind::Extension, "nearai").expect("valid ref");
+        let projection = extension_management
+            .project(nearai_ref)
+            .await
+            .expect("NEAR AI MCP projected");
+        assert_eq!(projection.phase, LifecyclePhase::Active);
+
+        let capabilities = extension_management
+            .active_model_visible_capabilities()
+            .await
+            .expect("active capabilities");
+        assert!(
+            capabilities
+                .iter()
+                .any(|capability| capability.id.as_str() == "nearai.web_search"),
+            "nearai.web_search should be active with NEAR AI session-token config"
+        );
+        stop_turn_runner_worker_for_manual_state_test(&runtime).await;
+    }
+
+    #[cfg(all(feature = "root-llm-provider", feature = "libsql"))]
+    #[tokio::test]
+    async fn runtime_nearai_mcp_bootstraps_from_stored_nearai_api_key() {
+        let _session_token_guard = RuntimeEnvGuard::unset("NEARAI_SESSION_TOKEN");
+        let _api_key_guard = RuntimeEnvGuard::unset("NEARAI_API_KEY");
+        let root = tempfile::tempdir().expect("tempdir");
+        let local_dev_root = root.path().join("local-dev");
+        let session_dir = tempfile::tempdir().expect("session tempdir");
+
+        let services = crate::build_reborn_services(
+            RebornBuildInput::local_dev("runtime-nearai-stored-mcp-owner", local_dev_root.clone())
+                .with_runtime_policy(local_dev_runtime_policy()),
+        )
+        .await
+        .expect("services build for stored key seed");
+        crate::LlmKeyStore::new(services.secret_store())
+            .put(
+                "nearai",
+                ironclaw_secrets::SecretMaterial::from("sk-reborn-stored-nearai-mcp-key"),
+            )
+            .await
+            .expect("stored key seeded");
+        drop(services);
+
+        let config = ironclaw_llm::LlmConfig {
+            backend: "nearai".to_string(),
+            session: ironclaw_llm::SessionConfig {
+                auth_base_url: "https://private.near.ai".to_string(),
+                session_path: session_dir.path().join("session.json"),
+            },
+            nearai: ironclaw_llm::NearAiConfig {
+                model: "test-model".to_string(),
+                cheap_model: None,
+                base_url: "https://cloud-api.near.ai".to_string(),
+                api_key: None,
+                fallback_model: None,
+                max_retries: 0,
+                circuit_breaker_threshold: None,
+                circuit_breaker_recovery_secs: 30,
+                response_cache_enabled: false,
+                response_cache_ttl_secs: 3600,
+                response_cache_max_entries: 1000,
+                failover_cooldown_secs: 300,
+                failover_cooldown_threshold: 3,
+                smart_routing_cascade: false,
+            },
+            provider: None,
+            bedrock: None,
+            gemini_oauth: None,
+            openai_codex: None,
+            request_timeout_secs: 5,
+            cheap_model: None,
+            smart_routing_cascade: false,
+            max_retries: 0,
+            circuit_breaker_threshold: None,
+            circuit_breaker_recovery_secs: 30,
+            response_cache_enabled: false,
+            response_cache_ttl_secs: 3600,
+            response_cache_max_entries: 1000,
+        };
+        let llm = crate::runtime_input::ResolvedRebornLlm::from_llm_config(config);
+
+        let input = RebornRuntimeInput::from_services(
+            RebornBuildInput::local_dev("runtime-nearai-stored-mcp-owner", local_dev_root)
+                .with_runtime_policy(local_dev_runtime_policy()),
+        )
+        .with_resolved_llm(llm)
+        .with_identity(RebornRuntimeIdentity {
+            tenant_id: "runtime-nearai-stored-mcp-tenant".to_string(),
+            agent_id: "runtime-nearai-stored-mcp-agent".to_string(),
+            source_binding_id: "runtime-nearai-stored-mcp-source".to_string(),
+            reply_target_binding_id: "runtime-nearai-stored-mcp-reply".to_string(),
+        });
+
+        let runtime = build_reborn_runtime(input).await.expect("runtime builds");
+        let local_runtime = runtime
+            .services()
+            .local_runtime
+            .as_ref()
+            .expect("local runtime");
+        let extension_management = local_runtime
+            .extension_management
+            .as_ref()
+            .expect("extension management");
+        let nearai_ref =
+            LifecyclePackageRef::new(LifecyclePackageKind::Extension, "nearai").expect("valid ref");
+        let projection = extension_management
+            .project(nearai_ref)
+            .await
+            .expect("NEAR AI MCP projected");
+        assert_eq!(projection.phase, LifecyclePhase::Active);
+
+        let capabilities = extension_management
+            .active_model_visible_capabilities()
+            .await
+            .expect("active capabilities");
+        assert!(
+            capabilities
+                .iter()
+                .any(|capability| capability.id.as_str() == "nearai.web_search"),
+            "nearai.web_search should be active with stored NEAR AI API key config"
+        );
+        stop_turn_runner_worker_for_manual_state_test(&runtime).await;
+    }
+
+    #[cfg(all(feature = "root-llm-provider", feature = "libsql"))]
+    async fn nearai_mcp_runtime_access_secret(
+        runtime: &super::RebornRuntime,
+        owner_scope: ResourceScope,
+    ) -> String {
+        let product_auth = runtime
+            .services()
+            .product_auth
+            .as_ref()
+            .expect("product auth");
+        let auth_scope = ironclaw_auth::AuthProductScope::credential_owner(
+            &owner_scope,
+            ironclaw_auth::AuthSurface::Api,
+        );
+        let accounts = product_auth
+            .credential_account_record_source()
+            .accounts_for_owner(&auth_scope)
+            .await
+            .expect("NEAR AI product-auth accounts");
+        let account = accounts
+            .into_iter()
+            .find(|account| {
+                account.provider.as_str() == "nearai"
+                    && account.status == ironclaw_auth::CredentialAccountStatus::Configured
+            })
+            .expect("configured NEAR AI product-auth account");
+
+        assert_eq!(account.scope.resource.tenant_id, owner_scope.tenant_id);
+        assert_eq!(account.scope.resource.user_id, owner_scope.user_id);
+        assert_eq!(account.scope.resource.agent_id, owner_scope.agent_id);
+        assert_eq!(account.scope.resource.project_id, owner_scope.project_id);
+
+        let handle = account.access_secret.expect("NEAR AI access secret");
+        let store = runtime.services().secret_store();
+        let lease = store
+            .lease_once(&account.scope.resource, &handle)
+            .await
+            .expect("NEAR AI access secret lease");
+        let material = store
+            .consume(&account.scope.resource, lease.id)
+            .await
+            .expect("NEAR AI access secret material");
+        secrecy::ExposeSecret::expose_secret(&material).to_string()
+    }
+
+    #[cfg(all(feature = "root-llm-provider", feature = "libsql"))]
+    #[tokio::test]
+    async fn runtime_nearai_mcp_prebuild_api_key_is_not_replaced_by_stored_key() {
+        let _session_token_guard = RuntimeEnvGuard::unset("NEARAI_SESSION_TOKEN");
+        let _api_key_guard = RuntimeEnvGuard::unset("NEARAI_API_KEY");
+        let root = tempfile::tempdir().expect("tempdir");
+        let local_dev_root = root.path().join("local-dev");
+        let session_dir = tempfile::tempdir().expect("session tempdir");
+        let owner = "runtime-nearai-prebuild-mcp-owner";
+        let tenant = "runtime-nearai-prebuild-mcp-tenant";
+        let agent = "runtime-nearai-prebuild-mcp-agent";
+
+        let services = crate::build_reborn_services(
+            RebornBuildInput::local_dev(owner, local_dev_root.clone())
+                .with_runtime_policy(local_dev_runtime_policy()),
+        )
+        .await
+        .expect("services build for stored key seed");
+        crate::LlmKeyStore::new(services.secret_store())
+            .put(
+                "nearai",
+                ironclaw_secrets::SecretMaterial::from("sk-post-build-stored-nearai-mcp-key"),
+            )
+            .await
+            .expect("stored key seeded");
+        drop(services);
+
+        let config = ironclaw_llm::LlmConfig {
+            backend: "nearai".to_string(),
+            session: ironclaw_llm::SessionConfig {
+                auth_base_url: "https://private.near.ai".to_string(),
+                session_path: session_dir.path().join("session.json"),
+            },
+            nearai: ironclaw_llm::NearAiConfig {
+                model: "test-model".to_string(),
+                cheap_model: None,
+                base_url: "https://cloud-api.near.ai".to_string(),
+                api_key: Some(secrecy::SecretString::from("sk-prebuild-nearai-mcp-key")),
+                fallback_model: None,
+                max_retries: 0,
+                circuit_breaker_threshold: None,
+                circuit_breaker_recovery_secs: 30,
+                response_cache_enabled: false,
+                response_cache_ttl_secs: 3600,
+                response_cache_max_entries: 1000,
+                failover_cooldown_secs: 300,
+                failover_cooldown_threshold: 3,
+                smart_routing_cascade: false,
+            },
+            provider: None,
+            bedrock: None,
+            gemini_oauth: None,
+            openai_codex: None,
+            request_timeout_secs: 5,
+            cheap_model: None,
+            smart_routing_cascade: false,
+            max_retries: 0,
+            circuit_breaker_threshold: None,
+            circuit_breaker_recovery_secs: 30,
+            response_cache_enabled: false,
+            response_cache_ttl_secs: 3600,
+            response_cache_max_entries: 1000,
+        };
+        let llm = crate::runtime_input::ResolvedRebornLlm::from_llm_config(config);
+
+        let input = RebornRuntimeInput::from_services(
+            RebornBuildInput::local_dev(owner, local_dev_root)
+                .with_runtime_policy(local_dev_runtime_policy()),
+        )
+        .with_resolved_llm(llm)
+        .with_identity(RebornRuntimeIdentity {
+            tenant_id: tenant.to_string(),
+            agent_id: agent.to_string(),
+            source_binding_id: "runtime-nearai-prebuild-mcp-source".to_string(),
+            reply_target_binding_id: "runtime-nearai-prebuild-mcp-reply".to_string(),
+        });
+
+        let runtime = build_reborn_runtime(input).await.expect("runtime builds");
+        let owner_scope = ResourceScope {
+            tenant_id: TenantId::new(tenant).expect("tenant"),
+            user_id: UserId::new(owner).expect("owner"),
+            agent_id: Some(AgentId::new(agent).expect("agent")),
+            project_id: None::<ProjectId>,
+            mission_id: None,
+            thread_id: None,
+            invocation_id: InvocationId::new(),
+        };
+        let material = nearai_mcp_runtime_access_secret(&runtime, owner_scope).await;
+
+        assert_eq!(material, "sk-prebuild-nearai-mcp-key");
+        stop_turn_runner_worker_for_manual_state_test(&runtime).await;
     }
 
     /// Counts how many times the runtime drives this provider and answers with a

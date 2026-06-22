@@ -124,10 +124,9 @@
             "id": "toolu_012GiLGF3Fdrw7vp1aAyVuM8",
             "name": "builtin__trigger_create",
             "arguments": {
-              "cron": "*/30 * * * *",
               "name": "Check Gmail for near.ai emails → ABC Sheet",
               "prompt": "Check the Gmail inbox for any emails from a near.ai address (i.e. sender email ends with @near.ai). For each matching email found, append a new row to the Google Sheet called \"ABC\" with the following columns: Date/Time Received, Sender, Subject, and a short Snippet of the email body. Do not send any emails or modify the messages — read only. If no near.ai emails are found, do nothing.",
-              "timezone": "UTC"
+              "schedule": { "kind": "cron", "expression": "*/30 * * * *", "timezone": "UTC" }
             }
           }
         ],
