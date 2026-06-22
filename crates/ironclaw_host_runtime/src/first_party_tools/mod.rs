@@ -20,6 +20,7 @@ mod spawn_subagent;
 mod time;
 mod trace_commons;
 mod trigger_management;
+mod workflow_result;
 
 use std::{future::Future, panic::AssertUnwindSafe, sync::Arc, time::Instant};
 
@@ -70,6 +71,10 @@ pub use trigger_management::TriggerManagementClock;
 pub use trigger_management::{
     TRIGGER_CREATE_CAPABILITY_ID, TRIGGER_LIST_CAPABILITY_ID, TRIGGER_REMOVE_CAPABILITY_ID,
     TriggerCreateHook,
+};
+pub use workflow_result::{
+    ReportWorkflowStageResultInput, WORKFLOW_REPORT_STAGE_RESULT_CAPABILITY_ID,
+    WorkflowStageResultAck, WorkflowStageResultSink, WorkflowStageResultSinkError,
 };
 
 pub const BUILTIN_FIRST_PARTY_PROVIDER: &str = "builtin";
@@ -198,6 +203,16 @@ pub fn builtin_first_party_package() -> Result<ExtensionPackage, ExtensionError>
     )
 }
 
+pub fn builtin_first_party_package_with_workflow_stage_result()
+-> Result<ExtensionPackage, ExtensionError> {
+    let mut package = builtin_first_party_package()?;
+    package
+        .manifest
+        .capabilities
+        .push(workflow_result::manifest()?);
+    ExtensionPackage::from_manifest(package.manifest, package.root)
+}
+
 pub fn builtin_first_party_package_for_process_backend(
     process_backend: ProcessBackendKind,
 ) -> Result<ExtensionPackage, ExtensionError> {
@@ -283,6 +298,15 @@ pub fn builtin_first_party_handlers(
 ) -> Result<FirstPartyCapabilityRegistry, HostApiError> {
     let mut registry = builtin_first_party_base_registry()?;
     trigger_management::insert_handlers(&mut registry, trigger_repository)?;
+    Ok(registry)
+}
+
+pub fn builtin_first_party_handlers_with_workflow_stage_result_sink(
+    trigger_repository: Arc<dyn ironclaw_triggers::TriggerRepository>,
+    workflow_stage_result_sink: Arc<dyn WorkflowStageResultSink>,
+) -> Result<FirstPartyCapabilityRegistry, HostApiError> {
+    let mut registry = builtin_first_party_handlers(trigger_repository)?;
+    workflow_result::insert_handler(&mut registry, workflow_stage_result_sink)?;
     Ok(registry)
 }
 

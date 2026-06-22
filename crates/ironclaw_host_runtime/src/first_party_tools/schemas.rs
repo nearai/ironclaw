@@ -528,6 +528,30 @@ pub(crate) fn resolve_builtin_input_schema_ref(reference: &str) -> Option<Value>
             "required": ["trigger_id"],
             "additionalProperties": false
         }),
+        "schemas/builtin/workflow-report-stage-result.input.v1.json" => json!({
+            "type": "object",
+            "properties": {
+                "workflow_run_id": { "type": "string" },
+                "stage_run_id": { "type": "string" },
+                "turn_run_id": { "type": "string" },
+                "stage": { "type": "string" },
+                "schema_version": { "type": "string" },
+                "completion_nonce": { "type": "string" },
+                "result": {
+                    "description": "Opaque structured workflow result payload"
+                }
+            },
+            "required": [
+                "workflow_run_id",
+                "stage_run_id",
+                "turn_run_id",
+                "stage",
+                "schema_version",
+                "completion_nonce",
+                "result"
+            ],
+            "additionalProperties": false
+        }),
         _ => return None,
     })
 }
