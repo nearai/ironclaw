@@ -16,12 +16,13 @@ use ironclaw_host_runtime::{
     VisibleCapabilityRequest as HostVisibleCapabilityRequest,
 };
 use ironclaw_loop_support::{
-    CapabilityResultWrite, HostManagedModelError, HostManagedModelErrorKind,
+    CapabilityResultWrite, CapabilityWriteResult, HostManagedModelError, HostManagedModelErrorKind,
     HostManagedModelGateway, HostManagedModelMessageRole, HostManagedModelRequest,
     HostManagedModelResponse, HostManagedToolResultContent, LoopCapabilityInputResolver,
     LoopCapabilityPortFactory, LoopCapabilityResultWriter, loop_driver_execution_extension_id,
 };
-use ironclaw_product_workflow::OutboundPreferencesProductFacade;
+use ironclaw_product_workflow::{OutboundPreferencesProductFacade, ProjectService};
+
 use ironclaw_run_state::ApprovalRequestStore;
 use ironclaw_threads::{
     AppendCapabilityDisplayPreviewRequest, CapabilityDisplayPreviewEnvelope,
@@ -48,6 +49,7 @@ use crate::{
 
 pub(super) mod extension_surface;
 mod outbound_delivery;
+mod project_create;
 mod refreshing_capability_port;
 #[cfg(test)]
 mod shell_tests;
@@ -60,6 +62,8 @@ pub(crate) use crate::outbound_delivery_capability_surface::{
     OUTBOUND_DELIVERY_TARGET_SET_CAPABILITY_ID, OUTBOUND_DELIVERY_TARGETS_LIST_CAPABILITY_ID,
 };
 use extension_surface::{LocalDevExtensionSurface, LocalDevExtensionSurfaceSource};
+#[cfg(test)]
+pub(crate) use project_create::PROJECT_CREATE_CAPABILITY_ID;
 use refreshing_capability_port::{
     RefreshingLocalDevCapabilityPortConfig, create_refreshing_local_dev_capability_port,
 };
@@ -100,6 +104,11 @@ pub(super) fn capability_wiring(
     );
     let extension_surface_source =
         LocalDevExtensionSurfaceSource::new(local_runtime.extension_management.clone());
+    // First-class project creation reuses the same access-controlled
+    // `ProjectService` facade the WebUI v2 surface wires (composition owns the
+    // service, never the raw repository), so an agent-created project is a real
+    // entity that appears in the Projects list.
+    let project_service: Arc<dyn ProjectService> = Arc::clone(&local_runtime.project_service);
     let display_previews = Arc::new(CapabilityDisplayPreviewStore::default());
     let capability_io = Arc::new(
         LocalDevCapabilityIo::new_with_durable_previews(
@@ -123,6 +132,7 @@ pub(super) fn capability_wiring(
             result_writer: Arc::clone(&capability_result_writer),
             milestone_sink,
             skill_activation_source,
+            project_service,
             trajectory_observer,
             outbound_preferences_facade,
             outbound_delivery_target_set_requires_approval,
@@ -154,6 +164,7 @@ struct LocalDevLoopCapabilityPortFactory {
     result_writer: Arc<dyn LoopCapabilityResultWriter>,
     milestone_sink: Arc<dyn LoopHostMilestoneSink>,
     skill_activation_source: Option<Arc<LocalDevSelectableSkillContextSource>>,
+    project_service: Arc<dyn ProjectService>,
     trajectory_observer: Option<Arc<dyn crate::RebornTrajectoryObserver>>,
     outbound_preferences_facade: Option<Arc<dyn OutboundPreferencesProductFacade>>,
     outbound_delivery_target_set_requires_approval: bool,
@@ -185,6 +196,7 @@ impl LoopCapabilityPortFactory for LocalDevLoopCapabilityPortFactory {
             result_writer: Arc::clone(&self.result_writer),
             milestone_sink: Arc::clone(&self.milestone_sink),
             skill_activation_source: self.skill_activation_source.clone(),
+            project_service: Arc::clone(&self.project_service),
             // Same observer drives both the input hook (on the capability port the
             // refreshing helper builds) and the result hook (on `LocalDevCapabilityIo`),
             // so the two callbacks correlate by `call_id` for one tool call.
@@ -519,7 +531,7 @@ impl LoopCapabilityResultWriter for LocalDevCapabilityIo {
     async fn write_capability_result(
         &self,
         write: CapabilityResultWrite<'_>,
-    ) -> Result<(LoopResultRef, u64), AgentLoopHostError> {
+    ) -> Result<CapabilityWriteResult, AgentLoopHostError> {
         let CapabilityResultWrite {
             run_context,
             input_ref,
@@ -574,7 +586,21 @@ impl LoopCapabilityResultWriter for LocalDevCapabilityIo {
             self.display_previews
                 .attach_timeline_message_id(invocation_id, message_id);
         }
-        Ok((result_ref, output_bytes))
+        Ok(CapabilityWriteResult::from_output(
+            result_ref,
+            output_bytes,
+            &output,
+        ))
+    }
+
+    fn record_running_invocation(
+        &self,
+        _run_context: &LoopRunContext,
+        invocation_id: InvocationId,
+        input_ref: &CapabilityInputRef,
+    ) {
+        self.display_previews
+            .record_running_invocation(invocation_id, input_ref);
     }
 
     async fn update_capability_result(

@@ -6,7 +6,7 @@ use ironclaw_host_runtime::HostRuntime;
 use ironclaw_loop_support::{
     HostRuntimeLoopCapabilityPortFactory, LoopCapabilityInputResolver, LoopCapabilityResultWriter,
 };
-use ironclaw_product_workflow::OutboundPreferencesProductFacade;
+use ironclaw_product_workflow::{OutboundPreferencesProductFacade, ProjectService};
 use ironclaw_run_state::ApprovalRequestStore;
 use ironclaw_turns::run_profile::{
     AgentLoopHostError, AgentLoopHostErrorKind, CapabilityBatchInvocation, CapabilityBatchOutcome,
@@ -20,6 +20,7 @@ use crate::local_dev_capability_policy::LocalDevCapabilityPolicy;
 use crate::runtime::LocalDevSelectableSkillContextSource;
 use crate::runtime::local_dev::extension_surface::LocalDevExtensionSurfaceSource;
 use crate::runtime::local_dev::outbound_delivery::outbound_delivery_capabilities;
+use crate::runtime::local_dev::project_create::project_create_capability;
 use crate::runtime::local_dev::skill_activation::skill_activation_capability;
 use crate::runtime::local_dev::surface_disclosure::wrap_local_dev_surface_disclosure;
 use crate::runtime::local_dev::synthetic_capability::wrap_local_dev_synthetic_capabilities;
@@ -39,6 +40,7 @@ pub(super) struct RefreshingLocalDevCapabilityPortConfig {
     pub(super) result_writer: Arc<dyn LoopCapabilityResultWriter>,
     pub(super) milestone_sink: Arc<dyn LoopHostMilestoneSink>,
     pub(super) skill_activation_source: Option<Arc<LocalDevSelectableSkillContextSource>>,
+    pub(super) project_service: Arc<dyn ProjectService>,
     pub(super) trajectory_observer: Option<Arc<dyn crate::RebornTrajectoryObserver>>,
     pub(super) outbound_preferences_facade: Option<Arc<dyn OutboundPreferencesProductFacade>>,
     pub(super) outbound_delivery_target_set_requires_approval: bool,
@@ -62,6 +64,7 @@ pub(super) async fn create_refreshing_local_dev_capability_port(
         result_writer: config.result_writer,
         milestone_sink: config.milestone_sink,
         skill_activation_source: config.skill_activation_source,
+        project_service: config.project_service,
         trajectory_observer: config.trajectory_observer,
         outbound_preferences_facade: config.outbound_preferences_facade,
         outbound_delivery_target_set_requires_approval: config
@@ -91,6 +94,7 @@ struct RefreshingLocalDevCapabilityPort {
     result_writer: Arc<dyn LoopCapabilityResultWriter>,
     milestone_sink: Arc<dyn LoopHostMilestoneSink>,
     skill_activation_source: Option<Arc<LocalDevSelectableSkillContextSource>>,
+    project_service: Arc<dyn ProjectService>,
     trajectory_observer: Option<Arc<dyn crate::RebornTrajectoryObserver>>,
     outbound_preferences_facade: Option<Arc<dyn OutboundPreferencesProductFacade>>,
     outbound_delivery_target_set_requires_approval: bool,
@@ -149,6 +153,10 @@ impl RefreshingLocalDevCapabilityPort {
             }
             None => Vec::new(),
         };
+        synthetic_capabilities.push(project_create_capability(
+            Arc::clone(&self.project_service),
+            self.fallback_user_id.clone(),
+        )?);
         if let Some(outbound_preferences_facade) = &self.outbound_preferences_facade {
             synthetic_capabilities.extend(outbound_delivery_capabilities(
                 Arc::clone(outbound_preferences_facade),

@@ -3092,6 +3092,7 @@ async fn host_runtime_services_auth_resume_dispatches_blocked_auth_run() {
             scope.clone(),
             secret_handle,
             SecretMaterial::from("test-secret-value"),
+            None,
         )
         .await
         .unwrap();
@@ -4258,6 +4259,7 @@ async fn host_runtime_services_projects_resource_network_secret_obligation_audit
             scope.clone(),
             secret_handle,
             SecretMaterial::from("SECRET_MATERIAL_SENTINEL_3022_sk_live_secret"),
+            None,
         )
         .await
         .unwrap();
@@ -4713,6 +4715,7 @@ async fn host_runtime_services_wasm_http_uses_production_staged_network_and_secr
             scope.clone(),
             secret_handle.clone(),
             SecretMaterial::from("sk-vertical-secret"),
+            None,
         )
         .await
         .unwrap();
@@ -4793,6 +4796,7 @@ async fn host_runtime_services_wasm_http_rejects_secret_store_lease_before_trans
             scope.clone(),
             secret_handle,
             SecretMaterial::from("sk-graph-store-secret"),
+            None,
         )
         .await
         .unwrap();
@@ -6519,6 +6523,7 @@ async fn stage_process_handoffs(
             scope.clone(),
             secret_handle.clone(),
             SecretMaterial::from(material),
+            None,
         )
         .await
         .unwrap();
@@ -6645,6 +6650,7 @@ where
             scope.clone(),
             secret_handle.clone(),
             SecretMaterial::from("runtime-secret"),
+            None,
         )
         .await
         .unwrap();
@@ -7964,6 +7970,7 @@ async fn invoke_capability_present_credential_proceeds_to_approval() {
             scope.clone(),
             secret_handle.clone(),
             SecretMaterial::from("token-value"),
+            None,
         )
         .await
         .unwrap();
@@ -8044,6 +8051,7 @@ async fn spawn_capability_present_credential_proceeds_to_approval() {
             scope.clone(),
             secret_handle.clone(),
             SecretMaterial::from("token-value"),
+            None,
         )
         .await
         .unwrap();
@@ -8288,6 +8296,7 @@ impl SecretStore for CountingErrorSecretStore {
         _scope: ResourceScope,
         _handle: SecretHandle,
         _material: SecretMaterial,
+        _expires_at: Option<ironclaw_host_api::Timestamp>,
     ) -> Result<SecretMetadata, SecretStoreError> {
         Err(SecretStoreError::StoreUnavailable {
             reason: "simulated backend failure".to_string(),

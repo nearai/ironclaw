@@ -37,16 +37,17 @@ use ironclaw_host_runtime::{
 };
 use ironclaw_loop_support::{
     CapabilityAllowSet, CapabilityResolveError, CapabilityResultWrite,
-    CapabilitySurfaceProfileResolver, EmptyLoopCapabilityPort, EmptyUserProfileSource,
-    HostIdentityContextBuildError, HostIdentityContextCandidate, HostIdentityContextSource,
-    HostIdentityMessageContent, HostInputBatch, HostInputEnvelope, HostInputQueue,
-    HostInputQueueError, HostManagedModelError, HostManagedModelErrorKind, HostManagedModelGateway,
-    HostManagedModelMessageRole, HostManagedModelRequest, HostManagedModelResponse,
-    HostRuntimeLoopCapabilityPort, HostSkillContextBuildError, HostSkillContextCandidate,
-    HostSkillContextSource, HostUserProfileSource, IdentityApplicability, IdentityFileName,
-    JsonSpawnSubagentInputCodec, LoopCapabilityInputResolver, LoopCapabilityPortFactory,
-    LoopCapabilityResultWriter, ProductLiveCancellationProbe, RunCancellationFactory,
-    RunCancellationHandle, identity_message_ref, loop_driver_execution_extension_id,
+    CapabilitySurfaceProfileResolver, CapabilityWriteResult, EmptyLoopCapabilityPort,
+    EmptyUserProfileSource, HostIdentityContextBuildError, HostIdentityContextCandidate,
+    HostIdentityContextSource, HostIdentityMessageContent, HostInputBatch, HostInputEnvelope,
+    HostInputQueue, HostInputQueueError, HostManagedModelError, HostManagedModelErrorKind,
+    HostManagedModelGateway, HostManagedModelMessageRole, HostManagedModelRequest,
+    HostManagedModelResponse, HostRuntimeLoopCapabilityPort, HostSkillContextBuildError,
+    HostSkillContextCandidate, HostSkillContextSource, HostUserProfileSource,
+    IdentityApplicability, IdentityFileName, JsonSpawnSubagentInputCodec,
+    LoopCapabilityInputResolver, LoopCapabilityPortFactory, LoopCapabilityResultWriter,
+    ProductLiveCancellationProbe, RunCancellationFactory, RunCancellationHandle,
+    identity_message_ref, loop_driver_execution_extension_id,
 };
 use ironclaw_processes::ProcessServices;
 use ironclaw_reborn::driver_registry::{
@@ -132,6 +133,119 @@ use ironclaw_turns::{
     runner::{ClaimRunRequest, ClaimedTurnRun, TurnRunTransitionPort},
 };
 use serde_json::{Value, json};
+use tracing::field::{Field, Visit};
+use tracing_subscriber::{
+    Layer, filter::LevelFilter, layer::Context, layer::SubscriberExt, registry::LookupSpan,
+};
+
+#[derive(Clone, Debug)]
+struct CapturedEvent {
+    message: String,
+    fields: Vec<(String, String)>,
+}
+
+#[derive(Clone, Default)]
+struct CorrelatedEventCapture {
+    events: Arc<Mutex<Vec<CapturedEvent>>>,
+}
+
+struct CorrelatedEventLayer {
+    events: Arc<Mutex<Vec<CapturedEvent>>>,
+}
+
+#[derive(Debug, Clone)]
+struct CapturedSpanFields(Vec<(String, String)>);
+
+#[derive(Default)]
+struct CaptureVisitor {
+    message: String,
+    fields: Vec<(String, String)>,
+}
+
+impl CorrelatedEventCapture {
+    fn layer(&self) -> CorrelatedEventLayer {
+        CorrelatedEventLayer {
+            events: Arc::clone(&self.events),
+        }
+    }
+
+    fn contains(&self, message: &str, thread_id: &str, run_id: &str) -> bool {
+        self.events.lock().unwrap().iter().any(|event| {
+            event.message == message
+                && event
+                    .fields
+                    .iter()
+                    .any(|(name, value)| name == "thread_id" && value == thread_id)
+                && event
+                    .fields
+                    .iter()
+                    .any(|(name, value)| name == "run_id" && value == run_id)
+        })
+    }
+}
+
+impl CaptureVisitor {
+    fn record_owned(&mut self, field: &Field, value: String) {
+        if field.name() == "message" {
+            self.message = value;
+        } else {
+            self.fields.push((field.name().to_string(), value));
+        }
+    }
+}
+
+impl Visit for CaptureVisitor {
+    fn record_debug(&mut self, field: &Field, value: &dyn std::fmt::Debug) {
+        let rendered = format!("{value:?}");
+        let value = rendered
+            .strip_prefix('"')
+            .and_then(|value| value.strip_suffix('"'))
+            .unwrap_or(rendered.as_str())
+            .to_string();
+        self.record_owned(field, value);
+    }
+
+    fn record_str(&mut self, field: &Field, value: &str) {
+        self.record_owned(field, value.to_string());
+    }
+}
+
+impl<S> Layer<S> for CorrelatedEventLayer
+where
+    S: tracing::Subscriber + for<'lookup> LookupSpan<'lookup>,
+{
+    fn on_new_span(
+        &self,
+        attrs: &tracing::span::Attributes<'_>,
+        id: &tracing::Id,
+        ctx: Context<'_, S>,
+    ) {
+        let mut visitor = CaptureVisitor::default();
+        attrs.record(&mut visitor);
+        if let Some(span) = ctx.span(id) {
+            span.extensions_mut()
+                .insert(CapturedSpanFields(visitor.fields));
+        }
+    }
+
+    fn on_event(&self, event: &tracing::Event<'_>, ctx: Context<'_, S>) {
+        let mut visitor = CaptureVisitor::default();
+        event.record(&mut visitor);
+        let mut fields = Vec::new();
+        if let Some(scope) = ctx.event_scope(event) {
+            for span in scope.from_root() {
+                if let Some(span_fields) = span.extensions().get::<CapturedSpanFields>() {
+                    fields.extend(span_fields.0.clone());
+                }
+            }
+        }
+        fields.extend(visitor.fields);
+        self.events.lock().unwrap().push(CapturedEvent {
+            message: visitor.message,
+            fields,
+        });
+    }
+}
 
 fn driver_requirements_for(
     descriptor: &AgentLoopDriverDescriptor,
@@ -1601,6 +1715,78 @@ async fn turn_runner_worker_completes_queued_run_after_turn_store_reopen() {
             && message.content.as_deref() == Some("model says hi")
             && message.turn_run_id.as_deref() == Some(expected_run_id.as_str())
     }));
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn turn_runner_worker_emits_thread_run_correlated_operator_log() {
+    let capture = CorrelatedEventCapture::default();
+    // Capture at DEBUG to mirror the operator-logs capture filter: run
+    // lifecycle anchors are `debug!` so they never corrupt a REPL/TUI via the
+    // info-level stderr layer, yet stay captured for the Logs panel.
+    let subscriber = tracing_subscriber::registry()
+        .with(LevelFilter::DEBUG)
+        .with(capture.layer());
+    let dispatch = tracing::Dispatch::new(subscriber);
+    let _guard = tracing::dispatcher::set_default(&dispatch);
+
+    let fixture =
+        HostFixture::new_unsubmitted("thread-runner-operator-log", "hello operator log").await;
+    let turn_store = Arc::new(InMemoryTurnStateStore::default());
+    let resolver = InMemoryRunProfileResolver::default();
+    let resolved = resolver
+        .resolve_run_profile(RunProfileResolutionRequest::interactive_default())
+        .await
+        .unwrap();
+    let descriptor = resolved.loop_driver.clone();
+    let run_id =
+        queue_fixture_turn(&fixture, turn_store.as_ref(), &resolver, "idem-runner-log").await;
+
+    let mut registry = DriverRegistry::new();
+    registry
+        .register_driver(
+            Arc::new(TextOnlyFinalReplyDriver { descriptor }),
+            DriverRequirements::all_required(),
+            DriverKind::Reference,
+        )
+        .unwrap();
+
+    let (_wake_sender, wake_receiver) = TurnRunnerWakeReceiver::new();
+    let worker = TurnRunnerWorker::new(
+        TurnRunnerWorkerConfig {
+            heartbeat_interval: std::time::Duration::from_millis(20),
+            poll_interval: std::time::Duration::from_millis(10),
+            scope_filter: Some(fixture.context.scope.clone()),
+        },
+        turn_store.clone(),
+        loop_exit_applier_for_fixture(&fixture, turn_store.clone()),
+        Arc::new(registry),
+        Arc::new(fixture.factory_with_loop_checkpoint_store(turn_store.clone())),
+        wake_receiver,
+    );
+
+    let cancel = tokio_util::sync::CancellationToken::new();
+    let worker_done = worker.run(cancel.clone());
+    let completion = async {
+        wait_for_run_status(
+            turn_store.as_ref(),
+            &fixture.context.scope,
+            run_id,
+            TurnStatus::Completed,
+            "turn runner should complete queued run for operator log correlation",
+        )
+        .await;
+        cancel.cancel();
+    };
+    tokio::join!(worker_done, completion);
+
+    assert!(
+        capture.contains(
+            "turn run started",
+            &fixture.context.scope.thread_id.to_string(),
+            &run_id.to_string(),
+        ),
+        "turn runner should emit a run-scoped tracing event carrying thread_id and run_id"
+    );
 }
 
 #[cfg(feature = "libsql-restart-tests")]
@@ -6948,7 +7134,7 @@ impl LoopCapabilityResultWriter for InMemoryCapabilityIo {
     async fn write_capability_result(
         &self,
         write: CapabilityResultWrite<'_>,
-    ) -> Result<(LoopResultRef, u64), AgentLoopHostError> {
+    ) -> Result<CapabilityWriteResult, AgentLoopHostError> {
         let mut remaining_failures = self.fail_result_writes_remaining.lock().unwrap();
         if *remaining_failures > 0 {
             *remaining_failures -= 1;
@@ -6958,6 +7144,7 @@ impl LoopCapabilityResultWriter for InMemoryCapabilityIo {
             ));
         }
         drop(remaining_failures);
+        let output = write.output.clone();
         self.results
             .lock()
             .unwrap()
@@ -6974,7 +7161,7 @@ impl LoopCapabilityResultWriter for InMemoryCapabilityIo {
                 "capability result ref could not be represented",
             )
         })?;
-        Ok((result_ref, 0))
+        Ok(CapabilityWriteResult::from_output(result_ref, 0, &output))
     }
 }
 

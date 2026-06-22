@@ -110,6 +110,7 @@ impl WebuiAuthenticator for FixedUserToken {
     async fn authenticate(&self, token: &str) -> Option<WebuiAuthentication> {
         if token == VALID_TOKEN {
             Some(WebuiAuthentication::operator(
+                TenantId::new(TENANT).expect("tenant"),
                 UserId::new(self.user_id.as_str()).expect("user id"),
             ))
         } else {

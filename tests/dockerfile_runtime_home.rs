@@ -136,11 +136,29 @@ fn reborn_dockerfile_uses_feature_matched_cache_and_loopback_default() {
 
 #[test]
 fn reborn_dockerfile_build_is_covered_by_ci() {
-    let workflow = read_repo_file(".github/workflows/test.yml");
+    // The Reborn Dockerfile build can live in any CI workflow — it moved from
+    // test.yml to platform-and-compat.yml when the cross-cutting jobs were
+    // extracted. Assert it is built by *some* workflow rather than pinning a
+    // single file, so future reorganizations don't silently drop coverage.
+    let workflows_dir = repo_file(".github/workflows");
+    let covered = std::fs::read_dir(&workflows_dir)
+        .expect("workflows dir should be readable")
+        .filter_map(Result::ok)
+        .filter(|entry| {
+            entry
+                .path()
+                .extension()
+                .is_some_and(|ext| ext == "yml" || ext == "yaml")
+        })
+        .any(|entry| {
+            std::fs::read_to_string(entry.path())
+                .map(|content| content.contains("docker build -f Dockerfile.reborn"))
+                .unwrap_or(false)
+        });
 
     assert!(
-        workflow.contains("docker build -f Dockerfile.reborn"),
-        "CI docker-build job must build the Reborn CLI Dockerfile"
+        covered,
+        "some CI workflow must build the Reborn CLI Dockerfile (`docker build -f Dockerfile.reborn`)"
     );
 }
 

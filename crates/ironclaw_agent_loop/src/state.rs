@@ -8,7 +8,9 @@ mod slots;
 pub use bounded_ring::BoundedRing;
 pub use ironclaw_turns::LoopFailureKind;
 pub use ironclaw_turns::run_profile::AuthResumeApprovalIdentity;
-pub use signature::{ArgsHash, CapabilityCallSignature, CapabilityCallSignatureError};
+pub use signature::{
+    ArgsHash, CapabilityCallSignature, CapabilityCallSignatureError, CapabilityOutputObservation,
+};
 pub use slots::{
     CapabilityStrategyState, CompactionPromptSnapshot, CompactionStrategyState,
     ContextStrategyState, DeferredCompactionWatermark, GateStrategyState, GoalRefreshStrategyState,
@@ -58,6 +60,8 @@ pub struct LoopExecutionState {
 
     // executor-observed (populated by executor; read-only to strategies)
     pub recent_call_signatures: BoundedRing<CapabilityCallSignature, 8>,
+    #[serde(default)]
+    pub seen_capability_output_digests: BoundedRing<CapabilityOutputObservation, 64>,
     pub recent_failure_kinds: BoundedRing<LoopFailureKind, 8>,
     /// Rolling window of assistant-output token counts (from
     /// `LoopModelResponse::usage.output_tokens`). The default stop
@@ -237,6 +241,7 @@ impl LoopExecutionState {
             input_cursor: LoopInputCursor::origin_for_run(context),
             surface_version: None,
             recent_call_signatures: BoundedRing::new(),
+            seen_capability_output_digests: BoundedRing::new(),
             recent_failure_kinds: BoundedRing::new(),
             recent_output_token_counts: BoundedRing::new(),
             final_answer_nudges_used: 0,
@@ -561,6 +566,68 @@ mod tests {
         let restored: LoopExecutionState = serde_json::from_value(value).unwrap();
 
         assert_eq!(restored, state);
+    }
+
+    #[test]
+    fn seen_capability_output_digests_round_trips_through_checkpoint_payload() {
+        let context = test_run_context();
+        let mut state = LoopExecutionState::initial_for_run(&context);
+        let signature = CapabilityCallSignature::from_call(
+            CapabilityId::new("demo.echo").expect("valid capability id"),
+            &json!({"message": "hi"}),
+        )
+        .expect("signature builds");
+        state
+            .seen_capability_output_digests
+            .push(CapabilityOutputObservation {
+                signature,
+                output_digest: ironclaw_turns::run_profile::ContentDigest(42),
+            });
+
+        let payload = encode_payload(&state);
+        let restored =
+            LoopExecutionState::from_checkpoint_payload(&payload, CheckpointKind::BeforeBlock)
+                .expect("decode checkpoint payload");
+
+        assert_eq!(
+            restored.seen_capability_output_digests, state.seen_capability_output_digests,
+            "seen_capability_output_digests must survive checkpoint encode/decode"
+        );
+    }
+
+    #[test]
+    fn checkpoint_payload_without_output_digest_ring_decodes_to_empty() {
+        let context = test_run_context();
+        let mut state = LoopExecutionState::initial_for_run(&context);
+        let signature = CapabilityCallSignature::from_call(
+            CapabilityId::new("demo.echo").expect("valid capability id"),
+            &json!({"message": "hi"}),
+        )
+        .expect("signature builds");
+        state
+            .seen_capability_output_digests
+            .push(CapabilityOutputObservation {
+                signature,
+                output_digest: ironclaw_turns::run_profile::ContentDigest(42),
+            });
+
+        let payload = encode_payload(&state);
+        let mut value: serde_json::Value = serde_json::from_slice(&payload).expect("parse");
+        value
+            .as_object_mut()
+            .expect("state serializes as object")
+            .remove("seen_capability_output_digests");
+        let stripped_payload = serde_json::to_vec(&value).expect("re-encode");
+        let from_legacy = LoopExecutionState::from_checkpoint_payload(
+            &stripped_payload,
+            CheckpointKind::BeforeBlock,
+        )
+        .expect("decode legacy checkpoint payload without seen_capability_output_digests");
+
+        assert!(
+            from_legacy.seen_capability_output_digests.is_empty(),
+            "legacy checkpoint missing seen_capability_output_digests must decode to an empty ring"
+        );
     }
 
     #[test]

@@ -767,7 +767,7 @@ impl OAuthDcrProvider {
         material: SecretMaterial,
     ) -> Result<(), AuthProductError> {
         self.secret_store
-            .put(scope.clone(), handle, material)
+            .put(scope.clone(), handle, material, None)
             .await
             .map(|_| ())
             .map_err(|_| AuthProductError::BackendUnavailable)
@@ -1848,6 +1848,7 @@ mod tests {
             scope: ResourceScope,
             handle: SecretHandle,
             material: SecretMaterial,
+            expires_at: Option<ironclaw_host_api::Timestamp>,
         ) -> Result<ironclaw_secrets::SecretMetadata, ironclaw_secrets::SecretStoreError> {
             self.put_handles
                 .lock()
@@ -1858,7 +1859,7 @@ mod tests {
                     reason: "injected second put failure".to_string(),
                 });
             }
-            self.inner.put(scope, handle, material).await
+            self.inner.put(scope, handle, material, expires_at).await
         }
 
         async fn metadata(

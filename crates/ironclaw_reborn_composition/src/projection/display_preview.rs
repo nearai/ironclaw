@@ -32,6 +32,12 @@ pub(super) trait CapabilityDisplayPreviewSource: Send + Sync {
         activity: &CapabilityActivityProjection,
     ) -> Result<CapabilityDisplayPreviewResolution, ProductAdapterError>;
 
+    /// Input a still-running invocation should display inline, or `None` if the
+    /// invocation is not in-flight (or has no recorded input). Default `None`.
+    fn running_input(&self, _invocation_id: InvocationId) -> Option<CapabilityRunningInput> {
+        None
+    }
+
     #[cfg(test)]
     async fn preview(
         &self,
@@ -73,6 +79,18 @@ pub(crate) struct CapabilityDisplayPreviewStore {
 struct CapabilityDisplayPendingInputs {
     by_ref: HashMap<String, CapabilityDisplayInputPreview>,
     refs_by_run: HashMap<String, Vec<String>>,
+    /// `invocation_id -> input_ref`, established when the invocation starts
+    /// executing (the activity frame only knows the invocation id, but the
+    /// input was recorded under its ref at registration). Lets the
+    /// still-running activity frame surface the input before the result lands.
+    input_ref_by_invocation: HashMap<String, String>,
+}
+
+/// The input a still-running invocation shows in its activity row.
+#[derive(Debug, Clone, Default)]
+pub(super) struct CapabilityRunningInput {
+    pub(super) subtitle: Option<String>,
+    pub(super) input_summary: Option<String>,
 }
 
 #[derive(Default)]
@@ -116,7 +134,7 @@ pub(crate) struct CapabilityDisplayPreviewResult<'a> {
 impl CapabilityDisplayPreviewStore {
     fn lock_pending_inputs(&self) -> MutexGuard<'_, CapabilityDisplayPendingInputs> {
         self.pending.lock().unwrap_or_else(|poisoned| {
-            tracing::warn!(
+            tracing::debug!(
                 "capability display preview pending input store was poisoned; recovering"
             );
             poisoned.into_inner()
@@ -125,7 +143,7 @@ impl CapabilityDisplayPreviewStore {
 
     fn lock_completed_previews(&self) -> MutexGuard<'_, CapabilityDisplayCompletedPreviews> {
         self.completed.lock().unwrap_or_else(|poisoned| {
-            tracing::warn!(
+            tracing::debug!(
                 "capability display preview completed preview store was poisoned; recovering"
             );
             poisoned.into_inner()
@@ -158,7 +176,7 @@ impl CapabilityDisplayPreviewStore {
         let input_summary = input_summary(tool_name, arguments);
         let input = CapabilityDisplayInputPreview {
             title: bounded_display_text(tool_name, CAPABILITY_DISPLAY_SUMMARY_MAX_BYTES).text,
-            subtitle: safe_path_subtitle(arguments),
+            subtitle: primary_arg_subtitle(tool_name, arguments),
             truncated: input_summary
                 .as_ref()
                 .is_some_and(|summary| summary.truncated),
@@ -173,6 +191,19 @@ impl CapabilityDisplayPreviewStore {
             .push(input_ref);
     }
 
+    /// Link a now-running invocation to the ref its input was recorded under,
+    /// so the running activity frame can surface that input before completion.
+    pub(crate) fn record_running_invocation(
+        &self,
+        invocation_id: InvocationId,
+        input_ref: &CapabilityInputRef,
+    ) {
+        let mut pending = self.lock_pending_inputs();
+        pending
+            .input_ref_by_invocation
+            .insert(invocation_id.to_string(), input_ref.as_str().to_string());
+    }
+
     #[cfg(test)]
     pub(crate) fn record_result(&self, result: CapabilityDisplayPreviewResult<'_>) {
         self.record_result_with_preview(result, None);
@@ -183,10 +214,15 @@ impl CapabilityDisplayPreviewStore {
         result: CapabilityDisplayPreviewResult<'_>,
         display_preview: Option<&CapabilityDisplayOutputPreview>,
     ) {
-        let input = self
-            .lock_pending_inputs()
-            .by_ref
-            .remove(result.input_ref.as_str());
+        let input = {
+            let mut pending = self.lock_pending_inputs();
+            // The result has landed: drop the running-input link so the
+            // activity frame stops surfacing it as in-flight.
+            pending
+                .input_ref_by_invocation
+                .remove(&result.invocation_id.to_string());
+            pending.by_ref.remove(result.input_ref.as_str())
+        };
         let title = input
             .as_ref()
             .map(|input| input.title.clone())
@@ -223,9 +259,13 @@ impl CapabilityDisplayPreviewStore {
     pub(crate) fn prune_run(&self, run_id: &str) {
         let mut pending = self.lock_pending_inputs();
         if let Some(input_refs) = pending.refs_by_run.remove(run_id) {
-            for input_ref in input_refs {
-                pending.by_ref.remove(&input_ref);
+            let pruned: std::collections::HashSet<String> = input_refs.into_iter().collect();
+            for input_ref in &pruned {
+                pending.by_ref.remove(input_ref);
             }
+            pending
+                .input_ref_by_invocation
+                .retain(|_, input_ref| !pruned.contains(input_ref));
         }
         drop(pending);
 
@@ -266,6 +306,18 @@ impl CapabilityDisplayPreviewSource for CapabilityDisplayPreviewStore {
         activity: &CapabilityActivityProjection,
     ) -> Result<CapabilityDisplayPreviewResolution, ProductAdapterError> {
         capability_display_preview_resolution_from_store(self, activity)
+    }
+
+    fn running_input(&self, invocation_id: InvocationId) -> Option<CapabilityRunningInput> {
+        let pending = self.lock_pending_inputs();
+        let input_ref = pending
+            .input_ref_by_invocation
+            .get(&invocation_id.to_string())?;
+        let input = pending.by_ref.get(input_ref)?;
+        Some(CapabilityRunningInput {
+            subtitle: input.subtitle.clone(),
+            input_summary: input.input_summary.clone(),
+        })
     }
 }
 
@@ -732,6 +784,52 @@ fn safe_path_subtitle(value: &serde_json::Value) -> Option<String> {
         .or_else(|| value.get("target"))?
         .as_str()?;
     safe_display_path(path)
+}
+
+/// A compact, display-safe "primary argument" for the activity row's inline
+/// detail — the single most salient input for a tool, so the row reads like
+/// `nearai.web_search   <query>` / `shell   <command>` / `read_file   <path>`
+/// instead of a bare tool name. Reuses the same sanitizing formatters as
+/// `input_summary` (URL stripping, shell redaction, byte bounds) and falls back
+/// to the path subtitle for tools without a recognized primary argument.
+fn primary_arg_subtitle(capability_id: &str, value: &serde_json::Value) -> Option<String> {
+    // Search-shaped tools → the query string.
+    if (capability_matches(capability_id, "memory_search")
+        || capability_matches(capability_id, "web_search")
+        || capability_matches(capability_id, "search")
+        || capability_matches(capability_id, "llm_context"))
+        && let Some(query) = string_arg(value, &["query", "q", "text", "pattern"])
+    {
+        return non_empty(bounded_summary_value(query).text);
+    }
+
+    // Shell → the command (with the existing secret-redacting formatter).
+    if capability_matches(capability_id, "shell")
+        && let Some(command) = string_arg(value, &["command"])
+    {
+        return non_empty(shell_command_display_text(command).text);
+    }
+
+    // HTTP / fetch → the URL (sensitive parts stripped).
+    if (capability_matches(capability_id, "http")
+        || capability_matches(capability_id, "http.save")
+        || capability_matches(capability_id, "web_fetch")
+        || capability_matches(capability_id, "get_content"))
+        && let Some(url) = string_arg(value, &["url"])
+    {
+        return non_empty(safe_url_display(url).text);
+    }
+
+    // Glob / grep → the pattern.
+    if (capability_matches(capability_id, "glob") || capability_matches(capability_id, "grep"))
+        && let Some(pattern) = string_arg(value, &["pattern"])
+    {
+        return non_empty(bounded_summary_value(pattern).text);
+    }
+
+    // Everything else (read_file, write_file, list_dir, apply_patch, memory_*)
+    // → the path/target.
+    safe_path_subtitle(value)
 }
 
 /// Returns `true` when the path contains characters that are inherently unsafe

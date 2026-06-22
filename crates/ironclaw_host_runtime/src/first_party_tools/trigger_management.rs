@@ -8,8 +8,8 @@ use ironclaw_host_api::{
     RuntimeDispatchErrorKind,
 };
 use ironclaw_triggers::{
-    TriggerCompletionPolicy, TriggerError, TriggerId, TriggerRecord, TriggerRepository,
-    TriggerRunRecord, TriggerSchedule, TriggerSourceKind, TriggerState,
+    TriggerError, TriggerId, TriggerRecord, TriggerRepository, TriggerRunRecord, TriggerSchedule,
+    TriggerSourceKind, TriggerState,
 };
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -32,7 +32,7 @@ pub const TRIGGER_CREATE_CAPABILITY_ID: &str = "builtin.trigger_create";
 pub const TRIGGER_LIST_CAPABILITY_ID: &str = "builtin.trigger_list";
 pub const TRIGGER_REMOVE_CAPABILITY_ID: &str = "builtin.trigger_remove";
 
-const TRIGGER_CREATE_DESCRIPTION: &str = "Create a caller-scoped scheduled trigger. If the user asks for routine or trigger results to be sent through an outbound product or channel, use the visible outbound delivery target capabilities to select that delivery target before creating the trigger; delivery routing is not encoded in this input.";
+const TRIGGER_CREATE_DESCRIPTION: &str = "Create a caller-scoped scheduled trigger (one-time or recurring). If the user asks for routine or trigger results to be sent through an outbound product or channel, use the visible outbound delivery target capabilities to select that delivery target before creating the trigger; delivery routing is not encoded in this input.";
 
 pub(super) fn manifests() -> Result<Vec<CapabilityManifest>, ExtensionError> {
     Ok(vec![
@@ -195,11 +195,35 @@ impl FirstPartyCapabilityHandler for TriggerManagementToolHandler {
 }
 
 #[derive(Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+enum TriggerScheduleInput {
+    Cron {
+        expression: String,
+        timezone: String,
+    },
+    Once {
+        at: String,
+        timezone: String,
+    },
+}
+
+impl TriggerScheduleInput {
+    fn into_schedule(self) -> Result<TriggerSchedule, TriggerError> {
+        match self {
+            Self::Cron {
+                expression,
+                timezone,
+            } => TriggerSchedule::cron_with_timezone(expression, timezone),
+            Self::Once { at, timezone } => TriggerSchedule::once_from_local(&at, &timezone),
+        }
+    }
+}
+
+#[derive(Deserialize)]
 struct TriggerCreateInput {
     name: String,
     prompt: String,
-    cron: String,
-    timezone: String,
+    schedule: TriggerScheduleInput,
 }
 
 #[derive(Deserialize)]
@@ -221,7 +245,9 @@ async fn create_trigger(
     now: DateTime<Utc>,
 ) -> Result<Value, FirstPartyCapabilityError> {
     let input: TriggerCreateInput = serde_json::from_value(input).map_err(|_| input_error())?;
-    let schedule = TriggerSchedule::cron_with_timezone(input.cron, input.timezone)
+    let schedule = input
+        .schedule
+        .into_schedule()
         .map_err(trigger_input_error)?;
     let next_run_at = next_run_at_for_schedule(&schedule, now)?;
     let record = TriggerRecord {
@@ -233,7 +259,6 @@ async fn create_trigger(
         name: input.name,
         source: TriggerSourceKind::Schedule,
         schedule,
-        completion_policy: TriggerCompletionPolicy::Recurring,
         prompt: input.prompt,
         state: TriggerState::Scheduled,
         next_run_at,
@@ -288,6 +313,7 @@ async fn list_triggers(
             scope.agent_id.clone(),
             scope.project_id.clone(),
             limit,
+            &[],
         )
         .await
         .map_err(|error| trigger_repository_error("list_scoped_triggers", error))?;
@@ -344,7 +370,6 @@ fn trigger_output(record: &TriggerRecord, recent_runs: &[TriggerRunRecord]) -> V
         "name": record.name,
         "source": record.source,
         "schedule": record.schedule,
-        "completion_policy": record.completion_policy,
         "state": record.state,
         "next_run_at": record.next_run_at,
         "last_run_at": record.last_run_at,
@@ -492,7 +517,7 @@ mod tests {
         let input = serde_json::json!({
             "name": "daily",
             "prompt": "check mail",
-            "cron": "0 9 * * *"
+            "schedule": { "kind": "cron", "expression": "0 9 * * *" }  // missing timezone
         });
         let result: Result<TriggerCreateInput, _> = serde_json::from_value(input);
         assert!(
@@ -506,34 +531,99 @@ mod tests {
         let input = serde_json::json!({
             "name": "daily",
             "prompt": "check mail",
-            "cron": "0 9 * * *",
-            "timezone": "Not/A/Timezone"
+            "schedule": { "kind": "cron", "expression": "0 9 * * *", "timezone": "Not/A/Timezone" }
         });
         let parsed: TriggerCreateInput = serde_json::from_value(input).expect("deserialize");
-        let result = TriggerSchedule::cron_with_timezone(parsed.cron, parsed.timezone);
+        let result = parsed.schedule.into_schedule();
         assert!(result.is_err(), "invalid timezone must be rejected");
-        let error_msg = result.unwrap_err().to_string();
-        assert!(
-            error_msg.contains("invalid timezone"),
-            "error should name the problem: {error_msg}"
-        );
     }
 
     #[test]
-    fn trigger_create_input_accepts_valid_timezone() {
+    fn trigger_create_input_accepts_cron_schedule() {
         let input = serde_json::json!({
             "name": "daily",
             "prompt": "check mail",
-            "cron": "0 9 * * *",
-            "timezone": "America/Los_Angeles"
+            "schedule": { "kind": "cron", "expression": "0 9 * * *", "timezone": "America/Los_Angeles" }
         });
         let parsed: TriggerCreateInput = serde_json::from_value(input).expect("deserialize");
-        let schedule = TriggerSchedule::cron_with_timezone(parsed.cron, &parsed.timezone)
-            .expect("valid timezone accepted");
+        let schedule = parsed
+            .schedule
+            .into_schedule()
+            .expect("valid cron schedule accepted");
         match &schedule {
             TriggerSchedule::Cron { timezone, .. } => {
                 assert_eq!(timezone, "America/Los_Angeles");
             }
+            TriggerSchedule::Once { .. } => panic!("expected Cron"),
         }
+    }
+
+    #[test]
+    fn trigger_create_input_rejects_missing_schedule() {
+        let input = serde_json::json!({
+            "name": "daily",
+            "prompt": "check mail"
+        });
+        let result: Result<TriggerCreateInput, _> = serde_json::from_value(input);
+        assert!(
+            result.is_err(),
+            "omitting schedule must fail deserialization"
+        );
+    }
+
+    #[test]
+    fn trigger_create_input_accepts_once_schedule_and_persists_as_utc() {
+        // 2099-06-24T17:00:00 UTC is unambiguous and in the future
+        let input = serde_json::json!({
+            "name": "one-off reminder",
+            "prompt": "remind me about the meeting",
+            "schedule": { "kind": "once", "at": "2099-06-24T17:00:00", "timezone": "UTC" }
+        });
+        let parsed: TriggerCreateInput =
+            serde_json::from_value(input).expect("deserialize one-shot input");
+        let schedule = parsed
+            .schedule
+            .into_schedule()
+            .expect("valid once schedule accepted");
+        match &schedule {
+            TriggerSchedule::Once { at, timezone } => {
+                assert_eq!(timezone, "UTC");
+                // Wall-clock 17:00:00 UTC → stored UTC timestamp must match
+                assert_eq!(at.to_rfc3339(), "2099-06-24T17:00:00+00:00");
+            }
+            TriggerSchedule::Cron { .. } => panic!("expected Once"),
+        }
+    }
+
+    #[test]
+    fn trigger_create_input_rejects_dst_ambiguous_time() {
+        // 2026-11-01T01:30:00 in America/New_York occurs twice (DST fall-back overlap)
+        let input = serde_json::json!({
+            "name": "ambiguous",
+            "prompt": "test",
+            "schedule": { "kind": "once", "at": "2026-11-01T01:30:00", "timezone": "America/New_York" }
+        });
+        let parsed: TriggerCreateInput = serde_json::from_value(input).expect("deserialize");
+        let result = parsed.schedule.into_schedule();
+        assert!(
+            result.is_err(),
+            "DST-ambiguous time must be rejected as input error"
+        );
+    }
+
+    #[test]
+    fn trigger_create_input_rejects_dst_gap_time() {
+        // 2026-03-08T02:30:00 in America/New_York does not exist (DST spring-forward gap)
+        let input = serde_json::json!({
+            "name": "dst-gap",
+            "prompt": "test",
+            "schedule": { "kind": "once", "at": "2026-03-08T02:30:00", "timezone": "America/New_York" }
+        });
+        let parsed: TriggerCreateInput = serde_json::from_value(input).expect("deserialize");
+        let result = parsed.schedule.into_schedule();
+        assert!(
+            result.is_err(),
+            "DST-gap time must be rejected as input error"
+        );
     }
 }

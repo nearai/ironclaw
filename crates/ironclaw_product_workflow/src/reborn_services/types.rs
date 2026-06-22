@@ -994,6 +994,13 @@ pub enum RebornAutomationSource {
         /// (e.g. "America/New_York"). Always "UTC" for legacy rows.
         timezone: String,
     },
+    /// A one-time trigger that fires once at `at`, then completes.
+    Once {
+        /// One-shot fire time as an RFC3339 UTC timestamp.
+        at: String,
+        /// IANA timezone the one-shot was scheduled in (for display).
+        timezone: String,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

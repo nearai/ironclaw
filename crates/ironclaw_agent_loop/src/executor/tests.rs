@@ -1140,6 +1140,7 @@ async fn reply_admission_rejects_candidate_before_finalizing_and_continues() {
                 progress: ironclaw_turns::run_profile::CapabilityProgress::MadeProgress,
                 terminate_hint: false,
                 byte_len: 0,
+                output_digest: None,
             })],
             stopped_on_suspension: false,
         }]);
@@ -1210,6 +1211,7 @@ async fn reply_admission_rendered_flag_stays_false_when_context_suppresses_contr
                 progress: ironclaw_turns::run_profile::CapabilityProgress::MadeProgress,
                 terminate_hint: false,
                 byte_len: 0,
+                output_digest: None,
             })],
             stopped_on_suspension: false,
         }]);
@@ -1379,6 +1381,7 @@ async fn capability_stage_returns_after_batch_summary() {
                 progress: ironclaw_turns::run_profile::CapabilityProgress::MadeProgress,
                 terminate_hint: false,
                 byte_len: 0,
+                output_digest: None,
             })],
             stopped_on_suspension: false,
         },
@@ -1429,6 +1432,7 @@ async fn capability_stage_returns_after_batch_summary() {
                         no_progress_count: 0,
                         observed_signatures: vec![signature.clone()],
                         made_progress_signatures: vec![signature],
+                        no_change_signatures: Vec::new(),
                     },
                 )
             );
@@ -1509,7 +1513,12 @@ fn sanitize_result_ref_suffix_handles_empty_special_chars_and_truncation() {
 }
 
 #[tokio::test]
-async fn exit_stage_no_progress_detected_finalizes_fallback_reply() {
+async fn exit_stage_no_progress_fails_when_nudge_disabled() {
+    // Production default: the driver-specific nudge gate is off, so a no-progress
+    // stop produces a typed `NoProgressDetected` failure with a Final checkpoint —
+    // NOT a canned "I stopped" reply finalized as a completed turn. No assistant
+    // reply is issued (no model call), and the failure carries the honest category
+    // the product layer renders deterministically.
     let host = MockHost::new(Vec::new());
     let family = crate::families::default();
     let ctx = StageContext {
@@ -1530,12 +1539,18 @@ async fn exit_stage_no_progress_detected_finalizes_fallback_reply() {
         .expect("exit stage");
 
     match exit {
-        LoopExit::Completed(completed) => {
-            assert_eq!(completed.reply_message_refs.len(), 1);
-            assert!(completed.final_checkpoint_id.is_some());
+        LoopExit::Failed(failed) => {
+            assert_eq!(failed.reason_kind, LoopFailureKind::NoProgressDetected);
+            // Final checkpoint is mandatory for the failed exit to validate
+            // through `verify_failure_evidence` (parity with the Aborted arm).
+            assert!(failed.checkpoint_id.is_some());
         }
-        other => panic!("expected completed exit with fallback reply, got {other:?}"),
+        other => panic!("expected typed no-progress failure, got {other:?}"),
     }
+    assert!(
+        host.model_requests().is_empty(),
+        "nudge gate disabled must not issue a model call"
+    );
 }
 
 #[tokio::test]
@@ -1586,7 +1601,9 @@ async fn no_progress_nudge_synthesizes_reply_when_gate_enabled() {
 
 #[tokio::test]
 async fn no_progress_skips_nudge_when_gate_disabled() {
-    // Gate OFF: no model call, canned fallback reply (production default).
+    // Gate OFF: even with a model reply available, no tool-free nudge call is
+    // issued and the no-progress stop terminates as a typed failure (production
+    // default) — not a canned reply, not a completed turn.
     let host = MockHost::new(vec![reply_response_with_text("unused")]);
     let family = crate::families::default();
     let ctx = StageContext {
@@ -1610,7 +1627,7 @@ async fn no_progress_skips_nudge_when_gate_disabled() {
         host.model_requests().is_empty(),
         "no nudge model call when gate disabled"
     );
-    assert!(matches!(exit, LoopExit::Completed(_)));
+    assert!(matches!(exit, LoopExit::Failed(_)));
 }
 
 #[tokio::test]
@@ -1656,8 +1673,8 @@ async fn budget_iteration_limit_nudges_to_completed_when_gate_enabled() {
 
 #[tokio::test]
 async fn nudge_respects_one_shot_cap() {
-    // With the cap already spent, the no-progress exit must not issue a model
-    // call and falls back to the canned reply.
+    // With the cap already spent, the no-progress exit must not issue another
+    // model call and terminates as a typed failure (no canned reply).
     let host = MockHost::new(vec![reply_response_with_text("unused")]).with_driver_nudges_enabled();
     let family = crate::families::default();
     let ctx = StageContext {
@@ -1682,7 +1699,7 @@ async fn nudge_respects_one_shot_cap() {
         host.model_requests().is_empty(),
         "capped nudge must not issue another model call"
     );
-    assert!(matches!(exit, LoopExit::Completed(_)));
+    assert!(matches!(exit, LoopExit::Failed(_)));
 }
 
 #[tokio::test]
@@ -1726,6 +1743,7 @@ async fn stopped_on_suspension_completed_outcome_still_appends_result() {
                 progress: ironclaw_turns::run_profile::CapabilityProgress::MadeProgress,
                 terminate_hint: true,
                 byte_len: 0,
+                output_digest: None,
             })],
             stopped_on_suspension: true,
         },
@@ -1779,6 +1797,7 @@ async fn stop_stage_preserves_ack_and_returns_stop_kind() {
                         no_progress_count: 0,
                         observed_signatures: Vec::new(),
                         made_progress_signatures: Vec::new(),
+                        no_change_signatures: Vec::new(),
                     },
                 ),
                 pending_input_ack,
@@ -1815,6 +1834,7 @@ async fn terminate_hint_after_batch_completes_without_extra_model_call() {
                 progress: ironclaw_turns::run_profile::CapabilityProgress::MadeProgress,
                 terminate_hint: true,
                 byte_len: 0,
+                output_digest: None,
             })],
             stopped_on_suspension: false,
         },
@@ -1952,6 +1972,7 @@ async fn approval_resume_metadata_is_replayed_after_before_block_checkpoint() {
                 progress: ironclaw_turns::run_profile::CapabilityProgress::MadeProgress,
                 terminate_hint: true,
                 byte_len: 0,
+                output_digest: None,
             })],
             stopped_on_suspension: false,
         },
@@ -2182,6 +2203,7 @@ async fn parallel_batch_records_completed_results_before_blocking_on_suspension(
                     progress: ironclaw_turns::run_profile::CapabilityProgress::MadeProgress,
                     terminate_hint: false,
                     byte_len: 0,
+                    output_digest: None,
                 }),
             ],
             stopped_on_suspension: false,
@@ -2241,6 +2263,7 @@ async fn capability_batch_rejects_outcome_count_exceeding_invocation_count() {
                     progress: ironclaw_turns::run_profile::CapabilityProgress::MadeProgress,
                     terminate_hint: false,
                     byte_len: 0,
+                    output_digest: None,
                 }),
                 CapabilityOutcome::Completed(CapabilityResultMessage {
                     result_ref: LoopResultRef::new("result:second").expect("valid"),
@@ -2248,6 +2271,7 @@ async fn capability_batch_rejects_outcome_count_exceeding_invocation_count() {
                     progress: ironclaw_turns::run_profile::CapabilityProgress::MadeProgress,
                     terminate_hint: false,
                     byte_len: 0,
+                    output_digest: None,
                 }),
             ],
             stopped_on_suspension: true,
@@ -2470,6 +2494,7 @@ async fn terminate_hint_counts_only_visible_invoked_calls() {
                 progress: ironclaw_turns::run_profile::CapabilityProgress::MadeProgress,
                 terminate_hint: true,
                 byte_len: 0,
+                output_digest: None,
             })],
             stopped_on_suspension: false,
         },
@@ -2560,6 +2585,7 @@ async fn retry_uses_single_call_invocation() {
                     progress: ironclaw_turns::run_profile::CapabilityProgress::MadeProgress,
                     terminate_hint: true,
                     byte_len: 0,
+                    output_digest: None,
                 },
             )]);
         let executor = CanonicalAgentLoopExecutor;
@@ -2595,6 +2621,7 @@ async fn policy_denied_capability_error_honors_retry_recovery() {
                 progress: ironclaw_turns::run_profile::CapabilityProgress::MadeProgress,
                 terminate_hint: true,
                 byte_len: 0,
+                output_digest: None,
             },
         )]);
     let executor = CanonicalAgentLoopExecutor;
@@ -2719,6 +2746,7 @@ async fn completed_provider_call_appends_provider_replay_metadata() {
                 progress: ironclaw_turns::run_profile::CapabilityProgress::MadeProgress,
                 terminate_hint: true,
                 byte_len: 0,
+                output_digest: None,
             })],
             stopped_on_suspension: false,
         },
@@ -2765,6 +2793,7 @@ async fn denied_provider_call_appends_failure_tool_result_for_replay() {
                     progress: ironclaw_turns::run_profile::CapabilityProgress::MadeProgress,
                     terminate_hint: true,
                     byte_len: 0,
+                    output_digest: None,
                 }),
                 CapabilityOutcome::Denied(ironclaw_turns::run_profile::CapabilityDenied {
                     reason_kind:
@@ -2882,11 +2911,17 @@ async fn invalid_provider_tool_failure_appends_structured_model_observation() {
 }
 
 #[tokio::test]
-async fn repeated_model_visible_capability_failures_stop_with_no_progress_fallback() {
+async fn repeated_capability_failures_do_not_trip_no_progress_and_run_can_recover() {
+    // PR3: Blocked/failed tool calls are NOT counted as no-progress — failures
+    // route through recovery and are bounded by the budget/iteration limit, not
+    // the no-progress escape. Three failed batches do not fire NoProgressDetected;
+    // once the model recovers with a reply the run completes normally, and the
+    // tool-error results stay in the transcript (work isn't lost).
     let host = MockHost::new(vec![
         provider_calls_response(),
         provider_calls_response(),
         provider_calls_response(),
+        reply_response(),
     ])
     .with_batch_outcomes(
         (0..3)
@@ -2910,33 +2945,30 @@ async fn repeated_model_visible_capability_failures_stop_with_no_progress_fallba
         .await
         .expect("execute");
 
-    match exit {
-        LoopExit::Completed(completed) => {
-            assert_eq!(
-                completed.reply_message_refs,
-                vec![message_ref("msg:assistant")]
-            );
-            assert_eq!(completed.result_refs.len(), 3);
-        }
-        other => panic!("expected completed no-progress fallback, got {other:?}"),
-    }
-    assert_eq!(host.model_requests().len(), 3);
+    assert!(
+        matches!(exit, LoopExit::Completed(_)),
+        "blocked failures must not fire no-progress; the recovered reply completes the run, got {exit:?}"
+    );
     assert_eq!(host.batch_invocations().len(), 3);
     assert_eq!(host.appended_result_refs().len(), 3);
     assert_eq!(
         final_staged_state(&host)
             .stop_state
             .trailing_no_progress_results,
-        3
+        0,
+        "Blocked/failed results must not count toward the no-progress escape"
     );
 }
 
 #[tokio::test]
-async fn repeated_model_visible_multi_call_failures_stop_with_no_progress_fallback() {
+async fn repeated_multi_call_failures_do_not_trip_no_progress_and_run_can_recover() {
+    // PR3 (multi-call variant): batches where every call fails are not counted as
+    // no-progress; the run recovers and completes once the model replies.
     let host = MockHost::new(vec![
         provider_two_calls_response(),
         provider_two_calls_response(),
         provider_two_calls_response(),
+        reply_response(),
     ])
     .with_batch_outcomes(
         (0..3)
@@ -2965,24 +2997,61 @@ async fn repeated_model_visible_multi_call_failures_stop_with_no_progress_fallba
         .await
         .expect("execute");
 
-    match exit {
-        LoopExit::Completed(completed) => {
-            assert_eq!(
-                completed.reply_message_refs,
-                vec![message_ref("msg:assistant")]
-            );
-            assert_eq!(completed.result_refs.len(), 6);
-        }
-        other => panic!("expected completed no-progress fallback, got {other:?}"),
-    }
-    assert_eq!(host.model_requests().len(), 3);
+    assert!(
+        matches!(exit, LoopExit::Completed(_)),
+        "multi-call blocked failures must not fire no-progress; got {exit:?}"
+    );
     assert_eq!(host.batch_invocations().len(), 3);
     assert_eq!(host.appended_result_refs().len(), 6);
     assert_eq!(
         final_staged_state(&host)
             .stop_state
             .trailing_no_progress_results,
-        3
+        0,
+        "Blocked/failed results must not count toward the no-progress escape"
+    );
+}
+
+#[tokio::test]
+async fn completed_output_digest_is_recorded_into_seen_capability_output_digests() {
+    // PR2 plumbing: the executor must record a completed result's `output_digest`
+    // into the checkpointed `seen_capability_output_digests` ring. Asserted through
+    // the executor (not the state helper) so the single production wiring line in
+    // `append_completed_capability_result` cannot silently regress while it is still
+    // inert — nothing reads the ring until output-aware detection lands in a later
+    // change, so a behavior-only test would stay green even if the push were removed.
+    let digest = ironclaw_turns::run_profile::ContentDigest(4242);
+    let result_ref = LoopResultRef::new("result:digest-recorded").expect("valid");
+    let host = MockHost::new(vec![calls_response()]).with_batch_outcomes(vec![
+        ironclaw_turns::run_profile::CapabilityBatchOutcome {
+            outcomes: vec![CapabilityOutcome::Completed(CapabilityResultMessage {
+                result_ref: result_ref.clone(),
+                safe_summary: "completed with digest".to_string(),
+                progress: ironclaw_turns::run_profile::CapabilityProgress::MadeProgress,
+                terminate_hint: true,
+                byte_len: 0,
+                output_digest: Some(digest),
+            })],
+            stopped_on_suspension: false,
+        },
+    ]);
+    let executor = CanonicalAgentLoopExecutor;
+    let state = LoopExecutionState::initial_for_run(host.run_context());
+
+    let exit = executor
+        .execute_family(&crate::families::default(), &host, state)
+        .await
+        .expect("execute");
+    assert!(matches!(exit, LoopExit::Completed(_)));
+
+    let recorded: Vec<_> = final_staged_state(&host)
+        .seen_capability_output_digests
+        .iter()
+        .map(|observation| observation.output_digest)
+        .collect();
+    assert!(
+        recorded.contains(&digest),
+        "executor must record the completed result's output_digest into the ring; got {recorded:?}"
     );
 }
 
@@ -3263,6 +3332,7 @@ async fn executor_post_capability_trips_policy_and_sets_flags_in_final_state() {
                 terminate_hint: true,
                 // Exceeds the default 32 000-byte cap for unknown capability ids.
                 byte_len: 33_001,
+                output_digest: None,
             })],
             stopped_on_suspension: false,
         },
@@ -3325,6 +3395,7 @@ async fn executor_post_capability_does_not_trip_under_threshold() {
                 progress: ironclaw_turns::run_profile::CapabilityProgress::MadeProgress,
                 terminate_hint: true,
                 byte_len: 100, // well under the 32 000-byte default cap
+                output_digest: None,
             })],
             stopped_on_suspension: false,
         },
@@ -3371,6 +3442,7 @@ async fn executor_skip_model_turn_bypasses_model_stage() {
                 progress: ironclaw_turns::run_profile::CapabilityProgress::MadeProgress,
                 terminate_hint: false, // loop must continue so SkipModel fires
                 byte_len: 33_001,
+                output_digest: None,
             })],
             stopped_on_suspension: false,
         },
@@ -3482,6 +3554,7 @@ async fn executor_batch_accumulates_per_capability_bytes_and_trips() {
                     progress: ironclaw_turns::run_profile::CapabilityProgress::MadeProgress,
                     terminate_hint: true, // exit after batch so we can inspect state
                     byte_len: 20_000,
+                    output_digest: None,
                 }),
                 CapabilityOutcome::Completed(CapabilityResultMessage {
                     result_ref: LoopResultRef::new("result:second").expect("valid"),
@@ -3489,6 +3562,7 @@ async fn executor_batch_accumulates_per_capability_bytes_and_trips() {
                     progress: ironclaw_turns::run_profile::CapabilityProgress::MadeProgress,
                     terminate_hint: true,
                     byte_len: 20_000,
+                    output_digest: None,
                 }),
             ],
             stopped_on_suspension: false,
@@ -3710,6 +3784,7 @@ async fn executor_emits_compaction_started_with_capability_result_overflow_initi
                 progress: ironclaw_turns::run_profile::CapabilityProgress::MadeProgress,
                 terminate_hint: false, // loop must continue so SkipModel iteration fires
                 byte_len: 33_001,      // exceeds the 32 000-byte default cap
+                output_digest: None,
             })],
             stopped_on_suspension: false,
         }])
@@ -4129,6 +4204,7 @@ async fn resume_after_auth_gate_redispatches_original_call_without_model_turn() 
                     progress: ironclaw_turns::run_profile::CapabilityProgress::MadeProgress,
                     terminate_hint: true,
                     byte_len: 0,
+                    output_digest: None,
                 },
             )],
             stopped_on_suspension: false,
@@ -4285,6 +4361,7 @@ async fn auth_resume_provider_registration_failure_fails_before_invocation() {
                         progress: ironclaw_turns::run_profile::CapabilityProgress::MadeProgress,
                         terminate_hint: true,
                         byte_len: 0,
+                        output_digest: None,
                     },
                 )],
                 stopped_on_suspension: false,
@@ -4765,6 +4842,7 @@ async fn auth_resume_after_approval_carries_resume_token_and_approval_request_id
                     progress: ironclaw_turns::run_profile::CapabilityProgress::MadeProgress,
                     terminate_hint: true,
                     byte_len: 0,
+                    output_digest: None,
                 },
             )],
             stopped_on_suspension: false,
@@ -4851,6 +4929,10 @@ async fn auth_resume_after_approval_carries_resume_token_and_approval_request_id
     assert_eq!(
         pending_auth_pa.approval_request_id, approval_request_id,
         "pending_auth_resume.prior_approval.approval_request_id must match the approval request"
+    );
+    assert!(
+        phase2_bb.pending_approval_resume.is_none(),
+        "phase 2 auth gate must fold prior approval into pending_auth_resume and clear pending_approval_resume"
     );
 
     // ── Phase 3: auth-resume → Completed ─────────────────────────────────────
@@ -5002,6 +5084,7 @@ async fn auth_resume_after_approval_carries_original_correlation_id() {
                     progress: ironclaw_turns::run_profile::CapabilityProgress::MadeProgress,
                     terminate_hint: true,
                     byte_len: 0,
+                    output_digest: None,
                 },
             )],
             stopped_on_suspension: false,
@@ -5136,6 +5219,7 @@ async fn auth_resume_slot_consumed_on_first_batch_match_not_reused_for_second_ca
                         progress: ironclaw_turns::run_profile::CapabilityProgress::MadeProgress,
                         terminate_hint: false,
                         byte_len: 0,
+                        output_digest: None,
                     },
                 ),
                 CapabilityOutcome::Completed(
@@ -5145,6 +5229,7 @@ async fn auth_resume_slot_consumed_on_first_batch_match_not_reused_for_second_ca
                         progress: ironclaw_turns::run_profile::CapabilityProgress::MadeProgress,
                         terminate_hint: false,
                         byte_len: 0,
+                        output_digest: None,
                     },
                 ),
             ],
@@ -5864,6 +5949,7 @@ async fn capability_stage_denied_auth_resume_only_fails_matching_call_remaining_
                 progress: ironclaw_turns::run_profile::CapabilityProgress::MadeProgress,
                 terminate_hint: false,
                 byte_len: 0,
+                output_digest: None,
             })],
             stopped_on_suspension: false,
         }]);
@@ -6092,6 +6178,7 @@ async fn capability_stage_denied_auth_resume_one_denied_two_remaining_all_dispat
                     progress: ironclaw_turns::run_profile::CapabilityProgress::MadeProgress,
                     terminate_hint: false,
                     byte_len: 0,
+                    output_digest: None,
                 }),
                 CapabilityOutcome::Completed(CapabilityResultMessage {
                     result_ref: z_result_ref.clone(),
@@ -6099,6 +6186,7 @@ async fn capability_stage_denied_auth_resume_one_denied_two_remaining_all_dispat
                     progress: ironclaw_turns::run_profile::CapabilityProgress::MadeProgress,
                     terminate_hint: false,
                     byte_len: 0,
+                    output_digest: None,
                 }),
             ],
             stopped_on_suspension: false,
@@ -6328,6 +6416,7 @@ async fn capability_stage_denied_approval_resume_only_fails_matching_call_remain
                 progress: ironclaw_turns::run_profile::CapabilityProgress::MadeProgress,
                 terminate_hint: false,
                 byte_len: 0,
+                output_digest: None,
             })],
             stopped_on_suspension: false,
         }]);
@@ -6539,6 +6628,7 @@ async fn capability_stage_denied_approval_resume_no_matching_call_dispatches_unr
                 progress: ironclaw_turns::run_profile::CapabilityProgress::MadeProgress,
                 terminate_hint: false,
                 byte_len: 0,
+                output_digest: None,
             })],
             stopped_on_suspension: false,
         }]);

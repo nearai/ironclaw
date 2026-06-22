@@ -36,29 +36,35 @@ use ironclaw_product_workflow::{
     LlmConfigServiceError, LlmConfigSnapshot, LlmModelsResult, LlmProbeRequest, LlmProbeResult,
     LlmProviderView, NearAiLoginRequest, NearAiLoginStart, NearAiWalletLoginRequest,
     NearAiWalletLoginResult, OperatorLogsService, OperatorServiceLifecycleService,
-    OutboundPreferencesProductFacade, ProductAgentBoundCaller, ProductWorkflowError,
-    RebornAttachmentRequest, RebornAutomationInfo, RebornAutomationRecentRunInfo,
-    RebornAutomationRecentRunStatus, RebornAutomationRunStatus, RebornAutomationSource,
-    RebornAutomationState, RebornChannelConnectAction, RebornChannelConnectStrategy,
-    RebornConnectableChannelInfo, RebornDeleteThreadRequest, RebornExtensionOnboardingState,
-    RebornGetRunStateRequest, RebornLogLevel, RebornLogQueryRequest, RebornLogQueryResponse,
+    OutboundPreferencesProductFacade, ProductAgentBoundCaller, ProductWorkflowError, ProjectCaller,
+    ProjectService, ProjectServiceError, RebornAddMemberRequest, RebornAttachmentRequest,
+    RebornAutomationInfo, RebornAutomationRecentRunInfo, RebornAutomationRecentRunStatus,
+    RebornAutomationRunStatus, RebornAutomationSource, RebornAutomationState,
+    RebornChannelConnectAction, RebornChannelConnectStrategy, RebornConnectableChannelInfo,
+    RebornCreateProjectRequest, RebornDeleteProjectRequest, RebornDeleteThreadRequest,
+    RebornExtensionOnboardingState, RebornGetProjectRequest, RebornGetRunStateRequest,
+    RebornListMembersRequest, RebornListMembersResponse, RebornListProjectsRequest,
+    RebornListProjectsResponse, RebornLogLevel, RebornLogQueryRequest, RebornLogQueryResponse,
     RebornOperatorConfigDiagnosticSeverity, RebornOperatorLogsQuery, RebornOperatorSetupRequest,
     RebornOperatorSetupStatus, RebornOperatorSurfaceStatus, RebornOutboundDeliveryModality,
     RebornOutboundDeliveryTargetCapabilities, RebornOutboundDeliveryTargetDescription,
     RebornOutboundDeliveryTargetId, RebornOutboundDeliveryTargetListResponse,
     RebornOutboundDeliveryTargetOption, RebornOutboundDeliveryTargetStatus,
-    RebornOutboundDeliveryTargetSummary, RebornOutboundPreferencesResponse,
-    RebornResolveGateResponse, RebornServiceLifecycleAction, RebornServiceLifecycleRequest,
-    RebornServiceLifecycleResponse, RebornServiceLifecycleState, RebornServices, RebornServicesApi,
-    RebornServicesError, RebornServicesErrorCode, RebornServicesErrorKind,
-    RebornSetOutboundPreferencesRequest, RebornStreamEventsRequest, RebornSubmitTurnResponse,
-    RebornTimelineRequest, ResolveApprovalInteractionRequest, ResolveApprovalInteractionResponse,
-    ResolveAuthInteractionRequest, ResolveAuthInteractionResponse, SetActiveLlmRequest,
-    StaticConnectableChannelsProductFacade, TriggerRunThreadScope, UpsertLlmProviderRequest,
-    WebUiAuthenticatedCaller, WebUiCancelRunRequest, WebUiCreateThreadRequest,
-    WebUiInboundValidationCode, WebUiListAutomationsRequest, WebUiListThreadsRequest,
-    WebUiResolveGateRequest, WebUiSendMessageRequest, WebUiSetupExtensionRequest,
-    approval_gate_ref, automation_trigger_thread_metadata_json,
+    RebornOutboundDeliveryTargetSummary, RebornOutboundPreferencesResponse, RebornProjectInfo,
+    RebornProjectMemberInfo, RebornProjectResponse, RebornProjectRole, RebornProjectState,
+    RebornRemoveMemberRequest, RebornResolveGateResponse, RebornServiceLifecycleAction,
+    RebornServiceLifecycleRequest, RebornServiceLifecycleResponse, RebornServiceLifecycleState,
+    RebornServices, RebornServicesApi, RebornServicesError, RebornServicesErrorCode,
+    RebornServicesErrorKind, RebornSetOutboundPreferencesRequest, RebornStreamEventsRequest,
+    RebornSubmitTurnResponse, RebornTimelineRequest, RebornUpdateMemberRoleRequest,
+    RebornUpdateProjectRequest, ResolveApprovalInteractionRequest,
+    ResolveApprovalInteractionResponse, ResolveAuthInteractionRequest,
+    ResolveAuthInteractionResponse, SetActiveLlmRequest, StaticConnectableChannelsProductFacade,
+    TriggerRunThreadScope, UpsertLlmProviderRequest, WebUiAuthenticatedCaller,
+    WebUiCancelRunRequest, WebUiCreateThreadRequest, WebUiInboundValidationCode,
+    WebUiListAutomationsRequest, WebUiListThreadsRequest, WebUiResolveGateRequest,
+    WebUiSendMessageRequest, WebUiSetupExtensionRequest, approval_gate_ref,
+    automation_trigger_thread_metadata_json,
 };
 use ironclaw_threads::{
     AcceptInboundMessageRequest, AcceptedInboundMessage, AcceptedInboundMessageReplay,
@@ -823,6 +829,7 @@ struct ListAutomationCall {
     caller: ProductAgentBoundCaller,
     limit: usize,
     run_limit: usize,
+    include_completed: bool,
 }
 
 #[derive(Default)]
@@ -850,6 +857,7 @@ impl AutomationProductFacade for RecordingAutomationFacade {
                 caller,
                 limit: request.limit,
                 run_limit: request.run_limit,
+                include_completed: request.include_completed,
             });
         Ok(vec![automation_info(
             "trigger-listed",
@@ -1883,6 +1891,207 @@ async fn create_thread_metadata_is_serialized_json() {
     assert_eq!(
         metadata["client_action_id"].as_str(),
         Some(client_action_id.as_str())
+    );
+}
+
+/// Project service that authorizes exactly one project id through `get_project`
+/// and fails everything else, so create-thread project authorization can be
+/// driven from the caller without a real repository.
+#[derive(Debug)]
+struct AuthorizingProjectService {
+    allowed_project_id: String,
+}
+
+#[async_trait]
+impl ProjectService for AuthorizingProjectService {
+    async fn list_projects(
+        &self,
+        _caller: ProjectCaller,
+        _request: RebornListProjectsRequest,
+    ) -> Result<RebornListProjectsResponse, ProjectServiceError> {
+        Err(ProjectServiceError::Internal)
+    }
+
+    async fn create_project(
+        &self,
+        _caller: ProjectCaller,
+        _request: RebornCreateProjectRequest,
+    ) -> Result<RebornProjectResponse, ProjectServiceError> {
+        Err(ProjectServiceError::Internal)
+    }
+
+    async fn get_project(
+        &self,
+        _caller: ProjectCaller,
+        request: RebornGetProjectRequest,
+    ) -> Result<RebornProjectResponse, ProjectServiceError> {
+        if request.project_id == self.allowed_project_id {
+            Ok(RebornProjectResponse {
+                project: RebornProjectInfo {
+                    project_id: self.allowed_project_id.clone(),
+                    name: "Authorized".to_string(),
+                    description: String::new(),
+                    icon: None,
+                    color: None,
+                    metadata: serde_json::json!({}),
+                    state: RebornProjectState::Active,
+                    role: RebornProjectRole::Owner,
+                    created_at: "1970-01-01T00:00:00Z".parse().expect("created at"),
+                    updated_at: "1970-01-01T00:00:00Z".parse().expect("updated at"),
+                },
+            })
+        } else {
+            // Mirrors the real service: no access (or unknown) collapses to NotFound.
+            Err(ProjectServiceError::NotFound)
+        }
+    }
+
+    async fn update_project(
+        &self,
+        _caller: ProjectCaller,
+        _request: RebornUpdateProjectRequest,
+    ) -> Result<RebornProjectResponse, ProjectServiceError> {
+        Err(ProjectServiceError::Internal)
+    }
+
+    async fn delete_project(
+        &self,
+        _caller: ProjectCaller,
+        _request: RebornDeleteProjectRequest,
+    ) -> Result<(), ProjectServiceError> {
+        Err(ProjectServiceError::Internal)
+    }
+
+    async fn list_members(
+        &self,
+        _caller: ProjectCaller,
+        _request: RebornListMembersRequest,
+    ) -> Result<RebornListMembersResponse, ProjectServiceError> {
+        Err(ProjectServiceError::Internal)
+    }
+
+    async fn add_member(
+        &self,
+        _caller: ProjectCaller,
+        _request: RebornAddMemberRequest,
+    ) -> Result<RebornProjectMemberInfo, ProjectServiceError> {
+        Err(ProjectServiceError::Internal)
+    }
+
+    async fn update_member_role(
+        &self,
+        _caller: ProjectCaller,
+        _request: RebornUpdateMemberRoleRequest,
+    ) -> Result<RebornProjectMemberInfo, ProjectServiceError> {
+        Err(ProjectServiceError::Internal)
+    }
+
+    async fn remove_member(
+        &self,
+        _caller: ProjectCaller,
+        _request: RebornRemoveMemberRequest,
+    ) -> Result<(), ProjectServiceError> {
+        Err(ProjectServiceError::Internal)
+    }
+}
+
+#[tokio::test]
+async fn create_thread_scopes_to_authorized_project() {
+    let thread_service = Arc::new(InMemorySessionThreadService::default());
+    let services = RebornServices::new(
+        thread_service.clone(),
+        Arc::new(FakeTurnCoordinator::default()),
+    )
+    .with_project_service(Arc::new(AuthorizingProjectService {
+        allowed_project_id: "project-scoped".to_string(),
+    }));
+
+    // Caller's default scope is project-alpha; the request proposes a different,
+    // authorized project, which must become the new thread's scope.
+    services
+        .create_thread(
+            caller_with_project(Some("project-alpha")),
+            serde_json::from_value::<WebUiCreateThreadRequest>(json!({
+                "client_action_id": "create-scoped",
+                "requested_thread_id": "thread-scoped",
+                "project_id": "project-scoped"
+            }))
+            .expect("request"),
+        )
+        .await
+        .expect("authorized project create succeeds");
+
+    let record = thread_service
+        .read_thread_by_id(ThreadId::new("thread-scoped").expect("thread id"))
+        .await
+        .expect("created thread exists");
+    assert_eq!(
+        record.scope.project_id.as_ref().map(|id| id.as_str()),
+        Some("project-scoped"),
+        "new thread must adopt the authorized project scope"
+    );
+}
+
+#[tokio::test]
+async fn create_thread_rejects_unauthorized_project() {
+    let services = RebornServices::new(
+        Arc::new(InMemorySessionThreadService::default()),
+        Arc::new(FakeTurnCoordinator::default()),
+    )
+    .with_project_service(Arc::new(AuthorizingProjectService {
+        allowed_project_id: "project-allowed".to_string(),
+    }));
+
+    let err = services
+        .create_thread(
+            caller_with_project(Some("project-alpha")),
+            serde_json::from_value::<WebUiCreateThreadRequest>(json!({
+                "client_action_id": "create-denied",
+                "requested_thread_id": "thread-denied",
+                "project_id": "project-forbidden"
+            }))
+            .expect("request"),
+        )
+        .await
+        .expect_err("a project the caller cannot access must be rejected");
+
+    // Fail closed on the deny→not-found contract: a project the caller can't
+    // access collapses to NotFound/404 (no existence oracle), not some
+    // unrelated internal error that `expect_err` alone would also accept.
+    assert_eq!(err.code, RebornServicesErrorCode::NotFound);
+    assert_eq!(err.status_code, 404);
+}
+
+#[tokio::test]
+async fn create_thread_without_proposed_project_keeps_caller_scope() {
+    let thread_service = Arc::new(InMemorySessionThreadService::default());
+    let services = RebornServices::new(
+        thread_service.clone(),
+        Arc::new(FakeTurnCoordinator::default()),
+    );
+
+    // No proposed project (and no project service wired): behavior is unchanged —
+    // the thread keeps the caller's default project scope.
+    services
+        .create_thread(
+            caller_with_project(Some("project-alpha")),
+            serde_json::from_value::<WebUiCreateThreadRequest>(json!({
+                "client_action_id": "create-default",
+                "requested_thread_id": "thread-default"
+            }))
+            .expect("request"),
+        )
+        .await
+        .expect("default create succeeds");
+
+    let record = thread_service
+        .read_thread_by_id(ThreadId::new("thread-default").expect("thread id"))
+        .await
+        .expect("created thread exists");
+    assert_eq!(
+        record.scope.project_id.as_ref().map(|id| id.as_str()),
+        Some("project-alpha"),
+        "without a proposed project the caller's scope is unchanged"
     );
 }
 
@@ -4500,6 +4709,7 @@ async fn list_automation_dispatches_through_product_facade() {
             WebUiListAutomationsRequest {
                 limit: Some(10),
                 run_limit: None,
+                ..Default::default()
             },
         )
         .await
@@ -5248,6 +5458,7 @@ async fn list_automations_rejects_missing_agent_id() {
             WebUiListAutomationsRequest {
                 limit: Some(10),
                 run_limit: None,
+                ..Default::default()
             },
         )
         .await
@@ -5273,6 +5484,7 @@ async fn list_automations_clamps_oversize_limit_before_product_facade() {
             WebUiListAutomationsRequest {
                 limit: Some(u32::MAX),
                 run_limit: None,
+                ..Default::default()
             },
         )
         .await
@@ -5302,6 +5514,7 @@ async fn list_automations_clamps_zero_limit_before_product_facade() {
             WebUiListAutomationsRequest {
                 limit: Some(0),
                 run_limit: None,
+                ..Default::default()
             },
         )
         .await
@@ -5330,6 +5543,7 @@ async fn list_automations_uses_default_limit_when_omitted() {
             WebUiListAutomationsRequest {
                 limit: None,
                 run_limit: None,
+                ..Default::default()
             },
         )
         .await
@@ -5359,6 +5573,7 @@ async fn list_automations_clamps_oversize_run_limit_before_product_facade() {
             WebUiListAutomationsRequest {
                 limit: None,
                 run_limit: Some(u32::MAX),
+                ..Default::default()
             },
         )
         .await
@@ -5388,6 +5603,7 @@ async fn list_automations_allows_zero_run_limit_before_product_facade() {
             WebUiListAutomationsRequest {
                 limit: None,
                 run_limit: Some(0),
+                ..Default::default()
             },
         )
         .await
@@ -5398,6 +5614,62 @@ async fn list_automations_allows_zero_run_limit_before_product_facade() {
     assert_eq!(
         list_calls[0].run_limit, 0,
         "explicit zero automation run history limit must disable embedded run history"
+    );
+}
+
+#[tokio::test]
+async fn list_automations_forwards_include_completed_true_to_product_facade() {
+    let automation_facade = Arc::new(RecordingAutomationFacade::default());
+    let services = RebornServices::new(
+        Arc::new(InMemorySessionThreadService::default()),
+        Arc::new(FakeTurnCoordinator::default()),
+    )
+    .with_automation_product_facade(automation_facade.clone());
+
+    services
+        .list_automations(
+            caller(),
+            WebUiListAutomationsRequest {
+                include_completed: true,
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("list automations");
+
+    let list_calls = automation_facade.list_calls();
+    assert_eq!(list_calls.len(), 1);
+    assert!(
+        list_calls[0].include_completed,
+        "include_completed=true must be forwarded to the product facade unchanged"
+    );
+}
+
+#[tokio::test]
+async fn list_automations_forwards_include_completed_false_to_product_facade() {
+    let automation_facade = Arc::new(RecordingAutomationFacade::default());
+    let services = RebornServices::new(
+        Arc::new(InMemorySessionThreadService::default()),
+        Arc::new(FakeTurnCoordinator::default()),
+    )
+    .with_automation_product_facade(automation_facade.clone());
+
+    services
+        .list_automations(
+            caller(),
+            WebUiListAutomationsRequest {
+                include_completed: false,
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("list automations");
+
+    let list_calls = automation_facade.list_calls();
+    assert_eq!(list_calls.len(), 1);
+    assert!(
+        !list_calls[0].include_completed,
+        "include_completed=false must be forwarded to the product facade unchanged"
     );
 }
 

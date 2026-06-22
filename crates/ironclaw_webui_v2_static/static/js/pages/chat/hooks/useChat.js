@@ -176,6 +176,7 @@ export function useChat(threadId) {
   const [pendingGate, setPendingGate] = React.useState(null);
   const [stateThreadId, setStateThreadId] = React.useState(threadId);
   const toolActivityStateRef = React.useRef(createToolActivityState());
+  const locallyResolvedGatesRef = React.useRef(new Map());
   const authTokenSubmitRef = React.useRef({
     gateKey: null,
     credentialRef: null,
@@ -219,6 +220,7 @@ export function useChat(threadId) {
 
   React.useEffect(() => {
     resetToolActivityState(toolActivityStateRef);
+    locallyResolvedGatesRef.current.clear();
   }, [threadId]);
 
   const cooldownSeconds = Math.max(0, Math.ceil((cooldownUntil - now) / 1000));
@@ -291,6 +293,7 @@ export function useChat(threadId) {
     setPendingGate,
     setActiveRun,
     activeRunRef,
+    locallyResolvedGatesRef,
     toolActivityStateRef,
     // Reborn's projection bridge does not yet emit `Text` items for
     // assistant replies, and never emits `capability_display_preview`
@@ -498,6 +501,10 @@ export function useChat(threadId) {
         credentialRef: opts.credentialRef,
       });
       const outcome = resolveGateOutcome(response);
+      locallyResolvedGatesRef.current.set(`${runId}\n${gateRef}`, {
+        resolution,
+        outcome,
+      });
       if (resolution === "denied" && outcome === "resumed") {
         failGateToolActivity(setMessages, pendingGate, toolActivityStateRef);
       }
