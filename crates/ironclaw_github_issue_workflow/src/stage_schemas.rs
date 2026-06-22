@@ -75,7 +75,7 @@ pub enum StageResultValidationError {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum RequiredFieldKind {
+pub enum StagePayloadFieldKind {
     Array,
     Bool,
     Number,
@@ -83,9 +83,22 @@ enum RequiredFieldKind {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct RequiredPayloadField {
-    name: &'static str,
-    kind: RequiredFieldKind,
+pub struct StagePayloadFieldRequirement {
+    pub name: &'static str,
+    pub kind: StagePayloadFieldKind,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct StageResultSchemaContract {
+    pub schema_version: &'static str,
+    pub payload_fields: &'static [StagePayloadFieldRequirement],
+}
+
+pub fn stage_result_schema_contract(stage: &GithubIssueStage) -> StageResultSchemaContract {
+    StageResultSchemaContract {
+        schema_version: stage_result_schema_version(stage),
+        payload_fields: required_payload_fields(stage),
+    }
 }
 
 pub fn validate_stage_result(
@@ -181,114 +194,114 @@ fn validate_stage_payload(
     Ok(())
 }
 
-fn required_payload_fields(stage: &GithubIssueStage) -> &'static [RequiredPayloadField] {
+fn required_payload_fields(stage: &GithubIssueStage) -> &'static [StagePayloadFieldRequirement] {
     match stage {
         GithubIssueStage::Triage => &[
-            RequiredPayloadField {
+            StagePayloadFieldRequirement {
                 name: "is_reproducible",
-                kind: RequiredFieldKind::Bool,
+                kind: StagePayloadFieldKind::Bool,
             },
-            RequiredPayloadField {
+            StagePayloadFieldRequirement {
                 name: "suspected_area",
-                kind: RequiredFieldKind::String,
+                kind: StagePayloadFieldKind::String,
             },
-            RequiredPayloadField {
+            StagePayloadFieldRequirement {
                 name: "risk",
-                kind: RequiredFieldKind::String,
+                kind: StagePayloadFieldKind::String,
             },
-            RequiredPayloadField {
+            StagePayloadFieldRequirement {
                 name: "recommended_next_stage",
-                kind: RequiredFieldKind::String,
+                kind: StagePayloadFieldKind::String,
             },
         ],
         GithubIssueStage::Planning => &[
-            RequiredPayloadField {
+            StagePayloadFieldRequirement {
                 name: "plan_items",
-                kind: RequiredFieldKind::Array,
+                kind: StagePayloadFieldKind::Array,
             },
-            RequiredPayloadField {
+            StagePayloadFieldRequirement {
                 name: "files_to_inspect_or_change",
-                kind: RequiredFieldKind::Array,
+                kind: StagePayloadFieldKind::Array,
             },
-            RequiredPayloadField {
+            StagePayloadFieldRequirement {
                 name: "test_strategy",
-                kind: RequiredFieldKind::String,
+                kind: StagePayloadFieldKind::String,
             },
-            RequiredPayloadField {
+            StagePayloadFieldRequirement {
                 name: "confidence",
-                kind: RequiredFieldKind::Number,
+                kind: StagePayloadFieldKind::Number,
             },
         ],
         GithubIssueStage::Implementation => &[
-            RequiredPayloadField {
+            StagePayloadFieldRequirement {
                 name: "changed_files",
-                kind: RequiredFieldKind::Array,
+                kind: StagePayloadFieldKind::Array,
             },
-            RequiredPayloadField {
+            StagePayloadFieldRequirement {
                 name: "commands_run",
-                kind: RequiredFieldKind::Array,
+                kind: StagePayloadFieldKind::Array,
             },
-            RequiredPayloadField {
+            StagePayloadFieldRequirement {
                 name: "test_evidence",
-                kind: RequiredFieldKind::Array,
+                kind: StagePayloadFieldKind::Array,
             },
-            RequiredPayloadField {
+            StagePayloadFieldRequirement {
                 name: "pr_ready",
-                kind: RequiredFieldKind::Bool,
+                kind: StagePayloadFieldKind::Bool,
             },
         ],
         GithubIssueStage::PrSynthesis => &[
-            RequiredPayloadField {
+            StagePayloadFieldRequirement {
                 name: "title",
-                kind: RequiredFieldKind::String,
+                kind: StagePayloadFieldKind::String,
             },
-            RequiredPayloadField {
+            StagePayloadFieldRequirement {
                 name: "body",
-                kind: RequiredFieldKind::String,
+                kind: StagePayloadFieldKind::String,
             },
-            RequiredPayloadField {
+            StagePayloadFieldRequirement {
                 name: "branch_name",
-                kind: RequiredFieldKind::String,
+                kind: StagePayloadFieldKind::String,
             },
-            RequiredPayloadField {
+            StagePayloadFieldRequirement {
                 name: "base_branch",
-                kind: RequiredFieldKind::String,
+                kind: StagePayloadFieldKind::String,
             },
-            RequiredPayloadField {
+            StagePayloadFieldRequirement {
                 name: "head_sha",
-                kind: RequiredFieldKind::String,
+                kind: StagePayloadFieldKind::String,
             },
         ],
         GithubIssueStage::CiRepair => &[
-            RequiredPayloadField {
+            StagePayloadFieldRequirement {
                 name: "failing_checks",
-                kind: RequiredFieldKind::Array,
+                kind: StagePayloadFieldKind::Array,
             },
-            RequiredPayloadField {
+            StagePayloadFieldRequirement {
                 name: "diagnosis",
-                kind: RequiredFieldKind::String,
+                kind: StagePayloadFieldKind::String,
             },
-            RequiredPayloadField {
+            StagePayloadFieldRequirement {
                 name: "changed_files",
-                kind: RequiredFieldKind::Array,
+                kind: StagePayloadFieldKind::Array,
             },
-            RequiredPayloadField {
+            StagePayloadFieldRequirement {
                 name: "commands_run",
-                kind: RequiredFieldKind::Array,
+                kind: StagePayloadFieldKind::Array,
             },
         ],
         GithubIssueStage::ReviewResponse => &[
-            RequiredPayloadField {
+            StagePayloadFieldRequirement {
                 name: "addressed_comments",
-                kind: RequiredFieldKind::Array,
+                kind: StagePayloadFieldKind::Array,
             },
-            RequiredPayloadField {
+            StagePayloadFieldRequirement {
                 name: "remaining_comments",
-                kind: RequiredFieldKind::Array,
+                kind: StagePayloadFieldKind::Array,
             },
-            RequiredPayloadField {
+            StagePayloadFieldRequirement {
                 name: "commands_run",
-                kind: RequiredFieldKind::Array,
+                kind: StagePayloadFieldKind::Array,
             },
         ],
     }
@@ -298,7 +311,7 @@ fn validate_allowed_payload_fields(
     stage: &GithubIssueStage,
     schema_version: &'static str,
     payload_object: &serde_json::Map<String, JsonValue>,
-    allowed_fields: &[RequiredPayloadField],
+    allowed_fields: &[StagePayloadFieldRequirement],
 ) -> Result<(), StageResultValidationError> {
     for field in payload_object.keys() {
         if !allowed_fields
@@ -319,7 +332,7 @@ fn validate_allowed_payload_fields(
 fn validate_required_payload_field(
     stage: &GithubIssueStage,
     payload_object: &serde_json::Map<String, JsonValue>,
-    required_field: RequiredPayloadField,
+    required_field: StagePayloadFieldRequirement,
 ) -> Result<(), StageResultValidationError> {
     let value = payload_object.get(required_field.name).ok_or_else(|| {
         StageResultValidationError::MissingPayloadField {
@@ -345,25 +358,34 @@ fn validate_required_payload_field(
     })
 }
 
-fn field_matches_kind(value: &JsonValue, kind: RequiredFieldKind) -> bool {
+fn field_matches_kind(value: &JsonValue, kind: StagePayloadFieldKind) -> bool {
     match kind {
-        RequiredFieldKind::Array => value.is_array(),
-        RequiredFieldKind::Bool => value.is_boolean(),
-        RequiredFieldKind::Number => value.is_number(),
-        RequiredFieldKind::String => value
+        StagePayloadFieldKind::Array => value.is_array(),
+        StagePayloadFieldKind::Bool => value.is_boolean(),
+        StagePayloadFieldKind::Number => value.is_number(),
+        StagePayloadFieldKind::String => value
             .as_str()
             .map(|string| !string.trim().is_empty())
             .unwrap_or(false),
     }
 }
 
-impl RequiredFieldKind {
-    fn expected_description(self) -> &'static str {
+impl StagePayloadFieldKind {
+    pub fn expected_description(self) -> &'static str {
         match self {
-            RequiredFieldKind::Array => "must be an array",
-            RequiredFieldKind::Bool => "must be a boolean",
-            RequiredFieldKind::Number => "must be a number",
-            RequiredFieldKind::String => "must be a non-empty string",
+            StagePayloadFieldKind::Array => "must be an array",
+            StagePayloadFieldKind::Bool => "must be a boolean",
+            StagePayloadFieldKind::Number => "must be a number",
+            StagePayloadFieldKind::String => "must be a non-empty string",
+        }
+    }
+
+    pub fn schema_description(self) -> &'static str {
+        match self {
+            StagePayloadFieldKind::Array => "array",
+            StagePayloadFieldKind::Bool => "boolean",
+            StagePayloadFieldKind::Number => "number",
+            StagePayloadFieldKind::String => "non-empty string",
         }
     }
 }
