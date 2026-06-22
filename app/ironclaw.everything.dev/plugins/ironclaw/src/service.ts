@@ -12,10 +12,16 @@ import type {
   ExtensionRegistryEntrySchema,
   ExtensionSchema,
   ExtensionSetupDetailSchema,
+  FsContentResponse,
+  FsEntry,
+  FsMountInfo,
+  FsStatResponse,
   OutboundPreferencesSchema,
   OutboundTargetSchema,
+  Project,
   ProjectFsEntrySchema,
   ProjectFsStatSchema,
+  ProjectMember,
   SessionSchema,
   SkillActionResponseSchema,
   SkillContentResponseSchema,
@@ -301,12 +307,16 @@ export class IronclawService {
               maxTotalBytes: caps.attachments.max_total_bytes ?? 0,
             }
           : undefined;
+        const features = raw.features ?? {};
         return {
           tenantId: raw.tenant_id,
           userId: raw.user_id,
           capabilities: {
             operatorWebuiConfig: caps.operator_webui_config ?? false,
             attachments: attCaps,
+          },
+          features: {
+            rebornProjects: features.reborn_projects ?? false,
           },
         } as Session;
       },
@@ -748,11 +758,9 @@ export class IronclawService {
         const automations: Automation[] = (raw.automations ?? []).map((a: any) => ({
           id: a.automation_id,
           name: a.name,
-          source: {
-            type: "schedule" as const,
-            cron: a.source?.cron ?? "",
-            timezone: a.source?.timezone ?? "UTC",
-          },
+          source: a.source?.type === "once"
+            ? { type: "once" as const, at: a.source.at ?? "", timezone: a.source.timezone ?? "UTC" }
+            : { type: "schedule" as const, cron: a.source?.cron ?? "", timezone: a.source?.timezone ?? "UTC", at: a.source?.at ?? undefined },
           state: a.state,
           nextRunAt: a.next_run_at ?? undefined,
           lastRunAt: a.last_run_at ?? undefined,
@@ -1240,6 +1248,273 @@ export class IronclawService {
       catch: (error: unknown) =>
         new Error(
           `Failed to download file: ${error instanceof Error ? error.message : String(error)}`,
+        ),
+    });
+  }
+
+  listFsMounts(): Effect.Effect<{ mounts: FsMountInfo[] }, Error> {
+    return Effect.tryPromise({
+      try: async () => {
+        const raw: any = await this.request("GET", "/api/webchat/v2/fs/mounts");
+        const mounts: FsMountInfo[] = (raw.mounts ?? []).map((m: any) => ({
+          mount: m.mount,
+          label: m.label,
+        }));
+        return { mounts };
+      },
+      catch: (error: unknown) =>
+        new Error(
+          `Failed to list fs mounts: ${error instanceof Error ? error.message : String(error)}`,
+        ),
+    });
+  }
+
+  listFsDir(mount: string, path: string): Effect.Effect<{ mount: string; path: string; entries: FsEntry[] }, Error> {
+    return Effect.tryPromise({
+      try: async () => {
+        const raw: any = await this.request("GET", "/api/webchat/v2/fs/list", undefined, {
+          mount,
+          path,
+        });
+        const entries: FsEntry[] = (raw.entries ?? []).map((e: any) => ({
+          name: e.name,
+          path: e.path,
+          kind: e.kind,
+        }));
+        return { mount: raw.mount, path: raw.path, entries };
+      },
+      catch: (error: unknown) =>
+        new Error(
+          `Failed to list fs dir: ${error instanceof Error ? error.message : String(error)}`,
+        ),
+    });
+  }
+
+  statFsPath(mount: string, path: string): Effect.Effect<FsStatResponse, Error> {
+    return Effect.tryPromise({
+      try: async () => {
+        const raw: any = await this.request("GET", "/api/webchat/v2/fs/stat", undefined, {
+          mount,
+          path,
+        });
+        return {
+          stat: {
+            path: raw.stat.path,
+            kind: raw.stat.kind,
+            sizeBytes: raw.stat.size_bytes,
+            mimeType: raw.stat.mime_type,
+          },
+        } as FsStatResponse;
+      },
+      catch: (error: unknown) =>
+        new Error(
+          `Failed to stat fs path: ${error instanceof Error ? error.message : String(error)}`,
+        ),
+    });
+  }
+
+  getFsContent(mount: string, path: string): Effect.Effect<FsContentResponse, Error> {
+    return Effect.tryPromise({
+      try: async () => {
+        const result = await this.requestBinary("GET", "/api/webchat/v2/fs/content", {
+          mount,
+          path,
+        });
+        return {
+          contentBase64: this.arrayBufferToBase64(result.bytes),
+          mimeType: result.mimeType,
+          filename: result.filename,
+          sizeBytes: result.sizeBytes,
+        } as FsContentResponse;
+      },
+      catch: (error: unknown) =>
+        new Error(
+          `Failed to get fs content: ${error instanceof Error ? error.message : String(error)}`,
+        ),
+    });
+  }
+
+  listProjects(): Effect.Effect<{ projects: Project[] }, Error> {
+    return Effect.tryPromise({
+      try: async () => {
+        const raw: any = await this.request("GET", "/api/webchat/v2/projects");
+        const projects: Project[] = (raw.projects ?? []).map((p: any) => ({
+          projectId: p.project_id,
+          name: p.name,
+          description: p.description ?? undefined,
+          createdAt: p.created_at ?? undefined,
+          updatedAt: p.updated_at ?? undefined,
+          memberCount: p.member_count ?? undefined,
+        }));
+        return { projects };
+      },
+      catch: (error: unknown) =>
+        new Error(
+          `Failed to list projects: ${error instanceof Error ? error.message : String(error)}`,
+        ),
+    });
+  }
+
+  createProject(name: string, description?: string): Effect.Effect<Project, Error> {
+    return Effect.tryPromise({
+      try: async () => {
+        const raw: any = await this.request("POST", "/api/webchat/v2/projects", {
+          name,
+          description,
+        });
+        return {
+          projectId: raw.project_id,
+          name: raw.name,
+          description: raw.description ?? undefined,
+          createdAt: raw.created_at ?? undefined,
+          updatedAt: raw.updated_at ?? undefined,
+          memberCount: raw.member_count ?? undefined,
+        } as Project;
+      },
+      catch: (error: unknown) =>
+        new Error(
+          `Failed to create project: ${error instanceof Error ? error.message : String(error)}`,
+        ),
+    });
+  }
+
+  getProject(id: string): Effect.Effect<Project, Error> {
+    return Effect.tryPromise({
+      try: async () => {
+        const raw: any = await this.request(
+          "GET",
+          `/api/webchat/v2/projects/${encodeURIComponent(id)}`,
+        );
+        return {
+          projectId: raw.project_id,
+          name: raw.name,
+          description: raw.description ?? undefined,
+          createdAt: raw.created_at ?? undefined,
+          updatedAt: raw.updated_at ?? undefined,
+          memberCount: raw.member_count ?? undefined,
+        } as Project;
+      },
+      catch: (error: unknown) =>
+        new Error(
+          `Failed to get project: ${error instanceof Error ? error.message : String(error)}`,
+        ),
+    });
+  }
+
+  updateProject(id: string, name?: string, description?: string): Effect.Effect<Project, Error> {
+    return Effect.tryPromise({
+      try: async () => {
+        const body: Record<string, unknown> = {};
+        if (name !== undefined) body.name = name;
+        if (description !== undefined) body.description = description;
+        const raw: any = await this.request(
+          "POST",
+          `/api/webchat/v2/projects/${encodeURIComponent(id)}`,
+          body,
+        );
+        return {
+          projectId: raw.project_id,
+          name: raw.name,
+          description: raw.description ?? undefined,
+          createdAt: raw.created_at ?? undefined,
+          updatedAt: raw.updated_at ?? undefined,
+          memberCount: raw.member_count ?? undefined,
+        } as Project;
+      },
+      catch: (error: unknown) =>
+        new Error(
+          `Failed to update project: ${error instanceof Error ? error.message : String(error)}`,
+        ),
+    });
+  }
+
+  deleteProject(id: string): Effect.Effect<void, Error> {
+    return Effect.tryPromise({
+      try: () =>
+        this.request<void>("DELETE", `/api/webchat/v2/projects/${encodeURIComponent(id)}`),
+      catch: (error: unknown) =>
+        new Error(
+          `Failed to delete project: ${error instanceof Error ? error.message : String(error)}`,
+        ),
+    });
+  }
+
+  listProjectMembers(id: string): Effect.Effect<{ members: ProjectMember[] }, Error> {
+    return Effect.tryPromise({
+      try: async () => {
+        const raw: any = await this.request(
+          "GET",
+          `/api/webchat/v2/projects/${encodeURIComponent(id)}/members`,
+        );
+        const members: ProjectMember[] = (raw.members ?? []).map((m: any) => ({
+          userId: m.user_id,
+          role: m.role,
+          displayName: m.display_name ?? undefined,
+          email: m.email ?? undefined,
+        }));
+        return { members };
+      },
+      catch: (error: unknown) =>
+        new Error(
+          `Failed to list project members: ${error instanceof Error ? error.message : String(error)}`,
+        ),
+    });
+  }
+
+  addProjectMember(id: string, userId: string, role: string): Effect.Effect<ProjectMember, Error> {
+    return Effect.tryPromise({
+      try: async () => {
+        const raw: any = await this.request(
+          "POST",
+          `/api/webchat/v2/projects/${encodeURIComponent(id)}/members`,
+          { user_id: userId, role },
+        );
+        return {
+          userId: raw.user_id,
+          role: raw.role,
+          displayName: raw.display_name ?? undefined,
+          email: raw.email ?? undefined,
+        } as ProjectMember;
+      },
+      catch: (error: unknown) =>
+        new Error(
+          `Failed to add project member: ${error instanceof Error ? error.message : String(error)}`,
+        ),
+    });
+  }
+
+  updateProjectMember(id: string, userId: string, role: string): Effect.Effect<ProjectMember, Error> {
+    return Effect.tryPromise({
+      try: async () => {
+        const raw: any = await this.request(
+          "POST",
+          `/api/webchat/v2/projects/${encodeURIComponent(id)}/members/${encodeURIComponent(userId)}`,
+          { role },
+        );
+        return {
+          userId: raw.user_id,
+          role: raw.role,
+          displayName: raw.display_name ?? undefined,
+          email: raw.email ?? undefined,
+        } as ProjectMember;
+      },
+      catch: (error: unknown) =>
+        new Error(
+          `Failed to update project member: ${error instanceof Error ? error.message : String(error)}`,
+        ),
+    });
+  }
+
+  removeProjectMember(id: string, userId: string): Effect.Effect<void, Error> {
+    return Effect.tryPromise({
+      try: () =>
+        this.request<void>(
+          "DELETE",
+          `/api/webchat/v2/projects/${encodeURIComponent(id)}/members/${encodeURIComponent(userId)}`,
+        ),
+      catch: (error: unknown) =>
+        new Error(
+          `Failed to remove project member: ${error instanceof Error ? error.message : String(error)}`,
         ),
     });
   }

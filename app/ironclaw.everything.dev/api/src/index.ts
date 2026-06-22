@@ -767,6 +767,64 @@ export default createPlugin.withPlugins<PluginsClient>()({
             .handler(h1(services, (ic) => ic.auth.submitManualToken)),
         },
 
+        fs: {
+          mounts: builder.ironclaw.fs.mounts
+            .use(requireAuth)
+            .use(ic.credentials)
+            .handler(h0(services, (ic) => ic.fs.mounts)),
+          list: builder.ironclaw.fs.list
+            .use(requireAuth)
+            .use(ic.credentials)
+            .handler(h1(services, (ic) => ic.fs.list)),
+          stat: builder.ironclaw.fs.stat
+            .use(requireAuth)
+            .use(ic.credentials)
+            .handler(h1(services, (ic) => ic.fs.stat)),
+          content: builder.ironclaw.fs.content
+            .use(requireAuth)
+            .use(ic.credentials)
+            .handler(h1(services, (ic) => ic.fs.content)),
+        },
+
+        projects: {
+          list: builder.ironclaw.projects.list
+            .use(requireAuth)
+            .use(ic.credentials)
+            .handler(h0(services, (ic) => ic.projects.list)),
+          create: builder.ironclaw.projects.create
+            .use(requireAuth)
+            .use(ic.credentials)
+            .handler(h1(services, (ic) => ic.projects.create)),
+          get: builder.ironclaw.projects.get
+            .use(requireAuth)
+            .use(ic.credentials)
+            .handler(h1(services, (ic) => ic.projects.get)),
+          update: builder.ironclaw.projects.update
+            .use(requireAuth)
+            .use(ic.credentials)
+            .handler(h1(services, (ic) => ic.projects.update)),
+          delete: builder.ironclaw.projects.delete
+            .use(requireAuth)
+            .use(ic.credentials)
+            .handler(h1(services, (ic) => ic.projects.delete)),
+          listMembers: builder.ironclaw.projects.listMembers
+            .use(requireAuth)
+            .use(ic.credentials)
+            .handler(h1(services, (ic) => ic.projects.listMembers)),
+          addMember: builder.ironclaw.projects.addMember
+            .use(requireAuth)
+            .use(ic.credentials)
+            .handler(h1(services, (ic) => ic.projects.addMember)),
+          updateMember: builder.ironclaw.projects.updateMember
+            .use(requireAuth)
+            .use(ic.credentials)
+            .handler(h1(services, (ic) => ic.projects.updateMember)),
+          removeMember: builder.ironclaw.projects.removeMember
+            .use(requireAuth)
+            .use(ic.credentials)
+            .handler(h1(services, (ic) => ic.projects.removeMember)),
+        },
+
         operator: {
           createAccessSession: builder.ironclaw.operator.createAccessSession
             .use(requireAuth)

@@ -51,6 +51,10 @@ export const AttachmentRefSchema = z.object({
   previewUrl: z.string().optional(),
 });
 
+export const SessionFeaturesSchema = z.object({
+  rebornProjects: z.boolean(),
+});
+
 export const SessionSchema = z.object({
   tenantId: z.string(),
   userId: z.string(),
@@ -58,6 +62,7 @@ export const SessionSchema = z.object({
     operatorWebuiConfig: z.boolean(),
     attachments: AttachmentCapabilitiesSchema.optional(),
   }),
+  features: SessionFeaturesSchema.optional(),
 });
 
 export const ThreadScopeSchema = z.object({
@@ -342,11 +347,18 @@ export const AuthProviderSchema = z.object({
   type: z.string(),
 });
 
-export const AutomationSourceSchema = z.object({
-  type: z.literal("schedule"),
-  cron: z.string(),
-  timezone: z.string(),
-});
+export const AutomationSourceSchema = z.discriminatedUnion("type", [
+  z.object({
+    type: z.literal("schedule"),
+    cron: z.string(),
+    timezone: z.string(),
+  }),
+  z.object({
+    type: z.literal("once"),
+    at: z.string(),
+    timezone: z.string(),
+  }),
+]);
 
 export const AutomationRecentRunSchema = z.object({
   runId: z.string().optional(),
@@ -549,6 +561,49 @@ export const ConnectableChannelSchema = z.object({
     errorMessage: z.string(),
   }),
   commandAliases: z.array(z.string()),
+});
+
+export const FsMountInfoSchema = z.object({
+  mount: z.string(),
+  label: z.string(),
+});
+
+export const FsEntrySchema = z.object({
+  name: z.string(),
+  path: z.string(),
+  kind: z.enum(["file", "directory", "symlink", "other"]),
+});
+
+export const FsStatResponseSchema = z.object({
+  stat: z.object({
+    path: z.string(),
+    kind: z.enum(["file", "directory", "symlink", "other"]),
+    sizeBytes: z.number(),
+    mimeType: z.string(),
+  }),
+});
+
+export const FsContentResponseSchema = z.object({
+  contentBase64: z.string(),
+  mimeType: z.string(),
+  filename: z.string(),
+  sizeBytes: z.number(),
+});
+
+export const ProjectSchema = z.object({
+  projectId: z.string(),
+  name: z.string(),
+  description: z.string().optional(),
+  createdAt: z.string().optional(),
+  updatedAt: z.string().optional(),
+  memberCount: z.number().optional(),
+});
+
+export const ProjectMemberSchema = z.object({
+  userId: z.string(),
+  role: z.string(),
+  displayName: z.string().optional(),
+  email: z.string().optional(),
 });
 
 export const contract = oc.router({
@@ -914,6 +969,157 @@ export const contract = oc.router({
       .errors(Errors),
   },
 
+  fs: {
+    mounts: oc
+      .route({ method: "GET", path: "/fs/mounts", summary: "List filesystem mount areas" })
+      .output(z.object({ mounts: z.array(FsMountInfoSchema) }))
+      .errors(Errors),
+
+    list: oc
+      .route({
+        method: "GET",
+        path: "/fs/list",
+        summary: "List directory entries at path",
+      })
+      .input(
+        z.object({
+          mount: z.string(),
+          path: z.string().default(""),
+        }),
+      )
+      .output(z.object({ mount: z.string(), path: z.string(), entries: z.array(FsEntrySchema) }))
+      .errors(Errors),
+
+    stat: oc
+      .route({
+        method: "GET",
+        path: "/fs/stat",
+        summary: "Get file metadata at path",
+      })
+      .input(
+        z.object({
+          mount: z.string(),
+          path: z.string(),
+        }),
+      )
+      .output(FsStatResponseSchema)
+      .errors(Errors),
+
+    content: oc
+      .route({
+        method: "GET",
+        path: "/fs/content",
+        summary: "Read file content at path",
+      })
+      .input(
+        z.object({
+          mount: z.string(),
+          path: z.string(),
+        }),
+      )
+      .output(FsContentResponseSchema)
+      .errors(Errors),
+  },
+
+  projects: {
+    list: oc
+      .route({ method: "GET", path: "/projects", summary: "List projects" })
+      .output(z.object({ projects: z.array(ProjectSchema) }))
+      .errors(Errors),
+
+    create: oc
+      .route({ method: "POST", path: "/projects", summary: "Create a project" })
+      .input(
+        z.object({
+          name: z.string(),
+          description: z.string().optional(),
+        }),
+      )
+      .output(ProjectSchema)
+      .errors(Errors),
+
+    get: oc
+      .route({ method: "GET", path: "/projects/{id}", summary: "Get a project" })
+      .input(z.object({ id: z.string() }))
+      .output(ProjectSchema)
+      .errors(Errors),
+
+    update: oc
+      .route({ method: "POST", path: "/projects/{id}", summary: "Update a project" })
+      .input(
+        z.object({
+          id: z.string(),
+          name: z.string().optional(),
+          description: z.string().optional(),
+        }),
+      )
+      .output(ProjectSchema)
+      .errors(Errors),
+
+    delete: oc
+      .route({ method: "DELETE", path: "/projects/{id}", summary: "Delete a project" })
+      .input(z.object({ id: z.string() }))
+      .output(z.object({ success: z.boolean() }))
+      .errors(Errors),
+
+    listMembers: oc
+      .route({
+        method: "GET",
+        path: "/projects/{id}/members",
+        summary: "List project members",
+      })
+      .input(z.object({ id: z.string() }))
+      .output(z.object({ members: z.array(ProjectMemberSchema) }))
+      .errors(Errors),
+
+    addMember: oc
+      .route({
+        method: "POST",
+        path: "/projects/{id}/members",
+        summary: "Add a member to a project",
+      })
+      .input(
+        z.object({
+          id: z.string(),
+          userId: z.string(),
+          role: z.string(),
+        }),
+      )
+      .output(ProjectMemberSchema)
+      .errors(Errors),
+
+    updateMember: oc
+      .route({
+        method: "POST",
+        path: "/projects/{id}/members/{userId}",
+        summary: "Update a member's role",
+      })
+      .input(
+        z.object({
+          id: z.string(),
+          userId: z.string(),
+          role: z.string(),
+        }),
+      )
+      .output(ProjectMemberSchema)
+      .errors(Errors),
+
+    removeMember: oc
+      .route({
+        method: "DELETE",
+        path: "/projects/{id}/members/{userId}",
+        summary: "Remove a member from a project",
+      })
+      .input(
+        z.object({
+          id: z.string(),
+          userId: z.string(),
+        }),
+      )
+      .output(z.object({ success: z.boolean() }))
+      .errors(Errors),
+  },
+
   auth: {
     listProviders: oc
       .route({ method: "GET", path: "/auth/providers", summary: "List OAuth providers" })
@@ -965,3 +1171,9 @@ export type Thread = z.infer<typeof ThreadSchema>;
 export type Session = z.infer<typeof SessionSchema>;
 export type GateResolution = z.infer<typeof GateResolutionSchema>;
 export type ThreadCreate = z.infer<typeof ThreadCreateSchema>;
+export type FsMountInfo = z.infer<typeof FsMountInfoSchema>;
+export type FsEntry = z.infer<typeof FsEntrySchema>;
+export type FsStatResponse = z.infer<typeof FsStatResponseSchema>;
+export type FsContentResponse = z.infer<typeof FsContentResponseSchema>;
+export type Project = z.infer<typeof ProjectSchema>;
+export type ProjectMember = z.infer<typeof ProjectMemberSchema>;

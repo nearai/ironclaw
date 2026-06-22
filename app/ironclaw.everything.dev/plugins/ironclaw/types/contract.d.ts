@@ -58,6 +58,9 @@ export declare const AttachmentRefSchema: z.ZodObject<{
     extractedText: z.ZodOptional<z.ZodString>;
     previewUrl: z.ZodOptional<z.ZodString>;
 }, z.core.$strip>;
+export declare const SessionFeaturesSchema: z.ZodObject<{
+    rebornProjects: z.ZodBoolean;
+}, z.core.$strip>;
 export declare const SessionSchema: z.ZodObject<{
     tenantId: z.ZodString;
     userId: z.ZodString;
@@ -70,6 +73,9 @@ export declare const SessionSchema: z.ZodObject<{
             maxTotalBytes: z.ZodNumber;
         }, z.core.$strip>>;
     }, z.core.$strip>;
+    features: z.ZodOptional<z.ZodObject<{
+        rebornProjects: z.ZodBoolean;
+    }, z.core.$strip>>;
 }, z.core.$strip>;
 export declare const ThreadScopeSchema: z.ZodObject<{
     tenantId: z.ZodString;
@@ -430,11 +436,15 @@ export declare const AuthProviderSchema: z.ZodObject<{
     name: z.ZodString;
     type: z.ZodString;
 }, z.core.$strip>;
-export declare const AutomationSourceSchema: z.ZodObject<{
+export declare const AutomationSourceSchema: z.ZodDiscriminatedUnion<[z.ZodObject<{
     type: z.ZodLiteral<"schedule">;
     cron: z.ZodString;
     timezone: z.ZodString;
-}, z.core.$strip>;
+}, z.core.$strip>, z.ZodObject<{
+    type: z.ZodLiteral<"once">;
+    at: z.ZodString;
+    timezone: z.ZodString;
+}, z.core.$strip>], "type">;
 export declare const AutomationRecentRunSchema: z.ZodObject<{
     runId: z.ZodOptional<z.ZodString>;
     threadId: z.ZodOptional<z.ZodString>;
@@ -446,11 +456,15 @@ export declare const AutomationRecentRunSchema: z.ZodObject<{
 export declare const AutomationSchema: z.ZodObject<{
     id: z.ZodString;
     name: z.ZodString;
-    source: z.ZodObject<{
+    source: z.ZodDiscriminatedUnion<[z.ZodObject<{
         type: z.ZodLiteral<"schedule">;
         cron: z.ZodString;
         timezone: z.ZodString;
-    }, z.core.$strip>;
+    }, z.core.$strip>, z.ZodObject<{
+        type: z.ZodLiteral<"once">;
+        at: z.ZodString;
+        timezone: z.ZodString;
+    }, z.core.$strip>], "type">;
     state: z.ZodString;
     nextRunAt: z.ZodOptional<z.ZodString>;
     lastRunAt: z.ZodOptional<z.ZodString>;
@@ -650,6 +664,53 @@ export declare const ConnectableChannelSchema: z.ZodObject<{
     }, z.core.$strip>;
     commandAliases: z.ZodArray<z.ZodString>;
 }, z.core.$strip>;
+export declare const FsMountInfoSchema: z.ZodObject<{
+    mount: z.ZodString;
+    label: z.ZodString;
+}, z.core.$strip>;
+export declare const FsEntrySchema: z.ZodObject<{
+    name: z.ZodString;
+    path: z.ZodString;
+    kind: z.ZodEnum<{
+        file: "file";
+        directory: "directory";
+        symlink: "symlink";
+        other: "other";
+    }>;
+}, z.core.$strip>;
+export declare const FsStatResponseSchema: z.ZodObject<{
+    stat: z.ZodObject<{
+        path: z.ZodString;
+        kind: z.ZodEnum<{
+            file: "file";
+            directory: "directory";
+            symlink: "symlink";
+            other: "other";
+        }>;
+        sizeBytes: z.ZodNumber;
+        mimeType: z.ZodString;
+    }, z.core.$strip>;
+}, z.core.$strip>;
+export declare const FsContentResponseSchema: z.ZodObject<{
+    contentBase64: z.ZodString;
+    mimeType: z.ZodString;
+    filename: z.ZodString;
+    sizeBytes: z.ZodNumber;
+}, z.core.$strip>;
+export declare const ProjectSchema: z.ZodObject<{
+    projectId: z.ZodString;
+    name: z.ZodString;
+    description: z.ZodOptional<z.ZodString>;
+    createdAt: z.ZodOptional<z.ZodString>;
+    updatedAt: z.ZodOptional<z.ZodString>;
+    memberCount: z.ZodOptional<z.ZodNumber>;
+}, z.core.$strip>;
+export declare const ProjectMemberSchema: z.ZodObject<{
+    userId: z.ZodString;
+    role: z.ZodString;
+    displayName: z.ZodOptional<z.ZodString>;
+    email: z.ZodOptional<z.ZodString>;
+}, z.core.$strip>;
 export declare const contract: {
     ping: import("@orpc/contract").ContractProcedure<import("@orpc/contract").Schema<unknown, unknown>, z.ZodObject<{
         status: z.ZodLiteral<"ok">;
@@ -667,6 +728,9 @@ export declare const contract: {
                 maxTotalBytes: z.ZodNumber;
             }, z.core.$strip>>;
         }, z.core.$strip>;
+        features: z.ZodOptional<z.ZodObject<{
+            rebornProjects: z.ZodBoolean;
+        }, z.core.$strip>>;
     }, z.core.$strip>, import("@orpc/contract").MergedErrorMap<Record<never, never>, import("@orpc/contract").MergedErrorMap<Record<never, never>, {
         UNAUTHORIZED: {
             status: number;
@@ -1458,11 +1522,15 @@ export declare const contract: {
             data: z.ZodArray<z.ZodObject<{
                 id: z.ZodString;
                 name: z.ZodString;
-                source: z.ZodObject<{
+                source: z.ZodDiscriminatedUnion<[z.ZodObject<{
                     type: z.ZodLiteral<"schedule">;
                     cron: z.ZodString;
                     timezone: z.ZodString;
-                }, z.core.$strip>;
+                }, z.core.$strip>, z.ZodObject<{
+                    type: z.ZodLiteral<"once">;
+                    at: z.ZodString;
+                    timezone: z.ZodString;
+                }, z.core.$strip>], "type">;
                 state: z.ZodString;
                 nextRunAt: z.ZodOptional<z.ZodString>;
                 lastRunAt: z.ZodOptional<z.ZodString>;
@@ -2153,6 +2221,415 @@ export declare const contract: {
             };
         }>>, Record<never, never>>;
     };
+    fs: {
+        mounts: import("@orpc/contract").ContractProcedure<import("@orpc/contract").Schema<unknown, unknown>, z.ZodObject<{
+            mounts: z.ZodArray<z.ZodObject<{
+                mount: z.ZodString;
+                label: z.ZodString;
+            }, z.core.$strip>>;
+        }, z.core.$strip>, import("@orpc/contract").MergedErrorMap<Record<never, never>, import("@orpc/contract").MergedErrorMap<Record<never, never>, {
+            UNAUTHORIZED: {
+                status: number;
+                message: string;
+            };
+            NOT_FOUND: {
+                status: number;
+                message: string;
+            };
+            BAD_REQUEST: {
+                status: number;
+                message: string;
+            };
+            CONFLICT: {
+                status: number;
+                message: string;
+            };
+            GATEWAY_ERROR: {
+                status: number;
+                message: string;
+            };
+        }>>, Record<never, never>>;
+        list: import("@orpc/contract").ContractProcedure<z.ZodObject<{
+            mount: z.ZodString;
+            path: z.ZodDefault<z.ZodString>;
+        }, z.core.$strip>, z.ZodObject<{
+            mount: z.ZodString;
+            path: z.ZodString;
+            entries: z.ZodArray<z.ZodObject<{
+                name: z.ZodString;
+                path: z.ZodString;
+                kind: z.ZodEnum<{
+                    file: "file";
+                    directory: "directory";
+                    symlink: "symlink";
+                    other: "other";
+                }>;
+            }, z.core.$strip>>;
+        }, z.core.$strip>, import("@orpc/contract").MergedErrorMap<Record<never, never>, import("@orpc/contract").MergedErrorMap<Record<never, never>, {
+            UNAUTHORIZED: {
+                status: number;
+                message: string;
+            };
+            NOT_FOUND: {
+                status: number;
+                message: string;
+            };
+            BAD_REQUEST: {
+                status: number;
+                message: string;
+            };
+            CONFLICT: {
+                status: number;
+                message: string;
+            };
+            GATEWAY_ERROR: {
+                status: number;
+                message: string;
+            };
+        }>>, Record<never, never>>;
+        stat: import("@orpc/contract").ContractProcedure<z.ZodObject<{
+            mount: z.ZodString;
+            path: z.ZodString;
+        }, z.core.$strip>, z.ZodObject<{
+            stat: z.ZodObject<{
+                path: z.ZodString;
+                kind: z.ZodEnum<{
+                    file: "file";
+                    directory: "directory";
+                    symlink: "symlink";
+                    other: "other";
+                }>;
+                sizeBytes: z.ZodNumber;
+                mimeType: z.ZodString;
+            }, z.core.$strip>;
+        }, z.core.$strip>, import("@orpc/contract").MergedErrorMap<Record<never, never>, import("@orpc/contract").MergedErrorMap<Record<never, never>, {
+            UNAUTHORIZED: {
+                status: number;
+                message: string;
+            };
+            NOT_FOUND: {
+                status: number;
+                message: string;
+            };
+            BAD_REQUEST: {
+                status: number;
+                message: string;
+            };
+            CONFLICT: {
+                status: number;
+                message: string;
+            };
+            GATEWAY_ERROR: {
+                status: number;
+                message: string;
+            };
+        }>>, Record<never, never>>;
+        content: import("@orpc/contract").ContractProcedure<z.ZodObject<{
+            mount: z.ZodString;
+            path: z.ZodString;
+        }, z.core.$strip>, z.ZodObject<{
+            contentBase64: z.ZodString;
+            mimeType: z.ZodString;
+            filename: z.ZodString;
+            sizeBytes: z.ZodNumber;
+        }, z.core.$strip>, import("@orpc/contract").MergedErrorMap<Record<never, never>, import("@orpc/contract").MergedErrorMap<Record<never, never>, {
+            UNAUTHORIZED: {
+                status: number;
+                message: string;
+            };
+            NOT_FOUND: {
+                status: number;
+                message: string;
+            };
+            BAD_REQUEST: {
+                status: number;
+                message: string;
+            };
+            CONFLICT: {
+                status: number;
+                message: string;
+            };
+            GATEWAY_ERROR: {
+                status: number;
+                message: string;
+            };
+        }>>, Record<never, never>>;
+    };
+    projects: {
+        list: import("@orpc/contract").ContractProcedure<import("@orpc/contract").Schema<unknown, unknown>, z.ZodObject<{
+            projects: z.ZodArray<z.ZodObject<{
+                projectId: z.ZodString;
+                name: z.ZodString;
+                description: z.ZodOptional<z.ZodString>;
+                createdAt: z.ZodOptional<z.ZodString>;
+                updatedAt: z.ZodOptional<z.ZodString>;
+                memberCount: z.ZodOptional<z.ZodNumber>;
+            }, z.core.$strip>>;
+        }, z.core.$strip>, import("@orpc/contract").MergedErrorMap<Record<never, never>, import("@orpc/contract").MergedErrorMap<Record<never, never>, {
+            UNAUTHORIZED: {
+                status: number;
+                message: string;
+            };
+            NOT_FOUND: {
+                status: number;
+                message: string;
+            };
+            BAD_REQUEST: {
+                status: number;
+                message: string;
+            };
+            CONFLICT: {
+                status: number;
+                message: string;
+            };
+            GATEWAY_ERROR: {
+                status: number;
+                message: string;
+            };
+        }>>, Record<never, never>>;
+        create: import("@orpc/contract").ContractProcedure<z.ZodObject<{
+            name: z.ZodString;
+            description: z.ZodOptional<z.ZodString>;
+        }, z.core.$strip>, z.ZodObject<{
+            projectId: z.ZodString;
+            name: z.ZodString;
+            description: z.ZodOptional<z.ZodString>;
+            createdAt: z.ZodOptional<z.ZodString>;
+            updatedAt: z.ZodOptional<z.ZodString>;
+            memberCount: z.ZodOptional<z.ZodNumber>;
+        }, z.core.$strip>, import("@orpc/contract").MergedErrorMap<Record<never, never>, import("@orpc/contract").MergedErrorMap<Record<never, never>, {
+            UNAUTHORIZED: {
+                status: number;
+                message: string;
+            };
+            NOT_FOUND: {
+                status: number;
+                message: string;
+            };
+            BAD_REQUEST: {
+                status: number;
+                message: string;
+            };
+            CONFLICT: {
+                status: number;
+                message: string;
+            };
+            GATEWAY_ERROR: {
+                status: number;
+                message: string;
+            };
+        }>>, Record<never, never>>;
+        get: import("@orpc/contract").ContractProcedure<z.ZodObject<{
+            id: z.ZodString;
+        }, z.core.$strip>, z.ZodObject<{
+            projectId: z.ZodString;
+            name: z.ZodString;
+            description: z.ZodOptional<z.ZodString>;
+            createdAt: z.ZodOptional<z.ZodString>;
+            updatedAt: z.ZodOptional<z.ZodString>;
+            memberCount: z.ZodOptional<z.ZodNumber>;
+        }, z.core.$strip>, import("@orpc/contract").MergedErrorMap<Record<never, never>, import("@orpc/contract").MergedErrorMap<Record<never, never>, {
+            UNAUTHORIZED: {
+                status: number;
+                message: string;
+            };
+            NOT_FOUND: {
+                status: number;
+                message: string;
+            };
+            BAD_REQUEST: {
+                status: number;
+                message: string;
+            };
+            CONFLICT: {
+                status: number;
+                message: string;
+            };
+            GATEWAY_ERROR: {
+                status: number;
+                message: string;
+            };
+        }>>, Record<never, never>>;
+        update: import("@orpc/contract").ContractProcedure<z.ZodObject<{
+            id: z.ZodString;
+            name: z.ZodOptional<z.ZodString>;
+            description: z.ZodOptional<z.ZodString>;
+        }, z.core.$strip>, z.ZodObject<{
+            projectId: z.ZodString;
+            name: z.ZodString;
+            description: z.ZodOptional<z.ZodString>;
+            createdAt: z.ZodOptional<z.ZodString>;
+            updatedAt: z.ZodOptional<z.ZodString>;
+            memberCount: z.ZodOptional<z.ZodNumber>;
+        }, z.core.$strip>, import("@orpc/contract").MergedErrorMap<Record<never, never>, import("@orpc/contract").MergedErrorMap<Record<never, never>, {
+            UNAUTHORIZED: {
+                status: number;
+                message: string;
+            };
+            NOT_FOUND: {
+                status: number;
+                message: string;
+            };
+            BAD_REQUEST: {
+                status: number;
+                message: string;
+            };
+            CONFLICT: {
+                status: number;
+                message: string;
+            };
+            GATEWAY_ERROR: {
+                status: number;
+                message: string;
+            };
+        }>>, Record<never, never>>;
+        delete: import("@orpc/contract").ContractProcedure<z.ZodObject<{
+            id: z.ZodString;
+        }, z.core.$strip>, z.ZodObject<{
+            success: z.ZodBoolean;
+        }, z.core.$strip>, import("@orpc/contract").MergedErrorMap<Record<never, never>, import("@orpc/contract").MergedErrorMap<Record<never, never>, {
+            UNAUTHORIZED: {
+                status: number;
+                message: string;
+            };
+            NOT_FOUND: {
+                status: number;
+                message: string;
+            };
+            BAD_REQUEST: {
+                status: number;
+                message: string;
+            };
+            CONFLICT: {
+                status: number;
+                message: string;
+            };
+            GATEWAY_ERROR: {
+                status: number;
+                message: string;
+            };
+        }>>, Record<never, never>>;
+        listMembers: import("@orpc/contract").ContractProcedure<z.ZodObject<{
+            id: z.ZodString;
+        }, z.core.$strip>, z.ZodObject<{
+            members: z.ZodArray<z.ZodObject<{
+                userId: z.ZodString;
+                role: z.ZodString;
+                displayName: z.ZodOptional<z.ZodString>;
+                email: z.ZodOptional<z.ZodString>;
+            }, z.core.$strip>>;
+        }, z.core.$strip>, import("@orpc/contract").MergedErrorMap<Record<never, never>, import("@orpc/contract").MergedErrorMap<Record<never, never>, {
+            UNAUTHORIZED: {
+                status: number;
+                message: string;
+            };
+            NOT_FOUND: {
+                status: number;
+                message: string;
+            };
+            BAD_REQUEST: {
+                status: number;
+                message: string;
+            };
+            CONFLICT: {
+                status: number;
+                message: string;
+            };
+            GATEWAY_ERROR: {
+                status: number;
+                message: string;
+            };
+        }>>, Record<never, never>>;
+        addMember: import("@orpc/contract").ContractProcedure<z.ZodObject<{
+            id: z.ZodString;
+            userId: z.ZodString;
+            role: z.ZodString;
+        }, z.core.$strip>, z.ZodObject<{
+            userId: z.ZodString;
+            role: z.ZodString;
+            displayName: z.ZodOptional<z.ZodString>;
+            email: z.ZodOptional<z.ZodString>;
+        }, z.core.$strip>, import("@orpc/contract").MergedErrorMap<Record<never, never>, import("@orpc/contract").MergedErrorMap<Record<never, never>, {
+            UNAUTHORIZED: {
+                status: number;
+                message: string;
+            };
+            NOT_FOUND: {
+                status: number;
+                message: string;
+            };
+            BAD_REQUEST: {
+                status: number;
+                message: string;
+            };
+            CONFLICT: {
+                status: number;
+                message: string;
+            };
+            GATEWAY_ERROR: {
+                status: number;
+                message: string;
+            };
+        }>>, Record<never, never>>;
+        updateMember: import("@orpc/contract").ContractProcedure<z.ZodObject<{
+            id: z.ZodString;
+            userId: z.ZodString;
+            role: z.ZodString;
+        }, z.core.$strip>, z.ZodObject<{
+            userId: z.ZodString;
+            role: z.ZodString;
+            displayName: z.ZodOptional<z.ZodString>;
+            email: z.ZodOptional<z.ZodString>;
+        }, z.core.$strip>, import("@orpc/contract").MergedErrorMap<Record<never, never>, import("@orpc/contract").MergedErrorMap<Record<never, never>, {
+            UNAUTHORIZED: {
+                status: number;
+                message: string;
+            };
+            NOT_FOUND: {
+                status: number;
+                message: string;
+            };
+            BAD_REQUEST: {
+                status: number;
+                message: string;
+            };
+            CONFLICT: {
+                status: number;
+                message: string;
+            };
+            GATEWAY_ERROR: {
+                status: number;
+                message: string;
+            };
+        }>>, Record<never, never>>;
+        removeMember: import("@orpc/contract").ContractProcedure<z.ZodObject<{
+            id: z.ZodString;
+            userId: z.ZodString;
+        }, z.core.$strip>, z.ZodObject<{
+            success: z.ZodBoolean;
+        }, z.core.$strip>, import("@orpc/contract").MergedErrorMap<Record<never, never>, import("@orpc/contract").MergedErrorMap<Record<never, never>, {
+            UNAUTHORIZED: {
+                status: number;
+                message: string;
+            };
+            NOT_FOUND: {
+                status: number;
+                message: string;
+            };
+            BAD_REQUEST: {
+                status: number;
+                message: string;
+            };
+            CONFLICT: {
+                status: number;
+                message: string;
+            };
+            GATEWAY_ERROR: {
+                status: number;
+                message: string;
+            };
+        }>>, Record<never, never>>;
+    };
     auth: {
         listProviders: import("@orpc/contract").ContractProcedure<import("@orpc/contract").Schema<unknown, unknown>, z.ZodObject<{
             data: z.ZodArray<z.ZodObject<{
@@ -2273,3 +2750,9 @@ export type Thread = z.infer<typeof ThreadSchema>;
 export type Session = z.infer<typeof SessionSchema>;
 export type GateResolution = z.infer<typeof GateResolutionSchema>;
 export type ThreadCreate = z.infer<typeof ThreadCreateSchema>;
+export type FsMountInfo = z.infer<typeof FsMountInfoSchema>;
+export type FsEntry = z.infer<typeof FsEntrySchema>;
+export type FsStatResponse = z.infer<typeof FsStatResponseSchema>;
+export type FsContentResponse = z.infer<typeof FsContentResponseSchema>;
+export type Project = z.infer<typeof ProjectSchema>;
+export type ProjectMember = z.infer<typeof ProjectMemberSchema>;

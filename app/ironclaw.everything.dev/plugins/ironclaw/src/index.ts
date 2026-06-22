@@ -350,6 +350,68 @@ export default createPlugin({
         ),
       },
 
+      fs: {
+        mounts: builder.fs.mounts.use(requireAuth).handler(
+          r((svc) => Effect.runPromise(svc.listFsMounts())),
+        ),
+
+        list: builder.fs.list.use(requireAuth).handler(
+          ri((svc, input) => Effect.runPromise(svc.listFsDir(input.mount, input.path))),
+        ),
+
+        stat: builder.fs.stat.use(requireAuth).handler(
+          ri((svc, input) => Effect.runPromise(svc.statFsPath(input.mount, input.path))),
+        ),
+
+        content: builder.fs.content.use(requireAuth).handler(
+          ri((svc, input) => Effect.runPromise(svc.getFsContent(input.mount, input.path))),
+        ),
+      },
+
+      projects: {
+        list: builder.projects.list.use(requireAuth).handler(
+          r((svc) => Effect.runPromise(svc.listProjects())),
+        ),
+
+        create: builder.projects.create.use(requireAuth).handler(
+          ri((svc, input) => Effect.runPromise(svc.createProject(input.name, input.description))),
+        ),
+
+        get: builder.projects.get.use(requireAuth).handler(
+          ri((svc, input) => Effect.runPromise(svc.getProject(input.id))),
+        ),
+
+        update: builder.projects.update.use(requireAuth).handler(
+          ri((svc, input) => Effect.runPromise(svc.updateProject(input.id, input.name, input.description))),
+        ),
+
+        delete: builder.projects.delete.use(requireAuth).handler(
+          ri(async (svc, input) => {
+            await Effect.runPromise(svc.deleteProject(input.id));
+            return { success: true };
+          }),
+        ),
+
+        listMembers: builder.projects.listMembers.use(requireAuth).handler(
+          ri((svc, input) => Effect.runPromise(svc.listProjectMembers(input.id))),
+        ),
+
+        addMember: builder.projects.addMember.use(requireAuth).handler(
+          ri((svc, input) => Effect.runPromise(svc.addProjectMember(input.id, input.userId, input.role))),
+        ),
+
+        updateMember: builder.projects.updateMember.use(requireAuth).handler(
+          ri((svc, input) => Effect.runPromise(svc.updateProjectMember(input.id, input.userId, input.role))),
+        ),
+
+        removeMember: builder.projects.removeMember.use(requireAuth).handler(
+          ri(async (svc, input) => {
+            await Effect.runPromise(svc.removeProjectMember(input.id, input.userId));
+            return { success: true };
+          }),
+        ),
+      },
+
       operator: {
         createAccessSession: builder.operator.createAccessSession.handler(
           ri(async (svc, input) => {
