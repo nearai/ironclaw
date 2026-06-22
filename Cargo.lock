@@ -4478,6 +4478,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "ironclaw_github_issue_workflow_storage"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "chrono",
+ "deadpool-postgres",
+ "ironclaw_filesystem",
+ "ironclaw_github_issue_workflow",
+ "ironclaw_host_api",
+ "libsql",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "tempfile",
+ "tokio",
+ "tokio-postgres",
+ "tracing",
+]
+
+[[package]]
 name = "ironclaw_hooks"
 version = "0.1.0"
 dependencies = [

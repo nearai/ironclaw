@@ -1634,6 +1634,49 @@ fn boundary_rules() -> Vec<BoundaryRule> {
             ],
         },
         BoundaryRule {
+            // GitHub issue workflow storage is only a durable adapter over
+            // the workflow repository port and the shared filesystem substrate.
+            // It must not become a composition root, product workflow shortcut,
+            // provider adapter, route surface, UI, or runtime-worker owner.
+            crate_name: "ironclaw_github_issue_workflow_storage",
+            forbidden: vec![
+                "ironclaw",
+                "ironclaw_agent_loop",
+                "ironclaw_capabilities",
+                "ironclaw_conversations",
+                "ironclaw_dispatcher",
+                "ironclaw_engine",
+                "ironclaw_extensions",
+                "ironclaw_first_party_extension_ports",
+                "ironclaw_first_party_extensions",
+                "ironclaw_gateway",
+                "ironclaw_host_runtime",
+                "ironclaw_loop_support",
+                "ironclaw_mcp",
+                "ironclaw_processes",
+                "ironclaw_product_adapter_registry",
+                "ironclaw_product_adapters",
+                "ironclaw_product_workflow",
+                "ironclaw_product_workflow_storage",
+                "ironclaw_reborn",
+                "ironclaw_reborn_cli",
+                "ironclaw_reborn_composition",
+                "ironclaw_reborn_config",
+                "ironclaw_reborn_openai_compat",
+                "ironclaw_reborn_openai_compat_storage",
+                "ironclaw_reborn_webui_ingress",
+                "ironclaw_scripts",
+                "ironclaw_slack_v2_adapter",
+                "ironclaw_telegram_v2_adapter",
+                "ironclaw_triggers",
+                "ironclaw_tui",
+                "ironclaw_wasm",
+                "ironclaw_wasm_product_adapters",
+                "ironclaw_webui_v2",
+                "ironclaw_webui_v2_static",
+            ],
+        },
+        BoundaryRule {
             // Product auth is a Reborn contract/facade vocabulary. It may
             // describe behavior-compatible v1 inventory, but implementation
             // code must not reach into v1 routes, extension managers, secret
