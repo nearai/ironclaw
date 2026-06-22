@@ -125,7 +125,7 @@ pub enum FirstPartyCapabilityError {
     Dispatch {
         kind: RuntimeDispatchErrorKind,
         safe_summary: Option<String>,
-        detail: Option<DispatchFailureDetail>,
+        detail: Option<Box<DispatchFailureDetail>>,
         usage: Option<ResourceUsage>,
     },
     /// Dispatch was blocked because a staged credential is missing or expired.
@@ -170,7 +170,7 @@ impl FirstPartyCapabilityError {
         Self::Dispatch {
             kind: RuntimeDispatchErrorKind::InputEncode,
             safe_summary: Some(safe_summary.into()),
-            detail: Some(DispatchFailureDetail::InvalidInput { issues }),
+            detail: Some(Box::new(DispatchFailureDetail::InvalidInput { issues })),
             usage: None,
         }
     }

@@ -2363,14 +2363,18 @@ fn runtime_model_visible_failure_to_loop(
 fn runtime_failure_detail_to_loop(
     detail: Option<DispatchFailureDetail>,
 ) -> Option<CapabilityFailureDetail> {
-    detail.map(|DispatchFailureDetail::InvalidInput { issues }| {
-        CapabilityFailureDetail::InvalidInput {
+    detail.map(dispatch_failure_detail_to_loop)
+}
+
+fn dispatch_failure_detail_to_loop(detail: DispatchFailureDetail) -> CapabilityFailureDetail {
+    match detail {
+        DispatchFailureDetail::InvalidInput { issues } => CapabilityFailureDetail::InvalidInput {
             issues: issues
                 .into_iter()
                 .map(dispatch_input_issue_to_loop)
                 .collect(),
-        }
-    })
+        },
+    }
 }
 
 fn dispatch_input_issue_to_loop(issue: DispatchInputIssue) -> CapabilityInputIssue {
@@ -2845,6 +2849,9 @@ mod tests {
         let issue =
             DispatchInputIssue::new("schedule.kind", DispatchInputIssueCode::MissingRequired)
                 .expected("cron or once");
+        let invalid_value_issue =
+            DispatchInputIssue::new("schedule.timezone", DispatchInputIssueCode::InvalidValue)
+                .expected("an IANA timezone");
         let detailed_invalid_input = runtime_failure_to_loop(
             RuntimeCapabilityFailure::new(
                 capability_id.clone(),
@@ -2852,7 +2859,7 @@ mod tests {
                 Some("trigger_create input failed validation".to_string()),
             )
             .with_detail(DispatchFailureDetail::InvalidInput {
-                issues: vec![issue],
+                issues: vec![issue, invalid_value_issue],
             }),
         )
         .expect("convert invalid input with runtime detail");
@@ -2861,9 +2868,11 @@ mod tests {
             CapabilityOutcome::Failed(CapabilityFailure {
                 detail: Some(CapabilityFailureDetail::InvalidInput { issues }),
                 ..
-            }) if issues.len() == 1
+            }) if issues.len() == 2
                 && issues[0].path == "schedule.kind"
                 && issues[0].code == CapabilityInputIssueCode::MissingRequired
+                && issues[1].path == "schedule.timezone"
+                && issues[1].code == CapabilityInputIssueCode::InvalidValue
         ));
 
         let denied = runtime_failure_to_loop(RuntimeCapabilityFailure::new(

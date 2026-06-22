@@ -433,13 +433,13 @@ fn runtime_failure_detail_to_loop(
 |---|---|---|---|
 | root is not object | `input` | `TypeMismatch` | `object` |
 | missing `schedule` | `schedule` | `MissingRequired` | `object with kind` |
-| old flat `cron` | `cron` | `UnexpectedField` | none |
-| extra root field | field name | `UnexpectedField` | none |
+| old flat `cron` | `unexpected_field` | `UnexpectedField` | none |
+| extra root field | `unexpected_field` | `UnexpectedField` | none |
 | missing discriminator | `schedule.kind` | `MissingRequired` | `cron or once` |
 | unknown discriminator | `schedule.kind` | `InvalidValue` | `cron or once` |
 | non-string discriminator | `schedule.kind` | `TypeMismatch` | `string` |
 | cron missing expression | `schedule.expression` | `MissingRequired` | `cron expression` |
-| extra schedule field | `schedule.<field>` | `UnexpectedField` | none |
+| extra schedule field | `schedule.unexpected_field` | `UnexpectedField` | none |
 | schedule missing timezone | `schedule.timezone` | `MissingRequired` | `IANA timezone name` |
 | once missing local time | `schedule.at` | `MissingRequired` | `YYYY-MM-DDTHH:MM:SS` |
 

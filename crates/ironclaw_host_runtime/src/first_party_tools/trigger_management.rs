@@ -447,7 +447,12 @@ fn classify_trigger_create_shape(input: &Value) -> Vec<DispatchInputIssue> {
     let mut issues = Vec::new();
     required_string(root, "name", "name", "string", &mut issues);
     required_string(root, "prompt", "prompt", "string", &mut issues);
-    unexpected_fields(root, &["name", "prompt", "schedule"], "", &mut issues);
+    unexpected_fields(
+        root,
+        &["name", "prompt", "schedule"],
+        "unexpected_field",
+        &mut issues,
+    );
 
     let Some(schedule) = root.get("schedule") else {
         issues.push(missing_required("schedule").expected("object with kind"));
@@ -466,7 +471,7 @@ fn classify_trigger_create_shape(input: &Value) -> Vec<DispatchInputIssue> {
             unexpected_fields(
                 schedule,
                 &["kind", "expression", "timezone"],
-                "schedule.",
+                "schedule.unexpected_field",
                 &mut issues,
             );
             required_string(
@@ -488,7 +493,7 @@ fn classify_trigger_create_shape(input: &Value) -> Vec<DispatchInputIssue> {
             unexpected_fields(
                 schedule,
                 &["kind", "at", "timezone"],
-                "schedule.",
+                "schedule.unexpected_field",
                 &mut issues,
             );
             required_string(
@@ -521,12 +526,11 @@ fn classify_trigger_create_shape(input: &Value) -> Vec<DispatchInputIssue> {
 fn unexpected_fields(
     object: &serde_json::Map<String, Value>,
     allowed: &[&str],
-    path_prefix: &'static str,
+    path: &'static str,
     issues: &mut Vec<DispatchInputIssue>,
 ) {
     for field in object.keys() {
         if !allowed.contains(&field.as_str()) {
-            let path = format!("{path_prefix}{field}");
             issues.push(unexpected_field(path));
         }
     }

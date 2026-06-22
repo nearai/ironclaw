@@ -868,8 +868,7 @@ async fn builtin_trigger_create_surfaces_structured_invalid_input_detail() {
                 "timezone": "UTC"
             }),
             vec![
-                ("cron", DispatchInputIssueCode::UnexpectedField),
-                ("timezone", DispatchInputIssueCode::UnexpectedField),
+                ("unexpected_field", DispatchInputIssueCode::UnexpectedField),
                 ("schedule", DispatchInputIssueCode::MissingRequired),
             ],
         ),
@@ -931,7 +930,7 @@ async fn builtin_trigger_create_surfaces_structured_invalid_input_detail() {
                 "extra": true,
                 "schedule": { "kind": "cron", "expression": "*/3 * * * *", "timezone": "UTC" }
             }),
-            vec![("extra", DispatchInputIssueCode::UnexpectedField)],
+            vec![("unexpected_field", DispatchInputIssueCode::UnexpectedField)],
         ),
         (
             "unexpected schedule field",
@@ -945,7 +944,10 @@ async fn builtin_trigger_create_surfaces_structured_invalid_input_detail() {
                     "extra": true
                 }
             }),
-            vec![("schedule.extra", DispatchInputIssueCode::UnexpectedField)],
+            vec![(
+                "schedule.unexpected_field",
+                DispatchInputIssueCode::UnexpectedField,
+            )],
         ),
         (
             "invalid cron cadence",

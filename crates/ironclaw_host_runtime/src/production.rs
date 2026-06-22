@@ -1982,21 +1982,15 @@ fn failure_from(
 ) -> RuntimeCapabilityFailure {
     let kind = failure_kind_from(&error);
     let message = sanitized_failure_message(&error);
-    let detail = failure_detail_from(&error);
+    let detail = match error {
+        CapabilityInvocationError::Dispatch { detail, .. } => detail,
+        _ => None,
+    };
     let mut failure = RuntimeCapabilityFailure::new(capability_id, kind, message);
     if let Some(detail) = detail {
         failure = failure.with_detail(detail);
     }
     failure
-}
-
-fn failure_detail_from(
-    error: &CapabilityInvocationError,
-) -> Option<ironclaw_host_api::DispatchFailureDetail> {
-    match error {
-        CapabilityInvocationError::Dispatch { detail, .. } => detail.clone(),
-        _ => None,
-    }
 }
 
 /// Returns a stable, redacted summary message for a capability invocation

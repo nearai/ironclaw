@@ -370,7 +370,7 @@ where
                     } => Err(DispatchError::FirstParty {
                         kind,
                         safe_summary,
-                        detail,
+                        detail: detail.map(|detail| *detail),
                     }),
                 };
             }
