@@ -123,7 +123,7 @@ use crate::available_extensions::slack_manifest_digest;
 use crate::default_system_prompt::seed_default_system_prompt;
 use crate::input::{RebornLocalRuntimeIdentity, RebornRuntimeProcessBinding, RebornStorageInput};
 use crate::lifecycle::{RebornLocalSkillManagementPort, build_local_skill_management_port};
-use crate::local_dev_authorization::local_dev_authorizer;
+use crate::local_dev_authorization::{StoreApprovalSettingsProvider, local_dev_authorizer};
 use crate::local_dev_capability_policy::{LocalDevCapabilityPolicy, local_dev_capability_policy};
 use crate::local_dev_mounts::{
     ambient_workspace_mount_view, memory_mount_view, scoped_skill_context_mount_view,
@@ -383,6 +383,14 @@ pub struct RebornServices {
     #[cfg(any(feature = "libsql", feature = "postgres"))]
     // arch-exempt: optional_arc, local-dev vs production split pending RebornServices split, plan #4471
     pub(crate) production_runtime: Option<RebornProductionRuntimeServices>,
+    /// Pre-minted scheduler wake wiring for the production composition path.
+    /// Minted in `build_production_shaped` so the notifier can satisfy
+    /// `HostRuntimeServices.with_turn_run_wake_notifier_dyn` before
+    /// `build_default_planned_runtime` runs; consumed by `build_reborn_runtime`
+    /// via `DefaultPlannedRuntimeParts.scheduler_wake_wiring` so the scheduler
+    /// loop driven by that function shares the exact same channel.
+    #[cfg(any(feature = "libsql", feature = "postgres"))]
+    pub(crate) production_scheduler_wake: Option<ironclaw_reborn::runtime::SchedulerWakeWiring>,
     /// Shared scoped secret store. Exposed so runtime-level features (e.g.
     /// operator LLM-key storage) can reuse the same instance product-auth uses
     /// rather than standing up a second authority.
@@ -652,6 +660,8 @@ struct RebornLocalDevStoreGraphInput {
     default_system_prompt_path: PathBuf,
     trigger_repository: Arc<dyn TriggerRepository>,
     project_repository: Arc<dyn ProjectRepository>,
+    /// Concurrency limits for the in-memory (or filesystem-backed) turn-state store.
+    turn_state_store_limits: ironclaw_turns::InMemoryTurnStateStoreLimits,
     /// Raw libSQL substrate handle, carried so the canonical Reborn identity
     /// store rides the same `reborn-local-dev.db` instead of opening a second
     /// handle (see `RebornRuntime::open_reborn_identity_resolver`).
@@ -687,6 +697,8 @@ impl RebornServices {
             local_runtime: None,
             #[cfg(any(feature = "libsql", feature = "postgres"))]
             production_runtime: None,
+            #[cfg(any(feature = "libsql", feature = "postgres"))]
+            production_scheduler_wake: None,
             #[cfg(any(feature = "root-llm-provider", feature = "test-support"))]
             secret_store: Arc::new(ironclaw_secrets::InMemorySecretStore::new()),
             #[cfg(any(feature = "libsql", feature = "postgres"))]
@@ -777,6 +789,7 @@ async fn build_local_dev(input: RebornBuildInput) -> Result<RebornServices, Rebo
         nearai_mcp_bootstrap_config,
         owner_id,
         local_runtime_identity,
+        turn_state_store_limits,
         ..
     } = input;
     let local_runtime_identity_for_nearai_mcp = local_runtime_identity.clone();
@@ -931,6 +944,7 @@ async fn build_local_dev(input: RebornBuildInput) -> Result<RebornServices, Rebo
         default_system_prompt_path,
         trigger_repository,
         project_repository,
+        turn_state_store_limits,
         #[cfg(feature = "libsql")]
         identity_substrate_db,
     })?;
@@ -950,9 +964,33 @@ async fn build_local_dev(input: RebornBuildInput) -> Result<RebornServices, Rebo
     let local_dev_trust_policy = Arc::new(builtin_first_party_trust_policy()?);
     let local_dev_trust_invalidation_bus = Arc::new(ironclaw_trust::InvalidationBus::new());
     let extension_registry = Arc::new(local_dev_builtin_extension_registry()?);
+    // Per-(tenant,user) approval settings resolved live at each dispatch gate
+    // so a WebUI change applies without a restart (#4959). Mirrors the
+    // persistent-approval store's cfg split: filesystem-backed (shared with the
+    // webui facade) in durable builds, in-memory otherwise.
+    #[cfg(any(feature = "libsql", feature = "postgres"))]
+    let approval_settings_provider = {
+        let approval_settings_filesystem = crate::wrap_scoped(Arc::clone(&filesystem));
+        Arc::new(StoreApprovalSettingsProvider::new(
+            Arc::new(
+                ironclaw_approvals::FilesystemToolPermissionOverrideStore::new(Arc::clone(
+                    &approval_settings_filesystem,
+                )),
+            ),
+            Arc::new(ironclaw_approvals::FilesystemAutoApproveSettingStore::new(
+                approval_settings_filesystem,
+            )),
+        ))
+    };
+    #[cfg(not(any(feature = "libsql", feature = "postgres")))]
+    let approval_settings_provider = Arc::new(StoreApprovalSettingsProvider::new(
+        Arc::new(ironclaw_approvals::InMemoryToolPermissionOverrideStore::new()),
+        Arc::new(ironclaw_approvals::InMemoryAutoApproveSettingStore::new()),
+    ));
     let authorizer = local_dev_authorizer(
         runtime_policy.as_ref(),
         Arc::clone(&store_graph.local_runtime.capability_policy),
+        approval_settings_provider,
     );
     let services = HostRuntimeServices::new(
         Arc::clone(&extension_registry),
@@ -1202,6 +1240,8 @@ async fn build_local_dev(input: RebornBuildInput) -> Result<RebornServices, Rebo
         local_runtime: Some(store_graph.local_runtime),
         #[cfg(any(feature = "libsql", feature = "postgres"))]
         production_runtime: None,
+        #[cfg(any(feature = "libsql", feature = "postgres"))]
+        production_scheduler_wake: None,
         #[cfg(any(feature = "root-llm-provider", feature = "test-support"))]
         secret_store,
         // Local-dev is single-user; no cross-owner enumeration or leader lock needed.
@@ -1428,6 +1468,7 @@ fn build_local_dev_store_graph(
         default_system_prompt_path,
         trigger_repository,
         project_repository,
+        turn_state_store_limits,
         identity_substrate_db,
     } = input;
     let scoped_filesystem = local_dev_scoped_filesystem(Arc::clone(&filesystem));
@@ -1443,9 +1484,10 @@ fn build_local_dev_store_graph(
     let persistent_approval_policies = Arc::new(FilesystemPersistentApprovalPolicyStore::new(
         Arc::clone(&scoped_filesystem),
     ));
-    let turn_state = Arc::new(FilesystemTurnStateStore::new(Arc::clone(
-        &scoped_filesystem,
-    )));
+    let turn_state = Arc::new(
+        FilesystemTurnStateStore::new(Arc::clone(&scoped_filesystem))
+            .with_limits(turn_state_store_limits),
+    );
     let checkpoint_state_store: Arc<dyn CheckpointStateStore> = Arc::new(
         FilesystemCheckpointStateStore::new(Arc::clone(&scoped_filesystem)),
     );
@@ -1574,6 +1616,7 @@ fn build_local_dev_store_graph(
         default_system_prompt_path,
         trigger_repository,
         project_repository,
+        turn_state_store_limits,
     } = input;
     #[cfg(feature = "postgres")]
     let subagent_goal_filesystem = local_dev_scoped_filesystem(Arc::clone(&filesystem));
@@ -1583,7 +1626,7 @@ fn build_local_dev_store_graph(
     let approval_requests = Arc::new(InMemoryApprovalRequestStore::new());
     let capability_leases = Arc::new(InMemoryCapabilityLeaseStore::new());
     let persistent_approval_policies = Arc::new(InMemoryPersistentApprovalPolicyStore::new());
-    let turn_state = Arc::new(InMemoryTurnStateStore::default());
+    let turn_state = Arc::new(InMemoryTurnStateStore::with_limits(turn_state_store_limits));
     let checkpoint_state_store: Arc<dyn CheckpointStateStore> =
         Arc::new(InMemoryCheckpointStateStore::default());
     let loop_checkpoint_store: Arc<dyn LoopCheckpointStore> =
@@ -2812,7 +2855,11 @@ async fn build_production_shaped(
         storage,
         production_trust_policy,
         runtime_policy,
-        turn_run_wake_notifier,
+        // The notifier field on `RebornBuildInput` is kept for backward
+        // compatibility with test callers that pre-mint one, but the
+        // production-shaped build now mints its own notifier internally so the
+        // coordinator and scheduler always share the exact same channel.
+        turn_run_wake_notifier: _,
         runtime_process_binding,
         required_runtime_backends,
         require_runtime_http_egress,
@@ -2825,6 +2872,7 @@ async fn build_production_shaped(
         oauth_provider_configs,
         oauth_dcr_provider_configs,
         nearai_mcp_bootstrap_config: _,
+        turn_state_store_limits,
     } = input;
     #[cfg(any(feature = "libsql", feature = "postgres"))]
     let wiring_config = production_config(
@@ -2836,7 +2884,6 @@ async fn build_production_shaped(
     let _ = (
         production_trust_policy,
         runtime_policy,
-        turn_run_wake_notifier,
         runtime_process_binding,
         owner_id,
         required_runtime_backends,
@@ -2845,6 +2892,7 @@ async fn build_production_shaped(
         product_auth_ports,
         oauth_provider_configs,
         oauth_dcr_provider_configs,
+        turn_state_store_limits,
     );
 
     match storage {
@@ -2863,10 +2911,18 @@ async fn build_production_shaped(
             auth_token,
             secret_master_key,
         } => {
+            // Mint the scheduler wake wiring here, before building the coordinator, so:
+            // 1. The notifier can satisfy `HostRuntimeServices.with_turn_run_wake_notifier_dyn`
+            //    (required by `validate_production_wiring` / `turn_coordinator_for_production`).
+            // 2. The wiring is threaded through `RebornServices` →
+            //    `DefaultPlannedRuntimeParts.scheduler_wake_wiring` so the
+            //    `build_default_planned_runtime` scheduler loop consumes the exact same channel,
+            //    ensuring the coordinator's notifier and the scheduler share a live queue.
+            let scheduler_wake_wiring = ironclaw_reborn::runtime::SchedulerWakeWiring::channel();
             let production_wiring = production_wiring(
                 production_trust_policy,
                 runtime_policy,
-                turn_run_wake_notifier,
+                scheduler_wake_wiring.notifier(),
                 runtime_process_binding,
             )?;
             let secret_master_key = resolve_secret_master_key(secret_master_key).await?;
@@ -2878,6 +2934,8 @@ async fn build_production_shaped(
                 oauth_provider_configs,
                 oauth_dcr_provider_configs,
                 owner_id,
+                turn_state_store_limits,
+                scheduler_wake_wiring,
             };
             build_libsql_production(context, db, path_or_url, auth_token, secret_master_key).await
         }
@@ -2888,10 +2946,18 @@ async fn build_production_shaped(
             tls_options,
             secret_master_key,
         } => {
+            // Mint the scheduler wake wiring here, before building the coordinator, so:
+            // 1. The notifier can satisfy `HostRuntimeServices.with_turn_run_wake_notifier_dyn`
+            //    (required by `validate_production_wiring` / `turn_coordinator_for_production`).
+            // 2. The wiring is threaded through `RebornServices` →
+            //    `DefaultPlannedRuntimeParts.scheduler_wake_wiring` so the
+            //    `build_default_planned_runtime` scheduler loop consumes the exact same channel,
+            //    ensuring the coordinator's notifier and the scheduler share a live queue.
+            let scheduler_wake_wiring = ironclaw_reborn::runtime::SchedulerWakeWiring::channel();
             let production_wiring = production_wiring(
                 production_trust_policy,
                 runtime_policy,
-                turn_run_wake_notifier,
+                scheduler_wake_wiring.notifier(),
                 runtime_process_binding,
             )?;
             let secret_master_key = resolve_secret_master_key(secret_master_key).await?;
@@ -2903,6 +2969,8 @@ async fn build_production_shaped(
                 oauth_provider_configs,
                 oauth_dcr_provider_configs,
                 owner_id,
+                turn_state_store_limits,
+                scheduler_wake_wiring,
             };
             build_postgres_production(context, pool, url, tls_options, secret_master_key).await
         }
@@ -2935,13 +3003,18 @@ struct RebornProductionBuildContext {
     oauth_provider_configs: Vec<crate::input::OAuthProviderBackendConfig>,
     oauth_dcr_provider_configs: Vec<crate::input::OAuthDcrProviderBackendConfig>,
     owner_id: String,
+    turn_state_store_limits: ironclaw_turns::InMemoryTurnStateStoreLimits,
+    /// The pre-minted scheduler wake wiring to carry to `RebornServices` so
+    /// `build_reborn_runtime` can hand it to `build_default_planned_runtime` via
+    /// `DefaultPlannedRuntimeParts.scheduler_wake_wiring`.
+    scheduler_wake_wiring: ironclaw_reborn::runtime::SchedulerWakeWiring,
 }
 
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 fn production_wiring(
     trust_policy: Option<Arc<HostTrustPolicy>>,
     runtime_policy: Option<EffectiveRuntimePolicy>,
-    turn_run_wake_notifier: Option<Arc<dyn ironclaw_turns::TurnRunWakeNotifier>>,
+    turn_run_wake_notifier: Arc<ironclaw_host_runtime::SchedulerTurnRunWakeNotifier>,
     runtime_process_binding: RebornRuntimeProcessBinding,
 ) -> Result<RebornProductionWiring, RebornBuildError> {
     let trust_policy = trust_policy.ok_or(RebornBuildError::MissingProductionTrustPolicy)?;
@@ -2950,8 +3023,8 @@ fn production_wiring(
     }
     let runtime_policy = runtime_policy.ok_or(RebornBuildError::MissingRuntimePolicy)?;
     validate_production_process_binding(&runtime_policy, &runtime_process_binding)?;
-    let turn_run_wake_notifier =
-        turn_run_wake_notifier.ok_or(RebornBuildError::MissingTurnRunWakeNotifier)?;
+    let turn_run_wake_notifier: Arc<dyn ironclaw_turns::TurnRunWakeNotifier> =
+        turn_run_wake_notifier;
     Ok(RebornProductionWiring {
         trust_policy,
         runtime_policy,
@@ -3276,6 +3349,8 @@ where
         oauth_provider_configs,
         oauth_dcr_provider_configs,
         owner_id,
+        turn_state_store_limits,
+        scheduler_wake_wiring,
     } = context;
     let owner_user_id = UserId::new(owner_id).map_err(|error| RebornBuildError::InvalidConfig {
         reason: error.to_string(),
@@ -3298,9 +3373,10 @@ where
         broadcast_budget_event_sink,
         ..
     } = build_budget_sinks();
-    let turn_state = Arc::new(FilesystemTurnStateStore::new(Arc::clone(
-        &stores.scoped_filesystem,
-    )));
+    let turn_state = Arc::new(
+        FilesystemTurnStateStore::new(Arc::clone(&stores.scoped_filesystem))
+            .with_limits(turn_state_store_limits),
+    );
     let checkpoint_state_store: Arc<dyn CheckpointStateStore> = Arc::new(
         FilesystemCheckpointStateStore::new(Arc::clone(&stores.scoped_filesystem)),
     );
@@ -3474,6 +3550,8 @@ where
         local_runtime: None,
         #[cfg(any(feature = "libsql", feature = "postgres"))]
         production_runtime: Some(production_runtime),
+        #[cfg(any(feature = "libsql", feature = "postgres"))]
+        production_scheduler_wake: Some(scheduler_wake_wiring),
         #[cfg(any(feature = "root-llm-provider", feature = "test-support"))]
         secret_store,
         // `Ready` only when this path built a durable candidate source (i.e. no

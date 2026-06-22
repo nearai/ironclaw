@@ -165,6 +165,7 @@ async fn build_runtime(
             .with_runner_settings(TurnRunnerSettings {
                 heartbeat_interval: Duration::from_secs(60),
                 poll_interval: Duration::from_secs(60),
+                ..TurnRunnerSettings::default()
             })
             .with_model_gateway_override(Arc::new(UnusedModelGateway)),
     )

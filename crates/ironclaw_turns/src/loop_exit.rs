@@ -89,7 +89,7 @@ pub trait LoopExitEvidencePort: Send + Sync {
     ) -> Result<Option<LoopCheckpointKind>, TurnError>;
 }
 
-/// Trusted loop-exit applier used by `TurnRunnerWorker`.
+/// Trusted loop-exit applier used by `RebornTurnRunExecutor`.
 ///
 /// This owns the only production construction path for `LoopExitValidationPolicy`:
 /// drivers can submit `LoopExit` claims, but only host-owned evidence ports can

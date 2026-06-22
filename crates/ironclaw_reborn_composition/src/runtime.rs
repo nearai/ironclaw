@@ -28,7 +28,6 @@ use std::time::Duration;
 use chrono::Utc;
 use thiserror::Error;
 use tokio::sync::{Mutex, OwnedMutexGuard};
-use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
@@ -67,7 +66,6 @@ use ironclaw_reborn::milestone_events::{
 use ironclaw_reborn::runtime::{
     DefaultPlannedRuntimeBuildError, DefaultPlannedRuntimeConfig, DefaultPlannedRuntimeParts,
     RuntimeSubagentGoalStore, RuntimeTurnStateStore, build_default_planned_runtime,
-    build_default_planned_runtime_with_wake_channel,
 };
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 use ironclaw_reborn::subagent::goal_store::FilesystemSubagentGoalStore;
@@ -76,19 +74,18 @@ use ironclaw_reborn::subagent::goal_store::InMemoryBoundedSubagentGoalStore;
 use ironclaw_reborn::subagent::{
     flavors::StaticSubagentDefinitionResolver, gate_resolution::BoundedSubagentGateResolutionStore,
 };
-use ironclaw_reborn::turn_runner::{
-    TurnRunnerWakeReceiver, TurnRunnerWakeSender, TurnRunnerWorkerConfig,
-};
 use ironclaw_threads::{
     AcceptInboundMessageRequest, EnsureThreadRequest, MessageContent, MessageKind, MessageStatus,
     SessionThreadService, ThreadHistoryRequest, ThreadScope,
 };
 use ironclaw_turns::{
     AcceptedMessageRef, CancelRunRequest, CancelRunResponse, GetRunStateRequest, IdempotencyKey,
-    LoopGateRef, ReplyTargetBindingRef, RunProfileResolutionRequest, SanitizedCancelReason,
-    SourceBindingRef, SubmitTurnRequest, SubmitTurnResponse, TurnActor, TurnCoordinator, TurnError,
-    TurnEventProjectionSource, TurnId, TurnPersistenceSnapshot, TurnRunId, TurnRunRecord,
-    TurnRunState, TurnScope, TurnSpawnTreeStateStore, TurnStatus,
+    InMemoryTurnStateStoreLimits, LoopGateRef, ReplyTargetBindingRef, RunProfileResolutionRequest,
+    SanitizedCancelReason, SourceBindingRef, SubmitTurnRequest, SubmitTurnResponse, TurnActor,
+    TurnCoordinator, TurnError, TurnEventProjectionSource, TurnId, TurnPersistenceSnapshot,
+    TurnRunId, TurnRunRecord, TurnRunState, TurnRunWake, TurnScope, TurnSpawnTreeStateStore,
+    TurnStatus,
+    events::EventCursor,
     run_profile::{LoopHostMilestoneSink, LoopRunContext},
 };
 
@@ -100,6 +97,7 @@ use ironclaw_product_workflow::{
 };
 use ironclaw_turns::run_profile::UserProfileContext;
 
+use self::runtime_turn_scheduler::RuntimeTurnScheduler;
 use crate::default_system_prompt::DefaultSystemPromptIdentitySource;
 use crate::factory::{LocalDevRootFilesystem, LocalDevTurnStateStore, builtin_extension_registry};
 use crate::local_dev_capability_policy::local_dev_capability_policy;
@@ -280,6 +278,32 @@ fn enforce_runtime_cutover_gate(
     }
 }
 
+/// Guard: production and migration-dry-run compositions always pre-mint
+/// [`SchedulerWakeWiring`] in `build_production_shaped` so the
+/// `HostRuntimeServices` notifier and the scheduler wake loop share exactly one
+/// channel. If the wiring is `None` for those profiles it means the composition
+/// contract was violated (e.g. a code path forgot to mint it), and starting the
+/// runtime would silently create a divergent scheduler-local channel. Extracted
+/// so the negative branch is unit-testable without a full libsql/postgres
+/// substrate.
+#[cfg(any(feature = "libsql", feature = "postgres"))]
+fn check_production_scheduler_wake_wiring(
+    profile: RebornCompositionProfile,
+    wiring: &Option<ironclaw_reborn::runtime::SchedulerWakeWiring>,
+) -> Result<(), RebornRuntimeError> {
+    if wiring.is_none()
+        && matches!(
+            profile,
+            RebornCompositionProfile::Production | RebornCompositionProfile::MigrationDryRun
+        )
+    {
+        return Err(RebornRuntimeError::InvalidArgument {
+            reason: "production runtime missing scheduler wake wiring".to_string(),
+        });
+    }
+    Ok(())
+}
+
 mod approval;
 mod auth_interaction;
 #[cfg(test)]
@@ -293,6 +317,7 @@ mod local_dev;
 #[path = "runtime/tests/outbound_delivery.rs"]
 mod outbound_delivery_tests;
 mod production;
+mod runtime_turn_scheduler;
 mod skills;
 
 #[cfg(test)]
@@ -429,8 +454,7 @@ pub struct RebornRuntime {
     turn_tree_store: Arc<dyn TurnSpawnTreeStateStore>,
     thread_service: Arc<dyn SessionThreadService>,
     thread_scope: ThreadScope,
-    worker_handle: JoinHandle<()>,
-    worker_cancel: CancellationToken,
+    turn_scheduler: RuntimeTurnScheduler,
     trigger_poller_handle: Option<TriggerPollerRuntimeHandle>,
     #[cfg(any(feature = "libsql", feature = "postgres"))]
     credential_refresh_worker_handle:
@@ -461,7 +485,6 @@ pub struct RebornRuntime {
     approval_audit_sink: Arc<InMemoryAuditSink>,
     webui_event_log: Arc<dyn DurableEventLog>,
     default_run_profile_id: String,
-    wake_sender: TurnRunnerWakeSender,
     send_locks: Mutex<HashMap<ConversationId, Arc<Mutex<()>>>>,
     skill_activation_source: Option<Arc<LocalDevSelectableSkillContextSource>>,
     skill_execution_adapter: Option<Arc<LocalDevSkillExecutionAdapter>>,
@@ -1572,7 +1595,9 @@ impl RebornRuntime {
     ) -> Result<SubmittedTurn, RebornRuntimeError> {
         let send_lock = self.send_lock_for(conversation).await;
         let _send_guard = send_lock.lock_owned().await;
-        if self.worker_handle.is_finished() {
+        // Stopped only when every worker has exited; a single crashed worker must not
+        // reject submissions while others run.
+        if self.turn_scheduler.is_stopped() {
             return Err(RebornRuntimeError::WorkerStopped);
         }
         let scope = self.turn_scope_for(&conversation.0);
@@ -1658,7 +1683,12 @@ impl RebornRuntime {
             }
         };
 
-        let SubmitTurnResponse::Accepted { run_id, .. } = response;
+        let SubmitTurnResponse::Accepted {
+            run_id,
+            status: submit_status,
+            event_cursor: submit_cursor,
+            ..
+        } = response;
         if cancellation.is_cancelled() {
             if let Some(skill_activation_source) = &self.skill_activation_source {
                 skill_activation_source
@@ -1674,7 +1704,12 @@ impl RebornRuntime {
             .await?;
             return Err(RebornRuntimeError::OperationCancelled);
         }
-        self.wake_sender.wake();
+        self.turn_scheduler.notify(TurnRunWake {
+            scope: scope.clone(),
+            run_id,
+            status: submit_status,
+            event_cursor: submit_cursor,
+        });
 
         Ok(SubmittedTurn {
             _send_guard,
@@ -1755,16 +1790,9 @@ impl RebornRuntime {
         if let Some(skill_learning_extraction_tasks) = self.skill_learning_extraction_tasks {
             skill_learning_extraction_tasks.shutdown().await;
         }
-        self.worker_cancel.cancel();
+        self.turn_scheduler.shutdown().await;
         if let Some(projection) = self.budget_event_projection {
             projection.shutdown().await;
-        }
-        if let Err(error) = self.worker_handle.await {
-            if error.is_panic() {
-                tracing::error!(%error, "reborn worker task panicked during shutdown");
-            } else {
-                tracing::warn!(%error, "reborn worker task was cancelled during shutdown");
-            }
         }
         Ok(())
     }
@@ -1815,7 +1843,7 @@ impl RebornRuntime {
     ) -> Result<TurnRunState, RebornRuntimeError> {
         let start = std::time::Instant::now();
         loop {
-            if self.worker_handle.is_finished() {
+            if self.turn_scheduler.is_stopped() {
                 return Err(RebornRuntimeError::WorkerStopped);
             }
             let state = self
@@ -1875,7 +1903,7 @@ impl RebornRuntime {
     ) -> Result<TurnRunState, RebornRuntimeError> {
         let start = std::time::Instant::now();
         loop {
-            if self.worker_handle.is_finished() {
+            if self.turn_scheduler.is_stopped() {
                 return Err(RebornRuntimeError::WorkerStopped);
             }
             let state = self
@@ -2072,7 +2100,12 @@ impl RebornRuntime {
         if cancellation_accepted {
             self.append_webui_loop_cancelled(scope, run_id).await?;
         }
-        self.wake_sender.wake();
+        self.turn_scheduler.notify(TurnRunWake {
+            scope: scope.clone(),
+            run_id: response.run_id,
+            status: response.status,
+            event_cursor: response.event_cursor,
+        });
         if cancellation_accepted {
             self.cancel_descendant_runs(scope, run_id, reason, idempotency_suffix)
                 .await?;
@@ -2137,7 +2170,7 @@ impl RebornRuntime {
                     let state = self
                         .turn_coordinator
                         .get_run_state(GetRunStateRequest {
-                            scope: child_scope,
+                            scope: child_scope.clone(),
                             run_id: child_run_id,
                         })
                         .await?;
@@ -2145,7 +2178,12 @@ impl RebornRuntime {
                         state.status,
                         TurnStatus::CancelRequested | TurnStatus::Cancelled
                     ) {
-                        self.wake_sender.wake();
+                        self.turn_scheduler.notify(TurnRunWake {
+                            scope: child_scope,
+                            run_id: child_run_id,
+                            status: state.status,
+                            event_cursor: EventCursor(0),
+                        });
                         continue;
                     }
                     return Err(error.into());
@@ -2158,7 +2196,12 @@ impl RebornRuntime {
                 self.append_webui_loop_cancelled(&child.scope, child_run_id)
                     .await?;
             }
-            self.wake_sender.wake();
+            self.turn_scheduler.notify(TurnRunWake {
+                scope: child_scope,
+                run_id: response.run_id,
+                status: response.status,
+                event_cursor: response.event_cursor,
+            });
         }
         Ok(())
     }
@@ -2286,16 +2329,6 @@ pub async fn build_reborn_runtime(
         });
     }
 
-    let planned_runtime_wake_channel = if profile == RebornCompositionProfile::Production
-        && services_input.turn_run_wake_notifier.is_none()
-    {
-        let (wake_sender, wake_receiver) = TurnRunnerWakeReceiver::new();
-        services_input = services_input.with_turn_run_wake_notifier(Arc::new(wake_sender.clone()));
-        Some((wake_sender, wake_receiver))
-    } else {
-        None
-    };
-
     let validated_identity = validate_runtime_identity(identity)?;
     services_input = services_input.with_local_runtime_identity(
         validated_identity.tenant_id.clone(),
@@ -2318,6 +2351,16 @@ pub async fn build_reborn_runtime(
     }
     let trusted_laptop_access = services_input.grants_trusted_laptop_access();
     let owner_id = services_input.owner_id().to_string();
+    // Thread per-user and per-origin concurrency caps from TurnRunnerSettings into the
+    // turn-state store. The factory reads these when constructing the store so limits
+    // are applied from the very first claim.
+    let turn_state_limits = InMemoryTurnStateStoreLimits {
+        max_concurrent_runs_per_user: runner.max_concurrent_runs_per_user,
+        max_concurrent_trigger_runs: runner.max_concurrent_trigger_runs,
+        max_concurrent_conversation_runs: runner.max_concurrent_conversation_runs,
+        ..InMemoryTurnStateStoreLimits::default()
+    };
+    services_input = services_input.with_turn_state_store_limits(turn_state_limits);
     let actor_user_id =
         UserId::new(owner_id.clone()).map_err(|reason| RebornRuntimeError::InvalidArgument {
             reason: format!("user id: {reason}"),
@@ -2342,6 +2385,23 @@ pub async fn build_reborn_runtime(
             .await?;
     }
     enforce_runtime_cutover_gate(profile, &services.readiness)?;
+
+    // Extract the pre-minted scheduler wake wiring from the production composition path
+    // (minted in `build_production_shaped`) so it can be handed to
+    // `DefaultPlannedRuntimeParts.scheduler_wake_wiring` below. The local-dev path
+    // leaves this `None` and `build_default_planned_runtime` mints its own wiring.
+    #[cfg(any(feature = "libsql", feature = "postgres"))]
+    let production_scheduler_wake = {
+        let wiring = services.production_scheduler_wake.take();
+        // Production and migration-dry-run mint this in `build_production_shaped` so the
+        // `HostRuntimeServices` notifier and the scheduler wake loop share one channel.
+        // Fail closed if it is missing rather than let `build_default_planned_runtime`
+        // mint a divergent scheduler-local channel (silent contract break).
+        check_production_scheduler_wake_wiring(profile, &wiring)?;
+        wiring
+    };
+    #[cfg(not(any(feature = "libsql", feature = "postgres")))]
+    let production_scheduler_wake: Option<ironclaw_reborn::runtime::SchedulerWakeWiring> = None;
 
     let runtime_parts = match profile {
         RebornCompositionProfile::LocalDev | RebornCompositionProfile::LocalDevYolo => {
@@ -2869,11 +2929,9 @@ pub async fn build_reborn_runtime(
         subagent_spawn_limits: ironclaw_loop_support::SubagentSpawnLimits::default(),
         loop_exit_evidence,
         config: DefaultPlannedRuntimeConfig {
-            worker: TurnRunnerWorkerConfig {
-                heartbeat_interval: runner.heartbeat_interval,
-                poll_interval: runner.poll_interval,
-                scope_filter: None,
-            },
+            heartbeat_interval: runner.heartbeat_interval,
+            poll_interval: runner.poll_interval,
+            worker_count: runner.worker_count,
             ..DefaultPlannedRuntimeConfig::default()
         },
         model_route_resolver: None,
@@ -2925,13 +2983,14 @@ pub async fn build_reborn_runtime(
         turn_event_sink: Some(turn_event_sink),
         hook_dispatcher_builder_factory,
         communication_context_provider,
+        // For the production composition path, use the pre-minted wiring from
+        // `build_production_shaped` so the `HostRuntimeServices` notifier (used by
+        // `turn_coordinator_for_production`) and the scheduler's wake loop share the
+        // exact same channel. For local-dev, `None` causes `build_default_planned_runtime`
+        // to mint its own wiring internally (existing behavior).
+        scheduler_wake_wiring: production_scheduler_wake,
     };
-    let composition = match planned_runtime_wake_channel {
-        Some(wake_channel) => {
-            build_default_planned_runtime_with_wake_channel(planned_runtime_parts, wake_channel)
-        }
-        None => build_default_planned_runtime(planned_runtime_parts),
-    }?;
+    let composition = build_default_planned_runtime(planned_runtime_parts)?;
     let default_resolved_run_profile = composition
         .run_profile_resolver
         .resolve_run_profile(RunProfileResolutionRequest::interactive_default())
@@ -3107,12 +3166,7 @@ pub async fn build_reborn_runtime(
             trigger_conversation_pairing_value = None;
         }
     }
-    let worker_cancel = CancellationToken::new();
-    let worker = Arc::clone(&composition.worker);
-    let worker_cancel_clone = worker_cancel.clone();
-    let worker_handle = tokio::spawn(async move {
-        worker.run(worker_cancel_clone).await;
-    });
+    let scheduler_notifier = composition.scheduler_handle.wake_notifier();
 
     // Spawn the background Google OAuth credential keepalive worker (B4).
     // Gated on the db features: the worker deps (candidate source + leader lock
@@ -3145,10 +3199,10 @@ pub async fn build_reborn_runtime(
 
     let trace_flush_worker =
         crate::trace_capture::spawn_trace_queue_flush_worker(trace_capture_scopes);
+    // Scheduler is running (started inside build_default_planned_runtime); mark readiness.
     services.readiness.workers.turn_runner = true;
     services.readiness.workers.trigger_poller = trigger_poller_handle.is_some();
     let turn_coordinator = planned_turn_coordinator;
-    let wake_sender = composition.wake_sender.clone();
 
     // Spawn the budget-event projection task as the production owner
     // of the broadcast sink — review feedback Thermo-Nuclear #3
@@ -3174,8 +3228,7 @@ pub async fn build_reborn_runtime(
         turn_tree_store: turn_state_store,
         thread_service,
         thread_scope,
-        worker_handle,
-        worker_cancel,
+        turn_scheduler: RuntimeTurnScheduler::new(composition.scheduler_handle, scheduler_notifier),
         trigger_poller_handle,
         #[cfg(any(feature = "libsql", feature = "postgres"))]
         credential_refresh_worker_handle,
@@ -3199,7 +3252,6 @@ pub async fn build_reborn_runtime(
         approval_audit_sink,
         webui_event_log: event_log,
         default_run_profile_id,
-        wake_sender,
         send_locks: Mutex::new(HashMap::new()),
         skill_activation_source,
         skill_execution_adapter,
@@ -3876,6 +3928,60 @@ mod tests {
         super::enforce_runtime_cutover_gate(RebornCompositionProfile::LocalDev, &readiness)
             .expect("local-dev runtime is not production traffic");
     }
+
+    // ── scheduler wake wiring guard unit tests ───────────────────────────────
+    // These exercise `check_production_scheduler_wake_wiring` directly so the
+    // fail-closed negative branch is covered without needing a full libsql /
+    // postgres substrate.  The guard is gated on the same `libsql | postgres`
+    // cfg as the production composition path it protects.
+
+    #[cfg(feature = "libsql")]
+    #[test]
+    fn production_scheduler_wake_guard_rejects_production_with_absent_wiring() {
+        let err = super::check_production_scheduler_wake_wiring(
+            RebornCompositionProfile::Production,
+            &None,
+        )
+        .expect_err(
+            "production runtime with absent scheduler wake wiring must be rejected fail-closed",
+        );
+        let RebornRuntimeError::InvalidArgument { reason } = err else {
+            panic!("expected InvalidArgument, got {err:?}");
+        };
+        assert!(
+            reason.contains("production runtime missing scheduler wake wiring"),
+            "reason should name the missing wiring, got: {reason}"
+        );
+    }
+
+    #[cfg(feature = "libsql")]
+    #[test]
+    fn production_scheduler_wake_guard_rejects_migration_dry_run_with_absent_wiring() {
+        let err = super::check_production_scheduler_wake_wiring(
+            RebornCompositionProfile::MigrationDryRun,
+            &None,
+        )
+        .expect_err(
+            "migration-dry-run with absent scheduler wake wiring must be rejected fail-closed",
+        );
+        let RebornRuntimeError::InvalidArgument { reason } = err else {
+            panic!("expected InvalidArgument, got {err:?}");
+        };
+        assert!(
+            reason.contains("production runtime missing scheduler wake wiring"),
+            "reason should name the missing wiring, got: {reason}"
+        );
+    }
+
+    #[cfg(feature = "libsql")]
+    #[test]
+    fn production_scheduler_wake_guard_passes_local_dev_with_absent_wiring() {
+        // Local-dev never mints scheduler wake wiring; the guard must not
+        // reject it (the scheduler loop mints its own channel on that path).
+        super::check_production_scheduler_wake_wiring(RebornCompositionProfile::LocalDev, &None)
+            .expect("local-dev is exempt from the scheduler wake wiring requirement");
+    }
+
     use ironclaw_authorization::CapabilityLeaseStore;
     use ironclaw_events::{EventStreamKey, ReadScope};
     #[cfg(all(feature = "root-llm-provider", feature = "libsql"))]
@@ -3949,14 +4055,7 @@ mod tests {
     const RUNTIME_SEND_TIMEOUT: Duration = Duration::from_secs(10);
 
     async fn stop_turn_runner_worker_for_manual_state_test(runtime: &super::RebornRuntime) {
-        runtime.worker_cancel.cancel();
-        tokio::time::timeout(Duration::from_secs(2), async {
-            while !runtime.worker_handle.is_finished() {
-                tokio::time::sleep(Duration::from_millis(1)).await;
-            }
-        })
-        .await
-        .expect("turn-runner worker should stop before manual turn-state test");
+        runtime.turn_scheduler.stop_for_test().await;
     }
 
     fn local_dev_runtime_policy() -> EffectiveRuntimePolicy {
@@ -9341,5 +9440,243 @@ mod tests {
                 updated_at: now,
             })
         }
+    }
+
+    // ── Regression: scheduler liveness must not treat mutex contention as stopped ──
+
+    /// Verify three invariants of the scheduler liveness check introduced to fix the
+    /// `try_lock()` contention bug:
+    ///
+    /// 1. Before shutdown: liveness check says NOT stopped (atomic flag = false).
+    /// 2. While mutex is momentarily held by another task: atomic flag is still false,
+    ///    so the guard correctly treats that as "alive".
+    /// 3. After graceful `shutdown()`: liveness check says stopped (atomic flag = true).
+    ///
+    /// The `stopped` atomic flag is the authoritative signal; `try_lock`
+    /// failure now means "alive" rather than "stopped".
+    #[tokio::test]
+    async fn scheduler_liveness_not_stopped_under_contention() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let gateway = Arc::new(RecordingGateway {
+            reply: "liveness-test-reply".to_string(),
+            requests: Arc::new(StdMutex::new(Vec::new())),
+        });
+
+        let input = RebornRuntimeInput::from_services(
+            RebornBuildInput::local_dev("scheduler-liveness-owner", root.path().join("local-dev"))
+                .with_runtime_policy(local_dev_runtime_policy()),
+        )
+        .with_identity(RebornRuntimeIdentity {
+            tenant_id: "scheduler-liveness-tenant".to_string(),
+            agent_id: "scheduler-liveness-agent".to_string(),
+            source_binding_id: "scheduler-liveness-source".to_string(),
+            reply_target_binding_id: "scheduler-liveness-reply".to_string(),
+        })
+        .with_poll_settings(PollSettings {
+            interval: Duration::from_millis(10),
+            max_total: RUNTIME_SEND_TIMEOUT,
+        })
+        .with_model_gateway_override(gateway);
+
+        let runtime = build_reborn_runtime(input)
+            .await
+            .expect("runtime builds for liveness test");
+
+        let conversation = runtime.new_conversation().await.expect("conversation");
+
+        // Invariant 1: Before shutdown, the atomic stopped flag must be false.
+        assert!(
+            !runtime.turn_scheduler.atomic_stopped(),
+            "scheduler_stopped must be false on a freshly built runtime"
+        );
+
+        // Invariant 2: While the scheduler handle mutex is held (simulating
+        // shutdown/scheduler contention), the public submit path must NOT
+        // return `WorkerStopped` — and must complete within a bounded timeout.
+        //
+        // `is_stopped()` uses `try_lock()` (non-blocking) on the handle mutex,
+        // not `lock().await`, so holding the lock here cannot deadlock. Tokio's
+        // Mutex is non-re-entrant: `try_lock()` inside `is_stopped()` will
+        // fail (returning `Err`) because the current task already holds the guard.
+        // The guard falls through to "alive" because the `stopped` flag is false.
+        //
+        // `notify()` sends through the notifier (not the handle mutex), so the
+        // worker processes the turn while the test holds the handle. The
+        // RecordingGateway resolves the model call synchronously, so the turn
+        // reaches Completed. We assert the full Ok result to catch both the
+        // liveness regression (WorkerStopped) and any other scheduler breakage.
+        //
+        // The surrounding `tokio::time::timeout` is the deadlock-regression
+        // guard: if `is_stopped()` ever regresses from `try_lock()` to
+        // `lock().await`, this test will panic with a clear message instead of
+        // hanging CI indefinitely.
+        {
+            // Hold the tokio Mutex for the duration of the submit call.
+            let _guard = runtime.turn_scheduler.handle_mutex().lock().await;
+
+            let result = tokio::time::timeout(
+                RUNTIME_SEND_TIMEOUT,
+                runtime.send_user_message(&conversation, "liveness-probe"),
+            )
+            .await
+            .expect(
+                "send_user_message timed out while handle mutex was held — \
+                 liveness guard likely regressed from try_lock() to lock().await, \
+                 causing a deadlock",
+            );
+
+            assert!(
+                result.is_ok(),
+                "send_user_message must succeed (RecordingGateway completes the turn) \
+                 while scheduler handle is merely contended (stopped=false); \
+                 got: {result:?}"
+            );
+        } // guard released here — handle mutex is free again
+
+        // Invariant 3: After the worker is stopped (flag = true), the public
+        // submit path MUST return `WorkerStopped`.
+        //
+        // We use `stop_turn_runner_worker_for_manual_state_test` instead of
+        // `shutdown()` because `shutdown()` consumes `self`, which would prevent
+        // us from calling `send_user_message` afterward to exercise the guard.
+        stop_turn_runner_worker_for_manual_state_test(&runtime).await;
+
+        assert!(
+            runtime.turn_scheduler.atomic_stopped(),
+            "scheduler_stopped must be true after stop helper"
+        );
+
+        let result_after_stop = runtime
+            .send_user_message(&conversation, "post-stop-probe")
+            .await;
+        assert!(
+            matches!(
+                result_after_stop,
+                Err(super::RebornRuntimeError::WorkerStopped)
+            ),
+            "send_user_message must return WorkerStopped after scheduler is stopped; \
+             got: {result_after_stop:?}"
+        );
+
+        // shutdown() handles the already-taken scheduler handle gracefully.
+        runtime.shutdown().await.expect("runtime shutdown");
+    }
+
+    /// Companion test: `stop_turn_runner_worker_for_manual_state_test` (the test-only
+    /// helper used by many existing tests) must also set `scheduler_stopped = true`
+    /// so the liveness guard correctly reports stopped after it is called.
+    #[tokio::test]
+    async fn scheduler_liveness_stopped_after_test_helper_stops_worker() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let gateway = Arc::new(RecordingGateway {
+            reply: "liveness-helper-test-reply".to_string(),
+            requests: Arc::new(StdMutex::new(Vec::new())),
+        });
+
+        let input = RebornRuntimeInput::from_services(
+            RebornBuildInput::local_dev(
+                "scheduler-liveness-helper-owner",
+                root.path().join("local-dev"),
+            )
+            .with_runtime_policy(local_dev_runtime_policy()),
+        )
+        .with_identity(RebornRuntimeIdentity {
+            tenant_id: "scheduler-liveness-helper-tenant".to_string(),
+            agent_id: "scheduler-liveness-helper-agent".to_string(),
+            source_binding_id: "scheduler-liveness-helper-source".to_string(),
+            reply_target_binding_id: "scheduler-liveness-helper-reply".to_string(),
+        })
+        .with_model_gateway_override(gateway);
+
+        let runtime = build_reborn_runtime(input)
+            .await
+            .expect("runtime builds for helper-stopped test");
+
+        // Before stopping: not stopped.
+        assert!(
+            !runtime.turn_scheduler.atomic_stopped(),
+            "scheduler_stopped must be false before stop helper runs"
+        );
+
+        stop_turn_runner_worker_for_manual_state_test(&runtime).await;
+
+        // After the test helper stops the worker: flag must be true.
+        assert!(
+            runtime.turn_scheduler.atomic_stopped(),
+            "scheduler_stopped must be true after stop_turn_runner_worker_for_manual_state_test"
+        );
+
+        // shutdown() handles the already-taken scheduler handle gracefully
+        // via the `if let Some` guard — safe to call after the test helper.
+        runtime.shutdown().await.expect("runtime shutdown");
+    }
+
+    /// After `stop_turn_runner_worker_for_manual_state_test` sets
+    /// `scheduler_stopped = true`, `send_user_message` must immediately return
+    /// `Err(RebornRuntimeError::WorkerStopped)` without submitting the turn.
+    #[tokio::test]
+    async fn scheduler_stopped_rejects_send_user_message() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let gateway = Arc::new(RecordingGateway {
+            reply: "stopped-reject-reply".to_string(),
+            requests: Arc::new(StdMutex::new(Vec::new())),
+        });
+
+        let input = RebornRuntimeInput::from_services(
+            RebornBuildInput::local_dev(
+                "scheduler-stopped-reject-owner",
+                root.path().join("local-dev"),
+            )
+            .with_runtime_policy(local_dev_runtime_policy()),
+        )
+        .with_identity(RebornRuntimeIdentity {
+            tenant_id: "scheduler-stopped-reject-tenant".to_string(),
+            agent_id: "scheduler-stopped-reject-agent".to_string(),
+            source_binding_id: "scheduler-stopped-reject-source".to_string(),
+            reply_target_binding_id: "scheduler-stopped-reject-reply".to_string(),
+        })
+        .with_model_gateway_override(gateway);
+
+        let runtime = build_reborn_runtime(input)
+            .await
+            .expect("runtime builds for stopped-reject test");
+
+        let conversation = runtime.new_conversation().await.expect("conversation");
+
+        // Capture thread history before the stopped-send to verify no side effects.
+        let thread_service = runtime.session_thread_service();
+        let thread_scope = runtime.thread_scope.clone();
+        let history_before = thread_service
+            .list_thread_history(ThreadHistoryRequest {
+                scope: thread_scope.clone(),
+                thread_id: conversation.0.clone(),
+            })
+            .await
+            .expect("list history before stopped send");
+
+        stop_turn_runner_worker_for_manual_state_test(&runtime).await;
+
+        let result = runtime.send_user_message(&conversation, "hi").await;
+        assert!(
+            matches!(result, Err(RebornRuntimeError::WorkerStopped)),
+            "send_user_message must return WorkerStopped when scheduler is stopped, got: {result:?}"
+        );
+
+        // Assert no side effects: history must not grow after the rejected send.
+        let history_after = thread_service
+            .list_thread_history(ThreadHistoryRequest {
+                scope: thread_scope,
+                thread_id: conversation.0.clone(),
+            })
+            .await
+            .expect("list history after stopped send");
+        assert_eq!(
+            history_before.messages.len(),
+            history_after.messages.len(),
+            "send_user_message must not write any messages when WorkerStopped is returned"
+        );
+
+        // shutdown() handles the already-taken scheduler handle gracefully.
+        runtime.shutdown().await.expect("runtime shutdown");
     }
 }

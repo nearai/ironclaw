@@ -18,7 +18,7 @@ use ironclaw_host_runtime::TenantSandboxProcessPort;
 #[cfg(any(test, feature = "test-support"))]
 use ironclaw_network::NetworkHttpEgress;
 use ironclaw_trust::HostTrustPolicy;
-use ironclaw_turns::TurnRunWakeNotifier;
+use ironclaw_turns::{InMemoryTurnStateStoreLimits, TurnRunWakeNotifier};
 use secrecy::SecretString;
 
 #[cfg(feature = "postgres")]
@@ -188,6 +188,9 @@ pub struct RebornBuildInput {
     pub(crate) oauth_provider_configs: Vec<OAuthProviderBackendConfig>,
     pub(crate) oauth_dcr_provider_configs: Vec<OAuthDcrProviderBackendConfig>,
     pub(crate) nearai_mcp_bootstrap_config: Option<crate::nearai_mcp::NearAiMcpBootstrapConfig>,
+    /// Concurrency limits applied to the in-memory turn-state store.
+    /// Defaults to no limits (all caps `None` / unlimited).
+    pub(crate) turn_state_store_limits: InMemoryTurnStateStoreLimits,
 }
 
 #[derive(Clone, Debug)]
@@ -619,6 +622,19 @@ impl RebornBuildInput {
         Ok(self)
     }
 
+    /// Set concurrency limits for the in-memory turn-state store.
+    ///
+    /// Called by `build_reborn_runtime` after mapping from `TurnRunnerSettings` so the
+    /// factory can apply them when constructing the store. Callers should use
+    /// `RebornRuntimeInput::with_runner_settings` rather than calling this directly.
+    pub(crate) fn with_turn_state_store_limits(
+        mut self,
+        limits: InMemoryTurnStateStoreLimits,
+    ) -> Self {
+        self.turn_state_store_limits = limits;
+        self
+    }
+
     fn push_oauth_provider_config(
         &mut self,
         spec: HostOAuthProviderSpec,
@@ -675,6 +691,7 @@ impl RebornBuildInput {
             oauth_provider_configs: Vec::new(),
             oauth_dcr_provider_configs: Vec::new(),
             nearai_mcp_bootstrap_config: None,
+            turn_state_store_limits: InMemoryTurnStateStoreLimits::default(),
         }
     }
 }

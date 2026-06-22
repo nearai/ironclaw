@@ -66,7 +66,6 @@ use ironclaw_turns::{
         VisibleCapabilityRequest, VisibleCapabilitySurface,
     },
 };
-use tokio::task::JoinHandle;
 use tokio::time::{sleep, timeout};
 use tokio_util::sync::CancellationToken;
 
@@ -83,8 +82,6 @@ pub struct ProductLiveAgentLoopHarness {
     capability_results: Arc<Mutex<Vec<serde_json::Value>>>,
     model_release: Option<CancellationToken>,
     _host_runtime_root: Option<tempfile::TempDir>,
-    worker_cancel: CancellationToken,
-    worker_handle: JoinHandle<()>,
 }
 
 #[derive(Debug, Clone)]
@@ -307,13 +304,11 @@ impl ProductLiveAgentLoopHarness {
             communication_context_provider: None,
             hook_security_audit_sink: None,
             turn_event_sink: None,
+            scheduler_wake_wiring: None,
         })
         .expect("product-live planned AgentLoop harness should build");
 
-        let worker_cancel = CancellationToken::new();
-        let worker = Arc::clone(&composition.worker);
-        let worker_cancel_clone = worker_cancel.clone();
-        let worker_handle = tokio::spawn(async move { worker.run(worker_cancel_clone).await });
+        // The scheduler is started automatically inside build_product_live_planned_runtime.
 
         Self {
             binding_service,
@@ -328,8 +323,6 @@ impl ProductLiveAgentLoopHarness {
             capability_results,
             model_release,
             _host_runtime_root: host_runtime_root,
-            worker_cancel,
-            worker_handle,
         }
     }
 
@@ -464,10 +457,7 @@ impl ProductLiveAgentLoopHarness {
     }
 
     pub async fn shutdown(self) {
-        self.worker_cancel.cancel();
-        self.worker_handle
-            .await
-            .expect("harness worker should stop cleanly");
+        self.composition.scheduler_handle.shutdown().await;
     }
 
     fn turn_scope(&self) -> TurnScope {
