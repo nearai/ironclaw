@@ -896,7 +896,10 @@ pub struct ListThreadsQuery {
 /// Lists the caller-scoped schedule automations visible to the browser. The
 /// optional `?limit=N` and `?run_limit=N` queries are capped by the product
 /// workflow facade; the response is a single bounded page and does not include
-/// a cursor.
+/// a cursor. By default only active automations are returned; pass
+/// `?include_completed=true` to also include soft-completed (fire-once)
+/// automations. See [`ListAutomationsQuery`] for the full per-parameter parse
+/// behavior.
 pub async fn list_automations(
     State(state): State<WebUiV2State>,
     Extension(caller): Extension<WebUiAuthenticatedCaller>,
@@ -905,6 +908,7 @@ pub async fn list_automations(
     let request = WebUiListAutomationsRequest {
         limit: query.limit,
         run_limit: query.run_limit,
+        include_completed: query.include_completed,
     };
     let response = state.services().list_automations(caller, request).await?;
     Ok(Json(response))
@@ -918,6 +922,18 @@ pub struct ListAutomationsQuery {
     /// Optional maximum number of recent runs to return per automation row.
     #[serde(default)]
     pub run_limit: Option<u32>,
+    /// When `true`, soft-completed (fire-once) automations are included
+    /// alongside active ones.
+    ///
+    /// Parse behavior (via `serde_urlencoded` / axum `Query<T>`):
+    /// - **Absent** (`?` or no param): defaults to `false` (active-only).
+    /// - **`true`** / **`false`**: parsed as the corresponding boolean.
+    /// - **Malformed** (e.g. `?include_completed=garbage`): deserialization
+    ///   fails at the `Query` extractor and the request is rejected with
+    ///   `400 Bad Request` before the handler runs. There is no silent
+    ///   fallback to `false` for unparseable values.
+    #[serde(default)]
+    pub include_completed: bool,
 }
 
 /// `GET /api/webchat/v2/traces/credit`

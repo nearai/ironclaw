@@ -210,7 +210,15 @@ jobs:
       - name: Restore Rust cache
         uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
-          key: reborn-tests-${{ matrix.package }}
+          # ONE shared cache for all ~60 crate-test jobs instead of a per-crate
+          # key. Per-crate keys produced ~60 caches (registry + target each,
+          # ~0.4-0.7 GB), which blew far past GitHub's ~10 GB repo cache LRU and
+          # evicted each other — so most jobs hit "No cache found", re-downloaded
+          # the crates.io registry from cold, and were exposed to transient
+          # download flakes (mitigated separately by CARGO_NET_RETRY). A single
+          # shared key keeps the registry + shared-dep build in one small,
+          # always-resident entry, so the registry is downloaded once, not ~60x.
+          shared-key: reborn-tests-crates
           # Keep saves to protected-branch and merge_group runs so the ~10 GB
           # repo cache LRU is seeded by shared states, not arbitrary PR branches.
           save-if: ${{ (github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'merge_group' }}
@@ -292,7 +300,12 @@ jobs:
       - name: Restore Rust cache
         uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
-          key: reborn-tests-root-${{ matrix.partition }}
+          # All 4 root partitions compile the *same* root-package build (they
+          # only run different test partitions), so one shared cache is strictly
+          # better than 4 per-partition copies (~1 GB each) — the cached target
+          # is fully valid for every partition, and it stops the 4 copies from
+          # crowding the shared LRU.
+          shared-key: reborn-tests-root
           # Keep saves to protected-branch and merge_group runs so the ~10 GB
           # repo cache LRU is seeded by shared states, not arbitrary PR branches.
           save-if: ${{ (github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'merge_group' }}
