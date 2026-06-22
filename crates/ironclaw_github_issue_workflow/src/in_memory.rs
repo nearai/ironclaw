@@ -6,20 +6,21 @@ use tokio::sync::Mutex;
 
 use crate::{
     AcceptStageResultInput, AcceptStageResultOutcome, AdvanceWorkflowRunInput,
-    ClaimProviderActionInput, ClaimProviderActionOutcome, ClaimRunnableWorkflowRunsInput,
-    CompleteProviderActionInput, CompleteProviderActionOutcome, CompleteWorkflowStepInput,
-    CompleteWorkflowStepOutcome, CreateOrGetProviderActionInput, CreateOrGetWorkflowRunInput,
-    CreateOrGetWorkflowRunOutcome, CreateOrGetWorkflowStepInput, CreateOrGetWorkflowStepOutcome,
-    CreateStageRunInput, CreateStageRunOutcome, GithubIssueProviderActionId,
+    BlockWorkflowRunInput, BlockWorkflowRunOutcome, ClaimProviderActionInput,
+    ClaimProviderActionOutcome, ClaimRunnableWorkflowRunsInput, CompleteProviderActionInput,
+    CompleteProviderActionOutcome, CompleteWorkflowStepInput, CompleteWorkflowStepOutcome,
+    CreateOrGetProviderActionInput, CreateOrGetWorkflowRunInput, CreateOrGetWorkflowRunOutcome,
+    CreateOrGetWorkflowStepInput, CreateOrGetWorkflowStepOutcome, CreateStageRunInput,
+    CreateStageRunOutcome, FindLatestWorkflowEventForProviderInput, GithubIssueProviderActionId,
     GithubIssueProviderActionRecord, GithubIssueProviderBinding, GithubIssueProviderBindingId,
     GithubIssueStageRunId, GithubIssueWorkflowError, GithubIssueWorkflowEvent,
     GithubIssueWorkflowEventId, GithubIssueWorkflowMode, GithubIssueWorkflowRepository,
     GithubIssueWorkflowRun, GithubIssueWorkflowRunId, GithubIssueWorkflowRunKey,
-    GithubIssueWorkflowRunStatus, GithubIssueWorkflowState, GithubProviderRef, LeaseRenewalOutcome,
-    ListWorkflowEventsAfterInput, ProviderActionStatus, RecordWorkflowEventInput,
-    RecordWorkflowEventOutcome, RenewWorkflowRunLeaseInput, TransitionOutcome,
-    UpsertProviderBindingInput, WorkflowIdempotencyKey, WorkflowStepRun, WorkflowStepRunId,
-    WorkflowStepStatus,
+    GithubIssueWorkflowRunStatus, GithubIssueWorkflowState, GithubProviderRef, LeaseReleaseOutcome,
+    LeaseRenewalOutcome, ListWorkflowEventsAfterInput, ProviderActionStatus,
+    RecordWorkflowEventInput, RecordWorkflowEventOutcome, ReleaseWorkflowRunLeaseInput,
+    RenewWorkflowRunLeaseInput, TransitionOutcome, UpsertProviderBindingInput,
+    WorkflowIdempotencyKey, WorkflowStepRun, WorkflowStepRunId, WorkflowStepStatus,
 };
 use ironclaw_host_api::TenantId;
 
@@ -268,7 +269,7 @@ impl GithubIssueWorkflowRepository for InMemoryGithubIssueWorkflowRepository {
                 continue;
             };
             if run.tenant_id != input.tenant_id
-                || is_terminal(&run.status)
+                || run.status != GithubIssueWorkflowRunStatus::Active
                 || !lease_is_claimable(run, input.now)
             {
                 continue;
@@ -314,6 +315,102 @@ impl GithubIssueWorkflowRepository for InMemoryGithubIssueWorkflowRepository {
         run.updated_at = input.now;
 
         Ok(LeaseRenewalOutcome::Renewed { run: run.clone() })
+    }
+
+    async fn release_workflow_run_lease(
+        &self,
+        input: ReleaseWorkflowRunLeaseInput,
+    ) -> Result<LeaseReleaseOutcome, GithubIssueWorkflowError> {
+        let mut state = self.state.lock().await;
+        let run = state
+            .runs_by_id
+            .get_mut(&input.workflow_run_id)
+            .ok_or_else(|| {
+                repository_error(format!(
+                    "workflow run `{}` does not exist",
+                    input.workflow_run_id
+                ))
+            })?;
+
+        if is_terminal(&run.status) {
+            return Ok(LeaseReleaseOutcome::Terminal);
+        }
+        if run.lease_owner.as_ref() != Some(&input.worker_id) {
+            return Ok(LeaseReleaseOutcome::NotLeaseOwner);
+        }
+
+        run.lease_owner = None;
+        run.lease_expires_at = None;
+        run.last_heartbeat_at = Some(input.now);
+        run.workflow_run_version += 1;
+        run.updated_at = input.now;
+
+        Ok(LeaseReleaseOutcome::Released { run: run.clone() })
+    }
+
+    async fn block_workflow_run(
+        &self,
+        input: BlockWorkflowRunInput,
+    ) -> Result<BlockWorkflowRunOutcome, GithubIssueWorkflowError> {
+        let mut state = self.state.lock().await;
+        let run = state
+            .runs_by_id
+            .get_mut(&input.workflow_run_id)
+            .ok_or_else(|| {
+                repository_error(format!(
+                    "workflow run `{}` does not exist",
+                    input.workflow_run_id
+                ))
+            })?;
+
+        if is_terminal(&run.status) {
+            return Ok(BlockWorkflowRunOutcome::Terminal);
+        }
+        if !lease_is_owned_by(run, &input.worker_id, input.now) {
+            return Ok(BlockWorkflowRunOutcome::NotLeaseOwner);
+        }
+
+        run.status = GithubIssueWorkflowRunStatus::Blocked;
+        run.workflow_state.active_block = Some(input.active_block);
+        run.lease_owner = None;
+        run.lease_expires_at = None;
+        run.active_stage_run_id = None;
+        run.last_heartbeat_at = Some(input.now);
+        run.workflow_run_version += 1;
+        run.updated_at = input.now;
+
+        Ok(BlockWorkflowRunOutcome::Blocked { run: run.clone() })
+    }
+
+    async fn find_latest_workflow_event_for_provider(
+        &self,
+        input: FindLatestWorkflowEventForProviderInput,
+    ) -> Result<Option<GithubIssueWorkflowEvent>, GithubIssueWorkflowError> {
+        let state = self.state.lock().await;
+        if !state.runs_by_id.contains_key(&input.workflow_run_id) {
+            return Err(repository_error(format!(
+                "workflow run `{}` does not exist",
+                input.workflow_run_id
+            )));
+        }
+
+        Ok(state
+            .events_by_id
+            .values()
+            .filter(|event| {
+                event.workflow_run_id == input.workflow_run_id
+                    && event.provider == input.provider
+                    && input
+                        .workflow_event_types
+                        .iter()
+                        .any(|event_type| event_type == &event.workflow_event_type)
+            })
+            .max_by(|left, right| {
+                left.provider_updated_at
+                    .cmp(&right.provider_updated_at)
+                    .then_with(|| left.sequence.cmp(&right.sequence))
+            })
+            .cloned())
     }
 
     async fn advance_event_cursor_and_transition(

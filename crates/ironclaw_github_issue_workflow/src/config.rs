@@ -1,3 +1,5 @@
+use std::time::Duration;
+
 use ironclaw_host_api::{ProjectId, TenantId, UserId};
 use serde::{Deserialize, Serialize};
 
@@ -106,4 +108,27 @@ fn validate_non_empty(name: &'static str, value: &str) -> Result<(), GithubIssue
         });
     }
     Ok(())
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GithubIssueWorkflowPollerConfig {
+    pub enabled: bool,
+    pub poll_interval: Duration,
+    pub max_repos_per_tick: usize,
+    pub max_issues_per_repo_per_tick: usize,
+    pub max_runnable_runs_per_tick: usize,
+    pub lease_duration: Duration,
+}
+
+impl Default for GithubIssueWorkflowPollerConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            poll_interval: Duration::from_secs(60),
+            max_repos_per_tick: 20,
+            max_issues_per_repo_per_tick: 10,
+            max_runnable_runs_per_tick: 10,
+            lease_duration: Duration::from_secs(300),
+        }
+    }
 }

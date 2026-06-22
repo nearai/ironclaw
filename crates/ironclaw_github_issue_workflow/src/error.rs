@@ -18,6 +18,12 @@ pub enum GithubIssueWorkflowError {
     #[error("GitHub issue workflow policy error: {reason}")]
     Policy { reason: String },
 
+    #[error("GitHub provider read failed: {reason}")]
+    ProviderRead { reason: String },
+
+    #[error("GitHub provider rate limited: {reason}")]
+    ProviderRateLimited { reason: String },
+
     #[error("GitHub issue workflow repository error: {reason}")]
     Repository { reason: String },
 }

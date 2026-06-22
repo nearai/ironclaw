@@ -4,8 +4,9 @@ use ironclaw_host_api::{AgentId, ProjectId, TenantId, UserId};
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    GithubCommentRef, GithubIssueRef, GithubIssueWorkflowError, GithubIssueWorkflowRunId,
-    GithubIssueWorkspaceSessionId, SubmitStageTurnOutcome, SubmitStageTurnRequest,
+    GithubCommentRef, GithubIssueRef, GithubIssueWorkflowConfig, GithubIssueWorkflowError,
+    GithubIssueWorkflowRunId, GithubIssueWorkspaceSessionId, GithubProviderAccountRef,
+    GithubRepositorySelector, SubmitStageTurnOutcome, SubmitStageTurnRequest,
     WorkflowWorkspaceMountRef, WorkflowWorkspaceRef,
 };
 
@@ -15,7 +16,32 @@ pub trait WorkflowClock: Send + Sync {
 }
 
 #[async_trait]
+pub trait GithubIssueWorkflowConfigSource: Send + Sync {
+    async fn list_enabled_workflow_configs(
+        &self,
+    ) -> Result<Vec<GithubIssueWorkflowConfig>, GithubIssueWorkflowError>;
+}
+
+#[async_trait]
 pub trait GithubIssueWorkflowPort: Send + Sync {
+    async fn search_open_bug_issues(
+        &self,
+        _input: SearchGithubIssuesInput,
+    ) -> Result<Vec<GithubIssueSearchHit>, GithubIssueWorkflowError> {
+        Err(GithubIssueWorkflowError::ProviderRead {
+            reason: "GitHub issue search is not configured".to_string(),
+        })
+    }
+
+    async fn get_issue(
+        &self,
+        _input: GetGithubIssueInput,
+    ) -> Result<GithubIssueProviderSnapshot, GithubIssueWorkflowError> {
+        Err(GithubIssueWorkflowError::ProviderRead {
+            reason: "GitHub issue reads are not configured".to_string(),
+        })
+    }
+
     async fn get_authenticated_workflow_actor(
         &self,
         input: GetAuthenticatedWorkflowActorInput,
@@ -42,6 +68,13 @@ pub trait StageTurnSubmitter: Send + Sync {
 
 #[async_trait]
 pub trait WorkflowProjectAccess: Send + Sync {
+    async fn assert_workflow_config_access(
+        &self,
+        _request: WorkflowConfigAccessRequest,
+    ) -> Result<(), GithubIssueWorkflowError> {
+        Ok(())
+    }
+
     async fn assert_workflow_project_access(
         &self,
         request: WorkflowProjectAccessRequest,
@@ -69,6 +102,75 @@ pub struct GithubActorSnapshot {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SearchGithubIssuesInput {
+    pub provider_account_ref: GithubProviderAccountRef,
+    pub owner: String,
+    pub repo: String,
+    pub query: String,
+    pub limit: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GithubIssueSearchHit {
+    pub owner: String,
+    pub repo: String,
+    pub number: u64,
+    pub node_id: Option<String>,
+    pub url: String,
+    pub default_branch: String,
+    pub updated_at: Option<DateTime<Utc>>,
+}
+
+impl GithubIssueSearchHit {
+    pub fn issue_ref(&self) -> GithubIssueRef {
+        GithubIssueRef {
+            owner: self.owner.clone(),
+            repo: self.repo.clone(),
+            number: self.number,
+            node_id: self.node_id.clone(),
+            url: self.url.clone(),
+            default_branch: self.default_branch.clone(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GetGithubIssueInput {
+    pub provider_account_ref: GithubProviderAccountRef,
+    pub owner: String,
+    pub repo: String,
+    pub number: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GithubIssueProviderSnapshot {
+    pub owner: String,
+    pub repo: String,
+    pub number: u64,
+    pub node_id: Option<String>,
+    pub url: String,
+    pub default_branch: String,
+    pub title: String,
+    pub body: String,
+    pub state: String,
+    pub labels: Vec<String>,
+    pub updated_at: Option<DateTime<Utc>>,
+}
+
+impl GithubIssueProviderSnapshot {
+    pub fn issue_ref(&self) -> GithubIssueRef {
+        GithubIssueRef {
+            owner: self.owner.clone(),
+            repo: self.repo.clone(),
+            number: self.number,
+            node_id: self.node_id.clone(),
+            url: self.url.clone(),
+            default_branch: self.default_branch.clone(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ListIssueCommentsInput {
     pub issue: GithubIssueRef,
 }
@@ -86,6 +188,15 @@ pub struct GithubIssueCommentSnapshot {
 pub struct CreateIssueCommentInput {
     pub issue: GithubIssueRef,
     pub body: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkflowConfigAccessRequest {
+    pub tenant_id: TenantId,
+    pub creator_user_id: UserId,
+    pub project_id: ProjectId,
+    pub repositories: Vec<GithubRepositorySelector>,
+    pub provider_account_ref: GithubProviderAccountRef,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

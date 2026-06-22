@@ -42,6 +42,21 @@ pub trait GithubIssueWorkflowRepository: Send + Sync {
         input: RenewWorkflowRunLeaseInput,
     ) -> Result<LeaseRenewalOutcome, GithubIssueWorkflowError>;
 
+    async fn release_workflow_run_lease(
+        &self,
+        input: ReleaseWorkflowRunLeaseInput,
+    ) -> Result<LeaseReleaseOutcome, GithubIssueWorkflowError>;
+
+    async fn block_workflow_run(
+        &self,
+        input: BlockWorkflowRunInput,
+    ) -> Result<BlockWorkflowRunOutcome, GithubIssueWorkflowError>;
+
+    async fn find_latest_workflow_event_for_provider(
+        &self,
+        input: FindLatestWorkflowEventForProviderInput,
+    ) -> Result<Option<GithubIssueWorkflowEvent>, GithubIssueWorkflowError>;
+
     async fn advance_event_cursor_and_transition(
         &self,
         input: AdvanceWorkflowRunInput,
@@ -151,6 +166,44 @@ pub enum LeaseRenewalOutcome {
     Renewed { run: GithubIssueWorkflowRun },
     NotLeaseOwner,
     Terminal,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReleaseWorkflowRunLeaseInput {
+    pub workflow_run_id: GithubIssueWorkflowRunId,
+    pub worker_id: WorkflowWorkerId,
+    pub now: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[allow(clippy::large_enum_variant)]
+pub enum LeaseReleaseOutcome {
+    Released { run: GithubIssueWorkflowRun },
+    NotLeaseOwner,
+    Terminal,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BlockWorkflowRunInput {
+    pub workflow_run_id: GithubIssueWorkflowRunId,
+    pub worker_id: WorkflowWorkerId,
+    pub active_block: GithubIssueBlockState,
+    pub now: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[allow(clippy::large_enum_variant)]
+pub enum BlockWorkflowRunOutcome {
+    Blocked { run: GithubIssueWorkflowRun },
+    NotLeaseOwner,
+    Terminal,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FindLatestWorkflowEventForProviderInput {
+    pub workflow_run_id: GithubIssueWorkflowRunId,
+    pub workflow_event_types: Vec<GithubIssueWorkflowEventType>,
+    pub provider: GithubProviderRef,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]

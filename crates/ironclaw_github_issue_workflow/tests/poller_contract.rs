@@ -1,0 +1,717 @@
+mod poller_contract {
+    use std::collections::HashMap;
+    use std::sync::{Arc, Mutex as StdMutex};
+
+    use async_trait::async_trait;
+    use chrono::{TimeZone, Utc};
+    use ironclaw_github_issue_workflow::{
+        CreateIssueCommentInput, CreateOrGetWorkflowRunInput, CreateOrGetWorkflowRunOutcome,
+        GetAuthenticatedWorkflowActorInput, GetGithubIssueInput, GithubActorSnapshot,
+        GithubCommentRef, GithubIssueCommentSnapshot, GithubIssueProviderSnapshot,
+        GithubIssueSearchHit, GithubIssueWorkflowConfig, GithubIssueWorkflowConfigSource,
+        GithubIssueWorkflowError, GithubIssueWorkflowEventType, GithubIssueWorkflowPolicyPorts,
+        GithubIssueWorkflowPoller, GithubIssueWorkflowPollerConfig, GithubIssueWorkflowPollerPorts,
+        GithubIssueWorkflowPort, GithubIssueWorkflowRepository, GithubIssueWorkflowRun,
+        GithubProviderAccountRef, GithubRepositorySelector, InMemoryGithubIssueWorkflowRepository,
+        ListIssueCommentsInput, PrepareWorkflowWorkspaceOutcome, PrepareWorkflowWorkspaceRequest,
+        SearchGithubIssuesInput, StageTurnSubmitter, SubmitStageTurnOutcome,
+        SubmitStageTurnRequest, WorkflowClock, WorkflowConfigAccessRequest, WorkflowProjectAccess,
+        WorkflowProjectAccessRequest, WorkflowWorkerId, WorkflowWorkspaceManager,
+        WorkflowWorkspaceMountRef, WorkflowWorkspaceRef,
+    };
+    use ironclaw_host_api::{ProjectId, TenantId, ThreadId, UserId};
+    use ironclaw_turns::TurnRunId;
+    use tokio::sync::Mutex;
+
+    fn fixed_time(seconds: i64) -> chrono::DateTime<Utc> {
+        Utc.timestamp_opt(seconds, 0).unwrap()
+    }
+
+    fn tenant(suffix: &str) -> TenantId {
+        TenantId::new(format!("tenant-poller-{suffix}")).unwrap()
+    }
+
+    fn user(suffix: &str) -> UserId {
+        UserId::new(format!("user-poller-{suffix}")).unwrap()
+    }
+
+    fn project(suffix: &str) -> ProjectId {
+        ProjectId::new(format!("project-poller-{suffix}")).unwrap()
+    }
+
+    fn worker() -> WorkflowWorkerId {
+        WorkflowWorkerId::from_trusted("poller-contract-worker".to_string()).unwrap()
+    }
+
+    fn provider_account() -> GithubProviderAccountRef {
+        GithubProviderAccountRef {
+            provider: "github".to_string(),
+            account_id: "account-poller".to_string(),
+        }
+    }
+
+    fn workflow_config(suffix: &str, owner: &str, repo: &str) -> GithubIssueWorkflowConfig {
+        GithubIssueWorkflowConfig {
+            tenant_id: tenant(suffix),
+            project_id: project(suffix),
+            owner_user_id: user(suffix),
+            repositories: vec![GithubRepositorySelector {
+                owner: owner.to_string(),
+                repo: repo.to_string(),
+            }],
+            candidate_selector: Default::default(),
+            max_active_runs_per_repo: 1,
+            default_run_profile: "default".to_string(),
+            provider_account_ref: provider_account(),
+        }
+    }
+
+    fn issue_snapshot(
+        owner: &str,
+        repo: &str,
+        number: u64,
+        updated_at: i64,
+    ) -> GithubIssueProviderSnapshot {
+        GithubIssueProviderSnapshot {
+            owner: owner.to_string(),
+            repo: repo.to_string(),
+            number,
+            node_id: Some(format!("issue-node-{repo}-{number}")),
+            url: format!("https://github.com/{owner}/{repo}/issues/{number}"),
+            default_branch: "main".to_string(),
+            title: format!("Bug {number}"),
+            body: format!("body for issue {number}"),
+            state: "open".to_string(),
+            labels: vec!["bug".to_string()],
+            updated_at: Some(fixed_time(updated_at)),
+        }
+    }
+
+    fn issue_hit(snapshot: &GithubIssueProviderSnapshot) -> GithubIssueSearchHit {
+        GithubIssueSearchHit {
+            owner: snapshot.owner.clone(),
+            repo: snapshot.repo.clone(),
+            number: snapshot.number,
+            node_id: snapshot.node_id.clone(),
+            url: snapshot.url.clone(),
+            default_branch: snapshot.default_branch.clone(),
+            updated_at: snapshot.updated_at,
+        }
+    }
+
+    fn comment(owner: &str, repo: &str, number: u64) -> GithubIssueCommentSnapshot {
+        GithubIssueCommentSnapshot {
+            comment: GithubCommentRef {
+                node_id: Some(format!("comment-node-{repo}-{number}")),
+                url: format!("https://github.com/{owner}/{repo}/issues/{number}#issuecomment-1"),
+            },
+            body: "I can reproduce this".to_string(),
+            author_login: "octocat".to_string(),
+            created_at: fixed_time(5),
+            updated_at: fixed_time(6),
+        }
+    }
+
+    #[derive(Debug)]
+    struct FakeClock {
+        now: StdMutex<chrono::DateTime<Utc>>,
+    }
+
+    impl FakeClock {
+        fn new(now: chrono::DateTime<Utc>) -> Self {
+            Self {
+                now: StdMutex::new(now),
+            }
+        }
+    }
+
+    impl WorkflowClock for FakeClock {
+        fn now(&self) -> chrono::DateTime<Utc> {
+            self.now.lock().unwrap().to_owned()
+        }
+    }
+
+    #[derive(Debug)]
+    struct FakeConfigSource {
+        configs: Mutex<Vec<GithubIssueWorkflowConfig>>,
+    }
+
+    impl FakeConfigSource {
+        fn new(configs: Vec<GithubIssueWorkflowConfig>) -> Self {
+            Self {
+                configs: Mutex::new(configs),
+            }
+        }
+    }
+
+    #[async_trait]
+    impl GithubIssueWorkflowConfigSource for FakeConfigSource {
+        async fn list_enabled_workflow_configs(
+            &self,
+        ) -> Result<Vec<GithubIssueWorkflowConfig>, GithubIssueWorkflowError> {
+            Ok(self.configs.lock().await.clone())
+        }
+    }
+
+    #[derive(Debug, Default)]
+    struct FakeGithubPort {
+        search_results: Mutex<HashMap<(String, String), Vec<GithubIssueSearchHit>>>,
+        issue_snapshots: Mutex<HashMap<(String, String, u64), GithubIssueProviderSnapshot>>,
+        comments: Mutex<HashMap<(String, String, u64), Vec<GithubIssueCommentSnapshot>>>,
+        rate_limited_repos: Mutex<Vec<(String, String)>>,
+        search_calls: Mutex<Vec<SearchGithubIssuesInput>>,
+        get_issue_calls: Mutex<Vec<GetGithubIssueInput>>,
+        list_comment_calls: Mutex<Vec<ListIssueCommentsInput>>,
+        create_comment_bodies: Mutex<Vec<String>>,
+    }
+
+    impl FakeGithubPort {
+        async fn add_issue(&self, snapshot: GithubIssueProviderSnapshot) {
+            let key = (snapshot.owner.clone(), snapshot.repo.clone());
+            self.search_results
+                .lock()
+                .await
+                .entry(key)
+                .or_default()
+                .push(issue_hit(&snapshot));
+            self.comments.lock().await.insert(
+                (
+                    snapshot.owner.clone(),
+                    snapshot.repo.clone(),
+                    snapshot.number,
+                ),
+                vec![comment(&snapshot.owner, &snapshot.repo, snapshot.number)],
+            );
+            self.issue_snapshots.lock().await.insert(
+                (
+                    snapshot.owner.clone(),
+                    snapshot.repo.clone(),
+                    snapshot.number,
+                ),
+                snapshot,
+            );
+        }
+
+        async fn rate_limit_repo(&self, owner: &str, repo: &str) {
+            self.rate_limited_repos
+                .lock()
+                .await
+                .push((owner.to_string(), repo.to_string()));
+        }
+
+        async fn search_calls(&self) -> Vec<SearchGithubIssuesInput> {
+            self.search_calls.lock().await.clone()
+        }
+
+        async fn get_issue_calls(&self) -> Vec<GetGithubIssueInput> {
+            self.get_issue_calls.lock().await.clone()
+        }
+
+        async fn created_comment_count(&self) -> usize {
+            self.create_comment_bodies.lock().await.len()
+        }
+    }
+
+    #[async_trait]
+    impl GithubIssueWorkflowPort for FakeGithubPort {
+        async fn search_open_bug_issues(
+            &self,
+            input: SearchGithubIssuesInput,
+        ) -> Result<Vec<GithubIssueSearchHit>, GithubIssueWorkflowError> {
+            self.search_calls.lock().await.push(input.clone());
+            if self
+                .rate_limited_repos
+                .lock()
+                .await
+                .contains(&(input.owner.clone(), input.repo.clone()))
+            {
+                return Err(GithubIssueWorkflowError::ProviderRateLimited {
+                    reason: format!("{}/{} search was rate limited", input.owner, input.repo),
+                });
+            }
+            Ok(self
+                .search_results
+                .lock()
+                .await
+                .get(&(input.owner, input.repo))
+                .cloned()
+                .unwrap_or_default())
+        }
+
+        async fn get_issue(
+            &self,
+            input: GetGithubIssueInput,
+        ) -> Result<GithubIssueProviderSnapshot, GithubIssueWorkflowError> {
+            self.get_issue_calls.lock().await.push(input.clone());
+            self.issue_snapshots
+                .lock()
+                .await
+                .get(&(input.owner, input.repo, input.number))
+                .cloned()
+                .ok_or_else(|| GithubIssueWorkflowError::ProviderRead {
+                    reason: "missing fake issue snapshot".to_string(),
+                })
+        }
+
+        async fn get_authenticated_workflow_actor(
+            &self,
+            _input: GetAuthenticatedWorkflowActorInput,
+        ) -> Result<GithubActorSnapshot, GithubIssueWorkflowError> {
+            Ok(GithubActorSnapshot {
+                login: "ironclaw-bot".to_string(),
+                node_id: Some("actor-node-1".to_string()),
+            })
+        }
+
+        async fn list_issue_comments(
+            &self,
+            input: ListIssueCommentsInput,
+        ) -> Result<Vec<GithubIssueCommentSnapshot>, GithubIssueWorkflowError> {
+            self.list_comment_calls.lock().await.push(input.clone());
+            Ok(self
+                .comments
+                .lock()
+                .await
+                .get(&(input.issue.owner, input.issue.repo, input.issue.number))
+                .cloned()
+                .unwrap_or_default())
+        }
+
+        async fn create_issue_comment(
+            &self,
+            input: CreateIssueCommentInput,
+        ) -> Result<GithubCommentRef, GithubIssueWorkflowError> {
+            self.create_comment_bodies.lock().await.push(input.body);
+            Ok(GithubCommentRef {
+                node_id: Some("created-comment-node".to_string()),
+                url: "https://github.com/nearai/ironclaw/issues/42#issuecomment-created"
+                    .to_string(),
+            })
+        }
+    }
+
+    #[derive(Debug)]
+    struct FakeProjectAccess {
+        config_allowed: bool,
+        config_requests: Mutex<Vec<WorkflowConfigAccessRequest>>,
+        run_requests: Mutex<Vec<WorkflowProjectAccessRequest>>,
+    }
+
+    impl FakeProjectAccess {
+        fn allow() -> Self {
+            Self {
+                config_allowed: true,
+                config_requests: Mutex::new(Vec::new()),
+                run_requests: Mutex::new(Vec::new()),
+            }
+        }
+
+        fn deny_config() -> Self {
+            Self {
+                config_allowed: false,
+                config_requests: Mutex::new(Vec::new()),
+                run_requests: Mutex::new(Vec::new()),
+            }
+        }
+
+        async fn config_request_count(&self) -> usize {
+            self.config_requests.lock().await.len()
+        }
+    }
+
+    #[async_trait]
+    impl WorkflowProjectAccess for FakeProjectAccess {
+        async fn assert_workflow_config_access(
+            &self,
+            request: WorkflowConfigAccessRequest,
+        ) -> Result<(), GithubIssueWorkflowError> {
+            self.config_requests.lock().await.push(request);
+            if self.config_allowed {
+                return Ok(());
+            }
+            Err(GithubIssueWorkflowError::PolicyDenied {
+                reason: "config access denied".to_string(),
+            })
+        }
+
+        async fn assert_workflow_project_access(
+            &self,
+            request: WorkflowProjectAccessRequest,
+        ) -> Result<(), GithubIssueWorkflowError> {
+            self.run_requests.lock().await.push(request);
+            Ok(())
+        }
+    }
+
+    #[derive(Debug, Default)]
+    struct FakeStageTurnSubmitter {
+        requests: Mutex<Vec<SubmitStageTurnRequest>>,
+    }
+
+    impl FakeStageTurnSubmitter {
+        async fn request_count(&self) -> usize {
+            self.requests.lock().await.len()
+        }
+    }
+
+    #[async_trait]
+    impl StageTurnSubmitter for FakeStageTurnSubmitter {
+        async fn submit_stage_turn(
+            &self,
+            request: SubmitStageTurnRequest,
+        ) -> Result<SubmitStageTurnOutcome, GithubIssueWorkflowError> {
+            let request_count = {
+                let mut requests = self.requests.lock().await;
+                requests.push(request);
+                requests.len()
+            };
+            Ok(SubmitStageTurnOutcome::Submitted {
+                thread_id: ThreadId::new(format!("thread-poller-{request_count}")).unwrap(),
+                turn_run_id: TurnRunId::new(),
+            })
+        }
+    }
+
+    #[derive(Debug, Default)]
+    struct FakeWorkspaceManager;
+
+    #[async_trait]
+    impl WorkflowWorkspaceManager for FakeWorkspaceManager {
+        async fn prepare_workspace(
+            &self,
+            _request: PrepareWorkflowWorkspaceRequest,
+        ) -> Result<PrepareWorkflowWorkspaceOutcome, GithubIssueWorkflowError> {
+            Ok(PrepareWorkflowWorkspaceOutcome {
+                workspace_session_id: Default::default(),
+                workspace_ref: WorkflowWorkspaceRef {
+                    thread_id: None,
+                    workspace_session_id: None,
+                    turn_run_id: None,
+                },
+                mount_ref: WorkflowWorkspaceMountRef {
+                    mount_id: "mount-poller".to_string(),
+                    alias: "/workspace".to_string(),
+                },
+            })
+        }
+    }
+
+    #[derive(Debug)]
+    struct FakePollerPorts {
+        repository: Arc<InMemoryGithubIssueWorkflowRepository>,
+        configs: Arc<FakeConfigSource>,
+        github: Arc<FakeGithubPort>,
+        project_access: Arc<FakeProjectAccess>,
+        stage_turns: Arc<FakeStageTurnSubmitter>,
+        workspace: Arc<FakeWorkspaceManager>,
+        clock: Arc<FakeClock>,
+        worker_id: WorkflowWorkerId,
+    }
+
+    impl FakePollerPorts {
+        fn new(configs: Vec<GithubIssueWorkflowConfig>) -> Self {
+            Self {
+                repository: Arc::new(InMemoryGithubIssueWorkflowRepository::default()),
+                configs: Arc::new(FakeConfigSource::new(configs)),
+                github: Arc::new(FakeGithubPort::default()),
+                project_access: Arc::new(FakeProjectAccess::allow()),
+                stage_turns: Arc::new(FakeStageTurnSubmitter::default()),
+                workspace: Arc::new(FakeWorkspaceManager),
+                clock: Arc::new(FakeClock::new(fixed_time(100))),
+                worker_id: worker(),
+            }
+        }
+
+        fn with_project_access(mut self, project_access: Arc<FakeProjectAccess>) -> Self {
+            self.project_access = project_access;
+            self
+        }
+    }
+
+    impl GithubIssueWorkflowPollerPorts for FakePollerPorts {
+        type Clock = FakeClock;
+        type ConfigSource = FakeConfigSource;
+        type GithubPort = FakeGithubPort;
+        type ProjectAccess = FakeProjectAccess;
+        type Repository = InMemoryGithubIssueWorkflowRepository;
+        type StageTurnSubmitter = FakeStageTurnSubmitter;
+        type WorkspaceManager = FakeWorkspaceManager;
+
+        fn clock(&self) -> Arc<Self::Clock> {
+            self.clock.clone()
+        }
+
+        fn config_source(&self) -> Arc<Self::ConfigSource> {
+            self.configs.clone()
+        }
+
+        fn github_port(&self) -> Arc<Self::GithubPort> {
+            self.github.clone()
+        }
+
+        fn project_access(&self) -> Arc<Self::ProjectAccess> {
+            self.project_access.clone()
+        }
+
+        fn repository(&self) -> Arc<Self::Repository> {
+            self.repository.clone()
+        }
+
+        fn stage_turn_submitter(&self) -> Arc<Self::StageTurnSubmitter> {
+            self.stage_turns.clone()
+        }
+
+        fn workspace_manager(&self) -> Arc<Self::WorkspaceManager> {
+            self.workspace.clone()
+        }
+
+        fn worker_id(&self) -> WorkflowWorkerId {
+            self.worker_id.clone()
+        }
+    }
+
+    impl GithubIssueWorkflowPolicyPorts for FakePollerPorts {
+        type Clock = FakeClock;
+        type GithubPort = FakeGithubPort;
+        type ProjectAccess = FakeProjectAccess;
+        type Repository = InMemoryGithubIssueWorkflowRepository;
+        type StageTurnSubmitter = FakeStageTurnSubmitter;
+        type WorkspaceManager = FakeWorkspaceManager;
+
+        fn clock(&self) -> Arc<Self::Clock> {
+            self.clock.clone()
+        }
+
+        fn github_port(&self) -> Arc<Self::GithubPort> {
+            self.github.clone()
+        }
+
+        fn project_access(&self) -> Arc<Self::ProjectAccess> {
+            self.project_access.clone()
+        }
+
+        fn repository(&self) -> Arc<Self::Repository> {
+            self.repository.clone()
+        }
+
+        fn stage_turn_submitter(&self) -> Arc<Self::StageTurnSubmitter> {
+            self.stage_turns.clone()
+        }
+
+        fn workspace_manager(&self) -> Arc<Self::WorkspaceManager> {
+            self.workspace.clone()
+        }
+
+        fn worker_id(&self) -> WorkflowWorkerId {
+            self.worker_id.clone()
+        }
+    }
+
+    fn poller_config() -> GithubIssueWorkflowPollerConfig {
+        GithubIssueWorkflowPollerConfig {
+            enabled: true,
+            ..GithubIssueWorkflowPollerConfig::default()
+        }
+    }
+
+    fn poller(ports: FakePollerPorts) -> GithubIssueWorkflowPoller<FakePollerPorts> {
+        GithubIssueWorkflowPoller::new(ports, poller_config(), "poller-contract-v1")
+    }
+
+    async fn existing_run(
+        repository: &InMemoryGithubIssueWorkflowRepository,
+        config: &GithubIssueWorkflowConfig,
+        snapshot: &GithubIssueProviderSnapshot,
+    ) -> GithubIssueWorkflowRun {
+        let issue = snapshot.issue_ref();
+        match repository
+            .create_or_get_workflow_run(CreateOrGetWorkflowRunInput {
+                tenant_id: config.tenant_id.clone(),
+                creator_user_id: config.owner_user_id.clone(),
+                agent_id: None,
+                project_id: Some(config.project_id.clone()),
+                issue_ref: issue,
+                workflow_policy_key: "github-bug-workflow".to_string(),
+                workflow_policy_version: "poller-contract-v1".to_string(),
+                now: fixed_time(200),
+            })
+            .await
+            .unwrap()
+        {
+            CreateOrGetWorkflowRunOutcome::Existing { run } => run,
+            CreateOrGetWorkflowRunOutcome::Created { .. } => {
+                panic!("poller should have created the workflow run")
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn poller_discovers_bug_issue_and_records_event() {
+        assert!(!GithubIssueWorkflowPollerConfig::default().enabled);
+        let config = workflow_config("discover", "nearai", "ironclaw");
+        let ports = FakePollerPorts::new(vec![config.clone()]);
+        let snapshot = issue_snapshot("nearai", "ironclaw", 42, 100);
+        ports.github.add_issue(snapshot.clone()).await;
+        let poller = poller(ports);
+
+        let outcome = poller.tick_once().await.unwrap();
+
+        assert_eq!(outcome.configs_loaded, 1);
+        assert_eq!(outcome.repositories_scanned, 1);
+        assert_eq!(outcome.issues_seen, 1);
+        assert_eq!(outcome.events_recorded, 1);
+        assert_eq!(outcome.policy_ticks, 1);
+        let run = existing_run(&poller.ports().repository, &config, &snapshot).await;
+        let events = poller
+            .ports()
+            .repository
+            .list_workflow_events_after(
+                ironclaw_github_issue_workflow::ListWorkflowEventsAfterInput {
+                    workflow_run_id: run.workflow_run_id.clone(),
+                    after_sequence: 0,
+                    limit: 10,
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(events.len(), 1);
+        assert_eq!(
+            events[0].workflow_event_type,
+            GithubIssueWorkflowEventType::GithubIssueDiscovered
+        );
+        assert_eq!(events[0].payload["issue"]["number"], 42);
+        assert_eq!(events[0].payload["provider_snapshot"]["comment_count"], 1);
+        let search_calls = poller.ports().github.search_calls().await;
+        assert_eq!(
+            search_calls[0].query,
+            "repo:nearai/ironclaw is:issue state:open label:bug"
+        );
+    }
+
+    #[tokio::test]
+    async fn poller_dedupes_same_issue_on_second_tick() {
+        let config = workflow_config("dedupe", "nearai", "ironclaw");
+        let ports = FakePollerPorts::new(vec![config.clone()]);
+        let snapshot = issue_snapshot("nearai", "ironclaw", 42, 100);
+        ports.github.add_issue(snapshot.clone()).await;
+        let poller = poller(ports);
+
+        poller.tick_once().await.unwrap();
+        let second = poller.tick_once().await.unwrap();
+
+        let run = existing_run(&poller.ports().repository, &config, &snapshot).await;
+        let events = poller
+            .ports()
+            .repository
+            .list_workflow_events_after(
+                ironclaw_github_issue_workflow::ListWorkflowEventsAfterInput {
+                    workflow_run_id: run.workflow_run_id,
+                    after_sequence: 0,
+                    limit: 10,
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(events.len(), 1);
+        assert_eq!(second.events_recorded, 0);
+        assert_eq!(second.events_deduped, 1);
+        assert_eq!(poller.ports().stage_turns.request_count().await, 1);
+        assert_eq!(poller.ports().github.created_comment_count().await, 1);
+    }
+
+    #[tokio::test]
+    async fn poller_checks_project_access_before_github_read() {
+        let config = workflow_config("denied", "nearai", "ironclaw");
+        let project_access = Arc::new(FakeProjectAccess::deny_config());
+        let ports = FakePollerPorts::new(vec![config]).with_project_access(project_access.clone());
+        let poller = poller(ports);
+
+        let outcome = poller.tick_once().await.unwrap();
+
+        assert_eq!(outcome.blocked_configs.len(), 1);
+        assert_eq!(project_access.config_request_count().await, 1);
+        assert!(poller.ports().github.search_calls().await.is_empty());
+        assert!(poller.ports().github.get_issue_calls().await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn poller_applies_per_repo_issue_limit() {
+        let config = workflow_config("limit", "nearai", "ironclaw");
+        let ports = FakePollerPorts::new(vec![config]);
+        ports
+            .github
+            .add_issue(issue_snapshot("nearai", "ironclaw", 41, 100))
+            .await;
+        ports
+            .github
+            .add_issue(issue_snapshot("nearai", "ironclaw", 42, 101))
+            .await;
+        ports
+            .github
+            .add_issue(issue_snapshot("nearai", "ironclaw", 43, 102))
+            .await;
+        let poller = GithubIssueWorkflowPoller::new(
+            ports,
+            GithubIssueWorkflowPollerConfig {
+                enabled: true,
+                max_issues_per_repo_per_tick: 2,
+                ..GithubIssueWorkflowPollerConfig::default()
+            },
+            "poller-contract-v1",
+        );
+
+        let outcome = poller.tick_once().await.unwrap();
+
+        assert_eq!(outcome.issues_seen, 2);
+        assert_eq!(outcome.events_recorded, 2);
+        let search_calls = poller.ports().github.search_calls().await;
+        assert_eq!(search_calls[0].limit, 2);
+        let get_issue_calls = poller.ports().github.get_issue_calls().await;
+        assert_eq!(get_issue_calls.len(), 2);
+        assert_eq!(get_issue_calls[0].number, 41);
+        assert_eq!(get_issue_calls[1].number, 42);
+    }
+
+    #[tokio::test]
+    async fn poller_ticks_runnable_runs_after_discovery() {
+        let config = workflow_config("tick", "nearai", "ironclaw");
+        let ports = FakePollerPorts::new(vec![config.clone()]);
+        let snapshot = issue_snapshot("nearai", "ironclaw", 42, 100);
+        ports.github.add_issue(snapshot.clone()).await;
+        let poller = poller(ports);
+
+        let outcome = poller.tick_once().await.unwrap();
+
+        assert_eq!(outcome.runnable_runs_claimed, 1);
+        assert_eq!(outcome.policy_ticks, 1);
+        assert_eq!(poller.ports().stage_turns.request_count().await, 1);
+        let run = existing_run(&poller.ports().repository, &config, &snapshot).await;
+        assert_eq!(run.event_cursor, 1);
+        assert!(run.active_stage_run_id.is_some());
+        assert!(run.lease_owner.is_none());
+    }
+
+    #[tokio::test]
+    async fn poller_provider_rate_limit_blocks_config_not_process() {
+        let limited = workflow_config("limited", "nearai", "limited");
+        let healthy = workflow_config("healthy", "nearai", "ironclaw");
+        let ports = FakePollerPorts::new(vec![limited, healthy.clone()]);
+        ports.github.rate_limit_repo("nearai", "limited").await;
+        let snapshot = issue_snapshot("nearai", "ironclaw", 42, 100);
+        ports.github.add_issue(snapshot.clone()).await;
+        let poller = poller(ports);
+
+        let outcome = poller.tick_once().await.unwrap();
+
+        assert_eq!(outcome.configs_loaded, 2);
+        assert_eq!(outcome.blocked_configs.len(), 1);
+        assert_eq!(outcome.events_recorded, 1);
+        let search_calls = poller.ports().github.search_calls().await;
+        assert_eq!(search_calls.len(), 2);
+        let get_issue_calls = poller.ports().github.get_issue_calls().await;
+        assert_eq!(get_issue_calls.len(), 1);
+        assert_eq!(get_issue_calls[0].repo, "ironclaw");
+        let run = existing_run(&poller.ports().repository, &healthy, &snapshot).await;
+        assert_eq!(run.issue_ref.repo, "ironclaw");
+    }
+}
