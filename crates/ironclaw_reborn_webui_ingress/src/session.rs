@@ -15,7 +15,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use chrono::{DateTime, Duration as ChronoDuration, Utc};
-use ironclaw_host_api::{TenantId, UserId};
+use ironclaw_host_api::{AgentId, ProjectId, TenantId, UserId};
 use ironclaw_reborn_composition::{WebuiAuthentication, WebuiAuthenticator};
 use secrecy::SecretString;
 use serde::{Deserialize, Serialize};
@@ -71,6 +71,8 @@ pub struct SessionRecord {
     pub session_id: SessionId,
     pub tenant_id: TenantId,
     pub user_id: UserId,
+    pub agent_id: Option<AgentId>,
+    pub project_id: Option<ProjectId>,
     pub created_at: DateTime<Utc>,
     pub expires_at: DateTime<Utc>,
 }
@@ -98,11 +100,15 @@ pub trait SessionStore: Send + Sync + 'static {
     /// Issue a new session bound to the supplied caller and lifetime.
     /// Returns the freshly minted bearer token; persist `record` keyed
     /// on this token (or whatever lookup encoding the backend prefers).
+    /// Optional `agent_id` and `project_id` scope the session to a
+    /// specific agent/project within the tenant.
     async fn create_session(
         &self,
         tenant_id: TenantId,
         user_id: UserId,
         lifetime: ChronoDuration,
+        agent_id: Option<AgentId>,
+        project_id: Option<ProjectId>,
     ) -> Result<SecretString, SessionStoreError>;
 
     /// Look up the session record bound to `candidate`. Implementations
@@ -165,6 +171,8 @@ impl SessionStore for InMemorySessionStore {
         tenant_id: TenantId,
         user_id: UserId,
         lifetime: ChronoDuration,
+        agent_id: Option<AgentId>,
+        project_id: Option<ProjectId>,
     ) -> Result<SecretString, SessionStoreError> {
         // Two distinct UUIDs: one is the operator-visible audit id
         // (`SessionId`, OK to log), the other is the bearer token
@@ -183,6 +191,8 @@ impl SessionStore for InMemorySessionStore {
             session_id,
             tenant_id,
             user_id,
+            agent_id,
+            project_id,
             created_at: now,
             expires_at: now
                 .checked_add_signed(lifetime)
@@ -280,7 +290,13 @@ impl WebuiAuthenticator for SessionAuthenticator {
             );
             return None;
         }
-        Some(WebuiAuthentication::user(record.user_id))
+        Some(WebuiAuthentication::new(
+            record.tenant_id,
+            record.user_id,
+            record.agent_id,
+            record.project_id,
+            Default::default(),
+        ))
     }
 }
 
@@ -300,7 +316,7 @@ mod tests {
     async fn create_then_lookup_returns_session() {
         let store = InMemorySessionStore::new();
         let token = store
-            .create_session(tenant(), user(), ChronoDuration::hours(1))
+            .create_session(tenant(), user(), ChronoDuration::hours(1), None, None)
             .await
             .expect("create");
         let record = store
@@ -315,7 +331,7 @@ mod tests {
     async fn expired_session_is_rejected_by_authenticator() {
         let store = Arc::new(InMemorySessionStore::new());
         let token = store
-            .create_session(tenant(), user(), ChronoDuration::seconds(-1))
+            .create_session(tenant(), user(), ChronoDuration::seconds(-1), None, None)
             .await
             .expect("create");
         let auth = SessionAuthenticator::new(store.clone());
@@ -333,7 +349,7 @@ mod tests {
     async fn live_session_resolves_to_caller_user_id() {
         let store = Arc::new(InMemorySessionStore::new());
         let token = store
-            .create_session(tenant(), user(), ChronoDuration::hours(1))
+            .create_session(tenant(), user(), ChronoDuration::hours(1), None, None)
             .await
             .expect("create");
         let auth = SessionAuthenticator::new(store);
@@ -356,7 +372,7 @@ mod tests {
     async fn session_record_debug_and_serialize_do_not_contain_bearer() {
         let store = InMemorySessionStore::new();
         let token = store
-            .create_session(tenant(), user(), ChronoDuration::hours(1))
+            .create_session(tenant(), user(), ChronoDuration::hours(1), None, None)
             .await
             .expect("create");
         let bearer = token.expose_secret().to_string();
@@ -402,6 +418,8 @@ mod tests {
                 _tenant_id: TenantId,
                 _user_id: UserId,
                 _lifetime: ChronoDuration,
+                _agent_id: Option<AgentId>,
+                _project_id: Option<ProjectId>,
             ) -> Result<SecretString, SessionStoreError> {
                 unreachable!()
             }

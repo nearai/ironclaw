@@ -347,7 +347,10 @@ fn build_app(profiles: Vec<OAuthUserProfile>) -> (axum::Router, Arc<RecordingSer
     let env_authenticator = Arc::new(
         EnvBearerAuthenticator::new(
             SecretString::from("env-operator-token".to_string()),
+            TenantId::new(TENANT).expect("tenant"),
             UserId::new("operator").expect("operator"),
+            Some(AgentId::new(AGENT).expect("agent")),
+            Some(ProjectId::new(PROJECT).expect("project")),
         )
         .expect("env authenticator"),
     );

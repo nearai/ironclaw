@@ -1,0 +1,61 @@
+{
+  "extends": "bos://work.efiz.near/nearbuilders.org",
+  "account": "work.efiz.near",
+  "domain": "ironclaw.everything.dev",
+  "title": "IronClaw",
+  "description": "IronClaw Reborn Dashboard Interface",
+  "staging": {
+    "domain": "dev.ironclaw..everything.dev"
+  },
+  "repository": "https://github.com/nearbuilders/ironclaw",
+  "ci": {
+    "railway": {
+      "service": "app"
+    }
+  },
+  "app": {
+    "host": {
+      "development": "local:host",
+      "secrets": [
+        "CORS_ORIGIN",
+        "TENANT_WHITELIST",
+        "ALLOW_OVERRIDE",
+        "ALLOW_UNTRUSTED_SSR",
+        "CSP_STRICT"
+      ],
+      "production": "https://elliot-braem-5044-host-ironclaw-nearbuilders-748dd5c0b-ze.zephyrcloud.app",
+      "integrity": "sha384-uzbBU2DfN9ozBwVXUPjGyv+w29xMfBYmNTYnKuQLsxvzNTufAO6PWH6QrpPa51bB"
+    },
+    "ui": {
+      "development": "local:ui",
+      "ssr": "https://elliot-braem-5041-ui-ironclaw-nearbuilders-4a9d8d6a0-ze.zephyrcloud.app",
+      "ssrIntegrity": "sha384-dnnjUwjviW6we0SdQHY/jtSp/NxZTfZMuKfzdXPSsP2/SDJbNgSZt6uHxcEc4qrg",
+      "production": "https://elliot-braem-5040-ui-ironclaw-nearbuilders-7a4396e5d-ze.zephyrcloud.app",
+      "integrity": "sha384-CfKojAeifHsc5vjHJIzaFYHbt9JKUWFgS7yEDra8xQaAJB0TwPEiaA22zet0kMa6"
+    },
+    "api": {
+      "development": "local:api",
+      "secrets": [
+        "API_DATABASE_URL",
+        "IRONCLAW_BASE_URL",
+        "BETTER_AUTH_SECRET"
+      ],
+      "production": "https://elliot-braem-5042-api-ironclaw-nearbuilders-31bdd5c4c-ze.zephyrcloud.app",
+      "integrity": "sha384-kJU4LTN0U/uXrYaGpG9gPVFZV+JOeYt0Ug2y2aOsFcpVAJC+hTNqei9IbZkf1Sju"
+    }
+  },
+  "plugins": {
+    "settings": {
+      "extends": "bos://work.efiz.near/nearbuilders.org"
+    },
+    "ironclaw": {
+      "development": "local:plugins/ironclaw",
+      "secrets": [
+        "IRONCLAW_BASE_URL",
+        "IRONCLAW_API_TOKEN"
+      ],
+      "production": "https://elliot-braem-5043-every-plugin-ironclaw-ironclaw--4663fb58b-ze.zephyrcloud.app",
+      "integrity": "sha384-C16nqFILTg4xcYT3+kONmbT2jYpD+89JGmTxBvUhCXt9iED4NnuSbwaOCelAedg3"
+    }
+  }
+}

@@ -2,6 +2,7 @@ use std::env;
 use std::net::{IpAddr, SocketAddr};
 use std::str::FromStr;
 use std::sync::Arc;
+use std::time::Duration;
 
 use anyhow::{Context, anyhow};
 use clap::Args;
@@ -130,10 +131,6 @@ impl ServeCommand {
         // value is consumed here.
         let token_byte_len = token_value.len();
         let session_signing_secret = SecretString::from(token_value.clone());
-        let env_authenticator: Arc<dyn WebuiAuthenticator> = Arc::new(EnvBearerAuthenticator::new(
-            SecretString::from(token_value),
-            user_id.clone(),
-        )?);
 
         // Resolve trusted host-installation default agent/project from
         // `[identity]`. The v2 facade builds `ThreadScope` from
@@ -166,6 +163,14 @@ impl ServeCommand {
             .map(ProjectId::new)
             .transpose()
             .map_err(|err| anyhow!("[identity].default_project is invalid: {err}"))?;
+
+        let env_authenticator: Arc<dyn WebuiAuthenticator> = Arc::new(EnvBearerAuthenticator::new(
+            SecretString::from(token_value),
+            tenant_id.clone(),
+            user_id.clone(),
+            Some(default_agent_id.clone()),
+            default_project_id.clone(),
+        )?);
         if let Some(project_id) = default_project_id.clone() {
             runtime_input = runtime_input.with_default_project_id(project_id);
         }
@@ -293,12 +298,34 @@ impl ServeCommand {
         // CORS allow-origin list. Empty = fail-closed on every
         // cross-origin preflight; operators MUST opt in to the
         // specific origins the host installation actually serves.
+        // Falls back to the IRONCLAW_REBORN_CORS_ORIGINS env var
+        // (comma-separated) when the config file does not set
+        // [webui].allowed_origins.
         let allowed_origins_raw = webui_section
             .and_then(|section| section.allowed_origins.as_ref())
             .cloned()
             .unwrap_or_default();
-        let allowed_origins = WebuiServeConfig::parse_allowed_origins(&allowed_origins_raw)
-            .map_err(|err| anyhow!("[webui].allowed_origins parse failure: {err}"))?;
+        let allowed_origins = if allowed_origins_raw.is_empty() {
+            match std::env::var("IRONCLAW_REBORN_CORS_ORIGINS") {
+                Ok(val) => {
+                    let parsed: Vec<String> = val.split(',').map(|s| s.trim().to_string()).collect();
+                    if parsed.is_empty() {
+                        Vec::new()
+                    } else {
+                        eprintln!(
+                            "[config] CORS allow-origins from IRONCLAW_REBORN_CORS_ORIGINS env: {}",
+                            parsed.join(", "),
+                        );
+                        WebuiServeConfig::parse_allowed_origins(&parsed)
+                            .map_err(|err| anyhow!("IRONCLAW_REBORN_CORS_ORIGINS parse failure: {err}"))?
+                    }
+                }
+                Err(_) => Vec::new(),
+            }
+        } else {
+            WebuiServeConfig::parse_allowed_origins(&allowed_origins_raw)
+                .map_err(|err| anyhow!("[webui].allowed_origins parse failure: {err}"))?
+        };
 
         let csp_override = webui_section.and_then(|section| section.csp_header_override.as_deref());
 
@@ -438,11 +465,20 @@ impl ServeCommand {
             )
             .await?;
 
+            let cors_origins_for_banner: Vec<String> = if allowed_origins_raw.is_empty() {
+                std::env::var("IRONCLAW_REBORN_CORS_ORIGINS")
+                    .ok()
+                    .map(|val| val.split(',').map(|s| s.trim().to_string()).collect())
+                    .unwrap_or_default()
+            } else {
+                allowed_origins_raw.clone()
+            };
+
             print_serve_banner(
                 listen_addr,
                 env_token_var,
                 env_user_id_var,
-                &allowed_origins_raw,
+                &cors_origins_for_banner,
                 &bundle.readiness,
             );
 
@@ -503,10 +539,30 @@ impl ServeCommand {
 
             let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
             tokio::spawn(async move {
+                #[cfg(unix)]
+                if let Ok(mut sigint) = tokio::signal::unix::signal(
+                    tokio::signal::unix::SignalKind::interrupt(),
+                ) {
+                    sigint.recv().await;
+                    tracing::info!(
+                        target = "ironclaw::reborn::cli::serve",
+                        "ctrl-c received; signalling graceful shutdown. Press Ctrl+C again to force exit.",
+                    );
+                    let _ = shutdown_tx.send(());
+
+                    sigint.recv().await;
+                    tracing::warn!(
+                        target = "ironclaw::reborn::cli::serve",
+                        "second ctrl-c received; force exiting",
+                    );
+                    std::process::exit(1);
+                }
+
+                #[cfg(not(unix))]
                 if tokio::signal::ctrl_c().await.is_ok() {
                     tracing::info!(
                         target = "ironclaw::reborn::cli::serve",
-                        "ctrl-c received; signalling WebChat v2 graceful shutdown",
+                        "ctrl-c received; signalling graceful shutdown.",
                     );
                     let _ = shutdown_tx.send(());
                 }
@@ -529,7 +585,21 @@ impl ServeCommand {
 
             // Always drain the Reborn runtime, even on serve error, so
             // background tasks and turn-runner state shut down cleanly.
-            let shutdown_result = runtime.shutdown().await;
+            let shutdown_result = match tokio::time::timeout(
+                Duration::from_secs(15),
+                runtime.shutdown(),
+            )
+            .await
+            {
+                Ok(result) => result,
+                Err(_) => {
+                    tracing::warn!(
+                        target = "ironclaw::reborn::cli::serve",
+                        "graceful shutdown timed out after 15s; force exiting",
+                    );
+                    std::process::exit(1);
+                }
+            };
             serve_result.context("WebChat v2 serve loop failed")?;
             shutdown_result.context("Reborn runtime shutdown failed")?;
             Ok::<(), anyhow::Error>(())

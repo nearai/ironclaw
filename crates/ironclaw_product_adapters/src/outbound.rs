@@ -249,13 +249,19 @@ impl Serialize for CapabilityActivityView {
             invocation_id: &'a InvocationId,
             #[serde(skip_serializing_if = "Option::is_none")]
             turn_run_id: &'a Option<TurnRunId>,
+            #[serde(skip_serializing_if = "Option::is_none")]
             thread_id: &'a Option<ThreadId>,
             capability_id: &'a CapabilityId,
             status: CapabilityActivityStatusView,
+            #[serde(skip_serializing_if = "Option::is_none")]
             provider: &'a Option<ExtensionId>,
+            #[serde(skip_serializing_if = "Option::is_none")]
             runtime: &'a Option<RuntimeKind>,
+            #[serde(skip_serializing_if = "Option::is_none")]
             process_id: &'a Option<ProcessId>,
+            #[serde(skip_serializing_if = "Option::is_none")]
             output_bytes: Option<u64>,
+            #[serde(skip_serializing_if = "Option::is_none")]
             error_kind: &'a Option<String>,
             #[serde(skip_serializing_if = "Option::is_none")]
             subtitle: &'a Option<String>,
@@ -496,20 +502,29 @@ impl Serialize for CapabilityDisplayPreviewView {
 
         #[derive(Serialize)]
         struct Wire<'a> {
+            #[serde(skip_serializing_if = "Option::is_none")]
             timeline_message_id: &'a Option<String>,
             invocation_id: &'a InvocationId,
             #[serde(skip_serializing_if = "Option::is_none")]
             turn_run_id: &'a Option<TurnRunId>,
+            #[serde(skip_serializing_if = "Option::is_none")]
             thread_id: &'a Option<ThreadId>,
             capability_id: &'a CapabilityId,
             status: CapabilityActivityStatusView,
             title: &'a str,
+            #[serde(skip_serializing_if = "Option::is_none")]
             subtitle: &'a Option<String>,
+            #[serde(skip_serializing_if = "Option::is_none")]
             input_summary: &'a Option<String>,
+            #[serde(skip_serializing_if = "Option::is_none")]
             output_summary: &'a Option<String>,
+            #[serde(skip_serializing_if = "Option::is_none")]
             output_preview: &'a Option<String>,
+            #[serde(skip_serializing_if = "Option::is_none")]
             output_kind: &'a Option<String>,
+            #[serde(skip_serializing_if = "Option::is_none")]
             output_bytes: Option<u64>,
+            #[serde(skip_serializing_if = "Option::is_none")]
             result_ref: &'a Option<String>,
             truncated: bool,
             updated_at: &'a DateTime<Utc>,

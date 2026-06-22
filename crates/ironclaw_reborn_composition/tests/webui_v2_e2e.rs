@@ -64,6 +64,7 @@ impl WebuiAuthenticator for OnlyValidToken {
     async fn authenticate(&self, token: &str) -> Option<WebuiAuthentication> {
         if token == VALID_TOKEN {
             Some(WebuiAuthentication::user(
+                TenantId::new(TENANT).expect("tenant"),
                 UserId::new(USER).expect("user id"),
             ))
         } else {
@@ -1154,6 +1155,7 @@ mod operator_llm_config {
         async fn authenticate(&self, token: &str) -> Option<WebuiAuthentication> {
             if token == VALID_TOKEN {
                 Some(WebuiAuthentication::operator(
+                    TenantId::new(TENANT).expect("tenant"),
                     UserId::new(USER).expect("user id"),
                 ))
             } else {

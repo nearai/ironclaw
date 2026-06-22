@@ -22,7 +22,7 @@ use axum::body::Body;
 use axum::http::{Request, StatusCode, header};
 use chrono::Duration as ChronoDuration;
 use http_body_util::BodyExt;
-use ironclaw_host_api::TenantId;
+use ironclaw_host_api::{AgentId, ProjectId, TenantId};
 use ironclaw_reborn_webui_ingress::{
     EmailUserDirectory, InMemorySessionStore, OAuthError, OAuthProvider, OAuthProviderName,
     OAuthRouterConfig, OAuthUserProfile, SessionStore, webui_v2_auth_router,
@@ -1152,6 +1152,8 @@ mod session_store_failure {
             _tenant_id: TenantId,
             _user_id: UserId,
             _lifetime: ChronoDuration,
+            _agent_id: Option<AgentId>,
+            _project_id: Option<ProjectId>,
         ) -> Result<SecretString, SessionStoreError> {
             Err(SessionStoreError::Backend("simulated outage".into()))
         }
@@ -1253,6 +1255,8 @@ mod logout_revoke_failure {
             _tenant_id: TenantId,
             _user_id: UserId,
             _lifetime: ChronoDuration,
+            _agent_id: Option<AgentId>,
+            _project_id: Option<ProjectId>,
         ) -> Result<SecretString, SessionStoreError> {
             unreachable!("test does not drive create_session")
         }

@@ -1,0 +1,143 @@
+import { useSyncExternalStore, useCallback, useEffect, useRef } from "react";
+import type { UIMessage } from "@tanstack/ai";
+import { useApiClient } from "@/app";
+import type { StagedAttachment } from "@/lib/attachments";
+import { threadChatManager, type PendingApproval, type AuthGate } from "./use-thread-chat-manager";
+
+interface UseThreadChatOptions {
+  threadId: string;
+  initialMessages: UIMessage[];
+}
+
+interface GateResolutionOpts {
+  always?: boolean;
+  credentialRef?: string;
+}
+
+export function useThreadChat({ threadId, initialMessages }: UseThreadChatOptions) {
+  const apiClient = useApiClient();
+
+  const versionRef = useRef(-1);
+  const snapshotRef = useRef<any>(null);
+
+  const getSnapshot = useCallback(() => {
+    const session = threadChatManager.get(threadId);
+    const version = session?.version ?? 0;
+    if (versionRef.current === version && snapshotRef.current) {
+      return snapshotRef.current;
+    }
+    versionRef.current = version;
+    snapshotRef.current = {
+      messages: session?.messages ?? ([] as UIMessage[]),
+      isLoading: session?.isLoading ?? false,
+      error: session?.error ?? null,
+      runId: session?.runId ?? null,
+      pendingApprovals: session?.pendingApprovals ?? ([] as PendingApproval[]),
+      authGates: session?.authGates ?? ([] as AuthGate[]),
+      streamInterrupted: session?.streamInterrupted ?? false,
+    };
+    return snapshotRef.current;
+  }, [threadId]);
+
+  const subscribe = useCallback(
+    (cb: () => void) => threadChatManager.subscribe(threadId, cb),
+    [threadId],
+  );
+
+  const state = useSyncExternalStore(subscribe, getSnapshot, getSnapshot);
+
+  useEffect(() => {
+    if (initialMessages.length > 0) {
+      threadChatManager.hydrate(threadId, initialMessages);
+    }
+  }, [threadId, initialMessages]);
+
+  type GateResolution = "approved" | "denied" | "credential_provided" | "cancelled";
+
+  const resolveGate = useCallback(
+    async (runId: string, gateRef: string, resolution: GateResolution, opts?: GateResolutionOpts) => {
+      await apiClient.conversation.threadApprove({
+        threadId,
+        runId,
+        gateRef,
+        resolution,
+        always: opts?.always,
+        credentialRef: opts?.credentialRef,
+      });
+    },
+    [apiClient, threadId],
+  );
+
+  const submitAuthToken = useCallback(
+    async (runId: string, gateRef: string, provider: string, accountLabel: string, token: string) => {
+      const { credentialRef } = await apiClient.conversation.submitManualToken({
+        provider,
+        accountLabel,
+        token,
+        threadId,
+        runId,
+        gateRef,
+      });
+      await resolveGate(runId, gateRef, "credential_provided", { credentialRef });
+    },
+    [apiClient, threadId, resolveGate],
+  );
+
+  const sendMessage = useCallback(
+    (content: string, attachments?: StagedAttachment[]) => {
+      threadChatManager.sendMessage(threadId, content, attachments);
+    },
+    [threadId],
+  );
+
+  const stop = useCallback(() => {
+    const session = threadChatManager.get(threadId);
+    if (session?.runId) {
+      apiClient.conversation.cancelRun({ threadId, runId: session.runId }).catch(() => {});
+    }
+    threadChatManager.stop(threadId);
+  }, [apiClient, threadId]);
+
+  const copyConversation = useCallback(async () => {
+    const session = threadChatManager.get(threadId);
+    if (!session) return;
+    const text = session.messages
+      .map((msg) => {
+        const role = msg.role === "user" ? "User" : "Assistant";
+        const textParts: string[] = [];
+        const toolParts: string[] = [];
+        for (const p of msg.parts) {
+          if (p.type === "text") {
+            textParts.push(p.content);
+          } else if (p.type === "tool-call") {
+            toolParts.push(`  Tool: ${p.name}(${p.arguments})`);
+          } else if (p.type === "tool-result") {
+            const summary =
+              typeof p.content === "string"
+                ? p.content.slice(0, 200)
+                : String(p.content).slice(0, 200);
+            toolParts.push(`  ${p.state === "error" ? "Error" : "Result"}: ${summary}`);
+          }
+        }
+        return `${role}:\n${[...textParts, ...toolParts].join("\n")}`;
+      })
+      .join("\n\n---\n\n");
+    await navigator.clipboard.writeText(text);
+  }, [threadId]);
+
+  return {
+    messages: state.messages,
+    isLoading: state.isLoading,
+    error: state.error,
+    runId: state.runId,
+    pendingApprovals: state.pendingApprovals,
+    authGates: state.authGates,
+    streamInterrupted: state.streamInterrupted,
+    sendMessage,
+    stop,
+    resolveGate,
+    submitAuthToken,
+    copyConversation,
+    threadId,
+  };
+}

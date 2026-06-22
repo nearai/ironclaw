@@ -1436,6 +1436,44 @@ pub enum RebornOperatorConfigDiagnosticSeverity {
     Error,
 }
 
+// ─── WebChat v2 thread state ───────────────────────────────────────────
+
+/// Request for [`RebornServicesApi::get_thread_state`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RebornGetThreadStateRequest {
+    pub thread_id: String,
+}
+
+/// Full authoritative thread state returned by
+/// [`RebornServicesApi::get_thread_state`]. Combines thread metadata,
+/// all messages, and summary artifacts — enough for a UI to rebuild
+/// from scratch without SSE event replay.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RebornGetThreadStateResponse {
+    pub thread: SessionThreadRecord,
+    pub messages: Vec<ThreadMessageRecord>,
+    pub summary_artifacts: Vec<SummaryArtifact>,
+}
+
+// ─── Operator access-session minting ───────────────────────────────────
+
+/// Request to mint a tenant-scoped signed session token.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WebUiMintAccessSessionRequest {
+    pub tenant_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project_id: Option<String>,
+}
+
+/// Response from a successful session mint.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WebUiMintAccessSessionResponse {
+    pub token: String,
+    pub expires_at: DateTime<Utc>,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

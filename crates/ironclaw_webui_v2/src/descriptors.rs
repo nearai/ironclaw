@@ -65,6 +65,9 @@ pub const WEBUI_V2_ROUTE_OPERATOR_DIAGNOSTICS: &str = "webui.v2.operator.diagnos
 pub const WEBUI_V2_ROUTE_OPERATOR_STATUS: &str = "webui.v2.operator.status";
 pub const WEBUI_V2_ROUTE_OPERATOR_LOGS: &str = "webui.v2.operator.logs";
 pub const WEBUI_V2_ROUTE_OPERATOR_SERVICE_LIFECYCLE: &str = "webui.v2.operator.service_lifecycle";
+pub const WEBUI_V2_ROUTE_GET_THREAD_STATE: &str = "webui.v2.get_thread_state";
+pub const WEBUI_V2_ROUTE_OPERATOR_CREATE_ACCESS_SESSION: &str =
+    "webui.v2.operator.create_access_session";
 pub const WEBUI_V2_ROUTE_LIST_PROJECT_FILES: &str = "webui.v2.list_project_files";
 pub const WEBUI_V2_ROUTE_STAT_PROJECT_FILE: &str = "webui.v2.stat_project_file";
 pub const WEBUI_V2_ROUTE_READ_PROJECT_FILE: &str = "webui.v2.read_project_file";
@@ -134,6 +137,9 @@ pub const WEBUI_V2_PATTERN_OPERATOR_DIAGNOSTICS: &str = "/api/webchat/v2/operato
 pub const WEBUI_V2_PATTERN_OPERATOR_STATUS: &str = "/api/webchat/v2/operator/status";
 pub const WEBUI_V2_PATTERN_OPERATOR_LOGS: &str = "/api/webchat/v2/operator/logs";
 pub const WEBUI_V2_PATTERN_OPERATOR_SERVICE_LIFECYCLE: &str = "/api/webchat/v2/operator/service";
+pub const WEBUI_V2_PATTERN_GET_THREAD_STATE: &str = "/api/webchat/v2/threads/{thread_id}/state";
+pub const WEBUI_V2_PATTERN_OPERATOR_CREATE_ACCESS_SESSION: &str =
+    "/api/webchat/v2/operator/access-sessions";
 pub const WEBUI_V2_PATTERN_LIST_PROJECT_FILES: &str = "/api/webchat/v2/threads/{thread_id}/files";
 pub const WEBUI_V2_PATTERN_STAT_PROJECT_FILE: &str =
     "/api/webchat/v2/threads/{thread_id}/files/stat";
@@ -208,6 +214,8 @@ pub fn webui_v2_routes() -> Vec<IngressRouteDescriptor> {
         operator_status_descriptor(),
         operator_logs_descriptor(),
         operator_service_lifecycle_descriptor(),
+        get_thread_state_descriptor(),
+        operator_create_access_session_descriptor(),
         list_project_files_descriptor(),
         stat_project_file_descriptor(),
         read_project_file_descriptor(),
@@ -265,6 +273,7 @@ pub fn is_webui_v2_operator_webui_config_route_id(route_id: &str) -> bool {
                 | WEBUI_V2_ROUTE_OPERATOR_STATUS
                 | WEBUI_V2_ROUTE_OPERATOR_LOGS
                 | WEBUI_V2_ROUTE_OPERATOR_SERVICE_LIFECYCLE
+                | WEBUI_V2_ROUTE_OPERATOR_CREATE_ACCESS_SESSION
         )
 }
 
@@ -1190,6 +1199,34 @@ fn operator_service_lifecycle_descriptor() -> IngressRouteDescriptor {
         WEBUI_V2_ROUTE_OPERATOR_SERVICE_LIFECYCLE,
         NetworkMethod::Post,
         WEBUI_V2_PATTERN_OPERATOR_SERVICE_LIFECYCLE,
+        mutation_policy(
+            body_limit_kib(4),
+            mutation_rate_limit(),
+            AuditTraceClass::UserAction,
+            AllowedEffectPath::ProductWorkflow,
+        ),
+    )
+}
+
+fn get_thread_state_descriptor() -> IngressRouteDescriptor {
+    descriptor(
+        WEBUI_V2_ROUTE_GET_THREAD_STATE,
+        NetworkMethod::Get,
+        WEBUI_V2_PATTERN_GET_THREAD_STATE,
+        read_policy(
+            read_rate_limit(),
+            AuditTraceClass::UserAction,
+            AllowedEffectPath::ProjectionOnly,
+            StreamingMode::None,
+        ),
+    )
+}
+
+fn operator_create_access_session_descriptor() -> IngressRouteDescriptor {
+    descriptor(
+        WEBUI_V2_ROUTE_OPERATOR_CREATE_ACCESS_SESSION,
+        NetworkMethod::Post,
+        WEBUI_V2_PATTERN_OPERATOR_CREATE_ACCESS_SESSION,
         mutation_policy(
             body_limit_kib(4),
             mutation_rate_limit(),

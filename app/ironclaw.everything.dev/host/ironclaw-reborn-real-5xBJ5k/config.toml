@@ -1,0 +1,19 @@
+api_version = "ironclaw.runtime/v1"
+
+[boot]
+profile = "local-dev"
+
+[identity]
+default_owner = "reborn-cli"
+tenant = "e2e-reborn"
+default_agent = "e2e-agent"
+
+[webui]
+env_token_var = "IRONCLAW_REBORN_WEBUI_TOKEN"
+env_user_id_var = "IRONCLAW_REBORN_WEBUI_USER_ID"
+
+[llm.default]
+provider_id = "openai"
+model = "mock-model"
+api_key_env = "MOCK_LLM_API_KEY"
+base_url = "http://127.0.0.1:58094/v1"

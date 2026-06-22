@@ -11,7 +11,7 @@ use std::{
 };
 
 use async_trait::async_trait;
-use chrono::Utc;
+use chrono::{Duration, Utc};
 use ironclaw_attachments::InboundAttachment;
 use ironclaw_auth::{
     AuthProductScope, AuthProviderId, CredentialAccountId, CredentialAccountProjection,
@@ -130,8 +130,9 @@ pub use types::{
     RebornSetOutboundPreferencesRequest, RebornSetupExtensionResponse, RebornSkillActionResponse,
     RebornSkillContentResponse, RebornSkillInfo, RebornSkillListResponse,
     RebornSkillSearchResponse, RebornSkillSourceKind, RebornSkillTrustLevel,
-    RebornStreamEventsRequest, RebornStreamEventsResponse, RebornSubmitTurnResponse,
-    RebornTimelineRequest, RebornTimelineResponse,
+    RebornGetThreadStateRequest, RebornGetThreadStateResponse, RebornStreamEventsRequest,
+    RebornStreamEventsResponse, RebornSubmitTurnResponse, RebornTimelineRequest,
+    RebornTimelineResponse, WebUiMintAccessSessionRequest, WebUiMintAccessSessionResponse,
 };
 
 type SkillActivationRecorder =
@@ -937,6 +938,21 @@ fn operator_config_diagnostic_command_plane_response(
     }
 }
 
+/// Port for minting tenant-scoped access sessions.
+///
+/// The standalone binary wires a `SignedTokenSessionStore`-backed
+/// implementation. Unwired handlers return `Unavailable`.
+#[async_trait]
+pub trait AccessSessionService: Send + Sync {
+    async fn create_session(
+        &self,
+        tenant_id: TenantId,
+        user_id: UserId,
+        agent_id: Option<AgentId>,
+        project_id: Option<ProjectId>,
+    ) -> Result<String, RebornServicesError>;
+}
+
 #[async_trait]
 pub trait RebornServicesApi: Send + Sync {
     async fn create_thread(
@@ -1579,6 +1595,30 @@ pub trait RebornServicesApi: Send + Sync {
         let _ = (caller, request);
         Err(RebornServicesError::service_unavailable(false))
     }
+
+    /// Return authoritative thread state for UI rebuild. Returns all
+    /// messages and summary artifacts for the given thread (unlike
+    /// `get_timeline` which is paginated).
+    async fn get_thread_state(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        request: RebornGetThreadStateRequest,
+    ) -> Result<RebornGetThreadStateResponse, RebornServicesError> {
+        let _ = (caller, request);
+        Err(RebornServicesError::service_unavailable(false))
+    }
+
+    /// Mint a tenant-scoped signed session token. Only available when
+    /// the host wires an `AccessSessionService`; otherwise returns
+    /// `Unavailable`.
+    async fn mint_access_session(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        request: WebUiMintAccessSessionRequest,
+    ) -> Result<WebUiMintAccessSessionResponse, RebornServicesError> {
+        let _ = (caller, request);
+        Err(RebornServicesError::service_unavailable(false))
+    }
 }
 
 /// Lands inbound attachment bytes into durable, agent-accessible storage and
@@ -1639,6 +1679,7 @@ pub struct RebornServices {
     skill_activation_clearer: Option<Arc<SkillActivationClearer>>,
     llm_config: Option<Arc<dyn LlmConfigService>>,
     thread_operation_locks: Arc<ThreadOperationLocks>,
+    access_session_service: Option<Arc<dyn AccessSessionService>>,
 }
 
 impl RebornServices {
@@ -1674,6 +1715,7 @@ impl RebornServices {
             skill_activation_clearer: None,
             llm_config: None,
             thread_operation_locks: Arc::new(StdMutex::new(HashMap::new())),
+            access_session_service: None,
         }
     }
 
@@ -1852,6 +1894,11 @@ impl RebornServices {
     {
         self.skill_activation_recorder = Some(Arc::new(recorder));
         self.skill_activation_clearer = Some(Arc::new(clearer));
+        self
+    }
+
+    pub fn with_access_session_service(mut self, service: Arc<dyn AccessSessionService>) -> Self {
+        self.access_session_service = Some(service);
         self
     }
 
@@ -3050,6 +3097,95 @@ impl RebornServicesApi for RebornServices {
             service_lifecycle: Some(service_lifecycle),
             diagnostics: Vec::new(),
         })
+    }
+
+    async fn get_thread_state(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        request: RebornGetThreadStateRequest,
+    ) -> Result<RebornGetThreadStateResponse, RebornServicesError> {
+        let thread_id = parse_thread_id_field("thread_id", request.thread_id)?;
+        let scope = caller.turn_scope(thread_id);
+        let thread_scope = thread_scope_from_turn_scope(&scope, Some(caller.user_id.clone()))?;
+        let history = match self
+            .thread_service
+            .list_thread_history(ThreadHistoryRequest {
+                scope: thread_scope,
+                thread_id: scope.thread_id.clone(),
+            })
+            .await
+        {
+            Ok(history) => history,
+            Err(
+                SessionThreadError::UnknownThread { .. }
+                | SessionThreadError::ThreadScopeMismatch { .. },
+            ) => {
+                return Err(RebornServicesError::from_status(
+                    RebornServicesErrorCode::NotFound,
+                    404,
+                    false,
+                ));
+            }
+            Err(err) => return Err(map_timeline_probe_error(err)),
+        };
+        Ok(RebornGetThreadStateResponse {
+            thread: history.thread,
+            messages: history.messages,
+            summary_artifacts: history.summary_artifacts,
+        })
+    }
+
+    async fn mint_access_session(
+        &self,
+        _caller: WebUiAuthenticatedCaller,
+        request: WebUiMintAccessSessionRequest,
+    ) -> Result<WebUiMintAccessSessionResponse, RebornServicesError> {
+        let Some(ref service) = self.access_session_service else {
+            return Err(RebornServicesError::service_unavailable(false));
+        };
+        let tenant_id = TenantId::new(request.tenant_id).map_err(|_err| {
+            RebornServicesError::from_status_kind(
+                RebornServicesErrorCode::InvalidRequest,
+                RebornServicesErrorKind::Validation,
+                400,
+                false,
+            )
+        })?;
+        let user_id = UserId::new("operator").map_err(|_| {
+            RebornServicesError::from_status_kind(
+                RebornServicesErrorCode::Internal,
+                RebornServicesErrorKind::Internal,
+                500,
+                false,
+            )
+        })?;
+        let agent_id = request
+            .agent_id
+            .map(|id| AgentId::new(id).map_err(|_| {
+                RebornServicesError::from_status_kind(
+                    RebornServicesErrorCode::InvalidRequest,
+                    RebornServicesErrorKind::Validation,
+                    400,
+                    false,
+                )
+            }))
+            .transpose()?;
+        let project_id = request
+            .project_id
+            .map(|id| ProjectId::new(id).map_err(|_| {
+                RebornServicesError::from_status_kind(
+                    RebornServicesErrorCode::InvalidRequest,
+                    RebornServicesErrorKind::Validation,
+                    400,
+                    false,
+                )
+            }))
+            .transpose()?;
+        let token = service
+            .create_session(tenant_id, user_id, agent_id, project_id)
+            .await?;
+        let expires_at = Utc::now() + Duration::hours(1);
+        Ok(WebUiMintAccessSessionResponse { token, expires_at })
     }
 
     async fn get_llm_config(

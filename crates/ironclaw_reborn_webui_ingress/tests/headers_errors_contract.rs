@@ -57,7 +57,10 @@ fn build_app_from(services: StubServices) -> (axum::Router, Arc<StubServices>) {
     let authenticator = Arc::new(
         EnvBearerAuthenticator::new(
             SecretString::from(ENV_TOKEN.to_string()),
+            TenantId::new(TENANT).expect("tenant"),
             UserId::new("operator").expect("user"),
+            Some(AgentId::new(AGENT).expect("agent")),
+            Some(ProjectId::new(PROJECT).expect("project")),
         )
         .expect("env bearer authenticator"),
     );
