@@ -430,6 +430,13 @@ pub struct RebornListAutomationsResponse {
     pub scheduler_enabled: bool,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RebornAutomationMutationResponse {
+    pub updated: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub automation: Option<RebornAutomationInfo>,
+}
+
 fn default_scheduler_enabled() -> bool {
     true
 }

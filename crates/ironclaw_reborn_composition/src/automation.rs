@@ -3,9 +3,10 @@ use std::{collections::HashMap, sync::Arc, time::Duration};
 use ironclaw_host_api::ThreadId;
 use ironclaw_product_workflow::{
     AutomationListRequest, AutomationProductFacade, ProductAgentBoundCaller, RebornAutomationInfo,
-    RebornAutomationRecentRunInfo, RebornAutomationRecentRunStatus, RebornAutomationRunStatus,
-    RebornAutomationSource, RebornAutomationState, RebornServicesError, RebornServicesErrorCode,
-    RebornServicesErrorKind, TriggerRunThreadScope,
+    RebornAutomationMutationResponse, RebornAutomationRecentRunInfo,
+    RebornAutomationRecentRunStatus, RebornAutomationRunStatus, RebornAutomationSource,
+    RebornAutomationState, RebornServicesError, RebornServicesErrorCode, RebornServicesErrorKind,
+    TriggerRunThreadScope,
 };
 use ironclaw_triggers::{
     TriggerError, TriggerId, TriggerRecord, TriggerRepository, TriggerRunHistoryStatus,
@@ -26,11 +27,10 @@ const AUTOMATION_BACKEND_TIMEOUT: Duration = Duration::from_secs(30);
 /// pipeline would be wrong by design. Both paths converge on the same scoping
 /// contract: tenant + creator_user + agent + project.
 ///
-/// ## Future panel mutations
-///
-/// Any panel mutation added here must append an audit `RuntimeEvent` before
-/// returning (precedent: `RebornRuntime::append_webui_loop_cancelled` in
-/// `runtime.rs`).
+/// Panel mutations stay caller-scoped through the same tenant + creator_user +
+/// agent + project repository contract as reads. Route descriptors classify
+/// those endpoints as user actions so host ingress audit policy remains the
+/// outer audit boundary.
 #[derive(Clone)]
 pub struct RebornAutomationProductFacade {
     trigger_repository: Arc<dyn TriggerRepository>,
@@ -156,6 +156,24 @@ impl AutomationProductFacade for RebornAutomationProductFacade {
             .collect())
     }
 
+    async fn pause_automation(
+        &self,
+        caller: ProductAgentBoundCaller,
+        automation_id: String,
+    ) -> Result<RebornAutomationMutationResponse, RebornServicesError> {
+        self.set_automation_state(caller, automation_id, TriggerState::Paused)
+            .await
+    }
+
+    async fn resume_automation(
+        &self,
+        caller: ProductAgentBoundCaller,
+        automation_id: String,
+    ) -> Result<RebornAutomationMutationResponse, RebornServicesError> {
+        self.set_automation_state(caller, automation_id, TriggerState::Scheduled)
+            .await
+    }
+
     async fn resolve_run_thread_scope(
         &self,
         caller: ProductAgentBoundCaller,
@@ -191,6 +209,37 @@ impl AutomationProductFacade for RebornAutomationProductFacade {
             project_id: trigger.project_id,
             creator_user_id: trigger.creator_user_id,
         }))
+    }
+}
+
+impl RebornAutomationProductFacade {
+    async fn set_automation_state(
+        &self,
+        caller: ProductAgentBoundCaller,
+        automation_id: String,
+        state: TriggerState,
+    ) -> Result<RebornAutomationMutationResponse, RebornServicesError> {
+        let trigger_id = parse_trigger_id(&automation_id)?;
+        let deadline = tokio::time::Instant::now() + self.backend_timeout;
+        let record = tokio::time::timeout_at(
+            deadline,
+            self.trigger_repository.set_scoped_trigger_state(
+                caller.tenant_id,
+                caller.user_id,
+                Some(caller.agent_id),
+                caller.project_id,
+                trigger_id,
+                state,
+            ),
+        )
+        .await
+        .map_err(|_| backend_timeout_error())?
+        .map_err(map_trigger_error)?;
+
+        Ok(RebornAutomationMutationResponse {
+            updated: record.is_some(),
+            automation: record.map(|record| automation_info_from_record(record, &[])),
+        })
     }
 }
 
@@ -328,6 +377,17 @@ fn map_recent_run(run: &TriggerRunRecord) -> Option<RebornAutomationRecentRunInf
         status,
         submitted_at: run.submitted_at,
         completed_at: run.completed_at,
+    })
+}
+
+fn parse_trigger_id(automation_id: &str) -> Result<TriggerId, RebornServicesError> {
+    TriggerId::parse(automation_id).map_err(|_| {
+        services_error(
+            RebornServicesErrorCode::InvalidRequest,
+            RebornServicesErrorKind::Validation,
+            400,
+            false,
+        )
     })
 }
 
