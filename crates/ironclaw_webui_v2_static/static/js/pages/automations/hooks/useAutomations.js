@@ -7,6 +7,7 @@ import {
   automationSummary,
   normalizeAutomations,
 } from "../lib/automations-presenters.js";
+import { nextAutomationsRefetchDelay } from "../lib/automations-refresh.js";
 
 const AUTOMATIONS_PAGE_LIMIT = 50;
 const AUTOMATION_RUNS_LIMIT = 25;
@@ -36,6 +37,18 @@ export function useAutomations(includeCompleted = false) {
     () => automationSummary(automations),
     [automations]
   );
+  const nextRefreshDelay = React.useMemo(
+    () => nextAutomationsRefetchDelay(automations),
+    [automations]
+  );
+
+  React.useEffect(() => {
+    if (nextRefreshDelay == null) return undefined;
+    const timer = setTimeout(() => {
+      query.refetch();
+    }, nextRefreshDelay);
+    return () => clearTimeout(timer);
+  }, [nextRefreshDelay, query.refetch]);
 
   // The scheduler (trigger poller) may be turned off, in which case listed
   // automations never fire. Treat an absent flag as enabled so we don't show a

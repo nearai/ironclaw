@@ -317,6 +317,10 @@ mod tests {
         assert!(page.contains("useOutboundDeliveryDefaults"));
         assert!(page.contains("AutomationsList"));
 
+        let automations_hook = asset_text("js/pages/automations/hooks/useAutomations.js");
+        assert!(automations_hook.contains("nextAutomationsRefetchDelay"));
+        assert!(automations_hook.contains("query.refetch()"));
+
         let list = asset_text("js/pages/automations/components/automations-list.js");
         assert!(list.contains("primary_status_label"));
         assert!(list.contains("primary_status_tone"));
