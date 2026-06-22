@@ -195,8 +195,60 @@ async fn skill_learned_bubble_delivers_when_sse_resumes_from_advanced_durable_cu
         .projection_cursor()
         .clone();
 
-    // 2. Post-run, ~seconds later, the skill-learning sink publishes the
-    //    learned-skill bubble onto the same thread's live stream.
+    // 2. A prior live reasoning update advances the live cursor on the same
+    //    still-open SSE stream. This uses the production milestone-sink caller,
+    //    not a projection helper.
+    let sink = services.with_live_progress_milestone_sink_for_publisher(
+        Arc::new(InMemoryLoopHostMilestoneSink::default()),
+        services.live_projection_publisher(user_id.clone()),
+    );
+    sink.publish_loop_milestone(LoopHostMilestone {
+        scope: scope.clone(),
+        actor: None,
+        turn_id: TurnId::new(),
+        run_id: TurnRunId::from_uuid(invocation_id.as_uuid()),
+        loop_driver_id: LoopDriverId::new("test_loop").unwrap(),
+        kind: LoopHostMilestoneKind::ModelReasoningDelta {
+            safe_delta: "checking whether this task taught a reusable workflow".to_string(),
+        },
+    })
+    .await
+    .unwrap();
+
+    // 3. The still-open SSE stream resumes from the advanced durable cursor and
+    //    receives the prior live reasoning item, advancing the live cursor.
+    let live_progress = services
+        .webui_event_stream()
+        .drain(ProjectionSubscriptionRequest {
+            actor: actor.clone(),
+            scope: scope.clone(),
+            after_cursor: Some(resume_cursor),
+        })
+        .await
+        .unwrap();
+    assert!(
+        live_progress.iter().any(|event| {
+            matches!(
+                event.payload(),
+                ProductOutboundPayload::ProjectionUpdate { state }
+                    if state.items.iter().any(|item| matches!(
+                        item,
+                        ProductProjectionItem::Thinking { body, .. }
+                            if body.contains("checking whether this task taught a reusable workflow")
+                    ))
+            )
+        }),
+        "live reasoning must deliver when SSE resumes from an advanced durable cursor: {live_progress:#?}"
+    );
+    let live_resume_cursor = live_progress
+        .last()
+        .expect("live reasoning event")
+        .projection_cursor()
+        .clone();
+
+    // 4. Post-run, ~seconds later, the skill-learning sink publishes through a
+    //    fresh publisher (with its own live sequence) and must still deliver
+    //    when the client resumes from the advanced live cursor.
     let publisher = services.live_projection_publisher(user_id.clone());
     publisher.publish_skill_learned(
         Some(&user_id),
@@ -206,13 +258,12 @@ async fn skill_learned_bubble_delivers_when_sse_resumes_from_advanced_durable_cu
         "Learned from the run; speeds up similar work next time.",
     );
 
-    // 3. The still-open SSE stream resumes from the advanced durable cursor.
     let resumed = services
         .webui_event_stream()
         .drain(ProjectionSubscriptionRequest {
             actor,
             scope,
-            after_cursor: Some(resume_cursor),
+            after_cursor: Some(live_resume_cursor),
         })
         .await
         .unwrap();
@@ -229,7 +280,7 @@ async fn skill_learned_bubble_delivers_when_sse_resumes_from_advanced_durable_cu
                     ))
             )
         }),
-        "learned-skill bubble must deliver when SSE resumes from an advanced durable cursor: {resumed:#?}"
+        "learned-skill bubble must deliver when SSE resumes from an advanced live cursor: {resumed:#?}"
     );
 }
 

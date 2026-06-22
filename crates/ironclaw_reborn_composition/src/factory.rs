@@ -472,10 +472,11 @@ pub(crate) struct RebornLocalRuntimeServices {
     /// modules wire the access-controlled service, never the substrate repo.
     pub(crate) project_service: Arc<dyn ProjectService>,
     pub(crate) outbound_preferences: Arc<dyn CommunicationPreferenceRepository>,
-    /// Global "auto-activate learned skills" master switch, shared by reference
-    /// between the skill activation selector (reads it per turn) and the WebUI
-    /// skills facade (toggles it). Defaults to `true`; a Settings write flips it
-    /// and the next turn's selection honors the new value without a restart.
+    /// Global default criteria-based skill auto-activation master switch,
+    /// shared by reference between the skill activation selector (reads it per
+    /// turn) and the WebUI skills facade (toggles it). Defaults to `true`; a
+    /// Settings write flips it and the next turn's selection honors the new
+    /// value without a restart.
     pub(crate) skill_auto_activate_learned: Arc<AtomicBool>,
     #[cfg(feature = "slack-v2-host-beta")]
     pub(crate) outbound_state: Arc<dyn OutboundStateStore>,

@@ -436,6 +436,9 @@ pub struct RebornRuntime {
     credential_refresh_worker_handle:
         Option<crate::credential_refresh_worker::CredentialRefreshWorkerRuntimeHandle>,
     trace_flush_worker: crate::trace_capture::TraceQueueFlushWorkerHandle,
+    #[cfg(feature = "root-llm-provider")]
+    skill_learning_extraction_tasks:
+        Option<Arc<crate::skill_learning::SkillLearningExtractionTasks>>,
     /// Late-binding slot shared with the poller's `PostSubmitHookWrappedSubmitter`.
     /// `set_trigger_post_submit_hook` fills this after `build_reborn_runtime` returns.
     /// `None` when the trigger poller is not enabled.
@@ -1748,6 +1751,10 @@ impl RebornRuntime {
                 .await;
         }
         self.trace_flush_worker.shutdown().await;
+        #[cfg(feature = "root-llm-provider")]
+        if let Some(skill_learning_extraction_tasks) = self.skill_learning_extraction_tasks {
+            skill_learning_extraction_tasks.shutdown().await;
+        }
         self.worker_cancel.cancel();
         if let Some(projection) = self.budget_event_projection {
             projection.shutdown().await;
@@ -2759,6 +2766,10 @@ pub async fn build_reborn_runtime(
     let mut turn_event_sinks: Vec<Arc<dyn ironclaw_turns::TurnEventSink>> =
         vec![trace_capture_sink];
     #[cfg(feature = "root-llm-provider")]
+    let mut skill_learning_extraction_tasks: Option<
+        Arc<crate::skill_learning::SkillLearningExtractionTasks>,
+    > = None;
+    #[cfg(feature = "root-llm-provider")]
     if let (Some((learning_provider, learning_model)), Some(local_runtime)) =
         (skill_learning_provider, local_runtime)
     {
@@ -2785,12 +2796,15 @@ pub async fn build_reborn_runtime(
         let skill_learned_notifier: Arc<dyn crate::skill_learning::SkillLearnedNotifier> = Arc::new(
             crate::skill_learning::LiveSkillLearnedNotifier::new(skill_learning_publisher),
         );
+        let extraction_tasks = Arc::new(crate::skill_learning::SkillLearningExtractionTasks::new());
+        skill_learning_extraction_tasks = Some(Arc::clone(&extraction_tasks));
         turn_event_sinks.push(Arc::new(
             crate::skill_learning::SkillLearningTurnEventSink::new(
                 Arc::clone(&thread_service),
                 inference,
                 skill_writer,
                 skill_learned_notifier,
+                extraction_tasks,
             ),
         ));
     }
@@ -3166,6 +3180,8 @@ pub async fn build_reborn_runtime(
         #[cfg(any(feature = "libsql", feature = "postgres"))]
         credential_refresh_worker_handle,
         trace_flush_worker,
+        #[cfg(feature = "root-llm-provider")]
+        skill_learning_extraction_tasks,
         #[cfg(feature = "slack-v2-host-beta")]
         post_submit_hook_slot: runtime_post_submit_hook_slot,
         #[cfg(any(test, feature = "test-support"))]

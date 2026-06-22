@@ -223,23 +223,37 @@ async fn skill_execution_adapter_prepares_filesystem_bundles_end_to_end() {
     .unwrap()
     .unwrap();
 
-    let activation = result
+    let policy_activations: Vec<_> = result
         .plan
         .activations()
         .iter()
-        .find(|activation| {
+        .filter(|activation| {
             activation.name == "policy-helper"
                 && activation.source == Some(RebornSkillSourceKind::User)
         })
-        .expect("explicit user skill activation should be present");
-    let bundle = result
+        .collect();
+    assert_eq!(
+        policy_activations.len(),
+        1,
+        "explicit user skill should activate exactly once"
+    );
+    // Runtime composition may add criteria-selected system skills; this guard is
+    // specifically about the explicit filesystem-backed user skill.
+    let policy_bundles: Vec<_> = result
         .plan
         .active_bundles()
         .iter()
-        .find(|bundle| {
+        .filter(|bundle| {
             bundle.source == RebornSkillSourceKind::User && bundle.skill_name == "policy-helper"
         })
-        .expect("explicit user skill bundle should be active");
+        .collect();
+    assert_eq!(
+        policy_bundles.len(),
+        1,
+        "explicit user skill bundle should be active exactly once"
+    );
+    let activation = policy_activations[0];
+    let bundle = policy_bundles[0];
     assert_eq!(bundle.skill_name, activation.name);
 
     let asset = runtime

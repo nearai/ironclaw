@@ -358,9 +358,9 @@ pub trait SkillsProductFacade: Send + Sync {
         Err(RebornServicesError::service_unavailable(false))
     }
 
-    /// Toggle the global "auto-activate learned skills" master switch. Disabling
-    /// leaves every learned skill invokable via an explicit `/name` mention but
-    /// turns off keyword/criteria auto-activation for all of them.
+    /// Toggle the global default criteria-based skill auto-activation master
+    /// switch. Disabling leaves skills invokable via an explicit `/name`
+    /// mention but turns off keyword/criteria auto-activation for all skills.
     async fn set_auto_activate_learned(
         &self,
         caller: WebUiAuthenticatedCaller,
@@ -1380,10 +1380,10 @@ pub trait RebornServicesApi: Send + Sync {
         Err(RebornServicesError::service_unavailable(false))
     }
 
-    /// Toggle the global "auto-activate learned skills" master switch (see
-    /// [`SkillsProductFacade::set_auto_activate_learned`]). Defaults to
-    /// unavailable so impls that do not surface skill management inherit a
-    /// fail-closed response.
+    /// Toggle the global default criteria-based skill auto-activation master
+    /// switch (see [`SkillsProductFacade::set_auto_activate_learned`]).
+    /// Defaults to unavailable so impls that do not surface skill management
+    /// inherit a fail-closed response.
     async fn set_auto_activate_learned(
         &self,
         caller: WebUiAuthenticatedCaller,

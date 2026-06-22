@@ -56,10 +56,11 @@ pub fn parse_skill_md(content: &str) -> Result<ParsedSkill, SkillParseError> {
 
 /// Return `content` with the top-level `auto_activate:` frontmatter flag set to
 /// `auto_activate`, replacing the line when present and inserting it just before
-/// the closing `---` when absent. Everything else (including the prompt body) is
-/// left byte-for-byte unchanged, so toggling a skill's automatic activation does
-/// not reformat its document. The result re-parses through [`parse_skill_md`]
-/// with the same `name`, so it is safe to feed to the skill-update path.
+/// the closing `---` when absent. The prompt body and other frontmatter fields
+/// are preserved semantically, while line endings are normalized to LF and a
+/// trailing newline is ensured as the document is reconstructed. The result
+/// re-parses through [`parse_skill_md`] with the same `name`, so it is safe to
+/// feed to the skill-update path.
 pub fn set_skill_auto_activate(content: &str, auto_activate: bool) -> String {
     let new_line = format!("auto_activate: {auto_activate}");
     let mut out = String::with_capacity(content.len() + new_line.len() + 2);

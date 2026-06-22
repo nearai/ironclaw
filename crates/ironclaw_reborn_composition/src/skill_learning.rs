@@ -1,7 +1,7 @@
 //! Skill learning: turn-end skill distillation for the Reborn runtime.
 //!
 //! Mirrors the trace-capture sink (`trace_capture.rs`): every successful
-//! terminal turn lifecycle event spawns a detached best-effort task that reads
+//! terminal turn lifecycle event spawns a supervised best-effort task that reads
 //! the just-finished run's transcript and, when the run is substantive enough,
 //! distills a reusable `SKILL.md` via the learning model, safety-scans it,
 //! installs it for the run's owner, and notifies the UI. The distillation
@@ -15,8 +15,9 @@
 //!
 //! Invariants (shared with `trace_capture.rs`):
 //! - Never block or fail the turn lifecycle path: the sink is subscribed
-//!   best-effort and all work happens on a spawned task whose errors are
-//!   logged at `debug!` only (`info!`/`warn!` corrupt the REPL).
+//!   best-effort and all work happens on a spawned task owned by the runtime
+//!   shutdown path; task errors are logged at `debug!` only (`info!`/`warn!`
+//!   corrupt the REPL).
 //! - Scope is derived from the EVENT (tenant + owner), never from a runtime
 //!   default — a wrong tenant writes a skill to a directory the WebUI and the
 //!   next run never read (see `docs/plans/2026-06-16-reborn-skill-evolution.md`).
@@ -57,13 +58,14 @@ impl TurnEventSink for CompositeTurnEventSink {
 #[cfg(feature = "root-llm-provider")]
 pub(crate) use learning::{
     LiveSkillLearnedNotifier, LlmSkillRefiner, PortSkillWriter, SkillLearnedNotifier,
-    SkillLearningInferenceAdapter, SkillLearningTurnEventSink, SkillRefiner, SkillWriter,
+    SkillLearningExtractionTasks, SkillLearningInferenceAdapter, SkillLearningTurnEventSink,
+    SkillRefiner, SkillWriter,
 };
 
 #[cfg(feature = "root-llm-provider")]
 mod learning {
     use std::collections::BTreeSet;
-    use std::sync::{Arc, LazyLock};
+    use std::sync::{Arc, LazyLock, Mutex};
 
     use async_trait::async_trait;
     use ironclaw_host_api::{InvocationId, ResourceScope, TenantId, ThreadId, UserId};
@@ -83,6 +85,7 @@ mod learning {
     use ironclaw_turns::{
         TurnError, TurnEventKind, TurnEventSink, TurnLifecycleEvent, TurnRunId, TurnScope,
     };
+    use tokio::task::JoinHandle;
 
     use crate::lifecycle::{RebornLocalSkillManagementError, RebornLocalSkillManagementPort};
     use crate::projection::LiveProjectionPublisher;
@@ -517,6 +520,7 @@ mod learning {
         inference: Arc<dyn SkillInferencePort>,
         skill_writer: Arc<dyn SkillWriter>,
         notifier: Arc<dyn SkillLearnedNotifier>,
+        extraction_tasks: Arc<SkillLearningExtractionTasks>,
     }
 
     impl SkillLearningTurnEventSink {
@@ -525,12 +529,67 @@ mod learning {
             inference: Arc<dyn SkillInferencePort>,
             skill_writer: Arc<dyn SkillWriter>,
             notifier: Arc<dyn SkillLearnedNotifier>,
+            extraction_tasks: Arc<SkillLearningExtractionTasks>,
         ) -> Self {
             Self {
                 thread_service,
                 inference,
                 skill_writer,
                 notifier,
+                extraction_tasks,
+            }
+        }
+    }
+
+    /// Runtime-owned handle set for post-turn extraction jobs. Jobs remain
+    /// fire-and-forget from the lifecycle publisher's perspective, but the
+    /// runtime keeps their handles so shutdown can stop model calls and skill
+    /// writes before dropping the services they depend on.
+    #[derive(Default)]
+    pub(crate) struct SkillLearningExtractionTasks {
+        handles: Mutex<Vec<JoinHandle<()>>>,
+    }
+
+    impl SkillLearningExtractionTasks {
+        pub(crate) fn new() -> Self {
+            Self::default()
+        }
+
+        fn spawn(&self, job: ExtractionJob) {
+            let handle = tokio::spawn(job.run());
+            let mut handles = match self.handles.lock() {
+                Ok(handles) => handles,
+                Err(poisoned) => poisoned.into_inner(),
+            };
+            handles.retain(|handle| !handle.is_finished());
+            handles.push(handle);
+        }
+
+        pub(crate) async fn shutdown(&self) {
+            let handles = {
+                let mut handles = match self.handles.lock() {
+                    Ok(handles) => handles,
+                    Err(poisoned) => poisoned.into_inner(),
+                };
+                std::mem::take(&mut *handles)
+            };
+            for handle in &handles {
+                handle.abort();
+            }
+            for handle in handles {
+                if let Err(error) = handle.await {
+                    if error.is_panic() {
+                        tracing::error!(
+                            %error,
+                            "skill-learning extraction task panicked during shutdown"
+                        );
+                    } else {
+                        tracing::debug!(
+                            %error,
+                            "skill-learning extraction task cancelled during shutdown"
+                        );
+                    }
+                }
             }
         }
     }
@@ -584,15 +643,16 @@ mod learning {
                 write_owner,
                 event_scope,
             };
-            tokio::spawn(job.run());
+            self.extraction_tasks.spawn(job);
             Ok(())
         }
     }
 
     /// The post-run extraction work, lifted out of [`SkillLearningTurnEventSink::publish`]
-    /// so it is a single owned future the sink can `tokio::spawn` AND a test can
-    /// drive to completion with `.await` (the spawn is fire-and-forget, so the
-    /// durable announce below is otherwise untestable through its caller).
+    /// so it is a single owned future the sink can supervise AND a test can
+    /// drive to completion with `.await` (the lifecycle publish path does not
+    /// await it, so the durable announce below is otherwise untestable through
+    /// its caller).
     struct ExtractionJob {
         thread_service: Arc<dyn SessionThreadService>,
         inference: Arc<dyn SkillInferencePort>,
@@ -978,6 +1038,7 @@ mod learning {
                 Arc::new(StubInference),
                 Arc::new(StubWriter),
                 Arc::new(StubNotifier),
+                Arc::new(SkillLearningExtractionTasks::new()),
             );
             // A failed run is the self-improvement loop's concern, not extraction.
             sink.publish(event(TurnEventKind::Failed, Some("alice")))
