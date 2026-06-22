@@ -5,6 +5,7 @@ Function-scoped: fresh browser context and page per test.
 """
 
 import asyncio
+from collections.abc import AsyncIterator
 import json
 import os
 import signal
@@ -60,7 +61,11 @@ _WASM_CHANNELS_TMPDIR = tempfile.TemporaryDirectory(prefix="ironclaw-e2e-wasm-ch
 
 EMULATE_NPM_PACKAGE = "emulate@0.7.0"
 EMULATE_GOOGLE_SEED = ROOT / "tests/e2e/fixtures/emulate/google_gmail.yaml"
+EMULATE_SLACK_SEED = ROOT / "tests/e2e/fixtures/emulate/slack.yaml"
+EMULATE_GITHUB_SEED = ROOT / "tests/e2e/fixtures/emulate/github.yaml"
 EMULATE_GOOGLE_READY_TOKEN = "mock-refreshed-access-token"
+EMULATE_SLACK_READY_TOKEN = "emulate-slack-token"
+EMULATE_GITHUB_READY_TOKEN = "emulate-github-token"
 EMULATE_STARTUP_ATTEMPTS = 120
 EMULATE_STARTUP_POLL_SECONDS = 0.5
 
@@ -410,11 +415,20 @@ async def mock_llm_server():
             proc.kill()
 
 
-@pytest.fixture(scope="session")
-async def emulate_google_server():
-    """Start the pinned Emulate Google service for hermetic Gmail API tests."""
+async def _run_emulate_server(
+    *,
+    service: str,
+    seed_path: Path,
+    ready_method: str,
+    ready_path: str,
+    ready_headers: dict[str, str],
+    ready_json: dict[str, Any] | None = None,
+) -> AsyncIterator[dict[str, str]]:
+    """Start a pinned Emulate service and wait for a seeded endpoint."""
     if shutil.which("npx") is None:
-        _emulate_unavailable("npx is required to run the Emulate Google E2E fixture")
+        _emulate_unavailable(
+            f"npx is required to run the Emulate {service} E2E fixture"
+        )
 
     port = _find_free_port()
     url = f"http://127.0.0.1:{port}"
@@ -428,11 +442,11 @@ async def emulate_google_server():
         "--yes",
         EMULATE_NPM_PACKAGE,
         "--service",
-        "google",
+        service,
         "--port",
         str(port),
         "--seed",
-        str(EMULATE_GOOGLE_SEED),
+        str(seed_path),
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
         env=env,
@@ -445,11 +459,11 @@ async def emulate_google_server():
                 if proc.returncode is not None:
                     break
                 try:
-                    response = await client.get(
-                        f"{url}/gmail/v1/users/me/messages",
-                        headers={
-                            "Authorization": f"Bearer {EMULATE_GOOGLE_READY_TOKEN}",
-                        },
+                    response = await client.request(
+                        ready_method,
+                        f"{url}{ready_path}",
+                        headers=ready_headers,
+                        json=ready_json,
                         timeout=2,
                     )
                     if response.status_code == 200:
@@ -467,7 +481,7 @@ async def emulate_google_server():
         except asyncio.TimeoutError:
             pass
         _emulate_unavailable(
-            "Emulate Google failed to start. "
+            f"Emulate {service} failed to start. "
             f"Last probe error: {last_error}\n"
             f"stdout:\n{stdout.decode('utf-8', errors='replace')[:2000]}\n"
             f"stderr:\n{stderr.decode('utf-8', errors='replace')[:2000]}"
@@ -477,6 +491,51 @@ async def emulate_google_server():
             await _stop_process(proc, sig=signal.SIGINT, timeout=5)
             if proc.returncode is None:
                 await _stop_process(proc, timeout=2)
+
+
+@pytest.fixture(scope="session")
+async def emulate_google_server():
+    """Start Emulate Google with seeded Gmail, Calendar, and Drive data."""
+    async for server in _run_emulate_server(
+        service="google",
+        seed_path=EMULATE_GOOGLE_SEED,
+        ready_method="GET",
+        ready_path="/gmail/v1/users/me/messages",
+        ready_headers={
+            "Authorization": f"Bearer {EMULATE_GOOGLE_READY_TOKEN}",
+        },
+    ):
+        yield server
+
+
+@pytest.fixture(scope="session")
+async def emulate_slack_server():
+    """Start Emulate Slack with a seeded workspace and bot token."""
+    async for server in _run_emulate_server(
+        service="slack",
+        seed_path=EMULATE_SLACK_SEED,
+        ready_method="POST",
+        ready_path="/api/auth.test",
+        ready_headers={
+            "Authorization": f"Bearer {EMULATE_SLACK_READY_TOKEN}",
+        },
+    ):
+        yield server
+
+
+@pytest.fixture(scope="session")
+async def emulate_github_server():
+    """Start Emulate GitHub with a seeded user, org, and repository."""
+    async for server in _run_emulate_server(
+        service="github",
+        seed_path=EMULATE_GITHUB_SEED,
+        ready_method="GET",
+        ready_path="/user",
+        ready_headers={
+            "Authorization": f"Bearer {EMULATE_GITHUB_READY_TOKEN}",
+        },
+    ):
+        yield server
 
 
 @pytest.fixture(autouse=True)

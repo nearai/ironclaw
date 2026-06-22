@@ -55,6 +55,7 @@ HEADED=1 pytest scenarios/
 | `test_tool_approval.py` | Approval card appears, buttons disable on approve/deny, parameters toggle via `page.evaluate("showApproval(...)")`; the waiting-approval regression uses a real HTTP tool call |
 | `test_extension_uninstall_cleanup.py` | Real install/setup/remove coverage for WASM tools, WASM channels, OAuth-backed shared Google tools, and MCP servers; verifies uninstall deletes stored secrets from the libSQL `secrets` table while preserving shared credentials until the last referencing extension is removed |
 | `test_oauth_refresh.py` | Hosted Gmail OAuth regression: complete setup via `/oauth/callback`, expire the stored access token in libSQL, trigger a real `gmail` tool call through `/api/chat/send`, verify refresh goes through the mock `/oauth/refresh` proxy without forwarding `client_secret`, and assert the Gmail tool result contains seeded Emulate data |
+| `test_emulate_reborn_provider_contracts.py` | Provider-contract coverage for Reborn-backed Emulate fixtures: Google Gmail/Calendar/Drive seeded reads, Slack auth/conversation/post/read delivery, and GitHub user/repo/issue mutation |
 | `test_dom_resource_limits.py` | DOM pruning at MAX_DOM_MESSAGES cap, no setInterval timer leaks across SSE reconnect cycles, streaming message preservation during pruning |
 
 ## `helpers.py`
@@ -77,7 +78,9 @@ All fixtures are defined in `tests/e2e/conftest.py`. Running `pytest scenarios/`
 |---------|-------------|
 | `ironclaw_binary` | Checks `target/debug/ironclaw`; if absent, runs `cargo build --no-default-features --features libsql` (timeout 600s). |
 | `mock_llm_server` | Starts `mock_llm.py --port 0`, reads the assigned port from stdout, waits for `/v1/models` to return 200. Yields the base URL. |
-| `emulate_google_server` | Starts `npx --yes emulate@0.7.0 --service google` with `fixtures/emulate/google_gmail.yaml`, waits for the Gmail messages endpoint to serve the seeded account, and yields the base URL for HTTP rewrite maps. Local runs skip if `npx` is unavailable; CI fails. |
+| `emulate_google_server` | Starts `npx --yes emulate@0.7.0 --service google` with `fixtures/emulate/google_gmail.yaml`, waits for the Gmail messages endpoint to serve the seeded account, and yields the base URL for HTTP rewrite maps. The seed covers Gmail, Calendar, and Drive. Local runs skip if `npx` is unavailable; CI fails. |
+| `emulate_slack_server` | Starts `npx --yes emulate@0.7.0 --service slack` with `fixtures/emulate/slack.yaml`, waits for seeded token auth to pass `auth.test`, and yields the base URL for Slack provider-contract assertions. |
+| `emulate_github_server` | Starts `npx --yes emulate@0.7.0 --service github` with `fixtures/emulate/github.yaml`, waits for `/user` to return the seeded actor, and yields the base URL for GitHub provider-contract assertions. |
 | `ironclaw_server` | Starts the ironclaw binary with a minimal env (see below), waits for `/api/health` (timeout 60s). Yields the base URL. On teardown sends **SIGINT** (not SIGTERM) so the tokio ctrl_c handler triggers a graceful shutdown and LLVM coverage data is flushed. |
 | `hosted_oauth_refresh_server` | Starts a second ironclaw instance with a dedicated libSQL DB and `GOOGLE_OAUTH_CLIENT_ID=hosted-google-client-id`, while still pointing `IRONCLAW_OAUTH_EXCHANGE_URL` at `mock_llm.py`. Yields a dict with `base_url`, `db_path`, and `mock_llm_url` for hosted refresh scenarios that do not need provider API calls. |
 | `hosted_google_oauth_refresh_server` | Starts the same hosted OAuth fixture shape, but sets `IRONCLAW_TEST_HTTP_REWRITE_MAP` so Gmail WASM HTTP calls to `gmail.googleapis.com` hit `emulate_google_server`. Yields `emulate_google_url` in addition to the hosted OAuth server fields. |
@@ -93,6 +96,14 @@ All fixtures are defined in `tests/e2e/conftest.py`. Running `pytest scenarios/`
 | `page` | Creates a fresh browser **context** (viewport 1280×720) and **page** per test, navigates to `/?token=e2e-test-token`, and waits for `#auth-screen` to become hidden before yielding. Closes the context after each test. |
 
 The function-scoped `page` fixture means **each test gets a clean browser context** (cookies, storage, etc.) but reuses the same ironclaw server and browser process. Tests that need the server URL directly (e.g., `test_auth_rejection`) accept `ironclaw_server` as an additional parameter.
+
+### Emulate provider coverage
+
+Use Emulate for provider APIs that map directly to Reborn features already in
+this repo: Google Gmail/Calendar/Drive, Slack delivery, and GitHub repo/issue
+workflows. Google Docs, Sheets, and Slides are first-party extension assets,
+but Emulate 0.7.0 does not provide those APIs directly; do not claim those are
+covered unless a separate fixture exercises the actual document API behavior.
 
 ### Environment passed to ironclaw in tests
 

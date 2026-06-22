@@ -58,6 +58,7 @@ Then Playwright drives a headless Chromium browser against the gateway, making D
 | `test_html_injection.py` | HTML injection security |
 | `test_extensions.py` | Extensions tab: install, remove, configure, OAuth, auth card, activate |
 | `test_oauth_refresh.py` | Hosted Gmail/MCP OAuth refresh; the Gmail path refreshes through the proxy and reads seeded Gmail data from Emulate |
+| `test_emulate_reborn_provider_contracts.py` | Emulate provider contracts for Reborn-backed Google Gmail/Calendar/Drive, Slack delivery, and GitHub repo/issue surfaces |
 
 ## Adding new scenarios
 
@@ -65,6 +66,20 @@ Then Playwright drives a headless Chromium browser against the gateway, making D
 2. Use the `page` fixture for a fresh browser page
 3. Use selectors from `helpers.py` (update `SEL` dict if new elements are needed)
 4. Keep tests deterministic -- use the mock LLM, not real providers
+
+## Emulate-backed provider fixtures
+
+Emulate coverage is intentionally limited to provider APIs that match Reborn
+features already present in the codebase:
+
+- Google: Gmail, Calendar, and Drive.
+- Slack: auth, conversations, and `chat.postMessage` delivery.
+- GitHub: authenticated user, repository metadata, and issue creation/listing.
+
+Google Docs, Sheets, and Slides exist as first-party extension assets, but
+Emulate 0.7.0 does not expose those API families directly. Cover those with
+Drive metadata where useful, or a separate fake/provider fixture if the
+document API behavior itself is the contract under test.
 
 ## Live Persona Failure Notes
 

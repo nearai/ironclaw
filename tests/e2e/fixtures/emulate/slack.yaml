@@ -1,0 +1,24 @@
+slack:
+  team:
+    name: Reborn E2E Workspace
+    domain: reborn-e2e
+  users:
+    - name: reborn-user
+      real_name: Reborn E2E User
+      email: reborn-user@example.com
+      presence: active
+  channels:
+    - name: reborn-alerts
+      topic: Reborn alert delivery
+      purpose: Delivery target for Reborn E2E Slack assertions.
+  bots:
+    - name: reborn-bot
+  tokens:
+    - token: emulate-slack-token
+      user: reborn-user
+      scopes:
+        - chat:write
+        - channels:read
+        - channels:history
+        - users:read
+  strict_scopes: true
