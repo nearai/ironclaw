@@ -14,15 +14,23 @@ use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use ironclaw_host_api::ThreadId;
+#[cfg(feature = "github-issue-workflow-beta")]
+use ironclaw_host_api::{AgentId, CapabilityId, ProjectId, TenantId, UserId};
+#[cfg(feature = "github-issue-workflow-beta")]
+use ironclaw_loop_support::{
+    CapabilityAllowSet, CapabilityResolveError, CapabilitySurfaceProfileResolver,
+    SubagentDefinitionResolver, SubagentKindId,
+};
 use ironclaw_loop_support::{
     HostManagedModelError, HostManagedModelErrorKind, HostManagedModelGateway,
     HostManagedModelRequest, HostManagedModelResponse,
 };
 #[cfg(feature = "github-issue-workflow-beta")]
-use ironclaw_loop_support::{SubagentDefinitionResolver, SubagentKindId};
+use ironclaw_turns::run_profile::LoopRunContext;
 #[cfg(feature = "github-issue-workflow-beta")]
 use ironclaw_turns::{
-    CapabilitySurfaceProfileId, RunProfileRequest, RunProfileResolutionRequest, RunProfileResolver,
+    CapabilitySurfaceProfileId, RunOriginAdapter, RunProfileRequest, RunProfileResolutionRequest,
+    RunProfileResolver, TurnActor, TurnId, TurnOwner, TurnScope, TurnSurfaceType,
 };
 use ironclaw_turns::{
     TurnRunId, TurnStatus,
@@ -105,16 +113,7 @@ pub fn github_issue_workflow_allowed_capabilities_for_profile_for_test(
         crate::github_issue_workflow::allowed_capabilities_for_stage_profile_id(&profile_id)
             .ok()
             .flatten()?;
-    match allow_set {
-        ironclaw_loop_support::CapabilityAllowSet::All => None,
-        ironclaw_loop_support::CapabilityAllowSet::Allowlist(capabilities) => Some(
-            capabilities
-                .into_iter()
-                .map(|capability| capability.as_str().to_string())
-                .collect(),
-        ),
-        _ => None,
-    }
+    capability_allow_set_to_strings(allow_set)
 }
 
 /// Render the workflow-restricted `builtin.spawn_subagent` parameters schema.
@@ -132,6 +131,107 @@ pub fn github_issue_workflow_subagent_definition_profile_for_test(kind: &str) ->
         .ok()
         .flatten()
         .map(|definition| definition.requested_run_profile.as_str().to_string())
+}
+
+/// Resolve the workflow-inherited child subagent capability surface for a
+/// concrete flavor. This mirrors the base resolver path that the production
+/// subagent surface intersection consumes before flavor material is applied.
+#[cfg(feature = "github-issue-workflow-beta")]
+pub fn github_issue_workflow_subagent_allowed_capabilities_for_test(
+    kind: &str,
+) -> Option<std::collections::BTreeSet<String>> {
+    let kind = SubagentKindId::new(kind).ok()?;
+    let definition_resolver =
+        crate::github_issue_workflow::GithubIssueWorkflowSubagentDefinitionResolver;
+    let definition = futures::executor::block_on(definition_resolver.resolve_kind(&kind))
+        .ok()
+        .flatten()?;
+    let run_profile_resolver =
+        crate::github_issue_workflow::planned_run_profile_resolver_with_stage_profiles()
+            .expect("workflow stage planned run-profile resolver builds");
+    let resolved = futures::executor::block_on(
+        run_profile_resolver.resolve_run_profile(
+            RunProfileResolutionRequest::interactive_default()
+                .with_requested_run_profile(definition.requested_run_profile),
+        ),
+    )
+    .expect("workflow subagent profile resolves");
+    let owner = UserId::new("workflow-subagent-owner").expect("owner user id");
+    let scope = TurnScope::new_with_owner(
+        TenantId::new("workflow-subagent-tenant").expect("tenant id"),
+        Some(AgentId::new("workflow-subagent-agent").expect("agent id")),
+        Some(ProjectId::new("workflow-subagent-project").expect("project id")),
+        ThreadId::new("workflow-subagent-thread").expect("thread id"),
+        Some(owner.clone()),
+    );
+    let product_context = ironclaw_product_context::resolve_inbound(
+        ironclaw_product_context::InboundClassification::TrustedOther,
+        RunOriginAdapter::new("github_issue_workflow").expect("workflow adapter"),
+        Some(TurnSurfaceType::Direct),
+        TurnOwner::Personal {
+            user: owner.clone(),
+        },
+    );
+    let context = LoopRunContext::new(scope, TurnId::new(), TurnRunId::new(), resolved)
+        .with_actor(TurnActor::new(owner))
+        .with_product_context(product_context);
+    let resolver = crate::github_issue_workflow::GithubIssueWorkflowCapabilitySurfaceResolver::new(
+        Arc::new(AllowAllCapabilitySurfaceResolverForTest),
+    );
+    let allow_set = futures::executor::block_on(resolver.resolve(&context)).ok()?;
+    capability_allow_set_to_strings(allow_set)
+}
+
+/// Return the workflow-enabled composition built-in package capability ids.
+#[cfg(feature = "github-issue-workflow-beta")]
+pub fn github_issue_workflow_builtin_package_capabilities_for_test()
+-> std::collections::BTreeSet<String> {
+    crate::factory::builtin_extension_registry()
+        .expect("workflow-enabled built-in extension registry builds")
+        .capabilities()
+        .map(|capability| capability.id.as_str().to_string())
+        .collect()
+}
+
+/// Return the default host-runtime built-in package capability ids.
+#[cfg(feature = "github-issue-workflow-beta")]
+pub fn github_issue_workflow_default_builtin_package_capabilities_for_test()
+-> std::collections::BTreeSet<String> {
+    ironclaw_host_runtime::builtin_first_party_package()
+        .expect("default built-in package builds")
+        .capabilities
+        .into_iter()
+        .map(|capability| capability.id.as_str().to_string())
+        .collect()
+}
+
+/// Return the workflow-enabled composition first-party handler ids that are
+/// relevant to the workflow result tool contract.
+#[cfg(feature = "github-issue-workflow-beta")]
+pub fn github_issue_workflow_first_party_handler_capabilities_for_test()
+-> std::collections::BTreeSet<String> {
+    let mut registry = ironclaw_host_runtime::builtin_first_party_handlers(Arc::new(
+        ironclaw_triggers::InMemoryTriggerRepository::default(),
+    ))
+    .expect("default built-in handlers build");
+    crate::github_issue_workflow::insert_workflow_stage_result_handler(
+        &mut registry,
+        Arc::new(ironclaw_triggers::InMemoryTriggerRepository::default()),
+    )
+    .expect("workflow stage result handler installs");
+    workflow_result_handler_ids(&registry)
+}
+
+/// Return the default host-runtime first-party handler ids that are relevant to
+/// the workflow result tool contract.
+#[cfg(feature = "github-issue-workflow-beta")]
+pub fn github_issue_workflow_default_first_party_handler_capabilities_for_test()
+-> std::collections::BTreeSet<String> {
+    let registry = ironclaw_host_runtime::builtin_first_party_handlers(Arc::new(
+        ironclaw_triggers::InMemoryTriggerRepository::default(),
+    ))
+    .expect("default built-in handlers build");
+    workflow_result_handler_ids(&registry)
 }
 
 /// Resolve every workflow stage profile through the composition planned
@@ -156,6 +256,50 @@ pub fn github_issue_workflow_resolved_stage_profile_ids_for_test()
             (resolved.profile_id.as_str() == profile.profile_id).then_some(profile.profile_id)
         })
         .collect()
+}
+
+#[cfg(feature = "github-issue-workflow-beta")]
+fn capability_allow_set_to_strings(
+    allow_set: CapabilityAllowSet,
+) -> Option<std::collections::BTreeSet<String>> {
+    match allow_set {
+        CapabilityAllowSet::All => None,
+        CapabilityAllowSet::Allowlist(capabilities) => Some(
+            capabilities
+                .into_iter()
+                .map(|capability| capability.as_str().to_string())
+                .collect(),
+        ),
+        _ => None,
+    }
+}
+
+#[cfg(feature = "github-issue-workflow-beta")]
+fn workflow_result_handler_ids(
+    registry: &ironclaw_host_runtime::FirstPartyCapabilityRegistry,
+) -> std::collections::BTreeSet<String> {
+    let capability_id =
+        CapabilityId::new(ironclaw_host_runtime::WORKFLOW_REPORT_STAGE_RESULT_CAPABILITY_ID)
+            .expect("workflow result capability id");
+    [capability_id]
+        .into_iter()
+        .filter(|capability_id| registry.contains_handler(capability_id))
+        .map(|capability_id| capability_id.as_str().to_string())
+        .collect()
+}
+
+#[cfg(feature = "github-issue-workflow-beta")]
+struct AllowAllCapabilitySurfaceResolverForTest;
+
+#[cfg(feature = "github-issue-workflow-beta")]
+#[async_trait]
+impl CapabilitySurfaceProfileResolver for AllowAllCapabilitySurfaceResolverForTest {
+    async fn resolve(
+        &self,
+        _run_context: &LoopRunContext,
+    ) -> Result<CapabilityAllowSet, CapabilityResolveError> {
+        Ok(CapabilityAllowSet::All)
+    }
 }
 
 /// Build a terminal/no-text assistant reply for CLI and product-surface tests.

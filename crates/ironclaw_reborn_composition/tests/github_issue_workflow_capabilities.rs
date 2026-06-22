@@ -6,10 +6,15 @@ mod github_issue_workflow_capabilities {
     use ironclaw_reborn_composition::test_support::{
         GithubIssueWorkflowCapabilityProfileForTest,
         github_issue_workflow_allowed_capabilities_for_profile_for_test,
+        github_issue_workflow_builtin_package_capabilities_for_test,
         github_issue_workflow_capability_profiles_for_test,
+        github_issue_workflow_default_builtin_package_capabilities_for_test,
         github_issue_workflow_default_capability_profile_for_test,
+        github_issue_workflow_default_first_party_handler_capabilities_for_test,
+        github_issue_workflow_first_party_handler_capabilities_for_test,
         github_issue_workflow_resolved_stage_profile_ids_for_test,
         github_issue_workflow_spawn_subagent_schema_for_test,
+        github_issue_workflow_subagent_allowed_capabilities_for_test,
         github_issue_workflow_subagent_definition_profile_for_test,
     };
 
@@ -139,6 +144,61 @@ mod github_issue_workflow_capabilities {
         assert!(
             !enum_values.contains("coder"),
             "workflow stage spawn_subagent schema must omit coder"
+        );
+    }
+
+    #[test]
+    fn workflow_planner_subagent_surface_is_read_only_without_http() {
+        let capabilities = github_issue_workflow_subagent_allowed_capabilities_for_test("planner")
+            .expect("planner workflow subagent surface resolves");
+
+        assert_eq!(
+            capabilities,
+            BTreeSet::from([
+                "builtin.glob".to_string(),
+                "builtin.grep".to_string(),
+                "builtin.list_dir".to_string(),
+                "builtin.read_file".to_string(),
+            ]),
+            "workflow planner subagents must resolve to a read/search-only surface"
+        );
+
+        for forbidden in [
+            "builtin.http",
+            "builtin.http.save",
+            "builtin.write_file",
+            "builtin.apply_patch",
+            "builtin.shell",
+            "builtin.spawn_subagent",
+            RESULT_SINK,
+        ] {
+            assert!(
+                !capabilities.contains(forbidden),
+                "workflow planner subagent surface must not expose {forbidden}"
+            );
+        }
+    }
+
+    #[test]
+    fn workflow_enabled_composition_installs_result_sink_package_and_handler() {
+        assert!(
+            github_issue_workflow_builtin_package_capabilities_for_test().contains(RESULT_SINK),
+            "workflow-enabled composition package must declare the stage result tool"
+        );
+        assert!(
+            github_issue_workflow_first_party_handler_capabilities_for_test().contains(RESULT_SINK),
+            "workflow-enabled composition handlers must include the stage result handler"
+        );
+
+        assert!(
+            !github_issue_workflow_default_builtin_package_capabilities_for_test()
+                .contains(RESULT_SINK),
+            "default built-in package must not declare the workflow-only result tool"
+        );
+        assert!(
+            !github_issue_workflow_default_first_party_handler_capabilities_for_test()
+                .contains(RESULT_SINK),
+            "default built-in handlers must not register the workflow-only result handler"
         );
     }
 

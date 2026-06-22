@@ -7,6 +7,12 @@ use ironclaw_github_issue_workflow::{
     SubmitStageTurnRequest, WorkflowActorScope,
 };
 use ironclaw_host_api::{AgentId, CapabilityId, ThreadId, UserId};
+use ironclaw_host_runtime::{
+    FirstPartyCapabilityError, FirstPartyCapabilityHandler, FirstPartyCapabilityRegistry,
+    FirstPartyCapabilityRequest, FirstPartyCapabilityResult, ReportWorkflowStageResultInput,
+    WorkflowStageResultAck, WorkflowStageResultSink, WorkflowStageResultSinkError,
+    builtin_first_party_handlers_with_workflow_stage_result_sink,
+};
 use ironclaw_loop_support::{
     CapabilityAllowSet, CapabilityResolveError, CapabilitySurfaceProfileResolver,
     SpawnSubagentFlavorDescriptor, SubagentDefinition, SubagentDefinitionResolver, SubagentKindId,
@@ -81,6 +87,13 @@ const PR_SYNTHESIS_CAPABILITIES: &[&str] = &[
     SHELL_CAPABILITY_ID,
     SPAWN_SUBAGENT_CAPABILITY_ID,
     RESULT_SINK_CAPABILITY_ID,
+];
+
+const WORKFLOW_SUBAGENT_CAPABILITIES: &[&str] = &[
+    READ_FILE_CAPABILITY_ID,
+    LIST_DIR_CAPABILITY_ID,
+    GREP_CAPABILITY_ID,
+    GLOB_CAPABILITY_ID,
 ];
 
 const NON_WORKFLOW_DEFAULT_CAPABILITIES: &[&str] = &[
@@ -192,6 +205,31 @@ pub(crate) fn allowed_capabilities_for_stage_profile_id(
         .transpose()
 }
 
+pub(crate) fn allowed_capabilities_for_workflow_subagent_profile_id(
+    profile_id: &CapabilitySurfaceProfileId,
+) -> Result<Option<CapabilityAllowSet>, CapabilityResolveError> {
+    if profile_id.as_str()
+        != ironclaw_reborn::planned_driver_factory::SUBAGENT_CAPABILITY_SURFACE_PROFILE_ID
+    {
+        return Ok(None);
+    }
+    capability_allow_set_for_ids(WORKFLOW_SUBAGENT_CAPABILITIES).map(Some)
+}
+
+fn capability_allow_set_for_ids(
+    capability_ids: &[&str],
+) -> Result<CapabilityAllowSet, CapabilityResolveError> {
+    let ids = capability_ids.iter().map(|capability| {
+        CapabilityId::new(*capability).map_err(|reason| {
+            CapabilityResolveError::internal(format!(
+                "invalid static GitHub issue workflow capability id {capability}: {reason}"
+            ))
+        })
+    });
+    ids.collect::<Result<Vec<_>, _>>()
+        .map(CapabilityAllowSet::allowlist)
+}
+
 pub(crate) struct GithubIssueWorkflowCapabilitySurfaceResolver {
     inner: Arc<dyn CapabilitySurfaceProfileResolver>,
 }
@@ -208,6 +246,15 @@ impl CapabilitySurfaceProfileResolver for GithubIssueWorkflowCapabilitySurfaceRe
         &self,
         run_context: &LoopRunContext,
     ) -> Result<CapabilityAllowSet, CapabilityResolveError> {
+        if is_github_issue_workflow_context(run_context)
+            && let Some(allow_set) = allowed_capabilities_for_workflow_subagent_profile_id(
+                &run_context
+                    .resolved_run_profile
+                    .capability_surface_profile_id,
+            )?
+        {
+            return Ok(allow_set);
+        }
         if let Some(allow_set) = allowed_capabilities_for_stage_profile_id(
             &run_context
                 .resolved_run_profile
@@ -217,6 +264,14 @@ impl CapabilitySurfaceProfileResolver for GithubIssueWorkflowCapabilitySurfaceRe
         }
         self.inner.resolve(run_context).await
     }
+}
+
+fn is_github_issue_workflow_context(run_context: &LoopRunContext) -> bool {
+    run_context
+        .product_context
+        .as_ref()
+        .and_then(|context| context.adapter.as_ref())
+        .is_some_and(|adapter| adapter.as_ref() == WORKFLOW_ADAPTER_ID)
 }
 
 pub(crate) fn workflow_subagent_flavor_catalog() -> Vec<SpawnSubagentFlavorDescriptor> {
@@ -317,6 +372,55 @@ impl SubagentDefinitionResolver for GithubIssueWorkflowSubagentDefinitionResolve
             allow_nesting: false,
             requested_run_profile,
         }))
+    }
+}
+
+pub(crate) fn insert_workflow_stage_result_handler(
+    registry: &mut FirstPartyCapabilityRegistry,
+    trigger_repository: Arc<dyn ironclaw_triggers::TriggerRepository>,
+) -> Result<(), ironclaw_host_api::HostApiError> {
+    let capability_id = CapabilityId::new(RESULT_SINK_CAPABILITY_ID)?;
+    let workflow_registry = builtin_first_party_handlers_with_workflow_stage_result_sink(
+        trigger_repository,
+        Arc::new(UnavailableWorkflowStageResultSink),
+    )?;
+    let handler = workflow_registry.get(&capability_id).ok_or_else(|| {
+        ironclaw_host_api::HostApiError::InvariantViolation {
+            reason: format!(
+                "workflow stage result helper did not register {RESULT_SINK_CAPABILITY_ID}"
+            ),
+        }
+    })?;
+    registry.insert_handler(
+        capability_id,
+        Arc::new(DelegatingWorkflowStageResultHandler { inner: handler }),
+    );
+    Ok(())
+}
+
+struct DelegatingWorkflowStageResultHandler {
+    inner: Arc<dyn FirstPartyCapabilityHandler>,
+}
+
+#[async_trait]
+impl FirstPartyCapabilityHandler for DelegatingWorkflowStageResultHandler {
+    async fn dispatch(
+        &self,
+        request: FirstPartyCapabilityRequest,
+    ) -> Result<FirstPartyCapabilityResult, FirstPartyCapabilityError> {
+        self.inner.dispatch(request).await
+    }
+}
+
+struct UnavailableWorkflowStageResultSink;
+
+#[async_trait]
+impl WorkflowStageResultSink for UnavailableWorkflowStageResultSink {
+    async fn report_stage_result(
+        &self,
+        _input: ReportWorkflowStageResultInput,
+    ) -> Result<WorkflowStageResultAck, WorkflowStageResultSinkError> {
+        Err(WorkflowStageResultSinkError::Unavailable)
     }
 }
 

@@ -30,7 +30,8 @@ use ironclaw_events::{DurableAuditLog, DurableEventLog};
 #[cfg(not(feature = "libsql"))]
 use ironclaw_events::{InMemoryDurableAuditLog, InMemoryDurableEventLog};
 use ironclaw_extensions::{
-    ExtensionInstallationStore, ExtensionLifecycleService, ExtensionRegistry,
+    ExtensionError, ExtensionInstallationStore, ExtensionLifecycleService, ExtensionPackage,
+    ExtensionRegistry,
 };
 #[cfg(not(feature = "libsql"))]
 use ironclaw_filesystem::InMemoryBackend;
@@ -52,6 +53,8 @@ use ironclaw_host_api::{
 };
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 use ironclaw_host_api::{HostApiError, MountAlias, MountGrant};
+#[cfg(feature = "github-issue-workflow-beta")]
+use ironclaw_host_runtime::builtin_first_party_package_with_workflow_stage_result;
 use ironclaw_host_runtime::{
     CapabilitySurfaceVersion, FirstPartyCapabilityRegistry, HostRuntimeHttpEgressPort,
     HostRuntimeServices, LocalHostProcessPort, ProductAuthProviderRuntimePorts, TriggerCreateHook,
@@ -2565,24 +2568,7 @@ pub(crate) fn builtin_extension_registry() -> Result<ExtensionRegistry, RebornBu
     let mut registry = ExtensionRegistry::new();
     registry
         .insert(
-            builtin_first_party_package().map_err(|error| RebornBuildError::InvalidConfig {
-                reason: format!("built-in first-party package is invalid: {error}"),
-            })?,
-        )
-        .map_err(|error| RebornBuildError::InvalidConfig {
-            reason: format!("built-in first-party registry is invalid: {error}"),
-        })?;
-    Ok(registry)
-}
-
-#[cfg(any(feature = "libsql", feature = "postgres"))]
-fn production_builtin_extension_registry(
-    process_backend: ProcessBackendKind,
-) -> Result<ExtensionRegistry, RebornBuildError> {
-    let mut registry = ExtensionRegistry::new();
-    registry
-        .insert(
-            builtin_first_party_package_for_process_backend(process_backend).map_err(|error| {
+            builtin_first_party_package_for_composition().map_err(|error| {
                 RebornBuildError::InvalidConfig {
                     reason: format!("built-in first-party package is invalid: {error}"),
                 }
@@ -2594,14 +2580,110 @@ fn production_builtin_extension_registry(
     Ok(registry)
 }
 
+fn builtin_first_party_package_for_composition() -> Result<ExtensionPackage, ExtensionError> {
+    let package = builtin_first_party_package()?;
+    #[cfg(feature = "github-issue-workflow-beta")]
+    {
+        workflow_stage_result_package(package)
+    }
+    #[cfg(not(feature = "github-issue-workflow-beta"))]
+    {
+        Ok(package)
+    }
+}
+
+#[cfg(any(feature = "libsql", feature = "postgres"))]
+fn builtin_first_party_package_for_process_backend_composition(
+    process_backend: ProcessBackendKind,
+) -> Result<ExtensionPackage, ExtensionError> {
+    let package = builtin_first_party_package_for_process_backend(process_backend)?;
+    #[cfg(feature = "github-issue-workflow-beta")]
+    {
+        workflow_stage_result_package(package)
+    }
+    #[cfg(not(feature = "github-issue-workflow-beta"))]
+    {
+        Ok(package)
+    }
+}
+
+#[cfg(feature = "github-issue-workflow-beta")]
+fn workflow_stage_result_package(
+    mut package: ExtensionPackage,
+) -> Result<ExtensionPackage, ExtensionError> {
+    let workflow_package = builtin_first_party_package_with_workflow_stage_result()?;
+    let capability_id = ironclaw_host_runtime::WORKFLOW_REPORT_STAGE_RESULT_CAPABILITY_ID;
+
+    if package
+        .capabilities
+        .iter()
+        .any(|candidate| candidate.id.as_str() == capability_id)
+    {
+        return Ok(package);
+    }
+
+    let descriptor = workflow_package
+        .capabilities
+        .iter()
+        .find(|candidate| candidate.id.as_str() == capability_id)
+        .cloned()
+        .ok_or_else(|| ExtensionError::InvalidManifest {
+            reason: format!("workflow result package is missing descriptor {capability_id}"),
+        })?;
+    let manifest = workflow_package
+        .manifest
+        .capabilities
+        .iter()
+        .find(|candidate| candidate.id.as_str() == capability_id)
+        .cloned()
+        .ok_or_else(|| ExtensionError::InvalidManifest {
+            reason: format!("workflow result package is missing manifest {capability_id}"),
+        })?;
+
+    package.capabilities.push(descriptor);
+    package.manifest.capabilities.push(manifest);
+    Ok(package)
+}
+
+#[cfg(any(feature = "libsql", feature = "postgres"))]
+fn production_builtin_extension_registry(
+    process_backend: ProcessBackendKind,
+) -> Result<ExtensionRegistry, RebornBuildError> {
+    let mut registry = ExtensionRegistry::new();
+    registry
+        .insert(
+            builtin_first_party_package_for_process_backend_composition(process_backend).map_err(
+                |error| RebornBuildError::InvalidConfig {
+                    reason: format!("built-in first-party package is invalid: {error}"),
+                },
+            )?,
+        )
+        .map_err(|error| RebornBuildError::InvalidConfig {
+            reason: format!("built-in first-party registry is invalid: {error}"),
+        })?;
+    Ok(registry)
+}
+
 fn builtin_first_party_registry_with_trigger_create_hook(
     trigger_repository: Arc<dyn TriggerRepository>,
     trigger_create_hook: Arc<dyn TriggerCreateHook>,
 ) -> Result<FirstPartyCapabilityRegistry, RebornBuildError> {
-    builtin_first_party_handlers_with_trigger_create_hook(trigger_repository, trigger_create_hook)
-        .map_err(|error| RebornBuildError::InvalidConfig {
-            reason: format!("built-in first-party handlers are invalid: {error}"),
-        })
+    let mut registry = builtin_first_party_handlers_with_trigger_create_hook(
+        Arc::clone(&trigger_repository),
+        trigger_create_hook,
+    )
+    .map_err(|error| RebornBuildError::InvalidConfig {
+        reason: format!("built-in first-party handlers are invalid: {error}"),
+    })?;
+    #[cfg(feature = "github-issue-workflow-beta")]
+    crate::github_issue_workflow::insert_workflow_stage_result_handler(
+        &mut registry,
+        trigger_repository,
+    )
+    .map_err(|error| RebornBuildError::InvalidConfig {
+        reason: format!("workflow stage result handler is invalid: {error}"),
+    })?;
+    Ok(registry)
 }
 
 #[cfg(any(feature = "libsql", feature = "postgres"))]
@@ -2610,14 +2692,23 @@ fn production_first_party_registry_with_trigger_create_hook(
     trigger_create_hook: Arc<dyn TriggerCreateHook>,
     process_backend: ProcessBackendKind,
 ) -> Result<FirstPartyCapabilityRegistry, RebornBuildError> {
-    builtin_first_party_handlers_with_trigger_create_hook_for_process_backend(
-        trigger_repository,
+    let mut registry = builtin_first_party_handlers_with_trigger_create_hook_for_process_backend(
+        Arc::clone(&trigger_repository),
         trigger_create_hook,
         process_backend,
     )
     .map_err(|error| RebornBuildError::InvalidConfig {
         reason: format!("built-in first-party handlers are invalid: {error}"),
-    })
+    })?;
+    #[cfg(feature = "github-issue-workflow-beta")]
+    crate::github_issue_workflow::insert_workflow_stage_result_handler(
+        &mut registry,
+        trigger_repository,
+    )
+    .map_err(|error| RebornBuildError::InvalidConfig {
+        reason: format!("workflow stage result handler is invalid: {error}"),
+    })?;
+    Ok(registry)
 }
 
 fn local_dev_builtin_extension_registry() -> Result<ExtensionRegistry, RebornBuildError> {
