@@ -58,7 +58,7 @@ Then Playwright drives a headless Chromium browser against the gateway, making D
 | `test_html_injection.py` | HTML injection security |
 | `test_extensions.py` | Extensions tab: install, remove, configure, OAuth, auth card, activate |
 | `test_oauth_refresh.py` | Hosted Gmail/MCP OAuth refresh; the Gmail path refreshes through the proxy and reads seeded Gmail data from Emulate |
-| `test_emulate_reborn_provider_contracts.py` | Emulate provider contracts for Reborn-backed Google Gmail/Calendar/Drive, Slack delivery, and GitHub repo/issue surfaces |
+| `test_emulate_reborn_provider_contracts.py` | Emulate provider contracts for Reborn-backed Google Gmail/Calendar/Drive reads and writes, Slack channel/DM delivery, and GitHub release/issue mutation |
 
 ## Adding new scenarios
 
@@ -72,14 +72,29 @@ Then Playwright drives a headless Chromium browser against the gateway, making D
 Emulate coverage is intentionally limited to provider APIs that match Reborn
 features already present in the codebase:
 
-- Google: Gmail, Calendar, and Drive.
-- Slack: auth, conversations, and `chat.postMessage` delivery.
-- GitHub: authenticated user, repository metadata, and issue creation/listing.
+- Google: Gmail, Calendar, and Drive seeded reads plus Gmail send, Calendar
+  event create/delete, and Drive upload/readback.
+- Slack: auth, conversations, channel/thread/DM delivery, and readback.
+- GitHub: authenticated user, repository metadata, release create/latest, and
+  issue creation/listing.
 
 Google Docs, Sheets, and Slides exist as first-party extension assets, but
 Emulate 0.7.0 does not expose those API families directly. Cover those with
 Drive metadata where useful, or a separate fake/provider fixture if the
 document API behavior itself is the contract under test.
+
+### Manual QA mapping
+
+The Emulate provider contracts map to the manual QA sheet only where Emulate
+can represent the backing provider API. Fully emulatable rows covered here:
+2A-2C, 3A/3D, 4A-4C/4E provider outputs, 5A-5B, 6A, 7A, and 8A/8D Slack
+delivery. Partially emulatable rows covered here: 2D-2F use Calendar/Drive/Gmail
+but not native Google Docs or live news; 4D uses GitHub release APIs and Slack
+delivery but not the model-authored routine; 5C-5D use Drive text plus Slack DM
+but not Google Docs; 6C-6E cover Gmail inputs and Drive-style write/readback but
+not Google Sheets; 7C-7E cover Slack inputs/delivery but not Google Sheets; 8B-8C
+need a separate fake HN/search endpoint. Telegram and Twitter/X rows 1A-1C are
+not covered by Emulate.
 
 ## Live Persona Failure Notes
 

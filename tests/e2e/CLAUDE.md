@@ -55,7 +55,7 @@ HEADED=1 pytest scenarios/
 | `test_tool_approval.py` | Approval card appears, buttons disable on approve/deny, parameters toggle via `page.evaluate("showApproval(...)")`; the waiting-approval regression uses a real HTTP tool call |
 | `test_extension_uninstall_cleanup.py` | Real install/setup/remove coverage for WASM tools, WASM channels, OAuth-backed shared Google tools, and MCP servers; verifies uninstall deletes stored secrets from the libSQL `secrets` table while preserving shared credentials until the last referencing extension is removed |
 | `test_oauth_refresh.py` | Hosted Gmail OAuth regression: complete setup via `/oauth/callback`, expire the stored access token in libSQL, trigger a real `gmail` tool call through `/api/chat/send`, verify refresh goes through the mock `/oauth/refresh` proxy without forwarding `client_secret`, and assert the Gmail tool result contains seeded Emulate data |
-| `test_emulate_reborn_provider_contracts.py` | Provider-contract coverage for Reborn-backed Emulate fixtures: Google Gmail/Calendar/Drive seeded reads, Slack auth/conversation/post/read delivery, and GitHub user/repo/issue mutation |
+| `test_emulate_reborn_provider_contracts.py` | Provider-contract coverage for Reborn-backed Emulate fixtures: Google Gmail/Calendar/Drive seeded reads and writes, Slack auth/conversation/channel/thread/DM delivery, and GitHub user/repo/release/issue mutation |
 | `test_dom_resource_limits.py` | DOM pruning at MAX_DOM_MESSAGES cap, no setInterval timer leaks across SSE reconnect cycles, streaming message preservation during pruning |
 
 ## `helpers.py`
@@ -100,10 +100,17 @@ The function-scoped `page` fixture means **each test gets a clean browser contex
 ### Emulate provider coverage
 
 Use Emulate for provider APIs that map directly to Reborn features already in
-this repo: Google Gmail/Calendar/Drive, Slack delivery, and GitHub repo/issue
-workflows. Google Docs, Sheets, and Slides are first-party extension assets,
-but Emulate 0.7.0 does not provide those APIs directly; do not claim those are
-covered unless a separate fixture exercises the actual document API behavior.
+this repo: Google Gmail/Calendar/Drive, Slack delivery, and GitHub repo/release
+or issue workflows. The current provider contract covers seeded reads plus
+stateful writes for Gmail send, Calendar event create/delete, Drive
+upload/readback, Slack channel/thread/DM delivery, GitHub release creation, and
+GitHub issue creation.
+
+Google Docs, Sheets, and Slides are first-party extension assets, but Emulate
+0.7.0 does not provide those APIs directly; do not claim those are covered
+unless a separate fixture exercises the actual document API behavior. The manual
+QA rows that mention Google Docs, Google Sheets, Telegram, Twitter/X, or HN/web
+search are therefore partial unless paired with a separate fake/provider fixture.
 
 ### Environment passed to ironclaw in tests
 
