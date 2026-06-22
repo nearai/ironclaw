@@ -42,6 +42,8 @@ const EN_SCHEDULE = {
   "automations.runStatus.error": "Error",
   "automations.runStatus.running": "Running",
   "automations.runStatus.unknown": "Unknown",
+  "automations.status.running": "Running",
+  "automations.status.needsReview": "Needs review",
   "automations.date.unknown": "Unknown",
   "automations.date.notScheduled": "Not scheduled",
   "automations.date.noRuns": "No runs yet",
@@ -385,6 +387,8 @@ test("normalizeAutomations presents bounded recent run history", () => {
   assert.match(automations[0].last_run_label, /Jun 4/);
   assert.equal(automations[0].last_status_label, "Error");
   assert.equal(automations[0].last_status_tone, "danger");
+  assert.equal(automations[0].primary_status_label, "Running");
+  assert.equal(automations[0].primary_status_tone, "info");
   // Post-acceptance statuses (running/ok/error) must produce a chat_path.
   assert.equal(automations[0].recent_runs[0].chat_path, "/chat/thread-running");
   assert.equal(automations[0].recent_runs[1].chat_path, "/chat/thread-error");
@@ -404,6 +408,44 @@ test("normalizeAutomations presents bounded recent run history", () => {
   assert.deepEqual(
     filterAutomations(automations, "failures").map((automation) => automation.automation_id),
     ["daily"],
+  );
+});
+
+test("normalizeAutomations keeps paused primary status even with a running recent run", () => {
+  const automations = normalizeAutomations({
+    automations: [
+      {
+        automation_id: "paused-with-run",
+        name: "Paused with run",
+        source: { type: "schedule", cron: "* * * * *" },
+        state: "paused",
+        next_run_at: "2026-06-06T16:00:00Z",
+        recent_runs: [
+          {
+            status: "running",
+            fired_at: "2026-06-05T16:00:00Z",
+            submitted_at: "2026-06-05T16:00:01Z",
+            thread_id: "thread-running",
+            run_id: "run-running",
+          },
+        ],
+      },
+    ],
+  });
+
+  assert.equal(automations[0].state_label, "Paused");
+  assert.equal(automations[0].state_tone, "warning");
+  assert.equal(automations[0].has_running_run, true);
+  assert.equal(automations[0].current_run.run_id, "run-running");
+  assert.equal(automations[0].primary_status_label, "Paused");
+  assert.equal(automations[0].primary_status_tone, "warning");
+  assert.deepEqual(
+    filterAutomations(automations, "paused").map((automation) => automation.automation_id),
+    ["paused-with-run"],
+  );
+  assert.deepEqual(
+    filterAutomations(automations, "running").map((automation) => automation.automation_id),
+    ["paused-with-run"],
   );
 });
 

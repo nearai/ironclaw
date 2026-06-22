@@ -159,16 +159,8 @@ export function AutomationsList({
                             </td>
                             <td className="px-5 py-4 align-top">
                               <${StatusPill}
-                                tone=${automation.has_running_run
-                                  ? "info"
-                                  : automation.has_failed_runs
-                                    ? "danger"
-                                    : automation.state_tone}
-                                label=${automation.has_running_run
-                                  ? t("automations.status.running")
-                                  : automation.has_failed_runs
-                                    ? t("automations.status.needsReview")
-                                    : automation.state_label}
+                                tone=${automation.primary_status_tone}
+                                label=${automation.primary_status_label}
                               />
                             </td>
                           </tr>

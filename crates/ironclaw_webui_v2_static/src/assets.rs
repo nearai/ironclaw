@@ -317,10 +317,16 @@ mod tests {
         assert!(page.contains("useOutboundDeliveryDefaults"));
         assert!(page.contains("AutomationsList"));
 
+        let list = asset_text("js/pages/automations/components/automations-list.js");
+        assert!(list.contains("primary_status_label"));
+        assert!(list.contains("primary_status_tone"));
+
         let detail_panel = asset_text("js/pages/automations/components/automation-detail-panel.js");
         assert!(detail_panel.contains("onPauseAutomation"));
         assert!(detail_panel.contains("onResumeAutomation"));
         assert!(detail_panel.contains("automation.state !== \"completed\""));
+        assert!(detail_panel.contains("primary_status_label"));
+        assert!(detail_panel.contains("primary_status_tone"));
 
         let app_bundle = asset_text("dist/app.js");
         let app_bundle_contains_encoded_automation_route = |suffix: &str| {

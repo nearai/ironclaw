@@ -82,10 +82,8 @@ export function AutomationDetailPanel({
           </div>
           <div className="flex shrink-0 items-center gap-2">
             <${StatusPill}
-              tone=${automation.has_running_run ? "info" : automation.state_tone}
-              label=${automation.has_running_run
-                ? t("automations.status.running")
-                : automation.state_label}
+              tone=${automation.primary_status_tone}
+              label=${automation.primary_status_label}
             />
             ${(canPause || canResume) &&
             html`
