@@ -2,7 +2,7 @@ use serde_json::Value as JsonValue;
 
 mod placeholder_stripping;
 
-pub(crate) use placeholder_stripping::strip_unset_optional_fields;
+pub(crate) use placeholder_stripping::{PlaceholderStrippingMode, strip_unset_optional_fields};
 
 /// Policy for shaping tool schemas at the provider boundary.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

@@ -2,6 +2,18 @@ use serde_json::Value as JsonValue;
 
 use crate::provider::{ToolCall, ToolDefinition};
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum PlaceholderStrippingMode {
+    NullOnly,
+    NullAndEmptyStrings,
+}
+
+impl PlaceholderStrippingMode {
+    fn strips_empty_strings(self) -> bool {
+        matches!(self, Self::NullAndEmptyStrings)
+    }
+}
+
 /// Strip "unset optional" placeholder values that the strict-mode tool-schema
 /// transform induces, from each tool call's arguments.
 ///
@@ -11,22 +23,14 @@ use crate::provider::{ToolCall, ToolDefinition};
 /// the optionals they aren't using with a placeholder: `null` for most, `""`
 /// for some (e.g. gpt-5.2-codex). Validating those against the tool's original
 /// schema would reject them, so this removes them before loop-side validation.
-///
-/// `strip_empty_strings` should be `true` only for the codex family, which fills
-/// unset optionals with `""`; other strict providers send `null`, so passing
-/// `false` preserves a deliberately-empty string they may have sent.
 pub(crate) fn strip_unset_optional_fields(
     tool_calls: &mut [ToolCall],
     tools: &[ToolDefinition],
-    strip_empty_strings: bool,
+    mode: PlaceholderStrippingMode,
 ) {
     for call in tool_calls.iter_mut() {
         if let Some(tool) = tools.iter().find(|tool| tool.name == call.name) {
-            strip_unset_optionals_in_value(
-                &mut call.arguments,
-                &tool.parameters,
-                strip_empty_strings,
-            );
+            strip_unset_optionals_in_value(&mut call.arguments, &tool.parameters, mode);
         }
     }
 }
@@ -34,7 +38,7 @@ pub(crate) fn strip_unset_optional_fields(
 fn strip_unset_optionals_in_value(
     value: &mut JsonValue,
     schema: &JsonValue,
-    strip_empty_strings: bool,
+    mode: PlaceholderStrippingMode,
 ) {
     match value {
         JsonValue::Object(map) => {
@@ -43,8 +47,9 @@ fn strip_unset_optionals_in_value(
             let to_remove = map
                 .iter()
                 .filter(|(key, val)| {
-                    !required.contains(key.as_str())
-                        && is_unset_placeholder(val, strip_empty_strings)
+                    properties.contains_key(key.as_str())
+                        && !required.contains(key.as_str())
+                        && is_unset_placeholder(val, mode)
                 })
                 .map(|(key, _)| key.clone())
                 .collect::<Vec<_>>();
@@ -53,14 +58,14 @@ fn strip_unset_optionals_in_value(
             }
             for (key, val) in map.iter_mut() {
                 if let Some(prop_schema) = properties.get(key.as_str()) {
-                    strip_unset_optionals_in_value(val, prop_schema, strip_empty_strings);
+                    strip_unset_optionals_in_value(val, prop_schema, mode);
                 }
             }
         }
         JsonValue::Array(items) => {
             if let Some(item_schema) = schema.get("items") {
                 for item in items.iter_mut() {
-                    strip_unset_optionals_in_value(item, item_schema, strip_empty_strings);
+                    strip_unset_optionals_in_value(item, item_schema, mode);
                 }
             }
         }
@@ -138,10 +143,10 @@ fn collect_placeholder_property_schemas<'a>(
     }
 }
 
-fn is_unset_placeholder(value: &JsonValue, strip_empty_strings: bool) -> bool {
+fn is_unset_placeholder(value: &JsonValue, mode: PlaceholderStrippingMode) -> bool {
     match value {
         JsonValue::Null => true,
-        JsonValue::String(string) => strip_empty_strings && string.is_empty(),
+        JsonValue::String(string) => mode.strips_empty_strings() && string.is_empty(),
         _ => false,
     }
 }
@@ -161,7 +166,11 @@ mod tests {
             }
         });
         let mut value = serde_json::json!({ "operation": "now", "format": null, "timezone": "" });
-        strip_unset_optionals_in_value(&mut value, &schema, true);
+        strip_unset_optionals_in_value(
+            &mut value,
+            &schema,
+            PlaceholderStrippingMode::NullAndEmptyStrings,
+        );
         assert_eq!(value, serde_json::json!({ "operation": "now" }));
     }
 
@@ -173,7 +182,11 @@ mod tests {
             "required": ["id"]
         });
         let mut value = serde_json::json!({ "id": null, "note": null });
-        strip_unset_optionals_in_value(&mut value, &schema, true);
+        strip_unset_optionals_in_value(
+            &mut value,
+            &schema,
+            PlaceholderStrippingMode::NullAndEmptyStrings,
+        );
         assert_eq!(value, serde_json::json!({ "id": null }));
     }
 
@@ -189,7 +202,11 @@ mod tests {
             "additionalProperties": false
         });
         let mut value = serde_json::json!({ "url": "https://example.com/SKILL.md", "content": "" });
-        strip_unset_optionals_in_value(&mut value, &schema, true);
+        strip_unset_optionals_in_value(
+            &mut value,
+            &schema,
+            PlaceholderStrippingMode::NullAndEmptyStrings,
+        );
         assert_eq!(
             value,
             serde_json::json!({ "url": "https://example.com/SKILL.md" })
@@ -210,7 +227,7 @@ mod tests {
                 "expression": null
             }
         });
-        strip_unset_optionals_in_value(&mut once_call, &schema, false);
+        strip_unset_optionals_in_value(&mut once_call, &schema, PlaceholderStrippingMode::NullOnly);
         assert_eq!(
             once_call,
             serde_json::json!({
@@ -234,7 +251,7 @@ mod tests {
                 "at": null
             }
         });
-        strip_unset_optionals_in_value(&mut cron_call, &schema, false);
+        strip_unset_optionals_in_value(&mut cron_call, &schema, PlaceholderStrippingMode::NullOnly);
         assert_eq!(
             cron_call,
             serde_json::json!({
@@ -263,7 +280,11 @@ mod tests {
             }
         });
 
-        strip_unset_optionals_in_value(&mut missing_shared_field, &schema, false);
+        strip_unset_optionals_in_value(
+            &mut missing_shared_field,
+            &schema,
+            PlaceholderStrippingMode::NullOnly,
+        );
 
         assert_eq!(
             missing_shared_field,
@@ -296,7 +317,11 @@ mod tests {
         });
         let mut value =
             serde_json::json!({ "items": [ { "a": "x", "b": null }, { "a": "y", "b": "" } ] });
-        strip_unset_optionals_in_value(&mut value, &schema, true);
+        strip_unset_optionals_in_value(
+            &mut value,
+            &schema,
+            PlaceholderStrippingMode::NullAndEmptyStrings,
+        );
         assert_eq!(
             value,
             serde_json::json!({ "items": [ { "a": "x" }, { "a": "y" } ] })
@@ -310,12 +335,35 @@ mod tests {
             "properties": { "prefix": { "type": "string" } }
         });
         let mut keep = serde_json::json!({ "prefix": "" });
-        strip_unset_optionals_in_value(&mut keep, &schema, false);
+        strip_unset_optionals_in_value(&mut keep, &schema, PlaceholderStrippingMode::NullOnly);
         assert_eq!(keep, serde_json::json!({ "prefix": "" }));
 
         let mut drop_null = serde_json::json!({ "prefix": null });
-        strip_unset_optionals_in_value(&mut drop_null, &schema, false);
+        strip_unset_optionals_in_value(&mut drop_null, &schema, PlaceholderStrippingMode::NullOnly);
         assert_eq!(drop_null, serde_json::json!({}));
+    }
+
+    #[test]
+    fn preserves_untyped_free_form_object_members() {
+        let schema = serde_json::json!({ "type": "object" });
+        let mut value = serde_json::json!({
+            "free_form_null": null,
+            "free_form_empty": ""
+        });
+
+        strip_unset_optionals_in_value(
+            &mut value,
+            &schema,
+            PlaceholderStrippingMode::NullAndEmptyStrings,
+        );
+
+        assert_eq!(
+            value,
+            serde_json::json!({
+                "free_form_null": null,
+                "free_form_empty": ""
+            })
+        );
     }
 
     #[test]
@@ -336,7 +384,11 @@ mod tests {
             signature: None,
             arguments_parse_error: None,
         }];
-        strip_unset_optional_fields(&mut calls, &tools, true);
+        strip_unset_optional_fields(
+            &mut calls,
+            &tools,
+            PlaceholderStrippingMode::NullAndEmptyStrings,
+        );
         assert_eq!(
             calls[0].arguments,
             serde_json::json!({ "operation": "now" })

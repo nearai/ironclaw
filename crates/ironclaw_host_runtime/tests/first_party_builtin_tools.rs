@@ -710,7 +710,7 @@ async fn builtin_trigger_create_rejects_schedule_with_no_future_slot_before_pers
     );
     let context = execution_context([TRIGGER_CREATE_CAPABILITY_ID]);
 
-    let error = invoke_with_context(
+    let failure = invoke_failure_with_context(
         &runtime,
         TRIGGER_CREATE_CAPABILITY_ID,
         json!({
@@ -720,10 +720,14 @@ async fn builtin_trigger_create_rejects_schedule_with_no_future_slot_before_pers
         }),
         context.clone(),
     )
-    .await
-    .unwrap_err();
-
-    assert_eq!(error, RuntimeFailureKind::InvalidInput);
+    .await;
+    assert_failure_input_issue_expected(
+        &failure,
+        "schedule.expression",
+        DispatchInputIssueCode::InvalidValue,
+        "cron expression with at least one future fire time",
+        "schedule with no future slot",
+    );
     assert!(
         repository
             .list_triggers(context.resource_scope.tenant_id)
@@ -797,27 +801,49 @@ async fn builtin_trigger_create_rejects_blank_name_or_prompt_before_persistence(
     let runtime = runtime_with_trigger_repository(repository.clone());
     let context = execution_context([TRIGGER_CREATE_CAPABILITY_ID]);
 
-    for input in [
-        json!({
-            "name": " ",
-            "prompt": "Run work",
-            "schedule": { "kind": "cron", "expression": "0 8 * * *", "timezone": "UTC" }
-        }),
-        json!({
-            "name": "Blank prompt",
-            "prompt": " ",
-            "schedule": { "kind": "cron", "expression": "0 8 * * *", "timezone": "UTC" }
-        }),
+    for (case_name, input, issue_path) in [
+        (
+            "blank name",
+            json!({
+                "name": " ",
+                "prompt": "Run work",
+                "schedule": { "kind": "cron", "expression": "0 8 * * *", "timezone": "UTC" }
+            }),
+            "name",
+        ),
+        (
+            "blank prompt",
+            json!({
+                "name": "Blank prompt",
+                "prompt": " ",
+                "schedule": { "kind": "cron", "expression": "0 8 * * *", "timezone": "UTC" }
+            }),
+            "prompt",
+        ),
     ] {
-        let error = invoke_with_context(
+        let failure = invoke_failure_with_context(
             &runtime,
             TRIGGER_CREATE_CAPABILITY_ID,
             input,
             context.clone(),
         )
-        .await
-        .unwrap_err();
-        assert_eq!(error, RuntimeFailureKind::InvalidInput);
+        .await;
+        assert_eq!(
+            failure.kind,
+            RuntimeFailureKind::InvalidInput,
+            "{case_name}"
+        );
+        assert_failure_input_issue_expected(
+            &failure,
+            issue_path,
+            DispatchInputIssueCode::InvalidValue,
+            match issue_path {
+                "name" => "non-empty trigger name",
+                "prompt" => "non-empty trigger prompt",
+                _ => unreachable!(),
+            },
+            case_name,
+        );
     }
 
     assert!(
@@ -835,27 +861,47 @@ async fn builtin_trigger_create_rejects_oversized_name_or_prompt_before_persiste
     let runtime = runtime_with_trigger_repository(repository.clone());
     let context = execution_context([TRIGGER_CREATE_CAPABILITY_ID]);
 
-    for input in [
-        json!({
-            "name": "x".repeat(MAX_TRIGGER_NAME_BYTES + 1),
-            "prompt": "Run work",
-            "schedule": { "kind": "cron", "expression": "0 8 * * *", "timezone": "UTC" }
-        }),
-        json!({
-            "name": "Oversized prompt",
-            "prompt": "x".repeat(MAX_TRIGGER_PROMPT_BYTES + 1),
-            "schedule": { "kind": "cron", "expression": "0 8 * * *", "timezone": "UTC" }
-        }),
+    for (case_name, input, issue_path, expected) in [
+        (
+            "oversized name",
+            json!({
+                "name": "x".repeat(MAX_TRIGGER_NAME_BYTES + 1),
+                "prompt": "Run work",
+                "schedule": { "kind": "cron", "expression": "0 8 * * *", "timezone": "UTC" }
+            }),
+            "name",
+            "trigger name within the allowed byte limit",
+        ),
+        (
+            "oversized prompt",
+            json!({
+                "name": "Oversized prompt",
+                "prompt": "x".repeat(MAX_TRIGGER_PROMPT_BYTES + 1),
+                "schedule": { "kind": "cron", "expression": "0 8 * * *", "timezone": "UTC" }
+            }),
+            "prompt",
+            "trigger prompt within the allowed byte limit",
+        ),
     ] {
-        let error = invoke_with_context(
+        let failure = invoke_failure_with_context(
             &runtime,
             TRIGGER_CREATE_CAPABILITY_ID,
             input,
             context.clone(),
         )
-        .await
-        .unwrap_err();
-        assert_eq!(error, RuntimeFailureKind::InvalidInput);
+        .await;
+        assert_eq!(
+            failure.kind,
+            RuntimeFailureKind::InvalidInput,
+            "{case_name}"
+        );
+        assert_failure_input_issue_expected(
+            &failure,
+            issue_path,
+            DispatchInputIssueCode::InvalidValue,
+            expected,
+            case_name,
+        );
     }
 
     assert!(
@@ -7249,18 +7295,36 @@ fn assert_failure_has_input_issue(
     code: DispatchInputIssueCode,
     case_name: &str,
 ) {
+    let _ = failure_input_issue(failure, path, code, case_name);
+}
+
+fn assert_failure_input_issue_expected(
+    failure: &RuntimeCapabilityFailure,
+    path: &str,
+    code: DispatchInputIssueCode,
+    expected: &str,
+    case_name: &str,
+) {
+    let issue = failure_input_issue(failure, path, code, case_name);
+    assert_eq!(issue.expected.as_deref(), Some(expected), "{case_name}");
+}
+
+fn failure_input_issue<'a>(
+    failure: &'a RuntimeCapabilityFailure,
+    path: &str,
+    code: DispatchInputIssueCode,
+    case_name: &str,
+) -> &'a ironclaw_host_api::DispatchInputIssue {
     let Some(DispatchFailureDetail::InvalidInput { issues }) = &failure.detail else {
         panic!(
             "{case_name}: expected invalid-input detail, got {:?}",
             failure.detail
         );
     };
-    assert!(
-        issues
-            .iter()
-            .any(|issue| issue.path == path && issue.code == code),
-        "{case_name}: expected issue {path} {code:?}, got {issues:?}"
-    );
+    issues
+        .iter()
+        .find(|issue| issue.path == path && issue.code == code)
+        .unwrap_or_else(|| panic!("{case_name}: expected issue {path} {code:?}, got {issues:?}"))
 }
 
 fn runtime() -> impl HostRuntime {
