@@ -34,6 +34,8 @@ use ironclaw_trust::{
 };
 use serde_json::{Value, json};
 
+const DISTINCTIVE_RESULT_VALUE: &str = "DISTINCTIVE_STAGE_RESULT_VALUE_98123";
+
 #[tokio::test]
 async fn workflow_result_manifest_is_host_bundled_and_schema_resolves() {
     let package = builtin_first_party_package_with_workflow_stage_result().unwrap();
@@ -137,8 +139,10 @@ async fn workflow_result_handler_rejects_invalid_json_without_calling_sink() {
 }
 
 #[tokio::test]
-async fn workflow_result_handler_sanitizes_validation_failure() {
-    let runtime = runtime_with_workflow_sink(Arc::new(ValidationFailingWorkflowSink::default()));
+async fn workflow_result_handler_sanitizes_validation_failure_reason_echoing_result() {
+    let runtime = runtime_with_workflow_sink(Arc::new(EchoingReasonWorkflowSink {
+        failure: EchoedReasonFailure::ValidationFailed,
+    }));
 
     let failure = invoke_failure_with_context(
         &runtime,
@@ -150,7 +154,7 @@ async fn workflow_result_handler_sanitizes_validation_failure() {
             "stage": "analysis",
             "schema_version": "workflow.stage_result.v1",
             "completion_nonce": "nonce-1",
-            "result": {"raw": "RAW_RESULT_PAYLOAD_DO_NOT_LEAK"}
+            "result": {"marker": DISTINCTIVE_RESULT_VALUE}
         }),
         execution_context([WORKFLOW_REPORT_STAGE_RESULT_CAPABILITY_ID]),
     )
@@ -158,8 +162,38 @@ async fn workflow_result_handler_sanitizes_validation_failure() {
 
     assert_eq!(failure.kind, RuntimeFailureKind::InvalidInput);
     let summary = failure.safe_summary().expect("sanitized summary");
-    assert_eq!(summary, "stage result failed schema validation");
-    assert!(!summary.contains("RAW_RESULT_PAYLOAD_DO_NOT_LEAK"));
+    assert_eq!(summary, "workflow stage result validation failed");
+    assert!(!summary.contains(DISTINCTIVE_RESULT_VALUE));
+    assert!(!summary.contains("sink echoed result"));
+}
+
+#[tokio::test]
+async fn workflow_result_handler_sanitizes_invalid_input_reason_echoing_result() {
+    let runtime = runtime_with_workflow_sink(Arc::new(EchoingReasonWorkflowSink {
+        failure: EchoedReasonFailure::InvalidInput,
+    }));
+
+    let failure = invoke_failure_with_context(
+        &runtime,
+        WORKFLOW_REPORT_STAGE_RESULT_CAPABILITY_ID,
+        json!({
+            "workflow_run_id": "workflow-run-1",
+            "stage_run_id": "stage-run-1",
+            "turn_run_id": "turn-run-1",
+            "stage": "analysis",
+            "schema_version": "workflow.stage_result.v1",
+            "completion_nonce": "nonce-1",
+            "result": {"marker": DISTINCTIVE_RESULT_VALUE}
+        }),
+        execution_context([WORKFLOW_REPORT_STAGE_RESULT_CAPABILITY_ID]),
+    )
+    .await;
+
+    assert_eq!(failure.kind, RuntimeFailureKind::InvalidInput);
+    let summary = failure.safe_summary().expect("sanitized summary");
+    assert_eq!(summary, "invalid workflow stage result input");
+    assert!(!summary.contains(DISTINCTIVE_RESULT_VALUE));
+    assert!(!summary.contains("sink echoed result"));
 }
 
 #[test]
@@ -244,21 +278,35 @@ impl WorkflowStageResultSink for RecordingWorkflowSink {
     }
 }
 
-#[derive(Default)]
-struct ValidationFailingWorkflowSink {
-    calls: Mutex<usize>,
+enum EchoedReasonFailure {
+    InvalidInput,
+    ValidationFailed,
+}
+
+struct EchoingReasonWorkflowSink {
+    failure: EchoedReasonFailure,
 }
 
 #[async_trait]
-impl WorkflowStageResultSink for ValidationFailingWorkflowSink {
+impl WorkflowStageResultSink for EchoingReasonWorkflowSink {
     async fn report_stage_result(
         &self,
-        _input: ReportWorkflowStageResultInput,
+        input: ReportWorkflowStageResultInput,
     ) -> Result<WorkflowStageResultAck, WorkflowStageResultSinkError> {
-        *self.calls.lock().unwrap() += 1;
-        Err(WorkflowStageResultSinkError::ValidationFailed {
-            reason: "stage result failed schema validation".to_string(),
-        })
+        let echoed_result = input
+            .result
+            .get("marker")
+            .and_then(Value::as_str)
+            .unwrap_or("missing-marker");
+        let reason = format!("sink echoed result {echoed_result}");
+        match self.failure {
+            EchoedReasonFailure::InvalidInput => {
+                Err(WorkflowStageResultSinkError::InvalidInput { reason })
+            }
+            EchoedReasonFailure::ValidationFailed => {
+                Err(WorkflowStageResultSinkError::ValidationFailed { reason })
+            }
+        }
     }
 }
 

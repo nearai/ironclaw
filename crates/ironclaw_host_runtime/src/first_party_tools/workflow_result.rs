@@ -127,9 +127,10 @@ impl FirstPartyCapabilityHandler for WorkflowResultToolHandler {
 
 fn workflow_sink_error(error: WorkflowStageResultSinkError) -> FirstPartyCapabilityError {
     match error {
-        WorkflowStageResultSinkError::InvalidInput { reason } => {
-            workflow_safe_error(RuntimeDispatchErrorKind::InputEncode, reason)
-        }
+        WorkflowStageResultSinkError::InvalidInput { .. } => workflow_safe_error(
+            RuntimeDispatchErrorKind::InputEncode,
+            "invalid workflow stage result input",
+        ),
         WorkflowStageResultSinkError::MismatchedBinding => workflow_safe_error(
             RuntimeDispatchErrorKind::PolicyDenied,
             "workflow stage result binding mismatch",
@@ -142,9 +143,10 @@ fn workflow_sink_error(error: WorkflowStageResultSinkError) -> FirstPartyCapabil
             RuntimeDispatchErrorKind::OperationFailed,
             "workflow stage is not active",
         ),
-        WorkflowStageResultSinkError::ValidationFailed { reason } => {
-            workflow_safe_error(RuntimeDispatchErrorKind::InputEncode, reason)
-        }
+        WorkflowStageResultSinkError::ValidationFailed { .. } => workflow_safe_error(
+            RuntimeDispatchErrorKind::InputEncode,
+            "workflow stage result validation failed",
+        ),
         WorkflowStageResultSinkError::Unavailable => workflow_safe_error(
             RuntimeDispatchErrorKind::Backend,
             "workflow stage result sink unavailable",
