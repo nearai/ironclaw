@@ -786,8 +786,8 @@ mod tests {
         use ironclaw_host_api::{AgentId, TenantId, ThreadId, Timestamp, UserId};
         use ironclaw_triggers::{
             InMemoryTriggerRepository, TriggerActiveRunLookup, TriggerActiveRunState,
-            TriggerActiveRunStateRequest, TriggerCompletionPolicy, TriggerError, TriggerFire,
-            TriggerId, TriggerInboundContentRef, TriggerMaterializedPrompt, TriggerPollerWorker,
+            TriggerActiveRunStateRequest, TriggerError, TriggerFire, TriggerId,
+            TriggerInboundContentRef, TriggerMaterializedPrompt, TriggerPollerWorker,
             TriggerPollerWorkerConfig, TriggerPollerWorkerDeps, TriggerPromptMaterializer,
             TriggerRecord, TriggerRepository, TriggerSchedule, TriggerSourceKind, TriggerState,
             TrustedTriggerFireSubmitOutcome, TrustedTriggerFireSubmitter,
@@ -912,7 +912,6 @@ mod tests {
                 name: "hook-wrapper-trigger".to_string(),
                 source: TriggerSourceKind::Schedule,
                 schedule: TriggerSchedule::cron("* * * * *").expect("cron"),
-                completion_policy: TriggerCompletionPolicy::Recurring,
                 prompt: "hook wrapper test prompt".to_string(),
                 state: TriggerState::Scheduled,
                 next_run_at: fire_slot,

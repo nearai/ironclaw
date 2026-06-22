@@ -33,6 +33,8 @@ mod budget;
 mod budget_events;
 mod bundled_skills;
 mod communication_context;
+#[cfg(any(feature = "libsql", feature = "postgres"))]
+mod credential_refresh_worker;
 mod default_system_prompt;
 mod error;
 mod extension_activation_credentials;
@@ -81,6 +83,8 @@ mod outbound_delivery_capability_surface;
 mod outbound_preferences;
 mod product_auth_durable;
 mod product_auth_providers;
+#[cfg(any(feature = "libsql", feature = "postgres"))]
+mod product_auth_refresh_lock;
 mod product_auth_runtime_credentials;
 #[cfg(feature = "webui-v2-beta")]
 mod product_auth_serve;
@@ -192,6 +196,7 @@ pub use ironclaw_product_workflow::{
     LifecycleExtensionSource, LifecycleExtensionSummary, LifecyclePhase, LifecycleProductPayload,
     LifecycleProductResponse, LifecycleSearchExtensionSummary,
 };
+pub use ironclaw_reborn::runtime::DEFAULT_TURN_RUNNER_WORKER_COUNT;
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 pub use ironclaw_runtime_policy::{
     ResolveRequest as RuntimePolicyResolveRequest, resolve as resolve_runtime_policy,
@@ -254,9 +259,10 @@ pub use runtime::{
     RebornSkillExecutionResult, RebornSkillSourceKind, build_reborn_runtime,
 };
 pub use runtime_input::{
-    DEFAULT_TURN_RUNNER_HEARTBEAT_INTERVAL, DEFAULT_TURN_RUNNER_POLL_INTERVAL, PollSettings,
-    RebornRuntimeIdentity, RebornRuntimeInput, TriggerFireAccessCheck, TriggerFireAccessChecker,
-    TriggerFireAccessDecision, TriggerFireAccessError, TriggerPollerSettings, TurnRunnerSettings,
+    CredentialRefreshSettings, DEFAULT_TURN_RUNNER_HEARTBEAT_INTERVAL,
+    DEFAULT_TURN_RUNNER_POLL_INTERVAL, PollSettings, RebornRuntimeIdentity, RebornRuntimeInput,
+    TriggerFireAccessCheck, TriggerFireAccessChecker, TriggerFireAccessDecision,
+    TriggerFireAccessError, TriggerPollerSettings, TurnRunnerSettings,
 };
 #[cfg(feature = "root-llm-provider")]
 pub use runtime_input::{RebornProviderFactory, ResolvedRebornLlm};
@@ -1242,6 +1248,7 @@ mod two_tenant_isolation_tests {
                 scope_a.clone(),
                 handle.clone(),
                 SecretMaterial::from("alice-secret".to_string()),
+                None,
             )
             .await
             .unwrap();
@@ -1250,6 +1257,7 @@ mod two_tenant_isolation_tests {
                 scope_b.clone(),
                 handle.clone(),
                 SecretMaterial::from("bob-secret".to_string()),
+                None,
             )
             .await
             .unwrap();

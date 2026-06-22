@@ -23,12 +23,14 @@ use crate::descriptors::{
     WEBUI_V2_PATTERN_LIST_AUTOMATIONS, WEBUI_V2_PATTERN_LIST_CONNECTABLE_CHANNELS,
     WEBUI_V2_PATTERN_LIST_EXTENSION_REGISTRY, WEBUI_V2_PATTERN_LIST_EXTENSIONS,
     WEBUI_V2_PATTERN_LIST_FS_MOUNTS, WEBUI_V2_PATTERN_LIST_LLM_MODELS,
-    WEBUI_V2_PATTERN_LIST_PROJECT_FILES, WEBUI_V2_PATTERN_LIST_SKILLS,
-    WEBUI_V2_PATTERN_OPERATOR_CONFIG, WEBUI_V2_PATTERN_OPERATOR_CONFIG_KEY,
-    WEBUI_V2_PATTERN_OPERATOR_CONFIG_VALIDATE, WEBUI_V2_PATTERN_OPERATOR_DIAGNOSTICS,
-    WEBUI_V2_PATTERN_OPERATOR_LOGS, WEBUI_V2_PATTERN_OPERATOR_SERVICE_LIFECYCLE,
-    WEBUI_V2_PATTERN_OPERATOR_SETUP, WEBUI_V2_PATTERN_OPERATOR_STATUS,
-    WEBUI_V2_PATTERN_OUTBOUND_DELIVERY_TARGETS, WEBUI_V2_PATTERN_OUTBOUND_PREFERENCES,
+    WEBUI_V2_PATTERN_LIST_PROJECT_FILES, WEBUI_V2_PATTERN_LIST_PROJECTS,
+    WEBUI_V2_PATTERN_LIST_SKILLS, WEBUI_V2_PATTERN_OPERATOR_CONFIG,
+    WEBUI_V2_PATTERN_OPERATOR_CONFIG_KEY, WEBUI_V2_PATTERN_OPERATOR_CONFIG_VALIDATE,
+    WEBUI_V2_PATTERN_OPERATOR_DIAGNOSTICS, WEBUI_V2_PATTERN_OPERATOR_LOGS,
+    WEBUI_V2_PATTERN_OPERATOR_SERVICE_LIFECYCLE, WEBUI_V2_PATTERN_OPERATOR_SETUP,
+    WEBUI_V2_PATTERN_OPERATOR_STATUS, WEBUI_V2_PATTERN_OUTBOUND_DELIVERY_TARGETS,
+    WEBUI_V2_PATTERN_OUTBOUND_PREFERENCES, WEBUI_V2_PATTERN_PROJECT_DETAIL,
+    WEBUI_V2_PATTERN_PROJECT_MEMBER_DETAIL, WEBUI_V2_PATTERN_PROJECT_MEMBERS,
     WEBUI_V2_PATTERN_READ_FS_FILE, WEBUI_V2_PATTERN_READ_PROJECT_FILE,
     WEBUI_V2_PATTERN_REMOVE_EXTENSION, WEBUI_V2_PATTERN_RESOLVE_GATE,
     WEBUI_V2_PATTERN_SEARCH_SKILLS, WEBUI_V2_PATTERN_SEND_MESSAGE, WEBUI_V2_PATTERN_SET_ACTIVE_LLM,
@@ -81,6 +83,7 @@ impl WebUiV2RouteOptions {
 pub struct WebUiV2State {
     services: Arc<dyn RebornServicesApi>,
     sse_capacity: Arc<SseCapacity>,
+    reborn_projects_enabled: bool,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
@@ -96,7 +99,22 @@ impl WebUiV2State {
         Self {
             services,
             sse_capacity: Arc::new(SseCapacity::new(max_concurrent_streams_per_caller)),
+            reborn_projects_enabled: false,
         }
+    }
+
+    /// Deployment gate for the Reborn Projects WebUI surface (the sidebar
+    /// entry and the `/projects` route). Off by default while the surface
+    /// is still being finished; host composition reads the
+    /// `IRONCLAW_REBORN_PROJECTS` env flag and feeds it here, and the
+    /// browser learns it from `GET /session`'s `features.reborn_projects`.
+    pub fn with_reborn_projects_enabled(mut self, enabled: bool) -> Self {
+        self.reborn_projects_enabled = enabled;
+        self
+    }
+
+    pub fn reborn_projects_enabled(&self) -> bool {
+        self.reborn_projects_enabled
     }
 
     pub fn services(&self) -> &Arc<dyn RebornServicesApi> {
@@ -145,6 +163,28 @@ pub fn webui_v2_router_with_options(state: WebUiV2State, options: WebUiV2RouteOp
         .route(
             WEBUI_V2_PATTERN_READ_PROJECT_FILE,
             get(handlers::read_project_file),
+        )
+        // GET (list) and POST (create) share `/api/webchat/v2/projects`.
+        .route(
+            WEBUI_V2_PATTERN_LIST_PROJECTS,
+            get(handlers::list_projects).post(handlers::create_project),
+        )
+        // GET (read), POST (update), DELETE share `/projects/{project_id}`.
+        .route(
+            WEBUI_V2_PATTERN_PROJECT_DETAIL,
+            get(handlers::get_project)
+                .post(handlers::update_project)
+                .delete(handlers::delete_project),
+        )
+        // GET (list) and POST (add) share `/projects/{project_id}/members`.
+        .route(
+            WEBUI_V2_PATTERN_PROJECT_MEMBERS,
+            get(handlers::list_project_members).post(handlers::add_project_member),
+        )
+        // POST (update role) and DELETE (revoke) share the member detail path.
+        .route(
+            WEBUI_V2_PATTERN_PROJECT_MEMBER_DETAIL,
+            post(handlers::update_project_member).delete(handlers::remove_project_member),
         )
         .route(
             WEBUI_V2_PATTERN_LIST_FS_MOUNTS,

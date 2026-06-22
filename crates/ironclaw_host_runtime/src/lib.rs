@@ -128,7 +128,7 @@ pub use services::{
 pub use surface::{CapabilitySurfacePolicy, VisibleCapability, VisibleCapabilityAccess};
 pub use turn_scheduler::{
     SchedulerTurnRunWakeNotifier, TurnRunExecutor, TurnRunExecutorError, TurnRunScheduler,
-    TurnRunSchedulerConfig, TurnRunSchedulerHandle,
+    TurnRunSchedulerConfig, TurnRunSchedulerHandle, TurnRunWakeChannel,
 };
 
 /// Stable, validated idempotency key supplied by upper turn/loop services.

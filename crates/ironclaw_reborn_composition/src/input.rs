@@ -15,8 +15,10 @@ use ironclaw_host_api::{AgentId, TenantId};
 #[cfg(all(test, feature = "slack-v2-host-beta"))]
 use ironclaw_host_runtime::HostRuntimeHttpEgressPort;
 use ironclaw_host_runtime::TenantSandboxProcessPort;
+#[cfg(any(test, feature = "test-support"))]
+use ironclaw_network::NetworkHttpEgress;
 use ironclaw_trust::HostTrustPolicy;
-use ironclaw_turns::TurnRunWakeNotifier;
+use ironclaw_turns::{InMemoryTurnStateStoreLimits, TurnRunWakeNotifier};
 use secrecy::SecretString;
 
 #[cfg(feature = "postgres")]
@@ -180,10 +182,15 @@ pub struct RebornBuildInput {
     pub(crate) require_wasm_credentials: bool,
     #[cfg(all(test, feature = "slack-v2-host-beta"))]
     pub(crate) host_runtime_http_egress_for_test: Option<Option<HostRuntimeHttpEgressPort>>,
+    #[cfg(any(test, feature = "test-support"))]
+    pub(crate) network_http_egress_for_test: Option<Arc<dyn NetworkHttpEgress>>,
     pub(crate) product_auth_ports: Option<RebornProductAuthServicePorts>,
     pub(crate) oauth_provider_configs: Vec<OAuthProviderBackendConfig>,
     pub(crate) oauth_dcr_provider_configs: Vec<OAuthDcrProviderBackendConfig>,
     pub(crate) nearai_mcp_bootstrap_config: Option<crate::nearai_mcp::NearAiMcpBootstrapConfig>,
+    /// Concurrency limits applied to the in-memory turn-state store.
+    /// Defaults to no limits (all caps `None` / unlimited).
+    pub(crate) turn_state_store_limits: InMemoryTurnStateStoreLimits,
 }
 
 #[derive(Clone, Debug)]
@@ -225,6 +232,11 @@ impl RebornBuildInput {
     /// `UserId` actor for inbound CLI messages.
     pub fn owner_id(&self) -> &str {
         &self.owner_id
+    }
+
+    #[cfg(feature = "root-llm-provider")]
+    pub(crate) fn has_nearai_mcp_bootstrap_config(&self) -> bool {
+        self.nearai_mcp_bootstrap_config.is_some()
     }
 
     /// Override the owner id after construction.
@@ -549,6 +561,17 @@ impl RebornBuildInput {
         self
     }
 
+    /// Override local-dev host HTTP egress for fixture recording and replay.
+    ///
+    /// This is compiled only for tests/test-support so Reborn QA harnesses can
+    /// route host-mediated integration calls through trace record/replay
+    /// adapters without changing production composition.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn with_network_http_egress_for_test(mut self, egress: Arc<dyn NetworkHttpEgress>) -> Self {
+        self.network_http_egress_for_test = Some(egress);
+        self
+    }
+
     /// Inject Reborn-native product-auth service ports.
     ///
     /// Production callers should provide durable implementations here. The
@@ -597,6 +620,19 @@ impl RebornBuildInput {
             scopes: Vec::new(),
         });
         Ok(self)
+    }
+
+    /// Set concurrency limits for the in-memory turn-state store.
+    ///
+    /// Called by `build_reborn_runtime` after mapping from `TurnRunnerSettings` so the
+    /// factory can apply them when constructing the store. Callers should use
+    /// `RebornRuntimeInput::with_runner_settings` rather than calling this directly.
+    pub(crate) fn with_turn_state_store_limits(
+        mut self,
+        limits: InMemoryTurnStateStoreLimits,
+    ) -> Self {
+        self.turn_state_store_limits = limits;
+        self
     }
 
     fn push_oauth_provider_config(
@@ -649,10 +685,13 @@ impl RebornBuildInput {
             require_wasm_credentials: false,
             #[cfg(all(test, feature = "slack-v2-host-beta"))]
             host_runtime_http_egress_for_test: None,
+            #[cfg(any(test, feature = "test-support"))]
+            network_http_egress_for_test: None,
             product_auth_ports: None,
             oauth_provider_configs: Vec::new(),
             oauth_dcr_provider_configs: Vec::new(),
             nearai_mcp_bootstrap_config: None,
+            turn_state_store_limits: InMemoryTurnStateStoreLimits::default(),
         }
     }
 }

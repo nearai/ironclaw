@@ -491,6 +491,12 @@ impl ProductAgentBoundCaller {
 pub struct AutomationListRequest {
     pub limit: usize,
     pub run_limit: usize,
+    /// When `true`, include completed (fire-once) automations alongside the
+    /// active ones. When `false` (the default), only active automations are
+    /// returned. Facades apply `limit` after this filter, so a full page of
+    /// active automations is returned regardless of how many completed ones
+    /// exist.
+    pub include_completed: bool,
 }
 
 /// Stored scope of a trigger-fired thread, returned by
@@ -1967,6 +1973,13 @@ impl RebornServicesApi for RebornServices {
         caller: WebUiAuthenticatedCaller,
         request: WebUiCreateThreadRequest,
     ) -> Result<RebornCreateThreadResponse, RebornServicesError> {
+        // A browser may propose a project for the new thread; authorize the
+        // caller's access to it (never trust the body alone) and adopt it as the
+        // thread's scope for this request only. Without a proposed project the
+        // caller's default scope is used unchanged.
+        let caller = self
+            .authorize_create_thread_project(caller, request.project_id.clone())
+            .await?;
         let command = request.into_command(caller)?;
         let WebUiInboundCommand::CreateThread {
             caller,
@@ -2802,7 +2815,14 @@ impl RebornServicesApi for RebornServices {
         let scheduler_enabled = self.automation_facade.scheduler_enabled();
         let automations = self
             .automation_facade
-            .list_automations(caller, AutomationListRequest { limit, run_limit })
+            .list_automations(
+                caller,
+                AutomationListRequest {
+                    limit,
+                    run_limit,
+                    include_completed: request.include_completed,
+                },
+            )
             .await?;
         Ok(RebornListAutomationsResponse {
             automations,
@@ -3762,6 +3782,44 @@ impl RebornServices {
         self.project_service
             .as_ref()
             .ok_or_else(|| RebornServicesError::service_unavailable(false))
+    }
+
+    /// Authorize a browser-proposed project for a new thread and, on success,
+    /// adopt it as the caller's scope for that thread only.
+    ///
+    /// The project must never be trusted from the request body alone: the
+    /// proposed id is authorized through the same access-controlled
+    /// [`get_project`](RebornServicesApi::get_project) read the project detail
+    /// route uses (`Ok` only when the caller can access the project, otherwise a
+    /// not-found/denied error). Without a proposed project the caller's default
+    /// scope is returned unchanged.
+    async fn authorize_create_thread_project(
+        &self,
+        mut caller: WebUiAuthenticatedCaller,
+        requested_project_id: Option<String>,
+    ) -> Result<WebUiAuthenticatedCaller, RebornServicesError> {
+        let Some(raw) = requested_project_id else {
+            return Ok(caller);
+        };
+        let project_id = ProjectId::new(raw).map_err(|error| {
+            // Carry the cause to the server log before mapping to the
+            // sanitized validation error (.claude/rules/error-handling.md —
+            // never `map_err(|_| …)` on a parse/validation failure).
+            tracing::debug!(?error, "create_thread received an invalid project_id");
+            RebornServicesError::validation(WebUiInboundValidationError::new(
+                "project_id",
+                WebUiInboundValidationCode::InvalidId,
+            ))
+        })?;
+        self.get_project(
+            caller.clone(),
+            RebornGetProjectRequest {
+                project_id: project_id.as_str().to_string(),
+            },
+        )
+        .await?;
+        caller.project_id = Some(project_id);
+        Ok(caller)
     }
 
     /// Verify the caller may access the thread and return the project-scoped
@@ -4872,5 +4930,59 @@ fn generated_thread_id(
             // Fallback remains valid under ThreadId validation rules.
             ThreadId::new("generated-thread-fallback").unwrap_or_else(|_| unreachable!())
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Every `ProjectServiceError` variant projects to a sanitized facade error
+    /// with the expected coarse code/status, and `InvalidInput`'s field name is
+    /// carried through (it is a controlled constant, never backend text).
+    #[test]
+    fn project_service_error_maps_to_sanitized_facade_error() {
+        let not_found = map_project_service_error(ProjectServiceError::NotFound);
+        assert_eq!(not_found.code, RebornServicesErrorCode::NotFound);
+        assert_eq!(not_found.status_code, 404);
+
+        let denied = map_project_service_error(ProjectServiceError::Denied);
+        assert_eq!(denied.kind, RebornServicesErrorKind::ParticipantDenied);
+        assert_eq!(denied.status_code, 403);
+
+        let invalid = map_project_service_error(ProjectServiceError::InvalidInput {
+            field: "project_id".to_string(),
+        });
+        assert_eq!(invalid.code, RebornServicesErrorCode::InvalidRequest);
+        assert_eq!(invalid.status_code, 400);
+        assert_eq!(invalid.field.as_deref(), Some("project_id"));
+
+        let conflict = map_project_service_error(ProjectServiceError::Conflict);
+        assert_eq!(conflict.code, RebornServicesErrorCode::Conflict);
+        assert_eq!(conflict.status_code, 409);
+
+        let unavailable = map_project_service_error(ProjectServiceError::Unavailable);
+        assert_eq!(unavailable.code, RebornServicesErrorCode::Unavailable);
+        assert_eq!(unavailable.status_code, 503);
+        assert!(unavailable.retryable, "unavailable is retryable");
+
+        let internal = map_project_service_error(ProjectServiceError::Internal);
+        assert_eq!(internal.code, RebornServicesErrorCode::Internal);
+        assert_eq!(internal.status_code, 500);
+    }
+
+    /// `require_project_service` returns `service_unavailable(false)` when no
+    /// project service is wired (see the helper in this file). This locks the
+    /// full shape of that sentinel — a clean, non-retryable 503 — so an unwired
+    /// runtime returns a stable error rather than a panic or a 500.
+    #[test]
+    fn unwired_project_service_sentinel_is_503() {
+        let unavailable = RebornServicesError::service_unavailable(false);
+        assert_eq!(unavailable.code, RebornServicesErrorCode::Unavailable);
+        assert_eq!(unavailable.status_code, 503);
+        assert!(
+            !unavailable.retryable,
+            "false-arg sentinel is non-retryable"
+        );
     }
 }

@@ -16,13 +16,13 @@ export function ProjectsPage() {
   const t = useT();
   const navigate = useNavigate();
   const { threadsState } = useOutletContext();
-  const { projectId = null, missionId = null, threadId = null } = useParams();
+  const { projectId = null, threadId = null } = useParams();
   const [search, setSearch] = React.useState("");
   const [chatFlowError, setChatFlowError] = React.useState(null);
 
   const overviewState = useProjectsOverview();
   const workspaceState = useProjectWorkspace(projectId);
-  const inspectorState = useProjectInspector({ projectId, missionId, threadId });
+  const inspectorState = useProjectInspector({ projectId, threadId });
 
   const filteredProjects = React.useMemo(() => {
     const query = search.trim().toLowerCase();
@@ -74,23 +74,35 @@ export function ProjectsPage() {
     });
   }, [navigate, threadsState]);
 
-  const handleOpenMission = React.useCallback((nextMissionId) => {
-    navigate(`/projects/${projectId}/missions/${nextMissionId}`);
-  }, [navigate, projectId]);
-
   const handleOpenThread = React.useCallback((nextThreadId) => {
     navigate(`/projects/${projectId}/threads/${nextThreadId}`);
   }, [navigate, projectId]);
+
+  // Start a new conversation scoped to this project: the backend authorizes the
+  // caller's access to `projectId` before scoping the thread to it, so the new
+  // thread shows up under the project. Then open it in chat.
+  const handleStartConversation = React.useCallback(async () => {
+    setChatFlowError(null);
+    try {
+      const newThreadId = await threadsState.createThread(projectId);
+      navigate("/chat", { state: { threadId: newThreadId } });
+      workspaceState.invalidate();
+    } catch (error) {
+      setChatFlowError({
+        type: "error",
+        message: error.message || t("projects.chatAutoFail"),
+      });
+    }
+  }, [navigate, threadsState, projectId, workspaceState, t]);
 
   const handleClearInspector = React.useCallback(() => {
     navigate(`/projects/${projectId}`);
   }, [navigate, projectId]);
 
+  // Project creation lives in the grid (and its empty-state CTA), not a
+  // duplicate top-of-page button.
   const headerActions = html`
     ${projectId && html`<${Button} variant="ghost" onClick=${() => navigate("/projects")}>${t("projects.allProjects")}<//>`}
-    <${Button} onClick=${handleCreateProject}>
-      ${threadsState.isCreating ? t("projects.preparingChat") : t("projects.newProject")}
-    <//>
   `;
 
   let content = null;
@@ -115,21 +127,11 @@ export function ProjectsPage() {
       content = html`
         <${ProjectWorkspaceShell}
           project=${workspaceState.project || selectedOverviewProject}
-          overview=${selectedOverviewProject || workspaceState.project}
-          missions=${workspaceState.missions}
           threads=${workspaceState.threads}
-          widgets=${workspaceState.widgets}
-          selectedMissionId=${missionId}
           selectedThreadId=${threadId}
-          inspector=${{
-            type: inspectorState.inspectorType,
-            mission: inspectorState.mission,
-            thread: inspectorState.thread,
-          }}
-          inspectorState=${inspectorState}
-          onSelectMission=${handleOpenMission}
           onSelectThread=${handleOpenThread}
-          onClearInspector=${handleClearInspector}
+          onNewConversation=${handleStartConversation}
+          isStartingConversation=${threadsState.isCreating}
         />
       `;
     }
@@ -167,8 +169,11 @@ export function ProjectsPage() {
           `}
           <${FeedbackBanner} result=${chatFlowError} onDismiss=${() => setChatFlowError(null)} />
           <${FeedbackBanner} result=${inspectorState.actionResult} onDismiss=${inspectorState.clearActionResult} />
-          <${ProjectsSummaryStrip} overview=${overviewState.overview} />
-          <${ProjectsAttentionStrip} items=${overviewState.overview.attention} onOpenItem=${handleOpenAttention} />
+          ${!projectId &&
+          html`
+            <${ProjectsSummaryStrip} overview=${overviewState.overview} />
+            <${ProjectsAttentionStrip} items=${overviewState.overview.attention} onOpenItem=${handleOpenAttention} />
+          `}
           ${content}
         </div>
       </div>

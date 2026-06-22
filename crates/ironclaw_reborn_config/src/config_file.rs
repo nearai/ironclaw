@@ -154,6 +154,14 @@ pub struct HarnessSection {
 pub struct RunnerSection {
     pub heartbeat_interval_secs: Option<u64>,
     pub poll_interval_ms: Option<u64>,
+    /// Number of concurrent turn-runner worker tasks. `None` or `0` defaults to 4. Clamped to 32.
+    pub worker_count: Option<usize>,
+    /// Max concurrent runs in `TurnStatus::Running` per (tenant_id, owner user_id). `None` or `0` = unlimited.
+    pub max_concurrent_runs_per_user: Option<u32>,
+    /// Max concurrent runs in `TurnStatus::Running` for `ScheduledTrigger` origin. `None` or `0` = unlimited.
+    pub max_concurrent_trigger_runs: Option<u32>,
+    /// Max concurrent runs in `TurnStatus::Running` for `Inbound` or `WebUi` origin. `None` or `0` = unlimited.
+    pub max_concurrent_conversation_runs: Option<u32>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -1129,6 +1137,52 @@ mod tests {
         assert!(cfg.storage.is_none());
         assert!(cfg.llm.is_none());
         assert!(cfg.slack.is_none());
+    }
+
+    #[test]
+    fn runner_section_new_fields_round_trip() {
+        let toml = r#"
+[runner]
+heartbeat_interval_secs = 10
+poll_interval_ms = 100
+worker_count = 3
+max_concurrent_runs_per_user = 2
+max_concurrent_trigger_runs = 5
+max_concurrent_conversation_runs = 4
+"#;
+        let cfg = RebornConfigFile::parse_text(toml, &attributed()).expect("must parse");
+        let runner = cfg.runner.as_ref().expect("runner section present");
+        assert_eq!(runner.heartbeat_interval_secs, Some(10));
+        assert_eq!(runner.poll_interval_ms, Some(100));
+        assert_eq!(runner.worker_count, Some(3));
+        assert_eq!(runner.max_concurrent_runs_per_user, Some(2));
+        assert_eq!(runner.max_concurrent_trigger_runs, Some(5));
+        assert_eq!(runner.max_concurrent_conversation_runs, Some(4));
+    }
+
+    #[test]
+    fn absent_runner_leaves_new_fields_none() {
+        let cfg = RebornConfigFile::parse_text("", &attributed()).expect("empty TOML is valid");
+        assert!(cfg.runner.is_none());
+    }
+
+    #[test]
+    fn runner_section_with_only_new_fields() {
+        let toml = r#"
+[runner]
+worker_count = 8
+max_concurrent_runs_per_user = 1
+max_concurrent_trigger_runs = 10
+max_concurrent_conversation_runs = 5
+"#;
+        let cfg = RebornConfigFile::parse_text(toml, &attributed()).expect("must parse");
+        let runner = cfg.runner.as_ref().expect("runner section present");
+        assert_eq!(runner.heartbeat_interval_secs, None);
+        assert_eq!(runner.poll_interval_ms, None);
+        assert_eq!(runner.worker_count, Some(8));
+        assert_eq!(runner.max_concurrent_runs_per_user, Some(1));
+        assert_eq!(runner.max_concurrent_trigger_runs, Some(10));
+        assert_eq!(runner.max_concurrent_conversation_runs, Some(5));
     }
 
     #[test]

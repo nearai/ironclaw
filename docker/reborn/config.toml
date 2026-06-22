@@ -11,6 +11,14 @@ default_agent = "reborn-cli-agent"
 [runner]
 heartbeat_interval_secs = 5
 poll_interval_ms = 200
+# Number of concurrent turn-runner worker tasks (default 4; clamped to 32).
+# worker_count = 4
+# Max concurrent runs in TurnStatus::Running per (tenant_id, owner user_id); 0 or absent = unlimited.
+# max_concurrent_runs_per_user = 0
+# Max concurrent ScheduledTrigger runs; 0 or absent = unlimited.
+# max_concurrent_trigger_runs = 0
+# Max concurrent Inbound/WebUi (conversation) runs; 0 or absent = unlimited.
+# max_concurrent_conversation_runs = 0
 
 [skills]
 regex_activation_enabled = true

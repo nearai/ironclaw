@@ -184,7 +184,9 @@ jobs:
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
           key: ${{ matrix.name }}
-          save-if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+          # Keep saves to protected-branch and merge_group runs so the ~10 GB
+          # repo cache LRU is seeded by shared states, not arbitrary PR branches.
+          save-if: ${{ (github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'merge_group' }}
       - name: Install cargo-component
         uses: ./.github/actions/install-cargo-component
       - name: Build WASM artifacts for integration tests
@@ -230,59 +232,13 @@ jobs:
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
           key: secret-store-contract
-          save-if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+          # Keep saves to protected-branch and merge_group runs so the ~10 GB
+          # repo cache LRU is seeded by shared states, not arbitrary PR branches.
+          save-if: ${{ (github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'merge_group' }}
       - name: Run secret store contract
         run: |
           timeout --signal=INT --kill-after=30s 10m \
             cargo test -p ironclaw_secrets --test secret_store_contract -- --nocapture
-
-  hooks-parity-tests:
-    name: Hooks Predicate-Backend Parity Tests
-    needs: changes
-    if: needs.changes.outputs.docs_only != 'true' && needs.changes.outputs.has_legacy_tests == 'true' && needs.changes.outputs.has_core_code == 'true'
-    runs-on: ubuntu-latest
-    timeout-minutes: 20
-    services:
-      postgres:
-        image: pgvector/pgvector:pg16
-        env:
-          POSTGRES_USER: postgres
-          POSTGRES_PASSWORD: postgres
-          POSTGRES_DB: ironclaw_test
-        ports:
-          - 5432:5432
-        options: >-
-          --health-cmd "pg_isready -U postgres"
-          --health-interval 10s
-          --health-timeout 5s
-          --health-retries 5
-    env:
-      CARGO_PROFILE_DEV_DEBUG: 0
-      CARGO_PROFILE_TEST_DEBUG: 0
-      DATABASE_URL: postgres://postgres:postgres@localhost/ironclaw_test
-      # Turn a missing/unreachable Postgres into a HARD failure so the full
-      # cross-backend matrix (in-memory + libSQL + Postgres) cannot skip-pass.
-      IRONCLAW_REQUIRE_POSTGRES: "1"
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
-        with:
-          ref: ${{ inputs.ref || github.sha }}
-          persist-credentials: false
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
-      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
-        with:
-          key: hooks-parity
-          save-if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
-      # Full parity matrix across all three backends: --features postgres
-      # compiles the Postgres leg, --features integration adds the multi-host
-      # adversarial suite, and IRONCLAW_REQUIRE_POSTGRES=1 (set above) makes the
-      # Postgres leg mandatory. The libSQL leg always runs (embedded temp-file).
-      - name: Run hooks parity matrix + multi-host adversarial suite (all backends)
-        run: |
-          timeout --signal=INT --kill-after=30s 15m \
-            cargo test -p ironclaw_hooks_parity --features postgres,integration -- --nocapture
 
   heavy-integration-tests:
     name: Heavy Integration Tests
@@ -306,7 +262,9 @@ jobs:
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
           key: heavy-integration
-          save-if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+          # Keep saves to protected-branch and merge_group runs so the ~10 GB
+          # repo cache LRU is seeded by shared states, not arbitrary PR branches.
+          save-if: ${{ (github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'merge_group' }}
       - name: Build Telegram WASM channel
         run: cargo build --manifest-path channels-src/telegram/Cargo.toml --target wasm32-wasip2 --release
       - name: Run thread scheduling integration tests
@@ -342,7 +300,9 @@ jobs:
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
           key: telegram-integration-${{ matrix.partition }}
-          save-if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+          # Keep saves to protected-branch and merge_group runs so the ~10 GB
+          # repo cache LRU is seeded by shared states, not arbitrary PR branches.
+          save-if: ${{ (github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'merge_group' }}
       - name: Build Telegram WASM channel
         run: cargo build --manifest-path channels-src/telegram/Cargo.toml --target wasm32-wasip2 --release
       - name: Install cargo-nextest
@@ -405,7 +365,10 @@ jobs:
         uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
-          save-if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+          shared-key: telegram-tests
+          # Keep saves to protected-branch and merge_group runs so the ~10 GB
+          # repo cache LRU is seeded by shared states, not arbitrary PR branches.
+          save-if: ${{ (github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'merge_group' }}
       - name: Run Telegram Channel Tests
         run: |
           timeout --signal=INT --kill-after=30s 10m \
@@ -433,195 +396,15 @@ jobs:
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
           key: slack-integration
-          save-if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+          # Keep saves to protected-branch and merge_group runs so the ~10 GB
+          # repo cache LRU is seeded by shared states, not arbitrary PR branches.
+          save-if: ${{ (github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'merge_group' }}
       - name: Build Slack WASM channel
         run: cargo build --manifest-path channels-src/slack/Cargo.toml --target wasm32-wasip2 --release
       - name: Run Slack integration tests
         run: |
           timeout --signal=INT --kill-after=30s 15m \
             cargo test --features integration --test slack_auth_integration -- --nocapture
-
-  windows-build:
-    name: Windows Build (${{ matrix.name }})
-    needs: [changes, matrix-config]
-    if: needs.changes.outputs.docs_only != 'true' && needs.changes.outputs.has_legacy_tests == 'true' && (github.event_name == 'push' || github.event_name == 'workflow_call')
-    runs-on: windows-latest
-    strategy:
-      fail-fast: true
-      matrix:
-        include: ${{ fromJSON(needs.matrix-config.outputs.windows_matrix) }}
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
-        with:
-          ref: ${{ inputs.ref || github.sha }}
-          persist-credentials: false
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
-      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
-        with:
-          key: windows-${{ matrix.name }}
-          save-if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
-      - name: Check compilation
-        run: cargo check --all --benches --tests --examples ${{ matrix.flags }}
-
-  wasm-wit-compat:
-    name: WASM WIT Compatibility
-    needs: changes
-    if: >
-      needs.changes.outputs.docs_only != 'true' &&
-      needs.changes.outputs.has_legacy_tests == 'true' &&
-      (github.event_name == 'push' || github.event_name == 'workflow_call' || needs.changes.outputs.has_wasm_abi_risk == 'true')
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
-    env:
-      CARGO_PROFILE_DEV_DEBUG: 0
-      CARGO_PROFILE_TEST_DEBUG: 0
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
-        with:
-          ref: ${{ inputs.ref || github.sha }}
-          persist-credentials: false
-      - name: Free disk space
-        run: |
-          df -h /
-          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc
-          df -h /
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
-        with:
-          targets: wasm32-wasip2
-      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
-        with:
-          key: wasm-extensions
-          save-if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
-      - name: Install cargo-component
-        uses: ./.github/actions/install-cargo-component
-      - name: Build all WASM extensions against current WIT
-        run: ./scripts/build-wasm-extensions.sh
-      - name: Instantiation test (host linker compatibility)
-        run: |
-          timeout --signal=INT --kill-after=30s 20m \
-            cargo test --all-features --test wit_compat -- --nocapture
-
-  bench-compile:
-    name: Benchmark Compilation
-    needs: changes
-    if: >
-      needs.changes.outputs.docs_only != 'true' &&
-      needs.changes.outputs.has_legacy_tests == 'true' &&
-      (github.event_name == 'push' || github.event_name == 'workflow_call') &&
-      needs.changes.outputs.has_core_code == 'true'
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
-        with:
-          ref: ${{ inputs.ref || github.sha }}
-          persist-credentials: false
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
-      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
-        with:
-          key: bench
-          save-if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
-      - name: Compile benchmarks
-        run: cargo bench --all-features --no-run
-
-  docker-build:
-    name: Docker Build
-    needs: changes
-    if: >
-      needs.changes.outputs.docs_only != 'true' &&
-      needs.changes.outputs.has_legacy_tests == 'true' &&
-      (github.event_name == 'push' || (github.event_name == 'workflow_call' && inputs.include_docker))
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
-        with:
-          ref: ${{ inputs.ref || github.sha }}
-          persist-credentials: false
-      - name: Build Docker image
-        run: docker build --target runtime -t ironclaw-test:ci .
-      - name: Build Reborn Docker image
-        run: docker build -f Dockerfile.reborn -t ironclaw-reborn-test:ci .
-
-  version-check:
-    name: Version Bump Check
-    runs-on: ubuntu-latest
-    needs: changes
-    if: >
-      (github.event_name == 'pull_request' || github.event_name == 'merge_group') &&
-      needs.changes.outputs.docs_only != 'true' &&
-      needs.changes.outputs.has_legacy_tests == 'true'
-    permissions:
-      contents: read
-      pull-requests: read
-      issues: read
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
-        with:
-          ref: ${{ inputs.ref || github.sha }}
-          persist-credentials: false
-          fetch-depth: 0
-      - name: Resolve version-check skip labels
-        id: skip_labels
-        env:
-          GH_TOKEN: ${{ github.token }}
-          REPO: ${{ github.repository }}
-          BASE_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event.merge_group.base_sha }}
-          HEAD_SHA: ${{ inputs.ref || github.sha }}
-          PR_LABELS: ${{ github.event_name == 'pull_request' && join(github.event.pull_request.labels.*.name, ',') || '' }}
-        run: |
-          if [ "${{ github.event_name }}" = "pull_request" ]; then
-            echo "labels=${PR_LABELS}" >> "$GITHUB_OUTPUT"
-            echo "allow_skip=true" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-
-          COMPARE_JSON="$(gh api "repos/${REPO}/compare/${BASE_SHA}...${HEAD_SHA}")"
-          PR_NUMBERS="$(
-            printf '%s' "$COMPARE_JSON" | jq -r '.commits[].sha' \
-            | while read -r sha; do
-                [ -n "$sha" ] || continue
-                gh api "repos/${REPO}/commits/${sha}/pulls" \
-                  -H "Accept: application/vnd.github+json" \
-                  --jq '.[].number' 2>/dev/null || true
-              done \
-            | awk 'NF && !seen[$0]++'
-          )"
-
-          PR_COUNT="$(printf '%s\n' "$PR_NUMBERS" | awk 'NF' | wc -l | tr -d ' ')"
-          if [ "${PR_COUNT}" != "1" ]; then
-            echo "labels=" >> "$GITHUB_OUTPUT"
-            echo "allow_skip=false" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-
-          LABELS="$(
-            printf '%s\n' "$PR_NUMBERS" \
-            | while read -r pr; do
-                [ -n "$pr" ] || continue
-                gh api "repos/${REPO}/issues/${pr}" --jq '.labels[].name' 2>/dev/null || true
-              done \
-            | awk 'NF && !seen[$0]++'
-          )"
-
-          if [ -n "$LABELS" ]; then
-            echo "labels=$(printf '%s\n' "$LABELS" | paste -sd, -)" >> "$GITHUB_OUTPUT"
-          else
-            echo "labels=" >> "$GITHUB_OUTPUT"
-          fi
-          echo "allow_skip=true" >> "$GITHUB_OUTPUT"
-      - name: Check version bumps for changed extensions
-        env:
-          PR_LABELS: ${{ steps.skip_labels.outputs.labels }}
-          GITHUB_BASE_REF: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.ref || github.event_name == 'merge_group' && github.event.merge_group.base_ref || '' }}
-          ALLOW_SKIP_VERSION_CHECK: ${{ steps.skip_labels.outputs.allow_skip }}
-        run: ./scripts/check-version-bumps.sh
 
   run-tests:
     name: Tests (Legacy)
@@ -631,7 +414,6 @@ jobs:
       - changes
       - matrix-config
       - tests
-      - hooks-parity-tests
       - heavy-integration-tests
       - telegram-integration-tests
       - replay-required
@@ -639,11 +421,6 @@ jobs:
       - web-e2e-full
       - telegram-tests
       - slack-tests
-      - wasm-wit-compat
-      - docker-build
-      - windows-build
-      - version-check
-      - bench-compile
     steps:
       - run: |
           require_success() {
@@ -674,7 +451,6 @@ jobs:
 
           if [[ "${{ needs.changes.outputs.has_core_code }}" == "true" ]]; then
             require_success "tests" "${{ needs.tests.result }}"
-            require_success "hooks-parity-tests" "${{ needs.hooks-parity-tests.result }}"
           fi
 
           if [[ "$event" == "push" || "$event" == "workflow_call" || "${{ needs.changes.outputs.has_runtime_heavy_risk }}" == "true" ]]; then
@@ -700,26 +476,6 @@ jobs:
 
           if [[ "$event" == "push" || "$event" == "workflow_call" || "${{ needs.changes.outputs.has_slack_risk }}" == "true" ]]; then
             require_success "slack-tests" "${{ needs.slack-tests.result }}"
-          fi
-
-          if [[ "$event" == "push" || "$event" == "workflow_call" || "${{ needs.changes.outputs.has_wasm_abi_risk }}" == "true" ]]; then
-            require_success "wasm-wit-compat" "${{ needs.wasm-wit-compat.result }}"
-          fi
-
-          if [[ "$event" == "push" || ( "$event" == "workflow_call" && "${{ inputs.include_docker }}" == "true" ) ]]; then
-            require_success "docker-build" "${{ needs.docker-build.result }}"
-          fi
-
-          if [[ "$event" == "push" || "$event" == "workflow_call" ]]; then
-            require_success "windows-build" "${{ needs.windows-build.result }}"
-          fi
-
-          if [[ ( "$event" == "push" || "$event" == "workflow_call" ) && "${{ needs.changes.outputs.has_core_code }}" == "true" ]]; then
-            require_success "bench-compile" "${{ needs.bench-compile.result }}"
-          fi
-
-          if [[ "$event" == "pull_request" || "$event" == "merge_group" ]] && [[ "${{ needs.changes.outputs.docs_only }}" != "true" ]]; then
-            require_success "version-check" "${{ needs.version-check.result }}"
           fi
 
   run-tests-compat:

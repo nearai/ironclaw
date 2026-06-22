@@ -82,6 +82,7 @@ async fn default_runtime_installs_configured_builtin_obligation_services() {
             context.resource_scope.clone(),
             secret_handle,
             SecretMaterial::from("runtime-secret"),
+            None,
         )
         .await
         .unwrap();

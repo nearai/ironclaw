@@ -84,10 +84,37 @@ It is the source of truth for fire eligibility.
 
 - `Scheduled` means the trigger may be polled and fired.
 - `Paused` means the trigger is retained but must not fire.
-- `Completed` is reserved for future finite schedules and must not be treated as a V1 cron-state requirement.
+- `Completed` is the terminal state reached when a `complete_after_first_fire`
+  trigger fires successfully. `clear_active_fire` transitions the trigger to
+  `Completed` (soft-complete) after the run reaches a terminal outcome.
+  Completed triggers are retained and remain queryable — the model-visible
+  `trigger_list` capability surfaces all states, and
+  `GET /api/webchat/v2/automations?include_completed=true` returns them — but
+  the default WebUI automations panel excludes `Completed` entries to avoid
+  cluttering the active list with triggers that will never fire again.
 - V1 does not expose a separate `enabled` field. Durable backends may add
   denormalized indexes derived from `state == Scheduled`, but those indexes must
   never become independent fire gates.
+
+### 3.4 Completion policy
+
+`TriggerRecord.completion_policy` controls what happens after a successful fire:
+
+- `Recurring` — the trigger keeps firing on its cron schedule. (For
+  `trigger_create`, callers must provide `completion_policy` explicitly; this
+  describes behavioral semantics, not input defaulting.) After
+  `clear_active_fire` observes a terminal turn outcome, the trigger stays in
+  `Scheduled` and the poller resumes normal cadence.
+- `CompleteAfterFirstFire` — fire-once semantics. After `clear_active_fire`
+  observes a terminal turn outcome, the trigger transitions to `Completed`.
+  The year-pinned cron pattern (scheduling the trigger for a single past-future
+  slot) combined with `complete_after_first_fire` is the V1 one-shot
+  implementation. Subsequent poll ticks skip the trigger because its state is
+  `Completed`.
+
+Run threads for completed triggers remain accessible by design; their history is
+retained user data and must not become unreachable when the trigger transitions
+to `Completed`.
 
 ---
 

@@ -469,7 +469,8 @@ const _: fn(&CredentialCacheEntry) = |entry| {
 mod tests {
     use super::*;
     use ironclaw_host_api::{
-        InvocationId, NetworkMethod, NetworkPolicy, ResourceScope, RuntimeKind, TenantId, UserId,
+        InvocationId, NetworkMethod, NetworkPolicy, ResourceScope, RuntimeKind, TenantId,
+        Timestamp, UserId,
     };
     use ironclaw_secrets::{
         InMemorySecretStore, SecretLease, SecretLeaseId, SecretMetadata, SecretStoreError,
@@ -590,6 +591,7 @@ mod tests {
             scope.clone(),
             handle.clone(),
             SecretMaterial::from("sk-test-secret"),
+            None,
         ))
         .unwrap();
 
@@ -621,8 +623,13 @@ mod tests {
             scope: ResourceScope,
             handle: SecretHandle,
             _material: SecretMaterial,
+            _expires_at: Option<Timestamp>,
         ) -> Result<SecretMetadata, SecretStoreError> {
-            Ok(SecretMetadata { scope, handle })
+            Ok(SecretMetadata {
+                scope,
+                handle,
+                expires_at: None,
+            })
         }
 
         async fn metadata(
@@ -633,6 +640,7 @@ mod tests {
             Ok(Some(SecretMetadata {
                 scope: self.scope.clone(),
                 handle: self.handle.clone(),
+                expires_at: None,
             }))
         }
 
@@ -699,9 +707,10 @@ mod tests {
             scope: ResourceScope,
             handle: SecretHandle,
             material: SecretMaterial,
+            expires_at: Option<Timestamp>,
         ) -> Result<SecretMetadata, SecretStoreError> {
             Self::yield_to_tokio().await;
-            self.inner.put(scope, handle, material).await
+            self.inner.put(scope, handle, material, expires_at).await
         }
 
         async fn metadata(

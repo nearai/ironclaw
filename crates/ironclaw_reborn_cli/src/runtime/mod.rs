@@ -7,16 +7,17 @@ use anyhow::Context;
 #[cfg(feature = "webui-v2-beta")]
 use ironclaw_reborn_composition::host_api::UserId;
 use ironclaw_reborn_composition::host_api::{AgentId, TenantId};
+use ironclaw_reborn_composition::{
+    CredentialRefreshSettings, DEFAULT_TURN_RUNNER_WORKER_COUNT, OAuthClientConfig,
+    OperatorLogLayer, PollSettings, RebornBuildInput, RebornCompositionProfile,
+    RebornLocalRuntimeProfileOptions, RebornRuntimeIdentity, RebornRuntimeInput,
+    TurnRunnerSettings, build_reborn_runtime, local_runtime_build_input_with_options,
+    nearai_mcp_bootstrap_config_from_env,
+};
 #[cfg(feature = "webui-v2-beta")]
 use ironclaw_reborn_composition::{
     LocalTriggerAccessReconciliation, LocalTriggerAccessRole, LocalTriggerAccessSource,
     open_local_trigger_access_store,
-};
-use ironclaw_reborn_composition::{
-    OAuthClientConfig, OperatorLogLayer, PollSettings, RebornBuildInput, RebornCompositionProfile,
-    RebornLocalRuntimeProfileOptions, RebornRuntimeIdentity, RebornRuntimeInput,
-    TurnRunnerSettings, build_reborn_runtime, local_runtime_build_input_with_options,
-    nearai_mcp_bootstrap_config_from_env,
 };
 use ironclaw_reborn_config::{
     REBORN_PROFILE_ENV, RebornBootConfig, RebornProfile, seed_default_config_file_if_missing,
@@ -368,6 +369,50 @@ pub(crate) fn build_runtime_input(
     build_runtime_input_with_options(config, caller, RuntimeInputOptions::default())
 }
 
+/// Build [`CredentialRefreshSettings`] for the proactive Google OAuth keepalive
+/// worker.
+///
+/// Enabled by default on the local `serve` surface (so refresh tokens stay warm
+/// for long-running deployments) and disabled for every other caller, mirroring
+/// the trigger-poller default. `IRONCLAW_CREDENTIAL_REFRESH_ENABLED` is an
+/// operator override: `1`/`true` forces it on, `0`/`false` is a kill-switch; a
+/// present-but-blank value falls through to the caller default.
+fn credential_refresh_settings(
+    caller: RuntimeInputCaller,
+) -> anyhow::Result<CredentialRefreshSettings> {
+    let base = if caller == RuntimeInputCaller::Serve {
+        CredentialRefreshSettings::enabled()
+    } else {
+        CredentialRefreshSettings::default()
+    };
+    apply_credential_refresh_override(base, std::env::var("IRONCLAW_CREDENTIAL_REFRESH_ENABLED"))
+}
+
+/// Apply the `IRONCLAW_CREDENTIAL_REFRESH_ENABLED` operator override to a base
+/// settings value. Pure (env lookup is passed in) so the override semantics are
+/// unit-testable without mutating process-global environment state.
+fn apply_credential_refresh_override(
+    mut settings: CredentialRefreshSettings,
+    raw: Result<String, std::env::VarError>,
+) -> anyhow::Result<CredentialRefreshSettings> {
+    match raw {
+        Ok(raw) => match raw.trim().to_ascii_lowercase().as_str() {
+            "" => {}
+            "1" | "true" => settings.enabled = true,
+            "0" | "false" => settings.enabled = false,
+            _ => anyhow::bail!(
+                "IRONCLAW_CREDENTIAL_REFRESH_ENABLED must be one of 1, true, 0, false"
+            ),
+        },
+        Err(std::env::VarError::NotPresent) => {}
+        Err(std::env::VarError::NotUnicode(_)) => {
+            anyhow::bail!("IRONCLAW_CREDENTIAL_REFRESH_ENABLED contains non-UTF-8 bytes")
+        }
+    }
+
+    Ok(settings)
+}
+
 pub(crate) fn build_runtime_input_with_options(
     config: &RebornBootConfig,
     caller: RuntimeInputCaller,
@@ -382,6 +427,7 @@ pub(crate) fn build_runtime_input_with_options(
             runtime_services.config_file.as_ref(),
             caller,
         )?)
+        .with_credential_refresh_settings(credential_refresh_settings(caller)?)
         .with_poll_settings(PollSettings {
             interval: Duration::from_millis(200),
             max_total: Duration::from_secs(180),
@@ -750,6 +796,25 @@ fn reject_unsupported_runtime_sections(
     }
 }
 
+const MAX_WORKER_COUNT: usize = 32;
+
+/// Resolve a `[runner]` concurrency cap against the in-effect default.
+///
+/// - `None` (field absent from the file) → keep `current_default` (the value
+///   `TurnRunnerSettings::default()` already placed in `settings`).
+/// - `Some(0)` → explicit "unlimited" sentinel → `None`.
+/// - `Some(n)` → that cap.
+fn resolve_concurrency_cap(
+    raw: Option<u32>,
+    current_default: Option<std::num::NonZeroU32>,
+) -> Option<std::num::NonZeroU32> {
+    match raw {
+        None => current_default,
+        Some(0) => None,
+        Some(n) => std::num::NonZeroU32::new(n),
+    }
+}
+
 fn runner_settings(
     config_file: Option<&ironclaw_reborn_config::RebornConfigFile>,
 ) -> anyhow::Result<TurnRunnerSettings> {
@@ -769,6 +834,41 @@ fn runner_settings(
             }
             settings.poll_interval = Duration::from_millis(ms);
         }
+        // worker_count: None or Some(0) → default; clamp at MAX_WORKER_COUNT.
+        let raw_worker_count = runner.worker_count.unwrap_or(0); // silent-ok: settings read [runner].worker_count — None/0 is an explicit "use default worker count" sentinel; clamped to MAX_WORKER_COUNT to protect scheduler capacity.
+        settings.worker_count = if raw_worker_count == 0 {
+            DEFAULT_TURN_RUNNER_WORKER_COUNT
+        } else {
+            let clamped = raw_worker_count.min(MAX_WORKER_COUNT);
+            if clamped < raw_worker_count {
+                tracing::debug!(
+                    requested = raw_worker_count,
+                    clamped = MAX_WORKER_COUNT,
+                    "config file [runner].worker_count exceeds maximum; clamping"
+                );
+            }
+            // clamped is in [1, 32]: guaranteed non-zero by min() + the zero branch above.
+            std::num::NonZeroUsize::new(clamped).ok_or_else(|| {
+                anyhow::anyhow!(
+                    "config file [runner].worker_count resolved to zero (raw={raw_worker_count})"
+                )
+            })?
+        };
+
+        // Each cap: absent in the file → keep the struct default already in
+        // `settings`; explicit `0` → "unlimited" sentinel (None); positive → cap.
+        settings.max_concurrent_runs_per_user = resolve_concurrency_cap(
+            runner.max_concurrent_runs_per_user,
+            settings.max_concurrent_runs_per_user,
+        );
+        settings.max_concurrent_trigger_runs = resolve_concurrency_cap(
+            runner.max_concurrent_trigger_runs,
+            settings.max_concurrent_trigger_runs,
+        );
+        settings.max_concurrent_conversation_runs = resolve_concurrency_cap(
+            runner.max_concurrent_conversation_runs,
+            settings.max_concurrent_conversation_runs,
+        );
     }
     Ok(settings)
 }
@@ -777,20 +877,187 @@ fn runner_settings(
 mod tests {
     use std::collections::HashMap;
 
+    use ironclaw_reborn_composition::{
+        CredentialRefreshSettings, RebornCompositionProfile, TurnStatus,
+        test_support::assistant_reply_without_text_for_test,
+    };
     #[cfg(feature = "webui-v2-beta")]
     use ironclaw_reborn_composition::{LocalTriggerAccessRole, LocalTriggerAccessSource};
-    use ironclaw_reborn_composition::{
-        RebornCompositionProfile, TurnStatus, test_support::assistant_reply_without_text_for_test,
-    };
     use ironclaw_reborn_config::RebornBootConfig;
 
     use super::test_env::{EnvGuard, lock_trigger_env};
     #[cfg(feature = "webui-v2-beta")]
     use super::with_run_local_trigger_fire_access_checker;
     use super::{
-        RuntimeInputCaller, RuntimeInputOptions, block_on_cli, build_runtime_input,
+        MAX_WORKER_COUNT, RuntimeInputCaller, RuntimeInputOptions,
+        apply_credential_refresh_override, block_on_cli, build_runtime_input,
         build_runtime_input_with_options, no_assistant_text_message, resolve_google_oauth_config,
+        runner_settings,
     };
+    use ironclaw_reborn_composition::DEFAULT_TURN_RUNNER_WORKER_COUNT;
+
+    fn parse_runner_section(toml: &str) -> ironclaw_reborn_config::RebornConfigFile {
+        ironclaw_reborn_config::RebornConfigFile::parse_text(
+            toml,
+            &std::path::PathBuf::from("/test/config.toml"),
+        )
+        .expect("must parse")
+    }
+
+    #[test]
+    fn runner_settings_absent_runner_gives_defaults() {
+        let settings = runner_settings(None).expect("should succeed");
+        assert_eq!(
+            settings.worker_count.get(),
+            DEFAULT_TURN_RUNNER_WORKER_COUNT.get()
+        );
+        // Out-of-box: per-user + trigger caps protect live chat from a
+        // trigger storm; conversations stay uncapped.
+        assert_eq!(
+            settings.max_concurrent_runs_per_user.map(|v| v.get()),
+            Some(3)
+        );
+        assert_eq!(
+            settings.max_concurrent_trigger_runs.map(|v| v.get()),
+            Some(8)
+        );
+        assert!(settings.max_concurrent_conversation_runs.is_none());
+    }
+
+    #[test]
+    fn runner_settings_present_section_absent_caps_keep_defaults() {
+        // A `[runner]` section that only tunes worker_count must NOT silently
+        // wipe the protective cap defaults.
+        let cfg = parse_runner_section("[runner]\nworker_count = 7\n");
+        let settings = runner_settings(Some(&cfg)).expect("should succeed");
+        assert_eq!(settings.worker_count.get(), 7);
+        assert_eq!(
+            settings.max_concurrent_runs_per_user.map(|v| v.get()),
+            Some(3)
+        );
+        assert_eq!(
+            settings.max_concurrent_trigger_runs.map(|v| v.get()),
+            Some(8)
+        );
+        assert!(settings.max_concurrent_conversation_runs.is_none());
+    }
+
+    #[test]
+    fn runner_settings_zero_worker_count_gives_default() {
+        let cfg = parse_runner_section("[runner]\nworker_count = 0\n");
+        let settings = runner_settings(Some(&cfg)).expect("should succeed");
+        assert_eq!(
+            settings.worker_count.get(),
+            DEFAULT_TURN_RUNNER_WORKER_COUNT.get()
+        );
+    }
+
+    #[test]
+    fn runner_settings_present_worker_count_round_trips() {
+        let cfg = parse_runner_section("[runner]\nworker_count = 7\n");
+        let settings = runner_settings(Some(&cfg)).expect("should succeed");
+        assert_eq!(settings.worker_count.get(), 7);
+    }
+
+    #[test]
+    fn runner_settings_clamps_worker_count_at_max() {
+        let toml = format!("[runner]\nworker_count = {}\n", MAX_WORKER_COUNT + 10);
+        let cfg = parse_runner_section(&toml);
+        let settings = runner_settings(Some(&cfg)).expect("should succeed");
+        assert_eq!(settings.worker_count.get(), MAX_WORKER_COUNT);
+    }
+
+    #[test]
+    fn runner_settings_zero_caps_become_none_unlimited() {
+        let cfg = parse_runner_section(
+            "[runner]\nmax_concurrent_runs_per_user = 0\nmax_concurrent_trigger_runs = 0\nmax_concurrent_conversation_runs = 0\n",
+        );
+        let settings = runner_settings(Some(&cfg)).expect("should succeed");
+        assert!(settings.max_concurrent_runs_per_user.is_none());
+        assert!(settings.max_concurrent_trigger_runs.is_none());
+        assert!(settings.max_concurrent_conversation_runs.is_none());
+    }
+
+    #[test]
+    fn runner_settings_nonzero_caps_round_trip() {
+        let cfg = parse_runner_section(
+            "[runner]\nmax_concurrent_runs_per_user = 3\nmax_concurrent_trigger_runs = 5\nmax_concurrent_conversation_runs = 2\n",
+        );
+        let settings = runner_settings(Some(&cfg)).expect("should succeed");
+        assert_eq!(
+            settings.max_concurrent_runs_per_user.map(|v| v.get()),
+            Some(3)
+        );
+        assert_eq!(
+            settings.max_concurrent_trigger_runs.map(|v| v.get()),
+            Some(5)
+        );
+        assert_eq!(
+            settings.max_concurrent_conversation_runs.map(|v| v.get()),
+            Some(2)
+        );
+    }
+
+    #[test]
+    fn credential_refresh_override_keeps_caller_default_without_env() {
+        // Serve base is enabled; absent env leaves it enabled.
+        let serve = apply_credential_refresh_override(
+            CredentialRefreshSettings::enabled(),
+            Err(std::env::VarError::NotPresent),
+        )
+        .expect("absent env is valid");
+        assert!(serve.enabled, "Serve default stays on when env unset");
+        // Non-Serve base is disabled; absent env leaves it disabled.
+        let other = apply_credential_refresh_override(
+            CredentialRefreshSettings::default(),
+            Err(std::env::VarError::NotPresent),
+        )
+        .expect("absent env is valid");
+        assert!(!other.enabled, "non-Serve default stays off when env unset");
+    }
+
+    #[test]
+    fn credential_refresh_override_kill_switch_disables() {
+        for raw in ["0", "false", "FALSE", " 0 "] {
+            let out = apply_credential_refresh_override(
+                CredentialRefreshSettings::enabled(),
+                Ok(raw.to_string()),
+            )
+            .expect("valid kill-switch value");
+            assert!(!out.enabled, "kill-switch {raw:?} must disable");
+        }
+    }
+
+    #[test]
+    fn credential_refresh_override_force_on_enables() {
+        for raw in ["1", "true", "TRUE", " true "] {
+            let out = apply_credential_refresh_override(
+                CredentialRefreshSettings::default(),
+                Ok(raw.to_string()),
+            )
+            .expect("valid force-on value");
+            assert!(out.enabled, "force-on {raw:?} must enable");
+        }
+    }
+
+    #[test]
+    fn credential_refresh_override_blank_falls_through_to_base() {
+        let out = apply_credential_refresh_override(
+            CredentialRefreshSettings::enabled(),
+            Ok("   ".to_string()),
+        )
+        .expect("blank value is valid");
+        assert!(out.enabled, "blank value keeps the caller base");
+    }
+
+    #[test]
+    fn credential_refresh_override_invalid_value_is_error() {
+        let result = apply_credential_refresh_override(
+            CredentialRefreshSettings::default(),
+            Ok("maybe".to_string()),
+        );
+        assert!(result.is_err(), "invalid value must be a hard error");
+    }
 
     fn clear_trigger_poller_env() -> (EnvGuard, EnvGuard) {
         (
