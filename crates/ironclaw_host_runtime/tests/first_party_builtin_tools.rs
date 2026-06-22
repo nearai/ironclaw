@@ -384,6 +384,33 @@ async fn builtin_trigger_create_input_schema_declares_schedule_one_of() {
         kinds.contains(&"once"),
         "schedule oneOf must have an once variant; got {kinds:?}"
     );
+
+    let validator = jsonschema::validator_for(schema).expect("trigger_create schema must compile");
+    let input = json!({
+        "name": "Tuesday reminder",
+        "prompt": "Send the Tuesday reminder",
+        "schedule": {
+            "kind": "cron",
+            "expression": "0 14 * * 2",
+            "timezone": "America/Los_Angeles"
+        }
+    });
+    validator
+        .validate(&input)
+        .expect("resolved trigger_create schema must accept weekly Tuesday cron input");
+
+    let once_input = json!({
+        "name": "Dog walking reminder",
+        "prompt": "Walk the dog",
+        "schedule": {
+            "kind": "once",
+            "at": "2026-06-23T14:00:00",
+            "timezone": "America/Los_Angeles"
+        }
+    });
+    validator
+        .validate(&once_input)
+        .expect("resolved trigger_create schema must accept one-time tomorrow input");
 }
 
 #[tokio::test]
@@ -454,6 +481,41 @@ async fn builtin_trigger_create_stamps_caller_scope_and_persists_record() {
     assert_eq!(records[0].creator_user_id, context.resource_scope.user_id);
     assert_eq!(records[0].agent_id, context.resource_scope.agent_id);
     assert_eq!(records[0].project_id, context.resource_scope.project_id);
+}
+
+#[tokio::test]
+async fn builtin_trigger_create_accepts_weekly_tuesday_cron_schedule() {
+    let repository = Arc::new(InMemoryTriggerRepository::default());
+    let runtime = runtime_with_trigger_repository(repository.clone());
+    let context = execution_context([TRIGGER_CREATE_CAPABILITY_ID]);
+
+    let output = invoke_with_context(
+        &runtime,
+        TRIGGER_CREATE_CAPABILITY_ID,
+        json!({
+            "name": "Tuesday reminder",
+            "prompt": "Send the Tuesday reminder",
+            "schedule": {
+                "kind": "cron",
+                "expression": "0 14 * * 2",
+                "timezone": "America/Los_Angeles"
+            }
+        }),
+        context.clone(),
+    )
+    .await
+    .expect("weekly Tuesday cron schedule must be accepted");
+
+    assert_eq!(output["trigger"]["name"], json!("Tuesday reminder"));
+    assert_eq!(output["trigger"]["schedule"]["kind"], json!("cron"));
+
+    let records = repository
+        .list_triggers(context.resource_scope.tenant_id.clone())
+        .await
+        .unwrap();
+    assert_eq!(records.len(), 1);
+    assert_eq!(records[0].name, "Tuesday reminder");
+    assert_eq!(records[0].prompt, "Send the Tuesday reminder");
 }
 
 #[tokio::test]

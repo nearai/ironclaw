@@ -3364,6 +3364,73 @@ mod tests {
     }
 
     #[test]
+    fn provider_argument_preparation_accepts_trigger_create_weekly_cron_schedule() {
+        let schema = serde_json::json!({
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+                "name": { "type": "string" },
+                "prompt": { "type": "string" },
+                "schedule": {
+                    "oneOf": [
+                        {
+                            "type": "object",
+                            "additionalProperties": false,
+                            "properties": {
+                                "kind": { "const": "cron" },
+                                "expression": { "type": "string" },
+                                "timezone": { "type": "string" }
+                            },
+                            "required": ["kind", "expression", "timezone"]
+                        },
+                        {
+                            "type": "object",
+                            "additionalProperties": false,
+                            "properties": {
+                                "kind": { "const": "once" },
+                                "at": { "type": "string" },
+                                "timezone": { "type": "string" }
+                            },
+                            "required": ["kind", "at", "timezone"]
+                        }
+                    ]
+                }
+            },
+            "required": ["name", "prompt", "schedule"]
+        });
+
+        let input = serde_json::json!({
+            "name": "Tuesday reminder",
+            "prompt": "Send the Tuesday reminder",
+            "schedule": {
+                "kind": "cron",
+                "expression": "0 14 * * 2",
+                "timezone": "America/Los_Angeles"
+            }
+        });
+
+        let normalized = prepare_provider_arguments(&input, &schema, "provider arguments")
+            .expect("trigger_create weekly cron arguments should pass provider validation");
+
+        assert_eq!(normalized, input);
+
+        let once_input = serde_json::json!({
+            "name": "Dog walking reminder",
+            "prompt": "Walk the dog",
+            "schedule": {
+                "kind": "once",
+                "at": "2026-06-23T14:00:00",
+                "timezone": "America/Los_Angeles"
+            }
+        });
+
+        let normalized = prepare_provider_arguments(&once_input, &schema, "provider arguments")
+            .expect("trigger_create once arguments should pass provider validation");
+
+        assert_eq!(normalized, once_input);
+    }
+
+    #[test]
     fn provider_argument_preparation_rejects_unresolved_ref_schema() {
         let schema = serde_json::json!({
             "$ref": "schemas/demo/echo.input.v1.json"
