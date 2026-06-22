@@ -129,7 +129,9 @@ if [ -n "$key_env" ] && [ -z "${!key_env:-}" ]; then
   if [ -n "$api_key" ]; then
     export "$key_env=$api_key"
   else
-    echo "    warning: no key provided. Turns will fail until you export $key_env." >&2
+    echo "    error: $key_env is required for the $PROVIDER model provider." >&2
+    echo "           Export it beforehand or re-run and enter it." >&2
+    exit 1
   fi
 fi
 
