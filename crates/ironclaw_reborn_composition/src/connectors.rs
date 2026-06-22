@@ -358,24 +358,16 @@ impl ConnectorReadPort for ComposioConnectorPort {
         &self,
         request: RebornConnectorWriteRequest,
     ) -> Result<RebornConnectorReadResponse, ConnectorReadError> {
-        // Explicit write allowlist — enforced before any upstream call. Drafts
-        // are always permitted; sends require the gateway send capability.
-        match classify_connector_write(&request.tool) {
-            ConnectorWriteKind::Draft => {}
-            ConnectorWriteKind::Send if self.send_enabled => {}
-            ConnectorWriteKind::Send => {
-                return Err(ConnectorReadError::InvalidRequest {
-                    reason: format!(
-                        "tool '{}' delivers and is disabled; the gateway send capability is off",
-                        request.tool
-                    ),
-                });
-            }
-            ConnectorWriteKind::Forbidden => {
-                return Err(ConnectorReadError::InvalidRequest {
-                    reason: format!("tool '{}' is not on the write allowlist", request.tool),
-                });
-            }
+        // Explicit write allowlist — enforced before any upstream call. The
+        // decision is a pure function (`connector_write_admission`) so the
+        // security boundary is regression-locked by unit tests independent of the
+        // upstream call.
+        if let Err(reason) =
+            connector_write_admission(classify_connector_write(&request.tool), self.send_enabled)
+        {
+            return Err(ConnectorReadError::InvalidRequest {
+                reason: format!("tool '{}' {reason}", request.tool),
+            });
         }
         self.execute_tool(&request.toolkit, &request.tool, &request.arguments)
             .await
@@ -446,9 +438,39 @@ fn extract_toolkit_slug(item: &serde_json::Value) -> Option<String> {
         .map(str::to_string)
 }
 
+/// Pure write-admission decision for the connector write route. Drafts are
+/// always permitted (they create a reviewable draft and deliver nothing); sends
+/// require the gateway send capability; everything else is forbidden. Extracted
+/// from `ConnectorWritePort::write` so the security boundary is unit-tested
+/// independent of any upstream call. Returns `Ok(())` to permit, or `Err(reason)`
+/// (a trailing clause appended to "tool '<slug>' …") to reject.
+fn connector_write_admission(kind: ConnectorWriteKind, send_enabled: bool) -> Result<(), String> {
+    match kind {
+        ConnectorWriteKind::Draft => Ok(()),
+        ConnectorWriteKind::Send if send_enabled => Ok(()),
+        ConnectorWriteKind::Send => {
+            Err("delivers and is disabled; the gateway send capability is off".to_string())
+        }
+        ConnectorWriteKind::Forbidden => Err("is not on the write allowlist".to_string()),
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{extract_items, extract_toolkit_slug};
+    use super::{ConnectorWriteKind, connector_write_admission, extract_items, extract_toolkit_slug};
+
+    #[test]
+    fn write_admission_enforces_kind_x_send_enabled_matrix() {
+        // Drafts: always permitted, regardless of the send capability.
+        assert!(connector_write_admission(ConnectorWriteKind::Draft, false).is_ok());
+        assert!(connector_write_admission(ConnectorWriteKind::Draft, true).is_ok());
+        // Sends: permitted ONLY when the gateway send capability is on.
+        assert!(connector_write_admission(ConnectorWriteKind::Send, true).is_ok());
+        assert!(connector_write_admission(ConnectorWriteKind::Send, false).is_err());
+        // Forbidden (deletes / unlisted): never permitted, even with sends on.
+        assert!(connector_write_admission(ConnectorWriteKind::Forbidden, true).is_err());
+        assert!(connector_write_admission(ConnectorWriteKind::Forbidden, false).is_err());
+    }
 
     #[test]
     fn extract_items_handles_envelope_and_bare_array() {
