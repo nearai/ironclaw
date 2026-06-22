@@ -1927,6 +1927,7 @@ async fn tick_source_provider_errors_report_bounded_permanent_reasons() {
         ),
         (
             TriggerError::InvalidRecord {
+                kind: crate::TriggerRecordValidationKind::Other,
                 reason: "bad record".to_string(),
             },
             TriggerPollerFailureReason::InvalidRecord,

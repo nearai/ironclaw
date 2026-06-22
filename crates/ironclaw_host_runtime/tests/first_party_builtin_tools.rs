@@ -856,6 +856,149 @@ async fn builtin_trigger_create_rejects_missing_schedule_before_persistence() {
     );
 }
 
+#[tokio::test]
+async fn builtin_trigger_create_surfaces_structured_invalid_input_detail() {
+    let cases = [
+        (
+            "old flat cron field",
+            json!({
+                "name": "Legacy shape",
+                "prompt": "Run work",
+                "cron": "*/3 * * * *",
+                "timezone": "UTC"
+            }),
+            vec![
+                ("cron", DispatchInputIssueCode::UnexpectedField),
+                ("timezone", DispatchInputIssueCode::UnexpectedField),
+                ("schedule", DispatchInputIssueCode::MissingRequired),
+            ],
+        ),
+        (
+            "non-object input",
+            json!("not an object"),
+            vec![("input", DispatchInputIssueCode::TypeMismatch)],
+        ),
+        (
+            "non-string name",
+            json!({
+                "name": 42,
+                "prompt": "Run work",
+                "schedule": { "kind": "cron", "expression": "*/3 * * * *", "timezone": "UTC" }
+            }),
+            vec![("name", DispatchInputIssueCode::TypeMismatch)],
+        ),
+        (
+            "non-object schedule",
+            json!({
+                "name": "Bad schedule",
+                "prompt": "Run work",
+                "schedule": "*/3 * * * *"
+            }),
+            vec![("schedule", DispatchInputIssueCode::TypeMismatch)],
+        ),
+        (
+            "missing schedule kind",
+            json!({
+                "name": "Missing kind",
+                "prompt": "Run work",
+                "schedule": { "expression": "*/3 * * * *", "timezone": "UTC" }
+            }),
+            vec![("schedule.kind", DispatchInputIssueCode::MissingRequired)],
+        ),
+        (
+            "non-string schedule kind",
+            json!({
+                "name": "Bad kind",
+                "prompt": "Run work",
+                "schedule": { "kind": 7, "expression": "*/3 * * * *", "timezone": "UTC" }
+            }),
+            vec![("schedule.kind", DispatchInputIssueCode::TypeMismatch)],
+        ),
+        (
+            "missing schedule timezone",
+            json!({
+                "name": "Missing timezone",
+                "prompt": "Run work",
+                "schedule": { "kind": "cron", "expression": "*/3 * * * *" }
+            }),
+            vec![("schedule.timezone", DispatchInputIssueCode::MissingRequired)],
+        ),
+        (
+            "unexpected root field",
+            json!({
+                "name": "Extra root",
+                "prompt": "Run work",
+                "extra": true,
+                "schedule": { "kind": "cron", "expression": "*/3 * * * *", "timezone": "UTC" }
+            }),
+            vec![("extra", DispatchInputIssueCode::UnexpectedField)],
+        ),
+        (
+            "unexpected schedule field",
+            json!({
+                "name": "Extra schedule",
+                "prompt": "Run work",
+                "schedule": {
+                    "kind": "cron",
+                    "expression": "*/3 * * * *",
+                    "timezone": "UTC",
+                    "extra": true
+                }
+            }),
+            vec![("schedule.extra", DispatchInputIssueCode::UnexpectedField)],
+        ),
+        (
+            "invalid cron cadence",
+            json!({
+                "name": "Too fast",
+                "prompt": "Run work",
+                "schedule": { "kind": "cron", "expression": "* * * * * *", "timezone": "UTC" }
+            }),
+            vec![("schedule.expression", DispatchInputIssueCode::InvalidValue)],
+        ),
+        (
+            "invalid timezone",
+            json!({
+                "name": "Invalid timezone",
+                "prompt": "Run work",
+                "schedule": { "kind": "cron", "expression": "*/3 * * * *", "timezone": "Not/A/Timezone" }
+            }),
+            vec![("schedule.timezone", DispatchInputIssueCode::InvalidValue)],
+        ),
+    ];
+
+    for (case_name, input, expected_issues) in cases {
+        let repository = Arc::new(InMemoryTriggerRepository::default());
+        let runtime = runtime_with_trigger_repository(repository.clone());
+        let context = execution_context([TRIGGER_CREATE_CAPABILITY_ID]);
+
+        let failure = invoke_failure_with_context(
+            &runtime,
+            TRIGGER_CREATE_CAPABILITY_ID,
+            input,
+            context.clone(),
+        )
+        .await;
+
+        assert_eq!(
+            failure.kind,
+            RuntimeFailureKind::InvalidInput,
+            "{case_name}"
+        );
+        for (path, code) in expected_issues {
+            assert_failure_has_input_issue(&failure, path, code, case_name);
+        }
+        assert!(
+            repository
+                .list_triggers(context.resource_scope.tenant_id)
+                .await
+                .unwrap()
+                .is_empty(),
+            "{case_name}: no trigger should be persisted"
+        );
+    }
+}
+
 /// Positive path: a future `once` schedule must be accepted, persisted,
 /// and round-trip the TriggerSchedule::Once variant correctly.
 ///
@@ -6996,6 +7139,26 @@ async fn invoke_failure_with_context<R: HostRuntime + ?Sized>(
         RuntimeCapabilityOutcome::Failed(failure) => failure,
         other => panic!("unexpected capability outcome: {other:?}"),
     }
+}
+
+fn assert_failure_has_input_issue(
+    failure: &RuntimeCapabilityFailure,
+    path: &str,
+    code: DispatchInputIssueCode,
+    case_name: &str,
+) {
+    let Some(DispatchFailureDetail::InvalidInput { issues }) = &failure.detail else {
+        panic!(
+            "{case_name}: expected invalid-input detail, got {:?}",
+            failure.detail
+        );
+    };
+    assert!(
+        issues
+            .iter()
+            .any(|issue| issue.path == path && issue.code == code),
+        "{case_name}: expected issue {path} {code:?}, got {issues:?}"
+    );
 }
 
 fn runtime() -> impl HostRuntime {

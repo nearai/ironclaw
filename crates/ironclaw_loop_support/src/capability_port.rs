@@ -5,7 +5,8 @@ use std::{
 
 use async_trait::async_trait;
 use ironclaw_host_api::{
-    CapabilityDisplayOutputPreview, CapabilityId, CapabilitySet, CorrelationId, EffectKind,
+    CapabilityDisplayOutputPreview, CapabilityId, CapabilitySet, CorrelationId,
+    DispatchFailureDetail, DispatchInputIssue, DispatchInputIssueCode, EffectKind,
     ExecutionContext, ExtensionId, InvocationId, MountView, Principal, ResourceEstimate,
     RuntimeKind, sha256_digest_token,
 };
@@ -22,7 +23,8 @@ use ironclaw_turns::{
         AgentLoopHostError, AgentLoopHostErrorKind, CapabilityApprovalResume, CapabilityAuthResume,
         CapabilityBatchInvocation, CapabilityBatchOutcome, CapabilityDenied,
         CapabilityDeniedReasonKind, CapabilityDescriptorView, CapabilityFailure,
-        CapabilityFailureKind, CapabilityInputRef, CapabilityInvocation, CapabilityOutcome,
+        CapabilityFailureDetail, CapabilityFailureKind, CapabilityInputIssue,
+        CapabilityInputIssueCode, CapabilityInputRef, CapabilityInvocation, CapabilityOutcome,
         CapabilityResultMessage, CapabilityResumeToken, ConcurrencyHint, ContentDigest,
         LoopCapabilityPort, LoopHostMilestone, LoopHostMilestoneKind, LoopHostMilestoneSink,
         LoopProcessRef, LoopRunContext, LoopSafeSummary, ProcessHandleSummary, ProviderToolCall,
@@ -2354,8 +2356,40 @@ fn runtime_model_visible_failure_to_loop(
     Ok(CapabilityOutcome::Failed(CapabilityFailure {
         error_kind: model_visible_runtime_failure_kind_to_loop(failure.kind)?,
         safe_summary: runtime_failure_safe_summary(&failure, "capability invocation failed"),
-        detail: None,
+        detail: runtime_failure_detail_to_loop(failure.detail),
     }))
+}
+
+fn runtime_failure_detail_to_loop(
+    detail: Option<DispatchFailureDetail>,
+) -> Option<CapabilityFailureDetail> {
+    detail.map(|DispatchFailureDetail::InvalidInput { issues }| {
+        CapabilityFailureDetail::InvalidInput {
+            issues: issues
+                .into_iter()
+                .map(dispatch_input_issue_to_loop)
+                .collect(),
+        }
+    })
+}
+
+fn dispatch_input_issue_to_loop(issue: DispatchInputIssue) -> CapabilityInputIssue {
+    CapabilityInputIssue {
+        path: issue.path,
+        code: dispatch_input_issue_code_to_loop(issue.code),
+        expected: issue.expected,
+        received: issue.received,
+        schema_path: issue.schema_path,
+    }
+}
+
+fn dispatch_input_issue_code_to_loop(code: DispatchInputIssueCode) -> CapabilityInputIssueCode {
+    match code {
+        DispatchInputIssueCode::MissingRequired => CapabilityInputIssueCode::MissingRequired,
+        DispatchInputIssueCode::UnexpectedField => CapabilityInputIssueCode::UnexpectedField,
+        DispatchInputIssueCode::TypeMismatch => CapabilityInputIssueCode::TypeMismatch,
+        DispatchInputIssueCode::InvalidValue => CapabilityInputIssueCode::InvalidValue,
+    }
 }
 
 fn runtime_failure_kind_to_loop(
@@ -2806,6 +2840,30 @@ mod tests {
             CapabilityOutcome::Failed(failure)
                 if failure.error_kind == CapabilityFailureKind::InvalidInput
                     && failure.safe_summary == "capability invocation failed"
+        ));
+
+        let issue =
+            DispatchInputIssue::new("schedule.kind", DispatchInputIssueCode::MissingRequired)
+                .expected("cron or once");
+        let detailed_invalid_input = runtime_failure_to_loop(
+            RuntimeCapabilityFailure::new(
+                capability_id.clone(),
+                RuntimeFailureKind::InvalidInput,
+                Some("trigger_create input failed validation".to_string()),
+            )
+            .with_detail(DispatchFailureDetail::InvalidInput {
+                issues: vec![issue],
+            }),
+        )
+        .expect("convert invalid input with runtime detail");
+        assert!(matches!(
+            detailed_invalid_input,
+            CapabilityOutcome::Failed(CapabilityFailure {
+                detail: Some(CapabilityFailureDetail::InvalidInput { issues }),
+                ..
+            }) if issues.len() == 1
+                && issues[0].path == "schedule.kind"
+                && issues[0].code == CapabilityInputIssueCode::MissingRequired
         ));
 
         let denied = runtime_failure_to_loop(RuntimeCapabilityFailure::new(
@@ -4063,6 +4121,7 @@ mod tests {
                     capability_id: CapabilityId::new("demo.echo").expect("valid capability id"),
                     kind: RuntimeFailureKind::InvalidInput,
                     message: Some("invalid input".to_string()),
+                    detail: None,
                 }),
                 CapabilityFailureKind::InvalidInput,
             ),

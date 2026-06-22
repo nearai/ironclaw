@@ -27,8 +27,8 @@
 use async_trait::async_trait;
 use ironclaw_host_api::{
     ApprovalRequestId, CapabilityDisplayOutputPreview, CapabilityId, CorrelationId,
-    ExecutionContext, ExtensionId, ProcessId, ResourceEstimate, ResourceScope, ResourceUsage,
-    RuntimeCredentialAuthRequirement, RuntimeKind, SecretHandle,
+    DispatchFailureDetail, ExecutionContext, ExtensionId, ProcessId, ResourceEstimate,
+    ResourceScope, ResourceUsage, RuntimeCredentialAuthRequirement, RuntimeKind, SecretHandle,
     runtime_policy::{DeploymentMode, EffectiveRuntimePolicy, RuntimeProfile},
 };
 use ironclaw_trust::TrustDecision;
@@ -581,6 +581,7 @@ pub struct RuntimeCapabilityFailure {
     pub capability_id: CapabilityId,
     pub kind: RuntimeFailureKind,
     pub message: Option<String>,
+    pub detail: Option<DispatchFailureDetail>,
 }
 
 /// Explicit fallback for outcome categories that the loop adapter cannot handle
@@ -760,7 +761,13 @@ impl RuntimeCapabilityFailure {
             capability_id,
             kind,
             message,
+            detail: None,
         }
+    }
+
+    pub fn with_detail(mut self, detail: DispatchFailureDetail) -> Self {
+        self.detail = Some(detail);
+        self
     }
 
     pub fn safe_summary(&self) -> Option<String> {
