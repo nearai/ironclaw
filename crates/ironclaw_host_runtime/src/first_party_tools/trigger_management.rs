@@ -468,46 +468,24 @@ fn classify_trigger_create_shape(input: &Value) -> Vec<DispatchInputIssue> {
             issues.push(missing_required("schedule.kind").expected("cron or once"));
         }
         Some(Value::String(kind)) if kind == "cron" => {
-            unexpected_fields(
+            schedule_variant_shape_issues(
                 schedule,
                 &["kind", "expression", "timezone"],
-                "schedule.unexpected_field",
-                &mut issues,
-            );
-            required_string(
-                schedule,
-                "expression",
-                "schedule.expression",
-                "cron expression",
-                &mut issues,
-            );
-            required_string(
-                schedule,
-                "timezone",
-                "schedule.timezone",
-                "IANA timezone name",
+                &[
+                    ("expression", "schedule.expression", "cron expression"),
+                    ("timezone", "schedule.timezone", "IANA timezone name"),
+                ],
                 &mut issues,
             );
         }
         Some(Value::String(kind)) if kind == "once" => {
-            unexpected_fields(
+            schedule_variant_shape_issues(
                 schedule,
                 &["kind", "at", "timezone"],
-                "schedule.unexpected_field",
-                &mut issues,
-            );
-            required_string(
-                schedule,
-                "at",
-                "schedule.at",
-                "YYYY-MM-DDTHH:MM:SS",
-                &mut issues,
-            );
-            required_string(
-                schedule,
-                "timezone",
-                "schedule.timezone",
-                "IANA timezone name",
+                &[
+                    ("at", "schedule.at", "YYYY-MM-DDTHH:MM:SS"),
+                    ("timezone", "schedule.timezone", "IANA timezone name"),
+                ],
                 &mut issues,
             );
         }
@@ -521,6 +499,23 @@ fn classify_trigger_create_shape(input: &Value) -> Vec<DispatchInputIssue> {
         issues.push(invalid_value("input").expected("valid trigger_create input"));
     }
     issues
+}
+
+fn schedule_variant_shape_issues(
+    schedule: &serde_json::Map<String, Value>,
+    allowed_fields: &[&str],
+    required_strings: &[(&'static str, &'static str, &'static str)],
+    issues: &mut Vec<DispatchInputIssue>,
+) {
+    unexpected_fields(
+        schedule,
+        allowed_fields,
+        "schedule.unexpected_field",
+        issues,
+    );
+    for (field, path, expected) in required_strings {
+        required_string(schedule, field, path, expected, issues);
+    }
 }
 
 fn unexpected_fields(
