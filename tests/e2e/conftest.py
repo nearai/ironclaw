@@ -22,6 +22,9 @@ import pytest
 
 from helpers import (
     AUTH_TOKEN,
+    EMULATE_GITHUB_BEARER,
+    EMULATE_GOOGLE_BEARER,
+    EMULATE_SLACK_BEARER,
     HTTP_WEBHOOK_SECRET,
     OWNER_SCOPE_ID,
     wait_for_port_line,
@@ -63,9 +66,9 @@ EMULATE_NPM_PACKAGE = "emulate@0.7.0"
 EMULATE_GOOGLE_SEED = ROOT / "tests/e2e/fixtures/emulate/google_gmail.yaml"
 EMULATE_SLACK_SEED = ROOT / "tests/e2e/fixtures/emulate/slack.yaml"
 EMULATE_GITHUB_SEED = ROOT / "tests/e2e/fixtures/emulate/github.yaml"
-EMULATE_GOOGLE_READY_TOKEN = "mock-refreshed-access-token"
-EMULATE_SLACK_READY_TOKEN = "emulate-slack-token"
-EMULATE_GITHUB_READY_TOKEN = "emulate-github-token"
+EMULATE_GOOGLE_READY_TOKEN = EMULATE_GOOGLE_BEARER
+EMULATE_SLACK_READY_TOKEN = EMULATE_SLACK_BEARER
+EMULATE_GITHUB_READY_TOKEN = EMULATE_GITHUB_BEARER
 EMULATE_STARTUP_ATTEMPTS = 120
 EMULATE_STARTUP_POLL_SECONDS = 0.5
 

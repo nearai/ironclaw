@@ -103,6 +103,20 @@ async def _approve_pending_request(base_url: str, thread_id: str, request_id: st
     )
 
 
+def _tool_result_contains_fragment(
+    tool_call: dict,
+    result_fragment: str | None,
+) -> bool:
+    if result_fragment is None:
+        return True
+
+    result_preview = tool_call.get("result_preview")
+    result_full = tool_call.get("result")
+    result_preview_text = "" if result_preview is None else str(result_preview)
+    result_full_text = "" if result_full is None else str(result_full)
+    return result_fragment in result_preview_text or result_fragment in result_full_text
+
+
 async def _wait_for_tool_result(
     base_url: str,
     thread_id: str,
@@ -132,12 +146,7 @@ async def _wait_for_tool_result(
                     continue
                 if not tool_call.get("has_result"):
                     continue
-                result = (
-                    tool_call.get("result_preview")
-                    or tool_call.get("result")
-                    or ""
-                )
-                if result_fragment is None or result_fragment in result:
+                if _tool_result_contains_fragment(tool_call, result_fragment):
                     return tool_call
 
         await asyncio.sleep(0.5)
@@ -146,6 +155,24 @@ async def _wait_for_tool_result(
         f"Timed out waiting for {tool_name} tool result in thread {thread_id} "
         f"containing {result_fragment!r}"
     )
+
+
+def test_tool_result_fragment_matches_full_result_when_preview_differs():
+    tool_call = {
+        "result_preview": "preview without expected content",
+        "result": {"message": EMULATE_GMAIL_SUBJECT},
+    }
+
+    assert _tool_result_contains_fragment(tool_call, EMULATE_GMAIL_SUBJECT)
+
+
+def test_tool_result_fragment_matches_preview_result():
+    tool_call = {
+        "result_preview": f"subject: {EMULATE_GMAIL_SUBJECT}",
+        "result": "",
+    }
+
+    assert _tool_result_contains_fragment(tool_call, EMULATE_GMAIL_SUBJECT)
 
 
 async def _wait_for_refresh_request(mock_base_url: str, timeout: float = 20.0) -> dict:

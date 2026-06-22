@@ -10,21 +10,23 @@ import json
 
 import httpx
 
-GOOGLE_TOKEN = "mock-refreshed-access-token"
-SLACK_TOKEN = "emulate-slack-token"
-GITHUB_TOKEN = "emulate-github-token"
+from helpers import (
+    EMULATE_GITHUB_BEARER,
+    EMULATE_GOOGLE_BEARER,
+    EMULATE_SLACK_BEARER,
+)
 
 
 def _google_headers() -> dict[str, str]:
-    return {"Authorization": f"Bearer {GOOGLE_TOKEN}"}
+    return {"Authorization": f"Bearer {EMULATE_GOOGLE_BEARER}"}
 
 
 def _slack_headers() -> dict[str, str]:
-    return {"Authorization": f"Bearer {SLACK_TOKEN}"}
+    return {"Authorization": f"Bearer {EMULATE_SLACK_BEARER}"}
 
 
 def _github_headers() -> dict[str, str]:
-    return {"Authorization": f"Bearer {GITHUB_TOKEN}"}
+    return {"Authorization": f"Bearer {EMULATE_GITHUB_BEARER}"}
 
 
 def _gmail_header(message: dict, name: str) -> str | None:
