@@ -140,7 +140,7 @@ impl StageTurnSubmitter for IronClawStageTurnSubmitter {
                     request.stage_turn_identity.reply_target_binding_ref(),
                 ),
                 external_event_id: Some(external_event_id),
-                content: MessageContent::text(stage_message_content(&request)),
+                content: MessageContent::text(request.prompt.content.clone()),
             })
             .await
             .map_err(map_thread_error)?;
@@ -306,46 +306,14 @@ fn stage_thread_metadata(
         "stage": stage_label(&request.stage_turn_identity.stage),
         "attempt": request.stage_turn_identity.attempt,
         "workflow_policy_version": request.stage_turn_identity.workflow_policy_version.as_str(),
-        "prompt_ref": request.content_ref.prompt_ref.as_str(),
-        "prompt_version": request.content_ref.prompt_version.as_str(),
-        "input_snapshot_hash": request.content_ref.input_snapshot_hash.as_str(),
+        "prompt_ref": request.prompt.content_ref.prompt_ref.as_str(),
+        "prompt_version": request.prompt.content_ref.prompt_version.as_str(),
+        "input_snapshot_hash": request.prompt.content_ref.input_snapshot_hash.as_str(),
+        "prompt_content_hash": request.prompt.content_hash.as_str(),
     }))
     .map_err(|error| GithubIssueWorkflowError::Policy {
         reason: format!("failed to serialize stage thread metadata: {error}"),
     })
-}
-
-fn stage_message_content(request: &SubmitStageTurnRequest) -> String {
-    let workspace = request
-        .workspace_mount_ref
-        .as_ref()
-        .map(|mount| {
-            format!(
-                "\nWorkspace mount: `{}` (`{}`)",
-                mount.alias, mount.mount_id
-            )
-        })
-        .unwrap_or_default();
-
-    format!(
-        "GitHub issue workflow stage turn\n\n\
-         Prompt ref: `{prompt_ref}`\n\
-         Prompt version: `{prompt_version}`\n\
-         Input snapshot hash: `{input_snapshot_hash}`\n\
-         Workflow run: `{workflow_run_id}`\n\
-         Stage run: `{stage_run_id}`\n\
-         Stage: `{stage}`\n\
-         Attempt: `{attempt}`\n\
-         Workflow policy version: `{policy_version}`{workspace}",
-        prompt_ref = request.content_ref.prompt_ref.as_str(),
-        prompt_version = request.content_ref.prompt_version.as_str(),
-        input_snapshot_hash = request.content_ref.input_snapshot_hash.as_str(),
-        workflow_run_id = request.stage_turn_identity.workflow_run_id.as_str(),
-        stage_run_id = request.stage_turn_identity.stage_run_id.as_str(),
-        stage = stage_label(&request.stage_turn_identity.stage),
-        attempt = request.stage_turn_identity.attempt,
-        policy_version = request.stage_turn_identity.workflow_policy_version.as_str(),
-    )
 }
 
 fn map_thread_error(error: SessionThreadError) -> GithubIssueWorkflowError {

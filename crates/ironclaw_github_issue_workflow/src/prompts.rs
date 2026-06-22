@@ -1,9 +1,10 @@
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    EngineeredWorkflowSnapshot, GithubIssueStage, GithubIssueWorkflowError,
-    render_stage_result_schema_contract, snapshot_hash, snapshot_serde_error,
-    snapshots::sha256_hex_bytes, stage_result_schema_contract, stages::stage_slug,
+    EngineeredWorkflowSnapshot, GithubIssueStage, GithubIssueWorkflowError, WorkflowPromptContent,
+    WorkflowPromptContentRef, render_stage_result_schema_contract, snapshot_hash,
+    snapshot_serde_error, snapshots::sha256_hex_bytes, stage_result_schema_contract,
+    stages::stage_slug,
 };
 
 const PROMPT_VERSION: &str = "v1";
@@ -17,6 +18,20 @@ pub struct StagePromptBundle {
     pub content: String,
     pub content_hash: String,
     pub snapshot_hash: String,
+}
+
+impl From<StagePromptBundle> for WorkflowPromptContent {
+    fn from(prompt: StagePromptBundle) -> Self {
+        Self {
+            content_ref: WorkflowPromptContentRef {
+                prompt_ref: prompt.prompt_ref,
+                prompt_version: prompt.prompt_version,
+                input_snapshot_hash: prompt.snapshot_hash,
+            },
+            content: prompt.content,
+            content_hash: prompt.content_hash,
+        }
+    }
 }
 
 pub fn render_stage_prompt(

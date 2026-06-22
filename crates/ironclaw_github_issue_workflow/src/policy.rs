@@ -8,17 +8,20 @@ use sha2::{Digest, Sha256};
 use crate::{
     AdvanceWorkflowRunInput, CompleteWorkflowStepInput, CompleteWorkflowStepOutcome,
     CreateOrGetWorkflowStepInput, CreateOrGetWorkflowStepOutcome, CreateStageRunInput,
-    CreateStageRunOutcome, GithubIssueBlockKind, GithubIssueBlockState,
-    GithubIssueProviderActionRunner, GithubIssueStage, GithubIssueWorkflowError,
-    GithubIssueWorkflowEvent, GithubIssueWorkflowEventType, GithubIssueWorkflowMode,
-    GithubIssueWorkflowPort, GithubIssueWorkflowRepository, GithubIssueWorkflowRun,
-    GithubIssueWorkflowRunId, GithubIssueWorkflowRunStatus, ListWorkflowEventsAfterInput,
-    PrepareWorkflowWorkspaceOutcome, PrepareWorkflowWorkspaceRequest, ProviderActionRunOutcome,
-    StageCompletedPayload, StageTurnIdentity, StageTurnSubmitter, SubmitStageTurnOutcome,
-    SubmitStageTurnRequest, TransitionOutcome, WorkflowActorScope, WorkflowClock,
-    WorkflowIdempotencyKey, WorkflowProjectAccess, WorkflowProjectAccessRequest,
-    WorkflowPromptContentRef, WorkflowRunTransition, WorkflowStepRunId, WorkflowWorkerId,
-    WorkflowWorkspaceManager, WorkflowWorkspaceMountRef, stage_slug,
+    CreateStageRunOutcome, EngineeredWorkflowSnapshot, GithubIssueBlockKind, GithubIssueBlockState,
+    GithubIssuePlanItemStatus, GithubIssueProviderActionRunner, GithubIssueSnapshot,
+    GithubIssueStage, GithubIssueWorkflowError, GithubIssueWorkflowEvent,
+    GithubIssueWorkflowEventType, GithubIssueWorkflowMode, GithubIssueWorkflowPort,
+    GithubIssueWorkflowRepository, GithubIssueWorkflowRun, GithubIssueWorkflowRunId,
+    GithubIssueWorkflowRunStatus, ListWorkflowEventsAfterInput, PrepareWorkflowWorkspaceOutcome,
+    PrepareWorkflowWorkspaceRequest, ProviderActionRunOutcome, ProviderContentSummary,
+    RepositorySnapshot, StageCompletedPayload, StageConstraintSnapshot, StageTurnIdentity,
+    StageTurnSubmitter, SubmitStageTurnOutcome, SubmitStageTurnRequest, TransitionOutcome,
+    WorkflowActorScope, WorkflowClock, WorkflowIdempotencyKey, WorkflowProjectAccess,
+    WorkflowProjectAccessRequest, WorkflowPromptContent, WorkflowRunTransition,
+    WorkflowStateSnapshot, WorkflowStepRunId, WorkflowWorkerId, WorkflowWorkspaceManager,
+    WorkflowWorkspaceMountRef, WorkflowWorkspaceSnapshot, render_stage_prompt,
+    stage_result_schema_version, stage_slug,
 };
 
 const DEFAULT_STAGE_ATTEMPT: u32 = 1;
@@ -463,7 +466,7 @@ where
             DEFAULT_STAGE_ATTEMPT,
             self.policy_version.clone(),
         );
-        let content_ref = self.stage_content_ref(&run, &stage)?;
+        let prompt = self.stage_prompt(&run, &stage, workspace_mount_ref.as_ref())?;
         let idempotency_key = stage_turn_identity.turn_idempotency_key();
         let outcome = self
             .ports
@@ -477,7 +480,7 @@ where
                     project_id: run.project_id.clone(),
                     workflow_run_id: run.workflow_run_id.clone(),
                 },
-                content_ref,
+                prompt,
                 capability_profile_id: DEFAULT_CAPABILITY_PROFILE_ID.to_string(),
                 workspace_mount_ref,
                 idempotency_key,
@@ -507,26 +510,197 @@ where
         Ok((run, completed))
     }
 
-    fn stage_content_ref(
+    fn stage_prompt(
         &self,
         run: &GithubIssueWorkflowRun,
         stage: &GithubIssueStage,
-    ) -> Result<WorkflowPromptContentRef, GithubIssueWorkflowError> {
-        let input_snapshot_hash = workflow_input_hash(
-            "stage_input",
-            &json!({
-                "workflow_run_id": run.workflow_run_id,
-                "issue": run.issue_ref,
-                "stage": stage_slug(stage),
-                "policy_version": self.policy_version,
-            }),
-        )?;
+        workspace_mount_ref: Option<&WorkflowWorkspaceMountRef>,
+    ) -> Result<WorkflowPromptContent, GithubIssueWorkflowError> {
+        let snapshot = Self::workflow_stage_snapshot(run, stage, workspace_mount_ref);
+        render_stage_prompt(stage.clone(), &snapshot).map(WorkflowPromptContent::from)
+    }
 
-        Ok(WorkflowPromptContentRef {
-            prompt_ref: format!("github_issue_workflow/{}", stage_slug(stage)),
-            prompt_version: self.policy_version.clone(),
-            input_snapshot_hash,
+    fn workflow_stage_snapshot(
+        run: &GithubIssueWorkflowRun,
+        stage: &GithubIssueStage,
+        workspace_mount_ref: Option<&WorkflowWorkspaceMountRef>,
+    ) -> EngineeredWorkflowSnapshot {
+        let issue = &run.issue_ref;
+        EngineeredWorkflowSnapshot {
+            issue: GithubIssueSnapshot {
+                owner: issue.owner.clone(),
+                repo: issue.repo.clone(),
+                number: issue.number,
+                title: format!("{}/{}#{}", issue.owner, issue.repo, issue.number),
+                url: issue.url.clone(),
+                default_branch: issue.default_branch.clone(),
+                state: "unknown".to_string(),
+                labels: Vec::new(),
+                summary: format!(
+                    "GitHub issue {} is being processed by workflow run {}. Use scoped GitHub read capabilities for provider details not present in this engineered snapshot.",
+                    issue.url, run.workflow_run_id
+                ),
+                provider_content_summaries: vec![ProviderContentSummary {
+                    source_ref: format!(
+                        "github:issue:{}/{}#{}",
+                        issue.owner, issue.repo, issue.number
+                    ),
+                    author: None,
+                    summary: "Workflow-owned issue reference metadata only; raw provider content is not embedded in this prompt.".to_string(),
+                    trust: "workflow_metadata".to_string(),
+                }],
+            },
+            workflow: WorkflowStateSnapshot {
+                workflow_run_id: run.workflow_run_id.as_str().to_string(),
+                workflow_policy_key: run.workflow_policy_key.clone(),
+                workflow_policy_version: run.workflow_policy_version.clone(),
+                status: Self::workflow_run_status_slug(&run.status).to_string(),
+                mode: Self::workflow_mode_slug(&run.workflow_state.mode).to_string(),
+                active_stage_run_id: run
+                    .active_stage_run_id
+                    .as_ref()
+                    .map(|stage_run_id| stage_run_id.as_str().to_string()),
+                event_cursor: run.event_cursor,
+                workflow_run_version: run.workflow_run_version,
+                active_block_summary: run
+                    .workflow_state
+                    .active_block
+                    .as_ref()
+                    .map(|block| block.reason.clone()),
+                plan: run
+                    .workflow_state
+                    .plan
+                    .iter()
+                    .map(|item| {
+                        format!(
+                            "{} ({})",
+                            item.title,
+                            Self::plan_item_status_slug(&item.status)
+                        )
+                    })
+                    .collect(),
+            },
+            repository: RepositorySnapshot {
+                owner: issue.owner.clone(),
+                name: issue.repo.clone(),
+                default_branch: issue.default_branch.clone(),
+                base_ref: Some(issue.default_branch.clone()),
+                base_sha: None,
+                working_branch: run
+                    .workflow_state
+                    .primary_pr
+                    .as_ref()
+                    .map(|pr| pr.head_branch.clone()),
+                head_sha: run
+                    .workflow_state
+                    .primary_pr
+                    .as_ref()
+                    .and_then(|pr| pr.head_sha.clone()),
+                primary_pr_url: run
+                    .workflow_state
+                    .primary_pr
+                    .as_ref()
+                    .map(|pr| pr.url.clone()),
+            },
+            previous_stage_results: Vec::new(),
+            workspace: Self::workflow_workspace_snapshot(run, workspace_mount_ref),
+            constraints: StageConstraintSnapshot {
+                stage: stage.clone(),
+                stage_goal: Self::stage_goal(stage).to_string(),
+                allowed_capabilities: vec!["builtin.workflow_report_stage_result".to_string()],
+                disallowed_capabilities: Vec::new(),
+                result_schema_version: stage_result_schema_version(stage).to_string(),
+                completion_tool: "builtin.workflow_report_stage_result".to_string(),
+                provider_write_policy: "provider writes are performed by workflow-owned provider actions".to_string(),
+            },
+        }
+    }
+
+    fn workflow_workspace_snapshot(
+        run: &GithubIssueWorkflowRun,
+        workspace_mount_ref: Option<&WorkflowWorkspaceMountRef>,
+    ) -> Option<WorkflowWorkspaceSnapshot> {
+        let workspace_ref = run.workflow_state.current_workspace_ref.as_ref();
+        if workspace_ref.is_none()
+            && workspace_mount_ref.is_none()
+            && run.workspace_session_id.is_none()
+        {
+            return None;
+        }
+
+        let mount_alias = workspace_mount_ref.map(|mount| mount.alias.clone());
+        Some(WorkflowWorkspaceSnapshot {
+            workspace_session_id: workspace_ref
+                .and_then(|workspace| workspace.workspace_session_id.as_ref())
+                .or(run.workspace_session_id.as_ref())
+                .map(|workspace_session_id| workspace_session_id.as_str().to_string()),
+            thread_id: workspace_ref
+                .and_then(|workspace| workspace.thread_id.as_ref())
+                .map(ToString::to_string),
+            turn_run_id: workspace_ref
+                .and_then(|workspace| workspace.turn_run_id.as_ref())
+                .map(ToString::to_string),
+            mount_alias: mount_alias.clone(),
+            virtual_root: mount_alias.unwrap_or_else(|| "/workspace".to_string()),
+            changed_files: Vec::new(),
         })
+    }
+
+    fn workflow_run_status_slug(status: &GithubIssueWorkflowRunStatus) -> &'static str {
+        match status {
+            GithubIssueWorkflowRunStatus::Active => "active",
+            GithubIssueWorkflowRunStatus::Blocked => "blocked",
+            GithubIssueWorkflowRunStatus::Succeeded => "succeeded",
+            GithubIssueWorkflowRunStatus::Failed => "failed",
+            GithubIssueWorkflowRunStatus::Cancelled => "cancelled",
+        }
+    }
+
+    fn workflow_mode_slug(mode: &GithubIssueWorkflowMode) -> &'static str {
+        match mode {
+            GithubIssueWorkflowMode::New => "new",
+            GithubIssueWorkflowMode::Claimed => "claimed",
+            GithubIssueWorkflowMode::Triage => "triage",
+            GithubIssueWorkflowMode::Planning => "planning",
+            GithubIssueWorkflowMode::Implementation => "implementation",
+            GithubIssueWorkflowMode::PrSynthesis => "pr_synthesis",
+            GithubIssueWorkflowMode::PrOpen => "pr_open",
+            GithubIssueWorkflowMode::CiRepair => "ci_repair",
+            GithubIssueWorkflowMode::ReviewResponse => "review_response",
+            GithubIssueWorkflowMode::Done => "done",
+        }
+    }
+
+    fn plan_item_status_slug(status: &GithubIssuePlanItemStatus) -> &'static str {
+        match status {
+            GithubIssuePlanItemStatus::Pending => "pending",
+            GithubIssuePlanItemStatus::InProgress => "in_progress",
+            GithubIssuePlanItemStatus::Completed => "completed",
+            GithubIssuePlanItemStatus::Skipped => "skipped",
+        }
+    }
+
+    fn stage_goal(stage: &GithubIssueStage) -> &'static str {
+        match stage {
+            GithubIssueStage::Triage => {
+                "Decide whether the GitHub issue is actionable and choose the next workflow stage."
+            }
+            GithubIssueStage::Planning => {
+                "Produce a focused implementation plan and test strategy for the issue."
+            }
+            GithubIssueStage::Implementation => {
+                "Implement the planned fix in the prepared workspace and report evidence."
+            }
+            GithubIssueStage::PrSynthesis => {
+                "Prepare pull request synthesis details from the completed implementation."
+            }
+            GithubIssueStage::CiRepair => {
+                "Diagnose failing checks and repair the implementation within workflow constraints."
+            }
+            GithubIssueStage::ReviewResponse => {
+                "Address review feedback and report the validated response outcome."
+            }
+        }
     }
 
     async fn create_or_get_step<T>(

@@ -5,9 +5,12 @@ mod github_issue_workflow_stage_turn {
 
     use async_trait::async_trait;
     use ironclaw_github_issue_workflow::{
-        GithubIssueStage, GithubIssueStageRunId, GithubIssueWorkflowRunId, StageTurnIdentity,
-        StageTurnSubmitter, SubmitStageTurnOutcome, SubmitStageTurnRequest, WorkflowActorScope,
-        WorkflowPromptContentRef, WorkflowWorkspaceMountRef,
+        EngineeredWorkflowSnapshot, GithubIssueSnapshot, GithubIssueStage, GithubIssueStageRunId,
+        GithubIssueWorkflowRunId, ProviderContentSummary, RepositorySnapshot,
+        StageConstraintSnapshot, StageResultSummary, StageTurnIdentity, StageTurnSubmitter,
+        SubmitStageTurnOutcome, SubmitStageTurnRequest, WorkflowActorScope, WorkflowPromptContent,
+        WorkflowStateSnapshot, WorkflowWorkspaceMountRef, WorkflowWorkspaceSnapshot,
+        render_stage_prompt, stage_result_schema_version,
     };
     use ironclaw_host_api::{AgentId, ProjectId, TenantId, ThreadId, UserId};
     use ironclaw_reborn_composition::test_support::github_issue_stage_turn_submitter_for_test;
@@ -41,6 +44,19 @@ mod github_issue_workflow_stage_turn {
             harness.coordinator.message_statuses_at_submit(),
             vec![Some(MessageStatus::Accepted)],
             "the thread message must already be accepted before turn submission"
+        );
+
+        let history = harness.history(&request).await;
+        assert_eq!(history.messages.len(), 1);
+        let content = history.messages[0]
+            .content
+            .as_deref()
+            .expect("accepted stage message content");
+        let prompt = triage_prompt_content();
+        assert_eq!(content, prompt);
+        assert!(
+            content.contains("builtin.workflow_report_stage_result"),
+            "accepted message must carry the rendered result-reporting instructions"
         );
     }
 
@@ -386,17 +402,90 @@ mod github_issue_workflow_stage_turn {
                 )
                 .expect("workflow run id"),
             },
-            content_ref: WorkflowPromptContentRef {
-                prompt_ref: "github_issue_bugfix/v1/triage".to_string(),
-                prompt_version: "v1".to_string(),
-                input_snapshot_hash: "snapshot-hash".to_string(),
-            },
+            prompt: WorkflowPromptContent::from(triage_prompt()),
             capability_profile_id: "github_issue_workflow.stage.default".to_string(),
             workspace_mount_ref: Some(WorkflowWorkspaceMountRef {
                 mount_id: "workspace-session".to_string(),
                 alias: "/workspace".to_string(),
             }),
             idempotency_key,
+        }
+    }
+
+    fn triage_prompt_content() -> String {
+        triage_prompt().content
+    }
+
+    fn triage_prompt() -> ironclaw_github_issue_workflow::StagePromptBundle {
+        render_stage_prompt(GithubIssueStage::Triage, &triage_snapshot())
+            .expect("render triage prompt")
+    }
+
+    fn triage_snapshot() -> EngineeredWorkflowSnapshot {
+        EngineeredWorkflowSnapshot {
+            issue: GithubIssueSnapshot {
+                owner: "nearai".to_string(),
+                repo: "ironclaw".to_string(),
+                number: 42,
+                title: "Stage turn should contain rendered prompt".to_string(),
+                url: "https://github.com/nearai/ironclaw/issues/42".to_string(),
+                default_branch: "main".to_string(),
+                state: "open".to_string(),
+                labels: vec!["bug".to_string()],
+                summary: "Accepted inbound message lacks prompt body".to_string(),
+                provider_content_summaries: vec![ProviderContentSummary {
+                    source_ref: "issue-body".to_string(),
+                    author: Some("octocat".to_string()),
+                    summary: "The stage turn submitter persisted metadata only.".to_string(),
+                    trust: "provider".to_string(),
+                }],
+            },
+            workflow: WorkflowStateSnapshot {
+                workflow_run_id: "workflow-run-stage-turn".to_string(),
+                workflow_policy_key: "github-bug-workflow".to_string(),
+                workflow_policy_version: "policy-v1".to_string(),
+                status: "running".to_string(),
+                mode: "claimed".to_string(),
+                active_stage_run_id: Some("stage-run-triage".to_string()),
+                event_cursor: 12,
+                workflow_run_version: 3,
+                active_block_summary: None,
+                plan: Vec::new(),
+            },
+            repository: RepositorySnapshot {
+                owner: "nearai".to_string(),
+                name: "ironclaw".to_string(),
+                default_branch: "main".to_string(),
+                base_ref: Some("main".to_string()),
+                base_sha: Some("base-sha".to_string()),
+                working_branch: None,
+                head_sha: None,
+                primary_pr_url: None,
+            },
+            previous_stage_results: vec![StageResultSummary {
+                stage: GithubIssueStage::Planning,
+                outcome: "not_started".to_string(),
+                summary: "No prior completed stages".to_string(),
+                evidence: Vec::new(),
+            }],
+            workspace: Some(WorkflowWorkspaceSnapshot {
+                workspace_session_id: Some("workspace-session".to_string()),
+                thread_id: None,
+                turn_run_id: None,
+                mount_alias: Some("/workspace".to_string()),
+                virtual_root: "/workspace".to_string(),
+                changed_files: Vec::new(),
+            }),
+            constraints: StageConstraintSnapshot {
+                stage: GithubIssueStage::Triage,
+                stage_goal: "Classify the GitHub issue and choose the next stage.".to_string(),
+                allowed_capabilities: vec!["builtin.workflow_report_stage_result".to_string()],
+                disallowed_capabilities: Vec::new(),
+                result_schema_version: stage_result_schema_version(&GithubIssueStage::Triage)
+                    .to_string(),
+                completion_tool: "builtin.workflow_report_stage_result".to_string(),
+                provider_write_policy: "no_provider_writes".to_string(),
+            },
         }
     }
 

@@ -132,6 +132,27 @@ pub struct WorkflowPromptContentRef {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkflowPromptContent {
+    pub content_ref: WorkflowPromptContentRef,
+    pub content: String,
+    pub content_hash: String,
+}
+
+impl WorkflowPromptContent {
+    pub fn new(
+        content_ref: WorkflowPromptContentRef,
+        content: impl Into<String>,
+        content_hash: impl Into<String>,
+    ) -> Self {
+        Self {
+            content_ref,
+            content: content.into(),
+            content_hash: content_hash.into(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WorkflowWorkspaceMountRef {
     pub mount_id: String,
     pub alias: String,
@@ -141,7 +162,7 @@ pub struct WorkflowWorkspaceMountRef {
 pub struct SubmitStageTurnRequest {
     pub stage_turn_identity: StageTurnIdentity,
     pub scope: WorkflowActorScope,
-    pub content_ref: WorkflowPromptContentRef,
+    pub prompt: WorkflowPromptContent,
     pub capability_profile_id: String,
     pub workspace_mount_ref: Option<WorkflowWorkspaceMountRef>,
     pub idempotency_key: WorkflowIdempotencyKey,
