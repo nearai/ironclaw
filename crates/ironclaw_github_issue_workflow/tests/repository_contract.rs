@@ -6,11 +6,12 @@ mod repository_contract {
         CreateStageRunOutcome, GithubIssueRef, GithubIssueStage, GithubIssueStageRunId,
         GithubIssueWorkflowEventType, GithubIssueWorkflowMode, GithubIssueWorkflowRepository,
         GithubIssueWorkflowRun, GithubProviderRef, GithubPullRequestRef,
-        InMemoryGithubIssueWorkflowRepository, RecordWorkflowEventInput,
-        RecordWorkflowEventOutcome, TransitionOutcome, UpsertProviderBindingInput,
-        WorkflowEventEnvelope, WorkflowEventSourceKind, WorkflowIdempotencyKey,
-        WorkflowRunTransition, WorkflowWorkerId, checks_changed_key, issue_changed_key,
-        issue_discovered_key, pr_opened_key, review_comment_created_key, stage_result_reported_key,
+        InMemoryGithubIssueWorkflowRepository, ProviderActionKind,
+        ProviderActionReconciliationStrategy, RecordWorkflowEventInput, RecordWorkflowEventOutcome,
+        TransitionOutcome, UpsertProviderBindingInput, WorkflowEventEnvelope,
+        WorkflowEventSourceKind, WorkflowIdempotencyKey, WorkflowRunTransition, WorkflowWorkerId,
+        checks_changed_key, issue_changed_key, issue_discovered_key, pr_opened_key,
+        review_comment_created_key, stage_result_reported_key,
     };
     use ironclaw_host_api::{AgentId, ProjectId, TenantId, UserId};
     use serde_json::json;
@@ -432,8 +433,11 @@ mod repository_contract {
                 stage_run_id: None,
                 step_run_id: None,
                 name: "claim-comment".to_string(),
+                kind: ProviderActionKind::ClaimComment,
                 idempotency_key: idempotency_key.clone(),
                 input_hash: input_hash.to_string(),
+                stable_marker: Some("claim-marker".to_string()),
+                reconciliation_strategy: ProviderActionReconciliationStrategy::ClaimCommentByMarker,
                 now: fixed_time(10),
             })
             .await
@@ -444,8 +448,11 @@ mod repository_contract {
                 stage_run_id: None,
                 step_run_id: None,
                 name: "claim-comment".to_string(),
+                kind: ProviderActionKind::ClaimComment,
                 idempotency_key,
                 input_hash: input_hash.to_string(),
+                stable_marker: Some("claim-marker".to_string()),
+                reconciliation_strategy: ProviderActionReconciliationStrategy::ClaimCommentByMarker,
                 now: fixed_time(20),
             })
             .await

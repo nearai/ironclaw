@@ -9,7 +9,8 @@ use crate::{
     GithubIssueProviderBinding, GithubIssueStage, GithubIssueStageRunId, GithubIssueWorkflowError,
     GithubIssueWorkflowEvent, GithubIssueWorkflowEventType, GithubIssueWorkflowMode,
     GithubIssueWorkflowRun, GithubIssueWorkflowRunId, GithubIssueWorkflowRunStatus,
-    GithubIssueWorkspaceSessionId, GithubProviderRef, WorkflowEventEnvelope,
+    GithubIssueWorkspaceSessionId, GithubProviderRef, ProviderActionKind,
+    ProviderActionReconciliationStrategy, ProviderActionStatus, WorkflowEventEnvelope,
     WorkflowIdempotencyKey, WorkflowStepRunId, WorkflowWorkerId,
 };
 
@@ -54,6 +55,16 @@ pub trait GithubIssueWorkflowRepository: Send + Sync {
         &self,
         input: CreateOrGetProviderActionInput,
     ) -> Result<GithubIssueProviderActionRecord, GithubIssueWorkflowError>;
+
+    async fn claim_provider_action(
+        &self,
+        input: ClaimProviderActionInput,
+    ) -> Result<ClaimProviderActionOutcome, GithubIssueWorkflowError>;
+
+    async fn complete_provider_action(
+        &self,
+        input: CompleteProviderActionInput,
+    ) -> Result<CompleteProviderActionOutcome, GithubIssueWorkflowError>;
 
     async fn upsert_provider_binding(
         &self,
@@ -191,9 +202,60 @@ pub struct CreateOrGetProviderActionInput {
     pub stage_run_id: Option<GithubIssueStageRunId>,
     pub step_run_id: Option<WorkflowStepRunId>,
     pub name: String,
+    pub kind: ProviderActionKind,
     pub idempotency_key: WorkflowIdempotencyKey,
     pub input_hash: String,
+    pub stable_marker: Option<String>,
+    pub reconciliation_strategy: ProviderActionReconciliationStrategy,
     pub now: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ClaimProviderActionInput {
+    pub provider_action_id: GithubIssueProviderActionId,
+    pub worker_id: WorkflowWorkerId,
+    pub now: DateTime<Utc>,
+    pub lease_expires_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[allow(clippy::large_enum_variant)]
+pub enum ClaimProviderActionOutcome {
+    Claimed {
+        action: GithubIssueProviderActionRecord,
+    },
+    AlreadyCompleted {
+        action: GithubIssueProviderActionRecord,
+    },
+    Busy {
+        action: GithubIssueProviderActionRecord,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CompleteProviderActionInput {
+    pub provider_action_id: GithubIssueProviderActionId,
+    pub worker_id: WorkflowWorkerId,
+    pub status: ProviderActionStatus,
+    pub provider_ref: Option<GithubProviderRef>,
+    pub stable_marker: Option<String>,
+    pub result: Option<JsonValue>,
+    pub redacted_failure_kind: Option<String>,
+    pub now: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[allow(clippy::large_enum_variant)]
+pub enum CompleteProviderActionOutcome {
+    Completed {
+        action: GithubIssueProviderActionRecord,
+    },
+    AlreadyCompleted {
+        action: GithubIssueProviderActionRecord,
+    },
+    NotLeaseOwner {
+        action: GithubIssueProviderActionRecord,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

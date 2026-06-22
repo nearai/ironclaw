@@ -6,16 +6,17 @@ use tokio::sync::Mutex;
 
 use crate::{
     AcceptStageResultInput, AcceptStageResultOutcome, AdvanceWorkflowRunInput,
-    ClaimRunnableWorkflowRunsInput, CreateOrGetProviderActionInput, CreateOrGetWorkflowRunInput,
-    CreateOrGetWorkflowRunOutcome, CreateStageRunInput, CreateStageRunOutcome,
-    GithubIssueProviderActionId, GithubIssueProviderActionRecord, GithubIssueProviderBinding,
-    GithubIssueProviderBindingId, GithubIssueStageRunId, GithubIssueWorkflowError,
-    GithubIssueWorkflowEvent, GithubIssueWorkflowEventId, GithubIssueWorkflowMode,
-    GithubIssueWorkflowRepository, GithubIssueWorkflowRun, GithubIssueWorkflowRunId,
-    GithubIssueWorkflowRunKey, GithubIssueWorkflowRunStatus, GithubIssueWorkflowState,
-    GithubProviderRef, LeaseRenewalOutcome, ProviderActionStatus, RecordWorkflowEventInput,
-    RecordWorkflowEventOutcome, RenewWorkflowRunLeaseInput, TransitionOutcome,
-    UpsertProviderBindingInput, WorkflowIdempotencyKey,
+    ClaimProviderActionInput, ClaimProviderActionOutcome, ClaimRunnableWorkflowRunsInput,
+    CompleteProviderActionInput, CompleteProviderActionOutcome, CreateOrGetProviderActionInput,
+    CreateOrGetWorkflowRunInput, CreateOrGetWorkflowRunOutcome, CreateStageRunInput,
+    CreateStageRunOutcome, GithubIssueProviderActionId, GithubIssueProviderActionRecord,
+    GithubIssueProviderBinding, GithubIssueProviderBindingId, GithubIssueStageRunId,
+    GithubIssueWorkflowError, GithubIssueWorkflowEvent, GithubIssueWorkflowEventId,
+    GithubIssueWorkflowMode, GithubIssueWorkflowRepository, GithubIssueWorkflowRun,
+    GithubIssueWorkflowRunId, GithubIssueWorkflowRunKey, GithubIssueWorkflowRunStatus,
+    GithubIssueWorkflowState, GithubProviderRef, LeaseRenewalOutcome, ProviderActionStatus,
+    RecordWorkflowEventInput, RecordWorkflowEventOutcome, RenewWorkflowRunLeaseInput,
+    TransitionOutcome, UpsertProviderBindingInput, WorkflowIdempotencyKey,
 };
 use ironclaw_host_api::TenantId;
 
@@ -486,13 +487,13 @@ impl GithubIssueWorkflowRepository for InMemoryGithubIssueWorkflowRepository {
             stage_run_id: input.stage_run_id,
             step_run_id: input.step_run_id,
             name: input.name,
+            kind: input.kind,
             idempotency_key: input.idempotency_key,
             input_hash: input.input_hash,
             status: ProviderActionStatus::Pending,
-            provider_ref_kind: None,
             provider_ref: None,
-            stable_marker: None,
-            reconciliation_strategy: "none".to_string(),
+            stable_marker: input.stable_marker,
+            reconciliation_strategy: input.reconciliation_strategy,
             lease_owner: None,
             lease_expires_at: None,
             attempt_count: 0,
@@ -515,6 +516,90 @@ impl GithubIssueWorkflowRepository for InMemoryGithubIssueWorkflowRepository {
             .insert(provider_action_id, record.clone());
 
         Ok(record)
+    }
+
+    async fn claim_provider_action(
+        &self,
+        input: ClaimProviderActionInput,
+    ) -> Result<ClaimProviderActionOutcome, GithubIssueWorkflowError> {
+        let mut state = self.state.lock().await;
+        let action = state
+            .provider_actions_by_id
+            .get_mut(&input.provider_action_id)
+            .ok_or_else(|| {
+                repository_error(format!(
+                    "provider action `{}` does not exist",
+                    input.provider_action_id
+                ))
+            })?;
+
+        if provider_action_is_complete(&action.status) {
+            return Ok(ClaimProviderActionOutcome::AlreadyCompleted {
+                action: action.clone(),
+            });
+        }
+        if !provider_action_lease_is_claimable(action, &input.worker_id, input.now) {
+            return Ok(ClaimProviderActionOutcome::Busy {
+                action: action.clone(),
+            });
+        }
+
+        action.status = ProviderActionStatus::Running;
+        action.lease_owner = Some(input.worker_id);
+        action.lease_expires_at = Some(input.lease_expires_at);
+        action.attempt_count = action.attempt_count.saturating_add(1);
+        action.updated_at = input.now;
+
+        Ok(ClaimProviderActionOutcome::Claimed {
+            action: action.clone(),
+        })
+    }
+
+    async fn complete_provider_action(
+        &self,
+        input: CompleteProviderActionInput,
+    ) -> Result<CompleteProviderActionOutcome, GithubIssueWorkflowError> {
+        let mut state = self.state.lock().await;
+        let action = state
+            .provider_actions_by_id
+            .get_mut(&input.provider_action_id)
+            .ok_or_else(|| {
+                repository_error(format!(
+                    "provider action `{}` does not exist",
+                    input.provider_action_id
+                ))
+            })?;
+
+        if provider_action_is_complete(&action.status) {
+            return Ok(CompleteProviderActionOutcome::AlreadyCompleted {
+                action: action.clone(),
+            });
+        }
+        if action.lease_owner.as_ref() != Some(&input.worker_id) {
+            return Ok(CompleteProviderActionOutcome::NotLeaseOwner {
+                action: action.clone(),
+            });
+        }
+
+        action.status = input.status;
+        action.provider_ref = input.provider_ref;
+        action.stable_marker = input.stable_marker;
+        action.result = input.result;
+        action.redacted_failure_kind = input.redacted_failure_kind;
+        action.next_attempt_at = None;
+        action.last_reconciled_at = match action.status {
+            ProviderActionStatus::NeedsReconciliation | ProviderActionStatus::Reconciling => {
+                Some(input.now)
+            }
+            _ => action.last_reconciled_at,
+        };
+        action.lease_owner = None;
+        action.lease_expires_at = None;
+        action.updated_at = input.now;
+
+        Ok(CompleteProviderActionOutcome::Completed {
+            action: action.clone(),
+        })
     }
 
     async fn upsert_provider_binding(
@@ -618,6 +703,28 @@ fn lease_is_owned_by(
             .lease_expires_at
             .map(|expires_at| expires_at > now)
             .unwrap_or(false)
+}
+
+fn provider_action_is_complete(status: &ProviderActionStatus) -> bool {
+    matches!(
+        status,
+        ProviderActionStatus::Succeeded
+            | ProviderActionStatus::Failed
+            | ProviderActionStatus::NeedsReconciliation
+    )
+}
+
+fn provider_action_lease_is_claimable(
+    action: &GithubIssueProviderActionRecord,
+    worker_id: &crate::WorkflowWorkerId,
+    now: chrono::DateTime<chrono::Utc>,
+) -> bool {
+    action.lease_owner.is_none()
+        || action.lease_owner.as_ref() == Some(worker_id)
+        || action
+            .lease_expires_at
+            .map(|expires_at| expires_at <= now)
+            .unwrap_or(true)
 }
 
 fn repository_error(reason: impl Into<String>) -> GithubIssueWorkflowError {
