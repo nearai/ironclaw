@@ -37,7 +37,19 @@ fn caller() -> ProductAgentBoundCaller {
 }
 
 fn automation_list_request(limit: usize, run_limit: usize) -> AutomationListRequest {
-    AutomationListRequest { limit, run_limit }
+    AutomationListRequest {
+        limit,
+        run_limit,
+        include_completed: false,
+    }
+}
+
+fn automation_list_request_with_completed(limit: usize, run_limit: usize) -> AutomationListRequest {
+    AutomationListRequest {
+        limit,
+        run_limit,
+        include_completed: true,
+    }
 }
 
 fn now() -> Timestamp {
@@ -63,7 +75,6 @@ fn make_record(
             expression: cron.to_string(),
             timezone: "UTC".to_string(),
         },
-        completion_policy: ironclaw_triggers::TriggerCompletionPolicy::Recurring,
         prompt: "run the daily task".to_string(),
         state,
         next_run_at: now(),
@@ -161,6 +172,7 @@ impl TriggerRepository for ScriptedRepository {
         _: Option<AgentId>,
         _: Option<ProjectId>,
         limit: usize,
+        _excluded_states: &[ironclaw_triggers::TriggerState],
     ) -> Result<Vec<TriggerRecord>, TriggerError> {
         if let Some(limits) = &self.limits {
             limits.lock().expect("limits").push(("scoped", limit));
@@ -358,27 +370,25 @@ async fn automation_facade_forwards_caller_scope_to_repository() {
 }
 
 #[tokio::test]
-async fn automation_facade_maps_all_trigger_states() {
+async fn automation_facade_maps_active_trigger_states() {
     let repo = Arc::new(InMemoryTriggerRepository::default());
     let c = caller();
 
-    // Completed is terminal, so its stale next_run_at slot is suppressed
-    // on the wire; Scheduled and Paused keep theirs.
-    let states = [
+    // Only Scheduled and Paused triggers appear in the active list.
+    // Completed is a terminal state (soft-complete after first fire) and must
+    // be excluded so finished one-shots do not clutter the panel. Paused
+    // keeps its next_run_at so the panel can show when a resumed trigger
+    // would next fire; Scheduled also keeps its slot.
+    let active_states = [
         (
             TriggerState::Scheduled,
             RebornAutomationState::Scheduled,
             true,
         ),
         (TriggerState::Paused, RebornAutomationState::Paused, true),
-        (
-            TriggerState::Completed,
-            RebornAutomationState::Completed,
-            false,
-        ),
     ];
 
-    for (trigger_state, expected_state, expect_next_run_at) in &states {
+    for (trigger_state, expected_state, expect_next_run_at) in &active_states {
         let id = TriggerId::new();
         let record = make_record(id, &c, *trigger_state, "Test trigger", "0 9 * * *");
         repo.upsert_trigger(record).await.expect("upsert");
@@ -400,6 +410,55 @@ async fn automation_facade_maps_all_trigger_states() {
             "next_run_at presence mismatch for {trigger_state:?}"
         );
     }
+}
+
+#[tokio::test]
+async fn automation_facade_excludes_completed_triggers_from_active_list() {
+    // A Completed trigger is a fired one-shot that has soft-completed. It must
+    // not appear in the active automations panel so users only see automations
+    // that are still running or can be resumed.
+    let repo = Arc::new(InMemoryTriggerRepository::default());
+    let c = caller();
+
+    let scheduled_id = TriggerId::new();
+    let completed_id = TriggerId::new();
+
+    repo.upsert_trigger(make_record(
+        scheduled_id,
+        &c,
+        TriggerState::Scheduled,
+        "Active routine",
+        "0 9 * * *",
+    ))
+    .await
+    .expect("upsert scheduled");
+
+    repo.upsert_trigger(make_record(
+        completed_id,
+        &c,
+        TriggerState::Completed,
+        "Fired one-shot",
+        "0 9 * * *",
+    ))
+    .await
+    .expect("upsert completed");
+
+    let facade = RebornAutomationProductFacade::new(repo);
+    let result = facade
+        .list_automations(c, automation_list_request(100, 0))
+        .await
+        .expect("list automations");
+
+    let ids: Vec<String> = result.iter().map(|a| a.automation_id.clone()).collect();
+    assert!(
+        ids.contains(&scheduled_id.to_string()),
+        "scheduled trigger must appear in active list"
+    );
+    assert!(
+        !ids.contains(&completed_id.to_string()),
+        "completed one-shot must be excluded from active list; got: {ids:?}"
+    );
+    assert_eq!(result.len(), 1, "only the active trigger should be listed");
 }
 
 #[tokio::test]
@@ -629,8 +688,7 @@ async fn automation_source_from_record_maps_cron_schedule() {
     let id = TriggerId::new();
     let record = make_record(id, &c, TriggerState::Scheduled, "Cron test", "*/5 * * * *");
 
-    let source = super::automation_source_from_record(&record)
-        .expect("cron schedule must map to Schedule source");
+    let source = super::automation_source_from_record(&record);
 
     assert_eq!(
         source,
@@ -650,8 +708,7 @@ async fn automation_source_from_record_includes_non_utc_timezone() {
     record.schedule = TriggerSchedule::cron_with_timezone("0 9 * * *", "America/New_York")
         .expect("valid tz schedule");
 
-    let source = super::automation_source_from_record(&record)
-        .expect("cron schedule must map to Schedule source");
+    let source = super::automation_source_from_record(&record);
 
     assert_eq!(
         source,
@@ -659,5 +716,187 @@ async fn automation_source_from_record_includes_non_utc_timezone() {
             cron: "0 9 * * *".to_string(),
             timezone: "America/New_York".to_string(),
         }
+    );
+}
+
+/// Regression test for pagination undercount bug.
+///
+/// Previously, `list_scoped_triggers` returned all states up to LIMIT and the
+/// Rust layer filtered out Completed afterwards. If the first N=limit rows were
+/// all Completed, the list would return 0 results even though active triggers
+/// existed beyond those rows.
+///
+/// The fix pushes the Completed exclusion into SQL so the LIMIT applies to
+/// already-filtered rows.  Using InMemoryTriggerRepository (which now also
+/// applies the exclusion before truncation) exercises the same invariant.
+#[tokio::test]
+async fn automation_facade_excludes_completed_even_when_filling_limit() {
+    let repo = Arc::new(InMemoryTriggerRepository::default());
+    let c = caller();
+
+    let completed_id = TriggerId::new();
+    let scheduled_id = TriggerId::new();
+
+    // Insert Completed first so it comes before Scheduled in creation order.
+    repo.upsert_trigger(make_record(
+        completed_id,
+        &c,
+        TriggerState::Completed,
+        "Fired one-shot",
+        "0 9 * * *",
+    ))
+    .await
+    .expect("upsert completed");
+
+    repo.upsert_trigger(make_record(
+        scheduled_id,
+        &c,
+        TriggerState::Scheduled,
+        "Active routine",
+        "0 10 * * *",
+    ))
+    .await
+    .expect("upsert scheduled");
+
+    // limit=1 — if Completed consumed the slot, Scheduled would be invisible.
+    let facade = RebornAutomationProductFacade::new(repo);
+    let result = facade
+        .list_automations(c, automation_list_request(1, 0))
+        .await
+        .expect("list automations");
+
+    let ids: Vec<String> = result.iter().map(|a| a.automation_id.clone()).collect();
+    assert_eq!(
+        result.len(),
+        1,
+        "exactly one active trigger should be returned; got: {ids:?}"
+    );
+    assert!(
+        ids.contains(&scheduled_id.to_string()),
+        "the active (Scheduled) trigger must be present; got: {ids:?}"
+    );
+    assert!(
+        !ids.contains(&completed_id.to_string()),
+        "completed trigger must be excluded even when it would fill the limit; got: {ids:?}"
+    );
+}
+
+/// `include_completed = true` causes Completed automations to be returned
+/// alongside active ones. The Completed entry must have `next_run_at = None`
+/// (its stored slot is a stale past date and must not render as a future run).
+#[tokio::test]
+async fn automation_facade_include_completed_returns_completed_automations() {
+    let repo = Arc::new(InMemoryTriggerRepository::default());
+    let c = caller();
+
+    let scheduled_id = TriggerId::new();
+    let completed_id = TriggerId::new();
+
+    repo.upsert_trigger(make_record(
+        scheduled_id,
+        &c,
+        TriggerState::Scheduled,
+        "Active routine",
+        "0 9 * * *",
+    ))
+    .await
+    .expect("upsert scheduled");
+
+    repo.upsert_trigger(make_record(
+        completed_id,
+        &c,
+        TriggerState::Completed,
+        "Fired one-shot",
+        "0 9 * * *",
+    ))
+    .await
+    .expect("upsert completed");
+
+    let facade = RebornAutomationProductFacade::new(repo);
+    let result = facade
+        .list_automations(c, automation_list_request_with_completed(100, 0))
+        .await
+        .expect("list automations include_completed=true");
+
+    let ids: Vec<String> = result.iter().map(|a| a.automation_id.clone()).collect();
+    assert_eq!(
+        result.len(),
+        2,
+        "both scheduled and completed triggers should be returned; got: {ids:?}"
+    );
+    assert!(
+        ids.contains(&scheduled_id.to_string()),
+        "scheduled trigger must be present; got: {ids:?}"
+    );
+    assert!(
+        ids.contains(&completed_id.to_string()),
+        "completed trigger must be present when include_completed=true; got: {ids:?}"
+    );
+
+    let completed = result
+        .iter()
+        .find(|a| a.automation_id == completed_id.to_string())
+        .expect("completed automation must be in result");
+    assert_eq!(
+        completed.state,
+        RebornAutomationState::Completed,
+        "completed automation must map to Completed state"
+    );
+    assert!(
+        completed.next_run_at.is_none(),
+        "completed automation must have next_run_at=None (stale slot suppressed)"
+    );
+}
+
+/// `include_completed = false` (default) preserves existing behavior:
+/// Completed automations are excluded at the SQL layer so pagination LIMIT
+/// applies only to active rows.
+#[tokio::test]
+async fn automation_facade_default_excludes_completed_automations() {
+    let repo = Arc::new(InMemoryTriggerRepository::default());
+    let c = caller();
+
+    let scheduled_id = TriggerId::new();
+    let completed_id = TriggerId::new();
+
+    repo.upsert_trigger(make_record(
+        scheduled_id,
+        &c,
+        TriggerState::Scheduled,
+        "Active routine",
+        "0 9 * * *",
+    ))
+    .await
+    .expect("upsert scheduled");
+
+    repo.upsert_trigger(make_record(
+        completed_id,
+        &c,
+        TriggerState::Completed,
+        "Fired one-shot",
+        "0 9 * * *",
+    ))
+    .await
+    .expect("upsert completed");
+
+    let facade = RebornAutomationProductFacade::new(repo);
+    let result = facade
+        .list_automations(c, automation_list_request(100, 0))
+        .await
+        .expect("list automations include_completed=false (default)");
+
+    let ids: Vec<String> = result.iter().map(|a| a.automation_id.clone()).collect();
+    assert_eq!(
+        result.len(),
+        1,
+        "only the active trigger should be listed by default; got: {ids:?}"
+    );
+    assert!(
+        ids.contains(&scheduled_id.to_string()),
+        "scheduled trigger must be present; got: {ids:?}"
+    );
+    assert!(
+        !ids.contains(&completed_id.to_string()),
+        "completed trigger must be excluded by default; got: {ids:?}"
     );
 }

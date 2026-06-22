@@ -14,9 +14,9 @@ use crate::{
     ClearActiveFireRequest, FireAcceptedRequest, FirePermanentFailedRequest, FireReplayedRequest,
     FireRetryableFailedRequest, FireTerminalFailedRequest, InMemoryTriggerRepository,
     TRIGGER_TRUSTED_ADAPTER_INSTALLATION_ID, TRIGGER_TRUSTED_ADAPTER_KIND,
-    TRIGGER_TRUSTED_EXTERNAL_ACTOR_NAMESPACE, TriggerCompletionPolicy, TriggerError, TriggerFire,
-    TriggerId, TriggerInboundContentRef, TriggerMaterializedPrompt, TriggerPromptMaterializer,
-    TriggerRecord, TriggerRepository, TriggerRunHistoryStatus, TriggerRunRecord, TriggerRunStatus,
+    TRIGGER_TRUSTED_EXTERNAL_ACTOR_NAMESPACE, TriggerError, TriggerFire, TriggerId,
+    TriggerInboundContentRef, TriggerMaterializedPrompt, TriggerPromptMaterializer, TriggerRecord,
+    TriggerRepository, TriggerRunHistoryStatus, TriggerRunRecord, TriggerRunStatus,
     TriggerSchedule, TriggerSourceKind, TriggerSourceProvider, TriggerState,
 };
 
@@ -61,7 +61,6 @@ fn sample_record(
         name: "daily summary".to_string(),
         source: TriggerSourceKind::Schedule,
         schedule: TriggerSchedule::cron("0 8 * * *").expect("valid cron"),
-        completion_policy: TriggerCompletionPolicy::Recurring,
         prompt: "summarize unread mail".to_string(),
         state: TriggerState::Scheduled,
         next_run_at,
@@ -1967,14 +1966,22 @@ async fn tick_source_provider_errors_report_bounded_permanent_reasons() {
 
 #[tokio::test]
 async fn tick_permanent_failure_without_next_slot_completes_trigger() {
+    // When a Cron trigger's next_slot_after returns None (schedule exhausted), a
+    // permanent pre-submission failure must be treated as Retryable (fail-closed)
+    // rather than completing the trigger. This keeps the trigger Scheduled so it
+    // can be investigated or removed manually.
     let repo = Arc::new(InMemoryTriggerRepository::default());
     let trigger_id = TriggerId::parse("01HZZZZZZZZZZZZZZZZZZZZZZZ").expect("ulid");
+    // Far-future fire slot whose daily Cron has no valid next slot after it.
     let fire_slot = ymd_hms(9999, 12, 31, 8, 0, 0);
     repo.upsert_trigger(sample_record(trigger_id, tenant("tenant-a"), fire_slot))
         .await
         .expect("insert");
-    let worker = worker(
+    // Use a source provider that returns None (SourceNoFire): a permanent failure
+    // that, because next_slot_after is None, must resolve to Retryable (fail-closed).
+    let worker = worker_with_source_provider(
         repo.clone(),
+        Arc::new(NullSourceProvider),
         Arc::new(RecordingMaterializer::success("content:trigger-fire")),
         Arc::new(RecordingSubmitter::with_outcomes(Vec::new())),
         Arc::new(RecordingActiveRunLookup::default()),
@@ -1982,21 +1989,445 @@ async fn tick_permanent_failure_without_next_slot_completes_trigger() {
 
     let report = worker.tick_once(fire_slot).await.expect("tick succeeds");
 
-    assert!(matches!(
-        report.results.last().map(|result| &result.outcome),
-        Some(TriggerPollerFireOutcome::PermanentFailed {
-            reason: TriggerPollerFailureReason::InvalidSchedule,
-        })
-    ));
+    // Fail-closed: permanent failure on an exhausted schedule stays Retryable.
+    assert!(
+        matches!(
+            report.results.last().map(|result| &result.outcome),
+            Some(TriggerPollerFireOutcome::RetryableFailed {
+                reason: TriggerPollerFailureReason::SourceNoFire,
+            })
+        ),
+        "exhausted-cron permanent failure must be retryable (fail-closed)"
+    );
     let persisted = repo
         .get_trigger(tenant("tenant-a"), trigger_id)
         .await
         .expect("load")
         .expect("record present");
-    assert_eq!(persisted.state, TriggerState::Completed);
+    // Trigger remains Scheduled (not Completed) so it can be manually removed.
+    assert_eq!(persisted.state, TriggerState::Scheduled);
     assert_eq!(persisted.last_status, Some(TriggerRunStatus::Error));
     assert_eq!(persisted.active_fire_slot, None);
     assert_eq!(persisted.active_run_ref, None);
+}
+
+#[tokio::test]
+async fn tick_fire_once_trigger_submits_without_terminal_error() {
+    // A fire-once trigger whose schedule has no future slot (year-pinned one-shot) must
+    // still succeed at submission — process_claimed_fire must NOT call next_run_at_after_fire
+    // for CompleteAfterFirstFire triggers.
+    let repo = Arc::new(InMemoryTriggerRepository::default());
+    let trigger_id = TriggerId::parse("01HZZZZZZZZZZZZZZZZZZZZZZZ").expect("ulid");
+    // Use a specific year-pinned timestamp far in the past: the schedule has no next slot.
+    let fire_slot = ymd_hms(2025, 1, 1, 8, 0, 0);
+    let mut record = sample_record(trigger_id, tenant("tenant-a"), fire_slot);
+    record.schedule = TriggerSchedule::once(fire_slot, "UTC").expect("valid once");
+    repo.upsert_trigger(record).await.expect("insert");
+    let run_id = TurnRunId::parse("01890f0f-9b6f-7a85-9e5b-9f21a93c4f5a").expect("run id");
+    let submitter = Arc::new(RecordingSubmitter::with_outcomes(vec![Ok(
+        TrustedTriggerFireSubmitOutcome::Accepted {
+            run_id,
+            submitted_at: fire_slot,
+            turn_scope: test_turn_scope(),
+        },
+    )]));
+
+    let worker = worker(
+        repo.clone(),
+        Arc::new(RecordingMaterializer::success("content:fire-once")),
+        submitter.clone(),
+        Arc::new(RecordingActiveRunLookup::default()),
+    );
+
+    let report = worker.tick_once(fire_slot).await.expect("tick succeeds");
+
+    assert_eq!(
+        report.results.last().map(|r| &r.outcome),
+        Some(&TriggerPollerFireOutcome::Submitted { run_id }),
+        "fire-once trigger must submit successfully"
+    );
+    // The trigger must have an active fire (not yet cleared by the run engine).
+    let persisted = repo
+        .get_trigger(tenant("tenant-a"), trigger_id)
+        .await
+        .expect("load")
+        .expect("record present");
+    assert_eq!(persisted.active_fire_slot, Some(fire_slot));
+    assert_eq!(persisted.active_run_ref, Some(run_id));
+    assert_eq!(
+        persisted.last_status,
+        Some(TriggerRunStatus::Ok),
+        "status must be Ok after accepted submit"
+    );
+    // state remains Scheduled until clear_active_fire is called.
+    assert_eq!(persisted.state, TriggerState::Scheduled);
+}
+
+#[tokio::test]
+async fn tick_fire_once_trigger_becomes_completed_after_clear() {
+    // After the run engine signals completion, clear_active_fire must move a
+    // fire-once trigger from Scheduled to Completed.
+    let repo = Arc::new(InMemoryTriggerRepository::default());
+    let trigger_id = TriggerId::parse("01HZZZZZZZZZZZZZZZZZZZZZZZ").expect("ulid");
+    let fire_slot = ymd_hms(2025, 1, 1, 8, 0, 0);
+    let run_id = TurnRunId::parse("01890f0f-9b6f-7a85-9e5b-9f21a93c4f5a").expect("run id");
+    // Start with an already-active fire-once trigger (simulating state after submit).
+    let mut record = sample_record(trigger_id, tenant("tenant-a"), fire_slot);
+    record.schedule = TriggerSchedule::once(fire_slot, "UTC").expect("valid once");
+    record.active_fire_slot = Some(fire_slot);
+    record.active_run_ref = Some(run_id);
+    repo.upsert_trigger(record).await.expect("insert");
+    let active_lookup = Arc::new(RecordingActiveRunLookup::with_state(
+        TriggerActiveRunState::Terminal {
+            status: TriggerRunHistoryStatus::Ok,
+        },
+    ));
+    let worker = worker(
+        repo.clone(),
+        Arc::new(RecordingMaterializer::success("content:fire-once")),
+        Arc::new(RecordingSubmitter::with_outcomes(Vec::new())),
+        active_lookup,
+    );
+
+    let report = worker.tick_once(fire_slot).await.expect("tick succeeds");
+
+    assert_eq!(
+        report.results.last().map(|r| &r.outcome),
+        Some(&TriggerPollerFireOutcome::ClearedTerminalActive { run_id }),
+    );
+    let persisted = repo
+        .get_trigger(tenant("tenant-a"), trigger_id)
+        .await
+        .expect("load")
+        .expect("record present");
+    assert_eq!(
+        persisted.state,
+        TriggerState::Completed,
+        "fire-once trigger must be Completed after clear_active_fire"
+    );
+    assert_eq!(persisted.active_fire_slot, None);
+    assert_eq!(persisted.active_run_ref, None);
+}
+
+#[tokio::test]
+async fn tick_fire_once_blocked_active_run_is_left_pending() {
+    // Regression guard: a fire-once trigger parked on a human-interaction gate
+    // (Blocked) must NOT be cleared by the poller. The gate is still answerable;
+    // clearing it would mark it Completed prematurely (before it ever fired
+    // successfully). The active_fire_slot and active_run_ref must be retained so
+    // the gate can still be resolved. The outcome must be SkippedAlreadyActive
+    // (the pending/skip path), not ClearedBlockedActive.
+    let repo = Arc::new(InMemoryTriggerRepository::default());
+    let trigger_id = TriggerId::parse("01HZZZZZZZZZZZZZZZZZZZZZZZ").expect("ulid");
+    let fire_slot = ymd_hms(2025, 1, 1, 8, 0, 0);
+    let run_id = TurnRunId::parse("01890f0f-9b6f-7a85-9e5b-9f21a93c4f5a").expect("run id");
+    let mut record = sample_record(trigger_id, tenant("tenant-a"), fire_slot);
+    record.schedule = TriggerSchedule::once(fire_slot, "UTC").expect("valid once");
+    record.active_fire_slot = Some(fire_slot);
+    record.active_run_ref = Some(run_id);
+    repo.upsert_trigger(record).await.expect("insert");
+    let worker = worker(
+        repo.clone(),
+        Arc::new(RecordingMaterializer::success("content:fire-once")),
+        Arc::new(RecordingSubmitter::with_outcomes(Vec::new())),
+        Arc::new(RecordingActiveRunLookup::with_state(
+            TriggerActiveRunState::Blocked,
+        )),
+    );
+
+    let report = worker.tick_once(fire_slot).await.expect("tick succeeds");
+
+    // The outcome must be the pending/skip path, not ClearedBlockedActive.
+    assert!(
+        matches!(
+            report.results.last().map(|r| &r.outcome),
+            Some(TriggerPollerFireOutcome::SkippedAlreadyActive { .. })
+        ),
+        "fire-once blocked run must produce SkippedAlreadyActive, not ClearedBlockedActive"
+    );
+    let persisted = repo
+        .get_trigger(tenant("tenant-a"), trigger_id)
+        .await
+        .expect("load")
+        .expect("record present");
+    // Active lock must be retained so the gate remains answerable.
+    assert_eq!(
+        persisted.active_fire_slot,
+        Some(fire_slot),
+        "fire-once blocked run must retain active_fire_slot"
+    );
+    assert_eq!(
+        persisted.active_run_ref,
+        Some(run_id),
+        "fire-once blocked run must retain active_run_ref"
+    );
+    // Must NOT be Completed — it never fired successfully.
+    assert_ne!(
+        persisted.state,
+        TriggerState::Completed,
+        "fire-once blocked run must not be marked Completed"
+    );
+}
+
+#[tokio::test]
+async fn tick_fire_once_terminal_ok_active_run_clears_to_completed() {
+    // Regression guard: a fire-once trigger whose run reaches Terminal with Ok
+    // must be cleared and moved to Completed — the normal one-shot completion path.
+    let repo = Arc::new(InMemoryTriggerRepository::default());
+    let trigger_id = TriggerId::parse("01HZZZZZZZZZZZZZZZZZZZZZZY").expect("ulid");
+    let fire_slot = ymd_hms(2025, 1, 1, 8, 0, 0);
+    let run_id = TurnRunId::parse("01890f0f-9b6f-7a85-9e5b-9f21a93c4f5b").expect("run id");
+    let mut record = sample_record(trigger_id, tenant("tenant-a"), fire_slot);
+    record.schedule = TriggerSchedule::once(fire_slot, "UTC").expect("valid once");
+    record.active_fire_slot = Some(fire_slot);
+    record.active_run_ref = Some(run_id);
+    repo.upsert_trigger(record).await.expect("insert");
+    let worker = worker(
+        repo.clone(),
+        Arc::new(RecordingMaterializer::success("content:fire-once")),
+        Arc::new(RecordingSubmitter::with_outcomes(Vec::new())),
+        Arc::new(RecordingActiveRunLookup::with_state(
+            TriggerActiveRunState::Terminal {
+                status: TriggerRunHistoryStatus::Ok,
+            },
+        )),
+    );
+
+    let report = worker.tick_once(fire_slot).await.expect("tick succeeds");
+
+    assert_eq!(
+        report.results.last().map(|r| &r.outcome),
+        Some(&TriggerPollerFireOutcome::ClearedTerminalActive { run_id }),
+        "fire-once terminal-ok run must produce ClearedTerminalActive"
+    );
+    let persisted = repo
+        .get_trigger(tenant("tenant-a"), trigger_id)
+        .await
+        .expect("load")
+        .expect("record present");
+    assert_eq!(
+        persisted.state,
+        TriggerState::Completed,
+        "fire-once terminal-ok run must be Completed after clear"
+    );
+    assert_eq!(persisted.active_fire_slot, None);
+    assert_eq!(persisted.active_run_ref, None);
+    let runs = repo
+        .list_trigger_run_history(tenant("tenant-a"), trigger_id, 10)
+        .await
+        .expect("list run history");
+    assert_eq!(runs.len(), 1);
+    assert_eq!(runs[0].status, TriggerRunHistoryStatus::Ok);
+}
+
+#[tokio::test]
+async fn tick_fire_once_terminal_error_active_run_clears_to_completed() {
+    // Regression guard: a fire-once trigger whose run reaches Terminal with Error
+    // (ran and errored) must also be cleared and moved to Completed — the one-shot
+    // is exhausted regardless of the run's own error status.
+    let repo = Arc::new(InMemoryTriggerRepository::default());
+    let trigger_id = TriggerId::parse("01HZZZZZZZZZZZZZZZZZZZZZZY").expect("ulid");
+    let fire_slot = ymd_hms(2025, 1, 1, 8, 0, 0);
+    let run_id = TurnRunId::parse("01890f0f-9b6f-7a85-9e5b-9f21a93c4f5c").expect("run id");
+    let mut record = sample_record(trigger_id, tenant("tenant-a"), fire_slot);
+    record.schedule = TriggerSchedule::once(fire_slot, "UTC").expect("valid once");
+    record.active_fire_slot = Some(fire_slot);
+    record.active_run_ref = Some(run_id);
+    repo.upsert_trigger(record).await.expect("insert");
+    let worker = worker(
+        repo.clone(),
+        Arc::new(RecordingMaterializer::success("content:fire-once")),
+        Arc::new(RecordingSubmitter::with_outcomes(Vec::new())),
+        Arc::new(RecordingActiveRunLookup::with_state(
+            TriggerActiveRunState::Terminal {
+                status: TriggerRunHistoryStatus::Error,
+            },
+        )),
+    );
+
+    let report = worker.tick_once(fire_slot).await.expect("tick succeeds");
+
+    assert_eq!(
+        report.results.last().map(|r| &r.outcome),
+        Some(&TriggerPollerFireOutcome::ClearedTerminalActive { run_id }),
+        "fire-once terminal-error run must produce ClearedTerminalActive"
+    );
+    let persisted = repo
+        .get_trigger(tenant("tenant-a"), trigger_id)
+        .await
+        .expect("load")
+        .expect("record present");
+    assert_eq!(
+        persisted.state,
+        TriggerState::Completed,
+        "fire-once terminal-error run must be Completed after clear (one-shot exhausted)"
+    );
+    assert_eq!(persisted.active_fire_slot, None);
+    assert_eq!(persisted.active_run_ref, None);
+    let runs = repo
+        .list_trigger_run_history(tenant("tenant-a"), trigger_id, 10)
+        .await
+        .expect("list run history");
+    assert_eq!(runs.len(), 1);
+    assert_eq!(runs[0].status, TriggerRunHistoryStatus::Error);
+}
+
+#[tokio::test]
+async fn tick_recurring_blocked_active_run_clears_as_failed() {
+    // Regression guard: the fire-once exemption in the Blocked arm must NOT affect
+    // recurring triggers. A recurring trigger parked on a gate must still be cleared
+    // with Error and left Scheduled so its next slot can fire.
+    // This is the same scenario as tick_clears_blocked_active_run_and_unblocks_schedule
+    // but re-stated here as an explicit policy regression guard for the Recurring branch.
+    let repo = Arc::new(InMemoryTriggerRepository::default());
+    let trigger_id = TriggerId::parse("01HZZZZZZZZZZZZZZZZZZZZZZX").expect("ulid");
+    let fire_slot = ts(1_704_067_200);
+    let run_id = TurnRunId::parse("01890f0f-9b6f-7a85-9e5b-9f21a93c4f5d").expect("run id");
+    let mut record = sample_record(trigger_id, tenant("tenant-a"), ts(1_704_067_260));
+    assert!(matches!(record.schedule, TriggerSchedule::Cron { .. }));
+    record.active_fire_slot = Some(fire_slot);
+    record.active_run_ref = Some(run_id);
+    repo.upsert_trigger(record).await.expect("insert");
+    let worker = worker(
+        repo.clone(),
+        Arc::new(RecordingMaterializer::success("content:trigger-fire")),
+        Arc::new(RecordingSubmitter::with_outcomes(Vec::new())),
+        Arc::new(RecordingActiveRunLookup::with_state(
+            TriggerActiveRunState::Blocked,
+        )),
+    );
+
+    let report = worker.tick_once(fire_slot).await.expect("tick succeeds");
+
+    assert_eq!(
+        report.results.last().map(|r| &r.outcome),
+        Some(&TriggerPollerFireOutcome::ClearedBlockedActive { run_id }),
+        "recurring blocked run must produce ClearedBlockedActive"
+    );
+    let persisted = repo
+        .get_trigger(tenant("tenant-a"), trigger_id)
+        .await
+        .expect("load")
+        .expect("record present");
+    assert_eq!(
+        persisted.state,
+        TriggerState::Scheduled,
+        "recurring blocked run must stay Scheduled after clear so the next slot can fire"
+    );
+    assert_eq!(persisted.active_fire_slot, None);
+    assert_eq!(persisted.active_run_ref, None);
+    let runs = repo
+        .list_trigger_run_history(tenant("tenant-a"), trigger_id, 10)
+        .await
+        .expect("list run history");
+    assert_eq!(runs.len(), 1);
+    assert_eq!(runs[0].run_id, Some(run_id));
+    assert_eq!(runs[0].status, TriggerRunHistoryStatus::Error);
+}
+
+#[tokio::test]
+async fn tick_fire_once_permanent_submit_failure_stays_scheduled_for_retry() {
+    // A CompleteAfterFirstFire trigger whose submitter returns a Permanent
+    // failure (e.g. unpaired actor, bad materialization) has NOT fired — the
+    // one-shot must remain Scheduled so it can retry once the cause is fixed.
+    // It must NOT be marked Completed; that only happens via clear_active_fire
+    // after a real run terminates.
+    let repo = Arc::new(InMemoryTriggerRepository::default());
+    let trigger_id = TriggerId::parse("01HZZZZZZZZZZZZZZZZZZZZZZZ").expect("ulid");
+    let fire_slot = ts(1_704_067_200);
+    let mut record = sample_record(trigger_id, tenant("tenant-a"), fire_slot);
+    record.schedule = TriggerSchedule::once(fire_slot, "UTC").expect("valid once");
+    let original_next_run_at = record.next_run_at;
+    repo.upsert_trigger(record).await.expect("insert");
+    let worker = worker(
+        repo.clone(),
+        Arc::new(RecordingMaterializer::success("content:fire-once")),
+        Arc::new(RecordingSubmitter::with_outcomes(vec![Err(
+            TriggerError::InvalidMaterialization {
+                reason: "fire-once permanent failure".to_string(),
+            },
+        )])),
+        Arc::new(RecordingActiveRunLookup::default()),
+    );
+
+    let report = worker.tick_once(fire_slot).await.expect("tick succeeds");
+
+    // Permanent pre-submission failure for a fire-once triggers Retryable (fail-closed).
+    assert!(
+        matches!(
+            report.results.last().map(|r| &r.outcome),
+            Some(TriggerPollerFireOutcome::RetryableFailed { .. })
+        ),
+        "fire-once permanent submit failure must produce RetryableFailed (fail-closed, not PermanentFailed)"
+    );
+    let persisted = repo
+        .get_trigger(tenant("tenant-a"), trigger_id)
+        .await
+        .expect("load")
+        .expect("record present");
+    assert_ne!(
+        persisted.state,
+        TriggerState::Completed,
+        "fire-once that never fired must NOT be Completed — it must remain Scheduled"
+    );
+    assert_eq!(
+        persisted.state,
+        TriggerState::Scheduled,
+        "fire-once permanent submit failure must leave trigger Scheduled"
+    );
+    assert_eq!(
+        persisted.next_run_at, original_next_run_at,
+        "fire-once trigger must NOT advance next_run_at on permanent failure"
+    );
+    assert_eq!(persisted.active_fire_slot, None);
+    assert_eq!(persisted.active_run_ref, None);
+}
+
+#[tokio::test]
+async fn tick_recurring_trigger_reschedules_unchanged() {
+    // Regression guard: the fire-once path must not affect recurring trigger behavior.
+    // A recurring trigger must still advance next_run_at after a successful fire.
+    let repo = Arc::new(InMemoryTriggerRepository::default());
+    let trigger_id = TriggerId::parse("01HZZZZZZZZZZZZZZZZZZZZZZZ").expect("ulid");
+    let fire_slot = ts(1_704_067_200);
+    let record = sample_record(trigger_id, tenant("tenant-a"), fire_slot);
+    assert!(matches!(record.schedule, TriggerSchedule::Cron { .. }));
+    let expected_next_run_at = record
+        .schedule
+        .next_slot_after(fire_slot)
+        .expect("next run")
+        .expect("future run");
+    repo.upsert_trigger(record).await.expect("insert");
+    let run_id = TurnRunId::parse("01890f0f-9b6f-7a85-9e5b-9f21a93c4f5a").expect("run id");
+    let worker = worker(
+        repo.clone(),
+        Arc::new(RecordingMaterializer::success("content:trigger-fire")),
+        Arc::new(RecordingSubmitter::with_outcomes(vec![Ok(
+            TrustedTriggerFireSubmitOutcome::Accepted {
+                run_id,
+                submitted_at: ts(1_704_067_205),
+                turn_scope: test_turn_scope(),
+            },
+        )])),
+        Arc::new(RecordingActiveRunLookup::default()),
+    );
+
+    let report = worker.tick_once(fire_slot).await.expect("tick succeeds");
+
+    assert_eq!(
+        report.results.last().map(|r| &r.outcome),
+        Some(&TriggerPollerFireOutcome::Submitted { run_id })
+    );
+    let persisted = repo
+        .get_trigger(tenant("tenant-a"), trigger_id)
+        .await
+        .expect("load")
+        .expect("record present");
+    assert_eq!(
+        persisted.next_run_at, expected_next_run_at,
+        "recurring trigger must advance to the next scheduled slot"
+    );
+    assert_eq!(persisted.state, TriggerState::Scheduled);
 }
 
 struct RecordingMaterializer {
@@ -2218,6 +2649,7 @@ impl TriggerRepository for TickConcurrencyRepository {
         _agent_id: Option<AgentId>,
         _project_id: Option<ProjectId>,
         _limit: usize,
+        _excluded_states: &[TriggerState],
     ) -> Result<Vec<TriggerRecord>, TriggerError> {
         unreachable!("tick-concurrency repository does not list scoped records")
     }
@@ -2367,6 +2799,7 @@ impl TriggerRepository for ActiveListErrorRepository {
         _agent_id: Option<AgentId>,
         _project_id: Option<ProjectId>,
         _limit: usize,
+        _excluded_states: &[TriggerState],
     ) -> Result<Vec<TriggerRecord>, TriggerError> {
         unreachable!("active-list-error repository does not list scoped records")
     }
@@ -2520,6 +2953,7 @@ impl TriggerRepository for ActiveWrapRefetchErrorRepository {
         _agent_id: Option<AgentId>,
         _project_id: Option<ProjectId>,
         _limit: usize,
+        _excluded_states: &[TriggerState],
     ) -> Result<Vec<TriggerRecord>, TriggerError> {
         unreachable!("active-wrap-refetch-error repository does not list scoped records")
     }
@@ -2666,6 +3100,7 @@ impl TriggerRepository for ActiveClearRaceRepository {
         _agent_id: Option<AgentId>,
         _project_id: Option<ProjectId>,
         _limit: usize,
+        _excluded_states: &[TriggerState],
     ) -> Result<Vec<TriggerRecord>, TriggerError> {
         unreachable!("active-clear-race repository does not list scoped records")
     }
@@ -2824,6 +3259,7 @@ impl TriggerRepository for ActiveClearFailsOnceRepository {
         _agent_id: Option<AgentId>,
         _project_id: Option<ProjectId>,
         _limit: usize,
+        _excluded_states: &[TriggerState],
     ) -> Result<Vec<TriggerRecord>, TriggerError> {
         unreachable!("active-clear-fails-once repository does not list scoped records")
     }
@@ -3017,6 +3453,7 @@ impl TriggerRepository for AcceptedMissingRepository {
         _agent_id: Option<AgentId>,
         _project_id: Option<ProjectId>,
         _limit: usize,
+        _excluded_states: &[TriggerState],
     ) -> Result<Vec<TriggerRecord>, TriggerError> {
         unreachable!("accepted-missing repository does not list scoped records")
     }
@@ -3155,6 +3592,7 @@ impl TriggerRepository for ReplayedMissingRepository {
         _agent_id: Option<AgentId>,
         _project_id: Option<ProjectId>,
         _limit: usize,
+        _excluded_states: &[TriggerState],
     ) -> Result<Vec<TriggerRecord>, TriggerError> {
         unreachable!("replayed-missing repository does not list scoped records")
     }
@@ -3294,6 +3732,7 @@ impl TriggerRepository for DueErrorThenSuccessRepository {
         _agent_id: Option<AgentId>,
         _project_id: Option<ProjectId>,
         _limit: usize,
+        _excluded_states: &[TriggerState],
     ) -> Result<Vec<TriggerRecord>, TriggerError> {
         unreachable!("due-error repository does not list scoped records")
     }
@@ -3449,6 +3888,7 @@ impl TriggerRepository for ClaimRaceRepository {
         _agent_id: Option<AgentId>,
         _project_id: Option<ProjectId>,
         _limit: usize,
+        _excluded_states: &[TriggerState],
     ) -> Result<Vec<TriggerRecord>, TriggerError> {
         unreachable!("claim-race repository does not list scoped records")
     }
@@ -3583,7 +4023,6 @@ async fn timezone_aware_firing_harness() {
         name: "daily 9am eastern".to_string(),
         source: TriggerSourceKind::Schedule,
         schedule: schedule.clone(),
-        completion_policy: TriggerCompletionPolicy::Recurring,
         prompt: "run daily summary".to_string(),
         state: TriggerState::Scheduled,
         next_run_at: computed_seed,

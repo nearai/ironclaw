@@ -141,7 +141,7 @@ async fn webui_event_stream_uses_credential_requirement_for_manual_token_auth_pr
 }
 
 #[tokio::test]
-async fn webui_event_stream_does_not_downgrade_oauth_requirement_to_manual_token_prompt() {
+async fn webui_event_stream_keeps_oauth_requirement_as_oauth_prompt_without_url() {
     let tenant_id = TenantId::new("webui-events-tenant").unwrap();
     let user_id = UserId::new("webui-events-user").unwrap();
     let agent_id = AgentId::new("webui-events-agent").unwrap();
@@ -209,7 +209,7 @@ async fn webui_event_stream_does_not_downgrade_oauth_requirement_to_manual_token
             ProductOutboundPayload::AuthPrompt(prompt)
                 if prompt.turn_run_id == turn_run
                     && prompt.auth_request_ref == gate_ref
-                    && prompt.challenge_kind == Some(AuthPromptChallengeKind::Other)
+                    && prompt.challenge_kind == Some(AuthPromptChallengeKind::OAuthUrl)
                     && prompt.provider.as_deref() == Some("google")
                     && prompt.account_label.is_none()
                     && prompt.authorization_url.is_none()

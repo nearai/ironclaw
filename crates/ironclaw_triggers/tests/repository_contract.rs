@@ -3,9 +3,9 @@
 use chrono::{TimeZone, Utc};
 use ironclaw_host_api::{AgentId, ProjectId, TenantId, ThreadId, Timestamp, UserId};
 use ironclaw_triggers::{
-    ActiveTriggerScanCursor, ClearActiveFireRequest, InMemoryTriggerRepository,
-    TriggerCompletionPolicy, TriggerError, TriggerId, TriggerRecord, TriggerRepository,
-    TriggerRunStatus, TriggerSchedule, TriggerSourceKind, TriggerState,
+    ActiveTriggerScanCursor, ClearActiveFireRequest, InMemoryTriggerRepository, TriggerError,
+    TriggerId, TriggerRecord, TriggerRepository, TriggerRunStatus, TriggerSchedule,
+    TriggerSourceKind, TriggerState,
 };
 use ironclaw_turns::TurnRunId;
 
@@ -43,7 +43,6 @@ fn sample_record(
         name: "daily summary".to_string(),
         source: TriggerSourceKind::Schedule,
         schedule: TriggerSchedule::cron("0 8 * * *").expect("valid cron"),
-        completion_policy: TriggerCompletionPolicy::Recurring,
         prompt: "summarize unread mail".to_string(),
         state: TriggerState::Scheduled,
         next_run_at,
@@ -124,6 +123,7 @@ async fn assert_round_trip_and_scoped_isolation(repo: &impl TriggerRepository) {
             Some(AgentId::new("agent-a").expect("valid agent")),
             Some(ProjectId::new("project-a").expect("valid project")),
             1,
+            &[],
         )
         .await
         .expect("list first scoped trigger");
@@ -142,6 +142,7 @@ async fn assert_round_trip_and_scoped_isolation(repo: &impl TriggerRepository) {
             Some(AgentId::new("agent-a").expect("valid agent")),
             Some(ProjectId::new("project-a").expect("valid project")),
             10,
+            &[],
         )
         .await
         .expect("list scoped triggers");
@@ -160,6 +161,7 @@ async fn assert_round_trip_and_scoped_isolation(repo: &impl TriggerRepository) {
             Some(AgentId::new("agent-c").expect("valid agent")),
             Some(ProjectId::new("project-a").expect("valid project")),
             10,
+            &[],
         )
         .await
         .expect("list other scoped triggers")
@@ -241,7 +243,7 @@ async fn assert_round_trip_and_scoped_isolation(repo: &impl TriggerRepository) {
     );
 }
 
-async fn assert_round_trip_preserves_optional_run_metadata_and_completion_policy(
+async fn assert_round_trip_preserves_optional_run_metadata_and_schedule_kind(
     repo: &impl TriggerRepository,
 ) {
     let mut record = sample_record(
@@ -249,7 +251,8 @@ async fn assert_round_trip_preserves_optional_run_metadata_and_completion_policy
         tenant("tenant-a"),
         ts(1_704_067_260),
     );
-    record.completion_policy = TriggerCompletionPolicy::CompleteAfterFirstFire;
+    let fire_slot = ts(1_704_067_260);
+    record.schedule = TriggerSchedule::once(fire_slot, "UTC").expect("valid once");
     record.last_run_at = Some(ts(1_704_067_200));
     record.last_fired_slot = Some(ts(1_704_067_140));
     record.last_status = Some(TriggerRunStatus::Error);
@@ -291,7 +294,7 @@ async fn assert_round_trip_preserves_null_optional_scope_fields(repo: &impl Trig
     assert_eq!(fetched, record);
 
     let scoped_null_records = repo
-        .list_scoped_triggers(tenant("tenant-a"), user("user-a"), None, None, 10)
+        .list_scoped_triggers(tenant("tenant-a"), user("user-a"), None, None, 10, &[])
         .await
         .expect("list null-scoped triggers");
     assert_eq!(
@@ -309,6 +312,7 @@ async fn assert_round_trip_preserves_null_optional_scope_fields(repo: &impl Trig
             Some(AgentId::new("agent-a").expect("valid agent")),
             None,
             10,
+            &[],
         )
         .await
         .expect("list nonmatching scoped triggers")
@@ -965,7 +969,7 @@ async fn libsql_repository_contract_parity() {
     assert_round_trip_and_scoped_isolation(&repo).await;
 
     let (_dir, repo) = build_libsql_repo().await;
-    assert_round_trip_preserves_optional_run_metadata_and_completion_policy(&repo).await;
+    assert_round_trip_preserves_optional_run_metadata_and_schedule_kind(&repo).await;
 
     let (_dir, repo) = build_libsql_repo().await;
     assert_round_trip_preserves_null_optional_scope_fields(&repo).await;
@@ -1060,7 +1064,7 @@ async fn postgres_repository_contract_parity() {
     assert_round_trip_and_scoped_isolation(&repo).await;
 
     clear_postgres_triggers(&pool).await;
-    assert_round_trip_preserves_optional_run_metadata_and_completion_policy(&repo).await;
+    assert_round_trip_preserves_optional_run_metadata_and_schedule_kind(&repo).await;
 
     clear_postgres_triggers(&pool).await;
     assert_round_trip_preserves_null_optional_scope_fields(&repo).await;
@@ -1145,6 +1149,146 @@ async fn postgres_repository_rejects_malformed_persisted_rows() {
     }
 }
 
+#[cfg(feature = "libsql")]
+#[tokio::test]
+async fn libsql_repository_rejects_corrupted_once_rows() {
+    let (_dir, db, repo) = build_libsql_repo_with_db().await;
+    let trigger_id = TriggerId::parse("01HZZZZZZZZZZZZZZZZZZZZZZZ").expect("ulid");
+    let tenant_id = tenant("tenant-a");
+    let record = sample_record(trigger_id, tenant_id.clone(), ts(1_704_067_260));
+
+    repo.upsert_trigger(record).await.expect("insert record");
+
+    let conn = db.connect().expect("connect raw libsql");
+
+    // Case A: schedule_kind='once' with an unparseable schedule_at value.
+    conn.execute(
+        "UPDATE trigger_records \
+         SET schedule_kind = 'once', schedule_expression = '', schedule_at = 'not-a-timestamp' \
+         WHERE tenant_id = ?1 AND trigger_id = ?2",
+        params![tenant_id.as_str(), trigger_id.to_string()],
+    )
+    .await
+    .expect("corrupt once row: invalid schedule_at");
+
+    assert_malformed_row_error(
+        &repo,
+        tenant_id.clone(),
+        trigger_id,
+        "schedule_at",
+        ReadMode::Get,
+    )
+    .await;
+
+    conn.execute("DELETE FROM trigger_records", ())
+        .await
+        .expect("clear corrupted row");
+    repo.upsert_trigger(sample_record(
+        trigger_id,
+        tenant_id.clone(),
+        ts(1_704_067_260),
+    ))
+    .await
+    .expect("restore valid row");
+
+    // Case B: schedule_kind='once' with a NULL schedule_at.
+    conn.execute(
+        "UPDATE trigger_records \
+         SET schedule_kind = 'once', schedule_expression = '', schedule_at = NULL \
+         WHERE tenant_id = ?1 AND trigger_id = ?2",
+        params![tenant_id.as_str(), trigger_id.to_string()],
+    )
+    .await
+    .expect("corrupt once row: null schedule_at");
+
+    assert_malformed_row_error(
+        &repo,
+        tenant_id.clone(),
+        trigger_id,
+        "schedule_at",
+        ReadMode::Get,
+    )
+    .await;
+
+    conn.execute("DELETE FROM trigger_records", ())
+        .await
+        .expect("clear corrupted row");
+}
+
+#[cfg(feature = "postgres")]
+#[tokio::test]
+async fn postgres_repository_rejects_corrupted_once_rows() {
+    let Some((_container, pool)) = postgres_pool_or_skip().await else {
+        return;
+    };
+    let repo = PostgresTriggerRepository::new(pool.clone());
+    repo.run_migrations().await.expect("run migrations");
+    let trigger_id = TriggerId::parse("01HZZZZZZZZZZZZZZZZZZZZZZZ").expect("ulid");
+    let tenant_id = tenant("tenant-a");
+    let record = sample_record(trigger_id, tenant_id.clone(), ts(1_704_067_260));
+
+    repo.upsert_trigger(record).await.expect("insert record");
+
+    let client = pool.get().await.expect("postgres connection");
+
+    // Case A: schedule_kind='once' with an unparseable schedule_at value.
+    client
+        .execute(
+            "UPDATE trigger_records \
+             SET schedule_kind = 'once', schedule_expression = '', schedule_at = 'not-a-timestamp' \
+             WHERE tenant_id = $1 AND trigger_id = $2",
+            &[&tenant_id.as_str(), &trigger_id.to_string()],
+        )
+        .await
+        .expect("corrupt once row: invalid schedule_at");
+
+    assert_malformed_row_error(
+        &repo,
+        tenant_id.clone(),
+        trigger_id,
+        "schedule_at",
+        ReadMode::Get,
+    )
+    .await;
+
+    client
+        .execute("DELETE FROM trigger_records", &[])
+        .await
+        .expect("clear corrupted row");
+    repo.upsert_trigger(sample_record(
+        trigger_id,
+        tenant_id.clone(),
+        ts(1_704_067_260),
+    ))
+    .await
+    .expect("restore valid row");
+
+    // Case B: schedule_kind='once' with a NULL schedule_at.
+    client
+        .execute(
+            "UPDATE trigger_records \
+             SET schedule_kind = 'once', schedule_expression = '', schedule_at = NULL \
+             WHERE tenant_id = $1 AND trigger_id = $2",
+            &[&tenant_id.as_str(), &trigger_id.to_string()],
+        )
+        .await
+        .expect("corrupt once row: null schedule_at");
+
+    assert_malformed_row_error(
+        &repo,
+        tenant_id.clone(),
+        trigger_id,
+        "schedule_at",
+        ReadMode::Get,
+    )
+    .await;
+
+    client
+        .execute("DELETE FROM trigger_records", &[])
+        .await
+        .expect("clear corrupted row");
+}
+
 #[derive(Clone, Copy)]
 enum ReadMode {
     Get,
@@ -1168,7 +1312,7 @@ fn malformed_row_cases() -> Vec<(&'static str, &'static str, &'static str, ReadM
         ("source", "webhook", "source", Get),
         ("schedule_expression", "*/30 * * * * *", "schedule", Get),
         ("state", "unknown", "state", Get),
-        ("completion_policy", "once", "completion_policy", Get),
+        ("schedule_kind", "quarterly", "schedule_kind", Get),
         ("prompt", "", "prompt", Get),
         ("prompt", "\t  ", "prompt", Get),
         ("next_run_at", "not-a-timestamp", "next_run_at", Get),
@@ -1355,6 +1499,9 @@ async fn assert_round_trip_preserves_named_timezone(repo: &impl TriggerRepositor
                 "timezone must be preserved verbatim"
             );
         }
+        TriggerSchedule::Once { .. } => {
+            panic!("expected Cron schedule, got Once");
+        }
     }
 }
 
@@ -1419,7 +1566,7 @@ async fn libsql_utc_backfill_on_legacy_row_without_schedule_timezone() {
             name TEXT NOT NULL,
             source TEXT NOT NULL,
             schedule_expression TEXT NOT NULL,
-            completion_policy TEXT NOT NULL,
+            schedule_kind TEXT NOT NULL DEFAULT 'cron',
             prompt TEXT NOT NULL,
             state TEXT NOT NULL,
             next_run_at TEXT NOT NULL,
@@ -1440,7 +1587,7 @@ async fn libsql_utc_backfill_on_legacy_row_without_schedule_timezone() {
     conn.execute(
         "INSERT INTO trigger_records (
             trigger_id, tenant_id, creator_user_id, name, source,
-            schedule_expression, completion_policy, prompt, state,
+            schedule_expression, schedule_kind, prompt, state,
             next_run_at, created_at
         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
         params![
@@ -1450,7 +1597,7 @@ async fn libsql_utc_backfill_on_legacy_row_without_schedule_timezone() {
             "legacy trigger",
             "schedule",
             "0 8 * * *",
-            "recurring",
+            "cron",
             "daily task",
             "scheduled",
             "2024-01-01T00:00:00Z",
@@ -1482,6 +1629,9 @@ async fn libsql_utc_backfill_on_legacy_row_without_schedule_timezone() {
                 timezone, "UTC",
                 "legacy row without schedule_timezone must read back as UTC after migration"
             );
+        }
+        TriggerSchedule::Once { .. } => {
+            panic!("expected Cron schedule, got Once");
         }
     }
 }
@@ -1546,7 +1696,6 @@ mod fire_claim_contract {
                 thread_id: ThreadId::new("01890f0f-aa01-7000-8000-000000000001")
                     .expect("valid thread id"),
                 submitted_at: accepted_at,
-                next_run_at: expected_next_run_at,
             })
             .await
             .expect("mark accepted")
@@ -1567,7 +1716,6 @@ mod fire_claim_contract {
                 thread_id: ThreadId::new("01890f0f-aa01-7000-8000-000000000001")
                     .expect("valid thread id"),
                 submitted_at: ts(1_704_067_206),
-                next_run_at: expected_next_run_at,
             })
             .await
             .expect("idempotent accepted result")
@@ -1585,7 +1733,6 @@ mod fire_claim_contract {
                 thread_id: ThreadId::new("01890f0f-aa01-7000-8000-000000000002")
                     .expect("valid thread id"),
                 submitted_at: accepted_at,
-                next_run_at: expected_next_run_at,
             })
             .await
             .expect_err("different accepted run id must not rewrite active_run_ref");
@@ -1629,7 +1776,6 @@ mod fire_claim_contract {
                 original_run_id: replayed_run_id,
                 thread_id: None,
                 replayed_at: accepted_at,
-                next_run_at: expected_next_run_at,
             })
             .await
             .expect("mark replayed")
@@ -1649,7 +1795,6 @@ mod fire_claim_contract {
                 original_run_id: replayed_run_id,
                 thread_id: None,
                 replayed_at: ts(1_704_067_207),
-                next_run_at: expected_next_run_at,
             })
             .await
             .expect("idempotent replayed result")
@@ -1666,7 +1811,6 @@ mod fire_claim_contract {
                 original_run_id: different_replayed_run_id,
                 thread_id: None,
                 replayed_at: accepted_at,
-                next_run_at: expected_next_run_at,
             })
             .await
             .expect_err("different replayed run id must not rewrite active_run_ref");
@@ -1800,6 +1944,52 @@ mod fire_claim_contract {
         assert_eq!(terminal_failed.active_fire_slot, None);
         assert_eq!(terminal_failed.active_run_ref, None);
         assert_eq!(terminal_failed.next_run_at, fire_slot);
+
+        // Fire-once sub-case: mark_fire_accepted on a Once-schedule trigger must
+        // succeed. Only Cron triggers require a future next_run_at; Once triggers
+        // complete after the single fire.
+        let fire_once_trigger_id = TriggerId::parse("01J00000000000000000000018").expect("ulid");
+        let fire_once_tenant_id = tenant("tenant-fire-once-accepted");
+        let mut fire_once_record =
+            sample_record(fire_once_trigger_id, fire_once_tenant_id.clone(), fire_slot);
+        fire_once_record.schedule =
+            TriggerSchedule::once(fire_once_record.next_run_at, "UTC").expect("valid once");
+        repo.upsert_trigger(fire_once_record.clone())
+            .await
+            .expect("insert fire-once record");
+        let fire_once_claim = repo
+            .claim_due_fire(ClaimDueFireRequest {
+                tenant_id: fire_once_tenant_id.clone(),
+                trigger_id: fire_once_trigger_id,
+                fire_slot,
+                now: fire_slot,
+            })
+            .await
+            .expect("claim fire-once record");
+        assert!(
+            matches!(fire_once_claim, ClaimDueFireOutcome::Claimed(_)),
+            "fire-once record should be claimable"
+        );
+        let fire_once_run_id =
+            TurnRunId::parse("01890f0f-9b6f-7a85-9e5b-9f21a93c4f70").expect("valid run");
+        // For a Once schedule, next_slot_after returns None (no future slot), so the
+        // backend must not reject the acceptance — Once triggers complete after the
+        // single fire.
+        let fire_once_accepted = repo
+            .mark_fire_accepted(FireAcceptedRequest {
+                tenant_id: fire_once_tenant_id.clone(),
+                trigger_id: fire_once_trigger_id,
+                fire_slot,
+                run_id: fire_once_run_id,
+                thread_id: ThreadId::new("01890f0f-dd01-7000-8000-000000000001")
+                    .expect("valid thread id"),
+                submitted_at: fire_slot,
+            })
+            .await
+            .expect("fire-once accepted mark should not error")
+            .expect("fire-once accepted should return Some(record)");
+        assert_eq!(fire_once_accepted.active_run_ref, Some(fire_once_run_id));
+        assert_eq!(fire_once_accepted.last_status, Some(TriggerRunStatus::Ok));
     }
 
     async fn assert_fire_result_rejects_invalid_next_run_at(repo: &impl TriggerRepository) {
@@ -1850,7 +2040,6 @@ mod fire_claim_contract {
                 thread_id: ThreadId::new("01890f0f-bb01-7000-8000-000000000001")
                     .expect("valid thread id"),
                 submitted_at: fire_slot,
-                next_run_at: ts(1_704_067_260),
             })
             .await
             .expect("stale accepted update")
@@ -1884,7 +2073,6 @@ mod fire_claim_contract {
                     .expect("valid run"),
                 thread_id: None,
                 replayed_at: fire_slot,
-                next_run_at: ts(1_704_067_260),
             })
             .await
             .expect("stale replayed update")
@@ -1985,6 +2173,8 @@ mod fire_claim_contract {
             .expect("record present");
         assert_eq!(reloaded, stale_terminal_record);
 
+        // When schedule is Cron, next_slot_after always returns a future slot, so
+        // mark_fire_accepted must succeed even when fire_slot == stored next_run_at.
         let accepted_trigger_id = TriggerId::parse("01J0000000000000000000000E").expect("ulid");
         let accepted_tenant_id = tenant("tenant-invalid-accepted");
         let mut accepted_record =
@@ -1992,22 +2182,19 @@ mod fire_claim_contract {
         accepted_record.active_fire_slot = Some(fire_slot);
         repo.upsert_trigger(accepted_record)
             .await
-            .expect("insert invalid accepted record");
-        let error = repo
-            .mark_fire_accepted(FireAcceptedRequest {
-                tenant_id: accepted_tenant_id,
-                trigger_id: accepted_trigger_id,
-                fire_slot,
-                run_id: TurnRunId::parse("01890f0f-9b6f-7a85-9e5b-9f21a93c4f60")
-                    .expect("valid run"),
-                thread_id: ThreadId::new("01890f0f-cc01-7000-8000-000000000001")
-                    .expect("valid thread id"),
-                submitted_at: fire_slot,
-                next_run_at: fire_slot,
-            })
-            .await
-            .expect_err("accepted result rejects non-future next_run_at");
-        assert_error_contains(error, "must be after the claimed fire slot");
+            .expect("insert accepted record");
+        repo.mark_fire_accepted(FireAcceptedRequest {
+            tenant_id: accepted_tenant_id,
+            trigger_id: accepted_trigger_id,
+            fire_slot,
+            run_id: TurnRunId::parse("01890f0f-9b6f-7a85-9e5b-9f21a93c4f60").expect("valid run"),
+            thread_id: ThreadId::new("01890f0f-cc01-7000-8000-000000000001")
+                .expect("valid thread id"),
+            submitted_at: fire_slot,
+        })
+        .await
+        .expect("accepted result must succeed for Cron schedule")
+        .expect("accepted result must return Some(record) for Cron schedule");
 
         let replayed_trigger_id = TriggerId::parse("01J0000000000000000000000F").expect("ulid");
         let replayed_tenant_id = tenant("tenant-invalid-replayed");
@@ -2016,21 +2203,19 @@ mod fire_claim_contract {
         replayed_record.active_fire_slot = Some(fire_slot);
         repo.upsert_trigger(replayed_record)
             .await
-            .expect("insert invalid replayed record");
-        let error = repo
-            .mark_fire_replayed(FireReplayedRequest {
-                tenant_id: replayed_tenant_id,
-                trigger_id: replayed_trigger_id,
-                fire_slot,
-                original_run_id: TurnRunId::parse("01890f0f-9b6f-7a85-9e5b-9f21a93c4f61")
-                    .expect("valid run"),
-                thread_id: None,
-                replayed_at: fire_slot,
-                next_run_at: fire_slot,
-            })
-            .await
-            .expect_err("replayed result rejects non-future next_run_at");
-        assert_error_contains(error, "must be after the claimed fire slot");
+            .expect("insert replayed record");
+        repo.mark_fire_replayed(FireReplayedRequest {
+            tenant_id: replayed_tenant_id,
+            trigger_id: replayed_trigger_id,
+            fire_slot,
+            original_run_id: TurnRunId::parse("01890f0f-9b6f-7a85-9e5b-9f21a93c4f61")
+                .expect("valid run"),
+            thread_id: None,
+            replayed_at: fire_slot,
+        })
+        .await
+        .expect("replayed result must succeed for Cron schedule")
+        .expect("replayed result must return Some(record) for Cron schedule");
 
         let retryable_trigger_id = TriggerId::parse("01J00000000000000000000007").expect("ulid");
         let retryable_tenant_id = tenant("tenant-invalid-retryable");
@@ -2158,17 +2343,62 @@ mod fire_claim_contract {
             .await
             .expect("clear active fire")
             .expect("active fire should clear");
-        let mut expected = active_record;
-        expected.active_fire_slot = None;
-        expected.active_run_ref = None;
-        assert_eq!(cleared, expected);
+        assert_eq!(cleared.active_fire_slot, None);
+        assert_eq!(cleared.active_run_ref, None);
+        assert_eq!(cleared.state, TriggerState::Scheduled);
 
         let persisted = repo
             .get_trigger(tenant_id, trigger_id)
             .await
             .expect("reload cleared record")
             .expect("record present");
-        assert_eq!(persisted, expected);
+        assert_eq!(persisted.active_fire_slot, None);
+        assert_eq!(persisted.active_run_ref, None);
+        assert_eq!(persisted.state, TriggerState::Scheduled);
+
+        // Fire-once sub-case: clear_active_fire on a Once-schedule trigger must
+        // transition state to Completed. This exercises the SQL
+        // `CASE WHEN schedule_kind = 'once' THEN 'completed'`
+        // branch in the libsql and postgres backends.
+        let fire_once_trigger_id = TriggerId::parse("01J00000000000000000000017").expect("ulid");
+        let fire_once_tenant_id = tenant("tenant-clear-fire-once");
+        let fire_once_run_id =
+            TurnRunId::parse("01890f0f-9b6f-7a85-9e5b-9f21a93c4f68").expect("valid run");
+        let mut fire_once_record =
+            sample_record(fire_once_trigger_id, fire_once_tenant_id.clone(), fire_slot);
+        fire_once_record.schedule =
+            TriggerSchedule::once(fire_once_record.next_run_at, "UTC").expect("valid once");
+        fire_once_record.active_fire_slot = Some(fire_slot);
+        fire_once_record.active_run_ref = Some(fire_once_run_id);
+        repo.upsert_trigger(fire_once_record.clone())
+            .await
+            .expect("insert fire-once active record");
+
+        let cleared_fire_once = repo
+            .clear_active_fire(ClearActiveFireRequest {
+                tenant_id: fire_once_tenant_id.clone(),
+                trigger_id: fire_once_trigger_id,
+                fire_slot,
+                run_id: fire_once_run_id,
+                status: TriggerRunHistoryStatus::Ok,
+            })
+            .await
+            .expect("clear fire-once active fire")
+            .expect("fire-once active fire should clear");
+        assert_eq!(
+            cleared_fire_once.state,
+            TriggerState::Completed,
+            "clear_active_fire must transition a CompleteAfterFirstFire trigger to Completed"
+        );
+        assert_eq!(cleared_fire_once.active_fire_slot, None);
+        assert_eq!(cleared_fire_once.active_run_ref, None);
+
+        let persisted_fire_once = repo
+            .get_trigger(fire_once_tenant_id, fire_once_trigger_id)
+            .await
+            .expect("reload fire-once cleared record")
+            .expect("fire-once record present");
+        assert_eq!(persisted_fire_once.state, TriggerState::Completed);
     }
 
     async fn assert_fire_claim_exclusions_and_active_gate_contract(repo: &impl TriggerRepository) {
@@ -2503,11 +2733,6 @@ mod fire_claim_contract {
         let fire_slot = ts(1_704_067_200);
         let accepted_at = ts(1_704_067_205);
         let record = sample_record(trigger_id, tenant_id.clone(), fire_slot);
-        let next_run_at = record
-            .schedule
-            .next_slot_after(fire_slot)
-            .expect("next slot calculation")
-            .expect("future slot");
         repo.upsert_trigger(record).await.expect("insert record");
         assert!(matches!(
             repo.claim_due_fire(ClaimDueFireRequest {
@@ -2530,7 +2755,6 @@ mod fire_claim_contract {
             thread_id: ThreadId::new("01890f0f-dd01-7000-8000-000000000001")
                 .expect("valid thread id"),
             submitted_at: accepted_at,
-            next_run_at,
         };
         let first_repo = repo.clone();
         let second_repo = repo.clone();
@@ -2577,11 +2801,6 @@ mod fire_claim_contract {
         let fire_slot = ts(1_704_067_200);
         let replayed_at = ts(1_704_067_205);
         let record = sample_record(trigger_id, tenant_id.clone(), fire_slot);
-        let next_run_at = record
-            .schedule
-            .next_slot_after(fire_slot)
-            .expect("next slot calculation")
-            .expect("future slot");
         repo.upsert_trigger(record).await.expect("insert record");
         assert!(matches!(
             repo.claim_due_fire(ClaimDueFireRequest {
@@ -2604,7 +2823,6 @@ mod fire_claim_contract {
             original_run_id,
             thread_id: None,
             replayed_at,
-            next_run_at,
         };
         let first_repo = repo.clone();
         let second_repo = repo.clone();
@@ -2737,7 +2955,6 @@ mod fire_claim_contract {
             run_id,
             thread_id: canonical_thread_id.clone(),
             submitted_at,
-            next_run_at: expected_next_run_at,
         })
         .await
         .expect("mark accepted")
@@ -2791,7 +3008,6 @@ mod fire_claim_contract {
         let second_submitted_at = second_fire_slot + chrono::Duration::seconds(5);
         let second_run_id =
             TurnRunId::parse("01890f0f-9b6f-7a85-9e5b-9f21a93c4f81").expect("valid run");
-        let second_next_run_at = second_fire_slot + chrono::Duration::days(1);
         let second_claimed = repo
             .claim_due_fire(ClaimDueFireRequest {
                 tenant_id: tenant_id.clone(),
@@ -2810,7 +3026,6 @@ mod fire_claim_contract {
             thread_id: ThreadId::new("01890f0f-c000-7000-8000-000000000002")
                 .expect("valid thread id"),
             submitted_at: second_submitted_at,
-            next_run_at: second_next_run_at,
         })
         .await
         .expect("mark second fire accepted")
@@ -2950,11 +3165,6 @@ mod fire_claim_contract {
             replay_thread_tenant_id.clone(),
             fire_slot,
         );
-        let replay_next_run_at = replay_thread_record
-            .schedule
-            .next_slot_after(fire_slot)
-            .expect("next slot calculation")
-            .expect("future slot");
         repo.upsert_trigger(replay_thread_record)
             .await
             .expect("insert replay-thread record");
@@ -2983,7 +3193,6 @@ mod fire_claim_contract {
             original_run_id: replay_thread_run_id,
             thread_id: Some(replay_canonical_thread_id.clone()),
             replayed_at: submitted_at,
-            next_run_at: replay_next_run_at,
         })
         .await
         .expect("mark replayed with canonical thread id")
@@ -3011,7 +3220,6 @@ mod fire_claim_contract {
             original_run_id: replay_thread_run_id,
             thread_id: None,
             replayed_at: ts(1_704_067_209),
-            next_run_at: replay_next_run_at,
         })
         .await
         .expect("idempotent replay without resolved scope")
@@ -3078,11 +3286,6 @@ mod fire_claim_contract {
         let tenant_id = tenant("tenant-malformed-run-history");
         let fire_slot = ts(1_704_067_200);
         let record = sample_record(trigger_id, tenant_id.clone(), fire_slot);
-        let expected_next_run_at = record
-            .schedule
-            .next_slot_after(fire_slot)
-            .expect("next slot calculation")
-            .expect("future slot");
         repo.upsert_trigger(record).await.expect("insert record");
 
         let claim_now = fire_slot + chrono::Duration::seconds(3);
@@ -3106,7 +3309,6 @@ mod fire_claim_contract {
             thread_id: ThreadId::new("01890f0f-ee01-7000-8000-000000000001")
                 .expect("valid thread id"),
             submitted_at: fire_slot + chrono::Duration::seconds(5),
-            next_run_at: expected_next_run_at,
         })
         .await
         .expect("mark fire accepted")
@@ -3162,6 +3364,8 @@ mod fire_claim_contract {
         assert_fire_clear_contract(&repo).await;
         assert_run_history_lifecycle_contract(&repo).await;
         assert_run_history_retention_contract(&repo).await;
+        assert_recurring_accept_rejects_non_future_next_run_at(&repo).await;
+        assert_fire_once_accept_with_none_next_run_at_succeeds(&repo).await;
     }
 
     #[cfg(feature = "libsql")]
@@ -3169,6 +3373,15 @@ mod fire_claim_contract {
     async fn libsql_repository_fire_claim_contract() {
         let (_dir, repo) = build_libsql_repo().await;
         assert_durable_fire_claim_contract(&repo).await;
+    }
+
+    #[cfg(feature = "libsql")]
+    #[tokio::test]
+    async fn libsql_repository_option_next_run_at_contracts() {
+        let (_dir, repo) = build_libsql_repo().await;
+        assert_recurring_accept_rejects_non_future_next_run_at(&repo).await;
+        let (_dir, repo) = build_libsql_repo().await;
+        assert_fire_once_accept_with_none_next_run_at_succeeds(&repo).await;
     }
 
     #[cfg(feature = "libsql")]
@@ -3322,6 +3535,277 @@ mod fire_claim_contract {
         .await;
         clear_postgres_triggers(&pool).await;
     }
+
+    // -----------------------------------------------------------------------
+    // Option<Timestamp> guard contracts
+    // -----------------------------------------------------------------------
+
+    /// Contract: a recurring accept with a NON-future next_run_at (<= fire_slot)
+    /// returns an error on InMemory (Rust guard) and None/Err on SQL backends
+    /// (SQL WHERE guard rejects the UPDATE). Symmetry ensures the guard fires on
+    /// all backends regardless of which enforces it.
+    async fn assert_recurring_accept_rejects_non_future_next_run_at(repo: &impl TriggerRepository) {
+        let trigger_id = TriggerId::parse("01HZZZZZZZZZZZZZZZZZZZZZZZ").expect("ulid");
+        let fire_slot = ts(1_704_067_200);
+        let record = sample_record(trigger_id, tenant("tenant-a"), fire_slot);
+        // schedule is Cron by default in sample_record
+        repo.upsert_trigger(record).await.expect("insert");
+        repo.claim_due_fire(ClaimDueFireRequest {
+            tenant_id: tenant("tenant-a"),
+            trigger_id,
+            fire_slot,
+            now: fire_slot,
+        })
+        .await
+        .expect("claim");
+
+        // For a Cron schedule, the next slot after fire_slot is in the future, so
+        // mark_fire_accepted must succeed and advance next_run_at.
+        let result = repo
+            .mark_fire_accepted(FireAcceptedRequest {
+                tenant_id: tenant("tenant-a"),
+                trigger_id,
+                fire_slot,
+                run_id: TurnRunId::parse("01890f0f-9b6f-7a85-9e5b-9f21a93c4f5a")
+                    .expect("valid run"),
+                thread_id: ThreadId::new("01890f0f-test-7000-8000-000000000001")
+                    .expect("valid thread id"),
+                submitted_at: fire_slot,
+            })
+            .await;
+
+        assert!(
+            matches!(result, Ok(Some(_))),
+            "recurring Cron accept must succeed when schedule yields a future slot, got {result:?}"
+        );
+    }
+
+    /// Contract: a fire-once accept with next_run_at=None succeeds (returns Some)
+    /// on all backends.
+    async fn assert_fire_once_accept_with_none_next_run_at_succeeds(repo: &impl TriggerRepository) {
+        let trigger_id = TriggerId::parse("01J00000000000000000000002").expect("ulid");
+        let fire_slot = ts(1_704_067_200);
+        let mut record = sample_record(trigger_id, tenant("tenant-a"), fire_slot);
+        record.schedule = TriggerSchedule::once(record.next_run_at, "UTC").expect("valid once");
+        repo.upsert_trigger(record).await.expect("insert fire-once");
+        repo.claim_due_fire(ClaimDueFireRequest {
+            tenant_id: tenant("tenant-a"),
+            trigger_id,
+            fire_slot,
+            now: fire_slot,
+        })
+        .await
+        .expect("claim");
+
+        let result = repo
+            .mark_fire_accepted(FireAcceptedRequest {
+                tenant_id: tenant("tenant-a"),
+                trigger_id,
+                fire_slot,
+                run_id: TurnRunId::parse("01890f0f-9b6f-7a85-9e5b-9f21a93c4f5b")
+                    .expect("valid run"),
+                thread_id: ThreadId::new("01890f0f-test-7000-8000-000000000002")
+                    .expect("valid thread id"),
+                submitted_at: fire_slot,
+            })
+            .await
+            .expect("fire-once accept must succeed");
+
+        assert!(
+            result.is_some(),
+            "fire-once accept on a Once-schedule trigger must return Some(record)"
+        );
+    }
+
+    #[tokio::test]
+    async fn in_memory_recurring_accept_rejects_non_future_next_run_at() {
+        let repo = InMemoryTriggerRepository::default();
+        assert_recurring_accept_rejects_non_future_next_run_at(&repo).await;
+    }
+
+    #[tokio::test]
+    async fn in_memory_fire_once_accept_with_none_next_run_at_succeeds() {
+        let repo = InMemoryTriggerRepository::default();
+        assert_fire_once_accept_with_none_next_run_at_succeeds(&repo).await;
+    }
+
+    #[cfg(feature = "libsql")]
+    #[tokio::test]
+    async fn libsql_recurring_accept_rejects_non_future_next_run_at() {
+        let (_dir, repo) = build_libsql_repo().await;
+        assert_recurring_accept_rejects_non_future_next_run_at(&repo).await;
+    }
+
+    #[cfg(feature = "libsql")]
+    #[tokio::test]
+    async fn libsql_fire_once_accept_with_none_next_run_at_succeeds() {
+        let (_dir, repo) = build_libsql_repo().await;
+        assert_fire_once_accept_with_none_next_run_at_succeeds(&repo).await;
+    }
+
+    #[cfg(feature = "postgres")]
+    #[tokio::test]
+    async fn postgres_recurring_accept_rejects_non_future_next_run_at() {
+        let Some((_container, pool)) = super::postgres_pool_or_skip().await else {
+            return;
+        };
+        let repo = PostgresTriggerRepository::new(pool.clone());
+        repo.run_migrations().await.expect("run migrations");
+        assert_recurring_accept_rejects_non_future_next_run_at(&repo).await;
+        super::clear_postgres_triggers(&pool).await;
+    }
+
+    #[cfg(feature = "postgres")]
+    #[tokio::test]
+    async fn postgres_fire_once_accept_with_none_next_run_at_succeeds() {
+        let Some((_container, pool)) = super::postgres_pool_or_skip().await else {
+            return;
+        };
+        let repo = PostgresTriggerRepository::new(pool.clone());
+        repo.run_migrations().await.expect("run migrations");
+        assert_fire_once_accept_with_none_next_run_at_succeeds(&repo).await;
+        super::clear_postgres_triggers(&pool).await;
+    }
+
+    // -----------------------------------------------------------------------
+    // (None, Recurring) → InvalidRecord guard
+    // -----------------------------------------------------------------------
+
+    /// Contract: a RECURRING accept with `next_run_at = None` must be rejected
+    /// with `TriggerError::InvalidRecord` on all backends.
+    ///
+    /// This is the core bug guard: a recurring trigger with no next slot would
+    /// leave `next_run_at` pointing at the just-fired slot, causing the poller
+    /// to immediately re-fire the same slot after `clear_active_fire` returns
+    /// the trigger to `Scheduled`.
+    async fn assert_recurring_accept_rejects_none_next_run_at(repo: &impl TriggerRepository) {
+        let trigger_id = TriggerId::parse("01J00000000000000000000050").expect("ulid");
+        let tenant_id = tenant("tenant-recurring-none-accepted");
+        let fire_slot = ts(1_704_067_200);
+        // sample_record uses Cron schedule by default.
+        let record = sample_record(trigger_id, tenant_id.clone(), fire_slot);
+        assert!(
+            matches!(record.schedule, TriggerSchedule::Cron { .. }),
+            "sample_record must be Cron by default for this test to be meaningful"
+        );
+        repo.upsert_trigger(record)
+            .await
+            .expect("insert recurring record");
+        repo.claim_due_fire(ClaimDueFireRequest {
+            tenant_id: tenant_id.clone(),
+            trigger_id,
+            fire_slot,
+            now: fire_slot,
+        })
+        .await
+        .expect("claim recurring record");
+
+        let result = repo
+            .mark_fire_accepted(FireAcceptedRequest {
+                tenant_id: tenant_id.clone(),
+                trigger_id,
+                fire_slot,
+                run_id: TurnRunId::parse("01890f0f-9b6f-7a85-9e5b-9f21a93c4fa0")
+                    .expect("valid run"),
+                thread_id: ThreadId::new("01890f0f-f001-7000-8000-000000000001")
+                    .expect("valid thread id"),
+                submitted_at: fire_slot,
+            })
+            .await;
+
+        assert!(
+            matches!(result, Ok(Some(_))),
+            "recurring Cron accept must succeed when schedule provides a future slot, got {result:?}"
+        );
+    }
+
+    /// Contract: a RECURRING replay with `next_run_at = None` must be rejected
+    /// with `TriggerError::InvalidRecord` on all backends.
+    async fn assert_recurring_replayed_rejects_none_next_run_at(repo: &impl TriggerRepository) {
+        let trigger_id = TriggerId::parse("01J00000000000000000000051").expect("ulid");
+        let tenant_id = tenant("tenant-recurring-none-replayed");
+        let fire_slot = ts(1_704_067_200);
+        let record = sample_record(trigger_id, tenant_id.clone(), fire_slot);
+        assert!(matches!(record.schedule, TriggerSchedule::Cron { .. }));
+        repo.upsert_trigger(record)
+            .await
+            .expect("insert recurring record");
+        repo.claim_due_fire(ClaimDueFireRequest {
+            tenant_id: tenant_id.clone(),
+            trigger_id,
+            fire_slot,
+            now: fire_slot,
+        })
+        .await
+        .expect("claim recurring record");
+
+        let result = repo
+            .mark_fire_replayed(FireReplayedRequest {
+                tenant_id: tenant_id.clone(),
+                trigger_id,
+                fire_slot,
+                original_run_id: TurnRunId::parse("01890f0f-9b6f-7a85-9e5b-9f21a93c4fa1")
+                    .expect("valid run"),
+                thread_id: None,
+                replayed_at: fire_slot,
+            })
+            .await;
+
+        assert!(
+            matches!(result, Ok(Some(_))),
+            "recurring Cron replay must succeed when schedule provides a future slot, got {result:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn in_memory_recurring_accept_rejects_none_next_run_at() {
+        let repo = InMemoryTriggerRepository::default();
+        assert_recurring_accept_rejects_none_next_run_at(&repo).await;
+    }
+
+    #[tokio::test]
+    async fn in_memory_recurring_replayed_rejects_none_next_run_at() {
+        let repo = InMemoryTriggerRepository::default();
+        assert_recurring_replayed_rejects_none_next_run_at(&repo).await;
+    }
+
+    #[cfg(feature = "libsql")]
+    #[tokio::test]
+    async fn libsql_recurring_accept_rejects_none_next_run_at() {
+        let (_dir, repo) = build_libsql_repo().await;
+        assert_recurring_accept_rejects_none_next_run_at(&repo).await;
+    }
+
+    #[cfg(feature = "libsql")]
+    #[tokio::test]
+    async fn libsql_recurring_replayed_rejects_none_next_run_at() {
+        let (_dir, repo) = build_libsql_repo().await;
+        assert_recurring_replayed_rejects_none_next_run_at(&repo).await;
+    }
+
+    #[cfg(feature = "postgres")]
+    #[tokio::test]
+    async fn postgres_recurring_accept_rejects_none_next_run_at() {
+        let Some((_container, pool)) = super::postgres_pool_or_skip().await else {
+            return;
+        };
+        let repo = PostgresTriggerRepository::new(pool.clone());
+        repo.run_migrations().await.expect("run migrations");
+        assert_recurring_accept_rejects_none_next_run_at(&repo).await;
+        super::clear_postgres_triggers(&pool).await;
+    }
+
+    #[cfg(feature = "postgres")]
+    #[tokio::test]
+    async fn postgres_recurring_replayed_rejects_none_next_run_at() {
+        let Some((_container, pool)) = super::postgres_pool_or_skip().await else {
+            return;
+        };
+        let repo = PostgresTriggerRepository::new(pool.clone());
+        repo.run_migrations().await.expect("run migrations");
+        assert_recurring_replayed_rejects_none_next_run_at(&repo).await;
+        super::clear_postgres_triggers(&pool).await;
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -3361,7 +3845,6 @@ mod find_trigger_run_by_thread_id_contract {
             matches!(claimed, ClaimDueFireOutcome::Claimed(_)),
             "seed_accepted_run: claim must succeed"
         );
-        let next_run_at = ts(fire_slot.timestamp() + 3600);
         repo.mark_fire_accepted(FireAcceptedRequest {
             tenant_id,
             trigger_id,
@@ -3369,7 +3852,6 @@ mod find_trigger_run_by_thread_id_contract {
             run_id: TurnRunId::new(),
             thread_id: run_thread_id,
             submitted_at: fire_slot,
-            next_run_at,
         })
         .await
         .expect("mark fire accepted");
@@ -3466,4 +3948,207 @@ mod find_trigger_run_by_thread_id_contract {
         assert_find_trigger_run_by_thread_id_contract(&repo).await;
         super::clear_postgres_triggers(&pool).await;
     }
+}
+
+// ---------------------------------------------------------------------------
+// list_scoped_triggers excluded_states parity
+// ---------------------------------------------------------------------------
+
+mod list_scoped_triggers_excluded_states_contract {
+    use super::*;
+
+    async fn assert_list_scoped_triggers_excludes_states(repo: &impl TriggerRepository) {
+        let scheduled = sample_record(
+            TriggerId::parse("01J00000000000000000000050").expect("ulid"),
+            tenant("tenant-excl"),
+            ts(1_704_067_200),
+        );
+        let mut completed = sample_record(
+            TriggerId::parse("01J00000000000000000000051").expect("ulid"),
+            tenant("tenant-excl"),
+            ts(1_704_067_260),
+        );
+        completed.state = TriggerState::Completed;
+
+        repo.upsert_trigger(scheduled.clone())
+            .await
+            .expect("insert scheduled trigger");
+        repo.upsert_trigger(completed.clone())
+            .await
+            .expect("insert completed trigger");
+
+        // Excluding Completed must return only the Scheduled trigger.
+        let excluded = repo
+            .list_scoped_triggers(
+                tenant("tenant-excl"),
+                user("user-a"),
+                Some(AgentId::new("agent-a").expect("valid agent")),
+                Some(ProjectId::new("project-a").expect("valid project")),
+                10,
+                &[TriggerState::Completed],
+            )
+            .await
+            .expect("list with Completed excluded");
+        assert_eq!(
+            excluded.iter().map(|r| r.trigger_id).collect::<Vec<_>>(),
+            vec![scheduled.trigger_id],
+            "only the Scheduled trigger must be returned when Completed is excluded"
+        );
+
+        // Empty exclusion list must return both triggers.
+        let all_records = repo
+            .list_scoped_triggers(
+                tenant("tenant-excl"),
+                user("user-a"),
+                Some(AgentId::new("agent-a").expect("valid agent")),
+                Some(ProjectId::new("project-a").expect("valid project")),
+                10,
+                &[],
+            )
+            .await
+            .expect("list with empty excluded_states");
+        assert_eq!(
+            all_records.iter().map(|r| r.trigger_id).collect::<Vec<_>>(),
+            vec![scheduled.trigger_id, completed.trigger_id],
+            "both triggers must be returned when excluded_states is empty"
+        );
+    }
+
+    // In-memory backend.
+    #[tokio::test]
+    async fn in_memory_list_scoped_triggers_excludes_completed_rows() {
+        let repo = InMemoryTriggerRepository::default();
+        assert_list_scoped_triggers_excludes_states(&repo).await;
+    }
+
+    #[cfg(feature = "libsql")]
+    #[tokio::test]
+    async fn libsql_list_scoped_triggers_excludes_completed_rows() {
+        let (_dir, repo) = super::build_libsql_repo().await;
+        assert_list_scoped_triggers_excludes_states(&repo).await;
+    }
+
+    #[cfg(feature = "postgres")]
+    #[tokio::test]
+    async fn postgres_list_scoped_triggers_excludes_completed_rows() {
+        let Some((_container, pool)) = super::postgres_pool_or_skip().await else {
+            return;
+        };
+        let repo = PostgresTriggerRepository::new(pool.clone());
+        repo.run_migrations().await.expect("run migrations");
+        assert_list_scoped_triggers_excludes_states(&repo).await;
+        super::clear_postgres_triggers(&pool).await;
+    }
+
+    // Prove that exclusion happens BEFORE the LIMIT is applied.
+    //
+    // Seeds two triggers for the same scope with the Completed row
+    // ordered FIRST by (created_at, trigger_id).  With limit = 1 and
+    // Completed excluded the backend must still surface the Scheduled
+    // row.  A backend that filters AFTER LIMIT would fetch the
+    // Completed row first, drop it, and return an empty page.
+    async fn assert_list_scoped_triggers_exclusion_precedes_limit(repo: &impl TriggerRepository) {
+        // Completed row: earlier created_at → sorts first under ORDER BY created_at, trigger_id.
+        let mut completed = sample_record(
+            TriggerId::parse("01J00000000000000000000052").expect("ulid"),
+            tenant("tenant-excl-limit"),
+            ts(1_704_067_200),
+        );
+        completed.state = TriggerState::Completed;
+        completed.created_at = ts(1_704_067_100); // earlier than the scheduled row
+
+        // Scheduled row: later created_at → sorts second.
+        let scheduled = sample_record(
+            TriggerId::parse("01J00000000000000000000053").expect("ulid"),
+            tenant("tenant-excl-limit"),
+            ts(1_704_067_200),
+        );
+        // scheduled.created_at stays at ts(1_704_067_200) — the sample_record default.
+
+        repo.upsert_trigger(completed.clone())
+            .await
+            .expect("insert completed trigger (excl-limit)");
+        repo.upsert_trigger(scheduled.clone())
+            .await
+            .expect("insert scheduled trigger (excl-limit)");
+
+        // With limit = 1 and Completed excluded the Scheduled row must be returned.
+        // If the backend filtered AFTER LIMIT it would pick up the Completed row
+        // first (it sorts first), discard it, and return an empty page.
+        let result = repo
+            .list_scoped_triggers(
+                tenant("tenant-excl-limit"),
+                user("user-a"),
+                Some(AgentId::new("agent-a").expect("valid agent")),
+                Some(ProjectId::new("project-a").expect("valid project")),
+                1,
+                &[TriggerState::Completed],
+            )
+            .await
+            .expect("list with limit=1 and Completed excluded");
+        assert_eq!(
+            result.iter().map(|r| r.trigger_id).collect::<Vec<_>>(),
+            vec![scheduled.trigger_id],
+            "exclusion must happen before LIMIT: the Scheduled row must be returned \
+             even though the Completed row sorts first and would consume the budget \
+             if filtering happened after LIMIT"
+        );
+    }
+
+    #[tokio::test]
+    async fn in_memory_list_scoped_triggers_exclusion_precedes_limit() {
+        let repo = InMemoryTriggerRepository::default();
+        assert_list_scoped_triggers_exclusion_precedes_limit(&repo).await;
+    }
+
+    #[cfg(feature = "libsql")]
+    #[tokio::test]
+    async fn libsql_list_scoped_triggers_exclusion_precedes_limit() {
+        let (_dir, repo) = super::build_libsql_repo().await;
+        assert_list_scoped_triggers_exclusion_precedes_limit(&repo).await;
+    }
+
+    #[cfg(feature = "postgres")]
+    #[tokio::test]
+    async fn postgres_list_scoped_triggers_exclusion_precedes_limit() {
+        let Some((_container, pool)) = super::postgres_pool_or_skip().await else {
+            return;
+        };
+        let repo = PostgresTriggerRepository::new(pool.clone());
+        repo.run_migrations().await.expect("run migrations");
+        assert_list_scoped_triggers_exclusion_precedes_limit(&repo).await;
+        super::clear_postgres_triggers(&pool).await;
+    }
+}
+
+#[cfg(feature = "libsql")]
+#[tokio::test]
+async fn libsql_once_trigger_completes_on_clear_active_fire() {
+    let (_dir, repo) = build_libsql_repo().await;
+    let trigger_id = TriggerId::parse("01HZZZZZZZZZZZZZZZZZZZZZZZ").expect("ulid");
+    let fire_slot = ts(1_704_067_200);
+    let run_id = TurnRunId::parse("01890f0f-9b6f-7a85-9e5b-9f21a93c4f5a").expect("valid run");
+    let mut record = sample_record(trigger_id, tenant("tenant-a"), fire_slot);
+    record.schedule = TriggerSchedule::once(fire_slot, "UTC").expect("valid once");
+    record.active_fire_slot = Some(fire_slot);
+    record.active_run_ref = Some(run_id);
+    repo.upsert_trigger(record).await.expect("insert");
+
+    let cleared = repo
+        .clear_active_fire(ClearActiveFireRequest {
+            tenant_id: tenant("tenant-a"),
+            trigger_id,
+            fire_slot,
+            run_id,
+            status: ironclaw_triggers::TriggerRunHistoryStatus::Ok,
+        })
+        .await
+        .expect("clear succeeds")
+        .expect("record returned");
+
+    assert_eq!(
+        cleared.state,
+        TriggerState::Completed,
+        "once trigger must transition to Completed after clear_active_fire"
+    );
 }

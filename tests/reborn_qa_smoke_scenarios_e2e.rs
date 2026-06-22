@@ -23,6 +23,7 @@ use reborn_support::{
         EXTENSION_INSTALL_CAPABILITY_ID, EXTENSION_LIFECYCLE_CAPABILITY_IDS,
         EXTENSION_REMOVE_CAPABILITY_ID, EXTENSION_SEARCH_CAPABILITY_ID,
     },
+    github as github_support,
     harness::{RebornBinaryE2EHarness, RecordingTestCapabilityPort},
     model_replay::{
         RebornModelReplayStep, RebornScriptedProviderToolCall, RebornTraceReplayModelGateway,
@@ -201,8 +202,11 @@ async fn qa_trigger_automation_smokes_create_view_and_cleanup() {
                 serde_json::json!({
                     "name": "qa-reborn-heartbeat-smoke",
                     "prompt": "reborn heartbeat smoke",
-                    "cron": "*/2 * * * *",
-                    "timezone": "UTC"
+                    "schedule": {
+                        "kind": "cron",
+                        "expression": "*/2 * * * *",
+                        "timezone": "UTC"
+                    }
                 }),
             )],
             expected_tool_results: Vec::new(),
@@ -222,8 +226,11 @@ async fn qa_trigger_automation_smokes_create_view_and_cleanup() {
                 serde_json::json!({
                     "name": "qa-reborn-cron-smoke",
                     "prompt": "summarize repo status",
-                    "cron": "0 9 * * 1",
-                    "timezone": "UTC"
+                    "schedule": {
+                        "kind": "cron",
+                        "expression": "0 9 * * 1",
+                        "timezone": "UTC"
+                    }
                 }),
             )],
             expected_tool_results: Vec::new(),
@@ -663,11 +670,7 @@ async fn qa_extension_lifecycle_tools_search_install_activate_and_remove_e2e() {
             expected_tool_results: Vec::new(),
         },
         RebornModelReplayStep::AssertProviderToolsThenProviderToolCalls {
-            capability_ids: capability_ids(&[
-                "github.get_issue",
-                "github.comment_issue",
-                "github.search_issues",
-            ]),
+            capability_ids: github_support::capability_ids().expect("github capability ids"),
             calls: vec![call(
                 &remove,
                 "qa_extension_remove_github",
@@ -888,17 +891,9 @@ async fn qa_plugin_browser_mcp_artifact_and_image_capability_surface_smokes() {
 
 #[tokio::test]
 async fn qa_github_capability_smoke_discovers_actions_without_live_github() {
-    let expected = [
-        "github.get_repo",
-        "github.list_issues",
-        "github.create_issue",
-        "github.get_pull_request",
-        "github.create_pr_review",
-        "github.get_workflow_runs",
-    ];
     let model_gateway = RebornTraceReplayModelGateway::with_scripted_steps([
         RebornModelReplayStep::AssertProviderToolsThenResponse {
-            capability_ids: expected.iter().map(|id| cap(id)).collect(),
+            capability_ids: github_support::capability_ids().expect("github capability ids"),
             response: HostManagedModelResponse::assistant_reply("qa github smoke complete"),
             expected_tool_results: Vec::new(),
         },
