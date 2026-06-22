@@ -31,7 +31,14 @@ export function ChatPage() {
       threads.some((thread) => thread.id === urlThreadId)
   );
   const routeThreadCanOpen = routeThreadSelectedLocally || routeThreadExistsInList;
-  const routeActiveThreadId = routeThreadCanOpen ? urlThreadId : null;
+  const routeThreadPendingValidation = Boolean(
+    urlThreadId &&
+      !isReservedThreadRoute &&
+      !isMalformedThreadRoute &&
+      !threadListSettled
+  );
+  const routeActiveThreadId =
+    routeThreadPendingValidation || routeThreadCanOpen ? urlThreadId : null;
 
   React.useEffect(() => {
     if (!urlThreadId) {
@@ -70,7 +77,6 @@ export function ChatPage() {
     isReservedThreadRoute,
     navigate,
     routeThreadCanOpen,
-    routeThreadSelectedLocally,
     setActiveThreadId,
     threadListSettled,
     urlThreadId,

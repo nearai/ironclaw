@@ -1961,11 +1961,11 @@ ${$e}`;if(J.current.gateKey!==Ke&&(J.current={gateKey:Ke,credentialRef:null,inFl
         onClose=${()=>Ya(!1)}
       />
     </div>
-  `}function th(){let{threadsState:e,gatewayStatus:t}=Ba(),{threadId:a}=ot(),n=ce(),r=je(),s=r.state?.composerDraft||"",i=e.threads||[],o=e.activeThreadId,u=e.setActiveThreadId,c=!!e.isLoaded,d=!!e.isFetching,f=c&&!d,m=a==="newchat",p=!!(a&&a.trim()===""),b=!!(a&&!m&&!p&&o===a&&!f),y=!!(a&&!m&&!p&&c&&i.some(x=>x.id===a)),$=b||y,g=$?a:null;h.default.useEffect(()=>{if(!a){o!==null&&u(null);return}if(m||p){o!==null&&u(null),n("/chat",{replace:!0});return}if(!(!f&&!$)){if(!$){o!==null&&u(null),n("/chat",{replace:!0});return}a!==o&&u(a)}},[o,p,m,n,$,b,u,f,a]);let v=h.default.useCallback((x,w={})=>{if(!x){e.setActiveThreadId(null),n("/chat",w);return}e.setActiveThreadId(x),n(`/chat/${x}`,w)},[e,n]);return l`
+  `}function th(){let{threadsState:e,gatewayStatus:t}=Ba(),{threadId:a}=ot(),n=ce(),r=je(),s=r.state?.composerDraft||"",i=e.threads||[],o=e.activeThreadId,u=e.setActiveThreadId,c=!!e.isLoaded,d=!!e.isFetching,f=c&&!d,m=a==="newchat",p=!!(a&&a.trim()===""),b=!!(a&&!m&&!p&&o===a&&!f),y=!!(a&&!m&&!p&&c&&i.some(w=>w.id===a)),$=b||y,v=!!(a&&!m&&!p&&!f)||$?a:null;h.default.useEffect(()=>{if(!a){o!==null&&u(null);return}if(m||p){o!==null&&u(null),n("/chat",{replace:!0});return}if(!(!f&&!$)){if(!$){o!==null&&u(null),n("/chat",{replace:!0});return}a!==o&&u(a)}},[o,p,m,n,$,u,f,a]);let x=h.default.useCallback((w,S={})=>{if(!w){e.setActiveThreadId(null),n("/chat",S);return}e.setActiveThreadId(w),n(`/chat/${w}`,S)},[e,n]);return l`
     <${Zw}
       threads=${i}
-      activeThreadId=${g}
-      onSelectThread=${v}
+      activeThreadId=${v}
+      onSelectThread=${x}
       isCreatingThread=${e.isCreating}
       composerDraft=${s}
       composerResetKey=${r.key}
