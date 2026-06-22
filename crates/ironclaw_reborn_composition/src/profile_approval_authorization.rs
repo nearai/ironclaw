@@ -32,27 +32,19 @@ pub(crate) trait ProfileApprovalGatePolicy: Send + Sync {
     }
 }
 
-/// Per-(tenant, user, capability) approval settings resolved live at dispatch
-/// time so a change made in the WebUI takes effect without a process restart
-/// (#4959).
-#[derive(Debug, Clone, Copy, Default)]
-pub(crate) struct ResolvedApprovalSettings {
-    /// Explicit per-tool override the user set, if any.
-    pub(crate) tool_override: Option<ToolPermissionOverride>,
-    /// Whether the user's global "auto-approve eligible tools" toggle is on.
-    pub(crate) global_auto_approve: bool,
-}
-
-/// Resolves [`ResolvedApprovalSettings`] for one dispatch. Implementations read
-/// the durable per-user stores; the authorizer queries this on every gate
-/// decision so settings apply per-turn without restart.
+/// Resolves approval settings for one dispatch. Implementations read the
+/// durable per-user stores; the authorizer queries these after the base grant
+/// decision allows the candidate so settings apply without process restart
+/// while non-runnable candidates do not spend approval-store reads.
 #[async_trait]
 pub(crate) trait ApprovalSettingsProvider: Send + Sync {
-    async fn resolve(
+    async fn tool_override(
         &self,
         scope: &ResourceScope,
         capability_id: &CapabilityId,
-    ) -> ResolvedApprovalSettings;
+    ) -> Option<ToolPermissionOverride>;
+
+    async fn global_auto_approve(&self, scope: &ResourceScope) -> bool;
 }
 
 /// No stored overrides and global auto-approve off: the gate behaves exactly as
@@ -64,12 +56,16 @@ pub(crate) struct EmptyApprovalSettingsProvider;
 #[cfg(test)]
 #[async_trait]
 impl ApprovalSettingsProvider for EmptyApprovalSettingsProvider {
-    async fn resolve(
+    async fn tool_override(
         &self,
         _scope: &ResourceScope,
         _capability_id: &CapabilityId,
-    ) -> ResolvedApprovalSettings {
-        ResolvedApprovalSettings::default()
+    ) -> Option<ToolPermissionOverride> {
+        None
+    }
+
+    async fn global_auto_approve(&self, _scope: &ResourceScope) -> bool {
+        false
     }
 }
 
@@ -120,10 +116,6 @@ impl TrustAwareCapabilityDispatchAuthorizer for ProfileApprovalPolicyAuthorizer 
             .inner
             .authorize_dispatch_with_trust(context, descriptor, estimate, trust_decision)
             .await;
-        let settings = self
-            .settings
-            .resolve(&context.resource_scope, &descriptor.id)
-            .await;
         require_approval_for_profile_policy(
             decision,
             context,
@@ -132,8 +124,9 @@ impl TrustAwareCapabilityDispatchAuthorizer for ProfileApprovalPolicyAuthorizer 
             ProfileApprovalActionKind::Dispatch,
             self.approval_policy,
             self.gate_policy.as_ref(),
-            settings,
+            self.settings.as_ref(),
         )
+        .await
     }
 
     async fn authorize_spawn_with_trust(
@@ -147,10 +140,6 @@ impl TrustAwareCapabilityDispatchAuthorizer for ProfileApprovalPolicyAuthorizer 
             .inner
             .authorize_spawn_with_trust(context, descriptor, estimate, trust_decision)
             .await;
-        let settings = self
-            .settings
-            .resolve(&context.resource_scope, &descriptor.id)
-            .await;
         require_approval_for_profile_policy(
             decision,
             context,
@@ -159,8 +148,9 @@ impl TrustAwareCapabilityDispatchAuthorizer for ProfileApprovalPolicyAuthorizer 
             ProfileApprovalActionKind::SpawnCapability,
             self.approval_policy,
             self.gate_policy.as_ref(),
-            settings,
+            self.settings.as_ref(),
         )
+        .await
     }
 }
 
@@ -172,7 +162,7 @@ enum ProfileApprovalActionKind {
 
 #[allow(clippy::too_many_arguments)]
 // arch-exempt: too_many_args, gate decision needs context+descriptor+estimate+policy+gate+settings, plan #4776
-fn require_approval_for_profile_policy(
+async fn require_approval_for_profile_policy(
     decision: Decision,
     context: &ExecutionContext,
     descriptor: &CapabilityDescriptor,
@@ -180,7 +170,7 @@ fn require_approval_for_profile_policy(
     action_kind: ProfileApprovalActionKind,
     approval_policy: ApprovalPolicy,
     gate_policy: &dyn ProfileApprovalGatePolicy,
-    settings: ResolvedApprovalSettings,
+    settings: &dyn ApprovalSettingsProvider,
 ) -> Decision {
     // The profile approval gate only ever upgrades an underlying `Allow`; a
     // `Deny` / `RequireApproval` from the grant authorizer passes through
@@ -202,10 +192,10 @@ fn require_approval_for_profile_policy(
 
     // Decision precedence (high → low), #4776:
     // 1. Explicit per-tool `disabled` → deny outright (strongest user intent).
-    if matches!(
-        settings.tool_override,
-        Some(ToolPermissionOverride::Disabled)
-    ) {
+    let tool_override = settings
+        .tool_override(&context.resource_scope, &descriptor.id)
+        .await;
+    if matches!(tool_override, Some(ToolPermissionOverride::Disabled)) {
         return Decision::Deny {
             reason: DenyReason::PolicyDenied,
         };
@@ -216,10 +206,7 @@ fn require_approval_for_profile_policy(
     }
     // 3. Explicit per-tool `ask_each_time` → always gate, ignoring the global
     //    auto-approve setting and any stored always-allow grant.
-    if matches!(
-        settings.tool_override,
-        Some(ToolPermissionOverride::AskEachTime)
-    ) {
+    if matches!(tool_override, Some(ToolPermissionOverride::AskEachTime)) {
         return require_approval();
     }
     // 4. Capability deliberately exempt from the gate (in-turn consent).
@@ -230,11 +217,7 @@ fn require_approval_for_profile_policy(
     if !gate_policy.effects_require_approval(approval_policy, &gate_effects) {
         return decision;
     }
-    // 6. Global auto-approve bypasses an otherwise-gated eligible tool.
-    if settings.global_auto_approve {
-        return decision;
-    }
-    // 7. A matching one-shot lease or persistent always-allow grant satisfies
+    // 6. A matching one-shot lease or persistent always-allow grant satisfies
     //    the gate.
     if has_matching_approval_grant(
         context,
@@ -243,6 +226,10 @@ fn require_approval_for_profile_policy(
         approval_policy,
         gate_policy,
     ) {
+        return decision;
+    }
+    // 7. Global auto-approve bypasses an otherwise-gated eligible tool.
+    if settings.global_auto_approve(&context.resource_scope).await {
         return decision;
     }
     require_approval()
@@ -389,15 +376,16 @@ mod tests {
 
     #[async_trait]
     impl ApprovalSettingsProvider for StubSettingsProvider {
-        async fn resolve(
+        async fn tool_override(
             &self,
             _scope: &ResourceScope,
             _capability_id: &CapabilityId,
-        ) -> ResolvedApprovalSettings {
-            ResolvedApprovalSettings {
-                tool_override: self.tool_override,
-                global_auto_approve: self.global_auto_approve,
-            }
+        ) -> Option<ToolPermissionOverride> {
+            self.tool_override
+        }
+
+        async fn global_auto_approve(&self, _scope: &ResourceScope) -> bool {
+            self.global_auto_approve
         }
     }
 

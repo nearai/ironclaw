@@ -274,6 +274,17 @@ fn enforce_runtime_cutover_gate(
         RebornCompositionProfile::Disabled => Err(RebornRuntimeError::InvalidArgument {
             reason: "profile=disabled must not start live Reborn runtime traffic".to_string(),
         }),
+        RebornCompositionProfile::HostedSingleTenant => {
+            if readiness.state != RebornReadinessState::HostedSingleTenantValidated {
+                return Err(RebornRuntimeError::InvalidArgument {
+                    reason: format!(
+                        "profile=hosted-single-tenant cannot start Reborn runtime before hosted single-tenant readiness is validated; required_state=HostedSingleTenantValidated, state={:?}",
+                        readiness.state
+                    ),
+                });
+            }
+            Ok(())
+        }
         RebornCompositionProfile::LocalDev | RebornCompositionProfile::LocalDevYolo => Ok(()),
     }
 }
@@ -699,14 +710,20 @@ impl LocalDevApprovalTurnRunLocator {
     async fn snapshot(
         &self,
     ) -> Result<TurnPersistenceSnapshot, ironclaw_product_workflow::ProductWorkflowError> {
-        #[cfg(feature = "libsql")]
+        #[cfg(any(feature = "libsql", feature = "postgres"))]
         {
             self.turn_state
                 .persistence_snapshot()
                 .await
-                .map_err(|_| approval_turn_locator_unavailable())
+                .map_err(|error| {
+                    tracing::debug!(
+                        %error,
+                        "approval turn-run locator could not read turn persistence snapshot"
+                    );
+                    approval_turn_locator_unavailable()
+                })
         }
-        #[cfg(not(feature = "libsql"))]
+        #[cfg(not(any(feature = "libsql", feature = "postgres")))]
         {
             Ok(self.turn_state.persistence_snapshot())
         }
@@ -848,7 +865,7 @@ fn snapshot_run_actor_matches(
         .any(|turn| turn.turn_id == run.turn_id && turn.scope == run.scope && turn.actor == *actor)
 }
 
-#[cfg(feature = "libsql")]
+#[cfg(any(feature = "libsql", feature = "postgres"))]
 fn approval_turn_locator_unavailable() -> ironclaw_product_workflow::ProductWorkflowError {
     ironclaw_product_workflow::ProductWorkflowError::Transient {
         reason: "approval turn-run locator unavailable".to_string(),
@@ -1113,10 +1130,14 @@ impl RebornRuntime {
         // rows into the same libSQL substrate. Reading that SQL table is a
         // substrate-level concern, so it lives here in the host layer (not the
         // identity crate) and binds each row into the filesystem-backed store.
-        if let Err(err) =
-            fold_legacy_webui_identities(&local.identity_substrate_db, tenant_id, &store).await
+        #[cfg(feature = "libsql")]
         {
-            return Some(Err(err));
+            if let Some(identity_substrate_db) = &local.identity_substrate_db
+                && let Err(err) =
+                    fold_legacy_webui_identities(identity_substrate_db, tenant_id, &store).await
+            {
+                return Some(Err(err));
+            }
         }
         Some(Ok(
             Arc::new(store) as Arc<dyn ironclaw_reborn_identity::RebornIdentityResolver>
@@ -1413,6 +1434,18 @@ impl RebornRuntime {
             .local_runtime
             .as_ref()
             .map(|rt| Arc::clone(&rt.budget_gate_store))
+    }
+
+    /// Test-only lookup scope for budget gates opened by a run in this
+    /// conversation. Durable gate stores route by the run's resource scope;
+    /// tests must not use `ResourceScope::system()` because the in-memory
+    /// store ignores scope while filesystem-backed stores do not.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn budget_gate_scope_for_conversation(
+        &self,
+        conversation: &ConversationId,
+    ) -> ironclaw_host_api::ResourceScope {
+        self.turn_scope_for(&conversation.0).to_resource_scope()
     }
 
     /// Apply the outcome of a resolved [`BudgetApprovalGate`]: when the
@@ -2261,7 +2294,8 @@ impl RebornRuntime {
 /// the returned `RebornRuntime` is ready to accept `send_user_message` calls.
 ///
 /// **Currently supported profiles:** `RebornCompositionProfile::LocalDev`,
-/// `RebornCompositionProfile::LocalDevYolo`, and
+/// `RebornCompositionProfile::LocalDevYolo`,
+/// `RebornCompositionProfile::HostedSingleTenant`, and
 /// `RebornCompositionProfile::Production` are wired end-to-end here. Production
 /// starts only after readiness diagnostics validate that live traffic can be
 /// exposed without a partial cutover.
@@ -2301,6 +2335,7 @@ pub async fn build_reborn_runtime(
     match profile {
         RebornCompositionProfile::LocalDev
         | RebornCompositionProfile::LocalDevYolo
+        | RebornCompositionProfile::HostedSingleTenant
         | RebornCompositionProfile::Production => {}
         RebornCompositionProfile::MigrationDryRun => {
             return Err(RebornRuntimeError::InvalidArgument {
@@ -2397,7 +2432,9 @@ pub async fn build_reborn_runtime(
     let production_scheduler_wake: Option<ironclaw_reborn::runtime::SchedulerWakeWiring> = None;
 
     let runtime_parts = match profile {
-        RebornCompositionProfile::LocalDev | RebornCompositionProfile::LocalDevYolo => {
+        RebornCompositionProfile::LocalDev
+        | RebornCompositionProfile::LocalDevYolo
+        | RebornCompositionProfile::HostedSingleTenant => {
             let local_runtime =
                 services
                     .local_runtime
@@ -2980,6 +3017,7 @@ pub async fn build_reborn_runtime(
                         local_runtime.workspace_mounts.clone(),
                         local_runtime.skill_mounts.clone(),
                         local_runtime.memory_mounts.clone(),
+                        local_runtime.system_extensions_lifecycle_mounts.clone(),
                         local_dev::extension_surface::LocalDevExtensionSurfaceSource::new(
                             local_runtime.extension_management.clone(),
                         ),
@@ -3381,7 +3419,7 @@ async fn bootstrap_nearai_mcp_from_effective_llm(
     else {
         return Ok(());
     };
-    crate::nearai_mcp::bootstrap_local_dev_nearai_mcp(
+    let outcome = crate::nearai_mcp::bootstrap_nearai_mcp(
         Some(config),
         product_auth,
         extension_management,
@@ -3390,7 +3428,9 @@ async fn bootstrap_nearai_mcp_from_effective_llm(
     .await
     .map_err(|error| RebornRuntimeError::InvalidArgument {
         reason: format!("NEAR AI MCP bootstrap from LLM config failed: {error}"),
-    })
+    })?;
+    outcome.log_completion();
+    Ok(())
 }
 
 struct ValidatedRuntimeIdentity {
@@ -3802,6 +3842,44 @@ mod tests {
 
         super::enforce_runtime_cutover_gate(RebornCompositionProfile::LocalDev, &readiness)
             .expect("local-dev runtime is not production traffic");
+    }
+
+    #[test]
+    fn runtime_cutover_gate_allows_hosted_single_tenant_readiness() {
+        let readiness = readiness_for_runtime_gate(
+            RebornCompositionProfile::HostedSingleTenant,
+            RebornReadinessState::HostedSingleTenantValidated,
+            Vec::new(),
+        );
+
+        super::enforce_runtime_cutover_gate(
+            RebornCompositionProfile::HostedSingleTenant,
+            &readiness,
+        )
+        .expect("validated hosted single-tenant runtime can start");
+    }
+
+    #[test]
+    fn runtime_cutover_gate_rejects_local_dev_readiness_for_hosted_single_tenant() {
+        let readiness = readiness_for_runtime_gate(
+            RebornCompositionProfile::HostedSingleTenant,
+            RebornReadinessState::DevOnly,
+            vec![crate::RebornReadinessDiagnostic::local_dev()],
+        );
+
+        let error = super::enforce_runtime_cutover_gate(
+            RebornCompositionProfile::HostedSingleTenant,
+            &readiness,
+        )
+        .expect_err("hosted single-tenant runtime requires hosted readiness");
+        let RebornRuntimeError::InvalidArgument { reason } = error else {
+            panic!("expected invalid argument, got {error:?}");
+        };
+        assert!(reason.contains("hosted-single-tenant"), "reason: {reason}");
+        assert!(
+            reason.contains("HostedSingleTenantValidated"),
+            "reason: {reason}"
+        );
     }
 
     // ── scheduler wake wiring guard unit tests ───────────────────────────────
@@ -8060,12 +8138,14 @@ mod tests {
         // Seed a legacy pre-#4381 WebUI identity into the SAME substrate DB the
         // runtime owns, exactly as the old store wrote it.
         let substrate = Arc::clone(
-            &runtime
+            runtime
                 .services
                 .local_runtime
                 .as_ref()
                 .expect("local runtime substrate")
-                .identity_substrate_db,
+                .identity_substrate_db
+                .as_ref()
+                .expect("libSQL identity substrate"),
         );
         let seed = substrate.connect().expect("substrate connection");
         seed.execute_batch(
@@ -8158,12 +8238,14 @@ mod tests {
 
         // Seed a legacy pre-#4381 WebUI Google identity with a VERIFIED email.
         let substrate = Arc::clone(
-            &runtime
+            runtime
                 .services
                 .local_runtime
                 .as_ref()
                 .expect("local runtime substrate")
-                .identity_substrate_db,
+                .identity_substrate_db
+                .as_ref()
+                .expect("libSQL identity substrate"),
         );
         let seed = substrate.connect().expect("substrate connection");
         seed.execute_batch(

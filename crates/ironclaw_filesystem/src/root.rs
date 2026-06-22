@@ -197,6 +197,22 @@ pub trait RootFilesystem: Send + Sync {
         unsupported(path, FilesystemOperation::Tail)
     }
 
+    /// Read at most `max_records` events at `path` starting at `from`
+    /// (exclusive).
+    ///
+    /// Backends with native paging should override this so consumers do not
+    /// materialize the full tail before applying their replay limit.
+    async fn tail_bounded(
+        &self,
+        path: &VirtualPath,
+        from: SeqNo,
+        max_records: usize,
+    ) -> Result<Vec<EventRecord>, FilesystemError> {
+        let mut records = self.tail(path, from).await?;
+        records.truncate(max_records);
+        Ok(records)
+    }
+
     /// Return the highest seq present at `path` with `seq > from`, or `None`
     /// when no such record exists. This is the head/replay-boundary probe used
     /// by durable event logs at subscription start.
@@ -326,6 +342,19 @@ mod tests {
                 operation: FilesystemOperation::Stat,
             })
         }
+
+        async fn tail(
+            &self,
+            _path: &VirtualPath,
+            _from: SeqNo,
+        ) -> Result<Vec<EventRecord>, FilesystemError> {
+            Ok((1..=3)
+                .map(|seq| EventRecord {
+                    seq: SeqNo::from_backend(seq),
+                    payload: vec![seq as u8],
+                })
+                .collect())
+        }
     }
 
     #[tokio::test]
@@ -339,5 +368,18 @@ mod tests {
         assert!(none.is_empty());
         assert_eq!(all.len(), 3);
         assert_eq!(all[2].name, "c");
+    }
+
+    #[tokio::test]
+    async fn tail_bounded_default_truncates_materialized_records() {
+        let backend = DefaultBoundedBackend;
+        let path = VirtualPath::new("/events").unwrap();
+
+        let none = backend.tail_bounded(&path, SeqNo::ZERO, 0).await.unwrap();
+        let first_two = backend.tail_bounded(&path, SeqNo::ZERO, 2).await.unwrap();
+
+        assert!(none.is_empty());
+        assert_eq!(first_two.len(), 2);
+        assert_eq!(first_two[1].seq, SeqNo::from_backend(2));
     }
 }

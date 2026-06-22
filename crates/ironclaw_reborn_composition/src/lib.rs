@@ -217,9 +217,9 @@ pub use llm_config_service::{LlmReloadTrigger, RebornLlmConfigService};
 #[cfg(feature = "root-llm-provider")]
 pub use llm_key_store::{LlmKeyStore, LlmKeyStoreError};
 pub use local_runtime_profile::{
-    RebornLocalRuntimeProfileError, RebornLocalRuntimeProfileOptions, local_dev_runtime_policy,
-    local_dev_yolo_runtime_policy, local_runtime_build_input,
-    local_runtime_build_input_with_options,
+    RebornLocalRuntimeProfileError, RebornLocalRuntimeProfileOptions,
+    hosted_single_tenant_runtime_policy, local_dev_runtime_policy, local_dev_yolo_runtime_policy,
+    local_runtime_build_input, local_runtime_build_input_with_options,
 };
 pub use nearai_mcp::{
     NearAiMcpBootstrapConfig, NearAiMcpBootstrapConfigError, nearai_mcp_bootstrap_config_from_env,

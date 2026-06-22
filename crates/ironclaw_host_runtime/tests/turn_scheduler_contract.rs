@@ -544,6 +544,7 @@ struct HeartbeatTrackingTransitions {
     store: Arc<InMemoryTurnStateStore>,
     heartbeats: AtomicUsize,
     notify_heartbeat: Notify,
+    heartbeat_delay: Mutex<Option<Duration>>,
 }
 
 struct ClaimRecordingTransitions {
@@ -557,7 +558,13 @@ impl HeartbeatTrackingTransitions {
             store,
             heartbeats: AtomicUsize::new(0),
             notify_heartbeat: Notify::new(),
+            heartbeat_delay: Mutex::new(None),
         }
+    }
+
+    fn with_heartbeat_delay(self, delay: Duration) -> Self {
+        *self.heartbeat_delay.lock().unwrap() = Some(delay);
+        self
     }
 
     async fn wait_for_heartbeats(&self, expected: usize) {
@@ -597,6 +604,10 @@ impl TurnRunTransitionPort for HeartbeatTrackingTransitions {
         &self,
         request: HeartbeatRequest,
     ) -> Result<ironclaw_turns::EventCursor, TurnError> {
+        let delay = *self.heartbeat_delay.lock().unwrap();
+        if let Some(delay) = delay {
+            tokio::time::sleep(delay).await;
+        }
         let result = self.store.heartbeat(request).await;
         if result.is_ok() {
             self.heartbeats.fetch_add(1, Ordering::SeqCst);
@@ -1463,6 +1474,60 @@ async fn scheduler_heartbeats_long_running_executor_until_completion() {
     transitions.wait_for_heartbeats(2).await;
     gate.notify_waiters();
     wait_for_status(&*store, scope, run_id, TurnStatus::Completed).await;
+    handle.shutdown().await;
+}
+
+#[tokio::test]
+async fn scheduler_records_failure_when_heartbeat_call_times_out() {
+    let store = Arc::new(InMemoryTurnStateStore::with_limits(
+        InMemoryTurnStateStoreLimits {
+            runner_lease_ttl: ChronoDuration::milliseconds(500),
+            ..InMemoryTurnStateStoreLimits::default()
+        },
+    ));
+    let transitions = Arc::new(
+        HeartbeatTrackingTransitions::new(Arc::clone(&store))
+            .with_heartbeat_delay(Duration::from_secs(60)),
+    );
+    let transition_port: Arc<dyn TurnRunTransitionPort> = transitions;
+    let executor = Arc::new(HangingExecutor::default());
+    let scheduler = TurnRunScheduler::new(
+        transition_port,
+        executor.clone(),
+        fast_config()
+            .with_poll_interval(Duration::from_secs(60))
+            .with_runner_heartbeat_interval(Duration::from_millis(10)),
+    );
+    let handle = scheduler.start();
+    let coordinator =
+        DefaultTurnCoordinator::new(store.clone()).with_wake_notifier(handle.wake_notifier());
+
+    let request = submit_turn_request("thread-heartbeat-timeout", "idem-heartbeat-timeout");
+    let scope = request.scope.clone();
+    let run_id = accepted_run_id(coordinator.submit_turn(request).await.unwrap());
+    executor.wait_for_started().await;
+
+    timeout(Duration::from_secs(2), async {
+        loop {
+            let state = store
+                .get_run_state(GetRunStateRequest {
+                    scope: scope.clone(),
+                    run_id,
+                })
+                .await
+                .unwrap();
+            if state.status == TurnStatus::Failed {
+                assert_eq!(
+                    state.failure.as_ref().map(|failure| failure.category()),
+                    Some("scheduler_heartbeat_failed")
+                );
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("run did not move to failed after heartbeat timeout");
     handle.shutdown().await;
 }
 

@@ -333,6 +333,7 @@ async fn consume_buffered_runtime_items(
 
 struct WebuiProjectionBatch {
     cursor: WebuiProjectionCursor,
+    pending_runtime_cursor_advance: Option<EventProjectionCursor>,
     runtime_payloads_pushed: usize,
     payloads: Vec<(WebuiProjectionCursor, ProductOutboundPayload)>,
 }
@@ -341,6 +342,7 @@ impl WebuiProjectionBatch {
     fn new(cursor: WebuiProjectionCursor) -> Self {
         Self {
             cursor,
+            pending_runtime_cursor_advance: None,
             runtime_payloads_pushed: 0,
             payloads: Vec::new(),
         }
@@ -372,7 +374,7 @@ impl WebuiProjectionBatch {
             self.cursor.runtime = Some(max_projection_cursor(final_cursor, item_cursor));
             self.cursor.runtime_item = None;
             self.cursor.runtime_payloads_delivered = 0;
-            self.push(ProductOutboundPayload::KeepAlive);
+            self.push_runtime_or_live(ProductOutboundPayload::KeepAlive);
             return Ok(true);
         }
 
@@ -401,7 +403,7 @@ impl WebuiProjectionBatch {
                 self.cursor.runtime_item = Some(item_cursor.runtime);
                 self.cursor.runtime_payloads_delivered = delivered;
             }
-            self.push(payload);
+            self.push_runtime_or_live(payload);
         }
         Ok(self.cursor.runtime_payloads_delivered == 0)
     }
@@ -416,8 +418,42 @@ impl WebuiProjectionBatch {
         }
         self.runtime_payloads_pushed += 1;
         self.cursor.live = Some(cursor);
-        self.push(payload);
+        self.push_runtime_or_live(payload);
         true
+    }
+
+    fn push_runtime_cursor_advance(&mut self, cursor: EventProjectionCursor) -> bool {
+        if cursor.runtime.as_u64() == 0 {
+            return true;
+        }
+        if self.runtime_cursor_covers(&cursor) {
+            return true;
+        }
+        self.defer_runtime_cursor_advance(cursor);
+        true
+    }
+
+    fn runtime_cursor_covers(&self, cursor: &EventProjectionCursor) -> bool {
+        self.cursor
+            .runtime
+            .as_ref()
+            .or(self.pending_runtime_cursor_advance.as_ref())
+            .is_some_and(|current| current.runtime >= cursor.runtime)
+    }
+
+    fn defer_runtime_cursor_advance(&mut self, cursor: EventProjectionCursor) {
+        self.pending_runtime_cursor_advance = Some(cursor);
+    }
+
+    fn flush_pending_runtime_cursor_advance(&mut self) {
+        let Some(cursor) = self.pending_runtime_cursor_advance.take() else {
+            return;
+        };
+        self.cursor.runtime = Some(cursor);
+        self.cursor.runtime_item = None;
+        self.cursor.runtime_payloads_delivered = 0;
+        self.payloads
+            .push((self.cursor.clone(), ProductOutboundPayload::KeepAlive));
     }
 
     async fn push_runtime_item(
@@ -453,6 +489,9 @@ impl WebuiProjectionBatch {
                 RuntimePayloadItem::Live { cursor, payload } => {
                     return Ok(self.push_live_payload(cursor, payload));
                 }
+                RuntimePayloadItem::CursorAdvance { cursor } => {
+                    return Ok(self.push_runtime_cursor_advance(cursor));
+                }
             }
         }
         Ok(true)
@@ -464,16 +503,22 @@ impl WebuiProjectionBatch {
 
     fn push_turn(&mut self, cursor: TurnEventProjectionCursor, payload: ProductOutboundPayload) {
         self.cursor.turn = Some(cursor);
-        self.push(payload);
+        self.push_preserving_runtime_cursor_advance(payload);
     }
 
-    fn push(&mut self, payload: ProductOutboundPayload) {
+    fn push_runtime_or_live(&mut self, payload: ProductOutboundPayload) {
+        self.pending_runtime_cursor_advance = None;
+        self.push_preserving_runtime_cursor_advance(payload);
+    }
+
+    fn push_preserving_runtime_cursor_advance(&mut self, payload: ProductOutboundPayload) {
         self.payloads.push((self.cursor.clone(), payload));
     }
 
     fn into_payloads(
-        self,
+        mut self,
     ) -> impl Iterator<Item = (WebuiProjectionCursor, ProductOutboundPayload)> {
+        self.flush_pending_runtime_cursor_advance();
         self.payloads.into_iter()
     }
 }
@@ -688,6 +733,9 @@ enum RuntimePayloadItem {
         cursor: EventProjectionCursor,
         payload: ProductOutboundPayload,
     },
+    CursorAdvance {
+        cursor: EventProjectionCursor,
+    },
 }
 
 type RuntimePayloadItemResult = Result<Option<RuntimePayloadItem>, ProductAdapterError>;
@@ -727,7 +775,7 @@ async fn snapshot_payloads(
     )
     .await?;
     if all_payloads.is_empty() {
-        return Ok(None);
+        return Ok(Some(RuntimePayloadItem::CursorAdvance { cursor }));
     }
     let total = all_payloads.total();
     let already_delivered =
@@ -767,7 +815,7 @@ async fn replay_payloads(
     )
     .await?;
     if all_payloads.is_empty() {
-        return Ok(None);
+        return Ok(Some(RuntimePayloadItem::CursorAdvance { cursor }));
     }
     let total = all_payloads.total();
     let already_delivered =

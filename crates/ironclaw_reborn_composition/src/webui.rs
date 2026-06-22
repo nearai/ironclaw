@@ -534,6 +534,11 @@ fn status_response_from_readiness(readiness: &RebornReadiness) -> RebornOperator
             RebornOperatorStatusSeverity::Warning,
             Some("finish Reborn runtime setup before production use".to_string()),
         ),
+        crate::RebornReadinessState::HostedSingleTenantValidated => (
+            RebornOperatorStatusState::Ready,
+            RebornOperatorStatusSeverity::Info,
+            None,
+        ),
         crate::RebornReadinessState::ProductionValidated => (
             RebornOperatorStatusState::Ready,
             RebornOperatorStatusSeverity::Info,

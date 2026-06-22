@@ -117,7 +117,7 @@ pub(super) fn operation_allowed(
         FilesystemOperation::Stat => permissions.read || permissions.list,
         FilesystemOperation::Delete => permissions.delete,
         FilesystemOperation::CreateDirAll => permissions.write,
-        FilesystemOperation::MountLocal => false,
+        FilesystemOperation::MountLocal | FilesystemOperation::Connect => false,
         // Coding tools never use the unified record/index/txn/event surface
         // — they are bytes-only. If a future code path routes here, treat
         // record-plane reads as `read` and writes as `write` to stay

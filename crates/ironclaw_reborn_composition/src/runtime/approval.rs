@@ -22,6 +22,7 @@ pub(super) struct LocalDevApprovalLeaseTermsProvider {
     workspace_mounts: MountView,
     skill_mounts: MountView,
     memory_mounts: MountView,
+    system_extensions_lifecycle_mounts: MountView,
     extension_surface_source: LocalDevExtensionSurfaceSource,
 }
 
@@ -32,6 +33,7 @@ impl LocalDevApprovalLeaseTermsProvider {
         workspace_mounts: MountView,
         skill_mounts: MountView,
         memory_mounts: MountView,
+        system_extensions_lifecycle_mounts: MountView,
         extension_surface_source: LocalDevExtensionSurfaceSource,
     ) -> Self {
         Self {
@@ -40,6 +42,7 @@ impl LocalDevApprovalLeaseTermsProvider {
             workspace_mounts,
             skill_mounts,
             memory_mounts,
+            system_extensions_lifecycle_mounts,
             extension_surface_source,
         }
     }
@@ -143,6 +146,7 @@ impl ApprovalLeaseTermsProvider for LocalDevApprovalLeaseTermsProvider {
             &self.workspace_mounts,
             &self.skill_mounts,
             &self.memory_mounts,
+            &self.system_extensions_lifecycle_mounts,
         ) {
             Ok(approval) => Ok(approval),
             Err(LocalDevCapabilityPolicyError::MissingGrant { .. }) => {
@@ -232,6 +236,7 @@ mod tests {
             MountView::default(),
             MountView::default(),
             MountView::default(),
+            MountView::default(),
             source,
         );
         let request_id = ApprovalRequestId::new();
@@ -301,6 +306,7 @@ mod tests {
             MountView::default(),
             MountView::default(),
             MountView::default(),
+            MountView::default(),
             source,
         );
         let request_id = ApprovalRequestId::new();
@@ -351,6 +357,7 @@ mod tests {
             MountView::default(),
             MountView::default(),
             MountView::default(),
+            MountView::default(),
             source,
         );
         let gate = approval_gate_record(
@@ -388,6 +395,7 @@ mod tests {
             MountView::default(),
             MountView::default(),
             MountView::default(),
+            MountView::default(),
             source,
         );
         let gate = approval_gate_record(
@@ -422,6 +430,7 @@ mod tests {
         let terms_provider = LocalDevApprovalLeaseTermsProvider::new(
             Arc::new(local_dev_capability_policy().expect("policy parses")),
             Arc::new(ExtensionRegistry::new()),
+            MountView::default(),
             MountView::default(),
             MountView::default(),
             MountView::default(),

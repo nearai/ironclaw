@@ -109,7 +109,7 @@ async fn stub_gateway_send_cancels_recovery_required_and_releases_conversation()
         reply_target_binding_id: "runtime-test-reply".to_string(),
     })
     .with_runner_settings(TurnRunnerSettings {
-        heartbeat_interval: Duration::from_millis(25),
+        heartbeat_interval: Duration::from_secs(60),
         poll_interval: Duration::from_secs(60),
         ..TurnRunnerSettings::default()
     });

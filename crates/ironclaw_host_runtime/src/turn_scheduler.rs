@@ -662,6 +662,7 @@ fn spawn_executor_task(
                             recovery_run_id,
                             recovery_runner_id,
                             recovery_lease_token,
+                            runner_heartbeat_interval,
                         ).await {
                             break ExecutorTaskOutcome::TerminalFailure(scheduler_failure(
                                 "scheduler_heartbeat_failed",
@@ -703,19 +704,29 @@ async fn heartbeat_claimed_run(
     run_id: ironclaw_turns::TurnRunId,
     runner_id: ironclaw_turns::TurnRunnerId,
     lease_token: ironclaw_turns::TurnLeaseToken,
+    timeout_after: Duration,
 ) -> bool {
-    let result = transitions
-        .heartbeat(HeartbeatRequest {
-            run_id,
-            runner_id,
-            lease_token,
-        })
-        .await;
-    if let Err(error) = result {
-        debug!(error = %error, "turn run scheduler heartbeat failed");
-        return false;
+    let heartbeat = transitions.heartbeat(HeartbeatRequest {
+        run_id,
+        runner_id,
+        lease_token,
+    });
+    let result = tokio::time::timeout(timeout_after, heartbeat).await;
+    match result {
+        Ok(Ok(_)) => true,
+        Ok(Err(error)) => {
+            debug!(error = %error, "turn run scheduler heartbeat failed");
+            false
+        }
+        Err(_) => {
+            debug!(
+                run_id = %run_id,
+                timeout_after = ?timeout_after,
+                "turn run scheduler heartbeat timed out"
+            );
+            false
+        }
     }
-    true
 }
 
 async fn record_terminal_failure(

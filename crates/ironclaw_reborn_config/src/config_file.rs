@@ -103,7 +103,8 @@ pub struct RebornConfigFile {
 pub struct BootSection {
     /// Composition profile name. Stringly typed; composition validates
     /// against `RebornCompositionProfile`. Examples: `"local-dev"`,
-    /// `"local-dev-yolo"`, `"production"`, `"migration-dry-run"`.
+    /// `"local-dev-yolo"`, `"hosted-single-tenant"`, `"production"`,
+    /// `"migration-dry-run"`.
     pub profile: Option<String>,
 }
 
@@ -223,7 +224,7 @@ pub struct StorageSection {
     pub url_env: Option<String>,
     /// Environment variable name containing the Reborn secret master key.
     pub secret_master_key_env: Option<String>,
-    /// PostgreSQL connection pool size for production storage. Defaults to 16.
+    /// PostgreSQL connection pool size for production storage. Defaults to 2.
     pub pool_max_size: Option<usize>,
 }
 
