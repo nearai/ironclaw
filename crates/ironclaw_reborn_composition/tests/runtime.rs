@@ -190,13 +190,13 @@ async fn skill_execution_adapter_prepares_filesystem_bundles_end_to_end() {
     let root = tempfile::tempdir().unwrap();
     let storage_root = root.path().join("local-dev");
     let skill_root = storage_root
-        .join("tenants/runtime-skill-execution-tenant/users/runtime-skill-execution-owner/skills/filesystem-review");
+        .join("tenants/runtime-skill-execution-tenant/users/runtime-skill-execution-owner/skills/filesystem-helper");
     std::fs::create_dir_all(skill_root.join("references")).unwrap();
     std::fs::write(
         skill_root.join("SKILL.md"),
         skill_md(
-            "filesystem-review",
-            "filesystem-review",
+            "filesystem-helper",
+            "filesystem-helper",
             "Use filesystem-backed review guidance.",
         ),
     )
@@ -221,14 +221,14 @@ async fn skill_execution_adapter_prepares_filesystem_bundles_end_to_end() {
     let conversation = runtime.new_conversation().await.unwrap();
     let result = tokio::time::timeout(
         Duration::from_secs(15),
-        runtime.execute_skill_message(&conversation, "$filesystem-review"),
+        runtime.execute_skill_message(&conversation, "$filesystem-helper"),
     )
     .await
     .unwrap()
     .unwrap();
 
     assert_eq!(result.plan.activations().len(), 1);
-    assert_eq!(result.plan.activations()[0].name, "filesystem-review");
+    assert_eq!(result.plan.activations()[0].name, "filesystem-helper");
     assert_eq!(result.plan.active_bundles().len(), 1);
     assert_eq!(
         result.plan.active_bundles()[0].source,
@@ -236,7 +236,7 @@ async fn skill_execution_adapter_prepares_filesystem_bundles_end_to_end() {
     );
     assert_eq!(
         result.plan.active_bundles()[0].skill_name,
-        "filesystem-review"
+        "filesystem-helper"
     );
 
     let asset = runtime
