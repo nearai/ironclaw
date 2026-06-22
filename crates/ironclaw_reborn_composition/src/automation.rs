@@ -180,9 +180,8 @@ impl AutomationProductFacade for RebornAutomationProductFacade {
         automation_id: String,
     ) -> Result<RebornAutomationMutationResponse, RebornServicesError> {
         let trigger_id = parse_trigger_id(&automation_id)?;
-        let deadline = tokio::time::Instant::now() + self.backend_timeout;
-        let removed = tokio::time::timeout_at(
-            deadline,
+        let removed = tokio::time::timeout(
+            self.backend_timeout,
             self.trigger_repository.remove_scoped_trigger(
                 caller.tenant_id,
                 caller.user_id,
@@ -247,9 +246,8 @@ impl RebornAutomationProductFacade {
         state: TriggerState,
     ) -> Result<RebornAutomationMutationResponse, RebornServicesError> {
         let trigger_id = parse_trigger_id(&automation_id)?;
-        let deadline = tokio::time::Instant::now() + self.backend_timeout;
-        let record = tokio::time::timeout_at(
-            deadline,
+        let record = tokio::time::timeout(
+            self.backend_timeout,
             self.trigger_repository.set_scoped_trigger_state(
                 caller.tenant_id,
                 caller.user_id,

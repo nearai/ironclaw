@@ -65,9 +65,7 @@ export function useAutomations(includeCompleted = false) {
   // false "off" notice against an older payload.
   const schedulerEnabled = query.data?.scheduler_enabled !== false;
   const invalidateAutomations = React.useCallback(() => {
-    queryClient.invalidateQueries({
-      predicate: (query) => query.queryKey?.[0] === "automations",
-    });
+    queryClient.invalidateQueries({ queryKey: ["automations"] });
   }, [queryClient]);
   const pauseMutation = useMutation({
     mutationFn: (automationId) => pauseAutomation({ automationId }),
