@@ -86,7 +86,7 @@ fn placeholder_required_fields(schema: &JsonValue) -> std::collections::HashSet<
         let Some(variants) = schema.get(keyword).and_then(JsonValue::as_array) else {
             continue;
         };
-        let mut common = variants.iter().filter_map(direct_required_fields);
+        let mut common = variants.iter().map(placeholder_required_fields);
         let Some(mut intersection) = common.next() else {
             continue;
         };
@@ -98,24 +98,11 @@ fn placeholder_required_fields(schema: &JsonValue) -> std::collections::HashSet<
 
     if let Some(variants) = schema.get("allOf").and_then(JsonValue::as_array) {
         for variant in variants {
-            if let Some(variant_required) = direct_required_fields(variant) {
-                required.extend(variant_required);
-            }
+            required.extend(placeholder_required_fields(variant));
         }
     }
 
     required
-}
-
-fn direct_required_fields(schema: &JsonValue) -> Option<std::collections::HashSet<&str>> {
-    Some(
-        schema
-            .get("required")?
-            .as_array()?
-            .iter()
-            .filter_map(JsonValue::as_str)
-            .collect(),
-    )
 }
 
 fn placeholder_property_schemas(schema: &JsonValue) -> std::collections::HashMap<&str, &JsonValue> {
@@ -393,6 +380,36 @@ mod tests {
             calls[0].arguments,
             serde_json::json!({ "operation": "now" })
         );
+    }
+
+    #[test]
+    fn strips_placeholder_when_oneof_variant_has_no_required_fields() {
+        let tools = vec![ToolDefinition {
+            name: "lookup".to_string(),
+            description: String::new(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "query": { "type": "string" }
+                },
+                "oneOf": [
+                    { "required": ["query"] },
+                    {}
+                ]
+            }),
+        }];
+        let mut calls = vec![ToolCall {
+            id: "1".to_string(),
+            name: "lookup".to_string(),
+            arguments: serde_json::json!({ "query": null }),
+            reasoning: None,
+            signature: None,
+            arguments_parse_error: None,
+        }];
+
+        strip_unset_optional_fields(&mut calls, &tools, PlaceholderStrippingMode::NullOnly);
+
+        assert_eq!(calls[0].arguments, serde_json::json!({}));
     }
 
     fn trigger_create_schema() -> JsonValue {
