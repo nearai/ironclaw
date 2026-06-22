@@ -351,12 +351,30 @@ async fn builtin_trigger_create_input_schema_declares_schedule_one_of() {
         !required_names.contains(&"completion_policy"),
         "completion_policy must NOT be in required; got {required_names:?}"
     );
+    let root_description = schema
+        .get("description")
+        .and_then(Value::as_str)
+        .expect("trigger_create schema must describe the top-level input shape");
+    assert!(
+        root_description.contains("top-level fields `name`, `prompt`, and `schedule`"),
+        "trigger_create schema should steer models to the top-level trigger shape; got {root_description:?}"
+    );
 
     // The `schedule` property must have a `oneOf`.
-    let one_of = schema
+    let schedule_schema = schema
         .get("properties")
         .and_then(|p| p.get("schedule"))
-        .and_then(|s| s.get("oneOf"))
+        .expect("trigger_create schema must declare schedule property");
+    let schedule_description = schedule_schema
+        .get("description")
+        .and_then(Value::as_str)
+        .expect("trigger_create schedule schema must describe expected schedule object shape");
+    assert!(
+        schedule_description.contains("Do not pass {\"operation\":\"parse\",\"data\":...}"),
+        "trigger_create schedule description should reject parse/data wrappers; got {schedule_description:?}"
+    );
+    let one_of = schedule_schema
+        .get("oneOf")
         .and_then(Value::as_array)
         .expect("trigger_create schema schedule must have a oneOf array");
     assert_eq!(
@@ -411,6 +429,19 @@ async fn builtin_trigger_create_input_schema_declares_schedule_one_of() {
     validator
         .validate(&once_input)
         .expect("resolved trigger_create schema must accept one-time tomorrow input");
+
+    let parse_wrapper_input = json!({
+        "operation": "parse",
+        "data": {
+            "kind": "cron",
+            "expression": "0 14 * * 2",
+            "timezone": "America/Los_Angeles"
+        }
+    });
+    assert!(
+        validator.validate(&parse_wrapper_input).is_err(),
+        "trigger_create schema must reject parser-style operation/data wrappers"
+    );
 }
 
 #[tokio::test]
