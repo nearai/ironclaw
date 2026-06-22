@@ -5,6 +5,8 @@ mod github_issue_workflow_runtime {
     use std::time::Duration;
 
     #[cfg(feature = "libsql")]
+    use ironclaw_github_issue_workflow::GithubProviderAccountRef;
+    #[cfg(feature = "libsql")]
     use ironclaw_host_api::ProjectId;
     use ironclaw_host_api::runtime_policy::{
         ApprovalPolicy, AuditMode, DeploymentMode, EffectiveRuntimePolicy, FilesystemBackendKind,
@@ -159,6 +161,7 @@ mod github_issue_workflow_runtime {
         let err = match build_reborn_runtime(
             local_dev_input(root.path().join("local-dev"))
                 .with_default_project_id(ProjectId::new("workflow-project").expect("project"))
+                .with_github_issue_workflow_provider_account_ref(provider_account_ref())
                 .with_github_issue_workflow_settings(GithubIssueWorkflowSettings::enabled()),
         )
         .await
@@ -171,6 +174,29 @@ mod github_issue_workflow_runtime {
 
         assert!(
             matches!(err, RebornRuntimeError::InvalidArgument { ref reason } if reason.contains("project access checker")),
+            "unexpected error: {err:?}"
+        );
+    }
+
+    #[cfg(feature = "libsql")]
+    #[tokio::test]
+    async fn production_enabled_workflow_requires_provider_account_ref() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let err = match build_reborn_runtime(
+            local_dev_input(root.path().join("local-dev"))
+                .with_default_project_id(ProjectId::new("workflow-project").expect("project"))
+                .with_github_issue_workflow_settings(GithubIssueWorkflowSettings::enabled()),
+        )
+        .await
+        {
+            Ok(_) => {
+                panic!("non-test workflow enablement must fail closed without provider account ref")
+            }
+            Err(err) => err,
+        };
+
+        assert!(
+            matches!(err, RebornRuntimeError::InvalidArgument { ref reason } if reason.contains("configured GitHub provider account reference")),
             "unexpected error: {err:?}"
         );
     }
@@ -206,6 +232,14 @@ mod github_issue_workflow_runtime {
             source_binding_id: "workflow-runtime-source".to_string(),
             reply_target_binding_id: "workflow-runtime-reply".to_string(),
         })
+    }
+
+    #[cfg(feature = "libsql")]
+    fn provider_account_ref() -> GithubProviderAccountRef {
+        GithubProviderAccountRef {
+            provider: "github".to_string(),
+            account_id: "workflow-test-account".to_string(),
+        }
     }
 
     async fn invoke_failure_with_context<R: HostRuntime + ?Sized>(

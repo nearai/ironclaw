@@ -606,6 +606,8 @@ pub(crate) struct GithubIssueWorkflowRuntimeDeps {
     pub(crate) repository: Arc<dyn GithubIssueWorkflowRepository>,
     pub(crate) stage_result_sink_slot: Arc<WorkflowStageResultSinkSlot>,
     pub(crate) host_runtime: Arc<dyn ironclaw_host_runtime::HostRuntime>,
+    pub(crate) configured_provider_account_ref: GithubProviderAccountRef,
+    pub(crate) project_access: Arc<dyn WorkflowProjectAccess>,
     pub(crate) thread_service: Arc<dyn SessionThreadService>,
     pub(crate) turn_coordinator: Arc<dyn TurnCoordinator>,
     pub(crate) actor_user_id: UserId,
@@ -624,6 +626,8 @@ pub(crate) fn spawn_github_issue_workflow(
         repository,
         stage_result_sink_slot,
         host_runtime,
+        configured_provider_account_ref,
+        project_access,
         thread_service,
         turn_coordinator,
         actor_user_id,
@@ -637,10 +641,6 @@ pub(crate) fn spawn_github_issue_workflow(
             reason: "workflow stage result sink slot was already initialized".to_string(),
         })?;
 
-    let configured_provider_account_ref = GithubProviderAccountRef {
-        provider: "github".to_string(),
-        account_id: "github-issue-workflow".to_string(),
-    };
     let dispatcher = Arc::new(HostRuntimeGithubIssueWorkflowCapabilityDispatcher::new(
         host_runtime,
         workflow_execution_context(actor_user_id.clone())?,
@@ -661,7 +661,7 @@ pub(crate) fn spawn_github_issue_workflow(
             clock: Arc::new(SystemWorkflowClock),
             config_source: Arc::new(EmptyGithubIssueWorkflowConfigSource),
             github_port,
-            project_access: Arc::new(UnconfiguredWorkflowProjectAccess),
+            project_access,
             repository,
             stage_turn_submitter,
             workspace_manager: Arc::new(UnconfiguredWorkflowWorkspaceManager),
@@ -837,6 +837,17 @@ impl GithubIssueWorkflowPollerPorts for IronClawGithubIssueWorkflowPollerPorts {
     fn worker_id(&self) -> WorkflowWorkerId {
         self.worker_id.clone()
     }
+}
+
+pub(crate) fn test_only_provider_account_ref() -> GithubProviderAccountRef {
+    GithubProviderAccountRef {
+        provider: "github".to_string(),
+        account_id: "github-issue-workflow-test".to_string(),
+    }
+}
+
+pub(crate) fn test_only_unconfigured_project_access() -> Arc<dyn WorkflowProjectAccess> {
+    Arc::new(UnconfiguredWorkflowProjectAccess)
 }
 
 struct SystemWorkflowClock;

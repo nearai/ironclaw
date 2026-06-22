@@ -417,6 +417,12 @@ pub struct RebornRuntimeInput {
     pub boot: Option<RebornBootConfig>,
     pub runner: TurnRunnerSettings,
     pub github_issue_workflow: GithubIssueWorkflowSettings,
+    #[cfg(feature = "github-issue-workflow-beta")]
+    pub github_issue_workflow_provider_account_ref:
+        Option<ironclaw_github_issue_workflow::GithubProviderAccountRef>,
+    #[cfg(feature = "github-issue-workflow-beta")]
+    pub github_issue_workflow_project_access:
+        Option<Arc<dyn ironclaw_github_issue_workflow::WorkflowProjectAccess>>,
     pub trigger_poller: TriggerPollerSettings,
     pub credential_refresh: CredentialRefreshSettings,
     pub trigger_fire_access_checker: Option<Arc<dyn TriggerFireAccessChecker>>,
@@ -476,6 +482,10 @@ impl RebornRuntimeInput {
             boot: None,
             runner: TurnRunnerSettings::default(),
             github_issue_workflow: GithubIssueWorkflowSettings::disabled(),
+            #[cfg(feature = "github-issue-workflow-beta")]
+            github_issue_workflow_provider_account_ref: None,
+            #[cfg(feature = "github-issue-workflow-beta")]
+            github_issue_workflow_project_access: None,
             trigger_poller: TriggerPollerSettings::default(),
             credential_refresh: CredentialRefreshSettings::default(),
             trigger_fire_access_checker: None,
@@ -588,6 +598,24 @@ impl RebornRuntimeInput {
         github_issue_workflow: GithubIssueWorkflowSettings,
     ) -> Self {
         self.github_issue_workflow = github_issue_workflow;
+        self
+    }
+
+    #[cfg(feature = "github-issue-workflow-beta")]
+    pub fn with_github_issue_workflow_provider_account_ref(
+        mut self,
+        provider_account_ref: ironclaw_github_issue_workflow::GithubProviderAccountRef,
+    ) -> Self {
+        self.github_issue_workflow_provider_account_ref = Some(provider_account_ref);
+        self
+    }
+
+    #[cfg(feature = "github-issue-workflow-beta")]
+    pub fn with_github_issue_workflow_project_access(
+        mut self,
+        project_access: Arc<dyn ironclaw_github_issue_workflow::WorkflowProjectAccess>,
+    ) -> Self {
+        self.github_issue_workflow_project_access = Some(project_access);
         self
     }
 

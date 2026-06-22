@@ -2276,6 +2276,10 @@ pub async fn build_reborn_runtime(
         boot,
         runner,
         github_issue_workflow,
+        #[cfg(feature = "github-issue-workflow-beta")]
+        github_issue_workflow_provider_account_ref,
+        #[cfg(feature = "github-issue-workflow-beta")]
+        github_issue_workflow_project_access,
         trigger_poller,
         credential_refresh,
         trigger_fire_access_checker,
@@ -3150,12 +3154,42 @@ pub async fn build_reborn_runtime(
                             .to_string(),
                 });
             }
-            return Err(RebornRuntimeError::InvalidArgument {
-                reason:
-                    "GitHub issue workflow requires a project access checker and configured GitHub provider account reference outside explicit test enablement"
-                        .to_string(),
-            });
         }
+        let configured_provider_account_ref = match github_issue_workflow_provider_account_ref {
+            Some(provider_account_ref) => {
+                provider_account_ref.validate().map_err(|error| {
+                    RebornRuntimeError::InvalidArgument {
+                        reason: format!(
+                            "GitHub issue workflow provider account reference is invalid: {error}"
+                        ),
+                    }
+                })?;
+                provider_account_ref
+            }
+            None if github_issue_workflow.allow_in_memory_for_tests => {
+                crate::github_issue_workflow::test_only_provider_account_ref()
+            }
+            None => {
+                return Err(RebornRuntimeError::InvalidArgument {
+                    reason:
+                        "GitHub issue workflow requires a configured GitHub provider account reference outside explicit test enablement"
+                            .to_string(),
+                });
+            }
+        };
+        let project_access = match github_issue_workflow_project_access {
+            Some(project_access) => project_access,
+            None if github_issue_workflow.allow_in_memory_for_tests => {
+                crate::github_issue_workflow::test_only_unconfigured_project_access()
+            }
+            None => {
+                return Err(RebornRuntimeError::InvalidArgument {
+                    reason:
+                        "GitHub issue workflow requires a project access checker outside explicit test enablement"
+                            .to_string(),
+                });
+            }
+        };
         let repository = workflow_repository.ok_or(RebornRuntimeError::InvalidArgument {
             reason: "GitHub issue workflow repository is not wired".to_string(),
         })?;
@@ -3174,6 +3208,8 @@ pub async fn build_reborn_runtime(
                 repository,
                 stage_result_sink_slot,
                 host_runtime,
+                configured_provider_account_ref,
+                project_access,
                 thread_service: Arc::clone(&thread_service),
                 turn_coordinator: Arc::clone(&planned_turn_coordinator),
                 actor_user_id: actor_user_id.clone(),
