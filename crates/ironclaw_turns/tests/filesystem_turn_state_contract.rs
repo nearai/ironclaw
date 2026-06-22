@@ -2,10 +2,21 @@
 //! [`ScopedFilesystem`] over [`LocalFilesystem`]. The persistent shape is a
 //! single `/turns/state.json` snapshot keyed by the [`MountView`] target.
 
-use std::sync::Arc;
+use std::{
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
+    time::Duration,
+};
 
+use async_trait::async_trait;
 use chrono::{TimeZone, Utc};
-use ironclaw_filesystem::{FilesystemError, LocalFilesystem, RootFilesystem, ScopedFilesystem};
+use ironclaw_filesystem::{
+    BackendCapabilities, CasExpectation, DirEntry, Entry, FileStat, FilesystemError, Filter,
+    IndexSpec, LocalFilesystem, Page, RecordVersion, RootFilesystem, ScopedFilesystem,
+    VersionedEntry,
+};
 use ironclaw_host_api::{
     AgentId, HostPath, MountAlias, MountGrant, MountPermissions, MountView, ProjectId, TenantId,
     ThreadId, UserId, VirtualPath,
@@ -60,6 +71,96 @@ where
 
 fn snapshot_virtual_path() -> VirtualPath {
     VirtualPath::new("/engine/tenants/test-tenant/users/test-user/turns/state.json").unwrap()
+}
+
+struct BlockingPutFilesystem<F> {
+    inner: F,
+    block_next_put: AtomicBool,
+    put_started: tokio::sync::Notify,
+    release_put: tokio::sync::Notify,
+}
+
+impl<F> BlockingPutFilesystem<F> {
+    fn new(inner: F) -> Self {
+        Self {
+            inner,
+            block_next_put: AtomicBool::new(false),
+            put_started: tokio::sync::Notify::new(),
+            release_put: tokio::sync::Notify::new(),
+        }
+    }
+
+    fn block_next_put(&self) {
+        self.block_next_put.store(true, Ordering::SeqCst);
+    }
+
+    async fn wait_for_blocked_put(&self) {
+        self.put_started.notified().await;
+    }
+
+    fn release_blocked_put(&self) {
+        self.release_put.notify_waiters();
+    }
+}
+
+#[async_trait]
+impl<F> RootFilesystem for BlockingPutFilesystem<F>
+where
+    F: RootFilesystem,
+{
+    fn capabilities(&self) -> BackendCapabilities {
+        self.inner.capabilities()
+    }
+
+    async fn put(
+        &self,
+        path: &VirtualPath,
+        entry: Entry,
+        cas: CasExpectation,
+    ) -> Result<RecordVersion, FilesystemError> {
+        if self.block_next_put.swap(false, Ordering::SeqCst) {
+            self.put_started.notify_waiters();
+            self.release_put.notified().await;
+        }
+        self.inner.put(path, entry, cas).await
+    }
+
+    async fn get(&self, path: &VirtualPath) -> Result<Option<VersionedEntry>, FilesystemError> {
+        self.inner.get(path).await
+    }
+
+    async fn list_dir(&self, path: &VirtualPath) -> Result<Vec<DirEntry>, FilesystemError> {
+        self.inner.list_dir(path).await
+    }
+
+    async fn list_dir_bounded(
+        &self,
+        path: &VirtualPath,
+        max_entries: usize,
+    ) -> Result<Vec<DirEntry>, FilesystemError> {
+        self.inner.list_dir_bounded(path, max_entries).await
+    }
+
+    async fn query(
+        &self,
+        path: &VirtualPath,
+        filter: &Filter,
+        page: Page,
+    ) -> Result<Vec<VersionedEntry>, FilesystemError> {
+        self.inner.query(path, filter, page).await
+    }
+
+    async fn ensure_index(
+        &self,
+        path: &VirtualPath,
+        spec: &IndexSpec,
+    ) -> Result<(), FilesystemError> {
+        self.inner.ensure_index(path, spec).await
+    }
+
+    async fn stat(&self, path: &VirtualPath) -> Result<FileStat, FilesystemError> {
+        self.inner.stat(path).await
+    }
 }
 
 fn turn_scope(thread: &str) -> TurnScope {
@@ -184,6 +285,58 @@ async fn filesystem_turn_state_store_persists_submit_and_reopens() {
         .unwrap();
     assert_eq!(state.run_id, run_id);
     assert_eq!(state.status, TurnStatus::Queued);
+}
+
+#[tokio::test]
+async fn filesystem_turn_state_store_snapshot_reads_overlap_apply_write() {
+    let backend = Arc::new(BlockingPutFilesystem::new(engine_filesystem()));
+    let scoped = scoped_turns_fs(Arc::clone(&backend));
+    let store = Arc::new(FilesystemTurnStateStore::new(Arc::clone(&scoped)));
+    let resolver = InMemoryRunProfileResolver::default();
+
+    let existing_request = submit_request_for(turn_scope("thread-fs-overlap-a"), "idem-overlap-a");
+    let existing_response = store
+        .submit_turn(
+            existing_request.clone(),
+            &AllowAllTurnAdmissionPolicy,
+            &resolver,
+        )
+        .await
+        .unwrap();
+    let existing_run_id = accepted_run_id(&existing_response);
+
+    backend.block_next_put();
+    let writer_store = Arc::clone(&store);
+    let writer = tokio::spawn(async move {
+        let resolver = InMemoryRunProfileResolver::default();
+        writer_store
+            .submit_turn(
+                submit_request_for(turn_scope("thread-fs-overlap-b"), "idem-overlap-b"),
+                &AllowAllTurnAdmissionPolicy,
+                &resolver,
+            )
+            .await
+    });
+
+    tokio::time::timeout(Duration::from_secs(1), backend.wait_for_blocked_put())
+        .await
+        .expect("writer should reach the delayed snapshot write");
+
+    let read = tokio::time::timeout(
+        Duration::from_millis(100),
+        store.get_run_state(GetRunStateRequest {
+            scope: existing_request.scope,
+            run_id: existing_run_id,
+        }),
+    )
+    .await
+    .expect("snapshot read must not wait behind the writer record lock")
+    .unwrap();
+    assert_eq!(read.run_id, existing_run_id);
+    assert_eq!(read.status, TurnStatus::Queued);
+
+    backend.release_blocked_put();
+    writer.await.unwrap().unwrap();
 }
 
 #[tokio::test]

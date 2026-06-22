@@ -860,7 +860,8 @@ impl RebornBinaryE2EHarness {
             subagent_spawn_limits: ironclaw_loop_support::SubagentSpawnLimits::default(),
             loop_exit_evidence: evidence,
             config: DefaultPlannedRuntimeConfig {
-                heartbeat_interval: Duration::from_millis(20),
+                // Keep the durable runner heartbeat at its production default;
+                // test responsiveness comes from fast scheduler polling below.
                 poll_interval: Duration::from_millis(10),
                 ..DefaultPlannedRuntimeConfig::default()
             },

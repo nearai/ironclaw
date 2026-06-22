@@ -122,9 +122,18 @@ where
     async fn read_snapshot(
         &self,
     ) -> Result<(TurnPersistenceSnapshot, Option<RecordVersion>), TurnError> {
-        let path = snapshot_path()?;
-        let record_lock = filesystem_record_lock(self.filesystem.as_ref(), &path);
-        let _guard = record_lock.lock().await;
+        // Pure reads are lock-free. The backend replaces the snapshot blob via
+        // an atomic rename (`LocalFilesystem::atomic_write_file`: write temp →
+        // `rename` over the target), so a concurrent reader always observes
+        // either the complete previous snapshot or the complete next one, never
+        // a torn write. Taking the per-record write lock here would force every
+        // pure reader (`get_run_state`, the cancellation factory's
+        // `seed_from_state` / polling fallback, host construction) to block
+        // behind an in-flight read-modify-write `apply`. Under the concurrent
+        // `TurnRunScheduler` — which runs claim, executor host-build reads,
+        // heartbeat writes, and cancellation polling against this single
+        // per-scope lock at once — that read-behind-write blocking deadlocks.
+        // Writers still serialize their read-modify-write CAS via `apply`'s lock.
         self.read_snapshot_unlocked().await
     }
 

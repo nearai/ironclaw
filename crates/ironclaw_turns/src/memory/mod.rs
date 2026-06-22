@@ -2,8 +2,9 @@ use async_trait::async_trait;
 use std::{
     collections::{HashMap, HashSet, VecDeque},
     hash::Hash,
-    sync::{Arc, Condvar, Mutex, MutexGuard},
+    sync::{Arc, Mutex, MutexGuard},
 };
+use tokio::sync::Notify;
 
 use chrono::{Duration as ChronoDuration, Utc};
 use ironclaw_host_api::{TenantId, UserId};
@@ -123,7 +124,7 @@ impl Default for InMemoryTurnStateStoreLimits {
 
 pub struct InMemoryTurnStateStore {
     inner: Mutex<Inner>,
-    submit_idempotency_ready: Condvar,
+    submit_idempotency_ready: Notify,
     admission_limit_provider: Arc<dyn TurnAdmissionLimitProvider>,
 }
 
@@ -252,12 +253,12 @@ fn invalid_lineage(reason: impl Into<String>) -> TurnError {
 
 struct SubmitInFlightGuard<'a> {
     inner: &'a Mutex<Inner>,
-    ready: &'a Condvar,
+    ready: &'a Notify,
     key: SubmitIdempotencyKey,
 }
 
 impl<'a> SubmitInFlightGuard<'a> {
-    fn new(inner: &'a Mutex<Inner>, ready: &'a Condvar, key: SubmitIdempotencyKey) -> Self {
+    fn new(inner: &'a Mutex<Inner>, ready: &'a Notify, key: SubmitIdempotencyKey) -> Self {
         Self { inner, ready, key }
     }
 }
@@ -272,7 +273,7 @@ impl Drop for SubmitInFlightGuard<'_> {
                 .remove(&self.key),
         };
         if removed {
-            self.ready.notify_all();
+            self.ready.notify_waiters();
         }
     }
 }
@@ -289,7 +290,7 @@ impl InMemoryTurnStateStore {
                 limits,
                 ..Inner::default()
             }),
-            submit_idempotency_ready: Condvar::new(),
+            submit_idempotency_ready: Notify::new(),
             admission_limit_provider: Arc::new(AllowAllTurnAdmissionLimitProvider),
         }
     }
@@ -317,7 +318,7 @@ impl InMemoryTurnStateStore {
                 limits,
                 ..Inner::default()
             }),
-            submit_idempotency_ready: Condvar::new(),
+            submit_idempotency_ready: Notify::new(),
             admission_limit_provider,
         }
     }
@@ -354,7 +355,7 @@ impl InMemoryTurnStateStore {
     ) -> Result<Self, TurnError> {
         Ok(Self {
             inner: Mutex::new(Inner::from_persistence_snapshot(snapshot, limits)?),
-            submit_idempotency_ready: Condvar::new(),
+            submit_idempotency_ready: Notify::new(),
             admission_limit_provider,
         })
     }
@@ -475,15 +476,32 @@ impl InMemoryTurnStateStore {
         })
     }
 
-    fn wait_for_submit_idempotency<'a>(
+    async fn wait_for_or_claim_submit_idempotency(
         &self,
-        inner: MutexGuard<'a, Inner>,
-    ) -> Result<MutexGuard<'a, Inner>, TurnError> {
-        self.submit_idempotency_ready
-            .wait(inner)
-            .map_err(|_| TurnError::Unavailable {
-                reason: "turn state store mutex poisoned".to_string(),
-            })
+        idempotency_key: &SubmitIdempotencyKey,
+    ) -> Result<Option<Result<SubmitTurnResponse, TurnError>>, TurnError> {
+        loop {
+            // Subscribe to the Notify BEFORE locking so we can't miss a
+            // notification that fires between our "in-flight" check and when we
+            // would otherwise start waiting.
+            let notified = self.submit_idempotency_ready.notified();
+            {
+                let mut inner = self.lock_inner()?;
+                if let Some(result) = inner.submit_idempotency.get(idempotency_key) {
+                    return Ok(Some(result.clone()));
+                }
+                if inner
+                    .submit_idempotency_in_flight
+                    .insert(idempotency_key.clone())
+                {
+                    return Ok(None);
+                }
+                // `inner` (the MutexGuard) is dropped here at the end of this
+                // inner block, releasing the Mutex before we await below.
+            }
+            // Await cooperatively — no Mutex held, no OS thread blocked.
+            notified.await;
+        }
     }
 }
 
@@ -564,20 +582,11 @@ impl TurnStateStore for InMemoryTurnStateStore {
             scope: request.scope.clone(),
             key: request.idempotency_key.clone(),
         };
+        if let Some(result) = self
+            .wait_for_or_claim_submit_idempotency(&idempotency_key)
+            .await?
         {
-            let mut inner = self.lock_inner()?;
-            loop {
-                if let Some(result) = inner.submit_idempotency.get(&idempotency_key) {
-                    return result.clone();
-                }
-                if inner
-                    .submit_idempotency_in_flight
-                    .insert(idempotency_key.clone())
-                {
-                    break;
-                }
-                inner = self.wait_for_submit_idempotency(inner)?;
-            }
+            return result;
         }
         let _in_flight_guard = SubmitInFlightGuard::new(
             &self.inner,
@@ -592,7 +601,7 @@ impl TurnStateStore for InMemoryTurnStateStore {
             let mut inner = self.lock_inner()?;
             if let Some(result) = inner.submit_idempotency.get(&idempotency_key).cloned() {
                 inner.submit_idempotency_in_flight.remove(&idempotency_key);
-                self.submit_idempotency_ready.notify_all();
+                self.submit_idempotency_ready.notify_waiters();
                 return result;
             }
             let response = Err(TurnError::InvalidRequest {
@@ -604,7 +613,7 @@ impl TurnStateStore for InMemoryTurnStateStore {
                 request.received_at,
             );
             inner.submit_idempotency_in_flight.remove(&idempotency_key);
-            self.submit_idempotency_ready.notify_all();
+            self.submit_idempotency_ready.notify_waiters();
             return response;
         }
 
@@ -614,7 +623,7 @@ impl TurnStateStore for InMemoryTurnStateStore {
             let mut inner = self.lock_inner()?;
             if let Some(result) = inner.submit_idempotency.get(&idempotency_key).cloned() {
                 inner.submit_idempotency_in_flight.remove(&idempotency_key);
-                self.submit_idempotency_ready.notify_all();
+                self.submit_idempotency_ready.notify_waiters();
                 return result;
             }
 
@@ -626,7 +635,7 @@ impl TurnStateStore for InMemoryTurnStateStore {
                     request.received_at,
                 );
                 inner.submit_idempotency_in_flight.remove(&idempotency_key);
-                self.submit_idempotency_ready.notify_all();
+                self.submit_idempotency_ready.notify_waiters();
                 return response;
             }
         }
@@ -641,7 +650,7 @@ impl TurnStateStore for InMemoryTurnStateStore {
         let mut inner = self.lock_inner()?;
         if let Some(result) = inner.submit_idempotency.get(&idempotency_key).cloned() {
             inner.submit_idempotency_in_flight.remove(&idempotency_key);
-            self.submit_idempotency_ready.notify_all();
+            self.submit_idempotency_ready.notify_waiters();
             return result;
         }
         let profile = match profile_resolution {
@@ -654,7 +663,7 @@ impl TurnStateStore for InMemoryTurnStateStore {
                     request.received_at,
                 );
                 inner.submit_idempotency_in_flight.remove(&idempotency_key);
-                self.submit_idempotency_ready.notify_all();
+                self.submit_idempotency_ready.notify_waiters();
                 return response;
             }
         };
@@ -662,7 +671,7 @@ impl TurnStateStore for InMemoryTurnStateStore {
         let lock_key = TurnActiveLockKey::from(&request.scope);
         if let Some(response) = inner.thread_busy(&lock_key) {
             inner.submit_idempotency_in_flight.remove(&idempotency_key);
-            self.submit_idempotency_ready.notify_all();
+            self.submit_idempotency_ready.notify_waiters();
             return Err(TurnError::ThreadBusy(response));
         }
 
@@ -678,7 +687,7 @@ impl TurnStateStore for InMemoryTurnStateStore {
                 request.received_at,
             );
             inner.submit_idempotency_in_flight.remove(&idempotency_key);
-            self.submit_idempotency_ready.notify_all();
+            self.submit_idempotency_ready.notify_waiters();
             return response;
         }
         let admission_class = profile.admission_class.clone();
@@ -696,7 +705,7 @@ impl TurnStateStore for InMemoryTurnStateStore {
                 request.received_at,
             );
             inner.submit_idempotency_in_flight.remove(&idempotency_key);
-            self.submit_idempotency_ready.notify_all();
+            self.submit_idempotency_ready.notify_waiters();
             return response;
         }
         let cursor = inner.next_cursor();
@@ -769,7 +778,7 @@ impl TurnStateStore for InMemoryTurnStateStore {
             record.received_at,
         );
         inner.submit_idempotency_in_flight.remove(&idempotency_key);
-        self.submit_idempotency_ready.notify_all();
+        self.submit_idempotency_ready.notify_waiters();
         response
     }
 
@@ -832,20 +841,11 @@ impl TurnSpawnTreeStateStore for InMemoryTurnStateStore {
             scope: request.child_scope.clone(),
             key: request.idempotency_key.clone(),
         };
+        if let Some(result) = self
+            .wait_for_or_claim_submit_idempotency(&idempotency_key)
+            .await?
         {
-            let mut inner = self.lock_inner()?;
-            loop {
-                if let Some(result) = inner.submit_idempotency.get(&idempotency_key) {
-                    return result.clone();
-                }
-                if inner
-                    .submit_idempotency_in_flight
-                    .insert(idempotency_key.clone())
-                {
-                    break;
-                }
-                inner = self.wait_for_submit_idempotency(inner)?;
-            }
+            return result;
         }
         let _in_flight_guard = SubmitInFlightGuard::new(
             &self.inner,
@@ -857,7 +857,7 @@ impl TurnSpawnTreeStateStore for InMemoryTurnStateStore {
             let mut inner = self.lock_inner()?;
             if let Some(result) = inner.submit_idempotency.get(&idempotency_key).cloned() {
                 inner.submit_idempotency_in_flight.remove(&idempotency_key);
-                self.submit_idempotency_ready.notify_all();
+                self.submit_idempotency_ready.notify_waiters();
                 return result;
             }
             let Some(parent) = inner
@@ -872,7 +872,7 @@ impl TurnSpawnTreeStateStore for InMemoryTurnStateStore {
                     request.received_at,
                 );
                 inner.submit_idempotency_in_flight.remove(&idempotency_key);
-                self.submit_idempotency_ready.notify_all();
+                self.submit_idempotency_ready.notify_waiters();
                 return response;
             };
             if !same_scope_envelope(&parent.scope, &request.child_scope) {
@@ -883,7 +883,7 @@ impl TurnSpawnTreeStateStore for InMemoryTurnStateStore {
                     request.received_at,
                 );
                 inner.submit_idempotency_in_flight.remove(&idempotency_key);
-                self.submit_idempotency_ready.notify_all();
+                self.submit_idempotency_ready.notify_waiters();
                 return response;
             }
             if parent.subagent_depth == u32::MAX {
@@ -894,7 +894,7 @@ impl TurnSpawnTreeStateStore for InMemoryTurnStateStore {
                     request.received_at,
                 );
                 inner.submit_idempotency_in_flight.remove(&idempotency_key);
-                self.submit_idempotency_ready.notify_all();
+                self.submit_idempotency_ready.notify_waiters();
                 return response;
             }
             SubmitTurnRequest {
@@ -921,7 +921,7 @@ impl TurnSpawnTreeStateStore for InMemoryTurnStateStore {
             let mut inner = self.lock_inner()?;
             if let Some(result) = inner.submit_idempotency.get(&idempotency_key).cloned() {
                 inner.submit_idempotency_in_flight.remove(&idempotency_key);
-                self.submit_idempotency_ready.notify_all();
+                self.submit_idempotency_ready.notify_waiters();
                 return result;
             }
             if let Err(rejection) = admission_result {
@@ -932,7 +932,7 @@ impl TurnSpawnTreeStateStore for InMemoryTurnStateStore {
                     request.received_at,
                 );
                 inner.submit_idempotency_in_flight.remove(&idempotency_key);
-                self.submit_idempotency_ready.notify_all();
+                self.submit_idempotency_ready.notify_waiters();
                 return response;
             }
         }
@@ -947,7 +947,7 @@ impl TurnSpawnTreeStateStore for InMemoryTurnStateStore {
         let mut inner = self.lock_inner()?;
         if let Some(result) = inner.submit_idempotency.get(&idempotency_key).cloned() {
             inner.submit_idempotency_in_flight.remove(&idempotency_key);
-            self.submit_idempotency_ready.notify_all();
+            self.submit_idempotency_ready.notify_waiters();
             return result;
         }
         let profile = match profile_resolution {
@@ -960,7 +960,7 @@ impl TurnSpawnTreeStateStore for InMemoryTurnStateStore {
                     request.received_at,
                 );
                 inner.submit_idempotency_in_flight.remove(&idempotency_key);
-                self.submit_idempotency_ready.notify_all();
+                self.submit_idempotency_ready.notify_waiters();
                 return response;
             }
         };
@@ -977,7 +977,7 @@ impl TurnSpawnTreeStateStore for InMemoryTurnStateStore {
                 request.received_at,
             );
             inner.submit_idempotency_in_flight.remove(&idempotency_key);
-            self.submit_idempotency_ready.notify_all();
+            self.submit_idempotency_ready.notify_waiters();
             return response;
         };
         if !same_scope_envelope(&parent.scope, &request.child_scope) {
@@ -988,7 +988,7 @@ impl TurnSpawnTreeStateStore for InMemoryTurnStateStore {
                 request.received_at,
             );
             inner.submit_idempotency_in_flight.remove(&idempotency_key);
-            self.submit_idempotency_ready.notify_all();
+            self.submit_idempotency_ready.notify_waiters();
             return response;
         }
         if parent.subagent_depth == u32::MAX {
@@ -999,7 +999,7 @@ impl TurnSpawnTreeStateStore for InMemoryTurnStateStore {
                 request.received_at,
             );
             inner.submit_idempotency_in_flight.remove(&idempotency_key);
-            self.submit_idempotency_ready.notify_all();
+            self.submit_idempotency_ready.notify_waiters();
             return response;
         }
         let parent_run_id = parent.run_id;
@@ -1014,7 +1014,7 @@ impl TurnSpawnTreeStateStore for InMemoryTurnStateStore {
                 request.received_at,
             );
             inner.submit_idempotency_in_flight.remove(&idempotency_key);
-            self.submit_idempotency_ready.notify_all();
+            self.submit_idempotency_ready.notify_waiters();
             return response;
         };
         if !same_scope_envelope(&root.scope, &request.child_scope) {
@@ -1025,7 +1025,7 @@ impl TurnSpawnTreeStateStore for InMemoryTurnStateStore {
                 request.received_at,
             );
             inner.submit_idempotency_in_flight.remove(&idempotency_key);
-            self.submit_idempotency_ready.notify_all();
+            self.submit_idempotency_ready.notify_waiters();
             return response;
         }
         if root.spawn_tree_root_run_id.unwrap_or(root.run_id) != root.run_id {
@@ -1038,14 +1038,14 @@ impl TurnSpawnTreeStateStore for InMemoryTurnStateStore {
                 request.received_at,
             );
             inner.submit_idempotency_in_flight.remove(&idempotency_key);
-            self.submit_idempotency_ready.notify_all();
+            self.submit_idempotency_ready.notify_waiters();
             return response;
         }
 
         let lock_key = TurnActiveLockKey::from(&request.child_scope);
         if let Some(response) = inner.thread_busy(&lock_key) {
             inner.submit_idempotency_in_flight.remove(&idempotency_key);
-            self.submit_idempotency_ready.notify_all();
+            self.submit_idempotency_ready.notify_waiters();
             return Err(TurnError::ThreadBusy(response));
         }
         let run_id = request.requested_run_id.unwrap_or_else(fresh_turn_run_id);
@@ -1059,7 +1059,7 @@ impl TurnSpawnTreeStateStore for InMemoryTurnStateStore {
                 request.received_at,
             );
             inner.submit_idempotency_in_flight.remove(&idempotency_key);
-            self.submit_idempotency_ready.notify_all();
+            self.submit_idempotency_ready.notify_waiters();
             return response;
         }
 
@@ -1084,7 +1084,7 @@ impl TurnSpawnTreeStateStore for InMemoryTurnStateStore {
                     request.received_at,
                 );
                 inner.submit_idempotency_in_flight.remove(&idempotency_key);
-                self.submit_idempotency_ready.notify_all();
+                self.submit_idempotency_ready.notify_waiters();
                 return response;
             }
         };
@@ -1114,7 +1114,7 @@ impl TurnSpawnTreeStateStore for InMemoryTurnStateStore {
                 request.received_at,
             );
             inner.submit_idempotency_in_flight.remove(&idempotency_key);
-            self.submit_idempotency_ready.notify_all();
+            self.submit_idempotency_ready.notify_waiters();
             return response;
         }
 
@@ -1189,7 +1189,7 @@ impl TurnSpawnTreeStateStore for InMemoryTurnStateStore {
             record.received_at,
         );
         inner.submit_idempotency_in_flight.remove(&idempotency_key);
-        self.submit_idempotency_ready.notify_all();
+        self.submit_idempotency_ready.notify_waiters();
         response
     }
 
