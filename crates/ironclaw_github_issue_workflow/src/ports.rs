@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 use crate::{
     GithubCommentRef, GithubIssueRef, GithubIssueWorkflowConfig, GithubIssueWorkflowError,
     GithubIssueWorkflowRunId, GithubIssueWorkspaceSessionId, GithubProviderAccountRef,
-    GithubRepositorySelector, SubmitStageTurnOutcome, SubmitStageTurnRequest,
+    GithubPullRequestRef, GithubRepositorySelector, SubmitStageTurnOutcome, SubmitStageTurnRequest,
     WorkflowWorkspaceMountRef, WorkflowWorkspaceRef,
 };
 
@@ -56,6 +56,15 @@ pub trait GithubIssueWorkflowPort: Send + Sync {
         &self,
         input: CreateIssueCommentInput,
     ) -> Result<GithubCommentRef, GithubIssueWorkflowError>;
+
+    async fn create_draft_pull_request(
+        &self,
+        _input: CreateDraftPullRequestInput,
+    ) -> Result<GithubPullRequestRef, GithubIssueWorkflowError> {
+        Err(GithubIssueWorkflowError::ProviderRead {
+            reason: "GitHub draft pull request writes are not configured".to_string(),
+        })
+    }
 }
 
 #[async_trait]
@@ -190,6 +199,17 @@ pub struct GithubIssueCommentSnapshot {
 pub struct CreateIssueCommentInput {
     pub issue: GithubIssueRef,
     pub body: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CreateDraftPullRequestInput {
+    pub provider_account_ref: GithubProviderAccountRef,
+    pub owner: String,
+    pub repo: String,
+    pub title: String,
+    pub body: Option<String>,
+    pub head_branch: String,
+    pub base_branch: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

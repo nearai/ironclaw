@@ -61,6 +61,33 @@ pub fn github_issue_stage_turn_submitter_for_test(
     )
 }
 
+#[cfg(feature = "github-issue-workflow-beta")]
+pub use crate::github_issue_workflow::{
+    GithubIssueWorkflowCapabilityDispatchError as GithubIssueWorkflowCapabilityDispatchErrorForTest,
+    GithubIssueWorkflowCapabilityDispatchRequest as GithubIssueWorkflowCapabilityDispatchRequestForTest,
+    GithubIssueWorkflowCapabilityDispatcher as GithubIssueWorkflowCapabilityDispatcherForTest,
+};
+
+/// Build the GitHub issue workflow provider adapter for composition tests.
+///
+/// Production wiring binds this adapter to a host-runtime capability path; this
+/// helper lets integration tests drive the same adapter over a fake dispatch seam.
+#[cfg(feature = "github-issue-workflow-beta")]
+pub fn github_issue_workflow_provider_port_for_test<D>(
+    configured_provider_account_ref: ironclaw_github_issue_workflow::GithubProviderAccountRef,
+    dispatcher: Arc<D>,
+) -> Arc<dyn ironclaw_github_issue_workflow::GithubIssueWorkflowPort>
+where
+    D: crate::github_issue_workflow::GithubIssueWorkflowCapabilityDispatcher + 'static,
+{
+    Arc::new(
+        crate::github_issue_workflow::IronClawGithubIssueWorkflowPort::new(
+            configured_provider_account_ref,
+            dispatcher,
+        ),
+    )
+}
+
 /// Test-only projection of one GitHub issue workflow capability profile.
 ///
 /// Mirrors the composition-owned stage profile contract without exposing raw

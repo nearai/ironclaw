@@ -1,16 +1,23 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 use ironclaw_github_issue_workflow::{
-    GithubIssueStage, GithubIssueWorkflowError, StageTurnSubmitter, SubmitStageTurnOutcome,
+    CreateDraftPullRequestInput, CreateIssueCommentInput, GetAuthenticatedWorkflowActorInput,
+    GetGithubIssueInput, GithubActorSnapshot, GithubCommentRef, GithubIssueCommentSnapshot,
+    GithubIssueProviderSnapshot, GithubIssueSearchHit, GithubIssueStage, GithubIssueWorkflowError,
+    GithubIssueWorkflowPort, GithubProviderAccountRef, GithubPullRequestRef,
+    ListIssueCommentsInput, SearchGithubIssuesInput, StageTurnSubmitter, SubmitStageTurnOutcome,
     SubmitStageTurnRequest, WorkflowActorScope,
 };
-use ironclaw_host_api::{AgentId, CapabilityId, ThreadId, UserId};
+use ironclaw_host_api::{
+    AgentId, CapabilityId, ExecutionContext, ResourceEstimate, ThreadId, UserId,
+};
 use ironclaw_host_runtime::{
     FirstPartyCapabilityError, FirstPartyCapabilityHandler, FirstPartyCapabilityRegistry,
     FirstPartyCapabilityRequest, FirstPartyCapabilityResult, ReportWorkflowStageResultInput,
-    WorkflowStageResultAck, WorkflowStageResultSink, WorkflowStageResultSinkError,
+    RuntimeCapabilityOutcome, RuntimeCapabilityRequest, RuntimeFailureKind, WorkflowStageResultAck,
+    WorkflowStageResultSink, WorkflowStageResultSinkError,
     builtin_first_party_handlers_with_workflow_stage_result_sink,
 };
 use ironclaw_loop_support::{
@@ -24,6 +31,7 @@ use ironclaw_threads::{
     ReplayAcceptedInboundMessageRequest, SessionThreadError, SessionThreadService, ThreadMessageId,
     ThreadScope,
 };
+use ironclaw_trust::TrustDecision;
 use ironclaw_turns::{
     AcceptedMessageRef, IdempotencyKey, ProductTurnContext, ReplyTargetBindingRef,
     RunOriginAdapter, RunProfileRequest, SourceBindingRef, SubmitTurnRequest, SubmitTurnResponse,
@@ -33,7 +41,7 @@ use ironclaw_turns::{
         LoopRunContext, RunProfileDefinition, RunProfileRegistryError,
     },
 };
-use serde_json::json;
+use serde_json::{Value as JsonValue, json};
 
 const WORKFLOW_ADAPTER_ID: &str = "github_issue_workflow";
 const RESULT_SINK_CAPABILITY_ID: &str =
@@ -49,6 +57,12 @@ pub(crate) const GITHUB_BUG_IMPLEMENTATION_PROFILE_ID: &str = "github-bug-implem
 pub(crate) const GITHUB_BUG_PR_SYNTHESIS_PROFILE_ID: &str = "github-bug-pr-synthesis-v1";
 pub(crate) const GITHUB_BUG_CI_REPAIR_PROFILE_ID: &str = "github-bug-ci-repair-v1";
 pub(crate) const GITHUB_BUG_REVIEW_RESPONSE_PROFILE_ID: &str = "github-bug-review-response-v1";
+const GITHUB_SEARCH_ISSUES_CAPABILITY_ID: &str = "github.search_issues";
+const GITHUB_GET_ISSUE_CAPABILITY_ID: &str = "github.get_issue";
+const GITHUB_LIST_ISSUE_COMMENTS_CAPABILITY_ID: &str = "github.list_issue_comments";
+const GITHUB_COMMENT_ISSUE_CAPABILITY_ID: &str = "github.comment_issue";
+const GITHUB_CREATE_PULL_REQUEST_CAPABILITY_ID: &str = "github.create_pull_request";
+const GITHUB_GET_AUTHENTICATED_USER_CAPABILITY_ID: &str = "github.get_authenticated_user";
 
 const READ_FILE_CAPABILITY_ID: &str = "builtin.read_file";
 const WRITE_FILE_CAPABILITY_ID: &str = "builtin.write_file";
@@ -421,6 +435,584 @@ impl WorkflowStageResultSink for UnavailableWorkflowStageResultSink {
         _input: ReportWorkflowStageResultInput,
     ) -> Result<WorkflowStageResultAck, WorkflowStageResultSinkError> {
         Err(WorkflowStageResultSinkError::Unavailable)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GithubIssueWorkflowCapabilityDispatchRequest {
+    pub capability_id: String,
+    pub provider_account_ref: GithubProviderAccountRef,
+    pub input: JsonValue,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum GithubIssueWorkflowCapabilityDispatchError {
+    AuthRequired,
+    ApprovalRequired,
+    Backend { kind: String, message: String },
+}
+
+#[async_trait]
+pub trait GithubIssueWorkflowCapabilityDispatcher: Send + Sync {
+    async fn dispatch(
+        &self,
+        request: GithubIssueWorkflowCapabilityDispatchRequest,
+    ) -> Result<JsonValue, GithubIssueWorkflowCapabilityDispatchError>;
+}
+
+#[allow(dead_code)]
+pub(crate) struct HostRuntimeGithubIssueWorkflowCapabilityDispatcher {
+    host_runtime: Arc<dyn ironclaw_host_runtime::HostRuntime>,
+    execution_context: ExecutionContext,
+    trust_decision: TrustDecision,
+    estimate: ResourceEstimate,
+}
+
+#[allow(dead_code)]
+impl HostRuntimeGithubIssueWorkflowCapabilityDispatcher {
+    pub(crate) fn new(
+        host_runtime: Arc<dyn ironclaw_host_runtime::HostRuntime>,
+        execution_context: ExecutionContext,
+        trust_decision: TrustDecision,
+    ) -> Self {
+        Self {
+            host_runtime,
+            execution_context,
+            trust_decision,
+            estimate: ResourceEstimate::default(),
+        }
+    }
+}
+
+#[async_trait]
+impl GithubIssueWorkflowCapabilityDispatcher
+    for HostRuntimeGithubIssueWorkflowCapabilityDispatcher
+{
+    async fn dispatch(
+        &self,
+        request: GithubIssueWorkflowCapabilityDispatchRequest,
+    ) -> Result<JsonValue, GithubIssueWorkflowCapabilityDispatchError> {
+        let capability_id = CapabilityId::new(request.capability_id.clone()).map_err(|reason| {
+            GithubIssueWorkflowCapabilityDispatchError::Backend {
+                kind: "invalid_capability_id".to_string(),
+                message: reason.to_string(),
+            }
+        })?;
+        let outcome = self
+            .host_runtime
+            .invoke_capability(RuntimeCapabilityRequest::new(
+                self.execution_context.clone(),
+                capability_id,
+                self.estimate.clone(),
+                request.input,
+                self.trust_decision.clone(),
+            ))
+            .await
+            .map_err(
+                |error| GithubIssueWorkflowCapabilityDispatchError::Backend {
+                    kind: "host_runtime".to_string(),
+                    message: error.to_string(),
+                },
+            )?;
+
+        match outcome {
+            RuntimeCapabilityOutcome::Completed(completed) => Ok(completed.output),
+            RuntimeCapabilityOutcome::AuthRequired(_) => {
+                Err(GithubIssueWorkflowCapabilityDispatchError::AuthRequired)
+            }
+            RuntimeCapabilityOutcome::ApprovalRequired(_) => {
+                Err(GithubIssueWorkflowCapabilityDispatchError::ApprovalRequired)
+            }
+            RuntimeCapabilityOutcome::Failed(failure) => {
+                Err(GithubIssueWorkflowCapabilityDispatchError::Backend {
+                    kind: failure.kind.as_str().to_string(),
+                    message: failure
+                        .message
+                        .unwrap_or_else(|| failure.kind.as_str().to_string()),
+                })
+            }
+            RuntimeCapabilityOutcome::ResourceBlocked(_) => {
+                Err(GithubIssueWorkflowCapabilityDispatchError::Backend {
+                    kind: RuntimeFailureKind::Resource.as_str().to_string(),
+                    message: "resource blocked".to_string(),
+                })
+            }
+            RuntimeCapabilityOutcome::SpawnedProcess(_) => {
+                Err(GithubIssueWorkflowCapabilityDispatchError::Backend {
+                    kind: "spawned_process".to_string(),
+                    message: "unexpected process outcome".to_string(),
+                })
+            }
+            RuntimeCapabilityOutcome::Unknown(unknown) => {
+                Err(GithubIssueWorkflowCapabilityDispatchError::Backend {
+                    kind: unknown.kind,
+                    message: unknown
+                        .message
+                        .unwrap_or_else(|| "unknown runtime outcome".to_string()),
+                })
+            }
+        }
+    }
+}
+
+pub(crate) struct IronClawGithubIssueWorkflowPort<D> {
+    configured_provider_account_ref: GithubProviderAccountRef,
+    dispatcher: Arc<D>,
+}
+
+impl<D> IronClawGithubIssueWorkflowPort<D> {
+    pub(crate) fn new(
+        configured_provider_account_ref: GithubProviderAccountRef,
+        dispatcher: Arc<D>,
+    ) -> Self {
+        Self {
+            configured_provider_account_ref,
+            dispatcher,
+        }
+    }
+}
+
+#[async_trait]
+impl<D> GithubIssueWorkflowPort for IronClawGithubIssueWorkflowPort<D>
+where
+    D: GithubIssueWorkflowCapabilityDispatcher,
+{
+    async fn search_open_bug_issues(
+        &self,
+        input: SearchGithubIssuesInput,
+    ) -> Result<Vec<GithubIssueSearchHit>, GithubIssueWorkflowError> {
+        let response = self
+            .dispatch_capability(
+                GITHUB_SEARCH_ISSUES_CAPABILITY_ID,
+                input.provider_account_ref.clone(),
+                json!({
+                    "query": input.query,
+                    "limit": input.limit,
+                }),
+            )
+            .await?;
+        normalize_issue_search_hits(&response, &input.owner, &input.repo)
+    }
+
+    async fn get_issue(
+        &self,
+        input: GetGithubIssueInput,
+    ) -> Result<GithubIssueProviderSnapshot, GithubIssueWorkflowError> {
+        let response = self
+            .dispatch_capability(
+                GITHUB_GET_ISSUE_CAPABILITY_ID,
+                input.provider_account_ref.clone(),
+                json!({
+                    "owner": input.owner,
+                    "repo": input.repo,
+                    "issue_number": input.number,
+                }),
+            )
+            .await?;
+        normalize_issue_snapshot(&response, &input.owner, &input.repo, input.number)
+    }
+
+    async fn get_authenticated_workflow_actor(
+        &self,
+        _input: GetAuthenticatedWorkflowActorInput,
+    ) -> Result<GithubActorSnapshot, GithubIssueWorkflowError> {
+        let response = self
+            .dispatch_capability(
+                GITHUB_GET_AUTHENTICATED_USER_CAPABILITY_ID,
+                self.configured_provider_account_ref.clone(),
+                json!({}),
+            )
+            .await?;
+        normalize_actor_snapshot(&response)
+    }
+
+    async fn list_issue_comments(
+        &self,
+        input: ListIssueCommentsInput,
+    ) -> Result<Vec<GithubIssueCommentSnapshot>, GithubIssueWorkflowError> {
+        let response = self
+            .dispatch_capability(
+                GITHUB_LIST_ISSUE_COMMENTS_CAPABILITY_ID,
+                self.configured_provider_account_ref.clone(),
+                json!({
+                    "owner": input.issue.owner,
+                    "repo": input.issue.repo,
+                    "issue_number": input.issue.number,
+                }),
+            )
+            .await?;
+        normalize_issue_comments(&response, &input.issue)
+    }
+
+    async fn create_issue_comment(
+        &self,
+        input: CreateIssueCommentInput,
+    ) -> Result<GithubCommentRef, GithubIssueWorkflowError> {
+        let response = self
+            .dispatch_capability(
+                GITHUB_COMMENT_ISSUE_CAPABILITY_ID,
+                self.configured_provider_account_ref.clone(),
+                json!({
+                    "owner": input.issue.owner,
+                    "repo": input.issue.repo,
+                    "issue_number": input.issue.number,
+                    "body": input.body,
+                }),
+            )
+            .await?;
+        normalize_comment_ref(
+            &response,
+            Some(&input.issue),
+            GITHUB_COMMENT_ISSUE_CAPABILITY_ID,
+        )
+    }
+
+    async fn create_draft_pull_request(
+        &self,
+        input: CreateDraftPullRequestInput,
+    ) -> Result<GithubPullRequestRef, GithubIssueWorkflowError> {
+        let response = self
+            .dispatch_capability(
+                GITHUB_CREATE_PULL_REQUEST_CAPABILITY_ID,
+                input.provider_account_ref.clone(),
+                json!({
+                    "owner": input.owner,
+                    "repo": input.repo,
+                    "title": input.title,
+                    "head": input.head_branch,
+                    "base": input.base_branch,
+                    "body": input.body,
+                    "draft": true,
+                }),
+            )
+            .await?;
+        normalize_pull_request_ref(&response, &input.owner, &input.repo)
+    }
+}
+
+impl<D> IronClawGithubIssueWorkflowPort<D>
+where
+    D: GithubIssueWorkflowCapabilityDispatcher,
+{
+    async fn dispatch_capability(
+        &self,
+        capability_id: &str,
+        provider_account_ref: GithubProviderAccountRef,
+        input: JsonValue,
+    ) -> Result<JsonValue, GithubIssueWorkflowError> {
+        self.dispatcher
+            .dispatch(GithubIssueWorkflowCapabilityDispatchRequest {
+                capability_id: capability_id.to_string(),
+                provider_account_ref,
+                input,
+            })
+            .await
+            .map_err(|error| map_dispatch_error(capability_id, error))
+    }
+}
+
+fn map_dispatch_error(
+    capability_id: &str,
+    error: GithubIssueWorkflowCapabilityDispatchError,
+) -> GithubIssueWorkflowError {
+    match error {
+        GithubIssueWorkflowCapabilityDispatchError::AuthRequired => {
+            GithubIssueWorkflowError::PolicyDenied {
+                reason: format!("GitHub capability {capability_id} requires authentication"),
+            }
+        }
+        GithubIssueWorkflowCapabilityDispatchError::ApprovalRequired => {
+            GithubIssueWorkflowError::PolicyDenied {
+                reason: format!("GitHub capability {capability_id} requires approval"),
+            }
+        }
+        GithubIssueWorkflowCapabilityDispatchError::Backend { kind, .. } => {
+            if kind == RuntimeFailureKind::Transient.as_str()
+                || kind == RuntimeFailureKind::Resource.as_str()
+            {
+                GithubIssueWorkflowError::ProviderRateLimited {
+                    reason: format!("GitHub capability {capability_id} failed ({kind})"),
+                }
+            } else {
+                GithubIssueWorkflowError::ProviderRead {
+                    reason: format!("GitHub capability {capability_id} failed ({kind})"),
+                }
+            }
+        }
+    }
+}
+
+fn normalize_issue_search_hits(
+    value: &JsonValue,
+    owner: &str,
+    repo: &str,
+) -> Result<Vec<GithubIssueSearchHit>, GithubIssueWorkflowError> {
+    let items = required_array(value, &["items"], GITHUB_SEARCH_ISSUES_CAPABILITY_ID)?;
+    items
+        .iter()
+        .map(|item| {
+            let number = required_u64(item, &["number"], GITHUB_SEARCH_ISSUES_CAPABILITY_ID)?;
+            Ok(GithubIssueSearchHit {
+                owner: owner.to_string(),
+                repo: repo.to_string(),
+                number,
+                node_id: optional_string(item, &[&["node_id"]]),
+                url: issue_like_url(item, owner, repo, number),
+                default_branch: optional_string(
+                    item,
+                    &[
+                        &["repository", "default_branch"],
+                        &["base", "repo", "default_branch"],
+                        &["default_branch"],
+                    ],
+                )
+                .unwrap_or_default(),
+                updated_at: optional_rfc3339_datetime(item, &[&["updated_at"]]),
+            })
+        })
+        .collect()
+}
+
+fn normalize_issue_snapshot(
+    value: &JsonValue,
+    owner: &str,
+    repo: &str,
+    number: u64,
+) -> Result<GithubIssueProviderSnapshot, GithubIssueWorkflowError> {
+    Ok(GithubIssueProviderSnapshot {
+        owner: owner.to_string(),
+        repo: repo.to_string(),
+        number,
+        node_id: optional_string(value, &[&["node_id"]]),
+        url: issue_like_url(value, owner, repo, number),
+        default_branch: optional_string(
+            value,
+            &[
+                &["repository", "default_branch"],
+                &["base", "repo", "default_branch"],
+                &["default_branch"],
+            ],
+        )
+        .unwrap_or_default(),
+        title: required_string(value, &["title"], GITHUB_GET_ISSUE_CAPABILITY_ID)?.to_string(),
+        body: optional_string(value, &[&["body"]]).unwrap_or_default(),
+        state: required_string(value, &["state"], GITHUB_GET_ISSUE_CAPABILITY_ID)?.to_string(),
+        labels: optional_labels(value),
+        updated_at: optional_rfc3339_datetime(value, &[&["updated_at"]]),
+    })
+}
+
+fn normalize_actor_snapshot(
+    value: &JsonValue,
+) -> Result<GithubActorSnapshot, GithubIssueWorkflowError> {
+    Ok(GithubActorSnapshot {
+        login: required_string(
+            value,
+            &["login"],
+            GITHUB_GET_AUTHENTICATED_USER_CAPABILITY_ID,
+        )?
+        .to_string(),
+        node_id: optional_string(value, &[&["node_id"]]),
+    })
+}
+
+fn normalize_issue_comments(
+    value: &JsonValue,
+    issue: &ironclaw_github_issue_workflow::GithubIssueRef,
+) -> Result<Vec<GithubIssueCommentSnapshot>, GithubIssueWorkflowError> {
+    let comments = match value {
+        JsonValue::Array(items) => items,
+        _ => required_array(value, &["items"], GITHUB_LIST_ISSUE_COMMENTS_CAPABILITY_ID)?,
+    };
+
+    comments
+        .iter()
+        .map(|comment| {
+            Ok(GithubIssueCommentSnapshot {
+                comment: normalize_comment_ref(
+                    comment,
+                    Some(issue),
+                    GITHUB_LIST_ISSUE_COMMENTS_CAPABILITY_ID,
+                )?,
+                body: optional_string(comment, &[&["body"]]).unwrap_or_default(),
+                author_login: optional_string(comment, &[&["user", "login"], &["author", "login"]])
+                    .unwrap_or_default(),
+                created_at: required_datetime(
+                    comment,
+                    &[&["created_at"]],
+                    GITHUB_LIST_ISSUE_COMMENTS_CAPABILITY_ID,
+                )?,
+                updated_at: required_datetime(
+                    comment,
+                    &[&["updated_at"], &["created_at"]],
+                    GITHUB_LIST_ISSUE_COMMENTS_CAPABILITY_ID,
+                )?,
+            })
+        })
+        .collect()
+}
+
+fn normalize_comment_ref(
+    value: &JsonValue,
+    issue: Option<&ironclaw_github_issue_workflow::GithubIssueRef>,
+    capability_id: &str,
+) -> Result<GithubCommentRef, GithubIssueWorkflowError> {
+    let url = if let Some(url) = optional_string(value, &[&["html_url"], &["url"]]) {
+        url
+    } else if let (Some(issue), Some(comment_id)) =
+        (issue, value.get("id").and_then(JsonValue::as_u64))
+    {
+        format!("{}#issuecomment-{comment_id}", issue.url)
+    } else if let Some(issue) = issue {
+        issue.url.clone()
+    } else {
+        return Err(invalid_output(
+            capability_id,
+            "comment response is missing url",
+        ));
+    };
+
+    Ok(GithubCommentRef {
+        node_id: optional_string(value, &[&["node_id"]]),
+        url,
+    })
+}
+
+fn normalize_pull_request_ref(
+    value: &JsonValue,
+    owner: &str,
+    repo: &str,
+) -> Result<GithubPullRequestRef, GithubIssueWorkflowError> {
+    let number = required_u64(value, &["number"], GITHUB_CREATE_PULL_REQUEST_CAPABILITY_ID)?;
+    let head_branch =
+        optional_string(value, &[&["head", "ref"], &["head_branch"]]).ok_or_else(|| {
+            invalid_output(
+                GITHUB_CREATE_PULL_REQUEST_CAPABILITY_ID,
+                "pull request response is missing head.ref",
+            )
+        })?;
+
+    Ok(GithubPullRequestRef {
+        owner: owner.to_string(),
+        repo: repo.to_string(),
+        number,
+        node_id: optional_string(value, &[&["node_id"]]),
+        url: optional_string(value, &[&["html_url"], &["url"]])
+            .unwrap_or_else(|| format!("https://github.com/{owner}/{repo}/pull/{number}")),
+        head_branch,
+        head_sha: optional_string(value, &[&["head", "sha"], &["head_sha"]]),
+    })
+}
+
+fn issue_like_url(value: &JsonValue, owner: &str, repo: &str, number: u64) -> String {
+    optional_string(value, &[&["html_url"], &["url"]])
+        .unwrap_or_else(|| format!("https://github.com/{owner}/{repo}/issues/{number}"))
+}
+
+fn optional_labels(value: &JsonValue) -> Vec<String> {
+    value
+        .get("labels")
+        .and_then(JsonValue::as_array)
+        .map(|labels| {
+            labels
+                .iter()
+                .filter_map(|label| match label {
+                    JsonValue::String(name) => Some(name.clone()),
+                    JsonValue::Object(_) => label
+                        .get("name")
+                        .and_then(JsonValue::as_str)
+                        .map(ToString::to_string),
+                    _ => None,
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn required_array<'a>(
+    value: &'a JsonValue,
+    path: &[&str],
+    capability_id: &str,
+) -> Result<&'a Vec<JsonValue>, GithubIssueWorkflowError> {
+    json_at_path(value, path)
+        .and_then(JsonValue::as_array)
+        .ok_or_else(|| {
+            invalid_output(
+                capability_id,
+                &format!("missing array `{}`", path.join(".")),
+            )
+        })
+}
+
+fn required_string<'a>(
+    value: &'a JsonValue,
+    path: &[&str],
+    capability_id: &str,
+) -> Result<&'a str, GithubIssueWorkflowError> {
+    json_at_path(value, path)
+        .and_then(JsonValue::as_str)
+        .ok_or_else(|| {
+            invalid_output(
+                capability_id,
+                &format!("missing string `{}`", path.join(".")),
+            )
+        })
+}
+
+fn required_u64(
+    value: &JsonValue,
+    path: &[&str],
+    capability_id: &str,
+) -> Result<u64, GithubIssueWorkflowError> {
+    json_at_path(value, path)
+        .and_then(JsonValue::as_u64)
+        .ok_or_else(|| {
+            invalid_output(
+                capability_id,
+                &format!("missing integer `{}`", path.join(".")),
+            )
+        })
+}
+
+fn required_datetime(
+    value: &JsonValue,
+    paths: &[&[&str]],
+    capability_id: &str,
+) -> Result<DateTime<Utc>, GithubIssueWorkflowError> {
+    optional_rfc3339_datetime(value, paths).ok_or_else(|| {
+        invalid_output(
+            capability_id,
+            &format!("missing timestamp `{}`", paths[0].join(".")),
+        )
+    })
+}
+
+fn optional_rfc3339_datetime(value: &JsonValue, paths: &[&[&str]]) -> Option<DateTime<Utc>> {
+    optional_string(value, paths).and_then(|timestamp| {
+        DateTime::parse_from_rfc3339(&timestamp)
+            .ok()
+            .map(|parsed| parsed.with_timezone(&Utc))
+    })
+}
+
+fn optional_string(value: &JsonValue, paths: &[&[&str]]) -> Option<String> {
+    paths
+        .iter()
+        .find_map(|path| json_at_path(value, path).and_then(JsonValue::as_str))
+        .map(ToString::to_string)
+}
+
+fn json_at_path<'a>(value: &'a JsonValue, path: &[&str]) -> Option<&'a JsonValue> {
+    let mut current = value;
+    for segment in path {
+        current = current.get(*segment)?;
+    }
+    Some(current)
+}
+
+fn invalid_output(capability_id: &str, detail: &str) -> GithubIssueWorkflowError {
+    GithubIssueWorkflowError::ProviderRead {
+        reason: format!("GitHub capability {capability_id} returned invalid output: {detail}"),
     }
 }
 
