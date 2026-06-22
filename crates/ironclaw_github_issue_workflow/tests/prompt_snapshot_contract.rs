@@ -247,6 +247,15 @@ mod prompt_snapshot_contract {
     }
 
     #[test]
+    fn prompt_schema_renders_next_actions_as_string_array() {
+        let snapshot = implementation_snapshot();
+        let bundle = render_stage_prompt(GithubIssueStage::Implementation, &snapshot).unwrap();
+
+        assert!(bundle.content.contains(r#""next_actions": ["string"]"#));
+        assert!(!bundle.content.contains(r#""next_actions": "["string"]""#));
+    }
+
+    #[test]
     fn planning_prompt_disallows_direct_github_writes() {
         let snapshot = planning_snapshot();
         let bundle = render_stage_prompt(GithubIssueStage::Planning, &snapshot).unwrap();

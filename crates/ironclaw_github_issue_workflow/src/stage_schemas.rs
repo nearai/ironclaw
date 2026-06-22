@@ -426,6 +426,9 @@ fn render_stage_result_envelope_shape(payload_shape: &str) -> String {
             StageResultContractFieldKind::EvidenceArray => {
                 format!("  \"{}\": [{}]", field.name, evidence_shape)
             }
+            StageResultContractFieldKind::StringArray => {
+                format!("  \"{}\": [\"string\"]", field.name)
+            }
             StageResultContractFieldKind::PayloadObject => {
                 format!("  \"{}\": {{\n{payload_shape}\n  }}", field.name)
             }
@@ -544,7 +547,7 @@ impl StageResultContractFieldKind {
             StageResultContractFieldKind::Outcome => "stage outcome",
             StageResultContractFieldKind::NonEmptyString => "non-empty string",
             StageResultContractFieldKind::EvidenceArray => "evidence array",
-            StageResultContractFieldKind::StringArray => "[\"string\"]",
+            StageResultContractFieldKind::StringArray => "string array",
             StageResultContractFieldKind::PayloadObject => "payload object",
             StageResultContractFieldKind::OptionalJson => "optional JSON",
         }
