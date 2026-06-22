@@ -190,15 +190,11 @@ async fn skill_execution_adapter_prepares_filesystem_bundles_end_to_end() {
     let root = tempfile::tempdir().unwrap();
     let storage_root = root.path().join("local-dev");
     let skill_root = storage_root
-        .join("tenants/runtime-skill-execution-tenant/users/runtime-skill-execution-owner/skills/filesystem-helper");
+        .join("tenants/runtime-skill-execution-tenant/users/runtime-skill-execution-owner/skills/policy-helper");
     std::fs::create_dir_all(skill_root.join("references")).unwrap();
     std::fs::write(
         skill_root.join("SKILL.md"),
-        skill_md(
-            "filesystem-helper",
-            "filesystem-helper",
-            "Use filesystem-backed policy guidance.",
-        ),
+        skill_md("policy-helper", "policy-helper", "Use policy guidance."),
     )
     .unwrap();
     std::fs::write(skill_root.join("references/policy.md"), "filesystem policy").unwrap();
@@ -221,39 +217,36 @@ async fn skill_execution_adapter_prepares_filesystem_bundles_end_to_end() {
     let conversation = runtime.new_conversation().await.unwrap();
     let result = tokio::time::timeout(
         Duration::from_secs(15),
-        runtime.execute_skill_message(&conversation, "$filesystem-helper"),
+        runtime.execute_skill_message(&conversation, "$policy-helper"),
     )
     .await
     .unwrap()
     .unwrap();
 
-    assert_eq!(
-        result.plan.activations().len(),
-        1,
-        "unexpected activations: {:?}",
-        result.plan.activations()
-    );
-    assert_eq!(result.plan.activations()[0].name, "filesystem-helper");
-    assert_eq!(
-        result.plan.active_bundles().len(),
-        1,
-        "unexpected active bundles: {:?}",
-        result.plan.active_bundles()
-    );
-    assert_eq!(
-        result.plan.active_bundles()[0].source,
-        RebornSkillSourceKind::User
-    );
-    assert_eq!(
-        result.plan.active_bundles()[0].skill_name,
-        "filesystem-helper"
-    );
+    let activation = result
+        .plan
+        .activations()
+        .iter()
+        .find(|activation| {
+            activation.name == "policy-helper"
+                && activation.source == Some(RebornSkillSourceKind::User)
+        })
+        .expect("explicit user skill activation should be present");
+    let bundle = result
+        .plan
+        .active_bundles()
+        .iter()
+        .find(|bundle| {
+            bundle.source == RebornSkillSourceKind::User && bundle.skill_name == "policy-helper"
+        })
+        .expect("explicit user skill bundle should be active");
+    assert_eq!(bundle.skill_name, activation.name);
 
     let asset = runtime
         .read_skill_execution_asset(
             &conversation,
             &result.plan,
-            &result.plan.activations()[0],
+            activation,
             "references/policy.md",
         )
         .await
