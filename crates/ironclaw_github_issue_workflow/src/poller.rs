@@ -179,11 +179,12 @@ where
                 .github_port()
                 .get_issue(GetGithubIssueInput {
                     provider_account_ref: workflow_config.provider_account_ref.clone(),
-                    owner: hit.owner,
-                    repo: hit.repo,
+                    owner: repository.owner.clone(),
+                    repo: repository.repo.clone(),
                     number: hit.number,
                 })
                 .await?;
+            ensure_snapshot_matches_request(repository, hit.number, &snapshot)?;
             let issue_ref = snapshot.issue_ref();
             let comments = self
                 .ports
@@ -524,6 +525,31 @@ fn issue_event_payload(snapshot: &GithubIssueProviderSnapshot, comment_count: us
             "comment_count": comment_count,
             "body_present": !snapshot.body.is_empty(),
         }
+    })
+}
+
+fn ensure_snapshot_matches_request(
+    repository: &GithubRepositorySelector,
+    requested_number: u64,
+    snapshot: &GithubIssueProviderSnapshot,
+) -> Result<(), GithubIssueWorkflowError> {
+    if snapshot.owner == repository.owner
+        && snapshot.repo == repository.repo
+        && snapshot.number == requested_number
+    {
+        return Ok(());
+    }
+
+    Err(GithubIssueWorkflowError::ProviderRead {
+        reason: format!(
+            "GitHub provider returned issue {}/{}#{} while reading configured issue {}/{}#{}",
+            snapshot.owner,
+            snapshot.repo,
+            snapshot.number,
+            repository.owner,
+            repository.repo,
+            requested_number
+        ),
     })
 }
 

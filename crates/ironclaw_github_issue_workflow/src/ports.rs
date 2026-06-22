@@ -72,7 +72,9 @@ pub trait WorkflowProjectAccess: Send + Sync {
         &self,
         _request: WorkflowConfigAccessRequest,
     ) -> Result<(), GithubIssueWorkflowError> {
-        Ok(())
+        Err(GithubIssueWorkflowError::PolicyDenied {
+            reason: "workflow config access is not configured".to_string(),
+        })
     }
 
     async fn assert_workflow_project_access(
