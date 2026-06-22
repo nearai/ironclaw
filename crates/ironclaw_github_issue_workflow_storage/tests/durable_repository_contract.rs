@@ -2,9 +2,10 @@
 
 use chrono::Duration;
 use ironclaw_github_issue_workflow::{
-    ClaimRunnableWorkflowRunsInput, CreateOrGetProviderActionInput, CreateOrGetWorkflowRunOutcome,
-    CreateStageRunInput, CreateStageRunOutcome, GithubIssueStage, RecordWorkflowEventOutcome,
-    TransitionOutcome, WorkflowIdempotencyKey,
+    BlockWorkflowRunInput, BlockWorkflowRunOutcome, ClaimRunnableWorkflowRunsInput,
+    CreateOrGetProviderActionInput, CreateOrGetWorkflowRunOutcome, CreateStageRunInput,
+    CreateStageRunOutcome, GithubIssueBlockKind, GithubIssueBlockState, GithubIssueStage,
+    RecordWorkflowEventOutcome, TransitionOutcome, WorkflowIdempotencyKey,
 };
 
 mod support;
@@ -164,6 +165,65 @@ mod durable_repository_contract {
             assert!(blocked_claim.is_empty(), "blocked claim for {}", case.name);
             assert_eq!(expired_claim.len(), 1, "expired claim for {}", case.name);
             assert_eq!(expired_claim[0].lease_owner, Some(worker(&case.name, 2)));
+        }
+    }
+
+    #[tokio::test]
+    async fn durable_lease_claim_skips_blocked_runs_after_lease_expiry() {
+        for case in RepositoryCase::cases("blocked-claim").await {
+            let repository = case.open().await;
+            let tenant_id = tenant(&case.name, 1);
+            let run = create_run(
+                repository.as_ref(),
+                &case.name,
+                tenant_id.clone(),
+                issue(&case.name, 42),
+            )
+            .await;
+
+            let first_claim = repository
+                .claim_runnable_workflow_runs(claim_input(
+                    &case.name,
+                    tenant_id.clone(),
+                    fixed_time(10),
+                    1,
+                ))
+                .await
+                .expect("first claim");
+            let blocked = repository
+                .block_workflow_run(BlockWorkflowRunInput {
+                    workflow_run_id: run.workflow_run_id.clone(),
+                    worker_id: worker(&case.name, 1),
+                    active_block: GithubIssueBlockState {
+                        kind: GithubIssueBlockKind::BlockedHuman,
+                        reason: "waiting on human input".to_string(),
+                        blocked_at: fixed_time(20),
+                    },
+                    now: fixed_time(20),
+                })
+                .await
+                .expect("block workflow run");
+            let reopened = case.reopen().await;
+            let blocked_claim = reopened
+                .claim_runnable_workflow_runs(ClaimRunnableWorkflowRunsInput {
+                    tenant_id,
+                    worker_id: worker(&case.name, 2),
+                    now: fixed_time(71),
+                    lease_expires_at: fixed_time(71) + Duration::seconds(60),
+                    limit: 10,
+                })
+                .await
+                .expect("claim blocked run after lease expiry");
+
+            assert_eq!(first_claim.len(), 1, "first claim for {}", case.name);
+            let BlockWorkflowRunOutcome::Blocked { .. } = blocked else {
+                panic!("run must block for {}", case.name);
+            };
+            assert!(
+                blocked_claim.is_empty(),
+                "blocked run must not be claimable after lease expiry for {}",
+                case.name
+            );
         }
     }
 

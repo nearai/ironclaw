@@ -321,7 +321,9 @@ where
             if claimed.len() >= input.limit {
                 break;
             }
-            if is_terminal(&candidate.status) || !lease_is_claimable(&candidate, input.now) {
+            if candidate.status != GithubIssueWorkflowRunStatus::Active
+                || !lease_is_claimable(&candidate, input.now)
+            {
                 continue;
             }
             if let Some(run) = self
@@ -926,7 +928,7 @@ where
         loop {
             let (mut run, version) = self.load_required_run_with_version(workflow_run_id).await?;
             if run.tenant_id != input.tenant_id
-                || is_terminal(&run.status)
+                || run.status != GithubIssueWorkflowRunStatus::Active
                 || !lease_is_claimable(&run, input.now)
             {
                 return Ok(None);
