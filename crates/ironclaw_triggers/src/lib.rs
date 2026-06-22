@@ -1629,7 +1629,7 @@ impl TriggerRepository for InMemoryTriggerRepository {
             record.next_run_at = t;
         }
         record.state = if next.is_some() {
-            TriggerState::Scheduled
+            record.state
         } else {
             TriggerState::Completed
         };

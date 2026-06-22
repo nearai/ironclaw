@@ -7,7 +7,10 @@ import {
   automationSummary,
   normalizeAutomations,
 } from "../lib/automations-presenters.js";
-import { nextAutomationsRefetchDelay } from "../lib/automations-refresh.js";
+import {
+  AUTOMATIONS_BASE_REFETCH_MS,
+  nextAutomationsRefetchDelay,
+} from "../lib/automations-refresh.js";
 
 const AUTOMATIONS_PAGE_LIMIT = 50;
 const AUTOMATION_RUNS_LIMIT = 25;
@@ -23,7 +26,7 @@ export function useAutomations(includeCompleted = false) {
         runLimit: AUTOMATION_RUNS_LIMIT,
         includeCompleted,
       }),
-    refetchInterval: 30000,
+    refetchInterval: AUTOMATIONS_BASE_REFETCH_MS,
     refetchIntervalInBackground: false,
   });
 
@@ -44,6 +47,8 @@ export function useAutomations(includeCompleted = false) {
 
   React.useEffect(() => {
     if (nextRefreshDelay == null) return undefined;
+    // The query's base refetchInterval keeps long-horizon schedules polling;
+    // this timer only pulls near-due and running automations forward.
     const timer = setTimeout(() => {
       query.refetch();
     }, nextRefreshDelay);

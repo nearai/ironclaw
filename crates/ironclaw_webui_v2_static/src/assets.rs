@@ -318,6 +318,7 @@ mod tests {
         assert!(page.contains("AutomationsList"));
 
         let automations_hook = asset_text("js/pages/automations/hooks/useAutomations.js");
+        assert!(automations_hook.contains("AUTOMATIONS_BASE_REFETCH_MS"));
         assert!(automations_hook.contains("nextAutomationsRefetchDelay"));
         assert!(automations_hook.contains("query.refetch()"));
 

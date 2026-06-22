@@ -2471,6 +2471,62 @@ mod fire_claim_contract {
         assert_eq!(persisted.active_run_ref, None);
         assert_eq!(persisted.state, TriggerState::Scheduled);
 
+        let paused_trigger_id = TriggerId::parse("01J00000000000000000000018").expect("ulid");
+        let paused_tenant_id = tenant("tenant-clear-paused");
+        let paused_run_id =
+            TurnRunId::parse("01890f0f-9b6f-7a85-9e5b-9f21a93c4f69").expect("valid run");
+        let mut paused_record =
+            sample_record(paused_trigger_id, paused_tenant_id.clone(), fire_slot);
+        paused_record.active_fire_slot = Some(fire_slot);
+        paused_record.active_run_ref = Some(paused_run_id);
+        repo.upsert_trigger(paused_record.clone())
+            .await
+            .expect("insert paused active record");
+
+        let paused = repo
+            .set_scoped_trigger_state(
+                paused_tenant_id.clone(),
+                paused_record.creator_user_id.clone(),
+                paused_record.agent_id.clone(),
+                paused_record.project_id.clone(),
+                paused_trigger_id,
+                TriggerState::Paused,
+            )
+            .await
+            .expect("pause active fire trigger")
+            .expect("pause should update active fire trigger");
+        assert_eq!(paused.state, TriggerState::Paused);
+        assert_eq!(paused.active_fire_slot, Some(fire_slot));
+        assert_eq!(paused.active_run_ref, Some(paused_run_id));
+
+        let cleared_paused = repo
+            .clear_active_fire(ClearActiveFireRequest {
+                tenant_id: paused_tenant_id.clone(),
+                trigger_id: paused_trigger_id,
+                fire_slot,
+                run_id: paused_run_id,
+                status: TriggerRunHistoryStatus::Ok,
+            })
+            .await
+            .expect("clear paused active fire")
+            .expect("paused active fire should clear");
+        assert_eq!(cleared_paused.active_fire_slot, None);
+        assert_eq!(cleared_paused.active_run_ref, None);
+        assert_eq!(
+            cleared_paused.state,
+            TriggerState::Paused,
+            "clear_active_fire must preserve a user pause applied while the fire was active"
+        );
+
+        let persisted_paused = repo
+            .get_trigger(paused_tenant_id, paused_trigger_id)
+            .await
+            .expect("reload cleared paused record")
+            .expect("paused record present");
+        assert_eq!(persisted_paused.active_fire_slot, None);
+        assert_eq!(persisted_paused.active_run_ref, None);
+        assert_eq!(persisted_paused.state, TriggerState::Paused);
+
         // Fire-once sub-case: clear_active_fire on a Once-schedule trigger must
         // transition state to Completed. This exercises the SQL
         // `CASE WHEN schedule_kind = 'once' THEN 'completed'`
