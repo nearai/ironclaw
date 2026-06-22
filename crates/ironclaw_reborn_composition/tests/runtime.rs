@@ -1,4 +1,4 @@
-use std::time::Duration;
+use std::{sync::LazyLock, time::Duration};
 
 use ironclaw_host_api::runtime_policy::{
     ApprovalPolicy, AuditMode, DeploymentMode, EffectiveRuntimePolicy, FilesystemBackendKind,
@@ -13,6 +13,14 @@ use ironclaw_turns::TurnStatus;
 use tokio_util::sync::CancellationToken;
 
 const SEND_USER_MESSAGE_TIMEOUT: Duration = Duration::from_secs(10);
+// These tests start full local-dev runtimes; with libsql enabled they contend
+// enough under libtest parallelism to trip timeout-oriented assertions.
+static RUNTIME_COMPOSITION_TEST_LOCK: LazyLock<tokio::sync::Mutex<()>> =
+    LazyLock::new(|| tokio::sync::Mutex::new(()));
+
+async fn runtime_composition_test_guard() -> tokio::sync::MutexGuard<'static, ()> {
+    RUNTIME_COMPOSITION_TEST_LOCK.lock().await
+}
 
 #[tokio::test]
 async fn runtime_rejects_disabled_profile_before_local_substrate_lookup() {
@@ -88,6 +96,7 @@ async fn runtime_requires_resolved_runtime_policy_for_local_dev() {
 
 #[tokio::test]
 async fn stub_gateway_send_cancels_recovery_required_and_releases_conversation() {
+    let _guard = runtime_composition_test_guard().await;
     let root = tempfile::tempdir().unwrap();
     let input = RebornRuntimeInput::from_services(
         RebornBuildInput::local_dev("runtime-test-owner", root.path().join("local-dev"))
@@ -148,6 +157,7 @@ async fn stub_gateway_send_cancels_recovery_required_and_releases_conversation()
 
 #[tokio::test]
 async fn send_user_message_with_cancellation_cancels_submitted_run() {
+    let _guard = runtime_composition_test_guard().await;
     let root = tempfile::tempdir().unwrap();
     let input = RebornRuntimeInput::from_services(
         RebornBuildInput::local_dev("runtime-cancel-owner", root.path().join("local-dev"))
@@ -189,6 +199,7 @@ async fn send_user_message_with_cancellation_cancels_submitted_run() {
 
 #[tokio::test]
 async fn skill_execution_adapter_prepares_filesystem_bundles_end_to_end() {
+    let _guard = runtime_composition_test_guard().await;
     let root = tempfile::tempdir().unwrap();
     let storage_root = root.path().join("local-dev");
     let skill_root = storage_root
@@ -270,6 +281,7 @@ async fn skill_execution_adapter_prepares_filesystem_bundles_end_to_end() {
 /// uncovered.
 #[tokio::test]
 async fn build_reborn_runtime_wires_third_party_hooks_when_enabled() {
+    let _guard = runtime_composition_test_guard().await;
     let root = tempfile::tempdir().unwrap();
     let storage_root = root.path().join("local-dev");
 
@@ -403,6 +415,7 @@ fn skill_md(name: &str, keyword: &str, prompt: &str) -> String {
 /// which mirrors the exact store construction `build_reborn_runtime` performs.
 #[tokio::test]
 async fn build_reborn_runtime_wires_per_user_cap_from_turn_runner_settings() {
+    let _guard = runtime_composition_test_guard().await;
     use std::num::NonZeroU32;
 
     let root = tempfile::tempdir().unwrap();
@@ -476,6 +489,7 @@ async fn build_reborn_runtime_wires_per_user_cap_from_turn_runner_settings() {
 /// workers are healthy — the bug the `all()` fix addresses.
 #[tokio::test]
 async fn multi_worker_runtime_does_not_raise_worker_stopped_while_workers_are_alive() {
+    let _guard = runtime_composition_test_guard().await;
     use std::num::NonZeroUsize;
 
     let root = tempfile::tempdir().unwrap();
