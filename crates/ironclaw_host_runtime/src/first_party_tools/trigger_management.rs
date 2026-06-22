@@ -740,7 +740,13 @@ mod tests {
         let error = next_run_at_for_schedule(&schedule, after_schedule_expires)
             .expect_err("exhausted schedule rejected");
 
-        assert!(matches!(error, TriggerError::InvalidSchedule { .. }));
+        assert!(matches!(
+            error,
+            TriggerError::InvalidSchedule {
+                kind: TriggerScheduleValidationKind::NoFutureFireTime,
+                ..
+            }
+        ));
     }
 
     #[test]

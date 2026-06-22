@@ -79,7 +79,7 @@ pub struct CapabilityDispatchResult {
     pub receipt: ResourceReceipt,
 }
 
-/// Stable, sanitized input issue code for dispatch validation failures.
+/// Stable input issue code for dispatch validation failures.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum DispatchInputIssueCode {
     MissingRequired,
@@ -88,7 +88,7 @@ pub enum DispatchInputIssueCode {
     InvalidValue,
 }
 
-/// Stable, sanitized input issue for dispatch validation failures.
+/// Stable input issue for dispatch validation failures.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DispatchInputIssue {
     pub path: String,
@@ -125,8 +125,7 @@ impl DispatchInputIssue {
     }
 }
 
-/// Stable, sanitized dispatch failure details that can be safely surfaced above
-/// the dispatch boundary.
+/// Stable structured dispatch failure details for dispatch validation failures.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DispatchFailureDetail {
     InvalidInput { issues: Vec<DispatchInputIssue> },
