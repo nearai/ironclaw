@@ -834,6 +834,184 @@ impl TurnRunTransitionPort for ClaimRecordingTransitions {
     }
 }
 
+/// Delegates every transition to a real store, but errors the first
+/// `remaining_failures` claim attempts to simulate a transient run-queue
+/// outage that arms the scheduler's claim-error retry deadline.
+struct FlakyClaimTransitions {
+    store: Arc<InMemoryTurnStateStore>,
+    remaining_failures: AtomicUsize,
+    claim_attempts: AtomicUsize,
+}
+
+impl FlakyClaimTransitions {
+    fn new(store: Arc<InMemoryTurnStateStore>, failures: usize) -> Self {
+        Self {
+            store,
+            remaining_failures: AtomicUsize::new(failures),
+            claim_attempts: AtomicUsize::new(0),
+        }
+    }
+
+    fn claim_attempts(&self) -> usize {
+        self.claim_attempts.load(Ordering::SeqCst)
+    }
+}
+
+#[async_trait]
+impl TurnRunTransitionPort for FlakyClaimTransitions {
+    async fn claim_next_run(
+        &self,
+        request: ClaimRunRequest,
+    ) -> Result<Option<ClaimedTurnRun>, TurnError> {
+        self.claim_attempts.fetch_add(1, Ordering::SeqCst);
+        // fetch_update returns Err when already at zero; only fail while
+        // failures remain, then delegate to the real store.
+        if self
+            .remaining_failures
+            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |remaining| {
+                remaining.checked_sub(1)
+            })
+            .is_ok()
+        {
+            return Err(TurnError::Unavailable {
+                reason: "claim store transiently unavailable".to_string(),
+            });
+        }
+        self.store.claim_next_run(request).await
+    }
+
+    async fn heartbeat(
+        &self,
+        request: HeartbeatRequest,
+    ) -> Result<ironclaw_turns::EventCursor, TurnError> {
+        self.store.heartbeat(request).await
+    }
+
+    async fn recover_expired_leases(
+        &self,
+        request: RecoverExpiredLeasesRequest,
+    ) -> Result<RecoverExpiredLeasesResponse, TurnError> {
+        self.store.recover_expired_leases(request).await
+    }
+
+    async fn record_model_route_snapshot(
+        &self,
+        request: RecordModelRouteSnapshotRequest,
+    ) -> Result<TurnRunState, TurnError> {
+        self.store.record_model_route_snapshot(request).await
+    }
+
+    async fn block_run(&self, request: BlockRunRequest) -> Result<TurnRunState, TurnError> {
+        self.store.block_run(request).await
+    }
+
+    async fn complete_run(&self, request: CompleteRunRequest) -> Result<TurnRunState, TurnError> {
+        self.store.complete_run(request).await
+    }
+
+    async fn cancel_run(
+        &self,
+        request: CancelRunCompletionRequest,
+    ) -> Result<TurnRunState, TurnError> {
+        self.store.cancel_run(request).await
+    }
+
+    async fn fail_run(&self, request: FailRunRequest) -> Result<TurnRunState, TurnError> {
+        self.store.fail_run(request).await
+    }
+
+    async fn record_runner_failure(
+        &self,
+        request: RecordRunnerFailureRequest,
+    ) -> Result<TurnRunState, TurnError> {
+        self.store.record_runner_failure(request).await
+    }
+
+    async fn apply_validated_loop_exit(
+        &self,
+        request: ApplyValidatedLoopExitRequest,
+    ) -> Result<TurnRunState, TurnError> {
+        self.store.apply_validated_loop_exit(request).await
+    }
+}
+
+/// Regression for the P0 wedge: a transient claim error arms the scheduler's
+/// retry deadline; if the periodic backstop stays gated behind it, a lost retry
+/// strands every Queued run forever. The `claim_error_backoff` is set far past
+/// the test window so the scheduled retry cannot fire — only a self-healing poll
+/// tick can drain the queued run.
+#[tokio::test(start_paused = true)]
+async fn periodic_backstop_drains_after_claim_error_arms_retry_deadline() {
+    let store = Arc::new(InMemoryTurnStateStore::default());
+    let transitions = Arc::new(FlakyClaimTransitions::new(store.clone(), 1));
+    let transition_port: Arc<dyn TurnRunTransitionPort> = transitions.clone();
+    let executor = Arc::new(CompletingExecutor::default());
+    let scheduler = TurnRunScheduler::new(
+        transition_port,
+        executor.clone(),
+        fast_config()
+            .with_poll_interval(Duration::from_millis(20))
+            .with_lease_recovery_interval(Duration::from_secs(3600))
+            .with_claim_error_backoff(Duration::from_secs(3600)),
+    );
+    let handle = scheduler.start();
+    // No wake is delivered, so the first drain comes from the poll tick. That
+    // claim errors and arms the retry deadline; before the fix the poll tick was
+    // gated behind that state and every later tick was a no-op, so the run never
+    // executed.
+    let coordinator = DefaultTurnCoordinator::new(store.clone())
+        .with_wake_notifier(Arc::new(NoopTurnRunWakeNotifier));
+
+    coordinator
+        .submit_turn(submit_turn_request("thread-wedge", "idem-wedge"))
+        .await
+        .unwrap();
+
+    executor.wait_for_started(1).await;
+    assert!(
+        transitions.claim_attempts() >= 2,
+        "poll-tick backstop did not retry the claim after the retry deadline was armed"
+    );
+    handle.shutdown().await;
+}
+
+/// Under a sustained claim-store outage the unconditional poll-tick backstop
+/// must NOT schedule a fresh retry timer on every tick — doing so would inject a
+/// new self-sustaining retry chain per tick and compound claims into a thundering
+/// herd. The scheduler keeps a single retry deadline, so with the poll interval
+/// equal to the backoff and no wakes, claims over a window stay bounded by the
+/// poll/retry cadence, not its square.
+#[tokio::test(start_paused = true)]
+async fn poll_backstop_does_not_compound_claims_during_outage() {
+    let transitions = Arc::new(FailingClaimTransitions::default());
+    let transition_port: Arc<dyn TurnRunTransitionPort> = transitions.clone();
+    let executor = Arc::new(CompletingExecutor::default());
+    let scheduler = TurnRunScheduler::new(
+        transition_port,
+        executor,
+        fast_config()
+            .with_poll_interval(Duration::from_millis(20))
+            .with_lease_recovery_interval(Duration::from_secs(3600))
+            .with_claim_error_backoff(Duration::from_millis(20)),
+    );
+    let handle = scheduler.start();
+
+    // First poll tick arms the retry deadline. No wakes are delivered, so without
+    // the accumulation bug the claims are the ~one-per-20ms poll ticks plus the
+    // single retry chain (~20 over 200ms). The buggy variant scheduled a fresh
+    // retry timer per poll tick, compounding to one-per-tick-times-ticks-elapsed
+    // (50+ over the same window).
+    transitions.wait_for_claim_attempts(1).await;
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    let attempts = transitions.claim_attempts();
+    assert!(
+        attempts <= 30,
+        "poll backstop compounded claims during outage: {attempts} attempts in ~200ms \
+         (expected roughly one per 20ms poll, not a compounding retry-timer chain)"
+    );
+    handle.shutdown().await;
+}
+
 #[test]
 fn executor_error_exposes_typed_sanitized_failure() {
     let error = TurnRunExecutorError::new("scheduler_test_error").unwrap();

@@ -1,4 +1,4 @@
-use std::{error::Error, fmt, panic::AssertUnwindSafe, sync::Arc, time::Duration};
+use std::{error::Error, fmt, panic::AssertUnwindSafe, pin::Pin, sync::Arc, time::Duration};
 
 use async_trait::async_trait;
 use chrono::Utc;
@@ -14,7 +14,7 @@ use ironclaw_turns::{
 use tokio::{
     sync::{Semaphore, mpsc},
     task::{JoinHandle, JoinSet},
-    time::{MissedTickBehavior, interval, sleep},
+    time::{Instant, MissedTickBehavior, Sleep, interval, sleep_until},
 };
 use tracing::Instrument;
 use tracing::debug;
@@ -230,7 +230,6 @@ impl TurnRunSchedulerHandle {
 enum SchedulerCommand {
     Wake(TurnRunWake),
     Drain,
-    RetryDrain,
     Shutdown,
 }
 
@@ -265,67 +264,49 @@ async fn run_scheduler_loop(
         config,
         runner_id,
     };
-    let mut claim_retry_pending = false;
+    // Single in-loop retry for claim-store errors. `retry_at` is the logical state
+    // (`Some` = a retry is pending, which also coalesces wakes); `retry_timer` is a
+    // pinned `Sleep` kept in lockstep with it via `arm_retry`. Keeping the timer
+    // inside the `select!` (vs the old detached `RetryDrain` task) means it cannot
+    // be lost to a runtime/shutdown race — the original wedge — and the single
+    // deadline means a sustained outage cannot compound retries into a thundering
+    // herd. Pinning + `reset` avoids rebuilding the timer future every iteration.
+    let mut retry_at: Option<Instant> = None;
+    let retry_timer = sleep_until(Instant::now());
+    tokio::pin!(retry_timer);
 
     loop {
         tokio::select! {
             Some(command) = command_rx.recv() => {
                 match command {
                     SchedulerCommand::Wake(wake) => {
-                        // Prefer the woken scope for locality; if that scope has no
-                        // claimable work, fall back to the global queue below.
-                        if !claim_retry_pending
-                            && drain_queued_runs(
+                        // Prefer the woken scope for locality; fall back to the
+                        // global queue. Skip entirely while a retry is pending so a
+                        // wake storm coalesces behind the single scheduled retry.
+                        if retry_at.is_none() {
+                            let claim_errored = drain_queued_runs(
                                 &context,
                                 Some(wake.scope),
                                 &mut executor_tasks,
-                            ).await
-                        {
-                            claim_retry_pending = true;
-                            schedule_drain_after(
-                                context.command_tx.clone(),
-                                context.config.claim_error_backoff(),
-                            );
-                        }
-                        if !claim_retry_pending
-                            && drain_queued_runs(
-                                &context,
-                                None,
-                                &mut executor_tasks,
-                            ).await
-                        {
-                            claim_retry_pending = true;
-                            schedule_drain_after(
-                                context.command_tx.clone(),
-                                context.config.claim_error_backoff(),
-                            );
+                            )
+                            .await
+                                || drain_queued_runs(&context, None, &mut executor_tasks).await;
+                            if claim_errored {
+                                arm_retry(
+                                    &mut retry_at,
+                                    retry_timer.as_mut(),
+                                    context.config.claim_error_backoff(),
+                                );
+                            }
                         }
                     }
                     SchedulerCommand::Drain => {
-                        if !claim_retry_pending
-                            && drain_queued_runs(
-                                &context,
-                                None,
-                                &mut executor_tasks,
-                            ).await
+                        if retry_at.is_none()
+                            && drain_queued_runs(&context, None, &mut executor_tasks).await
                         {
-                            claim_retry_pending = true;
-                            schedule_drain_after(
-                                context.command_tx.clone(),
-                                context.config.claim_error_backoff(),
-                            );
-                        }
-                    }
-                    SchedulerCommand::RetryDrain => {
-                        claim_retry_pending = false;
-                        if drain_queued_runs(
-                            &context,
-                            None,
-                            &mut executor_tasks,
-                        ).await {
-                            claim_retry_pending = true;
-                            schedule_drain_after(
-                                context.command_tx.clone(),
+                            arm_retry(
+                                &mut retry_at,
+                                retry_timer.as_mut(),
                                 context.config.claim_error_backoff(),
                             );
                         }
@@ -333,22 +314,41 @@ async fn run_scheduler_loop(
                     SchedulerCommand::Shutdown => {
                         executor_tasks.shutdown().await;
                         break;
-                    },
+                    }
+                }
+            }
+            _ = &mut retry_timer, if retry_at.is_some() => {
+                // Scheduled backoff retry after a claim error. Re-drain and re-arm
+                // only if the claim errors again; a clean drain clears the retry.
+                // This single in-loop retry replaces the detached, losable
+                // RetryDrain timer, so a runtime/shutdown race can no longer strand
+                // the queue.
+                if drain_queued_runs(&context, None, &mut executor_tasks).await {
+                    arm_retry(
+                        &mut retry_at,
+                        retry_timer.as_mut(),
+                        context.config.claim_error_backoff(),
+                    );
+                } else {
+                    retry_at = None;
                 }
             }
             _ = poll_tick.tick() => {
-                if !claim_retry_pending
-                    && drain_queued_runs(
-                        &context,
-                        None,
-                        &mut executor_tasks,
-                    ).await
-                {
-                    claim_retry_pending = true;
-                    schedule_drain_after(
-                        context.command_tx.clone(),
-                        context.config.claim_error_backoff(),
-                    );
+                // Unconditional self-healing backstop: drain regardless of any
+                // pending retry. The retry timer cannot be lost, but the poll tick
+                // still guarantees forward progress if anything ever leaves a stale
+                // deadline. On a claim error arm a retry only if none is pending
+                // (keep the earlier deadline); a clean drain clears any pending one.
+                if drain_queued_runs(&context, None, &mut executor_tasks).await {
+                    if retry_at.is_none() {
+                        arm_retry(
+                            &mut retry_at,
+                            retry_timer.as_mut(),
+                            context.config.claim_error_backoff(),
+                        );
+                    }
+                } else {
+                    retry_at = None;
                 }
             }
             Some(result) = executor_tasks.join_next(), if !executor_tasks.is_empty() => {
@@ -361,6 +361,17 @@ async fn run_scheduler_loop(
             }
         }
     }
+}
+
+/// Arm (or re-arm) the single claim-error retry: compute the next deadline from
+/// `backoff`, reset the pinned timer to it, and record it in `retry_at`. Keeping
+/// the timer and `retry_at` in lockstep here is what lets the `select!` branch
+/// guard (`if retry_at.is_some()`) gate a reused `Sleep` without rebuilding the
+/// timer future every loop iteration.
+fn arm_retry(retry_at: &mut Option<Instant>, retry_timer: Pin<&mut Sleep>, backoff: Duration) {
+    let deadline = Instant::now() + backoff;
+    retry_timer.reset(deadline);
+    *retry_at = Some(deadline);
 }
 
 async fn drain_queued_runs(
@@ -555,12 +566,4 @@ async fn recover_expired_leases(transitions: Arc<dyn TurnRunTransitionPort>) {
     if let Err(error) = result {
         debug!(error = %error, "turn run scheduler lease recovery failed");
     }
-}
-
-fn schedule_drain_after(command_tx: mpsc::Sender<SchedulerCommand>, delay: Duration) {
-    // Best-effort timer: if shutdown closes the command channel first, send fails harmlessly.
-    tokio::spawn(async move {
-        sleep(delay).await;
-        let _ = command_tx.send(SchedulerCommand::RetryDrain).await;
-    });
 }
