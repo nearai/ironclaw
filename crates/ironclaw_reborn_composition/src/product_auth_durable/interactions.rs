@@ -284,7 +284,7 @@ where
         secret: SecretString,
     ) -> Result<(), AuthProductError> {
         self.secret_store
-            .put(resource.clone(), access_secret, secret)
+            .put(resource.clone(), access_secret, secret, None)
             .await
             .map(|_| ())
             .map_err(|_| AuthProductError::BackendUnavailable)

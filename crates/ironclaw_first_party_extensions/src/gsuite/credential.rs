@@ -4,7 +4,7 @@ use ironclaw_auth::{
     AuthProductError, AuthProductScope, AuthProviderId, AuthSurface, CredentialAccount,
     CredentialAccountId, CredentialAccountRecordSource, CredentialAccountService,
     CredentialAccountStatus, CredentialRecoveryProjection, CredentialRefreshRequest,
-    GOOGLE_PROVIDER_ID, ProviderScope, select_latest_duplicate_user_reusable_account,
+    GOOGLE_PROVIDER_ID, ProviderScope,
 };
 use ironclaw_host_api::{ExtensionId, ResourceScope, SecretHandle};
 use thiserror::Error;
@@ -267,8 +267,7 @@ impl GoogleCredentialResolver {
                 missing_scopes: required_scopes.to_vec(),
             }),
             [account] => Ok(account.clone()),
-            _ => select_latest_duplicate_user_reusable_account(&scoped)
-                .ok_or(AuthProductError::AccountSelectionRequired.into()),
+            _ => Err(AuthProductError::AccountSelectionRequired.into()),
         }
     }
 

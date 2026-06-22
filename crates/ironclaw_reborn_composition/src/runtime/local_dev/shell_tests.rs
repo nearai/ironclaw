@@ -97,6 +97,7 @@ async fn local_dev_yolo_shell_translates_workspace_workdir_without_scoped_mounts
         result_writer,
         milestone_sink: Arc::new(InMemoryLoopHostMilestoneSink::default()),
         skill_activation_source: None,
+        project_service: Arc::clone(&local_runtime.project_service),
         trajectory_observer: None,
         outbound_preferences_facade: None,
         outbound_delivery_target_set_requires_approval: false,
@@ -143,14 +144,12 @@ async fn local_dev_yolo_shell_translates_workspace_workdir_without_scoped_mounts
         .expect("result output");
     assert_eq!(output["exit_code"], serde_json::json!(0));
     assert_eq!(output["success"], serde_json::json!(true));
+    // `$PWD` is the real host workspace path at exec time, but the host-runtime
+    // reverse output rewrite virtualizes it back to the `/workspace` alias before
+    // the result reaches the model — so the caller only ever sees the alias path,
+    // never the host layout.
     assert_eq!(
         output["output"],
-        serde_json::json!(format!(
-            "local-dev-shell-ok:{}",
-            shell_workdir
-                .canonicalize()
-                .expect("canonical shell workdir")
-                .display()
-        ))
+        serde_json::json!("local-dev-shell-ok:/workspace/qa-coding-smoke")
     );
 }

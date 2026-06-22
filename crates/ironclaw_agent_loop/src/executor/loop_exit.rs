@@ -1,8 +1,8 @@
 use async_trait::async_trait;
 use ironclaw_turns::{
-    LoopExit, LoopMessageRef,
+    LoopExit, LoopFailureKind, LoopMessageRef,
     run_profile::{
-        AssistantReply, FinalizeAssistantMessage, LoopInlineMessage, LoopInlineMessageRole,
+        FinalizeAssistantMessage, LoopInlineMessage, LoopInlineMessageRole,
         LoopModelCapabilityView, LoopModelRequest, LoopSafeSummary, ParentLoopOutput,
     },
 };
@@ -130,7 +130,8 @@ pub(super) async fn try_final_answer_nudge(
                     Ok(Some(reply_ref))
                 }
                 // Admission rejected it (empty / artifact) — give up; the caller
-                // falls back to its existing (failed/canned) exit.
+                // falls back to its existing exit (typed no-progress failure, or
+                // the budget path's fail-closed terminal).
                 ReplyAdmissionOutcome::RejectFinal { .. } => Ok(None),
             }
         }
@@ -148,12 +149,6 @@ fn estimate_output_tokens(content: &str) -> u32 {
     let estimated = content.len().div_ceil(4).max(1);
     estimated.min(u32::MAX as usize) as u32
 }
-
-const NO_PROGRESS_FALLBACK_REPLY: &str = concat!(
-    "I stopped because I was repeating the same step without making progress. ",
-    "The recent tool activity shows the repeated calls, results, and any failure summaries. ",
-    "Try again with a narrower request, or fix the failed tool/resource and rerun it."
-);
 
 #[derive(Debug, Default, Clone, Copy)]
 pub(crate) struct ExitStage;
@@ -192,18 +187,37 @@ impl ExitStage {
             }
             StopKind::NoProgressDetected => {
                 let mut state = state;
-                // Prefer a real synthesized answer (nudge); fall back to the
-                // canned no-progress reply when nudges are disabled/capped or the
-                // model still won't answer.
-                let reply_ref = match try_final_answer_nudge(ctx, &mut state).await? {
-                    Some(reply_ref) => reply_ref,
-                    None => finalize_no_progress_fallback(ctx).await?,
+                // A no-progress stop is a runtime *failure*, not a conversational
+                // completion. Where the driver-specific nudge is enabled and the
+                // model synthesizes a real closing answer, complete with that
+                // answer (preserves the #4837 final-answer-nudge benchmark path,
+                // bit-for-bit). Otherwise finalize a typed no-progress failure that
+                // the product layer renders deterministically — never a canned
+                // "I stopped" reply finalized as a successful turn.
+                // The nudge owns its own output-token accounting (it pushes to
+                // `recent_output_token_counts` on AcceptFinal); the caller only
+                // owns `assistant_refs`. Keep the checkpoint write single and
+                // shared across both outcomes.
+                let completed = match try_final_answer_nudge(ctx, &mut state).await? {
+                    Some(reply_ref) => {
+                        state.assistant_refs.push(reply_ref);
+                        true
+                    }
+                    None => false,
                 };
-                state.assistant_refs.push(reply_ref);
                 let checked = CheckpointStage
                     .write(ctx, state, CheckpointKind::Final)
                     .await?;
-                completed_exit(ctx.host, checked.state, Some(checked.checkpoint_id))
+                if completed {
+                    completed_exit(ctx.host, checked.state, Some(checked.checkpoint_id))
+                } else {
+                    failed_exit(
+                        ctx.host,
+                        checked.state,
+                        LoopFailureKind::NoProgressDetected,
+                        Some(checked.checkpoint_id),
+                    )
+                }
             }
             StopKind::Aborted(failure_kind) => {
                 let checked = CheckpointStage
@@ -218,21 +232,4 @@ impl ExitStage {
             }
         }
     }
-}
-
-async fn finalize_no_progress_fallback(
-    ctx: StageContext<'_>,
-) -> Result<LoopMessageRef, AgentLoopExecutorError> {
-    let reply_ref = ctx
-        .host
-        .finalize_assistant_message(FinalizeAssistantMessage {
-            reply: AssistantReply {
-                content: NO_PROGRESS_FALLBACK_REPLY.to_string(),
-            },
-        })
-        .await
-        .map_err(|_| AgentLoopExecutorError::HostUnavailable {
-            stage: super::HostStage::Transcript,
-        })?;
-    Ok(reply_ref)
 }

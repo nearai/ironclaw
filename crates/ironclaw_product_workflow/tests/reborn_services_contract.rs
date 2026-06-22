@@ -36,29 +36,35 @@ use ironclaw_product_workflow::{
     LlmConfigServiceError, LlmConfigSnapshot, LlmModelsResult, LlmProbeRequest, LlmProbeResult,
     LlmProviderView, NearAiLoginRequest, NearAiLoginStart, NearAiWalletLoginRequest,
     NearAiWalletLoginResult, OperatorLogsService, OperatorServiceLifecycleService,
-    OutboundPreferencesProductFacade, ProductAgentBoundCaller, ProductWorkflowError,
-    RebornAttachmentRequest, RebornAutomationInfo, RebornAutomationRecentRunInfo,
-    RebornAutomationRecentRunStatus, RebornAutomationRunStatus, RebornAutomationSource,
-    RebornAutomationState, RebornChannelConnectAction, RebornChannelConnectStrategy,
-    RebornConnectableChannelInfo, RebornDeleteThreadRequest, RebornExtensionOnboardingState,
-    RebornGetRunStateRequest, RebornLogLevel, RebornLogQueryRequest, RebornLogQueryResponse,
+    OutboundPreferencesProductFacade, ProductAgentBoundCaller, ProductWorkflowError, ProjectCaller,
+    ProjectService, ProjectServiceError, RebornAddMemberRequest, RebornAttachmentRequest,
+    RebornAutomationInfo, RebornAutomationRecentRunInfo, RebornAutomationRecentRunStatus,
+    RebornAutomationRunStatus, RebornAutomationSource, RebornAutomationState,
+    RebornChannelConnectAction, RebornChannelConnectStrategy, RebornConnectableChannelInfo,
+    RebornCreateProjectRequest, RebornDeleteProjectRequest, RebornDeleteThreadRequest,
+    RebornExtensionOnboardingState, RebornGetProjectRequest, RebornGetRunStateRequest,
+    RebornListMembersRequest, RebornListMembersResponse, RebornListProjectsRequest,
+    RebornListProjectsResponse, RebornLogLevel, RebornLogQueryRequest, RebornLogQueryResponse,
     RebornOperatorConfigDiagnosticSeverity, RebornOperatorLogsQuery, RebornOperatorSetupRequest,
     RebornOperatorSetupStatus, RebornOperatorSurfaceStatus, RebornOutboundDeliveryModality,
     RebornOutboundDeliveryTargetCapabilities, RebornOutboundDeliveryTargetDescription,
     RebornOutboundDeliveryTargetId, RebornOutboundDeliveryTargetListResponse,
     RebornOutboundDeliveryTargetOption, RebornOutboundDeliveryTargetStatus,
-    RebornOutboundDeliveryTargetSummary, RebornOutboundPreferencesResponse,
-    RebornResolveGateResponse, RebornServiceLifecycleAction, RebornServiceLifecycleRequest,
-    RebornServiceLifecycleResponse, RebornServiceLifecycleState, RebornServices, RebornServicesApi,
-    RebornServicesError, RebornServicesErrorCode, RebornServicesErrorKind,
-    RebornSetOutboundPreferencesRequest, RebornStreamEventsRequest, RebornSubmitTurnResponse,
-    RebornTimelineRequest, ResolveApprovalInteractionRequest, ResolveApprovalInteractionResponse,
-    ResolveAuthInteractionRequest, ResolveAuthInteractionResponse, SetActiveLlmRequest,
-    StaticConnectableChannelsProductFacade, TriggerRunThreadScope, UpsertLlmProviderRequest,
-    WebUiAuthenticatedCaller, WebUiCancelRunRequest, WebUiCreateThreadRequest,
-    WebUiInboundValidationCode, WebUiListAutomationsRequest, WebUiListThreadsRequest,
-    WebUiResolveGateRequest, WebUiSendMessageRequest, WebUiSetupExtensionRequest,
-    approval_gate_ref, automation_trigger_thread_metadata_json,
+    RebornOutboundDeliveryTargetSummary, RebornOutboundPreferencesResponse, RebornProjectInfo,
+    RebornProjectMemberInfo, RebornProjectResponse, RebornProjectRole, RebornProjectState,
+    RebornRemoveMemberRequest, RebornResolveGateResponse, RebornServiceLifecycleAction,
+    RebornServiceLifecycleRequest, RebornServiceLifecycleResponse, RebornServiceLifecycleState,
+    RebornServices, RebornServicesApi, RebornServicesError, RebornServicesErrorCode,
+    RebornServicesErrorKind, RebornSetOutboundPreferencesRequest, RebornStreamEventsRequest,
+    RebornSubmitTurnResponse, RebornTimelineRequest, RebornUpdateMemberRoleRequest,
+    RebornUpdateProjectRequest, ResolveApprovalInteractionRequest,
+    ResolveApprovalInteractionResponse, ResolveAuthInteractionRequest,
+    ResolveAuthInteractionResponse, SetActiveLlmRequest, StaticConnectableChannelsProductFacade,
+    TriggerRunThreadScope, UpsertLlmProviderRequest, WebUiAuthenticatedCaller,
+    WebUiCancelRunRequest, WebUiCreateThreadRequest, WebUiInboundValidationCode,
+    WebUiListAutomationsRequest, WebUiListThreadsRequest, WebUiResolveGateRequest,
+    WebUiSendMessageRequest, WebUiSetupExtensionRequest, approval_gate_ref,
+    automation_trigger_thread_metadata_json,
 };
 use ironclaw_threads::{
     AcceptInboundMessageRequest, AcceptedInboundMessage, AcceptedInboundMessageReplay,
@@ -86,6 +92,16 @@ use tokio::sync::{Notify, oneshot};
 
 fn caller() -> WebUiAuthenticatedCaller {
     caller_for_user("user-alpha")
+}
+
+/// Wait until the wall clock is strictly past `floor`, so the next thread
+/// created/used gets a later activity timestamp — deterministic regardless
+/// of clock resolution. Uses async sleep to avoid blocking the test runtime
+/// (`std::thread::sleep` would block the tokio executor).
+async fn wait_until_after(floor: chrono::DateTime<Utc>) {
+    while Utc::now() <= floor {
+        tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+    }
 }
 
 fn caller_for_user(user_id: &str) -> WebUiAuthenticatedCaller {
@@ -146,6 +162,8 @@ fn fake_thread_history(owner: &WebUiAuthenticatedCaller, thread_id: &str) -> Thr
             title: Some("M2 facade contract thread".to_string()),
             metadata_json: None,
             goal: None,
+            created_at: None,
+            updated_at: None,
         },
         messages: vec![ThreadMessageRecord {
             message_id: ThreadMessageId::new(),
@@ -458,7 +476,7 @@ impl TurnCoordinator for FakeTurnCoordinator {
             failure: None,
             event_cursor: EventCursor(17),
             product_context: None,
-            auth_resume_disposition: None,
+            resume_disposition: None,
         })
     }
 }
@@ -554,7 +572,7 @@ impl TurnCoordinator for BlockingSubmitCoordinator {
             failure: None,
             event_cursor: EventCursor(29),
             product_context: None,
-            auth_resume_disposition: None,
+            resume_disposition: None,
         })
     }
 }
@@ -600,12 +618,10 @@ impl ApprovalInteractionService for RecordingApprovalInteractionService {
                 })
             }
             ApprovalInteractionDecision::Deny => {
-                ResolveApprovalInteractionResponse::Denied(CancelRunResponse {
+                ResolveApprovalInteractionResponse::Resumed(ResumeTurnResponse {
                     run_id,
-                    status: TurnStatus::Cancelled,
+                    status: TurnStatus::Queued,
                     event_cursor: EventCursor(23),
-                    already_terminal: false,
-                    actor: None,
                 })
             }
         })
@@ -813,6 +829,7 @@ struct ListAutomationCall {
     caller: ProductAgentBoundCaller,
     limit: usize,
     run_limit: usize,
+    include_completed: bool,
 }
 
 #[derive(Default)]
@@ -840,6 +857,7 @@ impl AutomationProductFacade for RecordingAutomationFacade {
                 caller,
                 limit: request.limit,
                 run_limit: request.run_limit,
+                include_completed: request.include_completed,
             });
         Ok(vec![automation_info(
             "trigger-listed",
@@ -1560,6 +1578,8 @@ impl SessionThreadService for ScriptedThreadService {
                     title: None,
                     metadata_json: None,
                     goal: None,
+                    created_at: None,
+                    updated_at: None,
                 },
                 messages: Vec::new(),
                 summary_artifacts: Vec::new(),
@@ -1871,6 +1891,207 @@ async fn create_thread_metadata_is_serialized_json() {
     assert_eq!(
         metadata["client_action_id"].as_str(),
         Some(client_action_id.as_str())
+    );
+}
+
+/// Project service that authorizes exactly one project id through `get_project`
+/// and fails everything else, so create-thread project authorization can be
+/// driven from the caller without a real repository.
+#[derive(Debug)]
+struct AuthorizingProjectService {
+    allowed_project_id: String,
+}
+
+#[async_trait]
+impl ProjectService for AuthorizingProjectService {
+    async fn list_projects(
+        &self,
+        _caller: ProjectCaller,
+        _request: RebornListProjectsRequest,
+    ) -> Result<RebornListProjectsResponse, ProjectServiceError> {
+        Err(ProjectServiceError::Internal)
+    }
+
+    async fn create_project(
+        &self,
+        _caller: ProjectCaller,
+        _request: RebornCreateProjectRequest,
+    ) -> Result<RebornProjectResponse, ProjectServiceError> {
+        Err(ProjectServiceError::Internal)
+    }
+
+    async fn get_project(
+        &self,
+        _caller: ProjectCaller,
+        request: RebornGetProjectRequest,
+    ) -> Result<RebornProjectResponse, ProjectServiceError> {
+        if request.project_id == self.allowed_project_id {
+            Ok(RebornProjectResponse {
+                project: RebornProjectInfo {
+                    project_id: self.allowed_project_id.clone(),
+                    name: "Authorized".to_string(),
+                    description: String::new(),
+                    icon: None,
+                    color: None,
+                    metadata: serde_json::json!({}),
+                    state: RebornProjectState::Active,
+                    role: RebornProjectRole::Owner,
+                    created_at: "1970-01-01T00:00:00Z".parse().expect("created at"),
+                    updated_at: "1970-01-01T00:00:00Z".parse().expect("updated at"),
+                },
+            })
+        } else {
+            // Mirrors the real service: no access (or unknown) collapses to NotFound.
+            Err(ProjectServiceError::NotFound)
+        }
+    }
+
+    async fn update_project(
+        &self,
+        _caller: ProjectCaller,
+        _request: RebornUpdateProjectRequest,
+    ) -> Result<RebornProjectResponse, ProjectServiceError> {
+        Err(ProjectServiceError::Internal)
+    }
+
+    async fn delete_project(
+        &self,
+        _caller: ProjectCaller,
+        _request: RebornDeleteProjectRequest,
+    ) -> Result<(), ProjectServiceError> {
+        Err(ProjectServiceError::Internal)
+    }
+
+    async fn list_members(
+        &self,
+        _caller: ProjectCaller,
+        _request: RebornListMembersRequest,
+    ) -> Result<RebornListMembersResponse, ProjectServiceError> {
+        Err(ProjectServiceError::Internal)
+    }
+
+    async fn add_member(
+        &self,
+        _caller: ProjectCaller,
+        _request: RebornAddMemberRequest,
+    ) -> Result<RebornProjectMemberInfo, ProjectServiceError> {
+        Err(ProjectServiceError::Internal)
+    }
+
+    async fn update_member_role(
+        &self,
+        _caller: ProjectCaller,
+        _request: RebornUpdateMemberRoleRequest,
+    ) -> Result<RebornProjectMemberInfo, ProjectServiceError> {
+        Err(ProjectServiceError::Internal)
+    }
+
+    async fn remove_member(
+        &self,
+        _caller: ProjectCaller,
+        _request: RebornRemoveMemberRequest,
+    ) -> Result<(), ProjectServiceError> {
+        Err(ProjectServiceError::Internal)
+    }
+}
+
+#[tokio::test]
+async fn create_thread_scopes_to_authorized_project() {
+    let thread_service = Arc::new(InMemorySessionThreadService::default());
+    let services = RebornServices::new(
+        thread_service.clone(),
+        Arc::new(FakeTurnCoordinator::default()),
+    )
+    .with_project_service(Arc::new(AuthorizingProjectService {
+        allowed_project_id: "project-scoped".to_string(),
+    }));
+
+    // Caller's default scope is project-alpha; the request proposes a different,
+    // authorized project, which must become the new thread's scope.
+    services
+        .create_thread(
+            caller_with_project(Some("project-alpha")),
+            serde_json::from_value::<WebUiCreateThreadRequest>(json!({
+                "client_action_id": "create-scoped",
+                "requested_thread_id": "thread-scoped",
+                "project_id": "project-scoped"
+            }))
+            .expect("request"),
+        )
+        .await
+        .expect("authorized project create succeeds");
+
+    let record = thread_service
+        .read_thread_by_id(ThreadId::new("thread-scoped").expect("thread id"))
+        .await
+        .expect("created thread exists");
+    assert_eq!(
+        record.scope.project_id.as_ref().map(|id| id.as_str()),
+        Some("project-scoped"),
+        "new thread must adopt the authorized project scope"
+    );
+}
+
+#[tokio::test]
+async fn create_thread_rejects_unauthorized_project() {
+    let services = RebornServices::new(
+        Arc::new(InMemorySessionThreadService::default()),
+        Arc::new(FakeTurnCoordinator::default()),
+    )
+    .with_project_service(Arc::new(AuthorizingProjectService {
+        allowed_project_id: "project-allowed".to_string(),
+    }));
+
+    let err = services
+        .create_thread(
+            caller_with_project(Some("project-alpha")),
+            serde_json::from_value::<WebUiCreateThreadRequest>(json!({
+                "client_action_id": "create-denied",
+                "requested_thread_id": "thread-denied",
+                "project_id": "project-forbidden"
+            }))
+            .expect("request"),
+        )
+        .await
+        .expect_err("a project the caller cannot access must be rejected");
+
+    // Fail closed on the deny→not-found contract: a project the caller can't
+    // access collapses to NotFound/404 (no existence oracle), not some
+    // unrelated internal error that `expect_err` alone would also accept.
+    assert_eq!(err.code, RebornServicesErrorCode::NotFound);
+    assert_eq!(err.status_code, 404);
+}
+
+#[tokio::test]
+async fn create_thread_without_proposed_project_keeps_caller_scope() {
+    let thread_service = Arc::new(InMemorySessionThreadService::default());
+    let services = RebornServices::new(
+        thread_service.clone(),
+        Arc::new(FakeTurnCoordinator::default()),
+    );
+
+    // No proposed project (and no project service wired): behavior is unchanged —
+    // the thread keeps the caller's default project scope.
+    services
+        .create_thread(
+            caller_with_project(Some("project-alpha")),
+            serde_json::from_value::<WebUiCreateThreadRequest>(json!({
+                "client_action_id": "create-default",
+                "requested_thread_id": "thread-default"
+            }))
+            .expect("request"),
+        )
+        .await
+        .expect("default create succeeds");
+
+    let record = thread_service
+        .read_thread_by_id(ThreadId::new("thread-default").expect("thread id"))
+        .await
+        .expect("created thread exists");
+    assert_eq!(
+        record.scope.project_id.as_ref().map(|id| id.as_str()),
+        Some("project-alpha"),
+        "without a proposed project the caller's scope is unchanged"
     );
 }
 
@@ -3809,7 +4030,7 @@ async fn approval_gate_denial_uses_approval_interaction_service_and_returns_canc
         .await
         .expect("approval gate denial succeeds");
 
-    assert!(matches!(response, RebornResolveGateResponse::Cancelled(_)));
+    assert!(matches!(response, RebornResolveGateResponse::Resumed(_)));
     assert_eq!(approval_interactions.resolution_count(), 1);
     assert_eq!(coordinator.cancellation_count(), 0);
     assert_eq!(
@@ -4488,6 +4709,7 @@ async fn list_automation_dispatches_through_product_facade() {
             WebUiListAutomationsRequest {
                 limit: Some(10),
                 run_limit: None,
+                ..Default::default()
             },
         )
         .await
@@ -5236,6 +5458,7 @@ async fn list_automations_rejects_missing_agent_id() {
             WebUiListAutomationsRequest {
                 limit: Some(10),
                 run_limit: None,
+                ..Default::default()
             },
         )
         .await
@@ -5261,6 +5484,7 @@ async fn list_automations_clamps_oversize_limit_before_product_facade() {
             WebUiListAutomationsRequest {
                 limit: Some(u32::MAX),
                 run_limit: None,
+                ..Default::default()
             },
         )
         .await
@@ -5290,6 +5514,7 @@ async fn list_automations_clamps_zero_limit_before_product_facade() {
             WebUiListAutomationsRequest {
                 limit: Some(0),
                 run_limit: None,
+                ..Default::default()
             },
         )
         .await
@@ -5318,6 +5543,7 @@ async fn list_automations_uses_default_limit_when_omitted() {
             WebUiListAutomationsRequest {
                 limit: None,
                 run_limit: None,
+                ..Default::default()
             },
         )
         .await
@@ -5347,6 +5573,7 @@ async fn list_automations_clamps_oversize_run_limit_before_product_facade() {
             WebUiListAutomationsRequest {
                 limit: None,
                 run_limit: Some(u32::MAX),
+                ..Default::default()
             },
         )
         .await
@@ -5376,6 +5603,7 @@ async fn list_automations_allows_zero_run_limit_before_product_facade() {
             WebUiListAutomationsRequest {
                 limit: None,
                 run_limit: Some(0),
+                ..Default::default()
             },
         )
         .await
@@ -5386,6 +5614,62 @@ async fn list_automations_allows_zero_run_limit_before_product_facade() {
     assert_eq!(
         list_calls[0].run_limit, 0,
         "explicit zero automation run history limit must disable embedded run history"
+    );
+}
+
+#[tokio::test]
+async fn list_automations_forwards_include_completed_true_to_product_facade() {
+    let automation_facade = Arc::new(RecordingAutomationFacade::default());
+    let services = RebornServices::new(
+        Arc::new(InMemorySessionThreadService::default()),
+        Arc::new(FakeTurnCoordinator::default()),
+    )
+    .with_automation_product_facade(automation_facade.clone());
+
+    services
+        .list_automations(
+            caller(),
+            WebUiListAutomationsRequest {
+                include_completed: true,
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("list automations");
+
+    let list_calls = automation_facade.list_calls();
+    assert_eq!(list_calls.len(), 1);
+    assert!(
+        list_calls[0].include_completed,
+        "include_completed=true must be forwarded to the product facade unchanged"
+    );
+}
+
+#[tokio::test]
+async fn list_automations_forwards_include_completed_false_to_product_facade() {
+    let automation_facade = Arc::new(RecordingAutomationFacade::default());
+    let services = RebornServices::new(
+        Arc::new(InMemorySessionThreadService::default()),
+        Arc::new(FakeTurnCoordinator::default()),
+    )
+    .with_automation_product_facade(automation_facade.clone());
+
+    services
+        .list_automations(
+            caller(),
+            WebUiListAutomationsRequest {
+                include_completed: false,
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("list automations");
+
+    let list_calls = automation_facade.list_calls();
+    assert_eq!(list_calls.len(), 1);
+    assert!(
+        !list_calls[0].include_completed,
+        "include_completed=false must be forwarded to the product facade unchanged"
     );
 }
 
@@ -8201,6 +8485,8 @@ async fn list_threads_breaks_out_when_cursor_does_not_advance_for_automation_thr
             "trigger-scheduled-summary",
         )),
         goal: None,
+        created_at: None,
+        updated_at: None,
     };
     let stalled_cursor = "cursor-stalled".to_string();
     let thread_service = Arc::new(ScriptedThreadService::list_pages(vec![
@@ -8264,6 +8550,8 @@ async fn list_threads_caps_filtered_pages_when_automation_threads_dominate() {
             "trigger-scheduled-summary",
         )),
         goal: None,
+        created_at: None,
+        updated_at: None,
     };
     let responses = (0..20)
         .map(|index| ListThreadsForScopeResponse {
@@ -8324,6 +8612,34 @@ async fn list_threads_skips_hidden_automation_threads_when_filling_page() {
     let second_visible_thread_id =
         ThreadId::new("thread-c-visible").expect("second visible thread id");
 
+    // Threads list newest-activity first, so create them oldest → newest:
+    // second visible, then first visible, then the automation thread last.
+    // That yields a candidate order of [automation, first, second], so the
+    // facade has to skip the leading hidden automation thread while filling
+    // the first page — the behavior under test. Waiting past each stamp
+    // keeps the `created_at` order strict regardless of clock resolution.
+    let second = thread_service
+        .ensure_thread(EnsureThreadRequest {
+            scope: thread_scope_for(&caller),
+            thread_id: Some(second_visible_thread_id.clone()),
+            created_by_actor_id: caller.user_id.as_str().to_string(),
+            title: Some("Second visible chat".to_string()),
+            metadata_json: Some(json!({ "source": "webui" }).to_string()),
+        })
+        .await
+        .expect("second visible thread");
+    wait_until_after(second.updated_at.expect("activity stamp")).await;
+    let first = thread_service
+        .ensure_thread(EnsureThreadRequest {
+            scope: thread_scope_for(&caller),
+            thread_id: Some(first_visible_thread_id.clone()),
+            created_by_actor_id: caller.user_id.as_str().to_string(),
+            title: Some("First visible chat".to_string()),
+            metadata_json: Some(json!({ "source": "webui" }).to_string()),
+        })
+        .await
+        .expect("first visible thread");
+    wait_until_after(first.updated_at.expect("activity stamp")).await;
     thread_service
         .ensure_thread(EnsureThreadRequest {
             scope: thread_scope_for(&caller),
@@ -8336,26 +8652,6 @@ async fn list_threads_skips_hidden_automation_threads_when_filling_page() {
         })
         .await
         .expect("automation thread");
-    thread_service
-        .ensure_thread(EnsureThreadRequest {
-            scope: thread_scope_for(&caller),
-            thread_id: Some(first_visible_thread_id.clone()),
-            created_by_actor_id: caller.user_id.as_str().to_string(),
-            title: Some("First visible chat".to_string()),
-            metadata_json: Some(json!({ "source": "webui" }).to_string()),
-        })
-        .await
-        .expect("first visible thread");
-    thread_service
-        .ensure_thread(EnsureThreadRequest {
-            scope: thread_scope_for(&caller),
-            thread_id: Some(second_visible_thread_id.clone()),
-            created_by_actor_id: caller.user_id.as_str().to_string(),
-            title: Some("Second visible chat".to_string()),
-            metadata_json: Some(json!({ "source": "webui" }).to_string()),
-        })
-        .await
-        .expect("second visible thread");
 
     let first_page = services
         .list_threads(

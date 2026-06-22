@@ -1,6 +1,7 @@
 import { useQuery } from "@tanstack/react-query";
 import { React } from "../../../lib/html.js";
 import { listAutomations } from "../../../lib/api.js";
+import { useI18n } from "../../../lib/i18n.js";
 
 import {
   automationSummary,
@@ -10,21 +11,25 @@ import {
 const AUTOMATIONS_PAGE_LIMIT = 50;
 const AUTOMATION_RUNS_LIMIT = 25;
 
-export function useAutomations() {
+export function useAutomations(includeCompleted = false) {
+  const { t, lang } = useI18n();
   const query = useQuery({
-    queryKey: ["automations"],
+    queryKey: ["automations", { includeCompleted }],
     queryFn: () =>
       listAutomations({
         limit: AUTOMATIONS_PAGE_LIMIT,
         runLimit: AUTOMATION_RUNS_LIMIT,
+        includeCompleted,
       }),
     refetchInterval: 30000,
     refetchIntervalInBackground: false,
   });
 
+  // Schedule labels are localized in the presenter (`scheduleLabel`), so the
+  // memo must re-run when the active language changes, not just the data.
   const automations = React.useMemo(
-    () => normalizeAutomations(query.data),
-    [query.data]
+    () => normalizeAutomations(query.data, t, lang),
+    [query.data, t, lang]
   );
   const summary = React.useMemo(
     () => automationSummary(automations),

@@ -32,9 +32,8 @@ use ironclaw_reborn_composition::{
 };
 use ironclaw_triggers::{
     TRIGGER_TRUSTED_ADAPTER_INSTALLATION_ID, TRIGGER_TRUSTED_ADAPTER_KIND,
-    TRIGGER_TRUSTED_EXTERNAL_ACTOR_NAMESPACE, TriggerCompletionPolicy, TriggerId,
-    TriggerPollerWorkerConfig, TriggerRecord, TriggerRepository, TriggerRunStatus, TriggerSchedule,
-    TriggerSourceKind, TriggerState,
+    TRIGGER_TRUSTED_EXTERNAL_ACTOR_NAMESPACE, TriggerId, TriggerPollerWorkerConfig, TriggerRecord,
+    TriggerRepository, TriggerRunStatus, TriggerSchedule, TriggerSourceKind, TriggerState,
 };
 use ironclaw_trust::{AuthorityCeiling, EffectiveTrustClass, TrustDecision, TrustProvenance};
 use serde_json::{Value, json};
@@ -280,8 +279,9 @@ async fn trigger_poller_drives_trusted_ingress_for_due_scheduled_trigger() {
         project_id: None,
         name: "trigger-e2e-test".to_string(),
         source: TriggerSourceKind::Schedule,
-        schedule: TriggerSchedule::cron("* * * * *").expect("valid cron expression"),
-        completion_policy: TriggerCompletionPolicy::CompleteAfterFirstFire,
+        // One-shot: fires once, then becomes Completed via clear_active_fire.
+        schedule: TriggerSchedule::once(Utc::now() - chrono::Duration::seconds(120), "UTC")
+            .expect("valid once schedule"),
         prompt: TRIGGER_PROMPT.to_string(),
         state: TriggerState::Scheduled,
         next_run_at: Utc::now() - chrono::Duration::seconds(120),
@@ -334,14 +334,19 @@ async fn trigger_poller_drives_trusted_ingress_for_due_scheduled_trigger() {
     }
 
     // Wait for the settle writes (mark_fire_accepted sets last_fired_slot, last_run_at)
-    // to become visible. The first-pass loop breaks as soon as the claim+prompt are seen;
-    // the settle may still be in flight.
+    // and for clear_active_fire to run (which transitions state to Completed for
+    // CompleteAfterFirstFire triggers). The first-pass loop breaks as soon as the
+    // claim+prompt are seen; the settle may still be in flight.
     let final_record = wait_for_settled(
         &repo,
         &tenant_id,
         record.trigger_id,
         Duration::from_secs(5),
-        |r| r.last_fired_slot.is_some() && r.last_run_at.is_some(),
+        |r| {
+            r.last_fired_slot.is_some()
+                && r.last_run_at.is_some()
+                && r.state == TriggerState::Completed
+        },
     )
     .await;
 
@@ -360,23 +365,23 @@ async fn trigger_poller_drives_trusted_ingress_for_due_scheduled_trigger() {
         "LLM gateway never received a request containing the trigger prompt within 15s \
          — captured_messages: {captured_contents:?}"
     );
-    // CompleteAfterFirstFire: the settle write (mark_fire_accepted) records last_fired_slot
-    // and last_run_at. `state` transitions to `Completed` only when the terminal-failure
-    // path runs (`mark_fire_terminally_failed`); the policy field is currently stored but
-    // never consulted by `mark_fire_accepted` — see issue #4420 for the production gap.
-    // Once that is fixed, tighten this to `assert_eq!(state, TriggerState::Completed, ...)`.
     assert!(
         final_record.last_fired_slot.is_some(),
-        "CompleteAfterFirstFire policy: last_fired_slot should be set after fire — record: {final_record:?}",
+        "once schedule: last_fired_slot should be set after fire — record: {final_record:?}",
     );
     assert!(
         final_record.last_run_at.is_some(),
-        "CompleteAfterFirstFire policy: last_run_at should be set after fire — record: {final_record:?}",
+        "once schedule: last_run_at should be set after fire — record: {final_record:?}",
     );
     assert_eq!(
         final_record.last_status,
         Some(TriggerRunStatus::Ok),
-        "CompleteAfterFirstFire policy: last_status should be Ok after fire — record: {final_record:?}",
+        "once schedule: last_status should be Ok after fire — record: {final_record:?}",
+    );
+    assert_eq!(
+        final_record.state,
+        TriggerState::Completed,
+        "once schedule: state must be Completed after clear_active_fire — record: {final_record:?}",
     );
 }
 
@@ -404,8 +409,7 @@ async fn builtin_trigger_create_pairs_creator_and_poller_submits_turn() {
         json!({
             "name": "trigger-e2e-created-by-tool",
             "prompt": TRIGGER_PROMPT,
-            "cron": "* * * * *",
-            "timezone": "UTC"
+            "schedule": { "kind": "cron", "expression": "* * * * *", "timezone": "UTC" }
         }),
     )
     .await;
@@ -414,7 +418,6 @@ async fn builtin_trigger_create_pairs_creator_and_poller_submits_turn() {
         json!("trigger-e2e-created-by-tool")
     );
     assert_eq!(created["trigger"]["state"], json!("scheduled"));
-    assert_eq!(created["trigger"]["completion_policy"], json!("recurring"));
     assert!(created["trigger"]["last_status"].is_null());
     assert!(created["trigger"]["prompt"].is_null());
     assert!(created["trigger"]["tenant_id"].is_null());
@@ -590,7 +593,6 @@ async fn trigger_poller_does_not_fire_trigger_with_future_next_run_at() {
         name: "trigger-e2e-future".to_string(),
         source: TriggerSourceKind::Schedule,
         schedule: TriggerSchedule::cron("* * * * *").expect("valid cron expression"),
-        completion_policy: TriggerCompletionPolicy::CompleteAfterFirstFire,
         prompt: TRIGGER_PROMPT.to_string(),
         state: TriggerState::Scheduled,
         next_run_at: Utc::now() + chrono::Duration::seconds(3600),
@@ -687,7 +689,11 @@ async fn trigger_poller_does_not_submit_turn_for_unpaired_actor() {
     let agent_id = AgentId::new(AGENT).expect("agent id");
     let trigger_id = TriggerId::new();
 
-    // Seed a past-due trigger.
+    // Seed a past-due one-shot trigger. Using Once ensures that even after a
+    // permanent-failure fire attempt the trigger stays Scheduled (fail-closed):
+    // schedule.next_slot_after(fire_slot) returns None for a past Once, so the
+    // poller does not advance or complete the trigger — it stays retryable.
+    let fire_at = Utc::now() - chrono::Duration::seconds(120);
     let record = TriggerRecord {
         trigger_id,
         tenant_id: tenant_id.clone(),
@@ -696,11 +702,10 @@ async fn trigger_poller_does_not_submit_turn_for_unpaired_actor() {
         project_id: None,
         name: "trigger-e2e-unpaired".to_string(),
         source: TriggerSourceKind::Schedule,
-        schedule: TriggerSchedule::cron("* * * * *").expect("valid cron expression"),
-        completion_policy: TriggerCompletionPolicy::CompleteAfterFirstFire,
+        schedule: TriggerSchedule::once(fire_at, "UTC").expect("valid once schedule"),
         prompt: TRIGGER_PROMPT.to_string(),
         state: TriggerState::Scheduled,
-        next_run_at: Utc::now() - chrono::Duration::seconds(120),
+        next_run_at: fire_at,
         last_run_at: None,
         last_fired_slot: None,
         last_status: None,
@@ -805,9 +810,8 @@ async fn trigger_poller_fires_recurring_trigger_and_leaves_it_scheduled() {
         project_id: None,
         name: "trigger-e2e-recurring".to_string(),
         source: TriggerSourceKind::Schedule,
-        // Every minute — already at MIN_FIRE_CADENCE.
+        // Every minute — recurring cron stays Scheduled after each fire.
         schedule: TriggerSchedule::cron("* * * * *").expect("valid cron expression"),
-        completion_policy: TriggerCompletionPolicy::Recurring,
         prompt: TRIGGER_PROMPT.to_string(),
         state: TriggerState::Scheduled,
         next_run_at: original_next_run_at,

@@ -9,6 +9,7 @@
 //! store is introduced.
 
 mod compaction;
+mod content_digest;
 mod context_budget;
 mod driver;
 mod host;
@@ -36,6 +37,7 @@ pub use compaction::{
     CompactionInitiator, LoopCompactionError, LoopCompactionMode, LoopCompactionOutcome,
     LoopCompactionPort, LoopCompactionRequest, LoopCompactionResponse, LoopSummaryArtifactId,
 };
+pub use content_digest::{ContentDigest, ContentDigestError, normalize_for_hash};
 pub use context_budget::PromptContextTokenBudget;
 pub use driver::{
     AgentLoopDriver, AgentLoopDriverDescriptor, AgentLoopDriverError, AgentLoopDriverResumeRequest,
@@ -115,7 +117,7 @@ pub use resolver::{
 pub use runtime_context::{
     CommunicationContextFetch, CommunicationContextProvider, CommunicationRuntimeContext,
     ConnectedChannelSummary, ConnectedChannelsState, DeliveryTargetState, DeliveryTargetSummary,
-    LoopRuntimeContext,
+    Locale, LocaleError, LoopRuntimeContext, UserProfileContext,
 };
 pub use skill_context::{
     InstalledSkillSnapshot, NoopSkillContextSource, SkillActivationState, SkillContextBudget,

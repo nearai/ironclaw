@@ -6,10 +6,12 @@
 //! submit/deferred handling behind that seam prevents adapter-specific binding
 //! code from owning the whole inbound turn pipeline.
 
+use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
+use ironclaw_attachments::InboundAttachment;
 #[cfg(test)]
 use ironclaw_host_api::UserId;
 use ironclaw_product_adapters::{
@@ -41,6 +43,7 @@ use crate::policy::{
     BeforeInboundPolicy, BeforeInboundPolicyOutcome, BeforeInboundPolicyRequest,
     NoopBeforeInboundPolicy,
 };
+use crate::reborn_services::InboundAttachmentLander;
 
 #[cfg(not(any(test, feature = "test-support")))]
 const BEFORE_INBOUND_POLICY_TIMEOUT: Duration = Duration::from_secs(5);
@@ -155,6 +158,34 @@ pub trait InboundTurnService: Send + Sync {
         envelope: &ProductInboundEnvelope,
         before_inbound_policy: &dyn BeforeInboundPolicy,
     ) -> Result<InboundUserMessageDispatch, ProductWorkflowError>;
+
+    /// Accept a user message together with host-staged inline attachment bytes.
+    ///
+    /// `attachments` carries decoded bytes a synchronous host surface (e.g. the
+    /// OpenAI-compatible API) received inline — never serialized into the
+    /// bytes-free [`ProductInboundEnvelope`]. The implementation lands them into
+    /// project storage before message acceptance.
+    ///
+    /// The default supports only the no-attachment case: with no attachments it
+    /// delegates to [`Self::accept_user_message_with_before_policy`], but a
+    /// non-empty `attachments` list is **rejected** rather than silently
+    /// dropped — an implementation that has no landing path must fail closed so
+    /// a user's files never vanish. Implementations with an inline-bytes surface
+    /// override this.
+    async fn accept_user_message_with_before_policy_and_attachments(
+        &self,
+        envelope: &ProductInboundEnvelope,
+        before_inbound_policy: &dyn BeforeInboundPolicy,
+        attachments: Vec<InboundAttachment>,
+    ) -> Result<InboundUserMessageDispatch, ProductWorkflowError> {
+        if !attachments.is_empty() {
+            return Err(ProductWorkflowError::TurnSubmissionRejected {
+                reason: "inbound attachments are not supported by this turn service".into(),
+            });
+        }
+        self.accept_user_message_with_before_policy(envelope, before_inbound_policy)
+            .await
+    }
 }
 
 /// Default implementation that composes a [`ConversationBindingService`] with a
@@ -163,6 +194,7 @@ pub struct DefaultInboundTurnService<B, T, C> {
     binding_service: B,
     thread_service: T,
     turn_coordinator: C,
+    inbound_attachments: Option<Arc<dyn InboundAttachmentLander>>,
 }
 
 impl<B, T, C> DefaultInboundTurnService<B, T, C>
@@ -176,7 +208,19 @@ where
             binding_service,
             thread_service,
             turn_coordinator,
+            inbound_attachments: None,
         }
+    }
+
+    /// Wire the port that lands inline attachment bytes into project storage
+    /// before message acceptance. Without it, a turn carrying attachments is
+    /// rejected rather than silently dropping the files.
+    pub fn with_inbound_attachments(
+        mut self,
+        inbound_attachments: Arc<dyn InboundAttachmentLander>,
+    ) -> Self {
+        self.inbound_attachments = Some(inbound_attachments);
+        self
     }
 }
 
@@ -217,6 +261,33 @@ where
         &self,
         envelope: &ProductInboundEnvelope,
         before_inbound_policy: &dyn BeforeInboundPolicy,
+    ) -> Result<InboundUserMessageDispatch, ProductWorkflowError> {
+        self.accept_with_before_policy_inner(envelope, before_inbound_policy, Vec::new())
+            .await
+    }
+
+    async fn accept_user_message_with_before_policy_and_attachments(
+        &self,
+        envelope: &ProductInboundEnvelope,
+        before_inbound_policy: &dyn BeforeInboundPolicy,
+        attachments: Vec<InboundAttachment>,
+    ) -> Result<InboundUserMessageDispatch, ProductWorkflowError> {
+        self.accept_with_before_policy_inner(envelope, before_inbound_policy, attachments)
+            .await
+    }
+}
+
+impl<B, T, C> DefaultInboundTurnService<B, T, C>
+where
+    B: ConversationBindingService,
+    T: SessionThreadService,
+    C: TurnCoordinator,
+{
+    async fn accept_with_before_policy_inner(
+        &self,
+        envelope: &ProductInboundEnvelope,
+        before_inbound_policy: &dyn BeforeInboundPolicy,
+        attachments: Vec<InboundAttachment>,
     ) -> Result<InboundUserMessageDispatch, ProductWorkflowError> {
         let ProductInboundPayload::UserMessage(payload) = envelope.payload() else {
             return Err(ProductWorkflowError::UnsupportedActionKind {
@@ -260,18 +331,11 @@ where
             }
         };
 
-        self.accept_prepared_user_message(prepared_for_turn, envelope_for_turn)
+        self.accept_prepared_user_message(prepared_for_turn, envelope_for_turn, attachments)
             .await
             .map(InboundUserMessageDispatch::Accepted)
     }
-}
 
-impl<B, T, C> DefaultInboundTurnService<B, T, C>
-where
-    B: ConversationBindingService,
-    T: SessionThreadService,
-    C: TurnCoordinator,
-{
     async fn prepare_user_message(
         &self,
         envelope: &ProductInboundEnvelope,
@@ -355,6 +419,7 @@ where
         &self,
         prepared: PreparedUserMessage,
         envelope: &ProductInboundEnvelope,
+        attachments: Vec<InboundAttachment>,
     ) -> Result<InboundTurnOutcome, ProductWorkflowError> {
         let ProductInboundPayload::UserMessage(payload) = envelope.payload() else {
             return Err(ProductWorkflowError::UnsupportedActionKind {
@@ -374,6 +439,31 @@ where
                 reason: format!("failed to ensure thread: {e}"),
             })?;
 
+        // Inline attachment bytes (e.g. images on the OpenAI-compatible
+        // surface) are landed into project storage through the same authority
+        // the agent's file tools resolve through, then carried on the message as
+        // refs — never as raw bytes through the bytes-free product envelope.
+        let content = if attachments.is_empty() {
+            MessageContent::text(payload.text.clone())
+        } else {
+            let lander = self.inbound_attachments.as_ref().ok_or_else(|| {
+                ProductWorkflowError::TurnSubmissionRejected {
+                    reason: "inbound attachment lander not configured".into(),
+                }
+            })?;
+            let refs = lander
+                .land(
+                    &prepared.thread_scope,
+                    envelope.external_event_id().as_str(),
+                    attachments,
+                )
+                .await
+                .map_err(|e| ProductWorkflowError::Transient {
+                    reason: format!("failed to land inbound attachments: {e}"),
+                })?;
+            MessageContent::with_attachments(payload.text.clone(), refs)
+        };
+
         let reply_target_binding_id = prepared.source_binding_id.clone();
         let accepted = self
             .thread_service
@@ -384,7 +474,7 @@ where
                 source_binding_id: Some(prepared.source_binding_id.clone()),
                 reply_target_binding_id: Some(reply_target_binding_id.clone()),
                 external_event_id: Some(envelope.external_event_id().as_str().to_string()),
-                content: MessageContent::text(payload.text.clone()),
+                content,
             })
             .await
             .map_err(|e| ProductWorkflowError::Transient {
@@ -1447,6 +1537,256 @@ mod tests {
 
     fn thread_id() -> ThreadId {
         ThreadId::new("thread:alpha").unwrap()
+    }
+
+    // --- Inline-attachment landing (vision, #4644) ---
+
+    use ironclaw_product_adapters::{
+        AuthRequirement, ExternalEventId, ParsedProductInbound, ProductInboundEnvelope,
+        ProductInboundPayload, ProtocolAuthEvidence, TrustedInboundContext,
+    };
+    use ironclaw_threads::{AttachmentKind, AttachmentRef, InMemorySessionThreadService};
+
+    use crate::binding::ResolveBindingRequest;
+    use crate::reborn_services::RebornServicesError;
+
+    struct LandingBindingStub;
+
+    #[async_trait]
+    impl ConversationBindingService for LandingBindingStub {
+        async fn resolve_binding(
+            &self,
+            _request: ResolveBindingRequest,
+        ) -> Result<ResolvedBinding, ProductWorkflowError> {
+            Ok(ResolvedBinding {
+                tenant_id: tenant_id(),
+                actor_user_id: user_id(),
+                subject_user_id: Some(user_id()),
+                thread_id: thread_id(),
+                agent_id: Some(AgentId::new("agent:alpha").unwrap()),
+                project_id: None,
+            })
+        }
+
+        async fn lookup_binding(
+            &self,
+            request: ResolveBindingRequest,
+        ) -> Result<ResolvedBinding, ProductWorkflowError> {
+            self.resolve_binding(request).await
+        }
+    }
+
+    #[derive(Default)]
+    struct CapturingLander {
+        landed: Mutex<Vec<InboundAttachment>>,
+    }
+
+    #[async_trait]
+    impl InboundAttachmentLander for CapturingLander {
+        async fn land(
+            &self,
+            _thread_scope: &ThreadScope,
+            message_id: &str,
+            attachments: Vec<InboundAttachment>,
+        ) -> Result<Vec<AttachmentRef>, RebornServicesError> {
+            let refs = attachments
+                .iter()
+                .enumerate()
+                .map(|(index, attachment)| AttachmentRef {
+                    id: attachment.id.clone(),
+                    kind: AttachmentKind::Image,
+                    mime_type: attachment.mime_type.clone(),
+                    filename: attachment.filename.clone(),
+                    size_bytes: Some(attachment.bytes.len() as u64),
+                    storage_key: Some(format!(
+                        "/workspace/attachments/test/{message_id}-{index}-img"
+                    )),
+                    extracted_text: None,
+                })
+                .collect();
+            self.landed.lock().unwrap().extend(attachments);
+            Ok(refs)
+        }
+    }
+
+    fn user_message_envelope() -> ProductInboundEnvelope {
+        let installation_id = AdapterInstallationId::new("install_alpha").expect("install");
+        let evidence = ProtocolAuthEvidence::test_verified(
+            AuthRequirement::SharedSecretHeader {
+                header_name: "X-Secret".into(),
+            },
+            installation_id.as_str(),
+        );
+        let context = TrustedInboundContext::from_verified_evidence(
+            ProductAdapterId::new("test_adapter").expect("adapter"),
+            installation_id,
+            received_at(),
+            &evidence,
+        )
+        .expect("trusted context");
+        let parsed = ParsedProductInbound::new(
+            ExternalEventId::new("evt:image-1").expect("event"),
+            ExternalActorRef::new("test", "user1", None::<String>).expect("actor"),
+            ExternalConversationRef::new(None, "conv1", None, None).expect("conversation"),
+            ProductInboundPayload::UserMessage(
+                UserMessagePayload::new("look at this", vec![], ProductTriggerReason::DirectChat)
+                    .expect("payload"),
+            ),
+        )
+        .expect("parsed inbound");
+        ProductInboundEnvelope::from_trusted_parse(context, parsed).expect("envelope")
+    }
+
+    /// Caller-level coverage for the native vision door: a user message carrying
+    /// host-staged inline bytes must route those bytes through the
+    /// [`InboundAttachmentLander`] before message acceptance (the bytes never
+    /// touch the bytes-free product envelope). Mirrors the WebChat landing path.
+    #[tokio::test]
+    async fn native_attachment_path_lands_inline_bytes_before_acceptance() {
+        let thread_service = std::sync::Arc::new(InMemorySessionThreadService::default());
+        let lander = std::sync::Arc::new(CapturingLander::default());
+        let service = DefaultInboundTurnService::new(
+            LandingBindingStub,
+            thread_service,
+            CapturingTurnCoordinator::default(),
+        )
+        .with_inbound_attachments(lander.clone());
+
+        let envelope = user_message_envelope();
+        let bytes = vec![0x89, b'P', b'N', b'G'];
+        let attachment = InboundAttachment {
+            id: "openai-image-0".to_string(),
+            mime_type: "image/png".to_string(),
+            filename: Some("image-0.png".to_string()),
+            bytes: bytes.clone(),
+        };
+
+        let dispatch = service
+            .accept_user_message_with_before_policy_and_attachments(
+                &envelope,
+                &NoopBeforeInboundPolicy,
+                vec![attachment],
+            )
+            .await
+            .expect("accepting a user message with inline attachments succeeds");
+
+        assert!(matches!(dispatch, InboundUserMessageDispatch::Accepted(_)));
+        let landed = lander.landed.lock().unwrap();
+        assert_eq!(landed.len(), 1, "the inline image is landed exactly once");
+        assert_eq!(landed[0].mime_type, "image/png");
+        assert_eq!(landed[0].bytes, bytes);
+    }
+
+    /// Without a lander wired, a user message carrying inline bytes must fail
+    /// closed (rejected), never silently dropping the attachment.
+    #[tokio::test]
+    async fn native_attachment_path_without_lander_fails_closed() {
+        let thread_service = std::sync::Arc::new(InMemorySessionThreadService::default());
+        let service = DefaultInboundTurnService::new(
+            LandingBindingStub,
+            thread_service,
+            CapturingTurnCoordinator::default(),
+        );
+
+        let envelope = user_message_envelope();
+        let attachment = InboundAttachment {
+            id: "openai-image-0".to_string(),
+            mime_type: "image/png".to_string(),
+            filename: Some("image-0.png".to_string()),
+            bytes: vec![0x89, b'P', b'N', b'G'],
+        };
+
+        let result = service
+            .accept_user_message_with_before_policy_and_attachments(
+                &envelope,
+                &NoopBeforeInboundPolicy,
+                vec![attachment],
+            )
+            .await;
+
+        assert!(
+            matches!(
+                result,
+                Err(ProductWorkflowError::TurnSubmissionRejected { .. })
+            ),
+            "a missing lander must reject the turn, never silently drop the attachment"
+        );
+    }
+
+    /// A turn service that does not override the attachments method, exercising
+    /// the trait default. Its `accept_user_message_with_before_policy` returns a
+    /// distinct `Transient` error so a test can tell "the default delegated"
+    /// (Transient) apart from "the default rejected" (TurnSubmissionRejected).
+    struct DefaultAttachmentsTurnService;
+
+    #[async_trait]
+    impl InboundTurnService for DefaultAttachmentsTurnService {
+        async fn replay_accepted_user_message(
+            &self,
+            _envelope: &ProductInboundEnvelope,
+        ) -> Result<Option<InboundTurnOutcome>, ProductWorkflowError> {
+            Ok(None)
+        }
+
+        async fn accept_user_message(
+            &self,
+            _envelope: &ProductInboundEnvelope,
+        ) -> Result<InboundTurnOutcome, ProductWorkflowError> {
+            Err(ProductWorkflowError::Transient {
+                reason: "delegated".into(),
+            })
+        }
+
+        async fn accept_user_message_with_before_policy(
+            &self,
+            _envelope: &ProductInboundEnvelope,
+            _before_inbound_policy: &dyn BeforeInboundPolicy,
+        ) -> Result<InboundUserMessageDispatch, ProductWorkflowError> {
+            Err(ProductWorkflowError::Transient {
+                reason: "delegated".into(),
+            })
+        }
+    }
+
+    /// The trait default must reject a turn carrying inline bytes rather than
+    /// silently dropping them, but still pass an attachment-free turn straight
+    /// through to the underlying acceptance path.
+    #[tokio::test]
+    async fn default_attachments_impl_rejects_bytes_but_passes_empty_through() {
+        let service = DefaultAttachmentsTurnService;
+        let envelope = user_message_envelope();
+
+        let rejected = service
+            .accept_user_message_with_before_policy_and_attachments(
+                &envelope,
+                &NoopBeforeInboundPolicy,
+                vec![InboundAttachment {
+                    id: "openai-image-0".to_string(),
+                    mime_type: "image/png".to_string(),
+                    filename: Some("image-0.png".to_string()),
+                    bytes: vec![0x89, b'P', b'N', b'G'],
+                }],
+            )
+            .await;
+        assert!(
+            matches!(
+                rejected,
+                Err(ProductWorkflowError::TurnSubmissionRejected { .. })
+            ),
+            "the default must fail closed on inline bytes, never silently drop them"
+        );
+
+        let delegated = service
+            .accept_user_message_with_before_policy_and_attachments(
+                &envelope,
+                &NoopBeforeInboundPolicy,
+                Vec::new(),
+            )
+            .await;
+        assert!(
+            matches!(delegated, Err(ProductWorkflowError::Transient { .. })),
+            "with no attachments the default must delegate to the normal path"
+        );
     }
 
     #[test]

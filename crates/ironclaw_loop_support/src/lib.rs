@@ -38,6 +38,7 @@ mod subagent_spawn_port;
 mod system_inference;
 mod token_estimator;
 mod turn_event_publisher;
+pub mod user_profile_context;
 
 pub use budget_accountant::GovernorBackedAccountant;
 pub use budget_cost_table::{ModelCost, ModelCostTable, StaticModelCostTable, ZeroCostTable};
@@ -53,10 +54,11 @@ pub use capability_allow_set::{
     CapabilityAllowSet, CapabilityResolveError, CapabilitySurfaceProfileResolver,
 };
 pub use capability_port::{
-    CapabilityResultWrite, CapabilityTrajectoryObserver, DecoratingLoopCapabilityPortFactory,
-    HostRuntimeLoopCapabilityPort, HostRuntimeLoopCapabilityPortFactory,
-    LoopCapabilityInputResolver, LoopCapabilityPortDecorator, LoopCapabilityPortFactory,
-    LoopCapabilityResultWriter, concurrency_hint_from_effects, loop_driver_execution_extension_id,
+    CapabilityResultWrite, CapabilityTrajectoryObserver, CapabilityWriteResult,
+    DecoratingLoopCapabilityPortFactory, HostRuntimeLoopCapabilityPort,
+    HostRuntimeLoopCapabilityPortFactory, LoopCapabilityInputResolver, LoopCapabilityPortDecorator,
+    LoopCapabilityPortFactory, LoopCapabilityResultWriter, concurrency_hint_from_effects,
+    loop_driver_execution_extension_id,
 };
 pub use capability_surface_filter::{
     CapabilitySurfaceProfileFilter, CapabilitySurfaceVisibleFilter,
@@ -104,6 +106,7 @@ pub use subagent_spawn_port::{
     SubagentThreadKind, SubagentThreadMetadata, build_spawn_subagent_parameters_schema,
 };
 pub use system_inference::{GuardedSystemInferencePort, ModelGatewayBackedSystemInferencePort};
+pub use user_profile_context::{EmptyUserProfileSource, HostUserProfileSource};
 pub const COMPACTION_SYSTEM_PROMPT: &str =
     include_str!("../prompts/compaction_summarizer_fresh.md");
 pub const ACTIVE_TASK_COMPACTION_SYSTEM_PROMPT: &str = concat!(

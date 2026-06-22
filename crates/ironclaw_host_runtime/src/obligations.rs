@@ -22,7 +22,7 @@ use ironclaw_host_api::{
     ExtensionId, MountView, NetworkPolicy, Obligation, ProcessId, ResourceCeiling,
     ResourceEstimate, ResourceReservation, ResourceScope, ResourceUsage,
     RuntimeCredentialAccountProviderId, RuntimeCredentialAccountSetup,
-    RuntimeCredentialAuthRequirement, RuntimeHttpEgress, SandboxQuota, SecretHandle,
+    RuntimeCredentialAuthRequirement, RuntimeHttpEgress, SandboxQuota, SecretHandle, Timestamp,
 };
 use ironclaw_network::NetworkHttpEgress;
 use ironclaw_processes::{ProcessError, ProcessRecord, ProcessStart, ProcessStore};
@@ -595,8 +595,9 @@ impl SecretStore for SharedSecretStore {
         scope: ResourceScope,
         handle: SecretHandle,
         material: SecretMaterial,
+        expires_at: Option<Timestamp>,
     ) -> Result<SecretMetadata, SecretStoreError> {
-        self.0.put(scope, handle, material).await
+        self.0.put(scope, handle, material, expires_at).await
     }
 
     async fn metadata(
@@ -2361,6 +2362,7 @@ mod tests {
                 context.resource_scope.clone(),
                 handle.clone(),
                 SecretMaterial::from("runtime-secret"),
+                None,
             )
             .await
             .unwrap();

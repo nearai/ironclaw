@@ -11,6 +11,7 @@ export function MessageList({
   hasMore,
   onLoadMore,
   onRetryMessage,
+  threadId,
   pending = false,
   children,
 }) {
@@ -23,7 +24,7 @@ export function MessageList({
   // run state flips — the typing indicator / streamed reply are rendered as
   // children (not in `messages`), so they wouldn't trigger this otherwise.
   // The rAF defers the scroll until after layout so `scrollHeight` reflects
-  // the just-rendered row (avatar header, markdown, code blocks).
+  // the just-rendered row (markdown, code blocks).
   React.useEffect(() => {
     const el = containerRef.current;
     if (!el || !shouldScrollRef.current) return;
@@ -86,6 +87,7 @@ export function MessageList({
                 key=${item.id}
                 message=${item.message}
                 onRetry=${onRetryMessage}
+                threadId=${threadId}
               />`
         )}
         ${children}

@@ -43,7 +43,7 @@ use ironclaw_reborn_composition::{
     WebuiAuthentication, WebuiAuthenticator, WebuiServeConfig, build_reborn_runtime,
     build_webui_services, webui_v2_app,
 };
-use ironclaw_turns::run_profile::{LoopCapabilityPort, ProviderToolCall};
+use ironclaw_turns::run_profile::{CapabilityCallCandidate, LoopCapabilityPort, ProviderToolCall};
 use serde_json::{Value, json};
 use tower::ServiceExt;
 
@@ -90,6 +90,18 @@ fn local_dev_effective_policy() -> EffectiveRuntimePolicy {
         secret_mode: SecretMode::ScrubbedEnv,
         approval_policy: ApprovalPolicy::AskDestructive,
         audit_mode: AuditMode::LocalMinimal,
+    }
+}
+
+/// Local trusted-laptop policy with minimal approvals, so an in-workspace
+/// `write_file` auto-proceeds instead of parking on a destructive-write gate.
+/// Used by the file-production test, which is about download — not approval.
+fn local_yolo_effective_policy() -> EffectiveRuntimePolicy {
+    EffectiveRuntimePolicy {
+        requested_profile: RuntimeProfile::LocalYolo,
+        resolved_profile: RuntimeProfile::LocalYolo,
+        approval_policy: ApprovalPolicy::Minimal,
+        ..local_dev_effective_policy()
     }
 }
 
@@ -195,6 +207,123 @@ impl HostManagedModelGateway for ToolCallingGateway {
     }
 }
 
+// ─── file-producing gateway ───────────────────────────────────────────
+
+const CSV_PATH: &str = "/workspace/report.csv";
+const PDF_PATH: &str = "/workspace/report.pdf";
+const CSV_BODY: &str = "name,score\nalice,90\nbob,85\n";
+// A minimal, byte-stable PDF. The download mime is derived from the `.pdf`
+// extension (not content sniffing), so the bytes only need to round-trip
+// write -> read exactly; they are not rendered.
+const PDF_BODY: &str = "%PDF-1.4\n1 0 obj<</Type/Catalog>>endobj\ntrailer<</Root 1 0 R>>\n%%EOF\n";
+
+/// Scripted gateway that drives the agent to produce two downloadable files —
+/// a CSV then a PDF — via `builtin.write_file`, then emit a final reply that
+/// references both `/workspace` paths. Exercises the full "agent produces a
+/// file the user can download" flow against the real loop + capability host.
+#[derive(Debug, Default)]
+struct WriteFileGateway {
+    call_count: StdMutex<usize>,
+}
+
+async fn register_write(
+    capabilities: &Arc<dyn LoopCapabilityPort>,
+    tool_name: &str,
+    call_id: &str,
+    path: &str,
+    content: &str,
+) -> Result<CapabilityCallCandidate, HostManagedModelError> {
+    capabilities
+        .register_provider_tool_call(ProviderToolCall {
+            provider_id: "e2e-provider".to_string(),
+            provider_model_id: "e2e-model".to_string(),
+            turn_id: Some("e2e-write-turn".to_string()),
+            id: call_id.to_string(),
+            name: tool_name.to_string(),
+            arguments: json!({"path": path, "content": content}),
+            response_reasoning: None,
+            reasoning: None,
+            signature: None,
+        })
+        .await
+        .map_err(|err| {
+            HostManagedModelError::safe(
+                HostManagedModelErrorKind::InvalidRequest,
+                format!("register_provider_tool_call(write_file) failed: {err}"),
+            )
+        })
+}
+
+#[async_trait]
+impl HostManagedModelGateway for WriteFileGateway {
+    async fn stream_model(
+        &self,
+        _request: HostManagedModelRequest,
+    ) -> Result<HostManagedModelResponse, HostManagedModelError> {
+        Err(HostManagedModelError::safe(
+            HostManagedModelErrorKind::InvalidRequest,
+            "WriteFileGateway requires the capability-aware model path",
+        ))
+    }
+
+    async fn stream_model_with_capabilities(
+        &self,
+        _request: HostManagedModelRequest,
+        capabilities: Arc<dyn LoopCapabilityPort>,
+    ) -> Result<HostManagedModelResponse, HostManagedModelError> {
+        let call_index = {
+            let mut count = self
+                .call_count
+                .lock()
+                .expect("write gateway call lock poisoned");
+            let index = *count;
+            *count += 1;
+            index
+        };
+
+        let write_id = CapabilityId::new("builtin.write_file").expect("write_file capability id");
+        let write_tool = capabilities
+            .tool_definitions()
+            .map_err(|err| {
+                HostManagedModelError::safe(
+                    HostManagedModelErrorKind::InvalidRequest,
+                    format!("tool_definitions failed: {err}"),
+                )
+            })?
+            .into_iter()
+            .find(|def| def.capability_id == write_id)
+            .expect("builtin.write_file must be visible in local-dev capability surface");
+
+        // One tool round writes both files (mirrors the single-round shape the
+        // echo gateway proves), then the follow-up call emits the final reply.
+        if call_index == 0 {
+            let csv = register_write(
+                &capabilities,
+                &write_tool.name,
+                "e2e-write-csv",
+                CSV_PATH,
+                CSV_BODY,
+            )
+            .await?;
+            let pdf = register_write(
+                &capabilities,
+                &write_tool.name,
+                "e2e-write-pdf",
+                PDF_PATH,
+                PDF_BODY,
+            )
+            .await?;
+            return Ok(HostManagedModelResponse::capability_calls(
+                vec![csv, pdf],
+                "",
+            ));
+        }
+        Ok(HostManagedModelResponse::assistant_reply(format!(
+            "Saved {CSV_PATH} and {PDF_PATH} — both are ready to download."
+        )))
+    }
+}
+
 // ─── harness ──────────────────────────────────────────────────────────
 
 struct Harness {
@@ -204,20 +333,40 @@ struct Harness {
 }
 
 async fn build_harness() -> Harness {
+    build_harness_with_gateway(Arc::new(ToolCallingGateway::default())).await
+}
+
+async fn build_harness_with_gateway(gateway: Arc<dyn HostManagedModelGateway>) -> Harness {
+    build_harness_with_gateway_and_policy(gateway, local_dev_effective_policy()).await
+}
+
+async fn build_harness_with_gateway_and_policy(
+    gateway: Arc<dyn HostManagedModelGateway>,
+    policy: EffectiveRuntimePolicy,
+) -> Harness {
     let root = tempfile::tempdir().expect("tempdir");
     let storage_root = root.path().join("local-dev");
-    build_harness_at(storage_root, Some(root)).await
+    build_harness_at(storage_root, Some(root), gateway, policy).await
 }
 
 async fn build_harness_on_storage(storage_root: impl AsRef<Path>) -> Harness {
-    build_harness_at(storage_root.as_ref().to_path_buf(), None).await
+    build_harness_at(
+        storage_root.as_ref().to_path_buf(),
+        None,
+        Arc::new(ToolCallingGateway::default()),
+        local_dev_effective_policy(),
+    )
+    .await
 }
 
-async fn build_harness_at(storage_root: PathBuf, root: Option<tempfile::TempDir>) -> Harness {
-    let gateway = Arc::new(ToolCallingGateway::default());
+async fn build_harness_at(
+    storage_root: PathBuf,
+    root: Option<tempfile::TempDir>,
+    gateway: Arc<dyn HostManagedModelGateway>,
+    policy: EffectiveRuntimePolicy,
+) -> Harness {
     let input = RebornRuntimeInput::from_services(
-        RebornBuildInput::local_dev(USER, storage_root)
-            .with_runtime_policy(local_dev_effective_policy()),
+        RebornBuildInput::local_dev(USER, storage_root).with_runtime_policy(policy),
     )
     .with_identity(RebornRuntimeIdentity {
         tenant_id: TENANT.to_string(),
@@ -1150,6 +1299,174 @@ mod operator_llm_config {
             .await
             .expect("runtime shutdown clean");
     }
+}
+
+fn header_str(headers: &axum::http::HeaderMap, name: header::HeaderName) -> String {
+    headers
+        .get(name)
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or_default()
+        .to_string()
+}
+
+async fn read_body_bytes(response: axum::response::Response) -> Vec<u8> {
+    to_bytes(response.into_body(), 1024 * 1024)
+        .await
+        .expect("download body within 1 MiB cap")
+        .to_vec()
+}
+
+fn files_uri(thread_id: &str, suffix: &str, path: &str) -> String {
+    // test-only: `path` is interpolated raw into the query string, so paths used
+    // here must not contain URL-special characters (`&`, `#`, `?`, spaces). All
+    // current callers pass fixed `/workspace/...` constants that satisfy this; a
+    // future test needing special chars should URL-encode `path` first.
+    format!("/api/webchat/v2/threads/{thread_id}/files{suffix}?path={path}")
+}
+
+async fn download_file(
+    router: &axum::Router,
+    thread_id: &str,
+    path: &str,
+) -> axum::response::Response {
+    router
+        .clone()
+        .oneshot(bearer_get(&files_uri(thread_id, "/content", path)))
+        .await
+        .expect("download oneshot")
+}
+
+/// Wait until the agent's turn has finalized by polling the timeline for an
+/// assistant reply containing `needle`. Polls at a cadence under the read-route
+/// rate limit (120/min) so the wait itself never trips a 429.
+async fn wait_for_assistant_reply(router: &axum::Router, thread_id: &str, needle: &str) {
+    let deadline = Instant::now() + Duration::from_secs(20);
+    let mut timeline = Value::Null;
+    while Instant::now() < deadline {
+        let response = router
+            .clone()
+            .oneshot(bearer_get(&format!(
+                "/api/webchat/v2/threads/{thread_id}/timeline"
+            )))
+            .await
+            .expect("timeline oneshot");
+        assert_eq!(response.status(), StatusCode::OK, "timeline read");
+        timeline = read_json(response).await;
+        let found = timeline["messages"].as_array().is_some_and(|messages| {
+            messages.iter().any(|message| {
+                extract_assistant_text(message).is_some_and(|text| text.contains(needle))
+            })
+        });
+        if found {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(300)).await;
+    }
+    panic!("turn never produced an assistant reply containing {needle:?}; timeline={timeline:#?}");
+}
+
+/// End-to-end: the agent writes a CSV and a PDF into its project workspace via
+/// `write_file`, and both are then listable and downloadable through the v2
+/// project-filesystem endpoints with the right mime, attachment disposition,
+/// and exact bytes — while a path outside the workspace is refused.
+#[tokio::test]
+async fn agent_produced_workspace_files_are_listable_and_downloadable() {
+    let harness = build_harness_with_gateway_and_policy(
+        Arc::new(WriteFileGateway::default()),
+        local_yolo_effective_policy(),
+    )
+    .await;
+    let router = &harness.router;
+
+    let thread_id = create_thread(router, "e2e-files-thread").await;
+    send_message(router, &thread_id, "e2e-files-send").await;
+
+    // Wait for the turn to finalize (both files written), then download once.
+    wait_for_assistant_reply(router, &thread_id, "ready to download").await;
+
+    // CSV: registry-derived mime, attachment disposition + nosniff, exact bytes.
+    let csv = download_file(router, &thread_id, CSV_PATH).await;
+    assert_eq!(csv.status(), StatusCode::OK);
+    let csv_headers = csv.headers().clone();
+    assert!(
+        header_str(&csv_headers, header::CONTENT_TYPE).starts_with("text/csv"),
+        "csv content-type: {:?}",
+        csv_headers.get(header::CONTENT_TYPE)
+    );
+    let disposition = header_str(&csv_headers, header::CONTENT_DISPOSITION);
+    assert!(
+        disposition.contains("attachment") && disposition.contains("report.csv"),
+        "csv content-disposition: {disposition}"
+    );
+    assert_eq!(
+        header_str(&csv_headers, header::X_CONTENT_TYPE_OPTIONS),
+        "nosniff"
+    );
+    assert_eq!(read_body_bytes(csv).await, CSV_BODY.as_bytes());
+
+    // PDF: application/pdf mime + exact bytes.
+    let pdf = download_file(router, &thread_id, PDF_PATH).await;
+    assert_eq!(pdf.status(), StatusCode::OK);
+    assert!(
+        header_str(pdf.headers(), header::CONTENT_TYPE).starts_with("application/pdf"),
+        "pdf content-type: {:?}",
+        pdf.headers().get(header::CONTENT_TYPE)
+    );
+    assert_eq!(read_body_bytes(pdf).await, PDF_BODY.as_bytes());
+
+    // Directory listing surfaces both files under the workspace root.
+    let listing = router
+        .clone()
+        .oneshot(bearer_get(&format!(
+            "/api/webchat/v2/threads/{thread_id}/files?path=/workspace"
+        )))
+        .await
+        .expect("list oneshot");
+    assert_eq!(listing.status(), StatusCode::OK);
+    let listing = read_json(listing).await;
+    let names: Vec<&str> = listing["entries"]
+        .as_array()
+        .expect("entries array")
+        .iter()
+        .filter_map(|entry| entry["name"].as_str())
+        .collect();
+    assert!(
+        names.contains(&"report.csv") && names.contains(&"report.pdf"),
+        "workspace listing must include both files, got: {names:?}"
+    );
+
+    // Stat reports the written size.
+    let stat = router
+        .clone()
+        .oneshot(bearer_get(&files_uri(&thread_id, "/stat", CSV_PATH)))
+        .await
+        .expect("stat oneshot");
+    assert_eq!(stat.status(), StatusCode::OK);
+    let stat = read_json(stat).await;
+    assert_eq!(
+        stat["stat"]["size_bytes"].as_u64(),
+        Some(CSV_BODY.len() as u64)
+    );
+    // The extension-derived MIME drives the WebUI preview mode and mirrors the
+    // download Content-Type.
+    assert_eq!(stat["stat"]["mime_type"].as_str(), Some("text/csv"));
+
+    // A path outside the workspace mount is refused.
+    let denied = download_file(router, &thread_id, "/secrets/master.key").await;
+    assert!(
+        matches!(
+            denied.status(),
+            StatusCode::FORBIDDEN | StatusCode::BAD_REQUEST | StatusCode::NOT_FOUND
+        ),
+        "out-of-workspace path must be refused, got {}",
+        denied.status()
+    );
+
+    harness
+        .runtime
+        .shutdown()
+        .await
+        .expect("runtime shutdown clean");
 }
 
 /// Walks a `ThreadMessageRecord` JSON object and returns the rendered

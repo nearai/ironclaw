@@ -3,7 +3,12 @@ import { EmptyPanel, Panel, StatusPill } from "../../../design-system/primitives
 import { html } from "../../../lib/html.js";
 import { useT } from "../../../lib/i18n.js";
 import { cn } from "../../../utils/cn.js";
-import { RecentRunRow, recentRunKey, RunDots } from "./automation-recent-runs.js";
+import {
+  RecentRunRow,
+  recentRunKey,
+  RunDots,
+  RunHistorySummary,
+} from "./automation-recent-runs.js";
 
 function MetaItem({ label, value, tone }) {
   return html`
@@ -81,11 +86,14 @@ export function AutomationDetailPanel({ automation }) {
         </div>
 
         <div>
-          <div className="mb-2 flex items-center justify-between gap-3">
+          <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
             <h4 className="text-sm font-semibold text-iron-100">
               ${t("automations.detail.recentRuns")}
             </h4>
-            <${RunDots} runs=${automation.recent_runs} />
+            <div className="flex flex-col items-end gap-1">
+              <${RunDots} runs=${automation.recent_runs} />
+              <${RunHistorySummary} runs=${automation.recent_runs} />
+            </div>
           </div>
 
           ${automation.recent_runs.length

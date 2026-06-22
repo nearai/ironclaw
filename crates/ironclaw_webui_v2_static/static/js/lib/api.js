@@ -153,9 +153,12 @@ export function fetchSession() {
   return apiFetch(`${V2_BASE}/session`);
 }
 
-export function createThread({ clientActionId: clientId, requestedThreadId } = {}) {
+export function createThread({ clientActionId: clientId, requestedThreadId, projectId } = {}) {
   const body = { client_action_id: clientId || clientActionId() };
   if (requestedThreadId) body.requested_thread_id = requestedThreadId;
+  // The backend authorizes the caller's access to this project before scoping
+  // the new thread to it; the body only proposes it.
+  if (projectId) body.project_id = projectId;
   return apiFetch(`${V2_BASE}/threads`, {
     method: "POST",
     body: JSON.stringify(body),
@@ -178,14 +181,135 @@ export function deleteThread({ threadId } = {}) {
   });
 }
 
+// --- Project filesystem (download / navigation) ---
+
+function projectFilesBase(threadId) {
+  return `${V2_BASE}/threads/${encodeURIComponent(threadId)}/files`;
+}
+
+// List a directory under the thread's project workspace. `path` defaults to the
+// workspace root server-side when omitted.
+export function listProjectFiles({ threadId, path } = {}) {
+  if (!threadId) return Promise.reject(new Error("threadId is required"));
+  const url = new URL(projectFilesBase(threadId), window.location.origin);
+  if (path) url.searchParams.set("path", path);
+  return apiFetch(url.pathname + url.search);
+}
+
+// Metadata for a single project path (used to show a chip's size/icon).
+export function statProjectFile({ threadId, path } = {}) {
+  if (!threadId || !path) {
+    return Promise.reject(new Error("threadId and path are required"));
+  }
+  const url = new URL(`${projectFilesBase(threadId)}/stat`, window.location.origin);
+  url.searchParams.set("path", path);
+  return apiFetch(url.pathname + url.search);
+}
+
+// Same-origin relative URL for a project file's bytes. Feeds the shared
+// `fetchAttachmentBlob` (which attaches the bearer) so project-file chips can
+// reuse the message-attachment preview modal: it carries the same byte-fetch
+// shape as `attachmentUrl(...)`.
+export function projectFileContentUrl({ threadId, path } = {}) {
+  if (!threadId || !path) {
+    throw new Error("projectFileContentUrl requires threadId and path");
+  }
+  const url = new URL(`${projectFilesBase(threadId)}/content`, window.location.origin);
+  url.searchParams.set("path", path);
+  return url.pathname + url.search;
+}
+
 // --- Automations ---
 
-export function listAutomations({ limit, runLimit } = {}) {
+export function listAutomations({ limit, runLimit, includeCompleted } = {}) {
   const params = new URLSearchParams();
   if (limit != null) params.set("limit", String(limit));
   if (runLimit != null) params.set("run_limit", String(runLimit));
+  if (includeCompleted === true) params.set("include_completed", "true");
   const query = params.toString();
   return apiFetch(`${V2_BASE}/automations${query ? `?${query}` : ""}`);
+}
+
+// --- Projects (first-class entity + membership ACL) ---
+
+const PROJECTS_BASE = `${V2_BASE}/projects`;
+
+function projectPath(projectId) {
+  return `${PROJECTS_BASE}/${encodeURIComponent(projectId)}`;
+}
+
+export function listProjects({ limit } = {}) {
+  const url = new URL(PROJECTS_BASE, window.location.origin);
+  if (limit != null) url.searchParams.set("limit", String(limit));
+  return apiFetch(url.pathname + url.search);
+}
+
+export function createProject({ name, description, icon, color, metadata } = {}) {
+  if (!name) return Promise.reject(new Error("name is required"));
+  const body = { name };
+  if (description != null) body.description = description;
+  if (icon != null) body.icon = icon;
+  if (color != null) body.color = color;
+  if (metadata != null) body.metadata = metadata;
+  return apiFetch(PROJECTS_BASE, { method: "POST", body: JSON.stringify(body) });
+}
+
+export function getProject({ projectId } = {}) {
+  if (!projectId) return Promise.reject(new Error("projectId is required"));
+  return apiFetch(projectPath(projectId));
+}
+
+export function updateProject({ projectId, name, description, icon, color, metadata, state } = {}) {
+  if (!projectId) return Promise.reject(new Error("projectId is required"));
+  const body = {};
+  if (name != null) body.name = name;
+  if (description != null) body.description = description;
+  if (icon != null) body.icon = icon;
+  if (color != null) body.color = color;
+  if (metadata != null) body.metadata = metadata;
+  if (state != null) body.state = state;
+  return apiFetch(projectPath(projectId), { method: "POST", body: JSON.stringify(body) });
+}
+
+export function deleteProject({ projectId } = {}) {
+  if (!projectId) return Promise.reject(new Error("projectId is required"));
+  return apiFetch(projectPath(projectId), { method: "DELETE" });
+}
+
+export function listProjectMembers({ projectId } = {}) {
+  if (!projectId) return Promise.reject(new Error("projectId is required"));
+  return apiFetch(`${projectPath(projectId)}/members`);
+}
+
+export function addProjectMember({ projectId, userId, role } = {}) {
+  if (!projectId || !userId) {
+    return Promise.reject(new Error("projectId and userId are required"));
+  }
+  if (!role) return Promise.reject(new Error("role is required"));
+  return apiFetch(`${projectPath(projectId)}/members`, {
+    method: "POST",
+    body: JSON.stringify({ user_id: userId, role }),
+  });
+}
+
+export function updateProjectMemberRole({ projectId, userId, role } = {}) {
+  if (!projectId || !userId) {
+    return Promise.reject(new Error("projectId and userId are required"));
+  }
+  if (!role) return Promise.reject(new Error("role is required"));
+  return apiFetch(`${projectPath(projectId)}/members/${encodeURIComponent(userId)}`, {
+    method: "POST",
+    body: JSON.stringify({ role }),
+  });
+}
+
+export function removeProjectMember({ projectId, userId } = {}) {
+  if (!projectId || !userId) {
+    return Promise.reject(new Error("projectId and userId are required"));
+  }
+  return apiFetch(`${projectPath(projectId)}/members/${encodeURIComponent(userId)}`, {
+    method: "DELETE",
+  });
 }
 
 // --- Outbound delivery preferences ---

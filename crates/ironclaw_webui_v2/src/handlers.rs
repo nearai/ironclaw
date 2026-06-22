@@ -16,6 +16,7 @@ use std::convert::Infallible;
 use std::time::Duration;
 
 use axum::Json;
+use axum::body::Body;
 use axum::extract::{Extension, Path, Query, State};
 use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
 use axum::response::sse::{Event, KeepAlive, Sse};
@@ -23,28 +24,36 @@ use axum::response::{IntoResponse, Response};
 use futures::SinkExt;
 use futures::stream::Stream;
 use ironclaw_product_workflow::{
-    CodexLoginStart, LifecyclePackageKind, LifecyclePackageRef, LlmConfigSnapshot, LlmModelsResult,
-    LlmProbeRequest, LlmProbeResult, NearAiLoginRequest, NearAiLoginStart,
-    NearAiWalletLoginRequest, NearAiWalletLoginResult, ProductWorkflowError, ProjectionCursor,
-    RebornAttachmentRequest, RebornCancelRunResponse, RebornConnectableChannelListResponse,
-    RebornCreateThreadResponse, RebornDeleteThreadRequest, RebornDeleteThreadResponse,
+    CodexLoginStart, FsMount, LifecyclePackageKind, LifecyclePackageRef, LlmConfigSnapshot,
+    LlmModelsResult, LlmProbeRequest, LlmProbeResult, NearAiLoginRequest, NearAiLoginStart,
+    NearAiWalletLoginRequest, NearAiWalletLoginResult, ProductWorkflowError, ProjectFsFile,
+    ProjectionCursor, RebornAddMemberRequest, RebornAttachmentRequest, RebornCancelRunResponse,
+    RebornConnectableChannelListResponse, RebornCreateProjectRequest, RebornCreateThreadResponse,
+    RebornDeleteProjectRequest, RebornDeleteThreadRequest, RebornDeleteThreadResponse,
     RebornExtensionActionResponse, RebornExtensionListResponse, RebornExtensionRegistryResponse,
-    RebornListAutomationsResponse, RebornListThreadsResponse, RebornOperatorCommandPlaneResponse,
-    RebornOperatorConfigGetResponse, RebornOperatorConfigListResponse,
-    RebornOperatorConfigSetRequest, RebornOperatorConfigValidateRequest,
-    RebornOperatorConfigValidateResponse, RebornOperatorLogsQuery,
-    RebornOperatorServiceLifecycleRequest, RebornOperatorSetupRequest, RebornOperatorSetupResponse,
-    RebornOutboundDeliveryTargetListResponse, RebornOutboundPreferencesResponse,
+    RebornFsListRequest, RebornFsListResponse, RebornFsMountsResponse, RebornFsReadRequest,
+    RebornFsStatRequest, RebornFsStatResponse, RebornGetProjectRequest,
+    RebornListAutomationsResponse, RebornListMembersRequest, RebornListMembersResponse,
+    RebornListProjectsRequest, RebornListProjectsResponse, RebornListThreadsResponse,
+    RebornOperatorCommandPlaneResponse, RebornOperatorConfigGetResponse,
+    RebornOperatorConfigListResponse, RebornOperatorConfigSetRequest,
+    RebornOperatorConfigValidateRequest, RebornOperatorConfigValidateResponse,
+    RebornOperatorLogsQuery, RebornOperatorServiceLifecycleRequest, RebornOperatorSetupRequest,
+    RebornOperatorSetupResponse, RebornOutboundDeliveryTargetListResponse,
+    RebornOutboundPreferencesResponse, RebornProjectFsListRequest, RebornProjectFsListResponse,
+    RebornProjectFsReadRequest, RebornProjectFsStatRequest, RebornProjectFsStatResponse,
+    RebornProjectMemberInfo, RebornProjectResponse, RebornRemoveMemberRequest,
     RebornResolveGateResponse, RebornServicesApi, RebornServicesError, RebornServicesErrorCode,
     RebornServicesErrorKind, RebornSetOutboundPreferencesRequest, RebornSetupExtensionResponse,
     RebornSkillActionResponse, RebornSkillContentResponse, RebornSkillListResponse,
     RebornSkillSearchResponse, RebornStreamEventsRequest, RebornSubmitTurnResponse,
     RebornTimelineRequest, RebornTimelineResponse, RebornTraceCreditsResponse,
-    RebornTraceHoldAuthorizeResponse, SetActiveLlmRequest, UpsertLlmProviderRequest,
-    WebUiAttachmentCapabilities, WebUiAuthenticatedCaller, WebUiCancelRunRequest,
-    WebUiCreateThreadRequest, WebUiInboundValidationCode, WebUiInboundValidationError,
-    WebUiListAutomationsRequest, WebUiListThreadsRequest, WebUiResolveGateRequest,
-    WebUiSendMessageRequest, WebUiSetupExtensionRequest, webui_attachment_capabilities,
+    RebornTraceHoldAuthorizeResponse, RebornUpdateMemberRoleRequest, RebornUpdateProjectRequest,
+    SetActiveLlmRequest, UpsertLlmProviderRequest, WebUiAttachmentCapabilities,
+    WebUiAuthenticatedCaller, WebUiCancelRunRequest, WebUiCreateThreadRequest,
+    WebUiInboundValidationCode, WebUiInboundValidationError, WebUiListAutomationsRequest,
+    WebUiListThreadsRequest, WebUiResolveGateRequest, WebUiSendMessageRequest,
+    WebUiSetupExtensionRequest, webui_attachment_capabilities,
 };
 use serde::{Deserialize, Serialize};
 
@@ -58,6 +67,10 @@ pub struct WebUiV2SessionResponse {
     pub tenant_id: String,
     pub user_id: String,
     pub capabilities: WebUiV2Capabilities,
+    /// Deployment-wide feature gates the browser uses to show/hide
+    /// not-yet-finished surfaces. Distinct from `capabilities`, which are
+    /// per-token authorization flags.
+    pub features: WebUiV2Features,
     /// Inline-attachment contract (allowed `accept` tokens + size budgets)
     /// the browser advertises on its file picker. Generated from the shared
     /// format registry so the picker can never drift from the server's
@@ -65,8 +78,22 @@ pub struct WebUiV2SessionResponse {
     pub attachments: WebUiAttachmentCapabilities,
 }
 
+/// Deployment-wide WebUI feature gates surfaced to the browser on
+/// `GET /session`. These are global "is this surface ready to show"
+/// toggles, not per-caller authorization — keep authorization in
+/// [`WebUiV2Capabilities`].
+#[derive(Debug, Clone, Copy, Default, Serialize)]
+pub struct WebUiV2Features {
+    /// Reborn Projects surface (the conversations-panel entry + the
+    /// `/projects` route). Hidden unless the deployment sets
+    /// `IRONCLAW_REBORN_PROJECTS`, while the surface is still being
+    /// finished.
+    pub reborn_projects: bool,
+}
+
 /// `GET /api/webchat/v2/session`
 pub async fn get_session(
+    State(state): State<WebUiV2State>,
     Extension(caller): Extension<WebUiAuthenticatedCaller>,
     Extension(capabilities): Extension<WebUiV2Capabilities>,
 ) -> Json<WebUiV2SessionResponse> {
@@ -74,6 +101,9 @@ pub async fn get_session(
         tenant_id: caller.tenant_id.to_string(),
         user_id: caller.user_id.to_string(),
         capabilities,
+        features: WebUiV2Features {
+            reborn_projects: state.reborn_projects_enabled(),
+        },
         attachments: webui_attachment_capabilities(),
     })
 }
@@ -149,6 +179,380 @@ pub struct TimelineQuery {
     pub limit: Option<u32>,
     #[serde(default)]
     pub cursor: Option<String>,
+}
+
+/// Default workspace root listed when a `list_project_files` request omits
+/// `?path=`. The facade confines all paths to this alias regardless.
+const PROJECT_FS_ROOT: &str = "/workspace";
+
+/// Query parameters for the project-filesystem read routes. `path` is a scoped
+/// path under `/workspace`; optional only for directory listing (defaults to
+/// the workspace root).
+#[derive(Debug, Default, Deserialize)]
+pub struct ProjectFsQuery {
+    #[serde(default)]
+    pub path: Option<String>,
+}
+
+/// `GET /api/webchat/v2/threads/{thread_id}/files`
+///
+/// List a directory under the thread's project workspace. Generic filesystem
+/// navigation — also the listing surface a future file browser consumes.
+pub async fn list_project_files(
+    State(state): State<WebUiV2State>,
+    Extension(caller): Extension<WebUiAuthenticatedCaller>,
+    Path(thread_id): Path<String>,
+    Query(query): Query<ProjectFsQuery>,
+) -> Result<Json<RebornProjectFsListResponse>, WebUiV2HttpError> {
+    let request = RebornProjectFsListRequest {
+        thread_id,
+        path: project_fs_list_path(query.path),
+    };
+    let response = state.services().list_project_dir(caller, request).await?;
+    Ok(Json(response))
+}
+
+/// `GET /api/webchat/v2/threads/{thread_id}/files/stat`
+///
+/// Return metadata for a path under the thread's project workspace.
+pub async fn stat_project_file(
+    State(state): State<WebUiV2State>,
+    Extension(caller): Extension<WebUiAuthenticatedCaller>,
+    Path(thread_id): Path<String>,
+    Query(query): Query<ProjectFsQuery>,
+) -> Result<Json<RebornProjectFsStatResponse>, WebUiV2HttpError> {
+    let request = RebornProjectFsStatRequest {
+        thread_id,
+        path: require_project_fs_path(query.path)?,
+    };
+    let response = state.services().stat_project_path(caller, request).await?;
+    Ok(Json(response))
+}
+
+/// `GET /api/webchat/v2/threads/{thread_id}/files/content`
+///
+/// Download a file's bytes from the thread's project workspace. This is the
+/// retrieval path for agent-produced attachments (an `AttachmentRef`'s
+/// `storage_key` is passed as `?path=`).
+///
+/// The response is always served as an attachment with `nosniff` so a generated
+/// `.html`/`.svg` cannot execute in the app origin.
+pub async fn read_project_file(
+    State(state): State<WebUiV2State>,
+    Extension(caller): Extension<WebUiAuthenticatedCaller>,
+    Path(thread_id): Path<String>,
+    Query(query): Query<ProjectFsQuery>,
+) -> Result<Response, WebUiV2HttpError> {
+    let request = RebornProjectFsReadRequest {
+        thread_id,
+        path: require_project_fs_path(query.path)?,
+    };
+    let file = state.services().read_project_file(caller, request).await?;
+    project_fs_download_response(file)
+}
+
+/// Build the always-attachment, `nosniff` download response shared by the
+/// thread-scoped project-file route and the standalone filesystem-browser route.
+/// Serving every file as an attachment with `nosniff` means a generated
+/// `.html`/`.svg` cannot execute in the app origin.
+fn project_fs_download_response(file: ProjectFsFile) -> Result<Response, WebUiV2HttpError> {
+    let filename = sanitized_download_filename(file.filename.as_deref());
+    Response::builder()
+        .status(StatusCode::OK)
+        .header(header::CONTENT_TYPE, file.mime_type)
+        .header(header::CONTENT_LENGTH, file.size_bytes)
+        .header(
+            header::CONTENT_DISPOSITION,
+            format!("attachment; filename=\"{filename}\""),
+        )
+        .header(header::X_CONTENT_TYPE_OPTIONS, "nosniff")
+        .body(Body::from(file.bytes))
+        .map_err(|error| {
+            // Keep the client response sanitized (bare 500), but log the
+            // builder cause so a malformed download header is diagnosable
+            // server-side rather than vanishing into an opaque internal error.
+            tracing::debug!(
+                target = "ironclaw_webui_v2::project_fs",
+                error = %error,
+                "failed to build project-file download response",
+            );
+            WebUiV2HttpError::from(RebornServicesError::internal())
+        })
+}
+
+/// Query parameters for the standalone filesystem-browser read routes. `mount`
+/// selects which logical mount to read (memory/workspace/…); `path` is a
+/// mount-relative path (absent/blank means the mount root for listing).
+#[derive(Debug, Deserialize)]
+pub struct FsBrowseQuery {
+    pub mount: FsMount,
+    #[serde(default)]
+    pub path: Option<String>,
+}
+
+/// `GET /api/webchat/v2/fs/mounts`
+///
+/// List the mounts the read-only filesystem viewer can browse for this caller.
+pub async fn list_fs_mounts(
+    State(state): State<WebUiV2State>,
+    Extension(caller): Extension<WebUiAuthenticatedCaller>,
+) -> Result<Json<RebornFsMountsResponse>, WebUiV2HttpError> {
+    let response = state.services().list_fs_mounts(caller).await?;
+    Ok(Json(response))
+}
+
+/// `GET /api/webchat/v2/fs/list?mount=…&path=…`
+///
+/// List a directory on a browsable mount. Caller-scoped read-only navigation
+/// over the agent's internal filesystem.
+pub async fn browse_fs_dir(
+    State(state): State<WebUiV2State>,
+    Extension(caller): Extension<WebUiAuthenticatedCaller>,
+    Query(query): Query<FsBrowseQuery>,
+) -> Result<Json<RebornFsListResponse>, WebUiV2HttpError> {
+    let request = RebornFsListRequest {
+        mount: query.mount,
+        // Absent, empty, or whitespace-only path lists the mount root.
+        path: query
+            .path
+            .filter(|path| !path.trim().is_empty())
+            .unwrap_or_default(),
+    };
+    let response = state.services().browse_fs_dir(caller, request).await?;
+    Ok(Json(response))
+}
+
+/// `GET /api/webchat/v2/fs/stat?mount=…&path=…`
+///
+/// Return metadata for a path on a browsable mount.
+pub async fn stat_fs_path(
+    State(state): State<WebUiV2State>,
+    Extension(caller): Extension<WebUiAuthenticatedCaller>,
+    Query(query): Query<FsBrowseQuery>,
+) -> Result<Json<RebornFsStatResponse>, WebUiV2HttpError> {
+    let request = RebornFsStatRequest {
+        mount: query.mount,
+        path: require_fs_browse_path(query.path)?,
+    };
+    let response = state.services().stat_fs_path(caller, request).await?;
+    Ok(Json(response))
+}
+
+/// `GET /api/webchat/v2/fs/content?mount=…&path=…`
+///
+/// Download/preview a file's bytes from a browsable mount. Served as an
+/// attachment with `nosniff`, exactly like the project-file route.
+pub async fn read_fs_file(
+    State(state): State<WebUiV2State>,
+    Extension(caller): Extension<WebUiAuthenticatedCaller>,
+    Query(query): Query<FsBrowseQuery>,
+) -> Result<Response, WebUiV2HttpError> {
+    let request = RebornFsReadRequest {
+        mount: query.mount,
+        path: require_fs_browse_path(query.path)?,
+    };
+    let file = state.services().read_fs_file(caller, request).await?;
+    project_fs_download_response(file)
+}
+
+/// Reject a missing/blank `?path=` on the stat/download fs-browse routes with a
+/// field-scoped 400, mirroring [`require_project_fs_path`].
+fn require_fs_browse_path(path: Option<String>) -> Result<String, WebUiV2HttpError> {
+    match path {
+        Some(path) if !path.trim().is_empty() => Ok(path),
+        _ => Err(RebornServicesError::from(WebUiInboundValidationError::new(
+            "path",
+            WebUiInboundValidationCode::Blank,
+        ))
+        .into()),
+    }
+}
+
+/// Reject a missing or blank `?path=` on the stat/download routes with a
+/// field-scoped 400, rather than forwarding an empty string to the facade where
+/// it surfaces as a murkier downstream invalid-path error.
+/// Resolve the directory-listing path. An absent, empty, or whitespace-only
+/// `?path=` means "list the workspace root" — mirrors `require_project_fs_path`'s
+/// `trim`-based blank handling (so `?path=%20%20` isn't forwarded as a bogus
+/// path), but defaults to the root instead of erroring, since listing the root
+/// is a valid request.
+fn project_fs_list_path(path: Option<String>) -> String {
+    path.filter(|path| !path.trim().is_empty())
+        .unwrap_or_else(|| PROJECT_FS_ROOT.to_string())
+}
+
+fn require_project_fs_path(path: Option<String>) -> Result<String, WebUiV2HttpError> {
+    match path {
+        Some(path) if !path.trim().is_empty() => Ok(path),
+        _ => Err(RebornServicesError::from(WebUiInboundValidationError::new(
+            "path",
+            WebUiInboundValidationCode::Blank,
+        ))
+        .into()),
+    }
+}
+
+/// Query parameters for `list_projects`.
+#[derive(Debug, Default, Deserialize)]
+pub struct ListProjectsQuery {
+    #[serde(default)]
+    pub limit: Option<u32>,
+}
+
+/// `GET /api/webchat/v2/projects`
+pub async fn list_projects(
+    State(state): State<WebUiV2State>,
+    Extension(caller): Extension<WebUiAuthenticatedCaller>,
+    Query(query): Query<ListProjectsQuery>,
+) -> Result<Json<RebornListProjectsResponse>, WebUiV2HttpError> {
+    let request = RebornListProjectsRequest { limit: query.limit };
+    let response = state.services().list_projects(caller, request).await?;
+    Ok(Json(response))
+}
+
+/// `POST /api/webchat/v2/projects`
+pub async fn create_project(
+    State(state): State<WebUiV2State>,
+    Extension(caller): Extension<WebUiAuthenticatedCaller>,
+    Json(body): Json<RebornCreateProjectRequest>,
+) -> Result<Json<RebornProjectResponse>, WebUiV2HttpError> {
+    let response = state.services().create_project(caller, body).await?;
+    Ok(Json(response))
+}
+
+/// `GET /api/webchat/v2/projects/{project_id}`
+pub async fn get_project(
+    State(state): State<WebUiV2State>,
+    Extension(caller): Extension<WebUiAuthenticatedCaller>,
+    Path(project_id): Path<String>,
+) -> Result<Json<RebornProjectResponse>, WebUiV2HttpError> {
+    let response = state
+        .services()
+        .get_project(caller, RebornGetProjectRequest { project_id })
+        .await?;
+    Ok(Json(response))
+}
+
+/// `POST /api/webchat/v2/projects/{project_id}` — update (path `project_id`
+/// overrides any body value).
+pub async fn update_project(
+    State(state): State<WebUiV2State>,
+    Extension(caller): Extension<WebUiAuthenticatedCaller>,
+    Path(project_id): Path<String>,
+    Json(mut body): Json<RebornUpdateProjectRequest>,
+) -> Result<Json<RebornProjectResponse>, WebUiV2HttpError> {
+    body.project_id = project_id;
+    let response = state.services().update_project(caller, body).await?;
+    Ok(Json(response))
+}
+
+/// `DELETE /api/webchat/v2/projects/{project_id}`
+pub async fn delete_project(
+    State(state): State<WebUiV2State>,
+    Extension(caller): Extension<WebUiAuthenticatedCaller>,
+    Path(project_id): Path<String>,
+) -> Result<StatusCode, WebUiV2HttpError> {
+    state
+        .services()
+        .delete_project(caller, RebornDeleteProjectRequest { project_id })
+        .await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// `GET /api/webchat/v2/projects/{project_id}/members`
+pub async fn list_project_members(
+    State(state): State<WebUiV2State>,
+    Extension(caller): Extension<WebUiAuthenticatedCaller>,
+    Path(project_id): Path<String>,
+) -> Result<Json<RebornListMembersResponse>, WebUiV2HttpError> {
+    let response = state
+        .services()
+        .list_project_members(caller, RebornListMembersRequest { project_id })
+        .await?;
+    Ok(Json(response))
+}
+
+/// `POST /api/webchat/v2/projects/{project_id}/members` — grant a member
+/// (path `project_id` overrides any body value).
+pub async fn add_project_member(
+    State(state): State<WebUiV2State>,
+    Extension(caller): Extension<WebUiAuthenticatedCaller>,
+    Path(project_id): Path<String>,
+    Json(mut body): Json<RebornAddMemberRequest>,
+) -> Result<Json<RebornProjectMemberInfo>, WebUiV2HttpError> {
+    body.project_id = project_id;
+    let response = state.services().add_project_member(caller, body).await?;
+    Ok(Json(response))
+}
+
+/// `POST /api/webchat/v2/projects/{project_id}/members/{user_id}` — change a
+/// member's role (path ids override any body value).
+pub async fn update_project_member(
+    State(state): State<WebUiV2State>,
+    Extension(caller): Extension<WebUiAuthenticatedCaller>,
+    Path((project_id, user_id)): Path<(String, String)>,
+    Json(mut body): Json<RebornUpdateMemberRoleRequest>,
+) -> Result<Json<RebornProjectMemberInfo>, WebUiV2HttpError> {
+    body.project_id = project_id;
+    body.user_id = user_id;
+    let response = state
+        .services()
+        .update_project_member_role(caller, body)
+        .await?;
+    Ok(Json(response))
+}
+
+/// `DELETE /api/webchat/v2/projects/{project_id}/members/{user_id}`
+pub async fn remove_project_member(
+    State(state): State<WebUiV2State>,
+    Extension(caller): Extension<WebUiAuthenticatedCaller>,
+    Path((project_id, user_id)): Path<(String, String)>,
+) -> Result<StatusCode, WebUiV2HttpError> {
+    state
+        .services()
+        .remove_project_member(
+            caller,
+            RebornRemoveMemberRequest {
+                project_id,
+                user_id,
+            },
+        )
+        .await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// Upper bound on the sanitized `Content-Disposition` filename. A filesystem can
+/// hold names far longer than is safe to splice into a header; cap well under
+/// typical header-size limits so an oversized name degrades to a truncated label
+/// rather than failing the whole download with a builder error (500).
+const MAX_DOWNLOAD_FILENAME_BYTES: usize = 200;
+
+/// Produce a `Content-Disposition` filename that cannot inject header bytes or
+/// path separators. Keeps a conservative set of characters and falls back to a
+/// neutral name when nothing safe survives.
+fn sanitized_download_filename(filename: Option<&str>) -> String {
+    let candidate: String = filename
+        .unwrap_or("download")
+        .chars()
+        .map(|c| match c {
+            'a'..='z' | 'A'..='Z' | '0'..='9' | '.' | '-' | '_' | ' ' => c,
+            _ => '_',
+        })
+        .collect();
+    // Bound the length on a char boundary (every retained char is ASCII here, so
+    // each is one byte) before trimming, so the cap can't leave a stray leading
+    // dot/space at the new end.
+    let bounded = if candidate.len() > MAX_DOWNLOAD_FILENAME_BYTES {
+        &candidate[..MAX_DOWNLOAD_FILENAME_BYTES]
+    } else {
+        candidate.as_str()
+    };
+    let trimmed = bounded.trim_matches([' ', '.']).to_string();
+    if trimmed.is_empty() {
+        "download".to_string()
+    } else {
+        trimmed
+    }
 }
 
 /// `GET /api/webchat/v2/threads/{thread_id}/messages/{message_id}/attachments/{attachment_id}`
@@ -492,7 +896,10 @@ pub struct ListThreadsQuery {
 /// Lists the caller-scoped schedule automations visible to the browser. The
 /// optional `?limit=N` and `?run_limit=N` queries are capped by the product
 /// workflow facade; the response is a single bounded page and does not include
-/// a cursor.
+/// a cursor. By default only active automations are returned; pass
+/// `?include_completed=true` to also include soft-completed (fire-once)
+/// automations. See [`ListAutomationsQuery`] for the full per-parameter parse
+/// behavior.
 pub async fn list_automations(
     State(state): State<WebUiV2State>,
     Extension(caller): Extension<WebUiAuthenticatedCaller>,
@@ -501,6 +908,7 @@ pub async fn list_automations(
     let request = WebUiListAutomationsRequest {
         limit: query.limit,
         run_limit: query.run_limit,
+        include_completed: query.include_completed,
     };
     let response = state.services().list_automations(caller, request).await?;
     Ok(Json(response))
@@ -514,6 +922,18 @@ pub struct ListAutomationsQuery {
     /// Optional maximum number of recent runs to return per automation row.
     #[serde(default)]
     pub run_limit: Option<u32>,
+    /// When `true`, soft-completed (fire-once) automations are included
+    /// alongside active ones.
+    ///
+    /// Parse behavior (via `serde_urlencoded` / axum `Query<T>`):
+    /// - **Absent** (`?` or no param): defaults to `false` (active-only).
+    /// - **`true`** / **`false`**: parsed as the corresponding boolean.
+    /// - **Malformed** (e.g. `?include_completed=garbage`): deserialization
+    ///   fails at the `Query` extractor and the request is rejected with
+    ///   `400 Bad Request` before the handler runs. There is no silent
+    ///   fallback to `false` for unparseable values.
+    #[serde(default)]
+    pub include_completed: bool,
 }
 
 /// `GET /api/webchat/v2/traces/credit`
@@ -1362,5 +1782,90 @@ async fn ws_send_with_timeout(
             );
             Err(())
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sanitized_filename_neutralizes_header_injection() {
+        // Quote + CRLF injection attempts collapse to underscores so nothing can
+        // break out of the quoted `Content-Disposition` value or inject a header.
+        assert_eq!(
+            sanitized_download_filename(Some("a\"; rm -rf /.txt")),
+            "a__ rm -rf _.txt"
+        );
+        assert_eq!(
+            sanitized_download_filename(Some("evil\r\nSet-Cookie: x.csv")),
+            "evil__Set-Cookie_ x.csv"
+        );
+        // Path separators never survive — a download can't address another dir.
+        // (Leading dots are also trimmed, so a `../` prefix can't linger.)
+        assert_eq!(
+            sanitized_download_filename(Some("../../etc/passwd")),
+            "_.._etc_passwd"
+        );
+    }
+
+    #[test]
+    fn sanitized_filename_falls_back_to_neutral_name() {
+        assert_eq!(sanitized_download_filename(None), "download");
+        // A dots/spaces-only name trims to empty and falls back to the neutral
+        // name (illegal non-space chars instead map to `_` and survive).
+        assert_eq!(sanitized_download_filename(Some("   ...  ")), "download");
+        // A normal name is preserved verbatim.
+        assert_eq!(
+            sanitized_download_filename(Some("report.csv")),
+            "report.csv"
+        );
+    }
+
+    #[test]
+    fn sanitized_filename_is_length_capped() {
+        let long = format!("{}.csv", "a".repeat(500));
+        let out = sanitized_download_filename(Some(&long));
+        assert!(
+            out.len() <= MAX_DOWNLOAD_FILENAME_BYTES,
+            "filename must be capped, got {} bytes",
+            out.len()
+        );
+    }
+
+    #[test]
+    fn require_project_fs_path_rejects_missing_or_blank() {
+        assert!(require_project_fs_path(None).is_err());
+        assert!(require_project_fs_path(Some(String::new())).is_err());
+        assert!(require_project_fs_path(Some("   ".to_string())).is_err());
+    }
+
+    #[test]
+    fn require_project_fs_path_accepts_non_blank() {
+        assert_eq!(
+            require_project_fs_path(Some("/workspace/report.csv".to_string()))
+                .expect("non-blank path is accepted"),
+            "/workspace/report.csv"
+        );
+    }
+
+    #[test]
+    fn project_fs_list_path_defaults_root_for_missing_or_blank() {
+        // Absent, empty, and whitespace-only all mean "list the workspace root"
+        // rather than forwarding a bogus path the facade would reject.
+        assert_eq!(project_fs_list_path(None), PROJECT_FS_ROOT);
+        assert_eq!(project_fs_list_path(Some(String::new())), PROJECT_FS_ROOT);
+        assert_eq!(
+            project_fs_list_path(Some("   ".to_string())),
+            PROJECT_FS_ROOT
+        );
+    }
+
+    #[test]
+    fn project_fs_list_path_preserves_explicit_path() {
+        assert_eq!(
+            project_fs_list_path(Some("/workspace/sub".to_string())),
+            "/workspace/sub"
+        );
     }
 }
