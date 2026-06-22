@@ -516,6 +516,15 @@ pub enum TriggerState {
     Completed,
 }
 
+fn validate_user_settable_trigger_state(state: TriggerState) -> Result<(), TriggerError> {
+    match state {
+        TriggerState::Scheduled | TriggerState::Paused => Ok(()),
+        TriggerState::Completed => Err(TriggerError::InvalidRecord {
+            reason: "completed is a terminal trigger state and cannot be set directly".to_string(),
+        }),
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum TriggerRunStatus {
@@ -932,6 +941,23 @@ pub trait TriggerRepository: Send + Sync {
         trigger_id: TriggerId,
     ) -> Result<Option<TriggerRecord>, TriggerError>;
 
+    /// Sets the lifecycle state for a caller-scoped trigger.
+    ///
+    /// This user-facing mutation may only set non-terminal states
+    /// (`Scheduled` or `Paused`). A stored `Completed` trigger is terminal and
+    /// must not be moved back into the scheduler by this method; implementations
+    /// return `Ok(None)` for that case so callers do not leak trigger existence
+    /// across invalid lifecycle transitions.
+    async fn set_scoped_trigger_state(
+        &self,
+        tenant_id: TenantId,
+        creator_user_id: UserId,
+        agent_id: Option<AgentId>,
+        project_id: Option<ProjectId>,
+        trigger_id: TriggerId,
+        state: TriggerState,
+    ) -> Result<Option<TriggerRecord>, TriggerError>;
+
     /// Lists due triggers across all tenants for the trusted poller path.
     ///
     /// # Safety / Authorization
@@ -1244,6 +1270,32 @@ impl TriggerRepository for InMemoryTriggerRepository {
             return Ok(None);
         }
         Ok(state.records.remove(&key))
+    }
+
+    async fn set_scoped_trigger_state(
+        &self,
+        tenant_id: TenantId,
+        creator_user_id: UserId,
+        agent_id: Option<AgentId>,
+        project_id: Option<ProjectId>,
+        trigger_id: TriggerId,
+        new_state: TriggerState,
+    ) -> Result<Option<TriggerRecord>, TriggerError> {
+        validate_user_settable_trigger_state(new_state)?;
+        let mut state = self.lock_state()?;
+        let key = TriggerRepositoryKey::new(&tenant_id, trigger_id);
+        let Some(record) = state.records.get_mut(&key) else {
+            return Ok(None);
+        };
+        if record.creator_user_id != creator_user_id
+            || record.agent_id != agent_id
+            || record.project_id != project_id
+            || record.state == TriggerState::Completed
+        {
+            return Ok(None);
+        }
+        record.state = new_state;
+        Ok(Some(record.clone()))
     }
 
     async fn list_due_triggers(

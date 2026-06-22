@@ -937,6 +937,115 @@ async fn assert_persists_trigger_state_fire_gate(repo: &impl TriggerRepository) 
     assert_eq!(due_records[0].trigger_id, trigger_id);
 }
 
+async fn assert_scoped_state_transition_controls_fire_eligibility(repo: &impl TriggerRepository) {
+    let trigger_id = TriggerId::parse("01J00000000000000000000003").expect("ulid");
+    let tenant_id = tenant("tenant-a");
+    let record = sample_record(trigger_id, tenant_id.clone(), ts(1_704_067_200));
+    repo.upsert_trigger(record.clone())
+        .await
+        .expect("insert scheduled trigger");
+
+    let wrong_scope = repo
+        .set_scoped_trigger_state(
+            tenant_id.clone(),
+            user("user-a"),
+            Some(AgentId::new("agent-other").expect("valid agent")),
+            Some(ProjectId::new("project-a").expect("valid project")),
+            trigger_id,
+            TriggerState::Paused,
+        )
+        .await
+        .expect("wrong-scope pause");
+    assert_eq!(wrong_scope, None);
+    assert_eq!(
+        repo.get_trigger(tenant_id.clone(), trigger_id)
+            .await
+            .expect("get after wrong-scope pause")
+            .expect("record")
+            .state,
+        TriggerState::Scheduled
+    );
+
+    let paused = repo
+        .set_scoped_trigger_state(
+            tenant_id.clone(),
+            user("user-a"),
+            Some(AgentId::new("agent-a").expect("valid agent")),
+            Some(ProjectId::new("project-a").expect("valid project")),
+            trigger_id,
+            TriggerState::Paused,
+        )
+        .await
+        .expect("matching-scope pause")
+        .expect("paused record");
+    assert_eq!(paused.state, TriggerState::Paused);
+    assert!(
+        repo.list_due_triggers(ts(1_704_067_200), 10)
+            .await
+            .expect("list due after pause")
+            .is_empty()
+    );
+
+    let resumed = repo
+        .set_scoped_trigger_state(
+            tenant_id.clone(),
+            user("user-a"),
+            Some(AgentId::new("agent-a").expect("valid agent")),
+            Some(ProjectId::new("project-a").expect("valid project")),
+            trigger_id,
+            TriggerState::Scheduled,
+        )
+        .await
+        .expect("matching-scope resume")
+        .expect("resumed record");
+    assert_eq!(resumed.state, TriggerState::Scheduled);
+    let due_records = repo
+        .list_due_triggers(ts(1_704_067_200), 10)
+        .await
+        .expect("list due after resume");
+    assert_eq!(due_records.len(), 1);
+    assert_eq!(due_records[0].trigger_id, trigger_id);
+
+    assert!(matches!(
+        repo.set_scoped_trigger_state(
+            tenant_id.clone(),
+            user("user-a"),
+            Some(AgentId::new("agent-a").expect("valid agent")),
+            Some(ProjectId::new("project-a").expect("valid project")),
+            trigger_id,
+            TriggerState::Completed,
+        )
+        .await,
+        Err(TriggerError::InvalidRecord { .. })
+    ));
+
+    let mut completed = record;
+    completed.state = TriggerState::Completed;
+    repo.upsert_trigger(completed)
+        .await
+        .expect("mark trigger completed");
+    let completed_resume = repo
+        .set_scoped_trigger_state(
+            tenant_id.clone(),
+            user("user-a"),
+            Some(AgentId::new("agent-a").expect("valid agent")),
+            Some(ProjectId::new("project-a").expect("valid project")),
+            trigger_id,
+            TriggerState::Scheduled,
+        )
+        .await
+        .expect("completed resume");
+    assert_eq!(completed_resume, None);
+    assert_eq!(
+        repo.get_trigger(tenant_id, trigger_id)
+            .await
+            .expect("get completed after resume attempt")
+            .expect("completed record")
+            .state,
+        TriggerState::Completed
+    );
+}
+
 #[cfg(feature = "libsql")]
 async fn build_libsql_repo_with_db() -> (
     tempfile::TempDir,
@@ -991,6 +1100,9 @@ async fn libsql_repository_contract_parity() {
 
     let (_dir, repo) = build_libsql_repo().await;
     assert_persists_trigger_state_fire_gate(&repo).await;
+
+    let (_dir, repo) = build_libsql_repo().await;
+    assert_scoped_state_transition_controls_fire_eligibility(&repo).await;
 }
 
 #[cfg(feature = "libsql")]
@@ -1086,6 +1198,9 @@ async fn postgres_repository_contract_parity() {
 
     clear_postgres_triggers(&pool).await;
     assert_persists_trigger_state_fire_gate(&repo).await;
+
+    clear_postgres_triggers(&pool).await;
+    assert_scoped_state_transition_controls_fire_eligibility(&repo).await;
 }
 
 #[cfg(feature = "postgres")]
