@@ -12,12 +12,13 @@ mod poller_contract {
         GithubIssueWorkflowError, GithubIssueWorkflowEventType, GithubIssueWorkflowPolicyPorts,
         GithubIssueWorkflowPoller, GithubIssueWorkflowPollerConfig, GithubIssueWorkflowPollerPorts,
         GithubIssueWorkflowPort, GithubIssueWorkflowRepository, GithubIssueWorkflowRun,
-        GithubProviderAccountRef, GithubRepositorySelector, InMemoryGithubIssueWorkflowRepository,
-        ListIssueCommentsInput, PrepareWorkflowWorkspaceOutcome, PrepareWorkflowWorkspaceRequest,
-        SearchGithubIssuesInput, StageTurnSubmitter, SubmitStageTurnOutcome,
-        SubmitStageTurnRequest, WorkflowClock, WorkflowConfigAccessRequest, WorkflowProjectAccess,
-        WorkflowProjectAccessRequest, WorkflowWorkerId, WorkflowWorkspaceManager,
-        WorkflowWorkspaceMountRef, WorkflowWorkspaceRef,
+        GithubIssueWorkspaceSession, GithubIssueWorkspaceSessionId, GithubProviderAccountRef,
+        GithubRepositorySelector, InMemoryGithubIssueWorkflowRepository, ListIssueCommentsInput,
+        PrepareWorkflowWorkspaceOutcome, PrepareWorkflowWorkspaceRequest, SearchGithubIssuesInput,
+        StageTurnSubmitter, SubmitStageTurnOutcome, SubmitStageTurnRequest, WorkflowClock,
+        WorkflowConfigAccessRequest, WorkflowProjectAccess, WorkflowProjectAccessRequest,
+        WorkflowWorkerId, WorkflowWorkspaceManager, WorkflowWorkspaceMountRef,
+        WorkflowWorkspaceRef,
     };
     use ironclaw_host_api::{ProjectId, TenantId, ThreadId, UserId};
     use ironclaw_turns::TurnRunId;
@@ -426,18 +427,33 @@ mod poller_contract {
     impl WorkflowWorkspaceManager for FakeWorkspaceManager {
         async fn prepare_workspace(
             &self,
-            _request: PrepareWorkflowWorkspaceRequest,
+            request: PrepareWorkflowWorkspaceRequest,
         ) -> Result<PrepareWorkflowWorkspaceOutcome, GithubIssueWorkflowError> {
+            let workspace_session_id =
+                GithubIssueWorkspaceSessionId::from_trusted("poller-workspace-session".to_string())
+                    .unwrap();
             Ok(PrepareWorkflowWorkspaceOutcome {
-                workspace_session_id: Default::default(),
-                workspace_ref: WorkflowWorkspaceRef {
-                    thread_id: None,
-                    workspace_session_id: None,
-                    turn_run_id: None,
-                },
-                mount_ref: WorkflowWorkspaceMountRef {
-                    mount_id: "mount-poller".to_string(),
-                    alias: "/workspace".to_string(),
+                session: GithubIssueWorkspaceSession {
+                    workspace_session_id: workspace_session_id.clone(),
+                    workflow_run_id: request.workflow_run_id,
+                    repository: GithubRepositorySelector {
+                        owner: request.issue.owner,
+                        repo: request.issue.repo,
+                    },
+                    base_branch: request.base_branch,
+                    base_sha: None,
+                    working_branch: "ironclaw/poller-workspace-session".to_string(),
+                    current_head_sha: None,
+                    workspace_ref: WorkflowWorkspaceRef {
+                        thread_id: None,
+                        workspace_session_id: Some(workspace_session_id),
+                        turn_run_id: None,
+                    },
+                    mount_ref: WorkflowWorkspaceMountRef {
+                        mount_id: "mount-poller".to_string(),
+                        alias: "/workspace".to_string(),
+                    },
+                    created_at: request.requested_at,
                 },
             })
         }

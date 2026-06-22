@@ -1,10 +1,12 @@
+use chrono::{DateTime, Utc};
 use ironclaw_host_api::{AgentId, ProjectId, TenantId, ThreadId, Timestamp, UserId};
 use ironclaw_turns::TurnRunId;
 use serde::{Deserialize, Serialize};
 
 use crate::{
     GithubIssueStageRunId, GithubIssueWorkflowRunId, GithubIssueWorkflowRunKey,
-    GithubIssueWorkspaceSessionId, WorkflowWorkerId,
+    GithubIssueWorkspaceSessionId, GithubRepositorySelector, WorkflowWorkerId,
+    WorkflowWorkspaceMountRef,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -78,6 +80,20 @@ pub struct WorkflowWorkspaceRef {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GithubIssueWorkspaceSession {
+    pub workspace_session_id: GithubIssueWorkspaceSessionId,
+    pub workflow_run_id: GithubIssueWorkflowRunId,
+    pub repository: GithubRepositorySelector,
+    pub base_branch: String,
+    pub base_sha: Option<String>,
+    pub working_branch: String,
+    pub current_head_sha: Option<String>,
+    pub workspace_ref: WorkflowWorkspaceRef,
+    pub mount_ref: WorkflowWorkspaceMountRef,
+    pub created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum GithubIssueBlockKind {
     WaitingApproval,
@@ -125,7 +141,10 @@ pub struct GithubIssueWorkflowState {
     pub plan: Vec<GithubIssuePlanItem>,
     pub primary_pr: Option<GithubPullRequestRef>,
     pub claim_comment: Option<GithubCommentRef>,
+    #[serde(default)]
     pub current_workspace_ref: Option<WorkflowWorkspaceRef>,
+    #[serde(default)]
+    pub current_workspace_mount_ref: Option<WorkflowWorkspaceMountRef>,
     pub last_provider_watermarks: GithubProviderWatermarks,
 }
 
@@ -138,6 +157,7 @@ impl GithubIssueWorkflowState {
             primary_pr: None,
             claim_comment: None,
             current_workspace_ref: None,
+            current_workspace_mount_ref: None,
             last_provider_watermarks: GithubProviderWatermarks::default(),
         }
     }

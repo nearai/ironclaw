@@ -1,4 +1,4 @@
-mod policy_contract {
+mod workspace_stage_contract {
     use std::collections::VecDeque;
     use std::sync::{Arc, Mutex as StdMutex};
 
@@ -11,15 +11,14 @@ mod policy_contract {
         GithubIssueStage, GithubIssueWorkflowError, GithubIssueWorkflowEventType,
         GithubIssueWorkflowMode, GithubIssueWorkflowPolicy, GithubIssueWorkflowPolicyPorts,
         GithubIssueWorkflowPort, GithubIssueWorkflowRepository, GithubIssueWorkflowRun,
-        GithubIssueWorkflowRunStatus, GithubIssueWorkspaceSession, GithubIssueWorkspaceSessionId,
-        GithubProviderRef, GithubRepositorySelector, InMemoryGithubIssueWorkflowRepository,
-        ListIssueCommentsInput, PrepareWorkflowWorkspaceOutcome, PrepareWorkflowWorkspaceRequest,
-        RecordWorkflowEventInput, RecordWorkflowEventOutcome, StageCompletedPayload,
-        StageTurnSubmitter, SubmitStageTurnOutcome, SubmitStageTurnRequest, WorkflowClock,
-        WorkflowEventEnvelope, WorkflowEventSourceKind, WorkflowProjectAccess,
-        WorkflowProjectAccessRequest, WorkflowStepStatus, WorkflowWorkerId,
-        WorkflowWorkspaceManager, WorkflowWorkspaceMountRef, WorkflowWorkspaceRef,
-        issue_binding_ref, issue_discovered_key, stage_result_reported_key,
+        GithubIssueWorkspaceSession, GithubIssueWorkspaceSessionId, GithubProviderRef,
+        GithubRepositorySelector, InMemoryGithubIssueWorkflowRepository, ListIssueCommentsInput,
+        PrepareWorkflowWorkspaceOutcome, PrepareWorkflowWorkspaceRequest, RecordWorkflowEventInput,
+        RecordWorkflowEventOutcome, StageCompletedPayload, StageTurnSubmitter,
+        SubmitStageTurnOutcome, SubmitStageTurnRequest, WorkflowClock, WorkflowEventEnvelope,
+        WorkflowEventSourceKind, WorkflowProjectAccess, WorkflowProjectAccessRequest,
+        WorkflowStepStatus, WorkflowWorkerId, WorkflowWorkspaceManager, WorkflowWorkspaceMountRef,
+        WorkflowWorkspaceRef, issue_binding_ref, issue_discovered_key, stage_result_reported_key,
     };
     use ironclaw_host_api::{AgentId, ProjectId, TenantId, ThreadId, UserId};
     use ironclaw_turns::TurnRunId;
@@ -31,23 +30,23 @@ mod policy_contract {
     }
 
     fn tenant() -> TenantId {
-        TenantId::new("tenant-policy-contract").unwrap()
+        TenantId::new("tenant-workspace-contract").unwrap()
     }
 
     fn user() -> UserId {
-        UserId::new("user-policy-contract").unwrap()
+        UserId::new("user-workspace-contract").unwrap()
     }
 
     fn agent() -> AgentId {
-        AgentId::new("agent-policy-contract").unwrap()
+        AgentId::new("agent-workspace-contract").unwrap()
     }
 
     fn project() -> ProjectId {
-        ProjectId::new("project-policy-contract").unwrap()
+        ProjectId::new("project-workspace-contract").unwrap()
     }
 
     fn worker() -> WorkflowWorkerId {
-        WorkflowWorkerId::from_trusted("policy-contract-worker".to_string()).unwrap()
+        WorkflowWorkerId::from_trusted("workspace-contract-worker".to_string()).unwrap()
     }
 
     fn issue() -> GithubIssueRef {
@@ -74,7 +73,7 @@ mod policy_contract {
                 "next_actions": [],
                 "payload": {
                     "is_reproducible": true,
-                    "suspected_area": "github_issue_workflow",
+                    "suspected_area": "workspace",
                     "risk": "medium",
                     "recommended_next_stage": "planning"
                 }
@@ -85,7 +84,7 @@ mod policy_contract {
                 "evidence": [],
                 "next_actions": [],
                 "payload": {
-                    "plan_items": ["implement the fix"],
+                    "plan_items": ["prepare workspace", "implement fix"],
                     "files_to_inspect_or_change": ["src/lib.rs"],
                     "test_strategy": "cargo test",
                     "confidence": 0.9
@@ -110,6 +109,24 @@ mod policy_contract {
             GithubIssueStage::CiRepair => "ci_repair.v1",
             GithubIssueStage::ReviewResponse => "review_response.v1",
         }
+    }
+
+    async fn planning_completed_run(
+        policy: &GithubIssueWorkflowPolicy<FakePolicyPorts>,
+    ) -> GithubIssueWorkflowRun {
+        let run = create_claimed_run(&policy.ports().repository).await;
+        record_issue_discovered(&policy.ports().repository, &run).await;
+        let triage = policy.tick(run).await.unwrap().run;
+        let after_triage =
+            complete_active_stage(&policy.ports().repository, triage, GithubIssueStage::Triage)
+                .await;
+        let planning = policy.tick(after_triage).await.unwrap().run;
+        complete_active_stage(
+            &policy.ports().repository,
+            planning,
+            GithubIssueStage::Planning,
+        )
+        .await
     }
 
     async fn create_claimed_run(
@@ -260,23 +277,10 @@ mod policy_contract {
         }
     }
 
-    #[derive(Debug)]
+    #[derive(Debug, Default)]
     struct FakeGithubPort {
         comments: Mutex<Vec<GithubIssueCommentSnapshot>>,
         created_bodies: Mutex<Vec<String>>,
-    }
-
-    impl FakeGithubPort {
-        fn new() -> Self {
-            Self {
-                comments: Mutex::new(Vec::new()),
-                created_bodies: Mutex::new(Vec::new()),
-            }
-        }
-
-        async fn created_body_count(&self) -> usize {
-            self.created_bodies.lock().await.len()
-        }
     }
 
     #[async_trait]
@@ -311,53 +315,37 @@ mod policy_contract {
         }
     }
 
-    #[derive(Debug)]
-    struct FakeProjectAccess {
-        allowed: bool,
-        requests: Mutex<Vec<WorkflowProjectAccessRequest>>,
-    }
-
-    impl FakeProjectAccess {
-        fn allow() -> Self {
-            Self {
-                allowed: true,
-                requests: Mutex::new(Vec::new()),
-            }
-        }
-
-        fn deny() -> Self {
-            Self {
-                allowed: false,
-                requests: Mutex::new(Vec::new()),
-            }
-        }
-    }
+    #[derive(Debug, Default)]
+    struct FakeProjectAccess;
 
     #[async_trait]
     impl WorkflowProjectAccess for FakeProjectAccess {
         async fn assert_workflow_project_access(
             &self,
-            request: WorkflowProjectAccessRequest,
+            _request: WorkflowProjectAccessRequest,
         ) -> Result<(), GithubIssueWorkflowError> {
-            self.requests.lock().await.push(request);
-            if self.allowed {
-                return Ok(());
-            }
-            Err(GithubIssueWorkflowError::PolicyDenied {
-                reason: "project access denied".to_string(),
-            })
+            Ok(())
         }
     }
 
     #[derive(Debug)]
     struct FakeWorkspaceManager {
         requests: Mutex<Vec<PrepareWorkflowWorkspaceRequest>>,
+        failures_remaining: Mutex<usize>,
     }
 
     impl FakeWorkspaceManager {
         fn new() -> Self {
             Self {
                 requests: Mutex::new(Vec::new()),
+                failures_remaining: Mutex::new(0),
+            }
+        }
+
+        fn fail_once() -> Self {
+            Self {
+                requests: Mutex::new(Vec::new()),
+                failures_remaining: Mutex::new(1),
             }
         }
 
@@ -373,8 +361,17 @@ mod policy_contract {
             request: PrepareWorkflowWorkspaceRequest,
         ) -> Result<PrepareWorkflowWorkspaceOutcome, GithubIssueWorkflowError> {
             self.requests.lock().await.push(request.clone());
+            let mut failures_remaining = self.failures_remaining.lock().await;
+            if *failures_remaining > 0 {
+                *failures_remaining -= 1;
+                return Err(GithubIssueWorkflowError::Repository {
+                    reason: "workspace backend unavailable".to_string(),
+                });
+            }
+            drop(failures_remaining);
+
             let workspace_session_id =
-                GithubIssueWorkspaceSessionId::from_trusted("workspace-session-1".to_string())
+                GithubIssueWorkspaceSessionId::from_trusted("workspace-session-42".to_string())
                     .unwrap();
             Ok(PrepareWorkflowWorkspaceOutcome {
                 session: GithubIssueWorkspaceSession {
@@ -385,16 +382,16 @@ mod policy_contract {
                         repo: request.issue.repo,
                     },
                     base_branch: request.base_branch,
-                    base_sha: Some("base-sha-1".to_string()),
-                    working_branch: "ironclaw/workspace-session-1".to_string(),
-                    current_head_sha: None,
+                    base_sha: Some("base-sha-42".to_string()),
+                    working_branch: "ironclaw/workspace-session-42".to_string(),
+                    current_head_sha: Some("head-sha-42".to_string()),
                     workspace_ref: WorkflowWorkspaceRef {
-                        thread_id: None,
+                        thread_id: Some(ThreadId::new("workspace-thread-42").unwrap()),
                         workspace_session_id: Some(workspace_session_id),
-                        turn_run_id: None,
+                        turn_run_id: Some(TurnRunId::new()),
                     },
                     mount_ref: WorkflowWorkspaceMountRef {
-                        mount_id: "mount-1".to_string(),
+                        mount_id: "workspace-mount-42".to_string(),
                         alias: "/workspace".to_string(),
                     },
                     created_at: request.requested_at,
@@ -414,15 +411,6 @@ mod policy_contract {
             Self {
                 requests: Mutex::new(Vec::new()),
                 outcomes: Mutex::new(VecDeque::new()),
-            }
-        }
-
-        fn busy_once() -> Self {
-            Self {
-                requests: Mutex::new(Vec::new()),
-                outcomes: Mutex::new(VecDeque::from([SubmitStageTurnOutcome::Busy {
-                    reason: "thread busy".to_string(),
-                }])),
             }
         }
 
@@ -446,7 +434,7 @@ mod policy_contract {
                 return Ok(outcome);
             }
             Ok(SubmitStageTurnOutcome::Submitted {
-                thread_id: ThreadId::new(format!("thread-policy-{request_count}")).unwrap(),
+                thread_id: ThreadId::new(format!("thread-workspace-{request_count}")).unwrap(),
                 turn_run_id: TurnRunId::new(),
             })
         }
@@ -461,23 +449,6 @@ mod policy_contract {
         workspace: Arc<FakeWorkspaceManager>,
         clock: Arc<FakeClock>,
         worker_id: WorkflowWorkerId,
-    }
-
-    impl FakePolicyPorts {
-        fn new(
-            stage_turns: Arc<FakeStageTurnSubmitter>,
-            project_access: Arc<FakeProjectAccess>,
-        ) -> Self {
-            Self {
-                repository: Arc::new(InMemoryGithubIssueWorkflowRepository::default()),
-                github: Arc::new(FakeGithubPort::new()),
-                stage_turns,
-                project_access,
-                workspace: Arc::new(FakeWorkspaceManager::new()),
-                clock: Arc::new(FakeClock::new(fixed_time(30))),
-                worker_id: worker(),
-            }
-        }
     }
 
     impl GithubIssueWorkflowPolicyPorts for FakePolicyPorts {
@@ -517,193 +488,131 @@ mod policy_contract {
         }
     }
 
-    fn policy(
-        stage_turns: Arc<FakeStageTurnSubmitter>,
-        project_access: Arc<FakeProjectAccess>,
+    fn policy_with_workspace(
+        workspace: Arc<FakeWorkspaceManager>,
     ) -> GithubIssueWorkflowPolicy<FakePolicyPorts> {
         GithubIssueWorkflowPolicy::new(
-            FakePolicyPorts::new(stage_turns, project_access),
-            "policy-contract-v1",
+            FakePolicyPorts {
+                repository: Arc::new(InMemoryGithubIssueWorkflowRepository::default()),
+                github: Arc::new(FakeGithubPort::default()),
+                stage_turns: Arc::new(FakeStageTurnSubmitter::accepting()),
+                project_access: Arc::new(FakeProjectAccess),
+                workspace,
+                clock: Arc::new(FakeClock::new(fixed_time(30))),
+                worker_id: worker(),
+            },
+            "workspace-contract-v1",
         )
     }
 
     #[tokio::test]
-    async fn issue_discovered_claims_then_starts_triage_once() {
-        let stage_turns = Arc::new(FakeStageTurnSubmitter::accepting());
-        let project_access = Arc::new(FakeProjectAccess::allow());
-        let policy = policy(stage_turns.clone(), project_access);
-        let run = create_claimed_run(&policy.ports().repository).await;
-        record_issue_discovered(&policy.ports().repository, &run).await;
+    async fn planning_completion_prepares_workspace_once() {
+        let workspace = Arc::new(FakeWorkspaceManager::new());
+        let policy = policy_with_workspace(workspace.clone());
+        let after_planning = planning_completed_run(&policy).await;
 
-        let outcome = policy.tick(run).await.unwrap();
+        let first = policy.tick(after_planning.clone()).await.unwrap();
+        let second = policy.tick(after_planning).await.unwrap();
 
-        assert_eq!(policy.ports().github.created_body_count().await, 1);
+        assert_eq!(first.processed_event_count, 1);
+        assert_eq!(second.processed_event_count, 1);
+        assert_eq!(workspace.request_count().await, 1);
         assert_eq!(
-            outcome.run.workflow_state.mode,
-            GithubIssueWorkflowMode::Claimed
-        );
-        assert!(outcome.run.active_stage_run_id.is_some());
-        let requests = stage_turns.requests().await;
-        assert_eq!(requests.len(), 1);
-        assert_eq!(
-            requests[0].stage_turn_identity.stage,
-            GithubIssueStage::Triage
-        );
-        assert_eq!(
-            requests[0].stage_turn_identity.thread_id_seed(),
-            format!(
-                "github-issue-workflow:{}:stage:{}",
-                outcome.run.workflow_run_id,
-                outcome.run.active_stage_run_id.as_ref().unwrap()
-            )
-        );
-        assert!(
-            requests[0]
-                .stage_turn_identity
-                .completion_nonce()
-                .starts_with("stage-completion:")
+            first.run.workflow_state.mode,
+            GithubIssueWorkflowMode::Implementation
         );
     }
 
     #[tokio::test]
-    async fn policy_tick_replays_completed_claim_step_without_second_comment() {
-        let stage_turns = Arc::new(FakeStageTurnSubmitter::accepting());
-        let project_access = Arc::new(FakeProjectAccess::allow());
-        let policy = policy(stage_turns.clone(), project_access);
-        let run = create_claimed_run(&policy.ports().repository).await;
-        record_issue_discovered(&policy.ports().repository, &run).await;
-
-        policy.tick(run.clone()).await.unwrap();
-        policy.tick(run).await.unwrap();
-
-        assert_eq!(policy.ports().github.created_body_count().await, 1);
-        assert_eq!(stage_turns.requests().await.len(), 1);
-    }
-
-    #[tokio::test]
-    async fn triage_completion_starts_planning_stage() {
-        let stage_turns = Arc::new(FakeStageTurnSubmitter::accepting());
-        let project_access = Arc::new(FakeProjectAccess::allow());
-        let policy = policy(stage_turns.clone(), project_access);
-        let run = create_claimed_run(&policy.ports().repository).await;
-        record_issue_discovered(&policy.ports().repository, &run).await;
-        let triage = policy.tick(run).await.unwrap().run;
-        let after_triage =
-            complete_active_stage(&policy.ports().repository, triage, GithubIssueStage::Triage)
-                .await;
-
-        let outcome = policy.tick(after_triage).await.unwrap();
-
-        assert_eq!(
-            outcome.run.workflow_state.mode,
-            GithubIssueWorkflowMode::Planning
-        );
-        assert!(outcome.run.active_stage_run_id.is_some());
-        let requests = stage_turns.requests().await;
-        assert_eq!(requests.len(), 2);
-        assert_eq!(
-            requests.last().unwrap().stage_turn_identity.stage,
-            GithubIssueStage::Planning
-        );
-    }
-
-    #[tokio::test]
-    async fn planning_completion_prepares_workspace_then_starts_implementation() {
-        let stage_turns = Arc::new(FakeStageTurnSubmitter::accepting());
-        let project_access = Arc::new(FakeProjectAccess::allow());
-        let policy = policy(stage_turns.clone(), project_access);
-        let run = create_claimed_run(&policy.ports().repository).await;
-        record_issue_discovered(&policy.ports().repository, &run).await;
-        let triage = policy.tick(run).await.unwrap().run;
-        let after_triage =
-            complete_active_stage(&policy.ports().repository, triage, GithubIssueStage::Triage)
-                .await;
-        let planning = policy.tick(after_triage).await.unwrap().run;
-        let after_planning = complete_active_stage(
-            &policy.ports().repository,
-            planning,
-            GithubIssueStage::Planning,
-        )
-        .await;
+    async fn workspace_ref_not_raw_host_path() {
+        let workspace = Arc::new(FakeWorkspaceManager::new());
+        let policy = policy_with_workspace(workspace);
+        let after_planning = planning_completed_run(&policy).await;
 
         let outcome = policy.tick(after_planning).await.unwrap();
 
-        assert_eq!(
-            outcome.run.workflow_state.mode,
-            GithubIssueWorkflowMode::Implementation
+        let workspace_ref = outcome
+            .run
+            .workflow_state
+            .current_workspace_ref
+            .as_ref()
+            .expect("workspace ref must be stored on run state");
+        assert!(workspace_ref.thread_id.is_some());
+        assert!(workspace_ref.workspace_session_id.is_some());
+        assert!(workspace_ref.turn_run_id.is_some());
+        let mount = outcome
+            .run
+            .workflow_state
+            .current_workspace_mount_ref
+            .as_ref()
+            .expect("workspace mount ref must be stored on run state");
+        assert_eq!(mount.alias, "/workspace");
+        assert!(
+            !mount.mount_id.starts_with('/'),
+            "mount id must be an opaque ref, not a host path"
         );
-        assert_eq!(policy.ports().workspace.request_count().await, 1);
-        assert!(outcome.run.workspace_session_id.is_some());
-        let requests = stage_turns.requests().await;
-        assert_eq!(requests.len(), 3);
-        let implementation_request = requests.last().unwrap();
+    }
+
+    #[tokio::test]
+    async fn implementation_stage_receives_mount_ref() {
+        let workspace = Arc::new(FakeWorkspaceManager::new());
+        let policy = policy_with_workspace(workspace);
+        let after_planning = planning_completed_run(&policy).await;
+
+        policy.tick(after_planning).await.unwrap();
+
+        let requests = policy.ports().stage_turns.requests().await;
+        let implementation = requests.last().expect("implementation request");
         assert_eq!(
-            implementation_request.stage_turn_identity.stage,
+            implementation.stage_turn_identity.stage,
             GithubIssueStage::Implementation
         );
         assert_eq!(
-            implementation_request
+            implementation
                 .workspace_mount_ref
                 .as_ref()
                 .map(|mount| mount.alias.as_str()),
             Some("/workspace")
         );
+        assert!(implementation.prompt.content.contains("/workspace"));
+        assert!(implementation.prompt.content.contains("main"));
+        assert!(
+            !implementation.prompt.content.contains("/tmp/"),
+            "implementation prompt must not contain raw host temp paths"
+        );
     }
 
     #[tokio::test]
-    async fn project_access_denial_blocks_run_without_stage_submission() {
-        let stage_turns = Arc::new(FakeStageTurnSubmitter::accepting());
-        let project_access = Arc::new(FakeProjectAccess::deny());
-        let policy = policy(stage_turns.clone(), project_access);
-        let run = create_claimed_run(&policy.ports().repository).await;
-        record_issue_discovered(&policy.ports().repository, &run).await;
+    async fn workspace_prepare_failure_blocks_run_retryably() {
+        let workspace = Arc::new(FakeWorkspaceManager::fail_once());
+        let policy = policy_with_workspace(workspace.clone());
+        let after_planning = planning_completed_run(&policy).await;
 
-        let outcome = policy.tick(run).await.unwrap();
+        let blocked = policy.tick(after_planning.clone()).await.unwrap();
 
-        assert_eq!(outcome.run.status, GithubIssueWorkflowRunStatus::Blocked);
-        assert!(outcome.run.workflow_state.active_block.is_some());
-        assert!(outcome.run.active_stage_run_id.is_none());
-        assert!(stage_turns.requests().await.is_empty());
-    }
-
-    #[tokio::test]
-    async fn turn_submission_busy_keeps_stage_active_without_duplicate_submit() {
-        let stage_turns = Arc::new(FakeStageTurnSubmitter::busy_once());
-        let project_access = Arc::new(FakeProjectAccess::allow());
-        let policy = policy(stage_turns.clone(), project_access);
-        let run = create_claimed_run(&policy.ports().repository).await;
-        record_issue_discovered(&policy.ports().repository, &run).await;
-
-        let first = policy.tick(run).await.unwrap();
-        let immediate_replay = policy.tick(first.run.clone()).await.unwrap();
-
-        assert!(first.run.active_stage_run_id.is_some());
-        assert_eq!(first.run.event_cursor, 0);
-        let busy_step = first
+        assert_eq!(blocked.processed_event_count, 0);
+        assert_eq!(
+            blocked.run.workflow_state.mode,
+            GithubIssueWorkflowMode::Planning
+        );
+        assert_eq!(policy.ports().stage_turns.requests().await.len(), 2);
+        let workspace_step = blocked
             .steps
             .iter()
-            .find(|step| step.step_name == "start_stage:triage")
-            .expect("busy stage submission should record the start-stage step");
-        assert_eq!(busy_step.status, WorkflowStepStatus::Retryable);
-        assert_eq!(busy_step.next_attempt_at, Some(fixed_time(60)));
-        assert_eq!(immediate_replay.processed_event_count, 0);
-        assert_eq!(stage_turns.requests().await.len(), 1);
+            .find(|step| step.step_name == "prepare_workspace")
+            .expect("workspace step should be recorded");
+        assert_eq!(workspace_step.status, WorkflowStepStatus::Retryable);
+        assert_eq!(workspace_step.next_attempt_at, Some(fixed_time(60)));
 
         policy.ports().clock.set(fixed_time(61));
-        let retry = policy.tick(first.run).await.unwrap();
+        let retry = policy.tick(after_planning).await.unwrap();
 
         assert_eq!(retry.processed_event_count, 1);
-        assert_eq!(retry.run.event_cursor, 1);
+        assert_eq!(workspace.request_count().await, 2);
         assert_eq!(
             retry.run.workflow_state.mode,
-            GithubIssueWorkflowMode::Claimed
+            GithubIssueWorkflowMode::Implementation
         );
-        let retried_step = retry
-            .steps
-            .iter()
-            .find(|step| step.step_name == "start_stage:triage")
-            .expect("retry should return the start-stage step");
-        assert_eq!(retried_step.status, WorkflowStepStatus::Succeeded);
-        assert_eq!(stage_turns.requests().await.len(), 2);
+        assert_eq!(policy.ports().stage_turns.requests().await.len(), 3);
     }
 }

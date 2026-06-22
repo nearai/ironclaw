@@ -10,12 +10,14 @@ use ironclaw_github_issue_workflow::{
     GithubIssueSearchHit, GithubIssueStage, GithubIssueStageRunId, GithubIssueWorkflowConfig,
     GithubIssueWorkflowConfigSource, GithubIssueWorkflowError, GithubIssueWorkflowPoller,
     GithubIssueWorkflowPollerConfig, GithubIssueWorkflowPollerPorts, GithubIssueWorkflowPort,
-    GithubIssueWorkflowRepository, GithubIssueWorkflowRunId, GithubProviderAccountRef,
-    GithubPullRequestRef, ListIssueCommentsInput, PrepareWorkflowWorkspaceOutcome,
+    GithubIssueWorkflowRepository, GithubIssueWorkflowRunId, GithubIssueWorkspaceSession,
+    GithubIssueWorkspaceSessionId, GithubProviderAccountRef, GithubPullRequestRef,
+    GithubRepositorySelector, ListIssueCommentsInput, PrepareWorkflowWorkspaceOutcome,
     PrepareWorkflowWorkspaceRequest, SearchGithubIssuesInput, StageTurnSubmitter,
     SubmitStageTurnOutcome, SubmitStageTurnRequest, WorkflowActorScope, WorkflowClock,
     WorkflowConfigAccessRequest, WorkflowProjectAccess, WorkflowProjectAccessRequest,
-    WorkflowWorkerId, WorkflowWorkspaceManager, validate_stage_result,
+    WorkflowWorkerId, WorkflowWorkspaceManager, WorkflowWorkspaceMountRef, WorkflowWorkspaceRef,
+    validate_stage_result,
 };
 use ironclaw_host_api::{
     AgentId, CapabilityId, CapabilitySet, ExecutionContext, ExtensionId, MountView,
@@ -664,7 +666,7 @@ pub(crate) fn spawn_github_issue_workflow(
             project_access,
             repository,
             stage_turn_submitter,
-            workspace_manager: Arc::new(UnconfiguredWorkflowWorkspaceManager),
+            workspace_manager: Arc::new(IronClawWorkflowWorkspaceManager),
             worker_id: WorkflowWorkerId::new(),
         },
         GithubIssueWorkflowPollerConfig {
@@ -892,16 +894,43 @@ impl WorkflowProjectAccess for UnconfiguredWorkflowProjectAccess {
     }
 }
 
-struct UnconfiguredWorkflowWorkspaceManager;
+struct IronClawWorkflowWorkspaceManager;
 
 #[async_trait]
-impl WorkflowWorkspaceManager for UnconfiguredWorkflowWorkspaceManager {
+impl WorkflowWorkspaceManager for IronClawWorkflowWorkspaceManager {
     async fn prepare_workspace(
         &self,
-        _request: PrepareWorkflowWorkspaceRequest,
+        request: PrepareWorkflowWorkspaceRequest,
     ) -> Result<PrepareWorkflowWorkspaceOutcome, GithubIssueWorkflowError> {
-        Err(GithubIssueWorkflowError::PolicyDenied {
-            reason: "GitHub issue workflow workspace manager is not configured".to_string(),
+        let repository =
+            GithubRepositorySelector::new(request.issue.owner.clone(), request.issue.repo.clone())?;
+        let workflow_run_id = request.workflow_run_id.clone();
+        let workspace_session_id = GithubIssueWorkspaceSessionId::from_trusted(format!(
+            "github-issue-workflow:{}",
+            workflow_run_id
+        ))?;
+        let workspace_ref = WorkflowWorkspaceRef {
+            thread_id: None,
+            workspace_session_id: Some(workspace_session_id.clone()),
+            turn_run_id: None,
+        };
+        let mount_ref = WorkflowWorkspaceMountRef {
+            mount_id: format!("github-issue-workflow:{}", workspace_session_id.as_str()),
+            alias: "/workspace".to_string(),
+        };
+        Ok(PrepareWorkflowWorkspaceOutcome {
+            session: GithubIssueWorkspaceSession {
+                workspace_session_id,
+                workflow_run_id: request.workflow_run_id,
+                repository,
+                base_branch: request.base_branch.clone(),
+                base_sha: None,
+                working_branch: format!("ironclaw/github-bug/{workflow_run_id}"),
+                current_head_sha: None,
+                workspace_ref,
+                mount_ref,
+                created_at: request.requested_at,
+            },
         })
     }
 }

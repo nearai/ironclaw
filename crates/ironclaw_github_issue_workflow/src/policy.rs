@@ -13,15 +13,15 @@ use crate::{
     GithubIssueStage, GithubIssueWorkflowError, GithubIssueWorkflowEvent,
     GithubIssueWorkflowEventType, GithubIssueWorkflowMode, GithubIssueWorkflowPort,
     GithubIssueWorkflowRepository, GithubIssueWorkflowRun, GithubIssueWorkflowRunId,
-    GithubIssueWorkflowRunStatus, ListWorkflowEventsAfterInput, PrepareWorkflowWorkspaceOutcome,
-    PrepareWorkflowWorkspaceRequest, ProviderActionRunOutcome, ProviderContentSummary,
-    RepositorySnapshot, StageCompletedPayload, StageConstraintSnapshot, StageTurnIdentity,
-    StageTurnSubmitter, SubmitStageTurnOutcome, SubmitStageTurnRequest, TransitionOutcome,
-    WorkflowActorScope, WorkflowClock, WorkflowIdempotencyKey, WorkflowProjectAccess,
-    WorkflowProjectAccessRequest, WorkflowPromptContent, WorkflowRunTransition,
-    WorkflowStateSnapshot, WorkflowStepRunId, WorkflowWorkerId, WorkflowWorkspaceManager,
-    WorkflowWorkspaceMountRef, WorkflowWorkspaceSnapshot, render_stage_prompt,
-    stage_result_schema_version, stage_slug,
+    GithubIssueWorkflowRunStatus, GithubIssueWorkspaceSession, ListWorkflowEventsAfterInput,
+    PrepareWorkflowWorkspaceOutcome, PrepareWorkflowWorkspaceRequest, ProviderActionRunOutcome,
+    ProviderContentSummary, RepositorySnapshot, StageCompletedPayload, StageConstraintSnapshot,
+    StageTurnIdentity, StageTurnSubmitter, SubmitStageTurnOutcome, SubmitStageTurnRequest,
+    TransitionOutcome, WorkflowActorScope, WorkflowClock, WorkflowIdempotencyKey,
+    WorkflowProjectAccess, WorkflowProjectAccessRequest, WorkflowPromptContent,
+    WorkflowRunTransition, WorkflowStateSnapshot, WorkflowStepRunId, WorkflowWorkerId,
+    WorkflowWorkspaceManager, WorkflowWorkspaceMountRef, WorkflowWorkspaceSnapshot,
+    render_stage_prompt, stage_result_schema_version, stage_slug,
 };
 
 const DEFAULT_STAGE_ATTEMPT: u32 = 1;
@@ -60,6 +60,16 @@ pub struct WorkflowPolicyTickOutcome {
     pub run: GithubIssueWorkflowRun,
     pub processed_event_count: usize,
     pub steps: Vec<WorkflowStepRun>,
+}
+
+enum PrepareWorkspaceStepOutcome {
+    Prepared {
+        session: GithubIssueWorkspaceSession,
+        step: WorkflowStepRun,
+    },
+    NotReady {
+        step: WorkflowStepRun,
+    },
 }
 
 pub trait GithubIssueWorkflowPolicyPorts: Send + Sync {
@@ -246,12 +256,22 @@ where
             GithubIssueStage::Planning
                 if run.workflow_state.mode == GithubIssueWorkflowMode::Planning =>
             {
-                let (workspace, workspace_step) = self.prepare_workspace_step(&run).await?;
+                let (workspace_session, workspace_step) =
+                    match self.prepare_workspace_step(&run).await? {
+                        PrepareWorkspaceStepOutcome::Prepared { session, step } => (session, step),
+                        PrepareWorkspaceStepOutcome::NotReady { step } => {
+                            return Ok(WorkflowPolicyTickOutcome {
+                                run,
+                                processed_event_count: 0,
+                                steps: vec![step],
+                            });
+                        }
+                    };
                 let (run, start_step) = self
                     .start_stage_step(
                         run,
                         GithubIssueStage::Implementation,
-                        Some(workspace.mount_ref),
+                        Some(workspace_session.clone()),
                     )
                     .await?;
                 if start_step.status != WorkflowStepStatus::Succeeded {
@@ -268,7 +288,7 @@ where
                         WorkflowRunTransition {
                             mode: Some(GithubIssueWorkflowMode::Implementation),
                             clear_active_block: true,
-                            workspace_session_id: Some(workspace.workspace_session_id.clone()),
+                            workspace_session: Some(workspace_session),
                             ..WorkflowRunTransition::default()
                         },
                     )
@@ -344,7 +364,7 @@ where
     async fn prepare_workspace_step(
         &self,
         run: &GithubIssueWorkflowRun,
-    ) -> Result<(PrepareWorkflowWorkspaceOutcome, WorkflowStepRun), GithubIssueWorkflowError> {
+    ) -> Result<PrepareWorkspaceStepOutcome, GithubIssueWorkflowError> {
         let input = json!({
             "workflow_run_id": run.workflow_run_id,
             "issue": run.issue_ref,
@@ -360,10 +380,15 @@ where
                 });
             };
             let outcome = serde_json::from_value(result).map_err(policy_serde_error)?;
-            return Ok((outcome, step));
+            let PrepareWorkflowWorkspaceOutcome { session } = outcome;
+            return Ok(PrepareWorkspaceStepOutcome::Prepared { session, step });
+        }
+        let now = self.ports.clock().now();
+        if workflow_step_waits_for_retry(&step, now) {
+            return Ok(PrepareWorkspaceStepOutcome::NotReady { step });
         }
 
-        let outcome = self
+        let outcome = match self
             .ports
             .workspace_manager()
             .prepare_workspace(PrepareWorkflowWorkspaceRequest {
@@ -374,22 +399,43 @@ where
                 workflow_run_id: run.workflow_run_id.clone(),
                 issue: run.issue_ref.clone(),
                 base_branch: run.issue_ref.default_branch.clone(),
-                requested_at: self.ports.clock().now(),
+                requested_at: now,
             })
-            .await?;
+            .await
+        {
+            Ok(outcome) => outcome,
+            Err(error) => {
+                let retry = self
+                    .retry_step(
+                        step,
+                        None,
+                        Some(json!({ "reason": error.to_string() })),
+                        now + Duration::seconds(DEFAULT_BUSY_RETRY_SECONDS),
+                    )
+                    .await?;
+                return Ok(PrepareWorkspaceStepOutcome::NotReady { step: retry });
+            }
+        };
+        let session = outcome.session.clone();
         let result = serde_json::to_value(&outcome).map_err(policy_serde_error)?;
         let completed = self
             .complete_step(step, WorkflowStepStatus::Succeeded, Some(result), None)
             .await?;
-        Ok((outcome, completed))
+        Ok(PrepareWorkspaceStepOutcome::Prepared {
+            session,
+            step: completed,
+        })
     }
 
     async fn start_stage_step(
         &self,
         run: GithubIssueWorkflowRun,
         stage: GithubIssueStage,
-        workspace_mount_ref: Option<WorkflowWorkspaceMountRef>,
+        workspace_session: Option<GithubIssueWorkspaceSession>,
     ) -> Result<(GithubIssueWorkflowRun, WorkflowStepRun), GithubIssueWorkflowError> {
+        let workspace_mount_ref = workspace_session
+            .as_ref()
+            .map(|session| session.mount_ref.clone());
         let input = json!({
             "workflow_run_id": run.workflow_run_id,
             "stage": stage_slug(&stage),
@@ -466,7 +512,8 @@ where
             DEFAULT_STAGE_ATTEMPT,
             self.policy_version.clone(),
         );
-        let prompt = self.stage_prompt(&run, &stage, workspace_mount_ref.as_ref())?;
+        let prompt_run = run_with_workspace_session(&run, workspace_session.as_ref());
+        let prompt = self.stage_prompt(&prompt_run, &stage, workspace_mount_ref.as_ref())?;
         let idempotency_key = stage_turn_identity.turn_idempotency_key();
         let outcome = self
             .ports
@@ -621,6 +668,8 @@ where
         workspace_mount_ref: Option<&WorkflowWorkspaceMountRef>,
     ) -> Option<WorkflowWorkspaceSnapshot> {
         let workspace_ref = run.workflow_state.current_workspace_ref.as_ref();
+        let workspace_mount_ref =
+            workspace_mount_ref.or(run.workflow_state.current_workspace_mount_ref.as_ref());
         if workspace_ref.is_none()
             && workspace_mount_ref.is_none()
             && run.workspace_session_id.is_none()
@@ -878,6 +927,20 @@ fn workflow_step_waits_for_retry(step: &WorkflowStepRun, now: DateTime<Utc>) -> 
             .next_attempt_at
             .map(|next_attempt_at| next_attempt_at > now)
             .unwrap_or(false)
+}
+
+fn run_with_workspace_session(
+    run: &GithubIssueWorkflowRun,
+    workspace_session: Option<&GithubIssueWorkspaceSession>,
+) -> GithubIssueWorkflowRun {
+    let Some(workspace_session) = workspace_session else {
+        return run.clone();
+    };
+    let mut run = run.clone();
+    run.workspace_session_id = Some(workspace_session.workspace_session_id.clone());
+    run.workflow_state.current_workspace_ref = Some(workspace_session.workspace_ref.clone());
+    run.workflow_state.current_workspace_mount_ref = Some(workspace_session.mount_ref.clone());
+    run
 }
 
 fn run_is_terminal(status: &GithubIssueWorkflowRunStatus) -> bool {

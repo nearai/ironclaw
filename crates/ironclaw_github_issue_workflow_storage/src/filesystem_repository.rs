@@ -487,16 +487,10 @@ where
             if let Some(active_block) = input.transition.active_block.clone() {
                 run.workflow_state.active_block = Some(active_block);
             }
-            if let Some(workspace_session_id) = input.transition.workspace_session_id.clone() {
-                run.workspace_session_id = Some(workspace_session_id.clone());
-                run.workflow_state.current_workspace_ref = run
-                    .workflow_state
-                    .current_workspace_ref
-                    .clone()
-                    .map(|mut workspace_ref| {
-                        workspace_ref.workspace_session_id = Some(workspace_session_id);
-                        workspace_ref
-                    });
+            if let Some(workspace_session) = input.transition.workspace_session.clone() {
+                run.workspace_session_id = Some(workspace_session.workspace_session_id);
+                run.workflow_state.current_workspace_ref = Some(workspace_session.workspace_ref);
+                run.workflow_state.current_workspace_mount_ref = Some(workspace_session.mount_ref);
             }
 
             run.workflow_run_version += 1;

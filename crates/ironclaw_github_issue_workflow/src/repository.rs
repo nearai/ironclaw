@@ -9,7 +9,7 @@ use crate::{
     GithubIssueProviderBinding, GithubIssueStage, GithubIssueStageRunId, GithubIssueWorkflowError,
     GithubIssueWorkflowEvent, GithubIssueWorkflowEventType, GithubIssueWorkflowMode,
     GithubIssueWorkflowRun, GithubIssueWorkflowRunId, GithubIssueWorkflowRunStatus,
-    GithubIssueWorkspaceSessionId, GithubProviderRef, ProviderActionKind,
+    GithubIssueWorkspaceSession, GithubProviderRef, ProviderActionKind,
     ProviderActionReconciliationStrategy, ProviderActionStatus, WorkflowEventEnvelope,
     WorkflowIdempotencyKey, WorkflowStepRun, WorkflowStepRunId, WorkflowStepStatus,
     WorkflowWorkerId,
@@ -212,7 +212,7 @@ pub struct WorkflowRunTransition {
     pub mode: Option<GithubIssueWorkflowMode>,
     pub active_block: Option<GithubIssueBlockState>,
     pub clear_active_block: bool,
-    pub workspace_session_id: Option<GithubIssueWorkspaceSessionId>,
+    pub workspace_session: Option<GithubIssueWorkspaceSession>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

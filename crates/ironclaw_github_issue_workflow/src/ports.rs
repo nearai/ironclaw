@@ -5,9 +5,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     GithubCommentRef, GithubIssueRef, GithubIssueWorkflowConfig, GithubIssueWorkflowError,
-    GithubIssueWorkflowRunId, GithubIssueWorkspaceSessionId, GithubProviderAccountRef,
+    GithubIssueWorkflowRunId, GithubIssueWorkspaceSession, GithubProviderAccountRef,
     GithubPullRequestRef, GithubRepositorySelector, SubmitStageTurnOutcome, SubmitStageTurnRequest,
-    WorkflowWorkspaceMountRef, WorkflowWorkspaceRef,
 };
 
 #[async_trait]
@@ -245,7 +244,5 @@ pub struct PrepareWorkflowWorkspaceRequest {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PrepareWorkflowWorkspaceOutcome {
-    pub workspace_session_id: GithubIssueWorkspaceSessionId,
-    pub workspace_ref: WorkflowWorkspaceRef,
-    pub mount_ref: WorkflowWorkspaceMountRef,
+    pub session: GithubIssueWorkspaceSession,
 }
