@@ -3428,6 +3428,29 @@ mod tests {
             .expect("trigger_create once arguments should pass provider validation");
 
         assert_eq!(normalized, once_input);
+
+        let stringified_schedule_input = serde_json::json!({
+            "name": "Walk dog - Wednesdays",
+            "prompt": "Reminder: It's time to walk your dog!",
+            "schedule": "{\"kind\":\"cron\",\"expression\":\"0 15 * * 3\",\"timezone\":\"America/Los_Angeles\"}"
+        });
+
+        let normalized =
+            prepare_provider_arguments(&stringified_schedule_input, &schema, "provider arguments")
+                .expect("stringified trigger_create schedule should be decoded before validation");
+
+        assert_eq!(
+            normalized,
+            serde_json::json!({
+                "name": "Walk dog - Wednesdays",
+                "prompt": "Reminder: It's time to walk your dog!",
+                "schedule": {
+                    "kind": "cron",
+                    "expression": "0 15 * * 3",
+                    "timezone": "America/Los_Angeles"
+                }
+            })
+        );
     }
 
     #[test]

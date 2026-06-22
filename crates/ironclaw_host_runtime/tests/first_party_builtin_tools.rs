@@ -402,6 +402,13 @@ async fn builtin_trigger_create_input_schema_declares_schedule_one_of() {
         kinds.contains(&"once"),
         "schedule oneOf must have an once variant; got {kinds:?}"
     );
+    for variant in one_of {
+        assert_eq!(
+            variant.get("type").and_then(Value::as_str),
+            Some("object"),
+            "schedule variants must declare type=object so provider argument normalization can decode stringified nested schedules"
+        );
+    }
 
     let validator = jsonschema::validator_for(schema).expect("trigger_create schema must compile");
     let input = json!({
