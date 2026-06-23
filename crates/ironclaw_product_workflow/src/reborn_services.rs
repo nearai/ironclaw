@@ -680,7 +680,7 @@ fn operator_setup_validation_error(field: &str) -> RebornServicesError {
 }
 
 const OPERATOR_SETUP_PROFILE_ID_MAX_BYTES: usize = 128;
-const OPERATOR_SETUP_WEBUI_TOKEN_MIN_BYTES: usize = 16;
+const OPERATOR_SETUP_WEBUI_TOKEN_MIN_BYTES: usize = 32;
 const OPERATOR_SETUP_WEBUI_TOKEN_MAX_BYTES: usize = 4096;
 const OPERATOR_SETUP_REDACTED_SECRET_SENTINEL: &str = "••••••••";
 

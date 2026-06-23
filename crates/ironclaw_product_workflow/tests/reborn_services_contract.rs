@@ -7746,6 +7746,33 @@ async fn run_operator_setup_rejects_short_webui_access_token_before_provider_wri
 }
 
 #[tokio::test]
+async fn run_operator_setup_rejects_serve_weak_webui_access_token_before_provider_write() {
+    let llm_config = Arc::new(SetupRecordingLlmConfigService::default());
+    let services = services_with_setup_llm_config(llm_config.clone());
+
+    let err = services
+        .run_operator_setup(
+            caller(),
+            RebornOperatorSetupRequest {
+                provider_id: Some("openai".to_string()),
+                adapter: Some("open_ai_completions".to_string()),
+                webui_access_token: Some(SecretString::from("x".repeat(16))),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect_err("16-byte WebUI token is rejected");
+
+    assert_setup_validation(
+        err,
+        "webui_access_token",
+        WebUiInboundValidationCode::InvalidValue,
+    );
+    assert_eq!(llm_config.upsert_provider_count(), 0);
+    assert_eq!(llm_config.set_active_count(), 0);
+}
+
+#[tokio::test]
 async fn run_operator_setup_rejects_oversized_webui_access_token_before_provider_write() {
     let llm_config = Arc::new(SetupRecordingLlmConfigService::default());
     let services = services_with_setup_llm_config(llm_config.clone());
