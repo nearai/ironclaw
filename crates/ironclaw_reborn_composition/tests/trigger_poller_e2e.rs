@@ -745,13 +745,19 @@ async fn trigger_poller_does_not_submit_turn_for_unpaired_actor() {
         captured_contents
     );
 
-    // The trigger must not be marked Completed (failure-closed behavior).
-    assert_ne!(
+    // A one-shot permanent failure is terminal, but it must still avoid any
+    // turn submission for the unpaired actor.
+    assert_eq!(
         current.state,
         TriggerState::Completed,
-        "unpaired trigger must not be marked Completed — state: {:?}, last_status: {:?}",
+        "unpaired one-shot trigger should complete after a permanent failure — state: {:?}, last_status: {:?}",
         current.state,
         current.last_status
+    );
+    assert_eq!(
+        current.last_status,
+        Some(TriggerRunStatus::Error),
+        "unpaired trigger should record the failure status"
     );
 }
 
