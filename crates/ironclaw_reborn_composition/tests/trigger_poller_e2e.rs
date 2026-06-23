@@ -689,10 +689,10 @@ async fn trigger_poller_does_not_submit_turn_for_unpaired_actor() {
     let agent_id = AgentId::new(AGENT).expect("agent id");
     let trigger_id = TriggerId::new();
 
-    // Seed a past-due one-shot trigger. An unpaired external actor is a
-    // permanent pre-submit failure: the trusted trigger submitter must not send
-    // a turn, and the one-shot is completed so it cannot re-fire the same slot
-    // forever.
+    // Seed a past-due one-shot trigger. An unpaired external actor blocks
+    // trusted trigger materialization before any turn can be submitted. This
+    // is retryable: the trigger records the failed attempt, clears the active
+    // claim, and remains Scheduled until the actor is paired.
     let fire_at = Utc::now() - chrono::Duration::seconds(120);
     let record = TriggerRecord {
         trigger_id,
@@ -745,12 +745,12 @@ async fn trigger_poller_does_not_submit_turn_for_unpaired_actor() {
         captured_contents
     );
 
-    // The one-shot trigger records the permanent pre-submit failure and stops
-    // retrying the already-past slot.
+    // The one-shot trigger records the blocked pre-submit failure and remains
+    // retryable instead of completing the already-past slot.
     assert_eq!(
         current.state,
-        TriggerState::Completed,
-        "unpaired one-shot trigger must be completed after permanent pre-submit failure — \
+        TriggerState::Scheduled,
+        "unpaired one-shot trigger must remain Scheduled after blocked pre-submit failure — \
          state: {:?}, last_status: {:?}",
         current.state,
         current.last_status
@@ -762,11 +762,11 @@ async fn trigger_poller_does_not_submit_turn_for_unpaired_actor() {
     );
     assert_eq!(
         current.active_fire_slot, None,
-        "completed failed one-shot trigger must not keep an active fire — record: {current:?}"
+        "blocked failed one-shot trigger must not keep an active fire — record: {current:?}"
     );
     assert_eq!(
         current.active_run_ref, None,
-        "completed failed one-shot trigger must not have an active run — record: {current:?}"
+        "blocked failed one-shot trigger must not have an active run — record: {current:?}"
     );
 }
 
