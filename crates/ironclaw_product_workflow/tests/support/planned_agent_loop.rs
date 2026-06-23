@@ -13,9 +13,9 @@ use ironclaw_host_api::{
 use ironclaw_host_runtime::{CapabilitySurfacePolicy, SurfaceKind};
 use ironclaw_loop_support::{
     CapabilityAllowSet, CapabilityResolveError, CapabilitySurfaceProfileResolver,
-    EmptyLoopCapabilityPort, HostIdentityContextBuildError, HostIdentityContextCandidate,
-    HostIdentityContextSource, HostInputBatch, HostInputQueue, HostInputQueueError,
-    HostManagedModelError, HostManagedModelErrorKind, HostManagedModelGateway,
+    EmptyLoopCapabilityPort, EmptyUserProfileSource, HostIdentityContextBuildError,
+    HostIdentityContextCandidate, HostIdentityContextSource, HostInputBatch, HostInputQueue,
+    HostInputQueueError, HostManagedModelError, HostManagedModelErrorKind, HostManagedModelGateway,
     HostManagedModelRequest, HostManagedModelResponse, JsonSpawnSubagentInputCodec,
     LoopCapabilityPortFactory, LoopCapabilityResultWriter, ProductLiveCancellationProbe,
     RunCancellationFactory, RunCancellationHandle,
@@ -66,7 +66,6 @@ use ironclaw_turns::{
         VisibleCapabilityRequest, VisibleCapabilitySurface,
     },
 };
-use tokio::task::JoinHandle;
 use tokio::time::{sleep, timeout};
 use tokio_util::sync::CancellationToken;
 
@@ -83,8 +82,6 @@ pub struct ProductLiveAgentLoopHarness {
     capability_results: Arc<Mutex<Vec<serde_json::Value>>>,
     model_release: Option<CancellationToken>,
     _host_runtime_root: Option<tempfile::TempDir>,
-    worker_cancel: CancellationToken,
-    worker_handle: JoinHandle<()>,
 }
 
 #[derive(Debug, Clone)]
@@ -259,6 +256,7 @@ impl ProductLiveAgentLoopHarness {
             Arc::new(ProductLiveCapabilityIo::default());
         let turn_state_for_runtime: Arc<dyn RuntimeTurnStateStore> = turn_store.clone();
         let composition = build_product_live_planned_runtime(DefaultPlannedRuntimeParts {
+            attachment_read_port: None,
             turn_state: turn_state_for_runtime,
             thread_service: Arc::new(thread_service.clone()),
             thread_scope: thread_scope.clone(),
@@ -298,19 +296,19 @@ impl ProductLiveAgentLoopHarness {
             skill_context_source: None,
             input_queue: Some(Arc::new(EmptyInputQueue)),
             identity_context_source: Arc::new(EmptyIdentityContextSource),
+            user_profile_source: Arc::new(EmptyUserProfileSource),
             model_policy_guard: Some(Arc::new(NoOpPolicyGuard)),
             model_budget_accountant: Some(Arc::new(NoOpBudgetAccountant)),
             safety_context: Some(test_safety_context()),
             hook_dispatcher_builder_factory: None,
+            communication_context_provider: None,
             hook_security_audit_sink: None,
             turn_event_sink: None,
+            scheduler_wake_wiring: None,
         })
         .expect("product-live planned AgentLoop harness should build");
 
-        let worker_cancel = CancellationToken::new();
-        let worker = Arc::clone(&composition.worker);
-        let worker_cancel_clone = worker_cancel.clone();
-        let worker_handle = tokio::spawn(async move { worker.run(worker_cancel_clone).await });
+        // The scheduler is started automatically inside build_product_live_planned_runtime.
 
         Self {
             binding_service,
@@ -325,8 +323,6 @@ impl ProductLiveAgentLoopHarness {
             capability_results,
             model_release,
             _host_runtime_root: host_runtime_root,
-            worker_cancel,
-            worker_handle,
         }
     }
 
@@ -461,10 +457,7 @@ impl ProductLiveAgentLoopHarness {
     }
 
     pub async fn shutdown(self) {
-        self.worker_cancel.cancel();
-        self.worker_handle
-            .await
-            .expect("harness worker should stop cleanly");
+        self.composition.scheduler_handle.shutdown().await;
     }
 
     fn turn_scope(&self) -> TurnScope {
@@ -815,6 +808,7 @@ impl LoopCapabilityPort for RecordingCapabilityPort {
             progress: ironclaw_turns::run_profile::CapabilityProgress::MadeProgress,
             terminate_hint: self.capability.terminate_hint,
             byte_len: 0,
+            output_digest: None,
         }))
     }
 

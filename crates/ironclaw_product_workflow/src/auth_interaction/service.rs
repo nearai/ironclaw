@@ -6,8 +6,8 @@ use ironclaw_auth::{
     CredentialAccountId, CredentialSelectionInput,
 };
 use ironclaw_turns::{
-    CancelRunRequest, GateRef, GetRunStateRequest, ResumeTurnPrecondition, ResumeTurnRequest,
-    SanitizedCancelReason, TurnCoordinator, TurnError, TurnErrorCategory, TurnRunId, TurnStatus,
+    GateRef, GateResumeDisposition, GetRunStateRequest, ResumeTurnPrecondition, ResumeTurnRequest,
+    TurnCoordinator, TurnError, TurnErrorCategory, TurnRunId, TurnStatus,
 };
 
 use super::types::is_pending_auth_status;
@@ -157,6 +157,15 @@ impl DefaultAuthInteractionService {
             }
         };
         validate_completion_ref(&gate, completion)?;
+        self.resume_auth_gate(request, run_id, None).await
+    }
+
+    async fn resume_auth_gate(
+        &self,
+        request: ResolveAuthInteractionRequest,
+        run_id: TurnRunId,
+        resume_disposition: Option<GateResumeDisposition>,
+    ) -> Result<ResolveAuthInteractionResponse, ProductWorkflowError> {
         let state = self
             .turn_coordinator
             .get_run_state(GetRunStateRequest {
@@ -176,6 +185,7 @@ impl DefaultAuthInteractionService {
                 source_binding_ref: state.source_binding_ref,
                 reply_target_binding_ref: state.reply_target_binding_ref,
                 idempotency_key: request.idempotency_key,
+                resume_disposition,
             })
             .await
             .map_err(map_auth_resume_error)?;
@@ -207,12 +217,14 @@ impl DefaultAuthInteractionService {
         AuthGateRecord::new(gate.run_id(), gate.gate_ref().clone(), completed)
     }
 
-    async fn cancel_auth(
+    /// Cancel the OAuth flow if it is in an active (non-terminal) status.
+    /// Returns `Err(StaleAuth)` if the flow is already `Completed` (caller
+    /// should use the resume path instead).  No-ops for already-terminal
+    /// statuses (Failed / Expired / Canceled).
+    async fn cancel_auth_flow_if_active(
         &self,
-        request: ResolveAuthInteractionRequest,
-        gate: AuthGateRecord,
-        run_id: TurnRunId,
-    ) -> Result<ResolveAuthInteractionResponse, ProductWorkflowError> {
+        gate: &AuthGateRecord,
+    ) -> Result<(), ProductWorkflowError> {
         match gate.status() {
             AuthFlowStatus::Pending
             | AuthFlowStatus::AwaitingUser
@@ -225,32 +237,53 @@ impl DefaultAuthInteractionService {
             }
             AuthFlowStatus::Failed | AuthFlowStatus::Expired | AuthFlowStatus::Canceled => {}
             AuthFlowStatus::Completed => {
+                // DELIBERATE: a Deny arriving after the OAuth flow already
+                // reached Completed is rejected as StaleAuth.  This is a race
+                // (the user clicked Deny just as the OAuth callback landed).
+                // The caller (`resume_denied_auth`) short-circuits here and the
+                // run proceeds with the credential that was just obtained.
+                //
+                // Surfacing a friendlier "already connected" message, or
+                // cancelling the run to honor the late Deny, was considered and
+                // rejected as too complex for the initial implementation.  That
+                // remains a possible follow-up; for now the late-Deny path is
+                // intentionally a no-op from the run's perspective.
+                //
+                // The existing test `deny_on_completed_flow_rejects_with_stale_auth`
+                // pins this behavior.
                 return Err(auth_rejected(AuthInteractionRejectionKind::StaleAuth));
             }
         }
-        self.cancel_auth_run(request, run_id).await
+        Ok(())
     }
 
-    async fn cancel_auth_run(
+    async fn resume_denied_auth(
+        &self,
+        request: ResolveAuthInteractionRequest,
+        gate: AuthGateRecord,
+        run_id: TurnRunId,
+    ) -> Result<ResolveAuthInteractionResponse, ProductWorkflowError> {
+        self.cancel_auth_flow_if_active(&gate).await?;
+        self.resume_auth_gate(request, run_id, Some(GateResumeDisposition::Denied))
+            .await
+    }
+
+    async fn replay_denied_auth(
         &self,
         request: ResolveAuthInteractionRequest,
         run_id: TurnRunId,
     ) -> Result<ResolveAuthInteractionResponse, ProductWorkflowError> {
-        let response = self
-            .turn_coordinator
-            .cancel_run(CancelRunRequest {
-                scope: request.scope,
-                actor: request.actor,
-                run_id,
-                reason: SanitizedCancelReason::UserRequested,
-                idempotency_key: request.idempotency_key,
-            })
+        // Route through resume_turn with the SAME idempotency key as the first
+        // Deny.  TurnCoordinator::resume_turn returns the cached
+        // ResumeTurnResponse for a repeated key before running the precondition
+        // check, so this is idempotent regardless of current run state.  A
+        // fresh key on a finished run still errors via the precondition
+        // (correctly StaleAuth).
+        self.resume_auth_gate(request, run_id, Some(GateResumeDisposition::Denied))
             .await
-            .map_err(map_auth_resume_error)?;
-        Ok(ResolveAuthInteractionResponse::Canceled(response))
     }
 
-    async fn cancel_parked_auth_without_flow(
+    async fn resume_denied_auth_without_flow(
         &self,
         request: ResolveAuthInteractionRequest,
         run_id: TurnRunId,
@@ -261,7 +294,8 @@ impl DefaultAuthInteractionService {
                 return Err(auth_rejected(AuthInteractionRejectionKind::MissingAuth));
             }
         }
-        self.cancel_auth_run(request, run_id).await
+        self.resume_auth_gate(request, run_id, Some(GateResumeDisposition::Denied))
+            .await
     }
 }
 
@@ -311,7 +345,7 @@ impl AuthInteractionService for DefaultAuthInteractionService {
                 let Some(run_id) = request.run_id_hint else {
                     return Err(auth_rejected(AuthInteractionRejectionKind::MissingAuth));
                 };
-                return self.cancel_parked_auth_without_flow(request, run_id).await;
+                return self.resume_denied_auth_without_flow(request, run_id).await;
             }
             Err(error) => return Err(error),
         };
@@ -322,7 +356,7 @@ impl AuthInteractionService for DefaultAuthInteractionService {
         ) {
             (BlockedGateState::ParkedOnGate, AuthInteractionDecision::Deny) => {
                 let gate = self.refresh_gate(&gate).await?;
-                self.cancel_auth(request, gate, run_id).await
+                self.resume_denied_auth(request, gate, run_id).await
             }
             (
                 BlockedGateState::ParkedOnGate,
@@ -351,7 +385,7 @@ impl AuthInteractionService for DefaultAuthInteractionService {
                 if gate.status() != AuthFlowStatus::Canceled {
                     return Err(auth_rejected(AuthInteractionRejectionKind::StaleAuth));
                 }
-                self.cancel_auth(request, gate, run_id).await
+                self.replay_denied_auth(request, run_id).await
             }
         }
     }
@@ -417,7 +451,8 @@ fn map_auth_product_error(error: AuthProductError) -> ProductWorkflowError {
         AuthProductError::Canceled
         | AuthProductError::FlowAlreadyTerminal
         | AuthProductError::ProviderDenied
-        | AuthProductError::RefreshFailed => auth_rejected(AuthInteractionRejectionKind::StaleAuth),
+        | AuthProductError::RefreshFailed
+        | AuthProductError::InvalidGrant => auth_rejected(AuthInteractionRejectionKind::StaleAuth),
         AuthProductError::MalformedCallback
         | AuthProductError::TokenExchangeFailed
         | AuthProductError::CredentialMissing
@@ -449,7 +484,8 @@ fn map_credential_selection_error(error: AuthProductError) -> ProductWorkflowErr
         AuthProductError::Canceled
         | AuthProductError::FlowAlreadyTerminal
         | AuthProductError::ProviderDenied
-        | AuthProductError::RefreshFailed => auth_rejected(AuthInteractionRejectionKind::StaleAuth),
+        | AuthProductError::RefreshFailed
+        | AuthProductError::InvalidGrant => auth_rejected(AuthInteractionRejectionKind::StaleAuth),
         AuthProductError::MalformedCallback | AuthProductError::TokenExchangeFailed => {
             auth_rejected(AuthInteractionRejectionKind::UnsupportedResult)
         }

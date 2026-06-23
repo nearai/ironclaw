@@ -1,6 +1,7 @@
 # Slash-command dispatcher for nearai-bench on PR comments. A maintainer
 # (write/maintain/admin permission) comments `/benchmark <suite>`
-# (optionally `--model <id>`) on a PR; this workflow validates auth,
+# (optionally `--model <id>` and/or `--framework <ironclaw|ironclaw-reborn>`)
+# on a PR; this workflow validates auth,
 # parses the command, resolves the PR head SHA, reacts with 🚀, then
 # delegates to nearai/benchmarks's reusable workflow which builds the
 # harness against the PR's ironclaw SHA, runs the suite, compares against
@@ -9,8 +10,9 @@
 # Setup / usage docs:
 # https://github.com/nearai/benchmarks/blob/main/docs/ci/README.md
 #
-# Requires `OPENROUTER_API_KEY` as an org-level (or repo-level) secret.
-# Only that one secret is forwarded — `secrets: inherit` is intentionally
+# Requires `OPENROUTER_API_KEY` as an org-level (or repo-level) secret, plus
+# `NEARAI_API_KEY` for ironclaw-reborn runs (agent routes to NEAR AI cloud).
+# Only those secrets are forwarded — `secrets: inherit` is intentionally
 # NOT used (supply-chain hardening).
 
 name: nearai-bench
@@ -52,6 +54,7 @@ jobs:
     outputs:
       suite: ${{ steps.parse.outputs.suite }}
       model: ${{ steps.parse.outputs.model }}
+      framework: ${{ steps.parse.outputs.framework }}
       head_sha: ${{ steps.parse.outputs.head_sha }}
       authorized: ${{ steps.auth.outputs.authorized }}
     steps:
@@ -91,23 +94,45 @@ jobs:
           PR: ${{ github.event.issue.number }}
           REPO: ${{ github.repository }}
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          # Pinned reviewed commit on nearai/benchmarks main. Must match
-          # the SHA in the `bench` job's `uses:` below — bump in both
-          # places together. Used here to validate the requested suite
-          # exists at the same SHA we'd actually run against.
-          BENCH_PIN: 67effacd8c8a7f6f43b422e30a1810822b9d6d5f
+          # Ref on nearai/benchmarks used to validate the requested suite
+          # exists. Must match the ref the `bench` job actually runs against
+          # (its `uses:` below) so the pre-dispatch check gives the same
+          # answer as the dispatched workflow. That `uses:` is `@main`, so a
+          # pinned SHA here drifts stale and rejects suites that already exist
+          # on main (e.g. pinchbench26, officeqa, terminal-bench-2). Track
+          # `main` so the two stay in lock-step.
+          BENCH_PIN: main
         run: |
           set -euo pipefail
-          # Grammar: /benchmark <suite> [--model <model-id>]
-          # Suite name: [A-Za-z0-9_-]+
-          # Model ID:   [A-Za-z0-9_./:-]+ (allows openrouter-style "vendor/model")
-          suite=$(printf '%s' "$BODY" | sed -nE 's@^/benchmark[[:space:]]+([A-Za-z0-9_-]+)([[:space:]]+--model[[:space:]]+[A-Za-z0-9_./:-]+)?[[:space:]]*$@\1@p')
-          model=$(printf '%s' "$BODY" | sed -nE 's@^/benchmark[[:space:]]+[A-Za-z0-9_-]+[[:space:]]+--model[[:space:]]+([A-Za-z0-9_./:-]+)[[:space:]]*$@\1@p')
+          # Grammar: /benchmark <suite> [--model <model-id>] [--framework <ironclaw|ironclaw-reborn>]
+          #   <suite>     first token after the command, [A-Za-z0-9_-]+
+          #   --model     [A-Za-z0-9_./:-]+ (allows openrouter-style "vendor/model")
+          #   --framework ironclaw (default) | ironclaw-reborn
+          # The two flags may appear in either order. Newlines/tabs are
+          # normalised to single spaces so a multi-line comment still parses.
+          USAGE=$'Usage: `/benchmark <suite> [--model <model-id>] [--framework ironclaw|ironclaw-reborn]`\n\nExample: `/benchmark ironclaw-smoke --framework ironclaw-reborn`'
+          body_norm=$(printf '%s' "$BODY" | tr '\n\t' '  ' | tr -s ' ')
+          suite=$(printf '%s' "$body_norm" | sed -nE 's@^/benchmark[[:space:]]+([A-Za-z0-9_-]+).*@\1@p')
+          model=$(printf '%s' "$body_norm" | sed -nE 's@.*--model[[:space:]]+([A-Za-z0-9_./:-]+).*@\1@p')
+          framework=$(printf '%s' "$body_norm" | sed -nE 's@.*--framework[[:space:]]+([A-Za-z0-9_-]+).*@\1@p')
           if [ -z "$suite" ]; then
             # User-input error — post a helpful reply and exit cleanly
             # (exit 0 keeps the Actions tab green; bad syntax isn't infra
             # failure).
-            gh pr comment "$PR" --repo "$REPO" --body $'Could not parse `/benchmark` command.\n\nUsage: `/benchmark <suite> [--model <model-id>]`\n\nExample: `/benchmark ironclaw-smoke`'
+            gh pr comment "$PR" --repo "$REPO" --body "Could not parse \`/benchmark\` command."$'\n\n'"$USAGE"
+            exit 0
+          fi
+          # Reject unrecognised --flags so a typo (e.g. --frmework) fails
+          # loudly instead of silently falling back to the defaults.
+          unknown_flag=$(printf '%s' "$body_norm" | grep -oE -- '--[A-Za-z0-9_-]+' | grep -vE '^--(model|framework)$' | head -1 || true)
+          if [ -n "$unknown_flag" ]; then
+            gh pr comment "$PR" --repo "$REPO" --body "Unknown option \`${unknown_flag}\`."$'\n\n'"$USAGE"
+            exit 0
+          fi
+          # Validate the framework against the allowlist. Empty = unset =
+          # reusable workflow's default (ironclaw).
+          if [ -n "$framework" ] && [ "$framework" != "ironclaw" ] && [ "$framework" != "ironclaw-reborn" ]; then
+            gh pr comment "$PR" --repo "$REPO" --body "Unknown framework \`${framework}\`. Use \`ironclaw\` (default) or \`ironclaw-reborn\`."$'\n\n'"$USAGE"
             exit 0
           fi
           # Pre-dispatch suite check: refuse unknown suite names before
@@ -123,6 +148,7 @@ jobs:
           sha=$(gh pr view "$PR" --repo "$REPO" --json headRefOid -q .headRefOid)
           echo "suite=$suite" >> "$GITHUB_OUTPUT"
           echo "model=$model" >> "$GITHUB_OUTPUT"
+          echo "framework=$framework" >> "$GITHUB_OUTPUT"
           echo "head_sha=$sha" >> "$GITHUB_OUTPUT"
 
       - name: Acknowledge with 🚀 reaction
@@ -145,6 +171,7 @@ jobs:
           PR: ${{ github.event.issue.number }}
           SUITE: ${{ steps.parse.outputs.suite }}
           MODEL: ${{ steps.parse.outputs.model }}
+          FRAMEWORK: ${{ steps.parse.outputs.framework }}
           HEAD_SHA: ${{ steps.parse.outputs.head_sha }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
@@ -154,8 +181,12 @@ jobs:
           if [ -n "$MODEL" ]; then
             model_part=" (model \`$MODEL\`)"
           fi
+          framework_part=""
+          if [ -n "$FRAMEWORK" ] && [ "$FRAMEWORK" != "ironclaw" ]; then
+            framework_part=" on \`$FRAMEWORK\`"
+          fi
           gh pr comment "$PR" --repo "$REPO" --body \
-            "🧪 Started \`$SUITE\`${model_part} against ironclaw \`$short_sha\` — [watch run]($RUN_URL)."
+            "🧪 Started \`$SUITE\`${framework_part}${model_part} against ironclaw \`$short_sha\` — [watch run]($RUN_URL)."
 
   bench:
     needs: parse
@@ -193,9 +224,15 @@ jobs:
       pr-number: ${{ github.event.issue.number }}
       suite-name: ${{ needs.parse.outputs.suite }}
       model: ${{ needs.parse.outputs.model }}
+      # Empty when unspecified → the reusable workflow defaults to ironclaw.
+      framework: ${{ needs.parse.outputs.framework }}
       trigger-comment-id: ${{ github.event.comment.id }}
     # Scope inherited secrets to only what the reusable workflow needs.
     # Replaces `secrets: inherit`, which gave the called workflow access
     # to every secret available here.
     secrets:
       OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+      # ironclaw-reborn runs route the agent to NEAR AI cloud; the reusable
+      # workflow reads this for LLM_BACKEND=nearai. Optional there, so legacy
+      # ironclaw runs (OpenRouter) are unaffected if it's unset.
+      NEARAI_API_KEY: ${{ secrets.NEARAI_API_KEY }}

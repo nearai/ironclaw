@@ -149,9 +149,9 @@ may name the PostgreSQL URL variable, but must not contain the raw URL:
 backend = "postgres"
 url_env = "IRONCLAW_REBORN_POSTGRES_URL"
 secret_master_key_env = "IRONCLAW_REBORN_SECRET_MASTER_KEY"
-# Optional; defaults to 16. Keep below the PostgreSQL server's max_connections
-# after reserving capacity for migrations and operator sessions.
-pool_max_size = 16
+# Optional; defaults to 2. Keep below the PostgreSQL server or managed
+# session-pool cap after reserving capacity for restarts and operator sessions.
+pool_max_size = 2
 
 [policy]
 deployment_mode = "hosted_multi_tenant"
@@ -206,6 +206,8 @@ the current branch.
 | `IRONCLAW_REBORN_HOME` | Absolute Reborn state root. Defaults to `$HOME/.ironclaw/reborn`. The resolver rejects unsafe paths and v1 state-root aliases such as `$HOME/.ironclaw`. |
 | `IRONCLAW_REBORN_PROFILE` | Boot profile selector. Supported values: `local-dev`, `local-dev-yolo`, `production`, `migration-dry-run`. |
 | `IRONCLAW_REBORN_POSTGRES_URL` | Production PostgreSQL storage URL when `[storage].backend = "postgres"` and `[storage].url_env` names this variable. Keep it out of `config.toml`; remote providers must use TLS. |
+| `IRONCLAW_REBORN_POSTGRES_POOL_MAX_SIZE` | Optional override for the Reborn PostgreSQL client pool size. Use this when a managed provider enforces a small session-pool cap. |
+| `IRONCLAW_FILESYSTEM_POSTGRES_MIGRATION_CONNECT_MAX_WAIT_SECS` | Optional startup wait window for Postgres filesystem migration connection retries. Defaults to 300 seconds. |
 | `IRONCLAW_REBORN_SECRET_MASTER_KEY` | Production Reborn secret master key when `[storage].secret_master_key_env` names this variable. Keep it independent from the database URL and out of `config.toml`. |
 | `IRONCLAW_REBORN_LOG` | Tracing filter for the Reborn binary, for example `debug,ironclaw_reborn=trace`. |
 
@@ -263,17 +265,17 @@ Required WebUI env vars:
 | `IRONCLAW_REBORN_WEBUI_TOKEN` | Bearer token for WebUI requests. If SSO is enabled, this also signs sessions and must be at least 32 bytes. |
 | `IRONCLAW_REBORN_WEBUI_USER_ID` | Reborn owner/user id for env-bearer requests. If `[identity].default_owner` is configured, it must match this value. |
 
-Optional WebUI SSO env vars:
+Optional WebUI OAuth env vars:
 
 | Variable | Purpose |
 | --- | --- |
+| `IRONCLAW_REBORN_WEBUI_BASE_URL` | Public base URL used for WebUI login and product-auth OAuth callbacks. Non-loopback deployments must use `https://`. |
 | `IRONCLAW_REBORN_WEBUI_GOOGLE_CLIENT_ID` | Enables Google SSO when set. |
 | `IRONCLAW_REBORN_WEBUI_GOOGLE_CLIENT_SECRET` | Required when Google SSO is enabled. |
 | `IRONCLAW_REBORN_WEBUI_GOOGLE_ALLOWED_HD` | Optional Google hosted-domain restriction. |
 | `IRONCLAW_REBORN_WEBUI_GITHUB_CLIENT_ID` | Enables GitHub SSO when set. |
 | `IRONCLAW_REBORN_WEBUI_GITHUB_CLIENT_SECRET` | Required when GitHub SSO is enabled. |
 | `IRONCLAW_REBORN_WEBUI_ALLOWED_EMAIL_DOMAINS` | Required when any SSO provider is enabled. Comma-separated verified email domains. |
-| `IRONCLAW_REBORN_WEBUI_BASE_URL` | Public base URL used for OAuth callbacks. Non-loopback deployments must use `https://`. |
 | `IRONCLAW_REBORN_WEBUI_OAUTH_HTTP_TIMEOUT_SECS` | Optional OAuth HTTP timeout override. |
 
 For Google SSO, create a Google OAuth web client and register the Reborn WebUI
@@ -290,11 +292,13 @@ the authorized redirect URI in Google Cloud is:
 https://ironclaw.example.com/auth/callback/google
 ```
 
-Do not include a trailing slash in `IRONCLAW_REBORN_WEBUI_BASE_URL`; Reborn
-trims it before building callback URLs. If the base URL is omitted, Reborn uses
-the actual listener address, such as `http://127.0.0.1:3000`, which is suitable
-only for loopback/local OAuth testing. Public or non-loopback SSO deployments
-must set an `https://` base URL.
+Notion MCP and other product-auth OAuth setup flows use the same public WebUI
+base URL when registering provider callback URLs. Do not include a trailing
+slash in `IRONCLAW_REBORN_WEBUI_BASE_URL`; Reborn trims it before building
+callback URLs. If the base URL is omitted, Reborn uses the actual listener
+address, such as `http://127.0.0.1:3000`, which is suitable only for
+loopback/local OAuth testing. Public or non-loopback OAuth deployments must set
+an `https://` base URL.
 
 Complete Google SSO startup env:
 

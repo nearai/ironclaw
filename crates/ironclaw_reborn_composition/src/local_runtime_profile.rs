@@ -51,16 +51,12 @@ pub fn local_runtime_build_input_with_options(
 
 /// Resolved policy for the standalone local development runtime profile.
 pub fn local_dev_runtime_policy() -> Result<ResolvedRuntimePolicy, ResolveError> {
-    local_runtime_policy(
-        RebornCompositionProfile::LocalDev,
-        RebornLocalRuntimeProfileOptions::default(),
-    )
-    .map_err(|error| match error {
-        RebornLocalRuntimeProfileError::Policy(error) => error,
-        RebornLocalRuntimeProfileError::UnsupportedProfile { .. } => {
-            unreachable!("local-dev is a local runtime profile")
-        }
-    })
+    local_runtime_policy_for_local_dev_shape("local-dev")
+}
+
+/// Resolved policy for the hosted single-tenant local product surface.
+pub fn hosted_single_tenant_runtime_policy() -> Result<ResolvedRuntimePolicy, ResolveError> {
+    local_runtime_policy_for_local_dev_shape("hosted-single-tenant")
 }
 
 /// Resolved policy for trusted single-user local development with inherited
@@ -90,6 +86,7 @@ fn local_runtime_policy(
         RebornCompositionProfile::LocalDev => RuntimeProfile::LocalDev,
         RebornCompositionProfile::LocalDevYolo => RuntimeProfile::LocalYolo,
         RebornCompositionProfile::Disabled
+        | RebornCompositionProfile::HostedSingleTenant
         | RebornCompositionProfile::Production
         | RebornCompositionProfile::MigrationDryRun => {
             return Err(RebornLocalRuntimeProfileError::UnsupportedProfile { profile });
@@ -103,4 +100,19 @@ fn local_runtime_policy(
         )
     };
     Ok(ironclaw_runtime_policy::resolve(request)?)
+}
+
+fn local_runtime_policy_for_local_dev_shape(
+    profile_name: &'static str,
+) -> Result<ResolvedRuntimePolicy, ResolveError> {
+    local_runtime_policy(
+        RebornCompositionProfile::LocalDev,
+        RebornLocalRuntimeProfileOptions::default(),
+    )
+    .map_err(|error| match error {
+        RebornLocalRuntimeProfileError::Policy(error) => error,
+        RebornLocalRuntimeProfileError::UnsupportedProfile { .. } => {
+            unreachable!("{profile_name} uses the local-dev runtime policy shape")
+        }
+    })
 }

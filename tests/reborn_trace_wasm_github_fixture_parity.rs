@@ -199,6 +199,13 @@ fn github_capability_calls() -> Vec<RebornScriptedProviderToolCall> {
             "create-issue-comment",
             issue_comment_input(),
         ),
+        // Compatibility alias for github.create_issue_comment — routes through the
+        // same WASM path and must stay model-callable (visibility = "model").
+        call(
+            "github.comment_issue",
+            "comment-issue",
+            json!({"owner": "nearai", "repo": "ironclaw", "issue_number": 77, "body": "alias comment"}),
+        ),
         call(
             "github.list_pull_requests",
             "list-prs",
@@ -277,6 +284,11 @@ fn github_capability_calls() -> Vec<RebornScriptedProviderToolCall> {
             }),
         ),
         call(
+            "github.get_authenticated_user",
+            "get-authenticated-user",
+            json!({}),
+        ),
+        call(
             "github.list_repos",
             "list-repos",
             json!({"username": "nearai", "limit": 11, "page": 2}),
@@ -290,6 +302,13 @@ fn github_capability_calls() -> Vec<RebornScriptedProviderToolCall> {
             "github.search_code",
             "search-code",
             json!({"query": "repo:nearai/ironclaw path:src Tool", "limit": 12, "page": 3, "sort": "updated", "order": "desc"}),
+        ),
+        // Compatibility alias for github.search_issues_pull_requests — routes through
+        // the same WASM path and must stay model-callable (visibility = "model").
+        call(
+            "github.search_issues",
+            "search-issues",
+            json!({"query": "repo:nearai/ironclaw is:issue", "limit": 12, "page": 3, "sort": "updated", "order": "desc"}),
         ),
         call(
             "github.search_issues_pull_requests",
@@ -403,7 +422,9 @@ fn expected_github_http_requests() -> Vec<ExpectedGithubHttpRequest> {
                 "license_template": "mit"
             }),
         ),
-        get("https://api.github.com/repos/nearai/ironclaw/issues?state=closed&per_page=7&page=2"),
+        get(
+            "https://api.github.com/search/issues?q=repo%3Anearai%2Fironclaw%20state%3Aclosed%20is%3Aissue&per_page=7&page=2&sort=created&order=desc",
+        ),
         request(
             "POST",
             "https://api.github.com/repos/nearai/ironclaw/issues",
@@ -415,6 +436,12 @@ fn expected_github_http_requests() -> Vec<ExpectedGithubHttpRequest> {
             "POST",
             "https://api.github.com/repos/nearai/ironclaw/issues/42/comments",
             json!({"body": "matrix comment"}),
+        ),
+        // github.comment_issue alias → identical create-comment endpoint, distinct issue.
+        request(
+            "POST",
+            "https://api.github.com/repos/nearai/ironclaw/issues/77/comments",
+            json!({"body": "alias comment"}),
         ),
         get("https://api.github.com/repos/nearai/ironclaw/pulls?state=all&per_page=9&page=4"),
         request(
@@ -452,12 +479,17 @@ fn expected_github_http_requests() -> Vec<ExpectedGithubHttpRequest> {
                 "commit_message": "merge body"
             }),
         ),
+        get("https://api.github.com/user"),
         get("https://api.github.com/users/nearai/repos?per_page=11&page=2"),
         get(
             "https://api.github.com/search/repositories?q=org%3Anearai%20ironclaw&per_page=12&page=3&sort=updated&order=desc",
         ),
         get(
             "https://api.github.com/search/code?q=repo%3Anearai%2Fironclaw%20path%3Asrc%20Tool&per_page=12&page=3&sort=updated&order=desc",
+        ),
+        // github.search_issues alias → identical search/issues endpoint, distinct query.
+        get(
+            "https://api.github.com/search/issues?q=repo%3Anearai%2Fironclaw%20is%3Aissue&per_page=12&page=3&sort=updated&order=desc",
         ),
         get(
             "https://api.github.com/search/issues?q=repo%3Anearai%2Fironclaw%20is%3Apr&per_page=12&page=3&sort=updated&order=desc",

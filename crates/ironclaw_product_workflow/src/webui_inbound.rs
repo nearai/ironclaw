@@ -25,6 +25,41 @@ const MAX_INLINE_ATTACHMENT_BYTES: usize = 5 * 1024 * 1024;
 const MAX_INLINE_TOTAL_ATTACHMENT_BYTES: usize = 10 * 1024 * 1024;
 const ATTACHMENT_FILENAME_MAX_BYTES: usize = 256;
 
+/// Browser-facing inline-attachment contract advertised to the WebUI.
+///
+/// Carries the `accept` tokens generated from the shared
+/// [`ironclaw_common`] format registry (so the file picker can never drift
+/// from the server's allowed MIME set) plus the same budgets
+/// [`WebUiSendMessageRequest::decode_attachments`] enforces. The browser
+/// uses this only for pre-submit hints; the server-side decode remains the
+/// sole authority on what is accepted.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WebUiAttachmentCapabilities {
+    /// HTML file-input `accept` tokens from the shared registry: exact MIME
+    /// types plus extensions, e.g. `["image/png", ".png", "application/pdf",
+    /// ".pdf"]` — never `image/*` wildcards (which would advertise unsupported
+    /// formats, and which break folder navigation in the native macOS picker).
+    pub accept: Vec<String>,
+    /// Maximum number of attachments per message.
+    pub max_count: usize,
+    /// Maximum decoded byte size of a single attachment.
+    pub max_file_bytes: usize,
+    /// Maximum combined decoded byte size of all attachments in one message.
+    pub max_total_bytes: usize,
+}
+
+/// The inline-attachment contract advertised to browsers. Generated from the
+/// shared format registry and the budgets `decode_attachments` enforces, so
+/// the picker and the server stay in lockstep by construction.
+pub fn webui_attachment_capabilities() -> WebUiAttachmentCapabilities {
+    WebUiAttachmentCapabilities {
+        accept: ironclaw_common::accept_tokens(),
+        max_count: MAX_INLINE_ATTACHMENTS,
+        max_file_bytes: MAX_INLINE_ATTACHMENT_BYTES,
+        max_total_bytes: MAX_INLINE_TOTAL_ATTACHMENT_BYTES,
+    }
+}
+
 /// Authenticated WebUI caller after route auth has already completed.
 ///
 /// This is authority-bearing input supplied by the host/router layer, not by
@@ -76,6 +111,11 @@ pub struct WebUiCreateThreadRequest {
     pub client_action_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub requested_thread_id: Option<String>,
+    /// Optional project the new thread should be scoped to. The browser only
+    /// *proposes* it — the facade authorizes the caller's access to the project
+    /// before adopting it as scope, so the body is never trusted on its own.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project_id: Option<String>,
 }
 
 /// One inline attachment in a browser send-message body.
@@ -216,6 +256,11 @@ pub struct WebUiListAutomationsRequest {
     pub limit: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub run_limit: Option<u32>,
+    /// When `true`, soft-completed (fire-once) automations are included in the
+    /// response alongside active ones. Defaults to `false` (active-only) so
+    /// existing callers that do not set this flag are unaffected.
+    #[serde(default)]
+    pub include_completed: bool,
 }
 
 /// Browser body for WebUI extension-setup interaction.
@@ -286,12 +331,13 @@ pub enum WebUiGateResolution {
         #[serde(default)]
         always: bool,
     },
-    Denied,
+    /// Unified decline variant — covers both user-initiated approval denial
+    /// ("denied") and auth-gate cancellation ("cancelled"). Both legacy wire
+    /// strings deserialize to this variant; new serializations use "declined".
+    #[serde(alias = "denied", alias = "cancelled")]
+    Declined,
     /// A host-stored credential reference, not a raw secret/token.
-    CredentialProvided {
-        credential_ref: String,
-    },
-    Cancelled,
+    CredentialProvided { credential_ref: String },
 }
 
 /// Canonical route-independent WebUI command produced after validation.
@@ -511,7 +557,7 @@ fn parse_gate_resolution(
         "approved" => Ok(WebUiGateResolution::Approved {
             always: always.unwrap_or(false),
         }),
-        "denied" => Ok(WebUiGateResolution::Denied),
+        "denied" | "cancelled" => Ok(WebUiGateResolution::Declined),
         "credential_provided" => Ok(WebUiGateResolution::CredentialProvided {
             credential_ref: required_text(
                 "credential_ref",
@@ -520,7 +566,6 @@ fn parse_gate_resolution(
                 TextMode::Token,
             )?,
         }),
-        "cancelled" => Ok(WebUiGateResolution::Cancelled),
         _ => Err(WebUiInboundValidationError::new(
             "resolution",
             WebUiInboundValidationCode::InvalidValue,

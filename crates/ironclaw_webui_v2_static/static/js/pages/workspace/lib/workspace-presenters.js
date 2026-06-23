@@ -1,4 +1,26 @@
-export const DEFAULT_WORKSPACE_PATH = "README.md";
+// Empty selection = the viewer's root, where the tree lists the storage areas.
+// The browser then drills in by area.
+export const DEFAULT_WORKSPACE_PATH = "";
+
+// Display names for the storage areas shown at the root. Internally the first
+// path segment is the backend area id (used for routing and the URL); the UI
+// renders these friendlier names instead — the local project directory shows
+// as "home", memory stays "memory".
+export const AREA_DISPLAY_NAMES = { workspace: "home" };
+
+export function areaDisplayName(areaId) {
+  return AREA_DISPLAY_NAMES[areaId] || areaId;
+}
+
+// Canonical entry ordering, applied in every panel so the tree and the main
+// listing never disagree: directories first, then files, each group sorted
+// alphabetically (case-insensitive, locale-aware) by display name.
+export function sortEntries(entries) {
+  return [...(entries || [])].sort((a, b) => {
+    if (a.is_dir !== b.is_dir) return a.is_dir ? -1 : 1;
+    return a.name.localeCompare(b.name, undefined, { sensitivity: "base" });
+  });
+}
 
 export function pathSegments(path) {
   if (!path) return [];

@@ -17,7 +17,7 @@ use ironclaw_auth::{
     CredentialAccountStatus, CredentialOwnership, CredentialSelectionInput,
     ManualTokenCompletionInput, NewAuthFlow, NewCredentialAccount, OAuthCallbackClaimRequest,
     OAuthCallbackFailureInput, OAuthCallbackInput, OAuthProviderExchange, ProviderCallbackOutcome,
-    TurnGateAuthFlowQuery, flow_matches_turn_gate_query,
+    TurnGateAuthFlowQuery, binding_scope_owns_account, flow_matches_turn_gate_query,
 };
 
 #[async_trait]
@@ -503,7 +503,13 @@ where
             .read_account(scope, account_id)
             .await?
             .ok_or(AuthProductError::CredentialMissing)?;
-        if !scope_matches(scope, &account.scope) {
+        // Owner-granularity guard (#4935 defect A): the callback `scope` is the
+        // flow's stored scope, whose per-flow `invocation_id` (and any
+        // thread/mission) the bound account does not share. The old
+        // `scope_matches` full-equality rejected the legitimate update and left
+        // the forked account in place; the owner boundary
+        // (tenant/user/agent/project + session) is what must hold here.
+        if !binding_scope_owns_account(scope, &account) {
             return Err(AuthProductError::CrossScopeDenied);
         }
         if account.provider != exchange.provider {

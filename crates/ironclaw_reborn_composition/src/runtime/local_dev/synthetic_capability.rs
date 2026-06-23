@@ -20,6 +20,7 @@ pub(super) fn wrap_local_dev_synthetic_capabilities(
     run_context: LoopRunContext,
     input_resolver: Arc<dyn LoopCapabilityInputResolver>,
     result_writer: Arc<dyn LoopCapabilityResultWriter>,
+    trajectory_observer: Option<Arc<dyn crate::RebornTrajectoryObserver>>,
 ) -> Result<Arc<dyn LoopCapabilityPort>, AgentLoopHostError> {
     if capabilities.is_empty() {
         return Ok(inner);
@@ -30,6 +31,7 @@ pub(super) fn wrap_local_dev_synthetic_capabilities(
         run_context,
         input_resolver,
         result_writer,
+        trajectory_observer,
     )?))
 }
 
@@ -130,6 +132,11 @@ struct LocalDevSyntheticCapabilityPort {
     capabilities_by_id: HashMap<CapabilityId, LocalDevSyntheticCapability>,
     capability_ids_by_provider_tool_name: HashMap<String, CapabilityId>,
     current_surface_version: StdMutex<Option<CapabilitySurfaceVersion>>,
+    /// Synthetic calls resolve input + write the result here, bypassing the
+    /// inner `HostRuntimeLoopCapabilityPort` input hook. Hold the observer so we
+    /// can emit `on_capability_input` ourselves — otherwise consumers see the
+    /// result event (from `LocalDevCapabilityIo`) with no matching input.
+    trajectory_observer: Option<Arc<dyn crate::RebornTrajectoryObserver>>,
 }
 
 impl LocalDevSyntheticCapabilityPort {
@@ -139,6 +146,7 @@ impl LocalDevSyntheticCapabilityPort {
         run_context: LoopRunContext,
         input_resolver: Arc<dyn LoopCapabilityInputResolver>,
         result_writer: Arc<dyn LoopCapabilityResultWriter>,
+        trajectory_observer: Option<Arc<dyn crate::RebornTrajectoryObserver>>,
     ) -> Result<Self, AgentLoopHostError> {
         let mut capabilities_by_id = HashMap::new();
         let mut capability_ids_by_provider_tool_name = HashMap::new();
@@ -166,6 +174,7 @@ impl LocalDevSyntheticCapabilityPort {
             capabilities_by_id,
             capability_ids_by_provider_tool_name,
             current_surface_version: StdMutex::new(None),
+            trajectory_observer,
         })
     }
 
@@ -340,10 +349,41 @@ impl LoopCapabilityPort for LocalDevSyntheticCapabilityPort {
                 "synthetic capability call cites a stale capability surface",
             ));
         }
-        let input = self
-            .input_resolver
-            .resolve_capability_input(&self.run_context, &request.input_ref)
-            .await?;
+        if request.approval_resume.is_some() && request.auth_resume.is_some() {
+            return Err(AgentLoopHostError::new(
+                AgentLoopHostErrorKind::InvalidInvocation,
+                "capability invocation has both approval_resume and auth_resume set; \
+                 these resume modes are mutually exclusive",
+            ));
+        }
+        let input = match request.approval_resume.as_ref() {
+            Some(resume) => resume.input.clone(),
+            None => {
+                self.input_resolver
+                    .resolve_capability_input(&self.run_context, &request.input_ref)
+                    .await?
+            }
+        };
+        // The inner port's input hook is bypassed for synthetic capabilities, so
+        // emit the input event here — otherwise `LocalDevCapabilityIo` would stage
+        // a result with no matching input and consumers would see an unpaired
+        // event missing the tool arguments. Best-effort + panic-isolated, matching
+        // the other observer call sites.
+        if let Some(observer) = &self.trajectory_observer {
+            let caught = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                observer.on_capability_input(
+                    request.input_ref.as_str(),
+                    request.capability_id.as_str(),
+                    &input,
+                );
+            }));
+            if caught.is_err() {
+                tracing::warn!(
+                    capability_id = request.capability_id.as_str(),
+                    "trajectory observer on_capability_input panicked; dropping event"
+                );
+            }
+        }
         handler
             .invoke(LocalDevSyntheticCapabilityInvocation {
                 run_context: self.run_context.clone(),

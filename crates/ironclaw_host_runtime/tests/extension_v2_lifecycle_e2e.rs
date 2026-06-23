@@ -9,8 +9,8 @@ use ironclaw_dispatcher::{
     RuntimeAdapterResult, RuntimeDispatchErrorKind, RuntimeDispatcher,
 };
 use ironclaw_extensions::{
-    ExtensionError, ExtensionLifecycleService, ExtensionManifest, ExtensionPackage,
-    ExtensionRegistry, ExtensionRuntime, ManifestSource, ManifestV2Error,
+    CapabilityVisibility, ExtensionError, ExtensionLifecycleService, ExtensionManifest,
+    ExtensionPackage, ExtensionRegistry, ExtensionRuntime, ManifestSource, ManifestV2Error,
 };
 use ironclaw_filesystem::LocalFilesystem;
 use ironclaw_host_api::{
@@ -161,74 +161,164 @@ async fn github_v2_package_discovers_and_publishes_issue_hot_catalog() {
         &package.manifest.runtime,
         ExtensionRuntime::Wasm { module } if module.as_str() == "wasm/github_tool.wasm"
     ));
+    let expected_github_capability_ids = [
+        "github.get_repo",
+        "github.create_repo",
+        "github.list_issues",
+        "github.create_issue",
+        "github.get_issue",
+        "github.list_issue_comments",
+        "github.create_issue_comment",
+        "github.comment_issue",
+        "github.list_pull_requests",
+        "github.create_pull_request",
+        "github.get_pull_request",
+        "github.get_pull_request_files",
+        "github.create_pr_review",
+        "github.list_pull_request_comments",
+        "github.reply_pull_request_comment",
+        "github.get_pull_request_reviews",
+        "github.get_combined_status",
+        "github.merge_pull_request",
+        "github.get_authenticated_user",
+        "github.list_repos",
+        "github.search_repositories",
+        "github.search_code",
+        "github.search_issues",
+        "github.search_issues_pull_requests",
+        "github.list_branches",
+        "github.create_branch",
+        "github.get_file_content",
+        "github.create_or_update_file",
+        "github.delete_file",
+        "github.list_releases",
+        "github.create_release",
+        "github.trigger_workflow",
+        "github.get_workflow_runs",
+        "github.fork_repo",
+        "github.handle_webhook",
+    ];
+    assert_eq!(expected_github_capability_ids.len(), 35);
     assert_eq!(
         package
             .capabilities
             .iter()
             .map(|capability| capability.id.as_str())
-            .collect::<Vec<_>>(),
-        vec![
-            "github.search_issues",
-            "github.get_issue",
-            "github.comment_issue"
-        ]
+            .collect::<Vec<_>>()
+            .as_slice(),
+        expected_github_capability_ids
     );
-    for capability in &package.manifest.capabilities {
-        let expected_effects = if capability.id.as_str() == "github.comment_issue" {
+    assert_eq!(
+        package
+            .manifest
+            .capabilities
+            .iter()
+            .map(|capability| capability.id.as_str())
+            .collect::<Vec<_>>()
+            .as_slice(),
+        expected_github_capability_ids
+    );
+    let model_visible_capability_ids = package
+        .manifest
+        .capabilities
+        .iter()
+        .filter(|capability| capability.visibility == CapabilityVisibility::Model)
+        .map(|capability| capability.id.as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        model_visible_capability_ids.as_slice(),
+        expected_github_capability_ids
+    );
+    for (capability_id, expected_effects, expected_permission, expects_github_api_access) in [
+        (
+            "github.get_repo",
+            vec![EffectKind::Network, EffectKind::UseSecret],
+            PermissionMode::Allow,
+            true,
+        ),
+        (
+            "github.create_repo",
             vec![
                 EffectKind::DispatchCapability,
                 EffectKind::Network,
                 EffectKind::UseSecret,
                 EffectKind::ExternalWrite,
-            ]
-        } else {
-            vec![EffectKind::Network, EffectKind::UseSecret]
-        };
+            ],
+            PermissionMode::Ask,
+            true,
+        ),
+        (
+            "github.handle_webhook",
+            vec![EffectKind::DispatchCapability],
+            PermissionMode::Ask,
+            false,
+        ),
+    ] {
+        let capability = package
+            .manifest
+            .capabilities
+            .iter()
+            .find(|capability| capability.id.as_str() == capability_id)
+            .unwrap();
         assert_eq!(capability.effects, expected_effects);
-        assert_eq!(capability.default_permission, PermissionMode::Ask);
-        assert_eq!(
-            capability
-                .required_host_ports
-                .iter()
-                .map(|port| port.as_str())
-                .collect::<Vec<_>>(),
-            vec!["host.runtime.http_egress"]
-        );
-        assert_eq!(capability.runtime_credentials.len(), 1);
-        let credential = &capability.runtime_credentials[0];
-        assert_eq!(
-            credential.handle,
-            SecretHandle::new("github_runtime_token").unwrap()
-        );
-        assert_eq!(
-            credential.source,
-            RuntimeCredentialRequirementSource::ProductAuthAccount {
-                provider: RuntimeCredentialAccountProviderId::new("github").unwrap(),
-                setup: Default::default(),
-            }
-        );
-        assert_eq!(
-            credential.audience,
-            NetworkTargetPattern {
-                scheme: Some(NetworkScheme::Https),
-                host_pattern: "api.github.com".to_string(),
-                port: None,
-            }
-        );
-        assert_eq!(
-            credential.target,
-            RuntimeCredentialTarget::Header {
-                name: "authorization".to_string(),
-                prefix: Some("Bearer ".to_string()),
-            }
-        );
-        assert!(credential.required);
+        assert_eq!(capability.default_permission, expected_permission);
+        if expects_github_api_access {
+            assert_eq!(
+                capability
+                    .required_host_ports
+                    .iter()
+                    .map(|port| port.as_str())
+                    .collect::<Vec<_>>(),
+                vec!["host.runtime.http_egress"]
+            );
+            assert_eq!(capability.runtime_credentials.len(), 1);
+            let credential = &capability.runtime_credentials[0];
+            assert_eq!(
+                credential.handle,
+                SecretHandle::new("github_runtime_token").unwrap()
+            );
+            assert_eq!(
+                credential.source,
+                RuntimeCredentialRequirementSource::ProductAuthAccount {
+                    provider: RuntimeCredentialAccountProviderId::new("github").unwrap(),
+                    setup: Default::default(),
+                }
+            );
+            assert_eq!(
+                credential.audience,
+                NetworkTargetPattern {
+                    scheme: Some(NetworkScheme::Https),
+                    host_pattern: "api.github.com".to_string(),
+                    port: None,
+                }
+            );
+            assert_eq!(
+                credential.target,
+                RuntimeCredentialTarget::Header {
+                    name: "authorization".to_string(),
+                    prefix: Some("Bearer ".to_string()),
+                }
+            );
+            assert!(credential.required);
+        } else {
+            assert!(capability.required_host_ports.is_empty());
+            assert!(capability.runtime_credentials.is_empty());
+        }
     }
 
     let hot_catalog = publish_hot_capability_catalog(&fs, &registry)
         .await
         .unwrap();
-    assert_eq!(hot_catalog.capabilities.len(), 3);
+    assert_eq!(
+        hot_catalog
+            .capabilities
+            .iter()
+            .map(|capability| capability.descriptor.id.as_str())
+            .collect::<Vec<_>>()
+            .as_slice(),
+        expected_github_capability_ids
+    );
+    assert_eq!(hot_catalog.capabilities.len(), 35);
 
     let search = hot_catalog
         .get(&CapabilityId::new("github.search_issues").unwrap())
@@ -240,8 +330,12 @@ async fn github_v2_package_discovers_and_publishes_issue_hot_catalog() {
         json!("string")
     );
     assert_eq!(
-        search.output_schema["properties"]["items"]["type"],
-        json!("array")
+        search.output_schema["title"],
+        json!("GitHub raw API output")
+    );
+    assert_eq!(
+        search.output_schema["type"],
+        json!(["object", "array", "string", "null"])
     );
     assert!(
         search
@@ -267,14 +361,16 @@ async fn github_v2_package_discovers_and_publishes_issue_hot_catalog() {
         json!("\\.\\.")
     );
     assert_eq!(
-        get_issue.output_schema["required"],
-        json!(["number", "title", "state", "html_url"])
+        get_issue.output_schema["title"],
+        json!("GitHub raw API output")
     );
     assert!(
         get_issue
             .prompt_doc
             .as_deref()
-            .is_some_and(|doc| doc.contains("github.get_issue") && doc.contains("read-only"))
+            .is_some_and(|doc| doc.contains("github.get_issue")
+                && doc.contains("reads from the GitHub API")
+                && doc.contains("configured GitHub product-auth account"))
     );
 
     let comment_issue = hot_catalog
@@ -294,8 +390,8 @@ async fn github_v2_package_discovers_and_publishes_issue_hot_catalog() {
         ]
     );
     assert_eq!(
-        comment_issue.output_schema["required"],
-        json!(["id", "html_url", "body"])
+        comment_issue.output_schema["title"],
+        json!("GitHub raw API output")
     );
     assert!(comment_issue.prompt_doc.as_deref().is_some_and(|doc| {
         doc.contains("github.comment_issue")
@@ -468,20 +564,15 @@ fn mounted_github_package_fs() -> (tempfile::TempDir, LocalFilesystem) {
     let source_root = github_first_party_asset_root();
     let package_root = storage.path().join("github");
 
-    for relative in [
-        "manifest.toml",
-        "schemas/github/search_issues.input.v1.json",
-        "schemas/github/search_issues.output.v1.json",
-        "schemas/github/get_issue.input.v1.json",
-        "schemas/github/get_issue.output.v1.json",
-        "schemas/github/comment_issue.input.v1.json",
-        "schemas/github/comment_issue.output.v1.json",
-        "prompts/github/search_issues.md",
-        "prompts/github/get_issue.md",
-        "prompts/github/comment_issue.md",
-    ] {
-        copy_package_file(&source_root, &package_root, relative);
-    }
+    copy_package_file(&source_root, &package_root, "manifest.toml");
+    copy_package_dir(
+        &source_root.join("schemas/github"),
+        &package_root.join("schemas/github"),
+    );
+    copy_package_dir(
+        &source_root.join("prompts/github"),
+        &package_root.join("prompts/github"),
+    );
 
     let mut fs = LocalFilesystem::new();
     fs.mount_local(
@@ -503,6 +594,20 @@ fn copy_package_file(source_root: &Path, package_root: &Path, relative: &str) {
     let destination = package_root.join(relative);
     std::fs::create_dir_all(destination.parent().unwrap()).unwrap();
     std::fs::copy(source, destination).unwrap();
+}
+
+fn copy_package_dir(source: &Path, destination: &Path) {
+    std::fs::create_dir_all(destination).unwrap();
+    for entry in std::fs::read_dir(source).unwrap() {
+        let entry = entry.unwrap();
+        let source_path = entry.path();
+        let destination_path = destination.join(entry.file_name());
+        if entry.file_type().unwrap().is_dir() {
+            copy_package_dir(&source_path, &destination_path);
+        } else {
+            std::fs::copy(source_path, destination_path).unwrap();
+        }
+    }
 }
 
 fn sample_scope() -> ResourceScope {

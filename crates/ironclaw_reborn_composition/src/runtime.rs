@@ -28,7 +28,6 @@ use std::time::Duration;
 use chrono::Utc;
 use thiserror::Error;
 use tokio::sync::{Mutex, OwnedMutexGuard};
-use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
@@ -46,16 +45,17 @@ use ironclaw_host_api::{
 };
 use ironclaw_loop_support::{
     CapabilityAllowSet, CapabilityResolveError, CapabilitySurfaceProfileResolver,
-    FilesystemSkillBundleSource, HostIdentityContextSource, HostSkillContextSource,
-    JsonSpawnSubagentInputCodec, LoopCapabilityInputResolver, LoopCapabilityPortFactory,
-    LoopCapabilityResultWriter, ModelGatewayBackedSystemInferencePort,
+    EmptyUserProfileSource, FilesystemSkillBundleSource, HostIdentityContextSource,
+    HostSkillContextSource, HostUserProfileSource, JsonSpawnSubagentInputCodec,
+    LoopCapabilityInputResolver, LoopCapabilityPortFactory, LoopCapabilityResultWriter,
+    ModelGatewayBackedSystemInferencePort,
 };
 use ironclaw_product_adapters::ProjectionStream;
 use ironclaw_product_workflow::{
     ApprovalBlockedTurnRun, ApprovalInteractionScope, ApprovalInteractionService,
     ApprovalResolverPort, ApprovalTurnRunLocator, AuthInteractionService,
     DefaultApprovalInteractionService, DefaultAuthInteractionService,
-    RunStateApprovalInteractionReadModel,
+    OutboundPreferencesProductFacade, RunStateApprovalInteractionReadModel,
 };
 use ironclaw_reborn::loop_exit_applier::{
     ApprovalGateEvidenceStore, ThreadCheckpointLoopExitEvidencePort,
@@ -66,7 +66,6 @@ use ironclaw_reborn::milestone_events::{
 use ironclaw_reborn::runtime::{
     DefaultPlannedRuntimeBuildError, DefaultPlannedRuntimeConfig, DefaultPlannedRuntimeParts,
     RuntimeSubagentGoalStore, RuntimeTurnStateStore, build_default_planned_runtime,
-    build_default_planned_runtime_with_wake_channel,
 };
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 use ironclaw_reborn::subagent::goal_store::FilesystemSubagentGoalStore;
@@ -75,26 +74,57 @@ use ironclaw_reborn::subagent::goal_store::InMemoryBoundedSubagentGoalStore;
 use ironclaw_reborn::subagent::{
     flavors::StaticSubagentDefinitionResolver, gate_resolution::BoundedSubagentGateResolutionStore,
 };
-use ironclaw_reborn::turn_runner::{
-    TurnRunnerWakeReceiver, TurnRunnerWakeSender, TurnRunnerWorkerConfig,
-};
 use ironclaw_threads::{
     AcceptInboundMessageRequest, EnsureThreadRequest, MessageContent, MessageKind, MessageStatus,
     SessionThreadService, ThreadHistoryRequest, ThreadScope,
 };
 use ironclaw_turns::{
     AcceptedMessageRef, CancelRunRequest, CancelRunResponse, GetRunStateRequest, IdempotencyKey,
-    LoopGateRef, ReplyTargetBindingRef, RunProfileResolutionRequest, SanitizedCancelReason,
-    SourceBindingRef, SubmitTurnRequest, SubmitTurnResponse, TurnActor, TurnCoordinator, TurnError,
-    TurnEventProjectionSource, TurnId, TurnPersistenceSnapshot, TurnRunId, TurnRunRecord,
-    TurnRunState, TurnScope, TurnSpawnTreeStateStore, TurnStatus,
+    InMemoryTurnStateStoreLimits, LoopGateRef, ReplyTargetBindingRef, RunProfileResolutionRequest,
+    SanitizedCancelReason, SourceBindingRef, SubmitTurnRequest, SubmitTurnResponse, TurnActor,
+    TurnCoordinator, TurnError, TurnEventProjectionSource, TurnId, TurnPersistenceSnapshot,
+    TurnRunId, TurnRunRecord, TurnRunState, TurnRunWake, TurnScope, TurnSpawnTreeStateStore,
+    TurnStatus,
+    events::EventCursor,
     run_profile::{LoopHostMilestoneSink, LoopRunContext},
 };
 
+use ironclaw_host_runtime::MemoryBackedUserProfileSource;
+#[cfg(any(test, feature = "test-support"))]
+use ironclaw_product_workflow::{
+    RebornOutboundDeliveryTargetCapabilities, RebornOutboundDeliveryTargetId,
+    RebornOutboundDeliveryTargetSummary, RebornServicesError, WebUiAuthenticatedCaller,
+};
+use ironclaw_turns::run_profile::UserProfileContext;
+
+use self::runtime_turn_scheduler::RuntimeTurnScheduler;
 use crate::default_system_prompt::DefaultSystemPromptIdentitySource;
 use crate::factory::{LocalDevRootFilesystem, LocalDevTurnStateStore, builtin_extension_registry};
 use crate::local_dev_capability_policy::local_dev_capability_policy;
+#[cfg(any(test, feature = "test-support"))]
+use crate::outbound_preferences::OutboundDeliveryTargetEntry;
+use crate::outbound_preferences::{
+    MutableOutboundDeliveryTargetRegistry, OutboundDeliveryTargetProvider,
+    OutboundDeliveryTargetRegistrationOutcome, RebornOutboundPreferencesFacade,
+};
 use crate::projection::{RebornProjectionServices, build_reborn_projection_services};
+
+#[cfg(any(test, feature = "test-support"))]
+#[derive(Clone)]
+struct StaticOutboundDeliveryTargetProvider {
+    entry: OutboundDeliveryTargetEntry,
+}
+
+#[cfg(any(test, feature = "test-support"))]
+#[async_trait::async_trait]
+impl OutboundDeliveryTargetProvider for StaticOutboundDeliveryTargetProvider {
+    async fn list_outbound_delivery_targets(
+        &self,
+        _caller: &WebUiAuthenticatedCaller,
+    ) -> Result<Vec<OutboundDeliveryTargetEntry>, RebornServicesError> {
+        Ok(vec![self.entry.clone()])
+    }
+}
 use crate::runtime_input::{
     PollSettings, RebornRuntimeIdentity, RebornRuntimeInput, TriggerPollerAuthorizerConfig,
     TriggerPollerSettings,
@@ -118,6 +148,27 @@ use production::{
 };
 
 const MAX_DESCENDANT_CANCEL_NODES: usize = 1_000;
+
+// Adapter: wraps `MemoryBackedUserProfileSource` (in `ironclaw_host_runtime`) and
+// implements `HostUserProfileSource` (in `ironclaw_loop_support`). A direct
+// `impl HostUserProfileSource for MemoryBackedUserProfileSource` is forbidden by
+// the orphan rule — neither the trait nor the type is defined in this crate. The
+// newtype wrapper is defined here, so the impl is allowed. This mirrors how
+// `WorkspaceIdentityContextSource` (defined in `src/workspace/`) implements
+// `HostIdentityContextSource` (defined in `ironclaw_loop_support`) — the impl
+// lives in the crate that owns the *concrete type* and can see the trait.
+struct MemoryBackedUserProfileSourceAdapter(MemoryBackedUserProfileSource);
+
+#[async_trait::async_trait]
+impl HostUserProfileSource for MemoryBackedUserProfileSourceAdapter {
+    async fn resolve_user_profile(
+        &self,
+        run_context: &LoopRunContext,
+    ) -> Option<UserProfileContext> {
+        // Delegate to the inherent method on `MemoryBackedUserProfileSource`.
+        self.0.resolve_user_profile(run_context).await
+    }
+}
 
 struct RuntimeStoreParts<'a> {
     local_runtime: Option<&'a crate::factory::RebornLocalRuntimeServices>,
@@ -223,8 +274,45 @@ fn enforce_runtime_cutover_gate(
         RebornCompositionProfile::Disabled => Err(RebornRuntimeError::InvalidArgument {
             reason: "profile=disabled must not start live Reborn runtime traffic".to_string(),
         }),
+        RebornCompositionProfile::HostedSingleTenant => {
+            if readiness.state != RebornReadinessState::HostedSingleTenantValidated {
+                return Err(RebornRuntimeError::InvalidArgument {
+                    reason: format!(
+                        "profile=hosted-single-tenant cannot start Reborn runtime before hosted single-tenant readiness is validated; required_state=HostedSingleTenantValidated, state={:?}",
+                        readiness.state
+                    ),
+                });
+            }
+            Ok(())
+        }
         RebornCompositionProfile::LocalDev | RebornCompositionProfile::LocalDevYolo => Ok(()),
     }
+}
+
+/// Guard: production and migration-dry-run compositions always pre-mint
+/// [`SchedulerWakeWiring`] in `build_production_shaped` so the
+/// `HostRuntimeServices` notifier and the scheduler wake loop share exactly one
+/// channel. If the wiring is `None` for those profiles it means the composition
+/// contract was violated (e.g. a code path forgot to mint it), and starting the
+/// runtime would silently create a divergent scheduler-local channel. Extracted
+/// so the negative branch is unit-testable without a full libsql/postgres
+/// substrate.
+#[cfg(any(feature = "libsql", feature = "postgres"))]
+fn check_production_scheduler_wake_wiring(
+    profile: RebornCompositionProfile,
+    wiring: &Option<ironclaw_reborn::runtime::SchedulerWakeWiring>,
+) -> Result<(), RebornRuntimeError> {
+    if wiring.is_none()
+        && matches!(
+            profile,
+            RebornCompositionProfile::Production | RebornCompositionProfile::MigrationDryRun
+        )
+    {
+        return Err(RebornRuntimeError::InvalidArgument {
+            reason: "production runtime missing scheduler wake wiring".to_string(),
+        });
+    }
+    Ok(())
 }
 
 mod approval;
@@ -236,7 +324,11 @@ mod auth_interaction_tests;
 #[path = "runtime/tests/default_system_prompt.rs"]
 mod default_system_prompt_tests;
 mod local_dev;
+#[cfg(test)]
+#[path = "runtime/tests/outbound_delivery.rs"]
+mod outbound_delivery_tests;
 mod production;
+mod runtime_turn_scheduler;
 mod skills;
 
 #[cfg(test)]
@@ -373,9 +465,12 @@ pub struct RebornRuntime {
     turn_tree_store: Arc<dyn TurnSpawnTreeStateStore>,
     thread_service: Arc<dyn SessionThreadService>,
     thread_scope: ThreadScope,
-    worker_handle: JoinHandle<()>,
-    worker_cancel: CancellationToken,
+    turn_scheduler: RuntimeTurnScheduler,
     trigger_poller_handle: Option<TriggerPollerRuntimeHandle>,
+    #[cfg(any(feature = "libsql", feature = "postgres"))]
+    credential_refresh_worker_handle:
+        Option<crate::credential_refresh_worker::CredentialRefreshWorkerRuntimeHandle>,
+    trace_flush_worker: crate::trace_capture::TraceQueueFlushWorkerHandle,
     /// Late-binding slot shared with the poller's `PostSubmitHookWrappedSubmitter`.
     /// `set_trigger_post_submit_hook` fills this after `build_reborn_runtime` returns.
     /// `None` when the trigger poller is not enabled.
@@ -385,6 +480,7 @@ pub struct RebornRuntime {
     #[cfg(any(test, feature = "test-support"))]
     trigger_conversation_pairing:
         Option<Arc<dyn ironclaw_conversations::ConversationActorPairingService>>,
+    outbound_delivery_target_registry: Option<Arc<MutableOutboundDeliveryTargetRegistry>>,
     budget_event_projection: Option<crate::budget_events::BudgetEventProjection>,
     poll_settings: PollSettings,
     actor_user_id: UserId,
@@ -397,7 +493,6 @@ pub struct RebornRuntime {
     approval_audit_sink: Arc<InMemoryAuditSink>,
     webui_event_log: Arc<dyn DurableEventLog>,
     default_run_profile_id: String,
-    wake_sender: TurnRunnerWakeSender,
     send_locks: Mutex<HashMap<ConversationId, Arc<Mutex<()>>>>,
     skill_activation_source: Option<Arc<LocalDevSelectableSkillContextSource>>,
     skill_execution_adapter: Option<Arc<LocalDevSkillExecutionAdapter>>,
@@ -615,14 +710,20 @@ impl LocalDevApprovalTurnRunLocator {
     async fn snapshot(
         &self,
     ) -> Result<TurnPersistenceSnapshot, ironclaw_product_workflow::ProductWorkflowError> {
-        #[cfg(feature = "libsql")]
+        #[cfg(any(feature = "libsql", feature = "postgres"))]
         {
             self.turn_state
                 .persistence_snapshot()
                 .await
-                .map_err(|_| approval_turn_locator_unavailable())
+                .map_err(|error| {
+                    tracing::debug!(
+                        %error,
+                        "approval turn-run locator could not read turn persistence snapshot"
+                    );
+                    approval_turn_locator_unavailable()
+                })
         }
-        #[cfg(not(feature = "libsql"))]
+        #[cfg(not(any(feature = "libsql", feature = "postgres")))]
         {
             Ok(self.turn_state.persistence_snapshot())
         }
@@ -764,7 +865,7 @@ fn snapshot_run_actor_matches(
         .any(|turn| turn.turn_id == run.turn_id && turn.scope == run.scope && turn.actor == *actor)
 }
 
-#[cfg(feature = "libsql")]
+#[cfg(any(feature = "libsql", feature = "postgres"))]
 fn approval_turn_locator_unavailable() -> ironclaw_product_workflow::ProductWorkflowError {
     ironclaw_product_workflow::ProductWorkflowError::Transient {
         reason: "approval turn-run locator unavailable".to_string(),
@@ -893,6 +994,7 @@ impl RebornRuntime {
     )]
     pub(crate) fn clear_local_runtime_for_test(&mut self) {
         self.services.local_runtime = None;
+        self.outbound_delivery_target_registry = None;
     }
 
     /// Operator boot config, when the runtime was assembled with one. The
@@ -1028,10 +1130,14 @@ impl RebornRuntime {
         // rows into the same libSQL substrate. Reading that SQL table is a
         // substrate-level concern, so it lives here in the host layer (not the
         // identity crate) and binds each row into the filesystem-backed store.
-        if let Err(err) =
-            fold_legacy_webui_identities(&local.identity_substrate_db, tenant_id, &store).await
+        #[cfg(feature = "libsql")]
         {
-            return Some(Err(err));
+            if let Some(identity_substrate_db) = &local.identity_substrate_db
+                && let Err(err) =
+                    fold_legacy_webui_identities(identity_substrate_db, tenant_id, &store).await
+            {
+                return Some(Err(err));
+            }
         }
         Some(Ok(
             Arc::new(store) as Arc<dyn ironclaw_reborn_identity::RebornIdentityResolver>
@@ -1057,6 +1163,24 @@ impl RebornRuntime {
         self.turn_coordinator.clone()
     }
 
+    #[cfg(feature = "slack-v2-host-beta")]
+    pub(crate) fn auth_challenge_provider(&self) -> Option<Arc<dyn crate::AuthChallengeProvider>> {
+        self.services
+            .product_auth
+            .as_ref()
+            .and_then(|product_auth| product_auth.as_auth_challenge_provider())
+    }
+
+    #[cfg(feature = "slack-v2-host-beta")]
+    pub(crate) fn blocked_auth_flow_canceller(
+        &self,
+    ) -> Option<Arc<dyn crate::BlockedAuthFlowCanceller>> {
+        self.services
+            .product_auth
+            .as_ref()
+            .and_then(|product_auth| product_auth.as_blocked_auth_flow_canceller())
+    }
+
     pub(crate) fn webui_event_stream(&self) -> Arc<dyn ProjectionStream> {
         self.projection_services.webui_event_stream()
     }
@@ -1069,14 +1193,90 @@ impl RebornRuntime {
         self.auth_interaction_service.clone()
     }
 
-    #[cfg(feature = "slack-v2-host-beta")]
-    pub(crate) fn auth_challenge_provider(&self) -> Option<Arc<dyn crate::AuthChallengeProvider>> {
-        self.services
-            .product_auth
+    pub(crate) fn outbound_delivery_target_provider(
+        &self,
+    ) -> Option<Arc<dyn OutboundDeliveryTargetProvider>> {
+        self.outbound_delivery_target_registry
             .as_ref()
-            .and_then(|product_auth| product_auth.as_auth_challenge_provider())
+            .map(|registry| {
+                let registry = Arc::clone(registry);
+                let provider: Arc<dyn OutboundDeliveryTargetProvider> = registry;
+                provider
+            })
     }
 
+    #[cfg_attr(not(feature = "slack-v2-host-beta"), allow(dead_code))]
+    pub(crate) fn register_outbound_delivery_target_provider(
+        &self,
+        provider_key: impl Into<String>,
+        provider: Arc<dyn OutboundDeliveryTargetProvider>,
+    ) -> Result<OutboundDeliveryTargetRegistrationOutcome, RebornRuntimeError> {
+        let Some(registry) = self.outbound_delivery_target_registry.as_ref() else {
+            return Err(RebornRuntimeError::InvalidArgument {
+                reason: "outbound delivery target registry unavailable for this runtime"
+                    .to_string(),
+            });
+        };
+        registry
+            .register_provider(provider_key, provider)
+            .map_err(|error| RebornRuntimeError::InvalidArgument {
+                reason: format!("outbound delivery target provider registration failed: {error}"),
+            })
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn register_static_outbound_delivery_target_for_test(
+        &self,
+        provider_key: impl Into<String>,
+        target_id: RebornOutboundDeliveryTargetId,
+        channel: &str,
+        display_name: &str,
+        description: Option<&str>,
+        reply_target_binding_ref: ReplyTargetBindingRef,
+    ) -> Result<(), RebornRuntimeError> {
+        let summary = RebornOutboundDeliveryTargetSummary::new(
+            target_id,
+            channel,
+            display_name,
+            description.map(ToOwned::to_owned),
+        )
+        .map_err(|error| RebornRuntimeError::InvalidArgument {
+            reason: format!("invalid outbound delivery target summary: {error}"),
+        })?;
+        self.register_outbound_delivery_target_provider(
+            provider_key,
+            Arc::new(StaticOutboundDeliveryTargetProvider {
+                entry: OutboundDeliveryTargetEntry {
+                    summary,
+                    capabilities: RebornOutboundDeliveryTargetCapabilities {
+                        final_replies: true,
+                        gate_prompts: false,
+                        auth_prompts: false,
+                    },
+                    reply_target_binding_ref,
+                },
+            }),
+        )
+        .map(|_| ())
+    }
+
+    #[cfg_attr(not(feature = "slack-v2-host-beta"), allow(dead_code))]
+    pub(crate) fn outbound_delivery_target_provider_key_registered(
+        &self,
+        provider_key: &str,
+    ) -> Result<bool, RebornRuntimeError> {
+        let Some(registry) = self.outbound_delivery_target_registry.as_ref() else {
+            return Err(RebornRuntimeError::InvalidArgument {
+                reason: "outbound delivery target registry unavailable for this runtime"
+                    .to_string(),
+            });
+        };
+        registry
+            .contains_provider_key(provider_key)
+            .map_err(|error| RebornRuntimeError::InvalidArgument {
+                reason: format!("outbound delivery target provider lookup failed: {error}"),
+            })
+    }
     /// Wire the triggered-run delivery hook into the already-spawned trigger
     /// poller. Must be called after [`build_reborn_runtime`] returns and after
     /// the hook itself is constructed (e.g. inside
@@ -1104,6 +1304,13 @@ impl RebornRuntime {
         }
     }
 
+    #[cfg(feature = "slack-v2-host-beta")]
+    pub(crate) fn trigger_post_submit_hook_is_set(&self) -> bool {
+        self.post_submit_hook_slot
+            .as_ref()
+            .is_some_and(|slot| slot.get().is_some())
+    }
+
     #[cfg(test)]
     fn webui_approval_audit_sink(&self) -> Arc<InMemoryAuditSink> {
         self.approval_audit_sink.clone()
@@ -1115,17 +1322,62 @@ impl RebornRuntime {
         self.skill_activation_source.clone()
     }
 
-    /// Project-scoped workspace filesystem the agent's file tools resolve
-    /// through. Used to land inbound attachment bytes at paths the agent can
-    /// later read back. `None` when no local runtime is composed.
+    /// Read-write project-scoped workspace filesystem for landing inbound
+    /// attachment bytes at paths the agent's file tools can later read back.
+    /// `None` when no local runtime is composed.
+    ///
+    /// This deliberately does NOT reuse `rt.workspace_filesystem`: that handle
+    /// is intentionally read-only (it backs setup-marker reads — see
+    /// `local_dev_setup_marker_workspace_filesystem_is_read_only`), so writing
+    /// an attachment through it fails closed with `PermissionDenied`. Build a
+    /// read-write view over the same root using the read-write `workspace_mounts`
+    /// the agent's `file_write`/`file_read` tools resolve through, so a landed
+    /// attachment is addressable at its recorded `storage_key`.
     pub(crate) fn webui_workspace_filesystem(
         &self,
     ) -> Option<Arc<ironclaw_filesystem::ScopedFilesystem<crate::factory::LocalDevRootFilesystem>>>
     {
-        self.services
-            .local_runtime
-            .as_ref()
-            .map(|rt| Arc::clone(&rt.workspace_filesystem))
+        self.services.local_runtime.as_ref().map(|rt| {
+            Arc::new(ironclaw_filesystem::ScopedFilesystem::with_fixed_view(
+                Arc::clone(&rt.extension_filesystem),
+                rt.workspace_mounts.clone(),
+            ))
+        })
+    }
+
+    /// Read-only scoped filesystem spanning every mount the standalone WebUI
+    /// filesystem viewer can browse (workspace files + persistent memory), over
+    /// the same composite root the agent's tools resolve through. `None` when no
+    /// local runtime is composed, or when the browse mount view can't be built.
+    ///
+    /// Distinct from [`Self::webui_workspace_filesystem`]: that handle is the
+    /// read-write workspace-only view used to land attachments, whereas this is
+    /// a strictly read-only, multi-mount navigation view.
+    pub(crate) fn webui_browse_filesystem(
+        &self,
+    ) -> Option<Arc<ironclaw_filesystem::ScopedFilesystem<crate::factory::LocalDevRootFilesystem>>>
+    {
+        let rt = self.services.local_runtime.as_ref()?;
+        let view = match crate::local_dev_mounts::browse_mount_view() {
+            Ok(view) => view,
+            Err(error) => {
+                // Built from static aliases/targets, so this should never fail;
+                // if it does, log loudly rather than silently disabling the
+                // filesystem viewer with a bare `None`.
+                tracing::error!(
+                    target = "ironclaw_reborn_composition::webui",
+                    %error,
+                    "failed to build webui browse mount view; filesystem viewer unavailable",
+                );
+                return None;
+            }
+        };
+        Some(Arc::new(
+            ironclaw_filesystem::ScopedFilesystem::with_fixed_view(
+                Arc::clone(&rt.extension_filesystem),
+                view,
+            ),
+        ))
     }
 
     /// Test-only handle on the resource governor backing the budget
@@ -1182,6 +1434,18 @@ impl RebornRuntime {
             .local_runtime
             .as_ref()
             .map(|rt| Arc::clone(&rt.budget_gate_store))
+    }
+
+    /// Test-only lookup scope for budget gates opened by a run in this
+    /// conversation. Durable gate stores route by the run's resource scope;
+    /// tests must not use `ResourceScope::system()` because the in-memory
+    /// store ignores scope while filesystem-backed stores do not.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn budget_gate_scope_for_conversation(
+        &self,
+        conversation: &ConversationId,
+    ) -> ironclaw_host_api::ResourceScope {
+        self.turn_scope_for(&conversation.0).to_resource_scope()
     }
 
     /// Apply the outcome of a resolved [`BudgetApprovalGate`]: when the
@@ -1260,6 +1524,12 @@ impl RebornRuntime {
     /// without the `root-llm-provider` feature or an LLM config is not
     /// provided), the run will fail and the returned reply will surface
     /// that failure via `status = Failed` and `text = None`.
+    ///
+    /// **WebUI-only origin contract**: this task-level send path resolves
+    /// the turn's product-context origin as WebUI chat (`resolve_web_ui`).
+    /// A non-WebUI ingress (e.g. a future channel adapter) must not reuse
+    /// this method for its submissions; it must resolve its own origin at
+    /// that ingress instead.
     pub async fn send_user_message(
         &self,
         conversation: &ConversationId,
@@ -1355,7 +1625,9 @@ impl RebornRuntime {
     ) -> Result<SubmittedTurn, RebornRuntimeError> {
         let send_lock = self.send_lock_for(conversation).await;
         let _send_guard = send_lock.lock_owned().await;
-        if self.worker_handle.is_finished() {
+        // Stopped only when every worker has exited; a single crashed worker must not
+        // reject submissions while others run.
+        if self.turn_scheduler.is_stopped() {
             return Err(RebornRuntimeError::WorkerStopped);
         }
         let scope = self.turn_scope_for(&conversation.0);
@@ -1422,6 +1694,9 @@ impl RebornRuntime {
                 parent_run_id: None,
                 subagent_depth: 0,
                 spawn_tree_root_run_id: None,
+                product_context: Some(ironclaw_product_context::resolve_web_ui(
+                    scope.product_owner(&TurnActor::new(self.actor_user_id.clone())),
+                )),
             })
             .await
         {
@@ -1438,7 +1713,12 @@ impl RebornRuntime {
             }
         };
 
-        let SubmitTurnResponse::Accepted { run_id, .. } = response;
+        let SubmitTurnResponse::Accepted {
+            run_id,
+            status: submit_status,
+            event_cursor: submit_cursor,
+            ..
+        } = response;
         if cancellation.is_cancelled() {
             if let Some(skill_activation_source) = &self.skill_activation_source {
                 skill_activation_source
@@ -1454,7 +1734,12 @@ impl RebornRuntime {
             .await?;
             return Err(RebornRuntimeError::OperationCancelled);
         }
-        self.wake_sender.wake();
+        self.turn_scheduler.notify(TurnRunWake {
+            scope: scope.clone(),
+            run_id,
+            status: submit_status,
+            event_cursor: submit_cursor,
+        });
 
         Ok(SubmittedTurn {
             _send_guard,
@@ -1522,26 +1807,33 @@ impl RebornRuntime {
                 .shutdown(TRIGGER_POLLER_SHUTDOWN_TIMEOUT)
                 .await;
         }
-        self.worker_cancel.cancel();
+        #[cfg(any(feature = "libsql", feature = "postgres"))]
+        if let Some(credential_refresh_worker) = self.credential_refresh_worker_handle {
+            credential_refresh_worker
+                .shutdown(
+                    crate::credential_refresh_worker::CREDENTIAL_REFRESH_WORKER_SHUTDOWN_TIMEOUT,
+                )
+                .await;
+        }
+        self.trace_flush_worker.shutdown().await;
+        self.turn_scheduler.shutdown().await;
         if let Some(projection) = self.budget_event_projection {
             projection.shutdown().await;
-        }
-        if let Err(error) = self.worker_handle.await {
-            if error.is_panic() {
-                tracing::error!(%error, "reborn worker task panicked during shutdown");
-            } else {
-                tracing::warn!(%error, "reborn worker task was cancelled during shutdown");
-            }
         }
         Ok(())
     }
 
     fn turn_scope_for(&self, thread_id: &ThreadId) -> TurnScope {
-        TurnScope::new(
+        // RebornRuntime is bound to a single actor user, so its turns are
+        // owned by that user (not the shared agent).  Passing the explicit
+        // owner here makes `TurnScope::product_owner` resolve to
+        // `TurnOwner::Personal` instead of `TurnOwner::SharedAgent`.
+        TurnScope::new_with_owner(
             self.thread_scope.tenant_id.clone(),
             Some(self.thread_scope.agent_id.clone()),
             self.thread_scope.project_id.clone(),
             thread_id.clone(),
+            Some(self.actor_user_id.clone()),
         )
     }
 
@@ -1577,7 +1869,7 @@ impl RebornRuntime {
     ) -> Result<TurnRunState, RebornRuntimeError> {
         let start = std::time::Instant::now();
         loop {
-            if self.worker_handle.is_finished() {
+            if self.turn_scheduler.is_stopped() {
                 return Err(RebornRuntimeError::WorkerStopped);
             }
             let state = self
@@ -1637,7 +1929,7 @@ impl RebornRuntime {
     ) -> Result<TurnRunState, RebornRuntimeError> {
         let start = std::time::Instant::now();
         loop {
-            if self.worker_handle.is_finished() {
+            if self.turn_scheduler.is_stopped() {
                 return Err(RebornRuntimeError::WorkerStopped);
             }
             let state = self
@@ -1834,7 +2126,12 @@ impl RebornRuntime {
         if cancellation_accepted {
             self.append_webui_loop_cancelled(scope, run_id).await?;
         }
-        self.wake_sender.wake();
+        self.turn_scheduler.notify(TurnRunWake {
+            scope: scope.clone(),
+            run_id: response.run_id,
+            status: response.status,
+            event_cursor: response.event_cursor,
+        });
         if cancellation_accepted {
             self.cancel_descendant_runs(scope, run_id, reason, idempotency_suffix)
                 .await?;
@@ -1899,7 +2196,7 @@ impl RebornRuntime {
                     let state = self
                         .turn_coordinator
                         .get_run_state(GetRunStateRequest {
-                            scope: child_scope,
+                            scope: child_scope.clone(),
                             run_id: child_run_id,
                         })
                         .await?;
@@ -1907,7 +2204,12 @@ impl RebornRuntime {
                         state.status,
                         TurnStatus::CancelRequested | TurnStatus::Cancelled
                     ) {
-                        self.wake_sender.wake();
+                        self.turn_scheduler.notify(TurnRunWake {
+                            scope: child_scope,
+                            run_id: child_run_id,
+                            status: state.status,
+                            event_cursor: EventCursor(0),
+                        });
                         continue;
                     }
                     return Err(error.into());
@@ -1920,7 +2222,12 @@ impl RebornRuntime {
                 self.append_webui_loop_cancelled(&child.scope, child_run_id)
                     .await?;
             }
-            self.wake_sender.wake();
+            self.turn_scheduler.notify(TurnRunWake {
+                scope: child_scope,
+                run_id: response.run_id,
+                status: response.status,
+                event_cursor: response.event_cursor,
+            });
         }
         Ok(())
     }
@@ -1987,7 +2294,8 @@ impl RebornRuntime {
 /// the returned `RebornRuntime` is ready to accept `send_user_message` calls.
 ///
 /// **Currently supported profiles:** `RebornCompositionProfile::LocalDev`,
-/// `RebornCompositionProfile::LocalDevYolo`, and
+/// `RebornCompositionProfile::LocalDevYolo`,
+/// `RebornCompositionProfile::HostedSingleTenant`, and
 /// `RebornCompositionProfile::Production` are wired end-to-end here. Production
 /// starts only after readiness diagnostics validate that live traffic can be
 /// exposed without a partial cutover.
@@ -2002,6 +2310,7 @@ pub async fn build_reborn_runtime(
         boot,
         runner,
         trigger_poller,
+        credential_refresh,
         trigger_fire_access_checker,
         poll,
         identity,
@@ -2011,6 +2320,7 @@ pub async fn build_reborn_runtime(
         hooks: hooks_config,
         budget_defaults,
         budget_event_observer,
+        trajectory_observer,
         #[cfg(any(test, feature = "test-support"))]
         model_gateway_override,
         #[cfg(any(test, feature = "test-support"))]
@@ -2025,6 +2335,7 @@ pub async fn build_reborn_runtime(
     match profile {
         RebornCompositionProfile::LocalDev
         | RebornCompositionProfile::LocalDevYolo
+        | RebornCompositionProfile::HostedSingleTenant
         | RebornCompositionProfile::Production => {}
         RebornCompositionProfile::MigrationDryRun => {
             return Err(RebornRuntimeError::InvalidArgument {
@@ -2046,26 +2357,84 @@ pub async fn build_reborn_runtime(
         });
     }
 
-    let planned_runtime_wake_channel = if profile == RebornCompositionProfile::Production
-        && services_input.turn_run_wake_notifier.is_none()
+    let validated_identity = validate_runtime_identity(identity)?;
+    services_input = services_input.with_local_runtime_identity(
+        validated_identity.tenant_id.clone(),
+        validated_identity.agent_id.clone(),
+    );
+    #[cfg(feature = "root-llm-provider")]
+    let mut has_nearai_mcp_bootstrap_config = services_input.has_nearai_mcp_bootstrap_config();
+    #[cfg(feature = "root-llm-provider")]
+    if !has_nearai_mcp_bootstrap_config
+        && let Some(llm) = llm.as_ref()
+        && let Some(config) =
+            crate::nearai_mcp::nearai_mcp_bootstrap_config_from_llm_config(&llm.config)
+                .await
+                .map_err(|error| RebornRuntimeError::InvalidArgument {
+                    reason: format!("NEAR AI MCP bootstrap config: {error}"),
+                })?
     {
-        let (wake_sender, wake_receiver) = TurnRunnerWakeReceiver::new();
-        services_input = services_input.with_turn_run_wake_notifier(Arc::new(wake_sender.clone()));
-        Some((wake_sender, wake_receiver))
-    } else {
-        None
-    };
-
+        services_input = services_input.with_nearai_mcp_bootstrap_config(config);
+        has_nearai_mcp_bootstrap_config = true;
+    }
     let trusted_laptop_access = services_input.grants_trusted_laptop_access();
     let owner_id = services_input.owner_id().to_string();
+    // Thread per-user and per-origin concurrency caps from TurnRunnerSettings into the
+    // turn-state store. The factory reads these when constructing the store so limits
+    // are applied from the very first claim.
+    let turn_state_limits = InMemoryTurnStateStoreLimits {
+        max_concurrent_runs_per_user: runner.max_concurrent_runs_per_user,
+        max_concurrent_trigger_runs: runner.max_concurrent_trigger_runs,
+        max_concurrent_conversation_runs: runner.max_concurrent_conversation_runs,
+        ..InMemoryTurnStateStoreLimits::default()
+    };
+    services_input = services_input.with_turn_state_store_limits(turn_state_limits);
+    let actor_user_id =
+        UserId::new(owner_id.clone()).map_err(|reason| RebornRuntimeError::InvalidArgument {
+            reason: format!("user id: {reason}"),
+        })?;
+    #[cfg(feature = "root-llm-provider")]
+    let nearai_mcp_owner_scope = ResourceScope {
+        tenant_id: validated_identity.tenant_id.clone(),
+        user_id: actor_user_id.clone(),
+        agent_id: Some(validated_identity.agent_id.clone()),
+        project_id: default_project_id.clone(),
+        mission_id: None,
+        thread_id: None,
+        invocation_id: InvocationId::new(),
+    };
     let mut services = build_reborn_services(services_input).await?;
     #[cfg(feature = "root-llm-provider")]
     let llm =
         apply_startup_stored_llm_key(llm, crate::LlmKeyStore::new(services.secret_store())).await?;
+    #[cfg(feature = "root-llm-provider")]
+    if !has_nearai_mcp_bootstrap_config {
+        bootstrap_nearai_mcp_from_effective_llm(&services, llm.as_ref(), nearai_mcp_owner_scope)
+            .await?;
+    }
     enforce_runtime_cutover_gate(profile, &services.readiness)?;
 
+    // Extract the pre-minted scheduler wake wiring from the production composition path
+    // (minted in `build_production_shaped`) so it can be handed to
+    // `DefaultPlannedRuntimeParts.scheduler_wake_wiring` below. The local-dev path
+    // leaves this `None` and `build_default_planned_runtime` mints its own wiring.
+    #[cfg(any(feature = "libsql", feature = "postgres"))]
+    let production_scheduler_wake = {
+        let wiring = services.production_scheduler_wake.take();
+        // Production and migration-dry-run mint this in `build_production_shaped` so the
+        // `HostRuntimeServices` notifier and the scheduler wake loop share one channel.
+        // Fail closed if it is missing rather than let `build_default_planned_runtime`
+        // mint a divergent scheduler-local channel (silent contract break).
+        check_production_scheduler_wake_wiring(profile, &wiring)?;
+        wiring
+    };
+    #[cfg(not(any(feature = "libsql", feature = "postgres")))]
+    let production_scheduler_wake: Option<ironclaw_reborn::runtime::SchedulerWakeWiring> = None;
+
     let runtime_parts = match profile {
-        RebornCompositionProfile::LocalDev | RebornCompositionProfile::LocalDevYolo => {
+        RebornCompositionProfile::LocalDev
+        | RebornCompositionProfile::LocalDevYolo
+        | RebornCompositionProfile::HostedSingleTenant => {
             let local_runtime =
                 services
                     .local_runtime
@@ -2119,7 +2488,6 @@ pub async fn build_reborn_runtime(
         subagent_goal_store,
         trigger_repository: _trigger_repository,
     } = runtime_parts;
-    let validated_identity = validate_runtime_identity(identity)?;
     let (skill_context_source, skill_activation_source, skill_execution_adapter) =
         match (configured_skill_context_source, local_runtime) {
             (Some(source), _) => (Some(source), None, None),
@@ -2140,10 +2508,6 @@ pub async fn build_reborn_runtime(
 
     let tenant_id = validated_identity.tenant_id.clone();
     let agent_id = validated_identity.agent_id.clone();
-    let actor_user_id =
-        UserId::new(owner_id.clone()).map_err(|reason| RebornRuntimeError::InvalidArgument {
-            reason: format!("user id: {reason}"),
-        })?;
     let thread_scope = ThreadScope {
         tenant_id,
         agent_id,
@@ -2322,6 +2686,21 @@ pub async fn build_reborn_runtime(
             )
             .map_err(|error| RebornRuntimeError::SkillExecution(error.to_string()))?;
     }
+    let outbound_delivery_target_registry =
+        local_runtime.map(|_| Arc::new(MutableOutboundDeliveryTargetRegistry::default()));
+    let outbound_preferences_facade: Option<Arc<dyn OutboundPreferencesProductFacade>> =
+        match (local_runtime, &outbound_delivery_target_registry) {
+            (Some(local_runtime), Some(registry)) => {
+                let registry = Arc::clone(registry);
+                let provider: Arc<dyn OutboundDeliveryTargetProvider> = registry;
+                Some(Arc::new(RebornOutboundPreferencesFacade::new(
+                    Arc::clone(&local_runtime.outbound_preferences),
+                    provider,
+                ))
+                    as Arc<dyn OutboundPreferencesProductFacade>)
+            }
+            _ => None,
+        };
     let milestone_sink = projection_services.with_live_progress_milestone_sink_for_publisher(
         durable_milestone_sink,
         live_projection_publisher,
@@ -2351,6 +2730,8 @@ pub async fn build_reborn_runtime(
             model_gateway,
             milestone_sink.clone(),
             skill_activation_source.clone(),
+            outbound_preferences_facade.clone(),
+            trajectory_observer,
         )
         .ok_or(RebornRuntimeError::HostRuntimeUnavailable)?;
         (
@@ -2364,6 +2745,18 @@ pub async fn build_reborn_runtime(
             Some(local_dev_capabilities.display_previews),
         )
     } else {
+        // The trajectory observer is wired only through the local-dev capability
+        // path; non-local-dev runtimes have no capability/result hook to forward
+        // to. Accepting one here would silently produce an empty trajectory, so
+        // fail fast — the seam is local-dev/bench-only (see
+        // `RebornRuntimeInput::with_trajectory_observer`).
+        if trajectory_observer.is_some() {
+            return Err(RebornRuntimeError::InvalidArgument {
+                reason: "a trajectory observer was supplied, but it is only supported on \
+                         local-dev runtimes; this profile has no local runtime to observe"
+                    .to_string(),
+            });
+        }
         let capability_io = Arc::new(UnavailableCapabilityIo);
         let capability_input_resolver: Arc<dyn LoopCapabilityInputResolver> = capability_io.clone();
         let capability_result_writer: Arc<dyn LoopCapabilityResultWriter> = capability_io;
@@ -2421,10 +2814,67 @@ pub async fn build_reborn_runtime(
         None
     };
 
+    // Autonomous Trace Commons capture: a best-effort lifecycle sink mirrors
+    // the v1 binary's turn-end capture. Policy-gated per user scope — the
+    // sink is inert (one policy-file read per turn) until a scope enrolls
+    // via `builtin.trace_commons.onboard` or `traces opt-in`.
+    // Seed with the runtime owner's TENANT-SCOPED key (matching how capture
+    // keys state), so startup pending-queue discovery finds the owner's queued
+    // traces — a bare owner id would miss the `trace_scope_key(tenant, owner)`
+    // queue dir.
+    let runtime_owner_trace_scope = ironclaw_reborn_traces::contribution::trace_scope_key(
+        thread_scope.tenant_id.as_str(),
+        actor_user_id.as_str(),
+    );
+    let trace_capture_scopes: crate::trace_capture::ObservedTraceScopes =
+        Arc::new(std::sync::Mutex::new(std::collections::BTreeSet::from([
+            runtime_owner_trace_scope,
+        ])));
+    let trace_capture_sink: Arc<dyn ironclaw_turns::TurnEventSink> =
+        Arc::new(crate::trace_capture::TraceCaptureTurnEventSink::new(
+            Arc::clone(&thread_service),
+            Arc::clone(&trace_capture_scopes),
+        ));
+
+    let communication_context_provider: Option<
+        Arc<dyn ironclaw_turns::run_profile::CommunicationContextProvider>,
+    > = match (local_runtime, outbound_preferences_facade.clone()) {
+        (Some(local_runtime), Some(outbound_preferences_facade)) => {
+            let mut lifecycle_facade = crate::lifecycle::RebornLocalLifecycleFacade::new(
+                Arc::clone(&local_runtime.skill_management),
+            );
+            if let Some(extension_management) = &local_runtime.extension_management {
+                lifecycle_facade =
+                    lifecycle_facade.with_extension_management(Arc::clone(extension_management));
+            }
+            Some(Arc::new(
+                crate::communication_context::RuntimeCommunicationContextProvider::new(
+                    outbound_preferences_facade,
+                )
+                .with_lifecycle_facade(Arc::new(lifecycle_facade)),
+            )
+                as Arc<
+                    dyn ironclaw_turns::run_profile::CommunicationContextProvider,
+                >)
+        }
+        _ => None,
+    };
+
     let planned_runtime_parts = DefaultPlannedRuntimeParts {
         turn_state: Arc::clone(&turn_state_store),
         thread_service: Arc::clone(&thread_service),
         thread_scope: thread_scope.clone(),
+        // Read landed attachment bytes back through the project workspace
+        // filesystem so the model port can build multimodal image parts for
+        // vision-capable models. Only available when a local runtime (and thus a
+        // workspace filesystem) is composed.
+        attachment_read_port: local_runtime.map(|rt| {
+            Arc::new(
+                crate::attachment_landing::ProjectScopedAttachmentReader::new(Arc::clone(
+                    &rt.workspace_filesystem,
+                )),
+            ) as Arc<dyn ironclaw_loop_support::LoopAttachmentReadPort>
+        }),
         model_gateway: Arc::clone(&model_gateway),
         checkpoint_state_store: Arc::clone(&checkpoint_state_store)
             as Arc<dyn ironclaw_turns::CheckpointStateStore>,
@@ -2443,11 +2893,9 @@ pub async fn build_reborn_runtime(
         subagent_spawn_limits: ironclaw_loop_support::SubagentSpawnLimits::default(),
         loop_exit_evidence,
         config: DefaultPlannedRuntimeConfig {
-            worker: TurnRunnerWorkerConfig {
-                heartbeat_interval: runner.heartbeat_interval,
-                poll_interval: runner.poll_interval,
-                scope_filter: None,
-            },
+            heartbeat_interval: runner.heartbeat_interval,
+            poll_interval: runner.poll_interval,
+            worker_count: runner.worker_count,
             ..DefaultPlannedRuntimeConfig::default()
         },
         model_route_resolver: None,
@@ -2468,19 +2916,45 @@ pub async fn build_reborn_runtime(
             ) as Arc<dyn HostIdentityContextSource>,
             None => Arc::new(EmptyIdentityContextSource) as Arc<dyn HostIdentityContextSource>,
         },
+        // Resolve the per-user agent-context profile (timezone/locale/location) from
+        // `context/profile.json` via the workspace filesystem. When a local-dev workspace
+        // filesystem is available, the `MemoryBackedUserProfileSource` adapter reads it;
+        // otherwise `EmptyUserProfileSource` degrades gracefully to `None` (profile unknown).
+        // `extension_filesystem` is the raw `Arc<LocalDevRootFilesystem>` (=
+        // `CompositeRootFilesystem`) — the underlying RootFilesystem the workspace
+        // mounts are built from. `MemoryBackedUserProfileSource` constructs its own
+        // full virtual paths via `profile_scope_and_path` and does not use the
+        // `ScopedFilesystem` mount view, so the raw `RootFilesystem` is correct here.
+        //
+        // NOTE: this `Some(local_runtime) => real / None => Empty` guard intentionally
+        // mirrors `identity_context_source` directly above. The production-graph path
+        // (`production_runtime_parts`, `local_runtime: None`) currently wires NEITHER the
+        // identity source NOR this profile source — both degrade to Empty there today.
+        // Wiring the production-graph composition for these optional context sources is a
+        // single deferred follow-up (identity + profile together, to keep them paired);
+        // do not wire only one of them here, or they will diverge. See issue #5013.
+        user_profile_source: match local_runtime {
+            Some(local_runtime) => Arc::new(MemoryBackedUserProfileSourceAdapter(
+                MemoryBackedUserProfileSource::new(Arc::clone(&local_runtime.extension_filesystem)
+                    as Arc<dyn ironclaw_filesystem::RootFilesystem>),
+            )) as Arc<dyn HostUserProfileSource>,
+            None => Arc::new(EmptyUserProfileSource) as Arc<dyn HostUserProfileSource>,
+        },
         model_policy_guard: None,
         model_budget_accountant,
         safety_context: None,
         hook_security_audit_sink: Some(Arc::new(ironclaw_events::TracingSecurityAuditSink)),
-        turn_event_sink: None,
+        turn_event_sink: Some(trace_capture_sink),
         hook_dispatcher_builder_factory,
+        communication_context_provider,
+        // For the production composition path, use the pre-minted wiring from
+        // `build_production_shaped` so the `HostRuntimeServices` notifier (used by
+        // `turn_coordinator_for_production`) and the scheduler's wake loop share the
+        // exact same channel. For local-dev, `None` causes `build_default_planned_runtime`
+        // to mint its own wiring internally (existing behavior).
+        scheduler_wake_wiring: production_scheduler_wake,
     };
-    let composition = match planned_runtime_wake_channel {
-        Some(wake_channel) => {
-            build_default_planned_runtime_with_wake_channel(planned_runtime_parts, wake_channel)
-        }
-        None => build_default_planned_runtime(planned_runtime_parts),
-    }?;
+    let composition = build_default_planned_runtime(planned_runtime_parts)?;
     let default_resolved_run_profile = composition
         .run_profile_resolver
         .resolve_run_profile(RunProfileResolutionRequest::interactive_default())
@@ -2543,6 +3017,7 @@ pub async fn build_reborn_runtime(
                         local_runtime.workspace_mounts.clone(),
                         local_runtime.skill_mounts.clone(),
                         local_runtime.memory_mounts.clone(),
+                        local_runtime.system_extensions_lifecycle_mounts.clone(),
                         local_dev::extension_surface::LocalDevExtensionSurfaceSource::new(
                             local_runtime.extension_management.clone(),
                         ),
@@ -2656,16 +3131,43 @@ pub async fn build_reborn_runtime(
             trigger_conversation_pairing_value = None;
         }
     }
-    let worker_cancel = CancellationToken::new();
-    let worker = Arc::clone(&composition.worker);
-    let worker_cancel_clone = worker_cancel.clone();
-    let worker_handle = tokio::spawn(async move {
-        worker.run(worker_cancel_clone).await;
-    });
+    let scheduler_notifier = composition.scheduler_handle.wake_notifier();
+
+    // Spawn the background Google OAuth credential keepalive worker (B4).
+    // Gated on the db features: the worker deps (candidate source + leader lock
+    // + refresh port) are only produced together on production paths (libsql /
+    // postgres), bundled into `CredentialRefreshWorkerReady::Ready`. Local-dev /
+    // override paths are `Absent` and the worker is skipped. The `enabled` policy
+    // flag still gates the actual spawn inside `spawn_credential_refresh_worker`.
+    #[cfg(any(feature = "libsql", feature = "postgres"))]
+    let credential_refresh_worker_handle = match std::mem::replace(
+        &mut services.credential_refresh_worker,
+        crate::factory::CredentialRefreshWorkerReady::Absent,
+    ) {
+        crate::factory::CredentialRefreshWorkerReady::Ready {
+            candidate_source,
+            leader_lock,
+            refresh_port,
+        } => crate::credential_refresh_worker::spawn_credential_refresh_worker(
+            credential_refresh,
+            crate::credential_refresh_worker::CredentialRefreshWorkerDeps {
+                candidate_source,
+                refresh_port,
+                leader_lock: std::sync::Arc::new(leader_lock),
+            },
+        ),
+        crate::factory::CredentialRefreshWorkerReady::Absent => None,
+    };
+    // When no db feature is active, silence the unused-variable warning.
+    #[cfg(not(any(feature = "libsql", feature = "postgres")))]
+    let _ = credential_refresh;
+
+    let trace_flush_worker =
+        crate::trace_capture::spawn_trace_queue_flush_worker(trace_capture_scopes);
+    // Scheduler is running (started inside build_default_planned_runtime); mark readiness.
     services.readiness.workers.turn_runner = true;
     services.readiness.workers.trigger_poller = trigger_poller_handle.is_some();
     let turn_coordinator = planned_turn_coordinator;
-    let wake_sender = composition.wake_sender.clone();
 
     // Spawn the budget-event projection task as the production owner
     // of the broadcast sink — review feedback Thermo-Nuclear #3
@@ -2691,13 +3193,16 @@ pub async fn build_reborn_runtime(
         turn_tree_store: turn_state_store,
         thread_service,
         thread_scope,
-        worker_handle,
-        worker_cancel,
+        turn_scheduler: RuntimeTurnScheduler::new(composition.scheduler_handle, scheduler_notifier),
         trigger_poller_handle,
+        #[cfg(any(feature = "libsql", feature = "postgres"))]
+        credential_refresh_worker_handle,
+        trace_flush_worker,
         #[cfg(feature = "slack-v2-host-beta")]
         post_submit_hook_slot: runtime_post_submit_hook_slot,
         #[cfg(any(test, feature = "test-support"))]
         trigger_conversation_pairing: trigger_conversation_pairing_value,
+        outbound_delivery_target_registry,
         budget_event_projection,
         poll_settings: poll,
         actor_user_id,
@@ -2710,7 +3215,6 @@ pub async fn build_reborn_runtime(
         approval_audit_sink,
         webui_event_log: event_log,
         default_run_profile_id,
-        wake_sender,
         send_locks: Mutex::new(HashMap::new()),
         skill_activation_source,
         skill_execution_adapter,
@@ -2881,6 +3385,54 @@ async fn apply_startup_stored_llm_key(
     Ok(Some(llm))
 }
 
+#[cfg(feature = "root-llm-provider")]
+async fn bootstrap_nearai_mcp_from_effective_llm(
+    services: &RebornServices,
+    llm: Option<&ResolvedRebornLlm>,
+    owner_scope: ResourceScope,
+) -> Result<(), RebornRuntimeError> {
+    let Some(llm) = llm else {
+        return Ok(());
+    };
+    let Some(config) = crate::nearai_mcp::nearai_mcp_bootstrap_config_from_llm_config(&llm.config)
+        .await
+        .map_err(|error| RebornRuntimeError::InvalidArgument {
+            reason: format!("NEAR AI MCP bootstrap config: {error}"),
+        })?
+    else {
+        return Ok(());
+    };
+    if let Err(error) = config.endpoint() {
+        tracing::debug!(
+            %error,
+            "NEAR AI MCP auto-bootstrap skipped because the resolved LLM endpoint is not MCP-compatible"
+        );
+        return Ok(());
+    }
+    let Some(product_auth) = services.product_auth.as_ref() else {
+        return Ok(());
+    };
+    let Some(extension_management) = services
+        .local_runtime
+        .as_ref()
+        .and_then(|local_runtime| local_runtime.extension_management.as_ref())
+    else {
+        return Ok(());
+    };
+    let outcome = crate::nearai_mcp::bootstrap_nearai_mcp(
+        Some(config),
+        product_auth,
+        extension_management,
+        owner_scope,
+    )
+    .await
+    .map_err(|error| RebornRuntimeError::InvalidArgument {
+        reason: format!("NEAR AI MCP bootstrap from LLM config failed: {error}"),
+    })?;
+    outcome.log_completion();
+    Ok(())
+}
+
 struct ValidatedRuntimeIdentity {
     tenant_id: TenantId,
     agent_id: AgentId,
@@ -3009,10 +3561,17 @@ pub(crate) struct RebornLlmReloadParts {
 #[cfg(feature = "root-llm-provider")]
 async fn build_llm_gateway(llm: ResolvedRebornLlm) -> Result<LlmGatewayBundle, RebornRuntimeError> {
     let session = ironclaw_llm::create_session_manager(llm.config.session.clone()).await;
-    let raw = ironclaw_llm::build_static_provider_chain(&llm.config, Arc::clone(&session))
+    // Config is always the construction source. A caller-supplied factory (e.g.
+    // an instrumentation wrapper) then decorates the built provider; without one
+    // the config-built provider is driven as-is.
+    let built = ironclaw_llm::build_static_provider_chain(&llm.config, Arc::clone(&session))
         .await
         .map_err(|error| RebornRuntimeError::LlmProvider(error.to_string()))?;
-    wrap_swappable_gateway(raw, session)
+    // The factory is applied *inside* `wrap_swappable_gateway` — over the
+    // swappable wrapper, not the bare config provider — so a live config reload
+    // (which swaps the swappable's inner) keeps the factory's wrapper in the
+    // call path. See `wrap_swappable_gateway`.
+    wrap_swappable_gateway(built, session, llm.provider_factory.clone())
 }
 
 /// Cold-boot gateway: no LLM configured yet. Wraps a placeholder provider (which
@@ -3024,16 +3583,25 @@ async fn build_placeholder_llm_gateway() -> Result<LlmGatewayBundle, RebornRunti
     let session =
         ironclaw_llm::create_session_manager(ironclaw_llm::SessionConfig::default()).await;
     let raw: Arc<dyn ironclaw_llm::LlmProvider> = Arc::new(PlaceholderLlmProvider);
-    wrap_swappable_gateway(raw, session)
+    wrap_swappable_gateway(raw, session, None)
 }
 
 /// Wrap a raw provider in a [`SwappableLlmProvider`] + reload handle and build
 /// the model gateway. Shared by the real and placeholder boot paths so both get
 /// an identical live-reload seam.
+///
+/// The optional `provider_factory` (caller instrumentation, e.g. token/reasoning
+/// capture) is applied **over the swappable wrapper**, so the gateway drives
+/// `factory(swappable)`. A live config reload swaps the *inner* of the swappable
+/// via the reload handle; because the factory wraps the swappable itself, its
+/// instrumentation stays in the call path and continues to observe model calls
+/// against the reloaded provider. (Applying the factory to the bare provider
+/// instead would let the first reload silently drop the wrapper.)
 #[cfg(feature = "root-llm-provider")]
 fn wrap_swappable_gateway(
     raw: Arc<dyn ironclaw_llm::LlmProvider>,
     session: Arc<ironclaw_llm::SessionManager>,
+    provider_factory: Option<crate::runtime_input::RebornProviderFactory>,
 ) -> Result<LlmGatewayBundle, RebornRuntimeError> {
     use ironclaw_llm::{LlmProvider, LlmReloadHandle, SwappableLlmProvider};
     use ironclaw_reborn::model_gateway::{LlmModelProfilePolicy, LlmProviderModelGateway};
@@ -3041,7 +3609,13 @@ fn wrap_swappable_gateway(
 
     let swappable = Arc::new(SwappableLlmProvider::new(raw));
     let reload_handle = Arc::new(LlmReloadHandle::new(Arc::clone(&swappable), None));
-    let provider: Arc<dyn LlmProvider> = swappable;
+    let swappable_provider: Arc<dyn LlmProvider> = swappable;
+    // Gateway drives the factory's wrapper over the swappable (reload-stable);
+    // with no factory it drives the swappable directly.
+    let provider: Arc<dyn LlmProvider> = match provider_factory {
+        Some(factory) => factory(Arc::clone(&swappable_provider)),
+        None => swappable_provider,
+    };
 
     let model_profile_id = ModelProfileId::new("interactive_model").map_err(|reason| {
         RebornRuntimeError::LlmProvider(format!("invalid interactive model profile id: {reason}"))
@@ -3269,8 +3843,102 @@ mod tests {
         super::enforce_runtime_cutover_gate(RebornCompositionProfile::LocalDev, &readiness)
             .expect("local-dev runtime is not production traffic");
     }
+
+    #[test]
+    fn runtime_cutover_gate_allows_hosted_single_tenant_readiness() {
+        let readiness = readiness_for_runtime_gate(
+            RebornCompositionProfile::HostedSingleTenant,
+            RebornReadinessState::HostedSingleTenantValidated,
+            Vec::new(),
+        );
+
+        super::enforce_runtime_cutover_gate(
+            RebornCompositionProfile::HostedSingleTenant,
+            &readiness,
+        )
+        .expect("validated hosted single-tenant runtime can start");
+    }
+
+    #[test]
+    fn runtime_cutover_gate_rejects_local_dev_readiness_for_hosted_single_tenant() {
+        let readiness = readiness_for_runtime_gate(
+            RebornCompositionProfile::HostedSingleTenant,
+            RebornReadinessState::DevOnly,
+            vec![crate::RebornReadinessDiagnostic::local_dev()],
+        );
+
+        let error = super::enforce_runtime_cutover_gate(
+            RebornCompositionProfile::HostedSingleTenant,
+            &readiness,
+        )
+        .expect_err("hosted single-tenant runtime requires hosted readiness");
+        let RebornRuntimeError::InvalidArgument { reason } = error else {
+            panic!("expected invalid argument, got {error:?}");
+        };
+        assert!(reason.contains("hosted-single-tenant"), "reason: {reason}");
+        assert!(
+            reason.contains("HostedSingleTenantValidated"),
+            "reason: {reason}"
+        );
+    }
+
+    // ── scheduler wake wiring guard unit tests ───────────────────────────────
+    // These exercise `check_production_scheduler_wake_wiring` directly so the
+    // fail-closed negative branch is covered without needing a full libsql /
+    // postgres substrate.  The guard is gated on the same `libsql | postgres`
+    // cfg as the production composition path it protects.
+
+    #[cfg(feature = "libsql")]
+    #[test]
+    fn production_scheduler_wake_guard_rejects_production_with_absent_wiring() {
+        let err = super::check_production_scheduler_wake_wiring(
+            RebornCompositionProfile::Production,
+            &None,
+        )
+        .expect_err(
+            "production runtime with absent scheduler wake wiring must be rejected fail-closed",
+        );
+        let RebornRuntimeError::InvalidArgument { reason } = err else {
+            panic!("expected InvalidArgument, got {err:?}");
+        };
+        assert!(
+            reason.contains("production runtime missing scheduler wake wiring"),
+            "reason should name the missing wiring, got: {reason}"
+        );
+    }
+
+    #[cfg(feature = "libsql")]
+    #[test]
+    fn production_scheduler_wake_guard_rejects_migration_dry_run_with_absent_wiring() {
+        let err = super::check_production_scheduler_wake_wiring(
+            RebornCompositionProfile::MigrationDryRun,
+            &None,
+        )
+        .expect_err(
+            "migration-dry-run with absent scheduler wake wiring must be rejected fail-closed",
+        );
+        let RebornRuntimeError::InvalidArgument { reason } = err else {
+            panic!("expected InvalidArgument, got {err:?}");
+        };
+        assert!(
+            reason.contains("production runtime missing scheduler wake wiring"),
+            "reason should name the missing wiring, got: {reason}"
+        );
+    }
+
+    #[cfg(feature = "libsql")]
+    #[test]
+    fn production_scheduler_wake_guard_passes_local_dev_with_absent_wiring() {
+        // Local-dev never mints scheduler wake wiring; the guard must not
+        // reject it (the scheduler loop mints its own channel on that path).
+        super::check_production_scheduler_wake_wiring(RebornCompositionProfile::LocalDev, &None)
+            .expect("local-dev is exempt from the scheduler wake wiring requirement");
+    }
+
     use ironclaw_authorization::CapabilityLeaseStore;
     use ironclaw_events::{EventStreamKey, ReadScope};
+    #[cfg(all(feature = "root-llm-provider", feature = "libsql"))]
+    use ironclaw_host_api::ProjectId;
     use ironclaw_host_api::{
         Action, AgentId, ApprovalRequest, ApprovalRequestId, AuditStage, CapabilityId,
         CorrelationId, EffectKind, InvocationFingerprint, InvocationId, Principal,
@@ -3299,7 +3967,7 @@ mod tests {
     use ironclaw_skills::SkillTrust;
     use ironclaw_threads::{
         AppendToolResultReferenceRequest, EnsureThreadRequest, LoadContextMessagesRequest,
-        MessageKind, ThreadHistoryRequest, ThreadScope, ToolResultSafeSummary,
+        MessageKind, MessageStatus, ThreadHistoryRequest, ThreadScope, ToolResultSafeSummary,
     };
     use ironclaw_turns::{
         AcceptedMessageRef, AllowAllTurnAdmissionPolicy, BlockedReason, GetRunStateRequest,
@@ -3340,14 +4008,7 @@ mod tests {
     const RUNTIME_SEND_TIMEOUT: Duration = Duration::from_secs(10);
 
     async fn stop_turn_runner_worker_for_manual_state_test(runtime: &super::RebornRuntime) {
-        runtime.worker_cancel.cancel();
-        tokio::time::timeout(Duration::from_secs(2), async {
-            while !runtime.worker_handle.is_finished() {
-                tokio::time::sleep(Duration::from_millis(1)).await;
-            }
-        })
-        .await
-        .expect("turn-runner worker should stop before manual turn-state test");
+        runtime.turn_scheduler.stop_for_test().await;
     }
 
     fn local_dev_runtime_policy() -> EffectiveRuntimePolicy {
@@ -3537,6 +4198,72 @@ mod tests {
                     id: "call-1".to_string(),
                     name: echo_tool.name,
                     arguments: serde_json::json!({"message": "hello from tool"}),
+                    response_reasoning: None,
+                    reasoning: None,
+                    signature: None,
+                })
+                .await
+                .map_err(model_capability_error)?;
+            Ok(HostManagedModelResponse::capability_calls(
+                vec![candidate],
+                "",
+            ))
+        }
+    }
+
+    /// A long echo argument (well over the safe-preview 512-byte string cap) so
+    /// the default-observer test can prove the payload is truncated before the
+    /// observer sees it.
+    const LARGE_ECHO_MESSAGE: &str = "PAYLOAD0123456789ABCDEF_";
+
+    #[derive(Debug, Default)]
+    struct LargeEchoToolCallingGateway {
+        calls: StdMutex<usize>,
+    }
+
+    #[async_trait]
+    impl HostManagedModelGateway for LargeEchoToolCallingGateway {
+        async fn stream_model(
+            &self,
+            _request: HostManagedModelRequest,
+        ) -> Result<HostManagedModelResponse, HostManagedModelError> {
+            Err(HostManagedModelError::safe(
+                HostManagedModelErrorKind::InvalidRequest,
+                "expected capability-aware model path",
+            ))
+        }
+
+        async fn stream_model_with_capabilities(
+            &self,
+            _request: HostManagedModelRequest,
+            capabilities: Arc<dyn LoopCapabilityPort>,
+        ) -> Result<HostManagedModelResponse, HostManagedModelError> {
+            let call_index = {
+                let mut calls = self.calls.lock().expect("large echo gateway lock poisoned");
+                let call_index = *calls;
+                *calls += 1;
+                call_index
+            };
+            if call_index > 0 {
+                return Ok(HostManagedModelResponse::assistant_reply("tool ok"));
+            }
+            let echo_id = CapabilityId::new("builtin.echo").expect("echo id");
+            let echo_tool = capabilities
+                .tool_definitions()
+                .map_err(model_capability_error)?
+                .into_iter()
+                .find(|definition| definition.capability_id == echo_id)
+                .expect("echo provider tool definition");
+            // ~2.4 KB message: far over the 512-byte string preview cap.
+            let big_message = LARGE_ECHO_MESSAGE.repeat(100);
+            let candidate = capabilities
+                .register_provider_tool_call(ProviderToolCall {
+                    provider_id: "test-provider".to_string(),
+                    provider_model_id: "test-model".to_string(),
+                    turn_id: Some("provider-turn-1".to_string()),
+                    id: "call-1".to_string(),
+                    name: echo_tool.name,
+                    arguments: serde_json::json!({ "message": big_message }),
                     response_reasoning: None,
                     reasoning: None,
                     signature: None,
@@ -3795,6 +4522,7 @@ mod tests {
                 .expect("message ref"),
                 tool_result_provider_call: None,
                 tool_result_content: None,
+                image_parts: Vec::new(),
             }],
             surface_version: None,
             resolved_model_route: None,
@@ -3893,7 +4621,7 @@ mod tests {
         let raw: Arc<dyn ironclaw_llm::LlmProvider> = provider.clone();
         let session =
             ironclaw_llm::create_session_manager(ironclaw_llm::SessionConfig::default()).await;
-        let bundle = super::wrap_swappable_gateway(raw, session).expect("gateway bundle");
+        let bundle = super::wrap_swappable_gateway(raw, session, None).expect("gateway bundle");
 
         bundle
             .gateway
@@ -4023,6 +4751,610 @@ mod tests {
             .expect("chat request should be captured")
             .expect("auth header should be sent by capture server");
         assert_eq!(auth_header, "Bearer sess_reborn_env_token");
+    }
+
+    #[cfg(feature = "root-llm-provider")]
+    #[tokio::test]
+    async fn runtime_nearai_mcp_bootstraps_from_nearai_session_token() {
+        let _token_guard = RuntimeEnvGuard::set("NEARAI_SESSION_TOKEN", "sess_reborn_mcp_token");
+        let root = tempfile::tempdir().expect("tempdir");
+        let session_dir = tempfile::tempdir().expect("session tempdir");
+        let local_dev_root = root.path().join("local-dev");
+
+        let config = ironclaw_llm::LlmConfig {
+            backend: "nearai".to_string(),
+            session: ironclaw_llm::SessionConfig {
+                auth_base_url: "https://private.near.ai".to_string(),
+                session_path: session_dir.path().join("session.json"),
+            },
+            nearai: ironclaw_llm::NearAiConfig {
+                model: "test-model".to_string(),
+                cheap_model: None,
+                base_url: "https://private.near.ai".to_string(),
+                api_key: None,
+                fallback_model: None,
+                max_retries: 0,
+                circuit_breaker_threshold: None,
+                circuit_breaker_recovery_secs: 30,
+                response_cache_enabled: false,
+                response_cache_ttl_secs: 3600,
+                response_cache_max_entries: 1000,
+                failover_cooldown_secs: 300,
+                failover_cooldown_threshold: 3,
+                smart_routing_cascade: false,
+            },
+            provider: None,
+            bedrock: None,
+            gemini_oauth: None,
+            openai_codex: None,
+            request_timeout_secs: 5,
+            cheap_model: None,
+            smart_routing_cascade: false,
+            max_retries: 0,
+            circuit_breaker_threshold: None,
+            circuit_breaker_recovery_secs: 30,
+            response_cache_enabled: false,
+            response_cache_ttl_secs: 3600,
+            response_cache_max_entries: 1000,
+        };
+        let llm = crate::runtime_input::ResolvedRebornLlm::from_llm_config(config);
+
+        let input = RebornRuntimeInput::from_services(
+            RebornBuildInput::local_dev("runtime-nearai-session-mcp-owner", local_dev_root)
+                .with_runtime_policy(local_dev_runtime_policy()),
+        )
+        .with_resolved_llm(llm)
+        .with_identity(RebornRuntimeIdentity {
+            tenant_id: "runtime-nearai-session-mcp-tenant".to_string(),
+            agent_id: "runtime-nearai-session-mcp-agent".to_string(),
+            source_binding_id: "runtime-nearai-session-mcp-source".to_string(),
+            reply_target_binding_id: "runtime-nearai-session-mcp-reply".to_string(),
+        });
+
+        let runtime = build_reborn_runtime(input).await.expect("runtime builds");
+        let local_runtime = runtime
+            .services()
+            .local_runtime
+            .as_ref()
+            .expect("local runtime");
+        let extension_management = local_runtime
+            .extension_management
+            .as_ref()
+            .expect("extension management");
+        let nearai_ref =
+            LifecyclePackageRef::new(LifecyclePackageKind::Extension, "nearai").expect("valid ref");
+        let projection = extension_management
+            .project(nearai_ref)
+            .await
+            .expect("NEAR AI MCP projected");
+        assert_eq!(projection.phase, LifecyclePhase::Active);
+
+        let capabilities = extension_management
+            .active_model_visible_capabilities()
+            .await
+            .expect("active capabilities");
+        assert!(
+            capabilities
+                .iter()
+                .any(|capability| capability.id.as_str() == "nearai.web_search"),
+            "nearai.web_search should be active with NEAR AI session-token config"
+        );
+        stop_turn_runner_worker_for_manual_state_test(&runtime).await;
+    }
+
+    #[cfg(all(feature = "root-llm-provider", feature = "libsql"))]
+    #[tokio::test]
+    async fn runtime_nearai_mcp_bootstraps_from_stored_nearai_api_key() {
+        let _session_token_guard = RuntimeEnvGuard::unset("NEARAI_SESSION_TOKEN");
+        let _api_key_guard = RuntimeEnvGuard::unset("NEARAI_API_KEY");
+        let root = tempfile::tempdir().expect("tempdir");
+        let local_dev_root = root.path().join("local-dev");
+        let session_dir = tempfile::tempdir().expect("session tempdir");
+
+        let services = crate::build_reborn_services(
+            RebornBuildInput::local_dev("runtime-nearai-stored-mcp-owner", local_dev_root.clone())
+                .with_runtime_policy(local_dev_runtime_policy()),
+        )
+        .await
+        .expect("services build for stored key seed");
+        crate::LlmKeyStore::new(services.secret_store())
+            .put(
+                "nearai",
+                ironclaw_secrets::SecretMaterial::from("sk-reborn-stored-nearai-mcp-key"),
+            )
+            .await
+            .expect("stored key seeded");
+        drop(services);
+
+        let config = ironclaw_llm::LlmConfig {
+            backend: "nearai".to_string(),
+            session: ironclaw_llm::SessionConfig {
+                auth_base_url: "https://private.near.ai".to_string(),
+                session_path: session_dir.path().join("session.json"),
+            },
+            nearai: ironclaw_llm::NearAiConfig {
+                model: "test-model".to_string(),
+                cheap_model: None,
+                base_url: "https://cloud-api.near.ai".to_string(),
+                api_key: None,
+                fallback_model: None,
+                max_retries: 0,
+                circuit_breaker_threshold: None,
+                circuit_breaker_recovery_secs: 30,
+                response_cache_enabled: false,
+                response_cache_ttl_secs: 3600,
+                response_cache_max_entries: 1000,
+                failover_cooldown_secs: 300,
+                failover_cooldown_threshold: 3,
+                smart_routing_cascade: false,
+            },
+            provider: None,
+            bedrock: None,
+            gemini_oauth: None,
+            openai_codex: None,
+            request_timeout_secs: 5,
+            cheap_model: None,
+            smart_routing_cascade: false,
+            max_retries: 0,
+            circuit_breaker_threshold: None,
+            circuit_breaker_recovery_secs: 30,
+            response_cache_enabled: false,
+            response_cache_ttl_secs: 3600,
+            response_cache_max_entries: 1000,
+        };
+        let llm = crate::runtime_input::ResolvedRebornLlm::from_llm_config(config);
+
+        let input = RebornRuntimeInput::from_services(
+            RebornBuildInput::local_dev("runtime-nearai-stored-mcp-owner", local_dev_root)
+                .with_runtime_policy(local_dev_runtime_policy()),
+        )
+        .with_resolved_llm(llm)
+        .with_identity(RebornRuntimeIdentity {
+            tenant_id: "runtime-nearai-stored-mcp-tenant".to_string(),
+            agent_id: "runtime-nearai-stored-mcp-agent".to_string(),
+            source_binding_id: "runtime-nearai-stored-mcp-source".to_string(),
+            reply_target_binding_id: "runtime-nearai-stored-mcp-reply".to_string(),
+        });
+
+        let runtime = build_reborn_runtime(input).await.expect("runtime builds");
+        let local_runtime = runtime
+            .services()
+            .local_runtime
+            .as_ref()
+            .expect("local runtime");
+        let extension_management = local_runtime
+            .extension_management
+            .as_ref()
+            .expect("extension management");
+        let nearai_ref =
+            LifecyclePackageRef::new(LifecyclePackageKind::Extension, "nearai").expect("valid ref");
+        let projection = extension_management
+            .project(nearai_ref)
+            .await
+            .expect("NEAR AI MCP projected");
+        assert_eq!(projection.phase, LifecyclePhase::Active);
+
+        let capabilities = extension_management
+            .active_model_visible_capabilities()
+            .await
+            .expect("active capabilities");
+        assert!(
+            capabilities
+                .iter()
+                .any(|capability| capability.id.as_str() == "nearai.web_search"),
+            "nearai.web_search should be active with stored NEAR AI API key config"
+        );
+        stop_turn_runner_worker_for_manual_state_test(&runtime).await;
+    }
+
+    #[cfg(all(feature = "root-llm-provider", feature = "libsql"))]
+    async fn nearai_mcp_runtime_access_secret(
+        runtime: &super::RebornRuntime,
+        owner_scope: ResourceScope,
+    ) -> String {
+        let product_auth = runtime
+            .services()
+            .product_auth
+            .as_ref()
+            .expect("product auth");
+        let auth_scope = ironclaw_auth::AuthProductScope::credential_owner(
+            &owner_scope,
+            ironclaw_auth::AuthSurface::Api,
+        );
+        let accounts = product_auth
+            .credential_account_record_source()
+            .accounts_for_owner(&auth_scope)
+            .await
+            .expect("NEAR AI product-auth accounts");
+        let account = accounts
+            .into_iter()
+            .find(|account| {
+                account.provider.as_str() == "nearai"
+                    && account.status == ironclaw_auth::CredentialAccountStatus::Configured
+            })
+            .expect("configured NEAR AI product-auth account");
+
+        assert_eq!(account.scope.resource.tenant_id, owner_scope.tenant_id);
+        assert_eq!(account.scope.resource.user_id, owner_scope.user_id);
+        assert_eq!(account.scope.resource.agent_id, owner_scope.agent_id);
+        assert_eq!(account.scope.resource.project_id, owner_scope.project_id);
+
+        let handle = account.access_secret.expect("NEAR AI access secret");
+        let store = runtime.services().secret_store();
+        let lease = store
+            .lease_once(&account.scope.resource, &handle)
+            .await
+            .expect("NEAR AI access secret lease");
+        let material = store
+            .consume(&account.scope.resource, lease.id)
+            .await
+            .expect("NEAR AI access secret material");
+        secrecy::ExposeSecret::expose_secret(&material).to_string()
+    }
+
+    #[cfg(all(feature = "root-llm-provider", feature = "libsql"))]
+    #[tokio::test]
+    async fn runtime_nearai_mcp_prebuild_api_key_is_not_replaced_by_stored_key() {
+        let _session_token_guard = RuntimeEnvGuard::unset("NEARAI_SESSION_TOKEN");
+        let _api_key_guard = RuntimeEnvGuard::unset("NEARAI_API_KEY");
+        let root = tempfile::tempdir().expect("tempdir");
+        let local_dev_root = root.path().join("local-dev");
+        let session_dir = tempfile::tempdir().expect("session tempdir");
+        let owner = "runtime-nearai-prebuild-mcp-owner";
+        let tenant = "runtime-nearai-prebuild-mcp-tenant";
+        let agent = "runtime-nearai-prebuild-mcp-agent";
+
+        let services = crate::build_reborn_services(
+            RebornBuildInput::local_dev(owner, local_dev_root.clone())
+                .with_runtime_policy(local_dev_runtime_policy()),
+        )
+        .await
+        .expect("services build for stored key seed");
+        crate::LlmKeyStore::new(services.secret_store())
+            .put(
+                "nearai",
+                ironclaw_secrets::SecretMaterial::from("sk-post-build-stored-nearai-mcp-key"),
+            )
+            .await
+            .expect("stored key seeded");
+        drop(services);
+
+        let config = ironclaw_llm::LlmConfig {
+            backend: "nearai".to_string(),
+            session: ironclaw_llm::SessionConfig {
+                auth_base_url: "https://private.near.ai".to_string(),
+                session_path: session_dir.path().join("session.json"),
+            },
+            nearai: ironclaw_llm::NearAiConfig {
+                model: "test-model".to_string(),
+                cheap_model: None,
+                base_url: "https://cloud-api.near.ai".to_string(),
+                api_key: Some(secrecy::SecretString::from("sk-prebuild-nearai-mcp-key")),
+                fallback_model: None,
+                max_retries: 0,
+                circuit_breaker_threshold: None,
+                circuit_breaker_recovery_secs: 30,
+                response_cache_enabled: false,
+                response_cache_ttl_secs: 3600,
+                response_cache_max_entries: 1000,
+                failover_cooldown_secs: 300,
+                failover_cooldown_threshold: 3,
+                smart_routing_cascade: false,
+            },
+            provider: None,
+            bedrock: None,
+            gemini_oauth: None,
+            openai_codex: None,
+            request_timeout_secs: 5,
+            cheap_model: None,
+            smart_routing_cascade: false,
+            max_retries: 0,
+            circuit_breaker_threshold: None,
+            circuit_breaker_recovery_secs: 30,
+            response_cache_enabled: false,
+            response_cache_ttl_secs: 3600,
+            response_cache_max_entries: 1000,
+        };
+        let llm = crate::runtime_input::ResolvedRebornLlm::from_llm_config(config);
+
+        let input = RebornRuntimeInput::from_services(
+            RebornBuildInput::local_dev(owner, local_dev_root)
+                .with_runtime_policy(local_dev_runtime_policy()),
+        )
+        .with_resolved_llm(llm)
+        .with_identity(RebornRuntimeIdentity {
+            tenant_id: tenant.to_string(),
+            agent_id: agent.to_string(),
+            source_binding_id: "runtime-nearai-prebuild-mcp-source".to_string(),
+            reply_target_binding_id: "runtime-nearai-prebuild-mcp-reply".to_string(),
+        });
+
+        let runtime = build_reborn_runtime(input).await.expect("runtime builds");
+        let owner_scope = ResourceScope {
+            tenant_id: TenantId::new(tenant).expect("tenant"),
+            user_id: UserId::new(owner).expect("owner"),
+            agent_id: Some(AgentId::new(agent).expect("agent")),
+            project_id: None::<ProjectId>,
+            mission_id: None,
+            thread_id: None,
+            invocation_id: InvocationId::new(),
+        };
+        let material = nearai_mcp_runtime_access_secret(&runtime, owner_scope).await;
+
+        assert_eq!(material, "sk-prebuild-nearai-mcp-key");
+        stop_turn_runner_worker_for_manual_state_test(&runtime).await;
+    }
+
+    /// Counts how many times the runtime drives this provider and answers with a
+    /// fixed sentinel, so a test can prove an injected provider — not one built
+    /// from config — is the one the gateway actually calls.
+    #[cfg(feature = "root-llm-provider")]
+    struct CountingOverrideProvider {
+        calls: Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    #[cfg(feature = "root-llm-provider")]
+    #[async_trait::async_trait]
+    impl ironclaw_llm::LlmProvider for CountingOverrideProvider {
+        fn model_name(&self) -> &str {
+            "mock-override-model"
+        }
+
+        fn cost_per_token(&self) -> (rust_decimal::Decimal, rust_decimal::Decimal) {
+            (rust_decimal::Decimal::ZERO, rust_decimal::Decimal::ZERO)
+        }
+
+        async fn complete(
+            &self,
+            _request: ironclaw_llm::CompletionRequest,
+        ) -> Result<ironclaw_llm::CompletionResponse, ironclaw_llm::LlmError> {
+            self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(ironclaw_llm::CompletionResponse {
+                content: "override-driven".to_string(),
+                input_tokens: 0,
+                output_tokens: 0,
+                finish_reason: ironclaw_llm::FinishReason::Stop,
+                reasoning: None,
+                cache_read_input_tokens: 0,
+                cache_creation_input_tokens: 0,
+            })
+        }
+
+        async fn complete_with_tools(
+            &self,
+            _request: ironclaw_llm::ToolCompletionRequest,
+        ) -> Result<ironclaw_llm::ToolCompletionResponse, ironclaw_llm::LlmError> {
+            self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(ironclaw_llm::ToolCompletionResponse {
+                content: Some("override-driven".to_string()),
+                tool_calls: Vec::new(),
+                input_tokens: 0,
+                output_tokens: 0,
+                finish_reason: ironclaw_llm::FinishReason::Stop,
+                cache_read_input_tokens: 0,
+                cache_creation_input_tokens: 0,
+                reasoning: None,
+            })
+        }
+    }
+
+    /// The LLM-provider-instrumentation seam: when a caller installs a factory
+    /// via `ResolvedRebornLlm::with_provider_factory` (how the bench wraps an
+    /// instrumented provider to capture reasoning / tokens / cost / system-prompt
+    /// / tool definitions), the gateway must drive the factory's output. Here the
+    /// factory ignores the config-built provider and returns a counting mock, so
+    /// if the factory were not applied the gateway would drive the config-built
+    /// provider (dead endpoint) instead of returning the mock's sentinel.
+    #[cfg(feature = "root-llm-provider")]
+    #[tokio::test]
+    async fn build_llm_gateway_applies_provider_factory() {
+        let session_dir = tempfile::tempdir().expect("session tempdir");
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let mock: Arc<dyn ironclaw_llm::LlmProvider> = Arc::new(CountingOverrideProvider {
+            calls: Arc::clone(&calls),
+        });
+
+        let config = ironclaw_llm::LlmConfig {
+            backend: "nearai".to_string(),
+            session: ironclaw_llm::SessionConfig {
+                auth_base_url: "http://127.0.0.1:1".to_string(),
+                session_path: session_dir.path().join("session.json"),
+            },
+            nearai: ironclaw_llm::NearAiConfig {
+                model: "config-model-should-not-be-used".to_string(),
+                cheap_model: None,
+                base_url: "http://127.0.0.1:1".to_string(),
+                api_key: None,
+                fallback_model: None,
+                max_retries: 0,
+                circuit_breaker_threshold: None,
+                circuit_breaker_recovery_secs: 30,
+                response_cache_enabled: false,
+                response_cache_ttl_secs: 3600,
+                response_cache_max_entries: 1000,
+                failover_cooldown_secs: 300,
+                failover_cooldown_threshold: 3,
+                smart_routing_cascade: false,
+            },
+            provider: None,
+            bedrock: None,
+            gemini_oauth: None,
+            openai_codex: None,
+            request_timeout_secs: 5,
+            cheap_model: None,
+            smart_routing_cascade: false,
+            max_retries: 0,
+            circuit_breaker_threshold: None,
+            circuit_breaker_recovery_secs: 30,
+            response_cache_enabled: false,
+            response_cache_ttl_secs: 3600,
+            response_cache_max_entries: 1000,
+        };
+
+        let factory_mock = Arc::clone(&mock);
+        let llm = crate::runtime_input::ResolvedRebornLlm::from_llm_config(config)
+            .with_provider_factory(Arc::new(move |_built| Arc::clone(&factory_mock)));
+        let bundle = super::build_llm_gateway(llm)
+            .await
+            .expect("gateway builds with the provider factory");
+
+        let response = bundle
+            .gateway
+            .stream_model(nearai_gateway_test_request())
+            .await
+            .expect("gateway drives the factory-produced provider");
+
+        assert_eq!(
+            response.safe_text_deltas,
+            vec!["override-driven".to_string()],
+            "gateway must return the factory provider's response, not the config-built one"
+        );
+        assert_eq!(
+            calls.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "the override provider should be invoked exactly once"
+        );
+    }
+
+    /// Provider wrapper that counts model calls and delegates to its inner — a
+    /// stand-in for the bench's instrumentation wrapper. Unlike
+    /// `CountingOverrideProvider`, it wraps `inner` so swapping the inner (via a
+    /// live reload of a `SwappableLlmProvider`) is observable through it.
+    #[cfg(feature = "root-llm-provider")]
+    struct CountingWrapperProvider {
+        inner: Arc<dyn ironclaw_llm::LlmProvider>,
+        calls: Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    #[cfg(feature = "root-llm-provider")]
+    #[async_trait::async_trait]
+    impl ironclaw_llm::LlmProvider for CountingWrapperProvider {
+        fn model_name(&self) -> &str {
+            self.inner.model_name()
+        }
+
+        fn cost_per_token(&self) -> (rust_decimal::Decimal, rust_decimal::Decimal) {
+            self.inner.cost_per_token()
+        }
+
+        async fn complete(
+            &self,
+            request: ironclaw_llm::CompletionRequest,
+        ) -> Result<ironclaw_llm::CompletionResponse, ironclaw_llm::LlmError> {
+            self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            self.inner.complete(request).await
+        }
+
+        async fn complete_with_tools(
+            &self,
+            request: ironclaw_llm::ToolCompletionRequest,
+        ) -> Result<ironclaw_llm::ToolCompletionResponse, ironclaw_llm::LlmError> {
+            self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            self.inner.complete_with_tools(request).await
+        }
+    }
+
+    /// Minimal nearai `LlmConfig` pointed at a dead endpoint: it *builds* lazily
+    /// (no connection at construction) but any model call errors. Enough to
+    /// exercise gateway/reload wiring without a network.
+    #[cfg(feature = "root-llm-provider")]
+    fn dead_endpoint_nearai_config(session_path: std::path::PathBuf) -> ironclaw_llm::LlmConfig {
+        ironclaw_llm::LlmConfig {
+            backend: "nearai".to_string(),
+            session: ironclaw_llm::SessionConfig {
+                auth_base_url: "http://127.0.0.1:1".to_string(),
+                session_path,
+            },
+            nearai: ironclaw_llm::NearAiConfig {
+                model: "config-model".to_string(),
+                cheap_model: None,
+                base_url: "http://127.0.0.1:1".to_string(),
+                api_key: None,
+                fallback_model: None,
+                max_retries: 0,
+                circuit_breaker_threshold: None,
+                circuit_breaker_recovery_secs: 30,
+                response_cache_enabled: false,
+                response_cache_ttl_secs: 3600,
+                response_cache_max_entries: 1000,
+                failover_cooldown_secs: 300,
+                failover_cooldown_threshold: 3,
+                smart_routing_cascade: false,
+            },
+            provider: None,
+            bedrock: None,
+            gemini_oauth: None,
+            openai_codex: None,
+            request_timeout_secs: 5,
+            cheap_model: None,
+            smart_routing_cascade: false,
+            max_retries: 0,
+            circuit_breaker_threshold: None,
+            circuit_breaker_recovery_secs: 30,
+            response_cache_enabled: false,
+            response_cache_ttl_secs: 3600,
+            response_cache_max_entries: 1000,
+        }
+    }
+
+    /// Regression guard for Firat's review: the provider factory (caller
+    /// instrumentation) must survive a live config reload. `build_llm_gateway`
+    /// wraps the factory over the `SwappableLlmProvider`, so reloading — which
+    /// swaps the swappable's *inner* — keeps the wrapper in the call path. If the
+    /// factory were applied to the bare provider instead, the first reload would
+    /// silently drop instrumentation and this test's post-reload count would stay
+    /// at 1.
+    #[cfg(feature = "root-llm-provider")]
+    #[tokio::test]
+    async fn provider_factory_survives_live_reload() {
+        let session_dir = tempfile::tempdir().expect("session tempdir");
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let calls_for_factory = Arc::clone(&calls);
+        let factory: crate::runtime_input::RebornProviderFactory = Arc::new(move |inner| {
+            Arc::new(CountingWrapperProvider {
+                inner,
+                calls: Arc::clone(&calls_for_factory),
+            }) as Arc<dyn ironclaw_llm::LlmProvider>
+        });
+
+        let config = dead_endpoint_nearai_config(session_dir.path().join("session.json"));
+        let llm = crate::runtime_input::ResolvedRebornLlm::from_llm_config(config.clone())
+            .with_provider_factory(factory);
+        let bundle = super::build_llm_gateway(llm)
+            .await
+            .expect("gateway builds with the provider factory");
+
+        // First model call routes through the instrumentation wrapper. The dead
+        // endpoint makes the underlying call error, but the wrapper counts before
+        // delegating, so the result is irrelevant — only that it was observed.
+        let _ = bundle
+            .gateway
+            .stream_model(nearai_gateway_test_request())
+            .await;
+        assert_eq!(
+            calls.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "the instrumentation wrapper should observe the first model call"
+        );
+
+        // Live config reload: rebuild the chain and atomically swap the
+        // swappable's inner provider — exactly what the WebUI settings path does.
+        bundle
+            .reload
+            .reload_handle
+            .reload(&config, Arc::clone(&bundle.reload.session))
+            .await
+            .expect("live reload rebuilds the provider chain");
+
+        let _ = bundle
+            .gateway
+            .stream_model(nearai_gateway_test_request())
+            .await;
+        assert_eq!(
+            calls.load(std::sync::atomic::Ordering::SeqCst),
+            2,
+            "the instrumentation wrapper must still observe model calls after a live reload"
+        );
     }
 
     #[cfg(all(feature = "root-llm-provider", feature = "libsql"))]
@@ -4248,6 +5580,78 @@ mod tests {
         assert!(runtime.services().readiness.workers.turn_runner);
 
         runtime.shutdown().await.expect("runtime shutdown");
+    }
+
+    /// Regression guard for Firat's review: a trajectory observer is only wired
+    /// through the local-dev capability path, so supplying one to a production
+    /// runtime (no local runtime to observe) must fail fast rather than silently
+    /// produce an empty trajectory.
+    #[cfg(feature = "libsql")]
+    #[tokio::test]
+    async fn build_reborn_runtime_rejects_trajectory_observer_for_production() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db = Arc::new(
+            libsql::Builder::new_local(dir.path().join("reborn.db"))
+                .build()
+                .await
+                .expect("libsql db"),
+        );
+        let gateway = Arc::new(RecordingGateway {
+            reply: "production".to_string(),
+            requests: Arc::new(StdMutex::new(Vec::new())),
+        });
+        let observer = Arc::new(RecordingTrajectoryObserver::default());
+
+        let input = RebornRuntimeInput::from_services(
+            RebornBuildInput::libsql(
+                crate::RebornCompositionProfile::Production,
+                "runtime-observer-reject-owner",
+                db,
+                dir.path().join("events.db").to_string_lossy(),
+                None,
+                ironclaw_secrets::SecretMaterial::from("01234567890123456789012345678901"),
+            )
+            .with_production_trust_policy(Arc::new(
+                crate::builtin_first_party_trust_policy().expect("trust policy"),
+            ))
+            .with_runtime_policy(EffectiveRuntimePolicy {
+                deployment: DeploymentMode::HostedMultiTenant,
+                requested_profile: RuntimeProfile::SecureDefault,
+                resolved_profile: RuntimeProfile::SecureDefault,
+                filesystem_backend: FilesystemBackendKind::ScopedVirtual,
+                process_backend: ProcessBackendKind::TenantSandbox,
+                network_mode: NetworkMode::Deny,
+                secret_mode: SecretMode::BrokeredHandles,
+                approval_policy: ApprovalPolicy::AskAlways,
+                audit_mode: AuditMode::Standard,
+            })
+            .with_runtime_process_binding(RebornRuntimeProcessBinding::tenant_sandbox(Arc::new(
+                ironclaw_host_runtime::TenantSandboxProcessPort::new(Arc::new(
+                    RecordingSandboxTransport,
+                )),
+            ))),
+        )
+        .with_identity(RebornRuntimeIdentity {
+            tenant_id: "runtime-observer-reject-tenant".to_string(),
+            agent_id: "runtime-observer-reject-agent".to_string(),
+            source_binding_id: "runtime-observer-reject-source".to_string(),
+            reply_target_binding_id: "runtime-observer-reject-reply".to_string(),
+        })
+        .with_raw_trajectory_observer(observer)
+        .with_model_gateway_override(gateway);
+
+        let err = match build_reborn_runtime(input).await {
+            Ok(runtime) => {
+                runtime.shutdown().await.expect("shutdown");
+                panic!("production runtime must reject a trajectory observer");
+            }
+            Err(err) => err,
+        };
+        assert!(
+            matches!(err, super::RebornRuntimeError::InvalidArgument { ref reason }
+                if reason.contains("trajectory observer") && reason.contains("local-dev")),
+            "expected an InvalidArgument naming the local-dev-only constraint, got {err:#}"
+        );
     }
 
     #[cfg(feature = "libsql")]
@@ -4691,6 +6095,281 @@ mod tests {
         runtime.shutdown().await.expect("runtime shutdown");
     }
 
+    /// End-to-end Trace Commons auto-capture: a real runtime turn through
+    /// `send_user_message` must, for an enrolled owner scope, land a redacted
+    /// envelope in that scope's submission queue without any manual trace
+    /// command. This drives the full chain: turn completion → lifecycle bus →
+    /// best-effort capture sink → thread-history read → redact/score →
+    /// eligibility → queue (+ immediate flush attempt, which fails locally
+    /// against the closed loopback endpoint and must leave the entry queued).
+    #[tokio::test]
+    async fn send_user_message_auto_queues_trace_for_enrolled_scope() {
+        use ironclaw_reborn_traces::contribution as trace_contribution;
+
+        let owner = format!("runtime-trace-capture-owner-{}", uuid::Uuid::new_v4());
+        // Trace state is keyed by the tenant-scoped composite, so enroll (and
+        // later read the queue) under `trace_scope_key(tenant, owner)`, not the
+        // bare owner id.
+        let scope = trace_contribution::trace_scope_key("runtime-trace-capture-tenant", &owner);
+        let policy = trace_contribution::StandingTraceContributionPolicy {
+            enabled: true,
+            // Closed loopback port: the immediate flush fails fast and
+            // locally; no traffic leaves the machine.
+            ingestion_endpoint: Some("https://127.0.0.1:1/v1/traces".to_string()),
+            min_submission_score: 0.0,
+            require_manual_approval_when_pii_detected: false,
+            auto_submit_high_value_traces: true,
+            ..trace_contribution::StandingTraceContributionPolicy::default()
+        };
+        trace_contribution::write_trace_policy_for_scope(Some(&scope), &policy)
+            .expect("write trace policy");
+
+        let root = tempfile::tempdir().expect("tempdir");
+        let gateway = Arc::new(RecordingGateway {
+            reply: "auto capture reply".to_string(),
+            requests: Arc::new(StdMutex::new(Vec::new())),
+        });
+        let input = RebornRuntimeInput::from_services(
+            RebornBuildInput::local_dev(&owner, root.path().join("local-dev"))
+                .with_runtime_policy(local_dev_runtime_policy()),
+        )
+        .with_identity(RebornRuntimeIdentity {
+            tenant_id: "runtime-trace-capture-tenant".to_string(),
+            agent_id: "runtime-trace-capture-agent".to_string(),
+            source_binding_id: "runtime-trace-capture-source".to_string(),
+            reply_target_binding_id: "runtime-trace-capture-reply".to_string(),
+        })
+        .with_poll_settings(PollSettings {
+            interval: Duration::from_millis(10),
+            max_total: RUNTIME_SEND_TIMEOUT,
+        })
+        .with_model_gateway_override(gateway);
+
+        let runtime = build_reborn_runtime(input).await.expect("runtime builds");
+        let conversation = runtime.new_conversation().await.expect("conversation");
+        let reply = tokio::time::timeout(
+            RUNTIME_SEND_TIMEOUT,
+            runtime.send_user_message(&conversation, "capture this turn"),
+        )
+        .await
+        .expect("runtime send should finish")
+        .expect("runtime send should succeed");
+        assert_eq!(reply.status, TurnStatus::Completed);
+
+        // The capture task is detached from the lifecycle path; poll briefly.
+        let queue_dir =
+            trace_contribution::trace_contribution_dir_for_scope(Some(&scope)).join("queue");
+        let queued = |dir: &std::path::Path| -> Vec<std::path::PathBuf> {
+            match std::fs::read_dir(dir) {
+                Ok(entries) => entries
+                    .map(|entry| {
+                        // Fail loud on a per-entry IO error too, so the test
+                        // can't silently drop a broken entry and still claim the
+                        // queue holds exactly one envelope.
+                        entry
+                            .unwrap_or_else(|error| {
+                                panic!(
+                                    "failed to read a trace queue entry in {}: {error}",
+                                    dir.display()
+                                )
+                            })
+                            .path()
+                    })
+                    .filter(|path| {
+                        path.file_name()
+                            .and_then(|name| name.to_str())
+                            .is_some_and(|name| {
+                                name.ends_with(".json") && !name.ends_with(".held.json")
+                            })
+                    })
+                    .collect(),
+                // The queue dir not existing yet is the expected pre-capture
+                // state; any other IO error is a real failure the test must not
+                // mask as "no queued traces".
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => Vec::new(),
+                Err(error) => panic!("failed to read trace queue dir {}: {error}", dir.display()),
+            }
+        };
+        let mut entries = Vec::new();
+        for _ in 0..150 {
+            entries = queued(&queue_dir);
+            if !entries.is_empty() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        assert_eq!(
+            entries.len(),
+            1,
+            "a completed turn for an enrolled scope must auto-queue one trace envelope"
+        );
+        let body = std::fs::read_to_string(&entries[0]).expect("queued envelope readable");
+        let envelope: serde_json::Value = serde_json::from_str(&body).expect("envelope is JSON");
+        assert_eq!(envelope["outcome"]["task_success"], "success");
+
+        runtime.shutdown().await.expect("runtime shutdown");
+        let _ = std::fs::remove_dir_all(trace_contribution::trace_contribution_dir_for_scope(
+            Some(&scope),
+        ));
+    }
+
+    /// Regression guard: `send_user_message` must persist a
+    /// `TurnOwner::Personal` (the bound actor user) in `product_context`,
+    /// not a `TurnOwner::SharedAgent`.  Before the fix, `turn_scope_for`
+    /// built an ownerless scope whose `product_owner` resolved to
+    /// `SharedAgent` because `agent_id` was set and no explicit owner was
+    /// carried.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn send_user_message_persists_personal_owner_for_webui() {
+        use ironclaw_turns::TurnOwner;
+
+        let root = tempfile::tempdir().expect("tempdir");
+        let actor_owner_id = "runtime-personal-owner-user";
+        let gateway = Arc::new(RecordingGateway {
+            reply: "owner-check reply".to_string(),
+            requests: Arc::new(StdMutex::new(Vec::new())),
+        });
+        let input = RebornRuntimeInput::from_services(
+            RebornBuildInput::local_dev(actor_owner_id, root.path().join("local-dev"))
+                .with_runtime_policy(local_dev_runtime_policy()),
+        )
+        .with_identity(RebornRuntimeIdentity {
+            tenant_id: "runtime-personal-owner-tenant".to_string(),
+            agent_id: "runtime-personal-owner-agent".to_string(),
+            source_binding_id: "runtime-personal-owner-source".to_string(),
+            reply_target_binding_id: "runtime-personal-owner-reply".to_string(),
+        })
+        .with_poll_settings(PollSettings {
+            interval: Duration::from_millis(10),
+            max_total: RUNTIME_SEND_TIMEOUT,
+        })
+        .with_model_gateway_override(gateway);
+
+        let runtime = build_reborn_runtime(input).await.expect("runtime builds");
+        let conversation = runtime.new_conversation().await.expect("conversation");
+        let reply = tokio::time::timeout(
+            RUNTIME_SEND_TIMEOUT,
+            runtime.send_user_message(&conversation, "ping"),
+        )
+        .await
+        .expect("runtime send should finish within timeout")
+        .expect("runtime send should succeed");
+
+        assert_eq!(reply.status, TurnStatus::Completed);
+
+        // Verify the persisted product_context carries Personal{user: actor_user_id},
+        // not SharedAgent.
+        let scope = runtime.turn_scope_for(&conversation.0);
+        let run_state = runtime
+            .turn_coordinator
+            .get_run_state(GetRunStateRequest {
+                scope,
+                run_id: reply.run_id,
+            })
+            .await
+            .expect("get_run_state should succeed");
+
+        let product_context = run_state
+            .product_context
+            .expect("product_context must be set by send_user_message");
+        let expected_user_id = UserId::new(actor_owner_id).expect("actor user id should be valid");
+        assert!(
+            matches!(
+                &product_context.owner,
+                TurnOwner::Personal { user } if user == &expected_user_id
+            ),
+            "send_user_message must persist TurnOwner::Personal{{user: actor_user_id}}, \
+             got {:?}",
+            product_context.owner
+        );
+
+        runtime.shutdown().await.expect("runtime shutdown");
+    }
+
+    /// Regression guard: `send_user_message` resolves product context via
+    /// `resolve_web_ui`, which sets `TurnOriginKind::WebUi`.  The runtime
+    /// context section rendered into the model request must therefore contain
+    /// the WebUI origin line produced by
+    /// `LoopRuntimeContext::render_model_content`.  Previously, only the
+    /// persisted `product_context` owner was asserted; this test closes the
+    /// gap by asserting the *rendered* origin appears in the captured model
+    /// request.
+    #[tokio::test]
+    async fn send_user_message_renders_webui_origin_in_model_request() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let requests = Arc::new(StdMutex::new(Vec::new()));
+        let gateway = Arc::new(RecordingGateway {
+            reply: "webui-origin-check reply".to_string(),
+            requests: Arc::clone(&requests),
+        });
+        let input = RebornRuntimeInput::from_services(
+            RebornBuildInput::local_dev(
+                "runtime-webui-origin-owner",
+                root.path().join("local-dev"),
+            )
+            .with_runtime_policy(local_dev_runtime_policy()),
+        )
+        .with_identity(RebornRuntimeIdentity {
+            tenant_id: "runtime-webui-origin-tenant".to_string(),
+            agent_id: "runtime-webui-origin-agent".to_string(),
+            source_binding_id: "runtime-webui-origin-source".to_string(),
+            reply_target_binding_id: "runtime-webui-origin-reply".to_string(),
+        })
+        .with_poll_settings(PollSettings {
+            interval: Duration::from_millis(10),
+            max_total: RUNTIME_SEND_TIMEOUT,
+        })
+        .with_model_gateway_override(gateway);
+
+        let runtime = build_reborn_runtime(input).await.expect("runtime builds");
+        let conversation = runtime.new_conversation().await.expect("conversation");
+        let reply = tokio::time::timeout(
+            RUNTIME_SEND_TIMEOUT,
+            runtime.send_user_message(&conversation, "ping"),
+        )
+        .await
+        .expect("runtime send should finish within timeout")
+        .expect("runtime send should succeed");
+
+        assert_eq!(reply.status, TurnStatus::Completed);
+
+        // The runtime-context system message carries the rendered
+        // `LoopRuntimeContext` — its content_ref uses the "runtime" section
+        // prefix stamped by `push_runtime_context`.
+        let runtime_context_content = {
+            let requests = requests
+                .lock()
+                .expect("recording gateway requests lock poisoned");
+            requests[0]
+                .messages
+                .iter()
+                .find(|message| {
+                    message.role == HostManagedModelMessageRole::System
+                        && message
+                            .content_ref
+                            .as_str()
+                            .starts_with("msg:runtime.loop-start.")
+                })
+                .expect(
+                    "model request must include a runtime-context system message \
+                     (content_ref starts with msg:runtime.loop-start.)",
+                )
+                .content
+                .clone()
+        };
+
+        // Exact string produced by LoopRuntimeContext::render_model_content
+        // for TurnOriginKind::WebUi (runtime_context.rs line 225).
+        assert!(
+            runtime_context_content
+                .contains("Run origin: WebUI chat; replies render in this chat."),
+            "runtime-context system message must contain the WebUI origin line, \
+             got: {runtime_context_content:?}"
+        );
+
+        runtime.shutdown().await.expect("runtime shutdown");
+    }
+
     #[tokio::test]
     async fn send_user_message_until_gate_returns_blocked_on_auth_gate() {
         let root = tempfile::tempdir().expect("tempdir");
@@ -4830,6 +6509,7 @@ mod tests {
                 parent_run_id: None,
                 subagent_depth: 0,
                 spawn_tree_root_run_id: None,
+                product_context: None,
             })
             .await
             .expect("parent submitted");
@@ -5089,6 +6769,179 @@ mod tests {
         );
 
         runtime.shutdown().await.expect("runtime shutdown");
+    }
+
+    /// Records both trajectory callbacks so the e2e test can assert the
+    /// observer fires through a real `build_reborn_runtime` turn — driving the
+    /// input hook (`HostRuntimeLoopCapabilityPort`) and the result hook
+    /// (`LocalDevCapabilityIo::write_capability_result`) on the actual dispatch
+    /// path, not a direct helper call.
+    #[derive(Debug, Default)]
+    struct RecordingTrajectoryObserver {
+        inputs: StdMutex<Vec<(String, String, serde_json::Value)>>,
+        results: StdMutex<Vec<(String, String, serde_json::Value)>>,
+    }
+
+    impl crate::RebornTrajectoryObserver for RecordingTrajectoryObserver {
+        fn on_capability_input(
+            &self,
+            call_id: &str,
+            capability_id: &str,
+            arguments: &serde_json::Value,
+        ) {
+            self.inputs.lock().expect("inputs lock").push((
+                call_id.to_string(),
+                capability_id.to_string(),
+                arguments.clone(),
+            ));
+        }
+
+        fn on_capability_result(
+            &self,
+            call_id: &str,
+            capability_id: &str,
+            output: &serde_json::Value,
+        ) {
+            self.results.lock().expect("results lock").push((
+                call_id.to_string(),
+                capability_id.to_string(),
+                output.clone(),
+            ));
+        }
+    }
+
+    /// End-to-end guard for the #4588 trajectory observer seam: a real runtime
+    /// turn that dispatches the `builtin.echo` capability must fire BOTH the
+    /// input and result callbacks installed via
+    /// `RebornRuntimeInput::with_raw_trajectory_observer`. This drives the
+    /// result hook on the genuine dispatch path (the prior direct-call unit
+    /// test was dropped as false confidence — it stayed green even when
+    /// end-to-end dispatch was broken).
+    #[tokio::test]
+    async fn local_dev_runtime_forwards_tool_call_trajectory_to_raw_observer() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let gateway = Arc::new(ToolCallingGateway::default());
+        let gateway_for_runtime: Arc<dyn HostManagedModelGateway> = gateway.clone();
+        let observer = Arc::new(RecordingTrajectoryObserver::default());
+        let input = RebornRuntimeInput::from_services(
+            RebornBuildInput::local_dev("runtime-trajectory-owner", root.path().join("local-dev"))
+                .with_runtime_policy(local_dev_runtime_policy()),
+        )
+        .with_identity(RebornRuntimeIdentity {
+            tenant_id: "runtime-trajectory-tenant".to_string(),
+            agent_id: "runtime-trajectory-agent".to_string(),
+            source_binding_id: "runtime-trajectory-source".to_string(),
+            reply_target_binding_id: "runtime-trajectory-reply".to_string(),
+        })
+        .with_poll_settings(PollSettings {
+            interval: Duration::from_millis(10),
+            max_total: Duration::from_secs(3),
+        })
+        // Raw (not safe-preview) so we can assert verbatim arguments + output.
+        .with_raw_trajectory_observer(observer.clone())
+        .with_model_gateway_override(gateway_for_runtime);
+
+        let runtime = build_reborn_runtime(input).await.expect("runtime builds");
+        let conversation = runtime.new_conversation().await.expect("conversation");
+        let reply = tokio::time::timeout(
+            RUNTIME_SEND_TIMEOUT,
+            runtime.send_user_message(&conversation, "use echo tool"),
+        )
+        .await
+        .expect("runtime send should finish")
+        .expect("runtime send should succeed");
+        assert_eq!(reply.status, TurnStatus::Completed);
+        // Shut down before inspecting the recorded callbacks so the std-Mutex
+        // guards are never held across an `.await` (clippy::await_holding_lock).
+        runtime.shutdown().await.expect("runtime shutdown");
+
+        let echo_id = CapabilityId::new("builtin.echo").unwrap();
+
+        let inputs = observer.inputs.lock().expect("inputs lock");
+        assert_eq!(inputs.len(), 1, "exactly one capability input observed");
+        let (input_call_id, input_capability, arguments) = &inputs[0];
+        assert!(!input_call_id.is_empty(), "input call_id should be present");
+        assert_eq!(input_capability, echo_id.as_str());
+        assert_eq!(
+            arguments,
+            &serde_json::json!({"message": "hello from tool"}),
+            "observer should receive the raw model-emitted tool arguments"
+        );
+
+        let results = observer.results.lock().expect("results lock");
+        assert_eq!(results.len(), 1, "exactly one capability result observed");
+        let (result_call_id, result_capability, output) = &results[0];
+        assert_eq!(result_capability, echo_id.as_str());
+        assert_eq!(
+            result_call_id, input_call_id,
+            "result and input callbacks correlate by call_id"
+        );
+        assert!(
+            output.to_string().contains("hello from tool"),
+            "observer should receive the staged capability output, got {output}"
+        );
+    }
+
+    /// Caller-level guard for the **default** (safe-preview) observer path:
+    /// installing via the public `with_trajectory_observer` and driving a real
+    /// turn with a large tool payload must deliver a *bounded* preview to the
+    /// observer — proving truncation is wired between dispatch and the observer,
+    /// not just unit-tested on the helper in isolation.
+    #[tokio::test]
+    async fn local_dev_runtime_safe_preview_observer_receives_bounded_payload() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let gateway = Arc::new(LargeEchoToolCallingGateway::default());
+        let gateway_for_runtime: Arc<dyn HostManagedModelGateway> = gateway.clone();
+        let observer = Arc::new(RecordingTrajectoryObserver::default());
+        let input = RebornRuntimeInput::from_services(
+            RebornBuildInput::local_dev("runtime-preview-owner", root.path().join("local-dev"))
+                .with_runtime_policy(local_dev_runtime_policy()),
+        )
+        .with_identity(RebornRuntimeIdentity {
+            tenant_id: "runtime-preview-tenant".to_string(),
+            agent_id: "runtime-preview-agent".to_string(),
+            source_binding_id: "runtime-preview-source".to_string(),
+            reply_target_binding_id: "runtime-preview-reply".to_string(),
+        })
+        .with_poll_settings(PollSettings {
+            interval: Duration::from_millis(10),
+            max_total: Duration::from_secs(3),
+        })
+        // Default path → safe-preview truncation applied before the observer.
+        .with_trajectory_observer(observer.clone())
+        .with_model_gateway_override(gateway_for_runtime);
+
+        let runtime = build_reborn_runtime(input).await.expect("runtime builds");
+        let conversation = runtime.new_conversation().await.expect("conversation");
+        let reply = tokio::time::timeout(
+            RUNTIME_SEND_TIMEOUT,
+            runtime.send_user_message(&conversation, "echo a big payload"),
+        )
+        .await
+        .expect("runtime send should finish")
+        .expect("runtime send should succeed");
+        assert_eq!(reply.status, TurnStatus::Completed);
+        // Shut down before inspecting the recorded callbacks so the std-Mutex
+        // guards are never held across an `.await` (clippy::await_holding_lock).
+        runtime.shutdown().await.expect("runtime shutdown");
+
+        let original_len = LARGE_ECHO_MESSAGE.repeat(100).len();
+
+        let inputs = observer.inputs.lock().expect("inputs lock");
+        assert_eq!(inputs.len(), 1, "exactly one capability input observed");
+        let observed_message = inputs[0].2["message"].as_str().expect("message string");
+        assert!(
+            observed_message.len() < original_len && observed_message.contains("[truncated"),
+            "observer should receive a truncated preview of the large argument, got {} bytes",
+            observed_message.len()
+        );
+
+        let results = observer.results.lock().expect("results lock");
+        assert_eq!(results.len(), 1, "exactly one capability result observed");
+        assert!(
+            results[0].2.to_string().contains("[truncated"),
+            "observer should receive a truncated preview of the large result"
+        );
     }
 
     #[tokio::test]
@@ -5938,6 +7791,7 @@ mod tests {
                 WebUiCreateThreadRequest {
                     client_action_id: Some("create-webui-stream-thread".to_string()),
                     requested_thread_id: None,
+                    project_id: None,
                 },
             )
             .await
@@ -6284,12 +8138,14 @@ mod tests {
         // Seed a legacy pre-#4381 WebUI identity into the SAME substrate DB the
         // runtime owns, exactly as the old store wrote it.
         let substrate = Arc::clone(
-            &runtime
+            runtime
                 .services
                 .local_runtime
                 .as_ref()
                 .expect("local runtime substrate")
-                .identity_substrate_db,
+                .identity_substrate_db
+                .as_ref()
+                .expect("libSQL identity substrate"),
         );
         let seed = substrate.connect().expect("substrate connection");
         seed.execute_batch(
@@ -6382,12 +8238,14 @@ mod tests {
 
         // Seed a legacy pre-#4381 WebUI Google identity with a VERIFIED email.
         let substrate = Arc::clone(
-            &runtime
+            runtime
                 .services
                 .local_runtime
                 .as_ref()
                 .expect("local runtime substrate")
-                .identity_substrate_db,
+                .identity_substrate_db
+                .as_ref()
+                .expect("libSQL identity substrate"),
         );
         let seed = substrate.connect().expect("substrate connection");
         seed.execute_batch(
@@ -6622,6 +8480,7 @@ mod tests {
                 WebUiCreateThreadRequest {
                     client_action_id: Some("create-webui-approval-thread".to_string()),
                     requested_thread_id: None,
+                    project_id: None,
                 },
             )
             .await
@@ -6689,6 +8548,7 @@ mod tests {
                 WebUiCreateThreadRequest {
                     client_action_id: Some("create-webui-auth-thread".to_string()),
                     requested_thread_id: None,
+                    project_id: None,
                 },
             )
             .await
@@ -6755,6 +8615,7 @@ mod tests {
                 WebUiCreateThreadRequest {
                     client_action_id: Some("create-webui-audit-thread".to_string()),
                     requested_thread_id: None,
+                    project_id: None,
                 },
             )
             .await
@@ -6776,6 +8637,7 @@ mod tests {
                 parent_run_id: None,
                 subagent_depth: 0,
                 spawn_tree_root_run_id: None,
+                product_context: None,
             })
             .await
             .expect("submit turn");
@@ -6979,6 +8841,7 @@ mod tests {
                 WebUiCreateThreadRequest {
                     client_action_id: Some("create-webui-skill-thread".to_string()),
                     requested_thread_id: None,
+                    project_id: None,
                 },
             )
             .await
@@ -7263,12 +9126,246 @@ mod tests {
         runtime.shutdown().await.expect("runtime shutdown");
     }
 
+    /// Regression guard: a message that arrives while the thread is busy is stored with
+    /// `RejectedBusy` status and must NOT be auto-resubmitted when the blocking run
+    /// reaches a terminal state.
+    ///
+    /// Scenario:
+    ///  A – submitted via `turn_coordinator.submit_turn`; worker is stopped so it stays
+    ///      Queued and holds the active-lock.
+    ///  B – submitted via `bundle.api.submit_turn` (WebUI path); thread is busy → stored
+    ///      as `RejectedBusy`; response carries a non-empty `notice`.
+    ///  Cancel A → B stays `RejectedBusy` (no auto-resubmission).
+    ///  C – submitted after A is cancelled; thread is free → `Submitted`.
+    ///
+    /// arch-note: lives in runtime.rs (adds ~200 lines to an already >3000-line file) because
+    /// it requires `build_reborn_runtime` + full turn-runner control that only the runtime test
+    /// harness provides; moving it would require duplicating that harness. Decomposition of
+    /// runtime.rs is tracked in plan #4471.
+    #[tokio::test]
+    async fn rejected_busy_message_not_auto_resubmitted_after_run_cancellation() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let gateway = Arc::new(RecordingGateway {
+            reply: "busy-drain ok".to_string(),
+            requests: Arc::new(StdMutex::new(Vec::new())),
+        });
+        let input = RebornRuntimeInput::from_services(
+            RebornBuildInput::local_dev(
+                "runtime-rejected-busy-owner",
+                root.path().join("local-dev"),
+            )
+            .with_runtime_policy(local_dev_runtime_policy()),
+        )
+        .with_identity(RebornRuntimeIdentity {
+            tenant_id: "runtime-rejected-busy-tenant".to_string(),
+            agent_id: "runtime-rejected-busy-agent".to_string(),
+            source_binding_id: "runtime-rejected-busy-source".to_string(),
+            reply_target_binding_id: "runtime-rejected-busy-reply".to_string(),
+        })
+        .with_model_gateway_override(gateway);
+
+        let runtime = build_reborn_runtime(input).await.expect("runtime builds");
+        // Stop the worker so run A stays Queued and holds the thread active-lock.
+        stop_turn_runner_worker_for_manual_state_test(&runtime).await;
+
+        let bundle = build_webui_services(&runtime, None).expect("webui bundle");
+        let caller = WebUiAuthenticatedCaller::new(
+            TenantId::new("runtime-rejected-busy-tenant").unwrap(),
+            UserId::new("runtime-rejected-busy-owner").unwrap(),
+            Some(AgentId::new("runtime-rejected-busy-agent").unwrap()),
+            None,
+        );
+
+        // Create the thread via WebUI so the thread record exists.
+        let created = bundle
+            .api
+            .create_thread(
+                caller.clone(),
+                WebUiCreateThreadRequest {
+                    client_action_id: Some("create-rejected-busy-thread".to_string()),
+                    requested_thread_id: None,
+                    project_id: None,
+                },
+            )
+            .await
+            .expect("create thread");
+        let thread_id = created.thread.thread_id.clone();
+
+        // Submit message A directly so we hold the active-lock (worker is stopped,
+        // so the run stays Queued indefinitely).
+        let scope = caller.turn_scope(thread_id.clone());
+        let actor = caller.actor();
+        let submitted_a = runtime
+            .turn_coordinator
+            .submit_turn(SubmitTurnRequest {
+                scope: scope.clone(),
+                actor: actor.clone(),
+                accepted_message_ref: AcceptedMessageRef::new("msg:rejected-busy-a").unwrap(),
+                source_binding_ref: SourceBindingRef::new("source:rejected-busy-a").unwrap(),
+                reply_target_binding_ref: ReplyTargetBindingRef::new("reply:rejected-busy-a")
+                    .unwrap(),
+                requested_run_profile: None,
+                idempotency_key: IdempotencyKey::new("rejected-busy-a").unwrap(),
+                received_at: Utc::now(),
+                requested_run_id: None,
+                parent_run_id: None,
+                subagent_depth: 0,
+                spawn_tree_root_run_id: None,
+                product_context: None,
+            })
+            .await
+            .expect("message A submitted");
+        let SubmitTurnResponse::Accepted {
+            run_id: run_id_a, ..
+        } = submitted_a;
+
+        // Submit message B through the WebUI path — thread is busy, must get RejectedBusy.
+        let response_b = bundle
+            .api
+            .submit_turn(
+                caller.clone(),
+                WebUiSendMessageRequest {
+                    client_action_id: Some("send-rejected-busy-b".to_string()),
+                    thread_id: Some(thread_id.to_string()),
+                    content: Some("message B while thread is busy".to_string()),
+                    attachments: Vec::new(),
+                },
+            )
+            .await
+            .expect("message B submit should not error");
+
+        let RebornSubmitTurnResponse::RejectedBusy {
+            notice: notice_b,
+            active_run_id: busy_run_id,
+            ..
+        } = response_b
+        else {
+            panic!("expected RejectedBusy for message B, got {response_b:?}");
+        };
+        assert_eq!(
+            busy_run_id,
+            Some(run_id_a),
+            "RejectedBusy should report run A as the active run"
+        );
+        assert!(
+            !notice_b.is_empty(),
+            "RejectedBusy response must carry a non-empty notice"
+        );
+
+        // Verify message B is stored with RejectedBusy status.
+        let history = runtime
+            .thread_service
+            .list_thread_history(ThreadHistoryRequest {
+                scope: runtime.thread_scope.clone(),
+                thread_id: thread_id.clone(),
+            })
+            .await
+            .expect("thread history after B");
+        let rejected_messages: Vec<_> = history
+            .messages
+            .iter()
+            .filter(|m| matches!(m.status, MessageStatus::RejectedBusy))
+            .collect();
+        assert_eq!(
+            rejected_messages.len(),
+            1,
+            "exactly one message should be stored as RejectedBusy after thread-busy submit"
+        );
+        assert_eq!(
+            rejected_messages[0].kind,
+            MessageKind::User,
+            "the RejectedBusy message must be of kind User"
+        );
+
+        // Cancel run A — this is the terminal event that (must NOT) auto-resubmit B.
+        runtime
+            .cancel_run(
+                &scope,
+                run_id_a,
+                SanitizedCancelReason::UserRequested,
+                "rejected-busy-cancel-a",
+            )
+            .await
+            .expect("run A cancellation succeeds");
+
+        // B must remain RejectedBusy — no auto-resubmission should have fired.
+        let history_after_cancel = runtime
+            .thread_service
+            .list_thread_history(ThreadHistoryRequest {
+                scope: runtime.thread_scope.clone(),
+                thread_id: thread_id.clone(),
+            })
+            .await
+            .expect("thread history after cancel");
+        // Identify message B by the message_id we captured from the pre-cancel history.
+        // Using the stable message_id (rather than a simple RejectedBusy count) ensures
+        // a regression that leaves the RejectedBusy row AND adds a Submitted row for the
+        // same message cannot slip past as "still one RejectedBusy".
+        let msg_b_id = rejected_messages[0].message_id;
+
+        let msg_b_after_cancel: Vec<_> = history_after_cancel
+            .messages
+            .iter()
+            .filter(|m| m.message_id == msg_b_id)
+            .collect();
+        assert_eq!(
+            msg_b_after_cancel.len(),
+            1,
+            "message B must appear exactly once in history after run A is cancelled"
+        );
+        assert_eq!(
+            msg_b_after_cancel[0].status,
+            MessageStatus::RejectedBusy,
+            "message B must still be RejectedBusy after run A is cancelled — no auto-resubmission"
+        );
+        // Guard: no additional Submitted row must have been created for message B's message_id.
+        let submitted_for_b: Vec<_> = history_after_cancel
+            .messages
+            .iter()
+            .filter(|m| matches!(m.status, MessageStatus::Submitted) && m.message_id == msg_b_id)
+            .collect();
+        assert!(
+            submitted_for_b.is_empty(),
+            "no Submitted row must exist for message B after run A is cancelled — got {submitted_for_b:?}"
+        );
+
+        // Submit message C — thread is free again, must be Submitted.
+        let response_c = bundle
+            .api
+            .submit_turn(
+                caller.clone(),
+                WebUiSendMessageRequest {
+                    client_action_id: Some("send-rejected-busy-c".to_string()),
+                    thread_id: Some(thread_id.to_string()),
+                    content: Some("message C after thread is free".to_string()),
+                    attachments: Vec::new(),
+                },
+            )
+            .await
+            .expect("message C submit should not error");
+
+        assert!(
+            matches!(response_c, RebornSubmitTurnResponse::Submitted { .. }),
+            "message C must be accepted after run A is cancelled, got {response_c:?}"
+        );
+
+        runtime.shutdown().await.expect("runtime shutdown");
+    }
+
     struct MultiToolConfiguredCredentials;
 
     #[async_trait]
     impl crate::product_auth_runtime_credentials::RuntimeCredentialAccountSelectionService
         for MultiToolConfiguredCredentials
     {
+        async fn select_configured_account_for_binding(
+            &self,
+            _lookup: ironclaw_auth::CredentialAccountSelectionRequest,
+            _runtime_scope: ironclaw_auth::AuthProductScope,
+        ) -> Result<ironclaw_auth::CredentialAccount, ironclaw_auth::AuthProductError> {
+            Err(ironclaw_auth::AuthProductError::CredentialMissing)
+        }
+
         async fn select_unique_configured_runtime_account(
             &self,
             _request: crate::product_auth_runtime_credentials::RuntimeCredentialAccountSelectionRequest,
@@ -7300,5 +9397,243 @@ mod tests {
                 updated_at: now,
             })
         }
+    }
+
+    // ── Regression: scheduler liveness must not treat mutex contention as stopped ──
+
+    /// Verify three invariants of the scheduler liveness check introduced to fix the
+    /// `try_lock()` contention bug:
+    ///
+    /// 1. Before shutdown: liveness check says NOT stopped (atomic flag = false).
+    /// 2. While mutex is momentarily held by another task: atomic flag is still false,
+    ///    so the guard correctly treats that as "alive".
+    /// 3. After graceful `shutdown()`: liveness check says stopped (atomic flag = true).
+    ///
+    /// The `stopped` atomic flag is the authoritative signal; `try_lock`
+    /// failure now means "alive" rather than "stopped".
+    #[tokio::test]
+    async fn scheduler_liveness_not_stopped_under_contention() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let gateway = Arc::new(RecordingGateway {
+            reply: "liveness-test-reply".to_string(),
+            requests: Arc::new(StdMutex::new(Vec::new())),
+        });
+
+        let input = RebornRuntimeInput::from_services(
+            RebornBuildInput::local_dev("scheduler-liveness-owner", root.path().join("local-dev"))
+                .with_runtime_policy(local_dev_runtime_policy()),
+        )
+        .with_identity(RebornRuntimeIdentity {
+            tenant_id: "scheduler-liveness-tenant".to_string(),
+            agent_id: "scheduler-liveness-agent".to_string(),
+            source_binding_id: "scheduler-liveness-source".to_string(),
+            reply_target_binding_id: "scheduler-liveness-reply".to_string(),
+        })
+        .with_poll_settings(PollSettings {
+            interval: Duration::from_millis(10),
+            max_total: RUNTIME_SEND_TIMEOUT,
+        })
+        .with_model_gateway_override(gateway);
+
+        let runtime = build_reborn_runtime(input)
+            .await
+            .expect("runtime builds for liveness test");
+
+        let conversation = runtime.new_conversation().await.expect("conversation");
+
+        // Invariant 1: Before shutdown, the atomic stopped flag must be false.
+        assert!(
+            !runtime.turn_scheduler.atomic_stopped(),
+            "scheduler_stopped must be false on a freshly built runtime"
+        );
+
+        // Invariant 2: While the scheduler handle mutex is held (simulating
+        // shutdown/scheduler contention), the public submit path must NOT
+        // return `WorkerStopped` — and must complete within a bounded timeout.
+        //
+        // `is_stopped()` uses `try_lock()` (non-blocking) on the handle mutex,
+        // not `lock().await`, so holding the lock here cannot deadlock. Tokio's
+        // Mutex is non-re-entrant: `try_lock()` inside `is_stopped()` will
+        // fail (returning `Err`) because the current task already holds the guard.
+        // The guard falls through to "alive" because the `stopped` flag is false.
+        //
+        // `notify()` sends through the notifier (not the handle mutex), so the
+        // worker processes the turn while the test holds the handle. The
+        // RecordingGateway resolves the model call synchronously, so the turn
+        // reaches Completed. We assert the full Ok result to catch both the
+        // liveness regression (WorkerStopped) and any other scheduler breakage.
+        //
+        // The surrounding `tokio::time::timeout` is the deadlock-regression
+        // guard: if `is_stopped()` ever regresses from `try_lock()` to
+        // `lock().await`, this test will panic with a clear message instead of
+        // hanging CI indefinitely.
+        {
+            // Hold the tokio Mutex for the duration of the submit call.
+            let _guard = runtime.turn_scheduler.handle_mutex().lock().await;
+
+            let result = tokio::time::timeout(
+                RUNTIME_SEND_TIMEOUT,
+                runtime.send_user_message(&conversation, "liveness-probe"),
+            )
+            .await
+            .expect(
+                "send_user_message timed out while handle mutex was held — \
+                 liveness guard likely regressed from try_lock() to lock().await, \
+                 causing a deadlock",
+            );
+
+            assert!(
+                result.is_ok(),
+                "send_user_message must succeed (RecordingGateway completes the turn) \
+                 while scheduler handle is merely contended (stopped=false); \
+                 got: {result:?}"
+            );
+        } // guard released here — handle mutex is free again
+
+        // Invariant 3: After the worker is stopped (flag = true), the public
+        // submit path MUST return `WorkerStopped`.
+        //
+        // We use `stop_turn_runner_worker_for_manual_state_test` instead of
+        // `shutdown()` because `shutdown()` consumes `self`, which would prevent
+        // us from calling `send_user_message` afterward to exercise the guard.
+        stop_turn_runner_worker_for_manual_state_test(&runtime).await;
+
+        assert!(
+            runtime.turn_scheduler.atomic_stopped(),
+            "scheduler_stopped must be true after stop helper"
+        );
+
+        let result_after_stop = runtime
+            .send_user_message(&conversation, "post-stop-probe")
+            .await;
+        assert!(
+            matches!(
+                result_after_stop,
+                Err(super::RebornRuntimeError::WorkerStopped)
+            ),
+            "send_user_message must return WorkerStopped after scheduler is stopped; \
+             got: {result_after_stop:?}"
+        );
+
+        // shutdown() handles the already-taken scheduler handle gracefully.
+        runtime.shutdown().await.expect("runtime shutdown");
+    }
+
+    /// Companion test: `stop_turn_runner_worker_for_manual_state_test` (the test-only
+    /// helper used by many existing tests) must also set `scheduler_stopped = true`
+    /// so the liveness guard correctly reports stopped after it is called.
+    #[tokio::test]
+    async fn scheduler_liveness_stopped_after_test_helper_stops_worker() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let gateway = Arc::new(RecordingGateway {
+            reply: "liveness-helper-test-reply".to_string(),
+            requests: Arc::new(StdMutex::new(Vec::new())),
+        });
+
+        let input = RebornRuntimeInput::from_services(
+            RebornBuildInput::local_dev(
+                "scheduler-liveness-helper-owner",
+                root.path().join("local-dev"),
+            )
+            .with_runtime_policy(local_dev_runtime_policy()),
+        )
+        .with_identity(RebornRuntimeIdentity {
+            tenant_id: "scheduler-liveness-helper-tenant".to_string(),
+            agent_id: "scheduler-liveness-helper-agent".to_string(),
+            source_binding_id: "scheduler-liveness-helper-source".to_string(),
+            reply_target_binding_id: "scheduler-liveness-helper-reply".to_string(),
+        })
+        .with_model_gateway_override(gateway);
+
+        let runtime = build_reborn_runtime(input)
+            .await
+            .expect("runtime builds for helper-stopped test");
+
+        // Before stopping: not stopped.
+        assert!(
+            !runtime.turn_scheduler.atomic_stopped(),
+            "scheduler_stopped must be false before stop helper runs"
+        );
+
+        stop_turn_runner_worker_for_manual_state_test(&runtime).await;
+
+        // After the test helper stops the worker: flag must be true.
+        assert!(
+            runtime.turn_scheduler.atomic_stopped(),
+            "scheduler_stopped must be true after stop_turn_runner_worker_for_manual_state_test"
+        );
+
+        // shutdown() handles the already-taken scheduler handle gracefully
+        // via the `if let Some` guard — safe to call after the test helper.
+        runtime.shutdown().await.expect("runtime shutdown");
+    }
+
+    /// After `stop_turn_runner_worker_for_manual_state_test` sets
+    /// `scheduler_stopped = true`, `send_user_message` must immediately return
+    /// `Err(RebornRuntimeError::WorkerStopped)` without submitting the turn.
+    #[tokio::test]
+    async fn scheduler_stopped_rejects_send_user_message() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let gateway = Arc::new(RecordingGateway {
+            reply: "stopped-reject-reply".to_string(),
+            requests: Arc::new(StdMutex::new(Vec::new())),
+        });
+
+        let input = RebornRuntimeInput::from_services(
+            RebornBuildInput::local_dev(
+                "scheduler-stopped-reject-owner",
+                root.path().join("local-dev"),
+            )
+            .with_runtime_policy(local_dev_runtime_policy()),
+        )
+        .with_identity(RebornRuntimeIdentity {
+            tenant_id: "scheduler-stopped-reject-tenant".to_string(),
+            agent_id: "scheduler-stopped-reject-agent".to_string(),
+            source_binding_id: "scheduler-stopped-reject-source".to_string(),
+            reply_target_binding_id: "scheduler-stopped-reject-reply".to_string(),
+        })
+        .with_model_gateway_override(gateway);
+
+        let runtime = build_reborn_runtime(input)
+            .await
+            .expect("runtime builds for stopped-reject test");
+
+        let conversation = runtime.new_conversation().await.expect("conversation");
+
+        // Capture thread history before the stopped-send to verify no side effects.
+        let thread_service = runtime.session_thread_service();
+        let thread_scope = runtime.thread_scope.clone();
+        let history_before = thread_service
+            .list_thread_history(ThreadHistoryRequest {
+                scope: thread_scope.clone(),
+                thread_id: conversation.0.clone(),
+            })
+            .await
+            .expect("list history before stopped send");
+
+        stop_turn_runner_worker_for_manual_state_test(&runtime).await;
+
+        let result = runtime.send_user_message(&conversation, "hi").await;
+        assert!(
+            matches!(result, Err(RebornRuntimeError::WorkerStopped)),
+            "send_user_message must return WorkerStopped when scheduler is stopped, got: {result:?}"
+        );
+
+        // Assert no side effects: history must not grow after the rejected send.
+        let history_after = thread_service
+            .list_thread_history(ThreadHistoryRequest {
+                scope: thread_scope,
+                thread_id: conversation.0.clone(),
+            })
+            .await
+            .expect("list history after stopped send");
+        assert_eq!(
+            history_before.messages.len(),
+            history_after.messages.len(),
+            "send_user_message must not write any messages when WorkerStopped is returned"
+        );
+
+        // shutdown() handles the already-taken scheduler handle gracefully.
+        runtime.shutdown().await.expect("runtime shutdown");
     }
 }

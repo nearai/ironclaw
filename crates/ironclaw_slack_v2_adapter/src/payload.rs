@@ -352,18 +352,10 @@ fn parse_interaction_resolution(
         return Ok(None);
     };
     match first.to_ascii_lowercase().as_str() {
-        "approve" => parse_approval_resolution(
-            parts.next(),
-            parts.next(),
-            ApprovalDecision::ApproveOnce,
-            source_trigger,
-        ),
-        "deny" => parse_approval_resolution(
-            parts.next(),
-            parts.next(),
-            ApprovalDecision::Deny,
-            source_trigger,
-        ),
+        "approve" => {
+            parse_approval_resolution(parts.next(), ApprovalDecision::ApproveOnce, source_trigger)
+        }
+        "deny" => parse_approval_resolution(parts.next(), ApprovalDecision::Deny, source_trigger),
         "auth" => {
             let Some(action) = parts.next() else {
                 return malformed_interaction_noop("auth");
@@ -411,20 +403,27 @@ fn strip_leading_slack_mentions(text: &str) -> &str {
 
 fn parse_approval_resolution(
     gate_ref: Option<&str>,
-    extra_token: Option<&str>,
     decision: ApprovalDecision,
     source_trigger: ProductTriggerReason,
 ) -> Result<Option<ProductInboundPayload>, SlackPayloadParseError> {
-    if extra_token.is_some() {
-        return malformed_interaction_noop("approval");
-    }
-
     match gate_ref {
-        Some(gate_ref) => ApprovalResolutionPayload::new(gate_ref, decision)
-            .map(|payload| payload.with_source_trigger(source_trigger))
-            .map(ProductInboundPayload::ApprovalResolution)
-            .map(Some)
-            .map_err(adapter_error_to_payload_error),
+        Some(gate_ref) => {
+            // A well-formed `gate:<ref>` wins even when the user pasted the whole
+            // instruction line (e.g. "approve gate:X or deny gate:X") — the
+            // leading verb + first gate ref are the intent; trailing tokens are
+            // ignored. Any token that is not a `gate:<ref>` is not a targeted
+            // resolution (a genuine typo like "approve this"), so fall through to
+            // a no-op regardless of whether trailing text follows — keeping
+            // single- and multi-word non-gate replies consistent.
+            if !gate_ref.starts_with("gate:") {
+                return malformed_interaction_noop("approval");
+            }
+            ApprovalResolutionPayload::new(gate_ref, decision)
+                .map(|payload| payload.with_source_trigger(source_trigger))
+                .map(ProductInboundPayload::ApprovalResolution)
+                .map(Some)
+                .map_err(adapter_error_to_payload_error)
+        }
         None => ScopedApprovalResolutionPayload::new(decision)
             .map(|payload| payload.with_source_trigger(source_trigger))
             .map(ProductInboundPayload::ScopedApprovalResolution)

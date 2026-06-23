@@ -584,6 +584,13 @@ where
         if let Some(policies) = &self.persistent_approval_policies {
             runtime = runtime.with_persistent_approval_policies(Arc::clone(policies));
         }
+        // Wire the credential pre-flight store from the same secret_store used by
+        // the obligation handler (below). This ensures that contract tests driving
+        // host_runtime_for_local_testing() with .with_secret_store(...) genuinely
+        // exercise the pre-flight path, not just the dispatch-time obligation check.
+        if let Some(secret_store) = &self.secret_store {
+            runtime = runtime.with_credential_preflight_store(Arc::clone(secret_store));
+        }
         runtime.with_obligation_handler(Arc::new(self.builtin_obligation_handler()))
     }
 

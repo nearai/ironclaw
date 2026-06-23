@@ -20,7 +20,7 @@ use reborn_support::harness::{
     test_product_scope,
 };
 use reborn_support::model_replay::RebornTraceReplayModelGateway;
-use tokio::sync::RwLock;
+use tokio::sync::{RwLock, watch};
 
 const PROJECT_ALPHA_IDENTITY: &str = "Alice project alpha identity: carries amber notebook.";
 const PROJECT_BETA_IDENTITY: &str = "Alice project beta identity: carries violet notebook.";
@@ -44,7 +44,7 @@ async fn reborn_identity_project_scope_isolation_parity() {
         Some("project-beta-e2e"),
     );
 
-    let mut alpha = RebornBinaryE2EHarness::with_model_gateway_scope_identity_source_trigger_installation_shared_storage_unscoped_worker(
+    let mut alpha = RebornBinaryE2EHarness::with_model_gateway_scope_identity_source_trigger_installation_shared_storage(
         ROOM,
         RebornTraceReplayModelGateway::with_responses([HostManagedModelResponse::assistant_reply(
             "project alpha identity reply",
@@ -60,7 +60,7 @@ async fn reborn_identity_project_scope_isolation_parity() {
     )
     .await
     .expect("project alpha harness");
-    let mut beta = RebornBinaryE2EHarness::with_model_gateway_scope_identity_source_trigger_installation_shared_storage_unscoped_worker(
+    let mut beta = RebornBinaryE2EHarness::with_model_gateway_scope_identity_source_trigger_installation_shared_storage(
         ROOM,
         RebornTraceReplayModelGateway::with_responses([HostManagedModelResponse::assistant_reply(
             "project beta identity reply",
@@ -188,10 +188,21 @@ impl ProjectIdentityKey {
     }
 }
 
-#[derive(Default)]
 struct ProjectIdentitySource {
     identities: RwLock<HashMap<ProjectIdentityKey, HostIdentityContextCandidate>>,
     seen: RwLock<Vec<ProjectIdentityKey>>,
+    identity_changed: watch::Sender<()>,
+}
+
+impl Default for ProjectIdentitySource {
+    fn default() -> Self {
+        let (identity_changed, _) = watch::channel(());
+        Self {
+            identities: RwLock::new(HashMap::new()),
+            seen: RwLock::new(Vec::new()),
+            identity_changed,
+        }
+    }
 }
 
 impl ProjectIdentitySource {
@@ -203,6 +214,7 @@ impl ProjectIdentitySource {
             IdentityApplicability::Always,
         );
         self.identities.write().await.insert(key.clone(), candidate);
+        let _ = self.identity_changed.send(());
     }
 
     async fn seen_keys(&self) -> Vec<ProjectIdentityKey> {
@@ -235,13 +247,16 @@ impl HostIdentityContextSource for ProjectIdentitySource {
                 seen.push(key.clone());
             }
         }
-        self.identities
-            .read()
-            .await
-            .get(&key)
-            .cloned()
-            .map(|candidate| vec![candidate])
-            .ok_or(HostIdentityContextBuildError::SourceUnavailable)
+        let mut changed = self.identity_changed.subscribe();
+        loop {
+            if let Some(candidate) = self.identities.read().await.get(&key).cloned() {
+                return Ok(vec![candidate]);
+            }
+            changed
+                .changed()
+                .await
+                .map_err(|_| HostIdentityContextBuildError::SourceUnavailable)?;
+        }
     }
 
     async fn resolve_identity_message_content(

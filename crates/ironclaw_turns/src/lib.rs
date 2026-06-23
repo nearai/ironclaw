@@ -15,6 +15,7 @@ mod ids;
 mod lifecycle;
 pub mod loop_exit;
 mod memory;
+mod origin;
 mod request;
 mod response;
 pub mod run_profile;
@@ -68,23 +69,27 @@ pub use loop_exit::{
     LoopExitViolationKind, LoopFailed, LoopFailureKind,
 };
 pub use memory::{InMemoryTurnStateStore, InMemoryTurnStateStoreLimits};
+pub use origin::{
+    ProductTurnContext, RunOriginAdapter, TurnOriginKind, TurnOwner, TurnSurfaceType,
+};
 pub use request::{
-    CancelRunRequest, GetRunStateRequest, ResumeTurnPrecondition, ResumeTurnRequest,
-    SubmitChildRunRequest, SubmitTurnRequest, TurnTimestamp,
+    CancelRunRequest, GateResumeDisposition, GetRunStateRequest, ResumeTurnPrecondition,
+    ResumeTurnRequest, SubmitChildRunRequest, SubmitTurnRequest, TurnTimestamp,
 };
 pub use response::{CancelRunResponse, ResumeTurnResponse, SubmitTurnResponse, ThreadBusy};
 pub use run_profile::{
     AgentLoopDriver, AgentLoopDriverDescriptor, AgentLoopDriverError, AgentLoopDriverResumeRequest,
     AgentLoopDriverRunRequest, CancellationPolicy, CapabilitySurfaceProfileId, CheckpointPolicy,
-    CheckpointSchemaId, ConcurrencyClass, ContextProfileId, EmptyMemoryPromptContextService,
-    InMemoryRunProfileRegistry, InMemoryRunProfileResolver, LoopCheckpointKind,
-    LoopCheckpointStateRef, LoopDriverId, MemoryPromptContextRequest, MemoryPromptContextService,
-    ModelProfileId, PrivilegedRunProfileDimension, RedactedRunProfileProvenance,
-    RedactedRunProfileSource, ResolvedRunProfile, ResourceBudgetPolicy, ResourceBudgetTier,
-    RunClassId, RunProfileFingerprint, RunProfileRegistryError, RunProfileRequestAuthority,
-    RunProfileResolutionError, RunProfileResolutionRequest, RunProfileResolver,
-    RunProfileSourceLayer, RunProfileSourceRef, RunnerPoolId, RuntimeProfileConstraints,
-    SchedulingClass, SteeringPolicy,
+    CheckpointSchemaId, CommunicationRuntimeContext, ConcurrencyClass, ConnectedChannelSummary,
+    ConnectedChannelsState, ContextProfileId, DeliveryTargetState, DeliveryTargetSummary,
+    EmptyMemoryPromptContextService, InMemoryRunProfileRegistry, InMemoryRunProfileResolver,
+    LoopCheckpointKind, LoopCheckpointStateRef, LoopDriverId, MemoryPromptContextRequest,
+    MemoryPromptContextService, ModelProfileId, PrivilegedRunProfileDimension,
+    RedactedRunProfileProvenance, RedactedRunProfileSource, ResolvedRunProfile,
+    ResourceBudgetPolicy, ResourceBudgetTier, RunClassId, RunProfileFingerprint,
+    RunProfileRegistryError, RunProfileRequestAuthority, RunProfileResolutionError,
+    RunProfileResolutionRequest, RunProfileResolver, RunProfileSourceLayer, RunProfileSourceRef,
+    RunnerPoolId, RuntimeProfileConstraints, SchedulingClass, SteeringPolicy,
 };
 pub use scope::{TurnActor, TurnScope};
 pub use status::{

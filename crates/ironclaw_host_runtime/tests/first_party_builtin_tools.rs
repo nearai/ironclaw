@@ -29,15 +29,18 @@ use ironclaw_host_runtime::{
     GREP_CAPABILITY_ID, HTTP_CAPABILITY_ID, HTTP_SAVE_CAPABILITY_ID, HostRuntime,
     HostRuntimeServices, JSON_CAPABILITY_ID, LIST_DIR_CAPABILITY_ID, MEMORY_READ_CAPABILITY_ID,
     MEMORY_SEARCH_CAPABILITY_ID, MEMORY_TREE_CAPABILITY_ID, MEMORY_WRITE_CAPABILITY_ID,
-    READ_FILE_CAPABILITY_ID, RuntimeCapabilityFailure, RuntimeCapabilityOutcome,
-    RuntimeCapabilityRequest, RuntimeFailureKind, RuntimeProcessError, RuntimeProcessPort,
-    SHELL_CAPABILITY_ID, SKILL_INSTALL_CAPABILITY_ID, SKILL_LIST_CAPABILITY_ID,
+    PROFILE_SET_CAPABILITY_ID, READ_FILE_CAPABILITY_ID, RuntimeCapabilityFailure,
+    RuntimeCapabilityOutcome, RuntimeCapabilityRequest, RuntimeFailureKind, RuntimeProcessError,
+    RuntimeProcessPort, SHELL_CAPABILITY_ID, SKILL_INSTALL_CAPABILITY_ID, SKILL_LIST_CAPABILITY_ID,
     SKILL_REMOVE_CAPABILITY_ID, SPAWN_SUBAGENT_CAPABILITY_ID, SandboxCommandTransport, SurfaceKind,
-    TIME_CAPABILITY_ID, TRIGGER_CREATE_CAPABILITY_ID, TRIGGER_LIST_CAPABILITY_ID,
+    TIME_CAPABILITY_ID, TRACE_COMMONS_CREDITS_CAPABILITY_ID, TRACE_COMMONS_ONBOARD_CAPABILITY_ID,
+    TRACE_COMMONS_PROFILE_SET_CAPABILITY_ID, TRACE_COMMONS_PROFILE_TOKEN_CAPABILITY_ID,
+    TRACE_COMMONS_STATUS_CAPABILITY_ID, TRIGGER_CREATE_CAPABILITY_ID, TRIGGER_LIST_CAPABILITY_ID,
     TRIGGER_REMOVE_CAPABILITY_ID, TenantSandboxProcessPort, ToolCallHttpEgress, TriggerCreateHook,
     VisibleCapabilityAccess, VisibleCapabilityRequest, WRITE_FILE_CAPABILITY_ID,
-    builtin_first_party_handlers, builtin_first_party_handlers_with_trigger_create_hook,
-    builtin_first_party_package,
+    builtin_first_party_handlers, builtin_first_party_handlers_for_process_backend,
+    builtin_first_party_handlers_with_trigger_create_hook, builtin_first_party_package,
+    builtin_first_party_package_for_process_backend,
 };
 #[cfg(feature = "test-support")]
 use ironclaw_host_runtime::{
@@ -52,7 +55,7 @@ use ironclaw_secrets::InMemorySecretStore;
 use ironclaw_triggers::{
     ClaimDueFireRequest, ClearActiveFireRequest, FireAcceptedRequest, InMemoryTriggerRepository,
     MAX_TRIGGER_NAME_BYTES, MAX_TRIGGER_PROMPT_BYTES, TriggerError, TriggerRecord,
-    TriggerRepository, TriggerRunHistoryStatus, TriggerRunRecord,
+    TriggerRepository, TriggerRunHistoryStatus, TriggerRunRecord, TriggerSchedule, TriggerState,
 };
 use ironclaw_trust::{
     AdminConfig, AdminEntry, AuthorityCeiling, EffectiveTrustClass, HostTrustAssignment,
@@ -82,7 +85,10 @@ async fn builtin_first_party_package_declares_expected_capabilities() {
             | SKILL_INSTALL_CAPABILITY_ID
             | SKILL_REMOVE_CAPABILITY_ID
             | TRIGGER_CREATE_CAPABILITY_ID
-            | TRIGGER_REMOVE_CAPABILITY_ID => PermissionMode::Ask,
+            | TRIGGER_REMOVE_CAPABILITY_ID
+            | TRACE_COMMONS_ONBOARD_CAPABILITY_ID
+            | TRACE_COMMONS_PROFILE_SET_CAPABILITY_ID
+            | TRACE_COMMONS_PROFILE_TOKEN_CAPABILITY_ID => PermissionMode::Ask,
             _ => PermissionMode::Allow,
         };
         assert_eq!(descriptor.default_permission, expected_permission);
@@ -118,6 +124,11 @@ async fn builtin_first_party_package_declares_expected_capabilities() {
         http.effects,
         vec![EffectKind::DispatchCapability, EffectKind::Network]
     );
+    assert!(
+        http.description
+            .contains("Prefer GitHub extension capabilities"),
+        "builtin.http should steer GitHub repository API tasks toward the GitHub extension"
+    );
     let http_save = package
         .capabilities
         .iter()
@@ -130,6 +141,12 @@ async fn builtin_first_party_package_declares_expected_capabilities() {
             EffectKind::Network,
             EffectKind::WriteFilesystem
         ]
+    );
+    assert!(
+        http_save
+            .description
+            .contains("Prefer GitHub extension capabilities"),
+        "builtin.http.save should steer GitHub repository API tasks toward the GitHub extension"
     );
 
     let memory_write = package
@@ -159,6 +176,55 @@ async fn builtin_first_party_package_declares_expected_capabilities() {
     for id in all_builtin_capability_ids() {
         assert!(handlers.contains_handler(&capability_id(id)));
     }
+}
+
+#[tokio::test]
+async fn builtin_first_party_processless_package_and_handlers_omit_process_port_backed_shell() {
+    let package =
+        builtin_first_party_package_for_process_backend(ProcessBackendKind::None).unwrap();
+    let ids = package
+        .capabilities
+        .iter()
+        .map(|descriptor| descriptor.id.as_str())
+        .collect::<Vec<_>>();
+    assert!(!ids.contains(&SHELL_CAPABILITY_ID));
+    assert!(ids.contains(&SPAWN_SUBAGENT_CAPABILITY_ID));
+    assert!(ids.contains(&ECHO_CAPABILITY_ID));
+    assert!(
+        !package
+            .manifest
+            .capabilities
+            .iter()
+            .any(|capability| capability.id.as_str() == SHELL_CAPABILITY_ID)
+    );
+
+    let handlers = builtin_first_party_handlers_for_process_backend(
+        Arc::new(InMemoryTriggerRepository::default()),
+        ProcessBackendKind::None,
+    )
+    .unwrap();
+    assert!(!handlers.contains_handler(&capability_id(SHELL_CAPABILITY_ID)));
+    assert!(handlers.contains_handler(&capability_id(SPAWN_SUBAGENT_CAPABILITY_ID)));
+    assert!(handlers.contains_handler(&capability_id(ECHO_CAPABILITY_ID)));
+}
+
+#[tokio::test]
+async fn builtin_first_party_process_backend_package_and_handlers_keep_shell() {
+    let package =
+        builtin_first_party_package_for_process_backend(ProcessBackendKind::TenantSandbox).unwrap();
+    assert!(
+        package
+            .capabilities
+            .iter()
+            .any(|descriptor| descriptor.id.as_str() == SHELL_CAPABILITY_ID)
+    );
+
+    let handlers = builtin_first_party_handlers_for_process_backend(
+        Arc::new(InMemoryTriggerRepository::default()),
+        ProcessBackendKind::TenantSandbox,
+    )
+    .unwrap();
+    assert!(handlers.contains_handler(&capability_id(SHELL_CAPABILITY_ID)));
 }
 
 fn assert_coding_manifest_contract(descriptor: &CapabilityDescriptor) {
@@ -252,6 +318,140 @@ async fn builtin_first_party_surface_lists_allowed_tools_in_registry_order() {
 }
 
 #[tokio::test]
+async fn builtin_trigger_create_input_schema_declares_schedule_one_of() {
+    let runtime = runtime_with_trigger_repository(Arc::new(InMemoryTriggerRepository::default()));
+    let request = VisibleCapabilityRequest::new(
+        execution_context(all_builtin_capability_ids()),
+        SurfaceKind::new("agent_loop").unwrap(),
+    )
+    .with_policy(CapabilitySurfacePolicy::allow_all())
+    .with_provider_trust(provider_trust());
+
+    let surface = runtime.visible_capabilities(request).await.unwrap();
+
+    let trigger_create = surface
+        .capabilities
+        .iter()
+        .find(|capability| capability.descriptor.id.as_str() == TRIGGER_CREATE_CAPABILITY_ID)
+        .expect("trigger_create must appear in surface");
+
+    let schema = &trigger_create.descriptor.parameters_schema;
+
+    // `schedule` must be listed in the `required` array.
+    let required = schema
+        .get("required")
+        .and_then(Value::as_array)
+        .expect("trigger_create schema must have a required array");
+    let required_names: Vec<&str> = required.iter().filter_map(|v| v.as_str()).collect();
+    assert!(
+        required_names.contains(&"schedule"),
+        "schedule must be listed in required; got {required_names:?}"
+    );
+    assert!(
+        !required_names.contains(&"completion_policy"),
+        "completion_policy must NOT be in required; got {required_names:?}"
+    );
+    let root_description = schema
+        .get("description")
+        .and_then(Value::as_str)
+        .expect("trigger_create schema must describe the top-level input shape");
+    assert!(
+        root_description.contains("top-level fields `name`, `prompt`, and `schedule`"),
+        "trigger_create schema should steer models to the top-level trigger shape; got {root_description:?}"
+    );
+
+    // The `schedule` property must have a `oneOf`.
+    let schedule_schema = schema
+        .get("properties")
+        .and_then(|p| p.get("schedule"))
+        .expect("trigger_create schema must declare schedule property");
+    let schedule_description = schedule_schema
+        .get("description")
+        .and_then(Value::as_str)
+        .expect("trigger_create schedule schema must describe expected schedule object shape");
+    assert!(
+        schedule_description.contains("Do not pass {\"operation\":\"parse\",\"data\":...}"),
+        "trigger_create schedule description should reject parse/data wrappers; got {schedule_description:?}"
+    );
+    let one_of = schedule_schema
+        .get("oneOf")
+        .and_then(Value::as_array)
+        .expect("trigger_create schema schedule must have a oneOf array");
+    assert_eq!(
+        one_of.len(),
+        2,
+        "schedule oneOf must have exactly 2 variants; got {}",
+        one_of.len()
+    );
+
+    // Confirm the two kinds are "cron" and "once".
+    let kinds: Vec<&str> = one_of
+        .iter()
+        .filter_map(|v| {
+            v.get("properties")
+                .and_then(|p| p.get("kind"))
+                .and_then(|k| k.get("const"))
+                .and_then(Value::as_str)
+        })
+        .collect();
+    assert!(
+        kinds.contains(&"cron"),
+        "schedule oneOf must have a cron variant; got {kinds:?}"
+    );
+    assert!(
+        kinds.contains(&"once"),
+        "schedule oneOf must have an once variant; got {kinds:?}"
+    );
+    for variant in one_of {
+        assert_eq!(
+            variant.get("type").and_then(Value::as_str),
+            Some("object"),
+            "schedule variants must declare type=object so provider argument normalization can decode stringified nested schedules"
+        );
+    }
+
+    let validator = jsonschema::validator_for(schema).expect("trigger_create schema must compile");
+    let input = json!({
+        "name": "Tuesday reminder",
+        "prompt": "Send the Tuesday reminder",
+        "schedule": {
+            "kind": "cron",
+            "expression": "0 14 * * 2",
+            "timezone": "America/Los_Angeles"
+        }
+    });
+    validator
+        .validate(&input)
+        .expect("resolved trigger_create schema must accept weekly Tuesday cron input");
+
+    let once_input = json!({
+        "name": "Dog walking reminder",
+        "prompt": "Walk the dog",
+        "schedule": {
+            "kind": "once",
+            "at": "2026-06-23T14:00:00",
+            "timezone": "America/Los_Angeles"
+        }
+    });
+    validator
+        .validate(&once_input)
+        .expect("resolved trigger_create schema must accept one-time tomorrow input");
+
+    let parse_wrapper_input = json!({
+        "operation": "parse",
+        "data": {
+            "kind": "cron",
+            "expression": "0 14 * * 2",
+            "timezone": "America/Los_Angeles"
+        }
+    });
+    assert!(
+        validator.validate(&parse_wrapper_input).is_err(),
+        "trigger_create schema must reject parser-style operation/data wrappers"
+    );
+}
+
+#[tokio::test]
 async fn builtin_first_party_surface_hides_runtime_policy_impossible_tools() {
     let runtime = runtime_with_policy(network_denied_policy());
     let request = VisibleCapabilityRequest::new(
@@ -285,8 +485,7 @@ async fn builtin_trigger_create_stamps_caller_scope_and_persists_record() {
         json!({
             "name": "Daily summary",
             "prompt": "Summarize yesterday",
-            "cron": "0 8 * * *",
-            "timezone": "UTC"
+            "schedule": { "kind": "cron", "expression": "0 8 * * *", "timezone": "UTC" }
         }),
         context.clone(),
     )
@@ -297,14 +496,16 @@ async fn builtin_trigger_create_stamps_caller_scope_and_persists_record() {
     assert_eq!(trigger["name"], json!("Daily summary"));
     assert!(trigger.get("prompt").is_none());
     assert_eq!(trigger["source"], json!("schedule"));
-    assert_eq!(trigger["completion_policy"], json!("recurring"));
+    assert_eq!(trigger["schedule"]["kind"], json!("cron"));
     assert_eq!(trigger["state"], json!("scheduled"));
     assert!(trigger.get("tenant_id").is_none());
     assert!(trigger.get("creator_user_id").is_none());
     assert_eq!(trigger["agent_id"], json!("default"));
     assert_eq!(trigger["project_id"], json!("bootstrap"));
     assert_eq!(trigger["last_status"], Value::Null);
-    assert_eq!(trigger["is_active"], json!(false));
+    assert_eq!(trigger["is_enabled"], json!(true));
+    assert_eq!(trigger["is_active"], json!(true));
+    assert_eq!(trigger["has_active_fire"], json!(false));
     assert!(trigger.get("last_fired_slot").is_none());
     assert!(trigger.get("active_fire_slot").is_none());
     assert!(trigger.get("active_run_ref").is_none());
@@ -321,6 +522,41 @@ async fn builtin_trigger_create_stamps_caller_scope_and_persists_record() {
 }
 
 #[tokio::test]
+async fn builtin_trigger_create_accepts_weekly_tuesday_cron_schedule() {
+    let repository = Arc::new(InMemoryTriggerRepository::default());
+    let runtime = runtime_with_trigger_repository(repository.clone());
+    let context = execution_context([TRIGGER_CREATE_CAPABILITY_ID]);
+
+    let output = invoke_with_context(
+        &runtime,
+        TRIGGER_CREATE_CAPABILITY_ID,
+        json!({
+            "name": "Tuesday reminder",
+            "prompt": "Send the Tuesday reminder",
+            "schedule": {
+                "kind": "cron",
+                "expression": "0 14 * * 2",
+                "timezone": "America/Los_Angeles"
+            }
+        }),
+        context.clone(),
+    )
+    .await
+    .expect("weekly Tuesday cron schedule must be accepted");
+
+    assert_eq!(output["trigger"]["name"], json!("Tuesday reminder"));
+    assert_eq!(output["trigger"]["schedule"]["kind"], json!("cron"));
+
+    let records = repository
+        .list_triggers(context.resource_scope.tenant_id.clone())
+        .await
+        .unwrap();
+    assert_eq!(records.len(), 1);
+    assert_eq!(records[0].name, "Tuesday reminder");
+    assert_eq!(records[0].prompt, "Send the Tuesday reminder");
+}
+
+#[tokio::test]
 async fn builtin_trigger_create_runs_create_hook_after_persistence() {
     let repository = Arc::new(InMemoryTriggerRepository::default());
     let hook = Arc::new(PersistedRecordTriggerCreateHook::new(repository.clone()));
@@ -333,8 +569,7 @@ async fn builtin_trigger_create_runs_create_hook_after_persistence() {
         json!({
             "name": "Hooked trigger",
             "prompt": "Pair trigger creator",
-            "cron": "0 8 * * *",
-            "timezone": "UTC"
+            "schedule": { "kind": "cron", "expression": "0 8 * * *", "timezone": "UTC" }
         }),
         context.clone(),
     )
@@ -378,8 +613,7 @@ async fn builtin_trigger_create_maps_create_hook_error_to_backend_and_rolls_back
         json!({
             "name": "Hook failure",
             "prompt": "Do not persist this trigger",
-            "cron": "0 8 * * *",
-            "timezone": "UTC"
+            "schedule": { "kind": "cron", "expression": "0 8 * * *", "timezone": "UTC" }
         }),
         context.clone(),
     )
@@ -411,8 +645,7 @@ async fn builtin_trigger_create_surfaces_rollback_error_when_cleanup_fails() {
         json!({
             "name": "Rollback failure",
             "prompt": "Surface the rollback failure as the user-visible cause",
-            "cron": "0 8 * * *",
-            "timezone": "UTC"
+            "schedule": { "kind": "cron", "expression": "0 8 * * *", "timezone": "UTC" }
         }),
         context.clone(),
     )
@@ -446,8 +679,7 @@ async fn builtin_trigger_create_rejects_sub_minute_schedule_before_persistence()
         json!({
             "name": "Too fast",
             "prompt": "Run constantly",
-            "cron": "* * * * * *",
-            "timezone": "UTC"
+            "schedule": { "kind": "cron", "expression": "* * * * * *", "timezone": "UTC" }
         }),
         context.clone(),
     )
@@ -478,21 +710,24 @@ async fn builtin_trigger_create_rejects_schedule_with_no_future_slot_before_pers
     );
     let context = execution_context([TRIGGER_CREATE_CAPABILITY_ID]);
 
-    let error = invoke_with_context(
+    let failure = invoke_failure_with_context(
         &runtime,
         TRIGGER_CREATE_CAPABILITY_ID,
         json!({
             "name": "Expired finite schedule",
             "prompt": "Run once in the finite year",
-            "cron": format!("0 0 8 * * * {future_year}"),
-            "timezone": "UTC"
+            "schedule": { "kind": "cron", "expression": format!("0 0 8 * * * {future_year}"), "timezone": "UTC" }
         }),
         context.clone(),
     )
-    .await
-    .unwrap_err();
-
-    assert_eq!(error, RuntimeFailureKind::InvalidInput);
+    .await;
+    assert_failure_input_issue_expected(
+        &failure,
+        "schedule.expression",
+        DispatchInputIssueCode::InvalidValue,
+        "cron expression with at least one future fire time",
+        "schedule with no future slot",
+    );
     assert!(
         repository
             .list_triggers(context.resource_scope.tenant_id)
@@ -513,8 +748,7 @@ async fn builtin_trigger_create_rejects_malformed_input_before_persistence() {
         TRIGGER_CREATE_CAPABILITY_ID,
         json!({
             "name": "Missing prompt",
-            "cron": "0 8 * * *",
-            "timezone": "UTC"
+            "schedule": { "kind": "cron", "expression": "0 8 * * *", "timezone": "UTC" }
         }),
         context.clone(),
     )
@@ -543,8 +777,7 @@ async fn builtin_trigger_create_rejects_invalid_timezone_before_persistence() {
         json!({
             "name": "Invalid timezone trigger",
             "prompt": "Run something",
-            "cron": "0 9 * * *",
-            "timezone": "Not/A/Timezone"
+            "schedule": { "kind": "cron", "expression": "0 9 * * *", "timezone": "Not/A/Timezone" }
         }),
         context.clone(),
     )
@@ -568,29 +801,47 @@ async fn builtin_trigger_create_rejects_blank_name_or_prompt_before_persistence(
     let runtime = runtime_with_trigger_repository(repository.clone());
     let context = execution_context([TRIGGER_CREATE_CAPABILITY_ID]);
 
-    for input in [
-        json!({
-            "name": " ",
-            "prompt": "Run work",
-            "cron": "0 8 * * *",
-            "timezone": "UTC"
-        }),
-        json!({
-            "name": "Blank prompt",
-            "prompt": " ",
-            "cron": "0 8 * * *",
-            "timezone": "UTC"
-        }),
+    for (case_name, input, issue_path, expected) in [
+        (
+            "blank name",
+            json!({
+                "name": " ",
+                "prompt": "Run work",
+                "schedule": { "kind": "cron", "expression": "0 8 * * *", "timezone": "UTC" }
+            }),
+            "name",
+            "non-empty trigger name",
+        ),
+        (
+            "blank prompt",
+            json!({
+                "name": "Blank prompt",
+                "prompt": " ",
+                "schedule": { "kind": "cron", "expression": "0 8 * * *", "timezone": "UTC" }
+            }),
+            "prompt",
+            "non-empty trigger prompt",
+        ),
     ] {
-        let error = invoke_with_context(
+        let failure = invoke_failure_with_context(
             &runtime,
             TRIGGER_CREATE_CAPABILITY_ID,
             input,
             context.clone(),
         )
-        .await
-        .unwrap_err();
-        assert_eq!(error, RuntimeFailureKind::InvalidInput);
+        .await;
+        assert_eq!(
+            failure.kind,
+            RuntimeFailureKind::InvalidInput,
+            "{case_name}"
+        );
+        assert_failure_input_issue_expected(
+            &failure,
+            issue_path,
+            DispatchInputIssueCode::InvalidValue,
+            expected,
+            case_name,
+        );
     }
 
     assert!(
@@ -608,29 +859,47 @@ async fn builtin_trigger_create_rejects_oversized_name_or_prompt_before_persiste
     let runtime = runtime_with_trigger_repository(repository.clone());
     let context = execution_context([TRIGGER_CREATE_CAPABILITY_ID]);
 
-    for input in [
-        json!({
-            "name": "x".repeat(MAX_TRIGGER_NAME_BYTES + 1),
-            "prompt": "Run work",
-            "cron": "0 8 * * *",
-            "timezone": "UTC"
-        }),
-        json!({
-            "name": "Oversized prompt",
-            "prompt": "x".repeat(MAX_TRIGGER_PROMPT_BYTES + 1),
-            "cron": "0 8 * * *",
-            "timezone": "UTC"
-        }),
+    for (case_name, input, issue_path, expected) in [
+        (
+            "oversized name",
+            json!({
+                "name": "x".repeat(MAX_TRIGGER_NAME_BYTES + 1),
+                "prompt": "Run work",
+                "schedule": { "kind": "cron", "expression": "0 8 * * *", "timezone": "UTC" }
+            }),
+            "name",
+            "trigger name within the allowed byte limit",
+        ),
+        (
+            "oversized prompt",
+            json!({
+                "name": "Oversized prompt",
+                "prompt": "x".repeat(MAX_TRIGGER_PROMPT_BYTES + 1),
+                "schedule": { "kind": "cron", "expression": "0 8 * * *", "timezone": "UTC" }
+            }),
+            "prompt",
+            "trigger prompt within the allowed byte limit",
+        ),
     ] {
-        let error = invoke_with_context(
+        let failure = invoke_failure_with_context(
             &runtime,
             TRIGGER_CREATE_CAPABILITY_ID,
             input,
             context.clone(),
         )
-        .await
-        .unwrap_err();
-        assert_eq!(error, RuntimeFailureKind::InvalidInput);
+        .await;
+        assert_eq!(
+            failure.kind,
+            RuntimeFailureKind::InvalidInput,
+            "{case_name}"
+        );
+        assert_failure_input_issue_expected(
+            &failure,
+            issue_path,
+            DispatchInputIssueCode::InvalidValue,
+            expected,
+            case_name,
+        );
     }
 
     assert!(
@@ -654,8 +923,7 @@ async fn builtin_trigger_create_applies_first_party_input_size_bound() {
         json!({
             "name": "Large ignored field",
             "prompt": "Run work",
-            "cron": "0 8 * * *",
-            "timezone": "UTC",
+            "schedule": { "kind": "cron", "expression": "0 8 * * *", "timezone": "UTC" },
             "padding": "x".repeat(1_048_576)
         }),
         context.clone(),
@@ -670,6 +938,304 @@ async fn builtin_trigger_create_applies_first_party_input_size_bound() {
             .await
             .unwrap()
             .is_empty()
+    );
+}
+
+#[tokio::test]
+async fn builtin_trigger_create_rejects_invalid_schedule_kind_before_persistence() {
+    let repository = Arc::new(InMemoryTriggerRepository::default());
+    let runtime = runtime_with_trigger_repository(repository.clone());
+    let context = execution_context([TRIGGER_CREATE_CAPABILITY_ID]);
+
+    let error = invoke_with_context(
+        &runtime,
+        TRIGGER_CREATE_CAPABILITY_ID,
+        json!({
+            "name": "Invalid schedule kind trigger",
+            "prompt": "Run work",
+            "schedule": { "kind": "monthly", "expression": "0 8 1 * *", "timezone": "UTC" }
+        }),
+        context.clone(),
+    )
+    .await
+    .unwrap_err();
+
+    assert_eq!(error, RuntimeFailureKind::InvalidInput);
+    assert!(
+        repository
+            .list_triggers(context.resource_scope.tenant_id)
+            .await
+            .unwrap()
+            .is_empty(),
+        "no trigger should be persisted when schedule kind is invalid"
+    );
+}
+
+#[tokio::test]
+async fn builtin_trigger_create_rejects_missing_schedule_before_persistence() {
+    let repository = Arc::new(InMemoryTriggerRepository::default());
+    let runtime = runtime_with_trigger_repository(repository.clone());
+    let context = execution_context([TRIGGER_CREATE_CAPABILITY_ID]);
+
+    let error = invoke_with_context(
+        &runtime,
+        TRIGGER_CREATE_CAPABILITY_ID,
+        json!({
+            "name": "Missing schedule trigger",
+            "prompt": "Run work"
+        }),
+        context.clone(),
+    )
+    .await
+    .unwrap_err();
+
+    assert_eq!(error, RuntimeFailureKind::InvalidInput);
+    assert!(
+        repository
+            .list_triggers(context.resource_scope.tenant_id)
+            .await
+            .unwrap()
+            .is_empty(),
+        "no trigger should be persisted when schedule is absent"
+    );
+}
+
+#[tokio::test]
+async fn builtin_trigger_create_surfaces_structured_invalid_input_detail() {
+    let cases = [
+        (
+            "old flat cron field",
+            json!({
+                "name": "Legacy shape",
+                "prompt": "Run work",
+                "cron": "*/3 * * * *",
+                "timezone": "UTC"
+            }),
+            vec![
+                ("unexpected_field", DispatchInputIssueCode::UnexpectedField),
+                ("schedule", DispatchInputIssueCode::MissingRequired),
+            ],
+        ),
+        (
+            "non-object input",
+            json!("not an object"),
+            vec![("input", DispatchInputIssueCode::TypeMismatch)],
+        ),
+        (
+            "non-string name",
+            json!({
+                "name": 42,
+                "prompt": "Run work",
+                "schedule": { "kind": "cron", "expression": "*/3 * * * *", "timezone": "UTC" }
+            }),
+            vec![("name", DispatchInputIssueCode::TypeMismatch)],
+        ),
+        (
+            "non-object schedule",
+            json!({
+                "name": "Bad schedule",
+                "prompt": "Run work",
+                "schedule": "*/3 * * * *"
+            }),
+            vec![("schedule", DispatchInputIssueCode::TypeMismatch)],
+        ),
+        (
+            "missing schedule kind",
+            json!({
+                "name": "Missing kind",
+                "prompt": "Run work",
+                "schedule": { "expression": "*/3 * * * *", "timezone": "UTC" }
+            }),
+            vec![("schedule.kind", DispatchInputIssueCode::MissingRequired)],
+        ),
+        (
+            "non-string schedule kind",
+            json!({
+                "name": "Bad kind",
+                "prompt": "Run work",
+                "schedule": { "kind": 7, "expression": "*/3 * * * *", "timezone": "UTC" }
+            }),
+            vec![("schedule.kind", DispatchInputIssueCode::TypeMismatch)],
+        ),
+        (
+            "missing schedule timezone",
+            json!({
+                "name": "Missing timezone",
+                "prompt": "Run work",
+                "schedule": { "kind": "cron", "expression": "*/3 * * * *" }
+            }),
+            vec![("schedule.timezone", DispatchInputIssueCode::MissingRequired)],
+        ),
+        (
+            "unexpected root field",
+            json!({
+                "name": "Extra root",
+                "prompt": "Run work",
+                "extra": true,
+                "schedule": { "kind": "cron", "expression": "*/3 * * * *", "timezone": "UTC" }
+            }),
+            vec![("unexpected_field", DispatchInputIssueCode::UnexpectedField)],
+        ),
+        (
+            "unexpected schedule field",
+            json!({
+                "name": "Extra schedule",
+                "prompt": "Run work",
+                "schedule": {
+                    "kind": "cron",
+                    "expression": "*/3 * * * *",
+                    "timezone": "UTC",
+                    "extra": true
+                }
+            }),
+            vec![(
+                "schedule.unexpected_field",
+                DispatchInputIssueCode::UnexpectedField,
+            )],
+        ),
+        (
+            "invalid cron cadence",
+            json!({
+                "name": "Too fast",
+                "prompt": "Run work",
+                "schedule": { "kind": "cron", "expression": "* * * * * *", "timezone": "UTC" }
+            }),
+            vec![("schedule.expression", DispatchInputIssueCode::InvalidValue)],
+        ),
+        (
+            "invalid timezone",
+            json!({
+                "name": "Invalid timezone",
+                "prompt": "Run work",
+                "schedule": { "kind": "cron", "expression": "*/3 * * * *", "timezone": "Not/A/Timezone" }
+            }),
+            vec![("schedule.timezone", DispatchInputIssueCode::InvalidValue)],
+        ),
+    ];
+
+    for (case_name, input, expected_issues) in cases {
+        let repository = Arc::new(InMemoryTriggerRepository::default());
+        let runtime = runtime_with_trigger_repository(repository.clone());
+        let context = execution_context([TRIGGER_CREATE_CAPABILITY_ID]);
+
+        let failure = invoke_failure_with_context(
+            &runtime,
+            TRIGGER_CREATE_CAPABILITY_ID,
+            input,
+            context.clone(),
+        )
+        .await;
+
+        assert_eq!(
+            failure.kind,
+            RuntimeFailureKind::InvalidInput,
+            "{case_name}"
+        );
+        for (path, code) in expected_issues {
+            assert_failure_has_input_issue(&failure, path, code, case_name);
+        }
+        assert!(
+            repository
+                .list_triggers(context.resource_scope.tenant_id)
+                .await
+                .unwrap()
+                .is_empty(),
+            "{case_name}: no trigger should be persisted"
+        );
+    }
+}
+
+/// Positive path: a future `once` schedule must be accepted, persisted,
+/// and round-trip the TriggerSchedule::Once variant correctly.
+///
+/// Year 2099 is used so the `at` datetime always has a future slot regardless
+/// of the real wall-clock — no fixed test clock is needed.
+#[tokio::test]
+async fn builtin_trigger_create_accepts_once_schedule() {
+    let repository = Arc::new(InMemoryTriggerRepository::default());
+    let runtime = runtime_with_trigger_repository(repository.clone());
+    let context = execution_context([TRIGGER_CREATE_CAPABILITY_ID]);
+
+    let output = invoke_with_context(
+        &runtime,
+        TRIGGER_CREATE_CAPABILITY_ID,
+        json!({
+            "name": "One-shot reminder 2099",
+            "prompt": "Check the archives",
+            "schedule": { "kind": "once", "at": "2099-06-24T17:00:00", "timezone": "UTC" }
+        }),
+        context.clone(),
+    )
+    .await
+    .expect("once schedule trigger must be accepted");
+
+    // The response must surface the schedule kind correctly.
+    let trigger = &output["trigger"];
+    assert_eq!(trigger["name"], json!("One-shot reminder 2099"));
+    assert_eq!(trigger["schedule"]["kind"], json!("once"));
+    assert_eq!(trigger["state"], json!("scheduled"));
+    // completion_policy must NOT appear in the output
+    assert!(trigger.get("completion_policy").is_none() || trigger["completion_policy"].is_null());
+
+    // The record must be persisted as TriggerSchedule::Once.
+    let records = repository
+        .list_triggers(context.resource_scope.tenant_id.clone())
+        .await
+        .unwrap();
+    assert_eq!(records.len(), 1, "exactly one trigger must be persisted");
+
+    let record = &records[0];
+    assert_eq!(record.name, "One-shot reminder 2099");
+    assert_eq!(record.prompt, "Check the archives");
+
+    // Verify the stored schedule is Once with the correct UTC instant.
+    match &record.schedule {
+        TriggerSchedule::Once { at, timezone } => {
+            // 2099-06-24T17:00:00 UTC
+            assert_eq!(
+                at.to_rfc3339(),
+                "2099-06-24T17:00:00+00:00",
+                "stored at must match the submitted wall-clock converted to UTC"
+            );
+            assert_eq!(
+                timezone, "UTC",
+                "stored timezone must match the submitted value"
+            );
+        }
+        TriggerSchedule::Cron { .. } => panic!("expected Once schedule variant"),
+    }
+}
+
+/// Negative path: a `once` schedule whose `at` falls in a DST ambiguous fold
+/// (America/New_York on 2026-11-01 01:30:00 is a known overlap) must be
+/// rejected before any trigger is written to the repository.
+#[tokio::test]
+async fn builtin_trigger_create_rejects_invalid_once_schedule_before_persistence() {
+    let repository = Arc::new(InMemoryTriggerRepository::default());
+    let runtime = runtime_with_trigger_repository(repository.clone());
+    let context = execution_context([TRIGGER_CREATE_CAPABILITY_ID]);
+
+    let error = invoke_with_context(
+        &runtime,
+        TRIGGER_CREATE_CAPABILITY_ID,
+        json!({
+            "name": "DST overlap reminder",
+            "prompt": "This should be rejected",
+            "schedule": { "kind": "once", "at": "2026-11-01T01:30:00", "timezone": "America/New_York" }
+        }),
+        context.clone(),
+    )
+    .await
+    .unwrap_err();
+
+    assert_eq!(error, RuntimeFailureKind::InvalidInput);
+    assert!(
+        repository
+            .list_triggers(context.resource_scope.tenant_id)
+            .await
+            .unwrap()
+            .is_empty(),
+        "no trigger should be persisted when the once schedule is ambiguous (DST overlap)"
     );
 }
 
@@ -693,8 +1259,7 @@ async fn builtin_trigger_list_and_remove_are_caller_scoped() {
         json!({
             "name": "Owned trigger",
             "prompt": "Run owned work",
-            "cron": "0 8 * * *",
-            "timezone": "UTC"
+            "schedule": { "kind": "cron", "expression": "0 8 * * *", "timezone": "UTC" }
         }),
         owner_context.clone(),
     )
@@ -733,7 +1298,9 @@ async fn builtin_trigger_list_and_remove_are_caller_scoped() {
     .unwrap();
     assert_eq!(owner_list["triggers"].as_array().unwrap().len(), 1);
     assert!(owner_list["triggers"][0].get("last_status").is_some());
-    assert_eq!(owner_list["triggers"][0]["is_active"], json!(false));
+    assert_eq!(owner_list["triggers"][0]["is_enabled"], json!(true));
+    assert_eq!(owner_list["triggers"][0]["is_active"], json!(true));
+    assert_eq!(owner_list["triggers"][0]["has_active_fire"], json!(false));
     assert!(owner_list["triggers"][0].get("prompt").is_none());
     assert!(owner_list["triggers"][0].get("tenant_id").is_none());
     assert!(owner_list["triggers"][0].get("creator_user_id").is_none());
@@ -766,7 +1333,7 @@ async fn builtin_trigger_list_and_remove_are_caller_scoped() {
 }
 
 #[tokio::test]
-async fn builtin_trigger_list_shows_active_state_without_run_identifiers() {
+async fn builtin_trigger_list_separates_enabled_state_from_active_fire_state() {
     let repository = Arc::new(InMemoryTriggerRepository::default());
     let runtime = runtime_with_trigger_repository(repository.clone());
     let context = execution_context([TRIGGER_CREATE_CAPABILITY_ID, TRIGGER_LIST_CAPABILITY_ID]);
@@ -777,30 +1344,51 @@ async fn builtin_trigger_list_shows_active_state_without_run_identifiers() {
         json!({
             "name": "Active trigger",
             "prompt": "Run active work",
-            "cron": "0 8 * * *",
-            "timezone": "UTC"
+            "schedule": { "kind": "cron", "expression": "0 8 * * *", "timezone": "UTC" }
         }),
         context.clone(),
     )
     .await
     .unwrap();
-    assert_eq!(created["trigger"]["is_active"], json!(false));
+    assert_eq!(created["trigger"]["is_enabled"], json!(true));
+    assert_eq!(created["trigger"]["is_active"], json!(true));
+    assert_eq!(created["trigger"]["has_active_fire"], json!(false));
 
     let mut records = repository
         .list_triggers(context.resource_scope.tenant_id.clone())
         .await
         .unwrap();
     assert_eq!(records.len(), 1);
-    records[0].active_fire_slot = Some(records[0].next_run_at);
-    records[0].active_run_ref =
-        Some(TurnRunId::parse("01890f0f-9b6f-7a85-9e5b-9f21a93c4f5a").unwrap());
-    repository.upsert_trigger(records.remove(0)).await.unwrap();
+    let mut record = records.remove(0);
+    record.state = TriggerState::Paused;
+    repository.upsert_trigger(record.clone()).await.unwrap();
+
+    let listed_paused = invoke_with_context(
+        &runtime,
+        TRIGGER_LIST_CAPABILITY_ID,
+        json!({}),
+        context.clone(),
+    )
+    .await
+    .unwrap();
+    let paused_trigger = &listed_paused["triggers"][0];
+    assert_eq!(paused_trigger["state"], json!("paused"));
+    assert_eq!(paused_trigger["is_enabled"], json!(false));
+    assert_eq!(paused_trigger["is_active"], json!(false));
+    assert_eq!(paused_trigger["has_active_fire"], json!(false));
+
+    record.state = TriggerState::Scheduled;
+    record.active_fire_slot = Some(record.next_run_at);
+    record.active_run_ref = Some(TurnRunId::parse("01890f0f-9b6f-7a85-9e5b-9f21a93c4f5a").unwrap());
+    repository.upsert_trigger(record).await.unwrap();
 
     let listed = invoke_with_context(&runtime, TRIGGER_LIST_CAPABILITY_ID, json!({}), context)
         .await
         .unwrap();
     let trigger = &listed["triggers"][0];
+    assert_eq!(trigger["is_enabled"], json!(true));
     assert_eq!(trigger["is_active"], json!(true));
+    assert_eq!(trigger["has_active_fire"], json!(true));
     assert!(trigger.get("active_fire_slot").is_none());
     assert!(trigger.get("active_run_ref").is_none());
 }
@@ -840,8 +1428,7 @@ async fn builtin_trigger_create_list_and_remove_use_full_request_scope() {
         json!({
             "name": "Scoped trigger",
             "prompt": "Run scoped work",
-            "cron": "0 8 * * *",
-            "timezone": "UTC"
+            "schedule": { "kind": "cron", "expression": "0 8 * * *", "timezone": "UTC" }
         }),
         owner_context.clone(),
     )
@@ -852,7 +1439,9 @@ async fn builtin_trigger_create_list_and_remove_use_full_request_scope() {
     assert!(trigger.get("creator_user_id").is_none());
     assert_eq!(trigger["agent_id"], json!("scoped-agent"));
     assert_eq!(trigger["project_id"], json!("scoped-project"));
-    assert_eq!(trigger["is_active"], json!(false));
+    assert_eq!(trigger["is_enabled"], json!(true));
+    assert_eq!(trigger["is_active"], json!(true));
+    assert_eq!(trigger["has_active_fire"], json!(false));
     assert!(trigger.get("prompt").is_none());
     assert!(trigger.get("last_fired_slot").is_none());
     assert!(trigger.get("active_fire_slot").is_none());
@@ -923,8 +1512,7 @@ async fn builtin_trigger_create_round_trips_nullable_agent_and_project_scope() {
         json!({
             "name": "Unscoped trigger",
             "prompt": "Run unscoped work",
-            "cron": "0 8 * * *",
-            "timezone": "UTC"
+            "schedule": { "kind": "cron", "expression": "0 8 * * *", "timezone": "UTC" }
         }),
         context,
     )
@@ -933,7 +1521,9 @@ async fn builtin_trigger_create_round_trips_nullable_agent_and_project_scope() {
 
     assert_eq!(created["trigger"]["agent_id"], Value::Null);
     assert_eq!(created["trigger"]["project_id"], Value::Null);
-    assert_eq!(created["trigger"]["is_active"], json!(false));
+    assert_eq!(created["trigger"]["is_enabled"], json!(true));
+    assert_eq!(created["trigger"]["is_active"], json!(true));
+    assert_eq!(created["trigger"]["has_active_fire"], json!(false));
 }
 
 #[tokio::test]
@@ -949,8 +1539,7 @@ async fn builtin_trigger_list_applies_user_surface_limit_boundaries() {
             json!({
                 "name": format!("Trigger {index}"),
                 "prompt": "Run work",
-                "cron": "0 8 * * *",
-                "timezone": "UTC"
+                "schedule": { "kind": "cron", "expression": "0 8 * * *", "timezone": "UTC" }
             }),
             context.clone(),
         )
@@ -1012,8 +1601,7 @@ async fn builtin_trigger_list_embeds_recent_run_history_with_run_limit() {
         json!({
             "name": "Historical trigger",
             "prompt": "Create history rows",
-            "cron": "0 8 * * *",
-            "timezone": "UTC"
+            "schedule": { "kind": "cron", "expression": "* * * * *", "timezone": "UTC" }
         }),
         context.clone(),
     )
@@ -1045,7 +1633,6 @@ async fn builtin_trigger_list_embeds_recent_run_history_with_run_limit() {
             run_id: first_run_id,
             thread_id: ThreadId::new("01890f0f-0001-7000-8000-000000000001").unwrap(),
             submitted_at: first_fire_slot + chrono::Duration::seconds(1),
-            next_run_at: first_fire_slot + chrono::Duration::minutes(1),
         })
         .await
         .unwrap();
@@ -1079,7 +1666,6 @@ async fn builtin_trigger_list_embeds_recent_run_history_with_run_limit() {
             run_id: second_run_id,
             thread_id: ThreadId::new("01890f0f-0002-7000-8000-000000000002").unwrap(),
             submitted_at: second_fire_slot + chrono::Duration::seconds(1),
-            next_run_at: second_fire_slot + chrono::Duration::minutes(1),
         })
         .await
         .unwrap();
@@ -1113,7 +1699,6 @@ async fn builtin_trigger_list_embeds_recent_run_history_with_run_limit() {
             run_id: third_run_id,
             thread_id: ThreadId::new("01890f0f-0003-7000-8000-000000000003").unwrap(),
             submitted_at: third_fire_slot + chrono::Duration::seconds(1),
-            next_run_at: third_fire_slot + chrono::Duration::minutes(1),
         })
         .await
         .unwrap();
@@ -1156,8 +1741,7 @@ async fn builtin_trigger_list_with_zero_run_limit_returns_empty_recent_runs() {
         json!({
             "name": "Zero run limit trigger",
             "prompt": "Create history rows",
-            "cron": "0 8 * * *",
-            "timezone": "UTC"
+            "schedule": { "kind": "cron", "expression": "0 8 * * *", "timezone": "UTC" }
         }),
         context.clone(),
     )
@@ -1196,8 +1780,7 @@ async fn builtin_trigger_list_clamps_oversized_run_limit_to_max() {
         json!({
             "name": "Oversized run limit trigger",
             "prompt": "Create many history rows",
-            "cron": "0 8 * * *",
-            "timezone": "UTC"
+            "schedule": { "kind": "cron", "expression": "0 8 * * *", "timezone": "UTC" }
         }),
         context.clone(),
     )
@@ -1230,13 +1813,132 @@ async fn builtin_trigger_list_clamps_oversized_run_limit_to_max() {
     );
 }
 
+/// Regression guard: `builtin.trigger_list` (model-facing) must return triggers
+/// in ALL states, including `Completed` (soft-completed fire-once triggers).
+/// The model needs to see completed one-shots so it can report their history.
+///
+/// Contrast with `list_automations` (panel-facing) which EXCLUDES Completed.
+/// The difference is encoded by `list_triggers` passing `&[]` (no exclusions)
+/// while `list_automations` passes `&[TriggerState::Completed]`.
+#[tokio::test]
+async fn builtin_trigger_list_includes_completed_fire_once_triggers() {
+    let repository = Arc::new(InMemoryTriggerRepository::default());
+    let runtime = runtime_with_trigger_repository(repository.clone());
+    let context = execution_context([TRIGGER_CREATE_CAPABILITY_ID, TRIGGER_LIST_CAPABILITY_ID]);
+
+    // Create a fire-once trigger so it can be soft-completed.
+    let created = invoke_with_context(
+        &runtime,
+        TRIGGER_CREATE_CAPABILITY_ID,
+        json!({
+            "name": "One-shot reminder",
+            "prompt": "Remind me about the meeting",
+            "schedule": { "kind": "once", "at": "2099-06-24T17:00:00", "timezone": "UTC" }
+        }),
+        context.clone(),
+    )
+    .await
+    .unwrap();
+    let trigger_id_str = created["trigger"]["trigger_id"]
+        .as_str()
+        .expect("trigger_id in create output");
+
+    // Transition the trigger to Completed via a fire cycle (claim → clear).
+    let record = repository
+        .list_triggers(context.resource_scope.tenant_id.clone())
+        .await
+        .unwrap()
+        .pop()
+        .expect("persisted fire-once trigger");
+    assert!(
+        matches!(record.schedule, TriggerSchedule::Once { .. }),
+        "persisted record must have an Once schedule"
+    );
+    let fire_slot = record.next_run_at;
+    let run_id = ironclaw_turns::TurnRunId::new();
+
+    repository
+        .claim_due_fire(ClaimDueFireRequest {
+            tenant_id: record.tenant_id.clone(),
+            trigger_id: record.trigger_id,
+            fire_slot,
+            now: fire_slot,
+        })
+        .await
+        .unwrap();
+    repository
+        .mark_fire_accepted(FireAcceptedRequest {
+            tenant_id: record.tenant_id.clone(),
+            trigger_id: record.trigger_id,
+            fire_slot,
+            run_id,
+            thread_id: ironclaw_host_api::ThreadId::new("01890f0f-fire-7000-8000-000000000001")
+                .unwrap(),
+            submitted_at: fire_slot,
+        })
+        .await
+        .unwrap();
+    repository
+        .clear_active_fire(ClearActiveFireRequest {
+            tenant_id: record.tenant_id.clone(),
+            trigger_id: record.trigger_id,
+            fire_slot,
+            run_id,
+            status: TriggerRunHistoryStatus::Ok,
+        })
+        .await
+        .unwrap();
+
+    // Verify the repository has Completed state.
+    let persisted = repository
+        .get_trigger(record.tenant_id.clone(), record.trigger_id)
+        .await
+        .unwrap()
+        .expect("trigger record after clear");
+    assert_eq!(
+        persisted.state,
+        TriggerState::Completed,
+        "fire-once trigger must be Completed after clear_active_fire"
+    );
+
+    // trigger_list must include Completed triggers (model needs the history).
+    let listed = invoke_with_context(&runtime, TRIGGER_LIST_CAPABILITY_ID, json!({}), context)
+        .await
+        .unwrap();
+
+    let triggers = listed["triggers"].as_array().expect("triggers array");
+    assert_eq!(
+        triggers.len(),
+        1,
+        "trigger_list must return the completed fire-once trigger"
+    );
+    assert_eq!(
+        triggers[0]["trigger_id"].as_str().unwrap(),
+        trigger_id_str,
+        "trigger_list must include the completed fire-once trigger by id"
+    );
+    assert_eq!(
+        triggers[0]["state"],
+        json!("completed"),
+        "trigger_list must expose the Completed state to the model"
+    );
+}
+
 async fn seed_completed_trigger_runs(
     repository: &InMemoryTriggerRepository,
     record: &TriggerRecord,
     count: usize,
 ) {
-    for index in 0..count {
-        let fire_slot = record.next_run_at + chrono::Duration::minutes(index as i64);
+    // Re-derive each fire slot from the trigger's CURRENT next_run_at: clear_active_fire
+    // advances next_run_at via the schedule, so we follow whatever cadence the schedule
+    // dictates instead of assuming consecutive one-minute slots.
+    for _ in 0..count {
+        let current = repository
+            .get_trigger(record.tenant_id.clone(), record.trigger_id)
+            .await
+            .unwrap()
+            .expect("trigger present while seeding runs");
+        let fire_slot = current.next_run_at;
         let run_id = TurnRunId::new();
         repository
             .claim_due_fire(ClaimDueFireRequest {
@@ -1255,7 +1957,6 @@ async fn seed_completed_trigger_runs(
                 run_id,
                 thread_id: ThreadId::new("01890f0f-0004-7000-8000-000000000004").unwrap(),
                 submitted_at: fire_slot + chrono::Duration::seconds(1),
-                next_run_at: fire_slot + chrono::Duration::minutes(1),
             })
             .await
             .unwrap();
@@ -1375,8 +2076,7 @@ async fn builtin_trigger_management_maps_repository_errors_to_backend() {
         json!({
             "name": "Backend create",
             "prompt": "Run work",
-            "cron": "0 8 * * *",
-            "timezone": "UTC"
+            "schedule": { "kind": "cron", "expression": "0 8 * * *", "timezone": "UTC" }
         }),
         context.clone(),
     )
@@ -1417,8 +2117,7 @@ async fn builtin_trigger_list_maps_batch_run_history_repository_error_to_backend
         json!({
             "name": "Batch history failure",
             "prompt": "Create trigger before listing history",
-            "cron": "0 8 * * *",
-            "timezone": "UTC"
+            "schedule": { "kind": "cron", "expression": "0 8 * * *", "timezone": "UTC" }
         }),
         context.clone(),
     )
@@ -1871,6 +2570,49 @@ async fn memory_write_requires_memory_mount_authority() {
     )
     .await
     .unwrap_err();
+    assert_eq!(failure, RuntimeFailureKind::Authorization);
+}
+
+#[tokio::test]
+async fn builtin_profile_set_rejects_missing_memory_mount_authority() {
+    // profile_set routes through ensure_memory_mount(request, /*write*/ true) in
+    // profile_merge_write. This test verifies that the guard fires when the invocation
+    // context carries only a /workspace mount (no /memory write grant), mirroring
+    // the memory_write_requires_memory_mount_authority test above.
+    let runtime = runtime_with_filesystem(InMemoryBackend::new());
+    let (_filesystem, workspace_mounts) =
+        in_memory_mounted_filesystem(MountPermissions::read_write_list_delete());
+    let failure = invoke_with_context(
+        &runtime,
+        PROFILE_SET_CAPABILITY_ID,
+        json!({"timezone": "Asia/Tokyo"}),
+        execution_context_with_mounts([PROFILE_SET_CAPABILITY_ID], workspace_mounts),
+    )
+    .await
+    .unwrap_err();
+    // ensure_memory_mount returns FilesystemDenied, which maps to RuntimeFailureKind::Authorization.
+    assert_eq!(failure, RuntimeFailureKind::Authorization);
+}
+
+#[tokio::test]
+async fn builtin_profile_set_rejects_memory_mount_without_delete_permission() {
+    // ensure_memory_mount(write=true) requires read + list + write + delete.
+    // A /memory grant with read+list+write but NO delete must be rejected with
+    // Authorization, locking the current contract.
+    // MountPermissions::read_write() has read=true, write=true, list=true, delete=false.
+    let runtime = runtime_with_filesystem(InMemoryBackend::new());
+    let failure = invoke_with_context(
+        &runtime,
+        PROFILE_SET_CAPABILITY_ID,
+        json!({"timezone": "Asia/Tokyo"}),
+        execution_context_with_mounts(
+            [PROFILE_SET_CAPABILITY_ID],
+            memory_mounts(MountPermissions::read_write()),
+        ),
+    )
+    .await
+    .unwrap_err();
+    // ensure_memory_mount rejects write without delete (FilesystemDenied → Authorization).
     assert_eq!(failure, RuntimeFailureKind::Authorization);
 }
 
@@ -2876,18 +3618,18 @@ async fn builtin_http_does_not_inline_huge_binary_payloads() {
     .await
     .unwrap();
 
-    let body_base64 = output["body_base64"].as_str().expect("binary response");
     assert_eq!(output["body_truncated"], json!(true));
-    assert!(body_base64.len() <= 4096);
-    assert_eq!(output["body_bytes_returned"], json!(3072));
+    assert_eq!(output["body_base64_omitted"], json!(true));
+    assert_eq!(output["body_bytes_returned"], json!(0));
     assert_eq!(output["truncation"]["body"], json!(true));
-    assert_eq!(output["truncation"]["bytes_returned"], json!(3072));
+    assert_eq!(output["truncation"]["bytes_returned"], json!(0));
     assert!(
         output["body_truncation_hint"]
             .as_str()
             .expect("hint")
             .contains("builtin.http.save")
     );
+    assert!(output.get("body_base64").is_none());
     assert!(output.get("body_text").is_none());
     assert!(serialized_json_len(&output) <= 6_000);
 }
@@ -2921,11 +3663,11 @@ async fn builtin_http_truncates_tiny_binary_responses_without_panicking() {
 
 #[tokio::test]
 async fn builtin_http_final_budget_trim_preserves_base64_alignment() {
-    let headers = (0..4)
+    let headers = (0..2)
         .map(|index| (format!("x-large-{index}"), "h".repeat(512)))
         .collect::<Vec<_>>();
     let egress =
-        Arc::new(RecordingRuntimeHttpEgress::with_body(vec![0xFF; 4 * 1024]).with_headers(headers));
+        Arc::new(RecordingRuntimeHttpEgress::with_body(vec![0xFF; 512]).with_headers(headers));
     let runtime = runtime_with_http_egress(Arc::clone(&egress));
 
     let output = invoke_with_context(
@@ -2933,7 +3675,7 @@ async fn builtin_http_final_budget_trim_preserves_base64_alignment() {
         HTTP_CAPABILITY_ID,
         json!({
             "url": "https://api.example.test/v1/items",
-            "response_body_limit": 4096
+            "response_body_limit": 512
         }),
         execution_context_with_network([HTTP_CAPABILITY_ID], http_test_policy()),
     )
@@ -2943,10 +3685,10 @@ async fn builtin_http_final_budget_trim_preserves_base64_alignment() {
     let body_base64 = output["body_base64"].as_str().expect("binary response");
     assert_eq!(output["body_truncated"], json!(true));
     assert!(!body_base64.is_empty());
-    assert!(body_base64.len() < 4096);
+    assert!(body_base64.len() < 684);
     assert_eq!(body_base64.len() % 4, 0);
     assert_eq!(output["truncation"]["body"], json!(true));
-    assert!(serialized_json_len(&output) <= 6_000);
+    assert!(serialized_json_len(&output) <= 3_000);
 }
 
 #[tokio::test]
@@ -3568,13 +4310,29 @@ async fn builtin_skill_install_url_path_serializes_concurrent_fetches_from_same_
             context,
         )
     );
-    let mut outcomes = [first.map(|_| ()), second.map(|_| ())];
-    outcomes.sort_by_key(|result| result.is_err());
-
-    assert!(outcomes[0].is_ok());
-    assert_eq!(outcomes[1], Err(RuntimeFailureKind::OperationFailed));
+    // Both concurrent installs of the same URL fetch independently (egress == 2),
+    // then serialize on the per-skill mutation lock in
+    // ironclaw_skills::management::install_skill. Install is idempotent for
+    // identical content (replay-safety, nearai/ironclaw#4385): the second install
+    // observes the first's matching install and returns success instead of a
+    // conflict, so the skill is written exactly once.
+    assert!(
+        first.is_ok(),
+        "first concurrent install must succeed: {first:?}"
+    );
+    assert!(
+        second.is_ok(),
+        "second concurrent install of identical content must succeed idempotently: {second:?}"
+    );
     assert_eq!(egress.requests().len(), 2);
-    assert!(temp.path().join("concurrent-helper/SKILL.md").exists());
+    let installed = temp.path().join("concurrent-helper/SKILL.md");
+    assert!(installed.exists());
+    assert!(
+        std::fs::read_to_string(&installed)
+            .unwrap()
+            .contains("Fetched prompt."),
+        "installed SKILL.md must contain the fetched skill content"
+    );
 }
 
 #[tokio::test]
@@ -5236,6 +5994,186 @@ async fn builtin_coding_tools_match_v1_read_write_list_glob_and_grep_shapes() {
 }
 
 #[tokio::test]
+async fn read_file_enforces_byte_budget_on_long_lines_and_offers_continuation() {
+    // A few very long lines: only 6 lines (well under the 2000-line cap) but
+    // ~180 KB total, the shape that let a 310 KB log dump into context and
+    // exhaust the pinchbench turn budget. The byte cap must truncate it.
+    let temp = tempfile::tempdir().unwrap();
+    let wide_line = "x".repeat(30 * 1024);
+    let body = (0..6)
+        .map(|_| wide_line.as_str())
+        .collect::<Vec<_>>()
+        .join("\n");
+    std::fs::write(temp.path().join("wide.log"), format!("{body}\n")).unwrap();
+
+    let (filesystem, mounts) = mounted_filesystem(temp.path(), MountPermissions::read_only());
+    let runtime = runtime_with_filesystem(filesystem);
+    let context = execution_context_with_mounts(all_builtin_capability_ids(), mounts);
+
+    let read = invoke_with_context(
+        &runtime,
+        READ_FILE_CAPABILITY_ID,
+        json!({"path": "/workspace/wide.log"}),
+        context.clone(),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(read["total_lines"], json!(6));
+    assert_eq!(read["truncated"], json!(true));
+    assert_eq!(read["truncated_by"], json!("bytes"));
+    // Stopped well before all 6 lines, and the body stays inside the budget
+    // including the continuation notice.
+    let shown = read["lines_shown"].as_u64().unwrap();
+    assert!(
+        (1..6).contains(&shown),
+        "expected partial read, got {shown}"
+    );
+    let content = read["content"].as_str().unwrap();
+    assert!(
+        content.len() <= 64 * 1024,
+        "body exceeded byte budget: {} bytes",
+        content.len()
+    );
+    let next = read["next_offset"].as_u64().unwrap();
+    assert_eq!(next, shown + 1);
+    assert!(content.contains(&format!("Use offset={next} to continue")));
+
+    // Resuming from next_offset advances past the already-shown lines.
+    let resumed = invoke_with_context(
+        &runtime,
+        READ_FILE_CAPABILITY_ID,
+        json!({"path": "/workspace/wide.log", "offset": next}),
+        context.clone(),
+    )
+    .await
+    .unwrap();
+    let resumed_first = resumed["content"].as_str().unwrap();
+    assert!(resumed_first.starts_with(&format!("{:>6}│", next)));
+}
+
+#[tokio::test]
+async fn read_file_saturates_large_limit_without_overflow() {
+    let temp = tempfile::tempdir().unwrap();
+    std::fs::write(temp.path().join("lines.txt"), "first\nsecond\nthird\n").unwrap();
+
+    let (filesystem, mounts) = mounted_filesystem(temp.path(), MountPermissions::read_only());
+    let runtime = runtime_with_filesystem(filesystem);
+    let context = execution_context_with_mounts(all_builtin_capability_ids(), mounts);
+
+    let read = invoke_with_context(
+        &runtime,
+        READ_FILE_CAPABILITY_ID,
+        json!({
+            "path": "/workspace/lines.txt",
+            "offset": 2,
+            "limit": usize::MAX,
+        }),
+        context,
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(read["total_lines"], json!(3));
+    assert_eq!(read["lines_shown"], json!(2));
+    assert_eq!(read["truncated"], json!(false));
+    assert!(read["truncated_by"].is_null());
+    assert!(read["next_offset"].is_null());
+    let content = read["content"].as_str().unwrap();
+    assert!(content.starts_with("     2│ second"));
+    assert!(content.contains("     3│ third"));
+    assert!(!content.contains("     1│ first"));
+}
+
+#[tokio::test]
+async fn read_file_clamps_a_single_line_larger_than_the_whole_budget() {
+    // One line bigger than the entire byte budget must still return something
+    // (clamped on a UTF-8 boundary) and advance the cursor rather than emit empty.
+    let temp = tempfile::tempdir().unwrap();
+    std::fs::write(
+        temp.path().join("blob.txt"),
+        format!("{}\nnext\n", "y".repeat(100 * 1024)),
+    )
+    .unwrap();
+
+    let (filesystem, mounts) = mounted_filesystem(temp.path(), MountPermissions::read_only());
+    let runtime = runtime_with_filesystem(filesystem);
+    let context = execution_context_with_mounts(all_builtin_capability_ids(), mounts);
+
+    let read = invoke_with_context(
+        &runtime,
+        READ_FILE_CAPABILITY_ID,
+        json!({"path": "/workspace/blob.txt"}),
+        context.clone(),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(read["lines_shown"], json!(1));
+    assert_eq!(read["truncated_by"], json!("bytes"));
+    assert_eq!(read["next_offset"], json!(2));
+    let content = read["content"].as_str().unwrap();
+    assert!(content.contains("[line truncated]"));
+    assert!(
+        content.len() <= 64 * 1024,
+        "body exceeded byte budget: {} bytes",
+        content.len()
+    );
+}
+
+#[tokio::test]
+async fn read_file_tolerates_stray_nul_and_invalid_utf8_in_text_logs() {
+    // A real syslog-shaped file with one stray NUL and one invalid UTF-8 byte.
+    // The strict probe/decode rejected these, forcing the agent into a grep-only
+    // fallback (pinchbench syslog tasks). The read path must now decode it lossily.
+    let temp = tempfile::tempdir().unwrap();
+    let mut bytes = b"Jan  1 00:00:00 host sshd[1]: Failed password for root\n".to_vec();
+    bytes.push(0u8); // stray NUL
+    bytes.extend_from_slice(b"\xffJan  1 00:00:01 host sshd[1]: more log line\n"); // invalid UTF-8
+    std::fs::write(temp.path().join("syslog.log"), &bytes).unwrap();
+
+    let (filesystem, mounts) = mounted_filesystem(temp.path(), MountPermissions::read_only());
+    let runtime = runtime_with_filesystem(filesystem);
+    let context = execution_context_with_mounts(all_builtin_capability_ids(), mounts);
+
+    let read = invoke_with_context(
+        &runtime,
+        READ_FILE_CAPABILITY_ID,
+        json!({"path": "/workspace/syslog.log"}),
+        context.clone(),
+    )
+    .await
+    .expect("text log with stray NUL / invalid UTF-8 must read, not hard-fail");
+    let content = read["content"].as_str().unwrap();
+    assert!(content.contains("Failed password for root"));
+    assert!(content.contains("more log line"));
+}
+
+#[tokio::test]
+async fn read_file_still_rejects_nul_dense_binary() {
+    // Genuine binary (NUL-dense): must still be kept out of context rather than
+    // dumped as U+FFFD soup. 25% NUL bytes clears both the floor and the ratio.
+    let temp = tempfile::tempdir().unwrap();
+    let bytes: Vec<u8> = (0..4096)
+        .map(|i| if i % 4 == 0 { 0u8 } else { b'A' })
+        .collect();
+    std::fs::write(temp.path().join("blob.bin"), &bytes).unwrap();
+
+    let (filesystem, mounts) = mounted_filesystem(temp.path(), MountPermissions::read_only());
+    let runtime = runtime_with_filesystem(filesystem);
+    let context = execution_context_with_mounts(all_builtin_capability_ids(), mounts);
+
+    invoke_with_context(
+        &runtime,
+        READ_FILE_CAPABILITY_ID,
+        json!({"path": "/workspace/blob.bin"}),
+        context.clone(),
+    )
+    .await
+    .expect_err("NUL-dense binary must still be rejected by read_file");
+}
+
+#[tokio::test]
 async fn builtin_coding_paths_are_relative_to_requested_root_and_zero_values_match_v1() {
     let temp = tempfile::tempdir().unwrap();
     std::fs::create_dir_all(temp.path().join("src/nested")).unwrap();
@@ -6349,6 +7287,44 @@ async fn invoke_failure_with_context<R: HostRuntime + ?Sized>(
     }
 }
 
+fn assert_failure_has_input_issue(
+    failure: &RuntimeCapabilityFailure,
+    path: &str,
+    code: DispatchInputIssueCode,
+    case_name: &str,
+) {
+    let _ = failure_input_issue(failure, path, code, case_name);
+}
+
+fn assert_failure_input_issue_expected(
+    failure: &RuntimeCapabilityFailure,
+    path: &str,
+    code: DispatchInputIssueCode,
+    expected: &str,
+    case_name: &str,
+) {
+    let issue = failure_input_issue(failure, path, code, case_name);
+    assert_eq!(issue.expected.as_deref(), Some(expected), "{case_name}");
+}
+
+fn failure_input_issue<'a>(
+    failure: &'a RuntimeCapabilityFailure,
+    path: &str,
+    code: DispatchInputIssueCode,
+    case_name: &str,
+) -> &'a ironclaw_host_api::DispatchInputIssue {
+    let Some(DispatchFailureDetail::InvalidInput { issues }) = &failure.detail else {
+        panic!(
+            "{case_name}: expected invalid-input detail, got {:?}",
+            failure.detail
+        );
+    };
+    issues
+        .iter()
+        .find(|issue| issue.path == path && issue.code == code)
+        .unwrap_or_else(|| panic!("{case_name}: expected issue {path} {code:?}, got {issues:?}"))
+}
+
 fn runtime() -> impl HostRuntime {
     runtime_with_filesystem(LocalFilesystem::new())
 }
@@ -6580,9 +7556,17 @@ impl TriggerRepository for RemoveFailingTriggerRepository {
         agent_id: Option<AgentId>,
         project_id: Option<ProjectId>,
         limit: usize,
+        excluded_states: &[ironclaw_triggers::TriggerState],
     ) -> Result<Vec<ironclaw_triggers::TriggerRecord>, ironclaw_triggers::TriggerError> {
         self.inner
-            .list_scoped_triggers(tenant_id, creator_user_id, agent_id, project_id, limit)
+            .list_scoped_triggers(
+                tenant_id,
+                creator_user_id,
+                agent_id,
+                project_id,
+                limit,
+                excluded_states,
+            )
             .await
     }
 
@@ -6721,9 +7705,17 @@ impl TriggerRepository for BatchRunHistoryFailingTriggerRepository {
         agent_id: Option<AgentId>,
         project_id: Option<ProjectId>,
         limit: usize,
+        excluded_states: &[ironclaw_triggers::TriggerState],
     ) -> Result<Vec<ironclaw_triggers::TriggerRecord>, ironclaw_triggers::TriggerError> {
         self.inner
-            .list_scoped_triggers(tenant_id, creator_user_id, agent_id, project_id, limit)
+            .list_scoped_triggers(
+                tenant_id,
+                creator_user_id,
+                agent_id,
+                project_id,
+                limit,
+                excluded_states,
+            )
             .await
     }
 
@@ -6870,6 +7862,7 @@ impl TriggerRepository for FailingTriggerRepository {
         _agent_id: Option<AgentId>,
         _project_id: Option<ProjectId>,
         _limit: usize,
+        _excluded_states: &[ironclaw_triggers::TriggerState],
     ) -> Result<Vec<ironclaw_triggers::TriggerRecord>, ironclaw_triggers::TriggerError> {
         Err(trigger_backend_error())
     }
@@ -7240,6 +8233,12 @@ fn all_builtin_capability_ids() -> Vec<&'static str> {
         HTTP_SAVE_CAPABILITY_ID,
         SHELL_CAPABILITY_ID,
         SPAWN_SUBAGENT_CAPABILITY_ID,
+        TRACE_COMMONS_ONBOARD_CAPABILITY_ID,
+        TRACE_COMMONS_STATUS_CAPABILITY_ID,
+        TRACE_COMMONS_CREDITS_CAPABILITY_ID,
+        TRACE_COMMONS_PROFILE_TOKEN_CAPABILITY_ID,
+        TRACE_COMMONS_PROFILE_SET_CAPABILITY_ID,
+        PROFILE_SET_CAPABILITY_ID,
         MEMORY_SEARCH_CAPABILITY_ID,
         MEMORY_WRITE_CAPABILITY_ID,
         MEMORY_READ_CAPABILITY_ID,
@@ -7828,6 +8827,7 @@ fn builtin_effects() -> Vec<EffectKind> {
         EffectKind::Network,
         EffectKind::SpawnProcess,
         EffectKind::ExecuteCode,
+        // Required by builtin.trace_commons.onboard.
         EffectKind::ExternalWrite,
     ]
 }

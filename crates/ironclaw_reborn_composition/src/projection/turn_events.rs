@@ -5,7 +5,9 @@ use std::{
 
 use async_trait::async_trait;
 use futures::{StreamExt, stream};
-use ironclaw_host_api::{Action, ApprovalRequest, NetworkMethod, NetworkScheme, UserId};
+use ironclaw_host_api::{
+    Action, ApprovalRequest, InvocationId, NetworkMethod, NetworkScheme, UserId,
+};
 use ironclaw_product_adapters::{
     ApprovalPromptActionView, ApprovalPromptContextView, ApprovalPromptDestinationView,
     ApprovalPromptDetailView, ApprovalPromptScopeView, GatePromptView, ProductAdapterError,
@@ -420,37 +422,73 @@ async fn approval_gate_prompt(
     gate_ref: &GateRef,
     gate_ref_string: String,
 ) -> ProductOutboundPayload {
-    let context = approval_requests.zip(approval_request_id_from_gate_ref(gate_ref).ok());
-    let context = match context {
-        Some((store, request_id)) => {
-            let owner_user_id = event.owner_user_id.as_ref().unwrap_or(caller_user_id);
-            let scope = ApprovalInteractionScope::from_turn(
-                &event.scope,
-                &TurnActor::new(owner_user_id.clone()),
-            )
-            .to_resource_scope();
-            match store.get(&scope, request_id).await {
-                Ok(Some(record)) => approval_context_for_request(&record.request),
-                Ok(None) => None,
-                Err(error) => {
-                    tracing::debug!(
-                        %error,
-                        request_id = %request_id,
-                        "approval request lookup failed during WebUI gate projection"
-                    );
-                    None
-                }
-            }
-        }
-        None => None,
-    };
+    let owner_user_id = event.owner_user_id.as_ref().unwrap_or(caller_user_id);
+    let lookup =
+        approval_prompt_lookup(approval_requests, gate_ref, owner_user_id, &event.scope).await;
     gate_prompt_with_context(
         event,
         gate_ref_string,
         "Approval required",
-        is_approval_gate_ref(gate_ref),
-        context,
+        is_approval_gate_ref(gate_ref.as_str()),
+        lookup.context,
+        lookup.invocation_id,
     )
+}
+
+/// Resolve an approval gate's request details (tool/action/reason) into the
+/// rendered context view, by looking it up in the `ApprovalRequestStore` by
+/// gate ref. Shared by the WebUI gate projection and the Slack approval prompt
+/// so both surface the *same* "what is being approved" data from one source.
+/// Returns `None` when no store is wired, the gate ref is not an approval ref,
+/// the request is missing, or the lookup fails.
+#[cfg(feature = "slack-v2-host-beta")]
+pub(crate) async fn approval_prompt_context_view(
+    approval_requests: Option<&dyn ApprovalRequestStore>,
+    gate_ref: &GateRef,
+    owner_user_id: &UserId,
+    turn_scope: &TurnScope,
+) -> Option<ApprovalPromptContextView> {
+    approval_prompt_lookup(approval_requests, gate_ref, owner_user_id, turn_scope)
+        .await
+        .context
+}
+
+#[derive(Debug, Default)]
+struct ApprovalPromptLookup {
+    context: Option<ApprovalPromptContextView>,
+    invocation_id: Option<InvocationId>,
+}
+
+async fn approval_prompt_lookup(
+    approval_requests: Option<&dyn ApprovalRequestStore>,
+    gate_ref: &GateRef,
+    owner_user_id: &UserId,
+    turn_scope: &TurnScope,
+) -> ApprovalPromptLookup {
+    let (store, request_id) =
+        match approval_requests.zip(approval_request_id_from_gate_ref(gate_ref).ok()) {
+            Some(value) => value,
+            None => return ApprovalPromptLookup::default(),
+        };
+    let scope =
+        ApprovalInteractionScope::from_turn(turn_scope, &TurnActor::new(owner_user_id.clone()))
+            .to_resource_scope();
+    match store.get(&scope, request_id).await {
+        Ok(Some(record)) => ApprovalPromptLookup {
+            context: approval_context_for_request(&record.request),
+            invocation_id: Some(record.scope.invocation_id),
+        },
+        Ok(None) => ApprovalPromptLookup::default(),
+        Err(error) => {
+            tracing::debug!(
+                %error,
+                request_id = %request_id,
+                "approval request lookup failed during gate projection"
+            );
+            // silent-ok: approval context is best-effort UI enrichment; gate prompts remain actionable without it
+            ApprovalPromptLookup::default()
+        }
+    }
 }
 
 fn approval_context_for_request(request: &ApprovalRequest) -> Option<ApprovalPromptContextView> {
@@ -590,7 +628,7 @@ fn gate_prompt(
     headline: &'static str,
     allow_always: bool,
 ) -> ProductOutboundPayload {
-    gate_prompt_with_context(event, gate_ref, headline, allow_always, None)
+    gate_prompt_with_context(event, gate_ref, headline, allow_always, None, None)
 }
 
 fn gate_prompt_with_context(
@@ -599,10 +637,12 @@ fn gate_prompt_with_context(
     headline: &'static str,
     allow_always: bool,
     approval_context: Option<ApprovalPromptContextView>,
+    invocation_id: Option<InvocationId>,
 ) -> ProductOutboundPayload {
     ProductOutboundPayload::GatePrompt(GatePromptView {
         turn_run_id: event.run_id,
         gate_ref,
+        invocation_id,
         headline: headline.to_string(),
         body: event
             .sanitized_reason

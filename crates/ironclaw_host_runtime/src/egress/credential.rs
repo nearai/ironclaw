@@ -252,7 +252,9 @@ fn staged_secret_for_injection(
 }
 
 fn runtime_reuses_staged_credentials(runtime: RuntimeKind) -> bool {
-    runtime == RuntimeKind::Mcp
+    // Multi-call runtimes borrow invocation-scoped staged credentials until
+    // the capability dispatch completes or aborts.
+    matches!(runtime, RuntimeKind::Mcp | RuntimeKind::Wasm)
 }
 
 fn missing_runtime_credential(
@@ -467,7 +469,8 @@ const _: fn(&CredentialCacheEntry) = |entry| {
 mod tests {
     use super::*;
     use ironclaw_host_api::{
-        InvocationId, NetworkMethod, NetworkPolicy, ResourceScope, RuntimeKind, TenantId, UserId,
+        InvocationId, NetworkMethod, NetworkPolicy, ResourceScope, RuntimeKind, TenantId,
+        Timestamp, UserId,
     };
     use ironclaw_secrets::{
         InMemorySecretStore, SecretLease, SecretLeaseId, SecretMetadata, SecretStoreError,
@@ -588,6 +591,7 @@ mod tests {
             scope.clone(),
             handle.clone(),
             SecretMaterial::from("sk-test-secret"),
+            None,
         ))
         .unwrap();
 
@@ -619,8 +623,13 @@ mod tests {
             scope: ResourceScope,
             handle: SecretHandle,
             _material: SecretMaterial,
+            _expires_at: Option<Timestamp>,
         ) -> Result<SecretMetadata, SecretStoreError> {
-            Ok(SecretMetadata { scope, handle })
+            Ok(SecretMetadata {
+                scope,
+                handle,
+                expires_at: None,
+            })
         }
 
         async fn metadata(
@@ -631,7 +640,19 @@ mod tests {
             Ok(Some(SecretMetadata {
                 scope: self.scope.clone(),
                 handle: self.handle.clone(),
+                expires_at: None,
             }))
+        }
+
+        async fn metadata_for_scope(
+            &self,
+            _scope: &ResourceScope,
+        ) -> Result<Vec<SecretMetadata>, SecretStoreError> {
+            Ok(vec![SecretMetadata {
+                scope: self.scope.clone(),
+                handle: self.handle.clone(),
+                expires_at: None,
+            }])
         }
 
         async fn delete(
@@ -697,9 +718,10 @@ mod tests {
             scope: ResourceScope,
             handle: SecretHandle,
             material: SecretMaterial,
+            expires_at: Option<Timestamp>,
         ) -> Result<SecretMetadata, SecretStoreError> {
             Self::yield_to_tokio().await;
-            self.inner.put(scope, handle, material).await
+            self.inner.put(scope, handle, material, expires_at).await
         }
 
         async fn metadata(
@@ -709,6 +731,14 @@ mod tests {
         ) -> Result<Option<SecretMetadata>, SecretStoreError> {
             Self::yield_to_tokio().await;
             self.inner.metadata(scope, handle).await
+        }
+
+        async fn metadata_for_scope(
+            &self,
+            scope: &ResourceScope,
+        ) -> Result<Vec<SecretMetadata>, SecretStoreError> {
+            Self::yield_to_tokio().await;
+            self.inner.metadata_for_scope(scope).await
         }
 
         async fn delete(

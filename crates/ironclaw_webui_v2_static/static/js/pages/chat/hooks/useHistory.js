@@ -58,7 +58,7 @@ export function useHistory(threadId, options = {}) {
     loadError: null,
   });
   // Synchronous reentrancy guard, tracked PER THREAD — `isLoading` in state is
-  // async so it can't gate overlapping calls (scroll-to-load + onRunCompleted
+  // async so it can't gate overlapping calls (scroll-to-load + onRunSettled
   // refetch can fire in the same tick). It must be per-thread, not a single
   // boolean: a boolean held by an in-flight load of thread A would block a
   // switch to an uncached thread B, leaving B stuck loading. Each entry is
@@ -71,7 +71,13 @@ export function useHistory(threadId, options = {}) {
   threadIdRef.current = threadId;
 
   const loadHistory = React.useCallback(
-    async (cursor) => {
+    async (cursor, loadOptions = {}) => {
+      // `preserveClientOnly` keeps client-synthesized messages that never
+      // appear in the timeline (run-failure `err-*` bubbles) when a full
+      // reload replaces the list. A settle-triggered reload (any terminal
+      // run status) uses this so recovering tool input/output previews from
+      // the durable timeline doesn't erase a visible failure notice.
+      const { preserveClientOnly = false } = loadOptions;
       if (!threadId) {
         setState({ messages: [], nextCursor: null, isLoading: false, loadError: null });
         return;
@@ -96,7 +102,7 @@ export function useHistory(threadId, options = {}) {
         if (authScope() !== issuingScope) return;
 
         const pendingMessages = cursor ? [] : getPendingMessages?.() || [];
-        const renderable = messagesFromTimeline(data.messages || [], pendingMessages);
+        const renderable = messagesFromTimeline(data.messages || [], pendingMessages, threadId);
         const nextCursor = data.next_cursor || null;
 
         // RebornTimelineResponse.next_cursor === null means we reached
@@ -105,19 +111,31 @@ export function useHistory(threadId, options = {}) {
 
         // A full (non-paginated) load can be cached without the previous
         // state, so refresh the cache even if the user has since switched
-        // threads. Always under the issuing identity's key.
+        // threads -- the cache write must not be deferred into `setState`,
+        // which bails on a stale thread and would leave the cache stale.
+        // The active thread cache is refreshed again below after merging
+        // client-only messages from the live state.
         if (!cursor) {
-          putCache(key, { messages: renderable, nextCursor });
+          const cachedMessages = historyCache.get(key)?.messages || [];
+          const cacheMerged = mergeFullRefresh(renderable, cachedMessages, {
+            preserveClientOnly,
+          });
+          putCache(key, { messages: cacheMerged, nextCursor });
         }
 
         setState((prev) => {
           // Stale resolve for a thread that's no longer active: leave the
           // live view alone (the cache above already captured the result).
           if (threadIdRef.current !== threadId) return prev;
-          const merged = cursor
-            ? mergePage(renderable, prev.messages)
-            : renderable;
-          if (cursor) putCache(key, { messages: merged, nextCursor });
+          let merged;
+          if (cursor) {
+            merged = mergePage(renderable, prev.messages);
+          } else {
+            merged = mergeFullRefresh(renderable, prev.messages, {
+              preserveClientOnly,
+            });
+          }
+          putCache(key, { messages: merged, nextCursor });
           return {
             messages: merged,
             nextCursor,
@@ -184,6 +202,23 @@ export function useHistory(threadId, options = {}) {
 }
 
 function mergePage(older, current) {
-  const ids = new Set(current.map((m) => m.id));
-  return [...older.filter((m) => !ids.has(m.id)), ...current];
+  const ids = new Set(current.map((m) => m?.id).filter(Boolean));
+  return [...older.filter((m) => !ids.has(m?.id)), ...current];
+}
+
+function mergeFullRefresh(fresh, current, options = {}) {
+  const { preserveClientOnly = false } = options;
+  const ids = new Set(fresh.map((m) => m?.id).filter(Boolean));
+  const preserved = current.filter((message) => {
+    if (!message || typeof message.id !== "string" || ids.has(message.id)) {
+      return false;
+    }
+    if (isRuntimeActivityMessage(message)) return true;
+    return preserveClientOnly && message.id.startsWith("err-");
+  });
+  return preserved.length > 0 ? [...fresh, ...preserved] : fresh;
+}
+
+function isRuntimeActivityMessage(message) {
+  return message?.role === "tool_activity" || message?.role === "thinking";
 }

@@ -112,12 +112,7 @@ where
         thread_id: &ThreadId,
         message: &ThreadMessageRecord,
     ) -> Result<(), SessionThreadError> {
-        let path = message_sequence_index_path(scope, thread_id, message.sequence)?;
-        let record = MessageSequenceIndexRecord {
-            sequence: message.sequence,
-            message_id: message.message_id,
-        };
-        let entry = message_sequence_index_entry(&record)?;
+        let (path, entry) = message_sequence_index_entry_for_message(scope, thread_id, message)?;
         match put_with_cas(
             self.filesystem,
             &scope.to_resource_scope(),
@@ -148,6 +143,20 @@ where
             Err(PutError::Other(error)) => Err(error),
         }
     }
+}
+
+pub(super) fn message_sequence_index_entry_for_message(
+    scope: &ThreadScope,
+    thread_id: &ThreadId,
+    message: &ThreadMessageRecord,
+) -> Result<(ScopedPath, Entry), SessionThreadError> {
+    let path = message_sequence_index_path(scope, thread_id, message.sequence)?;
+    let record = MessageSequenceIndexRecord {
+        sequence: message.sequence,
+        message_id: message.message_id,
+    };
+    let entry = message_sequence_index_entry(&record)?;
+    Ok((path, entry))
 }
 
 fn message_sequence_index_entry(

@@ -4,7 +4,7 @@ use ironclaw_auth::{
     AuthProductError, AuthProductScope, AuthProviderId, AuthSurface, CredentialAccount,
     CredentialAccountId, CredentialAccountRecordSource, CredentialAccountService,
     CredentialAccountStatus, CredentialRecoveryProjection, CredentialRefreshRequest,
-    GOOGLE_PROVIDER_ID, ProviderScope, select_latest_duplicate_user_reusable_account,
+    GOOGLE_PROVIDER_ID, ProviderScope,
 };
 use ironclaw_host_api::{ExtensionId, ResourceScope, SecretHandle};
 use thiserror::Error;
@@ -58,7 +58,14 @@ impl GoogleCredentialResolver {
         requester_extension: &ExtensionId,
         required_scopes: &[ProviderScope],
     ) -> Result<GoogleCredential, GoogleCredentialError> {
-        let auth_scope = AuthProductScope::new(scope.clone(), AuthSurface::Api);
+        // Look up the owner's Google account at tenant/user/agent/project
+        // granularity. The runtime `scope` carries the current chat thread, but
+        // credentials are owned by the user, not the thread, so the thread/
+        // mission sub-scope must be stripped or the account authorized in one
+        // thread is invisible in the next. Staging still uses the real runtime
+        // scope via this method's `scope` parameter and
+        // `credential.access_secret_scope`.
+        let auth_scope = AuthProductScope::credential_owner(scope, AuthSurface::Api);
         let provider = google_provider_id()?;
         let account = match self
             .select_configured_account_for_gsuite_requester(
@@ -205,9 +212,15 @@ impl GoogleCredentialResolver {
         requester_extension: ExtensionId,
         account_id: CredentialAccountId,
     ) -> Result<Option<CredentialAccount>, AuthProductError> {
+        // Owner-scope the read so a known account is found from any thread of
+        // the same owner, not just the thread/session it was authorized in.
+        // `credential_owner` is session-agnostic (it builds a fresh owner scope
+        // with no `session_id`), which is what we want for a known-account-id
+        // lookup across the owner.
+        let owner_scope = AuthProductScope::credential_owner(&scope.resource, scope.surface);
         let account = self
             .account_records
-            .accounts_for_owner(scope)
+            .accounts_for_owner(&owner_scope)
             .await?
             .into_iter()
             .find(|account| account.id == account_id);
@@ -254,8 +267,7 @@ impl GoogleCredentialResolver {
                 missing_scopes: required_scopes.to_vec(),
             }),
             [account] => Ok(account.clone()),
-            _ => select_latest_duplicate_user_reusable_account(&scoped)
-                .ok_or(AuthProductError::AccountSelectionRequired.into()),
+            _ => Err(AuthProductError::AccountSelectionRequired.into()),
         }
     }
 
@@ -332,7 +344,7 @@ impl GoogleCredentialResolver {
         self.accounts
             .project_credential_recovery(
                 ironclaw_auth::CredentialRecoveryRequest::new(
-                    AuthProductScope::new(scope.clone(), AuthSurface::Api),
+                    AuthProductScope::credential_owner(scope, AuthSurface::Api),
                     provider,
                 )
                 .for_extension(requester_extension.clone()),
@@ -385,7 +397,7 @@ mod tests {
         CredentialRefreshReport, CredentialRefreshRequest, InMemoryAuthProductServices,
         NewCredentialAccount,
     };
-    use ironclaw_host_api::{InvocationId, UserId};
+    use ironclaw_host_api::{InvocationId, ThreadId, UserId};
 
     use super::*;
 
@@ -487,6 +499,61 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn resolve_projects_recovery_from_owner_scope_across_thread() {
+        let user = UserId::new("alice").unwrap();
+        let mut thread_a = ResourceScope::local_default(user.clone(), InvocationId::new()).unwrap();
+        thread_a.thread_id = Some(ThreadId::new("thread-a").unwrap());
+        let auth_scope = AuthProductScope::new(thread_a.clone(), AuthSurface::Api);
+
+        let auth = Arc::new(InMemoryAuthProductServices::new());
+        let account = auth
+            .create_account(new_credential_account(
+                auth_scope.clone(),
+                CredentialAccountStatus::Configured,
+            ))
+            .await
+            .unwrap();
+        let account_service = Arc::new(ThreadSensitiveRecoveryService {
+            account: account.clone(),
+            recovery_scope: std::sync::Mutex::new(None),
+        });
+        let resolver =
+            GoogleCredentialResolver::new(account_service.clone(), account_service.clone());
+
+        let mut thread_b = ResourceScope::local_default(user, InvocationId::new()).unwrap();
+        thread_b.thread_id = Some(ThreadId::new("thread-b").unwrap());
+
+        let error = resolver
+            .resolve(&thread_b, &ExtensionId::new("third-party").unwrap(), &[])
+            .await
+            .unwrap_err();
+
+        let GoogleCredentialError::Recovery(recovery) = error else {
+            panic!("expected recovery error");
+        };
+        assert_eq!(recovery.kind(), CredentialRecoveryKind::Configured);
+        assert_eq!(
+            recovery.selected_account().map(|account| account.id),
+            Some(account.id)
+        );
+
+        let recorded_scope = account_service
+            .recovery_scope
+            .lock()
+            .unwrap()
+            .clone()
+            .expect("recovery scope recorded");
+        assert_eq!(
+            recorded_scope,
+            AuthProductScope::credential_owner(&thread_b, AuthSurface::Api)
+        );
+        assert!(
+            recorded_scope.resource.thread_id.is_none(),
+            "recovery scope must be owner-scoped"
+        );
+    }
+
+    #[tokio::test]
     async fn resolve_returns_missing_access_secret_when_account_has_no_access_secret() {
         let scope =
             ResourceScope::local_default(UserId::new("alice").unwrap(), InvocationId::new())
@@ -579,6 +646,91 @@ mod tests {
             SecretHandle::new("google-access-token").unwrap()
         );
         assert!(credential.missing_scopes.is_empty());
+    }
+
+    #[tokio::test]
+    async fn resolve_finds_owner_account_authorized_in_a_different_thread() {
+        // Regression (#4920-follow-up): a Google credential a user authorizes in
+        // one chat thread MUST stay resolvable from a new thread of the same
+        // owner. Credentials are owned by tenant/user/agent/project, never by the
+        // thread they happened to be authorized in.
+        let user = UserId::new("alice").unwrap();
+        let mut thread_a = ResourceScope::local_default(user.clone(), InvocationId::new()).unwrap();
+        thread_a.thread_id = Some(ThreadId::new("thread-a").unwrap());
+        let auth_scope = AuthProductScope::new(thread_a.clone(), AuthSurface::Api);
+
+        let auth = Arc::new(InMemoryAuthProductServices::new());
+        let account = auth
+            .create_account(new_credential_account(
+                auth_scope,
+                CredentialAccountStatus::Configured,
+            ))
+            .await
+            .unwrap();
+        let resolver = GoogleCredentialResolver::new(auth.clone(), auth.clone());
+
+        let mut thread_b = ResourceScope::local_default(user, InvocationId::new()).unwrap();
+        thread_b.thread_id = Some(ThreadId::new("thread-b").unwrap());
+
+        let credential = resolver
+            .resolve(
+                &thread_b,
+                &ExtensionId::new("gmail").unwrap(),
+                &[ProviderScope::new("https://www.googleapis.com/auth/gmail.send").unwrap()],
+            )
+            .await
+            .expect("owner credential must resolve from a different thread");
+
+        assert_eq!(credential.account_id, account.id);
+        assert_eq!(
+            credential.access_secret,
+            SecretHandle::new("google-access-token").unwrap()
+        );
+    }
+
+    #[tokio::test]
+    async fn resolve_finds_extension_owned_account_authorized_in_a_different_thread() {
+        // The cross-thread guarantee is not limited to UserReusable accounts:
+        // an ExtensionOwned Google account stays resolvable for an authorized
+        // gsuite-sibling requester from any thread of the owner.
+        let user = UserId::new("alice").unwrap();
+        let calendar_scope =
+            ProviderScope::new("https://www.googleapis.com/auth/calendar.readonly").unwrap();
+        let mut thread_a = ResourceScope::local_default(user.clone(), InvocationId::new()).unwrap();
+        thread_a.thread_id = Some(ThreadId::new("thread-a").unwrap());
+        let auth_scope = AuthProductScope::new(thread_a.clone(), AuthSurface::Api);
+
+        let auth = Arc::new(InMemoryAuthProductServices::new());
+        let account = auth
+            .create_account(NewCredentialAccount {
+                scope: auth_scope,
+                provider: google_provider_id().unwrap(),
+                label: CredentialAccountLabel::new("work google").unwrap(),
+                status: CredentialAccountStatus::Configured,
+                ownership: CredentialOwnership::ExtensionOwned,
+                owner_extension: Some(ExtensionId::new("google-drive").unwrap()),
+                granted_extensions: Vec::new(),
+                access_secret: Some(SecretHandle::new("google-access-token").unwrap()),
+                refresh_secret: None,
+                scopes: vec![calendar_scope.clone()],
+            })
+            .await
+            .unwrap();
+        let resolver = GoogleCredentialResolver::new(auth.clone(), auth.clone());
+
+        let mut thread_b = ResourceScope::local_default(user, InvocationId::new()).unwrap();
+        thread_b.thread_id = Some(ThreadId::new("thread-b").unwrap());
+
+        let credential = resolver
+            .resolve(
+                &thread_b,
+                &ExtensionId::new("google-calendar").unwrap(),
+                &[calendar_scope],
+            )
+            .await
+            .expect("extension-owned credential must resolve from a different thread");
+
+        assert_eq!(credential.account_id, account.id);
     }
 
     #[tokio::test]
@@ -735,6 +887,57 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn resolve_account_finds_owner_account_authorized_in_a_different_thread() {
+        // Regression for the owner-scoped known-account lookup in
+        // `account_by_id`: an account authorized in one thread must resolve by id
+        // from a different thread of the same owner. The `resolve()` path already
+        // has cross-thread coverage; this locks the same guarantee on the
+        // `resolve_account` / `account_by_id` path so a future change that
+        // reintroduces thread-bound lookup there cannot slip through.
+        let user = UserId::new("alice").unwrap();
+        let mut thread_a = ResourceScope::local_default(user.clone(), InvocationId::new()).unwrap();
+        thread_a.thread_id = Some(ThreadId::new("thread-a").unwrap());
+        let create_scope = AuthProductScope::new(thread_a, AuthSurface::Api);
+        let calendar_scope =
+            ProviderScope::new("https://www.googleapis.com/auth/calendar.readonly").unwrap();
+
+        let auth = Arc::new(InMemoryAuthProductServices::new());
+        let account = auth
+            .create_account(NewCredentialAccount {
+                scope: create_scope,
+                provider: google_provider_id().unwrap(),
+                label: CredentialAccountLabel::new("work google").unwrap(),
+                status: CredentialAccountStatus::Configured,
+                ownership: CredentialOwnership::ExtensionOwned,
+                owner_extension: Some(ExtensionId::new("google-drive").unwrap()),
+                granted_extensions: Vec::new(),
+                access_secret: Some(SecretHandle::new("google-access-token").unwrap()),
+                refresh_secret: None,
+                scopes: vec![calendar_scope.clone()],
+            })
+            .await
+            .unwrap();
+        let resolver = GoogleCredentialResolver::new(auth.clone(), auth.clone());
+
+        let mut thread_b = ResourceScope::local_default(user, InvocationId::new()).unwrap();
+        thread_b.thread_id = Some(ThreadId::new("thread-b").unwrap());
+        let lookup_scope = AuthProductScope::new(thread_b.clone(), AuthSurface::Api);
+
+        let credential = resolver
+            .resolve_account(
+                &thread_b,
+                &lookup_scope,
+                &ExtensionId::new("google-calendar").unwrap(),
+                account.id,
+                &[calendar_scope],
+            )
+            .await
+            .expect("known account must resolve by id from a different thread");
+
+        assert_eq!(credential.account_id, account.id);
+    }
+
+    #[tokio::test]
     async fn refresh_reuses_gsuite_owned_google_account_from_durable_store() {
         let scope =
             ResourceScope::local_default(UserId::new("alice").unwrap(), InvocationId::new())
@@ -843,6 +1046,11 @@ mod tests {
         selected: CredentialAccountProjection,
     }
 
+    struct ThreadSensitiveRecoveryService {
+        account: CredentialAccount,
+        recovery_scope: std::sync::Mutex<Option<AuthProductScope>>,
+    }
+
     fn recovery_projection_for_account(
         account: &CredentialAccount,
     ) -> CredentialRecoveryProjection {
@@ -948,6 +1156,97 @@ mod tests {
             _request: CredentialRecoveryRequest,
         ) -> Result<CredentialRecoveryProjection, AuthProductError> {
             Ok(recovery_projection_for_account(&self.account))
+        }
+
+        async fn select_configured_account(
+            &self,
+            _request: CredentialAccountChoiceRequest,
+        ) -> Result<CredentialAccountProjection, AuthProductError> {
+            unreachable!("Google credential resolver tests use unique selection")
+        }
+
+        async fn refresh_account(
+            &self,
+            _request: CredentialRefreshRequest,
+        ) -> Result<CredentialRefreshReport, AuthProductError> {
+            unreachable!("Google credential resolver tests do not refresh accounts")
+        }
+    }
+
+    #[async_trait]
+    impl CredentialAccountRecordSource for ThreadSensitiveRecoveryService {
+        async fn accounts_for_owner(
+            &self,
+            scope: &AuthProductScope,
+        ) -> Result<Vec<CredentialAccount>, AuthProductError> {
+            let owner = CredentialAccountOwnerScope::from_scope(scope);
+            Ok(owner
+                .matches(&self.account)
+                .then(|| self.account.clone())
+                .into_iter()
+                .collect())
+        }
+    }
+
+    #[async_trait]
+    impl CredentialAccountService for ThreadSensitiveRecoveryService {
+        async fn create_account(
+            &self,
+            _request: NewCredentialAccount,
+        ) -> Result<CredentialAccount, AuthProductError> {
+            Ok(self.account.clone())
+        }
+
+        async fn get_account(
+            &self,
+            request: CredentialAccountLookupRequest,
+        ) -> Result<Option<CredentialAccount>, AuthProductError> {
+            Ok((request.account_id == self.account.id).then(|| self.account.clone()))
+        }
+
+        async fn list_accounts(
+            &self,
+            _request: CredentialAccountListRequest,
+        ) -> Result<CredentialAccountListPage, AuthProductError> {
+            Ok(CredentialAccountListPage {
+                accounts: vec![self.account.projection()],
+                next_cursor: None,
+            })
+        }
+
+        async fn update_status(
+            &self,
+            _scope: &AuthProductScope,
+            _account_id: CredentialAccountId,
+            _status: CredentialAccountStatus,
+        ) -> Result<CredentialAccount, AuthProductError> {
+            Ok(self.account.clone())
+        }
+
+        async fn select_unique_configured_account(
+            &self,
+            _request: CredentialAccountSelectionRequest,
+        ) -> Result<CredentialAccountProjection, AuthProductError> {
+            Ok(self.account.projection())
+        }
+
+        async fn project_credential_recovery(
+            &self,
+            request: CredentialRecoveryRequest,
+        ) -> Result<CredentialRecoveryProjection, AuthProductError> {
+            *self.recovery_scope.lock().unwrap() = Some(request.scope.clone());
+            if request.scope.resource.thread_id.is_none() {
+                Ok(CredentialRecoveryProjection::configured(
+                    google_provider_id().unwrap(),
+                    self.account.projection(),
+                ))
+            } else {
+                Ok(CredentialRecoveryProjection::setup_required(
+                    google_provider_id().unwrap(),
+                    CredentialRecoveryReason::NoAccount,
+                    Vec::new(),
+                ))
+            }
         }
 
         async fn select_configured_account(

@@ -95,6 +95,27 @@ impl WebuiAuthenticator for MultiUserToken {
     }
 }
 
+/// `WebuiAuthenticator` resolving [`VALID_TOKEN`] to a fixed,
+/// test-supplied user id. The trace-credits tests use it so the
+/// authenticated caller's user id equals a unique per-test trace
+/// scope — the facade derives the scope from the caller only.
+struct FixedUserToken {
+    user_id: String,
+}
+
+#[async_trait]
+impl WebuiAuthenticator for FixedUserToken {
+    async fn authenticate(&self, token: &str) -> Option<WebuiAuthentication> {
+        if token == VALID_TOKEN {
+            Some(WebuiAuthentication::operator(
+                UserId::new(self.user_id.as_str()).expect("user id"),
+            ))
+        } else {
+            None
+        }
+    }
+}
+
 #[tokio::test]
 async fn health_route_is_public_for_platform_probes() {
     let bundle = RebornWebuiBundle {
@@ -821,6 +842,8 @@ impl RebornServicesApi for StubServices {
                 title: None,
                 metadata_json: None,
                 goal: None,
+                created_at: None,
+                updated_at: None,
             },
         })
     }
@@ -873,6 +896,8 @@ impl RebornServicesApi for StubServices {
                 title: None,
                 metadata_json: None,
                 goal: None,
+                created_at: None,
+                updated_at: None,
             },
             messages: Vec::new(),
             summary_artifacts: Vec::new(),
@@ -954,6 +979,7 @@ impl RebornServicesApi for StubServices {
     ) -> Result<RebornListAutomationsResponse, RebornServicesError> {
         Ok(RebornListAutomationsResponse {
             automations: Vec::new(),
+            scheduler_enabled: true,
         })
     }
 
@@ -1261,6 +1287,120 @@ async fn missing_bearer_returns_401_before_facade() {
             .expect("lock")
             .is_empty()
     );
+}
+
+/// Removes a per-test trace scope directory on drop so a failed
+/// assertion cannot leak contributor-local state into the shared
+/// IronClaw base dir.
+struct TraceScopeCleanup(String);
+
+impl Drop for TraceScopeCleanup {
+    fn drop(&mut self) {
+        let dir = ironclaw_reborn_traces::contribution::trace_contribution_dir_for_scope(Some(
+            self.0.as_str(),
+        ));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+}
+
+fn unique_trace_credits_user() -> String {
+    format!("webui-v2-trace-credits-{}", uuid::Uuid::new_v4())
+}
+
+#[tokio::test]
+async fn trace_credits_bearer_happy_path_returns_unenrolled_zero_state_for_fresh_scope() {
+    // Fresh, unique user scope: the facade derives the trace scope from
+    // the authenticated caller's user id only, so a uuid-suffixed user
+    // guarantees no contributor-local state exists and the response is
+    // the unenrolled zero-state — never an error.
+    let user_id = unique_trace_credits_user();
+    let (app, _services) = build_app_with_authenticator(Arc::new(FixedUserToken {
+        user_id: user_id.clone(),
+    }));
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri("/api/webchat/v2/traces/credit")
+                .header(header::AUTHORIZATION, format!("Bearer {VALID_TOKEN}"))
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body: serde_json::Value =
+        serde_json::from_str(&read_body_string(response).await).expect("trace credits json");
+    assert_eq!(body["enrolled"], false);
+    assert_eq!(body["submissions_total"], 0);
+    assert_eq!(body["submissions_submitted"], 0);
+    assert_eq!(body["credit_events_total"], 0);
+    assert_eq!(body["pending_credit"], 0.0);
+    assert_eq!(body["final_credit"], 0.0);
+    assert!(
+        body["note"]
+            .as_str()
+            .expect("note")
+            .contains("authoritative ledger is server-side"),
+        "response must carry the server-authoritative framing note",
+    );
+}
+
+#[tokio::test]
+async fn trace_credits_missing_bearer_returns_401() {
+    let (app, _services) = build_app();
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri("/api/webchat/v2/traces/credit")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn trace_credits_reports_enrolled_for_caller_with_enabled_policy() {
+    use ironclaw_reborn_traces::contribution::{
+        StandingTraceContributionPolicy, trace_scope_key, write_trace_policy_for_scope,
+    };
+
+    // Trace state is keyed by the tenant-scoped composite, so enroll under
+    // `trace_scope_key(TENANT, user)` and assert the route reflects enrollment
+    // for that caller only.
+    let user_id = unique_trace_credits_user();
+    let scope = trace_scope_key(TENANT, user_id.as_str());
+    let _cleanup = TraceScopeCleanup(scope.clone());
+    let policy = StandingTraceContributionPolicy {
+        enabled: true,
+        ..StandingTraceContributionPolicy::default()
+    };
+    write_trace_policy_for_scope(Some(scope.as_str()), &policy).expect("write trace policy");
+
+    let (app, _services) = build_app_with_authenticator(Arc::new(FixedUserToken {
+        user_id: user_id.clone(),
+    }));
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri("/api/webchat/v2/traces/credit")
+                .header(header::AUTHORIZATION, format!("Bearer {VALID_TOKEN}"))
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body: serde_json::Value =
+        serde_json::from_str(&read_body_string(response).await).expect("trace credits json");
+    assert_eq!(body["enrolled"], true);
+    assert_eq!(body["submissions_total"], 0);
 }
 
 #[tokio::test]
@@ -2783,4 +2923,153 @@ async fn public_route_mount_is_merged_without_bearer_auth_and_keeps_descriptor_p
         .await
         .expect("oneshot");
     assert_eq!(protected.status(), StatusCode::UNAUTHORIZED);
+}
+
+// ─── Automations panel UI (fix/reborn-automations-ux) ─────────────────
+//
+// These lock the served automations SPA source shape so a regression that
+// drops one of the panel UX fixes fails here. Behavioral JS coverage needs a
+// browser harness this workspace does not own, so — per the existing
+// `static_*` precedent — we assert the shipped asset content instead.
+
+#[tokio::test]
+async fn static_automations_presenters_label_sub_hourly_schedules() {
+    let (app, _) = build_app();
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri("/v2/js/pages/automations/lib/automations-presenters.js")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = read_body_string(response).await;
+
+    // The cadence labels are now localized: the presenter selects an i18n key
+    // for each sub-hourly/hourly branch and the English copy lives in en.js.
+    assert!(
+        body.contains("automations.schedule.everyMinute"),
+        "presenters must label `* * * * *` / `*/1 * * * *` via the everyMinute key"
+    );
+    assert!(
+        body.contains("automations.schedule.everyMinutes"),
+        "presenters must label `*/N * * * *` via the everyMinutes key"
+    );
+    assert!(
+        body.contains("automations.schedule.hourlyAt"),
+        "presenters must label `M * * * *` via the hourlyAt key"
+    );
+
+    // And the English pack must carry the human-readable copy for those keys,
+    // so a clean install still reads "Every minute" / "Hourly at :MM".
+    let en = app
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri("/v2/js/i18n/en.js")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+    assert_eq!(en.status(), StatusCode::OK);
+    let en_body = read_body_string(en).await;
+    assert!(
+        en_body.contains("\"Every minute\""),
+        "en.js must label `* * * * *` as `Every minute` instead of `Custom schedule`"
+    );
+    assert!(
+        en_body.contains("Every {count} minutes"),
+        "en.js must label `*/N * * * *` as `Every N minutes`"
+    );
+    assert!(
+        en_body.contains("Hourly at :"),
+        "en.js must label `M * * * *` as an hourly cadence"
+    );
+}
+
+#[tokio::test]
+async fn static_automations_summary_reflows_cards_and_shrinks_next_run() {
+    let (app, _) = build_app();
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri("/v2/js/pages/automations/components/automations-summary-strip.js")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = read_body_string(response).await;
+
+    assert!(
+        body.contains("lg:grid-cols-3"),
+        "summary strip must cap cards per row so detail text stays readable"
+    );
+    assert!(
+        !body.contains("xl:grid-cols-5"),
+        "summary strip must not force five cards into one row"
+    );
+    assert!(
+        body.contains("valueClassName"),
+        "the NEXT RUN card must pass a smaller value font so the date is not truncated"
+    );
+}
+
+#[tokio::test]
+async fn static_automations_run_row_spaces_action_button_icons() {
+    let (app, _) = build_app();
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri("/v2/js/pages/automations/components/automation-recent-runs.js")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = read_body_string(response).await;
+
+    assert!(
+        body.contains("name=\"chat\" className=\"mr-1.5 h-4 w-4\""),
+        "the Open run button icon must be spaced away from its label"
+    );
+    assert!(
+        body.contains("name=\"file\" className=\"mr-1.5 h-4 w-4\""),
+        "the Logs button icon must be spaced away from its label"
+    );
+}
+
+#[tokio::test]
+async fn static_automations_delivery_surfaces_save_error_and_gates_slack_hint() {
+    let (app, _) = build_app();
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri("/v2/js/pages/automations/components/automation-delivery-defaults-panel.js")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = read_body_string(response).await;
+
+    assert!(
+        body.contains("deliveryState.saveError"),
+        "the delivery panel must render the save error instead of swallowing it"
+    );
+    assert!(
+        body.contains("hasExternalTargets"),
+        "the Slack approval footnote must be gated on an external target existing"
+    );
 }

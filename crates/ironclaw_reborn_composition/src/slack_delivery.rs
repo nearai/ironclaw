@@ -4,7 +4,7 @@
 //! observer runs after the workflow accepts an inbound Slack message, waits for
 //! the submitted run to finish, reads the finalized assistant reply, and sends it
 //! through the host-mediated product outbound delivery seam.
-// arch-exempt: large_file, deferred-busy hint logic stays here to share observer/test fixtures with final-reply delivery; decomposition tracked in #4818.
+// arch-exempt: large_file, busy-thread / RejectedBusy hint logic stays here to share observer/test fixtures with final-reply delivery; decomposition tracked in #4818.
 
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
@@ -25,12 +25,12 @@ use ironclaw_outbound::{
     ValidatedReplyTargetBinding,
 };
 use ironclaw_product_adapters::{
-    DeclaredEgressHost, EgressCredentialHandle, EgressHeader, EgressMethod, EgressPath,
-    EgressRequest, EgressResponse, ExternalActorRef, ExternalConversationRef, FinalReplyView,
-    GatePromptView, OutboundDeliverySink, ProductAdapter, ProductAdapterError, ProductInboundAck,
-    ProductInboundEnvelope, ProductInboundPayload, ProductOutboundPayload, ProductRejection,
-    ProductRejectionKind, ProductTriggerReason, ProductWorkflowRejectionKind, ProtocolHttpEgress,
-    ProtocolHttpEgressError,
+    ApprovalPromptContextView, DeclaredEgressHost, EgressCredentialHandle, EgressHeader,
+    EgressMethod, EgressPath, EgressRequest, EgressResponse, ExternalActorRef,
+    ExternalConversationRef, ExternalEventId, FinalReplyView, GatePromptView, OutboundDeliverySink,
+    ProductAdapter, ProductAdapterError, ProductInboundAck, ProductInboundEnvelope,
+    ProductInboundPayload, ProductOutboundPayload, ProductRejection, ProductRejectionKind,
+    ProductWorkflowRejectionKind, ProtocolHttpEgress, ProtocolHttpEgressError,
 };
 use ironclaw_product_workflow::{
     ConversationBindingService, ProductOutboundDeliveryRequest, ProductOutboundTargetResolver,
@@ -38,38 +38,42 @@ use ironclaw_product_workflow::{
     VerifiedProductOutboundTargetMetadata, is_approval_gate_ref,
     prepare_and_render_product_outbound,
 };
+use ironclaw_run_state::ApprovalRequestStore;
 use ironclaw_threads::{FinalizedAssistantMessageByRunRequest, SessionThreadService, ThreadScope};
 use ironclaw_triggers::TriggerFire;
 use ironclaw_turns::{
-    GateRef, GetRunStateRequest, ReplyTargetBindingRef, TurnActor, TurnCoordinator, TurnRunId,
-    TurnRunState, TurnScope, TurnStatus,
+    GateRef, GetRunStateRequest, ReplyTargetBindingRef, TurnActor, TurnCoordinator,
+    TurnErrorCategory, TurnRunId, TurnRunState, TurnScope, TurnStatus,
 };
 use ironclaw_wasm_product_adapters::ImmediateAckWorkflowObserver;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashSet, VecDeque};
 use tokio::sync::Semaphore;
 
-use crate::AuthChallengeProvider;
 use crate::auth_prompt::auth_prompt_view_for_blocked_auth;
-use crate::slack_outbound_targets::slack_conversation_id_from_reply_target_binding_ref;
+use crate::slack_outbound_targets::{
+    slack_conversation_id_from_reply_target_binding_ref, slack_reply_target_is_personal_dm,
+};
+use crate::{AuthChallengeProvider, BlockedAuthFlowCanceller};
 
 const MAX_SLACK_RUN_POLL_INTERVAL: Duration = Duration::from_secs(5);
+const DEFAULT_TRIGGERED_RUN_DELIVERY_MAX_WAIT: Duration = Duration::from_secs(30 * 60);
 const SLACK_RUN_POLL_JITTER_BUCKETS: u32 = 5;
 const SLACK_API_HOST: &str = "slack.com";
 const SLACK_BOT_TOKEN_HANDLE: &str = "slack_bot_token";
 const SLACK_WORKING_MESSAGE: &str = "Ironclaw is thinking...";
 const SLACK_AUTH_CANCELED_MESSAGE: &str = "Authentication canceled.";
+/// Posted when a run blocks on a credential-entry (non-OAuth) auth challenge:
+/// entering a secret in chat is a security risk, so it must be done in the web app.
+const SLACK_AUTH_UNAVAILABLE_MESSAGE: &str = "Setting this up needs a credential (an API key or token). Sharing one here is a security risk — anything entered in chat is stored in the conversation — so credential-based connections can only be set up in the Ironclaw web app. Connect it there, then ask me again here.";
 const SLACK_DELIVERY_TIMEOUT_MESSAGE: &str =
     "This is taking longer than expected — check the WebUI for the result.";
 const SLACK_DELIVERY_ERROR_MESSAGE: &str =
     "Something went wrong delivering the result here. Check the WebUI.";
 /// Posted when the blocking run is `BlockedApproval` and no gate_ref is available.
-const SLACK_DEFERRED_BUSY_APPROVAL_MESSAGE: &str = "Ironclaw is waiting on a pending approval before taking new messages — reply `approve` or `deny` (or `approve gate:<ref>`) to resume.";
+const SLACK_BUSY_APPROVAL_MESSAGE: &str = "Ironclaw is waiting on a pending approval before taking new messages — reply `approve` or `deny` (or `approve gate:<ref>`) to resume.";
 /// Posted for any other non-terminal blocking state, or when the state lookup fails.
-///
-/// Honest copy: no queue yet — deferred-message drain ships in a separate PR (#4812).
-/// Revisit this wording once #4812 lands and automatic retry is available.
-const SLACK_DEFERRED_BUSY_GENERIC_MESSAGE: &str = "Ironclaw is still working on a previous message and can't take this one yet — please resend it once the current task finishes.";
+const SLACK_BUSY_GENERIC_MESSAGE: &str = "Ironclaw is still working on a previous message and can't take this one yet — please resend it once the current task finishes.";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct BlockedActionableMarker {
@@ -119,25 +123,53 @@ pub struct SlackFinalReplyDeliveryServices {
     pub adapter: Arc<dyn ProductAdapter>,
     pub egress: Arc<dyn ProtocolHttpEgress>,
     pub delivery_sink: Arc<dyn OutboundDeliverySink>,
+    /// Resolves auth challenges for `BlockedAuth` runs. Only link-based OAuth
+    /// challenges are surfaced in Slack; other challenge kinds are denied (see the
+    /// `BlockedAuth` arm of `notification_for_actionable_state`).
     pub auth_challenges: Option<Arc<dyn AuthChallengeProvider>>,
+    /// Cancels the durable `AuthFlow` record whenever a `BlockedAuth` run is
+    /// auto-cancelled by the Slack delivery path. Threaded through the shared
+    /// `cancel_auth_blocked_run` helper, so it covers every caller that cancels a
+    /// blocked-auth run: the live observer non-OAuth deny arm, the triggered
+    /// non-OAuth deny arm, and the OAuth send-time DM backstop. The Slack path
+    /// cancels the run directly via `TurnCoordinator` (it does not go through the
+    /// canonical `AuthInteractionService` deny path), which would otherwise leave
+    /// the flow record non-terminal (#4952); this cancels the flow alongside the
+    /// run, after the run cancel succeeds. `None` (e.g. no `flow_record_source`
+    /// wired in) skips the flow cancel and still cancels the run — backward-compatible.
+    pub auth_flow_canceller: Option<Arc<dyn BlockedAuthFlowCanceller>>,
+    /// Store used to resolve an approval gate's request details (tool/action/reason)
+    /// so the Slack approval prompt can say WHAT is being approved — the same
+    /// source the WebUI projection reads. `None` disables the enrichment.
+    pub approval_requests: Option<Arc<dyn ApprovalRequestStore>>,
 }
 
-/// Maximum number of (conversation, run_id) pairs remembered for hint dedup.
+/// Maximum number of (conversation, external_event_id) pairs remembered for hint dedup.
 /// FIFO eviction beyond this cap keeps memory O(1); a false-negative after
 /// eviction just means one extra hint, which is harmless.
 const HINT_SEEN_CAP: usize = 256;
 
-type HintSeenKey = (String, TurnRunId);
+/// Throttle key for the busy-thread hint: one hint per (conversation fingerprint, external event id).
+///
+/// Using `ExternalEventId` instead of `TurnRunId` means:
+/// - Transport retries of the **same** Slack event share the same `external_event_id`, so
+///   they are deduplicated here — no duplicate hints on retries.
+/// - Each **new** human message has a distinct `external_event_id`, so each new message
+///   gets a fresh hint even if the same blocking run is still active.
+type HintSeenKey = (String, ExternalEventId);
 type HintSeenSet = Mutex<(VecDeque<HintSeenKey>, HashSet<HintSeenKey>)>;
 
 pub struct SlackFinalReplyDeliveryObserver {
     services: SlackFinalReplyDeliveryServices,
     settings: SlackFinalReplyDeliverySettings,
     delivery_permits: Arc<Semaphore>,
-    /// Per-observer throttle: at most one deferred-busy hint per
-    /// (conversation fingerprint, active_run_id) pair.
-    /// Caps Slack API usage per blocked run; bounded FIFO eviction keeps memory O(1);
-    /// a false-negative after eviction just means one extra hint, harmless.
+    /// Per-observer throttle: at most one busy-thread hint per
+    /// (conversation fingerprint, external_event_id) pair.
+    /// Transport retries of the same Slack event share the same external_event_id, so
+    /// they are deduplicated here. Each distinct new human message gets a fresh hint
+    /// even if the same blocking run is still active.
+    /// Bounded FIFO eviction keeps memory O(1); a false-negative after eviction just
+    /// means one extra hint, harmless.
     hint_seen: HintSeenSet,
     /// Single-flight guard: at most one live `deliver_final_reply` loop per run_id.
     ///
@@ -220,6 +252,47 @@ impl SlackFinalReplyDeliveryObserver {
         let actor = TurnActor::new(binding.actor_user_id.clone());
         let thread_scope = thread_scope_from_binding(&binding)?;
         let scope = turn_scope_from_thread_scope(&binding, &thread_scope)?;
+        // Foreign-run guard: a resolution bridged to a triggered run (the
+        // delivered-gate-route rewrite) resumes a run that lives in the
+        // trigger's own scope, not this Slack conversation's scope. That run is
+        // delivered by its own triggered-delivery loop (`deliver_triggered_run`),
+        // so the live observer must not also poll it here under the conversation
+        // scope — the run isn't found there, which would otherwise surface as a
+        // spurious "something went wrong" delivery error. Skip cleanly and let
+        // the triggered loop own continuation, matching the regular inbound flow.
+        //
+        // The skip only applies to bridged gate/auth resolution payloads. A
+        // normal UserMessage (or other non-resolution payload) must never be
+        // silently dropped here — surface the error instead.
+        let payload_can_bridge_to_foreign_run = matches!(
+            envelope.payload(),
+            ProductInboundPayload::ApprovalResolution(_)
+                | ProductInboundPayload::ScopedApprovalResolution(_)
+                | ProductInboundPayload::AuthResolution(_)
+        );
+        match self
+            .services
+            .turn_coordinator
+            .get_run_state(GetRunStateRequest {
+                scope: scope.clone(),
+                run_id,
+            })
+            .await
+        {
+            Ok(_) => {}
+            Err(error)
+                if payload_can_bridge_to_foreign_run
+                    && matches!(error.category(), TurnErrorCategory::ScopeNotFound) =>
+            {
+                tracing::debug!(
+                    target = "ironclaw::reborn::slack_delivery",
+                    %run_id,
+                    "skipping live Slack delivery: run is not in this conversation scope (triggered/foreign run); its own delivery loop owns continuation"
+                );
+                return Ok(());
+            }
+            Err(error) => return Err(error.into()),
+        }
         let mut delivered_blocked_marker = None;
         let mut working_message = None;
         let mut messages_to_delete_after_final = Vec::new();
@@ -359,10 +432,22 @@ impl SlackFinalReplyDeliveryObserver {
                     );
                     return Ok(None);
                 };
+                // Look up WHAT is being approved from the ApprovalRequestStore by
+                // gate ref — the same source the WebUI gate projection uses — so
+                // the prompt names the capability/reason instead of a generic step.
+                let approval_context = crate::projection::approval_prompt_context_view(
+                    self.services.approval_requests.as_deref(),
+                    gate_ref,
+                    &binding.actor_user_id,
+                    scope,
+                )
+                .await;
                 SlackActionableNotification {
                     event_kind: RunNotificationEventKind::ApprovalNeeded,
                     payload: ProductOutboundPayload::GatePrompt(slack_approval_gate_prompt_view(
-                        run_id, gate_ref,
+                        run_id,
+                        gate_ref,
+                        approval_context.as_ref(),
                     )),
                     gate_ref_for_routing: Some(gate_ref.as_str().to_string()),
                 }
@@ -371,32 +456,90 @@ impl SlackFinalReplyDeliveryObserver {
                 let Some(gate_ref) = state.gate_ref.as_ref() else {
                     tracing::warn!(
                         %run_id,
-                        "Slack run is blocked on auth without a gate ref; skipping auth prompt delivery"
+                        "Slack run is blocked on auth without a gate ref; skipping auth handling"
                     );
                     return Ok(None);
                 };
-                let view = slack_auth_prompt_view(
-                    envelope,
-                    auth_prompt_view_for_blocked_auth(
-                        &binding.actor_user_id,
+                let view = auth_prompt_view_for_blocked_auth(
+                    &binding.actor_user_id,
+                    scope,
+                    run_id,
+                    gate_ref.as_str(),
+                    "Authenticate to continue this run.".to_string(),
+                    &state.credential_requirements,
+                    self.services.auth_challenges.as_deref(),
+                )
+                .await?;
+                // Only link-based OAuth is allowed over Slack: the user
+                // authenticates on the provider's site via `authorization_url` and
+                // the callback stores the credential server-side — nothing secret
+                // is entered into the chat surface. Any other challenge (manual
+                // token / API-key entry, etc.) would have the user paste a
+                // credential into Slack, so deny it: cancel the run (same outcome
+                // as `auth deny`) and redirect them to the web app.
+                if view.authorization_url.is_some() {
+                    SlackActionableNotification {
+                        event_kind: RunNotificationEventKind::AuthRequired,
+                        payload: ProductOutboundPayload::AuthPrompt(slack_auth_prompt_view(
+                            envelope, view,
+                        )),
+                        gate_ref_for_routing: Some(gate_ref.as_str().to_string()),
+                    }
+                } else {
+                    // Deny: cancel the parked run (a backend `cancel_run`, same
+                    // outcome as `auth deny`) and post the denial directly. We
+                    // post directly — like the busy-thread hint — rather than as a
+                    // RunNotification FinalReply, because the outbound-policy /
+                    // communication-preference machinery is for agent replies, not
+                    // system notices, and gates the synthetic reply. Terminal: no
+                    // notification, so the delivery loop ends here.
+                    self.cancel_slack_auth_blocked_run(
                         scope,
+                        TurnActor::new(binding.actor_user_id.clone()),
                         run_id,
                         gate_ref.as_str(),
-                        "Authenticate to continue this run.".to_string(),
-                        &state.credential_requirements,
-                        self.services.auth_challenges.as_deref(),
                     )
-                    .await?,
-                );
-                SlackActionableNotification {
-                    event_kind: RunNotificationEventKind::AuthRequired,
-                    payload: ProductOutboundPayload::AuthPrompt(view),
-                    gate_ref_for_routing: Some(gate_ref.as_str().to_string()),
+                    .await?;
+                    if let Err(error) = post_slack_message(
+                        self.services.egress.as_ref(),
+                        envelope.external_conversation_ref(),
+                        SLACK_AUTH_UNAVAILABLE_MESSAGE,
+                    )
+                    .await
+                    {
+                        tracing::debug!(
+                            target = "ironclaw::reborn::slack_delivery",
+                            %error,
+                            "failed to post Slack auth-unavailable notice (best-effort)"
+                        );
+                    }
+                    return Ok(None);
                 }
             }
             _ => return Ok(None),
         };
         Ok(Some(notification))
+    }
+
+    /// Auto-deny a Slack run that blocked on interactive auth (disabled on this
+    /// channel). Thin wrapper over the shared [`cancel_auth_blocked_run`] so the
+    /// live observer and the triggered delivery path cancel identically.
+    async fn cancel_slack_auth_blocked_run(
+        &self,
+        scope: &TurnScope,
+        actor: TurnActor,
+        run_id: TurnRunId,
+        gate_ref: &str,
+    ) -> Result<(), SlackFinalReplyDeliveryError> {
+        cancel_auth_blocked_run(
+            self.services.turn_coordinator.as_ref(),
+            self.services.auth_flow_canceller.as_deref(),
+            scope,
+            actor,
+            run_id,
+            Some(gate_ref),
+        )
+        .await
     }
 
     async fn deliver_run_notification(
@@ -463,6 +606,7 @@ impl SlackFinalReplyDeliveryObserver {
                 adapter: self.services.adapter.as_ref(),
                 egress: &tracked_egress,
                 delivery_sink: self.services.delivery_sink.as_ref(),
+                require_direct_message_target: false,
             },
         )
         .await?;
@@ -949,20 +1093,9 @@ fn slack_run_notification_projection_id(
     format!("slack-run-notification:{suffix}:{run_id}")
 }
 
-fn slack_approval_gate_prompt_view(run_id: TurnRunId, gate_ref: &GateRef) -> GatePromptView {
-    GatePromptView {
-        turn_run_id: run_id,
-        gate_ref: gate_ref.as_str().to_string(),
-        headline: "Approval needed".to_string(),
-        body: format!(
-            "A step in the workflow requires your approval to resume.\nReply `approve` or `deny` in this thread, or use `approve {}` from anywhere.",
-            gate_ref.as_str()
-        ),
-        allow_always: is_approval_gate_ref(gate_ref),
-        approval_context: None,
-    }
-}
-
+/// Adapts a resolved auth-prompt view for Slack delivery. OAuth setup links are
+/// only safe to post in a private DM, so the `authorization_url` is stripped for
+/// any non-DM (channel) target.
 fn slack_auth_prompt_view(
     envelope: &ProductInboundEnvelope,
     mut view: ironclaw_product_adapters::AuthPromptView,
@@ -977,8 +1110,110 @@ fn slack_auth_setup_link_is_private(envelope: &ProductInboundEnvelope) -> bool {
     matches!(
         envelope.payload(),
         ProductInboundPayload::UserMessage(payload)
-            if payload.trigger == ProductTriggerReason::DirectChat
+            if payload.trigger == ironclaw_product_adapters::ProductTriggerReason::DirectChat
     )
+}
+
+fn slack_approval_gate_prompt_view(
+    run_id: TurnRunId,
+    gate_ref: &GateRef,
+    context: Option<&ApprovalPromptContextView>,
+) -> GatePromptView {
+    let gate_ref_str = gate_ref.as_str();
+
+    // Body carries only the semantic *What/Why* of the gate. The channel-specific
+    // *how to reply* (which differs for a DM vs a channel thread, and is the same
+    // for every gate) is appended once by the Slack adapter's
+    // `gate_prompt_reply_instruction` — keeping the two from duplicating the
+    // reply instructions and keeping the message short.
+    let body = match context {
+        Some(ctx) => {
+            let mut body = format!("*What:* {}", ctx.tool_name);
+            if let Some(reason) = ctx.reason.as_deref() {
+                body.push_str(&format!("\n*Why:* {reason}"));
+            }
+            body
+        }
+        None => "A step in this workflow needs your approval to continue.".to_string(),
+    };
+
+    GatePromptView {
+        turn_run_id: run_id,
+        gate_ref: gate_ref_str.to_string(),
+        invocation_id: None,
+        headline: "Approval needed".to_string(),
+        body,
+        allow_always: is_approval_gate_ref(gate_ref_str),
+        approval_context: context.cloned(),
+    }
+}
+
+/// Cancel a run parked on an interactive-auth gate with a `Policy` reason — the
+/// same `cancel_run` the auth-deny resolution uses. Idempotent per run
+/// (`slack-auth-block:{run_id}`) so repeated observer/delivery passes are safe.
+/// Shared by the live observer path ([`SlackFinalReplyDeliveryObserver::cancel_slack_auth_blocked_run`])
+/// and the triggered delivery path ([`triggered_notification_for_state`]) so the
+/// cancellation contract cannot drift between them.
+async fn cancel_auth_blocked_run(
+    coordinator: &dyn TurnCoordinator,
+    auth_flow_canceller: Option<&dyn BlockedAuthFlowCanceller>,
+    scope: &TurnScope,
+    actor: TurnActor,
+    run_id: TurnRunId,
+    gate_ref: Option<&str>,
+) -> Result<(), SlackFinalReplyDeliveryError> {
+    // Resolve the flow-cancel target BEFORE `cancel_run` consumes `actor`. Owner
+    // resolution mirrors `auth_prompt_view_for_blocked_auth`: an explicit turn owner
+    // (shared/team subject) wins, else the acting user. When `gate_ref` is absent
+    // there is no flow to resolve, so the flow cancel is skipped entirely (not
+    // encoded as an empty ref).
+    let flow_cancel_target = match (auth_flow_canceller, gate_ref) {
+        (Some(canceller), Some(gate_ref)) => {
+            let owner_user_id = scope
+                .explicit_owner_user_id()
+                .unwrap_or(&actor.user_id)
+                .clone();
+            Some((canceller, owner_user_id, gate_ref))
+        }
+        _ => None,
+    };
+
+    let idempotency_key = ironclaw_turns::IdempotencyKey::new(format!("slack-auth-block:{run_id}"))
+        .map_err(|err| SlackFinalReplyDeliveryError::SlackWebApi {
+            reason: format!("invalid idempotency key for slack auth block: {err}"),
+        })?;
+    // Cancel the run FIRST — it is the user-visible terminal action. `cancel_run` is
+    // idempotent (`slack-auth-block:{run_id}`), so repeated passes are safe. If it
+    // fails we return here and leave the durable `AuthFlow` (and the still-usable
+    // auth prompt) intact: marking the flow terminal while the run is still
+    // `BlockedAuth` would be the inverse state drift this fix is meant to prevent,
+    // and the OAuth backstop relies on a failed cancel leaving the prompt usable.
+    coordinator
+        .cancel_run(ironclaw_turns::CancelRunRequest {
+            scope: scope.clone(),
+            actor,
+            run_id,
+            reason: ironclaw_turns::SanitizedCancelReason::Policy,
+            idempotency_key,
+        })
+        .await?;
+
+    // Run is now terminal — cancel the stale `AuthFlow` record alongside it (#4952).
+    // Best-effort cleanliness: a flow-cancel failure does not surface, since the
+    // run (the user-visible action) has already been cancelled.
+    if let Some((canceller, owner_user_id, gate_ref)) = flow_cancel_target
+        && let Err(error) = canceller
+            .cancel_blocked_auth_flow(scope, &owner_user_id, run_id, gate_ref)
+            .await
+    {
+        tracing::debug!(
+            target = "ironclaw::reborn::slack_delivery",
+            %run_id,
+            %error,
+            "failed to cancel stale auth flow on Slack auth auto-deny (best-effort)"
+        );
+    }
+    Ok(())
 }
 
 fn jittered_poll_interval(base: Duration, run_id: &TurnRunId) -> Duration {
@@ -1003,10 +1238,11 @@ impl ImmediateAckWorkflowObserver for SlackFinalReplyDeliveryObserver {
         {
             return;
         }
-        // A2b: DeferredBusy feedback — the user's message was silently dropped
-        // because a run is blocked on a pending gate. Post a one-shot state-aware
-        // hint so the user knows to approve/deny/wait rather than being left in
-        // silence. Same best-effort semantics as A2: post failure → debug! only.
+        // A2b: Busy-thread hint — the user's message was silently dropped
+        // because a run is busy (pending gate or generic RejectedBusy). Post a
+        // one-shot state-aware hint so the user knows to approve/deny/wait (gate
+        // cases) or simply retry later (running-state cases) rather than being
+        // left in silence. Same best-effort semantics as A2: post failure → debug! only.
         //
         // Authorization: only post if the binding lookup succeeds, matching the
         // same guard used by `post_rejection_hint_if_authorized`.
@@ -1016,13 +1252,16 @@ impl ImmediateAckWorkflowObserver for SlackFinalReplyDeliveryObserver {
         // bounds the lifetime of this entire post-ACK task. A detached spawn would
         // escape `drain_immediate_ack_tasks` shutdown/drain without adding any
         // backpressure benefit.
-        if let Some(active_run_id) = deferred_busy_user_message_run_id(&envelope, &ack) {
-            // Throttle: at most one hint per (conversation, active_run_id) pair.
+        if let Some(active_run_id) = busy_hint_user_message_run_id(&envelope, &ack) {
+            // Throttle: at most one hint per (conversation, external_event_id) pair.
+            // Slack transport retries carry the same event id → deduplicated without
+            // duplicate posts. Each new human message has a distinct event id → each
+            // gets a fresh hint, even if the same blocking run is still active.
             // Check before the coordinator call to avoid a round-trip on repeats.
             let conv_key = envelope
                 .external_conversation_ref()
                 .conversation_fingerprint();
-            let throttle_key = (conv_key, active_run_id);
+            let throttle_key = (conv_key, envelope.external_event_id().clone());
             let already_seen = {
                 let mut guard = self.hint_seen.lock().unwrap_or_else(|e| e.into_inner());
                 let (queue, set) = &mut *guard;
@@ -1043,36 +1282,42 @@ impl ImmediateAckWorkflowObserver for SlackFinalReplyDeliveryObserver {
             if already_seen {
                 tracing::debug!(
                     target = "ironclaw::reborn::slack_delivery",
-                    "deferred-busy hint suppressed: already posted for this (conversation, run_id) pair"
+                    "busy-thread hint suppressed: already posted for this (conversation, event_id) pair (transport retry)"
                 );
                 return;
             }
-            // Authorization: verify the conversation has a valid binding before
-            // posting. Skip silently (debug!) when unauthorized.
-            let binding = match self
+            // Derive the scope for the active run state lookup so the hint can be
+            // state-specific (pending gate vs generic busy). When the conversation
+            // has no resolvable binding — e.g. a gate delivered into a fresh DM
+            // that never carried a prior user message — fall back to the generic
+            // busy copy rather than going silent. Posting a generic "I'm waiting
+            // on approval" back to the conversation that just messaged us leaks no
+            // data: it is a reply to the sender's own conversation. The user's
+            // choice here is to never be left without feedback while a gate is open.
+            let hint = match self
                 .services
                 .binding_service
                 .lookup_binding(ResolveBindingRequest::from_envelope(&envelope))
                 .await
             {
-                Ok(b) => b,
+                Ok(binding) => {
+                    busy_hint_from_run_state(
+                        self.services.turn_coordinator.as_ref(),
+                        self.services.approval_requests.as_deref(),
+                        &binding,
+                        active_run_id,
+                    )
+                    .await
+                }
                 Err(error) => {
                     tracing::debug!(
                         target = "ironclaw::reborn::slack_delivery",
                         error = %error,
-                        "skipped deferred-busy hint because the originating conversation was not authorized"
+                        "busy-thread hint falling back to generic copy because the conversation binding was not resolved"
                     );
-                    return;
+                    SLACK_BUSY_GENERIC_MESSAGE.to_string()
                 }
             };
-            // Derive the scope for the active run state lookup.
-            // Falls back to generic copy on any failure — never skips the hint.
-            let hint = deferred_busy_hint_from_run_state(
-                self.services.turn_coordinator.as_ref(),
-                &binding,
-                active_run_id,
-            )
-            .await;
             if let Err(post_err) = post_slack_message(
                 self.services.egress.as_ref(),
                 envelope.external_conversation_ref(),
@@ -1083,7 +1328,7 @@ impl ImmediateAckWorkflowObserver for SlackFinalReplyDeliveryObserver {
                 tracing::debug!(
                     target = "ironclaw::reborn::slack_delivery",
                     error = %post_err,
-                    "failed to post deferred-busy hint to Slack (best-effort)"
+                    "failed to post busy-thread hint to Slack (best-effort)"
                 );
             }
             return;
@@ -1222,6 +1467,18 @@ enum SlackFinalReplyDeliveryError {
     InvalidProjectionRef { reason: String },
 }
 
+/// Fail closed when a delivery that must reach a personal DM (e.g. carries an
+/// OAuth authorization_url) resolves to a non-DM target.
+fn enforce_direct_message_if_required(
+    target: &ReplyTargetBindingRef,
+    require_direct_message: bool,
+) -> Result<(), ProductWorkflowError> {
+    if require_direct_message && !slack_reply_target_is_personal_dm(target) {
+        return Err(ProductWorkflowError::OutboundTargetNotDirectMessage);
+    }
+    Ok(())
+}
+
 struct ObservedSlackReplyTargetAuthority {
     scope: TurnScope,
     actor: TurnActor,
@@ -1251,10 +1508,13 @@ impl ProductOutboundTargetResolver for ObservedSlackReplyTargetAuthority {
     async fn resolve_product_outbound_target_metadata(
         &self,
         target: &ValidatedReplyTargetBinding,
+        require_direct_message: bool,
     ) -> Result<VerifiedProductOutboundTargetMetadata, ProductWorkflowError> {
         if target.target() != &self.expected_target {
             return Err(ProductWorkflowError::BindingAccessDenied);
         }
+        // Defense in depth: honor the DM requirement even on the live-path resolver.
+        enforce_direct_message_if_required(target.target(), require_direct_message)?;
         Ok(VerifiedProductOutboundTargetMetadata {
             external_conversation_ref: self.external_conversation_ref.clone(),
             external_actor_ref: self.external_actor_ref.clone(),
@@ -1281,6 +1541,7 @@ fn submitted_run_id(ack: &ProductInboundAck) -> Option<TurnRunId> {
         } => Some(*submitted_run_id),
         ProductInboundAck::Duplicate { .. } => None,
         ProductInboundAck::DeferredBusy { .. }
+        | ProductInboundAck::RejectedBusy { .. }
         | ProductInboundAck::Rejected(_)
         | ProductInboundAck::CommandResult { .. }
         | ProductInboundAck::NoOp => None,
@@ -1348,33 +1609,60 @@ fn rejection_hint_for_resolution(
 }
 
 /// Returns `Some(active_run_id)` when the ack + payload combination should trigger
-/// the deferred-busy hint flow: a plain `DeferredBusy` ack on a `UserMessage` payload.
+/// the busy-thread hint flow: a `DeferredBusy` (legacy) or `RejectedBusy` ack on a
+/// `UserMessage` payload.
 ///
-/// Returns `None` for `Duplicate` acks (the idempotency ledger never settles
-/// `DeferredBusy`, so Slack transport retries re-process as a fresh plain
-/// `DeferredBusy`, never `Duplicate{DeferredBusy}`; suppressing all `Duplicate`
-/// matches the invariant in `rejection_hint_for_resolution`) and for all non-user-
-/// message payloads (resolution/control payloads must stay silent).
-fn deferred_busy_user_message_run_id(
+/// `RejectedBusy { active_run_id: Some(run_id) }` carries a live blocking run whose
+/// state can be fetched to produce a gate-aware hint.  When `active_run_id` is `None`
+/// (e.g. a replay with no live run) we return `None` — there is no run state to
+/// inspect so no hint is appropriate.
+///
+/// `Duplicate { prior }` — `RejectedBusy` is a settled outcome, so a Slack transport
+/// retry of the same external event arrives as `Duplicate { prior: RejectedBusy { .. } }`.
+/// We unwrap the prior and re-apply the same extraction so that `Duplicate { prior:
+/// RejectedBusy { active_run_id: Some(run) } }` still yields the blocking run id.
+/// The per-(conversation, event_id) throttle prevents a double-post when the first
+/// delivery already succeeded — the retry only posts if the original hint was lost.
+/// `Duplicate { prior: DeferredBusy { active_run_id, .. } }` yields `Some(active_run_id)` —
+/// the recursive call re-applies the same extraction on the prior ack.  DeferredBusy is never
+/// settled upstream (so this wrapping is unreachable in practice), but when it does occur the
+/// run id is surfaced rather than silently dropped.
+///
+/// Returns `None` for all non-user-message payloads (resolution/control payloads must
+/// stay silent).
+fn busy_hint_user_message_run_id(
     envelope: &ProductInboundEnvelope,
     ack: &ProductInboundAck,
 ) -> Option<TurnRunId> {
-    // All Duplicate acks are suppressed — same pattern as rejection_hint_for_resolution.
-    if matches!(ack, ProductInboundAck::Duplicate { .. }) {
-        return None;
-    }
     // Only reply to user messages — resolution/control/noop payloads must stay silent.
     if !matches!(envelope.payload(), ProductInboundPayload::UserMessage(_)) {
         return None;
     }
     match ack {
         ProductInboundAck::DeferredBusy { active_run_id, .. } => Some(*active_run_id),
+        // RejectedBusy with a live blocking run → hint is gated on the run state.
+        // RejectedBusy with no run (replay / no live run) → no hint.
+        ProductInboundAck::RejectedBusy {
+            active_run_id: Some(run_id),
+            ..
+        } => Some(*run_id),
+        ProductInboundAck::RejectedBusy {
+            active_run_id: None,
+            ..
+        } => None,
+        // Unwrap Duplicate and re-apply extraction on the prior ack.
+        // RejectedBusy is a settled outcome, so transport retries arrive as
+        // Duplicate{RejectedBusy{..}} — the prior still carries the blocking run id.
+        // DeferredBusy is never settled upstream, so Duplicate{DeferredBusy} is
+        // unreachable in practice; but when it occurs the recursive call yields
+        // Some(active_run_id) from the prior — the run id is not silently dropped.
+        ProductInboundAck::Duplicate { prior } => busy_hint_user_message_run_id(envelope, prior),
         _ => None,
     }
 }
 
-/// Looks up the blocking run's state and returns the appropriate deferred-busy
-/// hint copy.
+/// Looks up the blocking run's state and returns the appropriate busy-thread hint
+/// copy.
 ///
 /// - `BlockedApproval` with `Some(gate_ref)` → approval wording with concrete `approve {ref}` command
 /// - `BlockedApproval` with `None` gate_ref  → approval wording without a specific gate command
@@ -1383,8 +1671,9 @@ fn deferred_busy_user_message_run_id(
 /// - anything else / lookup failure           → generic wording
 ///
 /// Never returns an error — lookup failures degrade to the generic copy.
-async fn deferred_busy_hint_from_run_state(
+async fn busy_hint_from_run_state(
     coordinator: &dyn TurnCoordinator,
+    approval_requests: Option<&dyn ApprovalRequestStore>,
     binding: &ResolvedBinding,
     active_run_id: TurnRunId,
 ) -> String {
@@ -1397,46 +1686,71 @@ async fn deferred_busy_hint_from_run_state(
             tracing::debug!(
                 target = "ironclaw::reborn::slack_delivery",
                 error = %err,
-                "deferred-busy scope derivation failed; using generic copy"
+                "busy-thread hint scope derivation failed; using generic copy"
             );
-            return SLACK_DEFERRED_BUSY_GENERIC_MESSAGE.to_string();
+            return SLACK_BUSY_GENERIC_MESSAGE.to_string();
         }
     };
     match coordinator
         .get_run_state(GetRunStateRequest {
-            scope,
+            scope: scope.clone(),
             run_id: active_run_id,
         })
         .await
     {
         Ok(state) => match state.status {
             TurnStatus::BlockedApproval => match state.gate_ref.as_ref() {
-                Some(gate_ref) => format!(
-                    "Ironclaw is waiting on a pending approval before taking new messages \
-                     — reply `approve {ref}` or `deny` to resume.",
-                    ref = gate_ref.as_str()
-                ),
-                None => SLACK_DEFERRED_BUSY_APPROVAL_MESSAGE.to_string(),
+                // Name both the blocking gate ref AND what it would approve (the
+                // tool/capability), so the user sees exactly what is holding the
+                // conversation and what `approve` would authorize. The blocking
+                // run is in this thread's scope (that is why the thread is busy),
+                // so the approval request resolves under the derived scope.
+                Some(gate_ref) => {
+                    let what = crate::projection::approval_prompt_context_view(
+                        approval_requests,
+                        gate_ref,
+                        &binding.actor_user_id,
+                        &scope,
+                    )
+                    .await
+                    .map(|ctx| ctx.tool_name);
+                    match what {
+                        Some(tool) => format!(
+                            "Ironclaw is waiting on your approval for `{tool}` before taking new \
+                             messages — reply `approve {ref}` to authorize it or `deny {ref}` to \
+                             decline.",
+                            ref = gate_ref.as_str()
+                        ),
+                        None => format!(
+                            "Ironclaw is waiting on a pending approval (`{ref}`) before taking new \
+                             messages — reply `approve {ref}` or `deny {ref}` to respond.",
+                            ref = gate_ref.as_str()
+                        ),
+                    }
+                }
+                None => SLACK_BUSY_APPROVAL_MESSAGE.to_string(),
             },
+            // Auth gates can't be completed in Slack (credential sharing is a
+            // security risk), but still name the blocking ref so the user can
+            // decline it here and knows what is holding the thread.
             TurnStatus::BlockedAuth => match state.gate_ref.as_ref() {
                 Some(gate_ref) => format!(
-                    "Ironclaw is waiting on an authentication step before taking new messages \
-                     — complete the authentication prompt (or reply `auth deny {ref}` to decline).",
+                    "Ironclaw is waiting on authentication before taking new messages. Reply \
+                     `auth deny {ref}` to decline it here, or complete the connection in the \
+                     Ironclaw web app to resume.",
                     ref = gate_ref.as_str()
                 ),
-                None => "Ironclaw is waiting on an authentication step before taking new messages \
-                         — complete the authentication prompt to continue."
-                    .to_string(),
+                None => SLACK_BUSY_GENERIC_MESSAGE.to_string(),
             },
-            _ => SLACK_DEFERRED_BUSY_GENERIC_MESSAGE.to_string(),
+            _ => SLACK_BUSY_GENERIC_MESSAGE.to_string(),
         },
         Err(err) => {
             tracing::debug!(
                 target = "ironclaw::reborn::slack_delivery",
                 error = %err,
-                "deferred-busy run-state lookup failed; using generic copy"
+                "busy-thread hint run-state lookup failed; using generic copy"
             );
-            SLACK_DEFERRED_BUSY_GENERIC_MESSAGE.to_string()
+            SLACK_BUSY_GENERIC_MESSAGE.to_string()
         }
     }
 }
@@ -1544,7 +1858,10 @@ impl TriggeredRunDeliveryDriver {
     ) -> Self {
         Self::with_settings(
             services,
-            SlackFinalReplyDeliverySettings::default(),
+            SlackFinalReplyDeliverySettings {
+                max_wait: DEFAULT_TRIGGERED_RUN_DELIVERY_MAX_WAIT,
+                ..SlackFinalReplyDeliverySettings::default()
+            },
             delivery_store,
             route_store,
             fallback_agent_id,
@@ -1637,6 +1954,8 @@ impl PostSubmitDeliveryHook for TriggeredRunDeliveryDriver {
             egress: Arc::clone(&self.services.egress),
             delivery_sink: Arc::clone(&self.services.delivery_sink),
             auth_challenges: self.services.auth_challenges.clone(),
+            auth_flow_canceller: self.services.auth_flow_canceller.clone(),
+            approval_requests: self.services.approval_requests.clone(),
         };
         let settings = self.settings;
         let delivery_store = Arc::clone(&self.delivery_store);
@@ -1723,7 +2042,6 @@ async fn deliver_triggered_run(
     // Use the scope's agent_id when present; otherwise fall back to the configured
     // fallback_agent_id — the same value record_trigger_prompt uses — so the key
     // matches the thread that was stored at submit time.
-    let _thread_id = scope.thread_id.clone();
     let thread_scope = ThreadScope {
         tenant_id: scope.tenant_id.clone(),
         agent_id: scope
@@ -1771,7 +2089,9 @@ async fn deliver_triggered_run(
             }
         };
 
-        // Build the notification payload.
+        // Build the notification payload. The trigger prompt becomes the short
+        // routine label in the footer appended to every triggered Slack message.
+        let trigger_label = triggered_label_from_prompt(&fire.prompt);
         let notification = match triggered_notification_for_state(
             services,
             &scope,
@@ -1779,6 +2099,7 @@ async fn deliver_triggered_run(
             &actor,
             &state,
             run_id,
+            &trigger_label,
         )
         .await
         {
@@ -1806,6 +2127,16 @@ async fn deliver_triggered_run(
         let event_kind = notification.event_kind;
         let gate_ref_for_routing = notification.gate_ref_for_routing.clone();
 
+        // Compute the DM requirement from the payload BEFORE it is moved into the call.
+        // AuthPrompt payloads with an authorization_url must only be delivered to a
+        // personal DM; pass this requirement through the delivery request so the
+        // resolver enforces it at send time (closing the snapshot-vs-send race).
+        let require_direct_message_target = matches!(
+            &notification.payload,
+            ProductOutboundPayload::AuthPrompt(view)
+                if view.authorization_url.is_some()
+        );
+
         // Build the delivery request and deliver.
         let delivery_result = deliver_triggered_notification(
             services,
@@ -1815,6 +2146,7 @@ async fn deliver_triggered_run(
             &state,
             &authority,
             notification,
+            require_direct_message_target,
         )
         .await;
 
@@ -1845,7 +2177,13 @@ async fn deliver_triggered_run(
                     )
                     .await;
                 }
-                if let Some(marker) = next_blocked_marker {
+                if let Some(marker) = next_blocked_marker
+                    && matches!(
+                        event_kind,
+                        RunNotificationEventKind::ApprovalNeeded
+                            | RunNotificationEventKind::AuthRequired
+                    )
+                {
                     if event_kind == RunNotificationEventKind::AuthRequired {
                         messages_to_delete_after_final.extend(posted_messages);
                     }
@@ -1861,6 +2199,86 @@ async fn deliver_triggered_run(
                 record_triggered_run_outcome(delivery_store, run_id, outcome).await;
                 return outcome;
             }
+            Err(TriggeredNotificationFailure::OAuthTargetNotDm) => {
+                // Authority backstop tripped: the payload carried an OAuth
+                // authorization_url but the send-time binding was not a personal DM.
+                // Suppress the URL (fail closed), cancel the blocked run, then post
+                // the auth-unavailable notice as a terminal FinalReply — mirrors the
+                // non-OAuth deny branch in `triggered_notification_for_state`.
+                tracing::debug!(
+                    target = "ironclaw::reborn::slack_delivery",
+                    %run_id,
+                    "triggered run OAuth URL suppressed by send-time backstop: resolved \
+                     target is not a personal DM; cancelling run"
+                );
+                // Cancel the blocked run FIRST. Do NOT remove the existing auth
+                // prompt until the run is actually canceled: a transient cancel
+                // failure must leave the prompt in place (the user may still be able
+                // to finish), so on failure we record `Failed` and return without
+                // deleting anything.
+                if let Err(err) = cancel_auth_blocked_run(
+                    services.turn_coordinator.as_ref(),
+                    services.auth_flow_canceller.as_deref(),
+                    &scope,
+                    actor.clone(),
+                    run_id,
+                    state.gate_ref.as_ref().map(|gate_ref| gate_ref.as_str()),
+                )
+                .await
+                {
+                    tracing::debug!(
+                        target = "ironclaw::reborn::slack_delivery",
+                        %run_id,
+                        error = %err,
+                        "triggered run OAuth backstop: cancel_auth_blocked_run failed"
+                    );
+                    let outcome = TriggeredRunDeliveryOutcomeKind::Failed;
+                    record_triggered_run_outcome(delivery_store, run_id, outcome).await;
+                    return outcome;
+                }
+                // Post the auth-unavailable notice as a terminal FinalReply.
+                // require_direct_message_target is false: the notice is plain text
+                // with no OAuth URL, so no DM restriction applies.
+                let notice = SlackActionableNotification {
+                    event_kind: RunNotificationEventKind::FinalReplyReady,
+                    payload: ProductOutboundPayload::FinalReply(FinalReplyView {
+                        turn_run_id: run_id,
+                        text: format!(
+                            "{SLACK_AUTH_UNAVAILABLE_MESSAGE}{}",
+                            triggered_update_footer(&trigger_label)
+                        ),
+                        generated_at: Utc::now(),
+                    }),
+                    gate_ref_for_routing: None,
+                };
+                let outcome = match deliver_triggered_notification(
+                    services, &scope, &actor, run_id, &state, &authority, notice, false,
+                )
+                .await
+                {
+                    Ok(_) => TriggeredRunDeliveryOutcomeKind::Delivered,
+                    Err(TriggeredNotificationFailure::NoDefaultConfigured) => {
+                        TriggeredRunDeliveryOutcomeKind::NoDefaultConfigured
+                    }
+                    Err(TriggeredNotificationFailure::Denied) => {
+                        TriggeredRunDeliveryOutcomeKind::Denied
+                    }
+                    Err(TriggeredNotificationFailure::OAuthTargetNotDm)
+                    | Err(TriggeredNotificationFailure::Other(_)) => {
+                        TriggeredRunDeliveryOutcomeKind::Failed
+                    }
+                };
+                // The run is now canceled, so any OAuth auth-prompt messages posted
+                // to a DM in earlier iterations are stale — remove them. This runs
+                // only after a successful cancel and after the replacement notice has
+                // been attempted, so we never strip the prompt while the run is still
+                // live.
+                for message in messages_to_delete_after_final.drain(..) {
+                    delete_triggered_slack_message(services, message).await;
+                }
+                record_triggered_run_outcome(delivery_store, run_id, outcome).await;
+                return outcome;
+            }
             Err(failure) => {
                 tracing::warn!(
                     target = "ironclaw::reborn::slack_delivery",
@@ -1873,6 +2291,9 @@ async fn deliver_triggered_run(
                         TriggeredRunDeliveryOutcomeKind::NoDefaultConfigured
                     }
                     TriggeredNotificationFailure::Denied => TriggeredRunDeliveryOutcomeKind::Denied,
+                    TriggeredNotificationFailure::OAuthTargetNotDm => {
+                        unreachable!("OAuthTargetNotDm is handled by the dedicated arm above")
+                    }
                     TriggeredNotificationFailure::Other(_) => {
                         TriggeredRunDeliveryOutcomeKind::Failed
                     }
@@ -1920,7 +2341,74 @@ async fn wait_for_actionable_triggered(
     }
 }
 
+/// Footer for triggered **gate** prompts (approval / OAuth auth). The user can
+/// act on this specific request in Slack, but cannot otherwise drive the run.
+/// `label` is a short trigger identifier (truncated prompt); omitted when empty.
+fn triggered_gate_footer(label: &str) -> String {
+    let label = label.trim();
+    let lead = if label.is_empty() {
+        "From a triggered event.".to_string()
+    } else {
+        format!("From a triggered event: “{label}”.")
+    };
+    format!(
+        "\n\n_{lead} You can respond to this request here — to otherwise interact \
+         with this run, open the Ironclaw web app._"
+    )
+}
+
+/// Footer for triggered **updates / final replies**. These are output only —
+/// there is nothing to act on in Slack, so it points the user to the web app.
+fn triggered_update_footer(label: &str) -> String {
+    let label = label.trim();
+    let lead = if label.is_empty() {
+        "From a triggered event.".to_string()
+    } else {
+        format!("From a triggered event: “{label}”.")
+    };
+    format!(
+        "\n\n_{lead} You can't interact with triggered events here — open the \
+         Ironclaw web app to interact with this run._"
+    )
+}
+
+/// Truncate a trigger prompt to a short single-line label for the footer.
+fn triggered_label_from_prompt(prompt: &str) -> String {
+    const MAX_LABEL_CHARS: usize = 60;
+    let first_line = prompt.lines().next().unwrap_or("").trim();
+    if first_line.chars().count() <= MAX_LABEL_CHARS {
+        first_line.to_string()
+    } else {
+        let truncated: String = first_line.chars().take(MAX_LABEL_CHARS).collect();
+        format!("{truncated}…")
+    }
+}
+
 /// Builds the notification payload for a triggered run's actionable state.
+///
+/// ## Triggered Slack surface contract
+///
+/// A triggered run is **output-only over Slack, plus gate-resolution input** —
+/// it is NOT a conversational channel. This function is the single place those
+/// outputs are minted, and it only ever produces three of the nine
+/// [`ProductOutboundPayload`] variants:
+///
+/// - `BlockedApproval` → `GatePrompt` (approve/deny)
+/// - `BlockedAuth`     → `AuthPrompt` (OAuth link) or, for non-OAuth, a cancel +
+///   `FinalReply` carrying the auth-unavailable notice
+/// - `Completed`       → `FinalReply` (the result)
+///
+/// Anything else (`Running`, etc.) yields `None` — triggered Slack deliberately
+/// does NOT stream `Progress` / `CapabilityActivity` / projection payloads; those
+/// belong to the live WebUI channel.
+///
+/// On the inbound side the triggered run only consumes gate **resolutions**
+/// (`ApprovalResolution` / `ScopedApprovalResolution` / `AuthResolution`), bridged
+/// back into the trigger's scope via the delivered-gate-route fingerprint. A
+/// free-text Slack reply parses as a `UserMessage` and starts a *separate* run in
+/// the DM's own scope — it never reaches the triggered run. If you extend this
+/// function, preserve that boundary: do not mint conversational/streaming payloads
+/// here, and do not assume inbound free-text can address a triggered run.
 async fn triggered_notification_for_state(
     services: &SlackFinalReplyDeliveryServices,
     scope: &TurnScope,
@@ -1928,6 +2416,7 @@ async fn triggered_notification_for_state(
     actor: &TurnActor,
     state: &TurnRunState,
     run_id: TurnRunId,
+    trigger_label: &str,
 ) -> Result<Option<SlackActionableNotification>, SlackFinalReplyDeliveryError> {
     match state.status {
         TurnStatus::Completed => {
@@ -1943,6 +2432,7 @@ async fn triggered_notification_for_state(
                 .and_then(|m| m.content)
             else {
                 tracing::warn!(
+                    target = "ironclaw::reborn::slack_delivery",
                     %run_id,
                     "completed triggered run has no finalized assistant message; skipping delivery"
                 );
@@ -1952,7 +2442,7 @@ async fn triggered_notification_for_state(
                 event_kind: RunNotificationEventKind::FinalReplyReady,
                 payload: ProductOutboundPayload::FinalReply(FinalReplyView {
                     turn_run_id: run_id,
-                    text,
+                    text: format!("{text}{}", triggered_update_footer(trigger_label)),
                     generated_at: Utc::now(),
                 }),
                 gate_ref_for_routing: None,
@@ -1961,51 +2451,45 @@ async fn triggered_notification_for_state(
         TurnStatus::BlockedApproval => {
             let Some(gate_ref) = state.gate_ref.as_ref() else {
                 tracing::warn!(
+                    target = "ironclaw::reborn::slack_delivery",
                     %run_id,
                     "triggered run blocked on approval without gate ref; skipping"
                 );
                 return Ok(None);
             };
-            // Approval-prompt copy for triggered runs: "Reply approve <gate_ref>"
-            let gate_ref_str = gate_ref.as_str().to_string();
+            // Render the triggered approval prompt exactly like the regular
+            // inbound flow: What/Why context (the tool + reason) via the shared
+            // `slack_approval_gate_prompt_view`, with the channel-specific reply
+            // instruction appended once by the adapter. The approval request is
+            // stored under this triggered run's scope, so the context resolves
+            // here.
+            let context = crate::projection::approval_prompt_context_view(
+                services.approval_requests.as_deref(),
+                gate_ref,
+                &actor.user_id,
+                scope,
+            )
+            .await;
+            let mut prompt = slack_approval_gate_prompt_view(run_id, gate_ref, context.as_ref());
+            prompt.body.push_str(&triggered_gate_footer(trigger_label));
             Ok(Some(SlackActionableNotification {
                 event_kind: RunNotificationEventKind::ApprovalNeeded,
-                payload: ProductOutboundPayload::GatePrompt(GatePromptView {
-                    turn_run_id: run_id,
-                    gate_ref: gate_ref_str.clone(),
-                    headline: "Approval needed".to_string(),
-                    body: format!("Reply `approve {gate_ref_str}` to continue."),
-                    allow_always: is_approval_gate_ref(gate_ref),
-                    approval_context: None,
-                }),
-                gate_ref_for_routing: Some(gate_ref_str),
+                payload: ProductOutboundPayload::GatePrompt(prompt),
+                gate_ref_for_routing: Some(gate_ref.as_str().to_string()),
             }))
         }
         TurnStatus::BlockedAuth => {
             let Some(gate_ref) = state.gate_ref.as_ref() else {
                 tracing::warn!(
+                    target = "ironclaw::reborn::slack_delivery",
                     %run_id,
                     "triggered run blocked on auth without gate ref; skipping"
                 );
                 return Ok(None);
             };
-            // Auth notifications for triggered runs: strip authorization_url (no secrets in channel).
-            // Use the trigger creator as the actor. Fall back to the thread scope owner if set.
-            let thread_scope_owner = thread_scope
-                .owner_user_id
-                .clone()
-                .unwrap_or_else(|| actor.user_id.clone());
-            let turn_scope_for_auth = TurnScope::new_with_owner(
-                scope.tenant_id.clone(),
-                scope.agent_id.clone(),
-                scope.project_id.clone(),
-                scope.thread_id.clone(),
-                Some(thread_scope_owner.clone()),
-            );
-            let actor_for_auth = TurnActor::new(thread_scope_owner);
-            let mut view = crate::auth_prompt::auth_prompt_view_for_blocked_auth(
-                &actor_for_auth.user_id,
-                &turn_scope_for_auth,
+            let mut view = auth_prompt_view_for_blocked_auth(
+                &actor.user_id,
+                scope,
                 run_id,
                 gate_ref.as_str(),
                 "Authentication required to continue this automation.".to_string(),
@@ -2013,13 +2497,45 @@ async fn triggered_notification_for_state(
                 services.auth_challenges.as_deref(),
             )
             .await?;
-            // Strip auth URL — secrets must not appear in the channel.
-            view.authorization_url = None;
-            Ok(Some(SlackActionableNotification {
-                event_kind: RunNotificationEventKind::AuthRequired,
-                payload: ProductOutboundPayload::AuthPrompt(view),
-                gate_ref_for_routing: Some(gate_ref.as_str().to_string()),
-            }))
+            view.body.push_str(&triggered_gate_footer(trigger_label));
+            // Only link-based OAuth is allowed over Slack. The `require_direct_message_target`
+            // flag is set on the `ProductOutboundDeliveryRequest` when the payload carries
+            // an `authorization_url`, and the resolver enforces the DM constraint at send
+            // time — it returns `OutboundTargetNotDirectMessage` if the resolved binding is
+            // not a personal DM, which `classify_delivery_error` maps to `OAuthTargetNotDm`,
+            // causing `deliver_triggered_run` to cancel the run and post the auth-unavailable
+            // notice. We do not need to pre-check the DM status here.
+            if view.authorization_url.is_some() {
+                Ok(Some(SlackActionableNotification {
+                    event_kind: RunNotificationEventKind::AuthRequired,
+                    payload: ProductOutboundPayload::AuthPrompt(view),
+                    gate_ref_for_routing: Some(gate_ref.as_str().to_string()),
+                }))
+            } else {
+                // Non-OAuth challenge (manual token / API-key entry). Deny: cancel the
+                // parked run and post the auth-unavailable notice directly.
+                cancel_auth_blocked_run(
+                    services.turn_coordinator.as_ref(),
+                    services.auth_flow_canceller.as_deref(),
+                    scope,
+                    actor.clone(),
+                    run_id,
+                    Some(gate_ref.as_str()),
+                )
+                .await?;
+                Ok(Some(SlackActionableNotification {
+                    event_kind: RunNotificationEventKind::FinalReplyReady,
+                    payload: ProductOutboundPayload::FinalReply(FinalReplyView {
+                        turn_run_id: run_id,
+                        text: format!(
+                            "{SLACK_AUTH_UNAVAILABLE_MESSAGE}{}",
+                            triggered_update_footer(trigger_label)
+                        ),
+                        generated_at: Utc::now(),
+                    }),
+                    gate_ref_for_routing: None,
+                }))
+            }
         }
         _ => Ok(None),
     }
@@ -2032,6 +2548,14 @@ enum TriggeredNotificationFailure {
     NoDefaultConfigured,
     /// The resolved target is inaccessible or rejected the delivery.
     Denied,
+    /// The payload carries an OAuth `authorization_url` but the send-time
+    /// binding resolved to a non-personal-DM target. Posting the OAuth URL
+    /// to a shared channel would leak it to every member. The resolver returns
+    /// [`ProductWorkflowError::OutboundTargetNotDirectMessage`] when
+    /// `require_direct_message_target` is true and the binding is not a DM;
+    /// `classify_delivery_error` maps that to this variant. `deliver_triggered_run`
+    /// handles it by cancelling the run and posting the auth-unavailable notice.
+    OAuthTargetNotDm,
     /// Any other delivery or transport failure.
     Other(String),
 }
@@ -2041,12 +2565,20 @@ impl std::fmt::Display for TriggeredNotificationFailure {
         match self {
             Self::NoDefaultConfigured => write!(f, "no default delivery target configured"),
             Self::Denied => write!(f, "delivery target access denied"),
+            Self::OAuthTargetNotDm => {
+                write!(
+                    f,
+                    "OAuth authorization_url suppressed: send-time target is not a personal DM"
+                )
+            }
             Self::Other(reason) => write!(f, "{reason}"),
         }
     }
 }
 
 /// Delivers a triggered-run notification, returning the list of posted Slack messages.
+// arch-exempt: too_many_args, needs a delivery-request bundle (services + scope + actor + state + authority + notification), plan #4953
+#[allow(clippy::too_many_arguments)]
 async fn deliver_triggered_notification(
     services: &SlackFinalReplyDeliveryServices,
     scope: &TurnScope,
@@ -2055,6 +2587,7 @@ async fn deliver_triggered_notification(
     state: &TurnRunState,
     authority: &TriggeredSlackReplyTargetAuthority,
     notification: SlackActionableNotification,
+    require_direct_message_target: bool,
 ) -> Result<Vec<PostedSlackMessage>, TriggeredNotificationFailure> {
     let SlackActionableNotification {
         event_kind,
@@ -2093,7 +2626,7 @@ async fn deliver_triggered_notification(
     };
 
     let tracked_egress = TrackingSlackPostEgress::new(Arc::clone(&services.egress));
-    prepare_and_render_product_outbound(
+    let render_result = prepare_and_render_product_outbound(
         &outbound_policy,
         services.communication_preferences.as_ref(),
         authority,
@@ -2107,10 +2640,14 @@ async fn deliver_triggered_notification(
             adapter: services.adapter.as_ref(),
             egress: &tracked_egress,
             delivery_sink: services.delivery_sink.as_ref(),
+            require_direct_message_target,
         },
     )
-    .await
-    .map_err(classify_delivery_error)?;
+    .await;
+
+    if let Err(error) = render_result {
+        return Err(classify_delivery_error(error));
+    }
 
     Ok(tracked_egress.take_posted_messages())
 }
@@ -2123,6 +2660,10 @@ fn classify_delivery_error(
     use ironclaw_outbound::OutboundError;
     use ironclaw_product_workflow::ProductOutboundDeliveryError;
     match &error {
+        ProductOutboundDeliveryError::Workflow {
+            source: ProductWorkflowError::OutboundTargetNotDirectMessage,
+            ..
+        } => TriggeredNotificationFailure::OAuthTargetNotDm,
         ProductOutboundDeliveryError::Outbound(OutboundError::PreferenceTargetMissing {
             ..
         }) => TriggeredNotificationFailure::NoDefaultConfigured,
@@ -2218,7 +2759,15 @@ impl ProductOutboundTargetResolver for TriggeredSlackReplyTargetAuthority {
     async fn resolve_product_outbound_target_metadata(
         &self,
         target: &ValidatedReplyTargetBinding,
+        require_direct_message: bool,
     ) -> Result<VerifiedProductOutboundTargetMetadata, ProductWorkflowError> {
+        // Single enforcement point for the OAuth DM rule: when the delivery request
+        // requires a direct-message target (i.e. the payload carries an OAuth
+        // authorization_url), enforce that the EXACT send-time binding is a personal
+        // DM. Checked against the binding resolved NOW (at send time), making it
+        // race-free against the pre-loop preference snapshot going stale.
+        enforce_direct_message_if_required(target.target(), require_direct_message)?;
+
         // Decode the DM channel ID from the binding ref. The ref was built by
         // `slack_personal_dm_reply_target_binding_ref` / `slack_shared_channel_reply_target_binding_ref`
         // and encodes space + conversation in length-prefixed segments. We extract
@@ -2304,6 +2853,16 @@ mod tests {
     }
 
     fn envelope(payload: ProductInboundPayload) -> ProductInboundEnvelope {
+        envelope_with_event_id("evt:test", payload)
+    }
+
+    /// Like `envelope` but with a caller-specified event id.  Use this in tests
+    /// that need distinct event ids to exercise the per-(conversation, event_id)
+    /// throttle — e.g. two separate human messages vs. a transport retry.
+    fn envelope_with_event_id(
+        event_id: &str,
+        payload: ProductInboundPayload,
+    ) -> ProductInboundEnvelope {
         let adapter_id =
             ironclaw_product_adapters::ProductAdapterId::new("slack_v2").expect("adapter");
         let installation_id = AdapterInstallationId::new("install_alpha").expect("installation");
@@ -2321,7 +2880,7 @@ mod tests {
         )
         .expect("trusted context");
         let parsed = ParsedProductInbound::new(
-            ExternalEventId::new("evt:test").expect("event"),
+            ExternalEventId::new(event_id).expect("event"),
             ExternalActorRef::new("slack_user", "U123", None::<String>).expect("actor"),
             ExternalConversationRef::new(Some("T123"), "D123", None, None).expect("conversation"),
             payload,
@@ -2410,7 +2969,14 @@ mod tests {
     struct ScriptedTurnCoordinator {
         /// Run states returned in order by `get_run_state`. Wraps around.
         states: Vec<ScriptedRunState>,
+        /// When set, `get_run_state` returns `ScopeNotFound` — simulating a run
+        /// that does not live in the queried scope (a triggered/foreign run).
+        scope_not_found: bool,
         calls: Mutex<usize>,
+        cancel_calls: Mutex<Vec<TurnRunId>>,
+        /// When set, `cancel_run` returns `Err(TurnError::Unavailable)` instead of
+        /// the normal success response. Used to test the OAuth backstop cancel-failure path.
+        cancel_should_fail: std::sync::atomic::AtomicBool,
     }
 
     impl ScriptedTurnCoordinator {
@@ -2418,7 +2984,10 @@ mod tests {
             assert!(!states.is_empty(), "must provide at least one state");
             Self {
                 states,
+                scope_not_found: false,
                 calls: Mutex::new(0),
+                cancel_calls: Mutex::new(Vec::new()),
+                cancel_should_fail: std::sync::atomic::AtomicBool::new(false),
             }
         }
 
@@ -2427,6 +2996,18 @@ mod tests {
                 status,
                 gate_ref: None,
             }])
+        }
+
+        /// A coordinator whose `get_run_state` always reports `ScopeNotFound` —
+        /// the run is not in the queried (conversation) scope.
+        fn scope_not_found() -> Self {
+            let mut coordinator = Self::with_single_status(TurnStatus::Running);
+            coordinator.scope_not_found = true;
+            coordinator
+        }
+
+        fn cancel_call_count(&self) -> usize {
+            self.cancel_calls.lock().expect("cancel calls lock").len()
         }
     }
 
@@ -2481,6 +3062,9 @@ mod tests {
             &self,
             request: GetRunStateRequest,
         ) -> Result<TurnRunState, TurnError> {
+            if self.scope_not_found {
+                return Err(TurnError::ScopeNotFound);
+            }
             let mut calls = self.calls.lock().expect("calls lock");
             let idx = *calls % self.states.len();
             *calls += 1;
@@ -2505,15 +3089,33 @@ mod tests {
                 credential_requirements: Vec::new(),
                 failure: None,
                 event_cursor: EventCursor(1),
+                product_context: None,
+                resume_disposition: None,
             })
         }
 
         async fn cancel_run(
             &self,
-            _request: ironclaw_turns::CancelRunRequest,
+            request: ironclaw_turns::CancelRunRequest,
         ) -> Result<ironclaw_turns::CancelRunResponse, TurnError> {
-            Err(TurnError::Unavailable {
-                reason: "ScriptedTurnCoordinator does not support cancel_run".to_string(),
+            self.cancel_calls
+                .lock()
+                .expect("cancel calls lock")
+                .push(request.run_id);
+            if self
+                .cancel_should_fail
+                .load(std::sync::atomic::Ordering::Acquire)
+            {
+                return Err(TurnError::Unavailable {
+                    reason: "ScriptedTurnCoordinator: cancel_should_fail is set".to_string(),
+                });
+            }
+            Ok(ironclaw_turns::CancelRunResponse {
+                run_id: request.run_id,
+                status: TurnStatus::Cancelled,
+                event_cursor: ironclaw_turns::EventCursor::default(),
+                already_terminal: false,
+                actor: None,
             })
         }
     }
@@ -2616,6 +3218,41 @@ mod tests {
             .expect("seed preference");
     }
 
+    /// Seed a personal preference with distinct `auth_prompt_target` and
+    /// `final_reply_target` binding refs. Used to prove the OAuth DM gate keys on
+    /// the EFFECTIVE auth target (`auth_prompt_target.or(final_reply_target)`),
+    /// not "any stored target".
+    async fn seed_personal_preference_with_auth_target(
+        store: &InMemoryOutboundStateStore,
+        scope: &TurnScope,
+        auth_prompt_target: ReplyTargetBindingRef,
+        final_reply_target: ReplyTargetBindingRef,
+    ) {
+        let tenant = scope.tenant_id.clone();
+        let user = scope
+            .explicit_owner_user_id()
+            .cloned()
+            .expect("owner user id for preference seed");
+        let updated_by = user.clone();
+        let record = CommunicationPreferenceRecord {
+            scope: DeliveryDefaultScope::personal(tenant, user),
+            final_reply_target: Some(final_reply_target),
+            progress_target: None,
+            approval_prompt_target: None,
+            auth_prompt_target: Some(auth_prompt_target),
+            default_modality: None,
+            updated_at: Utc::now(),
+            updated_by,
+        };
+        store
+            .write_communication_preference(WriteCommunicationPreferenceRequest {
+                record,
+                expected_version: None,
+            })
+            .await
+            .expect("seed preference");
+    }
+
     /// Build a `SlackV2Adapter` with the given installation_id.
     fn test_adapter(installation_id: &str) -> Arc<SlackV2Adapter> {
         Arc::new(SlackV2Adapter::new(SlackV2AdapterConfig {
@@ -2634,6 +3271,27 @@ mod tests {
         outbound: Arc<InMemoryOutboundStateStore>,
         installation_id: &str,
     ) -> SlackFinalReplyDeliveryServices {
+        make_services_with_canceller(
+            coordinator,
+            thread_service,
+            egress,
+            outbound,
+            installation_id,
+            None,
+        )
+    }
+
+    /// Like [`make_services`] but threads in an explicit `auth_flow_canceller`.
+    /// Used by triggered-path tests that need to assert `BlockedAuthFlowCanceller`
+    /// is called (or not called) when the triggered delivery hits a `BlockedAuth` state.
+    fn make_services_with_canceller(
+        coordinator: Arc<dyn TurnCoordinator>,
+        thread_service: Arc<dyn ironclaw_threads::SessionThreadService>,
+        egress: Arc<FakeProtocolHttpEgress>,
+        outbound: Arc<InMemoryOutboundStateStore>,
+        installation_id: &str,
+        auth_flow_canceller: Option<Arc<dyn BlockedAuthFlowCanceller>>,
+    ) -> SlackFinalReplyDeliveryServices {
         SlackFinalReplyDeliveryServices {
             binding_service: Arc::new(TestNoopConversationBindingService),
             thread_service,
@@ -2645,6 +3303,8 @@ mod tests {
             egress,
             delivery_sink: Arc::new(FakeOutboundDeliverySink::default()),
             auth_challenges: None,
+            auth_flow_canceller,
+            approval_requests: None,
         }
     }
 
@@ -3029,6 +3689,34 @@ mod tests {
         );
     }
 
+    #[test]
+    fn triggered_driver_default_wait_budget_is_longer_than_live_slack_reply_wait() {
+        let install = "test-install";
+        let scope = personal_turn_scope();
+        let coordinator = Arc::new(ScriptedTurnCoordinator::with_single_status(
+            TurnStatus::Completed,
+        ));
+        let thread_service = Arc::new(InMemorySessionThreadService::default());
+        let outbound = Arc::new(InMemoryOutboundStateStore::default());
+        let egress = Arc::new(FakeProtocolHttpEgress::new(vec!["slack.com".to_string()]));
+        let delivery_store = Arc::new(InMemoryTriggeredRunDeliveryStore::default());
+        let route_store = Arc::new(InMemoryDeliveredGateRouteStore::default());
+        let services = make_services(coordinator, thread_service, egress, outbound, install);
+
+        let driver = TriggeredRunDeliveryDriver::new(
+            services,
+            delivery_store,
+            route_store,
+            scope.agent_id.clone().expect("test scope has agent"),
+        );
+
+        assert_eq!(
+            driver.settings.max_wait,
+            DEFAULT_TRIGGERED_RUN_DELIVERY_MAX_WAIT
+        );
+        assert!(driver.settings.max_wait > SlackFinalReplyDeliverySettings::default().max_wait);
+    }
+
     // --- BlockedAuth / timeout driver tests ------------------------------------
 
     /// BlockedAuth state: driver sends an auth-prompt notification (no http/https URL),
@@ -3273,6 +3961,16 @@ mod tests {
         outbound: Arc<InMemoryOutboundStateStore>,
         installation_id: &str,
     ) -> SlackFinalReplyDeliveryObserver {
+        make_observer_with_canceller(coordinator, egress, outbound, installation_id, None)
+    }
+
+    fn make_observer_with_canceller(
+        coordinator: Arc<dyn TurnCoordinator>,
+        egress: Arc<FakeProtocolHttpEgress>,
+        outbound: Arc<InMemoryOutboundStateStore>,
+        installation_id: &str,
+        auth_flow_canceller: Option<Arc<dyn BlockedAuthFlowCanceller>>,
+    ) -> SlackFinalReplyDeliveryObserver {
         use ironclaw_product_workflow::FakeConversationBindingService;
 
         let thread_service = Arc::new(InMemorySessionThreadService::default());
@@ -3287,6 +3985,8 @@ mod tests {
             egress,
             delivery_sink: Arc::new(FakeOutboundDeliverySink::default()),
             auth_challenges: None,
+            auth_flow_canceller,
+            approval_requests: None,
         };
         let settings = SlackFinalReplyDeliverySettings {
             poll_interval: std::time::Duration::ZERO,
@@ -3332,6 +4032,39 @@ mod tests {
             )
             .expect("user message"),
         )
+    }
+
+    /// Foreign-run guard: an Accepted resolution ack whose run lives in another
+    /// scope (a triggered run bridged via the delivered-gate-route rewrite) must
+    /// NOT produce a spurious delivery-error post. The live observer skips
+    /// delivery (the triggered loop owns continuation) when `get_run_state`
+    /// reports the run is not in this conversation scope.
+    #[tokio::test]
+    async fn accepted_resolution_for_foreign_scope_run_skips_delivery_without_error() {
+        let install = "test-install";
+        let egress = Arc::new(FakeProtocolHttpEgress::new(vec!["slack.com".to_string()]));
+        egress.allow_credential_handle("slack_bot_token");
+
+        let outbound = Arc::new(InMemoryOutboundStateStore::default());
+        // The resolved run is not in this conversation scope — it lives in the
+        // trigger's scope, delivered by its own triggered-delivery loop.
+        let coordinator = Arc::new(ScriptedTurnCoordinator::scope_not_found());
+        let observer = make_observer(coordinator, egress.clone(), outbound, install);
+        let env = envelope(scoped_approval_resolution_payload());
+        let ack = accepted_ack();
+
+        observer.observe_workflow_ack(env, ack).await;
+
+        let post_count = egress
+            .calls()
+            .iter()
+            .filter(|c| c.path == "/api/chat.postMessage")
+            .count();
+        assert_eq!(
+            post_count, 0,
+            "foreign-scope run must skip live delivery silently — no spurious \
+             error post expected, got {post_count} post(s)"
+        );
     }
 
     /// Rejected scoped-approval ack → hint posted to the envelope conversation.
@@ -3527,22 +4260,30 @@ mod tests {
         );
     }
 
-    /// Duplicate { prior: DeferredBusy } + UserMessage → nothing posted.
+    /// Duplicate { prior: DeferredBusy } + UserMessage → hint posted (run id extracted
+    /// from the prior, same as for a plain DeferredBusy).
     ///
     /// `should_settle_ack` returns false for DeferredBusy, so the idempotency
-    /// ledger never settles it. Slack transport retries re-process as a fresh
-    /// plain DeferredBusy (never Duplicate{DeferredBusy}), making this case
-    /// unreachable in practice. We still enforce None-for-all-Duplicate for
-    /// safety, matching the invariant in `rejection_hint_for_resolution`.
+    /// ledger never settles it and this case is unreachable in practice. However,
+    /// the Duplicate unwrap arm delegates to the prior ack's extraction, so
+    /// DeferredBusy inside a Duplicate consistently yields the run id rather than
+    /// silently dropping it.
     #[tokio::test]
-    async fn duplicate_deferred_busy_with_user_message_posts_nothing() {
+    async fn duplicate_deferred_busy_with_user_message_posts_hint() {
         let install = "test-install";
         let egress = Arc::new(FakeProtocolHttpEgress::new(vec!["slack.com".to_string()]));
         egress.allow_credential_handle("slack_bot_token");
+        egress.program_response(
+            "slack.com",
+            Ok(EgressResponse::new(
+                200,
+                slack_post_ok_json("D123", "8001.1"),
+            )),
+        );
 
         let outbound = Arc::new(InMemoryOutboundStateStore::default());
         let coordinator = Arc::new(ScriptedTurnCoordinator::with_single_status(
-            TurnStatus::Running,
+            TurnStatus::BlockedApproval,
         ));
         let observer = make_observer(coordinator, egress.clone(), outbound, install);
         let env = envelope(user_message_payload());
@@ -3553,17 +4294,23 @@ mod tests {
         observer.observe_workflow_ack(env, ack).await;
 
         let calls = egress.calls();
-        assert!(
-            !calls.iter().any(|c| c.path == "/api/chat.postMessage"),
-            "Duplicate{{DeferredBusy}} must NOT post a hint (None-for-all-Duplicate invariant)"
+        let post_calls: Vec<_> = calls
+            .iter()
+            .filter(|c| c.path == "/api/chat.postMessage")
+            .collect();
+        assert_eq!(
+            post_calls.len(),
+            1,
+            "Duplicate{{DeferredBusy}} must post a hint — run id extracted from prior"
         );
     }
 
-    /// Two distinct plain DeferredBusy + UserMessage envelopes with different active_run_ids
-    /// → two posts (throttle is per (conversation, run_id) pair).
+    /// Two distinct plain DeferredBusy + UserMessage envelopes with different external_event_ids
+    /// → two posts (throttle is per (conversation, external_event_id) pair).
     ///
-    /// Each `deferred_busy_ack()` call creates a fresh `TurnRunId`, so the two acks have
-    /// distinct throttle keys and each posts exactly one hint.
+    /// Each envelope is built with a distinct event id so the two messages have
+    /// distinct throttle keys and each posts exactly one hint.  The active_run_id in
+    /// the acks is the same here to demonstrate that run_id no longer drives dedup.
     #[tokio::test]
     async fn two_distinct_deferred_busy_user_messages_post_two_hints() {
         let install = "test-install";
@@ -3591,13 +4338,28 @@ mod tests {
         ));
         let observer = make_observer(coordinator, egress.clone(), outbound, install);
 
-        // First distinct user message while blocked (fresh active_run_id in each ack).
+        // Use a shared active_run_id across both acks to prove it's the event_id that
+        // gates dedup, not the run_id.
+        let shared_run_id = TurnRunId::new();
+        let make_ack = || ProductInboundAck::DeferredBusy {
+            accepted_message_ref: AcceptedMessageRef::new("slack:deferred-two-events")
+                .expect("ref"),
+            active_run_id: shared_run_id,
+        };
+
+        // First new user message (event id "evt:msg-1") — must post a hint.
         observer
-            .observe_workflow_ack(envelope(user_message_payload()), deferred_busy_ack())
+            .observe_workflow_ack(
+                envelope_with_event_id("evt:msg-1", user_message_payload()),
+                make_ack(),
+            )
             .await;
-        // Second distinct user message while blocked (different active_run_id → different key).
+        // Second new user message (event id "evt:msg-2") — distinct event → must also post.
         observer
-            .observe_workflow_ack(envelope(user_message_payload()), deferred_busy_ack())
+            .observe_workflow_ack(
+                envelope_with_event_id("evt:msg-2", user_message_payload()),
+                make_ack(),
+            )
             .await;
 
         let calls = egress.calls();
@@ -3608,12 +4370,12 @@ mod tests {
         assert_eq!(
             post_calls.len(),
             2,
-            "two distinct DeferredBusy + UserMessage deliveries must each post a hint"
+            "two distinct event ids must each post a hint even with the same active_run_id"
         );
     }
 
-    /// DeferredBusy + UserMessage + BlockedAuth state with gate_ref → auth copy with
-    /// concrete `auth deny <ref>` command posted.
+    /// DeferredBusy + UserMessage + BlockedAuth state → generic busy hint posted
+    /// (auth-specific wording removed; BlockedAuth now maps to the generic fallback).
     #[tokio::test]
     async fn deferred_busy_blocked_auth_state_posts_auth_hint() {
         let install = "test-install";
@@ -3628,11 +4390,9 @@ mod tests {
         );
 
         let outbound = Arc::new(InMemoryOutboundStateStore::default());
-        // BlockedAuth with concrete gate_ref → hint embeds `auth deny <ref>`.
-        let gate_ref_str = "gate:auth-slack-hint";
         let coordinator = Arc::new(ScriptedTurnCoordinator::with_states(vec![scripted_state(
             TurnStatus::BlockedAuth,
-            Some(gate_ref_str),
+            Some("gate:auth-slack-hint"),
         )]));
         let observer = make_observer(coordinator, egress.clone(), outbound, install);
         let env = envelope(user_message_payload());
@@ -3652,17 +4412,388 @@ mod tests {
         );
         let body = std::str::from_utf8(&post_calls[0].body).expect("utf8 body");
         assert!(
-            body.contains("authentication step"),
-            "deferred-busy hint for BlockedAuth must mention 'authentication step', got: {body}"
+            body.contains("waiting on authentication") && body.contains("auth deny"),
+            "deferred-busy hint for BlockedAuth must name the blocking auth gate, got: {body}"
+        );
+        // Must not contain the old auth-prompt wording.
+        assert!(
+            !body.contains("authentication step"),
+            "deferred-busy hint for BlockedAuth must not mention 'authentication step', got: {body}"
+        );
+    }
+
+    /// Accepted ack + BlockedAuth state → cancel_run is called and SLACK_AUTH_UNAVAILABLE_MESSAGE
+    /// is posted; no "Authentication required" text appears.
+    #[tokio::test]
+    async fn blocked_auth_cancels_run_and_posts_unavailable_message() {
+        let install = "test-install";
+        let egress = Arc::new(FakeProtocolHttpEgress::new(vec!["slack.com".to_string()]));
+        egress.allow_credential_handle("slack_bot_token");
+        egress.program_response(
+            "slack.com",
+            Ok(EgressResponse::new(
+                200,
+                slack_post_ok_json("D123", "6005.1"),
+            )),
+        );
+
+        let outbound = Arc::new(InMemoryOutboundStateStore::default());
+        let coordinator = Arc::new(ScriptedTurnCoordinator::with_states(vec![scripted_state(
+            TurnStatus::BlockedAuth,
+            Some("gate:auth-cancel-test"),
+        )]));
+        let observer = make_observer(
+            Arc::clone(&coordinator) as Arc<dyn TurnCoordinator>,
+            egress.clone(),
+            outbound,
+            install,
+        );
+        let env = envelope(user_message_payload());
+        let ack = ProductInboundAck::Accepted {
+            accepted_message_ref: AcceptedMessageRef::new("slack:blocked-auth-cancel-test")
+                .expect("ref"),
+            submitted_run_id: TurnRunId::new(),
+        };
+
+        observer.observe_workflow_ack(env, ack).await;
+
+        assert_eq!(
+            coordinator.cancel_call_count(),
+            1,
+            "BlockedAuth must cancel the run exactly once"
+        );
+
+        let calls = egress.calls();
+        let post_calls: Vec<_> = calls
+            .iter()
+            .filter(|c| c.path == "/api/chat.postMessage")
+            .collect();
+        assert_eq!(
+            post_calls.len(),
+            1,
+            "expected exactly one chat.postMessage for BlockedAuth cancel"
+        );
+        let body = std::str::from_utf8(&post_calls[0].body).expect("utf8 body");
+        assert!(
+            body.contains(SLACK_AUTH_UNAVAILABLE_MESSAGE),
+            "body must contain SLACK_AUTH_UNAVAILABLE_MESSAGE text, got: {body}"
         );
         assert!(
-            body.contains(gate_ref_str),
-            "deferred-busy auth hint must embed the concrete gate ref '{gate_ref_str}', got: {body}"
+            !body.contains("Authentication required"),
+            "body must not contain old auth-prompt text, got: {body}"
         );
-        // Must not contain approval command wording.
+    }
+
+    /// Records every `cancel_blocked_auth_flow` call so tests can assert the Slack
+    /// auto-deny path cancels the durable auth-flow record alongside the run (#4952).
+    ///
+    /// Captures all four arguments of `cancel_blocked_auth_flow` so tests can assert
+    /// that both the wiring (run_id/gate_ref) and the owner-resolution logic
+    /// (scope/owner_user_id) are correct. Asserting against concrete fixture values
+    /// catches a wrong-owner regression at production line 1167 that a tuple of
+    /// `(TurnRunId, String)` would silently miss.
+    #[derive(Clone)]
+    struct RecordedFlowCancel {
+        scope: TurnScope,
+        owner_user_id: ironclaw_host_api::UserId,
+        run_id: TurnRunId,
+        gate_ref: String,
+    }
+
+    #[derive(Default)]
+    struct RecordingBlockedAuthFlowCanceller {
+        calls: std::sync::Mutex<Vec<RecordedFlowCancel>>,
+    }
+
+    #[async_trait]
+    impl BlockedAuthFlowCanceller for RecordingBlockedAuthFlowCanceller {
+        async fn cancel_blocked_auth_flow(
+            &self,
+            scope: &TurnScope,
+            owner_user_id: &ironclaw_host_api::UserId,
+            run_id: TurnRunId,
+            gate_ref: &str,
+        ) -> Result<(), ironclaw_auth::AuthProductError> {
+            self.calls
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .push(RecordedFlowCancel {
+                    scope: scope.clone(),
+                    owner_user_id: owner_user_id.clone(),
+                    run_id,
+                    gate_ref: gate_ref.to_string(),
+                });
+            Ok(())
+        }
+    }
+
+    /// Accepted ack + BlockedAuth (non-OAuth) → the auto-deny cancels the stale
+    /// auth-flow record (via `BlockedAuthFlowCanceller`) for the blocked gate, not
+    /// just the run. Drives the live observer caller so a wiring regression — the
+    /// canceller no longer threaded into `cancel_auth_blocked_run` — is caught.
+    #[tokio::test]
+    async fn blocked_auth_cancels_stale_auth_flow() {
+        let install = "test-install";
+        let egress = Arc::new(FakeProtocolHttpEgress::new(vec!["slack.com".to_string()]));
+        egress.allow_credential_handle("slack_bot_token");
+        egress.program_response(
+            "slack.com",
+            Ok(EgressResponse::new(
+                200,
+                slack_post_ok_json("D123", "6006.1"),
+            )),
+        );
+
+        let outbound = Arc::new(InMemoryOutboundStateStore::default());
+        let coordinator = Arc::new(ScriptedTurnCoordinator::with_states(vec![scripted_state(
+            TurnStatus::BlockedAuth,
+            Some("gate:auth-cancel-test"),
+        )]));
+        let recorder = Arc::new(RecordingBlockedAuthFlowCanceller::default());
+        let observer = make_observer_with_canceller(
+            Arc::clone(&coordinator) as Arc<dyn TurnCoordinator>,
+            egress.clone(),
+            outbound,
+            install,
+            Some(Arc::clone(&recorder) as Arc<dyn BlockedAuthFlowCanceller>),
+        );
+        let env = envelope(user_message_payload());
+        let submitted_run_id = TurnRunId::new();
+        let ack = ProductInboundAck::Accepted {
+            accepted_message_ref: AcceptedMessageRef::new("slack:blocked-auth-flow-cancel-test")
+                .expect("ref"),
+            submitted_run_id,
+        };
+
+        observer.observe_workflow_ack(env, ack).await;
+
+        // Run is still cancelled exactly once...
+        assert_eq!(
+            coordinator.cancel_call_count(),
+            1,
+            "BlockedAuth must cancel the run exactly once"
+        );
+        // ...and the stale auth flow is cancelled for the same blocked gate.
+        let calls = recorder
+            .calls
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        assert_eq!(
+            calls.len(),
+            1,
+            "auto-deny must cancel the stale auth flow exactly once"
+        );
+        assert_eq!(
+            calls[0].run_id, submitted_run_id,
+            "canceller must receive the same run_id as the submitted ack"
+        );
+        assert_eq!(
+            calls[0].gate_ref, "gate:auth-cancel-test",
+            "must cancel the auth flow for the blocked gate"
+        );
+        // FIX 2: Assert the resolved owner_user_id and scope match the fixture values.
+        //
+        // In the live-observer path, `FakeConversationBindingService` derives:
+        //   actor_user_id    = "user:{external_actor_ref.id()}" = "user:U123"
+        //   subject_user_id  = Some("user:U123")
+        // That subject_user_id becomes thread_scope.owner_user_id → passed as the
+        // explicit owner to `TurnScope::new_with_owner`, so
+        // `scope.explicit_owner_user_id() = Some("user:U123")` which wins over
+        // actor.user_id in `cancel_auth_blocked_run` (production line 1167).
+        let expected_owner =
+            ironclaw_host_api::UserId::new("user:U123").expect("expected owner fixture");
+        assert_eq!(
+            calls[0].owner_user_id, expected_owner,
+            "owner_user_id must be the subject user derived from the external actor ref (U123)"
+        );
+        // Scope tenant must match what FakeConversationBindingService builds from
+        // installation_id "install_alpha".
+        let expected_tenant =
+            ironclaw_host_api::TenantId::new("tenant:install_alpha").expect("expected tenant");
+        assert_eq!(
+            calls[0].scope.tenant_id, expected_tenant,
+            "scope.tenant_id must match the tenant derived from the installation"
+        );
+    }
+
+    /// FIX 3: A failed `cancel_run` must leave the `AuthFlow` record intact.
+    ///
+    /// `cancel_auth_blocked_run` was reordered so the run is cancelled FIRST and
+    /// the durable `AuthFlow` is only marked terminal AFTER a successful cancel.
+    /// This test proves the invariant: when `cancel_run` returns `Err`, the
+    /// `BlockedAuthFlowCanceller` is NOT invoked — preventing inverse state drift
+    /// (a terminal `AuthFlow` whose corresponding run is still `BlockedAuth`).
+    ///
+    /// Drives the live-observer path (`SlackFinalReplyDeliveryObserver`) with a
+    /// `ScriptedTurnCoordinator` whose `cancel_should_fail` flag is set, mirroring
+    /// the mechanism used in `triggered_oauth_auth_backstop_cancel_failure_records_failed`.
+    #[tokio::test]
+    async fn blocked_auth_cancel_run_failure_leaves_auth_flow_intact() {
+        let install = "test-install";
+        let egress = Arc::new(FakeProtocolHttpEgress::new(vec!["slack.com".to_string()]));
+        egress.allow_credential_handle("slack_bot_token");
+        // No HTTP response programmed: the cancel fails before any post is made.
+
+        let outbound = Arc::new(InMemoryOutboundStateStore::default());
+        let coordinator = Arc::new(ScriptedTurnCoordinator::with_states(vec![scripted_state(
+            TurnStatus::BlockedAuth,
+            Some("gate:cancel-fail-intact"),
+        )]));
+        // Make cancel_run fail — mirrors the mechanism in
+        // `triggered_oauth_auth_backstop_cancel_failure_records_failed`.
+        coordinator
+            .cancel_should_fail
+            .store(true, std::sync::atomic::Ordering::Release);
+
+        let recorder = Arc::new(RecordingBlockedAuthFlowCanceller::default());
+        let observer = make_observer_with_canceller(
+            Arc::clone(&coordinator) as Arc<dyn TurnCoordinator>,
+            egress.clone(),
+            outbound,
+            install,
+            Some(Arc::clone(&recorder) as Arc<dyn BlockedAuthFlowCanceller>),
+        );
+        let env = envelope(user_message_payload());
+        let submitted_run_id = TurnRunId::new();
+        let ack = ProductInboundAck::Accepted {
+            accepted_message_ref: AcceptedMessageRef::new("slack:cancel-fail-intact-test")
+                .expect("ref"),
+            submitted_run_id,
+        };
+
+        observer.observe_workflow_ack(env, ack).await;
+
+        // cancel_run was attempted (it just failed).
+        assert_eq!(
+            coordinator.cancel_call_count(),
+            1,
+            "cancel_run must be attempted exactly once even when it fails"
+        );
+        // The flow canceller must NOT have been called: a failed run-cancel must
+        // leave the durable AuthFlow record intact so the auth prompt remains usable.
+        let calls = recorder
+            .calls
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         assert!(
-            !body.contains("approve") || body.contains("auth deny"),
-            "auth hint must not contain approval-only wording, got: {body}"
+            calls.is_empty(),
+            "BlockedAuthFlowCanceller must NOT be called when cancel_run fails; got {} call(s)",
+            calls.len()
+        );
+    }
+
+    /// A `BlockedAuthFlowCanceller` that always returns `Err(BackendUnavailable)`.
+    /// Used to assert that a flow-cancel error is swallowed and does not break
+    /// Slack auto-denial delivery.
+    ///
+    /// `call_count` is incremented atomically on every `cancel_blocked_auth_flow`
+    /// invocation so tests can assert the canceller was actually wired and called.
+    struct FailingBlockedAuthFlowCanceller {
+        call_count: std::sync::atomic::AtomicUsize,
+    }
+
+    impl FailingBlockedAuthFlowCanceller {
+        fn new() -> Self {
+            Self {
+                call_count: std::sync::atomic::AtomicUsize::new(0),
+            }
+        }
+
+        fn call_count(&self) -> usize {
+            self.call_count.load(std::sync::atomic::Ordering::SeqCst)
+        }
+    }
+
+    #[async_trait]
+    impl BlockedAuthFlowCanceller for FailingBlockedAuthFlowCanceller {
+        async fn cancel_blocked_auth_flow(
+            &self,
+            _scope: &ironclaw_turns::TurnScope,
+            _owner_user_id: &ironclaw_host_api::UserId,
+            _run_id: TurnRunId,
+            _gate_ref: &str,
+        ) -> Result<(), ironclaw_auth::AuthProductError> {
+            self.call_count
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Err(ironclaw_auth::AuthProductError::BackendUnavailable)
+        }
+    }
+
+    /// A flow-cancel failure must be swallowed: a failing `BlockedAuthFlowCanceller`
+    /// must not break Slack auto-denial.
+    ///
+    /// After `cancel_run` succeeds, `cancel_auth_blocked_run` attempts a best-effort
+    /// `cancel_blocked_auth_flow`.  When that returns `Err`, the error is debug-logged
+    /// and the function still returns `Ok(())` — so the `SLACK_AUTH_UNAVAILABLE_MESSAGE`
+    /// post still goes out and the coordinator cancel count is still 1.
+    #[tokio::test]
+    async fn blocked_auth_canceller_failure_is_swallowed() {
+        let install = "test-install";
+        let egress = Arc::new(FakeProtocolHttpEgress::new(vec!["slack.com".to_string()]));
+        egress.allow_credential_handle("slack_bot_token");
+        egress.program_response(
+            "slack.com",
+            Ok(EgressResponse::new(
+                200,
+                slack_post_ok_json("D123", "6007.1"),
+            )),
+        );
+
+        let outbound = Arc::new(InMemoryOutboundStateStore::default());
+        // cancel_run SUCCEEDS (cancel_should_fail is NOT set, matching the default).
+        let coordinator = Arc::new(ScriptedTurnCoordinator::with_states(vec![scripted_state(
+            TurnStatus::BlockedAuth,
+            Some("gate:auth-cancel-test"),
+        )]));
+        // Wire in a canceller that always fails — swallow path under test.
+        // Hold a clone of the Arc so we can inspect call_count after the observer runs.
+        let failing_canceller = Arc::new(FailingBlockedAuthFlowCanceller::new());
+        let observer = make_observer_with_canceller(
+            Arc::clone(&coordinator) as Arc<dyn TurnCoordinator>,
+            egress.clone(),
+            outbound,
+            install,
+            Some(Arc::clone(&failing_canceller) as Arc<dyn BlockedAuthFlowCanceller>),
+        );
+        let env = envelope(user_message_payload());
+        let ack = ProductInboundAck::Accepted {
+            accepted_message_ref: AcceptedMessageRef::new("slack:canceller-fail-swallowed-test")
+                .expect("ref"),
+            submitted_run_id: TurnRunId::new(),
+        };
+
+        observer.observe_workflow_ack(env, ack).await;
+
+        // The canceller must have been invoked exactly once — proving it is wired up.
+        assert_eq!(
+            failing_canceller.call_count(),
+            1,
+            "cancel_blocked_auth_flow must be called exactly once on the failing canceller"
+        );
+
+        // The run was still cancelled exactly once — flow-cancel failure does not
+        // prevent run cancellation or the auto-denial post.
+        assert_eq!(
+            coordinator.cancel_call_count(),
+            1,
+            "cancel_run must be called exactly once even when flow-cancel fails"
+        );
+
+        // The SLACK_AUTH_UNAVAILABLE_MESSAGE post must still go out.
+        let calls = egress.calls();
+        let post_calls: Vec<_> = calls
+            .iter()
+            .filter(|c| c.path == "/api/chat.postMessage")
+            .collect();
+        assert_eq!(
+            post_calls.len(),
+            1,
+            "expected exactly one chat.postMessage despite flow-cancel failure"
+        );
+        let body = std::str::from_utf8(&post_calls[0].body).expect("utf8 body");
+        assert!(
+            body.contains(SLACK_AUTH_UNAVAILABLE_MESSAGE),
+            "body must contain SLACK_AUTH_UNAVAILABLE_MESSAGE text, got: {body}"
         );
     }
 
@@ -3752,13 +4883,16 @@ mod tests {
         );
     }
 
-    /// DeferredBusy + UserMessage + unauthorized binding → no post, no panic.
+    /// DeferredBusy + UserMessage + unresolved binding → generic busy hint posted.
     ///
     /// Uses `TestNoopConversationBindingService` (always fails lookup_binding) to
-    /// simulate an unauthorized conversation: the observer must skip the hint post
-    /// silently rather than posting to an arbitrary channel.
+    /// simulate a conversation with no resolvable binding (e.g. a gate delivered
+    /// into a fresh DM). The observer must still post the generic busy copy to the
+    /// originating conversation rather than leaving the user in silence — replying
+    /// a generic "waiting on approval" notice to the sender's own conversation
+    /// leaks no data.
     #[tokio::test]
-    async fn deferred_busy_unauthorized_binding_posts_nothing() {
+    async fn deferred_busy_unresolved_binding_posts_generic_hint() {
         let install = "test-install";
         let egress = Arc::new(FakeProtocolHttpEgress::new(vec!["slack.com".to_string()]));
         egress.allow_credential_handle("slack_bot_token");
@@ -3780,6 +4914,8 @@ mod tests {
             egress: egress.clone(),
             delivery_sink: Arc::new(FakeOutboundDeliverySink::default()),
             auth_challenges: None,
+            auth_flow_canceller: None,
+            approval_requests: None,
         };
         let settings = SlackFinalReplyDeliverySettings {
             poll_interval: std::time::Duration::ZERO,
@@ -3795,9 +4931,276 @@ mod tests {
         observer.observe_workflow_ack(env, ack).await;
 
         let calls = egress.calls();
+        let post_calls: Vec<_> = calls
+            .iter()
+            .filter(|c| c.path == "/api/chat.postMessage")
+            .collect();
+        assert_eq!(
+            post_calls.len(),
+            1,
+            "the generic busy hint must be posted even when the binding does not resolve"
+        );
+        let body = std::str::from_utf8(&post_calls[0].body).expect("utf8 body");
+        assert!(
+            body.contains(SLACK_BUSY_GENERIC_MESSAGE),
+            "fallback hint must be the generic busy copy, got: {body}"
+        );
+    }
+
+    // ── RejectedBusy ack feedback tests ───────────────────────────────────────
+    //
+    // PR #4838 replaced `DeferredBusy` with `RejectedBusy` for busy user-message
+    // outcomes.  The hint path must recognise the new variant and produce the same
+    // gate-aware (BlockedApproval/BlockedAuth) or generic copy as it does for the
+    // legacy `DeferredBusy` variant.
+
+    fn rejected_busy_ack_with_run_id() -> ProductInboundAck {
+        ProductInboundAck::RejectedBusy {
+            accepted_message_ref: AcceptedMessageRef::new("slack:rejected-busy").expect("ref"),
+            active_run_id: Some(TurnRunId::new()),
+        }
+    }
+
+    fn rejected_busy_ack_no_run_id() -> ProductInboundAck {
+        ProductInboundAck::RejectedBusy {
+            accepted_message_ref: AcceptedMessageRef::new("slack:rejected-busy-none").expect("ref"),
+            active_run_id: None,
+        }
+    }
+
+    /// RejectedBusy { active_run_id: Some(..) } + UserMessage + BlockedApproval with
+    /// gate_ref → exactly one Slack post containing the concrete `approve {ref}` command.
+    #[tokio::test]
+    async fn rejected_busy_ack_with_run_id_posts_approval_hint() {
+        let install = "test-install";
+        let egress = Arc::new(FakeProtocolHttpEgress::new(vec!["slack.com".to_string()]));
+        egress.allow_credential_handle("slack_bot_token");
+        egress.program_response(
+            "slack.com",
+            Ok(EgressResponse::new(
+                200,
+                slack_post_ok_json("D123", "7000.1"),
+            )),
+        );
+
+        let outbound = Arc::new(InMemoryOutboundStateStore::default());
+        let gate_ref_str = "gate:approval-rb123";
+        let coordinator = Arc::new(ScriptedTurnCoordinator::with_states(vec![scripted_state(
+            TurnStatus::BlockedApproval,
+            Some(gate_ref_str),
+        )]));
+        let observer = make_observer(coordinator, egress.clone(), outbound, install);
+        let env = envelope(user_message_payload());
+        let ack = rejected_busy_ack_with_run_id();
+
+        observer.observe_workflow_ack(env, ack).await;
+
+        let calls = egress.calls();
+        let post_calls: Vec<_> = calls
+            .iter()
+            .filter(|c| c.path == "/api/chat.postMessage")
+            .collect();
+        assert_eq!(
+            post_calls.len(),
+            1,
+            "expected exactly one chat.postMessage for RejectedBusy(Some) + BlockedApproval"
+        );
+        let body = std::str::from_utf8(&post_calls[0].body).expect("utf8 body");
+        assert!(
+            body.contains("waiting on a pending approval"),
+            "RejectedBusy hint must mention 'waiting on a pending approval', got: {body}"
+        );
+        assert!(
+            body.contains(gate_ref_str),
+            "RejectedBusy approval hint must embed the concrete gate ref '{gate_ref_str}', got: {body}"
+        );
+    }
+
+    /// RejectedBusy { active_run_id: Some(..) } + UserMessage + BlockedAuth state →
+    /// generic busy hint posted (BlockedAuth now maps to the generic fallback).
+    #[tokio::test]
+    async fn rejected_busy_ack_with_run_id_posts_auth_hint() {
+        let install = "test-install";
+        let egress = Arc::new(FakeProtocolHttpEgress::new(vec!["slack.com".to_string()]));
+        egress.allow_credential_handle("slack_bot_token");
+        egress.program_response(
+            "slack.com",
+            Ok(EgressResponse::new(
+                200,
+                slack_post_ok_json("D123", "7001.1"),
+            )),
+        );
+
+        let outbound = Arc::new(InMemoryOutboundStateStore::default());
+        let coordinator = Arc::new(ScriptedTurnCoordinator::with_states(vec![scripted_state(
+            TurnStatus::BlockedAuth,
+            Some("gate:auth-rb456"),
+        )]));
+        let observer = make_observer(coordinator, egress.clone(), outbound, install);
+        let env = envelope(user_message_payload());
+        let ack = rejected_busy_ack_with_run_id();
+
+        observer.observe_workflow_ack(env, ack).await;
+
+        let calls = egress.calls();
+        let post_calls: Vec<_> = calls
+            .iter()
+            .filter(|c| c.path == "/api/chat.postMessage")
+            .collect();
+        assert_eq!(
+            post_calls.len(),
+            1,
+            "expected exactly one chat.postMessage for RejectedBusy(Some) + BlockedAuth"
+        );
+        let body = std::str::from_utf8(&post_calls[0].body).expect("utf8 body");
+        assert!(
+            body.contains("waiting on authentication") && body.contains("auth deny"),
+            "RejectedBusy auth hint must name the blocking auth gate, got: {body}"
+        );
+        assert!(
+            !body.contains("authentication step"),
+            "RejectedBusy auth hint must not mention 'authentication step', got: {body}"
+        );
+    }
+
+    /// RejectedBusy { active_run_id: None } + UserMessage → no hint posted.
+    ///
+    /// When there is no live blocking run there is no run state to inspect, so
+    /// the hint flow is skipped entirely.
+    #[tokio::test]
+    async fn rejected_busy_ack_with_no_run_id_posts_nothing() {
+        let install = "test-install";
+        let egress = Arc::new(FakeProtocolHttpEgress::new(vec!["slack.com".to_string()]));
+        egress.allow_credential_handle("slack_bot_token");
+
+        let outbound = Arc::new(InMemoryOutboundStateStore::default());
+        let coordinator = Arc::new(ScriptedTurnCoordinator::with_single_status(
+            TurnStatus::BlockedApproval,
+        ));
+        let observer = make_observer(coordinator, egress.clone(), outbound, install);
+        let env = envelope(user_message_payload());
+        let ack = rejected_busy_ack_no_run_id();
+
+        observer.observe_workflow_ack(env, ack).await;
+
+        let calls = egress.calls();
         assert!(
             !calls.iter().any(|c| c.path == "/api/chat.postMessage"),
-            "no chat.postMessage expected when binding authorization fails"
+            "no chat.postMessage expected for RejectedBusy(None) — no live run to inspect"
+        );
+    }
+
+    /// Duplicate { prior: RejectedBusy { active_run_id: Some(..) } } + UserMessage +
+    /// BlockedApproval state → hint posted (gate-aware approval copy).
+    ///
+    /// `RejectedBusy` is a settled outcome, so a Slack transport retry of the same
+    /// external event arrives as `Duplicate { prior: RejectedBusy { .. } }`.  The
+    /// busy-hint helper must unwrap the prior and extract the blocking run id so the
+    /// retry can still post the hint if the original was lost.
+    #[tokio::test]
+    async fn duplicate_rejected_busy_with_run_id_posts_approval_hint() {
+        let install = "test-install";
+        let egress = Arc::new(FakeProtocolHttpEgress::new(vec!["slack.com".to_string()]));
+        egress.allow_credential_handle("slack_bot_token");
+        egress.program_response(
+            "slack.com",
+            Ok(EgressResponse::new(
+                200,
+                slack_post_ok_json("D123", "8100.1"),
+            )),
+        );
+
+        let outbound = Arc::new(InMemoryOutboundStateStore::default());
+        let gate_ref_str = "gate:approval-dup-rb001";
+        let coordinator = Arc::new(ScriptedTurnCoordinator::with_states(vec![scripted_state(
+            TurnStatus::BlockedApproval,
+            Some(gate_ref_str),
+        )]));
+        let observer = make_observer(coordinator, egress.clone(), outbound, install);
+        let env = envelope(user_message_payload());
+        let ack = ProductInboundAck::Duplicate {
+            prior: Box::new(rejected_busy_ack_with_run_id()),
+        };
+
+        observer.observe_workflow_ack(env, ack).await;
+
+        let calls = egress.calls();
+        let post_calls: Vec<_> = calls
+            .iter()
+            .filter(|c| c.path == "/api/chat.postMessage")
+            .collect();
+        assert_eq!(
+            post_calls.len(),
+            1,
+            "Duplicate{{RejectedBusy(Some)}} + UserMessage must post exactly one hint"
+        );
+        let body = std::str::from_utf8(&post_calls[0].body).expect("utf8 body");
+        assert!(
+            body.contains("waiting on a pending approval"),
+            "Duplicate{{RejectedBusy}} hint must mention 'waiting on a pending approval', got: {body}"
+        );
+        assert!(
+            body.contains(gate_ref_str),
+            "Duplicate{{RejectedBusy}} approval hint must embed gate ref '{gate_ref_str}', got: {body}"
+        );
+    }
+
+    /// Duplicate { prior: RejectedBusy { active_run_id: Some(..) } } delivered twice
+    /// with the same (conversation, event_id) → exactly one post (throttle suppresses
+    /// the second).
+    ///
+    /// Both deliveries use `envelope()` which has a fixed event id "evt:test", so
+    /// they share the same (conversation, event_id) throttle key.  This models a
+    /// Slack transport retry of the exact same external event — the throttle prevents
+    /// double-posting: the first delivery inserts the key and the second is suppressed.
+    #[tokio::test]
+    async fn duplicate_rejected_busy_throttle_suppresses_second_delivery() {
+        let install = "test-install";
+        let run_id = TurnRunId::new();
+        let egress = Arc::new(FakeProtocolHttpEgress::new(vec!["slack.com".to_string()]));
+        egress.allow_credential_handle("slack_bot_token");
+        // Only one response slot — if two posts were attempted the second would
+        // error, making the assertion below a double-check.
+        egress.program_response(
+            "slack.com",
+            Ok(EgressResponse::new(
+                200,
+                slack_post_ok_json("D123", "8101.1"),
+            )),
+        );
+
+        let outbound = Arc::new(InMemoryOutboundStateStore::default());
+        let coordinator = Arc::new(ScriptedTurnCoordinator::with_single_status(
+            TurnStatus::BlockedApproval,
+        ));
+        let observer = make_observer(coordinator, egress.clone(), outbound, install);
+
+        let make_dup_ack = || ProductInboundAck::Duplicate {
+            prior: Box::new(ProductInboundAck::RejectedBusy {
+                accepted_message_ref: AcceptedMessageRef::new("slack:dup-rb-throttle")
+                    .expect("ref"),
+                active_run_id: Some(run_id),
+            }),
+        };
+
+        // First delivery: same event id "evt:test" → inserts throttle key, posts hint.
+        observer
+            .observe_workflow_ack(envelope(user_message_payload()), make_dup_ack())
+            .await;
+        // Second delivery: same event id "evt:test" → throttle key already present → suppressed.
+        observer
+            .observe_workflow_ack(envelope(user_message_payload()), make_dup_ack())
+            .await;
+
+        let calls = egress.calls();
+        let post_calls: Vec<_> = calls
+            .iter()
+            .filter(|c| c.path == "/api/chat.postMessage")
+            .collect();
+        assert_eq!(
+            post_calls.len(),
+            1,
+            "throttle must suppress the second Duplicate{{RejectedBusy}} hint for the same (conversation, event_id)"
         );
     }
 
@@ -3973,6 +5376,8 @@ mod tests {
             egress: egress.clone(),
             delivery_sink: Arc::new(FakeOutboundDeliverySink::default()),
             auth_challenges: None,
+            auth_flow_canceller: None,
+            approval_requests: None,
         };
         let settings = SlackFinalReplyDeliverySettings {
             poll_interval: std::time::Duration::ZERO,
@@ -4050,6 +5455,8 @@ mod tests {
             egress: egress.clone(),
             delivery_sink: Arc::new(FakeOutboundDeliverySink::default()),
             auth_challenges: None,
+            auth_flow_canceller: None,
+            approval_requests: None,
         };
         let settings = SlackFinalReplyDeliverySettings {
             poll_interval: std::time::Duration::ZERO,
@@ -4327,6 +5734,8 @@ mod tests {
             egress: egress.clone(),
             delivery_sink: Arc::new(FakeOutboundDeliverySink::default()),
             auth_challenges: None,
+            auth_flow_canceller: None,
+            approval_requests: None,
         };
         let settings = SlackFinalReplyDeliverySettings {
             poll_interval: std::time::Duration::ZERO,
@@ -4375,86 +5784,6 @@ mod tests {
         assert!(
             body.contains(gate_ref_str),
             "approval prompt must reference the gate ref, body: {body}"
-        );
-    }
-
-    /// Same suppression as the approval-prompt case, but through the auth prompt
-    /// payload path.
-    #[tokio::test]
-    async fn timeout_after_auth_blocked_notification_suppresses_timeout_message() {
-        use ironclaw_product_workflow::FakeConversationBindingService;
-
-        let install = "test-install";
-        let gate_ref_str = "gate:auth-timeout-test";
-        let egress = Arc::new(FakeProtocolHttpEgress::new(vec!["slack.com".to_string()]));
-        egress.allow_credential_handle("slack_bot_token");
-        egress.program_response(
-            "slack.com",
-            Ok(EgressResponse::new(
-                200,
-                slack_post_ok_json("D123", "5000.2"),
-            )),
-        );
-
-        let outbound = Arc::new(InMemoryOutboundStateStore::default());
-        let coordinator = Arc::new(ScriptedTurnCoordinator::with_states(vec![scripted_state(
-            TurnStatus::BlockedAuth,
-            Some(gate_ref_str),
-        )]));
-
-        let binding_service = Arc::new(FakeConversationBindingService::new());
-        let thread_service = Arc::new(InMemorySessionThreadService::default());
-        let services = SlackFinalReplyDeliveryServices {
-            binding_service,
-            thread_service,
-            turn_coordinator: coordinator,
-            outbound_store: outbound.clone(),
-            route_store: Arc::new(InMemoryDeliveredGateRouteStore::default()),
-            communication_preferences: outbound,
-            adapter: test_adapter(install),
-            egress: egress.clone(),
-            delivery_sink: Arc::new(FakeOutboundDeliverySink::default()),
-            auth_challenges: None,
-        };
-        let settings = SlackFinalReplyDeliverySettings {
-            poll_interval: std::time::Duration::ZERO,
-            max_wait: std::time::Duration::from_millis(1),
-            max_concurrent_deliveries: NonZeroUsize::new(1).unwrap(),
-            max_pending_deliveries: NonZeroUsize::new(8).unwrap(),
-        };
-        let observer = SlackFinalReplyDeliveryObserver::with_settings(services, settings);
-
-        let env = envelope(user_message_payload());
-        let ack = ProductInboundAck::Accepted {
-            accepted_message_ref: AcceptedMessageRef::new("slack:auth-blocked-timeout-test")
-                .expect("ref"),
-            submitted_run_id: TurnRunId::new(),
-        };
-
-        observer.observe_workflow_ack(env, ack).await;
-
-        let calls = egress.calls();
-        let post_calls: Vec<_> = calls
-            .iter()
-            .filter(|c| c.path == "/api/chat.postMessage")
-            .collect();
-        assert_eq!(
-            post_calls.len(),
-            1,
-            "expected exactly one chat.postMessage (the auth prompt), bodies: {:?}",
-            post_calls
-                .iter()
-                .map(|c| std::str::from_utf8(&c.body).unwrap_or("?"))
-                .collect::<Vec<_>>()
-        );
-        let body = std::str::from_utf8(&post_calls[0].body).unwrap_or("");
-        assert!(
-            !body.contains("longer than expected"),
-            "timeout notice must not be posted after auth notification timeout, body: {body}"
-        );
-        assert!(
-            body.contains(gate_ref_str),
-            "auth prompt must reference the gate ref, body: {body}"
         );
     }
 
@@ -4525,7 +5854,7 @@ mod tests {
         ))
         .expect("gate ref");
 
-        let prompt = slack_approval_gate_prompt_view(TurnRunId::new(), &gate_ref);
+        let prompt = slack_approval_gate_prompt_view(TurnRunId::new(), &gate_ref, None);
 
         assert_eq!(prompt.gate_ref, gate_ref.as_str());
         assert!(prompt.allow_always);
@@ -4535,10 +5864,95 @@ mod tests {
     fn slack_approval_prompt_does_not_offer_always_for_generic_gate() {
         let gate_ref = GateRef::new("gate:approve-slack").expect("gate ref");
 
-        let prompt = slack_approval_gate_prompt_view(TurnRunId::new(), &gate_ref);
+        let prompt = slack_approval_gate_prompt_view(TurnRunId::new(), &gate_ref, None);
 
         assert_eq!(prompt.gate_ref, gate_ref.as_str());
         assert!(!prompt.allow_always);
+    }
+
+    /// BUG-1 regression: the composition body carries only the semantic What/Why —
+    /// the channel-specific "how to reply" (and the gate ref) is appended once by
+    /// the Slack adapter's `gate_prompt_reply_instruction`, so the body must NOT
+    /// duplicate reply instructions or the gate ref (that caused the bloated,
+    /// confusing, double-instruction message).
+    #[test]
+    fn slack_approval_prompt_body_carries_only_what_why_not_reply_instructions() {
+        let gate_ref = GateRef::new("gate:approve-body-test").expect("gate ref");
+        let prompt = slack_approval_gate_prompt_view(TurnRunId::new(), &gate_ref, None);
+        let body = &prompt.body;
+
+        // No reply instructions in the body — that is the adapter footer's job.
+        assert!(
+            !body.contains("approve") && !body.contains("deny"),
+            "body must not contain reply instructions; got: {body}"
+        );
+        // No gate ref in the body (the footer renders it).
+        assert!(
+            !body.contains("gate:approve-body-test"),
+            "body must not contain the gate ref; got: {body}"
+        );
+        // No legacy misleading copy.
+        assert!(
+            !body.contains("from anywhere"),
+            "body must not claim bare `approve` works from anywhere; got: {body}"
+        );
+    }
+
+    /// BUG-2 regression: when approval context is provided, the prompt body must
+    /// include the action and reason, and approval_context must be Some.
+    #[test]
+    fn slack_approval_prompt_body_includes_context_when_provided() {
+        let gate_ref = GateRef::new("gate:approve-ctx-test").expect("gate ref");
+        let context = ApprovalPromptContextView::new(
+            "Send email via Gmail",
+            ironclaw_product_adapters::ApprovalPromptActionView::new("Send email via Gmail", None)
+                .expect("action view"),
+            ironclaw_product_adapters::ApprovalPromptScopeView::new("once", false)
+                .expect("scope view"),
+            Some("Automation step needs to notify the team".to_string()),
+            None,
+            vec![],
+        )
+        .expect("context view");
+        let prompt = slack_approval_gate_prompt_view(TurnRunId::new(), &gate_ref, Some(&context));
+        let body = &prompt.body;
+
+        assert!(
+            body.contains("Send email via Gmail"),
+            "body must include tool name from context; got: {body}"
+        );
+        assert!(
+            body.contains("Automation step needs to notify the team"),
+            "body must include reason from context; got: {body}"
+        );
+        assert!(
+            prompt.approval_context.is_some(),
+            "approval_context must be Some when action is available"
+        );
+    }
+
+    /// BUG-2: when context is None, body falls back to generic text and
+    /// approval_context is None.
+    #[test]
+    fn slack_approval_prompt_body_generic_when_no_context() {
+        let gate_ref = GateRef::new("gate:approve-no-ctx").expect("gate ref");
+        let prompt = slack_approval_gate_prompt_view(TurnRunId::new(), &gate_ref, None);
+        assert!(
+            prompt.approval_context.is_none(),
+            "approval_context must be None when context is absent"
+        );
+        // Generic body is a short fallback sentence — reply instructions live in
+        // the adapter footer, not the body.
+        assert!(
+            prompt.body.contains("needs your approval"),
+            "body must be the generic approval sentence; got: {}",
+            prompt.body
+        );
+        assert!(
+            !prompt.body.contains("approve") && !prompt.body.contains("deny"),
+            "generic body must not contain reply instructions; got: {}",
+            prompt.body
+        );
     }
 
     // --- Bug-fix regression tests: gate-route refs carry team id (space_id) ----
@@ -4626,6 +6040,29 @@ mod tests {
             .await;
         wait_for_delivery_record(&delivery_store, run_id).await;
 
+        // Regression: the triggered approval prompt now renders through the same
+        // shared `slack_approval_gate_prompt_view` as the regular inbound flow.
+        // With no approval context wired (approval_requests: None) the body is
+        // the shared generic fallback — NOT the old inline
+        // "Reply `approve <gate>` to continue." body that had drifted from live.
+        let approval_post_body = egress
+            .calls()
+            .iter()
+            .find(|c| c.path == "/api/chat.postMessage")
+            .map(|c| String::from_utf8_lossy(&c.body).to_string())
+            .expect("approval prompt must be posted");
+        assert!(
+            approval_post_body.contains("A step in this workflow needs your approval to continue"),
+            "triggered approval prompt must use the shared gate-prompt render; got: {approval_post_body}"
+        );
+        // Every triggered Slack message carries the triggered-event footer
+        // naming the surface contract (act here; interact via the web app).
+        assert!(
+            approval_post_body.contains("From a triggered event")
+                && approval_post_body.contains("Ironclaw web app"),
+            "triggered message must carry the triggered-event/web-app footer; got: {approval_post_body}"
+        );
+
         let creator = ironclaw_host_api::UserId::new("creator-user").expect("user id");
         let route = route_store
             .load_delivered_gate_route(&scope.tenant_id, &creator, gate_ref_str)
@@ -4660,7 +6097,7 @@ mod tests {
     /// `gate_ref_for_routing` was `None` for BlockedAuth so no route was
     /// recorded, causing a `MissingGate` when the user replied "approve".
     #[tokio::test]
-    async fn triggered_auth_delivery_records_gate_route() {
+    async fn triggered_non_oauth_auth_is_denied_without_gate_route() {
         let install = "test-install";
         let gate_ref_str = "gate:auth-route-regression";
         let scope = personal_turn_scope();
@@ -4742,18 +6179,859 @@ mod tests {
         wait_for_delivery_record(&delivery_store, run_id).await;
 
         let creator = ironclaw_host_api::UserId::new("creator-user").expect("user id");
-        // A gate route for the auth gate_ref must have been recorded.
+        // Non-OAuth auth (no `authorization_url`) is DENIED over Slack: the run is
+        // cancelled and an "auth unavailable" notice is posted instead of an auth
+        // prompt, so NO gate route is recorded (there is nothing to resolve
+        // in-thread). OAuth auth (which carries a URL) is what records a route.
         let route = route_store
             .load_delivered_gate_route(&scope.tenant_id, &creator, gate_ref_str)
             .await
-            .expect("load route")
-            .expect("auth gate route must be recorded (Bug 2 regression)");
-
-        assert_eq!(
-            route.gate_ref, gate_ref_str,
-            "recorded route must reference the auth gate_ref"
+            .expect("load route");
+        assert!(
+            route.is_none(),
+            "non-OAuth auth must NOT record a gate route on a triggered run"
         );
-        assert_eq!(route.run_id, run_id);
+
+        let posted: Vec<String> = egress
+            .calls()
+            .iter()
+            .filter(|c| c.path == "/api/chat.postMessage")
+            .map(|c| String::from_utf8_lossy(&c.body).to_string())
+            .collect();
+        assert!(
+            posted
+                .iter()
+                .any(|b| b.contains(SLACK_AUTH_UNAVAILABLE_MESSAGE)),
+            "expected the auth-unavailable notice to be posted; got: {posted:?}"
+        );
+    }
+
+    // ── BUG1 regression + OAuth backstop cancel-failure tests ─────────────────
+    //
+    // BUG1: when a triggered run reaches BlockedAuth with a non-OAuth challenge,
+    // `triggered_notification_for_state` cancels the run inline and returns a
+    // terminal FinalReplyReady notification. The delivery loop previously treated
+    // any Some(next_blocked_marker) as "still waiting", causing the loop to
+    // continue after a successful terminal delivery, read the now-Cancelled run
+    // state, hit Ok(None), and record Skipped instead of Delivered.
+
+    /// BUG1 regression: a triggered run that hits BlockedAuth with a non-OAuth
+    /// challenge (no authorization_url) must record `Delivered` — NOT `Skipped`.
+    ///
+    /// The non-OAuth deny branch in `triggered_notification_for_state` cancels the
+    /// run inline and returns a terminal `FinalReplyReady` notification. After the
+    /// notice is successfully posted, the delivery loop must fall through to the
+    /// terminal `Delivered` path rather than looping back and seeing the now-Cancelled
+    /// run as `Ok(None)` → `Skipped`.
+    #[tokio::test]
+    async fn triggered_non_oauth_auth_denial_records_delivered() {
+        let install = "test-install";
+        let gate_ref_str = "gate:non-oauth-denial-delivered";
+        let scope = personal_turn_scope();
+        let run_id = TurnRunId::new();
+        let binding_ref =
+            test_slack_binding_ref(install, scope.agent_id.as_ref().expect("agent").as_str());
+
+        // First poll → BlockedAuth (non-OAuth: no auth_challenges wired, so no
+        // authorization_url → deny branch fires inline cancel + FinalReplyReady).
+        // Second poll → Cancelled (terminal, no finalized message → Ok(None)).
+        // Without the BUG1 fix the loop continues to the second poll and records
+        // Skipped. With the fix, after the FinalReplyReady delivery the loop
+        // falls through to Delivered without polling again.
+        let coordinator = Arc::new(ScriptedTurnCoordinator::with_states(vec![
+            scripted_state(TurnStatus::BlockedAuth, Some(gate_ref_str)),
+            scripted_state(TurnStatus::Cancelled, None),
+        ]));
+        // No finalized assistant message needed: the terminal delivery is the
+        // auth-unavailable notice, not a Completed assistant reply.
+
+        let outbound = Arc::new(InMemoryOutboundStateStore::default());
+        seed_personal_preference(&outbound, &scope, binding_ref).await;
+
+        let egress = Arc::new(FakeProtocolHttpEgress::new(vec!["slack.com".to_string()]));
+        egress.allow_credential_handle("slack_bot_token");
+        // One postMessage for the auth-unavailable notice.
+        egress.program_response(
+            "slack.com",
+            Ok(EgressResponse::new(
+                200,
+                slack_post_ok_json("D456", "bug1.1"),
+            )),
+        );
+
+        let delivery_store = Arc::new(InMemoryTriggeredRunDeliveryStore::default());
+        let route_store = Arc::new(InMemoryDeliveredGateRouteStore::default());
+        let services = make_services(
+            coordinator.clone(),
+            Arc::new(InMemorySessionThreadService::default()),
+            egress.clone(),
+            outbound,
+            install,
+        );
+        let settings = SlackFinalReplyDeliverySettings {
+            poll_interval: std::time::Duration::ZERO,
+            max_wait: std::time::Duration::from_secs(5),
+            max_concurrent_deliveries: NonZeroUsize::new(1).unwrap(),
+            max_pending_deliveries: NonZeroUsize::new(8).unwrap(),
+        };
+        let driver = TriggeredRunDeliveryDriver::with_settings(
+            services,
+            settings,
+            delivery_store.clone(),
+            route_store.clone(),
+            scope.agent_id.clone().expect("test scope has agent"),
+        );
+
+        let fire = minimal_trigger_fire(None);
+        driver
+            .on_trigger_submitted(fire, run_id, scope.clone())
+            .await;
+        let record = wait_for_delivery_record(&delivery_store, run_id).await;
+
+        // BUG1 regression: outcome must be Delivered, not Skipped.
+        assert_eq!(
+            record.outcome,
+            TriggeredRunDeliveryOutcomeKind::Delivered,
+            "non-OAuth auth denial must record Delivered (not Skipped); got: {:?}",
+            record.outcome
+        );
+
+        // The auth-unavailable notice must have been posted.
+        let posted: Vec<String> = egress
+            .calls()
+            .iter()
+            .filter(|c| c.path == "/api/chat.postMessage")
+            .map(|c| String::from_utf8_lossy(&c.body).to_string())
+            .collect();
+        assert!(
+            posted
+                .iter()
+                .any(|b| b.contains(SLACK_AUTH_UNAVAILABLE_MESSAGE)),
+            "auth-unavailable notice must be posted; got: {posted:?}"
+        );
+
+        // cancel_run was called exactly once (inline by triggered_notification_for_state).
+        assert_eq!(
+            coordinator.cancel_call_count(),
+            1,
+            "cancel_run must be called exactly once for non-OAuth auth denial"
+        );
+    }
+
+    /// Triggered non-OAuth `BlockedAuth` → `cancel_auth_blocked_run` invokes the
+    /// `BlockedAuthFlowCanceller` for the blocked gate (#4952).
+    ///
+    /// Drives the same `triggered_notification_for_state` non-OAuth branch as
+    /// `triggered_non_oauth_auth_denial_records_delivered`, but this time a
+    /// `RecordingBlockedAuthFlowCanceller` is wired so we can assert the stale
+    /// auth-flow record is cancelled.
+    #[tokio::test]
+    async fn triggered_non_oauth_auth_cancels_stale_auth_flow() {
+        let install = "test-install";
+        let gate_ref_str = "gate:triggered-non-oauth-stale-flow";
+        let scope = personal_turn_scope();
+        let run_id = TurnRunId::new();
+        let binding_ref =
+            test_slack_binding_ref(install, scope.agent_id.as_ref().expect("agent").as_str());
+
+        // First poll → BlockedAuth (non-OAuth: no auth_challenges, so no
+        // authorization_url → deny branch in triggered_notification_for_state).
+        // Second poll → Cancelled (terminal, no message → Ok(None)).
+        let coordinator = Arc::new(ScriptedTurnCoordinator::with_states(vec![
+            scripted_state(TurnStatus::BlockedAuth, Some(gate_ref_str)),
+            scripted_state(TurnStatus::Cancelled, None),
+        ]));
+
+        let outbound = Arc::new(InMemoryOutboundStateStore::default());
+        seed_personal_preference(&outbound, &scope, binding_ref).await;
+
+        let egress = Arc::new(FakeProtocolHttpEgress::new(vec!["slack.com".to_string()]));
+        egress.allow_credential_handle("slack_bot_token");
+        // One postMessage for the auth-unavailable notice.
+        egress.program_response(
+            "slack.com",
+            Ok(EgressResponse::new(
+                200,
+                slack_post_ok_json("D456", "noa1.1"),
+            )),
+        );
+
+        let recorder = Arc::new(RecordingBlockedAuthFlowCanceller::default());
+        let delivery_store = Arc::new(InMemoryTriggeredRunDeliveryStore::default());
+        let route_store = Arc::new(InMemoryDeliveredGateRouteStore::default());
+        let services = make_services_with_canceller(
+            coordinator.clone(),
+            Arc::new(InMemorySessionThreadService::default()),
+            egress.clone(),
+            outbound,
+            install,
+            Some(Arc::clone(&recorder) as Arc<dyn BlockedAuthFlowCanceller>),
+        );
+        let settings = SlackFinalReplyDeliverySettings {
+            poll_interval: std::time::Duration::ZERO,
+            max_wait: std::time::Duration::from_secs(5),
+            max_concurrent_deliveries: NonZeroUsize::new(1).unwrap(),
+            max_pending_deliveries: NonZeroUsize::new(8).unwrap(),
+        };
+        let driver = TriggeredRunDeliveryDriver::with_settings(
+            services,
+            settings,
+            delivery_store.clone(),
+            route_store.clone(),
+            scope.agent_id.clone().expect("test scope has agent"),
+        );
+
+        let fire = minimal_trigger_fire(None);
+        driver
+            .on_trigger_submitted(fire, run_id, scope.clone())
+            .await;
+        wait_for_delivery_record(&delivery_store, run_id).await;
+
+        // The stale auth flow must have been cancelled exactly once.
+        let calls = recorder
+            .calls
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        assert_eq!(
+            calls.len(),
+            1,
+            "triggered non-OAuth auth deny must cancel the stale auth flow exactly once; got {} calls",
+            calls.len()
+        );
+        assert_eq!(
+            calls[0].run_id, run_id,
+            "canceller must receive the triggered run's run_id"
+        );
+        assert_eq!(
+            calls[0].gate_ref, gate_ref_str,
+            "canceller must receive the blocked gate_ref"
+        );
+        // FIX 2: Assert the resolved owner_user_id and scope match the fixture values.
+        //
+        // In the triggered path, `deliver_triggered_run` builds:
+        //   actor = TurnActor::new(fire.creator_user_id) = "creator-user"
+        // `personal_turn_scope()` sets explicit owner = "creator-user", so
+        // `scope.explicit_owner_user_id() = Some("creator-user")` wins at
+        // production line 1167 (`cancel_auth_blocked_run` owner resolution).
+        let expected_owner =
+            ironclaw_host_api::UserId::new("creator-user").expect("expected owner fixture");
+        assert_eq!(
+            calls[0].owner_user_id, expected_owner,
+            "owner_user_id must be the scope's explicit owner (creator-user from personal_turn_scope)"
+        );
+        // Scope tenant must match personal_turn_scope().
+        assert_eq!(
+            calls[0].scope.tenant_id, scope.tenant_id,
+            "scope.tenant_id must match the personal_turn_scope tenant"
+        );
+    }
+
+    /// OAuth backstop cancel-failure path: when `cancel_auth_blocked_run` fails in
+    /// the `OAuthTargetNotDm` error arm, the outcome must be `Failed` and NO
+    /// `/api/chat.delete` calls must be made (we must not strip the auth prompt
+    /// while the run may still be live).
+    #[tokio::test]
+    async fn triggered_oauth_auth_backstop_cancel_failure_records_failed() {
+        let install = "test-install";
+        let gate_ref_str = "gate:oauth-backstop-cancel-fail";
+        let scope = personal_turn_scope();
+        let run_id = TurnRunId::new();
+
+        // Use a SHARED CHANNEL binding ref so the OAuth backstop trips.
+        let binding_ref = test_slack_shared_channel_binding_ref(
+            install,
+            scope.agent_id.as_ref().expect("agent").as_str(),
+        );
+
+        // First poll → BlockedAuth; second poll is never reached because the
+        // cancel fails and we return Failed immediately.
+        let coordinator = Arc::new(ScriptedTurnCoordinator::with_states(vec![scripted_state(
+            TurnStatus::BlockedAuth,
+            Some(gate_ref_str),
+        )]));
+        // Make cancel_run fail so the OAuthTargetNotDm backstop arm returns Failed.
+        coordinator
+            .cancel_should_fail
+            .store(true, std::sync::atomic::Ordering::Release);
+
+        let outbound = Arc::new(InMemoryOutboundStateStore::default());
+        // Seed preference with the shared-channel binding so the OAuth guard trips.
+        seed_personal_preference(&outbound, &scope, binding_ref).await;
+
+        let egress = Arc::new(FakeProtocolHttpEgress::new(vec!["slack.com".to_string()]));
+        egress.allow_credential_handle("slack_bot_token");
+        // The initial auth-prompt delivery to the shared channel returns success
+        // (the backstop fires only after the delivery attempt when the authority
+        // detects the non-DM binding).  We do NOT program a postMessage response
+        // because the backstop intercepts BEFORE delivery via the
+        // `require_personal_dm_for_oauth` guard — no actual HTTP call is made.
+        // (The guard is checked inside `deliver_triggered_notification`; it
+        // returns `OAuthTargetNotDm` without posting.)
+
+        let delivery_store = Arc::new(InMemoryTriggeredRunDeliveryStore::default());
+        let route_store = Arc::new(InMemoryDeliveredGateRouteStore::default());
+        let mut services = make_services(
+            coordinator.clone(),
+            Arc::new(InMemorySessionThreadService::default()),
+            egress.clone(),
+            outbound,
+            install,
+        );
+        // Wire up an OAuth challenge provider so the BlockedAuth state generates
+        // an authorization_url, triggering the DM-only guard.
+        services.auth_challenges = Some(Arc::new(OAuthAuthChallengeProvider {
+            url: "https://provider.example/oauth-cancel-fail".to_string(),
+        }));
+
+        let settings = SlackFinalReplyDeliverySettings {
+            poll_interval: std::time::Duration::ZERO,
+            max_wait: std::time::Duration::from_secs(5),
+            max_concurrent_deliveries: NonZeroUsize::new(1).unwrap(),
+            max_pending_deliveries: NonZeroUsize::new(8).unwrap(),
+        };
+        let driver = TriggeredRunDeliveryDriver::with_settings(
+            services,
+            settings,
+            delivery_store.clone(),
+            route_store.clone(),
+            scope.agent_id.clone().expect("test scope has agent"),
+        );
+
+        let fire = minimal_trigger_fire(None);
+        driver
+            .on_trigger_submitted(fire, run_id, scope.clone())
+            .await;
+        let record = wait_for_delivery_record(&delivery_store, run_id).await;
+
+        // The cancel failed → outcome must be Failed.
+        assert_eq!(
+            record.outcome,
+            TriggeredRunDeliveryOutcomeKind::Failed,
+            "OAuth backstop cancel failure must record Failed; got: {:?}",
+            record.outcome
+        );
+
+        // No chat.delete calls: the auth prompt must not be removed when the
+        // cancel failed (the run may still be live).
+        let delete_call_count = egress
+            .calls()
+            .into_iter()
+            .filter(|c| c.path == "/api/chat.delete")
+            .count();
+        assert_eq!(
+            delete_call_count, 0,
+            "no chat.delete must be issued when backstop cancel fails; got {delete_call_count} calls"
+        );
+
+        // cancel_run was attempted exactly once.
+        assert_eq!(
+            coordinator.cancel_call_count(),
+            1,
+            "cancel_run must be attempted exactly once in the backstop arm"
+        );
+    }
+
+    /// OAuth `OAuthTargetNotDm` backstop → `BlockedAuthFlowCanceller` is invoked
+    /// to cancel the stale auth-flow record alongside the run (#4952).
+    ///
+    /// Models on `triggered_oauth_auth_backstop_cancel_failure_records_failed` but
+    /// wires a `RecordingBlockedAuthFlowCanceller` (no cancel_run failure) so the
+    /// backstop succeeds and we can assert the canceller was called for the correct
+    /// gate_ref.
+    #[tokio::test]
+    async fn triggered_oauth_backstop_cancels_stale_auth_flow() {
+        let install = "test-install";
+        let gate_ref_str = "gate:oauth-backstop-stale-flow";
+        let scope = personal_turn_scope();
+        let run_id = TurnRunId::new();
+
+        // Use a SHARED CHANNEL binding ref so the OAuth backstop trips
+        // (OAuthTargetNotDm is returned before any HTTP post is made).
+        let binding_ref = test_slack_shared_channel_binding_ref(
+            install,
+            scope.agent_id.as_ref().expect("agent").as_str(),
+        );
+
+        // First poll → BlockedAuth; second poll → Cancelled (after cancel_run).
+        let coordinator = Arc::new(ScriptedTurnCoordinator::with_states(vec![
+            scripted_state(TurnStatus::BlockedAuth, Some(gate_ref_str)),
+            scripted_state(TurnStatus::Cancelled, None),
+        ]));
+        // cancel_run must succeed so the backstop posts the unavailable notice.
+
+        let outbound = Arc::new(InMemoryOutboundStateStore::default());
+        // Seed preference with the shared-channel binding so the OAuth guard trips.
+        seed_personal_preference(&outbound, &scope, binding_ref).await;
+
+        let egress = Arc::new(FakeProtocolHttpEgress::new(vec!["slack.com".to_string()]));
+        egress.allow_credential_handle("slack_bot_token");
+        // One postMessage for the auth-unavailable notice (the backstop posts
+        // after a successful cancel_run).
+        egress.program_response(
+            "slack.com",
+            Ok(EgressResponse::new(
+                200,
+                slack_post_ok_json("C0SHARED", "obs2.1"),
+            )),
+        );
+
+        let recorder = Arc::new(RecordingBlockedAuthFlowCanceller::default());
+        let delivery_store = Arc::new(InMemoryTriggeredRunDeliveryStore::default());
+        let route_store = Arc::new(InMemoryDeliveredGateRouteStore::default());
+        let mut services = make_services_with_canceller(
+            coordinator.clone(),
+            Arc::new(InMemorySessionThreadService::default()),
+            egress.clone(),
+            outbound,
+            install,
+            Some(Arc::clone(&recorder) as Arc<dyn BlockedAuthFlowCanceller>),
+        );
+        // Wire up an OAuth challenge provider so the BlockedAuth state generates
+        // an authorization_url, triggering the DM-only guard.
+        services.auth_challenges = Some(Arc::new(OAuthAuthChallengeProvider {
+            url: "https://provider.example/oauth-backstop-stale".to_string(),
+        }));
+
+        let settings = SlackFinalReplyDeliverySettings {
+            poll_interval: std::time::Duration::ZERO,
+            max_wait: std::time::Duration::from_secs(5),
+            max_concurrent_deliveries: NonZeroUsize::new(1).unwrap(),
+            max_pending_deliveries: NonZeroUsize::new(8).unwrap(),
+        };
+        let driver = TriggeredRunDeliveryDriver::with_settings(
+            services,
+            settings,
+            delivery_store.clone(),
+            route_store.clone(),
+            scope.agent_id.clone().expect("test scope has agent"),
+        );
+
+        let fire = minimal_trigger_fire(None);
+        driver
+            .on_trigger_submitted(fire, run_id, scope.clone())
+            .await;
+        wait_for_delivery_record(&delivery_store, run_id).await;
+
+        // The stale auth flow must have been cancelled exactly once.
+        let calls = recorder
+            .calls
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        assert_eq!(
+            calls.len(),
+            1,
+            "OAuth backstop must cancel the stale auth flow exactly once; got {} calls",
+            calls.len()
+        );
+        assert_eq!(
+            calls[0].run_id, run_id,
+            "canceller must receive the triggered run's run_id"
+        );
+        assert_eq!(
+            calls[0].gate_ref, gate_ref_str,
+            "canceller must receive the blocked gate_ref"
+        );
+    }
+
+    // ── DM-gate security tests ─────────────────────────────────────────────────
+    //
+    // These tests verify the fail-closed gate that prevents OAuth
+    // `authorization_url` values from leaking onto shared Slack channels.
+
+    /// Fake `AuthChallengeProvider` that always returns an OAuth challenge
+    /// with the given `authorization_url`.
+    struct OAuthAuthChallengeProvider {
+        url: String,
+    }
+
+    #[async_trait]
+    impl AuthChallengeProvider for OAuthAuthChallengeProvider {
+        async fn challenge_for_gate(
+            &self,
+            _scope: &TurnScope,
+            _owner_user_id: &ironclaw_host_api::UserId,
+            _run_id: TurnRunId,
+            _gate_ref: &str,
+            _credential_requirements: &[ironclaw_host_api::RuntimeCredentialAuthRequirement],
+        ) -> Result<Option<crate::auth_prompt::AuthChallengeView>, ironclaw_auth::AuthProductError>
+        {
+            Ok(Some(crate::auth_prompt::AuthChallengeView {
+                kind: ironclaw_product_adapters::AuthPromptChallengeKind::OAuthUrl,
+                provider: ironclaw_auth::AuthProviderId::new("test-provider").expect("provider"),
+                account_label: None,
+                authorization_url: Some(
+                    ironclaw_auth::OAuthAuthorizationUrl::new(self.url.clone()).expect("url"),
+                ),
+                expires_at: None,
+            }))
+        }
+    }
+
+    /// Build a shared-channel binding ref for use in tests (no actor segments).
+    fn test_slack_shared_channel_binding_ref(
+        installation_id: &str,
+        agent_id: &str,
+    ) -> ReplyTargetBindingRef {
+        fn seg(name: &str, value: &str) -> String {
+            format!("{}:{}:{};", name, value.len(), value)
+        }
+        let raw = format!(
+            "{}{}{}{}{}{}{}",
+            seg("adapter", "slack_v2"),
+            seg("installation", installation_id),
+            seg("agent", agent_id),
+            seg("project", ""),
+            seg("space", "T123"),
+            seg("conversation", "C0SHARED"),
+            seg("topic", ""),
+        );
+        crate::slack_outbound_targets::slack_reply_target_binding_ref_from_raw(raw)
+            .expect("test shared-channel binding ref")
+    }
+
+    /// Security regression: triggered OAuth auth whose delivery target is a SHARED
+    /// CHANNEL must NOT post the `authorization_url`. The run must be cancelled and
+    /// the auth-unavailable notice must be posted instead.
+    ///
+    /// This is the "fail closed" path: if the binding ref does not parse as a
+    /// personal DM, the OAuth URL is suppressed regardless of `authorization_url`
+    /// being set.
+    #[tokio::test]
+    async fn triggered_oauth_auth_to_shared_channel_suppresses_authorization_url() {
+        let install = "test-install";
+        let gate_ref_str = "gate:oauth-shared-channel-leak";
+        let scope = personal_turn_scope();
+        let run_id = TurnRunId::new();
+
+        // Use a shared-channel binding ref (no actor_kind / actor segments).
+        let binding_ref = test_slack_shared_channel_binding_ref(
+            install,
+            scope.agent_id.as_ref().expect("agent").as_str(),
+        );
+
+        // First poll → BlockedAuth; second poll → Completed (after cancel the run
+        // reaches Completed or the test exits — we only care about what is posted).
+        let coordinator = Arc::new(ScriptedTurnCoordinator::with_states(vec![
+            scripted_state(TurnStatus::BlockedAuth, Some(gate_ref_str)),
+            scripted_state(TurnStatus::Completed, None),
+        ]));
+        let thread_service = Arc::new(InMemorySessionThreadService::default());
+        seed_finalized_assistant_message(
+            &thread_service,
+            &scope,
+            run_id,
+            "Run complete after auth.",
+        )
+        .await;
+
+        let outbound = Arc::new(InMemoryOutboundStateStore::default());
+        // Seed the preference with a SHARED CHANNEL binding ref (not a DM).
+        seed_personal_preference(&outbound, &scope, binding_ref).await;
+
+        let egress = Arc::new(FakeProtocolHttpEgress::new(vec!["slack.com".to_string()]));
+        egress.allow_credential_handle("slack_bot_token");
+        // Expect one chat.postMessage call for the auth-unavailable notice.
+        egress.program_response(
+            "slack.com",
+            Ok(EgressResponse::new(
+                200,
+                slack_post_ok_json("C0SHARED", "7001.1"),
+            )),
+        );
+        // And a second for the final reply after Completed.
+        egress.program_response(
+            "slack.com",
+            Ok(EgressResponse::new(
+                200,
+                slack_post_ok_json("C0SHARED", "7001.2"),
+            )),
+        );
+
+        let delivery_store = Arc::new(InMemoryTriggeredRunDeliveryStore::default());
+        let route_store = Arc::new(InMemoryDeliveredGateRouteStore::default());
+        let mut services = make_services(
+            coordinator,
+            thread_service,
+            egress.clone(),
+            outbound,
+            install,
+        );
+        // Wire up an OAuth challenge provider so the BlockedAuth state WOULD
+        // produce an authorization_url — the gate must suppress it.
+        services.auth_challenges = Some(Arc::new(OAuthAuthChallengeProvider {
+            url: "https://provider.example/oauth-auth".to_string(),
+        }));
+
+        let settings = SlackFinalReplyDeliverySettings {
+            poll_interval: std::time::Duration::ZERO,
+            max_wait: std::time::Duration::from_secs(5),
+            max_concurrent_deliveries: NonZeroUsize::new(1).unwrap(),
+            max_pending_deliveries: NonZeroUsize::new(8).unwrap(),
+        };
+        let driver = TriggeredRunDeliveryDriver::with_settings(
+            services,
+            settings,
+            delivery_store.clone(),
+            route_store.clone(),
+            scope.agent_id.clone().expect("test scope has agent"),
+        );
+
+        let fire = minimal_trigger_fire(None);
+        driver
+            .on_trigger_submitted(fire, run_id, scope.clone())
+            .await;
+        wait_for_delivery_record(&delivery_store, run_id).await;
+
+        let posted: Vec<String> = egress
+            .calls()
+            .iter()
+            .filter(|c| c.path == "/api/chat.postMessage")
+            .map(|c| String::from_utf8_lossy(&c.body).to_string())
+            .collect();
+
+        // The OAuth URL must NOT appear in any posted message.
+        for body in &posted {
+            assert!(
+                !body.contains("https://provider.example/oauth-auth"),
+                "authorization_url must NOT be posted to a shared channel; got: {body}"
+            );
+        }
+
+        // The auth-unavailable notice must appear instead.
+        assert!(
+            posted
+                .iter()
+                .any(|b| b.contains(SLACK_AUTH_UNAVAILABLE_MESSAGE)),
+            "auth-unavailable notice must be posted when OAuth is suppressed for non-DM target; \
+             got: {posted:?}"
+        );
+
+        // No gate route must be recorded (the auth was cancelled).
+        let creator = ironclaw_host_api::UserId::new("creator-user").expect("user id");
+        let route = route_store
+            .load_delivered_gate_route(&scope.tenant_id, &creator, gate_ref_str)
+            .await
+            .expect("load route");
+        assert!(
+            route.is_none(),
+            "no gate route must be recorded when OAuth is suppressed for non-DM target"
+        );
+    }
+
+    /// Positive case: triggered OAuth auth whose delivery target IS a personal DM
+    /// must post the `authorization_url` (unchanged from pre-fix behavior).
+    #[tokio::test]
+    async fn triggered_oauth_auth_to_personal_dm_posts_authorization_url() {
+        let install = "test-install";
+        let gate_ref_str = "gate:oauth-dm-allowed";
+        let scope = personal_turn_scope();
+        let run_id = TurnRunId::new();
+        // Use the personal-DM binding ref (has actor_kind / actor segments, D-prefixed channel).
+        let binding_ref =
+            test_slack_binding_ref(install, scope.agent_id.as_ref().expect("agent").as_str());
+
+        // First poll → BlockedAuth; second → Completed.
+        let coordinator = Arc::new(ScriptedTurnCoordinator::with_states(vec![
+            scripted_state(TurnStatus::BlockedAuth, Some(gate_ref_str)),
+            scripted_state(TurnStatus::Completed, None),
+        ]));
+        let thread_service = Arc::new(InMemorySessionThreadService::default());
+        seed_finalized_assistant_message(
+            &thread_service,
+            &scope,
+            run_id,
+            "Run complete after OAuth.",
+        )
+        .await;
+
+        let outbound = Arc::new(InMemoryOutboundStateStore::default());
+        seed_personal_preference(&outbound, &scope, binding_ref).await;
+
+        let egress = Arc::new(FakeProtocolHttpEgress::new(vec!["slack.com".to_string()]));
+        egress.allow_credential_handle("slack_bot_token");
+        // OAuth auth-prompt response.
+        egress.program_response(
+            "slack.com",
+            Ok(EgressResponse::new(
+                200,
+                slack_post_ok_json("D456", "8001.1"),
+            )),
+        );
+        // Final-reply response.
+        egress.program_response(
+            "slack.com",
+            Ok(EgressResponse::new(
+                200,
+                slack_post_ok_json("D456", "8001.2"),
+            )),
+        );
+        // Auth message deleted after final reply.
+        egress.program_response(
+            "slack.com",
+            Ok(EgressResponse::new(
+                200,
+                serde_json::json!({"ok": true}).to_string().into_bytes(),
+            )),
+        );
+
+        let delivery_store = Arc::new(InMemoryTriggeredRunDeliveryStore::default());
+        let route_store = Arc::new(InMemoryDeliveredGateRouteStore::default());
+        let mut services = make_services(
+            coordinator,
+            thread_service,
+            egress.clone(),
+            outbound,
+            install,
+        );
+        // Wire up an OAuth challenge provider so authorization_url is set.
+        services.auth_challenges = Some(Arc::new(OAuthAuthChallengeProvider {
+            url: "https://provider.example/oauth-auth-dm".to_string(),
+        }));
+
+        let settings = SlackFinalReplyDeliverySettings {
+            poll_interval: std::time::Duration::ZERO,
+            max_wait: std::time::Duration::from_secs(5),
+            max_concurrent_deliveries: NonZeroUsize::new(1).unwrap(),
+            max_pending_deliveries: NonZeroUsize::new(8).unwrap(),
+        };
+        let driver = TriggeredRunDeliveryDriver::with_settings(
+            services,
+            settings,
+            delivery_store.clone(),
+            route_store.clone(),
+            scope.agent_id.clone().expect("test scope has agent"),
+        );
+
+        let fire = minimal_trigger_fire(None);
+        driver
+            .on_trigger_submitted(fire, run_id, scope.clone())
+            .await;
+        wait_for_delivery_record(&delivery_store, run_id).await;
+
+        let posted: Vec<String> = egress
+            .calls()
+            .iter()
+            .filter(|c| c.path == "/api/chat.postMessage")
+            .map(|c| String::from_utf8_lossy(&c.body).to_string())
+            .collect();
+
+        // The OAuth URL MUST appear in the auth-prompt message sent to the DM.
+        assert!(
+            posted
+                .iter()
+                .any(|b| b.contains("https://provider.example/oauth-auth-dm")),
+            "authorization_url must be posted to a verified personal DM; got: {posted:?}"
+        );
+
+        // The auth-unavailable notice must NOT appear.
+        assert!(
+            !posted
+                .iter()
+                .any(|b| b.contains(SLACK_AUTH_UNAVAILABLE_MESSAGE)),
+            "auth-unavailable notice must NOT appear when OAuth is sent to a personal DM; \
+             got: {posted:?}"
+        );
+    }
+
+    /// Precedence guard: when `auth_prompt_target` is a SHARED CHANNEL but
+    /// `final_reply_target` is a personal DM, the OAuth gate must key on the
+    /// EFFECTIVE auth target (`auth_prompt_target.or(final_reply_target)` — see
+    /// `resolution_engine.rs` `PreferenceTargetKind::AuthPrompt`), i.e. the shared
+    /// channel. The URL must be SUPPRESSED. A naive "any stored target is a DM"
+    /// check would wrongly pass here and leak the OAuth URL to the channel.
+    #[tokio::test]
+    async fn triggered_oauth_auth_prefers_auth_target_over_dm_fallback() {
+        let install = "test-install";
+        let gate_ref_str = "gate:oauth-auth-target-shared";
+        let scope = personal_turn_scope();
+        let run_id = TurnRunId::new();
+        let agent = scope.agent_id.as_ref().expect("agent").as_str();
+        // auth_prompt_target → shared channel (the effective auth target);
+        // final_reply_target → personal DM (must NOT rescue the OAuth post).
+        let auth_target = test_slack_shared_channel_binding_ref(install, agent);
+        let final_target = test_slack_binding_ref(install, agent);
+
+        let coordinator = Arc::new(ScriptedTurnCoordinator::with_states(vec![
+            scripted_state(TurnStatus::BlockedAuth, Some(gate_ref_str)),
+            scripted_state(TurnStatus::Completed, None),
+        ]));
+        let thread_service = Arc::new(InMemorySessionThreadService::default());
+        seed_finalized_assistant_message(&thread_service, &scope, run_id, "Run complete.").await;
+
+        let outbound = Arc::new(InMemoryOutboundStateStore::default());
+        seed_personal_preference_with_auth_target(&outbound, &scope, auth_target, final_target)
+            .await;
+
+        let egress = Arc::new(FakeProtocolHttpEgress::new(vec!["slack.com".to_string()]));
+        egress.allow_credential_handle("slack_bot_token");
+        // auth-unavailable notice, then final reply.
+        egress.program_response(
+            "slack.com",
+            Ok(EgressResponse::new(
+                200,
+                slack_post_ok_json("C0SHARED", "9001.1"),
+            )),
+        );
+        egress.program_response(
+            "slack.com",
+            Ok(EgressResponse::new(
+                200,
+                slack_post_ok_json("C0SHARED", "9001.2"),
+            )),
+        );
+
+        let delivery_store = Arc::new(InMemoryTriggeredRunDeliveryStore::default());
+        let route_store = Arc::new(InMemoryDeliveredGateRouteStore::default());
+        let mut services = make_services(
+            coordinator,
+            thread_service,
+            egress.clone(),
+            outbound,
+            install,
+        );
+        services.auth_challenges = Some(Arc::new(OAuthAuthChallengeProvider {
+            url: "https://provider.example/oauth-auth-target".to_string(),
+        }));
+
+        let settings = SlackFinalReplyDeliverySettings {
+            poll_interval: std::time::Duration::ZERO,
+            max_wait: std::time::Duration::from_secs(5),
+            max_concurrent_deliveries: NonZeroUsize::new(1).unwrap(),
+            max_pending_deliveries: NonZeroUsize::new(8).unwrap(),
+        };
+        let driver = TriggeredRunDeliveryDriver::with_settings(
+            services,
+            settings,
+            delivery_store.clone(),
+            route_store.clone(),
+            scope.agent_id.clone().expect("test scope has agent"),
+        );
+
+        driver
+            .on_trigger_submitted(minimal_trigger_fire(None), run_id, scope.clone())
+            .await;
+        wait_for_delivery_record(&delivery_store, run_id).await;
+
+        let posted: Vec<String> = egress
+            .calls()
+            .iter()
+            .filter(|c| c.path == "/api/chat.postMessage")
+            .map(|c| String::from_utf8_lossy(&c.body).to_string())
+            .collect();
+
+        for body in &posted {
+            assert!(
+                !body.contains("https://provider.example/oauth-auth-target"),
+                "authorization_url must NOT post when the effective auth target is a shared \
+                 channel, even if final_reply_target is a DM; got: {body}"
+            );
+        }
+        assert!(
+            posted
+                .iter()
+                .any(|b| b.contains(SLACK_AUTH_UNAVAILABLE_MESSAGE)),
+            "auth-unavailable notice must be posted when OAuth is suppressed; got: {posted:?}"
+        );
     }
 
     /// Test C: the `record_gate_route_if_needed` helper, called from the
@@ -4886,7 +7164,7 @@ mod tests {
     /// Binding service that always returns a binding with `agent_id = None`.
     ///
     /// Used to exercise the scope-derivation fallback in
-    /// `deferred_busy_hint_from_run_state`: when `thread_scope_from_binding` fails
+    /// `busy_hint_from_run_state`: when `thread_scope_from_binding` fails
     /// because `agent_id` is missing, the hint must still be posted using the
     /// generic copy rather than being silently dropped.
     struct NoAgentConversationBindingService;
@@ -4969,9 +7247,9 @@ mod tests {
 
     /// Binding with no `agent_id` → scope derivation fails → generic copy posted.
     ///
-    /// `deferred_busy_hint_from_run_state` calls `thread_scope_from_binding` which
+    /// `busy_hint_from_run_state` calls `thread_scope_from_binding` which
     /// returns `Err` when `agent_id` is `None`. The code must fall back to
-    /// `SLACK_DEFERRED_BUSY_GENERIC_MESSAGE` and still post the hint.
+    /// `SLACK_BUSY_GENERIC_MESSAGE` and still post the hint.
     #[tokio::test]
     async fn deferred_busy_missing_agent_binding_posts_generic_hint() {
         let install = "test-install";
@@ -5003,6 +7281,8 @@ mod tests {
             egress: egress.clone(),
             delivery_sink: Arc::new(FakeOutboundDeliverySink::default()),
             auth_challenges: None,
+            auth_flow_canceller: None,
+            approval_requests: None,
         };
         let settings = SlackFinalReplyDeliverySettings {
             poll_interval: std::time::Duration::ZERO,
@@ -5037,8 +7317,8 @@ mod tests {
 
     /// Run-state lookup returns `Err` → generic copy posted.
     ///
-    /// `deferred_busy_hint_from_run_state` swallows `TurnError` from
-    /// `get_run_state` and degrades to `SLACK_DEFERRED_BUSY_GENERIC_MESSAGE`.
+    /// `busy_hint_from_run_state` swallows `TurnError` from
+    /// `get_run_state` and degrades to `SLACK_BUSY_GENERIC_MESSAGE`.
     #[tokio::test]
     async fn deferred_busy_run_state_lookup_error_posts_generic_hint() {
         let install = "test-install";
@@ -5068,6 +7348,8 @@ mod tests {
             egress: egress.clone(),
             delivery_sink: Arc::new(FakeOutboundDeliverySink::default()),
             auth_challenges: None,
+            auth_flow_canceller: None,
+            approval_requests: None,
         };
         let settings = SlackFinalReplyDeliverySettings {
             poll_interval: std::time::Duration::ZERO,
@@ -5131,10 +7413,14 @@ mod tests {
         );
     }
 
-    /// Two DeferredBusy acks with the same conversation + same active_run_id
-    /// → exactly one post (throttle suppresses the second).
+    /// Two DeferredBusy acks for the same conversation and the same external_event_id
+    /// (simulating a Slack transport retry) → exactly one post (throttle suppresses the retry).
+    ///
+    /// Both envelopes use event id "evt:test" (the default in `envelope()`), so they share
+    /// the same (conversation, event_id) throttle key. The active_run_id is irrelevant to
+    /// dedup with the new event-id-based throttle.
     #[tokio::test]
-    async fn deferred_busy_same_conversation_same_run_id_posts_once() {
+    async fn deferred_busy_same_conversation_same_event_id_posts_once() {
         let install = "test-install";
         let egress = Arc::new(FakeProtocolHttpEgress::new(vec!["slack.com".to_string()]));
         egress.allow_credential_handle("slack_bot_token");
@@ -5147,22 +7433,23 @@ mod tests {
         );
 
         let outbound = Arc::new(InMemoryOutboundStateStore::default());
-        let run_id = TurnRunId::new();
         let coordinator = Arc::new(ScriptedTurnCoordinator::with_single_status(
             TurnStatus::BlockedApproval,
         ));
         let observer = make_observer(coordinator, egress.clone(), outbound, install);
 
+        // Both acks carry a fresh run_id — the throttle must still suppress the
+        // second post because the event_id ("evt:test") is identical.
         let make_ack = || ProductInboundAck::DeferredBusy {
-            accepted_message_ref: AcceptedMessageRef::new("slack:deferred-same").expect("ref"),
-            active_run_id: run_id,
+            accepted_message_ref: AcceptedMessageRef::new("slack:deferred-same-evt").expect("ref"),
+            active_run_id: TurnRunId::new(),
         };
 
-        // First delivery: posts.
+        // First delivery (event "evt:test"): posts.
         observer
             .observe_workflow_ack(envelope(user_message_payload()), make_ack())
             .await;
-        // Second delivery: same (conversation, run_id) pair → throttled, no second post.
+        // Second delivery (same event "evt:test", different run_id): throttled, no second post.
         observer
             .observe_workflow_ack(envelope(user_message_payload()), make_ack())
             .await;
@@ -5175,14 +7462,17 @@ mod tests {
         assert_eq!(
             post_calls.len(),
             1,
-            "throttle must suppress the second hint for the same (conversation, run_id)"
+            "throttle must suppress the second hint for the same (conversation, event_id)"
         );
     }
 
-    /// Two DeferredBusy acks with the same conversation but different active_run_ids
-    /// → two posts (distinct throttle keys).
+    /// Two DeferredBusy acks for the same conversation but different external_event_ids
+    /// → two posts (distinct throttle keys: dedup is per event, not per run).
+    ///
+    /// The active_run_id is the same across both calls to prove that distinct run_ids
+    /// are no longer the gate for separate hints — distinct event_ids are.
     #[tokio::test]
-    async fn deferred_busy_same_conversation_different_run_id_posts_twice() {
+    async fn deferred_busy_same_conversation_different_event_id_posts_twice() {
         let install = "test-install";
         let egress = Arc::new(FakeProtocolHttpEgress::new(vec!["slack.com".to_string()]));
         egress.allow_credential_handle("slack_bot_token");
@@ -5207,18 +7497,25 @@ mod tests {
         ));
         let observer = make_observer(coordinator, egress.clone(), outbound, install);
 
-        let make_ack = |run_id: TurnRunId| ProductInboundAck::DeferredBusy {
-            accepted_message_ref: AcceptedMessageRef::new("slack:deferred-diff").expect("ref"),
-            active_run_id: run_id,
+        let shared_run = TurnRunId::new();
+        let make_ack = || ProductInboundAck::DeferredBusy {
+            accepted_message_ref: AcceptedMessageRef::new("slack:deferred-diff-evt").expect("ref"),
+            active_run_id: shared_run,
         };
 
-        // First delivery: run_id A.
+        // First new user message (event "evt:diff-1") → hint posted.
         observer
-            .observe_workflow_ack(envelope(user_message_payload()), make_ack(TurnRunId::new()))
+            .observe_workflow_ack(
+                envelope_with_event_id("evt:diff-1", user_message_payload()),
+                make_ack(),
+            )
             .await;
-        // Second delivery: run_id B (different key) → separate hint posted.
+        // Second new user message (event "evt:diff-2") → distinct event id → separate hint.
         observer
-            .observe_workflow_ack(envelope(user_message_payload()), make_ack(TurnRunId::new()))
+            .observe_workflow_ack(
+                envelope_with_event_id("evt:diff-2", user_message_payload()),
+                make_ack(),
+            )
             .await;
 
         let calls = egress.calls();
@@ -5229,7 +7526,7 @@ mod tests {
         assert_eq!(
             post_calls.len(),
             2,
-            "different run_ids must produce separate hints even for the same conversation"
+            "different event_ids must produce separate hints even for the same conversation and run_id"
         );
     }
 
@@ -5381,6 +7678,8 @@ mod tests {
             egress: egress.clone(),
             delivery_sink: Arc::new(FakeOutboundDeliverySink::default()),
             auth_challenges: None,
+            auth_flow_canceller: None,
+            approval_requests: None,
         };
         let settings = SlackFinalReplyDeliverySettings {
             poll_interval: std::time::Duration::ZERO,
@@ -5464,6 +7763,8 @@ mod tests {
             egress: egress.clone(),
             delivery_sink: Arc::new(FakeOutboundDeliverySink::default()),
             auth_challenges: None,
+            auth_flow_canceller: None,
+            approval_requests: None,
         };
         let settings = SlackFinalReplyDeliverySettings {
             poll_interval: std::time::Duration::from_millis(1),
@@ -5517,5 +7818,356 @@ mod tests {
         );
 
         first.abort();
+    }
+
+    // ── BUG-3 regression: StaleGate produces a distinct hint ──────────────────
+
+    /// `ProductRejectionKind::StaleGate` on an approval resolution must produce the
+    /// "no longer pending" copy, NOT the generic "declined by policy" wording.
+    #[test]
+    fn stale_gate_rejection_hint_is_distinct_from_policy_denied() {
+        // Approval resolution payload + Rejected(StaleGate) → the stale-gate hint.
+        let payload = approval_resolution_payload();
+        let env = envelope(payload);
+        let ack = rejected_ack(ProductRejectionKind::StaleGate);
+
+        let hint = rejection_hint_for_resolution(&env, &ack);
+        assert!(hint.is_some(), "StaleGate rejection must produce a hint");
+        let hint = hint.unwrap();
+
+        assert!(
+            hint.contains("no longer pending"),
+            "StaleGate hint must mention 'no longer pending'; got: {hint}"
+        );
+        assert!(
+            !hint.contains("policy"),
+            "StaleGate hint must NOT fall through to 'policy' wording; got: {hint}"
+        );
+    }
+
+    /// `ProductRejectionKind::StaleGate` on a scoped-approval resolution must also
+    /// produce the distinct hint (not policy wording).
+    #[test]
+    fn stale_gate_scoped_approval_rejection_hint_is_distinct() {
+        let payload = scoped_approval_resolution_payload();
+        let env = envelope(payload);
+        let ack = rejected_ack(ProductRejectionKind::StaleGate);
+
+        let hint = rejection_hint_for_resolution(&env, &ack);
+        let hint = hint.expect("StaleGate on scoped-approval must produce a hint");
+
+        assert!(
+            hint.contains("no longer pending"),
+            "StaleGate scoped-approval hint must mention 'no longer pending'; got: {hint}"
+        );
+        assert!(
+            !hint.contains("policy"),
+            "StaleGate scoped-approval hint must NOT say 'policy'; got: {hint}"
+        );
+    }
+
+    // ── BUG-4/5 regression: per-event dedup — new message always gets a hint ──
+
+    /// Each distinct Slack event (new human message) gets a fresh hint even while the
+    /// same run is blocking.  This is the core BUG-4/5 fix: the throttle now keys on
+    /// external_event_id, not active_run_id.
+    ///
+    /// Three messages with distinct event ids → three hints, despite the same conversation
+    /// and the same blocking run.
+    #[tokio::test]
+    async fn each_new_human_message_gets_its_own_hint_for_same_blocking_run() {
+        let install = "test-install";
+        let egress = Arc::new(FakeProtocolHttpEgress::new(vec!["slack.com".to_string()]));
+        egress.allow_credential_handle("slack_bot_token");
+        for i in 1u32..=3 {
+            egress.program_response(
+                "slack.com",
+                Ok(EgressResponse::new(
+                    200,
+                    slack_post_ok_json("D123", &format!("evt-bug45-{i}.0")),
+                )),
+            );
+        }
+
+        let outbound = Arc::new(InMemoryOutboundStateStore::default());
+        let blocking_run_id = TurnRunId::new();
+        let coordinator = Arc::new(ScriptedTurnCoordinator::with_single_status(
+            TurnStatus::BlockedApproval,
+        ));
+        let observer = make_observer(coordinator, egress.clone(), outbound, install);
+
+        // Shared active_run_id — the same run is blocking for all three messages.
+        let make_ack = || ProductInboundAck::DeferredBusy {
+            accepted_message_ref: AcceptedMessageRef::new("slack:bug45-hint").expect("ref"),
+            active_run_id: blocking_run_id,
+        };
+
+        // Three distinct new human messages while the run is blocked.
+        for i in 1u32..=3 {
+            observer
+                .observe_workflow_ack(
+                    envelope_with_event_id(&format!("evt:bug45-msg-{i}"), user_message_payload()),
+                    make_ack(),
+                )
+                .await;
+        }
+
+        let calls = egress.calls();
+        let post_calls: Vec<_> = calls
+            .iter()
+            .filter(|c| c.path == "/api/chat.postMessage")
+            .collect();
+        assert_eq!(
+            post_calls.len(),
+            3,
+            "each distinct new human message must produce its own hint (BUG-4/5 fix); got {} posts",
+            post_calls.len()
+        );
+    }
+
+    /// Transport retry of the SAME event must still be deduplicated by the
+    /// (conversation, event_id) key — no double-post.
+    #[tokio::test]
+    async fn transport_retry_of_same_event_is_deduplicated() {
+        let install = "test-install";
+        let egress = Arc::new(FakeProtocolHttpEgress::new(vec!["slack.com".to_string()]));
+        egress.allow_credential_handle("slack_bot_token");
+        // Only one response slot — a second post attempt would fail.
+        egress.program_response(
+            "slack.com",
+            Ok(EgressResponse::new(
+                200,
+                slack_post_ok_json("D123", "retry-dedup.1"),
+            )),
+        );
+
+        let outbound = Arc::new(InMemoryOutboundStateStore::default());
+        let blocking_run_id = TurnRunId::new();
+        let coordinator = Arc::new(ScriptedTurnCoordinator::with_single_status(
+            TurnStatus::BlockedApproval,
+        ));
+        let observer = make_observer(coordinator, egress.clone(), outbound, install);
+
+        let make_ack = || ProductInboundAck::DeferredBusy {
+            accepted_message_ref: AcceptedMessageRef::new("slack:retry-dedup").expect("ref"),
+            active_run_id: blocking_run_id,
+        };
+
+        // First delivery (original).
+        observer
+            .observe_workflow_ack(
+                envelope_with_event_id("evt:retry-event-X", user_message_payload()),
+                make_ack(),
+            )
+            .await;
+        // Second delivery (Slack transport retry) — same event id → must be suppressed.
+        observer
+            .observe_workflow_ack(
+                envelope_with_event_id("evt:retry-event-X", user_message_payload()),
+                make_ack(),
+            )
+            .await;
+
+        let calls = egress.calls();
+        let post_calls: Vec<_> = calls
+            .iter()
+            .filter(|c| c.path == "/api/chat.postMessage")
+            .collect();
+        assert_eq!(
+            post_calls.len(),
+            1,
+            "transport retry of the same event must be deduplicated (only one hint posted)"
+        );
+    }
+
+    // ── Authority backstop tests ──────────────────────────────────────────────
+    //
+    // These tests cover the `require_personal_dm_for_oauth` backstop in
+    // `TriggeredSlackReplyTargetAuthority::resolve_product_outbound_target_metadata`,
+    // which is now the single enforcement point ensuring OAuth authorization_urls
+    // only reach personal DMs. The pre-loop snapshot was removed; the backstop is
+    // authoritative.
+
+    /// Backstop regression: when the send-time binding resolves to a shared
+    /// channel, the `require_personal_dm_for_oauth` backstop must catch it and
+    /// suppress the OAuth URL. The run must be cancelled and the auth-unavailable
+    /// notice must be posted. No gate route must be recorded.
+    ///
+    /// Previously named `triggered_oauth_auth_dm_snapshot_but_channel_at_send_suppresses_url`
+    /// (tested the snapshot-vs-send race); simplified now that the backstop is the
+    /// only enforcement point and no pre-loop snapshot exists.
+    #[tokio::test]
+    async fn triggered_oauth_auth_dm_snapshot_but_channel_at_send_suppresses_url() {
+        let install = "test-install";
+        let gate_ref_str = "gate:oauth-race-snapshot-dm-send-channel";
+        let scope = personal_turn_scope();
+        let run_id = TurnRunId::new();
+        let agent = scope.agent_id.as_ref().expect("agent").as_str();
+
+        // Shared-channel binding: the backstop must catch this at send time.
+        let shared_binding = test_slack_shared_channel_binding_ref(install, agent);
+
+        // First poll → BlockedAuth with OAuth gate; second poll → Completed.
+        let coordinator = Arc::new(ScriptedTurnCoordinator::with_states(vec![
+            scripted_state(TurnStatus::BlockedAuth, Some(gate_ref_str)),
+            scripted_state(TurnStatus::Completed, None),
+        ]));
+        let thread_service = Arc::new(InMemorySessionThreadService::default());
+        seed_finalized_assistant_message(
+            &thread_service,
+            &scope,
+            run_id,
+            "Run complete after auth.",
+        )
+        .await;
+
+        let outbound = Arc::new(InMemoryOutboundStateStore::default());
+        seed_personal_preference(&outbound, &scope, shared_binding).await;
+
+        let egress = Arc::new(FakeProtocolHttpEgress::new(vec!["slack.com".to_string()]));
+        egress.allow_credential_handle("slack_bot_token");
+        // auth-unavailable notice (after backstop trip).
+        egress.program_response(
+            "slack.com",
+            Ok(EgressResponse::new(
+                200,
+                slack_post_ok_json("C0SHARED", "race-test.1"),
+            )),
+        );
+        // Second response (available if loop re-runs; not required to be consumed).
+        egress.program_response(
+            "slack.com",
+            Ok(EgressResponse::new(
+                200,
+                slack_post_ok_json("C0SHARED", "race-test.2"),
+            )),
+        );
+
+        let delivery_store = Arc::new(InMemoryTriggeredRunDeliveryStore::default());
+        let route_store = Arc::new(InMemoryDeliveredGateRouteStore::default());
+        let mut services = make_services(
+            coordinator,
+            thread_service,
+            egress.clone(),
+            outbound,
+            install,
+        );
+        // Wire up an OAuth challenge provider so authorization_url would be set
+        // if the backstop were absent.
+        services.auth_challenges = Some(Arc::new(OAuthAuthChallengeProvider {
+            url: "https://provider.example/oauth-race".to_string(),
+        }));
+
+        let settings = SlackFinalReplyDeliverySettings {
+            poll_interval: std::time::Duration::ZERO,
+            max_wait: std::time::Duration::from_secs(5),
+            max_concurrent_deliveries: NonZeroUsize::new(1).unwrap(),
+            max_pending_deliveries: NonZeroUsize::new(8).unwrap(),
+        };
+        let driver = TriggeredRunDeliveryDriver::with_settings(
+            services,
+            settings,
+            delivery_store.clone(),
+            route_store.clone(),
+            scope.agent_id.clone().expect("test scope has agent"),
+        );
+
+        driver
+            .on_trigger_submitted(minimal_trigger_fire(None), run_id, scope.clone())
+            .await;
+        wait_for_delivery_record(&delivery_store, run_id).await;
+
+        let posted: Vec<String> = egress
+            .calls()
+            .iter()
+            .filter(|c| c.path == "/api/chat.postMessage")
+            .map(|c| String::from_utf8_lossy(&c.body).to_string())
+            .collect();
+
+        // The OAuth URL must NOT appear in any posted message.
+        for body in &posted {
+            assert!(
+                !body.contains("https://provider.example/oauth-race"),
+                "authorization_url must NOT be posted when send-time target is a shared channel \
+                 (backstop); got: {body}"
+            );
+        }
+
+        // The auth-unavailable notice must appear (backstop tripped).
+        assert!(
+            posted
+                .iter()
+                .any(|b| b.contains(SLACK_AUTH_UNAVAILABLE_MESSAGE)),
+            "auth-unavailable notice must be posted when backstop suppresses OAuth URL; \
+             got: {posted:?}"
+        );
+
+        // No gate route must be recorded (the auth was cancelled).
+        let creator = ironclaw_host_api::UserId::new("creator-user").expect("user id");
+        let route = route_store
+            .load_delivered_gate_route(&scope.tenant_id, &creator, gate_ref_str)
+            .await
+            .expect("load route");
+        assert!(
+            route.is_none(),
+            "no gate route must be recorded when backstop cancels OAuth delivery"
+        );
+    }
+
+    // Removed: triggered_oauth_auth_preference_read_error_suppresses_authorization_url
+    // — tested the pre-loop snapshot fail-closed behavior on preference-read error;
+    // redundant now that the snapshot was removed and the backstop is the sole
+    // enforcement point (shared-channel delivery is already covered by
+    // `triggered_oauth_auth_to_shared_channel_suppresses_authorization_url`).
+
+    // Removed: triggered_oauth_auth_no_preference_suppresses_authorization_url
+    // — tested the pre-loop snapshot fail-closed behavior for an absent preference
+    // record; redundant after snapshot removal for the same reason as above.
+
+    // ── enforce_direct_message_if_required ────────────────────────────────────
+    //
+    // Direct unit tests for the shared helper that both ObservedSlackReplyTargetAuthority
+    // and TriggeredSlackReplyTargetAuthority delegate to (Fix 3 / Fix 6).
+    //
+    // The helper takes `&ReplyTargetBindingRef` so no ValidatedReplyTargetBinding
+    // scaffolding is required — we test the guard logic directly.
+
+    #[test]
+    fn enforce_direct_message_shared_channel_require_true_returns_err() {
+        let install = "test-install";
+        let agent = "test-agent";
+        let binding_ref = test_slack_shared_channel_binding_ref(install, agent);
+        let result = enforce_direct_message_if_required(&binding_ref, true);
+        assert!(
+            matches!(
+                result,
+                Err(ProductWorkflowError::OutboundTargetNotDirectMessage)
+            ),
+            "shared channel + require=true must return OutboundTargetNotDirectMessage"
+        );
+    }
+
+    #[test]
+    fn enforce_direct_message_shared_channel_require_false_returns_ok() {
+        let install = "test-install";
+        let agent = "test-agent";
+        let binding_ref = test_slack_shared_channel_binding_ref(install, agent);
+        let result = enforce_direct_message_if_required(&binding_ref, false);
+        assert!(
+            result.is_ok(),
+            "shared channel + require=false must not be rejected"
+        );
+    }
+
+    #[test]
+    fn enforce_direct_message_dm_binding_require_true_returns_ok() {
+        let install = "test-install";
+        let agent = "test-agent";
+        let binding_ref = test_slack_binding_ref(install, agent);
+        let result = enforce_direct_message_if_required(&binding_ref, true);
+        assert!(
+            result.is_ok(),
+            "personal DM binding + require=true must not be rejected"
+        );
     }
 }

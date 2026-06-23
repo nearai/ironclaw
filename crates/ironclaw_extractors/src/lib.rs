@@ -97,6 +97,35 @@ pub fn extract_text(data: &[u8], mime: &str, filename: Option<&str>) -> Result<S
     }
 }
 
+/// Extract text from non-plain-text document formats inferred from a filename.
+///
+/// This deliberately excludes UTF-8 passthrough formats such as `.txt`, `.json`,
+/// and source files. Callers that already have a normal text read path can use
+/// this as a fallback without letting a misleading extension override readable
+/// text bytes.
+pub fn extract_document_text_by_filename(
+    data: &[u8],
+    filename: Option<&str>,
+) -> Result<Option<String>, String> {
+    let ext = filename
+        .and_then(|filename| filename.rsplit('.').next())
+        .map(str::to_lowercase);
+    let Some(ext) = ext else {
+        return Ok(None);
+    };
+
+    let text = match ext.as_str() {
+        "pdf" => extract_pdf(data)?,
+        "docx" => extract_docx(data)?,
+        "pptx" => extract_pptx(data)?,
+        "xlsx" => extract_xlsx(data)?,
+        "doc" | "ppt" | "xls" => extract_binary_strings(data)?,
+        "rtf" => extract_rtf(data)?,
+        _ => return Ok(None),
+    };
+    Ok(Some(text))
+}
+
 /// Read a zip entry into a string with configurable decompressed size limits.
 fn bounded_read_zip_entry_with_limits(
     file: &mut zip::read::ZipFile<'_>,
@@ -558,15 +587,12 @@ fn parse_xlsx_sheet(xml: &str, shared_strings: &[String]) -> String {
 
 /// Try to extract text based on filename extension when MIME type is generic.
 fn try_extract_by_extension(data: &[u8], filename: Option<&str>) -> Option<String> {
+    if let Ok(Some(text)) = extract_document_text_by_filename(data, filename) {
+        return Some(text);
+    }
     let ext = filename?.rsplit('.').next()?.to_lowercase();
 
     match ext.as_str() {
-        "pdf" => extract_pdf(data).ok(),
-        "docx" => extract_docx(data).ok(),
-        "pptx" => extract_pptx(data).ok(),
-        "xlsx" => extract_xlsx(data).ok(),
-        "doc" | "ppt" | "xls" => extract_binary_strings(data).ok(),
-        "rtf" => extract_rtf(data).ok(),
         "txt" | "csv" | "tsv" | "json" | "xml" | "yaml" | "yml" | "toml" | "md" | "markdown"
         | "py" | "js" | "ts" | "rs" | "go" | "java" | "c" | "cpp" | "h" | "hpp" | "rb" | "sh"
         | "bash" | "zsh" | "fish" | "css" | "html" | "htm" | "sql" | "log" | "ini" | "cfg"
@@ -663,6 +689,23 @@ mod tests {
     fn extract_by_extension_txt() {
         let result = try_extract_by_extension(b"content", Some("notes.txt"));
         assert_eq!(result, Some("content".to_string()));
+    }
+
+    #[test]
+    fn extract_document_text_by_filename_ignores_text_extensions() {
+        let result = extract_document_text_by_filename(b"content", Some("notes.txt")).unwrap();
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn extract_document_text_by_filename_extracts_pdf() {
+        let result = extract_document_text_by_filename(
+            include_bytes!("../../../tests/fixtures/hello.pdf"),
+            Some("hello.pdf"),
+        )
+        .unwrap()
+        .expect("pdf text");
+        assert!(result.contains("Hello"));
     }
 
     #[test]

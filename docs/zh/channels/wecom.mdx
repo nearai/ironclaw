@@ -1,0 +1,190 @@
+---
+title: "企业微信"
+description: "通过企业微信与智能体交互"
+---
+
+通过企业微信智能机器人将 IronClaw 接入企业微信。企业微信频道使用企业微信智能机器人的 WebSocket 长连接，因此不需要公网 webhook URL 或隧道。
+
+<Note>
+如果您还没有设置智能体，请先查看我们的[快速开始指南](../quickstart)
+</Note>
+
+<Warning>
+企业微信频道面向智能机器人 WebSocket 长连接流程。自建应用 callback URL 和 Agent API 主动 REST 发送暂不支持。
+</Warning>
+
+---
+
+## 设置企业微信频道
+
+<Steps>
+
+<Step title="创建企业微信智能机器人">
+
+打开[企业微信管理后台](https://work.weixin.qq.com/wework_admin)，进入 **安全与管理** -> **管理工具** -> **智能机器人**。
+
+创建机器人，选择 API 模式，并选择长连接方式。如需官方 API 参考，请查看[企业微信智能机器人长连接文档](https://developer.work.weixin.qq.com/document/path/101463)。
+
+机器人创建完成后，在机器人详情页复制 **Bot ID** 和 **Secret**。请妥善保管 Secret。长连接流程会使用这两个凭据连接企业微信 OpenWS 端点。
+
+<Tip>
+请为企业微信频道使用长连接配置。Callback URL 模式中的 Token 和 EncodingAESKey 不用于企业微信频道设置。
+</Tip>
+
+</Step>
+
+<Step title="安装企业微信频道">
+
+企业微信以 WASM 频道形式分发。您可以在 Web Gateway 的 Extensions 页面安装，也可以在终端运行：
+
+```bash
+ironclaw registry install wecom
+```
+
+`ironclaw onboard --channels-only` 向导也可以安装该频道，并提示您输入机器人凭据。
+
+</Step>
+
+<Step title="添加机器人凭据">
+
+在安装器或设置向导提示时输入 Bot ID 和 Secret。IronClaw 会将它们保存为 `wecom_bot_id` 和 `wecom_bot_secret` 密钥。
+
+如果您使用 Web Gateway，请打开 **Settings** -> **Extensions**，找到 **企业微信频道**，然后点击 **Configure**。
+
+</Step>
+
+<Step title="启动 IronClaw">
+
+如果智能体尚未运行，请先启动：
+
+```bash
+ironclaw
+```
+
+频道启用后，IronClaw 会在启动时打开企业微信 WebSocket 连接。
+
+</Step>
+
+<Step title="发送测试消息">
+
+向企业微信智能机器人发送私聊消息。默认 `dm_policy` 为 `pairing`，机器人会在私聊中返回配对码。
+
+在终端批准该请求：
+
+```bash
+ironclaw pairing approve wecom <PAIRING_CODE>
+```
+
+批准后，再发送一条消息确认智能体能在企业微信中回复。
+
+</Step>
+
+</Steps>
+
+---
+
+## 频道能力
+
+| 能力 | 状态 |
+|------|------|
+| 私聊文本对话 | 支持 |
+| 群聊会话 | 支持 |
+| 配对审批 | 支持 |
+| 入站文本 | 支持 |
+| 入站图片 | 支持 |
+| 入站语音 | 支持 |
+| 入站视频 | 支持 |
+| 入站混合消息和引用上下文 | 支持 |
+| 出站文本回复 | 支持 |
+| 出站图片 | 支持 |
+| 出站语音 | 暂不支持 |
+| 出站视频 | 暂不支持 |
+| 出站文件 | 暂不支持 |
+| WebSocket 长连接 | 支持 |
+| HTTP callback 端点 | 暂不支持 |
+| 没有活跃企业微信会话路由时广播 | 暂不支持 |
+| 自建应用 callback 和 Agent API 发送 | 暂不支持 |
+
+<Note>
+出站媒体仅支持图片。语音、视频和文件发送暂不支持。
+</Note>
+
+<Note>
+如果未批准的用户在群聊中向机器人发消息，IronClaw 会提示他们私聊机器人，而不会在群里显示配对码。
+</Note>
+
+---
+
+## 配置选项
+
+企业微信频道可通过 `~/.ironclaw/channels/wecom.capabilities.json` 配置，该文件会在频道安装后创建。
+
+<Accordion title="选项概览">
+
+| 选项 | 值 | 默认值 | 描述 |
+|------|----|--------|------|
+| `dm_policy` | `pairing`, `open`, `allowlist` | `pairing` | 控制谁可以向机器人发送私聊消息 |
+| `allow_from` | 企业微信用户 ID 或 `*` | `[]` | 当 `dm_policy` 为 `allowlist` 时允许对话的用户，也包括配对批准过的用户 |
+| `owner_id` | 企业微信用户 ID | `null` | 如果设置，该用户始终允许对话 |
+| `inbound_merge_window_ms` | 数字 | `5000` | 将相邻入站消息片段合并为一个智能体回合的等待窗口 |
+
+</Accordion>
+
+<Note>
+修改频道配置文件后，请重启 IronClaw。
+</Note>
+
+### 私聊策略
+
+`dm_policy` 选项控制私聊访问：
+
+- `pairing` **（默认）**：未知用户会在私聊中收到配对码，并需要通过 `ironclaw pairing approve wecom <PAIRING_CODE>` 批准
+- `open`：私聊无需配对即可开始
+- `allowlist`：只有 `allow_from` 中列出的用户可以对话
+
+群聊消息也会检查 `allow_from` 和配对批准状态。群聊会话按企业微信 `chatid` 区分，私聊会话按发送者的企业微信 `userid` 区分。
+
+### 媒体合并窗口
+
+企业微信可能会将图片、语音或视频与相邻文本分开发送。`inbound_merge_window_ms` 让 IronClaw 短暂等待，以便相关消息片段可以合并为一个智能体回合。
+
+如果希望每个入站片段立即发送给智能体，请将其设置为 `0`。
+
+---
+
+## 故障排除
+
+<AccordionGroup>
+  <Accordion title="没有看到企业微信频道">
+    运行 `ironclaw registry install wecom` 安装频道，然后重启 IronClaw 并刷新 Web Gateway。
+  </Accordion>
+
+  <Accordion title="机器人没有连接">
+    确认企业微信机器人配置为长连接 API 模式，然后重新输入 Bot ID 和 Secret。企业微信每个机器人只允许一个有效长连接，请停止可能使用同一凭据的其他本地或服务器进程。
+  </Accordion>
+
+  <Accordion title="我只有 Token 和 EncodingAESKey">
+    这些字段属于企业微信 callback URL 模式。企业微信频道使用 Bot ID 和 Secret 建立 WebSocket 长连接。
+  </Accordion>
+
+  <Accordion title="机器人回复了配对码">
+    当 `dm_policy` 为 `pairing` 时这是预期行为。运行 `ironclaw pairing approve wecom <PAIRING_CODE>`，然后再发送一条消息。
+  </Accordion>
+
+  <Accordion title="群聊用户无法完成配对">
+    请让用户私聊机器人。频道会隐藏群聊中的配对码，只在私聊中显示。
+  </Accordion>
+
+  <Accordion title="媒体消息缺失">
+    检查 IronClaw 日志中的企业微信媒体下载或大小限制警告。频道可以从企业微信 OpenWS URL 和相关对象存储主机获取入站媒体，过大的媒体会被丢弃。
+  </Accordion>
+</AccordionGroup>
+
+---
+
+## 相关参考
+
+- [企业微信智能机器人概述](https://developer.work.weixin.qq.com/document/path/101039)
+- [企业微信智能机器人长连接](https://developer.work.weixin.qq.com/document/path/101463)
+- [企业微信接收消息](https://developer.work.weixin.qq.com/document/path/100719)
+- [企业微信主动回复消息](https://developer.work.weixin.qq.com/document/path/101138)

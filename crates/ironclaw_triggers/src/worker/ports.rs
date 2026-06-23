@@ -112,7 +112,19 @@ pub struct TriggerActiveRunStateRequest {
 pub enum TriggerActiveRunState {
     Missing,
     Nonterminal,
-    Terminal { status: TriggerRunHistoryStatus },
+    /// The run is parked on a gate that needs human interaction (tool-approval
+    /// or auth) which an unattended scheduled fire cannot satisfy. For recurring
+    /// (Cron) triggers, left as a non-advancing active fire it would block every
+    /// later scheduled run of the same trigger indefinitely, so the poller
+    /// clears it and records the fire as failed instead. See #4986. One-shot
+    /// (Once) triggers are the exception: their gate is still answerable and the
+    /// poller leaves the blocked fire pending rather than clearing it, so the
+    /// one-shot can complete once the gate is resolved (see
+    /// `worker/active_cleanup.rs`).
+    Blocked,
+    Terminal {
+        status: TriggerRunHistoryStatus,
+    },
 }
 
 #[async_trait]

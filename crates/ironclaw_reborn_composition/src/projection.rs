@@ -51,6 +51,9 @@ use runtime_replay::{
     DeliveredRuntimePayload, RuntimePayloadCandidate, RuntimePayloadResolution, RuntimePayloads,
     replay_payload_candidates, snapshot_payload_candidates,
 };
+// Only the Slack delivery path (feature-gated) consumes this re-export.
+#[cfg(feature = "slack-v2-host-beta")]
+pub(crate) use turn_events::approval_prompt_context_view;
 use turn_events::{
     FailureExplanationProvider, ModelFailureExplanationProvider, TurnEventBridge, TurnEventPayload,
 };
@@ -330,6 +333,7 @@ async fn consume_buffered_runtime_items(
 
 struct WebuiProjectionBatch {
     cursor: WebuiProjectionCursor,
+    pending_runtime_cursor_advance: Option<EventProjectionCursor>,
     runtime_payloads_pushed: usize,
     payloads: Vec<(WebuiProjectionCursor, ProductOutboundPayload)>,
 }
@@ -338,6 +342,7 @@ impl WebuiProjectionBatch {
     fn new(cursor: WebuiProjectionCursor) -> Self {
         Self {
             cursor,
+            pending_runtime_cursor_advance: None,
             runtime_payloads_pushed: 0,
             payloads: Vec::new(),
         }
@@ -369,7 +374,7 @@ impl WebuiProjectionBatch {
             self.cursor.runtime = Some(max_projection_cursor(final_cursor, item_cursor));
             self.cursor.runtime_item = None;
             self.cursor.runtime_payloads_delivered = 0;
-            self.push(ProductOutboundPayload::KeepAlive);
+            self.push_runtime_or_live(ProductOutboundPayload::KeepAlive);
             return Ok(true);
         }
 
@@ -398,7 +403,7 @@ impl WebuiProjectionBatch {
                 self.cursor.runtime_item = Some(item_cursor.runtime);
                 self.cursor.runtime_payloads_delivered = delivered;
             }
-            self.push(payload);
+            self.push_runtime_or_live(payload);
         }
         Ok(self.cursor.runtime_payloads_delivered == 0)
     }
@@ -413,8 +418,42 @@ impl WebuiProjectionBatch {
         }
         self.runtime_payloads_pushed += 1;
         self.cursor.live = Some(cursor);
-        self.push(payload);
+        self.push_runtime_or_live(payload);
         true
+    }
+
+    fn push_runtime_cursor_advance(&mut self, cursor: EventProjectionCursor) -> bool {
+        if cursor.runtime.as_u64() == 0 {
+            return true;
+        }
+        if self.runtime_cursor_covers(&cursor) {
+            return true;
+        }
+        self.defer_runtime_cursor_advance(cursor);
+        true
+    }
+
+    fn runtime_cursor_covers(&self, cursor: &EventProjectionCursor) -> bool {
+        self.cursor
+            .runtime
+            .as_ref()
+            .or(self.pending_runtime_cursor_advance.as_ref())
+            .is_some_and(|current| current.runtime >= cursor.runtime)
+    }
+
+    fn defer_runtime_cursor_advance(&mut self, cursor: EventProjectionCursor) {
+        self.pending_runtime_cursor_advance = Some(cursor);
+    }
+
+    fn flush_pending_runtime_cursor_advance(&mut self) {
+        let Some(cursor) = self.pending_runtime_cursor_advance.take() else {
+            return;
+        };
+        self.cursor.runtime = Some(cursor);
+        self.cursor.runtime_item = None;
+        self.cursor.runtime_payloads_delivered = 0;
+        self.payloads
+            .push((self.cursor.clone(), ProductOutboundPayload::KeepAlive));
     }
 
     async fn push_runtime_item(
@@ -450,6 +489,9 @@ impl WebuiProjectionBatch {
                 RuntimePayloadItem::Live { cursor, payload } => {
                     return Ok(self.push_live_payload(cursor, payload));
                 }
+                RuntimePayloadItem::CursorAdvance { cursor } => {
+                    return Ok(self.push_runtime_cursor_advance(cursor));
+                }
             }
         }
         Ok(true)
@@ -461,16 +503,22 @@ impl WebuiProjectionBatch {
 
     fn push_turn(&mut self, cursor: TurnEventProjectionCursor, payload: ProductOutboundPayload) {
         self.cursor.turn = Some(cursor);
-        self.push(payload);
+        self.push_preserving_runtime_cursor_advance(payload);
     }
 
-    fn push(&mut self, payload: ProductOutboundPayload) {
+    fn push_runtime_or_live(&mut self, payload: ProductOutboundPayload) {
+        self.pending_runtime_cursor_advance = None;
+        self.push_preserving_runtime_cursor_advance(payload);
+    }
+
+    fn push_preserving_runtime_cursor_advance(&mut self, payload: ProductOutboundPayload) {
         self.payloads.push((self.cursor.clone(), payload));
     }
 
     fn into_payloads(
-        self,
+        mut self,
     ) -> impl Iterator<Item = (WebuiProjectionCursor, ProductOutboundPayload)> {
+        self.flush_pending_runtime_cursor_advance();
         self.payloads.into_iter()
     }
 }
@@ -618,7 +666,7 @@ async fn item_to_payloads(
                     .await
                 }
                 ironclaw_event_streams::ProductProjectionEnvelope::ThreadLiveUpdate(update) => {
-                    live_update_payloads(scope, update, cursor, last_live_cursor)
+                    live_update_payloads(scope, display_previews, update, cursor, last_live_cursor)
                 }
                 _ => Err(internal_projection_error(
                     "unexpected projection update envelope",
@@ -650,6 +698,7 @@ async fn item_to_payloads(
 
 fn live_update_payloads(
     scope: &TurnScope,
+    display_previews: &dyn CapabilityDisplayPreviewSource,
     update: &ThreadLiveProjectionUpdate,
     cursor: EventProjectionCursor,
     last_live_cursor: Option<EventCursor>,
@@ -657,7 +706,7 @@ fn live_update_payloads(
     if last_live_cursor.is_some_and(|last| cursor.runtime <= last) {
         return Ok(None);
     }
-    let items = product_items_for_live_update(update);
+    let items = product_items_for_live_update(display_previews, update);
     if items.is_empty() {
         return Ok(None);
     }
@@ -683,6 +732,9 @@ enum RuntimePayloadItem {
     Live {
         cursor: EventProjectionCursor,
         payload: ProductOutboundPayload,
+    },
+    CursorAdvance {
+        cursor: EventProjectionCursor,
     },
 }
 
@@ -723,7 +775,7 @@ async fn snapshot_payloads(
     )
     .await?;
     if all_payloads.is_empty() {
-        return Ok(None);
+        return Ok(Some(RuntimePayloadItem::CursorAdvance { cursor }));
     }
     let total = all_payloads.total();
     let already_delivered =
@@ -763,7 +815,7 @@ async fn replay_payloads(
     )
     .await?;
     if all_payloads.is_empty() {
-        return Ok(None);
+        return Ok(Some(RuntimePayloadItem::CursorAdvance { cursor }));
     }
     let total = all_payloads.total();
     let already_delivered =
@@ -881,6 +933,11 @@ async fn runtime_payload_from_candidate(
             Ok(RuntimePayloadResolution::Payload(Box::new(payload)))
         }
         RuntimePayloadCandidate::CapabilityActivity(activity) => {
+            let activity_order = activity.activity_order_cursor().as_u64();
+            // Surface the staged input on the still-running activity frame so
+            // the row shows `tool   <arg>` (and a populated Parameters tab)
+            // live, instead of a bare tool name until the result lands.
+            let running = display_previews.running_input(activity.invocation_id);
             CapabilityActivityView::new(CapabilityActivityViewInput {
                 invocation_id: activity.invocation_id,
                 turn_run_id: activity
@@ -894,7 +951,10 @@ async fn runtime_payload_from_candidate(
                 process_id: activity.process_id,
                 output_bytes: activity.output_bytes,
                 error_kind: activity.error_kind,
+                subtitle: running.as_ref().and_then(|input| input.subtitle.clone()),
+                input_summary: running.and_then(|input| input.input_summary),
                 updated_at: activity.updated_at,
+                activity_order: Some(activity_order),
             })
             .map(ProductOutboundPayload::CapabilityActivity)
             .map(Box::new)

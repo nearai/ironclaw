@@ -1,21 +1,23 @@
 use std::{
     collections::HashMap,
-    sync::{Arc, Mutex, RwLock},
+    sync::{Arc, RwLock},
 };
 
 use async_trait::async_trait;
 use chrono::Utc;
 use ironclaw_filesystem::{
-    CasExpectation, ContentType, Entry, FilesystemError, RecordVersion, RootFilesystem,
-    ScopedFilesystem, VersionedEntry,
+    CasExpectation, FilesystemError, RecordVersion, RootFilesystem, ScopedFilesystem,
+    VersionedEntry,
 };
 use ironclaw_host_api::{
     Action, ApprovalRequestId, CapabilityGrant, CapabilityGrantId, CapabilityId, GrantConstraints,
     HostApiError, PermissionMode, Principal, ProjectId, ResourceScope, ScopedPath, SystemServiceId,
-    TenantId, ThreadId, UserId, sha256_digest_token,
+    TenantId, UserId, sha256_digest_token,
 };
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
+
+use crate::cas_record::FilesystemCasRecordStore;
 
 const POLICY_PREFIX: &str = "/approvals/persistent";
 const POLICY_PATH_CACHE_MAX_ENTRIES: usize = 1024;
@@ -40,8 +42,6 @@ pub fn persistent_approval_grant_issuer() -> Principal {
 
 #[derive(Debug, Error)]
 pub enum PersistentApprovalPolicyError {
-    #[error("persistent approval scope must include project_id or thread_id")]
-    UnsupportedScope,
     #[error("unknown persistent approval policy")]
     UnknownPolicy,
     #[error("persistent approval policy changed concurrently")]
@@ -95,28 +95,16 @@ pub struct PersistentApprovalScope {
     pub user_id: UserId,
     pub agent_id: Option<ironclaw_host_api::AgentId>,
     pub project_id: Option<ProjectId>,
-    pub thread_id: Option<ThreadId>,
 }
 
 impl PersistentApprovalScope {
-    pub fn from_resource_scope(
-        scope: &ResourceScope,
-    ) -> Result<Self, PersistentApprovalPolicyError> {
-        if scope.project_id.is_none() && scope.thread_id.is_none() {
-            return Err(PersistentApprovalPolicyError::UnsupportedScope);
-        }
-        let thread_id = if scope.project_id.is_some() {
-            None
-        } else {
-            scope.thread_id.clone()
-        };
-        Ok(Self {
+    pub fn from_resource_scope(scope: &ResourceScope) -> Self {
+        Self {
             tenant_id: scope.tenant_id.clone(),
             user_id: scope.user_id.clone(),
             agent_id: scope.agent_id.clone(),
             project_id: scope.project_id.clone(),
-            thread_id,
-        })
+        }
     }
 }
 
@@ -134,13 +122,13 @@ impl PersistentApprovalPolicyKey {
         action: PersistentApprovalAction,
         capability_id: CapabilityId,
         grantee: Principal,
-    ) -> Result<Self, PersistentApprovalPolicyError> {
-        Ok(Self {
-            scope: PersistentApprovalScope::from_resource_scope(scope)?,
+    ) -> Self {
+        Self {
+            scope: PersistentApprovalScope::from_resource_scope(scope),
             action,
             capability_id,
             grantee,
-        })
+        }
     }
 }
 
@@ -243,7 +231,7 @@ impl PersistentApprovalPolicyStore for InMemoryPersistentApprovalPolicyStore {
             input.action,
             input.capability_id,
             input.grantee,
-        )?;
+        );
         let mut policies = self
             .policies
             .write()
@@ -323,9 +311,7 @@ pub struct FilesystemPersistentApprovalPolicyStore<F>
 where
     F: RootFilesystem,
 {
-    filesystem: Arc<ScopedFilesystem<F>>,
-    path_cache: RwLock<HashMap<PersistentApprovalPolicyKey, ScopedPath>>,
-    mutation_locks: Mutex<HashMap<PersistentApprovalPolicyKey, Arc<tokio::sync::Mutex<()>>>>,
+    records: FilesystemCasRecordStore<F, PersistentApprovalPolicyKey>,
 }
 
 impl<F> FilesystemPersistentApprovalPolicyStore<F>
@@ -334,16 +320,8 @@ where
 {
     pub fn new(filesystem: Arc<ScopedFilesystem<F>>) -> Self {
         Self {
-            filesystem,
-            path_cache: RwLock::new(HashMap::new()),
-            mutation_locks: Mutex::new(HashMap::new()),
+            records: FilesystemCasRecordStore::new(filesystem, POLICY_PATH_CACHE_MAX_ENTRIES),
         }
-    }
-
-    fn record_entry(
-        policy: &PersistentApprovalPolicy,
-    ) -> Result<Entry, PersistentApprovalPolicyError> {
-        Ok(Entry::bytes(serialize(policy)?).with_content_type(ContentType::json()))
     }
 }
 
@@ -363,9 +341,9 @@ where
             input.action,
             input.capability_id,
             input.grantee,
-        )?;
+        );
         let path = self.cached_policy_path(&key)?;
-        let lock = self.mutation_lock(&key);
+        let lock = self.records.mutation_lock(&key);
         let _guard = lock.lock().await;
         for _ in 0..POLICY_CAS_RETRY_ATTEMPTS {
             let existing = self.lookup_versioned(&key).await?;
@@ -415,7 +393,7 @@ where
     ) -> Result<PersistentApprovalPolicy, PersistentApprovalPolicyError> {
         let scope = resource_scope_for_policy_key(key);
         let path = self.cached_policy_path(key)?;
-        let lock = self.mutation_lock(key);
+        let lock = self.records.mutation_lock(key);
         let _guard = lock.lock().await;
         for _ in 0..POLICY_CAS_RETRY_ATTEMPTS {
             let (mut policy, version) = self
@@ -444,7 +422,7 @@ where
     ) -> Result<Option<PersistentApprovalPolicy>, PersistentApprovalPolicyError> {
         let scope = resource_scope_for_policy_key(key);
         let path = self.cached_policy_path(key)?;
-        let lock = self.mutation_lock(key);
+        let lock = self.records.mutation_lock(key);
         let _guard = lock.lock().await;
         for _ in 0..POLICY_CAS_RETRY_ATTEMPTS {
             let Some((mut policy, version)) = self.lookup_versioned(key).await? else {
@@ -480,22 +458,20 @@ where
     {
         let path = self.cached_policy_path(key)?;
         let scope = resource_scope_for_policy_key(key);
-        let Some(versioned) = self.filesystem.get(&scope, &path).await? else {
+        self.lookup_versioned_at(key, &scope, &path).await
+    }
+
+    async fn lookup_versioned_at(
+        &self,
+        key: &PersistentApprovalPolicyKey,
+        scope: &ResourceScope,
+        path: &ScopedPath,
+    ) -> Result<Option<(PersistentApprovalPolicy, RecordVersion)>, PersistentApprovalPolicyError>
+    {
+        let Some(versioned) = self.records.get(scope, path).await? else {
             return Ok(None);
         };
         deserialize_versioned_policy(key, versioned)
-    }
-
-    fn mutation_lock(&self, key: &PersistentApprovalPolicyKey) -> Arc<tokio::sync::Mutex<()>> {
-        let mut locks = self
-            .mutation_locks
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        locks.retain(|_, lock| Arc::strong_count(lock) > 1);
-        locks
-            .entry(key.clone())
-            .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
-            .clone()
     }
 
     async fn write_policy_raw(
@@ -505,58 +481,16 @@ where
         policy: &PersistentApprovalPolicy,
         expectation: CasExpectation,
     ) -> Result<(), PersistentApprovalPolicyError> {
-        let entry = Self::record_entry(policy)?;
-        match self
-            .filesystem
-            .put(scope, path, entry.clone(), expectation)
+        self.records
+            .put_json(scope, path, serialize(policy)?, expectation)
             .await
-        {
-            Ok(_) => Ok(()),
-            Err(FilesystemError::Unsupported { .. }) => {
-                tracing::warn!(
-                    path = %path,
-                    "persistent approval policy store does not support versioned CAS; falling back to unconditional write"
-                );
-                let opaque = Entry::bytes(entry.body).with_content_type(entry.content_type);
-                self.filesystem
-                    .put(scope, path, opaque, CasExpectation::Any)
-                    .await
-                    .map(|_| ())
-                    .map_err(PersistentApprovalPolicyError::from)
-            }
-            Err(error) => Err(PersistentApprovalPolicyError::from(error)),
-        }
     }
 
     fn cached_policy_path(
         &self,
         key: &PersistentApprovalPolicyKey,
     ) -> Result<ScopedPath, PersistentApprovalPolicyError> {
-        if let Some(path) = self
-            .path_cache
-            .read()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .get(key)
-            .cloned()
-        {
-            return Ok(path);
-        }
-
-        let path = policy_path(key)?;
-        let mut cache = self
-            .path_cache
-            .write()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        if let Some(path) = cache.get(key).cloned() {
-            return Ok(path);
-        }
-        if cache.len() >= POLICY_PATH_CACHE_MAX_ENTRIES
-            && let Some(evicted) = cache.keys().next().cloned()
-        {
-            cache.remove(&evicted);
-        }
-        cache.insert(key.clone(), path.clone());
-        Ok(path)
+        self.records.cached_path(key, policy_path)
     }
 }
 
@@ -597,8 +531,6 @@ fn within_tenant_scope(scope: &PersistentApprovalScope) -> String {
     }
     if let Some(project_id) = &scope.project_id {
         segments.push(format!("projects/{project_id}"));
-    } else if let Some(thread_id) = &scope.thread_id {
-        segments.push(format!("threads/{thread_id}"));
     }
     if segments.is_empty() {
         "scope".to_string()
@@ -626,7 +558,7 @@ fn resource_scope_for_policy_key(key: &PersistentApprovalPolicyKey) -> ResourceS
         agent_id: key.scope.agent_id.clone(),
         project_id: key.scope.project_id.clone(),
         mission_id: None,
-        thread_id: key.scope.thread_id.clone(),
+        thread_id: None,
         invocation_id: ironclaw_host_api::InvocationId::new(),
     }
 }
@@ -660,7 +592,7 @@ mod tests {
     use ironclaw_filesystem::{InMemoryBackend, LocalFilesystem, ScopedFilesystem};
     use ironclaw_host_api::{
         AgentId, EffectKind, GrantConstraints, HostPath, InvocationId, MountAlias, MountGrant,
-        MountPermissions, MountView, NetworkPolicy, ProjectId, VirtualPath,
+        MountPermissions, MountView, NetworkPolicy, ProjectId, ThreadId, VirtualPath,
     };
 
     use super::*;
@@ -728,24 +660,10 @@ mod tests {
         let key = key_for(&scope);
 
         store.allow(input(scope)).await.expect("allow policy");
-        assert_eq!(
-            store
-                .path_cache
-                .read()
-                .unwrap_or_else(|poisoned| poisoned.into_inner())
-                .len(),
-            1
-        );
+        assert_eq!(store.records.path_cache_len(), 1);
 
         store.lookup(&key).await.expect("lookup policy");
-        assert_eq!(
-            store
-                .path_cache
-                .read()
-                .unwrap_or_else(|poisoned| poisoned.into_inner())
-                .len(),
-            1
-        );
+        assert_eq!(store.records.path_cache_len(), 1);
     }
 
     #[tokio::test]
@@ -761,18 +679,11 @@ mod tests {
                 .expect("allow policy");
         }
 
-        assert!(
-            store
-                .path_cache
-                .read()
-                .unwrap_or_else(|poisoned| poisoned.into_inner())
-                .len()
-                <= POLICY_PATH_CACHE_MAX_ENTRIES
-        );
+        assert!(store.records.path_cache_len() <= POLICY_PATH_CACHE_MAX_ENTRIES);
     }
 
     #[tokio::test]
-    async fn filesystem_policy_store_updates_and_revokes_on_byte_only_backend() {
+    async fn filesystem_policy_store_rejects_versioned_mutation_on_byte_only_backend() {
         let tempdir = tempfile::tempdir().expect("tempdir");
         let mut backend = LocalFilesystem::new();
         backend
@@ -793,23 +704,19 @@ mod tests {
         let second_source = ApprovalRequestId::new();
         let mut second_input = input(scope);
         second_input.source_approval_request_id = Some(second_source);
-        let second = store
-            .allow(second_input)
-            .await
-            .expect("allow updated policy");
-        let revoked = store.revoke(&key).await.expect("revoke updated policy");
 
-        assert_eq!(second.grant_id, first.grant_id);
-        assert_eq!(second.source_approval_request_id, Some(second_source));
-        assert!(revoked.active_grant().is_none());
-        assert!(
-            store
-                .lookup(&key)
-                .await
-                .expect("lookup revoked policy")
-                .expect("policy")
-                .active_grant()
-                .is_none()
+        assert!(matches!(
+            store.allow(second_input).await,
+            Err(PersistentApprovalPolicyError::Filesystem(_))
+        ));
+        assert!(matches!(
+            store.revoke(&key).await,
+            Err(PersistentApprovalPolicyError::Filesystem(_))
+        ));
+        assert_eq!(
+            store.lookup(&key).await.unwrap().expect("policy"),
+            first,
+            "unsupported versioned mutations must not overwrite the existing policy"
         );
     }
 
@@ -828,14 +735,7 @@ mod tests {
             .await
             .expect("allow second policy");
 
-        assert!(
-            store
-                .mutation_locks
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner())
-                .len()
-                <= 1
-        );
+        assert!(store.records.mutation_lock_count() <= 1);
     }
 
     #[tokio::test]
@@ -921,25 +821,113 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn policy_scope_prefers_project_over_thread() {
+    #[test]
+    fn policy_scope_prefers_project_over_thread() {
+        // Project is still part of the scope; differing thread ids under the same
+        // project produce identical keys.
         let scope_a = scope(Some("project-a"), Some("thread-a"));
         let scope_b = scope(Some("project-a"), Some("thread-b"));
 
+        let derived_a = PersistentApprovalScope::from_resource_scope(&scope_a);
+        let derived_b = PersistentApprovalScope::from_resource_scope(&scope_b);
+
+        assert_eq!(derived_a, derived_b);
         assert_eq!(
-            PersistentApprovalScope::from_resource_scope(&scope_a).unwrap(),
-            PersistentApprovalScope::from_resource_scope(&scope_b).unwrap()
+            derived_a.project_id,
+            Some(ProjectId::new("project-a").unwrap())
+        );
+    }
+
+    #[test]
+    fn project_scoped_policy_key_serialization_is_threadless() {
+        // Persistent approvals intentionally ignore thread_id. There is no
+        // backward-compatibility read path for old local test records, so the
+        // key serialization should not retain thread_id.
+        let key = key_for(&scope(Some("project-a"), Some("thread-ignored")));
+        let json = serde_json::to_string(&key).expect("serialize policy key");
+        assert!(
+            !json.contains("thread_id"),
+            "persistent approval keys must not serialize thread_id; got {json}"
+        );
+
+        let digest_thread_one =
+            policy_digest(&key_for(&scope(Some("project-a"), Some("thread-1")))).expect("digest");
+        let digest_thread_two =
+            policy_digest(&key_for(&scope(Some("project-a"), Some("thread-2")))).expect("digest");
+        assert_eq!(digest_thread_one, digest_thread_two);
+        assert_eq!(
+            within_tenant_scope(&key.scope),
+            "agents/agent-a/projects/project-a"
         );
     }
 
     #[tokio::test]
-    async fn policy_scope_uses_thread_without_project() {
+    async fn filesystem_project_scoped_policy_matches_in_new_thread_after_reload() {
+        // A project-scoped "always allow" applies across threads in the same
+        // project. A fresh store instance looks the policy up from a different
+        // thread and finds it through the canonical path.
+        let backend = Arc::new(InMemoryBackend::new());
+        let scoped = scoped_fs(Arc::clone(&backend), "tenant-a", "alice");
+        let store = FilesystemPersistentApprovalPolicyStore::new(Arc::clone(&scoped));
+
+        let granted = store
+            .allow(input(scope(Some("project-a"), Some("thread-1"))))
+            .await
+            .expect("allow project-scoped policy");
+
+        let new_thread_key = key_for(&scope(Some("project-a"), Some("thread-2")));
+        let reloaded = FilesystemPersistentApprovalPolicyStore::new(scoped)
+            .lookup(&new_thread_key)
+            .await
+            .expect("lookup")
+            .expect("pre-existing project-scoped policy still matches in a new thread");
+
+        assert_eq!(reloaded, granted);
+        assert!(reloaded.active_grant().is_some());
+    }
+
+    #[test]
+    fn policy_scope_without_project_is_thread_agnostic() {
         let scope_a = scope(None, Some("thread-a"));
         let scope_b = scope(None, Some("thread-b"));
 
+        let derived_a = PersistentApprovalScope::from_resource_scope(&scope_a);
+        let derived_b = PersistentApprovalScope::from_resource_scope(&scope_b);
+
+        assert_eq!(derived_a, derived_b);
+    }
+
+    #[test]
+    fn policy_scope_without_project_isolates_users() {
+        let scope_a = ResourceScope {
+            user_id: UserId::new("alice").unwrap(),
+            ..scope(None, Some("thread-a"))
+        };
+        let scope_b = ResourceScope {
+            user_id: UserId::new("bob").unwrap(),
+            ..scope(None, Some("thread-a"))
+        };
+
         assert_ne!(
-            PersistentApprovalScope::from_resource_scope(&scope_a).unwrap(),
-            PersistentApprovalScope::from_resource_scope(&scope_b).unwrap()
+            PersistentApprovalScope::from_resource_scope(&scope_a),
+            PersistentApprovalScope::from_resource_scope(&scope_b)
+        );
+    }
+
+    #[test]
+    fn policy_scope_without_project_isolates_agents() {
+        let scope_a = ResourceScope {
+            agent_id: Some(AgentId::new("agent-x").unwrap()),
+            ..scope(None, Some("thread-a"))
+        };
+        let scope_b = ResourceScope {
+            agent_id: Some(AgentId::new("agent-y").unwrap()),
+            ..scope(None, Some("thread-a"))
+        };
+
+        assert_ne!(
+            PersistentApprovalScope::from_resource_scope(&scope_a),
+            PersistentApprovalScope::from_resource_scope(&scope_b)
         );
     }
 
@@ -987,16 +975,6 @@ mod tests {
         assert_eq!(grant.issued_by, persistent_approval_grant_issuer());
     }
 
-    #[tokio::test]
-    async fn from_resource_scope_errs_without_project_or_thread() {
-        let scope = scope(None, None);
-
-        assert!(matches!(
-            PersistentApprovalScope::from_resource_scope(&scope),
-            Err(PersistentApprovalPolicyError::UnsupportedScope)
-        ));
-    }
-
     fn input(scope: ResourceScope) -> PersistentApprovalPolicyInput {
         PersistentApprovalPolicyInput {
             scope,
@@ -1024,7 +1002,6 @@ mod tests {
             CapabilityId::new("fixture.echo").unwrap(),
             Principal::User(UserId::new("alice").unwrap()),
         )
-        .unwrap()
     }
 
     fn scope(project_id: Option<&str>, thread_id: Option<&str>) -> ResourceScope {

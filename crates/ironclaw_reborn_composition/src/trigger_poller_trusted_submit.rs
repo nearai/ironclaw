@@ -373,7 +373,8 @@ fn classify_materializer_inbound_error(error: InboundTurnError) -> TriggerError 
                 | TurnError::Unauthorized
                 | TurnError::InvalidRequest { .. }
                 | TurnError::InvalidTransition { .. }
-                | TurnError::LeaseMismatch,
+                | TurnError::LeaseMismatch
+                | TurnError::InvalidRunOriginAdapter,
         } => rejected_trigger_materialization("trusted trigger submit rejected"),
         InboundTurnError::InvalidExternalRef { .. }
         | InboundTurnError::BindingRequired { .. }
@@ -444,11 +445,11 @@ mod tests {
         InMemoryTriggerRepository, ScheduleTriggerSourceProvider,
         TRIGGER_TRUSTED_ADAPTER_INSTALLATION_ID, TRIGGER_TRUSTED_ADAPTER_KIND,
         TRIGGER_TRUSTED_EXTERNAL_ACTOR_NAMESPACE, TriggerActiveRunLookup, TriggerActiveRunState,
-        TriggerActiveRunStateRequest, TriggerCompletionPolicy, TriggerError, TriggerFire,
-        TriggerFireIdentity, TriggerId, TriggerInboundContentRef, TriggerMaterializedPrompt,
-        TriggerPollerFailureReason, TriggerPollerFireOutcome, TriggerPollerWorker,
-        TriggerPollerWorkerConfig, TriggerPollerWorkerDeps, TriggerRecord, TriggerRepository,
-        TriggerSchedule, TriggerSourceKind, TriggerState, TrustedTriggerFireSubmitOutcome,
+        TriggerActiveRunStateRequest, TriggerError, TriggerFire, TriggerFireIdentity, TriggerId,
+        TriggerInboundContentRef, TriggerMaterializedPrompt, TriggerPollerFailureReason,
+        TriggerPollerFireOutcome, TriggerPollerWorker, TriggerPollerWorkerConfig,
+        TriggerPollerWorkerDeps, TriggerRecord, TriggerRepository, TriggerSchedule,
+        TriggerSourceKind, TriggerState, TrustedTriggerFireSubmitOutcome,
         TrustedTriggerFireSubmitter, TrustedTriggerSubmitRequest,
     };
     use ironclaw_turns::{
@@ -653,7 +654,6 @@ mod tests {
             name: "worker test".to_string(),
             source: TriggerSourceKind::Schedule,
             schedule: TriggerSchedule::cron("0 8 * * *").expect("valid cron"),
-            completion_policy: TriggerCompletionPolicy::Recurring,
             prompt: input.prompt,
             state: TriggerState::Scheduled,
             next_run_at: input.fire_slot,
@@ -1026,13 +1026,13 @@ mod tests {
             unimplemented!("trigger prompt recorder tests do not mark messages submitted")
         }
 
-        async fn mark_message_deferred_busy(
+        async fn mark_message_rejected_busy(
             &self,
             _scope: &ThreadScope,
             _thread_id: &ThreadId,
             _message_id: ThreadMessageId,
         ) -> Result<ThreadMessageRecord, SessionThreadError> {
-            unimplemented!("trigger prompt recorder tests do not defer messages")
+            unimplemented!("trigger prompt recorder tests do not reject messages")
         }
 
         async fn append_assistant_draft(
@@ -1587,7 +1587,6 @@ mod tests {
             name: "worker e2e".to_string(),
             source: TriggerSourceKind::Schedule,
             schedule: TriggerSchedule::cron("0 8 * * *").expect("valid cron"),
-            completion_policy: TriggerCompletionPolicy::Recurring,
             prompt: prompt.to_string(),
             state: TriggerState::Scheduled,
             next_run_at: fire_slot,
@@ -1864,7 +1863,6 @@ mod tests {
             name: "owner scope e2e".to_string(),
             source: TriggerSourceKind::Schedule,
             schedule: TriggerSchedule::cron("0 8 * * *").expect("valid cron"),
-            completion_policy: TriggerCompletionPolicy::Recurring,
             prompt: prompt.to_string(),
             state: TriggerState::Scheduled,
             next_run_at: fire_slot,

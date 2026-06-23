@@ -12,8 +12,6 @@ pub enum RebornBuildError {
     MissingRuntimePolicy,
     #[error("reborn composition production trust policy must contain at least one source")]
     EmptyProductionTrustPolicy,
-    #[error("reborn composition requires live turn scheduler wake notifier")]
-    MissingTurnRunWakeNotifier,
     #[error(
         "reborn production composition requires a configured or keychain-resolvable secret master key"
     )]
