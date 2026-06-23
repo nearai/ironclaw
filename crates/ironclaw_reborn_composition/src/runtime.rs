@@ -52,6 +52,8 @@ use ironclaw_loop_support::{
     ModelGatewayBackedSystemInferencePort,
 };
 use ironclaw_product_adapters::ProjectionStream;
+#[cfg(feature = "github-issue-workflow-beta")]
+use ironclaw_product_workflow::ProjectService;
 use ironclaw_product_workflow::{
     ApprovalBlockedTurnRun, ApprovalInteractionScope, ApprovalInteractionService,
     ApprovalResolverPort, ApprovalTurnRunLocator, AuthInteractionService,
@@ -197,6 +199,8 @@ struct RuntimeStoreParts<'a> {
     budget_gate_store: Arc<dyn ironclaw_resources::BudgetGateStore>,
     broadcast_budget_event_sink: Arc<ironclaw_resources::BroadcastBudgetEventSink>,
     subagent_goal_store: Arc<dyn RuntimeSubagentGoalStore>,
+    #[cfg(feature = "github-issue-workflow-beta")]
+    project_service: Option<Arc<dyn ProjectService>>,
     trigger_repository: Option<Arc<dyn ironclaw_triggers::TriggerRepository>>,
     #[cfg(feature = "github-issue-workflow-beta")]
     workflow_repository:
@@ -231,6 +235,8 @@ fn local_runtime_parts(
         budget_gate_store: Arc::clone(&local_runtime.budget_gate_store),
         broadcast_budget_event_sink: Arc::clone(&local_runtime.broadcast_budget_event_sink),
         subagent_goal_store,
+        #[cfg(feature = "github-issue-workflow-beta")]
+        project_service: Some(Arc::clone(&local_runtime.project_service)),
         trigger_repository: Some(Arc::clone(&local_runtime.trigger_repository)),
         #[cfg(feature = "github-issue-workflow-beta")]
         workflow_repository: Some(Arc::clone(&local_runtime.workflow_repository)),
@@ -265,6 +271,8 @@ where
         subagent_goal_store: Arc::new(FilesystemSubagentGoalStore::new(Arc::clone(
             &graph.scoped_filesystem,
         ))) as Arc<dyn RuntimeSubagentGoalStore>,
+        #[cfg(feature = "github-issue-workflow-beta")]
+        project_service: Some(Arc::clone(&graph.project_service)),
         trigger_repository: Some(Arc::clone(&graph.trigger_repository)),
         #[cfg(feature = "github-issue-workflow-beta")]
         workflow_repository: Some(Arc::clone(&graph.workflow_repository)),
@@ -2280,6 +2288,10 @@ pub async fn build_reborn_runtime(
         github_issue_workflow_provider_account_ref,
         #[cfg(feature = "github-issue-workflow-beta")]
         github_issue_workflow_project_access,
+        #[cfg(feature = "github-issue-workflow-beta")]
+        github_issue_workflow_config_source,
+        #[cfg(feature = "github-issue-workflow-beta")]
+        github_issue_workflow_workspace_manager,
         trigger_poller,
         credential_refresh,
         trigger_fire_access_checker,
@@ -2442,6 +2454,8 @@ pub async fn build_reborn_runtime(
         budget_gate_store,
         broadcast_budget_event_sink,
         subagent_goal_store,
+        #[cfg(feature = "github-issue-workflow-beta")]
+        project_service,
         trigger_repository: _trigger_repository,
         #[cfg(feature = "github-issue-workflow-beta")]
         workflow_repository,
@@ -3193,6 +3207,43 @@ pub async fn build_reborn_runtime(
                 });
             }
         };
+        let config_source = match github_issue_workflow_config_source {
+            Some(config_source) => config_source,
+            None if github_issue_workflow.allow_in_memory_for_tests => {
+                crate::github_issue_workflow::test_only_empty_config_source()
+            }
+            None => {
+                let project_id =
+                    github_issue_workflow_default_project_id.clone().ok_or_else(|| {
+                        RebornRuntimeError::InvalidArgument {
+                            reason:
+                                "GitHub issue workflow requires a default project_id outside explicit test enablement"
+                                    .to_string(),
+                        }
+                    })?;
+                let project_service = project_service.ok_or_else(|| {
+                    RebornRuntimeError::InvalidArgument {
+                        reason:
+                            "GitHub issue workflow requires a project service outside explicit test enablement"
+                                .to_string(),
+                    }
+                })?;
+                crate::github_issue_workflow::project_metadata_github_issue_workflow_config_source(
+                    project_service,
+                    validated_identity.tenant_id.clone(),
+                    actor_user_id.clone(),
+                    project_id,
+                    configured_provider_account_ref.clone(),
+                )
+            }
+        };
+        let workspace_manager = match github_issue_workflow_workspace_manager {
+            Some(workspace_manager) => workspace_manager,
+            None if github_issue_workflow.allow_in_memory_for_tests => {
+                crate::github_issue_workflow::test_only_unconfigured_workspace_manager()
+            }
+            None => crate::github_issue_workflow::runtime_workflow_workspace_manager(),
+        };
         let repository = workflow_repository.ok_or(RebornRuntimeError::InvalidArgument {
             reason: "GitHub issue workflow repository is not wired".to_string(),
         })?;
@@ -3212,7 +3263,9 @@ pub async fn build_reborn_runtime(
                 stage_result_sink_slot,
                 host_runtime,
                 configured_provider_account_ref,
+                config_source,
                 project_access,
+                workspace_manager,
                 thread_service: Arc::clone(&thread_service),
                 turn_coordinator: Arc::clone(&planned_turn_coordinator),
                 actor_user_id: actor_user_id.clone(),

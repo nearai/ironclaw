@@ -602,6 +602,7 @@ where
     pub(crate) checkpoint_state_store: Arc<dyn CheckpointStateStore>,
     pub(crate) thread_service: Arc<dyn SessionThreadService>,
     pub(crate) trigger_repository: Arc<dyn TriggerRepository>,
+    pub(crate) project_service: Arc<dyn ProjectService>,
     #[cfg(feature = "github-issue-workflow-beta")]
     pub(crate) workflow_repository: Arc<dyn GithubIssueWorkflowRepository>,
     #[cfg(feature = "github-issue-workflow-beta")]
@@ -625,6 +626,15 @@ impl RebornProductionRuntimeServices {
             Self::LibSql(graph) => Arc::clone(&graph.trigger_repository),
             #[cfg(feature = "postgres")]
             Self::Postgres(graph) => Arc::clone(&graph.trigger_repository),
+        }
+    }
+
+    pub(crate) fn project_service(&self) -> Arc<dyn ProjectService> {
+        match self {
+            #[cfg(feature = "libsql")]
+            Self::LibSql(graph) => Arc::clone(&graph.project_service),
+            #[cfg(feature = "postgres")]
+            Self::Postgres(graph) => Arc::clone(&graph.project_service),
         }
     }
 }
@@ -3488,7 +3498,7 @@ where
     let secret_store: Arc<dyn SecretStore> = stores.secret_credentials.secret_store.clone();
     let skill_management_filesystem: Arc<dyn RootFilesystem> = stores.filesystem.clone();
     let skill_management = Arc::new(RebornLocalSkillManagementPort::new_with_mount_resolver(
-        owner_user_id,
+        owner_user_id.clone(),
         skill_management_filesystem,
         Arc::new(production_skill_management_mount_view),
     ));
@@ -3515,6 +3525,20 @@ where
     );
     let thread_service: Arc<dyn SessionThreadService> = Arc::new(
         FilesystemSessionThreadService::new(Arc::clone(&stores.scoped_filesystem)),
+    );
+    let project_agent_id = ironclaw_host_api::AgentId::new("reborn-projects").map_err(|error| {
+        RebornBuildError::InvalidConfig {
+            reason: format!("invalid project agent id: {error}"),
+        }
+    })?;
+    let project_repository: Arc<dyn ProjectRepository> =
+        Arc::new(ironclaw_projects::FilesystemProjectRepository::new(
+            Arc::clone(&stores.scoped_filesystem),
+            owner_user_id.clone(),
+            project_agent_id,
+        ));
+    let project_service: Arc<dyn ProjectService> = Arc::new(
+        crate::project_service::RebornProjectService::new(project_repository),
     );
     let resource_governor = Arc::new(
         PersistentResourceGovernor::new(FilesystemResourceGovernorStore::new(Arc::clone(
@@ -3543,6 +3567,7 @@ where
         checkpoint_state_store: Arc::clone(&checkpoint_state_store),
         thread_service,
         trigger_repository: Arc::clone(&trigger_repository),
+        project_service,
         #[cfg(feature = "github-issue-workflow-beta")]
         workflow_repository,
         #[cfg(feature = "github-issue-workflow-beta")]

@@ -423,6 +423,12 @@ pub struct RebornRuntimeInput {
     #[cfg(feature = "github-issue-workflow-beta")]
     pub github_issue_workflow_project_access:
         Option<Arc<dyn ironclaw_github_issue_workflow::WorkflowProjectAccess>>,
+    #[cfg(feature = "github-issue-workflow-beta")]
+    pub github_issue_workflow_config_source:
+        Option<Arc<dyn ironclaw_github_issue_workflow::GithubIssueWorkflowConfigSource>>,
+    #[cfg(feature = "github-issue-workflow-beta")]
+    pub github_issue_workflow_workspace_manager:
+        Option<Arc<dyn ironclaw_github_issue_workflow::WorkflowWorkspaceManager>>,
     pub trigger_poller: TriggerPollerSettings,
     pub credential_refresh: CredentialRefreshSettings,
     pub trigger_fire_access_checker: Option<Arc<dyn TriggerFireAccessChecker>>,
@@ -486,6 +492,10 @@ impl RebornRuntimeInput {
             github_issue_workflow_provider_account_ref: None,
             #[cfg(feature = "github-issue-workflow-beta")]
             github_issue_workflow_project_access: None,
+            #[cfg(feature = "github-issue-workflow-beta")]
+            github_issue_workflow_config_source: None,
+            #[cfg(feature = "github-issue-workflow-beta")]
+            github_issue_workflow_workspace_manager: None,
             trigger_poller: TriggerPollerSettings::default(),
             credential_refresh: CredentialRefreshSettings::default(),
             trigger_fire_access_checker: None,
@@ -616,6 +626,24 @@ impl RebornRuntimeInput {
         project_access: Arc<dyn ironclaw_github_issue_workflow::WorkflowProjectAccess>,
     ) -> Self {
         self.github_issue_workflow_project_access = Some(project_access);
+        self
+    }
+
+    #[cfg(feature = "github-issue-workflow-beta")]
+    pub fn with_github_issue_workflow_config_source(
+        mut self,
+        config_source: Arc<dyn ironclaw_github_issue_workflow::GithubIssueWorkflowConfigSource>,
+    ) -> Self {
+        self.github_issue_workflow_config_source = Some(config_source);
+        self
+    }
+
+    #[cfg(feature = "github-issue-workflow-beta")]
+    pub fn with_github_issue_workflow_workspace_manager(
+        mut self,
+        workspace_manager: Arc<dyn ironclaw_github_issue_workflow::WorkflowWorkspaceManager>,
+    ) -> Self {
+        self.github_issue_workflow_workspace_manager = Some(workspace_manager);
         self
     }
 

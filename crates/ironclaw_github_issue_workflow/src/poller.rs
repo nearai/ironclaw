@@ -9,21 +9,21 @@ use crate::{
     BlockWorkflowRunInput, ClaimRunnableWorkflowRunsInput, CreateOrGetWorkflowRunInput,
     CreateOrGetWorkflowRunOutcome, FindLatestWorkflowEventForProviderInput, GetGithubIssueInput,
     GetPullRequestInput, GithubChecksChangedPayload, GithubCommentRef, GithubIssueBlockKind,
-    GithubIssueBlockState, GithubIssueClosedPayload, GithubIssueProviderSnapshot,
-    GithubIssueWorkflowConfig, GithubIssueWorkflowConfigSource, GithubIssueWorkflowError,
-    GithubIssueWorkflowEventType, GithubIssueWorkflowPolicy, GithubIssueWorkflowPolicyPorts,
-    GithubIssueWorkflowPollerConfig, GithubIssueWorkflowPort, GithubIssueWorkflowRepository,
-    GithubIssueWorkflowRun, GithubProviderRef, GithubPullRequestCheckSnapshot,
-    GithubPullRequestRef, GithubPullRequestSnapshot, GithubPullRequestUpdatedPayload,
-    GithubRepositorySelector, GithubReviewCommentCreatedPayload, GithubReviewCommentSnapshot,
-    LeaseReleaseOutcome, ListActiveWorkflowRunsForRepositoryInput, ListIssueCommentsInput,
-    ListPullRequestChecksInput, ListPullRequestReviewCommentsInput, RecordWorkflowEventInput,
-    RecordWorkflowEventOutcome, ReleaseWorkflowRunLeaseInput, SearchGithubIssuesInput,
-    StageTurnSubmitter, WorkflowClock, WorkflowConfigAccessRequest, WorkflowEventEnvelope,
-    WorkflowEventSourceKind, WorkflowProjectAccess, WorkflowWorkerId, WorkflowWorkspaceManager,
-    checks_failed_key, checks_succeeded_key, issue_binding_ref, issue_changed_key,
-    issue_closed_key, issue_discovered_key, pr_updated_key, primary_pr_binding_ref,
-    review_comment_created_key,
+    GithubIssueBlockState, GithubIssueCandidateSelector, GithubIssueClosedPayload,
+    GithubIssueProviderSnapshot, GithubIssueWorkflowConfig, GithubIssueWorkflowConfigSource,
+    GithubIssueWorkflowError, GithubIssueWorkflowEventType, GithubIssueWorkflowPolicy,
+    GithubIssueWorkflowPolicyPorts, GithubIssueWorkflowPollerConfig, GithubIssueWorkflowPort,
+    GithubIssueWorkflowRepository, GithubIssueWorkflowRun, GithubProviderRef,
+    GithubPullRequestCheckSnapshot, GithubPullRequestRef, GithubPullRequestSnapshot,
+    GithubPullRequestUpdatedPayload, GithubRepositorySelector, GithubReviewCommentCreatedPayload,
+    GithubReviewCommentSnapshot, LeaseReleaseOutcome, ListActiveWorkflowRunsForRepositoryInput,
+    ListIssueCommentsInput, ListPullRequestChecksInput, ListPullRequestReviewCommentsInput,
+    RecordWorkflowEventInput, RecordWorkflowEventOutcome, ReleaseWorkflowRunLeaseInput,
+    SearchGithubIssuesInput, StageTurnSubmitter, WorkflowClock, WorkflowConfigAccessRequest,
+    WorkflowEventEnvelope, WorkflowEventSourceKind, WorkflowProjectAccess, WorkflowWorkerId,
+    WorkflowWorkspaceManager, checks_failed_key, checks_succeeded_key, issue_binding_ref,
+    issue_changed_key, issue_closed_key, issue_discovered_key, pr_updated_key,
+    primary_pr_binding_ref, review_comment_created_key,
 };
 
 const DEFAULT_WORKFLOW_POLICY_KEY: &str = "github-bug-workflow";
@@ -178,7 +178,7 @@ where
         repository: &GithubRepositorySelector,
         outcome: &mut GithubIssueWorkflowPollerTickOutcome,
     ) -> Result<(), GithubIssueWorkflowError> {
-        let query = open_bug_query(repository);
+        let query = open_bug_query(repository, &workflow_config.candidate_selector);
         let hits = self
             .ports
             .github_port()
@@ -856,11 +856,30 @@ where
     }
 }
 
-fn open_bug_query(repository: &GithubRepositorySelector) -> String {
-    format!(
-        "repo:{}/{} is:issue state:open label:bug",
+fn open_bug_query(
+    repository: &GithubRepositorySelector,
+    selector: &GithubIssueCandidateSelector,
+) -> String {
+    let mut query = format!(
+        "repo:{}/{} is:issue state:open",
         repository.owner, repository.repo
-    )
+    );
+    for label in &selector.labels {
+        query.push_str(" label:");
+        query.push_str(&github_search_value(label));
+    }
+    query
+}
+
+fn github_search_value(value: &str) -> String {
+    if value
+        .chars()
+        .all(|character| character.is_ascii_alphanumeric() || matches!(character, '-' | '_' | '.'))
+    {
+        return value.to_string();
+    }
+
+    format!("\"{}\"", value.replace('\\', "\\\\").replace('"', "\\\""))
 }
 
 fn event_payload_schema(event_type: &GithubIssueWorkflowEventType) -> &'static str {
@@ -1041,5 +1060,36 @@ fn chrono_lease_duration(
 fn poller_serde_error(error: serde_json::Error) -> GithubIssueWorkflowError {
     GithubIssueWorkflowError::Policy {
         reason: error.to_string(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{github_search_value, open_bug_query};
+    use crate::{GithubIssueCandidateSelector, GithubRepositorySelector};
+
+    #[test]
+    fn open_bug_query_uses_configured_candidate_labels() {
+        let repository = GithubRepositorySelector::new("near", "ironclaw").expect("repository");
+        let query = open_bug_query(
+            &repository,
+            &GithubIssueCandidateSelector {
+                labels: vec!["bug".to_string(), "good first issue".to_string()],
+            },
+        );
+
+        assert_eq!(
+            query,
+            "repo:near/ironclaw is:issue state:open label:bug label:\"good first issue\""
+        );
+    }
+
+    #[test]
+    fn github_search_value_escapes_quoted_labels() {
+        assert_eq!(github_search_value("bug"), "bug");
+        assert_eq!(
+            github_search_value("needs \"care\""),
+            "\"needs \\\"care\\\"\""
+        );
     }
 }

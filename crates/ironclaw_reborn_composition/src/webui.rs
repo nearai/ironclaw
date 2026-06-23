@@ -199,10 +199,24 @@ pub(crate) fn build_webui_services_with_connectable_channels(
                 .with_scheduler_enabled(services.readiness.workers.trigger_poller),
         ));
     }
-    // First-class projects + membership (ACL). The local-dev graph builds the
-    // access-controlled facade once; production wiring is a follow-up.
-    if let Some(local_runtime) = &services.local_runtime {
-        api = api.with_project_service(Arc::clone(&local_runtime.project_service));
+    // First-class projects + membership (ACL). Local-dev and production expose
+    // the same access-controlled facade over their scoped project substrate.
+    let project_service: Option<Arc<dyn ironclaw_product_workflow::ProjectService>> = {
+        let from_local = services
+            .local_runtime
+            .as_ref()
+            .map(|local_runtime| Arc::clone(&local_runtime.project_service));
+        #[cfg(any(feature = "libsql", feature = "postgres"))]
+        let from_local = from_local.or_else(|| {
+            services
+                .production_runtime
+                .as_ref()
+                .map(|production_runtime| production_runtime.project_service())
+        });
+        from_local
+    };
+    if let Some(project_service) = project_service {
+        api = api.with_project_service(project_service);
     }
     if let Some(local_runtime) = &services.local_runtime {
         api = api.with_outbound_preferences_facade(Arc::new(RebornOutboundPreferencesFacade::new(
