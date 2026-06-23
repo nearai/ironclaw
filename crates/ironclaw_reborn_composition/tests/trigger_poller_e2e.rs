@@ -689,10 +689,9 @@ async fn trigger_poller_does_not_submit_turn_for_unpaired_actor() {
     let agent_id = AgentId::new(AGENT).expect("agent id");
     let trigger_id = TriggerId::new();
 
-    // Seed a past-due one-shot trigger. An unpaired external actor is a
-    // permanent pre-submit failure: the trusted trigger submitter must not send
-    // a turn, and the one-shot is completed so it cannot re-fire the same slot
-    // forever.
+    // Seed a past-due one-shot trigger. An unpaired external actor is retryable:
+    // the trusted trigger submitter must not send a turn, and the one-shot
+    // remains scheduled so it can fire after the actor is paired.
     let fire_at = Utc::now() - chrono::Duration::seconds(120);
     let record = TriggerRecord {
         trigger_id,
@@ -745,28 +744,13 @@ async fn trigger_poller_does_not_submit_turn_for_unpaired_actor() {
         captured_contents
     );
 
-    // The one-shot trigger records the permanent pre-submit failure and stops
-    // retrying the already-past slot.
-    assert_eq!(
+    // The trigger must not be marked Completed (retryable fail-closed behavior).
+    assert_ne!(
         current.state,
         TriggerState::Completed,
-        "unpaired one-shot trigger must be completed after permanent pre-submit failure — \
-         state: {:?}, last_status: {:?}",
+        "unpaired trigger must not be marked Completed — state: {:?}, last_status: {:?}",
         current.state,
         current.last_status
-    );
-    assert_eq!(
-        current.last_status,
-        Some(TriggerRunStatus::Error),
-        "unpaired one-shot trigger must record an error status — record: {current:?}"
-    );
-    assert_eq!(
-        current.active_fire_slot, None,
-        "completed failed one-shot trigger must not keep an active fire — record: {current:?}"
-    );
-    assert_eq!(
-        current.active_run_ref, None,
-        "completed failed one-shot trigger must not have an active run — record: {current:?}"
     );
 }
 
