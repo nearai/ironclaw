@@ -4,11 +4,22 @@
 //! private-internal access the inline module had (matches the
 //! `services.rs` / `services/tests.rs` pattern in this crate).
 
-use std::sync::Arc;
+use std::{
+    sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    },
+    time::Duration,
+};
 
 use async_trait::async_trait;
+use chrono::Utc;
+use ironclaw_host_api::{AgentId, ProjectId, TenantId, ThreadId, UserId};
 use ironclaw_turns::{
-    EventCursor, TurnError, TurnRunState,
+    AcceptedMessageRef, EventCursor, InMemoryRunProfileResolver, ReplyTargetBindingRef,
+    RunProfileId, RunProfileResolutionRequest, RunProfileResolver, RunProfileVersion,
+    SourceBindingRef, TurnActor, TurnError, TurnId, TurnLeaseToken, TurnRunId, TurnRunState,
+    TurnRunWake, TurnRunnerId, TurnScope, TurnStatus,
     runner::{
         ApplyValidatedLoopExitRequest, BlockRunRequest, CancelRunCompletionRequest,
         ClaimRunRequest, ClaimedTurnRun, CompleteRunRequest, FailRunRequest, HeartbeatRequest,
@@ -20,6 +31,12 @@ use ironclaw_turns::{
 use super::{TurnRunExecutor, TurnRunExecutorError, TurnRunScheduler, TurnRunSchedulerConfig};
 
 // ── Minimal fakes ────────────────────────────────────────────────────────
+
+fn unused_transition() -> Result<TurnRunState, TurnError> {
+    Err(TurnError::Unavailable {
+        reason: "unused".to_string(),
+    })
+}
 
 /// A `TurnRunTransitionPort` that claims nothing and no-ops everything else.
 struct NoopTransitionPort;
@@ -48,54 +65,40 @@ impl TurnRunTransitionPort for NoopTransitionPort {
         &self,
         _request: RecordModelRouteSnapshotRequest,
     ) -> Result<TurnRunState, TurnError> {
-        Err(TurnError::Unavailable {
-            reason: "noop".to_string(),
-        })
+        unused_transition()
     }
 
     async fn block_run(&self, _request: BlockRunRequest) -> Result<TurnRunState, TurnError> {
-        Err(TurnError::Unavailable {
-            reason: "noop".to_string(),
-        })
+        unused_transition()
     }
 
     async fn complete_run(&self, _request: CompleteRunRequest) -> Result<TurnRunState, TurnError> {
-        Err(TurnError::Unavailable {
-            reason: "noop".to_string(),
-        })
+        unused_transition()
     }
 
     async fn cancel_run(
         &self,
         _request: CancelRunCompletionRequest,
     ) -> Result<TurnRunState, TurnError> {
-        Err(TurnError::Unavailable {
-            reason: "noop".to_string(),
-        })
+        unused_transition()
     }
 
     async fn fail_run(&self, _request: FailRunRequest) -> Result<TurnRunState, TurnError> {
-        Err(TurnError::Unavailable {
-            reason: "noop".to_string(),
-        })
+        unused_transition()
     }
 
     async fn relinquish_run(
         &self,
         _request: RelinquishRunRequest,
     ) -> Result<TurnRunState, TurnError> {
-        Err(TurnError::Unavailable {
-            reason: "noop".to_string(),
-        })
+        unused_transition()
     }
 
     async fn apply_validated_loop_exit(
         &self,
         _request: ApplyValidatedLoopExitRequest,
     ) -> Result<TurnRunState, TurnError> {
-        Err(TurnError::Unavailable {
-            reason: "noop".to_string(),
-        })
+        unused_transition()
     }
 }
 
@@ -111,6 +114,205 @@ impl TurnRunExecutor for NoopExecutor {
     ) -> Result<(), TurnRunExecutorError> {
         Ok(())
     }
+}
+
+struct LockingTransitionPort {
+    claim: tokio::sync::Mutex<Option<ClaimedTurnRun>>,
+    state_lock: Arc<tokio::sync::Mutex<()>>,
+    heartbeat_count: AtomicUsize,
+}
+
+impl LockingTransitionPort {
+    fn new(claimed: ClaimedTurnRun, state_lock: Arc<tokio::sync::Mutex<()>>) -> Self {
+        Self {
+            claim: tokio::sync::Mutex::new(Some(claimed)),
+            state_lock,
+            heartbeat_count: AtomicUsize::new(0),
+        }
+    }
+
+    fn heartbeat_count(&self) -> usize {
+        self.heartbeat_count.load(Ordering::SeqCst)
+    }
+}
+
+#[async_trait]
+impl TurnRunTransitionPort for LockingTransitionPort {
+    async fn claim_next_run(
+        &self,
+        _request: ClaimRunRequest,
+    ) -> Result<Option<ClaimedTurnRun>, TurnError> {
+        Ok(self.claim.lock().await.take())
+    }
+
+    async fn heartbeat(&self, _request: HeartbeatRequest) -> Result<EventCursor, TurnError> {
+        self.heartbeat_count.fetch_add(1, Ordering::SeqCst);
+        let _guard = self.state_lock.lock().await;
+        Ok(EventCursor(1))
+    }
+
+    async fn recover_expired_leases(
+        &self,
+        _request: RecoverExpiredLeasesRequest,
+    ) -> Result<RecoverExpiredLeasesResponse, TurnError> {
+        Ok(RecoverExpiredLeasesResponse { recovered: vec![] })
+    }
+
+    async fn record_model_route_snapshot(
+        &self,
+        _request: RecordModelRouteSnapshotRequest,
+    ) -> Result<TurnRunState, TurnError> {
+        unused_transition()
+    }
+
+    async fn block_run(&self, _request: BlockRunRequest) -> Result<TurnRunState, TurnError> {
+        unused_transition()
+    }
+
+    async fn complete_run(&self, _request: CompleteRunRequest) -> Result<TurnRunState, TurnError> {
+        unused_transition()
+    }
+
+    async fn cancel_run(
+        &self,
+        _request: CancelRunCompletionRequest,
+    ) -> Result<TurnRunState, TurnError> {
+        unused_transition()
+    }
+
+    async fn fail_run(&self, _request: FailRunRequest) -> Result<TurnRunState, TurnError> {
+        unused_transition()
+    }
+
+    async fn relinquish_run(
+        &self,
+        _request: RelinquishRunRequest,
+    ) -> Result<TurnRunState, TurnError> {
+        unused_transition()
+    }
+
+    async fn apply_validated_loop_exit(
+        &self,
+        _request: ApplyValidatedLoopExitRequest,
+    ) -> Result<TurnRunState, TurnError> {
+        unused_transition()
+    }
+}
+
+struct LockHoldingExecutor {
+    state_lock: Arc<tokio::sync::Mutex<()>>,
+    locked_tx: tokio::sync::Mutex<Option<tokio::sync::oneshot::Sender<()>>>,
+    done_tx: tokio::sync::Mutex<Option<tokio::sync::oneshot::Sender<()>>>,
+}
+
+#[async_trait]
+impl TurnRunExecutor for LockHoldingExecutor {
+    async fn execute_claimed_run(
+        &self,
+        _claimed: ClaimedTurnRun,
+        _transitions: Arc<dyn TurnRunTransitionPort>,
+    ) -> Result<(), TurnRunExecutorError> {
+        let _guard = self.state_lock.lock().await;
+        if let Some(tx) = self.locked_tx.lock().await.take() {
+            let _ = tx.send(());
+        }
+        tokio::time::sleep(Duration::from_millis(30)).await;
+        if let Some(tx) = self.done_tx.lock().await.take() {
+            let _ = tx.send(());
+        }
+        Ok(())
+    }
+}
+
+async fn claimed_test_run(thread_id: &str) -> ClaimedTurnRun {
+    let scope = TurnScope::new(
+        TenantId::new("tenant-scheduler-test").unwrap(),
+        Some(AgentId::new("agent-scheduler-test").unwrap()),
+        Some(ProjectId::new("project-scheduler-test").unwrap()),
+        ThreadId::new(thread_id).unwrap(),
+    );
+    let resolved_run_profile = InMemoryRunProfileResolver::default()
+        .resolve_run_profile(RunProfileResolutionRequest::interactive_default())
+        .await
+        .expect("test run profile resolves");
+    let state = TurnRunState {
+        scope,
+        actor: Some(TurnActor::new(UserId::new("user-scheduler-test").unwrap())),
+        turn_id: TurnId::new(),
+        run_id: TurnRunId::new(),
+        status: TurnStatus::Running,
+        accepted_message_ref: AcceptedMessageRef::new(format!("accepted:{thread_id}"))
+            .expect("valid accepted message ref"),
+        source_binding_ref: SourceBindingRef::new("source-scheduler-test")
+            .expect("valid source binding ref"),
+        reply_target_binding_ref: ReplyTargetBindingRef::new("reply-scheduler-test")
+            .expect("valid reply binding ref"),
+        resolved_run_profile_id: RunProfileId::interactive_default(),
+        resolved_run_profile_version: RunProfileVersion::new(1),
+        resolved_model_route: None,
+        received_at: Utc::now(),
+        checkpoint_id: None,
+        gate_ref: None,
+        credential_requirements: Vec::new(),
+        failure: None,
+        event_cursor: EventCursor(1),
+        product_context: None,
+        resume_disposition: None,
+    };
+    ClaimedTurnRun {
+        state,
+        resolved_run_profile,
+        runner_id: TurnRunnerId::new(),
+        lease_token: TurnLeaseToken::new(),
+    }
+}
+
+#[tokio::test]
+async fn heartbeat_does_not_deadlock_executor_holding_transition_lock() {
+    let claimed = claimed_test_run("thread-heartbeat-lock").await;
+    let wake = TurnRunWake {
+        scope: claimed.state.scope.clone(),
+        run_id: claimed.state.run_id,
+        status: TurnStatus::Queued,
+        event_cursor: EventCursor(0),
+    };
+    let state_lock = Arc::new(tokio::sync::Mutex::new(()));
+    let transitions = Arc::new(LockingTransitionPort::new(claimed, Arc::clone(&state_lock)));
+    let (locked_tx, locked_rx) = tokio::sync::oneshot::channel();
+    let (done_tx, done_rx) = tokio::sync::oneshot::channel();
+    let executor = Arc::new(LockHoldingExecutor {
+        state_lock,
+        locked_tx: tokio::sync::Mutex::new(Some(locked_tx)),
+        done_tx: tokio::sync::Mutex::new(Some(done_tx)),
+    });
+    let config = TurnRunSchedulerConfig::default()
+        .with_max_concurrent_runs(1)
+        .with_poll_interval(Duration::from_secs(3600))
+        .with_lease_recovery_interval(Duration::from_secs(3600))
+        .with_runner_heartbeat_interval(Duration::from_millis(20));
+    let scheduler = TurnRunScheduler::new(transitions.clone(), executor, config);
+    let handle = scheduler.start();
+
+    use ironclaw_turns::TurnRunWakeNotifier;
+    handle
+        .wake_notifier()
+        .notify_queued_run(wake)
+        .expect("wake should be accepted");
+
+    tokio::time::timeout(Duration::from_secs(1), locked_rx)
+        .await
+        .expect("executor should acquire the transition lock")
+        .expect("executor lock signal should be sent");
+    tokio::time::timeout(Duration::from_secs(1), done_rx)
+        .await
+        .expect("executor must continue polling while heartbeat waits on the same lock")
+        .expect("executor done signal should be sent");
+    assert!(
+        transitions.heartbeat_count() > 0,
+        "test must exercise at least one heartbeat while the executor is running"
+    );
+
+    handle.shutdown().await;
 }
 
 /// `is_stopped()` returns `false` while the scheduler is running and the
