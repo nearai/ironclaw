@@ -6,7 +6,7 @@
 //! input can select an action, not a command line.
 
 use std::borrow::Cow;
-use std::io::Write;
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::Arc;
@@ -87,21 +87,36 @@ impl ServiceCommandRunner for SystemCommandRunner {
             .stderr(Stdio::null())
             .spawn()
             .map_err(ServiceCommandError::Start)?;
+        let mut stdout = child.stdout.take().ok_or_else(|| {
+            ServiceCommandError::Output(std::io::Error::other(
+                "service manager stdout pipe was not available",
+            ))
+        })?;
+        let stdout_reader = std::thread::spawn(move || {
+            let mut output = Vec::new();
+            stdout.read_to_end(&mut output).map(|_| output)
+        });
         let started = Instant::now();
         loop {
             match child.try_wait().map_err(ServiceCommandError::Status)? {
-                Some(_) => {
-                    let output = child
-                        .wait_with_output()
+                Some(status) => {
+                    let stdout = stdout_reader
+                        .join()
+                        .map_err(|_| {
+                            ServiceCommandError::Output(std::io::Error::other(
+                                "service manager stdout reader panicked",
+                            ))
+                        })?
                         .map_err(ServiceCommandError::Output)?;
                     return Ok(CommandOutput {
-                        success: output.status.success(),
-                        stdout: output.stdout,
+                        success: status.success(),
+                        stdout,
                     });
                 }
                 None if started.elapsed() >= SERVICE_COMMAND_TIMEOUT => {
                     let _ = child.kill();
                     let _ = child.wait();
+                    let _ = stdout_reader.join();
                     return Err(ServiceCommandError::Timeout);
                 }
                 None => std::thread::sleep(Duration::from_millis(25)),
@@ -623,11 +638,11 @@ impl RebornLocalServiceLifecycle {
     ) -> Result<String, RebornServiceLifecycleResponse> {
         let executable = self.executable_path_for_action(action)?;
         let boot_env = self.webui_boot_env_for_action(action)?;
-        let exe = systemd_escape(executable.to_string_lossy().as_ref());
-        let token_env_name = systemd_escape(&boot_env.token_env_name);
-        let token = systemd_escape(&boot_env.token);
-        let user_id_env_name = systemd_escape(&boot_env.user_id_env_name);
-        let user_id = systemd_escape(boot_env.user_id.as_str());
+        let exe = systemd_exec_escape(executable.to_string_lossy().as_ref());
+        let token_env_name = systemd_environment_escape(&boot_env.token_env_name);
+        let token = systemd_environment_escape(&boot_env.token);
+        let user_id_env_name = systemd_environment_escape(&boot_env.user_id_env_name);
+        let user_id = systemd_environment_escape(boot_env.user_id.as_str());
         Ok(format!(
             "[Unit]\n\
              Description=IronClaw Reborn WebUI service\n\
@@ -745,12 +760,19 @@ impl OperatorServiceLifecycleService for RebornLocalServiceLifecycle {
     }
 }
 
-fn systemd_escape(value: &str) -> String {
+fn systemd_exec_escape(value: &str) -> String {
     value
         .replace('\\', "\\\\")
         .replace('"', "\\\"")
         .replace('%', "%%")
         .replace('$', "$$")
+}
+
+fn systemd_environment_escape(value: &str) -> String {
+    value
+        .replace('\\', "\\\\")
+        .replace('"', "\\\"")
+        .replace('%', "%%")
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1178,6 +1200,34 @@ env_user_id_var = "CUSTOM_WEBUI_USER_ID"
         let unit_path = temp.path().join(".config/systemd/user").join(SYSTEMD_UNIT);
         let unit = std::fs::read_to_string(unit_path).expect("unit file");
         assert!(unit.contains("ExecStart=\"/usr/local/bin/iron%%claw-$$reborn\" serve"));
+    }
+
+    #[tokio::test]
+    async fn linux_install_preserves_dollar_signs_in_systemd_environment_values() {
+        let temp = TempDir::new().expect("tempdir");
+        let runner = Arc::new(RecordingRunner::new("inactive"));
+        let service = linux_service(&temp, runner).with_webui_boot_env(
+            WEBUI_TOKEN_ENV,
+            "test$webui%token",
+            WEBUI_USER_ID_ENV,
+            "user-test",
+        );
+
+        let response = service
+            .control_service(
+                test_caller(),
+                RebornServiceLifecycleRequest {
+                    action: RebornServiceLifecycleAction::Install,
+                },
+            )
+            .await
+            .expect("install response");
+
+        assert_eq!(response.state, RebornServiceLifecycleState::Installed);
+        let unit_path = temp.path().join(".config/systemd/user").join(SYSTEMD_UNIT);
+        let unit = std::fs::read_to_string(unit_path).expect("unit file");
+        assert!(unit.contains("Environment=\"IRONCLAW_REBORN_WEBUI_TOKEN=test$webui%%token\""));
+        assert!(!unit.contains("test$$webui"));
     }
 
     #[tokio::test]
