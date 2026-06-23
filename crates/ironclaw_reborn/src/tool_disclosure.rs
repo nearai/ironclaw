@@ -38,9 +38,13 @@ pub(crate) const CORE_TOOL_NAMES: &[&str] = &[
     // web
     "http",
     "web_search",
-    // onboarding entry points
+    // onboarding entry points — the full extension lifecycle is core so a weak
+    // model can run search -> install -> activate -> remove directly, without
+    // routing the install/remove steps through tool_search.
     "extension_search",
+    "extension_install",
     "extension_activate",
+    "extension_remove",
     // skills + time
     "skill_list",
     "time",
@@ -788,7 +792,9 @@ mod tests {
             ("shell", ironclaw_host_runtime::SHELL_CAPABILITY_ID),
             ("http", ironclaw_host_runtime::HTTP_CAPABILITY_ID),
             ("extension_search", "builtin.extension_search"),
+            ("extension_install", "builtin.extension_install"),
             ("extension_activate", "builtin.extension_activate"),
+            ("extension_remove", "builtin.extension_remove"),
             ("time", ironclaw_host_runtime::TIME_CAPABILITY_ID),
         ];
         let synthetic_or_extension_core_names = [

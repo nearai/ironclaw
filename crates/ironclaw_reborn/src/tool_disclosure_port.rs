@@ -697,10 +697,8 @@ impl ToolDisclosureCapabilityPort {
             .iter()
             .any(|candidate| candidate.name == tool_call.name);
         if active {
-            debug!(
-                tool_name = tool_call.name.as_str(),
-                "reborn tool disclosure direct-deferred miss: tool is already advertised"
-            );
+            // Normal path: the tool is advertised, so the inner port dispatches
+            // it directly. Not a forgiving-path case.
             Ok(None)
         } else {
             let target_call = self.target_call(tool_call, &definition, tool_call.arguments.clone());
@@ -1245,11 +1243,7 @@ mod tests {
     async fn direct_provider_encoded_builtin_dispatches_and_promotes() {
         let definitions = vec![
             provider_definition("fixture.read_file", "read_file", "Read a file"),
-            provider_definition(
-                "builtin.extension_install",
-                "extension_install",
-                "Install an extension",
-            ),
+            provider_definition("builtin.echo", "echo", "Echo the input"),
             provider_definition("fixture.extra_1", "extra_tool_1", "Extra operation"),
             provider_definition("fixture.extra_2", "extra_tool_2", "Extra operation"),
             provider_definition("fixture.extra_3", "extra_tool_3", "Extra operation"),
@@ -1277,17 +1271,17 @@ mod tests {
         assert!(
             !advertised
                 .iter()
-                .any(|definition| definition.name == "extension_install"),
-            "extension_install starts deferred"
+                .any(|definition| definition.name == "echo"),
+            "echo starts deferred"
         );
 
-        let direct_call = provider_call("builtin__extension_install", json!({"path": "demo"}));
+        let direct_call = provider_call("builtin__echo", json!({"path": "demo"}));
         let capability_ids = port
             .provider_tool_call_capability_ids(&direct_call)
             .expect("provider-encoded direct deferred call resolves");
         assert_eq!(
             capability_ids.provider_capability_id.as_str(),
-            "builtin.extension_install"
+            "builtin.echo"
         );
         assert_eq!(
             capability_ids
@@ -1295,7 +1289,7 @@ mod tests {
                 .iter()
                 .map(CapabilityId::as_str)
                 .collect::<Vec<_>>(),
-            vec!["builtin.extension_install"]
+            vec!["builtin.echo"]
         );
         port.validate_provider_tool_call(&direct_call)
             .expect("provider-encoded direct deferred call validates against resolved target");
@@ -1303,14 +1297,14 @@ mod tests {
             .register_provider_tool_call(direct_call)
             .await
             .expect("provider-encoded direct deferred call registers as target");
-        assert_eq!(target.capability_id.as_str(), "builtin.extension_install");
+        assert_eq!(target.capability_id.as_str(), "builtin.echo");
         assert_eq!(
             target
                 .provider_replay
                 .as_ref()
                 .expect("provider replay")
                 .provider_tool_name,
-            "builtin__extension_install"
+            "builtin__echo"
         );
         let outcome = port
             .invoke_capability(CapabilityInvocation {
@@ -1331,7 +1325,7 @@ mod tests {
                 .last()
                 .expect("target call")
                 .name,
-            "extension_install",
+            "echo",
             "inner registration must receive the catalog target name"
         );
         assert_eq!(
@@ -1343,7 +1337,7 @@ mod tests {
                 .expect("target invocation")
                 .capability_id
                 .as_str(),
-            "builtin.extension_install"
+            "builtin.echo"
         );
 
         let next_turn = disclosure_port(
@@ -1359,7 +1353,7 @@ mod tests {
         assert!(
             next_advertised
                 .iter()
-                .any(|definition| definition.name == "extension_install"),
+                .any(|definition| definition.name == "echo"),
             "successful provider-encoded direct deferred call should promote the target next turn"
         );
     }
