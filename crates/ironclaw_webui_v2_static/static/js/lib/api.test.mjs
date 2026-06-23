@@ -7,6 +7,8 @@ import {
   fetchAttachmentBlob,
   fetchAttachmentDataUrl,
   listAutomations,
+  pauseAutomation,
+  resumeAutomation,
 } from "./api.js";
 
 test("listAutomations reads through the v2 automations route", async () => {
@@ -53,6 +55,55 @@ test("listAutomations propagates api errors from the automations route", async (
     assert.equal(error.body, "temporarily unavailable");
     return true;
   });
+});
+
+test("pauseAutomation and resumeAutomation post to encoded v2 automation routes", async () => {
+  const calls = [];
+  globalThis.sessionStorage = {
+    getItem: () => "token-1",
+    setItem: () => {},
+    removeItem: () => {},
+  };
+  globalThis.fetch = async (path, options) => {
+    calls.push({ path, options });
+    return new Response(JSON.stringify({ updated: true }), {
+      status: 200,
+      headers: { "content-type": "application/json" },
+    });
+  };
+
+  await pauseAutomation({ automationId: "automation/needs encoding" });
+  await resumeAutomation({ automationId: "automation/needs encoding" });
+
+  assert.equal(calls.length, 2);
+  assert.equal(
+    calls[0].path,
+    "/api/webchat/v2/automations/automation%2Fneeds%20encoding/pause",
+  );
+  assert.equal(calls[0].options.method, "POST");
+  assert.equal(
+    calls[1].path,
+    "/api/webchat/v2/automations/automation%2Fneeds%20encoding/resume",
+  );
+  assert.equal(calls[1].options.method, "POST");
+  assert.equal(calls[0].options.headers.get("Authorization"), "Bearer token-1");
+});
+
+test("automation state mutations reject before fetch when automation id is missing", async () => {
+  let fetchCalled = false;
+  globalThis.sessionStorage = {
+    getItem: () => "token-1",
+    setItem: () => {},
+    removeItem: () => {},
+  };
+  globalThis.fetch = async () => {
+    fetchCalled = true;
+    throw new Error("fetch should not be called");
+  };
+
+  await assert.rejects(pauseAutomation(), /automationId is required/);
+  await assert.rejects(resumeAutomation({}), /automationId is required/);
+  assert.equal(fetchCalled, false);
 });
 
 test("deleteThread sends DELETE to the encoded thread route", async () => {

@@ -31,16 +31,16 @@ use ironclaw_product_workflow::{
     LlmModelsResult, LlmProbeRequest, LlmProbeResult, LlmProviderView, ProjectFsEntry,
     ProjectFsEntryKind, ProjectFsFile, ProjectFsStat, RebornAddMemberRequest,
     RebornAttachmentBytes, RebornAttachmentRequest, RebornAutomationInfo,
-    RebornAutomationRecentRunInfo, RebornAutomationRecentRunStatus, RebornAutomationSource,
-    RebornAutomationState, RebornCancelRunResponse, RebornChannelConnectAction,
-    RebornChannelConnectStrategy, RebornConnectableChannelInfo,
-    RebornConnectableChannelListResponse, RebornCreateThreadResponse, RebornDeleteProjectRequest,
-    RebornDeleteThreadRequest, RebornDeleteThreadResponse, RebornExtensionActionResponse,
-    RebornExtensionListResponse, RebornExtensionRegistryResponse, RebornFsListRequest,
-    RebornFsListResponse, RebornFsMountInfo, RebornFsMountsResponse, RebornFsReadRequest,
-    RebornFsStatRequest, RebornFsStatResponse, RebornGetRunStateRequest, RebornGetRunStateResponse,
-    RebornListAutomationsResponse, RebornListThreadsResponse, RebornOperatorArea,
-    RebornOperatorCommandPlaneResponse, RebornOperatorConfigDiagnostic,
+    RebornAutomationMutationResponse, RebornAutomationRecentRunInfo,
+    RebornAutomationRecentRunStatus, RebornAutomationSource, RebornAutomationState,
+    RebornCancelRunResponse, RebornChannelConnectAction, RebornChannelConnectStrategy,
+    RebornConnectableChannelInfo, RebornConnectableChannelListResponse, RebornCreateThreadResponse,
+    RebornDeleteProjectRequest, RebornDeleteThreadRequest, RebornDeleteThreadResponse,
+    RebornExtensionActionResponse, RebornExtensionListResponse, RebornExtensionRegistryResponse,
+    RebornFsListRequest, RebornFsListResponse, RebornFsMountInfo, RebornFsMountsResponse,
+    RebornFsReadRequest, RebornFsStatRequest, RebornFsStatResponse, RebornGetRunStateRequest,
+    RebornGetRunStateResponse, RebornListAutomationsResponse, RebornListThreadsResponse,
+    RebornOperatorArea, RebornOperatorCommandPlaneResponse, RebornOperatorConfigDiagnostic,
     RebornOperatorConfigDiagnosticSeverity, RebornOperatorConfigEntry,
     RebornOperatorConfigGetResponse, RebornOperatorConfigListResponse,
     RebornOperatorConfigSetRequest, RebornOperatorConfigValidateRequest,
@@ -226,6 +226,8 @@ struct StubServices {
     cancel_run_calls: Mutex<Vec<WebUiCancelRunRequest>>,
     resolve_gate_calls: Mutex<Vec<WebUiResolveGateRequest>>,
     list_automations_calls: Mutex<Vec<WebUiListAutomationsRequest>>,
+    pause_automation_calls: Mutex<Vec<String>>,
+    resume_automation_calls: Mutex<Vec<String>>,
     next_list_automations_error: Mutex<Option<RebornServicesError>>,
     get_outbound_preferences_calls: Mutex<usize>,
     set_outbound_preferences_calls: Mutex<Vec<RebornSetOutboundPreferencesRequest>>,
@@ -705,6 +707,44 @@ impl RebornServicesApi for StubServices {
                 "0 9 * * *",
             )],
             scheduler_enabled: true,
+        })
+    }
+
+    async fn pause_automation(
+        &self,
+        _caller: WebUiAuthenticatedCaller,
+        automation_id: String,
+    ) -> Result<RebornAutomationMutationResponse, RebornServicesError> {
+        self.pause_automation_calls
+            .lock()
+            .expect("lock")
+            .push(automation_id);
+        Ok(RebornAutomationMutationResponse {
+            updated: true,
+            automation: Some(automation_info(
+                "automation-paused",
+                "Daily status",
+                "0 9 * * *",
+            )),
+        })
+    }
+
+    async fn resume_automation(
+        &self,
+        _caller: WebUiAuthenticatedCaller,
+        automation_id: String,
+    ) -> Result<RebornAutomationMutationResponse, RebornServicesError> {
+        self.resume_automation_calls
+            .lock()
+            .expect("lock")
+            .push(automation_id);
+        Ok(RebornAutomationMutationResponse {
+            updated: true,
+            automation: Some(automation_info(
+                "automation-resumed",
+                "Daily status",
+                "0 9 * * *",
+            )),
         })
     }
 
@@ -1923,6 +1963,66 @@ async fn list_automations_omits_limits_and_forwards_none() {
 }
 
 #[tokio::test]
+async fn pause_and_resume_automation_dispatch_path_id_to_facade() {
+    let services = Arc::new(StubServices::default());
+    let router = router_with(services.clone());
+
+    let pause_response = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/api/webchat/v2/automations/automation-alpha/pause")
+                .body(Body::empty())
+                .expect("pause request"),
+        )
+        .await
+        .expect("pause oneshot");
+    assert_eq!(pause_response.status(), StatusCode::OK);
+    let pause_body = read_json(pause_response).await;
+    assert_eq!(pause_body["updated"], true);
+    assert_eq!(
+        pause_body["automation"]["automation_id"],
+        "automation-paused"
+    );
+
+    let resume_response = router
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/api/webchat/v2/automations/automation-alpha/resume")
+                .body(Body::empty())
+                .expect("resume request"),
+        )
+        .await
+        .expect("resume oneshot");
+    assert_eq!(resume_response.status(), StatusCode::OK);
+    let resume_body = read_json(resume_response).await;
+    assert_eq!(resume_body["updated"], true);
+    assert_eq!(
+        resume_body["automation"]["automation_id"],
+        "automation-resumed"
+    );
+
+    assert_eq!(
+        services
+            .pause_automation_calls
+            .lock()
+            .expect("lock")
+            .clone(),
+        vec!["automation-alpha".to_string()]
+    );
+    assert_eq!(
+        services
+            .resume_automation_calls
+            .lock()
+            .expect("lock")
+            .clone(),
+        vec!["automation-alpha".to_string()]
+    );
+}
+
+#[tokio::test]
 async fn trace_credits_returns_caller_scoped_unenrolled_zero_state() {
     // The facade's default `trace_credits` body reads contributor-local
     // Trace Commons state scoped by the authenticated caller's user id.
@@ -2588,7 +2688,7 @@ async fn operator_routes_dispatch_to_facade_with_body_and_query_inputs() {
         .oneshot(
             Request::builder()
                 .method(Method::GET)
-                .uri("/api/webchat/v2/operator/logs?limit=25&cursor=after-1&thread_id=thread-a&run_id=run-a&turn_id=turn-a&tool_call_id=tool-a&tool_name=shell&source=slack")
+                .uri("/api/webchat/v2/operator/logs?limit=25&cursor=after-1&thread_id=thread-a&run_id=run-a&turn_id=turn-a&tool_call_id=tool-a&tool_name=shell&source=slack&follow=true")
                 .body(Body::empty())
                 .expect("request"),
         )
@@ -2658,6 +2758,8 @@ async fn operator_routes_dispatch_to_facade_with_body_and_query_inputs() {
     );
     assert_eq!(operator_log_calls[0].tool_name.as_deref(), Some("shell"));
     assert_eq!(operator_log_calls[0].source.as_deref(), Some("slack"));
+    assert!(operator_log_calls[0].follow);
+    assert!(!operator_log_calls[0].tail);
     drop(operator_log_calls);
     assert_eq!(
         services

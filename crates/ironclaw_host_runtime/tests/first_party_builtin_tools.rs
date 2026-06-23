@@ -36,9 +36,10 @@ use ironclaw_host_runtime::{
     TIME_CAPABILITY_ID, TRACE_COMMONS_CREDITS_CAPABILITY_ID, TRACE_COMMONS_ONBOARD_CAPABILITY_ID,
     TRACE_COMMONS_PROFILE_SET_CAPABILITY_ID, TRACE_COMMONS_PROFILE_TOKEN_CAPABILITY_ID,
     TRACE_COMMONS_STATUS_CAPABILITY_ID, TRIGGER_CREATE_CAPABILITY_ID, TRIGGER_LIST_CAPABILITY_ID,
-    TRIGGER_REMOVE_CAPABILITY_ID, TenantSandboxProcessPort, ToolCallHttpEgress, TriggerCreateHook,
-    VisibleCapabilityAccess, VisibleCapabilityRequest, WRITE_FILE_CAPABILITY_ID,
-    builtin_first_party_handlers, builtin_first_party_handlers_for_process_backend,
+    TRIGGER_PAUSE_CAPABILITY_ID, TRIGGER_REMOVE_CAPABILITY_ID, TRIGGER_RESUME_CAPABILITY_ID,
+    TenantSandboxProcessPort, ToolCallHttpEgress, TriggerCreateHook, VisibleCapabilityAccess,
+    VisibleCapabilityRequest, WRITE_FILE_CAPABILITY_ID, builtin_first_party_handlers,
+    builtin_first_party_handlers_for_process_backend,
     builtin_first_party_handlers_with_trigger_create_hook, builtin_first_party_package,
     builtin_first_party_package_for_process_backend,
 };
@@ -85,7 +86,9 @@ async fn builtin_first_party_package_declares_expected_capabilities() {
             | SKILL_INSTALL_CAPABILITY_ID
             | SKILL_REMOVE_CAPABILITY_ID
             | TRIGGER_CREATE_CAPABILITY_ID
+            | TRIGGER_PAUSE_CAPABILITY_ID
             | TRIGGER_REMOVE_CAPABILITY_ID
+            | TRIGGER_RESUME_CAPABILITY_ID
             | TRACE_COMMONS_ONBOARD_CAPABILITY_ID
             | TRACE_COMMONS_PROFILE_SET_CAPABILITY_ID
             | TRACE_COMMONS_PROFILE_TOKEN_CAPABILITY_ID => PermissionMode::Ask,
@@ -1391,6 +1394,103 @@ async fn builtin_trigger_list_separates_enabled_state_from_active_fire_state() {
     assert_eq!(trigger["has_active_fire"], json!(true));
     assert!(trigger.get("active_fire_slot").is_none());
     assert!(trigger.get("active_run_ref").is_none());
+}
+
+#[tokio::test]
+async fn builtin_trigger_pause_and_resume_are_caller_scoped() {
+    let repository = Arc::new(InMemoryTriggerRepository::default());
+    let runtime = runtime_with_trigger_repository(repository.clone());
+    let owner_context = execution_context([
+        TRIGGER_CREATE_CAPABILITY_ID,
+        TRIGGER_LIST_CAPABILITY_ID,
+        TRIGGER_PAUSE_CAPABILITY_ID,
+        TRIGGER_RESUME_CAPABILITY_ID,
+    ]);
+    let mut foreign_context = execution_context([TRIGGER_PAUSE_CAPABILITY_ID]);
+    foreign_context.user_id = UserId::new("other-user").unwrap();
+    foreign_context.resource_scope.user_id = foreign_context.user_id.clone();
+
+    let created = invoke_with_context(
+        &runtime,
+        TRIGGER_CREATE_CAPABILITY_ID,
+        json!({
+            "name": "Pauseable trigger",
+            "prompt": "Run work",
+            "schedule": { "kind": "cron", "expression": "0 8 * * *", "timezone": "UTC" }
+        }),
+        owner_context.clone(),
+    )
+    .await
+    .unwrap();
+    let trigger_id = created["trigger"]["trigger_id"].as_str().unwrap();
+
+    let foreign_pause = invoke_with_context(
+        &runtime,
+        TRIGGER_PAUSE_CAPABILITY_ID,
+        json!({ "trigger_id": trigger_id }),
+        foreign_context,
+    )
+    .await
+    .unwrap();
+    assert_eq!(foreign_pause["updated"], json!(false));
+
+    let owner_pause = invoke_with_context(
+        &runtime,
+        TRIGGER_PAUSE_CAPABILITY_ID,
+        json!({ "trigger_id": trigger_id }),
+        owner_context.clone(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(owner_pause["updated"], json!(true));
+    assert_eq!(owner_pause["trigger"]["trigger_id"], json!(trigger_id));
+    assert_eq!(owner_pause["trigger"]["state"], json!("paused"));
+    assert_eq!(owner_pause["trigger"]["is_enabled"], json!(false));
+    assert_eq!(owner_pause["trigger"]["is_active"], json!(false));
+    assert!(owner_pause["trigger"].get("prompt").is_none());
+
+    let listed_paused = invoke_with_context(
+        &runtime,
+        TRIGGER_LIST_CAPABILITY_ID,
+        json!({}),
+        owner_context.clone(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(listed_paused["triggers"][0]["state"], json!("paused"));
+    assert_eq!(listed_paused["triggers"][0]["is_enabled"], json!(false));
+
+    let owner_resume = invoke_with_context(
+        &runtime,
+        TRIGGER_RESUME_CAPABILITY_ID,
+        json!({ "trigger_id": trigger_id }),
+        owner_context.clone(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(owner_resume["updated"], json!(true));
+    assert_eq!(owner_resume["trigger"]["state"], json!("scheduled"));
+    assert_eq!(owner_resume["trigger"]["is_enabled"], json!(true));
+    assert_eq!(owner_resume["trigger"]["is_active"], json!(true));
+
+    let mut records = repository
+        .list_triggers(owner_context.resource_scope.tenant_id.clone())
+        .await
+        .unwrap();
+    assert_eq!(records.len(), 1);
+    let mut completed = records.remove(0);
+    completed.state = TriggerState::Completed;
+    repository.upsert_trigger(completed).await.unwrap();
+
+    let completed_resume = invoke_with_context(
+        &runtime,
+        TRIGGER_RESUME_CAPABILITY_ID,
+        json!({ "trigger_id": trigger_id }),
+        owner_context,
+    )
+    .await
+    .unwrap();
+    assert_eq!(completed_resume["updated"], json!(false));
 }
 
 #[tokio::test]
@@ -7592,6 +7692,18 @@ impl TriggerRepository for RemoveFailingTriggerRepository {
             .await
     }
 
+    async fn set_scoped_trigger_state(
+        &self,
+        _tenant_id: TenantId,
+        _creator_user_id: UserId,
+        _agent_id: Option<AgentId>,
+        _project_id: Option<ProjectId>,
+        _trigger_id: ironclaw_triggers::TriggerId,
+        _state: ironclaw_triggers::TriggerState,
+    ) -> Result<Option<ironclaw_triggers::TriggerRecord>, ironclaw_triggers::TriggerError> {
+        Err(trigger_backend_error())
+    }
+
     async fn list_due_triggers(
         &self,
         now: Timestamp,
@@ -7740,6 +7852,18 @@ impl TriggerRepository for BatchRunHistoryFailingTriggerRepository {
             .await
     }
 
+    async fn set_scoped_trigger_state(
+        &self,
+        _tenant_id: TenantId,
+        _creator_user_id: UserId,
+        _agent_id: Option<AgentId>,
+        _project_id: Option<ProjectId>,
+        _trigger_id: ironclaw_triggers::TriggerId,
+        _state: ironclaw_triggers::TriggerState,
+    ) -> Result<Option<ironclaw_triggers::TriggerRecord>, ironclaw_triggers::TriggerError> {
+        Err(trigger_backend_error())
+    }
+
     async fn list_due_triggers(
         &self,
         now: Timestamp,
@@ -7882,6 +8006,18 @@ impl TriggerRepository for FailingTriggerRepository {
         _agent_id: Option<AgentId>,
         _project_id: Option<ProjectId>,
         _trigger_id: ironclaw_triggers::TriggerId,
+    ) -> Result<Option<ironclaw_triggers::TriggerRecord>, ironclaw_triggers::TriggerError> {
+        Err(trigger_backend_error())
+    }
+
+    async fn set_scoped_trigger_state(
+        &self,
+        _tenant_id: TenantId,
+        _creator_user_id: UserId,
+        _agent_id: Option<AgentId>,
+        _project_id: Option<ProjectId>,
+        _trigger_id: ironclaw_triggers::TriggerId,
+        _state: ironclaw_triggers::TriggerState,
     ) -> Result<Option<ironclaw_triggers::TriggerRecord>, ironclaw_triggers::TriggerError> {
         Err(trigger_backend_error())
     }
@@ -8255,6 +8391,8 @@ fn all_builtin_capability_ids() -> Vec<&'static str> {
         TRIGGER_CREATE_CAPABILITY_ID,
         TRIGGER_LIST_CAPABILITY_ID,
         TRIGGER_REMOVE_CAPABILITY_ID,
+        TRIGGER_PAUSE_CAPABILITY_ID,
+        TRIGGER_RESUME_CAPABILITY_ID,
     ]
 }
 

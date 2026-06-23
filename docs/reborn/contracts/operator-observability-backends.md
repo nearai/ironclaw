@@ -32,13 +32,19 @@ Required behavior:
 
 - Respect the facade limit clamp before hitting the backend.
 - Support optional level and target filters using stable enum/string values.
+- Support `tail=true` for newest entries in chronological order and
+  `follow=true` with an opaque cursor for newer entries when the backend can
+  retain an in-process cursor window.
+- Reject requests that set both `tail=true` and `follow=true`.
 - Return opaque cursors only; clients must not parse cursor internals.
-- Redact secrets, tokens, credentials, raw request bodies, host-sensitive paths, and provider payload details.
+- Redact secrets, tokens, credentials, raw request bodies, host-sensitive paths
+  with either slash or backslash separators, and provider payload details.
 - Return `service_unavailable` or an unavailable command-plane payload when no concrete backend is wired.
 
 Initial backend options:
 
-- In-process bounded ring buffer for current-process structured events.
+- In-process bounded ring buffer for current-process structured events,
+  including bounded tail/follow over retained entries.
 - Optional journald/systemd integration behind a separate service implementation.
 - File-tail support only if path allowlisting and redaction are enforced before response construction.
 
