@@ -468,7 +468,8 @@ pub fn apply_confidence_factor(base_score: u32, confidence: f64, is_authored: bo
 mod tests {
     use super::*;
     use crate::types::{
-        ActivationCriteria, GatingRequirements, LoadedSkill, SkillManifest, SkillSource, SkillTrust,
+        ActivationCriteria, GatingRequirements, LoadedSkill, SkillManifest, SkillOrigin,
+        SkillSource, SkillTrust,
     };
     use std::collections::HashSet;
     use std::path::PathBuf;
@@ -529,6 +530,7 @@ mod tests {
                 name: name.to_string(),
                 version: "1.0.0".to_string(),
                 auto_activate: true,
+                origin: SkillOrigin::default(),
                 description: format!("{} skill", name),
                 activation: ActivationCriteria {
                     keywords: kw_vec,

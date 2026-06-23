@@ -38,6 +38,7 @@
 
 pub mod gating;
 pub mod install_metadata;
+pub mod learned_provenance;
 pub mod management;
 mod parser;
 mod selector;
@@ -54,7 +55,7 @@ pub mod registry;
 pub use types::{
     ActivationCriteria, GatingRequirements, LoadedSkill, MAX_PROMPT_FILE_SIZE,
     ProviderRefreshStrategy, SkillCredentialLocation, SkillCredentialSpec, SkillManifest,
-    SkillOAuthConfig, SkillSource, SkillTrust,
+    SkillOAuthConfig, SkillOrigin, SkillSource, SkillTrust,
 };
 
 pub use gating::{GatingResult, check_requirements, check_requirements_sync};
@@ -62,16 +63,23 @@ pub use install_metadata::{
     INSTALL_METADATA_FILE_NAME, InstalledSkillMetadata, InstalledSkillMetadataSource,
     MAX_INSTALL_METADATA_BYTES,
 };
+pub use learned_provenance::{
+    ActivationSnapshot, LEARNED_PROVENANCE_FILE_NAME, LearnedSkillProvenance,
+    MAX_LEARNED_PROVENANCE_BYTES,
+};
 pub use management::{
     MAX_INSTALL_BUNDLE_FILE_BYTES, MAX_INSTALL_BUNDLE_FILES, MAX_INSTALL_BUNDLE_TOTAL_BYTES,
     SkillContentRequest, SkillContentResult, SkillInstallFile, SkillInstallRequest,
     SkillInstallResult, SkillInstallSource, SkillManagementContext, SkillManagementError,
     SkillManagementErrorKind, SkillRemoveRequest, SkillRemoveResult, SkillSearchRequest,
     SkillSearchResult, SkillSource as ManagedSkillSource, SkillSummary, SkillUpdateRequest,
-    SkillUpdateResult, install_skill, list_skills, read_skill_content, remove_skill, search_skills,
-    skill_summary_json, update_skill,
+    SkillUpdateResult, install_skill, list_skills, read_learned_provenance, read_skill_content,
+    remove_skill, search_skills, skill_is_bundle, skill_summary_json, update_skill,
+    write_learned_provenance,
 };
-pub use parser::{ParsedSkill, SkillParseError, parse_skill_md, set_skill_auto_activate};
+pub use parser::{
+    ParsedSkill, SkillParseError, parse_skill_md, set_skill_auto_activate, set_skill_origin,
+};
 pub use selector::{
     MAX_SKILL_CONTEXT_TOKENS, SelectionOutcome, SkillSelectionOptions, extract_skill_mentions,
     prefilter_skills_with_options, skill_token_cost,
