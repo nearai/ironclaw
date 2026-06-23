@@ -8,21 +8,22 @@ mod poller_contract {
         AdvanceWorkflowRunInput, ClaimRunnableWorkflowRunsInput, CreateIssueCommentInput,
         CreateOrGetWorkflowRunInput, CreateOrGetWorkflowRunOutcome,
         GetAuthenticatedWorkflowActorInput, GetGithubIssueInput, GetPullRequestInput,
-        GithubActorSnapshot, GithubCheckConclusion, GithubCommentRef, GithubIssueCommentSnapshot,
-        GithubIssueProviderSnapshot, GithubIssueSearchHit, GithubIssueWorkflowConfig,
-        GithubIssueWorkflowConfigSource, GithubIssueWorkflowError, GithubIssueWorkflowEventType,
-        GithubIssueWorkflowMode, GithubIssueWorkflowPolicyPorts, GithubIssueWorkflowPoller,
-        GithubIssueWorkflowPollerConfig, GithubIssueWorkflowPollerPorts, GithubIssueWorkflowPort,
-        GithubIssueWorkflowRepository, GithubIssueWorkflowRun, GithubIssueWorkspaceSession,
-        GithubIssueWorkspaceSessionId, GithubProviderAccountRef, GithubPullRequestCheckSnapshot,
-        GithubPullRequestRef, GithubPullRequestSnapshot, GithubRepositorySelector,
-        GithubReviewCommentSnapshot, InMemoryGithubIssueWorkflowRepository, ListIssueCommentsInput,
-        ListPullRequestChecksInput, ListPullRequestReviewCommentsInput,
-        PrepareWorkflowWorkspaceOutcome, PrepareWorkflowWorkspaceRequest, SearchGithubIssuesInput,
-        StageTurnSubmitter, SubmitStageTurnOutcome, SubmitStageTurnRequest, TransitionOutcome,
-        WorkflowClock, WorkflowConfigAccessRequest, WorkflowProjectAccess,
-        WorkflowProjectAccessRequest, WorkflowRunTransition, WorkflowWorkerId,
-        WorkflowWorkspaceManager, WorkflowWorkspaceMountRef, WorkflowWorkspaceRef,
+        GithubActorSnapshot, GithubCheckConclusion, GithubCommentRef, GithubIssueCandidateSelector,
+        GithubIssueCommentSnapshot, GithubIssueProviderSnapshot, GithubIssueSearchHit,
+        GithubIssueWorkflowConfig, GithubIssueWorkflowConfigSource, GithubIssueWorkflowError,
+        GithubIssueWorkflowEventType, GithubIssueWorkflowMode, GithubIssueWorkflowPolicyPorts,
+        GithubIssueWorkflowPoller, GithubIssueWorkflowPollerConfig, GithubIssueWorkflowPollerPorts,
+        GithubIssueWorkflowPort, GithubIssueWorkflowRepository, GithubIssueWorkflowRun,
+        GithubIssueWorkspaceSession, GithubIssueWorkspaceSessionId, GithubProviderAccountRef,
+        GithubPullRequestCheckSnapshot, GithubPullRequestRef, GithubPullRequestSnapshot,
+        GithubRepositorySelector, GithubReviewCommentSnapshot,
+        InMemoryGithubIssueWorkflowRepository, ListIssueCommentsInput, ListPullRequestChecksInput,
+        ListPullRequestReviewCommentsInput, PrepareWorkflowWorkspaceOutcome,
+        PrepareWorkflowWorkspaceRequest, SearchGithubIssuesInput, StageTurnSubmitter,
+        SubmitStageTurnOutcome, SubmitStageTurnRequest, TransitionOutcome, WorkflowClock,
+        WorkflowConfigAccessRequest, WorkflowProjectAccess, WorkflowProjectAccessRequest,
+        WorkflowRunTransition, WorkflowWorkerId, WorkflowWorkspaceManager,
+        WorkflowWorkspaceMountRef, WorkflowWorkspaceRef,
     };
     use ironclaw_host_api::{ProjectId, TenantId, ThreadId, UserId};
     use ironclaw_turns::TurnRunId;
@@ -87,6 +88,7 @@ mod poller_contract {
             title: format!("Bug {number}"),
             body: format!("body for issue {number}"),
             state: "open".to_string(),
+            author_login: Some("core-dev".to_string()),
             labels: vec!["bug".to_string()],
             updated_at: Some(fixed_time(updated_at)),
         }
@@ -895,6 +897,67 @@ mod poller_contract {
             search_calls[0].query,
             "repo:nearai/ironclaw is:issue state:open label:bug"
         );
+    }
+
+    #[tokio::test]
+    async fn poller_skips_issue_from_author_outside_allowlist_before_comments_or_run_creation() {
+        let mut config = workflow_config("author-skip", "nearai", "ironclaw");
+        config.candidate_selector = GithubIssueCandidateSelector {
+            labels: vec!["bug".to_string()],
+            allowed_author_logins: vec!["core-dev".to_string()],
+        };
+        let ports = FakePollerPorts::new(vec![config.clone()]);
+        let mut snapshot = issue_snapshot("nearai", "ironclaw", 42, 100);
+        snapshot.author_login = Some("drive-by-reporter".to_string());
+        ports.github.add_issue(snapshot.clone()).await;
+        let poller = poller(ports);
+
+        let outcome = poller.tick_once().await.unwrap();
+
+        assert_eq!(outcome.issues_seen, 1);
+        assert_eq!(outcome.events_recorded, 0);
+        assert_eq!(outcome.policy_ticks, 0);
+        assert_eq!(poller.ports().github.get_issue_calls().await.len(), 1);
+        assert!(poller.ports().github.list_comment_calls().await.is_empty());
+        let existing = poller
+            .ports()
+            .repository
+            .create_or_get_workflow_run(CreateOrGetWorkflowRunInput {
+                tenant_id: config.tenant_id.clone(),
+                creator_user_id: config.owner_user_id.clone(),
+                agent_id: None,
+                project_id: Some(config.project_id.clone()),
+                provider_account_ref: Some(config.provider_account_ref.clone()),
+                issue_ref: snapshot.issue_ref(),
+                workflow_policy_key: "github-bug-workflow".to_string(),
+                workflow_policy_version: "poller-contract-v1".to_string(),
+                now: fixed_time(200),
+            })
+            .await
+            .unwrap();
+        assert!(
+            matches!(existing, CreateOrGetWorkflowRunOutcome::Created { .. }),
+            "poller must not create a workflow run for an issue author outside the allowlist"
+        );
+    }
+
+    #[tokio::test]
+    async fn poller_allows_issue_from_author_allowlist_case_insensitively() {
+        let mut config = workflow_config("author-allow", "nearai", "ironclaw");
+        config.candidate_selector = GithubIssueCandidateSelector {
+            labels: vec!["bug".to_string()],
+            allowed_author_logins: vec!["CORE-DEV".to_string()],
+        };
+        let ports = FakePollerPorts::new(vec![config.clone()]);
+        let snapshot = issue_snapshot("nearai", "ironclaw", 42, 100);
+        ports.github.add_issue(snapshot.clone()).await;
+        let poller = poller(ports);
+
+        let outcome = poller.tick_once().await.unwrap();
+
+        assert_eq!(outcome.events_recorded, 1);
+        let run = existing_run(&poller.ports().repository, &config, &snapshot).await;
+        assert_eq!(run.issue_ref.number, 42);
     }
 
     #[tokio::test]

@@ -208,6 +208,12 @@ where
                 })
                 .await?;
             ensure_snapshot_matches_request(repository, hit.number, &snapshot)?;
+            if !workflow_config
+                .candidate_selector
+                .allows_author_login(snapshot.author_login.as_deref())
+            {
+                continue;
+            }
             let issue_ref = snapshot.issue_ref();
             let comments = self
                 .ports
@@ -906,6 +912,7 @@ fn issue_event_payload(snapshot: &GithubIssueProviderSnapshot, comment_count: us
         "provider_snapshot": {
             "title": snapshot.title,
             "state": snapshot.state,
+            "author_login": snapshot.author_login,
             "labels": snapshot.labels,
             "updated_at": snapshot.updated_at,
             "comment_count": comment_count,
@@ -1075,6 +1082,7 @@ mod tests {
             &repository,
             &GithubIssueCandidateSelector {
                 labels: vec!["bug".to_string(), "good first issue".to_string()],
+                allowed_author_logins: Vec::new(),
             },
         );
 

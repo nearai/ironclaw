@@ -68,6 +68,7 @@ impl GithubRepositorySelector {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GithubIssueCandidateSelector {
     pub labels: Vec<String>,
+    pub allowed_author_logins: Vec<String>,
 }
 
 impl GithubIssueCandidateSelector {
@@ -75,7 +76,27 @@ impl GithubIssueCandidateSelector {
         for label in &self.labels {
             validate_non_empty("candidate label", label)?;
         }
+        for login in &self.allowed_author_logins {
+            validate_non_empty("allowed author login", login)?;
+        }
         Ok(())
+    }
+
+    pub fn allows_author_login(&self, author_login: Option<&str>) -> bool {
+        if self.allowed_author_logins.is_empty() {
+            return true;
+        }
+
+        let Some(author_login) = author_login
+            .map(str::trim)
+            .filter(|login| !login.is_empty())
+        else {
+            return false;
+        };
+
+        self.allowed_author_logins
+            .iter()
+            .any(|allowed_login| allowed_login.trim().eq_ignore_ascii_case(author_login))
     }
 }
 
@@ -83,6 +104,7 @@ impl Default for GithubIssueCandidateSelector {
     fn default() -> Self {
         Self {
             labels: vec!["bug".to_string()],
+            allowed_author_logins: Vec::new(),
         }
     }
 }

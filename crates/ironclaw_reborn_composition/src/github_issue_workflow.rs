@@ -1685,10 +1685,13 @@ impl GithubIssueWorkflowConfigSource for ProjectMetadataGithubIssueWorkflowConfi
             .into_iter()
             .map(|repository| GithubRepositorySelector::new(repository.owner, repository.repo))
             .collect::<Result<Vec<_>, _>>()?;
-        let candidate_selector = match section.labels {
-            Some(labels) => GithubIssueCandidateSelector { labels },
-            None => GithubIssueCandidateSelector::default(),
-        };
+        let mut candidate_selector = GithubIssueCandidateSelector::default();
+        if let Some(labels) = section.labels {
+            candidate_selector.labels = labels;
+        }
+        if let Some(allowed_author_logins) = section.allowed_author_logins {
+            candidate_selector.allowed_author_logins = allowed_author_logins;
+        }
         let config = GithubIssueWorkflowConfig {
             tenant_id: self.tenant_id.clone(),
             project_id: self.project_id.clone(),
@@ -1770,6 +1773,8 @@ struct ProjectMetadataGithubIssueWorkflowSection {
     repositories: Option<Vec<ProjectMetadataGithubRepositorySelector>>,
     #[serde(default)]
     labels: Option<Vec<String>>,
+    #[serde(default)]
+    allowed_author_logins: Option<Vec<String>>,
     #[serde(default)]
     max_active_runs_per_repo: Option<u32>,
     #[serde(default)]
@@ -1988,6 +1993,7 @@ mod project_metadata_github_issue_workflow_config_source_tests {
                     { "owner": "near", "repo": "ironclaw" }
                 ],
                 "labels": ["bug", "regression"],
+                "allowed_author_logins": ["core-dev", "repo-maintainer"],
                 "max_active_runs_per_repo": 3,
                 "default_run_profile": "github-bug-workflow-v1"
             }
@@ -2012,6 +2018,10 @@ mod project_metadata_github_issue_workflow_config_source_tests {
         assert_eq!(config.repositories[0].owner, "near");
         assert_eq!(config.repositories[0].repo, "ironclaw");
         assert_eq!(config.candidate_selector.labels, ["bug", "regression"]);
+        assert_eq!(
+            config.candidate_selector.allowed_author_logins,
+            ["core-dev", "repo-maintainer"]
+        );
         assert_eq!(config.max_active_runs_per_repo, 3);
         assert_eq!(config.default_run_profile, "github-bug-workflow-v1");
 
@@ -2893,6 +2903,7 @@ fn normalize_issue_snapshot(
         title: required_string(value, &["title"], GITHUB_GET_ISSUE_CAPABILITY_ID)?.to_string(),
         body: optional_string(value, &[&["body"]]).unwrap_or_default(),
         state: required_string(value, &["state"], GITHUB_GET_ISSUE_CAPABILITY_ID)?.to_string(),
+        author_login: optional_string(value, &[&["user", "login"], &["author", "login"]]),
         labels: optional_labels(value),
         updated_at: optional_rfc3339_datetime(value, &[&["updated_at"]]),
     })

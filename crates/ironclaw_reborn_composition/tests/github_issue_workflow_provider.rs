@@ -6,9 +6,9 @@ mod github_issue_workflow_provider {
     use async_trait::async_trait;
     use ironclaw_github_issue_workflow::{
         CreateDraftPullRequestInput, CreateIssueCommentInput, GetAuthenticatedWorkflowActorInput,
-        GetPullRequestInput, GithubIssueRef, GithubIssueWorkflowError, GithubProviderAccountRef,
-        ListPullRequestChecksInput, ListPullRequestReviewCommentsInput, ListPullRequestsInput,
-        SearchGithubIssuesInput,
+        GetGithubIssueInput, GetPullRequestInput, GithubIssueRef, GithubIssueWorkflowError,
+        GithubProviderAccountRef, ListPullRequestChecksInput, ListPullRequestReviewCommentsInput,
+        ListPullRequestsInput, SearchGithubIssuesInput,
     };
     use ironclaw_reborn_composition::test_support::{
         GithubIssueWorkflowCapabilityDispatchErrorForTest,
@@ -57,6 +57,53 @@ mod github_issue_workflow_provider {
             provider_account("input-account")
         );
         assert_eq!(requests[0].input, json!({ "query": query, "limit": 5 }));
+    }
+
+    #[tokio::test]
+    async fn get_issue_normalizes_issue_author_login() {
+        let dispatcher = Arc::new(RecordingDispatcher::with_response(Ok(json!({
+            "number": 42,
+            "html_url": "https://github.com/nearai/ironclaw/issues/42",
+            "title": "Fix flaky workflow",
+            "body": "The workflow occasionally stalls.",
+            "state": "open",
+            "user": { "login": "core-dev" },
+            "labels": [{ "name": "bug" }],
+            "updated_at": "2026-06-22T10:30:00Z",
+            "repository": { "default_branch": "main" }
+        }))));
+        let port = github_issue_workflow_provider_port_for_test(
+            provider_account("configured-account"),
+            dispatcher.clone(),
+        );
+
+        let issue = port
+            .get_issue(GetGithubIssueInput {
+                provider_account_ref: provider_account("input-account"),
+                owner: "nearai".to_string(),
+                repo: "ironclaw".to_string(),
+                number: 42,
+            })
+            .await
+            .expect("issue loads");
+
+        assert_eq!(issue.author_login.as_deref(), Some("core-dev"));
+
+        let requests = dispatcher.requests();
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].capability_id, "github.get_issue");
+        assert_eq!(
+            requests[0].provider_account_ref,
+            provider_account("input-account")
+        );
+        assert_eq!(
+            requests[0].input,
+            json!({
+                "owner": "nearai",
+                "repo": "ironclaw",
+                "issue_number": 42,
+            })
+        );
     }
 
     #[tokio::test]

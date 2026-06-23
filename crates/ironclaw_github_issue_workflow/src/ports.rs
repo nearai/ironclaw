@@ -199,6 +199,7 @@ pub struct GithubIssueProviderSnapshot {
     pub title: String,
     pub body: String,
     pub state: String,
+    pub author_login: Option<String>,
     pub labels: Vec<String>,
     pub updated_at: Option<DateTime<Utc>>,
 }
