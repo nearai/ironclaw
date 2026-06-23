@@ -7993,7 +7993,7 @@ async fn run_operator_setup_rejects_unwired_host_mutations_before_provider_write
                 adapter: Some("open_ai_completions".to_string()),
                 profile_id: Some("production".to_string()),
                 webui_access_token: Some(SecretString::from(
-                    "webui-secret-token-value".to_string(),
+                    "webui-secret-token-value-32-bytes".to_string(),
                 )),
                 ..Default::default()
             },
@@ -8045,7 +8045,7 @@ async fn run_operator_setup_rejects_token_only_host_mutation_before_provider_wri
                 provider_id: Some("openai".to_string()),
                 adapter: Some("open_ai_completions".to_string()),
                 webui_access_token: Some(SecretString::from(
-                    "webui-secret-token-value".to_string(),
+                    "webui-secret-token-value-32-bytes".to_string(),
                 )),
                 ..Default::default()
             },
