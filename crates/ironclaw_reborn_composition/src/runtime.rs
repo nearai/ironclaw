@@ -3194,17 +3194,23 @@ pub async fn build_reborn_runtime(
                 });
             }
         };
+        let project_service_for_github_issue_workflow = project_service.clone();
         let project_access = match github_issue_workflow_project_access {
             Some(project_access) => project_access,
             None if github_issue_workflow.allow_in_memory_for_tests => {
                 crate::github_issue_workflow::test_only_unconfigured_project_access()
             }
             None => {
-                return Err(RebornRuntimeError::InvalidArgument {
-                    reason:
-                        "GitHub issue workflow requires a project access checker outside explicit test enablement"
-                            .to_string(),
-                });
+                let project_service = project_service_for_github_issue_workflow.ok_or_else(|| {
+                    RebornRuntimeError::InvalidArgument {
+                        reason:
+                            "GitHub issue workflow requires a project service outside explicit test enablement"
+                                .to_string(),
+                    }
+                })?;
+                crate::github_issue_workflow::project_service_github_issue_workflow_project_access(
+                    project_service,
+                )
             }
         };
         let config_source = match github_issue_workflow_config_source {

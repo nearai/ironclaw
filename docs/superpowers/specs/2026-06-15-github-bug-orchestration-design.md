@@ -369,7 +369,6 @@ pub struct GithubIssueWorkflowConfig {
     pub candidate_selector: GithubIssueCandidateSelector,
     pub max_active_runs_per_repo: u32,
     pub default_run_profile: String,
-    pub provider_account_ref: GithubProviderAccountRef,
 }
 ```
 
@@ -377,6 +376,9 @@ Rules:
 
 - every live scan is authorized against the project before it reads or writes;
 - repository selectors are host/project configuration, never issue text;
+- the GitHub provider account reference is runtime/operator configuration
+  resolved from ProductAuth, not project metadata; project metadata must not
+  choose or override the provider account;
 - workflow runs carry `project_id` for turn scope, workspace scope,
   observability, and WebUI routing;
 - local-dev may still support a no-project fallback, but production automation

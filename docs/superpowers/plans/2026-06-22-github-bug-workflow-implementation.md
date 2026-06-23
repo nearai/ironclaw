@@ -1472,6 +1472,7 @@ Define:
 #[serde(deny_unknown_fields)]
 pub struct GithubIssueWorkflowConfigSection {
     pub enabled: Option<bool>,
+    pub provider_account_id: Option<String>,
     pub poll_interval_secs: Option<u64>,
     pub max_repos_per_tick: Option<usize>,
     pub max_issues_per_repo_per_tick: Option<usize>,
@@ -1489,7 +1490,8 @@ Tests:
 - `github_issue_workflow_full_section_parses`
 - `github_issue_workflow_absent_section_yields_none`
 - `github_issue_workflow_rejects_unknown_key`
-- `github_issue_workflow_section_rejects_inline_secret_strings_if_string_fields_are_added`
+- `github_issue_workflow_rejects_empty_provider_account_id`
+- `github_issue_workflow_section_rejects_inline_secret_provider_account_id`
 
 Run: `cargo test -p ironclaw_reborn_config github_issue_workflow`.
 Expected: all tests pass.
@@ -1519,6 +1521,10 @@ At the CLI edge, mirror the existing runtime config resolver pattern:
 - create `runtime/github_issue_workflow.rs` to merge `[github_issue_workflow]` config and explicit environment
   overrides such as `IRONCLAW_GITHUB_ISSUE_WORKFLOW_ENABLED` and
   `IRONCLAW_GITHUB_ISSUE_WORKFLOW_INTERVAL_SECS`;
+- resolve the runtime/provider-owned GitHub account from
+  `[github_issue_workflow].provider_account_id`, overridden by
+  `IRONCLAW_GITHUB_ISSUE_WORKFLOW_PROVIDER_ACCOUNT_ID`, and pass it into
+  `RebornRuntimeInput`; project metadata must not choose provider accounts;
 - keep `ironclaw_reborn_config` parse-only;
 - pass the resolved `GithubIssueWorkflowSettings` into `RebornRuntimeInput` from `runtime/mod.rs`;
 - fail loudly when config enables the workflow but the binary was built without `github-issue-workflow-beta`, matching

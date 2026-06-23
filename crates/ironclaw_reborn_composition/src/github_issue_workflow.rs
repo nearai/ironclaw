@@ -1627,6 +1627,12 @@ pub(crate) fn project_metadata_github_issue_workflow_config_source(
     })
 }
 
+pub(crate) fn project_service_github_issue_workflow_project_access(
+    project_service: Arc<dyn ProjectService>,
+) -> Arc<dyn WorkflowProjectAccess> {
+    Arc::new(ProjectServiceWorkflowProjectAccess { project_service })
+}
+
 pub(crate) fn runtime_workflow_workspace_manager() -> Arc<dyn WorkflowWorkspaceManager> {
     Arc::new(RuntimeWorkflowWorkspaceManager)
 }
@@ -1697,6 +1703,61 @@ impl GithubIssueWorkflowConfigSource for ProjectMetadataGithubIssueWorkflowConfi
         };
         config.validate()?;
         Ok(vec![config])
+    }
+}
+
+struct ProjectServiceWorkflowProjectAccess {
+    project_service: Arc<dyn ProjectService>,
+}
+
+#[async_trait]
+impl WorkflowProjectAccess for ProjectServiceWorkflowProjectAccess {
+    async fn assert_workflow_config_access(
+        &self,
+        request: WorkflowConfigAccessRequest,
+    ) -> Result<(), GithubIssueWorkflowError> {
+        self.assert_project_access(
+            request.tenant_id,
+            request.creator_user_id,
+            request.project_id,
+        )
+        .await
+    }
+
+    async fn assert_workflow_project_access(
+        &self,
+        request: WorkflowProjectAccessRequest,
+    ) -> Result<(), GithubIssueWorkflowError> {
+        let Some(project_id) = request.project_id else {
+            return Err(GithubIssueWorkflowError::PolicyDenied {
+                reason: "workflow run has no project scope".to_string(),
+            });
+        };
+        self.assert_project_access(request.tenant_id, request.creator_user_id, project_id)
+            .await
+    }
+}
+
+impl ProjectServiceWorkflowProjectAccess {
+    async fn assert_project_access(
+        &self,
+        tenant_id: TenantId,
+        creator_user_id: UserId,
+        project_id: ProjectId,
+    ) -> Result<(), GithubIssueWorkflowError> {
+        self.project_service
+            .get_project(
+                ProjectCaller {
+                    tenant_id,
+                    user_id: creator_user_id,
+                },
+                RebornGetProjectRequest {
+                    project_id: project_id.to_string(),
+                },
+            )
+            .await
+            .map(|_| ())
+            .map_err(project_service_error_to_workflow_error)
     }
 }
 
@@ -1889,14 +1950,15 @@ impl WorkflowWorkspaceManager for UnconfiguredWorkflowWorkspaceManager {
 #[cfg(test)]
 mod project_metadata_github_issue_workflow_config_source_tests {
     use super::{
-        ProjectMetadataGithubIssueWorkflowConfigSource, RuntimeWorkflowWorkspaceManager,
-        git_branch_component,
+        ProjectMetadataGithubIssueWorkflowConfigSource, ProjectServiceWorkflowProjectAccess,
+        RuntimeWorkflowWorkspaceManager, git_branch_component,
     };
     use async_trait::async_trait;
     use chrono::Utc;
     use ironclaw_github_issue_workflow::{
         GithubIssueRef, GithubIssueWorkflowConfigSource, GithubIssueWorkflowError,
-        GithubProviderAccountRef, PrepareWorkflowWorkspaceRequest, WorkflowWorkspaceManager,
+        GithubProviderAccountRef, PrepareWorkflowWorkspaceRequest, WorkflowConfigAccessRequest,
+        WorkflowProjectAccess, WorkflowProjectAccessRequest, WorkflowWorkspaceManager,
     };
     use ironclaw_host_api::{AgentId, ProjectId, TenantId, UserId};
     use ironclaw_product_workflow::{
@@ -2003,6 +2065,91 @@ mod project_metadata_github_issue_workflow_config_source_tests {
             matches!(error, GithubIssueWorkflowError::InvalidConfig { ref reason } if reason.contains("provider_account_ref")),
             "unexpected error: {error:?}"
         );
+    }
+
+    #[tokio::test]
+    async fn project_service_project_access_uses_trusted_project_service() {
+        let project_service = Arc::new(FakeProjectService::new(json!({})));
+        let access = ProjectServiceWorkflowProjectAccess {
+            project_service: project_service.clone(),
+        };
+
+        access
+            .assert_workflow_config_access(WorkflowConfigAccessRequest {
+                tenant_id: TenantId::new("workflow-tenant").expect("tenant"),
+                creator_user_id: UserId::new("workflow-owner").expect("user"),
+                project_id: ProjectId::new("workflow-project").expect("project"),
+                repositories: Vec::new(),
+                provider_account_ref: GithubProviderAccountRef {
+                    provider: "github".to_string(),
+                    account_id: "runtime-github-account".to_string(),
+                },
+            })
+            .await
+            .expect("config access allowed");
+
+        access
+            .assert_workflow_project_access(WorkflowProjectAccessRequest {
+                tenant_id: TenantId::new("workflow-tenant").expect("tenant"),
+                creator_user_id: UserId::new("workflow-owner").expect("user"),
+                agent_id: Some(AgentId::new("workflow-agent").expect("agent")),
+                project_id: Some(ProjectId::new("workflow-project").expect("project")),
+                workflow_run_id:
+                    ironclaw_github_issue_workflow::GithubIssueWorkflowRunId::from_trusted(
+                        "workflow-run-project-access".to_string(),
+                    )
+                    .expect("workflow run"),
+                issue: GithubIssueRef {
+                    owner: "near".to_string(),
+                    repo: "ironclaw".to_string(),
+                    number: 42,
+                    node_id: None,
+                    url: "https://github.com/near/ironclaw/issues/42".to_string(),
+                    default_branch: "main".to_string(),
+                },
+            })
+            .await
+            .expect("project access allowed");
+
+        let captured = project_service.captured_get_project();
+        assert_eq!(captured.0.tenant_id.as_str(), "workflow-tenant");
+        assert_eq!(captured.0.user_id.as_str(), "workflow-owner");
+        assert_eq!(captured.1.project_id, "workflow-project");
+    }
+
+    #[tokio::test]
+    async fn project_service_project_access_denies_missing_project_scope() {
+        let access = ProjectServiceWorkflowProjectAccess {
+            project_service: Arc::new(FakeProjectService::new(json!({}))),
+        };
+
+        let error = access
+            .assert_workflow_project_access(WorkflowProjectAccessRequest {
+                tenant_id: TenantId::new("workflow-tenant").expect("tenant"),
+                creator_user_id: UserId::new("workflow-owner").expect("user"),
+                agent_id: Some(AgentId::new("workflow-agent").expect("agent")),
+                project_id: None,
+                workflow_run_id:
+                    ironclaw_github_issue_workflow::GithubIssueWorkflowRunId::from_trusted(
+                        "workflow-run-no-project".to_string(),
+                    )
+                    .expect("workflow run"),
+                issue: GithubIssueRef {
+                    owner: "near".to_string(),
+                    repo: "ironclaw".to_string(),
+                    number: 42,
+                    node_id: None,
+                    url: "https://github.com/near/ironclaw/issues/42".to_string(),
+                    default_branch: "main".to_string(),
+                },
+            })
+            .await
+            .expect_err("missing project scope denied");
+
+        assert!(matches!(
+            error,
+            GithubIssueWorkflowError::PolicyDenied { .. }
+        ));
     }
 
     #[tokio::test]

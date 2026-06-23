@@ -442,6 +442,18 @@ pub(crate) fn build_runtime_input_with_options(
             runtime_services.config_file.as_ref(),
         ));
 
+    #[cfg(feature = "github-issue-workflow-beta")]
+    {
+        if let Some(provider_account_ref) =
+            github_issue_workflow::github_issue_workflow_provider_account_ref(
+                runtime_services.config_file.as_ref(),
+            )?
+        {
+            runtime_input =
+                runtime_input.with_github_issue_workflow_provider_account_ref(provider_account_ref);
+        }
+    }
+
     #[cfg(feature = "root-llm-provider")]
     {
         match ironclaw_reborn_composition::resolve_reborn_runtime_llm(
@@ -2158,6 +2170,7 @@ poll_interval_secs = 15
             EnvGuard::clear("IRONCLAW_GITHUB_ISSUE_WORKFLOW_MAX_ISSUES_PER_REPO_PER_TICK"),
             EnvGuard::clear("IRONCLAW_GITHUB_ISSUE_WORKFLOW_MAX_RUNNABLE_RUNS_PER_TICK"),
             EnvGuard::clear("IRONCLAW_GITHUB_ISSUE_WORKFLOW_LEASE_DURATION_SECS"),
+            EnvGuard::clear("IRONCLAW_GITHUB_ISSUE_WORKFLOW_PROVIDER_ACCOUNT_ID"),
         ]
     }
 
@@ -2175,6 +2188,7 @@ poll_interval_secs = 15
             r#"
 [github_issue_workflow]
 enabled = true
+provider_account_id = "config-github-account"
 poll_interval_secs = 42
 max_repos_per_tick = 6
 max_issues_per_repo_per_tick = 8
@@ -2205,6 +2219,12 @@ lease_duration_secs = 300
             input.github_issue_workflow.lease_duration,
             std::time::Duration::from_secs(300)
         );
+        let account_ref = input
+            .github_issue_workflow_provider_account_ref
+            .as_ref()
+            .expect("provider account ref");
+        assert_eq!(account_ref.provider, "github");
+        assert_eq!(account_ref.account_id, "config-github-account");
     }
 
     #[cfg(feature = "github-issue-workflow-beta")]
@@ -2220,6 +2240,10 @@ lease_duration_secs = 300
             "IRONCLAW_GITHUB_ISSUE_WORKFLOW_INTERVAL_SECS",
             "75",
         ));
+        guards.push(EnvGuard::set(
+            "IRONCLAW_GITHUB_ISSUE_WORKFLOW_PROVIDER_ACCOUNT_ID",
+            "env-github-account",
+        ));
 
         let temp = tempfile::tempdir().expect("tempdir");
         let reborn_home = temp.path().join("reborn-home");
@@ -2229,6 +2253,7 @@ lease_duration_secs = 300
             r#"
 [github_issue_workflow]
 enabled = false
+provider_account_id = "config-github-account"
 poll_interval_secs = 15
 "#,
         )
@@ -2247,6 +2272,44 @@ poll_interval_secs = 15
         assert_eq!(
             input.github_issue_workflow.poll_interval,
             std::time::Duration::from_secs(75)
+        );
+        let account_ref = input
+            .github_issue_workflow_provider_account_ref
+            .as_ref()
+            .expect("provider account ref");
+        assert_eq!(account_ref.account_id, "env-github-account");
+    }
+
+    #[cfg(feature = "github-issue-workflow-beta")]
+    #[test]
+    fn cli_runtime_rejects_invalid_github_issue_workflow_provider_account_env() {
+        let _lock = lock_trigger_env();
+        let mut guards = clear_github_issue_workflow_env();
+        guards.push(EnvGuard::set(
+            "IRONCLAW_GITHUB_ISSUE_WORKFLOW_PROVIDER_ACCOUNT_ID",
+            " ",
+        ));
+
+        let temp = tempfile::tempdir().expect("tempdir");
+        let reborn_home = temp.path().join("reborn-home");
+        std::fs::create_dir_all(&reborn_home).expect("mkdir");
+        let config = RebornBootConfig::resolve_from_env_parts(
+            Some(reborn_home.into_os_string()),
+            None,
+            None,
+            None,
+        )
+        .expect("boot config");
+
+        let err = match build_runtime_input(&config, RuntimeInputCaller::Run) {
+            Ok(_) => panic!("invalid provider account env must fail"),
+            Err(err) => err,
+        };
+
+        assert!(
+            err.to_string()
+                .contains("IRONCLAW_GITHUB_ISSUE_WORKFLOW_PROVIDER_ACCOUNT_ID"),
+            "error must mention env var name, got: {err}"
         );
     }
 

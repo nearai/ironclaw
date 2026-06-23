@@ -206,26 +206,19 @@ mod github_issue_workflow_runtime {
 
     #[cfg(feature = "libsql")]
     #[tokio::test]
-    async fn production_enabled_workflow_requires_project_access_checker() {
+    async fn production_enabled_workflow_constructs_project_service_access_checker() {
         let root = tempfile::tempdir().expect("tempdir");
-        let err = match build_reborn_runtime(
+        let runtime = build_reborn_runtime(
             local_dev_input(root.path().join("local-dev"))
                 .with_default_project_id(ProjectId::new("workflow-project").expect("project"))
                 .with_github_issue_workflow_provider_account_ref(provider_account_ref())
                 .with_github_issue_workflow_settings(GithubIssueWorkflowSettings::enabled()),
         )
         .await
-        {
-            Ok(_) => panic!(
-                "non-test workflow enablement must fail closed without project access checker"
-            ),
-            Err(err) => err,
-        };
+        .expect("runtime builds with project-service-backed workflow access");
 
-        assert!(
-            matches!(err, RebornRuntimeError::InvalidArgument { ref reason } if reason.contains("project access checker")),
-            "unexpected error: {err:?}"
-        );
+        assert!(runtime.services().readiness.workers.github_issue_workflow);
+        runtime.shutdown().await.expect("shutdown");
     }
 
     #[cfg(feature = "libsql")]

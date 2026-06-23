@@ -416,6 +416,10 @@ pub struct GithubIssueWorkflowConfigSection {
     /// Enable or disable the workflow poller. Default `false` (off) in
     /// composition; operators MUST set `enabled = true` to activate it.
     pub enabled: Option<bool>,
+    /// ProductAuth GitHub account id used by provider-backed workflow actions.
+    /// The provider id is always `github`; secrets/tokens stay in ProductAuth,
+    /// not in this config file.
+    pub provider_account_id: Option<String>,
     /// How often the poller ticks, in seconds. Default in composition is 60.
     pub poll_interval_secs: Option<u64>,
     /// Maximum repositories discovered per tick. Default in composition is 20.
@@ -772,6 +776,14 @@ impl RebornConfigFile {
                     reason: "must be greater than 0".to_string(),
                 });
             }
+        }
+        if let Some(github_issue_workflow) = &self.github_issue_workflow
+            && let Some(provider_account_id) = &github_issue_workflow.provider_account_id
+        {
+            check_non_empty_trimmed(
+                Cow::Borrowed("github_issue_workflow.provider_account_id"),
+                provider_account_id,
+            )?;
         }
         if let Some(webui) = &self.webui {
             if let Some(host) = &webui.listen_host {
@@ -1883,6 +1895,7 @@ not_a_field = true
         let toml = r#"
 [github_issue_workflow]
 enabled = true
+provider_account_id = "operator-github-account"
 poll_interval_secs = 30
 max_repos_per_tick = 5
 max_issues_per_repo_per_tick = 7
@@ -1896,6 +1909,10 @@ lease_duration_secs = 45
             .as_ref()
             .expect("github_issue_workflow section present");
         assert_eq!(workflow.enabled, Some(true));
+        assert_eq!(
+            workflow.provider_account_id.as_deref(),
+            Some("operator-github-account")
+        );
         assert_eq!(workflow.poll_interval_secs, Some(30));
         assert_eq!(workflow.max_repos_per_tick, Some(5));
         assert_eq!(workflow.max_issues_per_repo_per_tick, Some(7));
@@ -1921,14 +1938,24 @@ not_a_field = true
     }
 
     #[test]
-    fn github_issue_workflow_section_rejects_inline_secret_strings_if_string_fields_are_added() {
+    fn github_issue_workflow_rejects_empty_provider_account_id() {
         let toml = r#"
 [github_issue_workflow]
-provider_account_env = "ghp_deadbeefdeadbeefdeadbeefdeadbeefdead"
+provider_account_id = " "
 "#;
-        let err = RebornConfigFile::parse_text(toml, &attributed()).expect_err(
-            "future string fields in [github_issue_workflow] must be guarded against inline secrets",
-        );
+        let err = RebornConfigFile::parse_text(toml, &attributed())
+            .expect_err("provider account id must not be empty");
+        assert!(matches!(err, RebornConfigFileError::InvalidField { .. }));
+    }
+
+    #[test]
+    fn github_issue_workflow_section_rejects_inline_secret_provider_account_id() {
+        let toml = r#"
+[github_issue_workflow]
+provider_account_id = "ghp_deadbeefdeadbeefdeadbeefdeadbeefdead"
+"#;
+        let err = RebornConfigFile::parse_text(toml, &attributed())
+            .expect_err("provider account id must be guarded against inline secrets");
         assert!(
             matches!(
                 err,
