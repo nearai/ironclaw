@@ -744,13 +744,26 @@ async fn trigger_poller_does_not_submit_turn_for_unpaired_actor() {
         captured_contents
     );
 
-    // The trigger must not be marked Completed (retryable fail-closed behavior).
-    assert_ne!(
+    // The one-shot trigger should remain scheduled after a retryable pre-submit failure.
+    assert_eq!(
         current.state,
-        TriggerState::Completed,
-        "unpaired trigger must not be marked Completed — state: {:?}, last_status: {:?}",
+        TriggerState::Scheduled,
+        "unpaired trigger must remain scheduled — state: {:?}, last_status: {:?}",
         current.state,
         current.last_status
+    );
+    assert_eq!(
+        current.last_status,
+        Some(TriggerRunStatus::Error),
+        "unpaired trigger must record the retryable failure — record: {current:?}"
+    );
+    assert_eq!(
+        current.active_fire_slot, None,
+        "scheduled trigger must not keep an active fire — record: {current:?}"
+    );
+    assert_eq!(
+        current.active_run_ref, None,
+        "scheduled trigger must not keep an active run — record: {current:?}"
     );
 }
 

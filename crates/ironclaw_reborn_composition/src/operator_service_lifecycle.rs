@@ -807,7 +807,7 @@ impl OperatorServiceLifecycleService for RebornLocalServiceLifecycle {
         .await
         .map_err(|error| {
             tracing::debug!(%error, "service lifecycle task failed");
-            RebornServicesError::internal()
+            RebornServicesError::internal_from(error.to_string())
         })
     }
 }
