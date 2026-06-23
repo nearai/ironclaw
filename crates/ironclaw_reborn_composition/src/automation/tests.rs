@@ -682,6 +682,18 @@ async fn automation_facade_maps_not_found_trigger_error_to_404() {
     assert!(!error.retryable);
 }
 
+#[test]
+fn map_trigger_error_preserves_blocked_materialization_semantics() {
+    let error = super::map_trigger_error(TriggerError::BlockedMaterialization {
+        reason: "trusted trigger inbound request blocked".to_string(),
+    });
+
+    assert_eq!(error.code, RebornServicesErrorCode::Forbidden);
+    assert_eq!(error.kind, RebornServicesErrorKind::ParticipantDenied);
+    assert_eq!(error.status_code, 403);
+    assert!(!error.retryable);
+}
+
 #[tokio::test]
 async fn automation_source_from_record_maps_cron_schedule() {
     let c = caller();

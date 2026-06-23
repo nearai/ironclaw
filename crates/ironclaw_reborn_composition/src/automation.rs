@@ -360,8 +360,13 @@ fn map_trigger_error(error: TriggerError) -> RebornServicesError {
         | TriggerError::InvalidRecord { .. }
         | TriggerError::InvalidPollerConfig { .. }
         | TriggerError::InvalidSchedule { .. }
-        | TriggerError::InvalidMaterialization { .. }
-        | TriggerError::BlockedMaterialization { .. } => internal_invariant(),
+        | TriggerError::InvalidMaterialization { .. } => internal_invariant(),
+        TriggerError::BlockedMaterialization { .. } => services_error(
+            RebornServicesErrorCode::Forbidden,
+            RebornServicesErrorKind::ParticipantDenied,
+            403,
+            false,
+        ),
     }
 }
 
