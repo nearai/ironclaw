@@ -69,17 +69,15 @@ impl TriggerPollerWorker {
         fire_slot: Timestamp,
         now: Timestamp,
     ) -> Result<TriggerPollerFireOutcome, TriggerError> {
-        let permanent_failure_disposition =
-            permanent_failure_disposition(&record.schedule, fire_slot)?;
-
         let fire = match self.deps.source_provider.evaluate(&record, now).await {
             Ok(Some(fire)) => fire,
             Ok(None) => {
+                let disposition = permanent_failure_disposition(&record.schedule, fire_slot)?;
                 return self
                     .persist_failed_fire(
                         record,
                         fire_slot,
-                        permanent_failure_disposition,
+                        disposition,
                         TriggerPollerFailureReason::SourceNoFire,
                     )
                     .await;
@@ -88,7 +86,9 @@ impl TriggerPollerWorker {
                 let classification = classify_failure(&error);
                 let disposition = match classification.kind {
                     SubmitFailureKind::Retryable => FailedFireDisposition::Retryable,
-                    SubmitFailureKind::Permanent => permanent_failure_disposition,
+                    SubmitFailureKind::Permanent => {
+                        permanent_failure_disposition(&record.schedule, fire_slot)?
+                    }
                 };
                 return self
                     .persist_failed_fire(record, fire_slot, disposition, classification.reason)
@@ -106,7 +106,9 @@ impl TriggerPollerWorker {
                 let classification = classify_failure(&error);
                 let disposition = match classification.kind {
                     SubmitFailureKind::Retryable => FailedFireDisposition::Retryable,
-                    SubmitFailureKind::Permanent => permanent_failure_disposition,
+                    SubmitFailureKind::Permanent => {
+                        permanent_failure_disposition(&record.schedule, fire_slot)?
+                    }
                 };
                 return self
                     .persist_failed_fire(record, fire_slot, disposition, classification.reason)
@@ -177,7 +179,9 @@ impl TriggerPollerWorker {
                 let classification = classify_failure(&error);
                 let disposition = match classification.kind {
                     SubmitFailureKind::Retryable => FailedFireDisposition::Retryable,
-                    SubmitFailureKind::Permanent => permanent_failure_disposition,
+                    SubmitFailureKind::Permanent => {
+                        permanent_failure_disposition(&record.schedule, fire_slot)?
+                    }
                 };
                 self.persist_failed_fire(record, fire_slot, disposition, classification.reason)
                     .await
