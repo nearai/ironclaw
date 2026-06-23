@@ -1552,7 +1552,10 @@ impl CapabilityObligationHandler for BuiltinObligationHandler {
         // Turn any base64 document payload into extracted text before redaction
         // and the output-size obligations run, so the model gets bounded text
         // (leak-scanned, size-checked) and the large base64 never survives.
-        dispatch.output = crate::document_output::extract_documents_in_output(dispatch.output);
+        dispatch.output = crate::document_output::extract_documents_in_output(
+            dispatch.capability_id.as_str(),
+            dispatch.output,
+        );
         if request
             .obligations
             .iter()
@@ -2485,7 +2488,10 @@ mod tests {
         );
         let handler = services.obligation_handler();
         let context = execution_context();
-        let capability_id = capability_id();
+        // The document-extraction transform is capability-gated, so this test
+        // must dispatch a capability that opts in (`google-drive.download_file`)
+        // — the shared `echo.say` helper id would pass through untouched.
+        let capability_id = CapabilityId::new("google-drive.download_file").unwrap();
         let estimate = ResourceEstimate::default();
         let obligations = vec![Obligation::RedactOutput];
         let encoded = base64::engine::general_purpose::STANDARD.encode(b"name,age\nAlice,30");
