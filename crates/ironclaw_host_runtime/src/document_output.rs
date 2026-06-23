@@ -34,11 +34,14 @@ use serde_json::Value;
 /// inbound-attachment extraction cap in `ironclaw_attachments`.
 const MAX_EXTRACTED_TEXT_CHARS: usize = 100_000;
 
-/// Upper bound on the base64 payload we will decode, guarding against
-/// allocating a huge buffer before the output-size obligation runs. The Drive
-/// guest caps downloads at 1 MB (~1.37 MB base64); this generous ceiling only
-/// rejects pathological payloads.
-const MAX_BASE64_INPUT_BYTES: usize = 16 * 1024 * 1024;
+/// Upper bound on the base64 payload we will decode. This is the *only*
+/// pre-decode size guard: `content_base64` is stripped before
+/// `dispatch_output_bytes()` runs, so the output-size obligation never sees it.
+/// Tied to the producer contract — the Drive guest caps raw downloads at 1 MB
+/// (`MAX_DOWNLOAD_TEXT_BYTES`), ~1.37 MB once base64-encoded — so 2 MiB leaves
+/// headroom for a legitimate payload while denying a misbehaving guest the
+/// chance to force a large host allocation.
+const MAX_BASE64_INPUT_BYTES: usize = 2 * 1024 * 1024;
 
 /// Capabilities whose output may carry a base64 document payload to extract.
 /// Keep this explicit so the transform is opt-in per capability, not a global
@@ -309,5 +312,20 @@ mod tests {
         // cap so the test allocates nothing large.
         let marker = decode_and_extract_capped("QUFBQUFBQUE=", "application/pdf", None, 4);
         assert!(marker.contains("too large"), "got: {marker}");
+    }
+
+    #[test]
+    fn payload_far_above_drive_contract_is_rejected_before_decode() {
+        // ~3 MB base64 is well above the Drive producer contract (1 MB raw,
+        // ~1.37 MB base64) and must be rejected before any decode. Guards against
+        // loosening the pre-decode cap back toward the former 16 MiB ceiling: at
+        // 16 MiB this blob would be decoded instead of marked "too large".
+        let blob = "A".repeat(3 * 1024 * 1024);
+        let marker = decode_and_extract(&blob, "application/pdf", None);
+        assert!(
+            marker.contains("too large"),
+            "3 MB payload must be rejected pre-decode; got: {}",
+            &marker[..marker.len().min(80)]
+        );
     }
 }
