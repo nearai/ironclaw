@@ -14,7 +14,7 @@ function slackSetupPanelSourceForTest() {
         .replace("export function SlackSetupPanel", "function SlackSetupPanel"),
     );
   }
-  return `${lines.join("\n")}\nglobalThis.__testExports = { SlackSetupPanel };`;
+  return `${lines.join("\n")}\nglobalThis.__testExports = { SlackSetupPanel, FIELD_HELP };`;
 }
 
 function createReactStub(state) {
@@ -89,6 +89,7 @@ function setupContext(state, saveResponses = []) {
   const setQueryDataCalls = [];
   const context = {
     Button: "button",
+    Icon() {},
     React: createReactStub(state),
     SlackChannelPicker() {},
     globalThis: {},
@@ -247,4 +248,19 @@ test("SlackSetupPanel rejects whitespace-only fresh secrets", () => {
   rendered = renderPanel(context, state, { data: status });
 
   assert.equal(valuesAfter(rendered, "disabled=")[0], true);
+});
+
+test("SlackSetupPanel defines field guidance for Slack credentials", () => {
+  const state = { hookIndex: 0, values: {}, refs: {}, effectDeps: {} };
+  const { context } = setupContext(state);
+  const help = context.globalThis.__testExports.FIELD_HELP;
+
+  assert.equal(help.installationId.title, "Choose a local install ID");
+  assert.equal(help.installationId.example, "Example: local-slack");
+  assert.equal(help.teamId.title, "Slack workspace ID");
+  assert.equal(help.teamId.example, "Example: T0123456789");
+  assert.equal(help.appId.title, "Slack app ID");
+  assert.equal(help.appId.example, "Example: A0123456789");
+  assert.match(help.botToken.body, /Bot User OAuth Token/);
+  assert.match(help.signingSecret.body, /Signing Secret/);
 });

@@ -33,6 +33,10 @@ const paths = {
 
   flag: html`<path d="M6.5 21V4.5" /><path d="M6.5 5h10.7l-1.4 4 1.4 4H6.5" />`,
 
+  info: html`<path d="M12 4.5a7.5 7.5 0 1 1 0 15 7.5 7.5 0 0 1 0-15Z" /><path
+      d="M12 10.5v5"
+    /><path d="M12 8.1h.01" />`,
+
   pin: html`<path d="M9 3.5h6l-1 5 3 3.5H7l3-3.5-1-5Z" /><path d="M12 15.5V21" />`,
 
   folder: html`<path
