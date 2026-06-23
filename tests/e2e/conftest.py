@@ -852,14 +852,17 @@ async def hosted_oauth_refresh_server(
 
 
 @pytest.fixture(scope="session")
-async def hosted_google_oauth_refresh_server(
+async def hosted_google_emulate_server(
     ironclaw_binary,
     mock_llm_server,
     emulate_google_server,
     wasm_tools_dir,
 ):
-    """Start hosted mode with Gmail API traffic rewritten to Emulate."""
-    rewrite_map = {"gmail.googleapis.com": emulate_google_server["url"]}
+    """Start hosted mode with Google provider API traffic rewritten to Emulate."""
+    rewrite_map = {
+        "gmail.googleapis.com": emulate_google_server["url"],
+        "www.googleapis.com": emulate_google_server["url"],
+    }
     async for server in _run_hosted_oauth_refresh_server(
         ironclaw_binary,
         mock_llm_server,
@@ -868,6 +871,12 @@ async def hosted_google_oauth_refresh_server(
         extra_result={"emulate_google_url": emulate_google_server["url"]},
     ):
         yield server
+
+
+@pytest.fixture(scope="session")
+async def hosted_google_oauth_refresh_server(hosted_google_emulate_server):
+    """Compatibility fixture for hosted Gmail OAuth refresh regression tests."""
+    yield hosted_google_emulate_server
 
 
 @pytest.fixture(scope="session")
