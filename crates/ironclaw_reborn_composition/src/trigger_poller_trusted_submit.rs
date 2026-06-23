@@ -376,9 +376,10 @@ fn classify_materializer_inbound_error(error: InboundTurnError) -> TriggerError 
                 | TurnError::LeaseMismatch
                 | TurnError::InvalidRunOriginAdapter,
         } => rejected_trigger_materialization("trusted trigger submit rejected"),
+        InboundTurnError::BindingRequired { .. } | InboundTurnError::AccessDenied { .. } => {
+            blocked_trigger_materialization("trusted trigger inbound request blocked")
+        }
         InboundTurnError::InvalidExternalRef { .. }
-        | InboundTurnError::BindingRequired { .. }
-        | InboundTurnError::AccessDenied { .. }
         | InboundTurnError::BindingConflict { .. }
         | InboundTurnError::ThreadNotFound { .. }
         | InboundTurnError::StatePoisoned
@@ -399,6 +400,13 @@ fn retryable_trigger_materializer_backend_error() -> TriggerError {
 fn rejected_trigger_materialization(reason: &'static str) -> TriggerError {
     tracing::debug!("trusted trigger materialization rejected");
     TriggerError::InvalidMaterialization {
+        reason: reason.to_string(),
+    }
+}
+
+fn blocked_trigger_materialization(reason: &'static str) -> TriggerError {
+    tracing::debug!("trusted trigger materialization blocked");
+    TriggerError::BlockedMaterialization {
         reason: reason.to_string(),
     }
 }
@@ -1222,10 +1230,30 @@ mod tests {
     }
 
     #[test]
-    fn non_submission_inbound_errors_are_permanent_materialization_failures() {
-        let error = classify_materializer_inbound_error(InboundTurnError::AccessDenied {
-            actor_id: "actor-1".to_string(),
-            thread_id: "thread-1".to_string(),
+    fn missing_binding_inbound_errors_are_blocked_materialization_failures() {
+        for error in [
+            InboundTurnError::BindingRequired {
+                adapter_kind: TRIGGER_TRUSTED_ADAPTER_KIND.to_string(),
+                external_actor_id: "actor-1".to_string(),
+            },
+            InboundTurnError::AccessDenied {
+                actor_id: "actor-1".to_string(),
+                thread_id: "thread-1".to_string(),
+            },
+        ] {
+            let classified = classify_materializer_inbound_error(error);
+
+            assert!(
+                matches!(classified, TriggerError::BlockedMaterialization { reason } if reason == "trusted trigger inbound request blocked")
+            );
+        }
+    }
+
+    #[test]
+    fn invalid_inbound_errors_are_permanent_materialization_failures() {
+        let error = classify_materializer_inbound_error(InboundTurnError::InvalidExternalRef {
+            kind: "adapter_kind",
+            reason: "empty".to_string(),
         });
 
         assert!(

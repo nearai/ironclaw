@@ -85,6 +85,7 @@ pub enum TriggerPollerFailureReason {
     InvalidPollerConfig,
     InvalidSchedule,
     InvalidMaterialization,
+    BlockedMaterialization,
     NotFound,
     SourceNoFire,
     ActiveRunLookup,

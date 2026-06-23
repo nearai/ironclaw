@@ -704,6 +704,7 @@ fn trigger_error_kind(error: &TriggerError) -> &'static str {
         TriggerError::InvalidPollerConfig { .. } => "invalid_poller_config",
         TriggerError::InvalidSchedule { .. } => "invalid_schedule",
         TriggerError::InvalidMaterialization { .. } => "invalid_materialization",
+        TriggerError::BlockedMaterialization { .. } => "blocked_materialization",
         TriggerError::Backend { .. } => "backend",
         TriggerError::NotFound => "not_found",
     }
