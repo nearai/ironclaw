@@ -1,0 +1,70 @@
+[package]
+name = "ironclaw_memory_native"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.92"
+description = "Memory document service adapters for IronClaw Reborn"
+authors = ["NEAR AI <support@near.ai>"]
+license = "MIT OR Apache-2.0"
+homepage = "https://github.com/nearai/ironclaw"
+repository = "https://github.com/nearai/ironclaw"
+publish = false
+
+[features]
+default = []
+# Conditional gate for substrate-level regression tests that anticipate
+# specific guards beyond what #3180 itself delivers: min_score-after-
+# normalization, deterministic tiebreaking, `ensure_path_matches_context`
+# / `ensure_scope_matches_context` checks, and `.system/engine/
+# orchestrator/*` protected-path registration. The followup PR(s) that
+# implement these must enable `pr3180-ready` in their merge commit so
+# the gated tests run in CI on the merge-queue branch.
+#
+# Empirical note (2026-05-12): on `reborn-integration` HEAD (#3180
+# merged), enabling this feature surfaces ~7 test failures because the
+# anticipated APIs (`ensure_path_matches_context`, deterministic
+# tie-breakers, orchestrator path registration) do not exist yet. The
+# gates are accurate; the substrate just isn't there yet.
+pr3180-ready = []
+# Exposes the trait-level contract test harness in
+# `src/contract_tests.rs` to downstream crates and integration tests.
+# Off by default so panic-style calls in the harness (`.expect`,
+# `.unwrap`, `assert*!`) do not appear in production builds and trip
+# the `scripts/check_no_panics.py` scanner. This crate's own
+# integration tests in `tests/` enable the feature via the self
+# dev-dependency below.
+contract-tests = []
+
+[dependencies]
+async-trait = "0.1"
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
+chrono-tz = "0.10"
+ironclaw_filesystem = { path = "../ironclaw_filesystem", version = "0.1.0" }
+ironclaw_host_api = { path = "../ironclaw_host_api", version = "0.1.0" }
+ironclaw_memory = { path = "../ironclaw_memory", version = "0.1.0" }
+ironclaw_prompt_envelope = { path = "../ironclaw_prompt_envelope" }
+ironclaw_safety = { path = "../ironclaw_safety", version = "0.2.1" }
+jsonschema = { version = "0.45", default-features = false }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+thiserror = "2"
+tracing = "0.1"
+uuid = { version = "1", features = ["v4"] }
+
+[dev-dependencies]
+# Self dev-dependency enables `contract-tests` for the crate's
+# integration tests in `tests/`, which import the contract suite and
+# the `contract_test!` macro. The harness contains `.expect`/`.unwrap`/
+# `assert!*` calls (intentional — it's a test harness) and must stay
+# gated off in the production-facing build of the library so the
+# no-panics scanner only sees production code.
+ironclaw_memory_native = { path = ".", features = ["contract-tests"] }
+tempfile = "3"
+# `rt-multi-thread` is required by the race-safety test's
+# `#[tokio::test(flavor = "multi_thread", worker_threads = 2)]` —
+# without it, the macro silently falls back to current-thread and
+# `tokio::join!` polls cooperatively on one thread, hiding real
+# preemptive races against `replace_document_chunks_if_current`
+# (PR #3180 invariant 6).
+tokio = { version = "1", features = ["macros", "rt", "rt-multi-thread"] }

@@ -15,9 +15,9 @@ use std::sync::Arc;
 use chrono_tz::Tz;
 use ironclaw_filesystem::RootFilesystem;
 use ironclaw_host_api::HostApiError;
-use ironclaw_memory::{
-    FilesystemMemoryDocumentRepository, MemoryBackend, MemoryContext, MemoryDocumentPath,
-    MemoryDocumentScope, RepositoryMemoryBackend,
+use ironclaw_memory::{MemoryContext, MemoryDocumentPath, MemoryDocumentScope};
+use ironclaw_memory_native::{
+    FilesystemMemoryDocumentRepository, MemoryBackend, RepositoryMemoryBackend,
 };
 use ironclaw_turns::run_profile::{Locale, LoopRunContext, UserProfileContext};
 use serde::Deserialize;
@@ -155,9 +155,10 @@ mod tests {
 
     use ironclaw_filesystem::{InMemoryBackend, RootFilesystem};
     use ironclaw_host_api::{TenantId, ThreadId, UserId};
-    use ironclaw_memory::{
+    use ironclaw_memory::MemoryContext;
+    use ironclaw_memory_native::{
         FilesystemMemoryDocumentRepository, MemoryBackend, MemoryBackendCapabilities,
-        MemoryBackendWriteOptions, MemoryContext, RepositoryMemoryBackend,
+        MemoryBackendWriteOptions, RepositoryMemoryBackend,
     };
     use ironclaw_turns::{
         RunProfileResolver, TurnActor, TurnId, TurnRunId, TurnScope,

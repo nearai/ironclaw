@@ -12,7 +12,7 @@
 use std::sync::Arc;
 
 use ironclaw_filesystem::InMemoryBackend;
-use ironclaw_memory::{FilesystemMemoryDocumentRepository, contract_test_indexed};
+use ironclaw_memory_native::{FilesystemMemoryDocumentRepository, contract_test_indexed};
 
 // FilesystemMemoryDocumentRepository implements MemoryDocumentIndexRepository
 // and serves FTS search, so it gets the chunk-seeded search-isolation

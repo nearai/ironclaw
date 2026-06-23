@@ -4,13 +4,12 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use ironclaw_filesystem::{FilesystemError, FilesystemOperation};
-use ironclaw_host_api::{CorrelationId, ResourceScope};
 
 use crate::chunking::{content_bytes_sha256, content_sha256};
 use crate::embedding::{EmbeddingProvider, embed_text};
 use crate::events::{
-    MemoryAuditContext, MemorySignificantEvent, MemorySignificantEventSink,
-    MemorySignificantEventSource, record_memory_significant_event,
+    MemorySignificantEvent, MemorySignificantEventSink, MemorySignificantEventSource,
+    record_memory_significant_event,
 };
 use crate::indexer::MemoryDocumentIndexer;
 use crate::metadata::{MemoryBackendWriteOptions, MemoryWriteOptions};
@@ -22,10 +21,10 @@ use crate::repo::{
     MemoryAppendOutcome, MemoryDocumentRepository, MemoryWriteOutcome, scoped_memory_changed_by_key,
 };
 use crate::safety::{
-    DefaultPromptWriteSafetyPolicy, PromptProtectedPathRegistry, PromptSafetyAllowanceId,
-    PromptWriteOperation, PromptWriteSafetyCheck, PromptWriteSafetyEventSink,
-    PromptWriteSafetyPolicy, PromptWriteSource, enforce_prompt_write_safety,
-    prompt_write_policy_requires_previous_content_hash, prompt_write_protected_classification,
+    DefaultPromptWriteSafetyPolicy, PromptProtectedPathRegistry, PromptWriteOperation,
+    PromptWriteSafetyCheck, PromptWriteSafetyEventSink, PromptWriteSafetyPolicy, PromptWriteSource,
+    enforce_prompt_write_safety, prompt_write_policy_requires_previous_content_hash,
+    prompt_write_protected_classification,
 };
 use crate::schema::validate_content_against_schema;
 use crate::search::{MemorySearchRequest, MemorySearchResult};
@@ -48,83 +47,12 @@ pub struct MemoryBackendCapabilities {
     pub transactions: bool,
 }
 
-/// Host-resolved scoped context passed to memory backends.
-///
-/// Backends receive this context after the host has parsed and authorized the
-/// virtual path. They must not infer broader tenant/user/project authority from
-/// their own configuration.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct MemoryContext {
-    scope: MemoryDocumentScope,
-    invocation_id: Option<String>,
-    audit_context: Option<MemoryAuditContext>,
-    prompt_write_safety_allowance: Option<PromptSafetyAllowanceId>,
-    prompt_write_safety_enforced: bool,
-}
-
-impl MemoryContext {
-    pub fn new(scope: MemoryDocumentScope) -> Self {
-        Self {
-            scope,
-            invocation_id: None,
-            audit_context: None,
-            prompt_write_safety_allowance: None,
-            prompt_write_safety_enforced: false,
-        }
-    }
-
-    pub fn with_invocation_id(mut self, invocation_id: impl Into<String>) -> Self {
-        self.invocation_id = Some(invocation_id.into());
-        self
-    }
-
-    pub fn with_audit_context(
-        mut self,
-        resource_scope: ResourceScope,
-        correlation_id: CorrelationId,
-    ) -> Self {
-        self.invocation_id = Some(resource_scope.invocation_id.to_string());
-        self.audit_context = Some(MemoryAuditContext::new(resource_scope, correlation_id));
-        self
-    }
-
-    pub fn with_prompt_write_safety_allowance(
-        mut self,
-        allowance: PromptSafetyAllowanceId,
-    ) -> Self {
-        self.prompt_write_safety_allowance = Some(allowance);
-        self
-    }
-
-    /// Internal marker set only after `MemoryBackendFilesystemAdapter` has
-    /// already run prompt-write safety. Keep crate-private so direct backend
-    /// callers cannot bypass protected prompt-file policy for files called out
-    /// in zmanian #3180 HIGH, including `SOUL.md` and `BOOTSTRAP.md`.
-    pub(crate) fn with_prompt_write_safety_enforced(mut self) -> Self {
-        self.prompt_write_safety_enforced = true;
-        self
-    }
-
-    pub fn scope(&self) -> &MemoryDocumentScope {
-        &self.scope
-    }
-
-    pub fn invocation_id(&self) -> Option<&str> {
-        self.invocation_id.as_deref()
-    }
-
-    pub fn audit_context(&self) -> Option<&MemoryAuditContext> {
-        self.audit_context.as_ref()
-    }
-
-    pub fn prompt_write_safety_allowance(&self) -> Option<&PromptSafetyAllowanceId> {
-        self.prompt_write_safety_allowance.as_ref()
-    }
-
-    pub fn prompt_write_safety_enforced(&self) -> bool {
-        self.prompt_write_safety_enforced
-    }
-}
+// `MemoryContext` moved to `ironclaw_memory`; re-exported so
+// `crate::backend::MemoryContext` and the backend code below keep resolving.
+// NOTE: `with_prompt_write_safety_enforced` is `pub` on the contract type
+// (cross-crate visibility) rather than `pub(crate)`; the filesystem adapter is
+// still the only caller that sets it before deferring backend re-enforcement.
+pub use ironclaw_memory::MemoryContext;
 
 /// Pluggable memory backend contract.
 ///
@@ -990,7 +918,8 @@ where
             MemorySignificantEvent::search_performed(
                 context.scope(),
                 MemorySignificantEventSource::RepositoryMemoryBackend,
-                &request,
+                request.full_text(),
+                request.vector(),
                 results.len() as u64,
             )
             .with_audit_context(context.audit_context()),
@@ -1005,6 +934,7 @@ mod tests {
     use super::*;
     use crate::embedding::EmbeddingError;
     use crate::repo::InMemoryMemoryDocumentRepository;
+    use crate::safety::PromptSafetyAllowanceId;
 
     struct FailingEmbeddingProvider;
 

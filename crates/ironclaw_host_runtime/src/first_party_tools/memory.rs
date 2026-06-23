@@ -15,9 +15,10 @@ use ironclaw_memory::{
     MemoryServiceErrorKind, MemoryServiceReadRequest, MemoryServiceReadResponse,
     MemoryServiceSearchRequest, MemoryServiceSearchResponse, MemoryServiceTreeRequest,
     MemoryServiceTreeResponse, MemoryServiceWriteRequest, MemoryServiceWriteResponse,
-    NativeMemoryService, PromptSafetyReasonCode, PromptWriteOperation, PromptWriteSafetyEvent,
+    PromptSafetyReasonCode, PromptWriteOperation, PromptWriteSafetyEvent,
     PromptWriteSafetyEventKind, PromptWriteSafetyEventSink,
 };
+use ironclaw_memory_native::NativeMemoryService;
 use serde_json::{Value, json};
 
 use crate::{FirstPartyCapabilityError, FirstPartyCapabilityRequest, FirstPartyCapabilityResult};

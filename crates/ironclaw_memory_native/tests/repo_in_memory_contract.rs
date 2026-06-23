@@ -7,6 +7,6 @@
 //! contract, named `in_memory::<contract_name>` so failures attribute
 //! cleanly to this impl.
 
-use ironclaw_memory::{InMemoryMemoryDocumentRepository, contract_test};
+use ironclaw_memory_native::{InMemoryMemoryDocumentRepository, contract_test};
 
 contract_test!(in_memory, InMemoryMemoryDocumentRepository::new);

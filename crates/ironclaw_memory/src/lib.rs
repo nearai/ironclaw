@@ -1,65 +1,45 @@
-//! Memory document filesystem adapters for IronClaw Reborn.
+//! Provider-neutral memory contract types for IronClaw Reborn.
 //!
-//! This crate owns memory-specific path grammar and repository seams. The
-//! generic filesystem crate owns only virtual path authority, scoped mounts,
-//! backend cataloging, and backend routing.
+//! This crate owns the host-facing IronClaw memory vocabulary: the
+//! [`MemoryService`] trait and its operation shapes, the memory document
+//! scope/path value types, prompt-write-safety vocabulary, and memory
+//! significant-event/audit contracts. The native provider implementation, the
+//! prompt-write-safety enforcement engine, and storage adapters live in the
+//! `ironclaw_memory` implementation crate, which depends on this crate and
+//! re-exports these types for backward compatibility.
 
-mod backend;
-mod chunking;
-#[cfg(any(test, feature = "contract-tests"))]
-pub mod contract_tests;
-mod embedding;
+mod context;
 mod events;
-mod filesystem;
-mod indexer;
+mod hash;
 mod metadata;
 mod path;
-mod repo;
 mod safety;
-mod schema;
-mod search;
 mod service;
-mod write_metadata;
 
-pub use backend::{
-    MemoryBackend, MemoryBackendCapabilities, MemoryContext, RepositoryMemoryBackend,
-};
-pub use chunking::{
-    ChunkConfig, MemoryChunkWrite, chunk_document, content_bytes_sha256, content_sha256,
-};
-pub use embedding::{EmbeddingError, EmbeddingProvider};
+pub use context::MemoryContext;
 pub use events::{
     MemoryAuditContext, MemoryEventSinkError, MemorySignificantEvent, MemorySignificantEventKind,
     MemorySignificantEventSink, MemorySignificantEventSource, MemorySignificantEventStatus,
 };
-pub use filesystem::{MemoryBackendFilesystemAdapter, MemoryDocumentFilesystem};
-pub use indexer::{
-    ChunkingMemoryDocumentIndexer, MemoryChunkReplaceOutcome, MemoryDocumentIndexRepository,
-    MemoryDocumentIndexer,
-};
-pub use metadata::{
-    CONFIG_FILE_NAME, DocumentMetadata, HygieneMetadata, MemoryBackendWriteOptions,
-    MemoryWriteOptions,
-};
-pub use path::{MemoryDocumentPath, MemoryDocumentScope};
-pub use repo::{
-    FilesystemMemoryDocumentRepository, InMemoryMemoryDocumentRepository, MemoryAppendOutcome,
-    MemoryDocumentRepository, MemoryWriteOutcome,
+pub use hash::{content_bytes_sha256, content_sha256};
+pub use metadata::{CONFIG_FILE_NAME, DocumentMetadata, HygieneMetadata};
+pub use path::{
+    MemoryDocumentPath, MemoryDocumentScope, validated_memory_relative_path,
+    validated_memory_segment,
 };
 pub use safety::{
-    DEFAULT_PROMPT_PROTECTED_PATHS, DefaultPromptWriteSafetyPolicy, PromptProtectedPathClass,
-    PromptProtectedPathRegistry, PromptSafetyAllowanceId, PromptSafetyPolicyVersion,
-    PromptSafetyReason, PromptSafetyReasonCode, PromptSafetySeverity, PromptSafetySummary,
-    PromptWriteOperation, PromptWriteSafetyDecision, PromptWriteSafetyError,
-    PromptWriteSafetyEvent, PromptWriteSafetyEventKind, PromptWriteSafetyEventSink,
-    PromptWriteSafetyPolicy, PromptWriteSafetyRequest, PromptWriteSource,
+    DEFAULT_PROMPT_PROTECTED_PATHS, PromptProtectedPathClass, PromptProtectedPathRegistry,
+    PromptSafetyAllowanceId, PromptSafetyPolicyVersion, PromptSafetyReason, PromptSafetyReasonCode,
+    PromptSafetySeverity, PromptSafetySummary, PromptWriteOperation, PromptWriteSafetyDecision,
+    PromptWriteSafetyError, PromptWriteSafetyEvent, PromptWriteSafetyEventKind,
+    PromptWriteSafetyEventSink, PromptWriteSafetyPolicy, PromptWriteSafetyRequest,
+    PromptWriteSource,
 };
-pub use search::{FusionStrategy, MemorySearchRequest, MemorySearchResult};
 pub use service::{
     MemoryInvocation, MemoryService, MemoryServiceContextRequest, MemoryServiceContextSnippet,
     MemoryServiceError, MemoryServiceErrorKind, MemoryServiceProfileSetRequest,
     MemoryServiceProfileSetResponse, MemoryServiceReadRequest, MemoryServiceReadResponse,
     MemoryServiceSearchRequest, MemoryServiceSearchResponse, MemoryServiceSearchResult,
     MemoryServiceTreeRequest, MemoryServiceTreeResponse, MemoryServiceWriteRequest,
-    MemoryServiceWriteResponse, NativeMemoryService,
+    MemoryServiceWriteResponse,
 };

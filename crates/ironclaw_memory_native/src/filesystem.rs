@@ -173,10 +173,10 @@ impl MemoryBackendFilesystemAdapter {
                 "memory document path must include a file path after project id",
             ));
         };
-        Ok(MemoryDocumentPath {
-            scope: parsed.scope,
+        Ok(MemoryDocumentPath::from_validated_parts(
+            parsed.scope,
             relative_path,
-        })
+        ))
     }
 }
 
@@ -549,10 +549,10 @@ impl MemoryDocumentFilesystem {
                 "memory document path must include a file path after project id",
             ));
         };
-        Ok(MemoryDocumentPath {
-            scope: parsed.scope,
+        Ok(MemoryDocumentPath::from_validated_parts(
+            parsed.scope,
             relative_path,
-        })
+        ))
     }
 
     async fn list_for_scope(

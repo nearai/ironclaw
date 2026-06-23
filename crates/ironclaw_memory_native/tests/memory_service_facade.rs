@@ -4,11 +4,11 @@ use async_trait::async_trait;
 use ironclaw_filesystem::InMemoryBackend;
 use ironclaw_filesystem::{FilesystemError, FilesystemOperation};
 use ironclaw_host_api::{InvocationId, ResourceScope, TenantId, UserId, VirtualPath};
-use ironclaw_memory::{
+use ironclaw_memory_native::{
     MemoryBackend, MemoryBackendCapabilities, MemoryContext, MemoryDocumentPath,
     MemorySearchRequest, MemorySearchResult, MemoryServiceErrorKind, MemoryWriteOutcome,
 };
-use ironclaw_memory::{
+use ironclaw_memory_native::{
     MemoryInvocation, MemoryService, MemoryServiceContextRequest, MemoryServiceProfileSetRequest,
     MemoryServiceReadRequest, MemoryServiceSearchRequest, MemoryServiceTreeRequest,
     MemoryServiceWriteRequest, NativeMemoryService,
@@ -307,7 +307,7 @@ impl MemoryBackend for AlwaysConflictProfileBackend {
         _path: &MemoryDocumentPath,
         _expected_previous_hash: Option<&str>,
         _bytes: &[u8],
-        _backend_options: &ironclaw_memory::MemoryBackendWriteOptions,
+        _backend_options: &ironclaw_memory_native::MemoryBackendWriteOptions,
     ) -> Result<MemoryWriteOutcome, FilesystemError> {
         Ok(MemoryWriteOutcome::Conflict)
     }
