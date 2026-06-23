@@ -137,6 +137,137 @@ async fn native_context_retrieve_filters_cross_scope_results_and_hashes_snippet_
 }
 
 #[tokio::test]
+async fn native_context_retrieve_filters_out_of_scope_tenant_user_agent_and_project() {
+    // The request scope is (tenant-native-memory, user-native-memory, no agent,
+    // no project) from `invocation()`. The backend returns one in-scope result
+    // plus four results that each differ on exactly one scope axis. The
+    // provider-side `retain` in `retrieve_context` is solely responsible for
+    // dropping every cross-scope result; if it were removed, all five would
+    // survive and the `len() == 1` assertion below would fail.
+    let service = NativeMemoryService::new(Arc::new(MockSearchBackend {
+        results: vec![
+            search_result(
+                "tenant-native-memory",
+                "user-native-memory",
+                "allowed.md",
+                1.0,
+                "in scope planning note",
+            ),
+            // Different tenant — must be dropped.
+            search_result(
+                "other-tenant",
+                "user-native-memory",
+                "wrong-tenant.md",
+                0.95,
+                "tenant leak",
+            ),
+            // Different user — must be dropped.
+            search_result(
+                "tenant-native-memory",
+                "other-user",
+                "wrong-user.md",
+                0.9,
+                "user leak",
+            ),
+            // Different agent (request has none) — must be dropped.
+            search_result_with_agent(
+                "tenant-native-memory",
+                "user-native-memory",
+                Some("agent-other"),
+                None,
+                "wrong-agent.md",
+                0.85,
+                "agent leak",
+            ),
+            // Different project (request has none) — must be dropped.
+            search_result_with_agent(
+                "tenant-native-memory",
+                "user-native-memory",
+                None,
+                Some("project-other"),
+                "wrong-project.md",
+                0.8,
+                "project leak",
+            ),
+        ],
+        fail: false,
+    }));
+
+    let snippets = service
+        .retrieve_context(
+            invocation(),
+            MemoryServiceContextRequest {
+                query: "planning".to_string(),
+                max_snippets: 10,
+                context_profile_id: "default".to_string(),
+            },
+        )
+        .await
+        .expect("context retrieval through IronClaw memory facade");
+
+    // Only the exactly-in-scope result survives the scope-isolation filter.
+    assert_eq!(snippets.len(), 1);
+    assert_eq!(
+        snippets[0].safe_summary,
+        "Untrusted memory content: in scope planning note"
+    );
+}
+
+#[tokio::test]
+async fn native_context_retrieve_filters_non_finite_scores_before_ordering() {
+    // The backend returns three in-scope results: two with non-finite scores
+    // (NaN and +inf) and one finite. The provider-side `retain` in
+    // `retrieve_context` drops the non-finite ones via `score.is_finite()`;
+    // if that predicate were removed, all three would survive (and NaN ordering
+    // would be ill-defined), so the `len() == 1` assertion below depends on it.
+    let service = NativeMemoryService::new(Arc::new(MockSearchBackend {
+        results: vec![
+            search_result(
+                "tenant-native-memory",
+                "user-native-memory",
+                "nan.md",
+                f32::NAN,
+                "nan score note",
+            ),
+            search_result(
+                "tenant-native-memory",
+                "user-native-memory",
+                "inf.md",
+                f32::INFINITY,
+                "infinite score note",
+            ),
+            search_result(
+                "tenant-native-memory",
+                "user-native-memory",
+                "finite.md",
+                0.5,
+                "finite score note",
+            ),
+        ],
+        fail: false,
+    }));
+
+    let snippets = service
+        .retrieve_context(
+            invocation(),
+            MemoryServiceContextRequest {
+                query: "score".to_string(),
+                max_snippets: 10,
+                context_profile_id: "default".to_string(),
+            },
+        )
+        .await
+        .expect("context retrieval through IronClaw memory facade");
+
+    // Only the result with a finite score survives.
+    assert_eq!(snippets.len(), 1);
+    assert_eq!(
+        snippets[0].safe_summary,
+        "Untrusted memory content: finite score note"
+    );
+}
+
+#[tokio::test]
 async fn native_context_retrieve_drops_path_like_snippets() {
     let service = NativeMemoryService::new(Arc::new(MockSearchBackend {
         results: vec![search_result(
@@ -320,8 +451,20 @@ fn search_result(
     score: f32,
     snippet: &str,
 ) -> MemorySearchResult {
+    search_result_with_agent(tenant, user, None, None, path, score, snippet)
+}
+
+fn search_result_with_agent(
+    tenant: &str,
+    user: &str,
+    agent: Option<&str>,
+    project: Option<&str>,
+    path: &str,
+    score: f32,
+    snippet: &str,
+) -> MemorySearchResult {
     MemorySearchResult {
-        path: MemoryDocumentPath::new_with_agent(tenant, user, None, None, path).unwrap(),
+        path: MemoryDocumentPath::new_with_agent(tenant, user, agent, project, path).unwrap(),
         score,
         snippet: snippet.to_string(),
         full_text_rank: Some(1),

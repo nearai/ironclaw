@@ -173,10 +173,13 @@ impl MemoryBackendFilesystemAdapter {
                 "memory document path must include a file path after project id",
             ));
         };
-        Ok(MemoryDocumentPath::from_validated_parts(
-            parsed.scope,
-            relative_path,
-        ))
+        MemoryDocumentPath::from_scope(parsed.scope, relative_path).map_err(|error| {
+            memory_error(
+                path.clone(),
+                operation,
+                format!("invalid memory document path: {error}"),
+            )
+        })
     }
 }
 
@@ -549,10 +552,13 @@ impl MemoryDocumentFilesystem {
                 "memory document path must include a file path after project id",
             ));
         };
-        Ok(MemoryDocumentPath::from_validated_parts(
-            parsed.scope,
-            relative_path,
-        ))
+        MemoryDocumentPath::from_scope(parsed.scope, relative_path).map_err(|error| {
+            memory_error(
+                path.clone(),
+                operation,
+                format!("invalid memory document path: {error}"),
+            )
+        })
     }
 
     async fn list_for_scope(

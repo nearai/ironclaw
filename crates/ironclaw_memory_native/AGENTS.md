@@ -1,4 +1,4 @@
-# Agent Map — ironclaw_memory
+# Agent Map — ironclaw_memory_native
 
 ## Start Here
 
@@ -26,7 +26,7 @@
 
 ## Validation
 
-- Fast local check: `cargo test -p ironclaw_memory`
+- Fast local check: `cargo test -p ironclaw_memory_native`
 - Boundary check after dependency/API changes: `cargo test -p ironclaw_architecture`
 - If production persistence behavior changes, add/maintain PostgreSQL and libSQL parity tests.
 

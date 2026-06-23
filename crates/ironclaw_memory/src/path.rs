@@ -115,13 +115,21 @@ impl MemoryDocumentPath {
         })
     }
 
-    /// Build a path from already-validated parts (e.g. a parsed virtual path).
-    /// Skips re-validation; the caller must pass a validated relative path.
-    pub fn from_validated_parts(scope: MemoryDocumentScope, relative_path: String) -> Self {
-        Self {
+    /// Build a path from an already-validated [`MemoryDocumentScope`] plus a
+    /// relative path that is validated here. The scope is a validated newtype,
+    /// so only the relative path needs re-checking; this keeps the public
+    /// constructor from ever producing a `MemoryDocumentPath` with traversal,
+    /// control characters, or reserved-sidecar segments, even if a caller in
+    /// another crate passes an unchecked path.
+    pub fn from_scope(
+        scope: MemoryDocumentScope,
+        relative_path: impl Into<String>,
+    ) -> Result<Self, HostApiError> {
+        let relative_path = validated_memory_relative_path(relative_path.into())?;
+        Ok(Self {
             scope,
             relative_path,
-        }
+        })
     }
 
     pub fn scope(&self) -> &MemoryDocumentScope {

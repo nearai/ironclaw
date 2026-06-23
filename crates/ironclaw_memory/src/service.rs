@@ -2,8 +2,8 @@
 //!
 //! This module owns the provider-neutral, host-facing IronClaw memory
 //! operation shapes and the [`MemoryService`] trait. The default native
-//! adapter and its storage behavior live in the `ironclaw_memory`
-//! implementation crate.
+//! adapter and its storage behavior live in the `ironclaw_memory_native`
+//! provider crate.
 
 use async_trait::async_trait;
 use chrono_tz::Tz;

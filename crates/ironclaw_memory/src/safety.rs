@@ -6,7 +6,7 @@
 //! module owns the provider-neutral vocabulary (operation, source, severity,
 //! reason codes, event sink, policy trait) that the memory backend and the
 //! filesystem adapters depend on. The default policy implementation and the
-//! enforcement engine live in the `ironclaw_memory` implementation crate.
+//! enforcement engine live in the `ironclaw_memory_native` provider crate.
 
 use std::collections::BTreeSet;
 

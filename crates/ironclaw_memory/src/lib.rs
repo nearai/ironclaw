@@ -5,7 +5,7 @@
 //! scope/path value types, prompt-write-safety vocabulary, and memory
 //! significant-event/audit contracts. The native provider implementation, the
 //! prompt-write-safety enforcement engine, and storage adapters live in the
-//! `ironclaw_memory` implementation crate, which depends on this crate and
+//! `ironclaw_memory_native` provider crate, which depends on this crate and
 //! re-exports these types for backward compatibility.
 
 mod context;
