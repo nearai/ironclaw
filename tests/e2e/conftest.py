@@ -802,6 +802,7 @@ async def _run_hosted_oauth_refresh_server(
                 "base_url": base_url,
                 "db_path": db_path,
                 "mock_llm_url": mock_llm_server,
+                "wasm_tools_dir": wasm_tools_dir,
                 **(extra_result or {}),
             }
         except TimeoutError:
@@ -888,7 +889,8 @@ async def hosted_github_emulate_server(
         wasm_tools_dir,
         extra_env={
             "IRONCLAW_TEST_HTTP_REWRITE_MAP": json.dumps(rewrite_map),
-            "GITHUB_TOKEN": EMULATE_GITHUB_BEARER,
+            "GITHUB_OAUTH_CLIENT_ID": "hosted-github-client-id",
+            "GITHUB_OAUTH_CLIENT_SECRET": "hosted-github-client-secret",
         },
         extra_result={"emulate_github_url": emulate_github_server["url"]},
     ):

@@ -6,13 +6,13 @@ import httpx
 
 from emulate_provider import github_json, google_headers
 from reborn_emulate_harness import (
-    activate_extension,
     complete_oauth_setup,
     completed_tool_results,
     extension_names,
     get_extension,
     install_extension,
     new_thread,
+    patch_extension_validation_endpoint,
     send_chat,
     tool_result_json,
     tool_result_text,
@@ -79,10 +79,22 @@ async def test_reborn_github_issue_lifecycle_mutates_emulate(
     hosted_github_emulate_server,
 ):
     server = hosted_github_emulate_server["base_url"]
+    mock_llm_url = hosted_github_emulate_server["mock_llm_url"]
     emulate_github_url = hosted_github_emulate_server["emulate_github_url"]
+    tools_dir = hosted_github_emulate_server["wasm_tools_dir"]
 
     await install_extension(server, "github")
-    await activate_extension(server, "github")
+    patch_extension_validation_endpoint(
+        tools_dir,
+        "github",
+        f"{emulate_github_url}/user",
+    )
+    await complete_oauth_setup(
+        server,
+        "github",
+        code="mock_github_full_path_code",
+        mock_base_url=mock_llm_url,
+    )
 
     github = await get_extension(server, "github")
     assert github is not None, (

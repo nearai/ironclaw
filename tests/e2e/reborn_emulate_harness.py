@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
 import httpx
@@ -50,6 +51,21 @@ async def install_extension(base_url: str, name: str) -> None:
     assert response.json().get("success") is True, response.text
 
 
+def patch_extension_validation_endpoint(
+    tools_dir: str,
+    extension_name: str,
+    validation_url: str,
+) -> None:
+    cap_path = Path(tools_dir) / f"{extension_name}.capabilities.json"
+    assert cap_path.exists(), (
+        f"Expected installed capabilities file at {cap_path}; "
+        f"tools dir contains: {[path.name for path in Path(tools_dir).iterdir()]}"
+    )
+    capabilities = json.loads(cap_path.read_text())
+    capabilities["auth"]["validation_endpoint"]["url"] = validation_url
+    cap_path.write_text(json.dumps(capabilities, indent=2) + "\n")
+
+
 async def activate_extension(base_url: str, name: str) -> dict:
     response = await api_post(
         base_url,
@@ -67,6 +83,7 @@ async def complete_oauth_setup(
     extension_name: str,
     *,
     code: str,
+    mock_base_url: str | None = None,
 ) -> dict:
     response = await api_post(
         base_url,
@@ -88,6 +105,19 @@ async def complete_oauth_setup(
             follow_redirects=True,
         )
     assert callback_response.status_code == 200, callback_response.text[:400]
+    callback_body = callback_response.text.lower()
+    oauth_state = None
+    if mock_base_url is not None:
+        async with httpx.AsyncClient() as client:
+            state_response = await client.get(
+                f"{mock_base_url}/__mock/oauth/state",
+                timeout=10,
+            )
+        state_response.raise_for_status()
+        oauth_state = state_response.json()
+    assert "connected" in callback_body or "success" in callback_body, (
+        f"{callback_response.text[:1200]}\noauth_state={oauth_state!r}"
+    )
     return setup_data
 
 

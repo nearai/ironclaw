@@ -100,6 +100,7 @@ CANNED_RESPONSES = [
      "I found the information you requested."),
 ]
 DEFAULT_RESPONSE = "I understand your request."
+EMULATE_GITHUB_BEARER = "ghp_emulate_github_token"
 
 TOOL_FAILURE_TRIGGER = re.compile(r"issue 1780 tool failure", re.IGNORECASE)
 TRUNCATED_TOOL_CALL_TRIGGER = re.compile(
@@ -2361,6 +2362,12 @@ def _is_google_token_url(url: str) -> bool:
     return "googleapis.com" in lowered or "accounts.google.com" in lowered
 
 
+def _is_github_token_url(url: str) -> bool:
+    if not url:
+        return False
+    return "github.com/login/oauth/access_token" in url.lower()
+
+
 async def oauth_exchange(request: web.Request) -> web.Response:
     """Mock OAuth token exchange proxy for E2E tests.
 
@@ -2402,6 +2409,13 @@ async def oauth_exchange(request: web.Request) -> web.Response:
         if live_refresh:
             resp["refresh_token"] = live_refresh
         return web.json_response(resp)
+
+    if _is_github_token_url(data.get("token_url", "")):
+        return web.json_response({
+            access_token_field: EMULATE_GITHUB_BEARER,
+            "refresh_token": "mock-github-refresh-token",
+            "expires_in": 3600,
+        })
 
     return web.json_response({
         access_token_field: f"mock-token-{code}",
