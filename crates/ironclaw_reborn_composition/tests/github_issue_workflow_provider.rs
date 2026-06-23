@@ -6,7 +6,8 @@ mod github_issue_workflow_provider {
     use async_trait::async_trait;
     use ironclaw_github_issue_workflow::{
         CreateDraftPullRequestInput, CreateIssueCommentInput, GetAuthenticatedWorkflowActorInput,
-        GithubIssueRef, GithubIssueWorkflowError, GithubProviderAccountRef,
+        GetPullRequestInput, GithubIssueRef, GithubIssueWorkflowError, GithubProviderAccountRef,
+        ListPullRequestChecksInput, ListPullRequestReviewCommentsInput, ListPullRequestsInput,
         SearchGithubIssuesInput,
     };
     use ironclaw_reborn_composition::test_support::{
@@ -148,6 +149,218 @@ mod github_issue_workflow_provider {
                 "base": "main",
                 "body": "Implements the provider adapter.",
                 "draft": true,
+            })
+        );
+    }
+
+    #[tokio::test]
+    async fn list_pull_requests_invokes_provider_list_with_account_ref() {
+        let dispatcher = Arc::new(RecordingDispatcher::with_response(Ok(json!([
+            {
+                "number": 4280,
+                "html_url": "https://github.com/nearai/ironclaw/pull/4280",
+                "node_id": "PR_kwDONode",
+                "title": "Fix bug",
+                "body": "<!-- marker -->",
+                "state": "open",
+                "draft": true,
+                "merged": false,
+                "updated_at": "2026-06-22T11:00:00Z",
+                "head": {
+                    "ref": "codex/github-bug-workflow",
+                    "sha": "abc123"
+                }
+            }
+        ]))));
+        let port = github_issue_workflow_provider_port_for_test(
+            provider_account("configured-account"),
+            dispatcher.clone(),
+        );
+
+        let pulls = port
+            .list_pull_requests(ListPullRequestsInput {
+                provider_account_ref: provider_account("input-account"),
+                owner: "nearai".to_string(),
+                repo: "ironclaw".to_string(),
+                state: "open".to_string(),
+                limit: 25,
+            })
+            .await
+            .expect("list pull requests succeeds");
+
+        assert_eq!(pulls.len(), 1);
+        assert_eq!(pulls[0].pull_request.number, 4280);
+        assert_eq!(pulls[0].pull_request.head_sha.as_deref(), Some("abc123"));
+        assert!(pulls[0].draft);
+
+        let requests = dispatcher.requests();
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].capability_id, "github.list_pull_requests");
+        assert_eq!(
+            requests[0].provider_account_ref,
+            provider_account("input-account")
+        );
+        assert_eq!(
+            requests[0].input,
+            json!({
+                "owner": "nearai",
+                "repo": "ironclaw",
+                "state": "open",
+                "page": 1,
+                "limit": 25,
+            })
+        );
+    }
+
+    #[tokio::test]
+    async fn get_pull_request_invokes_provider_get_and_normalizes_snapshot() {
+        let dispatcher = Arc::new(RecordingDispatcher::with_response(Ok(json!({
+            "number": 4280,
+            "html_url": "https://github.com/nearai/ironclaw/pull/4280",
+            "title": "Fix bug",
+            "body": "PR body",
+            "state": "closed",
+            "draft": false,
+            "merged": true,
+            "updated_at": "2026-06-22T12:00:00Z",
+            "head": {
+                "ref": "codex/github-bug-workflow",
+                "sha": "def456"
+            }
+        }))));
+        let port = github_issue_workflow_provider_port_for_test(
+            provider_account("configured-account"),
+            dispatcher.clone(),
+        );
+
+        let pull = port
+            .get_pull_request(GetPullRequestInput {
+                provider_account_ref: provider_account("input-account"),
+                owner: "nearai".to_string(),
+                repo: "ironclaw".to_string(),
+                number: 4280,
+            })
+            .await
+            .expect("get pull request succeeds");
+
+        assert_eq!(pull.pull_request.number, 4280);
+        assert_eq!(pull.pull_request.head_sha.as_deref(), Some("def456"));
+        assert!(pull.merged);
+
+        let requests = dispatcher.requests();
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].capability_id, "github.get_pull_request");
+        assert_eq!(
+            requests[0].input,
+            json!({
+                "owner": "nearai",
+                "repo": "ironclaw",
+                "pr_number": 4280,
+            })
+        );
+    }
+
+    #[tokio::test]
+    async fn list_pull_request_checks_reads_combined_status_for_head_sha() {
+        let dispatcher = Arc::new(RecordingDispatcher::with_response(Ok(json!({
+            "state": "failure",
+            "sha": "def456",
+            "statuses": [
+                {
+                    "id": 7001,
+                    "context": "clippy",
+                    "state": "failure",
+                    "target_url": "https://github.com/nearai/ironclaw/actions/runs/7001",
+                    "updated_at": "2026-06-22T12:15:00Z"
+                }
+            ]
+        }))));
+        let port = github_issue_workflow_provider_port_for_test(
+            provider_account("configured-account"),
+            dispatcher.clone(),
+        );
+
+        let checks = port
+            .list_pull_request_checks(ListPullRequestChecksInput {
+                provider_account_ref: provider_account("input-account"),
+                owner: "nearai".to_string(),
+                repo: "ironclaw".to_string(),
+                pull_request_number: 4280,
+                head_sha: Some("def456".to_string()),
+                limit: 10,
+            })
+            .await
+            .expect("list checks succeeds");
+
+        assert_eq!(checks.len(), 1);
+        assert_eq!(checks[0].suite_or_run_id, "7001");
+        assert_eq!(checks[0].head_sha, "def456");
+        assert!(checks[0].conclusion.is_failure());
+
+        let requests = dispatcher.requests();
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].capability_id, "github.get_combined_status");
+        assert_eq!(
+            requests[0].input,
+            json!({
+                "owner": "nearai",
+                "repo": "ironclaw",
+                "ref": "def456",
+            })
+        );
+    }
+
+    #[tokio::test]
+    async fn list_pull_request_review_comments_invokes_provider_comments() {
+        let dispatcher = Arc::new(RecordingDispatcher::with_response(Ok(json!([
+            {
+                "id": 9001,
+                "node_id": "PRRC_kwDONode",
+                "html_url": "https://github.com/nearai/ironclaw/pull/4280#discussion_r9001",
+                "body": "Please add a regression test.",
+                "user": { "login": "reviewer" },
+                "created_at": "2026-06-22T12:20:00Z",
+                "updated_at": "2026-06-22T12:21:00Z"
+            }
+        ]))));
+        let port = github_issue_workflow_provider_port_for_test(
+            provider_account("configured-account"),
+            dispatcher.clone(),
+        );
+
+        let comments = port
+            .list_pull_request_review_comments(ListPullRequestReviewCommentsInput {
+                provider_account_ref: provider_account("input-account"),
+                owner: "nearai".to_string(),
+                repo: "ironclaw".to_string(),
+                pull_request_number: 4280,
+                since: None,
+                limit: 20,
+            })
+            .await
+            .expect("list review comments succeeds");
+
+        assert_eq!(comments.len(), 1);
+        assert_eq!(comments[0].author_login, "reviewer");
+        assert_eq!(
+            comments[0].comment.node_id.as_deref(),
+            Some("PRRC_kwDONode")
+        );
+
+        let requests = dispatcher.requests();
+        assert_eq!(requests.len(), 1);
+        assert_eq!(
+            requests[0].capability_id,
+            "github.list_pull_request_comments"
+        );
+        assert_eq!(
+            requests[0].input,
+            json!({
+                "owner": "nearai",
+                "repo": "ironclaw",
+                "pr_number": 4280,
+                "page": 1,
+                "limit": 20,
             })
         );
     }

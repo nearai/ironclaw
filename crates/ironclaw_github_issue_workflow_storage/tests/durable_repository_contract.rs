@@ -5,9 +5,9 @@ use ironclaw_github_issue_workflow::{
     BlockWorkflowRunInput, BlockWorkflowRunOutcome, ClaimRunnableWorkflowRunsInput,
     CreateOrGetProviderActionInput, CreateOrGetWorkflowRunOutcome, CreateStageRunInput,
     CreateStageRunOutcome, GithubIssueBlockKind, GithubIssueBlockState, GithubIssueStage,
-    GithubIssueWorkspaceSession, GithubIssueWorkspaceSessionId, GithubRepositorySelector,
-    RecordWorkflowEventOutcome, TransitionOutcome, WorkflowIdempotencyKey,
-    WorkflowWorkspaceMountRef, WorkflowWorkspaceRef,
+    GithubIssueWorkspaceSession, GithubIssueWorkspaceSessionId, GithubProviderAccountRef,
+    GithubRepositorySelector, ListActiveWorkflowRunsForRepositoryInput, RecordWorkflowEventOutcome,
+    TransitionOutcome, WorkflowIdempotencyKey, WorkflowWorkspaceMountRef, WorkflowWorkspaceRef,
 };
 
 mod support;
@@ -71,6 +71,59 @@ mod durable_repository_contract {
 
             assert_eq!(first_run.workflow_run_id, second_run.workflow_run_id);
             assert_ne!(first_run.workflow_run_id, other_tenant_run.workflow_run_id);
+        }
+    }
+
+    #[tokio::test]
+    async fn durable_lists_active_runs_for_repository_after_reload_with_provider_account() {
+        for case in RepositoryCase::cases("active-runs-provider-account").await {
+            let repository = case.open().await;
+            let tenant_id = tenant(&case.name, 1);
+            let issue_ref = issue(&case.name, 42);
+            let mut input = workflow_run_input(
+                &case.name,
+                tenant_id.clone(),
+                issue_ref.clone(),
+                fixed_time(10),
+            );
+            input.provider_account_ref = Some(GithubProviderAccountRef {
+                provider: "github".to_string(),
+                account_id: format!("account-{}", case.name),
+            });
+            let created = repository
+                .create_or_get_workflow_run(input)
+                .await
+                .expect("create workflow run");
+            let CreateOrGetWorkflowRunOutcome::Created { run: created_run } = created else {
+                panic!("run should be created for {}", case.name);
+            };
+
+            let reopened = case.reopen().await;
+            let active_runs = reopened
+                .list_active_workflow_runs_for_repository(
+                    ListActiveWorkflowRunsForRepositoryInput {
+                        tenant_id,
+                        repository: GithubRepositorySelector::new(
+                            issue_ref.owner.clone(),
+                            issue_ref.repo.clone(),
+                        )
+                        .expect("valid repository selector"),
+                        limit: 10,
+                    },
+                )
+                .await
+                .expect("list active runs");
+
+            assert_eq!(active_runs.len(), 1, "active runs for {}", case.name);
+            assert_eq!(active_runs[0].workflow_run_id, created_run.workflow_run_id);
+            let expected_account_id = format!("account-{}", case.name);
+            assert_eq!(
+                active_runs[0]
+                    .provider_account_ref
+                    .as_ref()
+                    .map(|account| account.account_id.as_str()),
+                Some(expected_account_id.as_str())
+            );
         }
     }
 

@@ -3149,14 +3149,14 @@ pub async fn build_reborn_runtime(
                     .to_string(),
             });
         }
-        if !github_issue_workflow.allow_in_memory_for_tests {
-            if github_issue_workflow_default_project_id.is_none() {
-                return Err(RebornRuntimeError::InvalidArgument {
-                    reason:
-                        "GitHub issue workflow requires a default project_id outside explicit test enablement"
-                            .to_string(),
-                });
-            }
+        if !github_issue_workflow.allow_in_memory_for_tests
+            && github_issue_workflow_default_project_id.is_none()
+        {
+            return Err(RebornRuntimeError::InvalidArgument {
+                reason:
+                    "GitHub issue workflow requires a default project_id outside explicit test enablement"
+                        .to_string(),
+            });
         }
         let configured_provider_account_ref = match github_issue_workflow_provider_account_ref {
             Some(provider_account_ref) => {

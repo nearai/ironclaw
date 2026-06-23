@@ -6,12 +6,15 @@ use chrono::{DateTime, Utc};
 use ironclaw_github_issue_workflow::{
     AcceptStageResultInput, AcceptStageResultOutcome, CreateDraftPullRequestInput,
     CreateIssueCommentInput, GetAuthenticatedWorkflowActorInput, GetGithubIssueInput,
-    GithubActorSnapshot, GithubCommentRef, GithubIssueCommentSnapshot, GithubIssueProviderSnapshot,
-    GithubIssueSearchHit, GithubIssueStage, GithubIssueStageRunId, GithubIssueWorkflowConfig,
+    GetPullRequestInput, GithubActorSnapshot, GithubCheckConclusion, GithubCommentRef,
+    GithubIssueCommentSnapshot, GithubIssueProviderSnapshot, GithubIssueSearchHit,
+    GithubIssueStage, GithubIssueStageRunId, GithubIssueWorkflowConfig,
     GithubIssueWorkflowConfigSource, GithubIssueWorkflowError, GithubIssueWorkflowPoller,
     GithubIssueWorkflowPollerConfig, GithubIssueWorkflowPollerPorts, GithubIssueWorkflowPort,
     GithubIssueWorkflowRepository, GithubIssueWorkflowRunId, GithubProviderAccountRef,
-    GithubPullRequestRef, ListIssueCommentsInput, PrepareWorkflowWorkspaceOutcome,
+    GithubPullRequestCheckSnapshot, GithubPullRequestRef, GithubPullRequestSnapshot,
+    GithubReviewCommentSnapshot, ListIssueCommentsInput, ListPullRequestChecksInput,
+    ListPullRequestReviewCommentsInput, ListPullRequestsInput, PrepareWorkflowWorkspaceOutcome,
     PrepareWorkflowWorkspaceRequest, SearchGithubIssuesInput, StageTurnSubmitter,
     SubmitStageTurnOutcome, SubmitStageTurnRequest, WorkflowActorScope, WorkflowClock,
     WorkflowConfigAccessRequest, WorkflowProjectAccess, WorkflowProjectAccessRequest,
@@ -71,7 +74,11 @@ const GITHUB_SEARCH_ISSUES_CAPABILITY_ID: &str = "github.search_issues";
 const GITHUB_GET_ISSUE_CAPABILITY_ID: &str = "github.get_issue";
 const GITHUB_LIST_ISSUE_COMMENTS_CAPABILITY_ID: &str = "github.list_issue_comments";
 const GITHUB_COMMENT_ISSUE_CAPABILITY_ID: &str = "github.comment_issue";
+const GITHUB_LIST_PULL_REQUESTS_CAPABILITY_ID: &str = "github.list_pull_requests";
 const GITHUB_CREATE_PULL_REQUEST_CAPABILITY_ID: &str = "github.create_pull_request";
+const GITHUB_GET_PULL_REQUEST_CAPABILITY_ID: &str = "github.get_pull_request";
+const GITHUB_LIST_PULL_REQUEST_COMMENTS_CAPABILITY_ID: &str = "github.list_pull_request_comments";
+const GITHUB_GET_COMBINED_STATUS_CAPABILITY_ID: &str = "github.get_combined_status";
 const GITHUB_GET_AUTHENTICATED_USER_CAPABILITY_ID: &str = "github.get_authenticated_user";
 
 const READ_FILE_CAPABILITY_ID: &str = "builtin.read_file";
@@ -1087,6 +1094,26 @@ where
         )
     }
 
+    async fn list_pull_requests(
+        &self,
+        input: ListPullRequestsInput,
+    ) -> Result<Vec<GithubPullRequestSnapshot>, GithubIssueWorkflowError> {
+        let response = self
+            .dispatch_capability(
+                GITHUB_LIST_PULL_REQUESTS_CAPABILITY_ID,
+                input.provider_account_ref.clone(),
+                json!({
+                    "owner": input.owner.clone(),
+                    "repo": input.repo.clone(),
+                    "state": input.state.clone(),
+                    "page": 1,
+                    "limit": input.limit,
+                }),
+            )
+            .await?;
+        normalize_pull_request_snapshots(&response, &input.owner, &input.repo)
+    }
+
     async fn create_draft_pull_request(
         &self,
         input: CreateDraftPullRequestInput,
@@ -1107,6 +1134,77 @@ where
             )
             .await?;
         normalize_pull_request_ref(&response, &input.owner, &input.repo)
+    }
+
+    async fn get_pull_request(
+        &self,
+        input: GetPullRequestInput,
+    ) -> Result<GithubPullRequestSnapshot, GithubIssueWorkflowError> {
+        let response = self
+            .dispatch_capability(
+                GITHUB_GET_PULL_REQUEST_CAPABILITY_ID,
+                input.provider_account_ref.clone(),
+                json!({
+                    "owner": input.owner.clone(),
+                    "repo": input.repo.clone(),
+                    "pr_number": input.number,
+                }),
+            )
+            .await?;
+        normalize_pull_request_snapshot(
+            &response,
+            &input.owner,
+            &input.repo,
+            GITHUB_GET_PULL_REQUEST_CAPABILITY_ID,
+        )
+    }
+
+    async fn list_pull_request_checks(
+        &self,
+        input: ListPullRequestChecksInput,
+    ) -> Result<Vec<GithubPullRequestCheckSnapshot>, GithubIssueWorkflowError> {
+        let head_ref =
+            input
+                .head_sha
+                .clone()
+                .ok_or_else(|| GithubIssueWorkflowError::ProviderRead {
+                    reason: format!(
+                        "GitHub pull request {}/{}#{} has no head SHA for status lookup",
+                        input.owner, input.repo, input.pull_request_number
+                    ),
+                })?;
+        let response = self
+            .dispatch_capability(
+                GITHUB_GET_COMBINED_STATUS_CAPABILITY_ID,
+                input.provider_account_ref.clone(),
+                json!({
+                    "owner": input.owner,
+                    "repo": input.repo,
+                    "ref": head_ref,
+                }),
+            )
+            .await?;
+        normalize_combined_status_checks(&response, input.head_sha.as_deref(), input.limit)
+    }
+
+    async fn list_pull_request_review_comments(
+        &self,
+        input: ListPullRequestReviewCommentsInput,
+    ) -> Result<Vec<GithubReviewCommentSnapshot>, GithubIssueWorkflowError> {
+        let response = self
+            .dispatch_capability(
+                GITHUB_LIST_PULL_REQUEST_COMMENTS_CAPABILITY_ID,
+                input.provider_account_ref.clone(),
+                json!({
+                    "owner": input.owner,
+                    "repo": input.repo,
+                    "pr_number": input.pull_request_number,
+                    "page": 1,
+                    "limit": input.limit,
+                }),
+            )
+            .await?;
+        normalize_review_comments(&response)
     }
 }
 
@@ -1301,18 +1399,75 @@ fn normalize_comment_ref(
     })
 }
 
+fn normalize_pull_request_snapshots(
+    value: &JsonValue,
+    owner: &str,
+    repo: &str,
+) -> Result<Vec<GithubPullRequestSnapshot>, GithubIssueWorkflowError> {
+    let items = match value {
+        JsonValue::Array(items) => items,
+        _ => required_array(value, &["items"], GITHUB_LIST_PULL_REQUESTS_CAPABILITY_ID)?,
+    };
+    items
+        .iter()
+        .map(|item| {
+            normalize_pull_request_snapshot(
+                item,
+                owner,
+                repo,
+                GITHUB_LIST_PULL_REQUESTS_CAPABILITY_ID,
+            )
+        })
+        .collect()
+}
+
+fn normalize_pull_request_snapshot(
+    value: &JsonValue,
+    owner: &str,
+    repo: &str,
+    capability_id: &str,
+) -> Result<GithubPullRequestSnapshot, GithubIssueWorkflowError> {
+    Ok(GithubPullRequestSnapshot {
+        pull_request: normalize_pull_request_ref_with_capability(
+            value,
+            owner,
+            repo,
+            capability_id,
+        )?,
+        title: optional_string(value, &[&["title"]]).unwrap_or_default(),
+        body: optional_string(value, &[&["body"]]).unwrap_or_default(),
+        state: optional_string(value, &[&["state"]]).unwrap_or_else(|| "unknown".to_string()),
+        draft: optional_bool(value, &[&["draft"]]).unwrap_or(false),
+        merged: optional_bool(value, &[&["merged"]])
+            .or_else(|| value.get("merged_at").map(|merged_at| !merged_at.is_null()))
+            .unwrap_or(false),
+        updated_at: optional_rfc3339_datetime(value, &[&["updated_at"]]),
+    })
+}
+
 fn normalize_pull_request_ref(
     value: &JsonValue,
     owner: &str,
     repo: &str,
 ) -> Result<GithubPullRequestRef, GithubIssueWorkflowError> {
-    let number = required_u64(value, &["number"], GITHUB_CREATE_PULL_REQUEST_CAPABILITY_ID)?;
+    normalize_pull_request_ref_with_capability(
+        value,
+        owner,
+        repo,
+        GITHUB_CREATE_PULL_REQUEST_CAPABILITY_ID,
+    )
+}
+
+fn normalize_pull_request_ref_with_capability(
+    value: &JsonValue,
+    owner: &str,
+    repo: &str,
+    capability_id: &str,
+) -> Result<GithubPullRequestRef, GithubIssueWorkflowError> {
+    let number = required_u64(value, &["number"], capability_id)?;
     let head_branch =
         optional_string(value, &[&["head", "ref"], &["head_branch"]]).ok_or_else(|| {
-            invalid_output(
-                GITHUB_CREATE_PULL_REQUEST_CAPABILITY_ID,
-                "pull request response is missing head.ref",
-            )
+            invalid_output(capability_id, "pull request response is missing head.ref")
         })?;
 
     Ok(GithubPullRequestRef {
@@ -1325,6 +1480,97 @@ fn normalize_pull_request_ref(
         head_branch,
         head_sha: optional_string(value, &[&["head", "sha"], &["head_sha"]]),
     })
+}
+
+fn normalize_combined_status_checks(
+    value: &JsonValue,
+    fallback_head_sha: Option<&str>,
+    limit: usize,
+) -> Result<Vec<GithubPullRequestCheckSnapshot>, GithubIssueWorkflowError> {
+    let statuses = match value {
+        JsonValue::Array(items) => items,
+        _ => required_array(
+            value,
+            &["statuses"],
+            GITHUB_GET_COMBINED_STATUS_CAPABILITY_ID,
+        )?,
+    };
+    statuses
+        .iter()
+        .take(limit)
+        .map(|status| {
+            let suite_or_run_id = optional_u64(status, &[&["id"]])
+                .map(|id| id.to_string())
+                .or_else(|| optional_string(status, &[&["node_id"], &["context"]]))
+                .ok_or_else(|| {
+                    invalid_output(
+                        GITHUB_GET_COMBINED_STATUS_CAPABILITY_ID,
+                        "combined status item is missing id or context",
+                    )
+                })?;
+            let head_sha = optional_string(status, &[&["sha"]])
+                .or_else(|| fallback_head_sha.map(ToString::to_string))
+                .ok_or_else(|| {
+                    invalid_output(
+                        GITHUB_GET_COMBINED_STATUS_CAPABILITY_ID,
+                        "combined status item is missing sha",
+                    )
+                })?;
+            let conclusion = optional_string(status, &[&["state"]])
+                .map(|state| GithubCheckConclusion::from_provider(&state))
+                .unwrap_or(GithubCheckConclusion::Unknown);
+            Ok(GithubPullRequestCheckSnapshot {
+                suite_or_run_id,
+                name: optional_string(status, &[&["context"], &["name"]]).unwrap_or_default(),
+                head_sha,
+                conclusion,
+                completed_at: optional_rfc3339_datetime(
+                    status,
+                    &[&["updated_at"], &["created_at"]],
+                ),
+                details_url: optional_string(status, &[&["target_url"], &["url"]]),
+            })
+        })
+        .collect()
+}
+
+fn normalize_review_comments(
+    value: &JsonValue,
+) -> Result<Vec<GithubReviewCommentSnapshot>, GithubIssueWorkflowError> {
+    let comments = match value {
+        JsonValue::Array(items) => items,
+        _ => required_array(
+            value,
+            &["items"],
+            GITHUB_LIST_PULL_REQUEST_COMMENTS_CAPABILITY_ID,
+        )?,
+    };
+
+    comments
+        .iter()
+        .map(|comment| {
+            Ok(GithubReviewCommentSnapshot {
+                comment: normalize_comment_ref(
+                    comment,
+                    None,
+                    GITHUB_LIST_PULL_REQUEST_COMMENTS_CAPABILITY_ID,
+                )?,
+                body: optional_string(comment, &[&["body"]]).unwrap_or_default(),
+                author_login: optional_string(comment, &[&["user", "login"], &["author", "login"]])
+                    .unwrap_or_default(),
+                created_at: required_datetime(
+                    comment,
+                    &[&["created_at"]],
+                    GITHUB_LIST_PULL_REQUEST_COMMENTS_CAPABILITY_ID,
+                )?,
+                updated_at: required_datetime(
+                    comment,
+                    &[&["updated_at"], &["created_at"]],
+                    GITHUB_LIST_PULL_REQUEST_COMMENTS_CAPABILITY_ID,
+                )?,
+            })
+        })
+        .collect()
 }
 
 fn issue_like_url(value: &JsonValue, owner: &str, repo: &str, number: u64) -> String {
@@ -1416,6 +1662,18 @@ fn optional_rfc3339_datetime(value: &JsonValue, paths: &[&[&str]]) -> Option<Dat
             .ok()
             .map(|parsed| parsed.with_timezone(&Utc))
     })
+}
+
+fn optional_bool(value: &JsonValue, paths: &[&[&str]]) -> Option<bool> {
+    paths
+        .iter()
+        .find_map(|path| json_at_path(value, path).and_then(JsonValue::as_bool))
+}
+
+fn optional_u64(value: &JsonValue, paths: &[&[&str]]) -> Option<u64> {
+    paths
+        .iter()
+        .find_map(|path| json_at_path(value, path).and_then(JsonValue::as_u64))
 }
 
 fn optional_string(value: &JsonValue, paths: &[&[&str]]) -> Option<String> {

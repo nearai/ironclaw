@@ -54,6 +54,10 @@ pub enum GithubIssueWorkflowEventType {
     GithubPullRequestUpdated,
     #[serde(rename = "github.checks.changed")]
     GithubChecksChanged,
+    #[serde(rename = "github.checks.failed")]
+    GithubChecksFailed,
+    #[serde(rename = "github.checks.succeeded")]
+    GithubChecksSucceeded,
     #[serde(rename = "github.review_comment.created")]
     GithubReviewCommentCreated,
     #[serde(rename = "stage.completed")]
@@ -106,6 +110,12 @@ pub struct GithubPullRequestOpenedPayload {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GithubPullRequestUpdatedPayload {
     pub pull_request: GithubPullRequestRef,
+    #[serde(default)]
+    pub state: String,
+    #[serde(default)]
+    pub merged: bool,
+    #[serde(default)]
+    pub draft: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -158,8 +168,30 @@ pub fn issue_changed_key(
     ))
 }
 
+pub fn issue_closed_key(
+    issue: &GithubIssueRef,
+    closed_at: Option<DateTime<Utc>>,
+) -> WorkflowIdempotencyKey {
+    WorkflowIdempotencyKey::from_generated(format!(
+        "issue:{}:closed:{}",
+        issue_identity(issue),
+        timestamp_identity(closed_at)
+    ))
+}
+
 pub fn pr_opened_key(pr: &GithubPullRequestRef) -> WorkflowIdempotencyKey {
     WorkflowIdempotencyKey::from_generated(format!("pr:{}:opened", pr_identity(pr)))
+}
+
+pub fn pr_updated_key(
+    pr: &GithubPullRequestRef,
+    provider_updated_at: Option<DateTime<Utc>>,
+) -> WorkflowIdempotencyKey {
+    WorkflowIdempotencyKey::from_generated(format!(
+        "pr:{}:updated:{}",
+        pr_identity(pr),
+        timestamp_identity(provider_updated_at)
+    ))
 }
 
 pub fn checks_changed_key(
@@ -170,6 +202,14 @@ pub fn checks_changed_key(
     WorkflowIdempotencyKey::from_generated(format!(
         "checks:{head_sha}:{suite_or_run_id}:{conclusion}"
     ))
+}
+
+pub fn checks_failed_key(head_sha: &str, suite_or_run_id: &str) -> WorkflowIdempotencyKey {
+    WorkflowIdempotencyKey::from_generated(format!("checks:{head_sha}:{suite_or_run_id}:failed"))
+}
+
+pub fn checks_succeeded_key(head_sha: &str, suite_or_run_id: &str) -> WorkflowIdempotencyKey {
+    WorkflowIdempotencyKey::from_generated(format!("checks:{head_sha}:{suite_or_run_id}:succeeded"))
 }
 
 pub fn review_comment_created_key(comment_node_id: &str) -> WorkflowIdempotencyKey {

@@ -62,6 +62,7 @@ mod provider_action_contract {
                 creator_user_id: user(),
                 agent_id: Some(agent()),
                 project_id: Some(project()),
+                provider_account_ref: None,
                 issue_ref,
                 workflow_policy_key: "github-bug-workflow".to_string(),
                 workflow_policy_version: "2026-06-22".to_string(),

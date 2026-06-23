@@ -14,8 +14,10 @@ use crate::{
     GithubIssueWorkflowEventType, GithubIssueWorkflowMode, GithubIssueWorkflowPort,
     GithubIssueWorkflowRepository, GithubIssueWorkflowRun, GithubIssueWorkflowRunId,
     GithubIssueWorkflowRunStatus, GithubIssueWorkspaceSession, GithubIssueWorkspaceSessionId,
-    GithubRepositorySelector, ListWorkflowEventsAfterInput, PrepareWorkflowWorkspaceRequest,
-    ProviderActionRunOutcome, ProviderContentSummary, RepositorySnapshot, StageCompletedPayload,
+    GithubPullRequestRef, GithubPullRequestUpdatedPayload, GithubRepositorySelector,
+    GithubReviewCommentCreatedPayload, ListWorkflowEventsAfterInput,
+    PrepareWorkflowWorkspaceRequest, ProviderActionRunOutcome, ProviderContentSummary,
+    RepositorySnapshot, RunDraftPullRequestProviderActionRequest, StageCompletedPayload,
     StageConstraintSnapshot, StageTurnIdentity, StageTurnSubmitter, SubmitStageTurnOutcome,
     SubmitStageTurnRequest, TransitionOutcome, WorkflowActorScope, WorkflowClock,
     WorkflowIdempotencyKey, WorkflowProjectAccess, WorkflowProjectAccessRequest,
@@ -64,12 +66,20 @@ pub struct WorkflowPolicyTickOutcome {
 
 enum PrepareWorkspaceStepOutcome {
     Prepared {
-        session: GithubIssueWorkspaceSession,
+        session: Box<GithubIssueWorkspaceSession>,
         step: WorkflowStepRun,
     },
     NotReady {
         step: WorkflowStepRun,
     },
+}
+
+struct PrSynthesisResult {
+    title: String,
+    body: String,
+    head_branch: String,
+    base_branch: String,
+    head_sha: String,
 }
 
 pub trait GithubIssueWorkflowPolicyPorts: Send + Sync {
@@ -151,6 +161,22 @@ where
             GithubIssueWorkflowEventType::StageCompleted => {
                 self.process_stage_completed(run, event).await
             }
+            GithubIssueWorkflowEventType::GithubPullRequestOpened
+            | GithubIssueWorkflowEventType::GithubPullRequestUpdated => {
+                self.process_pull_request_updated(run, event).await
+            }
+            GithubIssueWorkflowEventType::GithubChecksFailed => {
+                self.process_checks_failed(run, event).await
+            }
+            GithubIssueWorkflowEventType::GithubChecksSucceeded => {
+                self.process_checks_succeeded(run, event).await
+            }
+            GithubIssueWorkflowEventType::GithubReviewCommentCreated => {
+                self.process_review_comment_created(run, event).await
+            }
+            GithubIssueWorkflowEventType::GithubIssueClosed => {
+                self.process_issue_closed(run, event).await
+            }
             _ => {
                 let run = self
                     .advance_run_cursor(run, event.sequence, WorkflowRunTransition::default())
@@ -182,7 +208,7 @@ where
         }
 
         let (run, start_stage_step) = self
-            .start_stage_step(run, GithubIssueStage::Triage, None)
+            .start_stage_step(run, GithubIssueStage::Triage, None, None)
             .await?;
         let stage_submitted = start_stage_step.status == WorkflowStepStatus::Succeeded;
         steps.push(start_stage_step);
@@ -227,7 +253,7 @@ where
                 ) =>
             {
                 let (run, step) = self
-                    .start_stage_step(run, GithubIssueStage::Planning, None)
+                    .start_stage_step(run, GithubIssueStage::Planning, None, None)
                     .await?;
                 if step.status != WorkflowStepStatus::Succeeded {
                     return Ok(WorkflowPolicyTickOutcome {
@@ -258,7 +284,7 @@ where
             {
                 let (workspace_session, workspace_step) =
                     match self.prepare_workspace_step(&run).await? {
-                        PrepareWorkspaceStepOutcome::Prepared { session, step } => (session, step),
+                        PrepareWorkspaceStepOutcome::Prepared { session, step } => (*session, step),
                         PrepareWorkspaceStepOutcome::NotReady { step } => {
                             return Ok(WorkflowPolicyTickOutcome {
                                 run,
@@ -272,6 +298,7 @@ where
                         run,
                         GithubIssueStage::Implementation,
                         Some(workspace_session.clone()),
+                        None,
                     )
                     .await?;
                 if start_step.status != WorkflowStepStatus::Succeeded {
@@ -299,6 +326,125 @@ where
                     steps: vec![workspace_step, start_step],
                 })
             }
+            GithubIssueStage::Implementation
+                if run.workflow_state.mode == GithubIssueWorkflowMode::Implementation =>
+            {
+                if !implementation_result_is_pr_ready(&payload.result) {
+                    let run = self
+                        .advance_run_cursor(run, event.sequence, WorkflowRunTransition::default())
+                        .await?;
+                    return Ok(WorkflowPolicyTickOutcome {
+                        run,
+                        processed_event_count: 1,
+                        steps: Vec::new(),
+                    });
+                }
+
+                let (run, step) = self
+                    .start_stage_step(run, GithubIssueStage::PrSynthesis, None, None)
+                    .await?;
+                if step.status != WorkflowStepStatus::Succeeded {
+                    return Ok(WorkflowPolicyTickOutcome {
+                        run,
+                        processed_event_count: 0,
+                        steps: vec![step],
+                    });
+                }
+                let run = self
+                    .advance_run_cursor(
+                        run,
+                        event.sequence,
+                        WorkflowRunTransition {
+                            mode: Some(GithubIssueWorkflowMode::PrSynthesis),
+                            clear_active_block: true,
+                            ..WorkflowRunTransition::default()
+                        },
+                    )
+                    .await?;
+                Ok(WorkflowPolicyTickOutcome {
+                    run,
+                    processed_event_count: 1,
+                    steps: vec![step],
+                })
+            }
+            GithubIssueStage::PrSynthesis
+                if run.workflow_state.mode == GithubIssueWorkflowMode::PrSynthesis =>
+            {
+                let pr_result = pr_synthesis_result(&payload.result)?;
+                let (step, primary_pr) = self
+                    .draft_pull_request_step(&run, payload.stage_run_id.clone(), pr_result)
+                    .await?;
+                if step.status != WorkflowStepStatus::Succeeded {
+                    return Ok(WorkflowPolicyTickOutcome {
+                        run,
+                        processed_event_count: 0,
+                        steps: vec![step],
+                    });
+                }
+                let Some(primary_pr) = primary_pr else {
+                    return Err(GithubIssueWorkflowError::Policy {
+                        reason: "completed draft pull request step did not return a pull request"
+                            .to_string(),
+                    });
+                };
+                let run = self
+                    .advance_run_cursor(
+                        run,
+                        event.sequence,
+                        WorkflowRunTransition {
+                            mode: Some(GithubIssueWorkflowMode::PrOpen),
+                            primary_pr: Some(primary_pr),
+                            clear_active_block: true,
+                            ..WorkflowRunTransition::default()
+                        },
+                    )
+                    .await?;
+                Ok(WorkflowPolicyTickOutcome {
+                    run,
+                    processed_event_count: 1,
+                    steps: vec![step],
+                })
+            }
+            GithubIssueStage::CiRepair
+                if run.workflow_state.mode == GithubIssueWorkflowMode::CiRepair =>
+            {
+                let run = self
+                    .advance_run_cursor(
+                        run,
+                        event.sequence,
+                        WorkflowRunTransition {
+                            mode: Some(GithubIssueWorkflowMode::PrOpen),
+                            clear_active_block: true,
+                            ..WorkflowRunTransition::default()
+                        },
+                    )
+                    .await?;
+                Ok(WorkflowPolicyTickOutcome {
+                    run,
+                    processed_event_count: 1,
+                    steps: Vec::new(),
+                })
+            }
+            GithubIssueStage::ReviewResponse
+                if run.workflow_state.mode == GithubIssueWorkflowMode::ReviewResponse =>
+            {
+                let run = self
+                    .advance_run_cursor(
+                        run,
+                        event.sequence,
+                        WorkflowRunTransition {
+                            mode: Some(GithubIssueWorkflowMode::PrOpen),
+                            clear_active_block: true,
+                            ..WorkflowRunTransition::default()
+                        },
+                    )
+                    .await?;
+                Ok(WorkflowPolicyTickOutcome {
+                    run,
+                    processed_event_count: 1,
+                    steps: Vec::new(),
+                })
+            }
             _ => {
                 let run = self
                     .advance_run_cursor(run, event.sequence, WorkflowRunTransition::default())
@@ -310,6 +456,166 @@ where
                 })
             }
         }
+    }
+
+    async fn process_pull_request_updated(
+        &self,
+        run: GithubIssueWorkflowRun,
+        event: GithubIssueWorkflowEvent,
+    ) -> Result<WorkflowPolicyTickOutcome, GithubIssueWorkflowError> {
+        let payload: GithubPullRequestUpdatedPayload =
+            serde_json::from_value(event.payload.clone()).map_err(policy_serde_error)?;
+        let mut transition = WorkflowRunTransition {
+            primary_pr: Some(payload.pull_request),
+            clear_active_block: true,
+            ..WorkflowRunTransition::default()
+        };
+        if payload.merged {
+            transition.status = Some(GithubIssueWorkflowRunStatus::Succeeded);
+            transition.mode = Some(GithubIssueWorkflowMode::Done);
+        } else {
+            transition.mode = Some(GithubIssueWorkflowMode::PrOpen);
+        }
+        let run = self
+            .advance_run_cursor(run, event.sequence, transition)
+            .await?;
+        Ok(WorkflowPolicyTickOutcome {
+            run,
+            processed_event_count: 1,
+            steps: Vec::new(),
+        })
+    }
+
+    async fn process_checks_failed(
+        &self,
+        run: GithubIssueWorkflowRun,
+        event: GithubIssueWorkflowEvent,
+    ) -> Result<WorkflowPolicyTickOutcome, GithubIssueWorkflowError> {
+        let payload: crate::GithubChecksChangedPayload =
+            serde_json::from_value(event.payload.clone()).map_err(policy_serde_error)?;
+        let (run, step) = self
+            .start_stage_step(
+                run,
+                GithubIssueStage::CiRepair,
+                None,
+                Some(&event.idempotency_key),
+            )
+            .await?;
+        if step.status != WorkflowStepStatus::Succeeded {
+            return Ok(WorkflowPolicyTickOutcome {
+                run,
+                processed_event_count: 0,
+                steps: vec![step],
+            });
+        }
+        let run = self
+            .advance_run_cursor(
+                run,
+                event.sequence,
+                WorkflowRunTransition {
+                    mode: Some(GithubIssueWorkflowMode::CiRepair),
+                    primary_pr: payload.pull_request,
+                    clear_active_block: true,
+                    ..WorkflowRunTransition::default()
+                },
+            )
+            .await?;
+        Ok(WorkflowPolicyTickOutcome {
+            run,
+            processed_event_count: 1,
+            steps: vec![step],
+        })
+    }
+
+    async fn process_checks_succeeded(
+        &self,
+        run: GithubIssueWorkflowRun,
+        event: GithubIssueWorkflowEvent,
+    ) -> Result<WorkflowPolicyTickOutcome, GithubIssueWorkflowError> {
+        let payload: crate::GithubChecksChangedPayload =
+            serde_json::from_value(event.payload.clone()).map_err(policy_serde_error)?;
+        let run = self
+            .advance_run_cursor(
+                run,
+                event.sequence,
+                WorkflowRunTransition {
+                    mode: Some(GithubIssueWorkflowMode::PrOpen),
+                    primary_pr: payload.pull_request,
+                    clear_active_block: true,
+                    ..WorkflowRunTransition::default()
+                },
+            )
+            .await?;
+        Ok(WorkflowPolicyTickOutcome {
+            run,
+            processed_event_count: 1,
+            steps: Vec::new(),
+        })
+    }
+
+    async fn process_review_comment_created(
+        &self,
+        run: GithubIssueWorkflowRun,
+        event: GithubIssueWorkflowEvent,
+    ) -> Result<WorkflowPolicyTickOutcome, GithubIssueWorkflowError> {
+        let payload: GithubReviewCommentCreatedPayload =
+            serde_json::from_value(event.payload.clone()).map_err(policy_serde_error)?;
+        let (run, step) = self
+            .start_stage_step(
+                run,
+                GithubIssueStage::ReviewResponse,
+                None,
+                Some(&event.idempotency_key),
+            )
+            .await?;
+        if step.status != WorkflowStepStatus::Succeeded {
+            return Ok(WorkflowPolicyTickOutcome {
+                run,
+                processed_event_count: 0,
+                steps: vec![step],
+            });
+        }
+        let run = self
+            .advance_run_cursor(
+                run,
+                event.sequence,
+                WorkflowRunTransition {
+                    mode: Some(GithubIssueWorkflowMode::ReviewResponse),
+                    primary_pr: payload.pull_request,
+                    clear_active_block: true,
+                    ..WorkflowRunTransition::default()
+                },
+            )
+            .await?;
+        Ok(WorkflowPolicyTickOutcome {
+            run,
+            processed_event_count: 1,
+            steps: vec![step],
+        })
+    }
+
+    async fn process_issue_closed(
+        &self,
+        run: GithubIssueWorkflowRun,
+        event: GithubIssueWorkflowEvent,
+    ) -> Result<WorkflowPolicyTickOutcome, GithubIssueWorkflowError> {
+        let run = self
+            .advance_run_cursor(
+                run,
+                event.sequence,
+                WorkflowRunTransition {
+                    status: Some(GithubIssueWorkflowRunStatus::Cancelled),
+                    mode: Some(GithubIssueWorkflowMode::Done),
+                    clear_active_block: true,
+                    ..WorkflowRunTransition::default()
+                },
+            )
+            .await?;
+        Ok(WorkflowPolicyTickOutcome {
+            run,
+            processed_event_count: 1,
+            steps: Vec::new(),
+        })
     }
 
     async fn claim_issue_step(
@@ -361,6 +667,89 @@ where
         self.complete_step(step, status, Some(result), None).await
     }
 
+    async fn draft_pull_request_step(
+        &self,
+        run: &GithubIssueWorkflowRun,
+        stage_run_id: crate::GithubIssueStageRunId,
+        pr_result: PrSynthesisResult,
+    ) -> Result<(WorkflowStepRun, Option<GithubPullRequestRef>), GithubIssueWorkflowError> {
+        let input = json!({
+            "workflow_run_id": run.workflow_run_id,
+            "stage_run_id": stage_run_id,
+            "title": pr_result.title.clone(),
+            "body": pr_result.body.clone(),
+            "head_branch": pr_result.head_branch.clone(),
+            "base_branch": pr_result.base_branch.clone(),
+            "head_sha": pr_result.head_sha.clone(),
+            "policy_version": self.policy_version,
+        });
+        let step = self
+            .create_or_get_step(run, "create_or_update_pr", &input)
+            .await?;
+        if workflow_step_replays(&step.status) {
+            let primary_pr = step
+                .result
+                .as_ref()
+                .map(provider_action_outcome_primary_pr)
+                .transpose()?
+                .flatten();
+            return Ok((step, primary_pr));
+        }
+        let now = self.ports.clock().now();
+        if workflow_step_waits_for_retry(&step, now) {
+            return Ok((step, None));
+        }
+
+        let Some(provider_account_ref) = run.provider_account_ref.clone() else {
+            return Err(GithubIssueWorkflowError::Policy {
+                reason: format!(
+                    "workflow run `{}` has no provider account ref for draft pull request",
+                    run.workflow_run_id
+                ),
+            });
+        };
+
+        let runner =
+            GithubIssueProviderActionRunner::new(self.ports.repository(), self.ports.github_port());
+        let outcome = runner
+            .run_draft_pull_request(RunDraftPullRequestProviderActionRequest {
+                run: run.clone(),
+                stage_run_id: Some(stage_run_id),
+                title: pr_result.title,
+                body: pr_result.body,
+                head_branch: pr_result.head_branch,
+                base_branch: pr_result.base_branch,
+                head_sha: pr_result.head_sha,
+                provider_account_ref,
+                worker_id: self.ports.worker_id(),
+                now,
+                lease_expires_at: self.ports.provider_action_lease_expires_at(),
+            })
+            .await?;
+
+        let primary_pr = provider_action_outcome_primary_pr_from_outcome(&outcome)?;
+        let status = match &outcome {
+            ProviderActionRunOutcome::Succeeded { .. }
+            | ProviderActionRunOutcome::Replayed { .. } => WorkflowStepStatus::Succeeded,
+            ProviderActionRunOutcome::Busy { .. } => WorkflowStepStatus::Retryable,
+            ProviderActionRunOutcome::NeedsReconciliation { .. } => WorkflowStepStatus::Blocked,
+            ProviderActionRunOutcome::Failed { .. } => WorkflowStepStatus::Failed,
+        };
+        let result = serde_json::to_value(&outcome).map_err(policy_serde_error)?;
+        if let ProviderActionRunOutcome::Busy { action } = outcome {
+            let next_attempt_at = action
+                .lease_expires_at
+                .unwrap_or(now + Duration::seconds(DEFAULT_BUSY_RETRY_SECONDS));
+            let step = self
+                .retry_step(step, Some(result), None, next_attempt_at)
+                .await?;
+            return Ok((step, None));
+        }
+
+        let step = self.complete_step(step, status, Some(result), None).await?;
+        Ok((step, primary_pr))
+    }
+
     async fn prepare_workspace_step(
         &self,
         run: &GithubIssueWorkflowRun,
@@ -384,7 +773,10 @@ where
                 run,
                 step.completed_at.unwrap_or(step.started_at),
             )?;
-            return Ok(PrepareWorkspaceStepOutcome::Prepared { session, step });
+            return Ok(PrepareWorkspaceStepOutcome::Prepared {
+                session: Box::new(session),
+                step,
+            });
         }
         let now = self.ports.clock().now();
         if workflow_step_waits_for_retry(&step, now) {
@@ -428,7 +820,7 @@ where
             .complete_step(step, WorkflowStepStatus::Succeeded, Some(result), None)
             .await?;
         Ok(PrepareWorkspaceStepOutcome::Prepared {
-            session,
+            session: Box::new(session),
             step: completed,
         })
     }
@@ -438,17 +830,22 @@ where
         run: GithubIssueWorkflowRun,
         stage: GithubIssueStage,
         workspace_session: Option<GithubIssueWorkspaceSession>,
+        trigger_idempotency_key: Option<&WorkflowIdempotencyKey>,
     ) -> Result<(GithubIssueWorkflowRun, WorkflowStepRun), GithubIssueWorkflowError> {
         let workspace_mount_ref = workspace_session
             .as_ref()
-            .map(|session| session.mount_ref.clone());
+            .map(|session| session.mount_ref.clone())
+            .or_else(|| run.workflow_state.current_workspace_mount_ref.clone());
+        let trigger_idempotency_key_value =
+            trigger_idempotency_key.map(|key| key.as_str().to_string());
         let input = json!({
             "workflow_run_id": run.workflow_run_id,
             "stage": stage_slug(&stage),
             "workspace_mount_ref": workspace_mount_ref,
+            "trigger_idempotency_key": trigger_idempotency_key_value,
             "policy_version": self.policy_version,
         });
-        let step_name = format!("start_stage:{}", stage_slug(&stage));
+        let step_name = Self::start_stage_step_name(&stage, trigger_idempotency_key);
         let step = self.create_or_get_step(&run, &step_name, &input).await?;
         if workflow_step_replays(&step.status) {
             return Ok((run, step));
@@ -758,6 +1155,20 @@ where
         }
     }
 
+    fn start_stage_step_name(
+        stage: &GithubIssueStage,
+        trigger_idempotency_key: Option<&WorkflowIdempotencyKey>,
+    ) -> String {
+        let base = format!("start_stage:{}", stage_slug(stage));
+        let Some(trigger_idempotency_key) = trigger_idempotency_key else {
+            return base;
+        };
+
+        let mut hasher = Sha256::new();
+        hasher.update(trigger_idempotency_key.as_str().as_bytes());
+        format!("{base}:trigger:{:x}", hasher.finalize())
+    }
+
     async fn create_or_get_step<T>(
         &self,
         run: &GithubIssueWorkflowRun,
@@ -1015,6 +1426,66 @@ fn stage_completed_payload(
     event: &GithubIssueWorkflowEvent,
 ) -> Result<StageCompletedPayload, GithubIssueWorkflowError> {
     serde_json::from_value(event.payload.clone()).map_err(policy_serde_error)
+}
+
+fn implementation_result_is_pr_ready(result: &JsonValue) -> bool {
+    result
+        .pointer("/payload/pr_ready")
+        .and_then(JsonValue::as_bool)
+        .unwrap_or(false)
+}
+
+fn pr_synthesis_result(result: &JsonValue) -> Result<PrSynthesisResult, GithubIssueWorkflowError> {
+    Ok(PrSynthesisResult {
+        title: required_payload_string(result, "title")?,
+        body: required_payload_string(result, "body")?,
+        head_branch: required_payload_string(result, "branch_name")?,
+        base_branch: required_payload_string(result, "base_branch")?,
+        head_sha: required_payload_string(result, "head_sha")?,
+    })
+}
+
+fn required_payload_string(
+    result: &JsonValue,
+    field: &str,
+) -> Result<String, GithubIssueWorkflowError> {
+    result
+        .pointer(&format!("/payload/{field}"))
+        .and_then(JsonValue::as_str)
+        .filter(|value| !value.trim().is_empty())
+        .map(str::to_string)
+        .ok_or_else(|| GithubIssueWorkflowError::Policy {
+            reason: format!("stage result payload missing required field `{field}`"),
+        })
+}
+
+fn provider_action_outcome_primary_pr(
+    value: &JsonValue,
+) -> Result<Option<GithubPullRequestRef>, GithubIssueWorkflowError> {
+    let outcome = serde_json::from_value::<ProviderActionRunOutcome>(value.clone())
+        .map_err(policy_serde_error)?;
+    provider_action_outcome_primary_pr_from_outcome(&outcome)
+}
+
+fn provider_action_outcome_primary_pr_from_outcome(
+    outcome: &ProviderActionRunOutcome,
+) -> Result<Option<GithubPullRequestRef>, GithubIssueWorkflowError> {
+    let action = match outcome {
+        ProviderActionRunOutcome::Succeeded { action, .. }
+        | ProviderActionRunOutcome::Replayed { action }
+        | ProviderActionRunOutcome::NeedsReconciliation { action }
+        | ProviderActionRunOutcome::Failed { action }
+        | ProviderActionRunOutcome::Busy { action } => action,
+    };
+    let Some(result) = action.result.as_ref() else {
+        return Ok(None);
+    };
+    let Some(pull_request) = result.get("pull_request") else {
+        return Ok(None);
+    };
+    serde_json::from_value(pull_request.clone())
+        .map(Some)
+        .map_err(policy_serde_error)
 }
 
 fn workflow_input_hash<T>(label: &str, input: &T) -> Result<String, GithubIssueWorkflowError>

@@ -79,6 +79,7 @@ pub fn workflow_run_input(
         creator_user_id: user(case, 1),
         agent_id: Some(agent(case, 1)),
         project_id: Some(project(case, 1)),
+        provider_account_ref: None,
         issue_ref,
         workflow_policy_key: "github-bug-workflow".to_string(),
         workflow_policy_version: "2026-06-22".to_string(),

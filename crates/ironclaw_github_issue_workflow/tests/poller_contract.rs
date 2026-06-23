@@ -5,20 +5,24 @@ mod poller_contract {
     use async_trait::async_trait;
     use chrono::{TimeZone, Utc};
     use ironclaw_github_issue_workflow::{
-        CreateIssueCommentInput, CreateOrGetWorkflowRunInput, CreateOrGetWorkflowRunOutcome,
-        GetAuthenticatedWorkflowActorInput, GetGithubIssueInput, GithubActorSnapshot,
-        GithubCommentRef, GithubIssueCommentSnapshot, GithubIssueProviderSnapshot,
-        GithubIssueSearchHit, GithubIssueWorkflowConfig, GithubIssueWorkflowConfigSource,
-        GithubIssueWorkflowError, GithubIssueWorkflowEventType, GithubIssueWorkflowPolicyPorts,
-        GithubIssueWorkflowPoller, GithubIssueWorkflowPollerConfig, GithubIssueWorkflowPollerPorts,
-        GithubIssueWorkflowPort, GithubIssueWorkflowRepository, GithubIssueWorkflowRun,
-        GithubIssueWorkspaceSession, GithubIssueWorkspaceSessionId, GithubProviderAccountRef,
-        GithubRepositorySelector, InMemoryGithubIssueWorkflowRepository, ListIssueCommentsInput,
+        AdvanceWorkflowRunInput, ClaimRunnableWorkflowRunsInput, CreateIssueCommentInput,
+        CreateOrGetWorkflowRunInput, CreateOrGetWorkflowRunOutcome,
+        GetAuthenticatedWorkflowActorInput, GetGithubIssueInput, GetPullRequestInput,
+        GithubActorSnapshot, GithubCheckConclusion, GithubCommentRef, GithubIssueCommentSnapshot,
+        GithubIssueProviderSnapshot, GithubIssueSearchHit, GithubIssueWorkflowConfig,
+        GithubIssueWorkflowConfigSource, GithubIssueWorkflowError, GithubIssueWorkflowEventType,
+        GithubIssueWorkflowMode, GithubIssueWorkflowPolicyPorts, GithubIssueWorkflowPoller,
+        GithubIssueWorkflowPollerConfig, GithubIssueWorkflowPollerPorts, GithubIssueWorkflowPort,
+        GithubIssueWorkflowRepository, GithubIssueWorkflowRun, GithubIssueWorkspaceSession,
+        GithubIssueWorkspaceSessionId, GithubProviderAccountRef, GithubPullRequestCheckSnapshot,
+        GithubPullRequestRef, GithubPullRequestSnapshot, GithubRepositorySelector,
+        GithubReviewCommentSnapshot, InMemoryGithubIssueWorkflowRepository, ListIssueCommentsInput,
+        ListPullRequestChecksInput, ListPullRequestReviewCommentsInput,
         PrepareWorkflowWorkspaceOutcome, PrepareWorkflowWorkspaceRequest, SearchGithubIssuesInput,
-        StageTurnSubmitter, SubmitStageTurnOutcome, SubmitStageTurnRequest, WorkflowClock,
-        WorkflowConfigAccessRequest, WorkflowProjectAccess, WorkflowProjectAccessRequest,
-        WorkflowWorkerId, WorkflowWorkspaceManager, WorkflowWorkspaceMountRef,
-        WorkflowWorkspaceRef,
+        StageTurnSubmitter, SubmitStageTurnOutcome, SubmitStageTurnRequest, TransitionOutcome,
+        WorkflowClock, WorkflowConfigAccessRequest, WorkflowProjectAccess,
+        WorkflowProjectAccessRequest, WorkflowRunTransition, WorkflowWorkerId,
+        WorkflowWorkspaceManager, WorkflowWorkspaceMountRef, WorkflowWorkspaceRef,
     };
     use ironclaw_host_api::{ProjectId, TenantId, ThreadId, UserId};
     use ironclaw_turns::TurnRunId;
@@ -113,6 +117,61 @@ mod poller_contract {
         }
     }
 
+    fn pull_request_snapshot(updated_at: i64, merged: bool) -> GithubPullRequestSnapshot {
+        GithubPullRequestSnapshot {
+            pull_request: GithubPullRequestRef {
+                owner: "nearai".to_string(),
+                repo: "ironclaw".to_string(),
+                number: 12,
+                node_id: Some("pr-node-poller-12".to_string()),
+                url: "https://github.com/nearai/ironclaw/pull/12".to_string(),
+                head_branch: "ironclaw/fix-42".to_string(),
+                head_sha: Some("head-sha-poller".to_string()),
+            },
+            title: "Fix bug 42".to_string(),
+            body: "Draft PR".to_string(),
+            state: if merged { "closed" } else { "open" }.to_string(),
+            draft: false,
+            merged,
+            updated_at: Some(fixed_time(updated_at)),
+        }
+    }
+
+    fn failed_check() -> GithubPullRequestCheckSnapshot {
+        GithubPullRequestCheckSnapshot {
+            suite_or_run_id: "clippy".to_string(),
+            name: "clippy".to_string(),
+            head_sha: "head-sha-poller".to_string(),
+            conclusion: GithubCheckConclusion::Failure,
+            completed_at: Some(fixed_time(310)),
+            details_url: Some("https://github.com/nearai/ironclaw/actions/runs/1".to_string()),
+        }
+    }
+
+    fn successful_check() -> GithubPullRequestCheckSnapshot {
+        GithubPullRequestCheckSnapshot {
+            suite_or_run_id: "test".to_string(),
+            name: "test".to_string(),
+            head_sha: "head-sha-poller".to_string(),
+            conclusion: GithubCheckConclusion::Success,
+            completed_at: Some(fixed_time(311)),
+            details_url: Some("https://github.com/nearai/ironclaw/actions/runs/2".to_string()),
+        }
+    }
+
+    fn review_comment() -> GithubReviewCommentSnapshot {
+        GithubReviewCommentSnapshot {
+            comment: GithubCommentRef {
+                node_id: Some("review-comment-node-poller".to_string()),
+                url: "https://github.com/nearai/ironclaw/pull/12#discussion_r1".to_string(),
+            },
+            body: "Please add a regression test.".to_string(),
+            author_login: "reviewer".to_string(),
+            created_at: fixed_time(320),
+            updated_at: fixed_time(320),
+        }
+    }
+
     #[derive(Debug)]
     struct FakeClock {
         now: StdMutex<chrono::DateTime<Utc>>,
@@ -159,10 +218,16 @@ mod poller_contract {
         search_results: Mutex<HashMap<(String, String), Vec<GithubIssueSearchHit>>>,
         issue_snapshots: Mutex<HashMap<(String, String, u64), GithubIssueProviderSnapshot>>,
         comments: Mutex<HashMap<(String, String, u64), Vec<GithubIssueCommentSnapshot>>>,
+        pull_requests: Mutex<HashMap<(String, String, u64), GithubPullRequestSnapshot>>,
+        checks: Mutex<HashMap<(String, String, u64), Vec<GithubPullRequestCheckSnapshot>>>,
+        review_comments: Mutex<HashMap<(String, String, u64), Vec<GithubReviewCommentSnapshot>>>,
         rate_limited_repos: Mutex<Vec<(String, String)>>,
         search_calls: Mutex<Vec<SearchGithubIssuesInput>>,
         get_issue_calls: Mutex<Vec<GetGithubIssueInput>>,
         list_comment_calls: Mutex<Vec<ListIssueCommentsInput>>,
+        get_pull_request_calls: Mutex<Vec<GetPullRequestInput>>,
+        list_check_calls: Mutex<Vec<ListPullRequestChecksInput>>,
+        list_review_comment_calls: Mutex<Vec<ListPullRequestReviewCommentsInput>>,
         create_comment_bodies: Mutex<Vec<String>>,
     }
 
@@ -220,6 +285,65 @@ mod poller_contract {
             );
         }
 
+        async fn clear_search_results(&self, owner: &str, repo: &str) {
+            self.search_results
+                .lock()
+                .await
+                .insert((owner.to_string(), repo.to_string()), Vec::new());
+        }
+
+        async fn set_issue_snapshot(&self, snapshot: GithubIssueProviderSnapshot) {
+            self.issue_snapshots.lock().await.insert(
+                (
+                    snapshot.owner.clone(),
+                    snapshot.repo.clone(),
+                    snapshot.number,
+                ),
+                snapshot,
+            );
+        }
+
+        async fn set_pull_request(&self, snapshot: GithubPullRequestSnapshot) {
+            self.pull_requests.lock().await.insert(
+                (
+                    snapshot.pull_request.owner.clone(),
+                    snapshot.pull_request.repo.clone(),
+                    snapshot.pull_request.number,
+                ),
+                snapshot,
+            );
+        }
+
+        async fn set_checks(
+            &self,
+            pull_request: &GithubPullRequestRef,
+            checks: Vec<GithubPullRequestCheckSnapshot>,
+        ) {
+            self.checks.lock().await.insert(
+                (
+                    pull_request.owner.clone(),
+                    pull_request.repo.clone(),
+                    pull_request.number,
+                ),
+                checks,
+            );
+        }
+
+        async fn set_review_comments(
+            &self,
+            pull_request: &GithubPullRequestRef,
+            comments: Vec<GithubReviewCommentSnapshot>,
+        ) {
+            self.review_comments.lock().await.insert(
+                (
+                    pull_request.owner.clone(),
+                    pull_request.repo.clone(),
+                    pull_request.number,
+                ),
+                comments,
+            );
+        }
+
         async fn rate_limit_repo(&self, owner: &str, repo: &str) {
             self.rate_limited_repos
                 .lock()
@@ -237,6 +361,18 @@ mod poller_contract {
 
         async fn list_comment_calls(&self) -> Vec<ListIssueCommentsInput> {
             self.list_comment_calls.lock().await.clone()
+        }
+
+        async fn get_pull_request_calls(&self) -> Vec<GetPullRequestInput> {
+            self.get_pull_request_calls.lock().await.clone()
+        }
+
+        async fn list_check_calls(&self) -> Vec<ListPullRequestChecksInput> {
+            self.list_check_calls.lock().await.clone()
+        }
+
+        async fn list_review_comment_calls(&self) -> Vec<ListPullRequestReviewCommentsInput> {
+            self.list_review_comment_calls.lock().await.clone()
         }
 
         async fn created_comment_count(&self) -> usize {
@@ -305,6 +441,52 @@ mod poller_contract {
                 .lock()
                 .await
                 .get(&(input.issue.owner, input.issue.repo, input.issue.number))
+                .cloned()
+                .unwrap_or_default())
+        }
+
+        async fn get_pull_request(
+            &self,
+            input: GetPullRequestInput,
+        ) -> Result<GithubPullRequestSnapshot, GithubIssueWorkflowError> {
+            self.get_pull_request_calls.lock().await.push(input.clone());
+            self.pull_requests
+                .lock()
+                .await
+                .get(&(input.owner, input.repo, input.number))
+                .cloned()
+                .ok_or_else(|| GithubIssueWorkflowError::ProviderRead {
+                    reason: "missing fake pull request snapshot".to_string(),
+                })
+        }
+
+        async fn list_pull_request_checks(
+            &self,
+            input: ListPullRequestChecksInput,
+        ) -> Result<Vec<GithubPullRequestCheckSnapshot>, GithubIssueWorkflowError> {
+            self.list_check_calls.lock().await.push(input.clone());
+            Ok(self
+                .checks
+                .lock()
+                .await
+                .get(&(input.owner, input.repo, input.pull_request_number))
+                .cloned()
+                .unwrap_or_default())
+        }
+
+        async fn list_pull_request_review_comments(
+            &self,
+            input: ListPullRequestReviewCommentsInput,
+        ) -> Result<Vec<GithubReviewCommentSnapshot>, GithubIssueWorkflowError> {
+            self.list_review_comment_calls
+                .lock()
+                .await
+                .push(input.clone());
+            Ok(self
+                .review_comments
+                .lock()
+                .await
+                .get(&(input.owner, input.repo, input.pull_request_number))
                 .cloned()
                 .unwrap_or_default())
         }
@@ -616,6 +798,7 @@ mod poller_contract {
                 creator_user_id: config.owner_user_id.clone(),
                 agent_id: None,
                 project_id: Some(config.project_id.clone()),
+                provider_account_ref: Some(config.provider_account_ref.clone()),
                 issue_ref: issue,
                 workflow_policy_key: "github-bug-workflow".to_string(),
                 workflow_policy_version: "poller-contract-v1".to_string(),
@@ -628,6 +811,46 @@ mod poller_contract {
             CreateOrGetWorkflowRunOutcome::Created { .. } => {
                 panic!("poller should have created the workflow run")
             }
+        }
+    }
+
+    async fn set_run_primary_pr(
+        repository: &InMemoryGithubIssueWorkflowRepository,
+        run: GithubIssueWorkflowRun,
+        pull_request: GithubPullRequestRef,
+    ) -> GithubIssueWorkflowRun {
+        let claimed = repository
+            .claim_runnable_workflow_runs(ClaimRunnableWorkflowRunsInput {
+                tenant_id: run.tenant_id.clone(),
+                worker_id: worker(),
+                now: fixed_time(250),
+                lease_expires_at: fixed_time(310),
+                limit: 1,
+            })
+            .await
+            .unwrap()
+            .pop()
+            .expect("run should be claimable for test transition");
+        let outcome = repository
+            .advance_event_cursor_and_transition(AdvanceWorkflowRunInput {
+                workflow_run_id: claimed.workflow_run_id.clone(),
+                worker_id: worker(),
+                expected_workflow_run_version: claimed.workflow_run_version,
+                expected_event_cursor: claimed.event_cursor,
+                next_event_cursor: claimed.event_cursor,
+                transition: WorkflowRunTransition {
+                    mode: Some(GithubIssueWorkflowMode::PrOpen),
+                    primary_pr: Some(pull_request),
+                    clear_active_block: true,
+                    ..WorkflowRunTransition::default()
+                },
+                now: fixed_time(251),
+            })
+            .await
+            .unwrap();
+        match outcome {
+            TransitionOutcome::Applied { run } => run,
+            other => panic!("primary PR transition should apply: {other:?}"),
         }
     }
 
@@ -865,6 +1088,217 @@ mod poller_contract {
         assert_eq!(run.event_cursor, 1);
         assert!(run.active_stage_run_id.is_some());
         assert!(run.lease_owner.is_none());
+    }
+
+    #[tokio::test]
+    async fn poller_records_pr_check_and_review_lifecycle_events_for_active_run() {
+        let config = workflow_config("pr-refresh", "nearai", "ironclaw");
+        let ports = FakePollerPorts::new(vec![config.clone()]);
+        let snapshot = issue_snapshot("nearai", "ironclaw", 42, 100);
+        ports.github.add_issue(snapshot.clone()).await;
+        let poller = poller(ports);
+        poller.tick_once().await.unwrap();
+
+        let run = existing_run(&poller.ports().repository, &config, &snapshot).await;
+        let pr_snapshot = pull_request_snapshot(300, false);
+        let pull_request = pr_snapshot.pull_request.clone();
+        set_run_primary_pr(&poller.ports().repository, run, pull_request.clone()).await;
+        poller.ports().github.set_pull_request(pr_snapshot).await;
+        poller
+            .ports()
+            .github
+            .set_checks(&pull_request, vec![failed_check()])
+            .await;
+        poller
+            .ports()
+            .github
+            .set_review_comments(&pull_request, vec![review_comment()])
+            .await;
+
+        let outcome = poller.tick_once().await.unwrap();
+
+        assert_eq!(outcome.events_recorded, 3);
+        assert_eq!(
+            poller.ports().github.get_pull_request_calls().await.len(),
+            1
+        );
+        assert_eq!(poller.ports().github.list_check_calls().await.len(), 1);
+        assert_eq!(
+            poller
+                .ports()
+                .github
+                .list_review_comment_calls()
+                .await
+                .len(),
+            1
+        );
+        let run = existing_run(&poller.ports().repository, &config, &snapshot).await;
+        let events = poller
+            .ports()
+            .repository
+            .list_workflow_events_after(
+                ironclaw_github_issue_workflow::ListWorkflowEventsAfterInput {
+                    workflow_run_id: run.workflow_run_id,
+                    after_sequence: 0,
+                    limit: 10,
+                },
+            )
+            .await
+            .unwrap();
+        let event_types: Vec<_> = events
+            .iter()
+            .map(|event| event.workflow_event_type.clone())
+            .collect();
+        assert!(event_types.contains(&GithubIssueWorkflowEventType::GithubPullRequestUpdated));
+        assert!(event_types.contains(&GithubIssueWorkflowEventType::GithubChecksFailed));
+        assert!(event_types.contains(&GithubIssueWorkflowEventType::GithubReviewCommentCreated));
+    }
+
+    #[tokio::test]
+    async fn poller_does_not_record_check_success_when_any_check_failed() {
+        let config = workflow_config("mixed-checks", "nearai", "ironclaw");
+        let ports = FakePollerPorts::new(vec![config.clone()]);
+        let snapshot = issue_snapshot("nearai", "ironclaw", 42, 100);
+        ports.github.add_issue(snapshot.clone()).await;
+        let poller = poller(ports);
+        poller.tick_once().await.unwrap();
+
+        let run = existing_run(&poller.ports().repository, &config, &snapshot).await;
+        let pr_snapshot = pull_request_snapshot(300, false);
+        let pull_request = pr_snapshot.pull_request.clone();
+        set_run_primary_pr(&poller.ports().repository, run, pull_request.clone()).await;
+        poller.ports().github.set_pull_request(pr_snapshot).await;
+        poller
+            .ports()
+            .github
+            .set_checks(&pull_request, vec![failed_check(), successful_check()])
+            .await;
+
+        let outcome = poller.tick_once().await.unwrap();
+
+        assert_eq!(outcome.events_recorded, 2);
+        let run = existing_run(&poller.ports().repository, &config, &snapshot).await;
+        let events = poller
+            .ports()
+            .repository
+            .list_workflow_events_after(
+                ironclaw_github_issue_workflow::ListWorkflowEventsAfterInput {
+                    workflow_run_id: run.workflow_run_id,
+                    after_sequence: 0,
+                    limit: 10,
+                },
+            )
+            .await
+            .unwrap();
+        let event_types: Vec<_> = events
+            .iter()
+            .map(|event| event.workflow_event_type.clone())
+            .collect();
+        assert!(event_types.contains(&GithubIssueWorkflowEventType::GithubChecksFailed));
+        assert!(!event_types.contains(&GithubIssueWorkflowEventType::GithubChecksSucceeded));
+    }
+
+    #[tokio::test]
+    async fn poller_records_closed_issue_for_active_run_without_open_search_hit() {
+        let config = workflow_config("closed-refresh", "nearai", "ironclaw");
+        let ports = FakePollerPorts::new(vec![config.clone()]);
+        let open_snapshot = issue_snapshot("nearai", "ironclaw", 42, 100);
+        ports.github.add_issue(open_snapshot.clone()).await;
+        let poller = poller(ports);
+        poller.tick_once().await.unwrap();
+
+        let run = existing_run(&poller.ports().repository, &config, &open_snapshot).await;
+        let pr_snapshot = pull_request_snapshot(300, false);
+        let pull_request = pr_snapshot.pull_request.clone();
+        set_run_primary_pr(&poller.ports().repository, run, pull_request.clone()).await;
+        poller.ports().github.set_pull_request(pr_snapshot).await;
+        poller
+            .ports()
+            .github
+            .clear_search_results("nearai", "ironclaw")
+            .await;
+        let mut closed_snapshot = open_snapshot.clone();
+        closed_snapshot.state = "closed".to_string();
+        closed_snapshot.updated_at = Some(fixed_time(360));
+        poller
+            .ports()
+            .github
+            .set_issue_snapshot(closed_snapshot)
+            .await;
+
+        let outcome = poller.tick_once().await.unwrap();
+
+        assert_eq!(outcome.issues_seen, 0);
+        assert!(outcome.events_recorded >= 1);
+        let run = existing_run(&poller.ports().repository, &config, &open_snapshot).await;
+        let events = poller
+            .ports()
+            .repository
+            .list_workflow_events_after(
+                ironclaw_github_issue_workflow::ListWorkflowEventsAfterInput {
+                    workflow_run_id: run.workflow_run_id,
+                    after_sequence: 0,
+                    limit: 10,
+                },
+            )
+            .await
+            .unwrap();
+        assert!(events.iter().any(|event| {
+            event.workflow_event_type == GithubIssueWorkflowEventType::GithubIssueClosed
+        }));
+    }
+
+    #[tokio::test]
+    async fn poller_records_pr_merge_before_closed_issue_when_both_refresh() {
+        let config = workflow_config("merge-before-closed", "nearai", "ironclaw");
+        let ports = FakePollerPorts::new(vec![config.clone()]);
+        let open_snapshot = issue_snapshot("nearai", "ironclaw", 42, 100);
+        ports.github.add_issue(open_snapshot.clone()).await;
+        let poller = poller(ports);
+        poller.tick_once().await.unwrap();
+
+        let run = existing_run(&poller.ports().repository, &config, &open_snapshot).await;
+        let pr_snapshot = pull_request_snapshot(370, true);
+        let pull_request = pr_snapshot.pull_request.clone();
+        set_run_primary_pr(&poller.ports().repository, run, pull_request).await;
+        poller.ports().github.set_pull_request(pr_snapshot).await;
+        poller
+            .ports()
+            .github
+            .clear_search_results("nearai", "ironclaw")
+            .await;
+        let mut closed_snapshot = open_snapshot.clone();
+        closed_snapshot.state = "closed".to_string();
+        closed_snapshot.updated_at = Some(fixed_time(360));
+        poller
+            .ports()
+            .github
+            .set_issue_snapshot(closed_snapshot)
+            .await;
+
+        poller.tick_once().await.unwrap();
+
+        let run = existing_run(&poller.ports().repository, &config, &open_snapshot).await;
+        let events = poller
+            .ports()
+            .repository
+            .list_workflow_events_after(
+                ironclaw_github_issue_workflow::ListWorkflowEventsAfterInput {
+                    workflow_run_id: run.workflow_run_id,
+                    after_sequence: 1,
+                    limit: 10,
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            events[0].workflow_event_type,
+            GithubIssueWorkflowEventType::GithubPullRequestUpdated
+        );
+        assert_eq!(
+            events[1].workflow_event_type,
+            GithubIssueWorkflowEventType::GithubIssueClosed
+        );
     }
 
     #[tokio::test]

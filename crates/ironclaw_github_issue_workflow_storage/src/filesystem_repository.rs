@@ -25,10 +25,11 @@ use ironclaw_github_issue_workflow::{
     GithubIssueWorkflowEventId, GithubIssueWorkflowMode, GithubIssueWorkflowRepository,
     GithubIssueWorkflowRun, GithubIssueWorkflowRunId, GithubIssueWorkflowRunKey,
     GithubIssueWorkflowRunStatus, GithubIssueWorkflowState, LeaseReleaseOutcome,
-    LeaseRenewalOutcome, ListWorkflowEventsAfterInput, ProviderActionStatus,
-    RecordWorkflowEventInput, RecordWorkflowEventOutcome, ReleaseWorkflowRunLeaseInput,
-    RenewWorkflowRunLeaseInput, TransitionOutcome, UpsertProviderBindingInput,
-    WorkflowIdempotencyKey, WorkflowStepRun, WorkflowStepRunId, WorkflowStepStatus,
+    LeaseRenewalOutcome, ListActiveWorkflowRunsForRepositoryInput, ListWorkflowEventsAfterInput,
+    ProviderActionStatus, RecordWorkflowEventInput, RecordWorkflowEventOutcome,
+    ReleaseWorkflowRunLeaseInput, RenewWorkflowRunLeaseInput, TransitionOutcome,
+    UpsertProviderBindingInput, WorkflowIdempotencyKey, WorkflowStepRun, WorkflowStepRunId,
+    WorkflowStepStatus,
 };
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 use ironclaw_host_api::{AgentId, InvocationId, ProjectId, TenantId, UserId};
@@ -136,6 +137,7 @@ where
                 creator_user_id: input.creator_user_id.clone(),
                 agent_id: input.agent_id.clone(),
                 project_id: input.project_id.clone(),
+                provider_account_ref: input.provider_account_ref.clone(),
                 issue_ref: input.issue_ref.clone(),
                 workflow_policy_key: input.workflow_policy_key.clone(),
                 workflow_policy_version: input.workflow_policy_version.clone(),
@@ -337,6 +339,41 @@ where
         Ok(claimed)
     }
 
+    async fn list_active_workflow_runs_for_repository(
+        &self,
+        input: ListActiveWorkflowRunsForRepositoryInput,
+    ) -> Result<Vec<GithubIssueWorkflowRun>, GithubIssueWorkflowError> {
+        if input.limit == 0 {
+            return Ok(Vec::new());
+        }
+
+        let mut runs: Vec<_> = self
+            .load_runs_for_tenant(&input.tenant_id)
+            .await?
+            .into_iter()
+            .map(|(run, _version)| run)
+            .filter(|run| {
+                run.issue_ref.owner == input.repository.owner
+                    && run.issue_ref.repo == input.repository.repo
+                    && !matches!(
+                        run.status,
+                        GithubIssueWorkflowRunStatus::Succeeded
+                            | GithubIssueWorkflowRunStatus::Failed
+                            | GithubIssueWorkflowRunStatus::Cancelled
+                    )
+            })
+            .collect();
+        runs.sort_by(|left, right| {
+            left.created_at.cmp(&right.created_at).then_with(|| {
+                left.workflow_run_id
+                    .as_str()
+                    .cmp(right.workflow_run_id.as_str())
+            })
+        });
+        runs.truncate(input.limit);
+        Ok(runs)
+    }
+
     async fn renew_workflow_run_lease(
         &self,
         input: RenewWorkflowRunLeaseInput,
@@ -491,6 +528,9 @@ where
                 run.workspace_session_id = Some(workspace_session.workspace_session_id);
                 run.workflow_state.current_workspace_ref = Some(workspace_session.workspace_ref);
                 run.workflow_state.current_workspace_mount_ref = Some(workspace_session.mount_ref);
+            }
+            if let Some(primary_pr) = input.transition.primary_pr.clone() {
+                run.workflow_state.primary_pr = Some(primary_pr);
             }
 
             run.workflow_run_version += 1;
@@ -1465,6 +1505,15 @@ where
         self.inner.claim_runnable_workflow_runs(input).await
     }
 
+    async fn list_active_workflow_runs_for_repository(
+        &self,
+        input: ListActiveWorkflowRunsForRepositoryInput,
+    ) -> Result<Vec<GithubIssueWorkflowRun>, GithubIssueWorkflowError> {
+        self.inner
+            .list_active_workflow_runs_for_repository(input)
+            .await
+    }
+
     async fn renew_workflow_run_lease(
         &self,
         input: RenewWorkflowRunLeaseInput,
@@ -1610,6 +1659,15 @@ impl GithubIssueWorkflowRepository for RebornLibSqlGithubIssueWorkflowRepository
         self.inner.claim_runnable_workflow_runs(input).await
     }
 
+    async fn list_active_workflow_runs_for_repository(
+        &self,
+        input: ListActiveWorkflowRunsForRepositoryInput,
+    ) -> Result<Vec<GithubIssueWorkflowRun>, GithubIssueWorkflowError> {
+        self.inner
+            .list_active_workflow_runs_for_repository(input)
+            .await
+    }
+
     async fn renew_workflow_run_lease(
         &self,
         input: RenewWorkflowRunLeaseInput,
@@ -1753,6 +1811,15 @@ impl GithubIssueWorkflowRepository for RebornPostgresGithubIssueWorkflowReposito
         input: ClaimRunnableWorkflowRunsInput,
     ) -> Result<Vec<GithubIssueWorkflowRun>, GithubIssueWorkflowError> {
         self.inner.claim_runnable_workflow_runs(input).await
+    }
+
+    async fn list_active_workflow_runs_for_repository(
+        &self,
+        input: ListActiveWorkflowRunsForRepositoryInput,
+    ) -> Result<Vec<GithubIssueWorkflowRun>, GithubIssueWorkflowError> {
+        self.inner
+            .list_active_workflow_runs_for_repository(input)
+            .await
     }
 
     async fn renew_workflow_run_lease(

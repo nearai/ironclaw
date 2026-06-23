@@ -56,6 +56,42 @@ pub trait GithubIssueWorkflowPort: Send + Sync {
         input: CreateIssueCommentInput,
     ) -> Result<GithubCommentRef, GithubIssueWorkflowError>;
 
+    async fn list_pull_requests(
+        &self,
+        _input: ListPullRequestsInput,
+    ) -> Result<Vec<GithubPullRequestSnapshot>, GithubIssueWorkflowError> {
+        Err(GithubIssueWorkflowError::ProviderRead {
+            reason: "GitHub pull request listing is not configured".to_string(),
+        })
+    }
+
+    async fn get_pull_request(
+        &self,
+        _input: GetPullRequestInput,
+    ) -> Result<GithubPullRequestSnapshot, GithubIssueWorkflowError> {
+        Err(GithubIssueWorkflowError::ProviderRead {
+            reason: "GitHub pull request reads are not configured".to_string(),
+        })
+    }
+
+    async fn list_pull_request_checks(
+        &self,
+        _input: ListPullRequestChecksInput,
+    ) -> Result<Vec<GithubPullRequestCheckSnapshot>, GithubIssueWorkflowError> {
+        Err(GithubIssueWorkflowError::ProviderRead {
+            reason: "GitHub pull request check reads are not configured".to_string(),
+        })
+    }
+
+    async fn list_pull_request_review_comments(
+        &self,
+        _input: ListPullRequestReviewCommentsInput,
+    ) -> Result<Vec<GithubReviewCommentSnapshot>, GithubIssueWorkflowError> {
+        Err(GithubIssueWorkflowError::ProviderRead {
+            reason: "GitHub pull request review comment reads are not configured".to_string(),
+        })
+    }
+
     async fn create_draft_pull_request(
         &self,
         _input: CreateDraftPullRequestInput,
@@ -198,6 +234,122 @@ pub struct GithubIssueCommentSnapshot {
 pub struct CreateIssueCommentInput {
     pub issue: GithubIssueRef,
     pub body: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ListPullRequestsInput {
+    pub provider_account_ref: GithubProviderAccountRef,
+    pub owner: String,
+    pub repo: String,
+    pub state: String,
+    pub limit: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GithubPullRequestSnapshot {
+    pub pull_request: GithubPullRequestRef,
+    pub title: String,
+    pub body: String,
+    pub state: String,
+    pub draft: bool,
+    pub merged: bool,
+    pub updated_at: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GetPullRequestInput {
+    pub provider_account_ref: GithubProviderAccountRef,
+    pub owner: String,
+    pub repo: String,
+    pub number: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ListPullRequestChecksInput {
+    pub provider_account_ref: GithubProviderAccountRef,
+    pub owner: String,
+    pub repo: String,
+    pub pull_request_number: u64,
+    pub head_sha: Option<String>,
+    pub limit: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GithubPullRequestCheckSnapshot {
+    pub suite_or_run_id: String,
+    pub name: String,
+    pub head_sha: String,
+    pub conclusion: GithubCheckConclusion,
+    pub completed_at: Option<DateTime<Utc>>,
+    pub details_url: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum GithubCheckConclusion {
+    Success,
+    Failure,
+    Cancelled,
+    TimedOut,
+    ActionRequired,
+    Neutral,
+    Skipped,
+    Unknown,
+}
+
+impl GithubCheckConclusion {
+    pub fn from_provider(value: &str) -> Self {
+        match value {
+            "success" => Self::Success,
+            "failure" | "error" => Self::Failure,
+            "cancelled" => Self::Cancelled,
+            "timed_out" => Self::TimedOut,
+            "action_required" => Self::ActionRequired,
+            "neutral" => Self::Neutral,
+            "skipped" => Self::Skipped,
+            _ => Self::Unknown,
+        }
+    }
+
+    pub fn as_provider_str(&self) -> &'static str {
+        match self {
+            Self::Success => "success",
+            Self::Failure => "failure",
+            Self::Cancelled => "cancelled",
+            Self::TimedOut => "timed_out",
+            Self::ActionRequired => "action_required",
+            Self::Neutral => "neutral",
+            Self::Skipped => "skipped",
+            Self::Unknown => "unknown",
+        }
+    }
+
+    pub fn is_success(&self) -> bool {
+        matches!(self, Self::Success | Self::Neutral | Self::Skipped)
+    }
+
+    pub fn is_failure(&self) -> bool {
+        matches!(self, Self::Failure | Self::TimedOut | Self::ActionRequired)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ListPullRequestReviewCommentsInput {
+    pub provider_account_ref: GithubProviderAccountRef,
+    pub owner: String,
+    pub repo: String,
+    pub pull_request_number: u64,
+    pub since: Option<DateTime<Utc>>,
+    pub limit: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GithubReviewCommentSnapshot {
+    pub comment: GithubCommentRef,
+    pub body: String,
+    pub author_login: String,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

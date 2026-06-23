@@ -8,13 +8,14 @@ use sha2::{Digest, Sha256};
 
 use crate::{
     ClaimProviderActionInput, ClaimProviderActionOutcome, CompleteProviderActionInput,
-    CompleteProviderActionOutcome, CreateIssueCommentInput, CreateOrGetProviderActionInput,
-    GetAuthenticatedWorkflowActorInput, GithubCommentRef, GithubIssueProviderActionId,
-    GithubIssueProviderBinding, GithubIssueStageRunId, GithubIssueWorkflowError,
-    GithubIssueWorkflowPort, GithubIssueWorkflowRepository, GithubIssueWorkflowRun,
-    GithubIssueWorkflowRunId, GithubProviderBindingRef, GithubProviderRef, ListIssueCommentsInput,
-    UpsertProviderBindingInput, WorkflowIdempotencyKey, WorkflowStepRunId, WorkflowWorkerId,
-    claim_comment_binding_ref,
+    CompleteProviderActionOutcome, CreateDraftPullRequestInput, CreateIssueCommentInput,
+    CreateOrGetProviderActionInput, GetAuthenticatedWorkflowActorInput, GithubCommentRef,
+    GithubIssueProviderActionId, GithubIssueProviderBinding, GithubIssueStageRunId,
+    GithubIssueWorkflowError, GithubIssueWorkflowPort, GithubIssueWorkflowRepository,
+    GithubIssueWorkflowRun, GithubIssueWorkflowRunId, GithubProviderAccountRef,
+    GithubProviderBindingRef, GithubProviderRef, GithubPullRequestRef, ListIssueCommentsInput,
+    ListPullRequestsInput, UpsertProviderBindingInput, WorkflowIdempotencyKey, WorkflowStepRunId,
+    WorkflowWorkerId, claim_comment_binding_ref, primary_pr_binding_ref,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -110,6 +111,21 @@ pub struct RunClaimCommentProviderActionRequest {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RunDraftPullRequestProviderActionRequest {
+    pub run: GithubIssueWorkflowRun,
+    pub stage_run_id: Option<GithubIssueStageRunId>,
+    pub title: String,
+    pub body: String,
+    pub head_branch: String,
+    pub base_branch: String,
+    pub head_sha: String,
+    pub provider_account_ref: GithubProviderAccountRef,
+    pub worker_id: WorkflowWorkerId,
+    pub now: DateTime<Utc>,
+    pub lease_expires_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[allow(clippy::large_enum_variant)]
 pub enum ProviderActionRunOutcome {
     Succeeded {
@@ -180,6 +196,53 @@ where
         match claimed {
             ClaimProviderActionOutcome::Claimed { action } => {
                 self.run_claimed_claim_comment(request, action, marker)
+                    .await
+            }
+            ClaimProviderActionOutcome::AlreadyCompleted { action } => {
+                Ok(ProviderActionRunOutcome::Replayed { action })
+            }
+            ClaimProviderActionOutcome::Busy { action } => {
+                Ok(ProviderActionRunOutcome::Busy { action })
+            }
+        }
+    }
+
+    pub async fn run_draft_pull_request(
+        &self,
+        request: RunDraftPullRequestProviderActionRequest,
+    ) -> Result<ProviderActionRunOutcome, GithubIssueWorkflowError> {
+        let marker = stable_pr_marker(&request.run.workflow_run_id);
+        let kind = ProviderActionKind::DraftPullRequest;
+        let action = self
+            .repository
+            .create_or_get_provider_action(CreateOrGetProviderActionInput {
+                workflow_run_id: request.run.workflow_run_id.clone(),
+                stage_run_id: request.stage_run_id.clone(),
+                step_run_id: None,
+                name: kind.as_name().to_string(),
+                kind,
+                idempotency_key: draft_pr_idempotency_key(&request.run.workflow_run_id),
+                input_hash: draft_pr_input_hash(&request, &marker),
+                stable_marker: Some(marker.clone()),
+                reconciliation_strategy:
+                    ProviderActionReconciliationStrategy::DraftPullRequestByHeadBranchAndMarker,
+                now: request.now,
+            })
+            .await?;
+
+        let claimed = self
+            .repository
+            .claim_provider_action(ClaimProviderActionInput {
+                provider_action_id: action.provider_action_id,
+                worker_id: request.worker_id.clone(),
+                now: request.now,
+                lease_expires_at: request.lease_expires_at,
+            })
+            .await?;
+
+        match claimed {
+            ClaimProviderActionOutcome::Claimed { action } => {
+                self.run_claimed_draft_pull_request(request, action, marker)
                     .await
             }
             ClaimProviderActionOutcome::AlreadyCompleted { action } => {
@@ -327,6 +390,111 @@ where
         .await
     }
 
+    async fn run_claimed_draft_pull_request(
+        &self,
+        request: RunDraftPullRequestProviderActionRequest,
+        action: GithubIssueProviderActionRecord,
+        marker: String,
+    ) -> Result<ProviderActionRunOutcome, GithubIssueWorkflowError> {
+        let pull_requests = match self
+            .port
+            .list_pull_requests(ListPullRequestsInput {
+                provider_account_ref: request.provider_account_ref.clone(),
+                owner: request.run.issue_ref.owner.clone(),
+                repo: request.run.issue_ref.repo.clone(),
+                state: "open".to_string(),
+                limit: 100,
+            })
+            .await
+        {
+            Ok(pull_requests) => pull_requests,
+            Err(_) => {
+                let action = self
+                    .complete_sanitized_failure(
+                        &action,
+                        &request.worker_id,
+                        "provider_read_failed",
+                        request.now,
+                    )
+                    .await?;
+                return Ok(ProviderActionRunOutcome::Failed { action });
+            }
+        };
+
+        let matching_pull_requests: Vec<_> = pull_requests
+            .iter()
+            .filter(|snapshot| {
+                snapshot.pull_request.head_branch == request.head_branch
+                    && snapshot.body.contains(&marker)
+            })
+            .collect();
+        if matching_pull_requests.len() > 1 {
+            let action = self
+                .complete_needs_reconciliation(
+                    &action,
+                    &request.worker_id,
+                    "ambiguous_draft_pull_request",
+                    request.now,
+                )
+                .await?;
+            return Ok(ProviderActionRunOutcome::NeedsReconciliation { action });
+        }
+        if let Some(existing) = matching_pull_requests.first() {
+            return self
+                .complete_draft_pull_request_success(
+                    &action,
+                    &request.worker_id,
+                    DraftPullRequestSuccess {
+                        marker,
+                        pull_request: existing.pull_request.clone(),
+                        echo_suppressed: true,
+                    },
+                    request.now,
+                )
+                .await;
+        }
+
+        let body = draft_pr_body(&marker, &request.body);
+        let pull_request = match self
+            .port
+            .create_draft_pull_request(CreateDraftPullRequestInput {
+                provider_account_ref: request.provider_account_ref.clone(),
+                owner: request.run.issue_ref.owner.clone(),
+                repo: request.run.issue_ref.repo.clone(),
+                title: request.title,
+                body: Some(body),
+                head_branch: request.head_branch,
+                base_branch: request.base_branch,
+            })
+            .await
+        {
+            Ok(pull_request) => pull_request,
+            Err(_) => {
+                let action = self
+                    .complete_sanitized_failure(
+                        &action,
+                        &request.worker_id,
+                        "provider_write_failed",
+                        request.now,
+                    )
+                    .await?;
+                return Ok(ProviderActionRunOutcome::Failed { action });
+            }
+        };
+
+        self.complete_draft_pull_request_success(
+            &action,
+            &request.worker_id,
+            DraftPullRequestSuccess {
+                marker,
+                pull_request,
+                echo_suppressed: false,
+            },
+            request.now,
+        )
+        .await
+    }
+
     async fn complete_claim_comment_success(
         &self,
         action: &GithubIssueProviderActionRecord,
@@ -363,6 +531,51 @@ where
                 workflow_run_id: action.workflow_run_id.clone(),
                 provider_ref: success.binding_ref.provider_ref,
                 role: success.binding_ref.role,
+                created_by_provider_action_id: Some(action.provider_action_id.clone()),
+                created_at: now,
+            })
+            .await?;
+
+        Ok(ProviderActionRunOutcome::Succeeded { action, binding })
+    }
+
+    async fn complete_draft_pull_request_success(
+        &self,
+        action: &GithubIssueProviderActionRecord,
+        worker_id: &WorkflowWorkerId,
+        success: DraftPullRequestSuccess,
+        now: DateTime<Utc>,
+    ) -> Result<ProviderActionRunOutcome, GithubIssueWorkflowError> {
+        let binding_ref = primary_pr_binding_ref(&success.pull_request);
+        let completed = self
+            .repository
+            .complete_provider_action(CompleteProviderActionInput {
+                provider_action_id: action.provider_action_id.clone(),
+                worker_id: worker_id.clone(),
+                status: ProviderActionStatus::Succeeded,
+                provider_ref: Some(binding_ref.provider_ref.clone()),
+                stable_marker: Some(success.marker.clone()),
+                result: Some(json!({
+                    "pull_request": success.pull_request,
+                    "stable_marker": success.marker,
+                    "echo_suppressed": success.echo_suppressed,
+                })),
+                redacted_failure_kind: None,
+                now,
+            })
+            .await?;
+        let CompleteProviderActionOutcome::Completed { action } = completed else {
+            return Err(GithubIssueWorkflowError::Repository {
+                reason: "provider action completion lost its lease".to_string(),
+            });
+        };
+
+        let binding = self
+            .repository
+            .upsert_provider_binding(UpsertProviderBindingInput {
+                workflow_run_id: action.workflow_run_id.clone(),
+                provider_ref: binding_ref.provider_ref,
+                role: binding_ref.role,
                 created_by_provider_action_id: Some(action.provider_action_id.clone()),
                 created_at: now,
             })
@@ -434,6 +647,13 @@ struct ClaimCommentSuccess {
     echo_suppressed: bool,
 }
 
+#[derive(Debug)]
+struct DraftPullRequestSuccess {
+    marker: String,
+    pull_request: GithubPullRequestRef,
+    echo_suppressed: bool,
+}
+
 fn claim_comment_idempotency_key(
     workflow_run_id: &GithubIssueWorkflowRunId,
 ) -> WorkflowIdempotencyKey {
@@ -457,6 +677,35 @@ fn claim_comment_body(marker: &str) -> String {
     format!(
         "{marker}\nIronClaw is attempting this bug fix. A draft PR will be linked here when ready."
     )
+}
+
+fn draft_pr_idempotency_key(workflow_run_id: &GithubIssueWorkflowRunId) -> WorkflowIdempotencyKey {
+    WorkflowIdempotencyKey::from_generated(format!(
+        "provider-action:draft-pull-request:{workflow_run_id}"
+    ))
+}
+
+fn draft_pr_input_hash(request: &RunDraftPullRequestProviderActionRequest, marker: &str) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(b"draft_pull_request");
+    hasher.update(request.run.workflow_run_id.as_str().as_bytes());
+    hasher.update(request.run.issue_ref.owner.as_bytes());
+    hasher.update(request.run.issue_ref.repo.as_bytes());
+    hasher.update(request.title.as_bytes());
+    hasher.update(request.body.as_bytes());
+    hasher.update(request.head_branch.as_bytes());
+    hasher.update(request.base_branch.as_bytes());
+    hasher.update(request.head_sha.as_bytes());
+    hasher.update(marker.as_bytes());
+    format!("sha256:{:x}", hasher.finalize())
+}
+
+fn draft_pr_body(marker: &str, body: &str) -> String {
+    if body.contains(marker) {
+        body.to_string()
+    } else {
+        format!("{marker}\n{body}")
+    }
 }
 
 fn claim_comment_success_binding_ref(

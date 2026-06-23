@@ -8,15 +8,22 @@ use serde_json::{Value as JsonValue, json};
 use crate::{
     BlockWorkflowRunInput, ClaimRunnableWorkflowRunsInput, CreateOrGetWorkflowRunInput,
     CreateOrGetWorkflowRunOutcome, FindLatestWorkflowEventForProviderInput, GetGithubIssueInput,
-    GithubIssueBlockKind, GithubIssueBlockState, GithubIssueProviderSnapshot,
+    GetPullRequestInput, GithubChecksChangedPayload, GithubCommentRef, GithubIssueBlockKind,
+    GithubIssueBlockState, GithubIssueClosedPayload, GithubIssueProviderSnapshot,
     GithubIssueWorkflowConfig, GithubIssueWorkflowConfigSource, GithubIssueWorkflowError,
     GithubIssueWorkflowEventType, GithubIssueWorkflowPolicy, GithubIssueWorkflowPolicyPorts,
     GithubIssueWorkflowPollerConfig, GithubIssueWorkflowPort, GithubIssueWorkflowRepository,
-    GithubProviderRef, GithubRepositorySelector, LeaseReleaseOutcome, ListIssueCommentsInput,
-    RecordWorkflowEventInput, RecordWorkflowEventOutcome, ReleaseWorkflowRunLeaseInput,
-    SearchGithubIssuesInput, StageTurnSubmitter, WorkflowClock, WorkflowConfigAccessRequest,
-    WorkflowEventEnvelope, WorkflowEventSourceKind, WorkflowProjectAccess, WorkflowWorkerId,
-    WorkflowWorkspaceManager, issue_binding_ref, issue_changed_key, issue_discovered_key,
+    GithubIssueWorkflowRun, GithubProviderRef, GithubPullRequestCheckSnapshot,
+    GithubPullRequestRef, GithubPullRequestSnapshot, GithubPullRequestUpdatedPayload,
+    GithubRepositorySelector, GithubReviewCommentCreatedPayload, GithubReviewCommentSnapshot,
+    LeaseReleaseOutcome, ListActiveWorkflowRunsForRepositoryInput, ListIssueCommentsInput,
+    ListPullRequestChecksInput, ListPullRequestReviewCommentsInput, RecordWorkflowEventInput,
+    RecordWorkflowEventOutcome, ReleaseWorkflowRunLeaseInput, SearchGithubIssuesInput,
+    StageTurnSubmitter, WorkflowClock, WorkflowConfigAccessRequest, WorkflowEventEnvelope,
+    WorkflowEventSourceKind, WorkflowProjectAccess, WorkflowWorkerId, WorkflowWorkspaceManager,
+    checks_failed_key, checks_succeeded_key, issue_binding_ref, issue_changed_key,
+    issue_closed_key, issue_discovered_key, pr_updated_key, primary_pr_binding_ref,
+    review_comment_created_key,
 };
 
 const DEFAULT_WORKFLOW_POLICY_KEY: &str = "github-bug-workflow";
@@ -46,6 +53,14 @@ pub struct GithubIssueWorkflowPoller<P> {
     config: GithubIssueWorkflowPollerConfig,
     workflow_policy_key: String,
     workflow_policy_version: String,
+}
+
+struct LifecycleEventRecord {
+    event_type: GithubIssueWorkflowEventType,
+    provider: GithubProviderRef,
+    provider_updated_at: Option<DateTime<Utc>>,
+    idempotency_key: crate::WorkflowIdempotencyKey,
+    payload: JsonValue,
 }
 
 impl<P> GithubIssueWorkflowPoller<P>
@@ -105,10 +120,18 @@ where
                     break;
                 }
                 repos_remaining -= 1;
-                if let Err(error) = self
-                    .discover_repository(&workflow_config, repository, &mut outcome)
+                let repository_result = async {
+                    self.discover_repository(&workflow_config, repository, &mut outcome)
+                        .await?;
+                    self.refresh_active_runs_for_repository(
+                        &workflow_config,
+                        repository,
+                        &mut outcome,
+                    )
                     .await
-                {
+                }
+                .await;
+                if let Err(error) = repository_result {
                     outcome.blocked_configs.push(blocked_config(
                         &workflow_config,
                         Some(repository),
@@ -201,6 +224,7 @@ where
                     creator_user_id: workflow_config.owner_user_id.clone(),
                     agent_id: None,
                     project_id: Some(workflow_config.project_id.clone()),
+                    provider_account_ref: Some(workflow_config.provider_account_ref.clone()),
                     issue_ref: issue_ref.clone(),
                     workflow_policy_key: self.workflow_policy_key.clone(),
                     workflow_policy_version: self.workflow_policy_version.clone(),
@@ -271,9 +295,346 @@ where
         Ok(())
     }
 
+    async fn refresh_active_runs_for_repository(
+        &self,
+        workflow_config: &GithubIssueWorkflowConfig,
+        repository: &GithubRepositorySelector,
+        outcome: &mut GithubIssueWorkflowPollerTickOutcome,
+    ) -> Result<(), GithubIssueWorkflowError> {
+        let active_runs = self
+            .ports
+            .repository()
+            .list_active_workflow_runs_for_repository(ListActiveWorkflowRunsForRepositoryInput {
+                tenant_id: workflow_config.tenant_id.clone(),
+                repository: repository.clone(),
+                limit: workflow_config.max_active_runs_per_repo as usize,
+            })
+            .await?;
+
+        for run in active_runs {
+            self.refresh_active_run(workflow_config, run, outcome)
+                .await?;
+        }
+
+        Ok(())
+    }
+
+    async fn refresh_active_run(
+        &self,
+        workflow_config: &GithubIssueWorkflowConfig,
+        run: GithubIssueWorkflowRun,
+        outcome: &mut GithubIssueWorkflowPollerTickOutcome,
+    ) -> Result<(), GithubIssueWorkflowError> {
+        if run.event_cursor == 0 && run.workflow_state.primary_pr.is_none() {
+            return Ok(());
+        }
+
+        let provider_account_ref = run
+            .provider_account_ref
+            .clone()
+            .unwrap_or_else(|| workflow_config.provider_account_ref.clone());
+        let issue_snapshot = self
+            .ports
+            .github_port()
+            .get_issue(GetGithubIssueInput {
+                provider_account_ref: provider_account_ref.clone(),
+                owner: run.issue_ref.owner.clone(),
+                repo: run.issue_ref.repo.clone(),
+                number: run.issue_ref.number,
+            })
+            .await?;
+        ensure_snapshot_matches_request(
+            &GithubRepositorySelector {
+                owner: run.issue_ref.owner.clone(),
+                repo: run.issue_ref.repo.clone(),
+            },
+            run.issue_ref.number,
+            &issue_snapshot,
+        )?;
+
+        if let Some(primary_pr) = run.workflow_state.primary_pr.clone() {
+            let pull_request = self
+                .ports
+                .github_port()
+                .get_pull_request(GetPullRequestInput {
+                    provider_account_ref: provider_account_ref.clone(),
+                    owner: primary_pr.owner.clone(),
+                    repo: primary_pr.repo.clone(),
+                    number: primary_pr.number,
+                })
+                .await?;
+            ensure_pull_request_matches_ref(&primary_pr, &pull_request)?;
+            self.refresh_pull_request_event(&run, &pull_request, outcome)
+                .await?;
+            self.refresh_pull_request_checks(
+                &run,
+                &provider_account_ref,
+                &pull_request.pull_request,
+                outcome,
+            )
+            .await?;
+            self.refresh_pull_request_review_comments(
+                &run,
+                &provider_account_ref,
+                &pull_request.pull_request,
+                outcome,
+            )
+            .await?;
+        }
+
+        if issue_snapshot.state != "closed" {
+            return Ok(());
+        }
+        let provider = issue_binding_ref(&run.issue_ref).provider_ref;
+        self.record_lifecycle_event(
+            &run,
+            LifecycleEventRecord {
+                event_type: GithubIssueWorkflowEventType::GithubIssueClosed,
+                provider,
+                provider_updated_at: issue_snapshot.updated_at,
+                idempotency_key: issue_closed_key(&run.issue_ref, issue_snapshot.updated_at),
+                payload: serde_json::to_value(GithubIssueClosedPayload {
+                    issue: run.issue_ref.clone(),
+                    closed_at: issue_snapshot.updated_at,
+                })
+                .map_err(poller_serde_error)?,
+            },
+            outcome,
+        )
+        .await
+    }
+
+    async fn refresh_pull_request_event(
+        &self,
+        run: &GithubIssueWorkflowRun,
+        snapshot: &GithubPullRequestSnapshot,
+        outcome: &mut GithubIssueWorkflowPollerTickOutcome,
+    ) -> Result<(), GithubIssueWorkflowError> {
+        let provider = primary_pr_binding_ref(&snapshot.pull_request).provider_ref;
+        if !self
+            .should_record_provider_event(
+                &run.workflow_run_id,
+                &[
+                    GithubIssueWorkflowEventType::GithubPullRequestOpened,
+                    GithubIssueWorkflowEventType::GithubPullRequestUpdated,
+                ],
+                &provider,
+                snapshot.updated_at,
+            )
+            .await?
+        {
+            outcome.events_deduped += 1;
+            return Ok(());
+        }
+
+        self.record_lifecycle_event(
+            run,
+            LifecycleEventRecord {
+                event_type: GithubIssueWorkflowEventType::GithubPullRequestUpdated,
+                provider,
+                provider_updated_at: snapshot.updated_at,
+                idempotency_key: pr_updated_key(&snapshot.pull_request, snapshot.updated_at),
+                payload: serde_json::to_value(GithubPullRequestUpdatedPayload {
+                    pull_request: snapshot.pull_request.clone(),
+                    state: snapshot.state.clone(),
+                    merged: snapshot.merged,
+                    draft: snapshot.draft,
+                })
+                .map_err(poller_serde_error)?,
+            },
+            outcome,
+        )
+        .await
+    }
+
+    async fn refresh_pull_request_checks(
+        &self,
+        run: &GithubIssueWorkflowRun,
+        provider_account_ref: &crate::GithubProviderAccountRef,
+        pull_request: &GithubPullRequestRef,
+        outcome: &mut GithubIssueWorkflowPollerTickOutcome,
+    ) -> Result<(), GithubIssueWorkflowError> {
+        let checks = self
+            .ports
+            .github_port()
+            .list_pull_request_checks(ListPullRequestChecksInput {
+                provider_account_ref: provider_account_ref.clone(),
+                owner: pull_request.owner.clone(),
+                repo: pull_request.repo.clone(),
+                pull_request_number: pull_request.number,
+                head_sha: pull_request.head_sha.clone(),
+                limit: 100,
+            })
+            .await?;
+        let has_failure = checks.iter().any(|check| check.conclusion.is_failure());
+        for check in checks.iter().filter(|check| check.conclusion.is_failure()) {
+            let provider = check_provider_ref(pull_request, check);
+            self.record_lifecycle_event(
+                run,
+                LifecycleEventRecord {
+                    event_type: GithubIssueWorkflowEventType::GithubChecksFailed,
+                    provider,
+                    provider_updated_at: check.completed_at,
+                    idempotency_key: checks_failed_key(&check.head_sha, &check.suite_or_run_id),
+                    payload: serde_json::to_value(GithubChecksChangedPayload {
+                        pull_request: Some(pull_request.clone()),
+                        head_sha: check.head_sha.clone(),
+                        suite_or_run_id: check.suite_or_run_id.clone(),
+                        conclusion: check.conclusion.as_provider_str().to_string(),
+                    })
+                    .map_err(poller_serde_error)?,
+                },
+                outcome,
+            )
+            .await?;
+        }
+        if !has_failure
+            && !checks.is_empty()
+            && checks.iter().all(|check| check.conclusion.is_success())
+        {
+            let head_sha = checks[0].head_sha.clone();
+            self.record_lifecycle_event(
+                run,
+                LifecycleEventRecord {
+                    event_type: GithubIssueWorkflowEventType::GithubChecksSucceeded,
+                    provider: aggregate_checks_provider_ref(pull_request, &head_sha),
+                    provider_updated_at: checks.iter().filter_map(|check| check.completed_at).max(),
+                    idempotency_key: checks_succeeded_key(&head_sha, "aggregate"),
+                    payload: serde_json::to_value(GithubChecksChangedPayload {
+                        pull_request: Some(pull_request.clone()),
+                        head_sha,
+                        suite_or_run_id: "aggregate".to_string(),
+                        conclusion: "success".to_string(),
+                    })
+                    .map_err(poller_serde_error)?,
+                },
+                outcome,
+            )
+            .await?;
+        }
+
+        Ok(())
+    }
+
+    async fn refresh_pull_request_review_comments(
+        &self,
+        run: &GithubIssueWorkflowRun,
+        provider_account_ref: &crate::GithubProviderAccountRef,
+        pull_request: &GithubPullRequestRef,
+        outcome: &mut GithubIssueWorkflowPollerTickOutcome,
+    ) -> Result<(), GithubIssueWorkflowError> {
+        let comments = self
+            .ports
+            .github_port()
+            .list_pull_request_review_comments(ListPullRequestReviewCommentsInput {
+                provider_account_ref: provider_account_ref.clone(),
+                owner: pull_request.owner.clone(),
+                repo: pull_request.repo.clone(),
+                pull_request_number: pull_request.number,
+                since: run
+                    .workflow_state
+                    .last_provider_watermarks
+                    .reviews_updated_at,
+                limit: 100,
+            })
+            .await?;
+        for comment in comments {
+            if comment.body.contains("ironclaw:github-bug-workflow") {
+                continue;
+            }
+            self.record_review_comment_event(run, pull_request, comment, outcome)
+                .await?;
+        }
+
+        Ok(())
+    }
+
+    async fn record_review_comment_event(
+        &self,
+        run: &GithubIssueWorkflowRun,
+        pull_request: &GithubPullRequestRef,
+        comment: GithubReviewCommentSnapshot,
+        outcome: &mut GithubIssueWorkflowPollerTickOutcome,
+    ) -> Result<(), GithubIssueWorkflowError> {
+        let provider = review_comment_provider_ref(pull_request, &comment.comment);
+        let comment_identity = comment
+            .comment
+            .node_id
+            .as_deref()
+            .unwrap_or(comment.comment.url.as_str());
+        self.record_lifecycle_event(
+            run,
+            LifecycleEventRecord {
+                event_type: GithubIssueWorkflowEventType::GithubReviewCommentCreated,
+                provider,
+                provider_updated_at: Some(comment.updated_at),
+                idempotency_key: review_comment_created_key(comment_identity),
+                payload: serde_json::to_value(GithubReviewCommentCreatedPayload {
+                    pull_request: Some(pull_request.clone()),
+                    comment: comment.comment,
+                })
+                .map_err(poller_serde_error)?,
+            },
+            outcome,
+        )
+        .await
+    }
+
+    async fn record_lifecycle_event(
+        &self,
+        run: &GithubIssueWorkflowRun,
+        record: LifecycleEventRecord,
+        outcome: &mut GithubIssueWorkflowPollerTickOutcome,
+    ) -> Result<(), GithubIssueWorkflowError> {
+        let event_type = record.event_type;
+        let event_outcome = self
+            .ports
+            .repository()
+            .record_workflow_event(RecordWorkflowEventInput {
+                workflow_run_id: run.workflow_run_id.clone(),
+                workflow_event_type: event_type.clone(),
+                envelope: WorkflowEventEnvelope {
+                    source_kind: WorkflowEventSourceKind::Poller,
+                    source_delivery_id: None,
+                    provider: record.provider,
+                    observed_at: self.ports.clock().now(),
+                    provider_updated_at: record.provider_updated_at,
+                    idempotency_key: record.idempotency_key,
+                    payload_schema: event_payload_schema(&event_type).to_string(),
+                    payload: record.payload,
+                },
+            })
+            .await?;
+        match event_outcome {
+            RecordWorkflowEventOutcome::Recorded { .. } => outcome.events_recorded += 1,
+            RecordWorkflowEventOutcome::Duplicate { .. }
+            | RecordWorkflowEventOutcome::Superseded { .. } => outcome.events_deduped += 1,
+        }
+        Ok(())
+    }
+
     async fn should_record_changed_event(
         &self,
         workflow_run_id: &crate::GithubIssueWorkflowRunId,
+        provider: &GithubProviderRef,
+        provider_updated_at: Option<DateTime<Utc>>,
+    ) -> Result<bool, GithubIssueWorkflowError> {
+        self.should_record_provider_event(
+            workflow_run_id,
+            &[
+                GithubIssueWorkflowEventType::GithubIssueDiscovered,
+                GithubIssueWorkflowEventType::GithubIssueChanged,
+            ],
+            provider,
+            provider_updated_at,
+        )
+        .await
+    }
+
+    async fn should_record_provider_event(
+        &self,
+        workflow_run_id: &crate::GithubIssueWorkflowRunId,
+        workflow_event_types: &[GithubIssueWorkflowEventType],
         provider: &GithubProviderRef,
         provider_updated_at: Option<DateTime<Utc>>,
     ) -> Result<bool, GithubIssueWorkflowError> {
@@ -282,10 +643,7 @@ where
             .repository()
             .find_latest_workflow_event_for_provider(FindLatestWorkflowEventForProviderInput {
                 workflow_run_id: workflow_run_id.clone(),
-                workflow_event_types: vec![
-                    GithubIssueWorkflowEventType::GithubIssueDiscovered,
-                    GithubIssueWorkflowEventType::GithubIssueChanged,
-                ],
+                workflow_event_types: workflow_event_types.to_vec(),
                 provider: provider.clone(),
             })
             .await?;
@@ -509,6 +867,15 @@ fn event_payload_schema(event_type: &GithubIssueWorkflowEventType) -> &'static s
     match event_type {
         GithubIssueWorkflowEventType::GithubIssueDiscovered => "github.issue.discovered.v1",
         GithubIssueWorkflowEventType::GithubIssueChanged => "github.issue.changed.v1",
+        GithubIssueWorkflowEventType::GithubIssueClosed => "github.issue.closed.v1",
+        GithubIssueWorkflowEventType::GithubPullRequestOpened => "github.pr.opened.v1",
+        GithubIssueWorkflowEventType::GithubPullRequestUpdated => "github.pr.updated.v1",
+        GithubIssueWorkflowEventType::GithubChecksChanged => "github.checks.changed.v1",
+        GithubIssueWorkflowEventType::GithubChecksFailed => "github.checks.failed.v1",
+        GithubIssueWorkflowEventType::GithubChecksSucceeded => "github.checks.succeeded.v1",
+        GithubIssueWorkflowEventType::GithubReviewCommentCreated => {
+            "github.review_comment.created.v1"
+        }
         _ => "github.issue.unknown.v1",
     }
 }
@@ -551,6 +918,76 @@ fn ensure_snapshot_matches_request(
             requested_number
         ),
     })
+}
+
+fn ensure_pull_request_matches_ref(
+    expected: &GithubPullRequestRef,
+    snapshot: &GithubPullRequestSnapshot,
+) -> Result<(), GithubIssueWorkflowError> {
+    let actual = &snapshot.pull_request;
+    if actual.owner == expected.owner
+        && actual.repo == expected.repo
+        && actual.number == expected.number
+    {
+        return Ok(());
+    }
+
+    Err(GithubIssueWorkflowError::ProviderRead {
+        reason: format!(
+            "GitHub provider returned PR {}/{}#{} while reading workflow PR {}/{}#{}",
+            actual.owner,
+            actual.repo,
+            actual.number,
+            expected.owner,
+            expected.repo,
+            expected.number
+        ),
+    })
+}
+
+fn check_provider_ref(
+    pull_request: &GithubPullRequestRef,
+    check: &GithubPullRequestCheckSnapshot,
+) -> GithubProviderRef {
+    GithubProviderRef {
+        system: "github".to_string(),
+        resource_type: "check_run".to_string(),
+        owner: pull_request.owner.clone(),
+        repo: pull_request.repo.clone(),
+        provider_id: format!("{}:{}", check.head_sha, check.suite_or_run_id),
+        provider_url: check.details_url.clone(),
+    }
+}
+
+fn aggregate_checks_provider_ref(
+    pull_request: &GithubPullRequestRef,
+    head_sha: &str,
+) -> GithubProviderRef {
+    GithubProviderRef {
+        system: "github".to_string(),
+        resource_type: "check_suite".to_string(),
+        owner: pull_request.owner.clone(),
+        repo: pull_request.repo.clone(),
+        provider_id: format!("{head_sha}:aggregate"),
+        provider_url: Some(pull_request.url.clone()),
+    }
+}
+
+fn review_comment_provider_ref(
+    pull_request: &GithubPullRequestRef,
+    comment: &GithubCommentRef,
+) -> GithubProviderRef {
+    GithubProviderRef {
+        system: "github".to_string(),
+        resource_type: "review_comment".to_string(),
+        owner: pull_request.owner.clone(),
+        repo: pull_request.repo.clone(),
+        provider_id: comment
+            .node_id
+            .clone()
+            .unwrap_or_else(|| comment.url.clone()),
+        provider_url: Some(comment.url.clone()),
+    }
 }
 
 fn blocked_config(
@@ -599,4 +1036,10 @@ fn chrono_lease_duration(
     Duration::from_std(duration).map_err(|_| GithubIssueWorkflowError::InvalidConfig {
         reason: "poller lease_duration is too large".to_string(),
     })
+}
+
+fn poller_serde_error(error: serde_json::Error) -> GithubIssueWorkflowError {
+    GithubIssueWorkflowError::Policy {
+        reason: error.to_string(),
+    }
 }

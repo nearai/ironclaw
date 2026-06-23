@@ -5,8 +5,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     GithubIssueStageRunId, GithubIssueWorkflowRunId, GithubIssueWorkflowRunKey,
-    GithubIssueWorkspaceSessionId, GithubRepositorySelector, WorkflowWorkerId,
-    WorkflowWorkspaceMountRef,
+    GithubIssueWorkspaceSessionId, GithubProviderAccountRef, GithubRepositorySelector,
+    WorkflowWorkerId, WorkflowWorkspaceMountRef,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -171,6 +171,8 @@ pub struct GithubIssueWorkflowRun {
     pub creator_user_id: UserId,
     pub agent_id: Option<AgentId>,
     pub project_id: Option<ProjectId>,
+    #[serde(default)]
+    pub provider_account_ref: Option<GithubProviderAccountRef>,
     pub issue_ref: GithubIssueRef,
     pub workflow_policy_key: String,
     pub workflow_policy_version: String,

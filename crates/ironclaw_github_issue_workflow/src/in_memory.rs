@@ -17,10 +17,11 @@ use crate::{
     GithubIssueWorkflowEventId, GithubIssueWorkflowMode, GithubIssueWorkflowRepository,
     GithubIssueWorkflowRun, GithubIssueWorkflowRunId, GithubIssueWorkflowRunKey,
     GithubIssueWorkflowRunStatus, GithubIssueWorkflowState, GithubProviderRef, LeaseReleaseOutcome,
-    LeaseRenewalOutcome, ListWorkflowEventsAfterInput, ProviderActionStatus,
-    RecordWorkflowEventInput, RecordWorkflowEventOutcome, ReleaseWorkflowRunLeaseInput,
-    RenewWorkflowRunLeaseInput, TransitionOutcome, UpsertProviderBindingInput,
-    WorkflowIdempotencyKey, WorkflowStepRun, WorkflowStepRunId, WorkflowStepStatus,
+    LeaseRenewalOutcome, ListActiveWorkflowRunsForRepositoryInput, ListWorkflowEventsAfterInput,
+    ProviderActionStatus, RecordWorkflowEventInput, RecordWorkflowEventOutcome,
+    ReleaseWorkflowRunLeaseInput, RenewWorkflowRunLeaseInput, TransitionOutcome,
+    UpsertProviderBindingInput, WorkflowIdempotencyKey, WorkflowStepRun, WorkflowStepRunId,
+    WorkflowStepStatus,
 };
 use ironclaw_host_api::TenantId;
 
@@ -126,6 +127,7 @@ impl GithubIssueWorkflowRepository for InMemoryGithubIssueWorkflowRepository {
             creator_user_id: input.creator_user_id,
             agent_id: input.agent_id,
             project_id: input.project_id,
+            provider_account_ref: input.provider_account_ref,
             issue_ref: input.issue_ref,
             workflow_policy_key: input.workflow_policy_key,
             workflow_policy_version: input.workflow_policy_version,
@@ -285,6 +287,37 @@ impl GithubIssueWorkflowRepository for InMemoryGithubIssueWorkflowRepository {
         }
 
         Ok(claimed)
+    }
+
+    async fn list_active_workflow_runs_for_repository(
+        &self,
+        input: ListActiveWorkflowRunsForRepositoryInput,
+    ) -> Result<Vec<GithubIssueWorkflowRun>, GithubIssueWorkflowError> {
+        if input.limit == 0 {
+            return Ok(Vec::new());
+        }
+
+        let state = self.state.lock().await;
+        let mut runs: Vec<_> = state
+            .run_order
+            .iter()
+            .filter_map(|run_id| state.runs_by_id.get(run_id))
+            .filter(|run| {
+                run.tenant_id == input.tenant_id
+                    && run.issue_ref.owner == input.repository.owner
+                    && run.issue_ref.repo == input.repository.repo
+                    && !matches!(
+                        run.status,
+                        GithubIssueWorkflowRunStatus::Succeeded
+                            | GithubIssueWorkflowRunStatus::Failed
+                            | GithubIssueWorkflowRunStatus::Cancelled
+                    )
+            })
+            .take(input.limit)
+            .cloned()
+            .collect();
+        runs.sort_by_key(|run| run.created_at);
+        Ok(runs)
     }
 
     async fn renew_workflow_run_lease(
@@ -464,6 +497,9 @@ impl GithubIssueWorkflowRepository for InMemoryGithubIssueWorkflowRepository {
             run.workspace_session_id = Some(workspace_session.workspace_session_id);
             run.workflow_state.current_workspace_ref = Some(workspace_session.workspace_ref);
             run.workflow_state.current_workspace_mount_ref = Some(workspace_session.mount_ref);
+        }
+        if let Some(primary_pr) = input.transition.primary_pr {
+            run.workflow_state.primary_pr = Some(primary_pr);
         }
 
         run.workflow_run_version += 1;

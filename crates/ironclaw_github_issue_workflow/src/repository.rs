@@ -9,10 +9,10 @@ use crate::{
     GithubIssueProviderBinding, GithubIssueStage, GithubIssueStageRunId, GithubIssueWorkflowError,
     GithubIssueWorkflowEvent, GithubIssueWorkflowEventType, GithubIssueWorkflowMode,
     GithubIssueWorkflowRun, GithubIssueWorkflowRunId, GithubIssueWorkflowRunStatus,
-    GithubIssueWorkspaceSession, GithubProviderRef, ProviderActionKind,
-    ProviderActionReconciliationStrategy, ProviderActionStatus, WorkflowEventEnvelope,
-    WorkflowIdempotencyKey, WorkflowStepRun, WorkflowStepRunId, WorkflowStepStatus,
-    WorkflowWorkerId,
+    GithubIssueWorkspaceSession, GithubProviderAccountRef, GithubProviderRef, GithubPullRequestRef,
+    GithubRepositorySelector, ProviderActionKind, ProviderActionReconciliationStrategy,
+    ProviderActionStatus, WorkflowEventEnvelope, WorkflowIdempotencyKey, WorkflowStepRun,
+    WorkflowStepRunId, WorkflowStepStatus, WorkflowWorkerId,
 };
 
 #[async_trait]
@@ -35,6 +35,11 @@ pub trait GithubIssueWorkflowRepository: Send + Sync {
     async fn claim_runnable_workflow_runs(
         &self,
         input: ClaimRunnableWorkflowRunsInput,
+    ) -> Result<Vec<GithubIssueWorkflowRun>, GithubIssueWorkflowError>;
+
+    async fn list_active_workflow_runs_for_repository(
+        &self,
+        input: ListActiveWorkflowRunsForRepositoryInput,
     ) -> Result<Vec<GithubIssueWorkflowRun>, GithubIssueWorkflowError>;
 
     async fn renew_workflow_run_lease(
@@ -109,6 +114,7 @@ pub struct CreateOrGetWorkflowRunInput {
     pub creator_user_id: UserId,
     pub agent_id: Option<AgentId>,
     pub project_id: Option<ProjectId>,
+    pub provider_account_ref: Option<GithubProviderAccountRef>,
     pub issue_ref: crate::GithubIssueRef,
     pub workflow_policy_key: String,
     pub workflow_policy_version: String,
@@ -149,6 +155,13 @@ pub struct ClaimRunnableWorkflowRunsInput {
     pub worker_id: WorkflowWorkerId,
     pub now: DateTime<Utc>,
     pub lease_expires_at: DateTime<Utc>,
+    pub limit: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ListActiveWorkflowRunsForRepositoryInput {
+    pub tenant_id: TenantId,
+    pub repository: GithubRepositorySelector,
     pub limit: usize,
 }
 
@@ -213,6 +226,7 @@ pub struct WorkflowRunTransition {
     pub active_block: Option<GithubIssueBlockState>,
     pub clear_active_block: bool,
     pub workspace_session: Option<GithubIssueWorkspaceSession>,
+    pub primary_pr: Option<GithubPullRequestRef>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
