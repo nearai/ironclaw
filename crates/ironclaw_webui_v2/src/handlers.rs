@@ -1113,6 +1113,33 @@ pub async fn remove_skill(
     Ok(Json(response))
 }
 
+/// `POST /api/webchat/v2/skills/{name}/auto-activate`
+pub async fn set_skill_auto_activate(
+    State(state): State<WebUiV2State>,
+    Extension(caller): Extension<WebUiAuthenticatedCaller>,
+    Path(SkillPath { name }): Path<SkillPath>,
+    Json(body): Json<SetSkillAutoActivateBody>,
+) -> Result<Json<RebornSkillActionResponse>, WebUiV2HttpError> {
+    let response = state
+        .services()
+        .set_skill_auto_activate(caller, name, body.enabled)
+        .await?;
+    Ok(Json(response))
+}
+
+/// `POST /api/webchat/v2/skills/auto-activate-learned`
+pub async fn set_auto_activate_learned(
+    State(state): State<WebUiV2State>,
+    Extension(caller): Extension<WebUiAuthenticatedCaller>,
+    Json(body): Json<SetSkillAutoActivateBody>,
+) -> Result<Json<RebornSkillActionResponse>, WebUiV2HttpError> {
+    let response = state
+        .services()
+        .set_auto_activate_learned(caller, body.enabled)
+        .await?;
+    Ok(Json(response))
+}
+
 /// `GET /api/webchat/v2/extensions/registry`
 pub async fn list_extension_registry(
     State(state): State<WebUiV2State>,
@@ -1576,6 +1603,11 @@ pub struct InstallSkillBody {
 #[derive(Debug, Deserialize)]
 pub struct UpdateSkillBody {
     pub content: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct SetSkillAutoActivateBody {
+    pub enabled: bool,
 }
 
 fn extension_package_ref_for_request(

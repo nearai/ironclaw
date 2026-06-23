@@ -265,6 +265,9 @@ struct StubServices {
     /// Queued response for the next `submit_turn` call. When `Some`, the value
     /// is taken and returned instead of the default `Submitted` response.
     next_submit_response: Mutex<Option<RebornSubmitTurnResponse>>,
+    /// Records the `enabled` value each `set_auto_activate_learned` call passes,
+    /// so the handler test can assert the request body reaches the facade.
+    set_auto_activate_learned_calls: Mutex<Vec<bool>>,
     // Project routes — recorded requests so path-param-override behavior can be
     // asserted (the path id must win over any body value).
     update_project_calls: Mutex<Vec<RebornUpdateProjectRequest>>,
@@ -762,6 +765,24 @@ impl RebornServicesApi for StubServices {
         _name: String,
     ) -> Result<RebornSkillActionResponse, RebornServicesError> {
         Err(rejecting_reborn_services_error())
+    }
+
+    async fn set_auto_activate_learned(
+        &self,
+        _caller: WebUiAuthenticatedCaller,
+        enabled: bool,
+    ) -> Result<RebornSkillActionResponse, RebornServicesError> {
+        self.set_auto_activate_learned_calls
+            .lock()
+            .expect("lock")
+            .push(enabled);
+        Ok(RebornSkillActionResponse {
+            success: true,
+            message: format!(
+                "Default skill auto-activation {}",
+                if enabled { "enabled" } else { "disabled" }
+            ),
+        })
     }
 
     async fn list_connectable_channels(
@@ -1422,6 +1443,40 @@ async fn send_message_rejected_busy_wire_shape() {
     assert!(
         !body["event_cursor"].is_null(),
         "fresh RejectedBusy wire must include event_cursor when Some"
+    );
+}
+
+// Test-through-the-caller: the handler must forward the request body's
+// `enabled` flag to `RebornServicesApi::set_auto_activate_learned`, not a
+// hardcoded value. Posting `false` and asserting the facade recorded `false`
+// catches the arg-loss class (e.g. a handler that always passes `true`).
+#[tokio::test]
+async fn set_auto_activate_learned_forwards_enabled_flag_to_facade() {
+    let services = Arc::new(StubServices::default());
+    let router = router_with(services.clone());
+
+    let response = router
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/api/webchat/v2/skills/auto-activate-learned")
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"enabled":false}"#))
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = read_json(response).await;
+    assert_eq!(body["success"], true);
+    assert_eq!(
+        *services
+            .set_auto_activate_learned_calls
+            .lock()
+            .expect("lock"),
+        vec![false],
+        "handler must forward body.enabled=false to the facade verbatim"
     );
 }
 

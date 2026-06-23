@@ -110,6 +110,7 @@ mod readiness;
 mod runtime;
 mod runtime_input;
 mod runtime_profile_approval_policy;
+mod skill_learning;
 mod skill_listing;
 #[cfg(feature = "slack-v2-host-beta")]
 mod slack_actor_identity;
