@@ -1517,14 +1517,12 @@ fn local_dev_nearai_mcp_owner_scope(
 }
 
 #[cfg(any(feature = "libsql", feature = "postgres"))]
-fn default_runtime_owner_scope(
+fn owner_scope_from_runtime_identity(
     owner_user_id: UserId,
-) -> Result<ResourceScope, ironclaw_host_api::HostApiError> {
-    let identity = RebornRuntimeIdentity::reborn_cli();
-    let tenant_id = ironclaw_host_api::TenantId::new(identity.tenant_id)?;
-    let agent_id = ironclaw_host_api::AgentId::new(identity.agent_id)?;
-
-    Ok(ResourceScope {
+    tenant_id: ironclaw_host_api::TenantId,
+    agent_id: ironclaw_host_api::AgentId,
+) -> ResourceScope {
+    ResourceScope {
         tenant_id,
         user_id: owner_user_id,
         agent_id: Some(agent_id),
@@ -1532,7 +1530,33 @@ fn default_runtime_owner_scope(
         mission_id: None,
         thread_id: None,
         invocation_id: InvocationId::new(),
-    })
+    }
+}
+
+#[cfg(any(feature = "libsql", feature = "postgres"))]
+fn default_runtime_owner_scope(
+    owner_user_id: UserId,
+) -> Result<ResourceScope, ironclaw_host_api::HostApiError> {
+    let identity = RebornRuntimeIdentity::reborn_cli();
+    let tenant_id = ironclaw_host_api::TenantId::new(identity.tenant_id)?;
+    let agent_id = ironclaw_host_api::AgentId::new(identity.agent_id)?;
+    Ok(owner_scope_from_runtime_identity(
+        owner_user_id,
+        tenant_id,
+        agent_id,
+    ))
+}
+
+#[cfg(any(feature = "libsql", feature = "postgres"))]
+fn configured_runtime_owner_scope(
+    owner_user_id: UserId,
+    local_runtime_identity: &RebornLocalRuntimeIdentity,
+) -> ResourceScope {
+    owner_scope_from_runtime_identity(
+        owner_user_id,
+        local_runtime_identity.tenant_id.clone(),
+        local_runtime_identity.agent_id.clone(),
+    )
 }
 
 #[cfg(any(feature = "libsql", feature = "postgres"))]
@@ -3028,7 +3052,7 @@ async fn build_production_shaped(
     let RebornBuildInput {
         profile,
         owner_id,
-        local_runtime_identity: _,
+        local_runtime_identity,
         storage,
         production_trust_policy,
         runtime_policy,
@@ -3066,6 +3090,7 @@ async fn build_production_shaped(
         required_runtime_backends,
         require_runtime_http_egress,
         require_wasm_credentials,
+        local_runtime_identity,
         product_auth_ports,
         oauth_provider_configs,
         oauth_dcr_provider_configs,
@@ -3120,6 +3145,7 @@ async fn build_production_shaped(
                 oauth_provider_configs,
                 oauth_dcr_provider_configs,
                 owner_id,
+                local_runtime_identity,
                 turn_state_store_limits,
                 scheduler_wake_wiring,
             };
@@ -3155,6 +3181,7 @@ async fn build_production_shaped(
                 oauth_provider_configs,
                 oauth_dcr_provider_configs,
                 owner_id,
+                local_runtime_identity,
                 turn_state_store_limits,
                 scheduler_wake_wiring,
             };
@@ -3189,6 +3216,7 @@ struct RebornProductionBuildContext {
     oauth_provider_configs: Vec<crate::input::OAuthProviderBackendConfig>,
     oauth_dcr_provider_configs: Vec<crate::input::OAuthDcrProviderBackendConfig>,
     owner_id: String,
+    local_runtime_identity: Option<RebornLocalRuntimeIdentity>,
     turn_state_store_limits: ironclaw_turns::InMemoryTurnStateStoreLimits,
     /// The pre-minted scheduler wake wiring to carry to `RebornServices` so
     /// `build_reborn_runtime` can hand it to `build_default_planned_runtime` via
@@ -3263,14 +3291,16 @@ where
     let owner_user_id =
         UserId::new(config.owner_id).map_err(crate::RebornCompositionError::Mount)?;
     build_filesystem_production_host_runtime_services(
-        filesystem,
-        owner_user_id,
-        config.event_store,
-        config.secret_master_key,
-        config.trust_policy,
-        config.runtime_policy,
-        config.turn_run_wake_notifier,
-        config.surface_version,
+        FilesystemProductionHostRuntimeServicesInput {
+            filesystem,
+            owner_user_id,
+            event_store: config.event_store,
+            secret_master_key: config.secret_master_key,
+            trust_policy: config.trust_policy,
+            runtime_policy: config.runtime_policy,
+            turn_run_wake_notifier: config.turn_run_wake_notifier,
+            surface_version: config.surface_version,
+        },
     )
     .await
 }
@@ -3290,20 +3320,22 @@ where
     let owner_user_id =
         UserId::new(config.owner_id).map_err(crate::RebornCompositionError::Mount)?;
     build_filesystem_production_host_runtime_services(
-        filesystem,
-        owner_user_id,
-        config.event_store,
-        config.secret_master_key,
-        config.trust_policy,
-        config.runtime_policy,
-        config.turn_run_wake_notifier,
-        config.surface_version,
+        FilesystemProductionHostRuntimeServicesInput {
+            filesystem,
+            owner_user_id,
+            event_store: config.event_store,
+            secret_master_key: config.secret_master_key,
+            trust_policy: config.trust_policy,
+            runtime_policy: config.runtime_policy,
+            turn_run_wake_notifier: config.turn_run_wake_notifier,
+            surface_version: config.surface_version,
+        },
     )
     .await
 }
 
 #[cfg(any(feature = "libsql", feature = "postgres"))]
-async fn build_filesystem_production_host_runtime_services<F, TPolicy, TWake>(
+struct FilesystemProductionHostRuntimeServicesInput<F, TPolicy, TWake> {
     filesystem: Arc<F>,
     owner_user_id: UserId,
     event_store: ironclaw_reborn_event_store::RebornEventStoreConfig,
@@ -3312,12 +3344,27 @@ async fn build_filesystem_production_host_runtime_services<F, TPolicy, TWake>(
     runtime_policy: crate::RebornProductionRuntimePolicy,
     turn_run_wake_notifier: Arc<TWake>,
     surface_version: CapabilitySurfaceVersion,
+}
+
+#[cfg(any(feature = "libsql", feature = "postgres"))]
+async fn build_filesystem_production_host_runtime_services<F, TPolicy, TWake>(
+    input: FilesystemProductionHostRuntimeServicesInput<F, TPolicy, TWake>,
 ) -> Result<FilesystemProductionHostRuntimeServices<F>, crate::RebornCompositionError>
 where
     F: RootFilesystem + 'static,
     TPolicy: ironclaw_trust::TrustPolicy + 'static,
     TWake: ironclaw_turns::TurnRunWakeNotifier + 'static,
 {
+    let FilesystemProductionHostRuntimeServicesInput {
+        filesystem,
+        owner_user_id,
+        event_store,
+        secret_master_key,
+        trust_policy,
+        runtime_policy,
+        turn_run_wake_notifier,
+        surface_version,
+    } = input;
     let scoped_filesystem = crate::wrap_scoped(Arc::clone(&filesystem));
     let owner_scope =
         default_runtime_owner_scope(owner_user_id).map_err(crate::RebornCompositionError::Mount)?;
@@ -3546,14 +3593,19 @@ where
         oauth_provider_configs,
         oauth_dcr_provider_configs,
         owner_id,
+        local_runtime_identity,
         turn_state_store_limits,
         scheduler_wake_wiring,
     } = context;
     let owner_user_id = UserId::new(owner_id).map_err(|error| RebornBuildError::InvalidConfig {
         reason: error.to_string(),
     })?;
-    let turn_state_scope =
-        default_runtime_owner_scope(owner_user_id.clone()).map_err(RebornBuildError::Mount)?;
+    let turn_state_scope = match local_runtime_identity.as_ref() {
+        Some(identity) => configured_runtime_owner_scope(owner_user_id.clone(), identity),
+        None => {
+            default_runtime_owner_scope(owner_user_id.clone()).map_err(RebornBuildError::Mount)?
+        }
+    };
     let turn_state_filesystem =
         owner_turn_state_filesystem(Arc::clone(&stores.filesystem), &turn_state_scope)
             .map_err(RebornBuildError::Mount)?;
@@ -4969,6 +5021,21 @@ mod tests {
             resolved.as_str(),
             "/tenants/tenant-alpha/users/owner-alpha/turns/state.json"
         );
+    }
+
+    #[cfg(any(feature = "libsql", feature = "postgres"))]
+    #[test]
+    fn runtime_owner_scope_uses_configured_runtime_identity_for_turn_state() {
+        let owner = UserId::new("configured-owner").expect("owner");
+        let identity = RebornLocalRuntimeIdentity {
+            tenant_id: TenantId::new("configured-tenant").expect("tenant"),
+            agent_id: ironclaw_host_api::AgentId::new("configured-agent").expect("agent"),
+        };
+        let scope = configured_runtime_owner_scope(owner.clone(), &identity);
+
+        assert_eq!(scope.tenant_id, identity.tenant_id);
+        assert_eq!(scope.user_id, owner);
+        assert_eq!(scope.agent_id, Some(identity.agent_id));
     }
 
     #[tokio::test]

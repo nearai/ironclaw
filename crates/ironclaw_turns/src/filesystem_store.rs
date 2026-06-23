@@ -97,13 +97,6 @@ impl CachedSnapshot {
     }
 }
 
-struct SnapshotMutation<T> {
-    outcome: Result<T, TurnError>,
-    old_snapshot: TurnPersistenceSnapshot,
-    new_snapshot: TurnPersistenceSnapshot,
-    version: Option<RecordVersion>,
-}
-
 /// Filesystem-backed turn-state store under the `/turns` mount alias.
 ///
 /// Construct with a [`ScopedFilesystem`] over a [`RootFilesystem`]. The
@@ -302,22 +295,27 @@ where
         Fut: std::future::Future<Output = (Result<T, TurnError>, InMemoryTurnStateStore)>,
     {
         for attempt in 0..FILESYSTEM_CAS_RETRIES {
-            let mutation = self.load_and_apply_snapshot(apply).await?;
-            if mutation.new_snapshot == mutation.old_snapshot {
-                return mutation.outcome;
+            let (snapshot, version) = self.read_snapshot_from_filesystem().await?;
+            let old_snapshot = snapshot.clone();
+            let store = self.build_in_memory_store(snapshot)?;
+            let (outcome, store) = apply(store).await;
+            let new_snapshot = store.persistence_snapshot();
+
+            if new_snapshot == old_snapshot {
+                return outcome;
             }
-            let entry = snapshot_entry(&mutation.new_snapshot)?;
-            let cas = match mutation.version {
+            let entry = snapshot_entry(&new_snapshot)?;
+            let cas = match version {
                 Some(version) => CasExpectation::Version(version),
                 None => CasExpectation::Absent,
             };
             match put_with_cas(self.filesystem.as_ref(), path, entry, cas).await {
                 Ok(version) => {
-                    self.store_snapshot_cache((mutation.new_snapshot, Some(version)));
-                    return mutation.outcome;
+                    self.store_snapshot_cache((new_snapshot, Some(version)));
+                    return outcome;
                 }
                 Err(PutError::VersionMismatch) => {
-                    self.clear_snapshot_cache_if_version(mutation.version);
+                    self.clear_snapshot_cache_if_version(version);
                     cas_retry_backoff(attempt).await;
                 }
                 Err(PutError::Other(error)) => return Err(error),
@@ -325,26 +323,6 @@ where
         }
         Err(TurnError::Unavailable {
             reason: "turn state filesystem CAS retries exhausted".to_string(),
-        })
-    }
-
-    async fn load_and_apply_snapshot<T, A, Fut>(
-        &self,
-        apply: &mut A,
-    ) -> Result<SnapshotMutation<T>, TurnError>
-    where
-        A: FnMut(InMemoryTurnStateStore) -> Fut,
-        Fut: std::future::Future<Output = (Result<T, TurnError>, InMemoryTurnStateStore)>,
-    {
-        let (snapshot, version) = self.read_snapshot_from_filesystem().await?;
-        let old_snapshot = snapshot.clone();
-        let store = self.build_in_memory_store(snapshot)?;
-        let (outcome, store) = apply(store).await;
-        Ok(SnapshotMutation {
-            outcome,
-            old_snapshot,
-            new_snapshot: store.persistence_snapshot(),
-            version,
         })
     }
 }
@@ -818,7 +796,7 @@ async fn cas_retry_backoff(attempt: usize) {
     let jitter = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|elapsed| {
-            let jitter_ceiling = base_delay.as_millis().max(1) as u128;
+            let jitter_ceiling = base_delay.as_millis().max(1);
             Duration::from_millis((elapsed.as_nanos() % jitter_ceiling) as u64)
         })
         .unwrap_or_default();
