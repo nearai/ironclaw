@@ -37,9 +37,9 @@ mod tests {
         AcceptedMessageRef, LoopMessageRef, ReplyTargetBindingRef, RunProfileResolutionRequest,
         RunProfileResolver, TurnActor, TurnId, TurnRunId, TurnScope,
         run_profile::{
-            CapabilityFailureKind, CapabilityInputRef, CapabilityInvocation, CapabilityOutcome,
-            InMemoryLoopHostMilestoneSink, InMemoryRunProfileResolver, ModelProfileId,
-            VisibleCapabilityRequest,
+            CapabilityCallCandidate, CapabilityFailureKind, CapabilityInputRef,
+            CapabilityInvocation, CapabilityOutcome, InMemoryLoopHostMilestoneSink,
+            InMemoryRunProfileResolver, ModelProfileId, VisibleCapabilityRequest,
         },
     };
 
@@ -173,6 +173,17 @@ mod tests {
 
     fn provider_tool_call(arguments: serde_json::Value) -> ProviderToolCall {
         provider_tool_call_with_name("builtin_echo", arguments)
+    }
+
+    fn invocation_for_candidate(candidate: &CapabilityCallCandidate) -> CapabilityInvocation {
+        CapabilityInvocation {
+            activity_id: candidate.activity_id,
+            surface_version: candidate.surface_version.clone(),
+            capability_id: candidate.capability_id.clone(),
+            input_ref: candidate.input_ref.clone(),
+            approval_resume: None,
+            auth_resume: None,
+        }
     }
 
     struct StaticOutboundDeliveryTargetProvider {
@@ -1140,14 +1151,7 @@ mod tests {
             SKILL_ACTIVATE_CAPABILITY_ID
         );
         let outcome = port
-            .invoke_capability(CapabilityInvocation {
-                activity_id: ironclaw_turns::CapabilityActivityId::new(),
-                surface_version: candidate.surface_version,
-                capability_id: candidate.capability_id,
-                input_ref: candidate.input_ref,
-                approval_resume: None,
-                auth_resume: None,
-            })
+            .invoke_capability(invocation_for_candidate(&candidate))
             .await
             .expect("skill activation invokes");
         assert!(matches!(outcome, CapabilityOutcome::Completed(_)));
@@ -1311,14 +1315,7 @@ mod tests {
             .await
             .expect("project_create call stages");
         let outcome = port
-            .invoke_capability(CapabilityInvocation {
-                activity_id: ironclaw_turns::CapabilityActivityId::new(),
-                surface_version: candidate.surface_version,
-                capability_id: candidate.capability_id,
-                input_ref: candidate.input_ref,
-                approval_resume: None,
-                auth_resume: None,
-            })
+            .invoke_capability(invocation_for_candidate(&candidate))
             .await
             .expect("project_create invokes");
         let message = match outcome {
@@ -1521,14 +1518,7 @@ mod tests {
             .await
             .expect("list call stages");
         let list_outcome = port
-            .invoke_capability(CapabilityInvocation {
-                activity_id: ironclaw_turns::CapabilityActivityId::new(),
-                surface_version: list_candidate.surface_version,
-                capability_id: list_candidate.capability_id,
-                input_ref: list_candidate.input_ref,
-                approval_resume: None,
-                auth_resume: None,
-            })
+            .invoke_capability(invocation_for_candidate(&list_candidate))
             .await
             .expect("list call invokes");
         let list_result_ref = match list_outcome {
@@ -1576,18 +1566,11 @@ mod tests {
             ))
             .await
             .expect("set call stages");
+        let set_activity_id = set_candidate.activity_id;
         let set_surface_version = set_candidate.surface_version.clone();
         let set_capability_id_from_candidate = set_candidate.capability_id.clone();
-        let set_input_ref = set_candidate.input_ref.clone();
         let blocked_outcome = port
-            .invoke_capability(CapabilityInvocation {
-                activity_id: ironclaw_turns::CapabilityActivityId::new(),
-                surface_version: set_surface_version.clone(),
-                capability_id: set_capability_id_from_candidate.clone(),
-                input_ref: set_input_ref.clone(),
-                approval_resume: None,
-                auth_resume: None,
-            })
+            .invoke_capability(invocation_for_candidate(&set_candidate))
             .await
             .expect("set call reaches approval gate");
         let approval_resume = match blocked_outcome {
@@ -1651,7 +1634,7 @@ mod tests {
 
         let set_outcome = port
             .invoke_capability(CapabilityInvocation {
-                activity_id: ironclaw_turns::CapabilityActivityId::new(),
+                activity_id: set_activity_id,
                 surface_version: set_surface_version,
                 capability_id: set_capability_id_from_candidate,
                 input_ref: CapabilityInputRef::new("input:stale-approval-resume")
@@ -1821,14 +1804,7 @@ mod tests {
             .await
             .expect("set call stages");
         let set_outcome = port
-            .invoke_capability(CapabilityInvocation {
-                activity_id: ironclaw_turns::CapabilityActivityId::new(),
-                surface_version: set_candidate.surface_version,
-                capability_id: set_candidate.capability_id,
-                input_ref: set_candidate.input_ref,
-                approval_resume: None,
-                auth_resume: None,
-            })
+            .invoke_capability(invocation_for_candidate(&set_candidate))
             .await
             .expect("set call invokes");
         assert!(
@@ -2698,14 +2674,7 @@ mod tests {
         );
 
         let outcome = port
-            .invoke_capability(CapabilityInvocation {
-                activity_id: ironclaw_turns::CapabilityActivityId::new(),
-                surface_version: candidate.surface_version,
-                capability_id: candidate.capability_id,
-                input_ref: candidate.input_ref,
-                approval_resume: None,
-                auth_resume: None,
-            })
+            .invoke_capability(invocation_for_candidate(&candidate))
             .await
             .expect("extension_search invocation");
 
@@ -2824,22 +2793,8 @@ mod tests {
         let batch_result = port
             .invoke_capability_batch(ironclaw_turns::run_profile::CapabilityBatchInvocation {
                 invocations: vec![
-                    ironclaw_turns::run_profile::CapabilityInvocation {
-                        activity_id: ironclaw_turns::CapabilityActivityId::new(),
-                        surface_version: candidate1.surface_version,
-                        capability_id: candidate1.capability_id,
-                        input_ref: candidate1.input_ref,
-                        approval_resume: None,
-                        auth_resume: None,
-                    },
-                    ironclaw_turns::run_profile::CapabilityInvocation {
-                        activity_id: ironclaw_turns::CapabilityActivityId::new(),
-                        surface_version: candidate2.surface_version,
-                        capability_id: candidate2.capability_id,
-                        input_ref: candidate2.input_ref,
-                        approval_resume: None,
-                        auth_resume: None,
-                    },
+                    invocation_for_candidate(&candidate1),
+                    invocation_for_candidate(&candidate2),
                 ],
                 stop_on_first_suspension: false,
             })
@@ -2906,14 +2861,7 @@ mod tests {
             .expect("gmail provider tool call stages");
 
         let outcome = port
-            .invoke_capability(CapabilityInvocation {
-                activity_id: ironclaw_turns::CapabilityActivityId::new(),
-                surface_version: candidate.surface_version,
-                capability_id: candidate.capability_id,
-                input_ref: candidate.input_ref,
-                approval_resume: None,
-                auth_resume: None,
-            })
+            .invoke_capability(invocation_for_candidate(&candidate))
             .await
             .expect("gmail provider tool call invokes");
 

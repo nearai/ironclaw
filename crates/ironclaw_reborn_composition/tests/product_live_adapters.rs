@@ -804,7 +804,7 @@ async fn local_dev_adapter_registers_provider_tool_calls_as_run_scoped_inputs() 
 
     let outcome = capability_port
         .invoke_capability(CapabilityInvocation {
-            activity_id: ironclaw_turns::CapabilityActivityId::new(),
+            activity_id: candidate.activity_id,
             surface_version: candidate.surface_version,
             capability_id,
             input_ref: candidate.input_ref,
