@@ -20,6 +20,7 @@ export function AutomationsList({
   onSelectAutomation,
   onPauseAutomation,
   onResumeAutomation,
+  onDeleteAutomation,
 }) {
   const t = useT();
   const filtered = filterAutomations(automations, filter);
@@ -176,6 +177,7 @@ export function AutomationsList({
                 isMutating=${isMutating}
                 onPauseAutomation=${onPauseAutomation}
                 onResumeAutomation=${onResumeAutomation}
+                onDeleteAutomation=${onDeleteAutomation}
               />
             </div>
           `}

@@ -228,7 +228,9 @@ struct StubServices {
     list_automations_calls: Mutex<Vec<WebUiListAutomationsRequest>>,
     pause_automation_calls: Mutex<Vec<String>>,
     resume_automation_calls: Mutex<Vec<String>>,
+    delete_automation_calls: Mutex<Vec<String>>,
     next_list_automations_error: Mutex<Option<RebornServicesError>>,
+    next_delete_automation_error: Mutex<Option<RebornServicesError>>,
     get_outbound_preferences_calls: Mutex<usize>,
     set_outbound_preferences_calls: Mutex<Vec<RebornSetOutboundPreferencesRequest>>,
     next_set_outbound_preferences_error: Mutex<Option<RebornServicesError>>,
@@ -292,6 +294,10 @@ impl StubServices {
 
     fn fail_list_automations(&self, error: RebornServicesError) {
         *self.next_list_automations_error.lock().expect("lock") = Some(error);
+    }
+
+    fn fail_delete_automation(&self, error: RebornServicesError) {
+        *self.next_delete_automation_error.lock().expect("lock") = Some(error);
     }
 
     fn fail_set_outbound_preferences(&self, error: RebornServicesError) {
@@ -745,6 +751,29 @@ impl RebornServicesApi for StubServices {
                 "Daily status",
                 "0 9 * * *",
             )),
+        })
+    }
+
+    async fn delete_automation(
+        &self,
+        _caller: WebUiAuthenticatedCaller,
+        automation_id: String,
+    ) -> Result<RebornAutomationMutationResponse, RebornServicesError> {
+        self.delete_automation_calls
+            .lock()
+            .expect("lock")
+            .push(automation_id);
+        if let Some(error) = self
+            .next_delete_automation_error
+            .lock()
+            .expect("lock")
+            .take()
+        {
+            return Err(error);
+        }
+        Ok(RebornAutomationMutationResponse {
+            updated: true,
+            automation: None,
         })
     }
 
@@ -2073,6 +2102,99 @@ async fn trace_credits_returns_caller_scoped_unenrolled_zero_state() {
             .expect("note")
             .contains("authoritative ledger is server-side")
     );
+}
+
+#[tokio::test]
+async fn delete_automation_dispatches_path_id_to_facade() {
+    let services = Arc::new(StubServices::default());
+    let router = router_with(services.clone());
+
+    let response = router
+        .oneshot(
+            Request::builder()
+                .method(Method::DELETE)
+                .uri("/api/webchat/v2/automations/automation-alpha")
+                .body(Body::empty())
+                .expect("delete request"),
+        )
+        .await
+        .expect("delete oneshot");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = read_json(response).await;
+    assert_eq!(body["updated"], true);
+    assert!(body.get("automation").is_none() || body["automation"].is_null());
+    assert_eq!(
+        services
+            .delete_automation_calls
+            .lock()
+            .expect("lock")
+            .clone(),
+        vec!["automation-alpha".to_string()]
+    );
+}
+
+#[tokio::test]
+async fn delete_automation_error_maps_to_http_status() {
+    for (error, expected_status, expected_code, expected_kind, expected_retryable) in [
+        (
+            RebornServicesError {
+                code: RebornServicesErrorCode::Forbidden,
+                kind: RebornServicesErrorKind::ParticipantDenied,
+                status_code: 403,
+                retryable: false,
+                field: None,
+                validation_code: None,
+            },
+            StatusCode::FORBIDDEN,
+            "forbidden",
+            "participant_denied",
+            false,
+        ),
+        (
+            RebornServicesError {
+                code: RebornServicesErrorCode::Unavailable,
+                kind: RebornServicesErrorKind::ServiceUnavailable,
+                status_code: 503,
+                retryable: true,
+                field: None,
+                validation_code: None,
+            },
+            StatusCode::SERVICE_UNAVAILABLE,
+            "unavailable",
+            "service_unavailable",
+            true,
+        ),
+    ] {
+        let services = Arc::new(StubServices::default());
+        services.fail_delete_automation(error);
+        let router = router_with(services.clone());
+
+        let response = router
+            .oneshot(
+                Request::builder()
+                    .method(Method::DELETE)
+                    .uri("/api/webchat/v2/automations/automation-alpha")
+                    .body(Body::empty())
+                    .expect("delete request"),
+            )
+            .await
+            .expect("delete oneshot");
+
+        assert_eq!(response.status(), expected_status);
+        let body = read_json(response).await;
+        assert_eq!(body["error"], expected_code);
+        assert_eq!(body["kind"], expected_kind);
+        assert_eq!(body["retryable"], expected_retryable);
+        assert_eq!(
+            services
+                .delete_automation_calls
+                .lock()
+                .expect("lock")
+                .clone(),
+            vec!["automation-alpha".to_string()]
+        );
+    }
 }
 
 #[tokio::test]

@@ -37,6 +37,7 @@ export function AutomationDetailPanel({
   isMutating = false,
   onPauseAutomation,
   onResumeAutomation,
+  onDeleteAutomation,
 }) {
   const t = useT();
   const navigate = useNavigate();
@@ -55,7 +56,7 @@ export function AutomationDetailPanel({
 
   const activeRun = automation.current_run;
   const canResume = automation.state === "paused";
-  const canPause = automation.state !== "paused" && automation.state !== "completed";
+  const canPause = automation.state === "active" || automation.state === "scheduled";
   const actionLabel = canResume ? t("missions.action.resume") : t("missions.action.pause");
   const actionTitle = `${actionLabel}: ${automation.display_name}`;
   const handleAction = () => {
@@ -65,6 +66,12 @@ export function AutomationDetailPanel({
     }
     if (canPause) {
       onPauseAutomation?.(automation.automation_id);
+    }
+  };
+  const deleteTitle = `${t("common.delete")}: ${automation.display_name}`;
+  const handleDelete = () => {
+    if (window.confirm(deleteTitle)) {
+      onDeleteAutomation?.(automation.automation_id);
     }
   };
 
@@ -99,6 +106,17 @@ export function AutomationDetailPanel({
                 <${Icon} name=${canResume ? "play" : "pause"} className="h-4 w-4" />
               <//>
             `}
+            <${Button}
+              type="button"
+              variant="danger"
+              size="icon-sm"
+              aria-label=${deleteTitle}
+              title=${deleteTitle}
+              disabled=${isMutating}
+              onClick=${handleDelete}
+            >
+              <${Icon} name="trash" className="h-4 w-4" />
+            <//>
           </div>
         </div>
       </div>

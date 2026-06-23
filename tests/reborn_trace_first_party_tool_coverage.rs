@@ -404,8 +404,16 @@ async fn reborn_trace_trigger_management_first_party_tools_parity() {
         CapabilityId::new(TRIGGER_RESUME_CAPABILITY_ID).expect("valid capability id");
     let trigger_remove =
         CapabilityId::new(TRIGGER_REMOVE_CAPABILITY_ID).expect("valid capability id");
+    let missing_trigger_id = "01HZZZZZZZZZZZZZZZZZZZZZZZ";
     let model_gateway = RebornTraceReplayModelGateway::with_scripted_steps([
-        RebornModelReplayStep::ProviderToolCalls {
+        RebornModelReplayStep::AssertProviderToolsThenProviderToolCalls {
+            capability_ids: vec![
+                trigger_create.clone(),
+                trigger_list.clone(),
+                trigger_remove.clone(),
+                trigger_pause.clone(),
+                trigger_resume.clone(),
+            ],
             calls: vec![RebornScriptedProviderToolCall::new(
                 trigger_create.clone(),
                 "call_trigger_create_first_party",
@@ -431,25 +439,9 @@ async fn reborn_trace_trigger_management_first_party_tools_parity() {
         },
         RebornModelReplayStep::ProviderToolCalls {
             calls: vec![RebornScriptedProviderToolCall::new(
-                trigger_pause.clone(),
-                "call_trigger_pause_first_party",
-                serde_json::json!({"trigger_id": "01J00000000000000000000009"}),
-            )],
-            expected_tool_results: Vec::new(),
-        },
-        RebornModelReplayStep::ProviderToolCalls {
-            calls: vec![RebornScriptedProviderToolCall::new(
-                trigger_resume.clone(),
-                "call_trigger_resume_first_party",
-                serde_json::json!({"trigger_id": "01J00000000000000000000009"}),
-            )],
-            expected_tool_results: Vec::new(),
-        },
-        RebornModelReplayStep::ProviderToolCalls {
-            calls: vec![RebornScriptedProviderToolCall::new(
                 trigger_remove.clone(),
-                "call_trigger_remove_first_party",
-                serde_json::json!({"trigger_id": "01J00000000000000000000009"}),
+                "call_trigger_remove_missing",
+                serde_json::json!({ "trigger_id": missing_trigger_id }),
             )],
             expected_tool_results: Vec::new(),
         },
@@ -485,15 +477,13 @@ async fn reborn_trace_trigger_management_first_party_tools_parity() {
         .expect("final reply");
 
     let invocations = harness.capability_invocations();
-    assert_eq!(invocations.len(), 5);
+    assert_eq!(invocations.len(), 3);
     assert_eq!(invocations[0].capability_id, trigger_create);
     assert_eq!(invocations[1].capability_id, trigger_list);
-    assert_eq!(invocations[2].capability_id, trigger_pause);
-    assert_eq!(invocations[3].capability_id, trigger_resume);
-    assert_eq!(invocations[4].capability_id, trigger_remove);
+    assert_eq!(invocations[2].capability_id, trigger_remove);
 
     let results = harness.capability_results();
-    assert_eq!(results.len(), 5);
+    assert_eq!(results.len(), 3);
     let trigger_id = results[0].output["trigger"]["trigger_id"]
         .as_str()
         .expect("created trigger id");
@@ -506,20 +496,18 @@ async fn reborn_trace_trigger_management_first_party_tools_parity() {
         results[1].output["triggers"][0]["trigger_id"],
         serde_json::json!(trigger_id)
     );
-    assert_eq!(results[2].capability_id, trigger_pause);
-    assert_eq!(results[2].output["updated"], serde_json::json!(false));
-    assert_eq!(results[3].capability_id, trigger_resume);
-    assert_eq!(results[3].output["updated"], serde_json::json!(false));
-    assert_eq!(results[4].capability_id, trigger_remove);
-    assert_eq!(results[4].output["removed"], serde_json::json!(false));
+    assert_eq!(results[2].capability_id, trigger_remove);
+    assert_eq!(results[2].output["removed"], serde_json::json!(false));
+    assert!(
+        results[2].output["trigger"].is_null(),
+        "missing trigger removal must return a null trigger payload"
+    );
 
     let requests = harness.model_requests();
-    assert_eq!(requests.len(), 6);
+    assert_eq!(requests.len(), 4);
     assert_eq!(tool_result_count(&requests[1]), 1);
     assert_eq!(tool_result_count(&requests[2]), 2);
     assert_eq!(tool_result_count(&requests[3]), 3);
-    assert_eq!(tool_result_count(&requests[4]), 4);
-    assert_eq!(tool_result_count(&requests[5]), 5);
     assert_milestone_order(
         &harness.milestones(),
         |kind| matches!(kind, LoopHostMilestoneKind::CapabilityBatchCompleted { .. }),

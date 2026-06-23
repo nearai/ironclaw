@@ -89,6 +89,85 @@ async fn pause_automation_returns_not_updated_for_wrong_scope() {
 }
 
 #[tokio::test]
+async fn delete_automation_removes_scoped_trigger() {
+    let repo = Arc::new(InMemoryTriggerRepository::default());
+    let c = caller();
+    let trigger_id = TriggerId::new();
+    repo.upsert_trigger(make_record(
+        trigger_id,
+        &c,
+        TriggerState::Scheduled,
+        "Delete me",
+        "0 9 * * *",
+    ))
+    .await
+    .expect("upsert trigger");
+
+    let facade = RebornAutomationProductFacade::new(repo.clone());
+    let response = facade
+        .delete_automation(c.clone(), trigger_id.to_string())
+        .await
+        .expect("delete automation");
+
+    assert!(response.updated);
+    assert!(response.automation.is_none());
+    assert!(
+        repo.list_scoped_triggers(
+            c.tenant_id,
+            c.user_id,
+            Some(c.agent_id),
+            c.project_id,
+            10,
+            &[]
+        )
+        .await
+        .expect("list scoped triggers")
+        .is_empty()
+    );
+}
+
+#[tokio::test]
+async fn delete_automation_returns_not_updated_for_wrong_scope() {
+    let repo = Arc::new(InMemoryTriggerRepository::default());
+    let c = caller();
+    let mut other_caller = caller();
+    other_caller.user_id = UserId::new("other-user").expect("valid user id");
+    let trigger_id = TriggerId::new();
+    repo.upsert_trigger(make_record(
+        trigger_id,
+        &other_caller,
+        TriggerState::Scheduled,
+        "Other task",
+        "0 10 * * *",
+    ))
+    .await
+    .expect("upsert trigger");
+
+    let facade = RebornAutomationProductFacade::new(repo.clone());
+    let response = facade
+        .delete_automation(c, trigger_id.to_string())
+        .await
+        .expect("delete wrong-scope automation");
+
+    assert!(!response.updated);
+    assert!(response.automation.is_none());
+    assert_eq!(
+        repo.list_scoped_triggers(
+            other_caller.tenant_id,
+            other_caller.user_id,
+            Some(other_caller.agent_id),
+            other_caller.project_id,
+            10,
+            &[],
+        )
+        .await
+        .expect("list other scoped triggers")
+        .len(),
+        1
+    );
+}
+
+#[tokio::test]
 async fn resume_automation_does_not_reopen_completed_trigger() {
     let repo = Arc::new(InMemoryTriggerRepository::default());
     let c = caller();
@@ -119,6 +198,18 @@ async fn pause_automation_rejects_invalid_automation_id_as_bad_request() {
 
     let error = facade
         .pause_automation(caller(), "not a trigger id".to_string())
+        .await
+        .expect_err("invalid automation id should be rejected");
+
+    assert_eq!(error.status_code, 400);
+}
+
+#[tokio::test]
+async fn delete_automation_rejects_invalid_automation_id_as_bad_request() {
+    let facade = RebornAutomationProductFacade::new(Arc::new(InMemoryTriggerRepository::default()));
+
+    let error = facade
+        .delete_automation(caller(), "not a trigger id".to_string())
         .await
         .expect_err("invalid automation id should be rejected");
 

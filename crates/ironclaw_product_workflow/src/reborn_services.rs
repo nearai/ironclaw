@@ -570,6 +570,14 @@ pub trait AutomationProductFacade: Send + Sync {
         Err(automation_unavailable())
     }
 
+    async fn delete_automation(
+        &self,
+        _caller: ProductAgentBoundCaller,
+        _automation_id: String,
+    ) -> Result<RebornAutomationMutationResponse, RebornServicesError> {
+        Err(automation_unavailable())
+    }
+
     /// Whether the background trigger poller (scheduler) is running.
     ///
     /// Surfaced to the browser so the panel can warn that listed automations
@@ -633,6 +641,14 @@ impl AutomationProductFacade for UnsupportedAutomationProductFacade {
     }
 
     async fn resume_automation(
+        &self,
+        _caller: ProductAgentBoundCaller,
+        _automation_id: String,
+    ) -> Result<RebornAutomationMutationResponse, RebornServicesError> {
+        Err(automation_unavailable())
+    }
+
+    async fn delete_automation(
         &self,
         _caller: ProductAgentBoundCaller,
         _automation_id: String,
@@ -1435,6 +1451,15 @@ pub trait RebornServicesApi: Send + Sync {
     }
 
     async fn resume_automation(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        automation_id: String,
+    ) -> Result<RebornAutomationMutationResponse, RebornServicesError> {
+        let _ = (caller, automation_id);
+        Err(RebornServicesError::service_unavailable(false))
+    }
+
+    async fn delete_automation(
         &self,
         caller: WebUiAuthenticatedCaller,
         automation_id: String,
@@ -3149,6 +3174,23 @@ impl RebornServicesApi for RebornServices {
         };
         self.automation_facade
             .resume_automation(caller, automation_id)
+            .await
+    }
+
+    async fn delete_automation(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        automation_id: String,
+    ) -> Result<RebornAutomationMutationResponse, RebornServicesError> {
+        let Some(caller) = product_agent_bound_caller_from_webui(caller) else {
+            return Err(RebornServicesError::from_status(
+                RebornServicesErrorCode::InvalidRequest,
+                400,
+                false,
+            ));
+        };
+        self.automation_facade
+            .delete_automation(caller, automation_id)
             .await
     }
 

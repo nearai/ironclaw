@@ -979,11 +979,15 @@ async fn assert_scoped_state_transition_controls_fire_eligibility(repo: &impl Tr
         .expect("matching-scope pause")
         .expect("paused record");
     assert_eq!(paused.state, TriggerState::Paused);
+    let due_after_pause = repo
+        .list_due_triggers(ts(1_704_067_200), 10)
+        .await
+        .expect("list due after pause");
     assert!(
-        repo.list_due_triggers(ts(1_704_067_200), 10)
-            .await
-            .expect("list due after pause")
-            .is_empty()
+        !due_after_pause
+            .iter()
+            .any(|record| record.tenant_id == tenant_id && record.trigger_id == trigger_id),
+        "paused trigger must not be fire-eligible"
     );
 
     let resumed = repo
@@ -1003,8 +1007,14 @@ async fn assert_scoped_state_transition_controls_fire_eligibility(repo: &impl Tr
         .list_due_triggers(ts(1_704_067_200), 10)
         .await
         .expect("list due after resume");
-    assert_eq!(due_records.len(), 1);
-    assert_eq!(due_records[0].trigger_id, trigger_id);
+    assert!(
+        due_records.iter().any(|record| {
+            record.tenant_id == tenant_id
+                && record.trigger_id == trigger_id
+                && record.state == TriggerState::Scheduled
+        }),
+        "resumed trigger must become fire-eligible again"
+    );
 
     assert!(matches!(
         repo.set_scoped_trigger_state(
@@ -3537,6 +3547,7 @@ mod fire_claim_contract {
         assert_run_history_retention_contract(&repo).await;
         assert_recurring_accept_rejects_non_future_next_run_at(&repo).await;
         assert_fire_once_accept_with_none_next_run_at_succeeds(&repo).await;
+        assert_scoped_state_transition_controls_fire_eligibility(&repo).await;
     }
 
     #[cfg(feature = "libsql")]

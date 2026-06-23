@@ -307,9 +307,11 @@ mod tests {
         assert!(api.contains("listAutomations"));
         assert!(api.contains("pauseAutomation"));
         assert!(api.contains("resumeAutomation"));
+        assert!(api.contains("deleteAutomation"));
         assert!(api.contains("/automations"));
         assert!(api.contains("/pause"));
         assert!(api.contains("/resume"));
+        assert!(api.contains(r#"method: "DELETE""#));
         assert!(api.contains("getOutboundPreferences"));
         assert!(api.contains("setOutboundPreferences"));
         assert!(api.contains("/outbound/preferences"));
@@ -333,9 +335,12 @@ mod tests {
         let detail_panel = asset_text("js/pages/automations/components/automation-detail-panel.js");
         assert!(detail_panel.contains("onPauseAutomation"));
         assert!(detail_panel.contains("onResumeAutomation"));
-        assert!(detail_panel.contains("automation.state !== \"completed\""));
+        assert!(detail_panel.contains("onDeleteAutomation"));
+        assert!(detail_panel.contains("automation.state === \"active\""));
+        assert!(detail_panel.contains("automation.state === \"scheduled\""));
         assert!(detail_panel.contains("primary_status_label"));
         assert!(detail_panel.contains("primary_status_tone"));
+        assert!(detail_panel.contains("window.confirm"));
 
         let app_bundle = asset_text("dist/app.js");
         let app_bundle_contains_encoded_automation_route = |suffix: &str| {
@@ -350,6 +355,18 @@ mod tests {
         assert!(
             app_bundle_contains_encoded_automation_route("resume"),
             "served WebUI bundle must include the automation resume endpoint; run frontend build after editing static/js/**"
+        );
+        let app_bundle_contains_encoded_automation_delete = app_bundle
+            .split("/automations/${encodeURIComponent(")
+            .any(|tail| {
+                let near = tail.chars().take(220).collect::<String>();
+                near.contains("method:\"DELETE\"")
+                    && !near.contains("/pause")
+                    && !near.contains("/resume")
+            });
+        assert!(
+            app_bundle_contains_encoded_automation_delete,
+            "served WebUI bundle must include the automation delete endpoint; run frontend build after editing static/js/**"
         );
 
         let defaults_panel =

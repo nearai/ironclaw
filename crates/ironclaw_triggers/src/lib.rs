@@ -1357,7 +1357,11 @@ impl TriggerRepository for InMemoryTriggerRepository {
         let mut selected_keys = state
             .records
             .iter()
-            .filter(|(_, record)| record.is_due_at(now) && !record.has_active_fire())
+            .filter(|(_, record)| {
+                record.state == TriggerState::Scheduled
+                    && record.is_due_at(now)
+                    && !record.has_active_fire()
+            })
             .map(|(key, record)| {
                 (
                     record.next_run_at,

@@ -174,6 +174,32 @@ impl AutomationProductFacade for RebornAutomationProductFacade {
             .await
     }
 
+    async fn delete_automation(
+        &self,
+        caller: ProductAgentBoundCaller,
+        automation_id: String,
+    ) -> Result<RebornAutomationMutationResponse, RebornServicesError> {
+        let trigger_id = parse_trigger_id(&automation_id)?;
+        let removed = tokio::time::timeout(
+            self.backend_timeout,
+            self.trigger_repository.remove_scoped_trigger(
+                caller.tenant_id,
+                caller.user_id,
+                Some(caller.agent_id),
+                caller.project_id,
+                trigger_id,
+            ),
+        )
+        .await
+        .map_err(|_| backend_timeout_error())?
+        .map_err(map_trigger_error)?;
+
+        Ok(RebornAutomationMutationResponse {
+            updated: removed.is_some(),
+            automation: None,
+        })
+    }
+
     async fn resolve_run_thread_scope(
         &self,
         caller: ProductAgentBoundCaller,
@@ -220,9 +246,8 @@ impl RebornAutomationProductFacade {
         state: TriggerState,
     ) -> Result<RebornAutomationMutationResponse, RebornServicesError> {
         let trigger_id = parse_trigger_id(&automation_id)?;
-        let deadline = tokio::time::Instant::now() + self.backend_timeout;
-        let record = tokio::time::timeout_at(
-            deadline,
+        let record = tokio::time::timeout(
+            self.backend_timeout,
             self.trigger_repository.set_scoped_trigger_state(
                 caller.tenant_id,
                 caller.user_id,
@@ -381,7 +406,12 @@ fn map_recent_run(run: &TriggerRunRecord) -> Option<RebornAutomationRecentRunInf
 }
 
 fn parse_trigger_id(automation_id: &str) -> Result<TriggerId, RebornServicesError> {
-    TriggerId::parse(automation_id).map_err(|_| {
+    TriggerId::parse(automation_id).map_err(|parse_error| {
+        tracing::debug!(
+            automation_id,
+            error = %parse_error,
+            "failed to parse automation trigger id"
+        );
         services_error(
             RebornServicesErrorCode::InvalidRequest,
             RebornServicesErrorKind::Validation,
