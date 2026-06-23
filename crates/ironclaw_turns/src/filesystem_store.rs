@@ -102,7 +102,6 @@ struct SnapshotMutation<T> {
     old_snapshot: TurnPersistenceSnapshot,
     new_snapshot: TurnPersistenceSnapshot,
     version: Option<RecordVersion>,
-    used_cached: bool,
 }
 
 /// Filesystem-backed turn-state store under the `/turns` mount alias.
@@ -181,10 +180,12 @@ where
         // writer lock here would force `get_run_state`, host construction,
         // cancellation polling, claims, heartbeats, and terminal transitions
         // behind one in-flight write on the single per-user snapshot.
-        self.read_snapshot_unlocked().await
+        let snapshot = self.read_snapshot_from_filesystem().await?;
+        self.store_snapshot_cache(snapshot.clone());
+        Ok(snapshot)
     }
 
-    async fn read_snapshot_unlocked(
+    async fn read_snapshot_from_filesystem(
         &self,
     ) -> Result<(TurnPersistenceSnapshot, Option<RecordVersion>), TurnError> {
         let path = snapshot_path()?;
@@ -192,22 +193,13 @@ where
         // scoped filesystem. Tenant/user isolation comes from the mount view
         // that resolves `/turns/state.json` to the backend virtual path; the
         // snapshot body then scopes records by agent/project/thread.
-        let snapshot = match self.filesystem.get(&ResourceScope::system(), &path).await {
+        match self.filesystem.get(&ResourceScope::system(), &path).await {
             Ok(Some(versioned)) => {
                 let snapshot = deserialize_snapshot(&versioned.entry.body)?;
                 Ok((snapshot, Some(versioned.version)))
             }
             Ok(None) => Ok((TurnPersistenceSnapshot::default(), None)),
             Err(error) => Err(fs_error(error)),
-        }?;
-        self.store_snapshot_cache(snapshot.clone());
-        Ok(snapshot)
-    }
-
-    fn cached_snapshot(&self) -> Option<(TurnPersistenceSnapshot, Option<RecordVersion>)> {
-        match self.snapshot_cache.lock() {
-            Ok(guard) => guard.as_ref().map(CachedSnapshot::parts),
-            Err(poisoned) => poisoned.into_inner().as_ref().map(CachedSnapshot::parts),
         }
     }
 
@@ -237,6 +229,28 @@ where
         match self.snapshot_cache.lock() {
             Ok(mut guard) => *guard = None,
             Err(poisoned) => *poisoned.into_inner() = None,
+        }
+    }
+
+    fn clear_snapshot_cache_if_version(&self, version: Option<RecordVersion>) {
+        match self.snapshot_cache.lock() {
+            Ok(mut guard) => {
+                if guard
+                    .as_ref()
+                    .is_some_and(|snapshot| snapshot.version == version)
+                {
+                    *guard = None;
+                }
+            }
+            Err(poisoned) => {
+                let mut guard = poisoned.into_inner();
+                if guard
+                    .as_ref()
+                    .is_some_and(|snapshot| snapshot.version == version)
+                {
+                    *guard = None;
+                }
+            }
         }
     }
 
@@ -288,12 +302,8 @@ where
         Fut: std::future::Future<Output = (Result<T, TurnError>, InMemoryTurnStateStore)>,
     {
         for attempt in 0..FILESYSTEM_CAS_RETRIES {
-            let mutation = self.load_and_apply_snapshot(attempt, apply).await?;
+            let mutation = self.load_and_apply_snapshot(apply).await?;
             if mutation.new_snapshot == mutation.old_snapshot {
-                if mutation.used_cached {
-                    self.clear_snapshot_cache();
-                    continue;
-                }
                 return mutation.outcome;
             }
             let entry = snapshot_entry(&mutation.new_snapshot)?;
@@ -307,7 +317,7 @@ where
                     return mutation.outcome;
                 }
                 Err(PutError::VersionMismatch) => {
-                    self.clear_snapshot_cache();
+                    self.clear_snapshot_cache_if_version(mutation.version);
                     cas_retry_backoff(attempt).await;
                 }
                 Err(PutError::Other(error)) => return Err(error),
@@ -320,24 +330,13 @@ where
 
     async fn load_and_apply_snapshot<T, A, Fut>(
         &self,
-        attempt: usize,
         apply: &mut A,
     ) -> Result<SnapshotMutation<T>, TurnError>
     where
         A: FnMut(InMemoryTurnStateStore) -> Fut,
         Fut: std::future::Future<Output = (Result<T, TurnError>, InMemoryTurnStateStore)>,
     {
-        let cached = if attempt == 0 {
-            self.cached_snapshot()
-        } else {
-            None
-        };
-        let used_cached = cached.is_some();
-        let (snapshot, version) = if let Some(snapshot) = cached {
-            snapshot
-        } else {
-            self.read_snapshot_unlocked().await?
-        };
+        let (snapshot, version) = self.read_snapshot_from_filesystem().await?;
         let old_snapshot = snapshot.clone();
         let store = self.build_in_memory_store(snapshot)?;
         let (outcome, store) = apply(store).await;
@@ -346,7 +345,6 @@ where
             old_snapshot,
             new_snapshot: store.persistence_snapshot(),
             version,
-            used_cached,
         })
     }
 }
@@ -867,6 +865,8 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ironclaw_filesystem::InMemoryBackend;
+    use ironclaw_host_api::{MountAlias, MountGrant, MountPermissions, MountView, VirtualPath};
 
     #[test]
     fn cached_snapshot_freshness_is_bounded() {
@@ -880,5 +880,31 @@ mod tests {
             loaded_at: Instant::now() - SNAPSHOT_READ_CACHE_TTL - Duration::from_millis(1),
         };
         assert!(!stale.is_fresh());
+    }
+
+    #[test]
+    fn cache_clear_by_version_preserves_newer_snapshot() {
+        let scoped = Arc::new(ScopedFilesystem::with_fixed_view(
+            Arc::new(InMemoryBackend::new()),
+            MountView::new(vec![MountGrant::new(
+                MountAlias::new("/turns").unwrap(),
+                VirtualPath::new("/engine/turns").unwrap(),
+                MountPermissions::read_write_list_delete(),
+            )])
+            .unwrap(),
+        ));
+        let store = FilesystemTurnStateStore::new(scoped);
+        let stale_version = Some(RecordVersion::from_backend(1));
+        let newer_version = Some(RecordVersion::from_backend(2));
+
+        store.store_snapshot_cache((TurnPersistenceSnapshot::default(), newer_version));
+        store.clear_snapshot_cache_if_version(stale_version);
+        assert_eq!(
+            store.fresh_cached_snapshot().map(|(_, version)| version),
+            Some(newer_version)
+        );
+
+        store.clear_snapshot_cache_if_version(newer_version);
+        assert!(store.fresh_cached_snapshot().is_none());
     }
 }

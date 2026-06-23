@@ -7,8 +7,8 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use ironclaw_host_api::{
-    InvocationId, MountAlias, MountGrant, MountPermissions, MountView, ResourceScope, ScopedPath,
-    TenantId, UserId, VirtualPath,
+    HostApiError, InvocationId, MountAlias, MountGrant, MountPermissions, MountView, ResourceScope,
+    ScopedPath, TenantId, UserId, VirtualPath,
 };
 
 use super::*;
@@ -151,6 +151,38 @@ async fn describe_path_returns_mount_not_found_for_unmapped_path() {
         .await
         .unwrap_err();
     assert!(matches!(err, FilesystemError::MountNotFound { .. }));
+}
+
+#[tokio::test]
+async fn describe_path_returns_contract_error_for_missing_alias() {
+    let backend = Arc::new(InMemoryBackend::new());
+    let mut root = CompositeRootFilesystem::new();
+    root.mount(
+        descriptor_for("/engine/tenants", backend.as_ref(), "turns"),
+        backend,
+    )
+    .unwrap();
+    let scoped = ScopedFilesystem::with_fixed_view(
+        Arc::new(root),
+        MountView::new(vec![MountGrant::new(
+            MountAlias::new("/workspace").unwrap(),
+            VirtualPath::new("/engine/workspace").unwrap(),
+            MountPermissions::read_write_list_delete(),
+        )])
+        .unwrap(),
+    );
+
+    let err = scoped
+        .describe_path(
+            &test_scope(),
+            &ScopedPath::new("/turns/state.json").unwrap(),
+        )
+        .await
+        .unwrap_err();
+    assert!(matches!(
+        err,
+        FilesystemError::Contract(HostApiError::InvalidMount { .. })
+    ));
 }
 
 #[tokio::test]
