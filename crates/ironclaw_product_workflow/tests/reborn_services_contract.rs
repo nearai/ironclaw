@@ -39,34 +39,35 @@ use ironclaw_product_workflow::{
     OperatorStatusService, OutboundPreferencesProductFacade, ProductAgentBoundCaller,
     ProductWorkflowError, ProjectCaller, ProjectService, ProjectServiceError,
     RebornAddMemberRequest, RebornAttachmentRequest, RebornAutomationInfo,
-    RebornAutomationRecentRunInfo, RebornAutomationRecentRunStatus, RebornAutomationRunStatus,
-    RebornAutomationSource, RebornAutomationState, RebornChannelConnectAction,
-    RebornChannelConnectStrategy, RebornConnectableChannelInfo, RebornCreateProjectRequest,
-    RebornDeleteProjectRequest, RebornDeleteThreadRequest, RebornExtensionOnboardingState,
-    RebornGetProjectRequest, RebornGetRunStateRequest, RebornListMembersRequest,
-    RebornListMembersResponse, RebornListProjectsRequest, RebornListProjectsResponse,
-    RebornLogLevel, RebornLogQueryRequest, RebornLogQueryResponse,
-    RebornOperatorConfigDiagnosticSeverity, RebornOperatorLogsQuery, RebornOperatorSetupRequest,
-    RebornOperatorSetupStatus, RebornOperatorStatusCheck, RebornOperatorStatusResponse,
-    RebornOperatorStatusSeverity, RebornOperatorStatusState, RebornOperatorSurfaceStatus,
-    RebornOutboundDeliveryModality, RebornOutboundDeliveryTargetCapabilities,
-    RebornOutboundDeliveryTargetDescription, RebornOutboundDeliveryTargetId,
-    RebornOutboundDeliveryTargetListResponse, RebornOutboundDeliveryTargetOption,
-    RebornOutboundDeliveryTargetStatus, RebornOutboundDeliveryTargetSummary,
-    RebornOutboundPreferencesResponse, RebornProjectInfo, RebornProjectMemberInfo,
-    RebornProjectResponse, RebornProjectRole, RebornProjectState, RebornRemoveMemberRequest,
-    RebornResolveGateResponse, RebornServiceLifecycleAction, RebornServiceLifecycleRequest,
-    RebornServiceLifecycleResponse, RebornServiceLifecycleState, RebornServices, RebornServicesApi,
-    RebornServicesError, RebornServicesErrorCode, RebornServicesErrorKind,
-    RebornSetOutboundPreferencesRequest, RebornStreamEventsRequest, RebornSubmitTurnResponse,
-    RebornTimelineRequest, RebornUpdateMemberRoleRequest, RebornUpdateProjectRequest,
-    ResolveApprovalInteractionRequest, ResolveApprovalInteractionResponse,
-    ResolveAuthInteractionRequest, ResolveAuthInteractionResponse, SetActiveLlmRequest,
-    StaticConnectableChannelsProductFacade, StaticOperatorStatusService, TriggerRunThreadScope,
-    UpsertLlmProviderRequest, WebUiAuthenticatedCaller, WebUiCancelRunRequest,
-    WebUiCreateThreadRequest, WebUiInboundValidationCode, WebUiListAutomationsRequest,
-    WebUiListThreadsRequest, WebUiResolveGateRequest, WebUiSendMessageRequest,
-    WebUiSetupExtensionRequest, approval_gate_ref, automation_trigger_thread_metadata_json,
+    RebornAutomationMutationResponse, RebornAutomationRecentRunInfo,
+    RebornAutomationRecentRunStatus, RebornAutomationRunStatus, RebornAutomationSource,
+    RebornAutomationState, RebornChannelConnectAction, RebornChannelConnectStrategy,
+    RebornConnectableChannelInfo, RebornCreateProjectRequest, RebornDeleteProjectRequest,
+    RebornDeleteThreadRequest, RebornExtensionOnboardingState, RebornGetProjectRequest,
+    RebornGetRunStateRequest, RebornListMembersRequest, RebornListMembersResponse,
+    RebornListProjectsRequest, RebornListProjectsResponse, RebornLogLevel, RebornLogQueryRequest,
+    RebornLogQueryResponse, RebornOperatorConfigDiagnosticSeverity, RebornOperatorLogsQuery,
+    RebornOperatorSetupRequest, RebornOperatorSetupStatus, RebornOperatorStatusCheck,
+    RebornOperatorStatusResponse, RebornOperatorStatusSeverity, RebornOperatorStatusState,
+    RebornOperatorSurfaceStatus, RebornOutboundDeliveryModality,
+    RebornOutboundDeliveryTargetCapabilities, RebornOutboundDeliveryTargetDescription,
+    RebornOutboundDeliveryTargetId, RebornOutboundDeliveryTargetListResponse,
+    RebornOutboundDeliveryTargetOption, RebornOutboundDeliveryTargetStatus,
+    RebornOutboundDeliveryTargetSummary, RebornOutboundPreferencesResponse, RebornProjectInfo,
+    RebornProjectMemberInfo, RebornProjectResponse, RebornProjectRole, RebornProjectState,
+    RebornRemoveMemberRequest, RebornResolveGateResponse, RebornServiceLifecycleAction,
+    RebornServiceLifecycleRequest, RebornServiceLifecycleResponse, RebornServiceLifecycleState,
+    RebornServices, RebornServicesApi, RebornServicesError, RebornServicesErrorCode,
+    RebornServicesErrorKind, RebornSetOutboundPreferencesRequest, RebornStreamEventsRequest,
+    RebornSubmitTurnResponse, RebornTimelineRequest, RebornUpdateMemberRoleRequest,
+    RebornUpdateProjectRequest, ResolveApprovalInteractionRequest,
+    ResolveApprovalInteractionResponse, ResolveAuthInteractionRequest,
+    ResolveAuthInteractionResponse, SetActiveLlmRequest, StaticConnectableChannelsProductFacade,
+    StaticOperatorStatusService, TriggerRunThreadScope, UpsertLlmProviderRequest,
+    WebUiAuthenticatedCaller, WebUiCancelRunRequest, WebUiCreateThreadRequest,
+    WebUiInboundValidationCode, WebUiListAutomationsRequest, WebUiListThreadsRequest,
+    WebUiResolveGateRequest, WebUiSendMessageRequest, WebUiSetupExtensionRequest,
+    approval_gate_ref, automation_trigger_thread_metadata_json,
 };
 use ironclaw_threads::{
     AcceptInboundMessageRequest, AcceptedInboundMessage, AcceptedInboundMessageReplay,
@@ -834,14 +835,32 @@ struct ListAutomationCall {
     include_completed: bool,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum AutomationMutationAction {
+    Pause,
+    Resume,
+}
+
+#[derive(Debug, Clone)]
+struct AutomationMutationCall {
+    caller: ProductAgentBoundCaller,
+    automation_id: String,
+    action: AutomationMutationAction,
+}
+
 #[derive(Default)]
 struct RecordingAutomationFacade {
     list_calls: Mutex<Vec<ListAutomationCall>>,
+    mutation_calls: Mutex<Vec<AutomationMutationCall>>,
 }
 
 impl RecordingAutomationFacade {
     fn list_calls(&self) -> Vec<ListAutomationCall> {
         self.list_calls.lock().expect("lock").clone()
+    }
+
+    fn mutation_calls(&self) -> Vec<AutomationMutationCall> {
+        self.mutation_calls.lock().expect("lock").clone()
     }
 }
 
@@ -876,6 +895,54 @@ impl AutomationProductFacade for RecordingAutomationFacade {
     ) -> Result<Option<TriggerRunThreadScope>, RebornServicesError> {
         // Trigger-thread access is not wired in the recording facade.
         Ok(None)
+    }
+
+    async fn pause_automation(
+        &self,
+        caller: ProductAgentBoundCaller,
+        automation_id: String,
+    ) -> Result<RebornAutomationMutationResponse, RebornServicesError> {
+        self.mutation_calls
+            .lock()
+            .expect("lock")
+            .push(AutomationMutationCall {
+                caller,
+                automation_id,
+                action: AutomationMutationAction::Pause,
+            });
+        Ok(RebornAutomationMutationResponse {
+            updated: true,
+            automation: Some(automation_info(
+                "trigger-paused",
+                "Daily status",
+                "0 9 * * *",
+                None,
+            )),
+        })
+    }
+
+    async fn resume_automation(
+        &self,
+        caller: ProductAgentBoundCaller,
+        automation_id: String,
+    ) -> Result<RebornAutomationMutationResponse, RebornServicesError> {
+        self.mutation_calls
+            .lock()
+            .expect("lock")
+            .push(AutomationMutationCall {
+                caller,
+                automation_id,
+                action: AutomationMutationAction::Resume,
+            });
+        Ok(RebornAutomationMutationResponse {
+            updated: true,
+            automation: Some(automation_info(
+                "trigger-resumed",
+                "Daily status",
+                "0 9 * * *",
+                None,
+            )),
+        })
     }
 }
 
@@ -5675,6 +5742,60 @@ async fn list_automations_forwards_include_completed_false_to_product_facade() {
     );
 }
 
+#[tokio::test]
+async fn pause_automation_rejects_missing_agent_id() {
+    let automation_facade = Arc::new(RecordingAutomationFacade::default());
+    let services = RebornServices::new(
+        Arc::new(InMemorySessionThreadService::default()),
+        Arc::new(FakeTurnCoordinator::default()),
+    )
+    .with_automation_product_facade(automation_facade.clone());
+
+    let err = services
+        .pause_automation(caller_without_agent(), "trigger-alpha".to_string())
+        .await
+        .expect_err("missing agent id should fail closed");
+
+    assert_eq!(err.code, RebornServicesErrorCode::InvalidRequest);
+    assert_eq!(err.status_code, 400);
+    assert_eq!(automation_facade.mutation_calls().len(), 0);
+}
+
+#[tokio::test]
+async fn pause_resume_automation_forward_caller_scope_to_product_facade() {
+    let automation_facade = Arc::new(RecordingAutomationFacade::default());
+    let services = RebornServices::new(
+        Arc::new(InMemorySessionThreadService::default()),
+        Arc::new(FakeTurnCoordinator::default()),
+    )
+    .with_automation_product_facade(automation_facade.clone());
+    let caller = caller();
+    let expected_agent_id = caller.agent_id.clone().expect("agent id");
+
+    let pause = services
+        .pause_automation(caller.clone(), "trigger-alpha".to_string())
+        .await
+        .expect("pause automation");
+    assert!(pause.updated);
+
+    let resume = services
+        .resume_automation(caller.clone(), "trigger-alpha".to_string())
+        .await
+        .expect("resume automation");
+    assert!(resume.updated);
+
+    let calls = automation_facade.mutation_calls();
+    assert_eq!(calls.len(), 2);
+    assert_eq!(calls[0].action, AutomationMutationAction::Pause);
+    assert_eq!(calls[0].automation_id, "trigger-alpha");
+    assert_eq!(calls[0].caller.tenant_id, caller.tenant_id);
+    assert_eq!(calls[0].caller.user_id, caller.user_id);
+    assert_eq!(calls[0].caller.agent_id, expected_agent_id);
+    assert_eq!(calls[0].caller.project_id, caller.project_id);
+    assert_eq!(calls[1].action, AutomationMutationAction::Resume);
+    assert_eq!(calls[1].automation_id, "trigger-alpha");
+}
+
 #[test]
 fn reborn_automation_state_round_trips_serde_for_every_variant() {
     let cases = [
@@ -5847,6 +5968,7 @@ async fn query_operator_logs_bounds_query_before_logs_service() {
                 tool_name: Some("shell".to_string()),
                 source: Some(boundary_source),
                 tail: true,
+                follow: false,
             },
         )
         .await
@@ -5872,10 +5994,88 @@ async fn query_operator_logs_bounds_query_before_logs_service() {
     assert!(run_id.ends_with(" ... [truncated]"));
     assert!(run_id.is_char_boundary(run_id.len()));
     assert_eq!(requests[0].level, Some(RebornLogLevel::Warn));
-    assert!(
-        !requests[0].tail,
-        "unsupported streaming must not reach the logs backend"
+    assert!(requests[0].tail);
+    assert!(!requests[0].follow);
+}
+
+#[tokio::test]
+async fn query_operator_logs_forwards_follow_mode_to_logs_service() {
+    let operator_logs = Arc::new(RecordingOperatorLogsService::default());
+    let services = RebornServices::new(
+        Arc::new(InMemorySessionThreadService::default()),
+        Arc::new(FakeTurnCoordinator::default()),
+    )
+    .with_operator_logs_service(operator_logs.clone());
+
+    services
+        .query_operator_logs(
+            caller(),
+            RebornOperatorLogsQuery {
+                limit: Some(25),
+                cursor: Some("after:7".to_string()),
+                level: Some(RebornLogLevel::Info),
+                target: Some("ironclaw".to_string()),
+                thread_id: None,
+                run_id: None,
+                turn_id: None,
+                tool_call_id: None,
+                tool_name: None,
+                source: None,
+                tail: false,
+                follow: true,
+            },
+        )
+        .await
+        .expect("operator logs follow query");
+
+    let requests = operator_logs.requests();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0].limit, Some(25));
+    assert_eq!(requests[0].cursor.as_deref(), Some("after:7"));
+    assert_eq!(requests[0].level, Some(RebornLogLevel::Info));
+    assert_eq!(requests[0].target.as_deref(), Some("ironclaw"));
+    assert!(!requests[0].tail);
+    assert!(requests[0].follow);
+}
+
+#[tokio::test]
+async fn query_operator_logs_rejects_ambiguous_tail_follow_modes() {
+    let operator_logs = Arc::new(RecordingOperatorLogsService::default());
+    let services = RebornServices::new(
+        Arc::new(InMemorySessionThreadService::default()),
+        Arc::new(FakeTurnCoordinator::default()),
+    )
+    .with_operator_logs_service(operator_logs.clone());
+
+    let err = services
+        .query_operator_logs(
+            caller(),
+            RebornOperatorLogsQuery {
+                limit: None,
+                cursor: None,
+                level: None,
+                target: None,
+                thread_id: None,
+                run_id: None,
+                turn_id: None,
+                tool_call_id: None,
+                tool_name: None,
+                source: None,
+                tail: true,
+                follow: true,
+            },
+        )
+        .await
+        .expect_err("tail and follow cannot be combined");
+
+    assert_eq!(err.kind, RebornServicesErrorKind::Validation);
+    assert_eq!(err.status_code, 400);
+    assert_eq!(err.field.as_deref(), Some("follow"));
+    assert_eq!(
+        err.validation_code,
+        Some(WebUiInboundValidationCode::InvalidValue)
     );
+    assert!(operator_logs.requests().is_empty());
 }
 
 #[tokio::test]

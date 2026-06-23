@@ -63,7 +63,8 @@ use ironclaw_host_runtime::{
     TRACE_COMMONS_CREDITS_CAPABILITY_ID, TRACE_COMMONS_ONBOARD_CAPABILITY_ID,
     TRACE_COMMONS_PROFILE_SET_CAPABILITY_ID, TRACE_COMMONS_PROFILE_TOKEN_CAPABILITY_ID,
     TRACE_COMMONS_STATUS_CAPABILITY_ID, TRIGGER_CREATE_CAPABILITY_ID, TRIGGER_LIST_CAPABILITY_ID,
-    TRIGGER_REMOVE_CAPABILITY_ID, VisibleCapabilityRequest as RuntimeVisibleCapabilityRequest,
+    TRIGGER_PAUSE_CAPABILITY_ID, TRIGGER_REMOVE_CAPABILITY_ID, TRIGGER_RESUME_CAPABILITY_ID,
+    VisibleCapabilityRequest as RuntimeVisibleCapabilityRequest,
     VisibleCapabilitySurface as RuntimeVisibleCapabilitySurface, WRITE_FILE_CAPABILITY_ID,
     builtin_first_party_handlers, builtin_first_party_package,
 };
@@ -1663,6 +1664,8 @@ impl HostRuntimeCapabilityHarness {
                 CapabilityId::new(SKILL_REMOVE_CAPABILITY_ID)?,
                 CapabilityId::new(TRIGGER_CREATE_CAPABILITY_ID)?,
                 CapabilityId::new(TRIGGER_LIST_CAPABILITY_ID)?,
+                CapabilityId::new(TRIGGER_PAUSE_CAPABILITY_ID)?,
+                CapabilityId::new(TRIGGER_RESUME_CAPABILITY_ID)?,
                 CapabilityId::new(TRIGGER_REMOVE_CAPABILITY_ID)?,
             ],
             runtime_kind: RuntimeKind::FirstParty,
@@ -1748,6 +1751,8 @@ impl HostRuntimeCapabilityHarness {
             vec![
                 CapabilityId::new(TRIGGER_CREATE_CAPABILITY_ID)?,
                 CapabilityId::new(TRIGGER_LIST_CAPABILITY_ID)?,
+                CapabilityId::new(TRIGGER_PAUSE_CAPABILITY_ID)?,
+                CapabilityId::new(TRIGGER_RESUME_CAPABILITY_ID)?,
                 CapabilityId::new(TRIGGER_REMOVE_CAPABILITY_ID)?,
             ],
             vec![EffectKind::DispatchCapability, EffectKind::ExternalWrite],

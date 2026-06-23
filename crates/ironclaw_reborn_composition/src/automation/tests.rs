@@ -1,3 +1,4 @@
+mod mutation_tests;
 mod resolver_tests;
 
 use std::{
@@ -238,6 +239,18 @@ impl TriggerRepository for ScriptedRepository {
         _: Option<AgentId>,
         _: Option<ProjectId>,
         _: TriggerId,
+    ) -> Result<Option<TriggerRecord>, TriggerError> {
+        Err(Self::backend_error())
+    }
+
+    async fn set_scoped_trigger_state(
+        &self,
+        _: TenantId,
+        _: UserId,
+        _: Option<AgentId>,
+        _: Option<ProjectId>,
+        _: TriggerId,
+        _: TriggerState,
     ) -> Result<Option<TriggerRecord>, TriggerError> {
         Err(Self::backend_error())
     }

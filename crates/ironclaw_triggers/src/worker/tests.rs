@@ -2728,6 +2728,18 @@ impl TriggerRepository for TickConcurrencyRepository {
         unreachable!("test repository does not remove scoped records")
     }
 
+    async fn set_scoped_trigger_state(
+        &self,
+        _tenant_id: TenantId,
+        _creator_user_id: UserId,
+        _agent_id: Option<AgentId>,
+        _project_id: Option<ProjectId>,
+        _trigger_id: TriggerId,
+        _state: TriggerState,
+    ) -> Result<Option<TriggerRecord>, TriggerError> {
+        unreachable!("test repository does not set scoped trigger state")
+    }
+
     async fn list_due_triggers(
         &self,
         _now: Timestamp,
@@ -2876,6 +2888,18 @@ impl TriggerRepository for ActiveListErrorRepository {
         _trigger_id: TriggerId,
     ) -> Result<Option<TriggerRecord>, TriggerError> {
         unreachable!("test repository does not remove scoped records")
+    }
+
+    async fn set_scoped_trigger_state(
+        &self,
+        _tenant_id: TenantId,
+        _creator_user_id: UserId,
+        _agent_id: Option<AgentId>,
+        _project_id: Option<ProjectId>,
+        _trigger_id: TriggerId,
+        _state: TriggerState,
+    ) -> Result<Option<TriggerRecord>, TriggerError> {
+        unreachable!("test repository does not set scoped trigger state")
     }
 
     async fn list_due_triggers(
@@ -3032,6 +3056,18 @@ impl TriggerRepository for ActiveWrapRefetchErrorRepository {
         unreachable!("test repository does not remove scoped records")
     }
 
+    async fn set_scoped_trigger_state(
+        &self,
+        _tenant_id: TenantId,
+        _creator_user_id: UserId,
+        _agent_id: Option<AgentId>,
+        _project_id: Option<ProjectId>,
+        _trigger_id: TriggerId,
+        _state: TriggerState,
+    ) -> Result<Option<TriggerRecord>, TriggerError> {
+        unreachable!("test repository does not set scoped trigger state")
+    }
+
     async fn list_due_triggers(
         &self,
         _now: Timestamp,
@@ -3177,6 +3213,18 @@ impl TriggerRepository for ActiveClearRaceRepository {
         _trigger_id: TriggerId,
     ) -> Result<Option<TriggerRecord>, TriggerError> {
         unreachable!("test repository does not remove scoped records")
+    }
+
+    async fn set_scoped_trigger_state(
+        &self,
+        _tenant_id: TenantId,
+        _creator_user_id: UserId,
+        _agent_id: Option<AgentId>,
+        _project_id: Option<ProjectId>,
+        _trigger_id: TriggerId,
+        _state: TriggerState,
+    ) -> Result<Option<TriggerRecord>, TriggerError> {
+        unreachable!("test repository does not set scoped trigger state")
     }
 
     async fn list_due_triggers(
@@ -3336,6 +3384,18 @@ impl TriggerRepository for ActiveClearFailsOnceRepository {
         _trigger_id: TriggerId,
     ) -> Result<Option<TriggerRecord>, TriggerError> {
         unreachable!("test repository does not remove scoped records")
+    }
+
+    async fn set_scoped_trigger_state(
+        &self,
+        _tenant_id: TenantId,
+        _creator_user_id: UserId,
+        _agent_id: Option<AgentId>,
+        _project_id: Option<ProjectId>,
+        _trigger_id: TriggerId,
+        _state: TriggerState,
+    ) -> Result<Option<TriggerRecord>, TriggerError> {
+        unreachable!("test repository does not set scoped trigger state")
     }
 
     async fn list_due_triggers(
@@ -3532,6 +3592,18 @@ impl TriggerRepository for AcceptedMissingRepository {
         unreachable!("test repository does not remove scoped records")
     }
 
+    async fn set_scoped_trigger_state(
+        &self,
+        _tenant_id: TenantId,
+        _creator_user_id: UserId,
+        _agent_id: Option<AgentId>,
+        _project_id: Option<ProjectId>,
+        _trigger_id: TriggerId,
+        _state: TriggerState,
+    ) -> Result<Option<TriggerRecord>, TriggerError> {
+        unreachable!("test repository does not set scoped trigger state")
+    }
+
     async fn list_due_triggers(
         &self,
         _now: Timestamp,
@@ -3669,6 +3741,18 @@ impl TriggerRepository for ReplayedMissingRepository {
         _trigger_id: TriggerId,
     ) -> Result<Option<TriggerRecord>, TriggerError> {
         unreachable!("test repository does not remove scoped records")
+    }
+
+    async fn set_scoped_trigger_state(
+        &self,
+        _tenant_id: TenantId,
+        _creator_user_id: UserId,
+        _agent_id: Option<AgentId>,
+        _project_id: Option<ProjectId>,
+        _trigger_id: TriggerId,
+        _state: TriggerState,
+    ) -> Result<Option<TriggerRecord>, TriggerError> {
+        unreachable!("test repository does not set scoped trigger state")
     }
 
     async fn list_due_triggers(
@@ -3809,6 +3893,18 @@ impl TriggerRepository for DueErrorThenSuccessRepository {
         _trigger_id: TriggerId,
     ) -> Result<Option<TriggerRecord>, TriggerError> {
         unreachable!("test repository does not remove scoped records")
+    }
+
+    async fn set_scoped_trigger_state(
+        &self,
+        _tenant_id: TenantId,
+        _creator_user_id: UserId,
+        _agent_id: Option<AgentId>,
+        _project_id: Option<ProjectId>,
+        _trigger_id: TriggerId,
+        _state: TriggerState,
+    ) -> Result<Option<TriggerRecord>, TriggerError> {
+        unreachable!("test repository does not set scoped trigger state")
     }
 
     async fn list_due_triggers(
@@ -3965,6 +4061,18 @@ impl TriggerRepository for ClaimRaceRepository {
         _trigger_id: TriggerId,
     ) -> Result<Option<TriggerRecord>, TriggerError> {
         unreachable!("test repository does not remove scoped records")
+    }
+
+    async fn set_scoped_trigger_state(
+        &self,
+        _tenant_id: TenantId,
+        _creator_user_id: UserId,
+        _agent_id: Option<AgentId>,
+        _project_id: Option<ProjectId>,
+        _trigger_id: TriggerId,
+        _state: TriggerState,
+    ) -> Result<Option<TriggerRecord>, TriggerError> {
+        unreachable!("test repository does not set scoped trigger state")
     }
 
     async fn list_due_triggers(

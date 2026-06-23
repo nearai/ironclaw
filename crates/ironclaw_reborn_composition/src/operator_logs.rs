@@ -1,3 +1,4 @@
+use std::borrow::Cow;
 use std::collections::VecDeque;
 use std::sync::{Arc, LazyLock, Mutex};
 
@@ -8,7 +9,7 @@ use ironclaw_product_workflow::{
     RebornLogQueryResponse, RebornServicesError, WebUiAuthenticatedCaller,
     normalize_operator_log_context_value,
 };
-use ironclaw_safety::LeakDetector;
+use ironclaw_safety::{LeakDetector, sensitive_paths::is_sensitive_path_str};
 use tracing::field::{Field, Visit};
 use tracing::span::{Attributes, Record};
 use tracing::{Event, Id};
@@ -241,6 +242,25 @@ struct OperatorLogState {
     entries: VecDeque<StoredLogEntry>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum OperatorLogQueryMode {
+    Page,
+    Tail,
+    Follow,
+}
+
+impl From<&RebornLogQueryRequest> for OperatorLogQueryMode {
+    fn from(request: &RebornLogQueryRequest) -> Self {
+        if request.follow {
+            Self::Follow
+        } else if request.tail {
+            Self::Tail
+        } else {
+            Self::Page
+        }
+    }
+}
+
 pub struct OperatorLogBuffer {
     capacity: usize,
     state: Mutex<OperatorLogState>,
@@ -274,6 +294,7 @@ impl OperatorLogBuffer {
             .leak_detector
             .scan_and_clean(&message)
             .unwrap_or_else(|_| "[log message redacted: contained blocked secret]".to_string());
+        let message = redact_sensitive_log_paths(&message);
         let message = truncate_utf8_with_suffix(&message, MAX_LOG_MESSAGE_BYTES);
         let correlation = self.correlation_from_fields(fields);
         let Ok(mut state) = self.state.lock() else {
@@ -360,7 +381,9 @@ impl OperatorLogBuffer {
             .unwrap_or(DEFAULT_LIMIT)
             .clamp(1, self.capacity);
         let request = self.normalize_query_request(request);
+        let mode = OperatorLogQueryMode::from(&request);
         let before_id = request.cursor.as_deref().and_then(parse_before_cursor);
+        let after_id = request.cursor.as_deref().and_then(parse_after_cursor);
         let target_filter = request.target.as_ref().map(|target| target.to_lowercase());
         let Ok(state) = self.state.lock() else {
             return RebornLogQueryResponse {
@@ -368,54 +391,110 @@ impl OperatorLogBuffer {
                 entries: Vec::new(),
                 next_cursor: None,
                 tail_supported: true,
-                follow_supported: false,
+                follow_supported: true,
             };
         };
 
         let mut selected = Vec::with_capacity(limit.min(self.capacity));
         let mut selected_bytes = 0usize;
         let mut next_cursor = None;
-        for entry in state.entries.iter().rev() {
-            if before_id.is_some_and(|id| entry.id >= id) {
-                continue;
-            }
-            if request.level.is_some_and(|level| entry.level != level) {
-                continue;
-            }
-            if let Some(target) = target_filter.as_ref()
-                && !entry.target.to_lowercase().contains(target.as_str())
-            {
-                continue;
-            }
-            if !entry.matches_query(&request) {
-                continue;
-            }
 
-            if selected.len() >= limit {
-                next_cursor = selected
-                    .last()
-                    .map(|entry: &StoredLogEntry| format!("before:{}", entry.id));
-                break;
+        match mode {
+            OperatorLogQueryMode::Follow => {
+                let start_after_id = after_id.unwrap_or_else(|| state.next_id.saturating_sub(1));
+                let mut last_selected_id = None;
+                for entry in state.entries.iter() {
+                    if entry.id <= start_after_id {
+                        continue;
+                    }
+                    if !entry_matches_request(entry, &request, target_filter.as_deref()) {
+                        continue;
+                    }
+
+                    if selected.len() >= limit {
+                        break;
+                    }
+                    let api_entry = RebornLogEntry::from(entry.clone());
+                    let entry_bytes = response_entry_bytes(&api_entry);
+                    let next_selected_bytes = response_entries_bytes_after_push(
+                        selected_bytes,
+                        selected.len(),
+                        entry_bytes,
+                    );
+                    if !selected.is_empty() && next_selected_bytes > MAX_LOG_RESPONSE_BYTES {
+                        break;
+                    }
+                    last_selected_id = Some(entry.id);
+                    selected_bytes = next_selected_bytes;
+                    selected.push(api_entry);
+                }
+                next_cursor = Some(after_cursor(last_selected_id.unwrap_or(start_after_id)));
             }
-            let entry_bytes = response_entry_bytes(entry);
-            if !selected.is_empty()
-                && selected_bytes.saturating_add(entry_bytes) > MAX_LOG_RESPONSE_BYTES
-            {
-                next_cursor = selected
-                    .last()
-                    .map(|entry: &StoredLogEntry| format!("before:{}", entry.id));
-                break;
+            OperatorLogQueryMode::Tail => {
+                for entry in state.entries.iter().rev() {
+                    if !entry_matches_request(entry, &request, target_filter.as_deref()) {
+                        continue;
+                    }
+
+                    if selected.len() >= limit {
+                        break;
+                    }
+                    let api_entry = RebornLogEntry::from(entry.clone());
+                    let entry_bytes = response_entry_bytes(&api_entry);
+                    let next_selected_bytes = response_entries_bytes_after_push(
+                        selected_bytes,
+                        selected.len(),
+                        entry_bytes,
+                    );
+                    if !selected.is_empty() && next_selected_bytes > MAX_LOG_RESPONSE_BYTES {
+                        break;
+                    }
+                    selected_bytes = next_selected_bytes;
+                    selected.push(api_entry);
+                }
+                selected.reverse();
+                next_cursor = Some(after_cursor(state.next_id.saturating_sub(1)));
             }
-            selected_bytes = selected_bytes.saturating_add(entry_bytes);
-            selected.push(entry.clone());
+            OperatorLogQueryMode::Page => {
+                for entry in state.entries.iter().rev() {
+                    if before_id.is_some_and(|id| entry.id >= id) {
+                        continue;
+                    }
+                    if !entry_matches_request(entry, &request, target_filter.as_deref()) {
+                        continue;
+                    }
+
+                    if selected.len() >= limit {
+                        next_cursor = selected
+                            .last()
+                            .map(|entry: &RebornLogEntry| format!("before:{}", entry.id));
+                        break;
+                    }
+                    let api_entry = RebornLogEntry::from(entry.clone());
+                    let entry_bytes = response_entry_bytes(&api_entry);
+                    let next_selected_bytes = response_entries_bytes_after_push(
+                        selected_bytes,
+                        selected.len(),
+                        entry_bytes,
+                    );
+                    if !selected.is_empty() && next_selected_bytes > MAX_LOG_RESPONSE_BYTES {
+                        next_cursor = selected
+                            .last()
+                            .map(|entry: &RebornLogEntry| format!("before:{}", entry.id));
+                        break;
+                    }
+                    selected_bytes = next_selected_bytes;
+                    selected.push(api_entry);
+                }
+            }
         }
 
         RebornLogQueryResponse {
             source: SOURCE.to_string(),
-            entries: selected.into_iter().map(RebornLogEntry::from).collect(),
+            entries: selected,
             next_cursor,
             tail_supported: true,
-            follow_supported: false,
+            follow_supported: true,
         }
     }
 }
@@ -426,9 +505,34 @@ fn set_first(slot: &mut Option<String>, value: String) {
     }
 }
 
-fn response_entry_bytes(entry: &StoredLogEntry) -> usize {
-    let api_entry = RebornLogEntry::from(entry.clone());
-    serde_json::to_vec(&api_entry).map_or(usize::MAX, |bytes| bytes.len())
+fn response_entry_bytes(entry: &RebornLogEntry) -> usize {
+    serde_json::to_vec(entry).map_or(usize::MAX, |bytes| bytes.len())
+}
+
+fn response_entries_bytes_after_push(
+    current_bytes: usize,
+    selected_len: usize,
+    entry_bytes: usize,
+) -> usize {
+    current_bytes
+        .saturating_add(entry_bytes)
+        .saturating_add(if selected_len == 0 { 2 } else { 1 })
+}
+
+fn entry_matches_request(
+    entry: &StoredLogEntry,
+    request: &RebornLogQueryRequest,
+    target_filter: Option<&str>,
+) -> bool {
+    if request.level.is_some_and(|level| entry.level != level) {
+        return false;
+    }
+    if let Some(target) = target_filter
+        && !entry.target.to_lowercase().contains(target)
+    {
+        return false;
+    }
+    entry.matches_query(request)
 }
 
 impl StoredLogEntry {
@@ -510,6 +614,174 @@ fn parse_before_cursor(cursor: &str) -> Option<u64> {
     cursor
         .strip_prefix("before:")
         .and_then(|value| value.parse::<u64>().ok())
+}
+
+fn parse_after_cursor(cursor: &str) -> Option<u64> {
+    cursor
+        .strip_prefix("after:")
+        .and_then(|value| value.parse::<u64>().ok())
+}
+
+fn after_cursor(id: u64) -> String {
+    format!("after:{id}")
+}
+
+fn redact_sensitive_log_paths(value: &str) -> String {
+    let mut redacted = String::with_capacity(value.len());
+    for segment in value.split_inclusive(char::is_whitespace) {
+        let token = segment.trim_end_matches(char::is_whitespace);
+        let whitespace = &segment[token.len()..];
+        redacted.push_str(&redact_sensitive_log_path_token(token));
+        redacted.push_str(whitespace);
+    }
+    redacted
+}
+
+fn redact_sensitive_log_path_token(token: &str) -> Cow<'_, str> {
+    let mut cursor = 0usize;
+    let mut redacted = String::new();
+    let mut last_copied = 0usize;
+    let mut changed = false;
+
+    while let Some(offset) = token[cursor..].find(['/', '\\']) {
+        let separator = cursor + offset;
+        let start = sensitive_path_candidate_start(token, separator);
+        let end = sensitive_path_candidate_end(token, start);
+        if start < end && is_sensitive_log_path_candidate(&token[start..end]) {
+            if !changed {
+                redacted = String::with_capacity(token.len());
+                changed = true;
+            }
+            redacted.push_str(&token[last_copied..start]);
+            redacted.push_str("[REDACTED_PATH]");
+            last_copied = end;
+            cursor = end;
+        } else {
+            cursor = token[separator..]
+                .chars()
+                .next()
+                .map_or(token.len(), |character| separator + character.len_utf8());
+        }
+    }
+
+    if changed {
+        redacted.push_str(&token[last_copied..]);
+        Cow::Owned(redacted)
+    } else {
+        Cow::Borrowed(token)
+    }
+}
+
+fn sensitive_path_candidate_start(token: &str, separator: usize) -> usize {
+    if separator >= 2 {
+        let prefix = &token[..separator];
+        let mut chars = prefix.chars().rev();
+        if chars.next() == Some(':')
+            && chars
+                .next()
+                .is_some_and(|character| character.is_ascii_alphabetic())
+        {
+            return separator - 2;
+        }
+    }
+
+    token[..separator]
+        .char_indices()
+        .rev()
+        .find_map(|(offset, character)| {
+            if is_log_path_boundary(character) {
+                Some(offset + character.len_utf8())
+            } else {
+                None
+            }
+        })
+        .unwrap_or(0)
+}
+
+fn sensitive_path_candidate_end(token: &str, start: usize) -> usize {
+    token[start..]
+        .char_indices()
+        .find_map(|(offset, character)| {
+            if character == ':'
+                && offset == 1
+                && token[start..]
+                    .chars()
+                    .next()
+                    .is_some_and(|prefix| prefix.is_ascii_alphabetic())
+            {
+                return None;
+            }
+            if is_log_path_boundary(character) {
+                Some(start + offset)
+            } else {
+                None
+            }
+        })
+        .unwrap_or(token.len())
+}
+
+fn is_log_path_boundary(character: char) -> bool {
+    matches!(
+        character,
+        '"' | '\'' | '`' | ',' | ';' | ':' | ')' | '(' | ']' | '[' | '{' | '}' | '='
+    )
+}
+
+fn is_sensitive_log_path_candidate(candidate: &str) -> bool {
+    if is_sensitive_path_str(candidate) {
+        return true;
+    }
+
+    let mut previous = None;
+    let mut has_operator_token_path = false;
+    let mut has_secret_segment = false;
+    let mut has_credential_filename = false;
+    for segment in candidate
+        .split(['/', '\\'])
+        .filter(|segment| !segment.is_empty())
+    {
+        if segment.eq_ignore_ascii_case("secret") || segment.eq_ignore_ascii_case("secrets") {
+            has_secret_segment = true;
+        }
+        if contains_ascii_case_insensitive(segment, "token")
+            || contains_ascii_case_insensitive(segment, "credential")
+            || contains_ascii_case_insensitive(segment, "secret")
+            || ends_with_ascii_case_insensitive(segment, ".key")
+        {
+            has_credential_filename = true;
+        }
+        if previous == Some("reborn") && contains_ascii_case_insensitive(segment, "operator-token")
+        {
+            has_operator_token_path = true;
+        }
+        previous = if segment.eq_ignore_ascii_case(".ironclaw")
+            || (previous == Some(".ironclaw") && segment.eq_ignore_ascii_case("reborn"))
+        {
+            Some(if segment.eq_ignore_ascii_case(".ironclaw") {
+                ".ironclaw"
+            } else {
+                "reborn"
+            })
+        } else {
+            None
+        };
+    }
+
+    has_operator_token_path || (has_secret_segment && has_credential_filename)
+}
+
+fn contains_ascii_case_insensitive(haystack: &str, needle: &str) -> bool {
+    haystack
+        .as_bytes()
+        .windows(needle.len())
+        .any(|window| window.eq_ignore_ascii_case(needle.as_bytes()))
+}
+
+fn ends_with_ascii_case_insensitive(haystack: &str, needle: &str) -> bool {
+    haystack
+        .as_bytes()
+        .get(haystack.len().saturating_sub(needle.len())..)
+        .is_some_and(|suffix| suffix.eq_ignore_ascii_case(needle.as_bytes()))
 }
 
 fn truncate_utf8_with_suffix(value: &str, max_bytes: usize) -> String {
@@ -962,6 +1234,225 @@ mod tests {
     }
 
     #[test]
+    fn record_redacts_sensitive_host_paths() {
+        let buffer = OperatorLogBuffer::new(10);
+        buffer.record(
+            RebornLogLevel::Warn,
+            "ironclaw::test",
+            "failed to read /home/user/.config/gh/hosts.yml, retrying".to_string(),
+        );
+
+        let response = buffer.query(RebornLogQueryRequest {
+            limit: Some(1),
+            ..RebornLogQueryRequest::default()
+        });
+
+        assert_eq!(
+            response.entries[0].message,
+            "failed to read [REDACTED_PATH], retrying"
+        );
+    }
+
+    #[test]
+    fn record_redacts_sensitive_host_paths_embedded_after_prefixes() {
+        let buffer = OperatorLogBuffer::new(10);
+        buffer.record(
+            RebornLogLevel::Warn,
+            "ironclaw::test",
+            "path=/home/user/.config/gh/hosts.yml json={\"path\":\"/home/user/.ssh/id_ed25519\"}"
+                .to_string(),
+        );
+
+        let response = buffer.query(RebornLogQueryRequest {
+            limit: Some(1),
+            ..RebornLogQueryRequest::default()
+        });
+
+        assert_eq!(
+            response.entries[0].message,
+            "path=[REDACTED_PATH] json={\"path\":\"[REDACTED_PATH]\"}"
+        );
+    }
+
+    #[test]
+    fn record_redacts_backslash_delimited_sensitive_host_paths() {
+        let buffer = OperatorLogBuffer::new(10);
+        buffer.record(
+            RebornLogLevel::Warn,
+            "ironclaw::test",
+            r#"win=C:\Users\alice\.ironclaw\reborn\operator-token.txt escaped=secret\token"#
+                .to_string(),
+        );
+
+        let response = buffer.query(RebornLogQueryRequest {
+            limit: Some(1),
+            ..RebornLogQueryRequest::default()
+        });
+
+        assert_eq!(
+            response.entries[0].message,
+            "win=[REDACTED_PATH] escaped=[REDACTED_PATH]"
+        );
+    }
+
+    #[test]
+    fn tail_returns_latest_entries_chronologically_with_follow_cursor() {
+        let buffer = OperatorLogBuffer::new(10);
+        for index in 0..4 {
+            buffer.record(
+                RebornLogLevel::Info,
+                "ironclaw::test",
+                format!("message {index}"),
+            );
+        }
+
+        let response = buffer.query(RebornLogQueryRequest {
+            limit: Some(2),
+            tail: true,
+            ..RebornLogQueryRequest::default()
+        });
+
+        assert_eq!(
+            response
+                .entries
+                .iter()
+                .map(|entry| entry.message.as_str())
+                .collect::<Vec<_>>(),
+            vec!["message 2", "message 3"]
+        );
+        assert!(response.tail_supported);
+        assert!(response.follow_supported);
+        assert_eq!(response.next_cursor.as_deref(), Some("after:4"));
+    }
+
+    #[test]
+    fn follow_returns_entries_after_cursor_chronologically() {
+        let buffer = OperatorLogBuffer::new(10);
+        for index in 0..3 {
+            buffer.record(
+                RebornLogLevel::Info,
+                "ironclaw::test",
+                format!("message {index}"),
+            );
+        }
+        let tail = buffer.query(RebornLogQueryRequest {
+            limit: Some(2),
+            tail: true,
+            ..RebornLogQueryRequest::default()
+        });
+        let cursor = tail.next_cursor.expect("follow cursor");
+        buffer.record(
+            RebornLogLevel::Warn,
+            "ironclaw::test",
+            "message 3".to_string(),
+        );
+        buffer.record(
+            RebornLogLevel::Warn,
+            "ironclaw::test",
+            "message 4".to_string(),
+        );
+
+        let response = buffer.query(RebornLogQueryRequest {
+            limit: Some(10),
+            cursor: Some(cursor),
+            follow: true,
+            ..RebornLogQueryRequest::default()
+        });
+
+        assert_eq!(
+            response
+                .entries
+                .iter()
+                .map(|entry| entry.message.as_str())
+                .collect::<Vec<_>>(),
+            vec!["message 3", "message 4"]
+        );
+        assert_eq!(response.next_cursor.as_deref(), Some("after:5"));
+    }
+
+    #[test]
+    fn filtered_tail_cursor_uses_highest_retained_log_id() {
+        let buffer = OperatorLogBuffer::new(10);
+        buffer.record(RebornLogLevel::Warn, "ironclaw::test", "match".to_string());
+        buffer.record(
+            RebornLogLevel::Info,
+            "ironclaw::test",
+            "newer non-match".to_string(),
+        );
+
+        let response = buffer.query(RebornLogQueryRequest {
+            limit: Some(10),
+            level: Some(RebornLogLevel::Warn),
+            tail: true,
+            ..RebornLogQueryRequest::default()
+        });
+
+        assert_eq!(response.entries.len(), 1);
+        assert_eq!(response.entries[0].message, "match");
+        assert_eq!(response.next_cursor.as_deref(), Some("after:2"));
+    }
+
+    #[test]
+    fn filtered_follow_cursor_stays_at_last_returned_match() {
+        let buffer = OperatorLogBuffer::new(10);
+        buffer.record(RebornLogLevel::Info, "ironclaw::test", "base".to_string());
+        buffer.record(RebornLogLevel::Warn, "ironclaw::test", "match".to_string());
+        buffer.record(
+            RebornLogLevel::Info,
+            "ironclaw::test",
+            "newer non-match".to_string(),
+        );
+
+        let response = buffer.query(RebornLogQueryRequest {
+            limit: Some(10),
+            cursor: Some("after:1".to_string()),
+            level: Some(RebornLogLevel::Warn),
+            follow: true,
+            ..RebornLogQueryRequest::default()
+        });
+
+        assert_eq!(response.entries.len(), 1);
+        assert_eq!(response.entries[0].message, "match");
+        assert_eq!(response.next_cursor.as_deref(), Some("after:2"));
+    }
+
+    #[test]
+    fn filtered_follow_cursor_allows_later_filter_changes() {
+        let buffer = OperatorLogBuffer::new(10);
+        buffer.record(RebornLogLevel::Info, "ironclaw::test", "base".to_string());
+        buffer.record(
+            RebornLogLevel::Warn,
+            "ironclaw::test",
+            "warn match".to_string(),
+        );
+        buffer.record(
+            RebornLogLevel::Info,
+            "ironclaw::test",
+            "info match".to_string(),
+        );
+
+        let warn_response = buffer.query(RebornLogQueryRequest {
+            limit: Some(10),
+            cursor: Some("after:1".to_string()),
+            level: Some(RebornLogLevel::Warn),
+            follow: true,
+            ..RebornLogQueryRequest::default()
+        });
+
+        let info_response = buffer.query(RebornLogQueryRequest {
+            limit: Some(10),
+            cursor: warn_response.next_cursor,
+            level: Some(RebornLogLevel::Info),
+            follow: true,
+            ..RebornLogQueryRequest::default()
+        });
+
+        assert_eq!(info_response.entries.len(), 1);
+        assert_eq!(info_response.entries[0].message, "info match");
+        assert_eq!(info_response.next_cursor.as_deref(), Some("after:3"));
+    }
+
+    #[test]
     fn record_truncates_large_messages_on_utf8_boundary() {
         let buffer = OperatorLogBuffer::new(10);
         buffer.record(
@@ -1033,9 +1524,42 @@ mod tests {
         let api_entry = RebornLogEntry::from(entry.clone());
 
         assert_eq!(
-            response_entry_bytes(&entry),
+            response_entry_bytes(&api_entry),
             serde_json::to_vec(&api_entry)
                 .expect("serialize entry")
+                .len()
+        );
+    }
+
+    #[test]
+    fn response_entries_bytes_after_push_counts_json_array_overhead() {
+        let first = RebornLogEntry::from(StoredLogEntry {
+            id: 1,
+            timestamp: Utc::now(),
+            level: RebornLogLevel::Info,
+            target: "ironclaw::test".to_string(),
+            message: "first".to_string(),
+            correlation: LogCorrelation::default(),
+        });
+        let second = RebornLogEntry::from(StoredLogEntry {
+            id: 2,
+            timestamp: Utc::now(),
+            level: RebornLogLevel::Warn,
+            target: "ironclaw::test".to_string(),
+            message: "second".to_string(),
+            correlation: LogCorrelation::default(),
+        });
+
+        let mut selected_bytes = 0;
+        selected_bytes =
+            response_entries_bytes_after_push(selected_bytes, 0, response_entry_bytes(&first));
+        selected_bytes =
+            response_entries_bytes_after_push(selected_bytes, 1, response_entry_bytes(&second));
+
+        assert_eq!(
+            selected_bytes,
+            serde_json::to_vec(&vec![first, second])
+                .expect("serialize entries")
                 .len()
         );
     }
