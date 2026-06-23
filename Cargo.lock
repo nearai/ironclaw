@@ -5150,7 +5150,6 @@ dependencies = [
  "axum 0.8.9",
  "http 1.4.1",
  "http-body-util",
- "ironclaw_auth",
  "ironclaw_host_api",
  "ironclaw_product_adapters",
  "ironclaw_product_workflow",

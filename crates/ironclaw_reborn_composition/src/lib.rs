@@ -187,8 +187,8 @@ pub use ironclaw_product_workflow::{
 #[cfg(feature = "webui-v2-beta")]
 pub use ironclaw_reborn_http_kit::{
     ProtectedRouteMount, PublicRouteDrain, PublicRouteDrains, PublicRouteMount,
-    RateLimitConfigError, WebuiAuthentication, WebuiAuthenticator, WebuiServeConfig,
-    WebuiServeConfigError, WebuiServeError, WebuiV2App, compose_webui_v2_app,
+    RateLimitConfigError, WebuiAuthentication, WebuiAuthenticator, WebuiServeConfigError,
+    WebuiServeError, WebuiV2App,
 };
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 pub use ironclaw_runtime_policy::{
@@ -332,6 +332,8 @@ pub use slack_serve::{
     slack_events_route_mount,
 };
 pub use trajectory_observer::RebornTrajectoryObserver;
+#[cfg(feature = "webui-v2-beta")]
+pub use webui::WebuiServeConfig;
 pub use webui::{RebornWebuiBundle, build_webui_services};
 #[cfg(feature = "webui-v2-beta")]
 pub use webui::{webui_v2_app, webui_v2_app_with_lifecycle};

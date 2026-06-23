@@ -45,7 +45,6 @@ use axum::{
     response::{IntoResponse, Response},
     routing::get,
 };
-use ironclaw_auth::GoogleOAuthRouteConfig;
 use ironclaw_host_api::ingress::IngressRouteDescriptor;
 use ironclaw_host_api::{AgentId, ProjectId, TenantId, UserId};
 use ironclaw_webui_v2::{
@@ -175,9 +174,11 @@ fn reborn_projects_enabled() -> bool {
 /// defaults — empty allow-origin list, locked-down CSP, 14 MiB outer
 /// body cap — apply unless an explicit builder override changes them.
 ///
-/// Read access is intentionally not re-exposed: host binaries should
-/// keep their own config sources of truth (`[webui]` TOML, env vars)
-/// and feed builders, not round-trip through this struct.
+/// Read access is limited to the host-stamped identity fields that
+/// composition needs while lowering typed route mounts. Host binaries
+/// should keep their own config sources of truth (`[webui]` TOML, env
+/// vars) and feed builders, not round-trip arbitrary config through
+/// this struct.
 #[derive(Clone)]
 pub struct WebuiServeConfig {
     /// Host installation tenant id. Stamped onto every
@@ -239,10 +240,6 @@ pub struct WebuiServeConfig {
     /// inside the bearer auth layer. These receive the same authenticated
     /// caller extensions and descriptor-driven policy enforcement as WebUI v2.
     pub(crate) protected_mounts: Vec<ProtectedRouteMount>,
-    /// Optional Google OAuth setup config for Reborn product-auth
-    /// credential onboarding. When absent, the mounted Google setup
-    /// route fails closed with a sanitized service-unavailable response.
-    pub(crate) google_oauth: Option<GoogleOAuthRouteConfig>,
 }
 
 /// Async drain hook for public route mounts that schedule work outside the
@@ -357,13 +354,7 @@ impl WebuiServeConfig {
             default_project_id: None,
             public_mounts: Vec::new(),
             protected_mounts: Vec::new(),
-            google_oauth: None,
         }
-    }
-
-    pub fn with_google_oauth(mut self, config: GoogleOAuthRouteConfig) -> Self {
-        self.google_oauth = Some(config);
-        self
     }
 
     pub fn tenant_id(&self) -> &TenantId {
@@ -376,10 +367,6 @@ impl WebuiServeConfig {
 
     pub fn default_project_id(&self) -> Option<&ProjectId> {
         self.default_project_id.as_ref()
-    }
-
-    pub fn google_oauth(&self) -> Option<&GoogleOAuthRouteConfig> {
-        self.google_oauth.as_ref()
     }
 
     pub fn prepend_public_route_mount(&mut self, mount: PublicRouteMount) {

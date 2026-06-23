@@ -104,3 +104,78 @@ where
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use std::sync::{
+        Barrier,
+        atomic::{AtomicUsize, Ordering},
+    };
+
+    use ironclaw_filesystem::{InMemoryBackend, ScopedFilesystem};
+    use ironclaw_host_api::{MountAlias, MountGrant, MountPermissions, MountView, VirtualPath};
+
+    use super::*;
+
+    fn test_store() -> Arc<FilesystemCasRecordStore<InMemoryBackend, String>> {
+        let backend = Arc::new(InMemoryBackend::new());
+        let mounts = MountView::new(vec![MountGrant::new(
+            MountAlias::new("/records").expect("mount alias"),
+            VirtualPath::new("/engine/records").expect("virtual path"),
+            MountPermissions::read_write_list_delete(),
+        )])
+        .expect("mount view");
+        let filesystem = Arc::new(ScopedFilesystem::with_fixed_view(backend, mounts));
+        Arc::new(FilesystemCasRecordStore::new(filesystem, 8))
+    }
+
+    #[test]
+    fn cached_path_uses_first_insert_under_concurrent_miss() {
+        let store = test_store();
+        let key = "same-key".to_string();
+        let barrier = Arc::new(Barrier::new(2));
+        let derive_count = Arc::new(AtomicUsize::new(0));
+
+        let first = {
+            let store = Arc::clone(&store);
+            let key = key.clone();
+            let barrier = Arc::clone(&barrier);
+            let derive_count = Arc::clone(&derive_count);
+            std::thread::spawn(move || {
+                store.cached_path(&key, |_| {
+                    derive_count.fetch_add(1, Ordering::SeqCst);
+                    barrier.wait();
+                    ScopedPath::new("/records/first.json")
+                })
+            })
+        };
+
+        let second = {
+            let store = Arc::clone(&store);
+            let key = key.clone();
+            let barrier = Arc::clone(&barrier);
+            let derive_count = Arc::clone(&derive_count);
+            std::thread::spawn(move || {
+                store.cached_path(&key, |_| {
+                    derive_count.fetch_add(1, Ordering::SeqCst);
+                    barrier.wait();
+                    ScopedPath::new("/records/second.json")
+                })
+            })
+        };
+
+        let first_path = first.join().expect("first task").expect("first path");
+        let second_path = second.join().expect("second task").expect("second path");
+
+        assert_eq!(
+            second_path.as_str(),
+            first_path.as_str(),
+            "concurrent misses should converge on the first inserted path"
+        );
+        assert_eq!(
+            derive_count.load(Ordering::SeqCst),
+            2,
+            "both tasks may derive before the write lock, but cache insertion must be stable"
+        );
+    }
+}

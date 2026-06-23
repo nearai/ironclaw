@@ -22,7 +22,6 @@ openai-compat-beta = [
 [dependencies]
 async-trait = "0.1"
 axum = "0.8"
-ironclaw_auth = { path = "../ironclaw_auth" }
 ironclaw_host_api = { path = "../ironclaw_host_api" }
 ironclaw_product_adapters = { path = "../ironclaw_product_adapters", optional = true }
 ironclaw_product_workflow = { path = "../ironclaw_product_workflow" }

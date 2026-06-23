@@ -6,7 +6,11 @@ use async_trait::async_trait;
 #[cfg(feature = "webui-v2-beta")]
 use axum::Router;
 #[cfg(feature = "webui-v2-beta")]
+use axum::http::HeaderValue;
+#[cfg(feature = "webui-v2-beta")]
 use ironclaw_host_api::ingress::IngressAuthPolicy;
+#[cfg(feature = "webui-v2-beta")]
+use ironclaw_host_api::{AgentId, ProjectId, TenantId};
 use ironclaw_host_api::{InvocationId, ResourceScope};
 use ironclaw_product_adapters::ProjectionStream;
 use ironclaw_product_workflow::{
@@ -36,13 +40,111 @@ use crate::{
     webui_extension_credentials::ProductAuthExtensionCredentialSetup,
 };
 #[cfg(feature = "webui-v2-beta")]
+use ironclaw_auth::GoogleOAuthRouteConfig;
+#[cfg(feature = "webui-v2-beta")]
 use ironclaw_reborn_http_kit::{
-    ProtectedRouteMount, PublicRouteMount, WebuiServeConfig, WebuiServeError, WebuiV2App,
-    compose_webui_v2_app,
+    ProtectedRouteMount, PublicRouteMount, WebuiAuthenticator,
+    WebuiServeConfig as HttpWebuiServeConfig, WebuiServeConfigError, WebuiServeError, WebuiV2App,
+    compose_webui_v2_app as compose_http_webui_v2_app,
 };
 
 static SKILL_CONTENT_SAFETY: std::sync::LazyLock<ironclaw_safety::Sanitizer> =
     std::sync::LazyLock::new(ironclaw_safety::Sanitizer::new);
+
+#[cfg(feature = "webui-v2-beta")]
+#[derive(Clone)]
+pub struct WebuiServeConfig {
+    inner: HttpWebuiServeConfig,
+    google_oauth: Option<GoogleOAuthRouteConfig>,
+}
+
+#[cfg(feature = "webui-v2-beta")]
+impl WebuiServeConfig {
+    pub fn new(
+        tenant_id: TenantId,
+        authenticator: Arc<dyn WebuiAuthenticator>,
+        allowed_origins: Vec<HeaderValue>,
+    ) -> Self {
+        Self {
+            inner: HttpWebuiServeConfig::new(tenant_id, authenticator, allowed_origins),
+            google_oauth: None,
+        }
+    }
+
+    pub fn parse_allowed_origins(
+        origins: &[String],
+    ) -> Result<Vec<HeaderValue>, WebuiServeConfigError> {
+        HttpWebuiServeConfig::parse_allowed_origins(origins)
+    }
+
+    pub fn with_google_oauth(mut self, config: GoogleOAuthRouteConfig) -> Self {
+        self.google_oauth = Some(config);
+        self
+    }
+
+    pub fn tenant_id(&self) -> &TenantId {
+        self.inner.tenant_id()
+    }
+
+    pub fn default_agent_id(&self) -> Option<&AgentId> {
+        self.inner.default_agent_id()
+    }
+
+    pub fn default_project_id(&self) -> Option<&ProjectId> {
+        self.inner.default_project_id()
+    }
+
+    fn google_oauth(&self) -> Option<&GoogleOAuthRouteConfig> {
+        self.google_oauth.as_ref()
+    }
+
+    pub fn prepend_public_route_mount(&mut self, mount: PublicRouteMount) {
+        self.inner.prepend_public_route_mount(mount);
+    }
+
+    pub fn prepend_protected_route_mount(&mut self, mount: ProtectedRouteMount) {
+        self.inner.prepend_protected_route_mount(mount);
+    }
+
+    pub fn with_public_route_mount(mut self, mount: PublicRouteMount) -> Self {
+        self.inner = self.inner.with_public_route_mount(mount);
+        self
+    }
+
+    pub fn with_protected_route_mount(mut self, mount: ProtectedRouteMount) -> Self {
+        self.inner = self.inner.with_protected_route_mount(mount);
+        self
+    }
+
+    pub fn with_canonical_host(mut self, host: impl Into<String>) -> Self {
+        self.inner = self.inner.with_canonical_host(host);
+        self
+    }
+
+    pub fn with_default_agent_id(mut self, agent_id: AgentId) -> Self {
+        self.inner = self.inner.with_default_agent_id(agent_id);
+        self
+    }
+
+    pub fn with_default_project_id(mut self, project_id: ProjectId) -> Self {
+        self.inner = self.inner.with_default_project_id(project_id);
+        self
+    }
+
+    pub fn with_max_body_bytes(mut self, bytes: usize) -> Self {
+        self.inner = self.inner.with_max_body_bytes(bytes);
+        self
+    }
+
+    pub fn with_csp_header_str(mut self, csp: &str) -> Result<Self, WebuiServeConfigError> {
+        self.inner = self.inner.with_csp_header_str(csp)?;
+        Ok(self)
+    }
+
+    fn into_inner(self) -> HttpWebuiServeConfig {
+        self.inner
+    }
+}
 
 /// WebUI-facing Reborn service bundle for host composition.
 ///
@@ -107,7 +209,7 @@ pub fn webui_v2_app_with_lifecycle(
         ));
         config.prepend_public_route_mount(PublicRouteMount::new(mount.public, public_descriptors));
     }
-    compose_webui_v2_app(bundle.api.clone(), config)
+    compose_http_webui_v2_app(bundle.api.clone(), config.into_inner())
 }
 
 /// Compose the WebUI-facing product facade from an already-built Reborn runtime.
