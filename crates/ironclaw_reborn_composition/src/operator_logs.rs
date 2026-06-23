@@ -416,13 +416,16 @@ impl OperatorLogBuffer {
                     }
                     let api_entry = RebornLogEntry::from(entry.clone());
                     let entry_bytes = response_entry_bytes(&api_entry);
-                    if !selected.is_empty()
-                        && selected_bytes.saturating_add(entry_bytes) > MAX_LOG_RESPONSE_BYTES
-                    {
+                    let next_selected_bytes = response_entries_bytes_after_push(
+                        selected_bytes,
+                        selected.len(),
+                        entry_bytes,
+                    );
+                    if !selected.is_empty() && next_selected_bytes > MAX_LOG_RESPONSE_BYTES {
                         break;
                     }
                     last_selected_id = Some(entry.id);
-                    selected_bytes = selected_bytes.saturating_add(entry_bytes);
+                    selected_bytes = next_selected_bytes;
                     selected.push(api_entry);
                 }
                 next_cursor = Some(after_cursor(last_selected_id.unwrap_or(start_after_id)));
@@ -438,12 +441,15 @@ impl OperatorLogBuffer {
                     }
                     let api_entry = RebornLogEntry::from(entry.clone());
                     let entry_bytes = response_entry_bytes(&api_entry);
-                    if !selected.is_empty()
-                        && selected_bytes.saturating_add(entry_bytes) > MAX_LOG_RESPONSE_BYTES
-                    {
+                    let next_selected_bytes = response_entries_bytes_after_push(
+                        selected_bytes,
+                        selected.len(),
+                        entry_bytes,
+                    );
+                    if !selected.is_empty() && next_selected_bytes > MAX_LOG_RESPONSE_BYTES {
                         break;
                     }
-                    selected_bytes = selected_bytes.saturating_add(entry_bytes);
+                    selected_bytes = next_selected_bytes;
                     selected.push(api_entry);
                 }
                 selected.reverse();
@@ -466,15 +472,18 @@ impl OperatorLogBuffer {
                     }
                     let api_entry = RebornLogEntry::from(entry.clone());
                     let entry_bytes = response_entry_bytes(&api_entry);
-                    if !selected.is_empty()
-                        && selected_bytes.saturating_add(entry_bytes) > MAX_LOG_RESPONSE_BYTES
-                    {
+                    let next_selected_bytes = response_entries_bytes_after_push(
+                        selected_bytes,
+                        selected.len(),
+                        entry_bytes,
+                    );
+                    if !selected.is_empty() && next_selected_bytes > MAX_LOG_RESPONSE_BYTES {
                         next_cursor = selected
                             .last()
                             .map(|entry: &RebornLogEntry| format!("before:{}", entry.id));
                         break;
                     }
-                    selected_bytes = selected_bytes.saturating_add(entry_bytes);
+                    selected_bytes = next_selected_bytes;
                     selected.push(api_entry);
                 }
             }
@@ -498,6 +507,16 @@ fn set_first(slot: &mut Option<String>, value: String) {
 
 fn response_entry_bytes(entry: &RebornLogEntry) -> usize {
     serde_json::to_vec(entry).map_or(usize::MAX, |bytes| bytes.len())
+}
+
+fn response_entries_bytes_after_push(
+    current_bytes: usize,
+    selected_len: usize,
+    entry_bytes: usize,
+) -> usize {
+    current_bytes
+        .saturating_add(entry_bytes)
+        .saturating_add(if selected_len == 0 { 2 } else { 1 })
 }
 
 fn entry_matches_request(
@@ -1508,6 +1527,39 @@ mod tests {
             response_entry_bytes(&api_entry),
             serde_json::to_vec(&api_entry)
                 .expect("serialize entry")
+                .len()
+        );
+    }
+
+    #[test]
+    fn response_entries_bytes_after_push_counts_json_array_overhead() {
+        let first = RebornLogEntry::from(StoredLogEntry {
+            id: 1,
+            timestamp: Utc::now(),
+            level: RebornLogLevel::Info,
+            target: "ironclaw::test".to_string(),
+            message: "first".to_string(),
+            correlation: LogCorrelation::default(),
+        });
+        let second = RebornLogEntry::from(StoredLogEntry {
+            id: 2,
+            timestamp: Utc::now(),
+            level: RebornLogLevel::Warn,
+            target: "ironclaw::test".to_string(),
+            message: "second".to_string(),
+            correlation: LogCorrelation::default(),
+        });
+
+        let mut selected_bytes = 0;
+        selected_bytes =
+            response_entries_bytes_after_push(selected_bytes, 0, response_entry_bytes(&first));
+        selected_bytes =
+            response_entries_bytes_after_push(selected_bytes, 1, response_entry_bytes(&second));
+
+        assert_eq!(
+            selected_bytes,
+            serde_json::to_vec(&vec![first, second])
+                .expect("serialize entries")
                 .len()
         );
     }
