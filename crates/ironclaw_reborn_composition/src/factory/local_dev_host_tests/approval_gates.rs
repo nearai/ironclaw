@@ -6,14 +6,15 @@ use std::{
 use chrono::Utc;
 use ironclaw_approvals::{
     ApprovalResolver, AutoApproveSettingInput, AutoApproveSettingStore,
-    CapabilityPermissionOverrideStore, DenyApproval, LeaseApproval, ToolPermissionOverride,
+    CapabilityPermissionOverrideStore, DenyApproval, LeaseApproval, PersistentApprovalAction,
+    PersistentApprovalPolicyInput, PersistentApprovalPolicyStore, ToolPermissionOverride,
     ToolPermissionOverrideInput,
 };
 use ironclaw_authorization::{CapabilityLeaseStatus, CapabilityLeaseStore};
 use ironclaw_host_api::{
     CapabilityGrant, CapabilityGrantId, CapabilityId, CapabilitySet, EffectKind, ExecutionContext,
     ExtensionId, GrantConstraints, MountView, NetworkPolicy, NetworkTargetPattern, Principal,
-    ResourceEstimate, RuntimeKind, ThreadId, TrustClass, UserId,
+    ResourceEstimate, ResourceScope, RuntimeKind, ThreadId, TrustClass, UserId,
 };
 use ironclaw_host_runtime::{
     APPLY_PATCH_CAPABILITY_ID, ECHO_CAPABILITY_ID, RuntimeApprovalGate, RuntimeCapabilityOutcome,
@@ -277,6 +278,76 @@ async fn local_dev_auto_approve_setting_update_skips_next_shell_gate() {
 }
 
 #[tokio::test]
+async fn local_dev_settings_page_always_allow_policy_skips_next_shell_gate() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let services = build_reborn_services(
+        RebornBuildInput::local_dev(
+            "local-dev-settings-allow-owner",
+            dir.path().join("local-dev"),
+        )
+        .with_runtime_policy(local_dev_policy()),
+    )
+    .await
+    .expect("local-dev services build");
+    let local_runtime = services
+        .local_runtime
+        .as_ref()
+        .expect("local-dev runtime substrate");
+    let host_runtime = services
+        .host_runtime
+        .as_ref()
+        .expect("local-dev host runtime");
+    let capability_id = CapabilityId::new(SHELL_CAPABILITY_ID).expect("shell capability");
+    let context = shell_execution_context(
+        "local-dev-settings-allow-owner",
+        "thread-local-dev-settings-allow",
+    );
+
+    local_runtime
+        .persistent_approval_policies
+        .allow(PersistentApprovalPolicyInput {
+            scope: operator_tool_permission_scope_for_test(&context.resource_scope),
+            action: PersistentApprovalAction::Dispatch,
+            capability_id: capability_id.clone(),
+            grantee: Principal::Extension(context.extension_id.clone()),
+            approved_by: Principal::User(context.user_id.clone()),
+            constraints: GrantConstraints {
+                allowed_effects: shell_allowed_effects(),
+                mounts: MountView::default(),
+                network: shell_network_policy(),
+                secrets: Vec::new(),
+                resource_ceiling: None,
+                expires_at: None,
+                max_invocations: None,
+            },
+            source_approval_request_id: None,
+        })
+        .await
+        .expect("settings-page persistent approval policy");
+
+    let outcome = host_runtime
+        .invoke_capability(RuntimeCapabilityRequest::new(
+            context.clone(),
+            capability_id,
+            ResourceEstimate::default(),
+            serde_json::json!({"command": "echo settings allow"}),
+            trust_decision(shell_allowed_effects()),
+        ))
+        .await
+        .expect("settings persistent approval shell invocation succeeds");
+
+    assert!(
+        matches!(outcome, RuntimeCapabilityOutcome::Completed(_)),
+        "settings-page always_allow policy should skip the shell approval gate, got {outcome:?}"
+    );
+    assert_eq!(
+        pending_approval_count(local_runtime, &context).await,
+        0,
+        "persistent always_allow policy must not create a pending approval"
+    );
+}
+
+#[tokio::test]
 async fn local_dev_yolo_explicit_ask_each_time_still_requires_approval_gate() {
     let dir = tempfile::tempdir().expect("tempdir");
     let host_home = dir.path().join("home");
@@ -306,7 +377,7 @@ async fn local_dev_yolo_explicit_ask_each_time_still_requires_approval_gate() {
     local_runtime
         .tool_permission_overrides
         .set(ToolPermissionOverrideInput {
-            scope: context.resource_scope.clone(),
+            scope: operator_tool_permission_scope_for_test(&context.resource_scope),
             capability_id: capability_id.clone(),
             state: ToolPermissionOverride::AskEachTime,
             updated_by: Principal::User(context.user_id.clone()),
@@ -527,6 +598,18 @@ async fn pending_approval_count(
         .into_iter()
         .filter(|record| record.status == ApprovalStatus::Pending)
         .count()
+}
+
+fn operator_tool_permission_scope_for_test(scope: &ResourceScope) -> ResourceScope {
+    ResourceScope {
+        tenant_id: scope.tenant_id.clone(),
+        user_id: scope.user_id.clone(),
+        agent_id: None,
+        project_id: None,
+        mission_id: None,
+        thread_id: None,
+        invocation_id: scope.invocation_id,
+    }
 }
 
 fn shell_lease_approval() -> LeaseApproval {

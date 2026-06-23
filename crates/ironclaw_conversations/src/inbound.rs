@@ -910,6 +910,10 @@ mod tests {
             InboundTurnError::DurableState {
                 reason: "disk write failed".to_string(),
             },
+            InboundTurnError::BindingRequired {
+                adapter_kind: TRIGGER_TRUSTED_ADAPTER_KIND.to_string(),
+                external_actor_id: "actor".to_string(),
+            },
         ] {
             let classified = classify_trusted_trigger_inbound_error(error);
             assert!(matches!(
@@ -968,10 +972,6 @@ mod tests {
             InboundTurnError::InvalidExternalRef {
                 kind: "adapter_kind",
                 reason: "empty".to_string(),
-            },
-            InboundTurnError::BindingRequired {
-                adapter_kind: TRIGGER_TRUSTED_ADAPTER_KIND.to_string(),
-                external_actor_id: "actor".to_string(),
             },
             InboundTurnError::AccessDenied {
                 actor_id: "actor".to_string(),

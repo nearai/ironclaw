@@ -376,8 +376,8 @@ fn classify_materializer_inbound_error(error: InboundTurnError) -> TriggerError 
                 | TurnError::LeaseMismatch
                 | TurnError::InvalidRunOriginAdapter,
         } => rejected_trigger_materialization("trusted trigger submit rejected"),
+        InboundTurnError::BindingRequired { .. } => retryable_trigger_materializer_backend_error(),
         InboundTurnError::InvalidExternalRef { .. }
-        | InboundTurnError::BindingRequired { .. }
         | InboundTurnError::AccessDenied { .. }
         | InboundTurnError::BindingConflict { .. }
         | InboundTurnError::ThreadNotFound { .. }
@@ -1230,6 +1230,18 @@ mod tests {
 
         assert!(
             matches!(error, TriggerError::InvalidMaterialization { reason } if reason == "trusted trigger inbound request rejected")
+        );
+    }
+
+    #[test]
+    fn binding_required_materialization_failure_is_retryable() {
+        let error = classify_materializer_inbound_error(InboundTurnError::BindingRequired {
+            adapter_kind: "trigger".to_string(),
+            external_actor_id: "actor-1".to_string(),
+        });
+
+        assert!(
+            matches!(error, TriggerError::Backend { reason } if reason == "trusted trigger submit retryable failure")
         );
     }
 

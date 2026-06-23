@@ -51,3 +51,11 @@ pub(super) fn classify_failure(error: &TriggerError) -> FailureClassification {
     };
     FailureClassification { kind, reason }
 }
+
+pub(super) fn classify_submit_failure(error: &TriggerError) -> FailureClassification {
+    let mut classification = classify_failure(error);
+    if matches!(error, TriggerError::NotFound) {
+        classification.kind = SubmitFailureKind::Retryable;
+    }
+    classification
+}

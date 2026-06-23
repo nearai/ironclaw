@@ -115,7 +115,10 @@ impl ApprovalSettingsProvider for StoreApprovalSettingsProvider {
         // Fail safe: a store read error resolves to "ask each time" with
         // auto-approve off so the gate falls back to asking rather than
         // silently auto-approving or denying. The error is logged, not swallowed.
-        let key = ToolPermissionOverrideKey::new(scope, capability_id.clone());
+        let key = ToolPermissionOverrideKey::new(
+            &operator_tool_permission_scope(scope),
+            capability_id.clone(),
+        );
         match self.overrides.get(&key).await {
             Ok(record) => record.map(|record| record.state),
             Err(error) => {
@@ -152,6 +155,18 @@ impl ApprovalSettingsProvider for StoreApprovalSettingsProvider {
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .insert(key, enabled);
         enabled
+    }
+}
+
+fn operator_tool_permission_scope(scope: &ResourceScope) -> ResourceScope {
+    ResourceScope {
+        tenant_id: scope.tenant_id.clone(),
+        user_id: scope.user_id.clone(),
+        agent_id: None,
+        project_id: None,
+        mission_id: None,
+        thread_id: None,
+        invocation_id: scope.invocation_id,
     }
 }
 

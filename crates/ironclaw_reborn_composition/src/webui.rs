@@ -51,6 +51,7 @@ impl RebornOperatorToolCatalog for ActiveRegistryOperatorToolCatalog {
             .capabilities()
             .map(|descriptor| RebornOperatorToolInfo {
                 capability_id: descriptor.id.clone(),
+                provider: descriptor.provider.clone(),
                 description: descriptor.description.clone(),
                 default_permission: descriptor.default_permission,
                 effects: descriptor.effects.clone(),

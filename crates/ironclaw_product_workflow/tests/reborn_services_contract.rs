@@ -11,11 +11,14 @@ use std::{
 
 use async_trait::async_trait;
 use chrono::Utc;
+use ironclaw_approvals::{
+    PersistentApprovalAction, PersistentApprovalPolicyKey, PersistentApprovalPolicyStore,
+};
 use ironclaw_attachments::InboundAttachment;
 use ironclaw_auth::{CredentialAccountId, CredentialAccountProjection};
 use ironclaw_host_api::{
-    AgentId, ApprovalRequestId, CapabilityId, EffectKind, PermissionMode, ProjectId, TenantId,
-    ThreadId, UserId,
+    AgentId, ApprovalRequestId, CapabilityId, EffectKind, ExtensionId, InvocationId,
+    PermissionMode, Principal, ProjectId, ResourceScope, TenantId, ThreadId, UserId,
 };
 use ironclaw_product_adapters::{
     ProductAdapterError, ProductOutboundEnvelope, ProductWorkflowRejectionKind, ProjectionCursor,
@@ -7483,31 +7486,50 @@ impl RebornOperatorToolCatalog for StaticOperatorToolCatalogForTest {
 }
 
 fn services_with_operator_approval_config() -> RebornServices {
-    RebornServices::new(
+    services_with_operator_approval_config_parts().0
+}
+
+fn services_with_operator_approval_config_parts() -> (
+    RebornServices,
+    Arc<ironclaw_approvals::InMemoryPersistentApprovalPolicyStore>,
+) {
+    let persistent_policies =
+        Arc::new(ironclaw_approvals::InMemoryPersistentApprovalPolicyStore::new());
+    let services = RebornServices::new(
         Arc::new(InMemorySessionThreadService::default()),
         Arc::new(FakeTurnCoordinator::default()),
     )
     .with_operator_approval_config(
         Arc::new(ironclaw_approvals::InMemoryToolPermissionOverrideStore::new()),
         Arc::new(ironclaw_approvals::InMemoryAutoApproveSettingStore::new()),
-        Arc::new(ironclaw_approvals::InMemoryPersistentApprovalPolicyStore::new()),
+        persistent_policies.clone(),
         Arc::new(StaticOperatorToolCatalogForTest {
             tools: vec![
                 RebornOperatorToolInfo {
                     capability_id: CapabilityId::new("tool.alpha").expect("capability id"),
+                    provider: ExtensionId::new("extension.alpha").expect("extension id"),
                     description: "Alpha tool".to_string(),
                     default_permission: PermissionMode::Ask,
                     effects: vec![EffectKind::ExecuteCode],
                 },
                 RebornOperatorToolInfo {
                     capability_id: CapabilityId::new("tool.locked").expect("capability id"),
+                    provider: ExtensionId::new("extension.locked").expect("extension id"),
                     description: "Locked tool".to_string(),
                     default_permission: PermissionMode::Deny,
                     effects: Vec::new(),
                 },
+                RebornOperatorToolInfo {
+                    capability_id: CapabilityId::new("tool.financial").expect("capability id"),
+                    provider: ExtensionId::new("extension.financial").expect("extension id"),
+                    description: "Financial tool".to_string(),
+                    default_permission: PermissionMode::Ask,
+                    effects: vec![EffectKind::Financial],
+                },
             ],
         }),
-    )
+    );
+    (services, persistent_policies)
 }
 
 fn operator_config_entry_value<'a>(
@@ -7522,9 +7544,21 @@ fn operator_config_entry_value<'a>(
         .value
 }
 
+fn operator_policy_scope_for_test(tenant_id: &str, user_id: &str) -> ResourceScope {
+    ResourceScope {
+        tenant_id: TenantId::new(tenant_id).expect("tenant id"),
+        user_id: UserId::new(user_id).expect("user id"),
+        agent_id: None,
+        project_id: None,
+        mission_id: None,
+        thread_id: None,
+        invocation_id: InvocationId::new(),
+    }
+}
+
 #[tokio::test]
 async fn operator_config_reads_and_writes_auto_approve_and_tool_permissions() {
-    let services = services_with_operator_approval_config();
+    let (services, persistent_policies) = services_with_operator_approval_config_parts();
 
     let initial = services
         .list_operator_config(caller())
@@ -7545,6 +7579,38 @@ async fn operator_config_reads_and_writes_auto_approve_and_tool_permissions() {
     assert_eq!(
         operator_config_entry_value(&initial, "tool.tool.locked")["state"],
         "disabled"
+    );
+    assert_eq!(
+        operator_config_entry_value(&initial, "tool.tool.financial")["state"],
+        "ask_each_time"
+    );
+    assert_eq!(
+        operator_config_entry_value(&initial, "tool.tool.financial")["locked"],
+        true
+    );
+    assert_eq!(
+        operator_config_entry_value(&initial, "tool.tool.financial")["effective_source"],
+        "locked"
+    );
+
+    let financial_error = services
+        .set_operator_config_key(
+            caller(),
+            "tool.tool.financial".to_string(),
+            RebornOperatorConfigSetRequest {
+                value: json!({ "state": "always_allow" }),
+            },
+        )
+        .await
+        .expect_err("hard-floor tool cannot be made always-allow");
+    assert_eq!(
+        financial_error.code,
+        RebornServicesErrorCode::InvalidRequest
+    );
+    assert_eq!(financial_error.kind, RebornServicesErrorKind::Validation);
+    assert_eq!(
+        financial_error.validation_code,
+        Some(WebUiInboundValidationCode::InvalidValue)
     );
 
     services
@@ -7588,6 +7654,38 @@ async fn operator_config_reads_and_writes_auto_approve_and_tool_permissions() {
         .expect("always allow tool");
     assert_eq!(allowed.entry.value["state"], "always_allow");
     assert_eq!(allowed.entry.value["effective_source"], "override");
+
+    let operator_scope = operator_policy_scope_for_test("tenant-alpha", "user-alpha");
+    let extension_key = PersistentApprovalPolicyKey::new(
+        &operator_scope,
+        PersistentApprovalAction::Dispatch,
+        CapabilityId::new("tool.alpha").expect("capability id"),
+        Principal::Extension(ExtensionId::new("extension.alpha").expect("extension id")),
+    );
+    assert!(
+        persistent_policies
+            .lookup(&extension_key)
+            .await
+            .expect("lookup extension-grantee policy")
+            .and_then(|policy| policy.active_grant())
+            .is_some(),
+        "settings-page always_allow must write the provider extension grantee"
+    );
+
+    let user_key = PersistentApprovalPolicyKey::new(
+        &operator_scope,
+        PersistentApprovalAction::Dispatch,
+        CapabilityId::new("tool.alpha").expect("capability id"),
+        Principal::User(UserId::new("user-alpha").expect("user id")),
+    );
+    assert!(
+        persistent_policies
+            .lookup(&user_key)
+            .await
+            .expect("lookup user-grantee policy")
+            .is_none(),
+        "settings-page always_allow must not write a user-grantee policy"
+    );
 }
 
 #[tokio::test]
