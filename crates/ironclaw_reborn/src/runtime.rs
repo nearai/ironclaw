@@ -55,6 +55,7 @@ use crate::{
         prompt_material::GateBackedSubagentPromptMaterialSource,
     },
     text_loop_driver::TextOnlyModelReplyDriverConfig,
+    tool_disclosure_port::ToolDisclosureCapabilityDecorator,
     turn_run_executor::RebornTurnRunExecutor,
 };
 
@@ -92,6 +93,30 @@ pub const DEFAULT_MAX_CONCURRENT_RUNS_PER_USER: std::num::NonZeroU32 =
         None => std::num::NonZeroU32::MIN,
     };
 
+pub const REBORN_TOOL_DISCLOSURE_ENV: &str = "REBORN_TOOL_DISCLOSURE";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ToolDisclosureMode {
+    #[default]
+    Off,
+    Bridged,
+}
+
+impl ToolDisclosureMode {
+    pub fn from_env() -> Self {
+        match std::env::var(REBORN_TOOL_DISCLOSURE_ENV) {
+            Ok(value) if value.eq_ignore_ascii_case("bridged") => Self::Bridged,
+            Ok(value) if value.eq_ignore_ascii_case("off") || value.trim().is_empty() => Self::Off,
+            Ok(_) => Self::Off,
+            Err(_) => Self::Off,
+        }
+    }
+
+    pub fn is_bridged(self) -> bool {
+        matches!(self, Self::Bridged)
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct DefaultPlannedRuntimeConfig {
     pub heartbeat_interval: std::time::Duration,
@@ -99,6 +124,7 @@ pub struct DefaultPlannedRuntimeConfig {
     pub worker_count: std::num::NonZeroUsize,
     pub text_only_driver: TextOnlyModelReplyDriverConfig,
     pub host: TextOnlyLoopHostConfig,
+    pub tool_disclosure: ToolDisclosureMode,
 }
 
 impl Default for DefaultPlannedRuntimeConfig {
@@ -109,6 +135,7 @@ impl Default for DefaultPlannedRuntimeConfig {
             worker_count: DEFAULT_TURN_RUNNER_WORKER_COUNT,
             text_only_driver: TextOnlyModelReplyDriverConfig::default(),
             host: TextOnlyLoopHostConfig::default(),
+            tool_disclosure: ToolDisclosureMode::from_env(),
         }
     }
 }
@@ -568,10 +595,14 @@ where
         parts.subagent_spawn_limits,
         flavors::builtin_flavor_catalog(),
     )?);
-    let capability_factory: Arc<dyn LoopCapabilityPortFactory> = Arc::new(
-        DecoratingLoopCapabilityPortFactory::new(parts.capability_factory)
-            .with_decorator(spawn_decorator),
-    );
+    let mut capability_factory = DecoratingLoopCapabilityPortFactory::new(parts.capability_factory)
+        .with_decorator(spawn_decorator);
+    if parts.config.tool_disclosure.is_bridged() {
+        capability_factory = capability_factory.with_decorator(Arc::new(
+            ToolDisclosureCapabilityDecorator::new(Arc::clone(&parts.capability_result_writer)),
+        ));
+    }
+    let capability_factory: Arc<dyn LoopCapabilityPortFactory> = Arc::new(capability_factory);
     let capability_surface_resolver: Arc<dyn CapabilitySurfaceProfileResolver> =
         Arc::new(SubagentCapabilitySurfaceResolver::new(
             parts.capability_surface_resolver,

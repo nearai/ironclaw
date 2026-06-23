@@ -1,15 +1,11 @@
 //! Pure progressive tool-disclosure catalog and selector.
 //!
-//! This module is intentionally not wired into the live model path yet. The
-//! next disclosure pass will connect it behind the rollout flag and add bridge
-//! execution.
+use std::collections::{BTreeSet, HashSet};
 
-#![allow(dead_code)]
-
-use std::collections::HashSet;
-
-use ironclaw_host_api::CapabilityId;
-use ironclaw_turns::run_profile::ProviderToolDefinition;
+use ironclaw_host_api::{CapabilityId, RuntimeKind};
+use ironclaw_turns::run_profile::{
+    CapabilityDescriptorView, ConcurrencyHint, ProviderToolDefinition,
+};
 use serde_json::{Map, Value, json};
 
 /// Candidate core names from the design doc. Exact membership is
@@ -28,6 +24,9 @@ pub(crate) const CORE_TOOL_NAMES: &[&str] = &[
 ];
 
 const BRIDGE_CAPABILITY_PREFIX: &str = "ironclaw";
+pub(crate) const TOOL_SEARCH_NAME: &str = "tool_search";
+pub(crate) const TOOL_DESCRIBE_NAME: &str = "tool_describe";
+pub(crate) const TOOL_CALL_NAME: &str = "tool_call";
 const MAX_KEYWORD_SCORE: u32 = 30;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -43,7 +42,7 @@ pub(crate) struct CapabilityCatalog {
 }
 
 #[derive(Debug, Clone)]
-struct CatalogEntry {
+pub(crate) struct CatalogEntry {
     definition: ProviderToolDefinition,
     est_schema_tokens: u32,
     search_blob: String,
@@ -120,6 +119,48 @@ impl CapabilityCatalog {
             .ok()
             .and_then(|index| self.entries.get(index))
     }
+
+    pub(crate) fn definition_by_name(&self, name: &str) -> Option<&ProviderToolDefinition> {
+        self.entry_by_name(name).map(|entry| &entry.definition)
+    }
+
+    pub(crate) fn definitions(&self) -> impl Iterator<Item = &ProviderToolDefinition> {
+        self.entries.iter().map(|entry| &entry.definition)
+    }
+
+    pub(crate) fn search_result(&self, name: &str) -> Option<CatalogSearchResult> {
+        self.entry_by_name(name)
+            .map(CatalogSearchResult::from_entry)
+    }
+
+    pub(crate) fn active_or_disclosed_descriptors(
+        &self,
+        active: &ActiveSet,
+        disclosed_names: &BTreeSet<String>,
+    ) -> Vec<CapabilityDescriptorView> {
+        let mut included = BTreeSet::new();
+        let mut descriptors = Vec::new();
+        for definition in &active.definitions {
+            if is_bridge_name(&definition.name) {
+                descriptors.push(bridge_descriptor(definition));
+            } else if let Some(entry) = self.entry_by_name(&definition.name)
+                && included.insert(definition.name.clone())
+            {
+                descriptors.push(catalog_descriptor(entry));
+            }
+        }
+        for name in disclosed_names {
+            if included.contains(name) {
+                continue;
+            }
+            if let Some(entry) = self.entry_by_name(name) {
+                included.insert(name.clone());
+                descriptors.push(catalog_descriptor(entry));
+            }
+        }
+        descriptors.sort_by(|left, right| left.capability_id.cmp(&right.capability_id));
+        descriptors
+    }
 }
 
 impl PromotedSet {
@@ -138,6 +179,7 @@ impl PromotedSet {
         self.names.iter().map(String::as_str)
     }
 
+    #[cfg(test)]
     pub(crate) fn len(&self) -> usize {
         self.names.len()
     }
@@ -164,7 +206,7 @@ impl DisclosureCaps {
 pub(crate) fn bridge_tool_definitions() -> Vec<ProviderToolDefinition> {
     vec![
         bridge_tool_definition(
-            "tool_search",
+            TOOL_SEARCH_NAME,
             "Search the deferred tool catalog by name and description.",
             json!({
                 "type": "object",
@@ -185,7 +227,7 @@ pub(crate) fn bridge_tool_definitions() -> Vec<ProviderToolDefinition> {
             }),
         ),
         bridge_tool_definition(
-            "tool_describe",
+            TOOL_DESCRIBE_NAME,
             "Return the full schema for one named deferred tool.",
             json!({
                 "type": "object",
@@ -200,7 +242,7 @@ pub(crate) fn bridge_tool_definitions() -> Vec<ProviderToolDefinition> {
             }),
         ),
         bridge_tool_definition(
-            "tool_call",
+            TOOL_CALL_NAME,
             "Invoke one named tool through the normal dispatcher path.",
             json!({
                 "type": "object",
@@ -220,6 +262,16 @@ pub(crate) fn bridge_tool_definitions() -> Vec<ProviderToolDefinition> {
             }),
         ),
     ]
+}
+
+pub(crate) fn is_bridge_name(name: &str) -> bool {
+    matches!(name, TOOL_SEARCH_NAME | TOOL_DESCRIBE_NAME | TOOL_CALL_NAME)
+}
+
+pub(crate) fn is_bridge_capability_id(capability_id: &CapabilityId) -> bool {
+    bridge_tool_definitions()
+        .iter()
+        .any(|definition| &definition.capability_id == capability_id)
 }
 
 /// Selects the active wire surface for a turn.
@@ -339,6 +391,61 @@ pub(crate) fn tool_search_rank(
         .collect()
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct CatalogSearchResult {
+    pub(crate) name: String,
+    pub(crate) capability_id: CapabilityId,
+    pub(crate) description: String,
+    pub(crate) required_params: Vec<String>,
+    pub(crate) parameters: Value,
+}
+
+impl CatalogSearchResult {
+    fn from_entry(entry: &CatalogEntry) -> Self {
+        Self {
+            name: entry.definition.name.clone(),
+            capability_id: entry.definition.capability_id.clone(),
+            description: entry.definition.description.clone(),
+            required_params: required_params(&entry.definition.parameters),
+            parameters: canonicalize_json(&entry.definition.parameters),
+        }
+    }
+}
+
+pub(crate) fn required_params(parameters: &Value) -> Vec<String> {
+    let mut names = BTreeSet::new();
+    collect_required_params(parameters, true, &mut names);
+    names.into_iter().collect()
+}
+
+fn collect_required_params(
+    value: &Value,
+    contributes_required: bool,
+    names: &mut BTreeSet<String>,
+) {
+    if contributes_required && let Some(required) = value.get("required").and_then(Value::as_array)
+    {
+        names.extend(
+            required
+                .iter()
+                .filter_map(Value::as_str)
+                .map(str::to_string),
+        );
+    }
+    if let Some(variants) = value.get("allOf").and_then(Value::as_array) {
+        for variant in variants {
+            collect_required_params(variant, contributes_required, names);
+        }
+    }
+    for key in ["oneOf", "anyOf"] {
+        if let Some(variants) = value.get(key).and_then(Value::as_array) {
+            for variant in variants {
+                collect_required_params(variant, false, names);
+            }
+        }
+    }
+}
+
 fn append_definition(
     definitions: &mut Vec<ProviderToolDefinition>,
     advertised_tokens: &mut u32,
@@ -392,6 +499,30 @@ fn bridge_capability_id(name: &'static str) -> CapabilityId {
             // branch means this source file was edited to contain an invalid id.
             panic!("invalid static bridge capability id: {error}");
         }
+    }
+}
+
+fn bridge_descriptor(definition: &ProviderToolDefinition) -> CapabilityDescriptorView {
+    CapabilityDescriptorView {
+        capability_id: definition.capability_id.clone(),
+        provider: None,
+        runtime: RuntimeKind::FirstParty,
+        safe_name: definition.name.clone(),
+        safe_description: definition.description.clone(),
+        concurrency_hint: ConcurrencyHint::Exclusive,
+        parameters_schema: definition.parameters.clone(),
+    }
+}
+
+fn catalog_descriptor(entry: &CatalogEntry) -> CapabilityDescriptorView {
+    CapabilityDescriptorView {
+        capability_id: entry.definition.capability_id.clone(),
+        provider: None,
+        runtime: RuntimeKind::FirstParty,
+        safe_name: entry.definition.name.clone(),
+        safe_description: entry.definition.description.clone(),
+        concurrency_hint: ConcurrencyHint::Exclusive,
+        parameters_schema: entry.definition.parameters.clone(),
     }
 }
 
