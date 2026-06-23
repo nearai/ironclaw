@@ -267,14 +267,16 @@ impl CreateJobTool {
         crate::tools::mcp::config::load_master_mcp_config_value(store.as_ref(), user_id).await
     }
 
-    /// Persist a sandbox job record (fire-and-forget).
-    fn persist_job(&self, record: SandboxJobRecord) {
-        if let Some(store) = self.store.clone() {
-            tokio::spawn(async move {
-                if let Err(e) = store.save_sandbox_job(&record).await {
-                    tracing::warn!(job_id = %record.id, "Failed to persist sandbox job: {}", e);
-                }
-            });
+    /// Persist a sandbox job record before container creation.
+    ///
+    /// This write must complete before we update `job_mode`, otherwise mode
+    /// persistence can race the insert and silently fall back to the DB
+    /// default (`worker`).
+    async fn persist_job(&self, record: SandboxJobRecord) {
+        if let Some(store) = self.store.clone()
+            && let Err(e) = store.save_sandbox_job(&record).await
+        {
+            tracing::warn!(job_id = %record.id, "Failed to persist sandbox job: {}", e);
         }
     }
 
@@ -472,7 +474,8 @@ impl CreateJobTool {
             credential_grants_json,
             mcp_servers: params.mcp_servers.clone(),
             max_iterations: params.max_iterations,
-        });
+        })
+        .await;
 
         // Persist the job mode to DB (for non-default modes).
         // For ACP, store "acp:<agent_name>" so restarts know which agent to use.
@@ -2515,6 +2518,64 @@ mod tests {
             err.contains("agent_name"),
             "error should mention missing agent_name, got: {err}"
         );
+    }
+
+    #[cfg(feature = "libsql")]
+    #[tokio::test]
+    async fn test_acp_mode_persists_job_mode_before_container_creation() {
+        use std::collections::HashMap;
+
+        use crate::config::acp::{AcpAgentConfig, AcpAgentsFile, save_acp_agents_for_user};
+        use crate::testing::TestHarnessBuilder;
+
+        let harness = TestHarnessBuilder::new().build().await;
+        let store = Arc::clone(&harness.db);
+        let manager = Arc::new(ContextManager::new(5));
+
+        let mut agents = AcpAgentsFile::default();
+        agents.upsert(AcpAgentConfig::new(
+            "test-agent",
+            "/bin/false",
+            vec![],
+            HashMap::new(),
+        ));
+        save_acp_agents_for_user(Some(store.as_ref()), "default", &agents)
+            .await
+            .expect("save ACP agent");
+
+        let jm = Arc::new(ContainerJobManager::new(
+            crate::orchestrator::job_manager::ContainerJobConfig {
+                image: "this-image-should-not-exist:never".to_string(),
+                acp_enabled: true,
+                ..Default::default()
+            },
+            crate::orchestrator::TokenStore::new(),
+        ));
+
+        let tool = CreateJobTool::new(Arc::clone(&manager)).with_sandbox(jm, Some(store.clone()));
+        let params = serde_json::json!({
+            "title": "ACP persistence regression",
+            "description": "Force container creation to fail after persistence",
+            "mode": "acp",
+            "agent_name": "test-agent",
+            "wait": false
+        });
+
+        let result = tool.execute(params, &JobContext::default()).await;
+        assert!(
+            result.is_err(),
+            "test requires container creation to fail after persistence"
+        );
+
+        let job_ids = manager.all_jobs().await;
+        assert_eq!(job_ids.len(), 1, "expected one sandbox job to be registered");
+
+        let mode = store
+            .get_sandbox_job_mode(job_ids[0])
+            .await
+            .expect("read sandbox job mode")
+            .expect("sandbox job mode should be persisted");
+        assert_eq!(mode, "acp:test-agent");
     }
 
     #[test]
