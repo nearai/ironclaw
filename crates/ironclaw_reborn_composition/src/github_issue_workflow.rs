@@ -15,10 +15,11 @@ use ironclaw_github_issue_workflow::{
     GithubPullRequestCheckSnapshot, GithubPullRequestRef, GithubPullRequestSnapshot,
     GithubReviewCommentSnapshot, ListIssueCommentsInput, ListPullRequestChecksInput,
     ListPullRequestReviewCommentsInput, ListPullRequestsInput, PrepareWorkflowWorkspaceOutcome,
-    PrepareWorkflowWorkspaceRequest, SearchGithubIssuesInput, StageTurnSubmitter,
-    SubmitStageTurnOutcome, SubmitStageTurnRequest, WorkflowActorScope, WorkflowClock,
-    WorkflowConfigAccessRequest, WorkflowProjectAccess, WorkflowProjectAccessRequest,
-    WorkflowWorkerId, WorkflowWorkspaceManager, validate_stage_result,
+    PrepareWorkflowWorkspaceRequest, RecordWorkflowEventInput, SearchGithubIssuesInput,
+    StageCompletedPayload, StageTurnSubmitter, SubmitStageTurnOutcome, SubmitStageTurnRequest,
+    WorkflowActorScope, WorkflowClock, WorkflowConfigAccessRequest, WorkflowEventEnvelope,
+    WorkflowEventSourceKind, WorkflowProjectAccess, WorkflowProjectAccessRequest, WorkflowWorkerId,
+    WorkflowWorkspaceManager, issue_binding_ref, stage_result_reported_key, validate_stage_result,
 };
 use ironclaw_host_api::{
     AgentId, CapabilityId, CapabilitySet, ExecutionContext, ExtensionId, MountView,
@@ -526,28 +527,62 @@ impl WorkflowStageResultSink for GithubWorkflowStageResultSink {
                     reason: error.to_string(),
                 }
             })?;
-        let result = serde_json::to_value(validated).map_err(|error| {
+        let result = serde_json::to_value(&validated.envelope).map_err(|error| {
             WorkflowStageResultSinkError::InvalidInput {
                 reason: format!("validated stage result could not be serialized: {error}"),
             }
         })?;
+        let now = Utc::now();
 
         match self
             .repository
             .accept_stage_result(AcceptStageResultInput {
-                workflow_run_id,
-                stage_run_id,
-                result,
-                now: Utc::now(),
+                workflow_run_id: workflow_run_id.clone(),
+                stage_run_id: stage_run_id.clone(),
+                result: result.clone(),
+                now,
             })
             .await
             .map_err(stage_result_repository_error)?
         {
-            AcceptStageResultOutcome::Accepted { .. } => Ok(WorkflowStageResultAck {
-                accepted: true,
-                duplicate: false,
-                stage_run_id: input.stage_run_id,
-            }),
+            AcceptStageResultOutcome::Accepted { run } => {
+                self.repository
+                    .record_workflow_event(RecordWorkflowEventInput {
+                        workflow_run_id,
+                        workflow_event_type:
+                            ironclaw_github_issue_workflow::GithubIssueWorkflowEventType::StageCompleted,
+                        envelope: WorkflowEventEnvelope {
+                            source_kind: WorkflowEventSourceKind::WorkflowInternal,
+                            source_delivery_id: None,
+                            provider: issue_binding_ref(&run.issue_ref).provider_ref,
+                            observed_at: now,
+                            provider_updated_at: None,
+                            idempotency_key: stage_result_reported_key(
+                                &stage_run_id,
+                                &validated.schema_version,
+                            ),
+                            payload_schema: "stage.completed.v1".to_string(),
+                            payload: serde_json::to_value(StageCompletedPayload {
+                                stage_run_id,
+                                stage: validated.stage,
+                                schema_version: validated.schema_version,
+                                result,
+                            })
+                            .map_err(|error| WorkflowStageResultSinkError::InvalidInput {
+                                reason: format!(
+                                    "stage completed workflow event could not be serialized: {error}"
+                                ),
+                            })?,
+                        },
+                    })
+                    .await
+                    .map_err(stage_result_repository_error)?;
+                Ok(WorkflowStageResultAck {
+                    accepted: true,
+                    duplicate: false,
+                    stage_run_id: input.stage_run_id,
+                })
+            }
             AcceptStageResultOutcome::NotActiveStage { .. } => {
                 Err(WorkflowStageResultSinkError::StageNotActive)
             }
@@ -576,6 +611,195 @@ fn stage_result_repository_error(error: GithubIssueWorkflowError) -> WorkflowSta
         GithubIssueWorkflowError::ProviderRead { .. }
         | GithubIssueWorkflowError::ProviderRateLimited { .. }
         | GithubIssueWorkflowError::Repository { .. } => WorkflowStageResultSinkError::Unavailable,
+    }
+}
+
+#[cfg(test)]
+mod github_issue_workflow_stage_result_sink_tests {
+    use std::sync::Arc;
+
+    use ironclaw_github_issue_workflow::{
+        CreateOrGetWorkflowRunInput, CreateStageRunInput, GithubIssueRef, GithubIssueStage,
+        GithubIssueWorkflowEventType, GithubIssueWorkflowRepository, GithubIssueWorkflowRunKey,
+        InMemoryGithubIssueWorkflowRepository, ListWorkflowEventsAfterInput,
+        WorkflowEventSourceKind,
+    };
+    use ironclaw_host_api::{AgentId, ProjectId, TenantId, UserId};
+    use ironclaw_host_runtime::{ReportWorkflowStageResultInput, WorkflowStageResultSink};
+    use ironclaw_turns::TurnRunId;
+    use serde_json::json;
+
+    use super::GithubWorkflowStageResultSink;
+
+    #[tokio::test]
+    async fn stage_result_sink_accepts_result_and_records_stage_completed_event() {
+        let repository = Arc::new(InMemoryGithubIssueWorkflowRepository::default());
+        let (workflow_run_id, stage_run_id) =
+            create_active_stage(&repository, GithubIssueStage::Triage).await;
+        let sink = GithubWorkflowStageResultSink::new(repository.clone());
+
+        let ack = sink
+            .report_stage_result(ReportWorkflowStageResultInput {
+                workflow_run_id: workflow_run_id.as_str().to_string(),
+                stage_run_id: stage_run_id.as_str().to_string(),
+                turn_run_id: TurnRunId::new().to_string(),
+                stage: "triage".to_string(),
+                schema_version: "triage.v1".to_string(),
+                completion_nonce: "nonce-triage".to_string(),
+                result: json!({
+                    "outcome": "completed",
+                    "summary": "triage completed",
+                    "evidence": [],
+                    "next_actions": [],
+                    "payload": {
+                        "is_reproducible": true,
+                        "suspected_area": "composition sink",
+                        "risk": "medium",
+                        "recommended_next_stage": "planning"
+                    }
+                }),
+            })
+            .await
+            .expect("stage result should be accepted");
+
+        assert!(ack.accepted);
+        assert!(!ack.duplicate);
+        assert_eq!(ack.stage_run_id, stage_run_id.as_str());
+
+        let events = repository
+            .list_workflow_events_after(ListWorkflowEventsAfterInput {
+                workflow_run_id,
+                after_sequence: 0,
+                limit: 10,
+            })
+            .await
+            .expect("list workflow events");
+        assert_eq!(events.len(), 1);
+        assert_eq!(
+            events[0].workflow_event_type,
+            GithubIssueWorkflowEventType::StageCompleted
+        );
+        assert_eq!(
+            events[0].source_kind,
+            WorkflowEventSourceKind::WorkflowInternal
+        );
+        assert_eq!(events[0].payload_schema, "stage.completed.v1");
+        assert_eq!(events[0].payload["schema_version"], "triage.v1");
+        assert_eq!(
+            events[0].payload["result"]["payload"]["is_reproducible"],
+            true
+        );
+    }
+
+    #[tokio::test]
+    async fn stage_result_sink_rejects_invalid_implementation_without_recording_event() {
+        let repository = Arc::new(InMemoryGithubIssueWorkflowRepository::default());
+        let (workflow_run_id, stage_run_id) =
+            create_active_stage(&repository, GithubIssueStage::Implementation).await;
+        let sink = GithubWorkflowStageResultSink::new(repository.clone());
+
+        let error = sink
+            .report_stage_result(ReportWorkflowStageResultInput {
+                workflow_run_id: workflow_run_id.as_str().to_string(),
+                stage_run_id: stage_run_id.as_str().to_string(),
+                turn_run_id: TurnRunId::new().to_string(),
+                stage: "implementation".to_string(),
+                schema_version: "implementation.v1".to_string(),
+                completion_nonce: "nonce-implementation".to_string(),
+                result: json!({
+                    "outcome": "completed",
+                    "summary": "implementation claims PR readiness without commands",
+                    "evidence": [],
+                    "next_actions": [],
+                    "payload": {
+                        "changed_files": ["src/lib.rs"],
+                        "test_evidence": ["not enough"],
+                        "pr_ready": true
+                    }
+                }),
+            })
+            .await
+            .expect_err("missing commands_run must fail validation");
+
+        assert!(matches!(
+            error,
+            ironclaw_host_runtime::WorkflowStageResultSinkError::ValidationFailed { .. }
+        ));
+
+        let events = repository
+            .list_workflow_events_after(ListWorkflowEventsAfterInput {
+                workflow_run_id,
+                after_sequence: 0,
+                limit: 10,
+            })
+            .await
+            .expect("list workflow events");
+        assert!(events.is_empty());
+    }
+
+    async fn create_active_stage(
+        repository: &InMemoryGithubIssueWorkflowRepository,
+        stage: GithubIssueStage,
+    ) -> (
+        ironclaw_github_issue_workflow::GithubIssueWorkflowRunId,
+        ironclaw_github_issue_workflow::GithubIssueStageRunId,
+    ) {
+        let run = match repository
+            .create_or_get_workflow_run(CreateOrGetWorkflowRunInput {
+                tenant_id: TenantId::new("tenant-stage-result-sink").unwrap(),
+                creator_user_id: UserId::new("user-stage-result-sink").unwrap(),
+                agent_id: Some(AgentId::new("agent-stage-result-sink").unwrap()),
+                project_id: Some(ProjectId::new("project-stage-result-sink").unwrap()),
+                provider_account_ref: None,
+                issue_ref: issue(),
+                workflow_policy_key: "github-bug-workflow".to_string(),
+                workflow_policy_version: "stage-result-sink-test".to_string(),
+                now: chrono::Utc::now(),
+            })
+            .await
+            .expect("create workflow run")
+        {
+            ironclaw_github_issue_workflow::CreateOrGetWorkflowRunOutcome::Created { run }
+            | ironclaw_github_issue_workflow::CreateOrGetWorkflowRunOutcome::Existing { run } => {
+                run
+            }
+        };
+        assert_eq!(
+            run.workflow_run_key,
+            GithubIssueWorkflowRunKey::for_issue(&run.issue_ref).expect("workflow run key")
+        );
+
+        match repository
+            .create_stage_run(CreateStageRunInput {
+                workflow_run_id: run.workflow_run_id.clone(),
+                stage,
+                now: chrono::Utc::now(),
+            })
+            .await
+            .expect("create stage run")
+        {
+            ironclaw_github_issue_workflow::CreateStageRunOutcome::Created {
+                stage_run_id, ..
+            }
+            | ironclaw_github_issue_workflow::CreateStageRunOutcome::ActiveStageExists {
+                existing_stage_run_id: stage_run_id,
+                ..
+            } => (run.workflow_run_id, stage_run_id),
+            ironclaw_github_issue_workflow::CreateStageRunOutcome::Terminal => {
+                panic!("new run should not be terminal")
+            }
+        }
+    }
+
+    fn issue() -> GithubIssueRef {
+        GithubIssueRef {
+            owner: "nearai".to_string(),
+            repo: "ironclaw".to_string(),
+            number: 4242,
+            node_id: Some("issue-node-stage-result-sink".to_string()),
+            url: "https://github.com/nearai/ironclaw/issues/4242".to_string(),
+            default_branch: "main".to_string(),
+        }
     }
 }
 
