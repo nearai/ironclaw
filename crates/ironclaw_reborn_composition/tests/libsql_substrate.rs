@@ -98,7 +98,6 @@ async fn libsql_substrate_builder_rejects_invalid_secret_master_key() {
 
     let result = build_libsql_production_host_runtime_services(LibSqlProductionSubstrateConfig {
         database,
-        owner_id: "libsql-substrate-owner".to_string(),
         event_store: RebornEventStoreConfig::Libsql {
             path_or_url: events_db_path.display().to_string(),
             auth_token: None,
@@ -125,50 +124,6 @@ async fn libsql_substrate_builder_rejects_invalid_secret_master_key() {
 }
 
 #[tokio::test]
-async fn libsql_substrate_builder_rejects_invalid_owner_id() {
-    let dir = tempdir().expect("create temporary directory for libSQL test databases");
-    let state_db_path = dir.path().join("state.db");
-    let events_db_path = dir.path().join("events.db");
-    let database = Arc::new(
-        libsql::Builder::new_local(state_db_path.display().to_string())
-            .build()
-            .await
-            .expect("build local libSQL state database"),
-    );
-
-    let result = build_libsql_production_host_runtime_services(LibSqlProductionSubstrateConfig {
-        database,
-        owner_id: String::new(),
-        event_store: RebornEventStoreConfig::Libsql {
-            path_or_url: events_db_path.display().to_string(),
-            auth_token: None,
-        },
-        secret_master_key: Some(SecretString::from("01234567890123456789012345678901")),
-        trust_policy: Arc::new(ironclaw_trust::HostTrustPolicy::fail_closed()),
-        runtime_policy: RebornProductionRuntimePolicy::with_tenant_sandbox_process_port(
-            production_runtime_policy(),
-            sandbox_process_port(),
-        )
-        .expect("create production runtime policy with tenant sandbox process port"),
-        turn_run_wake_notifier: Arc::new(RecordingSchedulerWakeNotifier),
-        surface_version: CapabilitySurfaceVersion::new("test-surface")
-            .expect("create test capability surface version"),
-    })
-    .await;
-
-    assert!(matches!(
-        result,
-        Err(RebornCompositionError::Mount(
-            ironclaw_host_api::HostApiError::InvalidId {
-                kind: "user",
-                value,
-                reason
-            }
-        )) if value.is_empty() && reason == "must not be empty"
-    ));
-}
-
-#[tokio::test]
 async fn libsql_substrate_builder_rejects_weak_env_secret_master_key() {
     let _guard = SECRETS_MASTER_KEY_ENV_LOCK.lock().await;
     let _env = EnvVarGuard::set(
@@ -187,7 +142,6 @@ async fn libsql_substrate_builder_rejects_weak_env_secret_master_key() {
 
     let result = build_libsql_production_host_runtime_services(LibSqlProductionSubstrateConfig {
         database,
-        owner_id: "libsql-substrate-owner".to_string(),
         event_store: RebornEventStoreConfig::Libsql {
             path_or_url: events_db_path.display().to_string(),
             auth_token: None,
@@ -273,7 +227,6 @@ async fn build_libsql_test_services() -> LibSqlTestServices {
 
     let services = build_libsql_production_host_runtime_services(LibSqlProductionSubstrateConfig {
         database,
-        owner_id: "libsql-substrate-owner".to_string(),
         event_store: RebornEventStoreConfig::Libsql {
             path_or_url: events_db_path.display().to_string(),
             auth_token: None,

@@ -243,7 +243,8 @@ where
     /// resulting snapshot is written back. On `VersionMismatch` the loop
     /// re-reads and reapplies the closure against the latest snapshot. The
     /// guarded read/modify/write is deadline-bounded so one wedged filesystem
-    /// operation cannot hold the tenant turn-state gate forever.
+    /// operation only consumes this caller's apply attempt until the deadline
+    /// returns `TurnError::Unavailable`.
     async fn apply<T, A, Fut>(&self, mut apply: A) -> Result<T, TurnError>
     where
         A: FnMut(InMemoryTurnStateStore) -> Fut,

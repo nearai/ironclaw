@@ -205,8 +205,11 @@ struct FirstWaveBlockingPutFilesystem<F> {
     first_wave_arrivals: AtomicUsize,
     version_mismatches: AtomicUsize,
     reject_puts: AtomicBool,
+    first_wave_released: AtomicBool,
     first_wave_ready: tokio::sync::Notify,
     release_first_wave: tokio::sync::Notify,
+    mismatch_retry_seen: AtomicBool,
+    mismatch_retry_ready: tokio::sync::Notify,
 }
 
 impl<F> FirstWaveBlockingPutFilesystem<F> {
@@ -217,8 +220,11 @@ impl<F> FirstWaveBlockingPutFilesystem<F> {
             first_wave_arrivals: AtomicUsize::new(0),
             version_mismatches: AtomicUsize::new(0),
             reject_puts: AtomicBool::new(false),
+            first_wave_released: AtomicBool::new(false),
             first_wave_ready: tokio::sync::Notify::new(),
             release_first_wave: tokio::sync::Notify::new(),
+            mismatch_retry_seen: AtomicBool::new(false),
+            mismatch_retry_ready: tokio::sync::Notify::new(),
         }
     }
 
@@ -226,6 +232,8 @@ impl<F> FirstWaveBlockingPutFilesystem<F> {
         self.first_wave_arrivals.store(0, Ordering::SeqCst);
         self.expected_first_wave_puts
             .store(expected_puts, Ordering::SeqCst);
+        self.first_wave_released.store(false, Ordering::SeqCst);
+        self.mismatch_retry_seen.store(false, Ordering::SeqCst);
     }
 
     async fn wait_for_first_wave(&self) {
@@ -236,7 +244,14 @@ impl<F> FirstWaveBlockingPutFilesystem<F> {
     }
 
     fn release_first_wave(&self) {
+        self.first_wave_released.store(true, Ordering::SeqCst);
         self.release_first_wave.notify_waiters();
+    }
+
+    async fn wait_for_mismatch_retry_read(&self) {
+        while !self.mismatch_retry_seen.load(Ordering::SeqCst) {
+            self.mismatch_retry_ready.notified().await;
+        }
     }
 
     fn version_mismatches(&self) -> usize {
@@ -443,7 +458,9 @@ where
                 if arrival == expected {
                     self.first_wave_ready.notify_one();
                 }
-                self.release_first_wave.notified().await;
+                while !self.first_wave_released.load(Ordering::SeqCst) {
+                    self.release_first_wave.notified().await;
+                }
             }
         }
         if self.reject_puts.load(Ordering::SeqCst) {
@@ -466,7 +483,13 @@ where
     }
 
     async fn get(&self, path: &VirtualPath) -> Result<Option<VersionedEntry>, FilesystemError> {
-        self.inner.get(path).await
+        let result = self.inner.get(path).await;
+        if self.version_mismatches.load(Ordering::SeqCst) > 0
+            && !self.mismatch_retry_seen.swap(true, Ordering::SeqCst)
+        {
+            self.mismatch_retry_ready.notify_waiters();
+        }
+        result
     }
 
     async fn list_dir(&self, path: &VirtualPath) -> Result<Vec<DirEntry>, FilesystemError> {
@@ -723,6 +746,13 @@ async fn filesystem_turn_state_store_clears_stale_snapshot_cache_after_version_m
     })
     .await
     .expect("first writer should observe a version mismatch before retrying");
+
+    tokio::time::timeout(
+        Duration::from_secs(1),
+        backend.wait_for_mismatch_retry_read(),
+    )
+    .await
+    .expect("store should retry with a fresh snapshot after clearing stale cache");
 
     raced.abort();
     let _ = raced.await;

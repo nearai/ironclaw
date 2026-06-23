@@ -820,8 +820,6 @@ where
     TWake: TurnRunWakeNotifier + 'static,
 {
     pub database: Arc<libsql::Database>,
-    /// Owner whose `/turns` state subtree is managed by this runtime.
-    pub owner_id: String,
     pub event_store: RebornEventStoreConfig,
     pub secret_master_key: Option<SecretMaterial>,
     pub trust_policy: Arc<TPolicy>,
@@ -838,8 +836,6 @@ where
     TWake: TurnRunWakeNotifier + 'static,
 {
     pub pool: deadpool_postgres::Pool,
-    /// Owner whose `/turns` state subtree is managed by this runtime.
-    pub owner_id: String,
     pub event_store: RebornEventStoreConfig,
     pub secret_master_key: Option<SecretMaterial>,
     pub trust_policy: Arc<TPolicy>,
