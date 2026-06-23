@@ -90,6 +90,8 @@ export function useThreads() {
     activeThreadId,
     setActiveThreadId,
     isLoading: query.isLoading,
+    isLoaded: query.isSuccess,
+    isFetching: query.isFetching,
     isCreating,
     createThread: handleCreateThread,
     deleteThread: handleDeleteThread,
