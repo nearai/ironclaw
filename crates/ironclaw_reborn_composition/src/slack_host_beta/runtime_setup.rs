@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
 use ironclaw_host_api::{AgentId, ProjectId, TenantId};
+use ironclaw_outbound::TriggeredRunDeliveryStore;
 use ironclaw_product_adapters::{
     AdapterInstallationId, EgressCredentialHandle, EgressRequest, EgressResponse,
     ProtocolHttpEgress, ProtocolHttpEgressError, RedactedString,
@@ -9,7 +10,8 @@ use ironclaw_product_workflow::{
     ProductConversationSubjectRouteResolver, RebornOutboundDeliveryTargetId, RebornServicesError,
     RebornServicesErrorCode, RebornServicesErrorKind, WebUiAuthenticatedCaller,
 };
-use ironclaw_turns::ReplyTargetBindingRef;
+use ironclaw_triggers::TriggerFire;
+use ironclaw_turns::{ReplyTargetBindingRef, TurnRunId, TurnScope};
 use sha2::{Digest, Sha256};
 use tokio::sync::Mutex;
 
@@ -26,6 +28,7 @@ use crate::slack_channel_routes::{
     SlackChannelRouteAdminRouteConfig, SlackChannelRouteAssignment, SlackChannelRouteError,
     SlackChannelRouteStore, SlackChannelRouteSubjectResolver,
 };
+use crate::slack_delivery::{PostSubmitDeliveryHook, TriggeredRunDeliveryDriver};
 use crate::slack_host_state::FilesystemSlackHostState;
 use crate::slack_outbound_targets::{
     SlackHostBetaOutboundTargetProvider, SlackOutboundTargetProviderConfig, SlackPersonalDmTarget,
@@ -60,7 +63,8 @@ use super::{
     SlackHostBetaActorUserResolver, SlackHostBetaBuildError, SlackHostBetaConfig,
     SlackHostBetaConfigInput, SlackHostBetaMounts, SlackHostBetaRuntimeConfig,
     SlackHostBetaRuntimeParts, build_slack_installation_record_with_resolvers,
-    slack_bot_token_handle, slack_protocol_egress_from_parts,
+    build_triggered_run_delivery_hook_from_parts, slack_bot_token_handle,
+    slack_protocol_egress_from_parts,
 };
 
 pub(super) async fn build_runtime_mounts(
@@ -144,7 +148,7 @@ pub(super) async fn build_runtime_mounts(
                 agent_id: config.agent_id.clone(),
                 project_id: config.project_id.clone(),
             },
-            setup_service,
+            Arc::clone(&setup_service),
             channel_route_store,
             personal_dm_target_store,
         ));
@@ -174,6 +178,20 @@ pub(super) async fn build_runtime_mounts(
                 });
             }
         }
+    }
+    let delivery_store: Arc<dyn TriggeredRunDeliveryStore> =
+        Arc::clone(&parts.local_runtime.triggered_run_delivery);
+    let trigger_delivery_hook: Arc<dyn PostSubmitDeliveryHook> =
+        Arc::new(DynamicSlackTriggeredRunDeliveryHook::new(
+            Arc::clone(&parts),
+            Arc::clone(&setup_service),
+            delivery_store,
+        ));
+    let hook_set = runtime.set_trigger_post_submit_hook(trigger_delivery_hook);
+    if !hook_set && runtime.trigger_post_submit_hook_is_set() && !provider_already_registered {
+        return Err(SlackHostBetaBuildError::OutboundDeliveryTargetRegistration {
+            reason: "Slack dynamic triggered-run delivery hook is already wired for a different Slack host config".to_string(),
+        });
     }
 
     Ok(SlackHostBetaMounts {
@@ -455,6 +473,91 @@ impl SlackPersonalDmTargetProvisioning for DynamicSlackPersonalDmTargetProvision
             .await?
             .provision_for_user(user_id, slack_user_id)
             .await
+    }
+}
+
+#[derive(Clone)]
+struct DynamicSlackTriggeredRunDeliveryHook {
+    parts: Arc<SlackHostBetaRuntimeParts>,
+    setup_service: Arc<SlackSetupService>,
+    delivery_store: Arc<dyn TriggeredRunDeliveryStore>,
+    cached_driver: Arc<Mutex<Option<DynamicSlackTriggeredRunDeliveryDriver>>>,
+}
+
+#[derive(Clone)]
+struct DynamicSlackTriggeredRunDeliveryDriver {
+    revision: u64,
+    driver: Arc<TriggeredRunDeliveryDriver>,
+}
+
+impl DynamicSlackTriggeredRunDeliveryHook {
+    fn new(
+        parts: Arc<SlackHostBetaRuntimeParts>,
+        setup_service: Arc<SlackSetupService>,
+        delivery_store: Arc<dyn TriggeredRunDeliveryStore>,
+    ) -> Self {
+        Self {
+            parts,
+            setup_service,
+            delivery_store,
+            cached_driver: Arc::new(Mutex::new(None)),
+        }
+    }
+
+    async fn current_driver(&self) -> Result<Option<Arc<TriggeredRunDeliveryDriver>>, String> {
+        let Some(setup) = self
+            .setup_service
+            .current_setup()
+            .await
+            .map_err(|error| error.to_string())?
+        else {
+            return Ok(None);
+        };
+        let revision = setup.revision;
+        let mut cached_driver = self.cached_driver.lock().await;
+        if let Some(cached) = cached_driver
+            .as_ref()
+            .filter(|cached| cached.revision == revision)
+        {
+            return Ok(Some(Arc::clone(&cached.driver)));
+        }
+        let config = slack_host_beta_config_from_setup(&self.setup_service, setup)
+            .await
+            .map_err(|error| error.to_string())?
+            .map_err(|error| error.to_string())?;
+        let driver = build_triggered_run_delivery_hook_from_parts(
+            &self.parts,
+            &config,
+            Arc::clone(&self.delivery_store),
+        )
+        .map_err(|error| error.to_string())?;
+        *cached_driver = Some(DynamicSlackTriggeredRunDeliveryDriver {
+            revision,
+            driver: Arc::clone(&driver),
+        });
+        Ok(Some(driver))
+    }
+}
+
+#[async_trait::async_trait]
+impl PostSubmitDeliveryHook for DynamicSlackTriggeredRunDeliveryHook {
+    async fn on_trigger_submitted(&self, fire: TriggerFire, run_id: TurnRunId, scope: TurnScope) {
+        match self.current_driver().await {
+            Ok(Some(driver)) => driver.on_trigger_submitted(fire, run_id, scope).await,
+            Ok(None) => {
+                tracing::debug!(
+                    %run_id,
+                    "Slack dynamic triggered-run delivery skipped: Slack setup is not configured"
+                );
+            }
+            Err(error) => {
+                tracing::warn!(
+                    %run_id,
+                    %error,
+                    "Slack dynamic triggered-run delivery skipped: delivery hook unavailable"
+                );
+            }
+        }
     }
 }
 
