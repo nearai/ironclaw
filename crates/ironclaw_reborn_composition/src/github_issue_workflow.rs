@@ -624,18 +624,32 @@ fn stage_result_repository_error(error: GithubIssueWorkflowError) -> WorkflowSta
 
 #[cfg(test)]
 mod github_issue_workflow_stage_result_sink_tests {
-    use std::sync::Arc;
+    use std::collections::VecDeque;
+    use std::sync::{Arc, Mutex as StdMutex};
 
+    use async_trait::async_trait;
     use ironclaw_github_issue_workflow::{
-        CreateOrGetWorkflowRunInput, CreateStageRunInput, GithubIssueRef, GithubIssueStage,
-        GithubIssueWorkflowEventType, GithubIssueWorkflowRepository, GithubIssueWorkflowRunKey,
-        InMemoryGithubIssueWorkflowRepository, ListWorkflowEventsAfterInput,
-        WorkflowEventSourceKind,
+        AdvanceWorkflowRunInput, ClaimRunnableWorkflowRunsInput, CreateDraftPullRequestInput,
+        CreateIssueCommentInput, CreateOrGetWorkflowRunInput, CreateOrGetWorkflowRunOutcome,
+        CreateStageRunInput, GetAuthenticatedWorkflowActorInput, GithubActorSnapshot,
+        GithubCommentRef, GithubIssueCommentSnapshot, GithubIssueRef, GithubIssueStage,
+        GithubIssueWorkflowError, GithubIssueWorkflowEventType, GithubIssueWorkflowMode,
+        GithubIssueWorkflowPolicy, GithubIssueWorkflowPolicyPorts, GithubIssueWorkflowRepository,
+        GithubIssueWorkflowRun, GithubIssueWorkflowRunKey, GithubIssueWorkspaceSession,
+        GithubIssueWorkspaceSessionId, GithubProviderAccountRef, GithubPullRequestRef,
+        GithubPullRequestSnapshot, GithubRepositorySelector, InMemoryGithubIssueWorkflowRepository,
+        ListIssueCommentsInput, ListPullRequestsInput, ListWorkflowEventsAfterInput,
+        PrepareWorkflowWorkspaceOutcome, PrepareWorkflowWorkspaceRequest, StageTurnSubmitter,
+        SubmitStageTurnOutcome, SubmitStageTurnRequest, TransitionOutcome, WorkflowClock,
+        WorkflowEventSourceKind, WorkflowProjectAccess, WorkflowProjectAccessRequest,
+        WorkflowRunTransition, WorkflowWorkerId, WorkflowWorkspaceManager,
+        WorkflowWorkspaceMountRef, WorkflowWorkspaceRef,
     };
-    use ironclaw_host_api::{AgentId, ProjectId, TenantId, UserId};
+    use ironclaw_host_api::{AgentId, ProjectId, TenantId, ThreadId, UserId};
     use ironclaw_host_runtime::{ReportWorkflowStageResultInput, WorkflowStageResultSink};
     use ironclaw_turns::TurnRunId;
     use serde_json::json;
+    use tokio::sync::Mutex;
 
     use super::GithubWorkflowStageResultSink;
 
@@ -745,6 +759,81 @@ mod github_issue_workflow_stage_result_sink_tests {
         assert!(events.is_empty());
     }
 
+    #[tokio::test]
+    async fn stage_result_sink_events_drive_policy_to_draft_pr_once() {
+        let repository = Arc::new(InMemoryGithubIssueWorkflowRepository::default());
+        let github = Arc::new(FakeGithubPort::new());
+        let sink = GithubWorkflowStageResultSink::new(repository.clone());
+        let policy = GithubIssueWorkflowPolicy::new(
+            FakePolicyPorts {
+                repository: repository.clone(),
+                github: github.clone(),
+                stage_turns: Arc::new(FakeStageTurnSubmitter::default()),
+                project_access: Arc::new(FakeProjectAccess),
+                workspace: Arc::new(FakeWorkspaceManager),
+                clock: Arc::new(FakeClock::new()),
+                worker_id: worker(),
+            },
+            "stage-result-smoke-v1",
+        );
+
+        let run = create_claimed_run(&repository).await;
+        let run = set_mode(
+            &repository,
+            run,
+            GithubIssueWorkflowMode::Implementation,
+            None,
+        )
+        .await;
+        let run = create_stage_run(&repository, run, GithubIssueStage::Implementation).await;
+        report_stage_result(
+            &sink,
+            &run,
+            GithubIssueStage::Implementation,
+            "implementation.v1",
+            implementation_result(),
+        )
+        .await;
+
+        let implementation_run = current_run(&repository).await;
+        let pr_synthesis = policy.tick(implementation_run).await.expect("policy tick");
+        assert_eq!(
+            pr_synthesis.run.workflow_state.mode,
+            GithubIssueWorkflowMode::PrSynthesis
+        );
+        assert_eq!(policy.ports().stage_turns.requests().await.len(), 1);
+
+        let run = current_run(&repository).await;
+        report_stage_result(
+            &sink,
+            &run,
+            GithubIssueStage::PrSynthesis,
+            "pr_synthesis.v1",
+            pr_synthesis_result(),
+        )
+        .await;
+
+        let pr_run = current_run(&repository).await;
+        let first = policy.tick(pr_run).await.expect("draft PR policy tick");
+        let second = policy.tick(first.run.clone()).await.expect("replay tick");
+
+        assert_eq!(
+            first.run.workflow_state.mode,
+            GithubIssueWorkflowMode::PrOpen
+        );
+        assert_eq!(second.processed_event_count, 0);
+        assert_eq!(github.created_prs().await.len(), 1);
+        assert_eq!(
+            first
+                .run
+                .workflow_state
+                .primary_pr
+                .as_ref()
+                .map(|pull_request| pull_request.number),
+            Some(123)
+        );
+    }
+
     async fn create_active_stage(
         repository: &InMemoryGithubIssueWorkflowRepository,
         stage: GithubIssueStage,
@@ -807,6 +896,427 @@ mod github_issue_workflow_stage_result_sink_tests {
             node_id: Some("issue-node-stage-result-sink".to_string()),
             url: "https://github.com/nearai/ironclaw/issues/4242".to_string(),
             default_branch: "main".to_string(),
+        }
+    }
+
+    async fn create_claimed_run(
+        repository: &InMemoryGithubIssueWorkflowRepository,
+    ) -> GithubIssueWorkflowRun {
+        let run = match repository
+            .create_or_get_workflow_run(CreateOrGetWorkflowRunInput {
+                tenant_id: TenantId::new("tenant-stage-result-sink").unwrap(),
+                creator_user_id: UserId::new("user-stage-result-sink").unwrap(),
+                agent_id: Some(AgentId::new("agent-stage-result-sink").unwrap()),
+                project_id: Some(ProjectId::new("project-stage-result-sink").unwrap()),
+                provider_account_ref: Some(provider_account_ref()),
+                issue_ref: issue(),
+                workflow_policy_key: "github-bug-workflow".to_string(),
+                workflow_policy_version: "stage-result-sink-test".to_string(),
+                now: chrono::Utc::now(),
+            })
+            .await
+            .expect("create workflow run")
+        {
+            CreateOrGetWorkflowRunOutcome::Created { run }
+            | CreateOrGetWorkflowRunOutcome::Existing { run } => run,
+        };
+
+        repository
+            .claim_runnable_workflow_runs(ClaimRunnableWorkflowRunsInput {
+                tenant_id: run.tenant_id.clone(),
+                worker_id: worker(),
+                now: chrono::Utc::now(),
+                lease_expires_at: chrono::Utc::now() + chrono::Duration::minutes(5),
+                limit: 1,
+            })
+            .await
+            .expect("claim workflow run")
+            .pop()
+            .unwrap_or(run)
+    }
+
+    async fn current_run(
+        repository: &InMemoryGithubIssueWorkflowRepository,
+    ) -> GithubIssueWorkflowRun {
+        match repository
+            .create_or_get_workflow_run(CreateOrGetWorkflowRunInput {
+                tenant_id: TenantId::new("tenant-stage-result-sink").unwrap(),
+                creator_user_id: UserId::new("user-stage-result-sink").unwrap(),
+                agent_id: Some(AgentId::new("agent-stage-result-sink").unwrap()),
+                project_id: Some(ProjectId::new("project-stage-result-sink").unwrap()),
+                provider_account_ref: Some(provider_account_ref()),
+                issue_ref: issue(),
+                workflow_policy_key: "github-bug-workflow".to_string(),
+                workflow_policy_version: "stage-result-sink-test".to_string(),
+                now: chrono::Utc::now(),
+            })
+            .await
+            .expect("get current workflow run")
+        {
+            CreateOrGetWorkflowRunOutcome::Created { run }
+            | CreateOrGetWorkflowRunOutcome::Existing { run } => run,
+        }
+    }
+
+    async fn set_mode(
+        repository: &InMemoryGithubIssueWorkflowRepository,
+        run: GithubIssueWorkflowRun,
+        mode: GithubIssueWorkflowMode,
+        primary_pr: Option<GithubPullRequestRef>,
+    ) -> GithubIssueWorkflowRun {
+        match repository
+            .advance_event_cursor_and_transition(AdvanceWorkflowRunInput {
+                workflow_run_id: run.workflow_run_id.clone(),
+                worker_id: worker(),
+                expected_workflow_run_version: run.workflow_run_version,
+                expected_event_cursor: run.event_cursor,
+                next_event_cursor: run.event_cursor,
+                transition: WorkflowRunTransition {
+                    mode: Some(mode),
+                    primary_pr,
+                    clear_active_block: true,
+                    ..WorkflowRunTransition::default()
+                },
+                now: chrono::Utc::now(),
+            })
+            .await
+            .expect("set workflow mode")
+        {
+            TransitionOutcome::Applied { run } => run,
+            other => panic!("mode transition should apply: {other:?}"),
+        }
+    }
+
+    async fn create_stage_run(
+        repository: &InMemoryGithubIssueWorkflowRepository,
+        run: GithubIssueWorkflowRun,
+        stage: GithubIssueStage,
+    ) -> GithubIssueWorkflowRun {
+        match repository
+            .create_stage_run(CreateStageRunInput {
+                workflow_run_id: run.workflow_run_id,
+                stage,
+                now: chrono::Utc::now(),
+            })
+            .await
+            .expect("create stage run")
+        {
+            ironclaw_github_issue_workflow::CreateStageRunOutcome::Created { run, .. }
+            | ironclaw_github_issue_workflow::CreateStageRunOutcome::ActiveStageExists {
+                run,
+                ..
+            } => run,
+            ironclaw_github_issue_workflow::CreateStageRunOutcome::Terminal => {
+                panic!("workflow run should not be terminal")
+            }
+        }
+    }
+
+    async fn report_stage_result(
+        sink: &GithubWorkflowStageResultSink,
+        run: &GithubIssueWorkflowRun,
+        stage: GithubIssueStage,
+        schema_version: &str,
+        result: serde_json::Value,
+    ) {
+        let stage_run_id = run
+            .active_stage_run_id
+            .as_ref()
+            .expect("active stage")
+            .as_str()
+            .to_string();
+        let ack = sink
+            .report_stage_result(ReportWorkflowStageResultInput {
+                workflow_run_id: run.workflow_run_id.as_str().to_string(),
+                stage_run_id,
+                turn_run_id: TurnRunId::new().to_string(),
+                stage: stage_name(&stage).to_string(),
+                schema_version: schema_version.to_string(),
+                completion_nonce: format!("nonce-{schema_version}"),
+                result,
+            })
+            .await
+            .expect("stage result should be accepted");
+        assert!(ack.accepted);
+    }
+
+    fn stage_name(stage: &GithubIssueStage) -> &'static str {
+        match stage {
+            GithubIssueStage::Triage => "triage",
+            GithubIssueStage::Planning => "planning",
+            GithubIssueStage::Implementation => "implementation",
+            GithubIssueStage::PrSynthesis => "pr_synthesis",
+            GithubIssueStage::CiRepair => "ci_repair",
+            GithubIssueStage::ReviewResponse => "review_response",
+        }
+    }
+
+    fn implementation_result() -> serde_json::Value {
+        json!({
+            "outcome": "completed",
+            "summary": "implementation completed",
+            "evidence": [],
+            "next_actions": [],
+            "payload": {
+                "changed_files": ["src/lib.rs"],
+                "commands_run": ["cargo test"],
+                "test_evidence": ["tests passed"],
+                "pr_ready": true
+            }
+        })
+    }
+
+    fn pr_synthesis_result() -> serde_json::Value {
+        json!({
+            "outcome": "completed",
+            "summary": "draft PR ready",
+            "evidence": [],
+            "next_actions": [],
+            "payload": {
+                "title": "Fix issue 4242",
+                "body": "This fixes issue 4242.",
+                "branch_name": "ironclaw/fix-4242",
+                "base_branch": "main",
+                "head_sha": "head-sha-4242"
+            }
+        })
+    }
+
+    fn provider_account_ref() -> GithubProviderAccountRef {
+        GithubProviderAccountRef {
+            provider: "github".to_string(),
+            account_id: "github-stage-result-sink".to_string(),
+        }
+    }
+
+    fn worker() -> WorkflowWorkerId {
+        WorkflowWorkerId::from_trusted("worker-stage-result-sink".to_string()).unwrap()
+    }
+
+    struct FakeClock {
+        now: StdMutex<chrono::DateTime<chrono::Utc>>,
+    }
+
+    impl FakeClock {
+        fn new() -> Self {
+            Self {
+                now: StdMutex::new(chrono::Utc::now()),
+            }
+        }
+    }
+
+    impl WorkflowClock for FakeClock {
+        fn now(&self) -> chrono::DateTime<chrono::Utc> {
+            *self.now.lock().expect("clock lock")
+        }
+    }
+
+    #[derive(Debug)]
+    struct FakeGithubPort {
+        created_prs: Mutex<Vec<CreateDraftPullRequestInput>>,
+        create_pr_results: Mutex<VecDeque<Result<GithubPullRequestRef, GithubIssueWorkflowError>>>,
+    }
+
+    impl FakeGithubPort {
+        fn new() -> Self {
+            Self {
+                created_prs: Mutex::new(Vec::new()),
+                create_pr_results: Mutex::new(VecDeque::from([Ok(GithubPullRequestRef {
+                    owner: "nearai".to_string(),
+                    repo: "ironclaw".to_string(),
+                    number: 123,
+                    node_id: Some("pr-node-123".to_string()),
+                    url: "https://github.com/nearai/ironclaw/pull/123".to_string(),
+                    head_branch: "ironclaw/fix-4242".to_string(),
+                    head_sha: Some("head-sha-4242".to_string()),
+                })])),
+            }
+        }
+
+        async fn created_prs(&self) -> Vec<CreateDraftPullRequestInput> {
+            self.created_prs.lock().await.clone()
+        }
+    }
+
+    #[async_trait]
+    impl ironclaw_github_issue_workflow::GithubIssueWorkflowPort for FakeGithubPort {
+        async fn get_authenticated_workflow_actor(
+            &self,
+            _input: GetAuthenticatedWorkflowActorInput,
+        ) -> Result<GithubActorSnapshot, GithubIssueWorkflowError> {
+            Ok(GithubActorSnapshot {
+                login: "ironclaw-bot".to_string(),
+                node_id: Some("actor-node-stage-result-sink".to_string()),
+            })
+        }
+
+        async fn list_issue_comments(
+            &self,
+            _input: ListIssueCommentsInput,
+        ) -> Result<Vec<GithubIssueCommentSnapshot>, GithubIssueWorkflowError> {
+            Ok(Vec::new())
+        }
+
+        async fn create_issue_comment(
+            &self,
+            _input: CreateIssueCommentInput,
+        ) -> Result<GithubCommentRef, GithubIssueWorkflowError> {
+            Ok(GithubCommentRef {
+                node_id: Some("comment-node-stage-result-sink".to_string()),
+                url: "https://github.com/nearai/ironclaw/issues/4242#issuecomment-1".to_string(),
+            })
+        }
+
+        async fn list_pull_requests(
+            &self,
+            _input: ListPullRequestsInput,
+        ) -> Result<Vec<GithubPullRequestSnapshot>, GithubIssueWorkflowError> {
+            Ok(Vec::new())
+        }
+
+        async fn create_draft_pull_request(
+            &self,
+            input: CreateDraftPullRequestInput,
+        ) -> Result<GithubPullRequestRef, GithubIssueWorkflowError> {
+            self.created_prs.lock().await.push(input);
+            self.create_pr_results
+                .lock()
+                .await
+                .pop_front()
+                .unwrap_or_else(|| {
+                    Err(GithubIssueWorkflowError::ProviderRead {
+                        reason: "unexpected draft PR retry".to_string(),
+                    })
+                })
+        }
+    }
+
+    #[derive(Debug, Default)]
+    struct FakeProjectAccess;
+
+    #[async_trait]
+    impl WorkflowProjectAccess for FakeProjectAccess {
+        async fn assert_workflow_project_access(
+            &self,
+            _request: WorkflowProjectAccessRequest,
+        ) -> Result<(), GithubIssueWorkflowError> {
+            Ok(())
+        }
+    }
+
+    #[derive(Debug, Default)]
+    struct FakeWorkspaceManager;
+
+    #[async_trait]
+    impl WorkflowWorkspaceManager for FakeWorkspaceManager {
+        async fn prepare_workspace(
+            &self,
+            request: PrepareWorkflowWorkspaceRequest,
+        ) -> Result<PrepareWorkflowWorkspaceOutcome, GithubIssueWorkflowError> {
+            let workspace_session_id =
+                GithubIssueWorkspaceSessionId::from_trusted("workspace-session-smoke".to_string())
+                    .unwrap();
+            Ok(PrepareWorkflowWorkspaceOutcome {
+                session: GithubIssueWorkspaceSession {
+                    workspace_session_id: workspace_session_id.clone(),
+                    workflow_run_id: request.workflow_run_id,
+                    repository: GithubRepositorySelector {
+                        owner: request.issue.owner,
+                        repo: request.issue.repo,
+                    },
+                    base_branch: request.base_branch,
+                    base_sha: None,
+                    working_branch: "ironclaw/fix-4242".to_string(),
+                    current_head_sha: Some("head-sha-4242".to_string()),
+                    workspace_ref: WorkflowWorkspaceRef {
+                        thread_id: Some(ThreadId::new("workspace-thread-smoke").unwrap()),
+                        workspace_session_id: Some(workspace_session_id),
+                        turn_run_id: Some(TurnRunId::new()),
+                    },
+                    mount_ref: WorkflowWorkspaceMountRef {
+                        mount_id: "workspace-mount-smoke".to_string(),
+                        alias: "/workspace".to_string(),
+                    },
+                    created_at: request.requested_at,
+                },
+            })
+        }
+    }
+
+    #[derive(Debug, Default)]
+    struct FakeStageTurnSubmitter {
+        requests: Mutex<Vec<SubmitStageTurnRequest>>,
+    }
+
+    impl FakeStageTurnSubmitter {
+        async fn requests(&self) -> Vec<SubmitStageTurnRequest> {
+            self.requests.lock().await.clone()
+        }
+    }
+
+    #[async_trait]
+    impl StageTurnSubmitter for FakeStageTurnSubmitter {
+        async fn submit_stage_turn(
+            &self,
+            request: SubmitStageTurnRequest,
+        ) -> Result<SubmitStageTurnOutcome, GithubIssueWorkflowError> {
+            let request_count = {
+                let mut requests = self.requests.lock().await;
+                requests.push(request);
+                requests.len()
+            };
+            Ok(SubmitStageTurnOutcome::Submitted {
+                thread_id: ThreadId::new(format!("thread-stage-result-sink-{request_count}"))
+                    .unwrap(),
+                turn_run_id: TurnRunId::new(),
+            })
+        }
+    }
+
+    struct FakePolicyPorts {
+        repository: Arc<InMemoryGithubIssueWorkflowRepository>,
+        github: Arc<FakeGithubPort>,
+        stage_turns: Arc<FakeStageTurnSubmitter>,
+        project_access: Arc<FakeProjectAccess>,
+        workspace: Arc<FakeWorkspaceManager>,
+        clock: Arc<FakeClock>,
+        worker_id: WorkflowWorkerId,
+    }
+
+    impl GithubIssueWorkflowPolicyPorts for FakePolicyPorts {
+        type Clock = FakeClock;
+        type GithubPort = FakeGithubPort;
+        type ProjectAccess = FakeProjectAccess;
+        type Repository = InMemoryGithubIssueWorkflowRepository;
+        type StageTurnSubmitter = FakeStageTurnSubmitter;
+        type WorkspaceManager = FakeWorkspaceManager;
+
+        fn clock(&self) -> Arc<Self::Clock> {
+            self.clock.clone()
+        }
+
+        fn github_port(&self) -> Arc<Self::GithubPort> {
+            self.github.clone()
+        }
+
+        fn project_access(&self) -> Arc<Self::ProjectAccess> {
+            self.project_access.clone()
+        }
+
+        fn repository(&self) -> Arc<Self::Repository> {
+            self.repository.clone()
+        }
+
+        fn stage_turn_submitter(&self) -> Arc<Self::StageTurnSubmitter> {
+            self.stage_turns.clone()
+        }
+
+        fn workspace_manager(&self) -> Arc<Self::WorkspaceManager> {
+            self.workspace.clone()
+        }
+
+        fn worker_id(&self) -> WorkflowWorkerId {
+            self.worker_id.clone()
         }
     }
 }
