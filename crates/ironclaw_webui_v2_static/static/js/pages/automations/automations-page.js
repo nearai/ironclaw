@@ -57,6 +57,14 @@ export function AutomationsPage() {
               ${t("automations.error.loadFailed")}
             </div>
           `}
+          ${automationsState.actionError &&
+          html`
+            <div
+              className="rounded-xl border border-red-400/30 bg-red-500/10 px-4 py-3 text-sm text-red-200"
+            >
+              ${automationsState.actionError.message}
+            </div>
+          `}
 
           ${showErrorOnly
             ? null
@@ -102,8 +110,12 @@ export function AutomationsPage() {
                         onFilterChange=${setFilter}
                         onRefresh=${handleRefresh}
                         isRefreshing=${isRefreshing}
+                        isMutating=${automationsState.isMutating}
                         selectedAutomationId=${selectedAutomationId}
                         onSelectAutomation=${setSelectedAutomationId}
+                        onPauseAutomation=${automationsState.pauseAutomation}
+                        onResumeAutomation=${automationsState.resumeAutomation}
+                        onDeleteAutomation=${automationsState.deleteAutomation}
                       />
                     `}
               `}

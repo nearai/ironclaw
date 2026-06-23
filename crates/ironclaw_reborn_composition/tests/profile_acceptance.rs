@@ -37,6 +37,18 @@ fn profile_parse_accepts_kebab_and_snake_case() {
         RebornCompositionProfile::LocalDevYolo
     );
     assert_eq!(
+        "hosted_single_tenant"
+            .parse::<RebornCompositionProfile>()
+            .unwrap(),
+        RebornCompositionProfile::HostedSingleTenant
+    );
+    assert_eq!(
+        "hosted-single-tenant"
+            .parse::<RebornCompositionProfile>()
+            .unwrap(),
+        RebornCompositionProfile::HostedSingleTenant
+    );
+    assert_eq!(
         "migration-dry-run"
             .parse::<RebornCompositionProfile>()
             .unwrap(),
@@ -49,6 +61,7 @@ fn full_graph_profiles_match_production_strictness() {
     assert!(!RebornCompositionProfile::Disabled.requires_production_shape());
     assert!(!RebornCompositionProfile::LocalDev.requires_production_shape());
     assert!(!RebornCompositionProfile::LocalDevYolo.requires_production_shape());
+    assert!(!RebornCompositionProfile::HostedSingleTenant.requires_production_shape());
     assert!(RebornCompositionProfile::Production.requires_production_shape());
     assert!(RebornCompositionProfile::MigrationDryRun.requires_production_shape());
 }
@@ -160,6 +173,41 @@ fn readiness_deserializes_legacy_payload_without_diagnostics() {
 }
 
 #[test]
+fn hosted_single_tenant_readiness_serializes_as_ready_single_tenant_profile() {
+    let readiness = readiness_for_contract(
+        RebornCompositionProfile::HostedSingleTenant,
+        RebornReadinessState::HostedSingleTenantValidated,
+        vec![RebornReadinessDiagnostic::hosted_single_tenant()],
+    );
+
+    let value = serde_json::to_value(readiness).unwrap();
+
+    assert_eq!(
+        value,
+        json!({
+            "profile": "hosted-single-tenant",
+            "state": "hosted-single-tenant-validated",
+            "facades": {
+                "host_runtime": true,
+                "turn_coordinator": true,
+                "product_auth": true
+            },
+            "workers": {
+                "turn_runner": false,
+                "trigger_poller": false
+            },
+            "diagnostics": [{
+                "profile": "hosted-single-tenant",
+                "component": "composition_profile",
+                "reason": "unverified",
+                "status": "info",
+                "blocks_production": false
+            }]
+        })
+    );
+}
+
+#[test]
 fn readiness_deserializes_diagnostics_payload_into_typed_enums() {
     let readiness: RebornReadiness = serde_json::from_value(json!({
         "profile": "production",
@@ -265,6 +313,7 @@ fn production_blocker_rejects_non_production_shaped_profiles() {
         RebornCompositionProfile::Disabled,
         RebornCompositionProfile::LocalDev,
         RebornCompositionProfile::LocalDevYolo,
+        RebornCompositionProfile::HostedSingleTenant,
     ] {
         let diagnostic = RebornReadinessDiagnostic::production_blocker(
             profile,
@@ -468,6 +517,7 @@ fn production_wiring_report_skipped_for_non_production_profiles() {
         RebornCompositionProfile::Disabled,
         RebornCompositionProfile::LocalDev,
         RebornCompositionProfile::LocalDevYolo,
+        RebornCompositionProfile::HostedSingleTenant,
     ] {
         assert!(
             RebornReadinessDiagnostic::from_production_wiring_report(profile, &report).is_empty()

@@ -68,6 +68,32 @@ fn setup_fake_entrypoint() -> FakeEntrypoint {
 }
 
 #[cfg(unix)]
+fn setup_fake_entrypoint_recording_cp() -> FakeEntrypoint {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let bin_dir = temp.path().join("bin");
+    let home_dir = temp.path().join("home");
+    let args_file = temp.path().join("args.txt");
+
+    std::fs::create_dir_all(&bin_dir).expect("bin dir");
+    write_executable(
+        &bin_dir.join("ironclaw-reborn"),
+        "#!/bin/sh\nprintf '%s\\n' \"$@\" > \"$IRONCLAW_REBORN_TEST_ARGS_FILE\"\n",
+    );
+    write_executable(
+        &bin_dir.join("cp"),
+        "#!/bin/sh\nprintf '%s\\n[storage]\\n' \"$1\" > \"$2\"\n",
+    );
+
+    FakeEntrypoint {
+        _temp: temp,
+        bin_dir,
+        home_dir,
+        default_config: "/opt/ironclaw/reborn/config.toml".to_string(),
+        args_file,
+    }
+}
+
+#[cfg(unix)]
 fn write_executable(path: &std::path::Path, content: &str) {
     std::fs::write(path, content).expect("write executable");
     let mut permissions = std::fs::metadata(path)
@@ -131,6 +157,32 @@ fn reborn_dockerfile_uses_feature_matched_cache_and_loopback_default() {
     assert!(
         dockerfile.contains("IRONCLAW_REBORN_SERVE_HOST=127.0.0.1"),
         "image default serve host must stay loopback; Railway should override to 0.0.0.0"
+    );
+    assert!(
+        dockerfile.contains("config.hosted-single-tenant.toml"),
+        "image must include the hosted single-tenant seed config"
+    );
+}
+
+#[test]
+fn reborn_hosted_single_tenant_seed_config_contains_postgres_storage() {
+    let config = read_repo_file("docker/reborn/config.hosted-single-tenant.toml");
+
+    assert!(
+        config.contains("profile = \"hosted-single-tenant\""),
+        "hosted seed config must select the hosted profile"
+    );
+    assert!(
+        config.contains("[storage]") && config.contains("backend = \"postgres\""),
+        "hosted seed config must include Postgres storage"
+    );
+    assert!(
+        config.contains("pool_max_size = 10"),
+        "hosted seed config must size the shared Postgres pool for runtime concurrency"
+    );
+    assert!(
+        !config.contains("[policy]"),
+        "hosted seed config must not include production-only [policy]"
     );
 }
 
@@ -205,6 +257,32 @@ fn reborn_entrypoint_copies_config_and_builds_default_serve_args() {
     assert_eq!(
         std::fs::read_to_string(&fake.args_file).expect("captured args"),
         "serve\n--host\n0.0.0.0\n--port\n4321\n--confirm-host-access\n"
+    );
+}
+
+#[test]
+#[cfg(unix)]
+fn reborn_entrypoint_selects_hosted_single_tenant_seed_config() {
+    let fake = setup_fake_entrypoint_recording_cp();
+    let output = Command::new("sh")
+        .arg(repo_file("docker/reborn/entrypoint.sh"))
+        .env_clear()
+        .env("PATH", fake.path_env())
+        .env("IRONCLAW_REBORN_HOME", &fake.home_dir)
+        .env("IRONCLAW_REBORN_PROFILE", "hosted-single-tenant")
+        .env("IRONCLAW_REBORN_ALLOW_EPHEMERAL_RAILWAY", "true")
+        .env("IRONCLAW_REBORN_TEST_ARGS_FILE", &fake.args_file)
+        .output()
+        .expect("entrypoint should run");
+
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        std::fs::read_to_string(fake.home_dir.join("config.toml")).expect("copied config"),
+        "/opt/ironclaw/reborn/config.hosted-single-tenant.toml\n[storage]\n"
     );
 }
 

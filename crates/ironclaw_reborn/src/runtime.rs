@@ -30,6 +30,11 @@ use ironclaw_turns::{
     runner::TurnRunTransitionPort,
 };
 
+use ironclaw_host_runtime::{
+    SchedulerTurnRunWakeNotifier, TurnRunScheduler, TurnRunSchedulerConfig, TurnRunSchedulerHandle,
+    TurnRunWakeChannel,
+};
+
 use crate::{
     app_loop_family::build_loop_family_registry,
     driver_registry::{DriverRegistry, DriverRegistryError},
@@ -50,18 +55,62 @@ use crate::{
         prompt_material::GateBackedSubagentPromptMaterialSource,
     },
     text_loop_driver::TextOnlyModelReplyDriverConfig,
-    turn_runner::{
-        TurnRunnerWakeReceiver, TurnRunnerWakeSender, TurnRunnerWorker, TurnRunnerWorkerConfig,
-    },
+    turn_run_executor::RebornTurnRunExecutor,
 };
 
-type PlannedRuntimeWakeChannel = (TurnRunnerWakeSender, TurnRunnerWakeReceiver);
+/// Default number of turn-runner worker tasks spawned per runtime instance.
+///
+/// Used by [`DefaultPlannedRuntimeConfig`] and [`TurnRunnerSettings`] so the
+/// value is defined exactly once and shared across all crates in the stack.
+pub const DEFAULT_TURN_RUNNER_WORKER_COUNT: std::num::NonZeroUsize =
+    match std::num::NonZeroUsize::new(16) {
+        Some(v) => v,
+        // 16 is a non-zero compile-time constant so this arm is never reached.
+        // `NonZeroUsize::MIN` (= 1) is used as a non-panicking fallback so the
+        // CI "no panics in production code" check stays green.
+        None => std::num::NonZeroUsize::MIN,
+    };
 
-#[derive(Debug, Clone, Default)]
+/// Default per-`(tenant, ScheduledTrigger)` concurrency cap.
+///
+/// Set below [`DEFAULT_TURN_RUNNER_WORKER_COUNT`] so background triggers can
+/// never occupy the whole scheduler pool: `worker_count - trigger_cap` slots
+/// (16 - 8 = 8) stay reserved for live conversation runs.
+pub const DEFAULT_MAX_CONCURRENT_TRIGGER_RUNS: std::num::NonZeroU32 =
+    match std::num::NonZeroU32::new(8) {
+        Some(v) => v,
+        // 8 is a non-zero compile-time constant so this arm is never reached.
+        None => std::num::NonZeroU32::MIN,
+    };
+
+/// Default per-`(tenant, owner user)` concurrency cap so a single user (or a
+/// thread-storm) cannot monopolise the shared scheduler pool.
+pub const DEFAULT_MAX_CONCURRENT_RUNS_PER_USER: std::num::NonZeroU32 =
+    match std::num::NonZeroU32::new(3) {
+        Some(v) => v,
+        // 3 is a non-zero compile-time constant so this arm is never reached.
+        None => std::num::NonZeroU32::MIN,
+    };
+
+#[derive(Debug, Clone)]
 pub struct DefaultPlannedRuntimeConfig {
-    pub worker: TurnRunnerWorkerConfig,
+    pub heartbeat_interval: std::time::Duration,
+    pub poll_interval: std::time::Duration,
+    pub worker_count: std::num::NonZeroUsize,
     pub text_only_driver: TextOnlyModelReplyDriverConfig,
     pub host: TextOnlyLoopHostConfig,
+}
+
+impl Default for DefaultPlannedRuntimeConfig {
+    fn default() -> Self {
+        Self {
+            heartbeat_interval: std::time::Duration::from_secs(10),
+            poll_interval: std::time::Duration::from_secs(5),
+            worker_count: DEFAULT_TURN_RUNNER_WORKER_COUNT,
+            text_only_driver: TextOnlyModelReplyDriverConfig::default(),
+            host: TextOnlyLoopHostConfig::default(),
+        }
+    }
 }
 
 pub trait RuntimeTurnStateStore:
@@ -80,6 +129,45 @@ impl<T> RuntimeTurnStateStore for T where
         + Send
         + Sync
 {
+}
+
+/// Opaque carrier for the scheduler's wake-pair (notifier + channel).
+///
+/// Keeps substrate types ([`SchedulerTurnRunWakeNotifier`], [`TurnRunWakeChannel`])
+/// off public struct fields while still letting the production composition path
+/// pre-mint the pair before building the coordinator (breaking the
+/// coordinator↔scheduler build-order cycle).
+///
+/// The struct is `pub` so `ironclaw_reborn_composition` (the sanctioned downstream
+/// consumer) can carry it through [`DefaultPlannedRuntimeParts`].  The raw
+/// substrate types are not re-exposed: constructors and accessors only hand
+/// back typed handles, never the bare fields.
+pub struct SchedulerWakeWiring {
+    notifier: Arc<SchedulerTurnRunWakeNotifier>,
+    channel: TurnRunWakeChannel,
+}
+
+impl SchedulerWakeWiring {
+    /// Mint a new notifier + paired wake channel using the default scheduler
+    /// wake-channel capacity.
+    pub fn channel() -> Self {
+        let (notifier, channel) = SchedulerTurnRunWakeNotifier::channel(
+            TurnRunSchedulerConfig::default().wake_channel_capacity(),
+        );
+        Self { notifier, channel }
+    }
+
+    /// Return a clone of the notifier so callers can register it with other
+    /// services before the scheduler is started.
+    pub fn notifier(&self) -> Arc<SchedulerTurnRunWakeNotifier> {
+        Arc::clone(&self.notifier)
+    }
+
+    /// Start the scheduler loop, consuming the carrier.  Returns the handle
+    /// so callers can query liveness and request shutdown.
+    pub(crate) fn start(self, scheduler: TurnRunScheduler) -> TurnRunSchedulerHandle {
+        scheduler.start_with_channel(self.notifier, self.channel)
+    }
 }
 
 pub struct DefaultPlannedRuntimeParts<G>
@@ -138,6 +226,16 @@ where
     /// behaves exactly as it did before hooks existed.
     pub hook_dispatcher_builder_factory: Option<HookDispatcherBuilderFactory>,
     pub communication_context_provider: Option<Arc<dyn CommunicationContextProvider>>,
+    /// Pre-minted scheduler wake wiring.
+    ///
+    /// When `Some`, the inner build skips its own [`SchedulerWakeWiring::channel`] call
+    /// and uses the provided carrier instead. This lets callers mint the notifier before
+    /// composing the rest of the runtime (e.g. to satisfy a separate wiring validation gate)
+    /// while still ensuring the scheduler loop consumes the exact same channel.
+    ///
+    /// When `None` (the default), the notifier and channel are minted internally, which is
+    /// correct for local-dev and any composition that does not need to pre-mint.
+    pub scheduler_wake_wiring: Option<SchedulerWakeWiring>,
 }
 
 pub trait RuntimeSubagentGoalStore:
@@ -159,8 +257,7 @@ where
     pub run_profile_resolver: Arc<dyn RunProfileResolver>,
     pub coordinator: Arc<dyn ironclaw_turns::TurnCoordinator>,
     pub host_factory: Arc<RebornLoopDriverHostFactory<S, G>>,
-    pub worker: Arc<TurnRunnerWorker>,
-    pub wake_sender: TurnRunnerWakeSender,
+    pub scheduler_handle: TurnRunSchedulerHandle,
 }
 
 #[derive(Debug)]
@@ -352,25 +449,11 @@ pub fn build_default_planned_runtime<G>(
 where
     G: HostManagedModelGateway + ?Sized + Send + Sync + 'static,
 {
-    build_default_planned_runtime_with_optional_wake_channel(parts, None)
+    build_default_planned_runtime_inner(parts)
 }
 
-pub fn build_default_planned_runtime_with_wake_channel<G>(
+fn build_default_planned_runtime_inner<G>(
     parts: DefaultPlannedRuntimeParts<G>,
-    wake_channel: PlannedRuntimeWakeChannel,
-) -> Result<
-    RebornRuntimeLoopComposition<dyn SessionThreadService, G>,
-    DefaultPlannedRuntimeBuildError,
->
-where
-    G: HostManagedModelGateway + ?Sized + Send + Sync + 'static,
-{
-    build_default_planned_runtime_with_optional_wake_channel(parts, Some(wake_channel))
-}
-
-fn build_default_planned_runtime_with_optional_wake_channel<G>(
-    parts: DefaultPlannedRuntimeParts<G>,
-    wake_channel: Option<PlannedRuntimeWakeChannel>,
 ) -> Result<
     RebornRuntimeLoopComposition<dyn SessionThreadService, G>,
     DefaultPlannedRuntimeBuildError,
@@ -399,19 +482,30 @@ where
     );
     let run_profile_resolver: Arc<dyn RunProfileResolver> = resolver;
 
-    let (wake_sender, wake_receiver) = wake_channel.unwrap_or_else(TurnRunnerWakeReceiver::new);
-    let worker_wake_notifier: Arc<dyn TurnRunWakeNotifier> = Arc::new(wake_sender.clone());
+    // Resolve the scheduler wake wiring BEFORE building the coordinator, breaking
+    // the coordinator↔scheduler build-order cycle.  The coordinator receives the
+    // real notifier immediately; the channel is held in the carrier and passed to
+    // `start_with_channel` via `SchedulerWakeWiring::start` after the executor is built.
+    //
+    // When a caller pre-minted the wiring (e.g. the production composition path
+    // that must satisfy `HostRuntimeServices.with_turn_run_wake_notifier_dyn`
+    // before this function runs), use it directly so the coordinator and the
+    // scheduler share the exact same channel.  Otherwise mint a fresh carrier.
+    let wake_wiring = parts
+        .scheduler_wake_wiring
+        .unwrap_or_else(SchedulerWakeWiring::channel);
+    let scheduler_notifier_base: Arc<dyn TurnRunWakeNotifier> = wake_wiring.notifier();
     // When a cancellation factory is supplied, fan-out each coordinator wake to
-    // BOTH the worker AND the factory's `notify_run_wake` observer. Without
-    // this composite, the worker still wakes but retained product run handles
+    // BOTH the scheduler AND the factory's `notify_run_wake` observer. Without
+    // this composite, the scheduler still wakes but retained product run handles
     // never flip on `cancel_run` — breaking end-to-end product-live
     // cancellation observation.
     let wake_notifier: Arc<dyn TurnRunWakeNotifier> = match parts.cancellation_factory.clone() {
         Some(factory) => Arc::new(CompositeTurnRunWakeNotifier::new(
-            worker_wake_notifier,
+            scheduler_notifier_base,
             factory,
         )),
-        None => worker_wake_notifier,
+        None => scheduler_notifier_base,
     };
     let turn_state_for_observer: Arc<dyn TurnSpawnTreeStateStore> = parts.turn_state.clone();
     let completion_observer = Arc::new(SubagentCompletionObserver::new_unbound(
@@ -539,14 +633,17 @@ where
         Arc::clone(&transition_port),
         parts.loop_exit_evidence,
     ));
-    let worker = Arc::new(TurnRunnerWorker::new(
-        parts.config.worker,
-        transition_port,
-        loop_exit_applier,
+    let executor = Arc::new(RebornTurnRunExecutor::new(
+        Arc::clone(&loop_exit_applier),
         Arc::clone(&driver_registry),
-        host_factory.clone(),
-        wake_receiver,
+        host_factory.clone() as Arc<dyn crate::turn_runner::HostFactory>,
     ));
+    let scheduler_config = TurnRunSchedulerConfig::default()
+        .with_max_concurrent_runs(parts.config.worker_count.get())
+        .with_runner_heartbeat_interval(parts.config.heartbeat_interval)
+        .with_poll_interval(parts.config.poll_interval);
+    let scheduler = TurnRunScheduler::new(Arc::clone(&transition_port), executor, scheduler_config);
+    let scheduler_handle = wake_wiring.start(scheduler);
 
     Ok(
         RebornRuntimeLoopComposition::<dyn SessionThreadService, G> {
@@ -554,8 +651,7 @@ where
             run_profile_resolver,
             coordinator,
             host_factory,
-            worker,
-            wake_sender,
+            scheduler_handle,
         },
     )
 }

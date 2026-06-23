@@ -49,14 +49,14 @@ Replaces the `completion_policy == CompleteAfterFirstFire` CASE.
 ### 5. Worker (`crates/ironclaw_triggers/src/worker/due_fire.rs`)
 - Remove `is_fire_once`, `recurring_next_run_at`, and the `failure_disposition` Terminal-vs-Reschedule
   split keyed on fire-once.
-- Pre-submit failure axis is "did the run execute?" — these paths never ran the turn, so they must
-  NOT complete the trigger (fail-closed):
+- Pre-submit failure handling is keyed on the schedule kind:
   - Retryable failure → `Retryable` (leave Scheduled at fire_slot; retries next poll). Unchanged.
-  - Permanent failure → reschedule to `schedule.next_slot_after(fire_slot)` if `Some`; if `None`
-    (a `Once`, or exhausted cron), **leave Scheduled at fire_slot** (fail-closed retry) — do NOT
-    mark Completed. (This is what makes the `trigger_poller_does_not_submit_turn_for_unpaired_actor`
-    test pass: an unpaired one-shot is never Completed.)
-  - A trigger only reaches `Completed` via `clear_active_fire` after a real run terminates.
+  - `Once` permanent failure → mark `Completed` so the one-shot slot cannot refire forever.
+  - Cron permanent failure → reschedule to `schedule.next_slot_after(fire_slot)` if `Some`;
+    exhausted Cron stays `Scheduled`/retryable and remains visible for manual investigation
+    or removal.
+  - A trigger reaches `Completed` via `clear_active_fire` after a real run terminates, and `Once`
+    can also reach `Completed` on a terminal pre-submit permanent failure.
 - `active_cleanup.rs`: the "blocked fire-once stays pending" rule now keys on the schedule being
   `Once` (i.e. `next_slot_after(fire_slot).is_none()`-style / `matches!(schedule, Once{..})`),
   not on `completion_policy`.

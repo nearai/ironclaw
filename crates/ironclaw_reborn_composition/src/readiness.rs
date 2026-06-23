@@ -12,6 +12,7 @@ pub enum RebornReadinessState {
     #[default]
     Disabled,
     DevOnly,
+    HostedSingleTenantValidated,
     ProductionValidated,
     MigrationDryRunValidated,
 }
@@ -275,6 +276,16 @@ impl RebornReadinessDiagnostic {
 
     pub fn local_dev_yolo() -> Self {
         Self::dev_only_profile(RebornCompositionProfile::LocalDevYolo)
+    }
+
+    pub fn hosted_single_tenant() -> Self {
+        Self {
+            profile: RebornCompositionProfile::HostedSingleTenant,
+            component: RebornReadinessDiagnosticComponent::CompositionProfile,
+            reason: RebornReadinessDiagnosticReason::Unverified,
+            status: RebornReadinessDiagnosticStatus::Info,
+            blocks_production: false,
+        }
     }
 
     fn dev_only_profile(profile: RebornCompositionProfile) -> Self {

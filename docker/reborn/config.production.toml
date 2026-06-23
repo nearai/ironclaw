@@ -15,6 +15,14 @@ default_profile = "secure_default"
 [runner]
 heartbeat_interval_secs = 5
 poll_interval_ms = 200
+# Number of concurrent turn-runner worker tasks (default 4; clamped to 32).
+# worker_count = 4
+# Max concurrent runs in TurnStatus::Running per (tenant_id, owner user_id); 0 or absent = unlimited.
+# max_concurrent_runs_per_user = 0
+# Max concurrent ScheduledTrigger runs; 0 or absent = unlimited.
+# max_concurrent_trigger_runs = 0
+# Max concurrent Inbound/WebUi (conversation) runs; 0 or absent = unlimited.
+# max_concurrent_conversation_runs = 0
 
 [skills]
 regex_activation_enabled = true
@@ -23,6 +31,7 @@ regex_activation_enabled = true
 backend = "postgres"
 url_env = "IRONCLAW_REBORN_POSTGRES_URL"
 secret_master_key_env = "IRONCLAW_REBORN_SECRET_MASTER_KEY"
+pool_max_size = 2
 # Remote Postgres defaults to TLS. For trusted private-network deployments
 # where the provider cannot complete TLS, set both DATABASE_SSLMODE=disable
 # and IRONCLAW_REBORN_ALLOW_REMOTE_POSTGRES_CLEAR_TEXT=true.
@@ -33,10 +42,8 @@ env_user_id_var = "IRONCLAW_REBORN_WEBUI_USER_ID"
 
 [llm.default]
 provider_id = "nearai"
-model = "anthropic/claude-sonnet-4-5"
+model = "deepseek-ai/DeepSeek-V4-Flash"
 api_key_env = "NEARAI_API_KEY"
 
 [slack]
 enabled = false
-signing_secret_env = "IRONCLAW_REBORN_SLACK_SIGNING_SECRET"
-bot_token_env = "IRONCLAW_REBORN_SLACK_BOT_TOKEN"

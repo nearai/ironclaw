@@ -88,11 +88,11 @@ browser-reachable.
 | `webui.v2.operator.service_lifecycle` | POST | `/api/webchat/v2/operator/service` | None | `ProductWorkflow` |
 
 `webui.v2.operator.logs` accepts bounded `limit`, `cursor`, `level`, and `target`
-query parameters, the existing boolean `tail` flag from `RebornOperatorLogsQuery`,
-plus optional scoped filters for `thread_id`, `run_id`, `turn_id`, `tool_call_id`,
-`tool_name`, and `source`. Responses include the same correlation fields when the
-captured tracing context provides them and expose tail/follow capability through
-`tail_supported` and `follow_supported`.
+query parameters, mutually exclusive boolean `tail` and `follow` flags from
+`RebornOperatorLogsQuery`, plus optional scoped filters for `thread_id`, `run_id`,
+`turn_id`, `tool_call_id`, `tool_name`, and `source`. Responses include the same
+correlation fields when the captured tracing context provides them and expose
+tail/follow capability through `tail_supported` and `follow_supported`.
 
 All routes require `BearerToken` auth with `AuthenticatedCaller`
 scope source. The host's bearer middleware is responsible for
@@ -119,9 +119,16 @@ unsupported-config reason codes currently include
 `operator_config_service_not_wired`, `operator_config_secret_not_wired`,
 `operator_config_deprecated`, `operator_config_immutable`,
 `operator_config_not_wired`, and `operator_config_unknown_key`.
-`POST /api/webchat/v2/operator/setup` uses the typed LLM config service
-for provider/model setup; profile and WebUI access setup return redacted
-not-yet-wired diagnostics until those owning services are exposed.
+`POST /api/webchat/v2/operator/setup` uses the typed LLM config service for
+provider/model setup. Profile selection and WebUI access inputs are validated
+through the same operator setup facade; unchanged masked tokens (not modified
+by the user) are treated as no-ops, and actual profile/token mutations fail
+closed until an owning persistence service is wired. Token values are never
+echoed.
+`GET /api/webchat/v2/operator/diagnostics` is the Reborn doctor surface: the
+product facade aggregates status/readiness, setup, and config diagnostics into
+one redacted payload instead of making route handlers inspect runtime internals
+or adding a second CLI-only diagnostic path.
 
 ### List-threads
 

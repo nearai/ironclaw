@@ -57,6 +57,20 @@ impl ProfileApprovalGatePolicy for RuntimeProfileApprovalGatePolicy {
         self.exempt_capabilities.contains(capability)
     }
 
+    fn effects_force_approval(&self, effects: &[EffectKind]) -> bool {
+        // Hard floor (#4776): the highest-risk effects always require an
+        // explicit approval gate and can never be auto-approved or satisfied by
+        // a stored always-allow grant — independent of profile or policy. Kept
+        // deliberately narrow so the yolo/Minimal-bypass behaviour for ordinary
+        // write/spawn effects is unchanged.
+        effects.iter().any(|effect| {
+            matches!(
+                effect,
+                EffectKind::Financial | EffectKind::ModifyApproval | EffectKind::ModifyBudget
+            )
+        })
+    }
+
     fn effects_require_approval(
         &self,
         approval_policy: ApprovalPolicy,

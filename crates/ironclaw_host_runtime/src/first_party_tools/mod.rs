@@ -68,8 +68,8 @@ pub use trace_commons::{
 #[cfg(any(test, feature = "test-support"))]
 pub use trigger_management::TriggerManagementClock;
 pub use trigger_management::{
-    TRIGGER_CREATE_CAPABILITY_ID, TRIGGER_LIST_CAPABILITY_ID, TRIGGER_REMOVE_CAPABILITY_ID,
-    TriggerCreateHook,
+    TRIGGER_CREATE_CAPABILITY_ID, TRIGGER_LIST_CAPABILITY_ID, TRIGGER_PAUSE_CAPABILITY_ID,
+    TRIGGER_REMOVE_CAPABILITY_ID, TRIGGER_RESUME_CAPABILITY_ID, TriggerCreateHook,
 };
 
 pub const BUILTIN_FIRST_PARTY_PROVIDER: &str = "builtin";

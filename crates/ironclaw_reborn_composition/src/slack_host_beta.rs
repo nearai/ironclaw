@@ -18,10 +18,11 @@ use ironclaw_product_adapters::{
     ProductAdapterId, ProtocolHttpEgress,
 };
 use ironclaw_product_workflow::{
-    ConversationBindingService, DefaultInboundTurnService, DefaultProductWorkflow,
-    ProductActorUserResolutionRequest, ProductActorUserResolver, ProductConversationBindingService,
-    ProductConversationRouteKey, ProductConversationSubjectRouteResolver, ProductInstallationKey,
-    ProductInstallationScope, ProductWorkflowError, ResolveBindingRequest, ResolvedBinding,
+    ApprovalInteractionService, AuthInteractionService, ConversationBindingService,
+    DefaultInboundTurnService, DefaultProductWorkflow, ProductActorUserResolutionRequest,
+    ProductActorUserResolver, ProductConversationBindingService, ProductConversationRouteKey,
+    ProductConversationSubjectRouteResolver, ProductInstallationKey, ProductInstallationScope,
+    ProductWorkflowError, ResolveBindingRequest, ResolvedBinding,
     StaticProductInstallationResolver,
 };
 use ironclaw_product_workflow_storage::RebornFilesystemIdempotencyLedger;
@@ -29,6 +30,8 @@ use ironclaw_slack_v2_adapter::{
     SLACK_API_HOST, SLACK_USER_ACTOR_KIND, SLACK_V2_ADAPTER_ID, SlackV2Adapter,
     SlackV2AdapterConfig, slack_request_signature_auth_requirement,
 };
+use ironclaw_threads::SessionThreadService;
+use ironclaw_turns::TurnCoordinator;
 use ironclaw_wasm_product_adapters::{
     EgressPolicy, HmacWebhookAuth, NativeProductAdapterRunner, NativeProductAdapterRunnerConfig,
     WebhookAuth,
@@ -36,6 +39,8 @@ use ironclaw_wasm_product_adapters::{
 use secrecy::{ExposeSecret, SecretString};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
+
+mod runtime_setup;
 
 use crate::RebornRuntime;
 use crate::outbound_preferences::{
@@ -172,6 +177,50 @@ pub struct SlackHostBetaConfigInput {
     pub channel_routes: Vec<SlackHostBetaChannelRoute>,
     pub signing_secret: SecretString,
     pub bot_token: SecretString,
+}
+
+#[derive(Debug, Clone)]
+pub struct SlackHostBetaRuntimeConfig {
+    pub tenant_id: TenantId,
+    pub agent_id: AgentId,
+    pub project_id: Option<ProjectId>,
+    pub operator_user_id: UserId,
+    pub legacy_setup: Option<SlackHostBetaLegacySetup>,
+}
+
+#[derive(Debug, Clone)]
+pub struct SlackHostBetaLegacySetup {
+    pub installation_id: String,
+    pub team_id: String,
+    pub api_app_id: String,
+    pub slack_user_id: Option<String>,
+    pub user_id: UserId,
+    pub shared_subject_user_id: Option<UserId>,
+    pub channel_routes: Vec<SlackHostBetaChannelRoute>,
+    pub signing_secret: SecretString,
+    pub bot_token: SecretString,
+}
+
+impl SlackHostBetaRuntimeConfig {
+    pub fn new(
+        tenant_id: TenantId,
+        agent_id: AgentId,
+        project_id: Option<ProjectId>,
+        operator_user_id: UserId,
+    ) -> Self {
+        Self {
+            tenant_id,
+            agent_id,
+            project_id,
+            operator_user_id,
+            legacy_setup: None,
+        }
+    }
+
+    pub fn with_legacy_setup(mut self, legacy_setup: SlackHostBetaLegacySetup) -> Self {
+        self.legacy_setup = Some(legacy_setup);
+        self
+    }
 }
 
 impl SlackHostBetaConfig {
@@ -357,6 +406,45 @@ pub struct SlackHostBetaMounts {
     pub events: PublicRouteMount,
     pub personal_binding_pairing: SlackPersonalBindingPairingRouteConfig,
     pub channel_routes: SlackChannelRouteAdminRouteConfig,
+    /// Internal target-authority handle consumed only by WebUI product-facade composition.
+    pub(crate) outbound_delivery_target_provider: Arc<dyn OutboundDeliveryTargetProvider>,
+    pub(crate) outbound_delivery_target_provider_registered: bool,
+}
+
+#[derive(Clone)]
+struct SlackHostBetaRuntimeParts {
+    local_runtime: Arc<crate::factory::RebornLocalRuntimeServices>,
+    thread_service: Arc<dyn SessionThreadService>,
+    turn_coordinator: Arc<dyn TurnCoordinator>,
+    approval_interaction_service: Arc<dyn ApprovalInteractionService>,
+    auth_interaction_service: Arc<dyn AuthInteractionService>,
+    auth_challenge_provider: Option<Arc<dyn crate::AuthChallengeProvider>>,
+    auth_flow_canceller: Option<Arc<dyn crate::BlockedAuthFlowCanceller>>,
+}
+
+impl SlackHostBetaRuntimeParts {
+    fn from_runtime(runtime: &RebornRuntime) -> Result<Self, SlackHostBetaBuildError> {
+        let local_runtime = runtime
+            .services()
+            .local_runtime
+            .as_ref()
+            .ok_or(SlackHostBetaBuildError::DurableHostStateUnavailable)?;
+        let approval_interaction_service: Arc<dyn ApprovalInteractionService> = Arc::new(
+            crate::delivered_gate_routing::DeliveredGateRoutingApprovalService::new(
+                runtime.webui_approval_interaction_service(),
+                Arc::clone(&local_runtime.delivered_gate_routes),
+            ),
+        );
+        Ok(Self {
+            local_runtime: Arc::clone(local_runtime),
+            thread_service: runtime.webui_thread_service(),
+            turn_coordinator: runtime.webui_turn_coordinator(),
+            approval_interaction_service,
+            auth_interaction_service: runtime.webui_auth_interaction_service(),
+            auth_challenge_provider: runtime.auth_challenge_provider(),
+            auth_flow_canceller: runtime.blocked_auth_flow_canceller(),
+        })
+    }
 }
 
 pub fn build_slack_events_route_mount(
@@ -590,6 +678,8 @@ pub fn build_slack_host_beta_mounts(
             events,
             personal_binding_pairing: SlackPersonalBindingPairingRouteConfig::new(pairing),
             channel_routes,
+            outbound_delivery_target_provider,
+            outbound_delivery_target_provider_registered: true,
         });
     }
     match runtime
@@ -613,7 +703,16 @@ pub fn build_slack_host_beta_mounts(
         events,
         personal_binding_pairing: SlackPersonalBindingPairingRouteConfig::new(pairing),
         channel_routes,
+        outbound_delivery_target_provider,
+        outbound_delivery_target_provider_registered: true,
     })
+}
+
+pub async fn build_slack_host_beta_runtime_mounts(
+    runtime: &RebornRuntime,
+    config: SlackHostBetaRuntimeConfig,
+) -> Result<SlackHostBetaMounts, SlackHostBetaBuildError> {
+    runtime_setup::build_runtime_mounts(runtime, config).await
 }
 
 pub fn build_slack_events_route_mount_with_actor_user_resolver(
@@ -630,14 +729,29 @@ fn build_slack_events_route_mount_with_resolvers(
     actor_user_resolver: Arc<dyn ProductActorUserResolver>,
     subject_route_resolver: Option<Arc<dyn ProductConversationSubjectRouteResolver>>,
 ) -> Result<PublicRouteMount, SlackHostBetaBuildError> {
+    let parts = SlackHostBetaRuntimeParts::from_runtime(runtime)?;
+    let record = build_slack_installation_record_with_resolvers(
+        &parts,
+        config,
+        actor_user_resolver,
+        subject_route_resolver,
+    )?;
+    Ok(slack_events_route_mount(
+        SlackEventsRouteState::from_resolver(Arc::new(StaticSlackInstallationResolver::new([
+            record,
+        ]))),
+    ))
+}
+
+fn build_slack_installation_record_with_resolvers(
+    parts: &SlackHostBetaRuntimeParts,
+    config: SlackHostBetaConfig,
+    actor_user_resolver: Arc<dyn ProductActorUserResolver>,
+    subject_route_resolver: Option<Arc<dyn ProductConversationSubjectRouteResolver>>,
+) -> Result<SlackInstallationRecord, SlackHostBetaBuildError> {
     // The resolver controls inbound Slack actor binding. `config.user_id`
     // scopes host-mediated Slack bot-token egress and legacy static actor
     // mapping. Shared Slack channel execution is configured separately.
-    let local_runtime = runtime
-        .services()
-        .local_runtime
-        .as_ref()
-        .ok_or(SlackHostBetaBuildError::DurableHostStateUnavailable)?;
     tracing::warn!(
         "Slack host-beta uses in-memory conversation bindings; Slack conversation binding continuity is lost on process restart"
     );
@@ -685,17 +799,17 @@ fn build_slack_events_route_mount_with_resolvers(
 
     let inbound = Arc::new(DefaultInboundTurnService::new(
         binding.clone(),
-        runtime.webui_thread_service(),
-        runtime.webui_turn_coordinator(),
+        Arc::clone(&parts.thread_service),
+        Arc::clone(&parts.turn_coordinator),
     ));
-    let route_store: Arc<dyn ironclaw_outbound::DeliveredGateRouteStore> =
-        Arc::clone(&local_runtime.delivered_gate_routes);
+    let route_store: Arc<dyn DeliveredGateRouteStore> =
+        Arc::clone(&parts.local_runtime.delivered_gate_routes);
     let workflow = Arc::new(
         DefaultProductWorkflow::new(
             inbound,
             Arc::new(
                 RebornFilesystemIdempotencyLedger::new(
-                    Arc::clone(&local_runtime.host_state_filesystem),
+                    Arc::clone(&parts.local_runtime.host_state_filesystem),
                     slack_egress_scope_template(&config),
                 )
                 .with_settled_entry_limit(
@@ -711,13 +825,8 @@ fn build_slack_events_route_mount_with_resolvers(
             ),
             Arc::new(binding.clone()),
         )
-        .with_approval_interaction_service(Arc::new(
-            crate::delivered_gate_routing::DeliveredGateRoutingApprovalService::new(
-                runtime.webui_approval_interaction_service(),
-                route_store.clone(),
-            ),
-        ))
-        .with_auth_interaction_service(runtime.webui_auth_interaction_service())
+        .with_approval_interaction_service(Arc::clone(&parts.approval_interaction_service))
+        .with_auth_interaction_service(Arc::clone(&parts.auth_interaction_service))
         .with_delivered_gate_routes(route_store.clone()),
     );
 
@@ -737,41 +846,38 @@ fn build_slack_events_route_mount_with_resolvers(
         ),
     ));
 
-    let egress = slack_protocol_egress(runtime, &config, token_handle)?;
-    let outbound_store: Arc<dyn OutboundStateStore> = Arc::clone(&local_runtime.outbound_state);
+    let egress = slack_protocol_egress_from_parts(parts, &config, token_handle)?;
+    let outbound_store: Arc<dyn OutboundStateStore> =
+        Arc::clone(&parts.local_runtime.outbound_state);
     let preferences: Arc<dyn ironclaw_outbound::CommunicationPreferenceRepository> =
-        Arc::clone(&local_runtime.outbound_preferences);
+        Arc::clone(&parts.local_runtime.outbound_preferences);
     let delivery_sink: Arc<dyn OutboundDeliverySink> = Arc::new(NoopSlackDeliverySink);
     let observer = Arc::new(SlackFinalReplyDeliveryObserver::with_settings(
         SlackFinalReplyDeliveryServices {
             binding_service: Arc::new(binding),
-            thread_service: runtime.webui_thread_service(),
-            turn_coordinator: runtime.webui_turn_coordinator(),
+            thread_service: Arc::clone(&parts.thread_service),
+            turn_coordinator: Arc::clone(&parts.turn_coordinator),
             outbound_store,
             route_store,
             communication_preferences: preferences,
             adapter,
             egress,
             delivery_sink,
-            auth_challenges: runtime.auth_challenge_provider(),
-            auth_flow_canceller: runtime.blocked_auth_flow_canceller(),
-            approval_requests: Some(Arc::clone(&local_runtime.approval_requests)
+            auth_challenges: parts.auth_challenge_provider.clone(),
+            auth_flow_canceller: parts.auth_flow_canceller.clone(),
+            approval_requests: Some(Arc::clone(&parts.local_runtime.approval_requests)
                 as Arc<dyn ironclaw_run_state::ApprovalRequestStore>),
         },
         SlackFinalReplyDeliverySettings::default(),
     ));
 
-    let slack_resolver = StaticSlackInstallationResolver::new([SlackInstallationRecord::new(
+    Ok(SlackInstallationRecord::new(
         config.tenant_id,
         config.installation_id,
         config.installation_selector,
         runner,
     )
-    .with_workflow_observer(observer)]);
-
-    Ok(slack_events_route_mount(
-        SlackEventsRouteState::from_resolver(Arc::new(slack_resolver)),
-    ))
+    .with_workflow_observer(observer))
 }
 
 fn slack_channel_route_key(
@@ -792,12 +898,17 @@ fn slack_protocol_egress(
     config: &SlackHostBetaConfig,
     token_handle: EgressCredentialHandle,
 ) -> Result<Arc<dyn ProtocolHttpEgress>, SlackHostBetaBuildError> {
-    let local_runtime = runtime
-        .services()
+    let parts = SlackHostBetaRuntimeParts::from_runtime(runtime)?;
+    slack_protocol_egress_from_parts(&parts, config, token_handle)
+}
+
+fn slack_protocol_egress_from_parts(
+    parts: &SlackHostBetaRuntimeParts,
+    config: &SlackHostBetaConfig,
+    token_handle: EgressCredentialHandle,
+) -> Result<Arc<dyn ProtocolHttpEgress>, SlackHostBetaBuildError> {
+    let host_egress = parts
         .local_runtime
-        .as_ref()
-        .ok_or(SlackHostBetaBuildError::RuntimeHttpEgressUnavailable)?;
-    let host_egress = local_runtime
         .host_runtime_http_egress
         .clone()
         .ok_or(SlackHostBetaBuildError::RuntimeHttpEgressUnavailable)?;
@@ -1001,13 +1112,15 @@ mod tests {
         }
     }
 
-    struct MultiUserTokenAuthenticator;
+    struct HiddenOperatorRouteAuthenticator;
 
     #[async_trait]
-    impl WebuiAuthenticator for MultiUserTokenAuthenticator {
+    impl WebuiAuthenticator for HiddenOperatorRouteAuthenticator {
         async fn authenticate(&self, token: &str) -> Option<WebuiAuthentication> {
             if token == "operator-token" {
-                Some(WebuiAuthentication::user(UserId::new(USER).expect("user")))
+                Some(WebuiAuthentication::operator(
+                    UserId::new(USER).expect("user"),
+                ))
             } else {
                 None
             }
@@ -1826,7 +1939,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn slack_channel_routes_are_not_mounted_for_non_operator_authenticator() {
+    async fn slack_channel_routes_mount_for_sso_operator_authenticator() {
         let (runtime, _root) = runtime().await;
         let mounts = build_slack_host_beta_mounts(&runtime, config_without_channel_routes())
             .expect("mounts");
@@ -1867,7 +1980,7 @@ mod tests {
             bundle,
             WebuiServeConfig::new(
                 TenantId::new(TENANT).expect("tenant"),
-                Arc::new(MultiUserTokenAuthenticator),
+                Arc::new(OperatorTokenAuthenticator),
                 Vec::new(),
             )
             .with_default_agent_id(AgentId::new(AGENT).expect("agent"))
@@ -1876,47 +1989,60 @@ mod tests {
         )
         .expect("webui app");
 
-        for (method, uri, body) in [
-            ("GET", WEBUI_V2_CHANNELS_SLACK_ROUTES_PATH, ""),
-            (
-                "PUT",
-                WEBUI_V2_CHANNELS_SLACK_ROUTES_PATH,
-                r#"{"channel_id":"C0HOST","subject_user_id":"user:slack-shared-subject"}"#,
-            ),
-            (
-                "DELETE",
-                WEBUI_V2_CHANNELS_SLACK_ROUTES_PATH,
-                r#"{"channel_id":"C0HOST"}"#,
-            ),
-            ("GET", WEBUI_V2_CHANNELS_SLACK_ALLOWED_PATH, ""),
-            (
-                "PUT",
-                WEBUI_V2_CHANNELS_SLACK_ALLOWED_PATH,
-                r#"{"channel_ids":["C0HOST"]}"#,
-            ),
-        ] {
-            let mut builder = Request::builder()
-                .method(method)
-                .uri(uri)
-                .header("authorization", "Bearer operator-token");
-            if method != "GET" {
-                builder = builder.header("content-type", "application/json");
-            }
-            let response = app
-                .clone()
-                .oneshot(
-                    builder
-                        .body(Body::from(body.to_string()))
-                        .expect("request builds"),
-                )
-                .await
-                .expect("route responds");
-            assert_eq!(
-                response.status(),
-                StatusCode::NOT_FOUND,
-                "{method} route must not be mounted for non-operator auth"
-            );
-        }
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri(WEBUI_V2_CHANNELS_SLACK_ROUTES_PATH)
+                    .header("authorization", "Bearer operator-token")
+                    .body(Body::empty())
+                    .expect("request builds"),
+            )
+            .await
+            .expect("route responds");
+        assert_eq!(response.status(), StatusCode::OK);
+
+        runtime.shutdown().await.expect("runtime shuts down");
+    }
+
+    #[tokio::test]
+    async fn slack_channel_routes_not_mounted_when_operator_route_visibility_is_hidden() {
+        let (runtime, _root) = runtime().await;
+        let mounts = build_slack_host_beta_mounts(&runtime, config_without_channel_routes())
+            .expect("mounts");
+        let bundle = build_webui_services_with_slack_host_beta_mounts(
+            &runtime,
+            None,
+            Some(&mounts),
+            SlackOperatorRouteVisibility::Hidden,
+        )
+        .expect("webui bundle");
+        let app = webui_v2_app(
+            bundle,
+            WebuiServeConfig::new(
+                TenantId::new(TENANT).expect("tenant"),
+                Arc::new(HiddenOperatorRouteAuthenticator),
+                Vec::new(),
+            )
+            .with_default_agent_id(AgentId::new(AGENT).expect("agent"))
+            .with_default_project_id(ProjectId::new(PROJECT).expect("project"))
+            .with_slack_channel_routes(mounts.channel_routes),
+        )
+        .expect("webui app");
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri(WEBUI_V2_CHANNELS_SLACK_ROUTES_PATH)
+                    .header("authorization", "Bearer operator-token")
+                    .body(Body::empty())
+                    .expect("request builds"),
+            )
+            .await
+            .expect("route responds");
+
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
 
         runtime.shutdown().await.expect("runtime shuts down");
     }

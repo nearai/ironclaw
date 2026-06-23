@@ -416,6 +416,7 @@ mod tests {
                 challenge: Some(SlackPersonalBindingPairingChallenge {
                     installation_id: installation("install-a"),
                     slack_user_id: SlackUserId::new("U123"),
+                    setup_revision: None,
                 }),
             }
         }

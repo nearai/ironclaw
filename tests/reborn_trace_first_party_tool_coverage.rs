@@ -16,7 +16,8 @@ use ironclaw_host_runtime::{
     TRACE_COMMONS_CREDITS_CAPABILITY_ID, TRACE_COMMONS_ONBOARD_CAPABILITY_ID,
     TRACE_COMMONS_PROFILE_SET_CAPABILITY_ID, TRACE_COMMONS_PROFILE_TOKEN_CAPABILITY_ID,
     TRACE_COMMONS_STATUS_CAPABILITY_ID, TRIGGER_CREATE_CAPABILITY_ID, TRIGGER_LIST_CAPABILITY_ID,
-    TRIGGER_REMOVE_CAPABILITY_ID, WRITE_FILE_CAPABILITY_ID, builtin_first_party_package,
+    TRIGGER_PAUSE_CAPABILITY_ID, TRIGGER_REMOVE_CAPABILITY_ID, TRIGGER_RESUME_CAPABILITY_ID,
+    WRITE_FILE_CAPABILITY_ID, builtin_first_party_package,
 };
 use ironclaw_loop_support::{HostManagedModelMessageRole, HostManagedModelResponse};
 use ironclaw_turns::{TurnStatus, run_profile::LoopHostMilestoneKind};
@@ -51,6 +52,8 @@ const REBORN_FIRST_PARTY_E2E_COVERED_CAPABILITIES: &[&str] = &[
     SKILL_REMOVE_CAPABILITY_ID,
     TRIGGER_CREATE_CAPABILITY_ID,
     TRIGGER_LIST_CAPABILITY_ID,
+    TRIGGER_PAUSE_CAPABILITY_ID,
+    TRIGGER_RESUME_CAPABILITY_ID,
     TRIGGER_REMOVE_CAPABILITY_ID,
     TRACE_COMMONS_ONBOARD_CAPABILITY_ID,
     TRACE_COMMONS_STATUS_CAPABILITY_ID,
@@ -395,10 +398,22 @@ async fn reborn_trace_trigger_management_first_party_tools_parity() {
     let trigger_create =
         CapabilityId::new(TRIGGER_CREATE_CAPABILITY_ID).expect("valid capability id");
     let trigger_list = CapabilityId::new(TRIGGER_LIST_CAPABILITY_ID).expect("valid capability id");
+    let trigger_pause =
+        CapabilityId::new(TRIGGER_PAUSE_CAPABILITY_ID).expect("valid capability id");
+    let trigger_resume =
+        CapabilityId::new(TRIGGER_RESUME_CAPABILITY_ID).expect("valid capability id");
     let trigger_remove =
         CapabilityId::new(TRIGGER_REMOVE_CAPABILITY_ID).expect("valid capability id");
+    let missing_trigger_id = "01HZZZZZZZZZZZZZZZZZZZZZZZ";
     let model_gateway = RebornTraceReplayModelGateway::with_scripted_steps([
-        RebornModelReplayStep::ProviderToolCalls {
+        RebornModelReplayStep::AssertProviderToolsThenProviderToolCalls {
+            capability_ids: vec![
+                trigger_create.clone(),
+                trigger_list.clone(),
+                trigger_remove.clone(),
+                trigger_pause.clone(),
+                trigger_resume.clone(),
+            ],
             calls: vec![RebornScriptedProviderToolCall::new(
                 trigger_create.clone(),
                 "call_trigger_create_first_party",
@@ -425,8 +440,8 @@ async fn reborn_trace_trigger_management_first_party_tools_parity() {
         RebornModelReplayStep::ProviderToolCalls {
             calls: vec![RebornScriptedProviderToolCall::new(
                 trigger_remove.clone(),
-                "call_trigger_remove_first_party",
-                serde_json::json!({"trigger_id": "01J00000000000000000000009"}),
+                "call_trigger_remove_missing",
+                serde_json::json!({ "trigger_id": missing_trigger_id }),
             )],
             expected_tool_results: Vec::new(),
         },
@@ -483,6 +498,10 @@ async fn reborn_trace_trigger_management_first_party_tools_parity() {
     );
     assert_eq!(results[2].capability_id, trigger_remove);
     assert_eq!(results[2].output["removed"], serde_json::json!(false));
+    assert!(
+        results[2].output["trigger"].is_null(),
+        "missing trigger removal must return a null trigger payload"
+    );
 
     let requests = harness.model_requests();
     assert_eq!(requests.len(), 4);
