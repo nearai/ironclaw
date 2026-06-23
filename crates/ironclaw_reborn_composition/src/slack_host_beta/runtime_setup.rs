@@ -514,13 +514,17 @@ impl DynamicSlackTriggeredRunDeliveryHook {
             return Ok(None);
         };
         let revision = setup.revision;
-        let mut cached_driver = self.cached_driver.lock().await;
-        if let Some(cached) = cached_driver
-            .as_ref()
-            .filter(|cached| cached.revision == revision)
+
         {
-            return Ok(Some(Arc::clone(&cached.driver)));
+            let cached_driver = self.cached_driver.lock().await;
+            if let Some(cached) = cached_driver
+                .as_ref()
+                .filter(|cached| cached.revision == revision)
+            {
+                return Ok(Some(Arc::clone(&cached.driver)));
+            }
         }
+
         let config = slack_host_beta_config_from_setup(&self.setup_service, setup)
             .await
             .map_err(|error| error.to_string())?
@@ -531,6 +535,14 @@ impl DynamicSlackTriggeredRunDeliveryHook {
             Arc::clone(&self.delivery_store),
         )
         .map_err(|error| error.to_string())?;
+
+        let mut cached_driver = self.cached_driver.lock().await;
+        if let Some(cached) = cached_driver
+            .as_ref()
+            .filter(|cached| cached.revision >= revision)
+        {
+            return Ok(Some(Arc::clone(&cached.driver)));
+        }
         *cached_driver = Some(DynamicSlackTriggeredRunDeliveryDriver {
             revision,
             driver: Arc::clone(&driver),
@@ -542,22 +554,25 @@ impl DynamicSlackTriggeredRunDeliveryHook {
 #[async_trait::async_trait]
 impl PostSubmitDeliveryHook for DynamicSlackTriggeredRunDeliveryHook {
     async fn on_trigger_submitted(&self, fire: TriggerFire, run_id: TurnRunId, scope: TurnScope) {
-        match self.current_driver().await {
-            Ok(Some(driver)) => driver.on_trigger_submitted(fire, run_id, scope).await,
-            Ok(None) => {
-                tracing::debug!(
-                    %run_id,
-                    "Slack dynamic triggered-run delivery skipped: Slack setup is not configured"
-                );
+        let hook = self.clone();
+        tokio::spawn(async move {
+            match hook.current_driver().await {
+                Ok(Some(driver)) => driver.on_trigger_submitted(fire, run_id, scope).await,
+                Ok(None) => {
+                    tracing::debug!(
+                        %run_id,
+                        "Slack dynamic triggered-run delivery skipped: Slack setup is not configured"
+                    );
+                }
+                Err(error) => {
+                    tracing::warn!(
+                        %run_id,
+                        %error,
+                        "Slack dynamic triggered-run delivery skipped: delivery hook unavailable"
+                    );
+                }
             }
-            Err(error) => {
-                tracing::warn!(
-                    %run_id,
-                    %error,
-                    "Slack dynamic triggered-run delivery skipped: delivery hook unavailable"
-                );
-            }
-        }
+        });
     }
 }
 
