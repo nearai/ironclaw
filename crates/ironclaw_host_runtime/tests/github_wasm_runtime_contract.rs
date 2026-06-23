@@ -390,6 +390,7 @@ async fn host_runtime_services_maps_google_drive_wasm_401_to_auth_required() {
             scope.clone(),
             account_access_secret,
             SecretMaterial::from("ya29.expired_fixture_token"),
+            None,
         )
         .await
         .unwrap();
@@ -447,6 +448,7 @@ async fn host_runtime_services_maps_google_drive_upload_wasm_401_to_auth_require
             scope.clone(),
             account_access_secret,
             SecretMaterial::from("ya29.expired_upload_fixture_token"),
+            None,
         )
         .await
         .unwrap();
