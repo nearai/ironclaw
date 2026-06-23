@@ -195,10 +195,12 @@ where
     bundle_source: Arc<S>,
     config: SkillActivationSelectorConfig,
     // Global "auto-activate learned skills" master switch, read live per turn.
-    // When `false`, criteria (keyword/regex) selection is skipped entirely so a
-    // learned skill activates only via an explicit `$name`/`/name` mention — the
-    // same effect as `SkillActivationSelectionMode::ExplicitOnly`, but toggleable
-    // at runtime without a restart. Defaults to `true` (auto-activation on).
+    // When `false`, MACHINE-LEARNED skills (`SkillManifest::origin`) are
+    // excluded from criteria (keyword/regex) selection and activate only via an
+    // explicit `$name`/`/name` mention; hand-written and bundled skills are
+    // unaffected and keep auto-activating. Scoped per-skill in
+    // `select_skill_activations`, not as an all-or-nothing gate. Toggleable at
+    // runtime without a restart. Defaults to `true` (auto-activation on).
     auto_activate_learned: Arc<AtomicBool>,
     setup_marker_source: Option<Arc<dyn SetupMarkerSource>>,
     activation_observer: Mutex<Option<Arc<dyn SkillActivationObserver>>>,
@@ -934,12 +936,17 @@ fn select_skill_activations(
         candidates_with_unsatisfied_setup_markers(candidates, satisfied_setup_markers);
     let loaded_skills: Vec<LoadedSkill> =
         active_candidates.iter().map(|c| c.loaded.clone()).collect();
-    // Skills the user turned auto-activation off for stay available for an
-    // explicit `$name`/`/name` mention (handled below), but are excluded from
-    // criteria (keyword/regex) selection.
+    // Two filters decide criteria (keyword/regex) eligibility; both still leave
+    // a skill available for an explicit `$name`/`/name` mention (handled
+    // below). First: skills the user turned auto-activation off for. Second:
+    // the global "auto-activate learned skills" master switch, which governs
+    // ONLY machine-learned skills (`SkillManifest::origin`) — when it is off, a
+    // learned skill is excluded from criteria, but hand-written and bundled
+    // skills keep auto-activating.
     let criteria_skills: Vec<LoadedSkill> = loaded_skills
         .iter()
         .filter(|skill| skill.manifest.auto_activate)
+        .filter(|skill| auto_activate_learned || !skill.manifest.origin.is_learned())
         .cloned()
         .collect();
     let mention_normalized_message = normalize_dollar_skill_mentions(message);
@@ -974,12 +981,12 @@ fn select_skill_activations(
         }
     }
 
-    // The global master switch (`auto_activate_learned`) gates criteria
-    // selection on top of the configured mode: when it is off, only explicit
-    // mentions activate, regardless of `selection_mode`.
-    if auto_activate_learned
-        && config.selection_mode == SkillActivationSelectionMode::ExplicitAndCriteria
-    {
+    // Criteria (keyword/regex) selection runs whenever the configured mode
+    // allows it. The global `auto_activate_learned` switch is NOT an
+    // all-or-nothing gate here — it is applied per-skill in `criteria_skills`
+    // above, scoping to machine-learned skills so hand-written skills keep
+    // auto-activating even when learned auto-activation is off.
+    if config.selection_mode == SkillActivationSelectionMode::ExplicitAndCriteria {
         let outcome = prefilter_skills_with_options(
             &rewritten_message,
             &criteria_skills,
@@ -1667,19 +1674,25 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn global_auto_activate_flag_gates_criteria_and_honors_live_toggle() {
-        let source = Arc::new(StaticSkillBundleSource::new(vec![(
-            SkillSourceKind::System,
-            "code-review",
+    async fn global_auto_activate_flag_gates_learned_criteria_and_honors_live_toggle() {
+        // A machine-learned skill (`origin: learned`): the global master switch
+        // governs exactly these.
+        let learned = ironclaw_skills::set_skill_origin(
             &skill_md(
                 "code-review",
                 "Review code",
                 &["review"],
                 "CODE_REVIEW_SENTINEL",
             ),
+            ironclaw_skills::SkillOrigin::Learned,
+        );
+        let source = Arc::new(StaticSkillBundleSource::new(vec![(
+            SkillSourceKind::System,
+            "code-review",
+            &learned,
         )]));
         // Default mode is ExplicitAndCriteria, but the global master switch is
-        // off: a keyword-matching skill must NOT auto-activate.
+        // off: a keyword-matching LEARNED skill must NOT auto-activate.
         let flag = Arc::new(AtomicBool::new(false));
         let selectable =
             SelectableSkillContextSource::new(source, SkillActivationSelectorConfig::default())
@@ -1723,6 +1736,135 @@ mod tests {
             selected.len(),
             1,
             "flipping the flag on must re-enable criteria activation live"
+        );
+        assert!(
+            selected[0]
+                .loaded_skill_md()
+                .expect("skill context")
+                .contains("CODE_REVIEW_SENTINEL")
+        );
+    }
+
+    #[tokio::test]
+    async fn global_switch_off_still_auto_activates_a_hand_written_skill() {
+        // Decision B: the global "auto-activate learned skills" switch governs
+        // ONLY machine-learned skills. A hand-written skill (no `origin: learned`
+        // marker → `SkillOrigin::User`) must keep auto-activating by keyword even
+        // when the switch is off — otherwise turning off learned auto-activation
+        // would silently disable the user's own skills. This is the regression
+        // that locks decision B's "hand-written unaffected" half.
+        let source = Arc::new(StaticSkillBundleSource::new(vec![(
+            SkillSourceKind::User,
+            "code-review",
+            &skill_md(
+                "code-review",
+                "Review code",
+                &["review"],
+                "CODE_REVIEW_SENTINEL",
+            ),
+        )]));
+        // Global learned-auto-activation switch OFF.
+        let flag = Arc::new(AtomicBool::new(false));
+        let selectable =
+            SelectableSkillContextSource::new(source, SkillActivationSelectorConfig::default())
+                .with_auto_activate_flag(Arc::clone(&flag));
+        let context = run_context_for("thread-handwritten", "msg:hw").await;
+        selectable
+            .record_user_message(
+                context.scope.clone(),
+                accepted_message_ref(&context),
+                "please review this PR",
+            )
+            .expect("record message");
+        let selected = selectable
+            .load_skill_context_candidates(&context)
+            .await
+            .expect("selection succeeds");
+        assert_eq!(
+            selected.len(),
+            1,
+            "a hand-written skill must still auto-activate when only the \
+             learned-skills switch is off"
+        );
+        assert!(
+            selected[0]
+                .loaded_skill_md()
+                .expect("skill context")
+                .contains("CODE_REVIEW_SENTINEL")
+        );
+    }
+
+    #[tokio::test]
+    async fn criteria_excludes_unapproved_skill_until_auto_activate_is_set() {
+        // A learned skill is staged with `auto_activate: false` (held for review)
+        // so it is NOT criteria-selected until an operator approves it — the
+        // safety boundary the learning loop depends on (think-in-universe BLOCK
+        // on #5061). This locks the per-skill filter in `select_skill_activations`
+        // (`criteria_skills.filter(|s| s.manifest.auto_activate)`) end-to-end
+        // through the real selector: a keyword-matching but unapproved skill is
+        // not selected; once `auto_activate` is set (the approval action) it is.
+        let held = ironclaw_skills::set_skill_auto_activate(
+            &skill_md(
+                "code-review",
+                "Review code",
+                &["review"],
+                "CODE_REVIEW_SENTINEL",
+            ),
+            false,
+        );
+        let source = Arc::new(StaticSkillBundleSource::new(vec![(
+            SkillSourceKind::User,
+            "code-review",
+            &held,
+        )]));
+        // No `.with_auto_activate_flag(..)`: the global master switch defaults ON,
+        // so the ONLY thing keeping the keyword-matching skill out is its
+        // per-skill `auto_activate: false`.
+        let selectable =
+            SelectableSkillContextSource::new(source, SkillActivationSelectorConfig::default());
+        let held_context = run_context_for("thread-held", "msg:held").await;
+        selectable
+            .record_user_message(
+                held_context.scope.clone(),
+                accepted_message_ref(&held_context),
+                "please review this PR",
+            )
+            .expect("record message");
+        let selected = selectable
+            .load_skill_context_candidates(&held_context)
+            .await
+            .expect("selection succeeds");
+        assert!(
+            selected.is_empty(),
+            "an unapproved (auto_activate:false) skill must NOT be criteria-selected, \
+             even when its keywords match and the global switch is on"
+        );
+
+        // Approval sets `auto_activate` on; a fresh run must now select it.
+        let approved = ironclaw_skills::set_skill_auto_activate(&held, true);
+        let source = Arc::new(StaticSkillBundleSource::new(vec![(
+            SkillSourceKind::User,
+            "code-review",
+            &approved,
+        )]));
+        let selectable =
+            SelectableSkillContextSource::new(source, SkillActivationSelectorConfig::default());
+        let approved_context = run_context_for("thread-approved", "msg:approved").await;
+        selectable
+            .record_user_message(
+                approved_context.scope.clone(),
+                accepted_message_ref(&approved_context),
+                "please review this PR",
+            )
+            .expect("record message");
+        let selected = selectable
+            .load_skill_context_candidates(&approved_context)
+            .await
+            .expect("selection succeeds");
+        assert_eq!(
+            selected.len(),
+            1,
+            "after approval (auto_activate set) the skill must be criteria-selected"
         );
         assert!(
             selected[0]
