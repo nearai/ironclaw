@@ -1,10 +1,14 @@
 use crate::request::github_request;
 use crate::validation::*;
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn list_issues(
     owner: &str,
     repo: &str,
     state: Option<&str>,
+    labels: Option<Vec<String>>,
+    assignee: Option<&str>,
+    milestone: Option<&str>,
     page: Option<u32>,
     limit: Option<u32>,
 ) -> Result<String, String> {
@@ -12,50 +16,54 @@ pub(crate) fn list_issues(
         return Err("Invalid owner or repo name".into());
     }
     let state = state.unwrap_or("open");
-    let search_state = match state {
-        "open" | "closed" => Some(state),
-        "all" => None,
+    match state {
+        "open" | "closed" | "all" => {}
         _ => return Err("invalid_state".to_string()),
-    };
-    validate_search_page(page)?;
-    validate_search_limit(limit)?;
+    }
+    validate_page(page)?;
+    validate_limit(limit)?;
+    validate_name_list(labels.as_deref(), "labels")?;
+    if let Some(assignee) = assignee {
+        validate_input_length(assignee, "assignee")?;
+    }
+    if let Some(milestone) = milestone {
+        validate_milestone_filter(milestone)?;
+    }
     let limit = limit.unwrap_or(30).min(100); // Cap at 100
-    let query = build_issue_search_query(
-        None,
-        None,
-        Some(owner),
-        Some(repo),
-        None,
-        None,
-        None,
-        search_state,
-        Some("issue"),
-    )?;
+    let encoded_owner = url_encode_path(owner);
+    let encoded_repo = url_encode_path(repo);
 
     let mut path = format!(
-        "/search/issues?q={}&per_page={}",
-        url_encode_query(&query),
+        "/repos/{}/{}/issues?state={}&per_page={}",
+        encoded_owner,
+        encoded_repo,
+        url_encode_query(state),
         limit
     );
-    append_search_params(&mut path, page, Some("created"), Some("desc"))?;
-
-    let response = github_request("GET", &path, None)?;
-    issue_items_from_search_response(&response)
+    if let Some(labels) = labels {
+        path.push_str("&labels=");
+        path.push_str(&url_encode_query(&labels.join(",")));
+    }
+    if let Some(assignee) = assignee {
+        path.push_str("&assignee=");
+        path.push_str(&url_encode_query(assignee));
+    }
+    if let Some(milestone) = milestone {
+        path.push_str("&milestone=");
+        path.push_str(&url_encode_query(milestone));
+    }
+    if let Some(p) = page {
+        path.push_str(&format!("&page={}", p));
+    }
+    github_request("GET", &path, None)
 }
 
-pub(crate) fn issue_items_from_search_response(response: &str) -> Result<String, String> {
-    let response: serde_json::Value = serde_json::from_str(response).map_err(|error| {
-        format!("github_api_invalid_json: failed to parse issue search response: {error}")
-    })?;
-    let items = response
-        .get("items")
-        .and_then(serde_json::Value::as_array)
-        .ok_or_else(|| {
-            "github_api_invalid_json: issue search response missing items array".to_string()
-        })?;
-    serde_json::to_string(items).map_err(|error| {
-        format!("github_api_invalid_json: failed to serialize issue search items: {error}")
-    })
+fn validate_milestone_filter(milestone: &str) -> Result<(), String> {
+    validate_input_length(milestone, "milestone")?;
+    if milestone == "none" || milestone == "*" || milestone.chars().all(|ch| ch.is_ascii_digit()) {
+        return Ok(());
+    }
+    Err("invalid_milestone".to_string())
 }
 
 pub(crate) fn create_issue(
@@ -64,6 +72,7 @@ pub(crate) fn create_issue(
     title: &str,
     body: Option<&str>,
     labels: Option<Vec<String>>,
+    assignees: Option<Vec<String>>,
 ) -> Result<String, String> {
     if !validate_path_segment(owner) || !validate_path_segment(repo) {
         return Err("Invalid owner or repo name".into());
@@ -72,22 +81,8 @@ pub(crate) fn create_issue(
     if let Some(b) = body {
         validate_input_length(b, "body")?;
     }
-    if let Some(labels) = &labels {
-        if labels.len() > 100 {
-            return Err("Invalid labels: at most 100 labels are allowed".into());
-        }
-        for label in labels {
-            if label.is_empty() {
-                return Err("Invalid labels: labels cannot be empty".into());
-            }
-            validate_input_length(label, "labels")?;
-            if label.chars().count() > 100 {
-                return Err(
-                    "Invalid labels: label exceeds maximum length of 100 characters".into(),
-                );
-            }
-        }
-    }
+    validate_name_list(labels.as_deref(), "labels")?;
+    validate_name_list(assignees.as_deref(), "assignees")?;
 
     let encoded_owner = url_encode_path(owner);
     let encoded_repo = url_encode_path(repo);
@@ -101,7 +96,33 @@ pub(crate) fn create_issue(
     if let Some(labels) = labels {
         req_body["labels"] = serde_json::json!(labels);
     }
+    if let Some(assignees) = assignees {
+        req_body["assignees"] = serde_json::json!(assignees);
+    }
     github_request("POST", &path, Some(req_body.to_string()))
+}
+
+fn validate_name_list(values: Option<&[String]>, field_name: &str) -> Result<(), String> {
+    let Some(values) = values else {
+        return Ok(());
+    };
+    if values.len() > 100 {
+        return Err(format!(
+            "Invalid {field_name}: at most 100 values are allowed"
+        ));
+    }
+    for value in values {
+        if value.is_empty() {
+            return Err(format!("Invalid {field_name}: values cannot be empty"));
+        }
+        validate_input_length(value, field_name)?;
+        if value.chars().count() > 100 {
+            return Err(format!(
+                "Invalid {field_name}: value exceeds maximum length of 100 characters"
+            ));
+        }
+    }
+    Ok(())
 }
 
 pub(crate) fn get_issue(owner: &str, repo: &str, issue_number: u32) -> Result<String, String> {

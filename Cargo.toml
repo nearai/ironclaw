@@ -9,7 +9,6 @@ exclude = [
     "channels-src/whatsapp",
     "crates/ironclaw_silk_decoder",
     "tools-src/composio",
-    "tools-src/github",
     "tools-src/gmail",
     "tools-src/google-calendar",
     "tools-src/google-docs",

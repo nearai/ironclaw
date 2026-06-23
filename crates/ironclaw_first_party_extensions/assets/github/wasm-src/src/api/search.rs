@@ -56,8 +56,8 @@ pub(crate) fn search_issues_pull_requests(
     let query = build_issue_search_query(
         query, repository, owner, repo, author, assignee, involves, state, issue_type,
     )?;
-    validate_search_page(page)?;
-    validate_search_limit(limit)?;
+    validate_page(page)?;
+    validate_limit(limit)?;
     validate_search_sort(sort)?;
     let limit = limit.unwrap_or(30).min(100);
     let mut path = format!(

@@ -2,7 +2,9 @@ Use `github.list_repos` to list repositories visible to the authenticated GitHub
 
 For the current authenticated user, omit `username` or set it to `@me`. Do not guess a username for "my repos".
 
-For another GitHub user or organization, set `username` to that exact login; this returns public repositories for that login.
+Use `type` to control GitHub's repository affiliation filter. Use `member` when the user needs organization or collaborator repositories visible to the authenticated account.
+
+For another GitHub user or organization, set `username` to that exact login; this returns public repositories for that login. With a named `username`, only `all`, `owner`, and `member` are valid `type` values; omit `type` unless the user asks for one of those filters.
 
 Do not answer "who am I on GitHub?" from this capability. GitHub `/user/repos` returns repositories the authenticated user can access, including organization-owned repositories, so `owner.login` in these results is not proof of the authenticated account. Use `github.get_authenticated_user` for identity questions.
 

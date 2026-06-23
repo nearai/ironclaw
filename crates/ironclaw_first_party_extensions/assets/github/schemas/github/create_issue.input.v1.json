@@ -43,6 +43,16 @@
         "minLength": 1,
         "maxLength": 100
       }
+    },
+    "assignees": {
+      "type": "array",
+      "maxItems": 100,
+      "items": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 100
+      },
+      "description": "GitHub logins to assign to the new issue."
     }
   },
   "required": [

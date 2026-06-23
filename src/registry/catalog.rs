@@ -607,18 +607,18 @@ mod tests {
         .unwrap();
 
         fs::write(
-            tools_dir.join("github.json"),
+            tools_dir.join("portfolio.json"),
             r#"{
-                "name": "github",
-                "display_name": "GitHub",
+                "name": "portfolio",
+                "display_name": "Portfolio",
                 "kind": "tool",
                 "version": "0.1.0",
-                "description": "GitHub integration for issues and PRs",
-                "keywords": ["code", "git"],
+                "description": "Portfolio demo tool",
+                "keywords": ["portfolio", "demo"],
                 "source": {
-                    "dir": "tools-src/github",
-                    "capabilities": "github-tool.capabilities.json",
-                    "crate_name": "github-tool"
+                    "dir": "tools-src/portfolio",
+                    "capabilities": "portfolio-tool.capabilities.json",
+                    "crate_name": "portfolio-tool"
                 },
                 "tags": ["default", "development"]
             }"#,
@@ -663,7 +663,7 @@ mod tests {
                 "bundles": {
                     "default": {
                         "display_name": "Recommended",
-                        "extensions": ["tools/slack", "tools/github", "channels/telegram"]
+                        "extensions": ["tools/slack", "tools/portfolio", "channels/telegram"]
                     },
                     "messaging": {
                         "display_name": "Messaging",

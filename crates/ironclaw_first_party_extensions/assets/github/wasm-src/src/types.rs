@@ -28,6 +28,9 @@ pub(crate) enum GitHubAction {
         owner: String,
         repo: String,
         state: Option<String>,
+        labels: Option<Vec<String>>,
+        assignee: Option<String>,
+        milestone: Option<String>,
         page: Option<u32>,
         limit: Option<u32>,
     },
@@ -38,6 +41,7 @@ pub(crate) enum GitHubAction {
         title: String,
         body: Option<String>,
         labels: Option<Vec<String>>,
+        assignees: Option<Vec<String>>,
     },
     #[serde(rename = "get_issue")]
     GetIssue {
@@ -65,6 +69,10 @@ pub(crate) enum GitHubAction {
         owner: String,
         repo: String,
         state: Option<String>,
+        head: Option<String>,
+        base: Option<String>,
+        sort: Option<String>,
+        direction: Option<String>,
         page: Option<u32>,
         limit: Option<u32>,
     },
@@ -91,6 +99,8 @@ pub(crate) enum GitHubAction {
         repo: String,
         #[serde(alias = "number", alias = "pull_number")]
         pr_number: u32,
+        page: Option<u32>,
+        limit: Option<u32>,
     },
     #[serde(rename = "create_pr_review")]
     CreatePrReview {
@@ -143,12 +153,15 @@ pub(crate) enum GitHubAction {
         commit_title: Option<String>,
         commit_message: Option<String>,
         merge_method: Option<MergeMethod>,
+        sha: Option<String>,
     },
     #[serde(rename = "get_authenticated_user")]
     GetAuthenticatedUser {},
     #[serde(rename = "list_repos")]
     ListRepos {
         username: Option<String>,
+        #[serde(rename = "type")]
+        repo_type: Option<RepoListType>,
         page: Option<u32>,
         limit: Option<u32>,
     },
@@ -314,6 +327,36 @@ impl MergeMethod {
             Self::Squash => "squash",
             Self::Rebase => "rebase",
         }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Deserialize)]
+pub(crate) enum RepoListType {
+    #[serde(rename = "all")]
+    All,
+    #[serde(rename = "owner")]
+    Owner,
+    #[serde(rename = "public")]
+    Public,
+    #[serde(rename = "private")]
+    Private,
+    #[serde(rename = "member")]
+    Member,
+}
+
+impl RepoListType {
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::All => "all",
+            Self::Owner => "owner",
+            Self::Public => "public",
+            Self::Private => "private",
+            Self::Member => "member",
+        }
+    }
+
+    pub(crate) fn is_supported_for_named_user(self) -> bool {
+        matches!(self, Self::All | Self::Owner | Self::Member)
     }
 }
 

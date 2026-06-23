@@ -68,6 +68,8 @@ fn guest_error_kind(code: &str) -> &'static str {
         | "invalid_state"
         | "invalid_type"
         | "invalid_sort"
+        | "invalid_direction"
+        | "invalid_milestone"
         | "invalid_order"
         | "invalid_page"
         | "invalid_limit"
@@ -96,7 +98,6 @@ export!(GitHubTool);
 #[cfg(test)]
 mod tests {
     use super::GitHubTool;
-    use crate::api::issue_items_from_search_response;
     use crate::dispatch::{action_from_context, execute_inner};
     use crate::exports::near::agent::tool::Guest;
     use crate::request::{sanitize_host_error, test_support};
@@ -192,6 +193,43 @@ mod tests {
     }
 
     #[test]
+    fn schema_exposes_bug1_parameters() {
+        let schema = GitHubTool::schema();
+        let parsed: serde_json::Value =
+            serde_json::from_str(&schema).expect("schema should be valid JSON");
+        let schemas = parsed["oneOf"].as_array().expect("schema oneOf");
+
+        let find_schema = |title: &str| {
+            schemas
+                .iter()
+                .find(|schema| schema["title"] == title)
+                .unwrap_or_else(|| panic!("missing schema {title}"))
+        };
+
+        assert!(
+            find_schema("GitHub get_pull_request_files input")["properties"]["page"].is_object()
+        );
+        assert!(find_schema("GitHub list_issues input")["properties"]["labels"].is_object());
+        assert!(find_schema("GitHub merge_pull_request input")["properties"]["sha"].is_object());
+        assert!(find_schema("GitHub create_issue input")["properties"]["assignees"].is_object());
+        assert_eq!(
+            find_schema("GitHub list_repos input")["properties"]["type"]["enum"],
+            json!(["all", "owner", "public", "private", "member"])
+        );
+        assert!(find_schema("GitHub list_pull_requests input")["properties"]["head"].is_object());
+        assert!(
+            find_schema("GitHub get_file_content input")["properties"]["path"]["description"]
+                .as_str()
+                .is_some_and(|description| description.contains("base64"))
+        );
+        assert!(
+            find_schema("GitHub search_issues_pull_requests input")["properties"]["sort"]["enum"]
+                .as_array()
+                .is_some_and(|values| values.iter().any(|value| value == "reactions-heart"))
+        );
+    }
+
+    #[test]
     fn sanitizes_host_egress_errors_without_leaking_details() {
         assert_eq!(
             sanitize_host_error("missing token ghp_secret_value"),
@@ -220,27 +258,24 @@ mod tests {
     }
 
     #[test]
-    fn list_issues_uses_issue_only_search_pagination() {
-        test_support::set_response(Ok(json!({
-            "total_count": 2,
-            "items": [
-                {
-                    "number": 4806,
-                    "title": "issue one"
-                },
-                {
-                    "number": 4804,
-                    "title": "issue two"
-                }
-            ]
-        })
+    fn list_issues_uses_native_repo_endpoint_with_filters() {
+        test_support::set_response(Ok(json!([
+            {
+                "number": 4806,
+                "title": "issue one"
+            },
+            {
+                "number": 4804,
+                "title": "issue two"
+            }
+        ])
         .to_string()));
 
         let output = execute_inner(
-            r#"{"owner":"nearai","repo":"ironclaw","state":"open","page":2,"limit":2}"#,
+            r#"{"owner":"nearai","repo":"ironclaw","state":"open","labels":["bug","api"],"assignee":"henry","milestone":"12","page":2,"limit":2}"#,
             Some(r#"{"capability_id":"github.list_issues"}"#),
         )
-        .expect("github.list_issues should return issue-only search items");
+        .expect("github.list_issues should call native issues endpoint");
 
         let requests = test_support::requests();
         assert_eq!(requests.len(), 1);
@@ -248,7 +283,7 @@ mod tests {
         assert_eq!(requests[0].body, None);
         assert_eq!(
             requests[0].path,
-            "/search/issues?q=repo%3Anearai%2Fironclaw%20state%3Aopen%20is%3Aissue&per_page=2&page=2&sort=created&order=desc"
+            "/repos/nearai/ironclaw/issues?state=open&per_page=2&labels=bug%2Capi&assignee=henry&milestone=12&page=2"
         );
 
         let parsed: serde_json::Value =
@@ -269,49 +304,8 @@ mod tests {
     }
 
     #[test]
-    fn issue_search_response_projects_items_array() {
-        let search_response = json!({
-            "total_count": 2,
-            "items": [
-                {
-                    "number": 4806,
-                    "title": "issue one"
-                },
-                {
-                    "number": 4804,
-                    "title": "issue two"
-                }
-            ]
-        })
-        .to_string();
-
-        let filtered = issue_items_from_search_response(&search_response)
-            .expect("GitHub issue search response should project items");
-        let parsed: serde_json::Value =
-            serde_json::from_str(&filtered).expect("filtered response should be JSON");
-
-        assert_eq!(
-            parsed,
-            json!([
-                {
-                    "number": 4806,
-                    "title": "issue one"
-                },
-                {
-                    "number": 4804,
-                    "title": "issue two"
-                }
-            ])
-        );
-    }
-
-    #[test]
-    fn list_issues_all_state_omits_state_qualifier() {
-        test_support::set_response(Ok(json!({
-            "total_count": 0,
-            "items": []
-        })
-        .to_string()));
+    fn list_issues_all_state_uses_native_state_param() {
+        test_support::set_response(Ok(json!([]).to_string()));
 
         execute_inner(
             r#"{"owner":"nearai","repo":"ironclaw","state":"all","limit":1}"#,
@@ -322,8 +316,181 @@ mod tests {
         let requests = test_support::requests();
         assert_eq!(
             requests[0].path,
-            "/search/issues?q=repo%3Anearai%2Fironclaw%20is%3Aissue&per_page=1&sort=created&order=desc"
+            "/repos/nearai/ironclaw/issues?state=all&per_page=1"
         );
+    }
+
+    #[test]
+    fn list_issues_rejects_milestone_titles_before_egress() {
+        test_support::set_response(Ok(json!([]).to_string()));
+
+        assert_eq!(
+            execute_inner(
+                r#"{"owner":"nearai","repo":"ironclaw","milestone":"v1"}"#,
+                Some(r#"{"capability_id":"github.list_issues"}"#),
+            )
+            .unwrap_err(),
+            "invalid_milestone"
+        );
+        assert!(
+            test_support::requests().is_empty(),
+            "invalid milestone title should be rejected before egress"
+        );
+    }
+
+    #[test]
+    fn get_pull_request_files_uses_page_and_limit() {
+        test_support::set_response(Ok(json!([]).to_string()));
+
+        execute_inner(
+            r#"{"owner":"nearai","repo":"ironclaw","pr_number":42,"page":3,"limit":50}"#,
+            Some(r#"{"capability_id":"github.get_pull_request_files"}"#),
+        )
+        .expect("github.get_pull_request_files should accept pagination");
+
+        let requests = test_support::requests();
+        assert_eq!(
+            requests[0].path,
+            "/repos/nearai/ironclaw/pulls/42/files?per_page=50&page=3"
+        );
+    }
+
+    #[test]
+    fn list_pull_requests_uses_filters_sort_and_direction() {
+        test_support::set_response(Ok(json!([]).to_string()));
+
+        execute_inner(
+            r#"{"owner":"nearai","repo":"ironclaw","state":"all","head":"henry:fix","base":"main","sort":"updated","direction":"asc","page":4,"limit":12}"#,
+            Some(r#"{"capability_id":"github.list_pull_requests"}"#),
+        )
+        .expect("github.list_pull_requests should accept filters");
+
+        let requests = test_support::requests();
+        assert_eq!(
+            requests[0].path,
+            "/repos/nearai/ironclaw/pulls?state=all&per_page=12&head=henry%3Afix&base=main&sort=updated&direction=asc&page=4"
+        );
+    }
+
+    #[test]
+    fn list_pull_requests_rejects_invalid_sort_direction_and_pagination() {
+        for (input, expected_error) in [
+            (
+                r#"{"owner":"nearai","repo":"ironclaw","state":"invalid"}"#,
+                "invalid_state",
+            ),
+            (
+                r#"{"owner":"nearai","repo":"ironclaw","sort":"comments"}"#,
+                "invalid_sort",
+            ),
+            (
+                r#"{"owner":"nearai","repo":"ironclaw","direction":"sideways"}"#,
+                "invalid_direction",
+            ),
+            (
+                r#"{"owner":"nearai","repo":"ironclaw","page":0}"#,
+                "invalid_page",
+            ),
+            (
+                r#"{"owner":"nearai","repo":"ironclaw","limit":0}"#,
+                "invalid_limit",
+            ),
+        ] {
+            test_support::set_response(Ok(json!([]).to_string()));
+
+            assert_eq!(
+                execute_inner(
+                    input,
+                    Some(r#"{"capability_id":"github.list_pull_requests"}"#)
+                )
+                .unwrap_err(),
+                expected_error
+            );
+            assert!(
+                test_support::requests().is_empty(),
+                "validation error {expected_error} should happen before egress"
+            );
+        }
+    }
+
+    #[test]
+    fn merge_pull_request_sends_optional_sha() {
+        test_support::set_response(Ok(json!({"merged": true}).to_string()));
+
+        execute_inner(
+            r#"{"owner":"nearai","repo":"ironclaw","pr_number":42,"merge_method":"squash","sha":"abc123"}"#,
+            Some(r#"{"capability_id":"github.merge_pull_request"}"#),
+        )
+        .expect("github.merge_pull_request should accept sha");
+
+        let requests = test_support::requests();
+        assert_eq!(requests[0].method, "PUT");
+        assert_eq!(requests[0].path, "/repos/nearai/ironclaw/pulls/42/merge");
+        let body: serde_json::Value =
+            serde_json::from_str(requests[0].body.as_deref().unwrap()).unwrap();
+        assert_eq!(body["merge_method"], "squash");
+        assert_eq!(body["sha"], "abc123");
+    }
+
+    #[test]
+    fn create_issue_sends_assignees() {
+        test_support::set_response(Ok(json!({"number": 12}).to_string()));
+
+        execute_inner(
+            r#"{"owner":"nearai","repo":"ironclaw","title":"bug","assignees":["henry"],"labels":["api"]}"#,
+            Some(r#"{"capability_id":"github.create_issue"}"#),
+        )
+        .expect("github.create_issue should accept assignees");
+
+        let requests = test_support::requests();
+        assert_eq!(requests[0].method, "POST");
+        assert_eq!(requests[0].path, "/repos/nearai/ironclaw/issues");
+        let body: serde_json::Value =
+            serde_json::from_str(requests[0].body.as_deref().unwrap()).unwrap();
+        assert_eq!(body["title"], "bug");
+        assert_eq!(body["assignees"], json!(["henry"]));
+        assert_eq!(body["labels"], json!(["api"]));
+    }
+
+    #[test]
+    fn create_issue_rejects_empty_or_too_many_labels_and_assignees() {
+        let too_many_assignees: Vec<String> =
+            (0..101).map(|index| format!("user-{index}")).collect();
+        let too_many_assignees_input = json!({
+            "owner": "nearai",
+            "repo": "ironclaw",
+            "title": "bug",
+            "assignees": too_many_assignees,
+        })
+        .to_string();
+
+        for (input, expected_error) in [
+            (
+                r#"{"owner":"nearai","repo":"ironclaw","title":"bug","labels":[""]}"#.to_string(),
+                "Invalid labels: values cannot be empty",
+            ),
+            (
+                r#"{"owner":"nearai","repo":"ironclaw","title":"bug","assignees":[""]}"#
+                    .to_string(),
+                "Invalid assignees: values cannot be empty",
+            ),
+            (
+                too_many_assignees_input,
+                "Invalid assignees: at most 100 values are allowed",
+            ),
+        ] {
+            test_support::set_response(Ok(json!({"number": 12}).to_string()));
+
+            assert_eq!(
+                execute_inner(&input, Some(r#"{"capability_id":"github.create_issue"}"#))
+                    .unwrap_err(),
+                expected_error
+            );
+            assert!(
+                test_support::requests().is_empty(),
+                "validation error {expected_error} should happen before egress"
+            );
+        }
     }
 
     #[test]
@@ -343,6 +510,58 @@ mod tests {
             assert_eq!(requests[0].method, "GET");
             assert_eq!(requests[0].body, None);
             assert_eq!(requests[0].path, "/user/repos?per_page=2");
+        }
+    }
+
+    #[test]
+    fn list_repos_appends_type_for_authenticated_user() {
+        test_support::set_response(Ok(json!([]).to_string()));
+
+        execute_inner(
+            r#"{"username":"@me","type":"member","limit":2}"#,
+            Some(r#"{"capability_id":"github.list_repos"}"#),
+        )
+        .expect("github.list_repos should accept type");
+
+        let requests = test_support::requests();
+        assert_eq!(requests[0].path, "/user/repos?per_page=2&type=member");
+    }
+
+    #[test]
+    fn list_repos_rejects_invalid_page_or_limit() {
+        for (input, expected_error) in [
+            (r#"{"page":0}"#, "invalid_page"),
+            (r#"{"limit":0}"#, "invalid_limit"),
+        ] {
+            test_support::set_response(Ok(json!([]).to_string()));
+
+            assert_eq!(
+                execute_inner(input, Some(r#"{"capability_id":"github.list_repos"}"#)).unwrap_err(),
+                expected_error
+            );
+            assert!(
+                test_support::requests().is_empty(),
+                "validation error {expected_error} should happen before egress"
+            );
+        }
+    }
+
+    #[test]
+    fn list_repos_rejects_private_or_public_type_for_named_user() {
+        for input in [
+            r#"{"username":"nearai","type":"public"}"#,
+            r#"{"username":"nearai","type":"private"}"#,
+        ] {
+            test_support::set_response(Ok(json!([]).to_string()));
+
+            assert_eq!(
+                execute_inner(input, Some(r#"{"capability_id":"github.list_repos"}"#)).unwrap_err(),
+                "invalid_type"
+            );
+            assert!(
+                test_support::requests().is_empty(),
+                "invalid named-user repo type should be rejected before egress"
+            );
         }
     }
 
@@ -383,6 +602,45 @@ mod tests {
 
         let requests = test_support::requests();
         assert_eq!(requests[0].path, "/users/nearai/repos?per_page=11&page=2");
+    }
+
+    #[test]
+    fn get_file_content_uses_ref_query() {
+        test_support::set_response(Ok(json!({
+            "path": "src/lib.rs",
+            "encoding": "base64",
+            "content": "Zm4gbWFpbigpIHt9"
+        })
+        .to_string()));
+
+        execute_inner(
+            r#"{"owner":"nearai","repo":"ironclaw","path":"src/lib.rs","ref":"main"}"#,
+            Some(r#"{"capability_id":"github.get_file_content"}"#),
+        )
+        .expect("github.get_file_content should fetch content");
+
+        let requests = test_support::requests();
+        assert_eq!(
+            requests[0].path,
+            "/repos/nearai/ironclaw/contents/src/lib.rs?ref=main"
+        );
+    }
+
+    #[test]
+    fn search_issues_pull_requests_accepts_wider_sort() {
+        test_support::set_response(Ok(json!({"items": []}).to_string()));
+
+        execute_inner(
+            r#"{"repo":"nearai/ironclaw","type":"pr","sort":"reactions-heart","order":"desc","limit":5}"#,
+            Some(r#"{"capability_id":"github.search_issues_pull_requests"}"#),
+        )
+        .expect("github.search_issues_pull_requests should accept GitHub issue-search sort");
+
+        let requests = test_support::requests();
+        assert_eq!(
+            requests[0].path,
+            "/search/issues?q=repo%3Anearai%2Fironclaw%20is%3Apr&per_page=5&sort=reactions-heart&order=desc"
+        );
     }
 
     #[test]

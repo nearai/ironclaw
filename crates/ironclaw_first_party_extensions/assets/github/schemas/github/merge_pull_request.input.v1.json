@@ -47,6 +47,11 @@
         "rebase"
       ],
       "default": "merge"
+    },
+    "sha": {
+      "type": "string",
+      "maxLength": 65536,
+      "description": "Expected pull request HEAD SHA. GitHub refuses the merge if the branch advanced."
     }
   },
   "required": [

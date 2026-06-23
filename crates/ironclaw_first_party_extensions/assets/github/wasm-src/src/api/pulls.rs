@@ -2,10 +2,15 @@ use crate::request::github_request;
 use crate::types::{MergeMethod, PrReviewEvent};
 use crate::validation::*;
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn list_pull_requests(
     owner: &str,
     repo: &str,
     state: Option<&str>,
+    head: Option<&str>,
+    base: Option<&str>,
+    sort: Option<&str>,
+    direction: Option<&str>,
     page: Option<u32>,
     limit: Option<u32>,
 ) -> Result<String, String> {
@@ -15,6 +20,20 @@ pub(crate) fn list_pull_requests(
     let encoded_owner = url_encode_path(owner);
     let encoded_repo = url_encode_path(repo);
     let state = state.unwrap_or("open");
+    match state {
+        "open" | "closed" | "all" => {}
+        _ => return Err("invalid_state".to_string()),
+    }
+    validate_pull_request_sort(sort)?;
+    validate_direction(direction)?;
+    if let Some(head) = head {
+        validate_input_length(head, "head")?;
+    }
+    if let Some(base) = base {
+        validate_input_length(base, "base")?;
+    }
+    validate_page(page)?;
+    validate_limit(limit)?;
     let limit = limit.unwrap_or(30).min(100); // Cap at 100
     let encoded_state = url_encode_query(state);
 
@@ -22,6 +41,22 @@ pub(crate) fn list_pull_requests(
         "/repos/{}/{}/pulls?state={}&per_page={}",
         encoded_owner, encoded_repo, encoded_state, limit
     );
+    if let Some(head) = head {
+        path.push_str("&head=");
+        path.push_str(&url_encode_query(head));
+    }
+    if let Some(base) = base {
+        path.push_str("&base=");
+        path.push_str(&url_encode_query(base));
+    }
+    if let Some(sort) = sort {
+        path.push_str("&sort=");
+        path.push_str(sort);
+    }
+    if let Some(direction) = direction {
+        path.push_str("&direction=");
+        path.push_str(direction);
+    }
     if let Some(p) = page {
         path.push_str(&format!("&page={}", p));
     }
@@ -83,20 +118,25 @@ pub(crate) fn get_pull_request_files(
     owner: &str,
     repo: &str,
     pr_number: u32,
+    page: Option<u32>,
+    limit: Option<u32>,
 ) -> Result<String, String> {
     if !validate_path_segment(owner) || !validate_path_segment(repo) {
         return Err("Invalid owner or repo name".into());
     }
+    validate_page(page)?;
+    validate_limit(limit)?;
     let encoded_owner = url_encode_path(owner);
     let encoded_repo = url_encode_path(repo);
-    github_request(
-        "GET",
-        &format!(
-            "/repos/{}/{}/pulls/{}/files",
-            encoded_owner, encoded_repo, pr_number
-        ),
-        None,
-    )
+    let limit = limit.unwrap_or(30).min(100);
+    let mut path = format!(
+        "/repos/{}/{}/pulls/{}/files?per_page={}",
+        encoded_owner, encoded_repo, pr_number, limit
+    );
+    if let Some(p) = page {
+        path.push_str(&format!("&page={}", p));
+    }
+    github_request("GET", &path, None)
 }
 
 pub(crate) fn create_pr_review(
@@ -214,6 +254,7 @@ pub(crate) fn merge_pull_request(
     commit_title: Option<&str>,
     commit_message: Option<&str>,
     merge_method: Option<MergeMethod>,
+    sha: Option<&str>,
 ) -> Result<String, String> {
     if !validate_path_segment(owner) || !validate_path_segment(repo) {
         return Err("Invalid owner or repo name".into());
@@ -223,6 +264,9 @@ pub(crate) fn merge_pull_request(
     }
     if let Some(v) = commit_message {
         validate_input_length(v, "commit_message")?;
+    }
+    if let Some(v) = sha {
+        validate_input_length(v, "sha")?;
     }
     let method = merge_method.unwrap_or(MergeMethod::Merge);
 
@@ -240,6 +284,9 @@ pub(crate) fn merge_pull_request(
     }
     if let Some(v) = commit_message {
         req_body["commit_message"] = serde_json::json!(v);
+    }
+    if let Some(v) = sha {
+        req_body["sha"] = serde_json::json!(v);
     }
     github_request("PUT", &path, Some(req_body.to_string()))
 }
