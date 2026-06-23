@@ -1950,15 +1950,21 @@ impl WorkflowWorkspaceManager for UnconfiguredWorkflowWorkspaceManager {
 #[cfg(test)]
 mod project_metadata_github_issue_workflow_config_source_tests {
     use super::{
-        ProjectMetadataGithubIssueWorkflowConfigSource, ProjectServiceWorkflowProjectAccess,
-        RuntimeWorkflowWorkspaceManager, git_branch_component,
+        IronClawGithubIssueWorkflowPollerPorts, ProjectMetadataGithubIssueWorkflowConfigSource,
+        ProjectServiceWorkflowProjectAccess, RuntimeWorkflowWorkspaceManager, git_branch_component,
     };
     use async_trait::async_trait;
     use chrono::Utc;
     use ironclaw_github_issue_workflow::{
-        GithubIssueRef, GithubIssueWorkflowConfigSource, GithubIssueWorkflowError,
-        GithubProviderAccountRef, PrepareWorkflowWorkspaceRequest, WorkflowConfigAccessRequest,
-        WorkflowProjectAccess, WorkflowProjectAccessRequest, WorkflowWorkspaceManager,
+        CreateIssueCommentInput, GetAuthenticatedWorkflowActorInput, GithubActorSnapshot,
+        GithubCommentRef, GithubIssueCommentSnapshot, GithubIssueRef, GithubIssueSearchHit,
+        GithubIssueWorkflowConfigSource, GithubIssueWorkflowError, GithubIssueWorkflowPoller,
+        GithubIssueWorkflowPollerBlockKind, GithubIssueWorkflowPollerConfig,
+        GithubIssueWorkflowPort, GithubProviderAccountRef, InMemoryGithubIssueWorkflowRepository,
+        ListIssueCommentsInput, PrepareWorkflowWorkspaceRequest, SearchGithubIssuesInput,
+        StageTurnSubmitter, SubmitStageTurnOutcome, SubmitStageTurnRequest, WorkflowClock,
+        WorkflowConfigAccessRequest, WorkflowProjectAccess, WorkflowProjectAccessRequest,
+        WorkflowWorkerId, WorkflowWorkspaceManager,
     };
     use ironclaw_host_api::{AgentId, ProjectId, TenantId, UserId};
     use ironclaw_product_workflow::{
@@ -1971,6 +1977,7 @@ mod project_metadata_github_issue_workflow_config_source_tests {
     };
     use serde_json::{Value as JsonValue, json};
     use std::sync::{Arc, Mutex};
+    use std::time::Duration;
 
     #[tokio::test]
     async fn project_metadata_config_source_builds_enabled_workflow_config() {
@@ -2111,10 +2118,75 @@ mod project_metadata_github_issue_workflow_config_source_tests {
             .await
             .expect("project access allowed");
 
-        let captured = project_service.captured_get_project();
-        assert_eq!(captured.0.tenant_id.as_str(), "workflow-tenant");
-        assert_eq!(captured.0.user_id.as_str(), "workflow-owner");
-        assert_eq!(captured.1.project_id, "workflow-project");
+        let captured = project_service.captured_get_projects();
+        assert_eq!(captured.len(), 2);
+        for (caller, request) in captured {
+            assert_eq!(caller.tenant_id.as_str(), "workflow-tenant");
+            assert_eq!(caller.user_id.as_str(), "workflow-owner");
+            assert_eq!(request.project_id, "workflow-project");
+        }
+    }
+
+    #[tokio::test]
+    async fn poller_uses_project_service_access_before_github_reads() {
+        let project_service = Arc::new(FakeProjectService::deny_after_get_projects(
+            json!({
+                "github_issue_workflow": {
+                    "enabled": true,
+                    "repositories": [
+                        { "owner": "near", "repo": "ironclaw" }
+                    ]
+                }
+            }),
+            1,
+        ));
+        let source = Arc::new(source_with_service(project_service.clone()));
+        let access = Arc::new(ProjectServiceWorkflowProjectAccess {
+            project_service: project_service.clone(),
+        });
+        let github = Arc::new(CountingGithubPort::default());
+        let poller = GithubIssueWorkflowPoller::new(
+            IronClawGithubIssueWorkflowPollerPorts {
+                clock: Arc::new(TestWorkflowClock),
+                config_source: source,
+                github_port: github.clone(),
+                project_access: access,
+                repository: Arc::new(InMemoryGithubIssueWorkflowRepository::default()),
+                stage_turn_submitter: Arc::new(NoopStageTurnSubmitter),
+                workspace_manager: Arc::new(RuntimeWorkflowWorkspaceManager),
+                worker_id: WorkflowWorkerId::new(),
+            },
+            GithubIssueWorkflowPollerConfig {
+                enabled: true,
+                poll_interval: Duration::from_secs(60),
+                max_repos_per_tick: 10,
+                max_issues_per_repo_per_tick: 10,
+                max_runnable_runs_per_tick: 10,
+                lease_duration: Duration::from_secs(300),
+            },
+            "project-access-caller-level-test",
+        );
+
+        let outcome = poller.tick_once().await.expect("poller tick");
+
+        assert_eq!(outcome.configs_loaded, 1);
+        assert_eq!(outcome.repositories_scanned, 0);
+        assert_eq!(outcome.blocked_configs.len(), 1);
+        assert_eq!(
+            outcome.blocked_configs[0].kind,
+            GithubIssueWorkflowPollerBlockKind::ProjectAccessDenied
+        );
+        assert_eq!(
+            github.search_calls(),
+            0,
+            "GitHub search must not happen before project access succeeds"
+        );
+        let captured = project_service.captured_get_projects();
+        assert_eq!(
+            captured.len(),
+            2,
+            "metadata load and access gate should both use ProjectService"
+        );
     }
 
     #[tokio::test]
@@ -2217,23 +2289,38 @@ mod project_metadata_github_issue_workflow_config_source_tests {
 
     struct FakeProjectService {
         metadata: JsonValue,
-        captured_get_project: Mutex<Option<(ProjectCaller, RebornGetProjectRequest)>>,
+        successful_get_projects_before_denial: Option<usize>,
+        captured_get_projects: Mutex<Vec<(ProjectCaller, RebornGetProjectRequest)>>,
     }
 
     impl FakeProjectService {
         fn new(metadata: JsonValue) -> Self {
             Self {
                 metadata,
-                captured_get_project: Mutex::new(None),
+                successful_get_projects_before_denial: None,
+                captured_get_projects: Mutex::new(Vec::new()),
+            }
+        }
+
+        fn deny_after_get_projects(
+            metadata: JsonValue,
+            successful_get_projects_before_denial: usize,
+        ) -> Self {
+            Self {
+                metadata,
+                successful_get_projects_before_denial: Some(successful_get_projects_before_denial),
+                captured_get_projects: Mutex::new(Vec::new()),
             }
         }
 
         fn captured_get_project(&self) -> (ProjectCaller, RebornGetProjectRequest) {
-            self.captured_get_project
-                .lock()
-                .expect("lock")
-                .clone()
+            self.captured_get_projects()
+                .pop()
                 .expect("get_project captured")
+        }
+
+        fn captured_get_projects(&self) -> Vec<(ProjectCaller, RebornGetProjectRequest)> {
+            self.captured_get_projects.lock().expect("lock").clone()
         }
     }
 
@@ -2260,7 +2347,17 @@ mod project_metadata_github_issue_workflow_config_source_tests {
             caller: ProjectCaller,
             request: RebornGetProjectRequest,
         ) -> Result<RebornProjectResponse, ProjectServiceError> {
-            *self.captured_get_project.lock().expect("lock") = Some((caller, request.clone()));
+            let call_count = {
+                let mut captured = self.captured_get_projects.lock().expect("lock");
+                captured.push((caller, request.clone()));
+                captured.len()
+            };
+            if self
+                .successful_get_projects_before_denial
+                .is_some_and(|allowed| call_count > allowed)
+            {
+                return Err(ProjectServiceError::Denied);
+            }
             Ok(RebornProjectResponse {
                 project: RebornProjectInfo {
                     project_id: request.project_id,
@@ -2323,6 +2420,70 @@ mod project_metadata_github_issue_workflow_config_source_tests {
             _request: RebornRemoveMemberRequest,
         ) -> Result<(), ProjectServiceError> {
             panic!("remove_member is not used by these tests")
+        }
+    }
+
+    #[derive(Default)]
+    struct CountingGithubPort {
+        search_calls: Mutex<usize>,
+    }
+
+    impl CountingGithubPort {
+        fn search_calls(&self) -> usize {
+            *self.search_calls.lock().expect("lock")
+        }
+    }
+
+    #[async_trait]
+    impl GithubIssueWorkflowPort for CountingGithubPort {
+        async fn search_open_bug_issues(
+            &self,
+            _input: SearchGithubIssuesInput,
+        ) -> Result<Vec<GithubIssueSearchHit>, GithubIssueWorkflowError> {
+            *self.search_calls.lock().expect("lock") += 1;
+            Ok(Vec::new())
+        }
+
+        async fn get_authenticated_workflow_actor(
+            &self,
+            _input: GetAuthenticatedWorkflowActorInput,
+        ) -> Result<GithubActorSnapshot, GithubIssueWorkflowError> {
+            panic!("get_authenticated_workflow_actor is not used by this test")
+        }
+
+        async fn list_issue_comments(
+            &self,
+            _input: ListIssueCommentsInput,
+        ) -> Result<Vec<GithubIssueCommentSnapshot>, GithubIssueWorkflowError> {
+            panic!("list_issue_comments is not used by this test")
+        }
+
+        async fn create_issue_comment(
+            &self,
+            _input: CreateIssueCommentInput,
+        ) -> Result<GithubCommentRef, GithubIssueWorkflowError> {
+            panic!("create_issue_comment is not used by this test")
+        }
+    }
+
+    struct NoopStageTurnSubmitter;
+
+    #[async_trait]
+    impl StageTurnSubmitter for NoopStageTurnSubmitter {
+        async fn submit_stage_turn(
+            &self,
+            _request: SubmitStageTurnRequest,
+        ) -> Result<SubmitStageTurnOutcome, GithubIssueWorkflowError> {
+            panic!("submit_stage_turn is not used by this test")
+        }
+    }
+
+    struct TestWorkflowClock;
+
+    #[async_trait]
+    impl WorkflowClock for TestWorkflowClock {
+        fn now(&self) -> chrono::DateTime<Utc> {
+            Utc::now()
         }
     }
 }

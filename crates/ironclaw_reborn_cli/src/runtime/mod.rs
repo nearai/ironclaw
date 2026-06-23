@@ -2313,6 +2313,43 @@ poll_interval_secs = 15
         );
     }
 
+    #[cfg(feature = "github-issue-workflow-beta")]
+    #[test]
+    fn cli_runtime_rejects_secret_shaped_github_issue_workflow_provider_account_env() {
+        let _lock = lock_trigger_env();
+        let mut guards = clear_github_issue_workflow_env();
+        guards.push(EnvGuard::set(
+            "IRONCLAW_GITHUB_ISSUE_WORKFLOW_PROVIDER_ACCOUNT_ID",
+            "ghp_deadbeefdeadbeefdeadbeefdeadbeefdead",
+        ));
+
+        let temp = tempfile::tempdir().expect("tempdir");
+        let reborn_home = temp.path().join("reborn-home");
+        std::fs::create_dir_all(&reborn_home).expect("mkdir");
+        let config = RebornBootConfig::resolve_from_env_parts(
+            Some(reborn_home.into_os_string()),
+            None,
+            None,
+            None,
+        )
+        .expect("boot config");
+
+        let err = match build_runtime_input(&config, RuntimeInputCaller::Run) {
+            Ok(_) => panic!("secret-shaped provider account env must fail"),
+            Err(err) => err,
+        };
+
+        let rendered = err.to_string();
+        assert!(
+            rendered.contains("IRONCLAW_GITHUB_ISSUE_WORKFLOW_PROVIDER_ACCOUNT_ID"),
+            "error must mention env var name, got: {err}"
+        );
+        assert!(
+            rendered.contains("inline secret"),
+            "error must explain secret-shaped value, got: {err}"
+        );
+    }
+
     #[test]
     fn cli_runtime_rejects_invalid_github_issue_workflow_env() {
         let _lock = lock_trigger_env();

@@ -201,6 +201,20 @@ regex_activation_enabled = true
 # # max_connections after reserving capacity for migrations/operator sessions.
 # pool_max_size = 16
 
+# [github_issue_workflow]
+# # Background GitHub issue-to-draft-PR workflow. Requires a binary built with
+# # `--features github-issue-workflow-beta` plus durable production storage.
+# enabled = false
+# # ProductAuth GitHub credential account id. The provider is always `github`;
+# # token values stay in ProductAuth/secret storage, not this config file.
+# # Env override: IRONCLAW_GITHUB_ISSUE_WORKFLOW_PROVIDER_ACCOUNT_ID.
+# provider_account_id = "00000000-0000-0000-0000-000000000000"
+# poll_interval_secs = 60
+# max_repos_per_tick = 20
+# max_issues_per_repo_per_tick = 10
+# max_runnable_runs_per_tick = 10
+# lease_duration_secs = 300
+
 [llm.default]
 # LLM slot selection. `provider_id` references an entry in
 # providers.json (built-in or user-overlay). `model` / `base_url` /
@@ -260,3 +274,23 @@ const PROVIDERS_STUB: &str = r#"[
   }
 ]
 "#;
+
+#[cfg(test)]
+mod tests {
+    use std::path::Path;
+
+    use ironclaw_reborn_config::RebornConfigFile;
+
+    use super::config_stub;
+
+    #[test]
+    fn config_stub_parses_and_documents_github_issue_workflow_account() {
+        let stub = config_stub();
+
+        RebornConfigFile::parse_text(&stub, Path::new("/tmp/reborn-config.toml"))
+            .expect("generated config stub must parse");
+        assert!(stub.contains("# [github_issue_workflow]"));
+        assert!(stub.contains("# provider_account_id = "));
+        assert!(stub.contains("IRONCLAW_GITHUB_ISSUE_WORKFLOW_PROVIDER_ACCOUNT_ID"));
+    }
+}

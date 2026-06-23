@@ -3,6 +3,8 @@ use std::time::Duration;
 use ironclaw_reborn_composition::GithubIssueWorkflowSettings;
 #[cfg(feature = "github-issue-workflow-beta")]
 use ironclaw_reborn_composition::GithubProviderAccountRef;
+#[cfg(feature = "github-issue-workflow-beta")]
+use ironclaw_reborn_config::reject_inline_secret;
 
 use super::RuntimeInputCaller;
 
@@ -71,6 +73,7 @@ fn parse_usize_env(name: &str, raw: String) -> anyhow::Result<usize> {
 
 #[cfg(feature = "github-issue-workflow-beta")]
 fn parse_provider_account_id(source: &str, raw: String) -> anyhow::Result<String> {
+    reject_inline_secret(source.to_string(), &raw)?;
     if raw.trim().is_empty() {
         anyhow::bail!(
             "{source} is set but empty or whitespace-only; either unset it or provide a valid value"
@@ -417,6 +420,29 @@ mod tests {
         assert!(
             err.to_string().contains(PROVIDER_ACCOUNT_ID_ENV),
             "error must mention env var name, got: {err}"
+        );
+    }
+
+    #[cfg(feature = "github-issue-workflow-beta")]
+    #[test]
+    fn github_issue_workflow_provider_account_ref_rejects_secret_shaped_env() {
+        let _lock = lock_trigger_env();
+        let mut guards = clear_workflow_env();
+        guards.push(EnvGuard::set(
+            PROVIDER_ACCOUNT_ID_ENV,
+            "ghp_deadbeefdeadbeefdeadbeefdeadbeefdead",
+        ));
+
+        let err = github_issue_workflow_provider_account_ref(None)
+            .expect_err("secret-shaped provider account env must fail");
+
+        assert!(
+            err.to_string().contains(PROVIDER_ACCOUNT_ID_ENV),
+            "error must mention env var name, got: {err}"
+        );
+        assert!(
+            err.to_string().contains("inline secret"),
+            "error must explain secret-shaped value, got: {err}"
         );
     }
 
