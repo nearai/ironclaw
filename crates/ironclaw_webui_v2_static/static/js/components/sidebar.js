@@ -7,6 +7,7 @@ import { SidebarTraceCredits } from "./sidebar-trace-credits.js";
 
 export function Sidebar({
   threadsState,
+  activeThreadId = threadsState?.activeThreadId,
   theme,
   toggleTheme,
   profile,
@@ -45,7 +46,7 @@ export function Sidebar({
       <div className="mt-3 flex min-h-0 flex-1 flex-col">
         <${SidebarThreads}
           threads=${threadsState.threads}
-          activeThreadId=${threadsState.activeThreadId}
+          activeThreadId=${activeThreadId}
           rebornProjectsEnabled=${rebornProjectsEnabled}
           onSelect=${onSelectThread}
           onDelete=${onDeleteThread}

@@ -60,6 +60,9 @@ export function GatewayLayout({
     });
   const onboardingExempt =
     location.pathname === "/welcome" || location.pathname.startsWith("/settings");
+  const isChatRoute =
+    location.pathname === "/chat" || location.pathname.startsWith("/chat/");
+  const sidebarActiveThreadId = isChatRoute ? threadsState?.activeThreadId : null;
 
   const [paletteOpen, setPaletteOpen] = React.useState(false);
   React.useEffect(() => {
@@ -110,6 +113,7 @@ export function GatewayLayout({
       >
         <${Sidebar}
           threadsState=${threadsState}
+          activeThreadId=${sidebarActiveThreadId}
           theme=${theme}
           toggleTheme=${toggleTheme}
           profile=${profile}
