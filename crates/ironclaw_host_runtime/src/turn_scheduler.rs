@@ -1,14 +1,16 @@
-use std::{error::Error, fmt, panic::AssertUnwindSafe, sync::Arc, time::Duration};
+use std::{
+    collections::HashMap, error::Error, fmt, panic::AssertUnwindSafe, sync::Arc, time::Duration,
+};
 
 use async_trait::async_trait;
 use chrono::Utc;
 use futures_util::FutureExt;
 use ironclaw_turns::{
-    SanitizedFailure, TurnError, TurnRunWake, TurnRunWakeNotifier, TurnRunWakeNotifyError,
-    TurnRunnerId, TurnScope,
+    SanitizedFailure, TurnError, TurnLeaseToken, TurnRunId, TurnRunWake, TurnRunWakeNotifier,
+    TurnRunWakeNotifyError, TurnRunnerId, TurnScope,
     runner::{
         ClaimRunRequest, ClaimedTurnRun, HeartbeatRequest, RecordRunnerFailureRequest,
-        RecoverExpiredLeasesRequest, TurnRunTransitionPort,
+        RecoverExpiredLeasesRequest, RelinquishRunRequest, TurnRunTransitionPort,
     },
 };
 use tokio::{
@@ -16,6 +18,7 @@ use tokio::{
     task::{JoinHandle, JoinSet},
     time::{MissedTickBehavior, interval, sleep},
 };
+use tokio_util::sync::CancellationToken;
 use tracing::Instrument;
 use tracing::debug;
 
@@ -170,10 +173,25 @@ impl TurnRunScheduler {
     }
 
     pub fn start(self) -> TurnRunSchedulerHandle {
-        let (command_tx, command_rx) = mpsc::channel(self.config.wake_channel_capacity());
-        let notifier = Arc::new(SchedulerTurnRunWakeNotifier {
-            command_tx: command_tx.clone(),
-        });
+        let capacity = self.config.wake_channel_capacity();
+        let (notifier, channel) = SchedulerTurnRunWakeNotifier::channel(capacity);
+        self.start_with_channel(notifier, channel)
+    }
+
+    /// Start with a pre-created wake channel (from
+    /// [`SchedulerTurnRunWakeNotifier::channel`]), consuming both the notifier
+    /// and the channel. This is the cycle-breaking entry point used when the
+    /// coordinator needs the notifier before the scheduler starts.
+    pub fn start_with_channel(
+        self,
+        notifier: Arc<SchedulerTurnRunWakeNotifier>,
+        channel: TurnRunWakeChannel,
+    ) -> TurnRunSchedulerHandle {
+        let TurnRunWakeChannel {
+            command_tx,
+            command_rx,
+        } = channel;
+        let shutdown_token = CancellationToken::new();
         let supervisor = tokio::spawn(run_scheduler_loop(
             command_rx,
             command_tx.clone(),
@@ -181,18 +199,58 @@ impl TurnRunScheduler {
             self.executor,
             self.config,
             self.runner_id,
+            shutdown_token.clone(),
         ));
         TurnRunSchedulerHandle {
             notifier,
-            command_tx,
-            supervisor,
+            supervisor: Some(supervisor),
+            shutdown_token,
         }
     }
+}
+
+/// The paired wake-channel bundle (sender + receiver) handed into
+/// [`TurnRunScheduler::start_with_channel`].
+///
+/// Created together with a [`SchedulerTurnRunWakeNotifier`] by
+/// [`SchedulerTurnRunWakeNotifier::channel`] to break the
+/// coordinator↔scheduler build-order cycle: the caller mints both the
+/// notifier and this channel before building the coordinator (so the
+/// coordinator can hold the notifier first), then passes this bundle to
+/// [`TurnRunScheduler::start_with_channel`] to wire the scheduler loop.
+/// Both halves of the underlying mpsc channel are carried here so that
+/// `start_with_channel` can clone the sender for internal re-queuing while
+/// moving the receiver into the loop.
+pub struct TurnRunWakeChannel {
+    command_tx: mpsc::Sender<SchedulerCommand>,
+    command_rx: mpsc::Receiver<SchedulerCommand>,
 }
 
 #[derive(Clone)]
 pub struct SchedulerTurnRunWakeNotifier {
     command_tx: mpsc::Sender<SchedulerCommand>,
+}
+
+impl SchedulerTurnRunWakeNotifier {
+    /// Create a notifier and its paired wake channel before the scheduler is
+    /// started, breaking the coordinator↔scheduler build-order cycle.
+    ///
+    /// The returned notifier can be given to the turn coordinator immediately.
+    /// Pass the channel to [`TurnRunScheduler::start_with_channel`] later to
+    /// wire the scheduler loop.
+    pub fn channel(capacity: usize) -> (Arc<SchedulerTurnRunWakeNotifier>, TurnRunWakeChannel) {
+        let (command_tx, command_rx) = mpsc::channel(capacity.max(1));
+        let notifier = Arc::new(SchedulerTurnRunWakeNotifier {
+            command_tx: command_tx.clone(),
+        });
+        (
+            notifier,
+            TurnRunWakeChannel {
+                command_tx,
+                command_rx,
+            },
+        )
+    }
 }
 
 impl fmt::Debug for SchedulerTurnRunWakeNotifier {
@@ -211,8 +269,17 @@ impl TurnRunWakeNotifier for SchedulerTurnRunWakeNotifier {
 
 pub struct TurnRunSchedulerHandle {
     notifier: Arc<SchedulerTurnRunWakeNotifier>,
-    command_tx: mpsc::Sender<SchedulerCommand>,
-    supervisor: JoinHandle<()>,
+    /// `Option` so that `shutdown()` can `take()` the handle without a
+    /// partial move, which would be disallowed when `Drop` is implemented.
+    /// `None` only after `shutdown()` completes or if construction somehow
+    /// produced an absent supervisor (not possible via the public API).
+    supervisor: Option<JoinHandle<()>>,
+    /// Cancellation token for shutdown signalling.  Cancelling this token
+    /// bypasses the bounded command queue entirely, so shutdown can never
+    /// block even when the queue is full or the loop is parked in a
+    /// long `claim_next_run` await.  Both `shutdown()` (async graceful path)
+    /// and `Drop` (sync safety-net path) call `cancel()` on this token.
+    shutdown_token: CancellationToken,
 }
 
 impl TurnRunSchedulerHandle {
@@ -220,9 +287,44 @@ impl TurnRunSchedulerHandle {
         Arc::clone(&self.notifier)
     }
 
-    pub async fn shutdown(self) {
-        let _ = self.command_tx.send(SchedulerCommand::Shutdown).await;
-        let _ = self.supervisor.await;
+    pub fn is_stopped(&self) -> bool {
+        self.supervisor.as_ref().is_none_or(|s| s.is_finished())
+    }
+
+    /// Graceful shutdown: signal the scheduler loop to stop via the
+    /// cancellation token (bypasses the command queue entirely — no
+    /// back-pressure, no loss), then await the supervisor task.
+    ///
+    /// If the handle is dropped without calling `shutdown()` — for example
+    /// when a build function returns `Err` after the scheduler has started —
+    /// the `Drop` impl cancels the token synchronously instead.
+    pub async fn shutdown(mut self) {
+        self.shutdown_token.cancel();
+        if let Some(supervisor) = self.supervisor.take() {
+            let _ = supervisor.await;
+        }
+    }
+}
+
+impl Drop for TurnRunSchedulerHandle {
+    fn drop(&mut self) {
+        // Safety net for error paths: if `shutdown()` was not called (e.g. a
+        // build function failed after starting the scheduler), cancel the token
+        // so the background task terminates instead of running indefinitely.
+        //
+        // `cancel()` is synchronous, idempotent, and infallible — it never
+        // blocks and never loses the signal regardless of command-queue state.
+        // The graceful `shutdown()` path awaits task completion and is preferred
+        // wherever an async context is available; Drop is the fallback for
+        // synchronous or error-path drops.
+        //
+        // The supervisor `JoinHandle` is `Option` so that `shutdown()` can
+        // `take()` it (avoiding a partial-move from a `Drop`-implementing type).
+        // When Drop fires here the `JoinHandle` — if not already taken by
+        // `shutdown()` — is dropped, which detaches the tokio task.  The
+        // token cancellation above causes the detached task to self-terminate
+        // on its next `select!` iteration.
+        self.shutdown_token.cancel();
     }
 }
 
@@ -231,7 +333,13 @@ enum SchedulerCommand {
     Wake(TurnRunWake),
     Drain,
     RetryDrain,
-    Shutdown,
+}
+
+/// Identity fields needed to relinquish a claimed run back to Queued.
+struct RelinquishIdentity {
+    run_id: TurnRunId,
+    runner_id: TurnRunnerId,
+    lease_token: TurnLeaseToken,
 }
 
 struct SchedulerDrainContext {
@@ -243,6 +351,35 @@ struct SchedulerDrainContext {
     runner_id: TurnRunnerId,
 }
 
+async fn shutdown_scheduler(
+    context: &SchedulerDrainContext,
+    executor_tasks: &mut JoinSet<TurnRunId>,
+    active_runs: HashMap<TurnRunId, RelinquishIdentity>,
+) {
+    // Abort all in-flight tasks first so there is no race between them
+    // completing a transition and our relinquish.
+    executor_tasks.shutdown().await;
+    // Best-effort relinquish: return each aborted run to Queued so a
+    // restart can pick it up instead of letting lease expiry mark it Failed.
+    for (_run_id, identity) in active_runs {
+        let result = context
+            .transitions
+            .relinquish_run(RelinquishRunRequest {
+                run_id: identity.run_id,
+                runner_id: identity.runner_id,
+                lease_token: identity.lease_token,
+            })
+            .await;
+        if let Err(error) = result {
+            debug!(
+                run_id = %identity.run_id,
+                error = %error,
+                "failed to relinquish in-flight run during scheduler shutdown; run will rely on lease recovery"
+            );
+        }
+    }
+}
+
 async fn run_scheduler_loop(
     mut command_rx: mpsc::Receiver<SchedulerCommand>,
     command_tx: mpsc::Sender<SchedulerCommand>,
@@ -250,9 +387,12 @@ async fn run_scheduler_loop(
     executor: Arc<dyn TurnRunExecutor>,
     config: TurnRunSchedulerConfig,
     runner_id: TurnRunnerId,
+    shutdown_token: CancellationToken,
 ) {
     let semaphore = Arc::new(Semaphore::new(config.max_concurrent_runs()));
-    let mut executor_tasks = JoinSet::new();
+    let mut executor_tasks: JoinSet<TurnRunId> = JoinSet::new();
+    // Tracks every in-flight run so we can relinquish on shutdown.
+    let mut active_runs: HashMap<TurnRunId, RelinquishIdentity> = HashMap::new();
     let mut poll_tick = interval(config.poll_interval());
     poll_tick.set_missed_tick_behavior(MissedTickBehavior::Delay);
     let mut recovery_tick = interval(config.lease_recovery_interval());
@@ -269,6 +409,12 @@ async fn run_scheduler_loop(
 
     loop {
         tokio::select! {
+            // CancellationToken arm: bypasses the command queue entirely so
+            // shutdown is never blocked by back-pressure or a parked await.
+            _ = shutdown_token.cancelled() => {
+                shutdown_scheduler(&context, &mut executor_tasks, active_runs).await;
+                break;
+            }
             Some(command) = command_rx.recv() => {
                 match command {
                     SchedulerCommand::Wake(wake) => {
@@ -279,6 +425,8 @@ async fn run_scheduler_loop(
                                 &context,
                                 Some(wake.scope),
                                 &mut executor_tasks,
+                                &mut active_runs,
+                                &shutdown_token,
                             ).await
                         {
                             claim_retry_pending = true;
@@ -292,6 +440,8 @@ async fn run_scheduler_loop(
                                 &context,
                                 None,
                                 &mut executor_tasks,
+                                &mut active_runs,
+                                &shutdown_token,
                             ).await
                         {
                             claim_retry_pending = true;
@@ -307,6 +457,8 @@ async fn run_scheduler_loop(
                                 &context,
                                 None,
                                 &mut executor_tasks,
+                                &mut active_runs,
+                                &shutdown_token,
                             ).await
                         {
                             claim_retry_pending = true;
@@ -322,6 +474,8 @@ async fn run_scheduler_loop(
                             &context,
                             None,
                             &mut executor_tasks,
+                            &mut active_runs,
+                            &shutdown_token,
                         ).await {
                             claim_retry_pending = true;
                             schedule_drain_after(
@@ -330,10 +484,6 @@ async fn run_scheduler_loop(
                             );
                         }
                     }
-                    SchedulerCommand::Shutdown => {
-                        executor_tasks.shutdown().await;
-                        break;
-                    },
                 }
             }
             _ = poll_tick.tick() => {
@@ -342,6 +492,8 @@ async fn run_scheduler_loop(
                         &context,
                         None,
                         &mut executor_tasks,
+                        &mut active_runs,
+                        &shutdown_token,
                     ).await
                 {
                     claim_retry_pending = true;
@@ -352,8 +504,13 @@ async fn run_scheduler_loop(
                 }
             }
             Some(result) = executor_tasks.join_next(), if !executor_tasks.is_empty() => {
-                if let Err(error) = result {
-                    debug!(error = %error, "turn run scheduler executor supervisor task failed");
+                match result {
+                    Ok(completed_run_id) => {
+                        active_runs.remove(&completed_run_id);
+                    }
+                    Err(error) => {
+                        debug!(error = %error, "turn run scheduler executor supervisor task failed");
+                    }
                 }
             }
             _ = recovery_tick.tick() => {
@@ -363,12 +520,35 @@ async fn run_scheduler_loop(
     }
 }
 
+/// Drains the queue of pending runs, spawning executor tasks until the semaphore
+/// is exhausted, no run is available, or a claim error occurs.
+///
+/// Returns `true` if a claim error occurred (caller should schedule a retry),
+/// `false` otherwise.
+///
+/// The `shutdown_token` is checked at the TOP of each iteration — before
+/// starting a new `claim_next_run` call — so that any in-flight claim always
+/// finishes and its result is properly inserted into `active_runs` (or handled
+/// as an error) before we bail out.  This shape is leak-proof: a claimed-but-
+/// untracked run cannot occur because we never abandon an in-progress claim;
+/// we only skip starting a NEW claim once cancellation has been observed.
 async fn drain_queued_runs(
     context: &SchedulerDrainContext,
     scope_filter: Option<TurnScope>,
-    executor_tasks: &mut JoinSet<()>,
+    executor_tasks: &mut JoinSet<TurnRunId>,
+    active_runs: &mut HashMap<TurnRunId, RelinquishIdentity>,
+    shutdown_token: &CancellationToken,
 ) -> bool {
     loop {
+        // Check for cancellation before starting a new claim.  We do this at
+        // the top of the loop (not inside the claim await) so that any claim
+        // already in progress always completes and is tracked in active_runs
+        // before we exit.  This prevents a "claimed in store but not tracked"
+        // leak where the shutdown drain would never relinquish the run.
+        if shutdown_token.is_cancelled() {
+            return false;
+        }
+
         let Ok(permit) = Arc::clone(&context.semaphore).try_acquire_owned() else {
             return false;
         };
@@ -382,6 +562,15 @@ async fn drain_queued_runs(
             .await;
         match claim {
             Ok(Some(claimed)) => {
+                let run_id = claimed.state.run_id;
+                active_runs.insert(
+                    run_id,
+                    RelinquishIdentity {
+                        run_id,
+                        runner_id: claimed.runner_id,
+                        lease_token: claimed.lease_token,
+                    },
+                );
                 spawn_executor_task(
                     claimed,
                     Arc::clone(&context.transitions),
@@ -413,7 +602,7 @@ fn spawn_executor_task(
     command_tx: mpsc::Sender<SchedulerCommand>,
     permit: tokio::sync::OwnedSemaphorePermit,
     runner_heartbeat_interval: Duration,
-    executor_tasks: &mut JoinSet<()>,
+    executor_tasks: &mut JoinSet<TurnRunId>,
 ) {
     // Tag every tracing event emitted while this run executes with its
     // `thread_id` + `run_id` so the operator Logs panel's scoped (thread/run)
@@ -425,14 +614,31 @@ fn spawn_executor_task(
         thread_id = %claimed.state.scope.thread_id,
         run_id = %claimed.state.run_id,
     );
+    // Capture these before `claimed` is moved into the async block so the
+    // "turn run started" event can emit them as explicit fields. This makes
+    // the event self-contained and allows test layers to find them without
+    // relying on span registration timing (which can be racy under parallel
+    // test execution when using `tracing::dispatcher::set_default`).
+    let recovery_thread_id = claimed.state.scope.thread_id.clone();
+    let recovery_run_id_for_start = claimed.state.run_id;
     executor_tasks.spawn(
         async move {
             let recovery_run_id = claimed.state.run_id;
             let recovery_runner_id = claimed.runner_id;
             let recovery_lease_token = claimed.lease_token;
-            tracing::debug!("turn run started");
+            tracing::debug!(
+                thread_id = %recovery_thread_id,
+                run_id = %recovery_run_id_for_start,
+                "turn run started",
+            );
             let mut heartbeat_tick = interval(runner_heartbeat_interval);
             heartbeat_tick.set_missed_tick_behavior(MissedTickBehavior::Delay);
+            // Consume the immediate first tick so the heartbeat loop never fires
+            // at t=0. The run's lease was just issued and valid; a t=0 heartbeat
+            // would fail on CancelRequested status (heartbeat only accepts Running)
+            // and prematurely terminate the executor task before the driver has a
+            // chance to observe cancellation and write its reply to thread history.
+            heartbeat_tick.tick().await;
             let executor_result =
                 AssertUnwindSafe(executor.execute_claimed_run(claimed, Arc::clone(&transitions)))
                     .catch_unwind();
@@ -456,6 +662,7 @@ fn spawn_executor_task(
                             recovery_run_id,
                             recovery_runner_id,
                             recovery_lease_token,
+                            runner_heartbeat_interval,
                         ).await {
                             break ExecutorTaskOutcome::TerminalFailure(scheduler_failure(
                                 "scheduler_heartbeat_failed",
@@ -485,6 +692,8 @@ fn spawn_executor_task(
             tracing::debug!("turn run finished");
             drop(permit);
             let _ = command_tx.send(SchedulerCommand::Drain).await;
+            // Return the run_id so the scheduler loop can remove it from active_runs.
+            recovery_run_id
         }
         .instrument(run_span),
     );
@@ -495,19 +704,29 @@ async fn heartbeat_claimed_run(
     run_id: ironclaw_turns::TurnRunId,
     runner_id: ironclaw_turns::TurnRunnerId,
     lease_token: ironclaw_turns::TurnLeaseToken,
+    timeout_after: Duration,
 ) -> bool {
-    let result = transitions
-        .heartbeat(HeartbeatRequest {
-            run_id,
-            runner_id,
-            lease_token,
-        })
-        .await;
-    if let Err(error) = result {
-        debug!(error = %error, "turn run scheduler heartbeat failed");
-        return false;
+    let heartbeat = transitions.heartbeat(HeartbeatRequest {
+        run_id,
+        runner_id,
+        lease_token,
+    });
+    let result = tokio::time::timeout(timeout_after, heartbeat).await;
+    match result {
+        Ok(Ok(_)) => true,
+        Ok(Err(error)) => {
+            debug!(error = %error, "turn run scheduler heartbeat failed");
+            false
+        }
+        Err(_) => {
+            debug!(
+                run_id = %run_id,
+                timeout_after = ?timeout_after,
+                "turn run scheduler heartbeat timed out"
+            );
+            false
+        }
     }
-    true
 }
 
 async fn record_terminal_failure(
@@ -564,3 +783,6 @@ fn schedule_drain_after(command_tx: mpsc::Sender<SchedulerCommand>, delay: Durat
         let _ = command_tx.send(SchedulerCommand::RetryDrain).await;
     });
 }
+#[cfg(test)]
+#[path = "turn_scheduler/tests.rs"]
+mod tests;

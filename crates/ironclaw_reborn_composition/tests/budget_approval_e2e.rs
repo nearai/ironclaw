@@ -36,6 +36,26 @@ use ironclaw_turns::run_profile::ModelProfileId;
 use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
 
+async fn wait_for_pending_gate_count(
+    store: &dyn ironclaw_resources::BudgetGateStore,
+    scope: &ironclaw_host_api::ResourceScope,
+    expected: usize,
+    context: &str,
+) -> Vec<ironclaw_resources::BudgetApprovalGate> {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+
+    let pending = loop {
+        let pending = store.list_pending(scope).expect("list pending");
+        if pending.len() == expected || tokio::time::Instant::now() >= deadline {
+            break pending;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    };
+
+    assert_eq!(pending.len(), expected, "{context}; got {pending:?}");
+    pending
+}
+
 fn local_dev_runtime_policy() -> EffectiveRuntimePolicy {
     EffectiveRuntimePolicy {
         deployment: DeploymentMode::LocalSingleUser,
@@ -120,8 +140,12 @@ async fn build_runtime_with_pause_inducing_setup(
 async fn pump_until_pending_gate(
     runtime: &RebornRuntime,
     gateway: &BudgetTestGateway,
-) -> ironclaw_resources::BudgetGateId {
+) -> (
+    ironclaw_resources::BudgetGateId,
+    ironclaw_host_api::ResourceScope,
+) {
     let conversation = runtime.new_conversation().await.expect("conversation");
+    let scope = runtime.budget_gate_scope_for_conversation(&conversation);
     let outcome = tokio::time::timeout(
         Duration::from_secs(3),
         runtime.send_user_message(&conversation, "first try"),
@@ -136,15 +160,14 @@ async fn pump_until_pending_gate(
     );
 
     let store = runtime.budget_gate_store().expect("gate store");
-    let pending = store
-        .list_pending(&ironclaw_host_api::ResourceScope::system())
-        .expect("list pending");
-    assert_eq!(
-        pending.len(),
+    let pending = wait_for_pending_gate_count(
+        store.as_ref(),
+        &scope,
         1,
-        "exactly one pending gate expected after pause; got {pending:?}"
-    );
-    pending[0].id
+        "exactly one pending gate expected after pause",
+    )
+    .await;
+    (pending[0].id, scope)
 }
 
 /// F3: pause → user approves with an increased limit → retry succeeds.
@@ -154,7 +177,7 @@ async fn f3_approval_with_increased_limit_unblocks_retry() {
     let (runtime, gateway) =
         build_runtime_with_pause_inducing_setup("f3", root.path().to_path_buf()).await;
 
-    let gate_id = pump_until_pending_gate(&runtime, &gateway).await;
+    let (gate_id, gate_scope) = pump_until_pending_gate(&runtime, &gateway).await;
 
     // Resolve: approve with a much larger cap so the next reservation
     // succeeds.
@@ -168,7 +191,7 @@ async fn f3_approval_with_increased_limit_unblocks_retry() {
     };
     let resolved = store
         .resolve(
-            &ironclaw_host_api::ResourceScope::system(),
+            &gate_scope,
             gate_id,
             BudgetGateOutcome::Approve {
                 increased_limit: increased.clone(),
@@ -183,7 +206,7 @@ async fn f3_approval_with_increased_limit_unblocks_retry() {
     // through a gate-resolution handler; the test-only accessor mimics
     // that surface.
     runtime
-        .apply_resolved_budget_gate(&ironclaw_host_api::ResourceScope::system(), gate_id)
+        .apply_resolved_budget_gate(&gate_scope, gate_id)
         .expect("apply resolved gate");
 
     // Now retry. With the larger cap in place, the reservation
@@ -213,13 +236,13 @@ async fn f4_cancel_keeps_budget_blocked_on_retry() {
     let root = tempfile::tempdir().unwrap();
     let (runtime, gateway) =
         build_runtime_with_pause_inducing_setup("f4", root.path().to_path_buf()).await;
-    let gate_id = pump_until_pending_gate(&runtime, &gateway).await;
+    let (gate_id, gate_scope) = pump_until_pending_gate(&runtime, &gateway).await;
 
     let store = runtime.budget_gate_store().expect("gate store");
     let canceller = ironclaw_host_api::UserId::new("f4-canceller").unwrap();
     let resolved = store
         .resolve(
-            &ironclaw_host_api::ResourceScope::system(),
+            &gate_scope,
             gate_id,
             BudgetGateOutcome::Cancel { by: canceller },
             chrono::Utc::now(),
@@ -233,7 +256,7 @@ async fn f4_cancel_keeps_budget_blocked_on_retry() {
     // Applying a cancel is a no-op on the governor (the limit stays
     // tight); calling the helper just confirms it doesn't panic.
     runtime
-        .apply_resolved_budget_gate(&ironclaw_host_api::ResourceScope::system(), gate_id)
+        .apply_resolved_budget_gate(&gate_scope, gate_id)
         .expect("apply resolved gate (cancel is a no-op)");
 
     // Retry — the same pause threshold fires, gateway still untouched.
@@ -260,7 +283,7 @@ async fn f5_expiry_marks_gate_terminal_and_keeps_budget_blocked() {
     let root = tempfile::tempdir().unwrap();
     let (runtime, gateway) =
         build_runtime_with_pause_inducing_setup("f5", root.path().to_path_buf()).await;
-    let gate_id = pump_until_pending_gate(&runtime, &gateway).await;
+    let (gate_id, gate_scope) = pump_until_pending_gate(&runtime, &gateway).await;
 
     let store = runtime.budget_gate_store().expect("gate store");
     // Expire every pending gate whose `expires_at` is at or before
@@ -268,7 +291,7 @@ async fn f5_expiry_marks_gate_terminal_and_keeps_budget_blocked() {
     // without us having to sleep or inject a clock.
     let cutoff = chrono::Utc::now() + chrono::Duration::days(365);
     let expired = store
-        .expire_pending_older_than(&ironclaw_host_api::ResourceScope::system(), cutoff)
+        .expire_pending_older_than(&gate_scope, cutoff)
         .expect("expire pending");
     assert_eq!(expired.len(), 1, "exactly one gate should have expired");
     assert!(matches!(
@@ -279,9 +302,7 @@ async fn f5_expiry_marks_gate_terminal_and_keeps_budget_blocked() {
 
     // Confirm the expired gate is no longer pending — before doing
     // a retry that would itself open a fresh gate.
-    let pending_after_expiry = store
-        .list_pending(&ironclaw_host_api::ResourceScope::system())
-        .expect("list pending");
+    let pending_after_expiry = store.list_pending(&gate_scope).expect("list pending");
     assert!(
         pending_after_expiry.iter().all(|g| g.id != gate_id),
         "the expired gate must drop out of the pending list — got {pending_after_expiry:?}"
@@ -322,14 +343,17 @@ async fn gate_opened_event_carries_id_that_matches_persisted_gate() {
         .expect("broadcast sink");
     let mut subscriber = broadcast.subscribe();
 
-    let _real_id = pump_until_pending_gate(&runtime, &gateway).await;
+    let (_real_id, gate_scope) = pump_until_pending_gate(&runtime, &gateway).await;
 
     // The pending gate's id (from the store).
     let store = runtime.budget_gate_store().expect("gate store");
-    let pending = store
-        .list_pending(&ironclaw_host_api::ResourceScope::system())
-        .expect("list pending");
-    assert_eq!(pending.len(), 1, "exactly one pending gate after pause");
+    let pending = wait_for_pending_gate_count(
+        store.as_ref(),
+        &gate_scope,
+        1,
+        "exactly one pending gate after pause",
+    )
+    .await;
     let persisted_id = pending[0].id;
 
     // Drain the broadcast and find the GateOpened event.
@@ -368,7 +392,7 @@ async fn pause_in_distinct_runs_produces_distinct_pending_gates() {
         build_runtime_with_pause_inducing_setup("dup", root.path().to_path_buf()).await;
 
     // First send → first gate.
-    let _gate_a = pump_until_pending_gate(&runtime, &gateway).await;
+    let (_gate_a, gate_scope) = pump_until_pending_gate(&runtime, &gateway).await;
 
     // Second send (fresh conversation, fresh run) → second gate.
     let conversation = runtime.new_conversation().await.expect("conversation");
@@ -380,14 +404,14 @@ async fn pause_in_distinct_runs_produces_distinct_pending_gates() {
     .expect("send finishes");
 
     let store = runtime.budget_gate_store().expect("gate store");
-    let pending = store
-        .list_pending(&ironclaw_host_api::ResourceScope::system())
-        .expect("list pending");
-    assert_eq!(
-        pending.len(),
+    let pending = wait_for_pending_gate_count(
+        store.as_ref(),
+        &gate_scope,
         2,
-        "two distinct paused runs must produce two pending gates"
-    );
+        "two distinct paused runs must produce two pending gates",
+    )
+    .await;
+    assert_eq!(pending.len(), 2);
     let _ = Decimal::ZERO; // keep the rust_decimal import live across compile shapes
 
     runtime.shutdown().await.expect("shutdown");

@@ -330,7 +330,7 @@ async fn qa_subagent_capability_smoke_uses_child_run() {
             expected_tool_results: Vec::new(),
         },
     ]);
-    let mut harness = RebornBinaryE2EHarness::with_harness_blocked_evidence_unscoped_worker(
+    let mut harness = RebornBinaryE2EHarness::with_harness_blocked_evidence(
         "room-qa-subagent",
         model_gateway,
         RecordingTestCapabilityPort::echo_with_spawn_subagent(),

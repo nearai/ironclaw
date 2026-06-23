@@ -573,6 +573,51 @@ impl TriggerRepository for LibSqlTriggerRepository {
         }
     }
 
+    async fn set_scoped_trigger_state(
+        &self,
+        tenant_id: TenantId,
+        creator_user_id: UserId,
+        agent_id: Option<AgentId>,
+        project_id: Option<ProjectId>,
+        trigger_id: TriggerId,
+        new_state: TriggerState,
+    ) -> Result<Option<TriggerRecord>, TriggerError> {
+        crate::validate_user_settable_trigger_state(new_state)?;
+        let conn = self.connect().await?;
+        let agent_id = agent_id.as_ref().map(AgentId::as_str);
+        let project_id = project_id.as_ref().map(ProjectId::as_str);
+        let mut rows = conn
+            .query(
+                &format!(
+                    "UPDATE {TRIGGER_TABLE}
+                     SET state = ?6
+                     WHERE tenant_id = ?1
+                       AND creator_user_id = ?2
+                       AND agent_id IS ?3
+                       AND project_id IS ?4
+                       AND trigger_id = ?5
+                       AND state <> ?7
+                     RETURNING {TRIGGER_COLUMNS}"
+                ),
+                params![
+                    tenant_id.as_str(),
+                    creator_user_id.as_str(),
+                    agent_id,
+                    project_id,
+                    trigger_id.to_string(),
+                    crate::state_text_codec(new_state),
+                    crate::state_text_codec(TriggerState::Completed),
+                ],
+            )
+            .await
+            .map_err(|error| backend_error("set scoped trigger state", error))?;
+        match rows.next().await {
+            Ok(Some(row)) => Ok(Some(row_to_record(&row)?)),
+            Ok(None) => Ok(None),
+            Err(error) => Err(backend_error("read scoped trigger state row", error)),
+        }
+    }
+
     async fn list_due_triggers(
         &self,
         now: Timestamp,
@@ -829,6 +874,7 @@ impl TriggerRepository for LibSqlTriggerRepository {
         if matches!(record.schedule, TriggerSchedule::Cron { .. }) && record.next_run_at > fire_slot
         {
             return Err(TriggerError::InvalidRecord {
+                kind: crate::TriggerRecordValidationKind::Other,
                 reason: "retryable fire failure must leave next_run_at at or before the failed fire slot"
                     .to_string(),
             });
@@ -1816,6 +1862,7 @@ fn opt_turn_run_id(value: Option<&TurnRunId>) -> libsql::Value {
 #[cfg(feature = "libsql")]
 fn invalid_record(field: &str, reason: impl Into<String>) -> TriggerError {
     TriggerError::InvalidRecord {
+        kind: crate::TriggerRecordValidationKind::Other,
         reason: format!("{field}: {}", reason.into()),
     }
 }

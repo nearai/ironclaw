@@ -20,6 +20,7 @@ MCP_TOOL_NAME = "mock_mcp_mock_search"
 MCP_ACCESS_TOKEN_SECRET = "mcp_mock_mcp_access_token"
 MCP_CLIENT_SECRET = "mcp_mock_mcp_client_secret"
 MCP_REFRESH_TOKEN_SECRET = "mcp_mock_mcp_access_token_refresh_token"
+EMULATE_GMAIL_SUBJECT = "Emulate seeded unread"
 
 
 def _extract_state(auth_url: str) -> str:
@@ -102,36 +103,26 @@ async def _approve_pending_request(base_url: str, thread_id: str, request_id: st
     )
 
 
-async def _wait_for_gmail_tool_call(base_url: str, thread_id: str, timeout: float = 30.0) -> dict:
-    approved_request_ids = set()
-    for _ in range(int(timeout * 2)):
-        response = await api_get(
-            base_url,
-            f"/api/chat/history?thread_id={thread_id}",
-            timeout=15,
-        )
-        response.raise_for_status()
-        history = response.json()
+def _tool_result_contains_fragment(
+    tool_call: dict,
+    result_fragment: str | None,
+) -> bool:
+    if result_fragment is None:
+        return True
 
-        pending = history.get("pending_gate")
-        if pending and pending["request_id"] not in approved_request_ids:
-            await _approve_pending_request(base_url, thread_id, pending["request_id"])
-            approved_request_ids.add(pending["request_id"])
-
-        for turn in history.get("turns", []):
-            for tool_call in turn.get("tool_calls", []):
-                if tool_call.get("name") == "gmail":
-                    return history
-
-        await asyncio.sleep(0.5)
-
-    raise AssertionError(f"Timed out waiting for gmail tool call in thread {thread_id}")
+    result_preview = tool_call.get("result_preview")
+    result_full = tool_call.get("result")
+    result_preview_text = "" if result_preview is None else str(result_preview)
+    result_full_text = "" if result_full is None else str(result_full)
+    return result_fragment in result_preview_text or result_fragment in result_full_text
 
 
-async def _wait_for_tool_call(
+async def _wait_for_tool_result(
     base_url: str,
     thread_id: str,
     tool_name: str,
+    *,
+    result_fragment: str | None = None,
     timeout: float = 30.0,
 ) -> dict:
     approved_request_ids = set()
@@ -151,12 +142,37 @@ async def _wait_for_tool_call(
 
         for turn in history.get("turns", []):
             for tool_call in turn.get("tool_calls", []):
-                if tool_call.get("name") == tool_name:
-                    return history
+                if tool_call.get("name") != tool_name:
+                    continue
+                if not tool_call.get("has_result"):
+                    continue
+                if _tool_result_contains_fragment(tool_call, result_fragment):
+                    return tool_call
 
         await asyncio.sleep(0.5)
 
-    raise AssertionError(f"Timed out waiting for {tool_name} tool call in thread {thread_id}")
+    raise AssertionError(
+        f"Timed out waiting for {tool_name} tool result in thread {thread_id} "
+        f"containing {result_fragment!r}"
+    )
+
+
+def test_tool_result_fragment_matches_full_result_when_preview_differs():
+    tool_call = {
+        "result_preview": "preview without expected content",
+        "result": {"message": EMULATE_GMAIL_SUBJECT},
+    }
+
+    assert _tool_result_contains_fragment(tool_call, EMULATE_GMAIL_SUBJECT)
+
+
+def test_tool_result_fragment_matches_preview_result():
+    tool_call = {
+        "result_preview": f"subject: {EMULATE_GMAIL_SUBJECT}",
+        "result": "",
+    }
+
+    assert _tool_result_contains_fragment(tool_call, EMULATE_GMAIL_SUBJECT)
 
 
 async def _wait_for_refresh_request(mock_base_url: str, timeout: float = 20.0) -> dict:
@@ -168,10 +184,10 @@ async def _wait_for_refresh_request(mock_base_url: str, timeout: float = 20.0) -
     raise AssertionError("Timed out waiting for exactly one OAuth refresh request")
 
 
-async def test_hosted_gmail_oauth_refresh_uses_proxy(hosted_oauth_refresh_server):
-    server = hosted_oauth_refresh_server["base_url"]
-    db_path = hosted_oauth_refresh_server["db_path"]
-    mock_base_url = hosted_oauth_refresh_server["mock_llm_url"]
+async def test_hosted_gmail_oauth_refresh_uses_proxy(hosted_google_oauth_refresh_server):
+    server = hosted_google_oauth_refresh_server["base_url"]
+    db_path = hosted_google_oauth_refresh_server["db_path"]
+    mock_base_url = hosted_google_oauth_refresh_server["mock_llm_url"]
 
     install_response = await api_post(
         server,
@@ -236,12 +252,12 @@ async def test_hosted_gmail_oauth_refresh_uses_proxy(hosted_oauth_refresh_server
     )
     assert send_response.status_code == 202, send_response.text
 
-    history = await _wait_for_gmail_tool_call(server, thread_id)
-    assert any(
-        tool_call.get("name") == "gmail"
-        for turn in history.get("turns", [])
-        for tool_call in turn.get("tool_calls", [])
-    ), history
+    await _wait_for_tool_result(
+        server,
+        thread_id,
+        "gmail",
+        result_fragment=EMULATE_GMAIL_SUBJECT,
+    )
 
     oauth_state = await _wait_for_refresh_request(mock_base_url)
     assert oauth_state["refresh_count"] == 1, oauth_state
@@ -330,12 +346,7 @@ async def test_hosted_mcp_oauth_refresh_uses_proxy(hosted_oauth_refresh_server):
     )
     assert send_response.status_code == 202, send_response.text
 
-    history = await _wait_for_tool_call(server, thread_id, MCP_TOOL_NAME)
-    assert any(
-        tool_call.get("name") == MCP_TOOL_NAME
-        for turn in history.get("turns", [])
-        for tool_call in turn.get("tool_calls", [])
-    ), history
+    await _wait_for_tool_result(server, thread_id, MCP_TOOL_NAME)
 
     oauth_state = await _wait_for_refresh_request(mock_base_url)
     assert oauth_state["refresh_count"] == 1, oauth_state

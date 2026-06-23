@@ -54,17 +54,47 @@ pub enum TriggerError {
     #[error("invalid fire identity component {label}: {reason}")]
     InvalidFireIdentityComponent { label: String, reason: String },
     #[error("invalid trigger record: {reason}")]
-    InvalidRecord { reason: String },
+    InvalidRecord {
+        kind: TriggerRecordValidationKind,
+        reason: String,
+    },
     #[error("invalid trigger poller configuration: {reason}")]
     InvalidPollerConfig { reason: String },
     #[error("invalid schedule: {reason}")]
-    InvalidSchedule { reason: String },
+    InvalidSchedule {
+        kind: TriggerScheduleValidationKind,
+        reason: String,
+    },
     #[error("invalid trigger materialization: {reason}")]
     InvalidMaterialization { reason: String },
     #[error("trigger repository backend unavailable: {reason}")]
     Backend { reason: String },
     #[error("trigger not found")]
     NotFound,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum TriggerRecordValidationKind {
+    NameEmpty,
+    NameTooLong,
+    PromptEmpty,
+    PromptTooLong,
+    Other,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum TriggerScheduleValidationKind {
+    InvalidTimezone,
+    InvalidDateTime,
+    AmbiguousDateTime,
+    NonexistentDateTime,
+    EmptyCronExpression,
+    InvalidCronFieldCount,
+    InvalidCronExpression,
+    SecondLevelCadence,
+    NoUpcomingFireTime,
+    SubMinuteCadence,
+    NoFutureFireTime,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
@@ -300,26 +330,31 @@ impl TriggerRecord {
     pub fn validate(&self) -> Result<(), TriggerError> {
         if self.name.trim().is_empty() {
             return Err(TriggerError::InvalidRecord {
+                kind: TriggerRecordValidationKind::NameEmpty,
                 reason: "trigger name must not be empty".to_string(),
             });
         }
         if self.name.len() > MAX_TRIGGER_NAME_BYTES {
             return Err(TriggerError::InvalidRecord {
+                kind: TriggerRecordValidationKind::NameTooLong,
                 reason: format!("trigger name must be at most {MAX_TRIGGER_NAME_BYTES} bytes"),
             });
         }
         if self.prompt.trim().is_empty() {
             return Err(TriggerError::InvalidRecord {
+                kind: TriggerRecordValidationKind::PromptEmpty,
                 reason: "trigger prompt must not be empty".to_string(),
             });
         }
         if self.prompt.len() > MAX_TRIGGER_PROMPT_BYTES {
             return Err(TriggerError::InvalidRecord {
+                kind: TriggerRecordValidationKind::PromptTooLong,
                 reason: format!("trigger prompt must be at most {MAX_TRIGGER_PROMPT_BYTES} bytes"),
             });
         }
         if self.active_run_ref.is_some() && self.active_fire_slot.is_none() {
             return Err(TriggerError::InvalidRecord {
+                kind: TriggerRecordValidationKind::Other,
                 reason: "active_run_ref requires active_fire_slot".to_string(),
             });
         }
@@ -412,16 +447,19 @@ impl TriggerSchedule {
             "cron" => Self::cron_with_timezone(expression, timezone),
             "once" => {
                 let at_str = schedule_at.ok_or_else(|| TriggerError::InvalidRecord {
+                    kind: TriggerRecordValidationKind::Other,
                     reason: "schedule_at: missing once timestamp".to_string(),
                 })?;
                 let at = chrono::DateTime::parse_from_rfc3339(at_str)
                     .map(|dt| dt.with_timezone(&chrono::Utc))
                     .map_err(|error| TriggerError::InvalidRecord {
+                        kind: TriggerRecordValidationKind::Other,
                         reason: format!("schedule_at: invalid once timestamp: {error}"),
                     })?;
                 Self::once(at, timezone)
             }
             other => Err(TriggerError::InvalidRecord {
+                kind: TriggerRecordValidationKind::Other,
                 reason: format!("schedule_kind: unsupported schedule kind `{other}`"),
             }),
         }
@@ -439,6 +477,7 @@ impl TriggerSchedule {
         let tz = parse_timezone(timezone_str)?;
         let naive = chrono::NaiveDateTime::parse_from_str(at_str, "%Y-%m-%dT%H:%M:%S").map_err(
             |error| TriggerError::InvalidSchedule {
+                kind: TriggerScheduleValidationKind::InvalidDateTime,
                 reason: format!("invalid datetime '{at_str}': {error}"),
             },
         )?;
@@ -447,6 +486,7 @@ impl TriggerSchedule {
             chrono::LocalResult::Single(dt) => dt.with_timezone(&chrono::Utc),
             chrono::LocalResult::Ambiguous(_, _) => {
                 return Err(TriggerError::InvalidSchedule {
+                    kind: TriggerScheduleValidationKind::AmbiguousDateTime,
                     reason: format!(
                         "datetime '{at_str}' is ambiguous in timezone '{timezone_str}' (DST overlap); use an explicit UTC offset"
                     ),
@@ -454,6 +494,7 @@ impl TriggerSchedule {
             }
             chrono::LocalResult::None => {
                 return Err(TriggerError::InvalidSchedule {
+                    kind: TriggerScheduleValidationKind::NonexistentDateTime,
                     reason: format!(
                         "datetime '{at_str}' does not exist in timezone '{timezone_str}' (DST gap); use an adjacent time"
                     ),
@@ -516,6 +557,16 @@ pub enum TriggerState {
     Completed,
 }
 
+fn validate_user_settable_trigger_state(state: TriggerState) -> Result<(), TriggerError> {
+    match state {
+        TriggerState::Scheduled | TriggerState::Paused => Ok(()),
+        TriggerState::Completed => Err(TriggerError::InvalidRecord {
+            kind: TriggerRecordValidationKind::Other,
+            reason: "completed is a terminal trigger state and cannot be set directly".to_string(),
+        }),
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum TriggerRunStatus {
@@ -556,6 +607,7 @@ pub(crate) fn parse_state_codec(value: &str) -> Result<TriggerState, TriggerErro
         "paused" => Ok(TriggerState::Paused),
         "completed" => Ok(TriggerState::Completed),
         other => Err(TriggerError::InvalidRecord {
+            kind: TriggerRecordValidationKind::Other,
             reason: format!("state: unsupported trigger state `{other}`"),
         }),
     }
@@ -573,6 +625,7 @@ pub(crate) fn parse_source_kind_codec(value: &str) -> Result<TriggerSourceKind, 
     match value {
         "schedule" => Ok(TriggerSourceKind::Schedule),
         other => Err(TriggerError::InvalidRecord {
+            kind: TriggerRecordValidationKind::Other,
             reason: format!("source: unsupported trigger source `{other}`"),
         }),
     }
@@ -592,6 +645,7 @@ pub(crate) fn parse_run_status_codec(value: &str) -> Result<TriggerRunStatus, Tr
         "ok" => Ok(TriggerRunStatus::Ok),
         "error" => Ok(TriggerRunStatus::Error),
         other => Err(TriggerError::InvalidRecord {
+            kind: TriggerRecordValidationKind::Other,
             reason: format!("last_status: unsupported trigger run status `{other}`"),
         }),
     }
@@ -606,6 +660,7 @@ pub(crate) fn parse_run_history_status_codec(
         "ok" => Ok(TriggerRunHistoryStatus::Ok),
         "error" => Ok(TriggerRunHistoryStatus::Error),
         other => Err(TriggerError::InvalidRecord {
+            kind: TriggerRecordValidationKind::Other,
             reason: format!("status: unsupported trigger run history status `{other}`"),
         }),
     }
@@ -932,6 +987,23 @@ pub trait TriggerRepository: Send + Sync {
         trigger_id: TriggerId,
     ) -> Result<Option<TriggerRecord>, TriggerError>;
 
+    /// Sets the lifecycle state for a caller-scoped trigger.
+    ///
+    /// This user-facing mutation may only set non-terminal states
+    /// (`Scheduled` or `Paused`). A stored `Completed` trigger is terminal and
+    /// must not be moved back into the scheduler by this method; implementations
+    /// return `Ok(None)` for that case so callers do not leak trigger existence
+    /// across invalid lifecycle transitions.
+    async fn set_scoped_trigger_state(
+        &self,
+        tenant_id: TenantId,
+        creator_user_id: UserId,
+        agent_id: Option<AgentId>,
+        project_id: Option<ProjectId>,
+        trigger_id: TriggerId,
+        state: TriggerState,
+    ) -> Result<Option<TriggerRecord>, TriggerError>;
+
     /// Lists due triggers across all tenants for the trusted poller path.
     ///
     /// # Safety / Authorization
@@ -1246,6 +1318,32 @@ impl TriggerRepository for InMemoryTriggerRepository {
         Ok(state.records.remove(&key))
     }
 
+    async fn set_scoped_trigger_state(
+        &self,
+        tenant_id: TenantId,
+        creator_user_id: UserId,
+        agent_id: Option<AgentId>,
+        project_id: Option<ProjectId>,
+        trigger_id: TriggerId,
+        new_state: TriggerState,
+    ) -> Result<Option<TriggerRecord>, TriggerError> {
+        validate_user_settable_trigger_state(new_state)?;
+        let mut state = self.lock_state()?;
+        let key = TriggerRepositoryKey::new(&tenant_id, trigger_id);
+        let Some(record) = state.records.get_mut(&key) else {
+            return Ok(None);
+        };
+        if record.creator_user_id != creator_user_id
+            || record.agent_id != agent_id
+            || record.project_id != project_id
+            || record.state == TriggerState::Completed
+        {
+            return Ok(None);
+        }
+        record.state = new_state;
+        Ok(Some(record.clone()))
+    }
+
     async fn list_due_triggers(
         &self,
         now: Timestamp,
@@ -1259,7 +1357,11 @@ impl TriggerRepository for InMemoryTriggerRepository {
         let mut selected_keys = state
             .records
             .iter()
-            .filter(|(_, record)| record.is_due_at(now) && !record.has_active_fire())
+            .filter(|(_, record)| {
+                record.state == TriggerState::Scheduled
+                    && record.is_due_at(now)
+                    && !record.has_active_fire()
+            })
             .map(|(key, record)| {
                 (
                     record.next_run_at,
@@ -1469,6 +1571,7 @@ impl TriggerRepository for InMemoryTriggerRepository {
                     && record.next_run_at > request.fire_slot
                 {
                     return Err(TriggerError::InvalidRecord {
+                        kind: TriggerRecordValidationKind::Other,
                         reason: "retryable fire failure must leave next_run_at at or before the failed fire slot"
                             .to_string(),
                     });
@@ -1577,7 +1680,7 @@ impl TriggerRepository for InMemoryTriggerRepository {
             record.next_run_at = t;
         }
         record.state = if next.is_some() {
-            TriggerState::Scheduled
+            record.state
         } else {
             TriggerState::Completed
         };
@@ -1811,6 +1914,7 @@ pub(crate) fn reject_non_future_next_run_at(
         return Ok(());
     }
     Err(TriggerError::InvalidRecord {
+        kind: TriggerRecordValidationKind::Other,
         reason: "fire result next_run_at must be after the claimed fire slot".to_string(),
     })
 }
@@ -1823,6 +1927,7 @@ pub(crate) fn reject_run_ref_rewrite(
         return Ok(());
     }
     Err(TriggerError::InvalidRecord {
+        kind: TriggerRecordValidationKind::Other,
         reason: "fire result must not rewrite an existing active_run_ref".to_string(),
     })
 }
@@ -1834,12 +1939,14 @@ pub(crate) fn reject_failed_result_after_active_run(
         return Ok(());
     }
     Err(TriggerError::InvalidRecord {
+        kind: TriggerRecordValidationKind::Other,
         reason: "fire failure result must not clear an accepted active_run_ref".to_string(),
     })
 }
 
 fn parse_timezone(timezone: &str) -> Result<Tz, TriggerError> {
     timezone.parse::<Tz>().map_err(|_| TriggerError::InvalidSchedule {
+        kind: TriggerScheduleValidationKind::InvalidTimezone,
         reason: format!(
             "invalid timezone '{timezone}': must be a valid IANA timezone name (e.g. 'America/New_York', 'UTC')"
         ),
@@ -1850,6 +1957,7 @@ fn normalize_cron_expression(expression: &str) -> Result<String, TriggerError> {
     let trimmed = expression.trim();
     if trimmed.is_empty() {
         return Err(TriggerError::InvalidSchedule {
+            kind: TriggerScheduleValidationKind::EmptyCronExpression,
             reason: "cron expression must not be empty".to_string(),
         });
     }
@@ -1865,6 +1973,7 @@ fn normalize_cron_expression(expression: &str) -> Result<String, TriggerError> {
             Ok(trimmed.to_string())
         }
         count => Err(TriggerError::InvalidSchedule {
+            kind: TriggerScheduleValidationKind::InvalidCronFieldCount,
             reason: format!("expected 5, 6, or 7 cron fields, got {count}"),
         }),
     }
@@ -1874,6 +1983,7 @@ fn parse_cron_schedule(expression: &str) -> Result<Schedule, TriggerError> {
     let normalized = normalize_cron_expression(expression)?;
     let schedule =
         Schedule::from_str(&normalized).map_err(|error| TriggerError::InvalidSchedule {
+            kind: TriggerScheduleValidationKind::InvalidCronExpression,
             reason: format!("invalid cron expression: {error}"),
         })?;
     reject_sub_minute_cadence(&schedule)?;
@@ -1885,6 +1995,7 @@ fn reject_sub_minute_seconds_field(field: &str) -> Result<(), TriggerError> {
         return Ok(());
     }
     Err(TriggerError::InvalidSchedule {
+        kind: TriggerScheduleValidationKind::SecondLevelCadence,
         reason: "cron schedules must not use second-level cadence; use second field `0`"
             .to_string(),
     })
@@ -1894,6 +2005,7 @@ fn reject_sub_minute_cadence(schedule: &Schedule) -> Result<(), TriggerError> {
     let mut upcoming = schedule.upcoming(Utc);
     let Some(first) = upcoming.next() else {
         return Err(TriggerError::InvalidSchedule {
+            kind: TriggerScheduleValidationKind::NoUpcomingFireTime,
             reason: "cron expression has no upcoming fire time".to_string(),
         });
     };
@@ -1902,6 +2014,7 @@ fn reject_sub_minute_cadence(schedule: &Schedule) -> Result<(), TriggerError> {
     };
     if (second - first).num_seconds() < MIN_FIRE_CADENCE.as_secs() as i64 {
         return Err(TriggerError::InvalidSchedule {
+            kind: TriggerScheduleValidationKind::SubMinuteCadence,
             reason: "schedule can fire more frequently than once per minute".to_string(),
         });
     }
@@ -2947,7 +3060,7 @@ mod tests {
         let error = TriggerSchedule::once_from_local("not-a-date", "America/New_York")
             .expect_err("malformed datetime must be rejected");
         match error {
-            TriggerError::InvalidSchedule { reason } => {
+            TriggerError::InvalidSchedule { reason, .. } => {
                 assert!(
                     reason.contains("not-a-date"),
                     "reason should name the bad input: {reason}"

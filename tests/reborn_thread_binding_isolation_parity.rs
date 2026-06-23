@@ -15,7 +15,7 @@ async fn reborn_thread_binding_isolation_parity() {
         HostManagedModelResponse::assistant_reply("alpha isolated reply"),
         HostManagedModelResponse::assistant_reply("beta isolated reply"),
     ]);
-    let mut harness = RebornBinaryE2EHarness::with_model_gateway_unscoped_worker(
+    let mut harness = RebornBinaryE2EHarness::with_model_gateway(
         "room-thread-alpha",
         model_gateway,
         RecordingTestCapabilityPort::echo(),

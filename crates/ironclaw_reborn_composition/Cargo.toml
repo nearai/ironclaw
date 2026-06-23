@@ -133,6 +133,7 @@ ironclaw_run_state = { path = "../ironclaw_run_state" }
 ironclaw_runtime_policy = { path = "../ironclaw_runtime_policy" }
 ironclaw_safety = { path = "../ironclaw_safety" }
 ironclaw_secrets = { path = "../ironclaw_secrets" }
+ironclaw_skill_learning = { path = "../ironclaw_skill_learning" }
 ironclaw_skills = { path = "../ironclaw_skills" }
 ironclaw_slack_v2_adapter = { path = "../ironclaw_slack_v2_adapter", optional = true }
 ironclaw_threads = { path = "../ironclaw_threads" }

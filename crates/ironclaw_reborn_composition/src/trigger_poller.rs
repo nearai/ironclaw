@@ -340,7 +340,7 @@ impl<S> LocalTriggerTurnSnapshotSource<S> {
     }
 }
 
-#[cfg(feature = "libsql")]
+#[cfg(any(feature = "libsql", feature = "postgres"))]
 #[async_trait]
 impl<F> TriggerTurnSnapshotSource
     for LocalTriggerTurnSnapshotSource<ironclaw_turns::FilesystemTurnStateStore<F>>
@@ -355,7 +355,7 @@ where
     }
 }
 
-#[cfg(not(feature = "libsql"))]
+#[cfg(not(any(feature = "libsql", feature = "postgres")))]
 #[async_trait]
 impl TriggerTurnSnapshotSource
     for LocalTriggerTurnSnapshotSource<ironclaw_turns::InMemoryTurnStateStore>
@@ -365,7 +365,7 @@ impl TriggerTurnSnapshotSource
     }
 }
 
-#[cfg(feature = "libsql")]
+#[cfg(any(feature = "libsql", feature = "postgres"))]
 fn trigger_backend_error(error: impl std::fmt::Display) -> TriggerError {
     TriggerError::Backend {
         reason: error.to_string(),

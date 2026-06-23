@@ -95,6 +95,8 @@ pub(super) fn capability_wiring(
     let local_runtime = services.local_runtime.as_ref()?;
     let workspace_mounts = local_runtime.workspace_mounts.clone();
     let memory_mounts = local_runtime.memory_mounts.clone();
+    let system_extensions_lifecycle_mounts =
+        local_runtime.system_extensions_lifecycle_mounts.clone();
     let approval_requests: Arc<dyn ApprovalRequestStore> = local_runtime.approval_requests.clone();
     let capability_leases: Arc<dyn CapabilityLeaseStore> = local_runtime.capability_leases.clone();
     let outbound_delivery_target_set_requires_approval = local_dev_effects_require_approval(
@@ -127,6 +129,7 @@ pub(super) fn capability_wiring(
             policy,
             workspace_mounts,
             memory_mounts,
+            system_extensions_lifecycle_mounts,
             extension_surface_source,
             input_resolver: Arc::clone(&capability_input_resolver),
             result_writer: Arc::clone(&capability_result_writer),
@@ -159,6 +162,7 @@ struct LocalDevLoopCapabilityPortFactory {
     policy: Arc<LocalDevCapabilityPolicy>,
     workspace_mounts: MountView,
     memory_mounts: MountView,
+    system_extensions_lifecycle_mounts: MountView,
     extension_surface_source: LocalDevExtensionSurfaceSource,
     input_resolver: Arc<dyn LoopCapabilityInputResolver>,
     result_writer: Arc<dyn LoopCapabilityResultWriter>,
@@ -191,6 +195,7 @@ impl LoopCapabilityPortFactory for LocalDevLoopCapabilityPortFactory {
             workspace_mounts: self.workspace_mounts.clone(),
             skill_mounts,
             memory_mounts: self.memory_mounts.clone(),
+            system_extensions_lifecycle_mounts: self.system_extensions_lifecycle_mounts.clone(),
             extension_surface_source: self.extension_surface_source.clone(),
             input_resolver: Arc::clone(&self.input_resolver),
             result_writer: Arc::clone(&self.result_writer),
@@ -829,25 +834,31 @@ fn local_dev_resource_scope_for_run(
     scope
 }
 
+struct LocalDevVisibleCapabilityInputs<'a> {
+    workspace_mounts: &'a MountView,
+    skill_mounts: &'a MountView,
+    memory_mounts: &'a MountView,
+    system_extensions_lifecycle_mounts: &'a MountView,
+    policy: &'a LocalDevCapabilityPolicy,
+    extension_surface: &'a LocalDevExtensionSurface,
+}
+
 fn local_dev_visible_capability_request(
     run_context: &LoopRunContext,
     fallback_user_id: &UserId,
-    workspace_mounts: MountView,
-    skill_mounts: MountView,
-    memory_mounts: MountView,
-    policy: &LocalDevCapabilityPolicy,
-    extension_surface: &LocalDevExtensionSurface,
+    inputs: LocalDevVisibleCapabilityInputs<'_>,
 ) -> Result<HostVisibleCapabilityRequest, AgentLoopHostError> {
     let extension_id = loop_driver_execution_extension_id(run_context)?;
-    let mut grants = policy.builtin_grants(
+    let mut grants = inputs.policy.builtin_grants(
         &extension_id,
-        &workspace_mounts,
-        &skill_mounts,
-        &memory_mounts,
+        inputs.workspace_mounts,
+        inputs.skill_mounts,
+        inputs.memory_mounts,
+        inputs.system_extensions_lifecycle_mounts,
     );
     grants
         .grants
-        .extend(extension_surface.grants(&extension_id));
+        .extend(inputs.extension_surface.grants(&extension_id));
     let user_id = run_context
         .scope
         .explicit_owner_user_id()
@@ -874,21 +885,21 @@ fn local_dev_visible_capability_request(
     context.validate().map_err(host_api_agent_loop_error)?;
 
     let builtin_provider =
-        ExtensionId::new(policy.provider.id.as_str()).map_err(host_api_agent_loop_error)?;
+        ExtensionId::new(inputs.policy.provider.id.as_str()).map_err(host_api_agent_loop_error)?;
     let mut provider_trust = BTreeMap::new();
     provider_trust.insert(
         builtin_provider,
         TrustDecision {
             effective_trust: EffectiveTrustClass::user_trusted(),
             authority_ceiling: AuthorityCeiling {
-                allowed_effects: policy.provider.authority_effects.clone(),
+                allowed_effects: inputs.policy.provider.authority_effects.clone(),
                 max_resource_ceiling: None,
             },
             provenance: TrustProvenance::AdminConfig,
             evaluated_at: Utc::now(),
         },
     );
-    provider_trust.extend(extension_surface.provider_trust());
+    provider_trust.extend(inputs.extension_surface.provider_trust());
 
     Ok(HostVisibleCapabilityRequest::new(
         context,

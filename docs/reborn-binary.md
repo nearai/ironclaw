@@ -482,9 +482,9 @@ and an explicit runtime policy:
 backend = "postgres"
 url_env = "IRONCLAW_REBORN_POSTGRES_URL"
 secret_master_key_env = "IRONCLAW_REBORN_SECRET_MASTER_KEY"
-# Optional; defaults to 16. Keep below the PostgreSQL server's max_connections
-# after reserving capacity for migrations and operator sessions.
-pool_max_size = 16
+# Optional; defaults to 2. Keep below the PostgreSQL server or managed
+# session-pool cap after reserving capacity for restarts and operator sessions.
+pool_max_size = 2
 
 [policy]
 deployment_mode = "hosted_multi_tenant"
@@ -494,6 +494,8 @@ default_profile = "secure_default"
 Set `IRONCLAW_REBORN_POSTGRES_URL` in the process environment, and set
 `IRONCLAW_REBORN_SECRET_MASTER_KEY` to independent cryptographic key material.
 Remote managed PostgreSQL URLs must use TLS, for example `sslmode=require`.
+Set `IRONCLAW_REBORN_POSTGRES_POOL_MAX_SIZE` to override the configured pool
+size when a managed provider enforces a smaller session-pool cap.
 The first production launch slice supports runtime policies that do not require
 a tenant-sandbox process binding.
 

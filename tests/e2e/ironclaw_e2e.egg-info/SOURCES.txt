@@ -13,6 +13,7 @@ scenarios/test_chat.py
 scenarios/test_connection.py
 scenarios/test_csp.py
 scenarios/test_dom_resource_limits.py
+scenarios/test_emulate_reborn_provider_contracts.py
 scenarios/test_extension_oauth.py
 scenarios/test_extension_uninstall_cleanup.py
 scenarios/test_extensions.py

@@ -4,7 +4,7 @@
 //! ports:
 //!
 //! inbound bytes -> ProductAdapter -> DefaultProductWorkflow ->
-//! DefaultInboundTurnService -> DefaultTurnCoordinator -> TurnRunnerWorker ->
+//! DefaultInboundTurnService -> DefaultTurnCoordinator -> TurnRunScheduler ->
 //! Reborn planned agent loop -> model/capability/transcript evidence.
 //!
 //! Documented test-support substitutions:
@@ -63,10 +63,12 @@ use ironclaw_host_runtime::{
     TRACE_COMMONS_CREDITS_CAPABILITY_ID, TRACE_COMMONS_ONBOARD_CAPABILITY_ID,
     TRACE_COMMONS_PROFILE_SET_CAPABILITY_ID, TRACE_COMMONS_PROFILE_TOKEN_CAPABILITY_ID,
     TRACE_COMMONS_STATUS_CAPABILITY_ID, TRIGGER_CREATE_CAPABILITY_ID, TRIGGER_LIST_CAPABILITY_ID,
-    TRIGGER_REMOVE_CAPABILITY_ID, VisibleCapabilityRequest as RuntimeVisibleCapabilityRequest,
+    TRIGGER_PAUSE_CAPABILITY_ID, TRIGGER_REMOVE_CAPABILITY_ID, TRIGGER_RESUME_CAPABILITY_ID,
+    VisibleCapabilityRequest as RuntimeVisibleCapabilityRequest,
     VisibleCapabilitySurface as RuntimeVisibleCapabilitySurface, WRITE_FILE_CAPABILITY_ID,
     builtin_first_party_handlers, builtin_first_party_package,
 };
+use ironclaw_host_runtime::{SchedulerTurnRunWakeNotifier, TurnRunSchedulerHandle};
 use ironclaw_loop_support::{
     CapabilityAllowSet, CapabilityResolveError, CapabilityResultWrite,
     CapabilitySurfaceProfileResolver, CapabilityWriteResult, DEFAULT_SPAWN_SUBAGENT_CAPABILITY_ID,
@@ -100,7 +102,6 @@ use ironclaw_reborn::{
         DefaultPlannedRuntimeConfig, DefaultPlannedRuntimeParts, RebornRuntimeLoopComposition,
         RuntimeTurnStateStore, build_default_planned_runtime,
     },
-    turn_runner::{TurnRunnerWakeSender, TurnRunnerWorker, TurnRunnerWorkerConfig},
 };
 use ironclaw_reborn_composition::{
     ProductLiveCapabilityIo, ProductLiveVisibleCapabilityRequestConfig, RebornBuildInput,
@@ -136,15 +137,13 @@ use ironclaw_turns::{
 };
 use ironclaw_wasm::{WitToolHost, WitToolRuntimeConfig};
 use serde_json::json;
-use tokio::task::JoinHandle;
-use tokio_util::sync::CancellationToken;
 
 use super::{
     config::WaitConfig,
     extension_surface::{
         BUNDLED_EXTENSION_CAPABILITY_IDS, BUNDLED_EXTENSION_IDS, EXTENSION_LIFECYCLE_CAPABILITY_IDS,
     },
-    filesystem::local_filesystem,
+    filesystem::{BlockingTurnStatePutFilesystem, local_filesystem},
     github as github_support,
     model_replay::RebornTraceReplayModelGateway,
     product_workflow::{RebornProductWorkflowHarness, resource_scope},
@@ -166,6 +165,8 @@ type HarnessCapabilityParts = (
     Arc<dyn LoopCapabilityResultWriter>,
     HarnessCapabilityRecorder,
 );
+type HarnessTurnStorageBackend = BlockingTurnStatePutFilesystem<InMemoryBackend>;
+type HarnessTurnBackend = CompositeRootFilesystem;
 
 pub struct RebornBinaryE2EHarness {
     ingress: RebornTestIngress,
@@ -174,18 +175,16 @@ pub struct RebornBinaryE2EHarness {
     binding: ResolvedBinding,
     thread_scope: ThreadScope,
     turn_scope: TurnScope,
-    turn_store: Arc<FilesystemTurnStateStore<LocalFilesystem>>,
+    turn_store: Arc<FilesystemTurnStateStore<HarnessTurnBackend>>,
     coordinator: Arc<dyn TurnCoordinator>,
     _product_harness: RebornProductWorkflowHarness,
     thread_harness: RebornThreadHarness,
     model_gateway: RebornTraceReplayModelGateway,
     capability_recorder: HarnessCapabilityRecorder,
     milestone_sink: Arc<ironclaw_turns::run_profile::InMemoryLoopHostMilestoneSink>,
-    worker: Arc<TurnRunnerWorker>,
-    cancel: CancellationToken,
-    worker_tasks: Vec<JoinHandle<()>>,
+    scheduler_handle: Option<TurnRunSchedulerHandle>,
+    scheduler_notifier: Arc<SchedulerTurnRunWakeNotifier>,
     _turn_root: Arc<tempfile::TempDir>,
-    _wake_sender: TurnRunnerWakeSender,
 }
 
 pub struct SubmittedTurn {
@@ -203,7 +202,7 @@ pub struct RebornHarnessSharedStorage {
     product_root: Arc<tempfile::TempDir>,
     thread_backend: Arc<LocalFilesystem>,
     thread_root: Arc<tempfile::TempDir>,
-    turn_backend: Arc<LocalFilesystem>,
+    turn_backend: Arc<HarnessTurnStorageBackend>,
     turn_root: Arc<tempfile::TempDir>,
 }
 
@@ -217,9 +216,21 @@ impl RebornHarnessSharedStorage {
             product_root,
             thread_backend: Arc::new(local_filesystem(thread_root.path())?),
             thread_root,
-            turn_backend: Arc::new(local_filesystem(turn_root.path())?),
+            turn_backend: Arc::new(BlockingTurnStatePutFilesystem::new(InMemoryBackend::new())),
             turn_root,
         })
+    }
+
+    pub fn block_next_turn_state_put(&self) {
+        self.turn_backend.block_next_put();
+    }
+
+    pub async fn wait_for_blocked_turn_state_put(&self) {
+        self.turn_backend.wait_for_blocked_put().await;
+    }
+
+    pub fn release_blocked_turn_state_put(&self) {
+        self.turn_backend.release_blocked_put();
     }
 }
 
@@ -310,44 +321,14 @@ impl RebornBinaryE2EHarness {
             .await
     }
 
-    pub async fn with_model_gateway_unscoped_worker(
-        conversation_id: &str,
-        model_gateway: RebornTraceReplayModelGateway,
-        capability_port: RecordingTestCapabilityPort,
-    ) -> HarnessResult<Self> {
-        Self::with_model_gateway_options_and_worker_scope(
-            conversation_id,
-            model_gateway,
-            capability_port,
-            false,
-            false,
-        )
-        .await
-    }
-
-    pub async fn with_harness_blocked_evidence_unscoped_worker(
-        conversation_id: &str,
-        model_gateway: RebornTraceReplayModelGateway,
-        capability_port: RecordingTestCapabilityPort,
-    ) -> HarnessResult<Self> {
-        Self::with_model_gateway_options_and_worker_scope(
-            conversation_id,
-            model_gateway,
-            capability_port,
-            true,
-            false,
-        )
-        .await
-    }
-
-    pub async fn with_model_gateway_scope_shared_storage_unscoped_worker(
+    pub async fn with_model_gateway_scope_shared_storage(
         conversation_id: &str,
         model_gateway: RebornTraceReplayModelGateway,
         capability_port: RecordingTestCapabilityPort,
         scope: ResourceScope,
         shared_storage: RebornHarnessSharedStorage,
     ) -> HarnessResult<Self> {
-        Self::with_model_gateway_scope_identity_source_trigger_installation_shared_storage_unscoped_worker(
+        Self::with_model_gateway_scope_identity_source_trigger_installation_shared_storage(
             conversation_id,
             model_gateway,
             capability_port,
@@ -362,7 +343,7 @@ impl RebornBinaryE2EHarness {
         .await
     }
 
-    pub async fn with_model_gateway_scope_installation_shared_storage_unscoped_worker(
+    pub async fn with_model_gateway_scope_installation_shared_storage(
         conversation_id: &str,
         model_gateway: RebornTraceReplayModelGateway,
         capability_port: RecordingTestCapabilityPort,
@@ -371,7 +352,7 @@ impl RebornBinaryE2EHarness {
         installation_id: &str,
         shared_storage: RebornHarnessSharedStorage,
     ) -> HarnessResult<Self> {
-        Self::with_model_gateway_scope_initial_actor_installation_shared_storage_unscoped_worker(
+        Self::with_model_gateway_scope_initial_actor_installation_shared_storage(
             conversation_id,
             "alice",
             model_gateway,
@@ -385,7 +366,7 @@ impl RebornBinaryE2EHarness {
     }
 
     #[allow(clippy::too_many_arguments)]
-    pub async fn with_model_gateway_scope_initial_actor_installation_shared_storage_unscoped_worker(
+    pub async fn with_model_gateway_scope_initial_actor_installation_shared_storage(
         conversation_id: &str,
         initial_actor_id: &str,
         model_gateway: RebornTraceReplayModelGateway,
@@ -395,7 +376,7 @@ impl RebornBinaryE2EHarness {
         installation_id: &str,
         shared_storage: RebornHarnessSharedStorage,
     ) -> HarnessResult<Self> {
-        Self::with_model_gateway_scope_identity_source_trigger_installation_shared_storage_unscoped_worker(
+        Self::with_model_gateway_scope_identity_source_trigger_installation_shared_storage(
             conversation_id,
             model_gateway,
             capability_port,
@@ -411,7 +392,7 @@ impl RebornBinaryE2EHarness {
     }
 
     #[allow(clippy::too_many_arguments)]
-    pub async fn with_model_gateway_scope_identity_source_trigger_installation_shared_storage_unscoped_worker(
+    pub async fn with_model_gateway_scope_identity_source_trigger_installation_shared_storage(
         conversation_id: &str,
         model_gateway: RebornTraceReplayModelGateway,
         capability_port: RecordingTestCapabilityPort,
@@ -423,11 +404,10 @@ impl RebornBinaryE2EHarness {
         initial_actor_id: &str,
         shared_storage: RebornHarnessSharedStorage,
     ) -> HarnessResult<Self> {
-        Self::with_model_gateway_capability_mode_identity_source_trigger_worker_scope_storage_and_adapter(
+        Self::with_model_gateway_capability_mode_identity_source_trigger_storage_and_adapter(
             conversation_id,
             model_gateway,
             HarnessCapabilityMode::Recording(capability_port),
-            false,
             false,
             initial_trigger,
             identity_context_source,
@@ -440,35 +420,16 @@ impl RebornBinaryE2EHarness {
         .await
     }
 
-    pub async fn with_model_gateway_identity_source_unscoped_worker(
+    pub async fn with_model_gateway_identity_source_shared(
         conversation_id: &str,
         model_gateway: RebornTraceReplayModelGateway,
         capability_port: RecordingTestCapabilityPort,
         identity_context_source: Arc<dyn HostIdentityContextSource>,
     ) -> HarnessResult<Self> {
-        Self::with_model_gateway_options_identity_source_trigger_and_worker_scope(
+        Self::with_model_gateway_options_identity_source_trigger(
             conversation_id,
             model_gateway,
             capability_port,
-            false,
-            false,
-            ProductTriggerReason::DirectChat,
-            identity_context_source,
-        )
-        .await
-    }
-
-    pub async fn with_model_gateway_identity_source_unscoped_shared_worker(
-        conversation_id: &str,
-        model_gateway: RebornTraceReplayModelGateway,
-        capability_port: RecordingTestCapabilityPort,
-        identity_context_source: Arc<dyn HostIdentityContextSource>,
-    ) -> HarnessResult<Self> {
-        Self::with_model_gateway_options_identity_source_trigger_and_worker_scope(
-            conversation_id,
-            model_gateway,
-            capability_port,
-            false,
             false,
             ProductTriggerReason::BotMention,
             identity_context_source,
@@ -698,69 +659,47 @@ impl RebornBinaryE2EHarness {
         capability_port: RecordingTestCapabilityPort,
         accept_harness_blocked_evidence: bool,
     ) -> HarnessResult<Self> {
-        Self::with_model_gateway_options_and_worker_scope(
+        Self::with_model_gateway_options_identity_source(
             conversation_id,
             model_gateway,
             capability_port,
             accept_harness_blocked_evidence,
-            true,
-        )
-        .await
-    }
-
-    async fn with_model_gateway_options_and_worker_scope(
-        conversation_id: &str,
-        model_gateway: RebornTraceReplayModelGateway,
-        capability_port: RecordingTestCapabilityPort,
-        accept_harness_blocked_evidence: bool,
-        restrict_worker_to_initial_scope: bool,
-    ) -> HarnessResult<Self> {
-        Self::with_model_gateway_options_identity_source_and_worker_scope(
-            conversation_id,
-            model_gateway,
-            capability_port,
-            accept_harness_blocked_evidence,
-            restrict_worker_to_initial_scope,
             Arc::new(EmptyIdentityContextSource),
         )
         .await
     }
 
-    async fn with_model_gateway_options_identity_source_and_worker_scope(
+    async fn with_model_gateway_options_identity_source(
         conversation_id: &str,
         model_gateway: RebornTraceReplayModelGateway,
         capability_port: RecordingTestCapabilityPort,
         accept_harness_blocked_evidence: bool,
-        restrict_worker_to_initial_scope: bool,
         identity_context_source: Arc<dyn HostIdentityContextSource>,
     ) -> HarnessResult<Self> {
-        Self::with_model_gateway_options_identity_source_trigger_and_worker_scope(
+        Self::with_model_gateway_options_identity_source_trigger(
             conversation_id,
             model_gateway,
             capability_port,
             accept_harness_blocked_evidence,
-            restrict_worker_to_initial_scope,
             ProductTriggerReason::DirectChat,
             identity_context_source,
         )
         .await
     }
 
-    async fn with_model_gateway_options_identity_source_trigger_and_worker_scope(
+    async fn with_model_gateway_options_identity_source_trigger(
         conversation_id: &str,
         model_gateway: RebornTraceReplayModelGateway,
         capability_port: RecordingTestCapabilityPort,
         accept_harness_blocked_evidence: bool,
-        restrict_worker_to_initial_scope: bool,
         initial_trigger: ProductTriggerReason,
         identity_context_source: Arc<dyn HostIdentityContextSource>,
     ) -> HarnessResult<Self> {
-        Self::with_model_gateway_capability_mode_identity_source_trigger_and_worker_scope(
+        Self::with_model_gateway_capability_mode_identity_source_trigger(
             conversation_id,
             model_gateway,
             HarnessCapabilityMode::Recording(capability_port),
             accept_harness_blocked_evidence,
-            restrict_worker_to_initial_scope,
             initial_trigger,
             identity_context_source,
         )
@@ -773,69 +712,47 @@ impl RebornBinaryE2EHarness {
         capability_mode: HarnessCapabilityMode,
         accept_harness_blocked_evidence: bool,
     ) -> HarnessResult<Self> {
-        Self::with_model_gateway_capability_mode_and_worker_scope(
+        Self::with_model_gateway_capability_mode_identity_source(
             conversation_id,
             model_gateway,
             capability_mode,
             accept_harness_blocked_evidence,
-            true,
-        )
-        .await
-    }
-
-    async fn with_model_gateway_capability_mode_and_worker_scope(
-        conversation_id: &str,
-        model_gateway: RebornTraceReplayModelGateway,
-        capability_mode: HarnessCapabilityMode,
-        accept_harness_blocked_evidence: bool,
-        restrict_worker_to_initial_scope: bool,
-    ) -> HarnessResult<Self> {
-        Self::with_model_gateway_capability_mode_identity_source_and_worker_scope(
-            conversation_id,
-            model_gateway,
-            capability_mode,
-            accept_harness_blocked_evidence,
-            restrict_worker_to_initial_scope,
             Arc::new(EmptyIdentityContextSource),
         )
         .await
     }
 
-    async fn with_model_gateway_capability_mode_identity_source_and_worker_scope(
+    async fn with_model_gateway_capability_mode_identity_source(
         conversation_id: &str,
         model_gateway: RebornTraceReplayModelGateway,
         capability_mode: HarnessCapabilityMode,
         accept_harness_blocked_evidence: bool,
-        restrict_worker_to_initial_scope: bool,
         identity_context_source: Arc<dyn HostIdentityContextSource>,
     ) -> HarnessResult<Self> {
-        Self::with_model_gateway_capability_mode_identity_source_trigger_and_worker_scope(
+        Self::with_model_gateway_capability_mode_identity_source_trigger(
             conversation_id,
             model_gateway,
             capability_mode,
             accept_harness_blocked_evidence,
-            restrict_worker_to_initial_scope,
             ProductTriggerReason::DirectChat,
             identity_context_source,
         )
         .await
     }
 
-    async fn with_model_gateway_capability_mode_identity_source_trigger_and_worker_scope(
+    async fn with_model_gateway_capability_mode_identity_source_trigger(
         conversation_id: &str,
         model_gateway: RebornTraceReplayModelGateway,
         capability_mode: HarnessCapabilityMode,
         accept_harness_blocked_evidence: bool,
-        restrict_worker_to_initial_scope: bool,
         initial_trigger: ProductTriggerReason,
         identity_context_source: Arc<dyn HostIdentityContextSource>,
     ) -> HarnessResult<Self> {
-        Self::with_model_gateway_capability_mode_identity_source_trigger_worker_scope_storage_and_adapter(
+        Self::with_model_gateway_capability_mode_identity_source_trigger_storage_and_adapter(
             conversation_id,
             model_gateway,
             capability_mode,
             accept_harness_blocked_evidence,
-            restrict_worker_to_initial_scope,
             initial_trigger,
             identity_context_source,
             product_scope(),
@@ -848,12 +765,11 @@ impl RebornBinaryE2EHarness {
     }
 
     #[allow(clippy::too_many_arguments)]
-    async fn with_model_gateway_capability_mode_identity_source_trigger_worker_scope_storage_and_adapter(
+    async fn with_model_gateway_capability_mode_identity_source_trigger_storage_and_adapter(
         conversation_id: &str,
         model_gateway: RebornTraceReplayModelGateway,
         capability_mode: HarnessCapabilityMode,
         accept_harness_blocked_evidence: bool,
-        restrict_worker_to_initial_scope: bool,
         initial_trigger: ProductTriggerReason,
         identity_context_source: Arc<dyn HostIdentityContextSource>,
         product_scope: ResourceScope,
@@ -909,7 +825,10 @@ impl RebornBinaryE2EHarness {
             )
         } else {
             let turn_root = Arc::new(tempfile::tempdir()?);
-            (Arc::new(local_filesystem(turn_root.path())?), turn_root)
+            (
+                Arc::new(BlockingTurnStatePutFilesystem::new(InMemoryBackend::new())),
+                turn_root,
+            )
         };
         let turn_store = Arc::new(FilesystemTurnStateStore::new(scoped_turns_fs(
             turn_backend,
@@ -959,11 +878,9 @@ impl RebornBinaryE2EHarness {
             subagent_spawn_limits: ironclaw_loop_support::SubagentSpawnLimits::default(),
             loop_exit_evidence: evidence,
             config: DefaultPlannedRuntimeConfig {
-                worker: TurnRunnerWorkerConfig {
-                    heartbeat_interval: Duration::from_millis(20),
-                    poll_interval: Duration::from_millis(10),
-                    scope_filter: restrict_worker_to_initial_scope.then(|| turn_scope.clone()),
-                },
+                // Keep the durable runner heartbeat at its production default;
+                // test responsiveness comes from fast scheduler polling below.
+                poll_interval: Duration::from_millis(10),
                 ..DefaultPlannedRuntimeConfig::default()
             },
             model_route_resolver: None,
@@ -980,6 +897,7 @@ impl RebornBinaryE2EHarness {
             hook_security_audit_sink: None,
             turn_event_sink: None,
             attachment_read_port: None,
+            scheduler_wake_wiring: None,
         })?;
         let binding_service: Arc<dyn ConversationBindingService> =
             Arc::new(product_harness.binding_service()?);
@@ -1017,7 +935,7 @@ impl RebornBinaryE2EHarness {
         binding: ResolvedBinding,
         thread_scope: ThreadScope,
         turn_scope: TurnScope,
-        turn_store: Arc<FilesystemTurnStateStore<LocalFilesystem>>,
+        turn_store: Arc<FilesystemTurnStateStore<HarnessTurnBackend>>,
         product_harness: RebornProductWorkflowHarness,
         thread_harness: RebornThreadHarness,
         model_gateway: RebornTraceReplayModelGateway,
@@ -1030,6 +948,7 @@ impl RebornBinaryE2EHarness {
         turn_root: Arc<tempfile::TempDir>,
     ) -> Self {
         let coordinator = Arc::clone(&composition.coordinator);
+        let scheduler_notifier = composition.scheduler_handle.wake_notifier();
         Self {
             ingress,
             workflow,
@@ -1044,35 +963,25 @@ impl RebornBinaryE2EHarness {
             model_gateway,
             capability_recorder,
             milestone_sink,
-            worker: composition.worker,
-            cancel: CancellationToken::new(),
-            worker_tasks: Vec::new(),
+            scheduler_handle: Some(composition.scheduler_handle),
+            scheduler_notifier,
             _turn_root: turn_root,
-            _wake_sender: composition.wake_sender,
         }
     }
 
     pub fn start(&mut self) {
-        self.start_workers(1);
+        // The scheduler is started automatically inside build_default_planned_runtime.
+        // This method is kept for API compatibility.
     }
 
-    pub fn start_workers(&mut self, count: usize) {
-        if !self.worker_tasks.is_empty() {
-            return;
-        }
-        for _ in 0..count.max(1) {
-            let worker = Arc::clone(&self.worker);
-            let cancel = self.cancel.clone();
-            self.worker_tasks.push(tokio::spawn(async move {
-                worker.run(cancel).await;
-            }));
-        }
+    pub fn start_workers(&mut self, _count: usize) {
+        // The scheduler is started automatically inside build_default_planned_runtime.
+        // Worker count is configured via DefaultPlannedRuntimeConfig.worker_count.
     }
 
     pub async fn shutdown(&mut self) {
-        self.cancel.cancel();
-        for task in self.worker_tasks.drain(..) {
-            let _ = task.await;
+        if let Some(scheduler) = self.scheduler_handle.take() {
+            scheduler.shutdown().await;
         }
     }
 
@@ -1442,7 +1351,11 @@ impl RebornBinaryE2EHarness {
 
 impl Drop for RebornBinaryE2EHarness {
     fn drop(&mut self) {
-        self.cancel.cancel();
+        // Scheduler handle is Option<TurnRunSchedulerHandle>; shutdown is async
+        // and cannot be called from Drop. The handle is taken in shutdown() and
+        // here we just let it drop. The scheduler supervisor task exits when the
+        // command channel closes on drop.
+        let _ = self.scheduler_handle.take();
     }
 }
 
@@ -1751,6 +1664,8 @@ impl HostRuntimeCapabilityHarness {
                 CapabilityId::new(SKILL_REMOVE_CAPABILITY_ID)?,
                 CapabilityId::new(TRIGGER_CREATE_CAPABILITY_ID)?,
                 CapabilityId::new(TRIGGER_LIST_CAPABILITY_ID)?,
+                CapabilityId::new(TRIGGER_PAUSE_CAPABILITY_ID)?,
+                CapabilityId::new(TRIGGER_RESUME_CAPABILITY_ID)?,
                 CapabilityId::new(TRIGGER_REMOVE_CAPABILITY_ID)?,
             ],
             runtime_kind: RuntimeKind::FirstParty,
@@ -1836,6 +1751,8 @@ impl HostRuntimeCapabilityHarness {
             vec![
                 CapabilityId::new(TRIGGER_CREATE_CAPABILITY_ID)?,
                 CapabilityId::new(TRIGGER_LIST_CAPABILITY_ID)?,
+                CapabilityId::new(TRIGGER_PAUSE_CAPABILITY_ID)?,
+                CapabilityId::new(TRIGGER_RESUME_CAPABILITY_ID)?,
                 CapabilityId::new(TRIGGER_REMOVE_CAPABILITY_ID)?,
             ],
             vec![EffectKind::DispatchCapability, EffectKind::ExternalWrite],
@@ -2927,6 +2844,17 @@ impl SecretStore for StaticSecretStore {
         }))
     }
 
+    async fn metadata_for_scope(
+        &self,
+        scope: &ResourceScope,
+    ) -> Result<Vec<SecretMetadata>, SecretStoreError> {
+        Ok(vec![SecretMetadata {
+            scope: scope.clone(),
+            handle: self.handle.clone(),
+            expires_at: None,
+        }])
+    }
+
     async fn delete(
         &self,
         _scope: &ResourceScope,
@@ -3642,27 +3570,64 @@ fn route_kind_for_trigger(trigger: ProductTriggerReason) -> ProductConversationR
     }
 }
 
-fn scoped_turns_fs<F>(
-    backend: Arc<F>,
+fn scoped_turns_fs(
+    backend: Arc<HarnessTurnStorageBackend>,
     binding: &ResolvedBinding,
-) -> HarnessResult<Arc<ScopedFilesystem<F>>>
-where
-    F: RootFilesystem,
-{
+) -> HarnessResult<Arc<ScopedFilesystem<HarnessTurnBackend>>> {
     let owner_user_id = binding
         .subject_user_id
         .as_ref()
         .unwrap_or(&binding.actor_user_id);
-    let target = format!(
-        "/engine/tenants/{}/users/{}/turns",
-        binding.tenant_id, owner_user_id
-    );
+    // Include agent_id and project_id in the path when present so that
+    // distinct agents or projects stored under the same tenant/user
+    // (e.g. shared-storage multi-harness tests) get isolated turn state
+    // files and cannot cross-claim each other's queued runs.
+    let target = match (binding.agent_id.as_ref(), binding.project_id.as_ref()) {
+        (Some(agent_id), Some(project_id)) => format!(
+            "/engine/tenants/{}/agents/{}/projects/{}/users/{}/turns",
+            binding.tenant_id, agent_id, project_id, owner_user_id
+        ),
+        (Some(agent_id), None) => format!(
+            "/engine/tenants/{}/agents/{}/users/{}/turns",
+            binding.tenant_id, agent_id, owner_user_id
+        ),
+        (None, Some(project_id)) => format!(
+            "/engine/tenants/{}/projects/{}/users/{}/turns",
+            binding.tenant_id, project_id, owner_user_id
+        ),
+        (None, None) => format!(
+            "/engine/tenants/{}/users/{}/turns",
+            binding.tenant_id, owner_user_id
+        ),
+    };
     let mounts = MountView::new(vec![MountGrant::new(
         MountAlias::new("/turns").expect("valid turns alias"),
         VirtualPath::new(target).expect("valid turns target"),
         MountPermissions::read_write_list_delete(),
     )])?;
-    Ok(Arc::new(ScopedFilesystem::with_fixed_view(backend, mounts)))
+    Ok(Arc::new(ScopedFilesystem::with_fixed_view(
+        turn_state_root_filesystem(backend)?,
+        mounts,
+    )))
+}
+
+fn turn_state_root_filesystem(
+    backend: Arc<HarnessTurnStorageBackend>,
+) -> HarnessResult<Arc<HarnessTurnBackend>> {
+    let mut root = CompositeRootFilesystem::new();
+    root.mount(
+        local_dev_mount_descriptor(
+            "/engine",
+            "reborn-harness-turn-state",
+            BackendKind::MemoryDocuments,
+            StorageClass::StructuredRecords,
+            ContentKind::StructuredRecord,
+            IndexPolicy::NotIndexed,
+            backend.capabilities(),
+        )?,
+        backend,
+    )?;
+    Ok(Arc::new(root))
 }
 
 pub fn trace_tool_call_response() -> ironclaw_loop_support::HostManagedModelResponse {

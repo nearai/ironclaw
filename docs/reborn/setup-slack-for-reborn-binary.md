@@ -8,8 +8,9 @@ Slack support has two gates:
 1. The binary must be built with the `slack-v2-host-beta` Cargo feature.
 2. Runtime config must set `[slack].enabled = true`.
 
-Slack secrets are environment variables only. Do not put bot tokens, signing
-secrets, OAuth client secrets, or LLM keys in `config.toml`.
+Slack bot token and signing secret are configured in WebUI Slack setup and
+stored in the Reborn secret store. Do not put OAuth client secrets or LLM keys
+in `config.toml`.
 
 ## Build or Run With Slack
 
@@ -73,9 +74,6 @@ export IRONCLAW_REBORN_WEBUI_USER_ID="reborn-cli"
 # LLM provider selected by [llm.default] in config.toml.
 export OPENAI_API_KEY="sk-..."
 
-# Slack secrets. The config stores only these variable names.
-export IRONCLAW_REBORN_SLACK_SIGNING_SECRET="<slack-signing-secret>"
-export IRONCLAW_REBORN_SLACK_BOT_TOKEN="xoxb-..."
 ```
 
 Optional public WebUI login or OAuth flows may also need
@@ -91,8 +89,6 @@ IRONCLAW_REBORN_HOME=/data/ironclaw-reborn
 IRONCLAW_REBORN_PROFILE=local-dev
 IRONCLAW_REBORN_WEBUI_TOKEN=<random-hex-32-bytes-or-longer>
 IRONCLAW_REBORN_WEBUI_USER_ID=reborn-cli
-IRONCLAW_REBORN_SLACK_SIGNING_SECRET=<slack-signing-secret>
-IRONCLAW_REBORN_SLACK_BOT_TOKEN=xoxb-...
 OPENAI_API_KEY=sk-...
 ```
 
@@ -106,54 +102,30 @@ Minimal Slack config:
 ```toml
 [slack]
 enabled = true
-installation_id = "install-alpha"
-team_id = "T1234567890"
-api_app_id = "A1234567890"
-signing_secret_env = "IRONCLAW_REBORN_SLACK_SIGNING_SECRET"
-bot_token_env = "IRONCLAW_REBORN_SLACK_BOT_TOKEN"
 ```
 
-Field notes:
+`enabled` is the only Slack boot setting. It mounts
+`POST /webhooks/slack/events` and exposes Slack channel setup in WebUI.
+Slack installation ids, team/app ids, the bot token, the signing secret,
+and channel mappings are configured after startup from WebUI channel setup.
 
-| Field | Required | Purpose |
-| --- | --- | --- |
-| `enabled` | Yes | Mounts `POST /webhooks/slack/events`. Env vars alone do not enable Slack. |
-| `installation_id` | Yes | Stable local id for this Slack app/workspace installation. Choose a durable operator-owned string. |
-| `team_id` | Yes | Slack workspace/team id, usually visible as `team_id` in Events API payloads. |
-| `api_app_id` | Yes | Slack app id, visible as `api_app_id` in Events API payloads. Required for personal-binding pairing. |
-| `signing_secret_env` | No | Env var containing the Slack signing secret. Defaults to `IRONCLAW_REBORN_SLACK_SIGNING_SECRET`. |
-| `bot_token_env` | No | Env var containing the Slack bot token. Defaults to `IRONCLAW_REBORN_SLACK_BOT_TOKEN`. |
-| `slack_user_id` | No | Legacy static Slack user mapping. Omit for the pairing-code flow. |
-| `user_id` | No | Reborn user id for the legacy mapped user and host-mediated Slack egress. Defaults to `IRONCLAW_REBORN_WEBUI_USER_ID`. |
-| `shared_subject_user_id` | No | Reborn user scope for shared Slack channel turns. Omit when using explicit channel routes. |
-| `[[slack.channel_routes]]` | No | Static Slack channel id to Reborn user scope mappings for app mentions and thread replies. |
+In WebUI, open Extensions, Slack, then Slack workspace setup. Save:
 
-Optional static routing examples:
+| Field | Purpose |
+| --- | --- |
+| Installation ID | Stable local id for this Slack app/workspace installation. Choose a durable operator-owned string. |
+| Team ID | Slack workspace/team id, usually visible as `team_id` in Events API payloads. |
+| App ID | Slack app id, visible as `api_app_id` in Events API payloads. |
+| Bot user | Optional Reborn user id for Slack host-mediated egress. Defaults to the WebUI operator. |
+| Shared subject | Optional Reborn user scope available for shared-channel routing. |
+| Bot token | Slack bot token. Stored in the Reborn secret store; never returned by the API. |
+| Signing secret | Slack signing secret. Stored in the Reborn secret store; never returned by the API. |
 
-```toml
-[slack]
-enabled = true
-installation_id = "install-alpha"
-team_id = "T1234567890"
-api_app_id = "A1234567890"
-signing_secret_env = "IRONCLAW_REBORN_SLACK_SIGNING_SECRET"
-bot_token_env = "IRONCLAW_REBORN_SLACK_BOT_TOKEN"
+After Slack setup is configured, use the same Slack channel setup section to
+map Slack channel ids to team agents.
 
-# Optional: one shared Reborn subject for unrouted shared-channel turns.
-shared_subject_user_id = "slack-team-agent"
-
-[[slack.channel_routes]]
-channel_id = "CENG123456"
-subject_user_id = "eng-team-agent"
-
-[[slack.channel_routes]]
-channel_id = "CSUPPORT123"
-subject_user_id = "support-team-agent"
-```
-
-In host-beta admin-managed mode, dynamic channel routes saved through WebUI
-take precedence over static `channel_routes`. Unrouted shared Slack channels
-fail closed instead of silently inheriting a personal/default user scope.
+Unrouted shared Slack channels fail closed instead of silently inheriting a
+personal/default user scope.
 
 ## Slack App Configuration
 
@@ -161,8 +133,8 @@ Create or edit a Slack app at `api.slack.com/apps`.
 
 Basic Information:
 
-- Copy `Signing Secret` into `IRONCLAW_REBORN_SLACK_SIGNING_SECRET`.
-- Copy `App ID` into `[slack].api_app_id`.
+- Copy `Signing Secret` into WebUI Slack workspace setup.
+- Copy `App ID` into WebUI Slack workspace setup.
 
 OAuth & Permissions:
 
@@ -177,7 +149,7 @@ OAuth & Permissions:
   - `mpim:history` if the bot should receive group-DM message events.
   - `files:read` if Slack file attachments should be downloaded and processed.
 - Install or reinstall the app to the workspace after changing scopes.
-- Copy `Bot User OAuth Token` into `IRONCLAW_REBORN_SLACK_BOT_TOKEN`.
+- Copy `Bot User OAuth Token` into WebUI Slack workspace setup.
 
 Event Subscriptions:
 
@@ -275,7 +247,33 @@ Verification checklist:
 
 ## Troubleshooting
 
-### [slack].enabled = true requires ... slack-v2-host-beta\n\nRebuild or rerun ironclaw-reborn with --features slack-v2-host-beta.\n\n### Slack route never receives events\n\nConfirm the Slack Request URL is exactly https://<public-host>/webhooks/slack/events, the public URL reaches the Reborn listener, and Socket Mode is disabled for this host-beta path.\n\n### Slack URL verification fails\n\nConfirm IRONCLAW_REBORN_SLACK_SIGNING_SECRET matches the app signing secret and that any proxy preserves the raw request body and Slack signature headers.\n\n### Slack replies fail with missing_scope\n\nAdd or confirm chat:write, reinstall the Slack app, and update IRONCLAW_REBORN_SLACK_BOT_TOKEN if Slack issued a new token.\n\n### Pairing code DM fails\n\nConfirm im:write and chat:write, reinstall the app, and verify the bot token starts with xoxb-.\n\n### Channel mention does not reach Reborn\n\nConfirm the app is invited to the channel, app_mention is subscribed, and [slack].team_id / [slack].api_app_id match the Slack app that emitted the event.\n\n### Shared-channel turns are rejected\n\nAdd a static [[slack.channel_routes]] entry, configure shared_subject_user_id, or use the WebUI Slack channel picker to allow the channel.
+### [slack].enabled = true requires ... slack-v2-host-beta
+
+Rebuild or rerun ironclaw-reborn with --features slack-v2-host-beta.
+
+### Slack route never receives events
+
+Confirm the Slack Request URL is exactly https://<public-host>/webhooks/slack/events, the public URL reaches the Reborn listener, and Socket Mode is disabled for this host-beta path.
+
+### Slack URL verification fails
+
+Confirm the WebUI Slack setup signing secret matches the app signing secret and that any proxy preserves the raw request body and Slack signature headers.
+
+### Slack replies fail with missing_scope
+
+Add or confirm chat:write, reinstall the Slack app, and update the bot token in WebUI Slack setup if Slack issued a new token.
+
+### Pairing code DM fails
+
+Confirm im:write and chat:write, reinstall the app, and verify the bot token in WebUI Slack setup starts with xoxb-.
+
+### Channel mention does not reach Reborn
+
+Confirm the app is invited to the channel, app_mention is subscribed, and the Team ID / App ID in WebUI Slack setup match the Slack app that emitted the event.
+
+### Shared-channel turns are rejected
+
+Configure Shared subject or use the WebUI Slack channel picker to allow the channel.
 
 ## Slack References
 

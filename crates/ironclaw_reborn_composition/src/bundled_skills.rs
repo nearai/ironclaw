@@ -102,6 +102,7 @@ pub(crate) fn bundled_reborn_skill_summaries() -> Result<Vec<SkillSummary>, Rebo
             keywords: skill.keywords,
             tags: skill.tags,
             requires_skills: skill.requires_skills,
+            auto_activate: true,
         })
         .collect())
 }

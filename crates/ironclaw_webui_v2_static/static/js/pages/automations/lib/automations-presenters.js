@@ -224,6 +224,22 @@ export function stateTone(state) {
   return STATE_PRESENTATION[state]?.tone || "muted";
 }
 
+export function primaryStatusLabel(automation, t) {
+  if (isBrowserActive(automation) && automation?.has_running_run) {
+    return tr(t)("automations.status.running");
+  }
+  if (isBrowserActive(automation) && automation?.has_failed_runs) {
+    return tr(t)("automations.status.needsReview");
+  }
+  return stateLabel(automation?.state, t);
+}
+
+export function primaryStatusTone(automation) {
+  if (isBrowserActive(automation) && automation?.has_running_run) return "info";
+  if (isBrowserActive(automation) && automation?.has_failed_runs) return "danger";
+  return stateTone(automation?.state);
+}
+
 export function lastStatusLabel(status, t) {
   const key = LAST_STATUS_PRESENTATION[status]?.labelKey || "automations.lastStatus.none";
   return tr(t)(key);
@@ -278,14 +294,22 @@ function normalizeAutomation(automation, t, locale) {
     null;
   const lastStatus = lastCompletedRun?.status || automation.last_status;
   const lastRunAt = lastCompletedRun?.completed_at || automation.last_run_at || null;
+  const normalized = {
+    ...automation,
+    recent_runs: recentRuns,
+    has_running_run: recentRuns.some((run) => run.status === "running"),
+    has_failed_runs: recentRuns.some((run) => run.status === "error"),
+  };
 
   return {
-    ...automation,
+    ...normalized,
     display_name: automation.name || tx("automations.untitled"),
     schedule_timezone: automation.source?.timezone || "UTC",
     schedule_label: automationScheduleLabel(automation.source, t, locale),
     state_label: stateLabel(automation.state, t),
     state_tone: stateTone(automation.state),
+    primary_status_label: primaryStatusLabel(normalized, t),
+    primary_status_tone: primaryStatusTone(normalized),
     next_run_timestamp: parseTimestamp(automation.next_run_at),
     next_run_label: formatAutomationDate(
       automation.next_run_at,
@@ -300,11 +324,8 @@ function normalizeAutomation(automation, t, locale) {
       tx("automations.date.unknown"),
       locale,
     ),
-    recent_runs: recentRuns,
     latest_run: latestRun,
     current_run: currentRun,
-    has_running_run: recentRuns.some((run) => run.status === "running"),
-    has_failed_runs: recentRuns.some((run) => run.status === "error"),
     success_rate_label: successRateLabel(recentRuns, t),
   };
 }
