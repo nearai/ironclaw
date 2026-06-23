@@ -2728,6 +2728,7 @@ async fn planned_host_factory_create_host_uses_profiled_capabilities() {
 
     let outcome = host
         .invoke_capability(CapabilityInvocation {
+            activity_id: ironclaw_turns::CapabilityActivityId::new(),
             surface_version: surface.version,
             capability_id: denied_id,
             input_ref: CapabilityInputRef::new("input:denied-from-planned-host").unwrap(),
@@ -3062,6 +3063,7 @@ async fn default_planned_runtime_composes_no_profile_coordinator_and_profiled_ho
 
     let outcome = host
         .invoke_capability(CapabilityInvocation {
+            activity_id: ironclaw_turns::CapabilityActivityId::new(),
             surface_version: surface.version,
             capability_id: denied_id,
             input_ref: CapabilityInputRef::new("input:runtime-denied").unwrap(),
@@ -3438,6 +3440,7 @@ async fn hooks_flag_off_capability_invocation_is_unaffected() {
     )));
     let outcome = host
         .invoke_capability(CapabilityInvocation {
+            activity_id: ironclaw_turns::CapabilityActivityId::new(),
             surface_version,
             capability_id: allowed_id.clone(),
             input_ref,
@@ -3481,6 +3484,7 @@ async fn hooks_flag_on_first_party_only_does_not_change_outcome() {
     )));
     let outcome = host
         .invoke_capability(CapabilityInvocation {
+            activity_id: ironclaw_turns::CapabilityActivityId::new(),
             surface_version,
             capability_id: allowed_id.clone(),
             input_ref,
@@ -3517,6 +3521,7 @@ async fn hooks_flag_on_extension_deny_hook_denies_through_composed_runtime() {
     // capability port resolves input or reaches the inner runtime.
     let outcome = host
         .invoke_capability(CapabilityInvocation {
+            activity_id: ironclaw_turns::CapabilityActivityId::new(),
             surface_version,
             capability_id: allowed_id.clone(),
             input_ref: CapabilityInputRef::new("input:hooks-deny").unwrap(),
@@ -3553,6 +3558,7 @@ async fn hooks_are_isolated_per_tenant_runtime() {
     .await;
     let outcome_a = host_a
         .invoke_capability(CapabilityInvocation {
+            activity_id: ironclaw_turns::CapabilityActivityId::new(),
             surface_version: surface_a,
             capability_id: allowed_id.clone(),
             input_ref: CapabilityInputRef::new("input:tenant-a").unwrap(),
@@ -3582,6 +3588,7 @@ async fn hooks_are_isolated_per_tenant_runtime() {
     )));
     let outcome_b = host_b
         .invoke_capability(CapabilityInvocation {
+            activity_id: ironclaw_turns::CapabilityActivityId::new(),
             surface_version: surface_b,
             capability_id: allowed_id.clone(),
             input_ref: input_ref_b,
@@ -5182,6 +5189,7 @@ async fn text_only_host_skill_context_does_not_expand_capability_surface() {
     let outcome = host
         .invoke_capability_batch(ironclaw_turns::run_profile::CapabilityBatchInvocation {
             invocations: vec![CapabilityInvocation {
+                activity_id: ironclaw_turns::CapabilityActivityId::new(),
                 surface_version: surface.version,
                 capability_id: CapabilityId::new("demo.echo").unwrap(),
                 input_ref: CapabilityInputRef::new("input:opaque-tool-input").unwrap(),
@@ -5309,6 +5317,7 @@ async fn text_only_host_routes_capability_invocation_through_host_runtime() {
 
     let outcome = host
         .invoke_capability(CapabilityInvocation {
+            activity_id: ironclaw_turns::CapabilityActivityId::new(),
             surface_version: surface.version.clone(),
             capability_id: capability_id.clone(),
             input_ref,
@@ -5374,6 +5383,7 @@ async fn text_only_host_profiled_capabilities_filter_surface_and_invocation() {
 
     let outcome = host
         .invoke_capability(CapabilityInvocation {
+            activity_id: ironclaw_turns::CapabilityActivityId::new(),
             surface_version: surface.version,
             capability_id: denied_id,
             input_ref: CapabilityInputRef::new("input:denied-profile").unwrap(),
@@ -5450,6 +5460,7 @@ async fn default_strategy_filter_all_loses_to_host_profile_filter() {
     // strategy's implicit `All` permit.
     let outcome = host
         .invoke_capability(CapabilityInvocation {
+            activity_id: ironclaw_turns::CapabilityActivityId::new(),
             surface_version: surface.version,
             capability_id: tool_b_id,
             input_ref: CapabilityInputRef::new("input:tool-b-denied").unwrap(),
@@ -5524,6 +5535,7 @@ async fn text_only_host_uses_fresh_execution_context_per_capability_invocation()
     for input_ref in [first_input, second_input] {
         let outcome = host
             .invoke_capability(CapabilityInvocation {
+                activity_id: ironclaw_turns::CapabilityActivityId::new(),
                 surface_version: surface.version.clone(),
                 capability_id: capability_id.clone(),
                 input_ref,
@@ -5613,6 +5625,7 @@ async fn text_only_host_rejects_outside_surface_capability_before_host_runtime()
         .unwrap();
     let denied = host
         .invoke_capability(CapabilityInvocation {
+            activity_id: ironclaw_turns::CapabilityActivityId::new(),
             surface_version: surface.version,
             capability_id: hidden_id,
             input_ref: CapabilityInputRef::new("input:hidden-request").unwrap(),
@@ -5630,6 +5643,7 @@ async fn text_only_host_rejects_outside_surface_capability_before_host_runtime()
 
     let stale = host
         .invoke_capability(CapabilityInvocation {
+            activity_id: ironclaw_turns::CapabilityActivityId::new(),
             surface_version: CapabilitySurfaceVersion::new("sha256:stale").unwrap(),
             capability_id: visible_id,
             input_ref: CapabilityInputRef::new("input:stale-request").unwrap(),
@@ -5685,6 +5699,7 @@ async fn text_only_host_sanitizes_runtime_failure_message_before_driver_output()
 
     let outcome = host
         .invoke_capability(CapabilityInvocation {
+            activity_id: ironclaw_turns::CapabilityActivityId::new(),
             surface_version: surface.version,
             capability_id,
             input_ref,
@@ -5791,6 +5806,7 @@ async fn text_only_host_maps_runtime_suspension_and_process_outcomes() {
     for (capability_id, input_ref) in cases {
         outcomes.push(
             host.invoke_capability(CapabilityInvocation {
+                activity_id: ironclaw_turns::CapabilityActivityId::new(),
                 surface_version: surface.version.clone(),
                 capability_id,
                 input_ref,
@@ -5877,6 +5893,7 @@ async fn text_only_host_maps_explicit_unknown_runtime_outcome_to_failure() {
 
     let outcome = host
         .invoke_capability(CapabilityInvocation {
+            activity_id: ironclaw_turns::CapabilityActivityId::new(),
             surface_version: surface.version,
             capability_id,
             input_ref,
@@ -5946,6 +5963,7 @@ async fn text_only_host_preserves_invalid_request_and_returns_unavailable_as_fai
 
     let invalid = host
         .invoke_capability(CapabilityInvocation {
+            activity_id: ironclaw_turns::CapabilityActivityId::new(),
             surface_version: surface.version.clone(),
             capability_id: capability_id.clone(),
             input_ref: first_input,
@@ -5956,6 +5974,7 @@ async fn text_only_host_preserves_invalid_request_and_returns_unavailable_as_fai
         .unwrap_err();
     let unavailable = host
         .invoke_capability(CapabilityInvocation {
+            activity_id: ironclaw_turns::CapabilityActivityId::new(),
             surface_version: surface.version,
             capability_id,
             input_ref: second_input,
@@ -6032,6 +6051,7 @@ async fn text_only_host_batch_stops_on_first_suspension_before_later_invocations
         .invoke_capability_batch(ironclaw_turns::run_profile::CapabilityBatchInvocation {
             invocations: vec![
                 CapabilityInvocation {
+                    activity_id: ironclaw_turns::CapabilityActivityId::new(),
                     surface_version: surface.version.clone(),
                     capability_id: approval_id,
                     input_ref: approval_input,
@@ -6039,6 +6059,7 @@ async fn text_only_host_batch_stops_on_first_suspension_before_later_invocations
                     auth_resume: None,
                 },
                 CapabilityInvocation {
+                    activity_id: ironclaw_turns::CapabilityActivityId::new(),
                     surface_version: surface.version,
                     capability_id: echo_id,
                     input_ref: echo_input,
@@ -6098,6 +6119,7 @@ async fn text_only_host_does_not_reinvoke_runtime_after_failed_outcome_retry() {
         .await
         .unwrap();
     let invocation = CapabilityInvocation {
+        activity_id: ironclaw_turns::CapabilityActivityId::new(),
         surface_version: surface.version,
         capability_id: capability_id.clone(),
         input_ref,
@@ -6221,6 +6243,7 @@ async fn text_only_host_waits_for_concurrent_duplicate_invocation_result() {
         .await
         .unwrap();
     let invocation = CapabilityInvocation {
+        activity_id: ironclaw_turns::CapabilityActivityId::new(),
         surface_version: surface.version,
         capability_id: capability_id.clone(),
         input_ref,
@@ -6302,6 +6325,7 @@ async fn text_only_host_bounds_completed_dispatch_records() {
     for input_ref in input_refs.iter().cloned() {
         let outcome = host
             .invoke_capability(CapabilityInvocation {
+                activity_id: ironclaw_turns::CapabilityActivityId::new(),
                 surface_version: surface.version.clone(),
                 capability_id: capability_id.clone(),
                 input_ref,
@@ -6314,6 +6338,7 @@ async fn text_only_host_bounds_completed_dispatch_records() {
     }
     let retried = host
         .invoke_capability(CapabilityInvocation {
+            activity_id: ironclaw_turns::CapabilityActivityId::new(),
             surface_version: surface.version,
             capability_id,
             input_ref: input_refs[0].clone(),
@@ -6417,6 +6442,7 @@ async fn text_only_host_does_not_reinvoke_runtime_after_result_write_failure_ret
         .await
         .unwrap();
     let invocation = CapabilityInvocation {
+        activity_id: ironclaw_turns::CapabilityActivityId::new(),
         surface_version: surface.version,
         capability_id: capability_id.clone(),
         input_ref,
@@ -6486,6 +6512,7 @@ async fn text_only_host_rejects_runtime_outcome_for_different_capability() {
 
     let error = host
         .invoke_capability(CapabilityInvocation {
+            activity_id: ironclaw_turns::CapabilityActivityId::new(),
             surface_version: surface.version,
             capability_id: requested_id,
             input_ref,
@@ -6557,6 +6584,7 @@ async fn text_only_host_rejects_previous_surface_after_refetch() {
 
     let stale = host
         .invoke_capability(CapabilityInvocation {
+            activity_id: ironclaw_turns::CapabilityActivityId::new(),
             surface_version: first_surface.version,
             capability_id: first_id,
             input_ref,
@@ -6582,6 +6610,7 @@ async fn text_only_host_empty_capability_surface_denies_invocation() {
     let outcome = host
         .invoke_capability_batch(ironclaw_turns::run_profile::CapabilityBatchInvocation {
             invocations: vec![CapabilityInvocation {
+                activity_id: ironclaw_turns::CapabilityActivityId::new(),
                 surface_version: surface.version.clone(),
                 capability_id: CapabilityId::new("demo.echo").unwrap(),
                 input_ref: CapabilityInputRef::new("input:opaque-tool-input").unwrap(),
@@ -6600,6 +6629,7 @@ async fn text_only_host_empty_capability_surface_denies_invocation() {
 
     let stale = host
         .invoke_capability(CapabilityInvocation {
+            activity_id: ironclaw_turns::CapabilityActivityId::new(),
             surface_version: CapabilitySurfaceVersion::new("other:v1").unwrap(),
             capability_id: CapabilityId::new("demo.echo").unwrap(),
             input_ref: CapabilityInputRef::new("input:opaque-tool-input").unwrap(),
@@ -6670,6 +6700,7 @@ async fn text_only_host_e2e_invokes_script_capability_through_real_host_runtime(
 
     let outcome = host
         .invoke_capability(CapabilityInvocation {
+            activity_id: ironclaw_turns::CapabilityActivityId::new(),
             surface_version: surface.version,
             capability_id: e2e_script_capability_id(),
             input_ref,
@@ -6724,6 +6755,7 @@ async fn text_only_host_denies_capability_without_provider_trust_before_host_run
 
     let denied = host
         .invoke_capability(CapabilityInvocation {
+            activity_id: ironclaw_turns::CapabilityActivityId::new(),
             surface_version: surface.version,
             capability_id,
             input_ref,
@@ -6783,6 +6815,7 @@ async fn text_only_host_allows_retry_after_missing_capability_input_is_staged() 
         .await
         .unwrap();
     let invocation = CapabilityInvocation {
+        activity_id: ironclaw_turns::CapabilityActivityId::new(),
         surface_version: surface.version,
         capability_id: capability_id.clone(),
         input_ref: input_ref.clone(),
@@ -7654,6 +7687,7 @@ impl AgentLoopDriver for ScriptCapabilityFinalReplyDriver {
             .map_err(driver_host_error)?;
         let capability = host
             .invoke_capability(CapabilityInvocation {
+                activity_id: ironclaw_turns::CapabilityActivityId::new(),
                 surface_version: surface.version.clone(),
                 capability_id: self.capability_id.clone(),
                 input_ref: self.input_ref.clone(),
@@ -8325,6 +8359,7 @@ impl RecordingGateway {
             usage: None,
             output: ParentLoopOutput::CapabilityCalls(vec![
                 ironclaw_turns::run_profile::CapabilityCallCandidate {
+                    activity_id: ironclaw_turns::CapabilityActivityId::new(),
                     surface_version: CapabilitySurfaceVersion::new("empty:v1").unwrap(),
                     capability_id: CapabilityId::new("demo.echo").unwrap(),
                     input_ref: CapabilityInputRef::new("input:opaque-tool-call").unwrap(),

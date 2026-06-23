@@ -22,7 +22,7 @@ import {
 // the item shapes.
 //
 // Items are externally-tagged enums so each entry carries exactly
-// one of `{ run_status, thinking, text, gate }` as a sub-object.
+// one renderable sub-object such as `{ run_status, thinking, text, gate }`.
 //
 // Status mapping (from `RunStatus.status`):
 //   "queued" | "running"           → processing
@@ -50,10 +50,9 @@ export function useChatEvents({
   // input/output previews are recovered from the durable record even when
   // the run failed, was cancelled, or needs recovery.
   const settledRunsRef = React.useRef(new Set());
-  // Last `run_status.run_id` we've observed, persisted across event
-  // frames. Used by `applyProjectionItems` to correlate an `item.gate`
-  // (which doesn't carry `run_id`) with the active run so resolveGate
-  // can build its `/runs/{run_id}/gates/{gate_ref}/resolve` URL.
+  // Last `run_status.run_id` we've observed, persisted across event frames.
+  // Used to reject stale terminal statuses after a locally resolved gate
+  // resumes a newer active run.
   const latestRunIdRef = React.useRef(null);
   const promptRunIdRef = React.useRef(null);
 
@@ -285,15 +284,8 @@ function applyProjectionItems({
   locallyResolvedGatesRef,
   toolActivityStateRef,
 }) {
-  // Snapshot the run_id surfaced by the most recent `run_status` item
-  // we've seen — either earlier in this same items batch, or carried
-  // over from a prior frame via `latestRunIdRef`. `item.gate` doesn't
-  // include a `run_id`, but resolveGate at the v2 endpoint needs both
-  // `run_id` + `gate_ref` in the URL, so we have to correlate the
-  // gate back to whichever run is currently active. setActiveRun is a
-  // React setter and doesn't update synchronously inside this loop;
-  // tracking the value locally lets the gate handler that runs later
-  // in the same iteration see the run we just learned about.
+  // Snapshot the most recent run id so stale terminal run_status frames can
+  // be filtered while a locally resolved gate is resuming a newer run.
   let activeRunId = latestRunIdRef?.current ?? null;
   for (const item of items) {
     if (item.run_status) {
@@ -490,21 +482,18 @@ function applyProjectionItems({
     }
 
     if (item.gate) {
-      // ProductProjectionItem::Gate carries gate_ref but not run_id, so we correlate to the
-      // active run (snapshotted above). Without a run_id the
-      // pendingGate is unusable (`resolveGate` would 400 at the path
-      // construction in `api.js`), so skip emitting the gate entirely
-      // if no run is active yet — a later projection_update will
-      // re-surface it once a run_status arrives.
+      const runId = item.gate.run_id || null;
       if (
-        activeRunId &&
-        promptRunIdRef?.current === activeRunId &&
-        !isLocallyResolvedGate(locallyResolvedGatesRef, activeRunId, item.gate.gate_ref)
+        runId &&
+        promptRunIdRef?.current === runId &&
+        !isLocallyResolvedGate(locallyResolvedGatesRef, runId, item.gate.gate_ref)
       ) {
         setPendingGate((current) => current || {
           kind: "gate",
-          runId: activeRunId,
+          gateKind: item.gate.gate_kind || "generic",
+          runId,
           gateRef: item.gate.gate_ref,
+          invocationId: item.gate.invocation_id || null,
           headline: item.gate.headline,
           body: "",
           allowAlways: item.gate.allow_always === true,

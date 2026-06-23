@@ -109,6 +109,18 @@ Reducer rules:
 - product-facing capability activity projections expose only metadata-safe
   lifecycle facts; raw tool arguments, raw output, command strings, host paths,
   and provider payloads stay outside the projection contract
+- capability activity rows are keyed by stable invocation/activity identity.
+  The loop assigns this identity before capability dispatch, and gate
+  checkpoints must persist it even when a producer blocks without a resume
+  token.
+  Gate refusal must update the parked capability activity by that identity
+  instead of creating a separate synthetic UI row. Product projections represent
+  auth/approval refusal as terminal `failed` activity with sanitized
+  `error_kind = gate_declined`; run-level `cancelled` remains reserved for
+  whole-run cancellation.
+- product-facing gate projection rows must carry the run identity and gate kind
+  needed to resolve the gate. Clients must not infer gate run identity from the
+  latest active run or from tool name/order heuristics.
 - product-facing model reasoning projections must use model-visible-sanitized
   reasoning deltas only. They are live UI hints, not canonical transcript,
   checkpoint, audit, or replay state.

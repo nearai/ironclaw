@@ -1126,7 +1126,7 @@ impl HostRuntimeLoopCapabilityPort {
             .write_capability_result(CapabilityResultWrite {
                 run_context: &self.run_context,
                 input_ref: &request.input_ref,
-                invocation_id: InvocationId::new(),
+                invocation_id: InvocationId::from_uuid(request.activity_id.as_uuid()),
                 capability_id: &request.capability_id,
                 output,
                 display_preview: None,
@@ -1245,6 +1245,7 @@ impl LoopCapabilityPort for HostRuntimeLoopCapabilityPort {
             )?;
         }
         Ok(ironclaw_turns::run_profile::CapabilityCallCandidate {
+            activity_id: CapabilityActivityId::new(),
             surface_version: prepared.surface_version,
             capability_id: prepared.capability_id,
             input_ref,
@@ -1496,6 +1497,7 @@ impl LoopCapabilityPort for HostRuntimeLoopCapabilityPort {
         let mut invocation_context = invocation_context_from_visible(
             &self.visible_request.context,
             &self.run_context,
+            request.activity_id,
             &request.capability_id,
             &capability,
             trust_decision.effective_trust.class(),
@@ -1889,6 +1891,7 @@ fn should_retry_result_write(
 fn invocation_context_from_visible(
     base: &ExecutionContext,
     run_context: &LoopRunContext,
+    activity_id: CapabilityActivityId,
     capability_id: &CapabilityId,
     capability: &RuntimeSurfaceCapabilitySnapshot,
     trust: ironclaw_host_api::TrustClass,
@@ -1910,7 +1913,7 @@ fn invocation_context_from_visible(
     // caller-supplied mounts, while this invocation context receives the execution mounts that the
     // authority resolver selected for the run and capability dispatch.
     context.mounts = execution_mounts.clone();
-    let invocation_id = InvocationId::new();
+    let invocation_id = InvocationId::from_uuid(activity_id.as_uuid());
     context.invocation_id = invocation_id;
     context.correlation_id = CorrelationId::new();
     context.process_id = None;
@@ -4446,6 +4449,7 @@ mod tests {
         );
 
         let invocation = CapabilityInvocation {
+            activity_id: ironclaw_turns::CapabilityActivityId::new(),
             surface_version: surface.version,
             capability_id: candidate.capability_id,
             input_ref: candidate.input_ref,
@@ -4458,6 +4462,7 @@ mod tests {
             .expect("capability_info invocation succeeds");
         let replayed_outcome = port
             .invoke_capability(CapabilityInvocation {
+                activity_id: ironclaw_turns::CapabilityActivityId::new(),
                 surface_version: invocation.surface_version,
                 capability_id: invocation.capability_id,
                 input_ref: invocation.input_ref,
@@ -4510,6 +4515,7 @@ mod tests {
             .await
             .expect("capability_info call should register");
         let invocation = CapabilityInvocation {
+            activity_id: ironclaw_turns::CapabilityActivityId::new(),
             surface_version: surface.version,
             capability_id: candidate.capability_id,
             input_ref: candidate.input_ref,
@@ -4580,6 +4586,7 @@ mod tests {
             "known target should include both capability_info and target ids"
         );
         port.invoke_capability(CapabilityInvocation {
+            activity_id: ironclaw_turns::CapabilityActivityId::new(),
             surface_version: surface.version,
             capability_id: candidate.capability_id,
             input_ref: candidate.input_ref,
@@ -4657,6 +4664,7 @@ mod tests {
 
             let outcome = port
                 .invoke_capability(CapabilityInvocation {
+                    activity_id: ironclaw_turns::CapabilityActivityId::new(),
                     surface_version: surface.version.clone(),
                     capability_id: candidate.capability_id,
                     input_ref: candidate.input_ref,
@@ -4739,6 +4747,7 @@ mod tests {
 
             let outcome = port
                 .invoke_capability(CapabilityInvocation {
+                    activity_id: ironclaw_turns::CapabilityActivityId::new(),
                     surface_version: surface.version.clone(),
                     capability_id: candidate.capability_id,
                     input_ref: candidate.input_ref,
@@ -4820,6 +4829,7 @@ mod tests {
 
         let outcome = port
             .invoke_capability(CapabilityInvocation {
+                activity_id: ironclaw_turns::CapabilityActivityId::new(),
                 surface_version: surface.version,
                 capability_id: candidate.capability_id,
                 input_ref: candidate.input_ref,
@@ -4883,6 +4893,7 @@ mod tests {
 
         let outcome = port
             .invoke_capability(CapabilityInvocation {
+                activity_id: ironclaw_turns::CapabilityActivityId::new(),
                 surface_version: surface.version,
                 capability_id: CapabilityId::new(capability_info::CAPABILITY_ID)
                     .expect("synthetic capability id"),
@@ -4964,6 +4975,7 @@ mod tests {
 
         let outcome = port
             .invoke_capability(CapabilityInvocation {
+                activity_id: ironclaw_turns::CapabilityActivityId::new(),
                 surface_version: surface.version,
                 capability_id: CapabilityId::new(capability_info::CAPABILITY_ID)
                     .expect("synthetic capability id"),
@@ -5111,6 +5123,7 @@ mod tests {
                 .await
                 .expect("capability_info call should register");
             port.invoke_capability(CapabilityInvocation {
+                activity_id: ironclaw_turns::CapabilityActivityId::new(),
                 surface_version: surface.version.clone(),
                 capability_id: candidate.capability_id,
                 input_ref: candidate.input_ref,
@@ -5176,6 +5189,7 @@ mod tests {
             .await
             .expect("visible capabilities load");
         port.invoke_capability(CapabilityInvocation {
+            activity_id: ironclaw_turns::CapabilityActivityId::new(),
             surface_version: surface.version,
             capability_id: capability_id.clone(),
             input_ref: CapabilityInputRef::new("input:old-builtin-capability-info")
@@ -5296,6 +5310,7 @@ mod tests {
         let input_ref = CapabilityInputRef::new("input:mount-test").expect("valid input ref");
 
         port.invoke_capability(CapabilityInvocation {
+            activity_id: ironclaw_turns::CapabilityActivityId::new(),
             surface_version: surface.version.clone(),
             capability_id: override_id.clone(),
             input_ref: input_ref.clone(),
@@ -5305,6 +5320,7 @@ mod tests {
         .await
         .expect("override invocation succeeds");
         port.invoke_capability(CapabilityInvocation {
+            activity_id: ironclaw_turns::CapabilityActivityId::new(),
             surface_version: surface.version,
             capability_id: default_id.clone(),
             input_ref,
@@ -5365,6 +5381,7 @@ mod tests {
 
         let outcome = port
             .invoke_capability(CapabilityInvocation {
+                activity_id: ironclaw_turns::CapabilityActivityId::new(),
                 surface_version: surface.version,
                 capability_id: capability_id.clone(),
                 input_ref: CapabilityInputRef::new("input:process-sandbox-plan")
@@ -5464,6 +5481,7 @@ mod tests {
 
         let error = port
             .invoke_capability(CapabilityInvocation {
+                activity_id: ironclaw_turns::CapabilityActivityId::new(),
                 surface_version: surface.version,
                 capability_id,
                 input_ref: CapabilityInputRef::new("input:direct-invalid")
@@ -5539,6 +5557,7 @@ mod tests {
 
         let outcome = port
             .invoke_capability(CapabilityInvocation {
+                activity_id: ironclaw_turns::CapabilityActivityId::new(),
                 surface_version: surface.version,
                 capability_id,
                 input_ref: candidate.input_ref,
@@ -5634,6 +5653,7 @@ mod tests {
 
         let outcome = port
             .invoke_capability(CapabilityInvocation {
+                activity_id: ironclaw_turns::CapabilityActivityId::new(),
                 surface_version: surface.version,
                 capability_id,
                 input_ref: candidate.input_ref,
@@ -5729,6 +5749,7 @@ mod tests {
 
         let outcome = port
             .invoke_capability(CapabilityInvocation {
+                activity_id: ironclaw_turns::CapabilityActivityId::new(),
                 surface_version: surface.version,
                 capability_id,
                 input_ref: candidate.input_ref,
@@ -5806,6 +5827,7 @@ mod tests {
             .expect("visible capabilities load");
 
         port.invoke_capability(CapabilityInvocation {
+            activity_id: ironclaw_turns::CapabilityActivityId::new(),
             surface_version: surface.version,
             capability_id,
             input_ref: CapabilityInputRef::new("input:direct-normalized").expect("valid input ref"),
@@ -5862,6 +5884,7 @@ mod tests {
 
         let error = port
             .invoke_capability(CapabilityInvocation {
+                activity_id: ironclaw_turns::CapabilityActivityId::new(),
                 surface_version: surface.version,
                 capability_id,
                 input_ref: CapabilityInputRef::new("input:invalid-process-sandbox-plan")
@@ -5919,6 +5942,7 @@ mod tests {
 
         let error = port
             .invoke_capability(CapabilityInvocation {
+                activity_id: ironclaw_turns::CapabilityActivityId::new(),
                 surface_version: surface.version,
                 capability_id,
                 input_ref: CapabilityInputRef::new("input:malformed-process-sandbox-plan")
@@ -5969,6 +5993,7 @@ mod tests {
         let err = invocation_context_from_visible(
             &context,
             &run_context,
+            CapabilityActivityId::new(),
             &capability_id,
             &capability,
             TrustClass::Sandbox,
@@ -6021,6 +6046,7 @@ mod tests {
         let invocation_context = invocation_context_from_visible(
             &context,
             &run_context,
+            CapabilityActivityId::new(),
             &capability_id,
             &capability,
             TrustClass::Sandbox,
@@ -6070,6 +6096,7 @@ mod tests {
         let invocation_context = invocation_context_from_visible(
             &context,
             &run_context,
+            CapabilityActivityId::new(),
             &capability_id,
             &capability,
             TrustClass::Sandbox,
@@ -6120,6 +6147,7 @@ mod tests {
         let invocation_context = invocation_context_from_visible(
             &context,
             &run_context,
+            CapabilityActivityId::new(),
             &capability_id,
             &capability,
             TrustClass::FirstParty,
@@ -6203,6 +6231,7 @@ mod tests {
         let invocation_context = invocation_context_from_visible(
             &context,
             &run_context,
+            CapabilityActivityId::new(),
             &capability_id,
             &capability,
             TrustClass::UserTrusted,
@@ -6248,6 +6277,7 @@ mod tests {
         let resume_token =
             CapabilityResumeToken::new(InvocationId::new().to_string()).expect("valid token");
         let dual_resume_invocation = CapabilityInvocation {
+            activity_id: ironclaw_turns::CapabilityActivityId::new(),
             surface_version: invocation.surface_version,
             capability_id: invocation.capability_id,
             input_ref: invocation.input_ref,
@@ -6585,6 +6615,7 @@ mod tests {
             .await
             .expect("provider tool call registers");
         CapabilityInvocation {
+            activity_id: ironclaw_turns::CapabilityActivityId::new(),
             surface_version: surface.version,
             capability_id: candidate.capability_id,
             input_ref: candidate.input_ref,

@@ -505,7 +505,7 @@ export function useChat(threadId) {
         resolution,
         outcome,
       });
-      if (resolution === "denied" && outcome === "resumed") {
+      if (isDeclinedGateResolution(resolution) && outcome === "resumed") {
         failGateToolActivity(setMessages, pendingGate, toolActivityStateRef);
       }
       setPendingGate(null);
@@ -674,6 +674,10 @@ export function useChat(threadId) {
     recoverHistory: noop,
     recoveryNotice: null,
   };
+}
+
+function isDeclinedGateResolution(resolution) {
+  return resolution === "denied" || resolution === "cancelled";
 }
 
 function retryAfterMs(err) {

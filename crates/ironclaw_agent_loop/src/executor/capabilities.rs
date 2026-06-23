@@ -114,14 +114,14 @@ impl ExecutorStage<CapabilityInput> for CapabilityStage {
         }
 
         // A run resumed from a user-DENIED auth gate must not re-dispatch the
-        // parked capability (still-missing credential → re-block → infinite loop).
-        // Surface a model-visible Authorization failure (retry forbidden) for the
-        // denied call and let unrelated calls in the same batch proceed normally.
+        // parked capability (still-missing credential -> re-block -> infinite loop).
+        // Surface a model-visible gate-declined failure (retry forbidden) for
+        // the denied call and let unrelated calls in the same batch proceed
+        // normally.
         //
-        // We call `handle_capability_error` directly (not via
-        // `handle_capability_outcome(Failed(Authorization, ...))`) because
-        // `capability_failed_summary` builds a prefix containing `"authorization:"`
-        // which is banned by `validate_loop_safe_summary`.
+        // We call `handle_capability_error` directly so the planner-visible
+        // summary can stay distinct from the stable product-facing declined
+        // reason token.
         if let Some(pending) = state.pending_auth_resume.as_ref().filter(|p| {
             matches!(
                 p.disposition.as_ref(),
@@ -162,9 +162,9 @@ impl ExecutorStage<CapabilityInput> for CapabilityStage {
         }
 
         // A run resumed from a user-DENIED approval gate must not re-dispatch
-        // the parked capability (re-dispatch → re-block → infinite loop).
+        // the parked capability (re-dispatch -> re-block -> infinite loop).
         // Mirror the auth-gate pattern above: surface a model-visible
-        // Authorization failure for only the denied call, let other parallel
+        // gate-declined failure for only the denied call, let other parallel
         // calls in the same batch proceed normally.
         if let Some(pending) = state.pending_approval_resume.as_ref().filter(|p| {
             matches!(
@@ -1009,7 +1009,7 @@ impl CapabilityStage {
     ///
     /// Partitions `visible_calls` by `denied_cap_id`.  For every call that
     /// matches the denied capability, synthesises a model-visible
-    /// `Authorization` failure (retry `Forbidden`) via `handle_capability_error`
+    /// `GateDeclined` failure (retry `Forbidden`) via `handle_capability_error`
     /// and uses `planner_summary` as the planner-visible strategy summary
     /// (must pass `validate_loop_safe_summary`).
     ///
@@ -1059,13 +1059,13 @@ impl CapabilityStage {
                         LoopProgressEvent::CapabilityActivityFailed {
                             activity_id,
                             capability_id: call.capability_id.clone(),
-                            reason_kind: CapabilityFailureKind::Authorization,
+                            reason_kind: CapabilityFailureKind::GateDeclined,
                         },
                     )
                     .await;
             }
             let failure = ironclaw_turns::run_profile::CapabilityFailure {
-                error_kind: CapabilityFailureKind::Authorization,
+                error_kind: CapabilityFailureKind::GateDeclined,
                 // Intentionally empty: model-visible text comes from
                 // `model_visible_capability_failure_observation` and the
                 // planner summary from `from_trusted_static` below.
@@ -1281,6 +1281,7 @@ mod tests {
     fn call(input: &str) -> CapabilityCallCandidate {
         let capability_id = ironclaw_host_api::CapabilityId::new("test.cap").unwrap();
         CapabilityCallCandidate {
+            activity_id: ironclaw_turns::CapabilityActivityId::new(),
             surface_version: CapabilitySurfaceVersion::new("test-v1").unwrap(),
             capability_id: capability_id.clone(),
             effective_capability_ids: vec![capability_id],

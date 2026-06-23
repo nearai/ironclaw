@@ -594,6 +594,7 @@ pub(crate) fn capability_call_from_trace_with_surface(
             }
         })?;
     Ok(CapabilityCallCandidate {
+        activity_id: ironclaw_turns::CapabilityActivityId::new(),
         surface_version,
         effective_capability_ids: vec![capability_id.clone()],
         capability_id,

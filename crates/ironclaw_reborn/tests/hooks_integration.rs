@@ -1180,6 +1180,7 @@ fn invocation(
     capability_id: &str,
 ) -> CapabilityInvocation {
     CapabilityInvocation {
+        activity_id: ironclaw_turns::CapabilityActivityId::new(),
         surface_version: surface_version.clone(),
         capability_id: CapabilityId::new(capability_id).expect("capability id literal is valid"),
         input_ref: CapabilityInputRef::new(format!("input:{capability_id}"))

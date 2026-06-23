@@ -205,6 +205,7 @@ impl LoopCapabilityPort for SurfacePrimedSpawnAuthPort {
         }
         self.register_calls.lock().unwrap().push(tool_call);
         Ok(CapabilityCallCandidate {
+            activity_id: ironclaw_turns::CapabilityActivityId::new(),
             surface_version: CapabilitySurfaceVersion::new("surface:test").unwrap(),
             capability_id: CapabilityId::new(DEFAULT_SPAWN_SUBAGENT_CAPABILITY_ID).unwrap(),
             effective_capability_ids: vec![
@@ -963,6 +964,7 @@ fn custom_tool_definition() -> ProviderToolDefinition {
 
 fn invocation(capability_id: &str) -> CapabilityInvocation {
     CapabilityInvocation {
+        activity_id: ironclaw_turns::CapabilityActivityId::new(),
         surface_version: CapabilitySurfaceVersion::new("surface:test").unwrap(),
         capability_id: CapabilityId::new(capability_id).unwrap(),
         input_ref: input_ref(),
@@ -1169,6 +1171,7 @@ fn spawn_test_port_with_codec_and_recorders(
 
 async fn invoke_spawn(port: &SubagentSpawnCapabilityPort) -> CapabilityOutcome {
     port.invoke_capability(CapabilityInvocation {
+        activity_id: ironclaw_turns::CapabilityActivityId::new(),
         surface_version: CapabilitySurfaceVersion::new("surface:test").unwrap(),
         capability_id: CapabilityId::new(DEFAULT_SPAWN_SUBAGENT_CAPABILITY_ID).unwrap(),
         input_ref: input_ref(),
@@ -1601,6 +1604,7 @@ async fn spawn_provider_tool_call_registration_does_not_require_inner_spawn_name
 
     let outcome = port
         .invoke_capability(CapabilityInvocation {
+            activity_id: ironclaw_turns::CapabilityActivityId::new(),
             surface_version: candidate.surface_version.clone(),
             capability_id: CapabilityId::new(DEFAULT_SPAWN_SUBAGENT_CAPABILITY_ID).unwrap(),
             input_ref: candidate.input_ref.clone(),
@@ -1710,6 +1714,7 @@ async fn invoke_spawn_fails_when_parent_record_is_missing() {
 
     let error = port
         .invoke_capability(CapabilityInvocation {
+            activity_id: ironclaw_turns::CapabilityActivityId::new(),
             surface_version: CapabilitySurfaceVersion::new("surface:test").unwrap(),
             capability_id: CapabilityId::new(DEFAULT_SPAWN_SUBAGENT_CAPABILITY_ID).unwrap(),
             input_ref: input_ref(),
@@ -2115,6 +2120,7 @@ async fn invoke_capability_batch_preserves_spawns_on_inner_batch_suspension() {
         .invoke_capability_batch(CapabilityBatchInvocation {
             invocations: vec![
                 CapabilityInvocation {
+                    activity_id: ironclaw_turns::CapabilityActivityId::new(),
                     surface_version: surface_version.clone(),
                     capability_id: spawn_id.clone(),
                     input_ref: input_ref_a,
@@ -2122,6 +2128,7 @@ async fn invoke_capability_batch_preserves_spawns_on_inner_batch_suspension() {
                     auth_resume: None,
                 },
                 CapabilityInvocation {
+                    activity_id: ironclaw_turns::CapabilityActivityId::new(),
                     surface_version: surface_version.clone(),
                     capability_id: spawn_id,
                     input_ref: input_ref_b,
@@ -2129,6 +2136,7 @@ async fn invoke_capability_batch_preserves_spawns_on_inner_batch_suspension() {
                     auth_resume: None,
                 },
                 CapabilityInvocation {
+                    activity_id: ironclaw_turns::CapabilityActivityId::new(),
                     surface_version,
                     capability_id: inner_id,
                     input_ref: CapabilityInputRef::new("input:inner").unwrap(),
@@ -2189,6 +2197,7 @@ async fn invoke_spawn_cancels_child_when_post_submit_thread_mark_fails() {
 
     let error = port
         .invoke_capability(CapabilityInvocation {
+            activity_id: ironclaw_turns::CapabilityActivityId::new(),
             surface_version: CapabilitySurfaceVersion::new("surface:test").unwrap(),
             capability_id: CapabilityId::new(DEFAULT_SPAWN_SUBAGENT_CAPABILITY_ID).unwrap(),
             input_ref: input_ref(),
@@ -2413,6 +2422,7 @@ async fn invoke_spawn_propagates_decode_rejection_before_side_effects() {
     let error = harness
         .port
         .invoke_capability(CapabilityInvocation {
+            activity_id: ironclaw_turns::CapabilityActivityId::new(),
             surface_version: CapabilitySurfaceVersion::new("surface:test").unwrap(),
             capability_id: CapabilityId::new(DEFAULT_SPAWN_SUBAGENT_CAPABILITY_ID).unwrap(),
             input_ref: input_ref(),
@@ -2447,6 +2457,7 @@ async fn invoke_spawn_batch_propagates_decode_rejection_before_side_effects() {
         .port
         .invoke_capability_batch(CapabilityBatchInvocation {
             invocations: vec![CapabilityInvocation {
+                activity_id: ironclaw_turns::CapabilityActivityId::new(),
                 surface_version: CapabilitySurfaceVersion::new("surface:test").unwrap(),
                 capability_id: CapabilityId::new(DEFAULT_SPAWN_SUBAGENT_CAPABILITY_ID).unwrap(),
                 input_ref: input_ref(),
@@ -2643,6 +2654,7 @@ async fn invoke_batch_coalesces_blocking_spawns_under_single_gate() {
     }
 
     let make_invocation = |input_ref: CapabilityInputRef| CapabilityInvocation {
+        activity_id: ironclaw_turns::CapabilityActivityId::new(),
         surface_version: CapabilitySurfaceVersion::new("surface:test").unwrap(),
         capability_id: CapabilityId::new(DEFAULT_SPAWN_SUBAGENT_CAPABILITY_ID).unwrap(),
         input_ref,
@@ -2737,6 +2749,7 @@ async fn invoke_batch_mixed_spawn_and_non_spawn_capabilities() {
         .invoke_capability_batch(CapabilityBatchInvocation {
             invocations: vec![
                 CapabilityInvocation {
+                    activity_id: ironclaw_turns::CapabilityActivityId::new(),
                     surface_version: surface_version.clone(),
                     capability_id: spawn_id.clone(),
                     input_ref: input_ref_a,
@@ -2744,6 +2757,7 @@ async fn invoke_batch_mixed_spawn_and_non_spawn_capabilities() {
                     auth_resume: None,
                 },
                 CapabilityInvocation {
+                    activity_id: ironclaw_turns::CapabilityActivityId::new(),
                     surface_version: surface_version.clone(),
                     capability_id: inner_id,
                     input_ref: input_ref_inner,
@@ -2751,6 +2765,7 @@ async fn invoke_batch_mixed_spawn_and_non_spawn_capabilities() {
                     auth_resume: None,
                 },
                 CapabilityInvocation {
+                    activity_id: ironclaw_turns::CapabilityActivityId::new(),
                     surface_version,
                     capability_id: spawn_id,
                     input_ref: input_ref_b,
@@ -2832,6 +2847,7 @@ async fn invoke_batch_skips_shared_gate_for_single_blocking_spawn() {
     let batch_outcome = port
         .invoke_capability_batch(CapabilityBatchInvocation {
             invocations: vec![CapabilityInvocation {
+                activity_id: ironclaw_turns::CapabilityActivityId::new(),
                 surface_version: CapabilitySurfaceVersion::new("surface:test").unwrap(),
                 capability_id: CapabilityId::new(DEFAULT_SPAWN_SUBAGENT_CAPABILITY_ID).unwrap(),
                 input_ref: input_ref(),
@@ -3131,6 +3147,7 @@ async fn spawn_provider_tool_call_registration_accepts_subagent_type_wire_key() 
     // Invoke the registered capability and assert the spawn is dispatched.
     let outcome = port
         .invoke_capability(CapabilityInvocation {
+            activity_id: ironclaw_turns::CapabilityActivityId::new(),
             surface_version: candidate.surface_version.clone(),
             capability_id: CapabilityId::new(DEFAULT_SPAWN_SUBAGENT_CAPABILITY_ID).unwrap(),
             input_ref: candidate.input_ref.clone(),

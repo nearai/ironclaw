@@ -641,6 +641,7 @@ impl ironclaw_turns::run_profile::LoopCapabilityPort for MockHost {
             CapabilityInputRef::new(format!("input:registered-provider-{}", registered.len()))
                 .expect("valid input ref");
         Ok(CapabilityCallCandidate {
+            activity_id: ironclaw_turns::CapabilityActivityId::new(),
             surface_version: self.visible_surface_version.clone(),
             capability_id: capability_id(),
             input_ref,
@@ -861,6 +862,7 @@ pub(super) fn calls_response() -> LoopModelResponse {
         chunks: Vec::new(),
         safe_reasoning_deltas: Vec::new(),
         output: ParentLoopOutput::CapabilityCalls(vec![CapabilityCallCandidate {
+            activity_id: ironclaw_turns::CapabilityActivityId::new(),
             surface_version: surface_version(),
             capability_id: capability_id(),
             input_ref: CapabilityInputRef::new("input:demo").expect("valid"),
@@ -878,6 +880,7 @@ pub(super) fn two_calls_response() -> LoopModelResponse {
         safe_reasoning_deltas: Vec::new(),
         output: ParentLoopOutput::CapabilityCalls(vec![
             CapabilityCallCandidate {
+                activity_id: ironclaw_turns::CapabilityActivityId::new(),
                 surface_version: surface_version(),
                 capability_id: capability_id(),
                 input_ref: CapabilityInputRef::new("input:first").expect("valid"), // safety: test-only fixture
@@ -885,6 +888,7 @@ pub(super) fn two_calls_response() -> LoopModelResponse {
                 provider_replay: None,
             },
             CapabilityCallCandidate {
+                activity_id: ironclaw_turns::CapabilityActivityId::new(),
                 surface_version: surface_version(),
                 capability_id: capability_id(),
                 input_ref: CapabilityInputRef::new("input:second").expect("valid"), // safety: test-only fixture
@@ -902,6 +906,7 @@ pub(super) fn provider_calls_response() -> LoopModelResponse {
         chunks: Vec::new(),
         safe_reasoning_deltas: Vec::new(),
         output: ParentLoopOutput::CapabilityCalls(vec![CapabilityCallCandidate {
+            activity_id: ironclaw_turns::CapabilityActivityId::new(),
             surface_version: surface_version(),
             capability_id: capability_id(),
             input_ref: CapabilityInputRef::new("input:demo").expect("valid"),
@@ -929,6 +934,7 @@ pub(super) fn provider_two_calls_response() -> LoopModelResponse {
         safe_reasoning_deltas: Vec::new(),
         output: ParentLoopOutput::CapabilityCalls(vec![
             CapabilityCallCandidate {
+                activity_id: ironclaw_turns::CapabilityActivityId::new(),
                 surface_version: surface_version(),
                 capability_id: capability_id(),
                 input_ref: CapabilityInputRef::new("input:first").expect("valid"),
@@ -946,6 +952,7 @@ pub(super) fn provider_two_calls_response() -> LoopModelResponse {
                 }),
             },
             CapabilityCallCandidate {
+                activity_id: ironclaw_turns::CapabilityActivityId::new(),
                 surface_version: surface_version(),
                 capability_id: capability_id(),
                 input_ref: CapabilityInputRef::new("input:second").expect("valid"),
@@ -973,6 +980,7 @@ pub(super) fn stale_surface_calls_response() -> LoopModelResponse {
         chunks: Vec::new(),
         safe_reasoning_deltas: Vec::new(),
         output: ParentLoopOutput::CapabilityCalls(vec![CapabilityCallCandidate {
+            activity_id: ironclaw_turns::CapabilityActivityId::new(),
             surface_version: stale_surface_version(),
             capability_id: capability_id(),
             input_ref: CapabilityInputRef::new("input:demo").expect("valid"),
@@ -990,6 +998,7 @@ pub(super) fn mixed_surface_calls_response() -> LoopModelResponse {
         safe_reasoning_deltas: Vec::new(),
         output: ParentLoopOutput::CapabilityCalls(vec![
             CapabilityCallCandidate {
+                activity_id: ironclaw_turns::CapabilityActivityId::new(),
                 surface_version: stale_surface_version(),
                 capability_id: capability_id(),
                 input_ref: CapabilityInputRef::new("input:stale").expect("valid"),
@@ -997,6 +1006,7 @@ pub(super) fn mixed_surface_calls_response() -> LoopModelResponse {
                 provider_replay: None,
             },
             CapabilityCallCandidate {
+                activity_id: ironclaw_turns::CapabilityActivityId::new(),
                 surface_version: surface_version(),
                 capability_id: capability_id(),
                 input_ref: CapabilityInputRef::new("input:visible").expect("valid"),

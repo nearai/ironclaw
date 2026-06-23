@@ -284,6 +284,7 @@ impl LoopCapabilityPort for LocalDevSyntheticCapabilityPort {
             .register_provider_tool_call_input(&self.run_context, &tool_call)
             .await?;
         Ok(CapabilityCallCandidate {
+            activity_id: ironclaw_turns::CapabilityActivityId::new(),
             surface_version: self.current_surface_version()?,
             capability_id: capability_id.clone(),
             input_ref,

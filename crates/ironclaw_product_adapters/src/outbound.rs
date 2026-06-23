@@ -945,6 +945,8 @@ pub enum AuthPromptChallengeKind {
 pub struct AuthPromptView {
     pub turn_run_id: TurnRunId,
     pub auth_request_ref: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub invocation_id: Option<InvocationId>,
     pub headline: String,
     pub body: String,
     /// Challenge kind — present when the projection layer has auth-flow
@@ -969,6 +971,15 @@ pub struct AuthPromptView {
     /// Challenge expiry. Present when the auth flow has a bounded TTL.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub expires_at: Option<chrono::DateTime<chrono::Utc>>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProductGateKind {
+    Approval,
+    Auth,
+    Resource,
+    Generic,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -1007,7 +1018,11 @@ pub enum ProductProjectionItem {
         failure_summary: Option<String>,
     },
     Gate {
+        run_id: TurnRunId,
+        gate_kind: ProductGateKind,
         gate_ref: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        invocation_id: Option<InvocationId>,
         headline: String,
         #[serde(default)]
         allow_always: bool,
@@ -1143,7 +1158,11 @@ impl<'de> Deserialize<'de> for ProductProjectionItem {
                 failure_summary: Option<String>,
             },
             Gate {
+                run_id: TurnRunId,
+                gate_kind: ProductGateKind,
                 gate_ref: String,
+                #[serde(default)]
+                invocation_id: Option<InvocationId>,
                 headline: String,
                 #[serde(default)]
                 allow_always: bool,
@@ -1189,11 +1208,17 @@ impl<'de> Deserialize<'de> for ProductProjectionItem {
                 failure_summary,
             },
             Wire::Gate {
+                run_id,
+                gate_kind,
                 gate_ref,
+                invocation_id,
                 headline,
                 allow_always,
             } => ProductProjectionItem::Gate {
+                run_id,
+                gate_kind,
                 gate_ref,
+                invocation_id,
                 headline,
                 allow_always,
             },
@@ -1519,11 +1544,16 @@ mod tests {
     }
 
     #[test]
-    fn projection_state_round_trips_gate_item_with_allow_always() {
+    fn projection_state_round_trips_gate_item_with_stable_identity() {
+        let run_id = TurnRunId::new();
+        let invocation_id = InvocationId::new();
         let state = ProductProjectionState::new(
             "thread-1",
             vec![ProductProjectionItem::Gate {
+                run_id,
+                gate_kind: ProductGateKind::Approval,
                 gate_ref: "gate:approval-test".to_string(),
+                invocation_id: Some(invocation_id),
                 headline: "Approval required".to_string(),
                 allow_always: true,
             }],
@@ -1531,7 +1561,13 @@ mod tests {
         .expect("valid gate projection");
         let value = serde_json::to_value(&state).expect("serialize");
 
+        assert_eq!(value["items"][0]["gate"]["run_id"], run_id.to_string());
+        assert_eq!(value["items"][0]["gate"]["gate_kind"], "approval");
         assert_eq!(value["items"][0]["gate"]["gate_ref"], "gate:approval-test");
+        assert_eq!(
+            value["items"][0]["gate"]["invocation_id"],
+            invocation_id.to_string()
+        );
         assert_eq!(value["items"][0]["gate"]["headline"], "Approval required");
         assert_eq!(value["items"][0]["gate"]["allow_always"], true);
         let decoded: ProductProjectionState =
@@ -1540,27 +1576,19 @@ mod tests {
     }
 
     #[test]
-    fn projection_state_accepts_legacy_gate_item_without_allow_always() {
+    fn projection_state_rejects_gate_item_without_run_identity() {
         let json = serde_json::json!({
             "thread_id": "thread-1",
             "items": [{
                 "gate": {
+                    "gate_kind": "approval",
                     "gate_ref": "gate:approval-test",
                     "headline": "Approval required"
                 }
             }]
         });
 
-        let decoded: ProductProjectionState =
-            serde_json::from_value(json).expect("deserialize legacy gate projection");
-        assert_eq!(
-            decoded.items,
-            vec![ProductProjectionItem::Gate {
-                gate_ref: "gate:approval-test".to_string(),
-                headline: "Approval required".to_string(),
-                allow_always: false,
-            }]
-        );
+        assert!(serde_json::from_value::<ProductProjectionState>(json).is_err());
     }
 
     #[test]

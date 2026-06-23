@@ -1141,6 +1141,7 @@ mod tests {
         );
         let outcome = port
             .invoke_capability(CapabilityInvocation {
+                activity_id: ironclaw_turns::CapabilityActivityId::new(),
                 surface_version: candidate.surface_version,
                 capability_id: candidate.capability_id,
                 input_ref: candidate.input_ref,
@@ -1311,6 +1312,7 @@ mod tests {
             .expect("project_create call stages");
         let outcome = port
             .invoke_capability(CapabilityInvocation {
+                activity_id: ironclaw_turns::CapabilityActivityId::new(),
                 surface_version: candidate.surface_version,
                 capability_id: candidate.capability_id,
                 input_ref: candidate.input_ref,
@@ -1520,6 +1522,7 @@ mod tests {
             .expect("list call stages");
         let list_outcome = port
             .invoke_capability(CapabilityInvocation {
+                activity_id: ironclaw_turns::CapabilityActivityId::new(),
                 surface_version: list_candidate.surface_version,
                 capability_id: list_candidate.capability_id,
                 input_ref: list_candidate.input_ref,
@@ -1578,6 +1581,7 @@ mod tests {
         let set_input_ref = set_candidate.input_ref.clone();
         let blocked_outcome = port
             .invoke_capability(CapabilityInvocation {
+                activity_id: ironclaw_turns::CapabilityActivityId::new(),
                 surface_version: set_surface_version.clone(),
                 capability_id: set_capability_id_from_candidate.clone(),
                 input_ref: set_input_ref.clone(),
@@ -1647,6 +1651,7 @@ mod tests {
 
         let set_outcome = port
             .invoke_capability(CapabilityInvocation {
+                activity_id: ironclaw_turns::CapabilityActivityId::new(),
                 surface_version: set_surface_version,
                 capability_id: set_capability_id_from_candidate,
                 input_ref: CapabilityInputRef::new("input:stale-approval-resume")
@@ -1817,6 +1822,7 @@ mod tests {
             .expect("set call stages");
         let set_outcome = port
             .invoke_capability(CapabilityInvocation {
+                activity_id: ironclaw_turns::CapabilityActivityId::new(),
                 surface_version: set_candidate.surface_version,
                 capability_id: set_candidate.capability_id,
                 input_ref: set_candidate.input_ref,
@@ -2135,6 +2141,7 @@ mod tests {
 
         let outcome = port
             .invoke_capability(CapabilityInvocation {
+                activity_id: ironclaw_turns::CapabilityActivityId::new(),
                 surface_version: surface.version.clone(),
                 capability_id: CapabilityId::new(READ_FILE_CAPABILITY_ID)
                     .expect("read_file capability id"), // safety: built-in capability id is a valid literal.
@@ -2168,6 +2175,7 @@ mod tests {
 
         let outcome = port
             .invoke_capability(CapabilityInvocation {
+                activity_id: ironclaw_turns::CapabilityActivityId::new(),
                 surface_version: surface.version,
                 capability_id: CapabilityId::new(READ_FILE_CAPABILITY_ID)
                     .expect("read_file capability id"), // safety: built-in capability id is a valid literal.
@@ -2259,6 +2267,7 @@ mod tests {
 
         let outcome = port
             .invoke_capability(CapabilityInvocation {
+                activity_id: ironclaw_turns::CapabilityActivityId::new(),
                 surface_version: surface.version,
                 capability_id: CapabilityId::new(SKILL_INSTALL_CAPABILITY_ID)
                     .expect("skill_install capability id"), // safety: built-in capability id is a valid literal.
@@ -2409,6 +2418,7 @@ mod tests {
             .expect("input ref"); // safety: test-only assertion in #[cfg(test)] module.
         let outcome = port
             .invoke_capability(CapabilityInvocation {
+                activity_id: ironclaw_turns::CapabilityActivityId::new(),
                 surface_version: surface.version,
                 capability_id: CapabilityId::new(READ_FILE_CAPABILITY_ID)
                     .expect("read_file capability id"), // safety: built-in capability id is a valid literal.
@@ -2689,6 +2699,7 @@ mod tests {
 
         let outcome = port
             .invoke_capability(CapabilityInvocation {
+                activity_id: ironclaw_turns::CapabilityActivityId::new(),
                 surface_version: candidate.surface_version,
                 capability_id: candidate.capability_id,
                 input_ref: candidate.input_ref,
@@ -2814,6 +2825,7 @@ mod tests {
             .invoke_capability_batch(ironclaw_turns::run_profile::CapabilityBatchInvocation {
                 invocations: vec![
                     ironclaw_turns::run_profile::CapabilityInvocation {
+                        activity_id: ironclaw_turns::CapabilityActivityId::new(),
                         surface_version: candidate1.surface_version,
                         capability_id: candidate1.capability_id,
                         input_ref: candidate1.input_ref,
@@ -2821,6 +2833,7 @@ mod tests {
                         auth_resume: None,
                     },
                     ironclaw_turns::run_profile::CapabilityInvocation {
+                        activity_id: ironclaw_turns::CapabilityActivityId::new(),
                         surface_version: candidate2.surface_version,
                         capability_id: candidate2.capability_id,
                         input_ref: candidate2.input_ref,
@@ -2894,6 +2907,7 @@ mod tests {
 
         let outcome = port
             .invoke_capability(CapabilityInvocation {
+                activity_id: ironclaw_turns::CapabilityActivityId::new(),
                 surface_version: candidate.surface_version,
                 capability_id: candidate.capability_id,
                 input_ref: candidate.input_ref,

@@ -1491,6 +1491,7 @@ fn sanitize_result_ref_suffix_handles_empty_special_chars_and_truncation() {
     assert_eq!(sanitized.len(), 300);
 
     let result_ref = synthetic_provider_error_result_ref(&CapabilityCallCandidate {
+        activity_id: ironclaw_turns::CapabilityActivityId::new(),
         surface_version: surface_version(),
         capability_id: capability_id(),
         input_ref: CapabilityInputRef::new("input:demo").expect("valid"),
@@ -5392,6 +5393,7 @@ async fn resume_origin_backend_failure_does_not_die_as_scope_mismatch() {
         chunks: Vec::new(),
         safe_reasoning_deltas: Vec::new(),
         output: ParentLoopOutput::CapabilityCalls(vec![CapabilityCallCandidate {
+            activity_id: ironclaw_turns::CapabilityActivityId::new(),
             surface_version: surface_version(),
             capability_id: capability_id(),
             input_ref: cap1_input_ref,
@@ -5559,6 +5561,7 @@ async fn auth_resume_origin_backend_failure_does_not_die_as_scope_mismatch() {
         chunks: Vec::new(),
         safe_reasoning_deltas: Vec::new(),
         output: ParentLoopOutput::CapabilityCalls(vec![CapabilityCallCandidate {
+            activity_id: ironclaw_turns::CapabilityActivityId::new(),
             surface_version: surface_version(),
             capability_id: capability_id(),
             input_ref: cap1_input_ref,
@@ -5691,12 +5694,12 @@ async fn auth_resume_origin_backend_failure_does_not_die_as_scope_mismatch() {
 /// 1. Return `TurnCompletedStep::Continue` (loop proceeds, not Blocked/Exit).
 /// 2. Clear `pending_approval_resume` so the next iteration prompts the model
 ///    normally.
-/// 3. Append a model-visible Authorization failure observation with
+/// 3. Append a model-visible gate-declined failure observation with
 ///    `status = Error` and `same_call_retry = Forbidden` (via
 ///    `generic_failure_recovery` mapping).
 /// 4. Issue zero batch-invoke calls to the capability host.
 #[tokio::test]
-async fn capability_stage_denied_approval_resume_surfaces_authorization_failure_and_continues() {
+async fn capability_stage_denied_approval_resume_surfaces_gate_declined_failure_and_continues() {
     let host = MockHost::new(Vec::new());
     let family = crate::families::default();
     let ctx = StageContext {
@@ -5769,7 +5772,7 @@ async fn capability_stage_denied_approval_resume_surfaces_authorization_failure_
             LoopProgressEvent::CapabilityActivityFailed {
                 activity_id,
                 capability_id: emitted_capability_id,
-                reason_kind: CapabilityFailureKind::Authorization,
+                reason_kind: CapabilityFailureKind::GateDeclined,
             } if *activity_id == denied_activity_id && *emitted_capability_id == capability_id()
         )),
         "denied approval resume must emit a persistent failed capability activity"
@@ -5783,11 +5786,11 @@ async fn capability_stage_denied_approval_resume_surfaces_authorization_failure_
     let observation = appended[0]
         .model_observation
         .as_ref()
-        .expect("model_observation must be Some for an Authorization failure");
+        .expect("model_observation must be Some for an gate-declined failure");
     assert_eq!(observation.status, ToolObservationStatus::Error);
     assert_eq!(
-        observation.summary, "Capability failed with authorization.",
-        "observation summary must describe the authorization failure"
+        observation.summary, "Capability declined by user.",
+        "observation summary must describe the gate-declined failure"
     );
     let recovery = observation
         .recovery
@@ -5797,7 +5800,7 @@ async fn capability_stage_denied_approval_resume_surfaces_authorization_failure_
 }
 
 #[tokio::test]
-async fn capability_stage_denied_auth_resume_surfaces_authorization_failure_and_continues() {
+async fn capability_stage_denied_auth_resume_surfaces_gate_declined_failure_and_continues() {
     // Use a provider call fixture (provider_replay set) so the observation is
     // actually appended to appended_result_refs by
     // append_capability_safe_summary_ref_with_observation.
@@ -5878,13 +5881,13 @@ async fn capability_stage_denied_auth_resume_surfaces_authorization_failure_and_
             LoopProgressEvent::CapabilityActivityFailed {
                 activity_id,
                 capability_id: emitted_capability_id,
-                reason_kind: CapabilityFailureKind::Authorization,
+                reason_kind: CapabilityFailureKind::GateDeclined,
             } if *activity_id == denied_activity_id && *emitted_capability_id == capability_id()
         )),
         "denied auth resume must emit a persistent failed capability activity"
     );
 
-    // 4. One model-visible observation appended with Authorization error + Forbidden retry.
+    // 4. One model-visible observation appended with GateDeclined error + Forbidden retry.
     let appended = host.appended_result_refs();
     assert_eq!(
         appended.len(),
@@ -5894,15 +5897,15 @@ async fn capability_stage_denied_auth_resume_surfaces_authorization_failure_and_
     let observation = appended[0]
         .model_observation
         .as_ref()
-        .expect("model_observation must be Some for an Authorization failure");
+        .expect("model_observation must be Some for an gate-declined failure");
     assert_eq!(
         observation.status,
         ToolObservationStatus::Error,
         "observation status must be Error"
     );
     assert_eq!(
-        observation.summary, "Capability failed with authorization.",
-        "observation summary must describe the authorization failure"
+        observation.summary, "Capability declined by user.",
+        "observation summary must describe the gate-declined failure"
     );
     let recovery = observation
         .recovery
@@ -5911,7 +5914,119 @@ async fn capability_stage_denied_auth_resume_surfaces_authorization_failure_and_
     assert_eq!(
         recovery.same_call_retry,
         SameCallRetryConstraint::Forbidden,
-        "Authorization failure must map to Forbidden retry constraint (model must not retry)"
+        "gate-declined failure must map to Forbidden retry constraint (model must not retry)"
+    );
+}
+
+#[tokio::test]
+async fn auth_gate_without_resume_token_records_activity_id_for_denial_failure() {
+    let mut calls = match calls_response().output {
+        ParentLoopOutput::CapabilityCalls(calls) => calls,
+        ParentLoopOutput::AssistantReply(_) => panic!("expected capability call fixture"),
+    };
+    let blocked_activity_id = calls[0].activity_id;
+
+    let host = MockHost::new(Vec::new()).with_batch_outcomes(vec![
+        ironclaw_turns::run_profile::CapabilityBatchOutcome {
+            outcomes: vec![CapabilityOutcome::AuthRequired {
+                gate_ref: LoopGateRef::new("gate:hook-auth-tokenless").expect("valid"),
+                credential_requirements: Vec::new(),
+                safe_summary: "hook requested auth".to_string(),
+                auth_resume: None,
+            }],
+            stopped_on_suspension: true,
+        },
+    ]);
+    let family = crate::families::default();
+    let ctx = StageContext {
+        planner: family.planner(),
+        host: &host,
+    };
+
+    let phase1 = CapabilityStage
+        .process(
+            ctx,
+            CapabilityInput {
+                state: LoopExecutionState::initial_for_run(host.run_context()),
+                surface: ironclaw_turns::run_profile::LoopCapabilityPort::visible_capabilities(
+                    &host,
+                    VisibleCapabilityRequest,
+                )
+                .await
+                .expect("visible surface"),
+                calls: calls.clone(),
+            },
+        )
+        .await
+        .expect("phase 1 must block on auth gate");
+    assert!(
+        matches!(phase1, TurnCompletedStep::Exit(LoopExit::Blocked(_))),
+        "tokenless auth gate must block the turn"
+    );
+
+    let mut blocked_state = final_staged_state_for_kind(&host, LoopCheckpointKind::BeforeBlock);
+    let pending = blocked_state
+        .pending_auth_resume
+        .as_ref()
+        .expect("tokenless auth gate must create pending auth resume");
+    assert_eq!(
+        pending.resume_token, None,
+        "hook-style tokenless auth gates should remain tokenless"
+    );
+    assert_eq!(
+        pending.activity_id,
+        Some(blocked_activity_id),
+        "tokenless auth gate must persist the call activity id for later terminal events"
+    );
+
+    blocked_state
+        .pending_auth_resume
+        .as_mut()
+        .expect("pending auth resume")
+        .disposition = Some(ironclaw_turns::GateResumeDisposition::Denied);
+
+    let phase2 = CapabilityStage
+        .process(
+            ctx,
+            CapabilityInput {
+                state: blocked_state,
+                surface: ironclaw_turns::run_profile::LoopCapabilityPort::visible_capabilities(
+                    &host,
+                    VisibleCapabilityRequest,
+                )
+                .await
+                .expect("visible surface"),
+                calls: std::mem::take(&mut calls),
+            },
+        )
+        .await
+        .expect("phase 2 must surface declined auth gate");
+    let final_state = match phase2 {
+        TurnCompletedStep::Continue { state, .. } => state,
+        TurnCompletedStep::Exit(exit) => {
+            panic!("expected Continue after denied tokenless auth gate, got Exit: {exit:?}")
+        }
+    };
+
+    assert!(
+        final_state.pending_auth_resume.is_none(),
+        "denied tokenless auth resume must be cleared"
+    );
+    assert_eq!(
+        host.batch_invocations().len(),
+        1,
+        "denied tokenless auth resume must not re-dispatch the parked capability"
+    );
+    assert!(
+        host.progress_events().iter().any(|event| matches!(
+            event,
+            LoopProgressEvent::CapabilityActivityFailed {
+                activity_id,
+                capability_id: emitted_capability_id,
+                reason_kind: CapabilityFailureKind::GateDeclined,
+            } if *activity_id == blocked_activity_id && *emitted_capability_id == capability_id()
+        )),
+        "denied tokenless auth gate must emit CapabilityActivityFailed for the original activity"
     );
 }
 
@@ -5920,7 +6035,7 @@ async fn capability_stage_denied_auth_resume_surfaces_authorization_failure_and_
 /// When a resumed run carries `pending_auth_resume` with `disposition = Some(Denied)`
 /// and the parallel batch contains BOTH the denied capability (X = `capability_id()`)
 /// AND an unrelated capability (Y = `other_capability_id()`), only X must receive
-/// an Authorization failure. Y must be dispatched normally and its outcome must
+/// an gate-declined failure. Y must be dispatched normally and its outcome must
 /// appear in the result refs. The loop must continue (not exit), and
 /// `pending_auth_resume` must be cleared.
 #[tokio::test]
@@ -5981,11 +6096,12 @@ async fn capability_stage_denied_auth_resume_only_fails_matching_call_remaining_
     //   call X: capability_id() ("demo.echo")  — matches denied pending_auth_resume
     //   call Y: other_capability_id() ("demo.list") — unrelated, must proceed normally
     //
-    // Use provider_replay on X so the Authorization failure observation is
+    // Use provider_replay on X so the gate-declined failure observation is
     // written to appended_result_refs (same pattern as the single-call test).
     let calls = vec![
         // call X — denied
         ironclaw_turns::run_profile::CapabilityCallCandidate {
+            activity_id: ironclaw_turns::CapabilityActivityId::new(),
             surface_version: surface_version(),
             capability_id: capability_id(),
             input_ref: ironclaw_turns::run_profile::CapabilityInputRef::new("input:x-denied")
@@ -6005,6 +6121,7 @@ async fn capability_stage_denied_auth_resume_only_fails_matching_call_remaining_
         },
         // call Y — unrelated, must dispatch normally
         ironclaw_turns::run_profile::CapabilityCallCandidate {
+            activity_id: ironclaw_turns::CapabilityActivityId::new(),
             surface_version: surface_version(),
             capability_id: other_capability_id(),
             input_ref: ironclaw_turns::run_profile::CapabilityInputRef::new("input:y-unrelated")
@@ -6068,20 +6185,20 @@ async fn capability_stage_denied_auth_resume_only_fails_matching_call_remaining_
     );
 
     // 4. Two result refs appended total:
-    //    - one Authorization failure observation for X
+    //    - one gate-declined failure observation for X
     //    - one Completed result for Y
     let appended = host.appended_result_refs();
     assert_eq!(
         appended.len(),
         2,
-        "expected two appended result refs: one Authorization failure for X, one Completed for Y"
+        "expected two appended result refs: one gate-declined failure for X, one Completed for Y"
     );
 
-    // The Authorization failure for X must carry a model-visible observation.
+    // The gate-declined failure for X must carry a model-visible observation.
     let auth_failure_entry = appended
         .iter()
         .find(|r| r.model_observation.is_some())
-        .expect("one appended result ref must be the Authorization failure for X");
+        .expect("one appended result ref must be the gate-declined failure for X");
     let obs = auth_failure_entry.model_observation.as_ref().unwrap();
     assert_eq!(
         obs.status,
@@ -6089,8 +6206,8 @@ async fn capability_stage_denied_auth_resume_only_fails_matching_call_remaining_
         "X failure observation status must be Error"
     );
     assert_eq!(
-        obs.summary, "Capability failed with authorization.",
-        "X failure observation summary must describe the authorization failure"
+        obs.summary, "Capability declined by user.",
+        "X failure observation summary must describe the gate-declined failure"
     );
     let recovery = obs
         .recovery
@@ -6113,7 +6230,7 @@ async fn capability_stage_denied_auth_resume_only_fails_matching_call_remaining_
                 .model_observation
                 .as_ref()
                 .is_some_and(|o| o.status != ToolObservationStatus::Error),
-        "Y's result must not be an Authorization failure"
+        "Y's result must not be an gate-declined failure"
     );
 
     // 5. final_state.result_refs must carry BOTH refs so the next model prompt sees them.
@@ -6123,7 +6240,7 @@ async fn capability_stage_denied_auth_resume_only_fails_matching_call_remaining_
         final_state
             .result_refs
             .contains(&auth_failure_entry.result_ref),
-        "final_state.result_refs must contain the Authorization failure ref for X"
+        "final_state.result_refs must contain the gate-declined failure ref for X"
     );
     assert!(
         final_state.result_refs.contains(&y_result_ref),
@@ -6218,8 +6335,9 @@ async fn capability_stage_denied_auth_resume_one_denied_two_remaining_all_dispat
     // Three calls: X (denied), Y (unrelated), Z (unrelated).
     let calls = vec![
         // X — matches denied pending_auth_resume; provider_replay set so the
-        // Authorization failure observation is written to appended_result_refs.
+        // gate-declined failure observation is written to appended_result_refs.
         ironclaw_turns::run_profile::CapabilityCallCandidate {
+            activity_id: ironclaw_turns::CapabilityActivityId::new(),
             surface_version: surface_version(),
             capability_id: capability_id(),
             input_ref: ironclaw_turns::run_profile::CapabilityInputRef::new(
@@ -6241,6 +6359,7 @@ async fn capability_stage_denied_auth_resume_one_denied_two_remaining_all_dispat
         },
         // Y — unrelated, must dispatch normally.
         ironclaw_turns::run_profile::CapabilityCallCandidate {
+            activity_id: ironclaw_turns::CapabilityActivityId::new(),
             surface_version: surface_version(),
             capability_id: other_capability_id(),
             input_ref: ironclaw_turns::run_profile::CapabilityInputRef::new(
@@ -6252,6 +6371,7 @@ async fn capability_stage_denied_auth_resume_one_denied_two_remaining_all_dispat
         },
         // Z — unrelated, must dispatch normally.
         ironclaw_turns::run_profile::CapabilityCallCandidate {
+            activity_id: ironclaw_turns::CapabilityActivityId::new(),
             surface_version: surface_version(),
             capability_id: z_capability_id.clone(),
             input_ref: ironclaw_turns::run_profile::CapabilityInputRef::new(
@@ -6324,21 +6444,21 @@ async fn capability_stage_denied_auth_resume_one_denied_two_remaining_all_dispat
     );
 
     // 4. Three result refs appended total:
-    //    - one Authorization failure observation for X
+    //    - one gate-declined failure observation for X
     //    - one Completed result for Y
     //    - one Completed result for Z
     let appended = host.appended_result_refs();
     assert_eq!(
         appended.len(),
         3,
-        "expected 3 appended result refs: Authorization failure for X, Completed for Y and Z"
+        "expected 3 appended result refs: gate-declined failure for X, Completed for Y and Z"
     );
 
-    // The Authorization failure for X must carry a model-visible observation.
+    // The gate-declined failure for X must carry a model-visible observation.
     let auth_failure_entry = appended
         .iter()
         .find(|r| r.model_observation.is_some())
-        .expect("one appended result ref must be the Authorization failure for X");
+        .expect("one appended result ref must be the gate-declined failure for X");
     let obs = auth_failure_entry.model_observation.as_ref().unwrap();
     assert_eq!(
         obs.status,
@@ -6346,8 +6466,8 @@ async fn capability_stage_denied_auth_resume_one_denied_two_remaining_all_dispat
         "X failure observation status must be Error"
     );
     assert_eq!(
-        obs.summary, "Capability failed with authorization.",
-        "X failure observation summary must describe the authorization failure"
+        obs.summary, "Capability declined by user.",
+        "X failure observation summary must describe the gate-declined failure"
     );
     let recovery = obs
         .recovery
@@ -6374,7 +6494,7 @@ async fn capability_stage_denied_auth_resume_one_denied_two_remaining_all_dispat
         final_state
             .result_refs
             .contains(&auth_failure_entry.result_ref),
-        "final_state.result_refs must contain the Authorization failure ref for X"
+        "final_state.result_refs must contain the gate-declined failure ref for X"
     );
     assert!(
         final_state.result_refs.contains(&y_result_ref),
@@ -6389,7 +6509,7 @@ async fn capability_stage_denied_auth_resume_one_denied_two_remaining_all_dispat
 /// When a resumed run carries `pending_approval_resume` with
 /// `disposition = Some(Denied)` and the parallel batch contains BOTH the
 /// denied capability (X = `capability_id()`) AND an unrelated capability
-/// (Y = `other_capability_id()`), only X must receive an Authorization
+/// (Y = `other_capability_id()`), only X must receive a gate-declined
 /// failure. Y must be dispatched normally and its outcome must appear in
 /// the result refs. The loop must continue, and `pending_approval_resume`
 /// must be cleared.
@@ -6452,6 +6572,7 @@ async fn capability_stage_denied_approval_resume_only_fails_matching_call_remain
     let calls = vec![
         // call X — denied
         ironclaw_turns::run_profile::CapabilityCallCandidate {
+            activity_id: ironclaw_turns::CapabilityActivityId::new(),
             surface_version: surface_version(),
             capability_id: capability_id(),
             input_ref: CapabilityInputRef::new("input:x-approval-denied").expect("valid"),
@@ -6470,6 +6591,7 @@ async fn capability_stage_denied_approval_resume_only_fails_matching_call_remain
         },
         // call Y — unrelated, must dispatch normally
         ironclaw_turns::run_profile::CapabilityCallCandidate {
+            activity_id: ironclaw_turns::CapabilityActivityId::new(),
             surface_version: surface_version(),
             capability_id: other_capability_id(),
             input_ref: CapabilityInputRef::new("input:y-approval-unrelated").expect("valid"),
@@ -6532,20 +6654,20 @@ async fn capability_stage_denied_approval_resume_only_fails_matching_call_remain
     );
 
     // 4. Two result refs appended total:
-    //    - one Authorization failure observation for X
+    //    - one gate-declined failure observation for X
     //    - one Completed result for Y
     let appended = host.appended_result_refs();
     assert_eq!(
         appended.len(),
         2,
-        "expected two appended result refs: one Authorization failure for X, one Completed for Y"
+        "expected two appended result refs: one gate-declined failure for X, one Completed for Y"
     );
 
-    // The Authorization failure for X must carry a model-visible observation.
+    // The gate-declined failure for X must carry a model-visible observation.
     let failure_entry = appended
         .iter()
         .find(|r| r.model_observation.is_some())
-        .expect("one appended result ref must be the Authorization failure for X");
+        .expect("one appended result ref must be the gate-declined failure for X");
     let obs = failure_entry.model_observation.as_ref().unwrap();
     assert_eq!(
         obs.status,
@@ -6553,8 +6675,8 @@ async fn capability_stage_denied_approval_resume_only_fails_matching_call_remain
         "X failure observation status must be Error"
     );
     assert_eq!(
-        obs.summary, "Capability failed with authorization.",
-        "X failure observation summary must describe the authorization failure"
+        obs.summary, "Capability declined by user.",
+        "X failure observation summary must describe the gate-declined failure"
     );
     let recovery = obs
         .recovery
@@ -6577,13 +6699,13 @@ async fn capability_stage_denied_approval_resume_only_fails_matching_call_remain
                 .model_observation
                 .as_ref()
                 .is_some_and(|o| o.status != ToolObservationStatus::Error),
-        "Y's result must not be an Authorization failure"
+        "Y's result must not be an gate-declined failure"
     );
 
     // 5. final_state.result_refs must carry BOTH refs.
     assert!(
         final_state.result_refs.contains(&failure_entry.result_ref),
-        "final_state.result_refs must contain the Authorization failure ref for X"
+        "final_state.result_refs must contain the gate-declined failure ref for X"
     );
     assert!(
         final_state.result_refs.contains(&y_result_ref),
@@ -6597,7 +6719,7 @@ async fn capability_stage_denied_approval_resume_only_fails_matching_call_remain
 /// capability X but the model emits *only* calls for capability Y (no X in
 /// `visible_calls`), the executor must:
 ///
-/// 1. NOT surface X as an Authorization failure (X is absent from the batch).
+/// 1. NOT surface X as an gate-declined failure (X is absent from the batch).
 /// 2. Dispatch Y normally and record its outcome.
 /// 3. Clear `pending_approval_resume` after processing the batch.
 /// 4. Return `TurnCompletedStep::Continue` (loop proceeds).
@@ -6661,6 +6783,7 @@ async fn capability_stage_denied_approval_resume_no_matching_call_dispatches_unr
 
     // The model emits ONLY call Y (other_capability_id); no X in this batch.
     let calls = vec![ironclaw_turns::run_profile::CapabilityCallCandidate {
+        activity_id: ironclaw_turns::CapabilityActivityId::new(),
         surface_version: surface_version(),
         capability_id: other_capability_id(),
         input_ref: CapabilityInputRef::new("input:y-no-match-approval").expect("valid"),
@@ -6699,8 +6822,8 @@ async fn capability_stage_denied_approval_resume_no_matching_call_dispatches_unr
         !appended.iter().any(|r| r
             .model_observation
             .as_ref()
-            .is_some_and(|o| o.summary == "Capability failed with authorization.")),
-        "X must NOT be surfaced as an Authorization failure when it is absent from visible_calls"
+            .is_some_and(|o| o.summary == "Capability declined by user.")),
+        "X must NOT be surfaced as an gate-declined failure when it is absent from visible_calls"
     );
 
     // 3. Y dispatches normally: exactly one batch invocation containing Y.

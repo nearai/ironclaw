@@ -95,6 +95,7 @@ fn auth_prompt() -> AuthPromptView {
     AuthPromptView {
         turn_run_id: run_id(),
         auth_request_ref: "auth:oauth".to_string(),
+        invocation_id: None,
         headline: "Connect account".to_string(),
         body: "Connect before continuing.".to_string(),
         challenge_kind: None,

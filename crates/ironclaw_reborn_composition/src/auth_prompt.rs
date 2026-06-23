@@ -127,6 +127,7 @@ pub(crate) async fn auth_prompt_view_for_blocked_auth(
     let base_view = AuthPromptView {
         turn_run_id: run_id,
         auth_request_ref: gate_ref.to_string(),
+        invocation_id: None,
         headline: "Authentication required".to_string(),
         body,
         challenge_kind: None,

@@ -247,6 +247,7 @@ test("useChatEvents: approval gate annotates an existing tool activity", () => {
     kind: "gate",
     runId,
     gateRef,
+    invocationId: "invocation-web-access",
     toolName: "web-access.search",
   };
   const harness = createUseChatEventsHarness({
@@ -282,13 +283,14 @@ test("useChatEvents: approval gate annotates an existing tool activity", () => {
   assert.deepEqual(harness.pendingGate, gate);
 });
 
-test("useChatEvents: approval gate creates activity before invocation metadata arrives", () => {
+test("useChatEvents: approval gate creates activity from stable invocation id before lifecycle metadata arrives", () => {
   const runId = "run-gated-synthetic";
   const gateRef = "gate:nearai";
   const gate = {
     kind: "gate",
     runId,
     gateRef,
+    invocationId: "invocation-nearai",
     toolName: "nearai.web_search",
   };
   const harness = createUseChatEventsHarness({
@@ -306,7 +308,7 @@ test("useChatEvents: approval gate creates activity before invocation metadata a
   });
 
   assert.equal(harness.messages.length, 1);
-  assert.equal(harness.messages[0].id, `tool-gate:${runId}:${gateRef}`);
+  assert.equal(harness.messages[0].id, "tool-invocation-nearai");
   assert.equal(harness.messages[0].toolName, "web_search");
   assert.equal(harness.messages[0].toolStatus, "running");
   assert.equal(harness.messages[0].gateRef, gateRef);
@@ -344,6 +346,8 @@ test("useChatEvents: cleared non-auth gates are not restored by later projection
           { run_status: { run_id: runId, status: "blocked_resource" } },
           {
             gate: {
+              run_id: runId,
+              gate_kind: "resource",
               gate_ref: "gate:resource",
               headline: "Resource unavailable",
             },
@@ -354,8 +358,10 @@ test("useChatEvents: cleared non-auth gates are not restored by later projection
   });
   assert.deepEqual(plain(harness.pendingGate), {
     kind: "gate",
+    gateKind: "resource",
     runId,
     gateRef: "gate:resource",
+    invocationId: null,
     headline: "Resource unavailable",
     body: "",
     allowAlways: false,
@@ -379,6 +385,8 @@ test("useChatEvents: cleared non-auth gates are not restored by later projection
         items: [
           {
             gate: {
+              run_id: runId,
+              gate_kind: "resource",
               gate_ref: "gate:resource",
               headline: "Resource unavailable",
             },
@@ -403,7 +411,10 @@ test("useChatEvents: projection approval gate preserves always-allow affordance"
           { run_status: { run_id: runId, status: "blocked_approval" } },
           {
             gate: {
+              run_id: runId,
+              gate_kind: "approval",
               gate_ref: "gate:approval",
+              invocation_id: "invocation-approval",
               headline: "Approval required",
               allow_always: true,
             },
@@ -415,8 +426,10 @@ test("useChatEvents: projection approval gate preserves always-allow affordance"
 
   assert.deepEqual(plain(harness.pendingGate), {
     kind: "gate",
+    gateKind: "approval",
     runId,
     gateRef: "gate:approval",
+    invocationId: "invocation-approval",
     headline: "Approval required",
     body: "",
     allowAlways: true,
@@ -535,6 +548,8 @@ test("useChatEvents: locally resolved approval gate is not restored by stale pro
           { run_status: { run_id: runId, status: "blocked_approval" } },
           {
             gate: {
+              run_id: runId,
+              gate_kind: "approval",
               gate_ref: gateRef,
               headline: "Approval required",
               allow_always: true,
@@ -586,6 +601,8 @@ test("useChatEvents: locally resumed deny allows follow-up activity without rest
           { run_status: { run_id: runId, status: "blocked_approval" } },
           {
             gate: {
+              run_id: runId,
+              gate_kind: "approval",
               gate_ref: gateRef,
               headline: "Approval required",
               allow_always: true,
@@ -754,7 +771,7 @@ test("useChatEvents: late started activity cannot downgrade remembered failed to
         turn_run_id: runId,
         capability_id: "nearai.web_search",
         status: "failed",
-        error_kind: "authorization",
+        error_kind: "gate_declined",
       },
     },
   });
@@ -787,7 +804,8 @@ test("useChatEvents: late started activity cannot downgrade remembered failed to
   assert.equal(harness.messages[0].id, `tool-${invocationId}`);
   assert.equal(harness.messages[0].toolName, "web_search");
   assert.equal(harness.messages[0].toolStatus, "error");
-  assert.equal(harness.messages[0].toolError, "authorization");
+  assert.equal(harness.messages[0].toolError, "Declined by user.");
+  assert.equal(harness.messages[0].toolErrorKind, "gate_declined");
 });
 
 test("useChatEvents: projection order annotates replayed terminal activity", () => {
@@ -925,6 +943,7 @@ test("useChatEvents: durable activity order updates gate activity", () => {
       kind: "gate",
       runId,
       gateRef,
+      invocationId: "invocation-web-search",
       toolName: "web-access.search",
     }),
   });
@@ -945,7 +964,7 @@ test("useChatEvents: durable activity order updates gate activity", () => {
       message.activityOrder,
       message.activityOrderSource,
     ]),
-    [[`tool-gate:${runId}:${gateRef}`, "search", undefined, undefined]],
+    [["tool-invocation-web-search", "search", undefined, undefined]],
   );
 
   harness.handleEvent({
@@ -973,7 +992,7 @@ test("useChatEvents: durable activity order updates gate activity", () => {
           },
           {
             capability_activity: {
-              invocation_id: `gate:${runId}:${gateRef}`,
+              invocation_id: "invocation-web-search",
               turn_run_id: runId,
               capability_id: "web-access.search",
               status: "started",
@@ -993,7 +1012,7 @@ test("useChatEvents: durable activity order updates gate activity", () => {
       message.activityOrderSource,
     ]),
     [
-      [`tool-gate:${runId}:${gateRef}`, "search", 3, "projection"],
+      ["tool-invocation-web-search", "search", 3, "projection"],
       [
         "tool-invocation-extension-a",
         "extension_search",

@@ -3030,6 +3030,7 @@ impl LoopCapabilityPort for GatewayCapabilityPort {
                 .unwrap();
         self.registered.lock().unwrap().push(tool_call.clone());
         Ok(ironclaw_turns::run_profile::CapabilityCallCandidate {
+            activity_id: ironclaw_turns::CapabilityActivityId::new(),
             surface_version: CapabilitySurfaceVersion::new("surface-v1").unwrap(),
             capability_id: CapabilityId::new("demo.echo").unwrap(),
             input_ref,

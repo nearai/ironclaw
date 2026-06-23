@@ -143,9 +143,9 @@ pub(super) fn capability_error_class(kind: &CapabilityFailureKind) -> Capability
         | CapabilityFailureKind::OutputTooLarge
         | CapabilityFailureKind::Process
         | CapabilityFailureKind::Resource => CapabilityErrorClass::OperationFailed,
-        CapabilityFailureKind::Authorization | CapabilityFailureKind::PolicyDenied => {
-            CapabilityErrorClass::PolicyDenied
-        }
+        CapabilityFailureKind::Authorization
+        | CapabilityFailureKind::GateDeclined
+        | CapabilityFailureKind::PolicyDenied => CapabilityErrorClass::PolicyDenied,
         CapabilityFailureKind::Internal => CapabilityErrorClass::Internal,
         CapabilityFailureKind::Dispatcher => CapabilityErrorClass::Permanent,
         CapabilityFailureKind::Cancelled => CapabilityErrorClass::Permanent,
@@ -161,9 +161,9 @@ pub(super) fn capability_error_class(kind: &CapabilityFailureKind) -> Capability
 pub(super) fn capability_failure_kind(kind: &CapabilityFailureKind) -> LoopFailureKind {
     match kind {
         CapabilityFailureKind::InvalidInput => LoopFailureKind::ModelError,
-        CapabilityFailureKind::Authorization | CapabilityFailureKind::PolicyDenied => {
-            LoopFailureKind::PolicyDenied
-        }
+        CapabilityFailureKind::Authorization
+        | CapabilityFailureKind::GateDeclined
+        | CapabilityFailureKind::PolicyDenied => LoopFailureKind::PolicyDenied,
         _ => LoopFailureKind::CapabilityProtocolError,
     }
 }

@@ -569,6 +569,7 @@ mod tests {
                 .clone()
                 .unwrap_or_else(|| provider_call_capability_ids(&["demo.allowed"]));
             Ok(ironclaw_turns::run_profile::CapabilityCallCandidate {
+                activity_id: ironclaw_turns::CapabilityActivityId::new(),
                 surface_version: surface_version(),
                 capability_id: capability_ids.provider_capability_id,
                 input_ref: input_ref("input:provider"),
@@ -632,6 +633,7 @@ mod tests {
 
     fn invocation(capability: &str, input: &str) -> CapabilityInvocation {
         CapabilityInvocation {
+            activity_id: ironclaw_turns::CapabilityActivityId::new(),
             surface_version: surface_version(),
             capability_id: capability_id(capability),
             input_ref: input_ref(input),
@@ -1065,6 +1067,7 @@ mod tests {
 
         filter
             .invoke_capability(CapabilityInvocation {
+                activity_id: ironclaw_turns::CapabilityActivityId::new(),
                 surface_version: candidate.surface_version,
                 capability_id: candidate.capability_id,
                 input_ref: candidate.input_ref,
@@ -1117,6 +1120,7 @@ mod tests {
         filter
             .invoke_capability_batch(CapabilityBatchInvocation {
                 invocations: vec![CapabilityInvocation {
+                    activity_id: ironclaw_turns::CapabilityActivityId::new(),
                     surface_version: candidate.surface_version,
                     capability_id: candidate.capability_id,
                     input_ref: candidate.input_ref,

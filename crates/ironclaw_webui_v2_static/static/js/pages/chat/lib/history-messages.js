@@ -195,6 +195,7 @@ export function toolCardFromPreview(preview) {
         preview.result_ref ||
         null
       : null,
+    toolErrorKind: null,
     toolDurationMs: null,
     updatedAt: preview.updated_at || null,
     resultRef: preview.result_ref || null,
@@ -215,6 +216,7 @@ export function toolCardFromPreview(preview) {
 // empty until the preview frame lands at completion.
 export function toolCardFromActivity(activity) {
   const activityOrder = numericActivityOrder(activity.activity_order);
+  const errorKind = activity.error_kind || null;
   return {
     invocationId: activity.invocation_id,
     callId: activity.invocation_id,
@@ -224,7 +226,8 @@ export function toolCardFromActivity(activity) {
     toolDetail: activity.subtitle || null,
     toolParameters: activity.input_summary || null,
     toolResultPreview: null,
-    toolError: activity.error_kind || null,
+    toolError: toolErrorText(errorKind),
+    toolErrorKind: errorKind,
     toolDurationMs: null,
     updatedAt: activity.updated_at || null,
     resultRef: null,
@@ -235,6 +238,12 @@ export function toolCardFromActivity(activity) {
     activityOrder,
     activityOrderSource: Number.isFinite(activityOrder) ? "projection" : null,
   };
+}
+
+function toolErrorText(errorKind) {
+  if (!errorKind) return null;
+  if (errorKind === "gate_declined") return "Declined by user.";
+  return errorKind;
 }
 
 export function isTerminalToolStatus(status) {

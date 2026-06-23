@@ -1014,6 +1014,7 @@ impl LoopCapabilityPort for SubagentSpawnCapabilityPort {
                 })?
                 .insert(input_ref.clone());
             return Ok(CapabilityCallCandidate {
+                activity_id: ironclaw_turns::CapabilityActivityId::new(),
                 surface_version: surface.version,
                 capability_id: self.spawn_id.clone(),
                 effective_capability_ids: vec![self.spawn_id.clone()],

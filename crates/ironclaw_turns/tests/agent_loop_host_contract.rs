@@ -2212,6 +2212,7 @@ async fn capability_invocations_must_cite_visible_surface_before_host_dispatch()
 
     let error = host
         .invoke_capability(CapabilityInvocation {
+            activity_id: ironclaw_turns::CapabilityActivityId::new(),
             surface_version: CapabilitySurfaceVersion::new("surface-v1").unwrap(),
             capability_id: foreign,
             input_ref: CapabilityInputRef::new("input:opaque-agent-loop-host-sentinel").unwrap(),
@@ -2526,6 +2527,7 @@ impl AgentLoopDriver for CapabilityDriver {
             .map_err(driver_error)?;
         let outcome = host
             .invoke_capability(CapabilityInvocation {
+                activity_id: ironclaw_turns::CapabilityActivityId::new(),
                 surface_version: surface.version,
                 capability_id: surface.descriptors[0].capability_id.clone(),
                 input_ref: CapabilityInputRef::new("input:opaque-tool-arguments").unwrap(),

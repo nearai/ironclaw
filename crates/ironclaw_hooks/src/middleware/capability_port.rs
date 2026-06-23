@@ -840,6 +840,7 @@ mod tests {
 
     fn snapshot_fixture_invocation() -> CapabilityInvocation {
         CapabilityInvocation {
+            activity_id: ironclaw_turns::CapabilityActivityId::new(),
             surface_version: ironclaw_turns::run_profile::CapabilitySurfaceVersion::new(
                 "snapshot:v1",
             )
@@ -887,6 +888,7 @@ mod tests {
     #[test]
     fn invocation_arguments_digest_is_stable_for_known_inputs() {
         let invocation = CapabilityInvocation {
+            activity_id: ironclaw_turns::CapabilityActivityId::new(),
             surface_version: ironclaw_turns::run_profile::CapabilitySurfaceVersion::new(
                 "snapshot:v1",
             )
@@ -949,6 +951,7 @@ mod tests {
             TenantId::new("alpha").expect("ok"),
         );
         let invocation = CapabilityInvocation {
+            activity_id: ironclaw_turns::CapabilityActivityId::new(),
             surface_version: ironclaw_turns::run_profile::CapabilitySurfaceVersion::new(
                 "snapshot:v1",
             )
@@ -1052,6 +1055,7 @@ mod tests {
         let cap_id = CapabilityId::new("cap.x").expect("ok");
         let surface = ironclaw_turns::run_profile::CapabilitySurfaceVersion::new("v").expect("ok");
         let a = CapabilityInvocation {
+            activity_id: ironclaw_turns::CapabilityActivityId::new(),
             surface_version: surface.clone(),
             capability_id: cap_id.clone(),
             input_ref: ironclaw_turns::run_profile::CapabilityInputRef::new("input:a").expect("ok"),
@@ -1059,6 +1063,7 @@ mod tests {
             auth_resume: None,
         };
         let b = CapabilityInvocation {
+            activity_id: ironclaw_turns::CapabilityActivityId::new(),
             surface_version: surface,
             capability_id: cap_id,
             input_ref: ironclaw_turns::run_profile::CapabilityInputRef::new("input:b").expect("ok"),
@@ -1073,6 +1078,7 @@ mod tests {
 
     fn invocation(capability: &str) -> CapabilityInvocation {
         CapabilityInvocation {
+            activity_id: ironclaw_turns::CapabilityActivityId::new(),
             surface_version: CapabilitySurfaceVersion::new("v1").expect("ok"),
             capability_id: CapabilityId::new(capability).expect("ok"),
             input_ref: CapabilityInputRef::new(format!("input:{capability}")).expect("ok"),

@@ -36,6 +36,7 @@ test("tool activity state keeps denied tools visible through a follow-up gate", 
       kind: "gate",
       runId,
       gateRef: "gate:web",
+      invocationId: "invocation-web",
       toolName: "web-access.search",
     },
     stateRef,
@@ -46,6 +47,7 @@ test("tool activity state keeps denied tools visible through a follow-up gate", 
       kind: "gate",
       runId,
       gateRef: "gate:web",
+      invocationId: "invocation-web",
       toolName: "web-access.search",
     },
     stateRef,
@@ -57,6 +59,7 @@ test("tool activity state keeps denied tools visible through a follow-up gate", 
       kind: "gate",
       runId,
       gateRef: "gate:nearai",
+      invocationId: "invocation-nearai",
       toolName: "nearai.web_search",
     },
     stateRef,
@@ -77,7 +80,7 @@ test("tool activity state keeps denied tools visible through a follow-up gate", 
         "gate:web",
       ],
       [
-        `tool-gate:${runId}:gate:nearai`,
+        "tool-invocation-nearai",
         "web_search",
         "running",
         "gate:nearai",
@@ -114,6 +117,7 @@ test("tool activity state keeps denied tools visible through a follow-up gate", 
       kind: "gate",
       runId,
       gateRef: "gate:nearai",
+      invocationId: "invocation-nearai",
       toolName: "nearai.web_search",
     },
     stateRef,
@@ -154,6 +158,7 @@ test("tool activity state keeps repeated same-tool approval gates separate", () 
     kind: "gate",
     runId,
     gateRef: `gate:extension-install:${index}`,
+    invocationId: `invocation-install-${index}`,
     toolName: "builtin.extension_install",
   });
 
@@ -171,25 +176,46 @@ test("tool activity state keeps repeated same-tool approval gates separate", () 
     ]),
     [
       [
-        `tool-gate:${runId}:gate:extension-install:1`,
+        "tool-invocation-install-1",
         "extension_install",
         "error",
         "gate:extension-install:1",
       ],
       [
-        `tool-gate:${runId}:gate:extension-install:2`,
+        "tool-invocation-install-2",
         "extension_install",
         "error",
         "gate:extension-install:2",
       ],
       [
-        `tool-gate:${runId}:gate:extension-install:3`,
+        "tool-invocation-install-3",
         "extension_install",
         "error",
         "gate:extension-install:3",
       ],
     ],
   );
+});
+
+test("tool activity state does not synthesize gate activity without invocation id", () => {
+  const stateRef = { current: createToolActivityState() };
+  let messages = [];
+  const setMessages = (updater) => {
+    messages = typeof updater === "function" ? updater(messages) : updater;
+  };
+
+  ensureGateToolActivity(
+    setMessages,
+    {
+      kind: "gate",
+      runId: "run-missing-id",
+      gateRef: "gate:web-search",
+      toolName: "web-access.search",
+    },
+    stateRef,
+  );
+
+  assert.deepEqual(messages, []);
 });
 
 test("tool activity cards use unprefixed display names", () => {
@@ -253,6 +279,7 @@ test("tool activity state leaves pending gates unnumbered after existing timelin
       kind: "gate",
       runId,
       gateRef: "gate:web-search",
+      invocationId: "invocation-web-search",
       toolName: "web-access.search",
     },
     stateRef,
@@ -279,6 +306,7 @@ test("tool activity state preserves existing order when a gate is denied", () =>
     kind: "gate",
     runId,
     gateRef: "gate:web-search",
+    invocationId: "invocation-web-search",
     toolName: "web-access.search",
   };
 
@@ -350,6 +378,7 @@ test("tool activity state applies durable projection order to gate activity", ()
       kind: "gate",
       runId,
       gateRef: "gate:web-search",
+      invocationId: "invocation-web-search",
       toolName: "web-access.search",
     },
     stateRef,

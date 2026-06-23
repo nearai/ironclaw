@@ -1201,6 +1201,7 @@ fn auth_prompt_view_serialises_optional_fields_when_present() {
     let view = AuthPromptView {
         turn_run_id: TurnRunId::new(),
         auth_request_ref: "gate-ref-001".to_string(),
+        invocation_id: None,
         headline: "Authentication required".to_string(),
         body: "Authenticate to continue.".to_string(),
         challenge_kind: Some(AuthPromptChallengeKind::OAuthUrl),
@@ -1236,6 +1237,7 @@ fn auth_prompt_view_omits_optional_fields_when_absent() {
     let view = AuthPromptView {
         turn_run_id: TurnRunId::new(),
         auth_request_ref: "gate-ref-002".to_string(),
+        invocation_id: None,
         headline: "Authentication required".to_string(),
         body: "Authenticate to continue.".to_string(),
         challenge_kind: None,

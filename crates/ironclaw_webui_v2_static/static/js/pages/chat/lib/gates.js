@@ -13,6 +13,7 @@ export function gateFromEvent(eventType, prompt) {
       : [];
     const gate = {
       kind: "gate",
+      gateKind: "approval",
       runId: prompt.turn_run_id,
       gateRef: prompt.gate_ref,
       invocationId: prompt.invocation_id || null,
@@ -37,6 +38,7 @@ export function gateFromEvent(eventType, prompt) {
   if (eventType === "auth_required") {
     return {
       kind: "auth_required",
+      gateKind: "auth",
       // Legacy auth_required prompts predate challenge_kind and are manual
       // token prompts. Explicit unknown/other challenge kinds still route to
       // the neutral auth card in chat.js.
@@ -53,6 +55,7 @@ export function gateFromEvent(eventType, prompt) {
       // path is `/runs/{run_id}/gates/{gate_ref}/resolve` — auth
       // prompts therefore round-trip through the same gate_ref slot.
       gateRef: prompt.auth_request_ref,
+      invocationId: prompt.invocation_id || null,
       // Falls back to null when unpopulated; components render a generic
       // label rather than a misleading provider name.
       provider: prompt.provider || null,

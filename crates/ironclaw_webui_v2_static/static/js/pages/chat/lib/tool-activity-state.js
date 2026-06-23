@@ -16,39 +16,35 @@ export function resetToolActivityState(stateRef) {
 export function ensureGateToolActivity(setMessages, gate, stateRef) {
   const card = toolCardFromGate(gate, { toolStatus: "running" });
   if (!card) return;
-  upsertToolActivityMessage(setMessages, card, stateRef, {
-    matchGate: true,
-  });
+  upsertToolActivityMessage(setMessages, card, stateRef);
 }
 
 export function failGateToolActivity(
   setMessages,
   gate,
   stateRef,
-  toolError = "authorization",
+  toolError = "Declined by user.",
 ) {
   const card = toolCardFromGate(gate, {
     toolStatus: "error",
     toolError,
+    toolErrorKind: "gate_declined",
   });
   if (!card) return;
-  upsertToolActivityMessage(setMessages, card, stateRef, {
-    matchGate: true,
-  });
+  upsertToolActivityMessage(setMessages, card, stateRef);
 }
 
 export function upsertToolActivityMessage(
   setMessages,
   card,
   stateRef,
-  options = {},
 ) {
   if (!card) return;
   let incoming = normalizeToolCard(card);
   incoming = applyRememberedTerminal(incoming, stateRef);
   setMessages((prev) => {
     const targetId = toolMessageId(incoming);
-    const existing = findToolActivityIndex(prev, incoming, targetId, options);
+    const existing = findToolActivityIndex(prev, incoming, targetId);
     if (existing >= 0) {
       const copy = [...prev];
       copy[existing] = mergeToolActivity(copy[existing], incoming);
@@ -66,10 +62,16 @@ export function upsertToolActivityMessage(
 }
 
 function toolCardFromGate(gate, overrides = {}) {
-  if (!gate?.runId || !gate?.gateRef || gate.kind !== "gate" || !gate.toolName) {
+  if (
+    !gate?.runId ||
+    !gate?.gateRef ||
+    !gate.invocationId ||
+    gate.kind !== "gate" ||
+    !gate.toolName
+  ) {
     return null;
   }
-  const invocationId = gate.invocationId || `gate:${gate.runId}:${gate.gateRef}`;
+  const invocationId = gate.invocationId;
   return {
     invocationId,
     callId: invocationId,
@@ -80,6 +82,7 @@ function toolCardFromGate(gate, overrides = {}) {
     toolParameters: null,
     toolResultPreview: null,
     toolError: overrides.toolError || null,
+    toolErrorKind: overrides.toolErrorKind || null,
     toolDurationMs: null,
     updatedAt: overrides.updatedAt || new Date().toISOString(),
     resultRef: null,
@@ -96,7 +99,7 @@ function toolMessageId(card) {
   return `tool-${card.invocationId}`;
 }
 
-function findToolActivityIndex(messages, card, targetId, options) {
+function findToolActivityIndex(messages, card, targetId) {
   const exact = messages.findIndex((message) => message?.id === targetId);
   if (exact >= 0) return exact;
 
@@ -111,36 +114,7 @@ function findToolActivityIndex(messages, card, targetId, options) {
     if (byGate >= 0) return byGate;
   }
 
-  if (!options.matchGate && !card.gateActivity) {
-    const synthetic = messages.findIndex((message) =>
-      canRealActivityAdoptSyntheticGate(message, card),
-    );
-    if (synthetic >= 0) return synthetic;
-  }
-
-  if (options.matchGate || card.gateActivity) {
-    const byTool = messages.findIndex(
-      (message) =>
-        message?.role === "tool_activity" &&
-        !message.gateRef &&
-        message.gateActivity !== true &&
-        !isTerminalToolStatus(message.toolStatus) &&
-        message.turnRunId === card.turnRunId &&
-        sameToolName(message.toolName, card.toolName),
-    );
-    if (byTool >= 0) return byTool;
-  }
-
   return -1;
-}
-
-function canRealActivityAdoptSyntheticGate(message, card) {
-  return (
-    message?.role === "tool_activity" &&
-    message.gateActivity === true &&
-    message.turnRunId === card.turnRunId &&
-    sameToolName(message.toolName, card.toolName)
-  );
 }
 
 function mergeToolActivity(current, incoming) {
@@ -163,6 +137,7 @@ function mergeToolActivity(current, incoming) {
     toolName: incoming.toolName || current.toolName,
     toolStatus: keepCurrentTerminal ? current.toolStatus : incoming.toolStatus,
     toolError: incoming.toolError || current.toolError,
+    toolErrorKind: incoming.toolErrorKind || current.toolErrorKind || null,
     updatedAt: keepCurrentTerminal
       ? current.updatedAt || incoming.updatedAt
       : incoming.updatedAt || current.updatedAt,
@@ -205,11 +180,6 @@ function applyRememberedTerminal(card, stateRef) {
 function rememberTerminal(card, stateRef) {
   if (!card?.invocationId || !isTerminalToolStatus(card.toolStatus)) return;
   stateRef?.current?.terminalByInvocation?.set(card.invocationId, card);
-}
-
-function sameToolName(left, right) {
-  if (!left || !right) return false;
-  return toolDisplayName(left) === toolDisplayName(right);
 }
 
 function normalizeToolCard(card) {

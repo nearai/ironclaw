@@ -163,7 +163,7 @@ impl PendingApprovalResume {
 /// value: both sub-fields are present together or neither is.
 ///
 /// When `disposition` is `Some(Denied)`, the executor surfaces a model-visible
-/// authorization failure for the parked call and SKIPS re-dispatch; in that
+/// gate-declined failure for the parked call and SKIPS re-dispatch; in that
 /// case `resume_token` and `replay` are unused.
 ///
 /// Field-name note: each pending-resume type scopes `disposition` to ONE
@@ -186,9 +186,9 @@ pub struct PendingAuthResume {
     /// re-dispatch can reuse it instead of minting a fresh one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub resume_token: Option<CapabilityResumeToken>,
-    /// Activity identifier for the parked invocation when the invocation was
-    /// previously assigned one. Token-less auth gates can still be resumed, but
-    /// they have no persisted activity to finalize on denial.
+    /// Activity identifier for the parked invocation. Token-less auth gates
+    /// still carry this explicitly so a later denial can finalize the same
+    /// activity instead of leaving the UI row running.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub activity_id: Option<CapabilityActivityId>,
     /// Prior-approval identity, set together with `resume_token` when the

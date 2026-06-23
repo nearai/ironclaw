@@ -32,6 +32,7 @@ pub(super) fn capability_invocation_from_candidate(
     approval_resume: Option<CapabilityApprovalResume>,
 ) -> CapabilityInvocation {
     CapabilityInvocation {
+        activity_id: call.activity_id,
         surface_version: call.surface_version,
         capability_id: call.capability_id,
         input_ref: call.input_ref,
@@ -64,6 +65,7 @@ pub(super) fn capability_invocation_from_auth_resume_candidate(
             replay: pending_auth.replay.clone(),
         });
     CapabilityInvocation {
+        activity_id: call.activity_id,
         surface_version: call.surface_version,
         capability_id: call.capability_id,
         input_ref: call.input_ref,
@@ -77,6 +79,9 @@ pub(super) fn pending_approval_resume_candidate(
     surface_version: CapabilitySurfaceVersion,
 ) -> CapabilityCallCandidate {
     CapabilityCallCandidate {
+        activity_id: resume
+            .activity_id_for_resume()
+            .unwrap_or_else(ironclaw_turns::CapabilityActivityId::new),
         surface_version,
         capability_id: resume.capability_id.clone(),
         input_ref: resume.input_ref.clone(),
@@ -91,7 +96,7 @@ pub(super) async fn pending_auth_resume_candidate(
     surface_version: CapabilitySurfaceVersion,
 ) -> Result<CapabilityCallCandidate, AgentLoopExecutorError> {
     if let Some(replay) = resume.provider_replay.as_ref() {
-        let candidate = host
+        let mut candidate = host
             .register_provider_tool_call(ProviderToolCall {
                 provider_id: replay.provider_id.clone(),
                 provider_model_id: replay.provider_model_id.clone(),
@@ -112,6 +117,9 @@ pub(super) async fn pending_auth_resume_candidate(
                 detail: "auth resume provider replay no longer matches blocked capability",
             });
         }
+        if let Some(activity_id) = resume.activity_id_for_resume() {
+            candidate.activity_id = activity_id;
+        }
         return Ok(candidate);
     }
     Ok(pending_auth_resume_staged_input_candidate(
@@ -125,6 +133,9 @@ fn pending_auth_resume_staged_input_candidate(
     surface_version: CapabilitySurfaceVersion,
 ) -> CapabilityCallCandidate {
     CapabilityCallCandidate {
+        activity_id: resume
+            .activity_id_for_resume()
+            .unwrap_or_else(ironclaw_turns::CapabilityActivityId::new),
         surface_version,
         capability_id: resume.capability_id.clone(),
         input_ref: resume.input_ref.clone(),
@@ -307,7 +318,7 @@ pub(super) fn model_visible_capability_failure_observation(
             schema_version:
                 ironclaw_turns::run_profile::MODEL_VISIBLE_TOOL_OBSERVATION_SCHEMA_VERSION,
             status: ToolObservationStatus::Error,
-            summary: format!("Capability failed with {}.", failure.error_kind.as_str()),
+            summary: model_visible_failure_summary(&failure.error_kind),
             detail: ToolObservationDetail::GenericFailure {
                 failure_kind: failure.error_kind.clone(),
             },
@@ -315,6 +326,13 @@ pub(super) fn model_visible_capability_failure_observation(
             recovery: Some(generic_failure_recovery(&failure.error_kind)),
             trust: ObservationTrust::UntrustedToolOutput,
         },
+    }
+}
+
+fn model_visible_failure_summary(error_kind: &CapabilityFailureKind) -> String {
+    match error_kind {
+        CapabilityFailureKind::GateDeclined => "Capability declined by user.".to_string(),
+        _ => format!("Capability failed with {}.", error_kind.as_str()),
     }
 }
 
@@ -371,9 +389,9 @@ fn invalid_input_observation(issues: Vec<CapabilityInputIssue>) -> ModelVisibleT
 
 fn generic_failure_recovery(error_kind: &CapabilityFailureKind) -> ToolRecoveryObservation {
     let same_call_retry = match error_kind {
-        CapabilityFailureKind::Authorization | CapabilityFailureKind::PolicyDenied => {
-            SameCallRetryConstraint::Forbidden
-        }
+        CapabilityFailureKind::Authorization
+        | CapabilityFailureKind::GateDeclined
+        | CapabilityFailureKind::PolicyDenied => SameCallRetryConstraint::Forbidden,
         CapabilityFailureKind::InvalidInput
         | CapabilityFailureKind::InvalidOutput
         | CapabilityFailureKind::OutputTooLarge => SameCallRetryConstraint::RequiresChangedInput,
@@ -625,6 +643,7 @@ mod tests {
         };
         let surface_version = CapabilitySurfaceVersion::new("surface:v1").unwrap();
         let call = CapabilityCallCandidate {
+            activity_id: ironclaw_turns::CapabilityActivityId::new(),
             surface_version,
             capability_id: cap.clone(),
             input_ref: CapabilityInputRef::new("input:both-fields").unwrap(),
@@ -671,8 +690,8 @@ mod tests {
      {
         // When `PendingAuthResume.resume_token` is None (the invocation never
         // passed an approval gate), the returned `CapabilityInvocation` must
-        // carry `auth_resume: None` so the host routes through `invoke_json`
-        // with a fresh invocation_id rather than the auth-resume path.
+        // carry `auth_resume: None` so the host routes through `invoke_json`,
+        // while preserving the call activity id as the invocation identity.
         use ironclaw_turns::run_profile::CapabilityInputRef;
 
         let cap = CapabilityId::new("test.cap").unwrap();
@@ -690,7 +709,9 @@ mod tests {
             disposition: None,
         };
         let surface_version = CapabilitySurfaceVersion::new("surface:v1").unwrap();
+        let activity_id = ironclaw_turns::CapabilityActivityId::new();
         let call = CapabilityCallCandidate {
+            activity_id,
             surface_version,
             capability_id: cap.clone(),
             input_ref: CapabilityInputRef::new("input:none-token").unwrap(),
@@ -700,6 +721,10 @@ mod tests {
 
         let invocation = capability_invocation_from_auth_resume_candidate(call, &resume);
 
+        assert_eq!(
+            invocation.activity_id, activity_id,
+            "tokenless auth-resume candidates must preserve the parked activity id"
+        );
         assert!(
             invocation.auth_resume.is_none(),
             "auth_resume must be None when resume_token is None; got {:?}",

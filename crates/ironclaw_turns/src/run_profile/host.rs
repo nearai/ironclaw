@@ -1218,6 +1218,10 @@ pub struct AssistantReply {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CapabilityCallCandidate {
+    /// Stable activity identity assigned before capability dispatch. Hosts use
+    /// this as the runtime invocation identity, and tokenless gate checkpoints
+    /// persist it so terminal events can close the same activity.
+    pub activity_id: CapabilityActivityId,
     pub surface_version: CapabilitySurfaceVersion,
     pub capability_id: CapabilityId,
     pub input_ref: CapabilityInputRef,
@@ -1387,6 +1391,9 @@ pub struct ProviderToolCallReference {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CapabilityInvocation {
+    /// Stable activity identity for this invocation. Runtime hosts derive
+    /// their `InvocationId` from it rather than minting a second identity.
+    pub activity_id: CapabilityActivityId,
     pub surface_version: CapabilitySurfaceVersion,
     pub capability_id: CapabilityId,
     pub input_ref: CapabilityInputRef,
@@ -1700,6 +1707,7 @@ pub enum CapabilityFailureKind {
     Backend,
     Cancelled,
     Dispatcher,
+    GateDeclined,
     InvalidInput,
     InvalidOutput,
     MissingRuntime,
@@ -1740,6 +1748,7 @@ impl CapabilityFailureKind {
             Self::Backend => "backend",
             Self::Cancelled => "cancelled",
             Self::Dispatcher => "dispatcher",
+            Self::GateDeclined => "gate_declined",
             Self::InvalidInput => "invalid_input",
             Self::InvalidOutput => "invalid_output",
             Self::MissingRuntime => "missing_runtime",
@@ -1784,6 +1793,7 @@ impl<'de> Deserialize<'de> for CapabilityFailureKind {
             "backend" => Ok(Self::Backend),
             "cancelled" => Ok(Self::Cancelled),
             "dispatcher" => Ok(Self::Dispatcher),
+            "gate_declined" => Ok(Self::GateDeclined),
             "invalid_input" => Ok(Self::InvalidInput),
             "invalid_output" => Ok(Self::InvalidOutput),
             "missing_runtime" => Ok(Self::MissingRuntime),

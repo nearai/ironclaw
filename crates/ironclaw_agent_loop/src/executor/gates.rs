@@ -70,14 +70,16 @@ impl ExecutorStage<GateInput> for GateStage {
                 let auth_resume_token = auth_resume.map(|r| r.resume_token.clone());
                 let auth_activity_id = auth_resume_token
                     .as_ref()
-                    .and_then(capability_activity_id_from_resume_token);
+                    .and_then(capability_activity_id_from_resume_token)
+                    .or(Some(call.activity_id));
                 let auth_replay = auth_resume.and_then(|r| r.replay.clone());
                 let auth_prior_approval = auth_resume.and_then(|r| r.prior_approval.clone());
                 if matches!(kind, GateKind::Approval) {
                     let approval_resume = input.approval_resume;
                     state.pending_approval_resume = approval_resume.map(|resume| {
                         let activity_id =
-                            capability_activity_id_from_resume_token(&resume.resume_token);
+                            capability_activity_id_from_resume_token(&resume.resume_token)
+                                .or(Some(call.activity_id));
                         PendingApprovalResume {
                             gate_ref: gate_ref.clone(),
                             capability_id: call.capability_id.clone(),

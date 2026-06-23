@@ -2394,6 +2394,7 @@ mod hook_resolver_adapter_tests {
 
     fn invocation(input_ref: &str) -> CapabilityInvocation {
         CapabilityInvocation {
+            activity_id: ironclaw_turns::CapabilityActivityId::new(),
             surface_version: CapabilitySurfaceVersion::new("v1")
                 .expect("surface version literal valid"),
             capability_id: CapabilityId::new("cap.test").expect("capability id literal valid"),
