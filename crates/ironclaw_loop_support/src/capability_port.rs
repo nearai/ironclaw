@@ -56,6 +56,7 @@ use self::surface_snapshot::{
 // existing adapter boundary.
 const PROVIDER_TOOL_NAME_DIGEST_BYTES: usize = 32;
 const PROVIDER_TOOL_CALL_INPUT_REF_PREFIX: &str = "input:provider-tool-";
+const MAX_IN_MEMORY_PROVIDER_TOOL_CALL_ACTIVITY_IDS: usize = 128;
 
 /// Observes a capability invocation's resolved input (arguments) as the host
 /// loop executes it, for trajectory capture by downstream consumers (benchmark
@@ -727,6 +728,45 @@ impl ProviderToolCallEffectiveCapabilityIdStore {
     }
 }
 
+#[derive(Default)]
+struct ProviderToolCallActivityIdStore {
+    records: HashMap<String, CapabilityActivityId>,
+    insertion_order: VecDeque<String>,
+}
+
+impl ProviderToolCallActivityIdStore {
+    fn get_or_insert(
+        &mut self,
+        input_ref: &CapabilityInputRef,
+    ) -> Result<CapabilityActivityId, AgentLoopHostError> {
+        if let Some(activity_id) = self.records.get(input_ref.as_str()) {
+            return Ok(*activity_id);
+        }
+        self.evict_until_below_limit()?;
+        let key = input_ref.as_str().to_string();
+        let activity_id = CapabilityActivityId::new();
+        self.insertion_order.push_back(key.clone());
+        self.records.insert(key, activity_id);
+        Ok(activity_id)
+    }
+
+    fn evict_until_below_limit(&mut self) -> Result<(), AgentLoopHostError> {
+        while self.records.len() >= MAX_IN_MEMORY_PROVIDER_TOOL_CALL_ACTIVITY_IDS {
+            let Some(candidate) = self.insertion_order.pop_front() else {
+                break;
+            };
+            self.records.remove(&candidate);
+        }
+        if self.records.len() >= MAX_IN_MEMORY_PROVIDER_TOOL_CALL_ACTIVITY_IDS {
+            return Err(AgentLoopHostError::new(
+                AgentLoopHostErrorKind::Unavailable,
+                "provider tool-call activity id store is unavailable",
+            ));
+        }
+        Ok(())
+    }
+}
+
 pub struct HostRuntimeLoopCapabilityPort {
     runtime: Arc<dyn HostRuntime>,
     run_context: LoopRunContext,
@@ -740,6 +780,7 @@ pub struct HostRuntimeLoopCapabilityPort {
     current_surface_version: Mutex<Option<String>>,
     dispatch_records: Mutex<DispatchRecordStore>,
     provider_tool_call_effective_capability_ids: Mutex<ProviderToolCallEffectiveCapabilityIdStore>,
+    provider_tool_call_activity_ids: Mutex<ProviderToolCallActivityIdStore>,
     trajectory_observer: Option<Arc<dyn CapabilityTrajectoryObserver>>,
 }
 
@@ -785,6 +826,7 @@ impl HostRuntimeLoopCapabilityPort {
             provider_tool_call_effective_capability_ids: Mutex::new(
                 ProviderToolCallEffectiveCapabilityIdStore::default(),
             ),
+            provider_tool_call_activity_ids: Mutex::new(ProviderToolCallActivityIdStore::default()),
             trajectory_observer: None,
         }
     }
@@ -951,6 +993,17 @@ impl HostRuntimeLoopCapabilityPort {
             "provider tool-call effective capability id store",
         )?
         .staged_effective_capability_ids_for(input_ref))
+    }
+
+    fn activity_id_for_provider_tool_call(
+        &self,
+        input_ref: &CapabilityInputRef,
+    ) -> Result<CapabilityActivityId, AgentLoopHostError> {
+        lock_mut(
+            &self.provider_tool_call_activity_ids,
+            "provider tool-call activity id store",
+        )?
+        .get_or_insert(input_ref)
     }
 
     /// Drop guard for an `InFlight` dispatch reservation. Releases the
@@ -1244,8 +1297,9 @@ impl LoopCapabilityPort for HostRuntimeLoopCapabilityPort {
                 prepared.effective_capability_ids.iter().cloned().collect(),
             )?;
         }
+        let activity_id = self.activity_id_for_provider_tool_call(&input_ref)?;
         Ok(ironclaw_turns::run_profile::CapabilityCallCandidate {
-            activity_id: CapabilityActivityId::new(),
+            activity_id,
             surface_version: prepared.surface_version,
             capability_id: prepared.capability_id,
             input_ref,
@@ -1337,6 +1391,60 @@ impl LoopCapabilityPort for HostRuntimeLoopCapabilityPort {
         &self,
         request: CapabilityInvocation,
     ) -> Result<CapabilityOutcome, AgentLoopHostError> {
+        let requested_invocation_id = InvocationId::from_uuid(request.activity_id.as_uuid());
+        // Normalize resume mode and validate token/activity identity before
+        // dispatch reservation. Cached replay branches can return without
+        // touching runtime state, so they must pass the same fail-closed checks
+        // as fresh dispatch.
+        enum ResolvedResumeMode<'a> {
+            Approval {
+                resume: &'a CapabilityApprovalResume,
+                invocation_id: InvocationId,
+            },
+            Auth {
+                resume: &'a CapabilityAuthResume,
+                invocation_id: InvocationId,
+            },
+            None,
+        }
+        let resume_mode = match (
+            request.approval_resume.as_ref(),
+            request.auth_resume.as_ref(),
+        ) {
+            (Some(_), Some(_)) => {
+                return Err(AgentLoopHostError::new(
+                    AgentLoopHostErrorKind::InvalidInvocation,
+                    "capability invocation has both approval_resume and auth_resume set; \
+                     these resume modes are mutually exclusive",
+                ));
+            }
+            (Some(resume), _) => {
+                let resume_invocation_id = invocation_id_from_resume_token(&resume.resume_token)?;
+                ensure_resume_invocation_matches_activity(
+                    resume_invocation_id,
+                    requested_invocation_id,
+                    "approval",
+                )?;
+                ResolvedResumeMode::Approval {
+                    resume,
+                    invocation_id: resume_invocation_id,
+                }
+            }
+            (_, Some(auth_resume)) => {
+                let resume_invocation_id =
+                    invocation_id_from_resume_token(&auth_resume.resume_token)?;
+                ensure_resume_invocation_matches_activity(
+                    resume_invocation_id,
+                    requested_invocation_id,
+                    "auth",
+                )?;
+                ResolvedResumeMode::Auth {
+                    resume: auth_resume,
+                    invocation_id: resume_invocation_id,
+                }
+            }
+            (Option::None, Option::None) => ResolvedResumeMode::None,
+        };
         let effective_input_ref = request
             .approval_resume
             .as_ref()
@@ -1494,7 +1602,6 @@ impl LoopCapabilityPort for HostRuntimeLoopCapabilityPort {
                 capability.estimate.clone(),
             )
         };
-        let requested_invocation_id = InvocationId::from_uuid(request.activity_id.as_uuid());
         let mut invocation_context =
             invocation_context_from_visible(VisibleInvocationContextRequest {
                 base: &self.visible_request.context,
@@ -1506,43 +1613,14 @@ impl LoopCapabilityPort for HostRuntimeLoopCapabilityPort {
                 allowed_effects: &trust_decision.authority_ceiling.allowed_effects,
                 execution_mounts: self.execution_mounts_for(&request.capability_id),
             })?;
-        // Normalize the two mutually-exclusive resume fields into a single
-        // local value BEFORE touching `invocation_context`, so an illegal
-        // both-set invocation is rejected before any state mutation occurs.
-        enum ResolvedResumeMode<'a> {
-            Approval(&'a CapabilityApprovalResume),
-            Auth(&'a CapabilityAuthResume),
-            None,
-        }
-        let resume_mode = match (
-            request.approval_resume.as_ref(),
-            request.auth_resume.as_ref(),
-        ) {
-            (Some(_), Some(_)) => {
-                // Both resume modes set simultaneously is an illegal invocation:
-                // approval_resume and auth_resume are mutually exclusive paths.
-                // Fail closed — do not dispatch, and do not mutate context.
-                return Err(AgentLoopHostError::new(
-                    AgentLoopHostErrorKind::InvalidInvocation,
-                    "capability invocation has both approval_resume and auth_resume set; \
-                     these resume modes are mutually exclusive",
-                ));
-            }
-            (Some(resume), _) => ResolvedResumeMode::Approval(resume),
-            (_, Some(auth_resume)) => ResolvedResumeMode::Auth(auth_resume),
-            (Option::None, Option::None) => ResolvedResumeMode::None,
-        };
         match &resume_mode {
-            ResolvedResumeMode::Approval(resume) => {
-                let resume_invocation_id = invocation_id_from_resume_token(&resume.resume_token)?;
-                ensure_resume_invocation_matches_activity(
-                    resume_invocation_id,
-                    requested_invocation_id,
-                    "approval",
-                )?;
-                invocation_context.invocation_id = resume_invocation_id;
+            ResolvedResumeMode::Approval {
+                resume,
+                invocation_id: resume_invocation_id,
+            } => {
+                invocation_context.invocation_id = *resume_invocation_id;
                 invocation_context.correlation_id = resume.correlation_id;
-                invocation_context.resource_scope.invocation_id = resume_invocation_id;
+                invocation_context.resource_scope.invocation_id = *resume_invocation_id;
                 invocation_context.validate().map_err(|_| {
                     AgentLoopHostError::new(
                         AgentLoopHostErrorKind::InvalidInvocation,
@@ -1550,19 +1628,15 @@ impl LoopCapabilityPort for HostRuntimeLoopCapabilityPort {
                     )
                 })?;
             }
-            ResolvedResumeMode::Auth(auth_resume) => {
+            ResolvedResumeMode::Auth {
+                resume: auth_resume,
+                invocation_id: resume_invocation_id,
+            } => {
                 // Reuse original invocation identifier so the fingerprinted
                 // approval lease (scoped to that identifier) can still be matched
                 // and claimed.
-                let resume_invocation_id =
-                    invocation_id_from_resume_token(&auth_resume.resume_token)?;
-                ensure_resume_invocation_matches_activity(
-                    resume_invocation_id,
-                    requested_invocation_id,
-                    "auth",
-                )?;
-                invocation_context.invocation_id = resume_invocation_id;
-                invocation_context.resource_scope.invocation_id = resume_invocation_id;
+                invocation_context.invocation_id = *resume_invocation_id;
+                invocation_context.resource_scope.invocation_id = *resume_invocation_id;
                 // Restore original correlation identifier when a prior approval is
                 // present so the same trace-correlation identifier flows through
                 // the full capability lifecycle (mirrors the approval-resume path).
@@ -1598,7 +1672,7 @@ impl LoopCapabilityPort for HostRuntimeLoopCapabilityPort {
         })
         .await?;
         let outcome = match resume_mode {
-            ResolvedResumeMode::Approval(resume) => {
+            ResolvedResumeMode::Approval { resume, .. } => {
                 let runtime_request = RuntimeCapabilityResumeRequest::new(
                     invocation_context,
                     resume.approval_request_id,
@@ -1610,7 +1684,10 @@ impl LoopCapabilityPort for HostRuntimeLoopCapabilityPort {
                 .with_idempotency_key(idempotency_key.clone());
                 dispatch_runtime_capability_resume(self.runtime.as_ref(), runtime_request).await
             }
-            ResolvedResumeMode::Auth(auth_resume) => {
+            ResolvedResumeMode::Auth {
+                resume: auth_resume,
+                ..
+            } => {
                 let prior_approval_id = auth_resume
                     .prior_approval
                     .as_ref()
@@ -4568,6 +4645,78 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn duplicate_provider_tool_call_registration_reuses_activity_id_and_cached_invocation() {
+        let capability_id = CapabilityId::new("demo.echo").expect("valid capability id");
+        let provider_id = ExtensionId::new("demo").expect("valid provider id");
+        let runtime = Arc::new(RecordingHostRuntime::new(vec![visible_capability(
+            capability_id.clone(),
+            provider_id.clone(),
+        )]));
+        let port = runtime_capability_port(
+            &capability_id,
+            &provider_id,
+            runtime.clone(),
+            Arc::new(RecordingResultWriter::default()),
+            dummy_milestone_sink(),
+            "thread-provider-duplicate-activity",
+        )
+        .await;
+        let surface = port
+            .visible_capabilities(VisibleCapabilityRequest {})
+            .await
+            .expect("visible capabilities load");
+        let provider_call = provider_tool_call();
+        let first = port
+            .register_provider_tool_call(provider_call.clone())
+            .await
+            .expect("first provider tool call registers");
+        let second = port
+            .register_provider_tool_call(provider_call)
+            .await
+            .expect("duplicate provider tool call registers");
+
+        assert_eq!(
+            second.input_ref, first.input_ref,
+            "duplicate provider calls canonicalize to the same staged input"
+        );
+        assert_eq!(
+            second.activity_id, first.activity_id,
+            "duplicate provider calls must preserve the same activity identity"
+        );
+
+        let first_outcome = port
+            .invoke_capability(CapabilityInvocation {
+                activity_id: first.activity_id,
+                surface_version: surface.version.clone(),
+                capability_id: first.capability_id.clone(),
+                input_ref: first.input_ref.clone(),
+                approval_resume: None,
+                auth_resume: None,
+            })
+            .await
+            .expect("first invocation succeeds");
+        let replayed_outcome = port
+            .invoke_capability(CapabilityInvocation {
+                activity_id: second.activity_id,
+                surface_version: surface.version,
+                capability_id: second.capability_id,
+                input_ref: second.input_ref,
+                approval_resume: None,
+                auth_resume: None,
+            })
+            .await
+            .expect("duplicate invocation replays cached outcome");
+
+        assert!(matches!(first_outcome, CapabilityOutcome::Completed(_)));
+        assert!(matches!(replayed_outcome, CapabilityOutcome::Completed(_)));
+        assert_eq!(
+            runtime.take_requests().len(),
+            1,
+            "duplicate provider registration must not create a second runtime dispatch"
+        );
+    }
+
+    #[tokio::test]
     async fn capability_info_accepts_visible_provider_tool_name() {
         let capability_id = CapabilityId::new("demo.echo").expect("valid capability id");
         let provider_id = ExtensionId::new("demo").expect("valid provider id");
@@ -6397,6 +6546,82 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn invoke_capability_rejects_cached_approval_resume_activity_mismatch() {
+        use ironclaw_host_api::ApprovalRequestId;
+        use ironclaw_turns::run_profile::CapabilityApprovalResume;
+
+        let capability_id = CapabilityId::new("demo.echo").expect("valid capability id");
+        let provider_id = ExtensionId::new("demo").expect("valid provider id");
+        let runtime = Arc::new(RecordingResumeHostRuntime::new(vec![visible_capability(
+            capability_id.clone(),
+            provider_id.clone(),
+        )]));
+        let port = runtime_capability_port(
+            &capability_id,
+            &provider_id,
+            runtime.clone(),
+            Arc::new(RecordingResultWriter::default()),
+            dummy_milestone_sink(),
+            "thread-cached-approval-resume-activity-mismatch",
+        )
+        .await;
+
+        let invocation = visible_runtime_invocation(&port).await;
+        let resume = CapabilityApprovalResume {
+            approval_request_id: ApprovalRequestId::new(),
+            resume_token: CapabilityResumeToken::new(invocation.activity_id.to_string())
+                .expect("valid resume token"),
+            correlation_id: CorrelationId::new(),
+            input_ref: invocation.input_ref.clone(),
+            input: serde_json::json!({}),
+            estimate: ResourceEstimate::default(),
+        };
+        let first_outcome = port
+            .invoke_capability(CapabilityInvocation {
+                activity_id: invocation.activity_id,
+                surface_version: invocation.surface_version.clone(),
+                capability_id: invocation.capability_id.clone(),
+                input_ref: invocation.input_ref.clone(),
+                approval_resume: Some(resume.clone()),
+                auth_resume: None,
+            })
+            .await
+            .expect("matching approval resume succeeds");
+        assert!(matches!(first_outcome, CapabilityOutcome::Completed(_)));
+        assert_eq!(runtime.resume_request_count(), 1);
+
+        let mismatched_activity_id = loop {
+            let candidate = CapabilityActivityId::new();
+            if candidate != invocation.activity_id {
+                break candidate;
+            }
+        };
+        let err = port
+            .invoke_capability(CapabilityInvocation {
+                activity_id: mismatched_activity_id,
+                surface_version: invocation.surface_version,
+                capability_id: invocation.capability_id,
+                input_ref: invocation.input_ref,
+                approval_resume: Some(resume),
+                auth_resume: None,
+            })
+            .await
+            .expect_err("cached approval resume must still reject activity mismatch");
+
+        assert_eq!(err.kind, AgentLoopHostErrorKind::InvalidInvocation);
+        assert!(
+            err.safe_summary.contains("activity identity"),
+            "error should name the activity identity mismatch: {:?}",
+            err.safe_summary
+        );
+        assert_eq!(
+            runtime.resume_request_count(),
+            1,
+            "mismatched cached replay must fail before runtime resume"
+        );
+    }
+
+    #[tokio::test]
     async fn invoke_capability_rejects_auth_resume_activity_mismatch() {
         use ironclaw_turns::run_profile::CapabilityAuthResume;
 
@@ -6870,6 +7095,86 @@ mod tests {
 
         async fn health(&self) -> Result<HostRuntimeHealth, HostRuntimeError> {
             unreachable!("recording host runtime should not report health")
+        }
+    }
+
+    struct RecordingResumeHostRuntime {
+        capabilities: Vec<VisibleCapability>,
+        resume_requests: Mutex<Vec<RuntimeCapabilityResumeRequest>>,
+    }
+
+    impl RecordingResumeHostRuntime {
+        fn new(capabilities: Vec<VisibleCapability>) -> Self {
+            Self {
+                capabilities,
+                resume_requests: Mutex::new(Vec::new()),
+            }
+        }
+
+        fn resume_request_count(&self) -> usize {
+            self.resume_requests
+                .lock()
+                .expect("resume requests lock")
+                .len()
+        }
+    }
+
+    #[async_trait]
+    impl HostRuntime for RecordingResumeHostRuntime {
+        async fn invoke_capability(
+            &self,
+            _request: RuntimeCapabilityRequest,
+        ) -> Result<RuntimeCapabilityOutcome, HostRuntimeError> {
+            unreachable!("recording resume runtime should not fresh-dispatch")
+        }
+
+        async fn resume_capability(
+            &self,
+            request: RuntimeCapabilityResumeRequest,
+        ) -> Result<RuntimeCapabilityOutcome, HostRuntimeError> {
+            self.resume_requests
+                .lock()
+                .expect("resume requests lock")
+                .push(request.clone());
+            Ok(RuntimeCapabilityOutcome::Completed(Box::new(
+                RuntimeCapabilityCompleted {
+                    capability_id: request.capability_id,
+                    output: serde_json::json!({"resumed": true}),
+                    display_preview: None,
+                    usage: ResourceUsage {
+                        output_bytes: RECORDING_OUTPUT_BYTES,
+                        ..ResourceUsage::default()
+                    },
+                },
+            )))
+        }
+
+        async fn visible_capabilities(
+            &self,
+            _request: ironclaw_host_runtime::VisibleCapabilityRequest,
+        ) -> Result<VisibleCapabilitySurface, HostRuntimeError> {
+            Ok(VisibleCapabilitySurface {
+                version: CapabilitySurfaceVersion::new("surface-v1").expect("valid version"),
+                capabilities: self.capabilities.clone(),
+            })
+        }
+
+        async fn cancel_work(
+            &self,
+            _request: CancelRuntimeWorkRequest,
+        ) -> Result<CancelRuntimeWorkOutcome, HostRuntimeError> {
+            unreachable!("recording resume runtime should not cancel work")
+        }
+
+        async fn runtime_status(
+            &self,
+            _request: RuntimeStatusRequest,
+        ) -> Result<HostRuntimeStatus, HostRuntimeError> {
+            unreachable!("recording resume runtime should not report status")
+        }
+
+        async fn health(&self) -> Result<HostRuntimeHealth, HostRuntimeError> {
+            unreachable!("recording resume runtime should not report health")
         }
     }
 

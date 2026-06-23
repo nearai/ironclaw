@@ -4144,7 +4144,7 @@ async fn non_auth_gate_block_preserves_pending_auth_resume() {
         effective_capability_ids: Vec::new(),
         provider_replay: None,
         resume_token: None,
-        activity_id: None,
+        activity_id: CapabilityActivityId::new(),
         prior_approval: None,
         replay: None,
         disposition: None,
@@ -4562,7 +4562,7 @@ async fn gate_stage_skip_and_continue_clears_stale_pending_auth_resume() {
         effective_capability_ids: Vec::new(),
         provider_replay: None,
         resume_token: None,
-        activity_id: None,
+        activity_id: CapabilityActivityId::new(),
         prior_approval: None,
         replay: None,
         disposition: None,
@@ -4626,7 +4626,7 @@ async fn gate_stage_abort_clears_stale_pending_auth_resume() {
         effective_capability_ids: Vec::new(),
         provider_replay: None,
         resume_token: None,
-        activity_id: None,
+        activity_id: CapabilityActivityId::new(),
         prior_approval: None,
         replay: None,
         disposition: None,
@@ -4693,7 +4693,7 @@ async fn gate_stage_skip_does_not_clear_auth_resume_for_different_capability() {
         effective_capability_ids: Vec::new(),
         provider_replay: None,
         resume_token: None,
-        activity_id: None,
+        activity_id: CapabilityActivityId::new(),
         prior_approval: None,
         replay: None,
         disposition: None,
@@ -5254,7 +5254,7 @@ async fn auth_resume_slot_consumed_on_first_batch_match_not_reused_for_second_ca
         effective_capability_ids: vec![],
         provider_replay: None,
         resume_token: Some(resume_token.clone()),
-        activity_id: None,
+        activity_id: CapabilityActivityId::new(),
         prior_approval: Some(crate::state::AuthResumeApprovalIdentity {
             approval_request_id,
             correlation_id,
@@ -5707,7 +5707,7 @@ async fn capability_stage_denied_approval_resume_surfaces_gate_declined_failure_
         host: &host,
     };
 
-    let calls = match provider_calls_response().output {
+    let mut calls = match provider_calls_response().output {
         ParentLoopOutput::CapabilityCalls(calls) => calls,
         ParentLoopOutput::AssistantReply(_) => panic!("expected provider calls fixture"),
     };
@@ -5715,6 +5715,7 @@ async fn capability_stage_denied_approval_resume_surfaces_gate_declined_failure_
     let denied_input_ref = calls[0].input_ref.clone();
     let denied_surface_version = calls[0].surface_version.clone();
     let denied_activity_id = CapabilityActivityId::new();
+    calls[0].activity_id = denied_activity_id;
 
     let mut state = LoopExecutionState::initial_for_run(host.run_context());
     state.pending_approval_resume = Some(PendingApprovalResume {
@@ -5723,7 +5724,7 @@ async fn capability_stage_denied_approval_resume_surfaces_gate_declined_failure_
         approval_request_id: ApprovalRequestId::new(),
         resume_token: CapabilityResumeToken::new(denied_activity_id.to_string())
             .expect("valid token"),
-        activity_id: Some(denied_activity_id),
+        activity_id: denied_activity_id,
         correlation_id: CorrelationId::new(),
         surface_version: denied_surface_version,
         input_ref: denied_input_ref,
@@ -5826,7 +5827,7 @@ async fn capability_stage_denied_auth_resume_surfaces_gate_declined_failure_and_
         resume_token: Some(
             CapabilityResumeToken::new(denied_activity_id.to_string()).expect("valid token"),
         ),
-        activity_id: Some(denied_activity_id),
+        activity_id: denied_activity_id,
         prior_approval: None,
         replay: None,
         disposition: Some(ironclaw_turns::GateResumeDisposition::Denied),
@@ -5834,10 +5835,11 @@ async fn capability_stage_denied_auth_resume_surfaces_gate_declined_failure_and_
 
     // Use provider_calls_response so provider_replay is set, enabling the
     // model-visible observation to be written to appended_result_refs.
-    let calls = match provider_calls_response().output {
+    let mut calls = match provider_calls_response().output {
         ParentLoopOutput::CapabilityCalls(calls) => calls,
         ParentLoopOutput::AssistantReply(_) => panic!("expected provider calls fixture"),
     };
+    calls[0].activity_id = denied_activity_id;
 
     let step = CapabilityStage
         .process(
@@ -5974,8 +5976,7 @@ async fn auth_gate_without_resume_token_records_activity_id_for_denial_failure()
         "hook-style tokenless auth gates should remain tokenless"
     );
     assert_eq!(
-        pending.activity_id,
-        Some(blocked_activity_id),
+        pending.activity_id, blocked_activity_id,
         "tokenless auth gate must persist the call activity id for later terminal events"
     );
 
@@ -6075,7 +6076,8 @@ async fn capability_stage_denied_auth_resume_only_fails_matching_call_remaining_
         host: &host,
     };
 
-    // Seed pending_auth_resume for capability X = capability_id(), Denied.
+    // Seed pending_auth_resume for parked activity X, Denied.
+    let denied_activity_id = CapabilityActivityId::new();
     let mut state = LoopExecutionState::initial_for_run(host.run_context());
     state.pending_auth_resume = Some(PendingAuthResume {
         gate_ref: LoopGateRef::new("gate:auth-deny-multi-test").expect("valid"),
@@ -6086,7 +6088,7 @@ async fn capability_stage_denied_auth_resume_only_fails_matching_call_remaining_
         effective_capability_ids: vec![capability_id()],
         provider_replay: None,
         resume_token: None,
-        activity_id: None,
+        activity_id: denied_activity_id,
         prior_approval: None,
         replay: None,
         disposition: Some(ironclaw_turns::GateResumeDisposition::Denied),
@@ -6101,7 +6103,7 @@ async fn capability_stage_denied_auth_resume_only_fails_matching_call_remaining_
     let calls = vec![
         // call X — denied
         ironclaw_turns::run_profile::CapabilityCallCandidate {
-            activity_id: ironclaw_turns::CapabilityActivityId::new(),
+            activity_id: denied_activity_id,
             surface_version: surface_version(),
             capability_id: capability_id(),
             input_ref: ironclaw_turns::run_profile::CapabilityInputRef::new("input:x-denied")
@@ -6248,6 +6250,123 @@ async fn capability_stage_denied_auth_resume_only_fails_matching_call_remaining_
     );
 }
 
+#[tokio::test]
+async fn capability_stage_denied_auth_resume_only_fails_matching_activity_when_capability_repeats()
+{
+    let y_result_ref = LoopResultRef::new("result:same-cap-y-outcome").expect("valid");
+    let host = MockHost::new(Vec::new()).with_batch_outcomes(vec![
+        ironclaw_turns::run_profile::CapabilityBatchOutcome {
+            outcomes: vec![CapabilityOutcome::Completed(CapabilityResultMessage {
+                result_ref: y_result_ref.clone(),
+                safe_summary: "same capability second call done".to_string(),
+                progress: ironclaw_turns::run_profile::CapabilityProgress::MadeProgress,
+                terminate_hint: false,
+                byte_len: 0,
+                output_digest: None,
+            })],
+            stopped_on_suspension: false,
+        },
+    ]);
+
+    let family = crate::families::default();
+    let ctx = StageContext {
+        planner: family.planner(),
+        host: &host,
+    };
+    let denied_activity_id = CapabilityActivityId::new();
+    let surviving_activity_id = CapabilityActivityId::new();
+    let mut state = LoopExecutionState::initial_for_run(host.run_context());
+    state.pending_auth_resume = Some(PendingAuthResume {
+        gate_ref: LoopGateRef::new("gate:auth-deny-same-cap").expect("valid"),
+        capability_id: capability_id(),
+        surface_version: surface_version(),
+        input_ref: CapabilityInputRef::new("input:deny-same-cap-x").expect("valid"),
+        effective_capability_ids: vec![capability_id()],
+        provider_replay: None,
+        resume_token: None,
+        activity_id: denied_activity_id,
+        prior_approval: None,
+        replay: None,
+        disposition: Some(ironclaw_turns::GateResumeDisposition::Denied),
+    });
+
+    let calls = vec![
+        ironclaw_turns::run_profile::CapabilityCallCandidate {
+            activity_id: denied_activity_id,
+            surface_version: surface_version(),
+            capability_id: capability_id(),
+            input_ref: CapabilityInputRef::new("input:x-same-cap-denied").expect("valid"),
+            effective_capability_ids: vec![capability_id()],
+            provider_replay: Some(ProviderToolCallReplay {
+                provider_id: "test-provider".to_string(),
+                provider_model_id: "test-model".to_string(),
+                provider_turn_id: "turn_1".to_string(),
+                provider_call_id: "call_x_same_cap".to_string(),
+                provider_tool_name: "demo__echo".to_string(),
+                arguments: serde_json::json!({"message": "x"}),
+                response_reasoning: None,
+                reasoning: None,
+                signature: None,
+            }),
+        },
+        ironclaw_turns::run_profile::CapabilityCallCandidate {
+            activity_id: surviving_activity_id,
+            surface_version: surface_version(),
+            capability_id: capability_id(),
+            input_ref: CapabilityInputRef::new("input:y-same-cap-survives").expect("valid"),
+            effective_capability_ids: vec![capability_id()],
+            provider_replay: None,
+        },
+    ];
+
+    let step = CapabilityStage
+        .process(
+            ctx,
+            CapabilityInput {
+                state,
+                surface: ironclaw_turns::run_profile::LoopCapabilityPort::visible_capabilities(
+                    &host,
+                    VisibleCapabilityRequest,
+                )
+                .await
+                .expect("visible surface"),
+                calls,
+            },
+        )
+        .await
+        .expect("capability stage");
+
+    let final_state = match step {
+        TurnCompletedStep::Continue { state, .. } => state,
+        TurnCompletedStep::Exit(exit) => {
+            panic!("expected Continue after same-capability partial auth deny, got Exit: {exit:?}")
+        }
+    };
+
+    let batches = host.batch_invocations();
+    assert_eq!(
+        batches.len(),
+        1,
+        "the non-denied same-capability call must still dispatch"
+    );
+    assert_eq!(batches[0].invocations.len(), 1);
+    assert_eq!(batches[0].invocations[0].activity_id, surviving_activity_id);
+    assert_eq!(batches[0].invocations[0].capability_id, capability_id());
+    assert!(
+        host.progress_events().iter().any(|event| matches!(
+            event,
+            LoopProgressEvent::CapabilityActivityFailed {
+                activity_id,
+                capability_id: emitted_capability_id,
+                reason_kind: CapabilityFailureKind::GateDeclined,
+            } if *activity_id == denied_activity_id && *emitted_capability_id == capability_id()
+        )),
+        "only the parked activity should receive the gate-declined failure"
+    );
+    assert!(final_state.pending_auth_resume.is_none());
+    assert!(final_state.result_refs.contains(&y_result_ref));
+}
+
 /// Regression test: partition + sizing invariant with 1 denied + 2 remaining calls.
 ///
 /// When the denied auth-resume batch contains one denied call (X) and TWO
@@ -6315,7 +6434,8 @@ async fn capability_stage_denied_auth_resume_one_denied_two_remaining_all_dispat
         host: &host,
     };
 
-    // pending_auth_resume for X = capability_id() ("demo.echo"), Denied.
+    // pending_auth_resume for parked activity X, Denied.
+    let denied_activity_id = CapabilityActivityId::new();
     let mut state = LoopExecutionState::initial_for_run(host.run_context());
     state.pending_auth_resume = Some(PendingAuthResume {
         gate_ref: LoopGateRef::new("gate:auth-deny-1plus2").expect("valid"),
@@ -6326,7 +6446,7 @@ async fn capability_stage_denied_auth_resume_one_denied_two_remaining_all_dispat
         effective_capability_ids: vec![capability_id()],
         provider_replay: None,
         resume_token: None,
-        activity_id: None,
+        activity_id: denied_activity_id,
         prior_approval: None,
         replay: None,
         disposition: Some(ironclaw_turns::GateResumeDisposition::Denied),
@@ -6337,7 +6457,7 @@ async fn capability_stage_denied_auth_resume_one_denied_two_remaining_all_dispat
         // X — matches denied pending_auth_resume; provider_replay set so the
         // gate-declined failure observation is written to appended_result_refs.
         ironclaw_turns::run_profile::CapabilityCallCandidate {
-            activity_id: ironclaw_turns::CapabilityActivityId::new(),
+            activity_id: denied_activity_id,
             surface_version: surface_version(),
             capability_id: capability_id(),
             input_ref: ironclaw_turns::run_profile::CapabilityInputRef::new(
@@ -6547,7 +6667,8 @@ async fn capability_stage_denied_approval_resume_only_fails_matching_call_remain
         host: &host,
     };
 
-    // Seed pending_approval_resume for capability X = capability_id(), Denied.
+    // Seed pending_approval_resume for parked activity X, Denied.
+    let denied_activity_id = CapabilityActivityId::new();
     let mut state = LoopExecutionState::initial_for_run(host.run_context());
     state.pending_approval_resume = Some(PendingApprovalResume {
         gate_ref: LoopGateRef::new("gate:approval-deny-multi").expect("valid"),
@@ -6555,7 +6676,7 @@ async fn capability_stage_denied_approval_resume_only_fails_matching_call_remain
         approval_request_id: ApprovalRequestId::new(),
         resume_token: CapabilityResumeToken::new("00000000-0000-0000-0000-000000000043")
             .expect("valid"),
-        activity_id: None,
+        activity_id: denied_activity_id,
         correlation_id: ironclaw_host_api::CorrelationId::new(),
         surface_version: surface_version(),
         input_ref: CapabilityInputRef::new("input:approval-deny-x").expect("valid"),
@@ -6572,7 +6693,7 @@ async fn capability_stage_denied_approval_resume_only_fails_matching_call_remain
     let calls = vec![
         // call X — denied
         ironclaw_turns::run_profile::CapabilityCallCandidate {
-            activity_id: ironclaw_turns::CapabilityActivityId::new(),
+            activity_id: denied_activity_id,
             surface_version: surface_version(),
             capability_id: capability_id(),
             input_ref: CapabilityInputRef::new("input:x-approval-denied").expect("valid"),
@@ -6770,7 +6891,7 @@ async fn capability_stage_denied_approval_resume_no_matching_call_dispatches_unr
         approval_request_id: ApprovalRequestId::new(),
         resume_token: CapabilityResumeToken::new("00000000-0000-0000-0000-000000000099")
             .expect("valid"),
-        activity_id: None,
+        activity_id: CapabilityActivityId::new(),
         correlation_id: ironclaw_host_api::CorrelationId::new(),
         surface_version: surface_version(),
         input_ref: CapabilityInputRef::new("input:approval-deny-no-match-x").expect("valid"),

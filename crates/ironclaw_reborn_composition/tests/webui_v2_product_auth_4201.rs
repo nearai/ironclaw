@@ -1218,7 +1218,11 @@ fn auth_prompt_view_serialises_optional_fields_when_present() {
     };
     let json = serde_json::to_value(&view).expect("serialise");
     assert_eq!(json["challenge_kind"], "oauth_url");
-    assert!(json["invocation_id"].is_string());
+    let invocation_id = view
+        .invocation_id
+        .expect("invocation id present")
+        .to_string();
+    assert_eq!(json["invocation_id"].as_str(), Some(invocation_id.as_str()));
     assert_eq!(json["provider"], "google");
     assert_eq!(json["account_label"], "work@example.com");
     assert!(
@@ -1291,6 +1295,7 @@ fn auth_prompt_view_deserialises_without_optional_fields() {
     assert!(view.account_label.is_none());
     assert!(view.authorization_url.is_none());
     assert!(view.expires_at.is_none());
+    assert!(view.invocation_id.is_none());
 }
 
 #[tokio::test]

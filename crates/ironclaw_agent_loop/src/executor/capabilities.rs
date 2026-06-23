@@ -128,7 +128,6 @@ impl ExecutorStage<CapabilityInput> for CapabilityStage {
                 Some(ironclaw_turns::GateResumeDisposition::Denied)
             )
         }) {
-            let denied_cap_id = pending.capability_id.clone();
             let denied_activity_id = pending.activity_id_for_resume();
             // Take ownership now that we've confirmed the disposition is Denied.
             // The unconditional take() below also covers the defensive case where
@@ -141,7 +140,6 @@ impl ExecutorStage<CapabilityInput> for CapabilityStage {
                     state,
                     &mut signatures,
                     &mut capability_batch,
-                    denied_cap_id,
                     denied_activity_id,
                     "auth gate denied by user",
                     visible_calls,
@@ -172,7 +170,6 @@ impl ExecutorStage<CapabilityInput> for CapabilityStage {
                 Some(ironclaw_turns::GateResumeDisposition::Denied)
             )
         }) {
-            let denied_cap_id = pending.capability_id.clone();
             let denied_activity_id = pending.activity_id_for_resume();
             // Clear the slot unconditionally — even if the partition yields no
             // matching calls, a stale Denied disposition must not bleed into the
@@ -184,7 +181,6 @@ impl ExecutorStage<CapabilityInput> for CapabilityStage {
                     state,
                     &mut signatures,
                     &mut capability_batch,
-                    denied_cap_id,
                     denied_activity_id,
                     "approval gate denied by user",
                     visible_calls,
@@ -1007,16 +1003,16 @@ impl CapabilityStage {
 
     /// Shared denied-resume short-circuit for both auth and approval gates.
     ///
-    /// Partitions `visible_calls` by `denied_cap_id`.  For every call that
-    /// matches the denied capability, synthesises a model-visible
-    /// `GateDeclined` failure (retry `Forbidden`) via `handle_capability_error`
-    /// and uses `planner_summary` as the planner-visible strategy summary
-    /// (must pass `validate_loop_safe_summary`).
+    /// Partitions `visible_calls` by the parked call's `activity_id`. For the
+    /// matching call, synthesises a model-visible `GateDeclined` failure (retry
+    /// `Forbidden`) via `handle_capability_error` and uses `planner_summary` as
+    /// the planner-visible strategy summary (must pass
+    /// `validate_loop_safe_summary`).
     ///
     /// Returns `ControlFlow::Break(step)` if `handle_capability_error` produced
     /// an `Exit` (caller should propagate it immediately), or
     /// `ControlFlow::Continue((state, remaining_calls))` with the surviving
-    /// state and the calls that did *not* match the denied capability.  The
+    /// state and the calls that did *not* match the parked activity.  The
     /// caller is responsible for checking whether `remaining_calls` is empty
     /// and calling `completed_turn` when it is.
     ///
@@ -1037,8 +1033,7 @@ impl CapabilityStage {
         mut state: LoopExecutionState,
         signatures: &mut HashSet<crate::state::CapabilityCallSignature>,
         capability_batch: &mut CapabilityBatchTurnSummary,
-        denied_cap_id: ironclaw_host_api::CapabilityId,
-        denied_activity_id: Option<CapabilityActivityId>,
+        denied_activity_id: CapabilityActivityId,
         planner_summary: &'static str,
         visible_calls: Vec<CapabilityCallCandidate>,
     ) -> Result<
@@ -1047,23 +1042,20 @@ impl CapabilityStage {
     > {
         let (denied_calls, remaining_calls): (Vec<_>, Vec<_>) = visible_calls
             .into_iter()
-            .partition(|call| call.capability_id == denied_cap_id);
+            .partition(|call| call.activity_id == denied_activity_id);
 
-        let mut denied_activity_id = denied_activity_id;
         for call in denied_calls {
             push_call_signature_once(&mut state, signatures, &call)?;
-            if let Some(activity_id) = denied_activity_id.take() {
-                CheckpointStage
-                    .emit_progress(
-                        ctx,
-                        LoopProgressEvent::CapabilityActivityFailed {
-                            activity_id,
-                            capability_id: call.capability_id.clone(),
-                            reason_kind: CapabilityFailureKind::GateDeclined,
-                        },
-                    )
-                    .await;
-            }
+            CheckpointStage
+                .emit_progress(
+                    ctx,
+                    LoopProgressEvent::CapabilityActivityFailed {
+                        activity_id: denied_activity_id,
+                        capability_id: call.capability_id.clone(),
+                        reason_kind: CapabilityFailureKind::GateDeclined,
+                    },
+                )
+                .await;
             let failure = ironclaw_turns::run_profile::CapabilityFailure {
                 error_kind: CapabilityFailureKind::GateDeclined,
                 // Intentionally empty: model-visible text comes from

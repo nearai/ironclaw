@@ -119,14 +119,20 @@ impl TurnRunExecutor for NoopExecutor {
 struct LockingTransitionPort {
     claim: tokio::sync::Mutex<Option<ClaimedTurnRun>>,
     state_lock: Arc<tokio::sync::Mutex<()>>,
+    heartbeat_started_tx: tokio::sync::Mutex<Option<tokio::sync::oneshot::Sender<()>>>,
     heartbeat_count: AtomicUsize,
 }
 
 impl LockingTransitionPort {
-    fn new(claimed: ClaimedTurnRun, state_lock: Arc<tokio::sync::Mutex<()>>) -> Self {
+    fn new(
+        claimed: ClaimedTurnRun,
+        state_lock: Arc<tokio::sync::Mutex<()>>,
+        heartbeat_started_tx: tokio::sync::oneshot::Sender<()>,
+    ) -> Self {
         Self {
             claim: tokio::sync::Mutex::new(Some(claimed)),
             state_lock,
+            heartbeat_started_tx: tokio::sync::Mutex::new(Some(heartbeat_started_tx)),
             heartbeat_count: AtomicUsize::new(0),
         }
     }
@@ -147,6 +153,9 @@ impl TurnRunTransitionPort for LockingTransitionPort {
 
     async fn heartbeat(&self, _request: HeartbeatRequest) -> Result<EventCursor, TurnError> {
         self.heartbeat_count.fetch_add(1, Ordering::SeqCst);
+        if let Some(tx) = self.heartbeat_started_tx.lock().await.take() {
+            let _ = tx.send(());
+        }
         let _guard = self.state_lock.lock().await;
         Ok(EventCursor(1))
     }
@@ -202,6 +211,7 @@ impl TurnRunTransitionPort for LockingTransitionPort {
 struct LockHoldingExecutor {
     state_lock: Arc<tokio::sync::Mutex<()>>,
     locked_tx: tokio::sync::Mutex<Option<tokio::sync::oneshot::Sender<()>>>,
+    release_rx: tokio::sync::Mutex<Option<tokio::sync::oneshot::Receiver<()>>>,
     done_tx: tokio::sync::Mutex<Option<tokio::sync::oneshot::Sender<()>>>,
 }
 
@@ -216,7 +226,9 @@ impl TurnRunExecutor for LockHoldingExecutor {
         if let Some(tx) = self.locked_tx.lock().await.take() {
             let _ = tx.send(());
         }
-        tokio::time::sleep(Duration::from_millis(30)).await;
+        if let Some(rx) = self.release_rx.lock().await.take() {
+            let _ = rx.await;
+        }
         if let Some(tx) = self.done_tx.lock().await.take() {
             let _ = tx.send(());
         }
@@ -277,19 +289,26 @@ async fn heartbeat_does_not_deadlock_executor_holding_transition_lock() {
         event_cursor: EventCursor(0),
     };
     let state_lock = Arc::new(tokio::sync::Mutex::new(()));
-    let transitions = Arc::new(LockingTransitionPort::new(claimed, Arc::clone(&state_lock)));
+    let (heartbeat_started_tx, heartbeat_started_rx) = tokio::sync::oneshot::channel();
+    let transitions = Arc::new(LockingTransitionPort::new(
+        claimed,
+        Arc::clone(&state_lock),
+        heartbeat_started_tx,
+    ));
     let (locked_tx, locked_rx) = tokio::sync::oneshot::channel();
+    let (release_tx, release_rx) = tokio::sync::oneshot::channel();
     let (done_tx, done_rx) = tokio::sync::oneshot::channel();
     let executor = Arc::new(LockHoldingExecutor {
         state_lock,
         locked_tx: tokio::sync::Mutex::new(Some(locked_tx)),
+        release_rx: tokio::sync::Mutex::new(Some(release_rx)),
         done_tx: tokio::sync::Mutex::new(Some(done_tx)),
     });
     let config = TurnRunSchedulerConfig::default()
         .with_max_concurrent_runs(1)
         .with_poll_interval(Duration::from_secs(3600))
         .with_lease_recovery_interval(Duration::from_secs(3600))
-        .with_runner_heartbeat_interval(Duration::from_millis(20));
+        .with_runner_heartbeat_interval(Duration::from_millis(250));
     let scheduler = TurnRunScheduler::new(transitions.clone(), executor, config);
     let handle = scheduler.start();
 
@@ -303,6 +322,13 @@ async fn heartbeat_does_not_deadlock_executor_holding_transition_lock() {
         .await
         .expect("executor should acquire the transition lock")
         .expect("executor lock signal should be sent");
+    tokio::time::timeout(Duration::from_secs(5), heartbeat_started_rx)
+        .await
+        .expect("heartbeat should start while executor holds the transition lock")
+        .expect("heartbeat started signal should be sent");
+    release_tx
+        .send(())
+        .expect("executor should still be waiting for release");
     tokio::time::timeout(Duration::from_secs(1), done_rx)
         .await
         .expect("executor must continue polling while heartbeat waits on the same lock")

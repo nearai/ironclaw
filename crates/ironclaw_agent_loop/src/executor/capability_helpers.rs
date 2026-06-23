@@ -79,7 +79,7 @@ pub(super) fn pending_approval_resume_candidate(
     surface_version: CapabilitySurfaceVersion,
 ) -> CapabilityCallCandidate {
     CapabilityCallCandidate {
-        activity_id: resume.activity_id_for_resume().unwrap_or_default(),
+        activity_id: resume.activity_id_for_resume(),
         surface_version,
         capability_id: resume.capability_id.clone(),
         input_ref: resume.input_ref.clone(),
@@ -115,9 +115,7 @@ pub(super) async fn pending_auth_resume_candidate(
                 detail: "auth resume provider replay no longer matches blocked capability",
             });
         }
-        if let Some(activity_id) = resume.activity_id_for_resume() {
-            candidate.activity_id = activity_id;
-        }
+        candidate.activity_id = resume.activity_id_for_resume();
         return Ok(candidate);
     }
     Ok(pending_auth_resume_staged_input_candidate(
@@ -131,7 +129,7 @@ fn pending_auth_resume_staged_input_candidate(
     surface_version: CapabilitySurfaceVersion,
 ) -> CapabilityCallCandidate {
     CapabilityCallCandidate {
-        activity_id: resume.activity_id_for_resume().unwrap_or_default(),
+        activity_id: resume.activity_id_for_resume(),
         surface_version,
         capability_id: resume.capability_id.clone(),
         input_ref: resume.input_ref.clone(),
@@ -585,7 +583,7 @@ mod tests {
             effective_capability_ids: vec![cap_a.clone(), cap_b.clone()],
             provider_replay: None,
             resume_token: None,
-            activity_id: None,
+            activity_id: ironclaw_turns::CapabilityActivityId::new(),
             prior_approval: None,
             replay: None,
             disposition: None,
@@ -629,7 +627,7 @@ mod tests {
             effective_capability_ids: vec![cap.clone()],
             provider_replay: None,
             resume_token: Some(resume_token.clone()),
-            activity_id: None,
+            activity_id: ironclaw_turns::CapabilityActivityId::new(),
             prior_approval: Some(AuthResumeApprovalIdentity {
                 approval_request_id,
                 correlation_id,
@@ -699,7 +697,7 @@ mod tests {
             effective_capability_ids: vec![cap.clone()],
             provider_replay: None,
             resume_token: None, // no prior approval — the key precondition
-            activity_id: None,
+            activity_id: ironclaw_turns::CapabilityActivityId::new(),
             prior_approval: None,
             replay: None,
             disposition: None,
