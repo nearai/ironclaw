@@ -35,8 +35,8 @@ use std::{
 
 use async_trait::async_trait;
 use ironclaw_filesystem::{
-    CasExpectation, ContentType, Entry, FilesystemCatalog, FilesystemError, FilesystemOperation,
-    RecordVersion, RootFilesystem, ScopedFilesystem, TxnCapability,
+    CasExpectation, ContentType, Entry, FilesystemError, FilesystemOperation, RecordKind,
+    RecordVersion, RootFilesystem, ScopedFilesystem,
 };
 use ironclaw_host_api::{ResourceScope, ScopedPath, UserId};
 
@@ -70,6 +70,7 @@ const SNAPSHOT_READ_CACHE_TTL: Duration = Duration::from_millis(500);
 
 const TURNS_PREFIX: &str = "/turns";
 const TURNS_SNAPSHOT_FILE: &str = "state.json";
+const TURNS_SNAPSHOT_KIND: &str = "turn_state_snapshot";
 
 #[derive(Clone)]
 struct CachedSnapshot {
@@ -106,17 +107,20 @@ struct SnapshotMutation<T> {
 
 /// Filesystem-backed turn-state store under the `/turns` mount alias.
 ///
-/// Construct with a [`ScopedFilesystem`] over any [`RootFilesystem`]. The
+/// Construct with a [`ScopedFilesystem`] over a [`RootFilesystem`]. The
 /// [`ScopedFilesystem`] resolves the `/turns` alias to a tenant/user-scoped
 /// [`VirtualPath`](ironclaw_host_api::VirtualPath) per its
 /// [`MountView`](ironclaw_host_api::MountView) and enforces per-op ACL before
 /// any backend dispatch — so tenant isolation is structural rather than
 /// something this crate has to re-derive from `TurnScope.tenant_id`.
 /// Within-tenant axes (agent/project/thread) stay in the persisted snapshot
-/// records because they are not covered by the per-tenant `MountAlias`.
+/// records because they are not covered by the per-tenant `MountAlias`. The
+/// backend must honor `Absent` / `Version` CAS for writes; unsupported CAS
+/// fails closed in the canonical write path instead of falling back to blind
+/// overwrites.
 pub struct FilesystemTurnStateStore<F>
 where
-    F: RootFilesystem + FilesystemCatalog,
+    F: RootFilesystem,
 {
     filesystem: Arc<ScopedFilesystem<F>>,
     limits: InMemoryTurnStateStoreLimits,
@@ -127,7 +131,7 @@ where
 
 impl<F> FilesystemTurnStateStore<F>
 where
-    F: RootFilesystem + FilesystemCatalog,
+    F: RootFilesystem,
 {
     pub fn new(filesystem: Arc<ScopedFilesystem<F>>) -> Self {
         Self {
@@ -261,7 +265,6 @@ where
         Fut: std::future::Future<Output = (Result<T, TurnError>, InMemoryTurnStateStore)>,
     {
         let path = snapshot_path()?;
-        self.ensure_snapshot_backend_supports_cas(&path).await?;
         match tokio::time::timeout(self.apply_timeout, self.apply_with_retry(&path, &mut apply))
             .await
         {
@@ -272,24 +275,6 @@ where
                     reason: "turn state filesystem apply timed out".to_string(),
                 })
             }
-        }
-    }
-
-    async fn ensure_snapshot_backend_supports_cas(
-        &self,
-        path: &ScopedPath,
-    ) -> Result<(), TurnError> {
-        let placement = self
-            .filesystem
-            .describe_path(&ResourceScope::system(), path)
-            .await
-            .map_err(fs_error)?;
-        if supports_versioned_cas(placement.capabilities.txn()) {
-            Ok(())
-        } else {
-            Err(TurnError::Unavailable {
-                reason: "turn state filesystem backend must support versioned CAS".to_string(),
-            })
         }
     }
 
@@ -369,7 +354,7 @@ where
 #[async_trait]
 impl<F> TurnStateStore for FilesystemTurnStateStore<F>
 where
-    F: RootFilesystem + FilesystemCatalog,
+    F: RootFilesystem,
 {
     async fn submit_turn(
         &self,
@@ -439,7 +424,7 @@ where
 #[async_trait]
 impl<F> TurnSpawnTreeStateStore for FilesystemTurnStateStore<F>
 where
-    F: RootFilesystem + FilesystemCatalog,
+    F: RootFilesystem,
 {
     async fn submit_child_turn(
         &self,
@@ -523,7 +508,7 @@ where
 #[async_trait]
 impl<F> TurnEventProjectionSource for FilesystemTurnStateStore<F>
 where
-    F: RootFilesystem + FilesystemCatalog,
+    F: RootFilesystem,
 {
     async fn read_turn_events_after(
         &self,
@@ -547,7 +532,7 @@ where
 #[async_trait]
 impl<F> LoopCheckpointStore for FilesystemTurnStateStore<F>
 where
-    F: RootFilesystem + FilesystemCatalog,
+    F: RootFilesystem,
 {
     async fn put_loop_checkpoint(
         &self,
@@ -577,7 +562,7 @@ where
 #[async_trait]
 impl<F> TurnRunTransitionPort for FilesystemTurnStateStore<F>
 where
-    F: RootFilesystem + FilesystemCatalog,
+    F: RootFilesystem,
 {
     async fn claim_next_run(
         &self,
@@ -805,7 +790,12 @@ fn snapshot_entry(snapshot: &TurnPersistenceSnapshot) -> Result<Entry, TurnError
     let body = serde_json::to_vec_pretty(snapshot).map_err(|error| TurnError::Unavailable {
         reason: format!("turn-state snapshot serialization failed: {error}"),
     })?;
-    Ok(Entry::bytes(body).with_content_type(ContentType::json()))
+    let kind = RecordKind::new(TURNS_SNAPSHOT_KIND).map_err(|error| TurnError::Unavailable {
+        reason: format!("invalid turn-state snapshot record kind: {error}"),
+    })?;
+    let mut entry = Entry::bytes(body).with_content_type(ContentType::json());
+    entry.kind = Some(kind);
+    Ok(entry)
 }
 
 fn deserialize_snapshot(bytes: &[u8]) -> Result<TurnPersistenceSnapshot, TurnError> {
@@ -819,10 +809,6 @@ fn fs_error(error: FilesystemError) -> TurnError {
     TurnError::Unavailable {
         reason: "turn state persistence temporarily unavailable".to_string(),
     }
-}
-
-fn supports_versioned_cas(txn: TxnCapability) -> bool {
-    matches!(txn, TxnCapability::Cas | TxnCapability::MultiKey)
 }
 
 async fn cas_retry_backoff(attempt: usize) {
@@ -862,7 +848,7 @@ async fn put_with_cas<F>(
     cas: CasExpectation,
 ) -> Result<RecordVersion, PutError>
 where
-    F: RootFilesystem + FilesystemCatalog,
+    F: RootFilesystem,
 {
     let scope = ResourceScope::system();
     match filesystem.put(&scope, path, entry, cas).await {

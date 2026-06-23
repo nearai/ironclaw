@@ -49,7 +49,7 @@ impl<F> BlockingTurnStatePutFilesystem<F> {
     }
 
     pub fn release_blocked_put(&self) {
-        self.release_put.notify_waiters();
+        self.release_put.notify_one();
     }
 }
 
@@ -70,7 +70,7 @@ where
     ) -> Result<RecordVersion, FilesystemError> {
         if self.block_next_put.swap(false, Ordering::SeqCst) {
             self.put_blocked.store(true, Ordering::SeqCst);
-            self.put_started.notify_waiters();
+            self.put_started.notify_one();
             self.release_put.notified().await;
             self.put_blocked.store(false, Ordering::SeqCst);
         }

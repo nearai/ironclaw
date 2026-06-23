@@ -15,13 +15,13 @@ use async_trait::async_trait;
 use chrono::{TimeZone, Utc};
 use ironclaw_filesystem::{
     BackendCapabilities, BackendId, BackendKind, CasExpectation, CompositeRootFilesystem,
-    ContentKind, DirEntry, Entry, FileStat, FilesystemError, Filter, InMemoryBackend, IndexPolicy,
-    IndexSpec, LocalFilesystem, MountDescriptor, Page, RecordVersion, RootFilesystem,
-    ScopedFilesystem, StorageClass, VersionedEntry,
+    ContentKind, DirEntry, Entry, FileStat, FilesystemError, FilesystemOperation, Filter,
+    InMemoryBackend, IndexPolicy, IndexSpec, LocalFilesystem, MountDescriptor, Page, RecordVersion,
+    RootFilesystem, ScopedFilesystem, StorageClass, VersionedEntry,
 };
 use ironclaw_host_api::{
-    AgentId, HostPath, MountAlias, MountGrant, MountPermissions, MountView, ProjectId, TenantId,
-    ThreadId, UserId, VirtualPath,
+    AgentId, HostPath, MountAlias, MountGrant, MountPermissions, MountView, ProjectId, ScopedPath,
+    TenantId, ThreadId, UserId, VirtualPath,
 };
 use ironclaw_turns::{
     AcceptedMessageRef, AllowAllTurnAdmissionPolicy, FilesystemTurnStateStore, GetRunStateRequest,
@@ -168,6 +168,7 @@ fn snapshot_virtual_path() -> VirtualPath {
 struct BlockingPutFilesystem<F> {
     inner: F,
     block_next_put: AtomicBool,
+    put_blocked: AtomicBool,
     put_started: tokio::sync::Notify,
     release_put: tokio::sync::Notify,
 }
@@ -177,6 +178,7 @@ impl<F> BlockingPutFilesystem<F> {
         Self {
             inner,
             block_next_put: AtomicBool::new(false),
+            put_blocked: AtomicBool::new(false),
             put_started: tokio::sync::Notify::new(),
             release_put: tokio::sync::Notify::new(),
         }
@@ -187,11 +189,13 @@ impl<F> BlockingPutFilesystem<F> {
     }
 
     async fn wait_for_blocked_put(&self) {
-        self.put_started.notified().await;
+        while !self.put_blocked.load(Ordering::SeqCst) {
+            self.put_started.notified().await;
+        }
     }
 
     fn release_blocked_put(&self) {
-        self.release_put.notify_waiters();
+        self.release_put.notify_one();
     }
 }
 
@@ -245,6 +249,63 @@ struct VersionMismatchFilesystem<F> {
 impl<F> VersionMismatchFilesystem<F> {
     fn new(inner: F) -> Self {
         Self { inner }
+    }
+}
+
+struct RejectingPutFilesystem<F> {
+    inner: F,
+    put_calls: AtomicUsize,
+}
+
+impl<F> RejectingPutFilesystem<F> {
+    fn new(inner: F) -> Self {
+        Self {
+            inner,
+            put_calls: AtomicUsize::new(0),
+        }
+    }
+
+    fn put_calls(&self) -> usize {
+        self.put_calls.load(Ordering::SeqCst)
+    }
+}
+
+#[async_trait]
+impl<F> RootFilesystem for RejectingPutFilesystem<F>
+where
+    F: RootFilesystem,
+{
+    fn capabilities(&self) -> BackendCapabilities {
+        self.inner.capabilities()
+    }
+
+    async fn put(
+        &self,
+        path: &VirtualPath,
+        _entry: Entry,
+        _cas: CasExpectation,
+    ) -> Result<RecordVersion, FilesystemError> {
+        self.put_calls.fetch_add(1, Ordering::SeqCst);
+        Err(FilesystemError::PermissionDenied {
+            path: ScopedPath::new(path.as_str().to_string()).expect("scoped path"),
+            operation: FilesystemOperation::WriteFile,
+        })
+    }
+
+    async fn get(&self, path: &VirtualPath) -> Result<Option<VersionedEntry>, FilesystemError> {
+        self.inner.get(path).await
+    }
+
+    async fn list_dir(&self, path: &VirtualPath) -> Result<Vec<DirEntry>, FilesystemError> {
+        self.inner.list_dir(path).await
+    }
+
+    async fn stat(&self, path: &VirtualPath) -> Result<FileStat, FilesystemError> {
+        self.inner.stat(path).await
+    }
+
+    async fn delete(&self, path: &VirtualPath) -> Result<(), FilesystemError> {
+        self.inner.delete(path).await
     }
 }
 
@@ -308,8 +369,10 @@ where
         cas: CasExpectation,
     ) -> Result<RecordVersion, FilesystemError> {
         if self.block_next_put.swap(false, Ordering::SeqCst) {
-            self.put_started.notify_waiters();
+            self.put_blocked.store(true, Ordering::SeqCst);
+            self.put_started.notify_one();
             self.release_put.notified().await;
+            self.put_blocked.store(false, Ordering::SeqCst);
         }
         self.inner.put(path, entry, cas).await
     }
@@ -372,7 +435,7 @@ where
             let arrival = self.first_wave_arrivals.fetch_add(1, Ordering::SeqCst) + 1;
             if arrival <= expected {
                 if arrival == expected {
-                    self.first_wave_ready.notify_waiters();
+                    self.first_wave_ready.notify_one();
                 }
                 self.release_first_wave.notified().await;
             }
@@ -935,6 +998,33 @@ async fn filesystem_turn_state_store_returns_unavailable_after_persistent_versio
 
     assert!(
         matches!(error, TurnError::Unavailable { reason } if reason == "turn state filesystem CAS retries exhausted")
+    );
+}
+
+#[tokio::test]
+async fn filesystem_turn_state_store_returns_unavailable_on_non_version_mismatch_put_error() {
+    let backend = Arc::new(RejectingPutFilesystem::new(engine_filesystem()));
+    let scoped = scoped_turns_fs(Arc::clone(&backend));
+    let store = FilesystemTurnStateStore::new(Arc::clone(&scoped));
+    let resolver = InMemoryRunProfileResolver::default();
+
+    let error = match store
+        .submit_turn(
+            submit_request_for(turn_scope("thread-fs-put-error"), "idem-put-error"),
+            &AllowAllTurnAdmissionPolicy,
+            &resolver,
+        )
+        .await
+    {
+        Ok(_) => panic!("put failure should surface as unavailable"),
+        Err(error) => error,
+    };
+
+    assert!(matches!(error, TurnError::Unavailable { .. }));
+    assert_eq!(
+        backend.put_calls(),
+        1,
+        "non-version-mismatch put errors must not retry"
     );
 }
 
