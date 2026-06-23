@@ -3,6 +3,7 @@ use std::{
     collections::VecDeque,
     path::{Path, PathBuf},
     sync::Arc,
+    sync::atomic::AtomicBool,
 };
 
 #[cfg(any(feature = "libsql", feature = "postgres"))]
@@ -493,6 +494,12 @@ pub(crate) struct RebornLocalRuntimeServices {
     /// modules wire the access-controlled service, never the substrate repo.
     pub(crate) project_service: Arc<dyn ProjectService>,
     pub(crate) outbound_preferences: Arc<dyn CommunicationPreferenceRepository>,
+    /// Global default criteria-based skill auto-activation master switch,
+    /// shared by reference between the skill activation selector (reads it per
+    /// turn) and the WebUI skills facade (toggles it). Defaults to `true`; a
+    /// Settings write flips it and the next turn's selection honors the new
+    /// value without a restart.
+    pub(crate) skill_auto_activate_learned: Arc<AtomicBool>,
     #[cfg(feature = "slack-v2-host-beta")]
     pub(crate) outbound_state: Arc<dyn OutboundStateStore>,
     #[cfg(feature = "slack-v2-host-beta")]
@@ -1516,6 +1523,63 @@ fn local_dev_nearai_mcp_owner_scope(
     })
 }
 
+#[cfg(any(feature = "libsql", feature = "postgres"))]
+fn owner_scope_from_runtime_identity(
+    owner_user_id: UserId,
+    tenant_id: ironclaw_host_api::TenantId,
+    agent_id: ironclaw_host_api::AgentId,
+) -> ResourceScope {
+    ResourceScope {
+        tenant_id,
+        user_id: owner_user_id,
+        agent_id: Some(agent_id),
+        project_id: None,
+        mission_id: None,
+        thread_id: None,
+        invocation_id: InvocationId::new(),
+    }
+}
+
+#[cfg(any(feature = "libsql", feature = "postgres"))]
+fn default_runtime_owner_scope(
+    owner_user_id: UserId,
+) -> Result<ResourceScope, ironclaw_host_api::HostApiError> {
+    let identity = RebornRuntimeIdentity::reborn_cli();
+    let tenant_id = ironclaw_host_api::TenantId::new(identity.tenant_id)?;
+    let agent_id = ironclaw_host_api::AgentId::new(identity.agent_id)?;
+    Ok(owner_scope_from_runtime_identity(
+        owner_user_id,
+        tenant_id,
+        agent_id,
+    ))
+}
+
+#[cfg(any(feature = "libsql", feature = "postgres"))]
+fn configured_runtime_owner_scope(
+    owner_user_id: UserId,
+    local_runtime_identity: &RebornLocalRuntimeIdentity,
+) -> ResourceScope {
+    owner_scope_from_runtime_identity(
+        owner_user_id,
+        local_runtime_identity.tenant_id.clone(),
+        local_runtime_identity.agent_id.clone(),
+    )
+}
+
+#[cfg(any(feature = "libsql", feature = "postgres"))]
+fn owner_turn_state_filesystem<F>(
+    filesystem: Arc<F>,
+    owner_scope: &ResourceScope,
+) -> Result<Arc<ScopedFilesystem<F>>, ironclaw_host_api::HostApiError>
+where
+    F: RootFilesystem + 'static,
+{
+    let view = crate::invocation_mount_view(owner_scope)?;
+    Ok(Arc::new(ScopedFilesystem::with_fixed_view(
+        filesystem, view,
+    )))
+}
+
 fn local_dev_extension_installation_state_path(
     profile: RebornCompositionProfile,
     local_runtime_identity: Option<&RebornLocalRuntimeIdentity>,
@@ -1568,6 +1632,11 @@ fn build_local_dev_store_graph(
         identity_substrate_db,
     } = input;
     let scoped_filesystem = local_dev_scoped_filesystem(Arc::clone(&filesystem));
+    let turn_state_scope =
+        local_dev_nearai_mcp_owner_scope(owner_user_id.clone(), local_runtime_identity.as_ref())?;
+    let turn_state_filesystem =
+        owner_turn_state_filesystem(Arc::clone(&filesystem), &turn_state_scope)
+            .map_err(RebornBuildError::Mount)?;
     let event_log = local_dev_event_log(Arc::clone(&filesystem))?;
     let audit_log = local_dev_audit_log(Arc::clone(&filesystem))?;
     let run_state = Arc::new(FilesystemRunStateStore::new(Arc::clone(&scoped_filesystem)));
@@ -1581,7 +1650,7 @@ fn build_local_dev_store_graph(
         Arc::clone(&scoped_filesystem),
     ));
     let turn_state = Arc::new(
-        FilesystemTurnStateStore::new(Arc::clone(&scoped_filesystem))
+        FilesystemTurnStateStore::new(Arc::clone(&turn_state_filesystem))
             .with_limits(turn_state_store_limits),
     );
     let checkpoint_state_store: Arc<dyn CheckpointStateStore> = Arc::new(
@@ -1648,6 +1717,7 @@ fn build_local_dev_store_graph(
             Arc::clone(&project_repository),
         )),
         outbound_preferences: outbound_stores.outbound_preferences,
+        skill_auto_activate_learned: Arc::new(AtomicBool::new(true)),
         #[cfg(feature = "slack-v2-host-beta")]
         outbound_state: outbound_stores.outbound_state,
         #[cfg(feature = "slack-v2-host-beta")]
@@ -1790,6 +1860,7 @@ fn build_local_dev_store_graph(
             Arc::clone(&project_repository),
         )),
         outbound_preferences: outbound_stores.outbound_preferences,
+        skill_auto_activate_learned: Arc::new(AtomicBool::new(true)),
         #[cfg(feature = "slack-v2-host-beta")]
         outbound_state: outbound_stores.outbound_state,
         #[cfg(feature = "slack-v2-host-beta")]
@@ -2990,7 +3061,7 @@ async fn build_production_shaped(
     let RebornBuildInput {
         profile,
         owner_id,
-        local_runtime_identity: _,
+        local_runtime_identity,
         storage,
         production_trust_policy,
         runtime_policy,
@@ -3028,6 +3099,7 @@ async fn build_production_shaped(
         required_runtime_backends,
         require_runtime_http_egress,
         require_wasm_credentials,
+        local_runtime_identity,
         product_auth_ports,
         oauth_provider_configs,
         oauth_dcr_provider_configs,
@@ -3082,6 +3154,7 @@ async fn build_production_shaped(
                 oauth_provider_configs,
                 oauth_dcr_provider_configs,
                 owner_id,
+                local_runtime_identity,
                 turn_state_store_limits,
                 scheduler_wake_wiring,
             };
@@ -3117,6 +3190,7 @@ async fn build_production_shaped(
                 oauth_provider_configs,
                 oauth_dcr_provider_configs,
                 owner_id,
+                local_runtime_identity,
                 turn_state_store_limits,
                 scheduler_wake_wiring,
             };
@@ -3151,6 +3225,7 @@ struct RebornProductionBuildContext {
     oauth_provider_configs: Vec<crate::input::OAuthProviderBackendConfig>,
     oauth_dcr_provider_configs: Vec<crate::input::OAuthDcrProviderBackendConfig>,
     owner_id: String,
+    local_runtime_identity: Option<RebornLocalRuntimeIdentity>,
     turn_state_store_limits: ironclaw_turns::InMemoryTurnStateStoreLimits,
     /// The pre-minted scheduler wake wiring to carry to `RebornServices` so
     /// `build_reborn_runtime` can hand it to `build_default_planned_runtime` via
@@ -3212,6 +3287,14 @@ type FilesystemProductionHostRuntimeServices<F> = HostRuntimeServices<
     ironclaw_processes::FilesystemProcessResultStore<F>,
 >;
 
+#[cfg(any(feature = "libsql", feature = "postgres"))]
+fn substrate_only_default_owner_id() -> Result<UserId, crate::RebornCompositionError> {
+    let identity = RebornRuntimeIdentity::reborn_cli();
+    // The substrate-only builders do not receive app/runtime owner input.
+    // Preserve their legacy location under the default `reborn-cli` owner.
+    UserId::new(identity.tenant_id).map_err(crate::RebornCompositionError::Mount)
+}
+
 #[cfg(feature = "libsql")]
 pub(crate) async fn build_libsql_production_host_runtime_services<TPolicy, TWake>(
     config: crate::LibSqlProductionSubstrateConfig<TPolicy, TWake>,
@@ -3223,13 +3306,15 @@ where
     let filesystem = Arc::new(LibSqlRootFilesystem::new(Arc::clone(&config.database)));
     filesystem.run_migrations().await?;
     build_filesystem_production_host_runtime_services(
-        filesystem,
-        config.event_store,
-        config.secret_master_key,
-        config.trust_policy,
-        config.runtime_policy,
-        config.turn_run_wake_notifier,
-        config.surface_version,
+        FilesystemProductionHostRuntimeServicesInput {
+            filesystem,
+            event_store: config.event_store,
+            secret_master_key: config.secret_master_key,
+            trust_policy: config.trust_policy,
+            runtime_policy: config.runtime_policy,
+            turn_run_wake_notifier: config.turn_run_wake_notifier,
+            surface_version: config.surface_version,
+        },
     )
     .await
 }
@@ -3247,19 +3332,21 @@ where
     ));
     filesystem.run_migrations().await?;
     build_filesystem_production_host_runtime_services(
-        filesystem,
-        config.event_store,
-        config.secret_master_key,
-        config.trust_policy,
-        config.runtime_policy,
-        config.turn_run_wake_notifier,
-        config.surface_version,
+        FilesystemProductionHostRuntimeServicesInput {
+            filesystem,
+            event_store: config.event_store,
+            secret_master_key: config.secret_master_key,
+            trust_policy: config.trust_policy,
+            runtime_policy: config.runtime_policy,
+            turn_run_wake_notifier: config.turn_run_wake_notifier,
+            surface_version: config.surface_version,
+        },
     )
     .await
 }
 
 #[cfg(any(feature = "libsql", feature = "postgres"))]
-async fn build_filesystem_production_host_runtime_services<F, TPolicy, TWake>(
+struct FilesystemProductionHostRuntimeServicesInput<F, TPolicy, TWake> {
     filesystem: Arc<F>,
     event_store: ironclaw_reborn_event_store::RebornEventStoreConfig,
     secret_master_key: Option<ironclaw_secrets::SecretMaterial>,
@@ -3267,13 +3354,32 @@ async fn build_filesystem_production_host_runtime_services<F, TPolicy, TWake>(
     runtime_policy: crate::RebornProductionRuntimePolicy,
     turn_run_wake_notifier: Arc<TWake>,
     surface_version: CapabilitySurfaceVersion,
+}
+
+#[cfg(any(feature = "libsql", feature = "postgres"))]
+async fn build_filesystem_production_host_runtime_services<F, TPolicy, TWake>(
+    input: FilesystemProductionHostRuntimeServicesInput<F, TPolicy, TWake>,
 ) -> Result<FilesystemProductionHostRuntimeServices<F>, crate::RebornCompositionError>
 where
     F: RootFilesystem + 'static,
     TPolicy: ironclaw_trust::TrustPolicy + 'static,
     TWake: ironclaw_turns::TurnRunWakeNotifier + 'static,
 {
+    let FilesystemProductionHostRuntimeServicesInput {
+        filesystem,
+        event_store,
+        secret_master_key,
+        trust_policy,
+        runtime_policy,
+        turn_run_wake_notifier,
+        surface_version,
+    } = input;
     let scoped_filesystem = crate::wrap_scoped(Arc::clone(&filesystem));
+    let owner_user_id = substrate_only_default_owner_id()?;
+    let owner_scope =
+        default_runtime_owner_scope(owner_user_id).map_err(crate::RebornCompositionError::Mount)?;
+    let turn_state_filesystem = owner_turn_state_filesystem(Arc::clone(&filesystem), &owner_scope)
+        .map_err(crate::RebornCompositionError::Mount)?;
     let process_services = ProcessServices::filesystem(Arc::clone(&scoped_filesystem));
     let secret_credentials = build_filesystem_secret_credential_stores(
         Arc::clone(&scoped_filesystem),
@@ -3307,7 +3413,7 @@ where
     .with_credential_broker(secret_credentials.credential_broker)
     .with_turn_run_wake_notifier(turn_run_wake_notifier)
     .with_filesystem_run_state(Arc::clone(&scoped_filesystem))
-    .with_filesystem_turn_state_store(Arc::clone(&scoped_filesystem))
+    .with_filesystem_turn_state_store(Arc::clone(&turn_state_filesystem))
     .with_run_profile_resolver(Arc::new(
         ironclaw_reborn::planned_driver_factory::default_planned_run_profile_resolver()?,
     ))
@@ -3497,12 +3603,22 @@ where
         oauth_provider_configs,
         oauth_dcr_provider_configs,
         owner_id,
+        local_runtime_identity,
         turn_state_store_limits,
         scheduler_wake_wiring,
     } = context;
     let owner_user_id = UserId::new(owner_id).map_err(|error| RebornBuildError::InvalidConfig {
         reason: error.to_string(),
     })?;
+    let turn_state_scope = match local_runtime_identity.as_ref() {
+        Some(identity) => configured_runtime_owner_scope(owner_user_id.clone(), identity),
+        None => {
+            default_runtime_owner_scope(owner_user_id.clone()).map_err(RebornBuildError::Mount)?
+        }
+    };
+    let turn_state_filesystem =
+        owner_turn_state_filesystem(Arc::clone(&stores.filesystem), &turn_state_scope)
+            .map_err(RebornBuildError::Mount)?;
     let secret_store: Arc<dyn SecretStore> = stores.secret_credentials.secret_store.clone();
     let skill_management_filesystem: Arc<dyn RootFilesystem> = stores.filesystem.clone();
     let skill_management = Arc::new(RebornLocalSkillManagementPort::new_with_mount_resolver(
@@ -3522,7 +3638,7 @@ where
         ..
     } = build_budget_sinks();
     let turn_state = Arc::new(
-        FilesystemTurnStateStore::new(Arc::clone(&stores.scoped_filesystem))
+        FilesystemTurnStateStore::new(Arc::clone(&turn_state_filesystem))
             .with_limits(turn_state_store_limits),
     );
     let checkpoint_state_store: Arc<dyn CheckpointStateStore> = Arc::new(
@@ -4040,6 +4156,7 @@ mod tests {
             trigger_repository: Arc::clone(&base_runtime.trigger_repository),
             project_service: Arc::clone(&base_runtime.project_service),
             outbound_preferences: Arc::clone(&base_runtime.outbound_preferences),
+            skill_auto_activate_learned: Arc::clone(&base_runtime.skill_auto_activate_learned),
             #[cfg(feature = "slack-v2-host-beta")]
             outbound_state: Arc::clone(&base_runtime.outbound_state),
             #[cfg(feature = "slack-v2-host-beta")]
@@ -4889,6 +5006,316 @@ mod tests {
         assert_eq!(scope.user_id, owner);
         assert_eq!(scope.agent_id, Some(identity.agent_id));
         assert!(scope.project_id.is_none());
+    }
+
+    #[cfg(any(feature = "libsql", feature = "postgres"))]
+    #[test]
+    fn turn_state_filesystem_routes_global_store_ops_to_owner_turns_path() {
+        let root = Arc::new(ironclaw_filesystem::InMemoryBackend::default());
+        let owner_scope = ResourceScope {
+            tenant_id: TenantId::new("tenant-alpha").expect("tenant"),
+            user_id: UserId::new("owner-alpha").expect("owner"),
+            agent_id: Some(ironclaw_host_api::AgentId::new("agent-alpha").expect("agent")),
+            project_id: None,
+            mission_id: None,
+            thread_id: None,
+            invocation_id: InvocationId::new(),
+        };
+        let scoped =
+            owner_turn_state_filesystem(root, &owner_scope).expect("owner turn-state filesystem");
+        let path = ScopedPath::new("/turns/state.json").expect("turn state path");
+        let resolved = scoped
+            .resolve(&ResourceScope::system(), &path)
+            .expect("fixed view should resolve global store operation");
+
+        assert_eq!(
+            resolved.as_str(),
+            "/tenants/tenant-alpha/users/owner-alpha/turns/state.json"
+        );
+    }
+
+    #[cfg(any(feature = "libsql", feature = "postgres"))]
+    #[test]
+    fn runtime_owner_scope_uses_configured_runtime_identity_for_turn_state() {
+        let owner = UserId::new("configured-owner").expect("owner");
+        let identity = RebornLocalRuntimeIdentity {
+            tenant_id: TenantId::new("configured-tenant").expect("tenant"),
+            agent_id: ironclaw_host_api::AgentId::new("configured-agent").expect("agent"),
+        };
+        let scope = configured_runtime_owner_scope(owner.clone(), &identity);
+
+        assert_eq!(scope.tenant_id, identity.tenant_id);
+        assert_eq!(scope.user_id, owner);
+        assert_eq!(scope.agent_id, Some(identity.agent_id));
+    }
+
+    #[cfg(feature = "libsql")]
+    #[tokio::test]
+    async fn production_libsql_turn_state_uses_configured_runtime_identity() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db = Arc::new(
+            libsql::Builder::new_local(dir.path().join("reborn.db").display().to_string())
+                .build()
+                .await
+                .expect("build libsql database"),
+        );
+        let assertion_filesystem = LibSqlRootFilesystem::new(Arc::clone(&db));
+        let owner = UserId::new("configured-owner").expect("owner");
+        let tenant = TenantId::new("configured-tenant").expect("tenant");
+        let agent = ironclaw_host_api::AgentId::new("configured-agent").expect("agent");
+        let services = build_reborn_services(
+            RebornBuildInput::libsql(
+                RebornCompositionProfile::Production,
+                owner.as_str(),
+                db,
+                dir.path().join("events.db").display().to_string(),
+                None,
+                ironclaw_secrets::SecretMaterial::from("01234567890123456789012345678901"),
+            )
+            .with_local_runtime_identity(tenant.clone(), agent.clone())
+            .with_production_trust_policy(Arc::new(
+                builtin_first_party_trust_policy().expect("builtin trust policy"),
+            ))
+            .with_runtime_policy(EffectiveRuntimePolicy {
+                deployment: ironclaw_host_api::DeploymentMode::HostedMultiTenant,
+                requested_profile: ironclaw_host_api::RuntimeProfile::HostedSafe,
+                resolved_profile: ironclaw_host_api::RuntimeProfile::HostedSafe,
+                filesystem_backend: FilesystemBackendKind::TenantWorkspace,
+                process_backend: ProcessBackendKind::None,
+                network_mode: ironclaw_host_api::NetworkMode::Brokered,
+                secret_mode: SecretMode::TenantBroker,
+                approval_policy: ironclaw_host_api::runtime_policy::ApprovalPolicy::AskAlways,
+                audit_mode: ironclaw_host_api::AuditMode::Standard,
+            }),
+        )
+        .await
+        .expect("production libsql services build");
+
+        let production_runtime = services
+            .production_runtime
+            .as_ref()
+            .expect("production runtime");
+        #[cfg(not(feature = "postgres"))]
+        let RebornProductionRuntimeServices::LibSql(graph) = production_runtime;
+        #[cfg(feature = "postgres")]
+        let graph = match production_runtime {
+            RebornProductionRuntimeServices::LibSql(graph) => graph,
+            RebornProductionRuntimeServices::Postgres(_) => {
+                panic!("expected libsql production runtime")
+            }
+        };
+        let scope = ironclaw_turns::TurnScope::new_with_owner(
+            tenant,
+            Some(agent),
+            None,
+            ironclaw_host_api::ThreadId::new("configured-thread").expect("thread"),
+            Some(owner.clone()),
+        );
+        let submit = ironclaw_turns::SubmitTurnRequest {
+            scope,
+            actor: ironclaw_turns::TurnActor::new(owner),
+            accepted_message_ref: ironclaw_turns::AcceptedMessageRef::new("configured-message-ref")
+                .expect("message ref"),
+            source_binding_ref: ironclaw_turns::SourceBindingRef::new("source-web")
+                .expect("source binding"),
+            reply_target_binding_ref: ironclaw_turns::ReplyTargetBindingRef::new("reply-web")
+                .expect("reply binding"),
+            requested_run_profile: Some(
+                ironclaw_turns::RunProfileRequest::new("default").expect("run profile"),
+            ),
+            idempotency_key: ironclaw_turns::IdempotencyKey::new("configured-turn")
+                .expect("idempotency key"),
+            received_at: chrono::Utc::now(),
+            requested_run_id: None,
+            parent_run_id: None,
+            subagent_depth: 0,
+            spawn_tree_root_run_id: None,
+            product_context: None,
+        };
+        ironclaw_turns::TurnStateStore::submit_turn(
+            graph.turn_state.as_ref(),
+            submit,
+            &ironclaw_turns::AllowAllTurnAdmissionPolicy,
+            &InMemoryRunProfileResolver::default(),
+        )
+        .await
+        .expect("submit through production turn-state store");
+
+        let configured_path =
+            VirtualPath::new("/tenants/configured-tenant/users/configured-owner/turns/state.json")
+                .expect("configured turn-state path");
+        let system_path = VirtualPath::new("/tenants/__system__/users/__system__/turns/state.json")
+            .expect("system turn-state path");
+
+        assert!(
+            assertion_filesystem
+                .get(&configured_path)
+                .await
+                .expect("configured turn-state read")
+                .is_some()
+        );
+        assert!(
+            assertion_filesystem
+                .get(&system_path)
+                .await
+                .expect("system turn-state read")
+                .is_none()
+        );
+    }
+
+    #[cfg(feature = "libsql")]
+    #[tokio::test]
+    async fn production_libsql_turn_state_uses_default_runtime_identity_when_unconfigured() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db = Arc::new(
+            libsql::Builder::new_local(dir.path().join("reborn.db").display().to_string())
+                .build()
+                .await
+                .expect("build libsql database"),
+        );
+        let assertion_filesystem = LibSqlRootFilesystem::new(Arc::clone(&db));
+        let owner = UserId::new("default-owner").expect("owner");
+        let services = build_reborn_services(
+            RebornBuildInput::libsql(
+                RebornCompositionProfile::Production,
+                owner.as_str(),
+                db,
+                dir.path().join("events.db").display().to_string(),
+                None,
+                ironclaw_secrets::SecretMaterial::from("01234567890123456789012345678901"),
+            )
+            .with_production_trust_policy(Arc::new(
+                builtin_first_party_trust_policy().expect("builtin trust policy"),
+            ))
+            .with_runtime_policy(EffectiveRuntimePolicy {
+                deployment: ironclaw_host_api::DeploymentMode::HostedMultiTenant,
+                requested_profile: ironclaw_host_api::RuntimeProfile::HostedSafe,
+                resolved_profile: ironclaw_host_api::RuntimeProfile::HostedSafe,
+                filesystem_backend: FilesystemBackendKind::TenantWorkspace,
+                process_backend: ProcessBackendKind::None,
+                network_mode: ironclaw_host_api::NetworkMode::Brokered,
+                secret_mode: SecretMode::TenantBroker,
+                approval_policy: ironclaw_host_api::runtime_policy::ApprovalPolicy::AskAlways,
+                audit_mode: ironclaw_host_api::AuditMode::Standard,
+            }),
+        )
+        .await
+        .expect("production libsql services build");
+
+        let production_runtime = services
+            .production_runtime
+            .as_ref()
+            .expect("production runtime");
+        #[cfg(not(feature = "postgres"))]
+        let RebornProductionRuntimeServices::LibSql(graph) = production_runtime;
+        #[cfg(feature = "postgres")]
+        let graph = match production_runtime {
+            RebornProductionRuntimeServices::LibSql(graph) => graph,
+            RebornProductionRuntimeServices::Postgres(_) => {
+                panic!("expected libsql production runtime")
+            }
+        };
+        let default_path =
+            VirtualPath::new("/tenants/reborn-cli/users/default-owner/turns/state.json")
+                .expect("default turn-state path");
+        let system_path = VirtualPath::new("/tenants/__system__/users/__system__/turns/state.json")
+            .expect("system turn-state path");
+        let default_identity = RebornRuntimeIdentity::reborn_cli();
+        let default_tenant = TenantId::new(default_identity.tenant_id).expect("default tenant");
+        let scope = ironclaw_turns::TurnScope::new_with_owner(
+            default_tenant,
+            None,
+            None,
+            ironclaw_host_api::ThreadId::new("default-thread").expect("thread"),
+            Some(owner.clone()),
+        );
+        let submit = ironclaw_turns::SubmitTurnRequest {
+            scope,
+            actor: ironclaw_turns::TurnActor::new(owner),
+            accepted_message_ref: ironclaw_turns::AcceptedMessageRef::new("default-message-ref")
+                .expect("message ref"),
+            source_binding_ref: ironclaw_turns::SourceBindingRef::new("source-web")
+                .expect("source binding"),
+            reply_target_binding_ref: ironclaw_turns::ReplyTargetBindingRef::new("reply-web")
+                .expect("reply binding"),
+            requested_run_profile: Some(
+                ironclaw_turns::RunProfileRequest::new("default").expect("run profile"),
+            ),
+            idempotency_key: ironclaw_turns::IdempotencyKey::new("default-turn")
+                .expect("idempotency key"),
+            received_at: chrono::Utc::now(),
+            requested_run_id: None,
+            parent_run_id: None,
+            subagent_depth: 0,
+            spawn_tree_root_run_id: None,
+            product_context: None,
+        };
+        ironclaw_turns::TurnStateStore::submit_turn(
+            graph.turn_state.as_ref(),
+            submit,
+            &ironclaw_turns::AllowAllTurnAdmissionPolicy,
+            &InMemoryRunProfileResolver::default(),
+        )
+        .await
+        .expect("submit through production turn-state store");
+
+        assert!(
+            assertion_filesystem
+                .get(&default_path)
+                .await
+                .expect("default turn-state read")
+                .is_some()
+        );
+        assert!(
+            assertion_filesystem
+                .get(&system_path)
+                .await
+                .expect("system turn-state read")
+                .is_none()
+        );
+    }
+
+    #[cfg(feature = "libsql")]
+    #[tokio::test]
+    async fn production_libsql_builder_rejects_invalid_owner_id_at_composition_boundary() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db = Arc::new(
+            libsql::Builder::new_local(dir.path().join("reborn.db").display().to_string())
+                .build()
+                .await
+                .expect("build libsql database"),
+        );
+
+        let result = build_reborn_services(
+            RebornBuildInput::libsql(
+                RebornCompositionProfile::Production,
+                "",
+                db,
+                dir.path().join("events.db").display().to_string(),
+                None,
+                ironclaw_secrets::SecretMaterial::from("01234567890123456789012345678901"),
+            )
+            .with_production_trust_policy(Arc::new(
+                builtin_first_party_trust_policy().expect("builtin trust policy"),
+            ))
+            .with_runtime_policy(EffectiveRuntimePolicy {
+                deployment: ironclaw_host_api::DeploymentMode::HostedMultiTenant,
+                requested_profile: ironclaw_host_api::RuntimeProfile::HostedSafe,
+                resolved_profile: ironclaw_host_api::RuntimeProfile::HostedSafe,
+                filesystem_backend: FilesystemBackendKind::TenantWorkspace,
+                process_backend: ProcessBackendKind::None,
+                network_mode: ironclaw_host_api::NetworkMode::Brokered,
+                secret_mode: SecretMode::TenantBroker,
+                approval_policy: ironclaw_host_api::runtime_policy::ApprovalPolicy::AskAlways,
+                audit_mode: ironclaw_host_api::AuditMode::Standard,
+            }),
+        )
+        .await;
+
+        assert!(
+            matches!(result, Err(RebornBuildError::InvalidConfig { ref reason }) if reason.contains("must not be empty")),
+            "expected invalid owner id error, got {result:?}"
+        );
     }
 
     #[tokio::test]

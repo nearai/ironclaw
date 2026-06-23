@@ -71,7 +71,7 @@ pub use management::{
     SkillUpdateResult, install_skill, list_skills, read_skill_content, remove_skill, search_skills,
     skill_summary_json, update_skill,
 };
-pub use parser::{ParsedSkill, SkillParseError, parse_skill_md};
+pub use parser::{ParsedSkill, SkillParseError, parse_skill_md, set_skill_auto_activate};
 pub use selector::{
     MAX_SKILL_CONTEXT_TOKENS, SelectionOutcome, SkillSelectionOptions, extract_skill_mentions,
     prefilter_skills_with_options, skill_token_cost,
