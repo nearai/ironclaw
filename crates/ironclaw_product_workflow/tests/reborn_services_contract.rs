@@ -36,9 +36,10 @@ use ironclaw_product_workflow::{
     LlmConfigServiceError, LlmConfigSnapshot, LlmModelsResult, LlmProbeRequest, LlmProbeResult,
     LlmProviderView, NearAiLoginRequest, NearAiLoginStart, NearAiWalletLoginRequest,
     NearAiWalletLoginResult, OperatorLogsService, OperatorServiceLifecycleService,
-    OutboundPreferencesProductFacade, ProductAgentBoundCaller, ProductWorkflowError, ProjectCaller,
-    ProjectService, ProjectServiceError, RebornAddMemberRequest, RebornAttachmentRequest,
-    RebornAutomationInfo, RebornAutomationMutationResponse, RebornAutomationRecentRunInfo,
+    OperatorStatusService, OutboundPreferencesProductFacade, ProductAgentBoundCaller,
+    ProductWorkflowError, ProjectCaller, ProjectService, ProjectServiceError,
+    RebornAddMemberRequest, RebornAttachmentRequest, RebornAutomationInfo,
+    RebornAutomationMutationResponse, RebornAutomationRecentRunInfo,
     RebornAutomationRecentRunStatus, RebornAutomationRunStatus, RebornAutomationSource,
     RebornAutomationState, RebornChannelConnectAction, RebornChannelConnectStrategy,
     RebornConnectableChannelInfo, RebornCreateProjectRequest, RebornDeleteProjectRequest,
@@ -46,21 +47,23 @@ use ironclaw_product_workflow::{
     RebornGetRunStateRequest, RebornListMembersRequest, RebornListMembersResponse,
     RebornListProjectsRequest, RebornListProjectsResponse, RebornLogLevel, RebornLogQueryRequest,
     RebornLogQueryResponse, RebornOperatorConfigDiagnosticSeverity, RebornOperatorLogsQuery,
-    RebornOperatorSetupRequest, RebornOperatorSetupStatus, RebornOperatorSurfaceStatus,
-    RebornOutboundDeliveryModality, RebornOutboundDeliveryTargetCapabilities,
-    RebornOutboundDeliveryTargetDescription, RebornOutboundDeliveryTargetId,
-    RebornOutboundDeliveryTargetListResponse, RebornOutboundDeliveryTargetOption,
-    RebornOutboundDeliveryTargetStatus, RebornOutboundDeliveryTargetSummary,
-    RebornOutboundPreferencesResponse, RebornProjectInfo, RebornProjectMemberInfo,
-    RebornProjectResponse, RebornProjectRole, RebornProjectState, RebornRemoveMemberRequest,
-    RebornResolveGateResponse, RebornServiceLifecycleAction, RebornServiceLifecycleRequest,
-    RebornServiceLifecycleResponse, RebornServiceLifecycleState, RebornServices, RebornServicesApi,
-    RebornServicesError, RebornServicesErrorCode, RebornServicesErrorKind,
-    RebornSetOutboundPreferencesRequest, RebornStreamEventsRequest, RebornSubmitTurnResponse,
-    RebornTimelineRequest, RebornUpdateMemberRoleRequest, RebornUpdateProjectRequest,
-    ResolveApprovalInteractionRequest, ResolveApprovalInteractionResponse,
-    ResolveAuthInteractionRequest, ResolveAuthInteractionResponse, SetActiveLlmRequest,
-    StaticConnectableChannelsProductFacade, TriggerRunThreadScope, UpsertLlmProviderRequest,
+    RebornOperatorSetupRequest, RebornOperatorSetupStatus, RebornOperatorStatusCheck,
+    RebornOperatorStatusResponse, RebornOperatorStatusSeverity, RebornOperatorStatusState,
+    RebornOperatorSurfaceStatus, RebornOutboundDeliveryModality,
+    RebornOutboundDeliveryTargetCapabilities, RebornOutboundDeliveryTargetDescription,
+    RebornOutboundDeliveryTargetId, RebornOutboundDeliveryTargetListResponse,
+    RebornOutboundDeliveryTargetOption, RebornOutboundDeliveryTargetStatus,
+    RebornOutboundDeliveryTargetSummary, RebornOutboundPreferencesResponse, RebornProjectInfo,
+    RebornProjectMemberInfo, RebornProjectResponse, RebornProjectRole, RebornProjectState,
+    RebornRemoveMemberRequest, RebornResolveGateResponse, RebornServiceLifecycleAction,
+    RebornServiceLifecycleRequest, RebornServiceLifecycleResponse, RebornServiceLifecycleState,
+    RebornServices, RebornServicesApi, RebornServicesError, RebornServicesErrorCode,
+    RebornServicesErrorKind, RebornSetOutboundPreferencesRequest, RebornStreamEventsRequest,
+    RebornSubmitTurnResponse, RebornTimelineRequest, RebornUpdateMemberRoleRequest,
+    RebornUpdateProjectRequest, ResolveApprovalInteractionRequest,
+    ResolveApprovalInteractionResponse, ResolveAuthInteractionRequest,
+    ResolveAuthInteractionResponse, SetActiveLlmRequest, StaticConnectableChannelsProductFacade,
+    StaticOperatorStatusService, TriggerRunThreadScope, UpsertLlmProviderRequest,
     WebUiAuthenticatedCaller, WebUiCancelRunRequest, WebUiCreateThreadRequest,
     WebUiInboundValidationCode, WebUiListAutomationsRequest, WebUiListThreadsRequest,
     WebUiResolveGateRequest, WebUiSendMessageRequest, WebUiSetupExtensionRequest,
@@ -7526,6 +7529,7 @@ struct SetupSetActiveCall {
 
 struct SetupRecordingLlmConfigService {
     snapshot_calls: Mutex<usize>,
+    snapshot_callers: Mutex<Vec<WebUiAuthenticatedCaller>>,
     upsert_provider_calls: Mutex<Vec<SetupUpsertCall>>,
     set_active_calls: Mutex<Vec<SetupSetActiveCall>>,
     test_connection_calls: Mutex<usize>,
@@ -7540,6 +7544,7 @@ impl Default for SetupRecordingLlmConfigService {
     fn default() -> Self {
         Self {
             snapshot_calls: Mutex::new(0),
+            snapshot_callers: Mutex::new(Vec::new()),
             upsert_provider_calls: Mutex::new(Vec::new()),
             set_active_calls: Mutex::new(Vec::new()),
             test_connection_calls: Mutex::new(0),
@@ -7555,6 +7560,10 @@ impl Default for SetupRecordingLlmConfigService {
 impl SetupRecordingLlmConfigService {
     fn snapshot_count(&self) -> usize {
         *self.snapshot_calls.lock().expect("lock")
+    }
+
+    fn snapshot_callers(&self) -> Vec<WebUiAuthenticatedCaller> {
+        self.snapshot_callers.lock().expect("lock").clone()
     }
 
     fn upsert_provider_count(&self) -> usize {
@@ -7624,9 +7633,10 @@ impl SetupRecordingLlmConfigService {
 impl LlmConfigService for SetupRecordingLlmConfigService {
     async fn snapshot(
         &self,
-        _caller: WebUiAuthenticatedCaller,
+        caller: WebUiAuthenticatedCaller,
     ) -> Result<LlmConfigSnapshot, LlmConfigServiceError> {
         *self.snapshot_calls.lock().expect("lock") += 1;
+        self.snapshot_callers.lock().expect("lock").push(caller);
         if let Some(error) = self.next_snapshot_error.lock().expect("lock").take() {
             return Err(error);
         }
@@ -7731,6 +7741,35 @@ impl LlmConfigService for SetupRecordingLlmConfigService {
     }
 }
 
+struct RecordingOperatorStatusService {
+    response: RebornOperatorStatusResponse,
+    callers: Mutex<Vec<WebUiAuthenticatedCaller>>,
+}
+
+impl RecordingOperatorStatusService {
+    fn new(response: RebornOperatorStatusResponse) -> Self {
+        Self {
+            response,
+            callers: Mutex::new(Vec::new()),
+        }
+    }
+
+    fn callers(&self) -> Vec<WebUiAuthenticatedCaller> {
+        self.callers.lock().expect("lock").clone()
+    }
+}
+
+#[async_trait]
+impl OperatorStatusService for RecordingOperatorStatusService {
+    async fn status(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+    ) -> Result<RebornOperatorStatusResponse, RebornServicesError> {
+        self.callers.lock().expect("lock").push(caller);
+        Ok(self.response.clone())
+    }
+}
+
 fn services_with_setup_llm_config(
     llm_config: Arc<SetupRecordingLlmConfigService>,
 ) -> RebornServices {
@@ -7739,6 +7778,126 @@ fn services_with_setup_llm_config(
         Arc::new(FakeTurnCoordinator::default()),
     )
     .with_llm_config_service(llm_config)
+}
+
+#[tokio::test]
+async fn operator_diagnostics_aggregates_status_setup_and_config_reasons() {
+    let llm_config = Arc::new(SetupRecordingLlmConfigService::default());
+    llm_config.use_active_snapshot("openai", "gpt-5-mini");
+    let status_service = Arc::new(RecordingOperatorStatusService::new(
+        RebornOperatorStatusResponse {
+            generated_at: Utc::now(),
+            overall: RebornOperatorStatusState::Blocked,
+            checks: vec![
+                RebornOperatorStatusCheck {
+                    id: "storage".to_string(),
+                    status: RebornOperatorStatusState::Blocked,
+                    severity: RebornOperatorStatusSeverity::Critical,
+                    summary: "storage backend is unavailable".to_string(),
+                    remediation: Some("repair storage configuration".to_string()),
+                },
+                RebornOperatorStatusCheck {
+                    id: "provider_model".to_string(),
+                    status: RebornOperatorStatusState::Ready,
+                    severity: RebornOperatorStatusSeverity::Info,
+                    summary: "provider and model are configured".to_string(),
+                    remediation: None,
+                },
+                RebornOperatorStatusCheck {
+                    id: "sk-secret-token".to_string(),
+                    status: RebornOperatorStatusState::Blocked,
+                    severity: RebornOperatorStatusSeverity::Critical,
+                    summary: "failed with sk-test1234567890 at /home/alice/.env".to_string(),
+                    remediation: Some(
+                        "inspect /home/alice/.ssh/id_ed25519 and credential token".to_string(),
+                    ),
+                },
+                RebornOperatorStatusCheck {
+                    id: "workspace_path".to_string(),
+                    status: RebornOperatorStatusState::Blocked,
+                    severity: RebornOperatorStatusSeverity::Warning,
+                    summary: "artifact staged at /workspace/ironclaw/.env".to_string(),
+                    remediation: Some("remove /workspace/ironclaw/secrets.env".to_string()),
+                },
+            ],
+        },
+    ));
+    let services = services_with_setup_llm_config(llm_config.clone())
+        .with_operator_status_service(status_service.clone());
+    let diagnostics_caller =
+        caller_for_user_with_project("user-diagnostics", Some("project-diagnostics"));
+
+    let response = services
+        .get_operator_diagnostics(diagnostics_caller.clone())
+        .await
+        .expect("operator diagnostics");
+
+    assert_eq!(response.area.as_str(), "diagnostics");
+    assert_eq!(response.status, RebornOperatorSurfaceStatus::Unavailable);
+    assert!(response.operator_status.is_some());
+    let reason_codes = response
+        .diagnostics
+        .iter()
+        .map(|diagnostic| diagnostic.reason_code.as_str())
+        .collect::<Vec<_>>();
+    assert!(reason_codes.contains(&"operator_doctor_storage_blocked"));
+    assert!(reason_codes.contains(&"operator_doctor_status_blocked"));
+    assert!(reason_codes.contains(&"operator_setup_profile_not_wired"));
+    assert!(reason_codes.contains(&"operator_setup_webui_access_not_wired"));
+    assert!(reason_codes.contains(&"operator_config_service_not_wired"));
+    assert!(!reason_codes.contains(&"operator_doctor_provider_model_ready"));
+    let rendered = serde_json::to_string(&response).expect("serialize diagnostics");
+    assert!(!rendered.contains("sk-"));
+    assert!(!rendered.contains("/home/"));
+    assert!(!rendered.contains("/workspace/"));
+    assert!(!rendered.contains(".ssh"));
+    assert!(!rendered.contains("credential token"));
+    assert!(
+        response.diagnostics.iter().any(|diagnostic| {
+            diagnostic.reason_code == "operator_doctor_status_blocked"
+                && diagnostic.key == "[redacted operator status detail]"
+                && diagnostic.message == "[redacted operator status detail]"
+                && diagnostic.remediation == "[redacted operator status detail]"
+        }),
+        "sensitive status-derived diagnostic details should be redacted"
+    );
+    assert!(
+        response.diagnostics.iter().any(|diagnostic| {
+            diagnostic.reason_code == "operator_doctor_workspace_path_blocked"
+                && diagnostic.key == "workspace_path"
+                && diagnostic.message == "[redacted operator status detail]"
+                && diagnostic.remediation == "[redacted operator status detail]"
+        }),
+        "/workspace/ status-derived diagnostic details should be redacted"
+    );
+    assert_eq!(status_service.callers(), vec![diagnostics_caller.clone()]);
+    assert_eq!(llm_config.snapshot_callers(), vec![diagnostics_caller]);
+}
+
+#[tokio::test]
+async fn operator_diagnostics_reports_setup_service_absence_without_failing_route() {
+    let services = RebornServices::new(
+        Arc::new(InMemorySessionThreadService::default()),
+        Arc::new(FakeTurnCoordinator::default()),
+    )
+    .with_operator_status_service(Arc::new(StaticOperatorStatusService::new(
+        RebornOperatorStatusResponse {
+            generated_at: Utc::now(),
+            overall: RebornOperatorStatusState::Ready,
+            checks: Vec::new(),
+        },
+    )));
+
+    let response = services
+        .get_operator_diagnostics(caller())
+        .await
+        .expect("operator diagnostics");
+
+    assert_eq!(response.area.as_str(), "diagnostics");
+    assert!(response.diagnostics.iter().any(|diagnostic| {
+        diagnostic.reason_code == "operator_setup_service_not_wired"
+            && diagnostic.severity == RebornOperatorConfigDiagnosticSeverity::Error
+    }));
 }
 
 #[tokio::test]
@@ -7756,13 +7915,14 @@ async fn get_operator_setup_returns_snapshot_from_llm_config() {
     assert_eq!(response.active_provider_id.as_deref(), Some("openai"));
     assert_eq!(response.active_model.as_deref(), Some("gpt-5-mini"));
     assert_eq!(response.status, RebornOperatorSetupStatus::Complete);
-    assert!(response.diagnostics.iter().any(|diagnostic| {
-        diagnostic.reason_code == "operator_setup_profile_not_wired"
-            && diagnostic.severity == RebornOperatorConfigDiagnosticSeverity::Info
+    assert!(response.diagnostics.is_empty());
+    assert!(response.steps.iter().any(|step| {
+        step.name == "profile"
+            && step.status == ironclaw_product_workflow::RebornOperatorSetupStepStatus::Complete
     }));
-    assert!(response.diagnostics.iter().any(|diagnostic| {
-        diagnostic.reason_code == "operator_setup_webui_access_not_wired"
-            && diagnostic.severity == RebornOperatorConfigDiagnosticSeverity::Info
+    assert!(response.steps.iter().any(|step| {
+        step.name == "webui_access"
+            && step.status == ironclaw_product_workflow::RebornOperatorSetupStepStatus::Complete
     }));
 }
 
@@ -7803,6 +7963,14 @@ async fn setup_response_reflects_active_provider_and_model() {
     }));
     assert!(response.steps.iter().any(|step| {
         step.name == "model"
+            && step.status == ironclaw_product_workflow::RebornOperatorSetupStepStatus::Complete
+    }));
+    assert!(response.steps.iter().any(|step| {
+        step.name == "profile"
+            && step.status == ironclaw_product_workflow::RebornOperatorSetupStepStatus::Complete
+    }));
+    assert!(response.steps.iter().any(|step| {
+        step.name == "webui_access"
             && step.status == ironclaw_product_workflow::RebornOperatorSetupStepStatus::Complete
     }));
 }
@@ -7935,6 +8103,133 @@ async fn run_operator_setup_rejects_internal_base_url_before_upsert() {
 
     assert_setup_validation(err, "base_url", WebUiInboundValidationCode::InvalidValue);
     assert_eq!(llm_config.upsert_provider_count(), 0);
+}
+
+#[tokio::test]
+async fn run_operator_setup_rejects_blank_profile_before_provider_write() {
+    let llm_config = Arc::new(SetupRecordingLlmConfigService::default());
+    let services = services_with_setup_llm_config(llm_config.clone());
+
+    let err = services
+        .run_operator_setup(
+            caller(),
+            RebornOperatorSetupRequest {
+                provider_id: Some("openai".to_string()),
+                adapter: Some("open_ai_completions".to_string()),
+                profile_id: Some("   ".to_string()),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect_err("blank profile id is rejected");
+
+    assert_setup_validation(err, "profile_id", WebUiInboundValidationCode::InvalidValue);
+    assert_eq!(llm_config.upsert_provider_count(), 0);
+    assert_eq!(llm_config.set_active_count(), 0);
+}
+
+#[tokio::test]
+async fn run_operator_setup_rejects_oversized_profile_before_provider_write() {
+    let llm_config = Arc::new(SetupRecordingLlmConfigService::default());
+    let services = services_with_setup_llm_config(llm_config.clone());
+
+    let err = services
+        .run_operator_setup(
+            caller(),
+            RebornOperatorSetupRequest {
+                provider_id: Some("openai".to_string()),
+                adapter: Some("open_ai_completions".to_string()),
+                profile_id: Some("x".repeat(129)),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect_err("oversized profile id is rejected");
+
+    assert_setup_validation(err, "profile_id", WebUiInboundValidationCode::InvalidValue);
+    assert_eq!(llm_config.upsert_provider_count(), 0);
+    assert_eq!(llm_config.set_active_count(), 0);
+}
+
+#[tokio::test]
+async fn run_operator_setup_rejects_short_webui_access_token_before_provider_write() {
+    let llm_config = Arc::new(SetupRecordingLlmConfigService::default());
+    let services = services_with_setup_llm_config(llm_config.clone());
+
+    let err = services
+        .run_operator_setup(
+            caller(),
+            RebornOperatorSetupRequest {
+                provider_id: Some("openai".to_string()),
+                adapter: Some("open_ai_completions".to_string()),
+                webui_access_token: Some(SecretString::from("too-short".to_string())),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect_err("short WebUI token is rejected");
+
+    assert_setup_validation(
+        err,
+        "webui_access_token",
+        WebUiInboundValidationCode::InvalidValue,
+    );
+    assert_eq!(llm_config.upsert_provider_count(), 0);
+    assert_eq!(llm_config.set_active_count(), 0);
+}
+
+#[tokio::test]
+async fn run_operator_setup_rejects_serve_weak_webui_access_token_before_provider_write() {
+    let llm_config = Arc::new(SetupRecordingLlmConfigService::default());
+    let services = services_with_setup_llm_config(llm_config.clone());
+
+    let err = services
+        .run_operator_setup(
+            caller(),
+            RebornOperatorSetupRequest {
+                provider_id: Some("openai".to_string()),
+                adapter: Some("open_ai_completions".to_string()),
+                webui_access_token: Some(SecretString::from("x".repeat(16))),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect_err("16-byte WebUI token is rejected");
+
+    assert_setup_validation(
+        err,
+        "webui_access_token",
+        WebUiInboundValidationCode::InvalidValue,
+    );
+    assert_eq!(llm_config.upsert_provider_count(), 0);
+    assert_eq!(llm_config.set_active_count(), 0);
+}
+
+#[tokio::test]
+async fn run_operator_setup_rejects_oversized_webui_access_token_before_provider_write() {
+    let llm_config = Arc::new(SetupRecordingLlmConfigService::default());
+    let services = services_with_setup_llm_config(llm_config.clone());
+
+    let err = services
+        .run_operator_setup(
+            caller(),
+            RebornOperatorSetupRequest {
+                provider_id: Some("openai".to_string()),
+                adapter: Some("open_ai_completions".to_string()),
+                webui_access_token: Some(SecretString::from("x".repeat(4097))),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect_err("oversized WebUI token is rejected");
+
+    assert_setup_validation(
+        err,
+        "webui_access_token",
+        WebUiInboundValidationCode::InvalidValue,
+    );
+    assert_eq!(llm_config.upsert_provider_count(), 0);
+    assert_eq!(llm_config.set_active_count(), 0);
 }
 
 #[tokio::test]
@@ -8075,6 +8370,126 @@ async fn run_operator_setup_upserts_and_activates_provider_config() {
             model: Some("gpt-5-mini".to_string()),
         }]
     );
+    assert_eq!(llm_config.set_active_count(), 0);
+}
+
+#[tokio::test]
+async fn run_operator_setup_ignores_redacted_webui_access_token_sentinel() {
+    let llm_config = Arc::new(SetupRecordingLlmConfigService::default());
+    llm_config.use_active_snapshot("openai", "gpt-5-mini");
+    let services = services_with_setup_llm_config(llm_config.clone());
+
+    let response = services
+        .run_operator_setup(
+            caller(),
+            RebornOperatorSetupRequest {
+                provider_id: Some("openai".to_string()),
+                model: Some("gpt-5-mini".to_string()),
+                webui_access_token: Some(SecretString::from("••••••••".to_string())),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("setup response");
+
+    assert_eq!(response.status, RebornOperatorSetupStatus::Complete);
+    let webui_step = response
+        .steps
+        .iter()
+        .find(|step| step.name == "webui_access")
+        .expect("webui access step");
+    assert_eq!(
+        webui_step.status,
+        ironclaw_product_workflow::RebornOperatorSetupStepStatus::Complete
+    );
+    assert_eq!(
+        llm_config.set_active_calls.lock().expect("lock").as_slice(),
+        [SetupSetActiveCall {
+            provider_id: "openai".to_string(),
+            model: Some("gpt-5-mini".to_string()),
+        }]
+    );
+    let serialized = serde_json::to_string(&response).expect("serialize setup response");
+    assert!(!serialized.contains("••••••••"));
+}
+
+#[tokio::test]
+async fn run_operator_setup_rejects_unwired_host_mutations_before_provider_write() {
+    let llm_config = Arc::new(SetupRecordingLlmConfigService::default());
+    let services = services_with_setup_llm_config(llm_config.clone());
+
+    let err = services
+        .run_operator_setup(
+            caller(),
+            RebornOperatorSetupRequest {
+                provider_id: Some("openai".to_string()),
+                adapter: Some("open_ai_completions".to_string()),
+                profile_id: Some("production".to_string()),
+                webui_access_token: Some(SecretString::from(
+                    "webui-secret-token-value-32-bytes".to_string(),
+                )),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect_err("unwired host mutations fail closed");
+
+    assert_eq!(err.code, RebornServicesErrorCode::Unavailable);
+    assert_eq!(err.kind, RebornServicesErrorKind::ServiceUnavailable);
+    assert_eq!(err.status_code, 503);
+    assert_eq!(llm_config.upsert_provider_count(), 0);
+    assert_eq!(llm_config.set_active_count(), 0);
+}
+
+#[tokio::test]
+async fn run_operator_setup_rejects_profile_only_host_mutation_before_provider_write() {
+    let llm_config = Arc::new(SetupRecordingLlmConfigService::default());
+    let services = services_with_setup_llm_config(llm_config.clone());
+
+    let err = services
+        .run_operator_setup(
+            caller(),
+            RebornOperatorSetupRequest {
+                provider_id: Some("openai".to_string()),
+                adapter: Some("open_ai_completions".to_string()),
+                profile_id: Some("production".to_string()),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect_err("unwired profile mutation fails closed");
+
+    assert_eq!(err.code, RebornServicesErrorCode::Unavailable);
+    assert_eq!(err.kind, RebornServicesErrorKind::ServiceUnavailable);
+    assert_eq!(err.status_code, 503);
+    assert_eq!(llm_config.upsert_provider_count(), 0);
+    assert_eq!(llm_config.set_active_count(), 0);
+}
+
+#[tokio::test]
+async fn run_operator_setup_rejects_token_only_host_mutation_before_provider_write() {
+    let llm_config = Arc::new(SetupRecordingLlmConfigService::default());
+    let services = services_with_setup_llm_config(llm_config.clone());
+
+    let err = services
+        .run_operator_setup(
+            caller(),
+            RebornOperatorSetupRequest {
+                provider_id: Some("openai".to_string()),
+                adapter: Some("open_ai_completions".to_string()),
+                webui_access_token: Some(SecretString::from(
+                    "webui-secret-token-value-32-bytes".to_string(),
+                )),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect_err("unwired WebUI token mutation fails closed");
+
+    assert_eq!(err.code, RebornServicesErrorCode::Unavailable);
+    assert_eq!(err.kind, RebornServicesErrorKind::ServiceUnavailable);
+    assert_eq!(err.status_code, 503);
+    assert_eq!(llm_config.upsert_provider_count(), 0);
     assert_eq!(llm_config.set_active_count(), 0);
 }
 
