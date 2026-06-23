@@ -113,6 +113,13 @@ test("RunDots renders the empty state when there are no recent runs", () => {
   assert.ok(collectScalars(rendered).includes("No runs"));
 });
 
+test("RunDots renders the empty state when recent runs are omitted or null", () => {
+  const { RunDots } = loadComponents();
+
+  assert.ok(collectScalars(RunDots({})).includes("No runs"));
+  assert.ok(collectScalars(RunDots({ runs: null })).includes("No runs"));
+});
+
 test("RunDots renders exactly eight runs without an overflow chip", () => {
   const { RunDots } = loadComponents();
 

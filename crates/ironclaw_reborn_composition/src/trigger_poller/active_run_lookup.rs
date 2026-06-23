@@ -7,6 +7,8 @@ use ironclaw_triggers::{
 };
 use ironclaw_turns::{TurnPersistenceSnapshot, TurnStatus};
 
+type ActiveRunIndex = HashMap<String, HashMap<ironclaw_turns::TurnRunId, TriggerActiveRunState>>;
+
 pub(crate) struct SnapshotActiveRunLookup {
     snapshot_source: Arc<dyn TriggerTurnSnapshotSource>,
 }
@@ -57,34 +59,31 @@ impl TriggerActiveRunLookup for SnapshotActiveRunLookup {
     }
 }
 
-fn active_run_index(
-    snapshot: &TurnPersistenceSnapshot,
-) -> HashMap<(ironclaw_host_api::TenantId, ironclaw_turns::TurnRunId), TriggerActiveRunState> {
-    snapshot
-        .runs
-        .iter()
-        .map(|run| {
-            let state = if run.status.is_terminal() {
-                TriggerActiveRunState::Terminal {
-                    status: terminal_run_history_status(run.status),
-                }
-            } else {
-                TriggerActiveRunState::Nonterminal
-            };
-            ((run.scope.tenant_id.clone(), run.run_id), state)
-        })
-        .collect()
+fn active_run_index(snapshot: &TurnPersistenceSnapshot) -> ActiveRunIndex {
+    let mut index = ActiveRunIndex::new();
+    for run in &snapshot.runs {
+        let state = if run.status.is_terminal() {
+            TriggerActiveRunState::Terminal {
+                status: terminal_run_history_status(run.status),
+            }
+        } else {
+            TriggerActiveRunState::Nonterminal
+        };
+        index
+            .entry(run.scope.tenant_id.as_str().to_owned())
+            .or_default()
+            .insert(run.run_id, state);
+    }
+    index
 }
 
 fn active_run_state_from_index(
-    run_index: &HashMap<
-        (ironclaw_host_api::TenantId, ironclaw_turns::TurnRunId),
-        TriggerActiveRunState,
-    >,
+    run_index: &ActiveRunIndex,
     request: &TriggerActiveRunStateRequest,
 ) -> TriggerActiveRunState {
     run_index
-        .get(&(request.tenant_id.clone(), request.run_id))
+        .get(request.tenant_id.as_str())
+        .and_then(|tenant_runs| tenant_runs.get(&request.run_id))
         .copied()
         .unwrap_or(TriggerActiveRunState::Missing)
 }

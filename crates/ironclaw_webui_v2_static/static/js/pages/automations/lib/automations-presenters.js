@@ -352,7 +352,12 @@ export function summarizeRuns(runs) {
   const list = Array.isArray(runs) ? runs : [];
   const counts = { total: list.length, ok: 0, error: 0, running: 0, unknown: 0 };
   for (const run of list) {
-    counts[normalizeRunStatus(run?.status)] += 1;
+    const status = normalizeRunStatus(run?.status);
+    if (Object.prototype.hasOwnProperty.call(counts, status)) {
+      counts[status] += 1;
+    } else {
+      counts.unknown += 1;
+    }
   }
   return counts;
 }

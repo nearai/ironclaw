@@ -97,18 +97,25 @@ function t(key) {
   return COPY[key] || key;
 }
 
-function createHarness({ clipboard = async () => {} } = {}) {
+function createHarness({ clipboard = async () => {}, includeClipboard = true } = {}) {
   const state = [];
   let cursor = 0;
+  let nextTimerId = 1;
   const navigations = [];
   const copiedText = [];
+  const clearedTimers = [];
+  const scheduledTimers = [];
+  const cleanups = [];
 
   function Button() {}
   function Icon() {}
   function Panel() {}
 
   const React = {
-    useEffect() {},
+    useEffect(effect) {
+      const cleanup = effect();
+      if (typeof cleanup === "function") cleanups.push(cleanup);
+    },
     useRef(initial) {
       return { current: initial };
     },
@@ -125,24 +132,35 @@ function createHarness({ clipboard = async () => {} } = {}) {
     },
   };
 
+  const navigator = includeClipboard
+    ? {
+        clipboard: {
+          writeText: async (text) => {
+            copiedText.push(text);
+            await clipboard(text);
+          },
+        },
+      }
+    : {};
+
   const context = {
     globalThis: {},
     Button,
     Icon,
     Panel,
     React,
-    clearTimeout: () => {},
     cn: (...parts) => parts.filter(Boolean).join(" "),
     html,
-    navigator: {
-      clipboard: {
-        writeText: async (text) => {
-          copiedText.push(text);
-          await clipboard(text);
-        },
-      },
+    navigator,
+    clearTimeout: (timerId) => {
+      clearedTimers.push(timerId);
     },
-    setTimeout: () => 1,
+    setTimeout: (callback, delay) => {
+      const id = nextTimerId;
+      nextTimerId += 1;
+      scheduledTimers.push({ id, callback, delay });
+      return id;
+    },
     useNavigate: () => (path) => navigations.push(path),
     useT: () => t,
   };
@@ -153,8 +171,13 @@ function createHarness({ clipboard = async () => {} } = {}) {
     Button,
     Icon,
     copiedText,
+    clearedTimers,
     exports,
     navigations,
+    scheduledTimers,
+    cleanup() {
+      for (const cleanup of cleanups.splice(0)) cleanup();
+    },
     renderEmpty() {
       cursor = 0;
       return exports.AutomationsEmptyState();
@@ -200,6 +223,38 @@ test("example prompt copies to clipboard and shows success state", async () => {
   assert.equal(componentProps(copied, harness.Icon)[0].name, "check");
 });
 
+test("example prompt replaces the success reset timer on rapid recopy", async () => {
+  const harness = createHarness();
+  const rendered = harness.renderPrompt();
+  const [copyButton] = nativeProps(rendered, "button");
+
+  await copyButton.onClick();
+  await copyButton.onClick();
+
+  assert.deepEqual(
+    harness.scheduledTimers.map((timer) => timer.delay),
+    [1500, 1500],
+  );
+  assert.ok(
+    harness.clearedTimers.includes(1),
+    "second copy must clear the first reset timer",
+  );
+});
+
+test("example prompt clears the pending success reset timer on unmount", async () => {
+  const harness = createHarness();
+  const rendered = harness.renderPrompt();
+  const [copyButton] = nativeProps(rendered, "button");
+
+  await copyButton.onClick();
+  harness.cleanup();
+
+  assert.ok(
+    harness.clearedTimers.includes(1),
+    "unmount cleanup must clear the pending reset timer",
+  );
+});
+
 test("example prompt ignores clipboard rejection and stays copyable", async () => {
   const harness = createHarness({
     clipboard: async () => {
@@ -215,4 +270,18 @@ test("example prompt ignores clipboard rejection and stays copyable", async () =
   const afterReject = harness.renderPrompt();
   assert.equal(nativeProps(afterReject, "button")[0]["aria-label"], "Copy prompt");
   assert.equal(componentProps(afterReject, harness.Icon)[0].name, "copy");
+});
+
+test("example prompt ignores missing clipboard API and stays copyable", async () => {
+  const harness = createHarness({ includeClipboard: false });
+
+  const rendered = harness.renderPrompt();
+  const [copyButton] = nativeProps(rendered, "button");
+
+  await assert.doesNotReject(copyButton.onClick());
+
+  assert.deepEqual(harness.copiedText, []);
+  const afterCopy = harness.renderPrompt();
+  assert.equal(nativeProps(afterCopy, "button")[0]["aria-label"], "Copy prompt");
+  assert.equal(componentProps(afterCopy, harness.Icon)[0].name, "copy");
 });
