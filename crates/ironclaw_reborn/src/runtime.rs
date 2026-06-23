@@ -761,6 +761,28 @@ mod tests {
         DecoratingLoopCapabilityPortFactory, LoopCapabilityPortDecorator, LoopCapabilityPortFactory,
     };
 
+    #[test]
+    fn tool_disclosure_mode_defaults_off_and_gates_decorator() {
+        use super::ToolDisclosureMode;
+        // Flag-off invariant: the default mode must be Off and must NOT report
+        // bridged, because the gateway only attaches the disclosure decorator
+        // when `is_bridged()` is true (`if parts.config.tool_disclosure
+        // .is_bridged()`). Off => no decorator => byte-identical request path.
+        assert_eq!(ToolDisclosureMode::default(), ToolDisclosureMode::Off);
+        assert!(
+            !ToolDisclosureMode::default().is_bridged(),
+            "default disclosure mode must not wire the decorator"
+        );
+        assert!(
+            !ToolDisclosureMode::Off.is_bridged(),
+            "Off must not wire the decorator"
+        );
+        assert!(
+            ToolDisclosureMode::Bridged.is_bridged(),
+            "Bridged is the only mode that wires the decorator"
+        );
+    }
+
     async fn test_run_context() -> LoopRunContext {
         let tenant_id = TenantId::new("tenant-runtime-test").unwrap();
         let agent_id = AgentId::new("agent-runtime-test").unwrap();

@@ -885,6 +885,156 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn tool_call_targeting_a_bridge_is_rejected_without_dispatch() {
+        // Recursion guard: tool_call(name = a bridge) must NOT re-enter the
+        // bridge or dispatch anything — it is a model-recoverable failure.
+        let inner = Arc::new(SpyPort {
+            definitions: vec![provider_definition(
+                "fixture.file_read",
+                "file_read",
+                "Read a file",
+            )],
+            surface_version: CapabilitySurfaceVersion::new("surface:test")
+                .expect("valid surface version"),
+            registered_calls: Mutex::new(Vec::new()),
+            invocations: Mutex::new(Vec::new()),
+        });
+        let port = disclosure_port(
+            Arc::clone(&inner) as Arc<dyn LoopCapabilityPort>,
+            run_context(TurnId::new()).await,
+            Arc::new(Mutex::new(HashMap::new())),
+        );
+
+        // Build the surface first, as the real loop always does before a call.
+        port.visible_capabilities(VisibleCapabilityRequest)
+            .await
+            .expect("surface builds turn state");
+
+        let candidate = port
+            .register_provider_tool_call(provider_call(
+                TOOL_CALL_NAME,
+                json!({"name": TOOL_SEARCH_NAME, "arguments": {}}),
+            ))
+            .await
+            .expect("recursive tool_call registers on the bridge path");
+        assert!(
+            is_bridge_capability_id(&candidate.capability_id),
+            "recursive tool_call must stay on the bridge path, never resolve to a target"
+        );
+        let outcome = port
+            .invoke_capability(CapabilityInvocation {
+                surface_version: candidate.surface_version,
+                capability_id: candidate.capability_id,
+                input_ref: candidate.input_ref,
+                approval_resume: None,
+                auth_resume: None,
+            })
+            .await
+            .expect("bridge handles recursion");
+        assert!(
+            matches!(
+                outcome,
+                CapabilityOutcome::Failed(CapabilityFailure {
+                    error_kind: CapabilityFailureKind::InvalidInput,
+                    ..
+                })
+            ),
+            "recursive tool_call must be a recoverable InvalidInput failure, not run death"
+        );
+        assert!(
+            inner
+                .registered_calls
+                .lock()
+                .expect("registered calls lock")
+                .is_empty(),
+            "recursion must not register any target call on the inner port"
+        );
+        assert!(
+            inner
+                .invocations
+                .lock()
+                .expect("invocations lock")
+                .is_empty(),
+            "recursion must not dispatch to the inner port"
+        );
+    }
+
+    #[tokio::test]
+    async fn tool_call_targeting_unknown_tool_is_rejected_without_dispatch() {
+        // Unknown-target guard: tool_call(name = not in catalog) must be a
+        // model-recoverable failure and must not dispatch to the inner port.
+        let inner = Arc::new(SpyPort {
+            definitions: vec![provider_definition(
+                "fixture.file_read",
+                "file_read",
+                "Read a file",
+            )],
+            surface_version: CapabilitySurfaceVersion::new("surface:test")
+                .expect("valid surface version"),
+            registered_calls: Mutex::new(Vec::new()),
+            invocations: Mutex::new(Vec::new()),
+        });
+        let port = disclosure_port(
+            Arc::clone(&inner) as Arc<dyn LoopCapabilityPort>,
+            run_context(TurnId::new()).await,
+            Arc::new(Mutex::new(HashMap::new())),
+        );
+
+        // Build the surface first, as the real loop always does before a call.
+        port.visible_capabilities(VisibleCapabilityRequest)
+            .await
+            .expect("surface builds turn state");
+
+        let candidate = port
+            .register_provider_tool_call(provider_call(
+                TOOL_CALL_NAME,
+                json!({"name": "does_not_exist", "arguments": {}}),
+            ))
+            .await
+            .expect("unknown-target tool_call registers on the bridge path");
+        assert!(
+            is_bridge_capability_id(&candidate.capability_id),
+            "unknown-target tool_call must stay on the bridge path"
+        );
+        let outcome = port
+            .invoke_capability(CapabilityInvocation {
+                surface_version: candidate.surface_version,
+                capability_id: candidate.capability_id,
+                input_ref: candidate.input_ref,
+                approval_resume: None,
+                auth_resume: None,
+            })
+            .await
+            .expect("bridge handles unknown target");
+        assert!(
+            matches!(
+                outcome,
+                CapabilityOutcome::Failed(CapabilityFailure {
+                    error_kind: CapabilityFailureKind::InvalidInput,
+                    ..
+                })
+            ),
+            "unknown-target tool_call must be a recoverable InvalidInput failure"
+        );
+        assert!(
+            inner
+                .registered_calls
+                .lock()
+                .expect("registered calls lock")
+                .is_empty(),
+            "unknown target must not register any call on the inner port"
+        );
+        assert!(
+            inner
+                .invocations
+                .lock()
+                .expect("invocations lock")
+                .is_empty(),
+            "unknown target must not dispatch to the inner port"
+        );
+    }
+
     fn disclosure_port(
         inner: Arc<dyn LoopCapabilityPort>,
         run_context: LoopRunContext,
