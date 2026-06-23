@@ -717,6 +717,7 @@ struct ProviderToolCallRegistrationStore {
 #[derive(Clone)]
 struct ProviderToolCallRegistrationRecord {
     activity_id: CapabilityActivityId,
+    capability_id: CapabilityId,
     effective_capability_ids: Option<HashSet<CapabilityId>>,
 }
 
@@ -727,6 +728,7 @@ impl ProviderToolCallRegistrationStore {
     fn record(
         &mut self,
         input_ref: &CapabilityInputRef,
+        capability_id: &CapabilityId,
         activity_id: Option<CapabilityActivityId>,
         effective_capability_ids: Option<HashSet<CapabilityId>>,
     ) -> Result<CapabilityActivityId, AgentLoopHostError> {
@@ -736,8 +738,15 @@ impl ProviderToolCallRegistrationStore {
                 .entry(key)
                 .or_insert_with(|| ProviderToolCallRegistrationRecord {
                     activity_id: activity_id.unwrap_or_default(),
+                    capability_id: capability_id.clone(),
                     effective_capability_ids: None,
                 });
+        if record.capability_id != *capability_id {
+            return Err(AgentLoopHostError::new(
+                AgentLoopHostErrorKind::InvalidInvocation,
+                "provider tool-call capability identity changed",
+            ));
+        }
         if let Some(activity_id) = activity_id
             && record.activity_id != activity_id
         {
@@ -989,6 +998,7 @@ impl HostRuntimeLoopCapabilityPort {
     fn record_provider_tool_call_registration(
         &self,
         input_ref: &CapabilityInputRef,
+        capability_id: &CapabilityId,
         activity_id: Option<CapabilityActivityId>,
         effective_capability_ids: Option<HashSet<CapabilityId>>,
     ) -> Result<CapabilityActivityId, AgentLoopHostError> {
@@ -996,7 +1006,12 @@ impl HostRuntimeLoopCapabilityPort {
             &self.provider_tool_call_registrations,
             "provider tool-call registration store",
         )?
-        .record(input_ref, activity_id, effective_capability_ids)
+        .record(
+            input_ref,
+            capability_id,
+            activity_id,
+            effective_capability_ids,
+        )
     }
 
     fn provider_tool_call_registration_for(
@@ -1276,6 +1291,7 @@ impl HostRuntimeLoopCapabilityPort {
             .then(|| prepared.effective_capability_ids.iter().cloned().collect());
         let activity_id = self.record_provider_tool_call_registration(
             &input_ref,
+            &prepared.capability_id,
             activity_id,
             registered_effective_capability_ids,
         )?;
@@ -1493,7 +1509,7 @@ impl LoopCapabilityPort for HostRuntimeLoopCapabilityPort {
             .map(|resume| &resume.input_ref)
             .unwrap_or(&request.input_ref);
         self.validate_provider_tool_call_registration_activity(
-            &request.input_ref,
+            effective_input_ref,
             request.activity_id,
         )?;
         let snapshot = self.snapshot_for(&request.surface_version)?;
@@ -4837,6 +4853,66 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn provider_tool_call_registration_rejects_capability_remap_for_same_input() {
+        let first_capability_id = CapabilityId::new("demo.a__b").expect("valid capability id");
+        let remapped_capability_id = CapabilityId::new("demo.a.b").expect("valid capability id");
+        let provider_id = ExtensionId::new("demo").expect("valid provider id");
+        let mut context = execution_context("thread-provider-capability-remap");
+        let run_context = loop_run_context(&context).await;
+        let loop_driver_extension =
+            loop_driver_execution_extension_id(&run_context).expect("valid extension id");
+        context.grants.grants.extend([
+            dispatch_capability_grant(&first_capability_id, &loop_driver_extension),
+            dispatch_capability_grant(&remapped_capability_id, &loop_driver_extension),
+        ]);
+        let runtime = Arc::new(RecordingHostRuntime::new(vec![visible_capability(
+            first_capability_id.clone(),
+            provider_id.clone(),
+        )]));
+        let port = HostRuntimeLoopCapabilityPortFactory::new(
+            runtime.clone(),
+            visible_request(context).with_provider_trust(std::collections::BTreeMap::from([(
+                provider_id.clone(),
+                dispatch_trust_decision(),
+            )])),
+            dummy_input_resolver(),
+            Arc::new(RecordingResultWriter::default()),
+            dummy_milestone_sink(),
+        )
+        .port_for_run_context(run_context);
+
+        port.visible_capabilities(VisibleCapabilityRequest {})
+            .await
+            .expect("first visible surface loads");
+        let mut provider_call = provider_tool_call();
+        provider_call.name = "demo__a__b".to_string();
+        let first = port
+            .register_provider_tool_call(provider_call.clone())
+            .await
+            .expect("first provider call registers");
+        assert_eq!(first.capability_id, first_capability_id);
+
+        runtime.set_capabilities(vec![visible_capability(
+            remapped_capability_id,
+            provider_id,
+        )]);
+        port.visible_capabilities(VisibleCapabilityRequest {})
+            .await
+            .expect("remapped visible surface loads");
+        let error = port
+            .register_provider_tool_call(provider_call)
+            .await
+            .expect_err("same provider input remapped to another capability must fail");
+
+        assert_eq!(error.kind, AgentLoopHostErrorKind::InvalidInvocation);
+        assert!(
+            error.safe_summary.contains("capability identity"),
+            "error should name capability identity drift: {:?}",
+            error.safe_summary
+        );
+    }
+
+    #[tokio::test]
     async fn runtime_provider_call_rejects_registered_activity_mismatch_without_replay_poisoning() {
         let capability_id = CapabilityId::new("demo.echo").expect("valid capability id");
         let provider_id = ExtensionId::new("demo").expect("valid provider id");
@@ -5414,17 +5490,17 @@ mod tests {
 
         let input_ref = CapabilityInputRef::new("input:capability-info-excluded-target")
             .expect("test input ref");
+        let capability_info_id =
+            CapabilityId::new(capability_info::CAPABILITY_ID).expect("synthetic id");
         let activity_id = port
             .record_provider_tool_call_registration(
                 &input_ref,
+                &capability_info_id,
                 None,
                 Some(
-                    [
-                        CapabilityId::new(capability_info::CAPABILITY_ID).expect("synthetic id"),
-                        allowed_capability_id,
-                    ]
-                    .into_iter()
-                    .collect(),
+                    [capability_info_id.clone(), allowed_capability_id]
+                        .into_iter()
+                        .collect(),
                 ),
             )
             .expect("staged provider tool call");
@@ -5488,17 +5564,17 @@ mod tests {
             .expect("visible capabilities load");
         let input_ref =
             CapabilityInputRef::new("input:capability-info-activity-mismatch").expect("input ref");
+        let capability_info_id =
+            CapabilityId::new(capability_info::CAPABILITY_ID).expect("synthetic id");
         let registered_activity_id = port
             .record_provider_tool_call_registration(
                 &input_ref,
+                &capability_info_id,
                 None,
                 Some(
-                    [
-                        CapabilityId::new(capability_info::CAPABILITY_ID).expect("synthetic id"),
-                        capability_id,
-                    ]
-                    .into_iter()
-                    .collect(),
+                    [capability_info_id.clone(), capability_id]
+                        .into_iter()
+                        .collect(),
                 ),
             )
             .expect("registered provider tool call");
@@ -5560,18 +5636,24 @@ mod tests {
         let mut store = ProviderToolCallRegistrationStore::default();
         let input_ref =
             CapabilityInputRef::new("input:registered-capability").expect("valid input ref");
+        let capability_id = CapabilityId::new("capability.info").expect("valid capability id");
         let effective_ids = [
-            CapabilityId::new("capability.info").expect("valid capability id"),
+            capability_id.clone(),
             CapabilityId::new("demo.echo").expect("valid capability id"),
         ]
         .into_iter()
         .collect::<HashSet<_>>();
 
         let first_activity_id = store
-            .record(&input_ref, None, Some(effective_ids.clone()))
+            .record(
+                &input_ref,
+                &capability_id,
+                None,
+                Some(effective_ids.clone()),
+            )
             .expect("first registration");
         let second_activity_id = store
-            .record(&input_ref, None, None)
+            .record(&input_ref, &capability_id, None, None)
             .expect("duplicate registration");
 
         assert_eq!(second_activity_id, first_activity_id);
@@ -5589,6 +5671,7 @@ mod tests {
         let mut store = ProviderToolCallRegistrationStore::default();
         let input_ref =
             CapabilityInputRef::new("input:registered-activity-conflict").expect("input ref");
+        let capability_id = CapabilityId::new("demo.echo").expect("valid capability id");
         let first_activity_id = CapabilityActivityId::new();
         let second_activity_id = loop {
             let candidate = CapabilityActivityId::new();
@@ -5598,10 +5681,10 @@ mod tests {
         };
 
         store
-            .record(&input_ref, Some(first_activity_id), None)
+            .record(&input_ref, &capability_id, Some(first_activity_id), None)
             .expect("first registration");
         let error = store
-            .record(&input_ref, Some(second_activity_id), None)
+            .record(&input_ref, &capability_id, Some(second_activity_id), None)
             .expect_err("conflicting duplicate activity must fail");
 
         assert_eq!(error.kind, AgentLoopHostErrorKind::InvalidInvocation);
@@ -5615,12 +5698,45 @@ mod tests {
     }
 
     #[test]
+    fn provider_tool_call_registration_store_rejects_capability_changes() {
+        let mut store = ProviderToolCallRegistrationStore::default();
+        let input_ref =
+            CapabilityInputRef::new("input:registered-provider-remap").expect("input ref");
+        let first_capability_id = CapabilityId::new("demo.echo").expect("valid capability id");
+        let second_capability_id = CapabilityId::new("demo.other").expect("valid capability id");
+
+        let activity_id = store
+            .record(&input_ref, &first_capability_id, None, None)
+            .expect("first registration");
+        let error = store
+            .record(&input_ref, &second_capability_id, None, None)
+            .expect_err("conflicting duplicate capability must fail");
+
+        assert_eq!(error.kind, AgentLoopHostErrorKind::InvalidInvocation);
+        assert_eq!(
+            store
+                .registration_for(&input_ref)
+                .expect("registration")
+                .activity_id,
+            activity_id
+        );
+        assert_eq!(
+            store
+                .registration_for(&input_ref)
+                .expect("registration")
+                .capability_id,
+            first_capability_id
+        );
+    }
+
+    #[test]
     fn provider_tool_call_registration_store_rejects_effective_id_changes() {
         let mut store = ProviderToolCallRegistrationStore::default();
         let input_ref =
             CapabilityInputRef::new("input:registered-capability-conflict").expect("input ref");
+        let capability_id = CapabilityId::new("capability.info").expect("valid capability id");
         let first_ids = [
-            CapabilityId::new("capability.info").expect("valid capability id"),
+            capability_id.clone(),
             CapabilityId::new("demo.echo").expect("valid capability id"),
         ]
         .into_iter()
@@ -5633,10 +5749,10 @@ mod tests {
         .collect::<HashSet<_>>();
 
         let activity_id = store
-            .record(&input_ref, None, Some(first_ids.clone()))
+            .record(&input_ref, &capability_id, None, Some(first_ids.clone()))
             .expect("first registration");
         let error = store
-            .record(&input_ref, None, Some(second_ids))
+            .record(&input_ref, &capability_id, None, Some(second_ids))
             .expect_err("conflicting duplicate registration must fail");
 
         assert_eq!(error.kind, AgentLoopHostErrorKind::InvalidInvocation);
@@ -6999,6 +7115,72 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn invoke_capability_checks_registered_activity_on_approval_resume_input_ref() {
+        use ironclaw_host_api::ApprovalRequestId;
+        use ironclaw_turns::run_profile::CapabilityApprovalResume;
+
+        let capability_id = CapabilityId::new("demo.echo").expect("valid capability id");
+        let provider_id = ExtensionId::new("demo").expect("valid provider id");
+        let runtime = Arc::new(RecordingResumeHostRuntime::new(vec![visible_capability(
+            capability_id.clone(),
+            provider_id.clone(),
+        )]));
+        let port = runtime_capability_port(
+            &capability_id,
+            &provider_id,
+            runtime.clone(),
+            Arc::new(RecordingResultWriter::default()),
+            dummy_milestone_sink(),
+            "thread-approval-resume-effective-input-ref-mismatch",
+        )
+        .await;
+
+        let surface = port
+            .visible_capabilities(VisibleCapabilityRequest {})
+            .await
+            .expect("visible capabilities load");
+        let candidate = port
+            .register_provider_tool_call(provider_tool_call())
+            .await
+            .expect("provider tool call registers");
+        let mismatched_activity_id = loop {
+            let candidate_activity = CapabilityActivityId::new();
+            if candidate_activity != candidate.activity_id {
+                break candidate_activity;
+            }
+        };
+        let err = port
+            .invoke_capability(CapabilityInvocation {
+                activity_id: mismatched_activity_id,
+                surface_version: surface.version,
+                capability_id: candidate.capability_id,
+                input_ref: CapabilityInputRef::new("input:outer-stale-approval-resume")
+                    .expect("valid input ref"),
+                approval_resume: Some(CapabilityApprovalResume {
+                    approval_request_id: ApprovalRequestId::new(),
+                    resume_token: CapabilityResumeToken::new(mismatched_activity_id.to_string())
+                        .expect("valid resume token"),
+                    correlation_id: CorrelationId::new(),
+                    input_ref: candidate.input_ref,
+                    input: serde_json::json!({}),
+                    estimate: ResourceEstimate::default(),
+                }),
+                auth_resume: None,
+            })
+            .await
+            .expect_err("registered approval resume input must reject activity mismatch");
+
+        assert_eq!(err.kind, AgentLoopHostErrorKind::InvalidInvocation);
+        assert!(
+            err.safe_summary
+                .contains("registered provider tool-call activity identity"),
+            "error should name the registered activity mismatch: {:?}",
+            err.safe_summary
+        );
+        assert_eq!(runtime.resume_request_count(), 0);
+    }
+
+    #[tokio::test]
     async fn invoke_capability_rejects_cached_approval_resume_activity_mismatch() {
         use ironclaw_host_api::ApprovalRequestId;
         use ironclaw_turns::run_profile::CapabilityApprovalResume;
@@ -7450,7 +7632,7 @@ mod tests {
     }
 
     struct RecordingHostRuntime {
-        capabilities: Vec<VisibleCapability>,
+        capabilities: Mutex<Vec<VisibleCapability>>,
         requests: Mutex<Vec<RuntimeCapabilityRequest>>,
         spawn_requests: Mutex<Vec<RuntimeCapabilityRequest>>,
     }
@@ -7458,10 +7640,14 @@ mod tests {
     impl RecordingHostRuntime {
         fn new(capabilities: Vec<VisibleCapability>) -> Self {
             Self {
-                capabilities,
+                capabilities: Mutex::new(capabilities),
                 requests: Mutex::new(Vec::new()),
                 spawn_requests: Mutex::new(Vec::new()),
             }
+        }
+
+        fn set_capabilities(&self, capabilities: Vec<VisibleCapability>) {
+            *self.capabilities.lock().expect("capabilities lock") = capabilities;
         }
 
         fn take_requests(&self) -> Vec<RuntimeCapabilityRequest> {
@@ -7528,7 +7714,7 @@ mod tests {
         ) -> Result<VisibleCapabilitySurface, HostRuntimeError> {
             Ok(VisibleCapabilitySurface {
                 version: CapabilitySurfaceVersion::new("surface-v1").expect("valid version"),
-                capabilities: self.capabilities.clone(),
+                capabilities: self.capabilities.lock().expect("capabilities lock").clone(),
             })
         }
 

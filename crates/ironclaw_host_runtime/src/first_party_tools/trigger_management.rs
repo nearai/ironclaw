@@ -431,7 +431,10 @@ async fn set_trigger_state(
     input: Value,
     state: TriggerState,
 ) -> Result<Value, FirstPartyCapabilityError> {
-    let input: TriggerStateInput = serde_json::from_value(input).map_err(|_| input_error())?;
+    let input: TriggerStateInput = serde_json::from_value(input).map_err(|error| {
+        tracing::debug!(%error, "invalid trigger state input payload");
+        input_error()
+    })?;
     let trigger_id = TriggerId::parse(&input.trigger_id).map_err(trigger_input_error)?;
     let updated = repository
         .set_scoped_trigger_state(

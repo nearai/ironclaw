@@ -59,6 +59,7 @@ pub(super) struct MockHost {
     single_invocations: Arc<Mutex<Vec<CapabilityInvocation>>>,
     registered_provider_calls: Arc<Mutex<Vec<ProviderToolCall>>>,
     provider_registration_errors: Arc<Mutex<VecDeque<AgentLoopHostError>>>,
+    provider_registration_activity_remap: Arc<Mutex<Option<ironclaw_turns::CapabilityActivityId>>>,
     staged_payloads: Arc<Mutex<Vec<StageCheckpointPayloadRequest>>>,
     appended_result_refs: Arc<Mutex<Vec<AppendCapabilityResultRef>>>,
     events: Arc<Mutex<Vec<String>>>,
@@ -99,6 +100,7 @@ impl MockHost {
             single_invocations: Arc::new(Mutex::new(Vec::new())),
             registered_provider_calls: Arc::new(Mutex::new(Vec::new())),
             provider_registration_errors: Arc::new(Mutex::new(VecDeque::new())),
+            provider_registration_activity_remap: Arc::new(Mutex::new(None)),
             staged_payloads: Arc::new(Mutex::new(Vec::new())),
             appended_result_refs: Arc::new(Mutex::new(Vec::new())),
             events: Arc::new(Mutex::new(Vec::new())),
@@ -199,6 +201,16 @@ impl MockHost {
     pub(super) fn with_provider_registration_errors(self, errors: Vec<AgentLoopHostError>) -> Self {
         *self.provider_registration_errors.lock().expect("lock") = errors.into();
         self
+    }
+
+    pub(super) fn set_provider_registration_activity_remap(
+        &self,
+        activity_id: ironclaw_turns::CapabilityActivityId,
+    ) {
+        *self
+            .provider_registration_activity_remap
+            .lock()
+            .expect("lock") = Some(activity_id);
     }
 
     pub(super) fn with_input_batches(self, batches: Vec<LoopInputBatch>) -> Self {
@@ -666,7 +678,12 @@ impl ironclaw_turns::run_profile::LoopCapabilityPort for MockHost {
         activity_id: ironclaw_turns::CapabilityActivityId,
     ) -> Result<CapabilityCallCandidate, AgentLoopHostError> {
         let mut candidate = self.register_provider_tool_call(tool_call).await?;
-        candidate.activity_id = activity_id;
+        candidate.activity_id = self
+            .provider_registration_activity_remap
+            .lock()
+            .expect("lock")
+            .clone()
+            .unwrap_or(activity_id);
         Ok(candidate)
     }
 

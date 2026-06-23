@@ -111,11 +111,12 @@ pub(super) async fn pending_auth_resume_candidate(
             )
             .await
             .map_err(capability_host_error)?;
-        if candidate.capability_id != resume.capability_id
+        if candidate.activity_id != resume.activity_id_for_resume()
+            || candidate.capability_id != resume.capability_id
             || candidate.effective_capability_ids != resume.effective_capability_ids
         {
             return Err(AgentLoopExecutorError::PlannerContract {
-                detail: "auth resume provider replay no longer matches blocked capability",
+                detail: "auth resume provider replay no longer matches blocked capability activity",
             });
         }
         return Ok(candidate);

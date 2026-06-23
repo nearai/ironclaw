@@ -4424,6 +4424,87 @@ async fn auth_resume_provider_registration_failure_fails_before_invocation() {
 }
 
 #[tokio::test]
+async fn auth_resume_provider_activity_remap_fails_before_invocation() {
+    let gate_ref = LoopGateRef::new("gate:auth-resume-activity-remap").expect("valid");
+    let completed_ref = LoopResultRef::new("result:unused-auth-resume-remap").expect("valid");
+    let host = MockHost::new(vec![provider_calls_response()]).with_batch_outcomes(vec![
+        ironclaw_turns::run_profile::CapabilityBatchOutcome {
+            outcomes: vec![CapabilityOutcome::AuthRequired {
+                gate_ref: gate_ref.clone(),
+                credential_requirements: Vec::new(),
+                safe_summary: "auth required".to_string(),
+                auth_resume: None,
+            }],
+            stopped_on_suspension: true,
+        },
+        ironclaw_turns::run_profile::CapabilityBatchOutcome {
+            outcomes: vec![CapabilityOutcome::Completed(
+                ironclaw_turns::run_profile::CapabilityResultMessage {
+                    result_ref: completed_ref,
+                    safe_summary: "should not invoke".to_string(),
+                    progress: ironclaw_turns::run_profile::CapabilityProgress::MadeProgress,
+                    terminate_hint: true,
+                    byte_len: 0,
+                    output_digest: None,
+                },
+            )],
+            stopped_on_suspension: false,
+        },
+    ]);
+    let executor = CanonicalAgentLoopExecutor;
+
+    let first_exit = executor
+        .execute_family(
+            &crate::families::default(),
+            &host,
+            LoopExecutionState::initial_for_run(host.run_context()),
+        )
+        .await
+        .expect("first execute blocks on auth gate");
+    assert!(
+        matches!(first_exit, LoopExit::Blocked(_)),
+        "expected Blocked exit, got {first_exit:?}"
+    );
+    let before_block_state = final_staged_state_for_kind(&host, LoopCheckpointKind::BeforeBlock);
+    let parked_activity_id = before_block_state
+        .pending_auth_resume
+        .as_ref()
+        .expect("auth resume checkpointed")
+        .activity_id_for_resume();
+    let remapped_activity_id = loop {
+        let candidate = CapabilityActivityId::new();
+        if candidate != parked_activity_id {
+            break candidate;
+        }
+    };
+    host.set_provider_registration_activity_remap(remapped_activity_id);
+
+    let error = executor
+        .execute_family(&crate::families::default(), &host, before_block_state)
+        .await
+        .expect_err("provider activity remap should fail auth resume");
+
+    assert!(
+        matches!(
+            error,
+            AgentLoopExecutorError::PlannerContract { detail }
+                if detail.contains("provider replay no longer matches")
+        ),
+        "unexpected error: {error:?}"
+    );
+    assert_eq!(
+        host.registered_provider_calls().len(),
+        1,
+        "phase 2 should restage the provider call before rejecting identity drift"
+    );
+    assert_eq!(
+        host.batch_invocations().len(),
+        1,
+        "phase 2 must fail before invoking the remapped resumed capability"
+    );
+}
+
+#[tokio::test]
 async fn resume_with_still_missing_credentials_blocks_again_without_model_turn() {
     // Phase 1: scripted AuthRequired -> executor exits Blocked and writes a
     // BeforeBlock checkpoint carrying a pending_auth_resume record.
