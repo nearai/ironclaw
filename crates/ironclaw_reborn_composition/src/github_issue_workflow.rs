@@ -35,10 +35,11 @@ use ironclaw_host_runtime::{
     WorkflowStageResultSink, WorkflowStageResultSinkError,
     builtin_first_party_handlers_with_workflow_stage_result_sink,
 };
+#[cfg(any(test, feature = "test-support"))]
+use ironclaw_loop_support::build_spawn_subagent_parameters_schema;
 use ironclaw_loop_support::{
     CapabilityAllowSet, CapabilityResolveError, CapabilitySurfaceProfileResolver,
     SpawnSubagentFlavorDescriptor, SubagentDefinition, SubagentDefinitionResolver, SubagentKindId,
-    build_spawn_subagent_parameters_schema,
 };
 use ironclaw_product_context::InboundClassification;
 use ironclaw_product_workflow::{
@@ -138,6 +139,7 @@ const WORKFLOW_SUBAGENT_CAPABILITIES: &[&str] = &[
     GLOB_CAPABILITY_ID,
 ];
 
+#[cfg(any(test, feature = "test-support"))]
 const NON_WORKFLOW_DEFAULT_CAPABILITIES: &[&str] = &[
     "builtin.echo",
     "builtin.time",
@@ -192,6 +194,7 @@ const GITHUB_ISSUE_WORKFLOW_STAGE_PROFILES: &[GithubIssueWorkflowCapabilityProfi
     },
 ];
 
+#[cfg(any(test, feature = "test-support"))]
 const NON_WORKFLOW_DEFAULT_PROFILE: GithubIssueWorkflowCapabilityProfile =
     GithubIssueWorkflowCapabilityProfile {
         profile_id: ironclaw_reborn::planned_driver_factory::PLANNED_DEFAULT_PROFILE_ID,
@@ -209,10 +212,12 @@ pub(crate) fn stage_capability_profile_id(stage: &GithubIssueStage) -> &'static 
     }
 }
 
+#[cfg(any(test, feature = "test-support"))]
 pub(crate) fn stage_capability_profiles() -> &'static [GithubIssueWorkflowCapabilityProfile] {
     GITHUB_ISSUE_WORKFLOW_STAGE_PROFILES
 }
 
+#[cfg(any(test, feature = "test-support"))]
 pub(crate) fn non_workflow_default_capability_profile() -> GithubIssueWorkflowCapabilityProfile {
     NON_WORKFLOW_DEFAULT_PROFILE
 }
@@ -341,6 +346,7 @@ pub(crate) fn workflow_subagent_flavor_catalog() -> Vec<SpawnSubagentFlavorDescr
     .collect()
 }
 
+#[cfg(any(test, feature = "test-support"))]
 pub(crate) fn workflow_spawn_subagent_schema() -> serde_json::Value {
     build_spawn_subagent_parameters_schema(&workflow_subagent_flavor_catalog())
 }
@@ -2501,21 +2507,21 @@ mod project_metadata_github_issue_workflow_config_source_tests {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct GithubIssueWorkflowCapabilityDispatchRequest {
-    pub capability_id: String,
-    pub provider_account_ref: GithubProviderAccountRef,
-    pub input: JsonValue,
+pub(crate) struct GithubIssueWorkflowCapabilityDispatchRequest {
+    pub(crate) capability_id: String,
+    pub(crate) provider_account_ref: GithubProviderAccountRef,
+    pub(crate) input: JsonValue,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum GithubIssueWorkflowCapabilityDispatchError {
+pub(crate) enum GithubIssueWorkflowCapabilityDispatchError {
     AuthRequired,
     ApprovalRequired,
     Backend { kind: String, message: String },
 }
 
 #[async_trait]
-pub trait GithubIssueWorkflowCapabilityDispatcher: Send + Sync {
+pub(crate) trait GithubIssueWorkflowCapabilityDispatcher: Send + Sync {
     async fn dispatch(
         &self,
         request: GithubIssueWorkflowCapabilityDispatchRequest,

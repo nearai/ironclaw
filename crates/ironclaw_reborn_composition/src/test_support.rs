@@ -36,6 +36,8 @@ use ironclaw_turns::{
     TurnRunId, TurnStatus,
     run_profile::{LoopCapabilityPort, LoopModelUsage},
 };
+#[cfg(feature = "github-issue-workflow-beta")]
+use serde_json::Value as JsonValue;
 
 use crate::runtime::{AssistantReply, ConversationId};
 
@@ -62,11 +64,68 @@ pub fn github_issue_stage_turn_submitter_for_test(
 }
 
 #[cfg(feature = "github-issue-workflow-beta")]
-pub use crate::github_issue_workflow::{
-    GithubIssueWorkflowCapabilityDispatchError as GithubIssueWorkflowCapabilityDispatchErrorForTest,
-    GithubIssueWorkflowCapabilityDispatchRequest as GithubIssueWorkflowCapabilityDispatchRequestForTest,
-    GithubIssueWorkflowCapabilityDispatcher as GithubIssueWorkflowCapabilityDispatcherForTest,
-};
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GithubIssueWorkflowCapabilityDispatchRequestForTest {
+    pub capability_id: String,
+    pub provider_account_ref: ironclaw_github_issue_workflow::GithubProviderAccountRef,
+    pub input: JsonValue,
+}
+
+#[cfg(feature = "github-issue-workflow-beta")]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum GithubIssueWorkflowCapabilityDispatchErrorForTest {
+    AuthRequired,
+    ApprovalRequired,
+    Backend { kind: String, message: String },
+}
+
+#[cfg(feature = "github-issue-workflow-beta")]
+#[async_trait]
+pub trait GithubIssueWorkflowCapabilityDispatcherForTest: Send + Sync {
+    async fn dispatch(
+        &self,
+        request: GithubIssueWorkflowCapabilityDispatchRequestForTest,
+    ) -> Result<JsonValue, GithubIssueWorkflowCapabilityDispatchErrorForTest>;
+}
+
+#[cfg(feature = "github-issue-workflow-beta")]
+struct GithubIssueWorkflowCapabilityDispatcherTestAdapter<D> {
+    inner: Arc<D>,
+}
+
+#[cfg(feature = "github-issue-workflow-beta")]
+#[async_trait]
+impl<D> crate::github_issue_workflow::GithubIssueWorkflowCapabilityDispatcher
+    for GithubIssueWorkflowCapabilityDispatcherTestAdapter<D>
+where
+    D: GithubIssueWorkflowCapabilityDispatcherForTest,
+{
+    async fn dispatch(
+        &self,
+        request: crate::github_issue_workflow::GithubIssueWorkflowCapabilityDispatchRequest,
+    ) -> Result<JsonValue, crate::github_issue_workflow::GithubIssueWorkflowCapabilityDispatchError>
+    {
+        let request = GithubIssueWorkflowCapabilityDispatchRequestForTest {
+            capability_id: request.capability_id,
+            provider_account_ref: request.provider_account_ref,
+            input: request.input,
+        };
+        self.inner.dispatch(request).await.map_err(|error| match error {
+            GithubIssueWorkflowCapabilityDispatchErrorForTest::AuthRequired => {
+                crate::github_issue_workflow::GithubIssueWorkflowCapabilityDispatchError::AuthRequired
+            }
+            GithubIssueWorkflowCapabilityDispatchErrorForTest::ApprovalRequired => {
+                crate::github_issue_workflow::GithubIssueWorkflowCapabilityDispatchError::ApprovalRequired
+            }
+            GithubIssueWorkflowCapabilityDispatchErrorForTest::Backend { kind, message } => {
+                crate::github_issue_workflow::GithubIssueWorkflowCapabilityDispatchError::Backend {
+                    kind,
+                    message,
+                }
+            }
+        })
+    }
+}
 
 /// Build the GitHub issue workflow provider adapter for composition tests.
 ///
@@ -78,8 +137,10 @@ pub fn github_issue_workflow_provider_port_for_test<D>(
     dispatcher: Arc<D>,
 ) -> Arc<dyn ironclaw_github_issue_workflow::GithubIssueWorkflowPort>
 where
-    D: crate::github_issue_workflow::GithubIssueWorkflowCapabilityDispatcher + 'static,
+    D: GithubIssueWorkflowCapabilityDispatcherForTest + 'static,
 {
+    let dispatcher =
+        Arc::new(GithubIssueWorkflowCapabilityDispatcherTestAdapter { inner: dispatcher });
     Arc::new(
         crate::github_issue_workflow::IronClawGithubIssueWorkflowPort::new(
             configured_provider_account_ref,
