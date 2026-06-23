@@ -4,7 +4,7 @@ use std::time::Duration;
 use async_trait::async_trait;
 use ironclaw_filesystem::{FilesystemError, FilesystemOperation, RootFilesystem};
 use ironclaw_host_api::VirtualPath;
-use ironclaw_memory::{
+use ironclaw_memory_native::{
     ChunkConfig, DefaultPromptWriteSafetyPolicy, DocumentMetadata,
     InMemoryMemoryDocumentRepository, MemoryAppendOutcome, MemoryBackend,
     MemoryBackendCapabilities, MemoryBackendFilesystemAdapter, MemoryBackendWriteOptions,
@@ -257,8 +257,8 @@ async fn backend_does_not_re_reject_adapter_approved_warn_or_bypass() {
     //     that fails closed unconditionally.
     //
     // After the fix the adapter's approval propagates as
-    // `prompt_write_safety_enforced=true` on the backend context, and
-    // the backend's policy is short-circuited. Before the fix the
+    // `prompt_safety_already_enforced=true` on the backend write options,
+    // and the backend's policy is short-circuited. Before the fix the
     // backend would re-evaluate and reject benign content the adapter
     // had already approved.
 
@@ -300,8 +300,8 @@ async fn backend_does_not_re_reject_adapter_approved_warn_or_bypass() {
 
     // Benign content: adapter's default policy allows it. If the
     // backend's `AlwaysRejectIfRecheckedPolicy` is re-run, the write
-    // fails. The fix is: adapter sets `prompt_write_safety_enforced`
-    // on the backend context, backend skips its policy.
+    // fails. The fix is: adapter sets `prompt_safety_already_enforced`
+    // on the backend write options, backend skips its policy.
     filesystem
         .write_file(&path, b"benign body content")
         .await
@@ -723,9 +723,7 @@ async fn repository_memory_backend_write_options_persist_overlay_and_apply_metad
         })),
         ..DocumentMetadata::default()
     };
-    let options = MemoryBackendWriteOptions {
-        metadata_overlay: Some(overlay.clone()),
-    };
+    let options = MemoryBackendWriteOptions::with_metadata_overlay(Some(overlay.clone()));
 
     backend
         .write_document_with_backend_options(&context, &path, br#"{"provider":"nearai"}"#, &options)

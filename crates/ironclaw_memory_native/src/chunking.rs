@@ -1,6 +1,9 @@
 //! Document chunking and content hashing.
 
-use sha2::{Digest, Sha256};
+// Content hashing moved to `ironclaw_memory`; re-exported below so
+// existing `crate::chunking::content_sha256` / `ironclaw_memory::content_sha256`
+// paths keep resolving.
+pub use ironclaw_memory::{content_bytes_sha256, content_sha256};
 
 /// Configuration for document chunking.
 ///
@@ -97,15 +100,4 @@ pub fn chunk_document(content: &str, config: ChunkConfig) -> Vec<String> {
     }
 
     chunks
-}
-
-/// Compute a SHA-256 content hash using the current workspace format.
-pub fn content_sha256(content: &str) -> String {
-    content_bytes_sha256(content.as_bytes())
-}
-
-pub fn content_bytes_sha256(content: &[u8]) -> String {
-    let mut hasher = Sha256::new();
-    hasher.update(content);
-    format!("sha256:{:x}", hasher.finalize())
 }

@@ -5,14 +5,11 @@
 //! host paths, and layer/path names; downstream adapters can project stable
 //! metadata through durable audit/event logs without becoming memory backends.
 
-use std::sync::Arc;
-
 use async_trait::async_trait;
 use ironclaw_host_api::{CorrelationId, ResourceScope};
 
-use crate::chunking::content_sha256;
+use crate::hash::content_sha256;
 use crate::path::{MemoryDocumentPath, MemoryDocumentScope};
-use crate::search::MemorySearchRequest;
 
 /// Redacted caller/audit context attached to memory events when the caller has one.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -161,7 +158,8 @@ impl MemorySignificantEvent {
     pub fn search_performed(
         scope: &MemoryDocumentScope,
         source: MemorySignificantEventSource,
-        request: &MemorySearchRequest,
+        full_text: bool,
+        vector: bool,
         result_count: u64,
     ) -> Self {
         Self {
@@ -173,8 +171,8 @@ impl MemorySignificantEvent {
             byte_count: None,
             chunk_count: None,
             result_count: Some(result_count),
-            full_text: Some(request.full_text()),
-            vector: Some(request.vector()),
+            full_text: Some(full_text),
+            vector: Some(vector),
             audit_context: None,
         }
     }
@@ -192,16 +190,4 @@ pub trait MemorySignificantEventSink: Send + Sync {
         &self,
         event: MemorySignificantEvent,
     ) -> Result<(), MemoryEventSinkError>;
-}
-
-pub(crate) async fn record_memory_significant_event(
-    sink: Option<&Arc<dyn MemorySignificantEventSink>>,
-    event: MemorySignificantEvent,
-) {
-    let Some(sink) = sink else {
-        return;
-    };
-    if let Err(error) = sink.record_memory_significant_event(event).await {
-        tracing::debug!(error = %error, "memory significant-event sink failed");
-    }
 }
