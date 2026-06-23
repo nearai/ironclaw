@@ -3,16 +3,17 @@ use std::sync::Arc;
 use chrono::Utc;
 
 use async_trait::async_trait;
+use ironclaw_extensions::ExtensionRegistry;
 use ironclaw_host_api::{InvocationId, ResourceScope};
 use ironclaw_product_adapters::ProjectionStream;
 use ironclaw_product_workflow::{
     ConnectableChannelsProductFacade, OperatorStatusService, RebornOperatorStatusCheck,
     RebornOperatorStatusResponse, RebornOperatorStatusSeverity, RebornOperatorStatusState,
-    RebornServices as ProductRebornServices, RebornServicesApi, RebornServicesError,
-    RebornServicesErrorCode, RebornServicesErrorKind, RebornSkillActionResponse,
-    RebornSkillContentResponse, RebornSkillInfo, RebornSkillListResponse,
-    RebornSkillSearchResponse, RebornSkillSourceKind, RebornSkillTrustLevel, SkillsProductFacade,
-    WebUiAuthenticatedCaller,
+    RebornOperatorToolCatalog, RebornOperatorToolInfo, RebornServices as ProductRebornServices,
+    RebornServicesApi, RebornServicesError, RebornServicesErrorCode, RebornServicesErrorKind,
+    RebornSkillActionResponse, RebornSkillContentResponse, RebornSkillInfo,
+    RebornSkillListResponse, RebornSkillSearchResponse, RebornSkillSourceKind,
+    RebornSkillTrustLevel, SkillsProductFacade, WebUiAuthenticatedCaller,
 };
 
 use ironclaw_triggers::TriggerRepository;
@@ -32,6 +33,31 @@ use crate::{
 
 static SKILL_CONTENT_SAFETY: std::sync::LazyLock<ironclaw_safety::Sanitizer> =
     std::sync::LazyLock::new(ironclaw_safety::Sanitizer::new);
+
+#[derive(Clone)]
+struct ActiveRegistryOperatorToolCatalog {
+    registry: Arc<ExtensionRegistry>,
+}
+
+impl ActiveRegistryOperatorToolCatalog {
+    fn new(registry: Arc<ExtensionRegistry>) -> Self {
+        Self { registry }
+    }
+}
+
+impl RebornOperatorToolCatalog for ActiveRegistryOperatorToolCatalog {
+    fn list_operator_tools(&self) -> Vec<RebornOperatorToolInfo> {
+        self.registry
+            .capabilities()
+            .map(|descriptor| RebornOperatorToolInfo {
+                capability_id: descriptor.id.clone(),
+                description: descriptor.description.clone(),
+                default_permission: descriptor.default_permission,
+                effects: descriptor.effects.clone(),
+            })
+            .collect()
+    }
+}
 
 /// WebUI-facing Reborn service bundle for host composition.
 ///
@@ -150,6 +176,21 @@ pub(crate) fn build_webui_services_with_connectable_channels(
         );
     }
     if let Some(local_runtime) = &services.local_runtime {
+        let tool_permission_overrides: Arc<dyn ironclaw_approvals::ToolPermissionOverrideStore> =
+            local_runtime.tool_permission_overrides.clone();
+        let auto_approve_settings: Arc<dyn ironclaw_approvals::AutoApproveSettingStore> =
+            local_runtime.auto_approve_settings.clone();
+        let persistent_approval_policies: Arc<
+            dyn ironclaw_approvals::PersistentApprovalPolicyStore,
+        > = local_runtime.persistent_approval_policies.clone();
+        api = api.with_operator_approval_config(
+            tool_permission_overrides,
+            auto_approve_settings,
+            persistent_approval_policies,
+            Arc::new(ActiveRegistryOperatorToolCatalog::new(Arc::clone(
+                &local_runtime.extension_registry,
+            ))),
+        );
         let mut lifecycle_facade =
             RebornLocalLifecycleFacade::new(local_runtime.skill_management.clone());
         if let Some(extension_management) = &local_runtime.extension_management {

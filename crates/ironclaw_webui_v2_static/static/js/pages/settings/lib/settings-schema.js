@@ -36,7 +36,7 @@ export const AGENT_FIELDS = [
       { key: "agent.job_timeout_secs", labelKey: "settings.field.jobTimeout", descKey: "settings.field.jobTimeoutDesc", type: "number" },
       { key: "agent.max_tool_iterations", labelKey: "settings.field.maxToolIterations", descKey: "settings.field.maxToolIterationsDesc", type: "number" },
       { key: "agent.use_planning", labelKey: "settings.field.planning", descKey: "settings.field.planningDesc", type: "boolean" },
-      { key: "agent.auto_approve_tools", labelKey: "settings.field.autoApproveTools", descKey: "settings.field.autoApproveToolsDesc", type: "boolean" },
+      { key: "agent.auto_approve_tools", labelKey: "settings.field.autoApproveEligibleTools", descKey: "settings.field.autoApproveEligibleToolsDesc", type: "boolean" },
       { key: "agent.default_timezone", labelKey: "settings.field.timezone", descKey: "settings.field.timezoneDesc", type: "text" },
       { key: "agent.session_idle_timeout_secs", labelKey: "settings.field.sessionIdleTimeout", descKey: "settings.field.sessionIdleTimeoutDesc", type: "number" },
       { key: "agent.stuck_threshold_secs", labelKey: "settings.field.stuckThreshold", descKey: "settings.field.stuckThresholdDesc", type: "number" },

@@ -13,7 +13,10 @@ use async_trait::async_trait;
 use chrono::Utc;
 use ironclaw_attachments::InboundAttachment;
 use ironclaw_auth::{CredentialAccountId, CredentialAccountProjection};
-use ironclaw_host_api::{AgentId, ApprovalRequestId, ProjectId, TenantId, ThreadId, UserId};
+use ironclaw_host_api::{
+    AgentId, ApprovalRequestId, CapabilityId, EffectKind, PermissionMode, ProjectId, TenantId,
+    ThreadId, UserId,
+};
 use ironclaw_product_adapters::{
     ProductAdapterError, ProductOutboundEnvelope, ProductWorkflowRejectionKind, ProjectionCursor,
     ProjectionStream, ProjectionSubscriptionRequest, ProtocolAuthFailure, RedactedString,
@@ -45,26 +48,27 @@ use ironclaw_product_workflow::{
     RebornExtensionOnboardingState, RebornGetProjectRequest, RebornGetRunStateRequest,
     RebornListMembersRequest, RebornListMembersResponse, RebornListProjectsRequest,
     RebornListProjectsResponse, RebornLogLevel, RebornLogQueryRequest, RebornLogQueryResponse,
-    RebornOperatorConfigDiagnosticSeverity, RebornOperatorLogsQuery, RebornOperatorSetupRequest,
-    RebornOperatorSetupStatus, RebornOperatorSurfaceStatus, RebornOutboundDeliveryModality,
-    RebornOutboundDeliveryTargetCapabilities, RebornOutboundDeliveryTargetDescription,
-    RebornOutboundDeliveryTargetId, RebornOutboundDeliveryTargetListResponse,
-    RebornOutboundDeliveryTargetOption, RebornOutboundDeliveryTargetStatus,
-    RebornOutboundDeliveryTargetSummary, RebornOutboundPreferencesResponse, RebornProjectInfo,
-    RebornProjectMemberInfo, RebornProjectResponse, RebornProjectRole, RebornProjectState,
-    RebornRemoveMemberRequest, RebornResolveGateResponse, RebornServiceLifecycleAction,
-    RebornServiceLifecycleRequest, RebornServiceLifecycleResponse, RebornServiceLifecycleState,
-    RebornServices, RebornServicesApi, RebornServicesError, RebornServicesErrorCode,
-    RebornServicesErrorKind, RebornSetOutboundPreferencesRequest, RebornStreamEventsRequest,
-    RebornSubmitTurnResponse, RebornTimelineRequest, RebornUpdateMemberRoleRequest,
-    RebornUpdateProjectRequest, ResolveApprovalInteractionRequest,
-    ResolveApprovalInteractionResponse, ResolveAuthInteractionRequest,
-    ResolveAuthInteractionResponse, SetActiveLlmRequest, StaticConnectableChannelsProductFacade,
-    TriggerRunThreadScope, UpsertLlmProviderRequest, WebUiAuthenticatedCaller,
-    WebUiCancelRunRequest, WebUiCreateThreadRequest, WebUiInboundValidationCode,
-    WebUiListAutomationsRequest, WebUiListThreadsRequest, WebUiResolveGateRequest,
-    WebUiSendMessageRequest, WebUiSetupExtensionRequest, approval_gate_ref,
-    automation_trigger_thread_metadata_json,
+    RebornOperatorConfigDiagnosticSeverity, RebornOperatorConfigSetRequest,
+    RebornOperatorLogsQuery, RebornOperatorSetupRequest, RebornOperatorSetupStatus,
+    RebornOperatorSurfaceStatus, RebornOperatorToolCatalog, RebornOperatorToolInfo,
+    RebornOutboundDeliveryModality, RebornOutboundDeliveryTargetCapabilities,
+    RebornOutboundDeliveryTargetDescription, RebornOutboundDeliveryTargetId,
+    RebornOutboundDeliveryTargetListResponse, RebornOutboundDeliveryTargetOption,
+    RebornOutboundDeliveryTargetStatus, RebornOutboundDeliveryTargetSummary,
+    RebornOutboundPreferencesResponse, RebornProjectInfo, RebornProjectMemberInfo,
+    RebornProjectResponse, RebornProjectRole, RebornProjectState, RebornRemoveMemberRequest,
+    RebornResolveGateResponse, RebornServiceLifecycleAction, RebornServiceLifecycleRequest,
+    RebornServiceLifecycleResponse, RebornServiceLifecycleState, RebornServices, RebornServicesApi,
+    RebornServicesError, RebornServicesErrorCode, RebornServicesErrorKind,
+    RebornSetOutboundPreferencesRequest, RebornStreamEventsRequest, RebornSubmitTurnResponse,
+    RebornTimelineRequest, RebornUpdateMemberRoleRequest, RebornUpdateProjectRequest,
+    ResolveApprovalInteractionRequest, ResolveApprovalInteractionResponse,
+    ResolveAuthInteractionRequest, ResolveAuthInteractionResponse, SetActiveLlmRequest,
+    StaticConnectableChannelsProductFacade, TriggerRunThreadScope, UpsertLlmProviderRequest,
+    WebUiAuthenticatedCaller, WebUiCancelRunRequest, WebUiCreateThreadRequest,
+    WebUiInboundValidationCode, WebUiListAutomationsRequest, WebUiListThreadsRequest,
+    WebUiResolveGateRequest, WebUiSendMessageRequest, WebUiSetupExtensionRequest,
+    approval_gate_ref, automation_trigger_thread_metadata_json,
 };
 use ironclaw_threads::{
     AcceptInboundMessageRequest, AcceptedInboundMessage, AcceptedInboundMessageReplay,
@@ -7465,6 +7469,125 @@ fn services_with_setup_llm_config(
         Arc::new(FakeTurnCoordinator::default()),
     )
     .with_llm_config_service(llm_config)
+}
+
+#[derive(Clone)]
+struct StaticOperatorToolCatalogForTest {
+    tools: Vec<RebornOperatorToolInfo>,
+}
+
+impl RebornOperatorToolCatalog for StaticOperatorToolCatalogForTest {
+    fn list_operator_tools(&self) -> Vec<RebornOperatorToolInfo> {
+        self.tools.clone()
+    }
+}
+
+fn services_with_operator_approval_config() -> RebornServices {
+    RebornServices::new(
+        Arc::new(InMemorySessionThreadService::default()),
+        Arc::new(FakeTurnCoordinator::default()),
+    )
+    .with_operator_approval_config(
+        Arc::new(ironclaw_approvals::InMemoryToolPermissionOverrideStore::new()),
+        Arc::new(ironclaw_approvals::InMemoryAutoApproveSettingStore::new()),
+        Arc::new(ironclaw_approvals::InMemoryPersistentApprovalPolicyStore::new()),
+        Arc::new(StaticOperatorToolCatalogForTest {
+            tools: vec![
+                RebornOperatorToolInfo {
+                    capability_id: CapabilityId::new("tool.alpha").expect("capability id"),
+                    description: "Alpha tool".to_string(),
+                    default_permission: PermissionMode::Ask,
+                    effects: vec![EffectKind::ExecuteCode],
+                },
+                RebornOperatorToolInfo {
+                    capability_id: CapabilityId::new("tool.locked").expect("capability id"),
+                    description: "Locked tool".to_string(),
+                    default_permission: PermissionMode::Deny,
+                    effects: Vec::new(),
+                },
+            ],
+        }),
+    )
+}
+
+fn operator_config_entry_value<'a>(
+    response: &'a ironclaw_product_workflow::RebornOperatorConfigListResponse,
+    key: &str,
+) -> &'a serde_json::Value {
+    &response
+        .entries
+        .iter()
+        .find(|entry| entry.key == key)
+        .unwrap_or_else(|| panic!("{key} entry"))
+        .value
+}
+
+#[tokio::test]
+async fn operator_config_reads_and_writes_auto_approve_and_tool_permissions() {
+    let services = services_with_operator_approval_config();
+
+    let initial = services
+        .list_operator_config(caller())
+        .await
+        .expect("operator config");
+    assert_eq!(
+        operator_config_entry_value(&initial, "agent.auto_approve_tools"),
+        &json!(false)
+    );
+    assert_eq!(
+        operator_config_entry_value(&initial, "tool.tool.alpha")["state"],
+        "ask_each_time"
+    );
+    assert_eq!(
+        operator_config_entry_value(&initial, "tool.tool.alpha")["effective_source"],
+        "default"
+    );
+    assert_eq!(
+        operator_config_entry_value(&initial, "tool.tool.locked")["state"],
+        "disabled"
+    );
+
+    services
+        .set_operator_config_key(
+            caller(),
+            "agent.auto_approve_tools".to_string(),
+            RebornOperatorConfigSetRequest { value: json!(true) },
+        )
+        .await
+        .expect("enable global auto approve");
+
+    let globally_allowed = services
+        .get_operator_config_key(caller(), "tool.tool.alpha".to_string())
+        .await
+        .expect("tool config");
+    assert_eq!(globally_allowed.entry.value["state"], "always_allow");
+    assert_eq!(globally_allowed.entry.value["effective_source"], "global");
+
+    let disabled = services
+        .set_operator_config_key(
+            caller(),
+            "tool.tool.alpha".to_string(),
+            RebornOperatorConfigSetRequest {
+                value: json!({ "state": "disabled" }),
+            },
+        )
+        .await
+        .expect("disable tool");
+    assert_eq!(disabled.entry.value["state"], "disabled");
+    assert_eq!(disabled.entry.value["effective_source"], "override");
+
+    let allowed = services
+        .set_operator_config_key(
+            caller(),
+            "tool.tool.alpha".to_string(),
+            RebornOperatorConfigSetRequest {
+                value: json!({ "state": "always_allow" }),
+            },
+        )
+        .await
+        .expect("always allow tool");
+    assert_eq!(allowed.entry.value["state"], "always_allow");
+    assert_eq!(allowed.entry.value["effective_source"], "override");
 }
 
 #[tokio::test]

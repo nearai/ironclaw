@@ -10,14 +10,20 @@ function ToolRow({ tool, onPermissionChange, isSaved }) {
   const t = useT();
   const permissionStates = [
     { value: "always_allow", label: t("tools.alwaysAllow"), tone: "positive" },
-    { value: "ask", label: t("tools.askEachTime"), tone: "warning" },
+    { value: "ask_each_time", label: t("tools.askEachTime"), tone: "warning" },
     { value: "disabled", label: t("tools.disabled"), tone: "danger" },
   ];
+  const sourceLabels = {
+    default: t("tools.sourceDefault"),
+    global: t("tools.sourceGlobal"),
+    override: t("tools.sourceOverride"),
+  };
 
   const isLocked = tool.locked;
   const current =
     permissionStates.find((p) => p.value === tool.state) || permissionStates[1];
-  const isDefault = tool.state === tool.default_state;
+  const effectiveSource = tool.effective_source || "default";
+  const isDefault = effectiveSource === "default" && tool.state === tool.default_state;
 
   return html`
     <div
@@ -42,6 +48,11 @@ function ToolRow({ tool, onPermissionChange, isSaved }) {
                 ${t("tools.default")}
               </span>
             `}
+            <span
+              className="rounded border border-[var(--v2-panel-border)] bg-[var(--v2-surface-soft)] px-1.5 py-0.5 font-mono text-[10px] text-[var(--v2-text-faint)]"
+            >
+              ${sourceLabels[effectiveSource] || sourceLabels.default}
+            </span>
           </div>
           ${tool.description &&
           html`
@@ -120,6 +131,7 @@ export function ToolsTab({ searchQuery = "" }) {
       tool.description,
       tool.state,
       tool.default_state,
+      tool.effective_source,
       tool.locked ? t("tools.disabled") : "",
     ])
   );

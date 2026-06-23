@@ -8,9 +8,15 @@ use std::{
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 use crate::product_auth_durable::{FilesystemAuthProductServices, UnavailableAuthProviderClient};
 #[cfg(any(feature = "libsql", feature = "postgres"))]
-use ironclaw_approvals::FilesystemPersistentApprovalPolicyStore;
+use ironclaw_approvals::{
+    FilesystemAutoApproveSettingStore, FilesystemPersistentApprovalPolicyStore,
+    FilesystemToolPermissionOverrideStore,
+};
 #[cfg(not(any(feature = "libsql", feature = "postgres")))]
-use ironclaw_approvals::InMemoryPersistentApprovalPolicyStore;
+use ironclaw_approvals::{
+    InMemoryAutoApproveSettingStore, InMemoryPersistentApprovalPolicyStore,
+    InMemoryToolPermissionOverrideStore,
+};
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 use ironclaw_auth::AuthProviderClient;
 #[cfg(any(feature = "libsql", feature = "postgres"))]
@@ -245,6 +251,18 @@ pub(crate) type LocalDevPersistentApprovalPolicyStore =
     FilesystemPersistentApprovalPolicyStore<LocalDevRootFilesystem>;
 #[cfg(not(any(feature = "libsql", feature = "postgres")))]
 pub(crate) type LocalDevPersistentApprovalPolicyStore = InMemoryPersistentApprovalPolicyStore;
+
+#[cfg(any(feature = "libsql", feature = "postgres"))]
+pub(crate) type LocalDevToolPermissionOverrideStore =
+    FilesystemToolPermissionOverrideStore<LocalDevRootFilesystem>;
+#[cfg(not(any(feature = "libsql", feature = "postgres")))]
+pub(crate) type LocalDevToolPermissionOverrideStore = InMemoryToolPermissionOverrideStore;
+
+#[cfg(any(feature = "libsql", feature = "postgres"))]
+pub(crate) type LocalDevAutoApproveSettingStore =
+    FilesystemAutoApproveSettingStore<LocalDevRootFilesystem>;
+#[cfg(not(any(feature = "libsql", feature = "postgres")))]
+pub(crate) type LocalDevAutoApproveSettingStore = InMemoryAutoApproveSettingStore;
 
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 type LocalDevProcessServices = ProcessServices<
@@ -487,6 +505,8 @@ pub(crate) struct RebornLocalRuntimeServices {
     #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) capability_policy: Arc<LocalDevCapabilityPolicy>,
     pub(crate) persistent_approval_policies: Arc<LocalDevPersistentApprovalPolicyStore>,
+    pub(crate) tool_permission_overrides: Arc<LocalDevToolPermissionOverrideStore>,
+    pub(crate) auto_approve_settings: Arc<LocalDevAutoApproveSettingStore>,
     pub(crate) turn_state: Arc<LocalDevTurnStateStore>,
     pub(crate) trigger_repository: Arc<dyn TriggerRepository>,
     /// Facade-shaped handle (not the raw `ProjectRepository`): composition
@@ -1025,27 +1045,16 @@ async fn build_local_runtime(input: RebornBuildInput) -> Result<RebornServices, 
     let local_dev_trust_invalidation_bus = Arc::new(ironclaw_trust::InvalidationBus::new());
     let extension_registry = Arc::new(local_dev_builtin_extension_registry()?);
     // Per-(tenant,user) approval settings resolved live at each dispatch gate
-    // so a WebUI change applies without a restart (#4959). Mirrors the
-    // persistent-approval store's cfg split: filesystem-backed (shared with the
-    // webui facade) in durable builds, in-memory otherwise.
-    #[cfg(any(feature = "libsql", feature = "postgres"))]
-    let approval_settings_provider = {
-        let approval_settings_filesystem = crate::wrap_scoped(Arc::clone(&filesystem));
-        Arc::new(StoreApprovalSettingsProvider::new(
-            Arc::new(
-                ironclaw_approvals::FilesystemToolPermissionOverrideStore::new(Arc::clone(
-                    &approval_settings_filesystem,
-                )),
-            ),
-            Arc::new(ironclaw_approvals::FilesystemAutoApproveSettingStore::new(
-                approval_settings_filesystem,
-            )),
-        ))
-    };
-    #[cfg(not(any(feature = "libsql", feature = "postgres")))]
+    // so a WebUI change applies without a restart (#4959). Reuse the local
+    // runtime stores exactly: in-memory builds must not accidentally fork UI
+    // writes away from the authorizer.
+    let tool_permission_overrides: Arc<dyn ironclaw_approvals::ToolPermissionOverrideStore> =
+        store_graph.local_runtime.tool_permission_overrides.clone();
+    let auto_approve_settings: Arc<dyn ironclaw_approvals::AutoApproveSettingStore> =
+        store_graph.local_runtime.auto_approve_settings.clone();
     let approval_settings_provider = Arc::new(StoreApprovalSettingsProvider::new(
-        Arc::new(ironclaw_approvals::InMemoryToolPermissionOverrideStore::new()),
-        Arc::new(ironclaw_approvals::InMemoryAutoApproveSettingStore::new()),
+        tool_permission_overrides,
+        auto_approve_settings,
     ));
     let authorizer = local_dev_authorizer(
         runtime_policy.as_ref(),
@@ -1614,6 +1623,12 @@ fn build_local_dev_store_graph(
             reason: format!("local-dev capability policy is invalid: {error}"),
         }
     })?);
+    let tool_permission_overrides = Arc::new(LocalDevToolPermissionOverrideStore::new(Arc::clone(
+        &scoped_filesystem,
+    )));
+    let auto_approve_settings = Arc::new(LocalDevAutoApproveSettingStore::new(Arc::clone(
+        &scoped_filesystem,
+    )));
     let memory_mounts =
         memory_mount_view(MountPermissions::read_write_list_delete()).map_err(|error| {
             RebornBuildError::InvalidConfig {
@@ -1642,6 +1657,8 @@ fn build_local_dev_store_graph(
         runtime_policy,
         capability_policy: Arc::clone(&capability_policy),
         persistent_approval_policies: Arc::clone(&persistent_approval_policies),
+        tool_permission_overrides: Arc::clone(&tool_permission_overrides),
+        auto_approve_settings: Arc::clone(&auto_approve_settings),
         turn_state: Arc::clone(&turn_state),
         trigger_repository: Arc::clone(&trigger_repository),
         project_service: Arc::new(crate::project_service::RebornProjectService::new(
@@ -1754,6 +1771,8 @@ fn build_local_dev_store_graph(
             reason: format!("local-dev capability policy is invalid: {error}"),
         }
     })?);
+    let tool_permission_overrides = Arc::new(LocalDevToolPermissionOverrideStore::new());
+    let auto_approve_settings = Arc::new(LocalDevAutoApproveSettingStore::new());
     let memory_mounts =
         memory_mount_view(MountPermissions::read_write_list_delete()).map_err(|error| {
             RebornBuildError::InvalidConfig {
@@ -1784,6 +1803,8 @@ fn build_local_dev_store_graph(
         runtime_policy,
         capability_policy: Arc::clone(&capability_policy),
         persistent_approval_policies: Arc::clone(&persistent_approval_policies),
+        tool_permission_overrides: Arc::clone(&tool_permission_overrides),
+        auto_approve_settings: Arc::clone(&auto_approve_settings),
         turn_state: Arc::clone(&turn_state),
         trigger_repository: Arc::clone(&trigger_repository),
         project_service: Arc::new(crate::project_service::RebornProjectService::new(
@@ -4036,6 +4057,8 @@ mod tests {
             runtime_policy: base_runtime.runtime_policy.clone(),
             capability_policy: Arc::clone(&base_runtime.capability_policy),
             persistent_approval_policies: Arc::clone(&base_runtime.persistent_approval_policies),
+            tool_permission_overrides: Arc::clone(&base_runtime.tool_permission_overrides),
+            auto_approve_settings: Arc::clone(&base_runtime.auto_approve_settings),
             turn_state: Arc::clone(&base_runtime.turn_state),
             trigger_repository: Arc::clone(&base_runtime.trigger_repository),
             project_service: Arc::clone(&base_runtime.project_service),
