@@ -1516,6 +1516,39 @@ fn local_dev_nearai_mcp_owner_scope(
     })
 }
 
+#[cfg(any(feature = "libsql", feature = "postgres"))]
+fn default_runtime_owner_scope(
+    owner_user_id: UserId,
+) -> Result<ResourceScope, ironclaw_host_api::HostApiError> {
+    let identity = RebornRuntimeIdentity::reborn_cli();
+    let tenant_id = ironclaw_host_api::TenantId::new(identity.tenant_id)?;
+    let agent_id = ironclaw_host_api::AgentId::new(identity.agent_id)?;
+
+    Ok(ResourceScope {
+        tenant_id,
+        user_id: owner_user_id,
+        agent_id: Some(agent_id),
+        project_id: None,
+        mission_id: None,
+        thread_id: None,
+        invocation_id: InvocationId::new(),
+    })
+}
+
+#[cfg(any(feature = "libsql", feature = "postgres"))]
+fn owner_turn_state_filesystem<F>(
+    filesystem: Arc<F>,
+    owner_scope: &ResourceScope,
+) -> Result<Arc<ScopedFilesystem<F>>, ironclaw_host_api::HostApiError>
+where
+    F: RootFilesystem + 'static,
+{
+    let view = crate::invocation_mount_view(owner_scope)?;
+    Ok(Arc::new(ScopedFilesystem::with_fixed_view(
+        filesystem, view,
+    )))
+}
+
 fn local_dev_extension_installation_state_path(
     profile: RebornCompositionProfile,
     local_runtime_identity: Option<&RebornLocalRuntimeIdentity>,
@@ -1568,6 +1601,11 @@ fn build_local_dev_store_graph(
         identity_substrate_db,
     } = input;
     let scoped_filesystem = local_dev_scoped_filesystem(Arc::clone(&filesystem));
+    let turn_state_scope =
+        local_dev_nearai_mcp_owner_scope(owner_user_id.clone(), local_runtime_identity.as_ref())?;
+    let turn_state_filesystem =
+        owner_turn_state_filesystem(Arc::clone(&filesystem), &turn_state_scope)
+            .map_err(RebornBuildError::Mount)?;
     let event_log = local_dev_event_log(Arc::clone(&filesystem))?;
     let audit_log = local_dev_audit_log(Arc::clone(&filesystem))?;
     let run_state = Arc::new(FilesystemRunStateStore::new(Arc::clone(&scoped_filesystem)));
@@ -1581,7 +1619,7 @@ fn build_local_dev_store_graph(
         Arc::clone(&scoped_filesystem),
     ));
     let turn_state = Arc::new(
-        FilesystemTurnStateStore::new(Arc::clone(&scoped_filesystem))
+        FilesystemTurnStateStore::new(Arc::clone(&turn_state_filesystem))
             .with_limits(turn_state_store_limits),
     );
     let checkpoint_state_store: Arc<dyn CheckpointStateStore> = Arc::new(
@@ -3222,8 +3260,11 @@ where
 {
     let filesystem = Arc::new(LibSqlRootFilesystem::new(Arc::clone(&config.database)));
     filesystem.run_migrations().await?;
+    let owner_user_id =
+        UserId::new(config.owner_id).map_err(crate::RebornCompositionError::Mount)?;
     build_filesystem_production_host_runtime_services(
         filesystem,
+        owner_user_id,
         config.event_store,
         config.secret_master_key,
         config.trust_policy,
@@ -3246,8 +3287,11 @@ where
         config.pool,
     ));
     filesystem.run_migrations().await?;
+    let owner_user_id =
+        UserId::new(config.owner_id).map_err(crate::RebornCompositionError::Mount)?;
     build_filesystem_production_host_runtime_services(
         filesystem,
+        owner_user_id,
         config.event_store,
         config.secret_master_key,
         config.trust_policy,
@@ -3261,6 +3305,7 @@ where
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 async fn build_filesystem_production_host_runtime_services<F, TPolicy, TWake>(
     filesystem: Arc<F>,
+    owner_user_id: UserId,
     event_store: ironclaw_reborn_event_store::RebornEventStoreConfig,
     secret_master_key: Option<ironclaw_secrets::SecretMaterial>,
     trust_policy: Arc<TPolicy>,
@@ -3274,6 +3319,10 @@ where
     TWake: ironclaw_turns::TurnRunWakeNotifier + 'static,
 {
     let scoped_filesystem = crate::wrap_scoped(Arc::clone(&filesystem));
+    let owner_scope =
+        default_runtime_owner_scope(owner_user_id).map_err(crate::RebornCompositionError::Mount)?;
+    let turn_state_filesystem = owner_turn_state_filesystem(Arc::clone(&filesystem), &owner_scope)
+        .map_err(crate::RebornCompositionError::Mount)?;
     let process_services = ProcessServices::filesystem(Arc::clone(&scoped_filesystem));
     let secret_credentials = build_filesystem_secret_credential_stores(
         Arc::clone(&scoped_filesystem),
@@ -3307,7 +3356,7 @@ where
     .with_credential_broker(secret_credentials.credential_broker)
     .with_turn_run_wake_notifier(turn_run_wake_notifier)
     .with_filesystem_run_state(Arc::clone(&scoped_filesystem))
-    .with_filesystem_turn_state_store(Arc::clone(&scoped_filesystem))
+    .with_filesystem_turn_state_store(Arc::clone(&turn_state_filesystem))
     .with_run_profile_resolver(Arc::new(
         ironclaw_reborn::planned_driver_factory::default_planned_run_profile_resolver()?,
     ))
@@ -3503,6 +3552,11 @@ where
     let owner_user_id = UserId::new(owner_id).map_err(|error| RebornBuildError::InvalidConfig {
         reason: error.to_string(),
     })?;
+    let turn_state_scope =
+        default_runtime_owner_scope(owner_user_id.clone()).map_err(RebornBuildError::Mount)?;
+    let turn_state_filesystem =
+        owner_turn_state_filesystem(Arc::clone(&stores.filesystem), &turn_state_scope)
+            .map_err(RebornBuildError::Mount)?;
     let secret_store: Arc<dyn SecretStore> = stores.secret_credentials.secret_store.clone();
     let skill_management_filesystem: Arc<dyn RootFilesystem> = stores.filesystem.clone();
     let skill_management = Arc::new(RebornLocalSkillManagementPort::new_with_mount_resolver(
@@ -3522,7 +3576,7 @@ where
         ..
     } = build_budget_sinks();
     let turn_state = Arc::new(
-        FilesystemTurnStateStore::new(Arc::clone(&stores.scoped_filesystem))
+        FilesystemTurnStateStore::new(Arc::clone(&turn_state_filesystem))
             .with_limits(turn_state_store_limits),
     );
     let checkpoint_state_store: Arc<dyn CheckpointStateStore> = Arc::new(
@@ -4889,6 +4943,32 @@ mod tests {
         assert_eq!(scope.user_id, owner);
         assert_eq!(scope.agent_id, Some(identity.agent_id));
         assert!(scope.project_id.is_none());
+    }
+
+    #[cfg(any(feature = "libsql", feature = "postgres"))]
+    #[test]
+    fn turn_state_filesystem_routes_global_store_ops_to_owner_turns_path() {
+        let root = Arc::new(ironclaw_filesystem::InMemoryBackend::default());
+        let owner_scope = ResourceScope {
+            tenant_id: TenantId::new("tenant-alpha").expect("tenant"),
+            user_id: UserId::new("owner-alpha").expect("owner"),
+            agent_id: Some(ironclaw_host_api::AgentId::new("agent-alpha").expect("agent")),
+            project_id: None,
+            mission_id: None,
+            thread_id: None,
+            invocation_id: InvocationId::new(),
+        };
+        let scoped =
+            owner_turn_state_filesystem(root, &owner_scope).expect("owner turn-state filesystem");
+        let path = ScopedPath::new("/turns/state.json").expect("turn state path");
+        let resolved = scoped
+            .resolve(&ResourceScope::system(), &path)
+            .expect("fixed view should resolve global store operation");
+
+        assert_eq!(
+            resolved.as_str(),
+            "/tenants/tenant-alpha/users/owner-alpha/turns/state.json"
+        );
     }
 
     #[tokio::test]

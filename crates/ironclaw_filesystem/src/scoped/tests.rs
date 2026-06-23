@@ -15,8 +15,9 @@ use super::*;
 use crate::in_memory::InMemoryBackend;
 use crate::{
     BackendId, BackendKind, CasExpectation, CompositeRootFilesystem, ContentKind, Entry,
-    FilesystemError, FilesystemOperation, Filter, IndexKey, IndexKind, IndexName, IndexPolicy,
-    IndexSpec, MountDescriptor, Page, RecordKind, SeqNo, StorageClass, TxnCapability,
+    FilesystemCatalog, FilesystemError, FilesystemOperation, Filter, IndexKey, IndexKind,
+    IndexName, IndexPolicy, IndexSpec, MountDescriptor, Page, RecordKind, SeqNo, StorageClass,
+    TxnCapability,
 };
 
 fn test_scope() -> ResourceScope {
@@ -97,8 +98,9 @@ async fn describe_path_uses_composite_mount_backend_capabilities() {
         Arc::clone(&turn_backend),
     )
     .unwrap();
+    let root = Arc::new(root);
     let scoped = ScopedFilesystem::with_fixed_view(
-        Arc::new(root),
+        Arc::clone(&root),
         MountView::new(vec![MountGrant::new(
             MountAlias::new("/turns").unwrap(),
             VirtualPath::new("/engine/tenants/t1/users/u1/turns").unwrap(),
@@ -107,16 +109,16 @@ async fn describe_path_uses_composite_mount_backend_capabilities() {
         .unwrap(),
     );
 
-    let root_capabilities = scoped.capabilities();
+    let root_capabilities = root.capabilities();
     assert_eq!(root_capabilities.txn(), TxnCapability::None);
 
-    let placement = scoped
-        .describe_path(
+    let virtual_path = scoped
+        .resolve(
             &test_scope(),
             &ScopedPath::new("/turns/state.json").unwrap(),
         )
-        .await
         .unwrap();
+    let placement = root.describe_path(&virtual_path).await.unwrap();
     assert_eq!(placement.capabilities.txn(), TxnCapability::Cas);
     assert_eq!(
         placement.path,
@@ -133,8 +135,9 @@ async fn describe_path_returns_mount_not_found_for_unmapped_path() {
         backend,
     )
     .unwrap();
+    let root = Arc::new(root);
     let scoped = ScopedFilesystem::with_fixed_view(
-        Arc::new(root),
+        Arc::clone(&root),
         MountView::new(vec![MountGrant::new(
             MountAlias::new("/missing").unwrap(),
             VirtualPath::new("/engine/unmounted").unwrap(),
@@ -143,13 +146,13 @@ async fn describe_path_returns_mount_not_found_for_unmapped_path() {
         .unwrap(),
     );
 
-    let err = scoped
-        .describe_path(
+    let virtual_path = scoped
+        .resolve(
             &test_scope(),
             &ScopedPath::new("/missing/state.json").unwrap(),
         )
-        .await
-        .unwrap_err();
+        .unwrap();
+    let err = root.describe_path(&virtual_path).await.unwrap_err();
     assert!(matches!(err, FilesystemError::MountNotFound { .. }));
 }
 
@@ -162,8 +165,9 @@ async fn describe_path_returns_contract_error_for_missing_alias() {
         backend,
     )
     .unwrap();
+    let root = Arc::new(root);
     let scoped = ScopedFilesystem::with_fixed_view(
-        Arc::new(root),
+        Arc::clone(&root),
         MountView::new(vec![MountGrant::new(
             MountAlias::new("/workspace").unwrap(),
             VirtualPath::new("/engine/workspace").unwrap(),
@@ -173,11 +177,10 @@ async fn describe_path_returns_contract_error_for_missing_alias() {
     );
 
     let err = scoped
-        .describe_path(
+        .resolve(
             &test_scope(),
             &ScopedPath::new("/turns/state.json").unwrap(),
         )
-        .await
         .unwrap_err();
     assert!(matches!(
         err,

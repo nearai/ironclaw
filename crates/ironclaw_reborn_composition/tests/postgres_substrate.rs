@@ -97,6 +97,7 @@ async fn postgres_substrate_builder_rejects_invalid_secret_master_key() {
     let result =
         build_postgres_production_host_runtime_services(PostgresProductionSubstrateConfig {
             pool,
+            owner_id: "postgres-substrate-owner".to_string(),
             event_store: RebornEventStoreConfig::Postgres {
                 url: SecretString::from(database_url),
                 tls_options: Default::default(),
@@ -135,6 +136,7 @@ async fn postgres_substrate_builder_rejects_weak_env_secret_master_key() {
     let result =
         build_postgres_production_host_runtime_services(PostgresProductionSubstrateConfig {
             pool,
+            owner_id: "postgres-substrate-owner".to_string(),
             event_store: RebornEventStoreConfig::Postgres {
                 url: SecretString::from(database_url),
                 tls_options: Default::default(),
@@ -179,6 +181,7 @@ async fn build_postgres_test_services(
 ) -> ironclaw_reborn_composition::PostgresProductionHostRuntimeServices {
     build_postgres_production_host_runtime_services(PostgresProductionSubstrateConfig {
         pool,
+        owner_id: "postgres-substrate-owner".to_string(),
         event_store: RebornEventStoreConfig::Postgres {
             url: SecretString::from(database_url),
             tls_options: Default::default(),

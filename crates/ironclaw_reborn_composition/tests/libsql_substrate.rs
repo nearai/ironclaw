@@ -98,6 +98,7 @@ async fn libsql_substrate_builder_rejects_invalid_secret_master_key() {
 
     let result = build_libsql_production_host_runtime_services(LibSqlProductionSubstrateConfig {
         database,
+        owner_id: "libsql-substrate-owner".to_string(),
         event_store: RebornEventStoreConfig::Libsql {
             path_or_url: events_db_path.display().to_string(),
             auth_token: None,
@@ -142,6 +143,7 @@ async fn libsql_substrate_builder_rejects_weak_env_secret_master_key() {
 
     let result = build_libsql_production_host_runtime_services(LibSqlProductionSubstrateConfig {
         database,
+        owner_id: "libsql-substrate-owner".to_string(),
         event_store: RebornEventStoreConfig::Libsql {
             path_or_url: events_db_path.display().to_string(),
             auth_token: None,
@@ -227,6 +229,7 @@ async fn build_libsql_test_services() -> LibSqlTestServices {
 
     let services = build_libsql_production_host_runtime_services(LibSqlProductionSubstrateConfig {
         database,
+        owner_id: "libsql-substrate-owner".to_string(),
         event_store: RebornEventStoreConfig::Libsql {
             path_or_url: events_db_path.display().to_string(),
             auth_token: None,

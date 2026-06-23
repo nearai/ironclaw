@@ -6,9 +6,8 @@ use ironclaw_host_api::{
 
 use crate::backend::{EventRecord, StorageTxn};
 use crate::{
-    BackendCapabilities, CasExpectation, DirEntry, Entry, FileStat, FilesystemCatalog,
-    FilesystemError, FilesystemOperation, Filter, IndexSpec, Page, PathPlacement, RecordVersion,
-    RootFilesystem, SeqNo, VersionedEntry, path_prefix_matches,
+    CasExpectation, DirEntry, Entry, FileStat, FilesystemError, FilesystemOperation, Filter,
+    IndexSpec, Page, RecordVersion, RootFilesystem, SeqNo, VersionedEntry, path_prefix_matches,
 };
 
 /// Resolver from a per-invocation [`ResourceScope`] to the [`MountView`] that
@@ -93,11 +92,6 @@ where
     /// it repeatedly should cache the returned value.
     pub fn mount_view(&self, scope: &ResourceScope) -> Result<MountView, FilesystemError> {
         (self.resolver)(scope).map_err(FilesystemError::from)
-    }
-
-    /// Capabilities declared by the underlying root backend.
-    pub fn capabilities(&self) -> BackendCapabilities {
-        self.root.capabilities()
     }
 
     // ─── Unified entry plane ──────────────────────────────────────────────
@@ -402,23 +396,6 @@ where
     ) -> Result<VirtualPath, FilesystemError> {
         let view = self.mount_view(scope)?;
         resolve_with_permission_view(&view, path, operation)
-    }
-}
-
-impl<F> ScopedFilesystem<F>
-where
-    F: RootFilesystem + FilesystemCatalog + ?Sized,
-{
-    /// Describe the catalog placement for `path` after resolving the caller's
-    /// scoped alias. This is metadata only; actual filesystem operations still
-    /// use their own permission checks.
-    pub async fn describe_path(
-        &self,
-        scope: &ResourceScope,
-        path: &ScopedPath,
-    ) -> Result<PathPlacement, FilesystemError> {
-        let virtual_path = self.resolve(scope, path)?;
-        self.root.describe_path(&virtual_path).await
     }
 }
 
