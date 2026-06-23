@@ -132,6 +132,7 @@ async fn host_runtime_services_routes_structured_github_wasm_search_through_runt
             scope.clone(),
             account_access_secret,
             SecretMaterial::from("ghp_fake_fixture_token"),
+            None,
         )
         .await
         .unwrap();
@@ -219,6 +220,7 @@ async fn host_runtime_services_restages_github_product_auth_for_multi_request_wa
             scope.clone(),
             account_access_secret,
             SecretMaterial::from("ghp_fake_fixture_token"),
+            None,
         )
         .await
         .unwrap();
@@ -317,6 +319,7 @@ async fn host_runtime_services_routes_google_drive_wasm_list_files_with_scoped_g
             scope.clone(),
             account_access_secret,
             SecretMaterial::from("ya29.fake_fixture_token"),
+            None,
         )
         .await
         .unwrap();
@@ -387,6 +390,7 @@ async fn host_runtime_services_routes_google_docs_wasm_get_document_with_scoped_
             scope.clone(),
             account_access_secret,
             SecretMaterial::from("ya29.fake_fixture_token"),
+            None,
         )
         .await
         .unwrap();
@@ -445,6 +449,7 @@ async fn host_runtime_services_routes_google_sheets_wasm_get_spreadsheet_with_sc
             scope.clone(),
             account_access_secret,
             SecretMaterial::from("ya29.fake_fixture_token"),
+            None,
         )
         .await
         .unwrap();
@@ -504,6 +509,7 @@ async fn host_runtime_services_routes_google_slides_wasm_get_presentation_with_s
             scope.clone(),
             account_access_secret,
             SecretMaterial::from("ya29.fake_fixture_token"),
+            None,
         )
         .await
         .unwrap();
@@ -580,6 +586,7 @@ async fn host_runtime_services_maps_github_wasm_input_errors_to_invalid_input() 
             scope.clone(),
             account_access_secret,
             SecretMaterial::from("ghp_fake_fixture_token"),
+            None,
         )
         .await
         .unwrap();
@@ -961,6 +968,24 @@ async fn bundled_github_wasm_builds_create_repo_fork_and_release_requests() {
         }),
     );
 
+    let list_my_repos_http = Arc::new(RecordingWasmHostHttp::ok(WasmHttpResponse {
+        status: 200,
+        headers_json: "{}".to_string(),
+        body: br#"[]"#.to_vec(),
+    }));
+    let list_my_repos = execute_bundled_github_wasm(
+        "github.list_repos",
+        json!({"username": "me", "limit": 2}),
+        Arc::clone(&list_my_repos_http),
+    );
+    assert_eq!(list_my_repos.error, None);
+    assert_single_wasm_request(
+        &list_my_repos_http,
+        "GET",
+        "https://api.github.com/user/repos?per_page=2",
+        None,
+    );
+
     let fork_http = Arc::new(RecordingWasmHostHttp::ok(WasmHttpResponse {
         status: 202,
         headers_json: "{}".to_string(),
@@ -1024,6 +1049,27 @@ async fn bundled_github_wasm_builds_create_repo_fork_and_release_requests() {
             "generate_release_notes": true
         }),
     );
+}
+
+#[tokio::test]
+async fn bundled_github_wasm_get_authenticated_user_uses_user_endpoint() {
+    let http = Arc::new(RecordingWasmHostHttp::ok(WasmHttpResponse {
+        status: 200,
+        headers_json: "{}".to_string(),
+        body: br#"{"login":"serrrfirat","type":"User"}"#.to_vec(),
+    }));
+    let user = execute_bundled_github_wasm(
+        "github.get_authenticated_user",
+        json!({}),
+        Arc::clone(&http),
+    );
+
+    assert_eq!(user.error, None);
+    let user: serde_json::Value =
+        serde_json::from_str(user.output_json.as_deref().unwrap()).unwrap();
+    assert_eq!(user["login"], json!("serrrfirat"));
+    assert_eq!(user["type"], json!("User"));
+    assert_single_wasm_request(&http, "GET", "https://api.github.com/user", None);
 }
 
 #[tokio::test]

@@ -399,6 +399,7 @@ mod tests {
                 resource_scope,
                 old_refresh.clone(),
                 SecretString::from("stored-google-refresh".to_string()),
+                None,
             )
             .await
             .expect("seed refresh token");
@@ -487,7 +488,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn composed_google_provider_marks_refresh_failed_on_non_200_token_response() {
+    async fn composed_google_provider_marks_revoked_on_invalid_grant_token_response() {
+        // A3: invalid_grant responses must set status Revoked (permanent revocation),
+        // not RefreshFailed (transient). The original test used the same body but
+        // expected RefreshFailed — updated to reflect the new classification.
         let egress = Arc::new(RecordingEgress::with_status(
             400,
             br#"{"error":"invalid_grant"}"#.to_vec(),
@@ -502,6 +506,7 @@ mod tests {
                 resource_scope,
                 old_refresh.clone(),
                 SecretString::from("stored-google-refresh".to_string()),
+                None,
             )
             .await
             .expect("seed refresh token");
@@ -548,14 +553,19 @@ mod tests {
         assert!(!report.refreshed);
         assert_eq!(
             report.account.status,
-            CredentialAccountStatus::RefreshFailed
+            CredentialAccountStatus::Revoked,
+            "invalid_grant must produce Revoked status (permanent revocation, not transient failure)"
         );
         let stored = shared
             .get_account(CredentialAccountLookupRequest::new(auth_scope, account.id))
             .await
             .expect("lookup")
             .expect("failed refresh account");
-        assert_eq!(stored.status, CredentialAccountStatus::RefreshFailed);
+        assert_eq!(
+            stored.status,
+            CredentialAccountStatus::Revoked,
+            "stored account must reflect Revoked status after invalid_grant"
+        );
         assert_eq!(stored.access_secret, Some(old_access));
         assert_eq!(stored.refresh_secret, Some(old_refresh));
         assert_eq!(

@@ -111,6 +111,11 @@ pub struct WebUiCreateThreadRequest {
     pub client_action_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub requested_thread_id: Option<String>,
+    /// Optional project the new thread should be scoped to. The browser only
+    /// *proposes* it — the facade authorizes the caller's access to the project
+    /// before adopting it as scope, so the body is never trusted on its own.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project_id: Option<String>,
 }
 
 /// One inline attachment in a browser send-message body.
@@ -251,6 +256,11 @@ pub struct WebUiListAutomationsRequest {
     pub limit: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub run_limit: Option<u32>,
+    /// When `true`, soft-completed (fire-once) automations are included in the
+    /// response alongside active ones. Defaults to `false` (active-only) so
+    /// existing callers that do not set this flag are unaffected.
+    #[serde(default)]
+    pub include_completed: bool,
 }
 
 /// Browser body for WebUI extension-setup interaction.
@@ -321,12 +331,13 @@ pub enum WebUiGateResolution {
         #[serde(default)]
         always: bool,
     },
-    Denied,
+    /// Unified decline variant — covers both user-initiated approval denial
+    /// ("denied") and auth-gate cancellation ("cancelled"). Both legacy wire
+    /// strings deserialize to this variant; new serializations use "declined".
+    #[serde(alias = "denied", alias = "cancelled")]
+    Declined,
     /// A host-stored credential reference, not a raw secret/token.
-    CredentialProvided {
-        credential_ref: String,
-    },
-    Cancelled,
+    CredentialProvided { credential_ref: String },
 }
 
 /// Canonical route-independent WebUI command produced after validation.
@@ -546,7 +557,7 @@ fn parse_gate_resolution(
         "approved" => Ok(WebUiGateResolution::Approved {
             always: always.unwrap_or(false),
         }),
-        "denied" => Ok(WebUiGateResolution::Denied),
+        "denied" | "cancelled" => Ok(WebUiGateResolution::Declined),
         "credential_provided" => Ok(WebUiGateResolution::CredentialProvided {
             credential_ref: required_text(
                 "credential_ref",
@@ -555,7 +566,6 @@ fn parse_gate_resolution(
                 TextMode::Token,
             )?,
         }),
-        "cancelled" => Ok(WebUiGateResolution::Cancelled),
         _ => Err(WebUiInboundValidationError::new(
             "resolution",
             WebUiInboundValidationCode::InvalidValue,

@@ -13,7 +13,9 @@ use std::net::SocketAddr;
 use std::time::Duration;
 
 use axum::{Router, extract::ConnectInfo, routing::get};
-use ironclaw_reborn_webui_ingress::{RebornWebuiServeOptions, serve_webui_v2};
+use ironclaw_reborn_webui_ingress::{
+    RebornWebuiServeOptions, deferred_webui_v2_startup_router, serve_webui_v2,
+};
 use tokio::sync::oneshot;
 
 async fn build_test_router() -> Router {
@@ -148,4 +150,78 @@ async fn serve_webui_v2_shuts_down_when_shutdown_sender_drops() {
         .expect("serve loop must exit within 2s of shutdown-sender drop")
         .expect("serve loop join handle must not panic");
     outcome.expect("serve loop must return Ok after shutdown-sender drop");
+}
+
+#[tokio::test]
+async fn deferred_startup_router_serves_health_then_delegates_when_ready() {
+    let (startup_router, ready_handle) = deferred_webui_v2_startup_router();
+    let (shutdown_tx, shutdown_rx) = oneshot::channel();
+    let (bound_tx, bound_rx) = oneshot::channel::<SocketAddr>();
+
+    let serve_handle = tokio::spawn(async move {
+        serve_webui_v2(RebornWebuiServeOptions {
+            addr: SocketAddr::from(([127, 0, 0, 1], 0)),
+            router: startup_router,
+            shutdown: shutdown_rx,
+            bound_addr_tx: Some(bound_tx),
+        })
+        .await
+    });
+
+    let bound = tokio::time::timeout(Duration::from_secs(2), bound_rx)
+        .await
+        .expect("bound_addr_tx must fire")
+        .expect("bound addr");
+
+    let health_response = test_client()
+        .get(format!("http://{bound}/api/health"))
+        .send()
+        .await
+        .expect("startup health request succeeds");
+    assert_eq!(
+        health_response.status(),
+        http::StatusCode::OK,
+        "startup health must pass before runtime assembly finishes"
+    );
+
+    let before_ready = test_client()
+        .get(format!("http://{bound}/ping"))
+        .send()
+        .await
+        .expect("pre-ready request succeeds");
+    assert_eq!(
+        before_ready.status(),
+        http::StatusCode::SERVICE_UNAVAILABLE,
+        "non-health routes must not accept traffic before the runtime router is ready"
+    );
+
+    let ready_router = build_test_router().await;
+    ready_handle
+        .publish_ready_router(ready_router)
+        .expect("startup router should still be listening");
+
+    let after_ready = test_client()
+        .get(format!("http://{bound}/ping"))
+        .send()
+        .await
+        .expect("ready request succeeds");
+    assert_eq!(
+        after_ready.status(),
+        http::StatusCode::OK,
+        "startup router must delegate to the ready WebUI router without rebinding"
+    );
+    let body = after_ready.text().await.expect("ready body");
+    assert_eq!(
+        body, "pong",
+        "ready request should reach the published router"
+    );
+
+    shutdown_tx
+        .send(())
+        .expect("shutdown receiver must be open");
+    tokio::time::timeout(Duration::from_secs(2), serve_handle)
+        .await
+        .expect("serve loop must exit within 2s of shutdown signal")
+        .expect("serve loop join handle must not panic")
+        .expect("serve loop must return Ok after shutdown");
 }

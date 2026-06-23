@@ -482,3 +482,40 @@ fn decode_attachments_empty_is_ok() {
             .is_empty()
     );
 }
+
+/// Wire-stability: both legacy strings ("denied" and "cancelled") must still
+/// deserialize to `WebUiGateResolution::Declined` after the unification.
+/// This guards against accidental serde rename breakage.
+#[test]
+fn legacy_denied_wire_string_deserializes_to_declined() {
+    let request: WebUiResolveGateRequest = serde_json::from_value(json!({
+        "client_action_id": "gate-1",
+        "thread_id": "thread-alpha",
+        "run_id": run_id(),
+        "gate_ref": "gate-alpha",
+        "resolution": "denied"
+    }))
+    .expect("denied request json");
+    let command = request.into_command(caller()).expect("valid command");
+    let WebUiInboundCommand::ResolveGate { resolution, .. } = command else {
+        panic!("expected resolve-gate command");
+    };
+    assert_eq!(resolution, WebUiGateResolution::Declined);
+}
+
+#[test]
+fn legacy_cancelled_wire_string_deserializes_to_declined() {
+    let request: WebUiResolveGateRequest = serde_json::from_value(json!({
+        "client_action_id": "gate-1",
+        "thread_id": "thread-alpha",
+        "run_id": run_id(),
+        "gate_ref": "gate-alpha",
+        "resolution": "cancelled"
+    }))
+    .expect("cancelled request json");
+    let command = request.into_command(caller()).expect("valid command");
+    let WebUiInboundCommand::ResolveGate { resolution, .. } = command else {
+        panic!("expected resolve-gate command");
+    };
+    assert_eq!(resolution, WebUiGateResolution::Declined);
+}

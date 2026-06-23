@@ -243,10 +243,30 @@ pub(crate) fn resolve_builtin_input_schema_ref(reference: &str) -> Option<Value>
             "required": ["display_handle"],
             "additionalProperties": false
         }),
+        "schemas/builtin/profile_set.input.v1.json" => json!({
+            "type": "object",
+            "properties": {
+                "timezone": {
+                    "type": "string",
+                    "description": "IANA timezone name, e.g. America/Los_Angeles or Asia/Tokyo"
+                },
+                "locale": {
+                    "type": "string",
+                    "description": "BCP-47 locale tag, e.g. en-US or ja-JP",
+                    "maxLength": 35
+                },
+                "location": {
+                    "type": "string",
+                    "description": "Free-text location label, e.g. Tokyo, Japan"
+                }
+            },
+            "minProperties": 1,
+            "additionalProperties": false
+        }),
         "schemas/builtin/read_file.input.v1.json" => json!({
             "type": "object",
             "properties": {
-                "path": { "type": "string", "description": "Scoped path to read" },
+                "path": { "type": "string", "description": "Scoped path to read. Supported document files such as PDFs are returned as extracted text." },
                 "offset": { "type": "integer", "minimum": 0, "description": "1-based starting line; 0 starts at the beginning" },
                 "limit": { "type": "integer", "minimum": 0, "description": "Maximum lines to return" }
             },
@@ -308,11 +328,88 @@ pub(crate) fn resolve_builtin_input_schema_ref(reference: &str) -> Option<Value>
             "type": "object",
             "properties": {
                 "path": { "type": "string", "description": "Scoped file path to patch" },
-                "old_string": { "type": "string", "description": "Exact text to replace" },
-                "new_string": { "type": "string", "description": "Replacement text" },
-                "replace_all": { "type": "boolean", "description": "Replace every match instead of exactly one" }
+                "old_string": {
+                    "type": ["string", "null"],
+                    "description": "Text to replace for a single targeted edit. Exact matches are preferred; fuzzy Unicode and trailing-whitespace normalization is used when exact text is not present."
+                },
+                "new_string": { "type": ["string", "null"], "description": "Replacement text for a single targeted edit" },
+                "edits": {
+                    "description": "One or more targeted replacements matched against the original file. Prefer this for multiple disjoint edits.",
+                    "oneOf": [
+                        {
+                            "type": "array",
+                            "minItems": 1,
+                            "maxItems": 256,
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "old_string": { "type": "string", "description": "Text to replace" },
+                                    "new_string": { "type": "string", "description": "Replacement text" }
+                                },
+                                "required": ["old_string", "new_string"],
+                                "additionalProperties": false
+                            }
+                        },
+                        { "type": "null" },
+                        { "const": "null" }
+                    ]
+                },
+                "replace_all": { "type": "boolean", "description": "Replace every match instead of exactly one. Only valid with a single targeted edit." }
             },
-            "required": ["path", "old_string", "new_string"],
+            "required": ["path"],
+            "oneOf": [
+                {
+                    "properties": {
+                        "old_string": {
+                            "type": "string",
+                            "not": { "const": "null" }
+                        },
+                        "new_string": {
+                            "type": "string",
+                            "not": { "const": "null" }
+                        }
+                    },
+                    "required": ["old_string", "new_string"],
+                    "not": {
+                        "properties": {
+                            "edits": { "type": "array" }
+                        },
+                        "required": ["edits"]
+                    }
+                },
+                {
+                    "properties": {
+                        "edits": { "type": "array" },
+                        "old_string": { "enum": ["null", null] },
+                        "new_string": { "enum": ["null", null] }
+                    },
+                    "required": ["edits"]
+                }
+            ],
+            "allOf": [
+                {
+                    "if": {
+                        "properties": {
+                            "replace_all": { "const": true }
+                        },
+                        "required": ["replace_all"]
+                    },
+                    "then": {
+                        "properties": {
+                            "edits": {
+                                "oneOf": [
+                                    {
+                                        "type": "array",
+                                        "maxItems": 1
+                                    },
+                                    { "type": "null" },
+                                    { "const": "null" }
+                                ]
+                            }
+                        }
+                    }
+                }
+            ],
             "additionalProperties": false
         }),
         "schemas/builtin/extension_search.input.v1.json" => json!({
@@ -369,6 +466,7 @@ pub(crate) fn resolve_builtin_input_schema_ref(reference: &str) -> Option<Value>
         }),
         "schemas/builtin/trigger_create.input.v1.json" => json!({
             "type": "object",
+            "description": "Create a scheduled trigger. Pass the trigger object itself with top-level fields `name`, `prompt`, and `schedule`; do not wrap the schedule in `operation`, `data`, or a parser request object.",
             "properties": {
                 "name": {
                     "type": "string",
@@ -378,10 +476,33 @@ pub(crate) fn resolve_builtin_input_schema_ref(reference: &str) -> Option<Value>
                     "type": "string",
                     "description": "Prompt submitted when the trigger fires. Runtime validation caps UTF-8 content at 32768 bytes. Do not embed delivery routing here; when the user asks to send routine or trigger results through an outbound product/channel, first select the target through the visible outbound delivery target capabilities, then create the trigger."
                 },
-                "cron": { "type": "string", "description": "Five-, six-, or seven-field cron expression; fire cadence must be at least one minute" },
-                "timezone": { "type": "string", "description": "IANA timezone name for cron evaluation (e.g. 'America/New_York', 'Europe/London', 'UTC'). The cron expression is evaluated in this timezone; fire times are stored and compared in UTC. If the user's timezone is already known from the conversation or their settings, use it without asking; if unknown, ask the user before creating the trigger. Never silently assume UTC — a trigger that fires at the wrong local time is worse than no trigger." }
+                "schedule": {
+                    "description": "When and how often the trigger fires. This value is the schedule object itself. For recurring triggers use {\"kind\":\"cron\",\"expression\":\"0 14 * * 2\",\"timezone\":\"America/Los_Angeles\"}. For one-time triggers use {\"kind\":\"once\",\"at\":\"2026-06-23T14:00:00\",\"timezone\":\"America/Los_Angeles\"}. Do not pass {\"operation\":\"parse\",\"data\":...}.",
+                    "oneOf": [
+                        {
+                            "type": "object",
+                            "properties": {
+                                "kind": { "const": "cron" },
+                                "expression": { "type": "string", "description": "Five-, six-, or seven-field cron expression; cadence at least one minute. Example: `0 14 * * 2` for Tuesdays at 2 PM in `timezone`." },
+                                "timezone": { "type": "string", "description": "IANA timezone name (e.g. America/New_York, UTC)." }
+                            },
+                            "required": ["kind", "expression", "timezone"],
+                            "additionalProperties": false
+                        },
+                        {
+                            "type": "object",
+                            "properties": {
+                                "kind": { "const": "once" },
+                                "at": { "type": "string", "description": "Local wall-clock datetime in `timezone`, format YYYY-MM-DDTHH:MM:SS; interpreted in the given timezone and converted to UTC." },
+                                "timezone": { "type": "string", "description": "IANA timezone name (e.g. America/New_York, UTC)." }
+                            },
+                            "required": ["kind", "at", "timezone"],
+                            "additionalProperties": false
+                        }
+                    ]
+                }
             },
-            "required": ["name", "prompt", "cron", "timezone"],
+            "required": ["name", "prompt", "schedule"],
             "additionalProperties": false
         }),
         "schemas/builtin/trigger_list.input.v1.json" => json!({

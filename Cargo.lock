@@ -3994,6 +3994,7 @@ dependencies = [
  "iana-time-zone",
  "insta",
  "ironclaw_approvals",
+ "ironclaw_auth",
  "ironclaw_authorization",
  "ironclaw_common",
  "ironclaw_embeddings",
@@ -4001,6 +4002,7 @@ dependencies = [
  "ironclaw_extensions",
  "ironclaw_extractors",
  "ironclaw_filesystem",
+ "ironclaw_first_party_extensions",
  "ironclaw_gateway",
  "ironclaw_host_api",
  "ironclaw_host_runtime",
@@ -4014,6 +4016,7 @@ dependencies = [
  "ironclaw_product_workflow",
  "ironclaw_reborn",
  "ironclaw_reborn_composition",
+ "ironclaw_reborn_config",
  "ironclaw_reborn_traces",
  "ironclaw_resources",
  "ironclaw_run_state",
@@ -4198,6 +4201,7 @@ dependencies = [
  "ironclaw_processes",
  "ironclaw_resources",
  "ironclaw_run_state",
+ "ironclaw_safety",
  "ironclaw_trust",
  "serde_json",
  "thiserror 2.0.18",
@@ -4430,17 +4434,20 @@ dependencies = [
  "futures-util",
  "glob",
  "ironclaw_auth",
+ "ironclaw_extractors",
  "ironclaw_filesystem",
  "ironclaw_host_api",
  "ironclaw_safety",
  "ironclaw_skills",
  "regex",
+ "serde",
  "serde_json",
  "similar",
  "tempfile",
  "thiserror 2.0.18",
  "tokio",
  "tracing",
+ "unicode-normalization",
 ]
 
 [[package]]
@@ -4604,7 +4611,10 @@ dependencies = [
  "thiserror 2.0.18",
  "tokio",
  "tokio-postgres",
+ "tokio-util",
  "tracing",
+ "tracing-subscriber",
+ "tracing-test",
  "url",
  "uuid",
  "wat",
@@ -4909,6 +4919,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "ironclaw_projects"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "base64 0.22.1",
+ "chrono",
+ "ironclaw_filesystem",
+ "ironclaw_host_api",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+ "ulid",
+]
+
+[[package]]
 name = "ironclaw_prompt_envelope"
 version = "0.1.0"
 dependencies = [
@@ -4955,6 +4982,7 @@ dependencies = [
  "tokio",
  "tokio-util",
  "tracing",
+ "tracing-subscriber",
  "tracing-test",
  "wat",
 ]
@@ -5029,6 +5057,7 @@ dependencies = [
  "ironclaw_product_context",
  "ironclaw_product_workflow",
  "ironclaw_product_workflow_storage",
+ "ironclaw_projects",
  "ironclaw_reborn",
  "ironclaw_reborn_composition",
  "ironclaw_reborn_config",
@@ -5140,11 +5169,13 @@ dependencies = [
  "async-stream",
  "async-trait",
  "axum 0.8.9",
+ "base64 0.22.1",
  "chrono",
  "futures-core",
  "hex",
  "http 1.4.1",
  "http-body-util",
+ "ironclaw_attachments",
  "ironclaw_host_api",
  "ironclaw_product_adapters",
  "ironclaw_turns",
@@ -5306,6 +5337,7 @@ dependencies = [
  "thiserror 2.0.18",
  "tracing",
  "url",
+ "urlencoding",
 ]
 
 [[package]]
@@ -5486,12 +5518,14 @@ name = "ironclaw_turns"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "blake3",
  "chrono",
  "chrono-tz",
  "hex",
  "ironclaw_filesystem",
  "ironclaw_host_api",
  "serde",
+ "serde_jcs",
  "serde_json",
  "sha2 0.10.9",
  "static_assertions",

@@ -80,6 +80,7 @@ function AuthenticatedLayout({ auth }) {
         profile=${auth.profile}
         isChecking=${auth.isChecking}
         isAdmin=${auth.isAdmin}
+        rebornProjectsEnabled=${auth.rebornProjectsEnabled}
         onSignOut=${auth.signOut}
       />
     <//>

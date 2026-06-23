@@ -62,6 +62,38 @@ const NEARAI_MCP_MANIFEST: &str =
 #[cfg(feature = "slack-v2-host-beta")]
 const SLACK_MANIFEST: &str =
     include_str!("../../ironclaw_first_party_extensions/assets/slack/manifest.toml");
+const NEARAI_EXTENSION_ID: &str = HostManagedCredentialExtension::NearAi.id();
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum HostManagedCredentialExtension {
+    NearAi,
+}
+
+impl HostManagedCredentialExtension {
+    const fn id(self) -> &'static str {
+        match self {
+            Self::NearAi => "nearai",
+        }
+    }
+
+    fn from_package_ref(package_ref: &LifecyclePackageRef) -> Option<Self> {
+        #[cfg(not(feature = "root-llm-provider"))]
+        {
+            let _ = package_ref;
+            None
+        }
+        #[cfg(feature = "root-llm-provider")]
+        {
+            if package_ref.kind != LifecyclePackageKind::Extension {
+                return None;
+            }
+            match package_ref.id.as_str() {
+                id if id == Self::NearAi.id() => Some(Self::NearAi),
+                _ => None,
+            }
+        }
+    }
+}
 
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) struct AvailableExtensionAsset {
@@ -108,13 +140,24 @@ impl AvailableExtensionPackage {
             visible_capability_ids,
             visible_read_only_capability_ids,
             credential_requirements: credential_requirements(self),
-            onboarding: onboarding(self.package_ref.id.as_str()),
+            onboarding: onboarding(&self.package_ref),
         }
     }
 }
 
-fn onboarding(package_id: &str) -> Option<LifecycleExtensionOnboarding> {
-    match package_id {
+fn onboarding(package_ref: &LifecyclePackageRef) -> Option<LifecycleExtensionOnboarding> {
+    if is_host_managed_credential_extension(package_ref) {
+        return Some(onboarding_message(
+            "NEAR AI MCP uses the NEAR AI credentials configured for the assistant. If NEAR AI is not configured yet, add a NEAR AI API key in assistant inference settings before activating this extension.",
+            Some(
+                "Configure NEAR AI for the assistant with an API key; MCP reuses that credential.",
+            ),
+            None,
+            "After NEAR AI is configured for the assistant, activate NEAR AI MCP to publish its tools.",
+        ));
+    }
+
+    match package_ref.id.as_str() {
         "github" => Some(onboarding_message(
             "GitHub needs a personal access token before its repository and pull request tools can run.",
             Some(
@@ -140,12 +183,6 @@ fn onboarding(package_id: &str) -> Option<LifecycleExtensionOnboarding> {
             Some("Authorize the Notion workspace that IronClaw should access."),
             None,
             "After authorization completes, activate Notion to publish its MCP tools.",
-        )),
-        "nearai" => Some(onboarding_message(
-            "NEAR AI needs an API key before its MCP tools can run.",
-            Some("Paste the NEAR AI API key IronClaw should use."),
-            None,
-            "After saving the API key, activate NEAR AI to publish its MCP tools.",
         )),
         "web-access" => Some(onboarding_message(
             "Web Access does not need credentials. Activate it to make web search and saved-result retrieval tools available.",
@@ -181,9 +218,17 @@ fn runtime_kind(runtime: &ExtensionRuntime) -> LifecycleExtensionRuntimeKind {
     }
 }
 
+fn is_host_managed_credential_extension(package_ref: &LifecyclePackageRef) -> bool {
+    HostManagedCredentialExtension::from_package_ref(package_ref).is_some()
+}
+
 fn credential_requirements(
     package: &AvailableExtensionPackage,
 ) -> Vec<LifecycleExtensionCredentialRequirement> {
+    if is_host_managed_credential_extension(&package.package_ref) {
+        return Vec::new();
+    }
+
     let mut groups: Vec<CredentialRequirementGroup> = Vec::new();
     for capability in &package.package.manifest.capabilities {
         for requirement in &capability.runtime_credentials {
@@ -403,7 +448,12 @@ fn nearai_mcp_package(
     config: Option<&NearAiMcpBootstrapConfig>,
 ) -> Result<AvailableExtensionPackage, ProductWorkflowError> {
     let manifest = nearai_mcp_manifest_toml_for_config(config)?;
-    bundled_extension_package("nearai", "NEAR AI", &manifest, nearai_mcp_assets(&manifest))
+    bundled_extension_package(
+        NEARAI_EXTENSION_ID,
+        "NEAR AI",
+        &manifest,
+        nearai_mcp_assets(&manifest),
+    )
 }
 
 fn google_calendar_package() -> Result<AvailableExtensionPackage, ProductWorkflowError> {
@@ -672,6 +722,7 @@ fn github_assets() -> Vec<AvailableExtensionAsset> {
         github_schema_asset!("get_pull_request_files.input.v1.json"),
         github_schema_asset!("get_pull_request_reviews.input.v1.json"),
         github_schema_asset!("get_repo.input.v1.json"),
+        github_schema_asset!("get_authenticated_user.input.v1.json"),
         github_schema_asset!("get_workflow_runs.input.v1.json"),
         github_schema_asset!("handle_webhook.input.v1.json"),
         github_schema_asset!("list_branches.input.v1.json"),
@@ -708,6 +759,7 @@ fn github_assets() -> Vec<AvailableExtensionAsset> {
         github_prompt_asset!("get_pull_request_files.md"),
         github_prompt_asset!("get_pull_request_reviews.md"),
         github_prompt_asset!("get_repo.md"),
+        github_prompt_asset!("get_authenticated_user.md"),
         github_prompt_asset!("get_workflow_runs.md"),
         github_prompt_asset!("handle_webhook.md"),
         github_prompt_asset!("list_branches.md"),
@@ -1477,7 +1529,7 @@ where
 fn reserved_host_bundled_extension_id(extension_id: &ExtensionId) -> bool {
     matches!(
         extension_id.as_str(),
-        "github" | "notion" | "web-access" | "nearai" | "slack"
+        "github" | "notion" | "web-access" | "slack" | NEARAI_EXTENSION_ID
     ) || is_gsuite_extension_id(extension_id)
 }
 
@@ -1584,7 +1636,7 @@ mod tests {
             "github",
             "notion",
             "web-access",
-            "nearai",
+            NEARAI_EXTENSION_ID,
             "google-calendar",
             "google-docs",
             "google-drive",
@@ -1686,6 +1738,7 @@ mod tests {
         }
 
         assert!(allowed_read_only.contains("github.get_repo"));
+        assert!(allowed_read_only.contains("github.get_authenticated_user"));
         assert!(allowed_read_only.contains("github.list_branches"));
         assert!(ask_required.contains("github.search_code"));
         assert!(ask_required.contains("github.create_issue"));
@@ -1739,7 +1792,11 @@ mod tests {
                 "Google Calendar needs Google OAuth authorization",
             ),
             ("notion", "Notion needs OAuth authorization"),
-            ("nearai", "NEAR AI needs an API key"),
+            #[cfg(feature = "root-llm-provider")]
+            (
+                NEARAI_EXTENSION_ID,
+                "NEAR AI MCP uses the NEAR AI credentials",
+            ),
             ("web-access", "Web Access does not need credentials"),
         ] {
             let package_ref =
@@ -1781,7 +1838,7 @@ mod tests {
                         }),
                     "{extension_id} configure next step should describe post-authorization activation"
                 );
-            } else if matches!(extension_id, "github" | "nearai") {
+            } else if extension_id == "github" {
                 assert!(
                     onboarding
                         .credential_instructions
@@ -1803,6 +1860,19 @@ mod tests {
                         }),
                     "{extension_id} configure next step should describe activation after saving credentials"
                 );
+            } else if extension_id == NEARAI_EXTENSION_ID {
+                assert_eq!(
+                    onboarding.credential_instructions.as_deref(),
+                    Some(
+                        "Configure NEAR AI for the assistant with an API key; MCP reuses that credential."
+                    )
+                );
+                assert_eq!(
+                    onboarding.credential_next_step.as_deref(),
+                    Some(
+                        "After NEAR AI is configured for the assistant, activate NEAR AI MCP to publish its tools."
+                    )
+                );
             } else if extension_id == "web-access" {
                 assert_eq!(
                     onboarding.credential_next_step.as_deref(),
@@ -1819,6 +1889,59 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn host_managed_credential_extension_detection_is_centralized() {
+        let nearai_ref =
+            LifecyclePackageRef::new(LifecyclePackageKind::Extension, NEARAI_EXTENSION_ID)
+                .expect("valid NEAR AI extension ref");
+        let notion_ref = LifecyclePackageRef::new(LifecyclePackageKind::Extension, "notion")
+            .expect("valid Notion extension ref");
+        let mcp_ref = LifecyclePackageRef::new(LifecyclePackageKind::Mcp, NEARAI_EXTENSION_ID)
+            .expect("valid MCP ref");
+
+        #[cfg(feature = "root-llm-provider")]
+        assert!(is_host_managed_credential_extension(&nearai_ref));
+        #[cfg(not(feature = "root-llm-provider"))]
+        assert!(!is_host_managed_credential_extension(&nearai_ref));
+        assert!(!is_host_managed_credential_extension(&notion_ref));
+        assert!(!is_host_managed_credential_extension(&mcp_ref));
+    }
+
+    #[test]
+    fn bundled_nearai_keeps_runtime_credentials_out_of_browser_setup_summary() {
+        let catalog = AvailableExtensionCatalog::from_first_party_assets().unwrap();
+        let package_ref =
+            LifecyclePackageRef::new(LifecyclePackageKind::Extension, NEARAI_EXTENSION_ID).unwrap();
+        let package = catalog.resolve(&package_ref).unwrap();
+        let summary = package.summary();
+
+        #[cfg(feature = "root-llm-provider")]
+        assert!(
+            summary.credential_requirements.is_empty(),
+            "NEAR AI MCP uses assistant-level NEAR AI credentials and must not \
+             project an extension credential setup prompt"
+        );
+        #[cfg(not(feature = "root-llm-provider"))]
+        assert!(
+            !summary.credential_requirements.is_empty(),
+            "NEAR AI MCP should only suppress extension credential setup prompts \
+             when the root NEAR AI provider owns the credential"
+        );
+
+        let search = package
+            .package
+            .manifest
+            .capabilities
+            .iter()
+            .find(|capability| capability.id.as_str() == "nearai.web_search")
+            .expect("nearai web search capability");
+        assert_eq!(search.runtime_credentials.len(), 1);
+        assert_eq!(
+            search.runtime_credentials[0].handle,
+            ironclaw_host_api::SecretHandle::new("llm_nearai_api_key").unwrap()
+        );
     }
 
     #[test]

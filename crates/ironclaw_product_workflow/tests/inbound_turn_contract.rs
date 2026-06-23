@@ -9,9 +9,10 @@ use chrono::Utc;
 use ironclaw_host_api::{AgentId, TenantId, ThreadId, UserId};
 use ironclaw_loop_support::{
     CapabilityAllowSet, CapabilityResolveError, CapabilityResultWrite,
-    CapabilitySurfaceProfileResolver, EmptyLoopCapabilityPort, HostIdentityContextBuildError,
-    HostIdentityContextCandidate, HostIdentityContextSource, HostInputBatch, HostInputQueue,
-    HostInputQueueError, HostManagedModelError, HostManagedModelGateway, HostManagedModelRequest,
+    CapabilitySurfaceProfileResolver, CapabilityWriteResult, EmptyLoopCapabilityPort,
+    EmptyUserProfileSource, HostIdentityContextBuildError, HostIdentityContextCandidate,
+    HostIdentityContextSource, HostInputBatch, HostInputQueue, HostInputQueueError,
+    HostManagedModelError, HostManagedModelGateway, HostManagedModelRequest,
     HostManagedModelResponse, JsonSpawnSubagentInputCodec, LoopCapabilityPortFactory,
     LoopCapabilityResultWriter, ProductLiveCancellationProbe, RunCancellationFactory,
     RunCancellationHandle,
@@ -45,10 +46,10 @@ use ironclaw_threads::{
 use ironclaw_turns::{
     CancelRunRequest, CancelRunResponse, DefaultTurnCoordinator, EventCursor, GetRunStateRequest,
     IdempotencyKey, InMemoryCheckpointStateStore, InMemoryLoopCheckpointStore,
-    InMemoryTurnStateStore, LoopResultRef, ResumeTurnRequest, ResumeTurnResponse, RunProfileId,
-    RunProfileVersion, SanitizedCancelReason, SubmitTurnRequest, SubmitTurnResponse, ThreadBusy,
-    TurnActor, TurnCoordinator, TurnError, TurnId, TurnOriginKind, TurnRunId, TurnRunState,
-    TurnRunWake, TurnScope, TurnStateStore, TurnStatus,
+    InMemoryTurnStateStore, ResumeTurnRequest, ResumeTurnResponse, RunProfileId, RunProfileVersion,
+    SanitizedCancelReason, SubmitTurnRequest, SubmitTurnResponse, ThreadBusy, TurnActor,
+    TurnCoordinator, TurnError, TurnId, TurnOriginKind, TurnRunId, TurnRunState, TurnRunWake,
+    TurnScope, TurnStateStore, TurnStatus,
     run_profile::{
         AgentLoopHostError, InMemoryLoopHostMilestoneSink, InstructionSafetyContext,
         LoopCancelReasonKind, LoopCapabilityPort, LoopInputAckToken, LoopInputCursorToken,
@@ -243,7 +244,7 @@ impl LoopCapabilityResultWriter for UnusedCapabilityResultWriter {
     async fn write_capability_result(
         &self,
         _write: CapabilityResultWrite<'_>,
-    ) -> Result<(LoopResultRef, u64), AgentLoopHostError> {
+    ) -> Result<CapabilityWriteResult, AgentLoopHostError> {
         Err(AgentLoopHostError::new(
             ironclaw_turns::run_profile::AgentLoopHostErrorKind::InvalidInvocation,
             "unused capability result writer",
@@ -692,6 +693,7 @@ async fn user_message_no_profile_uses_product_live_runtime_and_persists_reply() 
         skill_context_source: None,
         input_queue: Some(Arc::new(EmptyInputQueue)),
         identity_context_source: Arc::new(EmptyIdentityContextSource),
+        user_profile_source: Arc::new(EmptyUserProfileSource),
         model_policy_guard: Some(Arc::new(NoOpPolicyGuard)),
         model_budget_accountant: Some(Arc::new(NoOpBudgetAccountant)),
         safety_context: Some(test_safety_context()),
@@ -699,13 +701,11 @@ async fn user_message_no_profile_uses_product_live_runtime_and_persists_reply() 
         communication_context_provider: None,
         hook_security_audit_sink: None,
         turn_event_sink: None,
+        scheduler_wake_wiring: None,
     })
     .expect("product-live runtime should build");
 
-    let cancel = CancellationToken::new();
-    let worker = Arc::clone(&composition.worker);
-    let worker_cancel = cancel.clone();
-    let worker_handle = tokio::spawn(async move { worker.run(worker_cancel).await });
+    // The scheduler starts automatically inside build_product_live_planned_runtime.
     let service = DefaultInboundTurnService::new(
         binding_service,
         thread_service.clone(),
@@ -764,8 +764,7 @@ async fn user_message_no_profile_uses_product_live_runtime_and_persists_reply() 
         }
     };
 
-    cancel.cancel();
-    worker_handle.await.expect("worker should stop cleanly");
+    composition.scheduler_handle.shutdown().await;
 
     assert_eq!(state.status, TurnStatus::Completed);
     assert_eq!(
@@ -862,6 +861,7 @@ async fn user_message_no_profile_can_cancel_product_live_run_from_product_path()
         skill_context_source: None,
         input_queue: Some(Arc::new(EmptyInputQueue)),
         identity_context_source: Arc::new(EmptyIdentityContextSource),
+        user_profile_source: Arc::new(EmptyUserProfileSource),
         model_policy_guard: Some(Arc::new(NoOpPolicyGuard)),
         model_budget_accountant: Some(Arc::new(NoOpBudgetAccountant)),
         safety_context: Some(test_safety_context()),
@@ -869,13 +869,11 @@ async fn user_message_no_profile_can_cancel_product_live_run_from_product_path()
         communication_context_provider: None,
         hook_security_audit_sink: None,
         turn_event_sink: None,
+        scheduler_wake_wiring: None,
     })
     .expect("product-live runtime should build");
 
-    let cancel = CancellationToken::new();
-    let worker = Arc::clone(&composition.worker);
-    let worker_cancel = cancel.clone();
-    let worker_handle = tokio::spawn(async move { worker.run(worker_cancel).await });
+    // The scheduler starts automatically inside build_product_live_planned_runtime.
     let service = DefaultInboundTurnService::new(
         binding_service,
         thread_service.clone(),
@@ -953,8 +951,7 @@ async fn user_message_no_profile_can_cancel_product_live_run_from_product_path()
     .await
     .expect("product live run should finish after cancellation");
 
-    cancel.cancel();
-    worker_handle.await.expect("worker should stop cleanly");
+    composition.scheduler_handle.shutdown().await;
 
     assert_eq!(state.status, TurnStatus::Cancelled);
     // Reborn-integration's executor preserves the assistant reply that arrived
@@ -1044,6 +1041,7 @@ async fn product_live_runtime_rejects_unretained_cancellation_factory() {
         skill_context_source: None,
         input_queue: Some(Arc::new(EmptyInputQueue)),
         identity_context_source: Arc::new(EmptyIdentityContextSource),
+        user_profile_source: Arc::new(EmptyUserProfileSource),
         model_policy_guard: Some(Arc::new(NoOpPolicyGuard)),
         model_budget_accountant: Some(Arc::new(NoOpBudgetAccountant)),
         safety_context: Some(test_safety_context()),
@@ -1051,6 +1049,7 @@ async fn product_live_runtime_rejects_unretained_cancellation_factory() {
         communication_context_provider: None,
         hook_security_audit_sink: None,
         turn_event_sink: None,
+        scheduler_wake_wiring: None,
     }) {
         Ok(_) => panic!("product-live readiness must reject inert cancellation"),
         Err(error) => error,

@@ -34,4 +34,4 @@ test-support = []
 
 [dev-dependencies]
 ironclaw_threads = { path = ".", features = ["test-support"] }
-tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "time"] }

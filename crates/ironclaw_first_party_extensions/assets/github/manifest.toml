@@ -1,7 +1,7 @@
 schema_version = "reborn.extension_manifest.v2"
 id = "github"
 name = "GitHub"
-version = "0.2.6"
+version = "0.2.7"
 description = "GitHub repository, issue, pull request, search, branch, file, release, workflow, fork, and webhook capabilities."
 trust = "first_party_requested"
 
@@ -272,8 +272,22 @@ prompt_doc_ref = "prompts/github/merge_pull_request.md"
 required_host_ports = ["host.runtime.http_egress"]
 
 [[capability_provider.tools.capabilities]]
+id = "github.get_authenticated_user"
+description = "Get the authenticated GitHub user for the configured token."
+effects = ["network", "use_secret"]
+runtime_credentials = [
+  { handle = "github_runtime_token", source = { type = "product_auth_account", provider = "github" }, audience = { scheme = "https", host_pattern = "api.github.com" }, target = { type = "header", name = "authorization", prefix = "Bearer " } },
+]
+default_permission = "allow"
+visibility = "model"
+input_schema_ref = "schemas/github/get_authenticated_user.input.v1.json"
+output_schema_ref = "schemas/github/raw_output.v1.json"
+prompt_doc_ref = "prompts/github/get_authenticated_user.md"
+required_host_ports = ["host.runtime.http_egress"]
+
+[[capability_provider.tools.capabilities]]
 id = "github.list_repos"
-description = "List public repositories for a user."
+description = "List repositories visible to the authenticated GitHub user, or public repositories for a named user or organization."
 effects = ["network", "use_secret"]
 runtime_credentials = [
   { handle = "github_runtime_token", source = { type = "product_auth_account", provider = "github" }, audience = { scheme = "https", host_pattern = "api.github.com" }, target = { type = "header", name = "authorization", prefix = "Bearer " } },

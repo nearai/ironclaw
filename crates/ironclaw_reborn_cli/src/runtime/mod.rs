@@ -5,17 +5,21 @@ use std::{future::Future, thread};
 
 use anyhow::Context;
 #[cfg(feature = "webui-v2-beta")]
-use ironclaw_reborn_composition::host_api::{AgentId, TenantId, UserId};
+use ironclaw_reborn_composition::host_api::UserId;
+use ironclaw_reborn_composition::host_api::{AgentId, TenantId};
+#[cfg(feature = "postgres")]
+use ironclaw_reborn_composition::hosted_single_tenant_runtime_policy;
+use ironclaw_reborn_composition::{
+    CredentialRefreshSettings, DEFAULT_TURN_RUNNER_WORKER_COUNT, OAuthClientConfig,
+    OperatorLogLayer, PollSettings, RebornBuildInput, RebornCompositionProfile,
+    RebornLocalRuntimeProfileOptions, RebornRuntimeIdentity, RebornRuntimeInput,
+    TurnRunnerSettings, build_reborn_runtime, local_runtime_build_input_with_options,
+    nearai_mcp_bootstrap_config_from_env,
+};
 #[cfg(feature = "webui-v2-beta")]
 use ironclaw_reborn_composition::{
     LocalTriggerAccessReconciliation, LocalTriggerAccessRole, LocalTriggerAccessSource,
     open_local_trigger_access_store,
-};
-use ironclaw_reborn_composition::{
-    OAuthClientConfig, OperatorLogLayer, PollSettings, RebornBuildInput, RebornCompositionProfile,
-    RebornLocalRuntimeProfileOptions, RebornRuntimeIdentity, RebornRuntimeInput,
-    TurnRunnerSettings, build_reborn_runtime, local_runtime_build_input_with_options,
-    nearai_mcp_bootstrap_config_from_env,
 };
 use ironclaw_reborn_config::{
     REBORN_PROFILE_ENV, RebornBootConfig, RebornProfile, seed_default_config_file_if_missing,
@@ -32,17 +36,109 @@ mod trigger_poller;
 use trigger_poller::trigger_poller_settings;
 
 pub(crate) fn init_tracing() {
-    use tracing_subscriber::EnvFilter;
+    use tracing_subscriber::Layer;
     use tracing_subscriber::fmt;
     use tracing_subscriber::prelude::*;
-    let filter = EnvFilter::try_from_env("IRONCLAW_REBORN_LOG").unwrap_or_else(|_| {
-        EnvFilter::new("info,ironclaw_reborn=info,ironclaw_reborn_composition=info")
-    });
+    // stderr/fmt layer: operator-facing console output. Stays at `info` by
+    // default so `debug!` diagnostics never reach (and corrupt) a REPL/TUI
+    // terminal — the repo's logging invariant. Broad env overrides are still
+    // guarded from third-party debug floods unless those targets are explicit.
+    let stderr_filter = reborn_env_filter(
+        "IRONCLAW_REBORN_LOG",
+        "info,ironclaw_reborn=info,ironclaw_reborn_composition=info",
+    );
+    // Operator Logs buffer: captures run diagnostics at `debug` for the
+    // ironclaw run-path crates so the scoped (thread/run) Logs panel is
+    // populated, while those `debug!` events are NOT written to stderr. This is
+    // a *separate* per-layer filter, so terminal safety and Logs-panel
+    // visibility are decoupled. Broad env overrides are guarded the same way
+    // so the browser log buffer is not filled by low-level protocol crates.
+    let operator_filter = reborn_env_filter(
+        "IRONCLAW_REBORN_OPERATOR_LOG",
+        "info,ironclaw_reborn=debug,ironclaw_host_runtime=debug",
+    );
     let _ = tracing_subscriber::registry()
-        .with(filter)
-        .with(fmt::layer().with_writer(std::io::stderr))
-        .with(OperatorLogLayer)
+        .with(
+            fmt::layer()
+                .with_writer(std::io::stderr)
+                .with_filter(stderr_filter),
+        )
+        .with(OperatorLogLayer.with_filter(operator_filter))
         .try_init();
+}
+
+const REBORN_NOISY_LOG_TARGETS: &[(&str, &str)] = &[
+    ("tokio_postgres", "warn"),
+    ("deadpool_postgres", "warn"),
+    ("h2", "warn"),
+    ("hyper", "warn"),
+    ("hyper_util", "warn"),
+    ("reqwest", "warn"),
+    ("rustls", "warn"),
+    ("tower", "warn"),
+    ("tower_http", "warn"),
+    ("ironclaw_llm", "info"),
+];
+
+fn reborn_env_filter(env_key: &str, default_filter: &str) -> tracing_subscriber::EnvFilter {
+    let default_filter = protect_reborn_log_filter(default_filter);
+    match std::env::var(env_key) {
+        Ok(raw_filter) => {
+            tracing_subscriber::EnvFilter::try_new(protect_reborn_log_filter(&raw_filter))
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new(default_filter))
+        }
+        Err(_) => tracing_subscriber::EnvFilter::new(default_filter),
+    }
+}
+
+fn protect_reborn_log_filter(raw_filter: &str) -> String {
+    let mut filter = if raw_filter.trim().is_empty() {
+        "info".to_string()
+    } else {
+        raw_filter.trim().to_string()
+    };
+    for (target, level) in REBORN_NOISY_LOG_TARGETS {
+        if !log_filter_mentions_target(&filter, target) {
+            filter.push(',');
+            filter.push_str(target);
+            filter.push('=');
+            filter.push_str(level);
+        }
+    }
+    filter
+}
+
+fn log_filter_mentions_target(filter: &str, target: &str) -> bool {
+    let child_prefix = format!("{target}::");
+    filter
+        .split(',')
+        .filter_map(log_directive_target)
+        .any(|directive| directive == target || directive.starts_with(&child_prefix))
+}
+
+fn log_directive_target(directive: &str) -> Option<&str> {
+    let directive = directive.trim();
+    if directive.is_empty() {
+        return None;
+    }
+    let target = match directive.split_once('=') {
+        Some((target, _level)) => target.trim(),
+        None if is_log_level_directive(directive) => return None,
+        None => directive,
+    };
+    let target = target.split_once('[').map_or(target, |(target, _)| target);
+    if target.is_empty() || is_log_level_directive(target) {
+        None
+    } else {
+        Some(target)
+    }
+}
+
+fn is_log_level_directive(value: &str) -> bool {
+    matches!(
+        value.trim().to_ascii_lowercase().as_str(),
+        "off" | "error" | "warn" | "info" | "debug" | "trace"
+    )
 }
 
 pub(crate) fn block_on_cli<F, T, E>(future: F) -> anyhow::Result<T>
@@ -141,11 +237,9 @@ async fn with_run_local_trigger_fire_access_checker(
                 runtime_input.identity.agent_id
             )
         })?;
-        let user_store_path = config
-            .home()
-            .path()
-            .join("local-dev")
-            .join("reborn-local-dev.db");
+        let profile = effective_profile(config, config_file.as_ref())?;
+        let user_store_path =
+            local_runtime_storage_root(config, profile).join("reborn-local-dev.db");
         let access_store = open_local_trigger_access_store(&user_store_path)
             .await
             .context("failed to initialize local trigger-fire access store for `run`")?;
@@ -351,6 +445,50 @@ pub(crate) fn build_runtime_input(
     build_runtime_input_with_options(config, caller, RuntimeInputOptions::default())
 }
 
+/// Build [`CredentialRefreshSettings`] for the proactive Google OAuth keepalive
+/// worker.
+///
+/// Enabled by default on the local `serve` surface (so refresh tokens stay warm
+/// for long-running deployments) and disabled for every other caller, mirroring
+/// the trigger-poller default. `IRONCLAW_CREDENTIAL_REFRESH_ENABLED` is an
+/// operator override: `1`/`true` forces it on, `0`/`false` is a kill-switch; a
+/// present-but-blank value falls through to the caller default.
+fn credential_refresh_settings(
+    caller: RuntimeInputCaller,
+) -> anyhow::Result<CredentialRefreshSettings> {
+    let base = if caller == RuntimeInputCaller::Serve {
+        CredentialRefreshSettings::enabled()
+    } else {
+        CredentialRefreshSettings::default()
+    };
+    apply_credential_refresh_override(base, std::env::var("IRONCLAW_CREDENTIAL_REFRESH_ENABLED"))
+}
+
+/// Apply the `IRONCLAW_CREDENTIAL_REFRESH_ENABLED` operator override to a base
+/// settings value. Pure (env lookup is passed in) so the override semantics are
+/// unit-testable without mutating process-global environment state.
+fn apply_credential_refresh_override(
+    mut settings: CredentialRefreshSettings,
+    raw: Result<String, std::env::VarError>,
+) -> anyhow::Result<CredentialRefreshSettings> {
+    match raw {
+        Ok(raw) => match raw.trim().to_ascii_lowercase().as_str() {
+            "" => {}
+            "1" | "true" => settings.enabled = true,
+            "0" | "false" => settings.enabled = false,
+            _ => anyhow::bail!(
+                "IRONCLAW_CREDENTIAL_REFRESH_ENABLED must be one of 1, true, 0, false"
+            ),
+        },
+        Err(std::env::VarError::NotPresent) => {}
+        Err(std::env::VarError::NotUnicode(_)) => {
+            anyhow::bail!("IRONCLAW_CREDENTIAL_REFRESH_ENABLED contains non-UTF-8 bytes")
+        }
+    }
+
+    Ok(settings)
+}
+
 pub(crate) fn build_runtime_input_with_options(
     config: &RebornBootConfig,
     caller: RuntimeInputCaller,
@@ -365,6 +503,7 @@ pub(crate) fn build_runtime_input_with_options(
             runtime_services.config_file.as_ref(),
             caller,
         )?)
+        .with_credential_refresh_settings(credential_refresh_settings(caller)?)
         .with_poll_settings(PollSettings {
             interval: Duration::from_millis(200),
             max_total: Duration::from_secs(180),
@@ -430,7 +569,7 @@ pub(crate) fn build_services_input_with_options(
     reject_unsupported_runtime_sections(config_file.as_ref(), caller, profile)?;
     let mut services_input = match profile {
         RebornProfile::LocalDev | RebornProfile::LocalDevYolo => {
-            let local_dev_root: PathBuf = config.home().path().join("local-dev");
+            let local_dev_root = local_runtime_storage_root(config, profile);
             let workspace_root = std::env::current_dir()
                 .context("failed to resolve current directory for local-dev workspace")?;
             let mut services_input = local_runtime_build_input_with_options(
@@ -447,18 +586,24 @@ pub(crate) fn build_services_input_with_options(
                      got profile={profile}."
                 )
             })?
-            .with_local_dev_workspace_root(workspace_root);
-            if services_input.requires_local_dev_confirmed_host_home_root() {
+            .with_local_runtime_workspace_root(workspace_root);
+            if services_input.requires_local_runtime_confirmed_host_home_root() {
                 let host_home_root =
                     confirmed_host_home_root(options).context("local-dev-yolo host access")?;
                 services_input =
-                    services_input.with_local_dev_confirmed_host_home_root(host_home_root);
+                    services_input.with_local_runtime_confirmed_host_home_root(host_home_root);
             }
             services_input = services_input.with_optional_nearai_mcp_bootstrap_config(
                 nearai_mcp_bootstrap_config_from_env().context("NEAR AI MCP bootstrap config")?,
             );
             services_input
         }
+        RebornProfile::HostedSingleTenant => build_hosted_single_tenant_services_input(
+            profile,
+            owner_id,
+            config,
+            config_file.as_ref(),
+        )?,
         RebornProfile::Production | RebornProfile::MigrationDryRun => {
             // MigrationDryRun needs production storage handles so follow-up migration
             // code can inspect durable schema state; this branch only constructs
@@ -473,11 +618,55 @@ pub(crate) fn build_services_input_with_options(
     {
         services_input = services_input.with_google_oauth_backend(client);
     }
+    let identity = runtime_identity(config_file.as_ref());
+    let tenant_id = TenantId::new(identity.tenant_id).context("invalid runtime tenant identity")?;
+    let agent_id = AgentId::new(identity.agent_id).context("invalid runtime agent identity")?;
+    services_input = services_input.with_local_runtime_identity(tenant_id, agent_id);
 
     Ok(RuntimeServicesInput {
         services_input,
         config_file,
     })
+}
+
+#[cfg(feature = "postgres")]
+fn build_hosted_single_tenant_services_input(
+    profile: RebornProfile,
+    owner_id: &str,
+    config: &RebornBootConfig,
+    config_file: Option<&ironclaw_reborn_config::RebornConfigFile>,
+) -> anyhow::Result<RebornBuildInput> {
+    let workspace_root = std::env::current_dir()
+        .context("failed to resolve current directory for hosted single-tenant workspace")?;
+    let runtime_policy = hosted_single_tenant_runtime_policy()
+        .context("failed to resolve hosted single-tenant runtime policy")?;
+    Ok(
+        RebornBuildInput::hosted_single_tenant_postgres_from_config_and_env(
+            composition_profile(profile),
+            owner_id,
+            local_runtime_storage_root(config, profile),
+            config_file,
+        )
+        .map_err(anyhow::Error::from)?
+        .with_runtime_policy(runtime_policy)
+        .with_local_runtime_workspace_root(workspace_root)
+        .with_optional_nearai_mcp_bootstrap_config(
+            nearai_mcp_bootstrap_config_from_env().context("NEAR AI MCP bootstrap config")?,
+        ),
+    )
+}
+
+#[cfg(not(feature = "postgres"))]
+fn build_hosted_single_tenant_services_input(
+    profile: RebornProfile,
+    _owner_id: &str,
+    _config: &RebornBootConfig,
+    _config_file: Option<&ironclaw_reborn_config::RebornConfigFile>,
+) -> anyhow::Result<RebornBuildInput> {
+    anyhow::bail!(
+        "profile={profile} requires a binary built with the `postgres` feature for hosted \
+         single-tenant storage; the default PostgreSQL URL env var is IRONCLAW_REBORN_POSTGRES_URL"
+    )
 }
 
 #[cfg(feature = "postgres")]
@@ -599,10 +788,24 @@ fn confirmed_host_home_root(options: RuntimeInputOptions) -> anyhow::Result<Path
         .context("HOME or USERPROFILE must be set")
 }
 
+pub(crate) fn local_runtime_storage_root(
+    config: &RebornBootConfig,
+    profile: RebornProfile,
+) -> PathBuf {
+    match profile {
+        RebornProfile::LocalDev
+        | RebornProfile::LocalDevYolo
+        | RebornProfile::Production
+        | RebornProfile::MigrationDryRun => config.home().path().join("local-dev"),
+        RebornProfile::HostedSingleTenant => config.home().path().join("hosted-single-tenant"),
+    }
+}
+
 fn composition_profile(profile: RebornProfile) -> RebornCompositionProfile {
     match profile {
         RebornProfile::LocalDev => RebornCompositionProfile::LocalDev,
         RebornProfile::LocalDevYolo => RebornCompositionProfile::LocalDevYolo,
+        RebornProfile::HostedSingleTenant => RebornCompositionProfile::HostedSingleTenant,
         RebornProfile::Production => RebornCompositionProfile::Production,
         RebornProfile::MigrationDryRun => RebornCompositionProfile::MigrationDryRun,
     }
@@ -729,6 +932,25 @@ fn reject_unsupported_runtime_sections(
     }
 }
 
+const MAX_WORKER_COUNT: usize = 32;
+
+/// Resolve a `[runner]` concurrency cap against the in-effect default.
+///
+/// - `None` (field absent from the file) → keep `current_default` (the value
+///   `TurnRunnerSettings::default()` already placed in `settings`).
+/// - `Some(0)` → explicit "unlimited" sentinel → `None`.
+/// - `Some(n)` → that cap.
+fn resolve_concurrency_cap(
+    raw: Option<u32>,
+    current_default: Option<std::num::NonZeroU32>,
+) -> Option<std::num::NonZeroU32> {
+    match raw {
+        None => current_default,
+        Some(0) => None,
+        Some(n) => std::num::NonZeroU32::new(n),
+    }
+}
+
 fn runner_settings(
     config_file: Option<&ironclaw_reborn_config::RebornConfigFile>,
 ) -> anyhow::Result<TurnRunnerSettings> {
@@ -748,6 +970,41 @@ fn runner_settings(
             }
             settings.poll_interval = Duration::from_millis(ms);
         }
+        // worker_count: None or Some(0) → default; clamp at MAX_WORKER_COUNT.
+        let raw_worker_count = runner.worker_count.unwrap_or(0); // silent-ok: settings read [runner].worker_count — None/0 is an explicit "use default worker count" sentinel; clamped to MAX_WORKER_COUNT to protect scheduler capacity.
+        settings.worker_count = if raw_worker_count == 0 {
+            DEFAULT_TURN_RUNNER_WORKER_COUNT
+        } else {
+            let clamped = raw_worker_count.min(MAX_WORKER_COUNT);
+            if clamped < raw_worker_count {
+                tracing::debug!(
+                    requested = raw_worker_count,
+                    clamped = MAX_WORKER_COUNT,
+                    "config file [runner].worker_count exceeds maximum; clamping"
+                );
+            }
+            // clamped is in [1, 32]: guaranteed non-zero by min() + the zero branch above.
+            std::num::NonZeroUsize::new(clamped).ok_or_else(|| {
+                anyhow::anyhow!(
+                    "config file [runner].worker_count resolved to zero (raw={raw_worker_count})"
+                )
+            })?
+        };
+
+        // Each cap: absent in the file → keep the struct default already in
+        // `settings`; explicit `0` → "unlimited" sentinel (None); positive → cap.
+        settings.max_concurrent_runs_per_user = resolve_concurrency_cap(
+            runner.max_concurrent_runs_per_user,
+            settings.max_concurrent_runs_per_user,
+        );
+        settings.max_concurrent_trigger_runs = resolve_concurrency_cap(
+            runner.max_concurrent_trigger_runs,
+            settings.max_concurrent_trigger_runs,
+        );
+        settings.max_concurrent_conversation_runs = resolve_concurrency_cap(
+            runner.max_concurrent_conversation_runs,
+            settings.max_concurrent_conversation_runs,
+        );
     }
     Ok(settings)
 }
@@ -756,20 +1013,225 @@ fn runner_settings(
 mod tests {
     use std::collections::HashMap;
 
+    use ironclaw_reborn_composition::{
+        CredentialRefreshSettings, RebornCompositionProfile, TurnStatus,
+        test_support::assistant_reply_without_text_for_test,
+    };
     #[cfg(feature = "webui-v2-beta")]
     use ironclaw_reborn_composition::{LocalTriggerAccessRole, LocalTriggerAccessSource};
-    use ironclaw_reborn_composition::{
-        RebornCompositionProfile, TurnStatus, test_support::assistant_reply_without_text_for_test,
-    };
     use ironclaw_reborn_config::RebornBootConfig;
 
     use super::test_env::{EnvGuard, lock_trigger_env};
     #[cfg(feature = "webui-v2-beta")]
     use super::with_run_local_trigger_fire_access_checker;
     use super::{
-        RuntimeInputCaller, RuntimeInputOptions, block_on_cli, build_runtime_input,
-        build_runtime_input_with_options, no_assistant_text_message, resolve_google_oauth_config,
+        MAX_WORKER_COUNT, RuntimeInputCaller, RuntimeInputOptions,
+        apply_credential_refresh_override, block_on_cli, build_runtime_input,
+        build_runtime_input_with_options, no_assistant_text_message, protect_reborn_log_filter,
+        resolve_google_oauth_config, runner_settings,
     };
+    use ironclaw_reborn_composition::DEFAULT_TURN_RUNNER_WORKER_COUNT;
+
+    fn parse_runner_section(toml: &str) -> ironclaw_reborn_config::RebornConfigFile {
+        ironclaw_reborn_config::RebornConfigFile::parse_text(
+            toml,
+            &std::path::PathBuf::from("/test/config.toml"),
+        )
+        .expect("must parse")
+    }
+
+    #[test]
+    fn runner_settings_absent_runner_gives_defaults() {
+        let settings = runner_settings(None).expect("should succeed");
+        assert_eq!(
+            settings.worker_count.get(),
+            DEFAULT_TURN_RUNNER_WORKER_COUNT.get()
+        );
+        // Out-of-box: per-user + trigger caps protect live chat from a
+        // trigger storm; conversations stay uncapped.
+        assert_eq!(
+            settings.max_concurrent_runs_per_user.map(|v| v.get()),
+            Some(3)
+        );
+        assert_eq!(
+            settings.max_concurrent_trigger_runs.map(|v| v.get()),
+            Some(8)
+        );
+        assert!(settings.max_concurrent_conversation_runs.is_none());
+    }
+
+    #[test]
+    fn runner_settings_present_section_absent_caps_keep_defaults() {
+        // A `[runner]` section that only tunes worker_count must NOT silently
+        // wipe the protective cap defaults.
+        let cfg = parse_runner_section("[runner]\nworker_count = 7\n");
+        let settings = runner_settings(Some(&cfg)).expect("should succeed");
+        assert_eq!(settings.worker_count.get(), 7);
+        assert_eq!(
+            settings.max_concurrent_runs_per_user.map(|v| v.get()),
+            Some(3)
+        );
+        assert_eq!(
+            settings.max_concurrent_trigger_runs.map(|v| v.get()),
+            Some(8)
+        );
+        assert!(settings.max_concurrent_conversation_runs.is_none());
+    }
+
+    #[test]
+    fn runner_settings_zero_worker_count_gives_default() {
+        let cfg = parse_runner_section("[runner]\nworker_count = 0\n");
+        let settings = runner_settings(Some(&cfg)).expect("should succeed");
+        assert_eq!(
+            settings.worker_count.get(),
+            DEFAULT_TURN_RUNNER_WORKER_COUNT.get()
+        );
+    }
+
+    #[test]
+    fn runner_settings_present_worker_count_round_trips() {
+        let cfg = parse_runner_section("[runner]\nworker_count = 7\n");
+        let settings = runner_settings(Some(&cfg)).expect("should succeed");
+        assert_eq!(settings.worker_count.get(), 7);
+    }
+
+    #[test]
+    fn runner_settings_clamps_worker_count_at_max() {
+        let toml = format!("[runner]\nworker_count = {}\n", MAX_WORKER_COUNT + 10);
+        let cfg = parse_runner_section(&toml);
+        let settings = runner_settings(Some(&cfg)).expect("should succeed");
+        assert_eq!(settings.worker_count.get(), MAX_WORKER_COUNT);
+    }
+
+    #[test]
+    fn runner_settings_zero_caps_become_none_unlimited() {
+        let cfg = parse_runner_section(
+            "[runner]\nmax_concurrent_runs_per_user = 0\nmax_concurrent_trigger_runs = 0\nmax_concurrent_conversation_runs = 0\n",
+        );
+        let settings = runner_settings(Some(&cfg)).expect("should succeed");
+        assert!(settings.max_concurrent_runs_per_user.is_none());
+        assert!(settings.max_concurrent_trigger_runs.is_none());
+        assert!(settings.max_concurrent_conversation_runs.is_none());
+    }
+
+    #[test]
+    fn runner_settings_nonzero_caps_round_trip() {
+        let cfg = parse_runner_section(
+            "[runner]\nmax_concurrent_runs_per_user = 3\nmax_concurrent_trigger_runs = 5\nmax_concurrent_conversation_runs = 2\n",
+        );
+        let settings = runner_settings(Some(&cfg)).expect("should succeed");
+        assert_eq!(
+            settings.max_concurrent_runs_per_user.map(|v| v.get()),
+            Some(3)
+        );
+        assert_eq!(
+            settings.max_concurrent_trigger_runs.map(|v| v.get()),
+            Some(5)
+        );
+        assert_eq!(
+            settings.max_concurrent_conversation_runs.map(|v| v.get()),
+            Some(2)
+        );
+    }
+
+    #[test]
+    fn reborn_log_filter_suppresses_noisy_targets_for_broad_debug() {
+        let filter = protect_reborn_log_filter("debug");
+
+        assert!(filter.contains("debug"));
+        assert!(filter.contains("tokio_postgres=warn"));
+        assert!(filter.contains("deadpool_postgres=warn"));
+        assert!(filter.contains("h2=warn"));
+        assert!(filter.contains("hyper=warn"));
+        assert!(filter.contains("hyper_util=warn"));
+        assert!(filter.contains("reqwest=warn"));
+        assert!(filter.contains("rustls=warn"));
+        assert!(filter.contains("tower=warn"));
+        assert!(filter.contains("tower_http=warn"));
+        assert!(filter.contains("ironclaw_llm=info"));
+    }
+
+    #[test]
+    fn reborn_log_filter_keeps_explicit_noisy_target_directives() {
+        let filter = protect_reborn_log_filter(
+            "debug,tokio_postgres::query=debug,ironclaw_llm::nearai_chat=debug",
+        );
+
+        assert!(filter.contains("tokio_postgres::query=debug"));
+        assert!(!filter.contains("tokio_postgres=warn"));
+        assert!(filter.contains("ironclaw_llm::nearai_chat=debug"));
+        assert!(!filter.contains("ironclaw_llm=info"));
+        assert!(filter.contains("reqwest=warn"));
+    }
+
+    #[test]
+    fn reborn_log_filter_blank_env_uses_info_with_noisy_target_suppression() {
+        let filter = protect_reborn_log_filter("   ");
+
+        assert!(filter.starts_with("info,"));
+        assert!(filter.contains("tokio_postgres=warn"));
+    }
+
+    #[test]
+    fn credential_refresh_override_keeps_caller_default_without_env() {
+        // Serve base is enabled; absent env leaves it enabled.
+        let serve = apply_credential_refresh_override(
+            CredentialRefreshSettings::enabled(),
+            Err(std::env::VarError::NotPresent),
+        )
+        .expect("absent env is valid");
+        assert!(serve.enabled, "Serve default stays on when env unset");
+        // Non-Serve base is disabled; absent env leaves it disabled.
+        let other = apply_credential_refresh_override(
+            CredentialRefreshSettings::default(),
+            Err(std::env::VarError::NotPresent),
+        )
+        .expect("absent env is valid");
+        assert!(!other.enabled, "non-Serve default stays off when env unset");
+    }
+
+    #[test]
+    fn credential_refresh_override_kill_switch_disables() {
+        for raw in ["0", "false", "FALSE", " 0 "] {
+            let out = apply_credential_refresh_override(
+                CredentialRefreshSettings::enabled(),
+                Ok(raw.to_string()),
+            )
+            .expect("valid kill-switch value");
+            assert!(!out.enabled, "kill-switch {raw:?} must disable");
+        }
+    }
+
+    #[test]
+    fn credential_refresh_override_force_on_enables() {
+        for raw in ["1", "true", "TRUE", " true "] {
+            let out = apply_credential_refresh_override(
+                CredentialRefreshSettings::default(),
+                Ok(raw.to_string()),
+            )
+            .expect("valid force-on value");
+            assert!(out.enabled, "force-on {raw:?} must enable");
+        }
+    }
+
+    #[test]
+    fn credential_refresh_override_blank_falls_through_to_base() {
+        let out = apply_credential_refresh_override(
+            CredentialRefreshSettings::enabled(),
+            Ok("   ".to_string()),
+        )
+        .expect("blank value is valid");
+        assert!(out.enabled, "blank value keeps the caller base");
+    }
+
+    #[test]
+    fn credential_refresh_override_invalid_value_is_error() {
+        let result = apply_credential_refresh_override(
+            CredentialRefreshSettings::default(),
+            Ok("maybe".to_string()),
+        );
+        assert!(result.is_err(), "invalid value must be a hard error");
+    }
 
     fn clear_trigger_poller_env() -> (EnvGuard, EnvGuard) {
         (
@@ -1235,6 +1697,87 @@ secret_master_key_env = "IRONCLAW_REBORN_SECRET_MASTER_KEY"
             err.to_string().contains("empty"),
             "error must mention empty URL env var, got: {err:#}"
         );
+    }
+
+    #[cfg(feature = "postgres")]
+    #[test]
+    fn build_runtime_input_hosted_single_tenant_constructs_postgres_local_runtime_input() {
+        let _lock = lock_trigger_env();
+        let (_enabled, _interval) = clear_trigger_poller_env();
+        let (database_sslmode, allow_cleartext) = clear_reborn_postgres_tls_env();
+        let postgres_url = EnvGuard::set(
+            "IRONCLAW_REBORN_POSTGRES_URL",
+            "postgres://event_user:RAW_PASSWORD_SENTINEL_3162@db.example.com/events?sslmode=require",
+        );
+        let secret_master_key =
+            EnvGuard::set("IRONCLAW_REBORN_SECRET_MASTER_KEY", "test-master-key");
+        let pool_max_size = EnvGuard::set("IRONCLAW_REBORN_POSTGRES_POOL_MAX_SIZE", "1");
+        let (_temp, config) = boot_config_with_config_toml(
+            "hosted-single-tenant",
+            r#"
+[storage]
+backend = "postgres"
+url_env = "IRONCLAW_REBORN_POSTGRES_URL"
+secret_master_key_env = "IRONCLAW_REBORN_SECRET_MASTER_KEY"
+"#,
+        );
+
+        let runtime_input =
+            build_runtime_input(&config, RuntimeInputCaller::Serve).expect("runtime input");
+        let services = runtime_input.services.expect("services input");
+        let policy = services.runtime_policy().expect("runtime policy");
+
+        assert_eq!(
+            services.profile(),
+            RebornCompositionProfile::HostedSingleTenant
+        );
+        assert_eq!(policy.requested_profile.as_str(), "local_dev");
+        assert!(!services.grants_trusted_laptop_access());
+        drop(pool_max_size);
+        drop(secret_master_key);
+        drop(postgres_url);
+        drop(database_sslmode);
+        drop(allow_cleartext);
+    }
+
+    #[cfg(feature = "postgres")]
+    #[test]
+    fn build_runtime_input_rejects_invalid_postgres_pool_max_size_override() {
+        let _lock = lock_trigger_env();
+        let (_enabled, _interval) = clear_trigger_poller_env();
+        let (database_sslmode, allow_cleartext) = clear_reborn_postgres_tls_env();
+        let postgres_url = EnvGuard::set(
+            "IRONCLAW_REBORN_POSTGRES_URL",
+            "postgres://event_user:RAW_PASSWORD_SENTINEL_3162@db.example.com/events?sslmode=require",
+        );
+        let secret_master_key =
+            EnvGuard::set("IRONCLAW_REBORN_SECRET_MASTER_KEY", "test-master-key");
+        let pool_max_size = EnvGuard::set("IRONCLAW_REBORN_POSTGRES_POOL_MAX_SIZE", "0");
+        let (_temp, config) = boot_config_with_config_toml(
+            "hosted-single-tenant",
+            r#"
+[storage]
+backend = "postgres"
+url_env = "IRONCLAW_REBORN_POSTGRES_URL"
+secret_master_key_env = "IRONCLAW_REBORN_SECRET_MASTER_KEY"
+"#,
+        );
+
+        let err = match build_runtime_input(&config, RuntimeInputCaller::Serve) {
+            Ok(_) => panic!("zero pool override must fail"),
+            Err(error) => error,
+        };
+
+        assert!(
+            err.to_string()
+                .contains("IRONCLAW_REBORN_POSTGRES_POOL_MAX_SIZE"),
+            "error must identify pool override env var: {err:#}"
+        );
+        drop(pool_max_size);
+        drop(secret_master_key);
+        drop(postgres_url);
+        drop(database_sslmode);
+        drop(allow_cleartext);
     }
 
     #[cfg(feature = "postgres")]

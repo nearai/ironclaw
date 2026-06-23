@@ -4,7 +4,7 @@
 //! ports:
 //!
 //! inbound bytes -> ProductAdapter -> DefaultProductWorkflow ->
-//! DefaultInboundTurnService -> DefaultTurnCoordinator -> TurnRunnerWorker ->
+//! DefaultInboundTurnService -> DefaultTurnCoordinator -> TurnRunScheduler ->
 //! Reborn planned agent loop -> model/capability/transcript evidence.
 //!
 //! Documented test-support substitutions:
@@ -26,6 +26,10 @@ use std::{
 
 use async_trait::async_trait;
 use ironclaw_approvals::{ApprovalResolver, LeaseApproval};
+use ironclaw_auth::{
+    AuthProductScope, AuthProviderId, AuthSurface, CredentialAccountLabel, CredentialAccountStatus,
+    CredentialOwnership, NewCredentialAccount, ProviderScope,
+};
 use ironclaw_authorization::{GrantAuthorizer, TrustAwareCapabilityDispatchAuthorizer};
 use ironclaw_extensions::ExtensionRegistry;
 use ironclaw_filesystem::{
@@ -36,11 +40,12 @@ use ironclaw_filesystem::{
 use ironclaw_host_api::{
     Action, AgentId, ApprovalRequestId, CapabilityDescriptor, CapabilityGrant, CapabilityGrantId,
     CapabilityId, CapabilitySet, CredentialStageError, Decision, EffectKind, ExecutionContext,
-    ExtensionId, GrantConstraints, HostPath, MountAlias, MountGrant, MountPermissions, MountView,
-    NetworkPolicy, NetworkScheme, NetworkTargetPattern, Obligation, Obligations, PackageId,
-    Principal, ProjectId, ResourceEstimate, ResourceScope, RuntimeCredentialAccountProviderId,
-    RuntimeHttpEgress, RuntimeHttpEgressError, RuntimeHttpEgressRequest, RuntimeHttpEgressResponse,
-    RuntimeKind, SecretHandle, TenantId, ThreadId, TrustClass, UserId, VirtualPath,
+    ExtensionId, GrantConstraints, HostPath, InvocationId, MountAlias, MountGrant,
+    MountPermissions, MountView, NetworkPolicy, NetworkScheme, NetworkTargetPattern, Obligation,
+    Obligations, PackageId, Principal, ProjectId, ResourceEstimate, ResourceScope,
+    RuntimeCredentialAccountProviderId, RuntimeHttpEgress, RuntimeHttpEgressError,
+    RuntimeHttpEgressRequest, RuntimeHttpEgressResponse, RuntimeKind, SecretHandle, TenantId,
+    ThreadId, TrustClass, UserId, VirtualPath,
 };
 use ironclaw_host_runtime::{
     APPLY_PATCH_CAPABILITY_ID, BUILTIN_FIRST_PARTY_PROVIDER, CancelRuntimeWorkOutcome,
@@ -50,11 +55,11 @@ use ironclaw_host_runtime::{
     HostRuntime, HostRuntimeError, HostRuntimeHealth, HostRuntimeServices, HostRuntimeStatus,
     JSON_CAPABILITY_ID, LIST_DIR_CAPABILITY_ID, MEMORY_READ_CAPABILITY_ID,
     MEMORY_SEARCH_CAPABILITY_ID, MEMORY_TREE_CAPABILITY_ID, MEMORY_WRITE_CAPABILITY_ID,
-    READ_FILE_CAPABILITY_ID, RuntimeCapabilityOutcome, RuntimeCapabilityRequest,
-    RuntimeCapabilityResumeRequest, RuntimeCredentialAccessSecret, RuntimeCredentialAccountRequest,
-    RuntimeCredentialAccountResolver, RuntimeStatusRequest, SHELL_CAPABILITY_ID,
-    SKILL_INSTALL_CAPABILITY_ID, SKILL_LIST_CAPABILITY_ID, SKILL_REMOVE_CAPABILITY_ID,
-    SPAWN_SUBAGENT_CAPABILITY_ID, SurfaceKind, TIME_CAPABILITY_ID,
+    PROFILE_SET_CAPABILITY_ID, READ_FILE_CAPABILITY_ID, RuntimeCapabilityOutcome,
+    RuntimeCapabilityRequest, RuntimeCapabilityResumeRequest, RuntimeCredentialAccessSecret,
+    RuntimeCredentialAccountRequest, RuntimeCredentialAccountResolver, RuntimeStatusRequest,
+    SHELL_CAPABILITY_ID, SKILL_INSTALL_CAPABILITY_ID, SKILL_LIST_CAPABILITY_ID,
+    SKILL_REMOVE_CAPABILITY_ID, SPAWN_SUBAGENT_CAPABILITY_ID, SurfaceKind, TIME_CAPABILITY_ID,
     TRACE_COMMONS_CREDITS_CAPABILITY_ID, TRACE_COMMONS_ONBOARD_CAPABILITY_ID,
     TRACE_COMMONS_PROFILE_SET_CAPABILITY_ID, TRACE_COMMONS_PROFILE_TOKEN_CAPABILITY_ID,
     TRACE_COMMONS_STATUS_CAPABILITY_ID, TRIGGER_CREATE_CAPABILITY_ID, TRIGGER_LIST_CAPABILITY_ID,
@@ -62,12 +67,13 @@ use ironclaw_host_runtime::{
     VisibleCapabilitySurface as RuntimeVisibleCapabilitySurface, WRITE_FILE_CAPABILITY_ID,
     builtin_first_party_handlers, builtin_first_party_package,
 };
+use ironclaw_host_runtime::{SchedulerTurnRunWakeNotifier, TurnRunSchedulerHandle};
 use ironclaw_loop_support::{
     CapabilityAllowSet, CapabilityResolveError, CapabilityResultWrite,
-    CapabilitySurfaceProfileResolver, DEFAULT_SPAWN_SUBAGENT_CAPABILITY_ID,
-    HostIdentityContextBuildError, HostIdentityContextCandidate, HostIdentityContextSource,
-    HostManagedModelRequest, HostRuntimeLoopCapabilityPortFactory, JsonSpawnSubagentInputCodec,
-    LoopCapabilityPortFactory, LoopCapabilityResultWriter,
+    CapabilitySurfaceProfileResolver, CapabilityWriteResult, DEFAULT_SPAWN_SUBAGENT_CAPABILITY_ID,
+    EmptyUserProfileSource, HostIdentityContextBuildError, HostIdentityContextCandidate,
+    HostIdentityContextSource, HostManagedModelRequest, HostRuntimeLoopCapabilityPortFactory,
+    JsonSpawnSubagentInputCodec, LoopCapabilityPortFactory, LoopCapabilityResultWriter,
 };
 use ironclaw_network::{
     NetworkHttpEgress, NetworkHttpError, NetworkHttpRequest, NetworkHttpResponse, NetworkUsage,
@@ -95,7 +101,6 @@ use ironclaw_reborn::{
         DefaultPlannedRuntimeConfig, DefaultPlannedRuntimeParts, RebornRuntimeLoopComposition,
         RuntimeTurnStateStore, build_default_planned_runtime,
     },
-    turn_runner::{TurnRunnerWakeSender, TurnRunnerWorker, TurnRunnerWorkerConfig},
 };
 use ironclaw_reborn_composition::{
     ProductLiveCapabilityIo, ProductLiveVisibleCapabilityRequestConfig, RebornBuildInput,
@@ -131,12 +136,13 @@ use ironclaw_turns::{
 };
 use ironclaw_wasm::{WitToolHost, WitToolRuntimeConfig};
 use serde_json::json;
-use tokio::task::JoinHandle;
-use tokio_util::sync::CancellationToken;
 
 use super::{
     config::WaitConfig,
-    filesystem::local_filesystem,
+    extension_surface::{
+        BUNDLED_EXTENSION_CAPABILITY_IDS, BUNDLED_EXTENSION_IDS, EXTENSION_LIFECYCLE_CAPABILITY_IDS,
+    },
+    filesystem::{BlockingTurnStatePutFilesystem, local_filesystem},
     github as github_support,
     model_replay::RebornTraceReplayModelGateway,
     product_workflow::{RebornProductWorkflowHarness, resource_scope},
@@ -158,6 +164,8 @@ type HarnessCapabilityParts = (
     Arc<dyn LoopCapabilityResultWriter>,
     HarnessCapabilityRecorder,
 );
+type HarnessTurnStorageBackend = BlockingTurnStatePutFilesystem<InMemoryBackend>;
+type HarnessTurnBackend = CompositeRootFilesystem;
 
 pub struct RebornBinaryE2EHarness {
     ingress: RebornTestIngress,
@@ -166,18 +174,16 @@ pub struct RebornBinaryE2EHarness {
     binding: ResolvedBinding,
     thread_scope: ThreadScope,
     turn_scope: TurnScope,
-    turn_store: Arc<FilesystemTurnStateStore<LocalFilesystem>>,
+    turn_store: Arc<FilesystemTurnStateStore<HarnessTurnBackend>>,
     coordinator: Arc<dyn TurnCoordinator>,
     _product_harness: RebornProductWorkflowHarness,
     thread_harness: RebornThreadHarness,
     model_gateway: RebornTraceReplayModelGateway,
     capability_recorder: HarnessCapabilityRecorder,
     milestone_sink: Arc<ironclaw_turns::run_profile::InMemoryLoopHostMilestoneSink>,
-    worker: Arc<TurnRunnerWorker>,
-    cancel: CancellationToken,
-    worker_tasks: Vec<JoinHandle<()>>,
+    scheduler_handle: Option<TurnRunSchedulerHandle>,
+    scheduler_notifier: Arc<SchedulerTurnRunWakeNotifier>,
     _turn_root: Arc<tempfile::TempDir>,
-    _wake_sender: TurnRunnerWakeSender,
 }
 
 pub struct SubmittedTurn {
@@ -195,7 +201,7 @@ pub struct RebornHarnessSharedStorage {
     product_root: Arc<tempfile::TempDir>,
     thread_backend: Arc<LocalFilesystem>,
     thread_root: Arc<tempfile::TempDir>,
-    turn_backend: Arc<LocalFilesystem>,
+    turn_backend: Arc<HarnessTurnStorageBackend>,
     turn_root: Arc<tempfile::TempDir>,
 }
 
@@ -209,9 +215,21 @@ impl RebornHarnessSharedStorage {
             product_root,
             thread_backend: Arc::new(local_filesystem(thread_root.path())?),
             thread_root,
-            turn_backend: Arc::new(local_filesystem(turn_root.path())?),
+            turn_backend: Arc::new(BlockingTurnStatePutFilesystem::new(InMemoryBackend::new())),
             turn_root,
         })
+    }
+
+    pub fn block_next_turn_state_put(&self) {
+        self.turn_backend.block_next_put();
+    }
+
+    pub async fn wait_for_blocked_turn_state_put(&self) {
+        self.turn_backend.wait_for_blocked_put().await;
+    }
+
+    pub fn release_blocked_turn_state_put(&self) {
+        self.turn_backend.release_blocked_put();
     }
 }
 
@@ -302,44 +320,14 @@ impl RebornBinaryE2EHarness {
             .await
     }
 
-    pub async fn with_model_gateway_unscoped_worker(
-        conversation_id: &str,
-        model_gateway: RebornTraceReplayModelGateway,
-        capability_port: RecordingTestCapabilityPort,
-    ) -> HarnessResult<Self> {
-        Self::with_model_gateway_options_and_worker_scope(
-            conversation_id,
-            model_gateway,
-            capability_port,
-            false,
-            false,
-        )
-        .await
-    }
-
-    pub async fn with_harness_blocked_evidence_unscoped_worker(
-        conversation_id: &str,
-        model_gateway: RebornTraceReplayModelGateway,
-        capability_port: RecordingTestCapabilityPort,
-    ) -> HarnessResult<Self> {
-        Self::with_model_gateway_options_and_worker_scope(
-            conversation_id,
-            model_gateway,
-            capability_port,
-            true,
-            false,
-        )
-        .await
-    }
-
-    pub async fn with_model_gateway_scope_shared_storage_unscoped_worker(
+    pub async fn with_model_gateway_scope_shared_storage(
         conversation_id: &str,
         model_gateway: RebornTraceReplayModelGateway,
         capability_port: RecordingTestCapabilityPort,
         scope: ResourceScope,
         shared_storage: RebornHarnessSharedStorage,
     ) -> HarnessResult<Self> {
-        Self::with_model_gateway_scope_identity_source_trigger_installation_shared_storage_unscoped_worker(
+        Self::with_model_gateway_scope_identity_source_trigger_installation_shared_storage(
             conversation_id,
             model_gateway,
             capability_port,
@@ -354,7 +342,7 @@ impl RebornBinaryE2EHarness {
         .await
     }
 
-    pub async fn with_model_gateway_scope_installation_shared_storage_unscoped_worker(
+    pub async fn with_model_gateway_scope_installation_shared_storage(
         conversation_id: &str,
         model_gateway: RebornTraceReplayModelGateway,
         capability_port: RecordingTestCapabilityPort,
@@ -363,7 +351,7 @@ impl RebornBinaryE2EHarness {
         installation_id: &str,
         shared_storage: RebornHarnessSharedStorage,
     ) -> HarnessResult<Self> {
-        Self::with_model_gateway_scope_initial_actor_installation_shared_storage_unscoped_worker(
+        Self::with_model_gateway_scope_initial_actor_installation_shared_storage(
             conversation_id,
             "alice",
             model_gateway,
@@ -377,7 +365,7 @@ impl RebornBinaryE2EHarness {
     }
 
     #[allow(clippy::too_many_arguments)]
-    pub async fn with_model_gateway_scope_initial_actor_installation_shared_storage_unscoped_worker(
+    pub async fn with_model_gateway_scope_initial_actor_installation_shared_storage(
         conversation_id: &str,
         initial_actor_id: &str,
         model_gateway: RebornTraceReplayModelGateway,
@@ -387,7 +375,7 @@ impl RebornBinaryE2EHarness {
         installation_id: &str,
         shared_storage: RebornHarnessSharedStorage,
     ) -> HarnessResult<Self> {
-        Self::with_model_gateway_scope_identity_source_trigger_installation_shared_storage_unscoped_worker(
+        Self::with_model_gateway_scope_identity_source_trigger_installation_shared_storage(
             conversation_id,
             model_gateway,
             capability_port,
@@ -403,7 +391,7 @@ impl RebornBinaryE2EHarness {
     }
 
     #[allow(clippy::too_many_arguments)]
-    pub async fn with_model_gateway_scope_identity_source_trigger_installation_shared_storage_unscoped_worker(
+    pub async fn with_model_gateway_scope_identity_source_trigger_installation_shared_storage(
         conversation_id: &str,
         model_gateway: RebornTraceReplayModelGateway,
         capability_port: RecordingTestCapabilityPort,
@@ -415,11 +403,10 @@ impl RebornBinaryE2EHarness {
         initial_actor_id: &str,
         shared_storage: RebornHarnessSharedStorage,
     ) -> HarnessResult<Self> {
-        Self::with_model_gateway_capability_mode_identity_source_trigger_worker_scope_storage_and_adapter(
+        Self::with_model_gateway_capability_mode_identity_source_trigger_storage_and_adapter(
             conversation_id,
             model_gateway,
             HarnessCapabilityMode::Recording(capability_port),
-            false,
             false,
             initial_trigger,
             identity_context_source,
@@ -432,35 +419,16 @@ impl RebornBinaryE2EHarness {
         .await
     }
 
-    pub async fn with_model_gateway_identity_source_unscoped_worker(
+    pub async fn with_model_gateway_identity_source_shared(
         conversation_id: &str,
         model_gateway: RebornTraceReplayModelGateway,
         capability_port: RecordingTestCapabilityPort,
         identity_context_source: Arc<dyn HostIdentityContextSource>,
     ) -> HarnessResult<Self> {
-        Self::with_model_gateway_options_identity_source_trigger_and_worker_scope(
+        Self::with_model_gateway_options_identity_source_trigger(
             conversation_id,
             model_gateway,
             capability_port,
-            false,
-            false,
-            ProductTriggerReason::DirectChat,
-            identity_context_source,
-        )
-        .await
-    }
-
-    pub async fn with_model_gateway_identity_source_unscoped_shared_worker(
-        conversation_id: &str,
-        model_gateway: RebornTraceReplayModelGateway,
-        capability_port: RecordingTestCapabilityPort,
-        identity_context_source: Arc<dyn HostIdentityContextSource>,
-    ) -> HarnessResult<Self> {
-        Self::with_model_gateway_options_identity_source_trigger_and_worker_scope(
-            conversation_id,
-            model_gateway,
-            capability_port,
-            false,
             false,
             ProductTriggerReason::BotMention,
             identity_context_source,
@@ -544,6 +512,35 @@ impl RebornBinaryE2EHarness {
         model_gateway: RebornTraceReplayModelGateway,
     ) -> HarnessResult<Self> {
         let host_runtime = Arc::new(HostRuntimeCapabilityHarness::process_tools().await?);
+        Self::with_model_gateway_capability_mode(
+            conversation_id,
+            model_gateway,
+            HarnessCapabilityMode::HostRuntime(host_runtime),
+            false,
+        )
+        .await
+    }
+
+    pub async fn with_host_runtime_qa_smoke_capabilities(
+        conversation_id: &str,
+        model_gateway: RebornTraceReplayModelGateway,
+    ) -> HarnessResult<Self> {
+        let host_runtime = Arc::new(HostRuntimeCapabilityHarness::qa_smoke_tools().await?);
+        Self::with_model_gateway_capability_mode(
+            conversation_id,
+            model_gateway,
+            HarnessCapabilityMode::HostRuntime(host_runtime),
+            false,
+        )
+        .await
+    }
+
+    pub async fn with_host_runtime_extension_lifecycle_capabilities(
+        conversation_id: &str,
+        model_gateway: RebornTraceReplayModelGateway,
+    ) -> HarnessResult<Self> {
+        let host_runtime =
+            Arc::new(HostRuntimeCapabilityHarness::extension_lifecycle_tools().await?);
         Self::with_model_gateway_capability_mode(
             conversation_id,
             model_gateway,
@@ -661,69 +658,47 @@ impl RebornBinaryE2EHarness {
         capability_port: RecordingTestCapabilityPort,
         accept_harness_blocked_evidence: bool,
     ) -> HarnessResult<Self> {
-        Self::with_model_gateway_options_and_worker_scope(
+        Self::with_model_gateway_options_identity_source(
             conversation_id,
             model_gateway,
             capability_port,
             accept_harness_blocked_evidence,
-            true,
-        )
-        .await
-    }
-
-    async fn with_model_gateway_options_and_worker_scope(
-        conversation_id: &str,
-        model_gateway: RebornTraceReplayModelGateway,
-        capability_port: RecordingTestCapabilityPort,
-        accept_harness_blocked_evidence: bool,
-        restrict_worker_to_initial_scope: bool,
-    ) -> HarnessResult<Self> {
-        Self::with_model_gateway_options_identity_source_and_worker_scope(
-            conversation_id,
-            model_gateway,
-            capability_port,
-            accept_harness_blocked_evidence,
-            restrict_worker_to_initial_scope,
             Arc::new(EmptyIdentityContextSource),
         )
         .await
     }
 
-    async fn with_model_gateway_options_identity_source_and_worker_scope(
+    async fn with_model_gateway_options_identity_source(
         conversation_id: &str,
         model_gateway: RebornTraceReplayModelGateway,
         capability_port: RecordingTestCapabilityPort,
         accept_harness_blocked_evidence: bool,
-        restrict_worker_to_initial_scope: bool,
         identity_context_source: Arc<dyn HostIdentityContextSource>,
     ) -> HarnessResult<Self> {
-        Self::with_model_gateway_options_identity_source_trigger_and_worker_scope(
+        Self::with_model_gateway_options_identity_source_trigger(
             conversation_id,
             model_gateway,
             capability_port,
             accept_harness_blocked_evidence,
-            restrict_worker_to_initial_scope,
             ProductTriggerReason::DirectChat,
             identity_context_source,
         )
         .await
     }
 
-    async fn with_model_gateway_options_identity_source_trigger_and_worker_scope(
+    async fn with_model_gateway_options_identity_source_trigger(
         conversation_id: &str,
         model_gateway: RebornTraceReplayModelGateway,
         capability_port: RecordingTestCapabilityPort,
         accept_harness_blocked_evidence: bool,
-        restrict_worker_to_initial_scope: bool,
         initial_trigger: ProductTriggerReason,
         identity_context_source: Arc<dyn HostIdentityContextSource>,
     ) -> HarnessResult<Self> {
-        Self::with_model_gateway_capability_mode_identity_source_trigger_and_worker_scope(
+        Self::with_model_gateway_capability_mode_identity_source_trigger(
             conversation_id,
             model_gateway,
             HarnessCapabilityMode::Recording(capability_port),
             accept_harness_blocked_evidence,
-            restrict_worker_to_initial_scope,
             initial_trigger,
             identity_context_source,
         )
@@ -736,69 +711,47 @@ impl RebornBinaryE2EHarness {
         capability_mode: HarnessCapabilityMode,
         accept_harness_blocked_evidence: bool,
     ) -> HarnessResult<Self> {
-        Self::with_model_gateway_capability_mode_and_worker_scope(
+        Self::with_model_gateway_capability_mode_identity_source(
             conversation_id,
             model_gateway,
             capability_mode,
             accept_harness_blocked_evidence,
-            true,
-        )
-        .await
-    }
-
-    async fn with_model_gateway_capability_mode_and_worker_scope(
-        conversation_id: &str,
-        model_gateway: RebornTraceReplayModelGateway,
-        capability_mode: HarnessCapabilityMode,
-        accept_harness_blocked_evidence: bool,
-        restrict_worker_to_initial_scope: bool,
-    ) -> HarnessResult<Self> {
-        Self::with_model_gateway_capability_mode_identity_source_and_worker_scope(
-            conversation_id,
-            model_gateway,
-            capability_mode,
-            accept_harness_blocked_evidence,
-            restrict_worker_to_initial_scope,
             Arc::new(EmptyIdentityContextSource),
         )
         .await
     }
 
-    async fn with_model_gateway_capability_mode_identity_source_and_worker_scope(
+    async fn with_model_gateway_capability_mode_identity_source(
         conversation_id: &str,
         model_gateway: RebornTraceReplayModelGateway,
         capability_mode: HarnessCapabilityMode,
         accept_harness_blocked_evidence: bool,
-        restrict_worker_to_initial_scope: bool,
         identity_context_source: Arc<dyn HostIdentityContextSource>,
     ) -> HarnessResult<Self> {
-        Self::with_model_gateway_capability_mode_identity_source_trigger_and_worker_scope(
+        Self::with_model_gateway_capability_mode_identity_source_trigger(
             conversation_id,
             model_gateway,
             capability_mode,
             accept_harness_blocked_evidence,
-            restrict_worker_to_initial_scope,
             ProductTriggerReason::DirectChat,
             identity_context_source,
         )
         .await
     }
 
-    async fn with_model_gateway_capability_mode_identity_source_trigger_and_worker_scope(
+    async fn with_model_gateway_capability_mode_identity_source_trigger(
         conversation_id: &str,
         model_gateway: RebornTraceReplayModelGateway,
         capability_mode: HarnessCapabilityMode,
         accept_harness_blocked_evidence: bool,
-        restrict_worker_to_initial_scope: bool,
         initial_trigger: ProductTriggerReason,
         identity_context_source: Arc<dyn HostIdentityContextSource>,
     ) -> HarnessResult<Self> {
-        Self::with_model_gateway_capability_mode_identity_source_trigger_worker_scope_storage_and_adapter(
+        Self::with_model_gateway_capability_mode_identity_source_trigger_storage_and_adapter(
             conversation_id,
             model_gateway,
             capability_mode,
             accept_harness_blocked_evidence,
-            restrict_worker_to_initial_scope,
             initial_trigger,
             identity_context_source,
             product_scope(),
@@ -811,12 +764,11 @@ impl RebornBinaryE2EHarness {
     }
 
     #[allow(clippy::too_many_arguments)]
-    async fn with_model_gateway_capability_mode_identity_source_trigger_worker_scope_storage_and_adapter(
+    async fn with_model_gateway_capability_mode_identity_source_trigger_storage_and_adapter(
         conversation_id: &str,
         model_gateway: RebornTraceReplayModelGateway,
         capability_mode: HarnessCapabilityMode,
         accept_harness_blocked_evidence: bool,
-        restrict_worker_to_initial_scope: bool,
         initial_trigger: ProductTriggerReason,
         identity_context_source: Arc<dyn HostIdentityContextSource>,
         product_scope: ResourceScope,
@@ -872,7 +824,10 @@ impl RebornBinaryE2EHarness {
             )
         } else {
             let turn_root = Arc::new(tempfile::tempdir()?);
-            (Arc::new(local_filesystem(turn_root.path())?), turn_root)
+            (
+                Arc::new(BlockingTurnStatePutFilesystem::new(InMemoryBackend::new())),
+                turn_root,
+            )
         };
         let turn_store = Arc::new(FilesystemTurnStateStore::new(scoped_turns_fs(
             turn_backend,
@@ -922,11 +877,9 @@ impl RebornBinaryE2EHarness {
             subagent_spawn_limits: ironclaw_loop_support::SubagentSpawnLimits::default(),
             loop_exit_evidence: evidence,
             config: DefaultPlannedRuntimeConfig {
-                worker: TurnRunnerWorkerConfig {
-                    heartbeat_interval: Duration::from_millis(20),
-                    poll_interval: Duration::from_millis(10),
-                    scope_filter: restrict_worker_to_initial_scope.then(|| turn_scope.clone()),
-                },
+                // Keep the durable runner heartbeat at its production default;
+                // test responsiveness comes from fast scheduler polling below.
+                poll_interval: Duration::from_millis(10),
                 ..DefaultPlannedRuntimeConfig::default()
             },
             model_route_resolver: None,
@@ -934,6 +887,7 @@ impl RebornBinaryE2EHarness {
             skill_context_source: None,
             input_queue: None,
             identity_context_source,
+            user_profile_source: Arc::new(EmptyUserProfileSource),
             model_policy_guard: None,
             model_budget_accountant: None,
             safety_context: None,
@@ -942,6 +896,7 @@ impl RebornBinaryE2EHarness {
             hook_security_audit_sink: None,
             turn_event_sink: None,
             attachment_read_port: None,
+            scheduler_wake_wiring: None,
         })?;
         let binding_service: Arc<dyn ConversationBindingService> =
             Arc::new(product_harness.binding_service()?);
@@ -979,7 +934,7 @@ impl RebornBinaryE2EHarness {
         binding: ResolvedBinding,
         thread_scope: ThreadScope,
         turn_scope: TurnScope,
-        turn_store: Arc<FilesystemTurnStateStore<LocalFilesystem>>,
+        turn_store: Arc<FilesystemTurnStateStore<HarnessTurnBackend>>,
         product_harness: RebornProductWorkflowHarness,
         thread_harness: RebornThreadHarness,
         model_gateway: RebornTraceReplayModelGateway,
@@ -992,6 +947,7 @@ impl RebornBinaryE2EHarness {
         turn_root: Arc<tempfile::TempDir>,
     ) -> Self {
         let coordinator = Arc::clone(&composition.coordinator);
+        let scheduler_notifier = composition.scheduler_handle.wake_notifier();
         Self {
             ingress,
             workflow,
@@ -1006,35 +962,25 @@ impl RebornBinaryE2EHarness {
             model_gateway,
             capability_recorder,
             milestone_sink,
-            worker: composition.worker,
-            cancel: CancellationToken::new(),
-            worker_tasks: Vec::new(),
+            scheduler_handle: Some(composition.scheduler_handle),
+            scheduler_notifier,
             _turn_root: turn_root,
-            _wake_sender: composition.wake_sender,
         }
     }
 
     pub fn start(&mut self) {
-        self.start_workers(1);
+        // The scheduler is started automatically inside build_default_planned_runtime.
+        // This method is kept for API compatibility.
     }
 
-    pub fn start_workers(&mut self, count: usize) {
-        if !self.worker_tasks.is_empty() {
-            return;
-        }
-        for _ in 0..count.max(1) {
-            let worker = Arc::clone(&self.worker);
-            let cancel = self.cancel.clone();
-            self.worker_tasks.push(tokio::spawn(async move {
-                worker.run(cancel).await;
-            }));
-        }
+    pub fn start_workers(&mut self, _count: usize) {
+        // The scheduler is started automatically inside build_default_planned_runtime.
+        // Worker count is configured via DefaultPlannedRuntimeConfig.worker_count.
     }
 
     pub async fn shutdown(&mut self) {
-        self.cancel.cancel();
-        for task in self.worker_tasks.drain(..) {
-            let _ = task.await;
+        if let Some(scheduler) = self.scheduler_handle.take() {
+            scheduler.shutdown().await;
         }
     }
 
@@ -1184,7 +1130,7 @@ impl RebornBinaryE2EHarness {
                 source_binding_ref: SourceBindingRef::new("src:resume")?,
                 reply_target_binding_ref: ReplyTargetBindingRef::new("reply:resume")?,
                 idempotency_key: IdempotencyKey::new(idempotency_key.into())?,
-                auth_resume_disposition: None,
+                resume_disposition: None,
             })
             .await?;
         if response.status != TurnStatus::Queued {
@@ -1404,7 +1350,11 @@ impl RebornBinaryE2EHarness {
 
 impl Drop for RebornBinaryE2EHarness {
     fn drop(&mut self) {
-        self.cancel.cancel();
+        // Scheduler handle is Option<TurnRunSchedulerHandle>; shutdown is async
+        // and cannot be called from Drop. The handle is taken in shutdown() and
+        // here we just let it drop. The scheduler supervisor task exits when the
+        // command channel closes on drop.
+        let _ = self.scheduler_handle.take();
     }
 }
 
@@ -1543,6 +1493,7 @@ struct HostRuntimeCapabilityHarness {
     network_policy: NetworkPolicy,
     secrets: Vec<SecretHandle>,
     provider_id: ExtensionId,
+    additional_provider_trust: Vec<(ExtensionId, Vec<EffectKind>)>,
     user_id: UserId,
     invocations: Arc<Mutex<Vec<CapabilityInvocation>>>,
     results: Arc<Mutex<Vec<RecordedCapabilityResult>>>,
@@ -1553,6 +1504,7 @@ struct HostRuntimeCapabilityHarness {
 struct HostRuntimeHarnessOptions {
     mounts: MountView,
     runtime_policy: Option<ironclaw_host_api::runtime_policy::EffectiveRuntimePolicy>,
+    seed_extension_credentials: bool,
 }
 
 impl HostRuntimeHarnessOptions {
@@ -1563,7 +1515,13 @@ impl HostRuntimeHarnessOptions {
         Self {
             mounts,
             runtime_policy,
+            seed_extension_credentials: false,
         }
+    }
+
+    fn with_seed_extension_credentials(mut self) -> Self {
+        self.seed_extension_credentials = true;
+        self
     }
 }
 
@@ -1649,6 +1607,109 @@ impl HostRuntimeCapabilityHarness {
             HostRuntimeHarnessOptions::new(MountView::default(), None),
         )
         .await
+    }
+
+    async fn qa_smoke_tools() -> HarnessResult<Self> {
+        let (root, storage_root, workspace_root) = host_runtime_storage_roots()?;
+        std::fs::create_dir_all(storage_root.join("skills"))?;
+        std::fs::create_dir_all(storage_root.join("system/skills"))?;
+        let runtime = local_dev_host_runtime_with_http_egress(
+            storage_root,
+            Arc::new(RecordingRuntimeHttpEgress::with_body(
+                br#"{"accepted":true,"source":"qa-smoke"}"#.to_vec(),
+            )),
+        )?;
+        let mounts = qa_smoke_mounts()?;
+        let memory_mounts = memory_mounts(MountPermissions::read_write_list_delete())?;
+        let memory_capability_ids = [
+            CapabilityId::new(MEMORY_SEARCH_CAPABILITY_ID)?,
+            CapabilityId::new(MEMORY_WRITE_CAPABILITY_ID)?,
+            CapabilityId::new(MEMORY_READ_CAPABILITY_ID)?,
+            CapabilityId::new(MEMORY_TREE_CAPABILITY_ID)?,
+        ];
+        Ok(Self {
+            runtime,
+            approval_parts: None,
+            pending_approval_scopes: Arc::new(Mutex::new(HashMap::new())),
+            io: Arc::new(ProductLiveCapabilityIo::default()),
+            root,
+            workspace_root,
+            mounts,
+            capability_mount_overrides: memory_capability_ids
+                .iter()
+                .cloned()
+                .map(|capability_id| (capability_id, memory_mounts.clone()))
+                .collect(),
+            capability_ids: vec![
+                CapabilityId::new(ECHO_CAPABILITY_ID)?,
+                CapabilityId::new(TIME_CAPABILITY_ID)?,
+                CapabilityId::new(JSON_CAPABILITY_ID)?,
+                CapabilityId::new(HTTP_CAPABILITY_ID)?,
+                CapabilityId::new(HTTP_SAVE_CAPABILITY_ID)?,
+                CapabilityId::new(MEMORY_SEARCH_CAPABILITY_ID)?,
+                CapabilityId::new(MEMORY_WRITE_CAPABILITY_ID)?,
+                CapabilityId::new(MEMORY_READ_CAPABILITY_ID)?,
+                CapabilityId::new(MEMORY_TREE_CAPABILITY_ID)?,
+                CapabilityId::new(READ_FILE_CAPABILITY_ID)?,
+                CapabilityId::new(WRITE_FILE_CAPABILITY_ID)?,
+                CapabilityId::new(LIST_DIR_CAPABILITY_ID)?,
+                CapabilityId::new(GLOB_CAPABILITY_ID)?,
+                CapabilityId::new(GREP_CAPABILITY_ID)?,
+                CapabilityId::new(APPLY_PATCH_CAPABILITY_ID)?,
+                CapabilityId::new(SHELL_CAPABILITY_ID)?,
+                CapabilityId::new(SPAWN_SUBAGENT_CAPABILITY_ID)?,
+                CapabilityId::new(SKILL_LIST_CAPABILITY_ID)?,
+                CapabilityId::new(SKILL_INSTALL_CAPABILITY_ID)?,
+                CapabilityId::new(SKILL_REMOVE_CAPABILITY_ID)?,
+                CapabilityId::new(TRIGGER_CREATE_CAPABILITY_ID)?,
+                CapabilityId::new(TRIGGER_LIST_CAPABILITY_ID)?,
+                CapabilityId::new(TRIGGER_REMOVE_CAPABILITY_ID)?,
+            ],
+            runtime_kind: RuntimeKind::FirstParty,
+            effect_kinds: vec![
+                EffectKind::DispatchCapability,
+                EffectKind::ReadFilesystem,
+                EffectKind::WriteFilesystem,
+                EffectKind::DeleteFilesystem,
+                EffectKind::Network,
+                EffectKind::SpawnProcess,
+                EffectKind::ExecuteCode,
+                EffectKind::ExternalWrite,
+            ],
+            network_policy: http_test_policy(),
+            secrets: Vec::new(),
+            provider_id: ExtensionId::new(BUILTIN_FIRST_PARTY_PROVIDER)?,
+            additional_provider_trust: Vec::new(),
+            user_id: UserId::new("reborn-e2e-qa-smoke-user")?,
+            invocations: Arc::new(Mutex::new(Vec::new())),
+            results: Arc::new(Mutex::new(Vec::new())),
+            http_egress: None,
+            network_egress: None,
+        })
+    }
+
+    async fn extension_lifecycle_tools() -> HarnessResult<Self> {
+        let mut capability_ids = capability_ids_from_strs(EXTENSION_LIFECYCLE_CAPABILITY_IDS)?;
+        capability_ids.extend(capability_ids_from_strs(BUNDLED_EXTENSION_CAPABILITY_IDS)?);
+        let mut harness = Self::new_with_options(
+            "reborn-e2e-extension-lifecycle-tools",
+            capability_ids,
+            local_dev_all_effects(),
+            Vec::new(),
+            ExtensionId::new(BUILTIN_FIRST_PARTY_PROVIDER)?,
+            UserId::new("reborn-e2e-extension-lifecycle-user")?,
+            HostRuntimeHarnessOptions::new(
+                MountView::default(),
+                Some(ironclaw_reborn_composition::local_dev_yolo_runtime_policy(
+                    true,
+                )?),
+            )
+            .with_seed_extension_credentials(),
+        )
+        .await?;
+        harness.network_policy = wildcard_test_policy();
+        harness.additional_provider_trust = bundled_extension_provider_trust()?;
+        Ok(harness)
     }
 
     async fn skill_management_tools() -> HarnessResult<Self> {
@@ -1782,6 +1843,7 @@ impl HostRuntimeCapabilityHarness {
         let HostRuntimeHarnessOptions {
             mounts,
             runtime_policy,
+            seed_extension_credentials,
         } = options;
         let root = Arc::new(tempfile::tempdir()?);
         let storage_root = root.path().join("local-dev");
@@ -1808,6 +1870,9 @@ impl HostRuntimeCapabilityHarness {
             input = input.with_runtime_policy(runtime_policy);
         }
         let services = build_reborn_services(input).await?;
+        if seed_extension_credentials {
+            seed_extension_lifecycle_credentials(&services, &user_id).await?;
+        }
         let approval_parts = services.local_dev_approval_test_parts();
         let pending_approval_scopes = Arc::new(Mutex::new(HashMap::new()));
         let runtime = services
@@ -1832,6 +1897,7 @@ impl HostRuntimeCapabilityHarness {
             network_policy: NetworkPolicy::default(),
             secrets,
             provider_id,
+            additional_provider_trust: Vec::new(),
             user_id,
             invocations: Arc::new(Mutex::new(Vec::new())),
             results: Arc::new(Mutex::new(Vec::new())),
@@ -1894,6 +1960,10 @@ impl HostRuntimeCapabilityHarness {
             CapabilityId::new(MEMORY_WRITE_CAPABILITY_ID)?,
             CapabilityId::new(MEMORY_READ_CAPABILITY_ID)?,
             CapabilityId::new(MEMORY_TREE_CAPABILITY_ID)?,
+            // profile_set writes to the memory mount (context/profile.json under
+            // the user-scoped scope), so it needs the memory mount override just
+            // like the four memory_* capabilities above.
+            CapabilityId::new(PROFILE_SET_CAPABILITY_ID)?,
         ];
         Ok(Self {
             runtime,
@@ -1917,6 +1987,7 @@ impl HostRuntimeCapabilityHarness {
                 CapabilityId::new(MEMORY_WRITE_CAPABILITY_ID)?,
                 CapabilityId::new(MEMORY_READ_CAPABILITY_ID)?,
                 CapabilityId::new(MEMORY_TREE_CAPABILITY_ID)?,
+                CapabilityId::new(PROFILE_SET_CAPABILITY_ID)?,
                 CapabilityId::new(READ_FILE_CAPABILITY_ID)?,
                 CapabilityId::new(APPLY_PATCH_CAPABILITY_ID)?,
             ],
@@ -1930,6 +2001,7 @@ impl HostRuntimeCapabilityHarness {
             network_policy,
             secrets: Vec::new(),
             provider_id: ExtensionId::new(BUILTIN_FIRST_PARTY_PROVIDER)?,
+            additional_provider_trust: Vec::new(),
             user_id,
             invocations: Arc::new(Mutex::new(Vec::new())),
             results: Arc::new(Mutex::new(Vec::new())),
@@ -1973,6 +2045,7 @@ impl HostRuntimeCapabilityHarness {
             network_policy: github_support::api_policy(),
             secrets: github_support::secret_handles()?,
             provider_id: github_support::provider_id()?,
+            additional_provider_trust: Vec::new(),
             user_id: UserId::new("reborn-e2e-github-user")?,
             invocations: Arc::new(Mutex::new(Vec::new())),
             results: Arc::new(Mutex::new(Vec::new())),
@@ -2096,6 +2169,100 @@ fn approval_request_id_from_gate_ref(gate_ref: &GateRef) -> HarnessResult<Approv
     Ok(ApprovalRequestId::parse(value)?)
 }
 
+async fn seed_extension_lifecycle_credentials(
+    services: &ironclaw_reborn_composition::RebornServices,
+    user_id: &UserId,
+) -> HarnessResult<()> {
+    let product_auth = services
+        .product_auth
+        .as_ref()
+        .ok_or("extension lifecycle harness missing product auth")?;
+    let scope = AuthProductScope::credential_owner(
+        &ResourceScope {
+            tenant_id: TenantId::new("tenant-e2e")?,
+            user_id: user_id.clone(),
+            agent_id: Some(AgentId::new("agent-e2e")?),
+            project_id: Some(ProjectId::new("project-e2e")?),
+            mission_id: None,
+            thread_id: None,
+            invocation_id: InvocationId::new(),
+        },
+        AuthSurface::Api,
+    );
+    let accounts = product_auth.credential_account_service();
+    for seed in extension_lifecycle_credential_seeds() {
+        accounts
+            .create_account(NewCredentialAccount {
+                scope: scope.clone(),
+                provider: AuthProviderId::new(seed.provider)?,
+                label: CredentialAccountLabel::new(seed.label)?,
+                status: CredentialAccountStatus::Configured,
+                ownership: CredentialOwnership::UserReusable,
+                owner_extension: None,
+                granted_extensions: Vec::new(),
+                access_secret: Some(SecretHandle::new(seed.secret_handle)?),
+                refresh_secret: None,
+                scopes: seed
+                    .scopes
+                    .iter()
+                    .map(|scope| ProviderScope::new(*scope))
+                    .collect::<Result<Vec<_>, _>>()?,
+            })
+            .await?;
+    }
+    Ok(())
+}
+
+struct ExtensionLifecycleCredentialSeed {
+    provider: &'static str,
+    label: &'static str,
+    secret_handle: &'static str,
+    scopes: &'static [&'static str],
+}
+
+fn extension_lifecycle_credential_seeds() -> &'static [ExtensionLifecycleCredentialSeed] {
+    &[
+        ExtensionLifecycleCredentialSeed {
+            provider: "github",
+            label: "qa github",
+            secret_handle: "qa_github_access",
+            scopes: &[],
+        },
+        ExtensionLifecycleCredentialSeed {
+            provider: "google",
+            label: "qa google",
+            secret_handle: "qa_google_access",
+            scopes: &[
+                "https://www.googleapis.com/auth/calendar.events",
+                "https://www.googleapis.com/auth/calendar.readonly",
+                "https://www.googleapis.com/auth/documents",
+                "https://www.googleapis.com/auth/documents.readonly",
+                "https://www.googleapis.com/auth/drive",
+                "https://www.googleapis.com/auth/drive.readonly",
+                "https://www.googleapis.com/auth/gmail.modify",
+                "https://www.googleapis.com/auth/gmail.readonly",
+                "https://www.googleapis.com/auth/gmail.send",
+                "https://www.googleapis.com/auth/presentations",
+                "https://www.googleapis.com/auth/presentations.readonly",
+                "https://www.googleapis.com/auth/spreadsheets",
+                "https://www.googleapis.com/auth/spreadsheets.readonly",
+            ],
+        },
+        ExtensionLifecycleCredentialSeed {
+            provider: "nearai",
+            label: "qa nearai",
+            secret_handle: "qa_nearai_access",
+            scopes: &[],
+        },
+        ExtensionLifecycleCredentialSeed {
+            provider: "notion",
+            label: "qa notion",
+            secret_handle: "qa_notion_access",
+            scopes: &[],
+        },
+    ]
+}
+
 struct RecordingHostRuntime {
     inner: Arc<dyn HostRuntime>,
     pending_approval_scopes: Arc<Mutex<HashMap<ApprovalRequestId, ResourceScope>>>,
@@ -2196,7 +2363,7 @@ impl LoopCapabilityPortFactory for HostRuntimeHarnessCapabilityPortFactory {
         &self,
         run_context: &LoopRunContext,
     ) -> Result<Arc<dyn LoopCapabilityPort>, AgentLoopHostError> {
-        let authority = ProductLiveVisibleCapabilityRequestConfig::new(
+        let mut authority = ProductLiveVisibleCapabilityRequestConfig::new(
             self.harness.user_id.clone(),
             self.harness.runtime_kind,
             TrustClass::FirstParty,
@@ -2218,6 +2385,13 @@ impl LoopCapabilityPortFactory for HostRuntimeHarnessCapabilityPortFactory {
             EffectiveTrustClass::user_trusted(),
             self.harness.effect_kinds.clone(),
         );
+        for (provider, effects) in &self.harness.additional_provider_trust {
+            authority = authority.with_provider_trust_for_effects(
+                provider.clone(),
+                EffectiveTrustClass::user_trusted(),
+                effects.clone(),
+            );
+        }
         let execution_mounts = self.harness.mounts.clone();
         let visible_request = visible_capability_request_for_run(run_context, authority)
             .map_err(host_runtime_harness_error)?;
@@ -2524,7 +2698,11 @@ fn first_party_trust_policy() -> HarnessResult<HostTrustPolicy> {
                 EffectKind::DispatchCapability,
                 EffectKind::ReadFilesystem,
                 EffectKind::WriteFilesystem,
+                EffectKind::DeleteFilesystem,
                 EffectKind::Network,
+                EffectKind::SpawnProcess,
+                EffectKind::ExecuteCode,
+                EffectKind::ExternalWrite,
             ],
             None,
         )]),
@@ -2559,6 +2737,45 @@ fn http_test_policy() -> NetworkPolicy {
         deny_private_ip_ranges: true,
         max_egress_bytes: Some(10_000),
     }
+}
+
+fn wildcard_test_policy() -> NetworkPolicy {
+    NetworkPolicy {
+        allowed_targets: vec![NetworkTargetPattern {
+            scheme: None,
+            host_pattern: "*".to_string(),
+            port: None,
+        }],
+        deny_private_ip_ranges: true,
+        max_egress_bytes: Some(1_000_000),
+    }
+}
+
+fn capability_ids_from_strs(ids: &[&str]) -> HarnessResult<Vec<CapabilityId>> {
+    ids.iter()
+        .map(|id| CapabilityId::new(*id).map_err(Into::into))
+        .collect()
+}
+
+fn bundled_extension_provider_trust() -> HarnessResult<Vec<(ExtensionId, Vec<EffectKind>)>> {
+    BUNDLED_EXTENSION_IDS
+        .iter()
+        .map(|id| Ok((ExtensionId::new(*id)?, local_dev_all_effects())))
+        .collect()
+}
+
+fn local_dev_all_effects() -> Vec<EffectKind> {
+    vec![
+        EffectKind::DispatchCapability,
+        EffectKind::ReadFilesystem,
+        EffectKind::WriteFilesystem,
+        EffectKind::DeleteFilesystem,
+        EffectKind::Network,
+        EffectKind::UseSecret,
+        EffectKind::SpawnProcess,
+        EffectKind::ExecuteCode,
+        EffectKind::ExternalWrite,
+    ]
 }
 
 #[derive(Debug)]
@@ -2601,8 +2818,13 @@ impl SecretStore for StaticSecretStore {
         scope: ResourceScope,
         handle: SecretHandle,
         _material: SecretMaterial,
+        _expires_at: Option<ironclaw_host_api::Timestamp>,
     ) -> Result<SecretMetadata, SecretStoreError> {
-        Ok(SecretMetadata { scope, handle })
+        Ok(SecretMetadata {
+            scope,
+            handle,
+            expires_at: None,
+        })
     }
 
     async fn metadata(
@@ -2613,7 +2835,19 @@ impl SecretStore for StaticSecretStore {
         Ok((handle == &self.handle).then(|| SecretMetadata {
             scope: scope.clone(),
             handle: handle.clone(),
+            expires_at: None,
         }))
+    }
+
+    async fn metadata_for_scope(
+        &self,
+        scope: &ResourceScope,
+    ) -> Result<Vec<SecretMetadata>, SecretStoreError> {
+        Ok(vec![SecretMetadata {
+            scope: scope.clone(),
+            handle: self.handle.clone(),
+            expires_at: None,
+        }])
     }
 
     async fn delete(
@@ -2837,15 +3071,15 @@ impl LoopCapabilityResultWriter for RecordingCapabilityResultWriter {
     async fn write_capability_result(
         &self,
         write: CapabilityResultWrite<'_>,
-    ) -> Result<(LoopResultRef, u64), AgentLoopHostError> {
+    ) -> Result<CapabilityWriteResult, AgentLoopHostError> {
         let capability_id = write.capability_id.clone();
         let output = write.output.clone();
-        let (result_ref, byte_len) = self.inner.write_capability_result(write).await?;
+        let write_result = self.inner.write_capability_result(write).await?;
         self.results.lock().unwrap().push(RecordedCapabilityResult {
             capability_id,
             output,
         });
-        Ok((result_ref, byte_len))
+        Ok(write_result)
     }
 
     async fn update_capability_result(
@@ -2889,6 +3123,26 @@ fn memory_mounts(permissions: MountPermissions) -> HarnessResult<MountView> {
 
 fn skill_mounts() -> HarnessResult<MountView> {
     Ok(MountView::new(vec![
+        MountGrant::new(
+            MountAlias::new("/skills")?,
+            VirtualPath::new("/projects/skills")?,
+            MountPermissions::read_write_list_delete(),
+        ),
+        MountGrant::new(
+            MountAlias::new("/system/skills")?,
+            VirtualPath::new("/projects/system/skills")?,
+            MountPermissions::read_only(),
+        ),
+    ])?)
+}
+
+fn qa_smoke_mounts() -> HarnessResult<MountView> {
+    Ok(MountView::new(vec![
+        MountGrant::new(
+            MountAlias::new("/workspace")?,
+            VirtualPath::new("/projects/workspace")?,
+            MountPermissions::read_write_list_delete(),
+        ),
         MountGrant::new(
             MountAlias::new("/skills")?,
             VirtualPath::new("/projects/skills")?,
@@ -3050,6 +3304,7 @@ impl RecordingTestCapabilityPort {
             progress: ironclaw_turns::run_profile::CapabilityProgress::MadeProgress,
             terminate_hint: false,
             byte_len: 0,
+            output_digest: None,
         })
     }
 }
@@ -3310,27 +3565,64 @@ fn route_kind_for_trigger(trigger: ProductTriggerReason) -> ProductConversationR
     }
 }
 
-fn scoped_turns_fs<F>(
-    backend: Arc<F>,
+fn scoped_turns_fs(
+    backend: Arc<HarnessTurnStorageBackend>,
     binding: &ResolvedBinding,
-) -> HarnessResult<Arc<ScopedFilesystem<F>>>
-where
-    F: RootFilesystem,
-{
+) -> HarnessResult<Arc<ScopedFilesystem<HarnessTurnBackend>>> {
     let owner_user_id = binding
         .subject_user_id
         .as_ref()
         .unwrap_or(&binding.actor_user_id);
-    let target = format!(
-        "/engine/tenants/{}/users/{}/turns",
-        binding.tenant_id, owner_user_id
-    );
+    // Include agent_id and project_id in the path when present so that
+    // distinct agents or projects stored under the same tenant/user
+    // (e.g. shared-storage multi-harness tests) get isolated turn state
+    // files and cannot cross-claim each other's queued runs.
+    let target = match (binding.agent_id.as_ref(), binding.project_id.as_ref()) {
+        (Some(agent_id), Some(project_id)) => format!(
+            "/engine/tenants/{}/agents/{}/projects/{}/users/{}/turns",
+            binding.tenant_id, agent_id, project_id, owner_user_id
+        ),
+        (Some(agent_id), None) => format!(
+            "/engine/tenants/{}/agents/{}/users/{}/turns",
+            binding.tenant_id, agent_id, owner_user_id
+        ),
+        (None, Some(project_id)) => format!(
+            "/engine/tenants/{}/projects/{}/users/{}/turns",
+            binding.tenant_id, project_id, owner_user_id
+        ),
+        (None, None) => format!(
+            "/engine/tenants/{}/users/{}/turns",
+            binding.tenant_id, owner_user_id
+        ),
+    };
     let mounts = MountView::new(vec![MountGrant::new(
         MountAlias::new("/turns").expect("valid turns alias"),
         VirtualPath::new(target).expect("valid turns target"),
         MountPermissions::read_write_list_delete(),
     )])?;
-    Ok(Arc::new(ScopedFilesystem::with_fixed_view(backend, mounts)))
+    Ok(Arc::new(ScopedFilesystem::with_fixed_view(
+        turn_state_root_filesystem(backend)?,
+        mounts,
+    )))
+}
+
+fn turn_state_root_filesystem(
+    backend: Arc<HarnessTurnStorageBackend>,
+) -> HarnessResult<Arc<HarnessTurnBackend>> {
+    let mut root = CompositeRootFilesystem::new();
+    root.mount(
+        local_dev_mount_descriptor(
+            "/engine",
+            "reborn-harness-turn-state",
+            BackendKind::MemoryDocuments,
+            StorageClass::StructuredRecords,
+            ContentKind::StructuredRecord,
+            IndexPolicy::NotIndexed,
+            backend.capabilities(),
+        )?,
+        backend,
+    )?;
+    Ok(Arc::new(root))
 }
 
 pub fn trace_tool_call_response() -> ironclaw_loop_support::HostManagedModelResponse {

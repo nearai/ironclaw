@@ -370,7 +370,7 @@ pub(super) async fn google_oauth_callback_handler(
         ))
         .await;
         state.remove_pkce_verifier(flow_id);
-        return response.map(|response| oauth_callback_response(&headers, response));
+        return oauth_callback_route_result_response(&headers, response);
     }
 
     let provider = match run_with_backend_timeout(
@@ -403,12 +403,23 @@ pub(super) async fn google_oauth_callback_handler(
     let requested_scopes = callback_state.requested_scopes();
     let callback_scopes = match parse_google_callback_scopes(query.scopes.as_deref()) {
         Ok(Some(callback_scopes)) => {
-            if let Err(error) = validate_google_callback_includes_requested_scopes(
+            if validate_google_callback_includes_requested_scopes(
                 &callback_scopes,
                 requested_scopes,
-            ) {
+            )
+            .is_err()
+            {
                 state.remove_pkce_verifier(flow_id);
-                return Err(error);
+                let response = run_with_backend_timeout(state.product_auth.handle_oauth_callback(
+                    RebornOAuthCallbackRequest {
+                        scope: callback_scope.clone(),
+                        flow_id,
+                        opaque_state_hash: state_hash.clone(),
+                        outcome: RebornOAuthCallbackOutcome::ProviderDenied,
+                    },
+                ))
+                .await;
+                return oauth_callback_route_result_response(&headers, response);
             }
             requested_scopes.to_vec()
         }
@@ -461,6 +472,19 @@ pub(super) async fn google_oauth_callback_handler(
     Ok(oauth_callback_response(&headers, response))
 }
 
+fn oauth_callback_route_result_response(
+    headers: &HeaderMap,
+    response: Result<RebornOAuthCallbackResponse, ProductAuthRouteFailure>,
+) -> Result<Response, ProductAuthRouteFailure> {
+    match response {
+        Ok(response) => Ok(oauth_callback_response(headers, response)),
+        Err(error) if wants_oauth_callback_html(headers) => {
+            Ok(oauth_callback_failure_html(error.status, &error.body))
+        }
+        Err(error) => Err(error),
+    }
+}
+
 fn validate_google_callback_includes_requested_scopes(
     callback_scopes: &[ProviderScope],
     requested_scopes: &[ProviderScope],
@@ -470,7 +494,10 @@ fn validate_google_callback_includes_requested_scopes(
             .iter()
             .all(|requested| callback_scopes.iter().any(|scope| scope == requested))
     {
-        return Err(ProductAuthRouteFailure::malformed_callback());
+        return Err(ProductAuthRouteFailure::new(
+            StatusCode::BAD_REQUEST,
+            AuthErrorCode::ProviderDenied,
+        ));
     }
     Ok(())
 }
@@ -502,6 +529,20 @@ fn oauth_callback_completion_html(response: &RebornOAuthCallbackResponse) -> Res
     const CHANNEL: &str = "ironclaw-product-auth";
     const STORAGE_KEY: &str = "ironclaw:product-auth:oauth-complete";
     const MESSAGE_TYPE: &str = "ironclaw:product-auth:oauth-complete";
+    let (title, message) = match response.status {
+        AuthFlowStatus::Completed => (
+            "Authorization complete",
+            "Authorization complete. You can close this window.",
+        ),
+        AuthFlowStatus::Failed => (
+            "Authorization failed",
+            "Authorization failed. No permissions were selected, or authorization was denied. Please retry authorization and select the requested permissions.",
+        ),
+        _ => (
+            "Authorization failed",
+            "Authorization did not complete. Please return to Reborn and retry authorization.",
+        ),
+    };
 
     let payload = json!({
         "type": MESSAGE_TYPE,
@@ -515,10 +556,10 @@ fn oauth_callback_completion_html(response: &RebornOAuthCallbackResponse) -> Res
 <html lang="en">
 <head>
   <meta charset="utf-8">
-  <title>Authorization complete</title>
+  <title>{title}</title>
 </head>
 <body>
-  <p>Authorization complete. You can close this window.</p>
+  <p>{message}</p>
   <script>
     (() => {{
       const payload = {payload};
@@ -538,6 +579,36 @@ fn oauth_callback_completion_html(response: &RebornOAuthCallbackResponse) -> Res
 </html>"#
     );
     ([(header::CONTENT_TYPE, "text/html; charset=utf-8")], html).into_response()
+}
+
+fn oauth_callback_failure_html(status: StatusCode, error: &RebornOAuthCallbackError) -> Response {
+    let message = match error.code {
+        AuthErrorCode::ProviderDenied => {
+            "Authorization failed. No permissions were selected, or authorization was denied. Please retry authorization and select the requested permissions."
+        }
+        AuthErrorCode::MalformedCallback => {
+            "Authorization failed. Please retry authorization from Reborn."
+        }
+        _ => "Authorization failed. Please return to Reborn and retry authorization.",
+    };
+    let html = format!(
+        r#"<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Authorization failed</title>
+</head>
+<body>
+  <p>{message}</p>
+</body>
+</html>"#
+    );
+    (
+        status,
+        [(header::CONTENT_TYPE, "text/html; charset=utf-8")],
+        html,
+    )
+        .into_response()
 }
 
 pub(super) async fn callback_outcome_from_query(
@@ -685,6 +756,7 @@ mod tests {
     use crate::input::OAuthClientConfig;
     use crate::oauth_gate::{GoogleOAuthGateProvider, GoogleOAuthGateProviderRegistry};
     use async_trait::async_trait;
+    use axum::body::to_bytes;
     use ironclaw_auth::{GOOGLE_CALENDAR_READONLY_SCOPE, InMemoryAuthProductServices};
     use ironclaw_host_api::{RuntimeCredentialAccountProviderId, RuntimeCredentialAuthRequirement};
     use ironclaw_secrets::{InMemorySecretStore, SecretStore};
@@ -778,6 +850,105 @@ mod tests {
                 gate_ref: AuthGateRef::new(gate_ref).expect("gate ref"),
             }
         );
+    }
+
+    #[tokio::test]
+    async fn google_oauth_callback_with_empty_scope_returns_html_failure_page() {
+        let shared = Arc::new(InMemoryAuthProductServices::new());
+        let secret_store = Arc::new(InMemorySecretStore::new());
+        let secret_store_for_provider: Arc<dyn SecretStore> = secret_store.clone();
+        let dispatcher = Arc::new(RecordingDispatcher::default());
+        let google_gate = Arc::new(GoogleOAuthGateProvider::new(
+            OAuthClientConfig::new(
+                "google-client.apps.googleusercontent.com",
+                "http://127.0.0.1:3000/api/reborn/product-auth/oauth/google/callback",
+                None,
+            )
+            .expect("google oauth client"),
+            secret_store_for_provider,
+        ));
+        let product_auth = Arc::new(
+            RebornProductAuthServices::from_shared(shared.clone(), dispatcher)
+                .with_flow_record_source(shared)
+                .with_oauth_gate_registry(Arc::new(GoogleOAuthGateProviderRegistry::new(vec![
+                    google_gate,
+                ]))),
+        );
+        let state = ProductAuthRouteState::new(
+            product_auth.clone(),
+            TenantId::new("tenant-alpha").expect("tenant"),
+            None,
+            None,
+        );
+        let turn_scope = TurnScope::new(
+            TenantId::new("tenant-alpha").expect("tenant"),
+            None,
+            None,
+            ThreadId::new("thread-alpha").expect("thread"),
+        );
+        let owner_user_id = UserId::new("user-alpha").expect("user");
+        let requirements = vec![RuntimeCredentialAuthRequirement {
+            provider: RuntimeCredentialAccountProviderId::new("google").expect("provider"),
+            setup: ironclaw_host_api::RuntimeCredentialAccountSetup::OAuth {
+                scopes: vec![GOOGLE_CALENDAR_READONLY_SCOPE.to_string()],
+            },
+            requester_extension: ExtensionId::new("gmail").expect("extension"),
+            provider_scopes: vec![GOOGLE_CALENDAR_READONLY_SCOPE.to_string()],
+        }];
+
+        let challenge = product_auth
+            .challenge_for_gate(
+                &turn_scope,
+                &owner_user_id,
+                TurnRunId::new(),
+                "gate:gmail-auth",
+                &requirements,
+            )
+            .await
+            .expect("challenge lookup")
+            .expect("google oauth challenge");
+        let authorization_url = challenge.authorization_url.expect("authorization url");
+        let state_value = Url::parse(authorization_url.as_str())
+            .expect("authorization url")
+            .query_pairs()
+            .find_map(|(name, value)| (name == "state").then(|| value.into_owned()))
+            .expect("oauth state");
+        let encoded_state =
+            url::form_urlencoded::byte_serialize(state_value.as_bytes()).collect::<String>();
+        let uri = format!(
+            "{GOOGLE_OAUTH_CALLBACK_PATH}?state={encoded_state}&code=google-auth-code&scope="
+        )
+        .parse::<Uri>()
+        .expect("callback uri");
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            header::ACCEPT,
+            "text/html,application/xhtml+xml"
+                .parse()
+                .expect("accept header"),
+        );
+
+        let response = google_oauth_callback_handler(
+            State(state),
+            RawQuery(uri.query().map(str::to_string)),
+            uri,
+            headers,
+        )
+        .await
+        .expect("google callback renders html failure");
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(
+            response.headers().get(header::CONTENT_TYPE),
+            Some(&"text/html; charset=utf-8".parse().expect("content type"))
+        );
+        let body = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("response body");
+        let body = String::from_utf8(body.to_vec()).expect("utf8 body");
+        assert!(body.contains("Authorization failed"));
+        assert!(body.contains("No permissions were selected"));
+        assert!(!body.contains("malformed_callback"));
     }
 
     #[tokio::test]

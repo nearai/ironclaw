@@ -1,5 +1,6 @@
 use ironclaw_safety::{
-    ProviderValidationError, validate_optional_provider_metadata_text,
+    PROVIDER_METADATA_TEXT_MAX_BYTES, ProviderValidationError,
+    validate_optional_provider_metadata_text,
     validate_provider_arguments as validate_safety_provider_arguments, validate_provider_identity,
     validate_provider_token, validate_provider_tool_name as validate_safety_provider_tool_name,
 };
@@ -27,19 +28,19 @@ pub(super) fn validate_provider_tool_call(
     validate_optional_provider_metadata_text(
         tool_call.response_reasoning.as_deref(),
         "provider response reasoning",
-        4096,
+        PROVIDER_METADATA_TEXT_MAX_BYTES,
     )
     .map_err(invalid_invocation)?;
     validate_optional_provider_metadata_text(
         tool_call.reasoning.as_deref(),
         "provider reasoning",
-        4096,
+        PROVIDER_METADATA_TEXT_MAX_BYTES,
     )
     .map_err(invalid_invocation)?;
     validate_optional_provider_metadata_text(
         tool_call.signature.as_deref(),
         "provider signature",
-        4096,
+        PROVIDER_METADATA_TEXT_MAX_BYTES,
     )
     .map_err(invalid_invocation)?;
     Ok(())
@@ -90,13 +91,19 @@ mod tests {
 
     #[test]
     fn provider_tool_call_validation_rejects_sensitive_metadata() {
+        // Arguments carrying a real secret-like token are rejected by the
+        // entropy-based leak scan, which is the canonical guard after #5001
+        // dropped the crude bare-word substring markers.
         let mut call = provider_tool_call();
         let api_key = format!("sk-proj-{}", "a".repeat(24));
         call.arguments = serde_json::json!({"password": api_key});
         assert!(validate_provider_tool_call(&call).is_err());
 
+        // The same leak scan runs over model-emitted reasoning, so a leaked
+        // secret-like token there is rejected even though bare words like
+        // "traceback" are now intentionally allowed (#5001, PinchBench bucket D).
         let mut call = provider_tool_call();
-        call.reasoning = Some("provider error included traceback".to_string());
+        call.reasoning = Some(format!("provider error leaked sk-proj-{}", "b".repeat(24)));
         assert!(validate_provider_tool_call(&call).is_err());
     }
 

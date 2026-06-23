@@ -1,0 +1,106 @@
+{
+  "model_name": "recorded-qa-routine_release_watch",
+  "steps": [
+    {
+      "response": {
+        "type": "user_input",
+        "content": "Every 5 minutes in UTC, create a routine that checks the public GitHub releases API for https://github.com/nearai/ironclaw and sends me a Slack message summarizing any new releases. Do not require GitHub account authorization."
+      }
+    },
+    {
+      "request_hint": {
+        "last_user_message_contains": "Every 5 minutes in UTC, create a routine that checks the public GitHub releases ",
+        "min_message_count": 2
+      },
+      "response": {
+        "type": "tool_calls",
+        "tool_calls": [
+          {
+            "id": "toolu_01HoPezBYTMdNGJj4s9aJiBW",
+            "name": "builtin__outbound_delivery_targets_list",
+            "arguments": {
+              "channel": "slack"
+            }
+          }
+        ],
+        "input_tokens": 12469,
+        "output_tokens": 62
+      }
+    },
+    {
+      "request_hint": {
+        "last_user_message_contains": "Every 5 minutes in UTC, create a routine that checks the public GitHub releases ",
+        "min_message_count": 4
+      },
+      "response": {
+        "type": "tool_calls",
+        "tool_calls": [
+          {
+            "id": "toolu_01DTsRuZNZxwK4kTiDfK1jeQ",
+            "name": "builtin__outbound_delivery_target_set",
+            "arguments": {
+              "target_id": "slack:qa-trace-dm"
+            }
+          }
+        ],
+        "input_tokens": 12592,
+        "output_tokens": 69
+      },
+      "expected_tool_results": [
+        {
+          "tool_call_id": "toolu_01HoPezBYTMdNGJj4s9aJiBW",
+          "name": "builtin__outbound_delivery_targets_list",
+          "content": " object targets array object capabilities object auth_prompts false final_replies true gate_prompts false target object channel slack description QA trace Slack direct message display_name Slack DM target_id slack:qa-trace-dm"
+        }
+      ]
+    },
+    {
+      "request_hint": {
+        "last_user_message_contains": "Every 5 minutes in UTC, create a routine that checks the public GitHub releases ",
+        "min_message_count": 6
+      },
+      "response": {
+        "type": "tool_calls",
+        "tool_calls": [
+          {
+            "id": "toolu_01Q5TvjemFTRcBCfx5XkBrvV",
+            "name": "builtin__trigger_create",
+            "arguments": {
+              "name": "nearai/ironclaw GitHub Release Monitor",
+              "prompt": "Check the public GitHub releases API for https://github.com/nearai/ironclaw by fetching this URL (no auth required):\nhttps://api.github.com/repos/nearai/ironclaw/releases\n\nCompare the releases returned against any previously seen release IDs stored in memory (memory path: \"github_releases/nearai_ironclaw_seen.md\"). \n\nSteps:\n1. Fetch https://api.github.com/repos/nearai/ironclaw/releases via HTTP GET (no Authorization header).\n2. Read memory at \"github_releases/nearai_ironclaw_seen.md\" to get the list of previously seen release IDs.\n3. Identify any releases whose `id` field is NOT in the previously seen list — these are new releases.\n4. If there are new releases, send a Slack DM summarizing each new release with: release name, tag, published date, and the HTML URL. Format it clearly.\n5. Update the memory file \"github_releases/nearai_ironclaw_seen.md\" to include all current release IDs (seen + new), replacing the old content.\n6. If there are no new releases, do not send a Slack message — just confirm silently by updating nothing.\n",
+              "schedule": { "kind": "cron", "expression": "*/5 * * * *", "timezone": "UTC" }
+            }
+          }
+        ],
+        "input_tokens": 12720,
+        "output_tokens": 403
+      },
+      "expected_tool_results": [
+        {
+          "tool_call_id": "toolu_01DTsRuZNZxwK4kTiDfK1jeQ",
+          "name": "builtin__outbound_delivery_target_set",
+          "content": " object default_modality text final_reply_target object channel slack description QA trace Slack direct message display_name Slack DM target_id slack:qa-trace-dm final_reply_target_status available"
+        }
+      ]
+    },
+    {
+      "request_hint": {
+        "last_user_message_contains": "Every 5 minutes in UTC, create a routine that checks the public GitHub releases ",
+        "min_message_count": 8
+      },
+      "response": {
+        "type": "text",
+        "content": "The routine is set up and ready. Here's a summary of what was configured:\n\n---\n\n### ✅ nearai/ironclaw GitHub Release Monitor\n\n| Setting | Value |\n|---|---|\n| **Schedule** | Every 5 minutes (UTC) |\n| **First run** | 2026-06-19T18:25:00Z |\n| **Delivery** | Slack DM |\n| **API used** | `https://api.github.com/repos/nearai/ironclaw/releases` (public, no auth) |\n| **Trigger ID** | `01KVGHWSZ5SCSG5X9CNDF7MNWQ` |\n\n**How it works:**\n1. Fetches the public GitHub Releases API for `nearai/ironclaw` (no GitHub account needed).\n2. Compares releases against a persistent memory log of previously seen release IDs.\n3. If new releases are found → sends you a Slack DM with the release name, tag, publish date, and link.\n4. If nothing is new → runs silently with no message.",
+        "input_tokens": 13276,
+        "output_tokens": 259
+      },
+      "expected_tool_results": [
+        {
+          "tool_call_id": "toolu_01Q5TvjemFTRcBCfx5XkBrvV",
+          "name": "builtin__trigger_create",
+          "content": " object trigger object agent_id qa-trace-agent completion_policy recurring created_at 2026-06-19T18:22:06.820998Z has_active_fire false is_active true is_enabled true last_run_at null last_status null name nearai ironclaw GitHub Release Monitor next_run_at 2026-06-19T18:25:00Z project_id null recent_runs array schedule object expression * 5 * * * * kind cron timezone UTC source schedule state scheduled trigger_id 01KVGHWSZ5SCSG5X9CNDF7MNWQ"
+        }
+      ]
+    }
+  ]
+}

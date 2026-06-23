@@ -81,12 +81,22 @@ impl LocalDevCapabilityPolicy {
             .map(|grant| &grant.capability)
     }
 
+    pub(crate) fn system_extensions_lifecycle_capability_ids(
+        &self,
+    ) -> impl Iterator<Item = &CapabilityId> {
+        self.grants
+            .iter()
+            .filter(|grant| grant.mounts == LocalDevMountProfile::SystemExtensionsLifecycle)
+            .map(|grant| &grant.capability)
+    }
+
     pub(crate) fn builtin_grants(
         &self,
         grantee: &ExtensionId,
         workspace_mounts: &MountView,
         skill_mounts: &MountView,
         memory_mounts: &MountView,
+        system_extensions_mounts: &MountView,
     ) -> CapabilitySet {
         let grants = self
             .grants
@@ -101,6 +111,7 @@ impl LocalDevCapabilityPolicy {
                     workspace_mounts,
                     skill_mounts,
                     memory_mounts,
+                    system_extensions_mounts,
                     None,
                 ),
             })
@@ -114,6 +125,7 @@ impl LocalDevCapabilityPolicy {
         workspace_mounts: &MountView,
         skill_mounts: &MountView,
         memory_mounts: &MountView,
+        system_extensions_mounts: &MountView,
     ) -> Result<GrantConstraints, LocalDevCapabilityPolicyError> {
         let grant = self.grant(capability)?;
         Ok(constraint_terms(
@@ -121,6 +133,7 @@ impl LocalDevCapabilityPolicy {
             workspace_mounts,
             skill_mounts,
             memory_mounts,
+            system_extensions_mounts,
             None,
         ))
     }
@@ -131,6 +144,7 @@ impl LocalDevCapabilityPolicy {
         workspace_mounts: &MountView,
         skill_mounts: &MountView,
         memory_mounts: &MountView,
+        system_extensions_mounts: &MountView,
     ) -> Result<LeaseApproval, LocalDevCapabilityPolicyError> {
         let constraints = match action {
             LocalDevApprovalPolicyAction::Dispatch { capability } => self.grant_constraints_for(
@@ -138,6 +152,7 @@ impl LocalDevCapabilityPolicy {
                 workspace_mounts,
                 skill_mounts,
                 memory_mounts,
+                system_extensions_mounts,
             )?,
             LocalDevApprovalPolicyAction::SpawnCapability { capability } => {
                 match self.grant(capability) {
@@ -146,6 +161,7 @@ impl LocalDevCapabilityPolicy {
                         workspace_mounts,
                         skill_mounts,
                         memory_mounts,
+                        system_extensions_mounts,
                         Some(EffectKind::SpawnProcess),
                     ),
                     Err(LocalDevCapabilityPolicyError::MissingGrant { .. }) => {
@@ -158,6 +174,7 @@ impl LocalDevCapabilityPolicy {
                             workspace_mounts,
                             skill_mounts,
                             memory_mounts,
+                            system_extensions_mounts,
                             None,
                         )
                     }
@@ -247,6 +264,7 @@ pub(crate) enum LocalDevMountProfile {
     Ambient,
     SkillManagement,
     Memory,
+    SystemExtensionsLifecycle,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
@@ -411,6 +429,7 @@ fn constraint_terms(
     workspace_mounts: &MountView,
     skill_mounts: &MountView,
     memory_mounts: &MountView,
+    system_extensions_mounts: &MountView,
     required_effect: Option<EffectKind>,
 ) -> GrantConstraints {
     let mounts = match source.mounts() {
@@ -418,6 +437,7 @@ fn constraint_terms(
         LocalDevMountProfile::Ambient => MountView::default(),
         LocalDevMountProfile::SkillManagement => skill_mounts.clone(),
         LocalDevMountProfile::Memory => memory_mounts.clone(),
+        LocalDevMountProfile::SystemExtensionsLifecycle => system_extensions_mounts.clone(),
     };
     let network = match source.network() {
         LocalDevNetworkProfile::Default => NetworkPolicy::default(),
@@ -486,9 +506,11 @@ mod tests {
                 .contains(&EffectKind::SpawnProcess)
         );
         // onboard is exempt (it runs its own in-turn confirmed=true consent
-        // before the network POST); profile_set is deliberately NOT exempt —
-        // publishing a public community profile must hit the runtime approval
-        // gate, with its model-controlled confirmed=true only as defense-in-depth.
+        // before the network POST); trace_commons.profile_set is deliberately NOT
+        // exempt — publishing a public community profile must hit the runtime
+        // approval gate, with its model-controlled confirmed=true only as
+        // defense-in-depth. builtin.profile_set IS exempt: private local write
+        // only (no network/external_write), analogous to memory_write on a fixed path.
         assert!(
             policy
                 .approval_gate_exempt_capabilities()
@@ -500,6 +522,14 @@ mod tests {
                 .approval_gate_exempt_capabilities()
                 .iter()
                 .any(|capability| capability.as_str() == "builtin.trace_commons.profile_set")
+        );
+        assert!(
+            policy
+                .approval_gate_exempt_capabilities()
+                .iter()
+                .any(|capability| capability.as_str() == "builtin.profile_set"),
+            "builtin.profile_set must be in the exempt list (private local write, no \
+             network/external_write — analogous to memory_write on a fixed path)"
         );
         assert!(
             policy
@@ -582,8 +612,25 @@ mod tests {
             assert_eq!(grant.mounts, LocalDevMountProfile::Ambient);
             assert_eq!(grant.network, LocalDevNetworkProfile::Default);
         }
+        // builtin.profile_set writes context/profile.json under the memory mount.
+        // It mirrors memory_write's effect set (read+write filesystem, memory mount,
+        // default network) and must be present here or it is denied as MissingGrant.
+        let builtin_profile_set = policy
+            .grant(&CapabilityId::new("builtin.profile_set").expect("capability id"))
+            .expect("builtin.profile_set grant must be present");
+        assert_eq!(
+            builtin_profile_set.effects,
+            vec![
+                EffectKind::DispatchCapability,
+                EffectKind::ReadFilesystem,
+                EffectKind::WriteFilesystem,
+            ]
+        );
+        assert_eq!(builtin_profile_set.mounts, LocalDevMountProfile::Memory);
+        assert_eq!(builtin_profile_set.network, LocalDevNetworkProfile::Default);
+
         // profile_token writes profile_token.jwt (0600), so its grant carries
-        // WriteFilesystem; profile_set only reads policy + posts, so it does not.
+        // WriteFilesystem; trace_commons.profile_set only reads policy + posts, so it does not.
         let profile_token = policy
             .grant(
                 &CapabilityId::new("builtin.trace_commons.profile_token").expect("capability id"),
@@ -664,6 +711,7 @@ mod tests {
                 &MountView::default(),
                 &MountView::default(),
                 &MountView::default(),
+                &MountView::default(),
             )
             .expect("lease approval");
 
@@ -687,6 +735,7 @@ mod tests {
                 LocalDevApprovalPolicyAction::SpawnCapability {
                     capability: &capability,
                 },
+                &MountView::default(),
                 &MountView::default(),
                 &MountView::default(),
                 &MountView::default(),
