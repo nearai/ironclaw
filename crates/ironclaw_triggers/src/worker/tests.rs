@@ -2327,18 +2327,15 @@ async fn tick_recurring_blocked_active_run_clears_as_failed() {
 }
 
 #[tokio::test]
-async fn tick_fire_once_permanent_submit_failure_stays_scheduled_for_retry() {
-    // A CompleteAfterFirstFire trigger whose submitter returns a Permanent
-    // failure (e.g. unpaired actor, bad materialization) has NOT fired — the
-    // one-shot must remain Scheduled so it can retry once the cause is fixed.
-    // It must NOT be marked Completed; that only happens via clear_active_fire
-    // after a real run terminates.
+async fn tick_fire_once_permanent_submit_failure_completes_once_trigger() {
+    // Once triggers must key permanent failure handling on the schedule kind, not
+    // on next_slot_after(None). Exhausted cron schedules also have no next slot
+    // but must keep the existing fail-closed Retryable behavior.
     let repo = Arc::new(InMemoryTriggerRepository::default());
     let trigger_id = TriggerId::parse("01HZZZZZZZZZZZZZZZZZZZZZZZ").expect("ulid");
     let fire_slot = ts(1_704_067_200);
     let mut record = sample_record(trigger_id, tenant("tenant-a"), fire_slot);
     record.schedule = TriggerSchedule::once(fire_slot, "UTC").expect("valid once");
-    let original_next_run_at = record.next_run_at;
     repo.upsert_trigger(record).await.expect("insert");
     let worker = worker(
         repo.clone(),
@@ -2353,35 +2350,92 @@ async fn tick_fire_once_permanent_submit_failure_stays_scheduled_for_retry() {
 
     let report = worker.tick_once(fire_slot).await.expect("tick succeeds");
 
-    // Permanent pre-submission failure for a fire-once triggers Retryable (fail-closed).
     assert!(
         matches!(
             report.results.last().map(|r| &r.outcome),
-            Some(TriggerPollerFireOutcome::RetryableFailed { .. })
+            Some(TriggerPollerFireOutcome::OncePermanentFailed {
+                reason: TriggerPollerFailureReason::InvalidMaterialization,
+            })
         ),
-        "fire-once permanent submit failure must produce RetryableFailed (fail-closed, not PermanentFailed)"
+        "fire-once permanent submit failure must complete the once trigger, not remain retryable"
     );
     let persisted = repo
         .get_trigger(tenant("tenant-a"), trigger_id)
         .await
         .expect("load")
         .expect("record present");
-    assert_ne!(
+    assert_eq!(
         persisted.state,
         TriggerState::Completed,
-        "fire-once that never fired must NOT be Completed — it must remain Scheduled"
-    );
-    assert_eq!(
-        persisted.state,
-        TriggerState::Scheduled,
-        "fire-once permanent submit failure must leave trigger Scheduled"
-    );
-    assert_eq!(
-        persisted.next_run_at, original_next_run_at,
-        "fire-once trigger must NOT advance next_run_at on permanent failure"
+        "fire-once permanent submit failure must mark the once trigger Completed"
     );
     assert_eq!(persisted.active_fire_slot, None);
     assert_eq!(persisted.active_run_ref, None);
+    let due = repo
+        .list_due_triggers(fire_slot, 10)
+        .await
+        .expect("due query");
+    assert!(
+        due.iter().all(|r| r.trigger_id != trigger_id),
+        "completed fire-once trigger must not appear in due list"
+    );
+}
+
+#[tokio::test]
+async fn tick_fire_once_permanent_pre_submit_failures_complete_once_trigger() {
+    let fire_slot = ts(1_704_067_200);
+    let cases = [
+        (
+            "01HZZZZZZZZZZZZZZZZZZZZZZY",
+            Arc::new(NullSourceProvider) as Arc<dyn TriggerSourceProvider>,
+            Arc::new(RecordingMaterializer::success("content:fire-once")),
+            TriggerPollerFailureReason::SourceNoFire,
+        ),
+        (
+            "01HZZZZZZZZZZZZZZZZZZZZZZX",
+            Arc::new(crate::ScheduleTriggerSourceProvider) as Arc<dyn TriggerSourceProvider>,
+            Arc::new(RecordingMaterializer::failure(
+                TriggerError::InvalidMaterialization {
+                    reason: "bad prompt content ref for once trigger".to_string(),
+                },
+            )),
+            TriggerPollerFailureReason::InvalidMaterialization,
+        ),
+    ];
+
+    for (trigger_id, source_provider, materializer, expected_reason) in cases {
+        let repo = Arc::new(InMemoryTriggerRepository::default());
+        let trigger_id = TriggerId::parse(trigger_id).expect("ulid");
+        let mut record = sample_record(trigger_id, tenant("tenant-a"), fire_slot);
+        record.schedule = TriggerSchedule::once(fire_slot, "UTC").expect("valid once");
+        repo.upsert_trigger(record).await.expect("insert");
+        let worker = worker_with_source_provider(
+            repo.clone(),
+            source_provider,
+            materializer,
+            Arc::new(RecordingSubmitter::with_outcomes(Vec::new())),
+            Arc::new(RecordingActiveRunLookup::default()),
+        );
+
+        let report = worker.tick_once(fire_slot).await.expect("tick succeeds");
+
+        assert!(
+            matches!(
+                report.results.last().map(|r| &r.outcome),
+                Some(TriggerPollerFireOutcome::OncePermanentFailed { reason })
+                    if *reason == expected_reason
+            ),
+            "fire-once permanent pre-submit failure must complete the once trigger"
+        );
+        let persisted = repo
+            .get_trigger(tenant("tenant-a"), trigger_id)
+            .await
+            .expect("load")
+            .expect("record present");
+        assert_eq!(persisted.state, TriggerState::Completed);
+        assert_eq!(persisted.active_fire_slot, None);
+        assert_eq!(persisted.active_run_ref, None);
+    }
 }
 
 #[tokio::test]
