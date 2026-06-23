@@ -465,13 +465,14 @@ where
     /// Builds and attaches a filesystem-backed turn-state store over the
     /// supplied [`ScopedFilesystem`].
     ///
-    /// Production composition wires the `/turns` mount alias on the same
-    /// [`ScopedFilesystem`] that carries the other consumer-store aliases,
-    /// so a single handle is enough to construct this store: it takes its
-    /// alias-relative subtree through the shared `MountView`. The backend
-    /// choice (`LibSqlRootFilesystem`, `PostgresRootFilesystem`,
-    /// `InMemoryBackend`, …) happens at the [`RootFilesystem`] layer, not
-    /// here.
+    /// The turn-state store performs global snapshot operations internally, so
+    /// callers must pass a handle whose `/turns` alias is already fixed to the
+    /// owning user's subtree. Do not pass the shared dynamic invocation scoped
+    /// filesystem here: its global-operation scope would route turn state to
+    /// the system sentinel owner rather than the runtime owner. The backend
+    /// choice (`CompositeRootFilesystem` over `LibSqlRootFilesystem`,
+    /// `PostgresRootFilesystem`, `InMemoryBackend`, …) still happens at the
+    /// [`RootFilesystem`] layer, not here.
     ///
     /// Replaces the legacy `with_libsql_turn_state_store` /
     /// `with_postgres_turn_state_store` builders (deleted along with the
