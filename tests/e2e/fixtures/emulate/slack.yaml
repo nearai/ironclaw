@@ -28,4 +28,6 @@ slack:
         - im:write
         - im:history
         - users:read
+        - reactions:read
+        - reactions:write
   strict_scopes: true

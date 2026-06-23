@@ -58,7 +58,7 @@ Then Playwright drives a headless Chromium browser against the gateway, making D
 | `test_html_injection.py` | HTML injection security |
 | `test_extensions.py` | Extensions tab: install, remove, configure, OAuth, auth card, activate |
 | `test_oauth_refresh.py` | Hosted Gmail/MCP OAuth refresh; the Gmail path refreshes through the proxy and reads seeded Gmail data from Emulate |
-| `test_emulate_reborn_provider_contracts.py` | Emulate provider contracts for Reborn-backed Google Gmail/Calendar/Drive reads and writes, Slack channel/DM delivery, and GitHub release/issue mutation |
+| `test_emulate_reborn_provider_contracts.py` | Emulate provider contracts for Reborn-backed Google Gmail/Calendar/Drive reads and writes, Slack channel/thread/DM delivery plus reactions/user lookup, and GitHub repo/issue/PR/search/branch/git-object/release/fork/action-route surfaces |
 
 ## Adding new scenarios
 
@@ -74,14 +74,24 @@ features already present in the codebase:
 
 - Google: Gmail, Calendar, and Drive seeded reads plus Gmail send, Calendar
   event create/delete, and Drive upload/readback.
-- Slack: auth, conversations, channel/thread/DM delivery, and readback.
-- GitHub: authenticated user, repository metadata, release create/latest, and
-  issue creation/listing.
+- Slack: auth, conversations, channel/thread/DM delivery, reactions, user
+  lookup, and readback.
+- GitHub: authenticated user, repo create/list/metadata, fork list/create,
+  release create/latest/list, issue create/read/comment/list/search, PR
+  create/read/list/files/review/comment/merge, search, branch/ref mutation,
+  Git blob/tree/commit read/write, and Actions workflow/run route readback.
 
 Google Docs, Sheets, and Slides exist as first-party extension assets, but
 Emulate 0.7.0 does not expose those API families directly. Cover those with
 Drive metadata where useful, or a separate fake/provider fixture if the
 document API behavior itself is the contract under test.
+
+GitHub file-content tools use the `/contents` API, and workflow dispatch needs
+seeded workflow rows. Emulate 0.7.0 exposes Git blob/tree/commit/ref APIs and
+Actions workflow/run routes, but it does not expose `/contents` routes or a
+seed hook for workflows. The provider contract therefore covers the emulatable
+Git object mutation/readback path plus empty Actions route readback, not direct
+`/contents` file create/update/delete or workflow dispatch.
 
 ### Manual QA mapping
 

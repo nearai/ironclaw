@@ -64,6 +64,31 @@ async def _slack_post(
     return body
 
 
+async def _github_json(
+    client: httpx.AsyncClient,
+    base_url: str,
+    method: str,
+    path: str,
+    *,
+    payload: dict | None = None,
+    params: dict | None = None,
+    expected_status: int = 200,
+) -> dict | list:
+    response = await client.request(
+        method,
+        f"{base_url}{path}",
+        headers=_github_headers(),
+        json=payload,
+        params=params,
+    )
+    assert response.status_code == expected_status, (
+        f"GitHub {method} {path} returned {response.status_code}: {response.text}"
+    )
+    if not response.content:
+        return {}
+    return response.json()
+
+
 async def test_emulate_google_covers_reborn_gsuite_read_inputs(emulate_google_server):
     base_url = emulate_google_server["url"]
     async with httpx.AsyncClient(timeout=10) as client:
@@ -340,65 +365,426 @@ async def test_emulate_slack_covers_reborn_delivery_surfaces(emulate_slack_serve
         )
         assert any(message["text"] == dm_text for message in dm_history["messages"])
 
+        await _slack_post(
+            client,
+            base_url,
+            "reactions.add",
+            {"channel": channel["id"], "timestamp": posted["ts"], "name": "eyes"},
+        )
+        reaction = await _slack_post(
+            client,
+            base_url,
+            "reactions.get",
+            {"channel": channel["id"], "timestamp": posted["ts"]},
+        )
+        assert any(
+            item["name"] == "eyes" and item["count"] == 1
+            for item in reaction["message"]["reactions"]
+        )
 
-async def test_emulate_github_covers_reborn_repo_issue_surfaces(emulate_github_server):
+        reviewer_info = await _slack_post(
+            client,
+            base_url,
+            "users.info",
+            {"user": reviewer["id"]},
+        )
+        assert reviewer_info["user"]["name"] == "qa-reviewer"
+
+
+async def test_emulate_github_covers_reborn_repo_surfaces(emulate_github_server):
     base_url = emulate_github_server["url"]
     async with httpx.AsyncClient(timeout=10) as client:
-        user_response = await client.get(f"{base_url}/user", headers=_github_headers())
-        user_response.raise_for_status()
-        assert user_response.json()["login"] == "reborn-dev"
+        user = await _github_json(client, base_url, "GET", "/user")
+        assert user["login"] == "reborn-dev"
 
-        repo_response = await client.get(
-            f"{base_url}/repos/nearai/ironclaw",
-            headers=_github_headers(),
+        created_repo = await _github_json(
+            client,
+            base_url,
+            "POST",
+            "/user/repos",
+            payload={
+                "name": "reborn-provider-contract",
+                "description": "Created by the Reborn Emulate provider contract.",
+                "private": True,
+                "auto_init": True,
+            },
+            expected_status=201,
         )
-        repo_response.raise_for_status()
-        repo = repo_response.json()
+        assert created_repo["full_name"] == "reborn-dev/reborn-provider-contract"
+
+        user_repos = await _github_json(client, base_url, "GET", "/user/repos")
+        assert any(
+            item["full_name"] == "reborn-dev/reborn-provider-contract"
+            for item in user_repos
+        )
+
+        repo = await _github_json(
+            client,
+            base_url,
+            "GET",
+            "/repos/nearai/ironclaw",
+        )
         assert repo["full_name"] == "nearai/ironclaw"
         assert repo["language"] == "Rust"
         assert "reborn" in repo["topics"]
 
-        release_response = await client.post(
-            f"{base_url}/repos/nearai/ironclaw/releases",
-            headers=_github_headers(),
-            json={
+        fork = await _github_json(
+            client,
+            base_url,
+            "POST",
+            "/repos/nearai/ironclaw/forks",
+            payload={"name": "ironclaw-reborn-fork"},
+            expected_status=202,
+        )
+        assert fork["full_name"] == "reborn-dev/ironclaw-reborn-fork"
+
+        forks = await _github_json(
+            client,
+            base_url,
+            "GET",
+            "/repos/nearai/ironclaw/forks",
+        )
+        assert any(item["full_name"] == fork["full_name"] for item in forks)
+
+        release = await _github_json(
+            client,
+            base_url,
+            "POST",
+            "/repos/nearai/ironclaw/releases",
+            payload={
                 "tag_name": "reborn-emulate-v1",
                 "name": "Reborn Emulate v1",
                 "body": "Release seeded through the Emulate provider contract.",
             },
+            expected_status=201,
         )
-        release_response.raise_for_status()
-        release = release_response.json()
         assert release["tag_name"] == "reborn-emulate-v1"
         assert release["draft"] is False
 
-        latest_release_response = await client.get(
-            f"{base_url}/repos/nearai/ironclaw/releases/latest",
-            headers=_github_headers(),
+        latest_release = await _github_json(
+            client,
+            base_url,
+            "GET",
+            "/repos/nearai/ironclaw/releases/latest",
         )
-        latest_release_response.raise_for_status()
-        latest_release = latest_release_response.json()
         assert latest_release["tag_name"] == "reborn-emulate-v1"
 
-        title = "Emulate Reborn provider contract"
-        issue_response = await client.post(
-            f"{base_url}/repos/nearai/ironclaw/issues",
-            headers=_github_headers(),
-            json={
-                "title": title,
+        releases = await _github_json(
+            client,
+            base_url,
+            "GET",
+            "/repos/nearai/ironclaw/releases",
+        )
+        assert any(item["tag_name"] == "reborn-emulate-v1" for item in releases)
+
+        issue_title = "Emulate Reborn provider contract issue"
+        issue = await _github_json(
+            client,
+            base_url,
+            "POST",
+            "/repos/nearai/ironclaw/issues",
+            payload={
+                "title": issue_title,
                 "body": "Created by the Reborn Emulate provider contract test.",
             },
+            expected_status=201,
         )
-        issue_response.raise_for_status()
-        issue = issue_response.json()
-        assert issue["number"] == 1
-        assert issue["title"] == title
+        assert issue["title"] == issue_title
         assert issue["state"] == "open"
 
-        issues_response = await client.get(
-            f"{base_url}/repos/nearai/ironclaw/issues",
-            headers=_github_headers(),
+        issue_readback = await _github_json(
+            client,
+            base_url,
+            "GET",
+            f"/repos/nearai/ironclaw/issues/{issue['number']}",
+        )
+        assert issue_readback["title"] == issue_title
+
+        issue_comment = await _github_json(
+            client,
+            base_url,
+            "POST",
+            f"/repos/nearai/ironclaw/issues/{issue['number']}/comments",
+            payload={"body": "Issue comment from the provider contract."},
+            expected_status=201,
+        )
+        assert issue_comment["body"] == "Issue comment from the provider contract."
+
+        issue_comments = await _github_json(
+            client,
+            base_url,
+            "GET",
+            f"/repos/nearai/ironclaw/issues/{issue['number']}/comments",
+        )
+        assert any(item["id"] == issue_comment["id"] for item in issue_comments)
+
+        issues = await _github_json(
+            client,
+            base_url,
+            "GET",
+            "/repos/nearai/ironclaw/issues",
             params={"state": "open"},
         )
-        issues_response.raise_for_status()
-        assert any(item["title"] == title for item in issues_response.json())
+        assert any(item["title"] == issue_title for item in issues)
+
+        issue_search = await _github_json(
+            client,
+            base_url,
+            "GET",
+            "/search/issues",
+            params={"q": "repo:nearai/ironclaw Emulate Reborn provider contract issue"},
+        )
+        assert any(item["number"] == issue["number"] for item in issue_search["items"])
+
+        main_ref = await _github_json(
+            client,
+            base_url,
+            "GET",
+            "/repos/nearai/ironclaw/git/ref/heads/main",
+        )
+        main_sha = main_ref["object"]["sha"]
+        main_commit = await _github_json(
+            client,
+            base_url,
+            "GET",
+            f"/repos/nearai/ironclaw/git/commits/{main_sha}",
+        )
+        content = "Reborn provider contract git object payload."
+        blob = await _github_json(
+            client,
+            base_url,
+            "POST",
+            "/repos/nearai/ironclaw/git/blobs",
+            payload={"content": content, "encoding": "utf-8"},
+            expected_status=201,
+        )
+        blob_readback = await _github_json(
+            client,
+            base_url,
+            "GET",
+            f"/repos/nearai/ironclaw/git/blobs/{blob['sha']}",
+        )
+        assert base64.b64decode(blob_readback["content"]).decode("utf-8") == content
+
+        tree = await _github_json(
+            client,
+            base_url,
+            "POST",
+            "/repos/nearai/ironclaw/git/trees",
+            payload={
+                "base_tree": main_commit["commit"]["tree"]["sha"],
+                "tree": [
+                    {
+                        "path": "docs/emulate-contract.md",
+                        "mode": "100644",
+                        "type": "blob",
+                        "sha": blob["sha"],
+                    }
+                ],
+            },
+            expected_status=201,
+        )
+        tree_readback = await _github_json(
+            client,
+            base_url,
+            "GET",
+            f"/repos/nearai/ironclaw/git/trees/{tree['sha']}",
+            params={"recursive": "1"},
+        )
+        assert any(
+            item["path"] == "docs/emulate-contract.md"
+            and item["sha"] == blob["sha"]
+            for item in tree_readback["tree"]
+        )
+
+        commit = await _github_json(
+            client,
+            base_url,
+            "POST",
+            "/repos/nearai/ironclaw/git/commits",
+            payload={
+                "message": "docs: add emulate provider contract",
+                "tree": tree["sha"],
+                "parents": [main_sha],
+            },
+            expected_status=201,
+        )
+        branch_name = "reborn-emulate-provider-contract"
+        branch_ref = await _github_json(
+            client,
+            base_url,
+            "POST",
+            "/repos/nearai/ironclaw/git/refs",
+            payload={"ref": f"refs/heads/{branch_name}", "sha": commit["sha"]},
+            expected_status=201,
+        )
+        assert branch_ref["ref"] == f"refs/heads/{branch_name}"
+
+        branches = await _github_json(
+            client,
+            base_url,
+            "GET",
+            "/repos/nearai/ironclaw/branches",
+        )
+        assert any(item["name"] == branch_name for item in branches)
+
+        matching_refs = await _github_json(
+            client,
+            base_url,
+            "GET",
+            "/repos/nearai/ironclaw/git/matching-refs/heads/reborn-emulate",
+        )
+        assert any(item["ref"] == f"refs/heads/{branch_name}" for item in matching_refs)
+
+        pr_title = "Emulate Reborn provider contract PR"
+        pr = await _github_json(
+            client,
+            base_url,
+            "POST",
+            "/repos/nearai/ironclaw/pulls",
+            payload={
+                "title": pr_title,
+                "head": branch_name,
+                "base": "main",
+                "body": "PR created through the Emulate provider contract.",
+                "draft": False,
+            },
+            expected_status=201,
+        )
+        assert pr["title"] == pr_title
+        assert pr["state"] == "open"
+
+        pull_requests = await _github_json(
+            client,
+            base_url,
+            "GET",
+            "/repos/nearai/ironclaw/pulls",
+            params={"state": "open"},
+        )
+        assert any(item["number"] == pr["number"] for item in pull_requests)
+
+        pr_readback = await _github_json(
+            client,
+            base_url,
+            "GET",
+            f"/repos/nearai/ironclaw/pulls/{pr['number']}",
+        )
+        assert pr_readback["head"]["ref"] == branch_name
+
+        pr_files = await _github_json(
+            client,
+            base_url,
+            "GET",
+            f"/repos/nearai/ironclaw/pulls/{pr['number']}/files",
+        )
+        assert isinstance(pr_files, list)
+
+        review = await _github_json(
+            client,
+            base_url,
+            "POST",
+            f"/repos/nearai/ironclaw/pulls/{pr['number']}/reviews",
+            payload={
+                "body": "Provider contract review comment.",
+                "event": "COMMENT",
+                "comments": [
+                    {
+                        "path": "docs/emulate-contract.md",
+                        "position": 1,
+                        "body": "Inline review comment from the provider contract.",
+                    }
+                ],
+            },
+            expected_status=201,
+        )
+        assert review["state"] == "COMMENTED"
+
+        reviews = await _github_json(
+            client,
+            base_url,
+            "GET",
+            f"/repos/nearai/ironclaw/pulls/{pr['number']}/reviews",
+        )
+        assert any(item["id"] == review["id"] for item in reviews)
+
+        review_comments = await _github_json(
+            client,
+            base_url,
+            "GET",
+            f"/repos/nearai/ironclaw/pulls/{pr['number']}/reviews/{review['id']}/comments",
+        )
+        assert any(
+            item["body"] == "Inline review comment from the provider contract."
+            for item in review_comments
+        )
+
+        pr_comment = await _github_json(
+            client,
+            base_url,
+            "POST",
+            f"/repos/nearai/ironclaw/pulls/{pr['number']}/comments",
+            payload={
+                "body": "Follow-up PR review comment from the provider contract.",
+                "in_reply_to_id": review_comments[0]["id"],
+            },
+            expected_status=201,
+        )
+        assert pr_comment["in_reply_to_id"] == review_comments[0]["id"]
+
+        pr_comments = await _github_json(
+            client,
+            base_url,
+            "GET",
+            f"/repos/nearai/ironclaw/pulls/{pr['number']}/comments",
+        )
+        assert any(item["id"] == pr_comment["id"] for item in pr_comments)
+
+        merge = await _github_json(
+            client,
+            base_url,
+            "PUT",
+            f"/repos/nearai/ironclaw/pulls/{pr['number']}/merge",
+            payload={
+                "commit_title": "Merge Reborn Emulate provider contract PR",
+                "merge_method": "squash",
+            },
+        )
+        assert merge["merged"] is True
+
+        repo_search = await _github_json(
+            client,
+            base_url,
+            "GET",
+            "/search/repositories",
+            params={"q": "org:nearai ironclaw"},
+        )
+        assert any(item["full_name"] == "nearai/ironclaw" for item in repo_search["items"])
+
+        code_search = await _github_json(
+            client,
+            base_url,
+            "GET",
+            "/search/code",
+            params={"q": "provider contract repo:nearai/ironclaw"},
+        )
+        assert any(
+            item["path"] == "docs/emulate-contract.md"
+            and item["sha"] == blob["sha"]
+            for item in code_search["items"]
+        )
+
+        workflow_runs = await _github_json(
+            client,
+            base_url,
+            "GET",
+            "/repos/nearai/ironclaw/actions/runs",
+        )
+        assert workflow_runs["total_count"] == 0
+
+        workflows = await _github_json(
+            client,
+            base_url,
+            "GET",
+            "/repos/nearai/ironclaw/actions/workflows",
+        )
+        assert workflows["workflows"] == []
