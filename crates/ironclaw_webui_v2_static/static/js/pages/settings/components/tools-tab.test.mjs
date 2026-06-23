@@ -133,7 +133,7 @@ test("Tools tab renders global auto-approve control and saves the operator key",
   assert.deepEqual(saved, [{ key: "agent.auto_approve_tools", value: true }]);
 });
 
-test("Tool permission select follows global/default unless a per-tool override exists", () => {
+test("Tool permission select follows global unless a per-tool override exists", () => {
   const { exports } = renderToolsModule();
   const globalTool = exports.ToolRow({
     tool: {

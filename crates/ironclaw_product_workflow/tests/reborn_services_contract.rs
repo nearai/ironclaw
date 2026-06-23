@@ -7751,6 +7751,13 @@ fn services_with_operator_approval_config_parts() -> (
                     effects: vec![EffectKind::ExecuteCode],
                 },
                 RebornOperatorToolInfo {
+                    capability_id: CapabilityId::new("tool.default_allow").expect("capability id"),
+                    provider: ExtensionId::new("extension.default_allow").expect("extension id"),
+                    description: "Default-allow tool".to_string(),
+                    default_permission: PermissionMode::Allow,
+                    effects: vec![EffectKind::DispatchCapability],
+                },
+                RebornOperatorToolInfo {
                     capability_id: CapabilityId::new("tool.locked").expect("capability id"),
                     provider: ExtensionId::new("extension.locked").expect("extension id"),
                     description: "Locked tool".to_string(),
@@ -7812,7 +7819,16 @@ async fn operator_config_reads_and_writes_auto_approve_and_tool_permissions() {
     );
     assert_eq!(
         operator_config_entry_value(&initial, "tool.tool.alpha")["effective_source"],
-        "default"
+        "global"
+    );
+    assert_eq!(
+        operator_config_entry_value(&initial, "tool.tool.default_allow")["state"],
+        "ask_each_time",
+        "default-allow tools must still ask while global auto-approve is off"
+    );
+    assert_eq!(
+        operator_config_entry_value(&initial, "tool.tool.default_allow")["effective_source"],
+        "global"
     );
     assert_eq!(
         operator_config_entry_value(&initial, "tool.tool.locked")["state"],
@@ -7866,6 +7882,16 @@ async fn operator_config_reads_and_writes_auto_approve_and_tool_permissions() {
         .expect("tool config");
     assert_eq!(globally_allowed.entry.value["state"], "always_allow");
     assert_eq!(globally_allowed.entry.value["effective_source"], "global");
+
+    let default_allow_global = services
+        .get_operator_config_key(caller(), "tool.tool.default_allow".to_string())
+        .await
+        .expect("default-allow tool config");
+    assert_eq!(default_allow_global.entry.value["state"], "always_allow");
+    assert_eq!(
+        default_allow_global.entry.value["effective_source"],
+        "global"
+    );
 
     let ask_override = services
         .set_operator_config_key(
@@ -8039,7 +8065,7 @@ async fn operator_config_is_scoped_by_tenant_and_user() {
         );
         assert_eq!(
             operator_config_entry_value(&config, "tool.tool.alpha")["effective_source"],
-            "default"
+            "global"
         );
     }
 }

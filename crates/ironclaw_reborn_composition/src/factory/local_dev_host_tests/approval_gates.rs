@@ -278,6 +278,50 @@ async fn local_dev_auto_approve_setting_update_skips_next_shell_gate() {
 }
 
 #[tokio::test]
+async fn local_dev_default_allow_echo_asks_when_global_auto_approve_is_off() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let services = build_reborn_services(
+        RebornBuildInput::local_dev("local-dev-echo-default-ask", dir.path().join("local-dev"))
+            .with_runtime_policy(local_dev_policy()),
+    )
+    .await
+    .expect("local-dev services build");
+    let local_runtime = services
+        .local_runtime
+        .as_ref()
+        .expect("local-dev runtime substrate");
+    let host_runtime = services
+        .host_runtime
+        .as_ref()
+        .expect("local-dev host runtime");
+    let capability_id = CapabilityId::new(ECHO_CAPABILITY_ID).expect("echo capability");
+    let context = echo_spawn_execution_context("local-dev-echo-default-ask", "thread-echo-ask");
+
+    let outcome = host_runtime
+        .invoke_capability(RuntimeCapabilityRequest::new(
+            context.clone(),
+            capability_id.clone(),
+            ResourceEstimate::default(),
+            serde_json::json!({"message": "ask for echo"}),
+            trust_decision(echo_spawn_allowed_effects()),
+        ))
+        .await
+        .expect("echo invocation resolves");
+
+    let RuntimeCapabilityOutcome::ApprovalRequired(gate) = outcome else {
+        panic!(
+            "default-allow builtin.echo should ask when global auto-approve is off, got {outcome:?}"
+        );
+    };
+    assert_eq!(gate.capability_id, capability_id);
+    assert_eq!(
+        pending_approval_count(local_runtime, &context).await,
+        1,
+        "default-allow builtin.echo must create a pending approval when global auto-approve is off"
+    );
+}
+
+#[tokio::test]
 async fn local_dev_settings_page_always_allow_policy_skips_next_shell_gate() {
     let dir = tempfile::tempdir().expect("tempdir");
     let services = build_reborn_services(

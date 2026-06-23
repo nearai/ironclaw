@@ -993,14 +993,16 @@ async fn effective_tool_permission(
         return Ok((ToolPermissionState::AlwaysAllow, "override"));
     }
 
-    if config
-        .auto_approve
-        .is_enabled(&operator_scope)
-        .await
-        .map_err(operator_config_store_error)?
-        && permission_mode_allows_persistent_approval(tool.default_permission)
-    {
-        return Ok((ToolPermissionState::AlwaysAllow, "global"));
+    if permission_mode_allows_persistent_approval(tool.default_permission) {
+        let global_auto_approve = config
+            .auto_approve
+            .is_enabled(&operator_scope)
+            .await
+            .map_err(operator_config_store_error)?;
+        if global_auto_approve {
+            return Ok((ToolPermissionState::AlwaysAllow, "global"));
+        }
+        return Ok((ToolPermissionState::AskEachTime, "global"));
     }
 
     Ok((
@@ -1064,8 +1066,7 @@ fn hard_floor_tool(tool: &RebornOperatorToolInfo) -> bool {
 
 fn default_tool_permission_state(permission: PermissionMode) -> ToolPermissionState {
     match permission {
-        PermissionMode::Allow => ToolPermissionState::AlwaysAllow,
-        PermissionMode::Ask => ToolPermissionState::AskEachTime,
+        PermissionMode::Allow | PermissionMode::Ask => ToolPermissionState::AskEachTime,
         PermissionMode::Deny => ToolPermissionState::Disabled,
     }
 }
