@@ -155,6 +155,9 @@ pub struct SkillSummary {
     pub keywords: Vec<String>,
     pub tags: Vec<String>,
     pub requires_skills: Vec<String>,
+    /// Whether the skill participates in automatic activation (mirrors
+    /// `SkillManifest::auto_activate`). `false` means explicit-mention only.
+    pub auto_activate: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -786,6 +789,7 @@ async fn read_skill_summary(
         keywords: parsed.manifest.activation.keywords,
         tags: parsed.manifest.activation.tags,
         requires_skills: parsed.manifest.requires.skills,
+        auto_activate: parsed.manifest.auto_activate,
     }))
 }
 

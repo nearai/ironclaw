@@ -1,5 +1,6 @@
 import { React, html } from "../../../lib/html.js";
 import { Card } from "../../../design-system/card.js";
+import { Button } from "../../../design-system/button.js";
 import { useT } from "../../../lib/i18n.js";
 import { useSkills } from "../hooks/useSkills.js";
 import { matchesSearch } from "../lib/settings-search.js";
@@ -12,13 +13,18 @@ export function SkillsTab({ searchQuery = "" }) {
   const {
     skills,
     query,
+    autoActivateLearned,
     fetchSkillContent,
     installSkill,
     removeSkill,
     updateSkill,
+    setSkillAutoActivate,
+    setAutoActivateLearned,
     isInstalling,
     isRemoving,
     isUpdating,
+    isSettingAutoActivate,
+    isSettingAutoActivateLearned,
   } = useSkills();
   const [actionError, setActionError] = React.useState("");
   const [actionResult, setActionResult] = React.useState("");
@@ -61,6 +67,36 @@ export function SkillsTab({ searchQuery = "" }) {
       return { success: false, message };
     }
   }, [t, updateSkill]);
+
+  const handleSetAutoActivate = React.useCallback(async (name, enabled) => {
+    setActionError("");
+    setActionResult("");
+    try {
+      const response = await setSkillAutoActivate({ name, enabled });
+      if (!response?.success) {
+        setActionError(response?.message || t("skills.updateFailed"));
+        return;
+      }
+      setActionResult(response.message);
+    } catch (err) {
+      setActionError(err.message || t("skills.updateFailed"));
+    }
+  }, [setSkillAutoActivate, t]);
+
+  const handleSetAutoActivateLearned = React.useCallback(async (enabled) => {
+    setActionError("");
+    setActionResult("");
+    try {
+      const response = await setAutoActivateLearned(enabled);
+      if (!response?.success) {
+        setActionError(response?.message || t("skills.updateFailed"));
+        return;
+      }
+      setActionResult(response.message);
+    } catch (err) {
+      setActionError(err.message || t("skills.updateFailed"));
+    }
+  }, [setAutoActivateLearned, t]);
 
   let body;
   if (query.isLoading) {
@@ -122,8 +158,10 @@ export function SkillsTab({ searchQuery = "" }) {
                 onEdit=${fetchSkillContent}
                 onRemove=${handleRemove}
                 onUpdate=${handleUpdate}
+                onSetAutoActivate=${handleSetAutoActivate}
                 isRemoving=${isRemoving}
                 isUpdating=${isUpdating}
+                isSettingAutoActivate=${isSettingAutoActivate}
               />
             `
           )}
@@ -134,6 +172,11 @@ export function SkillsTab({ searchQuery = "" }) {
 
   return html`
     <div className="space-y-4">
+      <${LearnedAutoActivateCard}
+        enabled=${autoActivateLearned}
+        isSaving=${isSettingAutoActivateLearned}
+        onToggle=${handleSetAutoActivateLearned}
+      />
       <${SkillInstallPanel} onInstall=${installSkill} isInstalling=${isInstalling} />
       <${SkillActionResult} error=${actionError} result=${actionResult} />
       ${body}
@@ -141,7 +184,56 @@ export function SkillsTab({ searchQuery = "" }) {
   `;
 }
 
-function SkillGroup({ title, skills, onEdit, onRemove, onUpdate, isRemoving, isUpdating }) {
+// Global master switch for keyword/criteria skill activation. When off, EVERY
+// skill (learned, user-authored, and bundled) stays invokable via an explicit
+// /name mention but no longer auto-activates by keyword. This is a true global
+// default, not learned-only; the per-skill toggle on `SkillCard` is the
+// per-skill counterpart.
+function LearnedAutoActivateCard({ enabled, isSaving, onToggle }) {
+  // When auto-activation is off, give the whole card a light-red background as a
+  // persistent "default is off" cue. Inline style overrides the Card variant's
+  // own background reliably (no Tailwind class-ordering ambiguity).
+  const cardStyle = enabled ? undefined : { background: "var(--v2-danger-soft)" };
+  return html`
+    <${Card} padding="md" style=${cardStyle}>
+      <div className="flex items-start justify-between gap-4">
+        <div className="min-w-0">
+          <div className="text-sm font-medium text-[var(--v2-text-strong)]">
+            ${`Default skill auto-activation ${enabled ? "enabled" : "disabled"}`}
+          </div>
+          <div className="mt-1 text-xs text-[var(--v2-text-muted)]">
+            ${enabled
+              ? "Skills auto-activate by keyword on matching requests. Turn off to require an explicit /name."
+              : "Skills run only when you type /name. Turn on to let them auto-activate by keyword."}
+          </div>
+        </div>
+        <div className="shrink-0">
+          <${Button}
+            type="button"
+            variant=${enabled ? "secondary" : "ghost"}
+            size="sm"
+            disabled=${isSaving}
+            onClick=${() => onToggle(!enabled)}
+          >
+            ${enabled ? "Default: On" : "Default: Off"}
+          <//>
+        </div>
+      </div>
+    <//>
+  `;
+}
+
+function SkillGroup({
+  title,
+  skills,
+  onEdit,
+  onRemove,
+  onUpdate,
+  onSetAutoActivate,
+  isRemoving,
+  isUpdating,
+  isSettingAutoActivate,
+}) {
   if (skills.length === 0) return null;
   return html`
     <${Card} padding="md">
@@ -156,8 +248,10 @@ function SkillGroup({ title, skills, onEdit, onRemove, onUpdate, isRemoving, isU
             onEdit=${onEdit}
             onRemove=${onRemove}
             onUpdate=${onUpdate}
+            onSetAutoActivate=${onSetAutoActivate}
             isRemoving=${isRemoving}
             isUpdating=${isUpdating}
+            isSettingAutoActivate=${isSettingAutoActivate}
           />
         `
       )}

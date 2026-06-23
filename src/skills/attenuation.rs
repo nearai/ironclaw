@@ -138,6 +138,7 @@ mod tests {
             manifest: SkillManifest {
                 name: name.to_string(),
                 version: "1.0.0".to_string(),
+                auto_activate: true,
                 description: String::new(),
                 activation: ActivationCriteria::default(),
                 credentials: vec![],

@@ -7,6 +7,7 @@ Browser-level end-to-end tests for the IronClaw web gateway using Python + Playw
 - Python 3.11+
 - Rust toolchain (for building ironclaw)
 - Chromium (installed via Playwright)
+- Node.js with `npx` (for Emulate-backed provider fixtures)
 
 ## Setup
 
@@ -56,6 +57,8 @@ Then Playwright drives a headless Chromium browser against the gateway, making D
 | `test_sse_reconnect.py` | SSE reconnection handling, keepalive comments, restart recovery, stale reconnect IDs, and connection-limit coverage |
 | `test_html_injection.py` | HTML injection security |
 | `test_extensions.py` | Extensions tab: install, remove, configure, OAuth, auth card, activate |
+| `test_oauth_refresh.py` | Hosted Gmail/MCP OAuth refresh; the Gmail path refreshes through the proxy and reads seeded Gmail data from Emulate |
+| `test_emulate_reborn_provider_contracts.py` | Emulate provider contracts for Reborn-backed Google Gmail/Calendar/Drive reads and writes, Slack channel/thread/DM delivery plus reactions/user lookup, and GitHub repo/issue/PR/search/branch/git-object/release/fork/action-route surfaces |
 
 ## Adding new scenarios
 
@@ -63,6 +66,45 @@ Then Playwright drives a headless Chromium browser against the gateway, making D
 2. Use the `page` fixture for a fresh browser page
 3. Use selectors from `helpers.py` (update `SEL` dict if new elements are needed)
 4. Keep tests deterministic -- use the mock LLM, not real providers
+
+## Emulate-backed provider fixtures
+
+Emulate coverage is intentionally limited to provider APIs that match Reborn
+features already present in the codebase:
+
+- Google: Gmail, Calendar, and Drive seeded reads plus Gmail send, Calendar
+  event create/delete, and Drive upload/readback.
+- Slack: auth, conversations, channel/thread/DM delivery, reactions, user
+  lookup, and readback.
+- GitHub: authenticated user, repo create/list/metadata, fork list/create,
+  release create/latest/list, issue create/read/comment/list/search, PR
+  create/read/list/files/review/comment/merge, search, branch/ref mutation,
+  Git blob/tree/commit read/write, and Actions workflow/run route readback.
+
+Google Docs, Sheets, and Slides exist as first-party extension assets, but
+Emulate 0.7.0 does not expose those API families directly. Cover those with
+Drive metadata where useful, or a separate fake/provider fixture if the
+document API behavior itself is the contract under test.
+
+GitHub file-content tools use the `/contents` API, and workflow dispatch needs
+seeded workflow rows. Emulate 0.7.0 exposes Git blob/tree/commit/ref APIs and
+Actions workflow/run routes, but it does not expose `/contents` routes or a
+seed hook for workflows. The provider contract therefore covers the emulatable
+Git object mutation/readback path plus empty Actions route readback, not direct
+`/contents` file create/update/delete or workflow dispatch.
+
+### Manual QA mapping
+
+The Emulate provider contracts map to the manual QA sheet only where Emulate
+can represent the backing provider API. Fully emulatable rows covered here:
+2A-2C, 3A/3D, 4A-4C/4E provider outputs, 5A-5B, 6A, 7A, and 8A/8D Slack
+delivery. Partially emulatable rows covered here: 2D-2F use Calendar/Drive/Gmail
+but not native Google Docs or live news; 4D uses GitHub release APIs and Slack
+delivery but not the model-authored routine; 5C-5D use Drive text plus Slack DM
+but not Google Docs; 6C-6E cover Gmail inputs and Drive-style write/readback but
+not Google Sheets; 7C-7E cover Slack inputs/delivery but not Google Sheets; 8B-8C
+need a separate fake HN/search endpoint. Telegram and Twitter/X rows 1A-1C are
+not covered by Emulate.
 
 ## Live Persona Failure Notes
 
