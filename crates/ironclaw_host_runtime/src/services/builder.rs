@@ -9,15 +9,16 @@ use super::PostgresRootFilesystem;
 use super::{
     ApprovalRequestStore, AuditSink, CapabilityLeaseStore, DurableAuditLog, DurableAuditSink,
     DurableEventLog, DurableEventSink, EffectiveRuntimePolicy, EventSink,
-    FilesystemApprovalRequestStore, FilesystemResourceGovernorStore, FilesystemRunStateStore,
-    FilesystemTurnStateStore, FirstPartyCapabilityRegistry, HostRuntimeServices, McpExecutor,
-    NetworkHttpEgress, PersistentResourceGovernor, ProcessBackendKind, ProcessExecutor,
-    ProcessObligationLifecycleStore, ProcessResultStore, ProcessStore, ProductionComponentType,
-    ProductionImplementationReadiness, ProductionWiringComponent, ProductionWiringIssueKind,
-    ProductionWiringReport, RebornEventStoreConfig, RebornEventStoreError, RebornEventStores,
-    RebornProfile, ResourceGovernor, RootFilesystem, RunProfileResolver, RunStateApprovalStore,
-    RunStateStore, RuntimeBackendHealth, RuntimeCredentialAccountResolver, RuntimeHttpEgress,
-    RuntimeKind, RuntimeProcessPort, ScopedFilesystem, ScriptExecutor, SecretMode, SecretStore,
+    FilesystemApprovalRequestStore, FilesystemCatalog, FilesystemResourceGovernorStore,
+    FilesystemRunStateStore, FilesystemTurnStateStore, FirstPartyCapabilityRegistry,
+    HostRuntimeServices, McpExecutor, NetworkHttpEgress, PersistentResourceGovernor,
+    ProcessBackendKind, ProcessExecutor, ProcessObligationLifecycleStore, ProcessResultStore,
+    ProcessStore, ProductionComponentType, ProductionImplementationReadiness,
+    ProductionWiringComponent, ProductionWiringIssueKind, ProductionWiringReport,
+    RebornEventStoreConfig, RebornEventStoreError, RebornEventStores, RebornProfile,
+    ResourceGovernor, RootFilesystem, RunProfileResolver, RunStateApprovalStore, RunStateStore,
+    RuntimeBackendHealth, RuntimeCredentialAccountResolver, RuntimeHttpEgress, RuntimeKind,
+    RuntimeProcessPort, ScopedFilesystem, ScriptExecutor, SecretMode, SecretStore,
     SecurityAuditSink, SharedSecretStore, TenantSandboxProcessPort, TrustPolicy,
     TurnRunTransitionPort, TurnRunWakeNotifier, TurnStateStore, WasmError, WasmRuntimeAdapter,
     WasmRuntimeCredentialProvider, WasmStagedRuntimeCredentials, WitToolHost, WitToolRuntimeConfig,
@@ -469,9 +470,9 @@ where
     /// [`ScopedFilesystem`] that carries the other consumer-store aliases,
     /// so a single handle is enough to construct this store: it takes its
     /// alias-relative subtree through the shared `MountView`. The backend
-    /// choice (`LibSqlRootFilesystem`, `PostgresRootFilesystem`,
-    /// `InMemoryBackend`, …) happens at the [`RootFilesystem`] layer, not
-    /// here.
+    /// choice (`CompositeRootFilesystem` over `LibSqlRootFilesystem`,
+    /// `PostgresRootFilesystem`, `InMemoryBackend`, …) happens at the
+    /// [`RootFilesystem`] / [`FilesystemCatalog`] layer, not here.
     ///
     /// Replaces the legacy `with_libsql_turn_state_store` /
     /// `with_postgres_turn_state_store` builders (deleted along with the
@@ -485,7 +486,7 @@ where
         scoped_filesystem: Arc<ScopedFilesystem<FsBackend>>,
     ) -> Self
     where
-        FsBackend: RootFilesystem + 'static,
+        FsBackend: RootFilesystem + FilesystemCatalog + 'static,
     {
         let store = Arc::new(FilesystemTurnStateStore::new(scoped_filesystem));
         self.with_turn_state_and_transition_port(store)

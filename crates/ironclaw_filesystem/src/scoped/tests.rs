@@ -14,8 +14,9 @@ use ironclaw_host_api::{
 use super::*;
 use crate::in_memory::InMemoryBackend;
 use crate::{
-    CasExpectation, Entry, FilesystemError, FilesystemOperation, Filter, IndexKey, IndexKind,
-    IndexName, IndexSpec, Page, RecordKind, SeqNo,
+    BackendId, BackendKind, CasExpectation, CompositeRootFilesystem, ContentKind, Entry,
+    FilesystemError, FilesystemOperation, Filter, IndexKey, IndexKind, IndexName, IndexPolicy,
+    IndexSpec, MountDescriptor, Page, RecordKind, SeqNo, StorageClass, TxnCapability,
 };
 
 fn test_scope() -> ResourceScope {
@@ -49,6 +50,22 @@ fn scoped_in_memory(permissions: MountPermissions) -> ScopedFilesystem<InMemoryB
     )
 }
 
+fn descriptor_for(
+    virtual_root: &str,
+    backend: &InMemoryBackend,
+    backend_id: &str,
+) -> MountDescriptor {
+    MountDescriptor {
+        virtual_root: VirtualPath::new(virtual_root).unwrap(),
+        backend_id: BackendId::new(backend_id).unwrap(),
+        backend_kind: BackendKind::MemoryDocuments,
+        storage_class: StorageClass::StructuredRecords,
+        content_kind: ContentKind::StructuredRecord,
+        index_policy: IndexPolicy::NotIndexed,
+        capabilities: backend.capabilities(),
+    }
+}
+
 fn no_op(read: bool, write: bool, list: bool, delete: bool) -> MountPermissions {
     MountPermissions {
         read,
@@ -69,6 +86,71 @@ fn record_with_scope(scope: &str) -> Entry {
         IndexKey::new("scope").unwrap(),
         crate::IndexValue::Text(scope.into()),
     )
+}
+
+#[tokio::test]
+async fn describe_path_uses_composite_mount_backend_capabilities() {
+    let turn_backend = Arc::new(InMemoryBackend::new());
+    let mut root = CompositeRootFilesystem::new();
+    root.mount(
+        descriptor_for("/engine/tenants", turn_backend.as_ref(), "turns"),
+        Arc::clone(&turn_backend),
+    )
+    .unwrap();
+    let scoped = ScopedFilesystem::with_fixed_view(
+        Arc::new(root),
+        MountView::new(vec![MountGrant::new(
+            MountAlias::new("/turns").unwrap(),
+            VirtualPath::new("/engine/tenants/t1/users/u1/turns").unwrap(),
+            MountPermissions::read_write_list_delete(),
+        )])
+        .unwrap(),
+    );
+
+    let root_capabilities = scoped.capabilities();
+    assert_eq!(root_capabilities.txn(), TxnCapability::None);
+
+    let placement = scoped
+        .describe_path(
+            &test_scope(),
+            &ScopedPath::new("/turns/state.json").unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(placement.capabilities.txn(), TxnCapability::Cas);
+    assert_eq!(
+        placement.path,
+        VirtualPath::new("/engine/tenants/t1/users/u1/turns/state.json").unwrap()
+    );
+}
+
+#[tokio::test]
+async fn describe_path_returns_mount_not_found_for_unmapped_path() {
+    let backend = Arc::new(InMemoryBackend::new());
+    let mut root = CompositeRootFilesystem::new();
+    root.mount(
+        descriptor_for("/engine/tenants", backend.as_ref(), "turns"),
+        backend,
+    )
+    .unwrap();
+    let scoped = ScopedFilesystem::with_fixed_view(
+        Arc::new(root),
+        MountView::new(vec![MountGrant::new(
+            MountAlias::new("/missing").unwrap(),
+            VirtualPath::new("/engine/unmounted").unwrap(),
+            MountPermissions::read_write_list_delete(),
+        )])
+        .unwrap(),
+    );
+
+    let err = scoped
+        .describe_path(
+            &test_scope(),
+            &ScopedPath::new("/missing/state.json").unwrap(),
+        )
+        .await
+        .unwrap_err();
+    assert!(matches!(err, FilesystemError::MountNotFound { .. }));
 }
 
 #[tokio::test]
