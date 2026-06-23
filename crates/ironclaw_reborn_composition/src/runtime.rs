@@ -471,6 +471,9 @@ pub struct RebornRuntime {
     credential_refresh_worker_handle:
         Option<crate::credential_refresh_worker::CredentialRefreshWorkerRuntimeHandle>,
     trace_flush_worker: crate::trace_capture::TraceQueueFlushWorkerHandle,
+    #[cfg(feature = "root-llm-provider")]
+    skill_learning_extraction_tasks:
+        Option<Arc<crate::skill_learning::SkillLearningExtractionTasks>>,
     /// Late-binding slot shared with the poller's `PostSubmitHookWrappedSubmitter`.
     /// `set_trigger_post_submit_hook` fills this after `build_reborn_runtime` returns.
     /// `None` when the trigger poller is not enabled.
@@ -1816,6 +1819,10 @@ impl RebornRuntime {
                 .await;
         }
         self.trace_flush_worker.shutdown().await;
+        #[cfg(feature = "root-llm-provider")]
+        if let Some(skill_learning_extraction_tasks) = self.skill_learning_extraction_tasks {
+            skill_learning_extraction_tasks.shutdown().await;
+        }
         self.turn_scheduler.shutdown().await;
         if let Some(projection) = self.budget_event_projection {
             projection.shutdown().await;
@@ -2534,6 +2541,15 @@ pub async fn build_reborn_runtime(
     //    building a real gateway only to discard it wastes startup work (and, on
     //    the cold-boot path, an LLM session manager), which made
     //    timeout-sensitive tests flaky. When no override is set, build normally.
+    // Build the (optional) skill-learning provider from the resolved LLM config
+    // BEFORE the gateway consumes `llm`. Distillation/refinement runs against a
+    // stronger model (IRONCLAW_SKILL_LEARNING_MODEL), reusing the run's NEAR AI
+    // credentials with only the model overridden.
+    #[cfg(feature = "root-llm-provider")]
+    let skill_learning_provider = match llm.as_ref() {
+        Some(resolved) => build_skill_learning_provider(&resolved.config).await,
+        None => None,
+    };
     #[cfg(all(feature = "root-llm-provider", any(test, feature = "test-support")))]
     let (model_gateway, llm_cost_table, llm_reload) = match model_gateway_override {
         Some(override_gateway) => (override_gateway, None, None),
@@ -2701,6 +2717,10 @@ pub async fn build_reborn_runtime(
             }
             _ => None,
         };
+    // Clone the live projection publisher for the skill-learning sink before
+    // the milestone-sink builder consumes the original by value.
+    #[cfg(feature = "root-llm-provider")]
+    let skill_learning_publisher = Arc::clone(&live_projection_publisher);
     let milestone_sink = projection_services.with_live_progress_milestone_sink_for_publisher(
         durable_milestone_sink,
         live_projection_publisher,
@@ -2835,6 +2855,59 @@ pub async fn build_reborn_runtime(
             Arc::clone(&thread_service),
             Arc::clone(&trace_capture_scopes),
         ));
+    // Skill learning shares the turn-end seam with trace capture (composed
+    // additively, so the trace-capture path is unchanged). It is active only
+    // when a learning model is configured (a stronger model than the run's, via
+    // IRONCLAW_SKILL_LEARNING_MODEL); otherwise only trace capture runs.
+    #[cfg_attr(not(feature = "root-llm-provider"), allow(unused_mut))]
+    let mut turn_event_sinks: Vec<Arc<dyn ironclaw_turns::TurnEventSink>> =
+        vec![trace_capture_sink];
+    #[cfg(feature = "root-llm-provider")]
+    let mut skill_learning_extraction_tasks: Option<
+        Arc<crate::skill_learning::SkillLearningExtractionTasks>,
+    > = None;
+    #[cfg(feature = "root-llm-provider")]
+    if let (Some((learning_provider, learning_model)), Some(local_runtime)) =
+        (skill_learning_provider, local_runtime)
+    {
+        let inference: Arc<dyn ironclaw_skill_learning::SkillInferencePort> =
+            Arc::new(crate::skill_learning::SkillLearningInferenceAdapter::new(
+                learning_provider,
+                learning_model,
+            ));
+        // Reuse the runtime's already-built scoped skill-management port so the
+        // learned skill lands exactly where the WebUI lists it and the next run
+        // loads it. The writer evolves an existing learned skill in place when a
+        // recurring task is re-learned, using the same learning model to refine
+        // it (accumulated gotchas, bumped version) instead of accreting siblings.
+        let skill_refiner: Arc<dyn crate::skill_learning::SkillRefiner> = Arc::new(
+            crate::skill_learning::LlmSkillRefiner::new(Arc::clone(&inference)),
+        );
+        let skill_writer: Arc<dyn crate::skill_learning::SkillWriter> =
+            Arc::new(crate::skill_learning::PortSkillWriter::new(
+                Arc::clone(&local_runtime.skill_management),
+                skill_refiner,
+            ));
+        // Live "learned a skill" bubble on the run's thread stream (reuses the
+        // SkillActivation projection -> existing chat bubble).
+        let skill_learned_notifier: Arc<dyn crate::skill_learning::SkillLearnedNotifier> = Arc::new(
+            crate::skill_learning::LiveSkillLearnedNotifier::new(skill_learning_publisher),
+        );
+        let extraction_tasks = Arc::new(crate::skill_learning::SkillLearningExtractionTasks::new());
+        skill_learning_extraction_tasks = Some(Arc::clone(&extraction_tasks));
+        turn_event_sinks.push(Arc::new(
+            crate::skill_learning::SkillLearningTurnEventSink::new(
+                Arc::clone(&thread_service),
+                inference,
+                skill_writer,
+                skill_learned_notifier,
+                extraction_tasks,
+            ),
+        ));
+    }
+    let turn_event_sink: Arc<dyn ironclaw_turns::TurnEventSink> = Arc::new(
+        crate::skill_learning::CompositeTurnEventSink::new(turn_event_sinks),
+    );
 
     let communication_context_provider: Option<
         Arc<dyn ironclaw_turns::run_profile::CommunicationContextProvider>,
@@ -2944,7 +3017,7 @@ pub async fn build_reborn_runtime(
         model_budget_accountant,
         safety_context: None,
         hook_security_audit_sink: Some(Arc::new(ironclaw_events::TracingSecurityAuditSink)),
-        turn_event_sink: Some(trace_capture_sink),
+        turn_event_sink: Some(turn_event_sink),
         hook_dispatcher_builder_factory,
         communication_context_provider,
         // For the production composition path, use the pre-minted wiring from
@@ -3198,6 +3271,8 @@ pub async fn build_reborn_runtime(
         #[cfg(any(feature = "libsql", feature = "postgres"))]
         credential_refresh_worker_handle,
         trace_flush_worker,
+        #[cfg(feature = "root-llm-provider")]
+        skill_learning_extraction_tasks,
         #[cfg(feature = "slack-v2-host-beta")]
         post_submit_hook_slot: runtime_post_submit_hook_slot,
         #[cfg(any(test, feature = "test-support"))]
@@ -3329,8 +3404,15 @@ fn local_dev_selector_config(
 ) -> SkillActivationSelectorConfig {
     SkillActivationSelectorConfig {
         max_context_tokens: LOCAL_DEV_MAX_SKILL_CONTEXT_TOKENS,
+        // `ExplicitAndCriteria` (the upstream default) lets a learned skill
+        // auto-activate when a later request matches its keywords/patterns —
+        // not only when the user types `$name`/`/name`. This is what closes
+        // the learn→reuse loop: a skill distilled from one task is applied
+        // automatically on the next similar task. Explicit mentions still
+        // force-activate; criteria selection is additive and bounded by
+        // `max_active_skills` / `max_context_tokens`.
         selection_mode:
-            ironclaw_first_party_extension_ports::SkillActivationSelectionMode::ExplicitOnly,
+            ironclaw_first_party_extension_ports::SkillActivationSelectionMode::ExplicitAndCriteria,
         regex_activation_enabled: regex_skill_activation_enabled,
         ..SkillActivationSelectorConfig::default()
     }
@@ -3357,6 +3439,7 @@ fn local_dev_filesystem_skill_context_source(
     let selectable_skills = extension.selectable_skill_runtime_with_setup_markers(
         selector_config,
         Arc::clone(&local_runtime.workspace_filesystem),
+        Arc::clone(&local_runtime.skill_auto_activate_learned),
     );
     Ok(LocalDevSkillContextSource {
         source: selectable_skills.host_skill_context_source(),
@@ -3519,6 +3602,44 @@ async fn build_production_model_gateway(
             // isn't actually in use. The budget cost table is (re)derived when a
             // real provider is configured + the binary restarts.
             Ok((gateway, None, Some(reload)))
+        }
+    }
+}
+
+/// Build a dedicated provider for the skill-learning model, when configured.
+///
+/// Skill distillation/refinement runs against a STRONGER model than the run's.
+/// The model id comes from `IRONCLAW_SKILL_LEARNING_MODEL`; it reuses the run's
+/// NEAR AI credentials/base URL with only the model overridden (NEAR AI is
+/// multi-model and honours a per-request model override). Returns `None` when
+/// unconfigured, when the backend is not NEAR AI, or when provider construction
+/// fails — in all of which cases skill learning stays disabled.
+#[cfg(feature = "root-llm-provider")]
+async fn build_skill_learning_provider(
+    config: &ironclaw_llm::LlmConfig,
+) -> Option<(Arc<dyn ironclaw_llm::LlmProvider>, String)> {
+    let model = std::env::var("IRONCLAW_SKILL_LEARNING_MODEL")
+        .ok()
+        .filter(|model| !model.trim().is_empty())?;
+    if !matches!(config.backend.as_str(), "nearai" | "near_ai" | "near") {
+        tracing::debug!(
+            backend = %config.backend,
+            "skill-learning: learning model is only wired for the nearai backend; skill learning disabled"
+        );
+        return None;
+    }
+    let mut nearai = config.nearai.clone();
+    nearai.model = model.clone();
+    let session = ironclaw_llm::create_session_manager(config.session.clone()).await;
+    match ironclaw_llm::create_llm_provider_with_config(
+        &nearai,
+        session,
+        config.request_timeout_secs,
+    ) {
+        Ok(provider) => Some((provider, model)),
+        Err(error) => {
+            tracing::debug!(%error, "skill-learning: could not build the learning provider; skill learning disabled");
+            None
         }
     }
 }
@@ -3731,9 +3852,13 @@ mod tests {
             !cfg.regex_activation_enabled,
             "regex_skill_activation_enabled=false must propagate into SkillActivationSelectorConfig"
         );
+        // Local-dev uses criteria selection so a learned skill auto-activates on
+        // a keyword/pattern match (the learn→reuse loop), not only on an
+        // explicit `$name` mention. A revert to `ExplicitOnly` would silently
+        // break auto-reuse, so lock it here.
         assert!(matches!(
             cfg.selection_mode,
-            ironclaw_first_party_extension_ports::SkillActivationSelectionMode::ExplicitOnly
+            ironclaw_first_party_extension_ports::SkillActivationSelectionMode::ExplicitAndCriteria
         ));
     }
 

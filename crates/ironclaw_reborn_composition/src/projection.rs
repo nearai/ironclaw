@@ -44,9 +44,14 @@ use display_preview::{
     NoopCapabilityDisplayPreviewSource,
 };
 use live_progress::{
-    LiveProgressMilestoneSink, LiveProjectionPublisher, LiveSkillActivationObserver,
-    product_items_for_live_update,
+    LiveProgressMilestoneSink, LiveSkillActivationObserver, product_items_for_live_update,
 };
+// Crate-visible under `root-llm-provider` so the skill-learning sink can name
+// the publisher type; otherwise a module-private import for internal use only.
+#[cfg(feature = "root-llm-provider")]
+pub(crate) use live_progress::LiveProjectionPublisher;
+#[cfg(not(feature = "root-llm-provider"))]
+use live_progress::LiveProjectionPublisher;
 use runtime_replay::{
     DeliveredRuntimePayload, RuntimePayloadCandidate, RuntimePayloadResolution, RuntimePayloads,
     replay_payload_candidates, snapshot_payload_candidates,

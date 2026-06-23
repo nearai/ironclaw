@@ -1012,6 +1012,11 @@ pub struct RebornExtensionListResponse {
 pub struct RebornSkillListResponse {
     pub skills: Vec<RebornSkillInfo>,
     pub count: usize,
+    /// Global default criteria-based skill auto-activation master switch. When
+    /// `false`, skills activate only via an explicit `/name` mention. Defaults
+    /// to `true` for back-compat with producers that predate the flag.
+    #[serde(default = "default_true")]
+    pub auto_activate_learned: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1064,6 +1069,14 @@ pub struct RebornSkillInfo {
     pub can_edit: bool,
     #[serde(default)]
     pub can_delete: bool,
+    /// Whether the skill auto-activates on matching requests. `false` means it
+    /// only runs when explicitly invoked with `/name`. Defaults to `true`.
+    #[serde(default = "default_true")]
+    pub auto_activate: bool,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

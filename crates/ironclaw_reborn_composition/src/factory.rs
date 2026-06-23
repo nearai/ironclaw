@@ -3,6 +3,7 @@ use std::{
     collections::VecDeque,
     path::{Path, PathBuf},
     sync::Arc,
+    sync::atomic::AtomicBool,
 };
 
 #[cfg(any(feature = "libsql", feature = "postgres"))]
@@ -493,6 +494,12 @@ pub(crate) struct RebornLocalRuntimeServices {
     /// modules wire the access-controlled service, never the substrate repo.
     pub(crate) project_service: Arc<dyn ProjectService>,
     pub(crate) outbound_preferences: Arc<dyn CommunicationPreferenceRepository>,
+    /// Global default criteria-based skill auto-activation master switch,
+    /// shared by reference between the skill activation selector (reads it per
+    /// turn) and the WebUI skills facade (toggles it). Defaults to `true`; a
+    /// Settings write flips it and the next turn's selection honors the new
+    /// value without a restart.
+    pub(crate) skill_auto_activate_learned: Arc<AtomicBool>,
     #[cfg(feature = "slack-v2-host-beta")]
     pub(crate) outbound_state: Arc<dyn OutboundStateStore>,
     #[cfg(feature = "slack-v2-host-beta")]
@@ -1710,6 +1717,7 @@ fn build_local_dev_store_graph(
             Arc::clone(&project_repository),
         )),
         outbound_preferences: outbound_stores.outbound_preferences,
+        skill_auto_activate_learned: Arc::new(AtomicBool::new(true)),
         #[cfg(feature = "slack-v2-host-beta")]
         outbound_state: outbound_stores.outbound_state,
         #[cfg(feature = "slack-v2-host-beta")]
@@ -1852,6 +1860,7 @@ fn build_local_dev_store_graph(
             Arc::clone(&project_repository),
         )),
         outbound_preferences: outbound_stores.outbound_preferences,
+        skill_auto_activate_learned: Arc::new(AtomicBool::new(true)),
         #[cfg(feature = "slack-v2-host-beta")]
         outbound_state: outbound_stores.outbound_state,
         #[cfg(feature = "slack-v2-host-beta")]
@@ -4147,6 +4156,7 @@ mod tests {
             trigger_repository: Arc::clone(&base_runtime.trigger_repository),
             project_service: Arc::clone(&base_runtime.project_service),
             outbound_preferences: Arc::clone(&base_runtime.outbound_preferences),
+            skill_auto_activate_learned: Arc::clone(&base_runtime.skill_auto_activate_learned),
             #[cfg(feature = "slack-v2-host-beta")]
             outbound_state: Arc::clone(&base_runtime.outbound_state),
             #[cfg(feature = "slack-v2-host-beta")]

@@ -119,6 +119,49 @@ impl LiveProjectionPublisher {
         }
     }
 
+    /// Publish a "learned a new skill" live item to the run's thread stream,
+    /// reusing the [`ThreadLiveProjectionItem::SkillActivation`] projection
+    /// (rendered as a chat bubble). Called post-run by the skill-learning sink:
+    /// the in-run [`SkillActivationObserver`] only fires at prompt-build for
+    /// skill *selection*, so a learned-skill notification has no producer
+    /// otherwise. Best-effort — drops silently if names/feedback sanitize empty.
+    #[cfg(feature = "root-llm-provider")]
+    pub(crate) fn publish_skill_learned(
+        &self,
+        owner: Option<&UserId>,
+        scope: &TurnScope,
+        run_id: TurnRunId,
+        skill_name: &str,
+        feedback: &str,
+    ) {
+        let name = sanitize_bounded_model_visible_text(skill_name, PROJECTION_SKILL_NAME_MAX_BYTES);
+        let note =
+            sanitize_bounded_model_visible_text(feedback, PROJECTION_SKILL_FEEDBACK_MAX_BYTES);
+        if name.is_empty() && note.is_empty() {
+            return;
+        }
+        let sequence = self.next_live_sequence();
+        self.publish_live_item(
+            owner,
+            scope,
+            sequence,
+            ThreadLiveProjectionItem::SkillActivation {
+                id: skill_activation_id(run_id, sequence),
+                run_id,
+                skill_names: if name.is_empty() {
+                    Vec::new()
+                } else {
+                    vec![name]
+                },
+                feedback: if note.is_empty() {
+                    Vec::new()
+                } else {
+                    vec![note]
+                },
+            },
+        );
+    }
+
     /// Build the projection scope for a live item. The stream key is keyed
     /// to the per-run `owner` (the authenticated caller) when one is
     /// threaded through, falling back to the runtime owner only for host
