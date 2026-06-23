@@ -164,7 +164,7 @@ struct WebuiBootEnv {
     token_env_name: String,
     token: String,
     user_id_env_name: String,
-    user_id: String,
+    user_id: UserId,
 }
 
 impl std::fmt::Debug for RebornLocalServiceLifecycle {
@@ -204,7 +204,7 @@ impl RebornLocalServiceLifecycle {
             home_dir: std::env::var_os("HOME").map(PathBuf::from),
             executable: std::env::current_exe()
                 .map_err(|error| format!("current executable path could not be resolved: {error}")),
-            webui_boot_env: webui_boot_env_from_env_for_boot_config(boot),
+            webui_boot_env: webui_boot_env_from_env_for_boot_config(boot, &operator_user_id),
             operator_identity: Some(OperatorIdentity {
                 tenant_id: operator_tenant_id,
                 user_id: operator_user_id,
@@ -229,7 +229,7 @@ impl RebornLocalServiceLifecycle {
                 token_env_name: WEBUI_TOKEN_ENV.to_string(),
                 token: "test-webui-token".to_string(),
                 user_id_env_name: WEBUI_USER_ID_ENV.to_string(),
-                user_id: "user-test".to_string(),
+                user_id: test_operator_identity().user_id,
             }),
             operator_identity: Some(test_operator_identity()),
             runner,
@@ -252,7 +252,7 @@ impl RebornLocalServiceLifecycle {
                 token_env_name: WEBUI_TOKEN_ENV.to_string(),
                 token: "test-webui-token".to_string(),
                 user_id_env_name: WEBUI_USER_ID_ENV.to_string(),
-                user_id: "user-test".to_string(),
+                user_id: test_operator_identity().user_id,
             }),
             operator_identity: Some(test_operator_identity()),
             runner,
@@ -284,7 +284,7 @@ impl RebornLocalServiceLifecycle {
             token_env_name: token_env_name.to_string(),
             token: token.to_string(),
             user_id_env_name: user_id_env_name.to_string(),
-            user_id: user_id.to_string(),
+            user_id: UserId::new(user_id).expect("test webui user id"),
         });
         self
     }
@@ -627,7 +627,7 @@ impl RebornLocalServiceLifecycle {
         let token_env_name = systemd_escape(&boot_env.token_env_name);
         let token = systemd_escape(&boot_env.token);
         let user_id_env_name = systemd_escape(&boot_env.user_id_env_name);
-        let user_id = systemd_escape(&boot_env.user_id);
+        let user_id = systemd_escape(boot_env.user_id.as_str());
         Ok(format!(
             "[Unit]\n\
              Description=IronClaw Reborn WebUI service\n\
@@ -656,7 +656,7 @@ impl RebornLocalServiceLifecycle {
         let token_env_name = xml_escape(&boot_env.token_env_name);
         let token = xml_escape(&boot_env.token);
         let user_id_env_name = xml_escape(&boot_env.user_id_env_name);
-        let user_id = xml_escape(&boot_env.user_id);
+        let user_id = xml_escape(boot_env.user_id.as_str());
         Ok(format!(
             r#"<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -793,13 +793,15 @@ fn xml_escape(raw: &str) -> String {
 }
 
 fn webui_boot_env_from_env() -> Result<WebuiBootEnv, String> {
-    webui_boot_env_from_env_names(WebuiEnvNames::default())
+    webui_boot_env_from_env_names(WebuiEnvNames::default(), None)
 }
 
 fn webui_boot_env_from_env_for_boot_config(
     boot: Option<&ironclaw_reborn_config::RebornBootConfig>,
+    operator_user_id: &UserId,
 ) -> Result<WebuiBootEnv, String> {
-    webui_env_names_for_boot_config(boot).and_then(webui_boot_env_from_env_names)
+    webui_env_names_for_boot_config(boot)
+        .and_then(|names| webui_boot_env_from_env_names(names, Some(operator_user_id)))
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -824,8 +826,10 @@ fn webui_env_names_for_boot_config(
         return Ok(WebuiEnvNames::default());
     };
     let config_path = boot.home().config_file_path();
-    let config = ironclaw_reborn_config::RebornConfigFile::load(&config_path)
-        .map_err(|error| format!("Reborn config file could not be loaded: {error}"))?;
+    let config = ironclaw_reborn_config::RebornConfigFile::load(&config_path).map_err(|error| {
+        tracing::debug!(%error, "Reborn config file could not be loaded for service lifecycle");
+        "Reborn config file could not be loaded".to_string()
+    })?;
     let Some(webui) = config.and_then(|config| config.webui) else {
         return Ok(WebuiEnvNames::default());
     };
@@ -839,15 +843,37 @@ fn webui_env_names_for_boot_config(
     })
 }
 
-fn webui_boot_env_from_env_names(names: WebuiEnvNames) -> Result<WebuiBootEnv, String> {
+fn webui_boot_env_from_env_names(
+    names: WebuiEnvNames,
+    expected_user_id: Option<&UserId>,
+) -> Result<WebuiBootEnv, String> {
     let token = required_env(&names.token)?;
-    let user_id = required_env(&names.user_id)?;
+    let user_id = webui_user_id_from_env_value(
+        &names.user_id,
+        required_env(&names.user_id)?,
+        expected_user_id,
+    )?;
     Ok(WebuiBootEnv {
         token_env_name: names.token,
         token,
         user_id_env_name: names.user_id,
         user_id,
     })
+}
+
+fn webui_user_id_from_env_value(
+    env_name: &str,
+    raw_user_id: String,
+    expected_user_id: Option<&UserId>,
+) -> Result<UserId, String> {
+    let user_id = UserId::new(raw_user_id)
+        .map_err(|_| format!("{env_name} must match the authorized operator user"))?;
+    if expected_user_id.is_some_and(|expected| expected != &user_id) {
+        return Err(format!(
+            "{env_name} must match the authorized operator user"
+        ));
+    }
+    Ok(user_id)
 }
 
 fn required_env(name: &str) -> Result<String, String> {
@@ -1088,6 +1114,41 @@ env_user_id_var = "CUSTOM_WEBUI_USER_ID"
 
         assert_eq!(names.token, "CUSTOM_WEBUI_TOKEN");
         assert_eq!(names.user_id, "CUSTOM_WEBUI_USER_ID");
+    }
+
+    #[test]
+    fn webui_env_names_sanitize_reborn_config_load_errors() {
+        let temp = TempDir::new().expect("tempdir");
+        std::fs::create_dir(temp.path().join("config.toml")).expect("config dir");
+        let boot = ironclaw_reborn_config::RebornBootConfig::resolve_from_env_parts(
+            Some(temp.path().as_os_str().to_os_string()),
+            None,
+            None,
+            None,
+        )
+        .expect("boot config");
+
+        let error = webui_env_names_for_boot_config(Some(&boot)).expect_err("load error");
+
+        assert_eq!(error, "Reborn config file could not be loaded");
+        assert!(!error.contains(temp.path().to_string_lossy().as_ref()));
+    }
+
+    #[test]
+    fn webui_user_id_from_env_value_rejects_operator_mismatch() {
+        let expected = UserId::new("user-test").expect("expected user id");
+
+        let error = webui_user_id_from_env_value(
+            "CUSTOM_WEBUI_USER_ID",
+            "other-user".to_string(),
+            Some(&expected),
+        )
+        .expect_err("user mismatch");
+
+        assert_eq!(
+            error,
+            "CUSTOM_WEBUI_USER_ID must match the authorized operator user"
+        );
     }
 
     #[tokio::test]
