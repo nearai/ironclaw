@@ -742,6 +742,7 @@ pub(crate) async fn authorize_oauth_egress(
             context: &context,
             capability_id,
             estimate: &estimate,
+            credential_account_selections: &[],
             obligations: &[Obligation::ApplyNetworkPolicy {
                 policy: policy.clone(),
             }],

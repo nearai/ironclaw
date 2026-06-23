@@ -161,6 +161,7 @@ impl RuntimeCredentialRestager {
             .resolve_access_secret(RuntimeCredentialAccountRequest {
                 scope: &request.scope,
                 provider,
+                account_id: None,
                 setup,
                 provider_scopes: &credential.provider_scopes,
                 requester_extension: &credential.requester_extension,

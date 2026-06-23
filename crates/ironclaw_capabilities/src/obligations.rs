@@ -1,7 +1,8 @@
 use async_trait::async_trait;
 use ironclaw_host_api::{
     CapabilityDispatchResult, CapabilityId, ExecutionContext, MountView, Obligation,
-    ResourceEstimate, ResourceReservation, RuntimeCredentialAuthRequirement,
+    ResourceEstimate, ResourceReservation, RuntimeCredentialAccountSelection,
+    RuntimeCredentialAuthRequirement,
 };
 use thiserror::Error;
 
@@ -20,6 +21,7 @@ pub struct CapabilityObligationRequest<'a> {
     pub capability_id: &'a CapabilityId,
     pub estimate: &'a ResourceEstimate,
     pub obligations: &'a [Obligation],
+    pub credential_account_selections: &'a [RuntimeCredentialAccountSelection],
 }
 
 /// Effects produced by pre-dispatch obligation handling.

@@ -564,6 +564,7 @@ async fn reborn_e2e_gate_host_http_consumes_staged_policy_and_secret_once() {
             context: &context,
             capability_id: &capability_id,
             estimate: &ResourceEstimate::default(),
+            credential_account_selections: &[],
             obligations: &[
                 Obligation::ApplyNetworkPolicy {
                     policy: staged_policy.clone(),

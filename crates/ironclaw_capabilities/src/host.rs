@@ -90,6 +90,7 @@ struct ResumedDispatchParams<'r> {
     input: serde_json::Value,
     trust_decision: TrustDecision,
     authorized_context: ExecutionContext,
+    credential_account_selections: Vec<ironclaw_host_api::RuntimeCredentialAccountSelection>,
     descriptor: &'r CapabilityDescriptor,
     /// Approval-lease state for this resume.  See [`ResumedLeaseState`].
     lease_state: ResumedLeaseState<'r>,
@@ -269,6 +270,7 @@ where
                         &request.context,
                         &request.capability_id,
                         &request.estimate,
+                        &request.credential_account_selections,
                         allowed_obligations.clone(),
                     )
                     .await
@@ -759,6 +761,7 @@ where
             input: request.input,
             trust_decision: request.trust_decision,
             authorized_context,
+            credential_account_selections: request.credential_account_selections,
             descriptor,
             lease_state: ResumedLeaseState::PendingClaim(PendingClaimAfterAuth {
                 leases: capability_leases,
@@ -1081,6 +1084,7 @@ where
             input: request.input,
             trust_decision: request.trust_decision,
             authorized_context,
+            credential_account_selections: request.credential_account_selections,
             descriptor,
             lease_state: match approval_lease_to_consume {
                 Some((leases, lease)) => ResumedLeaseState::AlreadyClaimed(leases, Box::new(lease)),
@@ -1320,6 +1324,7 @@ where
                 &authorized_context,
                 &request.capability_id,
                 &request.estimate,
+                &request.credential_account_selections,
                 obligations.clone(),
             )
             .await
@@ -1495,6 +1500,7 @@ where
                         &request.context,
                         &request.capability_id,
                         &request.estimate,
+                        &request.credential_account_selections,
                         allowed_obligations.clone(),
                     )
                     .await
@@ -1741,6 +1747,7 @@ where
             input,
             trust_decision,
             authorized_context,
+            credential_account_selections,
             descriptor,
             lease_state,
         } = params;
@@ -1860,6 +1867,7 @@ where
                 &authorized_context,
                 &capability_id,
                 &estimate,
+                &credential_account_selections,
                 obligations.clone(),
             )
             .await
@@ -2016,6 +2024,7 @@ where
         context: &ExecutionContext,
         capability_id: &ironclaw_host_api::CapabilityId,
         estimate: &ResourceEstimate,
+        credential_account_selections: &[ironclaw_host_api::RuntimeCredentialAccountSelection],
         obligations: Vec<Obligation>,
     ) -> Result<CapabilityObligationOutcome, CapabilityInvocationError> {
         if obligations.is_empty() {
@@ -2043,6 +2052,7 @@ where
                 capability_id,
                 estimate,
                 obligations: obligations.as_slice(),
+                credential_account_selections,
             })
             .await
             .map_err(|error| prepare_obligation_error_to_invocation(capability_id, error))

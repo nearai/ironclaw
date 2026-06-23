@@ -385,6 +385,7 @@ async fn host_http_egress_consumes_secret_staged_by_builtin_obligation_handler()
             context: &context,
             capability_id: &capability_id,
             estimate: &ResourceEstimate::default(),
+            credential_account_selections: &[],
             obligations: &obligations,
         })
         .await
@@ -2484,6 +2485,7 @@ async fn mcp_http_client_reuses_product_auth_staged_credential_for_json_rpc_sess
             context: &context,
             capability_id: &capability_id,
             estimate: &ResourceEstimate::default(),
+            credential_account_selections: &[],
             obligations: &[
                 Obligation::ApplyNetworkPolicy {
                     policy: sample_policy(),
@@ -4568,6 +4570,7 @@ async fn stage_policy(
             context: &context,
             capability_id,
             estimate: &ResourceEstimate::default(),
+            credential_account_selections: &[],
             obligations: &[Obligation::ApplyNetworkPolicy { policy }],
         })
         .await
@@ -4615,6 +4618,7 @@ async fn stage_secret(
             context: &context,
             capability_id,
             estimate: &ResourceEstimate::default(),
+            credential_account_selections: &[],
             obligations: &[Obligation::InjectSecretOnce {
                 handle: handle.clone(),
             }],

@@ -74,6 +74,7 @@ async fn auth_resume_json_accepts_blocked_auth_run_and_dispatches() {
             estimate,
             input,
             trust_decision: trust_decision(),
+            credential_account_selections: Vec::new(),
             approval_request_id: None,
         })
         .await
@@ -111,6 +112,7 @@ async fn auth_resume_json_rejects_run_in_blocked_approval_status() {
             estimate: ResourceEstimate::default(),
             input: json!({"message": "needs approval"}),
             trust_decision: trust_decision(),
+            credential_account_selections: Vec::new(),
         })
         .await
         .unwrap_err();
@@ -129,6 +131,7 @@ async fn auth_resume_json_rejects_run_in_blocked_approval_status() {
             estimate: ResourceEstimate::default(),
             input: json!({"message": "needs approval"}),
             trust_decision: trust_decision(),
+            credential_account_selections: Vec::new(),
             approval_request_id: None,
         })
         .await
@@ -182,6 +185,7 @@ async fn auth_resume_json_rejects_run_in_running_status() {
             estimate: ResourceEstimate::default(),
             input: json!({"message": "try to resume running"}),
             trust_decision: trust_decision(),
+            credential_account_selections: Vec::new(),
             approval_request_id: None,
         })
         .await
@@ -231,6 +235,7 @@ async fn auth_resume_json_rejects_fingerprint_mismatch_on_approval_request() {
             estimate: estimate.clone(),
             input: original_input.clone(),
             trust_decision: trust_decision(),
+            credential_account_selections: Vec::new(),
         })
         .await
         .unwrap_err();
@@ -268,6 +273,7 @@ async fn auth_resume_json_rejects_fingerprint_mismatch_on_approval_request() {
             estimate,
             input: json!({"message": "MUTATED input"}),
             trust_decision: trust_decision(),
+            credential_account_selections: Vec::new(),
             approval_request_id: Some(approval_id),
         })
         .await
@@ -327,6 +333,7 @@ async fn auth_resume_json_with_approval_request_id_claims_active_lease_and_dispa
             estimate: estimate.clone(),
             input: input.clone(),
             trust_decision: trust_decision(),
+            credential_account_selections: Vec::new(),
         })
         .await
         .unwrap_err();
@@ -371,6 +378,7 @@ async fn auth_resume_json_with_approval_request_id_claims_active_lease_and_dispa
             estimate,
             input,
             trust_decision: trust_decision(),
+            credential_account_selections: Vec::new(),
             approval_request_id: Some(approval_id),
         })
         .await
@@ -444,6 +452,7 @@ async fn auth_resume_json_rejects_capability_id_mismatch_against_run_record() {
             estimate: ResourceEstimate::default(),
             input: serde_json::json!({"message": "mismatch"}),
             trust_decision: trust_decision(),
+            credential_account_selections: Vec::new(),
             approval_request_id: None,
         })
         .await
@@ -537,6 +546,7 @@ async fn auth_resume_json_rejects_approval_not_yet_approved() {
             estimate: ResourceEstimate::default(),
             input: serde_json::json!({"message": "pending approval"}),
             trust_decision: trust_decision(),
+            credential_account_selections: Vec::new(),
             approval_request_id: Some(approval_id),
         })
         .await
@@ -611,6 +621,7 @@ async fn auth_resume_json_returns_store_missing_when_approval_requests_absent() 
             estimate: ResourceEstimate::default(),
             input: serde_json::json!({"message": "needs approval store"}),
             trust_decision: trust_decision(),
+            credential_account_selections: Vec::new(),
             approval_request_id: Some(approval_id),
         })
         .await
@@ -676,6 +687,7 @@ async fn auth_resume_json_without_approval_request_id_skips_lease_path_and_dispa
             estimate,
             input,
             trust_decision: trust_decision(),
+            credential_account_selections: Vec::new(),
             approval_request_id: None, // no prior approval
         })
         .await
@@ -772,6 +784,7 @@ async fn auth_resume_after_real_approval_bounce_reuses_claimed_lease() {
             estimate: estimate.clone(),
             input: input.clone(),
             trust_decision: trust_decision(),
+            credential_account_selections: Vec::new(),
         })
         .await
         .unwrap_err();
@@ -835,6 +848,7 @@ async fn auth_resume_after_real_approval_bounce_reuses_claimed_lease() {
             estimate: estimate.clone(),
             input: input.clone(),
             trust_decision: trust_decision(),
+            credential_account_selections: Vec::new(),
         })
         .await
         .unwrap_err();
@@ -882,6 +896,7 @@ async fn auth_resume_after_real_approval_bounce_reuses_claimed_lease() {
             estimate: estimate.clone(),
             input: input.clone(),
             trust_decision: trust_decision(),
+            credential_account_selections: Vec::new(),
             approval_request_id: Some(approval_id),
         })
         .await
@@ -1009,6 +1024,7 @@ async fn auth_resume_json_terminal_dispatch_failure_revokes_claimed_lease() {
             estimate: estimate.clone(),
             input: input.clone(),
             trust_decision: trust_decision(),
+            credential_account_selections: Vec::new(),
         })
         .await
         .unwrap_err();
@@ -1048,6 +1064,7 @@ async fn auth_resume_json_terminal_dispatch_failure_revokes_claimed_lease() {
             estimate: estimate.clone(),
             input: input.clone(),
             trust_decision: trust_decision(),
+            credential_account_selections: Vec::new(),
         })
         .await
         .unwrap_err();
@@ -1074,6 +1091,7 @@ async fn auth_resume_json_terminal_dispatch_failure_revokes_claimed_lease() {
             estimate: estimate.clone(),
             input: input.clone(),
             trust_decision: trust_decision(),
+            credential_account_selections: Vec::new(),
             approval_request_id: Some(approval_id),
         })
         .await
@@ -1150,6 +1168,7 @@ async fn auth_resume_json_non_terminal_auth_bounce_leaves_lease_claimed() {
             estimate: estimate.clone(),
             input: input.clone(),
             trust_decision: trust_decision(),
+            credential_account_selections: Vec::new(),
         })
         .await
         .unwrap_err();
@@ -1188,6 +1207,7 @@ async fn auth_resume_json_non_terminal_auth_bounce_leaves_lease_claimed() {
             estimate: estimate.clone(),
             input: input.clone(),
             trust_decision: trust_decision(),
+            credential_account_selections: Vec::new(),
         })
         .await
         .unwrap_err();
@@ -1216,6 +1236,7 @@ async fn auth_resume_json_non_terminal_auth_bounce_leaves_lease_claimed() {
             estimate: estimate.clone(),
             input: input.clone(),
             trust_decision: trust_decision(),
+            credential_account_selections: Vec::new(),
             approval_request_id: Some(approval_id),
         })
         .await
@@ -1383,6 +1404,7 @@ async fn concurrent_auth_resume_claim_loser_returns_lease_error_without_failing_
             estimate: estimate.clone(),
             input: input.clone(),
             trust_decision: trust_decision(),
+            credential_account_selections: Vec::new(),
         })
         .await
         .unwrap_err();
@@ -1428,6 +1450,7 @@ async fn concurrent_auth_resume_claim_loser_returns_lease_error_without_failing_
             estimate: estimate.clone(),
             input: input.clone(),
             trust_decision: trust_decision(),
+            credential_account_selections: Vec::new(),
             approval_request_id: Some(approval_id),
         })
         .await
@@ -1510,6 +1533,7 @@ async fn auth_resume_json_returns_store_missing_when_capability_leases_absent() 
             estimate: ResourceEstimate::default(),
             input: serde_json::json!({"message": "needs lease store"}),
             trust_decision: trust_decision(),
+            credential_account_selections: Vec::new(),
             approval_request_id: Some(approval_id),
         })
         .await
@@ -1628,6 +1652,7 @@ async fn auth_resume_json_rejected_prior_approval_fails_blocked_auth_run() {
             estimate: ResourceEstimate::default(),
             input: serde_json::json!({"message": "denied approval"}),
             trust_decision: trust_decision(),
+            credential_account_selections: Vec::new(),
             approval_request_id: Some(approval_id),
         })
         .await
@@ -1878,6 +1903,7 @@ async fn concurrent_auth_resume_reuse_loser_does_not_double_dispatch() {
             estimate: estimate.clone(),
             input: input.clone(),
             trust_decision: trust_decision(),
+            credential_account_selections: Vec::new(),
         })
         .await
         .unwrap_err();
@@ -1915,6 +1941,7 @@ async fn concurrent_auth_resume_reuse_loser_does_not_double_dispatch() {
                 estimate: estimate.clone(),
                 input: input.clone(),
                 trust_decision: trust_decision(),
+                credential_account_selections: Vec::new(),
             })
             .await
             .unwrap_err();
@@ -1972,6 +1999,7 @@ async fn concurrent_auth_resume_reuse_loser_does_not_double_dispatch() {
             estimate: task_a_estimate,
             input: task_a_input,
             trust_decision: trust_decision(),
+            credential_account_selections: Vec::new(),
             approval_request_id: Some(approval_id),
         })
         .await
@@ -2001,6 +2029,7 @@ async fn concurrent_auth_resume_reuse_loser_does_not_double_dispatch() {
             estimate: task_b_estimate,
             input: task_b_input,
             trust_decision: trust_decision(),
+            credential_account_selections: Vec::new(),
             approval_request_id: Some(approval_id),
         })
         .await
@@ -2147,6 +2176,7 @@ async fn auth_resume_json_authorization_deny_revokes_dispatching_lease() {
             estimate: estimate.clone(),
             input: input.clone(),
             trust_decision: trust_decision(),
+            credential_account_selections: Vec::new(),
         })
         .await
         .unwrap_err();
@@ -2186,6 +2216,7 @@ async fn auth_resume_json_authorization_deny_revokes_dispatching_lease() {
             estimate: estimate.clone(),
             input: input.clone(),
             trust_decision: trust_decision(),
+            credential_account_selections: Vec::new(),
         })
         .await
         .unwrap_err();
@@ -2217,6 +2248,7 @@ async fn auth_resume_json_authorization_deny_revokes_dispatching_lease() {
             estimate: estimate.clone(),
             input: input.clone(),
             trust_decision: trust_decision(),
+            credential_account_selections: Vec::new(),
             approval_request_id: Some(approval_id),
         })
         .await
@@ -2300,6 +2332,7 @@ async fn auth_resume_json_authorization_require_approval_revokes_dispatching_lea
             estimate: estimate.clone(),
             input: input.clone(),
             trust_decision: trust_decision(),
+            credential_account_selections: Vec::new(),
         })
         .await
         .unwrap_err();
@@ -2338,6 +2371,7 @@ async fn auth_resume_json_authorization_require_approval_revokes_dispatching_lea
             estimate: estimate.clone(),
             input: input.clone(),
             trust_decision: trust_decision(),
+            credential_account_selections: Vec::new(),
         })
         .await
         .unwrap_err();
@@ -2372,6 +2406,7 @@ async fn auth_resume_json_authorization_require_approval_revokes_dispatching_lea
             estimate: estimate.clone(),
             input: input.clone(),
             trust_decision: trust_decision(),
+            credential_account_selections: Vec::new(),
             approval_request_id: Some(approval_id),
         })
         .await
@@ -2431,6 +2466,7 @@ async fn auth_resume_json_returns_store_missing_when_run_state_absent() {
             estimate: ResourceEstimate::default(),
             input: serde_json::json!({"message": "no run_state store"}),
             trust_decision: trust_decision(),
+            credential_account_selections: Vec::new(),
             approval_request_id: None,
         })
         .await
@@ -2483,6 +2519,7 @@ async fn auth_resume_json_unknown_invocation_when_run_record_missing() {
             estimate: ResourceEstimate::default(),
             input: serde_json::json!({"message": "no run record seeded"}),
             trust_decision: trust_decision(),
+            credential_account_selections: Vec::new(),
             approval_request_id: None,
         })
         .await
@@ -2600,6 +2637,7 @@ async fn auth_resume_json_approval_request_mismatch_action() {
             estimate: ResourceEstimate::default(),
             input: serde_json::json!({"message": "action mismatch"}),
             trust_decision: trust_decision(),
+            credential_account_selections: Vec::new(),
             approval_request_id: Some(approval_id),
         })
         .await
@@ -2689,6 +2727,7 @@ async fn auth_resume_json_approval_request_mismatch_correlation_id() {
             estimate: ResourceEstimate::default(),
             input: serde_json::json!({"message": "correlation_id mismatch"}),
             trust_decision: trust_decision(),
+            credential_account_selections: Vec::new(),
             approval_request_id: Some(approval_id),
         })
         .await
@@ -2773,6 +2812,7 @@ async fn auth_resume_json_approval_request_mismatch_requested_by() {
             estimate: ResourceEstimate::default(),
             input: serde_json::json!({"message": "requested_by mismatch"}),
             trust_decision: trust_decision(),
+            credential_account_selections: Vec::new(),
             approval_request_id: Some(approval_id),
         })
         .await
@@ -2990,6 +3030,7 @@ async fn concurrent_auth_resume_fresh_active_lease_loser_does_not_double_dispatc
             estimate: estimate.clone(),
             input: input.clone(),
             trust_decision: trust_decision(),
+            credential_account_selections: Vec::new(),
         })
         .await
         .unwrap_err();
@@ -3049,6 +3090,7 @@ async fn concurrent_auth_resume_fresh_active_lease_loser_does_not_double_dispatc
             estimate: task_a_estimate,
             input: task_a_input,
             trust_decision: trust_decision(),
+            credential_account_selections: Vec::new(),
             approval_request_id: Some(approval_id),
         })
         .await
@@ -3076,6 +3118,7 @@ async fn concurrent_auth_resume_fresh_active_lease_loser_does_not_double_dispatc
             estimate: estimate.clone(),
             input: input.clone(),
             trust_decision: trust_decision(),
+            credential_account_selections: Vec::new(),
             approval_request_id: Some(approval_id),
         })
         .await;
@@ -3267,6 +3310,7 @@ async fn auth_resume_json_unknown_capability_does_not_strand_active_approval_lea
             estimate,
             input,
             trust_decision: trust_decision(),
+            credential_account_selections: Vec::new(),
             approval_request_id: Some(approval_id),
         })
         .await
@@ -3408,6 +3452,7 @@ async fn auth_resume_json_unknown_capability_does_not_strand_claimed_approval_le
             estimate,
             input,
             trust_decision: trust_decision(),
+            credential_account_selections: Vec::new(),
             approval_request_id: Some(approval_id),
         })
         .await

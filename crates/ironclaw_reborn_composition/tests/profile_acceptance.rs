@@ -125,7 +125,8 @@ fn readiness_serializes_diagnostics_with_stable_redacted_vocabulary() {
             },
             "workers": {
                 "turn_runner": false,
-                "trigger_poller": false
+                "trigger_poller": false,
+                "github_issue_workflow": false
             },
             "diagnostics": [{
                 "profile": "production",

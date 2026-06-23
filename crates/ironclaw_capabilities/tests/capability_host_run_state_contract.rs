@@ -35,6 +35,7 @@ async fn capability_host_blocks_for_approval_without_dispatch() {
             estimate: estimate.clone(),
             input: input.clone(),
             trust_decision: trust_decision(),
+            credential_account_selections: Vec::new(),
         })
         .await
         .unwrap_err();
@@ -119,6 +120,7 @@ output_schema_ref = "schemas/shell.output.v1.json"
             estimate: ResourceEstimate::default(),
             input,
             trust_decision: trust_decision(),
+            credential_account_selections: Vec::new(),
         })
         .await
         .unwrap_err();
@@ -176,6 +178,7 @@ async fn capability_host_uses_combined_store_for_atomic_approval_block() {
             estimate: estimate.clone(),
             input: input.clone(),
             trust_decision: trust_decision(),
+            credential_account_selections: Vec::new(),
         })
         .await
         .unwrap_err();
@@ -228,6 +231,7 @@ async fn capability_host_separate_store_setters_clear_combined_atomic_path() {
             estimate,
             input,
             trust_decision: trust_decision(),
+            credential_account_selections: Vec::new(),
         })
         .await
         .unwrap_err();
@@ -272,6 +276,7 @@ async fn capability_host_leaves_run_blocked_when_resume_is_attempted_before_appr
             estimate: estimate.clone(),
             input: input.clone(),
             trust_decision: trust_decision(),
+            credential_account_selections: Vec::new(),
         })
         .await
         .unwrap_err();
@@ -296,6 +301,7 @@ async fn capability_host_leaves_run_blocked_when_resume_is_attempted_before_appr
             estimate,
             input,
             trust_decision: trust_decision(),
+            credential_account_selections: Vec::new(),
         })
         .await
         .unwrap_err();
@@ -366,6 +372,7 @@ async fn assert_mismatched_approval_request_rejected(
             estimate: ResourceEstimate::default(),
             input: json!({"message": "needs approval"}),
             trust_decision: trust_decision(),
+            credential_account_selections: Vec::new(),
         })
         .await
         .unwrap_err();
@@ -408,6 +415,7 @@ async fn capability_host_does_not_point_run_at_approval_before_approval_is_persi
         estimate: ResourceEstimate::default(),
         input: json!({"message": "needs approval"}),
         trust_decision: trust_decision(),
+        credential_account_selections: Vec::new(),
     });
     tokio::pin!(invocation);
 
@@ -456,6 +464,7 @@ async fn capability_host_marks_run_failed_when_obligations_are_unsupported() {
             estimate: ResourceEstimate::default(),
             input: json!({"message": "blocked obligation"}),
             trust_decision: trust_decision(),
+            credential_account_selections: Vec::new(),
         })
         .await
         .unwrap_err();
@@ -486,6 +495,7 @@ async fn capability_host_returns_business_error_when_run_state_fail_transition_f
             estimate: ResourceEstimate::default(),
             input: json!({"message": "denied"}),
             trust_decision: trust_decision(),
+            credential_account_selections: Vec::new(),
         })
         .await
         .unwrap_err();
@@ -523,6 +533,7 @@ async fn capability_host_returns_resume_business_error_when_run_state_fail_trans
             estimate: estimate.clone(),
             input: input.clone(),
             trust_decision: trust_decision(),
+            credential_account_selections: Vec::new(),
         })
         .await
         .unwrap_err();
@@ -547,6 +558,7 @@ async fn capability_host_returns_resume_business_error_when_run_state_fail_trans
             estimate,
             input,
             trust_decision: trust_decision(),
+            credential_account_selections: Vec::new(),
         })
         .await
         .unwrap_err();
@@ -581,6 +593,7 @@ async fn capability_host_does_not_orphan_approval_when_run_block_fails() {
             estimate: ResourceEstimate::default(),
             input: json!({"message": "needs approval"}),
             trust_decision: trust_decision(),
+            credential_account_selections: Vec::new(),
         })
         .await
         .unwrap_err();
@@ -617,6 +630,7 @@ async fn capability_host_returns_specific_error_for_authorizer_fingerprint_misma
             estimate: ResourceEstimate::default(),
             input: json!({"message": "real input"}),
             trust_decision: trust_decision(),
+            credential_account_selections: Vec::new(),
         })
         .await
         .unwrap_err();
@@ -646,6 +660,7 @@ async fn capability_host_returns_dispatch_result_when_run_completion_fails_after
             estimate: ResourceEstimate::default(),
             input: json!({"message": "authorized"}),
             trust_decision: trust_decision(),
+            credential_account_selections: Vec::new(),
         })
         .await
         .unwrap();
@@ -677,6 +692,7 @@ async fn capability_host_resumes_approved_invocation_and_consumes_matching_lease
             estimate: estimate.clone(),
             input: input.clone(),
             trust_decision: trust_decision(),
+            credential_account_selections: Vec::new(),
         })
         .await
         .unwrap_err();
@@ -718,6 +734,7 @@ async fn capability_host_resumes_approved_invocation_and_consumes_matching_lease
             estimate,
             input,
             trust_decision: trust_decision(),
+            credential_account_selections: Vec::new(),
         })
         .await
         .unwrap();
@@ -752,6 +769,7 @@ async fn capability_host_returns_dispatch_result_when_run_completion_fails_after
             estimate: estimate.clone(),
             input: input.clone(),
             trust_decision: trust_decision(),
+            credential_account_selections: Vec::new(),
         })
         .await
         .unwrap_err();
@@ -793,6 +811,7 @@ async fn capability_host_returns_dispatch_result_when_run_completion_fails_after
             estimate,
             input,
             trust_decision: trust_decision(),
+            credential_account_selections: Vec::new(),
         })
         .await
         .unwrap();
@@ -823,6 +842,7 @@ async fn capability_host_denies_resume_when_trust_ceiling_omits_capability_effec
             estimate: estimate.clone(),
             input: input.clone(),
             trust_decision: trust_decision(),
+            credential_account_selections: Vec::new(),
         })
         .await
         .unwrap_err();
@@ -864,6 +884,7 @@ async fn capability_host_denies_resume_when_trust_ceiling_omits_capability_effec
             estimate,
             input,
             trust_decision: trust_decision_with_effects(Vec::new()),
+            credential_account_selections: Vec::new(),
         })
         .await
         .unwrap_err();
@@ -904,6 +925,7 @@ async fn capability_host_revokes_claimed_lease_when_dispatch_fails_after_resume(
             estimate: estimate.clone(),
             input: input.clone(),
             trust_decision: trust_decision(),
+            credential_account_selections: Vec::new(),
         })
         .await
         .unwrap_err();
@@ -945,6 +967,7 @@ async fn capability_host_revokes_claimed_lease_when_dispatch_fails_after_resume(
             estimate,
             input,
             trust_decision: trust_decision(),
+            credential_account_selections: Vec::new(),
         })
         .await
         .unwrap_err();
@@ -991,6 +1014,7 @@ async fn capability_host_returns_dispatch_result_when_lease_consume_fails_after_
             estimate: estimate.clone(),
             input: input.clone(),
             trust_decision: trust_decision(),
+            credential_account_selections: Vec::new(),
         })
         .await
         .unwrap_err();
@@ -1032,6 +1056,7 @@ async fn capability_host_returns_dispatch_result_when_lease_consume_fails_after_
             estimate,
             input,
             trust_decision: trust_decision(),
+            credential_account_selections: Vec::new(),
         })
         .await
         .unwrap();
@@ -1067,6 +1092,7 @@ async fn capability_host_does_not_overwrite_completed_run_when_concurrent_resume
             estimate: estimate.clone(),
             input: input.clone(),
             trust_decision: trust_decision(),
+            credential_account_selections: Vec::new(),
         })
         .await
         .unwrap_err();
@@ -1108,6 +1134,7 @@ async fn capability_host_does_not_overwrite_completed_run_when_concurrent_resume
         estimate: estimate.clone(),
         input: input.clone(),
         trust_decision: trust_decision(),
+        credential_account_selections: Vec::new(),
     });
     let second = resume_host.resume_json(CapabilityResumeRequest {
         context,
@@ -1116,6 +1143,7 @@ async fn capability_host_does_not_overwrite_completed_run_when_concurrent_resume
         estimate,
         input,
         trust_decision: trust_decision(),
+        credential_account_selections: Vec::new(),
     });
     let (first_result, second_result) = tokio::join!(first, second);
 
@@ -1151,6 +1179,7 @@ async fn capability_host_rejects_resume_with_mismatched_capability_id() {
             estimate: estimate.clone(),
             input: input.clone(),
             trust_decision: trust_decision(),
+            credential_account_selections: Vec::new(),
         })
         .await
         .unwrap_err();
@@ -1176,6 +1205,7 @@ async fn capability_host_rejects_resume_with_mismatched_capability_id() {
             estimate,
             input,
             trust_decision: trust_decision(),
+            credential_account_selections: Vec::new(),
         })
         .await
         .unwrap_err();
@@ -1218,6 +1248,7 @@ async fn capability_host_rejects_resume_with_mismatched_approval_request_id() {
             estimate: estimate.clone(),
             input: input.clone(),
             trust_decision: trust_decision(),
+            credential_account_selections: Vec::new(),
         })
         .await
         .unwrap_err();
@@ -1244,6 +1275,7 @@ async fn capability_host_rejects_resume_with_mismatched_approval_request_id() {
             estimate,
             input,
             trust_decision: trust_decision(),
+            credential_account_selections: Vec::new(),
         })
         .await
         .unwrap_err();
@@ -1283,6 +1315,7 @@ async fn capability_host_rejects_resume_with_mutated_input_before_lease_claim_or
             estimate: estimate.clone(),
             input: json!({"message": "approved"}),
             trust_decision: trust_decision(),
+            credential_account_selections: Vec::new(),
         })
         .await
         .unwrap_err();
@@ -1324,6 +1357,7 @@ async fn capability_host_rejects_resume_with_mutated_input_before_lease_claim_or
             estimate,
             input: json!({"message": "mutated"}),
             trust_decision: trust_decision(),
+            credential_account_selections: Vec::new(),
         })
         .await
         .unwrap_err();

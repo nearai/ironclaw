@@ -1,5 +1,6 @@
 use ironclaw_host_api::{
     ApprovalRequestId, CapabilityDispatchResult, CapabilityId, ExecutionContext, ResourceEstimate,
+    RuntimeCredentialAccountSelection,
 };
 use ironclaw_processes::ProcessRecord;
 use ironclaw_trust::TrustDecision;
@@ -11,6 +12,7 @@ pub struct CapabilityInvocationRequest {
     pub estimate: ResourceEstimate,
     pub input: Value,
     pub trust_decision: TrustDecision,
+    pub credential_account_selections: Vec<RuntimeCredentialAccountSelection>,
 }
 
 /// Caller-facing approved capability resume request.
@@ -22,6 +24,7 @@ pub struct CapabilityResumeRequest {
     pub estimate: ResourceEstimate,
     pub input: Value,
     pub trust_decision: TrustDecision,
+    pub credential_account_selections: Vec<RuntimeCredentialAccountSelection>,
 }
 
 /// Caller-facing auth-resume capability request.
@@ -39,6 +42,7 @@ pub struct CapabilityAuthResumeRequest {
     pub input: Value,
     pub trust_decision: TrustDecision,
     pub approval_request_id: Option<ApprovalRequestId>,
+    pub credential_account_selections: Vec<RuntimeCredentialAccountSelection>,
 }
 
 /// Caller-facing capability spawn request.
@@ -49,6 +53,7 @@ pub struct CapabilitySpawnRequest {
     pub estimate: ResourceEstimate,
     pub input: Value,
     pub trust_decision: TrustDecision,
+    pub credential_account_selections: Vec<RuntimeCredentialAccountSelection>,
 }
 
 /// Caller-facing capability invocation result.

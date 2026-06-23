@@ -205,6 +205,11 @@ string_id!(
     "runtime_credential_account_provider",
     validate_name_segment
 );
+string_id!(
+    RuntimeCredentialAccountId,
+    "runtime_credential_account",
+    validate_scope_id
+);
 string_id!(SystemServiceId, "system_service", validate_name_segment);
 
 /// Extension-prefixed capability identifier.

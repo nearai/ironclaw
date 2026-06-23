@@ -21,6 +21,7 @@ async fn capability_host_denies_missing_grant_before_dispatch() {
             estimate: ResourceEstimate::default(),
             input: json!({"message": "blocked"}),
             trust_decision: trust_decision(),
+            credential_account_selections: Vec::new(),
         })
         .await
         .unwrap_err();
@@ -52,6 +53,7 @@ async fn capability_host_denies_dispatch_when_trust_ceiling_omits_capability_eff
             estimate: ResourceEstimate::default(),
             input: json!({"message": "blocked by trust"}),
             trust_decision: trust_decision_with_effects(Vec::new()),
+            credential_account_selections: Vec::new(),
         })
         .await
         .unwrap_err();
@@ -87,6 +89,7 @@ async fn capability_host_authorized_dispatch_uses_neutral_dispatch_port() {
             },
             input: json!({"message": "authorized"}),
             trust_decision: trust_decision(),
+            credential_account_selections: Vec::new(),
         })
         .await
         .unwrap();
@@ -114,6 +117,7 @@ async fn capability_host_returns_approval_store_missing_when_approval_cannot_be_
             estimate: ResourceEstimate::default(),
             input: json!({"message": "needs approval"}),
             trust_decision: trust_decision(),
+            credential_account_selections: Vec::new(),
         })
         .await
         .unwrap_err();
@@ -140,6 +144,7 @@ async fn capability_host_fails_closed_on_unsupported_obligations_before_dispatch
             estimate: ResourceEstimate::default(),
             input: json!({"message": "must not dispatch"}),
             trust_decision: trust_decision(),
+            credential_account_selections: Vec::new(),
         })
         .await
         .unwrap_err();

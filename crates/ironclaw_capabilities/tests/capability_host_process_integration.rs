@@ -55,6 +55,7 @@ async fn capability_host_spawn_runs_background_process_through_process_host() {
             estimate: estimate.clone(),
             input: input.clone(),
             trust_decision: trust_decision(),
+            credential_account_selections: Vec::new(),
         })
         .await
         .unwrap();
@@ -136,6 +137,7 @@ async fn capability_spawn_process_host_hides_cross_scope_status_and_output() {
             estimate: ResourceEstimate::default(),
             input: json!({"message":"private"}),
             trust_decision: trust_decision(),
+            credential_account_selections: Vec::new(),
         })
         .await
         .unwrap();
@@ -174,6 +176,7 @@ async fn capability_host_spawn_fails_closed_on_unsupported_obligations_before_pr
             estimate: ResourceEstimate::default(),
             input: json!({"message":"must not spawn"}),
             trust_decision: trust_decision(),
+            credential_account_selections: Vec::new(),
         })
         .await
         .unwrap_err();

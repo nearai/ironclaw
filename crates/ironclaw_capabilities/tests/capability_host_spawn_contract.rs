@@ -37,6 +37,7 @@ async fn capability_host_blocks_spawn_for_approval_without_starting_process() {
             estimate: estimate.clone(),
             input: input.clone(),
             trust_decision: trust_decision(),
+            credential_account_selections: Vec::new(),
         })
         .await
         .unwrap_err();
@@ -123,6 +124,7 @@ output_schema_ref = "schemas/shell.output.v1.json"
             estimate: ResourceEstimate::default(),
             input,
             trust_decision: trust_decision(),
+            credential_account_selections: Vec::new(),
         })
         .await
         .unwrap_err();
@@ -185,6 +187,7 @@ async fn capability_host_resumes_approved_spawn_and_consumes_matching_lease() {
             estimate: estimate.clone(),
             input: input.clone(),
             trust_decision: trust_decision(),
+            credential_account_selections: Vec::new(),
         })
         .await
         .unwrap_err();
@@ -227,6 +230,7 @@ async fn capability_host_resumes_approved_spawn_and_consumes_matching_lease() {
             estimate,
             input,
             trust_decision: trust_decision(),
+            credential_account_selections: Vec::new(),
         })
         .await
         .unwrap();
@@ -269,6 +273,7 @@ async fn capability_host_denies_spawn_when_trust_ceiling_omits_spawn_effect() {
             estimate: ResourceEstimate::default(),
             input: json!({"message": "blocked spawn"}),
             trust_decision: trust_decision_with_effects(vec![EffectKind::DispatchCapability]),
+            credential_account_selections: Vec::new(),
         })
         .await
         .unwrap_err();
@@ -305,6 +310,7 @@ async fn capability_host_returns_spawn_result_when_run_completion_fails_after_sp
             estimate: ResourceEstimate::default(),
             input: json!({"message": "background"}),
             trust_decision: trust_decision(),
+            credential_account_selections: Vec::new(),
         })
         .await
         .unwrap();
@@ -333,6 +339,7 @@ async fn capability_host_spawns_authorized_process_without_dispatching_inline() 
             estimate: ResourceEstimate::default(),
             input: json!({"message": "background"}),
             trust_decision: trust_decision(),
+            credential_account_selections: Vec::new(),
         })
         .await
         .unwrap();

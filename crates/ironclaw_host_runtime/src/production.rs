@@ -373,6 +373,7 @@ impl HostRuntime for DefaultHostRuntime {
             estimate,
             input,
             idempotency_key,
+            credential_account_selections,
             trust_decision: _caller_trust_decision,
         } = request;
         let scope = context.resource_scope.clone();
@@ -453,6 +454,7 @@ impl HostRuntime for DefaultHostRuntime {
             estimate,
             input,
             trust_decision,
+            credential_account_selections,
         };
 
         match host.invoke_json(invocation).await {
@@ -482,6 +484,7 @@ impl HostRuntime for DefaultHostRuntime {
             estimate,
             input,
             idempotency_key,
+            credential_account_selections,
             trust_decision: _caller_trust_decision,
         } = request;
         let input = host_runtime_spawn_input_for_capability(&capability_id, input)?;
@@ -555,6 +558,7 @@ impl HostRuntime for DefaultHostRuntime {
             estimate,
             input,
             trust_decision,
+            credential_account_selections,
         };
 
         match host.spawn_json(spawn).await {
@@ -585,6 +589,7 @@ impl HostRuntime for DefaultHostRuntime {
             estimate,
             input,
             idempotency_key,
+            credential_account_selections,
             trust_decision: _caller_trust_decision,
         } = request;
         let idempotency_key = idempotency_key.map(|key| key.as_str().to_string());
@@ -642,6 +647,7 @@ impl HostRuntime for DefaultHostRuntime {
             estimate,
             input,
             trust_decision,
+            credential_account_selections,
         };
 
         match host.resume_json(resume).await {
@@ -687,6 +693,7 @@ impl HostRuntime for DefaultHostRuntime {
             estimate,
             input,
             idempotency_key,
+            credential_account_selections,
             trust_decision: _caller_trust_decision,
             approval_request_id,
         } = request;
@@ -763,6 +770,7 @@ impl HostRuntime for DefaultHostRuntime {
             input,
             trust_decision,
             approval_request_id,
+            credential_account_selections,
         };
 
         match host.auth_resume_json(auth_resume).await {
@@ -806,6 +814,7 @@ impl HostRuntime for DefaultHostRuntime {
             estimate,
             input,
             idempotency_key,
+            credential_account_selections,
             trust_decision: _caller_trust_decision,
         } = request;
         let input = host_runtime_spawn_input_for_capability(&capability_id, input)?;
@@ -864,6 +873,7 @@ impl HostRuntime for DefaultHostRuntime {
             estimate,
             input,
             trust_decision,
+            credential_account_selections,
         };
 
         match host.resume_spawn_json(resume).await {

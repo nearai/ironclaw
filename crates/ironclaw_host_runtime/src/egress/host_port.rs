@@ -180,6 +180,7 @@ impl HostRuntimeHttpEgressPort {
                 context: &context,
                 capability_id: &request.request.capability_id,
                 estimate: &estimate,
+                credential_account_selections: &[],
                 obligations: &[Obligation::ApplyNetworkPolicy {
                     policy: request.request.network_policy.clone(),
                 }],

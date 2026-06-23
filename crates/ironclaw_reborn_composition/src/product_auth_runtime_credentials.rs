@@ -4,8 +4,8 @@ use async_trait::async_trait;
 use chrono::Utc;
 use ironclaw_auth::{
     AuthProductError, AuthProductScope, AuthProviderId, AuthSurface, CredentialAccount,
-    CredentialAccountRecordSource, CredentialAccountSelectionRequest, CredentialAccountStatus,
-    CredentialRefreshReport, CredentialRefreshRequest, ProviderScope,
+    CredentialAccountId, CredentialAccountRecordSource, CredentialAccountSelectionRequest,
+    CredentialAccountStatus, CredentialRefreshReport, CredentialRefreshRequest, ProviderScope,
     select_latest_duplicate_user_reusable_account,
 };
 use ironclaw_host_api::{
@@ -105,6 +105,7 @@ impl RuntimeCredentialAccountRefreshService for NoopRuntimeCredentialAccountRefr
 #[derive(Clone)]
 pub(crate) struct RuntimeCredentialAccountSelectionRequest {
     lookup: CredentialAccountSelectionRequest,
+    account_id: Option<CredentialAccountId>,
     runtime_scope: AuthProductScope,
     setup: RuntimeCredentialAccountSetup,
     provider_scopes: Vec<ProviderScope>,
@@ -121,12 +122,14 @@ pub(crate) trait RuntimeCredentialAccountRefreshPort: Send + Sync {
 impl RuntimeCredentialAccountSelectionRequest {
     pub(crate) fn new(
         lookup: CredentialAccountSelectionRequest,
+        account_id: Option<CredentialAccountId>,
         runtime_scope: AuthProductScope,
         setup: RuntimeCredentialAccountSetup,
         provider_scopes: Vec<ProviderScope>,
     ) -> Self {
         Self {
             lookup,
+            account_id,
             runtime_scope,
             setup,
             provider_scopes,
@@ -157,6 +160,7 @@ async fn runtime_credential_auth_requirement_configured(
     let request = runtime_credential_account_selection_request(
         scope,
         &requirement.provider,
+        None,
         requirement.setup.clone(),
         &requirement.provider_scopes,
         &requirement.requester_extension,
@@ -353,6 +357,13 @@ impl RuntimeCredentialAccountSelectionService for ProductAuthRuntimeCredentialAc
                 },
             )
             .await?;
+        let configured = match request.account_id {
+            Some(account_id) => configured
+                .into_iter()
+                .filter(|account| account.id == account_id)
+                .collect(),
+            None => configured,
+        };
         self.finalize_selection(configured, &request.lookup)
     }
 
@@ -479,6 +490,7 @@ impl RuntimeCredentialAccountResolver for ProductAuthRuntimeCredentialResolver {
         let selection_request = runtime_credential_account_selection_request(
             request.scope,
             request.provider,
+            request.account_id,
             request.setup.clone(),
             request.provider_scopes,
             request.requester_extension,
@@ -513,6 +525,7 @@ impl RuntimeCredentialAccountResolver for ProductAuthRuntimeCredentialResolver {
 fn runtime_credential_account_selection_request(
     scope: &ResourceScope,
     provider: &RuntimeCredentialAccountProviderId,
+    account_id: Option<&ironclaw_host_api::RuntimeCredentialAccountId>,
     setup: RuntimeCredentialAccountSetup,
     provider_scopes: &[String],
     requester_extension: &ExtensionId,
@@ -539,9 +552,25 @@ fn runtime_credential_account_selection_request(
             })
         })
         .collect::<Result<Vec<_>, _>>()?;
+    let account_id = match account_id {
+        Some(account_id) => Some(
+            uuid::Uuid::parse_str(account_id.as_str())
+                .map(CredentialAccountId::from_uuid)
+                .map_err(|e| {
+                    tracing::debug!(
+                        account_id = %account_id.as_str(),
+                        err = %e,
+                        "runtime credential account id is invalid"
+                    );
+                    CredentialStageError::Backend
+                })?,
+        ),
+        None => None,
+    };
     Ok(RuntimeCredentialAccountSelectionRequest::new(
         CredentialAccountSelectionRequest::new(owner_scope, provider)
             .for_extension(requester_extension.clone()),
+        account_id,
         AuthProductScope::new(scope.clone(), AuthSurface::Api),
         setup,
         provider_scopes,

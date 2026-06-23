@@ -25,13 +25,15 @@ use ironclaw_github_issue_workflow::{
 };
 use ironclaw_host_api::{
     AgentId, CapabilityId, CapabilitySet, ExecutionContext, ExtensionId, MountView, ProjectId,
-    ResourceEstimate, RuntimeKind, TenantId, ThreadId, TrustClass, UserId,
+    ResourceEstimate, RuntimeCredentialAccountId, RuntimeCredentialAccountProviderId,
+    RuntimeCredentialAccountSelection, RuntimeKind, TenantId, ThreadId, TrustClass, UserId,
 };
 use ironclaw_host_runtime::{
     FirstPartyCapabilityError, FirstPartyCapabilityHandler, FirstPartyCapabilityRegistry,
     FirstPartyCapabilityRequest, FirstPartyCapabilityResult, ReportWorkflowStageResultInput,
-    RuntimeFailureKind, WorkflowStageResultAck, WorkflowStageResultSink,
-    WorkflowStageResultSinkError, builtin_first_party_handlers_with_workflow_stage_result_sink,
+    RuntimeCapabilityOutcome, RuntimeCapabilityRequest, RuntimeFailureKind, WorkflowStageResultAck,
+    WorkflowStageResultSink, WorkflowStageResultSinkError,
+    builtin_first_party_handlers_with_workflow_stage_result_sink,
 };
 use ironclaw_loop_support::{
     CapabilityAllowSet, CapabilityResolveError, CapabilitySurfaceProfileResolver,
@@ -2552,18 +2554,68 @@ impl GithubIssueWorkflowCapabilityDispatcher
         &self,
         request: GithubIssueWorkflowCapabilityDispatchRequest,
     ) -> Result<JsonValue, GithubIssueWorkflowCapabilityDispatchError> {
-        // The current host-runtime credential staging path selects product-auth
-        // accounts by scope/provider/requester only; it has no account-id field
-        // on RuntimeCapabilityRequest or RuntimeCredentialAccountRequest. Failing
-        // closed here prevents silently dispatching under a different GitHub
-        // account than the workflow explicitly selected.
-        Err(GithubIssueWorkflowCapabilityDispatchError::Backend {
-            kind: "provider_account_selection_unavailable".to_string(),
-            message: format!(
-                "host runtime cannot honor explicit GitHub provider account selection for {}",
-                request.capability_id
-            ),
-        })
+        let capability_id = CapabilityId::new(request.capability_id.clone()).map_err(|error| {
+            GithubIssueWorkflowCapabilityDispatchError::Backend {
+                kind: "invalid_capability_id".to_string(),
+                message: error.to_string(),
+            }
+        })?;
+        let provider =
+            RuntimeCredentialAccountProviderId::new(request.provider_account_ref.provider.clone())
+                .map_err(
+                    |error| GithubIssueWorkflowCapabilityDispatchError::Backend {
+                        kind: "invalid_provider_account_ref".to_string(),
+                        message: error.to_string(),
+                    },
+                )?;
+        let account_id =
+            RuntimeCredentialAccountId::new(request.provider_account_ref.account_id.clone())
+                .map_err(
+                    |error| GithubIssueWorkflowCapabilityDispatchError::Backend {
+                        kind: "invalid_provider_account_ref".to_string(),
+                        message: error.to_string(),
+                    },
+                )?;
+        let runtime_request = RuntimeCapabilityRequest::new(
+            self.execution_context.clone(),
+            capability_id.clone(),
+            self.estimate.clone(),
+            request.input,
+            self.trust_decision.clone(),
+        )
+        .with_credential_account_selection(RuntimeCredentialAccountSelection::new(
+            provider, account_id,
+        ));
+
+        match self.host_runtime.invoke_capability(runtime_request).await {
+            Ok(RuntimeCapabilityOutcome::Completed(completed)) => Ok(completed.output),
+            Ok(RuntimeCapabilityOutcome::AuthRequired(_)) => {
+                Err(GithubIssueWorkflowCapabilityDispatchError::AuthRequired)
+            }
+            Ok(RuntimeCapabilityOutcome::ApprovalRequired(_)) => {
+                Err(GithubIssueWorkflowCapabilityDispatchError::ApprovalRequired)
+            }
+            Ok(RuntimeCapabilityOutcome::Failed(failure)) => {
+                Err(GithubIssueWorkflowCapabilityDispatchError::Backend {
+                    kind: failure.kind.as_str().to_string(),
+                    message: failure.message.unwrap_or_else(|| {
+                        format!("GitHub capability {} failed", capability_id.as_str())
+                    }),
+                })
+            }
+            Ok(other) => Err(GithubIssueWorkflowCapabilityDispatchError::Backend {
+                kind: other.kind().to_string(),
+                message: format!(
+                    "GitHub capability {} returned unsupported runtime outcome {}",
+                    capability_id.as_str(),
+                    other.kind()
+                ),
+            }),
+            Err(error) => Err(GithubIssueWorkflowCapabilityDispatchError::Backend {
+                kind: "host_runtime_error".to_string(),
+                message: error.to_string(),
+            }),
+        }
     }
 }
 
@@ -3599,7 +3651,7 @@ fn invalid_ref(error: impl std::fmt::Display) -> GithubIssueWorkflowError {
 
 #[cfg(test)]
 mod github_issue_workflow_provider_runtime_contract_tests {
-    use std::sync::Arc;
+    use std::sync::{Arc, Mutex};
 
     use async_trait::async_trait;
     use chrono::Utc;
@@ -3610,13 +3662,14 @@ mod github_issue_workflow_provider_runtime_contract_tests {
     };
     use ironclaw_host_api::{
         AgentId, CapabilitySet, EffectKind, ExecutionContext, ExtensionId, MountView, ProjectId,
-        RuntimeKind, TenantId, TrustClass, UserId,
+        ResourceUsage, RuntimeKind, TenantId, TrustClass, UserId,
     };
     use ironclaw_host_runtime::{
         CancelRuntimeWorkOutcome, CancelRuntimeWorkRequest, HostRuntime, HostRuntimeError,
         HostRuntimeHealth, HostRuntimeStatus, RuntimeCapabilityAuthResumeRequest,
-        RuntimeCapabilityOutcome, RuntimeCapabilityRequest, RuntimeCapabilityResumeRequest,
-        RuntimeStatusRequest, VisibleCapabilityRequest, VisibleCapabilitySurface,
+        RuntimeCapabilityCompleted, RuntimeCapabilityOutcome, RuntimeCapabilityRequest,
+        RuntimeCapabilityResumeRequest, RuntimeStatusRequest, VisibleCapabilityRequest,
+        VisibleCapabilitySurface,
     };
     use ironclaw_trust::{AuthorityCeiling, EffectiveTrustClass, TrustDecision, TrustProvenance};
 
@@ -3659,19 +3712,25 @@ mod github_issue_workflow_provider_runtime_contract_tests {
     }
 
     #[tokio::test]
-    async fn host_runtime_github_issue_workflow_provider_dispatcher_fails_closed_for_account_selection()
-     {
+    async fn host_runtime_github_issue_workflow_provider_dispatcher_selects_configured_account() {
+        let host_runtime = Arc::new(RecordingHostRuntime::with_output(serde_json::json!([
+            {
+                "number": 42,
+                "html_url": "https://github.com/nearai/ironclaw/issues/42",
+                "updated_at": "2026-06-22T10:30:00Z"
+            }
+        ])));
         let port: Arc<dyn GithubIssueWorkflowPort> =
             Arc::new(IronClawGithubIssueWorkflowPort::new(
                 provider_account("configured-account"),
                 Arc::new(HostRuntimeGithubIssueWorkflowCapabilityDispatcher::new(
-                    Arc::new(PanickingHostRuntime),
+                    host_runtime.clone(),
                     execution_context_for_test(),
                     trust_decision_for_test(),
                 )),
             ));
 
-        let error = port
+        let hits = port
             .search_open_bug_issues(SearchGithubIssuesInput {
                 provider_account_ref: provider_account("input-account"),
                 owner: "nearai".to_string(),
@@ -3680,27 +3739,60 @@ mod github_issue_workflow_provider_runtime_contract_tests {
                 limit: 5,
             })
             .await
-            .expect_err("production-shaped dispatch should fail closed");
+            .expect("production-shaped dispatch should invoke host runtime");
 
-        assert!(matches!(
-            error,
-            GithubIssueWorkflowError::ProviderRead { .. }
-        ));
-        let rendered = error.to_string();
-        assert!(rendered.contains("github.search_issues"));
-        assert!(rendered.contains("provider_account_selection_unavailable"));
+        assert_eq!(hits.len(), 1);
+        let request = host_runtime
+            .take_request()
+            .expect("host runtime request should be captured");
+        assert_eq!(request.capability_id.as_str(), "github.search_issues");
+        assert_eq!(
+            request.input,
+            serde_json::json!({
+                "query": "repo:nearai/ironclaw is:issue state:open label:bug",
+                "limit": 5,
+            })
+        );
+        assert_eq!(request.credential_account_selections.len(), 1);
+        let selection = &request.credential_account_selections[0];
+        assert_eq!(selection.provider.as_str(), "github");
+        assert_eq!(selection.account_id.as_str(), "input-account");
     }
 
     #[derive(Debug)]
-    struct PanickingHostRuntime;
+    struct RecordingHostRuntime {
+        output: serde_json::Value,
+        request: Mutex<Option<RuntimeCapabilityRequest>>,
+    }
+
+    impl RecordingHostRuntime {
+        fn with_output(output: serde_json::Value) -> Self {
+            Self {
+                output,
+                request: Mutex::new(None),
+            }
+        }
+
+        fn take_request(&self) -> Option<RuntimeCapabilityRequest> {
+            self.request.lock().expect("request mutex").take()
+        }
+    }
 
     #[async_trait]
-    impl HostRuntime for PanickingHostRuntime {
+    impl HostRuntime for RecordingHostRuntime {
         async fn invoke_capability(
             &self,
-            _request: RuntimeCapabilityRequest,
+            request: RuntimeCapabilityRequest,
         ) -> Result<RuntimeCapabilityOutcome, HostRuntimeError> {
-            panic!("host runtime should not be invoked when account selection cannot be honored");
+            *self.request.lock().expect("request mutex") = Some(request.clone());
+            Ok(RuntimeCapabilityOutcome::Completed(Box::new(
+                RuntimeCapabilityCompleted {
+                    capability_id: request.capability_id,
+                    output: self.output.clone(),
+                    display_preview: None,
+                    usage: ResourceUsage::default(),
+                },
+            )))
         }
 
         async fn resume_capability(

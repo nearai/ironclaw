@@ -21,7 +21,8 @@ use ironclaw_host_api::{
     CapabilityDispatchResult, CapabilityId, CredentialStageError, DecisionSummary, EffectKind,
     ExtensionId, MountView, NetworkPolicy, Obligation, ProcessId, ResourceCeiling,
     ResourceEstimate, ResourceReservation, ResourceScope, ResourceUsage,
-    RuntimeCredentialAccountProviderId, RuntimeCredentialAccountSetup,
+    RuntimeCredentialAccountId, RuntimeCredentialAccountProviderId,
+    RuntimeCredentialAccountSelection, RuntimeCredentialAccountSetup,
     RuntimeCredentialAuthRequirement, RuntimeHttpEgress, SandboxQuota, SecretHandle, Timestamp,
 };
 use ironclaw_network::NetworkHttpEgress;
@@ -45,6 +46,7 @@ pub(crate) const DEFAULT_RUNTIME_SECRET_INJECTION_TTL: Duration = Duration::from
 pub struct RuntimeCredentialAccountRequest<'a> {
     pub scope: &'a ResourceScope,
     pub provider: &'a RuntimeCredentialAccountProviderId,
+    pub account_id: Option<&'a RuntimeCredentialAccountId>,
     pub setup: &'a RuntimeCredentialAccountSetup,
     pub provider_scopes: &'a [String],
     pub requester_extension: &'a ExtensionId,
@@ -1307,6 +1309,10 @@ impl BuiltinObligationHandler {
                 .resolve_access_secret(RuntimeCredentialAccountRequest {
                     scope: &request.context.resource_scope,
                     provider: obligation.provider,
+                    account_id: selected_account_for_obligation(
+                        &obligation,
+                        request.credential_account_selections,
+                    )?,
                     setup: obligation.setup,
                     provider_scopes: obligation.provider_scopes,
                     requester_extension: obligation.requester_extension,
@@ -1453,6 +1459,7 @@ impl CapabilityObligationHandler for BuiltinObligationHandler {
                 context: request.context,
                 capability_id: request.capability_id,
                 estimate: request.estimate,
+                credential_account_selections: request.credential_account_selections,
                 obligations: request.obligations,
             })
             .await?;
@@ -1744,6 +1751,22 @@ struct CredentialAccountInjectionObligation<'a> {
     setup: &'a RuntimeCredentialAccountSetup,
     provider_scopes: &'a [String],
     requester_extension: &'a ExtensionId,
+}
+
+fn selected_account_for_obligation<'a>(
+    obligation: &CredentialAccountInjectionObligation<'_>,
+    selections: &'a [RuntimeCredentialAccountSelection],
+) -> Result<Option<&'a RuntimeCredentialAccountId>, CapabilityObligationError> {
+    let mut selected = selections
+        .iter()
+        .filter(|selection| selection.provider == *obligation.provider);
+    let Some(first) = selected.next() else {
+        return Ok(None);
+    };
+    if selected.any(|selection| selection.account_id != first.account_id) {
+        return Err(secret_obligation_failed());
+    }
+    Ok(Some(&first.account_id))
 }
 
 fn credential_account_injection_obligations(
@@ -2384,6 +2407,7 @@ mod tests {
                 context: &context,
                 capability_id: &capability_id,
                 estimate: &estimate,
+                credential_account_selections: &[],
                 obligations: &obligations,
             })
             .await

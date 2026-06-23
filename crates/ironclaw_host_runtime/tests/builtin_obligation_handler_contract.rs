@@ -2,7 +2,7 @@ mod support;
 
 use support::legacy_capability_fixture_to_v2;
 
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use ironclaw_authorization::TrustAwareCapabilityDispatchAuthorizer;
@@ -55,6 +55,7 @@ async fn builtin_obligation_handler_emits_metadata_only_audit_before() {
             context: &context,
             capability_id: &capability_id,
             estimate: &estimate,
+            credential_account_selections: &[],
             obligations: &obligations,
         })
         .await
@@ -95,6 +96,7 @@ async fn builtin_obligation_handler_satisfy_fails_closed_on_post_dispatch_obliga
             context: &context,
             capability_id: &capability_id,
             estimate: &estimate,
+            credential_account_selections: &[],
             obligations: &obligations,
         })
         .await
@@ -166,6 +168,7 @@ async fn builtin_obligation_handler_allows_resource_ceiling_when_estimate_is_wit
             context: &context,
             capability_id: &capability_id,
             estimate: &estimate,
+            credential_account_selections: &[],
             obligations: &obligations,
         })
         .await
@@ -198,6 +201,7 @@ async fn builtin_obligation_handler_rejects_resource_ceiling_above_host_estimate
             context: &context,
             capability_id: &capability_id,
             estimate: &estimate,
+            credential_account_selections: &[],
             obligations: &obligations,
         })
         .await
@@ -237,6 +241,7 @@ async fn builtin_obligation_handler_rejects_unenforced_sandbox_quota_fields() {
             context: &context,
             capability_id: &capability_id,
             estimate: &estimate,
+            credential_account_selections: &[],
             obligations: &obligations,
         })
         .await
@@ -276,6 +281,7 @@ async fn builtin_obligation_handler_rejects_wall_clock_ceiling_until_runtime_han
             context: &context,
             capability_id: &capability_id,
             estimate: &estimate,
+            credential_account_selections: &[],
             obligations: &obligations,
         })
         .await
@@ -318,6 +324,7 @@ async fn builtin_obligation_handler_rejects_sandbox_network_ceiling_until_runtim
             context: &context,
             capability_id: &capability_id,
             estimate: &estimate,
+            credential_account_selections: &[],
             obligations: &obligations,
         })
         .await
@@ -360,6 +367,7 @@ async fn builtin_obligation_handler_rejects_sandbox_process_ceiling_until_runtim
             context: &context,
             capability_id: &capability_id,
             estimate: &estimate,
+            credential_account_selections: &[],
             obligations: &obligations,
         })
         .await
@@ -612,6 +620,7 @@ async fn builtin_obligation_handler_stores_network_policy_for_runtime_handoff() 
             context: &context,
             capability_id: &capability_id,
             estimate: &estimate,
+            credential_account_selections: &[],
             obligations: &obligations,
         })
         .await
@@ -638,6 +647,7 @@ async fn builtin_obligation_handler_removes_network_policy_on_abort() {
             context: &context,
             capability_id: &capability_id,
             estimate: &estimate,
+            credential_account_selections: &[],
             obligations: &obligations,
         })
         .await
@@ -674,6 +684,7 @@ async fn network_obligation_handoff_isolates_agent_scope() {
             context: &context,
             capability_id: &capability_id,
             estimate: &ResourceEstimate::default(),
+            credential_account_selections: &[],
             obligations: &[Obligation::ApplyNetworkPolicy {
                 policy: allowed_network_policy(),
             }],
@@ -711,6 +722,7 @@ async fn builtin_obligation_handler_leases_consumes_and_stages_secret_once() {
             context: &context,
             capability_id: &capability_id,
             estimate: &estimate,
+            credential_account_selections: &[],
             obligations: &obligations,
         })
         .await
@@ -746,6 +758,7 @@ async fn builtin_obligation_handler_removes_staged_secret_on_abort() {
             context: &context,
             capability_id: &capability_id,
             estimate: &estimate,
+            credential_account_selections: &[],
             obligations: &obligations,
         })
         .await
@@ -805,6 +818,7 @@ async fn builtin_obligation_handler_satisfy_preserves_staged_handoffs_when_relea
             context: &context,
             capability_id: &capability_id,
             estimate: &estimate,
+            credential_account_selections: &[],
             obligations: &obligations,
         })
         .await
@@ -848,6 +862,7 @@ async fn builtin_obligation_handler_cleans_unused_staged_handoffs_after_dispatch
             context: &context,
             capability_id: &capability_id,
             estimate: &estimate,
+            credential_account_selections: &[],
             obligations: &obligations,
         })
         .await
@@ -896,6 +911,7 @@ async fn builtin_obligation_handler_returns_scoped_mount_outcome_when_subset() {
             context: &context,
             capability_id: &capability_id,
             estimate: &estimate,
+            credential_account_selections: &[],
             obligations: &obligations,
         })
         .await
@@ -924,6 +940,7 @@ async fn builtin_obligation_handler_reserves_requested_resources_and_releases_on
             context: &context,
             capability_id: &capability_id,
             estimate: &estimate,
+            credential_account_selections: &[],
             obligations: &obligations,
         })
         .await
@@ -1286,6 +1303,44 @@ impl RuntimeCredentialAccountResolver for FixedHandleResolver {
 }
 
 #[derive(Debug)]
+struct CapturingHandleResolver {
+    handle: ironclaw_host_api::SecretHandle,
+    seen_account_id: Mutex<Option<String>>,
+}
+
+impl CapturingHandleResolver {
+    fn new(handle: ironclaw_host_api::SecretHandle) -> Self {
+        Self {
+            handle,
+            seen_account_id: Mutex::new(None),
+        }
+    }
+
+    fn seen_account_id(&self) -> Option<String> {
+        self.seen_account_id
+            .lock()
+            .expect("seen account id mutex")
+            .clone()
+    }
+}
+
+#[async_trait::async_trait]
+impl RuntimeCredentialAccountResolver for CapturingHandleResolver {
+    async fn resolve_access_secret(
+        &self,
+        request: RuntimeCredentialAccountRequest<'_>,
+    ) -> Result<RuntimeCredentialAccessSecret, ironclaw_host_api::CredentialStageError> {
+        *self.seen_account_id.lock().expect("seen account id mutex") = request
+            .account_id
+            .map(|account_id| account_id.as_str().to_string());
+        Ok(RuntimeCredentialAccessSecret {
+            scope: request.scope.clone(),
+            handle: self.handle.clone(),
+        })
+    }
+}
+
+#[derive(Debug)]
 struct SourceScopedHandleResolver {
     source_scope: ResourceScope,
     handle: ironclaw_host_api::SecretHandle,
@@ -1332,6 +1387,7 @@ async fn inject_credential_account_once_fails_when_no_resolver_wired() {
             context: &context,
             capability_id: &capability_id,
             estimate: &estimate,
+            credential_account_selections: &[],
             obligations: &obligations,
         })
         .await
@@ -1373,6 +1429,7 @@ async fn inject_credential_account_once_fails_when_resolver_returns_auth_require
             context: &context,
             capability_id: &capability_id,
             estimate: &estimate,
+            credential_account_selections: &[],
             obligations: &obligations,
         })
         .await
@@ -1437,10 +1494,69 @@ async fn inject_credential_account_once_resolves_and_stages_secret() {
             context: &context,
             capability_id: &capability_id,
             estimate: &estimate,
+            credential_account_selections: &[],
             obligations: &obligations,
         })
         .await
         .expect("obligation should be satisfied");
+}
+
+#[tokio::test]
+async fn inject_credential_account_once_forwards_selected_account_id() {
+    let access_handle = ironclaw_host_api::SecretHandle::new("github_selected_access").unwrap();
+    let injection_slot = ironclaw_host_api::SecretHandle::new("github_runtime_token").unwrap();
+    let secret_store = Arc::new(ironclaw_secrets::InMemorySecretStore::new());
+    let context = execution_context(CapabilitySet::default());
+    secret_store
+        .put(
+            context.resource_scope.clone(),
+            access_handle.clone(),
+            ironclaw_secrets::SecretMaterial::from("test-github-token"),
+            None,
+        )
+        .await
+        .unwrap();
+    let resolver = Arc::new(CapturingHandleResolver::new(access_handle));
+    let services = BuiltinObligationServices::new(
+        Arc::new(ironclaw_events::InMemoryAuditSink::new()),
+        secret_store,
+        Arc::new(ironclaw_resources::InMemoryResourceGovernor::new()),
+    )
+    .with_credential_account_resolver(resolver.clone());
+    let handler = services.obligation_handler();
+    let capability_id = capability_id();
+    let estimate = ResourceEstimate::default();
+    let provider = ironclaw_host_api::RuntimeCredentialAccountProviderId::new("github").unwrap();
+    let selected_account =
+        ironclaw_host_api::RuntimeCredentialAccountId::new("selected-github-account").unwrap();
+    let selections = vec![ironclaw_host_api::RuntimeCredentialAccountSelection::new(
+        provider.clone(),
+        selected_account.clone(),
+    )];
+    let obligations = vec![Obligation::InjectCredentialAccountOnce {
+        handle: injection_slot,
+        provider,
+        setup: ironclaw_host_api::RuntimeCredentialAccountSetup::ManualToken,
+        provider_scopes: Vec::new(),
+        requester_extension: ironclaw_host_api::ExtensionId::new("github").unwrap(),
+    }];
+
+    handler
+        .satisfy(CapabilityObligationRequest {
+            phase: CapabilityObligationPhase::Invoke,
+            context: &context,
+            capability_id: &capability_id,
+            estimate: &estimate,
+            credential_account_selections: &selections,
+            obligations: &obligations,
+        })
+        .await
+        .expect("obligation should stage selected account credential");
+
+    assert_eq!(
+        resolver.seen_account_id().as_deref(),
+        Some(selected_account.as_str())
+    );
 }
 
 #[tokio::test]
@@ -1491,6 +1607,7 @@ async fn inject_credential_account_once_reads_from_resolved_source_scope() {
             context: &context,
             capability_id: &capability_id,
             estimate: &estimate,
+            credential_account_selections: &[],
             obligations: &obligations,
         })
         .await
@@ -1533,6 +1650,7 @@ async fn inject_credential_account_once_maps_unknown_resolved_secret_to_auth_req
             context: &context,
             capability_id: &capability_id,
             estimate: &estimate,
+            credential_account_selections: &[],
             obligations: &obligations,
         })
         .await

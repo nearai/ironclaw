@@ -5618,6 +5618,7 @@ async fn spawned_obligation_lifecycle_abort_cleans_up_when_process_start_fails()
             estimate: fixture.estimate.clone(),
             input: json!({"message": "spawn fails"}),
             trust_decision: trust_decision_with_dispatch_authority(),
+            credential_account_selections: Vec::new(),
         })
         .await
         .unwrap_err();
@@ -6536,6 +6537,7 @@ async fn stage_process_handoffs(
             context: &context,
             capability_id,
             estimate: &ResourceEstimate::default(),
+            credential_account_selections: &[],
             obligations: &[
                 Obligation::ApplyNetworkPolicy { policy },
                 Obligation::InjectSecretOnce {
@@ -6576,6 +6578,7 @@ impl SpawnObligationFixture {
             estimate: self.estimate.clone(),
             input: json!({"message": "background"}),
             trust_decision: trust_decision_with_dispatch_authority(),
+            credential_account_selections: Vec::new(),
         })
         .await
         .unwrap()

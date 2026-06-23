@@ -28,7 +28,7 @@ use async_trait::async_trait;
 use ironclaw_host_api::{
     ApprovalRequestId, CapabilityDisplayOutputPreview, CapabilityId, CorrelationId,
     ExecutionContext, ExtensionId, ProcessId, ResourceEstimate, ResourceScope, ResourceUsage,
-    RuntimeCredentialAuthRequirement, RuntimeKind, SecretHandle,
+    RuntimeCredentialAccountSelection, RuntimeCredentialAuthRequirement, RuntimeKind, SecretHandle,
     runtime_policy::{DeploymentMode, EffectiveRuntimePolicy, RuntimeProfile},
 };
 use ironclaw_trust::TrustDecision;
@@ -347,6 +347,13 @@ pub struct RuntimeCapabilityRequest {
     /// The host runtime still validates and forwards the key into
     /// observability spans for audit/tracing.
     pub idempotency_key: Option<IdempotencyKey>,
+    /// Optional caller-selected ProductAuth accounts keyed by provider.
+    ///
+    /// Empty preserves the default ProductAuth resolver behavior: select the
+    /// unique configured account visible to the requester. Entries here narrow
+    /// staging to the named provider account without bypassing ownership,
+    /// requester-visibility, provider-scope, or refresh checks.
+    pub credential_account_selections: Vec<RuntimeCredentialAccountSelection>,
     /// Legacy caller-supplied trust decision kept for transitional request-shape
     /// compatibility.
     ///
@@ -372,12 +379,21 @@ impl RuntimeCapabilityRequest {
             estimate,
             input,
             idempotency_key: None,
+            credential_account_selections: Vec::new(),
             trust_decision,
         }
     }
 
     pub fn with_idempotency_key(mut self, key: IdempotencyKey) -> Self {
         self.idempotency_key = Some(key);
+        self
+    }
+
+    pub fn with_credential_account_selection(
+        mut self,
+        selection: RuntimeCredentialAccountSelection,
+    ) -> Self {
+        self.credential_account_selections.push(selection);
         self
     }
 }
@@ -397,6 +413,7 @@ pub struct RuntimeCapabilityResumeRequest {
     pub estimate: ResourceEstimate,
     pub input: Value,
     pub idempotency_key: Option<IdempotencyKey>,
+    pub credential_account_selections: Vec<RuntimeCredentialAccountSelection>,
     pub trust_decision: TrustDecision,
 }
 
@@ -416,12 +433,21 @@ impl RuntimeCapabilityResumeRequest {
             estimate,
             input,
             idempotency_key: None,
+            credential_account_selections: Vec::new(),
             trust_decision,
         }
     }
 
     pub fn with_idempotency_key(mut self, key: IdempotencyKey) -> Self {
         self.idempotency_key = Some(key);
+        self
+    }
+
+    pub fn with_credential_account_selection(
+        mut self,
+        selection: RuntimeCredentialAccountSelection,
+    ) -> Self {
+        self.credential_account_selections.push(selection);
         self
     }
 }
@@ -440,6 +466,7 @@ pub struct RuntimeCapabilityAuthResumeRequest {
     pub estimate: ResourceEstimate,
     pub input: Value,
     pub idempotency_key: Option<IdempotencyKey>,
+    pub credential_account_selections: Vec<RuntimeCredentialAccountSelection>,
     pub trust_decision: TrustDecision,
     /// Present when the invocation previously passed an approval gate.
     /// Used to locate and claim the matching fingerprinted approval lease
@@ -462,6 +489,7 @@ impl RuntimeCapabilityAuthResumeRequest {
             estimate,
             input,
             idempotency_key: None,
+            credential_account_selections: Vec::new(),
             trust_decision,
             approval_request_id,
         }
@@ -469,6 +497,14 @@ impl RuntimeCapabilityAuthResumeRequest {
 
     pub fn with_idempotency_key(mut self, key: IdempotencyKey) -> Self {
         self.idempotency_key = Some(key);
+        self
+    }
+
+    pub fn with_credential_account_selection(
+        mut self,
+        selection: RuntimeCredentialAccountSelection,
+    ) -> Self {
+        self.credential_account_selections.push(selection);
         self
     }
 }

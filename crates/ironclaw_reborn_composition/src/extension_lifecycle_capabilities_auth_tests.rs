@@ -93,6 +93,7 @@ async fn local_dev_extension_activate_accepts_manual_token_from_webui_gate_scope
                 AuthProviderId::new("github").expect("provider"),
             )
             .for_extension(ExtensionId::new("github").expect("extension")),
+            None,
             AuthProductScope::new(activate_scope.clone(), AuthSurface::Api),
             RuntimeCredentialAccountSetup::ManualToken,
             Vec::new(),

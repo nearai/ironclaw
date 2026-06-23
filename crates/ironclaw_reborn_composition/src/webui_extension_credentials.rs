@@ -44,6 +44,7 @@ impl ExtensionCredentialSetupService for ProductAuthExtensionCredentialSetup {
                 RuntimeCredentialAccountSelectionRequest::new(
                     CredentialAccountSelectionRequest::new(request.scope.clone(), request.provider)
                         .for_extension(request.requester_extension),
+                    None,
                     request.scope,
                     runtime_credential_setup(request.setup),
                     request.provider_scopes,

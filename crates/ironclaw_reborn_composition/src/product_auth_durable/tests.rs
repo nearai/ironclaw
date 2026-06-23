@@ -207,6 +207,7 @@ async fn filesystem_runtime_account_selection_matches_setup_invocation_account()
     let selected = selector
         .select_unique_configured_runtime_account(RuntimeCredentialAccountSelectionRequest::new(
             CredentialAccountSelectionRequest::new(runtime_scope.clone(), google_provider()),
+            None,
             runtime_scope,
             ironclaw_host_api::RuntimeCredentialAccountSetup::OAuth { scopes: Vec::new() },
             Vec::new(),
@@ -254,6 +255,7 @@ async fn filesystem_runtime_account_selection_matches_new_thread_reusable_accoun
         .resolve_access_secret(RuntimeCredentialAccountRequest {
             scope: &runtime_scope.resource,
             provider: &RuntimeCredentialAccountProviderId::new("google").unwrap(),
+            account_id: None,
             setup: &ironclaw_host_api::RuntimeCredentialAccountSetup::ManualToken,
             provider_scopes: &[],
             requester_extension: &ExtensionId::new("google-calendar").unwrap(),
@@ -870,6 +872,7 @@ async fn filesystem_runtime_account_selection_tolerates_many_session_account_roo
     let selected = selector
         .select_unique_configured_runtime_account(RuntimeCredentialAccountSelectionRequest::new(
             CredentialAccountSelectionRequest::new(runtime_scope.clone(), google_provider()),
+            None,
             runtime_scope,
             ironclaw_host_api::RuntimeCredentialAccountSetup::OAuth {
                 scopes: vec!["drive.readonly".to_string()],
@@ -917,6 +920,7 @@ async fn filesystem_runtime_account_selection_tolerates_many_account_records_per
     let selected = selector
         .select_unique_configured_runtime_account(RuntimeCredentialAccountSelectionRequest::new(
             CredentialAccountSelectionRequest::new(runtime_scope.clone(), google_provider()),
+            None,
             runtime_scope,
             ironclaw_host_api::RuntimeCredentialAccountSetup::OAuth {
                 scopes: vec!["drive.readonly".to_string()],

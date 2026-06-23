@@ -27,6 +27,7 @@ pub struct RebornFacadeReadiness {
 pub struct RebornWorkerReadiness {
     pub turn_runner: bool,
     pub trigger_poller: bool,
+    #[serde(default)]
     pub github_issue_workflow: bool,
 }
 
