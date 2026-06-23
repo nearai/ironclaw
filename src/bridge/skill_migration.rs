@@ -203,13 +203,14 @@ async fn v1_skill_to_memory_doc(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ironclaw_skills::types::{ActivationCriteria, SkillManifest, SkillTrust};
+    use ironclaw_skills::types::{ActivationCriteria, SkillManifest, SkillOrigin, SkillTrust};
     use std::path::PathBuf;
 
     fn make_v1_skill(name: &str, content: &str) -> LoadedSkill {
         LoadedSkill {
             manifest: SkillManifest {
                 name: name.to_string(),
+                origin: SkillOrigin::User,
                 version: "1.0.0".to_string(),
                 auto_activate: true,
                 description: format!("{name} skill"),
