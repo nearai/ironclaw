@@ -16,7 +16,7 @@ use ironclaw_threads::ThreadScope;
 use ironclaw_turns::{TurnActor, TurnScope};
 
 /// Canonical owner-scoping rule for per-caller thread isolation.
-pub(crate) struct ThreadScopeResolver;
+pub struct ThreadScopeResolver;
 
 impl ThreadScopeResolver {
     /// Re-point `base`'s `owner_user_id` at the run's authenticated
@@ -26,7 +26,7 @@ impl ThreadScopeResolver {
     /// Only rewrites when the base scope is owner-scoped: an owner-less
     /// base (no declared owner) or an actor-less run is returned
     /// unchanged, so single-operator and system flows are untouched.
-    pub(crate) fn resolve(base: &ThreadScope, actor: Option<&TurnActor>) -> ThreadScope {
+    pub fn resolve(base: &ThreadScope, actor: Option<&TurnActor>) -> ThreadScope {
         let mut scope = base.clone();
         if scope.owner_user_id.is_some()
             && let Some(actor) = actor
@@ -36,7 +36,7 @@ impl ThreadScopeResolver {
         scope
     }
 
-    pub(crate) fn resolve_for_turn(
+    pub fn resolve_for_turn(
         base: &ThreadScope,
         turn_scope: &TurnScope,
         actor: Option<&TurnActor>,

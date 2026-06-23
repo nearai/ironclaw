@@ -591,8 +591,11 @@ fn push_inline_message(
     synthetic_refs: &mut SyntheticMessageRefRegistry,
 ) -> Result<(), AgentLoopHostError> {
     let role = inline_role(message.role).to_string();
-    let safe_body =
-        validate_model_safe_text(message.safe_body.as_str().to_string(), "inline prompt body")?;
+    let safe_body = validate_prompt_text(
+        message.safe_body.as_str().to_string(),
+        "inline prompt body",
+        PromptTextSurface::GenericModelContent,
+    )?;
     let content_ref = synthetic_message_ref("inline", &role, &safe_body, ordinal, synthetic_refs)?;
     feed_field(fingerprint, b"section", b"inline");
     feed_field(fingerprint, b"ref", content_ref.as_str().as_bytes());
@@ -894,7 +897,13 @@ fn feed_field(digest: &mut Sha256, label: &[u8], value: &[u8]) {
 
 #[cfg(test)]
 mod tests {
+    use ironclaw_host_api::{AgentId, ProjectId, TenantId, ThreadId};
+
     use super::*;
+    use crate::{
+        RunProfileId, RunProfileVersion, TurnId, TurnRunId, TurnScope,
+        run_profile::{LoopInlineMessageBody, ResolvedRunProfile},
+    };
 
     #[test]
     fn synthetic_ref_registry_rejects_mismatched_duplicate_refs() {
@@ -915,5 +924,52 @@ mod tests {
             .unwrap_err();
 
         assert_eq!(error.kind, AgentLoopHostErrorKind::Internal);
+    }
+
+    #[test]
+    fn instruction_bundle_accepts_inline_message_body_over_legacy_threshold() {
+        let inline_body = format!(
+            "{}\n\nkeep markdown structure",
+            "review instruction ".repeat(32)
+        );
+        assert!(
+            inline_body.len() > 512,
+            "fixture must exceed the legacy 512-byte inline-message regression threshold"
+        );
+
+        let bundle = InstructionBundleBuilder::new(test_context())
+            .build(InstructionBundleRequest {
+                context_bundle: LoopContextBundle::default(),
+                visible_surface: None,
+                safety_context: None,
+                runtime_context: None,
+                inline_messages: vec![LoopInlineMessage {
+                    role: LoopInlineMessageRole::User,
+                    safe_body: LoopInlineMessageBody::new(inline_body.clone())
+                        .expect("inline message body should accept generic model-content budget"),
+                }],
+            })
+            .expect("instruction bundle should accept large inline-message bodies");
+
+        assert!(bundle.requires_materialization_store);
+        assert_eq!(bundle.messages.len(), 1);
+        assert_eq!(bundle.materialized_messages.len(), 1);
+        assert_eq!(bundle.materialized_messages[0].role, "user");
+        assert_eq!(bundle.materialized_messages[0].model_content, inline_body);
+    }
+
+    fn test_context() -> LoopRunContext {
+        let scope = TurnScope::new(
+            TenantId::new("tenant-instruction-bundle").unwrap(),
+            Some(AgentId::new("agent-instruction-bundle").unwrap()),
+            Some(ProjectId::new("project-instruction-bundle").unwrap()),
+            ThreadId::new("thread-instruction-bundle").unwrap(),
+        );
+        let resolved_run_profile = ResolvedRunProfile::legacy_compatibility(
+            RunProfileId::interactive_default(),
+            RunProfileVersion::new(1),
+            true,
+        );
+        LoopRunContext::new(scope, TurnId::new(), TurnRunId::new(), resolved_run_profile)
     }
 }

@@ -41,7 +41,9 @@ use crate::{
     loop_driver_host::{
         HookDispatcherBuilderFactory, RebornLoopDriverHostFactory, TextOnlyLoopHostConfig,
     },
-    loop_exit_applier::{LoopExitApplier, ThreadCheckpointLoopExitEvidencePort},
+    loop_exit_applier::{
+        AwaitDependentRunEvidenceStore, LoopExitApplier, ThreadCheckpointLoopExitEvidencePort,
+    },
     model_routes::ModelRouteResolver,
     planned_driver_factory::{
         DefaultPlannedDriverRegistrationError, default_planned_run_profile_resolver,
@@ -420,6 +422,8 @@ where
         ));
     }
     let turn_state_store: Arc<dyn TurnStateStore> = parts.turn_state.clone();
+    let await_dependent_run_evidence: Arc<dyn AwaitDependentRunEvidenceStore> =
+        parts.subagent_gate_store.clone();
     parts.loop_exit_evidence = Arc::new(
         ThreadCheckpointLoopExitEvidencePort::new_with_thread_scope(
             Arc::clone(&parts.thread_service),
@@ -427,6 +431,7 @@ where
             Arc::clone(&parts.loop_checkpoint_store),
             parts.thread_scope.clone(),
         )
+        .with_await_dependent_run_evidence(await_dependent_run_evidence)
         .with_checkpoint_state_store(Arc::clone(&parts.checkpoint_state_store))
         .with_cancellation_factory(cancellation_factory),
     );
