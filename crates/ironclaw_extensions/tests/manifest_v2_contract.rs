@@ -607,20 +607,20 @@ output_schema_ref = "schemas/acme/echo.output.v1.json"
 }
 
 #[test]
-fn rejects_api_visible_capability_without_prompt_doc_ref() {
+fn allows_api_visible_capability_without_prompt_doc_ref() {
+    // prompt_doc_ref is model-facing documentation, so api-visible capabilities
+    // may omit it (issue #3537).
     let toml = third_party_wasm_manifest("acme-tools", "acme-tools.echo")
         .replace(r#"visibility = "model""#, r#"visibility = "api""#)
         .replace("prompt_doc_ref = \"prompts/example/echo.md\"\n", "");
-    let err =
-        ExtensionManifestV2::parse(&toml, ManifestSource::InstalledLocal, &catalog()).unwrap_err();
+    let manifest =
+        ExtensionManifestV2::parse(&toml, ManifestSource::InstalledLocal, &catalog()).unwrap();
 
-    assert!(
-        matches!(err, ManifestV2Error::Invalid { ref reason }
-            if reason.contains("capability acme-tools.echo")
-                && reason.contains("api-visible")
-                && reason.contains("prompt_doc_ref")),
-        "{err:?}"
+    assert_eq!(
+        manifest.capabilities[0].visibility,
+        CapabilityVisibility::Api
     );
+    assert!(manifest.capabilities[0].prompt_doc_ref.is_none());
 }
 
 #[test]

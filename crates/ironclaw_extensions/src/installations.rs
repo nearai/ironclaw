@@ -872,6 +872,7 @@ default_permission = "ask"
 visibility = "model"
 input_schema_ref = "schemas/read.input.json"
 output_schema_ref = "schemas/read.output.json"
+prompt_doc_ref = "prompts/test/read.md"
 "#
         )
     }

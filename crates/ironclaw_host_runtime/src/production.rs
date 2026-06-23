@@ -2215,6 +2215,7 @@ default_permission = "ask"
 visibility = "model"
 input_schema_ref = "schemas/test.input.json"
 output_schema_ref = "schemas/test.output.json"
+prompt_doc_ref = "prompts/test/test.cap.md"
 "#;
         let manifest = ExtensionManifest::parse(
             MANIFEST,

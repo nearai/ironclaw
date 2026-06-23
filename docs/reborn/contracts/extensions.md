@@ -233,7 +233,7 @@ Rules:
 - `ironclaw_extensions` parses the envelope, validates host API refs, and dispatches to a composition-wired host API contract registry.
 - Domain contract handlers own section pattern validation, cardinality, typed section schema validation, and catalog/read-model projection.
 - Domain contract handlers must not treat manifest `trust` / `descriptor_trust_default` as effective runtime authority. Effective trust and grants come from composition-owned trust policy evaluation, not self-declared manifest metadata.
-- Model-visible capability-provider sections must carry enough cold metadata to project an LLM-facing tool descriptor: stable capability ID, human description, input schema ref, output schema ref, effects, permission default, and visibility. `prompt_doc_ref` is optional lazy help metadata, not part of the mandatory per-turn surface.
+- Model-visible capability-provider sections must carry enough cold metadata to project an LLM-facing tool descriptor: stable capability ID, human description, input schema ref, output schema ref, effects, permission default, and visibility. Model-visible capabilities must declare `prompt_doc_ref` (API- and host-internal-visible capabilities may omit it); it is lazy help metadata resolved on demand, not part of the mandatory per-turn surface.
 - The LLM consumes the projected hot capability surface, not the raw manifest section. Catalog publication resolves schema refs into compact per-turn tool descriptors and resolves `prompt_doc_ref` only when one is declared.
 - Unknown `host_api.id` values fail closed.
 - Repeating the same `host_api.id` is allowed only when that contract declares multi-instance support.
@@ -298,7 +298,8 @@ Rules:
   valid when the capability declares `use_secret`; duplicate handles within one
   capability are invalid. The manifest never contains raw secret material.
 - top-level legacy capabilities must provide `input_schema_ref` and
-  `output_schema_ref`; `prompt_doc_ref` is optional lazy help metadata.
+  `output_schema_ref`; `prompt_doc_ref` is lazy help metadata, required for
+  model-visible capabilities.
 - during this cutover, `CapabilityDescriptor.parameters_schema` is a projection
   placeholder of the form `{ "$ref": input_schema_ref }`. Catalog publication is
   responsible for resolving schema/doc refs into hot per-turn tool descriptors.

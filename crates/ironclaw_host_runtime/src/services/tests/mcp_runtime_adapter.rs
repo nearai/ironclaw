@@ -84,6 +84,7 @@ default_permission = "allow"
 visibility = "model"
 input_schema_ref = "schemas/test-mcp/search.input.v1.json"
 output_schema_ref = "schemas/test-mcp/search.output.v1.json"
+prompt_doc_ref = "prompts/test-mcp/search.md"
 "#;
 
 struct AuthRequiredMcpExecutor {

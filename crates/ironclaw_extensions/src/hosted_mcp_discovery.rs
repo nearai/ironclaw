@@ -247,6 +247,7 @@ default_permission = "ask"
 visibility = "model"
 input_schema_ref = "schemas/notion/fetch.input.json"
 output_schema_ref = "schemas/notion/fetch.output.json"
+prompt_doc_ref = "prompts/test/notion-fetch.md"
 runtime_credentials = [
   { handle = "notion_access_token", source = { type = "product_auth_account", provider = "notion" }, audience = { scheme = "https", host_pattern = "mcp.notion.com" }, target = { type = "header", name = "authorization", prefix = "Bearer " }, required = true }
 ]

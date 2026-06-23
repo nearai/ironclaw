@@ -11,7 +11,7 @@
 //! - extension IDs starting with `ironclaw.` are reserved for HostBundled;
 //! - installed manifests must use `wasm` / `mcp` / `script` runtimes only;
 //! - every capability declares `visibility`, relative
-//!   [`CapabilityProfileSchemaRef`] input/output schema refs, public
+//!   [`CapabilityProfileSchemaRef`] input/output schema refs, model-visible
 //!   capabilities declare `prompt_doc_ref`, and every capability declares the
 //!   set of host ports it needs;
 //! - host port names validate against a host-defined [`HostPortCatalog`].
@@ -956,6 +956,10 @@ impl CapabilityDeclV2 {
             .transpose()?;
         if prompt_doc_ref.is_none() {
             match raw.visibility {
+                // `prompt_doc_ref` is the model-facing prompt documentation for a
+                // capability, so it is required only for model-visible capabilities
+                // (issue #3537). API- and host-internal-visible capabilities are not
+                // surfaced to the model and therefore do not need one.
                 CapabilityVisibility::Model => {
                     return Err(ManifestV2Error::Invalid {
                         reason: format!(
@@ -963,12 +967,7 @@ impl CapabilityDeclV2 {
                         ),
                     });
                 }
-                CapabilityVisibility::Api => {
-                    return Err(ManifestV2Error::Invalid {
-                        reason: format!("api-visible capability {id} must declare prompt_doc_ref"),
-                    });
-                }
-                CapabilityVisibility::HostInternal => {}
+                CapabilityVisibility::Api | CapabilityVisibility::HostInternal => {}
             }
         }
 

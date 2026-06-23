@@ -243,4 +243,5 @@ default_permission = "allow"
 visibility = "model"
 input_schema_ref = "schemas/echo/extension_raw_schema_sentinel_3022.input.v1.json"
 output_schema_ref = "schemas/echo/extension_raw_schema_sentinel_3022.output.v1.json"
+prompt_doc_ref = "prompts/test/echo-say.md"
 "#;

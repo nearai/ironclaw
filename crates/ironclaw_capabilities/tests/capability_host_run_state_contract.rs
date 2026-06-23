@@ -84,6 +84,7 @@ default_permission = "ask"
 visibility = "model"
 input_schema_ref = "schemas/shell.input.v1.json"
 output_schema_ref = "schemas/shell.output.v1.json"
+prompt_doc_ref = "prompts/test/builtin_shell.md"
 "#;
     let manifest = ExtensionManifest::parse(
         manifest_toml,

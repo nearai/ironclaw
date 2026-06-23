@@ -461,6 +461,7 @@ default_permission = "ask"
 visibility = "model"
 input_schema_ref = "schemas/{name}.input.json"
 output_schema_ref = "schemas/{name}.output.json"
+prompt_doc_ref = "prompts/test/{name}.md"
 "#
                 )
             })

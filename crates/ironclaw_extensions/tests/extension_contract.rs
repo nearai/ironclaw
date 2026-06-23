@@ -618,7 +618,9 @@ fn capability_provider_host_api_rejects_model_visible_missing_prompt_doc_ref() {
 }
 
 #[test]
-fn capability_provider_host_api_rejects_api_visible_missing_prompt_doc_ref() {
+fn capability_provider_host_api_allows_api_visible_missing_prompt_doc_ref() {
+    // prompt_doc_ref is model-facing documentation, so api-visible capabilities
+    // may omit it (issue #3537).
     let manifest = CAPABILITY_PROVIDER_MANIFEST
         .replace("visibility = \"model\"", "visibility = \"api\"")
         .replace(
@@ -626,24 +628,19 @@ fn capability_provider_host_api_rejects_api_visible_missing_prompt_doc_ref() {
             "",
         );
 
-    let err = ExtensionManifest::parse_with_host_api_contracts(
+    let manifest = ExtensionManifest::parse_with_host_api_contracts(
         &manifest,
         ManifestSource::InstalledLocal,
         &HostPortCatalog::empty(),
         &capability_provider_contracts(),
     )
-    .unwrap_err();
+    .expect("api-visible capabilities may omit prompt_doc_ref");
 
-    assert!(
-        matches!(
-            err,
-            ExtensionError::ManifestV2(ManifestV2Error::HostApiSectionRejected { ref reason, .. })
-                if reason.contains("telegram.send_message")
-                    && reason.contains("api-visible")
-                    && reason.contains("prompt_doc_ref")
-        ),
-        "{err:?}"
+    assert_eq!(
+        manifest.capabilities[0].visibility,
+        CapabilityVisibility::Api
     );
+    assert!(manifest.capabilities[0].prompt_doc_ref.is_none());
 }
 
 #[test]
