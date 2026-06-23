@@ -73,7 +73,7 @@ pub(crate) fn direct_children(
     Ok(entries.into_values().collect())
 }
 
-#[cfg(any(feature = "postgres", feature = "libsql"))]
+#[cfg(feature = "libsql")]
 pub(crate) fn child_path_like_pattern(path: &VirtualPath) -> String {
     let mut pattern = String::new();
     for character in path.as_str().trim_end_matches('/').chars() {
@@ -157,7 +157,13 @@ pub(crate) fn infrastructure_pg_error(
     operation: FilesystemOperation,
     error: tokio_postgres::Error,
 ) -> FilesystemError {
-    infrastructure_error(operation, error.to_string())
+    let reason = format!("postgres root filesystem infrastructure error: {error}");
+    tracing::debug!(
+        %operation,
+        %reason,
+        "postgres root filesystem infrastructure error"
+    );
+    infrastructure_error(operation, reason)
 }
 
 #[cfg(feature = "libsql")]

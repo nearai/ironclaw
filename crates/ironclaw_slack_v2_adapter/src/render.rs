@@ -12,6 +12,7 @@ use ironclaw_product_adapters::{
 use serde::Serialize;
 use thiserror::Error;
 
+use crate::mrkdwn::{render_slack_mrkdwn, slack_text_chunks};
 use crate::payload::SLACK_API_HOST;
 
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
@@ -59,6 +60,15 @@ pub fn render_final_reply(
     )
 }
 
+pub(crate) fn render_final_reply_messages(
+    target: &ProductOutboundTarget,
+    view: &FinalReplyView,
+    credential_handle: EgressCredentialHandle,
+) -> Result<Vec<EgressRequest>, SlackRenderError> {
+    let text = render_slack_mrkdwn(&view.text);
+    render_text_messages(target, slack_text_chunks(&text), true, credential_handle)
+}
+
 pub fn render_gate_prompt(
     target: &ProductOutboundTarget,
     view: &GatePromptView,
@@ -96,23 +106,28 @@ pub fn render_auth_prompt(
 }
 
 fn gate_prompt_reply_instruction(target: &ProductOutboundTarget, gate_ref: &str) -> String {
+    // `gate_ref` already carries its `gate:` prefix (e.g. `gate:approval-…`).
+    // DMs resolve a bare reply in-place; channels need an @mention to be heard.
+    // The explicit `approve <gate_ref>` form disambiguates when several approvals
+    // are pending in the same conversation — it still only works where I receive
+    // messages (this chat), so we do NOT claim "from anywhere".
     if requires_app_mention(target) {
         return format!(
-            "Mention this app in this Slack thread with `approve` or `deny`. If the thread has multiple pending approvals, use `approve {gate_ref}` or `deny {gate_ref}`."
+            "Reply by mentioning me with `approve` or `deny` in this thread. If several approvals are pending here, use `approve {gate_ref}` or `deny {gate_ref}`."
         );
     }
     format!(
-        "Reply `approve` or `deny` in this Slack thread. If the thread has multiple pending approvals, use `approve {gate_ref}` or `deny {gate_ref}`."
+        "Reply `approve` or `deny` in this chat to respond to this request. If several approvals are pending here, use `approve {gate_ref}` or `deny {gate_ref}`."
     )
 }
 
 fn auth_prompt_reply_instruction(target: &ProductOutboundTarget, auth_request_ref: &str) -> String {
     if requires_app_mention(target) {
         return format!(
-            "Mention this app in this Slack thread with `auth deny {auth_request_ref}` to cancel this blocked run."
+            "Mention me with `auth deny {auth_request_ref}` in this thread to cancel this run."
         );
     }
-    format!("Reply `auth deny {auth_request_ref}` to cancel this blocked run.")
+    format!("Reply `auth deny {auth_request_ref}` here to cancel this run.")
 }
 
 fn requires_app_mention(target: &ProductOutboundTarget) -> bool {
@@ -128,142 +143,37 @@ fn render_text_message(
     mrkdwn: bool,
     credential_handle: EgressCredentialHandle,
 ) -> Result<EgressRequest, SlackRenderError> {
+    let mut requests = render_text_messages(target, vec![text], mrkdwn, credential_handle)?;
+    Ok(requests.remove(0))
+}
+
+fn render_text_messages(
+    target: &ProductOutboundTarget,
+    texts: Vec<String>,
+    mrkdwn: bool,
+    credential_handle: EgressCredentialHandle,
+) -> Result<Vec<EgressRequest>, SlackRenderError> {
     let reply = slack_reply_target(target)?;
-    let body = ChatPostMessageRequest {
-        channel: reply.channel,
-        text,
-        mrkdwn,
-        thread_ts: reply.thread_ts,
-    };
-    let body_bytes = serde_json::to_vec(&body).map_err(|err| SlackRenderError::Serialization {
-        reason: err.to_string(),
-    })?;
-
-    Ok(build_egress_request(
-        "/api/chat.postMessage",
-        body_bytes,
-        credential_handle,
-    ))
-}
-
-fn render_slack_mrkdwn(markdown: &str) -> String {
-    let mut rendered = String::with_capacity(markdown.len());
-    let lines = markdown.lines().collect::<Vec<_>>();
-    let mut index = 0;
-    while index < lines.len() {
-        if is_markdown_table_separator(lines[index]) {
-            index += 1;
-            continue;
-        }
-        let line = lines[index];
-        let converted = if is_markdown_table_row(line) {
-            render_table_row(line)
-        } else {
-            render_slack_mrkdwn_line(line)
-        };
-        rendered.push_str(&converted);
-        if index + 1 < lines.len() {
-            rendered.push('\n');
-        }
-        index += 1;
-    }
-    rendered
-}
-
-fn render_slack_mrkdwn_line(line: &str) -> String {
-    let line = strip_heading_marker(line);
-    let line = convert_markdown_links(line);
-    convert_markdown_bold(&line)
-}
-
-fn strip_heading_marker(line: &str) -> &str {
-    let trimmed = line.trim_start();
-    if !trimmed.starts_with('#') {
-        return line;
-    }
-    let hash_count = trimmed.chars().take_while(|ch| *ch == '#').count();
-    if !(1..=6).contains(&hash_count) {
-        return line;
-    }
-    let rest = &trimmed[hash_count..];
-    let Some(rest) = rest.strip_prefix(' ') else {
-        return line;
-    };
-    rest
-}
-
-fn convert_markdown_links(line: &str) -> String {
-    let mut out = String::with_capacity(line.len());
-    let bytes = line.as_bytes();
-    let mut index = 0;
-    while index < line.len() {
-        if bytes[index] == b'['
-            && let Some(label_end_rel) = line[index + 1..].find(']')
-        {
-            let label_end = index + 1 + label_end_rel;
-            if line[label_end..].starts_with("](")
-                && let Some(url_end_rel) = line[label_end + 2..].find(')')
-            {
-                let label = &line[index + 1..label_end];
-                let url_end = label_end + 2 + url_end_rel;
-                let url = &line[label_end + 2..url_end];
-                if is_safe_slack_link_url(url) {
-                    out.push('<');
-                    out.push_str(url);
-                    out.push('|');
-                    out.push_str(label);
-                    out.push('>');
-                    index = url_end + 1;
-                    continue;
-                }
-            }
-        }
-        let Some(ch) = line[index..].chars().next() else {
-            break;
-        };
-        out.push(ch);
-        index += ch.len_utf8();
-    }
-    out
-}
-
-fn is_safe_slack_link_url(url: &str) -> bool {
-    url.starts_with("http://") || url.starts_with("https://")
-}
-
-fn convert_markdown_bold(line: &str) -> String {
-    let mut out = String::with_capacity(line.len());
-    for (index, part) in line.split("**").enumerate() {
-        if index > 0 {
-            out.push('*');
-        }
-        out.push_str(part);
-    }
-    out
-}
-
-fn is_markdown_table_row(line: &str) -> bool {
-    let trimmed = line.trim();
-    trimmed.starts_with('|') && trimmed.ends_with('|') && trimmed.matches('|').count() >= 2
-}
-
-fn is_markdown_table_separator(line: &str) -> bool {
-    if !is_markdown_table_row(line) {
-        return false;
-    }
-    line.trim().trim_matches('|').split('|').all(|cell| {
-        let cell = cell.trim();
-        !cell.is_empty() && cell.chars().all(|ch| matches!(ch, '-' | ':' | ' '))
-    })
-}
-
-fn render_table_row(line: &str) -> String {
-    line.trim()
-        .trim_matches('|')
-        .split('|')
-        .map(|cell| render_slack_mrkdwn_line(cell.trim()))
-        .collect::<Vec<_>>()
-        .join(" | ")
+    texts
+        .into_iter()
+        .map(|text| {
+            let body = ChatPostMessageRequest {
+                channel: reply.channel.clone(),
+                text,
+                mrkdwn,
+                thread_ts: reply.thread_ts.clone(),
+            };
+            let body_bytes =
+                serde_json::to_vec(&body).map_err(|err| SlackRenderError::Serialization {
+                    reason: err.to_string(),
+                })?;
+            Ok(build_egress_request(
+                "/api/chat.postMessage",
+                body_bytes,
+                credential_handle.clone(),
+            ))
+        })
+        .collect()
 }
 
 #[derive(Debug, Serialize)]
@@ -347,29 +257,6 @@ mod tests {
         assert_eq!(body["text"], "hello Slack");
         assert_eq!(body["mrkdwn"], true);
         assert_eq!(body["thread_ts"], "1710000000.000001");
-    }
-
-    #[test]
-    fn final_reply_renders_common_markdown_as_slack_mrkdwn() {
-        let view = FinalReplyView {
-            turn_run_id: TurnRunId::new(),
-            text: "Here are your top Notion docs:\n\n### Top Priority Docs\n\n1. **NEAR AI Engineering Weekly Updates** ([link](https://www.notion.com/p/abc))\n   - \"Multi tenancy for migrating from Railway => top priority\"\n\n| Doc | Highlight |\n|---|---|\n| **Priority Agents** | Priority Agents |"
-                .to_string(),
-            generated_at: Utc::now(),
-        };
-
-        let request = render_final_reply(&target("C123", None), &view, handle()).expect("render");
-        let body: serde_json::Value = serde_json::from_slice(request.body()).expect("body json");
-
-        assert_eq!(body["mrkdwn"], true);
-        let text = body["text"].as_str().expect("text");
-        assert!(text.contains("Top Priority Docs"));
-        assert!(!text.contains("###"));
-        assert!(text.contains("*NEAR AI Engineering Weekly Updates*"));
-        assert!(text.contains("<https://www.notion.com/p/abc|link>"));
-        assert!(!text.contains("|---|---|"));
-        assert!(text.contains("Doc | Highlight"));
-        assert!(text.contains("*Priority Agents* | Priority Agents"));
     }
 
     #[test]

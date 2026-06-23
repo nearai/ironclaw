@@ -13,9 +13,9 @@ use ironclaw_events::{InMemoryDurableEventLog, RuntimeEvent};
 use ironclaw_host_api::{
     Action, AgentId, ApprovalRequest, ApprovalRequestId, CapabilityId, CorrelationId, ExtensionId,
     InvocationId, NetworkMethod, NetworkScheme, NetworkTarget, Principal, ResourceEstimate,
-    ResourceScope, RuntimeCredentialAccountProviderId, RuntimeCredentialAuthRequirement,
-    RuntimeHttpEgress, RuntimeHttpEgressRequest, RuntimeHttpEgressResponse, RuntimeKind, TenantId,
-    ThreadId, UserId,
+    ResourceScope, RuntimeCredentialAccountProviderId, RuntimeCredentialAccountSetup,
+    RuntimeCredentialAuthRequirement, RuntimeHttpEgress, RuntimeHttpEgressRequest,
+    RuntimeHttpEgressResponse, RuntimeKind, TenantId, ThreadId, UserId,
 };
 use ironclaw_product_adapters::{
     AuthPromptChallengeKind, CapabilityActivityStatusView, ProductOutboundEnvelope,
@@ -383,5 +383,7 @@ fn turn_run_state(
         credential_requirements: Vec::new(),
         failure: None,
         event_cursor: cursor,
+        product_context: None,
+        resume_disposition: None,
     }
 }

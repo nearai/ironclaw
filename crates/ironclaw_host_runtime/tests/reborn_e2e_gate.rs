@@ -551,6 +551,7 @@ async fn reborn_e2e_gate_host_http_consumes_staged_policy_and_secret_once() {
             scope.clone(),
             handle.clone(),
             SecretMaterial::from("sk-reborn-e2e-staged-secret"),
+            None,
         )
         .await
         .unwrap();

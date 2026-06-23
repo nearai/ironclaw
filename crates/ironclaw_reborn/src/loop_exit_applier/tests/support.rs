@@ -88,6 +88,8 @@ pub(super) fn running_run_state(
         credential_requirements: Vec::new(),
         failure: None,
         event_cursor: EventCursor(0),
+        product_context: None,
+        resume_disposition: None,
     }
 }
 
@@ -316,6 +318,8 @@ pub(super) fn claimed_run() -> ClaimedTurnRun {
             credential_requirements: Vec::new(),
             failure: None,
             event_cursor: EventCursor(0),
+            product_context: None,
+            resume_disposition: None,
         },
         resolved_run_profile: profile,
         runner_id: TurnRunnerId::new(),
@@ -572,5 +576,7 @@ fn state_for_mapping(
         credential_requirements: Vec::new(),
         failure,
         event_cursor: EventCursor(0),
+        product_context: None,
+        resume_disposition: None,
     }
 }

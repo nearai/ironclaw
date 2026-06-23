@@ -71,6 +71,90 @@ async fn webui_event_stream_drains_run_status_projection_from_event_stream_manag
 }
 
 #[tokio::test]
+async fn webui_event_stream_advances_runtime_cursor_for_empty_visible_snapshot() {
+    let tenant_id = TenantId::new("webui-empty-snapshot-tenant").unwrap();
+    let user_id = UserId::new("webui-empty-snapshot-user").unwrap();
+    let agent_id = AgentId::new("webui-empty-snapshot-agent").unwrap();
+    let target_thread_id = ThreadId::new("webui-empty-snapshot-target-thread").unwrap();
+    let other_thread_id = ThreadId::new("webui-empty-snapshot-other-thread").unwrap();
+    let event_log = Arc::new(InMemoryDurableEventLog::new());
+    event_log
+        .append(RuntimeEvent::model_started(
+            resource_scope(
+                &tenant_id,
+                &user_id,
+                &agent_id,
+                &other_thread_id,
+                InvocationId::new(),
+            ),
+            CapabilityId::new("loop.model").unwrap(),
+        ))
+        .await
+        .unwrap();
+
+    let event_log: Arc<dyn DurableEventLog> = event_log;
+    let actor = TurnActor::new(user_id);
+    let services = build_reborn_projection_services(
+        event_log,
+        ReplyTargetBindingRef::new("webui-empty-snapshot-reply").unwrap(),
+    );
+    let events = services
+        .webui_event_stream()
+        .drain(ProjectionSubscriptionRequest {
+            actor,
+            scope: TurnScope::new(tenant_id, Some(agent_id), None, target_thread_id),
+            after_cursor: None,
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(events.len(), 1);
+    assert!(matches!(
+        events[0].payload(),
+        ProductOutboundPayload::KeepAlive
+    ));
+    let cursor = parse_webui_projection_cursor(events[0].projection_cursor().as_str()).unwrap();
+    let runtime = cursor
+        .runtime
+        .expect("empty visible snapshot must still advance runtime cursor");
+    assert!(runtime.runtime.as_u64() > 0);
+    assert!(cursor.runtime_item.is_none());
+    assert_eq!(cursor.runtime_payloads_delivered, 0);
+}
+
+#[test]
+fn webui_projection_batch_preserves_deferred_runtime_cursor_across_turn_payloads() {
+    let tenant_id = TenantId::new("webui-interleaved-cursor-tenant").unwrap();
+    let user_id = UserId::new("webui-interleaved-cursor-user").unwrap();
+    let agent_id = AgentId::new("webui-interleaved-cursor-agent").unwrap();
+    let thread_id = ThreadId::new("webui-interleaved-cursor-thread").unwrap();
+    let turn_scope = TurnScope::new(
+        tenant_id.clone(),
+        Some(agent_id.clone()),
+        None,
+        thread_id.clone(),
+    );
+    let runtime_cursor = EventProjectionCursor::for_scope(
+        runtime_projection_scope(&TurnActor::new(user_id), &turn_scope),
+        ironclaw_events::EventCursor::new(4),
+    );
+    let turn_cursor = TurnEventProjectionCursor::for_scope(turn_scope, TurnEventCursor(7));
+
+    let mut batch = WebuiProjectionBatch::new(WebuiProjectionCursor::default());
+    assert!(batch.push_runtime_cursor_advance(runtime_cursor.clone()));
+    batch.push_turn(turn_cursor.clone(), ProductOutboundPayload::KeepAlive);
+
+    let payloads = batch.into_payloads().collect::<Vec<_>>();
+    assert_eq!(payloads.len(), 2);
+    assert_eq!(payloads[0].0.turn, Some(turn_cursor));
+    assert!(payloads[0].0.runtime.is_none());
+    assert_eq!(payloads[1].0.runtime, Some(runtime_cursor));
+    assert_eq!(payloads[1].0.runtime_item, None);
+    assert_eq!(payloads[1].0.runtime_payloads_delivered, 0);
+    assert!(matches!(payloads[1].1, ProductOutboundPayload::KeepAlive));
+}
+
+#[tokio::test]
 async fn webui_event_stream_drains_capability_activity_from_projection() {
     let tenant_id = TenantId::new("webui-activity-tenant").unwrap();
     let user_id = UserId::new("webui-activity-user").unwrap();
@@ -235,6 +319,7 @@ async fn capability_display_preview_store_redacts_unsafe_paths_and_secrets() {
             process_id: None,
             output_bytes: Some(42),
             error_kind: None,
+            first_cursor: ironclaw_events::EventCursor::new(1),
             last_cursor: ironclaw_events::EventCursor::new(1),
             updated_at: chrono::Utc::now(),
         })
@@ -877,6 +962,159 @@ async fn webui_event_stream_live_cursor_does_not_poison_runtime_failure_resume()
 }
 
 #[tokio::test]
+async fn webui_event_stream_delivers_prior_completed_activity_before_pending_approval_preview() {
+    let tenant_id = TenantId::new("webui-live-pending-preview-tenant").unwrap();
+    let user_id = UserId::new("webui-live-pending-preview-user").unwrap();
+    let agent_id = AgentId::new("webui-live-pending-preview-agent").unwrap();
+    let thread_id = ThreadId::new("webui-live-pending-preview-thread").unwrap();
+    let first_extension_invocation = InvocationId::new();
+    let second_extension_invocation = InvocationId::new();
+    let approval_invocation = InvocationId::new();
+    let extension_search = CapabilityId::new("builtin.extension_search").unwrap();
+    let web_access_search = CapabilityId::new("web-access.search").unwrap();
+    let provider = ExtensionId::new("builtin").unwrap();
+    let event_log = Arc::new(InMemoryDurableEventLog::new());
+    event_log
+        .append(RuntimeEvent::dispatch_requested(
+            resource_scope(
+                &tenant_id,
+                &user_id,
+                &agent_id,
+                &thread_id,
+                first_extension_invocation,
+            ),
+            extension_search.clone(),
+        ))
+        .await
+        .unwrap();
+    event_log
+        .append(RuntimeEvent::dispatch_requested(
+            resource_scope(
+                &tenant_id,
+                &user_id,
+                &agent_id,
+                &thread_id,
+                second_extension_invocation,
+            ),
+            extension_search.clone(),
+        ))
+        .await
+        .unwrap();
+    event_log
+        .append(RuntimeEvent::dispatch_succeeded(
+            resource_scope(
+                &tenant_id,
+                &user_id,
+                &agent_id,
+                &thread_id,
+                second_extension_invocation,
+            ),
+            extension_search.clone(),
+            provider.clone(),
+            RuntimeKind::FirstParty,
+            48,
+        ))
+        .await
+        .unwrap();
+    event_log
+        .append(RuntimeEvent::dispatch_succeeded(
+            resource_scope(
+                &tenant_id,
+                &user_id,
+                &agent_id,
+                &thread_id,
+                first_extension_invocation,
+            ),
+            extension_search.clone(),
+            provider,
+            RuntimeKind::FirstParty,
+            32,
+        ))
+        .await
+        .unwrap();
+    event_log
+        .append(RuntimeEvent::dispatch_requested(
+            resource_scope(
+                &tenant_id,
+                &user_id,
+                &agent_id,
+                &thread_id,
+                approval_invocation,
+            ),
+            web_access_search.clone(),
+        ))
+        .await
+        .unwrap();
+
+    let event_log: Arc<dyn DurableEventLog> = event_log;
+    let display_previews = Arc::new(CapabilityDisplayPreviewStore::default());
+    let services = build_reborn_projection_services(
+        event_log,
+        ReplyTargetBindingRef::new("webui-live-pending-preview-reply").unwrap(),
+    )
+    .with_display_previews(display_previews);
+
+    let events = services
+        .webui_event_stream()
+        .drain(ProjectionSubscriptionRequest {
+            actor: TurnActor::new(user_id),
+            scope: TurnScope::new(tenant_id, Some(agent_id), None, thread_id),
+            after_cursor: None,
+        })
+        .await
+        .unwrap();
+
+    let activities = events
+        .iter()
+        .filter_map(|event| match event.payload() {
+            ProductOutboundPayload::CapabilityActivity(activity) => Some((
+                activity.invocation_id,
+                activity.capability_id.clone(),
+                activity.status,
+                activity.activity_order,
+            )),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+
+    assert_eq!(
+        activities,
+        vec![
+            (
+                first_extension_invocation,
+                extension_search.clone(),
+                CapabilityActivityStatusView::Completed,
+                Some(1),
+            ),
+            (
+                second_extension_invocation,
+                extension_search,
+                CapabilityActivityStatusView::Completed,
+                Some(2),
+            ),
+            (
+                approval_invocation,
+                web_access_search,
+                CapabilityActivityStatusView::Started,
+                Some(5),
+            ),
+        ],
+        "a pending approval preview must not hide already completed tool activity"
+    );
+    let cursor = parse_webui_projection_cursor(
+        events
+            .last()
+            .expect("activity payloads should be delivered")
+            .projection_cursor()
+            .as_str(),
+    )
+    .unwrap();
+    assert!(cursor.runtime.is_none());
+    assert!(cursor.runtime_item.is_some());
+    assert_eq!(cursor.runtime_payloads_delivered, 4);
+}
+
+#[tokio::test]
 async fn webui_event_stream_maps_subscription_terminated_work_summary_to_context() {
     let tenant_id = TenantId::new("webui-terminated-summary-tenant").unwrap();
     let user_id = UserId::new("webui-terminated-summary-user").unwrap();
@@ -1159,6 +1397,7 @@ async fn webui_projection_snapshot_bounds_activity_fanout_before_payload_mapping
                 process_id: None,
                 output_bytes: None,
                 error_kind: None,
+                first_cursor: ironclaw_events::EventCursor::new(index as u64 + 1),
                 last_cursor: ironclaw_events::EventCursor::new(index as u64 + 1),
                 updated_at: chrono::Utc::now(),
             })

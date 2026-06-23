@@ -123,21 +123,51 @@ pub(crate) fn list_issues(
     if !validate_path_segment(owner) || !validate_path_segment(repo) {
         return Err("Invalid owner or repo name".into());
     }
-    let encoded_owner = url_encode_path(owner);
-    let encoded_repo = url_encode_path(repo);
     let state = state.unwrap_or("open");
+    let search_state = match state {
+        "open" | "closed" => Some(state),
+        "all" => None,
+        _ => return Err("invalid_state".to_string()),
+    };
+    validate_search_page(page)?;
+    validate_search_limit(limit)?;
     let limit = limit.unwrap_or(30).min(100); // Cap at 100
-    let encoded_state = url_encode_query(state);
+    let query = build_issue_search_query(
+        None,
+        None,
+        Some(owner),
+        Some(repo),
+        None,
+        None,
+        None,
+        search_state,
+        Some("issue"),
+    )?;
 
     let mut path = format!(
-        "/repos/{}/{}/issues?state={}&per_page={}",
-        encoded_owner, encoded_repo, encoded_state, limit
+        "/search/issues?q={}&per_page={}",
+        url_encode_query(&query),
+        limit
     );
-    if let Some(p) = page {
-        path.push_str(&format!("&page={}", p));
-    }
+    append_search_params(&mut path, page, Some("created"), Some("desc"))?;
 
-    github_request("GET", &path, None)
+    let response = github_request("GET", &path, None)?;
+    issue_items_from_search_response(&response)
+}
+
+pub(crate) fn issue_items_from_search_response(response: &str) -> Result<String, String> {
+    let response: serde_json::Value = serde_json::from_str(response).map_err(|error| {
+        format!("github_api_invalid_json: failed to parse issue search response: {error}")
+    })?;
+    let items = response
+        .get("items")
+        .and_then(serde_json::Value::as_array)
+        .ok_or_else(|| {
+            "github_api_invalid_json: issue search response missing items array".to_string()
+        })?;
+    serde_json::to_string(items).map_err(|error| {
+        format!("github_api_invalid_json: failed to serialize issue search items: {error}")
+    })
 }
 
 pub(crate) fn create_issue(
@@ -487,21 +517,34 @@ pub(crate) fn merge_pull_request(
     github_request("PUT", &path, Some(req_body.to_string()))
 }
 
+pub(crate) fn get_authenticated_user() -> Result<String, String> {
+    github_request("GET", "/user", None)
+}
+
 pub(crate) fn list_repos(
-    username: &str,
+    username: Option<&str>,
     page: Option<u32>,
     limit: Option<u32>,
 ) -> Result<String, String> {
-    if !validate_path_segment(username) {
-        return Err("Invalid username".into());
-    }
-    let encoded_username = url_encode_path(username);
     let limit = limit.unwrap_or(30).min(100); // Cap at 100
-    let mut path = format!("/users/{}/repos?per_page={}", encoded_username, limit);
+    let mut path = match username.map(str::trim).filter(|value| !value.is_empty()) {
+        Some(username) if !is_authenticated_user_alias(username) => {
+            if !validate_path_segment(username) {
+                return Err("Invalid username".into());
+            }
+            let encoded_username = url_encode_path(username);
+            format!("/users/{}/repos?per_page={}", encoded_username, limit)
+        }
+        _ => format!("/user/repos?per_page={}", limit),
+    };
     if let Some(p) = page {
         path.push_str(&format!("&page={}", p));
     }
     github_request("GET", &path, None)
+}
+
+fn is_authenticated_user_alias(username: &str) -> bool {
+    username.eq_ignore_ascii_case("me") || username.eq_ignore_ascii_case("@me")
 }
 
 pub(crate) fn search_repositories(

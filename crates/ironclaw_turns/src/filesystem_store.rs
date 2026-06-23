@@ -29,14 +29,14 @@
 //! path itself.
 
 use std::{
-    collections::HashMap,
-    sync::{Arc, Mutex, MutexGuard, OnceLock, Weak},
+    sync::{Arc, Mutex},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 use async_trait::async_trait;
 use ironclaw_filesystem::{
-    CasExpectation, ContentType, Entry, FilesystemError, FilesystemOperation, RecordVersion,
-    RootFilesystem, ScopedFilesystem,
+    CasExpectation, ContentType, Entry, FilesystemError, FilesystemOperation, RecordKind,
+    RecordVersion, RootFilesystem, ScopedFilesystem,
 };
 use ironclaw_host_api::{ResourceScope, ScopedPath, UserId};
 
@@ -58,25 +58,58 @@ use crate::{
     },
 };
 
-/// Bound on the CAS retry loop. Picked deliberately small: the in-process
-/// per-path lock map collapses contention to one writer at a time, and
-/// cross-process contention on filesystem mounts is what the
-/// [`TurnError::Unavailable`] return shape is meant to surface.
-const FILESYSTEM_CAS_RETRIES: usize = 8;
+/// Bound on the CAS retry loop. The per-user snapshot is intentionally written
+/// with optimistic CAS instead of an in-process write gate, so bursts of
+/// same-user transitions can overlap without parking unrelated turn-state
+/// callers behind one wedged operation.
+const FILESYSTEM_CAS_RETRIES: usize = 32;
+const FILESYSTEM_APPLY_TIMEOUT: Duration = Duration::from_secs(15);
+const FILESYSTEM_CAS_BACKOFF_BASE: Duration = Duration::from_millis(2);
+const FILESYSTEM_CAS_BACKOFF_MAX: Duration = Duration::from_millis(50);
+const SNAPSHOT_READ_CACHE_TTL: Duration = Duration::from_millis(500);
 
 const TURNS_PREFIX: &str = "/turns";
 const TURNS_SNAPSHOT_FILE: &str = "state.json";
+const TURNS_SNAPSHOT_KIND: &str = "turn_state_snapshot";
+
+#[derive(Clone)]
+struct CachedSnapshot {
+    snapshot: TurnPersistenceSnapshot,
+    version: Option<RecordVersion>,
+    loaded_at: Instant,
+}
+
+impl CachedSnapshot {
+    fn new(snapshot: TurnPersistenceSnapshot, version: Option<RecordVersion>) -> Self {
+        Self {
+            snapshot,
+            version,
+            loaded_at: Instant::now(),
+        }
+    }
+
+    fn is_fresh(&self) -> bool {
+        self.loaded_at.elapsed() <= SNAPSHOT_READ_CACHE_TTL
+    }
+
+    fn parts(&self) -> (TurnPersistenceSnapshot, Option<RecordVersion>) {
+        (self.snapshot.clone(), self.version)
+    }
+}
 
 /// Filesystem-backed turn-state store under the `/turns` mount alias.
 ///
-/// Construct with a [`ScopedFilesystem`] over any [`RootFilesystem`]. The
+/// Construct with a [`ScopedFilesystem`] over a [`RootFilesystem`]. The
 /// [`ScopedFilesystem`] resolves the `/turns` alias to a tenant/user-scoped
 /// [`VirtualPath`](ironclaw_host_api::VirtualPath) per its
 /// [`MountView`](ironclaw_host_api::MountView) and enforces per-op ACL before
 /// any backend dispatch — so tenant isolation is structural rather than
 /// something this crate has to re-derive from `TurnScope.tenant_id`.
 /// Within-tenant axes (agent/project/thread) stay in the persisted snapshot
-/// records because they are not covered by the per-tenant `MountAlias`.
+/// records because they are not covered by the per-tenant `MountAlias`. The
+/// backend must honor `Absent` / `Version` CAS for writes; unsupported CAS
+/// fails closed in the canonical write path instead of falling back to blind
+/// overwrites.
 pub struct FilesystemTurnStateStore<F>
 where
     F: RootFilesystem,
@@ -84,6 +117,8 @@ where
     filesystem: Arc<ScopedFilesystem<F>>,
     limits: InMemoryTurnStateStoreLimits,
     admission_limit_provider: Arc<dyn TurnAdmissionLimitProvider>,
+    snapshot_cache: Mutex<Option<CachedSnapshot>>,
+    apply_timeout: Duration,
 }
 
 impl<F> FilesystemTurnStateStore<F>
@@ -95,6 +130,8 @@ where
             filesystem,
             limits: InMemoryTurnStateStoreLimits::default(),
             admission_limit_provider: Arc::new(AllowAllTurnAdmissionLimitProvider),
+            snapshot_cache: Mutex::new(None),
+            apply_timeout: FILESYSTEM_APPLY_TIMEOUT,
         }
     }
 
@@ -111,6 +148,11 @@ where
         self
     }
 
+    pub fn with_apply_timeout(mut self, apply_timeout: Duration) -> Self {
+        self.apply_timeout = apply_timeout;
+        self
+    }
+
     /// Read the persistence snapshot from `/turns/state.json`. Returns an
     /// empty snapshot if the blob is missing — `start` semantics for a fresh
     /// tenant/user mount.
@@ -122,13 +164,21 @@ where
     async fn read_snapshot(
         &self,
     ) -> Result<(TurnPersistenceSnapshot, Option<RecordVersion>), TurnError> {
-        let path = snapshot_path()?;
-        let record_lock = filesystem_record_lock(self.filesystem.as_ref(), &path);
-        let _guard = record_lock.lock().await;
-        self.read_snapshot_unlocked().await
+        if let Some(snapshot) = self.fresh_cached_snapshot() {
+            return Ok(snapshot);
+        }
+        // Pure reads are lock-free. CAS-capable backends expose only committed
+        // snapshot versions, so a reader racing a write observes either the
+        // previous committed snapshot or the next one. Taking a process-local
+        // writer lock here would force `get_run_state`, host construction,
+        // cancellation polling, claims, heartbeats, and terminal transitions
+        // behind one in-flight write on the single per-user snapshot.
+        let snapshot = self.read_snapshot_from_filesystem().await?;
+        self.store_snapshot_cache(snapshot.clone());
+        Ok(snapshot)
     }
 
-    async fn read_snapshot_unlocked(
+    async fn read_snapshot_from_filesystem(
         &self,
     ) -> Result<(TurnPersistenceSnapshot, Option<RecordVersion>), TurnError> {
         let path = snapshot_path()?;
@@ -143,6 +193,35 @@ where
             }
             Ok(None) => Ok((TurnPersistenceSnapshot::default(), None)),
             Err(error) => Err(fs_error(error)),
+        }
+    }
+
+    fn fresh_cached_snapshot(&self) -> Option<(TurnPersistenceSnapshot, Option<RecordVersion>)> {
+        match self.snapshot_cache.lock() {
+            Ok(guard) => guard
+                .as_ref()
+                .filter(|snapshot| snapshot.is_fresh())
+                .map(CachedSnapshot::parts),
+            Err(poisoned) => poisoned
+                .into_inner()
+                .as_ref()
+                .filter(|snapshot| snapshot.is_fresh())
+                .map(CachedSnapshot::parts),
+        }
+    }
+
+    fn store_snapshot_cache(&self, snapshot: (TurnPersistenceSnapshot, Option<RecordVersion>)) {
+        let cached = CachedSnapshot::new(snapshot.0, snapshot.1);
+        match self.snapshot_cache.lock() {
+            Ok(mut guard) => *guard = Some(cached),
+            Err(poisoned) => *poisoned.into_inner() = Some(cached),
+        }
+    }
+
+    fn clear_snapshot_cache(&self) {
+        match self.snapshot_cache.lock() {
+            Ok(mut guard) => *guard = None,
+            Err(poisoned) => *poisoned.into_inner() = None,
         }
     }
 
@@ -162,34 +241,65 @@ where
     /// `apply` materializes a transient [`InMemoryTurnStateStore`] from the
     /// loaded snapshot, runs the supplied async closure against it, and the
     /// resulting snapshot is written back. On `VersionMismatch` the loop
-    /// re-reads (cross-process contention); on `Unsupported` it falls back
-    /// to `CasExpectation::Any` so the byte-only `LocalFilesystem` path
-    /// still works through the per-record `FILESYSTEM_RECORD_LOCKS` map.
+    /// re-reads and reapplies the closure against the latest snapshot. The
+    /// guarded read/modify/write is deadline-bounded so one wedged filesystem
+    /// operation only consumes this caller's apply attempt until the deadline
+    /// returns `TurnError::Unavailable`.
     async fn apply<T, A, Fut>(&self, mut apply: A) -> Result<T, TurnError>
     where
         A: FnMut(InMemoryTurnStateStore) -> Fut,
         Fut: std::future::Future<Output = (Result<T, TurnError>, InMemoryTurnStateStore)>,
     {
         let path = snapshot_path()?;
-        let record_lock = filesystem_record_lock(self.filesystem.as_ref(), &path);
-        let _guard = record_lock.lock().await;
-        for _ in 0..FILESYSTEM_CAS_RETRIES {
-            let (snapshot, version) = self.read_snapshot_unlocked().await?;
+        match tokio::time::timeout(self.apply_timeout, self.apply_with_retry(&path, &mut apply))
+            .await
+        {
+            Ok(result) => result,
+            Err(_) => {
+                self.clear_snapshot_cache();
+                Err(TurnError::Unavailable {
+                    reason: "turn state filesystem apply timed out".to_string(),
+                })
+            }
+        }
+    }
+
+    async fn apply_with_retry<T, A, Fut>(
+        &self,
+        path: &ScopedPath,
+        apply: &mut A,
+    ) -> Result<T, TurnError>
+    where
+        A: FnMut(InMemoryTurnStateStore) -> Fut,
+        Fut: std::future::Future<Output = (Result<T, TurnError>, InMemoryTurnStateStore)>,
+    {
+        for attempt in 0..FILESYSTEM_CAS_RETRIES {
+            let (snapshot, version) = self.read_snapshot_from_filesystem().await?;
             let old_snapshot = snapshot.clone();
             let store = self.build_in_memory_store(snapshot)?;
             let (outcome, store) = apply(store).await;
             let new_snapshot = store.persistence_snapshot();
+
             if new_snapshot == old_snapshot {
+                // This apply path read the latest snapshot directly from the
+                // backend, so any previously cached snapshot may now be stale.
+                self.clear_snapshot_cache();
                 return outcome;
             }
             let entry = snapshot_entry(&new_snapshot)?;
             let cas = match version {
-                Some(v) => CasExpectation::Version(v),
+                Some(version) => CasExpectation::Version(version),
                 None => CasExpectation::Absent,
             };
-            match put_with_cas(self.filesystem.as_ref(), &path, entry, cas).await {
-                Ok(()) => return outcome,
-                Err(PutError::VersionMismatch) => continue,
+            match put_with_cas(self.filesystem.as_ref(), path, entry, cas).await {
+                Ok(version) => {
+                    self.store_snapshot_cache((new_snapshot, Some(version)));
+                    return outcome;
+                }
+                Err(PutError::VersionMismatch) => {
+                    self.clear_snapshot_cache();
+                    cas_retry_backoff(attempt).await;
+                }
                 Err(PutError::Other(error)) => return Err(error),
             }
         }
@@ -638,7 +748,12 @@ fn snapshot_entry(snapshot: &TurnPersistenceSnapshot) -> Result<Entry, TurnError
     let body = serde_json::to_vec_pretty(snapshot).map_err(|error| TurnError::Unavailable {
         reason: format!("turn-state snapshot serialization failed: {error}"),
     })?;
-    Ok(Entry::bytes(body).with_content_type(ContentType::json()))
+    let kind = RecordKind::new(TURNS_SNAPSHOT_KIND).map_err(|error| TurnError::Unavailable {
+        reason: format!("invalid turn-state snapshot record kind: {error}"),
+    })?;
+    let mut entry = Entry::bytes(body).with_content_type(ContentType::json());
+    entry.kind = Some(kind);
+    Ok(entry)
 }
 
 fn deserialize_snapshot(bytes: &[u8]) -> Result<TurnPersistenceSnapshot, TurnError> {
@@ -654,46 +769,20 @@ fn fs_error(error: FilesystemError) -> TurnError {
     }
 }
 
-type FilesystemRecordLock = Arc<tokio::sync::Mutex<()>>;
-
-// Per-resolved-record async serialization for the filesystem-backed turn store.
-//
-// Values are stored as `Weak<Mutex<()>>` so the map does not pin lock entries
-// alive once all in-flight operations on a path have released their `Arc`
-// clones. The key is the backend virtual path when the scoped filesystem can
-// resolve it, not the alias-relative path shared by every mount. Mirrors the
-// per-record lock map shape used by
-// `ironclaw_run_state::FilesystemRunStateStore`; only one snapshot path lives
-// in this map per tenant/user, so churn is even lower here than there.
-static FILESYSTEM_RECORD_LOCKS: OnceLock<Mutex<HashMap<String, Weak<tokio::sync::Mutex<()>>>>> =
-    OnceLock::new();
-
-fn filesystem_record_lock<F>(
-    filesystem: &ScopedFilesystem<F>,
-    path: &ScopedPath,
-) -> FilesystemRecordLock
-where
-    F: RootFilesystem,
-{
-    let key = filesystem
-        .resolve(&ResourceScope::system(), path)
-        .map(|virtual_path| virtual_path.as_str().to_string())
-        .unwrap_or_else(|_| path.as_str().to_string());
-    filesystem_record_lock_for_key(&key)
-}
-
-fn filesystem_record_lock_for_key(key: &str) -> FilesystemRecordLock {
-    let locks = FILESYSTEM_RECORD_LOCKS.get_or_init(|| Mutex::new(HashMap::new()));
-    let mut guard: MutexGuard<'_, HashMap<String, Weak<tokio::sync::Mutex<()>>>> = locks
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-    guard.retain(|_, weak| weak.strong_count() > 0);
-    if let Some(existing) = guard.get(key).and_then(Weak::upgrade) {
-        return existing;
-    }
-    let fresh: FilesystemRecordLock = Arc::new(tokio::sync::Mutex::new(()));
-    guard.insert(key.to_string(), Arc::downgrade(&fresh));
-    fresh
+async fn cas_retry_backoff(attempt: usize) {
+    let shift = attempt.min(8) as u32;
+    let multiplier = 1_u32.checked_shl(shift).unwrap_or(u32::MAX);
+    let base_delay = FILESYSTEM_CAS_BACKOFF_BASE
+        .saturating_mul(multiplier)
+        .min(FILESYSTEM_CAS_BACKOFF_MAX);
+    let jitter = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|elapsed| {
+            let jitter_ceiling = base_delay.as_millis().max(1);
+            Duration::from_millis((elapsed.as_nanos() % jitter_ceiling) as u64)
+        })
+        .unwrap_or_default();
+    tokio::time::sleep(base_delay.saturating_add(jitter)).await;
 }
 
 /// Local error classification for the CAS-aware put helper.
@@ -707,34 +796,72 @@ enum PutError {
 
 /// Issue a `put` honoring the requested CAS expectation.
 ///
-/// Falls back to `CasExpectation::Any` when the backend reports `Unsupported`
-/// for the request — `LocalFilesystem` is byte-only and only accepts `Any`.
-/// On a byte-only backend the in-process record-lock map provides
-/// intra-process serialization; cross-process safety on those backends is a
-/// documented process-local limitation (matches
-/// `ironclaw_run_state::put_with_cas`).
+/// Turn state is a single per-user snapshot, so this store requires a backend
+/// with real `Absent` / `Version` CAS. Falling back to `Any` would turn a
+/// stale-snapshot race into a blind overwrite.
 async fn put_with_cas<F>(
     filesystem: &ScopedFilesystem<F>,
     path: &ScopedPath,
     entry: Entry,
     cas: CasExpectation,
-) -> Result<(), PutError>
+) -> Result<RecordVersion, PutError>
 where
     F: RootFilesystem,
 {
-    let fallback_entry = entry.clone();
     let scope = ResourceScope::system();
     match filesystem.put(&scope, path, entry, cas).await {
-        Ok(_) => Ok(()),
+        Ok(version) => Ok(version),
         Err(FilesystemError::VersionMismatch { .. }) => Err(PutError::VersionMismatch),
         Err(FilesystemError::Unsupported {
             operation: FilesystemOperation::WriteFile,
             ..
-        }) => filesystem
-            .put(&scope, path, fallback_entry, CasExpectation::Any)
-            .await
-            .map(|_| ())
-            .map_err(|error| PutError::Other(fs_error(error))),
+        }) => Err(PutError::Other(TurnError::Unavailable {
+            reason: "turn state filesystem backend must support versioned CAS".to_string(),
+        })),
         Err(error) => Err(PutError::Other(fs_error(error))),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cached_snapshot_freshness_is_bounded() {
+        let snapshot = TurnPersistenceSnapshot::default();
+        let fresh = CachedSnapshot::new(snapshot.clone(), None);
+        assert!(fresh.is_fresh());
+
+        let stale = CachedSnapshot {
+            snapshot,
+            version: None,
+            loaded_at: Instant::now() - SNAPSHOT_READ_CACHE_TTL - Duration::from_millis(1),
+        };
+        assert!(!stale.is_fresh());
+    }
+
+    #[tokio::test]
+    async fn no_op_apply_clears_snapshot_cache_before_returning() {
+        let filesystem = Arc::new(ScopedFilesystem::with_fixed_view(
+            Arc::new(ironclaw_filesystem::InMemoryBackend::new()),
+            ironclaw_host_api::MountView::new(vec![ironclaw_host_api::MountGrant::new(
+                ironclaw_host_api::MountAlias::new("/turns").unwrap(),
+                ironclaw_host_api::VirtualPath::new("/engine/turns").unwrap(),
+                ironclaw_host_api::MountPermissions::read_write_list_delete(),
+            )])
+            .unwrap(),
+        ));
+        let store = FilesystemTurnStateStore::new(filesystem);
+        store.store_snapshot_cache((
+            TurnPersistenceSnapshot::default(),
+            Some(RecordVersion::from_backend(99)),
+        ));
+
+        store
+            .apply(|store| async move { (Ok::<_, TurnError>(()), store) })
+            .await
+            .unwrap();
+
+        assert!(store.fresh_cached_snapshot().is_none());
     }
 }

@@ -165,6 +165,7 @@ async fn build_runtime(
             .with_runner_settings(TurnRunnerSettings {
                 heartbeat_interval: Duration::from_secs(60),
                 poll_interval: Duration::from_secs(60),
+                ..TurnRunnerSettings::default()
             })
             .with_model_gateway_override(Arc::new(UnusedModelGateway)),
     )
@@ -206,6 +207,7 @@ async fn submit_and_block_auth_run(
                 parent_run_id: None,
                 subagent_depth: 0,
                 spawn_tree_root_run_id: None,
+                product_context: None,
             },
             &admission,
             &profiles,

@@ -18,14 +18,18 @@ import {
   recordAcceptedMessageRef,
   removePending,
 } from "../lib/pending-messages.js";
+import {
+  createToolActivityState,
+  failGateToolActivity,
+  resetToolActivityState,
+} from "../lib/tool-activity-state.js";
+import { toRenderAttachment, toWireAttachment } from "../lib/attachments.js";
 import { useHistory } from "./useHistory.js";
 import { useSSE } from "./useSSE.js";
 
 const AUTH_TOKEN_FLOW_TIMEOUT_MS = 30000;
 const AUTH_GATE_CREDENTIAL_STORED_ERROR =
   "credential_stored_gate_resolution_failed";
-const UNSUPPORTED_MULTIMODAL_PAYLOAD_ERROR =
-  "webui_v2_multimodal_payload_unsupported";
 const OAUTH_CALLBACK_CHANNEL = "ironclaw-product-auth";
 const OAUTH_CALLBACK_STORAGE_KEY = "ironclaw:product-auth:oauth-complete";
 const OAUTH_CALLBACK_MESSAGE_TYPE = "ironclaw:product-auth:oauth-complete";
@@ -55,14 +59,19 @@ function threadNeedsSidebarRefresh(threadId) {
   return !thread?.title;
 }
 
-function unsupportedMultimodalPayloadError() {
-  const error = new Error("webchat v2 multimodal payload unsupported");
-  error.safeErrorCode = UNSUPPORTED_MULTIMODAL_PAYLOAD_ERROR;
-  return error;
-}
-
 function submitResponseResumedTurnGate(response) {
   return response?.continuation?.type === "turn_gate_resume";
+}
+
+function resolveGateOutcome(response) {
+  if (response?.outcome) return response.outcome;
+  const status = String(response?.status || "").toLowerCase();
+  if (status === "queued" || status === "running") return "resumed";
+  if (status === "cancelled" || response?.already_terminal === true) {
+    return "cancelled";
+  }
+  if (response?.already_terminal === false) return "resumed";
+  return null;
 }
 
 function isPendingOAuthGate(gate) {
@@ -126,6 +135,15 @@ export function useChat(threadId) {
     activeRunRef.current = value;
     setActiveRunState(value);
   }, []);
+  // Mirror committed activeRun into the ref. The setActiveRun wrapper keeps
+  // the ref current for back-to-back synchronous reads inside event handlers;
+  // this effect additionally covers paths that set the state directly — the
+  // per-thread reset below uses the raw setter so render stays side-effect
+  // free (no ref mutation during render, which a concurrent render could
+  // discard without rolling back).
+  React.useEffect(() => {
+    activeRunRef.current = activeRun;
+  }, [activeRun]);
   const [channelConnectAction, setChannelConnectAction] = React.useState(null);
 
   const getPendingMessages = React.useCallback(
@@ -156,6 +174,9 @@ export function useChat(threadId) {
 
   const [isProcessing, setIsProcessing] = React.useState(false);
   const [pendingGate, setPendingGate] = React.useState(null);
+  const [stateThreadId, setStateThreadId] = React.useState(threadId);
+  const toolActivityStateRef = React.useRef(createToolActivityState());
+  const locallyResolvedGatesRef = React.useRef(new Map());
   const authTokenSubmitRef = React.useRef({
     gateKey: null,
     credentialRef: null,
@@ -169,11 +190,37 @@ export function useChat(threadId) {
   // back to non-default values if that thread actually has an active
   // run / gate. `cooldownUntil` is intentionally not reset — it's a
   // rate-limit timer that applies across threads.
-  React.useEffect(() => {
+  //
+  // This runs DURING render (not in an effect) on purpose. An effect
+  // fires a beat too late: there is one render where the new threadId is
+  // already in scope but pendingGate / isProcessing still hold the prior
+  // thread's values, and any consumer reading them in that render (the
+  // approval card, and the sidebar state mirror in chat.js) briefly
+  // mis-attributes the old thread's gate to the newly opened one — e.g.
+  // a "needs attention" badge bleeding onto a normal thread. React
+  // supports a conditional setState during render for exactly this
+  // "adjust state when a prop changes" case; it re-renders immediately
+  // without committing the stale output. The previous-threadId guard is
+  // itself state (not a ref) so an aborted concurrent render rolls it
+  // back and the reset re-fires on retry instead of being skipped.
+  //
+  // DO NOT move this into a useEffect — that is the regression it fixes.
+  // Two rules keep this pattern correct, and any change here must preserve
+  // both: (1) the guard must be state, not a ref, so it
+  // is rolled back on a discarded render; (2) only plain state setters may
+  // run here (no ref writes / side effects) — that is why this uses the
+  // raw setActiveRunState rather than the activeRunRef-mutating wrapper.
+  if (stateThreadId !== threadId) {
+    setStateThreadId(threadId);
     setIsProcessing(false);
     setPendingGate(null);
-    setActiveRun(null);
+    setActiveRunState(null);
     setChannelConnectAction(null);
+  }
+
+  React.useEffect(() => {
+    resetToolActivityState(toolActivityStateRef);
+    locallyResolvedGatesRef.current.clear();
   }, [threadId]);
 
   const cooldownSeconds = Math.max(0, Math.ceil((cooldownUntil - now) / 1000));
@@ -246,16 +293,22 @@ export function useChat(threadId) {
     setPendingGate,
     setActiveRun,
     activeRunRef,
+    locallyResolvedGatesRef,
+    toolActivityStateRef,
     // Reborn's projection bridge does not yet emit `Text` items for
-    // assistant replies, so the SSE stream only delivers `run_status`.
-    // On terminal success, refetch the timeline so the assistant
-    // message that landed in the thread becomes visible in the UI.
-    // Clear pending optimistic messages first so the real user
-    // message from the server doesn't render alongside its
+    // assistant replies, and never emits `capability_display_preview`
+    // items in the projection state — the assistant reply and the rich
+    // tool input/output cards live only in the thread timeline. Refetch
+    // the timeline on EVERY terminal run (success or not) so both become
+    // visible; a failed/cancelled run still recovers the tool previews for
+    // tools that completed before it terminated. `preserveClientOnly`
+    // keeps the client-side `err-*` failure bubble across the reload.
+    // On success, clear pending optimistic messages first so the real
+    // user message from the server doesn't render alongside its
     // pre-submit optimistic twin.
-    onRunCompleted: () => {
-      setPendingMessages([]);
-      loadHistory();
+    onRunSettled: (_runId, { success }) => {
+      if (success) setPendingMessages([]);
+      loadHistory(undefined, { preserveClientOnly: true });
     },
   });
 
@@ -265,10 +318,12 @@ export function useChat(threadId) {
     enabled: Boolean(threadId),
   });
 
-  // Accepts the fork's call shape `{ images, attachments, threadId,
-  // timezone }`. v2 SendMessage carries `content` only; image and
-  // file payloads are rejected until the v2 contract grows typed
-  // multimodal fields.
+  // Accepts the composer call shape `{ attachments, threadId }`. The
+  // `attachments` are staged objects from `lib/attachments.js`
+  // (`stageFiles`); we split them into the `WebUiInboundAttachment` wire
+  // shape for the send and the render shape for the optimistic bubble so
+  // cards/thumbnails appear immediately, matching what the timeline
+  // projection returns after the run.
   //
   // v2 send-message requires `thread_id` as a path parameter — the
   // facade refuses to implicitly create a missing thread. When the
@@ -278,15 +333,20 @@ export function useChat(threadId) {
   // hook can route to `/chat/<id>` after the first send.
   const send = React.useCallback(
     async (content, opts = {}) => {
-      const { threadId: targetThreadId, images = [], attachments = [] } = opts;
-      if (images.length > 0 || attachments.length > 0) {
-        throw unsupportedMultimodalPayloadError();
-      }
+      const { threadId: targetThreadId, attachments: stagedAttachments = [] } =
+        opts;
+      const wireAttachments = stagedAttachments.map(toWireAttachment);
+      const renderAttachments = stagedAttachments.map(toRenderAttachment);
 
-      const connectable = await resolveConnectAction(content);
-      if (connectable) {
-        setChannelConnectAction(connectable);
-        return { channel_connect_action: connectable };
+      // Channel-connect slash commands ("/connect telegram") never carry
+      // attachments; skip that detection when files are staged so an
+      // upload is never misread as a command and dropped.
+      if (stagedAttachments.length === 0) {
+        const connectable = await resolveConnectAction(content);
+        if (connectable) {
+          setChannelConnectAction(connectable);
+          return { channel_connect_action: connectable };
+        }
       }
       setChannelConnectAction(null);
 
@@ -306,6 +366,7 @@ export function useChat(threadId) {
         id: `pending-${pendingSeqRef.current++}`,
         role: "user",
         content,
+        attachments: renderAttachments,
         timestamp: new Date().toISOString(),
         isOptimistic: true,
       };
@@ -318,6 +379,7 @@ export function useChat(threadId) {
           id: optimisticId,
           role: "user",
           content,
+          attachments: renderAttachments,
           timestamp: pendingRecord.timestamp,
           isOptimistic: true,
         },
@@ -330,6 +392,7 @@ export function useChat(threadId) {
         const response = await sendMessage({
           threadId: sendThreadId,
           content,
+          attachments: wireAttachments,
         });
         // Refresh the sidebar only while the cached entry is missing
         // or title-less. Once the first-message title has appeared,
@@ -357,6 +420,32 @@ export function useChat(threadId) {
               m.id === optimisticId ? { ...m, timelineMessageId } : m,
             ),
           );
+        }
+        // When the thread was busy, the message is rejected (not deferred).
+        // Mark the optimistic user message as failed and display the
+        // server's notice (if present) as a system message so the user
+        // knows to resend.
+        if (response?.outcome === "rejected_busy") {
+          setMessages((prev) =>
+            prev.map((m) =>
+              m.id === optimisticId
+                ? { ...m, isOptimistic: false, status: "error" }
+                : m,
+            ),
+          );
+          if (response?.notice) {
+            setMessages((prev) => [
+              ...prev,
+              {
+                id: `system-rejected-${pendingSeqRef.current++}`,
+                role: "system",
+                content: response.notice,
+                timestamp: new Date().toISOString(),
+                isOptimistic: false,
+              },
+            ]);
+          }
+          setIsProcessing(false);
         }
         return response;
       } catch (err) {
@@ -403,7 +492,7 @@ export function useChat(threadId) {
       if (!runId || !gateRef) {
         throw new Error("resolveGate requires a pending gate with run_id and gate_ref");
       }
-      await resolveGateRequest({
+      const response = await resolveGateRequest({
         threadId,
         runId,
         gateRef,
@@ -411,15 +500,28 @@ export function useChat(threadId) {
         always: opts.always,
         credentialRef: opts.credentialRef,
       });
-      const shouldContinueProcessing =
-        resolution === "approved" || resolution === "credential_provided";
-      setPendingGate(null);
-      setIsProcessing(shouldContinueProcessing);
-      if (!shouldContinueProcessing) {
-        setActiveRun(null);
+      const outcome = resolveGateOutcome(response);
+      locallyResolvedGatesRef.current.set(`${runId}\n${gateRef}`, {
+        resolution,
+        outcome,
+      });
+      if (resolution === "denied" && outcome === "resumed") {
+        failGateToolActivity(setMessages, pendingGate, toolActivityStateRef);
       }
+      setPendingGate(null);
+      if (outcome === "resumed") {
+        setIsProcessing(true);
+        setActiveRun({
+          runId: response?.run_id || runId,
+          threadId: response?.thread_id || threadId,
+          status: response?.status || "queued",
+        });
+        return;
+      }
+      setIsProcessing(false);
+      setActiveRun(null);
     },
-    [pendingGate, threadId],
+    [pendingGate, threadId, setMessages, setActiveRun],
   );
 
   const submitAuthToken = React.useCallback(

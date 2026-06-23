@@ -191,6 +191,14 @@ pub struct TurnRunRecord {
     pub subagent_depth: u32,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub spawn_tree_root_run_id: Option<TurnRunId>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub product_context: Option<crate::ProductTurnContext>,
+    #[serde(
+        rename = "auth_resume_disposition",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub resume_disposition: Option<crate::GateResumeDisposition>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -300,6 +308,7 @@ impl TurnIdempotencyOutcomeKind {
             TurnError::Conflict { .. }
             | TurnError::InvalidTransition { .. }
             | TurnError::LeaseMismatch => Self::Conflict,
+            TurnError::InvalidRunOriginAdapter => Self::InvalidRequest,
         }
     }
 }
@@ -450,4 +459,110 @@ pub struct TurnPersistenceSnapshot {
     pub admission_reservations: Vec<TurnAdmissionReservationRecord>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub spawn_tree_reservations: Vec<SpawnTreeReservation>,
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::{
+        AcceptedMessageRef, EventCursor, GateResumeDisposition, ReplyTargetBindingRef,
+        SourceBindingRef, TurnRunId, TurnRunRecord, TurnScope, TurnStatus,
+    };
+    use ironclaw_host_api::{AgentId, ProjectId, TenantId, ThreadId};
+
+    fn minimal_turn_run_record() -> TurnRunRecord {
+        // Build a TurnRunRecord by serializing a struct-literal then
+        // deserializing back so serde fills in all optional defaults.
+        // We construct the profile via the same JSON shortcut used elsewhere
+        // in test helpers (no ResolvedRunProfile needed).
+        let scope = TurnScope::new(
+            TenantId::new("tenant-store-test").unwrap(),
+            Some(AgentId::new("agent-store-test").unwrap()),
+            Some(ProjectId::new("project-store-test").unwrap()),
+            ThreadId::new("thread-store-test").unwrap(),
+        );
+        let profile: crate::TurnRunProfile = serde_json::from_value(serde_json::json!({
+            "id": "default",
+            "version": 1,
+            "allow_steering": false,
+            "auto_queue_followups": false,
+        }))
+        .expect("profile deserialization");
+        TurnRunRecord {
+            run_id: TurnRunId::new(),
+            turn_id: crate::TurnId::new(),
+            scope,
+            accepted_message_ref: AcceptedMessageRef::new("accepted-store-test").unwrap(),
+            source_binding_ref: SourceBindingRef::new("source-store-test").unwrap(),
+            reply_target_binding_ref: ReplyTargetBindingRef::new("reply-store-test").unwrap(),
+            status: TurnStatus::Completed,
+            profile,
+            resolved_model_route: None,
+            checkpoint_id: None,
+            gate_ref: None,
+            credential_requirements: vec![],
+            failure: None,
+            event_cursor: EventCursor(0),
+            runner_id: None,
+            lease_token: None,
+            lease_expires_at: None,
+            last_heartbeat_at: None,
+            claim_count: 0,
+            received_at: chrono::DateTime::parse_from_rfc3339("2026-01-01T00:00:00Z")
+                .unwrap()
+                .with_timezone(&chrono::Utc),
+            parent_run_id: None,
+            subagent_depth: 0,
+            spawn_tree_root_run_id: None,
+            product_context: None,
+            resume_disposition: None,
+        }
+    }
+
+    #[test]
+    fn turn_run_record_resume_disposition_defaults_to_none_when_absent() {
+        // (a) Deserialize a real TurnRunRecord JSON with auth_resume_disposition key ABSENT.
+        // This proves #[serde(default)] is in place on the field.
+        let record = minimal_turn_run_record();
+        let mut json_val =
+            serde_json::to_value(&record).expect("serialize TurnRunRecord with None disposition");
+
+        // The key must already be absent due to skip_serializing_if = "Option::is_none".
+        let obj = json_val
+            .as_object_mut()
+            .expect("TurnRunRecord must serialize to JSON object");
+        assert!(
+            !obj.contains_key("auth_resume_disposition"),
+            "auth_resume_disposition must be absent when resume_disposition is None"
+        );
+
+        // Belt-and-suspenders: forcibly remove the key then deserialize.
+        obj.remove("auth_resume_disposition");
+        let deserialized: TurnRunRecord =
+            serde_json::from_value(json_val).expect("deserialize TurnRunRecord missing key");
+        assert_eq!(
+            deserialized.resume_disposition, None,
+            "resume_disposition must default to None when the JSON key is absent"
+        );
+
+        // (b) Deserialize a real TurnRunRecord JSON carrying the LEGACY key
+        // "auth_resume_disposition": "denied". This proves the serde rename/back-compat.
+        let record2 = minimal_turn_run_record();
+        let mut json_val2 =
+            serde_json::to_value(&record2).expect("serialize TurnRunRecord for legacy key test");
+        let obj2 = json_val2
+            .as_object_mut()
+            .expect("TurnRunRecord must serialize to JSON object");
+        obj2.insert(
+            "auth_resume_disposition".to_string(),
+            serde_json::json!("denied"),
+        );
+
+        let deserialized2: TurnRunRecord =
+            serde_json::from_value(json_val2).expect("deserialize TurnRunRecord with legacy key");
+        assert_eq!(
+            deserialized2.resume_disposition,
+            Some(GateResumeDisposition::Denied),
+            "resume_disposition must be Some(Denied) when legacy key auth_resume_disposition is present"
+        );
+    }
 }

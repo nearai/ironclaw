@@ -57,6 +57,11 @@ trace_*.json
 .ironclaw/
 .review/
 
+# Local-dev workspace artifacts: the WebChat v2 attachment lander writes
+# uploaded files under a project workspace; when `serve` runs from the repo
+# root they land in ./attachments/. These are user uploads, never source.
+/attachments/
+
 # Python cache
 __pycache__/
 *.pyc
@@ -72,3 +77,4 @@ tests/fixtures/llm_traces/live/*.log
 
 # Local test artifacts
 .anvil/
+.codegraph/

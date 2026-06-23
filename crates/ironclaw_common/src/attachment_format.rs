@@ -451,6 +451,24 @@ pub fn canonical_extension(mime: &str) -> Option<&'static str> {
     lookup(mime).map(|format| format.canonical_ext)
 }
 
+/// The canonical MIME type for a filename extension (without the leading dot),
+/// matched case-insensitively against each format's canonical and alias
+/// extensions. Returns `None` for an unknown extension; download callers should
+/// fall back to `application/octet-stream`.
+pub fn mime_for_extension(ext: &str) -> Option<&'static str> {
+    // `ext` is normalized to lowercase and every `FORMATS` extension/alias is a
+    // unique lowercase literal (locked by
+    // `table_has_no_duplicate_mimes_or_extensions`), so direct equality
+    // suffices — no per-iteration case folding needed.
+    let ext = ext.trim_start_matches('.').to_ascii_lowercase();
+    FORMATS
+        .iter()
+        .find(|format| {
+            format.canonical_ext == ext || format.ext_aliases.iter().any(|alias| *alias == ext)
+        })
+        .map(|format| format.mime)
+}
+
 /// The attachment kind for a MIME type.
 ///
 /// The registry is authoritative for supported formats. For unsupported MIME
@@ -495,9 +513,18 @@ pub fn all_formats() -> &'static [AttachmentFormat] {
 /// by MIME is always authoritative; these tokens only widen what the picker
 /// *shows*, never what is *accepted*.
 pub fn accept_tokens() -> Vec<String> {
-    let alias_count: usize = FORMATS.iter().map(|f| f.ext_aliases.len()).sum();
-    let mut tokens = Vec::with_capacity(FORMATS.len() + alias_count);
+    // Advertise the exact MIME type *and* the extension(s) for each format.
+    // The MIME types are load-bearing on macOS: with an extension-only `accept`,
+    // Chromium hands NSOpenPanel an extension-based `allowedFileTypes` filter
+    // that makes folders non-navigable, so double-clicking a folder dismisses
+    // the picker instead of opening it. Exact MIME types map to UTIs that keep
+    // directory navigation working. They are exact (never `image/*` wildcards),
+    // so the advertised set still equals the supported set; the extensions cover
+    // platforms (and extension-less files) the MIME match would miss.
+    let ext_alias_count: usize = FORMATS.iter().map(|f| f.ext_aliases.len()).sum();
+    let mut tokens = Vec::with_capacity(FORMATS.len() * 2 + ext_alias_count);
     for format in FORMATS {
+        tokens.push(format.mime.to_string());
         tokens.push(format!(".{}", format.canonical_ext));
         tokens.extend(format.ext_aliases.iter().map(|alias| format!(".{alias}")));
     }
@@ -627,6 +654,31 @@ mod tests {
                 format.canonical_ext
             );
             assert!(!format.canonical_ext.is_empty());
+            // `mime_for_extension` lowercases its input and compares with `==`,
+            // so every table extension must be lowercase, and every extension
+            // (canonical or alias) must be unique across the whole table — a
+            // collision would silently mislabel a download with the first match.
+            assert_eq!(
+                format.canonical_ext,
+                format.canonical_ext.to_ascii_lowercase(),
+                "canonical extension {} is not lowercase",
+                format.canonical_ext
+            );
+            for alias in format.ext_aliases {
+                assert!(
+                    seen_exts.insert(*alias),
+                    "extension {alias} appears as canonical and/or alias more than once",
+                );
+                assert_ne!(
+                    *alias, format.canonical_ext,
+                    "extension alias equals canonical for {alias}",
+                );
+                assert_eq!(
+                    *alias,
+                    alias.to_ascii_lowercase(),
+                    "extension alias {alias} is not lowercase",
+                );
+            }
             assert_eq!(
                 format.mime,
                 normalize_mime_type(format.mime),
@@ -647,32 +699,45 @@ mod tests {
     }
 
     #[test]
-    fn accept_tokens_are_exactly_the_registry_extensions() {
+    fn accept_tokens_advertise_exact_mimes_and_extensions_without_wildcards() {
         let tokens = accept_tokens();
 
-        // Every token is an explicit extension — no `image/*` / `audio/*`
-        // wildcards that would advertise formats the registry rejects.
-        assert!(
-            tokens.iter().all(|t| t.starts_with('.')),
-            "accept tokens must be extensions, not wildcards: {tokens:?}"
-        );
+        // Every token is either an extension (`.png`) or an exact MIME type
+        // (`image/png`) — never an `image/*` / `audio/*` wildcard that would
+        // advertise formats the registry rejects. (The exact MIME types are what
+        // keep macOS folder navigation working in the native picker.)
+        for t in &tokens {
+            let is_ext = t.starts_with('.');
+            let is_exact_mime = t.contains('/') && !t.ends_with("/*");
+            assert!(
+                is_ext || is_exact_mime,
+                "accept token must be an extension or exact MIME, not {t:?}: {tokens:?}"
+            );
+            assert!(
+                !t.contains('*'),
+                "accept tokens must not be wildcards: {t:?}"
+            );
+        }
 
         // No duplicate tokens.
         let unique: HashSet<&String> = tokens.iter().collect();
         assert_eq!(unique.len(), tokens.len(), "accept tokens must be unique");
 
-        // The advertised set covers the canonical extension of every registered
-        // format (so the picker and `is_supported_mime` stay in lockstep) plus a
-        // few common spelling aliases for real-world filenames.
+        // The advertised set covers the canonical extension *and* the canonical
+        // MIME of every registered format (so the picker and `is_supported_mime`
+        // stay in lockstep) plus a few common spelling aliases for real-world
+        // filenames.
         let token_set: HashSet<String> = tokens.iter().cloned().collect();
-        let canonical: HashSet<String> = all_formats()
-            .iter()
-            .map(|f| format!(".{}", f.canonical_ext))
-            .collect();
-        assert!(
-            canonical.is_subset(&token_set),
-            "every canonical extension must be advertised: {tokens:?}"
-        );
+        for format in all_formats() {
+            assert!(
+                token_set.contains(&format!(".{}", format.canonical_ext)),
+                "every canonical extension must be advertised: {tokens:?}"
+            );
+            assert!(
+                token_set.contains(format.mime),
+                "every canonical MIME must be advertised: {tokens:?}"
+            );
+        }
         for alias in [".jpeg", ".htm", ".yml", ".opus", ".cc", ".mjs"] {
             assert!(
                 token_set.contains(alias),
@@ -680,16 +745,18 @@ mod tests {
             );
         }
 
-        // Images are advertised by explicit extension, not a wildcard.
+        // Images are advertised by exact extension + MIME, never a wildcard.
         assert!(tokens.contains(&".png".to_string()));
+        assert!(tokens.contains(&"image/png".to_string()));
         assert!(!tokens.contains(&"image/*".to_string()));
     }
 
     #[test]
     fn accept_attribute_is_comma_joined_tokens() {
         assert_eq!(accept_attribute(), accept_tokens().join(","));
-        // Table order: the first registered format is `image/png`.
-        assert!(accept_attribute().starts_with(".png,"));
+        // Table order: the first registered format is `image/png`, emitted as
+        // its MIME type then its extension.
+        assert!(accept_attribute().starts_with("image/png,.png,"));
     }
 
     /// The registry is the source of truth the v1 `src/` call sites will migrate
@@ -858,5 +925,25 @@ mod tests {
                 "registry canonical_ext for {mime} diverged from web_attachment_ext"
             );
         }
+    }
+
+    #[test]
+    fn mime_for_extension_resolves_canonical_alias_and_normalizes() {
+        // Canonical extension.
+        assert_eq!(mime_for_extension("csv"), Some("text/csv"));
+        assert_eq!(mime_for_extension("jpg"), Some("image/jpeg"));
+        // Alias extensions resolve to the same canonical MIME.
+        assert_eq!(mime_for_extension("jpeg"), Some("image/jpeg"));
+        assert_eq!(mime_for_extension("jfif"), Some("image/jpeg"));
+        // Input is normalized: leading dot stripped, ASCII case-insensitive.
+        assert_eq!(mime_for_extension(".JPG"), Some("image/jpeg"));
+        assert_eq!(mime_for_extension("CSV"), Some("text/csv"));
+    }
+
+    #[test]
+    fn mime_for_extension_returns_none_for_unknown() {
+        // Download callers rely on `None` to fall back to octet-stream.
+        assert_eq!(mime_for_extension("nope"), None);
+        assert_eq!(mime_for_extension(""), None);
     }
 }

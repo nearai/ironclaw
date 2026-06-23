@@ -1,9 +1,51 @@
 // Map v2 `ThreadMessageRecord[]` from RebornTimelineResponse into
-// the message shape the UI components render. Kept narrow: the v2
-// timeline contract has no attachments or generated images; turn grouping
-// consumes the normalized `turnRunId` carried by records and previews.
+// the message shape the UI components render. Turn grouping consumes the
+// normalized `turnRunId` carried by records and previews. Records carry
+// `attachments: AttachmentRef[]`; we project them into the render shape
+// `MessageBubble` expects so attachment cards survive a page refresh and a
+// thread switch (the timeline is the source of truth — the bytes stay
+// behind the project mount, the cards render from the refs).
 
-export function messagesFromTimeline(records, pendingMessages = []) {
+import { attachmentKindFromMime, formatBytes } from "./attachments.js";
+import { attachmentUrl } from "../../../lib/api.js";
+
+// Project a stored `AttachmentRef` (snake_case wire shape) into the
+// render shape `MessageBubble` consumes. The timeline never carries bytes,
+// so `preview_url` is null here; a landed image instead gets a `fetch_url`
+// the bubble lazily resolves into a thumbnail (an authenticated byte fetch,
+// since `<img>` cannot send a bearer header). The just-sent optimistic
+// message keeps its local data URL in `preview_url` and needs no fetch.
+function attachmentsFromRecord(record, threadId) {
+  const refs = record.attachments;
+  if (!Array.isArray(refs) || refs.length === 0) return undefined;
+  return refs.map((ref) => {
+    const kind = ref.kind || attachmentKindFromMime(ref.mime_type);
+    // Any landed attachment can serve its bytes — for an image thumbnail or
+    // for click-to-preview of any kind. A ref without a storage_key never
+    // landed, so there are no bytes to fetch. Require every addressing part so
+    // a malformed record yields a plain card (no fetch) rather than throwing in
+    // `attachmentUrl` mid-projection.
+    const fetch_url =
+      threadId && ref.storage_key && record.message_id && ref.id
+        ? attachmentUrl({
+            threadId,
+            messageId: record.message_id,
+            attachmentId: ref.id,
+          })
+        : null;
+    return {
+      id: ref.id,
+      filename: ref.filename || "attachment",
+      mime_type: ref.mime_type || "",
+      kind,
+      size_label: Number.isFinite(ref.size_bytes) ? formatBytes(ref.size_bytes) : "",
+      preview_url: null,
+      fetch_url,
+    };
+  });
+}
+
+export function messagesFromTimeline(records, pendingMessages = [], threadId = null) {
   const seen = new Set();
   const messages = [];
 
@@ -27,6 +69,8 @@ export function messagesFromTimeline(records, pendingMessages = []) {
         ...card,
         timestamp: timestampForRecord(record) || card.updatedAt || null,
         sequence: record.sequence,
+        activityOrder: card.activityOrder,
+        activityOrderSource: card.activityOrderSource,
         turnRunId: record.turn_run_id || null,
       });
       continue;
@@ -36,13 +80,21 @@ export function messagesFromTimeline(records, pendingMessages = []) {
     if (seen.has(id)) continue;
     seen.add(id);
     const role = roleForRecord(record);
+    const isBusyRejected =
+      role === "user" &&
+      (record.status === "rejected_busy" || record.status === "deferred_busy");
     messages.push({
       id,
       role,
       content: record.content || "",
+      attachments: attachmentsFromRecord(record, threadId),
       timestamp: timestampForRecord(record),
       kind: record.kind,
-      status: record.status,
+      status: isBusyRejected ? "error" : record.status,
+      ...(isBusyRejected && {
+        error:
+          "This message wasn't sent because Ironclaw was busy. Resend it to try again.",
+      }),
       isFinalReply: isFinalAssistantRecord(record),
       sequence: record.sequence,
       turnRunId: record.turn_run_id || null,
@@ -122,10 +174,12 @@ function toolCardFromPreviewRecord(record) {
 // `ToolActivityCard` destructures.
 export function toolCardFromPreview(preview) {
   const failed = preview.status === "failed" || preview.status === "killed";
+  const activityOrder = numericActivityOrder(preview.activity_order);
   return {
     invocationId: preview.invocation_id,
     callId: preview.invocation_id,
-    toolName: preview.title || preview.capability_id || "tool",
+    capabilityId: preview.capability_id || null,
+    toolName: toolDisplayName(preview.title || preview.capability_id) || "tool",
     toolStatus: toolStatusFromActivityStatus(preview.status),
     toolDetail: preview.subtitle || null,
     toolParameters: preview.input_summary || null,
@@ -148,21 +202,27 @@ export function toolCardFromPreview(preview) {
     outputBytes: preview.output_bytes ?? null,
     outputKind: preview.output_kind || null,
     turnRunId: preview.turn_run_id || null,
+    activityOrder,
+    activityOrderSource: Number.isFinite(activityOrder) ? "projection" : null,
   };
 }
 
 // Map a `CapabilityActivityView` (SSE lifecycle frame) into the same
-// card shape. Activity frames carry only metadata — no title, no
-// parameters, no output — so the resulting card is intentionally
-// sparse and is meant to be enriched by the next preview frame.
+// card shape. While the invocation is still running the backend now
+// carries the staged input on the activity frame (`subtitle` =
+// inline primary argument, `input_summary` = parameters), so the row
+// shows `tool   <arg>` live instead of a bare name. Output fields stay
+// empty until the preview frame lands at completion.
 export function toolCardFromActivity(activity) {
+  const activityOrder = numericActivityOrder(activity.activity_order);
   return {
     invocationId: activity.invocation_id,
     callId: activity.invocation_id,
-    toolName: activity.capability_id || "tool",
+    capabilityId: activity.capability_id || null,
+    toolName: toolDisplayName(activity.capability_id) || "tool",
     toolStatus: toolStatusFromActivityStatus(activity.status),
-    toolDetail: null,
-    toolParameters: null,
+    toolDetail: activity.subtitle || null,
+    toolParameters: activity.input_summary || null,
     toolResultPreview: null,
     toolError: activity.error_kind || null,
     toolDurationMs: null,
@@ -172,11 +232,20 @@ export function toolCardFromActivity(activity) {
     outputBytes: activity.output_bytes ?? null,
     outputKind: null,
     turnRunId: activity.turn_run_id || null,
+    activityOrder,
+    activityOrderSource: Number.isFinite(activityOrder) ? "projection" : null,
   };
 }
 
 export function isTerminalToolStatus(status) {
   return status === "success" || status === "error";
+}
+
+export function toolDisplayName(name) {
+  const value = typeof name === "string" ? name.trim() : "";
+  if (!value) return "";
+  const parts = value.split(".");
+  return parts[parts.length - 1] || value;
 }
 
 function toolStatusFromActivityStatus(status) {
@@ -191,4 +260,9 @@ function toolStatusFromActivityStatus(status) {
     default:
       return "running";
   }
+}
+
+function numericActivityOrder(value) {
+  const number = Number(value);
+  return Number.isFinite(number) ? number : null;
 }

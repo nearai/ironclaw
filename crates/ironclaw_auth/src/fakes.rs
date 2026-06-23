@@ -21,16 +21,17 @@ use crate::{
     OAuthProviderRefresh, OAuthProviderRefreshRequest, ProviderCallbackOutcome,
     SecretCleanupAction, SecretCleanupQuarantine, SecretCleanupQuarantineReason,
     SecretCleanupReport, SecretCleanupRequest, SecretCleanupService, SecretSubmitRequest,
-    SecretSubmitResult, Timestamp, TurnGateAuthFlowQuery,
+    SecretSubmitResult, Timestamp, TurnGateAuthFlowQuery, binding_scope_owns_account,
     cleanup::SecretCleanupAction::Deactivate,
     domain::{
         PreparedCallbackFlow, account_is_authorized_for_requester, prepare_callback_flow,
         recovery_projection_for_single_account, recovery_projection_for_unconfigured_accounts,
         update_account_from_exchange, update_account_from_request, validate_account_update_target,
-        validate_bound_update_authority, validate_callback_claim,
-        validate_credential_status_transition, validate_flow_update_binding,
-        validate_manual_token_flow, validate_manual_token_update_binding,
-        validate_new_credential_account, validate_refresh_target, validate_selection_flow,
+        validate_bound_account_update_target, validate_bound_update_authority,
+        validate_callback_claim, validate_credential_status_transition,
+        validate_flow_update_binding, validate_manual_token_flow,
+        validate_manual_token_update_binding, validate_new_credential_account,
+        validate_refresh_target, validate_selection_flow,
     },
     flow::credential_status_for_completed_flow,
     flow_matches_turn_gate_query,
@@ -47,6 +48,7 @@ struct AuthState {
     continuations: Vec<AuthContinuationEvent>,
     refresh_fails: HashSet<CredentialAccountId>,
     refresh_backend_fails: HashSet<CredentialAccountId>,
+    refresh_invalid_grants: HashSet<CredentialAccountId>,
     refresh_races: HashMap<CredentialAccountId, (SecretHandle, SecretHandle)>,
     quarantines: HashMap<CredentialAccountId, SecretCleanupQuarantineReason>,
 }
@@ -76,6 +78,10 @@ impl InMemoryAuthProductServices {
 
     pub fn fail_next_refresh_backend_for_tests(&self, account_id: CredentialAccountId) {
         self.lock_state().refresh_backend_fails.insert(account_id);
+    }
+
+    pub fn invalid_grant_next_refresh_for_tests(&self, account_id: CredentialAccountId) {
+        self.lock_state().refresh_invalid_grants.insert(account_id);
     }
 
     pub fn complete_refresh_during_next_provider_call_for_tests(
@@ -937,6 +943,7 @@ impl AuthProviderClient for InMemoryAuthProductServices {
             let mut state = self.lock_state();
             let should_fail = state.refresh_fails.remove(&request.account_id);
             let should_backend_fail = state.refresh_backend_fails.remove(&request.account_id);
+            let should_invalid_grant = state.refresh_invalid_grants.remove(&request.account_id);
             if let Some((access_secret, refresh_secret)) =
                 state.refresh_races.remove(&request.account_id)
                 && let Some(account) = state.accounts.get_mut(&request.account_id)
@@ -946,13 +953,16 @@ impl AuthProviderClient for InMemoryAuthProductServices {
                 account.status = CredentialAccountStatus::Configured;
                 account.updated_at = Utc::now();
             }
-            (should_fail, should_backend_fail)
+            (should_fail, should_backend_fail, should_invalid_grant)
         };
         if should_fail.0 {
             return Err(AuthProductError::RefreshFailed);
         }
         if should_fail.1 {
             return Err(AuthProductError::BackendUnavailable);
+        }
+        if should_fail.2 {
+            return Err(AuthProductError::InvalidGrant);
         }
         Ok(OAuthProviderRefresh {
             provider: request.provider,
@@ -1058,7 +1068,17 @@ fn resolve_callback_account(
         Some(account_id) => {
             update_bound_callback_account(state, callback, exchange, account_id, now)
         }
-        None => create_callback_account(state, callback, exchange),
+        // Mirror the production durable callback (flows.rs): an exchange with no
+        // provider account_id but a stored update_binding is a reconnect of the
+        // bound account, not a fresh create. Routing this to
+        // `create_callback_account` (which rejects any binding) left the fake
+        // unable to exercise the reconnect contract.
+        None => match callback.update_binding.as_ref().map(|b| b.account_id) {
+            Some(account_id) => {
+                update_bound_callback_account(state, callback, exchange, account_id, now)
+            }
+            None => create_callback_account(state, callback, exchange),
+        },
     }
 }
 
@@ -1079,7 +1099,10 @@ fn update_bound_callback_account(
         .accounts
         .get_mut(&account_id)
         .ok_or(AuthProductError::CredentialMissing)?;
-    if !scope_matches(&callback.scope, &account.scope) {
+    // Owner-granularity guard (#4935), mirroring production `update_bound_oauth_account`.
+    // The callback `scope` carries the flow's per-flow invocation/thread the bound
+    // account never shared; full `scope_matches` here rejected the legitimate reconnect.
+    if !binding_scope_owns_account(&callback.scope, account) {
         return Err(AuthProductError::CrossScopeDenied);
     }
     if account.provider != exchange.provider {
@@ -1122,7 +1145,7 @@ fn create_or_update_manual_token_account(
 ) -> Result<CredentialAccount, AuthProductError> {
     match pending.update_binding.as_ref() {
         Some(binding) => {
-            let account_request = manual_token_account_request(
+            let mut account_request = manual_token_account_request(
                 &pending,
                 binding.ownership,
                 binding.owner_extension.clone(),
@@ -1133,7 +1156,21 @@ fn create_or_update_manual_token_account(
                 .accounts
                 .get_mut(&binding.account_id)
                 .ok_or(AuthProductError::CredentialMissing)?;
-            validate_account_update_target(account, &account_request)?;
+            // Bound reconnect: authorize at owner granularity (#4935), mirroring
+            // the production durable path; full `scope_matches` would reject every
+            // cross-thread manual-token reconnect.
+            validate_bound_account_update_target(
+                account,
+                &pending.scope,
+                &pending.provider,
+                binding,
+            )?;
+            // Mutate the bound account in place, preserving its own durable scope
+            // (the reconnect arrives from a different thread/invocation; the
+            // account does not move). This keeps the mutation's internal
+            // same-scope check trivially satisfied, exactly as the reusable path
+            // below does.
+            account_request.scope = account.scope.clone();
             update_account_from_request(account, account_request, now)
         }
         None => {

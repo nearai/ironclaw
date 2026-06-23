@@ -167,6 +167,7 @@ async fn webui_event_stream_offers_always_for_typed_approval_gate() {
     let gate_ref = GateRef::new(format!("gate:approval-{approval_request_id}")).unwrap();
     let approval_requests = Arc::new(InMemoryApprovalRequestStore::new());
     let capability = CapabilityId::new("builtin.http").unwrap();
+    let blocked_invocation = InvocationId::new();
     approval_requests
         .save_pending(
             resource_scope(
@@ -174,7 +175,7 @@ async fn webui_event_stream_offers_always_for_typed_approval_gate() {
                 &user_id,
                 &agent_id,
                 &thread_id,
-                InvocationId::new(),
+                blocked_invocation,
             ),
             ApprovalRequest {
                 id: approval_request_id,
@@ -249,6 +250,7 @@ async fn webui_event_stream_offers_always_for_typed_approval_gate() {
 
     assert_eq!(prompt.turn_run_id, turn_run);
     assert_eq!(prompt.gate_ref, gate_ref.as_str());
+    assert_eq!(prompt.invocation_id, Some(blocked_invocation));
     assert_eq!(prompt.headline, "Approval required");
     assert_eq!(prompt.body, "capability requires approval");
     assert!(prompt.allow_always);

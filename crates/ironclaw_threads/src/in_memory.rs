@@ -4,6 +4,7 @@ use std::{
 };
 
 use async_trait::async_trait;
+use chrono::Utc;
 use ironclaw_host_api::ThreadId;
 use tokio::sync::Mutex;
 use uuid::Uuid;
@@ -85,6 +86,7 @@ impl SessionThreadService for InMemorySessionThreadService {
             return Ok(existing.record.clone());
         }
 
+        let now = Utc::now();
         let record = SessionThreadRecord {
             scope: request.scope,
             thread_id: thread_id.clone(),
@@ -92,6 +94,8 @@ impl SessionThreadService for InMemorySessionThreadService {
             title: request.title,
             metadata_json: request.metadata_json,
             goal: None,
+            created_at: Some(now),
+            updated_at: Some(now),
         };
         state.threads.insert(
             thread_id,
@@ -144,10 +148,17 @@ impl SessionThreadService for InMemorySessionThreadService {
         let key = InboundIdempotencyKey::from_request(&request);
         let thread = get_thread_mut(&mut state, &request.scope, &request.thread_id)?;
         let message_id = ThreadMessageId::new();
-        let sequence = thread.next_sequence;
-        thread.next_sequence += 1;
+        // Validate the payload before mutating any thread state. A rejected
+        // attachment must not increment the sequence or bump the
+        // last-activity stamp, or an invalid message would surface the
+        // thread at the top of the sidebar without being appended.
         let (content_text, attachments) = request.content.into_parts();
         crate::contract::validate_attachment_refs(&attachments)?;
+        let sequence = thread.next_sequence;
+        thread.next_sequence += 1;
+        // Appending a message is thread activity; bump the last-activity
+        // stamp so activity-ordered listings surface this thread first.
+        thread.record.updated_at = Some(Utc::now());
         thread.messages.push(ThreadMessageRecord {
             message_id,
             thread_id: request.thread_id.clone(),
@@ -237,7 +248,7 @@ impl SessionThreadService for InMemorySessionThreadService {
         Ok(message.clone())
     }
 
-    async fn mark_message_deferred_busy(
+    async fn mark_message_rejected_busy(
         &self,
         scope: &ThreadScope,
         thread_id: &ThreadId,
@@ -245,8 +256,8 @@ impl SessionThreadService for InMemorySessionThreadService {
     ) -> Result<ThreadMessageRecord, SessionThreadError> {
         let mut state = self.state.lock().await;
         let message = get_message_mut(&mut state, scope, thread_id, message_id)?;
-        ensure_user_accepted(message, "mark_message_deferred_busy")?;
-        message.status = MessageStatus::DeferredBusy;
+        ensure_user_accepted(message, "mark_message_rejected_busy")?;
+        message.status = MessageStatus::RejectedBusy;
         message.turn_id = None;
         message.turn_run_id = None;
         Ok(message.clone())
@@ -283,6 +294,9 @@ impl SessionThreadService for InMemorySessionThreadService {
             redaction_ref: None,
         };
         thread.next_sequence += 1;
+        // Appending a message is thread activity; bump the last-activity
+        // stamp so activity-ordered listings surface this thread first.
+        thread.record.updated_at = Some(Utc::now());
         thread.messages.push(message.clone());
         Ok(message)
     }
@@ -364,6 +378,9 @@ impl SessionThreadService for InMemorySessionThreadService {
             redaction_ref: None,
         };
         thread.next_sequence += 1;
+        // Appending a message is thread activity; bump the last-activity
+        // stamp so activity-ordered listings surface this thread first.
+        thread.record.updated_at = Some(Utc::now());
         thread.messages.push(message.clone());
         Ok(message)
     }
@@ -412,6 +429,9 @@ impl SessionThreadService for InMemorySessionThreadService {
             redaction_ref: None,
         };
         thread.next_sequence += 1;
+        // Appending a message is thread activity; bump the last-activity
+        // stamp so activity-ordered listings surface this thread first.
+        thread.record.updated_at = Some(Utc::now());
         thread.messages.push(message.clone());
         Ok(message)
     }
@@ -727,24 +747,31 @@ impl SessionThreadService for InMemorySessionThreadService {
                 record
             })
             .collect();
-        // Stable order so opaque cursor → resumption is deterministic.
-        matching.sort_by(|a, b| a.thread_id.as_str().cmp(b.thread_id.as_str()));
+        // Newest activity first (`updated_at`, falling back to
+        // `created_at`); legacy records without timestamps sort last.
+        // Tie-break on thread_id ascending so the order is stable and
+        // opaque cursors stay resumable, matching the filesystem backend
+        // and the web sidebar's `byActivityDesc` comparator.
+        matching.sort_by(|a, b| {
+            let a_key = a.updated_at.or(a.created_at);
+            let b_key = b.updated_at.or(b.created_at);
+            std::cmp::Reverse(a_key)
+                .cmp(&std::cmp::Reverse(b_key))
+                .then_with(|| a.thread_id.as_str().cmp(b.thread_id.as_str()))
+        });
 
+        // Opaque cursor is the last thread_id of the previous page; find
+        // it in the activity-sorted list and resume after it. A cursor
+        // that no longer resolves ends the stream rather than restarting.
         let start_index = match request.cursor.as_deref() {
             Some(cursor) => matching
                 .iter()
-                .position(|record| record.thread_id.as_str() > cursor)
+                .position(|record| record.thread_id.as_str() == cursor)
+                .map(|index| index + 1)
                 .unwrap_or(matching.len()),
             None => 0,
         };
         let end_index = start_index.saturating_add(limit).min(matching.len());
-        // Cursor reflects the last *attempted* id in the slice (vs. the
-        // last successful), so a page that ends up empty due to
-        // upstream filtering still produces a cursor that moves
-        // forward. Today every entry in `matching` survives because
-        // the scope filter is the only predicate, but lining this up
-        // with the filesystem backend keeps the contract identical
-        // when future predicates land.
         let next_cursor = if end_index < matching.len() {
             matching[start_index..end_index]
                 .last()
@@ -796,6 +823,31 @@ impl SessionThreadService for InMemorySessionThreadService {
                 })?;
         thread.record.goal = Some(request.goal.clone());
         Ok(request.goal)
+    }
+}
+
+impl InMemorySessionThreadService {
+    /// Test-only back-door: force a message's status to `DeferredBusy` so
+    /// that legacy-row read/replay tests can construct pre-existing
+    /// `DeferredBusy` rows without going through the now-retired
+    /// `mark_message_deferred_busy` writer.  Never call from production code.
+    ///
+    /// Gated behind `#[cfg(any(test, feature = "test-support"))]` so it is
+    /// absent from production builds. Integration tests in a separate
+    /// compilation unit must enable the `test-support` feature.
+    #[cfg(any(test, feature = "test-support"))]
+    pub async fn inject_legacy_deferred_busy_for_test(
+        &self,
+        scope: &ThreadScope,
+        thread_id: &ThreadId,
+        message_id: ThreadMessageId,
+    ) -> Result<ThreadMessageRecord, SessionThreadError> {
+        let mut state = self.state.lock().await;
+        let message = get_message_mut(&mut state, scope, thread_id, message_id)?;
+        message.status = MessageStatus::DeferredBusy;
+        message.turn_id = None;
+        message.turn_run_id = None;
+        Ok(message.clone())
     }
 }
 
@@ -924,23 +976,14 @@ fn context_messages_with_summary_replacements(thread: &StoredThread) -> Vec<Cont
                 kind: MessageKind::Summary,
                 tool_result_provider_call: None,
                 content: summary.content.clone(),
+                image_attachments: Vec::new(),
             });
             emitted_summaries.insert(summary.summary_id);
             skip_through = summary.end_sequence;
             continue;
         }
         if let Some(content) = message.content.clone() {
-            context.push(ContextMessage {
-                message_id: Some(message.message_id),
-                summary_id: None,
-                sequence: message.sequence,
-                kind: message.kind,
-                tool_result_provider_call: message.tool_result_provider_call.clone(),
-                content: crate::attachment_context::augment_model_content(
-                    content,
-                    &message.attachments,
-                ),
-            });
+            context.push(ContextMessage::from_transcript_message(message, content));
         }
     }
     context
@@ -960,17 +1003,8 @@ fn context_messages_by_id(
         .iter()
         .filter_map(|message_id| {
             let message = visible_messages.get(message_id)?;
-            Some(ContextMessage {
-                message_id: Some(message.message_id),
-                summary_id: None,
-                sequence: message.sequence,
-                kind: message.kind,
-                tool_result_provider_call: message.tool_result_provider_call.clone(),
-                content: crate::attachment_context::augment_model_content(
-                    message.content.clone()?,
-                    &message.attachments,
-                ),
-            })
+            let content = message.content.clone()?;
+            Some(ContextMessage::from_transcript_message(message, content))
         })
         .collect()
 }
@@ -1023,11 +1057,41 @@ fn history_message(message: &ThreadMessageRecord) -> ThreadMessageRecord {
     }
 }
 
+/// Returns true when a non-model-context-visible message within the summary
+/// span could later become model-visible (i.e. it is in a resurfaceable pending
+/// state).  Permanently-terminal non-visible messages (RejectedBusy, capability
+/// previews) never resurface, so a compaction summary spanning them is safe to
+/// apply — blocking it would silently drop a legitimate compacted range.
+///
+/// Resurfaceable statuses (must still block the summary):
+///   Draft | Interrupted | Superseded | DeferredBusy
+/// Permanent non-visible (must NOT block):
+///   RejectedBusy (terminal, user must explicitly resend)
+///   CapabilityDisplayPreview kind (never model-visible regardless of status)
+///
+/// Note: Redacted/Deleted keep their blocking role here — they were never
+/// model-visible and the separate `summary_covers_redacted_or_deleted_content`
+/// guard (used for history display) doesn't cover the context-build path.
+fn can_resurface_as_model_visible(message: &ThreadMessageRecord) -> bool {
+    matches!(
+        message.status,
+        MessageStatus::Draft
+            | MessageStatus::Interrupted
+            | MessageStatus::Superseded
+            | MessageStatus::DeferredBusy
+    )
+}
+
 fn summary_covers_hidden_content(thread: &StoredThread, summary: &SummaryArtifact) -> bool {
     thread.messages.iter().any(|message| {
         summary.start_sequence <= message.sequence
             && message.sequence <= summary.end_sequence
             && !is_model_context_visible(message)
+            && (can_resurface_as_model_visible(message)
+                || matches!(
+                    message.status,
+                    MessageStatus::Redacted | MessageStatus::Deleted
+                ))
     })
 }
 

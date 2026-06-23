@@ -20,6 +20,8 @@ use ironclaw_turns::{
 };
 use serde_json::json;
 
+use crate::capability_port::CapabilityWriteResult;
+
 use super::*;
 
 struct StaticInputResolver {
@@ -242,6 +244,7 @@ impl LoopCapabilityPort for SurfacePrimedSpawnAuthPort {
             progress: ironclaw_turns::run_profile::CapabilityProgress::MadeProgress,
             terminate_hint: false,
             byte_len: 0,
+            output_digest: None,
         }))
     }
 
@@ -363,6 +366,7 @@ impl LoopCapabilityPort for AuthPassPort {
             progress: ironclaw_turns::run_profile::CapabilityProgress::MadeProgress,
             terminate_hint: false,
             byte_len: 0,
+            output_digest: None,
         }))
     }
 
@@ -511,8 +515,11 @@ impl LoopCapabilityResultWriter for NoopResultWriter {
     async fn write_capability_result(
         &self,
         _write: CapabilityResultWrite<'_>,
-    ) -> Result<(LoopResultRef, u64), AgentLoopHostError> {
-        Ok((LoopResultRef::new("result:spawn").unwrap(), 0))
+    ) -> Result<CapabilityWriteResult, AgentLoopHostError> {
+        Ok(CapabilityWriteResult::without_output_digest(
+            LoopResultRef::new("result:spawn").unwrap(),
+            0,
+        ))
     }
 }
 
@@ -695,14 +702,14 @@ impl SessionThreadService for FailingMarkThreadService {
         ))
     }
 
-    async fn mark_message_deferred_busy(
+    async fn mark_message_rejected_busy(
         &self,
         scope: &ThreadScope,
         thread_id: &ThreadId,
         message_id: ThreadMessageId,
     ) -> Result<ThreadMessageRecord, SessionThreadError> {
         self.inner
-            .mark_message_deferred_busy(scope, thread_id, message_id)
+            .mark_message_rejected_busy(scope, thread_id, message_id)
             .await
     }
 
@@ -1039,6 +1046,8 @@ fn turn_record(run_context: &LoopRunContext, subagent_depth: u32) -> TurnRunReco
         parent_run_id: lineage_root,
         subagent_depth,
         spawn_tree_root_run_id: lineage_root,
+        product_context: None,
+        resume_disposition: None,
     }
 }
 
@@ -1177,6 +1186,7 @@ fn completed_outcome(label: &str) -> CapabilityOutcome {
         progress: ironclaw_turns::run_profile::CapabilityProgress::MadeProgress,
         terminate_hint: false,
         byte_len: 0,
+        output_digest: None,
     })
 }
 
@@ -2873,8 +2883,8 @@ impl LoopCapabilityResultWriter for FixedByteResultWriter {
     async fn write_capability_result(
         &self,
         _write: CapabilityResultWrite<'_>,
-    ) -> Result<(LoopResultRef, u64), AgentLoopHostError> {
-        Ok((
+    ) -> Result<CapabilityWriteResult, AgentLoopHostError> {
+        Ok(CapabilityWriteResult::without_output_digest(
             LoopResultRef::new("result:fixed-bytes").unwrap(),
             self.byte_len,
         ))

@@ -11,12 +11,14 @@ mod http_output;
 mod json;
 mod memory;
 mod model_visible_output;
+mod profile_set;
 mod schemas;
 mod shell;
 mod skill_management;
 mod skill_url_install;
 mod spawn_subagent;
 mod time;
+mod trace_commons;
 mod trigger_management;
 
 use std::{future::Future, panic::AssertUnwindSafe, sync::Arc, time::Instant};
@@ -32,9 +34,9 @@ use ironclaw_first_party_extensions::coding::{
 };
 use ironclaw_host_api::{
     CapabilityId, CapabilityProfileSchemaRef, EffectKind, ExtensionId, HostApiError,
-    PermissionMode, RequestedTrustClass, ResourceCeiling, ResourceEstimate, ResourceProfile,
-    ResourceUsage, RuntimeDispatchErrorKind, RuntimeHttpEgressError, RuntimeHttpEgressResponse,
-    TrustClass, VirtualPath,
+    PermissionMode, ProcessBackendKind, RequestedTrustClass, ResourceCeiling, ResourceEstimate,
+    ResourceProfile, ResourceUsage, RuntimeDispatchErrorKind, RuntimeHttpEgressError,
+    RuntimeHttpEgressResponse, TrustClass, VirtualPath,
 };
 
 use crate::{
@@ -51,12 +53,18 @@ pub use memory::{
     MEMORY_READ_CAPABILITY_ID, MEMORY_SEARCH_CAPABILITY_ID, MEMORY_TREE_CAPABILITY_ID,
     MEMORY_WRITE_CAPABILITY_ID,
 };
+pub use profile_set::PROFILE_SET_CAPABILITY_ID;
 pub use shell::SHELL_CAPABILITY_ID;
 pub use skill_management::{
     SKILL_INSTALL_CAPABILITY_ID, SKILL_LIST_CAPABILITY_ID, SKILL_REMOVE_CAPABILITY_ID,
 };
 pub use spawn_subagent::SPAWN_SUBAGENT_CAPABILITY_ID;
 pub use time::TIME_CAPABILITY_ID;
+pub use trace_commons::{
+    TRACE_COMMONS_CREDITS_CAPABILITY_ID, TRACE_COMMONS_ONBOARD_CAPABILITY_ID,
+    TRACE_COMMONS_PROFILE_SET_CAPABILITY_ID, TRACE_COMMONS_PROFILE_TOKEN_CAPABILITY_ID,
+    TRACE_COMMONS_STATUS_CAPABILITY_ID,
+};
 #[cfg(any(test, feature = "test-support"))]
 pub use trigger_management::TriggerManagementClock;
 pub use trigger_management::{
@@ -71,6 +79,12 @@ pub const LIST_DIR_CAPABILITY_ID: &str = "builtin.list_dir";
 pub const GLOB_CAPABILITY_ID: &str = "builtin.glob";
 pub const GREP_CAPABILITY_ID: &str = "builtin.grep";
 pub const APPLY_PATCH_CAPABILITY_ID: &str = "builtin.apply_patch";
+
+// `builtin.shell` is the only built-in first-party handler that directly
+// requires a RuntimeProcessPort. `builtin.spawn_subagent` declares
+// SpawnProcess as an authorization effect, but child-run scheduling is governed
+// by runtime-policy planning rather than this process-port capability list.
+const PROCESS_PORT_BACKED_BUILTIN_CAPABILITY_IDS: &[&str] = &[SHELL_CAPABILITY_ID];
 
 const MAX_FIRST_PARTY_INPUT_BYTES: usize = 1_048_576;
 const MAX_WRITE_FILE_INPUT_BYTES: usize = 6 * 1024 * 1024;
@@ -93,7 +107,7 @@ const CODING_CAPABILITIES: &[CodingCapabilityMetadata] = &[
     CodingCapabilityMetadata {
         id: READ_FILE_CAPABILITY_ID,
         kind: CodingCapabilityKind::ReadFile,
-        description: "Read a file through scoped mounts with v1 read_file output shape",
+        description: "Read text files, and extract text from supported document files, through scoped mounts with v1 read_file output shape",
         effects: &[EffectKind::ReadFilesystem],
         max_input_bytes: MAX_FIRST_PARTY_INPUT_BYTES,
     },
@@ -162,6 +176,12 @@ pub fn builtin_first_party_package() -> Result<ExtensionPackage, ExtensionError>
                     http::save_manifest()?,
                     shell::manifest()?,
                     spawn_subagent::manifest()?,
+                    trace_commons::onboard_manifest()?,
+                    trace_commons::status_manifest()?,
+                    trace_commons::credits_manifest()?,
+                    trace_commons::profile_token_manifest()?,
+                    trace_commons::profile_set_manifest()?,
+                    profile_set::manifest()?,
                 ];
                 capabilities.extend(memory::manifests()?);
                 capabilities.extend(coding_manifests()?);
@@ -176,6 +196,69 @@ pub fn builtin_first_party_package() -> Result<ExtensionPackage, ExtensionError>
         },
         VirtualPath::new("/system/extensions/builtin")?,
     )
+}
+
+pub fn builtin_first_party_package_for_process_backend(
+    process_backend: ProcessBackendKind,
+) -> Result<ExtensionPackage, ExtensionError> {
+    let mut package = builtin_first_party_package()?;
+    if !process_port_backed_builtins_enabled(process_backend) {
+        remove_process_port_backed_builtin_capabilities(&mut package)?;
+    }
+    Ok(package)
+}
+
+fn process_port_backed_builtins_enabled(process_backend: ProcessBackendKind) -> bool {
+    matches!(
+        process_backend,
+        ProcessBackendKind::Docker
+            | ProcessBackendKind::Srt
+            | ProcessBackendKind::SmolVm
+            | ProcessBackendKind::LocalHost
+            | ProcessBackendKind::TenantSandbox
+            | ProcessBackendKind::OrgDedicatedRunner
+    )
+}
+
+fn remove_process_port_backed_builtin_capabilities(
+    package: &mut ExtensionPackage,
+) -> Result<(), ExtensionError> {
+    for capability_id in PROCESS_PORT_BACKED_BUILTIN_CAPABILITY_IDS {
+        remove_builtin_capability(package, capability_id)?;
+    }
+    Ok(())
+}
+
+fn remove_builtin_capability(
+    package: &mut ExtensionPackage,
+    capability_id: &str,
+) -> Result<(), ExtensionError> {
+    let capability_id = CapabilityId::new(capability_id)?;
+    let descriptor_present = package
+        .capabilities
+        .iter()
+        .any(|candidate| candidate.id == capability_id);
+    let manifest_present = package
+        .manifest
+        .capabilities
+        .iter()
+        .any(|candidate| candidate.id == capability_id);
+    if !descriptor_present || !manifest_present {
+        return Err(ExtensionError::InvalidManifest {
+            reason: format!(
+                "built-in first-party package is missing process-port-backed capability {capability_id}"
+            ),
+        });
+    }
+
+    package
+        .capabilities
+        .retain(|candidate| candidate.id != capability_id);
+    package
+        .manifest
+        .capabilities
+        .retain(|candidate| candidate.id != capability_id);
+    Ok(())
 }
 
 fn coding_manifests() -> Result<Vec<CapabilityManifest>, ExtensionError> {
@@ -203,6 +286,17 @@ pub fn builtin_first_party_handlers(
     Ok(registry)
 }
 
+pub fn builtin_first_party_handlers_for_process_backend(
+    trigger_repository: Arc<dyn ironclaw_triggers::TriggerRepository>,
+    process_backend: ProcessBackendKind,
+) -> Result<FirstPartyCapabilityRegistry, HostApiError> {
+    let mut registry = builtin_first_party_handlers(trigger_repository)?;
+    if !process_port_backed_builtins_enabled(process_backend) {
+        remove_process_port_backed_builtin_handlers(&mut registry)?;
+    }
+    Ok(registry)
+}
+
 /// Create handlers for all built-in first-party capabilities using an
 /// explicitly composed trigger repository and trigger-create lifecycle hook.
 pub fn builtin_first_party_handlers_with_trigger_create_hook(
@@ -216,6 +310,46 @@ pub fn builtin_first_party_handlers_with_trigger_create_hook(
         trigger_create_hook,
     )?;
     Ok(registry)
+}
+
+pub fn builtin_first_party_handlers_with_trigger_create_hook_for_process_backend(
+    trigger_repository: Arc<dyn ironclaw_triggers::TriggerRepository>,
+    trigger_create_hook: Arc<dyn TriggerCreateHook>,
+    process_backend: ProcessBackendKind,
+) -> Result<FirstPartyCapabilityRegistry, HostApiError> {
+    let mut registry = builtin_first_party_handlers_with_trigger_create_hook(
+        trigger_repository,
+        trigger_create_hook,
+    )?;
+    if !process_port_backed_builtins_enabled(process_backend) {
+        remove_process_port_backed_builtin_handlers(&mut registry)?;
+    }
+    Ok(registry)
+}
+
+fn remove_process_port_backed_builtin_handlers(
+    registry: &mut FirstPartyCapabilityRegistry,
+) -> Result<(), HostApiError> {
+    for capability_id in PROCESS_PORT_BACKED_BUILTIN_CAPABILITY_IDS {
+        remove_builtin_handler(registry, capability_id)?;
+    }
+    Ok(())
+}
+
+fn remove_builtin_handler(
+    registry: &mut FirstPartyCapabilityRegistry,
+    capability_id: &str,
+) -> Result<(), HostApiError> {
+    let capability_id = CapabilityId::new(capability_id)?;
+    if !registry.contains_handler(&capability_id) {
+        return Err(HostApiError::InvariantViolation {
+            reason: format!(
+                "built-in first-party handlers are missing process-port-backed capability {capability_id}"
+            ),
+        });
+    }
+    registry.remove_handler(&capability_id);
+    Ok(())
 }
 
 #[cfg(any(test, feature = "test-support"))]
@@ -265,6 +399,27 @@ fn builtin_first_party_base_registry() -> Result<FirstPartyCapabilityRegistry, H
         CapabilityId::new(SPAWN_SUBAGENT_CAPABILITY_ID)?,
         handler.clone(),
     );
+    registry.insert_handler(
+        CapabilityId::new(TRACE_COMMONS_ONBOARD_CAPABILITY_ID)?,
+        handler.clone(),
+    );
+    registry.insert_handler(
+        CapabilityId::new(TRACE_COMMONS_STATUS_CAPABILITY_ID)?,
+        handler.clone(),
+    );
+    registry.insert_handler(
+        CapabilityId::new(TRACE_COMMONS_CREDITS_CAPABILITY_ID)?,
+        handler.clone(),
+    );
+    registry.insert_handler(
+        CapabilityId::new(TRACE_COMMONS_PROFILE_TOKEN_CAPABILITY_ID)?,
+        handler.clone(),
+    );
+    registry.insert_handler(
+        CapabilityId::new(TRACE_COMMONS_PROFILE_SET_CAPABILITY_ID)?,
+        handler.clone(),
+    );
+    registry.insert_handler(CapabilityId::new(PROFILE_SET_CAPABILITY_ID)?, handler);
     skill_management::insert_handlers(&mut registry)?;
     Ok(registry)
 }
@@ -331,6 +486,14 @@ impl FirstPartyCapabilityHandler for BuiltinFirstPartyTools {
                     bounded_output_bytes(&result.output, FIRST_PARTY_MAX_OUTPUT_BYTES)?;
                 return Ok(result);
             }
+            PROFILE_SET_CAPABILITY_ID => {
+                let mut result = profile_set::dispatch(&self.memory_state, &request).await?;
+                result.usage.output_bytes =
+                    bounded_output_bytes(&result.output, FIRST_PARTY_MAX_OUTPUT_BYTES)?;
+                result.usage.wall_clock_ms =
+                    start.elapsed().as_millis().try_into().unwrap_or(u64::MAX);
+                return Ok(result);
+            }
             SHELL_CAPABILITY_ID => {
                 let (output, duration) = shell::dispatch(&request).await?;
                 let wall_clock_ms = duration.as_millis().try_into().unwrap_or(u64::MAX);
@@ -355,6 +518,26 @@ impl FirstPartyCapabilityHandler for BuiltinFirstPartyTools {
                 ));
             }
             SPAWN_SUBAGENT_CAPABILITY_ID => (spawn_subagent::dispatch(), None),
+            // arch-exempt: network_egress_bytes not surfaced for the onboard
+            // call — it routes through the host runtime_http_egress (policy- and
+            // credential-checked), but dispatch_onboard returns only the output
+            // Value, so outbound byte accounting is not propagated back here.
+            // Low-frequency, consent-gated onboarding call.
+            TRACE_COMMONS_ONBOARD_CAPABILITY_ID => {
+                (trace_commons::dispatch_onboard(&request).await?, None)
+            }
+            TRACE_COMMONS_STATUS_CAPABILITY_ID => {
+                (trace_commons::dispatch_status(&request).await?, None)
+            }
+            TRACE_COMMONS_CREDITS_CAPABILITY_ID => {
+                (trace_commons::dispatch_credits(&request).await?, None)
+            }
+            TRACE_COMMONS_PROFILE_TOKEN_CAPABILITY_ID => {
+                (trace_commons::dispatch_profile_token(&request).await?, None)
+            }
+            TRACE_COMMONS_PROFILE_SET_CAPABILITY_ID => {
+                (trace_commons::dispatch_profile_set(&request).await?, None)
+            }
             capability_id => {
                 let Some(metadata) = coding_capability_metadata(capability_id) else {
                     return Err(FirstPartyCapabilityError::new(

@@ -6,14 +6,17 @@
 //! submit/deferred handling behind that seam prevents adapter-specific binding
 //! code from owning the whole inbound turn pipeline.
 
+use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
+use ironclaw_attachments::InboundAttachment;
 #[cfg(test)]
 use ironclaw_host_api::UserId;
 use ironclaw_product_adapters::{
-    ProductInboundAck, ProductInboundEnvelope, ProductInboundPayload, ProductRejection,
+    ProductAdapterId, ProductInboundAck, ProductInboundEnvelope, ProductInboundPayload,
+    ProductRejection,
 };
 use ironclaw_threads::{
     AcceptInboundMessageRequest, AcceptedInboundMessageReplay, EnsureThreadRequest, MessageContent,
@@ -22,13 +25,14 @@ use ironclaw_threads::{
 };
 use ironclaw_turns::{
     AcceptedMessageRef, SubmitTurnRequest, SubmitTurnResponse, TurnActor, TurnCoordinator,
-    TurnError, TurnRunId, TurnScope,
+    TurnError, TurnRunId, TurnScope, TurnSurfaceType,
 };
 use uuid::Uuid;
 
 use crate::binding::{
-    ConversationBindingService, ProductConversationBindingCreationPolicy, ResolveBindingRequest,
-    ResolvedBinding, binding_profile_for_trigger,
+    ConversationBindingService, ProductConversationBindingCreationPolicy,
+    ProductConversationRouteKind, ResolveBindingRequest, ResolvedBinding,
+    binding_profile_for_trigger,
 };
 use crate::binding_ref::{
     DEFAULT_BINDING_REF_RAW_MAX_BYTES, bounded_idempotency_key, bounded_reply_target_binding_ref,
@@ -39,6 +43,7 @@ use crate::policy::{
     BeforeInboundPolicy, BeforeInboundPolicyOutcome, BeforeInboundPolicyRequest,
     NoopBeforeInboundPolicy,
 };
+use crate::reborn_services::InboundAttachmentLander;
 
 #[cfg(not(any(test, feature = "test-support")))]
 const BEFORE_INBOUND_POLICY_TIMEOUT: Duration = Duration::from_secs(5);
@@ -76,10 +81,11 @@ pub enum InboundTurnOutcome {
         binding: ResolvedBinding,
     },
     /// Turn submission was busy (thread already has an active run). The message
-    /// was accepted but deferred.
-    DeferredBusy {
+    /// was recorded as RejectedBusy — it will NOT be auto-resubmitted; the user
+    /// must resend once the current task finishes.
+    RejectedBusy {
         accepted_message_ref: AcceptedMessageRef,
-        active_run_id: TurnRunId,
+        active_run_id: Option<TurnRunId>,
         binding: ResolvedBinding,
     },
 }
@@ -96,11 +102,11 @@ impl InboundTurnOutcome {
                 accepted_message_ref: accepted_message_ref.clone(),
                 submitted_run_id: *submitted_run_id,
             },
-            Self::DeferredBusy {
+            Self::RejectedBusy {
                 accepted_message_ref,
                 active_run_id,
                 ..
-            } => ProductInboundAck::DeferredBusy {
+            } => ProductInboundAck::RejectedBusy {
                 accepted_message_ref: accepted_message_ref.clone(),
                 active_run_id: *active_run_id,
             },
@@ -119,6 +125,8 @@ struct PreparedUserMessage {
     thread_scope: ThreadScope,
     source_binding_id: String,
     submit_idempotency_key: String,
+    adapter_id: ProductAdapterId,
+    surface_type: TurnSurfaceType,
 }
 
 /// Port for the inbound turn submission path.
@@ -150,6 +158,34 @@ pub trait InboundTurnService: Send + Sync {
         envelope: &ProductInboundEnvelope,
         before_inbound_policy: &dyn BeforeInboundPolicy,
     ) -> Result<InboundUserMessageDispatch, ProductWorkflowError>;
+
+    /// Accept a user message together with host-staged inline attachment bytes.
+    ///
+    /// `attachments` carries decoded bytes a synchronous host surface (e.g. the
+    /// OpenAI-compatible API) received inline — never serialized into the
+    /// bytes-free [`ProductInboundEnvelope`]. The implementation lands them into
+    /// project storage before message acceptance.
+    ///
+    /// The default supports only the no-attachment case: with no attachments it
+    /// delegates to [`Self::accept_user_message_with_before_policy`], but a
+    /// non-empty `attachments` list is **rejected** rather than silently
+    /// dropped — an implementation that has no landing path must fail closed so
+    /// a user's files never vanish. Implementations with an inline-bytes surface
+    /// override this.
+    async fn accept_user_message_with_before_policy_and_attachments(
+        &self,
+        envelope: &ProductInboundEnvelope,
+        before_inbound_policy: &dyn BeforeInboundPolicy,
+        attachments: Vec<InboundAttachment>,
+    ) -> Result<InboundUserMessageDispatch, ProductWorkflowError> {
+        if !attachments.is_empty() {
+            return Err(ProductWorkflowError::TurnSubmissionRejected {
+                reason: "inbound attachments are not supported by this turn service".into(),
+            });
+        }
+        self.accept_user_message_with_before_policy(envelope, before_inbound_policy)
+            .await
+    }
 }
 
 /// Default implementation that composes a [`ConversationBindingService`] with a
@@ -158,6 +194,7 @@ pub struct DefaultInboundTurnService<B, T, C> {
     binding_service: B,
     thread_service: T,
     turn_coordinator: C,
+    inbound_attachments: Option<Arc<dyn InboundAttachmentLander>>,
 }
 
 impl<B, T, C> DefaultInboundTurnService<B, T, C>
@@ -171,7 +208,19 @@ where
             binding_service,
             thread_service,
             turn_coordinator,
+            inbound_attachments: None,
         }
+    }
+
+    /// Wire the port that lands inline attachment bytes into project storage
+    /// before message acceptance. Without it, a turn carrying attachments is
+    /// rejected rather than silently dropping the files.
+    pub fn with_inbound_attachments(
+        mut self,
+        inbound_attachments: Arc<dyn InboundAttachmentLander>,
+    ) -> Self {
+        self.inbound_attachments = Some(inbound_attachments);
+        self
     }
 }
 
@@ -212,6 +261,33 @@ where
         &self,
         envelope: &ProductInboundEnvelope,
         before_inbound_policy: &dyn BeforeInboundPolicy,
+    ) -> Result<InboundUserMessageDispatch, ProductWorkflowError> {
+        self.accept_with_before_policy_inner(envelope, before_inbound_policy, Vec::new())
+            .await
+    }
+
+    async fn accept_user_message_with_before_policy_and_attachments(
+        &self,
+        envelope: &ProductInboundEnvelope,
+        before_inbound_policy: &dyn BeforeInboundPolicy,
+        attachments: Vec<InboundAttachment>,
+    ) -> Result<InboundUserMessageDispatch, ProductWorkflowError> {
+        self.accept_with_before_policy_inner(envelope, before_inbound_policy, attachments)
+            .await
+    }
+}
+
+impl<B, T, C> DefaultInboundTurnService<B, T, C>
+where
+    B: ConversationBindingService,
+    T: SessionThreadService,
+    C: TurnCoordinator,
+{
+    async fn accept_with_before_policy_inner(
+        &self,
+        envelope: &ProductInboundEnvelope,
+        before_inbound_policy: &dyn BeforeInboundPolicy,
+        attachments: Vec<InboundAttachment>,
     ) -> Result<InboundUserMessageDispatch, ProductWorkflowError> {
         let ProductInboundPayload::UserMessage(payload) = envelope.payload() else {
             return Err(ProductWorkflowError::UnsupportedActionKind {
@@ -255,18 +331,11 @@ where
             }
         };
 
-        self.accept_prepared_user_message(prepared_for_turn, envelope_for_turn)
+        self.accept_prepared_user_message(prepared_for_turn, envelope_for_turn, attachments)
             .await
             .map(InboundUserMessageDispatch::Accepted)
     }
-}
 
-impl<B, T, C> DefaultInboundTurnService<B, T, C>
-where
-    B: ConversationBindingService,
-    T: SessionThreadService,
-    C: TurnCoordinator,
-{
     async fn prepare_user_message(
         &self,
         envelope: &ProductInboundEnvelope,
@@ -277,6 +346,10 @@ where
             });
         };
         let (route_kind, creation_policy) = binding_profile_for_trigger(payload.trigger);
+        let surface_type = match route_kind {
+            ProductConversationRouteKind::Direct => TurnSurfaceType::Direct,
+            ProductConversationRouteKind::Shared => TurnSurfaceType::Channel,
+        };
         let binding_request = ResolveBindingRequest {
             adapter_id: envelope.adapter_id().clone(),
             installation_id: envelope.installation_id().clone(),
@@ -304,6 +377,8 @@ where
             thread_scope,
             source_binding_id,
             submit_idempotency_key,
+            adapter_id: envelope.adapter_id().clone(),
+            surface_type,
         })
     }
 
@@ -344,6 +419,7 @@ where
         &self,
         prepared: PreparedUserMessage,
         envelope: &ProductInboundEnvelope,
+        attachments: Vec<InboundAttachment>,
     ) -> Result<InboundTurnOutcome, ProductWorkflowError> {
         let ProductInboundPayload::UserMessage(payload) = envelope.payload() else {
             return Err(ProductWorkflowError::UnsupportedActionKind {
@@ -363,6 +439,31 @@ where
                 reason: format!("failed to ensure thread: {e}"),
             })?;
 
+        // Inline attachment bytes (e.g. images on the OpenAI-compatible
+        // surface) are landed into project storage through the same authority
+        // the agent's file tools resolve through, then carried on the message as
+        // refs — never as raw bytes through the bytes-free product envelope.
+        let content = if attachments.is_empty() {
+            MessageContent::text(payload.text.clone())
+        } else {
+            let lander = self.inbound_attachments.as_ref().ok_or_else(|| {
+                ProductWorkflowError::TurnSubmissionRejected {
+                    reason: "inbound attachment lander not configured".into(),
+                }
+            })?;
+            let refs = lander
+                .land(
+                    &prepared.thread_scope,
+                    envelope.external_event_id().as_str(),
+                    attachments,
+                )
+                .await
+                .map_err(|e| ProductWorkflowError::Transient {
+                    reason: format!("failed to land inbound attachments: {e}"),
+                })?;
+            MessageContent::with_attachments(payload.text.clone(), refs)
+        };
+
         let reply_target_binding_id = prepared.source_binding_id.clone();
         let accepted = self
             .thread_service
@@ -373,14 +474,14 @@ where
                 source_binding_id: Some(prepared.source_binding_id.clone()),
                 reply_target_binding_id: Some(reply_target_binding_id.clone()),
                 external_event_id: Some(envelope.external_event_id().as_str().to_string()),
-                content: MessageContent::text(payload.text.clone()),
+                content,
             })
             .await
             .map_err(|e| ProductWorkflowError::Transient {
                 reason: format!("failed to accept inbound message: {e}"),
             })?;
 
-        ProductInboundTurnHandoff::NeedsSubmission(AcceptedProductInboundTurn {
+        ProductInboundTurnHandoff::NeedsSubmission(Box::new(AcceptedProductInboundTurn {
             binding: prepared.binding,
             thread_scope: prepared.thread_scope,
             message_id: accepted.message_id,
@@ -388,7 +489,9 @@ where
             reply_target_binding_id,
             idempotency_key_raw: prepared.submit_idempotency_key,
             received_at: envelope.received_at(),
-        })
+            adapter_id: prepared.adapter_id,
+            surface_type: prepared.surface_type,
+        }))
         .submit_or_replay(&self.thread_service, &self.turn_coordinator)
         .await
     }
@@ -422,7 +525,12 @@ enum ProductInboundTurnHandoff {
         submitted_run_id: TurnRunId,
         binding: ResolvedBinding,
     },
-    NeedsSubmission(AcceptedProductInboundTurn),
+    AlreadyRejected {
+        accepted_message_ref: AcceptedMessageRef,
+        binding: ResolvedBinding,
+        active_run_id: Option<TurnRunId>,
+    },
+    NeedsSubmission(Box<AcceptedProductInboundTurn>),
 }
 
 impl ProductInboundTurnHandoff {
@@ -431,6 +539,7 @@ impl ProductInboundTurnHandoff {
         replay: AcceptedInboundMessageReplay,
         submit_idempotency_key: String,
         received_at: DateTime<Utc>,
+        adapter_id: ProductAdapterId,
     ) -> Result<Self, ProductWorkflowError> {
         let binding = binding_from_replay(&replay)?;
         let thread_scope = replay.scope.clone();
@@ -440,6 +549,9 @@ impl ProductInboundTurnHandoff {
             received_at,
             binding,
             thread_scope,
+            adapter_id,
+            // Surface type is unknown at replay time without the original trigger.
+            TurnSurfaceType::Direct,
         )
     }
 
@@ -455,6 +567,8 @@ impl ProductInboundTurnHandoff {
             received_at,
             prepared.binding.clone(),
             prepared.thread_scope.clone(),
+            prepared.adapter_id.clone(),
+            prepared.surface_type,
         )
     }
 
@@ -464,6 +578,8 @@ impl ProductInboundTurnHandoff {
         received_at: DateTime<Utc>,
         binding: ResolvedBinding,
         thread_scope: ThreadScope,
+        adapter_id: ProductAdapterId,
+        surface_type: TurnSurfaceType,
     ) -> Result<Self, ProductWorkflowError> {
         let accepted_message_ref = accepted_message_ref(replay.message_id)?;
 
@@ -482,6 +598,25 @@ impl ProductInboundTurnHandoff {
                 accepted_message_ref,
                 submitted_run_id,
                 binding,
+            });
+        }
+
+        if replay.status == MessageStatus::RejectedBusy {
+            let active_run_id = replay
+                .turn_run_id
+                .as_deref()
+                .map(|s| {
+                    Uuid::parse_str(s).map(TurnRunId::from_uuid).map_err(|e| {
+                        ProductWorkflowError::TurnSubmissionRejected {
+                            reason: format!("invalid rejected busy turn_run_id: {e}"),
+                        }
+                    })
+                })
+                .transpose()?;
+            return Ok(Self::AlreadyRejected {
+                accepted_message_ref,
+                binding,
+                active_run_id,
             });
         }
 
@@ -508,15 +643,19 @@ impl ProductInboundTurnHandoff {
             }
         })?;
 
-        Ok(Self::NeedsSubmission(AcceptedProductInboundTurn {
-            binding,
-            thread_scope,
-            message_id: replay.message_id,
-            source_binding_id,
-            reply_target_binding_id,
-            idempotency_key_raw: submit_idempotency_key,
-            received_at,
-        }))
+        Ok(Self::NeedsSubmission(Box::new(
+            AcceptedProductInboundTurn {
+                binding,
+                thread_scope,
+                message_id: replay.message_id,
+                source_binding_id,
+                reply_target_binding_id,
+                idempotency_key_raw: submit_idempotency_key,
+                received_at,
+                adapter_id,
+                surface_type,
+            },
+        )))
     }
 
     async fn submit_or_replay<T, C>(
@@ -538,6 +677,15 @@ impl ProductInboundTurnHandoff {
                 submitted_run_id,
                 binding,
             }),
+            Self::AlreadyRejected {
+                accepted_message_ref,
+                binding,
+                active_run_id,
+            } => Ok(InboundTurnOutcome::RejectedBusy {
+                accepted_message_ref,
+                active_run_id,
+                binding,
+            }),
             Self::NeedsSubmission(submission) => {
                 submission.submit(thread_service, turn_coordinator).await
             }
@@ -553,6 +701,8 @@ struct AcceptedProductInboundTurn {
     reply_target_binding_id: String,
     idempotency_key_raw: String,
     received_at: DateTime<Utc>,
+    adapter_id: ProductAdapterId,
+    surface_type: TurnSurfaceType,
 }
 
 impl AcceptedProductInboundTurn {
@@ -573,6 +723,8 @@ impl AcceptedProductInboundTurn {
             reply_target_binding_id,
             idempotency_key_raw,
             received_at,
+            adapter_id,
+            surface_type,
         } = self;
         let turn_scope = TurnScope::new_with_owner(
             binding.tenant_id.clone(),
@@ -608,6 +760,18 @@ impl AcceptedProductInboundTurn {
             reason: format!("invalid turn ref: {e}"),
         })?;
 
+        let run_adapter =
+            ironclaw_turns::RunOriginAdapter::new(adapter_id.as_str()).map_err(|e| {
+                ProductWorkflowError::TurnSubmissionRejected {
+                    reason: e.to_string(),
+                }
+            })?;
+        let product_context = ironclaw_product_context::resolve_inbound(
+            ironclaw_product_context::InboundClassification::Untrusted,
+            run_adapter,
+            Some(surface_type),
+            turn_scope.product_owner(&actor),
+        );
         let request = SubmitTurnRequest {
             scope: turn_scope,
             actor,
@@ -621,6 +785,7 @@ impl AcceptedProductInboundTurn {
             parent_run_id: None,
             subagent_depth: 0,
             spawn_tree_root_run_id: None,
+            product_context: Some(product_context),
         };
 
         match turn_coordinator.submit_turn(request).await {
@@ -647,14 +812,14 @@ impl AcceptedProductInboundTurn {
             }
             Err(TurnError::ThreadBusy(busy)) => {
                 thread_service
-                    .mark_message_deferred_busy(&thread_scope, &binding.thread_id, message_id)
+                    .mark_message_rejected_busy(&thread_scope, &binding.thread_id, message_id)
                     .await
                     .map_err(|e| ProductWorkflowError::Transient {
-                        reason: format!("failed to mark message deferred: {e}"),
+                        reason: format!("failed to mark message rejected: {e}"),
                     })?;
-                Ok(InboundTurnOutcome::DeferredBusy {
+                Ok(InboundTurnOutcome::RejectedBusy {
                     accepted_message_ref,
-                    active_run_id: busy.active_run_id,
+                    active_run_id: Some(busy.active_run_id),
                     binding,
                 })
             }
@@ -759,7 +924,7 @@ fn segment(name: &str, value: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use std::future::pending;
+    use std::{future::pending, sync::Mutex};
 
     use async_trait::async_trait;
     use chrono::TimeZone;
@@ -768,11 +933,294 @@ mod tests {
         AdapterInstallationId, ExternalActorRef, ExternalConversationRef, ProductAdapterId,
         ProductTriggerReason, UserMessagePayload,
     };
-    use ironclaw_threads::ThreadScope;
+    use ironclaw_threads::{
+        AcceptInboundMessageRequest, AcceptedInboundMessage, AcceptedInboundMessageReplay,
+        AppendAssistantDraftRequest, AppendCapabilityDisplayPreviewRequest,
+        AppendToolResultReferenceRequest, ContextMessages, ContextWindow,
+        CreateSummaryArtifactRequest, EnsureThreadRequest, ListThreadsForScopeRequest,
+        ListThreadsForScopeResponse, LoadContextMessagesRequest, LoadContextWindowRequest,
+        MessageContent, RedactMessageRequest, ReplayAcceptedInboundMessageRequest,
+        SessionThreadError, SessionThreadRecord, SummaryArtifact, ThreadHistory,
+        ThreadHistoryRequest, ThreadMessageId, ThreadMessageRecord, ThreadScope,
+        UpdateAssistantDraftRequest, UpdateToolResultReferenceRequest,
+    };
+    use ironclaw_turns::{
+        CancelRunRequest, CancelRunResponse, GetRunStateRequest, ResumeTurnRequest,
+        ResumeTurnResponse, RunProfileId, RunProfileVersion, SubmitTurnRequest, SubmitTurnResponse,
+        TurnCoordinator, TurnError, TurnId, TurnOriginKind, TurnRunId, TurnRunState, TurnScope,
+        TurnStatus, TurnSurfaceType, events::EventCursor,
+    };
 
     use crate::action::SourceBindingKey;
 
     use super::*;
+
+    // --- Minimal stubs for submit path tests ---
+
+    #[derive(Default)]
+    struct CapturingTurnCoordinator {
+        submissions: Mutex<Vec<SubmitTurnRequest>>,
+    }
+
+    impl CapturingTurnCoordinator {
+        fn submissions(&self) -> Vec<SubmitTurnRequest> {
+            self.submissions.lock().unwrap().clone()
+        }
+    }
+
+    #[async_trait]
+    impl TurnCoordinator for CapturingTurnCoordinator {
+        async fn prepare_turn(&self, _scope: TurnScope) -> Result<TurnRunId, TurnError> {
+            Ok(TurnRunId::new())
+        }
+
+        async fn submit_turn(
+            &self,
+            request: SubmitTurnRequest,
+        ) -> Result<SubmitTurnResponse, TurnError> {
+            let run_id = TurnRunId::new();
+            let message_ref = request.accepted_message_ref.clone();
+            let reply_ref = request.reply_target_binding_ref.clone();
+            self.submissions.lock().unwrap().push(request);
+            Ok(SubmitTurnResponse::Accepted {
+                turn_id: TurnId::new(),
+                run_id,
+                status: TurnStatus::Completed,
+                resolved_run_profile_id: RunProfileId::default_profile(),
+                resolved_run_profile_version: RunProfileVersion::new(1),
+                event_cursor: EventCursor(0),
+                accepted_message_ref: message_ref,
+                reply_target_binding_ref: reply_ref,
+            })
+        }
+
+        async fn resume_turn(
+            &self,
+            _request: ResumeTurnRequest,
+        ) -> Result<ResumeTurnResponse, TurnError> {
+            unimplemented!("not used in submit path tests")
+        }
+
+        async fn cancel_run(
+            &self,
+            _request: CancelRunRequest,
+        ) -> Result<CancelRunResponse, TurnError> {
+            unimplemented!("not used in submit path tests")
+        }
+
+        async fn get_run_state(
+            &self,
+            _request: GetRunStateRequest,
+        ) -> Result<TurnRunState, TurnError> {
+            unimplemented!("not used in submit path tests")
+        }
+    }
+
+    struct StubSessionThreadService;
+
+    #[async_trait]
+    impl ironclaw_threads::SessionThreadService for StubSessionThreadService {
+        async fn ensure_thread(
+            &self,
+            _request: EnsureThreadRequest,
+        ) -> Result<SessionThreadRecord, SessionThreadError> {
+            unimplemented!("not used in submit path tests")
+        }
+
+        async fn accept_inbound_message(
+            &self,
+            _request: AcceptInboundMessageRequest,
+        ) -> Result<AcceptedInboundMessage, SessionThreadError> {
+            unimplemented!("not used in submit path tests")
+        }
+
+        async fn replay_accepted_inbound_message(
+            &self,
+            _request: ReplayAcceptedInboundMessageRequest,
+        ) -> Result<Option<AcceptedInboundMessageReplay>, SessionThreadError> {
+            Ok(None)
+        }
+
+        async fn mark_message_submitted(
+            &self,
+            _scope: &ThreadScope,
+            _thread_id: &ironclaw_host_api::ThreadId,
+            _message_id: ThreadMessageId,
+            _turn_id: String,
+            _turn_run_id: String,
+        ) -> Result<ThreadMessageRecord, SessionThreadError> {
+            Ok(stub_message_record(_message_id))
+        }
+
+        async fn mark_message_rejected_busy(
+            &self,
+            _scope: &ThreadScope,
+            _thread_id: &ironclaw_host_api::ThreadId,
+            _message_id: ThreadMessageId,
+        ) -> Result<ThreadMessageRecord, SessionThreadError> {
+            unimplemented!("not used in submit path tests")
+        }
+
+        async fn append_assistant_draft(
+            &self,
+            _request: AppendAssistantDraftRequest,
+        ) -> Result<ThreadMessageRecord, SessionThreadError> {
+            unimplemented!("not used in submit path tests")
+        }
+
+        async fn append_tool_result_reference(
+            &self,
+            _request: AppendToolResultReferenceRequest,
+        ) -> Result<ThreadMessageRecord, SessionThreadError> {
+            unimplemented!("not used in submit path tests")
+        }
+
+        async fn append_capability_display_preview(
+            &self,
+            _request: AppendCapabilityDisplayPreviewRequest,
+        ) -> Result<ThreadMessageRecord, SessionThreadError> {
+            unimplemented!("not used in submit path tests")
+        }
+
+        async fn update_tool_result_reference(
+            &self,
+            _request: UpdateToolResultReferenceRequest,
+        ) -> Result<ThreadMessageRecord, SessionThreadError> {
+            unimplemented!("not used in submit path tests")
+        }
+
+        async fn update_assistant_draft(
+            &self,
+            _request: UpdateAssistantDraftRequest,
+        ) -> Result<ThreadMessageRecord, SessionThreadError> {
+            unimplemented!("not used in submit path tests")
+        }
+
+        async fn finalize_assistant_message(
+            &self,
+            _scope: &ThreadScope,
+            _thread_id: &ironclaw_host_api::ThreadId,
+            _message_id: ThreadMessageId,
+            _content: MessageContent,
+        ) -> Result<ThreadMessageRecord, SessionThreadError> {
+            unimplemented!("not used in submit path tests")
+        }
+
+        async fn redact_message(
+            &self,
+            _request: RedactMessageRequest,
+        ) -> Result<ThreadMessageRecord, SessionThreadError> {
+            unimplemented!("not used in submit path tests")
+        }
+
+        async fn load_context_window(
+            &self,
+            _request: LoadContextWindowRequest,
+        ) -> Result<ContextWindow, SessionThreadError> {
+            unimplemented!("not used in submit path tests")
+        }
+
+        async fn load_context_messages(
+            &self,
+            _request: LoadContextMessagesRequest,
+        ) -> Result<ContextMessages, SessionThreadError> {
+            unimplemented!("not used in submit path tests")
+        }
+
+        async fn list_thread_history(
+            &self,
+            _request: ThreadHistoryRequest,
+        ) -> Result<ThreadHistory, SessionThreadError> {
+            unimplemented!("not used in submit path tests")
+        }
+
+        async fn create_summary_artifact(
+            &self,
+            _request: CreateSummaryArtifactRequest,
+        ) -> Result<SummaryArtifact, SessionThreadError> {
+            unimplemented!("not used in submit path tests")
+        }
+
+        async fn list_threads_for_scope(
+            &self,
+            _request: ListThreadsForScopeRequest,
+        ) -> Result<ListThreadsForScopeResponse, SessionThreadError> {
+            unimplemented!("not used in submit path tests")
+        }
+    }
+
+    fn stub_message_record(message_id: ThreadMessageId) -> ThreadMessageRecord {
+        ThreadMessageRecord {
+            message_id,
+            thread_id: thread_id(),
+            sequence: 1,
+            kind: ironclaw_threads::MessageKind::User,
+            status: ironclaw_threads::MessageStatus::Submitted,
+            actor_id: None,
+            source_binding_id: None,
+            reply_target_binding_id: None,
+            turn_id: None,
+            turn_run_id: None,
+            tool_result_ref: None,
+            tool_result_provider_call: None,
+            content: None,
+            attachments: Vec::new(),
+            redaction_ref: None,
+        }
+    }
+
+    /// The legacy `from_replay` path hard-codes `TurnSurfaceType::Direct` and injects the
+    /// adapter id. This test drives the handoff through `submit_or_replay` and asserts
+    /// that the submitted `SubmitTurnRequest.product_context` carries `Direct` surface and
+    /// the adapter from the replay call.
+    #[tokio::test]
+    async fn replay_submit_carries_direct_surface_type_and_adapter_id() {
+        let adapter_id = ProductAdapterId::new("telegram").unwrap();
+        let message_id = ThreadMessageId::new();
+        let handoff = ProductInboundTurnHandoff::from_replay(
+            replay(
+                message_id,
+                MessageStatus::DeferredBusy,
+                Some("src:replay"),
+                Some("reply:replay"),
+                None,
+            ),
+            "turn-key-replay".to_string(),
+            received_at(),
+            adapter_id.clone(),
+        )
+        .expect("replay handoff");
+
+        let coordinator = CapturingTurnCoordinator::default();
+        let thread_service = StubSessionThreadService;
+
+        handoff
+            .submit_or_replay(&thread_service, &coordinator)
+            .await
+            .expect("submit_or_replay succeeds");
+
+        let submissions = coordinator.submissions();
+        assert_eq!(submissions.len(), 1, "one turn must be submitted");
+        let ctx = submissions[0]
+            .product_context
+            .as_ref()
+            .expect("product_context must be set");
+        assert_eq!(
+            ctx.surface_type,
+            Some(TurnSurfaceType::Direct),
+            "replay path must carry Direct surface type"
+        );
+        assert_eq!(
+            ctx.adapter.as_ref().map(|a| a.as_str()),
+            Some(adapter_id.as_str()),
+            "replay path must carry the adapter id"
+        );
+        assert_eq!(
+            ctx.origin,
+            TurnOriginKind::Inbound,
+            "replay path must record Inbound origin (Untrusted classification)"
+        );
+    }
 
     struct PendingBeforeInboundPolicy;
 
@@ -825,6 +1273,7 @@ mod tests {
             ),
             "turn-key".to_string(),
             received_at(),
+            ProductAdapterId::new("test_adapter").unwrap(),
         )
         .expect("submitted replay handoff");
 
@@ -846,28 +1295,36 @@ mod tests {
     }
 
     #[test]
-    fn deferred_replay_becomes_needs_submission_handoff() {
+    fn rejected_busy_replay_becomes_already_rejected_handoff() {
         let message_id = ThreadMessageId::new();
         let handoff = ProductInboundTurnHandoff::from_replay(
             replay(
                 message_id,
-                MessageStatus::DeferredBusy,
+                MessageStatus::RejectedBusy,
                 Some("src:alpha"),
                 Some("reply:alpha"),
                 None,
             ),
             "turn-key".to_string(),
             received_at(),
+            ProductAdapterId::new("test_adapter").unwrap(),
         )
-        .expect("deferred replay handoff");
+        .expect("rejected busy replay handoff");
 
-        let ProductInboundTurnHandoff::NeedsSubmission(submission) = handoff else {
-            panic!("expected deferred replay to require a new turn submission")
+        let ProductInboundTurnHandoff::AlreadyRejected {
+            accepted_message_ref: actual_message_ref,
+            active_run_id,
+            ..
+        } = handoff
+        else {
+            panic!("expected rejected busy replay to be terminal, not resubmitted")
         };
 
-        assert_eq!(submission.message_id, message_id);
-        assert_eq!(submission.source_binding_id, "src:alpha");
-        assert_eq!(submission.reply_target_binding_id, "reply:alpha");
+        assert_eq!(
+            actual_message_ref,
+            accepted_message_ref(message_id).unwrap()
+        );
+        assert!(active_run_id.is_none());
     }
 
     #[test]
@@ -882,9 +1339,13 @@ mod tests {
         );
         replay.actor_id = None;
 
-        let handoff =
-            ProductInboundTurnHandoff::from_replay(replay, "turn-key".to_string(), received_at())
-                .expect("legacy replay handoff");
+        let handoff = ProductInboundTurnHandoff::from_replay(
+            replay,
+            "turn-key".to_string(),
+            received_at(),
+            ProductAdapterId::new("test_adapter").unwrap(),
+        )
+        .expect("legacy replay handoff");
 
         let ProductInboundTurnHandoff::NeedsSubmission(submission) = handoff else {
             panic!("expected legacy replay to require a new turn submission")
@@ -925,6 +1386,8 @@ mod tests {
             },
             source_binding_id: "src:alpha".to_string(),
             submit_idempotency_key: "turn-key".to_string(),
+            adapter_id: ProductAdapterId::new("test_adapter").unwrap(),
+            surface_type: TurnSurfaceType::Direct,
         };
 
         let handoff = ProductInboundTurnHandoff::from_replay_with_prepared(
@@ -945,6 +1408,72 @@ mod tests {
         );
         assert_eq!(submission.thread_scope.owner_user_id, Some(subject_user_id));
         assert_eq!(submission.message_id, message_id);
+    }
+
+    /// A BotMention shared route must produce `TurnSurfaceType::Channel` in the
+    /// submitted `SubmitTurnRequest.product_context`. This exercises the
+    /// `ProductConversationRouteKind::Shared => TurnSurfaceType::Channel` branch
+    /// in `prepare_user_message` through the replay-with-prepared handoff path,
+    /// which is the same submission seam the full inbound-turn pipeline uses.
+    #[tokio::test]
+    async fn shared_user_message_records_channel_surface_type() {
+        let message_id = ThreadMessageId::new();
+        let prepared = PreparedUserMessage {
+            binding: ResolvedBinding {
+                tenant_id: tenant_id(),
+                actor_user_id: user_id(),
+                subject_user_id: Some(user_id()),
+                thread_id: thread_id(),
+                agent_id: Some(AgentId::new("agent:alpha").unwrap()),
+                project_id: None,
+            },
+            thread_scope: ThreadScope {
+                tenant_id: tenant_id(),
+                agent_id: AgentId::new("agent:alpha").unwrap(),
+                project_id: None,
+                owner_user_id: Some(user_id()),
+                mission_id: None,
+            },
+            source_binding_id: "src:shared".to_string(),
+            submit_idempotency_key: "turn-key-shared".to_string(),
+            adapter_id: ProductAdapterId::new("slack").unwrap(),
+            // BotMention shared route maps to Channel surface type.
+            surface_type: TurnSurfaceType::Channel,
+        };
+
+        let handoff = ProductInboundTurnHandoff::from_replay_with_prepared(
+            replay(
+                message_id,
+                MessageStatus::DeferredBusy,
+                Some("src:shared"),
+                Some("reply:shared"),
+                None,
+            ),
+            "turn-key-shared".to_string(),
+            received_at(),
+            &prepared,
+        )
+        .expect("shared route replay handoff");
+
+        let coordinator = CapturingTurnCoordinator::default();
+        let thread_service = StubSessionThreadService;
+
+        handoff
+            .submit_or_replay(&thread_service, &coordinator)
+            .await
+            .expect("submit_or_replay succeeds");
+
+        let submissions = coordinator.submissions();
+        assert_eq!(submissions.len(), 1, "one turn must be submitted");
+        let ctx = submissions[0]
+            .product_context
+            .as_ref()
+            .expect("product_context must be set");
+        assert_eq!(
+            ctx.surface_type,
+            Some(TurnSurfaceType::Channel),
+            "BotMention shared route must carry Channel surface type"
+        );
     }
 
     fn policy_request() -> BeforeInboundPolicyRequest {
@@ -1008,5 +1537,286 @@ mod tests {
 
     fn thread_id() -> ThreadId {
         ThreadId::new("thread:alpha").unwrap()
+    }
+
+    // --- Inline-attachment landing (vision, #4644) ---
+
+    use ironclaw_product_adapters::{
+        AuthRequirement, ExternalEventId, ParsedProductInbound, ProductInboundEnvelope,
+        ProductInboundPayload, ProtocolAuthEvidence, TrustedInboundContext,
+    };
+    use ironclaw_threads::{AttachmentKind, AttachmentRef, InMemorySessionThreadService};
+
+    use crate::binding::ResolveBindingRequest;
+    use crate::reborn_services::RebornServicesError;
+
+    struct LandingBindingStub;
+
+    #[async_trait]
+    impl ConversationBindingService for LandingBindingStub {
+        async fn resolve_binding(
+            &self,
+            _request: ResolveBindingRequest,
+        ) -> Result<ResolvedBinding, ProductWorkflowError> {
+            Ok(ResolvedBinding {
+                tenant_id: tenant_id(),
+                actor_user_id: user_id(),
+                subject_user_id: Some(user_id()),
+                thread_id: thread_id(),
+                agent_id: Some(AgentId::new("agent:alpha").unwrap()),
+                project_id: None,
+            })
+        }
+
+        async fn lookup_binding(
+            &self,
+            request: ResolveBindingRequest,
+        ) -> Result<ResolvedBinding, ProductWorkflowError> {
+            self.resolve_binding(request).await
+        }
+    }
+
+    #[derive(Default)]
+    struct CapturingLander {
+        landed: Mutex<Vec<InboundAttachment>>,
+    }
+
+    #[async_trait]
+    impl InboundAttachmentLander for CapturingLander {
+        async fn land(
+            &self,
+            _thread_scope: &ThreadScope,
+            message_id: &str,
+            attachments: Vec<InboundAttachment>,
+        ) -> Result<Vec<AttachmentRef>, RebornServicesError> {
+            let refs = attachments
+                .iter()
+                .enumerate()
+                .map(|(index, attachment)| AttachmentRef {
+                    id: attachment.id.clone(),
+                    kind: AttachmentKind::Image,
+                    mime_type: attachment.mime_type.clone(),
+                    filename: attachment.filename.clone(),
+                    size_bytes: Some(attachment.bytes.len() as u64),
+                    storage_key: Some(format!(
+                        "/workspace/attachments/test/{message_id}-{index}-img"
+                    )),
+                    extracted_text: None,
+                })
+                .collect();
+            self.landed.lock().unwrap().extend(attachments);
+            Ok(refs)
+        }
+    }
+
+    fn user_message_envelope() -> ProductInboundEnvelope {
+        let installation_id = AdapterInstallationId::new("install_alpha").expect("install");
+        let evidence = ProtocolAuthEvidence::test_verified(
+            AuthRequirement::SharedSecretHeader {
+                header_name: "X-Secret".into(),
+            },
+            installation_id.as_str(),
+        );
+        let context = TrustedInboundContext::from_verified_evidence(
+            ProductAdapterId::new("test_adapter").expect("adapter"),
+            installation_id,
+            received_at(),
+            &evidence,
+        )
+        .expect("trusted context");
+        let parsed = ParsedProductInbound::new(
+            ExternalEventId::new("evt:image-1").expect("event"),
+            ExternalActorRef::new("test", "user1", None::<String>).expect("actor"),
+            ExternalConversationRef::new(None, "conv1", None, None).expect("conversation"),
+            ProductInboundPayload::UserMessage(
+                UserMessagePayload::new("look at this", vec![], ProductTriggerReason::DirectChat)
+                    .expect("payload"),
+            ),
+        )
+        .expect("parsed inbound");
+        ProductInboundEnvelope::from_trusted_parse(context, parsed).expect("envelope")
+    }
+
+    /// Caller-level coverage for the native vision door: a user message carrying
+    /// host-staged inline bytes must route those bytes through the
+    /// [`InboundAttachmentLander`] before message acceptance (the bytes never
+    /// touch the bytes-free product envelope). Mirrors the WebChat landing path.
+    #[tokio::test]
+    async fn native_attachment_path_lands_inline_bytes_before_acceptance() {
+        let thread_service = std::sync::Arc::new(InMemorySessionThreadService::default());
+        let lander = std::sync::Arc::new(CapturingLander::default());
+        let service = DefaultInboundTurnService::new(
+            LandingBindingStub,
+            thread_service,
+            CapturingTurnCoordinator::default(),
+        )
+        .with_inbound_attachments(lander.clone());
+
+        let envelope = user_message_envelope();
+        let bytes = vec![0x89, b'P', b'N', b'G'];
+        let attachment = InboundAttachment {
+            id: "openai-image-0".to_string(),
+            mime_type: "image/png".to_string(),
+            filename: Some("image-0.png".to_string()),
+            bytes: bytes.clone(),
+        };
+
+        let dispatch = service
+            .accept_user_message_with_before_policy_and_attachments(
+                &envelope,
+                &NoopBeforeInboundPolicy,
+                vec![attachment],
+            )
+            .await
+            .expect("accepting a user message with inline attachments succeeds");
+
+        assert!(matches!(dispatch, InboundUserMessageDispatch::Accepted(_)));
+        let landed = lander.landed.lock().unwrap();
+        assert_eq!(landed.len(), 1, "the inline image is landed exactly once");
+        assert_eq!(landed[0].mime_type, "image/png");
+        assert_eq!(landed[0].bytes, bytes);
+    }
+
+    /// Without a lander wired, a user message carrying inline bytes must fail
+    /// closed (rejected), never silently dropping the attachment.
+    #[tokio::test]
+    async fn native_attachment_path_without_lander_fails_closed() {
+        let thread_service = std::sync::Arc::new(InMemorySessionThreadService::default());
+        let service = DefaultInboundTurnService::new(
+            LandingBindingStub,
+            thread_service,
+            CapturingTurnCoordinator::default(),
+        );
+
+        let envelope = user_message_envelope();
+        let attachment = InboundAttachment {
+            id: "openai-image-0".to_string(),
+            mime_type: "image/png".to_string(),
+            filename: Some("image-0.png".to_string()),
+            bytes: vec![0x89, b'P', b'N', b'G'],
+        };
+
+        let result = service
+            .accept_user_message_with_before_policy_and_attachments(
+                &envelope,
+                &NoopBeforeInboundPolicy,
+                vec![attachment],
+            )
+            .await;
+
+        assert!(
+            matches!(
+                result,
+                Err(ProductWorkflowError::TurnSubmissionRejected { .. })
+            ),
+            "a missing lander must reject the turn, never silently drop the attachment"
+        );
+    }
+
+    /// A turn service that does not override the attachments method, exercising
+    /// the trait default. Its `accept_user_message_with_before_policy` returns a
+    /// distinct `Transient` error so a test can tell "the default delegated"
+    /// (Transient) apart from "the default rejected" (TurnSubmissionRejected).
+    struct DefaultAttachmentsTurnService;
+
+    #[async_trait]
+    impl InboundTurnService for DefaultAttachmentsTurnService {
+        async fn replay_accepted_user_message(
+            &self,
+            _envelope: &ProductInboundEnvelope,
+        ) -> Result<Option<InboundTurnOutcome>, ProductWorkflowError> {
+            Ok(None)
+        }
+
+        async fn accept_user_message(
+            &self,
+            _envelope: &ProductInboundEnvelope,
+        ) -> Result<InboundTurnOutcome, ProductWorkflowError> {
+            Err(ProductWorkflowError::Transient {
+                reason: "delegated".into(),
+            })
+        }
+
+        async fn accept_user_message_with_before_policy(
+            &self,
+            _envelope: &ProductInboundEnvelope,
+            _before_inbound_policy: &dyn BeforeInboundPolicy,
+        ) -> Result<InboundUserMessageDispatch, ProductWorkflowError> {
+            Err(ProductWorkflowError::Transient {
+                reason: "delegated".into(),
+            })
+        }
+    }
+
+    /// The trait default must reject a turn carrying inline bytes rather than
+    /// silently dropping them, but still pass an attachment-free turn straight
+    /// through to the underlying acceptance path.
+    #[tokio::test]
+    async fn default_attachments_impl_rejects_bytes_but_passes_empty_through() {
+        let service = DefaultAttachmentsTurnService;
+        let envelope = user_message_envelope();
+
+        let rejected = service
+            .accept_user_message_with_before_policy_and_attachments(
+                &envelope,
+                &NoopBeforeInboundPolicy,
+                vec![InboundAttachment {
+                    id: "openai-image-0".to_string(),
+                    mime_type: "image/png".to_string(),
+                    filename: Some("image-0.png".to_string()),
+                    bytes: vec![0x89, b'P', b'N', b'G'],
+                }],
+            )
+            .await;
+        assert!(
+            matches!(
+                rejected,
+                Err(ProductWorkflowError::TurnSubmissionRejected { .. })
+            ),
+            "the default must fail closed on inline bytes, never silently drop them"
+        );
+
+        let delegated = service
+            .accept_user_message_with_before_policy_and_attachments(
+                &envelope,
+                &NoopBeforeInboundPolicy,
+                Vec::new(),
+            )
+            .await;
+        assert!(
+            matches!(delegated, Err(ProductWorkflowError::Transient { .. })),
+            "with no attachments the default must delegate to the normal path"
+        );
+    }
+
+    #[test]
+    fn rejected_busy_replay_with_invalid_turn_run_id_fails_loudly() {
+        let message_id = ThreadMessageId::new();
+        let result = ProductInboundTurnHandoff::from_replay(
+            replay(
+                message_id,
+                MessageStatus::RejectedBusy,
+                Some("src:alpha"),
+                Some("reply:alpha"),
+                Some("not-a-uuid".to_string()),
+            ),
+            "turn-key".to_string(),
+            received_at(),
+            ProductAdapterId::new("test_adapter").unwrap(),
+        );
+        let err = match result {
+            Err(e) => e,
+            Ok(_) => panic!("expected Err for malformed turn_run_id, got Ok"),
+        };
+
+        match err {
+            ProductWorkflowError::TurnSubmissionRejected { reason } => {
+                assert!(
+                    reason.contains("invalid rejected busy turn_run_id"),
+                    "expected reason to contain 'invalid rejected busy turn_run_id', got: {reason}"
+                );
+            }
+            other => panic!("expected TurnSubmissionRejected, got: {other:?}"),
+        }
     }
 }

@@ -1326,6 +1326,101 @@ async fn filesystem_manual_token_rotation_removes_previous_secret() {
     );
 }
 
+#[tokio::test]
+async fn filesystem_manual_token_reconnect_updates_bound_account_across_a_different_thread() {
+    // Regression (#4935 defect A, manual-token durable path): a manual-token
+    // reconnect from a different thread/invocation than the account was created
+    // in must UPDATE the bound account at owner granularity. The apply step used
+    // `validate_account_update_target` (full `scope_matches`), so setup accepted
+    // the binding but submit rejected it with CrossScopeDenied and would re-fork.
+    use ironclaw_auth::{
+        CredentialAccountUpdateBinding, ManualTokenSetupRequest, SecretSubmitRequest,
+    };
+
+    let filesystem = test_filesystem();
+    let secret_store: Arc<dyn SecretStore> = Arc::new(InMemorySecretStore::new());
+    let service = test_service(Arc::clone(&filesystem), Arc::clone(&secret_store));
+
+    // Account created in thread-a.
+    let mut create_scope = test_scope();
+    create_scope.resource.thread_id = Some(ThreadId::new("thread-a").unwrap());
+    let challenge1 = service
+        .request_secret_input(ManualTokenSetupRequest {
+            scope: create_scope.clone(),
+            provider: google_provider(),
+            label: account_label(),
+            continuation: AuthContinuationRef::SetupOnly,
+            update_binding: None,
+            expires_at: Utc::now() + Duration::minutes(5),
+        })
+        .await
+        .unwrap();
+    let AuthChallenge::ManualTokenRequired {
+        interaction_id: iid1,
+        ..
+    } = challenge1
+    else {
+        panic!("expected ManualTokenRequired");
+    };
+    let account_id = service
+        .submit_manual_token(
+            &create_scope,
+            SecretSubmitRequest {
+                interaction_id: iid1,
+                secret: SecretString::from("token-v1"),
+            },
+        )
+        .await
+        .unwrap()
+        .account_id;
+
+    // Reconnect from thread-b (fresh invocation), binding to the same account.
+    let mut reauth_scope = test_scope();
+    reauth_scope.resource.thread_id = Some(ThreadId::new("thread-b").unwrap());
+    let challenge2 = service
+        .request_secret_input(ManualTokenSetupRequest {
+            scope: reauth_scope.clone(),
+            provider: google_provider(),
+            label: account_label(),
+            continuation: AuthContinuationRef::SetupOnly,
+            update_binding: Some(CredentialAccountUpdateBinding {
+                account_id,
+                ownership: CredentialOwnership::UserReusable,
+                owner_extension: None,
+                granted_extensions: vec![],
+            }),
+            expires_at: Utc::now() + Duration::minutes(5),
+        })
+        .await
+        .expect("reconnect challenge across a different thread");
+    let AuthChallenge::ManualTokenRequired {
+        interaction_id: iid2,
+        ..
+    } = challenge2
+    else {
+        panic!("expected ManualTokenRequired for reconnect");
+    };
+    let result = service
+        .submit_manual_token(
+            &reauth_scope,
+            SecretSubmitRequest {
+                interaction_id: iid2,
+                secret: SecretString::from("token-v2"),
+            },
+        )
+        .await
+        .expect("cross-thread manual-token reconnect must update the bound account, not fork");
+    assert_eq!(result.account_id, account_id);
+
+    // No fork: still exactly one account for the owner.
+    let accounts = service
+        .accounts_for_owner(&create_scope.to_credential_owner())
+        .await
+        .unwrap();
+    assert_eq!(accounts.len(), 1);
+    assert_eq!(accounts[0].id, account_id);
+}
+
 // ─── fix: durable SecretCleanupService purges secrets on Uninstall ───────────
 
 #[tokio::test]
@@ -1350,6 +1445,7 @@ async fn filesystem_cleanup_for_lifecycle_deactivates_owner_and_revokes_on_unins
             scope.resource.clone(),
             access.clone(),
             SecretString::from("access-material"),
+            None,
         )
         .await
         .unwrap();
@@ -1358,6 +1454,7 @@ async fn filesystem_cleanup_for_lifecycle_deactivates_owner_and_revokes_on_unins
             scope.resource.clone(),
             refresh.clone(),
             SecretString::from("refresh-material"),
+            None,
         )
         .await
         .unwrap();
@@ -1668,6 +1765,7 @@ async fn filesystem_oauth_reauth_purges_previous_provider_secrets() {
             scope.resource.clone(),
             access_v1.clone(),
             SecretMaterial::from("access-token-v1"),
+            None,
         )
         .await
         .unwrap();
@@ -1676,6 +1774,7 @@ async fn filesystem_oauth_reauth_purges_previous_provider_secrets() {
             scope.resource.clone(),
             refresh_v1.clone(),
             SecretMaterial::from("refresh-token-v1"),
+            None,
         )
         .await
         .unwrap();
@@ -1770,6 +1869,7 @@ async fn filesystem_oauth_reauth_purges_previous_provider_secrets() {
             scope.resource.clone(),
             access_v2.clone(),
             SecretMaterial::from("access-token-v2"),
+            None,
         )
         .await
         .unwrap();
@@ -1778,6 +1878,7 @@ async fn filesystem_oauth_reauth_purges_previous_provider_secrets() {
             scope.resource.clone(),
             refresh_v2.clone(),
             SecretMaterial::from("refresh-token-v2"),
+            None,
         )
         .await
         .unwrap();
@@ -1839,6 +1940,171 @@ async fn filesystem_oauth_reauth_purges_previous_provider_secrets() {
             .unwrap()
             .is_some(),
         "v2 refresh handle must be present in SecretStore after re-auth"
+    );
+}
+
+// ─── [tests] OAuth reauth updates the bound account across transient scope diffs
+
+#[tokio::test]
+async fn filesystem_oauth_reauth_updates_bound_account_across_fresh_invocation() {
+    // Defect A, durable callback path: the bound-account update resolves at owner
+    // granularity. When the reconnect flow's scope differs from the account's
+    // creation scope ONLY by transient invocation/thread/mission, the callback
+    // must still update the SAME account. A regression to full `scope_matches`
+    // (in `validate_scoped_update_binding` or `update_bound_oauth_account`) would
+    // reject this with CrossScopeDenied. Owner granularity is tenant/user/agent/
+    // project plus path-segmenting session — all unchanged across the reconnect.
+    use ironclaw_auth::{CredentialAccountUpdateBinding, ProviderCallbackOutcome};
+
+    let filesystem = test_filesystem();
+    let secret_store: Arc<dyn SecretStore> = Arc::new(InMemorySecretStore::new());
+    let setup_scope = test_scope();
+    let service = test_service(Arc::clone(&filesystem), Arc::clone(&secret_store));
+
+    // ── Step 1: initial flow creates the account under `setup_scope`. ─────────
+    let flow1 = service
+        .create_flow(NewAuthFlow {
+            id: None,
+            scope: setup_scope.clone(),
+            kind: AuthFlowKind::IntegrationCredential,
+            provider: google_provider(),
+            challenge: AuthChallenge::OAuthUrl {
+                authorization_url: OAuthAuthorizationUrl::new("https://provider.example/oauth")
+                    .unwrap(),
+                expires_at: Utc::now() + Duration::minutes(5),
+            },
+            continuation: AuthContinuationRef::SetupOnly,
+            update_binding: None,
+            opaque_state_hash: Some(state_hash("state1")),
+            pkce_verifier_hash: Some(pkce_hash("pkce1")),
+            expires_at: Utc::now() + Duration::minutes(5),
+        })
+        .await
+        .unwrap();
+    service
+        .claim_oauth_callback(
+            &setup_scope,
+            OAuthCallbackClaimRequest {
+                flow_id: flow1.id,
+                opaque_state_hash: state_hash("state1"),
+                provider: google_provider(),
+                pkce_verifier_hash: pkce_hash("pkce1"),
+            },
+        )
+        .await
+        .unwrap();
+    let access_v1 = SecretHandle::new("oauth-access-v1").unwrap();
+    let completed1 = service
+        .complete_oauth_callback(
+            &setup_scope,
+            OAuthCallbackInput {
+                flow_id: flow1.id,
+                opaque_state_hash: state_hash("state1"),
+                outcome: ProviderCallbackOutcome::Authorized {
+                    exchange: OAuthProviderExchange {
+                        provider: google_provider(),
+                        account_label: account_label(),
+                        authorization_code_hash: code_hash("code1"),
+                        pkce_verifier_hash: pkce_hash("pkce1"),
+                        access_secret: access_v1.clone(),
+                        refresh_secret: None,
+                        scopes: vec![ProviderScope::new("gmail.readonly").unwrap()],
+                        account_id: None,
+                    },
+                },
+            },
+        )
+        .await
+        .unwrap();
+    let account_id = completed1
+        .credential_account_id
+        .expect("first OAuth flow must produce a credential account");
+
+    // ── Step 2: reconnect from a DIFFERENT context — fresh invocation plus a
+    // different thread/mission, same owner (tenant/user/agent/project/session).
+    let mut reauth_resource = setup_scope.resource.clone();
+    reauth_resource.invocation_id = InvocationId::new();
+    reauth_resource.thread_id = Some(ThreadId::new("thread-reauth").unwrap());
+    reauth_resource.mission_id = Some(ironclaw_host_api::MissionId::new("mission-reauth").unwrap());
+    let reauth_scope = AuthProductScope::new(reauth_resource, setup_scope.surface);
+
+    let flow2 = service
+        .create_flow(NewAuthFlow {
+            id: None,
+            scope: reauth_scope.clone(),
+            kind: AuthFlowKind::IntegrationCredential,
+            provider: google_provider(),
+            challenge: AuthChallenge::OAuthUrl {
+                authorization_url: OAuthAuthorizationUrl::new("https://provider.example/oauth")
+                    .unwrap(),
+                expires_at: Utc::now() + Duration::minutes(5),
+            },
+            continuation: AuthContinuationRef::SetupOnly,
+            update_binding: Some(CredentialAccountUpdateBinding {
+                account_id,
+                ownership: CredentialOwnership::UserReusable,
+                owner_extension: None,
+                granted_extensions: vec![],
+            }),
+            opaque_state_hash: Some(state_hash("state2")),
+            pkce_verifier_hash: Some(pkce_hash("pkce2")),
+            expires_at: Utc::now() + Duration::minutes(5),
+        })
+        .await
+        .expect("cross-invocation reconnect must accept the owner's binding");
+    service
+        .claim_oauth_callback(
+            &reauth_scope,
+            OAuthCallbackClaimRequest {
+                flow_id: flow2.id,
+                opaque_state_hash: state_hash("state2"),
+                provider: google_provider(),
+                pkce_verifier_hash: pkce_hash("pkce2"),
+            },
+        )
+        .await
+        .unwrap();
+    let access_v2 = SecretHandle::new("oauth-access-v2").unwrap();
+    let completed2 = service
+        .complete_oauth_callback(
+            &reauth_scope,
+            OAuthCallbackInput {
+                flow_id: flow2.id,
+                opaque_state_hash: state_hash("state2"),
+                outcome: ProviderCallbackOutcome::Authorized {
+                    exchange: OAuthProviderExchange {
+                        provider: google_provider(),
+                        account_label: account_label(),
+                        authorization_code_hash: code_hash("code2"),
+                        pkce_verifier_hash: pkce_hash("pkce2"),
+                        access_secret: access_v2.clone(),
+                        refresh_secret: None,
+                        scopes: vec![ProviderScope::new("gmail.readonly").unwrap()],
+                        account_id: None,
+                    },
+                },
+            },
+        )
+        .await
+        .expect("cross-invocation reconnect callback must update the bound account");
+
+    // The bound account was UPDATED in place across the transient scope diff —
+    // same account id, carrying the re-auth's access secret, and not forked.
+    assert_eq!(
+        completed2.credential_account_id,
+        Some(account_id),
+        "reconnect must complete against the same owner account, not a fork",
+    );
+    let owner_accounts = service.accounts_for_owner(&setup_scope).await.unwrap();
+    assert_eq!(
+        owner_accounts.len(),
+        1,
+        "reconnect must not fork a second account",
+    );
+    assert_eq!(
+        owner_accounts[0].access_secret,
+        Some(access_v2),
+        "the bound account must carry the re-auth access secret",
     );
 }
 
@@ -2848,6 +3114,7 @@ async fn filesystem_oauth_cas_conflict_branch_purges_previous_secrets() {
             scope.resource.clone(),
             old_access.clone(),
             SecretMaterial::from("old-access-token"),
+            None,
         )
         .await
         .unwrap();
@@ -2856,6 +3123,7 @@ async fn filesystem_oauth_cas_conflict_branch_purges_previous_secrets() {
             scope.resource.clone(),
             old_refresh.clone(),
             SecretMaterial::from("old-refresh-token"),
+            None,
         )
         .await
         .unwrap();
@@ -2940,6 +3208,265 @@ async fn filesystem_oauth_cas_conflict_branch_purges_previous_secrets() {
             .unwrap()
             .is_none(),
         "old refresh secret must be purged after CAS-conflict update"
+    );
+}
+
+// ─── PR #5087 A1: list_refresh_candidates covers all owner-scope shapes ──────
+
+/// Builds an `AuthProductScope` for `resource` using the Web surface (the
+/// surface used by most fixture helpers). This is only for scope construction;
+/// the surface does not affect the keepalive candidate filter.
+#[cfg(any(feature = "libsql", feature = "postgres"))]
+fn scope_for_resource(
+    resource: ironclaw_host_api::ResourceScope,
+) -> ironclaw_auth::AuthProductScope {
+    ironclaw_auth::AuthProductScope::new(resource, AuthSurface::Web)
+}
+
+/// Builds a minimal `ResourceScope` for a given (tenant, user) pair.
+/// `agent_id` and `project_id` are threaded through directly.
+#[cfg(any(feature = "libsql", feature = "postgres"))]
+fn resource_scope(
+    tenant_id: &str,
+    user_id: &str,
+    agent_id: Option<&str>,
+    project_id: Option<&str>,
+) -> ironclaw_host_api::ResourceScope {
+    use ironclaw_host_api::{AgentId, ProjectId, TenantId};
+    ironclaw_host_api::ResourceScope {
+        tenant_id: TenantId::new(tenant_id).unwrap(),
+        user_id: UserId::new(user_id).unwrap(),
+        agent_id: agent_id.map(|a| AgentId::new(a).unwrap()),
+        project_id: project_id.map(|p| ProjectId::new(p).unwrap()),
+        mission_id: None,
+        thread_id: None,
+        invocation_id: InvocationId::new(),
+    }
+}
+
+#[cfg(any(feature = "libsql", feature = "postgres"))]
+#[tokio::test]
+async fn list_refresh_candidates_covers_agent_and_project_scopes() {
+    // Goal: verify that `list_refresh_candidates` discovers Google keepalive
+    // candidates across all four owner-scope shapes (plain, agent-only,
+    // agent+project, project-only) and excludes accounts that fail any one
+    // of the three eligibility filters (provider != google, status != Configured,
+    // refresh_secret == None).
+    //
+    // Setup uses `new_with_root` + `invocation_mount_view` so account writes
+    // land at real paths (e.g. /tenants/t/users/u/secrets/agents/<a>/product-auth/…)
+    // that `list_refresh_candidates` can enumerate via the raw `RootFilesystem`.
+
+    use ironclaw_auth::GOOGLE_PROVIDER_ID;
+
+    let backend = Arc::new(InMemoryBackend::new());
+    let scoped = Arc::new(ScopedFilesystem::new(
+        Arc::clone(&backend),
+        crate::invocation_mount_view,
+    ));
+    let secret_store: Arc<dyn SecretStore> = Arc::new(InMemorySecretStore::new());
+    let service = FilesystemAuthProductServices::new_with_root(
+        Arc::clone(&scoped),
+        Arc::clone(&backend),
+        Arc::clone(&secret_store),
+    );
+
+    let tenant = "acmetenant";
+    let user = "alice";
+
+    // ── Positive cases: Google Configured + refresh_secret present ────────────
+
+    // 1. Plain scope: no agent, no project.
+    let plain_resource = resource_scope(tenant, user, None, None);
+    let plain_scope = scope_for_resource(plain_resource);
+    let plain_account = service
+        .create_account(NewCredentialAccount {
+            scope: plain_scope,
+            provider: AuthProviderId::new(GOOGLE_PROVIDER_ID).unwrap(),
+            label: CredentialAccountLabel::new("Alice Google Plain").unwrap(),
+            status: CredentialAccountStatus::Configured,
+            ownership: CredentialOwnership::UserReusable,
+            owner_extension: None,
+            granted_extensions: vec![],
+            access_secret: Some(SecretHandle::new("plain-access").unwrap()),
+            refresh_secret: Some(SecretHandle::new("plain-refresh").unwrap()),
+            scopes: vec![],
+        })
+        .await
+        .unwrap();
+
+    // 2. Agent-only scope.
+    let agent_resource = resource_scope(tenant, user, Some("testagent"), None);
+    let agent_scope = scope_for_resource(agent_resource);
+    let agent_account = service
+        .create_account(NewCredentialAccount {
+            scope: agent_scope,
+            provider: AuthProviderId::new(GOOGLE_PROVIDER_ID).unwrap(),
+            label: CredentialAccountLabel::new("Alice Google Agent").unwrap(),
+            status: CredentialAccountStatus::Configured,
+            ownership: CredentialOwnership::UserReusable,
+            owner_extension: None,
+            granted_extensions: vec![],
+            access_secret: Some(SecretHandle::new("agent-access").unwrap()),
+            refresh_secret: Some(SecretHandle::new("agent-refresh").unwrap()),
+            scopes: vec![],
+        })
+        .await
+        .unwrap();
+
+    // 3. Agent+project scope.
+    let agent_project_resource =
+        resource_scope(tenant, user, Some("testagent"), Some("testproject"));
+    let agent_project_scope = scope_for_resource(agent_project_resource);
+    let agent_project_account = service
+        .create_account(NewCredentialAccount {
+            scope: agent_project_scope,
+            provider: AuthProviderId::new(GOOGLE_PROVIDER_ID).unwrap(),
+            label: CredentialAccountLabel::new("Alice Google Agent+Project").unwrap(),
+            status: CredentialAccountStatus::Configured,
+            ownership: CredentialOwnership::UserReusable,
+            owner_extension: None,
+            granted_extensions: vec![],
+            access_secret: Some(SecretHandle::new("agent-project-access").unwrap()),
+            refresh_secret: Some(SecretHandle::new("agent-project-refresh").unwrap()),
+            scopes: vec![],
+        })
+        .await
+        .unwrap();
+
+    // 4. Project-only scope (no agent).
+    let project_resource = resource_scope(tenant, user, None, Some("testproject"));
+    let project_scope = scope_for_resource(project_resource);
+    let project_account = service
+        .create_account(NewCredentialAccount {
+            scope: project_scope,
+            provider: AuthProviderId::new(GOOGLE_PROVIDER_ID).unwrap(),
+            label: CredentialAccountLabel::new("Alice Google Project").unwrap(),
+            status: CredentialAccountStatus::Configured,
+            ownership: CredentialOwnership::UserReusable,
+            owner_extension: None,
+            granted_extensions: vec![],
+            access_secret: Some(SecretHandle::new("project-access").unwrap()),
+            refresh_secret: Some(SecretHandle::new("project-refresh").unwrap()),
+            scopes: vec![],
+        })
+        .await
+        .unwrap();
+
+    // ── Negative cases: must be excluded ─────────────────────────────────────
+
+    // 5. Non-Google provider (GitHub) — must be excluded even if Configured+refresh.
+    let neg_resource_github = resource_scope(tenant, user, None, None);
+    let neg_scope_github = scope_for_resource(neg_resource_github);
+    let github_account = service
+        .create_account(NewCredentialAccount {
+            scope: neg_scope_github,
+            provider: AuthProviderId::new("github").unwrap(),
+            label: CredentialAccountLabel::new("Alice GitHub").unwrap(),
+            status: CredentialAccountStatus::Configured,
+            ownership: CredentialOwnership::UserReusable,
+            owner_extension: None,
+            granted_extensions: vec![],
+            access_secret: Some(SecretHandle::new("github-access").unwrap()),
+            refresh_secret: Some(SecretHandle::new("github-refresh").unwrap()),
+            scopes: vec![],
+        })
+        .await
+        .unwrap();
+
+    // 6. Google Revoked — must be excluded (status != Configured).
+    let neg_resource_revoked = resource_scope(tenant, user, None, None);
+    let neg_scope_revoked = scope_for_resource(neg_resource_revoked);
+    let revoked_account = service
+        .create_account(NewCredentialAccount {
+            scope: neg_scope_revoked,
+            provider: AuthProviderId::new(GOOGLE_PROVIDER_ID).unwrap(),
+            label: CredentialAccountLabel::new("Alice Google Revoked").unwrap(),
+            status: CredentialAccountStatus::Revoked,
+            ownership: CredentialOwnership::UserReusable,
+            owner_extension: None,
+            granted_extensions: vec![],
+            access_secret: None,
+            refresh_secret: Some(SecretHandle::new("revoked-refresh").unwrap()),
+            scopes: vec![],
+        })
+        .await
+        .unwrap();
+
+    // 7. Google Configured but NO refresh_secret — must be excluded.
+    let neg_resource_no_refresh = resource_scope(tenant, user, None, None);
+    let neg_scope_no_refresh = scope_for_resource(neg_resource_no_refresh);
+    let no_refresh_account = service
+        .create_account(NewCredentialAccount {
+            scope: neg_scope_no_refresh,
+            provider: AuthProviderId::new(GOOGLE_PROVIDER_ID).unwrap(),
+            label: CredentialAccountLabel::new("Alice Google No Refresh").unwrap(),
+            status: CredentialAccountStatus::Configured,
+            ownership: CredentialOwnership::UserReusable,
+            owner_extension: None,
+            granted_extensions: vec![],
+            access_secret: Some(SecretHandle::new("no-refresh-access").unwrap()),
+            refresh_secret: None,
+            scopes: vec![],
+        })
+        .await
+        .unwrap();
+
+    // ── Exercise ──────────────────────────────────────────────────────────────
+
+    let candidates = service.list_refresh_candidates().await;
+
+    // ── Assert: all 4 scope shapes are returned ───────────────────────────────
+    let candidate_ids: std::collections::BTreeSet<_> = candidates.iter().map(|a| a.id).collect();
+
+    assert!(
+        candidate_ids.contains(&plain_account.id),
+        "plain (no agent/project) Google account must be a keepalive candidate; found ids: {candidate_ids:?}"
+    );
+    assert!(
+        candidate_ids.contains(&agent_account.id),
+        "agent-only-scoped Google account must be a keepalive candidate; found ids: {candidate_ids:?}"
+    );
+    assert!(
+        candidate_ids.contains(&agent_project_account.id),
+        "agent+project-scoped Google account must be a keepalive candidate; found ids: {candidate_ids:?}"
+    );
+    assert!(
+        candidate_ids.contains(&project_account.id),
+        "project-only-scoped Google account must be a keepalive candidate; found ids: {candidate_ids:?}"
+    );
+
+    // ── Assert: negative cases are excluded ───────────────────────────────────
+    assert!(
+        !candidate_ids.contains(&github_account.id),
+        "non-Google (GitHub) account must NOT be a keepalive candidate"
+    );
+    assert!(
+        !candidate_ids.contains(&revoked_account.id),
+        "Revoked Google account must NOT be a keepalive candidate"
+    );
+    assert!(
+        !candidate_ids.contains(&no_refresh_account.id),
+        "Google Configured account with no refresh_secret must NOT be a keepalive candidate"
+    );
+
+    // ── Light secret-material guard: no refresh handle is exposed beyond ──────
+    // account metadata (the returned CredentialAccount has a handle name only,
+    // not the secret material itself). Verified structurally: the candidate list
+    // must not return any account whose refresh_secret is None (the test would
+    // have already caught that above, but belt-and-suspenders).
+    assert!(
+        candidates.iter().all(|a| a.refresh_secret.is_some()),
+        "every returned candidate must carry a refresh_secret handle"
+    );
+    // Confirm each handle is opaque (handle name, not raw secret material).
+    assert!(
+        candidates
+            .iter()
+            .flat_map(|a| [a.access_secret.as_ref(), a.refresh_secret.as_ref()])
+            .flatten()
+            .all(|h| !h.as_str().is_empty()),
+        "secret handles in candidates must be non-empty opaque identifiers"
     );
 }
 

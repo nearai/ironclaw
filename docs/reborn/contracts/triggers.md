@@ -84,10 +84,44 @@ It is the source of truth for fire eligibility.
 
 - `Scheduled` means the trigger may be polled and fired.
 - `Paused` means the trigger is retained but must not fire.
-- `Completed` is reserved for future finite schedules and must not be treated as a V1 cron-state requirement.
+- `Completed` is the terminal state reached when a `complete_after_first_fire`
+  trigger fires successfully. `clear_active_fire` transitions the trigger to
+  `Completed` (soft-complete) after the run reaches a terminal outcome; the
+  same path also soft-completes successful `Once` fires after their terminal
+  run outcome. `Once` triggers also complete on a terminal pre-submit failure
+  so the same one-shot slot does not refire forever. Completed triggers are
+  retained and remain queryable — the model-visible `trigger_list` capability
+  surfaces all states, and
+  `GET /api/webchat/v2/automations?include_completed=true` returns them — but
+  the default WebUI automations panel excludes `Completed` entries to avoid
+  cluttering the active list with triggers that will never fire again.
 - V1 does not expose a separate `enabled` field. Durable backends may add
   denormalized indexes derived from `state == Scheduled`, but those indexes must
   never become independent fire gates.
+
+### 3.4 Completion policy
+
+`TriggerRecord.completion_policy` controls what happens after a successful fire:
+
+- `Recurring` — the trigger keeps firing on its cron schedule. (For
+  `trigger_create`, callers must provide `completion_policy` explicitly; this
+  describes behavioral semantics, not input defaulting.) After
+  `clear_active_fire` observes a terminal turn outcome, the trigger stays in
+  `Scheduled` and the poller resumes normal cadence.
+- `CompleteAfterFirstFire` — fire-once semantics. After `clear_active_fire`
+  observes a terminal turn outcome, the trigger transitions to `Completed`.
+  The year-pinned cron pattern (scheduling the trigger for a single past-future
+  slot) combined with `complete_after_first_fire` is the V1 one-shot
+  implementation. Subsequent poll ticks skip the trigger because its state is
+  `Completed`.
+
+Pre-submit permanent failures are handled separately by the worker: `Once`
+triggers complete on failure so the one-shot slot is retired, while exhausted
+Cron triggers stay `Scheduled`/retryable for manual investigation or removal.
+
+Run threads for completed triggers remain accessible by design; their history is
+retained user data and must not become unreachable when the trigger transitions
+to `Completed`.
 
 ---
 
@@ -335,14 +369,17 @@ Slot bookkeeping is tied to acceptance, not merely polling:
   `active_fire_slot` and `active_run_ref`, leave `last_fired_slot` and
   `last_run_at` unchanged, and keep `next_run_at` at or before the failed
   fire_slot so the poller can retry it on the next tick;
-- permanent validation or authorization failures write `last_status = Error`,
-  clear `active_fire_slot` and `active_run_ref`, leave `last_fired_slot` and
-  `last_run_at` unchanged, and advance `next_run_at` beyond the failed
-  fire_slot;
-- permanent failures on a schedule with no future fire slot mark the trigger
+- permanent validation or authorization failures on Cron write `last_status =
+  Error`, clear `active_fire_slot` and `active_run_ref`, leave
+  `last_fired_slot` and `last_run_at` unchanged, and advance `next_run_at`
+  beyond the failed fire_slot;
+- permanent validation or authorization failures on `Once` mark the trigger
   `Completed`, write `last_status = Error`, clear active-fire fields, and leave
-  `next_run_at` at the failed fire slot. The `Completed` state, not a sentinel
-  timestamp, removes the trigger from future due queries.
+  `next_run_at` at the failed fire slot so the one-shot slot is retired. The
+  `Completed` state, not a sentinel timestamp, removes the trigger from future
+  due queries;
+- exhausted Cron permanent pre-submit failures stay `Scheduled`/retryable so
+  they remain visible for manual review and removal.
 
 Turn terminal lookup and clearing are a narrow seam layered above fire-claim
 and submit-result bookkeeping:
@@ -417,7 +454,16 @@ Capability follow-ups before launch:
 
 ## 9. Delivery
 
-Trigger delivery is fast-follow.
+Trigger delivery target selection is outside trigger identity and goes through
+the outbound delivery track. Product-facing outbound preference APIs and
+explicit provider-backed target tooling own discovery and approval-gated
+selection. Local-dev Reborn exposes model-visible outbound target
+discovery/selection capabilities that write the caller's final-reply
+preference. When a user asks to send routine or trigger results through a
+delivery product/channel, model-visible trigger surfaces must steer the model to
+discover and select an outbound delivery target before calling
+`trigger_create`; durable selection remains product-owned and trigger records
+still do not embed delivery targets.
 
 - Trigger ingress identity must not include delivery targets.
 - Trigger record identity must not include delivery targets.

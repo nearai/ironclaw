@@ -39,6 +39,7 @@ macro_rules! bounded_string_id {
 }
 
 bounded_string_id!(AdapterKind, "adapter_kind");
+
 bounded_string_id!(AdapterInstallationId, "adapter_installation_id");
 bounded_string_id!(ExternalEventId, "external_event_id");
 bounded_string_id!(InboundMessageContentRef, "inbound_message_content_ref");

@@ -149,6 +149,7 @@ pub(super) fn map_lifecycle_error(error: ProductWorkflowError) -> RebornServices
         | ProductWorkflowError::AuthContinuationRejected { .. }
         | ProductWorkflowError::BeforeInboundPolicyFailed { .. }
         | ProductWorkflowError::DuplicateAction { .. }
+        | ProductWorkflowError::OutboundTargetNotDirectMessage
         | ProductWorkflowError::UnknownInstallation => RebornServicesError::internal_invariant(),
     }
 }

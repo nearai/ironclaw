@@ -8,7 +8,13 @@ export const defaultRoute = "/chat";
 // the page's `lib/*-api.js` calls real endpoints.
 export const primaryRoutes = [
   { id: "chat", path: "/chat", labelKey: "nav.chat" },
-  { id: "workspace", path: "/workspace", labelKey: "nav.workspace", hidden: true },
+  { id: "workspace", path: "/workspace", labelKey: "nav.workspace" },
+  // Surfaced in the conversations panel (under Search, above Recent) by
+  // SidebarThreads rather than the primary nav list, so `hidden: true` keeps the
+  // /projects route registered (direct URL + breadcrumb/title resolution) while
+  // suppressing the now-duplicate top-nav entry. Its lib/projects-api.js calls
+  // the real v2 `/api/webchat/v2/projects` endpoints (list/create/read/update/
+  // delete + membership ACL); per-project missions/threads remain stubbed.
   { id: "projects", path: "/projects", labelKey: "nav.projects", hidden: true },
   { id: "jobs", path: "/jobs", labelKey: "nav.jobs", hidden: true },
   { id: "routines", path: "/routines", labelKey: "nav.routines", hidden: true },
@@ -40,15 +46,17 @@ export const SETTINGS_SUB_ROUTES = [
   // { id: "networking", labelKey: "settings.networking", icon: "pulse" },
   // { id: "tools", labelKey: "settings.tools", icon: "tool" },
   { id: "skills", labelKey: "settings.skills", icon: "file" },
+  // Trace Commons is un-hidden: its api lib calls the real v2
+  // `/api/webchat/v2/traces/credit` endpoint.
+  { id: "traces", labelKey: "settings.traceCommons", icon: "layers" },
   // { id: "users", labelKey: "settings.users", icon: "lock" },
   { id: "language", labelKey: "settings.language", icon: "globe" },
 ];
 
 export const EXTENSIONS_SUB_ROUTES = [
-  { id: "installed", labelKey: "extensions.installed", icon: "bolt" },
+  { id: "registry", labelKey: "extensions.registry", icon: "plus" },
   { id: "channels", labelKey: "extensions.channels", icon: "send" },
   { id: "mcp", labelKey: "extensions.mcp", icon: "pulse" },
-  { id: "registry", labelKey: "extensions.registry", icon: "plus" },
 ];
 
 export const ADMIN_SUB_ROUTES = [

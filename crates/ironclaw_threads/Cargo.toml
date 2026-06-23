@@ -26,5 +26,12 @@ tokio = { version = "1", features = ["sync"] }
 tracing = "0.1"
 uuid = { version = "1", features = ["v4", "serde"] }
 
+[features]
+## Exposes test-only back-doors (e.g. `inject_legacy_deferred_busy_for_test`)
+## needed by integration tests in a separate compilation unit. Never enable
+## in production builds; this feature is intentionally off by default.
+test-support = []
+
 [dev-dependencies]
-tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+ironclaw_threads = { path = ".", features = ["test-support"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "time"] }

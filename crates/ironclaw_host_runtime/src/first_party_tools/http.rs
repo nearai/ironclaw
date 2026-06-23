@@ -32,6 +32,7 @@ const MAX_NETWORK_EGRESS_BYTES: u64 = 256 * 1024;
 const MAX_HTTP_HEADERS: usize = 64;
 const MAX_HTTP_HEADER_NAME_BYTES: usize = 512;
 const MAX_HTTP_HEADER_VALUE_BYTES: usize = 8 * 1024;
+const GITHUB_EXTENSION_PREFERENCE: &str = "Prefer GitHub extension capabilities for GitHub repository, issue, pull request, release, or workflow data when they are available.";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum HttpSaveMode {
@@ -74,9 +75,10 @@ fn http_manifest(
     description: &str,
     effects: Vec<EffectKind>,
 ) -> Result<CapabilityManifest, ExtensionError> {
+    let description = format!("{description} {GITHUB_EXTENSION_PREFERENCE}");
     first_party_capability_manifest(
         capability_id,
-        description,
+        &description,
         effects,
         PermissionMode::Ask,
         Some(http_resource_profile()),
@@ -293,18 +295,32 @@ fn header_pair(name: &str, value: &str) -> Result<(String, String), FirstPartyCa
 }
 
 fn body(input: &Value) -> Result<Vec<u8>, FirstPartyCapabilityError> {
-    if input.get("body").is_some() && input.get("body_base64").is_some() {
+    // Treat a null / empty-string field as absent. Models routinely emit *both*
+    // `body` and `body_base64` as `""` defaults for a bodyless request (the
+    // schema lists both), which must not trip the mutual-exclusion check or be
+    // decoded as a real (empty) body. Only a non-empty value counts as "set".
+    let is_set = |key: &str| {
+        input
+            .get(key)
+            .is_some_and(|v| !v.is_null() && v.as_str() != Some(""))
+    };
+    if is_set("body") && is_set("body_base64") {
         return Err(input_error());
     }
-    let body = if let Some(encoded) = input.get("body_base64") {
-        let encoded = encoded.as_str().ok_or_else(input_error)?;
+    let body = if is_set("body_base64") {
+        let encoded = input
+            .get("body_base64")
+            .and_then(Value::as_str)
+            .ok_or_else(input_error)?;
         BASE64_STANDARD.decode(encoded).map_err(|_| input_error())?
-    } else {
+    } else if is_set("body") {
         match input.get("body") {
-            None | Some(Value::Null) => Vec::new(),
             Some(Value::String(value)) => value.as_bytes().to_vec(),
             Some(value) => serde_json::to_vec(value).map_err(|_| input_error())?,
+            None => Vec::new(),
         }
+    } else {
+        Vec::new()
     };
     if body.len() as u64 > MAX_NETWORK_EGRESS_BYTES {
         return Err(input_error());
@@ -475,4 +491,54 @@ fn log_raw_http_input_error_for_local_diagnostics(
         );
     }
     error
+}
+
+#[cfg(test)]
+mod body_tests {
+    use super::body;
+    use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
+    use serde_json::json;
+
+    #[test]
+    fn empty_string_body_and_body_base64_are_treated_as_absent() {
+        // Models commonly emit both schema fields as "" defaults for a bodyless
+        // GET. Both empty must be accepted as "no body", not rejected by the
+        // mutual-exclusion check.
+        let input = json!({ "method": "get", "body": "", "body_base64": "" });
+        assert_eq!(
+            body(&input).expect("empty fields accepted"),
+            Vec::<u8>::new()
+        );
+    }
+
+    #[test]
+    fn absent_body_fields_yield_empty_body() {
+        let input = json!({ "method": "get" });
+        assert_eq!(body(&input).expect("no body fields"), Vec::<u8>::new());
+    }
+
+    #[test]
+    fn non_empty_body_is_used() {
+        let input = json!({ "method": "post", "body": "hello", "body_base64": "" });
+        assert_eq!(body(&input).expect("string body"), b"hello".to_vec());
+    }
+
+    #[test]
+    fn non_empty_body_base64_is_decoded() {
+        let encoded = BASE64_STANDARD.encode("hello");
+        let input = json!({ "method": "post", "body": "", "body_base64": encoded });
+        assert_eq!(body(&input).expect("base64 body"), b"hello".to_vec());
+    }
+
+    #[test]
+    fn both_non_empty_is_rejected() {
+        let input = json!({ "method": "post", "body": "a", "body_base64": "Yg==" });
+        assert!(body(&input).is_err(), "ambiguous body must be rejected");
+    }
+
+    #[test]
+    fn json_object_body_is_serialized() {
+        let input = json!({ "method": "post", "body": { "k": "v" } });
+        assert_eq!(body(&input).expect("json body"), br#"{"k":"v"}"#.to_vec());
+    }
 }
