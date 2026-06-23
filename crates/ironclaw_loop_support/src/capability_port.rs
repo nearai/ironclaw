@@ -5,7 +5,8 @@ use std::{
 
 use async_trait::async_trait;
 use ironclaw_host_api::{
-    CapabilityDisplayOutputPreview, CapabilityId, CapabilitySet, CorrelationId, EffectKind,
+    CapabilityDisplayOutputPreview, CapabilityId, CapabilitySet, CorrelationId,
+    DispatchFailureDetail, DispatchInputIssue, DispatchInputIssueCode, EffectKind,
     ExecutionContext, ExtensionId, InvocationId, MountView, Principal, ResourceEstimate,
     RuntimeKind, sha256_digest_token,
 };
@@ -22,7 +23,8 @@ use ironclaw_turns::{
         AgentLoopHostError, AgentLoopHostErrorKind, CapabilityApprovalResume, CapabilityAuthResume,
         CapabilityBatchInvocation, CapabilityBatchOutcome, CapabilityDenied,
         CapabilityDeniedReasonKind, CapabilityDescriptorView, CapabilityFailure,
-        CapabilityFailureKind, CapabilityInputRef, CapabilityInvocation, CapabilityOutcome,
+        CapabilityFailureDetail, CapabilityFailureKind, CapabilityInputIssue,
+        CapabilityInputIssueCode, CapabilityInputRef, CapabilityInvocation, CapabilityOutcome,
         CapabilityResultMessage, CapabilityResumeToken, ConcurrencyHint, ContentDigest,
         LoopCapabilityPort, LoopHostMilestone, LoopHostMilestoneKind, LoopHostMilestoneSink,
         LoopProcessRef, LoopRunContext, LoopSafeSummary, ProcessHandleSummary, ProviderToolCall,
@@ -2354,8 +2356,44 @@ fn runtime_model_visible_failure_to_loop(
     Ok(CapabilityOutcome::Failed(CapabilityFailure {
         error_kind: model_visible_runtime_failure_kind_to_loop(failure.kind)?,
         safe_summary: runtime_failure_safe_summary(&failure, "capability invocation failed"),
-        detail: None,
+        detail: runtime_failure_detail_to_loop(failure.detail),
     }))
+}
+
+fn runtime_failure_detail_to_loop(
+    detail: Option<DispatchFailureDetail>,
+) -> Option<CapabilityFailureDetail> {
+    detail.map(dispatch_failure_detail_to_loop)
+}
+
+fn dispatch_failure_detail_to_loop(detail: DispatchFailureDetail) -> CapabilityFailureDetail {
+    match detail {
+        DispatchFailureDetail::InvalidInput { issues } => CapabilityFailureDetail::InvalidInput {
+            issues: issues
+                .into_iter()
+                .map(dispatch_input_issue_to_loop)
+                .collect(),
+        },
+    }
+}
+
+fn dispatch_input_issue_to_loop(issue: DispatchInputIssue) -> CapabilityInputIssue {
+    CapabilityInputIssue {
+        path: issue.path,
+        code: dispatch_input_issue_code_to_loop(issue.code),
+        expected: issue.expected,
+        received: issue.received,
+        schema_path: issue.schema_path,
+    }
+}
+
+fn dispatch_input_issue_code_to_loop(code: DispatchInputIssueCode) -> CapabilityInputIssueCode {
+    match code {
+        DispatchInputIssueCode::MissingRequired => CapabilityInputIssueCode::MissingRequired,
+        DispatchInputIssueCode::UnexpectedField => CapabilityInputIssueCode::UnexpectedField,
+        DispatchInputIssueCode::TypeMismatch => CapabilityInputIssueCode::TypeMismatch,
+        DispatchInputIssueCode::InvalidValue => CapabilityInputIssueCode::InvalidValue,
+    }
 }
 
 fn runtime_failure_kind_to_loop(
@@ -2806,6 +2844,35 @@ mod tests {
             CapabilityOutcome::Failed(failure)
                 if failure.error_kind == CapabilityFailureKind::InvalidInput
                     && failure.safe_summary == "capability invocation failed"
+        ));
+
+        let issue =
+            DispatchInputIssue::new("schedule.kind", DispatchInputIssueCode::MissingRequired)
+                .expected("cron or once");
+        let invalid_value_issue =
+            DispatchInputIssue::new("schedule.timezone", DispatchInputIssueCode::InvalidValue)
+                .expected("an IANA timezone");
+        let detailed_invalid_input = runtime_failure_to_loop(
+            RuntimeCapabilityFailure::new(
+                capability_id.clone(),
+                RuntimeFailureKind::InvalidInput,
+                Some("trigger_create input failed validation".to_string()),
+            )
+            .with_detail(DispatchFailureDetail::InvalidInput {
+                issues: vec![issue, invalid_value_issue],
+            }),
+        )
+        .expect("convert invalid input with runtime detail");
+        assert!(matches!(
+            detailed_invalid_input,
+            CapabilityOutcome::Failed(CapabilityFailure {
+                detail: Some(CapabilityFailureDetail::InvalidInput { issues }),
+                ..
+            }) if issues.len() == 2
+                && issues[0].path == "schedule.kind"
+                && issues[0].code == CapabilityInputIssueCode::MissingRequired
+                && issues[1].path == "schedule.timezone"
+                && issues[1].code == CapabilityInputIssueCode::InvalidValue
         ));
 
         let denied = runtime_failure_to_loop(RuntimeCapabilityFailure::new(
@@ -3293,6 +3360,96 @@ mod tests {
         assert!(error.safe_summary.contains("schema validation"));
         assert!(
             ironclaw_turns::run_profile::LoopSafeSummary::new(error.safe_summary.clone()).is_ok()
+        );
+    }
+
+    #[test]
+    fn provider_argument_preparation_accepts_trigger_create_weekly_cron_schedule() {
+        let schema = serde_json::json!({
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+                "name": { "type": "string" },
+                "prompt": { "type": "string" },
+                "schedule": {
+                    "oneOf": [
+                        {
+                            "type": "object",
+                            "additionalProperties": false,
+                            "properties": {
+                                "kind": { "const": "cron" },
+                                "expression": { "type": "string" },
+                                "timezone": { "type": "string" }
+                            },
+                            "required": ["kind", "expression", "timezone"]
+                        },
+                        {
+                            "type": "object",
+                            "additionalProperties": false,
+                            "properties": {
+                                "kind": { "const": "once" },
+                                "at": { "type": "string" },
+                                "timezone": { "type": "string" }
+                            },
+                            "required": ["kind", "at", "timezone"]
+                        }
+                    ]
+                }
+            },
+            "required": ["name", "prompt", "schedule"]
+        });
+
+        let input = serde_json::json!({
+            "name": "Tuesday reminder",
+            "prompt": "Send the Tuesday reminder",
+            "schedule": {
+                "kind": "cron",
+                "expression": "0 14 * * 2",
+                "timezone": "America/Los_Angeles"
+            }
+        });
+
+        let normalized = prepare_provider_arguments(&input, &schema, "provider arguments")
+            .expect("trigger_create weekly cron arguments should pass provider validation");
+
+        assert_eq!(normalized, input);
+
+        let once_input = serde_json::json!({
+            "name": "Dog walking reminder",
+            "prompt": "Walk the dog",
+            "schedule": {
+                "kind": "once",
+                "at": "2026-06-23T14:00:00",
+                "timezone": "America/Los_Angeles"
+            }
+        });
+
+        let normalized = prepare_provider_arguments(&once_input, &schema, "provider arguments")
+            .expect("trigger_create once arguments should pass provider validation");
+
+        assert_eq!(normalized, once_input);
+
+        let stringified_schedule_input = serde_json::json!({
+            "name": "Walk dog - Wednesdays",
+            "prompt": "Reminder: It's time to walk your dog!",
+            "schedule": "{\"kind\":\"cron\",\"expression\":\"0 15 * * 3\",\"timezone\":\"America/Los_Angeles\"}"
+        });
+
+        let normalized =
+            prepare_provider_arguments(&stringified_schedule_input, &schema, "provider arguments")
+                .expect("stringified trigger_create schedule should be decoded before validation");
+
+        assert_eq!(
+            normalized,
+            serde_json::json!({
+                "name": "Walk dog - Wednesdays",
+                "prompt": "Reminder: It's time to walk your dog!",
+                "schedule": {
+                    "kind": "cron",
+                    "expression": "0 15 * * 3",
+                    "timezone": "America/Los_Angeles"
+                }
+            })
         );
     }
 
@@ -4063,6 +4220,7 @@ mod tests {
                     capability_id: CapabilityId::new("demo.echo").expect("valid capability id"),
                     kind: RuntimeFailureKind::InvalidInput,
                     message: Some("invalid input".to_string()),
+                    detail: None,
                 }),
                 CapabilityFailureKind::InvalidInput,
             ),

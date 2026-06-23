@@ -608,6 +608,13 @@ impl SecretStore for SharedSecretStore {
         self.0.metadata(scope, handle).await
     }
 
+    async fn metadata_for_scope(
+        &self,
+        scope: &ResourceScope,
+    ) -> Result<Vec<SecretMetadata>, SecretStoreError> {
+        self.0.metadata_for_scope(scope).await
+    }
+
     async fn delete(
         &self,
         scope: &ResourceScope,

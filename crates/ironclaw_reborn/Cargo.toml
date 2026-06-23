@@ -83,7 +83,7 @@ serde_json = "1"
 tempfile = "3"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "time"] }
 wat = "1.245.1"
-tracing-test = "0.2"
+tracing-test = { version = "0.2", features = ["no-env-filter"] }
 tracing-subscriber = "0.3"
 
 [[test]]

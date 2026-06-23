@@ -874,6 +874,7 @@ impl TriggerRepository for LibSqlTriggerRepository {
         if matches!(record.schedule, TriggerSchedule::Cron { .. }) && record.next_run_at > fire_slot
         {
             return Err(TriggerError::InvalidRecord {
+                kind: crate::TriggerRecordValidationKind::Other,
                 reason: "retryable fire failure must leave next_run_at at or before the failed fire slot"
                     .to_string(),
             });
@@ -1861,6 +1862,7 @@ fn opt_turn_run_id(value: Option<&TurnRunId>) -> libsql::Value {
 #[cfg(feature = "libsql")]
 fn invalid_record(field: &str, reason: impl Into<String>) -> TriggerError {
     TriggerError::InvalidRecord {
+        kind: crate::TriggerRecordValidationKind::Other,
         reason: format!("{field}: {}", reason.into()),
     }
 }

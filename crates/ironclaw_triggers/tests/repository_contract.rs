@@ -1483,7 +1483,7 @@ async fn assert_malformed_row_error(
         } else {
             matches!(
                 error,
-                TriggerError::InvalidRecord { ref reason } if reason.contains(expected_field)
+                TriggerError::InvalidRecord { ref reason, .. } if reason.contains(expected_field)
             )
         },
         "expected malformed row to report {expected_field}, got {error:?}"

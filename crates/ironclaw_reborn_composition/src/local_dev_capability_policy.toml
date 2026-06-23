@@ -198,25 +198,25 @@ network = "default"
 [[grants]]
 capability = "builtin.extension_search"
 effects = ["dispatch_capability", "read_filesystem"]
-mounts = "ambient"
+mounts = "system_extensions_lifecycle"
 network = "default"
 
 [[grants]]
 capability = "builtin.extension_install"
 effects = ["dispatch_capability", "read_filesystem", "write_filesystem"]
-mounts = "ambient"
+mounts = "system_extensions_lifecycle"
 network = "default"
 
 [[grants]]
 capability = "builtin.extension_activate"
 effects = ["dispatch_capability", "read_filesystem", "write_filesystem", "network"]
-mounts = "ambient"
+mounts = "system_extensions_lifecycle"
 network = "local_dev_wildcard"
 
 [[grants]]
 capability = "builtin.extension_remove"
 effects = ["dispatch_capability", "read_filesystem", "write_filesystem"]
-mounts = "ambient"
+mounts = "system_extensions_lifecycle"
 network = "default"
 
 [[grants]]

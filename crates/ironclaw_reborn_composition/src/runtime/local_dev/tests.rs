@@ -137,15 +137,19 @@ mod tests {
     ) -> HostVisibleCapabilityRequest {
         let policy = crate::local_dev_capability_policy::local_dev_capability_policy()
             .expect("policy parses");
+        let empty_mounts = MountView::default();
 
         local_dev_visible_capability_request(
             run_context,
             fallback_user_id,
-            MountView::default(),
-            MountView::default(),
-            MountView::default(),
-            &policy,
-            &LocalDevExtensionSurface::default(),
+            LocalDevVisibleCapabilityInputs {
+                workspace_mounts: &empty_mounts,
+                skill_mounts: &empty_mounts,
+                memory_mounts: &empty_mounts,
+                system_extensions_lifecycle_mounts: &empty_mounts,
+                policy: &policy,
+                extension_surface: &LocalDevExtensionSurface::default(),
+            },
         )
         .expect("visible request")
     }
@@ -817,6 +821,9 @@ mod tests {
         let memory_mounts =
             crate::local_dev_mounts::memory_mount_view(MountPermissions::read_write_list_delete())
                 .expect("memory mounts build");
+        let system_extensions_lifecycle_mounts =
+            crate::local_dev_mounts::system_extensions_lifecycle_mount_view()
+                .expect("system extensions lifecycle mounts build");
         assert!(workspace_mounts.mounts.iter().all(|mount| {
             mount.alias.as_str() != "/skills" && mount.alias.as_str() != "/system/skills"
         }));
@@ -840,6 +847,7 @@ mod tests {
             &workspace_mounts,
             &skill_mounts,
             &memory_mounts,
+            &system_extensions_lifecycle_mounts,
         );
         let grant_for = |capability_id: &str| {
             grants
@@ -913,7 +921,10 @@ mod tests {
             extension_search_grant.constraints.allowed_effects,
             vec![EffectKind::DispatchCapability, EffectKind::ReadFilesystem]
         );
-        assert!(extension_search_grant.constraints.mounts.mounts.is_empty());
+        assert_eq!(
+            extension_search_grant.constraints.mounts,
+            system_extensions_lifecycle_mounts
+        );
         assert_eq!(
             extension_search_grant.constraints.network,
             NetworkPolicy::default()
@@ -925,7 +936,7 @@ mod tests {
         ] {
             let grant = grant_for(capability_id);
             assert_eq!(grant.constraints.allowed_effects, local_dev_allowed_effects);
-            assert!(grant.constraints.mounts.mounts.is_empty());
+            assert_eq!(grant.constraints.mounts, system_extensions_lifecycle_mounts);
             assert_eq!(grant.constraints.network, NetworkPolicy::default());
         }
         let extension_activate_grant = grant_for(EXTENSION_ACTIVATE_CAPABILITY_ID);
@@ -938,12 +949,9 @@ mod tests {
                 EffectKind::Network
             ]
         );
-        assert!(
-            extension_activate_grant
-                .constraints
-                .mounts
-                .mounts
-                .is_empty()
+        assert_eq!(
+            extension_activate_grant.constraints.mounts,
+            system_extensions_lifecycle_mounts
         );
         assert_eq!(
             extension_activate_grant
@@ -1070,6 +1078,9 @@ mod tests {
             policy,
             workspace_mounts: local_runtime.workspace_mounts.clone(),
             memory_mounts: local_runtime.memory_mounts.clone(),
+            system_extensions_lifecycle_mounts: local_runtime
+                .system_extensions_lifecycle_mounts
+                .clone(),
             extension_surface_source: LocalDevExtensionSurfaceSource::default(),
             input_resolver,
             result_writer,
@@ -1239,6 +1250,9 @@ mod tests {
             policy: Arc::clone(&local_runtime.capability_policy),
             workspace_mounts: local_runtime.workspace_mounts.clone(),
             memory_mounts: local_runtime.memory_mounts.clone(),
+            system_extensions_lifecycle_mounts: local_runtime
+                .system_extensions_lifecycle_mounts
+                .clone(),
             extension_surface_source: LocalDevExtensionSurfaceSource::default(),
             input_resolver,
             result_writer,
@@ -1412,6 +1426,9 @@ mod tests {
             policy,
             workspace_mounts: local_runtime.workspace_mounts.clone(),
             memory_mounts: local_runtime.memory_mounts.clone(),
+            system_extensions_lifecycle_mounts: local_runtime
+                .system_extensions_lifecycle_mounts
+                .clone(),
             extension_surface_source: LocalDevExtensionSurfaceSource::default(),
             input_resolver,
             result_writer,
@@ -1613,6 +1630,7 @@ mod tests {
                 &local_runtime.workspace_mounts,
                 &local_runtime.skill_mounts,
                 &local_runtime.memory_mounts,
+                &local_runtime.system_extensions_lifecycle_mounts,
             )
             .expect("outbound delivery approval lease terms");
         ApprovalResolver::new(
@@ -1873,6 +1891,9 @@ mod tests {
             policy,
             workspace_mounts: local_runtime.workspace_mounts.clone(),
             memory_mounts: local_runtime.memory_mounts.clone(),
+            system_extensions_lifecycle_mounts: local_runtime
+                .system_extensions_lifecycle_mounts
+                .clone(),
             extension_surface_source: LocalDevExtensionSurfaceSource::default(),
             input_resolver,
             result_writer,
@@ -1971,6 +1992,9 @@ mod tests {
             policy,
             workspace_mounts,
             memory_mounts: local_runtime.memory_mounts.clone(),
+            system_extensions_lifecycle_mounts: local_runtime
+                .system_extensions_lifecycle_mounts
+                .clone(),
             extension_surface_source: LocalDevExtensionSurfaceSource::default(),
             input_resolver,
             result_writer,
@@ -2199,6 +2223,9 @@ mod tests {
             policy,
             workspace_mounts,
             memory_mounts: local_runtime.memory_mounts.clone(),
+            system_extensions_lifecycle_mounts: local_runtime
+                .system_extensions_lifecycle_mounts
+                .clone(),
             extension_surface_source: LocalDevExtensionSurfaceSource::default(),
             input_resolver,
             result_writer,
@@ -2297,6 +2324,9 @@ mod tests {
             policy,
             workspace_mounts,
             memory_mounts: local_runtime.memory_mounts.clone(),
+            system_extensions_lifecycle_mounts: local_runtime
+                .system_extensions_lifecycle_mounts
+                .clone(),
             extension_surface_source: LocalDevExtensionSurfaceSource::default(),
             input_resolver,
             result_writer,
@@ -2594,6 +2624,83 @@ mod tests {
         assert!(
             tool_definition_ids.contains(&"github.search_issues"),
             "refreshed provider tools should include github after activation"
+        );
+    }
+
+    #[tokio::test]
+    async fn local_dev_capability_port_extension_search_reads_system_catalog() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let services = crate::build_reborn_services(crate::RebornBuildInput::local_dev(
+            "local-dev-extension-search-owner",
+            dir.path().join("local-dev"),
+        ))
+        .await
+        .expect("local-dev services build");
+        let run_context = run_context("extension-search-loop-port").await;
+        let thread_scope = ThreadScope {
+            tenant_id: run_context.scope.tenant_id.clone(),
+            agent_id: run_context.scope.agent_id.clone().expect("agent id"),
+            project_id: run_context.scope.project_id.clone(),
+            owner_user_id: None,
+            mission_id: None,
+        };
+        let wiring = capability_wiring(
+            &services,
+            Arc::new(InMemorySessionThreadService::default()),
+            thread_scope,
+            UserId::new("local-dev-extension-search-user").expect("user id"),
+            Arc::new(
+                crate::local_dev_capability_policy::local_dev_capability_policy()
+                    .expect("policy parses"),
+            ),
+            Arc::new(UnavailableModelGateway),
+            Arc::new(InMemoryLoopHostMilestoneSink::default()),
+            None,
+            None,
+            None,
+        )
+        .expect("local-dev capability wiring");
+        let port = wiring
+            .capability_factory
+            .create_capability_port(&run_context)
+            .await
+            .expect("capability port");
+        port.visible_capabilities(VisibleCapabilityRequest {})
+            .await
+            .expect("visible surface");
+        let tool_definition = port
+            .tool_definitions()
+            .expect("tool definitions")
+            .into_iter()
+            .find(|definition| definition.capability_id.as_str() == EXTENSION_SEARCH_CAPABILITY_ID)
+            .expect("extension_search tool definition");
+
+        let candidate = port
+            .register_provider_tool_call(provider_tool_call_with_name(
+                tool_definition.name,
+                serde_json::json!({"query": "gmail"}),
+            ))
+            .await
+            .expect("extension_search provider tool call stages");
+        assert_eq!(
+            candidate.capability_id.as_str(),
+            EXTENSION_SEARCH_CAPABILITY_ID
+        );
+
+        let outcome = port
+            .invoke_capability(CapabilityInvocation {
+                surface_version: candidate.surface_version,
+                capability_id: candidate.capability_id,
+                input_ref: candidate.input_ref,
+                approval_resume: None,
+                auth_resume: None,
+            })
+            .await
+            .expect("extension_search invocation");
+
+        assert!(
+            matches!(outcome, CapabilityOutcome::Completed(_)),
+            "extension_search should be authorized to read the system extension catalog, got {outcome:?}"
         );
     }
 
