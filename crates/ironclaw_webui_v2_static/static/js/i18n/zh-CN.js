@@ -480,6 +480,7 @@ registerPack("zh-CN", {
   "tools.askEachTime": "每次询问",
   "tools.disabled": "已禁用",
   "tools.default": "默认",
+  "tools.followDefault": "跟随全局/默认",
   "tools.sourceDefault": "默认权限",
   "tools.sourceGlobal": "全局自动批准",
   "tools.sourceOverride": "单工具覆盖",

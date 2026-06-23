@@ -168,6 +168,19 @@ impl TriggerRepository for FailingThreadLookupRepository {
             reason: "stub".to_string(),
         })
     }
+    async fn set_scoped_trigger_state(
+        &self,
+        _: TenantId,
+        _: UserId,
+        _: Option<AgentId>,
+        _: Option<ProjectId>,
+        _: TriggerId,
+        _: ironclaw_triggers::TriggerState,
+    ) -> Result<Option<TriggerRecord>, TriggerError> {
+        Err(TriggerError::Backend {
+            reason: "stub".to_string(),
+        })
+    }
     async fn list_due_triggers(
         &self,
         _: Timestamp,

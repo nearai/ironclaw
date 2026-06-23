@@ -88,6 +88,8 @@ pub struct RebornLogQueryRequest {
     pub source: Option<String>,
     #[serde(default)]
     pub tail: bool,
+    #[serde(default)]
+    pub follow: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -428,6 +430,13 @@ pub struct RebornListAutomationsResponse {
     /// wire so an older payload without the field is not misreported as off.
     #[serde(default = "default_scheduler_enabled")]
     pub scheduler_enabled: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RebornAutomationMutationResponse {
+    pub updated: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub automation: Option<RebornAutomationInfo>,
 }
 
 fn default_scheduler_enabled() -> bool {
@@ -1361,6 +1370,8 @@ pub struct RebornOperatorLogsQuery {
     pub source: Option<String>,
     #[serde(default)]
     pub tail: bool,
+    #[serde(default)]
+    pub follow: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

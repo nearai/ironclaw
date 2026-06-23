@@ -32,6 +32,8 @@ const TRIGGER_RUN_HISTORY_MAX_LIMIT: usize = 100;
 pub const TRIGGER_CREATE_CAPABILITY_ID: &str = "builtin.trigger_create";
 pub const TRIGGER_LIST_CAPABILITY_ID: &str = "builtin.trigger_list";
 pub const TRIGGER_REMOVE_CAPABILITY_ID: &str = "builtin.trigger_remove";
+pub const TRIGGER_PAUSE_CAPABILITY_ID: &str = "builtin.trigger_pause";
+pub const TRIGGER_RESUME_CAPABILITY_ID: &str = "builtin.trigger_resume";
 
 const TRIGGER_CREATE_DESCRIPTION: &str = "Create a caller-scoped scheduled trigger (one-time or recurring). If the user asks for routine or trigger results to be sent through an outbound product or channel, use the visible outbound delivery target capabilities to select that delivery target before creating the trigger; delivery routing is not encoded in this input.";
 
@@ -54,6 +56,20 @@ pub(super) fn manifests() -> Result<Vec<CapabilityManifest>, ExtensionError> {
         first_party_capability_manifest(
             TRIGGER_REMOVE_CAPABILITY_ID,
             "Remove a caller-scoped scheduled trigger",
+            vec![EffectKind::DispatchCapability, EffectKind::ExternalWrite],
+            PermissionMode::Ask,
+            resource_profile(),
+        )?,
+        first_party_capability_manifest(
+            TRIGGER_PAUSE_CAPABILITY_ID,
+            "Pause a caller-scoped scheduled trigger so it remains retained but does not fire",
+            vec![EffectKind::DispatchCapability, EffectKind::ExternalWrite],
+            PermissionMode::Ask,
+            resource_profile(),
+        )?,
+        first_party_capability_manifest(
+            TRIGGER_RESUME_CAPABILITY_ID,
+            "Resume a caller-scoped paused trigger so it may fire on its stored schedule",
             vec![EffectKind::DispatchCapability, EffectKind::ExternalWrite],
             PermissionMode::Ask,
             resource_profile(),
@@ -111,7 +127,15 @@ fn insert_trigger_handlers(
         CapabilityId::new(TRIGGER_LIST_CAPABILITY_ID)?,
         handler.clone(),
     );
-    registry.insert_handler(CapabilityId::new(TRIGGER_REMOVE_CAPABILITY_ID)?, handler);
+    registry.insert_handler(
+        CapabilityId::new(TRIGGER_REMOVE_CAPABILITY_ID)?,
+        handler.clone(),
+    );
+    registry.insert_handler(
+        CapabilityId::new(TRIGGER_PAUSE_CAPABILITY_ID)?,
+        handler.clone(),
+    );
+    registry.insert_handler(CapabilityId::new(TRIGGER_RESUME_CAPABILITY_ID)?, handler);
     Ok(())
 }
 
@@ -181,6 +205,24 @@ impl FirstPartyCapabilityHandler for TriggerManagementToolHandler {
             TRIGGER_REMOVE_CAPABILITY_ID => {
                 remove_trigger(&*self.repository, &request.scope, request.input).await?
             }
+            TRIGGER_PAUSE_CAPABILITY_ID => {
+                set_trigger_state(
+                    &*self.repository,
+                    &request.scope,
+                    request.input,
+                    TriggerState::Paused,
+                )
+                .await?
+            }
+            TRIGGER_RESUME_CAPABILITY_ID => {
+                set_trigger_state(
+                    &*self.repository,
+                    &request.scope,
+                    request.input,
+                    TriggerState::Scheduled,
+                )
+                .await?
+            }
             _ => {
                 return Err(FirstPartyCapabilityError::new(
                     RuntimeDispatchErrorKind::UndeclaredCapability,
@@ -243,6 +285,11 @@ struct TriggerCreateInput {
 
 #[derive(Deserialize)]
 struct TriggerRemoveInput {
+    trigger_id: String,
+}
+
+#[derive(Deserialize)]
+struct TriggerStateInput {
     trigger_id: String,
 }
 
@@ -375,6 +422,31 @@ async fn remove_trigger(
     Ok(json!({
         "removed": removed.is_some(),
         "trigger": removed.as_ref().map(trigger_remove_output),
+    }))
+}
+
+async fn set_trigger_state(
+    repository: &dyn TriggerRepository,
+    scope: &ResourceScope,
+    input: Value,
+    state: TriggerState,
+) -> Result<Value, FirstPartyCapabilityError> {
+    let input: TriggerStateInput = serde_json::from_value(input).map_err(|_| input_error())?;
+    let trigger_id = TriggerId::parse(&input.trigger_id).map_err(trigger_input_error)?;
+    let updated = repository
+        .set_scoped_trigger_state(
+            scope.tenant_id.clone(),
+            scope.user_id.clone(),
+            scope.agent_id.clone(),
+            scope.project_id.clone(),
+            trigger_id,
+            state,
+        )
+        .await
+        .map_err(|error| trigger_repository_error("set_scoped_trigger_state", error))?;
+    Ok(json!({
+        "updated": updated.is_some(),
+        "trigger": updated.as_ref().map(|record| trigger_output(record, &[])),
     }))
 }
 

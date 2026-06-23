@@ -497,6 +497,7 @@ registerPack("en", {
   "tools.askEachTime": "Ask each time",
   "tools.disabled": "Disabled",
   "tools.default": "default",
+  "tools.followDefault": "Follow global/default",
   "tools.sourceDefault": "default permission",
   "tools.sourceGlobal": "global auto-approve",
   "tools.sourceOverride": "per-tool override",

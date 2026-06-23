@@ -4,10 +4,21 @@ const OPERATOR_CONFIG_BASE = "/api/webchat/v2/operator/config";
 const AUTO_APPROVE_KEY = "agent.auto_approve_tools";
 const TOOL_PREFIX = "tool.";
 const TOOL_PERMISSION_STATES = new Set(["always_allow", "ask_each_time", "disabled"]);
+const TOOL_PERMISSION_UPDATE_STATES = new Set([
+  "default",
+  "always_allow",
+  "ask_each_time",
+  "disabled",
+]);
 
 function normalizeToolState(state) {
   if (state === "ask") return "ask_each_time";
   return TOOL_PERMISSION_STATES.has(state) ? state : "ask_each_time";
+}
+
+function normalizeToolUpdateState(state) {
+  if (state === "ask") return "ask_each_time";
+  return TOOL_PERMISSION_UPDATE_STATES.has(state) ? state : "default";
 }
 
 function normalizeEffectiveSource(source) {
@@ -136,7 +147,7 @@ export async function fetchTools() {
   };
 }
 export async function updateToolPermission(name, state) {
-  const normalized = normalizeToolState(state);
+  const normalized = normalizeToolUpdateState(state);
   const data = await apiFetch(
     `${OPERATOR_CONFIG_BASE}/${encodeURIComponent(`${TOOL_PREFIX}${name}`)}`,
     {

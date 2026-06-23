@@ -301,7 +301,11 @@ mod tests {
 
         let api = asset_text("js/lib/api.js");
         assert!(api.contains("listAutomations"));
+        assert!(api.contains("pauseAutomation"));
+        assert!(api.contains("resumeAutomation"));
         assert!(api.contains("/automations"));
+        assert!(api.contains("/pause"));
+        assert!(api.contains("/resume"));
         assert!(api.contains("getOutboundPreferences"));
         assert!(api.contains("setOutboundPreferences"));
         assert!(api.contains("/outbound/preferences"));
@@ -312,6 +316,37 @@ mod tests {
         assert!(page.contains("AutomationDeliveryDefaultsPanel"));
         assert!(page.contains("useOutboundDeliveryDefaults"));
         assert!(page.contains("AutomationsList"));
+
+        let automations_hook = asset_text("js/pages/automations/hooks/useAutomations.js");
+        assert!(automations_hook.contains("AUTOMATIONS_BASE_REFETCH_MS"));
+        assert!(automations_hook.contains("nextAutomationsRefetchDelay"));
+        assert!(automations_hook.contains("query.refetch()"));
+
+        let list = asset_text("js/pages/automations/components/automations-list.js");
+        assert!(list.contains("primary_status_label"));
+        assert!(list.contains("primary_status_tone"));
+
+        let detail_panel = asset_text("js/pages/automations/components/automation-detail-panel.js");
+        assert!(detail_panel.contains("onPauseAutomation"));
+        assert!(detail_panel.contains("onResumeAutomation"));
+        assert!(detail_panel.contains("automation.state !== \"completed\""));
+        assert!(detail_panel.contains("primary_status_label"));
+        assert!(detail_panel.contains("primary_status_tone"));
+
+        let app_bundle = asset_text("dist/app.js");
+        let app_bundle_contains_encoded_automation_route = |suffix: &str| {
+            app_bundle
+                .split("/automations/${encodeURIComponent(")
+                .any(|tail| tail.contains(&format!(")}}/{suffix}")))
+        };
+        assert!(
+            app_bundle_contains_encoded_automation_route("pause"),
+            "served WebUI bundle must include the automation pause endpoint; run frontend build after editing static/js/**"
+        );
+        assert!(
+            app_bundle_contains_encoded_automation_route("resume"),
+            "served WebUI bundle must include the automation resume endpoint; run frontend build after editing static/js/**"
+        );
 
         let defaults_panel =
             asset_text("js/pages/automations/components/automation-delivery-defaults-panel.js");

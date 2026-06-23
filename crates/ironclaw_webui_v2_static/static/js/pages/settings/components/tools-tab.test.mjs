@@ -45,10 +45,37 @@ function collectTemplateText(root) {
   return text.join("");
 }
 
+function collectScalars(root) {
+  const scalars = [];
+  visit(root, (node) => {
+    if (!Array.isArray(node.values)) return;
+    for (const value of node.values) {
+      if (typeof value === "string" || typeof value === "number" || typeof value === "boolean") {
+        scalars.push(value);
+      }
+    }
+  });
+  return scalars;
+}
+
 function findComponentNode(root, component) {
   let found = null;
   visit(root, (node) => {
     if (!found && Array.isArray(node.values) && node.values.includes(component)) {
+      found = node;
+    }
+  });
+  return found;
+}
+
+function findTemplateNode(root, fragment) {
+  let found = null;
+  visit(root, (node) => {
+    if (
+      !found &&
+      Array.isArray(node.strings) &&
+      node.strings.some((part) => part.includes(fragment))
+    ) {
       found = node;
     }
   });
@@ -84,7 +111,7 @@ function renderToolsModule({ tools = [] } = {}) {
     }),
   };
   vm.runInNewContext(
-    sourceForTest("./tools-tab.js", ["ToolsTab", "AutoApproveCard", "Switch"]),
+    sourceForTest("./tools-tab.js", ["ToolsTab", "AutoApproveCard", "Switch", "ToolRow"]),
     context
   );
   return { exports: context.globalThis.__testExports, saved };
@@ -104,4 +131,38 @@ test("Tools tab renders global auto-approve control and saves the operator key",
 
   componentProps(switchNode, exports.Switch).onChange(true);
   assert.deepEqual(saved, [{ key: "agent.auto_approve_tools", value: true }]);
+});
+
+test("Tool permission select follows global/default unless a per-tool override exists", () => {
+  const { exports } = renderToolsModule();
+  const globalTool = exports.ToolRow({
+    tool: {
+      name: "builtin.echo",
+      description: "Echo",
+      state: "always_allow",
+      default_state: "ask_each_time",
+      effective_source: "global",
+      locked: false,
+    },
+    onPermissionChange: () => {},
+    isSaved: false,
+  });
+  const globalSelect = findTemplateNode(globalTool, "<select");
+  assert.equal(globalSelect.values[0], "default");
+  assert.ok(collectScalars(globalTool).includes("tools.followDefault"));
+
+  const overrideTool = exports.ToolRow({
+    tool: {
+      name: "builtin.echo",
+      description: "Echo",
+      state: "ask_each_time",
+      default_state: "ask_each_time",
+      effective_source: "override",
+      locked: false,
+    },
+    onPermissionChange: () => {},
+    isSaved: false,
+  });
+  const overrideSelect = findTemplateNode(overrideTool, "<select");
+  assert.equal(overrideSelect.values[0], "ask_each_time");
 });
