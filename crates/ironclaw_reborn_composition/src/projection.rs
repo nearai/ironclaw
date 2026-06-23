@@ -249,32 +249,33 @@ impl ProjectionStream for WebuiRuntimeProjectionStream {
             .await
             .map_err(map_event_stream_error)?;
 
-        let is_resuming_runtime_payloads = origin_cursor.runtime_payloads_delivered > 0;
         let mut batch = WebuiProjectionBatch::new(origin_cursor);
-        if let Some(item) = subscription.next().await
-            && batch
+        // Process the head durable item, then drain whatever else is buffered.
+        // The buffered tail is the INDEPENDENT live update stream (live
+        // `ThreadLiveUpdate` capability-activity / reasoning rows the manager
+        // appends after the durable item). Draining it must NOT be gated on
+        // whether the head durable item fully delivered: a still-running tool
+        // whose display preview resolves to `Pending` leaves the durable item
+        // partial (`runtime_payloads_delivered > 0`), so `push_runtime_item`
+        // returns `false` — but later tools' live activity sits behind it in
+        // the buffer and would otherwise never drain (the tool list "sticks"
+        // until reload). `consume_buffered_runtime_items` is already bounded by
+        // runtime-payload capacity and stops on the first item it cannot fully
+        // accept, so always running it here is safe; live payloads are
+        // independently de-duplicated by the live cursor.
+        if let Some(item) = subscription.next().await {
+            batch
                 .push_runtime_item(item, &request.scope, self.display_previews.as_ref())
-                .await?
-            && !is_resuming_runtime_payloads
-        {
-            consume_buffered_runtime_items(
-                &mut subscription,
-                &mut batch,
-                &request.scope,
-                self.display_previews.as_ref(),
-            )
-            .await?;
+                .await?;
         }
 
-        if batch.runtime_payloads_pushed == 0 && !is_resuming_runtime_payloads {
-            consume_buffered_runtime_items(
-                &mut subscription,
-                &mut batch,
-                &request.scope,
-                self.display_previews.as_ref(),
-            )
-            .await?;
-        }
+        consume_buffered_runtime_items(
+            &mut subscription,
+            &mut batch,
+            &request.scope,
+            self.display_previews.as_ref(),
+        )
+        .await?;
 
         let turn_after = batch.cursor().turn.clone();
         let turn_drain = self

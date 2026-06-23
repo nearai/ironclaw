@@ -1782,3 +1782,352 @@ async fn webui_event_stream_drains_completed_and_failed_capability_activity_meta
         )
     }));
 }
+
+// Regression for the historical WebChat v2 multi-tool live-streaming bug:
+// during an agent run the open SSE stream delivered only the FIRST tool's live
+// `capability_activity` and never later tools' live activity, leaving the tool
+// list "stuck" until reload. The diagnosed mechanism: a still-running durable
+// capability (whose display-preview resolves to `Pending`) leaves the durable
+// runtime item only partially delivered (`runtime_payloads_delivered > 0`), so
+// `push_runtime_item` returns `false` and the `&& !is_resuming_runtime_payloads`
+// guard short-circuits `consume_buffered_runtime_items` — the INDEPENDENT live
+// buffer (containing later tools' `CapabilityInvoked` items) never drains. This
+// test interleaves exactly that trigger (one completed tool with a Ready
+// preview, one still-running tool with a Pending preview that holds the cursor)
+// with live `CapabilityInvoked` milestones for three tools, then drains across
+// resumed polls (mimicking the SSE 1s poll resuming from the prior cursor) and
+// asserts EVERY tool's live activity is eventually delivered.
+#[tokio::test]
+async fn webui_event_stream_delivers_every_tools_live_activity_across_resumed_drains_with_pending_preview()
+ {
+    let tenant_id = TenantId::new("webui-multitool-live-tenant").unwrap();
+    let user_id = UserId::new("webui-multitool-live-user").unwrap();
+    let agent_id = AgentId::new("webui-multitool-live-agent").unwrap();
+    let thread_id = ThreadId::new("webui-multitool-live-thread").unwrap();
+
+    // Durable timeline: a completed tool (Ready preview) followed by a
+    // still-running tool whose preview resolves to `Pending`, holding the
+    // runtime cursor mid-item — the original trigger.
+    let completed_invocation = InvocationId::new();
+    let running_invocation = InvocationId::new();
+    let run_id = TurnRunId::new();
+    let list_dir = CapabilityId::new("builtin.list_dir").unwrap();
+    let ironguard_scan = CapabilityId::new("ironguard.scan").unwrap();
+    let provider = ExtensionId::new("builtin").unwrap();
+    let completed_input_ref = preview_input_ref("multitool-list-dir");
+
+    let display_previews = Arc::new(CapabilityDisplayPreviewStore::default());
+    // The completed tool resolves to a Ready preview payload.
+    display_previews.record_input(
+        &run_id.to_string(),
+        &completed_input_ref,
+        "list_dir",
+        &serde_json::json!({ "path": "src" }),
+    );
+    display_previews.record_result(CapabilityDisplayPreviewResult {
+        run_id: &run_id.to_string(),
+        input_ref: &completed_input_ref,
+        invocation_id: completed_invocation,
+        capability_id: &list_dir,
+        result_ref: "result:multitool-list-dir",
+        output: &serde_json::json!({ "entries": ["main.rs", "lib.rs"] }),
+        output_bytes: 24,
+    });
+
+    let event_log = Arc::new(InMemoryDurableEventLog::new());
+    event_log
+        .append(RuntimeEvent::dispatch_requested(
+            resource_scope(
+                &tenant_id,
+                &user_id,
+                &agent_id,
+                &thread_id,
+                completed_invocation,
+            ),
+            list_dir.clone(),
+        ))
+        .await
+        .unwrap();
+    event_log
+        .append(RuntimeEvent::dispatch_succeeded(
+            resource_scope(
+                &tenant_id,
+                &user_id,
+                &agent_id,
+                &thread_id,
+                completed_invocation,
+            ),
+            list_dir.clone(),
+            provider.clone(),
+            RuntimeKind::FirstParty,
+            24,
+        ))
+        .await
+        .unwrap();
+    // Still-running tool: only a dispatch_requested, so its display preview is
+    // `Pending` and the durable runtime item never fully delivers.
+    event_log
+        .append(RuntimeEvent::dispatch_requested(
+            resource_scope(
+                &tenant_id,
+                &user_id,
+                &agent_id,
+                &thread_id,
+                running_invocation,
+            ),
+            ironguard_scan.clone(),
+        ))
+        .await
+        .unwrap();
+
+    let event_log: Arc<dyn DurableEventLog> = event_log;
+    let services = build_reborn_projection_services(
+        event_log,
+        ReplyTargetBindingRef::new("webui-multitool-live-reply").unwrap(),
+    )
+    .with_display_previews(Arc::clone(&display_previews));
+    let actor = TurnActor::new(user_id.clone());
+    let scope = TurnScope::new(
+        tenant_id.clone(),
+        Some(agent_id.clone()),
+        None,
+        thread_id.clone(),
+    );
+
+    // Live milestone sink (the production path that the agent loop drives).
+    let sink = services.with_live_progress_milestone_sink_for_publisher(
+        Arc::new(InMemoryLoopHostMilestoneSink::default()),
+        services.live_projection_publisher(user_id.clone()),
+    );
+
+    // Three tools emit live `CapabilityInvoked` milestones — the live activity
+    // the user expects to see appear one after another in the tool list. Two of
+    // them correspond to durable tools; a third (read_file) is purely live to
+    // confirm later tools are not gated behind the pending durable item.
+    let read_file = CapabilityId::new("builtin.read_file").unwrap();
+    let live_tools = [
+        (
+            ironclaw_turns::CapabilityActivityId::from_uuid(completed_invocation.as_uuid()),
+            list_dir.clone(),
+        ),
+        (
+            ironclaw_turns::CapabilityActivityId::from_uuid(running_invocation.as_uuid()),
+            ironguard_scan.clone(),
+        ),
+        (
+            ironclaw_turns::CapabilityActivityId::new(),
+            read_file.clone(),
+        ),
+    ];
+    for (activity_id, capability_id) in &live_tools {
+        sink.publish_loop_milestone(LoopHostMilestone {
+            scope: scope.clone(),
+            actor: None,
+            turn_id: TurnId::new(),
+            run_id: TurnRunId::from_uuid(completed_invocation.as_uuid()),
+            loop_driver_id: LoopDriverId::new("test_loop").unwrap(),
+            kind: LoopHostMilestoneKind::CapabilityInvoked {
+                activity_id: *activity_id,
+                capability_id: capability_id.clone(),
+            },
+        })
+        .await
+        .unwrap();
+    }
+
+    let expected_live_capabilities = live_tools
+        .iter()
+        .map(|(_, capability_id)| capability_id.clone())
+        .collect::<std::collections::HashSet<_>>();
+
+    // Drive the SSE poll loop: drain repeatedly, resuming from the prior
+    // drain's last cursor each time, exactly as the WebUI SSE handler does on
+    // its ~1s tick. Collect every LIVE capability_activity delivered.
+    let mut delivered_live = std::collections::HashSet::new();
+    let mut after_cursor = None;
+    for poll in 0..8 {
+        let events = services
+            .webui_event_stream()
+            .drain(ProjectionSubscriptionRequest {
+                actor: actor.clone(),
+                scope: scope.clone(),
+                after_cursor: after_cursor.clone(),
+            })
+            .await
+            .unwrap_or_else(|error| panic!("poll {poll} drain failed: {error:?}"));
+
+        for event in &events {
+            if let ProductOutboundPayload::ProjectionUpdate { state } = event.payload() {
+                for item in &state.items {
+                    if let ProductProjectionItem::CapabilityActivity(activity) = item {
+                        // Live activity rows carry no durable activity_order.
+                        if activity.activity_order.is_none() {
+                            delivered_live.insert(activity.capability_id.clone());
+                        }
+                    }
+                }
+            }
+        }
+
+        if let Some(last) = events.last() {
+            after_cursor = Some(last.projection_cursor().clone());
+        }
+
+        if delivered_live == expected_live_capabilities {
+            break;
+        }
+    }
+
+    assert_eq!(
+        delivered_live, expected_live_capabilities,
+        "every tool's live capability_activity must be delivered across resumed SSE polls, \
+         not just the first tool's (a still-running tool's Pending preview must not gate the \
+         independent live update buffer); delivered={delivered_live:?}"
+    );
+}
+
+// Control: identical to the multi-tool test above but WITHOUT the still-running
+// tool (no Pending preview holding the durable cursor). If the live items DO
+// deliver here, then the Pending durable item is conclusively the gate in the
+// failing test — proving that test exercises the real bug rather than a broken
+// fixture.
+#[tokio::test]
+async fn control_live_activity_delivers_when_no_pending_durable_item_blocks() {
+    let tenant_id = TenantId::new("webui-multitool-control-tenant").unwrap();
+    let user_id = UserId::new("webui-multitool-control-user").unwrap();
+    let agent_id = AgentId::new("webui-multitool-control-agent").unwrap();
+    let thread_id = ThreadId::new("webui-multitool-control-thread").unwrap();
+
+    let completed_invocation = InvocationId::new();
+    let run_id = TurnRunId::new();
+    let list_dir = CapabilityId::new("builtin.list_dir").unwrap();
+    let ironguard_scan = CapabilityId::new("ironguard.scan").unwrap();
+    let read_file = CapabilityId::new("builtin.read_file").unwrap();
+    let provider = ExtensionId::new("builtin").unwrap();
+    let completed_input_ref = preview_input_ref("control-list-dir");
+
+    let display_previews = Arc::new(CapabilityDisplayPreviewStore::default());
+    display_previews.record_input(
+        &run_id.to_string(),
+        &completed_input_ref,
+        "list_dir",
+        &serde_json::json!({ "path": "src" }),
+    );
+    display_previews.record_result(CapabilityDisplayPreviewResult {
+        run_id: &run_id.to_string(),
+        input_ref: &completed_input_ref,
+        invocation_id: completed_invocation,
+        capability_id: &list_dir,
+        result_ref: "result:control-list-dir",
+        output: &serde_json::json!({ "entries": ["main.rs"] }),
+        output_bytes: 12,
+    });
+
+    let event_log = Arc::new(InMemoryDurableEventLog::new());
+    // Only a COMPLETED durable tool — no still-running tool, so the durable
+    // runtime item fully delivers (no Pending slot holding the cursor).
+    event_log
+        .append(RuntimeEvent::dispatch_requested(
+            resource_scope(
+                &tenant_id,
+                &user_id,
+                &agent_id,
+                &thread_id,
+                completed_invocation,
+            ),
+            list_dir.clone(),
+        ))
+        .await
+        .unwrap();
+    event_log
+        .append(RuntimeEvent::dispatch_succeeded(
+            resource_scope(
+                &tenant_id,
+                &user_id,
+                &agent_id,
+                &thread_id,
+                completed_invocation,
+            ),
+            list_dir.clone(),
+            provider.clone(),
+            RuntimeKind::FirstParty,
+            12,
+        ))
+        .await
+        .unwrap();
+
+    let event_log: Arc<dyn DurableEventLog> = event_log;
+    let services = build_reborn_projection_services(
+        event_log,
+        ReplyTargetBindingRef::new("webui-multitool-control-reply").unwrap(),
+    )
+    .with_display_previews(Arc::clone(&display_previews));
+    let actor = TurnActor::new(user_id.clone());
+    let scope = TurnScope::new(
+        tenant_id.clone(),
+        Some(agent_id.clone()),
+        None,
+        thread_id.clone(),
+    );
+
+    let sink = services.with_live_progress_milestone_sink_for_publisher(
+        Arc::new(InMemoryLoopHostMilestoneSink::default()),
+        services.live_projection_publisher(user_id.clone()),
+    );
+    let live_tools = [list_dir.clone(), ironguard_scan.clone(), read_file.clone()];
+    for capability_id in &live_tools {
+        sink.publish_loop_milestone(LoopHostMilestone {
+            scope: scope.clone(),
+            actor: None,
+            turn_id: TurnId::new(),
+            run_id: TurnRunId::from_uuid(completed_invocation.as_uuid()),
+            loop_driver_id: LoopDriverId::new("test_loop").unwrap(),
+            kind: LoopHostMilestoneKind::CapabilityInvoked {
+                activity_id: ironclaw_turns::CapabilityActivityId::new(),
+                capability_id: capability_id.clone(),
+            },
+        })
+        .await
+        .unwrap();
+    }
+    let expected = live_tools
+        .iter()
+        .cloned()
+        .collect::<std::collections::HashSet<_>>();
+
+    let mut delivered_live = std::collections::HashSet::new();
+    let mut after_cursor = None;
+    for _ in 0..8 {
+        let events = services
+            .webui_event_stream()
+            .drain(ProjectionSubscriptionRequest {
+                actor: actor.clone(),
+                scope: scope.clone(),
+                after_cursor: after_cursor.clone(),
+            })
+            .await
+            .unwrap();
+        for event in &events {
+            if let ProductOutboundPayload::ProjectionUpdate { state } = event.payload() {
+                for item in &state.items {
+                    if let ProductProjectionItem::CapabilityActivity(activity) = item
+                        && activity.activity_order.is_none()
+                    {
+                        delivered_live.insert(activity.capability_id.clone());
+                    }
+                }
+            }
+        }
+        if let Some(last) = events.last() {
+            after_cursor = Some(last.projection_cursor().clone());
+        }
+        if delivered_live == expected {
+            break;
+        }
+    }
+
+    assert_eq!(
+        delivered_live, expected,
+        "control: with no Pending durable item, all live activities deliver"
+    );
+}
