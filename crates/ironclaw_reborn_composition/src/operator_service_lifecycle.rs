@@ -866,8 +866,10 @@ fn webui_user_id_from_env_value(
     raw_user_id: String,
     expected_user_id: Option<&UserId>,
 ) -> Result<UserId, String> {
-    let user_id = UserId::new(raw_user_id)
-        .map_err(|_| format!("{env_name} must match the authorized operator user"))?;
+    let user_id = UserId::new(raw_user_id).map_err(|error| {
+        tracing::debug!(%error, "WebUI operator user id env value was rejected");
+        format!("{env_name} must match the authorized operator user")
+    })?;
     if expected_user_id.is_some_and(|expected| expected != &user_id) {
         return Err(format!(
             "{env_name} must match the authorized operator user"
