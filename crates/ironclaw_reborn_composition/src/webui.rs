@@ -439,6 +439,8 @@ impl SkillsProductFacade for LocalSkillsProductFacade {
         // The toggled document is trusted prompt text loaded into the next run,
         // so re-scan it before persisting (parity with install/update).
         validate_skill_content_safety(&updated)?;
+        // dispatch-exempt: caller-scoped operator skill metadata write,
+        // not an in-turn tool call.
         let result = self
             .skill_management
             .update_for_scope(scope, &name, &updated)
