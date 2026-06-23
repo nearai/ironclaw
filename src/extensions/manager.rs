@@ -4474,6 +4474,24 @@ impl ExtensionManager {
                 .await
                 .map_err(|e| ExtensionError::AuthFailed(e.to_string()))?;
 
+            if let Some(ref oauth) = auth.oauth {
+                let merged_scopes = self
+                    .collect_shared_scopes(&auth.secret_name, &oauth.scopes, user_id)
+                    .await;
+                if !merged_scopes.is_empty() {
+                    let scopes = merged_scopes.join(" ");
+                    let params = CreateSecretParams::new(
+                        oauth_scopes_secret_name(&auth.secret_name),
+                        scopes,
+                    )
+                    .with_provider(name.to_string());
+                    self.secrets
+                        .create(user_id, params)
+                        .await
+                        .map_err(|e| ExtensionError::AuthFailed(e.to_string()))?;
+                }
+            }
+
             return Ok(AuthResult::authenticated(name, ExtensionKind::WasmTool));
         }
 
@@ -14305,6 +14323,65 @@ mod tests {
             ToolAuthState::Ready,
             "env-var token should be Ready without scope expansion check"
         );
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_env_var_auth_import_records_scopes_for_status() -> Result<(), String> {
+        let dir = tempfile::tempdir().map_err(|err| format!("temp dir: {err}"))?;
+        let tools_dir = dir.path().join("tools");
+        std::fs::create_dir_all(&tools_dir).map_err(|err| format!("tools dir: {err}"))?;
+
+        let scope = "https://www.googleapis.com/auth/documents";
+        let caps = serde_json::json!({
+            "auth": {
+                "secret_name": "google_oauth_token",
+                "display_name": "Google",
+                "oauth": {
+                    "authorization_url": "https://accounts.google.com/o/oauth2/v2/auth",
+                    "token_url": "https://oauth2.googleapis.com/token",
+                    "client_id_env": "GOOGLE_OAUTH_CLIENT_ID",
+                    "client_secret_env": "GOOGLE_OAUTH_CLIENT_SECRET",
+                    "scopes": [scope],
+                    "use_pkce": false,
+                    "extra_params": {
+                        "access_type": "offline",
+                        "prompt": "consent"
+                    }
+                },
+                "env_var": "HOME"
+            }
+        });
+        std::fs::write(tools_dir.join("google-docs.wasm"), b"\0asm")
+            .map_err(|err| format!("write wasm: {err}"))?;
+        std::fs::write(
+            tools_dir.join("google-docs.capabilities.json"),
+            serde_json::to_vec(&caps).map_err(|err| format!("serialize: {err}"))?,
+        )
+        .map_err(|err| format!("write caps: {err}"))?;
+
+        let mgr = make_test_manager(None, tools_dir);
+        let result = mgr
+            .auth("google-docs", "test")
+            .await
+            .map_err(|err| err.to_string())?;
+
+        assert!(
+            result.is_authenticated(),
+            "env token should authenticate the tool"
+        );
+        assert_eq!(
+            mgr.check_tool_auth_status("google-docs", "test").await,
+            ToolAuthState::Ready,
+            "env token imported into the secret store must include scope metadata"
+        );
+        let scopes = mgr
+            .secrets
+            .get_decrypted("test", "google_oauth_token_scopes")
+            .await
+            .map_err(|err| format!("read scopes: {err}"))?;
+        assert_eq!(scopes.expose(), scope);
 
         Ok(())
     }

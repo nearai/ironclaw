@@ -874,6 +874,28 @@ async def hosted_google_emulate_server(
 
 
 @pytest.fixture(scope="session")
+async def hosted_github_emulate_server(
+    ironclaw_binary,
+    mock_llm_server,
+    emulate_github_server,
+    wasm_tools_dir,
+):
+    """Start hosted mode with GitHub provider API traffic rewritten to Emulate."""
+    rewrite_map = {"api.github.com": emulate_github_server["url"]}
+    async for server in _run_hosted_oauth_refresh_server(
+        ironclaw_binary,
+        mock_llm_server,
+        wasm_tools_dir,
+        extra_env={
+            "IRONCLAW_TEST_HTTP_REWRITE_MAP": json.dumps(rewrite_map),
+            "GITHUB_TOKEN": EMULATE_GITHUB_BEARER,
+        },
+        extra_result={"emulate_github_url": emulate_github_server["url"]},
+    ):
+        yield server
+
+
+@pytest.fixture(scope="session")
 async def hosted_google_oauth_refresh_server(hosted_google_emulate_server):
     """Compatibility fixture for hosted Gmail OAuth refresh regression tests."""
     yield hosted_google_emulate_server
@@ -1476,14 +1498,15 @@ async def fake_slack_server():
         proc.kill()
 
 
-@pytest.fixture(scope="session")
-async def slack_e2e_server(
+async def _run_slack_provider_e2e_server(
     ironclaw_binary,
     mock_llm_server,
     wasm_tools_dir,
-    fake_slack_server,
+    slack_api_url,
+    *,
+    result_url_key: str,
 ):
-    """IronClaw instance wired to the fake Slack API for E2E Slack tests."""
+    """IronClaw instance wired to a Slack-compatible provider API."""
     reserved = _reserve_loopback_sockets(2)
     try:
         db_tmpdir = tempfile.TemporaryDirectory(prefix="ironclaw-e2e-slack-db-")
@@ -1515,8 +1538,8 @@ async def slack_e2e_server(
                 "WASM_CHANNELS_DIR": channels_tmpdir.name,
                 "IRONCLAW_TEST_HTTP_REWRITE_MAP": json.dumps(
                     {
-                        "slack.com": fake_slack_server,
-                        "files.slack.com": fake_slack_server,
+                        "slack.com": slack_api_url,
+                        "files.slack.com": slack_api_url,
                     }
                 ),
             },
@@ -1538,7 +1561,7 @@ async def slack_e2e_server(
             yield {
                 "base_url": base_url,
                 "http_url": http_url,
-                "fake_slack_url": fake_slack_server,
+                result_url_key: slack_api_url,
                 "channels_dir": channels_tmpdir.name,
             }
         except TimeoutError:
@@ -1575,6 +1598,42 @@ async def slack_e2e_server(
         for sock in reserved:
             if sock.fileno() != -1:
                 sock.close()
+
+
+@pytest.fixture(scope="session")
+async def slack_e2e_server(
+    ironclaw_binary,
+    mock_llm_server,
+    wasm_tools_dir,
+    fake_slack_server,
+):
+    """IronClaw instance wired to the fake Slack API for E2E Slack tests."""
+    async for server in _run_slack_provider_e2e_server(
+        ironclaw_binary,
+        mock_llm_server,
+        wasm_tools_dir,
+        fake_slack_server,
+        result_url_key="fake_slack_url",
+    ):
+        yield server
+
+
+@pytest.fixture(scope="session")
+async def slack_emulate_e2e_server(
+    ironclaw_binary,
+    mock_llm_server,
+    wasm_tools_dir,
+    emulate_slack_server,
+):
+    """IronClaw instance wired to Emulate Slack for channel E2E tests."""
+    async for server in _run_slack_provider_e2e_server(
+        ironclaw_binary,
+        mock_llm_server,
+        wasm_tools_dir,
+        emulate_slack_server["url"],
+        result_url_key="emulate_slack_url",
+    ):
+        yield server
 
 # ── Telegram E2E fixtures ────────────────────────────────────────────────
 

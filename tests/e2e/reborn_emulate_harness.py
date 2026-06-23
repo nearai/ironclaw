@@ -50,6 +50,18 @@ async def install_extension(base_url: str, name: str) -> None:
     assert response.json().get("success") is True, response.text
 
 
+async def activate_extension(base_url: str, name: str) -> dict:
+    response = await api_post(
+        base_url,
+        f"/api/extensions/{name}/activate",
+        timeout=30,
+    )
+    assert response.status_code == 200, response.text
+    data = response.json()
+    assert data.get("success") is True or data.get("activated") is True, data
+    return data
+
+
 async def complete_oauth_setup(
     base_url: str,
     extension_name: str,
