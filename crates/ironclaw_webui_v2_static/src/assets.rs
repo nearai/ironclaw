@@ -273,11 +273,15 @@ mod tests {
         assert!(picker.contains("listSlackAllowedChannels"));
         assert!(picker.contains("saveSlackAllowedChannels(channels)"));
 
+        let setup_panel = asset_text("js/components/slack-setup-panel.js");
+        assert!(setup_panel.contains("SlackChannelPicker"));
+        assert!(setup_panel.contains("<${SlackChannelPicker} action=${action} />"));
+
         let channels_tab = asset_text("js/pages/extensions/components/channels-tab.js");
         assert!(channels_tab.contains("showLegacySlackConnectActions"));
         assert!(channels_tab.contains("admin_managed_channels"));
         assert!(channels_tab.contains("inbound_proof_code"));
-        assert!(channels_tab.contains("SlackChannelPicker"));
+        assert!(channels_tab.contains("SlackAdminManagedSection"));
         assert!(channels_tab.contains("SlackPairingSection"));
         assert!(channels_tab.contains("findSlackConnectActions"));
         assert!(channels_tab.contains("slackConnectActions"));

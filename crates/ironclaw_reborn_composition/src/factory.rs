@@ -408,7 +408,14 @@ pub struct RebornServices {
     /// Shared scoped secret store. Exposed so runtime-level features (e.g.
     /// operator LLM-key storage) can reuse the same instance product-auth uses
     /// rather than standing up a second authority.
-    #[cfg(any(feature = "root-llm-provider", feature = "test-support"))]
+    #[cfg_attr(
+        not(any(
+            feature = "root-llm-provider",
+            feature = "slack-v2-host-beta",
+            feature = "test-support"
+        )),
+        allow(dead_code)
+    )]
     pub(crate) secret_store: Arc<dyn SecretStore>,
     /// Readiness of the background credential keepalive worker (B1). Carries the
     /// worker's dependencies together so "both deps present or neither" is a type
@@ -445,7 +452,14 @@ pub(crate) enum CredentialRefreshWorkerReady {
 
 impl RebornServices {
     /// The shared scoped secret store backing this composition.
-    #[cfg(feature = "root-llm-provider")]
+    #[cfg_attr(
+        not(any(
+            feature = "root-llm-provider",
+            feature = "slack-v2-host-beta",
+            feature = "test-support"
+        )),
+        allow(dead_code)
+    )]
     pub(crate) fn secret_store(&self) -> Arc<dyn SecretStore> {
         Arc::clone(&self.secret_store)
     }
@@ -714,7 +728,6 @@ impl RebornServices {
             production_runtime: None,
             #[cfg(any(feature = "libsql", feature = "postgres"))]
             production_scheduler_wake: None,
-            #[cfg(any(feature = "root-llm-provider", feature = "test-support"))]
             secret_store: Arc::new(ironclaw_secrets::InMemorySecretStore::new()),
             #[cfg(any(feature = "libsql", feature = "postgres"))]
             credential_refresh_worker: CredentialRefreshWorkerReady::Absent,
@@ -1313,7 +1326,6 @@ async fn build_local_runtime(input: RebornBuildInput) -> Result<RebornServices, 
         production_runtime: None,
         #[cfg(any(feature = "libsql", feature = "postgres"))]
         production_scheduler_wake: None,
-        #[cfg(any(feature = "root-llm-provider", feature = "test-support"))]
         secret_store,
         // Local-dev is single-user; no cross-owner enumeration or leader lock needed.
         #[cfg(any(feature = "libsql", feature = "postgres"))]
@@ -3816,7 +3828,6 @@ where
         production_runtime: Some(production_runtime),
         #[cfg(any(feature = "libsql", feature = "postgres"))]
         production_scheduler_wake: Some(scheduler_wake_wiring),
-        #[cfg(any(feature = "root-llm-provider", feature = "test-support"))]
         secret_store,
         // `Ready` only when this path built a durable candidate source (i.e. no
         // caller-supplied product_auth_ports override); `Absent` otherwise. The

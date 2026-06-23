@@ -337,39 +337,30 @@ export IRONCLAW_REBORN_HOME="$PWD/.reborn-home"
 export OPENAI_API_KEY="sk-..." # or the required env var for your configured provider
 export IRONCLAW_REBORN_WEBUI_TOKEN="$(openssl rand -hex 32)"
 export IRONCLAW_REBORN_WEBUI_USER_ID="reborn-cli"
-export IRONCLAW_REBORN_SLACK_SIGNING_SECRET="..."
-export IRONCLAW_REBORN_SLACK_BOT_TOKEN="xoxb-..."
 
 cargo run -q -p ironclaw_reborn_cli --features slack-v2-host-beta --bin ironclaw-reborn -- serve
 ```
 
-Slack env vars alone do not enable Slack. Add a `[slack]` section to
-`config.toml`:
+Add a `[slack]` section to `config.toml`:
 
 ```toml
 [slack]
 enabled = true
-installation_id = "install-alpha"
-team_id = "T123"
-api_app_id = "A123"
-# slack_user_id = "U123" # optional legacy static user mapping
-# user_id = "reborn-cli" # defaults to the WebUI authenticated user
-signing_secret_env = "IRONCLAW_REBORN_SLACK_SIGNING_SECRET"
-bot_token_env = "IRONCLAW_REBORN_SLACK_BOT_TOKEN"
 ```
 
-Required Slack settings and env vars:
+`enabled` is the only Slack boot setting. After the server starts, configure
+the Slack app ids, bot token, signing secret, and channel mappings from WebUI
+channel setup.
+
+Required Slack settings:
 
 | Name | Purpose |
 | --- | --- |
 | `[slack].enabled = true` | Mounts the Slack route during `serve`. |
-| `[slack].installation_id` | Stable local installation id. |
-| `[slack].team_id` | Slack workspace/team id. |
-| `[slack].api_app_id` | Slack app id. |
-| `IRONCLAW_REBORN_SLACK_SIGNING_SECRET` | Slack request signing secret, or the env var named by `[slack].signing_secret_env`. |
-| `IRONCLAW_REBORN_SLACK_BOT_TOKEN` | Slack bot token, or the env var named by `[slack].bot_token_env`. |
+| WebUI Slack workspace setup | Stores Slack installation ids, channel mappings, and Slack bot/signing secrets. |
 
-More detailed command notes live in [`docs/reborn-binary.md`](docs/reborn-binary.md).
+More detailed Slack setup notes live in
+[`docs/reborn/setup-slack-for-reborn-binary.md`](docs/reborn/setup-slack-for-reborn-binary.md).
 
 ## Philosophy
 
