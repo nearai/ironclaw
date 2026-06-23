@@ -10,8 +10,10 @@ export function SkillCard({
   onEdit,
   onRemove,
   onUpdate,
+  onSetAutoActivate,
   isRemoving,
   isUpdating,
+  isSettingAutoActivate,
 }) {
   const t = useT();
   const name = skill.name || skill.id;
@@ -19,6 +21,8 @@ export function SkillCard({
   const sourceKind = skill.source_kind || "installed";
   const canEdit = Boolean(skill.can_edit);
   const canDelete = Boolean(skill.can_delete);
+  // Defaults true: a skill without the field auto-activates.
+  const autoActivate = skill.auto_activate !== false;
   const [isEditing, setIsEditing] = React.useState(false);
   const [draft, setDraft] = React.useState("");
   const [editError, setEditError] = React.useState("");
@@ -126,6 +130,22 @@ export function SkillCard({
             >
               <${Icon} name="check" className="h-4 w-4" />
               ${isUpdating ? t("skills.saving") : t("skills.save")}
+            <//>
+          `}
+          ${canEdit && !isEditing &&
+          html`
+            <${Button}
+              type="button"
+              variant=${autoActivate ? "secondary" : "ghost"}
+              size="sm"
+              disabled=${isSettingAutoActivate}
+              title=${autoActivate
+                ? "Auto-activation on — runs on matching requests. Click to make it explicit-only (/name)."
+                : "Explicit-only — runs only when you type /name. Click to enable auto-activation."}
+              onClick=${() => onSetAutoActivate(name, !autoActivate)}
+            >
+              <${Icon} name=${autoActivate ? "check" : "close"} className="h-4 w-4" />
+              ${autoActivate ? "Auto-activate: On" : "Auto-activate: Off"}
             <//>
           `}
           ${canDelete && !isEditing &&

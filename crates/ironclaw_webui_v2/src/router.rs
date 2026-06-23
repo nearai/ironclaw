@@ -34,6 +34,7 @@ use crate::descriptors::{
     WEBUI_V2_PATTERN_READ_FS_FILE, WEBUI_V2_PATTERN_READ_PROJECT_FILE,
     WEBUI_V2_PATTERN_REMOVE_EXTENSION, WEBUI_V2_PATTERN_RESOLVE_GATE,
     WEBUI_V2_PATTERN_SEARCH_SKILLS, WEBUI_V2_PATTERN_SEND_MESSAGE, WEBUI_V2_PATTERN_SET_ACTIVE_LLM,
+    WEBUI_V2_PATTERN_SET_AUTO_ACTIVATE_LEARNED, WEBUI_V2_PATTERN_SET_SKILL_AUTO_ACTIVATE,
     WEBUI_V2_PATTERN_SETUP_EXTENSION, WEBUI_V2_PATTERN_SKILL_DETAIL,
     WEBUI_V2_PATTERN_START_CODEX_LOGIN, WEBUI_V2_PATTERN_START_NEARAI_LOGIN,
     WEBUI_V2_PATTERN_STAT_FS_PATH, WEBUI_V2_PATTERN_STAT_PROJECT_FILE,
@@ -243,6 +244,14 @@ pub fn webui_v2_router_with_options(state: WebUiV2State, options: WebUiV2RouteOp
             get(handlers::get_skill_content)
                 .put(handlers::update_skill)
                 .delete(handlers::remove_skill),
+        )
+        .route(
+            WEBUI_V2_PATTERN_SET_SKILL_AUTO_ACTIVATE,
+            post(handlers::set_skill_auto_activate),
+        )
+        .route(
+            WEBUI_V2_PATTERN_SET_AUTO_ACTIVATE_LEARNED,
+            post(handlers::set_auto_activate_learned),
         )
         .route(
             WEBUI_V2_PATTERN_LIST_EXTENSION_REGISTRY,

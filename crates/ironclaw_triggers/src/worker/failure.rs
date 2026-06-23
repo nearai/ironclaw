@@ -1,5 +1,3 @@
-use ironclaw_host_api::Timestamp;
-
 use crate::TriggerError;
 
 use super::TriggerPollerFailureReason;
@@ -8,12 +6,6 @@ use super::TriggerPollerFailureReason;
 pub(super) enum SubmitFailureKind {
     Retryable,
     Permanent,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum FireFailureDisposition {
-    Retryable,
-    PermanentReschedule(Timestamp),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

@@ -8,9 +8,9 @@
 #
 # Railway:
 #   Set Dockerfile path to Dockerfile.reborn and IRONCLAW_REBORN_SERVE_HOST=0.0.0.0.
-#   Railway supplies PORT. Set IRONCLAW_REBORN_PROFILE=production plus
+#   Railway supplies PORT. Set IRONCLAW_REBORN_PROFILE=hosted-single-tenant plus
 #   IRONCLAW_REBORN_POSTGRES_URL and IRONCLAW_REBORN_SECRET_MASTER_KEY for
-#   durable production storage.
+#   durable hosted storage.
 
 FROM rust:1.92-bookworm AS chef
 
@@ -71,6 +71,7 @@ RUN apt-get update \
 
 COPY --from=builder /app/target/dist/ironclaw-reborn /usr/local/bin/ironclaw-reborn
 COPY docker/reborn/config.toml /opt/ironclaw/reborn/config.toml
+COPY docker/reborn/config.hosted-single-tenant.toml /opt/ironclaw/reborn/config.hosted-single-tenant.toml
 COPY docker/reborn/config.production.toml /opt/ironclaw/reborn/config.production.toml
 COPY docker/reborn/entrypoint.sh /usr/local/bin/ironclaw-reborn-entrypoint
 

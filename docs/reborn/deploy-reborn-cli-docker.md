@@ -83,13 +83,28 @@ builds the `ironclaw-reborn serve` arguments from `PORT` and
 `IRONCLAW_REBORN_SERVE_HOST`; Railway does not shell-expand `$VAR` placeholders
 in Docker command arguments before they reach the entrypoint.
 
-Minimum Railway variables:
+Minimum Railway variables for the hosted single-tenant Postgres profile:
 
 ```bash
+IRONCLAW_REBORN_PROFILE=hosted-single-tenant
+IRONCLAW_REBORN_POSTGRES_URL=<postgres-url>
+IRONCLAW_REBORN_SECRET_MASTER_KEY=<random-secret-master-key>
 IRONCLAW_REBORN_WEBUI_TOKEN=<random-hex-32-bytes-or-longer>
 IRONCLAW_REBORN_WEBUI_USER_ID=reborn-cli
 NEARAI_API_KEY=<nearai-api-key>
 ```
+
+For managed Postgres providers with a small session-pool cap, set
+`IRONCLAW_REBORN_POSTGRES_POOL_MAX_SIZE=1` or `2` rather than relying on the
+provider to queue excess sessions.
+For `hosted-single-tenant`, `ironclaw-reborn serve` binds the WebUI listener
+and serves `/api/health` before PostgreSQL-backed runtime assembly finishes.
+Non-health routes return `503` until the runtime router is ready. This lets
+Railway drain the old deployment and release PgBouncer session-mode
+connections before the new deployment needs one for startup migrations.
+`IRONCLAW_FILESYSTEM_POSTGRES_MIGRATION_CONNECT_MAX_WAIT_SECS` still controls
+how long runtime assembly waits for PostgreSQL once the healthcheck listener is
+up; the default is 5 minutes.
 
 `ironclaw-reborn serve` exits before binding the HTTP listener if the WebUI
 token/user variables are missing. The bundled config selects NearAI as the
@@ -98,13 +113,18 @@ selects a different provider.
 
 Do not use `IRONCLAW_REBORN_PROFILE=local-dev-yolo` for a public Railway
 listener. That profile grants trusted host access and `serve` refuses to bind it
-to a non-loopback host. Use the default `local-dev` container config until the
-production Reborn deployment profile is fully wired for this service.
+to a non-loopback host. Use `hosted-single-tenant` for the preview deployment
+path that keeps the local-dev product surface while storing runtime state in
+Postgres.
 
-Set `IRONCLAW_REBORN_HOME` to a mounted volume path if state should survive
-redeploys. The image default is `/data/ironclaw-reborn`; without a Railway
-volume, that path is ephemeral. The container workdir is `/workspace` so the
-local-dev workspace root stays separate from Reborn's state and skill roots.
+Set `IRONCLAW_REBORN_HOME` to a mounted volume path if local files should
+survive redeploys. The hosted single-tenant profile stores runtime/control-plane
+state, including extension installation/activation state, in Postgres; project
+files, materialized system extension packages, and current skill file storage
+still live under the local filesystem root. The image default is
+`/data/ironclaw-reborn`; without a Railway volume, that path is ephemeral. The
+container workdir is `/workspace` so the workspace root stays separate from
+Reborn's state and skill roots.
 
 To seed a custom config instead of the bundled default, mount it under
 `/opt/ironclaw/` and set `IRONCLAW_REBORN_DEFAULT_CONFIG` to that path. On first

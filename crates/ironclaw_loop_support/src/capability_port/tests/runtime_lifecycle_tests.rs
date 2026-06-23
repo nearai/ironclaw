@@ -402,6 +402,7 @@ async fn runtime_capability_failed_and_unknown_outcomes_emit_failure_milestones(
                 capability_id: CapabilityId::new("demo.echo").expect("valid capability id"),
                 kind: RuntimeFailureKind::InvalidInput,
                 message: Some("invalid input".to_string()),
+                detail: None,
             }),
             CapabilityFailureKind::InvalidInput,
         ),

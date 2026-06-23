@@ -1003,9 +1003,12 @@ impl LlmProvider for CodexChatGptProvider {
         // Strict-mode tool schemas advertise every optional as required+nullable,
         // so the model fills unset optionals with `null` (or `""` for some codex
         // models). Strip those placeholders against each tool's original schema
-        // so only genuinely-provided values reach the tool. `true`: the codex
-        // family fills with `""` as well as `null`.
-        crate::tool_schema::strip_unset_optional_fields(&mut tool_calls, &request.tools, true);
+        // so only genuinely-provided values reach the tool.
+        crate::tool_schema::strip_unset_optional_fields(
+            &mut tool_calls,
+            &request.tools,
+            crate::tool_schema::PlaceholderStrippingMode::NullAndEmptyStrings,
+        );
 
         let finish_reason = if tool_calls.is_empty() {
             FinishReason::Stop

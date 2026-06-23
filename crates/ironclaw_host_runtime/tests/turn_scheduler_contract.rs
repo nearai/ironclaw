@@ -14,8 +14,8 @@ use ironclaw_filesystem::LocalFilesystem;
 use ironclaw_host_api::{AgentId, ProjectId, TenantId, ThreadId, UserId};
 use ironclaw_host_runtime::{
     CapabilitySurfaceVersion, HostRuntimeServices, ProductionWiringComponent,
-    ProductionWiringIssueKind, TurnRunExecutor, TurnRunExecutorError, TurnRunScheduler,
-    TurnRunSchedulerConfig,
+    ProductionWiringIssueKind, SchedulerTurnRunWakeNotifier, TurnRunExecutor, TurnRunExecutorError,
+    TurnRunScheduler, TurnRunSchedulerConfig,
 };
 use ironclaw_processes::ProcessServices;
 use ironclaw_resources::InMemoryResourceGovernor;
@@ -36,10 +36,6 @@ use ironclaw_turns::{
     },
 };
 use tokio::{sync::Notify, time::timeout};
-use tracing::field::{Field, Visit};
-use tracing_subscriber::{
-    Layer, filter::LevelFilter, layer::Context, layer::SubscriberExt, registry::LookupSpan,
-};
 
 #[derive(Default)]
 struct CompletingExecutor {
@@ -131,115 +127,6 @@ struct DurableTurnStoreStub;
 struct HangingExecutor {
     started: AtomicUsize,
     notify_started: Notify,
-}
-
-#[derive(Clone, Debug)]
-struct CapturedEvent {
-    message: String,
-    fields: Vec<(String, String)>,
-}
-
-#[derive(Clone, Default)]
-struct CorrelatedEventCapture {
-    events: Arc<Mutex<Vec<CapturedEvent>>>,
-}
-
-struct CorrelatedEventLayer {
-    events: Arc<Mutex<Vec<CapturedEvent>>>,
-}
-
-#[derive(Debug, Clone)]
-struct CapturedSpanFields(Vec<(String, String)>);
-
-#[derive(Default)]
-struct CaptureVisitor {
-    message: String,
-    fields: Vec<(String, String)>,
-}
-
-impl CorrelatedEventCapture {
-    fn layer(&self) -> CorrelatedEventLayer {
-        CorrelatedEventLayer {
-            events: Arc::clone(&self.events),
-        }
-    }
-
-    fn contains(&self, message: &str, thread_id: &str, run_id: &str) -> bool {
-        self.events.lock().unwrap().iter().any(|event| {
-            event.message == message
-                && event
-                    .fields
-                    .iter()
-                    .any(|(name, value)| name == "thread_id" && value == thread_id)
-                && event
-                    .fields
-                    .iter()
-                    .any(|(name, value)| name == "run_id" && value == run_id)
-        })
-    }
-}
-
-impl CaptureVisitor {
-    fn record_owned(&mut self, field: &Field, value: String) {
-        if field.name() == "message" {
-            self.message = value;
-        } else {
-            self.fields.push((field.name().to_string(), value));
-        }
-    }
-}
-
-impl Visit for CaptureVisitor {
-    fn record_debug(&mut self, field: &Field, value: &dyn std::fmt::Debug) {
-        let rendered = format!("{value:?}");
-        let value = rendered
-            .strip_prefix('"')
-            .and_then(|value| value.strip_suffix('"'))
-            .unwrap_or(rendered.as_str())
-            .to_string();
-        self.record_owned(field, value);
-    }
-
-    fn record_str(&mut self, field: &Field, value: &str) {
-        self.record_owned(field, value.to_string());
-    }
-}
-
-impl<S> Layer<S> for CorrelatedEventLayer
-where
-    S: tracing::Subscriber + for<'lookup> LookupSpan<'lookup>,
-{
-    fn on_new_span(
-        &self,
-        attrs: &tracing::span::Attributes<'_>,
-        id: &tracing::Id,
-        ctx: Context<'_, S>,
-    ) {
-        let mut visitor = CaptureVisitor::default();
-        attrs.record(&mut visitor);
-        if let Some(span) = ctx.span(id) {
-            span.extensions_mut()
-                .insert(CapturedSpanFields(visitor.fields));
-        }
-    }
-
-    fn on_event(&self, event: &tracing::Event<'_>, ctx: Context<'_, S>) {
-        let mut visitor = CaptureVisitor::default();
-        event.record(&mut visitor);
-        let mut fields = Vec::new();
-        if let Some(scope) = ctx.event_scope(event) {
-            for span in scope.from_root() {
-                if let Some(span_fields) = span.extensions().get::<CapturedSpanFields>() {
-                    fields.extend(span_fields.0.clone());
-                }
-            }
-        }
-        fields.extend(visitor.fields);
-        self.events.lock().unwrap().push(CapturedEvent {
-            message: visitor.message,
-            fields,
-        });
-    }
 }
 
 impl FailingExecutor {
@@ -657,6 +544,7 @@ struct HeartbeatTrackingTransitions {
     store: Arc<InMemoryTurnStateStore>,
     heartbeats: AtomicUsize,
     notify_heartbeat: Notify,
+    heartbeat_delay: Mutex<Option<Duration>>,
 }
 
 struct ClaimRecordingTransitions {
@@ -670,7 +558,13 @@ impl HeartbeatTrackingTransitions {
             store,
             heartbeats: AtomicUsize::new(0),
             notify_heartbeat: Notify::new(),
+            heartbeat_delay: Mutex::new(None),
         }
+    }
+
+    fn with_heartbeat_delay(self, delay: Duration) -> Self {
+        *self.heartbeat_delay.lock().unwrap() = Some(delay);
+        self
     }
 
     async fn wait_for_heartbeats(&self, expected: usize) {
@@ -710,6 +604,10 @@ impl TurnRunTransitionPort for HeartbeatTrackingTransitions {
         &self,
         request: HeartbeatRequest,
     ) -> Result<ironclaw_turns::EventCursor, TurnError> {
+        let delay = *self.heartbeat_delay.lock().unwrap();
+        if let Some(delay) = delay {
+            tokio::time::sleep(delay).await;
+        }
         let result = self.store.heartbeat(request).await;
         if result.is_ok() {
             self.heartbeats.fetch_add(1, Ordering::SeqCst);
@@ -957,25 +855,22 @@ async fn production_services_scheduler_and_coordinator_execute_turn_end_to_end()
     handle.shutdown().await;
 }
 
-// Quarantined: flaky under parallel `--all-targets` load. The thread-local
-// tracing subscriber (`set_default`) races the spawned scheduler task's async
-// `debug!("turn run started")` emission — the assertion can run before the
-// event is captured under CPU contention (passes reliably in isolation).
-// Re-enable once log capture is made deterministic (e.g. poll-for-event or a
-// scheduler-side completion barrier). Tracked in the closure bake notes.
-#[tokio::test(flavor = "current_thread")]
-#[ignore = "flaky under parallel load: thread-local subscriber races async scheduler log capture; passes in isolation (tracked for deflake)"]
+/// Verifies that `TurnRunScheduler` emits a "turn run started" debug event with
+/// `thread_id` and `run_id` correlation fields so the operator Logs panel can
+/// scope entries to a specific run.
+///
+/// # Why `#[traced_test]` instead of `set_default`
+///
+/// `tracing::dispatcher::set_default` is thread-local and subject to a global
+/// `SCOPED_COUNT` fast-path race in `tracing-core`: when parallel tests
+/// decrement the count to 0, spawned async tasks silently fall back to the
+/// no-op global dispatcher. `#[traced_test]` registers a global subscriber
+/// instead, which correctly captures events from spawned tasks regardless of
+/// parallelism. The `no-env-filter` feature is required because the event
+/// originates in this crate's `turn_scheduler` module.
+#[tokio::test]
+#[tracing_test::traced_test]
 async fn scheduler_executor_emits_thread_run_correlated_operator_log() {
-    let capture = CorrelatedEventCapture::default();
-    // Capture at DEBUG to mirror the operator-logs capture filter: run
-    // lifecycle anchors are `debug!` so they never corrupt a REPL/TUI via the
-    // info-level stderr layer, yet stay captured for the Logs panel.
-    let subscriber = tracing_subscriber::registry()
-        .with(LevelFilter::DEBUG)
-        .with(capture.layer());
-    let dispatch = tracing::Dispatch::new(subscriber);
-    let _guard = tracing::dispatcher::set_default(&dispatch);
-
     let store = Arc::new(InMemoryTurnStateStore::default());
     let transitions: Arc<dyn TurnRunTransitionPort> = store.clone();
     let executor = Arc::new(CompletingExecutor::default());
@@ -997,10 +892,29 @@ async fn scheduler_executor_emits_thread_run_correlated_operator_log() {
     wait_for_status(&*store, scope, run_id, TurnStatus::Completed).await;
     handle.shutdown().await;
 
-    assert!(
-        capture.contains("turn run started", &thread_id, &run_id.to_string()),
-        "scheduler executor should emit a run-scoped tracing event carrying thread_id and run_id"
-    );
+    let run_id_str = run_id.to_string();
+    // `logs_assert` gives access to all captured log lines from this test.
+    // We verify that at least one line contains the "turn run started" message
+    // together with the expected thread_id and run_id correlation fields.
+    logs_assert(|lines: &[&str]| {
+        let found = lines.iter().any(|line| {
+            line.contains("turn run started")
+                && line.contains(&format!("thread_id={thread_id}"))
+                && line.contains(&format!("run_id={run_id_str}"))
+        });
+        if found {
+            Ok(())
+        } else {
+            let matching: Vec<_> = lines
+                .iter()
+                .filter(|l| l.contains("turn run started"))
+                .collect();
+            Err(format!(
+                "no log line found with 'turn run started', thread_id={thread_id}, run_id={run_id_str}; \
+                 lines_with_message={matching:?}"
+            ))
+        }
+    });
 }
 
 #[tokio::test]
@@ -1236,6 +1150,161 @@ async fn shutdown_aborts_in_flight_executor_tasks() {
         .expect("scheduler shutdown should not detach hanging executor tasks");
 }
 
+/// Verifies that graceful scheduler shutdown relinquishes in-flight runs back
+/// to Queued so a restart can retry them instead of letting lease expiry fail
+/// them.
+#[tokio::test]
+async fn shutdown_relinquishes_in_flight_runs_to_queued() {
+    let store = Arc::new(InMemoryTurnStateStore::default());
+    let transitions: Arc<dyn TurnRunTransitionPort> = store.clone();
+    // HangingExecutor blocks indefinitely so the run stays Running through shutdown.
+    let executor = Arc::new(HangingExecutor::default());
+    let scheduler = TurnRunScheduler::new(
+        Arc::clone(&transitions),
+        executor.clone(),
+        fast_config().with_poll_interval(Duration::from_secs(60)),
+    );
+    let handle = scheduler.start();
+    let coordinator =
+        DefaultTurnCoordinator::new(store.clone()).with_wake_notifier(handle.wake_notifier());
+
+    let request = submit_turn_request("thread-relinquish-shutdown", "idem-relinquish-shutdown");
+    let scope = request.scope.clone();
+    let run_id = accepted_run_id(coordinator.submit_turn(request).await.unwrap());
+
+    // Wait until the executor has actually claimed and started the run (Running).
+    // Bounded so a regression in claim/start logic cannot hang the test suite.
+    timeout(Duration::from_secs(3), executor.wait_for_started())
+        .await
+        .expect("executor did not start the run within 3s; scheduler may not have claimed the queued run");
+
+    // Shutdown aborts the in-flight task and must relinquish the run to Queued.
+    timeout(Duration::from_secs(2), handle.shutdown())
+        .await
+        .expect("scheduler shutdown should not hang when relinquishing in-flight runs");
+
+    let state = store
+        .get_run_state(GetRunStateRequest { scope, run_id })
+        .await
+        .unwrap();
+    assert_eq!(
+        state.status,
+        TurnStatus::Queued,
+        "in-flight run must be relinquished back to Queued on shutdown, not left Running or Failed"
+    );
+}
+
+/// Regression test for `Drop for TurnRunSchedulerHandle`.
+///
+/// When a handle is dropped WITHOUT calling `shutdown()` — for example, when a
+/// build function starts the scheduler and then fails on a later fallible step —
+/// the `Drop` impl must still drive `shutdown_scheduler`, which aborts every
+/// in-flight executor task and relinquishes each active run back to `Queued`.
+///
+/// This complements `shutdown_relinquishes_in_flight_runs_to_queued` (which
+/// covers the explicit `shutdown()` path) by proving the same drain happens on
+/// an implicit, synchronous drop.
+#[tokio::test]
+async fn drop_without_shutdown_relinquishes_in_flight_run_to_queued() {
+    let store = Arc::new(InMemoryTurnStateStore::default());
+    let transitions: Arc<dyn TurnRunTransitionPort> = store.clone();
+    // HangingExecutor parks in `pending::<()>()` so the run stays Running
+    // until the task is aborted, giving the shutdown drain a live in-flight
+    // run to relinquish.
+    let executor = Arc::new(HangingExecutor::default());
+    let scheduler = TurnRunScheduler::new(
+        Arc::clone(&transitions),
+        executor.clone(),
+        fast_config().with_poll_interval(Duration::from_secs(60)),
+    );
+    let handle = scheduler.start();
+    let coordinator =
+        DefaultTurnCoordinator::new(store.clone()).with_wake_notifier(handle.wake_notifier());
+
+    let request = submit_turn_request("thread-drop-relinquish", "idem-drop-relinquish");
+    let scope = request.scope.clone();
+    let run_id = accepted_run_id(coordinator.submit_turn(request).await.unwrap());
+
+    // Wait until the executor has actually claimed and started the run so it
+    // is genuinely in-flight (Running, lease held, tracked in active_runs).
+    timeout(Duration::from_secs(3), executor.wait_for_started())
+        .await
+        .expect("executor did not start the run within 3 s; scheduler may not have claimed it");
+
+    // Drop the handle WITHOUT calling shutdown().
+    // The Drop impl cancels the token, the background loop's `select!` picks
+    // it up, calls `shutdown_scheduler`, aborts executor tasks, and relinquishes
+    // each active run.
+    drop(handle);
+
+    // Give the background loop time to run the shutdown_scheduler drain.
+    // Bounded so a regression cannot hang CI.
+    timeout(Duration::from_secs(3), async {
+        loop {
+            let state = store
+                .get_run_state(GetRunStateRequest {
+                    scope: scope.clone(),
+                    run_id,
+                })
+                .await
+                .unwrap();
+            if state.status == TurnStatus::Queued {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect(
+        "in-flight run must be relinquished back to Queued when handle is dropped without shutdown()",
+    );
+}
+
+/// Verifies that when a coordinator mints the notifier and channel before
+/// starting the scheduler via `start_with_channel`, the notifier held by the
+/// coordinator and the scheduler's consuming loop share the SAME underlying
+/// mpsc channel. A mismatch would leave the notified run unclaimed.
+#[tokio::test]
+async fn start_with_channel_shares_notifier_with_scheduler_loop() {
+    let store = Arc::new(InMemoryTurnStateStore::default());
+    let transitions: Arc<dyn TurnRunTransitionPort> = store.clone();
+    let executor = Arc::new(CompletingExecutor::default());
+
+    // Mint the notifier and channel BEFORE building the scheduler — this is
+    // the cycle-breaking entry point the coordinator uses so it can hold the
+    // notifier first.
+    let cap = fast_config().wake_channel_capacity();
+    let (notifier, channel) = SchedulerTurnRunWakeNotifier::channel(cap);
+
+    let scheduler = TurnRunScheduler::new(
+        Arc::clone(&transitions),
+        executor.clone(),
+        fast_config().with_poll_interval(Duration::from_secs(60)),
+    );
+    // Pass the pre-minted notifier + channel; do NOT call start() which would
+    // create a fresh channel and break the identity contract under test.
+    let handle = scheduler.start_with_channel(notifier.clone(), channel);
+
+    // Submit a turn through the store directly (no coordinator) so we control
+    // exactly which notifier fires the wake.
+    let coordinator =
+        DefaultTurnCoordinator::new(store.clone()).with_wake_notifier(notifier.clone());
+
+    let request = submit_turn_request("thread-start-with-channel", "idem-start-with-channel");
+    let scope = request.scope.clone();
+    let run_id = accepted_run_id(coordinator.submit_turn(request).await.unwrap());
+
+    // Fire the pre-minted notifier — the one the coordinator holds, not the
+    // one inside the handle.  If the scheduler loop is consuming a different
+    // channel this wake is lost and the run stays Queued indefinitely.
+    timeout(Duration::from_secs(3), executor.wait_for_started(1))
+        .await
+        .expect("executor did not start the run within 3s; notifier and scheduler channel are mismatched");
+
+    wait_for_status(&*store, scope, run_id, TurnStatus::Completed).await;
+    handle.shutdown().await;
+}
+
 #[tokio::test]
 async fn poller_recovers_queued_run_after_missed_wake() {
     let store = Arc::new(InMemoryTurnStateStore::default());
@@ -1409,6 +1478,60 @@ async fn scheduler_heartbeats_long_running_executor_until_completion() {
 }
 
 #[tokio::test]
+async fn scheduler_records_failure_when_heartbeat_call_times_out() {
+    let store = Arc::new(InMemoryTurnStateStore::with_limits(
+        InMemoryTurnStateStoreLimits {
+            runner_lease_ttl: ChronoDuration::milliseconds(500),
+            ..InMemoryTurnStateStoreLimits::default()
+        },
+    ));
+    let transitions = Arc::new(
+        HeartbeatTrackingTransitions::new(Arc::clone(&store))
+            .with_heartbeat_delay(Duration::from_secs(60)),
+    );
+    let transition_port: Arc<dyn TurnRunTransitionPort> = transitions;
+    let executor = Arc::new(HangingExecutor::default());
+    let scheduler = TurnRunScheduler::new(
+        transition_port,
+        executor.clone(),
+        fast_config()
+            .with_poll_interval(Duration::from_secs(60))
+            .with_runner_heartbeat_interval(Duration::from_millis(10)),
+    );
+    let handle = scheduler.start();
+    let coordinator =
+        DefaultTurnCoordinator::new(store.clone()).with_wake_notifier(handle.wake_notifier());
+
+    let request = submit_turn_request("thread-heartbeat-timeout", "idem-heartbeat-timeout");
+    let scope = request.scope.clone();
+    let run_id = accepted_run_id(coordinator.submit_turn(request).await.unwrap());
+    executor.wait_for_started().await;
+
+    timeout(Duration::from_secs(2), async {
+        loop {
+            let state = store
+                .get_run_state(GetRunStateRequest {
+                    scope: scope.clone(),
+                    run_id,
+                })
+                .await
+                .unwrap();
+            if state.status == TurnStatus::Failed {
+                assert_eq!(
+                    state.failure.as_ref().map(|failure| failure.category()),
+                    Some("scheduler_heartbeat_failed")
+                );
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("run did not move to failed after heartbeat timeout");
+    handle.shutdown().await;
+}
+
+#[tokio::test]
 async fn canceled_hanging_executor_lease_expires_to_cancelled() {
     let store = Arc::new(InMemoryTurnStateStore::with_limits(
         InMemoryTurnStateStoreLimits {
@@ -1502,6 +1625,148 @@ async fn expired_lease_reconciler_fails_running_run() {
     .await
     .expect("expired lease was not reconciled");
     handle.shutdown().await;
+}
+
+/// A `TurnRunTransitionPort` whose `claim_next_run` blocks until a `Notify` is
+/// signalled, then returns `Ok(None)`.  Used to simulate a slow store claim so
+/// that we can verify the cancellation / drain-exit behaviour.
+struct BarrierClaimTransitions {
+    /// Fired by the test when `claim_next_run` should return.
+    release: Arc<tokio::sync::Notify>,
+    /// Fired by `claim_next_run` once it has entered its blocking await so the
+    /// test knows the drain loop is actually parked inside a claim.
+    entered: Arc<tokio::sync::Notify>,
+}
+
+#[async_trait]
+impl TurnRunTransitionPort for BarrierClaimTransitions {
+    async fn claim_next_run(
+        &self,
+        _request: ClaimRunRequest,
+    ) -> Result<Option<ClaimedTurnRun>, TurnError> {
+        self.entered.notify_waiters();
+        self.release.notified().await;
+        Ok(None)
+    }
+
+    async fn heartbeat(
+        &self,
+        _request: HeartbeatRequest,
+    ) -> Result<ironclaw_turns::EventCursor, TurnError> {
+        panic!("barrier claim transitions should not heartbeat")
+    }
+
+    async fn recover_expired_leases(
+        &self,
+        _request: RecoverExpiredLeasesRequest,
+    ) -> Result<RecoverExpiredLeasesResponse, TurnError> {
+        Ok(RecoverExpiredLeasesResponse { recovered: vec![] })
+    }
+
+    async fn record_model_route_snapshot(
+        &self,
+        _request: RecordModelRouteSnapshotRequest,
+    ) -> Result<TurnRunState, TurnError> {
+        panic!("barrier claim transitions should not record model route snapshots")
+    }
+
+    async fn block_run(&self, _request: BlockRunRequest) -> Result<TurnRunState, TurnError> {
+        panic!("barrier claim transitions should not block runs")
+    }
+
+    async fn complete_run(&self, _request: CompleteRunRequest) -> Result<TurnRunState, TurnError> {
+        panic!("barrier claim transitions should not complete runs")
+    }
+
+    async fn cancel_run(
+        &self,
+        _request: CancelRunCompletionRequest,
+    ) -> Result<TurnRunState, TurnError> {
+        panic!("barrier claim transitions should not cancel runs")
+    }
+
+    async fn fail_run(&self, _request: FailRunRequest) -> Result<TurnRunState, TurnError> {
+        panic!("barrier claim transitions should not fail runs")
+    }
+
+    async fn record_runner_failure(
+        &self,
+        _request: RecordRunnerFailureRequest,
+    ) -> Result<TurnRunState, TurnError> {
+        panic!("barrier claim transitions should not record terminal failure")
+    }
+
+    async fn apply_validated_loop_exit(
+        &self,
+        _request: ApplyValidatedLoopExitRequest,
+    ) -> Result<TurnRunState, TurnError> {
+        panic!("barrier claim transitions should not apply loop exits")
+    }
+}
+
+/// Verifies that scheduler shutdown does not start new `claim_next_run` calls
+/// after cancellation fires, and exits promptly once the in-flight claim returns.
+///
+/// Shape chosen (FIX 1): cancellation is checked at the TOP of each drain
+/// iteration, BEFORE starting a new `claim_next_run`.  This means:
+///  - Any claim already in progress runs to completion so its result is always
+///    tracked in `active_runs` (no leaked claimed-but-untracked run).
+///  - Once that claim returns, the top-of-loop check fires → drain exits without
+///    issuing any further claim calls.
+///  - The outer scheduler select re-enters and observes `cancelled()`, calling
+///    `shutdown_scheduler`.
+///
+/// The test drives this by:
+///  1. Sending a Wake to start a drain → `claim_next_run` blocks on a barrier.
+///  2. Waiting for the drain to be inside the claim await (`entered` notify).
+///  3. Calling `shutdown()` to cancel the token.
+///  4. Releasing the barrier → claim returns `Ok(None)`.
+///  5. Asserting `shutdown()` completes within a short bound after the release.
+#[tokio::test]
+async fn shutdown_completes_promptly_after_stalled_claim_unblocks() {
+    let release = Arc::new(tokio::sync::Notify::new());
+    let entered = Arc::new(tokio::sync::Notify::new());
+    let transitions = Arc::new(BarrierClaimTransitions {
+        release: Arc::clone(&release),
+        entered: Arc::clone(&entered),
+    });
+    let transition_port: Arc<dyn TurnRunTransitionPort> = transitions;
+    let executor = Arc::new(CompletingExecutor::default());
+    let scheduler = TurnRunScheduler::new(
+        transition_port,
+        executor,
+        fast_config()
+            // Long poll interval so only the explicit Wake triggers a drain.
+            .with_poll_interval(Duration::from_secs(3600))
+            .with_lease_recovery_interval(Duration::from_secs(3600)),
+    );
+    let handle = scheduler.start();
+
+    // Trigger a drain by sending a Wake; the barrier claim will block.
+    handle
+        .wake_notifier()
+        .notify_queued_run(fake_wake("thread-stalled-claim"))
+        .unwrap();
+
+    // Wait until the scheduler is actually parked inside claim_next_run.
+    timeout(Duration::from_secs(2), entered.notified())
+        .await
+        .expect("scheduler did not enter claim_next_run within 2 s");
+
+    // Initiate shutdown in the background — the token is cancelled immediately,
+    // but the loop is stuck awaiting the in-flight claim.
+    let shutdown_future = tokio::spawn(async move { handle.shutdown().await });
+
+    // Release the barrier — claim_next_run returns Ok(None).
+    // The top-of-loop cancellation check fires on the next iteration and the
+    // drain returns; the outer loop observes cancelled() and calls shutdown_scheduler.
+    release.notify_waiters();
+
+    // Shutdown must complete promptly (well within 2 s) after we release the barrier.
+    timeout(Duration::from_secs(2), shutdown_future)
+        .await
+        .expect("scheduler shutdown must complete promptly after stalled claim unblocks")
+        .expect("shutdown task must not panic");
 }
 
 fn fast_config() -> TurnRunSchedulerConfig {

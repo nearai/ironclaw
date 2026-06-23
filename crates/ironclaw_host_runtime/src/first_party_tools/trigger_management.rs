@@ -4,12 +4,13 @@ use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use ironclaw_extensions::{CapabilityManifest, ExtensionError};
 use ironclaw_host_api::{
-    CapabilityId, EffectKind, HostApiError, PermissionMode, ResourceScope, ResourceUsage,
-    RuntimeDispatchErrorKind,
+    CapabilityId, DispatchInputIssue, DispatchInputIssueCode, EffectKind, HostApiError,
+    PermissionMode, ResourceScope, ResourceUsage, RuntimeDispatchErrorKind,
 };
 use ironclaw_triggers::{
-    TriggerError, TriggerId, TriggerRecord, TriggerRepository, TriggerRunRecord, TriggerSchedule,
-    TriggerSourceKind, TriggerState,
+    TriggerError, TriggerId, TriggerRecord, TriggerRecordValidationKind, TriggerRepository,
+    TriggerRunRecord, TriggerSchedule, TriggerScheduleValidationKind, TriggerSourceKind,
+    TriggerState,
 };
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -195,7 +196,7 @@ impl FirstPartyCapabilityHandler for TriggerManagementToolHandler {
 }
 
 #[derive(Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case")]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 enum TriggerScheduleInput {
     Cron {
         expression: String,
@@ -207,7 +208,20 @@ enum TriggerScheduleInput {
     },
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TriggerScheduleInputKind {
+    Cron,
+    Once,
+}
+
 impl TriggerScheduleInput {
+    fn kind(&self) -> TriggerScheduleInputKind {
+        match self {
+            Self::Cron { .. } => TriggerScheduleInputKind::Cron,
+            Self::Once { .. } => TriggerScheduleInputKind::Once,
+        }
+    }
+
     fn into_schedule(self) -> Result<TriggerSchedule, TriggerError> {
         match self {
             Self::Cron {
@@ -220,6 +234,7 @@ impl TriggerScheduleInput {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct TriggerCreateInput {
     name: String,
     prompt: String,
@@ -244,12 +259,15 @@ async fn create_trigger(
     input: Value,
     now: DateTime<Utc>,
 ) -> Result<Value, FirstPartyCapabilityError> {
-    let input: TriggerCreateInput = serde_json::from_value(input).map_err(|_| input_error())?;
+    let input: TriggerCreateInput = TriggerCreateInput::deserialize(&input)
+        .map_err(|error| trigger_create_shape_error(&input, error))?;
+    let schedule_kind = input.schedule.kind();
     let schedule = input
         .schedule
         .into_schedule()
-        .map_err(trigger_input_error)?;
-    let next_run_at = next_run_at_for_schedule(&schedule, now)?;
+        .map_err(|error| trigger_schedule_error(schedule_kind, error))?;
+    let next_run_at = next_run_at_for_schedule(&schedule, now)
+        .map_err(|error| trigger_next_run_error(schedule_kind, error))?;
     let record = TriggerRecord {
         trigger_id: TriggerId::new(),
         tenant_id: scope.tenant_id.clone(),
@@ -269,7 +287,7 @@ async fn create_trigger(
         active_run_ref: None,
         created_at: now,
     };
-    record.validate().map_err(trigger_input_error)?;
+    record.validate().map_err(trigger_record_error)?;
     repository
         .upsert_trigger(record.clone())
         .await
@@ -405,11 +423,225 @@ fn trigger_remove_output(record: &TriggerRecord) -> Value {
 fn next_run_at_for_schedule(
     schedule: &TriggerSchedule,
     now: DateTime<Utc>,
-) -> Result<DateTime<Utc>, FirstPartyCapabilityError> {
-    schedule
-        .next_slot_after(now)
-        .map_err(trigger_input_error)?
-        .ok_or_else(input_error)
+) -> Result<DateTime<Utc>, TriggerError> {
+    schedule.next_slot_after(now).and_then(|next| {
+        next.ok_or_else(|| TriggerError::InvalidSchedule {
+            kind: TriggerScheduleValidationKind::NoFutureFireTime,
+            reason: "schedule has no future fire time".to_string(),
+        })
+    })
+}
+
+fn trigger_create_shape_error(
+    input: &Value,
+    _error: serde_json::Error,
+) -> FirstPartyCapabilityError {
+    invalid_trigger_input(classify_trigger_create_shape(input))
+}
+
+fn classify_trigger_create_shape(input: &Value) -> Vec<DispatchInputIssue> {
+    let Some(root) = input.as_object() else {
+        return vec![type_mismatch("input", "object")];
+    };
+
+    let mut issues = Vec::new();
+    required_string(root, "name", "name", "string", &mut issues);
+    required_string(root, "prompt", "prompt", "string", &mut issues);
+    unexpected_fields(
+        root,
+        &["name", "prompt", "schedule"],
+        "unexpected_field",
+        &mut issues,
+    );
+
+    let Some(schedule) = root.get("schedule") else {
+        issues.push(missing_required("schedule").expected("object with kind"));
+        return issues;
+    };
+    let Some(schedule) = schedule.as_object() else {
+        issues.push(type_mismatch("schedule", "object"));
+        return issues;
+    };
+
+    match schedule.get("kind") {
+        None | Some(Value::Null) => {
+            issues.push(missing_required("schedule.kind").expected("cron or once"));
+        }
+        Some(Value::String(kind)) if kind == "cron" => {
+            schedule_variant_shape_issues(
+                schedule,
+                &["kind", "expression", "timezone"],
+                &[
+                    ("expression", "schedule.expression", "cron expression"),
+                    ("timezone", "schedule.timezone", "IANA timezone name"),
+                ],
+                &mut issues,
+            );
+        }
+        Some(Value::String(kind)) if kind == "once" => {
+            schedule_variant_shape_issues(
+                schedule,
+                &["kind", "at", "timezone"],
+                &[
+                    ("at", "schedule.at", "YYYY-MM-DDTHH:MM:SS"),
+                    ("timezone", "schedule.timezone", "IANA timezone name"),
+                ],
+                &mut issues,
+            );
+        }
+        Some(Value::String(_)) => {
+            issues.push(invalid_value("schedule.kind").expected("cron or once"));
+        }
+        Some(_) => issues.push(type_mismatch("schedule.kind", "string")),
+    }
+
+    if issues.is_empty() {
+        issues.push(invalid_value("input").expected("valid trigger_create input"));
+    }
+    issues
+}
+
+fn schedule_variant_shape_issues(
+    schedule: &serde_json::Map<String, Value>,
+    allowed_fields: &[&str],
+    required_strings: &[(&'static str, &'static str, &'static str)],
+    issues: &mut Vec<DispatchInputIssue>,
+) {
+    unexpected_fields(
+        schedule,
+        allowed_fields,
+        "schedule.unexpected_field",
+        issues,
+    );
+    for (field, path, expected) in required_strings {
+        required_string(schedule, field, path, expected, issues);
+    }
+}
+
+fn unexpected_fields(
+    object: &serde_json::Map<String, Value>,
+    allowed: &[&str],
+    path: &'static str,
+    issues: &mut Vec<DispatchInputIssue>,
+) {
+    for field in object.keys() {
+        if !allowed.contains(&field.as_str()) {
+            issues.push(unexpected_field(path));
+        }
+    }
+}
+
+fn required_string(
+    object: &serde_json::Map<String, Value>,
+    field: &'static str,
+    path: &'static str,
+    expected: &'static str,
+    issues: &mut Vec<DispatchInputIssue>,
+) {
+    match object.get(field) {
+        None | Some(Value::Null) => issues.push(missing_required(path).expected(expected)),
+        Some(Value::String(_)) => {}
+        Some(_) => issues.push(type_mismatch(path, "string")),
+    }
+}
+
+fn missing_required(path: impl Into<String>) -> DispatchInputIssue {
+    DispatchInputIssue::new(path, DispatchInputIssueCode::MissingRequired)
+}
+
+fn unexpected_field(path: impl Into<String>) -> DispatchInputIssue {
+    DispatchInputIssue::new(path, DispatchInputIssueCode::UnexpectedField)
+}
+
+fn type_mismatch(path: impl Into<String>, expected: &'static str) -> DispatchInputIssue {
+    DispatchInputIssue::new(path, DispatchInputIssueCode::TypeMismatch).expected(expected)
+}
+
+fn invalid_value(path: impl Into<String>) -> DispatchInputIssue {
+    DispatchInputIssue::new(path, DispatchInputIssueCode::InvalidValue)
+}
+
+fn invalid_trigger_input(issues: Vec<DispatchInputIssue>) -> FirstPartyCapabilityError {
+    let issue_paths = issues
+        .iter()
+        .map(|issue| issue.path.as_str())
+        .collect::<Vec<_>>();
+    tracing::debug!(
+        runtime_dispatch_error_kind = %RuntimeDispatchErrorKind::InputEncode,
+        issue_count = issues.len(),
+        issue_paths = ?issue_paths,
+        "trigger management capability input validation failed"
+    );
+    FirstPartyCapabilityError::invalid_input_issues(
+        "trigger_create input failed validation",
+        issues,
+    )
+}
+
+fn trigger_schedule_error(
+    kind: TriggerScheduleInputKind,
+    error: TriggerError,
+) -> FirstPartyCapabilityError {
+    let issue = match error {
+        TriggerError::InvalidSchedule {
+            kind: TriggerScheduleValidationKind::InvalidTimezone,
+            ..
+        } => invalid_value("schedule.timezone").expected("valid IANA timezone name"),
+        TriggerError::InvalidSchedule { .. } => match kind {
+            TriggerScheduleInputKind::Cron => invalid_value("schedule.expression")
+                .expected("five-, six-, or seven-field cron with at least one-minute cadence"),
+            TriggerScheduleInputKind::Once => invalid_value("schedule.at")
+                .expected("YYYY-MM-DDTHH:MM:SS valid in the selected timezone"),
+        },
+        other => invalid_value("schedule").expected(trigger_error_kind(&other)),
+    };
+    invalid_trigger_input(vec![issue])
+}
+
+fn trigger_record_error(error: TriggerError) -> FirstPartyCapabilityError {
+    match error {
+        TriggerError::InvalidRecord {
+            kind: TriggerRecordValidationKind::NameEmpty,
+            ..
+        } => invalid_trigger_input(vec![
+            invalid_value("name").expected("non-empty trigger name"),
+        ]),
+        TriggerError::InvalidRecord {
+            kind: TriggerRecordValidationKind::PromptEmpty,
+            ..
+        } => invalid_trigger_input(vec![
+            invalid_value("prompt").expected("non-empty trigger prompt"),
+        ]),
+        TriggerError::InvalidRecord {
+            kind: TriggerRecordValidationKind::NameTooLong,
+            ..
+        } => invalid_trigger_input(vec![
+            invalid_value("name").expected("trigger name within the allowed byte limit"),
+        ]),
+        TriggerError::InvalidRecord {
+            kind: TriggerRecordValidationKind::PromptTooLong,
+            ..
+        } => invalid_trigger_input(vec![
+            invalid_value("prompt").expected("trigger prompt within the allowed byte limit"),
+        ]),
+        other => invalid_trigger_input(vec![
+            invalid_value("trigger").expected(trigger_error_kind(&other)),
+        ]),
+    }
+}
+
+fn trigger_next_run_error(
+    kind: TriggerScheduleInputKind,
+    _error: TriggerError,
+) -> FirstPartyCapabilityError {
+    let issue = match kind {
+        TriggerScheduleInputKind::Cron => invalid_value("schedule.expression")
+            .expected("cron expression with at least one future fire time"),
+        TriggerScheduleInputKind::Once => {
+            invalid_value("schedule.at").expected("future local datetime")
+        }
+    };
+    invalid_trigger_input(vec![issue])
 }
 
 fn trigger_input_error(error: TriggerError) -> FirstPartyCapabilityError {
@@ -505,8 +737,8 @@ mod tests {
 
         assert!(matches!(
             error,
-            FirstPartyCapabilityError::Dispatch {
-                kind: RuntimeDispatchErrorKind::InputEncode,
+            TriggerError::InvalidSchedule {
+                kind: TriggerScheduleValidationKind::NoFutureFireTime,
                 ..
             }
         ));
