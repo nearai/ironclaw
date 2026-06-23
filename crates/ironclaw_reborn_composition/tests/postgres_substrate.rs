@@ -123,6 +123,44 @@ async fn postgres_substrate_builder_rejects_invalid_secret_master_key() {
 }
 
 #[tokio::test]
+async fn postgres_substrate_builder_rejects_invalid_owner_id() {
+    let Some((_container, pool, database_url)) = postgres_pool_or_skip().await else {
+        return;
+    };
+
+    let result =
+        build_postgres_production_host_runtime_services(PostgresProductionSubstrateConfig {
+            pool,
+            owner_id: String::new(),
+            event_store: RebornEventStoreConfig::Postgres {
+                url: SecretString::from(database_url),
+                tls_options: Default::default(),
+            },
+            secret_master_key: Some(SecretString::from("01234567890123456789012345678901")),
+            trust_policy: Arc::new(ironclaw_trust::HostTrustPolicy::fail_closed()),
+            runtime_policy: RebornProductionRuntimePolicy::with_tenant_sandbox_process_port(
+                production_runtime_policy(),
+                sandbox_process_port(),
+            )
+            .unwrap(),
+            turn_run_wake_notifier: Arc::new(RecordingSchedulerWakeNotifier),
+            surface_version: CapabilitySurfaceVersion::new("test-surface").unwrap(),
+        })
+        .await;
+
+    assert!(matches!(
+        result,
+        Err(RebornCompositionError::Mount(
+            ironclaw_host_api::HostApiError::InvalidId {
+                kind: "user",
+                value,
+                reason
+            }
+        )) if value.is_empty() && reason == "must not be empty"
+    ));
+}
+
+#[tokio::test]
 async fn postgres_substrate_builder_rejects_weak_env_secret_master_key() {
     let _guard = SECRETS_MASTER_KEY_ENV_LOCK.lock().await;
     let _env = EnvVarGuard::set(

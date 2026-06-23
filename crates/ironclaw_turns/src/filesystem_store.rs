@@ -225,28 +225,6 @@ where
         }
     }
 
-    fn clear_snapshot_cache_if_version(&self, version: Option<RecordVersion>) {
-        match self.snapshot_cache.lock() {
-            Ok(mut guard) => {
-                if guard
-                    .as_ref()
-                    .is_some_and(|snapshot| snapshot.version == version)
-                {
-                    *guard = None;
-                }
-            }
-            Err(poisoned) => {
-                let mut guard = poisoned.into_inner();
-                if guard
-                    .as_ref()
-                    .is_some_and(|snapshot| snapshot.version == version)
-                {
-                    *guard = None;
-                }
-            }
-        }
-    }
-
     fn build_in_memory_store(
         &self,
         snapshot: TurnPersistenceSnapshot,
@@ -302,6 +280,9 @@ where
             let new_snapshot = store.persistence_snapshot();
 
             if new_snapshot == old_snapshot {
+                // This apply path read the latest snapshot directly from the
+                // backend, so any previously cached snapshot may now be stale.
+                self.clear_snapshot_cache();
                 return outcome;
             }
             let entry = snapshot_entry(&new_snapshot)?;
@@ -315,7 +296,7 @@ where
                     return outcome;
                 }
                 Err(PutError::VersionMismatch) => {
-                    self.clear_snapshot_cache_if_version(version);
+                    self.clear_snapshot_cache();
                     cas_retry_backoff(attempt).await;
                 }
                 Err(PutError::Other(error)) => return Err(error),
@@ -843,8 +824,6 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ironclaw_filesystem::InMemoryBackend;
-    use ironclaw_host_api::{MountAlias, MountGrant, MountPermissions, MountView, VirtualPath};
 
     #[test]
     fn cached_snapshot_freshness_is_bounded() {
@@ -860,29 +839,28 @@ mod tests {
         assert!(!stale.is_fresh());
     }
 
-    #[test]
-    fn cache_clear_by_version_preserves_newer_snapshot() {
-        let scoped = Arc::new(ScopedFilesystem::with_fixed_view(
-            Arc::new(InMemoryBackend::new()),
-            MountView::new(vec![MountGrant::new(
-                MountAlias::new("/turns").unwrap(),
-                VirtualPath::new("/engine/turns").unwrap(),
-                MountPermissions::read_write_list_delete(),
+    #[tokio::test]
+    async fn no_op_apply_clears_snapshot_cache_before_returning() {
+        let filesystem = Arc::new(ScopedFilesystem::with_fixed_view(
+            Arc::new(ironclaw_filesystem::InMemoryBackend::new()),
+            ironclaw_host_api::MountView::new(vec![ironclaw_host_api::MountGrant::new(
+                ironclaw_host_api::MountAlias::new("/turns").unwrap(),
+                ironclaw_host_api::VirtualPath::new("/engine/turns").unwrap(),
+                ironclaw_host_api::MountPermissions::read_write_list_delete(),
             )])
             .unwrap(),
         ));
-        let store = FilesystemTurnStateStore::new(scoped);
-        let stale_version = Some(RecordVersion::from_backend(1));
-        let newer_version = Some(RecordVersion::from_backend(2));
+        let store = FilesystemTurnStateStore::new(filesystem);
+        store.store_snapshot_cache((
+            TurnPersistenceSnapshot::default(),
+            Some(RecordVersion::from_backend(99)),
+        ));
 
-        store.store_snapshot_cache((TurnPersistenceSnapshot::default(), newer_version));
-        store.clear_snapshot_cache_if_version(stale_version);
-        assert_eq!(
-            store.fresh_cached_snapshot().map(|(_, version)| version),
-            Some(newer_version)
-        );
+        store
+            .apply(|store| async move { (Ok::<_, TurnError>(()), store) })
+            .await
+            .unwrap();
 
-        store.clear_snapshot_cache_if_version(newer_version);
         assert!(store.fresh_cached_snapshot().is_none());
     }
 }

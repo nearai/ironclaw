@@ -204,6 +204,7 @@ struct FirstWaveBlockingPutFilesystem<F> {
     expected_first_wave_puts: AtomicUsize,
     first_wave_arrivals: AtomicUsize,
     version_mismatches: AtomicUsize,
+    reject_puts: AtomicBool,
     first_wave_ready: tokio::sync::Notify,
     release_first_wave: tokio::sync::Notify,
 }
@@ -215,6 +216,7 @@ impl<F> FirstWaveBlockingPutFilesystem<F> {
             expected_first_wave_puts: AtomicUsize::new(0),
             first_wave_arrivals: AtomicUsize::new(0),
             version_mismatches: AtomicUsize::new(0),
+            reject_puts: AtomicBool::new(false),
             first_wave_ready: tokio::sync::Notify::new(),
             release_first_wave: tokio::sync::Notify::new(),
         }
@@ -239,6 +241,10 @@ impl<F> FirstWaveBlockingPutFilesystem<F> {
 
     fn version_mismatches(&self) -> usize {
         self.version_mismatches.load(Ordering::SeqCst)
+    }
+
+    fn set_reject_puts(&self, reject_puts: bool) {
+        self.reject_puts.store(reject_puts, Ordering::SeqCst);
     }
 }
 
@@ -439,6 +445,18 @@ where
                 }
                 self.release_first_wave.notified().await;
             }
+        }
+        if self.reject_puts.load(Ordering::SeqCst) {
+            self.version_mismatches.fetch_add(1, Ordering::SeqCst);
+            return Err(FilesystemError::VersionMismatch {
+                path: path.clone(),
+                expected: match cas {
+                    CasExpectation::Any => None,
+                    CasExpectation::Absent => None,
+                    CasExpectation::Version(version) => Some(version),
+                },
+                found: None,
+            });
         }
         let result = self.inner.put(path, entry, cas).await;
         if matches!(result, Err(FilesystemError::VersionMismatch { .. })) {
@@ -641,6 +659,88 @@ async fn filesystem_turn_state_store_reuses_fresh_snapshot_for_read_only_lookup(
         backend.get_calls(),
         0,
         "fresh read-only turn-state lookups should reuse the in-process snapshot cache"
+    );
+}
+
+#[tokio::test]
+async fn filesystem_turn_state_store_clears_stale_snapshot_cache_after_version_mismatch() {
+    let backend = Arc::new(FirstWaveBlockingPutFilesystem::new(
+        CountingFilesystem::new(engine_filesystem()),
+    ));
+    let scoped = scoped_turns_fs(Arc::clone(&backend));
+    let store = Arc::new(FilesystemTurnStateStore::new(Arc::clone(&scoped)));
+    let external_store = FilesystemTurnStateStore::new(scoped);
+    let resolver = InMemoryRunProfileResolver::default();
+
+    let seed_scope = turn_scope("thread-fs-vm-cache-seed");
+    let seed_request = submit_request_for(seed_scope, "idem-fs-vm-cache-seed");
+    store
+        .submit_turn(seed_request, &AllowAllTurnAdmissionPolicy, &resolver)
+        .await
+        .unwrap();
+
+    let external_request = submit_request_for(
+        turn_scope("thread-fs-vm-cache-external"),
+        "idem-fs-vm-cache-ext",
+    );
+    external_store
+        .submit_turn(external_request, &AllowAllTurnAdmissionPolicy, &resolver)
+        .await
+        .unwrap();
+
+    backend.block_first_put_wave(1);
+
+    let raced_scope = turn_scope("thread-fs-vm-cache-raced");
+    let raced_request = submit_request_for(raced_scope, "idem-fs-vm-cache-raced");
+    let raced_store = Arc::clone(&store);
+    let raced = tokio::spawn(async move {
+        let resolver = InMemoryRunProfileResolver::default();
+        raced_store
+            .submit_turn(raced_request, &AllowAllTurnAdmissionPolicy, &resolver)
+            .await
+    });
+
+    tokio::time::timeout(Duration::from_secs(1), backend.wait_for_first_wave())
+        .await
+        .expect("first version-mismatching writer should block on its initial put");
+
+    let competing_scope = turn_scope("thread-fs-vm-cache-competing");
+    let competing_request =
+        submit_request_for(competing_scope.clone(), "idem-fs-vm-cache-competing");
+    let competing_response = external_store
+        .submit_turn(competing_request, &AllowAllTurnAdmissionPolicy, &resolver)
+        .await
+        .unwrap();
+    let competing_run_id = accepted_run_id(&competing_response);
+
+    backend.set_reject_puts(true);
+    backend.release_first_wave();
+
+    tokio::time::timeout(Duration::from_secs(1), async {
+        while backend.version_mismatches() == 0 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("first writer should observe a version mismatch before retrying");
+
+    raced.abort();
+    let _ = raced.await;
+
+    backend.inner.reset_get_calls();
+    let state = store
+        .get_run_state(GetRunStateRequest {
+            scope: competing_scope,
+            run_id: competing_run_id,
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(state.run_id, competing_run_id);
+    assert_eq!(
+        backend.inner.get_calls(),
+        1,
+        "version mismatch must clear stale snapshot cache before retry/backoff"
     );
 }
 

@@ -5038,6 +5038,120 @@ mod tests {
         assert_eq!(scope.agent_id, Some(identity.agent_id));
     }
 
+    #[cfg(feature = "libsql")]
+    #[tokio::test]
+    async fn production_libsql_turn_state_uses_configured_runtime_identity() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db = Arc::new(
+            libsql::Builder::new_local(dir.path().join("reborn.db").display().to_string())
+                .build()
+                .await
+                .expect("build libsql database"),
+        );
+        let assertion_filesystem = LibSqlRootFilesystem::new(Arc::clone(&db));
+        let owner = UserId::new("configured-owner").expect("owner");
+        let tenant = TenantId::new("configured-tenant").expect("tenant");
+        let agent = ironclaw_host_api::AgentId::new("configured-agent").expect("agent");
+        let services = build_reborn_services(
+            RebornBuildInput::libsql(
+                RebornCompositionProfile::Production,
+                owner.as_str(),
+                db,
+                dir.path().join("events.db").display().to_string(),
+                None,
+                ironclaw_secrets::SecretMaterial::from("01234567890123456789012345678901"),
+            )
+            .with_local_runtime_identity(tenant.clone(), agent.clone())
+            .with_production_trust_policy(Arc::new(
+                builtin_first_party_trust_policy().expect("builtin trust policy"),
+            ))
+            .with_runtime_policy(EffectiveRuntimePolicy {
+                deployment: ironclaw_host_api::DeploymentMode::HostedMultiTenant,
+                requested_profile: ironclaw_host_api::RuntimeProfile::HostedSafe,
+                resolved_profile: ironclaw_host_api::RuntimeProfile::HostedSafe,
+                filesystem_backend: FilesystemBackendKind::TenantWorkspace,
+                process_backend: ProcessBackendKind::None,
+                network_mode: ironclaw_host_api::NetworkMode::Brokered,
+                secret_mode: SecretMode::TenantBroker,
+                approval_policy: ironclaw_host_api::runtime_policy::ApprovalPolicy::AskAlways,
+                audit_mode: ironclaw_host_api::AuditMode::Standard,
+            }),
+        )
+        .await
+        .expect("production libsql services build");
+
+        let production_runtime = services
+            .production_runtime
+            .as_ref()
+            .expect("production runtime");
+        #[cfg(not(feature = "postgres"))]
+        let RebornProductionRuntimeServices::LibSql(graph) = production_runtime;
+        #[cfg(feature = "postgres")]
+        let graph = match production_runtime {
+            RebornProductionRuntimeServices::LibSql(graph) => graph,
+            RebornProductionRuntimeServices::Postgres(_) => {
+                panic!("expected libsql production runtime")
+            }
+        };
+        let scope = ironclaw_turns::TurnScope::new_with_owner(
+            tenant,
+            Some(agent),
+            None,
+            ironclaw_host_api::ThreadId::new("configured-thread").expect("thread"),
+            Some(owner.clone()),
+        );
+        let submit = ironclaw_turns::SubmitTurnRequest {
+            scope,
+            actor: ironclaw_turns::TurnActor::new(owner),
+            accepted_message_ref: ironclaw_turns::AcceptedMessageRef::new("configured-message-ref")
+                .expect("message ref"),
+            source_binding_ref: ironclaw_turns::SourceBindingRef::new("source-web")
+                .expect("source binding"),
+            reply_target_binding_ref: ironclaw_turns::ReplyTargetBindingRef::new("reply-web")
+                .expect("reply binding"),
+            requested_run_profile: Some(
+                ironclaw_turns::RunProfileRequest::new("default").expect("run profile"),
+            ),
+            idempotency_key: ironclaw_turns::IdempotencyKey::new("configured-turn")
+                .expect("idempotency key"),
+            received_at: chrono::Utc::now(),
+            requested_run_id: None,
+            parent_run_id: None,
+            subagent_depth: 0,
+            spawn_tree_root_run_id: None,
+            product_context: None,
+        };
+        ironclaw_turns::TurnStateStore::submit_turn(
+            graph.turn_state.as_ref(),
+            submit,
+            &ironclaw_turns::AllowAllTurnAdmissionPolicy,
+            &InMemoryRunProfileResolver::default(),
+        )
+        .await
+        .expect("submit through production turn-state store");
+
+        let configured_path =
+            VirtualPath::new("/tenants/configured-tenant/users/configured-owner/turns/state.json")
+                .expect("configured turn-state path");
+        let system_path = VirtualPath::new("/tenants/__system__/users/__system__/turns/state.json")
+            .expect("system turn-state path");
+
+        assert!(
+            assertion_filesystem
+                .get(&configured_path)
+                .await
+                .expect("configured turn-state read")
+                .is_some()
+        );
+        assert!(
+            assertion_filesystem
+                .get(&system_path)
+                .await
+                .expect("system turn-state read")
+                .is_none()
+        );
+    }
+
     #[tokio::test]
     async fn local_dev_nearai_mcp_auto_bootstraps_from_injected_config() {
         let dir = tempfile::tempdir().expect("tempdir");
