@@ -14,9 +14,9 @@ mod policy_contract {
         GithubIssueWorkflowRunStatus, GithubIssueWorkspaceSession, GithubIssueWorkspaceSessionId,
         GithubProviderRef, GithubRepositorySelector, InMemoryGithubIssueWorkflowRepository,
         ListIssueCommentsInput, PrepareWorkflowWorkspaceOutcome, PrepareWorkflowWorkspaceRequest,
-        RecordWorkflowEventInput, RecordWorkflowEventOutcome, StageCompletedPayload,
-        StageTurnSubmitter, SubmitStageTurnOutcome, SubmitStageTurnRequest, WorkflowClock,
-        WorkflowEventEnvelope, WorkflowEventSourceKind, WorkflowProjectAccess,
+        ProviderContentSummary, RecordWorkflowEventInput, RecordWorkflowEventOutcome,
+        StageCompletedPayload, StageTurnSubmitter, SubmitStageTurnOutcome, SubmitStageTurnRequest,
+        WorkflowClock, WorkflowEventEnvelope, WorkflowEventSourceKind, WorkflowProjectAccess,
         WorkflowProjectAccessRequest, WorkflowStepStatus, WorkflowWorkerId,
         WorkflowWorkspaceManager, WorkflowWorkspaceMountRef, WorkflowWorkspaceRef,
         issue_binding_ref, issue_discovered_key, stage_result_reported_key,
@@ -154,6 +154,22 @@ mod policy_contract {
         repository: &InMemoryGithubIssueWorkflowRepository,
         run: &GithubIssueWorkflowRun,
     ) {
+        record_issue_discovered_with_payload(
+            repository,
+            run,
+            serde_json::to_value(GithubIssueDiscoveredPayload {
+                issue: run.issue_ref.clone(),
+            })
+            .unwrap(),
+        )
+        .await;
+    }
+
+    async fn record_issue_discovered_with_payload(
+        repository: &InMemoryGithubIssueWorkflowRepository,
+        run: &GithubIssueWorkflowRun,
+        payload: JsonValue,
+    ) {
         let outcome = repository
             .record_workflow_event(RecordWorkflowEventInput {
                 workflow_run_id: run.workflow_run_id.clone(),
@@ -166,10 +182,7 @@ mod policy_contract {
                     provider_updated_at: Some(fixed_time(12)),
                     idempotency_key: issue_discovered_key(&run.issue_ref),
                     payload_schema: "github.issue.discovered.v1".to_string(),
-                    payload: serde_json::to_value(GithubIssueDiscoveredPayload {
-                        issue: run.issue_ref.clone(),
-                    })
-                    .unwrap(),
+                    payload,
                 },
             })
             .await
@@ -563,6 +576,52 @@ mod policy_contract {
                 .stage_turn_identity
                 .completion_nonce()
                 .starts_with("stage-completion:")
+        );
+    }
+
+    #[tokio::test]
+    async fn issue_discovered_stage_prompt_includes_provider_issue_content() {
+        let stage_turns = Arc::new(FakeStageTurnSubmitter::accepting());
+        let project_access = Arc::new(FakeProjectAccess::allow());
+        let policy = policy(stage_turns.clone(), project_access);
+        let run = create_claimed_run(&policy.ports().repository).await;
+        let canary_line = "GitHub issue workflow canary policy prompt evidence";
+        record_issue_discovered_with_payload(
+            &policy.ports().repository,
+            &run,
+            json!({
+                "issue": run.issue_ref,
+                "provider_snapshot": {
+                    "title": "Workflow bug canary",
+                    "state": "open",
+                    "author_login": "BenKurrek",
+                    "labels": ["bug"],
+                    "updated_at": fixed_time(12),
+                    "comment_count": 0,
+                    "body_present": true,
+                    "content_summaries": [ProviderContentSummary {
+                        source_ref: "github:issue:nearai/ironclaw#42".to_string(),
+                        author: Some("BenKurrek".to_string()),
+                        summary: format!(
+                            "Requested change: add a file containing `{canary_line}`."
+                        ),
+                        trust: "untrusted_provider_content".to_string(),
+                    }]
+                }
+            }),
+        )
+        .await;
+
+        policy.tick(run).await.unwrap();
+
+        let requests = stage_turns.requests().await;
+        assert_eq!(requests.len(), 1);
+        assert!(requests[0].prompt.content.contains(canary_line));
+        assert!(
+            requests[0]
+                .prompt
+                .content
+                .contains("untrusted_provider_content")
         );
     }
 

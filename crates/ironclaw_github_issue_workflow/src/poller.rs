@@ -10,14 +10,15 @@ use crate::{
     CreateOrGetWorkflowRunOutcome, FindLatestWorkflowEventForProviderInput, GetGithubIssueInput,
     GetPullRequestInput, GithubChecksChangedPayload, GithubCommentRef, GithubIssueBlockKind,
     GithubIssueBlockState, GithubIssueCandidateSelector, GithubIssueClosedPayload,
-    GithubIssueProviderSnapshot, GithubIssueWorkflowConfig, GithubIssueWorkflowConfigSource,
-    GithubIssueWorkflowError, GithubIssueWorkflowEventType, GithubIssueWorkflowPolicy,
-    GithubIssueWorkflowPolicyPorts, GithubIssueWorkflowPollerConfig, GithubIssueWorkflowPort,
-    GithubIssueWorkflowRepository, GithubIssueWorkflowRun, GithubProviderRef,
-    GithubPullRequestCheckSnapshot, GithubPullRequestRef, GithubPullRequestSnapshot,
-    GithubPullRequestUpdatedPayload, GithubRepositorySelector, GithubReviewCommentCreatedPayload,
-    GithubReviewCommentSnapshot, LeaseReleaseOutcome, ListActiveWorkflowRunsForRepositoryInput,
-    ListIssueCommentsInput, ListPullRequestChecksInput, ListPullRequestReviewCommentsInput,
+    GithubIssueCommentSnapshot, GithubIssueProviderSnapshot, GithubIssueProviderSnapshotSummary,
+    GithubIssueWorkflowConfig, GithubIssueWorkflowConfigSource, GithubIssueWorkflowError,
+    GithubIssueWorkflowEventType, GithubIssueWorkflowPolicy, GithubIssueWorkflowPolicyPorts,
+    GithubIssueWorkflowPollerConfig, GithubIssueWorkflowPort, GithubIssueWorkflowRepository,
+    GithubIssueWorkflowRun, GithubProviderRef, GithubPullRequestCheckSnapshot,
+    GithubPullRequestRef, GithubPullRequestSnapshot, GithubPullRequestUpdatedPayload,
+    GithubRepositorySelector, GithubReviewCommentCreatedPayload, GithubReviewCommentSnapshot,
+    LeaseReleaseOutcome, ListActiveWorkflowRunsForRepositoryInput, ListIssueCommentsInput,
+    ListPullRequestChecksInput, ListPullRequestReviewCommentsInput, ProviderContentSummary,
     RecordWorkflowEventInput, RecordWorkflowEventOutcome, ReleaseWorkflowRunLeaseInput,
     SearchGithubIssuesInput, StageTurnSubmitter, WorkflowClock, WorkflowConfigAccessRequest,
     WorkflowEventEnvelope, WorkflowEventSourceKind, WorkflowProjectAccess, WorkflowWorkerId,
@@ -27,6 +28,9 @@ use crate::{
 };
 
 const DEFAULT_WORKFLOW_POLICY_KEY: &str = "github-bug-workflow";
+const MAX_PROVIDER_CONTENT_SUMMARY_CHARS: usize = 12_000;
+const MAX_PROVIDER_COMMENT_SUMMARIES: usize = 5;
+const WORKFLOW_CLAIM_COMMENT_PREFIX: &str = "<!-- ironclaw:github-bug-workflow:claim:";
 
 pub trait GithubIssueWorkflowPollerPorts: Send + Sync {
     type Clock: WorkflowClock + ?Sized;
@@ -287,7 +291,7 @@ where
                             }
                         },
                         payload_schema: event_payload_schema(&event_type).to_string(),
-                        payload: issue_event_payload(&snapshot, comments.len()),
+                        payload: issue_event_payload(&snapshot, &comments),
                     },
                 })
                 .await?;
@@ -905,20 +909,79 @@ fn event_payload_schema(event_type: &GithubIssueWorkflowEventType) -> &'static s
     }
 }
 
-fn issue_event_payload(snapshot: &GithubIssueProviderSnapshot, comment_count: usize) -> JsonValue {
+fn issue_event_payload(
+    snapshot: &GithubIssueProviderSnapshot,
+    comments: &[GithubIssueCommentSnapshot],
+) -> JsonValue {
     let issue = snapshot.issue_ref();
+    let provider_snapshot = GithubIssueProviderSnapshotSummary {
+        title: snapshot.title.clone(),
+        state: snapshot.state.clone(),
+        author_login: snapshot.author_login.clone(),
+        labels: snapshot.labels.clone(),
+        updated_at: snapshot.updated_at,
+        comment_count: comments.len(),
+        body_present: !snapshot.body.is_empty(),
+        content_summaries: provider_content_summaries(snapshot, comments),
+    };
     json!({
         "issue": issue,
-        "provider_snapshot": {
-            "title": snapshot.title,
-            "state": snapshot.state,
-            "author_login": snapshot.author_login,
-            "labels": snapshot.labels,
-            "updated_at": snapshot.updated_at,
-            "comment_count": comment_count,
-            "body_present": !snapshot.body.is_empty(),
-        }
+        "provider_snapshot": provider_snapshot,
     })
+}
+
+fn provider_content_summaries(
+    snapshot: &GithubIssueProviderSnapshot,
+    comments: &[GithubIssueCommentSnapshot],
+) -> Vec<ProviderContentSummary> {
+    let mut summaries = Vec::with_capacity(MAX_PROVIDER_COMMENT_SUMMARIES + 1);
+    summaries.push(ProviderContentSummary {
+        source_ref: format!(
+            "github:issue:{}/{}#{}",
+            snapshot.owner, snapshot.repo, snapshot.number
+        ),
+        author: snapshot.author_login.clone(),
+        summary: format!(
+            "Issue title: {}\n\nIssue body:\n{}",
+            snapshot.title,
+            truncate_provider_text(&snapshot.body, MAX_PROVIDER_CONTENT_SUMMARY_CHARS)
+        ),
+        trust: "untrusted_provider_content".to_string(),
+    });
+
+    summaries.extend(
+        comments
+            .iter()
+            .filter(|comment| {
+                !comment
+                    .body
+                    .trim_start()
+                    .starts_with(WORKFLOW_CLAIM_COMMENT_PREFIX)
+            })
+            .take(MAX_PROVIDER_COMMENT_SUMMARIES)
+            .map(|comment| ProviderContentSummary {
+                source_ref: comment.comment.url.clone(),
+                author: Some(comment.author_login.clone()),
+                summary: format!(
+                    "Issue comment updated at {}:\n{}",
+                    comment.updated_at.to_rfc3339(),
+                    truncate_provider_text(&comment.body, MAX_PROVIDER_CONTENT_SUMMARY_CHARS)
+                ),
+                trust: "untrusted_provider_content".to_string(),
+            }),
+    );
+
+    summaries
+}
+
+fn truncate_provider_text(text: &str, max_chars: usize) -> String {
+    let text = text.trim();
+    if text.chars().count() <= max_chars {
+        return text.to_string();
+    }
+
+    let truncated = text.chars().take(max_chars).collect::<String>();
+    format!("{truncated}\n[truncated after {max_chars} characters]")
 }
 
 fn ensure_snapshot_matches_request(

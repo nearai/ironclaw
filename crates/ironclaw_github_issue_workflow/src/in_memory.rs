@@ -493,6 +493,9 @@ impl GithubIssueWorkflowRepository for InMemoryGithubIssueWorkflowRepository {
         if let Some(active_block) = input.transition.active_block {
             run.workflow_state.active_block = Some(active_block);
         }
+        if let Some(provider_snapshot) = input.transition.latest_provider_snapshot {
+            run.workflow_state.latest_provider_snapshot = Some(provider_snapshot);
+        }
         if let Some(workspace_session) = input.transition.workspace_session {
             run.workspace_session_id = Some(workspace_session.workspace_session_id);
             run.workflow_state.current_workspace_ref = Some(workspace_session.workspace_ref);

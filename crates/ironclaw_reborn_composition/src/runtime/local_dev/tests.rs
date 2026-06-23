@@ -1066,6 +1066,7 @@ mod tests {
         );
         let factory = LocalDevLoopCapabilityPortFactory {
             runtime,
+            thread_service: Arc::new(InMemorySessionThreadService::default()),
             fallback_user_id: UserId::new("skill-activate-user").expect("user id"),
             policy,
             workspace_mounts: local_runtime.workspace_mounts.clone(),
@@ -1235,6 +1236,7 @@ mod tests {
         let result_writer: Arc<dyn LoopCapabilityResultWriter> = capability_io.clone();
         let factory = LocalDevLoopCapabilityPortFactory {
             runtime,
+            thread_service: Arc::new(InMemorySessionThreadService::default()),
             fallback_user_id: UserId::new("project-create-fallback-user").expect("user id"),
             policy: Arc::clone(&local_runtime.capability_policy),
             workspace_mounts: local_runtime.workspace_mounts.clone(),
@@ -1408,6 +1410,7 @@ mod tests {
         let fallback_user_id = UserId::new("outbound-delivery-fallback-user").expect("user id");
         let factory = LocalDevLoopCapabilityPortFactory {
             runtime,
+            thread_service: Arc::new(InMemorySessionThreadService::default()),
             fallback_user_id: fallback_user_id.clone(),
             policy,
             workspace_mounts: local_runtime.workspace_mounts.clone(),
@@ -1869,6 +1872,7 @@ mod tests {
         let result_writer: Arc<dyn LoopCapabilityResultWriter> = capability_io;
         let factory = LocalDevLoopCapabilityPortFactory {
             runtime,
+            thread_service: Arc::new(InMemorySessionThreadService::default()),
             fallback_user_id: UserId::new("outbound-delivery-fallback-user").expect("user id"),
             policy,
             workspace_mounts: local_runtime.workspace_mounts.clone(),
@@ -1967,6 +1971,7 @@ mod tests {
         let result_writer: Arc<dyn LoopCapabilityResultWriter> = capability_io.clone();
         let factory = LocalDevLoopCapabilityPortFactory {
             runtime,
+            thread_service: Arc::new(InMemorySessionThreadService::default()),
             fallback_user_id: UserId::new("local-yolo-host-user").expect("user id"), // safety: literal test id is valid.
             policy,
             workspace_mounts,
@@ -2195,6 +2200,7 @@ mod tests {
         let result_writer: Arc<dyn LoopCapabilityResultWriter> = capability_io.clone();
         let factory = LocalDevLoopCapabilityPortFactory {
             runtime,
+            thread_service: Arc::new(InMemorySessionThreadService::default()),
             fallback_user_id: UserId::new("local-dev-skill-port-user").expect("user id"), // safety: literal test id is valid.
             policy,
             workspace_mounts,
@@ -2293,6 +2299,7 @@ mod tests {
         let result_writer: Arc<dyn LoopCapabilityResultWriter> = capability_io.clone();
         let factory = LocalDevLoopCapabilityPortFactory {
             runtime,
+            thread_service: Arc::new(InMemorySessionThreadService::default()),
             fallback_user_id: UserId::new("local-dev-no-host-user").expect("user id"), // safety: literal test id is valid.
             policy,
             workspace_mounts,

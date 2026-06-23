@@ -5,6 +5,7 @@ use ironclaw_host_runtime::SHELL_CAPABILITY_ID;
 use ironclaw_loop_support::{
     LoopCapabilityInputResolver, LoopCapabilityPortFactory, LoopCapabilityResultWriter,
 };
+use ironclaw_threads::InMemorySessionThreadService;
 use ironclaw_turns::{
     RunProfileResolutionRequest, RunProfileResolver, TurnId, TurnRunId, TurnScope,
     run_profile::{
@@ -88,6 +89,7 @@ async fn local_dev_yolo_shell_translates_workspace_workdir_without_scoped_mounts
     let result_writer: Arc<dyn LoopCapabilityResultWriter> = capability_io.clone();
     let factory = LocalDevLoopCapabilityPortFactory {
         runtime,
+        thread_service: Arc::new(InMemorySessionThreadService::default()),
         fallback_user_id: UserId::new("local-dev-shell-user").expect("user id"),
         policy,
         workspace_mounts,

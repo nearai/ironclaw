@@ -6,13 +6,14 @@ use serde_json::Value as JsonValue;
 
 use crate::{
     GithubIssueBlockState, GithubIssueProviderActionId, GithubIssueProviderActionRecord,
-    GithubIssueProviderBinding, GithubIssueStage, GithubIssueStageRunId, GithubIssueWorkflowError,
-    GithubIssueWorkflowEvent, GithubIssueWorkflowEventType, GithubIssueWorkflowMode,
-    GithubIssueWorkflowRun, GithubIssueWorkflowRunId, GithubIssueWorkflowRunStatus,
-    GithubIssueWorkspaceSession, GithubProviderAccountRef, GithubProviderRef, GithubPullRequestRef,
-    GithubRepositorySelector, ProviderActionKind, ProviderActionReconciliationStrategy,
-    ProviderActionStatus, WorkflowEventEnvelope, WorkflowIdempotencyKey, WorkflowStepRun,
-    WorkflowStepRunId, WorkflowStepStatus, WorkflowWorkerId,
+    GithubIssueProviderBinding, GithubIssueProviderSnapshotSummary, GithubIssueStage,
+    GithubIssueStageRunId, GithubIssueWorkflowError, GithubIssueWorkflowEvent,
+    GithubIssueWorkflowEventType, GithubIssueWorkflowMode, GithubIssueWorkflowRun,
+    GithubIssueWorkflowRunId, GithubIssueWorkflowRunStatus, GithubIssueWorkspaceSession,
+    GithubProviderAccountRef, GithubProviderRef, GithubPullRequestRef, GithubRepositorySelector,
+    ProviderActionKind, ProviderActionReconciliationStrategy, ProviderActionStatus,
+    WorkflowEventEnvelope, WorkflowIdempotencyKey, WorkflowStepRun, WorkflowStepRunId,
+    WorkflowStepStatus, WorkflowWorkerId,
 };
 
 #[async_trait]
@@ -225,6 +226,7 @@ pub struct WorkflowRunTransition {
     pub mode: Option<GithubIssueWorkflowMode>,
     pub active_block: Option<GithubIssueBlockState>,
     pub clear_active_block: bool,
+    pub latest_provider_snapshot: Option<GithubIssueProviderSnapshotSummary>,
     pub workspace_session: Option<GithubIssueWorkspaceSession>,
     pub primary_pr: Option<GithubPullRequestRef>,
 }

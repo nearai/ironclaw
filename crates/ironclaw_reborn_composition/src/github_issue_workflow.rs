@@ -1,8 +1,14 @@
+use std::collections::BTreeSet;
+use std::path::{Path, PathBuf};
+use std::process::Stdio;
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
+use ironclaw_approvals::{
+    PersistentApprovalAction, PersistentApprovalPolicyInput, PersistentApprovalPolicyStore,
+};
 use ironclaw_github_issue_workflow::{
     AcceptStageResultInput, AcceptStageResultOutcome, CreateDraftPullRequestInput,
     CreateIssueCommentInput, GetAuthenticatedWorkflowActorInput, GetGithubIssueInput,
@@ -24,9 +30,12 @@ use ironclaw_github_issue_workflow::{
     validate_stage_result,
 };
 use ironclaw_host_api::{
-    AgentId, CapabilityId, CapabilitySet, ExecutionContext, ExtensionId, MountView, ProjectId,
-    ResourceEstimate, RuntimeCredentialAccountId, RuntimeCredentialAccountProviderId,
-    RuntimeCredentialAccountSelection, RuntimeKind, TenantId, ThreadId, TrustClass, UserId,
+    AgentId, CapabilityGrant, CapabilityGrantId, CapabilityId, CapabilitySet, CorrelationId,
+    EffectKind, ExecutionContext, ExtensionId, GrantConstraints, InvocationId, MountAlias,
+    MountGrant, MountPermissions, MountView, NetworkPolicy, NetworkScheme, NetworkTargetPattern,
+    Principal, ProjectId, ResourceEstimate, ResourceScope, RuntimeCredentialAccountId,
+    RuntimeCredentialAccountProviderId, RuntimeCredentialAccountSelection, RuntimeKind,
+    SystemServiceId, TenantId, ThreadId, TrustClass, UserId, VirtualPath,
 };
 use ironclaw_host_runtime::{
     FirstPartyCapabilityError, FirstPartyCapabilityHandler, FirstPartyCapabilityRegistry,
@@ -40,6 +49,7 @@ use ironclaw_loop_support::build_spawn_subagent_parameters_schema;
 use ironclaw_loop_support::{
     CapabilityAllowSet, CapabilityResolveError, CapabilitySurfaceProfileResolver,
     SpawnSubagentFlavorDescriptor, SubagentDefinition, SubagentDefinitionResolver, SubagentKindId,
+    loop_driver_execution_extension_id,
 };
 use ironclaw_product_context::InboundClassification;
 use ironclaw_product_workflow::{
@@ -54,8 +64,9 @@ use ironclaw_trust::TrustDecision;
 use ironclaw_trust::{AuthorityCeiling, EffectiveTrustClass, TrustProvenance};
 use ironclaw_turns::{
     AcceptedMessageRef, IdempotencyKey, ProductTurnContext, ReplyTargetBindingRef,
-    RunOriginAdapter, RunProfileRequest, SourceBindingRef, SubmitTurnRequest, SubmitTurnResponse,
-    TurnActor, TurnCoordinator, TurnError, TurnRunId, TurnScope, TurnSurfaceType,
+    RunOriginAdapter, RunProfileRequest, RunProfileResolutionRequest, RunProfileResolver,
+    SourceBindingRef, SubmitTurnRequest, SubmitTurnResponse, TurnActor, TurnCoordinator, TurnError,
+    TurnId, TurnRunId, TurnScope, TurnSurfaceType,
     run_profile::{
         CapabilitySurfaceProfileId, InMemoryRunProfileRegistry, InMemoryRunProfileResolver,
         LoopRunContext, RunProfileDefinition, RunProfileRegistryError,
@@ -63,8 +74,10 @@ use ironclaw_turns::{
 };
 use serde::Deserialize;
 use serde_json::{Value as JsonValue, json};
+use tokio::process::Command;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
+use uuid::Uuid;
 
 const WORKFLOW_ADAPTER_ID: &str = "github_issue_workflow";
 const RESULT_SINK_CAPABILITY_ID: &str =
@@ -90,6 +103,18 @@ const GITHUB_GET_PULL_REQUEST_CAPABILITY_ID: &str = "github.get_pull_request";
 const GITHUB_LIST_PULL_REQUEST_COMMENTS_CAPABILITY_ID: &str = "github.list_pull_request_comments";
 const GITHUB_GET_COMBINED_STATUS_CAPABILITY_ID: &str = "github.get_combined_status";
 const GITHUB_GET_AUTHENTICATED_USER_CAPABILITY_ID: &str = "github.get_authenticated_user";
+const WORKFLOW_GITHUB_CAPABILITY_IDS: &[&str] = &[
+    GITHUB_SEARCH_ISSUES_CAPABILITY_ID,
+    GITHUB_GET_ISSUE_CAPABILITY_ID,
+    GITHUB_LIST_ISSUE_COMMENTS_CAPABILITY_ID,
+    GITHUB_COMMENT_ISSUE_CAPABILITY_ID,
+    GITHUB_LIST_PULL_REQUESTS_CAPABILITY_ID,
+    GITHUB_CREATE_PULL_REQUEST_CAPABILITY_ID,
+    GITHUB_GET_PULL_REQUEST_CAPABILITY_ID,
+    GITHUB_LIST_PULL_REQUEST_COMMENTS_CAPABILITY_ID,
+    GITHUB_GET_COMBINED_STATUS_CAPABILITY_ID,
+    GITHUB_GET_AUTHENTICATED_USER_CAPABILITY_ID,
+];
 const PROJECT_METADATA_GITHUB_ISSUE_WORKFLOW_KEY: &str = "github_issue_workflow";
 const DEFAULT_GITHUB_ISSUE_WORKFLOW_RUN_PROFILE: &str = "default";
 
@@ -138,6 +163,35 @@ const WORKFLOW_SUBAGENT_CAPABILITIES: &[&str] = &[
     GREP_CAPABILITY_ID,
     GLOB_CAPABILITY_ID,
 ];
+
+const WORKFLOW_STAGE_APPROVAL_CAPABILITY_IDS: &[&str] = &[
+    WRITE_FILE_CAPABILITY_ID,
+    APPLY_PATCH_CAPABILITY_ID,
+    SHELL_CAPABILITY_ID,
+];
+
+pub(crate) fn workflow_stage_approval_capability_ids() -> &'static [&'static str] {
+    WORKFLOW_STAGE_APPROVAL_CAPABILITY_IDS
+}
+
+pub(crate) struct GithubIssueWorkflowStageApprovalGrantInput {
+    pub(crate) capability_id: CapabilityId,
+    pub(crate) constraints: GrantConstraints,
+}
+
+pub(crate) struct GithubIssueWorkflowStageApprovalPolicyInput {
+    pub(crate) tenant_id: TenantId,
+    pub(crate) actor_user_id: UserId,
+    pub(crate) agent_id: AgentId,
+    pub(crate) project_id: Option<ProjectId>,
+    pub(crate) grants: Vec<GithubIssueWorkflowStageApprovalGrantInput>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct GithubIssueWorkflowStageApprovalPolicySeed {
+    pub(crate) loop_driver_grantee: ExtensionId,
+    pub(crate) capability_ids: BTreeSet<String>,
+}
 
 #[cfg(any(test, feature = "test-support"))]
 const NON_WORKFLOW_DEFAULT_CAPABILITIES: &[&str] = &[
@@ -313,7 +367,7 @@ impl CapabilitySurfaceProfileResolver for GithubIssueWorkflowCapabilitySurfaceRe
     }
 }
 
-fn is_github_issue_workflow_context(run_context: &LoopRunContext) -> bool {
+pub(crate) fn is_github_issue_workflow_context(run_context: &LoopRunContext) -> bool {
     run_context
         .product_context
         .as_ref()
@@ -394,6 +448,76 @@ fn register_stage_run_profiles(
 
 fn invalid_run_profile(reason: String) -> RunProfileRegistryError {
     RunProfileRegistryError::InvalidProfile { reason }
+}
+
+pub(crate) async fn ensure_github_issue_workflow_stage_approval_policies(
+    policies: Arc<dyn PersistentApprovalPolicyStore>,
+    input: GithubIssueWorkflowStageApprovalPolicyInput,
+) -> Result<GithubIssueWorkflowStageApprovalPolicySeed, GithubIssueWorkflowError> {
+    let loop_driver_grantee = workflow_stage_loop_driver_grantee(&input).await?;
+    let approved_by = Principal::System(
+        SystemServiceId::new(WORKFLOW_ADAPTER_ID).map_err(workflow_invalid_config)?,
+    );
+    let scope = ResourceScope {
+        tenant_id: input.tenant_id,
+        user_id: input.actor_user_id,
+        agent_id: Some(input.agent_id),
+        project_id: input.project_id,
+        mission_id: None,
+        thread_id: None,
+        invocation_id: InvocationId::new(),
+    };
+    let mut capability_ids = BTreeSet::new();
+    for grant in input.grants {
+        let capability_id = grant.capability_id;
+        capability_ids.insert(capability_id.as_str().to_string());
+        policies
+            .allow(PersistentApprovalPolicyInput {
+                scope: scope.clone(),
+                action: PersistentApprovalAction::Dispatch,
+                capability_id,
+                grantee: Principal::Extension(loop_driver_grantee.clone()),
+                approved_by: approved_by.clone(),
+                constraints: grant.constraints,
+                source_approval_request_id: None,
+            })
+            .await
+            .map_err(|error| GithubIssueWorkflowError::Repository {
+                reason: format!("workflow stage approval policy seed failed: {error}"),
+            })?;
+    }
+    Ok(GithubIssueWorkflowStageApprovalPolicySeed {
+        loop_driver_grantee,
+        capability_ids,
+    })
+}
+
+pub(crate) async fn workflow_stage_loop_driver_grantee(
+    input: &GithubIssueWorkflowStageApprovalPolicyInput,
+) -> Result<ExtensionId, GithubIssueWorkflowError> {
+    let resolver = planned_run_profile_resolver_with_stage_profiles()
+        .map_err(|error| workflow_invalid_config(error.to_string()))?;
+    let requested_run_profile = RunProfileRequest::new(GITHUB_BUG_IMPLEMENTATION_PROFILE_ID)
+        .map_err(workflow_invalid_config)?;
+    let resolved = resolver
+        .resolve_run_profile(
+            RunProfileResolutionRequest::interactive_default()
+                .with_requested_run_profile(requested_run_profile),
+        )
+        .await
+        .map_err(|error| workflow_invalid_config(error.to_string()))?;
+    let thread_id =
+        ThreadId::new("github-issue-workflow-approval-seed").map_err(workflow_invalid_config)?;
+    let scope = TurnScope::new_with_owner(
+        input.tenant_id.clone(),
+        Some(input.agent_id.clone()),
+        input.project_id.clone(),
+        thread_id,
+        Some(input.actor_user_id.clone()),
+    );
+    let run_context = LoopRunContext::new(scope, TurnId::new(), TurnRunId::new(), resolved)
+        .with_actor(TurnActor::new(input.actor_user_id.clone()));
+    loop_driver_execution_extension_id(&run_context).map_err(workflow_invalid_config)
 }
 
 #[derive(Default)]
@@ -1369,8 +1493,10 @@ pub(crate) struct GithubIssueWorkflowRuntimeDeps {
     pub(crate) workspace_manager: Arc<dyn WorkflowWorkspaceManager>,
     pub(crate) thread_service: Arc<dyn SessionThreadService>,
     pub(crate) turn_coordinator: Arc<dyn TurnCoordinator>,
+    pub(crate) tenant_id: TenantId,
     pub(crate) actor_user_id: UserId,
     pub(crate) default_agent_id: AgentId,
+    pub(crate) default_project_id: Option<ProjectId>,
 }
 
 pub(crate) fn spawn_github_issue_workflow(
@@ -1391,8 +1517,10 @@ pub(crate) fn spawn_github_issue_workflow(
         workspace_manager,
         thread_service,
         turn_coordinator,
+        tenant_id,
         actor_user_id,
         default_agent_id,
+        default_project_id,
     } = deps;
     let sink: Arc<dyn WorkflowStageResultSink> =
         Arc::new(GithubWorkflowStageResultSink::new(Arc::clone(&repository)));
@@ -1404,7 +1532,12 @@ pub(crate) fn spawn_github_issue_workflow(
 
     let dispatcher = Arc::new(HostRuntimeGithubIssueWorkflowCapabilityDispatcher::new(
         host_runtime,
-        workflow_execution_context(actor_user_id.clone())?,
+        workflow_execution_context(
+            tenant_id,
+            actor_user_id.clone(),
+            default_agent_id.clone(),
+            default_project_id,
+        )?,
         workflow_trust_decision(),
     ));
     let github_port = Arc::new(IronClawGithubIssueWorkflowPort::new(
@@ -1516,29 +1649,113 @@ async fn sleep_or_cancel(delay: Duration, cancel: &CancellationToken) -> bool {
 }
 
 fn workflow_execution_context(
+    tenant_id: TenantId,
     owner_user_id: UserId,
+    agent_id: AgentId,
+    project_id: Option<ProjectId>,
 ) -> Result<ExecutionContext, GithubIssueWorkflowError> {
-    ExecutionContext::local_default(
-        owner_user_id,
-        ExtensionId::new("github_issue_workflow").map_err(workflow_invalid_config)?,
-        RuntimeKind::FirstParty,
-        TrustClass::FirstParty,
-        CapabilitySet::default(),
-        MountView::default(),
-    )
-    .map_err(workflow_invalid_config)
+    let invocation_id = InvocationId::new();
+    let extension_id = ExtensionId::new(WORKFLOW_ADAPTER_ID).map_err(workflow_invalid_config)?;
+    let resource_scope = ResourceScope {
+        tenant_id: tenant_id.clone(),
+        user_id: owner_user_id.clone(),
+        agent_id: Some(agent_id.clone()),
+        project_id: project_id.clone(),
+        mission_id: None,
+        thread_id: None,
+        invocation_id,
+    };
+    let context = ExecutionContext {
+        invocation_id,
+        correlation_id: CorrelationId::new(),
+        process_id: None,
+        parent_process_id: None,
+        tenant_id,
+        user_id: owner_user_id,
+        agent_id: Some(agent_id),
+        project_id,
+        mission_id: None,
+        thread_id: None,
+        extension_id: extension_id.clone(),
+        runtime: RuntimeKind::FirstParty,
+        trust: TrustClass::FirstParty,
+        grants: workflow_capability_grants(&extension_id)?,
+        mounts: MountView::default(),
+        resource_scope,
+    };
+    context.validate().map_err(workflow_invalid_config)?;
+    Ok(context)
 }
 
 fn workflow_trust_decision() -> TrustDecision {
     TrustDecision {
         effective_trust: EffectiveTrustClass::user_trusted(),
         authority_ceiling: AuthorityCeiling {
-            allowed_effects: vec![ironclaw_host_api::EffectKind::DispatchCapability],
+            allowed_effects: workflow_authority_effects(),
             max_resource_ceiling: None,
         },
         provenance: TrustProvenance::Default,
         evaluated_at: Utc::now(),
     }
+}
+
+fn workflow_capability_grants(
+    grantee: &ExtensionId,
+) -> Result<CapabilitySet, GithubIssueWorkflowError> {
+    let grants = WORKFLOW_GITHUB_CAPABILITY_IDS
+        .iter()
+        .map(|capability_id| {
+            Ok(CapabilityGrant {
+                id: CapabilityGrantId::new(),
+                capability: CapabilityId::new(*capability_id).map_err(workflow_invalid_config)?,
+                grantee: Principal::Extension(grantee.clone()),
+                issued_by: ironclaw_approvals::persistent_approval_grant_issuer(),
+                constraints: GrantConstraints {
+                    allowed_effects: workflow_capability_effects(*capability_id),
+                    mounts: MountView::default(),
+                    network: workflow_github_network_policy(),
+                    secrets: Vec::new(),
+                    resource_ceiling: None,
+                    expires_at: None,
+                    max_invocations: None,
+                },
+            })
+        })
+        .collect::<Result<Vec<_>, GithubIssueWorkflowError>>()?;
+    Ok(CapabilitySet { grants })
+}
+
+fn workflow_github_network_policy() -> NetworkPolicy {
+    NetworkPolicy {
+        allowed_targets: vec![NetworkTargetPattern {
+            scheme: Some(NetworkScheme::Https),
+            host_pattern: "api.github.com".to_string(),
+            port: None,
+        }],
+        deny_private_ip_ranges: true,
+        max_egress_bytes: None,
+    }
+}
+
+fn workflow_capability_effects(capability_id: &str) -> Vec<EffectKind> {
+    match capability_id {
+        GITHUB_COMMENT_ISSUE_CAPABILITY_ID | GITHUB_CREATE_PULL_REQUEST_CAPABILITY_ID => vec![
+            EffectKind::DispatchCapability,
+            EffectKind::Network,
+            EffectKind::UseSecret,
+            EffectKind::ExternalWrite,
+        ],
+        _ => vec![EffectKind::Network, EffectKind::UseSecret],
+    }
+}
+
+fn workflow_authority_effects() -> Vec<EffectKind> {
+    vec![
+        EffectKind::DispatchCapability,
+        EffectKind::Network,
+        EffectKind::UseSecret,
+        EffectKind::ExternalWrite,
+    ]
 }
 
 fn workflow_invalid_config(error: impl std::fmt::Display) -> GithubIssueWorkflowError {
@@ -1641,8 +1858,12 @@ pub(crate) fn project_service_github_issue_workflow_project_access(
     Arc::new(ProjectServiceWorkflowProjectAccess { project_service })
 }
 
-pub(crate) fn runtime_workflow_workspace_manager() -> Arc<dyn WorkflowWorkspaceManager> {
-    Arc::new(RuntimeWorkflowWorkspaceManager)
+pub(crate) fn runtime_workflow_workspace_manager(
+    local_dev_storage_root: PathBuf,
+) -> Arc<dyn WorkflowWorkspaceManager> {
+    Arc::new(RuntimeWorkflowWorkspaceManager {
+        local_dev_storage_root,
+    })
 }
 
 struct SystemWorkflowClock;
@@ -1878,7 +2099,13 @@ impl WorkflowProjectAccess for UnconfiguredWorkflowProjectAccess {
     }
 }
 
-struct RuntimeWorkflowWorkspaceManager;
+const GITHUB_ISSUE_WORKFLOW_WORKSPACES_STORAGE_DIR: &str = "github-issue-workspaces";
+const GITHUB_ISSUE_WORKFLOW_WORKSPACES_VIRTUAL_ROOT: &str = "/projects/github-issue-workspaces";
+const WORKFLOW_WORKSPACE_GIT_TIMEOUT: Duration = Duration::from_secs(300);
+
+struct RuntimeWorkflowWorkspaceManager {
+    local_dev_storage_root: PathBuf,
+}
 
 #[async_trait]
 impl WorkflowWorkspaceManager for RuntimeWorkflowWorkspaceManager {
@@ -1887,6 +2114,50 @@ impl WorkflowWorkspaceManager for RuntimeWorkflowWorkspaceManager {
         request: PrepareWorkflowWorkspaceRequest,
     ) -> Result<PrepareWorkflowWorkspaceOutcome, GithubIssueWorkflowError> {
         let workspace_session_id = GithubIssueWorkspaceSessionId::new();
+        let repository =
+            GithubRepositorySelector::new(request.issue.owner.clone(), request.issue.repo.clone())?;
+        let clone_url = workflow_repository_clone_url(&repository)?;
+        let workspace_host_path =
+            workflow_workspace_host_path(&self.local_dev_storage_root, &workspace_session_id);
+        let workspaces_root =
+            workspace_host_path
+                .parent()
+                .ok_or_else(|| GithubIssueWorkflowError::Repository {
+                    reason: "workflow workspace path has no parent directory".to_string(),
+                })?;
+        tokio::fs::create_dir_all(workspaces_root)
+            .await
+            .map_err(|error| GithubIssueWorkflowError::Repository {
+                reason: format!("failed to create workflow workspace root: {error}"),
+            })?;
+        run_workflow_git_command(
+            None,
+            &[
+                "clone",
+                "--no-tags",
+                "--depth",
+                "1",
+                "--branch",
+                &request.base_branch,
+                &clone_url,
+                workspace_host_path.to_str().ok_or_else(|| {
+                    GithubIssueWorkflowError::Repository {
+                        reason: "workflow workspace path is not valid UTF-8".to_string(),
+                    }
+                })?,
+            ],
+        )
+        .await?;
+        let base_sha =
+            run_workflow_git_command(Some(&workspace_host_path), &["rev-parse", "HEAD"]).await?;
+        let working_branch = workflow_working_branch(&request.issue, &request.workflow_run_id);
+        run_workflow_git_command(
+            Some(&workspace_host_path),
+            &["checkout", "-B", &working_branch],
+        )
+        .await?;
+        let current_head_sha =
+            run_workflow_git_command(Some(&workspace_host_path), &["rev-parse", "HEAD"]).await?;
         let workspace_ref = WorkflowWorkspaceRef {
             thread_id: None,
             workspace_session_id: Some(workspace_session_id.clone()),
@@ -1900,19 +2171,123 @@ impl WorkflowWorkspaceManager for RuntimeWorkflowWorkspaceManager {
             session: GithubIssueWorkspaceSession {
                 workspace_session_id,
                 workflow_run_id: request.workflow_run_id.clone(),
-                repository: GithubRepositorySelector::new(
-                    request.issue.owner.clone(),
-                    request.issue.repo.clone(),
-                )?,
+                repository,
                 base_branch: request.base_branch,
-                base_sha: None,
-                working_branch: workflow_working_branch(&request.issue, &request.workflow_run_id),
-                current_head_sha: None,
+                base_sha: Some(base_sha),
+                working_branch,
+                current_head_sha: Some(current_head_sha),
                 workspace_ref,
                 mount_ref,
                 created_at: request.requested_at,
             },
         })
+    }
+}
+
+fn workflow_workspace_host_path(
+    local_dev_storage_root: &Path,
+    workspace_session_id: &GithubIssueWorkspaceSessionId,
+) -> PathBuf {
+    local_dev_storage_root
+        .join(GITHUB_ISSUE_WORKFLOW_WORKSPACES_STORAGE_DIR)
+        .join(workspace_session_id.as_str())
+}
+
+fn workflow_workspace_virtual_root(
+    workspace_session_id: &GithubIssueWorkspaceSessionId,
+) -> Result<VirtualPath, GithubIssueWorkflowError> {
+    VirtualPath::new(format!(
+        "{GITHUB_ISSUE_WORKFLOW_WORKSPACES_VIRTUAL_ROOT}/{}",
+        workspace_session_id.as_str()
+    ))
+    .map_err(|error| GithubIssueWorkflowError::Policy {
+        reason: format!("invalid workflow workspace virtual root: {error}"),
+    })
+}
+
+fn workflow_workspace_mount_view(
+    workspace_session_id: &GithubIssueWorkspaceSessionId,
+    alias: &str,
+) -> Result<MountView, GithubIssueWorkflowError> {
+    MountView::new(vec![MountGrant::new(
+        MountAlias::new(alias.to_string()).map_err(|error| GithubIssueWorkflowError::Policy {
+            reason: format!("invalid workflow workspace mount alias: {error}"),
+        })?,
+        workflow_workspace_virtual_root(workspace_session_id)?,
+        MountPermissions::read_write(),
+    )])
+    .map_err(|error| GithubIssueWorkflowError::Policy {
+        reason: format!("invalid workflow workspace mount view: {error}"),
+    })
+}
+
+fn workflow_repository_clone_url(
+    repository: &GithubRepositorySelector,
+) -> Result<String, GithubIssueWorkflowError> {
+    validate_github_url_component("repository owner", &repository.owner)?;
+    validate_github_url_component("repository name", &repository.repo)?;
+    Ok(format!(
+        "https://github.com/{}/{}.git",
+        repository.owner, repository.repo
+    ))
+}
+
+fn validate_github_url_component(label: &str, value: &str) -> Result<(), GithubIssueWorkflowError> {
+    if value.is_empty() || value == "." || value == ".." {
+        return Err(GithubIssueWorkflowError::InvalidConfig {
+            reason: format!("{label} is not a safe GitHub URL component"),
+        });
+    }
+    if !value
+        .chars()
+        .all(|character| character.is_ascii_alphanumeric() || matches!(character, '-' | '_' | '.'))
+    {
+        return Err(GithubIssueWorkflowError::InvalidConfig {
+            reason: format!("{label} contains characters that are not safe in a GitHub URL"),
+        });
+    }
+    Ok(())
+}
+
+async fn run_workflow_git_command(
+    current_dir: Option<&Path>,
+    args: &[&str],
+) -> Result<String, GithubIssueWorkflowError> {
+    let mut command = Command::new("git");
+    command.args(args).stdin(Stdio::null()).kill_on_drop(true);
+    if let Some(current_dir) = current_dir {
+        command.current_dir(current_dir);
+    }
+    let output = tokio::time::timeout(WORKFLOW_WORKSPACE_GIT_TIMEOUT, command.output())
+        .await
+        .map_err(|_| GithubIssueWorkflowError::Repository {
+            reason: "git command timed out while preparing workflow workspace".to_string(),
+        })?
+        .map_err(|error| GithubIssueWorkflowError::Repository {
+            reason: format!("failed to run git while preparing workflow workspace: {error}"),
+        })?;
+    if !output.status.success() {
+        return Err(GithubIssueWorkflowError::Repository {
+            reason: format!(
+                "git command failed while preparing workflow workspace: {}",
+                workflow_command_stderr_summary(&output.stderr)
+            ),
+        });
+    }
+    String::from_utf8(output.stdout)
+        .map(|value| value.trim().to_string())
+        .map_err(|error| GithubIssueWorkflowError::Repository {
+            reason: format!("git output was not valid UTF-8: {error}"),
+        })
+}
+
+fn workflow_command_stderr_summary(stderr: &[u8]) -> String {
+    let text = String::from_utf8_lossy(stderr);
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        "<no stderr>".to_string()
+    } else {
+        trimmed.chars().take(1000).collect()
     }
 }
 
@@ -1965,6 +2340,8 @@ mod project_metadata_github_issue_workflow_config_source_tests {
     use super::{
         IronClawGithubIssueWorkflowPollerPorts, ProjectMetadataGithubIssueWorkflowConfigSource,
         ProjectServiceWorkflowProjectAccess, RuntimeWorkflowWorkspaceManager, git_branch_component,
+        test_only_unconfigured_workspace_manager,
+        workflow_stage_workspace_mount_view_from_thread_metadata,
     };
     use async_trait::async_trait;
     use chrono::Utc;
@@ -2171,7 +2548,7 @@ mod project_metadata_github_issue_workflow_config_source_tests {
                 project_access: access,
                 repository: Arc::new(InMemoryGithubIssueWorkflowRepository::default()),
                 stage_turn_submitter: Arc::new(NoopStageTurnSubmitter),
-                workspace_manager: Arc::new(RuntimeWorkflowWorkspaceManager),
+                workspace_manager: test_only_unconfigured_workspace_manager(),
                 worker_id: WorkflowWorkerId::new(),
             },
             GithubIssueWorkflowPollerConfig {
@@ -2243,9 +2620,12 @@ mod project_metadata_github_issue_workflow_config_source_tests {
     }
 
     #[tokio::test]
-    async fn runtime_workspace_manager_uses_virtual_workspace_mount_only() {
-        let manager = RuntimeWorkflowWorkspaceManager;
-        let outcome = manager
+    async fn runtime_workspace_manager_rejects_unsafe_repository_components_before_git() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let manager = RuntimeWorkflowWorkspaceManager {
+            local_dev_storage_root: root.path().to_path_buf(),
+        };
+        let error = manager
             .prepare_workspace(PrepareWorkflowWorkspaceRequest {
                 tenant_id: TenantId::new("workflow-tenant").expect("tenant"),
                 creator_user_id: UserId::new("workflow-owner").expect("user"),
@@ -2257,7 +2637,7 @@ mod project_metadata_github_issue_workflow_config_source_tests {
                     )
                     .expect("workflow run"),
                 issue: GithubIssueRef {
-                    owner: "near".to_string(),
+                    owner: "near/evil".to_string(),
                     repo: "ironclaw".to_string(),
                     number: 42,
                     node_id: None,
@@ -2268,21 +2648,38 @@ mod project_metadata_github_issue_workflow_config_source_tests {
                 requested_at: Utc::now(),
             })
             .await
-            .expect("workspace prepares");
+            .expect_err("unsafe repository owner should fail before git clone");
 
-        assert_eq!(outcome.session.mount_ref.alias, "/workspace");
+        assert!(matches!(
+            error,
+            GithubIssueWorkflowError::InvalidConfig { ref reason }
+                if reason.contains("repository owner")
+        ));
+        assert!(!root.path().join("github-issue-workspaces").exists());
+    }
+
+    #[test]
+    fn workflow_stage_workspace_metadata_builds_session_mount_view() {
+        let metadata = json!({
+            "kind": "github_issue_workflow_stage",
+            "workspace_mount_ref": {
+                "mount_id": "11111111-1111-4111-8111-111111111111",
+                "alias": "/workspace"
+            }
+        })
+        .to_string();
+
+        let mounts = workflow_stage_workspace_mount_view_from_thread_metadata(&metadata)
+            .expect("metadata parses")
+            .expect("workflow mount view");
+
+        assert_eq!(mounts.mounts.len(), 1);
+        assert_eq!(mounts.mounts[0].alias.as_str(), "/workspace");
         assert_eq!(
-            outcome.session.workspace_ref.workspace_session_id.as_ref(),
-            Some(&outcome.session.workspace_session_id)
+            mounts.mounts[0].target.as_str(),
+            "/projects/github-issue-workspaces/11111111-1111-4111-8111-111111111111"
         );
-        assert!(outcome.session.workspace_ref.thread_id.is_none());
-        assert!(outcome.session.workspace_ref.turn_run_id.is_none());
-        assert!(
-            outcome
-                .session
-                .working_branch
-                .starts_with("ironclaw/github-bug/near-ironclaw-issue-42-workflow-run")
-        );
+        assert!(mounts.mounts[0].permissions.write);
     }
 
     #[test]
@@ -2550,6 +2947,23 @@ impl HostRuntimeGithubIssueWorkflowCapabilityDispatcher {
             estimate: ResourceEstimate::default(),
         }
     }
+
+    fn fresh_execution_context(
+        &self,
+    ) -> Result<ExecutionContext, GithubIssueWorkflowCapabilityDispatchError> {
+        let mut context = self.execution_context.clone();
+        let invocation_id = InvocationId::new();
+        context.invocation_id = invocation_id;
+        context.correlation_id = CorrelationId::new();
+        context.resource_scope.invocation_id = invocation_id;
+        context.validate().map_err(|error| {
+            GithubIssueWorkflowCapabilityDispatchError::Backend {
+                kind: "invalid_execution_context".to_string(),
+                message: error.to_string(),
+            }
+        })?;
+        Ok(context)
+    }
 }
 
 #[async_trait]
@@ -2583,7 +2997,7 @@ impl GithubIssueWorkflowCapabilityDispatcher
                     },
                 )?;
         let runtime_request = RuntimeCapabilityRequest::new(
-            self.execution_context.clone(),
+            self.fresh_execution_context()?,
             capability_id.clone(),
             self.estimate.clone(),
             request.input,
@@ -3631,10 +4045,57 @@ fn stage_thread_metadata(
         "prompt_version": request.prompt.content_ref.prompt_version.as_str(),
         "input_snapshot_hash": request.prompt.content_ref.input_snapshot_hash.as_str(),
         "prompt_content_hash": request.prompt.content_hash.as_str(),
+        "workspace_mount_ref": request.workspace_mount_ref.as_ref().map(|mount| json!({
+            "mount_id": mount.mount_id.as_str(),
+            "alias": mount.alias.as_str(),
+        })),
     }))
     .map_err(|error| GithubIssueWorkflowError::Policy {
         reason: format!("failed to serialize stage thread metadata: {error}"),
     })
+}
+
+pub(crate) fn workflow_stage_workspace_mount_view_from_thread_metadata(
+    metadata_json: &str,
+) -> Result<Option<MountView>, GithubIssueWorkflowError> {
+    let metadata: JsonValue =
+        serde_json::from_str(metadata_json).map_err(|error| GithubIssueWorkflowError::Policy {
+            reason: format!("failed to parse GitHub issue workflow stage metadata: {error}"),
+        })?;
+    if metadata.get("kind").and_then(JsonValue::as_str) != Some("github_issue_workflow_stage") {
+        return Ok(None);
+    }
+    let Some(mount_ref) = metadata.get("workspace_mount_ref") else {
+        return Ok(None);
+    };
+    if mount_ref.is_null() {
+        return Ok(None);
+    }
+    let mount_id = mount_ref
+        .get("mount_id")
+        .and_then(JsonValue::as_str)
+        .ok_or_else(|| GithubIssueWorkflowError::Policy {
+            reason: "GitHub issue workflow stage metadata is missing workspace mount_id"
+                .to_string(),
+        })?;
+    let alias = mount_ref
+        .get("alias")
+        .and_then(JsonValue::as_str)
+        .ok_or_else(|| GithubIssueWorkflowError::Policy {
+            reason: "GitHub issue workflow stage metadata is missing workspace mount alias"
+                .to_string(),
+        })?;
+    if alias != crate::local_dev_mounts::WORKSPACE_ALIAS {
+        return Err(GithubIssueWorkflowError::Policy {
+            reason: "GitHub issue workflow stage workspace mount alias is not /workspace"
+                .to_string(),
+        });
+    }
+    Uuid::parse_str(mount_id).map_err(|error| GithubIssueWorkflowError::Policy {
+        reason: format!("GitHub issue workflow workspace mount id is not a UUID: {error}"),
+    })?;
+    let workspace_session_id = GithubIssueWorkspaceSessionId::from_trusted(mount_id.to_string())?;
+    workflow_workspace_mount_view(&workspace_session_id, alias).map(Some)
 }
 
 fn map_thread_error(error: SessionThreadError) -> GithubIssueWorkflowError {
@@ -3658,17 +4119,21 @@ fn invalid_ref(error: impl std::fmt::Display) -> GithubIssueWorkflowError {
 #[cfg(test)]
 mod github_issue_workflow_provider_runtime_contract_tests {
     use std::sync::{Arc, Mutex};
+    use std::time::Duration;
 
     use async_trait::async_trait;
     use chrono::Utc;
     use ironclaw_github_issue_workflow::{
-        GithubIssueRef, GithubIssueWorkflowError, GithubIssueWorkflowPort,
-        GithubIssueWorkflowRunId, GithubProviderAccountRef, PrepareWorkflowWorkspaceRequest,
-        SearchGithubIssuesInput, WorkflowWorkspaceManager,
+        GithubIssueCandidateSelector, GithubIssueRef, GithubIssueWorkflowConfig,
+        GithubIssueWorkflowConfigSource, GithubIssueWorkflowError, GithubIssueWorkflowPort,
+        GithubIssueWorkflowRunId, GithubProviderAccountRef, GithubRepositorySelector,
+        PrepareWorkflowWorkspaceRequest, SearchGithubIssuesInput, WorkflowConfigAccessRequest,
+        WorkflowProjectAccess, WorkflowProjectAccessRequest, WorkflowWorkspaceManager,
     };
     use ironclaw_host_api::{
-        AgentId, CapabilitySet, EffectKind, ExecutionContext, ExtensionId, MountView, ProjectId,
-        ResourceUsage, RuntimeKind, TenantId, TrustClass, UserId,
+        AgentId, CapabilitySet, EffectKind, ExecutionContext, ExtensionId, MountView,
+        NetworkScheme, NetworkTargetPattern, ProjectId, ResourceUsage, RuntimeKind, TenantId,
+        TrustClass, UserId,
     };
     use ironclaw_host_runtime::{
         CancelRuntimeWorkOutcome, CancelRuntimeWorkRequest, HostRuntime, HostRuntimeError,
@@ -3677,10 +4142,18 @@ mod github_issue_workflow_provider_runtime_contract_tests {
         RuntimeCapabilityResumeRequest, RuntimeStatusRequest, VisibleCapabilityRequest,
         VisibleCapabilitySurface,
     };
+    use ironclaw_threads::InMemorySessionThreadService;
     use ironclaw_trust::{AuthorityCeiling, EffectiveTrustClass, TrustDecision, TrustProvenance};
+    use ironclaw_turns::{
+        CancelRunRequest, CancelRunResponse, GetRunStateRequest, ResumeTurnRequest,
+        ResumeTurnResponse, SubmitTurnRequest, SubmitTurnResponse, TurnCoordinator, TurnError,
+        TurnRunId, TurnRunState, TurnScope,
+    };
+    use tokio::sync::Notify;
 
     use super::{
-        HostRuntimeGithubIssueWorkflowCapabilityDispatcher, IronClawGithubIssueWorkflowPort,
+        GithubIssueWorkflowRuntimeDeps, HostRuntimeGithubIssueWorkflowCapabilityDispatcher,
+        IronClawGithubIssueWorkflowPort, WorkflowStageResultSinkSlot, spawn_github_issue_workflow,
     };
 
     #[tokio::test]
@@ -3765,22 +4238,200 @@ mod github_issue_workflow_provider_runtime_contract_tests {
         assert_eq!(selection.account_id.as_str(), "input-account");
     }
 
+    #[tokio::test]
+    async fn host_runtime_github_issue_workflow_provider_dispatcher_mints_invocation_per_call() {
+        let host_runtime = Arc::new(RecordingHostRuntime::with_output(serde_json::json!([])));
+        let port: Arc<dyn GithubIssueWorkflowPort> =
+            Arc::new(IronClawGithubIssueWorkflowPort::new(
+                provider_account("configured-account"),
+                Arc::new(HostRuntimeGithubIssueWorkflowCapabilityDispatcher::new(
+                    host_runtime.clone(),
+                    execution_context_for_test(),
+                    trust_decision_for_test(),
+                )),
+            ));
+
+        for _ in 0..2 {
+            port.search_open_bug_issues(SearchGithubIssuesInput {
+                provider_account_ref: provider_account("input-account"),
+                owner: "nearai".to_string(),
+                repo: "ironclaw".to_string(),
+                query: "repo:nearai/ironclaw is:issue state:open label:bug".to_string(),
+                limit: 5,
+            })
+            .await
+            .expect("production-shaped dispatch should invoke host runtime");
+        }
+
+        let requests = host_runtime.take_requests();
+        assert_eq!(requests.len(), 2);
+        assert_ne!(
+            requests[0].context.invocation_id, requests[1].context.invocation_id,
+            "background workflow capability dispatches must not reuse run-state ids"
+        );
+        assert_ne!(
+            requests[0].context.resource_scope.invocation_id,
+            requests[1].context.resource_scope.invocation_id,
+            "resource scope invocation ids must stay aligned and fresh"
+        );
+    }
+
+    #[tokio::test]
+    async fn spawned_github_issue_workflow_dispatches_with_reborn_owner_scope() {
+        let host_runtime = Arc::new(RecordingHostRuntime::with_output(serde_json::json!([])));
+        let handle = spawn_github_issue_workflow(
+            crate::runtime_input::GithubIssueWorkflowSettings::enabled_for_tests(),
+            GithubIssueWorkflowRuntimeDeps {
+                repository: Arc::new(
+                    ironclaw_github_issue_workflow::InMemoryGithubIssueWorkflowRepository::default(
+                    ),
+                ),
+                stage_result_sink_slot: Arc::new(WorkflowStageResultSinkSlot::new()),
+                host_runtime: host_runtime.clone(),
+                configured_provider_account_ref: provider_account("runtime-account"),
+                config_source: Arc::new(StaticWorkflowConfigSource {
+                    configs: vec![GithubIssueWorkflowConfig {
+                        tenant_id: TenantId::new("workflow-tenant").unwrap(),
+                        project_id: ProjectId::new("workflow-project").unwrap(),
+                        owner_user_id: UserId::new("workflow-owner").unwrap(),
+                        repositories: vec![
+                            GithubRepositorySelector::new("nearai", "ironclaw").unwrap(),
+                        ],
+                        candidate_selector: GithubIssueCandidateSelector::default(),
+                        max_active_runs_per_repo: 1,
+                        default_run_profile: "github-bug-workflow-v1".to_string(),
+                        provider_account_ref: provider_account("runtime-account"),
+                    }],
+                }),
+                project_access: Arc::new(AllowWorkflowProjectAccess),
+                workspace_manager: super::test_only_unconfigured_workspace_manager(),
+                thread_service: Arc::new(InMemorySessionThreadService::default()),
+                turn_coordinator: Arc::new(PanicTurnCoordinator),
+                tenant_id: TenantId::new("workflow-tenant").unwrap(),
+                actor_user_id: UserId::new("workflow-owner").unwrap(),
+                default_agent_id: AgentId::new("workflow-agent").unwrap(),
+                default_project_id: Some(ProjectId::new("workflow-project").unwrap()),
+            },
+        )
+        .expect("workflow spawn should be configured")
+        .expect("enabled workflow should spawn");
+
+        let request = host_runtime.wait_for_request().await;
+        handle.shutdown(Duration::from_secs(1)).await;
+
+        assert_eq!(request.context.tenant_id.as_str(), "workflow-tenant");
+        assert_eq!(request.context.user_id.as_str(), "workflow-owner");
+        assert_eq!(
+            request
+                .context
+                .agent_id
+                .as_ref()
+                .map(|agent_id| agent_id.as_str()),
+            Some("workflow-agent")
+        );
+        assert_eq!(
+            request
+                .context
+                .project_id
+                .as_ref()
+                .map(|project_id| project_id.as_str()),
+            Some("workflow-project")
+        );
+        assert_eq!(
+            request.context.resource_scope.tenant_id.as_str(),
+            "workflow-tenant"
+        );
+        assert_eq!(
+            request.context.resource_scope.user_id.as_str(),
+            "workflow-owner"
+        );
+        assert_eq!(
+            request
+                .context
+                .resource_scope
+                .agent_id
+                .as_ref()
+                .map(|agent_id| agent_id.as_str()),
+            Some("workflow-agent")
+        );
+        assert_eq!(
+            request
+                .context
+                .resource_scope
+                .project_id
+                .as_ref()
+                .map(|project_id| project_id.as_str()),
+            Some("workflow-project")
+        );
+        let search_grant = request
+            .context
+            .grants
+            .grants
+            .iter()
+            .find(|grant| grant.capability.as_str() == "github.search_issues")
+            .expect("workflow context should grant GitHub issue search");
+        assert!(
+            search_grant
+                .constraints
+                .allowed_effects
+                .contains(&EffectKind::Network)
+        );
+        assert!(
+            search_grant
+                .constraints
+                .allowed_effects
+                .contains(&EffectKind::UseSecret)
+        );
+        assert_eq!(
+            search_grant.constraints.network.allowed_targets,
+            vec![NetworkTargetPattern {
+                scheme: Some(NetworkScheme::Https),
+                host_pattern: "api.github.com".to_string(),
+                port: None,
+            }]
+        );
+        assert!(search_grant.constraints.network.deny_private_ip_ranges);
+        assert_eq!(
+            search_grant.issued_by,
+            ironclaw_approvals::persistent_approval_grant_issuer()
+        );
+    }
+
     #[derive(Debug)]
     struct RecordingHostRuntime {
         output: serde_json::Value,
-        request: Mutex<Option<RuntimeCapabilityRequest>>,
+        requests: Mutex<Vec<RuntimeCapabilityRequest>>,
+        notify: Notify,
     }
 
     impl RecordingHostRuntime {
         fn with_output(output: serde_json::Value) -> Self {
             Self {
                 output,
-                request: Mutex::new(None),
+                requests: Mutex::new(Vec::new()),
+                notify: Notify::new(),
             }
         }
 
         fn take_request(&self) -> Option<RuntimeCapabilityRequest> {
-            self.request.lock().expect("request mutex").take()
+            self.requests.lock().expect("request mutex").pop()
+        }
+
+        fn take_requests(&self) -> Vec<RuntimeCapabilityRequest> {
+            std::mem::take(&mut *self.requests.lock().expect("request mutex"))
+        }
+
+        async fn wait_for_request(&self) -> RuntimeCapabilityRequest {
+            tokio::time::timeout(Duration::from_secs(2), async {
+                loop {
+                    if let Some(request) = self.take_request() {
+                        return request;
+                    }
+                    self.notify.notified().await;
+                }
+            })
+            .await
+            .expect("host runtime request should be captured")
         }
     }
 
@@ -3790,7 +4441,11 @@ mod github_issue_workflow_provider_runtime_contract_tests {
             &self,
             request: RuntimeCapabilityRequest,
         ) -> Result<RuntimeCapabilityOutcome, HostRuntimeError> {
-            *self.request.lock().expect("request mutex") = Some(request.clone());
+            self.requests
+                .lock()
+                .expect("request mutex")
+                .push(request.clone());
+            self.notify.notify_waiters();
             Ok(RuntimeCapabilityOutcome::Completed(Box::new(
                 RuntimeCapabilityCompleted {
                     capability_id: request.capability_id,
@@ -3869,6 +4524,75 @@ mod github_issue_workflow_provider_runtime_contract_tests {
         GithubProviderAccountRef {
             provider: "github".to_string(),
             account_id: account_id.to_string(),
+        }
+    }
+
+    struct StaticWorkflowConfigSource {
+        configs: Vec<GithubIssueWorkflowConfig>,
+    }
+
+    #[async_trait]
+    impl GithubIssueWorkflowConfigSource for StaticWorkflowConfigSource {
+        async fn list_enabled_workflow_configs(
+            &self,
+        ) -> Result<Vec<GithubIssueWorkflowConfig>, GithubIssueWorkflowError> {
+            Ok(self.configs.clone())
+        }
+    }
+
+    struct AllowWorkflowProjectAccess;
+
+    #[async_trait]
+    impl WorkflowProjectAccess for AllowWorkflowProjectAccess {
+        async fn assert_workflow_config_access(
+            &self,
+            _request: WorkflowConfigAccessRequest,
+        ) -> Result<(), GithubIssueWorkflowError> {
+            Ok(())
+        }
+
+        async fn assert_workflow_project_access(
+            &self,
+            _request: WorkflowProjectAccessRequest,
+        ) -> Result<(), GithubIssueWorkflowError> {
+            Ok(())
+        }
+    }
+
+    struct PanicTurnCoordinator;
+
+    #[async_trait]
+    impl TurnCoordinator for PanicTurnCoordinator {
+        async fn prepare_turn(&self, _scope: TurnScope) -> Result<TurnRunId, TurnError> {
+            panic!("prepare_turn should not be called in this test")
+        }
+
+        async fn submit_turn(
+            &self,
+            _request: SubmitTurnRequest,
+        ) -> Result<SubmitTurnResponse, TurnError> {
+            panic!("submit_turn should not be called in this test")
+        }
+
+        async fn resume_turn(
+            &self,
+            _request: ResumeTurnRequest,
+        ) -> Result<ResumeTurnResponse, TurnError> {
+            panic!("resume_turn should not be called in this test")
+        }
+
+        async fn cancel_run(
+            &self,
+            _request: CancelRunRequest,
+        ) -> Result<CancelRunResponse, TurnError> {
+            panic!("cancel_run should not be called in this test")
+        }
+
+        async fn get_run_state(
+            &self,
+            _request: GetRunStateRequest,
+        ) -> Result<TurnRunState, TurnError> {
+            panic!("get_run_state should not be called in this test")
         }
     }
 }

@@ -135,6 +135,27 @@ pub struct GithubProviderWatermarks {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProviderContentSummary {
+    pub source_ref: String,
+    pub author: Option<String>,
+    pub summary: String,
+    pub trust: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GithubIssueProviderSnapshotSummary {
+    pub title: String,
+    pub state: String,
+    pub author_login: Option<String>,
+    pub labels: Vec<String>,
+    pub updated_at: Option<Timestamp>,
+    pub comment_count: usize,
+    pub body_present: bool,
+    #[serde(default)]
+    pub content_summaries: Vec<ProviderContentSummary>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GithubIssueWorkflowState {
     pub mode: GithubIssueWorkflowMode,
     pub active_block: Option<GithubIssueBlockState>,
@@ -145,6 +166,8 @@ pub struct GithubIssueWorkflowState {
     pub current_workspace_ref: Option<WorkflowWorkspaceRef>,
     #[serde(default)]
     pub current_workspace_mount_ref: Option<WorkflowWorkspaceMountRef>,
+    #[serde(default)]
+    pub latest_provider_snapshot: Option<GithubIssueProviderSnapshotSummary>,
     pub last_provider_watermarks: GithubProviderWatermarks,
 }
 
@@ -158,6 +181,7 @@ impl GithubIssueWorkflowState {
             claim_comment: None,
             current_workspace_ref: None,
             current_workspace_mount_ref: None,
+            latest_provider_snapshot: None,
             last_provider_watermarks: GithubProviderWatermarks::default(),
         }
     }

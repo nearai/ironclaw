@@ -861,7 +861,10 @@ mod poller_contract {
         assert!(!GithubIssueWorkflowPollerConfig::default().enabled);
         let config = workflow_config("discover", "nearai", "ironclaw");
         let ports = FakePollerPorts::new(vec![config.clone()]);
-        let snapshot = issue_snapshot("nearai", "ironclaw", 42, 100);
+        let mut snapshot = issue_snapshot("nearai", "ironclaw", 42, 100);
+        snapshot.body =
+            "Please add a canary file containing GitHub issue workflow poller evidence."
+                .to_string();
         ports.github.add_issue(snapshot.clone()).await;
         let poller = poller(ports);
 
@@ -892,6 +895,16 @@ mod poller_contract {
         );
         assert_eq!(events[0].payload["issue"]["number"], 42);
         assert_eq!(events[0].payload["provider_snapshot"]["comment_count"], 1);
+        assert!(
+            events[0].payload["provider_snapshot"]["content_summaries"][0]["summary"]
+                .as_str()
+                .unwrap()
+                .contains("GitHub issue workflow poller evidence")
+        );
+        assert_eq!(
+            events[0].payload["provider_snapshot"]["content_summaries"][0]["trust"],
+            "untrusted_provider_content"
+        );
         let search_calls = poller.ports().github.search_calls().await;
         assert_eq!(
             search_calls[0].query,

@@ -24,6 +24,8 @@ use ironclaw_loop_support::{
 use ironclaw_product_workflow::{OutboundPreferencesProductFacade, ProjectService};
 
 use ironclaw_run_state::ApprovalRequestStore;
+#[cfg(feature = "github-issue-workflow-beta")]
+use ironclaw_threads::ThreadHistoryRequest;
 use ironclaw_threads::{
     AppendCapabilityDisplayPreviewRequest, CapabilityDisplayPreviewEnvelope,
     CapabilityDisplayPreviewEnvelopeInput, CapabilityDisplayPreviewStatus, SessionThreadService,
@@ -113,7 +115,7 @@ pub(super) fn capability_wiring(
     let capability_io = Arc::new(
         LocalDevCapabilityIo::new_with_durable_previews(
             Arc::clone(&display_previews),
-            thread_service,
+            Arc::clone(&thread_service),
             thread_scope,
         )
         .with_observer(trajectory_observer.clone()),
@@ -123,6 +125,7 @@ pub(super) fn capability_wiring(
     let capability_factory: Arc<dyn LoopCapabilityPortFactory> =
         Arc::new(LocalDevLoopCapabilityPortFactory {
             runtime,
+            thread_service,
             fallback_user_id,
             policy,
             workspace_mounts,
@@ -155,6 +158,7 @@ pub(super) fn capability_wiring(
 #[derive(Clone)]
 struct LocalDevLoopCapabilityPortFactory {
     runtime: Arc<dyn HostRuntime>,
+    thread_service: Arc<dyn SessionThreadService>,
     fallback_user_id: UserId,
     policy: Arc<LocalDevCapabilityPolicy>,
     workspace_mounts: MountView,
@@ -178,6 +182,7 @@ impl LoopCapabilityPortFactory for LocalDevLoopCapabilityPortFactory {
         &self,
         run_context: &LoopRunContext,
     ) -> Result<Arc<dyn LoopCapabilityPort>, AgentLoopHostError> {
+        let workspace_mounts = self.workspace_mounts_for_run(run_context).await?;
         let skill_mounts = scoped_skill_management_mount_view(&local_dev_resource_scope_for_run(
             run_context,
             &self.fallback_user_id,
@@ -188,7 +193,7 @@ impl LoopCapabilityPortFactory for LocalDevLoopCapabilityPortFactory {
             run_context: run_context.clone(),
             fallback_user_id: self.fallback_user_id.clone(),
             policy: Arc::clone(&self.policy),
-            workspace_mounts: self.workspace_mounts.clone(),
+            workspace_mounts,
             skill_mounts,
             memory_mounts: self.memory_mounts.clone(),
             extension_surface_source: self.extension_surface_source.clone(),
@@ -209,6 +214,100 @@ impl LoopCapabilityPortFactory for LocalDevLoopCapabilityPortFactory {
         })
         .await
     }
+}
+
+impl LocalDevLoopCapabilityPortFactory {
+    async fn workspace_mounts_for_run(
+        &self,
+        run_context: &LoopRunContext,
+    ) -> Result<MountView, AgentLoopHostError> {
+        #[cfg(feature = "github-issue-workflow-beta")]
+        {
+            if let Some(mounts) = self
+                .github_issue_workflow_stage_workspace_mounts(run_context)
+                .await?
+            {
+                return Ok(mounts);
+            }
+        }
+        Ok(self.workspace_mounts.clone())
+    }
+
+    #[cfg(feature = "github-issue-workflow-beta")]
+    async fn github_issue_workflow_stage_workspace_mounts(
+        &self,
+        run_context: &LoopRunContext,
+    ) -> Result<Option<MountView>, AgentLoopHostError> {
+        if !crate::github_issue_workflow::is_github_issue_workflow_context(run_context) {
+            return Ok(None);
+        }
+        let thread_scope = workflow_thread_scope_for_run(run_context)?;
+        let thread = self
+            .thread_service
+            .read_thread(ThreadHistoryRequest {
+                scope: thread_scope,
+                thread_id: run_context.thread_id.clone(),
+            })
+            .await
+            .map_err(|error| {
+                AgentLoopHostError::new(
+                    AgentLoopHostErrorKind::Unavailable,
+                    format!("failed to read GitHub issue workflow stage thread: {error}"),
+                )
+            })?;
+        let metadata_json = thread.metadata_json.as_deref().ok_or_else(|| {
+            AgentLoopHostError::new(
+                AgentLoopHostErrorKind::Invalid,
+                "GitHub issue workflow stage thread is missing workspace metadata",
+            )
+        })?;
+        let mounts =
+            crate::github_issue_workflow::workflow_stage_workspace_mount_view_from_thread_metadata(
+                metadata_json,
+            )
+            .map_err(|error| {
+                AgentLoopHostError::new(
+                    AgentLoopHostErrorKind::Invalid,
+                    format!("invalid GitHub issue workflow stage workspace metadata: {error}"),
+                )
+            })?
+            .ok_or_else(|| {
+                AgentLoopHostError::new(
+                    AgentLoopHostErrorKind::Invalid,
+                    "GitHub issue workflow stage thread metadata has no workspace mount",
+                )
+            })?;
+        Ok(Some(mounts))
+    }
+}
+
+#[cfg(feature = "github-issue-workflow-beta")]
+fn workflow_thread_scope_for_run(
+    run_context: &LoopRunContext,
+) -> Result<ThreadScope, AgentLoopHostError> {
+    let agent_id = run_context.scope.agent_id.clone().ok_or_else(|| {
+        AgentLoopHostError::new(
+            AgentLoopHostErrorKind::Invalid,
+            "GitHub issue workflow stage run has no agent scope",
+        )
+    })?;
+    let owner_user_id = run_context
+        .scope
+        .explicit_owner_user_id()
+        .cloned()
+        .ok_or_else(|| {
+            AgentLoopHostError::new(
+                AgentLoopHostErrorKind::Invalid,
+                "GitHub issue workflow stage run has no explicit thread owner",
+            )
+        })?;
+    Ok(ThreadScope {
+        tenant_id: run_context.scope.tenant_id.clone(),
+        agent_id,
+        project_id: run_context.scope.project_id.clone(),
+        owner_user_id: Some(owner_user_id),
+        mission_id: None,
+    })
 }
 
 const LOCAL_DEV_CAPABILITY_IO_MAX_STAGED_REFS: usize = 1024;

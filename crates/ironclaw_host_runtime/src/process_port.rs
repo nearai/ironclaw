@@ -6,10 +6,15 @@
 //! existing local-host behavior behind an explicit port without changing
 //! placement semantics.
 
-use std::{collections::HashMap, path::PathBuf, process::Stdio, time::Duration};
+use std::{
+    collections::HashMap,
+    path::{Path, PathBuf},
+    process::Stdio,
+    time::Duration,
+};
 
 use async_trait::async_trait;
-use ironclaw_host_api::{MountView, ResourceScope};
+use ironclaw_host_api::{MountGrant, MountView, ResourceScope, VirtualPath};
 #[cfg(unix)]
 use libc::{SIGKILL, kill};
 use thiserror::Error;
@@ -176,6 +181,36 @@ pub(crate) enum LocalHostProcessEnvMode {
 pub struct LocalHostProcessPort {
     env_mode: LocalHostProcessEnvMode,
     workdir_aliases: Vec<LocalHostWorkdirAlias>,
+    virtual_root_aliases: Vec<LocalHostVirtualRootAlias>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct LocalHostVirtualRootAlias {
+    virtual_root: VirtualPath,
+    host_path: PathBuf,
+}
+
+impl LocalHostVirtualRootAlias {
+    fn try_new(
+        virtual_root: impl Into<String>,
+        host_path: impl Into<PathBuf>,
+    ) -> Result<Self, String> {
+        let virtual_root =
+            VirtualPath::new(virtual_root.into()).map_err(|error| error.to_string())?;
+        let host_path = host_path.into();
+        if !host_path.is_absolute() {
+            return Err("local host virtual root host_path must be absolute".to_string());
+        }
+        Ok(Self {
+            virtual_root,
+            host_path,
+        })
+    }
+
+    fn host_path_for_target(&self, target: &VirtualPath) -> Option<PathBuf> {
+        let tail = virtual_path_tail(self.virtual_root.as_str(), target.as_str())?;
+        Some(self.host_path.join(tail))
+    }
 }
 
 impl LocalHostProcessPort {
@@ -183,6 +218,7 @@ impl LocalHostProcessPort {
         Self {
             env_mode: LocalHostProcessEnvMode::Scrubbed,
             workdir_aliases: Vec::new(),
+            virtual_root_aliases: Vec::new(),
         }
     }
 
@@ -190,6 +226,7 @@ impl LocalHostProcessPort {
         Self {
             env_mode: LocalHostProcessEnvMode::Inherited,
             workdir_aliases: Vec::new(),
+            virtual_root_aliases: Vec::new(),
         }
     }
 
@@ -207,6 +244,59 @@ impl LocalHostProcessPort {
         }
         self
     }
+
+    pub fn with_virtual_root_alias(
+        mut self,
+        virtual_root: impl Into<String>,
+        host_path: impl Into<PathBuf>,
+    ) -> Self {
+        match LocalHostVirtualRootAlias::try_new(virtual_root, host_path) {
+            Ok(alias) => self.virtual_root_aliases.push(alias),
+            Err(reason) => tracing::debug!(
+                reason = %reason,
+                "ignoring invalid local host process virtual root alias"
+            ),
+        }
+        self
+    }
+
+    fn effective_workdir_aliases(&self, mounts: Option<&MountView>) -> Vec<LocalHostWorkdirAlias> {
+        let mut aliases = self.workdir_aliases.clone();
+        let Some(mounts) = mounts else {
+            return aliases;
+        };
+        for mount in &mounts.mounts {
+            if let Some(alias) = self.workdir_alias_for_mount(mount) {
+                push_workdir_alias_override(&mut aliases, alias);
+            }
+        }
+        aliases
+    }
+
+    fn workdir_alias_for_mount(&self, mount: &MountGrant) -> Option<LocalHostWorkdirAlias> {
+        let host_path = self
+            .virtual_root_aliases
+            .iter()
+            .filter_map(|alias| {
+                alias
+                    .host_path_for_target(&mount.target)
+                    .map(|path| (alias, path))
+            })
+            .max_by_key(|(alias, _path)| alias.virtual_root.as_str().len())
+            .map(|(_alias, path)| path)?;
+        match LocalHostWorkdirAlias::try_new(mount.alias.as_str(), host_path) {
+            Ok(alias) => Some(alias),
+            Err(reason) => {
+                tracing::debug!(
+                    alias = %mount.alias.as_str(),
+                    target = %mount.target.as_str(),
+                    reason = %reason,
+                    "ignoring local host process mount alias"
+                );
+                None
+            }
+        }
+    }
 }
 
 #[async_trait]
@@ -215,8 +305,9 @@ impl RuntimeProcessPort for LocalHostProcessPort {
         &self,
         request: CommandExecutionRequest,
     ) -> Result<CommandExecutionOutput, RuntimeProcessError> {
-        let cwd = resolve_local_host_workdir(request.workdir.as_deref(), &self.workdir_aliases)
-            .map_err(|e| {
+        let aliases = self.effective_workdir_aliases(request.mounts.as_ref());
+        let cwd =
+            resolve_local_host_workdir(request.workdir.as_deref(), &aliases).map_err(|e| {
                 RuntimeProcessError::ExecutionFailed(format!(
                     "cannot determine working directory: {e}"
                 ))
@@ -231,7 +322,7 @@ impl RuntimeProcessPort for LocalHostProcessPort {
                 "running local host command with inherited environment"
             );
         }
-        let command = rewrite_local_host_command_aliases(&request.command, &self.workdir_aliases);
+        let command = rewrite_local_host_command_aliases(&request.command, &aliases);
         let start = std::time::Instant::now();
         let (output, exit_code) = execute_local_command(
             &request.scope,
@@ -248,7 +339,7 @@ impl RuntimeProcessPort for LocalHostProcessPort {
         // `/workspace` terms and never leaks the host layout into the reply.
         // (The saved-output full result is a separate, non-model-facing UI
         // surface and is left to the result-fetch path.)
-        let preview = rewrite_local_host_output_aliases(&output.preview, &self.workdir_aliases);
+        let preview = rewrite_local_host_output_aliases(&output.preview, &aliases);
         Ok(CommandExecutionOutput {
             output: preview,
             saved_output: output.saved_output,
@@ -257,6 +348,22 @@ impl RuntimeProcessPort for LocalHostProcessPort {
             duration: start.elapsed(),
         })
     }
+}
+
+fn virtual_path_tail(root: &str, target: &str) -> Option<PathBuf> {
+    if target == root {
+        return Some(PathBuf::new());
+    }
+    let relative = target.strip_prefix(&format!("{root}/"))?;
+    Some(Path::new(relative).to_path_buf())
+}
+
+fn push_workdir_alias_override(
+    aliases: &mut Vec<LocalHostWorkdirAlias>,
+    alias: LocalHostWorkdirAlias,
+) {
+    aliases.retain(|existing| existing.alias() != alias.alias());
+    aliases.push(alias);
 }
 
 async fn execute_local_command(
@@ -361,6 +468,7 @@ async fn terminate_child_tree(child: &mut tokio::process::Child) {
 mod tests {
     use super::*;
     use crate::process_output::{COMMAND_MAX_OUTPUT_SIZE, SavedCommandOutputSanitization};
+    use ironclaw_host_api::{MountAlias, MountGrant, MountPermissions, MountView, VirtualPath};
     use std::sync::Mutex;
 
     #[derive(Debug)]
@@ -692,6 +800,75 @@ mod tests {
         assert_eq!(output.exit_code, 0);
         assert_eq!(output.output, "ok");
         assert!(scratch.exists());
+    }
+
+    #[tokio::test]
+    async fn local_host_process_port_uses_request_mounts_for_workspace_workdir() {
+        let root_dir = tempfile::tempdir().expect("root tempdir");
+        let root = root_dir.path().canonicalize().expect("canonical root");
+        let default_workspace = root.join("workspace");
+        let workflow_workspace = root.join("github-issue-workspaces/session-1");
+        std::fs::create_dir_all(&default_workspace).expect("default workspace dir");
+        std::fs::create_dir_all(&workflow_workspace).expect("workflow workspace dir");
+        let port = LocalHostProcessPort::new_inherited_env()
+            .with_workdir_alias("/workspace", default_workspace)
+            .with_virtual_root_alias("/projects", root.clone())
+            .with_virtual_root_alias("/projects/workspace", root.join("workspace"));
+
+        let output = port
+            .run_command(CommandExecutionRequest {
+                scope: ResourceScope::system(),
+                mounts: Some(workflow_workspace_mounts()),
+                command: "printf '%s' \"$PWD\"".to_string(),
+                workdir: Some("/workspace".to_string()),
+                timeout_secs: Some(5),
+                extra_env: HashMap::new(),
+            })
+            .await
+            .expect("command succeeds");
+
+        assert_eq!(output.exit_code, 0);
+        assert_eq!(output.output, "/workspace");
+    }
+
+    #[tokio::test]
+    async fn local_host_process_port_writes_command_paths_to_request_mounts() {
+        let root_dir = tempfile::tempdir().expect("root tempdir");
+        let root = root_dir.path().canonicalize().expect("canonical root");
+        let default_workspace = root.join("workspace");
+        let workflow_workspace = root.join("github-issue-workspaces/session-1");
+        std::fs::create_dir_all(&default_workspace).expect("default workspace dir");
+        std::fs::create_dir_all(&workflow_workspace).expect("workflow workspace dir");
+        let port = LocalHostProcessPort::new_inherited_env()
+            .with_workdir_alias("/workspace", default_workspace.clone())
+            .with_virtual_root_alias("/projects", root.clone())
+            .with_virtual_root_alias("/projects/workspace", default_workspace.clone());
+
+        let output = port
+            .run_command(CommandExecutionRequest {
+                scope: ResourceScope::system(),
+                mounts: Some(workflow_workspace_mounts()),
+                command: "touch /workspace/canary && printf ok".to_string(),
+                workdir: None,
+                timeout_secs: Some(5),
+                extra_env: HashMap::new(),
+            })
+            .await
+            .expect("command succeeds");
+
+        assert_eq!(output.exit_code, 0);
+        assert_eq!(output.output, "ok");
+        assert!(workflow_workspace.join("canary").exists());
+        assert!(!default_workspace.join("canary").exists());
+    }
+
+    fn workflow_workspace_mounts() -> MountView {
+        MountView::new(vec![MountGrant::new(
+            MountAlias::new("/workspace").expect("mount alias"),
+            VirtualPath::new("/projects/github-issue-workspaces/session-1").expect("virtual path"),
+            MountPermissions::read_write(),
+        )])
+        .expect("mount view")
     }
 
     #[cfg(windows)]

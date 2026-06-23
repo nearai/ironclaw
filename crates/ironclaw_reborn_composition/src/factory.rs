@@ -274,6 +274,7 @@ where
 
 fn local_dev_process_port_for_policy(
     runtime_policy: &Option<ironclaw_host_api::runtime_policy::EffectiveRuntimePolicy>,
+    local_dev_storage_root: &Path,
     workspace_root: &Path,
     host_home_root: Option<&LocalDevHostHomeRoot>,
 ) -> Option<LocalHostProcessPort> {
@@ -286,10 +287,14 @@ fn local_dev_process_port_for_policy(
     } else {
         LocalHostProcessPort::new()
     }
-    .with_workdir_alias("/workspace", workspace_root);
+    .with_workdir_alias("/workspace", workspace_root)
+    .with_virtual_root_alias("/projects", local_dev_storage_root)
+    .with_virtual_root_alias("/projects/workspace", workspace_root);
     if let Some(host_home_root) = host_home_root {
         process_port =
             process_port.with_workdir_alias("/host", host_home_root.canonical_root.clone());
+        process_port = process_port
+            .with_virtual_root_alias("/projects/host", host_home_root.canonical_root.clone());
         for alias in host_home_root.aliases() {
             let alias_str = match alias.to_str() {
                 Some(s) => s,
@@ -1024,6 +1029,7 @@ async fn build_local_dev(input: RebornBuildInput) -> Result<RebornServices, Rebo
         .with_turn_state_and_transition_port(Arc::clone(&store_graph.turn_state));
     let local_dev_process_port = local_dev_process_port_for_policy(
         &runtime_policy,
+        &root,
         &workspace_root,
         host_home_root.as_ref(),
     );

@@ -6,8 +6,6 @@ mod github_issue_workflow_runtime {
 
     #[cfg(feature = "libsql")]
     use ironclaw_github_issue_workflow::GithubProviderAccountRef;
-    #[cfg(feature = "libsql")]
-    use ironclaw_host_api::ProjectId;
     use ironclaw_host_api::runtime_policy::{
         ApprovalPolicy, AuditMode, DeploymentMode, EffectiveRuntimePolicy, FilesystemBackendKind,
         NetworkMode, ProcessBackendKind, RuntimeProfile, SecretMode,
@@ -15,12 +13,16 @@ mod github_issue_workflow_runtime {
     use ironclaw_host_api::{
         CapabilityGrant, CapabilityGrantId, CapabilityId, CapabilitySet, EffectKind,
         ExecutionContext, ExtensionId, GrantConstraints, MountView, NetworkPolicy, Principal,
-        ResourceEstimate, RuntimeKind, TrustClass,
+        ProjectId, ResourceEstimate, RuntimeKind, TenantId, TrustClass, UserId,
     };
     use ironclaw_host_runtime::{
         CapabilitySurfacePolicy, HostRuntime, RuntimeCapabilityFailure, RuntimeCapabilityOutcome,
         RuntimeCapabilityRequest, RuntimeFailureKind, SurfaceKind, VisibleCapabilityRequest,
         WORKFLOW_REPORT_STAGE_RESULT_CAPABILITY_ID,
+    };
+    use ironclaw_reborn_composition::test_support::{
+        github_issue_workflow_stage_approval_policy_constraints_for_test,
+        github_issue_workflow_stage_loop_driver_grantee_for_test,
     };
     use ironclaw_reborn_composition::{
         GithubIssueWorkflowSettings, RebornBuildInput, RebornRuntimeError, RebornRuntimeIdentity,
@@ -105,6 +107,56 @@ mod github_issue_workflow_runtime {
         .expect("runtime builds");
 
         assert!(runtime.services().readiness.workers.github_issue_workflow);
+
+        runtime.shutdown().await.expect("shutdown");
+    }
+
+    #[tokio::test]
+    async fn runtime_enabled_workflow_seeds_stage_approval_policies() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let project_id = ProjectId::new("workflow-project").expect("project");
+        let runtime = build_reborn_runtime(
+            local_dev_input(root.path().join("local-dev"))
+                .with_default_project_id(project_id.clone())
+                .with_github_issue_workflow_settings(
+                    GithubIssueWorkflowSettings::enabled_for_tests(),
+                ),
+        )
+        .await
+        .expect("runtime builds");
+        let tenant_id = TenantId::new("workflow-runtime-tenant").expect("tenant");
+        let user_id = UserId::new("workflow-runtime-owner").expect("user");
+        let agent_id = ironclaw_host_api::AgentId::new("workflow-runtime-agent").expect("agent");
+        let grantee = github_issue_workflow_stage_loop_driver_grantee_for_test(
+            tenant_id.clone(),
+            user_id.clone(),
+            agent_id.clone(),
+            Some(project_id.clone()),
+        )
+        .await
+        .expect("workflow stage loop driver grantee");
+
+        for capability in ["builtin.apply_patch", "builtin.shell", "builtin.write_file"] {
+            let constraints = github_issue_workflow_stage_approval_policy_constraints_for_test(
+                runtime.services(),
+                tenant_id.clone(),
+                user_id.clone(),
+                agent_id.clone(),
+                Some(project_id.clone()),
+                CapabilityId::new(capability).expect("capability id"),
+                grantee.clone(),
+            )
+            .await
+            .expect("lookup seeded approval policy")
+            .unwrap_or_else(|| panic!("missing seeded approval policy for {capability}"));
+            assert_eq!(constraints.max_invocations, None);
+            assert!(
+                constraints
+                    .allowed_effects
+                    .contains(&EffectKind::DispatchCapability),
+                "seeded approval for {capability} must authorize dispatch"
+            );
+        }
 
         runtime.shutdown().await.expect("shutdown");
     }

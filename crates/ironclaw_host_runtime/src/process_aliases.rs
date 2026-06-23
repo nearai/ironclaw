@@ -31,6 +31,10 @@ impl LocalHostWorkdirAlias {
         let relative = workdir.strip_prefix(&format!("{}/", self.alias))?;
         relative_workdir_tail(relative)
     }
+
+    pub(crate) fn alias(&self) -> &str {
+        &self.alias
+    }
 }
 
 pub(crate) fn resolve_local_host_workdir(

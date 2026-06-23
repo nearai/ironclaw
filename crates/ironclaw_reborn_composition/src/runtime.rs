@@ -41,8 +41,8 @@ use ironclaw_first_party_extension_ports::{
 };
 use ironclaw_host_api::{
     ActionResultSummary, ActionSummary, AgentId, ApprovalRequestId, AuditEnvelope, AuditEventId,
-    AuditStage, CapabilityId, CorrelationId, DecisionSummary, EffectKind, InvocationId,
-    ResourceScope, TenantId, ThreadId, UserId,
+    AuditStage, CapabilityId, CorrelationId, DecisionSummary, EffectKind, GrantConstraints,
+    InvocationId, MountView, ResourceScope, TenantId, ThreadId, UserId,
 };
 use ironclaw_loop_support::{
     CapabilityAllowSet, CapabilityResolveError, CapabilitySurfaceProfileResolver,
@@ -115,9 +115,13 @@ use crate::factory::{LocalDevRootFilesystem, LocalDevTurnStateStore, builtin_ext
 #[cfg(feature = "github-issue-workflow-beta")]
 use crate::github_issue_workflow::{
     GITHUB_ISSUE_WORKFLOW_SHUTDOWN_TIMEOUT, GithubIssueWorkflowRuntimeDeps,
-    GithubIssueWorkflowRuntimeHandle, spawn_github_issue_workflow,
+    GithubIssueWorkflowRuntimeHandle, GithubIssueWorkflowStageApprovalGrantInput,
+    GithubIssueWorkflowStageApprovalPolicyInput,
+    ensure_github_issue_workflow_stage_approval_policies, spawn_github_issue_workflow,
 };
-use crate::local_dev_capability_policy::local_dev_capability_policy;
+use crate::local_dev_capability_policy::{
+    LocalDevApprovalPolicyAction, LocalDevCapabilityPolicy, local_dev_capability_policy,
+};
 #[cfg(any(test, feature = "test-support"))]
 use crate::outbound_preferences::OutboundDeliveryTargetEntry;
 use crate::outbound_preferences::{
@@ -451,6 +455,53 @@ impl From<TurnError> for RebornRuntimeError {
     fn from(value: TurnError) -> Self {
         Self::TurnCoordinator(value.to_string())
     }
+}
+
+#[cfg(feature = "github-issue-workflow-beta")]
+pub(crate) fn github_issue_workflow_stage_approval_policy_grants(
+    policy: &LocalDevCapabilityPolicy,
+    workspace_mounts: &MountView,
+    skill_mounts: &MountView,
+    memory_mounts: &MountView,
+) -> Result<Vec<GithubIssueWorkflowStageApprovalGrantInput>, RebornRuntimeError> {
+    crate::github_issue_workflow::workflow_stage_approval_capability_ids()
+        .iter()
+        .map(|capability| {
+            let capability_id = CapabilityId::new(*capability).map_err(|reason| {
+                RebornRuntimeError::InvalidArgument {
+                    reason: format!(
+                        "GitHub issue workflow stage approval capability id is invalid: {reason}"
+                    ),
+                }
+            })?;
+            let approval = policy
+                .lease_approval_for(
+                    LocalDevApprovalPolicyAction::Dispatch {
+                        capability: &capability_id,
+                    },
+                    workspace_mounts,
+                    skill_mounts,
+                    memory_mounts,
+                )
+                .map_err(|error| RebornRuntimeError::InvalidArgument {
+                    reason: format!(
+                        "GitHub issue workflow stage approval policy is invalid: {error}"
+                    ),
+                })?;
+            Ok(GithubIssueWorkflowStageApprovalGrantInput {
+                capability_id,
+                constraints: GrantConstraints {
+                    allowed_effects: approval.allowed_effects,
+                    mounts: approval.mounts,
+                    network: approval.network,
+                    secrets: approval.secrets,
+                    resource_ceiling: approval.resource_ceiling,
+                    expires_at: approval.expires_at,
+                    max_invocations: approval.max_invocations,
+                },
+            })
+        })
+        .collect()
 }
 
 impl From<DefaultPlannedRuntimeBuildError> for RebornRuntimeError {
@@ -3016,7 +3067,7 @@ pub async fn build_reborn_runtime(
     let approval_audit_sink = Arc::new(InMemoryAuditSink::new());
     let approval_interaction_service: Arc<dyn ApprovalInteractionService> =
         if let (Some(local_runtime), Some(local_dev_capability_policy)) =
-            (local_runtime, local_dev_capability_policy)
+            (local_runtime, local_dev_capability_policy.as_ref())
         {
             let approval_turn_runs = Arc::new(LocalDevApprovalTurnRunLocator::new(Arc::clone(
                 &local_runtime.turn_state,
@@ -3036,7 +3087,7 @@ pub async fn build_reborn_runtime(
                 DefaultApprovalInteractionService::new(
                     approval_read_model,
                     Arc::new(approval::LocalDevApprovalLeaseTermsProvider::new(
-                        local_dev_capability_policy,
+                        Arc::clone(local_dev_capability_policy),
                         Arc::clone(&local_runtime.extension_registry),
                         local_runtime.workspace_mounts.clone(),
                         local_runtime.skill_mounts.clone(),
@@ -3248,7 +3299,17 @@ pub async fn build_reborn_runtime(
             None if github_issue_workflow.allow_in_memory_for_tests => {
                 crate::github_issue_workflow::test_only_unconfigured_workspace_manager()
             }
-            None => crate::github_issue_workflow::runtime_workflow_workspace_manager(),
+            None => {
+                let local_runtime =
+                    local_runtime.ok_or_else(|| RebornRuntimeError::InvalidArgument {
+                        reason:
+                            "GitHub issue workflow requires local-dev workspace storage outside explicit test enablement"
+                                .to_string(),
+                    })?;
+                crate::github_issue_workflow::runtime_workflow_workspace_manager(
+                    local_runtime.local_dev_storage_root.clone(),
+                )
+            }
         };
         let repository = workflow_repository.ok_or(RebornRuntimeError::InvalidArgument {
             reason: "GitHub issue workflow repository is not wired".to_string(),
@@ -3262,6 +3323,33 @@ pub async fn build_reborn_runtime(
             .as_ref()
             .cloned()
             .ok_or(RebornRuntimeError::HostRuntimeUnavailable)?;
+        if let (Some(local_runtime), Some(local_dev_capability_policy)) =
+            (local_runtime, local_dev_capability_policy.as_ref())
+        {
+            let grants = github_issue_workflow_stage_approval_policy_grants(
+                local_dev_capability_policy.as_ref(),
+                &local_runtime.workspace_mounts,
+                &local_runtime.skill_mounts,
+                &local_runtime.memory_mounts,
+            )?;
+            ensure_github_issue_workflow_stage_approval_policies(
+                Arc::clone(&local_runtime.persistent_approval_policies)
+                    as Arc<dyn ironclaw_approvals::PersistentApprovalPolicyStore>,
+                GithubIssueWorkflowStageApprovalPolicyInput {
+                    tenant_id: validated_identity.tenant_id.clone(),
+                    actor_user_id: actor_user_id.clone(),
+                    agent_id: validated_identity.agent_id.clone(),
+                    project_id: github_issue_workflow_default_project_id.clone(),
+                    grants,
+                },
+            )
+            .await
+            .map_err(|error| RebornRuntimeError::InvalidArgument {
+                reason: format!(
+                    "GitHub issue workflow stage approval policies could not be seeded: {error}"
+                ),
+            })?;
+        }
         spawn_github_issue_workflow(
             github_issue_workflow,
             GithubIssueWorkflowRuntimeDeps {
@@ -3274,8 +3362,10 @@ pub async fn build_reborn_runtime(
                 workspace_manager,
                 thread_service: Arc::clone(&thread_service),
                 turn_coordinator: Arc::clone(&planned_turn_coordinator),
+                tenant_id: validated_identity.tenant_id.clone(),
                 actor_user_id: actor_user_id.clone(),
                 default_agent_id: validated_identity.agent_id.clone(),
+                default_project_id: github_issue_workflow_default_project_id.clone(),
             },
         )
         .map_err(|error| RebornRuntimeError::InvalidArgument {

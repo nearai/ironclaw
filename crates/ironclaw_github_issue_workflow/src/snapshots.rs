@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-use crate::{GithubIssueStage, GithubIssueWorkflowError};
+use crate::{GithubIssueStage, GithubIssueWorkflowError, domain::ProviderContentSummary};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct EngineeredWorkflowSnapshot {
@@ -25,14 +25,6 @@ pub struct GithubIssueSnapshot {
     pub labels: Vec<String>,
     pub summary: String,
     pub provider_content_summaries: Vec<ProviderContentSummary>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ProviderContentSummary {
-    pub source_ref: String,
-    pub author: Option<String>,
-    pub summary: String,
-    pub trust: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

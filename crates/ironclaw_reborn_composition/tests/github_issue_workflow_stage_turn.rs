@@ -4,6 +4,10 @@ mod github_issue_workflow_stage_turn {
     use std::sync::{Arc, Mutex};
 
     use async_trait::async_trait;
+    use ironclaw_approvals::{
+        InMemoryPersistentApprovalPolicyStore, PersistentApprovalAction,
+        PersistentApprovalPolicyKey, PersistentApprovalPolicyStore, PersistentApprovalScope,
+    };
     use ironclaw_github_issue_workflow::{
         EngineeredWorkflowSnapshot, GithubIssueSnapshot, GithubIssueStage, GithubIssueStageRunId,
         GithubIssueWorkflowRunId, ProviderContentSummary, RepositorySnapshot,
@@ -12,8 +16,13 @@ mod github_issue_workflow_stage_turn {
         WorkflowStateSnapshot, WorkflowWorkspaceMountRef, WorkflowWorkspaceSnapshot,
         render_stage_prompt, stage_result_schema_version,
     };
-    use ironclaw_host_api::{AgentId, ProjectId, TenantId, ThreadId, UserId};
-    use ironclaw_reborn_composition::test_support::github_issue_stage_turn_submitter_for_test;
+    use ironclaw_host_api::{
+        AgentId, CapabilityId, Principal, ProjectId, TenantId, ThreadId, UserId,
+    };
+    use ironclaw_reborn_composition::test_support::{
+        github_issue_stage_turn_submitter_for_test,
+        seed_github_issue_workflow_stage_approval_policies_for_test,
+    };
     use ironclaw_threads::{
         InMemorySessionThreadService, MessageStatus, SessionThreadService, ThreadHistoryRequest,
         ThreadScope,
@@ -58,6 +67,19 @@ mod github_issue_workflow_stage_turn {
             content.contains("builtin.workflow_report_stage_result"),
             "accepted message must carry the rendered result-reporting instructions"
         );
+        let metadata: serde_json::Value = serde_json::from_str(
+            history
+                .thread
+                .metadata_json
+                .as_deref()
+                .expect("stage thread metadata"),
+        )
+        .expect("metadata json");
+        assert_eq!(
+            metadata["workspace_mount_ref"]["mount_id"],
+            workspace_session_id()
+        );
+        assert_eq!(metadata["workspace_mount_ref"]["alias"], "/workspace");
     }
 
     #[tokio::test]
@@ -198,6 +220,55 @@ mod github_issue_workflow_stage_turn {
             assert!(
                 !source.contains(forbidden),
                 "stage submitter must not use trusted trigger ingress: found {forbidden}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn stage_approval_seed_persists_project_scoped_policies_for_side_effect_capabilities() {
+        let store = Arc::new(InMemoryPersistentApprovalPolicyStore::new());
+        let seeded = seed_github_issue_workflow_stage_approval_policies_for_test(
+            store.clone(),
+            tenant_id(),
+            owner_user_id(),
+            agent_id(),
+            Some(project_id()),
+        )
+        .await
+        .expect("seed workflow stage approval policies");
+
+        assert_eq!(
+            seeded.capability_ids,
+            ["builtin.apply_patch", "builtin.shell", "builtin.write_file"]
+                .into_iter()
+                .map(String::from)
+                .collect()
+        );
+
+        for capability_id in &seeded.capability_ids {
+            let key = PersistentApprovalPolicyKey {
+                scope: PersistentApprovalScope {
+                    tenant_id: tenant_id(),
+                    user_id: owner_user_id(),
+                    agent_id: Some(agent_id()),
+                    project_id: Some(project_id()),
+                },
+                action: PersistentApprovalAction::Dispatch,
+                capability_id: CapabilityId::new(capability_id).expect("capability id"),
+                grantee: Principal::Extension(seeded.loop_driver_grantee.clone()),
+            };
+            let policy = store
+                .lookup(&key)
+                .await
+                .expect("lookup seeded policy")
+                .unwrap_or_else(|| panic!("missing policy for {capability_id}"));
+            assert_eq!(policy.constraints.max_invocations, None);
+            assert!(
+                policy
+                    .constraints
+                    .allowed_effects
+                    .contains(&ironclaw_host_api::EffectKind::DispatchCapability),
+                "policy for {capability_id} must authorize dispatch"
             );
         }
     }
@@ -405,7 +476,7 @@ mod github_issue_workflow_stage_turn {
             prompt: WorkflowPromptContent::from(triage_prompt()),
             capability_profile_id: "github_issue_workflow.stage.default".to_string(),
             workspace_mount_ref: Some(WorkflowWorkspaceMountRef {
-                mount_id: "workspace-session".to_string(),
+                mount_id: workspace_session_id().to_string(),
                 alias: "/workspace".to_string(),
             }),
             idempotency_key,
@@ -469,7 +540,7 @@ mod github_issue_workflow_stage_turn {
                 evidence: Vec::new(),
             }],
             workspace: Some(WorkflowWorkspaceSnapshot {
-                workspace_session_id: Some("workspace-session".to_string()),
+                workspace_session_id: Some(workspace_session_id().to_string()),
                 thread_id: None,
                 turn_run_id: None,
                 mount_alias: Some("/workspace".to_string()),
@@ -539,5 +610,9 @@ mod github_issue_workflow_stage_turn {
 
     fn project_id() -> ProjectId {
         ProjectId::new("project-github").expect("project id")
+    }
+
+    fn workspace_session_id() -> &'static str {
+        "11111111-1111-4111-8111-111111111111"
     }
 }

@@ -13,9 +13,17 @@
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
+#[cfg(feature = "github-issue-workflow-beta")]
+use ironclaw_approvals::{
+    PersistentApprovalAction, PersistentApprovalPolicyKey, PersistentApprovalPolicyStore,
+    PersistentApprovalScope,
+};
 use ironclaw_host_api::ThreadId;
 #[cfg(feature = "github-issue-workflow-beta")]
-use ironclaw_host_api::{AgentId, CapabilityId, ProjectId, TenantId, UserId};
+use ironclaw_host_api::{
+    AgentId, CapabilityId, ExtensionId, GrantConstraints, MountView, Principal, ProjectId,
+    TenantId, UserId,
+};
 #[cfg(feature = "github-issue-workflow-beta")]
 use ironclaw_loop_support::{
     CapabilityAllowSet, CapabilityResolveError, CapabilitySurfaceProfileResolver,
@@ -61,6 +69,100 @@ pub fn github_issue_stage_turn_submitter_for_test(
             default_agent_id,
         ),
     )
+}
+
+#[cfg(feature = "github-issue-workflow-beta")]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GithubIssueWorkflowStageApprovalPolicySeedForTest {
+    pub loop_driver_grantee: ExtensionId,
+    pub capability_ids: std::collections::BTreeSet<String>,
+}
+
+#[cfg(feature = "github-issue-workflow-beta")]
+pub async fn seed_github_issue_workflow_stage_approval_policies_for_test(
+    policies: Arc<dyn PersistentApprovalPolicyStore>,
+    tenant_id: TenantId,
+    actor_user_id: UserId,
+    agent_id: AgentId,
+    project_id: Option<ProjectId>,
+) -> Result<GithubIssueWorkflowStageApprovalPolicySeedForTest, String> {
+    let policy = crate::local_dev_capability_policy::local_dev_capability_policy()
+        .map_err(|error| error.to_string())?;
+    let grants = crate::runtime::github_issue_workflow_stage_approval_policy_grants(
+        &policy,
+        &MountView::default(),
+        &MountView::default(),
+        &MountView::default(),
+    )
+    .map_err(|error| error.to_string())?;
+    let seed = crate::github_issue_workflow::ensure_github_issue_workflow_stage_approval_policies(
+        policies,
+        crate::github_issue_workflow::GithubIssueWorkflowStageApprovalPolicyInput {
+            tenant_id,
+            actor_user_id,
+            agent_id,
+            project_id,
+            grants,
+        },
+    )
+    .await
+    .map_err(|error| error.to_string())?;
+    Ok(GithubIssueWorkflowStageApprovalPolicySeedForTest {
+        loop_driver_grantee: seed.loop_driver_grantee,
+        capability_ids: seed.capability_ids,
+    })
+}
+
+#[cfg(feature = "github-issue-workflow-beta")]
+pub async fn github_issue_workflow_stage_loop_driver_grantee_for_test(
+    tenant_id: TenantId,
+    actor_user_id: UserId,
+    agent_id: AgentId,
+    project_id: Option<ProjectId>,
+) -> Result<ExtensionId, String> {
+    crate::github_issue_workflow::workflow_stage_loop_driver_grantee(
+        &crate::github_issue_workflow::GithubIssueWorkflowStageApprovalPolicyInput {
+            tenant_id,
+            actor_user_id,
+            agent_id,
+            project_id,
+            grants: Vec::new(),
+        },
+    )
+    .await
+    .map_err(|error| error.to_string())
+}
+
+#[cfg(feature = "github-issue-workflow-beta")]
+pub async fn github_issue_workflow_stage_approval_policy_constraints_for_test(
+    services: &crate::factory::RebornServices,
+    tenant_id: TenantId,
+    actor_user_id: UserId,
+    agent_id: AgentId,
+    project_id: Option<ProjectId>,
+    capability_id: CapabilityId,
+    grantee: ExtensionId,
+) -> Result<Option<GrantConstraints>, String> {
+    let local_runtime = services
+        .local_runtime
+        .as_ref()
+        .ok_or_else(|| "local runtime is unavailable".to_string())?;
+    local_runtime
+        .persistent_approval_policies
+        .lookup(&PersistentApprovalPolicyKey {
+            scope: PersistentApprovalScope {
+                tenant_id,
+                user_id: actor_user_id,
+                agent_id: Some(agent_id),
+                project_id,
+            },
+            action: PersistentApprovalAction::Dispatch,
+            capability_id,
+            grantee: Principal::Extension(grantee),
+        })
+        .await
+        .map(|policy| policy.map(|policy| policy.constraints))
+        .map_err(|error| error.to_string())
 }
 
 #[cfg(feature = "github-issue-workflow-beta")]
