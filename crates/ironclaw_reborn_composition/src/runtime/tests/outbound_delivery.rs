@@ -195,7 +195,7 @@ async fn local_dev_runtime_selects_outbound_delivery_target_before_trigger_creat
     })
     .with_poll_settings(PollSettings {
         interval: Duration::from_millis(10),
-        max_total: Duration::from_secs(3),
+        max_total: RUNTIME_SEND_TIMEOUT,
     })
     .with_model_gateway_override(gateway_for_runtime);
 

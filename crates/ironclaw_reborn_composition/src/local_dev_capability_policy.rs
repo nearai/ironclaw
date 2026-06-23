@@ -81,12 +81,22 @@ impl LocalDevCapabilityPolicy {
             .map(|grant| &grant.capability)
     }
 
+    pub(crate) fn system_extensions_lifecycle_capability_ids(
+        &self,
+    ) -> impl Iterator<Item = &CapabilityId> {
+        self.grants
+            .iter()
+            .filter(|grant| grant.mounts == LocalDevMountProfile::SystemExtensionsLifecycle)
+            .map(|grant| &grant.capability)
+    }
+
     pub(crate) fn builtin_grants(
         &self,
         grantee: &ExtensionId,
         workspace_mounts: &MountView,
         skill_mounts: &MountView,
         memory_mounts: &MountView,
+        system_extensions_mounts: &MountView,
     ) -> CapabilitySet {
         let grants = self
             .grants
@@ -101,6 +111,7 @@ impl LocalDevCapabilityPolicy {
                     workspace_mounts,
                     skill_mounts,
                     memory_mounts,
+                    system_extensions_mounts,
                     None,
                 ),
             })
@@ -114,6 +125,7 @@ impl LocalDevCapabilityPolicy {
         workspace_mounts: &MountView,
         skill_mounts: &MountView,
         memory_mounts: &MountView,
+        system_extensions_mounts: &MountView,
     ) -> Result<GrantConstraints, LocalDevCapabilityPolicyError> {
         let grant = self.grant(capability)?;
         Ok(constraint_terms(
@@ -121,6 +133,7 @@ impl LocalDevCapabilityPolicy {
             workspace_mounts,
             skill_mounts,
             memory_mounts,
+            system_extensions_mounts,
             None,
         ))
     }
@@ -131,6 +144,7 @@ impl LocalDevCapabilityPolicy {
         workspace_mounts: &MountView,
         skill_mounts: &MountView,
         memory_mounts: &MountView,
+        system_extensions_mounts: &MountView,
     ) -> Result<LeaseApproval, LocalDevCapabilityPolicyError> {
         let constraints = match action {
             LocalDevApprovalPolicyAction::Dispatch { capability } => self.grant_constraints_for(
@@ -138,6 +152,7 @@ impl LocalDevCapabilityPolicy {
                 workspace_mounts,
                 skill_mounts,
                 memory_mounts,
+                system_extensions_mounts,
             )?,
             LocalDevApprovalPolicyAction::SpawnCapability { capability } => {
                 match self.grant(capability) {
@@ -146,6 +161,7 @@ impl LocalDevCapabilityPolicy {
                         workspace_mounts,
                         skill_mounts,
                         memory_mounts,
+                        system_extensions_mounts,
                         Some(EffectKind::SpawnProcess),
                     ),
                     Err(LocalDevCapabilityPolicyError::MissingGrant { .. }) => {
@@ -158,6 +174,7 @@ impl LocalDevCapabilityPolicy {
                             workspace_mounts,
                             skill_mounts,
                             memory_mounts,
+                            system_extensions_mounts,
                             None,
                         )
                     }
@@ -247,6 +264,7 @@ pub(crate) enum LocalDevMountProfile {
     Ambient,
     SkillManagement,
     Memory,
+    SystemExtensionsLifecycle,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
@@ -411,6 +429,7 @@ fn constraint_terms(
     workspace_mounts: &MountView,
     skill_mounts: &MountView,
     memory_mounts: &MountView,
+    system_extensions_mounts: &MountView,
     required_effect: Option<EffectKind>,
 ) -> GrantConstraints {
     let mounts = match source.mounts() {
@@ -418,6 +437,7 @@ fn constraint_terms(
         LocalDevMountProfile::Ambient => MountView::default(),
         LocalDevMountProfile::SkillManagement => skill_mounts.clone(),
         LocalDevMountProfile::Memory => memory_mounts.clone(),
+        LocalDevMountProfile::SystemExtensionsLifecycle => system_extensions_mounts.clone(),
     };
     let network = match source.network() {
         LocalDevNetworkProfile::Default => NetworkPolicy::default(),
@@ -691,6 +711,7 @@ mod tests {
                 &MountView::default(),
                 &MountView::default(),
                 &MountView::default(),
+                &MountView::default(),
             )
             .expect("lease approval");
 
@@ -714,6 +735,7 @@ mod tests {
                 LocalDevApprovalPolicyAction::SpawnCapability {
                     capability: &capability,
                 },
+                &MountView::default(),
                 &MountView::default(),
                 &MountView::default(),
                 &MountView::default(),

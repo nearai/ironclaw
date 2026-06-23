@@ -892,8 +892,8 @@ mod tests {
         // secret-like token there is rejected even though bare words like
         // "stack trace" are now intentionally allowed (#5001, PinchBench bucket D).
         let mut envelope = provider_reference();
-        envelope.response_reasoning =
-            Some(format!("provider error leaked sk-proj-{}", "b".repeat(24)));
+        let leaked_token = format!("sk-proj-{}", "b".repeat(24));
+        envelope.response_reasoning = Some(format!("provider error leaked {leaked_token}"));
         assert!(envelope.validate().is_err());
     }
 

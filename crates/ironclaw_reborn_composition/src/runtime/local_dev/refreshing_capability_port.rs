@@ -25,7 +25,10 @@ use crate::runtime::local_dev::skill_activation::skill_activation_capability;
 use crate::runtime::local_dev::surface_disclosure::wrap_local_dev_surface_disclosure;
 use crate::runtime::local_dev::synthetic_capability::wrap_local_dev_synthetic_capabilities;
 
-use super::{capability_io_error, host_api_agent_loop_error, local_dev_visible_capability_request};
+use super::{
+    LocalDevVisibleCapabilityInputs, capability_io_error, host_api_agent_loop_error,
+    local_dev_visible_capability_request,
+};
 
 pub(super) struct RefreshingLocalDevCapabilityPortConfig {
     pub(super) runtime: Arc<dyn HostRuntime>,
@@ -35,6 +38,7 @@ pub(super) struct RefreshingLocalDevCapabilityPortConfig {
     pub(super) workspace_mounts: MountView,
     pub(super) skill_mounts: MountView,
     pub(super) memory_mounts: MountView,
+    pub(super) system_extensions_lifecycle_mounts: MountView,
     pub(super) extension_surface_source: LocalDevExtensionSurfaceSource,
     pub(super) input_resolver: Arc<dyn LoopCapabilityInputResolver>,
     pub(super) result_writer: Arc<dyn LoopCapabilityResultWriter>,
@@ -59,6 +63,7 @@ pub(super) async fn create_refreshing_local_dev_capability_port(
         workspace_mounts: config.workspace_mounts,
         skill_mounts: config.skill_mounts,
         memory_mounts: config.memory_mounts,
+        system_extensions_lifecycle_mounts: config.system_extensions_lifecycle_mounts,
         extension_surface_source: config.extension_surface_source,
         input_resolver: config.input_resolver,
         result_writer: config.result_writer,
@@ -89,6 +94,7 @@ struct RefreshingLocalDevCapabilityPort {
     workspace_mounts: MountView,
     skill_mounts: MountView,
     memory_mounts: MountView,
+    system_extensions_lifecycle_mounts: MountView,
     extension_surface_source: LocalDevExtensionSurfaceSource,
     input_resolver: Arc<dyn LoopCapabilityInputResolver>,
     result_writer: Arc<dyn LoopCapabilityResultWriter>,
@@ -114,11 +120,14 @@ impl RefreshingLocalDevCapabilityPort {
         let visible_request = local_dev_visible_capability_request(
             &self.run_context,
             &self.fallback_user_id,
-            self.workspace_mounts.clone(),
-            self.skill_mounts.clone(),
-            self.memory_mounts.clone(),
-            &self.policy,
-            &extension_surface,
+            LocalDevVisibleCapabilityInputs {
+                workspace_mounts: &self.workspace_mounts,
+                skill_mounts: &self.skill_mounts,
+                memory_mounts: &self.memory_mounts,
+                system_extensions_lifecycle_mounts: &self.system_extensions_lifecycle_mounts,
+                policy: &self.policy,
+                extension_surface: &extension_surface,
+            },
         )?;
         let mut factory = HostRuntimeLoopCapabilityPortFactory::new(
             Arc::clone(&self.runtime),
@@ -143,6 +152,12 @@ impl RefreshingLocalDevCapabilityPort {
         for capability_id in self.policy.memory_capability_ids() {
             factory = factory
                 .with_capability_execution_mount(capability_id.clone(), self.memory_mounts.clone());
+        }
+        for capability_id in self.policy.system_extensions_lifecycle_capability_ids() {
+            factory = factory.with_capability_execution_mount(
+                capability_id.clone(),
+                self.system_extensions_lifecycle_mounts.clone(),
+            );
         }
         let port = factory.for_run_context(self.run_context.clone());
         let mut synthetic_capabilities = match &self.skill_activation_source {

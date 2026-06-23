@@ -8314,6 +8314,15 @@ impl SecretStore for CountingErrorSecretStore {
         })
     }
 
+    async fn metadata_for_scope(
+        &self,
+        _scope: &ResourceScope,
+    ) -> Result<Vec<SecretMetadata>, SecretStoreError> {
+        Err(SecretStoreError::StoreUnavailable {
+            reason: "simulated backend failure".to_string(),
+        })
+    }
+
     async fn delete(
         &self,
         _scope: &ResourceScope,

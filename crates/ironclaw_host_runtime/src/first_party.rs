@@ -10,8 +10,9 @@ use std::{collections::HashMap, fmt, sync::Arc};
 
 use async_trait::async_trait;
 use ironclaw_host_api::{
-    CapabilityDisplayOutputPreview, CapabilityId, MountView, ResourceEstimate, ResourceScope,
-    ResourceUsage, RuntimeCredentialAuthRequirement, RuntimeDispatchErrorKind, SecretHandle,
+    CapabilityDisplayOutputPreview, CapabilityId, DispatchFailureDetail, DispatchInputIssue,
+    MountView, ResourceEstimate, ResourceScope, ResourceUsage, RuntimeCredentialAuthRequirement,
+    RuntimeDispatchErrorKind, SecretHandle,
 };
 use serde_json::Value;
 
@@ -124,6 +125,7 @@ pub enum FirstPartyCapabilityError {
     Dispatch {
         kind: RuntimeDispatchErrorKind,
         safe_summary: Option<String>,
+        detail: Option<Box<DispatchFailureDetail>>,
         usage: Option<ResourceUsage>,
     },
     /// Dispatch was blocked because a staged credential is missing or expired.
@@ -144,6 +146,7 @@ impl FirstPartyCapabilityError {
         Self::Dispatch {
             kind,
             safe_summary: None,
+            detail: None,
             usage: None,
         }
     }
@@ -155,6 +158,19 @@ impl FirstPartyCapabilityError {
         Self::Dispatch {
             kind,
             safe_summary: Some(safe_summary.into()),
+            detail: None,
+            usage: None,
+        }
+    }
+
+    pub fn invalid_input_issues(
+        safe_summary: impl Into<String>,
+        issues: Vec<DispatchInputIssue>,
+    ) -> Self {
+        Self::Dispatch {
+            kind: RuntimeDispatchErrorKind::InputEncode,
+            safe_summary: Some(safe_summary.into()),
+            detail: Some(Box::new(DispatchFailureDetail::InvalidInput { issues })),
             usage: None,
         }
     }
@@ -196,10 +212,14 @@ impl FirstPartyCapabilityError {
     pub fn with_usage(self, usage: ResourceUsage) -> Self {
         match self {
             Self::Dispatch {
-                kind, safe_summary, ..
+                kind,
+                safe_summary,
+                detail,
+                ..
             } => Self::Dispatch {
                 kind,
                 safe_summary,
+                detail,
                 usage: Some(usage),
             },
             Self::AuthRequired {

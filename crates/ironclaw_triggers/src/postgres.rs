@@ -611,6 +611,7 @@ impl TriggerRepository for PostgresTriggerRepository {
             && record.next_run_at > request.fire_slot
         {
             return Err(TriggerError::InvalidRecord {
+                kind: crate::TriggerRecordValidationKind::Other,
                 reason: "retryable fire failure must leave next_run_at at or before the failed fire slot"
                     .to_string(),
             });
@@ -1291,6 +1292,7 @@ fn fmt_ts(value: &Timestamp) -> String {
 
 fn invalid_record(field: &str, reason: impl Into<String>) -> TriggerError {
     TriggerError::InvalidRecord {
+        kind: crate::TriggerRecordValidationKind::Other,
         reason: format!("{field}: {}", reason.into()),
     }
 }

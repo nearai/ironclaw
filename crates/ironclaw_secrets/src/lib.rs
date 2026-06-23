@@ -1012,6 +1012,16 @@ pub trait SecretStore: Send + Sync {
         handle: &SecretHandle,
     ) -> Result<Option<SecretMetadata>, SecretStoreError>;
 
+    /// Lists redacted metadata for secrets under exactly the caller's owner scope.
+    ///
+    /// This intentionally exposes handles only, never material or leases. Backends
+    /// should avoid per-handle point reads when they can enumerate the owner prefix
+    /// directly.
+    async fn metadata_for_scope(
+        &self,
+        scope: &ResourceScope,
+    ) -> Result<Vec<SecretMetadata>, SecretStoreError>;
+
     /// Deletes a scoped secret if it exists. Returns whether a stored secret was removed.
     async fn delete(
         &self,
@@ -1204,6 +1214,30 @@ where
             Err(SecretError::NotFound(_)) => Ok(None),
             Err(error) => Err(map_legacy_secret_error(error)),
         }
+    }
+
+    async fn metadata_for_scope(
+        &self,
+        scope: &ResourceScope,
+    ) -> Result<Vec<SecretMetadata>, SecretStoreError> {
+        let legacy_user_id = scoped_legacy_user_id(scope);
+        self.inner
+            .list(&legacy_user_id)
+            .await
+            .map_err(map_legacy_secret_error)?
+            .into_iter()
+            .map(|secret| {
+                SecretHandle::new(secret.name)
+                    .map(|handle| SecretMetadata {
+                        scope: scope.clone(),
+                        handle,
+                        expires_at: None,
+                    })
+                    .map_err(|error| SecretStoreError::StoreUnavailable {
+                        reason: format!("legacy secret handle is invalid: {error}"),
+                    })
+            })
+            .collect()
     }
 
     async fn delete(
@@ -1431,6 +1465,13 @@ impl SecretStore for InMemorySecretStore {
         handle: &SecretHandle,
     ) -> Result<Option<SecretMetadata>, SecretStoreError> {
         self.inner.metadata(scope, handle).await
+    }
+
+    async fn metadata_for_scope(
+        &self,
+        scope: &ResourceScope,
+    ) -> Result<Vec<SecretMetadata>, SecretStoreError> {
+        self.inner.metadata_for_scope(scope).await
     }
 
     async fn delete(

@@ -42,6 +42,8 @@ env:
   # no OOM, so keep Cargo's default parallelism. If runner OOMs recur, restore
   # the previous one-job Cargo build serialization as the one-line fallback.
   RUSTFLAGS: "-C linker=clang -C link-arg=--ld-path=/usr/bin/mold"
+  CARGO_HTTP_MULTIPLEXING: "false"
+  CARGO_NET_RETRY: "10"
   CARGO_PROFILE_DEV_DEBUG: 0
   CARGO_PROFILE_TEST_DEBUG: 0
   # The 64-crate closure runs ~64 jobs that each resolve+download the dependency
