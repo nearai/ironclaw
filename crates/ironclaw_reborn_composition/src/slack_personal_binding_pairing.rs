@@ -19,7 +19,9 @@ use ironclaw_slack_v2_adapter::{SLACK_USER_ACTOR_KIND, SLACK_V2_ADAPTER_ID};
 use thiserror::Error;
 
 use crate::slack_actor_identity::RebornUserIdentityLookup;
-use crate::slack_outbound_targets::SlackPersonalDmTargetProvisioner;
+use crate::slack_outbound_targets::{
+    SlackPersonalDmTarget, SlackPersonalDmTargetError, SlackPersonalDmTargetProvisioner,
+};
 use crate::slack_personal_binding::{
     RebornUserIdentityBinding, SlackPersonalBindingPrincipal, SlackPersonalUserBindingError,
     SlackPersonalUserBindingService,
@@ -123,6 +125,26 @@ pub trait SlackPersonalBindingPairingNotifier: Send + Sync {
 }
 
 #[async_trait::async_trait]
+pub(crate) trait SlackPersonalDmTargetProvisioning: Send + Sync + std::fmt::Debug {
+    async fn provision_for_user(
+        &self,
+        user_id: UserId,
+        slack_user_id: SlackUserId,
+    ) -> Result<SlackPersonalDmTarget, SlackPersonalDmTargetError>;
+}
+
+#[async_trait::async_trait]
+impl SlackPersonalDmTargetProvisioning for SlackPersonalDmTargetProvisioner {
+    async fn provision_for_user(
+        &self,
+        user_id: UserId,
+        slack_user_id: SlackUserId,
+    ) -> Result<SlackPersonalDmTarget, SlackPersonalDmTargetError> {
+        SlackPersonalDmTargetProvisioner::provision_for_user(self, user_id, slack_user_id).await
+    }
+}
+
+#[async_trait::async_trait]
 pub(crate) trait SlackPersonalUserBinder: Send + Sync + std::fmt::Debug {
     async fn validate_installation_actor(
         &self,
@@ -176,7 +198,7 @@ pub struct SlackPersonalBindingPairingService {
     binding_service: Arc<dyn SlackPersonalUserBinder>,
     challenge_store: Arc<dyn SlackPersonalBindingPairingChallengeStore>,
     notifier: Arc<dyn SlackPersonalBindingPairingNotifier>,
-    dm_provisioner: Option<Arc<SlackPersonalDmTargetProvisioner>>,
+    dm_provisioner: Option<Arc<dyn SlackPersonalDmTargetProvisioning>>,
 }
 
 impl SlackPersonalBindingPairingService {
@@ -206,7 +228,7 @@ impl SlackPersonalBindingPairingService {
     /// and never blocks or fails the redemption itself.
     pub(crate) fn with_dm_provisioner(
         mut self,
-        provisioner: Arc<SlackPersonalDmTargetProvisioner>,
+        provisioner: Arc<dyn SlackPersonalDmTargetProvisioning>,
     ) -> Self {
         self.dm_provisioner = Some(provisioner);
         self

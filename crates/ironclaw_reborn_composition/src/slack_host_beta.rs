@@ -2646,6 +2646,102 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn dynamic_slack_setup_pairing_registers_runtime_personal_dm_target() {
+        // Regression guard for PR #5152's WebUI Slack setup path: dynamic setup
+        // must register the same runtime outbound target provider and pairing
+        // DM provisioner that static Slack host-beta setup wires.
+        let egress = Arc::new(RecordingRuntimeHttpEgress::default());
+        let (runtime, _root) = runtime_with_host_egress_override(Some(Some(
+            host_egress_port_for_test(Arc::clone(&egress)),
+        )))
+        .await;
+        let mounts = build_slack_host_beta_runtime_mounts(
+            &runtime,
+            dynamic_runtime_config_without_legacy_actor(),
+        )
+        .await
+        .expect("dynamic mounts");
+        assert!(
+            mounts.outbound_delivery_target_provider_registered,
+            "dynamic Slack setup must register its target provider with the runtime"
+        );
+
+        let first_body =
+            dm_event_body_with("Ev-dynamic-dm-provision", "pair me", "1710000003.000001");
+        post_signed_slack_event(&mounts.events, &first_body).await;
+        if let Some(drain) = mounts.events.drain.as_ref() {
+            drain.drain().await;
+        }
+        let pairing_code = wait_for_pairing_code(&egress).await;
+
+        let pairing_mount =
+            slack_personal_binding_pairing_route_mount(mounts.personal_binding_pairing.clone());
+        let redeem_body = format!(r#"{{"channel":"slack","code":"{pairing_code}"}}"#);
+        let redeem_response = pairing_mount
+            .protected
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(WEBUI_V2_EXTENSION_PAIRING_REDEEM_PATH)
+                    .header("content-type", "application/json")
+                    .extension(operator_caller())
+                    .body(Body::from(redeem_body))
+                    .expect("redeem request builds"),
+            )
+            .await
+            .expect("redeem route responds");
+        assert_eq!(redeem_response.status(), StatusCode::OK);
+
+        let runtime_provider = runtime
+            .outbound_delivery_target_provider()
+            .expect("dynamic Slack setup registers runtime provider");
+        let mut runtime_targets = Vec::new();
+        for _ in 0..40 {
+            runtime_targets = runtime_provider
+                .list_outbound_delivery_targets(&operator_caller())
+                .await
+                .expect("runtime target list");
+            if !runtime_targets.is_empty() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+        assert_eq!(
+            runtime_targets.len(),
+            1,
+            "dynamic pairing must provision a runtime-visible personal DM target"
+        );
+        assert_eq!(
+            runtime_targets[0].summary.target_id.as_str(),
+            "slack:personal-dm:T0HOST:user:slack-host"
+        );
+
+        let bundle = build_webui_services_with_slack_host_beta_mounts(
+            &runtime,
+            None,
+            Some(&mounts),
+            SlackOperatorRouteVisibility::Hidden,
+        )
+        .expect("webui bundle");
+        let selected = bundle
+            .api
+            .set_outbound_preferences(
+                operator_caller(),
+                RebornSetOutboundPreferencesRequest {
+                    final_reply_target_id: Some(runtime_targets[0].summary.target_id.clone()),
+                },
+            )
+            .await
+            .expect("set dynamic Slack personal DM target");
+        assert_eq!(
+            selected.final_reply_target_status,
+            RebornOutboundDeliveryTargetStatus::Available
+        );
+
+        runtime.shutdown().await.expect("runtime shuts down");
+    }
+
+    #[tokio::test]
     async fn pairing_redeem_is_idempotent_and_does_not_duplicate_dm_target() {
         // Re-provisioning (pairing re-fires) must not create duplicate targets.
         let egress = Arc::new(RecordingRuntimeHttpEgress::default());
@@ -3342,6 +3438,26 @@ mod tests {
             bot_token: SecretString::from("xoxb-host-token"),
         })
         .expect("valid config")
+    }
+
+    fn dynamic_runtime_config_without_legacy_actor() -> SlackHostBetaRuntimeConfig {
+        SlackHostBetaRuntimeConfig::new(
+            TenantId::new(TENANT).expect("tenant"),
+            AgentId::new(AGENT).expect("agent"),
+            Some(ProjectId::new(PROJECT).expect("project")),
+            UserId::new(USER).expect("user"),
+        )
+        .with_legacy_setup(SlackHostBetaLegacySetup {
+            installation_id: INSTALLATION.to_string(),
+            team_id: TEAM.to_string(),
+            api_app_id: API_APP.to_string(),
+            slack_user_id: None,
+            user_id: UserId::new(USER).expect("user"),
+            shared_subject_user_id: None,
+            channel_routes: Vec::new(),
+            signing_secret: SecretString::from(SECRET),
+            bot_token: SecretString::from("xoxb-host-token"),
+        })
     }
 
     fn config_without_channel_routes() -> SlackHostBetaConfig {

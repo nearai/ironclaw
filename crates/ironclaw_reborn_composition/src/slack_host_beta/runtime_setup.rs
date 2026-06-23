@@ -10,10 +10,14 @@ use ironclaw_product_workflow::{
     RebornServicesErrorCode, RebornServicesErrorKind, WebUiAuthenticatedCaller,
 };
 use ironclaw_turns::ReplyTargetBindingRef;
+use sha2::{Digest, Sha256};
 use tokio::sync::Mutex;
 
 use crate::RebornRuntime;
-use crate::outbound_preferences::{OutboundDeliveryTargetEntry, OutboundDeliveryTargetProvider};
+use crate::outbound_preferences::{
+    OutboundDeliveryTargetEntry, OutboundDeliveryTargetProvider,
+    OutboundDeliveryTargetRegistrationOutcome,
+};
 use crate::slack_actor_identity::{
     RebornUserIdentityLookup, SLACK_IDENTITY_PROVIDER, SlackUserIdentityActorResolver,
     slack_user_identity_provider_user_id,
@@ -24,8 +28,8 @@ use crate::slack_channel_routes::{
 };
 use crate::slack_host_state::FilesystemSlackHostState;
 use crate::slack_outbound_targets::{
-    SlackHostBetaOutboundTargetProvider, SlackOutboundTargetProviderConfig,
-    SlackPersonalDmTargetStore,
+    SlackHostBetaOutboundTargetProvider, SlackOutboundTargetProviderConfig, SlackPersonalDmTarget,
+    SlackPersonalDmTargetError, SlackPersonalDmTargetProvisioner, SlackPersonalDmTargetStore,
 };
 use crate::slack_pairing_notifier::SlackPairingChallengeHttpNotifier;
 use crate::slack_personal_binding::{
@@ -39,7 +43,7 @@ use crate::slack_personal_binding_pairing::{
     SlackPersonalBindingPairingChallenge, SlackPersonalBindingPairingChallengeStore,
     SlackPersonalBindingPairingCode, SlackPersonalBindingPairingError,
     SlackPersonalBindingPairingNotifier, SlackPersonalBindingPairingService,
-    SlackPersonalUserBinder,
+    SlackPersonalDmTargetProvisioning, SlackPersonalUserBinder,
 };
 use crate::slack_personal_binding_pairing_serve::SlackPersonalBindingPairingRouteConfig;
 use crate::slack_serve::{
@@ -80,11 +84,13 @@ pub(super) async fn build_runtime_mounts(
         setup_store,
         runtime.services().secret_store(),
     ));
+    let token_handle = slack_bot_token_handle()?;
     let binding_store: Arc<dyn RebornUserIdentityBindingStore> = state.clone();
+    let channel_route_store: Arc<dyn SlackChannelRouteStore> = state.clone();
+    let personal_dm_target_store: Arc<dyn SlackPersonalDmTargetStore> = state.clone();
     let dynamic_binding_service: Arc<dyn SlackPersonalUserBinder> = Arc::new(
         DynamicSlackPersonalUserBinder::new(Arc::clone(&setup_service), Arc::clone(&binding_store)),
     );
-    let token_handle = slack_bot_token_handle()?;
     let notifier: Arc<dyn SlackPersonalBindingPairingNotifier> =
         Arc::new(SlackPairingChallengeHttpNotifier::new(
             Arc::new(DynamicSlackProtocolHttpEgress::new(
@@ -92,18 +98,24 @@ pub(super) async fn build_runtime_mounts(
                 Arc::clone(&setup_service),
                 token_handle.clone(),
             )),
-            token_handle,
+            token_handle.clone(),
         ));
     let challenge_store: Arc<dyn SlackPersonalBindingPairingChallengeStore> = Arc::new(
         DynamicSlackPairingChallengeStore::new(Arc::clone(&setup_service), state.clone()),
     );
+    let dm_provisioner: Arc<dyn SlackPersonalDmTargetProvisioning> =
+        Arc::new(DynamicSlackPersonalDmTargetProvisioner::new(
+            Arc::clone(&parts),
+            Arc::clone(&setup_service),
+            token_handle.clone(),
+            Arc::clone(&personal_dm_target_store),
+        ));
     let pairing = SlackPersonalBindingPairingService::new_with_binder(
         dynamic_binding_service,
         challenge_store,
         notifier,
-    );
-    let channel_route_store: Arc<dyn SlackChannelRouteStore> = state.clone();
-    let personal_dm_target_store: Arc<dyn SlackPersonalDmTargetStore> = state.clone();
+    )
+    .with_dm_provisioner(dm_provisioner);
     if let Some(legacy_setup) = config.legacy_setup.clone() {
         seed_legacy_slack_setup_if_missing(
             &setup_service,
@@ -125,22 +137,78 @@ pub(super) async fn build_runtime_mounts(
         Arc::clone(&setup_service),
     );
 
-    Ok(SlackHostBetaMounts {
-        events: slack_events_route_mount(SlackEventsRouteState::from_resolver(Arc::new(resolver))),
-        personal_binding_pairing: SlackPersonalBindingPairingRouteConfig::new(pairing),
-        channel_routes,
-        outbound_delivery_target_provider: Arc::new(SlackDynamicOutboundTargetProvider::new(
+    let outbound_delivery_target_provider: Arc<dyn OutboundDeliveryTargetProvider> =
+        Arc::new(SlackDynamicOutboundTargetProvider::new(
             SlackDynamicOutboundTargetProviderConfig {
-                tenant_id: config.tenant_id,
-                agent_id: config.agent_id,
-                project_id: config.project_id,
+                tenant_id: config.tenant_id.clone(),
+                agent_id: config.agent_id.clone(),
+                project_id: config.project_id.clone(),
             },
             setup_service,
             channel_route_store,
             personal_dm_target_store,
-        )),
-        outbound_delivery_target_provider_registered: false,
+        ));
+    let provider_key = slack_dynamic_outbound_delivery_target_provider_key(&config);
+    let provider_already_registered = runtime
+        .outbound_delivery_target_provider_key_registered(&provider_key)
+        .map_err(
+            |error| SlackHostBetaBuildError::OutboundDeliveryTargetRegistration {
+                reason: error.to_string(),
+            },
+        )?;
+    if !provider_already_registered {
+        match runtime
+            .register_outbound_delivery_target_provider(
+                provider_key,
+                Arc::clone(&outbound_delivery_target_provider),
+            )
+            .map_err(
+                |error| SlackHostBetaBuildError::OutboundDeliveryTargetRegistration {
+                    reason: error.to_string(),
+                },
+            )? {
+            OutboundDeliveryTargetRegistrationOutcome::Registered => {}
+            OutboundDeliveryTargetRegistrationOutcome::Replaced => {
+                return Err(SlackHostBetaBuildError::OutboundDeliveryTargetRegistration {
+                    reason: "Slack dynamic outbound delivery target provider was concurrently registered".to_string(),
+                });
+            }
+        }
+    }
+
+    Ok(SlackHostBetaMounts {
+        events: slack_events_route_mount(SlackEventsRouteState::from_resolver(Arc::new(resolver))),
+        personal_binding_pairing: SlackPersonalBindingPairingRouteConfig::new(pairing),
+        channel_routes,
+        outbound_delivery_target_provider,
+        outbound_delivery_target_provider_registered: true,
     })
+}
+
+fn slack_dynamic_outbound_delivery_target_provider_key(
+    config: &SlackHostBetaRuntimeConfig,
+) -> String {
+    let mut hasher = Sha256::new();
+    hash_provider_key_field(&mut hasher, config.tenant_id.as_str());
+    hash_provider_key_field(&mut hasher, config.agent_id.as_str());
+    hash_provider_key_field(
+        &mut hasher,
+        config.project_id.as_ref().map_or("", ProjectId::as_str),
+    );
+    hash_provider_key_field(&mut hasher, config.operator_user_id.as_str());
+
+    let digest = hasher.finalize();
+    let mut suffix = String::with_capacity(64);
+    for byte in digest {
+        use std::fmt::Write as _;
+        let _ = write!(&mut suffix, "{byte:02x}");
+    }
+    format!("slack-host-beta-runtime-setup:{suffix}")
+}
+
+fn hash_provider_key_field(hasher: &mut Sha256, value: &str) {
+    hasher.update(value.len().to_be_bytes());
+    hasher.update(value.as_bytes());
 }
 
 async fn seed_legacy_slack_setup_if_missing(
@@ -309,6 +377,84 @@ impl ProtocolHttpEgress for DynamicSlackProtocolHttpEgress {
         request: EgressRequest,
     ) -> Result<EgressResponse, ProtocolHttpEgressError> {
         self.configured_egress().await?.send(request).await
+    }
+}
+
+#[derive(Clone)]
+struct DynamicSlackPersonalDmTargetProvisioner {
+    parts: Arc<SlackHostBetaRuntimeParts>,
+    setup_service: Arc<SlackSetupService>,
+    token_handle: EgressCredentialHandle,
+    store: Arc<dyn SlackPersonalDmTargetStore>,
+}
+
+impl DynamicSlackPersonalDmTargetProvisioner {
+    fn new(
+        parts: Arc<SlackHostBetaRuntimeParts>,
+        setup_service: Arc<SlackSetupService>,
+        token_handle: EgressCredentialHandle,
+        store: Arc<dyn SlackPersonalDmTargetStore>,
+    ) -> Self {
+        Self {
+            parts,
+            setup_service,
+            token_handle,
+            store,
+        }
+    }
+
+    async fn configured_provisioner(
+        &self,
+    ) -> Result<SlackPersonalDmTargetProvisioner, SlackPersonalDmTargetError> {
+        let setup = self
+            .setup_service
+            .current_setup()
+            .await
+            .map_err(|_| SlackPersonalDmTargetError::StoreUnavailable)?
+            .ok_or(SlackPersonalDmTargetError::StoreUnavailable)?;
+        let config = slack_host_beta_config_from_setup(&self.setup_service, setup)
+            .await
+            .map_err(|_| SlackPersonalDmTargetError::StoreUnavailable)?
+            .map_err(|error| SlackPersonalDmTargetError::ProvisioningFailed(error.to_string()))?;
+        let egress =
+            slack_protocol_egress_from_parts(&self.parts, &config, self.token_handle.clone())
+                .map_err(|error| {
+                    SlackPersonalDmTargetError::ProvisioningFailed(error.to_string())
+                })?;
+        Ok(SlackPersonalDmTargetProvisioner::new(
+            config.tenant_id,
+            config.installation_id,
+            config.team_id,
+            egress,
+            self.token_handle.clone(),
+            Arc::clone(&self.store),
+        ))
+    }
+}
+
+impl std::fmt::Debug for DynamicSlackPersonalDmTargetProvisioner {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("DynamicSlackPersonalDmTargetProvisioner")
+            .field("tenant_id", &self.setup_service.tenant_id())
+            .field("agent_id", &self.setup_service.agent_id())
+            .field("project_id", &self.setup_service.project_id())
+            .field("store", &self.store)
+            .finish_non_exhaustive()
+    }
+}
+
+#[async_trait::async_trait]
+impl SlackPersonalDmTargetProvisioning for DynamicSlackPersonalDmTargetProvisioner {
+    async fn provision_for_user(
+        &self,
+        user_id: ironclaw_host_api::UserId,
+        slack_user_id: SlackUserId,
+    ) -> Result<SlackPersonalDmTarget, SlackPersonalDmTargetError> {
+        self.configured_provisioner()
+            .await?
+            .provision_for_user(user_id, slack_user_id)
+            .await
     }
 }
 
