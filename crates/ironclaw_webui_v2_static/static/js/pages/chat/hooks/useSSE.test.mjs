@@ -58,7 +58,9 @@ function instantiateUseSSE() {
   const timers = [];
   let cleanup = null;
   const context = {
-    clearTimeout: () => {},
+    clearTimeout: (timer) => {
+      timer.cancelled = true;
+    },
     document: {
       visibilityState: "visible",
       addEventListener: () => {},
@@ -87,8 +89,9 @@ function instantiateUseSSE() {
       },
     },
     setTimeout: (callback, delay) => {
-      timers.push({ callback, delay });
-      return timers.length;
+      const timer = { callback, delay, cancelled: false };
+      timers.push(timer);
+      return timer;
     },
   };
   vm.runInNewContext(useSSESourceForTest(), context);
@@ -101,6 +104,7 @@ function instantiateUseSSE() {
     cleanup: () => cleanup?.(),
     events,
     source: sources[0],
+    sources,
     statuses,
     timers,
   };
@@ -121,6 +125,27 @@ test("useSSE stops reconnecting after a terminal server error event", () => {
   assert.equal(harness.source.closeCalls, 1, "terminal error closes the stream once");
   assert.equal(harness.timers.length, 0, "terminal error must not schedule reconnect");
   assert.equal(harness.statuses.at(-1), "disconnected");
+  assert.deepEqual(harness.events.map((event) => event.type), ["error"]);
+});
+
+test("useSSE cancels reconnect if EventSource.onerror runs before the terminal error listener", () => {
+  const harness = instantiateUseSSE();
+
+  harness.source.onopen();
+  harness.source.onerror();
+  harness.source.emit("error", {
+    type: "error",
+    error: "not_found",
+    kind: "not_found",
+    retryable: false,
+  });
+
+  assert.equal(harness.source.closeCalls, 1, "lifecycle error closes the stream");
+  assert.equal(harness.timers.length, 1, "lifecycle error initially schedules reconnect");
+  assert.equal(harness.timers[0].cancelled, true, "terminal frame cancels the scheduled reconnect");
+
+  harness.timers[0].callback();
+  assert.equal(harness.sources.length, 1, "cancelled terminal reconnect must not open a new stream");
   assert.deepEqual(harness.events.map((event) => event.type), ["error"]);
 });
 

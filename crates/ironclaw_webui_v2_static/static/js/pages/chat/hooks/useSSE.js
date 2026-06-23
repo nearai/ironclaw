@@ -51,9 +51,11 @@ export function useSSE({ threadId, onEvent, enabled }) {
     let reconnectTimer = null;
     let reconnectAttempts = 0;
     let terminalError = false;
+    const handledEvents = new WeakSet();
     const maxReconnectDelay = 30_000;
 
     function connect() {
+      if (terminalError) return;
       if (document.visibilityState === "hidden") {
         setStatus("paused");
         return;
@@ -70,7 +72,8 @@ export function useSSE({ threadId, onEvent, enabled }) {
         setStatus("connected");
       };
 
-      es.onerror = () => {
+      es.onerror = (event) => {
+        if (dispatchFrame(event, "error") === "terminal") return;
         if (es) es.close();
         es = null;
         setStatus("disconnected");
@@ -80,14 +83,16 @@ export function useSSE({ threadId, onEvent, enabled }) {
         reconnectTimer = setTimeout(connect, delay);
       };
 
-      const dispatchFrame = (event, fallbackType) => {
+      function dispatchFrame(event, fallbackType) {
+        if (!event || handledEvents.has(event)) return null;
         let frame = null;
         try {
           frame = JSON.parse(event.data);
         } catch (_) {
-          return;
+          return null;
         }
-        if (!frame || typeof frame !== "object") return;
+        if (!frame || typeof frame !== "object") return null;
+        handledEvents.add(event);
         if (event.lastEventId) {
           lastEventIdRef.current = event.lastEventId;
         }
@@ -95,6 +100,10 @@ export function useSSE({ threadId, onEvent, enabled }) {
         const stopAfterEvent = frameType === "error" && frame.retryable === false;
         if (stopAfterEvent) {
           terminalError = true;
+          if (reconnectTimer) {
+            clearTimeout(reconnectTimer);
+            reconnectTimer = null;
+          }
         }
         onEventRef.current?.({
           // The frame's own `type` field is the canonical source;
@@ -110,7 +119,8 @@ export function useSSE({ threadId, onEvent, enabled }) {
           es = null;
           setStatus("disconnected");
         }
-      };
+        return stopAfterEvent ? "terminal" : "handled";
+      }
 
       // Cover anything emitted without an `event:` field — defensive
       // only; the Rust handler always tags its frames today.
