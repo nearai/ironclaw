@@ -337,26 +337,29 @@ export IRONCLAW_REBORN_HOME="$PWD/.reborn-home"
 export OPENAI_API_KEY="sk-..." # or the required env var for your configured provider
 export IRONCLAW_REBORN_WEBUI_TOKEN="$(openssl rand -hex 32)"
 export IRONCLAW_REBORN_WEBUI_USER_ID="reborn-cli"
+export IRONCLAW_REBORN_SLACK_ENABLED="true"
 
 cargo run -q -p ironclaw_reborn_cli --features slack-v2-host-beta --bin ironclaw-reborn -- serve
 ```
 
-Add a `[slack]` section to `config.toml`:
+Enable Slack by setting `IRONCLAW_REBORN_SLACK_ENABLED=true`, or by adding a
+`[slack]` section to `config.toml`:
 
 ```toml
 [slack]
 enabled = true
 ```
 
-`enabled` is the only Slack boot setting. After the server starts, configure
-the Slack app ids, bot token, signing secret, and channel mappings from WebUI
-channel setup.
+The env var overrides only the Slack route enablement gate: `true`/`1` mounts
+Slack, while `false`/`0` acts as a deployment kill switch. After the server
+starts, configure the Slack app ids, bot token, signing secret, and channel
+mappings from WebUI channel setup.
 
 Required Slack settings:
 
 | Name | Purpose |
 | --- | --- |
-| `[slack].enabled = true` | Mounts the Slack route during `serve`. |
+| `[slack].enabled = true` or `IRONCLAW_REBORN_SLACK_ENABLED=true` | Mounts the Slack route during `serve`. |
 | WebUI Slack workspace setup | Stores Slack installation ids, channel mappings, and Slack bot/signing secrets. |
 
 More detailed Slack setup notes live in
