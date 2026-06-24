@@ -18,12 +18,13 @@ use chrono::{DateTime, Duration, Utc};
 use ironclaw_hooks::middleware::HookGateRefFactory;
 use ironclaw_host_api::{ApprovalRequestId, CapabilityId, UserId, sha256_digest_token};
 use ironclaw_turns::{
-    CapabilityActivityId, LoopGateRef,
+    LoopGateRef,
     run_profile::{
         AgentLoopHostError, AgentLoopHostErrorKind, CapabilityBatchInvocation,
         CapabilityBatchOutcome, CapabilityCallCandidate, CapabilityInvocation, CapabilityOutcome,
         LoopCapabilityPort, LoopRunContext, ProviderToolCall, ProviderToolCallCapabilityIds,
-        ProviderToolDefinition, VisibleCapabilityRequest, VisibleCapabilitySurface,
+        ProviderToolDefinition, RegisterProviderToolCallRequest, VisibleCapabilityRequest,
+        VisibleCapabilitySurface,
     },
 };
 
@@ -385,19 +386,9 @@ impl LoopCapabilityPort for HookGateInvocationScopePort {
 
     async fn register_provider_tool_call(
         &self,
-        tool_call: ProviderToolCall,
+        request: RegisterProviderToolCallRequest,
     ) -> Result<CapabilityCallCandidate, AgentLoopHostError> {
-        self.inner.register_provider_tool_call(tool_call).await
-    }
-
-    async fn register_provider_tool_call_for_activity(
-        &self,
-        tool_call: ProviderToolCall,
-        activity_id: CapabilityActivityId,
-    ) -> Result<CapabilityCallCandidate, AgentLoopHostError> {
-        self.inner
-            .register_provider_tool_call_for_activity(tool_call, activity_id)
-            .await
+        self.inner.register_provider_tool_call(request).await
     }
 
     async fn visible_capabilities(

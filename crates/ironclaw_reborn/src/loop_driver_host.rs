@@ -55,9 +55,9 @@ const LEGACY_TEXT_ONLY_CHECKPOINT_SCHEMA_ID: &str = "interactive_checkpoint_v1";
 const LEGACY_TEXT_ONLY_CHECKPOINT_SCHEMA_VERSION: u64 = 1;
 
 use ironclaw_turns::{
-    CapabilityActivityId, CheckpointStateStore, LoopCheckpointStateRef, LoopCheckpointStore,
-    RunProfileId, TurnCheckpointId, TurnError, TurnRunWake, TurnRunWakeNotifier,
-    TurnRunWakeNotifyError, TurnStateStore, TurnStatus,
+    CheckpointStateStore, LoopCheckpointStateRef, LoopCheckpointStore, RunProfileId,
+    TurnCheckpointId, TurnError, TurnRunWake, TurnRunWakeNotifier, TurnRunWakeNotifyError,
+    TurnStateStore, TurnStatus,
     run_profile::{
         AgentLoopHostError, AgentLoopHostErrorKind, AppendCapabilityResultRef, BeginAssistantDraft,
         CapabilityBatchInvocation, CapabilityBatchOutcome, CapabilityInvocation, CapabilityOutcome,
@@ -74,8 +74,9 @@ use ironclaw_turns::{
         LoopPromptBundle, LoopPromptBundleAuthority, LoopPromptBundleRequest, LoopPromptPort,
         LoopRunContext, LoopRunInfoPort, LoopRuntimeContext, LoopTranscriptPort,
         NoOpBudgetAccountant, NoOpPolicyGuard, ProviderToolCall, ProviderToolDefinition,
-        RunScopedHookMilestoneSink, StageCheckpointPayloadRequest, SystemInferencePort,
-        UpdateAssistantDraft, VisibleCapabilityRequest, VisibleCapabilitySurface,
+        RegisterProviderToolCallRequest, RunScopedHookMilestoneSink, StageCheckpointPayloadRequest,
+        SystemInferencePort, UpdateAssistantDraft, VisibleCapabilityRequest,
+        VisibleCapabilitySurface,
     },
     runner::ClaimedTurnRun,
 };
@@ -199,19 +200,9 @@ impl LoopCapabilityPort for SurfaceTrackingLoopCapabilityPort {
 
     async fn register_provider_tool_call(
         &self,
-        tool_call: ProviderToolCall,
+        request: RegisterProviderToolCallRequest,
     ) -> Result<ironclaw_turns::run_profile::CapabilityCallCandidate, AgentLoopHostError> {
-        self.inner.register_provider_tool_call(tool_call).await
-    }
-
-    async fn register_provider_tool_call_for_activity(
-        &self,
-        tool_call: ProviderToolCall,
-        activity_id: CapabilityActivityId,
-    ) -> Result<ironclaw_turns::run_profile::CapabilityCallCandidate, AgentLoopHostError> {
-        self.inner
-            .register_provider_tool_call_for_activity(tool_call, activity_id)
-            .await
+        self.inner.register_provider_tool_call(request).await
     }
 
     async fn visible_capabilities(
@@ -1879,21 +1870,9 @@ impl LoopCapabilityPort for RebornLoopDriverHost {
 
     async fn register_provider_tool_call(
         &self,
-        tool_call: ProviderToolCall,
+        request: RegisterProviderToolCallRequest,
     ) -> Result<ironclaw_turns::run_profile::CapabilityCallCandidate, AgentLoopHostError> {
-        self.capabilities
-            .register_provider_tool_call(tool_call)
-            .await
-    }
-
-    async fn register_provider_tool_call_for_activity(
-        &self,
-        tool_call: ProviderToolCall,
-        activity_id: CapabilityActivityId,
-    ) -> Result<ironclaw_turns::run_profile::CapabilityCallCandidate, AgentLoopHostError> {
-        self.capabilities
-            .register_provider_tool_call_for_activity(tool_call, activity_id)
-            .await
+        self.capabilities.register_provider_tool_call(request).await
     }
 
     async fn visible_capabilities(

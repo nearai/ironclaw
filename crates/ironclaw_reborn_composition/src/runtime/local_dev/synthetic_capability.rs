@@ -13,8 +13,8 @@ use ironclaw_turns::{
         CapabilityBatchOutcome, CapabilityCallCandidate, CapabilityDescriptorView,
         CapabilityInvocation, CapabilityOutcome, CapabilitySurfaceVersion, ConcurrencyHint,
         LoopCapabilityPort, LoopRunContext, ProviderToolCall, ProviderToolCallCapabilityIds,
-        ProviderToolCallReplay, ProviderToolDefinition, VisibleCapabilityRequest,
-        VisibleCapabilitySurface,
+        ProviderToolCallReplay, ProviderToolDefinition, RegisterProviderToolCallRequest,
+        VisibleCapabilityRequest, VisibleCapabilitySurface,
     },
 };
 
@@ -217,7 +217,10 @@ impl LocalDevSyntheticCapabilityPort {
         let Some((capability_id, _)) = self.synthetic_provider_call(&tool_call) else {
             return self
                 .inner
-                .register_provider_tool_call_for_activity(tool_call, activity_id)
+                .register_provider_tool_call(RegisterProviderToolCallRequest::for_activity(
+                    tool_call,
+                    activity_id,
+                ))
                 .await;
         };
         let capability_id = capability_id.clone();
@@ -313,22 +316,25 @@ impl LoopCapabilityPort for LocalDevSyntheticCapabilityPort {
 
     async fn register_provider_tool_call(
         &self,
-        tool_call: ProviderToolCall,
+        request: RegisterProviderToolCallRequest,
     ) -> Result<CapabilityCallCandidate, AgentLoopHostError> {
+        let RegisterProviderToolCallRequest {
+            tool_call,
+            activity_id,
+        } = request;
         if self.synthetic_provider_call(&tool_call).is_some() {
             return self
-                .register_synthetic_provider_tool_call(tool_call, CapabilityActivityId::new())
+                .register_synthetic_provider_tool_call(
+                    tool_call,
+                    activity_id.unwrap_or_else(CapabilityActivityId::new),
+                )
                 .await;
         }
-        self.inner.register_provider_tool_call(tool_call).await
-    }
-
-    async fn register_provider_tool_call_for_activity(
-        &self,
-        tool_call: ProviderToolCall,
-        activity_id: CapabilityActivityId,
-    ) -> Result<CapabilityCallCandidate, AgentLoopHostError> {
-        self.register_synthetic_provider_tool_call(tool_call, activity_id)
+        self.inner
+            .register_provider_tool_call(RegisterProviderToolCallRequest {
+                tool_call,
+                activity_id,
+            })
             .await
     }
 

@@ -29,7 +29,7 @@ use ironclaw_turns::{
         LoopCapabilityPort, LoopHostMilestone, LoopHostMilestoneKind, LoopHostMilestoneSink,
         LoopProcessRef, LoopRunContext, LoopSafeSummary, ProcessHandleSummary, ProviderToolCall,
         ProviderToolCallCapabilityIds, ProviderToolCallReplay, ProviderToolDefinition,
-        VisibleCapabilityRequest, VisibleCapabilitySurface,
+        RegisterProviderToolCallRequest, VisibleCapabilityRequest, VisibleCapabilitySurface,
     },
 };
 use serde_json::Value;
@@ -1361,18 +1361,9 @@ impl LoopCapabilityPort for HostRuntimeLoopCapabilityPort {
 
     async fn register_provider_tool_call(
         &self,
-        tool_call: ProviderToolCall,
+        request: RegisterProviderToolCallRequest,
     ) -> Result<ironclaw_turns::run_profile::CapabilityCallCandidate, AgentLoopHostError> {
-        self.register_provider_tool_call_with_activity(tool_call, None)
-            .await
-    }
-
-    async fn register_provider_tool_call_for_activity(
-        &self,
-        tool_call: ProviderToolCall,
-        activity_id: CapabilityActivityId,
-    ) -> Result<ironclaw_turns::run_profile::CapabilityCallCandidate, AgentLoopHostError> {
-        self.register_provider_tool_call_with_activity(tool_call, Some(activity_id))
+        self.register_provider_tool_call_with_activity(request.tool_call, request.activity_id)
             .await
     }
 
@@ -4628,7 +4619,7 @@ mod tests {
             "include_schema": true
         });
         let candidate = port
-            .register_provider_tool_call(call)
+            .register_provider_tool_call(RegisterProviderToolCallRequest::new(call))
             .await
             .expect("capability_info call should register");
         assert_eq!(
@@ -4699,7 +4690,7 @@ mod tests {
         call.name = capability_info::TOOL_NAME.to_string();
         call.arguments = serde_json::json!({ "name": capability_id.as_str() });
         let candidate = port
-            .register_provider_tool_call(call)
+            .register_provider_tool_call(RegisterProviderToolCallRequest::new(call))
             .await
             .expect("capability_info call should register");
         let invocation = CapabilityInvocation {
@@ -4748,11 +4739,13 @@ mod tests {
             .expect("visible capabilities load");
         let provider_call = provider_tool_call();
         let first = port
-            .register_provider_tool_call(provider_call.clone())
+            .register_provider_tool_call(RegisterProviderToolCallRequest::new(
+                provider_call.clone(),
+            ))
             .await
             .expect("first provider tool call registers");
         let second = port
-            .register_provider_tool_call(provider_call)
+            .register_provider_tool_call(RegisterProviderToolCallRequest::new(provider_call))
             .await
             .expect("duplicate provider tool call registers");
 
@@ -4819,26 +4812,29 @@ mod tests {
             .await
             .expect("visible capabilities load");
         let provider_call = provider_tool_call();
-        let requested_activity_id = CapabilityActivityId::new();
+        let activity_id = CapabilityActivityId::new();
         let candidate = port
-            .register_provider_tool_call_for_activity(provider_call.clone(), requested_activity_id)
+            .register_provider_tool_call(RegisterProviderToolCallRequest::for_activity(
+                provider_call.clone(),
+                activity_id,
+            ))
             .await
             .expect("provider tool call registers with requested activity");
 
-        assert_eq!(candidate.activity_id, requested_activity_id);
+        assert_eq!(candidate.activity_id, activity_id);
 
         let duplicate = port
-            .register_provider_tool_call(provider_call)
+            .register_provider_tool_call(RegisterProviderToolCallRequest::new(provider_call))
             .await
             .expect("duplicate provider tool call registers");
         assert_eq!(
-            duplicate.activity_id, requested_activity_id,
+            duplicate.activity_id, activity_id,
             "ordinary duplicate registration must reuse the requested activity"
         );
 
         let outcome = port
             .invoke_capability(CapabilityInvocation {
-                activity_id: requested_activity_id,
+                activity_id: activity_id,
                 surface_version: surface.version,
                 capability_id: candidate.capability_id,
                 input_ref: candidate.input_ref,
@@ -4887,7 +4883,9 @@ mod tests {
         let mut provider_call = provider_tool_call();
         provider_call.name = "demo__a__b".to_string();
         let first = port
-            .register_provider_tool_call(provider_call.clone())
+            .register_provider_tool_call(RegisterProviderToolCallRequest::new(
+                provider_call.clone(),
+            ))
             .await
             .expect("first provider call registers");
         assert_eq!(first.capability_id, first_capability_id);
@@ -4900,7 +4898,7 @@ mod tests {
             .await
             .expect("remapped visible surface loads");
         let error = port
-            .register_provider_tool_call(provider_call)
+            .register_provider_tool_call(RegisterProviderToolCallRequest::new(provider_call))
             .await
             .expect_err("same provider input remapped to another capability must fail");
 
@@ -4934,7 +4932,7 @@ mod tests {
             .await
             .expect("visible capabilities load");
         let candidate = port
-            .register_provider_tool_call(provider_tool_call())
+            .register_provider_tool_call(RegisterProviderToolCallRequest::new(provider_tool_call()))
             .await
             .expect("provider tool call registers");
         let mismatched_activity_id = loop {
@@ -5005,7 +5003,9 @@ mod tests {
             .expect("visible capabilities load");
         let provider_call = provider_tool_call();
         let first = port
-            .register_provider_tool_call(provider_call.clone())
+            .register_provider_tool_call(RegisterProviderToolCallRequest::new(
+                provider_call.clone(),
+            ))
             .await
             .expect("first provider tool call registers");
         let first_outcome = port
@@ -5024,13 +5024,13 @@ mod tests {
             let mut call = provider_tool_call();
             call.id = format!("call_distinct_{index}");
             call.arguments = serde_json::json!({ "message": format!("distinct-{index}") });
-            port.register_provider_tool_call(call)
+            port.register_provider_tool_call(RegisterProviderToolCallRequest::new(call))
                 .await
                 .expect("distinct provider tool call registers");
         }
 
         let second = port
-            .register_provider_tool_call(provider_call)
+            .register_provider_tool_call(RegisterProviderToolCallRequest::new(provider_call))
             .await
             .expect("original provider tool call registers again");
 
@@ -5101,7 +5101,7 @@ mod tests {
             "detail": "summary"
         });
         let candidate = port
-            .register_provider_tool_call(call)
+            .register_provider_tool_call(RegisterProviderToolCallRequest::new(call))
             .await
             .expect("capability_info call should register by provider tool name");
         assert_eq!(
@@ -5177,7 +5177,7 @@ mod tests {
                 "invalid capability_info arguments should be staged for model-visible failure",
             );
             let candidate = port
-                .register_provider_tool_call(call)
+                .register_provider_tool_call(RegisterProviderToolCallRequest::new(call))
                 .await
                 .expect("invalid capability_info arguments should stage");
 
@@ -5263,7 +5263,7 @@ mod tests {
             port.validate_provider_tool_call(&call)
                 .expect("invalid capability_info names should be staged for model-visible failure");
             let candidate = port
-                .register_provider_tool_call(call)
+                .register_provider_tool_call(RegisterProviderToolCallRequest::new(call))
                 .await
                 .expect("invalid capability_info name should stage");
 
@@ -5345,7 +5345,7 @@ mod tests {
         assert_eq!(error.kind, AgentLoopHostErrorKind::InvalidInvocation);
 
         let candidate = port
-            .register_provider_tool_call(call)
+            .register_provider_tool_call(RegisterProviderToolCallRequest::new(call))
             .await
             .expect("unknown target should stage so the model can observe the tool error");
 
@@ -5804,7 +5804,7 @@ mod tests {
         let mut call = provider_tool_call();
         call.name = capability_info::TOOL_NAME.to_string();
         call.arguments = serde_json::json!({ "name": capability_info::TOOL_NAME });
-        port.register_provider_tool_call(call)
+        port.register_provider_tool_call(RegisterProviderToolCallRequest::new(call))
             .await
             .expect("capability_info should be able to describe itself by tool name");
 
@@ -5813,7 +5813,7 @@ mod tests {
         call2.id = "call_2".to_string();
         call2.name = capability_info::TOOL_NAME.to_string();
         call2.arguments = serde_json::json!({ "name": capability_info::CAPABILITY_ID });
-        port.register_provider_tool_call(call2)
+        port.register_provider_tool_call(RegisterProviderToolCallRequest::new(call2))
             .await
             .expect("capability_info should be able to describe itself by capability id");
     }
@@ -5867,7 +5867,7 @@ mod tests {
                 call.arguments["detail"] = serde_json::json!(detail);
             }
             let candidate = port
-                .register_provider_tool_call(call)
+                .register_provider_tool_call(RegisterProviderToolCallRequest::new(call))
                 .await
                 .expect("capability_info call should register");
             port.invoke_capability(CapabilityInvocation {
@@ -6293,7 +6293,7 @@ mod tests {
         port.validate_provider_tool_call(&call)
             .expect("schema-invalid provider calls should stage for model-visible failure");
         let candidate = port
-            .register_provider_tool_call(call)
+            .register_provider_tool_call(RegisterProviderToolCallRequest::new(call))
             .await
             .expect("schema-invalid provider calls should register");
         assert!(
@@ -6395,7 +6395,7 @@ mod tests {
         port.validate_provider_tool_call(&call)
             .expect("schema-invalid provider calls should stage for model-visible failure");
         let candidate = port
-            .register_provider_tool_call(call)
+            .register_provider_tool_call(RegisterProviderToolCallRequest::new(call))
             .await
             .expect("schema-invalid provider calls should register");
 
@@ -6491,7 +6491,7 @@ mod tests {
         port.validate_provider_tool_call(&call)
             .expect("schema-invalid provider calls should stage for model-visible failure");
         let candidate = port
-            .register_provider_tool_call(call)
+            .register_provider_tool_call(RegisterProviderToolCallRequest::new(call))
             .await
             .expect("schema-invalid provider calls should register");
 
@@ -7140,7 +7140,7 @@ mod tests {
             .await
             .expect("visible capabilities load");
         let candidate = port
-            .register_provider_tool_call(provider_tool_call())
+            .register_provider_tool_call(RegisterProviderToolCallRequest::new(provider_tool_call()))
             .await
             .expect("provider tool call registers");
         let mismatched_activity_id = loop {
@@ -7599,7 +7599,7 @@ mod tests {
             .await
             .expect("visible capabilities load");
         let candidate = port
-            .register_provider_tool_call(provider_tool_call())
+            .register_provider_tool_call(RegisterProviderToolCallRequest::new(provider_tool_call()))
             .await
             .expect("provider tool call registers");
         CapabilityInvocation {

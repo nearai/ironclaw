@@ -4101,8 +4101,9 @@ mod tests {
         TurnCheckpointId, TurnId, TurnLeaseToken, TurnRunId, TurnRunnerId, TurnScope, TurnStatus,
         run_profile::{
             InMemoryRunProfileResolver, LoopCapabilityPort, LoopCheckpointStateRef, LoopRunContext,
-            ModelProfileId, ProviderToolCall, RunProfileResolutionRequest, RunProfileResolver,
-            SkillVisibility, VisibleCapabilityRequest,
+            ModelProfileId, ProviderToolCall, RegisterProviderToolCallRequest,
+            RunProfileResolutionRequest, RunProfileResolver, SkillVisibility,
+            VisibleCapabilityRequest,
         },
         runner::{BlockRunRequest, ClaimRunRequest, TurnRunTransitionPort},
     };
@@ -4317,17 +4318,19 @@ mod tests {
                 .find(|definition| definition.capability_id == echo_id)
                 .expect("echo provider tool definition");
             let candidate = capabilities
-                .register_provider_tool_call(ProviderToolCall {
-                    provider_id: "test-provider".to_string(),
-                    provider_model_id: "test-model".to_string(),
-                    turn_id: Some("provider-turn-1".to_string()),
-                    id: "call-1".to_string(),
-                    name: echo_tool.name,
-                    arguments: serde_json::json!({"message": "hello from tool"}),
-                    response_reasoning: None,
-                    reasoning: None,
-                    signature: None,
-                })
+                .register_provider_tool_call(RegisterProviderToolCallRequest::new(
+                    ProviderToolCall {
+                        provider_id: "test-provider".to_string(),
+                        provider_model_id: "test-model".to_string(),
+                        turn_id: Some("provider-turn-1".to_string()),
+                        id: "call-1".to_string(),
+                        name: echo_tool.name,
+                        arguments: serde_json::json!({"message": "hello from tool"}),
+                        response_reasoning: None,
+                        reasoning: None,
+                        signature: None,
+                    },
+                ))
                 .await
                 .map_err(model_capability_error)?;
             Ok(HostManagedModelResponse::capability_calls(
@@ -4383,17 +4386,19 @@ mod tests {
             // ~2.4 KB message: far over the 512-byte string preview cap.
             let big_message = LARGE_ECHO_MESSAGE.repeat(100);
             let candidate = capabilities
-                .register_provider_tool_call(ProviderToolCall {
-                    provider_id: "test-provider".to_string(),
-                    provider_model_id: "test-model".to_string(),
-                    turn_id: Some("provider-turn-1".to_string()),
-                    id: "call-1".to_string(),
-                    name: echo_tool.name,
-                    arguments: serde_json::json!({ "message": big_message }),
-                    response_reasoning: None,
-                    reasoning: None,
-                    signature: None,
-                })
+                .register_provider_tool_call(RegisterProviderToolCallRequest::new(
+                    ProviderToolCall {
+                        provider_id: "test-provider".to_string(),
+                        provider_model_id: "test-model".to_string(),
+                        turn_id: Some("provider-turn-1".to_string()),
+                        id: "call-1".to_string(),
+                        name: echo_tool.name,
+                        arguments: serde_json::json!({ "message": big_message }),
+                        response_reasoning: None,
+                        reasoning: None,
+                        signature: None,
+                    },
+                ))
                 .await
                 .map_err(model_capability_error)?;
             Ok(HostManagedModelResponse::capability_calls(
@@ -4437,17 +4442,19 @@ mod tests {
                 .find(|definition| definition.capability_id == notion_search_id)
                 .expect("activated Notion capability should be visible");
             let candidate = capabilities
-                .register_provider_tool_call(ProviderToolCall {
-                    provider_id: "test-provider".to_string(),
-                    provider_model_id: "test-model".to_string(),
-                    turn_id: Some("provider-turn-auth-gate".to_string()),
-                    id: "call-auth-gate".to_string(),
-                    name: notion_tool.name,
-                    arguments: serde_json::json!({ "query": "project notes" }),
-                    response_reasoning: None,
-                    reasoning: None,
-                    signature: None,
-                })
+                .register_provider_tool_call(RegisterProviderToolCallRequest::new(
+                    ProviderToolCall {
+                        provider_id: "test-provider".to_string(),
+                        provider_model_id: "test-model".to_string(),
+                        turn_id: Some("provider-turn-auth-gate".to_string()),
+                        id: "call-auth-gate".to_string(),
+                        name: notion_tool.name,
+                        arguments: serde_json::json!({ "query": "project notes" }),
+                        response_reasoning: None,
+                        reasoning: None,
+                        signature: None,
+                    },
+                ))
                 .await
                 .map_err(model_capability_error)?;
             Ok(HostManagedModelResponse::capability_calls(
@@ -4510,17 +4517,19 @@ mod tests {
                 .find(|definition| definition.capability_id == list_dir_id)
                 .expect("list_dir provider tool definition");
             let candidate = capabilities
-                .register_provider_tool_call(ProviderToolCall {
-                    provider_id: "test-provider".to_string(),
-                    provider_model_id: "test-model".to_string(),
-                    turn_id: Some("provider-turn-1".to_string()),
-                    id: "call-1".to_string(),
-                    name: list_dir_tool.name,
-                    arguments: serde_json::json!({"path": "/workspace"}),
-                    response_reasoning: None,
-                    reasoning: None,
-                    signature: None,
-                })
+                .register_provider_tool_call(RegisterProviderToolCallRequest::new(
+                    ProviderToolCall {
+                        provider_id: "test-provider".to_string(),
+                        provider_model_id: "test-model".to_string(),
+                        turn_id: Some("provider-turn-1".to_string()),
+                        id: "call-1".to_string(),
+                        name: list_dir_tool.name,
+                        arguments: serde_json::json!({"path": "/workspace"}),
+                        response_reasoning: None,
+                        reasoning: None,
+                        signature: None,
+                    },
+                ))
                 .await
                 .map_err(model_capability_error)?;
             Ok(HostManagedModelResponse::capability_calls(
@@ -9218,7 +9227,9 @@ mod tests {
                     signature: None,
                 };
                 let candidate1 = capabilities
-                    .register_provider_tool_call(call1.clone())
+                    .register_provider_tool_call(RegisterProviderToolCallRequest::new(
+                        call1.clone(),
+                    ))
                     .await
                     .map_err(model_capability_error)?;
 
@@ -9261,7 +9272,7 @@ mod tests {
                 call1.id = "call-multi-2".to_string();
                 call1.arguments = serde_json::json!({"message": "hello from call 2"});
                 let candidate2 = capabilities
-                    .register_provider_tool_call(call1)
+                    .register_provider_tool_call(RegisterProviderToolCallRequest::new(call1))
                     .await
                     .map_err(model_capability_error)?;
 

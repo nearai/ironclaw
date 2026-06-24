@@ -26,8 +26,8 @@ use ironclaw_turns::{
         CapabilityDeniedReasonKind, CapabilityDescriptorView, CapabilityInputRef,
         CapabilityInvocation, CapabilityOutcome, ConcurrencyHint, LoopCapabilityPort,
         LoopRunContext, LoopSafeSummary, ProviderToolCall, ProviderToolCallCapabilityIds,
-        ProviderToolCallReplay, ProviderToolDefinition, VisibleCapabilityRequest,
-        VisibleCapabilitySurface, sanitize_model_visible_text,
+        ProviderToolCallReplay, ProviderToolDefinition, RegisterProviderToolCallRequest,
+        VisibleCapabilityRequest, VisibleCapabilitySurface, sanitize_model_visible_text,
     },
 };
 use serde::{Deserialize, Serialize};
@@ -1035,29 +1035,25 @@ impl LoopCapabilityPort for SubagentSpawnCapabilityPort {
 
     async fn register_provider_tool_call(
         &self,
-        tool_call: ProviderToolCall,
+        request: RegisterProviderToolCallRequest,
     ) -> Result<CapabilityCallCandidate, AgentLoopHostError> {
+        let RegisterProviderToolCallRequest {
+            tool_call,
+            activity_id,
+        } = request;
         if self.is_spawn_provider_tool_name(&tool_call.name) {
             return self
-                .register_spawn_provider_tool_call(tool_call, CapabilityActivityId::new())
-                .await;
-        }
-        let inner_candidate = self.inner.register_provider_tool_call(tool_call).await?;
-        Ok(inner_candidate)
-    }
-
-    async fn register_provider_tool_call_for_activity(
-        &self,
-        tool_call: ProviderToolCall,
-        activity_id: CapabilityActivityId,
-    ) -> Result<CapabilityCallCandidate, AgentLoopHostError> {
-        if self.is_spawn_provider_tool_name(&tool_call.name) {
-            return self
-                .register_spawn_provider_tool_call(tool_call, activity_id)
+                .register_spawn_provider_tool_call(
+                    tool_call,
+                    activity_id.unwrap_or_else(CapabilityActivityId::new),
+                )
                 .await;
         }
         self.inner
-            .register_provider_tool_call_for_activity(tool_call, activity_id)
+            .register_provider_tool_call(RegisterProviderToolCallRequest {
+                tool_call,
+                activity_id,
+            })
             .await
     }
 

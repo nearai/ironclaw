@@ -43,7 +43,9 @@ use ironclaw_reborn_composition::{
     WebuiAuthentication, WebuiAuthenticator, WebuiServeConfig, build_reborn_runtime,
     build_webui_services, webui_v2_app,
 };
-use ironclaw_turns::run_profile::{CapabilityCallCandidate, LoopCapabilityPort, ProviderToolCall};
+use ironclaw_turns::run_profile::{
+    CapabilityCallCandidate, LoopCapabilityPort, ProviderToolCall, RegisterProviderToolCallRequest,
+};
 use serde_json::{Value, json};
 use tower::ServiceExt;
 
@@ -181,7 +183,8 @@ impl HostManagedModelGateway for ToolCallingGateway {
             .expect("builtin.echo must be visible in local-dev capability surface");
 
         let candidate = capabilities
-            .register_provider_tool_call(ProviderToolCall {
+            .register_provider_tool_call(RegisterProviderToolCallRequest::new(
+                ProviderToolCall {
                 provider_id: "e2e-provider".to_string(),
                 provider_model_id: "e2e-model".to_string(),
                 turn_id: Some("e2e-turn-1".to_string()),
@@ -191,7 +194,8 @@ impl HostManagedModelGateway for ToolCallingGateway {
                 response_reasoning: None,
                 reasoning: None,
                 signature: None,
-            })
+                },
+            ))
             .await
             .map_err(|err| {
                 HostManagedModelError::safe(
@@ -234,7 +238,7 @@ async fn register_write(
     content: &str,
 ) -> Result<CapabilityCallCandidate, HostManagedModelError> {
     capabilities
-        .register_provider_tool_call(ProviderToolCall {
+        .register_provider_tool_call(RegisterProviderToolCallRequest::new(ProviderToolCall {
             provider_id: "e2e-provider".to_string(),
             provider_model_id: "e2e-model".to_string(),
             turn_id: Some("e2e-write-turn".to_string()),
@@ -244,7 +248,7 @@ async fn register_write(
             response_reasoning: None,
             reasoning: None,
             signature: None,
-        })
+        }))
         .await
         .map_err(|err| {
             HostManagedModelError::safe(

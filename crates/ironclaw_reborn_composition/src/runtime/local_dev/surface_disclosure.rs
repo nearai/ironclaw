@@ -5,14 +5,11 @@ use ironclaw_host_runtime::{
     APPLY_PATCH_CAPABILITY_ID, GLOB_CAPABILITY_ID, GREP_CAPABILITY_ID, LIST_DIR_CAPABILITY_ID,
     READ_FILE_CAPABILITY_ID, SHELL_CAPABILITY_ID, WRITE_FILE_CAPABILITY_ID,
 };
-use ironclaw_turns::{
-    CapabilityActivityId,
-    run_profile::{
-        AgentLoopHostError, CapabilityBatchInvocation, CapabilityBatchOutcome,
-        CapabilityCallCandidate, CapabilityDescriptorView, CapabilityInvocation, CapabilityOutcome,
-        LoopCapabilityPort, ProviderToolCall, ProviderToolCallCapabilityIds,
-        ProviderToolDefinition, VisibleCapabilityRequest, VisibleCapabilitySurface,
-    },
+use ironclaw_turns::run_profile::{
+    AgentLoopHostError, CapabilityBatchInvocation, CapabilityBatchOutcome, CapabilityCallCandidate,
+    CapabilityDescriptorView, CapabilityInvocation, CapabilityOutcome, LoopCapabilityPort,
+    ProviderToolCall, ProviderToolCallCapabilityIds, ProviderToolDefinition,
+    RegisterProviderToolCallRequest, VisibleCapabilityRequest, VisibleCapabilitySurface,
 };
 
 pub(super) fn wrap_local_dev_surface_disclosure(
@@ -57,19 +54,9 @@ impl LoopCapabilityPort for LocalDevSurfaceDisclosurePort {
 
     async fn register_provider_tool_call(
         &self,
-        tool_call: ProviderToolCall,
+        request: RegisterProviderToolCallRequest,
     ) -> Result<CapabilityCallCandidate, AgentLoopHostError> {
-        self.inner.register_provider_tool_call(tool_call).await
-    }
-
-    async fn register_provider_tool_call_for_activity(
-        &self,
-        tool_call: ProviderToolCall,
-        activity_id: CapabilityActivityId,
-    ) -> Result<CapabilityCallCandidate, AgentLoopHostError> {
-        self.inner
-            .register_provider_tool_call_for_activity(tool_call, activity_id)
-            .await
+        self.inner.register_provider_tool_call(request).await
     }
 
     async fn visible_capabilities(

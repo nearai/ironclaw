@@ -3019,11 +3019,12 @@ impl LoopCapabilityPort for GatewayCapabilityPort {
 
     async fn register_provider_tool_call(
         &self,
-        tool_call: ProviderToolCall,
+        request: ironclaw_turns::run_profile::RegisterProviderToolCallRequest,
     ) -> Result<
         ironclaw_turns::run_profile::CapabilityCallCandidate,
         ironclaw_turns::run_profile::AgentLoopHostError,
     > {
+        let tool_call = request.tool_call;
         self.validate_provider_tool_call(&tool_call)?;
         let input_ref =
             ironclaw_turns::run_profile::CapabilityInputRef::new(format!("input:{}", tool_call.id))

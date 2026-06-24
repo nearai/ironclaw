@@ -24,7 +24,7 @@ use ironclaw_host_runtime::{
 use ironclaw_turns::run_profile::{
     AgentLoopHostError, AgentLoopHostErrorKind, CapabilityAuthResume, CapabilityBatchInvocation,
     CapabilityFailureKind, CapabilityInputRef, CapabilityOutcome, LoopCapabilityPort,
-    LoopHostMilestoneSink, LoopRunContext,
+    LoopHostMilestoneSink, LoopRunContext, RegisterProviderToolCallRequest,
 };
 
 #[tokio::test]
@@ -326,11 +326,11 @@ async fn runtime_capability_batch_continues_after_runtime_failure_outcome() {
     let mut second_call = provider_tool_call();
     second_call.id = "call_2".to_string();
     let first = port
-        .register_provider_tool_call(provider_tool_call())
+        .register_provider_tool_call(RegisterProviderToolCallRequest::new(provider_tool_call()))
         .await
         .expect("first provider tool call registers");
     let second = port
-        .register_provider_tool_call(second_call)
+        .register_provider_tool_call(RegisterProviderToolCallRequest::new(second_call))
         .await
         .expect("second provider tool call registers");
 
@@ -897,7 +897,7 @@ async fn visible_runtime_invocation(port: &HostRuntimeLoopCapabilityPort) -> Cap
         .await
         .expect("visible capabilities load");
     let candidate = port
-        .register_provider_tool_call(provider_tool_call())
+        .register_provider_tool_call(RegisterProviderToolCallRequest::new(provider_tool_call()))
         .await
         .expect("provider tool call registers");
     CapabilityInvocation {

@@ -39,7 +39,8 @@ mod tests {
         run_profile::{
             CapabilityCallCandidate, CapabilityFailureKind, CapabilityInputRef,
             CapabilityInvocation, CapabilityOutcome, InMemoryLoopHostMilestoneSink,
-            InMemoryRunProfileResolver, ModelProfileId, VisibleCapabilityRequest,
+            InMemoryRunProfileResolver, ModelProfileId, RegisterProviderToolCallRequest,
+            VisibleCapabilityRequest,
         },
     };
 
@@ -1143,7 +1144,7 @@ mod tests {
             signature: None,
         };
         let candidate = port
-            .register_provider_tool_call(call)
+            .register_provider_tool_call(RegisterProviderToolCallRequest::new(call))
             .await
             .expect("provider call stages");
         assert_eq!(
@@ -1305,12 +1306,14 @@ mod tests {
         // `append_capability_result_ref` and terminate the whole run; this locks
         // that regression — the capability must still complete.
         let candidate = port
-            .register_provider_tool_call(provider_tool_call_with_name(
-                "builtin__project_create",
-                serde_json::json!({
-                    "name": "Build /api <svc>",
-                    "description": "Ship the project feature"
-                }),
+            .register_provider_tool_call(RegisterProviderToolCallRequest::new(
+                provider_tool_call_with_name(
+                    "builtin__project_create",
+                    serde_json::json!({
+                        "name": "Build /api <svc>",
+                        "description": "Ship the project feature"
+                    }),
+                ),
             ))
             .await
             .expect("project_create call stages");
@@ -1499,9 +1502,11 @@ mod tests {
         );
 
         let malformed_list = port
-            .register_provider_tool_call(provider_tool_call_with_name(
-                "builtin__outbound_delivery_targets_list",
-                serde_json::Value::Null,
+            .register_provider_tool_call(RegisterProviderToolCallRequest::new(
+                provider_tool_call_with_name(
+                    "builtin__outbound_delivery_targets_list",
+                    serde_json::Value::Null,
+                ),
             ))
             .await
             .expect_err("malformed list input should fail validation");
@@ -1511,9 +1516,11 @@ mod tests {
         );
 
         let list_candidate = port
-            .register_provider_tool_call(provider_tool_call_with_name(
-                "builtin__outbound_delivery_targets_list",
-                serde_json::json!({ "channel": "slack" }),
+            .register_provider_tool_call(RegisterProviderToolCallRequest::new(
+                provider_tool_call_with_name(
+                    "builtin__outbound_delivery_targets_list",
+                    serde_json::json!({ "channel": "slack" }),
+                ),
             ))
             .await
             .expect("list call stages");
@@ -1540,9 +1547,11 @@ mod tests {
         );
 
         let malformed_set = port
-            .register_provider_tool_call(provider_tool_call_with_name(
-                "builtin__outbound_delivery_target_set",
-                serde_json::json!({ "target_id": "bad\nid" }),
+            .register_provider_tool_call(RegisterProviderToolCallRequest::new(
+                provider_tool_call_with_name(
+                    "builtin__outbound_delivery_target_set",
+                    serde_json::json!({ "target_id": "bad\nid" }),
+                ),
             ))
             .await
             .expect_err("malformed set input should fail validation");
@@ -1560,9 +1569,11 @@ mod tests {
             actor_user_id.clone(),
         );
         let set_candidate = port
-            .register_provider_tool_call(provider_tool_call_with_name(
-                "builtin__outbound_delivery_target_set",
-                serde_json::json!({ "target_id": slack_target_id.as_str() }),
+            .register_provider_tool_call(RegisterProviderToolCallRequest::new(
+                provider_tool_call_with_name(
+                    "builtin__outbound_delivery_target_set",
+                    serde_json::json!({ "target_id": slack_target_id.as_str() }),
+                ),
             ))
             .await
             .expect("set call stages");
@@ -1797,9 +1808,11 @@ mod tests {
             actor_user_id.clone(),
         );
         let set_candidate = port
-            .register_provider_tool_call(provider_tool_call_with_name(
-                "builtin__outbound_delivery_target_set",
-                serde_json::json!({ "target_id": slack_target_id.as_str() }),
+            .register_provider_tool_call(RegisterProviderToolCallRequest::new(
+                provider_tool_call_with_name(
+                    "builtin__outbound_delivery_target_set",
+                    serde_json::json!({ "target_id": slack_target_id.as_str() }),
+                ),
             ))
             .await
             .expect("set call stages");
@@ -2591,9 +2604,11 @@ mod tests {
         assert!(active_capability_ids.contains(&"github.comment_issue"));
 
         let staged_after_activation = port
-            .register_provider_tool_call(provider_tool_call_with_name(
-                "github__search_issues",
-                serde_json::json!({"query": "repo:nearai/ironclaw is:issue"}),
+            .register_provider_tool_call(RegisterProviderToolCallRequest::new(
+                provider_tool_call_with_name(
+                    "github__search_issues",
+                    serde_json::json!({"query": "repo:nearai/ironclaw is:issue"}),
+                ),
             ))
             .await
             .expect("provider registration resolves github after prompt-stage refresh");
@@ -2662,9 +2677,11 @@ mod tests {
             .expect("extension_search tool definition");
 
         let candidate = port
-            .register_provider_tool_call(provider_tool_call_with_name(
-                tool_definition.name,
-                serde_json::json!({"query": "gmail"}),
+            .register_provider_tool_call(RegisterProviderToolCallRequest::new(
+                provider_tool_call_with_name(
+                    tool_definition.name,
+                    serde_json::json!({"query": "gmail"}),
+                ),
             ))
             .await
             .expect("extension_search provider tool call stages");
@@ -2738,7 +2755,7 @@ mod tests {
         );
         call1.id = "call-mid-response-1".to_string();
         let candidate1 = port
-            .register_provider_tool_call(call1)
+            .register_provider_tool_call(RegisterProviderToolCallRequest::new(call1))
             .await
             .expect("first register");
 
@@ -2781,7 +2798,7 @@ mod tests {
         );
         call2.id = "call-mid-response-2".to_string();
         let candidate2 = port
-            .register_provider_tool_call(call2)
+            .register_provider_tool_call(RegisterProviderToolCallRequest::new(call2))
             .await
             .expect("second register after extension activation");
 
@@ -2853,9 +2870,8 @@ mod tests {
         assert_eq!(tool_definition.name, "gmail__list_messages");
 
         let candidate = port
-            .register_provider_tool_call(provider_tool_call_with_name(
-                tool_definition.name,
-                serde_json::json!({}),
+            .register_provider_tool_call(RegisterProviderToolCallRequest::new(
+                provider_tool_call_with_name(tool_definition.name, serde_json::json!({})),
             ))
             .await
             .expect("gmail provider tool call stages");

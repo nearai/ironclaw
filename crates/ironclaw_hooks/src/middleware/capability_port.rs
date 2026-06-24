@@ -27,15 +27,11 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use ironclaw_host_api::TenantId;
-use ironclaw_turns::{
-    CapabilityActivityId,
-    run_profile::{
-        AgentLoopHostError, CapabilityBatchInvocation, CapabilityBatchOutcome,
-        CapabilityCallCandidate, CapabilityDenied, CapabilityDeniedReasonKind,
-        CapabilityInvocation, CapabilityOutcome, LoopCapabilityPort, ProviderToolCall,
-        ProviderToolCallCapabilityIds, ProviderToolDefinition, VisibleCapabilityRequest,
-        VisibleCapabilitySurface,
-    },
+use ironclaw_turns::run_profile::{
+    AgentLoopHostError, CapabilityBatchInvocation, CapabilityBatchOutcome, CapabilityCallCandidate,
+    CapabilityDenied, CapabilityDeniedReasonKind, CapabilityInvocation, CapabilityOutcome,
+    LoopCapabilityPort, ProviderToolCall, ProviderToolCallCapabilityIds, ProviderToolDefinition,
+    RegisterProviderToolCallRequest, VisibleCapabilityRequest, VisibleCapabilitySurface,
 };
 
 use crate::dispatch::{BeforeCapabilityDispatchOutcome, HookDispatcher};
@@ -254,19 +250,9 @@ impl LoopCapabilityPort for HookedLoopCapabilityPort {
 
     async fn register_provider_tool_call(
         &self,
-        tool_call: ProviderToolCall,
+        request: RegisterProviderToolCallRequest,
     ) -> Result<CapabilityCallCandidate, AgentLoopHostError> {
-        self.inner.register_provider_tool_call(tool_call).await
-    }
-
-    async fn register_provider_tool_call_for_activity(
-        &self,
-        tool_call: ProviderToolCall,
-        activity_id: CapabilityActivityId,
-    ) -> Result<CapabilityCallCandidate, AgentLoopHostError> {
-        self.inner
-            .register_provider_tool_call_for_activity(tool_call, activity_id)
-            .await
+        self.inner.register_provider_tool_call(request).await
     }
 
     async fn visible_capabilities(

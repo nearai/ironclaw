@@ -13,7 +13,7 @@ use ironclaw_loop_support::{
 use ironclaw_turns::run_profile::{
     AgentLoopHostError, CapabilityCallCandidate, CapabilityInputRef, CapabilitySurfaceVersion,
     LoopCapabilityPort, ParentLoopOutput, ProviderToolCall, ProviderToolCallReplay,
-    ProviderToolDefinition, VisibleCapabilityRequest,
+    ProviderToolDefinition, RegisterProviderToolCallRequest, VisibleCapabilityRequest,
 };
 use thiserror::Error;
 
@@ -485,7 +485,7 @@ async fn provider_tool_calls_response(
             .map_err(capability_host_error)?;
         candidates.push(
             capabilities
-                .register_provider_tool_call(provider_call)
+                .register_provider_tool_call(RegisterProviderToolCallRequest::new(provider_call))
                 .await
                 .map_err(capability_host_error)?,
         );

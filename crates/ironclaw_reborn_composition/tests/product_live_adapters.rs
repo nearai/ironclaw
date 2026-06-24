@@ -54,7 +54,8 @@ use ironclaw_turns::{
         AgentLoopHostError, CapabilityInputRef, CapabilityInvocation, CapabilityOutcome,
         InMemoryLoopHostMilestoneSink, InstructionSafetyContext, LoopCancelReasonKind,
         LoopModelBudgetAccountant, LoopModelPolicyGuard, LoopRunContext, NoOpBudgetAccountant,
-        NoOpPolicyGuard, PromptMode, ProviderToolCall, VisibleCapabilityRequest,
+        NoOpPolicyGuard, PromptMode, ProviderToolCall, RegisterProviderToolCallRequest,
+        VisibleCapabilityRequest,
     },
 };
 
@@ -766,7 +767,9 @@ async fn local_dev_adapter_registers_provider_tool_calls_as_run_scoped_inputs() 
         signature: Some("sig-provider-tool".to_string()),
     };
     let candidate = capability_port
-        .register_provider_tool_call(provider_tool_call.clone())
+        .register_provider_tool_call(RegisterProviderToolCallRequest::new(
+            provider_tool_call.clone(),
+        ))
         .await
         .unwrap();
 
@@ -790,7 +793,7 @@ async fn local_dev_adapter_registers_provider_tool_calls_as_run_scoped_inputs() 
         .await
         .unwrap();
     let other_candidate = other_capability_port
-        .register_provider_tool_call(provider_tool_call)
+        .register_provider_tool_call(RegisterProviderToolCallRequest::new(provider_tool_call))
         .await
         .unwrap();
     assert_ne!(

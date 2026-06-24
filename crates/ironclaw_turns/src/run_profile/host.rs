@@ -1390,6 +1390,34 @@ pub struct ProviderToolCallReference {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RegisterProviderToolCallRequest {
+    pub tool_call: ProviderToolCall,
+    /// Activity identity to bind to this provider call. When set, the host
+    /// must register the call with this id, rejecting if the same input_ref was
+    /// already registered with another id. When absent, the host creates an id
+    /// for the first registration and returns that same id for duplicate
+    /// registrations of the same input_ref.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub activity_id: Option<CapabilityActivityId>,
+}
+
+impl RegisterProviderToolCallRequest {
+    pub fn new(tool_call: ProviderToolCall) -> Self {
+        Self {
+            tool_call,
+            activity_id: None,
+        }
+    }
+
+    pub fn for_activity(tool_call: ProviderToolCall, activity_id: CapabilityActivityId) -> Self {
+        Self {
+            tool_call,
+            activity_id: Some(activity_id),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CapabilityInvocation {
     /// Stable activity identity for this invocation. Runtime hosts derive
     /// their execution identity from it rather than minting a second id.
@@ -1845,19 +1873,9 @@ pub trait LoopCapabilityPort: Send + Sync {
 
     async fn register_provider_tool_call(
         &self,
-        _tool_call: ProviderToolCall,
+        _request: RegisterProviderToolCallRequest,
     ) -> Result<CapabilityCallCandidate, AgentLoopHostError> {
         Err(unsupported_host_method("register_provider_tool_call"))
-    }
-
-    async fn register_provider_tool_call_for_activity(
-        &self,
-        _tool_call: ProviderToolCall,
-        _activity_id: CapabilityActivityId,
-    ) -> Result<CapabilityCallCandidate, AgentLoopHostError> {
-        Err(unsupported_host_method(
-            "register_provider_tool_call_for_activity",
-        ))
     }
 
     async fn visible_capabilities(

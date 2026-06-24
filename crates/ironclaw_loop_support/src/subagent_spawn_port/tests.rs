@@ -16,7 +16,9 @@ use ironclaw_turns::{
     RunProfileResolutionRequest, RunProfileResolver, RunProfileVersion, SpawnTreeReservation,
     SubmitTurnRequest, TurnId, TurnRunProfile, TurnRunRecord, TurnRunState, TurnStateStore,
     TurnStatus,
-    run_profile::{CapabilityResultMessage, CapabilitySurfaceVersion},
+    run_profile::{
+        CapabilityResultMessage, CapabilitySurfaceVersion, RegisterProviderToolCallRequest,
+    },
 };
 use serde_json::json;
 
@@ -195,7 +197,7 @@ impl LoopCapabilityPort for SurfacePrimedSpawnAuthPort {
 
     async fn register_provider_tool_call(
         &self,
-        tool_call: ProviderToolCall,
+        request: RegisterProviderToolCallRequest,
     ) -> Result<CapabilityCallCandidate, AgentLoopHostError> {
         if *self.visible_calls.lock().unwrap() == 0 {
             return Err(AgentLoopHostError::new(
@@ -203,7 +205,7 @@ impl LoopCapabilityPort for SurfacePrimedSpawnAuthPort {
                 "surface not primed",
             ));
         }
-        self.register_calls.lock().unwrap().push(tool_call);
+        self.register_calls.lock().unwrap().push(request.tool_call);
         Ok(CapabilityCallCandidate {
             activity_id: ironclaw_turns::CapabilityActivityId::new(),
             surface_version: CapabilitySurfaceVersion::new("surface:test").unwrap(),
@@ -275,9 +277,9 @@ impl LoopCapabilityPort for StrictSpawnAuthPort {
 
     async fn register_provider_tool_call(
         &self,
-        tool_call: ProviderToolCall,
+        request: RegisterProviderToolCallRequest,
     ) -> Result<CapabilityCallCandidate, AgentLoopHostError> {
-        self.register_calls.lock().unwrap().push(tool_call);
+        self.register_calls.lock().unwrap().push(request.tool_call);
         Err(AgentLoopHostError::new(
             AgentLoopHostErrorKind::InvalidInvocation,
             "strict inner does not accept spawn provider tool names",
@@ -1506,7 +1508,9 @@ async fn spawn_provider_tool_call_is_registered_for_spawn_dispatch() {
         spawn_test_port_with_inner(context, inner.clone(), Arc::new(RegisteringSpawnInputCodec));
 
     let candidate = port
-        .register_provider_tool_call(spawn_provider_tool_call())
+        .register_provider_tool_call(RegisterProviderToolCallRequest::new(
+            spawn_provider_tool_call(),
+        ))
         .await
         .expect("provider tool call registration");
 
@@ -1534,7 +1538,10 @@ async fn spawn_provider_tool_call_registration_for_activity_uses_requested_activ
     let activity_id = CapabilityActivityId::new();
 
     let candidate = port
-        .register_provider_tool_call_for_activity(spawn_provider_tool_call(), activity_id)
+        .register_provider_tool_call(RegisterProviderToolCallRequest::for_activity(
+            spawn_provider_tool_call(),
+            activity_id,
+        ))
         .await
         .expect("provider tool call registration");
 
@@ -1558,7 +1565,7 @@ async fn spawn_provider_tool_call_registration_rejects_missing_turn_id() {
     call.turn_id = None;
 
     let error = port
-        .register_provider_tool_call(call)
+        .register_provider_tool_call(RegisterProviderToolCallRequest::new(call))
         .await
         .expect_err("provider tool call missing turn id rejects");
 
@@ -1598,7 +1605,9 @@ async fn spawn_provider_tool_call_registration_does_not_require_inner_spawn_name
     );
 
     let candidate = port
-        .register_provider_tool_call(spawn_provider_tool_call())
+        .register_provider_tool_call(RegisterProviderToolCallRequest::new(
+            spawn_provider_tool_call(),
+        ))
         .await
         .expect("provider tool call registration");
 
@@ -3157,7 +3166,7 @@ async fn spawn_provider_tool_call_registration_accepts_subagent_type_wire_key() 
 
     // Register succeeds — validation accepts `subagent_type` as the wire key.
     let candidate = port
-        .register_provider_tool_call(call)
+        .register_provider_tool_call(RegisterProviderToolCallRequest::new(call))
         .await
         .expect("registration must succeed with subagent_type wire key");
 

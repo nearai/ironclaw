@@ -8,15 +8,12 @@ use ironclaw_loop_support::{
 };
 use ironclaw_product_workflow::{OutboundPreferencesProductFacade, ProjectService};
 use ironclaw_run_state::ApprovalRequestStore;
-use ironclaw_turns::{
-    CapabilityActivityId,
-    run_profile::{
-        AgentLoopHostError, AgentLoopHostErrorKind, CapabilityBatchInvocation,
-        CapabilityBatchOutcome, CapabilityCallCandidate, CapabilityInvocation, CapabilityOutcome,
-        LoopCapabilityPort, LoopHostMilestoneSink, LoopRunContext, ProviderToolCall,
-        ProviderToolCallCapabilityIds, ProviderToolDefinition, VisibleCapabilityRequest,
-        VisibleCapabilitySurface,
-    },
+use ironclaw_turns::run_profile::{
+    AgentLoopHostError, AgentLoopHostErrorKind, CapabilityBatchInvocation, CapabilityBatchOutcome,
+    CapabilityCallCandidate, CapabilityInvocation, CapabilityOutcome, LoopCapabilityPort,
+    LoopHostMilestoneSink, LoopRunContext, ProviderToolCall, ProviderToolCallCapabilityIds,
+    ProviderToolDefinition, RegisterProviderToolCallRequest, VisibleCapabilityRequest,
+    VisibleCapabilitySurface,
 };
 use tokio::sync::Mutex as AsyncMutex;
 
@@ -273,22 +270,11 @@ impl LoopCapabilityPort for RefreshingLocalDevCapabilityPort {
 
     async fn register_provider_tool_call(
         &self,
-        tool_call: ProviderToolCall,
+        request: RegisterProviderToolCallRequest,
     ) -> Result<CapabilityCallCandidate, AgentLoopHostError> {
         self.current_or_refresh()
             .await?
-            .register_provider_tool_call(tool_call)
-            .await
-    }
-
-    async fn register_provider_tool_call_for_activity(
-        &self,
-        tool_call: ProviderToolCall,
-        activity_id: CapabilityActivityId,
-    ) -> Result<CapabilityCallCandidate, AgentLoopHostError> {
-        self.current_or_refresh()
-            .await?
-            .register_provider_tool_call_for_activity(tool_call, activity_id)
+            .register_provider_tool_call(request)
             .await
     }
 

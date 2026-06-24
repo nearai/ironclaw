@@ -18,10 +18,11 @@ use ironclaw_turns::{
         LoopInputBatch, LoopInputCursor, LoopInputCursorToken, LoopModelMessage, LoopModelRequest,
         LoopModelResponse, LoopPromptBundle, LoopPromptBundleRef, LoopPromptBundleRequest,
         LoopRunContext, ModelProfileId, ModelStreamChunk, ParentLoopOutput, PromptMode,
-        ProviderToolCall, ProviderToolCallReplay, RedactedRunProfileProvenance, ResolvedRunProfile,
-        ResourceBudgetPolicy, ResourceBudgetTier, RunClassId, RunProfileFingerprint,
-        RuntimeProfileConstraints, SchedulingClass, StageCheckpointPayloadRequest, SteeringPolicy,
-        VisibleCapabilityRequest, VisibleCapabilitySurface,
+        ProviderToolCall, ProviderToolCallReplay, RedactedRunProfileProvenance,
+        RegisterProviderToolCallRequest, ResolvedRunProfile, ResourceBudgetPolicy,
+        ResourceBudgetTier, RunClassId, RunProfileFingerprint, RuntimeProfileConstraints,
+        SchedulingClass, StageCheckpointPayloadRequest, SteeringPolicy, VisibleCapabilityRequest,
+        VisibleCapabilitySurface,
     },
 };
 
@@ -631,8 +632,9 @@ impl ironclaw_turns::run_profile::LoopModelPort for MockHost {
 impl ironclaw_turns::run_profile::LoopCapabilityPort for MockHost {
     async fn register_provider_tool_call(
         &self,
-        tool_call: ProviderToolCall,
+        request: RegisterProviderToolCallRequest,
     ) -> Result<CapabilityCallCandidate, AgentLoopHostError> {
+        let tool_call = request.tool_call;
         if let Some(error) = self
             .provider_registration_errors
             .lock()
@@ -652,8 +654,14 @@ impl ironclaw_turns::run_profile::LoopCapabilityPort for MockHost {
         let input_ref =
             CapabilityInputRef::new(format!("input:registered-provider-{}", registered.len()))
                 .expect("valid input ref");
+        let activity_id = request.activity_id;
         Ok(CapabilityCallCandidate {
-            activity_id: ironclaw_turns::CapabilityActivityId::new(),
+            activity_id: (*self
+                .provider_registration_activity_remap
+                .lock()
+                .expect("lock"))
+            .or(activity_id)
+            .unwrap_or_else(ironclaw_turns::CapabilityActivityId::new),
             surface_version: self.visible_surface_version.clone(),
             capability_id: capability_id(),
             input_ref,
@@ -670,20 +678,6 @@ impl ironclaw_turns::run_profile::LoopCapabilityPort for MockHost {
                 signature: tool_call.signature,
             }),
         })
-    }
-
-    async fn register_provider_tool_call_for_activity(
-        &self,
-        tool_call: ProviderToolCall,
-        activity_id: ironclaw_turns::CapabilityActivityId,
-    ) -> Result<CapabilityCallCandidate, AgentLoopHostError> {
-        let mut candidate = self.register_provider_tool_call(tool_call).await?;
-        candidate.activity_id = (*self
-            .provider_registration_activity_remap
-            .lock()
-            .expect("lock"))
-        .unwrap_or(activity_id);
-        Ok(candidate)
     }
 
     async fn visible_capabilities(

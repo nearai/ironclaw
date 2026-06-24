@@ -10,8 +10,8 @@ use ironclaw_turns::{
         CapabilityInputIssueCode, CapabilityInputRepair, CapabilityInvocation,
         CapabilityRecoveryHint, CapabilityResultMessage, CapabilitySurfaceVersion,
         ModelVisibleToolObservation, ObservationTrust, ProviderToolCall, ProviderToolCallReference,
-        SameCallRetryConstraint, ToolObservationDetail, ToolObservationStatus,
-        ToolRecoveryObservation, VisibleCapabilitySurface,
+        RegisterProviderToolCallRequest, SameCallRetryConstraint, ToolObservationDetail,
+        ToolObservationStatus, ToolRecoveryObservation, VisibleCapabilitySurface,
     },
 };
 
@@ -95,7 +95,7 @@ pub(super) async fn pending_auth_resume_candidate(
 ) -> Result<CapabilityCallCandidate, AgentLoopExecutorError> {
     if let Some(replay) = resume.provider_replay.as_ref() {
         let candidate = host
-            .register_provider_tool_call_for_activity(
+            .register_provider_tool_call(RegisterProviderToolCallRequest::for_activity(
                 ProviderToolCall {
                     provider_id: replay.provider_id.clone(),
                     provider_model_id: replay.provider_model_id.clone(),
@@ -108,7 +108,7 @@ pub(super) async fn pending_auth_resume_candidate(
                     signature: replay.signature.clone(),
                 },
                 resume.activity_id_for_resume(),
-            )
+            ))
             .await
             .map_err(capability_host_error)?;
         if candidate.activity_id != resume.activity_id_for_resume()
