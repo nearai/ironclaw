@@ -50,6 +50,8 @@ mod failure_summary;
 mod google_oauth;
 mod gsuite;
 mod hooks;
+#[cfg(feature = "slack-v2-host-beta")]
+pub mod host_ingress;
 mod input;
 mod lifecycle;
 #[cfg(feature = "root-llm-provider")]
@@ -126,6 +128,8 @@ mod slack_dm_open;
 mod slack_egress;
 #[cfg(feature = "slack-v2-host-beta")]
 mod slack_host_beta;
+#[cfg(feature = "slack-v2-host-beta")]
+pub mod slack_host_ingress;
 #[cfg(feature = "slack-v2-host-beta")]
 mod slack_host_state;
 #[cfg(feature = "slack-v2-host-beta")]
@@ -302,9 +306,10 @@ pub use slack_egress::{
 pub use slack_host_beta::{
     SlackHostBetaBuildError, SlackHostBetaChannelRoute, SlackHostBetaConfig,
     SlackHostBetaConfigInput, SlackHostBetaLegacySetup, SlackHostBetaMounts,
-    SlackHostBetaRuntimeConfig, build_slack_events_route_mount,
-    build_slack_events_route_mount_with_actor_user_resolver, build_slack_host_beta_mounts,
-    build_slack_host_beta_runtime_mounts, build_triggered_run_delivery_hook,
+    SlackHostBetaRuntimeConfig, build_slack_events_host_ingress_mount,
+    build_slack_events_route_mount, build_slack_events_route_mount_with_actor_user_resolver,
+    build_slack_host_beta_mounts, build_slack_host_beta_runtime_mounts,
+    build_slack_host_beta_runtime_mounts_with_host_ingress_mode, build_triggered_run_delivery_hook,
 };
 #[cfg(feature = "slack-v2-host-beta")]
 pub use slack_personal_binding::{

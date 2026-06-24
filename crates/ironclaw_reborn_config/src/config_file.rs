@@ -298,12 +298,35 @@ pub struct WebuiSection {
 /// routing, and Slack secrets are configured through the WebUI channel setup
 /// surface. The deprecated fields below are accepted as a startup migration
 /// bridge for existing `config.toml` files; secret values still stay env-only.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SlackHostIngressMode {
+    #[default]
+    Legacy,
+    GenericShadow,
+    Generic,
+}
+
+impl SlackHostIngressMode {
+    pub fn is_generic_shadow(self) -> bool {
+        matches!(self, Self::GenericShadow)
+    }
+
+    pub fn is_generic(self) -> bool {
+        matches!(self, Self::Generic)
+    }
+}
+
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SlackSection {
     /// Explicit host-beta enablement gate. Omitted/false means the Slack route
     /// is not mounted by `ironclaw-reborn serve`.
     pub enabled: Option<bool>,
+    /// Selects which Slack events webhook implementation `serve` mounts.
+    /// Defaults to the legacy host-beta path.
+    #[serde(default)]
+    pub host_ingress_mode: SlackHostIngressMode,
     /// Deprecated: adapter installation id for legacy config-backed setup.
     pub installation_id: Option<String>,
     /// Deprecated: Slack team id for legacy config-backed setup.
@@ -1271,6 +1294,70 @@ enabled = true
         assert!(llm.contains_key("mission"));
         let slack = cfg.slack.as_ref().expect("slack section present");
         assert_eq!(slack.enabled, Some(true));
+        assert_eq!(slack.host_ingress_mode, SlackHostIngressMode::Legacy);
+        assert_eq!(slack.team_id.as_deref(), Some("T123"));
+        assert_eq!(slack.shared_subject_user_id.as_deref(), Some("team-agent"));
+        assert_eq!(slack.channel_routes.len(), 1);
+        assert_eq!(
+            slack.channel_routes[0].subject_user_id.as_deref(),
+            Some("eng-team-agent")
+        );
+        assert_eq!(
+            slack.signing_secret_env.as_deref(),
+            Some("IRONCLAW_REBORN_SLACK_SIGNING_SECRET")
+        );
+    }
+
+    #[test]
+    fn slack_host_ingress_mode_parses_known_values_and_default() {
+        let default_cfg = RebornConfigFile::parse_text("[slack]\n", &attributed())
+            .expect("missing mode should default");
+        assert_eq!(
+            default_cfg
+                .slack
+                .as_ref()
+                .expect("slack section present")
+                .host_ingress_mode,
+            SlackHostIngressMode::Legacy
+        );
+
+        let generic_cfg = RebornConfigFile::parse_text(
+            "[slack]\nhost_ingress_mode = \"generic\"\n",
+            &attributed(),
+        )
+        .expect("generic mode should parse");
+        assert_eq!(
+            generic_cfg
+                .slack
+                .as_ref()
+                .expect("slack section present")
+                .host_ingress_mode,
+            SlackHostIngressMode::Generic
+        );
+
+        let shadow_cfg = RebornConfigFile::parse_text(
+            "[slack]\nhost_ingress_mode = \"generic_shadow\"\n",
+            &attributed(),
+        )
+        .expect("generic_shadow mode should parse");
+        assert_eq!(
+            shadow_cfg
+                .slack
+                .as_ref()
+                .expect("slack section present")
+                .host_ingress_mode,
+            SlackHostIngressMode::GenericShadow
+        );
+    }
+
+    #[test]
+    fn slack_host_ingress_mode_rejects_invalid_value() {
+        let err = RebornConfigFile::parse_text(
+            "[slack]\nhost_ingress_mode = \"generic-shaadow\"\n",
+            &attributed(),
+        )
+        .expect_err("invalid mode should fail parse");
+        assert!(matches!(err, RebornConfigFileError::Toml { .. }));
     }
 
     #[test]

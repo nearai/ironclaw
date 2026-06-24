@@ -195,6 +195,94 @@ async fn slack_events_handler_rejects_ambiguous_installation_without_dispatch() 
     assert_eq!(dispatcher_b.dispatch_calls.load(Ordering::SeqCst), 0);
 }
 
+const TEAM_B_BODY: &str = r#"{
+    "type": "event_callback",
+    "team_id": "T-B",
+    "api_app_id": "A-slack",
+    "event_id": "Ev-B",
+    "event": {
+        "type": "message",
+        "channel_type": "im",
+        "user": "U999",
+        "channel": "D-B",
+        "text": "hello from B",
+        "ts": "1710000000.000002"
+    }
+}"#;
+
+/// Behavior pin: with two installations on DISTINCT teams holding DISTINCT
+/// secrets mounted on the same events path, an event for team B with secret B
+/// resolves and dispatches through installation B only — installation A is
+/// never touched. This is the exact positive multi-installation selection the
+/// generic host-ingress path's per-request candidate resolution must preserve
+/// (see docs/plans/2026-06-17-slack-generic-host-ingress-egress.md §4.4).
+#[tokio::test]
+async fn slack_events_handler_routes_distinct_secret_installations_independently() {
+    let dispatcher_a = Arc::new(HeaderSecretDispatcher::new("secret-a", "install-a"));
+    let dispatcher_b = Arc::new(HeaderSecretDispatcher::new("secret-b", "install-b"));
+    let resolver = StaticSlackInstallationResolver::new(vec![
+        SlackInstallationRecord::new(
+            tenant_id("tenant-a"),
+            installation_id("install-a"),
+            SlackInstallationSelector::team("T-A"),
+            dispatcher_a.clone(),
+        ),
+        SlackInstallationRecord::new(
+            tenant_id("tenant-b"),
+            installation_id("install-b"),
+            SlackInstallationSelector::team("T-B"),
+            dispatcher_b.clone(),
+        ),
+    ]);
+    let mount = slack_events_route_mount(SlackEventsRouteState::new(SlackIngressService::new(
+        Arc::new(resolver),
+    )));
+
+    // Event for team B with team B's secret -> only B dispatches.
+    let response_b = post_to_mount(&mount, TEAM_B_BODY, "secret-b").await;
+    assert_eq!(response_b.status(), StatusCode::OK);
+    assert_eq!(dispatcher_b.dispatch_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(dispatcher_a.dispatch_calls.load(Ordering::SeqCst), 0);
+
+    // Event for team A with team A's secret -> only A dispatches.
+    let response_a = post_to_mount(&mount, TEAM_A_BODY, "secret-a").await;
+    assert_eq!(response_a.status(), StatusCode::OK);
+    assert_eq!(dispatcher_a.dispatch_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(dispatcher_b.dispatch_calls.load(Ordering::SeqCst), 1);
+}
+
+/// Behavior pin: presenting team B's body but team A's secret must fail closed
+/// (no installation verifies) without dispatching either installation.
+#[tokio::test]
+async fn slack_events_handler_rejects_wrong_secret_for_selected_installation() {
+    let dispatcher_a = Arc::new(HeaderSecretDispatcher::new("secret-a", "install-a"));
+    let dispatcher_b = Arc::new(HeaderSecretDispatcher::new("secret-b", "install-b"));
+    let resolver = StaticSlackInstallationResolver::new(vec![
+        SlackInstallationRecord::new(
+            tenant_id("tenant-a"),
+            installation_id("install-a"),
+            SlackInstallationSelector::team("T-A"),
+            dispatcher_a.clone(),
+        ),
+        SlackInstallationRecord::new(
+            tenant_id("tenant-b"),
+            installation_id("install-b"),
+            SlackInstallationSelector::team("T-B"),
+            dispatcher_b.clone(),
+        ),
+    ]);
+    let mount = slack_events_route_mount(SlackEventsRouteState::new(SlackIngressService::new(
+        Arc::new(resolver),
+    )));
+
+    let response = post_to_mount(&mount, TEAM_B_BODY, "secret-a").await;
+
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    assert_error_body(response, "authentication").await;
+    assert_eq!(dispatcher_a.dispatch_calls.load(Ordering::SeqCst), 0);
+    assert_eq!(dispatcher_b.dispatch_calls.load(Ordering::SeqCst), 0);
+}
+
 #[tokio::test]
 async fn slack_events_handler_rate_limit_refills_after_window() {
     let dispatcher = Arc::new(HeaderSecretDispatcher::new("secret-a", "install-a"));

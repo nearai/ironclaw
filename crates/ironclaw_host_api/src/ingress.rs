@@ -6,9 +6,13 @@
 //! extraction, limits, CORS/Origin policy, audit, and effect dispatch all remain
 //! host-composition responsibilities.
 
-use std::num::{NonZeroU32, NonZeroU64};
+use std::{
+    fmt,
+    num::{NonZeroU32, NonZeroU64},
+};
 
 use serde::{Deserialize, Serialize};
+use thiserror::Error;
 
 use crate::{
     CapabilityId, HostApiError, HostPortId, NetworkMethod,
@@ -442,6 +446,315 @@ impl IngressRouteDescriptor {
     }
 }
 
+/// Host-resolved ingress metadata for a route descriptor.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(try_from = "HostIngressRouteDeclarationWire")]
+pub struct HostIngressRouteDeclaration {
+    route: IngressRouteDescriptor,
+    target: HostIngressTarget,
+    auth: Vec<IngressAuthBinding>,
+    ack: IngressAckMode,
+    drain: IngressDrainMode,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct HostIngressRouteDeclarationWire {
+    route: IngressRouteDescriptor,
+    target: HostIngressTarget,
+    auth: Vec<IngressAuthBinding>,
+    ack: IngressAckMode,
+    drain: IngressDrainMode,
+}
+
+impl HostIngressRouteDeclaration {
+    pub fn new(
+        route: IngressRouteDescriptor,
+        target: HostIngressTarget,
+        auth: Vec<IngressAuthBinding>,
+        ack: IngressAckMode,
+        drain: IngressDrainMode,
+    ) -> Result<Self, HostIngressDeclarationError> {
+        if ack == IngressAckMode::Immediate && drain != IngressDrainMode::DrainBeforeRuntimeShutdown
+        {
+            return Err(HostIngressDeclarationError::ImmediateAckRequiresDrain);
+        }
+
+        if matches!(target, HostIngressTarget::ProductAdapterInbound { .. })
+            && !matches!(
+                route.policy().effect_path(),
+                AllowedEffectPath::ProductWorkflow
+            )
+        {
+            return Err(HostIngressDeclarationError::ProductAdapterInboundRequiresProductWorkflow);
+        }
+
+        validate_ingress_auth_bindings(route.policy().auth(), &auth)?;
+
+        Ok(Self {
+            route,
+            target,
+            auth,
+            ack,
+            drain,
+        })
+    }
+
+    pub fn route(&self) -> &IngressRouteDescriptor {
+        &self.route
+    }
+
+    pub fn target(&self) -> &HostIngressTarget {
+        &self.target
+    }
+
+    pub fn auth(&self) -> &[IngressAuthBinding] {
+        &self.auth
+    }
+
+    pub fn ack(&self) -> IngressAckMode {
+        self.ack
+    }
+
+    pub fn drain(&self) -> IngressDrainMode {
+        self.drain
+    }
+}
+
+impl TryFrom<HostIngressRouteDeclarationWire> for HostIngressRouteDeclaration {
+    type Error = HostIngressDeclarationError;
+
+    fn try_from(value: HostIngressRouteDeclarationWire) -> Result<Self, Self::Error> {
+        Self::new(
+            value.route,
+            value.target,
+            value.auth,
+            value.ack,
+            value.drain,
+        )
+    }
+}
+
+/// Host capability that receives a verified ingress request.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", tag = "type", deny_unknown_fields)]
+pub enum HostIngressTarget {
+    ProductAdapterInbound {
+        capability_id: CapabilityId,
+        product_adapter_section: String,
+    },
+    HostCapability {
+        capability_id: CapabilityId,
+    },
+}
+
+/// Binding from a code-built verifier name to opaque credential handles.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(try_from = "IngressAuthBindingWire")]
+pub struct IngressAuthBinding {
+    scheme: IngressAuthSchemeName,
+    credential_handles: Vec<IngressCredentialHandle>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct IngressAuthBindingWire {
+    scheme: IngressAuthSchemeName,
+    credential_handles: Vec<IngressCredentialHandle>,
+}
+
+impl IngressAuthBinding {
+    pub fn new(
+        scheme: IngressAuthSchemeName,
+        credential_handles: Vec<IngressCredentialHandle>,
+    ) -> Result<Self, HostIngressDeclarationError> {
+        if credential_handles.is_empty() {
+            return Err(HostIngressDeclarationError::AuthBindingMissingCredentials { scheme });
+        }
+        Ok(Self {
+            scheme,
+            credential_handles,
+        })
+    }
+
+    pub fn scheme(&self) -> &IngressAuthSchemeName {
+        &self.scheme
+    }
+
+    pub fn credential_handles(&self) -> &[IngressCredentialHandle] {
+        &self.credential_handles
+    }
+}
+
+impl TryFrom<IngressAuthBindingWire> for IngressAuthBinding {
+    type Error = HostIngressDeclarationError;
+
+    fn try_from(value: IngressAuthBindingWire) -> Result<Self, Self::Error> {
+        Self::new(value.scheme, value.credential_handles)
+    }
+}
+
+/// Name of a code-built ingress verifier.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(try_from = "String")]
+pub struct IngressAuthSchemeName(String);
+
+impl IngressAuthSchemeName {
+    fn validate(value: &str) -> Result<(), IngressAuthSchemeNameError> {
+        validate_host_ingress_token(value).map_err(|reason| IngressAuthSchemeNameError::Invalid {
+            value: value.to_owned(),
+            reason,
+        })
+    }
+
+    pub fn new(raw: impl Into<String>) -> Result<Self, IngressAuthSchemeNameError> {
+        let value = raw.into();
+        Self::validate(&value)?;
+        Ok(Self(value))
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    pub fn into_inner(self) -> String {
+        self.0
+    }
+
+    pub fn declared_auth_scheme(&self) -> IngressAuthScheme {
+        IngressAuthScheme::WebhookSignature
+    }
+}
+
+impl TryFrom<String> for IngressAuthSchemeName {
+    type Error = IngressAuthSchemeNameError;
+
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::validate(&value)?;
+        Ok(Self(value))
+    }
+}
+
+impl AsRef<str> for IngressAuthSchemeName {
+    fn as_ref(&self) -> &str {
+        &self.0
+    }
+}
+
+impl fmt::Display for IngressAuthSchemeName {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl From<IngressAuthSchemeName> for String {
+    fn from(id: IngressAuthSchemeName) -> Self {
+        id.0
+    }
+}
+
+/// Opaque identifier for an ingress credential binding.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(try_from = "String")]
+pub struct IngressCredentialHandle(String);
+
+impl IngressCredentialHandle {
+    fn validate(value: &str) -> Result<(), IngressCredentialHandleError> {
+        validate_host_ingress_token(value).map_err(|reason| IngressCredentialHandleError::Invalid {
+            value: value.to_owned(),
+            reason,
+        })
+    }
+
+    pub fn new(raw: impl Into<String>) -> Result<Self, IngressCredentialHandleError> {
+        let value = raw.into();
+        Self::validate(&value)?;
+        Ok(Self(value))
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    pub fn into_inner(self) -> String {
+        self.0
+    }
+}
+
+impl TryFrom<String> for IngressCredentialHandle {
+    type Error = IngressCredentialHandleError;
+
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::validate(&value)?;
+        Ok(Self(value))
+    }
+}
+
+impl AsRef<str> for IngressCredentialHandle {
+    fn as_ref(&self) -> &str {
+        &self.0
+    }
+}
+
+impl fmt::Display for IngressCredentialHandle {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl From<IngressCredentialHandle> for String {
+    fn from(id: IngressCredentialHandle) -> Self {
+        id.0
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum IngressAckMode {
+    AwaitHandler,
+    Immediate,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum IngressDrainMode {
+    None,
+    DrainBeforeRuntimeShutdown,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
+pub enum HostIngressDeclarationError {
+    #[error("immediate ingress ack requires drain before runtime shutdown")]
+    ImmediateAckRequiresDrain,
+    #[error("product adapter inbound ingress target requires product workflow effect path")]
+    ProductAdapterInboundRequiresProductWorkflow,
+    #[error("required ingress auth policy requires at least one auth binding")]
+    RequiredAuthMissingBindings,
+    #[error("public ingress auth policy must not declare auth bindings")]
+    PublicAuthMustNotDeclareBindings,
+    #[error("ingress auth binding for scheme '{scheme}' must list at least one credential handle")]
+    AuthBindingMissingCredentials { scheme: IngressAuthSchemeName },
+    #[error(
+        "ingress auth binding scheme '{scheme}' requires descriptor policy auth scheme '{required:?}'"
+    )]
+    AuthBindingSchemeNotDeclared {
+        scheme: IngressAuthSchemeName,
+        required: IngressAuthScheme,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
+pub enum IngressAuthSchemeNameError {
+    #[error("invalid ingress auth scheme name '{value}': {reason}")]
+    Invalid { value: String, reason: &'static str },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
+pub enum IngressCredentialHandleError {
+    #[error("invalid ingress credential handle '{value}': {reason}")]
+    Invalid { value: String, reason: &'static str },
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ListenerClass {
@@ -676,6 +989,66 @@ fn auth_has_any_scheme(auth: &IngressAuthPolicy, required: &[IngressAuthScheme])
     )
 }
 
+fn validate_ingress_auth_bindings(
+    policy: &IngressAuthPolicy,
+    auth: &[IngressAuthBinding],
+) -> Result<(), HostIngressDeclarationError> {
+    match policy {
+        IngressAuthPolicy::Required { schemes } => {
+            if auth.is_empty() {
+                return Err(HostIngressDeclarationError::RequiredAuthMissingBindings);
+            }
+
+            for binding in auth {
+                if binding.credential_handles.is_empty() {
+                    return Err(HostIngressDeclarationError::AuthBindingMissingCredentials {
+                        scheme: binding.scheme.clone(),
+                    });
+                }
+
+                let required = binding.scheme.declared_auth_scheme();
+                if !schemes.contains(&required) {
+                    return Err(HostIngressDeclarationError::AuthBindingSchemeNotDeclared {
+                        scheme: binding.scheme.clone(),
+                        required,
+                    });
+                }
+            }
+
+            Ok(())
+        }
+        IngressAuthPolicy::Public { .. } => {
+            if auth.is_empty() {
+                Ok(())
+            } else {
+                Err(HostIngressDeclarationError::PublicAuthMustNotDeclareBindings)
+            }
+        }
+    }
+}
+
+fn validate_host_ingress_token(value: &str) -> Result<(), &'static str> {
+    if value.is_empty() {
+        return Err("must not be empty");
+    }
+    if value.len() > 128 {
+        return Err("must be at most 128 bytes");
+    }
+    let first = value.as_bytes()[0];
+    if !(first.is_ascii_lowercase() || first.is_ascii_digit()) {
+        return Err("must start with lowercase ASCII letter or digit");
+    }
+    if value.bytes().any(|byte| {
+        !(byte.is_ascii_lowercase() || byte.is_ascii_digit() || matches!(byte, b'_' | b'-' | b'.'))
+    }) {
+        return Err("only lowercase ASCII letters, digits, '_', '-', and '.' are allowed");
+    }
+    if value.split('.').any(str::is_empty) {
+        return Err("empty dot segments are not allowed");
+    }
+    Ok(())
+}
+
 fn is_effectful_path(effect_path: &AllowedEffectPath) -> bool {
     !matches!(
         effect_path,
@@ -774,6 +1147,75 @@ mod tests {
 
     fn valid_policy() -> IngressPolicy {
         IngressPolicy::new(base_policy_parts()).expect("valid policy")
+    }
+
+    fn slack_events_policy() -> IngressPolicy {
+        IngressPolicy::new(IngressPolicyParts {
+            listener_class: ListenerClass::PublicWebhook,
+            auth: IngressAuthPolicy::Required {
+                schemes: vec![IngressAuthScheme::WebhookSignature],
+            },
+            scope_source: IngressScopeSource::HostResolved,
+            body_limit: BodyLimitPolicy::Limited {
+                max_bytes: nz64(256 * 1024),
+            },
+            rate_limit: RateLimitPolicy::Limited {
+                scope: RateLimitScope::Global,
+                max_requests: nz32(120),
+                window_seconds: nz32(60),
+            },
+            cors: CorsPolicy::NotApplicable,
+            websocket_origin: WebSocketOriginPolicy::NotApplicable,
+            streaming: StreamingMode::None,
+            audit: AuditTraceClass::PublicCallback,
+            effect_path: AllowedEffectPath::ProductWorkflow,
+        })
+        .expect("Slack-shaped policy should validate")
+    }
+
+    fn slack_events_descriptor() -> IngressRouteDescriptor {
+        IngressRouteDescriptor::new(
+            "slack.events",
+            NetworkMethod::Post,
+            "/slack/events",
+            slack_events_policy(),
+        )
+        .expect("Slack-shaped descriptor should validate")
+    }
+
+    fn product_adapter_target() -> HostIngressTarget {
+        HostIngressTarget::ProductAdapterInbound {
+            capability_id: CapabilityId::new("slack.events").expect("valid capability"),
+            product_adapter_section: "events".to_owned(),
+        }
+    }
+
+    fn host_capability_target() -> HostIngressTarget {
+        HostIngressTarget::HostCapability {
+            capability_id: CapabilityId::new("host.ingress").expect("valid capability"),
+        }
+    }
+
+    fn hmac_auth_binding() -> IngressAuthBinding {
+        IngressAuthBinding::new(
+            IngressAuthSchemeName::new("slack_v0_hmac").expect("valid auth scheme name"),
+            vec![
+                IngressCredentialHandle::new("slack_signing_secret")
+                    .expect("valid credential handle"),
+            ],
+        )
+        .expect("auth binding with a credential handle should validate")
+    }
+
+    fn slack_events_declaration() -> HostIngressRouteDeclaration {
+        HostIngressRouteDeclaration::new(
+            slack_events_descriptor(),
+            product_adapter_target(),
+            vec![hmac_auth_binding()],
+            IngressAckMode::Immediate,
+            IngressDrainMode::DrainBeforeRuntimeShutdown,
+        )
+        .expect("Slack-shaped host ingress declaration should validate")
     }
 
     #[test]
@@ -1036,5 +1478,160 @@ mod tests {
         let err = serde_json::from_value::<IngressRouteDescriptor>(raw)
             .expect_err("unknown root fields must reject");
         assert!(err.to_string().contains("unknown field"));
+    }
+
+    #[test]
+    fn slack_shaped_host_ingress_declaration_constructs() {
+        let declaration = slack_events_declaration();
+
+        assert_eq!(declaration.route().route_id().as_str(), "slack.events");
+        assert_eq!(declaration.route().method(), NetworkMethod::Post);
+        assert_eq!(declaration.auth().len(), 1);
+        assert_eq!(declaration.auth()[0].scheme().as_str(), "slack_v0_hmac");
+        assert_eq!(declaration.ack(), IngressAckMode::Immediate);
+        assert_eq!(
+            declaration.drain(),
+            IngressDrainMode::DrainBeforeRuntimeShutdown
+        );
+    }
+
+    #[test]
+    fn immediate_ack_requires_shutdown_drain() {
+        let err = HostIngressRouteDeclaration::new(
+            slack_events_descriptor(),
+            product_adapter_target(),
+            vec![hmac_auth_binding()],
+            IngressAckMode::Immediate,
+            IngressDrainMode::None,
+        )
+        .expect_err("immediate ack without shutdown drain must reject");
+
+        assert_eq!(err, HostIngressDeclarationError::ImmediateAckRequiresDrain);
+    }
+
+    #[test]
+    fn product_adapter_inbound_requires_product_workflow_effect_path() {
+        let descriptor = IngressRouteDescriptor::new(
+            "slack.events",
+            NetworkMethod::Post,
+            "/slack/events",
+            IngressPolicy::new(host_resolved_required_parts(
+                ListenerClass::PublicWebhook,
+                vec![IngressAuthScheme::WebhookSignature],
+                AllowedEffectPath::NoEffect,
+            ))
+            .expect("non-workflow public webhook policy should validate"),
+        )
+        .expect("descriptor should validate");
+
+        let err = HostIngressRouteDeclaration::new(
+            descriptor,
+            product_adapter_target(),
+            vec![hmac_auth_binding()],
+            IngressAckMode::AwaitHandler,
+            IngressDrainMode::None,
+        )
+        .expect_err("product adapter inbound must reject non-workflow effect path");
+
+        assert_eq!(
+            err,
+            HostIngressDeclarationError::ProductAdapterInboundRequiresProductWorkflow
+        );
+    }
+
+    #[test]
+    fn host_ingress_auth_bindings_must_match_policy_auth_mode() {
+        let empty_required_err = HostIngressRouteDeclaration::new(
+            slack_events_descriptor(),
+            product_adapter_target(),
+            Vec::new(),
+            IngressAckMode::AwaitHandler,
+            IngressDrainMode::None,
+        )
+        .expect_err("required auth policy must reject empty auth bindings");
+        assert_eq!(
+            empty_required_err,
+            HostIngressDeclarationError::RequiredAuthMissingBindings
+        );
+
+        let public_descriptor = IngressRouteDescriptor::new(
+            "oauth.callback",
+            NetworkMethod::Get,
+            "/oauth/callback",
+            IngressPolicy::new(public_route_parts(
+                ListenerClass::OAuthCallback,
+                AllowedEffectPath::NoEffect,
+            ))
+            .expect("public no-effect OAuth callback should validate"),
+        )
+        .expect("public descriptor should validate");
+
+        let non_empty_public_err = HostIngressRouteDeclaration::new(
+            public_descriptor,
+            host_capability_target(),
+            vec![hmac_auth_binding()],
+            IngressAckMode::AwaitHandler,
+            IngressDrainMode::None,
+        )
+        .expect_err("public auth policy must reject non-empty auth bindings");
+        assert_eq!(
+            non_empty_public_err,
+            HostIngressDeclarationError::PublicAuthMustNotDeclareBindings
+        );
+    }
+
+    #[test]
+    fn auth_binding_requires_credential_handle() {
+        let err = IngressAuthBinding::new(
+            IngressAuthSchemeName::new("slack_v0_hmac").expect("valid auth scheme name"),
+            Vec::new(),
+        )
+        .expect_err("auth binding without credential handles must reject");
+
+        assert!(err.to_string().contains("credential handle"));
+    }
+
+    #[test]
+    fn auth_binding_scheme_must_be_declared_by_policy() {
+        let descriptor = IngressRouteDescriptor::new(
+            "web_chat.send",
+            NetworkMethod::Post,
+            "/api/chat/v2/messages",
+            valid_policy(),
+        )
+        .expect("bearer-token descriptor should validate");
+
+        let err = HostIngressRouteDeclaration::new(
+            descriptor,
+            host_capability_target(),
+            vec![hmac_auth_binding()],
+            IngressAckMode::AwaitHandler,
+            IngressDrainMode::None,
+        )
+        .expect_err("webhook-signature binding must reject bearer-token-only policy");
+
+        assert!(matches!(
+            err,
+            HostIngressDeclarationError::AuthBindingSchemeNotDeclared {
+                required: IngressAuthScheme::WebhookSignature,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn host_ingress_declaration_round_trips_through_validated_wire_shape() {
+        let declaration = slack_events_declaration();
+
+        let json = serde_json::to_value(&declaration).expect("serialize declaration");
+        assert_eq!(json["route"]["route_id"], "slack.events");
+        assert_eq!(json["target"]["type"], "product_adapter_inbound");
+        assert_eq!(json["auth"][0]["scheme"], "slack_v0_hmac");
+        assert_eq!(json["ack"], "immediate");
+        assert_eq!(json["drain"], "drain_before_runtime_shutdown");
+
+        let reparsed: HostIngressRouteDeclaration =
+            serde_json::from_value(json).expect("validated declaration should deserialize");
+        assert_eq!(reparsed, declaration);
     }
 }

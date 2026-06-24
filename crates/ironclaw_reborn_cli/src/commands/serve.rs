@@ -18,7 +18,7 @@ use ironclaw_reborn_composition::{
 };
 #[cfg(feature = "slack-v2-host-beta")]
 use ironclaw_reborn_composition::{
-    SlackOperatorRouteVisibility, build_slack_host_beta_runtime_mounts,
+    SlackOperatorRouteVisibility, build_slack_host_beta_runtime_mounts_with_host_ingress_mode,
     build_webui_services_with_slack_host_beta_mounts,
 };
 use ironclaw_reborn_config::{IdentitySection, RebornProfile, seed_default_config_file_if_missing};
@@ -180,6 +180,12 @@ impl ServeCommand {
         )?;
         #[cfg(not(feature = "slack-v2-host-beta"))]
         let _ = slack_host_beta_config;
+        #[cfg(feature = "slack-v2-host-beta")]
+        let slack_host_ingress_mode = config_file
+            .as_ref()
+            .and_then(|file| file.slack.as_ref())
+            .map(|slack| slack.host_ingress_mode)
+            .unwrap_or_default();
 
         // Resolve listen address with explicit precedence:
         //   CLI flag (Some(...)) > config file > compile-time default.
@@ -364,7 +370,12 @@ impl ServeCommand {
                 .context("failed to assemble Reborn runtime for `serve`")?;
             #[cfg(feature = "slack-v2-host-beta")]
             let slack_mounts = if let Some(slack_config) = slack_host_beta_config {
-                match build_slack_host_beta_runtime_mounts(&runtime, slack_config)
+                match build_slack_host_beta_runtime_mounts_with_host_ingress_mode(
+                    &runtime,
+                    slack_config,
+                    slack_host_ingress_mode.is_generic(),
+                    slack_host_ingress_mode.is_generic_shadow(),
+                )
                     .await
                     .context("failed to compose Slack host-beta routes")
                 {

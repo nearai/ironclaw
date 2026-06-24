@@ -15,7 +15,9 @@ use axum::http::{Request, StatusCode};
 use hmac::{Hmac, Mac};
 use http_body_util::BodyExt;
 use ironclaw_conversations::InMemoryConversationServices;
+use ironclaw_host_api::ingress::IngressCredentialHandle;
 use ironclaw_host_api::{AgentId, ApprovalRequestId, ProjectId, TenantId, ThreadId, UserId};
+use ironclaw_host_api::{InvocationId, ResourceScope, SecretHandle};
 use ironclaw_outbound::{
     CommunicationPreferenceRepository, InMemoryOutboundStateStore, OutboundStateStore,
 };
@@ -38,6 +40,7 @@ use ironclaw_product_workflow::{
     ResolveAuthInteractionRequest, ResolveAuthInteractionResponse, StaticProductActorUserResolver,
     StaticProductInstallationResolver,
 };
+use ironclaw_secrets::{InMemorySecretStore, SecretMaterial, SecretStore};
 use ironclaw_slack_v2_adapter::{
     SLACK_USER_ACTOR_KIND, SlackV2Adapter, SlackV2AdapterConfig,
     slack_request_signature_auth_requirement,
@@ -59,9 +62,15 @@ use ironclaw_wasm_product_adapters::{
 use tower::ServiceExt;
 
 use super::*;
+use crate::host_ingress::public_ingress_route_mount;
 use crate::slack_delivery::{
     SlackFinalReplyDeliveryObserver, SlackFinalReplyDeliveryServices,
     SlackFinalReplyDeliverySettings,
+};
+use crate::slack_host_ingress::{
+    ExtensionInstallationIngressCredentialBinding, ExtensionInstallationIngressCredentialResolver,
+    SlackEventsIngressHandler, SlackHostIngressInstallation,
+    slack_events_host_ingress_registrations,
 };
 use crate::{
     AuthChallengeProvider, RebornUserIdentityLookup, RebornUserIdentityLookupError,
@@ -90,6 +99,8 @@ const AUTH_GATE: &str = "gate:auth-slack";
 
 struct Harness {
     mount: PublicRouteMount,
+    /// Generic host-ingress mount built from the same runner+observer as `mount`.
+    generic_mount: PublicRouteMount,
     state: SlackEventsRouteState,
     egress: RecordingEgress,
     coordinator: Arc<RecordingTurnCoordinator>,
@@ -118,6 +129,12 @@ impl Harness {
     async fn post_event(&self, body: &'static str) -> axum::response::Response {
         let timestamp = current_unix_timestamp();
         self.post_event_with_signature(body, timestamp, slack_signature(timestamp, body))
+            .await
+    }
+
+    async fn post_event_generic(&self, body: &'static str) -> axum::response::Response {
+        let timestamp = current_unix_timestamp();
+        self.post_event_generic_with_signature(body, timestamp, slack_signature(timestamp, body))
             .await
     }
 
@@ -152,6 +169,28 @@ impl Harness {
         signature: String,
     ) -> axum::response::Response {
         self.mount
+            .router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(SLACK_EVENTS_PATH)
+                    .header(SLACK_TIMESTAMP_HEADER, timestamp.to_string())
+                    .header(SLACK_SIGNATURE_HEADER, signature)
+                    .body(Body::from(body))
+                    .expect("request should build"), // safety: static test request fixtures are valid.
+            )
+            .await
+            .expect("router should respond") // safety: in-process test router should not fail
+    }
+
+    async fn post_event_generic_with_signature(
+        &self,
+        body: &'static str,
+        timestamp: u64,
+        signature: String,
+    ) -> axum::response::Response {
+        self.generic_mount
             .router
             .clone()
             .oneshot(
@@ -342,6 +381,13 @@ async fn build_harness_with_full_settings(
         },
     ));
 
+    let generic_mount = build_generic_slack_host_ingress_mount(
+        installation_id.clone(),
+        runner.clone(),
+        observer.clone(),
+    )
+    .await;
+
     let slack_resolver = StaticSlackInstallationResolver::new(vec![
         SlackInstallationRecord::new(
             TenantId::new(TENANT).expect("tenant"), // safety: static test tenant id is valid.
@@ -356,6 +402,7 @@ async fn build_harness_with_full_settings(
 
     Harness {
         mount,
+        generic_mount,
         state,
         egress,
         coordinator: Arc::new(coordinator),
@@ -363,6 +410,59 @@ async fn build_harness_with_full_settings(
         auths,
         route_store,
     }
+}
+
+async fn build_generic_slack_host_ingress_mount(
+    installation_id: AdapterInstallationId,
+    runner: Arc<NativeProductAdapterRunner>,
+    observer: Arc<SlackFinalReplyDeliveryObserver>,
+) -> PublicRouteMount {
+    let ingress_credential_handle =
+        IngressCredentialHandle::new("slack_signing_secret").expect("ingress credential handle"); // safety: static test handle is valid.
+    let installation = SlackHostIngressInstallation::new(
+        TenantId::new(TENANT).expect("tenant"), // safety: static test tenant id is valid.
+        installation_id,
+        SlackInstallationSelector::team(TEAM),
+        vec![ingress_credential_handle.clone()],
+        runner,
+    )
+    .expect("generic Slack ingress installation should build") // safety: static test installation fixture is valid.
+    .with_workflow_observer(observer);
+    let handler = Arc::new(
+        SlackEventsIngressHandler::new([installation])
+            .expect("generic Slack events ingress handler should build"), // safety: static test installation has one unique candidate id.
+    );
+    let secret_scope = ResourceScope::local_default(
+        UserId::new(USER).expect("user"), // safety: static test user id is valid.
+        InvocationId::new(),
+    )
+    .expect("generic Slack secret scope should build"); // safety: local default scope accepts static test identity.
+    let secret_handle = SecretHandle::new("slack_signing_secret").expect("secret handle"); // safety: static test secret handle is valid.
+    let secret_store = Arc::new(InMemorySecretStore::new());
+    secret_store
+        .put(
+            secret_scope.clone(),
+            secret_handle.clone(),
+            SecretMaterial::from(SECRET.to_string()),
+        )
+        .await
+        .expect("seed generic Slack signing secret"); // safety: in-memory secret store should accept static test secret material.
+    let resolver = Arc::new(
+        ExtensionInstallationIngressCredentialResolver::new(
+            secret_store,
+            [ExtensionInstallationIngressCredentialBinding {
+                candidate_id: INSTALLATION.to_string(),
+                ingress_credential_handle,
+                secret_scope,
+                secret_handle,
+            }],
+        )
+        .expect("generic Slack ingress credential resolver should build"), // safety: static binding has a valid candidate id and unique handle.
+    );
+    let registrations = slack_events_host_ingress_registrations(handler)
+        .expect("generic Slack ingress registrations should build"); // safety: handler declares a valid ingress credential handle.
+    public_ingress_route_mount(registrations, resolver)
+        .expect("generic Slack ingress route mount should build") // safety: static test route declarations are unique.
 }
 
 fn static_personal_actor_user_resolver() -> Arc<dyn ProductActorUserResolver> {
@@ -558,6 +658,13 @@ async fn build_harness_for_delivered_route_tests_with_store_mode(
         },
     ));
 
+    let generic_mount = build_generic_slack_host_ingress_mount(
+        installation_id.clone(),
+        runner.clone(),
+        observer.clone(),
+    )
+    .await;
+
     let slack_resolver = StaticSlackInstallationResolver::new(vec![
         SlackInstallationRecord::new(
             TenantId::new(TENANT).expect("tenant"), // safety: static test tenant id is valid.
@@ -572,6 +679,7 @@ async fn build_harness_for_delivered_route_tests_with_store_mode(
 
     let harness = Harness {
         mount,
+        generic_mount,
         state,
         egress,
         coordinator: Arc::new(coordinator),
@@ -2517,6 +2625,13 @@ async fn build_harness_for_auth_fanout_test(
         },
     ));
 
+    let generic_mount = build_generic_slack_host_ingress_mount(
+        installation_id.clone(),
+        runner.clone(),
+        observer.clone(),
+    )
+    .await;
+
     let slack_resolver = StaticSlackInstallationResolver::new(vec![
         SlackInstallationRecord::new(
             TenantId::new(TENANT).expect("tenant"), // safety: static test tenant id is valid.
@@ -2531,6 +2646,7 @@ async fn build_harness_for_auth_fanout_test(
 
     let harness = Harness {
         mount,
+        generic_mount,
         state,
         egress,
         coordinator: Arc::new(coordinator),
@@ -2846,4 +2962,97 @@ async fn slack_approval_then_auth_resume_completes_without_second_approval() {
 
     // FakeAuthChallengeProvider must have been called exactly once (for the auth prompt).
     auth_provider.assert_single_call();
+}
+
+mod generic_parity {
+    use super::*;
+
+    #[tokio::test]
+    async fn generic_forged_hmac_rejected_without_delivery() {
+        let harness = build_harness(TurnMode::Complete {
+            assistant_text: "must not send".into(),
+        })
+        .await;
+
+        let response = harness
+            .post_event_generic_with_signature(
+                dm_message("Ev-forged", "hello"),
+                current_unix_timestamp(),
+                "v0=deadbeef".to_string(),
+            )
+            .await;
+
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        harness.drain().await;
+        assert!(harness.slack_messages().is_empty());
+    }
+
+    #[tokio::test]
+    async fn generic_dm_delivers_final_reply_after_immediate_ack() {
+        let harness = build_harness(TurnMode::Complete {
+            assistant_text: "hello from reborn".into(),
+        })
+        .await;
+
+        let response = harness
+            .post_event_generic(dm_message("Ev-final", "hello"))
+            .await;
+
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_body(response, "ok").await;
+        harness.drain().await;
+
+        let messages = harness.slack_messages();
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0]["channel"], CHANNEL);
+        assert_eq!(messages[0]["text"], "hello from reborn");
+    }
+
+    #[tokio::test]
+    async fn generic_dm_retry_delivery_is_idempotent() {
+        let harness = build_harness(TurnMode::Complete {
+            assistant_text: "hello from reborn".into(),
+        })
+        .await;
+        let body = dm_message("Ev-final", "hello");
+
+        let first = harness.post_event_generic(body).await;
+        let retry = harness.post_event_generic(body).await;
+
+        assert_eq!(first.status(), StatusCode::OK);
+        assert_eq!(retry.status(), StatusCode::OK);
+        harness.drain().await;
+
+        let messages = harness.slack_messages();
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0]["channel"], CHANNEL);
+        assert_eq!(messages[0]["text"], "hello from reborn");
+    }
+
+    #[tokio::test]
+    async fn generic_dm_delivers_approval_prompt_after_immediate_ack() {
+        let harness = build_harness(TurnMode::BlockApproval).await;
+
+        let response = harness
+            .post_event_generic(dm_message("Ev-approval", "needs approval"))
+            .await;
+
+        assert_eq!(response.status(), StatusCode::OK);
+        harness.drain().await;
+
+        let messages = harness.slack_messages();
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0]["channel"], CHANNEL);
+        assert!(
+            messages[0]["text"]
+                .as_str()
+                .is_some_and(|text| text.contains("Approval needed"))
+        );
+        assert!(
+            messages[0]["text"]
+                .as_str()
+                .is_some_and(|text| text.contains("approve` or `deny"))
+        );
+        assert!(harness.slack_deletes().is_empty());
+    }
 }

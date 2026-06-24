@@ -1,5 +1,6 @@
 use std::sync::Arc;
 
+use ironclaw_host_api::ingress::IngressCredentialHandle;
 use ironclaw_host_api::{AgentId, ProjectId, TenantId};
 use ironclaw_outbound::TriggeredRunDeliveryStore;
 use ironclaw_product_adapters::{
@@ -16,6 +17,11 @@ use sha2::{Digest, Sha256};
 use tokio::sync::Mutex;
 
 use crate::RebornRuntime;
+use crate::host_ingress::{
+    HostIngressAuthCandidate, HostIngressCapabilityHandler, HostIngressCredentialResolver,
+    HostIngressError, HostIngressImmediateResponse, ResolvedIngressSecret,
+    UnverifiedHostIngressRequest, VerifiedHostIngressRequest, public_ingress_route_mount,
+};
 use crate::outbound_preferences::{
     OutboundDeliveryTargetEntry, OutboundDeliveryTargetProvider,
     OutboundDeliveryTargetRegistrationOutcome,
@@ -29,6 +35,10 @@ use crate::slack_channel_routes::{
     SlackChannelRouteStore, SlackChannelRouteSubjectResolver,
 };
 use crate::slack_delivery::{PostSubmitDeliveryHook, TriggeredRunDeliveryDriver};
+use crate::slack_host_ingress::{
+    map_runner_error, map_slack_ingress_error, slack_events_host_ingress_registrations_for_handler,
+    slack_hmac_auth_candidates_for_installation_envelope,
+};
 use crate::slack_host_state::FilesystemSlackHostState;
 use crate::slack_outbound_targets::{
     SlackHostBetaOutboundTargetProvider, SlackOutboundTargetProviderConfig, SlackPersonalDmTarget,
@@ -50,18 +60,19 @@ use crate::slack_personal_binding_pairing::{
 };
 use crate::slack_personal_binding_pairing_serve::SlackPersonalBindingPairingRouteConfig;
 use crate::slack_serve::{
-    ResolvedSlackIngress, SlackEventsRouteState, SlackIngressError, SlackInstallationResolver,
+    ResolvedSlackIngress, SlackEventsRouteState, SlackIngressError,
+    SlackInstallationRateLimitConfig, SlackInstallationRateLimiter, SlackInstallationResolver,
     SlackInstallationSelector, SlackTeamId, SlackUserId, StaticSlackInstallationResolver,
     slack_events_route_mount,
 };
 use crate::slack_setup::{
     SlackInstallationSetup, SlackInstallationSetupStore, SlackInstallationSetupUpdate,
-    SlackSetupService,
+    SlackSetupError, SlackSetupService,
 };
 
 use super::{
-    SlackHostBetaActorUserResolver, SlackHostBetaBuildError, SlackHostBetaConfig,
-    SlackHostBetaConfigInput, SlackHostBetaMounts, SlackHostBetaRuntimeConfig,
+    SLACK_SIGNING_SECRET_HANDLE, SlackHostBetaActorUserResolver, SlackHostBetaBuildError,
+    SlackHostBetaConfig, SlackHostBetaConfigInput, SlackHostBetaMounts, SlackHostBetaRuntimeConfig,
     SlackHostBetaRuntimeParts, build_slack_installation_record_with_resolvers,
     build_triggered_run_delivery_hook_from_parts, slack_bot_token_handle,
     slack_protocol_egress_from_parts,
@@ -70,6 +81,15 @@ use super::{
 pub(super) async fn build_runtime_mounts(
     runtime: &RebornRuntime,
     config: SlackHostBetaRuntimeConfig,
+) -> Result<SlackHostBetaMounts, SlackHostBetaBuildError> {
+    build_runtime_mounts_with_host_ingress_mode(runtime, config, false, false).await
+}
+
+pub(super) async fn build_runtime_mounts_with_host_ingress_mode(
+    runtime: &RebornRuntime,
+    config: SlackHostBetaRuntimeConfig,
+    use_generic_host_ingress: bool,
+    validate_generic_host_ingress: bool,
 ) -> Result<SlackHostBetaMounts, SlackHostBetaBuildError> {
     let parts = Arc::new(SlackHostBetaRuntimeParts::from_runtime(runtime)?);
     let state = Arc::new(FilesystemSlackHostState::new(
@@ -129,13 +149,14 @@ pub(super) async fn build_runtime_mounts(
         )
         .await?;
     }
-    let resolver = DynamicSlackInstallationResolver::new(
-        Arc::clone(&parts),
-        Arc::clone(&setup_service),
-        state.clone(),
-        pairing.clone(),
-        Arc::clone(&channel_route_store),
-    );
+    let resolver: Arc<dyn SlackInstallationResolver> =
+        Arc::new(DynamicSlackInstallationResolver::new(
+            Arc::clone(&parts),
+            Arc::clone(&setup_service),
+            state.clone(),
+            pairing.clone(),
+            Arc::clone(&channel_route_store),
+        ));
     let channel_routes = SlackChannelRouteAdminRouteConfig::dynamic(
         Arc::clone(&channel_route_store),
         Arc::clone(&setup_service),
@@ -194,8 +215,24 @@ pub(super) async fn build_runtime_mounts(
         });
     }
 
+    let direct_events =
+        slack_events_route_mount(SlackEventsRouteState::from_resolver(Arc::clone(&resolver)));
+    let generic_events = if use_generic_host_ingress || validate_generic_host_ingress {
+        Some(build_dynamic_slack_host_ingress_mount(
+            Arc::clone(&resolver),
+            Arc::clone(&setup_service),
+        )?)
+    } else {
+        None
+    };
+    let events = if use_generic_host_ingress {
+        generic_events.expect("generic host ingress mount was built")
+    } else {
+        direct_events
+    };
+
     Ok(SlackHostBetaMounts {
-        events: slack_events_route_mount(SlackEventsRouteState::from_resolver(Arc::new(resolver))),
+        events,
         personal_binding_pairing: SlackPersonalBindingPairingRouteConfig::new(pairing),
         channel_routes,
         outbound_delivery_target_provider,
@@ -227,6 +264,188 @@ fn slack_dynamic_outbound_delivery_target_provider_key(
 fn hash_provider_key_field(hasher: &mut Sha256, value: &str) {
     hasher.update(value.len().to_be_bytes());
     hasher.update(value.as_bytes());
+}
+
+fn build_dynamic_slack_host_ingress_mount(
+    resolver: Arc<dyn SlackInstallationResolver>,
+    setup_service: Arc<SlackSetupService>,
+) -> Result<crate::webui_serve::PublicRouteMount, SlackHostBetaBuildError> {
+    let credential_handle = dynamic_slack_ingress_credential_handle()?;
+    let handler: Arc<dyn HostIngressCapabilityHandler> =
+        Arc::new(DynamicSlackEventsIngressHandler::new(
+            resolver,
+            Arc::clone(&setup_service),
+            credential_handle.clone(),
+        ));
+    let registrations =
+        slack_events_host_ingress_registrations_for_handler(vec![credential_handle], handler)?;
+    let credential_resolver: Arc<dyn HostIngressCredentialResolver> =
+        Arc::new(DynamicSlackIngressCredentialResolver::new(setup_service));
+    Ok(public_ingress_route_mount(
+        registrations,
+        credential_resolver,
+    )?)
+}
+
+fn dynamic_slack_ingress_credential_handle() -> Result<IngressCredentialHandle, HostIngressError> {
+    IngressCredentialHandle::new(SLACK_SIGNING_SECRET_HANDLE).map_err(|error| {
+        HostIngressError::Internal {
+            reason: format!("Slack signing secret ingress handle did not validate: {error}"),
+        }
+    })
+}
+
+struct DynamicSlackEventsIngressHandler {
+    resolver: Arc<dyn SlackInstallationResolver>,
+    setup_service: Arc<SlackSetupService>,
+    credential_handle: IngressCredentialHandle,
+    installation_rate_limiter: SlackInstallationRateLimiter,
+}
+
+impl DynamicSlackEventsIngressHandler {
+    fn new(
+        resolver: Arc<dyn SlackInstallationResolver>,
+        setup_service: Arc<SlackSetupService>,
+        credential_handle: IngressCredentialHandle,
+    ) -> Self {
+        Self {
+            resolver,
+            setup_service,
+            credential_handle,
+            installation_rate_limiter: SlackInstallationRateLimiter::new(
+                SlackInstallationRateLimitConfig::default(),
+            ),
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl HostIngressCapabilityHandler for DynamicSlackEventsIngressHandler {
+    async fn auth_candidates(
+        &self,
+        request: &UnverifiedHostIngressRequest<'_>,
+    ) -> Result<Vec<HostIngressAuthCandidate>, HostIngressError> {
+        let Some(setup) = self
+            .setup_service
+            .current_setup()
+            .await
+            .map_err(|error| map_setup_error_to_host_ingress("read Slack setup", error))?
+        else {
+            return Ok(Vec::new());
+        };
+        let installation_id = setup.installation_id().map_err(|error| {
+            map_setup_error_to_host_ingress("resolve Slack installation id", error)
+        })?;
+        slack_hmac_auth_candidates_for_installation_envelope(
+            self.setup_service.tenant_id().clone(),
+            installation_id,
+            SlackInstallationSelector::app_team(setup.api_app_id, setup.team_id),
+            vec![self.credential_handle.clone()],
+            request.headers(),
+            request.body(),
+        )
+        .await
+    }
+
+    async fn handle_verified(
+        &self,
+        request: VerifiedHostIngressRequest,
+    ) -> Result<HostIngressImmediateResponse, HostIngressError> {
+        let ingress = self
+            .resolver
+            .resolve_ingress(request.headers(), request.body())
+            .await
+            .map_err(map_slack_ingress_error)?;
+        self.installation_rate_limiter
+            .check(ingress.installation())
+            .map_err(map_slack_ingress_error)?;
+
+        match ingress {
+            ResolvedSlackIngress::UrlVerification { challenge, .. } => {
+                Ok(HostIngressImmediateResponse::ok_body(challenge))
+            }
+            ResolvedSlackIngress::Event { installation, .. } => {
+                installation
+                    .dispatcher()
+                    .process_verified_webhook_immediate_ack(
+                        request.body(),
+                        request.auth_evidence(),
+                        installation.workflow_observer(),
+                    )
+                    .await
+                    .map_err(map_runner_error)?;
+                Ok(HostIngressImmediateResponse::accepted())
+            }
+        }
+    }
+
+    fn drain<'a>(&'a self) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'a>> {
+        self.resolver.drain_installations()
+    }
+}
+
+struct DynamicSlackIngressCredentialResolver {
+    setup_service: Arc<SlackSetupService>,
+}
+
+impl DynamicSlackIngressCredentialResolver {
+    fn new(setup_service: Arc<SlackSetupService>) -> Self {
+        Self { setup_service }
+    }
+}
+
+#[async_trait::async_trait]
+impl HostIngressCredentialResolver for DynamicSlackIngressCredentialResolver {
+    async fn resolve_ingress_secret(
+        &self,
+        candidate: &crate::host_ingress::HostIngressAuthCandidate,
+        handle: &IngressCredentialHandle,
+    ) -> Result<ResolvedIngressSecret, HostIngressError> {
+        if handle.as_str() != SLACK_SIGNING_SECRET_HANDLE {
+            return Err(HostIngressError::AuthenticationFailed {
+                reason: format!("unsupported Slack ingress credential handle `{handle}`"),
+            });
+        }
+        let setup = self
+            .setup_service
+            .current_setup()
+            .await
+            .map_err(|error| map_setup_error_to_host_ingress("read Slack setup", error))?
+            .ok_or_else(|| HostIngressError::AuthenticationFailed {
+                reason: "Slack setup is not configured".to_string(),
+            })?;
+        if candidate.candidate_id() != setup.installation_id {
+            return Err(HostIngressError::AuthenticationFailed {
+                reason: format!(
+                    "Slack ingress candidate `{}` does not match configured installation",
+                    candidate.candidate_id()
+                ),
+            });
+        }
+        let material = self
+            .setup_service
+            .signing_secret(&setup)
+            .await
+            .map_err(|error| {
+                map_setup_error_to_host_ingress("resolve Slack signing secret", error)
+            })?;
+        Ok(ResolvedIngressSecret::new(material))
+    }
+}
+
+fn map_setup_error_to_host_ingress(
+    action: &'static str,
+    error: SlackSetupError,
+) -> HostIngressError {
+    let reason = format!("{action}: {error}");
+    match error {
+        SlackSetupError::StoreUnavailable | SlackSetupError::SecretStoreUnavailable { .. } => {
+            HostIngressError::TemporarilyUnavailable { reason }
+        }
+        SlackSetupError::InvalidField { .. } | SlackSetupError::MissingField { .. } => {
+            HostIngressError::AuthenticationFailed { reason }
+        }
+    }
 }
 
 async fn seed_legacy_slack_setup_if_missing(
