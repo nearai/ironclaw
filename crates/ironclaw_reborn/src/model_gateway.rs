@@ -1341,10 +1341,48 @@ fn image_data_url(mime_type: &str, bytes: &[u8]) -> String {
     )
 }
 
+/// Collapse runs of identical *error* tool observations in the replayed context.
+///
+/// A model that repeats the same failing call accumulates byte-for-byte identical
+/// error observations — one per attempt — and every one is replayed into every
+/// later prompt. That both bloats context and drowns the model in copies of its
+/// own failure so it cannot tell it is looping. Keep the FIRST and LAST occurrence
+/// of each identical error intact (first for original detail, last because it is
+/// most recent and carries any repair hints) and replace the ones in between with
+/// a compact marker. Nothing is dropped — every tool-result message stays, so
+/// provider tool-call/result pairing is preserved; only the observation *content*
+/// of interior duplicates shrinks. Success observations and a lone repeat are
+/// never touched (the 3+ threshold leaves the first/last-only case alone).
+fn collapse_repeated_failure_observations(messages: &mut [HostManagedModelMessage]) {
+    let mut occurrences: std::collections::HashMap<String, Vec<usize>> =
+        std::collections::HashMap::new();
+    for (index, message) in messages.iter().enumerate() {
+        if let Some(HostManagedToolResultContent::Reference { envelope }) =
+            message.tool_result_content.as_ref()
+            && let Some(fingerprint) = envelope.error_observation_fingerprint()
+        {
+            occurrences.entry(fingerprint).or_default().push(index);
+        }
+    }
+    for indices in occurrences.values() {
+        if indices.len() < 3 {
+            continue;
+        }
+        for &index in &indices[1..indices.len() - 1] {
+            if let Some(HostManagedToolResultContent::Reference { envelope }) =
+                messages[index].tool_result_content.as_mut()
+            {
+                envelope.collapse_to_repeated_error_marker();
+            }
+        }
+    }
+}
+
 fn convert_messages(
-    messages: Vec<HostManagedModelMessage>,
+    mut messages: Vec<HostManagedModelMessage>,
     replay_identity: &ProviderReplayIdentity,
 ) -> Result<Vec<ChatMessage>, HostManagedModelError> {
+    collapse_repeated_failure_observations(&mut messages);
     let mut converted = Vec::with_capacity(messages.len());
     let mut index = 0;
     while index < messages.len() {
@@ -1749,6 +1787,100 @@ mod tests {
             serde_json::from_str::<serde_json::Value>(&replay.model_content).unwrap(),
             observation
         );
+    }
+
+    fn error_tool_result_message(
+        result_ref: &str,
+        observation: serde_json::Value,
+    ) -> HostManagedModelMessage {
+        let envelope = ironclaw_threads::ToolResultReferenceEnvelope::with_model_observation(
+            result_ref,
+            ironclaw_threads::ToolResultSafeSummary::new("tool failed").expect("safe summary"),
+            observation,
+        )
+        .expect("valid observation envelope");
+        HostManagedModelMessage {
+            role: HostManagedModelMessageRole::ToolResult,
+            content: "tool failed".to_string(),
+            content_ref: ironclaw_turns::LoopMessageRef::new(
+                "msg:11111111-1111-1111-1111-111111111111",
+            )
+            .expect("valid message ref"),
+            tool_result_provider_call: None,
+            tool_result_content: Some(HostManagedToolResultContent::Reference { envelope }),
+            image_parts: Vec::new(),
+        }
+    }
+
+    fn tool_result_observation(message: &HostManagedModelMessage) -> serde_json::Value {
+        match message.tool_result_content.as_ref().expect("tool result content") {
+            HostManagedToolResultContent::Reference { envelope } => {
+                envelope.model_observation.clone().expect("model observation")
+            }
+            other => panic!("expected reference, got {other:?}"),
+        }
+    }
+
+    fn generic_error_observation() -> serde_json::Value {
+        serde_json::json!({
+            "schema_version": 1,
+            "status": "error",
+            "summary": "Capability failed with invalid_input.",
+            "detail": {"kind": "generic_failure", "failure_kind": "invalid_input"},
+            "trust": "untrusted_tool_output",
+        })
+    }
+
+    #[test]
+    fn collapse_repeated_failure_observations_keeps_first_and_last_only() {
+        let error_obs = generic_error_observation();
+        let success_obs = serde_json::json!({
+            "schema_version": 1,
+            "status": "success",
+            "summary": "ok",
+            "detail": {"kind": "generic_failure", "failure_kind": "none"},
+            "trust": "untrusted_tool_output",
+        });
+        // Four identical failures (each its own result_ref) plus a success.
+        let mut messages = vec![
+            error_tool_result_message("result:err_1.1", error_obs.clone()),
+            error_tool_result_message("result:err_1.2", error_obs.clone()),
+            error_tool_result_message("result:err_1.3", error_obs.clone()),
+            error_tool_result_message("result:err_1.4", error_obs.clone()),
+            error_tool_result_message("result:ok_1.5", success_obs.clone()),
+        ];
+
+        collapse_repeated_failure_observations(&mut messages);
+
+        // First and last identical errors keep full detail.
+        assert_eq!(tool_result_observation(&messages[0]), error_obs);
+        assert_eq!(tool_result_observation(&messages[3]), error_obs);
+        // Interior duplicates collapse to the compact, schema-valid marker.
+        for index in [1usize, 2] {
+            let failure_kind = tool_result_observation(&messages[index])
+                .get("detail")
+                .and_then(|detail| detail.get("failure_kind"))
+                .and_then(|kind| kind.as_str())
+                .map(str::to_string);
+            assert_eq!(failure_kind.as_deref(), Some("repeated_error_elided"));
+        }
+        // Success observation is never touched.
+        assert_eq!(tool_result_observation(&messages[4]), success_obs);
+    }
+
+    #[test]
+    fn collapse_repeated_failure_observations_leaves_a_single_repeat_alone() {
+        let error_obs = generic_error_observation();
+        let mut messages = vec![
+            error_tool_result_message("result:err_2.1", error_obs.clone()),
+            error_tool_result_message("result:err_2.2", error_obs.clone()),
+        ];
+
+        collapse_repeated_failure_observations(&mut messages);
+
+        // Below the 3+ threshold: both copies stay intact.
+        assert_eq!(tool_result_observation(&messages[0]), error_obs);
+        assert_eq!(tool_result_observation(&messages[1]), error_obs);
     }
 
     fn user_message_with_images(
