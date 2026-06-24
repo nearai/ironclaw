@@ -70,6 +70,61 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
                 "fake-refresh-token",
             )
 
+    def test_generated_github_seed_creates_manual_token_product_auth_account(self):
+        if importlib.util.find_spec("cryptography") is None:
+            self.skipTest("cryptography is installed in the e2e venv, not system Python")
+        with tempfile.TemporaryDirectory() as tmpdir:
+            home = Path(tmpdir) / "reborn-home"
+            env = {
+                "AUTH_LIVE_GITHUB_TOKEN": "fake-github-token",
+            }
+            with patch.dict(os.environ, env, clear=False):
+                seed = run_live_qa._seed_generated_github_product_auth_if_configured(
+                    home,
+                    "qa-user",
+                )
+                preflight = run_live_qa._github_auth_preflight(
+                    home,
+                    {},
+                    requires_github_auth=True,
+                )
+
+            self.assertTrue(seed["seeded"])
+            self.assertEqual(seed["token_env_source"], "AUTH_LIVE_GITHUB_TOKEN")
+            self.assertTrue(preflight["ready"])
+            self.assertEqual(preflight["configured_account_count"], 1)
+
+            db_path = home / "local-dev" / "reborn-local-dev.db"
+            master_key = (
+                home / "local-dev" / ".reborn-local-dev-secrets-master-key"
+            ).read_text(encoding="utf-8")
+            with sqlite3.connect(db_path) as db:
+                account_row = db.execute(
+                    "SELECT contents FROM root_filesystem_entries "
+                    "WHERE path LIKE '%product-auth/callback/accounts/%.json'"
+                ).fetchone()
+            self.assertIsNotNone(account_row)
+            account = json.loads(account_row[0])
+            self.assertEqual(account["provider"], "github")
+            self.assertEqual(account["status"], "configured")
+            expected_handle = (
+                f"product-auth-manual-{seed['account_id']}-{seed['account_id']}"
+            )
+            self.assertEqual(account["access_secret"], expected_handle)
+
+            with sqlite3.connect(db_path) as db:
+                secret_row = db.execute(
+                    "SELECT contents FROM root_filesystem_entries "
+                    "WHERE path LIKE ?",
+                    (f"%/{account['access_secret']}.json",),
+                ).fetchone()
+            self.assertIsNotNone(secret_row)
+            stored = json.loads(secret_row[0])
+            self.assertEqual(
+                run_live_qa._decrypt_filesystem_secret(master_key, stored),
+                "fake-github-token",
+            )
+
     def test_prepare_reborn_home_gates_missing_slack_without_raising(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
@@ -130,8 +185,8 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
             self.assertNotIn('team_id = ""', config)
             self.assertNotIn('api_app_id = ""', config)
 
-    def test_default_suite_excludes_github_connect_until_live_auth_state_exists(self):
-        self.assertFalse(run_live_qa.CASES["qa_4b_github_connect"].default_enabled)
+    def test_default_suite_includes_github_connect_after_generated_auth_seed(self):
+        self.assertTrue(run_live_qa.CASES["qa_4b_github_connect"].default_enabled)
         self.assertTrue(run_live_qa.CASES["qa_4b_github_connect"].requires_github_auth)
         self.assertIn("qa_4b_github_connect", run_live_qa.CASES)
         default_cases = [
@@ -139,7 +194,7 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
             for name, spec in run_live_qa.CASES.items()
             if spec.default_enabled
         ]
-        self.assertNotIn("qa_4b_github_connect", default_cases)
+        self.assertIn("qa_4b_github_connect", default_cases)
 
     def test_bootstrap_forwards_all_cases_flag(self):
         with tempfile.TemporaryDirectory() as tmpdir:

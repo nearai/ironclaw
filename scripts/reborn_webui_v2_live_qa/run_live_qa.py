@@ -898,6 +898,125 @@ def _github_auth_preflight(
     }
 
 
+def _seed_generated_github_product_auth_if_configured(reborn_home: Path, user_id: str) -> dict[str, object]:
+    token_names = [
+        "AUTH_LIVE_GITHUB_TOKEN",
+        "IRONCLAW_REBORN_GITHUB_TOKEN",
+        "LIVE_CANARY_GITHUB_TOKEN",
+        "GITHUB_TOKEN",
+        "GH_TOKEN",
+    ]
+    selected = _first_env_value(token_names)
+    preflight: dict[str, object] = {
+        "checked": True,
+        "seeded": False,
+        "token_env_present": selected is not None,
+        "token_env_names": token_names,
+        "token_env_source": selected[0] if selected else None,
+    }
+    if not selected:
+        return preflight
+
+    db_path = reborn_home / "local-dev" / "reborn-local-dev.db"
+    master_key_path = reborn_home / "local-dev" / ".reborn-local-dev-secrets-master-key"
+    master_key_path.parent.mkdir(parents=True, exist_ok=True)
+    if master_key_path.exists():
+        master_key = master_key_path.read_text(encoding="utf-8").strip()
+    else:
+        master_key = hashlib.sha256(os.urandom(32)).hexdigest()
+        master_key_path.write_text(master_key, encoding="utf-8")
+        master_key_path.chmod(0o600)
+
+    _root_filesystem_create_table(db_path)
+    account_id = str(
+        uuid.uuid5(
+            uuid.NAMESPACE_URL,
+            f"ironclaw-reborn-webui-v2-live-qa/github/{user_id}",
+        )
+    )
+    invocation_id = str(
+        uuid.uuid5(
+            uuid.NAMESPACE_URL,
+            f"ironclaw-reborn-webui-v2-live-qa/github-invocation/{user_id}",
+        )
+    )
+    thread_id = str(
+        uuid.uuid5(
+            uuid.NAMESPACE_URL,
+            f"ironclaw-reborn-webui-v2-live-qa/github-thread/{user_id}",
+        )
+    )
+    now_s = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+    resource = {
+        "tenant_id": "reborn-cli",
+        "user_id": user_id,
+        "agent_id": "reborn-cli-agent",
+        "project_id": None,
+        "thread_id": thread_id,
+        "invocation_id": invocation_id,
+        "mission_id": None,
+    }
+    secret_scope = dict(resource)
+    access_handle = f"product-auth-manual-{account_id}-{account_id}"
+    secret_root = (
+        f"/tenants/reborn-cli/users/{user_id}/secrets/agents/reborn-cli-agent/secrets"
+    )
+    encrypted_value, key_salt = _encrypt_filesystem_secret(
+        master_key=master_key,
+        scope=secret_scope,
+        handle=access_handle,
+        plaintext=selected[1],
+    )
+    _put_root_filesystem_json(
+        db_path,
+        f"{secret_root}/{access_handle}.json",
+        {
+            "handle": access_handle,
+            "scope": secret_scope,
+            "encrypted_value": encrypted_value,
+            "key_salt": key_salt,
+            "expires_at": None,
+            "created_at": now_s,
+            "updated_at": now_s,
+        },
+    )
+
+    account_path = (
+        f"/tenants/reborn-cli/users/{user_id}/secrets/agents/reborn-cli-agent/"
+        f"product-auth/callback/accounts/{account_id}.json"
+    )
+    _put_root_filesystem_json(
+        db_path,
+        account_path,
+        {
+            "id": account_id,
+            "provider": "github",
+            "label": "github",
+            "status": "configured",
+            "ownership": "user_reusable",
+            "owner_extension": None,
+            "granted_extensions": [],
+            "scope": {
+                "resource": resource,
+                "surface": "callback",
+            },
+            "scopes": [],
+            "access_secret": access_handle,
+            "refresh_secret": None,
+            "created_at": now_s,
+            "updated_at": now_s,
+        },
+    )
+    preflight.update(
+        {
+            "seeded": True,
+            "account_id": account_id,
+            "account_path": account_path,
+        }
+    )
+    return preflight
+
+
 def _google_required_env_for_block(
     preflight: dict[str, object],
     *,
@@ -1990,6 +2109,7 @@ def create_generated_reborn_home(path: Path, *, include_slack: bool = False) -> 
         encoding="utf-8",
     )
     google_seed = _seed_generated_google_product_auth_if_configured(path, _auth_user_id())
+    github_seed = _seed_generated_github_product_auth_if_configured(path, _auth_user_id())
     print(
         "[reborn-webui-v2-live-qa] Generated temp Reborn home from live LLM env "
         f"(provider_id={provider_id}, model={model}, api_key_env={api_key_env}).",
@@ -1999,6 +2119,12 @@ def create_generated_reborn_home(path: Path, *, include_slack: bool = False) -> 
         print(
             "[reborn-webui-v2-live-qa] Seeded generated Reborn home with "
             "AUTH_LIVE_GOOGLE_* product-auth credentials for Google live cases.",
+            flush=True,
+        )
+    if github_seed.get("seeded"):
+        print(
+            "[reborn-webui-v2-live-qa] Seeded generated Reborn home with "
+            "GitHub product-auth credentials for GitHub live cases.",
             flush=True,
         )
     return path
@@ -3864,7 +3990,6 @@ CASES: dict[str, CaseSpec] = {
     "qa_4b_github_connect": CaseSpec(
         case_qa_4b_github_connect,
         requires_github_auth=True,
-        default_enabled=False,
     ),
     "qa_4c_github_release_live_chat": CaseSpec(case_qa_4c_github_release_live_chat),
     "qa_4d_github_release_slack_routine": CaseSpec(
