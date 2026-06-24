@@ -1504,4 +1504,138 @@ mod tests {
 
         assert_eq!(surface.version.as_str(), "surface-v1");
     }
+
+    // ── CapabilitySurfaceDenyFilter tests ────────────────────────────────────
+
+    #[test]
+    fn deny_filter_strips_denied_tool_definitions() {
+        let inner = Arc::new(SpyPort::default());
+        *inner
+            .tool_definitions
+            .lock()
+            .expect("tool definitions lock") = vec![
+            provider_definition("builtin.spawn_subagent", "builtin__spawn_subagent"),
+            provider_definition("builtin.echo", "builtin__echo"),
+        ];
+        let filter =
+            CapabilitySurfaceDenyFilter::new(inner, [capability_id("builtin.spawn_subagent")]);
+
+        let definitions = filter.tool_definitions().expect("tool definitions");
+
+        assert_eq!(
+            definitions
+                .iter()
+                .map(|definition| (definition.capability_id.as_str(), definition.name.as_str()))
+                .collect::<Vec<_>>(),
+            vec![("builtin.echo", "builtin__echo")]
+        );
+    }
+
+    #[tokio::test]
+    async fn deny_filter_strips_denied_visible_descriptors() {
+        let inner = Arc::new(SpyPort::default());
+        *inner.surface.lock().expect("surface lock") = Some(VisibleCapabilitySurface {
+            version: surface_version(),
+            descriptors: vec![
+                descriptor("builtin.spawn_subagent"),
+                descriptor("builtin.echo"),
+            ],
+        });
+        let filter =
+            CapabilitySurfaceDenyFilter::new(inner, [capability_id("builtin.spawn_subagent")]);
+
+        let surface = filter
+            .visible_capabilities(VisibleCapabilityRequest)
+            .await
+            .expect("surface");
+
+        assert_eq!(surface.version, surface_version());
+        assert_eq!(
+            surface
+                .descriptors
+                .iter()
+                .map(|descriptor| descriptor.capability_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["builtin.echo"]
+        );
+    }
+
+    #[tokio::test]
+    async fn deny_filter_rejects_provider_tool_call_for_denied_capability() {
+        let inner = Arc::new(SpyPort::default());
+        *inner
+            .tool_definitions
+            .lock()
+            .expect("tool definitions lock") = vec![
+            provider_definition("builtin.spawn_subagent", "builtin__spawn_subagent"),
+            provider_definition("builtin.echo", "builtin__echo"),
+        ];
+        let filter = CapabilitySurfaceDenyFilter::new(
+            inner.clone(),
+            [capability_id("builtin.spawn_subagent")],
+        );
+
+        let error = filter
+            .register_provider_tool_call(provider_call("builtin__spawn_subagent"))
+            .await
+            .expect_err("denied provider call should fail before staging");
+
+        assert_eq!(error.kind, AgentLoopHostErrorKind::InvalidInvocation);
+        assert!(
+            inner
+                .provider_calls
+                .lock()
+                .expect("provider calls lock")
+                .is_empty()
+        );
+
+        // Allowed call succeeds and reaches the inner port.
+        filter
+            .register_provider_tool_call(provider_call("builtin__echo"))
+            .await
+            .expect("allowed provider call should succeed");
+        assert_eq!(
+            inner
+                .provider_calls
+                .lock()
+                .expect("provider calls lock")
+                .len(),
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn deny_filter_denies_invoke_of_denied_capability() {
+        let inner = Arc::new(SpyPort::default());
+        let filter = CapabilitySurfaceDenyFilter::new(
+            inner.clone(),
+            [capability_id("builtin.spawn_subagent")],
+        );
+
+        let outcome = filter
+            .invoke_capability(invocation("builtin.spawn_subagent", "input:denied"))
+            .await
+            .expect("outcome");
+
+        assert_eq!(denied_reason(&outcome), Some("model_view_denied"));
+        assert!(
+            inner
+                .invocations
+                .lock()
+                .expect("invocation lock")
+                .is_empty()
+        );
+
+        // Allowed id passes through to inner.
+        let allowed_outcome = filter
+            .invoke_capability(invocation("builtin.echo", "input:allowed"))
+            .await
+            .expect("outcome");
+
+        assert!(
+            matches!(allowed_outcome, CapabilityOutcome::Completed(_)),
+            "allowed capability should complete"
+        );
+        assert_eq!(inner.invocations.lock().expect("invocation lock").len(), 1);
+    }
 }
