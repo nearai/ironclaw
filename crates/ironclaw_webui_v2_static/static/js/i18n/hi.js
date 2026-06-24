@@ -1056,6 +1056,7 @@ registerPack("hi", {
     "यह ऑटोमेशन अब उपलब्ध नहीं है, या आपके पास इसकी पहुँच नहीं है।",
   "automations.row.lastRun": "अंतिम रन",
   "automations.sort.label": "क्रमबद्ध करें",
+  "automations.runs.countLabel": "हाल के रन",
   "automations.detail.idLabel": "आईडी",
   "automations.detail.copyId": "आईडी कॉपी करें",
   "automations.detail.recentRuns": "हाल के रन",

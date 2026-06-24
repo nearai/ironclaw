@@ -849,6 +849,7 @@ registerPack("en", {
   "automations.detail.noThread": "No thread attached",
   "automations.row.lastRun": "Last run",
   "automations.sort.label": "Sort",
+  "automations.runs.countLabel": "recent runs",
   "automations.detail.idLabel": "ID",
   "automations.detail.copyId": "Copy ID",
 

@@ -1056,6 +1056,7 @@ registerPack("zh-CN", {
     "此自动化已不再可用，或者您没有访问权限。",
   "automations.row.lastRun": "上次运行",
   "automations.sort.label": "排序",
+  "automations.runs.countLabel": "最近运行",
   "automations.detail.idLabel": "ID",
   "automations.detail.copyId": "复制 ID",
   "automations.detail.recentRuns": "最近运行",

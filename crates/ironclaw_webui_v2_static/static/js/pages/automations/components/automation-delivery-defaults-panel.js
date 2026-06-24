@@ -189,7 +189,7 @@ export function DeliveryDefaultsContent({ deliveryState }) {
               <label
                 key=${tid}
                 className=${cn(
-                  "flex items-start gap-3.5 rounded-xl border px-4 py-3.5 cursor-pointer",
+                  "flex items-center gap-4 rounded-xl border px-4 py-3.5 cursor-pointer",
                   "transition-colors duration-100",
                   "bg-[var(--v2-surface-soft)] border-[var(--v2-panel-border)]",
                   "hover:bg-[var(--v2-surface-muted)] hover:border-[color-mix(in_srgb,var(--v2-accent)_30%,var(--v2-panel-border))]",
@@ -197,19 +197,15 @@ export function DeliveryDefaultsContent({ deliveryState }) {
                     "border-[color-mix(in_srgb,var(--v2-accent)_45%,var(--v2-panel-border))] bg-[var(--v2-accent-soft)]",
                 )}
               >
-                <input
-                  type="radio"
-                  name="delivery-target"
-                  value=${tid}
-                  checked=${isSelected}
-                  disabled=${isBusy}
-                  onChange=${() => setDraftTargetId(tid)}
-                  className="mt-0.5 h-4 w-4 shrink-0 accent-[var(--v2-accent)]"
-                />
                 <span
-                  className="mt-0.5 grid h-8 w-8 shrink-0 place-items-center rounded-lg border border-[var(--v2-panel-border)] bg-[var(--v2-surface-muted)] text-[var(--v2-text-muted)]"
+                  className=${cn(
+                    "mr-1 grid h-10 w-10 shrink-0 place-items-center rounded-lg border",
+                    isSelected
+                      ? "border-[color-mix(in_srgb,var(--v2-accent)_35%,var(--v2-panel-border))] bg-[var(--v2-accent-soft)] text-[var(--v2-accent-text)]"
+                      : "border-[var(--v2-panel-border)] bg-[var(--v2-surface-muted)] text-[var(--v2-text-muted)]",
+                  )}
                 >
-                  <${Icon} name="chat" className="h-4 w-4" />
+                  <${Icon} name="chat" className="h-5 w-5" />
                 </span>
                 <div className="flex-1 min-w-0">
                   <div className="text-sm font-semibold text-[var(--v2-text-strong)] leading-snug">
@@ -225,7 +221,16 @@ export function DeliveryDefaultsContent({ deliveryState }) {
                   label=${optStatus === "unavailable"
                     ? t("automations.delivery.pill.unavailable")
                     : t("automations.delivery.pill.ready")}
-                  className="self-center shrink-0"
+                  className="shrink-0"
+                />
+                <input
+                  type="radio"
+                  name="delivery-target"
+                  value=${tid}
+                  checked=${isSelected}
+                  disabled=${isBusy}
+                  onChange=${() => setDraftTargetId(tid)}
+                  className="h-4 w-4 shrink-0 accent-[var(--v2-accent)]"
                 />
               </label>
             `;
@@ -258,7 +263,7 @@ export function DeliveryDefaultsContent({ deliveryState }) {
           <!-- Web app only / fallback row -->
           <label
             className=${cn(
-              "flex items-start gap-3.5 rounded-xl border px-4 py-3.5",
+              "flex items-center gap-4 rounded-xl border px-4 py-3.5",
               "transition-colors duration-100",
               "bg-[var(--v2-surface-soft)] border-[var(--v2-panel-border)]",
               hasTargets
@@ -268,19 +273,15 @@ export function DeliveryDefaultsContent({ deliveryState }) {
                 "border-[color-mix(in_srgb,var(--v2-accent)_45%,var(--v2-panel-border))] bg-[var(--v2-accent-soft)]",
             )}
           >
-            <input
-              type="radio"
-              name="delivery-target"
-              value=""
-              checked=${draftTargetId === ""}
-              disabled=${isBusy || !hasTargets}
-              onChange=${() => setDraftTargetId("")}
-              className="mt-0.5 h-4 w-4 shrink-0 accent-[var(--v2-accent)]"
-            />
             <span
-              className="mt-0.5 grid h-8 w-8 shrink-0 place-items-center rounded-lg border border-[var(--v2-panel-border)] bg-[var(--v2-surface-muted)] text-[var(--v2-text-muted)]"
+              className=${cn(
+                "mr-1 grid h-10 w-10 shrink-0 place-items-center rounded-lg border",
+                draftTargetId === ""
+                  ? "border-[color-mix(in_srgb,var(--v2-accent)_35%,var(--v2-panel-border))] bg-[var(--v2-accent-soft)] text-[var(--v2-accent-text)]"
+                  : "border-[var(--v2-panel-border)] bg-[var(--v2-surface-muted)] text-[var(--v2-text-muted)]",
+              )}
             >
-              <${Icon} name="file" className="h-4 w-4" />
+              <${Icon} name="file" className="h-5 w-5" />
             </span>
             <div className="flex-1 min-w-0">
               <div className="text-sm font-semibold text-[var(--v2-text-strong)] leading-snug">
@@ -293,7 +294,16 @@ export function DeliveryDefaultsContent({ deliveryState }) {
             <${Badge}
               tone="muted"
               label=${t("automations.delivery.pill.fallback")}
-              className="self-center shrink-0"
+              className="shrink-0"
+            />
+            <input
+              type="radio"
+              name="delivery-target"
+              value=""
+              checked=${draftTargetId === ""}
+              disabled=${isBusy || !hasTargets}
+              onChange=${() => setDraftTargetId("")}
+              className="h-4 w-4 shrink-0 accent-[var(--v2-accent)]"
             />
           </label>
 

@@ -109,7 +109,12 @@ export function RunHistorySummary({ runs = [], className = "" }) {
       )}
     >
       <div className="flex items-baseline justify-between gap-3">
-        <span className="text-sm font-medium text-iron-200">${view.totalText}</span>
+        <span className="text-sm font-medium text-iron-100">
+          ${view.total}${" "}
+          <span className="font-normal text-iron-400">
+            ${t("automations.runs.countLabel")}
+          </span>
+        </span>
         ${view.successRate != null &&
         html`<span
           className=${cn("text-sm font-semibold tabular-nums", rateTone)}

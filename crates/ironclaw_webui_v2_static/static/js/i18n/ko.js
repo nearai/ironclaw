@@ -1056,6 +1056,7 @@ registerPack("ko", {
     "이 자동화는 더 이상 사용할 수 없거나 액세스 권한이 없습니다.",
   "automations.row.lastRun": "마지막 실행",
   "automations.sort.label": "정렬",
+  "automations.runs.countLabel": "최근 실행",
   "automations.detail.idLabel": "ID",
   "automations.detail.copyId": "ID 복사",
   "automations.detail.recentRuns": "최근 실행",

@@ -1056,6 +1056,7 @@ registerPack("fr", {
     "Cette automatisation n’est plus disponible ou vous n’y avez pas accès.",
   "automations.row.lastRun": "Dernière exécution",
   "automations.sort.label": "Trier",
+  "automations.runs.countLabel": "exécutions récentes",
   "automations.detail.idLabel": "ID",
   "automations.detail.copyId": "Copier l’ID",
   "automations.detail.recentRuns": "Exécutions récentes",

@@ -1056,6 +1056,7 @@ registerPack("ar", {
     "لم تعد هذه الأتمتة متاحة، أو ليس لديك حق الوصول إليها.",
   "automations.row.lastRun": "آخر تشغيل",
   "automations.sort.label": "ترتيب",
+  "automations.runs.countLabel": "عمليات تشغيل أخيرة",
   "automations.detail.idLabel": "المعرّف",
   "automations.detail.copyId": "نسخ المعرّف",
   "automations.detail.recentRuns": "عمليات التشغيل الأخيرة",

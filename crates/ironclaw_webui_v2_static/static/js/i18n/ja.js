@@ -1056,6 +1056,7 @@ registerPack("ja", {
     "このオートメーションは利用できなくなったか、アクセス権がありません。",
   "automations.row.lastRun": "最終実行",
   "automations.sort.label": "並べ替え",
+  "automations.runs.countLabel": "最近の実行",
   "automations.detail.idLabel": "ID",
   "automations.detail.copyId": "IDをコピー",
   "automations.detail.recentRuns": "最近の実行",

@@ -1056,6 +1056,7 @@ registerPack("uk", {
     "Ця автоматизація більше недоступна або у вас немає до неї доступу.",
   "automations.row.lastRun": "Останній запуск",
   "automations.sort.label": "Сортувати",
+  "automations.runs.countLabel": "останні запуски",
   "automations.detail.idLabel": "ID",
   "automations.detail.copyId": "Скопіювати ID",
   "automations.detail.recentRuns": "Останні запуски",
