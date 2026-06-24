@@ -58,28 +58,26 @@ descriptor is built from the manifest's own `route_id`/`method`/`path`.
 - **Both** Slack and Telegram manifests migrated; projected policy is
   behavior-equal to the deleted Rust functions.
 
-### Move 2 — Unify the transport model behind one contract (NEXT)
+### Move 2 — Unify the transport model behind one contract ✅
 
 **Base:** stacks on Move 1. **Bar:** the webhook-specific policy fields collapse
 into the shared envelope; the residual string→scheme mapping is deleted.
 
-Scope:
-- Introduce a `transport = webhook { path, method, ack, drain } | websocket { url,
-  heartbeat, identify_credential } | polling { min_interval }` discriminator with
-  the shared `IngressPolicy` security envelope from Move 1. Re-express Slack and
-  Telegram webhook ingress as `transport = webhook`. **Do not implement the
-  websocket variant yet** — prove the webhook variant rides the unified shape;
-  websocket lands when a real second consumer (Discord/WeCom) exists. Avoid
-  speculative genericity (its own smell).
-- **Fail-closed auth hardening (carried from Move 1's deferral):**
-  `IngressAuthSchemeName::declared_auth_scheme()` currently maps the binding
-  scheme-*name* → `IngressAuthScheme` via a string `match` with a
-  `_ => WebhookSignature` **silent fallback** — stringly-typed and fail-*open* in
-  a security path. Move 2 carries the verifier kind directly through the auth
-  binding and makes an unknown scheme name a hard error (no `WebhookSignature`
-  default). This removes the last "magic string → auth kind" indirection.
-- **Deletion bar:** the `declared_auth_scheme()` string match and any
-  webhook-only policy duplication are gone after this move.
+Completed:
+- Added a tagged transport shape under `[host_ingress.*.transport]`. Slack and
+  Telegram webhook ingress now express `route_id`, `method`, `path`, `ack`, and
+  `drain` through `kind = "webhook"` while sharing the same manifest-projected
+  `IngressPolicy` security envelope.
+- Kept websocket/polling runtime support out of this move. Unsupported transport
+  kinds fail closed at parse time, so the contract can grow only when there is a
+  real second transport consumer.
+- Deleted the auth-scheme string fallback path. `host_ingress.*.auth.verifier`
+  is now the typed `IngressAuthScheme`; unknown values fail at parse time, and
+  mismatched policy/binding pairs reject at declaration validation time. Slack's
+  signature verifier and Telegram's shared-secret-header verifier are pinned by
+  caller-level registry tests.
+- **Deletion bar met:** the residual `declared_auth_scheme()` string match and
+  webhook-only policy duplication are gone.
 
 Out of scope: `serve.rs` mount wiring (Move 4), websocket runtime,
 connectable/egress modules.
@@ -102,12 +100,25 @@ referenced credential handle must resolve to a declared credential. Closes the
   `HostIngressHostApiContract::project_section_with_context`). Then tighten the
   empty-declared-set rule to require a declaration for every referenced handle.
 
-### Move 4 — Collapse the `serve.rs` per-channel cfg sprawl
+### Move 4 — Collapse the `serve.rs` per-channel cfg sprawl ✅ / residual setup work
 
 Replace the `#[cfg(feature = "telegram-v2-host-beta")]` + nested
 `is_generic()/is_generic_shadow()` mount block (cloned from Slack) with a single
 loop that iterates enabled extensions and mounts whatever transports they project.
 **Bar:** "add a channel" touches zero lines in `serve.rs`.
+
+Current state:
+- `serve.rs` now builds one `HostIngressServePlanInput`, calls one
+  `build_host_ingress_serve_plan`, and applies the resulting generic public-route
+  mounts/connectable-channel metadata to WebUI serving.
+- `HostIngressServePlan` reads enabled extension installations, projects
+  `ironclaw.host_ingress/v1` declarations, and serves route mounts according to
+  per-route projection policy.
+- Channel-specific Slack/Telegram code still exists only at the runtime adapter
+  boundary and for legacy host-beta config import. That residual import path is
+  deliberately deferred to `ironclaw.extension_setup/v1` below; removing it here
+  would turn this move into a product setup rewrite instead of an ingress
+  contract deletion.
 
 ### Move 5+ — Remaining contracts (one per PR, each deleting Rust)
 

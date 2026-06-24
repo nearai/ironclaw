@@ -813,6 +813,26 @@ credential_handles = ["telegram_webhook_secret"]
     }
 
     #[test]
+    fn telegram_auth_binding_verifier_must_not_fall_back_to_webhook_signature() {
+        let raw = telegram_manifest("").replace(
+            r#"verifier = "shared_secret_header""#,
+            r#"verifier = "webhook_signature""#,
+        );
+        let error = project_single_section(&raw, "host_ingress.updates")
+            .expect_err("telegram verifier outside policy scheme list must reject");
+
+        assert!(matches!(
+            error,
+            Error::DeclarationValidation {
+                source: HostIngressDeclarationError::AuthBindingVerifierNotDeclared {
+                    verifier: IngressAuthScheme::WebhookSignature
+                },
+                ..
+            }
+        ));
+    }
+
+    #[test]
     fn unsupported_transport_kind_is_rejected_at_parse_time() {
         let raw = slack_manifest("").replace(r#"kind = "webhook""#, r#"kind = "websocket""#);
         let error = project_single_section(&raw, "host_ingress.events")
