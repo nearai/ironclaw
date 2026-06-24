@@ -1,0 +1,40 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "GitHub list_pull_request_review_threads input",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "owner": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 100,
+      "pattern": "^[^\\s/?#]+$",
+      "not": { "pattern": "\\.\\." }
+    },
+    "repo": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 100,
+      "pattern": "^[^\\s/?#]+$",
+      "not": { "pattern": "\\.\\." }
+    },
+    "pr_number": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "first": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 100,
+      "default": 30,
+      "description": "GraphQL page size for review threads."
+    },
+    "after": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 65536,
+      "description": "GraphQL cursor returned from a previous page."
+    }
+  },
+  "required": ["owner", "repo", "pr_number"]
+}
