@@ -112,10 +112,12 @@ pub(crate) fn spawn_trigger_poller(
     Ok(Some(TriggerPollerRuntimeHandle { cancel, handle }))
 }
 
-/// Wraps a `TrustedTriggerFireSubmitter` to invoke a post-submit hook after
-/// each successful fire submission. The hook is stored in a `OnceLock` slot so
-/// it can be wired after the poller is spawned (late-binding). If the slot is
-/// empty at submit time the hook is simply skipped.
+/// Wraps a `TrustedTriggerFireSubmitter` to start a post-submit hook after each
+/// successful fire submission. The hook is detached from the poller tick so
+/// delivery latency cannot delay fire settlement. The hook is stored in a
+/// `OnceLock` slot so it can be wired after the poller is spawned
+/// (late-binding). If the slot is empty at submit time the hook is simply
+/// skipped.
 #[cfg(feature = "slack-v2-host-beta")]
 pub(crate) struct PostSubmitHookWrappedSubmitter {
     pub(crate) inner: Arc<dyn TrustedTriggerFireSubmitter>,

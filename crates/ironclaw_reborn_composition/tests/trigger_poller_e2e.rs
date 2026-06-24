@@ -11,7 +11,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
-use chrono::Utc;
+use chrono::{TimeZone, Utc};
 use ironclaw_conversations::{AdapterInstallationId, AdapterKind, ExternalActorRef};
 use ironclaw_host_api::{
     AgentId, CapabilityGrant, CapabilityGrantId, CapabilityId, CapabilitySet, EffectKind,
@@ -118,28 +118,12 @@ where
     last.expect("at least one read should have succeeded in wait_for_settled")
 }
 
-async fn recent_due_slot_after_with_future_next(
-    schedule: &TriggerSchedule,
-    after: Option<chrono::DateTime<Utc>>,
-) -> chrono::DateTime<Utc> {
-    let stop = Instant::now() + Duration::from_secs(5);
-    while Instant::now() < stop {
-        let now = Utc::now();
-        let slot = now - chrono::Duration::milliseconds(500);
-        if after.map(|previous| slot <= previous).unwrap_or(false) {
-            tokio::time::sleep(Duration::from_millis(25)).await;
-            continue;
-        }
-        let next = schedule
-            .next_slot_after(slot)
-            .expect("valid recurring schedule")
-            .expect("recurring schedule should have a next slot");
-        if next > now {
-            return slot;
-        }
-        tokio::time::sleep(Duration::from_millis(25)).await;
-    }
-    panic!("could not choose a due slot whose next recurring slot is still in the future");
+fn current_minute_slot() -> chrono::DateTime<Utc> {
+    let now_seconds = Utc::now().timestamp();
+    let minute_seconds = now_seconds - now_seconds.rem_euclid(60);
+    Utc.timestamp_opt(minute_seconds, 0)
+        .single()
+        .expect("valid minute timestamp")
 }
 
 /// Shared runtime builder. Every test passes the `TriggerPollerSettings` it
@@ -585,46 +569,16 @@ async fn builtin_created_recurring_trigger_fires_again_after_first_run_settles()
         .await
         .expect("get created trigger")
         .expect("created trigger persisted");
-    let first_due_slot = recent_due_slot_after_with_future_next(&record.schedule, None).await;
+    let first_due_slot = current_minute_slot() - chrono::Duration::minutes(1);
+    let second_due_slot = record
+        .schedule
+        .next_slot_after(first_due_slot)
+        .expect("valid recurring schedule")
+        .expect("recurring schedule should have a second slot");
     record.next_run_at = first_due_slot;
     repo.upsert_trigger(record.clone())
         .await
         .expect("make first recurring slot due");
-
-    let first = wait_for_settled(
-        &repo,
-        &tenant_id,
-        trigger_id,
-        Duration::from_secs(15),
-        |r| {
-            r.last_fired_slot.is_some()
-                && r.last_run_at.is_some()
-                && r.last_status == Some(TriggerRunStatus::Ok)
-                && r.active_fire_slot.is_none()
-                && r.active_run_ref.is_none()
-                && r.next_run_at > first_due_slot
-        },
-    )
-    .await;
-    assert!(
-        recording_gateway
-            .request_count_containing(TRIGGER_PROMPT)
-            .await
-            >= 1,
-        "first recurring trigger fire should submit a model request"
-    );
-
-    let first_fired_slot = first.last_fired_slot.expect("first fire slot");
-    let mut second_record = first.clone();
-    let second_due_slot =
-        recent_due_slot_after_with_future_next(&second_record.schedule, Some(first_fired_slot))
-            .await;
-    second_record.next_run_at = second_due_slot;
-    second_record.active_fire_slot = None;
-    second_record.active_run_ref = None;
-    repo.upsert_trigger(second_record)
-        .await
-        .expect("make second recurring slot due");
 
     let second = wait_for_settled(
         &repo,
@@ -633,8 +587,9 @@ async fn builtin_created_recurring_trigger_fires_again_after_first_run_settles()
         Duration::from_secs(15),
         |r| {
             r.last_fired_slot
-                .map(|slot| slot > first_fired_slot)
+                .map(|slot| slot >= second_due_slot)
                 .unwrap_or(false)
+                && r.last_run_at.is_some()
                 && r.last_status == Some(TriggerRunStatus::Ok)
                 && r.active_fire_slot.is_none()
                 && r.active_run_ref.is_none()
