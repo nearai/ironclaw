@@ -212,6 +212,12 @@ pub(crate) async fn bootstrap_nearai_mcp(
         .map_err(|error| RebornBuildError::InvalidConfig {
             reason: format!("NEAR AI MCP auto-enable skipped: invalid NEARAI_BASE_URL: {error}"),
         })?;
+    if !durable_product_auth_storage_enabled() {
+        tracing::debug!(
+            "NEAR AI MCP credentials are present, but durable product-auth secret storage is not enabled; skipping auto-activation"
+        );
+        return Ok(NearAiMcpBootstrapOutcome::SkippedUnsupportedStorage);
+    }
 
     let package_ref =
         LifecyclePackageRef::new(LifecyclePackageKind::Extension, "nearai").map_err(|error| {
@@ -355,6 +361,7 @@ pub(crate) enum NearAiMcpBootstrapOutcome {
     NotConfigured,
     SkippedDisabled,
     SkippedUnavailable,
+    SkippedUnsupportedStorage,
     SkippedPreservedRemoved,
     SkippedNonActivatable,
     ReusedCredential,
@@ -368,6 +375,7 @@ impl NearAiMcpBootstrapOutcome {
             Self::NotConfigured => tracing::debug!("NEAR AI MCP bootstrap is not configured"),
             Self::SkippedDisabled
             | Self::SkippedUnavailable
+            | Self::SkippedUnsupportedStorage
             | Self::SkippedPreservedRemoved
             | Self::SkippedNonActivatable => tracing::debug!(
                 outcome = ?self,
@@ -378,6 +386,10 @@ impl NearAiMcpBootstrapOutcome {
             }
         }
     }
+}
+
+fn durable_product_auth_storage_enabled() -> bool {
+    cfg!(any(feature = "libsql", feature = "postgres"))
 }
 
 fn nearai_mcp_bootstrap_account_is_usable(
@@ -498,6 +510,14 @@ mod tests {
             created_at: chrono::DateTime::from_timestamp(updated_at_secs, 0).expect("timestamp"),
             updated_at: chrono::DateTime::from_timestamp(updated_at_secs, 0).expect("timestamp"),
         }
+    }
+
+    #[test]
+    fn durable_product_auth_storage_flag_matches_features() {
+        assert_eq!(
+            durable_product_auth_storage_enabled(),
+            cfg!(any(feature = "libsql", feature = "postgres"))
+        );
     }
 
     #[test]
