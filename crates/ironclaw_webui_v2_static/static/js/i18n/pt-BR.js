@@ -511,6 +511,20 @@ registerPack("pt-BR", {
   "skills.removed": "Habilidade \"{name}\" removida",
   "skills.activatesOn": "Ativa em",
   "skills.imported": "importado",
+  "skills.defaultAutoActivationEnabled": "Ativação automática padrão de habilidades ativada",
+  "skills.defaultAutoActivationDisabled": "Ativação automática padrão de habilidades desativada",
+  "skills.defaultAutoActivationOnDesc":
+    "As habilidades se autoativam por palavra-chave em solicitações correspondentes. Desative para exigir um /name explícito.",
+  "skills.defaultAutoActivationOffDesc":
+    "As habilidades só rodam quando você digita /name. Ative para permitir autoativação por palavra-chave.",
+  "skills.defaultAutoActivationOnButton": "Padrão: Ligado",
+  "skills.defaultAutoActivationOffButton": "Padrão: Desligado",
+  "skills.autoActivateOnTitle":
+    "Autoativação ligada — roda em solicitações correspondentes. Clique para exigir /name.",
+  "skills.autoActivateOffTitle":
+    "Somente explícito — roda apenas quando você digita /name. Clique para ativar a autoativação.",
+  "skills.autoActivateOnLabel": "Autoativar: Ligado",
+  "skills.autoActivateOffLabel": "Autoativar: Desligado",
 
   // Settings — users tab
   "users.title": "Usuários ({count})",
