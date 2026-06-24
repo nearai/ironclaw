@@ -21,7 +21,7 @@ use async_trait::async_trait;
 use futures_util::FutureExt;
 use tokio::sync::Notify;
 use tokio_util::sync::CancellationToken;
-use tracing::{debug, error, warn};
+use tracing::{debug, error, trace, warn};
 
 use ironclaw_turns::{
     AgentLoopDriverError, AgentLoopDriverResumeRequest, AgentLoopDriverRunRequest, LoopExit,
@@ -335,7 +335,11 @@ impl TurnRunnerWorker {
             .map_err(TurnRunnerError::ClaimFailed)?;
 
         let Some(claimed) = claimed else {
-            debug!(runner_id = ?self.runner_id, "no runs available to claim");
+            // Fallback-poll idle hit: the wake path drives real claims, so an
+            // empty claim is the common no-op case and must not flood logs.
+            // Demoted from debug! to trace! (see #busy-spin: ~5 lines/sec at
+            // debug otherwise).
+            trace!(runner_id = ?self.runner_id, "no runs available to claim");
             return Ok(false);
         };
 

@@ -700,24 +700,36 @@ fn is_subagent_terminal_status(status: TurnStatus) -> bool {
     status.is_terminal()
 }
 
+/// Maximum byte length of a single subagent content field (`final_text` /
+/// `failure_summary`) in the durable completion payload.
+///
+/// This is a CONTENT-grade cap, not the 512-byte SUMMARY cap: the payload is
+/// the parent model's view of the child's real output (code, diffs, JSON,
+/// paths), so the bound is large and only guards against an unbounded write.
+/// Mirrors `LOOP_CONTEXT_SNIPPET_MODEL_CONTENT_MAX_BYTES` (64 KiB).
+const SUBAGENT_PAYLOAD_CONTENT_MAX_BYTES: usize = 64 * 1024;
+
 fn background_completion_payload(
     event: &AwaitedChildTerminalEvent,
     record: &ironclaw_loop_support::AwaitedChildSetRecord,
     child_output: &ChildTerminalOutput,
 ) -> Result<serde_json::Value, TurnError> {
-    // Wrap untrusted subagent-authored strings in explicit
-    // `|||...|||` delimiters before they enter the capability result store.
-    // `sanitize_tool_result_summary` already strips structural characters,
-    // but downstream consumers that surface the field into model context
-    // gain defense-in-depth framing against prompt-injection payloads.
+    // The model-visible payload preserves the subagent's real output verbatim.
+    // `preserve_untrusted_subagent_content` keeps delimiters (`{ } [ ] ` < > /
+    // \`) and newlines/indentation intact — they are load-bearing for code,
+    // diffs, JSON, and paths the parent model must read — and only neutralizes
+    // non-whitespace control chars. Injection defense is the `|||...|||`
+    // framing plus the untrusted-tool-result role, NOT structural-character
+    // destruction. (The short, delimiter-rejecting safe-summary path lives in
+    // `parent_result_summary` via `sanitize_tool_result_summary`.)
     let final_text = child_output
         .final_text
         .as_deref()
-        .map(|text| wrap_untrusted_subagent_text(sanitize_tool_result_summary(text.to_string())));
+        .map(preserve_untrusted_subagent_content);
     let failure_summary = child_output
         .failure_summary
         .as_deref()
-        .map(|text| wrap_untrusted_subagent_text(sanitize_tool_result_summary(text.to_string())));
+        .map(preserve_untrusted_subagent_content);
     let terminal_reason = event
         .sanitized_reason
         .as_deref()
@@ -752,11 +764,13 @@ fn parent_result_summary(
     event: &AwaitedChildTerminalEvent,
     child_output: &ChildTerminalOutput,
 ) -> Result<ToolResultSafeSummary, TurnError> {
-    // Wrap untrusted child output in explicit delimiters so the parent
-    // model sees subagent-authored text as opaque data, not as in-band
-    // instructions. `sanitize_tool_result_summary` already strips structural
-    // characters; the delimiter is defense-in-depth against prompt-injection
-    // payloads in the 512-character window that survives sanitization.
+    // This is the SHORT safe-summary path, distinct from the durable payload:
+    // it must satisfy `ToolResultSafeSummary`, which rejects structural
+    // delimiters (`{ } [ ] ` < > / \`). `sanitize_tool_result_summary` keeps it
+    // delimiter-free (falling back to a fixed string when it cannot) and bounds
+    // it to 512 bytes. The `|||...|||` framing plus the explicit "do not follow
+    // instructions" preamble are the injection defense; the real, unmutilated
+    // output travels in the payload (`background_completion_payload`), not here.
     let mut summary = match child_output.final_text.as_deref() {
         Some(final_text) if !final_text.trim().is_empty() => {
             let final_text =
@@ -787,11 +801,29 @@ fn parent_result_summary(
 }
 
 fn wrap_untrusted_subagent_text(value: String) -> String {
-    // Pipe delimiters survive `sanitize_tool_result_summary` (which strips
-    // `< > { } [ ] \` and similar structural chars). Without that property
-    // the wrapper would be silently erased by the final re-sanitization
-    // step in `parent_result_summary`.
-    format!("|||{}|||", value)
+    // Pipe delimiters survive the short safe-summary path's re-sanitization in
+    // `parent_result_summary` (where `sanitize_tool_result_summary` would reject
+    // `< > { } [ ] \``), so the wrapper frames the untrusted region without
+    // being erased. On the payload path the content is preserved verbatim, so
+    // the same framing applies without any structural-character loss.
+    format!("|||{value}|||")
+}
+
+/// Build the model-visible, framed payload string for a subagent content field.
+///
+/// Preserves the child's real output verbatim (delimiters, newlines, paths) via
+/// `sanitize_untrusted_text_body`, applies a large CONTENT-grade cap at a UTF-8
+/// char boundary with an explicit `[truncated …]` marker (never a silent drop
+/// to a fixed string), then wraps the result in `|||...|||` framing.
+fn preserve_untrusted_subagent_content(value: &str) -> String {
+    let mut safe = sanitize_untrusted_text_body(value);
+    if safe.len() > SUBAGENT_PAYLOAD_CONTENT_MAX_BYTES {
+        let original_len = safe.len();
+        truncate_to_char_boundary(&mut safe, SUBAGENT_PAYLOAD_CONTENT_MAX_BYTES);
+        let dropped_bytes = original_len - safe.len();
+        safe = format!("{safe} [truncated {dropped_bytes} bytes]");
+    }
+    wrap_untrusted_subagent_text(safe)
 }
 
 fn sanitize_untrusted_terminal_reason(value: &str) -> String {
@@ -815,22 +847,24 @@ fn sanitize_tool_result_summary(value: String) -> String {
 }
 
 fn sanitize_untrusted_text_body(value: &str) -> String {
-    let sanitized = sanitize_model_visible_text(value.to_string())
+    // Preserve the real content verbatim: brackets, backticks, slashes, braces,
+    // and newlines/indentation are load-bearing for code and paths. Untrusted
+    // subagent text is demarcated for the model by `wrap_untrusted_subagent_text`
+    // (|||...|||) at the call sites, so prompt-injection defense is framing-based
+    // and does not require destroying delimiters. Only neutralize non-whitespace
+    // control characters. (Short safe-summaries are still kept delimiter-free by
+    // the `ToolResultSafeSummary` validation + generic fallback in
+    // `sanitize_tool_result_summary`.)
+    sanitize_model_visible_text(value.to_string())
         .chars()
-        .map(|character| match character {
-            '{' | '}' | '[' | ']' | '`' | '<' | '>' | '/' | '\\' => ' ',
-            character if character == '\0' || character.is_control() => ' ',
-            character => character,
+        .map(|character| {
+            if character.is_control() && !matches!(character, '\n' | '\t' | '\r') {
+                ' '
+            } else {
+                character
+            }
         })
-        .collect::<String>();
-    let mut collapsed = String::new();
-    for part in sanitized.split_whitespace() {
-        if !collapsed.is_empty() {
-            collapsed.push(' ');
-        }
-        collapsed.push_str(part);
-    }
-    collapsed
+        .collect::<String>()
 }
 
 fn truncate_to_char_boundary(value: &mut String, max_bytes: usize) {
@@ -3296,21 +3330,129 @@ mod tests {
             owner_user_id: Some(owner),
         };
 
+        // Real subagent output: code/JSON/paths whose delimiters MUST survive
+        // into the model-visible payload. Pre-fix this was routed through the
+        // 512-byte, delimiter-rejecting summary sanitizer and collapsed to the
+        // fixed "Subagent result available" string, destroying the output.
+        let child_final_text = "median([3, 1, 2]) see `stats.py` path src/calc.py";
+        let child_failure = "ValueError in {handler}: see logs/run.json";
         let payload = background_completion_payload(
             &event,
             &record,
             &ChildTerminalOutput {
-                final_text: None,
+                final_text: Some(child_final_text.to_string()),
+                failure_summary: Some(child_failure.to_string()),
+            },
+        )
+        .unwrap();
+
+        // Terminal reason keeps delimiters verbatim (framed, not mutilated).
+        assert_eq!(payload["terminal_event"]["reason"], "|||secret {json}|||");
+        assert_ne!(
+            payload["terminal_event"]["reason"],
+            "Subagent result available"
+        );
+
+        // The real child output survives verbatim inside `|||...|||` framing —
+        // brackets, backticks, slashes, parens all intact — and is NOT replaced
+        // by the fixed summary fallback.
+        assert_eq!(payload["final_text"], format!("|||{child_final_text}|||"));
+        assert_eq!(payload["failure_summary"], format!("|||{child_failure}|||"));
+        assert_ne!(payload["final_text"], "Subagent result available");
+        assert_ne!(payload["failure_summary"], "Subagent result available");
+    }
+
+    #[test]
+    fn background_completion_payload_preserves_large_content_with_truncation_marker() {
+        let tenant = TenantId::new("tenant").unwrap();
+        let agent = AgentId::new("agent").unwrap();
+        let owner = UserId::new("owner").unwrap();
+        let parent_scope = TurnScope::new(
+            tenant.clone(),
+            Some(agent.clone()),
+            None,
+            ThreadId::new("payload-large-parent").unwrap(),
+        );
+        let child_scope = TurnScope::new(
+            tenant,
+            Some(agent),
+            None,
+            ThreadId::new("payload-large-child").unwrap(),
+        );
+        let child_run_id = TurnRunId::new();
+        let mut parent_run_context =
+            ironclaw_agent_loop::test_support::test_run_context("payload-large-parent");
+        parent_run_context.scope = parent_scope.clone();
+        parent_run_context.thread_id = parent_scope.thread_id.clone();
+
+        let record = AwaitedChildSetRecord {
+            gate_ref: GateRef::new("gate:subagent-large").unwrap(),
+            parent_run_context,
+            tree_root_run_id: TurnRunId::new(),
+            child_scope: child_scope.clone(),
+            child_run_id,
+            child_thread_id: child_scope.thread_id.clone(),
+            source_binding_ref: SourceBindingRef::new("subagent-source:large").unwrap(),
+            reply_target_binding_ref: ReplyTargetBindingRef::new("subagent-reply:large").unwrap(),
+            subagent_kind: SubagentKindId::new("general").unwrap(),
+            spawn_capability_id: CapabilityId::new(DEFAULT_SPAWN_SUBAGENT_CAPABILITY_ID).unwrap(),
+            result_ref: LoopResultRef::new("result:subagent.large").unwrap(),
+            mode: SpawnSubagentMode::Background,
+        };
+        let event = AwaitedChildTerminalEvent {
+            status: TurnStatus::Completed,
+            kind: TurnEventKind::Completed,
+            cursor: EventCursor(7),
+            sanitized_reason: None,
+            owner_user_id: Some(owner),
+        };
+
+        // Larger than the CONTENT-grade cap: must be truncated at a char
+        // boundary with an explicit marker, never silently dropped to a fixed
+        // string.
+        let oversized = "x".repeat(SUBAGENT_PAYLOAD_CONTENT_MAX_BYTES + 4096);
+        let payload = background_completion_payload(
+            &event,
+            &record,
+            &ChildTerminalOutput {
+                final_text: Some(oversized),
                 failure_summary: None,
             },
         )
         .unwrap();
 
-        assert_eq!(payload["terminal_event"]["reason"], "|||secret json|||");
-        assert_ne!(
-            payload["terminal_event"]["reason"],
-            "Subagent result available"
-        );
+        let final_text = payload["final_text"].as_str().unwrap();
+        assert!(final_text.starts_with("|||"));
+        assert!(final_text.ends_with("|||"));
+        assert!(final_text.contains("[truncated"));
+        assert_ne!(payload["final_text"], "Subagent result available");
+    }
+
+    #[test]
+    fn sanitize_untrusted_text_body_preserves_delimiters_neutralizes_controls() {
+        // The CONTENT-grade twin of `sanitize_tool_result_summary`: structural
+        // delimiters that are load-bearing for code/paths MUST survive, while
+        // non-whitespace control characters are neutralized to spaces.
+        let raw = "median([3, 1, 2]) see `stats.py` path src/calc.py {obj}\u{0}\u{7}";
+
+        let safe = sanitize_untrusted_text_body(raw);
+
+        // Brackets, backticks, slashes, parens, braces survive verbatim.
+        assert!(safe.contains('['));
+        assert!(safe.contains(']'));
+        assert!(safe.contains('`'));
+        assert!(safe.contains('/'));
+        assert!(safe.contains('('));
+        assert!(safe.contains(')'));
+        assert!(safe.contains('{'));
+        assert!(safe.contains('}'));
+        assert!(safe.contains("src/calc.py"));
+        assert!(safe.contains("`stats.py`"));
+        assert!(safe.contains("{obj}"));
+        // The NUL and BEL control chars are neutralized to spaces.
+        assert!(!safe.contains('\u{0}'));
+        assert!(!safe.contains('\u{7}'));
+        assert!(safe.ends_with("  "));
     }
 
     #[tokio::test]
