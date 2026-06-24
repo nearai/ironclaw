@@ -221,16 +221,8 @@ api_key_env = "OPENAI_API_KEY"
 # # Host-beta Slack Events API route for `ironclaw-reborn serve`.
 # # Requires a binary built with `--features slack-v2-host-beta`.
 # enabled = false
-# installation_id = "install-alpha"
-# team_id = "T123"
-# # Required for tenant app-scoped personal-binding pairing.
-# api_app_id = "A123"
-# # Optional legacy static mapping. Omit for the pairing-code flow.
-# slack_user_id = "U123"
-# # Defaults to the WebUI authenticated user when omitted.
-# # user_id = "reborn-cli"
-# signing_secret_env = "IRONCLAW_REBORN_SLACK_SIGNING_SECRET"
-# bot_token_env = "IRONCLAW_REBORN_SLACK_BOT_TOKEN"
+# # Configure Slack app ids, bot token, signing secret, and channel mappings
+# # from WebUI channel setup after the server starts.
 "#,
         api_version = REBORN_CONFIG_API_VERSION,
     )

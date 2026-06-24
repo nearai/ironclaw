@@ -142,6 +142,8 @@ mod slack_personal_binding_pairing_serve;
 mod slack_personal_binding_serve;
 #[cfg(feature = "slack-v2-host-beta")]
 pub mod slack_serve;
+#[cfg(feature = "slack-v2-host-beta")]
+mod slack_setup;
 #[cfg(feature = "test-support")]
 pub mod test_support;
 mod trace_capture;
@@ -299,9 +301,10 @@ pub use slack_egress::{
 #[cfg(feature = "slack-v2-host-beta")]
 pub use slack_host_beta::{
     SlackHostBetaBuildError, SlackHostBetaChannelRoute, SlackHostBetaConfig,
-    SlackHostBetaConfigInput, SlackHostBetaMounts, build_slack_events_route_mount,
+    SlackHostBetaConfigInput, SlackHostBetaLegacySetup, SlackHostBetaMounts,
+    SlackHostBetaRuntimeConfig, build_slack_events_route_mount,
     build_slack_events_route_mount_with_actor_user_resolver, build_slack_host_beta_mounts,
-    build_triggered_run_delivery_hook,
+    build_slack_host_beta_runtime_mounts, build_triggered_run_delivery_hook,
 };
 #[cfg(feature = "slack-v2-host-beta")]
 pub use slack_personal_binding::{
@@ -792,6 +795,11 @@ pub(crate) fn slack_host_state_mount_view(
             MountPermissions::read_write_list_delete(),
         ),
         MountGrant::new(
+            MountAlias::new("/tenant-shared/slack-setup")?,
+            VirtualPath::new(format!("/tenants/{tenant_id}/shared/slack-setup"))?,
+            MountPermissions::read_write_list_delete(),
+        ),
+        MountGrant::new(
             MountAlias::new("/engine/product_workflow/idempotency")?,
             VirtualPath::new(format!(
                 "/tenants/{tenant_id}/shared/slack-product-workflow/idempotency"
@@ -1044,6 +1052,11 @@ mod mount_view_tests {
                 "/tenant-shared/slack-channel-routes",
                 "/tenant-shared/slack-channel-routes/install/team/route.json",
                 "slack-channel-routes/install/team/route.json",
+            ),
+            (
+                "/tenant-shared/slack-setup",
+                "/tenant-shared/slack-setup/installation.json",
+                "slack-setup/installation.json",
             ),
             (
                 "/engine/product_workflow/idempotency",

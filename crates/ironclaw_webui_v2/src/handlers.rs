@@ -962,6 +962,19 @@ pub async fn resume_automation(
     Ok(Json(response))
 }
 
+/// `DELETE /api/webchat/v2/automations/:automation_id`
+pub async fn delete_automation(
+    State(state): State<WebUiV2State>,
+    Extension(caller): Extension<WebUiAuthenticatedCaller>,
+    Path(automation_id): Path<String>,
+) -> Result<Json<RebornAutomationMutationResponse>, WebUiV2HttpError> {
+    let response = state
+        .services()
+        .delete_automation(caller, automation_id)
+        .await?;
+    Ok(Json(response))
+}
+
 #[derive(Debug, Default, Deserialize)]
 pub struct ListAutomationsQuery {
     /// Optional maximum number of schedule automations to return.

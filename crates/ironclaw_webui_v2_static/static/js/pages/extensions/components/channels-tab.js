@@ -1,7 +1,7 @@
 import { StatusPill } from "../../../design-system/primitives.js";
 import { html } from "../../../lib/html.js";
 import { useT } from "../../../lib/i18n.js";
-import { SlackChannelPicker } from "../../../components/slack-channel-picker.js";
+import { SlackAdminManagedSection } from "../../../components/slack-setup-panel.js";
 import { SlackPairingSection } from "../../../components/slack-pairing-section.js";
 import { ExtensionCard, RegistryCard } from "./extension-card.js";
 import { PairingSection } from "./pairing-section.js";
@@ -46,7 +46,7 @@ export function SlackConnectActionSections({
   const sections = actions
     .map((action) => {
       if (isSlackAdminManagedAction(action)) {
-        return html`<${SlackChannelPicker} action=${action.action} />`;
+        return html`<${SlackAdminManagedSection} action=${action.action} />`;
       }
       if (isSlackInboundProofCodeAction(action)) {
         return html`<${SlackPairingSection} action=${action.action} />`;

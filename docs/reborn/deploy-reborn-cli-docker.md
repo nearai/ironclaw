@@ -172,19 +172,12 @@ config file with:
 ```toml
 [slack]
 enabled = true
-installation_id = "<installation-id>"
-team_id = "<slack-team-id>"
-api_app_id = "<slack-api-app-id>"
-signing_secret_env = "IRONCLAW_REBORN_SLACK_SIGNING_SECRET"
-bot_token_env = "IRONCLAW_REBORN_SLACK_BOT_TOKEN"
 ```
 
-Then set:
+Then configure Slack app ids, the bot token, signing secret, and channel
+mappings from WebUI channel setup after the container starts.
 
-```bash
-IRONCLAW_REBORN_SLACK_SIGNING_SECRET=<slack-signing-secret>
-IRONCLAW_REBORN_SLACK_BOT_TOKEN=<slack-bot-token>
-```
+Set the WebUI identity environment variables as usual.
 
-Do not store OAuth, Slack, or LLM secrets in `config.toml`; the parser treats
-secrets as env-only deployment material.
+Do not store OAuth, Slack, or LLM secrets in `config.toml`. Slack bot tokens
+and signing secrets are stored from WebUI channel setup.

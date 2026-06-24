@@ -10,6 +10,7 @@ use crate::types::*;
 const DRIVE_API_BASE: &str = "https://www.googleapis.com/drive/v3";
 const UPLOAD_API_BASE: &str = "https://www.googleapis.com/upload/drive/v3";
 const MAX_DOWNLOAD_TEXT_BYTES: usize = 1_000_000;
+const GOOGLE_API_AUTH_REQUIRED_ERROR: &str = "google_api_error_status_401";
 
 /// Standard fields to request for file metadata.
 const FILE_FIELDS: &str = "id,name,mimeType,description,size,createdTime,modifiedTime,\
@@ -36,11 +37,7 @@ fn api_call(method: &str, path: &str, body: Option<&str>) -> Result<String, Stri
     let response = host::http_request(method, &url, headers, body_bytes.as_deref(), None)?;
 
     if response.status < 200 || response.status >= 300 {
-        let body_text = String::from_utf8_lossy(&response.body);
-        return Err(format!(
-            "Drive API returned status {}: {}",
-            response.status, body_text
-        ));
+        return Err(api_status_error("Drive", response.status, &response.body));
     }
 
     if response.body.is_empty() {
@@ -60,14 +57,22 @@ fn api_call_raw(method: &str, url: &str) -> Result<Vec<u8>, String> {
     let response = host::http_request(method, url, "{}", None, None)?;
 
     if response.status < 200 || response.status >= 300 {
-        let body_text = String::from_utf8_lossy(&response.body);
-        return Err(format!(
-            "Drive API returned status {}: {}",
-            response.status, body_text
-        ));
+        return Err(api_status_error("Drive", response.status, &response.body));
     }
 
     Ok(response.body)
+}
+
+fn api_status_error(service: &str, status: u16, body: &[u8]) -> String {
+    if status == 401 {
+        return serde_json::json!({
+            "code": GOOGLE_API_AUTH_REQUIRED_ERROR,
+            "kind": "auth_required",
+        })
+        .to_string();
+    }
+    let body_text = String::from_utf8_lossy(body);
+    format!("{service} API returned status {status}: {body_text}")
 }
 
 /// Parse a file resource from the API response.
@@ -286,11 +291,7 @@ pub fn upload_file(
     let response = host::http_request("POST", &url, &headers, Some(body.as_bytes()), None)?;
 
     if response.status < 200 || response.status >= 300 {
-        let body_text = String::from_utf8_lossy(&response.body);
-        return Err(format!(
-            "Upload failed with status {}: {}",
-            response.status, body_text
-        ));
+        return Err(api_status_error("Drive", response.status, &response.body));
     }
 
     let parsed: serde_json::Value = serde_json::from_str(

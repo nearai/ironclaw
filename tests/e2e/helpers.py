@@ -216,7 +216,7 @@ OWNER_SCOPE_ID = "e2e-owner-scope"
 HTTP_WEBHOOK_SECRET = "e2e-http-webhook-secret"
 EMULATE_GOOGLE_BEARER = "mock-refreshed-access-token"
 EMULATE_SLACK_BEARER = "emulate-slack-token"
-EMULATE_GITHUB_BEARER = "emulate-github-token"
+EMULATE_GITHUB_BEARER = "ghp_emulate_github_token"
 
 # Bearer token for the Reborn WebUI v2 surface (`ironclaw-reborn serve`).
 # Must be >= 32 bytes: `serve` also uses this value as the SSO session-signing
