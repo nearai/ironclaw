@@ -53,6 +53,8 @@ pub struct TuiAppHandle {
     pub msg_rx: mpsc::Receiver<TuiUserMessage>,
     /// Join handle for the TUI thread.
     pub join_handle: std::thread::JoinHandle<()>,
+    // For graceful shutdown signaling
+    pub stop_tx: mpsc::Sender<()>,
 }
 
 /// Configuration for creating a TuiApp.
@@ -83,6 +85,7 @@ pub struct TuiAppConfig {
 pub fn start_tui(config: TuiAppConfig) -> TuiAppHandle {
     let (event_tx, event_rx) = mpsc::channel::<TuiEvent>(256);
     let (msg_tx, msg_rx) = mpsc::channel::<TuiUserMessage>(32);
+    let (stop_tx, stop_rx) = mpsc::channel::<()>(1); // For graceful shutdown signaling
 
     // Clone event_tx for the crossterm polling task
     let input_event_tx = event_tx.clone();
@@ -101,7 +104,7 @@ pub fn start_tui(config: TuiAppConfig) -> TuiAppHandle {
         };
 
         rt.block_on(async move {
-            if let Err(e) = run_tui(config, event_rx, input_event_tx, msg_tx).await {
+            if let Err(e) = run_tui(config, event_rx, input_event_tx, msg_tx, stop_rx).await {
                 tracing::error!("TUI error: {}", e);
             }
         });
@@ -111,6 +114,7 @@ pub fn start_tui(config: TuiAppConfig) -> TuiAppHandle {
         event_tx,
         msg_rx,
         join_handle,
+        stop_tx,
     }
 }
 
@@ -120,6 +124,7 @@ async fn run_tui(
     mut event_rx: mpsc::Receiver<TuiEvent>,
     input_event_tx: mpsc::Sender<TuiEvent>,
     msg_tx: mpsc::Sender<TuiUserMessage>,
+    mut stop_rx: mpsc::Receiver<()>,
 ) -> io::Result<()> {
     // Terminal setup
     enable_raw_mode()?;
@@ -267,6 +272,9 @@ async fn run_tui(
                     break; // Channel closed
                 };
                 handle_event(event, &mut state, &mut widgets, &msg_tx, &layout).await;
+            }
+            _ = stop_rx.recv() => {
+                break;
             }
         }
 
