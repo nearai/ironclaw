@@ -407,6 +407,7 @@ fn descriptors_match_except_schema(
         })
 }
 
+mod credential_coherence;
 pub mod host_api;
 mod hosted_mcp_discovery;
 mod installations;

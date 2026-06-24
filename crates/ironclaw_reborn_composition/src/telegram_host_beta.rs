@@ -6,8 +6,8 @@
 //! extension, and [`build_telegram_updates_host_ingress_mount_from_enabled_extensions`]
 //! projects the `/webhooks/telegram/updates` route from enabled extension state
 //! through the generic host-ingress registry. The mounted route's descriptor is
-//! the single source of truth (the registry `telegram_updates` policy profile),
-//! so there is no hand-maintained path that can drift out of the manifest.
+//! projected from the manifest, so there is no hand-maintained path that can
+//! drift out of the manifest.
 //!
 //! Two distinct secrets flow through here and must never be conflated:
 //! * the **webhook secret** authenticates inbound updates (the host verifies the
@@ -30,9 +30,7 @@ use ironclaw_host_api::ingress::{
 use ironclaw_host_api::{
     AgentId, ExtensionId, InvocationId, ProjectId, ResourceScope, SecretHandle, TenantId, UserId,
 };
-use ironclaw_host_ingress_registry::{
-    TELEGRAM_UPDATES_ROUTE_ID, list_enabled_host_ingress_entries,
-};
+use ironclaw_host_ingress_registry::{HostIngressRuntimeEntry, list_enabled_host_ingress_entries};
 use ironclaw_product_adapters::{
     AdapterInstallationId, AuthRequirement, DeclaredEgressHost, DeclaredEgressTarget,
     EgressCredentialHandle, ProductAdapter, ProductAdapterId, ProtocolHttpEgress,
@@ -54,7 +52,7 @@ use secrecy::{ExposeSecret, SecretString};
 use thiserror::Error;
 
 use crate::RebornRuntime;
-use crate::host_ingress::{HostIngressError, public_ingress_route_mount};
+use crate::host_ingress::{HostIngressError, HostIngressRegistration, public_ingress_route_mount};
 use crate::telegram_delivery::{
     TelegramFinalReplyDeliveryObserver, TelegramFinalReplyDeliveryServices,
 };
@@ -64,8 +62,8 @@ use crate::telegram_extension_settings::{
 };
 use crate::telegram_host_ingress::{
     ExtensionInstallationIngressCredentialBinding, ExtensionInstallationIngressCredentialResolver,
-    TELEGRAM_WEBHOOK_SECRET_HEADER, TelegramHostIngressInstallation, TelegramUpdatesIngressHandler,
-    telegram_updates_host_ingress_registrations,
+    TELEGRAM_UPDATES_HOST_INGRESS_ROUTE_ID, TELEGRAM_WEBHOOK_SECRET_HEADER,
+    TelegramHostIngressInstallation, TelegramUpdatesIngressHandler,
 };
 use crate::webui_serve::PublicRouteMount;
 
@@ -282,18 +280,31 @@ pub async fn build_telegram_updates_host_ingress_mount_from_enabled_extensions(
         .extension_management
         .as_ref()
         .ok_or(TelegramHostBetaBuildError::ExtensionLifecycleUnavailable)?;
+    let store = extension_management.installation_store();
+    let entries = list_enabled_host_ingress_entries(store.as_ref()).await?;
+    build_telegram_updates_host_ingress_mount_from_entries(runtime, &entries).await
+}
+
+pub(crate) async fn build_telegram_updates_host_ingress_mount_from_entries(
+    runtime: &RebornRuntime,
+    entries: &[HostIngressRuntimeEntry],
+) -> Result<Option<PublicRouteMount>, TelegramHostBetaBuildError> {
+    let local_runtime = runtime
+        .services()
+        .local_runtime
+        .as_ref()
+        .ok_or(TelegramHostBetaBuildError::DurableHostStateUnavailable)?;
     let secret_store = local_runtime
         .secret_store
         .clone()
         .ok_or(TelegramHostBetaBuildError::SecretStoreUnavailable)?;
-    let store = extension_management.installation_store();
     let settings_store = FilesystemTelegramExtensionSettingsStore::new(Arc::clone(
         &local_runtime.host_state_filesystem,
     ));
-    let entries = list_enabled_host_ingress_entries(store.as_ref()).await?;
     let telegram_extension_id = telegram_extension_id()?;
     let mut installations = Vec::new();
     let mut credential_bindings = Vec::new();
+    let mut projected_declaration = None;
 
     for entry in entries {
         let installation = entry.installation();
@@ -302,6 +313,10 @@ pub async fn build_telegram_updates_host_ingress_mount_from_enabled_extensions(
         }
         if !is_telegram_updates_declaration(entry.declaration()) {
             continue;
+        }
+        let declaration = entry.declaration().clone();
+        if projected_declaration.is_none() {
+            projected_declaration = Some(declaration.clone());
         }
         let settings = settings_store
             .get(installation.installation_id())
@@ -333,7 +348,7 @@ pub async fn build_telegram_updates_host_ingress_mount_from_enabled_extensions(
         let (runner, observer) =
             build_telegram_runner_and_observer(runtime, &config, bot_token_handle, egress)?;
 
-        let credential_handles = declaration_credential_handles(entry.declaration());
+        let credential_handles = declaration_credential_handles(&declaration);
         for ingress_credential_handle in &credential_handles {
             let secret_handle =
                 extension_secret_handle(installation, ingress_credential_handle.as_str())?;
@@ -354,9 +369,9 @@ pub async fn build_telegram_updates_host_ingress_mount_from_enabled_extensions(
         );
     }
 
-    if installations.is_empty() {
+    let Some(declaration) = projected_declaration else {
         return Ok(None);
-    }
+    };
 
     let handler = Arc::new(TelegramUpdatesIngressHandler::new(installations)?);
     let resolver = Arc::new(ExtensionInstallationIngressCredentialResolver::new(
@@ -364,13 +379,16 @@ pub async fn build_telegram_updates_host_ingress_mount_from_enabled_extensions(
         credential_bindings,
     )?);
     Ok(Some(public_ingress_route_mount(
-        telegram_updates_host_ingress_registrations(handler)?,
+        vec![HostIngressRegistration {
+            declaration,
+            handler,
+        }],
         resolver,
     )?))
 }
 
 fn is_telegram_updates_declaration(declaration: &HostIngressRouteDeclaration) -> bool {
-    if declaration.route().route_id().as_str() != TELEGRAM_UPDATES_ROUTE_ID {
+    if declaration.route().route_id().as_str() != TELEGRAM_UPDATES_HOST_INGRESS_ROUTE_ID {
         return false;
     }
     matches!(

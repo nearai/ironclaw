@@ -1,9 +1,21 @@
-use ironclaw_extensions::{ExtensionManifestRecord, MANIFEST_SCHEMA_VERSION, ManifestSource};
+use std::sync::Arc;
+
+use ironclaw_extensions::{
+    ExtensionManifestRecord, ExtensionManifestV2, HostApiContractRegistry, HostApiId,
+    HostApiManifestContract, HostApiRefV2, MANIFEST_SCHEMA_VERSION, ManifestSectionPath,
+    ManifestSource,
+};
 use ironclaw_host_api::HostPortCatalog;
 use ironclaw_product_adapter_registry::{
-    ManifestHash, RegistryError, parse_product_adapter_manifest_record, product_adapter_sections,
+    ManifestHash, ProductAdapterHostApiContract, RegistryError,
+    parse_product_adapter_manifest_record, product_adapter_sections,
 };
 use ironclaw_product_adapters::{AuthRequirement, ProductCapabilityFlag, ProductSurfaceKind};
+
+const TELEGRAM_MANIFEST: &str =
+    include_str!("../../ironclaw_first_party_extensions/assets/telegram/manifest.toml");
+const SLACK_MANIFEST: &str =
+    include_str!("../../ironclaw_first_party_extensions/assets/slack/manifest.toml");
 
 fn manifest(extra: &str) -> String {
     format!(
@@ -188,4 +200,74 @@ flags = ["inbound_messages"]
         err.to_string().contains("invalid adapter_id"),
         "expected adapter_id validation error, got {err:?}"
     );
+}
+
+#[test]
+fn real_first_party_product_adapter_manifests_project_cleanly() {
+    let mut contracts = HostApiContractRegistry::new();
+    contracts
+        .register(Arc::new(ProductAdapterHostApiContract::new().unwrap()))
+        .unwrap();
+    contracts
+        .register(Arc::new(FakeHostIngressContract {
+            id: HostApiId::new("ironclaw.host_ingress/v1").unwrap(),
+        }))
+        .unwrap();
+
+    for raw in [TELEGRAM_MANIFEST, SLACK_MANIFEST] {
+        ExtensionManifestV2::parse_with_host_api_contracts(
+            raw,
+            ManifestSource::HostBundled,
+            &HostPortCatalog::empty(),
+            &contracts,
+        )
+        .unwrap();
+        assert_eq!(product_adapter_sections_from_manifest(raw, &contracts), 1);
+    }
+}
+
+fn product_adapter_sections_from_manifest(raw: &str, contracts: &HostApiContractRegistry) -> usize {
+    let record = ExtensionManifestRecord::from_toml_with_contracts(
+        raw,
+        ManifestSource::HostBundled,
+        &HostPortCatalog::empty(),
+        Some(ManifestHash::new("sha256:real-manifest-test").unwrap()),
+        contracts,
+    )
+    .unwrap();
+    product_adapter_sections(&record).unwrap().len()
+}
+
+struct FakeHostIngressContract {
+    id: HostApiId,
+}
+
+impl HostApiManifestContract for FakeHostIngressContract {
+    fn id(&self) -> &HostApiId {
+        &self.id
+    }
+
+    fn accepts_section_path(&self, section: &ManifestSectionPath) -> bool {
+        section
+            .as_str()
+            .strip_prefix("host_ingress")
+            .is_some_and(|rest| rest.is_empty() || rest.starts_with('.'))
+    }
+
+    fn validate_section(
+        &self,
+        _host_api: &HostApiRefV2,
+        section: &toml::Value,
+    ) -> Result<(), String> {
+        // Post-transport-discriminator shape: route_id lives under
+        // [host_ingress.*.transport], not at the section top level.
+        section
+            .as_table()
+            .and_then(|table| table.get("transport"))
+            .and_then(toml::Value::as_table)
+            .and_then(|transport| transport.get("route_id"))
+            .and_then(toml::Value::as_str)
+            .ok_or_else(|| "host_ingress transport.route_id is required".to_string())?;
+        Ok(())
+    }
 }

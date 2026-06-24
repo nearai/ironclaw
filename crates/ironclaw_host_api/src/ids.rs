@@ -7,6 +7,7 @@
 //! smuggled into manifests, mount paths, approvals, or audit records.
 
 use serde::{Deserialize, Serialize};
+use thiserror::Error;
 use uuid::Uuid;
 
 use crate::HostApiError;
@@ -207,6 +208,86 @@ string_id!(
 );
 string_id!(SystemServiceId, "system_service", validate_name_segment);
 
+/// Canonical extension-manifest credential binding handle.
+///
+/// Domain contracts may keep narrower handle newtypes for their local schema
+/// vocabulary. They convert into this shared handle only when reporting
+/// declared/referenced credentials into the v2 manifest projection boundary.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(try_from = "String")]
+pub struct CredentialHandle(String);
+
+impl CredentialHandle {
+    fn validate(value: &str) -> Result<(), CredentialHandleError> {
+        if value.is_empty() {
+            return Err(CredentialHandleError::Invalid {
+                value: value.to_string(),
+                reason: "must not be empty",
+            });
+        }
+        if value.len() > 256 {
+            return Err(CredentialHandleError::Invalid {
+                value: value.to_string(),
+                reason: "must be at most 256 bytes",
+            });
+        }
+        if has_forbidden_control(value) {
+            return Err(CredentialHandleError::Invalid {
+                value: value.to_string(),
+                reason: "NUL/control characters are not allowed",
+            });
+        }
+        Ok(())
+    }
+
+    pub fn new(raw: impl Into<String>) -> Result<Self, CredentialHandleError> {
+        let value = raw.into();
+        Self::validate(&value)?;
+        Ok(Self(value))
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    pub fn into_inner(self) -> String {
+        self.0
+    }
+}
+
+impl TryFrom<String> for CredentialHandle {
+    type Error = CredentialHandleError;
+
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::validate(&value)?;
+        Ok(Self(value))
+    }
+}
+
+impl AsRef<str> for CredentialHandle {
+    fn as_ref(&self) -> &str {
+        &self.0
+    }
+}
+
+impl std::fmt::Display for CredentialHandle {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl From<CredentialHandle> for String {
+    fn from(handle: CredentialHandle) -> Self {
+        handle.0
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
+pub enum CredentialHandleError {
+    #[error("invalid credential handle '{value}': {reason}")]
+    Invalid { value: String, reason: &'static str },
+}
+
 /// Extension-prefixed capability identifier.
 ///
 /// Capability IDs require at least two dot-separated segments and may use
@@ -278,3 +359,27 @@ uuid_id!(ResourceReservationId);
 uuid_id!(ApprovalRequestId);
 uuid_id!(AuditEventId);
 uuid_id!(CorrelationId);
+
+#[cfg(test)]
+mod tests {
+    use super::CredentialHandle;
+
+    #[test]
+    fn credential_handle_accepts_manifest_safe_values() {
+        let handle = CredentialHandle::new("telegram_bot_token").unwrap();
+        assert_eq!(handle.as_str(), "telegram_bot_token");
+
+        let parsed: CredentialHandle = serde_json::from_str("\"slack.signing-secret\"").unwrap();
+        assert_eq!(parsed.as_str(), "slack.signing-secret");
+    }
+
+    #[test]
+    fn credential_handle_rejects_malformed_values() {
+        for raw in ["", "telegram\nsecret", "x\0y"] {
+            assert!(
+                CredentialHandle::new(raw).is_err(),
+                "expected {raw:?} to be rejected"
+            );
+        }
+    }
+}

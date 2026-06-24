@@ -26,9 +26,9 @@ use async_trait::async_trait;
 use ironclaw_host_api::ingress::{
     AllowedEffectPath, AuditTraceClass, BodyLimitPolicy, CorsPolicy, HostIngressRouteDeclaration,
     HostIngressTarget, IngressAckMode, IngressAuthBinding, IngressAuthPolicy, IngressAuthScheme,
-    IngressAuthSchemeName, IngressCredentialHandle, IngressDrainMode, IngressPolicy,
-    IngressPolicyParts, IngressRouteDescriptor, IngressScopeSource, ListenerClass, RateLimitPolicy,
-    RateLimitScope, StreamingMode, WebSocketOriginPolicy,
+    IngressCredentialHandle, IngressDrainMode, IngressPolicy, IngressPolicyParts,
+    IngressRouteDescriptor, IngressScopeSource, ListenerClass, RateLimitPolicy, RateLimitScope,
+    StreamingMode, WebSocketOriginPolicy,
 };
 use ironclaw_host_api::{CapabilityId, NetworkMethod, ResourceScope, SecretHandle};
 use ironclaw_product_adapters::{AdapterInstallationId, AuthRequirement, ProtocolAuthEvidence};
@@ -40,7 +40,7 @@ use ironclaw_wasm_product_adapters::{
 
 use crate::host_ingress::{
     HostIngressAuthCandidate, HostIngressCapabilityHandler, HostIngressCredentialResolver,
-    HostIngressError, HostIngressImmediateResponse, HostIngressRegistration, ResolvedIngressSecret,
+    HostIngressError, HostIngressImmediateResponse, ResolvedIngressSecret,
     UnverifiedHostIngressRequest, VerifiedHostIngressRequest,
 };
 
@@ -51,9 +51,6 @@ pub const TELEGRAM_UPDATES_HOST_INGRESS_ROUTE_ID: &str = "telegram.updates";
 pub const TELEGRAM_UPDATES_HOST_INGRESS_PATH: &str = "/webhooks/telegram/updates";
 /// Header carrying the per-installation webhook shared secret.
 pub const TELEGRAM_WEBHOOK_SECRET_HEADER: &str = "X-Telegram-Bot-Api-Secret-Token";
-/// Auth scheme name recorded in the route declaration's auth binding. Its
-/// `declared_auth_scheme()` maps to `WebhookSignature`, matching the policy.
-const TELEGRAM_SHARED_SECRET_AUTH_SCHEME: &str = "telegram_shared_secret";
 /// Telegram updates can carry large payloads (e.g. captions, inline data); cap
 /// at 1 MiB to bound host memory while comfortably covering real updates.
 const TELEGRAM_UPDATES_BODY_LIMIT_BYTES: u64 = 1024 * 1024;
@@ -215,18 +212,6 @@ impl HostIngressCapabilityHandler for TelegramUpdatesIngressHandler {
     }
 }
 
-pub fn telegram_updates_host_ingress_registrations(
-    handler: Arc<TelegramUpdatesIngressHandler>,
-) -> Result<Vec<HostIngressRegistration>, HostIngressError> {
-    let declaration =
-        telegram_updates_host_ingress_declaration(handler.declared_credential_handles())?;
-    let handler: Arc<dyn HostIngressCapabilityHandler> = handler;
-    Ok(vec![HostIngressRegistration {
-        declaration,
-        handler,
-    }])
-}
-
 pub fn telegram_updates_host_ingress_declaration(
     credential_handles: Vec<IngressCredentialHandle>,
 ) -> Result<HostIngressRouteDeclaration, HostIngressError> {
@@ -246,7 +231,7 @@ pub fn telegram_updates_host_ingress_declaration(
             "Telegram updates ingress descriptor did not validate: {error}"
         ))
     })?;
-    let auth = IngressAuthBinding::new(telegram_shared_secret_auth_scheme()?, credential_handles)
+    let auth = IngressAuthBinding::new(IngressAuthScheme::SharedSecretHeader, credential_handles)
         .map_err(|error| {
         internal(format!(
             "Telegram updates ingress auth binding did not validate: {error}"
@@ -312,19 +297,11 @@ fn verify_telegram_shared_secret(
     }
 }
 
-fn telegram_shared_secret_auth_scheme() -> Result<IngressAuthSchemeName, HostIngressError> {
-    IngressAuthSchemeName::new(TELEGRAM_SHARED_SECRET_AUTH_SCHEME).map_err(|error| {
-        internal(format!(
-            "Telegram updates ingress auth scheme did not validate: {error}"
-        ))
-    })
-}
-
 fn telegram_updates_ingress_policy() -> Result<IngressPolicy, HostIngressError> {
     IngressPolicy::new(IngressPolicyParts {
         listener_class: ListenerClass::PublicWebhook,
         auth: IngressAuthPolicy::Required {
-            schemes: vec![IngressAuthScheme::WebhookSignature],
+            schemes: vec![IngressAuthScheme::SharedSecretHeader],
         },
         scope_source: IngressScopeSource::HostResolved,
         body_limit: BodyLimitPolicy::Limited {
@@ -550,8 +527,8 @@ mod tests {
         }
         assert_eq!(declaration.auth().len(), 1);
         assert_eq!(
-            declaration.auth()[0].scheme().as_str(),
-            "telegram_shared_secret"
+            declaration.auth()[0].verifier(),
+            IngressAuthScheme::SharedSecretHeader
         );
     }
 
@@ -560,15 +537,6 @@ mod tests {
         let error = telegram_updates_host_ingress_declaration(Vec::new())
             .expect_err("declaration without credential handles must reject");
         assert!(matches!(error, HostIngressError::Internal { .. }));
-    }
-
-    #[test]
-    fn telegram_shared_secret_auth_scheme_declares_webhook_signature() {
-        let scheme = telegram_shared_secret_auth_scheme().expect("scheme validates");
-        assert_eq!(
-            scheme.declared_auth_scheme(),
-            IngressAuthScheme::WebhookSignature
-        );
     }
 
     #[test]

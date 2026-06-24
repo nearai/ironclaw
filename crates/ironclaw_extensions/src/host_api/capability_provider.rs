@@ -1,5 +1,6 @@
 use std::collections::BTreeSet;
 
+use ironclaw_host_api::RuntimeCredentialRequirementSource;
 use serde::Deserialize;
 
 use crate::v2::{
@@ -53,12 +54,19 @@ impl HostApiManifestContract for CapabilityProviderHostApiContract {
     fn project_section_with_context(
         &self,
         context: &HostApiManifestContext<'_>,
-        _host_api: &HostApiRefV2,
+        host_api: &HostApiRefV2,
         section: &toml::Value,
     ) -> Result<HostApiManifestProjection, String> {
-        Ok(HostApiManifestProjection {
-            capabilities: project_capabilities(context, section)?,
-        })
+        let capabilities = project_capabilities(context, section)?;
+        let mut projection = HostApiManifestProjection::default();
+        projection
+            .reference_credential_handles(
+                host_api,
+                secret_runtime_credential_handles(&capabilities),
+            )
+            .map_err(|error| error.to_string())?;
+        projection.capabilities = capabilities;
+        Ok(projection)
     }
 }
 
@@ -89,6 +97,18 @@ fn project_capabilities(
         capabilities.push(capability);
     }
     Ok(capabilities)
+}
+
+fn secret_runtime_credential_handles(
+    capabilities: &[CapabilityDeclV2],
+) -> impl Iterator<Item = &str> {
+    capabilities
+        .iter()
+        .flat_map(|capability| capability.runtime_credentials.iter())
+        .filter_map(|credential| {
+            (credential.source == RuntimeCredentialRequirementSource::SecretHandle)
+                .then_some(credential.handle.as_str())
+        })
 }
 
 #[derive(Debug, Deserialize)]

@@ -1,5 +1,5 @@
 #[cfg(feature = "slack-v2-host-beta")]
-use anyhow::anyhow;
+use anyhow::{Context, anyhow};
 
 #[cfg(feature = "slack-v2-host-beta")]
 use std::env;
@@ -8,7 +8,9 @@ use std::path::Path;
 
 #[cfg(feature = "slack-v2-host-beta")]
 use ironclaw_reborn_composition::{
-    SlackHostBetaChannelRoute, SlackHostBetaConfig, SlackHostBetaConfigInput, SlackTeamId,
+    ConfiguredHostIngressProjectionMode, HostIngressOperatorRouteVisibility,
+    HostIngressServePlanInput, RebornRuntime, SlackHostBetaChannelRoute, SlackHostBetaConfig,
+    SlackHostBetaConfigInput, SlackTeamId, import_slack_host_beta_config_as_extension_installation,
 };
 #[cfg(feature = "slack-v2-host-beta")]
 use secrecy::SecretString;
@@ -35,6 +37,66 @@ pub(crate) fn resolve_slack_config_for_serve(
         default_user_id,
         config_path,
     )
+}
+
+#[cfg(feature = "slack-v2-host-beta")]
+pub(crate) async fn import_slack_config_for_serve(
+    runtime: &RebornRuntime,
+    config: &Option<SlackHostBetaConfig>,
+) -> anyhow::Result<()> {
+    if let Some(config) = config {
+        import_slack_host_beta_config_as_extension_installation(runtime, config)
+            .await
+            .map_err(anyhow::Error::from)
+            .context("failed to import Slack config into extension state")?;
+    }
+    Ok(())
+}
+
+#[cfg(not(feature = "slack-v2-host-beta"))]
+pub(crate) async fn import_slack_config_for_serve(
+    _runtime: &ironclaw_reborn_composition::RebornRuntime,
+    _config: &Option<()>,
+) -> anyhow::Result<()> {
+    Ok(())
+}
+
+#[cfg(feature = "slack-v2-host-beta")]
+pub(crate) fn configure_slack_host_ingress_plan_for_serve(
+    input: HostIngressServePlanInput,
+    config: Option<SlackHostBetaConfig>,
+    section: Option<&ironclaw_reborn_config::SlackSection>,
+    operator_routes_visible: bool,
+) -> HostIngressServePlanInput {
+    let Some(config) = config else {
+        return input;
+    };
+    let mode = section
+        .map(|slack| slack.host_ingress_mode)
+        .unwrap_or_default();
+    let projection_mode = if mode.is_generic() {
+        ConfiguredHostIngressProjectionMode::Serve
+    } else if mode.is_generic_shadow() {
+        ConfiguredHostIngressProjectionMode::ValidateOnly
+    } else {
+        ConfiguredHostIngressProjectionMode::Suppress
+    };
+    let operator_route_visibility = if operator_routes_visible {
+        HostIngressOperatorRouteVisibility::Visible
+    } else {
+        HostIngressOperatorRouteVisibility::Hidden
+    };
+    input.with_slack_host_beta(config, projection_mode, operator_route_visibility)
+}
+
+#[cfg(not(feature = "slack-v2-host-beta"))]
+pub(crate) fn configure_slack_host_ingress_plan_for_serve(
+    input: ironclaw_reborn_composition::HostIngressServePlanInput,
+    _config: Option<()>,
+    _section: Option<&ironclaw_reborn_config::SlackSection>,
+    _operator_routes_visible: bool,
+) -> ironclaw_reborn_composition::HostIngressServePlanInput {
+    input
 }
 
 #[cfg(not(feature = "slack-v2-host-beta"))]

@@ -18,8 +18,8 @@ use std::sync::Arc;
 use ironclaw_extensions::{
     ExtensionInstallation, ExtensionInstallationError, ExtensionInstallationStore,
     ExtensionManifestRecord, ExtensionManifestV2, HostApiContractRegistry, HostApiId,
-    HostApiManifestContext, HostApiManifestContract, HostApiMultiplicity, HostApiRefV2,
-    ManifestSectionPath, ManifestSource, ManifestV2Error,
+    HostApiManifestContext, HostApiManifestContract, HostApiManifestProjection,
+    HostApiMultiplicity, HostApiRefV2, ManifestSectionPath, ManifestSource, ManifestV2Error,
 };
 use ironclaw_host_api::{ExtensionId, HostPortCatalog};
 use ironclaw_product_adapters::{
@@ -316,6 +316,41 @@ impl HostApiManifestContract for ProductAdapterHostApiContract {
         )
         .map(|_| ())
         .map_err(|e| e.to_string())
+    }
+
+    fn project_section_with_context(
+        &self,
+        context: &HostApiManifestContext<'_>,
+        host_api: &HostApiRefV2,
+        section: &toml::Value,
+    ) -> Result<HostApiManifestProjection, String> {
+        let adapter = ProductAdapterHostApiSection::from_value(
+            context.extension_id,
+            host_api.section.clone(),
+            section.clone(),
+        )
+        .map_err(|error| error.to_string())?;
+        let mut projection = HostApiManifestProjection::default();
+        projection
+            .declare_credential_handles(
+                adapter
+                    .required_credentials()
+                    .iter()
+                    .map(EgressCredentialHandle::as_str),
+            )
+            .map_err(|error| error.to_string())?;
+        projection
+            .reference_credential_handles(
+                host_api,
+                adapter
+                    .declared_egress()
+                    .iter()
+                    .filter_map(|target| target.credential_handle.as_ref())
+                    .map(EgressCredentialHandle::as_str),
+            )
+            .map_err(|error| error.to_string())?;
+
+        Ok(projection)
     }
 }
 

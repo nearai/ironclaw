@@ -4,8 +4,8 @@ use std::sync::Arc;
 
 use ironclaw_extensions::{
     CapabilityVisibility, ExtensionManifestV2, ExtensionRuntimeV2, HostApiContractRegistry,
-    HostApiId, HostApiManifestContract, HostApiMultiplicity, HostApiRefV2, MANIFEST_SCHEMA_VERSION,
-    ManifestSectionPath, ManifestSource, ManifestV2Error,
+    HostApiId, HostApiManifestContract, HostApiManifestProjection, HostApiMultiplicity,
+    HostApiRefV2, MANIFEST_SCHEMA_VERSION, ManifestSectionPath, ManifestSource, ManifestV2Error,
 };
 use ironclaw_host_api::{
     CapabilityProfileId, ExtensionId, HostPortCatalog, HostPortCatalogEntry, HostPortId,
@@ -1148,6 +1148,8 @@ struct FakeHostApiContract {
     prefix: &'static str,
     multiplicity: HostApiMultiplicity,
     required_key: &'static str,
+    declared_credentials: Vec<&'static str>,
+    referenced_credentials: Vec<&'static str>,
 }
 
 impl FakeHostApiContract {
@@ -1162,7 +1164,19 @@ impl FakeHostApiContract {
             prefix,
             multiplicity,
             required_key,
+            declared_credentials: Vec::new(),
+            referenced_credentials: Vec::new(),
         }
+    }
+
+    fn declares(mut self, handles: Vec<&'static str>) -> Self {
+        self.declared_credentials = handles;
+        self
+    }
+
+    fn references(mut self, handles: Vec<&'static str>) -> Self {
+        self.referenced_credentials = handles;
+        self
     }
 }
 
@@ -1195,6 +1209,23 @@ impl HostApiManifestContract for FakeHostApiContract {
         } else {
             Err(format!("missing required key {}", self.required_key))
         }
+    }
+
+    fn project_section_with_context(
+        &self,
+        context: &ironclaw_extensions::HostApiManifestContext<'_>,
+        host_api: &HostApiRefV2,
+        section: &toml::Value,
+    ) -> Result<HostApiManifestProjection, String> {
+        self.validate_section_with_context(context, host_api, section)?;
+        let mut projection = HostApiManifestProjection::default();
+        projection
+            .declare_credential_handles(self.declared_credentials.iter().copied())
+            .map_err(|error| error.to_string())?;
+        projection
+            .reference_credential_handles(host_api, self.referenced_credentials.iter().copied())
+            .map_err(|error| error.to_string())?;
+        Ok(projection)
     }
 }
 
@@ -1439,6 +1470,54 @@ output_schema_ref = "schemas/telegram/legacy.output.v1.json"
     )
     .unwrap_err();
     assert!(matches!(err, ManifestV2Error::Invalid { .. }), "{err:?}");
+}
+
+#[test]
+fn rejects_cross_contract_dangling_credential_handle() {
+    let product = Arc::new(
+        FakeHostApiContract::new(
+            "ironclaw.product_adapter/v1",
+            "product_adapter",
+            HostApiMultiplicity::Multiple,
+            "surface_kind",
+        )
+        .declares(vec!["telegram_bot_token"]),
+    );
+    let capabilities = Arc::new(
+        FakeHostApiContract::new(
+            "ironclaw.capability_provider/v1",
+            "capability_provider",
+            HostApiMultiplicity::Single,
+            "capabilities",
+        )
+        .references(vec!["github_token"]),
+    );
+    let mut registry = HostApiContractRegistry::new();
+    registry.register(product).unwrap();
+    registry.register(capabilities).unwrap();
+
+    let err = ExtensionManifestV2::parse_with_host_api_contracts(
+        &telegram_multi_host_api_manifest(),
+        ManifestSource::InstalledLocal,
+        &catalog(),
+        &registry,
+    )
+    .unwrap_err();
+
+    assert!(
+        matches!(
+            err,
+            ManifestV2Error::DanglingCredentialHandle {
+                ref handle,
+                ref host_api,
+                ref section,
+            }
+                if handle.as_str() == "github_token"
+                    && host_api.as_str() == "ironclaw.capability_provider/v1"
+                    && section.as_str() == "capability_provider.tools"
+        ),
+        "{err:?}"
+    );
 }
 
 #[test]
