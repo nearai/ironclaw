@@ -142,3 +142,27 @@ fn prompt_file_stem(stage: &GithubIssueStage) -> &'static str {
         GithubIssueStage::ReviewResponse => "address_review",
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn implementation_prompt_documents_workspace_shell_cwd() {
+        // Regression: the implementer's `builtin.shell`/test commands run inside
+        // the cloned repo at `/workspace`. Without this instruction the model
+        // self-checks against a host-looking cwd, reports `pr_ready: false`, and
+        // leans entirely on the verify gate. The rendered Implementation prompt
+        // embeds the trimmed template verbatim, so asserting the template
+        // content pins what the model actually sees.
+        let asset = prompt_asset(&GithubIssueStage::Implementation);
+        assert!(
+            asset.template.contains("## Workspace And Shell"),
+            "implement.md must carry the Workspace And Shell section"
+        );
+        assert!(
+            asset.template.contains("/workspace"),
+            "implement.md must tell the model its shell/test commands run in /workspace"
+        );
+    }
+}

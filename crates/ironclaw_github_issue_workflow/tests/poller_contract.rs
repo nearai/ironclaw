@@ -8,15 +8,16 @@ mod poller_contract {
         AdvanceWorkflowRunInput, ClaimRunnableWorkflowRunsInput, CreateIssueCommentInput,
         CreateOrGetWorkflowRunInput, CreateOrGetWorkflowRunOutcome,
         GetAuthenticatedWorkflowActorInput, GetGithubIssueInput, GetPullRequestInput,
-        GithubActorSnapshot, GithubCheckConclusion, GithubCommentRef, GithubIssueCandidateSelector,
-        GithubIssueCommentSnapshot, GithubIssueProviderSnapshot, GithubIssueSearchHit,
+        GetStageRunInput, GithubActorSnapshot, GithubCheckConclusion, GithubCommentRef,
+        GithubIssueBlockKind, GithubIssueCandidateSelector, GithubIssueCommentSnapshot,
+        GithubIssueProviderSnapshot, GithubIssueSearchHit, GithubIssueStageRunId,
         GithubIssueWorkflowConfig, GithubIssueWorkflowConfigSource, GithubIssueWorkflowError,
         GithubIssueWorkflowEventType, GithubIssueWorkflowMode, GithubIssueWorkflowPolicyPorts,
         GithubIssueWorkflowPoller, GithubIssueWorkflowPollerConfig, GithubIssueWorkflowPollerPorts,
         GithubIssueWorkflowPort, GithubIssueWorkflowRepository, GithubIssueWorkflowRun,
-        GithubIssueWorkspaceSession, GithubIssueWorkspaceSessionId, GithubProviderAccountRef,
-        GithubPullRequestCheckSnapshot, GithubPullRequestRef, GithubPullRequestSnapshot,
-        GithubRepositorySelector, GithubReviewCommentSnapshot,
+        GithubIssueWorkflowRunStatus, GithubIssueWorkspaceSession, GithubIssueWorkspaceSessionId,
+        GithubProviderAccountRef, GithubPullRequestCheckSnapshot, GithubPullRequestRef,
+        GithubPullRequestSnapshot, GithubRepositorySelector, GithubReviewCommentSnapshot,
         InMemoryGithubIssueWorkflowRepository, ListIssueCommentsInput, ListPullRequestChecksInput,
         ListPullRequestReviewCommentsInput, PrepareWorkflowWorkspaceOutcome,
         PrepareWorkflowWorkspaceRequest, SearchGithubIssuesInput, StageTurnSubmitter,
@@ -184,6 +185,10 @@ mod poller_contract {
             Self {
                 now: StdMutex::new(now),
             }
+        }
+
+        fn set(&self, now: chrono::DateTime<Utc>) {
+            *self.now.lock().unwrap() = now;
         }
     }
 
@@ -1167,6 +1172,235 @@ mod poller_contract {
     }
 
     #[tokio::test]
+    async fn poller_reconciles_stale_active_stage_to_recovery_required() {
+        let config = workflow_config("reconcile-stale", "nearai", "ironclaw");
+        let ports = FakePollerPorts::new(vec![config.clone()]);
+        let snapshot = issue_snapshot("nearai", "ironclaw", 42, 100);
+        ports.github.add_issue(snapshot.clone()).await;
+        let poller = GithubIssueWorkflowPoller::new(
+            ports,
+            GithubIssueWorkflowPollerConfig {
+                enabled: true,
+                stage_stale_after: std::time::Duration::from_secs(60),
+                ..GithubIssueWorkflowPollerConfig::default()
+            },
+            "poller-contract-v1",
+        );
+
+        // Tick 1: discover -> create run -> create active stage -> submit turn.
+        let first = poller.tick_once().await.unwrap();
+        assert_eq!(first.stale_stages_failed, 0);
+        let run = existing_run(&poller.ports().repository, &config, &snapshot).await;
+        let stage_run_id = run
+            .active_stage_run_id
+            .clone()
+            .expect("active stage after first tick");
+
+        // The stage turn never reports a result; advance well past the
+        // staleness threshold so the next no-progress tick reconciles it.
+        let now = poller.ports().clock.now();
+        poller
+            .ports()
+            .clock
+            .set(now + chrono::Duration::seconds(120));
+
+        // Tick 2: no new event -> reconciler escalates the stale stage.
+        let second = poller.tick_once().await.unwrap();
+        assert_eq!(second.stale_stages_failed, 1);
+        assert_eq!(second.blocked_runs.len(), 1);
+        assert_eq!(
+            second.blocked_runs[0].kind,
+            GithubIssueBlockKind::RecoveryRequired
+        );
+
+        let blocked = existing_run(&poller.ports().repository, &config, &snapshot).await;
+        assert_eq!(blocked.status, GithubIssueWorkflowRunStatus::Blocked);
+        assert_eq!(
+            blocked
+                .workflow_state
+                .active_block
+                .as_ref()
+                .map(|block| block.kind.clone()),
+            Some(GithubIssueBlockKind::RecoveryRequired)
+        );
+        assert!(blocked.active_stage_run_id.is_none());
+
+        let stage = poller
+            .ports()
+            .repository
+            .get_stage_run(GetStageRunInput {
+                workflow_run_id: blocked.workflow_run_id.clone(),
+                stage_run_id,
+            })
+            .await
+            .unwrap()
+            .expect("stage row persists");
+        assert!(!stage.active);
+        assert!(stage.failed);
+    }
+
+    #[tokio::test]
+    async fn poller_does_not_reconcile_fresh_active_stage() {
+        let config = workflow_config("reconcile-fresh", "nearai", "ironclaw");
+        let ports = FakePollerPorts::new(vec![config.clone()]);
+        let snapshot = issue_snapshot("nearai", "ironclaw", 42, 100);
+        ports.github.add_issue(snapshot.clone()).await;
+        let poller = GithubIssueWorkflowPoller::new(
+            ports,
+            GithubIssueWorkflowPollerConfig {
+                enabled: true,
+                stage_stale_after: std::time::Duration::from_secs(60),
+                ..GithubIssueWorkflowPollerConfig::default()
+            },
+            "poller-contract-v1",
+        );
+
+        poller.tick_once().await.unwrap();
+        // Advance only halfway to the staleness threshold: a healthy in-flight
+        // stage must NOT be reconciled.
+        let now = poller.ports().clock.now();
+        poller
+            .ports()
+            .clock
+            .set(now + chrono::Duration::seconds(30));
+
+        let second = poller.tick_once().await.unwrap();
+        assert_eq!(second.stale_stages_failed, 0);
+
+        let run = existing_run(&poller.ports().repository, &config, &snapshot).await;
+        assert_ne!(run.status, GithubIssueWorkflowRunStatus::Blocked);
+        assert!(run.active_stage_run_id.is_some());
+        assert!(run.workflow_state.active_block.is_none());
+    }
+
+    #[tokio::test]
+    async fn poller_reconciles_orphan_active_stage_pointer_to_recovery_required() {
+        // Orphan crash state: `active_stage_run_id` is set but NO stage row
+        // backs it (a crash between the run-pointer write and the stage-row
+        // write). `get_stage_run` returns None, so the stuck-stage reconciler
+        // cannot read a stage-level heartbeat — it must instead escalate the run
+        // to RecoveryRequired once the run itself has carried the orphan pointer
+        // for longer than `stage_stale_after`, rather than re-claiming it as a
+        // permanent no-op every tick.
+        let config = workflow_config("reconcile-orphan", "nearai", "ironclaw");
+        let ports = FakePollerPorts::new(vec![config.clone()]);
+        // No search hits: discovery records nothing, so the only run is the one
+        // we seed directly with the orphan pointer.
+        let snapshot = issue_snapshot("nearai", "ironclaw", 42, 100);
+        let run = create_run(&ports.repository, &config, &snapshot).await;
+        // `create_run` stamps `created_at = fixed_time(200)`. Point the run at a
+        // fabricated stage id that has no backing stage row.
+        let orphan_stage_run_id =
+            GithubIssueStageRunId::from_trusted("orphan-stage-run-id".to_string()).unwrap();
+        ports
+            .repository
+            .seed_orphan_active_stage_pointer(
+                &run.workflow_run_id,
+                orphan_stage_run_id.clone(),
+                fixed_time(205),
+            )
+            .await
+            .unwrap();
+        let poller = GithubIssueWorkflowPoller::new(
+            ports,
+            GithubIssueWorkflowPollerConfig {
+                enabled: true,
+                stage_stale_after: std::time::Duration::from_secs(60),
+                ..GithubIssueWorkflowPollerConfig::default()
+            },
+            "poller-contract-v1",
+        );
+
+        // Confirm the orphan really has no backing stage row before the tick.
+        assert!(
+            poller
+                .ports()
+                .repository
+                .get_stage_run(GetStageRunInput {
+                    workflow_run_id: run.workflow_run_id.clone(),
+                    stage_run_id: orphan_stage_run_id.clone(),
+                })
+                .await
+                .unwrap()
+                .is_none(),
+            "seeded orphan pointer must have no backing stage row"
+        );
+
+        // Advance well past `stage_stale_after` measured from the run's
+        // `created_at` (the claim refreshes `updated_at`/`last_heartbeat_at`
+        // every tick, so only `created_at` is a stable staleness anchor).
+        poller.ports().clock.set(fixed_time(400));
+
+        let outcome = poller.tick_once().await.unwrap();
+
+        assert_eq!(outcome.runnable_runs_claimed, 1);
+        assert_eq!(outcome.stale_stages_failed, 1);
+        assert_eq!(outcome.blocked_runs.len(), 1);
+        assert_eq!(
+            outcome.blocked_runs[0].kind,
+            GithubIssueBlockKind::RecoveryRequired
+        );
+
+        let blocked = existing_run(&poller.ports().repository, &config, &snapshot).await;
+        assert_eq!(blocked.status, GithubIssueWorkflowRunStatus::Blocked);
+        assert_eq!(
+            blocked
+                .workflow_state
+                .active_block
+                .as_ref()
+                .map(|block| block.kind.clone()),
+            Some(GithubIssueBlockKind::RecoveryRequired)
+        );
+        // `block_workflow_run` clears the orphan pointer, so the run stops
+        // re-claiming as a no-op.
+        assert!(blocked.active_stage_run_id.is_none());
+    }
+
+    #[tokio::test]
+    async fn poller_does_not_reconcile_fresh_orphan_active_stage_pointer() {
+        // A run whose orphan pointer is younger than `stage_stale_after` (the
+        // brief window between the run-pointer write and the stage-row write
+        // during normal stage creation) must NOT be escalated.
+        let config = workflow_config("reconcile-orphan-fresh", "nearai", "ironclaw");
+        let ports = FakePollerPorts::new(vec![config.clone()]);
+        let snapshot = issue_snapshot("nearai", "ironclaw", 42, 100);
+        let run = create_run(&ports.repository, &config, &snapshot).await;
+        let orphan_stage_run_id =
+            GithubIssueStageRunId::from_trusted("fresh-orphan-stage-run-id".to_string()).unwrap();
+        ports
+            .repository
+            .seed_orphan_active_stage_pointer(
+                &run.workflow_run_id,
+                orphan_stage_run_id,
+                fixed_time(205),
+            )
+            .await
+            .unwrap();
+        let poller = GithubIssueWorkflowPoller::new(
+            ports,
+            GithubIssueWorkflowPollerConfig {
+                enabled: true,
+                stage_stale_after: std::time::Duration::from_secs(60),
+                ..GithubIssueWorkflowPollerConfig::default()
+            },
+            "poller-contract-v1",
+        );
+
+        // Only 30s past `created_at` (fixed_time(200)) — under the 60s
+        // threshold, so the fresh orphan must survive.
+        poller.ports().clock.set(fixed_time(230));
+
+        let outcome = poller.tick_once().await.unwrap();
+        assert_eq!(outcome.stale_stages_failed, 0);
+        assert!(outcome.blocked_runs.is_empty());
+
+        let run = existing_run(&poller.ports().repository, &config, &snapshot).await;
+        assert_ne!(run.status, GithubIssueWorkflowRunStatus::Blocked);
+        assert!(run.active_stage_run_id.is_some());
+        assert!(run.workflow_state.active_block.is_none());
+    }
+
+    #[tokio::test]
     async fn poller_records_pr_check_and_review_lifecycle_events_for_active_run() {
         let config = workflow_config("pr-refresh", "nearai", "ironclaw");
         let ports = FakePollerPorts::new(vec![config.clone()]);
@@ -1399,5 +1633,113 @@ mod poller_contract {
         assert_eq!(get_issue_calls[0].repo, "ironclaw");
         let run = existing_run(&poller.ports().repository, &healthy, &snapshot).await;
         assert_eq!(run.issue_ref.repo, "ironclaw");
+    }
+
+    /// Create (or fetch) the workflow run for an issue up front, so the test can
+    /// seed events onto it before the poller claims it. Accepts either outcome.
+    async fn create_run(
+        repository: &InMemoryGithubIssueWorkflowRepository,
+        config: &GithubIssueWorkflowConfig,
+        snapshot: &GithubIssueProviderSnapshot,
+    ) -> GithubIssueWorkflowRun {
+        match repository
+            .create_or_get_workflow_run(CreateOrGetWorkflowRunInput {
+                tenant_id: config.tenant_id.clone(),
+                creator_user_id: config.owner_user_id.clone(),
+                agent_id: None,
+                project_id: Some(config.project_id.clone()),
+                provider_account_ref: Some(config.provider_account_ref.clone()),
+                issue_ref: snapshot.issue_ref(),
+                workflow_policy_key: "github-bug-workflow".to_string(),
+                workflow_policy_version: "poller-contract-v1".to_string(),
+                now: fixed_time(200),
+            })
+            .await
+            .unwrap()
+        {
+            CreateOrGetWorkflowRunOutcome::Existing { run }
+            | CreateOrGetWorkflowRunOutcome::Created { run } => run,
+        }
+    }
+
+    /// Record a `GithubIssueChanged` event (cursor-advancing, no stage submit)
+    /// directly into the repository so a single claimed tick can drain it.
+    async fn record_issue_changed_event(
+        repository: &InMemoryGithubIssueWorkflowRepository,
+        run: &GithubIssueWorkflowRun,
+        updated_at: i64,
+    ) {
+        let provider =
+            ironclaw_github_issue_workflow::issue_binding_ref(&run.issue_ref).provider_ref;
+        repository
+            .record_workflow_event(ironclaw_github_issue_workflow::RecordWorkflowEventInput {
+                workflow_run_id: run.workflow_run_id.clone(),
+                workflow_event_type: GithubIssueWorkflowEventType::GithubIssueChanged,
+                envelope: ironclaw_github_issue_workflow::WorkflowEventEnvelope {
+                    source_kind: ironclaw_github_issue_workflow::WorkflowEventSourceKind::Poller,
+                    source_delivery_id: None,
+                    provider,
+                    observed_at: fixed_time(updated_at),
+                    provider_updated_at: Some(fixed_time(updated_at)),
+                    idempotency_key: ironclaw_github_issue_workflow::issue_changed_key(
+                        &run.issue_ref,
+                        Some(fixed_time(updated_at)),
+                    ),
+                    payload_schema: "github.issue.changed.v1".to_string(),
+                    payload: serde_json::json!({ "issue": run.issue_ref }),
+                },
+            })
+            .await
+            .expect("record issue changed event");
+    }
+
+    #[tokio::test]
+    async fn claimed_tick_drains_multiple_pending_events_in_one_tick() {
+        // A1: a single `tick_once` must drain every already-recorded queued
+        // event for a claimed run, not just one. We pre-seed three
+        // cursor-advancing `GithubIssueChanged` events; after one tick the run
+        // cursor must have advanced past all three (three policy transitions in
+        // one claimed tick), rather than one-per-tick.
+        let config = workflow_config("drain", "nearai", "ironclaw");
+        let ports = FakePollerPorts::new(vec![config.clone()]);
+        // No search hits added: discovery records nothing, so the only events
+        // are the three we seed below.
+        let snapshot = issue_snapshot("nearai", "ironclaw", 42, 100);
+        let run = create_run(&ports.repository, &config, &snapshot).await;
+        record_issue_changed_event(&ports.repository, &run, 101).await;
+        record_issue_changed_event(&ports.repository, &run, 102).await;
+        record_issue_changed_event(&ports.repository, &run, 103).await;
+        let poller = poller(ports);
+
+        let outcome = poller.tick_once().await.unwrap();
+
+        // All three transitions happened in this ONE claimed tick (the drain
+        // re-ticks until a tick makes no progress, so policy_ticks is the three
+        // event transitions plus the final no-op tick that detects the drain is
+        // done). Without draining this would be a single transition.
+        assert_eq!(outcome.runnable_runs_claimed, 1);
+        assert!(
+            outcome.policy_ticks >= 3,
+            "all queued events should drain in one claimed tick, got {} policy ticks",
+            outcome.policy_ticks
+        );
+        assert_eq!(outcome.leases_released, 1);
+
+        // The run cursor advanced past every seeded event.
+        let drained_run = existing_run(&poller.ports().repository, &config, &snapshot).await;
+        let events = poller
+            .ports()
+            .repository
+            .list_workflow_events_after(
+                ironclaw_github_issue_workflow::ListWorkflowEventsAfterInput {
+                    workflow_run_id: drained_run.workflow_run_id.clone(),
+                    after_sequence: 0,
+                    limit: 10,
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(events.len(), 3);
+        assert_eq!(drained_run.event_cursor, events.last().unwrap().sequence);
     }
 }

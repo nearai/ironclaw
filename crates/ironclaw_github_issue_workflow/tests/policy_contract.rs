@@ -12,11 +12,12 @@ mod policy_contract {
         GithubIssueWorkflowMode, GithubIssueWorkflowPolicy, GithubIssueWorkflowPolicyPorts,
         GithubIssueWorkflowPort, GithubIssueWorkflowRepository, GithubIssueWorkflowRun,
         GithubIssueWorkflowRunStatus, GithubIssueWorkspaceSession, GithubIssueWorkspaceSessionId,
-        GithubProviderRef, GithubRepositorySelector, InMemoryGithubIssueWorkflowRepository,
-        ListIssueCommentsInput, PrepareWorkflowWorkspaceOutcome, PrepareWorkflowWorkspaceRequest,
-        ProviderContentSummary, RecordWorkflowEventInput, RecordWorkflowEventOutcome,
-        StageCompletedPayload, StageTurnSubmitter, SubmitStageTurnOutcome, SubmitStageTurnRequest,
-        WorkflowClock, WorkflowEventEnvelope, WorkflowEventSourceKind, WorkflowProjectAccess,
+        GithubProviderAccountRef, GithubProviderRef, GithubRepositorySelector,
+        InMemoryGithubIssueWorkflowRepository, ListIssueCommentsInput,
+        PrepareWorkflowWorkspaceOutcome, PrepareWorkflowWorkspaceRequest, ProviderContentSummary,
+        RecordWorkflowEventInput, RecordWorkflowEventOutcome, StageCompletedPayload,
+        StageTurnSubmitter, SubmitStageTurnOutcome, SubmitStageTurnRequest, WorkflowClock,
+        WorkflowEventEnvelope, WorkflowEventSourceKind, WorkflowProjectAccess,
         WorkflowProjectAccessRequest, WorkflowStepStatus, WorkflowWorkerId,
         WorkflowWorkspaceManager, WorkflowWorkspaceMountRef, WorkflowWorkspaceRef,
         issue_binding_ref, issue_discovered_key, stage_result_reported_key,
@@ -112,8 +113,22 @@ mod policy_contract {
         }
     }
 
+    fn account() -> GithubProviderAccountRef {
+        GithubProviderAccountRef {
+            provider: "github".to_string(),
+            account_id: "policy-contract-account".to_string(),
+        }
+    }
+
     async fn create_claimed_run(
         repository: &InMemoryGithubIssueWorkflowRepository,
+    ) -> GithubIssueWorkflowRun {
+        create_claimed_run_with_account(repository, Some(account())).await
+    }
+
+    async fn create_claimed_run_with_account(
+        repository: &InMemoryGithubIssueWorkflowRepository,
+        provider_account_ref: Option<GithubProviderAccountRef>,
     ) -> GithubIssueWorkflowRun {
         let run = match repository
             .create_or_get_workflow_run(CreateOrGetWorkflowRunInput {
@@ -121,7 +136,7 @@ mod policy_contract {
                 creator_user_id: user(),
                 agent_id: Some(agent()),
                 project_id: Some(project()),
-                provider_account_ref: None,
+                provider_account_ref,
                 issue_ref: issue(),
                 workflow_policy_key: "github-bug-workflow".to_string(),
                 workflow_policy_version: "2026-06-22".to_string(),
@@ -577,6 +592,62 @@ mod policy_contract {
                 .completion_nonce()
                 .starts_with("stage-completion:")
         );
+    }
+
+    /// FIX #14 (in-scope part): the claim comment ref posted by the claim
+    /// provider action must be captured onto the run's workflow state when the
+    /// issue is claimed, so a later stage can edit that comment to link the draft
+    /// PR. Driven through the policy caller (`tick`), not the helper, per the
+    /// "test through the caller" rule.
+    #[tokio::test]
+    async fn issue_discovered_records_claim_comment_on_workflow_state() {
+        let stage_turns = Arc::new(FakeStageTurnSubmitter::accepting());
+        let project_access = Arc::new(FakeProjectAccess::allow());
+        let policy = policy(stage_turns.clone(), project_access);
+        let run = create_claimed_run(&policy.ports().repository).await;
+        record_issue_discovered(&policy.ports().repository, &run).await;
+
+        let outcome = policy.tick(run).await.unwrap();
+
+        // A claim comment was posted...
+        assert_eq!(policy.ports().github.created_body_count().await, 1);
+        // ...and its ref is now recorded on the run's workflow state (the
+        // `FakeGithubPort` returns this exact comment from create_issue_comment).
+        let claim_comment = outcome
+            .run
+            .workflow_state
+            .claim_comment
+            .as_ref()
+            .expect("claim comment ref must be recorded on the workflow state after claim");
+        assert_eq!(
+            claim_comment.url,
+            "https://github.com/nearai/ironclaw/issues/42#issuecomment-created"
+        );
+        assert_eq!(
+            claim_comment.node_id.as_deref(),
+            Some("created-comment-node-1")
+        );
+    }
+
+    #[tokio::test]
+    async fn claim_issue_step_fails_closed_when_run_has_no_provider_account_ref() {
+        let stage_turns = Arc::new(FakeStageTurnSubmitter::accepting());
+        let project_access = Arc::new(FakeProjectAccess::allow());
+        let policy = policy(stage_turns.clone(), project_access);
+        let run = create_claimed_run_with_account(&policy.ports().repository, None).await;
+        record_issue_discovered(&policy.ports().repository, &run).await;
+
+        let error = policy
+            .tick(run)
+            .await
+            .expect_err("claim must fail closed without a bound provider account ref");
+
+        assert!(
+            matches!(error, GithubIssueWorkflowError::Policy { .. }),
+            "expected a fail-closed Policy error, got {error:?}"
+        );
+        // The claim comment must not be posted under an ambient/global account.
+        assert_eq!(policy.ports().github.created_body_count().await, 0);
     }
 
     #[tokio::test]

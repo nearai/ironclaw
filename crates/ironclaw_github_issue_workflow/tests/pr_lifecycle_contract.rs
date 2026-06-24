@@ -21,7 +21,8 @@ mod pr_lifecycle_contract {
         ProviderActionRunOutcome, ProviderActionStatus, RecordWorkflowEventInput,
         RecordWorkflowEventOutcome, RunDraftPullRequestProviderActionRequest,
         StageCompletedPayload, StageTurnSubmitter, SubmitStageTurnOutcome, SubmitStageTurnRequest,
-        WorkflowClock, WorkflowEventEnvelope, WorkflowEventSourceKind, WorkflowProjectAccess,
+        VerifyWorkflowWorkspaceOutcome, VerifyWorkflowWorkspaceRequest, WorkflowClock,
+        WorkflowEventEnvelope, WorkflowEventSourceKind, WorkflowProjectAccess,
         WorkflowProjectAccessRequest, WorkflowRunTransition, WorkflowWorkerId,
         WorkflowWorkspaceManager, WorkflowWorkspaceMountRef, WorkflowWorkspaceRef,
         checks_failed_key, issue_binding_ref, issue_closed_key, review_comment_created_key,
@@ -158,6 +159,23 @@ mod pr_lifecycle_contract {
                 "payload": {}
             }),
         }
+    }
+
+    /// An implementation stage result with an explicit `pr_ready` self-report,
+    /// for exercising the independent-gate-vs-self-report policy.
+    fn implementation_result(pr_ready: bool) -> JsonValue {
+        json!({
+            "outcome": "completed",
+            "summary": "implementation completed",
+            "evidence": [],
+            "next_actions": [],
+            "payload": {
+                "changed_files": ["src/lib.rs"],
+                "commands_run": [],
+                "test_evidence": [],
+                "pr_ready": pr_ready
+            }
+        })
     }
 
     fn schema_version(stage: GithubIssueStage) -> &'static str {
@@ -300,8 +318,17 @@ mod pr_lifecycle_contract {
         run: &GithubIssueWorkflowRun,
         stage: GithubIssueStage,
     ) -> GithubIssueWorkflowRun {
+        record_stage_completed_with_result(repository, run, stage.clone(), stage_result(stage))
+            .await
+    }
+
+    async fn record_stage_completed_with_result(
+        repository: &InMemoryGithubIssueWorkflowRepository,
+        run: &GithubIssueWorkflowRun,
+        stage: GithubIssueStage,
+        result: JsonValue,
+    ) -> GithubIssueWorkflowRun {
         let stage_run_id = run.active_stage_run_id.clone().unwrap_or_default();
-        let result = stage_result(stage.clone());
         let accepted_run = match repository
             .accept_stage_result(AcceptStageResultInput {
                 workflow_run_id: run.workflow_run_id.clone(),
@@ -611,11 +638,47 @@ mod pr_lifecycle_contract {
         }
     }
 
+    #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+    enum VerifyBehavior {
+        /// Default trait no-op: nothing to verify (ran: false) -> gate skipped.
+        #[default]
+        Skip,
+        /// Verification ran and passed.
+        Pass,
+        /// Verification ran and failed -> the gate must block the run.
+        Fail,
+    }
+
     #[derive(Debug, Default)]
-    struct FakeWorkspaceManager;
+    struct FakeWorkspaceManager {
+        verify: VerifyBehavior,
+    }
 
     #[async_trait]
     impl WorkflowWorkspaceManager for FakeWorkspaceManager {
+        async fn verify_workspace(
+            &self,
+            _request: VerifyWorkflowWorkspaceRequest,
+        ) -> Result<VerifyWorkflowWorkspaceOutcome, GithubIssueWorkflowError> {
+            let (ran, passed, exit_code) = match self.verify {
+                VerifyBehavior::Skip => (false, true, None),
+                VerifyBehavior::Pass => (true, true, Some(0)),
+                VerifyBehavior::Fail => (true, false, Some(1)),
+            };
+            Ok(VerifyWorkflowWorkspaceOutcome {
+                ran,
+                passed,
+                exit_code,
+                command_label: "pytest -q".to_string(),
+                stdout_tail: String::new(),
+                stderr_tail: if passed {
+                    String::new()
+                } else {
+                    "test_average_basic FAILED".to_string()
+                },
+            })
+        }
+
         async fn prepare_workspace(
             &self,
             request: PrepareWorkflowWorkspaceRequest,
@@ -656,12 +719,14 @@ mod pr_lifecycle_contract {
             ironclaw_github_issue_workflow::PublishWorkflowWorkspaceOutcome,
             GithubIssueWorkflowError,
         > {
-            Ok(ironclaw_github_issue_workflow::PublishWorkflowWorkspaceOutcome {
-                working_branch: "ironclaw/fix-42".to_string(),
-                base_branch: request.base_branch,
-                head_sha: "head-sha-42".to_string(),
-                has_changes: true,
-            })
+            Ok(
+                ironclaw_github_issue_workflow::PublishWorkflowWorkspaceOutcome {
+                    working_branch: "ironclaw/fix-42".to_string(),
+                    base_branch: request.base_branch,
+                    head_sha: "head-sha-42".to_string(),
+                    has_changes: true,
+                },
+            )
         }
     }
 
@@ -743,13 +808,17 @@ mod pr_lifecycle_contract {
     }
 
     fn policy() -> GithubIssueWorkflowPolicy<FakePolicyPorts> {
+        policy_with_verify(VerifyBehavior::Skip)
+    }
+
+    fn policy_with_verify(verify: VerifyBehavior) -> GithubIssueWorkflowPolicy<FakePolicyPorts> {
         GithubIssueWorkflowPolicy::new(
             FakePolicyPorts {
                 repository: Arc::new(InMemoryGithubIssueWorkflowRepository::default()),
                 github: Arc::new(FakeGithubPort::new()),
                 stage_turns: Arc::new(FakeStageTurnSubmitter::default()),
                 project_access: Arc::new(FakeProjectAccess),
-                workspace: Arc::new(FakeWorkspaceManager),
+                workspace: Arc::new(FakeWorkspaceManager { verify }),
                 clock: Arc::new(FakeClock::new(fixed_time(40))),
                 worker_id: worker(),
             },
@@ -791,6 +860,306 @@ mod pr_lifecycle_contract {
     }
 
     #[tokio::test]
+    async fn implementation_pr_ready_with_passing_verification_advances_to_pr_synthesis() {
+        let policy = policy_with_verify(VerifyBehavior::Pass);
+        let run = create_claimed_run(&policy.ports().repository).await;
+        let run = set_mode(
+            &policy.ports().repository,
+            run,
+            GithubIssueWorkflowMode::Implementation,
+            None,
+        )
+        .await;
+        let run = attach_workspace_session(&policy.ports().repository, run).await;
+        record_stage_completed(
+            &policy.ports().repository,
+            &run,
+            GithubIssueStage::Implementation,
+        )
+        .await;
+
+        let outcome = policy.tick(run).await.unwrap();
+
+        assert_eq!(
+            outcome.run.workflow_state.mode,
+            GithubIssueWorkflowMode::PrSynthesis
+        );
+        let requests = policy.ports().stage_turns.requests().await;
+        assert_eq!(requests.len(), 1);
+        assert_eq!(
+            requests[0].stage_turn_identity.stage,
+            GithubIssueStage::PrSynthesis
+        );
+    }
+
+    #[tokio::test]
+    async fn implementation_pr_ready_with_failing_verification_blocks_and_opens_no_pr() {
+        let policy = policy_with_verify(VerifyBehavior::Fail);
+        let run = create_claimed_run(&policy.ports().repository).await;
+        let run = set_mode(
+            &policy.ports().repository,
+            run,
+            GithubIssueWorkflowMode::Implementation,
+            None,
+        )
+        .await;
+        let run = attach_workspace_session(&policy.ports().repository, run).await;
+        record_stage_completed(
+            &policy.ports().repository,
+            &run,
+            GithubIssueStage::Implementation,
+        )
+        .await;
+
+        let outcome = policy.tick(run).await.unwrap();
+
+        // Failing verification blocks the run; PrSynthesis is never reached and
+        // no draft PR is opened.
+        assert_eq!(outcome.run.status, GithubIssueWorkflowRunStatus::Blocked);
+        assert_ne!(
+            outcome.run.workflow_state.mode,
+            GithubIssueWorkflowMode::PrSynthesis
+        );
+        let requests = policy.ports().stage_turns.requests().await;
+        assert!(
+            requests
+                .iter()
+                .all(|request| request.stage_turn_identity.stage != GithubIssueStage::PrSynthesis),
+            "no PrSynthesis stage turn should be submitted when verification fails"
+        );
+        assert_eq!(policy.ports().github.created_prs().await.len(), 0);
+    }
+
+    #[tokio::test]
+    async fn implementation_not_pr_ready_but_passing_verification_advances_to_pr_synthesis() {
+        // The model could not self-verify (e.g. its scoped shell could not
+        // reach the workspace) and conservatively reported `pr_ready: false`,
+        // yet the change is correct. The independent verify gate is
+        // authoritative: it runs the repo's tests, they pass, and the run
+        // advances to PrSynthesis rather than idling forever in implementation.
+        let policy = policy_with_verify(VerifyBehavior::Pass);
+        let run = create_claimed_run(&policy.ports().repository).await;
+        let run = set_mode(
+            &policy.ports().repository,
+            run,
+            GithubIssueWorkflowMode::Implementation,
+            None,
+        )
+        .await;
+        let run = attach_workspace_session(&policy.ports().repository, run).await;
+        record_stage_completed_with_result(
+            &policy.ports().repository,
+            &run,
+            GithubIssueStage::Implementation,
+            implementation_result(false),
+        )
+        .await;
+
+        let outcome = policy.tick(run).await.unwrap();
+
+        assert_eq!(
+            outcome.run.workflow_state.mode,
+            GithubIssueWorkflowMode::PrSynthesis,
+            "a not-pr_ready implementation whose tests pass must still advance"
+        );
+        let requests = policy.ports().stage_turns.requests().await;
+        assert_eq!(requests.len(), 1);
+        assert_eq!(
+            requests[0].stage_turn_identity.stage,
+            GithubIssueStage::PrSynthesis
+        );
+    }
+
+    #[tokio::test]
+    async fn pr_synthesis_prompt_surfaces_independent_verification_result() {
+        // The independent verify gate ran the repository's tests and they
+        // passed. PrSynthesis must SEE that result in its engineered snapshot so
+        // the synthesized PR body can state the workflow independently verified
+        // the tests, rather than merely echoing the implementer's self-report.
+        // Drives the full policy tick (not just the snapshot builder) so a
+        // regression that drops the gate result between the verify step and the
+        // rendered prompt is caught.
+        let policy = policy_with_verify(VerifyBehavior::Pass);
+        let run = create_claimed_run(&policy.ports().repository).await;
+        let run = set_mode(
+            &policy.ports().repository,
+            run,
+            GithubIssueWorkflowMode::Implementation,
+            None,
+        )
+        .await;
+        let run = attach_workspace_session(&policy.ports().repository, run).await;
+        record_stage_completed_with_result(
+            &policy.ports().repository,
+            &run,
+            GithubIssueStage::Implementation,
+            implementation_result(false),
+        )
+        .await;
+
+        let outcome = policy.tick(run).await.unwrap();
+        assert_eq!(
+            outcome.run.workflow_state.mode,
+            GithubIssueWorkflowMode::PrSynthesis
+        );
+
+        // The gate result is persisted on the run for replays.
+        let verification = outcome
+            .run
+            .workflow_state
+            .last_verification
+            .as_ref()
+            .expect("verify gate result must be recorded on the run");
+        assert!(verification.ran, "the gate ran the repository's tests");
+        assert!(verification.passed, "the gate result must record a pass");
+
+        // ...and is embedded in the PrSynthesis stage prompt the model receives.
+        let requests = policy.ports().stage_turns.requests().await;
+        assert_eq!(requests.len(), 1);
+        assert_eq!(
+            requests[0].stage_turn_identity.stage,
+            GithubIssueStage::PrSynthesis
+        );
+        let prompt = &requests[0].prompt.content;
+        assert!(
+            prompt.contains("\"passed\": true"),
+            "PrSynthesis prompt must surface the passing gate result; got:\n{prompt}"
+        );
+        assert!(
+            prompt.contains("pytest"),
+            "PrSynthesis prompt must include the verification command label; got:\n{prompt}"
+        );
+    }
+
+    #[tokio::test]
+    async fn implementation_not_pr_ready_with_no_test_suite_escalates_to_human() {
+        // B5: when the gate cannot vouch either way (no detectable test suite ->
+        // Skip) AND the model reported `pr_ready: false`, the run must NOT just
+        // silently advance the cursor and idle Active forever (an idle dead-end
+        // the active-stage-gated reconciler never catches). It must escalate to
+        // a human-blocked state instead, while still opening no PR.
+        let policy = policy_with_verify(VerifyBehavior::Skip);
+        let run = create_claimed_run(&policy.ports().repository).await;
+        let run = set_mode(
+            &policy.ports().repository,
+            run,
+            GithubIssueWorkflowMode::Implementation,
+            None,
+        )
+        .await;
+        let run = attach_workspace_session(&policy.ports().repository, run).await;
+        record_stage_completed_with_result(
+            &policy.ports().repository,
+            &run,
+            GithubIssueStage::Implementation,
+            implementation_result(false),
+        )
+        .await;
+
+        let outcome = policy.tick(run).await.unwrap();
+
+        // Escalated, not advanced: the run is human-blocked and produced no
+        // forward transition (cursor not advanced over the event).
+        assert_eq!(
+            outcome.run.status,
+            GithubIssueWorkflowRunStatus::Blocked,
+            "an unverifiable not-pr_ready implementation must escalate, not idle"
+        );
+        assert_eq!(outcome.processed_event_count, 0);
+        assert_ne!(
+            outcome.run.workflow_state.mode,
+            GithubIssueWorkflowMode::PrSynthesis
+        );
+        let requests = policy.ports().stage_turns.requests().await;
+        assert!(
+            requests
+                .iter()
+                .all(|request| request.stage_turn_identity.stage != GithubIssueStage::PrSynthesis),
+            "no PrSynthesis stage turn when verification is skipped and pr_ready is false"
+        );
+        assert_eq!(policy.ports().github.created_prs().await.len(), 0);
+    }
+
+    #[tokio::test]
+    async fn implementation_not_pr_ready_with_no_workspace_session_escalates_to_human() {
+        // B5: the second idle dead-end — no prepared workspace session to verify
+        // against AND `pr_ready: false`. Without a session the policy cannot run
+        // the gate, so the old code advanced the cursor and left the run idling
+        // Active. It must escalate to a human-blocked state instead.
+        let policy = policy_with_verify(VerifyBehavior::Skip);
+        let run = create_claimed_run(&policy.ports().repository).await;
+        let run = set_mode(
+            &policy.ports().repository,
+            run,
+            GithubIssueWorkflowMode::Implementation,
+            None,
+        )
+        .await;
+        // Deliberately NO attach_workspace_session: workspace_session_id is None.
+        record_stage_completed_with_result(
+            &policy.ports().repository,
+            &run,
+            GithubIssueStage::Implementation,
+            implementation_result(false),
+        )
+        .await;
+
+        let outcome = policy.tick(run).await.unwrap();
+
+        assert_eq!(
+            outcome.run.status,
+            GithubIssueWorkflowRunStatus::Blocked,
+            "an unverifiable not-pr_ready implementation with no session must escalate"
+        );
+        assert_eq!(outcome.processed_event_count, 0);
+        assert_eq!(policy.ports().github.created_prs().await.len(), 0);
+    }
+
+    #[tokio::test]
+    async fn pr_synthesis_prompt_includes_prior_stage_results() {
+        // Regression for bug #4: the PrSynthesis stage prompt must carry the
+        // prior stages' completed results (loaded from the StageCompleted event
+        // log), not an empty list. With the list empty the model emitted a
+        // "PR synthesis unavailable: missing implementation metadata" fallback.
+        let policy = policy();
+        let run = create_claimed_run(&policy.ports().repository).await;
+        let run = set_mode(
+            &policy.ports().repository,
+            run,
+            GithubIssueWorkflowMode::Implementation,
+            None,
+        )
+        .await;
+        record_stage_completed(
+            &policy.ports().repository,
+            &run,
+            GithubIssueStage::Implementation,
+        )
+        .await;
+
+        let outcome = policy.tick(run).await.unwrap();
+        assert_eq!(
+            outcome.run.workflow_state.mode,
+            GithubIssueWorkflowMode::PrSynthesis
+        );
+
+        let requests = policy.ports().stage_turns.requests().await;
+        assert_eq!(requests.len(), 1);
+        assert_eq!(
+            requests[0].stage_turn_identity.stage,
+            GithubIssueStage::PrSynthesis
+        );
+        // The prior Implementation stage's summary must appear in the PrSynthesis
+        // prompt snapshot, proving previous_stage_results is populated from the
+        // event log rather than hardcoded empty.
+        let prompt = &requests[0].prompt.content;
+        assert!(
+            prompt.contains("implementation completed"),
+            "PrSynthesis prompt should include the prior Implementation stage summary; got:\n{prompt}"
+        );
+    }
+
+    #[tokio::test]
     async fn pr_synthesis_creates_draft_pr_once() {
         let policy = policy();
         let run = create_claimed_run(&policy.ports().repository).await;
@@ -827,6 +1196,91 @@ mod pr_lifecycle_contract {
                 .as_ref()
                 .map(|pull_request| pull_request.number),
             Some(12)
+        );
+    }
+
+    #[tokio::test]
+    async fn pr_synthesis_appends_host_authored_verification_footer_to_pr_body() {
+        // B4: the final PR body must carry a HOST-authored verification footer
+        // derived from the run's last_verification — accuracy must not depend on
+        // the model's prose. We set a PASSING verification on the run, drive
+        // PrSynthesis to draft the PR, and assert the body sent to GitHub
+        // contains the host footer reflecting the pass.
+        let policy = policy();
+        let run = create_claimed_run(&policy.ports().repository).await;
+        let run = set_mode(
+            &policy.ports().repository,
+            run,
+            GithubIssueWorkflowMode::PrSynthesis,
+            None,
+        )
+        .await;
+        let run = attach_workspace_session(&policy.ports().repository, run).await;
+        // Persist a passing verification summary onto the run, as the
+        // Implementation -> PrSynthesis transition does in a real run.
+        let outcome = policy
+            .ports()
+            .repository
+            .advance_event_cursor_and_transition(
+                ironclaw_github_issue_workflow::AdvanceWorkflowRunInput {
+                    workflow_run_id: run.workflow_run_id.clone(),
+                    worker_id: worker(),
+                    expected_workflow_run_version: run.workflow_run_version,
+                    expected_event_cursor: run.event_cursor,
+                    next_event_cursor: run.event_cursor,
+                    transition: WorkflowRunTransition {
+                        last_verification: Some(
+                            ironclaw_github_issue_workflow::WorkflowVerificationSummary {
+                                ran: true,
+                                passed: true,
+                                command_label: "pytest -q".to_string(),
+                                exit_code: Some(0),
+                            },
+                        ),
+                        ..WorkflowRunTransition::default()
+                    },
+                    now: fixed_time(30),
+                },
+            )
+            .await
+            .unwrap();
+        let run = match outcome {
+            ironclaw_github_issue_workflow::TransitionOutcome::Applied { run } => run,
+            other => panic!("verification transition should apply: {other:?}"),
+        };
+        record_stage_completed(
+            &policy.ports().repository,
+            &run,
+            GithubIssueStage::PrSynthesis,
+        )
+        .await;
+
+        let first = policy.tick(run).await.unwrap();
+        assert_eq!(first.processed_event_count, 1);
+
+        let created = policy.ports().github.created_prs().await;
+        assert_eq!(created.len(), 1);
+        let body = created[0]
+            .body
+            .as_deref()
+            .expect("draft PR body should be present");
+        // The model body is preserved...
+        assert!(
+            body.contains("This fixes bug 42."),
+            "model body should be preserved: {body}"
+        );
+        // ...and the host-authored verification footer is appended.
+        assert!(
+            body.contains("## Workflow verification"),
+            "host verification footer missing: {body}"
+        );
+        assert!(
+            body.contains("`pytest -q`"),
+            "footer should name the verification command: {body}"
+        );
+        assert!(
+            body.contains("passed (exit 0)"),
+            "footer should reflect the passing verification: {body}"
         );
     }
 

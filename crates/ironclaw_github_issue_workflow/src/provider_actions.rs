@@ -106,6 +106,7 @@ fn stable_marker(kind: &str, id: &str) -> String {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RunClaimCommentProviderActionRequest {
     pub run: GithubIssueWorkflowRun,
+    pub provider_account_ref: GithubProviderAccountRef,
     pub worker_id: WorkflowWorkerId,
     pub now: DateTime<Utc>,
     pub lease_expires_at: DateTime<Utc>,
@@ -267,7 +268,10 @@ where
 
         match claimed {
             ClaimProviderActionOutcome::Claimed { action } => {
-                debug!(claim = "claimed", "executing draft-pull-request provider action");
+                debug!(
+                    claim = "claimed",
+                    "executing draft-pull-request provider action"
+                );
                 self.run_claimed_draft_pull_request(request, action, marker)
                     .await
             }
@@ -294,6 +298,7 @@ where
         let actor = match self
             .port
             .get_authenticated_workflow_actor(GetAuthenticatedWorkflowActorInput {
+                provider_account_ref: request.provider_account_ref.clone(),
                 owner: request.run.issue_ref.owner.clone(),
                 repo: request.run.issue_ref.repo.clone(),
             })
@@ -323,6 +328,7 @@ where
         let comments = match self
             .port
             .list_issue_comments(ListIssueCommentsInput {
+                provider_account_ref: request.provider_account_ref.clone(),
                 issue: request.run.issue_ref.clone(),
             })
             .await
@@ -410,6 +416,7 @@ where
         let comment = match self
             .port
             .create_issue_comment(CreateIssueCommentInput {
+                provider_account_ref: request.provider_account_ref.clone(),
                 issue: request.run.issue_ref.clone(),
                 body,
             })

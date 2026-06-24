@@ -12,13 +12,13 @@ mod workspace_stage_contract {
         GithubIssueStage, GithubIssueWorkflowError, GithubIssueWorkflowEventType,
         GithubIssueWorkflowMode, GithubIssueWorkflowPolicy, GithubIssueWorkflowPolicyPorts,
         GithubIssueWorkflowPort, GithubIssueWorkflowRepository, GithubIssueWorkflowRun,
-        GithubIssueWorkspaceSession, GithubIssueWorkspaceSessionId, GithubProviderRef,
-        GithubRepositorySelector, InMemoryGithubIssueWorkflowRepository, ListIssueCommentsInput,
-        PrepareWorkflowWorkspaceOutcome, PrepareWorkflowWorkspaceRequest, RecordWorkflowEventInput,
-        RecordWorkflowEventOutcome, StageCompletedPayload, StageTurnSubmitter,
-        SubmitStageTurnOutcome, SubmitStageTurnRequest, WorkflowClock, WorkflowEventEnvelope,
-        WorkflowEventSourceKind, WorkflowIdempotencyKey, WorkflowProjectAccess,
-        WorkflowProjectAccessRequest, WorkflowStepStatus, WorkflowWorkerId,
+        GithubIssueWorkspaceSession, GithubIssueWorkspaceSessionId, GithubProviderAccountRef,
+        GithubProviderRef, GithubRepositorySelector, InMemoryGithubIssueWorkflowRepository,
+        ListIssueCommentsInput, PrepareWorkflowWorkspaceOutcome, PrepareWorkflowWorkspaceRequest,
+        RecordWorkflowEventInput, RecordWorkflowEventOutcome, StageCompletedPayload,
+        StageTurnSubmitter, SubmitStageTurnOutcome, SubmitStageTurnRequest, WorkflowClock,
+        WorkflowEventEnvelope, WorkflowEventSourceKind, WorkflowIdempotencyKey,
+        WorkflowProjectAccess, WorkflowProjectAccessRequest, WorkflowStepStatus, WorkflowWorkerId,
         WorkflowWorkspaceManager, WorkflowWorkspaceMountRef, WorkflowWorkspaceRef,
         issue_binding_ref, issue_discovered_key, stage_result_reported_key,
     };
@@ -131,6 +131,13 @@ mod workspace_stage_contract {
         .await
     }
 
+    fn account() -> GithubProviderAccountRef {
+        GithubProviderAccountRef {
+            provider: "github".to_string(),
+            account_id: "workspace-stage-account".to_string(),
+        }
+    }
+
     async fn create_claimed_run(
         repository: &InMemoryGithubIssueWorkflowRepository,
     ) -> GithubIssueWorkflowRun {
@@ -140,7 +147,7 @@ mod workspace_stage_contract {
                 creator_user_id: user(),
                 agent_id: Some(agent()),
                 project_id: Some(project()),
-                provider_account_ref: None,
+                provider_account_ref: Some(account()),
                 issue_ref: issue(),
                 workflow_policy_key: "github-bug-workflow".to_string(),
                 workflow_policy_version: "2026-06-22".to_string(),

@@ -9,23 +9,25 @@ use tracing::debug;
 use crate::{
     AdvanceWorkflowRunInput, CompleteWorkflowStepInput, CompleteWorkflowStepOutcome,
     CreateOrGetWorkflowStepInput, CreateOrGetWorkflowStepOutcome, CreateStageRunInput,
-    CreateStageRunOutcome, EngineeredWorkflowSnapshot, GithubIssueBlockKind, GithubIssueBlockState,
-    GithubIssuePlanItemStatus, GithubIssueProviderActionRunner, GithubIssueProviderSnapshotSummary,
-    GithubIssueSnapshot, GithubIssueStage, GithubIssueWorkflowError, GithubIssueWorkflowEvent,
-    GithubIssueWorkflowEventType, GithubIssueWorkflowMode, GithubIssueWorkflowPort,
-    GithubIssueWorkflowRepository, GithubIssueWorkflowRun, GithubIssueWorkflowRunId,
-    GithubIssueWorkflowRunStatus, GithubIssueWorkspaceSession, GithubIssueWorkspaceSessionId,
-    GithubPullRequestRef, GithubPullRequestUpdatedPayload, GithubRepositorySelector,
-    GithubReviewCommentCreatedPayload, ListWorkflowEventsAfterInput,
-    PrepareWorkflowWorkspaceRequest, ProviderActionRunOutcome, ProviderContentSummary,
-    PublishWorkflowWorkspaceOutcome, PublishWorkflowWorkspaceRequest,
+    CreateStageRunOutcome, EngineeredWorkflowSnapshot, GithubCommentRef, GithubIssueBlockKind,
+    GithubIssueBlockState, GithubIssuePlanItemStatus, GithubIssueProviderActionRunner,
+    GithubIssueProviderSnapshotSummary, GithubIssueSnapshot, GithubIssueStage,
+    GithubIssueWorkflowError, GithubIssueWorkflowEvent, GithubIssueWorkflowEventType,
+    GithubIssueWorkflowMode, GithubIssueWorkflowPort, GithubIssueWorkflowRepository,
+    GithubIssueWorkflowRun, GithubIssueWorkflowRunId, GithubIssueWorkflowRunStatus,
+    GithubIssueWorkspaceSession, GithubIssueWorkspaceSessionId, GithubPullRequestRef,
+    GithubPullRequestUpdatedPayload, GithubRepositorySelector, GithubReviewCommentCreatedPayload,
+    ListWorkflowEventsAfterInput, PrepareWorkflowWorkspaceRequest, ProviderActionRunOutcome,
+    ProviderContentSummary, PublishWorkflowWorkspaceOutcome, PublishWorkflowWorkspaceRequest,
     RepositorySnapshot, RunDraftPullRequestProviderActionRequest, StageCompletedPayload,
-    StageConstraintSnapshot, StageTurnIdentity, StageTurnSubmitter, SubmitStageTurnOutcome,
-    SubmitStageTurnRequest, TransitionOutcome, WorkflowActorScope, WorkflowClock,
-    WorkflowIdempotencyKey, WorkflowProjectAccess, WorkflowProjectAccessRequest,
-    WorkflowPromptContent, WorkflowRunTransition, WorkflowStateSnapshot, WorkflowStepRunId,
-    WorkflowWorkerId, WorkflowWorkspaceManager, WorkflowWorkspaceMountRef, WorkflowWorkspaceRef,
-    WorkflowWorkspaceSnapshot, render_stage_prompt, stage_result_schema_version, stage_slug,
+    StageConstraintSnapshot, StageResultEnvelope, StageResultOutcome, StageResultSummary,
+    StageTurnIdentity, StageTurnSubmitter, SubmitStageTurnOutcome, SubmitStageTurnRequest,
+    TransitionOutcome, VerifyWorkflowWorkspaceOutcome, VerifyWorkflowWorkspaceRequest,
+    WorkflowActorScope, WorkflowClock, WorkflowIdempotencyKey, WorkflowProjectAccess,
+    WorkflowProjectAccessRequest, WorkflowPromptContent, WorkflowRunTransition,
+    WorkflowStateSnapshot, WorkflowStepRunId, WorkflowWorkerId, WorkflowWorkspaceManager,
+    WorkflowWorkspaceMountRef, WorkflowWorkspaceRef, WorkflowWorkspaceSnapshot,
+    render_stage_prompt, stage_result_schema_version, stage_slug,
 };
 
 const DEFAULT_STAGE_ATTEMPT: u32 = 1;
@@ -79,6 +81,29 @@ enum PrepareWorkspaceStepOutcome {
 enum PublishWorkspaceStepOutcome {
     Published {
         outcome: PublishWorkflowWorkspaceOutcome,
+        step: WorkflowStepRun,
+    },
+    NotReady {
+        step: WorkflowStepRun,
+    },
+}
+
+enum VerifyWorkspaceStepOutcome {
+    /// Verification ran and passed. Carries the outcome so the gate result can
+    /// be surfaced to the PrSynthesis prompt.
+    Passed {
+        outcome: VerifyWorkflowWorkspaceOutcome,
+        step: WorkflowStepRun,
+    },
+    /// No verification command was configured/detected — the gate is skipped.
+    /// Carries the (`ran: false`) outcome so it can still be recorded.
+    Skipped {
+        outcome: VerifyWorkflowWorkspaceOutcome,
+        step: WorkflowStepRun,
+    },
+    /// Verification ran and failed; the PR must NOT be opened.
+    Failed {
+        outcome: VerifyWorkflowWorkspaceOutcome,
         step: WorkflowStepRun,
     },
     NotReady {
@@ -237,7 +262,7 @@ where
         if let Some(snapshot) = latest_provider_snapshot.clone() {
             run.workflow_state.latest_provider_snapshot = Some(snapshot);
         }
-        let claim_step = self.claim_issue_step(&run).await?;
+        let (claim_step, claim_comment) = self.claim_issue_step(&run).await?;
         let claim_succeeded = claim_step.status == WorkflowStepStatus::Succeeded;
         steps.push(claim_step);
         if !claim_succeeded {
@@ -269,6 +294,7 @@ where
                     mode: Some(GithubIssueWorkflowMode::Claimed),
                     clear_active_block: true,
                     latest_provider_snapshot,
+                    claim_comment,
                     ..WorkflowRunTransition::default()
                 },
             )
@@ -393,25 +419,142 @@ where
             GithubIssueStage::Implementation
                 if run.workflow_state.mode == GithubIssueWorkflowMode::Implementation =>
             {
-                if !implementation_result_is_pr_ready(&payload.result) {
-                    let run = self
-                        .advance_run_cursor(run, event.sequence, WorkflowRunTransition::default())
-                        .await?;
-                    return Ok(WorkflowPolicyTickOutcome {
-                        run,
-                        processed_event_count: 1,
-                        steps: Vec::new(),
-                    });
+                // The independent verify gate is authoritative: the model's
+                // self-reported `pr_ready` is NEVER trusted as the decision.
+                // We run the repository's own tests in the workspace and decide
+                // from the result. This blocks a `pr_ready: true` with failing
+                // tests AND still proceeds for a correct change the model could
+                // not self-verify (e.g. its shell could not reach the scoped
+                // workspace, so it conservatively reported `pr_ready: false`) —
+                // once the gate confirms the tests pass, the run advances.
+                //
+                // The model's self-report is consulted ONLY as a fallback when
+                // there is nothing to independently verify: no detectable test
+                // suite (Skipped) or no workspace session yet. There we respect
+                // a `false` and idle rather than open a PR the implementer
+                // flagged as not ready.
+                let model_pr_ready = implementation_result_is_pr_ready(&payload.result);
+                // The verify gate also yields the summary surfaced to PrSynthesis
+                // (so the PR body reflects what the workflow independently ran),
+                // not just the step to report.
+                let (verify_step, verify_summary): (
+                    Option<WorkflowStepRun>,
+                    Option<crate::WorkflowVerificationSummary>,
+                ) = match run.workspace_session_id.clone() {
+                    Some(verify_session_id) => {
+                        match self.verify_workspace_step(&run, verify_session_id).await? {
+                            VerifyWorkspaceStepOutcome::Passed { outcome, step } => {
+                                (Some(step), Some(workflow_verification_summary(&outcome)))
+                            }
+                            VerifyWorkspaceStepOutcome::Skipped { outcome, step } => {
+                                if !model_pr_ready {
+                                    // Dead-end: the implementer flagged the change
+                                    // as not PR-ready AND there is no test suite
+                                    // for the gate to independently confirm it.
+                                    // Advancing the cursor here would leave the run
+                                    // Active in Implementation with no active stage
+                                    // and no next stage — the reconciler (gated on
+                                    // an active stage) never catches it, so the run
+                                    // loops forever as a silent no-op. Escalate to a
+                                    // human instead of stranding it.
+                                    let run = self
+                                        .block_run(
+                                            run,
+                                            "implementation reported not PR-ready and no \
+                                             verification suite was detected to confirm \
+                                             readiness; human review required"
+                                                .to_string(),
+                                        )
+                                        .await?;
+                                    return Ok(WorkflowPolicyTickOutcome {
+                                        run,
+                                        processed_event_count: 0,
+                                        steps: vec![step],
+                                    });
+                                }
+                                (Some(step), Some(workflow_verification_summary(&outcome)))
+                            }
+                            VerifyWorkspaceStepOutcome::NotReady { step } => {
+                                return Ok(WorkflowPolicyTickOutcome {
+                                    run,
+                                    processed_event_count: 0,
+                                    steps: vec![step],
+                                });
+                            }
+                            VerifyWorkspaceStepOutcome::Failed { outcome, step } => {
+                                let reason = format!(
+                                    "workspace verification failed: {} (exit {}){}",
+                                    outcome.command_label,
+                                    outcome
+                                        .exit_code
+                                        .map(|code| code.to_string())
+                                        .unwrap_or_else(|| "unknown".to_string()),
+                                    if outcome.stderr_tail.is_empty() {
+                                        String::new()
+                                    } else {
+                                        format!(": {}", outcome.stderr_tail)
+                                    },
+                                );
+                                let run = self.block_run(run, reason).await?;
+                                return Ok(WorkflowPolicyTickOutcome {
+                                    run,
+                                    processed_event_count: 0,
+                                    steps: vec![step],
+                                });
+                            }
+                        }
+                    }
+                    None => {
+                        if !model_pr_ready {
+                            // Dead-end: no prepared workspace session to verify
+                            // against AND the implementer reported not PR-ready.
+                            // Same stranding hazard as the Skipped branch above —
+                            // a silent cursor advance leaves the run Active with no
+                            // active stage that the reconciler can catch. Escalate
+                            // to a human rather than no-op-loop forever.
+                            let run = self
+                                .block_run(
+                                    run,
+                                    "implementation reported not PR-ready and no workspace \
+                                     session was available to independently verify it; human \
+                                     review required"
+                                        .to_string(),
+                                )
+                                .await?;
+                            return Ok(WorkflowPolicyTickOutcome {
+                                run,
+                                processed_event_count: 0,
+                                steps: Vec::new(),
+                            });
+                        }
+                        (None, None)
+                    }
+                };
+
+                // Surface the gate result to the PrSynthesis prompt rendered in
+                // this same tick by `start_stage_step` (which captures/restores
+                // `last_verification` across its repo reload, mirroring the
+                // `latest_provider_snapshot` seam), and persist it via the
+                // transition below for replays.
+                let mut run = run;
+                if let Some(summary) = verify_summary.clone() {
+                    run.workflow_state.last_verification = Some(summary);
                 }
 
-                let (run, step) = self
+                let (run, start_step) = self
                     .start_stage_step(run, GithubIssueStage::PrSynthesis, None, None)
                     .await?;
-                if step.status != WorkflowStepStatus::Succeeded {
+                let mut steps = Vec::new();
+                if let Some(verify_step) = verify_step {
+                    steps.push(verify_step);
+                }
+                let start_succeeded = start_step.status == WorkflowStepStatus::Succeeded;
+                steps.push(start_step);
+                if !start_succeeded {
                     return Ok(WorkflowPolicyTickOutcome {
                         run,
                         processed_event_count: 0,
-                        steps: vec![step],
+                        steps,
                     });
                 }
                 let run = self
@@ -421,6 +564,7 @@ where
                         WorkflowRunTransition {
                             mode: Some(GithubIssueWorkflowMode::PrSynthesis),
                             clear_active_block: true,
+                            last_verification: verify_summary,
                             ..WorkflowRunTransition::default()
                         },
                     )
@@ -428,7 +572,7 @@ where
                 Ok(WorkflowPolicyTickOutcome {
                     run,
                     processed_event_count: 1,
-                    steps: vec![step],
+                    steps,
                 })
             }
             GithubIssueStage::PrSynthesis
@@ -446,17 +590,19 @@ where
                             .to_string(),
                     });
                 };
-                let (publish_outcome, publish_step) =
-                    match self.publish_workspace_step(&run, workspace_session_id).await? {
-                        PublishWorkspaceStepOutcome::Published { outcome, step } => (outcome, step),
-                        PublishWorkspaceStepOutcome::NotReady { step } => {
-                            return Ok(WorkflowPolicyTickOutcome {
-                                run,
-                                processed_event_count: 0,
-                                steps: vec![step],
-                            });
-                        }
-                    };
+                let (publish_outcome, publish_step) = match self
+                    .publish_workspace_step(&run, workspace_session_id)
+                    .await?
+                {
+                    PublishWorkspaceStepOutcome::Published { outcome, step } => (outcome, step),
+                    PublishWorkspaceStepOutcome::NotReady { step } => {
+                        return Ok(WorkflowPolicyTickOutcome {
+                            run,
+                            processed_event_count: 0,
+                            steps: vec![step],
+                        });
+                    }
+                };
                 if !publish_outcome.has_changes {
                     // No commits between base and the working branch: a draft PR
                     // cannot be opened. Block the run for human attention rather
@@ -733,7 +879,7 @@ where
     async fn claim_issue_step(
         &self,
         run: &GithubIssueWorkflowRun,
-    ) -> Result<WorkflowStepRun, GithubIssueWorkflowError> {
+    ) -> Result<(WorkflowStepRun, Option<GithubCommentRef>), GithubIssueWorkflowError> {
         let input = json!({
             "workflow_run_id": run.workflow_run_id,
             "issue": run.issue_ref,
@@ -741,18 +887,40 @@ where
         });
         let step = self.create_or_get_step(run, "claim_issue", &input).await?;
         if workflow_step_replays(&step.status) {
-            return Ok(step);
+            // Recover the claim comment ref from the persisted step result so a
+            // replayed claim step still surfaces it (replay-safe, like the
+            // draft PR replay path).
+            let claim_comment = step
+                .result
+                .as_ref()
+                .map(provider_action_outcome_claim_comment_from_result)
+                .transpose()?
+                .flatten();
+            return Ok((step, claim_comment));
         }
         let now = self.ports.clock().now();
         if workflow_step_waits_for_retry(&step, now) {
-            return Ok(step);
+            return Ok((step, None));
         }
+
+        // Fail closed: the claim comment must be posted under the run's bound
+        // provider account, never an ambient/global fallback. Mirrors
+        // `draft_pull_request_step`.
+        let Some(provider_account_ref) = run.provider_account_ref.clone() else {
+            return Err(GithubIssueWorkflowError::Policy {
+                reason: format!(
+                    "workflow run `{}` has no provider account ref for claim comment",
+                    run.workflow_run_id
+                ),
+            });
+        };
 
         let runner =
             GithubIssueProviderActionRunner::new(self.ports.repository(), self.ports.github_port());
         let outcome = runner
             .run_claim_comment(crate::RunClaimCommentProviderActionRequest {
                 run: run.clone(),
+                provider_account_ref,
                 worker_id: self.ports.worker_id(),
                 now,
                 lease_expires_at: self.ports.provider_action_lease_expires_at(),
@@ -766,6 +934,9 @@ where
             ProviderActionRunOutcome::NeedsReconciliation { .. } => WorkflowStepStatus::Blocked,
             ProviderActionRunOutcome::Failed { .. } => WorkflowStepStatus::Failed,
         };
+        // Capture the posted (or echoed) claim comment ref so the run can record
+        // it and later link the draft PR back into that comment.
+        let claim_comment = provider_action_outcome_claim_comment(&outcome)?;
         debug!(
             workflow_run_id = %run.workflow_run_id,
             outcome = provider_action_outcome_slug(&outcome),
@@ -776,12 +947,14 @@ where
             let next_attempt_at = action
                 .lease_expires_at
                 .unwrap_or(now + Duration::seconds(DEFAULT_BUSY_RETRY_SECONDS));
-            return self
+            let step = self
                 .retry_step(step, Some(result), None, next_attempt_at)
-                .await;
+                .await?;
+            return Ok((step, None));
         }
 
-        self.complete_step(step, status, Some(result), None).await
+        let step = self.complete_step(step, status, Some(result), None).await?;
+        Ok((step, claim_comment))
     }
 
     async fn draft_pull_request_step(
@@ -790,11 +963,21 @@ where
         stage_run_id: crate::GithubIssueStageRunId,
         pr_result: PrSynthesisResult,
     ) -> Result<(WorkflowStepRun, Option<GithubPullRequestRef>), GithubIssueWorkflowError> {
+        // The PR body is verbatim model output, and the synthesis model only
+        // saw its own self-report — so it understates what the workflow
+        // independently verified. Append a host-authored, deterministic
+        // verification footer (from the run's `last_verification`) so the PR's
+        // verification claim does not depend on model prose. The footer is part
+        // of the step input hash so a body change re-runs the step idempotently.
+        let body = compose_pr_body_with_verification_footer(
+            &pr_result.body,
+            run.workflow_state.last_verification.as_ref(),
+        );
         let input = json!({
             "workflow_run_id": run.workflow_run_id,
             "stage_run_id": stage_run_id,
             "title": pr_result.title.clone(),
-            "body": pr_result.body.clone(),
+            "body": body.clone(),
             "head_branch": pr_result.head_branch.clone(),
             "base_branch": pr_result.base_branch.clone(),
             "head_sha": pr_result.head_sha.clone(),
@@ -833,7 +1016,7 @@ where
                 run: run.clone(),
                 stage_run_id: Some(stage_run_id),
                 title: pr_result.title,
-                body: pr_result.body,
+                body,
                 head_branch: pr_result.head_branch,
                 base_branch: pr_result.base_branch,
                 head_sha: pr_result.head_sha,
@@ -854,7 +1037,8 @@ where
         };
         match (&outcome, primary_pr.as_ref()) {
             (
-                ProviderActionRunOutcome::Succeeded { .. } | ProviderActionRunOutcome::Replayed { .. },
+                ProviderActionRunOutcome::Succeeded { .. }
+                | ProviderActionRunOutcome::Replayed { .. },
                 Some(pr),
             ) => debug!(
                 workflow_run_id = %run.workflow_run_id,
@@ -1060,6 +1244,90 @@ where
         })
     }
 
+    /// Independently verify the implementation in the prepared workspace before
+    /// a draft PR is opened. Mirrors `publish_workspace_step` (idempotent,
+    /// replay-safe, retries a transient infra fault). A FAILED verification
+    /// (tests ran and did not pass) is NOT retryable — the caller blocks the run
+    /// so a PR is never opened with failing tests. A missing/auto-undetected
+    /// command yields `Skipped` (repos without tests are not blocked).
+    async fn verify_workspace_step(
+        &self,
+        run: &GithubIssueWorkflowRun,
+        workspace_session_id: GithubIssueWorkspaceSessionId,
+    ) -> Result<VerifyWorkspaceStepOutcome, GithubIssueWorkflowError> {
+        let input = json!({
+            "workflow_run_id": run.workflow_run_id,
+            "workspace_session_id": workspace_session_id.as_str(),
+            "policy_version": self.policy_version,
+        });
+        let step = self
+            .create_or_get_step(run, "verify_workspace", &input)
+            .await?;
+        if workflow_step_replays(&step.status) {
+            let Some(result) = step.result.clone() else {
+                return Err(GithubIssueWorkflowError::Policy {
+                    reason: "completed verify_workspace step had no result".to_string(),
+                });
+            };
+            let outcome: VerifyWorkflowWorkspaceOutcome =
+                serde_json::from_value(result).map_err(policy_serde_error)?;
+            return Ok(classify_verify_outcome(outcome, step));
+        }
+        let now = self.ports.clock().now();
+        if workflow_step_waits_for_retry(&step, now) {
+            return Ok(VerifyWorkspaceStepOutcome::NotReady { step });
+        }
+
+        let outcome = match self
+            .ports
+            .workspace_manager()
+            .verify_workspace(VerifyWorkflowWorkspaceRequest {
+                tenant_id: run.tenant_id.clone(),
+                creator_user_id: run.creator_user_id.clone(),
+                agent_id: run.agent_id.clone(),
+                project_id: run.project_id.clone(),
+                workflow_run_id: run.workflow_run_id.clone(),
+                issue: run.issue_ref.clone(),
+                workspace_session_id,
+                // Host-configured verification commands are not yet plumbed into
+                // the policy (the policy ports expose no config access); the
+                // backend auto-detects a runner. Plumbing a per-config override
+                // is a follow-up.
+                command: None,
+                requested_at: now,
+            })
+            .await
+        {
+            Ok(outcome) => outcome,
+            Err(error) => {
+                if !workspace_prepare_error_is_retryable(&error) {
+                    return Err(error);
+                }
+                let retry = self
+                    .retry_step(
+                        step,
+                        None,
+                        Some(json!({ "reason": error.to_string() })),
+                        now + Duration::seconds(DEFAULT_BUSY_RETRY_SECONDS),
+                    )
+                    .await?;
+                return Ok(VerifyWorkspaceStepOutcome::NotReady { step: retry });
+            }
+        };
+        debug!(
+            workflow_run_id = %run.workflow_run_id,
+            ran = outcome.ran,
+            passed = outcome.passed,
+            command = %outcome.command_label,
+            "workflow workspace verification step completed"
+        );
+        let result = serde_json::to_value(&outcome).map_err(policy_serde_error)?;
+        let completed = self
+            .complete_step(step, WorkflowStepStatus::Succeeded, Some(result), None)
+            .await?;
+        Ok(classify_verify_outcome(outcome, completed))
+    }
+
     #[tracing::instrument(
         skip_all,
         fields(
@@ -1075,6 +1343,7 @@ where
         trigger_idempotency_key: Option<&WorkflowIdempotencyKey>,
     ) -> Result<(GithubIssueWorkflowRun, WorkflowStepRun), GithubIssueWorkflowError> {
         let latest_provider_snapshot = run.workflow_state.latest_provider_snapshot.clone();
+        let last_verification = run.workflow_state.last_verification.clone();
         let workspace_mount_ref = workspace_session
             .as_ref()
             .map(|session| session.mount_ref.clone())
@@ -1182,6 +1451,9 @@ where
         if run.workflow_state.latest_provider_snapshot.is_none() {
             run.workflow_state.latest_provider_snapshot = latest_provider_snapshot;
         }
+        if run.workflow_state.last_verification.is_none() {
+            run.workflow_state.last_verification = last_verification;
+        }
 
         let stage_run_id_log = stage_run_id.clone();
         let stage_turn_identity = StageTurnIdentity::new(
@@ -1192,7 +1464,9 @@ where
             self.policy_version.clone(),
         );
         let prompt_run = run_with_workspace_session(&run, workspace_session.as_ref());
-        let prompt = self.stage_prompt(&prompt_run, &stage, workspace_mount_ref.as_ref())?;
+        let prompt = self
+            .stage_prompt(&prompt_run, &stage, workspace_mount_ref.as_ref())
+            .await?;
         let idempotency_key = stage_turn_identity.turn_idempotency_key();
         let idempotency_key_log = idempotency_key.as_str().to_string();
         let outcome = self
@@ -1260,20 +1534,64 @@ where
         Ok((run, completed))
     }
 
-    fn stage_prompt(
+    async fn stage_prompt(
         &self,
         run: &GithubIssueWorkflowRun,
         stage: &GithubIssueStage,
         workspace_mount_ref: Option<&WorkflowWorkspaceMountRef>,
     ) -> Result<WorkflowPromptContent, GithubIssueWorkflowError> {
-        let snapshot = Self::workflow_stage_snapshot(run, stage, workspace_mount_ref);
+        let previous_stage_results = self.load_previous_stage_results(run).await?;
+        let snapshot =
+            Self::workflow_stage_snapshot(run, stage, workspace_mount_ref, previous_stage_results);
         render_stage_prompt(stage.clone(), &snapshot).map(WorkflowPromptContent::from)
+    }
+
+    /// Load the prior stages' completed results for this run from the durable
+    /// StageCompleted event log, so PrSynthesis (and later stages) see the
+    /// Triage/Planning/Implementation summaries + evidence instead of an empty
+    /// list (which made the model emit a "missing implementation metadata"
+    /// fallback PR). Events come back ascending by sequence, preserving stage
+    /// order. Fails loud on a malformed stored event (error-handling.md).
+    async fn load_previous_stage_results(
+        &self,
+        run: &GithubIssueWorkflowRun,
+    ) -> Result<Vec<StageResultSummary>, GithubIssueWorkflowError> {
+        let events = self
+            .ports
+            .repository()
+            .list_workflow_events_after(ListWorkflowEventsAfterInput {
+                workflow_run_id: run.workflow_run_id.clone(),
+                after_sequence: -1,
+                limit: 1024,
+            })
+            .await?;
+        let mut summaries = Vec::new();
+        for event in events {
+            if event.workflow_event_type != GithubIssueWorkflowEventType::StageCompleted {
+                continue;
+            }
+            let payload = stage_completed_payload(&event)?;
+            let envelope: StageResultEnvelope =
+                serde_json::from_value(payload.result).map_err(policy_serde_error)?;
+            summaries.push(StageResultSummary {
+                stage: payload.stage,
+                outcome: stage_result_outcome_slug(&envelope.outcome),
+                summary: envelope.summary,
+                evidence: envelope
+                    .evidence
+                    .iter()
+                    .map(|item| format!("{}: {}", item.kind, item.summary))
+                    .collect(),
+            });
+        }
+        Ok(summaries)
     }
 
     fn workflow_stage_snapshot(
         run: &GithubIssueWorkflowRun,
         stage: &GithubIssueStage,
         workspace_mount_ref: Option<&WorkflowWorkspaceMountRef>,
+        previous_stage_results: Vec<StageResultSummary>,
     ) -> EngineeredWorkflowSnapshot {
         let issue = &run.issue_ref;
         let provider_snapshot = run.workflow_state.latest_provider_snapshot.as_ref();
@@ -1359,7 +1677,8 @@ where
                 owner: issue.owner.clone(),
                 name: issue.repo.clone(),
                 default_branch: issue.default_branch.clone(),
-                base_ref: Some(issue.default_branch.clone()),
+                base_ref: (!issue.default_branch.trim().is_empty())
+                    .then(|| issue.default_branch.clone()),
                 base_sha: None,
                 working_branch: run
                     .workflow_state
@@ -1377,8 +1696,9 @@ where
                     .as_ref()
                     .map(|pr| pr.url.clone()),
             },
-            previous_stage_results: Vec::new(),
+            previous_stage_results,
             workspace: Self::workflow_workspace_snapshot(run, workspace_mount_ref),
+            verification: run.workflow_state.last_verification.clone(),
             constraints: StageConstraintSnapshot {
                 stage: stage.clone(),
                 stage_goal: Self::stage_goal(stage).to_string(),
@@ -1775,6 +2095,20 @@ fn stage_completed_payload(
     serde_json::from_value(event.payload.clone()).map_err(policy_serde_error)
 }
 
+/// Snake_case wire string for a stage outcome — must match the `serde(rename_all
+/// = "snake_case")` representation (types.md forbids `format!("{:?}")` for
+/// wire/enum rendering). Locked by `stage_result_outcome_slug_matches_serde`.
+fn stage_result_outcome_slug(outcome: &StageResultOutcome) -> String {
+    match outcome {
+        StageResultOutcome::Completed => "completed",
+        StageResultOutcome::NeedsHuman => "needs_human",
+        StageResultOutcome::GaveUp => "gave_up",
+        StageResultOutcome::ExhaustedTurns => "exhausted_turns",
+        StageResultOutcome::NotProduced => "not_produced",
+    }
+    .to_string()
+}
+
 fn issue_provider_snapshot(
     event: &GithubIssueWorkflowEvent,
 ) -> Result<Option<GithubIssueProviderSnapshotSummary>, GithubIssueWorkflowError> {
@@ -1787,6 +2121,70 @@ fn issue_provider_snapshot(
                 .map(Some)
                 .map_err(policy_serde_error)
         })
+}
+
+fn classify_verify_outcome(
+    outcome: VerifyWorkflowWorkspaceOutcome,
+    step: WorkflowStepRun,
+) -> VerifyWorkspaceStepOutcome {
+    if !outcome.ran {
+        VerifyWorkspaceStepOutcome::Skipped { outcome, step }
+    } else if outcome.passed {
+        VerifyWorkspaceStepOutcome::Passed { outcome, step }
+    } else {
+        VerifyWorkspaceStepOutcome::Failed { outcome, step }
+    }
+}
+
+/// Project the verification gate outcome onto the persisted/model-visible
+/// summary. Only the host-authored, secret-free fields are carried (never the
+/// raw stderr tail).
+fn workflow_verification_summary(
+    outcome: &VerifyWorkflowWorkspaceOutcome,
+) -> crate::WorkflowVerificationSummary {
+    crate::WorkflowVerificationSummary {
+        ran: outcome.ran,
+        passed: outcome.passed,
+        command_label: outcome.command_label.clone(),
+        exit_code: outcome.exit_code,
+    }
+}
+
+/// Append a host-authored "## Workflow verification" footer to the model's PR
+/// body when the independent verification gate ran, so the PR's verification
+/// claim is deterministic host text rather than model prose. When verification
+/// did not run (no detected/configured command), the model body is returned
+/// unchanged — there is nothing host-authoritative to assert. `command_label`
+/// is host-authored/argv-only and carries no secrets or raw stderr, so it is
+/// safe to embed verbatim.
+fn compose_pr_body_with_verification_footer(
+    model_body: &str,
+    verification: Option<&crate::WorkflowVerificationSummary>,
+) -> String {
+    let Some(verification) = verification.filter(|summary| summary.ran) else {
+        return model_body.to_string();
+    };
+    let status = if verification.passed {
+        "passed"
+    } else {
+        "FAILED"
+    };
+    let exit_code = verification
+        .exit_code
+        .map(|code| code.to_string())
+        .unwrap_or_else(|| "unknown".to_string());
+    let footer = format!(
+        "## Workflow verification\n\nThe workflow independently ran the \
+         repository's verification command in the prepared workspace before \
+         opening this PR.\n\n- Command: `{}`\n- Result: {} (exit {})",
+        verification.command_label, status, exit_code,
+    );
+    let trimmed = model_body.trim_end();
+    if trimmed.is_empty() {
+        footer
+    } else {
+        format!("{trimmed}\n\n{footer}")
+    }
 }
 
 fn implementation_result_is_pr_ready(result: &JsonValue) -> bool {
@@ -1849,6 +2247,44 @@ fn provider_action_outcome_primary_pr_from_outcome(
         .map_err(policy_serde_error)
 }
 
+/// Decode the claim comment ref from a persisted `claim_issue` step result
+/// (a serialized `ProviderActionRunOutcome`). Used by the replay path so a
+/// re-driven claim step recovers the same ref. Mirrors
+/// `provider_action_outcome_primary_pr`.
+fn provider_action_outcome_claim_comment_from_result(
+    value: &JsonValue,
+) -> Result<Option<GithubCommentRef>, GithubIssueWorkflowError> {
+    let outcome = serde_json::from_value::<ProviderActionRunOutcome>(value.clone())
+        .map_err(policy_serde_error)?;
+    provider_action_outcome_claim_comment(&outcome)
+}
+
+/// Extract the claim comment ref recorded in a claim-comment provider action's
+/// result. Mirrors `provider_action_outcome_primary_pr_from_outcome`: the
+/// success/replay paths store `{"comment": GithubCommentRef, ..}` in the action
+/// result, so the comment ref survives replay (a re-driven claim step reads the
+/// same ref back rather than re-posting).
+fn provider_action_outcome_claim_comment(
+    outcome: &ProviderActionRunOutcome,
+) -> Result<Option<GithubCommentRef>, GithubIssueWorkflowError> {
+    let action = match outcome {
+        ProviderActionRunOutcome::Succeeded { action, .. }
+        | ProviderActionRunOutcome::Replayed { action }
+        | ProviderActionRunOutcome::NeedsReconciliation { action }
+        | ProviderActionRunOutcome::Failed { action }
+        | ProviderActionRunOutcome::Busy { action } => action,
+    };
+    let Some(result) = action.result.as_ref() else {
+        return Ok(None);
+    };
+    let Some(comment) = result.get("comment") else {
+        return Ok(None);
+    };
+    serde_json::from_value(comment.clone())
+        .map(Some)
+        .map_err(policy_serde_error)
+}
+
 fn workflow_input_hash<T>(label: &str, input: &T) -> Result<String, GithubIssueWorkflowError>
 where
     T: Serialize,
@@ -1880,5 +2316,29 @@ fn provider_action_outcome_slug(outcome: &ProviderActionRunOutcome) -> &'static 
         ProviderActionRunOutcome::NeedsReconciliation { .. } => "needs_reconciliation",
         ProviderActionRunOutcome::Failed { .. } => "failed",
         ProviderActionRunOutcome::Busy { .. } => "busy",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::stage_result_outcome_slug;
+    use crate::StageResultOutcome;
+
+    #[test]
+    fn stage_result_outcome_slug_matches_serde() {
+        for outcome in [
+            StageResultOutcome::Completed,
+            StageResultOutcome::NeedsHuman,
+            StageResultOutcome::GaveUp,
+            StageResultOutcome::ExhaustedTurns,
+            StageResultOutcome::NotProduced,
+        ] {
+            let serde = serde_json::to_value(&outcome).expect("serialize outcome");
+            assert_eq!(
+                serde.as_str().expect("outcome serializes to a string"),
+                stage_result_outcome_slug(&outcome),
+                "slug must match serde snake_case for {outcome:?}"
+            );
+        }
     }
 }

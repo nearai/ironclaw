@@ -155,6 +155,20 @@ pub struct GithubIssueProviderSnapshotSummary {
     pub content_summaries: Vec<ProviderContentSummary>,
 }
 
+/// Result of the workflow's independent in-workspace verification gate (it runs
+/// the repository's own tests before PR synthesis). Threaded into the
+/// PrSynthesis snapshot so the synthesized PR body reflects what the workflow
+/// independently verified, rather than only the implementer's self-report.
+/// `command_label` is host-authored/argv-only and carries no secrets or raw
+/// stderr, so it is safe to embed in the model-visible snapshot.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkflowVerificationSummary {
+    pub ran: bool,
+    pub passed: bool,
+    pub command_label: String,
+    pub exit_code: Option<i32>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GithubIssueWorkflowState {
     pub mode: GithubIssueWorkflowMode,
@@ -168,6 +182,11 @@ pub struct GithubIssueWorkflowState {
     pub current_workspace_mount_ref: Option<WorkflowWorkspaceMountRef>,
     #[serde(default)]
     pub latest_provider_snapshot: Option<GithubIssueProviderSnapshotSummary>,
+    /// Outcome of the most recent independent verification gate run, surfaced to
+    /// the PrSynthesis model. `#[serde(default)]` keeps legacy persisted
+    /// workflow_state blobs (which predate this field) deserializable.
+    #[serde(default)]
+    pub last_verification: Option<WorkflowVerificationSummary>,
     pub last_provider_watermarks: GithubProviderWatermarks,
 }
 
@@ -182,6 +201,7 @@ impl GithubIssueWorkflowState {
             current_workspace_ref: None,
             current_workspace_mount_ref: None,
             latest_provider_snapshot: None,
+            last_verification: None,
             last_provider_watermarks: GithubProviderWatermarks::default(),
         }
     }

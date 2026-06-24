@@ -12,17 +12,18 @@ use crate::{
     CompleteProviderActionOutcome, CompleteWorkflowStepInput, CompleteWorkflowStepOutcome,
     CreateOrGetProviderActionInput, CreateOrGetWorkflowRunInput, CreateOrGetWorkflowRunOutcome,
     CreateOrGetWorkflowStepInput, CreateOrGetWorkflowStepOutcome, CreateStageRunInput,
-    CreateStageRunOutcome, FindLatestWorkflowEventForProviderInput, GithubIssueProviderActionId,
+    CreateStageRunOutcome, FailStageRunInput, FailStageRunOutcome,
+    FindLatestWorkflowEventForProviderInput, GetStageRunInput, GithubIssueProviderActionId,
     GithubIssueProviderActionRecord, GithubIssueProviderBinding, GithubIssueProviderBindingId,
-    GithubIssueStageRunId, GithubIssueWorkflowError, GithubIssueWorkflowEvent,
+    GithubIssueStage, GithubIssueStageRunId, GithubIssueWorkflowError, GithubIssueWorkflowEvent,
     GithubIssueWorkflowEventId, GithubIssueWorkflowMode, GithubIssueWorkflowRepository,
     GithubIssueWorkflowRun, GithubIssueWorkflowRunId, GithubIssueWorkflowRunKey,
     GithubIssueWorkflowRunStatus, GithubIssueWorkflowState, GithubProviderRef, LeaseReleaseOutcome,
     LeaseRenewalOutcome, ListActiveWorkflowRunsForRepositoryInput, ListWorkflowEventsAfterInput,
     ProviderActionStatus, RecordWorkflowEventInput, RecordWorkflowEventOutcome,
-    ReleaseWorkflowRunLeaseInput, RenewWorkflowRunLeaseInput, TransitionOutcome,
+    ReleaseWorkflowRunLeaseInput, RenewWorkflowRunLeaseInput, StageRunSnapshot, TransitionOutcome,
     UpsertProviderBindingInput, WorkflowIdempotencyKey, WorkflowStepRun, WorkflowStepRunId,
-    WorkflowStepStatus,
+    WorkflowStepStatus, apply_workflow_run_transition,
 };
 use ironclaw_host_api::TenantId;
 
@@ -36,6 +37,31 @@ impl Default for InMemoryGithubIssueWorkflowRepository {
         Self {
             state: Mutex::new(InMemoryState::default()),
         }
+    }
+}
+
+#[cfg(any(test, feature = "test-support"))]
+impl InMemoryGithubIssueWorkflowRepository {
+    /// Test-only seeding: point a run's `active_stage_run_id` at a stage id that
+    /// has NO backing stage row, reproducing the orphan-pointer crash state (a
+    /// crash between the run-pointer write and the stage-row write). The
+    /// stuck-stage reconciler must escalate such a run once it is older than
+    /// `stage_stale_after`. Only the run-pointer and `updated_at` are touched so
+    /// the run stays claimable; the version is bumped to mirror a real write.
+    pub async fn seed_orphan_active_stage_pointer(
+        &self,
+        workflow_run_id: &GithubIssueWorkflowRunId,
+        orphan_stage_run_id: GithubIssueStageRunId,
+        now: chrono::DateTime<chrono::Utc>,
+    ) -> Result<(), GithubIssueWorkflowError> {
+        let mut state = self.state.lock().await;
+        let run = state.runs_by_id.get_mut(workflow_run_id).ok_or_else(|| {
+            repository_error(format!("workflow run `{workflow_run_id}` does not exist"))
+        })?;
+        run.active_stage_run_id = Some(orphan_stage_run_id);
+        run.workflow_run_version += 1;
+        run.updated_at = now;
+        Ok(())
     }
 }
 
@@ -71,8 +97,12 @@ struct RunIdempotencyKey {
 #[derive(Debug, Clone)]
 struct InMemoryStageRun {
     workflow_run_id: GithubIssueWorkflowRunId,
+    stage: GithubIssueStage,
     result: Option<JsonValue>,
     active: bool,
+    failed: bool,
+    created_at: chrono::DateTime<chrono::Utc>,
+    last_heartbeat_at: chrono::DateTime<chrono::Utc>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -487,29 +517,9 @@ impl GithubIssueWorkflowRepository for InMemoryGithubIssueWorkflowRepository {
         }
 
         run.event_cursor = input.next_event_cursor;
-        if let Some(status) = input.transition.status {
-            run.status = status;
-        }
-        if let Some(mode) = input.transition.mode {
-            run.workflow_state.mode = mode;
-        }
-        if input.transition.clear_active_block {
-            run.workflow_state.active_block = None;
-        }
-        if let Some(active_block) = input.transition.active_block {
-            run.workflow_state.active_block = Some(active_block);
-        }
-        if let Some(provider_snapshot) = input.transition.latest_provider_snapshot {
-            run.workflow_state.latest_provider_snapshot = Some(provider_snapshot);
-        }
-        if let Some(workspace_session) = input.transition.workspace_session {
-            run.workspace_session_id = Some(workspace_session.workspace_session_id);
-            run.workflow_state.current_workspace_ref = Some(workspace_session.workspace_ref);
-            run.workflow_state.current_workspace_mount_ref = Some(workspace_session.mount_ref);
-        }
-        if let Some(primary_pr) = input.transition.primary_pr {
-            run.workflow_state.primary_pr = Some(primary_pr);
-        }
+        // Single shared projection: keep this in lockstep with the durable
+        // backend by routing both through `apply_workflow_run_transition`.
+        apply_workflow_run_transition(run, &input.transition);
 
         run.workflow_run_version += 1;
         run.updated_at = input.now;
@@ -528,11 +538,11 @@ impl GithubIssueWorkflowRepository for InMemoryGithubIssueWorkflowRepository {
     ) -> Result<CreateStageRunOutcome, GithubIssueWorkflowError> {
         let CreateStageRunInput {
             workflow_run_id,
-            stage: _stage,
+            stage,
             now,
         } = input;
         let mut state = self.state.lock().await;
-        let run = state.runs_by_id.get_mut(&workflow_run_id).ok_or_else(|| {
+        let run = state.runs_by_id.get(&workflow_run_id).ok_or_else(|| {
             repository_error(format!("workflow run `{}` does not exist", workflow_run_id))
         })?;
 
@@ -558,27 +568,33 @@ impl GithubIssueWorkflowRepository for InMemoryGithubIssueWorkflowRepository {
         }
 
         let stage_run_id = GithubIssueStageRunId::new();
+        // Stage-row-FIRST: persist the stage row before pointing the run at it.
+        // A crash after this insert but before the run-pointer write leaves an
+        // active stage row that no run references — harmless and GC-able, and
+        // the next tick simply re-creates a fresh stage. The reverse order
+        // (pointer first) would leave a pointer to a missing stage row, which
+        // `accept_stage_result` reads as `NotActiveStage` forever — a permanent
+        // stuck run. So the stage row is the safe thing to write first.
+        state.stage_runs_by_id.insert(
+            stage_run_id.clone(),
+            InMemoryStageRun {
+                workflow_run_id: workflow_run_id.clone(),
+                stage,
+                result: None,
+                active: true,
+                failed: false,
+                created_at: now,
+                last_heartbeat_at: now,
+            },
+        );
+
+        let run = state.runs_by_id.get_mut(&workflow_run_id).ok_or_else(|| {
+            repository_error(format!("workflow run `{}` does not exist", workflow_run_id))
+        })?;
         run.active_stage_run_id = Some(stage_run_id.clone());
         run.workflow_run_version += 1;
         run.updated_at = now;
         let updated_run = run.clone();
-
-        // Split-brain gap: the run row now points at the stage run, but the
-        // stage_runs table has not been written yet. A crash here would orphan
-        // the active_stage_run_id pointer.
-        debug!(
-            workflow_run_id = %workflow_run_id,
-            stage_run_id = %stage_run_id,
-            "create_stage_run pointer written; persisting stage run row"
-        );
-        state.stage_runs_by_id.insert(
-            stage_run_id.clone(),
-            InMemoryStageRun {
-                workflow_run_id,
-                result: None,
-                active: true,
-            },
-        );
 
         debug!(
             stage_run_id = %stage_run_id,
@@ -653,19 +669,19 @@ impl GithubIssueWorkflowRepository for InMemoryGithubIssueWorkflowRepository {
         run.updated_at = input.now;
         let updated_run = run.clone();
 
-        // Split-brain gap: the run row already cleared its active stage pointer,
-        // but the stage run row is still marked active until the write below.
-        debug!(
-            workflow_run_id = %input.workflow_run_id,
-            stage_run_id = %input.stage_run_id,
-            "accept_stage_result cleared active pointer; persisting stage run result"
-        );
+        // Run-pointer-FIRST is the recoverable order for accept: a crash after
+        // clearing the pointer but before flipping the stage row leaves an
+        // unreferenced still-active stage row (an orphan), while the run itself
+        // is free to advance. The reverse order (stage row first) would leave a
+        // pointer to an inactive stage = a stuck run the reconciler must not
+        // auto-recover, so we deliberately keep the pointer write first here.
         let stage_run = state
             .stage_runs_by_id
             .get_mut(&input.stage_run_id)
             .ok_or_else(|| repository_error("active stage run was missing"))?;
         stage_run.result = Some(input.result);
         stage_run.active = false;
+        stage_run.last_heartbeat_at = input.now;
 
         debug!(
             workflow_run_id = %input.workflow_run_id,
@@ -674,6 +690,54 @@ impl GithubIssueWorkflowRepository for InMemoryGithubIssueWorkflowRepository {
             "accept_stage_result accepted stage result"
         );
         Ok(AcceptStageResultOutcome::Accepted { run: updated_run })
+    }
+
+    async fn get_stage_run(
+        &self,
+        input: GetStageRunInput,
+    ) -> Result<Option<StageRunSnapshot>, GithubIssueWorkflowError> {
+        let state = self.state.lock().await;
+        Ok(state
+            .stage_runs_by_id
+            .get(&input.stage_run_id)
+            .filter(|stage| stage.workflow_run_id == input.workflow_run_id)
+            .map(|stage| StageRunSnapshot {
+                stage_run_id: input.stage_run_id.clone(),
+                workflow_run_id: stage.workflow_run_id.clone(),
+                stage: stage.stage.clone(),
+                active: stage.active,
+                failed: stage.failed,
+                created_at: stage.created_at,
+                last_heartbeat_at: stage.last_heartbeat_at,
+            }))
+    }
+
+    async fn fail_stage_run(
+        &self,
+        input: FailStageRunInput,
+    ) -> Result<FailStageRunOutcome, GithubIssueWorkflowError> {
+        let mut state = self.state.lock().await;
+        let Some(stage) = state.stage_runs_by_id.get_mut(&input.stage_run_id) else {
+            return Ok(FailStageRunOutcome::NotFound);
+        };
+        if stage.workflow_run_id != input.workflow_run_id {
+            return Ok(FailStageRunOutcome::NotFound);
+        }
+        if !stage.active {
+            return Ok(FailStageRunOutcome::AlreadyInactive);
+        }
+        stage.active = false;
+        stage.failed = true;
+        stage.last_heartbeat_at = input.now;
+        debug!(
+            workflow_run_id = %input.workflow_run_id,
+            stage_run_id = %input.stage_run_id,
+            outcome = "failed",
+            "fail_stage_run marked stage run failed"
+        );
+        Ok(FailStageRunOutcome::Failed {
+            stage_run_id: input.stage_run_id,
+        })
     }
 
     async fn create_or_get_workflow_step(

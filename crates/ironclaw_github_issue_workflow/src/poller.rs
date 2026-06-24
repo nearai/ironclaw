@@ -8,30 +8,43 @@ use tracing::debug;
 
 use crate::{
     BlockWorkflowRunInput, ClaimRunnableWorkflowRunsInput, CreateOrGetWorkflowRunInput,
-    CreateOrGetWorkflowRunOutcome, FindLatestWorkflowEventForProviderInput, GetGithubIssueInput,
-    GetPullRequestInput, GithubChecksChangedPayload, GithubCommentRef, GithubIssueBlockKind,
-    GithubIssueBlockState, GithubIssueCandidateSelector, GithubIssueClosedPayload,
-    GithubIssueCommentSnapshot, GithubIssueProviderSnapshot, GithubIssueProviderSnapshotSummary,
-    GithubIssueWorkflowConfig, GithubIssueWorkflowConfigSource, GithubIssueWorkflowError,
-    GithubIssueWorkflowEventType, GithubIssueWorkflowPolicy, GithubIssueWorkflowPolicyPorts,
-    GithubIssueWorkflowPollerConfig, GithubIssueWorkflowPort, GithubIssueWorkflowRepository,
-    GithubIssueWorkflowRun, GithubProviderRef, GithubPullRequestCheckSnapshot,
-    GithubPullRequestRef, GithubPullRequestSnapshot, GithubPullRequestUpdatedPayload,
-    GithubRepositorySelector, GithubReviewCommentCreatedPayload, GithubReviewCommentSnapshot,
-    LeaseReleaseOutcome, ListActiveWorkflowRunsForRepositoryInput, ListIssueCommentsInput,
-    ListPullRequestChecksInput, ListPullRequestReviewCommentsInput, ProviderContentSummary,
-    RecordWorkflowEventInput, RecordWorkflowEventOutcome, ReleaseWorkflowRunLeaseInput,
-    SearchGithubIssuesInput, StageTurnSubmitter, WorkflowClock, WorkflowConfigAccessRequest,
-    WorkflowEventEnvelope, WorkflowEventSourceKind, WorkflowProjectAccess, WorkflowWorkerId,
-    WorkflowWorkspaceManager, checks_failed_key, checks_succeeded_key, issue_binding_ref,
-    issue_changed_key, issue_closed_key, issue_discovered_key, pr_updated_key,
-    primary_pr_binding_ref, review_comment_created_key,
+    CreateOrGetWorkflowRunOutcome, FailStageRunInput, FindLatestWorkflowEventForProviderInput,
+    GetGithubIssueInput, GetPullRequestInput, GetStageRunInput, GithubChecksChangedPayload,
+    GithubCommentRef, GithubIssueBlockKind, GithubIssueBlockState, GithubIssueCandidateSelector,
+    GithubIssueClosedPayload, GithubIssueCommentSnapshot, GithubIssueProviderSnapshot,
+    GithubIssueProviderSnapshotSummary, GithubIssueWorkflowConfig, GithubIssueWorkflowConfigSource,
+    GithubIssueWorkflowError, GithubIssueWorkflowEventType, GithubIssueWorkflowPolicy,
+    GithubIssueWorkflowPolicyPorts, GithubIssueWorkflowPollerConfig, GithubIssueWorkflowPort,
+    GithubIssueWorkflowRepository, GithubIssueWorkflowRun, GithubIssueWorkflowRunStatus,
+    GithubProviderRef, GithubPullRequestCheckSnapshot, GithubPullRequestRef,
+    GithubPullRequestSnapshot, GithubPullRequestUpdatedPayload, GithubRepositorySelector,
+    GithubReviewCommentCreatedPayload, GithubReviewCommentSnapshot, LeaseReleaseOutcome,
+    ListActiveWorkflowRunsForRepositoryInput, ListIssueCommentsInput, ListPullRequestChecksInput,
+    ListPullRequestReviewCommentsInput, ProviderContentSummary, RecordWorkflowEventInput,
+    RecordWorkflowEventOutcome, ReleaseWorkflowRunLeaseInput, SearchGithubIssuesInput,
+    StageTurnSubmitter, WorkflowClock, WorkflowConfigAccessRequest, WorkflowEventEnvelope,
+    WorkflowEventSourceKind, WorkflowProjectAccess, WorkflowWorkerId, WorkflowWorkspaceManager,
+    checks_failed_key, checks_succeeded_key, issue_binding_ref, issue_changed_key,
+    issue_closed_key, issue_discovered_key, pr_updated_key, primary_pr_binding_ref,
+    review_comment_created_key, stage_slug,
 };
 
 const DEFAULT_WORKFLOW_POLICY_KEY: &str = "github-bug-workflow";
-const MAX_PROVIDER_CONTENT_SUMMARY_CHARS: usize = 12_000;
+// Per-text cap for an issue body or a single comment embedded in the engineered
+// snapshot. Raised from the original conservative 12k so a long bug report (with
+// stack traces / repro steps) survives into the model context; the downstream
+// event replay is capped at ~100KB total, so this stays well under that ceiling
+// even with several comments attached.
+const MAX_PROVIDER_CONTENT_SUMMARY_CHARS: usize = 64_000;
 const MAX_PROVIDER_COMMENT_SUMMARIES: usize = 5;
 const WORKFLOW_CLAIM_COMMENT_PREFIX: &str = "<!-- ironclaw:github-bug-workflow:claim:";
+/// Upper bound on the number of policy transitions a single `tick_claimed_run`
+/// drains for one claimed run before yielding the lease. Each policy tick
+/// advances exactly one event; draining collapses already-recorded queued
+/// events into one tick so a multi-stage burst does not wait a full poll
+/// interval per boundary. The bound caps how long a single run holds its lease
+/// so one busy run cannot starve the rest of the tenant.
+const MAX_DRAINED_TRANSITIONS_PER_TICK: usize = 32;
 
 pub trait GithubIssueWorkflowPollerPorts: Send + Sync {
     type Clock: WorkflowClock + ?Sized;
@@ -109,7 +122,10 @@ where
             .list_enabled_workflow_configs()
             .await?;
         outcome.configs_loaded = configs.len();
-        debug!(configs_loaded = outcome.configs_loaded, "poller tick started");
+        debug!(
+            configs_loaded = outcome.configs_loaded,
+            "poller tick started"
+        );
 
         let mut repos_remaining = self.config.max_repos_per_tick;
         let mut claim_tenants = Vec::new();
@@ -172,6 +188,7 @@ where
             runnable_runs_claimed = outcome.runnable_runs_claimed,
             policy_ticks = outcome.policy_ticks,
             leases_released = outcome.leases_released,
+            stale_stages_failed = outcome.stale_stages_failed,
             blocked_configs = outcome.blocked_configs.len(),
             blocked_runs = outcome.blocked_runs.len(),
             "poller tick completed"
@@ -257,6 +274,7 @@ where
                 .ports
                 .github_port()
                 .list_issue_comments(ListIssueCommentsInput {
+                    provider_account_ref: workflow_config.provider_account_ref.clone(),
                     issue: issue_ref.clone(),
                 })
                 .await?;
@@ -786,60 +804,230 @@ where
             self.policy_ports(),
             self.workflow_policy_version.clone(),
         );
-        match policy.tick(run.clone()).await {
-            Ok(policy_outcome) => {
-                outcome.policy_ticks += 1;
-                if policy_outcome.processed_event_count == 0 {
-                    debug!(
-                        active_stage = policy_outcome.run.active_stage_run_id.is_some(),
-                        "claimed run produced no new event (stuck-run no-op)"
-                    );
+        // DRAIN: a single policy tick advances exactly one event, but the stage
+        // result sink may have queued several events for this run (e.g. a stage
+        // completion that immediately submits the next stage which completes
+        // again). Re-tick the same run while it keeps reporting progress so a
+        // multi-transition burst collapses into one claimed tick instead of
+        // waiting a full poll interval per boundary. We stop when: a tick makes
+        // no progress (no new event after the cursor), the run reaches a
+        // terminal status, or the per-tick guard is hit (bounding lease-hold
+        // time so one busy run cannot starve the tenant). The lease is held the
+        // whole time — `advance_run_cursor` fails with NotLeaseOwner if it is
+        // lost, which surfaces as the Err arm below.
+        let mut run = run;
+        let mut drained = 0usize;
+        loop {
+            match policy.tick(run.clone()).await {
+                Ok(policy_outcome) => {
+                    run = policy_outcome.run;
+                    // A tick that advanced no event is a cursor probe, not a
+                    // transition: stop draining and do NOT count it, so
+                    // `policy_ticks` stays a count of real transitions rather
+                    // than being inflated by the trailing empty probe every
+                    // drain performs (a single-event run is 1 tick, not 2).
+                    if policy_outcome.processed_event_count == 0 {
+                        break;
+                    }
+                    outcome.policy_ticks += 1;
+                    drained += 1;
+                    if run_is_terminal(&run.status) || drained >= MAX_DRAINED_TRANSITIONS_PER_TICK {
+                        break;
+                    }
                 }
-                let release = self
-                    .ports
-                    .repository()
-                    .release_workflow_run_lease(ReleaseWorkflowRunLeaseInput {
-                        workflow_run_id: policy_outcome.run.workflow_run_id,
-                        worker_id: self.ports.worker_id(),
-                        now: self.ports.clock().now(),
-                    })
-                    .await?;
-                if matches!(release, LeaseReleaseOutcome::Released { .. }) {
-                    outcome.leases_released += 1;
+                Err(error) => {
+                    return self
+                        .block_run_after_policy_failure(run, error, outcome)
+                        .await;
                 }
-                Ok(())
-            }
-            Err(error) => {
-                let reason = error.to_string();
-                let kind = run_block_kind(&error);
-                debug!(
-                    kind = ?kind,
-                    reason = %reason,
-                    "blocking workflow run after policy tick failure"
-                );
-                self.ports
-                    .repository()
-                    .block_workflow_run(BlockWorkflowRunInput {
-                        workflow_run_id: run.workflow_run_id.clone(),
-                        worker_id: self.ports.worker_id(),
-                        active_block: GithubIssueBlockState {
-                            kind: kind.clone(),
-                            reason: reason.clone(),
-                            blocked_at: self.ports.clock().now(),
-                        },
-                        now: self.ports.clock().now(),
-                    })
-                    .await?;
-                outcome
-                    .blocked_runs
-                    .push(GithubIssueWorkflowPollerBlockedRun {
-                        workflow_run_id: run.workflow_run_id,
-                        kind,
-                        reason,
-                    });
-                Ok(())
             }
         }
+        // The drain settled. If the run still has an active stage and is not
+        // terminal, run the stuck-stage reconciler on that final state.
+        if !run_is_terminal(&run.status) && run.active_stage_run_id.is_some() {
+            debug!(
+                active_stage = true,
+                "claimed run settled with an active stage (no further events to drain)"
+            );
+            // Stuck-stage reconciler: a stage turn is fire-and-forget, so
+            // a turn that dies without reporting a result strands
+            // `active_stage_run_id` set forever while the poller silently
+            // re-claims the run every tick. When a drained run still has an
+            // active stage, check the STAGE-level heartbeat (the run lease is
+            // renewed each tick and never goes stale, so it cannot detect
+            // this). If the stage is stale — or was already failed by a prior
+            // reconcile that crashed before blocking — fail the stage and
+            // escalate the run to RecoveryRequired via the same block path the
+            // policy-error arm uses.
+            if let Some(stage_run_id) = run.active_stage_run_id.clone() {
+                let now = self.ports.clock().now();
+                let snapshot = self
+                    .ports
+                    .repository()
+                    .get_stage_run(GetStageRunInput {
+                        workflow_run_id: run.workflow_run_id.clone(),
+                        stage_run_id: stage_run_id.clone(),
+                    })
+                    .await?;
+                let stale_after = chrono_lease_duration(self.config.stage_stale_after)?;
+                match snapshot {
+                    Some(snapshot) => {
+                        let is_stale =
+                            snapshot.active && now - snapshot.last_heartbeat_at >= stale_after;
+                        // Do NOT escalate an inactive-but-not-failed stage:
+                        // that is work that SUCCEEDED whose run-pointer clear
+                        // merely crashed mid-accept; escalating it would
+                        // wrongly demand human recovery of completed work.
+                        if is_stale || snapshot.failed {
+                            self.ports
+                                .repository()
+                                .fail_stage_run(FailStageRunInput {
+                                    workflow_run_id: run.workflow_run_id.clone(),
+                                    stage_run_id: stage_run_id.clone(),
+                                    now,
+                                })
+                                .await?;
+                            let reason = format!(
+                                "stage `{}` stalled with no progress for >= {}s",
+                                stage_slug(&snapshot.stage),
+                                self.config.stage_stale_after.as_secs(),
+                            );
+                            self.escalate_stuck_stage_to_recovery(&run, reason, now, outcome)
+                                .await?;
+                            debug!(
+                                stage_run_id = %stage_run_id,
+                                "reconciler escalated stale stage to RecoveryRequired"
+                            );
+                            // block_workflow_run already cleared the lease and
+                            // the active-stage pointer, so skip lease release.
+                            return Ok(());
+                        }
+                    }
+                    // Orphan pointer: `active_stage_run_id` is set but NO stage
+                    // row backs it — a crash between the run-pointer write and
+                    // the stage-row write. There is no stage-level heartbeat to
+                    // read, so staleness is measured from the run's `created_at`
+                    // (the only stable anchor: the run's lease — and therefore
+                    // its `updated_at`/`last_heartbeat_at` — is refreshed on
+                    // every claim, so it never goes stale on a stuck run). A
+                    // brief orphan window is normal during stage creation, so we
+                    // escalate only after `stage_stale_after`. There is no row to
+                    // fail; `block_workflow_run` clears the orphan pointer, so
+                    // the run stops re-claiming as a permanent no-op.
+                    None => {
+                        if now - run.created_at >= stale_after {
+                            let reason = format!(
+                                "active stage pointer `{}` has no backing stage row for >= {}s \
+                                 (orphan pointer; recovery required)",
+                                stage_run_id,
+                                self.config.stage_stale_after.as_secs(),
+                            );
+                            self.escalate_stuck_stage_to_recovery(&run, reason, now, outcome)
+                                .await?;
+                            debug!(
+                                stage_run_id = %stage_run_id,
+                                "reconciler escalated orphan active-stage pointer to RecoveryRequired"
+                            );
+                            // block_workflow_run already cleared the lease and
+                            // the orphan pointer, so skip lease release.
+                            return Ok(());
+                        }
+                        debug!(
+                            stage_run_id = %stage_run_id,
+                            "orphan active-stage pointer is still within the stale window; leaving it"
+                        );
+                    }
+                }
+            }
+        }
+        let release = self
+            .ports
+            .repository()
+            .release_workflow_run_lease(ReleaseWorkflowRunLeaseInput {
+                workflow_run_id: run.workflow_run_id,
+                worker_id: self.ports.worker_id(),
+                now: self.ports.clock().now(),
+            })
+            .await?;
+        if matches!(release, LeaseReleaseOutcome::Released { .. }) {
+            outcome.leases_released += 1;
+        }
+        Ok(())
+    }
+
+    /// Block a claimed run after its policy tick failed, mirroring the original
+    /// inline error arm. Used by the drain loop so a failure at any drained
+    /// transition blocks the run instead of looping.
+    async fn block_run_after_policy_failure(
+        &self,
+        run: crate::GithubIssueWorkflowRun,
+        error: GithubIssueWorkflowError,
+        outcome: &mut GithubIssueWorkflowPollerTickOutcome,
+    ) -> Result<(), GithubIssueWorkflowError> {
+        let reason = error.to_string();
+        let kind = run_block_kind(&error);
+        debug!(
+            kind = ?kind,
+            reason = %reason,
+            "blocking workflow run after policy tick failure"
+        );
+        self.ports
+            .repository()
+            .block_workflow_run(BlockWorkflowRunInput {
+                workflow_run_id: run.workflow_run_id.clone(),
+                worker_id: self.ports.worker_id(),
+                active_block: GithubIssueBlockState {
+                    kind: kind.clone(),
+                    reason: reason.clone(),
+                    blocked_at: self.ports.clock().now(),
+                },
+                now: self.ports.clock().now(),
+            })
+            .await?;
+        outcome
+            .blocked_runs
+            .push(GithubIssueWorkflowPollerBlockedRun {
+                workflow_run_id: run.workflow_run_id,
+                kind,
+                reason,
+            });
+        Ok(())
+    }
+
+    /// Escalate a stuck stage (stale stage row OR orphan pointer with no row) to
+    /// a `RecoveryRequired` block. Shared by both stuck-stage reconciler arms so
+    /// they record the outcome identically: block the run (which also clears the
+    /// lease and the active-stage pointer), count it, and surface the blocked run
+    /// to the tick outcome.
+    async fn escalate_stuck_stage_to_recovery(
+        &self,
+        run: &crate::GithubIssueWorkflowRun,
+        reason: String,
+        now: DateTime<Utc>,
+        outcome: &mut GithubIssueWorkflowPollerTickOutcome,
+    ) -> Result<(), GithubIssueWorkflowError> {
+        self.ports
+            .repository()
+            .block_workflow_run(BlockWorkflowRunInput {
+                workflow_run_id: run.workflow_run_id.clone(),
+                worker_id: self.ports.worker_id(),
+                active_block: GithubIssueBlockState {
+                    kind: GithubIssueBlockKind::RecoveryRequired,
+                    reason: reason.clone(),
+                    blocked_at: now,
+                },
+                now,
+            })
+            .await?;
+        outcome.stale_stages_failed += 1;
+        outcome
+            .blocked_runs
+            .push(GithubIssueWorkflowPollerBlockedRun {
+                workflow_run_id: run.workflow_run_id.clone(),
+                kind: GithubIssueBlockKind::RecoveryRequired,
+                reason,
+            });
+        Ok(())
     }
 
     fn policy_ports(&self) -> PollerPolicyPorts<P> {
@@ -855,6 +1043,56 @@ where
     }
 }
 
+/// Wake channel that lets a stage-result producer re-tick the poller
+/// immediately at a stage boundary instead of waiting a full poll interval.
+///
+/// Mirrors the turn-runner wake pattern: a `tokio::sync::Notify` shared between
+/// a [`GithubIssueWorkflowPollerWakeSender`] (handed to the stage-result sink)
+/// and a [`GithubIssueWorkflowPollerWakeReceiver`] (selected against in the
+/// poller loop). Wake delivery is best-effort and edge-triggered: a wake that
+/// arrives while the poller is mid-tick coalesces into the single pending
+/// permit `Notify` holds, so it is safe to over-fire and the interval remains
+/// the safety-net fallback.
+#[derive(Debug, Clone)]
+pub struct GithubIssueWorkflowPollerWakeSender {
+    notify: Arc<tokio::sync::Notify>,
+}
+
+impl GithubIssueWorkflowPollerWakeSender {
+    /// Signal the poller that a run may have newly drainable events.
+    pub fn wake(&self) {
+        self.notify.notify_one();
+    }
+}
+
+/// Receiver half of the poller wake channel. Held by the poller loop.
+#[derive(Debug, Clone)]
+pub struct GithubIssueWorkflowPollerWakeReceiver {
+    notify: Arc<tokio::sync::Notify>,
+}
+
+impl GithubIssueWorkflowPollerWakeReceiver {
+    /// Construct a connected wake sender/receiver pair.
+    pub fn channel() -> (
+        GithubIssueWorkflowPollerWakeSender,
+        GithubIssueWorkflowPollerWakeReceiver,
+    ) {
+        let notify = Arc::new(tokio::sync::Notify::new());
+        (
+            GithubIssueWorkflowPollerWakeSender {
+                notify: Arc::clone(&notify),
+            },
+            Self { notify },
+        )
+    }
+
+    /// Wait for a wake signal. The caller pairs this with an interval fallback
+    /// via `select!` so a missed/dropped wake still recovers on the next tick.
+    pub async fn notified(&self) {
+        self.notify.notified().await;
+    }
+}
+
 #[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GithubIssueWorkflowPollerTickOutcome {
     pub disabled: bool,
@@ -866,6 +1104,7 @@ pub struct GithubIssueWorkflowPollerTickOutcome {
     pub runnable_runs_claimed: usize,
     pub policy_ticks: usize,
     pub leases_released: usize,
+    pub stale_stages_failed: usize,
     pub blocked_configs: Vec<GithubIssueWorkflowPollerBlockedConfig>,
     pub blocked_runs: Vec<GithubIssueWorkflowPollerBlockedRun>,
 }
@@ -1018,7 +1257,8 @@ fn provider_content_summaries(
     snapshot: &GithubIssueProviderSnapshot,
     comments: &[GithubIssueCommentSnapshot],
 ) -> Vec<ProviderContentSummary> {
-    let mut summaries = Vec::with_capacity(MAX_PROVIDER_COMMENT_SUMMARIES + 1);
+    // +1 issue summary, +1 possible elision marker.
+    let mut summaries = Vec::with_capacity(MAX_PROVIDER_COMMENT_SUMMARIES + 2);
     summaries.push(ProviderContentSummary {
         source_ref: format!(
             "github:issue:{}/{}#{}",
@@ -1033,15 +1273,23 @@ fn provider_content_summaries(
         trust: "untrusted_provider_content".to_string(),
     });
 
+    // Drop the workflow's own claim comments, then keep up to the cap. Count
+    // the total non-claim comments first so we can tell the model how many were
+    // elided rather than silently truncating the conversation (mirrors how
+    // `truncate_provider_text` marks a truncated body).
+    let included: Vec<&GithubIssueCommentSnapshot> = comments
+        .iter()
+        .filter(|comment| {
+            !comment
+                .body
+                .trim_start()
+                .starts_with(WORKFLOW_CLAIM_COMMENT_PREFIX)
+        })
+        .collect();
+    let total_comments = included.len();
     summaries.extend(
-        comments
+        included
             .iter()
-            .filter(|comment| {
-                !comment
-                    .body
-                    .trim_start()
-                    .starts_with(WORKFLOW_CLAIM_COMMENT_PREFIX)
-            })
             .take(MAX_PROVIDER_COMMENT_SUMMARIES)
             .map(|comment| ProviderContentSummary {
                 source_ref: comment.comment.url.clone(),
@@ -1054,6 +1302,18 @@ fn provider_content_summaries(
                 trust: "untrusted_provider_content".to_string(),
             }),
     );
+    if total_comments > MAX_PROVIDER_COMMENT_SUMMARIES {
+        let dropped = total_comments - MAX_PROVIDER_COMMENT_SUMMARIES;
+        summaries.push(ProviderContentSummary {
+            source_ref: format!(
+                "github:issue:{}/{}#{}:comments-elided",
+                snapshot.owner, snapshot.repo, snapshot.number
+            ),
+            author: None,
+            summary: format!("[{dropped} additional comments not shown]"),
+            trust: "untrusted_provider_content".to_string(),
+        });
+    }
 
     summaries
 }
@@ -1196,6 +1456,18 @@ fn config_block_kind(error: &GithubIssueWorkflowError) -> GithubIssueWorkflowPol
     }
 }
 
+/// Whether a run has reached a terminal status. The drain loop stops re-ticking
+/// a run once it is terminal (the policy itself short-circuits a terminal tick,
+/// but stopping here avoids a redundant final no-op tick).
+fn run_is_terminal(status: &GithubIssueWorkflowRunStatus) -> bool {
+    matches!(
+        status,
+        GithubIssueWorkflowRunStatus::Succeeded
+            | GithubIssueWorkflowRunStatus::Failed
+            | GithubIssueWorkflowRunStatus::Cancelled
+    )
+}
+
 fn run_block_kind(error: &GithubIssueWorkflowError) -> GithubIssueBlockKind {
     match error {
         GithubIssueWorkflowError::ProviderRateLimited { .. } => GithubIssueBlockKind::RateLimited,
@@ -1219,8 +1491,16 @@ fn poller_serde_error(error: serde_json::Error) -> GithubIssueWorkflowError {
 
 #[cfg(test)]
 mod tests {
-    use super::{github_search_value, open_bug_query};
-    use crate::{GithubIssueCandidateSelector, GithubRepositorySelector};
+    use chrono::{TimeZone, Utc};
+
+    use super::{
+        MAX_PROVIDER_COMMENT_SUMMARIES, github_search_value, open_bug_query,
+        provider_content_summaries,
+    };
+    use crate::{
+        GithubCommentRef, GithubIssueCandidateSelector, GithubIssueCommentSnapshot,
+        GithubIssueProviderSnapshot, GithubRepositorySelector,
+    };
 
     #[test]
     fn open_bug_query_uses_configured_candidate_labels() {
@@ -1245,6 +1525,84 @@ mod tests {
         assert_eq!(
             github_search_value("needs \"care\""),
             "\"needs \\\"care\\\"\""
+        );
+    }
+
+    #[test]
+    fn provider_content_summaries_marks_dropped_comments() {
+        let snapshot = GithubIssueProviderSnapshot {
+            owner: "near".to_string(),
+            repo: "ironclaw".to_string(),
+            number: 7,
+            node_id: None,
+            url: "https://github.com/near/ironclaw/issues/7".to_string(),
+            default_branch: "main".to_string(),
+            title: "Bug".to_string(),
+            body: "body".to_string(),
+            state: "open".to_string(),
+            author_login: Some("reporter".to_string()),
+            labels: vec!["bug".to_string()],
+            updated_at: None,
+        };
+        // Two more comments than the cap so the elision marker must appear.
+        let comment_count = MAX_PROVIDER_COMMENT_SUMMARIES + 2;
+        let comments: Vec<GithubIssueCommentSnapshot> = (0..comment_count)
+            .map(|index| GithubIssueCommentSnapshot {
+                comment: GithubCommentRef {
+                    node_id: Some(format!("c{index}")),
+                    url: format!("https://github.com/near/ironclaw/issues/7#c{index}"),
+                },
+                body: format!("comment {index}"),
+                author_login: "octocat".to_string(),
+                created_at: Utc.timestamp_opt(1, 0).unwrap(),
+                updated_at: Utc.timestamp_opt(2, 0).unwrap(),
+            })
+            .collect();
+
+        let summaries = provider_content_summaries(&snapshot, &comments);
+
+        // 1 issue + cap comments + 1 elision marker.
+        assert_eq!(summaries.len(), 1 + MAX_PROVIDER_COMMENT_SUMMARIES + 1);
+        let marker = summaries.last().expect("a summary is present");
+        assert_eq!(marker.summary, "[2 additional comments not shown]");
+        assert!(marker.source_ref.ends_with(":comments-elided"));
+    }
+
+    #[test]
+    fn provider_content_summaries_has_no_marker_when_under_cap() {
+        let snapshot = GithubIssueProviderSnapshot {
+            owner: "near".to_string(),
+            repo: "ironclaw".to_string(),
+            number: 8,
+            node_id: None,
+            url: "https://github.com/near/ironclaw/issues/8".to_string(),
+            default_branch: "main".to_string(),
+            title: "Bug".to_string(),
+            body: "body".to_string(),
+            state: "open".to_string(),
+            author_login: Some("reporter".to_string()),
+            labels: Vec::new(),
+            updated_at: None,
+        };
+        let comments = vec![GithubIssueCommentSnapshot {
+            comment: GithubCommentRef {
+                node_id: Some("c0".to_string()),
+                url: "https://github.com/near/ironclaw/issues/8#c0".to_string(),
+            },
+            body: "only comment".to_string(),
+            author_login: "octocat".to_string(),
+            created_at: Utc.timestamp_opt(1, 0).unwrap(),
+            updated_at: Utc.timestamp_opt(2, 0).unwrap(),
+        }];
+
+        let summaries = provider_content_summaries(&snapshot, &comments);
+
+        // 1 issue + 1 comment, no elision marker.
+        assert_eq!(summaries.len(), 2);
+        assert!(
+            summaries
+                .iter()
+                .all(|summary| !summary.summary.contains("additional comments not shown"))
         );
     }
 }

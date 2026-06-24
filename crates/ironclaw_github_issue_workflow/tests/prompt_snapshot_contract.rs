@@ -68,6 +68,7 @@ mod prompt_snapshot_contract {
                 changed_files: vec!["crates/ironclaw_github_issue_workflow/src/policy.rs"
                     .to_string()],
             }),
+            verification: None,
             constraints: StageConstraintSnapshot {
                 stage: GithubIssueStage::Implementation,
                 stage_goal: "Patch the workflow and collect verification evidence.".to_string(),

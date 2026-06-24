@@ -78,6 +78,24 @@ pub trait GithubIssueWorkflowRepository: Send + Sync {
         input: AcceptStageResultInput,
     ) -> Result<AcceptStageResultOutcome, GithubIssueWorkflowError>;
 
+    /// Read the stage run row by id. Returns `None` when the row is absent
+    /// (legacy run before stage rows were persisted, or never created). Used by
+    /// the stuck-stage reconciler to read the stage-level staleness clock.
+    async fn get_stage_run(
+        &self,
+        input: GetStageRunInput,
+    ) -> Result<Option<StageRunSnapshot>, GithubIssueWorkflowError>;
+
+    /// Mark a stage run row failed (active -> false, failed -> true). Used by
+    /// the stuck-stage reconciler before the run is escalated to a
+    /// `RecoveryRequired` block. The run-row `active_stage_run_id` pointer is
+    /// cleared separately by `block_workflow_run`, not here, so the two writes
+    /// stay independent and the sequence is crash-idempotent.
+    async fn fail_stage_run(
+        &self,
+        input: FailStageRunInput,
+    ) -> Result<FailStageRunOutcome, GithubIssueWorkflowError>;
+
     async fn create_or_get_workflow_step(
         &self,
         input: CreateOrGetWorkflowStepInput,
@@ -229,6 +247,80 @@ pub struct WorkflowRunTransition {
     pub latest_provider_snapshot: Option<GithubIssueProviderSnapshotSummary>,
     pub workspace_session: Option<GithubIssueWorkspaceSession>,
     pub primary_pr: Option<GithubPullRequestRef>,
+    /// The claim comment posted on the issue when the run was claimed. Captured
+    /// from the claim provider action so a later stage can edit that comment to
+    /// link the draft PR. `#[serde(default)]` keeps legacy persisted transition
+    /// rows (which predate this field) deserializable.
+    #[serde(default)]
+    pub claim_comment: Option<crate::GithubCommentRef>,
+    /// Outcome of the independent verification gate, persisted onto the run's
+    /// workflow_state so PrSynthesis (and replays) can surface it.
+    #[serde(default)]
+    pub last_verification: Option<crate::WorkflowVerificationSummary>,
+}
+
+/// Apply every field of a [`WorkflowRunTransition`] onto a run, in the order the
+/// backends agreed on. This is the SINGLE place the transition's fields are
+/// projected onto `GithubIssueWorkflowRun`/`GithubIssueWorkflowState`: both the
+/// in-memory backend and the durable filesystem backend (inside its CAS retry
+/// loop) call it, so the two cannot silently diverge — a divergence already
+/// shipped once when the durable backend dropped `latest_provider_snapshot`.
+///
+/// The transition is destructured below so that adding a new field to
+/// [`WorkflowRunTransition`] is a COMPILE ERROR here until the new field is
+/// handled — that is the mechanism that prevents the next dropped field. The
+/// caller is responsible for the event-cursor advance, version bump, timestamp,
+/// and terminal-state lease/stage clearing; this helper only projects the
+/// transition's own fields.
+///
+/// Ordering note: `clear_active_block` is honored BEFORE `active_block`, so a
+/// transition that both clears and sets ends with the set block. This preserves
+/// the original hand-rolled if-let ordering both backends used.
+pub fn apply_workflow_run_transition(
+    run: &mut GithubIssueWorkflowRun,
+    transition: &WorkflowRunTransition,
+) {
+    let WorkflowRunTransition {
+        status,
+        mode,
+        active_block,
+        clear_active_block,
+        latest_provider_snapshot,
+        workspace_session,
+        primary_pr,
+        claim_comment,
+        last_verification,
+    } = transition;
+
+    if let Some(status) = status.clone() {
+        run.status = status;
+    }
+    if let Some(mode) = mode.clone() {
+        run.workflow_state.mode = mode;
+    }
+    if *clear_active_block {
+        run.workflow_state.active_block = None;
+    }
+    if let Some(active_block) = active_block.clone() {
+        run.workflow_state.active_block = Some(active_block);
+    }
+    if let Some(provider_snapshot) = latest_provider_snapshot.clone() {
+        run.workflow_state.latest_provider_snapshot = Some(provider_snapshot);
+    }
+    if let Some(workspace_session) = workspace_session.clone() {
+        run.workspace_session_id = Some(workspace_session.workspace_session_id);
+        run.workflow_state.current_workspace_ref = Some(workspace_session.workspace_ref);
+        run.workflow_state.current_workspace_mount_ref = Some(workspace_session.mount_ref);
+    }
+    if let Some(primary_pr) = primary_pr.clone() {
+        run.workflow_state.primary_pr = Some(primary_pr);
+    }
+    if let Some(claim_comment) = claim_comment.clone() {
+        run.workflow_state.claim_comment = Some(claim_comment);
+    }
+    if let Some(last_verification) = last_verification.clone() {
+        run.workflow_state.last_verification = Some(last_verification);
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -286,6 +378,46 @@ pub enum AcceptStageResultOutcome {
     Accepted { run: GithubIssueWorkflowRun },
     NotActiveStage { run: GithubIssueWorkflowRun },
     Terminal,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GetStageRunInput {
+    pub workflow_run_id: GithubIssueWorkflowRunId,
+    pub stage_run_id: GithubIssueStageRunId,
+}
+
+/// A read-only view of a stage run row, used by the stuck-stage reconciler.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StageRunSnapshot {
+    pub stage_run_id: GithubIssueStageRunId,
+    pub workflow_run_id: GithubIssueWorkflowRunId,
+    pub stage: GithubIssueStage,
+    pub active: bool,
+    pub failed: bool,
+    pub created_at: DateTime<Utc>,
+    /// Stage-level liveness clock, stamped when the stage row is written. This
+    /// is the staleness signal the reconciler tests against `stage_stale_after`.
+    /// It is deliberately decoupled from the run-level lease (which is renewed
+    /// every poller tick and therefore never goes stale on a stuck stage).
+    pub last_heartbeat_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FailStageRunInput {
+    pub workflow_run_id: GithubIssueWorkflowRunId,
+    pub stage_run_id: GithubIssueStageRunId,
+    pub now: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum FailStageRunOutcome {
+    /// The stage row was flipped to failed/inactive.
+    Failed { stage_run_id: GithubIssueStageRunId },
+    /// The stage row was already inactive (accepted or previously failed) — the
+    /// op is idempotent, so a retried reconcile is a no-op.
+    AlreadyInactive,
+    /// No stage row exists for this run/id pair.
+    NotFound,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

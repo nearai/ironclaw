@@ -17,8 +17,9 @@ The authoritative schema block is appended by the renderer. It is the only accep
 
 ## Success Criteria
 - Produce ordered plan items that are narrow enough for the implementation stage.
-- Name files or areas to inspect or change.
-- Provide a test strategy that can prove the bugfix through the caller or workflow boundary.
+- Prefer the minimal change that fixes the bug. Preserve public APIs and function/method signatures unless the fix strictly requires changing them; when a signature must change, the plan must include updating every call site and the affected tests.
+- Name files or areas to inspect or change. Do not plan unrelated refactors, reformatting, or renames.
+- Provide a test strategy that can prove the bugfix through the caller or workflow boundary, and that keeps the existing test suite green.
 - Include confidence as a number in the accepted schema payload.
 
 ## Failure Or Needs-Human Criteria

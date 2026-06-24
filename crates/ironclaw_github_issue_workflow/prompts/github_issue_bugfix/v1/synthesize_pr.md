@@ -19,6 +19,7 @@ The authoritative schema block is appended by the renderer. It is the only accep
 - Produce a concise PR title and useful body.
 - Include branch name, base branch, and head SHA.
 - Describe tests and risks from prior stage evidence.
+- Reflect the snapshot's `verification` field in the PR body: when `verification.passed` is `true`, state that the workflow independently re-ran the repository's tests in the prepared workspace and they passed (cite `verification.command_label`). Do not claim independent verification when `verification` is absent or `verification.ran` is `false`; describe only the implementer-reported evidence in that case. Never overstate: do not claim tests pass beyond what `verification` and prior stage evidence support.
 - Keep provider-write intent structured for workflow provider actions.
 
 ## Failure Or Needs-Human Criteria

@@ -1,7 +1,10 @@
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-use crate::{GithubIssueStage, GithubIssueWorkflowError, domain::ProviderContentSummary};
+use crate::{
+    GithubIssueStage, GithubIssueWorkflowError,
+    domain::{ProviderContentSummary, WorkflowVerificationSummary},
+};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct EngineeredWorkflowSnapshot {
@@ -10,6 +13,11 @@ pub struct EngineeredWorkflowSnapshot {
     pub repository: RepositorySnapshot,
     pub previous_stage_results: Vec<StageResultSummary>,
     pub workspace: Option<WorkflowWorkspaceSnapshot>,
+    /// Result of the workflow's independent in-workspace verification gate, so
+    /// PrSynthesis can state what the workflow itself verified. `#[serde(default)]`
+    /// keeps prior persisted/serialized snapshots compatible.
+    #[serde(default)]
+    pub verification: Option<WorkflowVerificationSummary>,
     pub constraints: StageConstraintSnapshot,
 }
 

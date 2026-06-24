@@ -149,14 +149,42 @@ pub trait WorkflowWorkspaceManager: Send + Sync {
         _request: PublishWorkflowWorkspaceRequest,
     ) -> Result<PublishWorkflowWorkspaceOutcome, GithubIssueWorkflowError> {
         Err(GithubIssueWorkflowError::PolicyDenied {
-            reason: "GitHub issue workflow workspace publish is not supported by this workspace backend"
-                .to_string(),
+            reason:
+                "GitHub issue workflow workspace publish is not supported by this workspace backend"
+                    .to_string(),
+        })
+    }
+
+    /// Independently verify the implementation in the prepared workspace BEFORE
+    /// a draft PR is opened — by running the repository's test/verification
+    /// command in the checkout and reporting whether it passed. This is the
+    /// trust-but-verify gate: the policy must not rely on the model's
+    /// self-reported `pr_ready`/`test_evidence` (a model can claim success while
+    /// leaving the tests broken).
+    ///
+    /// The default is a NO-OP that reports `ran: false, passed: true` (a backend
+    /// without verification support never blocks a run). Only a backend with a
+    /// real checkout implements it. A failing test suite is reported as
+    /// `Ok(passed: false)` — NOT an `Err` — because it is a policy decision, not
+    /// an infrastructure fault; spawn/timeout faults are `Err` (retryable).
+    async fn verify_workspace(
+        &self,
+        _request: VerifyWorkflowWorkspaceRequest,
+    ) -> Result<VerifyWorkflowWorkspaceOutcome, GithubIssueWorkflowError> {
+        Ok(VerifyWorkflowWorkspaceOutcome {
+            ran: false,
+            passed: true,
+            exit_code: None,
+            command_label: String::new(),
+            stdout_tail: String::new(),
+            stderr_tail: String::new(),
         })
     }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GetAuthenticatedWorkflowActorInput {
+    pub provider_account_ref: GithubProviderAccountRef,
     pub owner: String,
     pub repo: String,
 }
@@ -239,6 +267,7 @@ impl GithubIssueProviderSnapshot {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ListIssueCommentsInput {
+    pub provider_account_ref: GithubProviderAccountRef,
     pub issue: GithubIssueRef,
 }
 
@@ -253,6 +282,7 @@ pub struct GithubIssueCommentSnapshot {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CreateIssueCommentInput {
+    pub provider_account_ref: GithubProviderAccountRef,
     pub issue: GithubIssueRef,
     pub body: String,
 }
@@ -449,4 +479,45 @@ pub struct PublishWorkflowWorkspaceOutcome {
     /// at least one commit to open a PR against). A PR cannot be opened when
     /// this is false.
     pub has_changes: bool,
+}
+
+/// A host-authored verification command run argv-only (NEVER a shell string)
+/// in the prepared workspace checkout.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkflowVerificationCommand {
+    pub program: String,
+    #[serde(default)]
+    pub args: Vec<String>,
+    pub timeout_secs: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct VerifyWorkflowWorkspaceRequest {
+    pub tenant_id: TenantId,
+    pub creator_user_id: UserId,
+    pub agent_id: Option<AgentId>,
+    pub project_id: Option<ProjectId>,
+    pub workflow_run_id: GithubIssueWorkflowRunId,
+    pub issue: GithubIssueRef,
+    pub workspace_session_id: GithubIssueWorkspaceSessionId,
+    /// Explicit host-authored command. When `None`, the backend may auto-detect
+    /// a test runner from the checkout (or report `ran: false` if none is found).
+    pub command: Option<WorkflowVerificationCommand>,
+    pub requested_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct VerifyWorkflowWorkspaceOutcome {
+    /// Whether a verification command was actually executed. `false` means no
+    /// command was configured/detected — the gate is skipped, not failed.
+    pub ran: bool,
+    /// Whether the executed command passed (exit 0). Meaningful only when `ran`.
+    pub passed: bool,
+    pub exit_code: Option<i32>,
+    /// Human-readable label of the command that ran (argv joined); never
+    /// contains secrets (host-authored / detected program + args only).
+    pub command_label: String,
+    /// Bounded tail of stdout/stderr for diagnostics (truncated).
+    pub stdout_tail: String,
+    pub stderr_tail: String,
 }

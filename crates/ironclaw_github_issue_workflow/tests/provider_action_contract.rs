@@ -9,10 +9,10 @@ mod provider_action_contract {
         GetAuthenticatedWorkflowActorInput, GithubActorSnapshot, GithubCommentRef,
         GithubIssueCommentSnapshot, GithubIssueProviderActionRunner, GithubIssueRef,
         GithubIssueWorkflowError, GithubIssueWorkflowPort, GithubIssueWorkflowRepository,
-        GithubIssueWorkflowRun, InMemoryGithubIssueWorkflowRepository, ListIssueCommentsInput,
-        ProviderActionKind, ProviderActionReconciliationStrategy, ProviderActionRunOutcome,
-        ProviderActionStatus, RunClaimCommentProviderActionRequest, WorkflowWorkerId,
-        stable_claim_marker,
+        GithubIssueWorkflowRun, GithubProviderAccountRef, InMemoryGithubIssueWorkflowRepository,
+        ListIssueCommentsInput, ProviderActionKind, ProviderActionReconciliationStrategy,
+        ProviderActionRunOutcome, ProviderActionStatus, RunClaimCommentProviderActionRequest,
+        WorkflowWorkerId, stable_claim_marker,
     };
     use ironclaw_host_api::{AgentId, ProjectId, TenantId, UserId};
     use tokio::sync::{Mutex, Notify};
@@ -102,6 +102,9 @@ mod provider_action_contract {
         list_calls: Mutex<usize>,
         create_call_observed: Notify,
         pause_first_create_until: Mutex<Option<Arc<Notify>>>,
+        actor_account: Mutex<Option<GithubProviderAccountRef>>,
+        list_account: Mutex<Option<GithubProviderAccountRef>>,
+        create_account: Mutex<Option<GithubProviderAccountRef>>,
     }
 
     impl FakeGithubIssueWorkflowPort {
@@ -121,7 +124,22 @@ mod provider_action_contract {
                 list_calls: Mutex::new(0),
                 create_call_observed: Notify::new(),
                 pause_first_create_until: Mutex::new(None),
+                actor_account: Mutex::new(None),
+                list_account: Mutex::new(None),
+                create_account: Mutex::new(None),
             }
+        }
+
+        async fn actor_account(&self) -> Option<GithubProviderAccountRef> {
+            self.actor_account.lock().await.clone()
+        }
+
+        async fn list_account(&self) -> Option<GithubProviderAccountRef> {
+            self.list_account.lock().await.clone()
+        }
+
+        async fn create_account(&self) -> Option<GithubProviderAccountRef> {
+            self.create_account.lock().await.clone()
         }
 
         async fn set_comments(&self, comments: Vec<GithubIssueCommentSnapshot>) {
@@ -161,15 +179,17 @@ mod provider_action_contract {
     impl GithubIssueWorkflowPort for FakeGithubIssueWorkflowPort {
         async fn get_authenticated_workflow_actor(
             &self,
-            _input: GetAuthenticatedWorkflowActorInput,
+            input: GetAuthenticatedWorkflowActorInput,
         ) -> Result<GithubActorSnapshot, GithubIssueWorkflowError> {
+            *self.actor_account.lock().await = Some(input.provider_account_ref.clone());
             Ok(self.actor.clone())
         }
 
         async fn list_issue_comments(
             &self,
-            _input: ListIssueCommentsInput,
+            input: ListIssueCommentsInput,
         ) -> Result<Vec<GithubIssueCommentSnapshot>, GithubIssueWorkflowError> {
+            *self.list_account.lock().await = Some(input.provider_account_ref.clone());
             *self.list_calls.lock().await += 1;
             Ok(self.comments.lock().await.clone())
         }
@@ -178,6 +198,7 @@ mod provider_action_contract {
             &self,
             input: CreateIssueCommentInput,
         ) -> Result<GithubCommentRef, GithubIssueWorkflowError> {
+            *self.create_account.lock().await = Some(input.provider_account_ref.clone());
             let create_call_count = {
                 let mut create_bodies = self.create_bodies.lock().await;
                 create_bodies.push(input.body);
@@ -206,16 +227,43 @@ mod provider_action_contract {
         }
     }
 
+    fn claim_account() -> GithubProviderAccountRef {
+        GithubProviderAccountRef {
+            provider: "github".to_string(),
+            account_id: "claim-comment-account".to_string(),
+        }
+    }
+
     fn request(
         run: GithubIssueWorkflowRun,
         worker_id: WorkflowWorkerId,
     ) -> RunClaimCommentProviderActionRequest {
         RunClaimCommentProviderActionRequest {
             run,
+            provider_account_ref: claim_account(),
             worker_id,
             now: fixed_time(20),
             lease_expires_at: fixed_time(80),
         }
+    }
+
+    #[tokio::test]
+    async fn claim_comment_uses_run_provider_account_ref_for_all_provider_ops() {
+        let repository = Arc::new(InMemoryGithubIssueWorkflowRepository::default());
+        let port = Arc::new(FakeGithubIssueWorkflowPort::new());
+        let run = create_run(&repository, issue()).await;
+        let runner = GithubIssueProviderActionRunner::new(repository, port.clone());
+
+        // Empty comment list -> the runner reads the actor, lists comments, then
+        // creates the claim comment: all three provider ops are exercised.
+        runner
+            .run_claim_comment(request(run, worker(1)))
+            .await
+            .unwrap();
+
+        assert_eq!(port.actor_account().await.as_ref(), Some(&claim_account()));
+        assert_eq!(port.list_account().await.as_ref(), Some(&claim_account()));
+        assert_eq!(port.create_account().await.as_ref(), Some(&claim_account()));
     }
 
     #[tokio::test]

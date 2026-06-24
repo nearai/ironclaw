@@ -140,6 +140,14 @@ pub struct GithubIssueWorkflowPollerConfig {
     pub max_issues_per_repo_per_tick: usize,
     pub max_runnable_runs_per_tick: usize,
     pub lease_duration: Duration,
+    /// How long a stage run row may sit active without progress before the
+    /// stuck-stage reconciler escalates the run to `RecoveryRequired`. Measured
+    /// against the STAGE-level heartbeat, not the run lease (the run lease is
+    /// renewed every tick and never goes stale, which is the bug this guards).
+    /// Escalate-only: too long merely delays recovery; too short would kill
+    /// healthy long-running stage turns, so this must exceed the longest
+    /// legitimate stage turn.
+    pub stage_stale_after: Duration,
 }
 
 impl Default for GithubIssueWorkflowPollerConfig {
@@ -151,6 +159,7 @@ impl Default for GithubIssueWorkflowPollerConfig {
             max_issues_per_repo_per_tick: 10,
             max_runnable_runs_per_tick: 10,
             lease_duration: Duration::from_secs(300),
+            stage_stale_after: Duration::from_secs(1800),
         }
     }
 }
