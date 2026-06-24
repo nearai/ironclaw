@@ -280,6 +280,33 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
             self.assertFalse(preflight["ready"])
             self.assertIn("missing GitHub live prerequisites", preflight["reason"])
 
+    def test_google_required_env_for_runtime_block_includes_refresh_inputs(self):
+        required = run_live_qa._google_required_env_for_block(
+            {
+                "missing_google_client_secret": True,
+                "refresh_probe_failed": True,
+            },
+            requires_runtime_access=True,
+        )
+
+        self.assertEqual(
+            required,
+            [
+                "IRONCLAW_REBORN_GOOGLE_CLIENT_ID",
+                "IRONCLAW_REBORN_GOOGLE_CLIENT_SECRET",
+                "AUTH_LIVE_GOOGLE_ACCESS_TOKEN",
+                "AUTH_LIVE_GOOGLE_REFRESH_TOKEN",
+            ],
+        )
+
+    def test_google_required_env_for_connect_block_keeps_client_id_only(self):
+        required = run_live_qa._google_required_env_for_block(
+            {},
+            requires_runtime_access=False,
+        )
+
+        self.assertEqual(required, ["IRONCLAW_REBORN_GOOGLE_CLIENT_ID"])
+
     def test_slack_delivery_observed_is_status_agnostic_after_gate_resume(self):
         self.assertTrue(
             run_live_qa._slack_delivery_observed(
