@@ -746,9 +746,10 @@ mod tests {
         let body: serde_json::Value =
             serde_json::from_str(requests[0].body.as_deref().unwrap()).unwrap();
         let query = body["query"].as_str().unwrap();
+        let compact_query: String = query.chars().filter(|c| !c.is_whitespace()).collect();
         assert!(query.contains("reviewThreads"));
         assert!(
-            !query.contains("comments("),
+            !compact_query.contains("comments(") && !compact_query.contains("comments{"),
             "thread listing should not hydrate per-thread comments"
         );
         assert_eq!(body["variables"]["owner"], "nearai");
