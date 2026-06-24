@@ -1020,15 +1020,18 @@ impl AuthPromptContextView {
         Ok(view)
     }
 
-    pub fn from_auth_prompt(prompt: &AuthPromptView) -> Option<Self> {
+    pub fn from_auth_prompt(prompt: &AuthPromptView) -> Result<Option<Self>, ProductAdapterError> {
+        let Some(challenge_kind) = prompt.challenge_kind else {
+            return Ok(None);
+        };
         Self::new(
-            prompt.challenge_kind?,
+            challenge_kind,
             prompt.provider.clone(),
             prompt.account_label.clone(),
             prompt.authorization_url.clone(),
             prompt.expires_at,
         )
-        .ok()
+        .map(Some)
     }
 
     fn validate(&self) -> Result<(), ProductAdapterError> {
@@ -1136,8 +1139,6 @@ pub enum ProductProjectionItem {
         #[serde(default)]
         allow_always: bool,
         #[serde(default, skip_serializing_if = "Option::is_none")]
-        approval_context: Option<ApprovalPromptContextView>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
         auth_context: Option<AuthPromptContextView>,
     },
     SkillActivation {
@@ -1188,7 +1189,6 @@ impl ProductProjectionItem {
                 gate_ref,
                 headline,
                 body,
-                approval_context,
                 auth_context,
                 ..
             } => {
@@ -1204,9 +1204,6 @@ impl ProductProjectionItem {
                 )?;
                 if let Some(body) = body {
                     validate_bounded_text("projection_gate_body", body, PROJECTION_TEXT_MAX_BYTES)?;
-                }
-                if let Some(context) = approval_context {
-                    context.validate()?;
                 }
                 if let Some(context) = auth_context {
                     context.validate()?;
@@ -1297,8 +1294,6 @@ impl<'de> Deserialize<'de> for ProductProjectionItem {
                 #[serde(default)]
                 allow_always: bool,
                 #[serde(default)]
-                approval_context: Option<ApprovalPromptContextView>,
-                #[serde(default)]
                 auth_context: Option<AuthPromptContextView>,
             },
             SkillActivation {
@@ -1349,7 +1344,6 @@ impl<'de> Deserialize<'de> for ProductProjectionItem {
                 headline,
                 body,
                 allow_always,
-                approval_context,
                 auth_context,
             } => ProductProjectionItem::Gate {
                 run_id,
@@ -1359,7 +1353,6 @@ impl<'de> Deserialize<'de> for ProductProjectionItem {
                 headline,
                 body,
                 allow_always,
-                approval_context,
                 auth_context,
             },
             Wire::SkillActivation {
@@ -1697,7 +1690,6 @@ mod tests {
                 headline: "Approval required".to_string(),
                 body: Some("capability requires approval".to_string()),
                 allow_always: true,
-                approval_context: None,
                 auth_context: None,
             }],
         )
@@ -1735,7 +1727,6 @@ mod tests {
                 headline: "Authentication required".to_string(),
                 body: Some("Authenticate to continue this run.".to_string()),
                 allow_always: false,
-                approval_context: None,
                 auth_context: Some(
                     AuthPromptContextView::new(
                         AuthPromptChallengeKind::OAuthUrl,
@@ -1766,6 +1757,24 @@ mod tests {
         let decoded: ProductProjectionState =
             serde_json::from_value(value).expect("deserialize auth gate projection");
         assert_eq!(decoded, state);
+    }
+
+    #[test]
+    fn auth_prompt_context_from_prompt_rejects_invalid_prompt_context() {
+        let prompt = AuthPromptView {
+            turn_run_id: TurnRunId::new(),
+            auth_request_ref: "gate:auth-test".to_string(),
+            invocation_id: None,
+            headline: "Authentication required".to_string(),
+            body: "Authenticate to continue this run.".to_string(),
+            challenge_kind: Some(AuthPromptChallengeKind::OAuthUrl),
+            provider: Some("github".to_string()),
+            account_label: None,
+            authorization_url: Some("x".repeat(PROJECTION_TEXT_MAX_BYTES + 1)),
+            expires_at: None,
+        };
+
+        assert!(AuthPromptContextView::from_auth_prompt(&prompt).is_err());
     }
 
     #[test]

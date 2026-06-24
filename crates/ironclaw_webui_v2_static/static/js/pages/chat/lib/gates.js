@@ -82,14 +82,10 @@ export function gateFromProjectionGate(gate) {
       expiresAt: authContext.expires_at || null,
     };
   }
-  return gateWithApprovalContext(
-    {
-      ...base,
-      kind: "gate",
-    },
-    gate.approval_context || null,
-    gate.body || "",
-  );
+  return {
+    ...base,
+    kind: "gate",
+  };
 }
 
 function gateWithApprovalContext(gate, approvalContext, fallbackDescription) {

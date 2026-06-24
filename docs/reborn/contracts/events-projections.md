@@ -123,15 +123,17 @@ Reducer rules:
   generic failure.
 - product-facing gate projection rows must carry the run identity and gate kind
   needed to resolve the gate. When the gate is tied to a parked capability
-  activity or product-safe prompt metadata, the row also carries the stable
-  invocation id and the same approval/auth context used by the immediate prompt
-  payload. Clients must not infer gate run identity from the latest active run
-  or from tool name/order heuristics.
+  activity, the row also carries the stable invocation id. Auth gate rows may
+  carry product-safe auth context, such as challenge kind, provider, account
+  label, authorization URL, and expiry, when that context is needed to rebuild
+  OAuth/manual-token affordances. Clients must not infer gate run identity from
+  the latest active run or from tool name/order heuristics.
   Product adapters may additionally emit rich `GatePrompt`/`AuthPrompt`
   payloads for immediate UI affordances such as OAuth URLs or approval context,
-  but those prompt payloads are enrichments; replay/rebase reconstruction must
-  still work from the projection gate row's own `run_id`, `gate_kind`, and
-  `gate_ref`.
+  but those prompt payloads are enrichments. Approval request details remain
+  prompt-only unless a product adapter defines an explicit redaction contract;
+  replay/rebase reconstruction must still work from the projection gate row's
+  own `run_id`, `gate_kind`, `gate_ref`, and any product-safe auth context.
 - product-facing model reasoning projections must use model-visible-sanitized
   reasoning deltas only. They are live UI hints, not canonical transcript,
   checkpoint, audit, or replay state.

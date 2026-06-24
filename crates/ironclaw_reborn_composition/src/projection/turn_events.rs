@@ -691,7 +691,7 @@ fn turn_event_projection_state(
         failure_category: failure_details.category,
         failure_summary: failure_details.summary,
     }];
-    if let Some(item) = gate_projection_item(event, blocked_prompt) {
+    if let Some(item) = gate_projection_item(event, blocked_prompt)? {
         items.push(item);
     }
     ProductProjectionState::new(event.scope.thread_id.to_string(), items)
@@ -703,20 +703,18 @@ struct GateProjectionPromptContext {
     headline: Option<String>,
     body: Option<String>,
     allow_always: Option<bool>,
-    approval_context: Option<ApprovalPromptContextView>,
     auth_context: Option<AuthPromptContextView>,
 }
 
 fn gate_projection_prompt_context(
     blocked_prompt: Option<&ProductOutboundPayload>,
-) -> GateProjectionPromptContext {
-    match blocked_prompt {
+) -> Result<GateProjectionPromptContext, ProductAdapterError> {
+    let context = match blocked_prompt {
         Some(ProductOutboundPayload::GatePrompt(prompt)) => GateProjectionPromptContext {
             invocation_id: prompt.invocation_id,
             headline: Some(prompt.headline.clone()),
             body: Some(prompt.body.clone()),
             allow_always: Some(prompt.allow_always),
-            approval_context: prompt.approval_context.clone(),
             auth_context: None,
         },
         Some(ProductOutboundPayload::AuthPrompt(prompt)) => GateProjectionPromptContext {
@@ -724,29 +722,31 @@ fn gate_projection_prompt_context(
             headline: Some(prompt.headline.clone()),
             body: Some(prompt.body.clone()),
             allow_always: Some(false),
-            approval_context: None,
-            auth_context: AuthPromptContextView::from_auth_prompt(prompt),
+            auth_context: AuthPromptContextView::from_auth_prompt(prompt)?,
         },
         _ => GateProjectionPromptContext::default(),
-    }
+    };
+    Ok(context)
 }
 
 fn gate_projection_item(
     event: &TurnLifecycleEvent,
     blocked_prompt: Option<&ProductOutboundPayload>,
-) -> Option<ProductProjectionItem> {
+) -> Result<Option<ProductProjectionItem>, ProductAdapterError> {
     if !matches!(event.kind, TurnEventKind::Blocked) {
-        return None;
+        return Ok(None);
     }
-    let blocked_gate = event.blocked_gate.as_ref()?;
-    let prompt_context = gate_projection_prompt_context(blocked_prompt);
+    let Some(blocked_gate) = event.blocked_gate.as_ref() else {
+        return Ok(None);
+    };
+    let prompt_context = gate_projection_prompt_context(blocked_prompt)?;
     let body = prompt_context.body.unwrap_or_else(|| {
         event
             .sanitized_reason
             .clone()
             .unwrap_or_else(|| gate_projection_body(blocked_gate.gate_kind).to_string())
     });
-    Some(ProductProjectionItem::Gate {
+    Ok(Some(ProductProjectionItem::Gate {
         run_id: event.run_id,
         gate_kind: product_gate_kind(blocked_gate.gate_kind),
         gate_ref: blocked_gate.gate_ref.as_str().to_string(),
@@ -759,9 +759,8 @@ fn gate_projection_item(
             matches!(blocked_gate.gate_kind, TurnBlockedGateKind::Approval)
                 && is_approval_gate_ref(blocked_gate.gate_ref.as_str())
         }),
-        approval_context: prompt_context.approval_context,
         auth_context: prompt_context.auth_context,
-    })
+    }))
 }
 
 fn product_gate_kind(kind: TurnBlockedGateKind) -> ProductGateKind {

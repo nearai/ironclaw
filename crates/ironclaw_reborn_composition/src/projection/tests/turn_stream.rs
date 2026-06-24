@@ -306,14 +306,12 @@ async fn webui_event_stream_offers_always_for_typed_approval_gate() {
                     gate_ref: projected_gate_ref,
                     invocation_id,
                     body,
-                    approval_context: Some(context),
                     ..
                 } if *run_id == turn_run
                     && *gate_kind == ProductGateKind::Approval
                     && projected_gate_ref == gate_ref.as_str()
                     && *invocation_id == Some(blocked_invocation)
                     && body.as_deref() == Some("capability requires approval")
-                    && context.tool_name == "builtin.http"
             ))
     )));
 }
