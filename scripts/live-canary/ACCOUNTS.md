@@ -5,6 +5,7 @@ Use it when adding or rotating providers for:
 
 - `auth-live-seeded`
 - `auth-browser-consent`
+- `reborn-webui-v2-live-qa`
 - any future auth canary lane added under `scripts/live-canary/run.sh`
 
 The shared implementation for auth lanes lives in:
@@ -74,6 +75,46 @@ adding new provider credentials should add them under
 `github.com/nearai/ironclaw/settings/secrets/actions` at repo scope.
 
 Only providers with populated secrets are executed.
+
+## Reborn WebUI v2 Live QA Lane
+
+The `reborn-webui-v2-live-qa` lane drives the Reborn CLI `serve` command and
+WebUI v2 with Playwright. It is backed by the QA spreadsheet cases, not by the
+legacy gateway stack.
+
+Local runs normally reuse a copied Reborn home:
+
+- `REBORN_WEBUI_V2_LIVE_QA_HOME=/tmp/ironclaw-reborn-real-slack`
+
+When a copied home is not available, the lane can generate a temporary Reborn
+home from CI secrets. The generated home can seed Google product-auth from the
+existing auth-live Google token secrets:
+
+- `GOOGLE_OAUTH_CLIENT_ID`
+- `GOOGLE_OAUTH_CLIENT_SECRET`
+- `AUTH_LIVE_GOOGLE_ACCESS_TOKEN`
+- `AUTH_LIVE_GOOGLE_REFRESH_TOKEN`
+
+Slack workflow cases require bot-level Slack credentials for the Reborn Slack
+adapter. `SLACK_WEBHOOK_URL` is only for canary reporting and is not sufficient
+for WebUI Slack workflow coverage.
+
+- `IRONCLAW_REBORN_SLACK_SIGNING_SECRET`
+- `IRONCLAW_REBORN_SLACK_BOT_TOKEN`
+- `REBORN_WEBUI_V2_LIVE_QA_SLACK_ROUTE_CHANNEL_ID` when a stable delivery
+  target should be pinned instead of discovered from `auth.test`
+
+Telegram workflow cases require a real test bot token:
+
+- `TELEGRAM_BOT_TOKEN` or `LIVE_CANARY_TELEGRAM_BOT_TOKEN`
+- `TELEGRAM_WEBHOOK_SECRET` or `LIVE_CANARY_TELEGRAM_WEBHOOK_SECRET` when the
+  channel configuration requires one
+- `REBORN_WEBUI_V2_LIVE_QA_TELEGRAM_CHAT_ID` for cases that need a stable
+  recipient chat
+
+Use `CASES=all` only after the Slack, Google, and Telegram credentials above
+are populated; otherwise the runner records the affected cases as credential
+gates and exits nonzero.
 
 ## Shared Provider Fixtures
 

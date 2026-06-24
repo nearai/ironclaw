@@ -345,9 +345,23 @@ where
                     url: request.url.clone(),
                     headers: headers.clone(),
                 }) {
-                Ok(injections) => injections,
+                Ok(injections) => {
+                    tracing::debug!(
+                        capability_id = %self.capability_id,
+                        url = %request.url,
+                        injection_count = injections.len(),
+                        "WASM runtime credential provider returned injections"
+                    );
+                    injections
+                }
                 Err(error) => {
                     self.discard_staged_policy();
+                    tracing::debug!(
+                        capability_id = %self.capability_id,
+                        url = %request.url,
+                        ?error,
+                        "WASM runtime credential provider failed"
+                    );
                     return Err(wasm_credential_provider_error(error));
                 }
             };

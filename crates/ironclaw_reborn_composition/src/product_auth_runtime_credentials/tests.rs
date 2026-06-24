@@ -626,6 +626,48 @@ async fn resolver_stages_oauth_access_secret_when_proactive_refresh_backend_is_u
 }
 
 #[tokio::test]
+async fn resolver_propagates_backend_error_when_stale_access_token_cannot_refresh() {
+    let accounts = Arc::new(InMemoryAuthProductServices::new());
+    let scope =
+        ResourceScope::local_default(UserId::new("alice").unwrap(), InvocationId::new()).unwrap();
+    let auth_scope = AuthProductScope::new(scope.clone(), AuthSurface::Api);
+    let access_secret = SecretHandle::new("google_expired_access_refresh_backend_down").unwrap();
+    let drive_scope = ProviderScope::new("https://www.googleapis.com/auth/drive.readonly").unwrap();
+    let account = ConfiguredAccount::new(auth_scope, "google")
+        .access_secret(Some(access_secret.clone()))
+        .refresh_secret(SecretHandle::new("google_refresh_backend_down_expired").unwrap())
+        .scopes(&["https://www.googleapis.com/auth/drive.readonly"])
+        .create(&accounts)
+        .await;
+    accounts.fail_next_refresh_backend_for_tests(account.id);
+
+    let secret_store = Arc::new(InMemorySecretStore::new());
+    secret_store
+        .put(
+            account.scope.resource.clone(),
+            access_secret,
+            ironclaw_secrets::SecretMaterial::from("[placeholder]".to_string()),
+            Some(Utc::now() - chrono::Duration::minutes(1)),
+        )
+        .await
+        .expect("seed expired access-token metadata");
+    let resolver = resolver_with_refresh_and_store(accounts.clone(), secret_store);
+
+    let error = resolver
+        .resolve_access_secret(RuntimeCredentialAccountRequest {
+            scope: &scope,
+            provider: &RuntimeCredentialAccountProviderId::new("google").unwrap(),
+            setup: &RuntimeCredentialAccountSetup::OAuth { scopes: Vec::new() },
+            provider_scopes: &[drive_scope.as_str().to_string()],
+            requester_extension: &ExtensionId::new("google-drive").unwrap(),
+        })
+        .await
+        .expect_err("known-stale access token plus backend refresh failure is backend, not auth");
+
+    assert_eq!(error, CredentialStageError::Backend);
+}
+
+#[tokio::test]
 async fn resolver_maps_oauth_refresh_failure_to_auth_required() {
     let accounts = Arc::new(InMemoryAuthProductServices::new());
     let scope =
