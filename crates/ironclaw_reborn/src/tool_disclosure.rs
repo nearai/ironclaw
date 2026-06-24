@@ -894,7 +894,10 @@ mod tests {
         // dotted capability id (`google-calendar.list_events`), sometimes the
         // `__`-encoded wire name. Both must resolve to the same catalog entry,
         // regardless of which form the catalog itself stores, for ANY provider.
-        for stored_name in ["google-calendar__list_events", "google-calendar.list_events"] {
+        for stored_name in [
+            "google-calendar__list_events",
+            "google-calendar.list_events",
+        ] {
             let definition = ProviderToolDefinition {
                 capability_id: CapabilityId::new("google-calendar.list_events")
                     .expect("valid capability id"),
