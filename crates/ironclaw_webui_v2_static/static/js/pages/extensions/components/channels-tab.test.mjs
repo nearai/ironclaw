@@ -194,7 +194,7 @@ test("SlackConnectActionSections renders every supported Slack action", () => {
   assert.equal(unhandledView.rendered, null);
 });
 
-test("ChannelsTab keeps Slack controls in the legacy builtin location when Slack is not installed", () => {
+test("ChannelsTab keeps Slack controls in the builtin location when Slack is not installed", () => {
   const view = channelsTabForTest({
     status: { enabled_channels: [], sse_connections: 0, ws_connections: 0 },
     channels: [],
@@ -214,7 +214,7 @@ test("ChannelsTab keeps Slack controls in the legacy builtin location when Slack
     view.rendered,
     view.SlackConnectActionSections,
   );
-  assert.notEqual(builtinSlackSection, undefined, "expected legacy Slack section");
+  assert.notEqual(builtinSlackSection, undefined, "expected builtin Slack section");
   assert.equal(renderedContainsComponent(builtinSlackSection, view.SlackConnectActionSections), true);
   assert.equal(renderedContainsSlackActionPair(builtinSlackSection), true);
 

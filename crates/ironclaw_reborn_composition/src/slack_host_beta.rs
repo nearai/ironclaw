@@ -1117,6 +1117,27 @@ mod tests {
         }
     }
 
+    struct MixedSessionAndOperatorAuthenticator;
+
+    #[async_trait]
+    impl WebuiAuthenticator for MixedSessionAndOperatorAuthenticator {
+        async fn authenticate(&self, token: &str) -> Option<WebuiAuthentication> {
+            match token {
+                "session-token" => {
+                    Some(WebuiAuthentication::user(UserId::new(USER).expect("user")))
+                }
+                "operator-token" => Some(WebuiAuthentication::operator(
+                    UserId::new(USER).expect("user"),
+                )),
+                _ => None,
+            }
+        }
+
+        fn mounts_operator_webui_config_routes(&self) -> bool {
+            true
+        }
+    }
+
     struct HiddenOperatorRouteAuthenticator;
 
     #[async_trait]
@@ -1486,6 +1507,7 @@ mod tests {
                         user_id: UserId::new(USER).expect("user"),
                         agent_id: Some(AgentId::new(AGENT).expect("agent")),
                         project_id: Some(ProjectId::new(PROJECT).expect("project")),
+                        operator_webui_config: false,
                     })
                     .body(Body::from(redeem_body))
                     .expect("redeem request builds"),
@@ -1650,6 +1672,7 @@ mod tests {
                         user_id: UserId::new(USER).expect("user"),
                         agent_id: Some(AgentId::new(AGENT).expect("agent")),
                         project_id: Some(ProjectId::new(PROJECT).expect("project")),
+                        operator_webui_config: true,
                     })
                     .body(Body::from(format!(
                         r#"{{"channel_id":"C0HOST","subject_user_id":"{SHARED_SUBJECT}"}}"#
@@ -1799,6 +1822,155 @@ mod tests {
                     "subject_display_name": save_body["channels"][1]["subject_display_name"].clone()
                 }
             ])
+        );
+
+        runtime.shutdown().await.expect("runtime shuts down");
+    }
+
+    #[tokio::test]
+    async fn slack_connectable_channels_advertise_admin_action_to_operator_token() {
+        let (runtime, _root) = runtime().await;
+        let mounts = build_slack_host_beta_mounts(&runtime, config_without_channel_routes())
+            .expect("mounts");
+        let bundle = build_webui_services_with_slack_host_beta_mounts(
+            &runtime,
+            None,
+            Some(&mounts),
+            SlackOperatorRouteVisibility::Visible,
+        )
+        .expect("webui bundle");
+        let app = webui_v2_app(
+            bundle,
+            WebuiServeConfig::new(
+                TenantId::new(TENANT).expect("tenant"),
+                Arc::new(OperatorTokenAuthenticator),
+                Vec::new(),
+            )
+            .with_default_agent_id(AgentId::new(AGENT).expect("agent"))
+            .with_default_project_id(ProjectId::new(PROJECT).expect("project"))
+            .with_slack_channel_routes(mounts.channel_routes),
+        )
+        .expect("webui app");
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/api/webchat/v2/channels/connectable")
+                    .header("authorization", "Bearer operator-token")
+                    .body(Body::empty())
+                    .expect("request builds"),
+            )
+            .await
+            .expect("route responds");
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), 64 * 1024)
+            .await
+            .expect("response body");
+        let body: serde_json::Value = serde_json::from_slice(&body).expect("response json");
+        let strategies: Vec<_> = body["channels"]
+            .as_array()
+            .expect("channels")
+            .iter()
+            .map(|channel| channel["strategy"].as_str().expect("strategy"))
+            .collect();
+        assert!(
+            strategies.contains(&"admin_managed_channels"),
+            "operator token should see Slack admin channel setup: {body}"
+        );
+        assert!(
+            strategies.contains(&"inbound_proof_code"),
+            "operator token should still see personal Slack pairing: {body}"
+        );
+
+        runtime.shutdown().await.expect("runtime shuts down");
+    }
+
+    #[tokio::test]
+    async fn slack_connectable_channels_hide_admin_action_from_sso_session_token() {
+        let (runtime, _root) = runtime().await;
+        let mounts = build_slack_host_beta_mounts(&runtime, config_without_channel_routes())
+            .expect("mounts");
+        let bundle = build_webui_services_with_slack_host_beta_mounts(
+            &runtime,
+            None,
+            Some(&mounts),
+            SlackOperatorRouteVisibility::Visible,
+        )
+        .expect("webui bundle");
+        let app = webui_v2_app(
+            bundle,
+            WebuiServeConfig::new(
+                TenantId::new(TENANT).expect("tenant"),
+                Arc::new(MixedSessionAndOperatorAuthenticator),
+                Vec::new(),
+            )
+            .with_default_agent_id(AgentId::new(AGENT).expect("agent"))
+            .with_default_project_id(ProjectId::new(PROJECT).expect("project"))
+            .with_slack_channel_routes(mounts.channel_routes),
+        )
+        .expect("webui app");
+
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/api/webchat/v2/channels/connectable")
+                    .header("authorization", "Bearer session-token")
+                    .body(Body::empty())
+                    .expect("request builds"),
+            )
+            .await
+            .expect("route responds");
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), 64 * 1024)
+            .await
+            .expect("response body");
+        let body: serde_json::Value = serde_json::from_slice(&body).expect("response json");
+        let session_strategies: Vec<_> = body["channels"]
+            .as_array()
+            .expect("channels")
+            .iter()
+            .map(|channel| channel["strategy"].as_str().expect("strategy"))
+            .collect();
+        assert!(
+            !session_strategies.contains(&"admin_managed_channels"),
+            "SSO session token should not see Slack admin setup: {body}"
+        );
+        assert!(
+            session_strategies.contains(&"inbound_proof_code"),
+            "SSO session token should still see personal Slack pairing: {body}"
+        );
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/api/webchat/v2/channels/connectable")
+                    .header("authorization", "Bearer operator-token")
+                    .body(Body::empty())
+                    .expect("request builds"),
+            )
+            .await
+            .expect("route responds");
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), 64 * 1024)
+            .await
+            .expect("response body");
+        let body: serde_json::Value = serde_json::from_slice(&body).expect("response json");
+        let operator_strategies: Vec<_> = body["channels"]
+            .as_array()
+            .expect("channels")
+            .iter()
+            .map(|channel| channel["strategy"].as_str().expect("strategy"))
+            .collect();
+        assert!(
+            operator_strategies.contains(&"admin_managed_channels"),
+            "operator token should see Slack admin setup: {body}"
         );
 
         runtime.shutdown().await.expect("runtime shuts down");
@@ -2597,6 +2769,7 @@ mod tests {
                         user_id: UserId::new(USER).expect("user"),
                         agent_id: Some(AgentId::new(AGENT).expect("agent")),
                         project_id: Some(ProjectId::new(PROJECT).expect("project")),
+                        operator_webui_config: false,
                     })
                     .body(Body::from(redeem_body))
                     .expect("redeem request builds"),
@@ -2842,6 +3015,7 @@ mod tests {
                         user_id: UserId::new(USER).expect("user"),
                         agent_id: Some(AgentId::new(AGENT).expect("agent")),
                         project_id: Some(ProjectId::new(PROJECT).expect("project")),
+                        operator_webui_config: false,
                     })
                     .body(Body::from(redeem_body))
                     .expect("redeem request builds"),
