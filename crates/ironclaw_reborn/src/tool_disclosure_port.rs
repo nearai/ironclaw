@@ -162,24 +162,25 @@ impl LoopCapabilityPort for ToolDisclosureCapabilityPort {
                     capability_id = target.definition.capability_id.as_str(),
                     "reborn tool disclosure resolving direct deferred provider tool call"
                 );
-                // Resolve through the inner port with the synthesized target call so
-                // the real authority surface (effective_capability_ids / approval
-                // expansion) is preserved, exactly as for a directly-listed tool —
-                // not collapsed to a single capability id.
-                return self
-                    .inner
-                    .provider_tool_call_capability_ids(&target.target_call);
+                // Resolve to the catalog's capability id directly. This is the
+                // resolvability gate for the gateway pre-check; it must NOT depend
+                // on the inner port being able to re-resolve the (unadvertised)
+                // provider name, which it cannot for a deferred tool. The real
+                // effective_capability_ids / approval expansion are applied later
+                // by validate/register, which dispatch the synthesized target call.
+                return Ok(ProviderToolCallCapabilityIds::single(
+                    target.definition.capability_id,
+                ));
             }
             return self.inner.provider_tool_call_capability_ids(tool_call);
         }
         if tool_call.name == TOOL_CALL_NAME
             && let Some(target) = self.allowed_tool_call_target(tool_call)?
         {
-            // Same as the direct-deferred path: keep the inner port's full
-            // capability-id resolution for the bridge tool_call target.
-            return self
-                .inner
-                .provider_tool_call_capability_ids(&target.target_call);
+            return Ok(ProviderToolCallCapabilityIds {
+                provider_capability_id: target.definition.capability_id.clone(),
+                effective_capability_ids: vec![target.definition.capability_id],
+            });
         }
         let Some(definition) = bridge_tool_definitions()
             .into_iter()
@@ -675,18 +676,31 @@ impl ToolDisclosureCapabilityPort {
         };
         let Some(definition) = self.catalog_target(state, &tool_call.name) else {
             // DIAGNOSTIC (temporary): the model called a non-bridge tool that the
-            // catalog could not resolve by name. Log enough to see whether it's a
-            // name-form mismatch vs. genuinely absent from the catalog.
-            let sample: Vec<&str> = state
+            // catalog could not resolve by name. Sample catalog names + capability
+            // ids that share the called tool's provider prefix, so a name-form
+            // mismatch (dotted vs `__`-encoded) is visible vs. genuinely absent.
+            let prefix: String = tool_call
+                .name
+                .chars()
+                .take_while(|c| *c != '_' && *c != '.' && *c != '-')
+                .collect();
+            let sample: Vec<String> = state
                 .catalog
                 .definitions()
-                .map(|definition| definition.name.as_str())
-                .filter(|name| name.contains("extension") || name.contains("install"))
+                .filter(|definition| {
+                    definition.name.starts_with(&prefix)
+                        || definition.capability_id.as_str().starts_with(&prefix)
+                })
+                .map(|definition| {
+                    format!("{}|{}", definition.name, definition.capability_id.as_str())
+                })
+                .take(8)
                 .collect();
             debug!(
                 tool_name = tool_call.name.as_str(),
                 catalog_len = state.catalog.len(),
-                extension_like_names = ?sample,
+                prefix = prefix.as_str(),
+                prefix_matches = ?sample,
                 "reborn tool disclosure direct-deferred miss: not found in catalog by name"
             );
             return Ok(None);

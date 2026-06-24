@@ -203,20 +203,43 @@ fn is_core_tool_definition(definition: &ProviderToolDefinition) -> bool {
         .any(|core_name| definition_matches_core_name(definition, core_name))
 }
 
+/// Encode a capability id the way the provider/gateway encodes tool names for
+/// the wire: dotted segments (`<provider>.<tool>`) become `__`-joined. Mirrors
+/// `provider_tool_name_base`'s dominant `.` -> `__` rule. Used so a deferred tool
+/// resolves whether the model emits the bare wire name, the dotted capability id,
+/// or the `__`-encoded form — for ANY provider, not just `builtin`.
+pub(crate) fn encode_provider_tool_name(capability_id: &str) -> String {
+    capability_id.replace('.', "__")
+}
+
 pub(crate) fn definition_matches_provider_name(
     definition: &ProviderToolDefinition,
     provider_name: &str,
 ) -> bool {
+    // 1. Exact canonical wire name (the advertised form).
     if definition.name == provider_name {
         return true;
     }
+    let capability_id = definition.capability_id.as_str();
+    // 2. Exact capability id — the dotted form the model often copies verbatim
+    //    from tool_search results / the visible surface (e.g. the model calls
+    //    `google-calendar.list_events`).
+    if capability_id == provider_name {
+        return true;
+    }
+    // 3. Provider-encoded wire form of the capability id (`.` -> `__`), so the
+    //    `__`-encoded call resolves regardless of whether the catalog stores the
+    //    dotted or encoded name — for every provider (builtin, extensions, MCP).
+    if encode_provider_tool_name(capability_id) == provider_name {
+        return true;
+    }
+    // 4. builtin-specific leniency for the bare tool name (`read_file`).
     if let Some(builtin_name) = provider_name
         .strip_prefix("builtin__")
         .or_else(|| provider_name.strip_prefix("builtin."))
     {
         return definition_matches_core_name(definition, builtin_name);
     }
-    let capability_id = definition.capability_id.as_str();
     capability_id
         .strip_prefix("builtin.")
         .is_some_and(|name| name == provider_name)
@@ -862,6 +885,41 @@ mod tests {
                 .map(|entry| entry.tier),
             Some(ToolTier::Core)
         );
+    }
+
+    #[test]
+    fn provider_name_matcher_resolves_non_builtin_dotted_and_encoded_forms() {
+        // A weak model copies a deferred extension tool's name from tool_search
+        // results / the visible surface in inconsistent forms — sometimes the
+        // dotted capability id (`google-calendar.list_events`), sometimes the
+        // `__`-encoded wire name. Both must resolve to the same catalog entry,
+        // regardless of which form the catalog itself stores, for ANY provider.
+        for stored_name in ["google-calendar__list_events", "google-calendar.list_events"] {
+            let definition = ProviderToolDefinition {
+                capability_id: CapabilityId::new("google-calendar.list_events")
+                    .expect("valid capability id"),
+                name: stored_name.to_string(),
+                description: "List events on a Google Calendar.".to_string(),
+                parameters: medium_schema(0),
+            };
+            assert!(
+                definition_matches_provider_name(&definition, "google-calendar__list_events"),
+                "encoded call must resolve (stored as {stored_name})"
+            );
+            assert!(
+                definition_matches_provider_name(&definition, "google-calendar.list_events"),
+                "dotted call must resolve (stored as {stored_name})"
+            );
+            // A different tool / provider must NOT match.
+            assert!(!definition_matches_provider_name(
+                &definition,
+                "google-calendar__list_calendars"
+            ));
+            assert!(!definition_matches_provider_name(
+                &definition,
+                "gmail__send_message"
+            ));
+        }
     }
 
     #[test]
