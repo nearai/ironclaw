@@ -156,7 +156,7 @@ QA_SHEET_CASES: dict[str, dict[str, object]] = {
     "qa_4b_github_connect": {
         "rows": ["4B"],
         "feature": "GitHub connection flow",
-        "gate": "requires live GitHub OAuth test account",
+        "gate": "requires live GitHub extension auth state",
     },
     "qa_4c_github_release_live_chat": {
         "rows": ["4C"],
@@ -3775,7 +3775,6 @@ CASES: dict[str, CaseSpec] = {
     ),
     "qa_4b_github_connect": CaseSpec(
         case_qa_4b_github_connect,
-        default_enabled=False,
     ),
     "qa_4c_github_release_live_chat": CaseSpec(case_qa_4c_github_release_live_chat),
     "qa_4d_github_release_slack_routine": CaseSpec(

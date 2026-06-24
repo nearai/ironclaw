@@ -130,15 +130,15 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
             self.assertNotIn('team_id = ""', config)
             self.assertNotIn('api_app_id = ""', config)
 
-    def test_default_suite_excludes_github_connect_until_live_oauth_exists(self):
-        self.assertFalse(run_live_qa.CASES["qa_4b_github_connect"].default_enabled)
+    def test_default_suite_includes_github_connect_when_live_auth_state_is_verifiable(self):
+        self.assertTrue(run_live_qa.CASES["qa_4b_github_connect"].default_enabled)
         self.assertIn("qa_4b_github_connect", run_live_qa.CASES)
         default_cases = [
             name
             for name, spec in run_live_qa.CASES.items()
             if spec.default_enabled
         ]
-        self.assertNotIn("qa_4b_github_connect", default_cases)
+        self.assertIn("qa_4b_github_connect", default_cases)
 
     def test_bootstrap_forwards_all_cases_flag(self):
         with tempfile.TemporaryDirectory() as tmpdir:
