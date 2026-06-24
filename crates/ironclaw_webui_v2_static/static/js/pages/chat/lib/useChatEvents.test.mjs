@@ -8,6 +8,7 @@ import {
   toolCardFromActivity,
   toolCardFromPreview,
 } from "./history-messages.js";
+import { gateFromProjectionGate } from "./gates.js";
 import {
   createToolActivityState,
   ensureGateToolActivity,
@@ -59,6 +60,7 @@ function createUseChatEventsHarness({
     },
     failureMessageForRunStatus,
     gateFromEvent,
+    gateFromProjectionGate,
     globalThis: {},
     ensureGateToolActivity,
     isTerminalToolStatus,
@@ -443,6 +445,11 @@ test("useChatEvents: projection approval gate preserves always-allow affordance"
 test("useChatEvents: projection gate visibility is independent of item order", () => {
   const runId = "run-gate-before-status";
   const harness = createUseChatEventsHarness();
+  harness.setCurrentActiveRun({
+    runId,
+    threadId: "thread-1",
+    status: "running",
+  });
 
   harness.handleEvent({
     type: "projection_update",

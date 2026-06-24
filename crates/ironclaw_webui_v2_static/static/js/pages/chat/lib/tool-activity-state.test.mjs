@@ -218,6 +218,36 @@ test("tool activity state does not synthesize gate activity without invocation i
   assert.deepEqual(messages, []);
 });
 
+test("tool activity state can mark auth gates declined without invocation id", () => {
+  const stateRef = { current: createToolActivityState() };
+  let messages = [];
+  const setMessages = (updater) => {
+    messages = typeof updater === "function" ? updater(messages) : updater;
+  };
+
+  failGateToolActivity(
+    setMessages,
+    {
+      kind: "auth_required",
+      runId: "run-auth-declined",
+      gateRef: "gate:auth-required",
+      gateKind: "auth",
+      headline: "Authentication required",
+    },
+    stateRef,
+  );
+
+  assert.equal(messages.length, 1);
+  assert.equal(
+    messages[0].id,
+    "tool-gate:run-auth-declined:auth_required:gate:auth-required",
+  );
+  assert.equal(messages[0].toolName, "Authentication required");
+  assert.equal(messages[0].toolStatus, "declined");
+  assert.equal(messages[0].toolErrorKind, "gate_declined");
+  assert.equal(messages[0].gateRef, "gate:auth-required");
+});
+
 test("tool activity cards use unprefixed display names", () => {
   assert.equal(
     toolCardFromActivity({

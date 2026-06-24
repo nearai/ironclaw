@@ -755,10 +755,7 @@ fn gate_projection_item(
             .headline
             .unwrap_or_else(|| gate_projection_headline(blocked_gate.gate_kind).to_string()),
         body: Some(body),
-        allow_always: prompt_context.allow_always.unwrap_or_else(|| {
-            matches!(blocked_gate.gate_kind, TurnBlockedGateKind::Approval)
-                && is_approval_gate_ref(blocked_gate.gate_ref.as_str())
-        }),
+        allow_always: prompt_context.allow_always.unwrap_or(false),
         auth_context: prompt_context.auth_context,
     }))
 }

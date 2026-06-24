@@ -62,15 +62,19 @@ export function upsertToolActivityMessage(
 }
 
 function toolCardFromGate(gate, overrides = {}) {
+  const isGatePrompt = gate?.kind === "gate";
+  const isAuthPrompt = gate?.kind === "auth_required";
+  const shouldFallbackToGateIdentity =
+    isAuthPrompt && overrides.toolStatus === "declined";
   if (
     !gate?.runId ||
     !gate?.gateRef ||
-    !gate.invocationId ||
-    gate.kind !== "gate"
+    (!gate.invocationId && !shouldFallbackToGateIdentity) ||
+    (!isGatePrompt && !isAuthPrompt)
   ) {
     return null;
   }
-  const invocationId = gate.invocationId;
+  const invocationId = gate.invocationId || fallbackGateInvocationId(gate);
   const displaySource = gate.toolName || gate.headline || gate.gateKind || "gate";
   return {
     invocationId,
@@ -93,6 +97,10 @@ function toolCardFromGate(gate, overrides = {}) {
     gateRef: gate.gateRef,
     gateActivity: true,
   };
+}
+
+function fallbackGateInvocationId(gate) {
+  return `gate:${gate.runId}:${gate.kind}:${gate.gateRef}`;
 }
 
 function toolMessageId(card) {

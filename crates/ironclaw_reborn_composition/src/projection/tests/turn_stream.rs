@@ -616,6 +616,90 @@ async fn webui_event_stream_keeps_approval_prompt_when_request_lookup_fails() {
 }
 
 #[tokio::test]
+async fn webui_event_stream_fails_closed_for_projection_allow_always_without_prompt() {
+    let tenant_id = TenantId::new("webui-events-approval-no-prompt-tenant").unwrap();
+    let user_id = UserId::new("webui-events-approval-no-prompt-user").unwrap();
+    let agent_id = AgentId::new("webui-events-approval-no-prompt-agent").unwrap();
+    let thread_id = ThreadId::new("webui-events-approval-no-prompt-thread").unwrap();
+    let turn_run = TurnRunId::new();
+    let scope = TurnScope::new(
+        tenant_id.clone(),
+        Some(agent_id.clone()),
+        None,
+        thread_id.clone(),
+    );
+    let approval_request_id = ApprovalRequestId::new();
+    let gate_ref = GateRef::new(format!("gate:approval-{approval_request_id}")).unwrap();
+    let event_log_dyn: Arc<dyn DurableEventLog> = Arc::new(InMemoryDurableEventLog::new());
+    let actor = TurnActor::new(user_id.clone());
+    let services = build_reborn_projection_services(
+        event_log_dyn,
+        ReplyTargetBindingRef::new("webui-events-approval-no-prompt-reply").unwrap(),
+    )
+    .with_turn_events(
+        Arc::new(FakeTurnEventSource {
+            events: vec![TurnLifecycleEvent {
+                cursor: TurnEventCursor(1),
+                scope: scope.clone(),
+                occurred_at: Some(chrono::Utc::now()),
+                owner_user_id: Some(user_id.clone()),
+                run_id: turn_run,
+                status: TurnStatus::BlockedApproval,
+                kind: TurnEventKind::Blocked,
+                blocked_gate: Some(TurnBlockedGateMetadata {
+                    gate_ref: gate_ref.clone(),
+                    gate_kind: TurnBlockedGateKind::Approval,
+                    credential_requirements: Vec::new(),
+                }),
+                sanitized_reason: Some("capability requires approval".to_string()),
+            }],
+        }),
+        Arc::new(FakeTurnCoordinator {
+            state: TurnRunState {
+                status: TurnStatus::BlockedApproval,
+                gate_ref: Some(gate_ref.clone()),
+                // Cursor mismatch suppresses the transient prompt payload; the
+                // durable projection still needs to fail closed on affordances.
+                ..turn_run_state(&scope, &user_id, turn_run, TurnEventCursor(2))
+            },
+        }),
+    );
+
+    let events = services
+        .webui_event_stream()
+        .drain(ProjectionSubscriptionRequest {
+            actor,
+            scope,
+            after_cursor: None,
+        })
+        .await
+        .unwrap();
+
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(event.payload(), ProductOutboundPayload::GatePrompt(_)))
+    );
+    assert!(events.iter().any(|event| matches!(
+        event.payload(),
+        ProductOutboundPayload::ProjectionUpdate { state }
+            if state.items.iter().any(|item| matches!(
+                item,
+                ProductProjectionItem::Gate {
+                    run_id,
+                    gate_kind,
+                    gate_ref: projected_gate_ref,
+                    allow_always,
+                    ..
+                } if *run_id == turn_run
+                    && *gate_kind == ProductGateKind::Approval
+                    && projected_gate_ref == gate_ref.as_str()
+                    && !*allow_always
+            ))
+    )));
+}
+
+#[tokio::test]
 async fn webui_event_stream_does_not_offer_always_for_generic_approval_gate() {
     let tenant_id = TenantId::new("webui-events-generic-approval-tenant").unwrap();
     let user_id = UserId::new("webui-events-generic-approval-user").unwrap();
