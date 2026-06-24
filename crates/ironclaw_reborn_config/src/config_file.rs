@@ -294,15 +294,18 @@ pub struct WebuiSection {
 
 /// Slack Events API host-beta enablement.
 ///
-/// `enabled = true` mounts the Slack route. Installation identifiers, channel
-/// routing, and Slack secrets are configured through the WebUI channel setup
-/// surface. The deprecated fields below are accepted as a startup migration
-/// bridge for existing `config.toml` files; secret values still stay env-only.
+/// `enabled = true` or `IRONCLAW_REBORN_SLACK_ENABLED=true` mounts the Slack
+/// route. The env var overrides only this enablement gate. Installation
+/// identifiers, channel routing, and Slack secrets are configured through the
+/// WebUI channel setup surface. The deprecated fields below are accepted as a
+/// startup migration bridge for existing `config.toml` files; secret values
+/// still stay env-only.
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SlackSection {
     /// Explicit host-beta enablement gate. Omitted/false means the Slack route
-    /// is not mounted by `ironclaw-reborn serve`.
+    /// is not mounted by `ironclaw-reborn serve` unless
+    /// `IRONCLAW_REBORN_SLACK_ENABLED` overrides it.
     pub enabled: Option<bool>,
     /// Deprecated: adapter installation id for legacy config-backed setup.
     pub installation_id: Option<String>,
