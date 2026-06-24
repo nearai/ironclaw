@@ -501,7 +501,7 @@ impl ToolDisclosureCapabilityPort {
             TOOL_SEARCH_NAME => self.invoke_tool_search(&request, &bridge).await,
             TOOL_DESCRIBE_NAME => self.invoke_tool_describe(&request, &bridge).await,
             TOOL_CALL_NAME => Ok(failed_invalid_input(
-                "tool_call target is unknown or not disclosed",
+                "tool_call target is not a known tool; use tool_search to find the correct tool name",
             )),
             _ => Ok(failed_invalid_input("unknown bridge tool")),
         }
@@ -654,25 +654,26 @@ impl ToolDisclosureCapabilityPort {
         let Some(state) = guard.as_ref() else {
             return Ok(None);
         };
+        // Forgiving resolution: resolve any tool the catalog knows by name,
+        // regardless of whether it has been advertised or discovered this turn.
+        // A *direct* call to an undisclosed tool already resolves via
+        // `direct_deferred_target`, so the `tool_call` bridge must not be
+        // stricter than the direct path. Requiring prior disclosure here was a
+        // dead end: a model that calls `tool_call` before `tool_search`/
+        // `tool_describe` got a generic "invalid_input" with no recovery hint and
+        // looped until the run died. Resolving forgivingly lets the call dispatch
+        // and surface the tool's *real* schema error (with repairs) — which the
+        // model can act on — and earns promotion on success via the register
+        // path's `record_promotable_input`. Safety/approval/auth gates still run
+        // at dispatch, so this is a token-economy boundary, not a security one.
         let Some(definition) = self.catalog_target(state, name) else {
             return Ok(None);
         };
-        let active = state
-            .active
-            .definitions
-            .iter()
-            .any(|candidate| candidate.capability_id == definition.capability_id);
-        let disclosed = state.disclosed_names.contains(name)
-            || state.disclosed_names.contains(&definition.name);
-        if active || disclosed {
-            let target_call = self.target_call(tool_call, &definition, arguments);
-            Ok(Some(ResolvedToolTarget {
-                definition,
-                target_call,
-            }))
-        } else {
-            Ok(None)
-        }
+        let target_call = self.target_call(tool_call, &definition, arguments);
+        Ok(Some(ResolvedToolTarget {
+            definition,
+            target_call,
+        }))
     }
 
     fn direct_deferred_target(
@@ -1054,34 +1055,9 @@ mod tests {
                 .any(|definition| definition.name == "hidden_tool")
         );
 
-        let undisclosed = port
-            .register_provider_tool_call(provider_call(
-                TOOL_CALL_NAME,
-                json!({"name": "hidden_tool", "arguments": {}}),
-            ))
-            .await
-            .expect("undisclosed tool_call registers as bridge failure");
-        assert!(
-            is_bridge_capability_id(&undisclosed.capability_id),
-            "undisclosed tool_call should stay on bridge path"
-        );
-        let failed = port
-            .invoke_capability(CapabilityInvocation {
-                surface_version: undisclosed.surface_version,
-                capability_id: undisclosed.capability_id,
-                input_ref: undisclosed.input_ref,
-                approval_resume: None,
-                auth_resume: None,
-            })
-            .await
-            .expect("bridge invalid failure");
-        assert!(matches!(
-            failed,
-            CapabilityOutcome::Failed(CapabilityFailure {
-                error_kind: CapabilityFailureKind::InvalidInput,
-                ..
-            })
-        ));
+        // Forgiving `tool_call` resolution of an undisclosed catalog tool is
+        // covered by `tool_call_resolves_undisclosed_catalog_target_forgivingly`.
+        // This test focuses on the search -> disclose -> dispatch -> promote flow.
 
         let search = port
             .register_provider_tool_call(provider_call(
@@ -1618,6 +1594,100 @@ mod tests {
                 .iter()
                 .any(|definition| definition.name == "gmail__send_message"),
             "successful non-builtin direct deferred call should promote the target next turn"
+        );
+    }
+
+    #[tokio::test]
+    async fn tool_call_resolves_undisclosed_catalog_target_forgivingly() {
+        // Regression: a model (often a strong one) may invoke a catalog tool via
+        // the `tool_call` bridge WITHOUT first discovering it through
+        // tool_search/tool_describe. The bridge used to reject that with a generic
+        // `invalid_input` ("unknown or not disclosed") carrying no recovery hint,
+        // so the model looped on the same dead-end call until the run died. The
+        // bridge must be no stricter than a direct call: an undisclosed catalog
+        // tool resolves and dispatches to the target.
+        let definitions = vec![
+            provider_definition("fixture.read_file", "read_file", "Read a file"),
+            provider_definition(
+                "fixture.hidden",
+                "hidden_tool",
+                "Hidden workspace operation",
+            ),
+            provider_definition("fixture.extra_1", "extra_tool_1", "Extra operation"),
+            provider_definition("fixture.extra_2", "extra_tool_2", "Extra operation"),
+            provider_definition("fixture.extra_3", "extra_tool_3", "Extra operation"),
+            provider_definition("fixture.extra_4", "extra_tool_4", "Extra operation"),
+        ];
+        let inner = Arc::new(SpyPort {
+            definitions,
+            surface_version: CapabilitySurfaceVersion::new("surface:test")
+                .expect("valid surface version"),
+            registered_calls: Mutex::new(Vec::new()),
+            invocations: Mutex::new(Vec::new()),
+        });
+        let port = disclosure_port(
+            Arc::clone(&inner) as Arc<dyn LoopCapabilityPort>,
+            run_context(TurnId::new()).await,
+            Arc::new(Mutex::new(HashMap::new())),
+        );
+
+        port.visible_capabilities(VisibleCapabilityRequest)
+            .await
+            .expect("visible surface");
+        let advertised = port.tool_definitions().expect("tool definitions");
+        assert!(
+            !advertised
+                .iter()
+                .any(|definition| definition.name == "hidden_tool"),
+            "hidden_tool starts deferred (never discovered this turn)"
+        );
+
+        // tool_call the deferred tool WITHOUT any prior tool_search/tool_describe.
+        let candidate = port
+            .register_provider_tool_call(provider_call(
+                TOOL_CALL_NAME,
+                json!({"name": "hidden_tool", "arguments": {"path": "demo"}}),
+            ))
+            .await
+            .expect("undisclosed tool_call resolves forgivingly");
+        assert_eq!(
+            candidate.capability_id.as_str(),
+            "fixture.hidden",
+            "undisclosed tool_call must resolve to the catalog target, not the bridge"
+        );
+
+        let outcome = port
+            .invoke_capability(CapabilityInvocation {
+                surface_version: candidate.surface_version,
+                capability_id: candidate.capability_id,
+                input_ref: candidate.input_ref,
+                approval_resume: None,
+                auth_resume: None,
+            })
+            .await
+            .expect("target dispatches");
+        assert!(matches!(outcome, CapabilityOutcome::Completed(_)));
+        assert_eq!(
+            inner
+                .registered_calls
+                .lock()
+                .expect("registered calls lock")
+                .last()
+                .expect("target call")
+                .name,
+            "hidden_tool",
+            "the inner port must receive the unwrapped target call"
+        );
+        assert_eq!(
+            inner
+                .invocations
+                .lock()
+                .expect("invocations lock")
+                .last()
+                .expect("target invocation")
+                .capability_id
+                .as_str(),
+            "fixture.hidden"
         );
     }
 
