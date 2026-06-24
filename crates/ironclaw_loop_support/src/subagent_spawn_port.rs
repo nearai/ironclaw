@@ -1,5 +1,5 @@
 use std::{
-    collections::{HashMap, HashSet, hash_map::Entry},
+    collections::{HashMap, hash_map::Entry},
     fmt,
     str::FromStr,
     sync::{
@@ -388,8 +388,7 @@ pub struct SubagentSpawnCapabilityPort {
     limits: SubagentSpawnLimits,
     deps: Arc<SubagentSpawnDeps>,
     parameters_schema: Arc<serde_json::Value>,
-    auth_input_refs: Mutex<HashSet<CapabilityInputRef>>,
-    spawn_activity_ids: Mutex<HashMap<CapabilityInputRef, CapabilityActivityId>>,
+    spawn_authorizations: Mutex<HashMap<CapabilityInputRef, CapabilityActivityId>>,
     spawned_this_turn: AtomicU32,
 }
 
@@ -501,8 +500,7 @@ impl SubagentSpawnCapabilityPort {
             limits,
             deps,
             parameters_schema,
-            auth_input_refs: Mutex::new(HashSet::new()),
-            spawn_activity_ids: Mutex::new(HashMap::new()),
+            spawn_authorizations: Mutex::new(HashMap::new()),
             spawned_this_turn: AtomicU32::new(0),
         }
     }
@@ -528,8 +526,7 @@ impl SubagentSpawnCapabilityPort {
             limits,
             deps,
             parameters_schema,
-            auth_input_refs: Mutex::new(HashSet::new()),
-            spawn_activity_ids: Mutex::new(HashMap::new()),
+            spawn_authorizations: Mutex::new(HashMap::new()),
             spawned_this_turn: AtomicU32::new(0),
         }
     }
@@ -600,13 +597,13 @@ impl SubagentSpawnCapabilityPort {
             .register_provider_tool_call_input(&self.run_context, &tool_call)
             .await?;
         let activity_id = {
-            let mut spawn_activity_ids = self.spawn_activity_ids.lock().map_err(|_| {
+            let mut spawn_authorizations = self.spawn_authorizations.lock().map_err(|_| {
                 AgentLoopHostError::new(
                     AgentLoopHostErrorKind::Unavailable,
-                    "subagent spawn activity identity store is unavailable",
+                    "subagent spawn authorization store is unavailable",
                 )
             })?;
-            match spawn_activity_ids.entry(input_ref.clone()) {
+            match spawn_authorizations.entry(input_ref.clone()) {
                 Entry::Occupied(entry) => {
                     let registered_activity_id = *entry.get();
                     if let Some(activity_id) = activity_id
@@ -626,15 +623,6 @@ impl SubagentSpawnCapabilityPort {
                 }
             }
         };
-        self.auth_input_refs
-            .lock()
-            .map_err(|_| {
-                AgentLoopHostError::new(
-                    AgentLoopHostErrorKind::Unavailable,
-                    "subagent spawn authorization input store is unavailable",
-                )
-            })?
-            .insert(input_ref.clone());
         Ok(CapabilityCallCandidate {
             activity_id,
             surface_version: surface.version,
@@ -799,36 +787,56 @@ impl SubagentSpawnCapabilityPort {
         &self,
         invocation: &CapabilityInvocation,
     ) -> Result<Option<CapabilityOutcome>, AgentLoopHostError> {
-        let is_registered = {
-            let auth_input_refs = self.auth_input_refs.lock().map_err(|_| {
-                AgentLoopHostError::new(
-                    AgentLoopHostErrorKind::Unavailable,
-                    "subagent spawn authorization input store is unavailable",
-                )
-            })?;
-            auth_input_refs.contains(&invocation.input_ref)
-        };
-        if !is_registered {
+        let mut spawn_authorizations = self.spawn_authorizations.lock().map_err(|_| {
+            AgentLoopHostError::new(
+                AgentLoopHostErrorKind::Unavailable,
+                "subagent spawn authorization store is unavailable",
+            )
+        })?;
+        let Some(registered_activity_id) = spawn_authorizations.get(&invocation.input_ref).copied()
+        else {
             return Ok(Some(spawn_rejected("spawn_requires_provider_registration")));
+        };
+        if registered_activity_id != invocation.activity_id {
+            return Err(AgentLoopHostError::new(
+                AgentLoopHostErrorKind::InvalidInvocation,
+                "registered provider tool-call activity identity does not match the requested activity",
+            ));
         }
-        self.remove_auth_input_ref(&invocation.input_ref)?;
+        spawn_authorizations.remove(&invocation.input_ref);
         Ok(None)
     }
 
-    fn remove_auth_input_ref(
+    #[cfg(test)]
+    fn register_test_spawn_authorization(
+        &self,
+        input_ref: CapabilityInputRef,
+        activity_id: CapabilityActivityId,
+    ) {
+        self.spawn_authorizations
+            .lock()
+            .expect("spawn authorization lock")
+            .insert(input_ref, activity_id);
+    }
+
+    #[cfg(test)]
+    fn test_spawn_authorization(
         &self,
         input_ref: &CapabilityInputRef,
-    ) -> Result<(), AgentLoopHostError> {
-        self.auth_input_refs
+    ) -> Option<CapabilityActivityId> {
+        self.spawn_authorizations
             .lock()
-            .map_err(|_| {
-                AgentLoopHostError::new(
-                    AgentLoopHostErrorKind::Unavailable,
-                    "subagent spawn authorization input store is unavailable",
-                )
-            })?
-            .remove(input_ref);
-        Ok(())
+            .expect("spawn authorization lock")
+            .get(input_ref)
+            .copied()
+    }
+
+    #[cfg(test)]
+    fn test_spawn_authorization_contains(&self, input_ref: &CapabilityInputRef) -> bool {
+        self.spawn_authorizations
+            .lock()
+            .expect("spawn authorization lock")
+            .contains_key(input_ref)
     }
 
     async fn finish_spawn(
