@@ -308,24 +308,47 @@ mod tests {
 
     #[test]
     fn list_issues_uses_native_repo_endpoint_with_filters() {
-        test_support::set_response(Ok(json!([
-            {
-                "number": 4806,
-                "title": "issue one"
-            },
-            {
-                "number": 4805,
-                "title": "pull request",
-                "pull_request": {
-                    "url": "https://api.github.com/repos/nearai/ironclaw/pulls/4805"
+        test_support::set_responses([
+            Ok(json!([
+                {
+                    "number": 4808,
+                    "title": "previous issue"
+                },
+                {
+                    "number": 4807,
+                    "title": "previous pull request",
+                    "pull_request": {
+                        "url": "https://api.github.com/repos/nearai/ironclaw/pulls/4807"
+                    }
                 }
-            },
-            {
-                "number": 4804,
-                "title": "issue two"
-            }
-        ])
-        .to_string()));
+            ])
+            .to_string()),
+            Ok(json!([
+                {
+                    "number": 4806,
+                    "title": "skipped issue"
+                },
+                {
+                    "number": 4805,
+                    "title": "pull request",
+                    "pull_request": {
+                        "url": "https://api.github.com/repos/nearai/ironclaw/pulls/4805"
+                    }
+                }
+            ])
+            .to_string()),
+            Ok(json!([
+                {
+                    "number": 4804,
+                    "title": "issue one"
+                },
+                {
+                    "number": 4803,
+                    "title": "issue two"
+                }
+            ])
+            .to_string()),
+        ]);
 
         let output = execute_inner(
             r#"{"owner":"nearai","repo":"ironclaw","state":"open","labels":["bug","api"],"assignee":"henry","milestone":"12","page":2,"limit":2}"#,
@@ -334,12 +357,21 @@ mod tests {
         .expect("github.list_issues should call native issues endpoint");
 
         let requests = test_support::requests();
-        assert_eq!(requests.len(), 1);
-        assert_eq!(requests[0].method, "GET");
-        assert_eq!(requests[0].body, None);
+        assert_eq!(requests.len(), 3);
+        assert!(requests
+            .iter()
+            .all(|request| request.method == "GET" && request.body.is_none()));
         assert_eq!(
             requests[0].path,
-            "/repos/nearai/ironclaw/issues?state=open&per_page=2&labels=bug%2Capi&assignee=henry&milestone=12&page=2"
+            "/repos/nearai/ironclaw/issues?state=open&per_page=2&page=1&labels=bug%2Capi&assignee=henry&milestone=12"
+        );
+        assert_eq!(
+            requests[1].path,
+            "/repos/nearai/ironclaw/issues?state=open&per_page=2&page=2&labels=bug%2Capi&assignee=henry&milestone=12"
+        );
+        assert_eq!(
+            requests[2].path,
+            "/repos/nearai/ironclaw/issues?state=open&per_page=2&page=3&labels=bug%2Capi&assignee=henry&milestone=12"
         );
 
         let parsed: serde_json::Value =
@@ -348,11 +380,11 @@ mod tests {
             parsed,
             json!([
                 {
-                    "number": 4806,
+                    "number": 4804,
                     "title": "issue one"
                 },
                 {
-                    "number": 4804,
+                    "number": 4803,
                     "title": "issue two"
                 }
             ])
@@ -372,7 +404,7 @@ mod tests {
         let requests = test_support::requests();
         assert_eq!(
             requests[0].path,
-            "/repos/nearai/ironclaw/issues?state=all&per_page=1"
+            "/repos/nearai/ironclaw/issues?state=all&per_page=1&page=1"
         );
     }
 
@@ -558,7 +590,7 @@ mod tests {
         let requests = test_support::requests();
         assert_eq!(
             requests[0].path,
-            "/repos/nearai/ironclaw/issues?state=open&per_page=2"
+            "/repos/nearai/ironclaw/issues?state=open&per_page=2&page=1"
         );
     }
 

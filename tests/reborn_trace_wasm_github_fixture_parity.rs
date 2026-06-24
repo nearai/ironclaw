@@ -555,7 +555,7 @@ fn expected_github_http_requests() -> Vec<ExpectedGithubHttpRequest> {
             }),
         ),
         get(
-            "https://api.github.com/repos/nearai/ironclaw/issues?state=closed&per_page=7&labels=qa%2Creborn&assignee=henry&milestone=12&page=2",
+            "https://api.github.com/repos/nearai/ironclaw/issues?state=closed&per_page=7&page=1&labels=qa%2Creborn&assignee=henry&milestone=12",
         ),
         request(
             "POST",

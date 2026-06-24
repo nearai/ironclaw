@@ -79,6 +79,7 @@ pub(crate) fn sanitize_host_error(error: &str) -> String {
 #[cfg(test)]
 pub(crate) mod test_support {
     use std::cell::RefCell;
+    use std::collections::VecDeque;
 
     #[derive(Clone, Debug, PartialEq, Eq)]
     pub(crate) struct CapturedRequest {
@@ -89,13 +90,17 @@ pub(crate) mod test_support {
 
     thread_local! {
         static REQUESTS: RefCell<Vec<CapturedRequest>> = const { RefCell::new(Vec::new()) };
-        static RESPONSE: RefCell<Option<Result<String, String>>> = const { RefCell::new(None) };
+        static RESPONSES: RefCell<VecDeque<Result<String, String>>> = const { RefCell::new(VecDeque::new()) };
     }
 
     pub(crate) fn set_response(response: Result<String, String>) {
+        set_responses([response]);
+    }
+
+    pub(crate) fn set_responses<const N: usize>(responses: [Result<String, String>; N]) {
         REQUESTS.with(|requests| requests.borrow_mut().clear());
-        RESPONSE.with(|next_response| {
-            *next_response.borrow_mut() = Some(response);
+        RESPONSES.with(|next_responses| {
+            *next_responses.borrow_mut() = responses.into();
         });
     }
 
@@ -114,6 +119,6 @@ pub(crate) mod test_support {
     }
 
     pub(super) fn take_response() -> Option<Result<String, String>> {
-        RESPONSE.with(|response| response.borrow_mut().take())
+        RESPONSES.with(|responses| responses.borrow_mut().pop_front())
     }
 }

@@ -34,45 +34,104 @@ pub(crate) fn list_issues(
         validate_milestone_filter(milestone)?;
     }
     let limit = limit.unwrap_or(30).min(100); // Cap at 100
+    let requested_page = page.unwrap_or(1);
     let encoded_owner = url_encode_path(owner);
     let encoded_repo = url_encode_path(repo);
+    let encoded_state = url_encode_query(state);
+    let encoded_labels = labels
+        .as_ref()
+        .filter(|labels| !labels.is_empty())
+        .map(|labels| url_encode_query(&labels.join(",")));
+    let encoded_assignee = assignee.map(url_encode_query);
+    let encoded_milestone = milestone.map(url_encode_query);
 
-    let mut path = format!(
-        "/repos/{}/{}/issues?state={}&per_page={}",
-        encoded_owner,
-        encoded_repo,
-        url_encode_query(state),
-        limit
-    );
-    if let Some(labels) = labels {
-        if !labels.is_empty() {
-            path.push_str("&labels=");
-            path.push_str(&url_encode_query(&labels.join(",")));
-        }
-    }
-    if let Some(assignee) = assignee {
-        path.push_str("&assignee=");
-        path.push_str(&url_encode_query(assignee));
-    }
-    if let Some(milestone) = milestone {
-        path.push_str("&milestone=");
-        path.push_str(&url_encode_query(milestone));
-    }
-    if let Some(p) = page {
-        path.push_str(&format!("&page={}", p));
-    }
-    let response = github_request("GET", &path, None)?;
-    filter_pull_requests_from_issues_response(&response)
+    list_issue_only_page(ListIssuesPageRequest {
+        encoded_owner: &encoded_owner,
+        encoded_repo: &encoded_repo,
+        encoded_state: &encoded_state,
+        encoded_labels: encoded_labels.as_deref(),
+        encoded_assignee: encoded_assignee.as_deref(),
+        encoded_milestone: encoded_milestone.as_deref(),
+        requested_page,
+        limit,
+    })
 }
 
-fn filter_pull_requests_from_issues_response(response: &str) -> Result<String, String> {
-    let issues: Vec<serde_json::Value> =
-        serde_json::from_str(response).map_err(|_| "github_api_invalid_json".to_string())?;
-    let issues = issues
-        .into_iter()
-        .filter(|issue| issue.get("pull_request").is_none())
-        .collect::<Vec<_>>();
-    serde_json::to_string(&issues).map_err(|_| "github_api_invalid_json".to_string())
+struct ListIssuesPageRequest<'a> {
+    encoded_owner: &'a str,
+    encoded_repo: &'a str,
+    encoded_state: &'a str,
+    encoded_labels: Option<&'a str>,
+    encoded_assignee: Option<&'a str>,
+    encoded_milestone: Option<&'a str>,
+    requested_page: u32,
+    limit: u32,
+}
+
+fn list_issue_only_page(request: ListIssuesPageRequest<'_>) -> Result<String, String> {
+    let target_start = u64::from(request.requested_page - 1) * u64::from(request.limit);
+    let target_end = target_start + u64::from(request.limit);
+    let mut raw_page = 1_u32;
+    let mut seen_issues = 0_u64;
+    let mut output = Vec::new();
+
+    loop {
+        let path = list_issues_path(&request, raw_page);
+        let response = github_request("GET", &path, None)?;
+        let raw_items = parse_issues_response(&response)?;
+        let is_last_raw_page = raw_items.len() < request.limit as usize;
+
+        for item in raw_items {
+            if item.get("pull_request").is_some() {
+                continue;
+            }
+            if seen_issues >= target_start && seen_issues < target_end {
+                output.push(item);
+            }
+            seen_issues += 1;
+            if seen_issues >= target_end {
+                return serialize_issues_response(&output);
+            }
+        }
+
+        if is_last_raw_page {
+            return serialize_issues_response(&output);
+        }
+        raw_page = raw_page
+            .checked_add(1)
+            .ok_or_else(|| "invalid_page".to_string())?;
+    }
+}
+
+fn list_issues_path(request: &ListIssuesPageRequest<'_>, raw_page: u32) -> String {
+    let mut path = format!(
+        "/repos/{}/{}/issues?state={}&per_page={}&page={}",
+        request.encoded_owner, request.encoded_repo, request.encoded_state, request.limit, raw_page
+    );
+    if let Some(labels) = request.encoded_labels {
+        path.push_str("&labels=");
+        path.push_str(labels);
+    }
+    if let Some(assignee) = request.encoded_assignee {
+        path.push_str("&assignee=");
+        path.push_str(assignee);
+    }
+    if let Some(milestone) = request.encoded_milestone {
+        path.push_str("&milestone=");
+        path.push_str(milestone);
+    }
+    path
+}
+
+fn parse_issues_response(response: &str) -> Result<Vec<serde_json::Value>, String> {
+    serde_json::from_str(response)
+        .map_err(|err| format!("github_api_invalid_json: issues response parse failed: {err}"))
+}
+
+fn serialize_issues_response(issues: &[serde_json::Value]) -> Result<String, String> {
+    serde_json::to_string(issues).map_err(|err| {
+        format!("github_api_invalid_json: issues response serialization failed: {err}")
+    })
 }
 
 fn validate_milestone_filter(milestone: &str) -> Result<(), String> {
