@@ -1,10 +1,11 @@
-use std::{collections::HashSet, sync::Arc};
+use std::sync::Arc;
 
 use async_trait::async_trait;
+use chrono::Utc;
 use ironclaw_auth::{
     AuthProductError, AuthProductScope, AuthProviderId, AuthSurface, CredentialAccount,
-    CredentialAccountId, CredentialAccountRecordSource, CredentialAccountSelectionRequest,
-    CredentialAccountStatus, CredentialRefreshReport, CredentialRefreshRequest, ProviderScope,
+    CredentialAccountRecordSource, CredentialAccountSelectionRequest, CredentialAccountStatus,
+    CredentialRefreshReport, CredentialRefreshRequest, ProviderScope,
     select_latest_duplicate_user_reusable_account,
 };
 use ironclaw_host_api::{
@@ -15,6 +16,12 @@ use ironclaw_host_runtime::{
     RuntimeCredentialAccessSecret, RuntimeCredentialAccountRequest,
     RuntimeCredentialAccountResolver,
 };
+
+/// Minimum time remaining before an access token is considered fresh enough
+/// to skip an inline refresh round-trip. Fixed at 5 minutes — not operator
+/// configurable.
+pub(crate) const DEFAULT_ACCESS_REFRESH_MARGIN: std::time::Duration =
+    std::time::Duration::from_secs(5 * 60);
 
 #[derive(Clone)]
 pub(crate) struct ProductAuthRuntimeCredentialResolver {
@@ -216,14 +223,17 @@ impl RuntimeCredentialAccountVisibilityPolicy for DefaultRuntimeCredentialAccoun
 
 pub(crate) struct ProductAuthRuntimeCredentialAccountRefresher {
     refresh_accounts: Arc<dyn RuntimeCredentialAccountRefreshPort>,
-    refreshed_account_ids: tokio::sync::Mutex<HashSet<CredentialAccountId>>,
+    secret_store: Arc<dyn ironclaw_secrets::SecretStore>,
 }
 
 impl ProductAuthRuntimeCredentialAccountRefresher {
-    pub(crate) fn new(refresh_accounts: Arc<dyn RuntimeCredentialAccountRefreshPort>) -> Self {
+    pub(crate) fn new(
+        refresh_accounts: Arc<dyn RuntimeCredentialAccountRefreshPort>,
+        secret_store: Arc<dyn ironclaw_secrets::SecretStore>,
+    ) -> Self {
         Self {
             refresh_accounts,
-            refreshed_account_ids: tokio::sync::Mutex::new(HashSet::new()),
+            secret_store,
         }
     }
 }
@@ -377,13 +387,35 @@ impl RuntimeCredentialAccountRefreshService for ProductAuthRuntimeCredentialAcco
             return Ok(account);
         }
         let account_id = account.id;
-        let mut refreshed_account_ids = self.refreshed_account_ids.lock().await;
-        if refreshed_account_ids.contains(&account_id) {
-            return accounts
-                .select_unique_configured_runtime_account(request)
-                .await;
-        }
 
+        // A2: If the access secret has a known expiry that is still outside
+        // the refresh margin, skip the token-endpoint round-trip and reuse the
+        // staged token. We always re-read from the store (never cache).
+        // Skip only when `expires_at` is present — absent means legacy record
+        // or cleanup deleted it, both are fail-safe: proceed with refresh.
+        if let Some(access_handle) = &account.access_secret {
+            let metadata = self
+                .secret_store
+                .metadata(&account.scope.resource, access_handle)
+                .await
+                .unwrap_or(None); // silent-ok: metadata unavailability is non-fatal — fall through to refresh
+            if let Some(meta) = metadata
+                && let Some(expires_at) = meta.expires_at
+            {
+                let margin = chrono::Duration::from_std(DEFAULT_ACCESS_REFRESH_MARGIN)
+                    .unwrap_or(chrono::Duration::seconds(300));
+                if expires_at
+                    .checked_sub_signed(margin)
+                    .is_some_and(|cutoff| cutoff > Utc::now())
+                {
+                    tracing::debug!(
+                        provider = %account.provider,
+                        "oauth access token still fresh, skipping inline refresh"
+                    );
+                    return Ok(account);
+                }
+            }
+        }
         let mut refresh_request = CredentialRefreshRequest::new(
             account.scope.clone(),
             account.provider.clone(),
@@ -400,7 +432,6 @@ impl RuntimeCredentialAccountRefreshService for ProductAuthRuntimeCredentialAcco
             .await
         {
             Ok(_) => {
-                refreshed_account_ids.insert(account_id);
                 accounts
                     .select_unique_configured_runtime_account(request)
                     .await

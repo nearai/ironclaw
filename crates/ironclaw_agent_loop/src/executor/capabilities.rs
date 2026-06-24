@@ -5,15 +5,15 @@ use async_trait::async_trait;
 use ironclaw_turns::{
     LoopFailureKind, LoopResultRef,
     run_profile::{
-        AuthResumeApprovalIdentity, CapabilityApprovalResume, CapabilityAuthResume,
-        CapabilityAuthResumeReplay, CapabilityBatchInvocation, CapabilityCallCandidate,
-        CapabilityFailureKind, CapabilityOutcome, CapabilityProgress, CapabilityResultMessage,
-        LoopDriverNoteKind, LoopProgressEvent, VisibleCapabilitySurface,
+        AuthResumeApprovalIdentity, CapabilityActivityId, CapabilityApprovalResume,
+        CapabilityAuthResume, CapabilityAuthResumeReplay, CapabilityBatchInvocation,
+        CapabilityCallCandidate, CapabilityFailureKind, CapabilityOutcome, CapabilityProgress,
+        CapabilityResultMessage, LoopDriverNoteKind, LoopProgressEvent, VisibleCapabilitySurface,
     },
 };
 
 use crate::{
-    state::{CheckpointKind, LoopExecutionState},
+    state::{CapabilityOutputObservation, CheckpointKind, LoopExecutionState},
     strategies::{
         BatchPolicy, CapabilityBatchTurnSummary, CapabilityErrorClass, CapabilityErrorSummary,
         GateKind, RecoveryOutcome, SanitizedStrategySummary, TurnSummary,
@@ -129,6 +129,7 @@ impl ExecutorStage<CapabilityInput> for CapabilityStage {
             )
         }) {
             let denied_cap_id = pending.capability_id.clone();
+            let denied_activity_id = pending.activity_id_for_resume();
             // Take ownership now that we've confirmed the disposition is Denied.
             // The unconditional take() below also covers the defensive case where
             // auth_denied_calls is empty — preventing a stale Denied disposition
@@ -141,6 +142,7 @@ impl ExecutorStage<CapabilityInput> for CapabilityStage {
                     &mut signatures,
                     &mut capability_batch,
                     denied_cap_id,
+                    denied_activity_id,
                     "auth gate denied by user",
                     visible_calls,
                 )
@@ -171,6 +173,7 @@ impl ExecutorStage<CapabilityInput> for CapabilityStage {
             )
         }) {
             let denied_cap_id = pending.capability_id.clone();
+            let denied_activity_id = pending.activity_id_for_resume();
             // Clear the slot unconditionally — even if the partition yields no
             // matching calls, a stale Denied disposition must not bleed into the
             // fall-through batch.
@@ -182,6 +185,7 @@ impl ExecutorStage<CapabilityInput> for CapabilityStage {
                     &mut signatures,
                     &mut capability_batch,
                     denied_cap_id,
+                    denied_activity_id,
                     "approval gate denied by user",
                     visible_calls,
                 )
@@ -391,6 +395,7 @@ impl ExecutorStage<CapabilityInput> for CapabilityStage {
                             progress: CapabilityProgress::MadeProgress,
                             terminate_hint: false,
                             byte_len,
+                            output_digest: None,
                         };
                         append_completed_capability_result(
                             ctx.host,
@@ -659,6 +664,7 @@ impl CapabilityStage {
                     progress: CapabilityProgress::MadeProgress,
                     terminate_hint: false,
                     byte_len,
+                    output_digest: None,
                 };
                 AwaitDependentRunGateStage
                     .process(
@@ -1032,6 +1038,7 @@ impl CapabilityStage {
         signatures: &mut HashSet<crate::state::CapabilityCallSignature>,
         capability_batch: &mut CapabilityBatchTurnSummary,
         denied_cap_id: ironclaw_host_api::CapabilityId,
+        denied_activity_id: Option<CapabilityActivityId>,
         planner_summary: &'static str,
         visible_calls: Vec<CapabilityCallCandidate>,
     ) -> Result<
@@ -1042,8 +1049,21 @@ impl CapabilityStage {
             .into_iter()
             .partition(|call| call.capability_id == denied_cap_id);
 
+        let mut denied_activity_id = denied_activity_id;
         for call in denied_calls {
             push_call_signature_once(&mut state, signatures, &call)?;
+            if let Some(activity_id) = denied_activity_id.take() {
+                CheckpointStage
+                    .emit_progress(
+                        ctx,
+                        LoopProgressEvent::CapabilityActivityFailed {
+                            activity_id,
+                            capability_id: call.capability_id.clone(),
+                            reason_kind: CapabilityFailureKind::Authorization,
+                        },
+                    )
+                    .await;
+            }
             let failure = ironclaw_turns::run_profile::CapabilityFailure {
                 error_kind: CapabilityFailureKind::Authorization,
                 // Intentionally empty: model-visible text comes from
@@ -1147,6 +1167,7 @@ async fn append_spawned_child_result(
         progress: CapabilityProgress::MadeProgress,
         terminate_hint: false,
         byte_len,
+        output_digest: None,
     };
     append_completed_capability_result(host, state, call, result, capability_batch).await
 }
@@ -1178,7 +1199,35 @@ async fn append_completed_capability_result(
 ) -> Result<(), AgentLoopExecutorError> {
     append_capability_result_ref(host, call, &result).await?;
     let signature = capability_call_signature(call)?;
-    capability_batch.record_result(signature, result.progress, result.terminate_hint);
+    // Output-aware progress: if this exact call (same signature) produced an
+    // output we have already observed this run, it advanced nothing — NoChange.
+    // A first-seen output is MadeProgress. Without a digest (synthetic results or
+    // older hosts) fall back to the host-reported progress. The membership check
+    // MUST run before recording the observation, or a first occurrence would
+    // immediately look "seen".
+    let progress = match result.output_digest {
+        Some(output_digest) => {
+            let already_seen = state
+                .seen_capability_output_digests
+                .iter()
+                .any(|observation| {
+                    observation.signature == signature && observation.output_digest == output_digest
+                });
+            if already_seen {
+                CapabilityProgress::NoChange
+            } else {
+                state
+                    .seen_capability_output_digests
+                    .push(CapabilityOutputObservation {
+                        signature: signature.clone(),
+                        output_digest,
+                    });
+                CapabilityProgress::MadeProgress
+            }
+        }
+        None => result.progress,
+    };
+    capability_batch.record_result(signature, progress, result.terminate_hint);
     push_completed_result(state, &call.capability_id, result);
     Ok(())
 }
@@ -1256,6 +1305,7 @@ mod tests {
             progress: CapabilityProgress::MadeProgress,
             terminate_hint: false,
             byte_len: 0,
+            output_digest: None,
         })
     }
 

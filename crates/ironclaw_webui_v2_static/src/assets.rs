@@ -172,12 +172,15 @@ mod tests {
     }
 
     #[test]
-    fn chat_gate_resolution_always_resumes_run() {
+    fn chat_gate_resolution_uses_resume_outcome() {
         let use_chat = asset_text("js/pages/chat/hooks/useChat.js");
-        // Every gate resolution resumes the run; there is no shouldContinueProcessing
-        // conditional. The terminal run_status SSE event is what clears processing.
-        assert!(use_chat.contains("setPendingGate(null);\n      setIsProcessing(true);"));
-        // activeRun is NOT cleared inside resolveGate — the run keeps going.
+        // Gate resolution normally resumes the run, but stale/terminal gate
+        // responses must not synthesize a processing state.
+        assert!(use_chat.contains("const outcome = resolveGateOutcome(response);"));
+        assert!(use_chat.contains("if (outcome === \"resumed\")"));
+        assert!(use_chat.contains("setIsProcessing(true);"));
+        assert!(use_chat.contains("setIsProcessing(false);"));
+        assert!(use_chat.contains("setActiveRun(null);"));
         assert!(!use_chat.contains("setIsProcessing(shouldContinueProcessing);"));
 
         let events = asset_text("js/pages/chat/lib/useChatEvents.js");
@@ -270,11 +273,15 @@ mod tests {
         assert!(picker.contains("listSlackAllowedChannels"));
         assert!(picker.contains("saveSlackAllowedChannels(channels)"));
 
+        let setup_panel = asset_text("js/components/slack-setup-panel.js");
+        assert!(setup_panel.contains("SlackChannelPicker"));
+        assert!(setup_panel.contains("<${SlackChannelPicker} action=${action} />"));
+
         let channels_tab = asset_text("js/pages/extensions/components/channels-tab.js");
         assert!(channels_tab.contains("showLegacySlackConnectActions"));
         assert!(channels_tab.contains("admin_managed_channels"));
         assert!(channels_tab.contains("inbound_proof_code"));
-        assert!(channels_tab.contains("SlackChannelPicker"));
+        assert!(channels_tab.contains("SlackAdminManagedSection"));
         assert!(channels_tab.contains("SlackPairingSection"));
         assert!(channels_tab.contains("findSlackConnectActions"));
         assert!(channels_tab.contains("slackConnectActions"));
@@ -298,7 +305,13 @@ mod tests {
 
         let api = asset_text("js/lib/api.js");
         assert!(api.contains("listAutomations"));
+        assert!(api.contains("pauseAutomation"));
+        assert!(api.contains("resumeAutomation"));
+        assert!(api.contains("deleteAutomation"));
         assert!(api.contains("/automations"));
+        assert!(api.contains("/pause"));
+        assert!(api.contains("/resume"));
+        assert!(api.contains(r#"method: "DELETE""#));
         assert!(api.contains("getOutboundPreferences"));
         assert!(api.contains("setOutboundPreferences"));
         assert!(api.contains("/outbound/preferences"));
@@ -309,6 +322,52 @@ mod tests {
         assert!(page.contains("AutomationDeliveryDefaultsPanel"));
         assert!(page.contains("useOutboundDeliveryDefaults"));
         assert!(page.contains("AutomationsList"));
+
+        let automations_hook = asset_text("js/pages/automations/hooks/useAutomations.js");
+        assert!(automations_hook.contains("AUTOMATIONS_BASE_REFETCH_MS"));
+        assert!(automations_hook.contains("nextAutomationsRefetchDelay"));
+        assert!(automations_hook.contains("query.refetch()"));
+
+        let list = asset_text("js/pages/automations/components/automations-list.js");
+        assert!(list.contains("primary_status_label"));
+        assert!(list.contains("primary_status_tone"));
+
+        let detail_panel = asset_text("js/pages/automations/components/automation-detail-panel.js");
+        assert!(detail_panel.contains("onPauseAutomation"));
+        assert!(detail_panel.contains("onResumeAutomation"));
+        assert!(detail_panel.contains("onDeleteAutomation"));
+        assert!(detail_panel.contains("automation.state === \"active\""));
+        assert!(detail_panel.contains("automation.state === \"scheduled\""));
+        assert!(detail_panel.contains("primary_status_label"));
+        assert!(detail_panel.contains("primary_status_tone"));
+        assert!(detail_panel.contains("window.confirm"));
+
+        let app_bundle = asset_text("dist/app.js");
+        let app_bundle_contains_encoded_automation_route = |suffix: &str| {
+            app_bundle
+                .split("/automations/${encodeURIComponent(")
+                .any(|tail| tail.contains(&format!(")}}/{suffix}")))
+        };
+        assert!(
+            app_bundle_contains_encoded_automation_route("pause"),
+            "served WebUI bundle must include the automation pause endpoint; run frontend build after editing static/js/**"
+        );
+        assert!(
+            app_bundle_contains_encoded_automation_route("resume"),
+            "served WebUI bundle must include the automation resume endpoint; run frontend build after editing static/js/**"
+        );
+        let app_bundle_contains_encoded_automation_delete = app_bundle
+            .split("/automations/${encodeURIComponent(")
+            .any(|tail| {
+                let near = tail.chars().take(220).collect::<String>();
+                near.contains("method:\"DELETE\"")
+                    && !near.contains("/pause")
+                    && !near.contains("/resume")
+            });
+        assert!(
+            app_bundle_contains_encoded_automation_delete,
+            "served WebUI bundle must include the automation delete endpoint; run frontend build after editing static/js/**"
+        );
 
         let defaults_panel =
             asset_text("js/pages/automations/components/automation-delivery-defaults-panel.js");

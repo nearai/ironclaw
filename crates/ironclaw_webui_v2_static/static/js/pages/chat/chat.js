@@ -1,5 +1,4 @@
 import { React, html } from "../../lib/html.js";
-import { useT } from "../../lib/i18n.js";
 import {
   THREAD_STATE,
   clearThreadState,
@@ -21,7 +20,19 @@ import { TypingIndicator } from "./components/typing-indicator.js";
 import { useChat } from "./hooks/useChat.js";
 import { NEW_DRAFT_KEY } from "./lib/draft-store.js";
 import { buildRuntimeContext } from "./lib/runtime-context.js";
-import { buildScopedLogsPath } from "../logs/lib/logs-data.js";
+
+/* Grace window before an active thread's sidebar state is cleared to idle.
+ * Long enough for SSE to rehydrate a gate/run after a thread switch (so a
+ * persisted "needs attention" badge isn't wiped-then-restored), short
+ * enough that a genuinely resolved thread clears promptly.
+ *
+ * Assumption: SSE rehydration of a live gate/run completes within this
+ * window. If it doesn't, a still-pending thread's badge clears here and
+ * reappears when the gate finally arrives — a one-off re-flicker, never a
+ * wrong state. The downside is purely cosmetic and self-correcting, so it
+ * is intentionally not instrumented; revisit this constant (not add
+ * telemetry) if slow links make the re-flicker noticeable. */
+const THREAD_STATE_CLEAR_GRACE_MS = 1500;
 
 export function Chat({
   threads,
@@ -32,7 +43,6 @@ export function Chat({
   composerResetKey = "",
   gatewayStatus,
 }) {
-  const t = useT();
   const {
     messages,
     isProcessing,
@@ -84,16 +94,6 @@ export function Chat({
       isProcessing &&
       !pendingGate
   );
-  const scopedLogsHref = React.useMemo(() => {
-    if (!activeThreadId) return null;
-    const runId =
-      activeRun?.threadId === activeThreadId ? activeRun.runId : null;
-    return buildScopedLogsPath(
-      { threadId: activeThreadId, runId },
-      { absolute: true }
-    );
-  }, [activeRun, activeThreadId]);
-
   const handleSend = React.useCallback(
     async (content, { images = [], attachments = [] } = {}) => {
       const response = await send(content, {
@@ -144,16 +144,30 @@ export function Chat({
    * visibility — the green/amber dot appearing on background threads
    * — requires either a user-scoped SSE channel or list_threads state
    * enrichment. Both are deferred follow-ups; see
-   * docs/webui-v2-followup-picks-02-05.md. */
+   * docs/webui-v2-followup-picks-02-05.md.
+   *
+   * Clearing is deferred by a short grace period: opening a thread resets
+   * pendingGate to null until SSE rehydrates it, so an immediate clear
+   * would wipe a persisted "needs attention" badge and re-set it a beat
+   * later — a visible flicker on the sidebar row when you click into the
+   * thread. An incoming gate/run cancels the pending clear before it
+   * fires; a genuinely resolved thread still clears, just after the
+   * window. Setting NEEDS_ATTENTION / RUNNING stays immediate. */
   React.useEffect(() => {
-    if (!activeThreadId) return;
+    if (!activeThreadId) return undefined;
     if (pendingGate) {
       setThreadState(activeThreadId, THREAD_STATE.NEEDS_ATTENTION);
-    } else if (isProcessing) {
-      setThreadState(activeThreadId, THREAD_STATE.RUNNING);
-    } else {
-      clearThreadState(activeThreadId);
+      return undefined;
     }
+    if (isProcessing) {
+      setThreadState(activeThreadId, THREAD_STATE.RUNNING);
+      return undefined;
+    }
+    const timer = setTimeout(
+      () => clearThreadState(activeThreadId),
+      THREAD_STATE_CLEAR_GRACE_MS
+    );
+    return () => clearTimeout(timer);
   }, [activeThreadId, pendingGate, isProcessing]);
 
   const [shortcutsOpen, setShortcutsOpen] = React.useState(false);
@@ -178,18 +192,6 @@ export function Chat({
     <div className="flex h-full min-h-0 overflow-hidden">
       <div className="flex min-w-0 flex-1 flex-col">
         <${ConnectionStatus} status=${sseStatus} />
-
-        ${scopedLogsHref &&
-        html`
-          <div className="flex justify-end border-b border-[var(--v2-panel-border)] bg-[var(--v2-canvas-strong)] px-4 py-1.5">
-            <a
-              href=${scopedLogsHref}
-              className="rounded-[6px] px-2 py-1 text-xs font-medium text-[var(--v2-text-muted)] hover:bg-[var(--v2-surface-muted)] hover:text-[var(--v2-text-strong)]"
-            >
-              ${t("nav.logs")}
-            </a>
-          </div>
-        `}
 
         ${historyLoadError &&
         html`

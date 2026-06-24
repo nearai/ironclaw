@@ -1,9 +1,16 @@
 import { useNavigate } from "react-router";
+import { Button } from "../../../design-system/button.js";
+import { Icon } from "../../../design-system/icons.js";
 import { EmptyPanel, Panel, StatusPill } from "../../../design-system/primitives.js";
 import { html } from "../../../lib/html.js";
 import { useT } from "../../../lib/i18n.js";
 import { cn } from "../../../utils/cn.js";
-import { RecentRunRow, recentRunKey, RunDots } from "./automation-recent-runs.js";
+import {
+  RecentRunRow,
+  recentRunKey,
+  RunDots,
+  RunHistorySummary,
+} from "./automation-recent-runs.js";
 
 function MetaItem({ label, value, tone }) {
   return html`
@@ -25,7 +32,13 @@ function MetaItem({ label, value, tone }) {
   `;
 }
 
-export function AutomationDetailPanel({ automation }) {
+export function AutomationDetailPanel({
+  automation,
+  isMutating = false,
+  onPauseAutomation,
+  onResumeAutomation,
+  onDeleteAutomation,
+}) {
   const t = useT();
   const navigate = useNavigate();
 
@@ -42,6 +55,25 @@ export function AutomationDetailPanel({ automation }) {
   }
 
   const activeRun = automation.current_run;
+  const canResume = automation.state === "paused";
+  const canPause = automation.state === "active" || automation.state === "scheduled";
+  const actionLabel = canResume ? t("missions.action.resume") : t("missions.action.pause");
+  const actionTitle = `${actionLabel}: ${automation.display_name}`;
+  const handleAction = () => {
+    if (canResume) {
+      onResumeAutomation?.(automation.automation_id);
+      return;
+    }
+    if (canPause) {
+      onPauseAutomation?.(automation.automation_id);
+    }
+  };
+  const deleteTitle = `${t("common.delete")}: ${automation.display_name}`;
+  const handleDelete = () => {
+    if (window.confirm(deleteTitle)) {
+      onDeleteAutomation?.(automation.automation_id);
+    }
+  };
 
   return html`
     <${Panel} className="overflow-hidden">
@@ -55,12 +87,37 @@ export function AutomationDetailPanel({ automation }) {
               ${automation.automation_id}
             </div>
           </div>
-          <${StatusPill}
-            tone=${automation.has_running_run ? "info" : automation.state_tone}
-            label=${automation.has_running_run
-              ? t("automations.status.running")
-              : automation.state_label}
-          />
+          <div className="flex shrink-0 items-center gap-2">
+            <${StatusPill}
+              tone=${automation.primary_status_tone}
+              label=${automation.primary_status_label}
+            />
+            ${(canPause || canResume) &&
+            html`
+              <${Button}
+                type="button"
+                variant=${canResume ? "primary" : "secondary"}
+                size="icon-sm"
+                aria-label=${actionTitle}
+                title=${actionTitle}
+                disabled=${isMutating}
+                onClick=${handleAction}
+              >
+                <${Icon} name=${canResume ? "play" : "pause"} className="h-4 w-4" />
+              <//>
+            `}
+            <${Button}
+              type="button"
+              variant="danger"
+              size="icon-sm"
+              aria-label=${deleteTitle}
+              title=${deleteTitle}
+              disabled=${isMutating}
+              onClick=${handleDelete}
+            >
+              <${Icon} name="trash" className="h-4 w-4" />
+            <//>
+          </div>
         </div>
       </div>
 
@@ -81,11 +138,14 @@ export function AutomationDetailPanel({ automation }) {
         </div>
 
         <div>
-          <div className="mb-2 flex items-center justify-between gap-3">
+          <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
             <h4 className="text-sm font-semibold text-iron-100">
               ${t("automations.detail.recentRuns")}
             </h4>
-            <${RunDots} runs=${automation.recent_runs} />
+            <div className="flex flex-col items-end gap-1">
+              <${RunDots} runs=${automation.recent_runs} />
+              <${RunHistorySummary} runs=${automation.recent_runs} />
+            </div>
           </div>
 
           ${automation.recent_runs.length

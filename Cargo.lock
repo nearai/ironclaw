@@ -4002,6 +4002,7 @@ dependencies = [
  "ironclaw_extensions",
  "ironclaw_extractors",
  "ironclaw_filesystem",
+ "ironclaw_first_party_extensions",
  "ironclaw_gateway",
  "ironclaw_host_api",
  "ironclaw_host_runtime",
@@ -4015,6 +4016,7 @@ dependencies = [
  "ironclaw_product_workflow",
  "ironclaw_reborn",
  "ironclaw_reborn_composition",
+ "ironclaw_reborn_config",
  "ironclaw_reborn_traces",
  "ironclaw_resources",
  "ironclaw_run_state",
@@ -4438,12 +4440,14 @@ dependencies = [
  "ironclaw_safety",
  "ironclaw_skills",
  "regex",
+ "serde",
  "serde_json",
  "similar",
  "tempfile",
  "thiserror 2.0.18",
  "tokio",
  "tracing",
+ "unicode-normalization",
 ]
 
 [[package]]
@@ -4620,7 +4624,10 @@ dependencies = [
  "thiserror 2.0.18",
  "tokio",
  "tokio-postgres",
+ "tokio-util",
  "tracing",
+ "tracing-subscriber",
+ "tracing-test",
  "url",
  "uuid",
  "wat",
@@ -4925,6 +4932,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "ironclaw_projects"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "base64 0.22.1",
+ "chrono",
+ "ironclaw_filesystem",
+ "ironclaw_host_api",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+ "ulid",
+]
+
+[[package]]
 name = "ironclaw_prompt_envelope"
 version = "0.1.0"
 dependencies = [
@@ -4971,6 +4995,7 @@ dependencies = [
  "tokio",
  "tokio-util",
  "tracing",
+ "tracing-subscriber",
  "tracing-test",
  "wat",
 ]
@@ -5045,6 +5070,7 @@ dependencies = [
  "ironclaw_product_context",
  "ironclaw_product_workflow",
  "ironclaw_product_workflow_storage",
+ "ironclaw_projects",
  "ironclaw_reborn",
  "ironclaw_reborn_composition",
  "ironclaw_reborn_config",
@@ -5058,6 +5084,7 @@ dependencies = [
  "ironclaw_runtime_policy",
  "ironclaw_safety",
  "ironclaw_secrets",
+ "ironclaw_skill_learning",
  "ironclaw_skills",
  "ironclaw_slack_v2_adapter",
  "ironclaw_threads",
@@ -5370,6 +5397,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "ironclaw_skill_learning"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "ironclaw_skills",
+ "thiserror 2.0.18",
+ "tokio",
+]
+
+[[package]]
 name = "ironclaw_skills"
 version = "0.3.0"
 dependencies = [
@@ -5505,12 +5542,14 @@ name = "ironclaw_turns"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "blake3",
  "chrono",
  "chrono-tz",
  "hex",
  "ironclaw_filesystem",
  "ironclaw_host_api",
  "serde",
+ "serde_jcs",
  "serde_json",
  "sha2 0.10.9",
  "static_assertions",

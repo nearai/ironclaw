@@ -93,21 +93,21 @@ export function PageHeader({ threadsState, onToggleSidebar }) {
           to="/logs"
           className=${({ isActive }) =>
             cn(
-              "grid h-8 w-8 place-items-center rounded-[8px] text-[var(--v2-text-muted)] hover:bg-[var(--v2-surface-muted)] hover:text-[var(--v2-text-strong)]",
+              "inline-flex h-8 items-center rounded-[8px] px-2.5 text-xs font-semibold text-[var(--v2-text-muted)] hover:bg-[var(--v2-surface-muted)] hover:text-[var(--v2-text-strong)]",
               isActive && "bg-[var(--v2-accent-soft)] text-[var(--v2-accent-text)]"
             )}
           title=${t("nav.logs")}
         >
-          <${Icon} name="list" className="h-4 w-4" />
+          ${t("nav.logs")}
         <//>
         <a
           href=${DOCS_URL}
           target="_blank"
           rel="noopener noreferrer"
-          className="grid h-8 w-8 place-items-center rounded-[8px] text-[var(--v2-text-muted)] hover:bg-[var(--v2-surface-muted)] hover:text-[var(--v2-text-strong)]"
+          className="inline-flex h-8 items-center rounded-[8px] px-2.5 text-xs font-semibold text-[var(--v2-text-muted)] hover:bg-[var(--v2-surface-muted)] hover:text-[var(--v2-text-strong)]"
           title=${t("nav.docs")}
         >
-          <${Icon} name="file" className="h-4 w-4" />
+          ${t("nav.docs")}
         </a>
       </div>
     </header>

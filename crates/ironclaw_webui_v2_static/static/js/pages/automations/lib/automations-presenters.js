@@ -1,3 +1,9 @@
+// Source types the presenter understands. Rows with other source types are
+// silently excluded from the list (the original intent of the "schedule"-only
+// guard) — adding a new backend source type requires a one-line addition here.
+// Add new source types here as the backend gains them
+const SUPPORTED_SOURCE_TYPES = ["schedule", "once"];
+
 // Display tone + i18n label key for each status. The label text itself is
 // resolved through `t` at render time so non-English locales don't see English
 // status pills (RUNNING / ERROR / etc.).
@@ -44,6 +50,7 @@ export const AUTOMATION_FILTERS = [
     predicate: (automation) => automation.has_failed_runs,
   },
   { value: "paused", labelKey: "automations.filter.paused", predicate: isBrowserPaused },
+  { value: "completed", labelKey: "automations.filter.completed", predicate: isBrowserCompleted },
 ];
 
 export function normalizeAutomations(response, t, locale) {
@@ -51,7 +58,7 @@ export function normalizeAutomations(response, t, locale) {
     ? response.automations
     : [];
   return automations
-    .filter((automation) => automation?.source?.type === "schedule")
+    .filter((automation) => SUPPORTED_SOURCE_TYPES.includes(automation?.source?.type))
     .map((automation) => normalizeAutomation(automation, t, locale))
     .sort(compareAutomations);
 }
@@ -62,16 +69,20 @@ export function filterAutomations(automations, filter) {
 }
 
 export function automationSummary(automations) {
-  const active = automations.filter((automation) => isBrowserActive(automation)).length;
+  // Exclude completed (soft-completed one-shots) from summary cards so that
+  // fetching with include_completed=true does not inflate the counts shown on
+  // all other tabs.
+  const visible = automations.filter((a) => a.state !== "completed");
+  const active = visible.filter((automation) => isBrowserActive(automation)).length;
   // Count automations (not individual runs) so each card matches the
   // same-named filter tab, which filters automations via has_running_run /
   // has_failed_runs.
-  const running = automations.filter((automation) => automation.has_running_run).length;
-  const failures = automations.filter((automation) => automation.has_failed_runs).length;
+  const running = visible.filter((automation) => automation.has_running_run).length;
+  const failures = visible.filter((automation) => automation.has_failed_runs).length;
   // Only automations that will actually fire contribute to "soonest next run".
   // Paused triggers keep their stored next_run_at slot, but they won't run, so
   // surfacing their time here would imply a run that never happens.
-  const next = automations
+  const next = visible
     .filter(
       (automation) =>
         isBrowserActive(automation) && nextRunTimestamp(automation) != null,
@@ -82,7 +93,7 @@ export function automationSummary(automations) {
         (b.next_run_timestamp ?? Number.MAX_SAFE_INTEGER),
     )[0];
   return {
-    scheduled: automations.length,
+    scheduled: visible.length,
     active,
     running,
     failures,
@@ -177,16 +188,22 @@ export function scheduleLabel(cron, timezone, t, locale) {
 
 // `fallback` is already-translated text the caller resolves via `t`; `locale`
 // localizes the date itself so non-English users don't see English months.
-export function formatAutomationDate(value, fallback = "Unknown", locale) {
+// When `timezone` is a non-empty string it is forwarded to `Intl` so the wall
+// clock reflects that timezone. The catch fallback deliberately omits timeZone
+// (browser-local) — never substitute UTC.
+export function formatAutomationDate(value, fallback = "Unknown", locale, timezone) {
   if (!value) return fallback;
   const date = new Date(value);
   if (Number.isNaN(date.getTime())) return fallback;
+  const tzOptions =
+    timezone && typeof timezone === "string" ? { timeZone: timezone } : {};
   try {
     return date.toLocaleString(locale || [], {
       month: "short",
       day: "numeric",
       hour: "2-digit",
       minute: "2-digit",
+      ...tzOptions,
     });
   } catch (_) {
     return date.toLocaleString([], {
@@ -205,6 +222,22 @@ export function stateLabel(state, t) {
 
 export function stateTone(state) {
   return STATE_PRESENTATION[state]?.tone || "muted";
+}
+
+export function primaryStatusLabel(automation, t) {
+  if (isBrowserActive(automation) && automation?.has_running_run) {
+    return tr(t)("automations.status.running");
+  }
+  if (isBrowserActive(automation) && automation?.has_failed_runs) {
+    return tr(t)("automations.status.needsReview");
+  }
+  return stateLabel(automation?.state, t);
+}
+
+export function primaryStatusTone(automation) {
+  if (isBrowserActive(automation) && automation?.has_running_run) return "info";
+  if (isBrowserActive(automation) && automation?.has_failed_runs) return "danger";
+  return stateTone(automation?.state);
 }
 
 export function lastStatusLabel(status, t) {
@@ -227,6 +260,30 @@ export function runStatusTone(status) {
   return RUN_STATUS_PRESENTATION[normalizeRunStatus(status)]?.tone || "muted";
 }
 
+// Format a one-shot trigger as "Once on <datetime> (<tz>)".
+// Returns the custom-schedule fallback key when `at` is missing or unparseable.
+function onceScheduleLabel(at, timezone, t, locale) {
+  if (!at) return tr(t)("automations.schedule.custom");
+  const datetime = formatAutomationDate(at, null, locale, timezone);
+  if (!datetime) return tr(t)("automations.schedule.custom");
+  const tzSuffix = timezone && typeof timezone === "string" ? ` (${timezone})` : "";
+  return tr(t)("automations.schedule.onceAt", { datetime }) + tzSuffix;
+}
+
+// Dispatcher for the discriminated source union. A future source kind is a
+// one-line addition in SUPPORTED_SOURCE_TYPES + a branch here.
+function automationScheduleLabel(source, t, locale) {
+  if (source?.type === "once") {
+    return onceScheduleLabel(source.at, source.timezone, t, locale);
+  }
+  if (source?.type === "schedule") {
+    // Preserve the pre-existing "UTC" default for schedule sources so that a
+    // recurring trigger with no stored timezone still appends "(UTC)".
+    return scheduleLabel(source.cron, source.timezone || "UTC", t, locale);
+  }
+  return tr(t)("automations.schedule.custom");
+}
+
 function normalizeAutomation(automation, t, locale) {
   const tx = tr(t);
   const recentRuns = normalizeRuns(automation.recent_runs, t, locale);
@@ -237,19 +294,22 @@ function normalizeAutomation(automation, t, locale) {
     null;
   const lastStatus = lastCompletedRun?.status || automation.last_status;
   const lastRunAt = lastCompletedRun?.completed_at || automation.last_run_at || null;
+  const normalized = {
+    ...automation,
+    recent_runs: recentRuns,
+    has_running_run: recentRuns.some((run) => run.status === "running"),
+    has_failed_runs: recentRuns.some((run) => run.status === "error"),
+  };
 
   return {
-    ...automation,
+    ...normalized,
     display_name: automation.name || tx("automations.untitled"),
     schedule_timezone: automation.source?.timezone || "UTC",
-    schedule_label: scheduleLabel(
-      automation.source?.cron,
-      automation.source?.timezone || "UTC",
-      t,
-      locale,
-    ),
+    schedule_label: automationScheduleLabel(automation.source, t, locale),
     state_label: stateLabel(automation.state, t),
     state_tone: stateTone(automation.state),
+    primary_status_label: primaryStatusLabel(normalized, t),
+    primary_status_tone: primaryStatusTone(normalized),
     next_run_timestamp: parseTimestamp(automation.next_run_at),
     next_run_label: formatAutomationDate(
       automation.next_run_at,
@@ -264,11 +324,8 @@ function normalizeAutomation(automation, t, locale) {
       tx("automations.date.unknown"),
       locale,
     ),
-    recent_runs: recentRuns,
     latest_run: latestRun,
     current_run: currentRun,
-    has_running_run: recentRuns.some((run) => run.status === "running"),
-    has_failed_runs: recentRuns.some((run) => run.status === "error"),
     success_rate_label: successRateLabel(recentRuns, t),
   };
 }
@@ -308,6 +365,51 @@ function normalizeRunStatus(status) {
   return "unknown";
 }
 
+// Count recent runs by status so the UI can show a "how many" summary instead
+// of relying on the reader counting densely-packed status dots. The API can
+// return up to 25 recent runs while the dot strip only has room for a handful,
+// so callers use `total` to render an overflow indicator (#4988).
+export function summarizeRuns(runs) {
+  const list = Array.isArray(runs) ? runs : [];
+  const counts = { total: list.length, ok: 0, error: 0, running: 0, unknown: 0 };
+  for (const run of list) {
+    counts[normalizeRunStatus(run?.status)] += 1;
+  }
+  return counts;
+}
+
+// Ordered, non-empty status buckets for the recent-run summary chips. Kept in
+// the presenter (not inline in the component) so a caller-level test can assert
+// that no counted status — including `unknown` — is dropped from what the UI
+// renders. Each entry carries the i18n key suffix and the chip tone class.
+export function runStatusBreakdown(runs) {
+  const counts = summarizeRuns(runs);
+  return [
+    { key: "ok", tone: "text-emerald-300", count: counts.ok },
+    { key: "error", tone: "text-red-300", count: counts.error },
+    { key: "running", tone: "text-sky-300", count: counts.running },
+    { key: "unknown", tone: "text-iron-400", count: counts.unknown },
+  ].filter((part) => part.count > 0);
+}
+
+// The fully-resolved data the recent-run summary renders: the total label plus
+// one chip per non-empty status (localized text + tone). `RunHistorySummary`
+// maps this 1:1 with no logic of its own, so this function is the single place
+// a status bucket could be dropped — and the place the caller-level test drives.
+export function runSummaryView(runs, t) {
+  const tx = tr(t);
+  const counts = summarizeRuns(runs);
+  const chips = runStatusBreakdown(runs).map((part) => ({
+    ...part,
+    text: tx(`automations.runs.${part.key}`, { count: part.count }),
+  }));
+  return {
+    total: counts.total,
+    totalText: tx("automations.runs.total", { count: counts.total }),
+    chips,
+  };
+}
+
 function successRateLabel(runs, t) {
   const tx = tr(t);
   const terminalRuns = runs.filter((run) => run.status === "ok" || run.status === "error");
@@ -338,6 +440,10 @@ function isBrowserActive(automation) {
 
 function isBrowserPaused(automation) {
   return ["paused", "disabled", "inactive"].includes(automation?.state);
+}
+
+function isBrowserCompleted(automation) {
+  return automation?.state === "completed";
 }
 
 function nextRunTimestamp(automation) {

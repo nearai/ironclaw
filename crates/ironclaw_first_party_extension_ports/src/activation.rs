@@ -1,6 +1,7 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::hash::{Hash, Hasher};
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
@@ -193,6 +194,12 @@ where
 {
     bundle_source: Arc<S>,
     config: SkillActivationSelectorConfig,
+    // Global "auto-activate learned skills" master switch, read live per turn.
+    // When `false`, criteria (keyword/regex) selection is skipped entirely so a
+    // learned skill activates only via an explicit `$name`/`/name` mention — the
+    // same effect as `SkillActivationSelectionMode::ExplicitOnly`, but toggleable
+    // at runtime without a restart. Defaults to `true` (auto-activation on).
+    auto_activate_learned: Arc<AtomicBool>,
     setup_marker_source: Option<Arc<dyn SetupMarkerSource>>,
     activation_observer: Mutex<Option<Arc<dyn SkillActivationObserver>>>,
     messages_by_run: Mutex<HashMap<SkillActivationMessageKey, SkillActivationMessage>>,
@@ -219,6 +226,7 @@ where
         Self {
             bundle_source,
             config,
+            auto_activate_learned: Arc::new(AtomicBool::new(true)),
             setup_marker_source: None,
             activation_observer: Mutex::new(None),
             messages_by_run: Mutex::new(HashMap::new()),
@@ -226,6 +234,15 @@ where
             active_plans_by_run: Mutex::new(ActivePlanCache::default()),
             plans_by_run: Mutex::new(HashMap::new()),
         }
+    }
+
+    /// Share a runtime-mutable "auto-activate learned skills" master switch with
+    /// this source. The selector reads it on every turn, so toggling the flag
+    /// elsewhere (e.g. a Settings UI write) takes effect on the next message
+    /// without rebuilding the runtime.
+    pub fn with_auto_activate_flag(mut self, flag: Arc<AtomicBool>) -> Self {
+        self.auto_activate_learned = flag;
+        self
     }
 
     pub(crate) fn with_setup_marker_source<T>(mut self, source: Arc<T>) -> Self
@@ -467,6 +484,7 @@ where
             message,
             &candidate_set.candidates,
             &self.config,
+            self.auto_activate_learned.load(Ordering::Relaxed),
             &candidate_set.satisfied_setup_markers,
         )?;
         let plan = activation_plan_for_candidates(selection);
@@ -909,12 +927,21 @@ fn select_skill_activations(
     message: &str,
     candidates: &[ActivationCandidate],
     config: &SkillActivationSelectorConfig,
+    auto_activate_learned: bool,
     satisfied_setup_markers: &HashSet<String>,
 ) -> Result<SkillActivationSelection, SkillActivationSelectionError> {
     let active_candidates =
         candidates_with_unsatisfied_setup_markers(candidates, satisfied_setup_markers);
     let loaded_skills: Vec<LoadedSkill> =
         active_candidates.iter().map(|c| c.loaded.clone()).collect();
+    // Skills the user turned auto-activation off for stay available for an
+    // explicit `$name`/`/name` mention (handled below), but are excluded from
+    // criteria (keyword/regex) selection.
+    let criteria_skills: Vec<LoadedSkill> = loaded_skills
+        .iter()
+        .filter(|skill| skill.manifest.auto_activate)
+        .cloned()
+        .collect();
     let mention_normalized_message = normalize_dollar_skill_mentions(message);
     let (explicit, rewritten_message) =
         extract_skill_mentions(&mention_normalized_message, &loaded_skills);
@@ -947,10 +974,15 @@ fn select_skill_activations(
         }
     }
 
-    if config.selection_mode == SkillActivationSelectionMode::ExplicitAndCriteria {
+    // The global master switch (`auto_activate_learned`) gates criteria
+    // selection on top of the configured mode: when it is off, only explicit
+    // mentions activate, regardless of `selection_mode`.
+    if auto_activate_learned
+        && config.selection_mode == SkillActivationSelectionMode::ExplicitAndCriteria
+    {
         let outcome = prefilter_skills_with_options(
             &rewritten_message,
-            &loaded_skills,
+            &criteria_skills,
             remaining_slots,
             remaining_tokens,
             satisfied_setup_markers,
@@ -1626,6 +1658,72 @@ mod tests {
             .expect("selection succeeds");
 
         assert_eq!(selected.len(), 1);
+        assert!(
+            selected[0]
+                .loaded_skill_md()
+                .expect("skill context")
+                .contains("CODE_REVIEW_SENTINEL")
+        );
+    }
+
+    #[tokio::test]
+    async fn global_auto_activate_flag_gates_criteria_and_honors_live_toggle() {
+        let source = Arc::new(StaticSkillBundleSource::new(vec![(
+            SkillSourceKind::System,
+            "code-review",
+            &skill_md(
+                "code-review",
+                "Review code",
+                &["review"],
+                "CODE_REVIEW_SENTINEL",
+            ),
+        )]));
+        // Default mode is ExplicitAndCriteria, but the global master switch is
+        // off: a keyword-matching skill must NOT auto-activate.
+        let flag = Arc::new(AtomicBool::new(false));
+        let selectable =
+            SelectableSkillContextSource::new(source, SkillActivationSelectorConfig::default())
+                .with_auto_activate_flag(Arc::clone(&flag));
+
+        // Run 1: flag off. A keyword-matching skill must NOT auto-activate.
+        let off_context = run_context_for("thread-a", "msg:run-off").await;
+        selectable
+            .record_user_message(
+                off_context.scope.clone(),
+                accepted_message_ref(&off_context),
+                "please review this PR",
+            )
+            .expect("record message");
+        let selected = selectable
+            .load_skill_context_candidates(&off_context)
+            .await
+            .expect("selection succeeds");
+        assert!(
+            selected.is_empty(),
+            "criteria selection must be skipped while the global flag is off"
+        );
+
+        // Flip the shared flag on without rebuilding the source. A fresh run
+        // (distinct run id, so the per-run plan cache does not mask the change)
+        // must honor the new value immediately.
+        flag.store(true, Ordering::Relaxed);
+        let on_context = run_context_for("thread-a", "msg:run-on").await;
+        selectable
+            .record_user_message(
+                on_context.scope.clone(),
+                accepted_message_ref(&on_context),
+                "please review this PR",
+            )
+            .expect("record message");
+        let selected = selectable
+            .load_skill_context_candidates(&on_context)
+            .await
+            .expect("selection succeeds");
+        assert_eq!(
+            selected.len(),
+            1,
+            "flipping the flag on must re-enable criteria activation live"
+        );
         assert!(
             selected[0]
                 .loaded_skill_md()

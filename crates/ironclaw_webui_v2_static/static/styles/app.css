@@ -358,8 +358,20 @@ input:focus, select:focus, textarea:focus {
 .v2-typing-dot:nth-child(2) { animation-delay: 0.15s !important; }
 .v2-typing-dot:nth-child(3) { animation-delay: 0.3s  !important; }
 
+/* Refresh / in-flight spinner. Like the typing dots, this is an intentional
+   exception to the static-motion policy above: the class selector + !important
+   outranks the universal `animation: none` rule so a loading control can spin.
+   Suppressed under prefers-reduced-motion. */
+@keyframes v2-spin {
+  to { transform: rotate(360deg); }
+}
+.v2-spin {
+  animation: v2-spin 0.8s linear infinite !important;
+}
+
 @media (prefers-reduced-motion: reduce) {
   .v2-typing-dot { animation: none !important; }
+  .v2-spin { animation: none !important; }
 }
 
 /* ── Markdown body ───────────────────────────────────────────────── */

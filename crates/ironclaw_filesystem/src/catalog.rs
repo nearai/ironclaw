@@ -282,6 +282,18 @@ impl RootFilesystem for CompositeRootFilesystem {
         self.matching_mount(path)?.backend.tail(path, from).await
     }
 
+    async fn tail_bounded(
+        &self,
+        path: &VirtualPath,
+        from: SeqNo,
+        max_records: usize,
+    ) -> Result<Vec<EventRecord>, FilesystemError> {
+        self.matching_mount(path)?
+            .backend
+            .tail_bounded(path, from, max_records)
+            .await
+    }
+
     // ── Legacy bytes plane ──
 
     async fn read_file(&self, path: &VirtualPath) -> Result<Vec<u8>, FilesystemError> {

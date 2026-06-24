@@ -149,9 +149,9 @@ may name the PostgreSQL URL variable, but must not contain the raw URL:
 backend = "postgres"
 url_env = "IRONCLAW_REBORN_POSTGRES_URL"
 secret_master_key_env = "IRONCLAW_REBORN_SECRET_MASTER_KEY"
-# Optional; defaults to 16. Keep below the PostgreSQL server's max_connections
-# after reserving capacity for migrations and operator sessions.
-pool_max_size = 16
+# Optional; defaults to 2. Keep below the PostgreSQL server or managed
+# session-pool cap after reserving capacity for restarts and operator sessions.
+pool_max_size = 2
 
 [policy]
 deployment_mode = "hosted_multi_tenant"
@@ -206,6 +206,8 @@ the current branch.
 | `IRONCLAW_REBORN_HOME` | Absolute Reborn state root. Defaults to `$HOME/.ironclaw/reborn`. The resolver rejects unsafe paths and v1 state-root aliases such as `$HOME/.ironclaw`. |
 | `IRONCLAW_REBORN_PROFILE` | Boot profile selector. Supported values: `local-dev`, `local-dev-yolo`, `production`, `migration-dry-run`. |
 | `IRONCLAW_REBORN_POSTGRES_URL` | Production PostgreSQL storage URL when `[storage].backend = "postgres"` and `[storage].url_env` names this variable. Keep it out of `config.toml`; remote providers must use TLS. |
+| `IRONCLAW_REBORN_POSTGRES_POOL_MAX_SIZE` | Optional override for the Reborn PostgreSQL client pool size. Use this when a managed provider enforces a small session-pool cap. |
+| `IRONCLAW_FILESYSTEM_POSTGRES_MIGRATION_CONNECT_MAX_WAIT_SECS` | Optional startup wait window for Postgres filesystem migration connection retries. Defaults to 300 seconds. |
 | `IRONCLAW_REBORN_SECRET_MASTER_KEY` | Production Reborn secret master key when `[storage].secret_master_key_env` names this variable. Keep it independent from the database URL and out of `config.toml`. |
 | `IRONCLAW_REBORN_LOG` | Tracing filter for the Reborn binary, for example `debug,ironclaw_reborn=trace`. |
 
@@ -335,39 +337,30 @@ export IRONCLAW_REBORN_HOME="$PWD/.reborn-home"
 export OPENAI_API_KEY="sk-..." # or the required env var for your configured provider
 export IRONCLAW_REBORN_WEBUI_TOKEN="$(openssl rand -hex 32)"
 export IRONCLAW_REBORN_WEBUI_USER_ID="reborn-cli"
-export IRONCLAW_REBORN_SLACK_SIGNING_SECRET="..."
-export IRONCLAW_REBORN_SLACK_BOT_TOKEN="xoxb-..."
 
 cargo run -q -p ironclaw_reborn_cli --features slack-v2-host-beta --bin ironclaw-reborn -- serve
 ```
 
-Slack env vars alone do not enable Slack. Add a `[slack]` section to
-`config.toml`:
+Add a `[slack]` section to `config.toml`:
 
 ```toml
 [slack]
 enabled = true
-installation_id = "install-alpha"
-team_id = "T123"
-api_app_id = "A123"
-# slack_user_id = "U123" # optional legacy static user mapping
-# user_id = "reborn-cli" # defaults to the WebUI authenticated user
-signing_secret_env = "IRONCLAW_REBORN_SLACK_SIGNING_SECRET"
-bot_token_env = "IRONCLAW_REBORN_SLACK_BOT_TOKEN"
 ```
 
-Required Slack settings and env vars:
+`enabled` is the only Slack boot setting. After the server starts, configure
+the Slack app ids, bot token, signing secret, and channel mappings from WebUI
+channel setup.
+
+Required Slack settings:
 
 | Name | Purpose |
 | --- | --- |
 | `[slack].enabled = true` | Mounts the Slack route during `serve`. |
-| `[slack].installation_id` | Stable local installation id. |
-| `[slack].team_id` | Slack workspace/team id. |
-| `[slack].api_app_id` | Slack app id. |
-| `IRONCLAW_REBORN_SLACK_SIGNING_SECRET` | Slack request signing secret, or the env var named by `[slack].signing_secret_env`. |
-| `IRONCLAW_REBORN_SLACK_BOT_TOKEN` | Slack bot token, or the env var named by `[slack].bot_token_env`. |
+| WebUI Slack workspace setup | Stores Slack installation ids, channel mappings, and Slack bot/signing secrets. |
 
-More detailed command notes live in [`docs/reborn-binary.md`](docs/reborn-binary.md).
+More detailed Slack setup notes live in
+[`docs/reborn/setup-slack-for-reborn-binary.md`](docs/reborn/setup-slack-for-reborn-binary.md).
 
 ## Philosophy
 

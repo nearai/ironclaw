@@ -17,7 +17,9 @@ use ironclaw_auth::{
     AuthProductScope, AuthProviderId, CredentialAccountId, CredentialAccountProjection,
     CredentialAccountUpdateBinding, ProviderScope,
 };
-use ironclaw_host_api::{AgentId, ExtensionId, ProjectId, TenantId, ThreadId, UserId};
+use ironclaw_host_api::{
+    AgentId, ExtensionId, InvocationId, ProjectId, ResourceScope, TenantId, ThreadId, UserId,
+};
 use ironclaw_product_adapters::{
     ProductAdapterError, ProductWorkflowRejectionKind, ProjectionStream,
     ProjectionSubscriptionRequest,
@@ -33,7 +35,7 @@ use ironclaw_turns::{
     ResumeTurnRequest, SanitizedCancelReason, SubmitTurnRequest, SubmitTurnResponse, TurnActor,
     TurnCoordinator, TurnError, TurnRunId, TurnScope, TurnStatus,
 };
-use secrecy::SecretString;
+use secrecy::{ExposeSecret as _, SecretString};
 use tokio::sync::{Mutex as AsyncMutex, OwnedMutexGuard};
 use url::Url;
 use uuid::Uuid;
@@ -62,15 +64,21 @@ mod extension_credentials;
 mod extension_onboarding;
 mod extension_setup_credentials;
 mod extensions;
+mod fs_browse;
 mod lifecycle_setup;
 mod llm_config;
 mod project_fs;
+mod projects;
 mod trace_credits;
 mod types;
 
 pub use error::{RebornServicesError, RebornServicesErrorCode, RebornServicesErrorKind};
 pub use trace_credits::{RebornTraceCreditsResponse, RebornTraceHoldAuthorizeResponse};
 
+pub use fs_browse::{
+    FilesystemBrowseReader, FsMount, RebornFsListRequest, RebornFsListResponse, RebornFsMountInfo,
+    RebornFsMountsResponse, RebornFsReadRequest, RebornFsStatRequest, RebornFsStatResponse,
+};
 pub use llm_config::{
     CodexLoginStart, LlmActiveSelection, LlmConfigService, LlmConfigServiceError,
     LlmConfigSnapshot, LlmModelsResult, LlmProbeRequest, LlmProbeResult, LlmProviderView,
@@ -82,11 +90,20 @@ pub use project_fs::{
     ProjectFsStat, RebornProjectFsListRequest, RebornProjectFsListResponse,
     RebornProjectFsReadRequest, RebornProjectFsStatRequest, RebornProjectFsStatResponse,
 };
+pub use projects::{
+    ProjectCaller, ProjectService, ProjectServiceError, RebornAddMemberRequest,
+    RebornCreateProjectRequest, RebornDeleteProjectRequest, RebornGetProjectRequest,
+    RebornListMembersRequest, RebornListMembersResponse, RebornListProjectsRequest,
+    RebornListProjectsResponse, RebornProjectInfo, RebornProjectMemberInfo,
+    RebornProjectMemberStatus, RebornProjectResponse, RebornProjectRole, RebornProjectState,
+    RebornRemoveMemberRequest, RebornUpdateMemberRoleRequest, RebornUpdateProjectRequest,
+};
 pub use types::{
     RebornAttachmentBytes, RebornAttachmentRequest, RebornAutomationInfo,
-    RebornAutomationRecentRunInfo, RebornAutomationRecentRunStatus, RebornAutomationRunStatus,
-    RebornAutomationSource, RebornAutomationState, RebornCancelRunResponse,
-    RebornChannelConnectAction, RebornChannelConnectStrategy, RebornConnectableChannelInfo,
+    RebornAutomationMutationResponse, RebornAutomationRecentRunInfo,
+    RebornAutomationRecentRunStatus, RebornAutomationRunStatus, RebornAutomationSource,
+    RebornAutomationState, RebornCancelRunResponse, RebornChannelConnectAction,
+    RebornChannelConnectStrategy, RebornConnectableChannelInfo,
     RebornConnectableChannelListResponse, RebornCreateThreadResponse, RebornDeleteThreadRequest,
     RebornDeleteThreadResponse, RebornExtensionActionResponse, RebornExtensionCredentialSetup,
     RebornExtensionInfo, RebornExtensionListResponse, RebornExtensionOnboardingPayload,
@@ -328,6 +345,31 @@ pub trait SkillsProductFacade: Send + Sync {
         let _ = (caller, name);
         Err(RebornServicesError::service_unavailable(false))
     }
+
+    /// Toggle a skill's automatic activation. Disabling keeps the skill
+    /// invokable via an explicit `/name` mention but excludes it from criteria
+    /// (keyword/regex) selection.
+    async fn set_skill_auto_activate(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        name: String,
+        enabled: bool,
+    ) -> Result<RebornSkillActionResponse, RebornServicesError> {
+        let _ = (caller, name, enabled);
+        Err(RebornServicesError::service_unavailable(false))
+    }
+
+    /// Toggle the global default criteria-based skill auto-activation master
+    /// switch. Disabling leaves skills invokable via an explicit `/name`
+    /// mention but turns off keyword/criteria auto-activation for all skills.
+    async fn set_auto_activate_learned(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        enabled: bool,
+    ) -> Result<RebornSkillActionResponse, RebornServicesError> {
+        let _ = (caller, enabled);
+        Err(RebornServicesError::service_unavailable(false))
+    }
 }
 
 #[derive(Debug, Default)]
@@ -475,6 +517,12 @@ impl ProductAgentBoundCaller {
 pub struct AutomationListRequest {
     pub limit: usize,
     pub run_limit: usize,
+    /// When `true`, include completed (fire-once) automations alongside the
+    /// active ones. When `false` (the default), only active automations are
+    /// returned. Facades apply `limit` after this filter, so a full page of
+    /// active automations is returned regardless of how many completed ones
+    /// exist.
+    pub include_completed: bool,
 }
 
 /// Stored scope of a trigger-fired thread, returned by
@@ -505,6 +553,30 @@ pub trait AutomationProductFacade: Send + Sync {
         caller: ProductAgentBoundCaller,
         request: AutomationListRequest,
     ) -> Result<Vec<RebornAutomationInfo>, RebornServicesError>;
+
+    async fn pause_automation(
+        &self,
+        _caller: ProductAgentBoundCaller,
+        _automation_id: String,
+    ) -> Result<RebornAutomationMutationResponse, RebornServicesError> {
+        Err(automation_unavailable())
+    }
+
+    async fn resume_automation(
+        &self,
+        _caller: ProductAgentBoundCaller,
+        _automation_id: String,
+    ) -> Result<RebornAutomationMutationResponse, RebornServicesError> {
+        Err(automation_unavailable())
+    }
+
+    async fn delete_automation(
+        &self,
+        _caller: ProductAgentBoundCaller,
+        _automation_id: String,
+    ) -> Result<RebornAutomationMutationResponse, RebornServicesError> {
+        Err(automation_unavailable())
+    }
 
     /// Whether the background trigger poller (scheduler) is running.
     ///
@@ -557,6 +629,30 @@ impl AutomationProductFacade for UnsupportedAutomationProductFacade {
         _caller: ProductAgentBoundCaller,
         _request: AutomationListRequest,
     ) -> Result<Vec<RebornAutomationInfo>, RebornServicesError> {
+        Err(automation_unavailable())
+    }
+
+    async fn pause_automation(
+        &self,
+        _caller: ProductAgentBoundCaller,
+        _automation_id: String,
+    ) -> Result<RebornAutomationMutationResponse, RebornServicesError> {
+        Err(automation_unavailable())
+    }
+
+    async fn resume_automation(
+        &self,
+        _caller: ProductAgentBoundCaller,
+        _automation_id: String,
+    ) -> Result<RebornAutomationMutationResponse, RebornServicesError> {
+        Err(automation_unavailable())
+    }
+
+    async fn delete_automation(
+        &self,
+        _caller: ProductAgentBoundCaller,
+        _automation_id: String,
+    ) -> Result<RebornAutomationMutationResponse, RebornServicesError> {
         Err(automation_unavailable())
     }
 
@@ -624,6 +720,14 @@ impl GateResolutionRoute {
     }
 }
 
+fn operator_setup_validation_error(field: &str) -> RebornServicesError {
+    WebUiInboundValidationError {
+        field: field.to_string(),
+        code: WebUiInboundValidationCode::InvalidValue,
+    }
+    .into()
+}
+
 /// Stable WebUI-facing facade surface for beta Reborn routes.
 fn operator_setup_diagnostic(
     key: &str,
@@ -642,46 +746,63 @@ fn operator_setup_diagnostic(
     }
 }
 
-fn operator_setup_info_diagnostic(
-    key: &str,
-    reason_code: &str,
-    message: &str,
-    remediation: &str,
-) -> RebornOperatorConfigDiagnostic {
-    operator_setup_diagnostic(
-        key,
-        RebornOperatorConfigDiagnosticSeverity::Info,
-        reason_code,
-        message,
-        remediation,
-    )
+const OPERATOR_SETUP_PROFILE_ID_MAX_BYTES: usize = 128;
+const OPERATOR_SETUP_WEBUI_TOKEN_MIN_BYTES: usize = 32;
+const OPERATOR_SETUP_WEBUI_TOKEN_MAX_BYTES: usize = 4096;
+const OPERATOR_SETUP_REDACTED_SECRET_SENTINEL: &str = "••••••••";
+
+fn validate_operator_setup_profile_id(
+    profile_id: Option<&str>,
+) -> Result<Option<String>, RebornServicesError> {
+    let Some(profile_id) = profile_id else {
+        return Ok(None);
+    };
+    let trimmed = profile_id.trim();
+    if trimmed.is_empty() || trimmed.len() > OPERATOR_SETUP_PROFILE_ID_MAX_BYTES {
+        return Err(operator_setup_validation_error("profile_id"));
+    }
+    Ok(Some(trimmed.to_string()))
 }
 
-fn operator_setup_validation_error(field: &str) -> RebornServicesError {
-    WebUiInboundValidationError {
-        field: field.to_string(),
-        code: WebUiInboundValidationCode::InvalidValue,
+fn validate_operator_setup_webui_access_token(
+    webui_access_token: Option<&SecretString>,
+) -> Result<bool, RebornServicesError> {
+    let Some(token) = webui_access_token else {
+        return Ok(false);
+    };
+    let token = token.expose_secret().trim();
+    if token == OPERATOR_SETUP_REDACTED_SECRET_SENTINEL {
+        return Ok(false);
     }
-    .into()
+    if token.len() < OPERATOR_SETUP_WEBUI_TOKEN_MIN_BYTES
+        || token.len() > OPERATOR_SETUP_WEBUI_TOKEN_MAX_BYTES
+    {
+        return Err(operator_setup_validation_error("webui_access_token"));
+    }
+    Ok(true)
+}
+
+fn reject_unwired_operator_setup_host_mutation(
+    profile_id: Option<String>,
+    webui_access_token_updated: bool,
+) -> Result<(), RebornServicesError> {
+    if profile_id.is_some() || webui_access_token_updated {
+        return Err(RebornServicesError::service_unavailable(false));
+    }
+    Ok(())
+}
+
+#[derive(Debug, Clone, Default)]
+struct OperatorSetupHostState {
+    profile_id: Option<String>,
+    webui_access_token_updated: bool,
 }
 
 fn setup_response_from_llm_snapshot(
     snapshot: LlmConfigSnapshot,
-    mut diagnostics: Vec<RebornOperatorConfigDiagnostic>,
+    diagnostics: Vec<RebornOperatorConfigDiagnostic>,
+    host_state: OperatorSetupHostState,
 ) -> RebornOperatorSetupResponse {
-    diagnostics.push(operator_setup_info_diagnostic(
-        "profile_id",
-        "operator_setup_profile_not_wired",
-        "Profile setup is not wired into the operator setup API yet.",
-        "Continue using the existing profile setup path until profile persistence is exposed through Reborn services.",
-    ));
-    diagnostics.push(operator_setup_info_diagnostic(
-        "webui_access",
-        "operator_setup_webui_access_not_wired",
-        "WebUI access setup is not wired into the operator setup API yet.",
-        "Configure WebUI access through host bootstrap settings until operator access management is exposed through Reborn services.",
-    ));
-
     let active_provider_id = snapshot
         .active
         .as_ref()
@@ -692,6 +813,16 @@ fn setup_response_from_llm_snapshot(
         .and_then(|active| active.model.clone());
     let provider_complete = active_provider_id.is_some();
     let model_complete = active_model.is_some();
+    let profile_message = host_state.profile_id.as_deref().map_or_else(
+        || "Runtime profile is selected by the current host configuration.".to_string(),
+        |profile_id| format!("Runtime profile `{profile_id}` was accepted by the setup API."),
+    );
+    let webui_access_message = if host_state.webui_access_token_updated {
+        "WebUI access token was accepted without echoing the secret value.".to_string()
+    } else {
+        "Current authenticated operator already has WebUI access.".to_string()
+    };
+
     let status = if provider_complete && model_complete {
         RebornOperatorSetupStatus::Complete
     } else {
@@ -737,13 +868,13 @@ fn setup_response_from_llm_snapshot(
             },
             RebornOperatorSetupStep {
                 name: "profile".to_string(),
-                status: RebornOperatorSetupStepStatus::Unsupported,
-                message: "Profile setup is not wired into this API yet.".to_string(),
+                status: RebornOperatorSetupStepStatus::Complete,
+                message: profile_message,
             },
             RebornOperatorSetupStep {
                 name: "webui_access".to_string(),
-                status: RebornOperatorSetupStepStatus::Unsupported,
-                message: "WebUI access setup is not wired into this API yet.".to_string(),
+                status: RebornOperatorSetupStepStatus::Complete,
+                message: webui_access_message,
             },
         ],
         diagnostics,
@@ -915,6 +1046,140 @@ fn operator_config_diagnostic_command_plane_response(
     }
 }
 
+fn operator_doctor_status_diagnostic(
+    check: &RebornOperatorStatusCheck,
+) -> Option<RebornOperatorConfigDiagnostic> {
+    if check.status == RebornOperatorStatusState::Ready {
+        return None;
+    }
+
+    let severity = match check.severity {
+        RebornOperatorStatusSeverity::Info => RebornOperatorConfigDiagnosticSeverity::Info,
+        RebornOperatorStatusSeverity::Warning => RebornOperatorConfigDiagnosticSeverity::Warning,
+        RebornOperatorStatusSeverity::Critical => RebornOperatorConfigDiagnosticSeverity::Error,
+    };
+    let state = match check.status {
+        RebornOperatorStatusState::Ready => "ready",
+        RebornOperatorStatusState::Degraded => "degraded",
+        RebornOperatorStatusState::Blocked => "blocked",
+        RebornOperatorStatusState::Unsupported => "unsupported",
+        RebornOperatorStatusState::NotConfigured => "not_configured",
+    };
+    let reason_code = operator_doctor_status_reason_code(&check.id, state);
+    let remediation = check
+        .remediation
+        .as_deref()
+        .unwrap_or("inspect the corresponding operator status check");
+    Some(RebornOperatorConfigDiagnostic {
+        key: operator_doctor_status_text(&check.id),
+        severity,
+        reason_code,
+        message: operator_doctor_status_text(&check.summary),
+        owning_area: RebornOperatorArea::Status,
+        remediation: operator_doctor_status_text(remediation),
+    })
+}
+
+fn operator_doctor_status_response(
+    mut status: RebornOperatorStatusResponse,
+) -> RebornOperatorStatusResponse {
+    status.checks = status
+        .checks
+        .into_iter()
+        .map(operator_doctor_status_check)
+        .collect();
+    status
+}
+
+fn operator_doctor_status_check(mut check: RebornOperatorStatusCheck) -> RebornOperatorStatusCheck {
+    check.id = operator_doctor_status_text(&check.id);
+    check.summary = operator_doctor_status_text(&check.summary);
+    check.remediation = check
+        .remediation
+        .as_deref()
+        .map(operator_doctor_status_text);
+    check
+}
+
+fn operator_doctor_status_reason_code(check_id: &str, state: &str) -> String {
+    if is_operator_doctor_reason_code_component(check_id)
+        && !operator_doctor_status_text_needs_redaction(check_id)
+    {
+        format!("operator_doctor_{check_id}_{state}")
+    } else {
+        format!("operator_doctor_status_{state}")
+    }
+}
+
+fn is_operator_doctor_reason_code_component(value: &str) -> bool {
+    let mut chars = value.chars();
+    matches!(chars.next(), Some(first) if first.is_ascii_lowercase())
+        && value.len() <= 64
+        && chars.all(|character| {
+            character.is_ascii_lowercase() || character.is_ascii_digit() || character == '_'
+        })
+}
+
+fn operator_doctor_status_text(value: &str) -> String {
+    if operator_doctor_status_text_needs_redaction(value) {
+        "[redacted operator status detail]".to_string()
+    } else {
+        value.to_string()
+    }
+}
+
+fn operator_doctor_status_text_needs_redaction(value: &str) -> bool {
+    let lower = value.to_ascii_lowercase();
+    lower.contains("sk-")
+        || lower.contains("/home/")
+        || lower.contains("/workspace/")
+        || lower.contains("\\users\\")
+        || lower.contains("/users/")
+        || lower.contains(".ssh")
+        || lower.contains(".env")
+        || lower.contains("api_key")
+        || lower.contains("password")
+        || lower.contains("credential")
+}
+
+fn operator_doctor_setup_unavailable_diagnostic(
+    reason_code: &str,
+    message: &str,
+) -> RebornOperatorConfigDiagnostic {
+    operator_setup_diagnostic(
+        "setup",
+        RebornOperatorConfigDiagnosticSeverity::Error,
+        reason_code,
+        message,
+        "Complete provider/model setup through the operator setup API or bootstrap configuration.",
+    )
+}
+
+fn operator_doctor_status_unavailable_diagnostic() -> RebornOperatorConfigDiagnostic {
+    RebornOperatorConfigDiagnostic {
+        key: "status".to_string(),
+        severity: RebornOperatorConfigDiagnosticSeverity::Error,
+        reason_code: "operator_doctor_status_unavailable".to_string(),
+        message: "Operator status checks are unavailable.".to_string(),
+        owning_area: RebornOperatorArea::Status,
+        remediation: "wire the operator status service before relying on doctor diagnostics"
+            .to_string(),
+    }
+}
+
+fn operator_diagnostics_surface_status(
+    diagnostics: &[RebornOperatorConfigDiagnostic],
+) -> RebornOperatorSurfaceStatus {
+    if diagnostics
+        .iter()
+        .any(|diagnostic| diagnostic.severity == RebornOperatorConfigDiagnosticSeverity::Error)
+    {
+        RebornOperatorSurfaceStatus::Unavailable
+    } else {
+        RebornOperatorSurfaceStatus::Available
+    }
+}
+
 #[async_trait]
 pub trait RebornServicesApi: Send + Sync {
     async fn create_thread(
@@ -1019,6 +1284,145 @@ pub trait RebornServicesApi: Send + Sync {
         Err(RebornServicesError::service_unavailable(false))
     }
 
+    /// List the mounts the standalone read-only filesystem viewer can browse
+    /// (memory, workspace files, skills). The set is composition-determined; a
+    /// runtime without a wired browse reader reports an empty list rather than
+    /// erroring, so the UI can render an empty/disabled state.
+    async fn list_fs_mounts(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+    ) -> Result<RebornFsMountsResponse, RebornServicesError> {
+        let _ = caller;
+        Ok(RebornFsMountsResponse { mounts: Vec::new() })
+    }
+
+    /// List a directory on a browsable mount. Read-only navigation over the
+    /// caller-scoped internal filesystem; `path` is mount-relative. Default
+    /// body reports the service unavailable so implementors without a wired
+    /// browse reader (and existing fakes) compile untouched.
+    async fn browse_fs_dir(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        request: RebornFsListRequest,
+    ) -> Result<RebornFsListResponse, RebornServicesError> {
+        let _ = (caller, request);
+        Err(RebornServicesError::service_unavailable(false))
+    }
+
+    /// List the projects the caller can access (owner or active member).
+    ///
+    /// Default body reports the service unavailable so implementors without a
+    /// wired project service (and existing fakes) compile untouched.
+    async fn list_projects(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        request: RebornListProjectsRequest,
+    ) -> Result<RebornListProjectsResponse, RebornServicesError> {
+        let _ = (caller, request);
+        Err(RebornServicesError::service_unavailable(false))
+    }
+
+    /// Stat a path on a browsable mount.
+    async fn stat_fs_path(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        request: RebornFsStatRequest,
+    ) -> Result<RebornFsStatResponse, RebornServicesError> {
+        let _ = (caller, request);
+        Err(RebornServicesError::service_unavailable(false))
+    }
+
+    /// Create a project owned by the caller.
+    async fn create_project(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        request: RebornCreateProjectRequest,
+    ) -> Result<RebornProjectResponse, RebornServicesError> {
+        let _ = (caller, request);
+        Err(RebornServicesError::service_unavailable(false))
+    }
+
+    /// Read (preview/download) a file on a browsable mount. The returned
+    /// [`ProjectFsFile`] carries the bytes the HTTP layer streams as the body.
+    async fn read_fs_file(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        request: RebornFsReadRequest,
+    ) -> Result<ProjectFsFile, RebornServicesError> {
+        let _ = (caller, request);
+        Err(RebornServicesError::service_unavailable(false))
+    }
+
+    /// Fetch a single project the caller can access.
+    async fn get_project(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        request: RebornGetProjectRequest,
+    ) -> Result<RebornProjectResponse, RebornServicesError> {
+        let _ = (caller, request);
+        Err(RebornServicesError::service_unavailable(false))
+    }
+
+    /// Update a project (editor or owner access required).
+    async fn update_project(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        request: RebornUpdateProjectRequest,
+    ) -> Result<RebornProjectResponse, RebornServicesError> {
+        let _ = (caller, request);
+        Err(RebornServicesError::service_unavailable(false))
+    }
+
+    /// Delete a project (owner access required).
+    async fn delete_project(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        request: RebornDeleteProjectRequest,
+    ) -> Result<(), RebornServicesError> {
+        let _ = (caller, request);
+        Err(RebornServicesError::service_unavailable(false))
+    }
+
+    /// List a project's membership grants (viewer access required).
+    async fn list_project_members(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        request: RebornListMembersRequest,
+    ) -> Result<RebornListMembersResponse, RebornServicesError> {
+        let _ = (caller, request);
+        Err(RebornServicesError::service_unavailable(false))
+    }
+
+    /// Grant a user a role on a project (owner access required).
+    async fn add_project_member(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        request: RebornAddMemberRequest,
+    ) -> Result<RebornProjectMemberInfo, RebornServicesError> {
+        let _ = (caller, request);
+        Err(RebornServicesError::service_unavailable(false))
+    }
+
+    /// Change a member's role (owner access required).
+    async fn update_project_member_role(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        request: RebornUpdateMemberRoleRequest,
+    ) -> Result<RebornProjectMemberInfo, RebornServicesError> {
+        let _ = (caller, request);
+        Err(RebornServicesError::service_unavailable(false))
+    }
+
+    /// Revoke a member (owner access required).
+    async fn remove_project_member(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        request: RebornRemoveMemberRequest,
+    ) -> Result<(), RebornServicesError> {
+        let _ = (caller, request);
+        Err(RebornServicesError::service_unavailable(false))
+    }
+
     /// List the caller-scoped threads. Pagination is opaque: callers
     /// echo back the `next_cursor` from a prior response to retrieve
     /// the next page; the cursor encoding is implementation-defined.
@@ -1036,6 +1440,33 @@ pub trait RebornServicesApi: Send + Sync {
         caller: WebUiAuthenticatedCaller,
         request: WebUiListAutomationsRequest,
     ) -> Result<RebornListAutomationsResponse, RebornServicesError>;
+
+    async fn pause_automation(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        automation_id: String,
+    ) -> Result<RebornAutomationMutationResponse, RebornServicesError> {
+        let _ = (caller, automation_id);
+        Err(RebornServicesError::service_unavailable(false))
+    }
+
+    async fn resume_automation(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        automation_id: String,
+    ) -> Result<RebornAutomationMutationResponse, RebornServicesError> {
+        let _ = (caller, automation_id);
+        Err(RebornServicesError::service_unavailable(false))
+    }
+
+    async fn delete_automation(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        automation_id: String,
+    ) -> Result<RebornAutomationMutationResponse, RebornServicesError> {
+        let _ = (caller, automation_id);
+        Err(RebornServicesError::service_unavailable(false))
+    }
 
     /// Read-only Trace Commons credit summary for the authenticated
     /// caller.
@@ -1179,6 +1610,33 @@ pub trait RebornServicesApi: Send + Sync {
         caller: WebUiAuthenticatedCaller,
         name: String,
     ) -> Result<RebornSkillActionResponse, RebornServicesError>;
+
+    /// Toggle a skill's automatic activation (see
+    /// [`SkillsProductFacade::set_skill_auto_activate`]). Defaults to
+    /// unavailable so impls that do not surface skill management inherit a
+    /// fail-closed response.
+    async fn set_skill_auto_activate(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        name: String,
+        enabled: bool,
+    ) -> Result<RebornSkillActionResponse, RebornServicesError> {
+        let _ = (caller, name, enabled);
+        Err(RebornServicesError::service_unavailable(false))
+    }
+
+    /// Toggle the global default criteria-based skill auto-activation master
+    /// switch (see [`SkillsProductFacade::set_auto_activate_learned`]).
+    /// Defaults to unavailable so impls that do not surface skill management
+    /// inherit a fail-closed response.
+    async fn set_auto_activate_learned(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        enabled: bool,
+    ) -> Result<RebornSkillActionResponse, RebornServicesError> {
+        let _ = (caller, enabled);
+        Err(RebornServicesError::service_unavailable(false))
+    }
 
     async fn list_extension_registry(
         &self,
@@ -1459,6 +1917,8 @@ pub struct RebornServices {
     turn_coordinator: Arc<dyn TurnCoordinator>,
     inbound_attachments: Option<Arc<dyn InboundAttachmentLander>>,
     project_filesystem: Option<Arc<dyn ProjectFilesystemReader>>,
+    filesystem_browser: Option<Arc<dyn FilesystemBrowseReader>>,
+    project_service: Option<Arc<dyn ProjectService>>,
     inbound_attachment_reader: Option<Arc<dyn InboundAttachmentReader>>,
     event_stream: Option<Arc<dyn ProjectionStream>>,
     lifecycle_facade: Arc<dyn LifecycleProductFacade>,
@@ -1488,6 +1948,8 @@ impl RebornServices {
             turn_coordinator,
             inbound_attachments: None,
             project_filesystem: None,
+            filesystem_browser: None,
+            project_service: None,
             inbound_attachment_reader: None,
             event_stream: None,
             lifecycle_facade: Arc::new(UnsupportedLifecycleProductFacade::new_static(
@@ -1536,6 +1998,26 @@ impl RebornServices {
         project_filesystem: Arc<dyn ProjectFilesystemReader>,
     ) -> Self {
         self.project_filesystem = Some(project_filesystem);
+        self
+    }
+
+    /// Wire the read-only multi-mount browse port backing the standalone
+    /// filesystem viewer (memory / workspace files / skills). Without it,
+    /// `list_fs_mounts` reports no mounts and the `browse_fs_dir` /
+    /// `stat_fs_path` / `read_fs_file` methods report the service unavailable.
+    pub fn with_filesystem_browser(
+        mut self,
+        filesystem_browser: Arc<dyn FilesystemBrowseReader>,
+    ) -> Self {
+        self.filesystem_browser = Some(filesystem_browser);
+        self
+    }
+
+    /// Wire the project management + membership (ACL) port. Without it, the
+    /// `list_projects` / `create_project` / … methods report the service
+    /// unavailable.
+    pub fn with_project_service(mut self, project_service: Arc<dyn ProjectService>) -> Self {
+        self.project_service = Some(project_service);
         self
     }
 
@@ -1707,7 +2189,11 @@ impl RebornServicesApi for RebornServices {
             .snapshot(caller)
             .await
             .map_err(llm_config::map_llm_config_error)?;
-        Ok(setup_response_from_llm_snapshot(snapshot, Vec::new()))
+        Ok(setup_response_from_llm_snapshot(
+            snapshot,
+            Vec::new(),
+            OperatorSetupHostState::default(),
+        ))
     }
 
     async fn run_operator_setup(
@@ -1736,6 +2222,14 @@ impl RebornServicesApi for RebornServices {
             return Err(operator_setup_validation_error("api_key"));
         }
         validate_llm_base_url(request.base_url.as_deref())?;
+        let profile_id = validate_operator_setup_profile_id(request.profile_id.as_deref())?;
+        let webui_access_token_updated =
+            validate_operator_setup_webui_access_token(request.webui_access_token.as_ref())?;
+        reject_unwired_operator_setup_host_mutation(profile_id, webui_access_token_updated)?;
+        let host_state = OperatorSetupHostState {
+            profile_id: None,
+            webui_access_token_updated: false,
+        };
 
         let snapshot = match (request.provider_id, request.adapter) {
             (Some(provider_id), Some(adapter)) => llm_config
@@ -1770,7 +2264,11 @@ impl RebornServicesApi for RebornServices {
                 .map_err(llm_config::map_llm_config_error)?,
         };
 
-        Ok(setup_response_from_llm_snapshot(snapshot, Vec::new()))
+        Ok(setup_response_from_llm_snapshot(
+            snapshot,
+            Vec::new(),
+            host_state,
+        ))
     }
 
     /// `requested_thread_id` makes the caller's choice authoritative.
@@ -1788,6 +2286,13 @@ impl RebornServicesApi for RebornServices {
         caller: WebUiAuthenticatedCaller,
         request: WebUiCreateThreadRequest,
     ) -> Result<RebornCreateThreadResponse, RebornServicesError> {
+        // A browser may propose a project for the new thread; authorize the
+        // caller's access to it (never trust the body alone) and adopt it as the
+        // thread's scope for this request only. Without a proposed project the
+        // caller's default scope is used unchanged.
+        let caller = self
+            .authorize_create_thread_project(caller, request.project_id.clone())
+            .await?;
         let command = request.into_command(caller)?;
         let WebUiInboundCommand::CreateThread {
             caller,
@@ -2146,6 +2651,186 @@ impl RebornServicesApi for RebornServices {
             .map_err(map_project_fs_error)
     }
 
+    async fn list_fs_mounts(
+        &self,
+        _caller: WebUiAuthenticatedCaller,
+    ) -> Result<RebornFsMountsResponse, RebornServicesError> {
+        // No wired browser is not an error: the UI renders an empty viewer.
+        let mounts = self
+            .filesystem_browser
+            .as_ref()
+            .map(|browser| {
+                browser
+                    .available_mounts()
+                    .into_iter()
+                    .map(|mount| RebornFsMountInfo {
+                        mount,
+                        label: mount.label().to_string(),
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        Ok(RebornFsMountsResponse { mounts })
+    }
+
+    async fn browse_fs_dir(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        request: RebornFsListRequest,
+    ) -> Result<RebornFsListResponse, RebornServicesError> {
+        let browser = self.require_filesystem_browser(request.mount)?;
+        // Scope is derived from the authenticated caller, never the request.
+        let scope = caller_browse_scope(&caller);
+        // dispatch-exempt: read-only, caller-scoped internal-filesystem listing
+        // through the facade's own port — not an in-turn mutating tool call.
+        let entries = browser
+            .list_dir(&scope, request.mount, &request.path)
+            .await
+            .map_err(map_project_fs_error)?;
+        Ok(RebornFsListResponse {
+            mount: request.mount,
+            path: request.path,
+            entries,
+        })
+    }
+
+    async fn stat_fs_path(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        request: RebornFsStatRequest,
+    ) -> Result<RebornFsStatResponse, RebornServicesError> {
+        let browser = self.require_filesystem_browser(request.mount)?;
+        let scope = caller_browse_scope(&caller);
+        // dispatch-exempt: read-only, caller-scoped internal-filesystem stat.
+        let stat = browser
+            .stat(&scope, request.mount, &request.path)
+            .await
+            .map_err(map_project_fs_error)?;
+        Ok(RebornFsStatResponse { stat })
+    }
+
+    async fn read_fs_file(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        request: RebornFsReadRequest,
+    ) -> Result<ProjectFsFile, RebornServicesError> {
+        let browser = self.require_filesystem_browser(request.mount)?;
+        let scope = caller_browse_scope(&caller);
+        // dispatch-exempt: read-only, caller-scoped internal-filesystem download.
+        browser
+            .read_file(&scope, request.mount, &request.path)
+            .await
+            .map_err(map_project_fs_error)
+    }
+
+    async fn list_projects(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        request: RebornListProjectsRequest,
+    ) -> Result<RebornListProjectsResponse, RebornServicesError> {
+        let service = self.require_project_service()?;
+        service
+            .list_projects(project_caller(&caller), request)
+            .await
+            .map_err(map_project_service_error)
+    }
+
+    async fn create_project(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        request: RebornCreateProjectRequest,
+    ) -> Result<RebornProjectResponse, RebornServicesError> {
+        let service = self.require_project_service()?;
+        service
+            .create_project(project_caller(&caller), request)
+            .await
+            .map_err(map_project_service_error)
+    }
+
+    async fn get_project(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        request: RebornGetProjectRequest,
+    ) -> Result<RebornProjectResponse, RebornServicesError> {
+        let service = self.require_project_service()?;
+        service
+            .get_project(project_caller(&caller), request)
+            .await
+            .map_err(map_project_service_error)
+    }
+
+    async fn update_project(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        request: RebornUpdateProjectRequest,
+    ) -> Result<RebornProjectResponse, RebornServicesError> {
+        let service = self.require_project_service()?;
+        service
+            .update_project(project_caller(&caller), request)
+            .await
+            .map_err(map_project_service_error)
+    }
+
+    async fn delete_project(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        request: RebornDeleteProjectRequest,
+    ) -> Result<(), RebornServicesError> {
+        let service = self.require_project_service()?;
+        service
+            .delete_project(project_caller(&caller), request)
+            .await
+            .map_err(map_project_service_error)
+    }
+
+    async fn list_project_members(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        request: RebornListMembersRequest,
+    ) -> Result<RebornListMembersResponse, RebornServicesError> {
+        let service = self.require_project_service()?;
+        service
+            .list_members(project_caller(&caller), request)
+            .await
+            .map_err(map_project_service_error)
+    }
+
+    async fn add_project_member(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        request: RebornAddMemberRequest,
+    ) -> Result<RebornProjectMemberInfo, RebornServicesError> {
+        let service = self.require_project_service()?;
+        service
+            .add_member(project_caller(&caller), request)
+            .await
+            .map_err(map_project_service_error)
+    }
+
+    async fn update_project_member_role(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        request: RebornUpdateMemberRoleRequest,
+    ) -> Result<RebornProjectMemberInfo, RebornServicesError> {
+        let service = self.require_project_service()?;
+        service
+            .update_member_role(project_caller(&caller), request)
+            .await
+            .map_err(map_project_service_error)
+    }
+
+    async fn remove_project_member(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        request: RebornRemoveMemberRequest,
+    ) -> Result<(), RebornServicesError> {
+        let service = self.require_project_service()?;
+        service
+            .remove_member(project_caller(&caller), request)
+            .await
+            .map_err(map_project_service_error)
+    }
+
     async fn read_attachment(
         &self,
         caller: WebUiAuthenticatedCaller,
@@ -2443,12 +3128,70 @@ impl RebornServicesApi for RebornServices {
         let scheduler_enabled = self.automation_facade.scheduler_enabled();
         let automations = self
             .automation_facade
-            .list_automations(caller, AutomationListRequest { limit, run_limit })
+            .list_automations(
+                caller,
+                AutomationListRequest {
+                    limit,
+                    run_limit,
+                    include_completed: request.include_completed,
+                },
+            )
             .await?;
         Ok(RebornListAutomationsResponse {
             automations,
             scheduler_enabled,
         })
+    }
+
+    async fn pause_automation(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        automation_id: String,
+    ) -> Result<RebornAutomationMutationResponse, RebornServicesError> {
+        let Some(caller) = product_agent_bound_caller_from_webui(caller) else {
+            return Err(RebornServicesError::from_status(
+                RebornServicesErrorCode::InvalidRequest,
+                400,
+                false,
+            ));
+        };
+        self.automation_facade
+            .pause_automation(caller, automation_id)
+            .await
+    }
+
+    async fn resume_automation(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        automation_id: String,
+    ) -> Result<RebornAutomationMutationResponse, RebornServicesError> {
+        let Some(caller) = product_agent_bound_caller_from_webui(caller) else {
+            return Err(RebornServicesError::from_status(
+                RebornServicesErrorCode::InvalidRequest,
+                400,
+                false,
+            ));
+        };
+        self.automation_facade
+            .resume_automation(caller, automation_id)
+            .await
+    }
+
+    async fn delete_automation(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        automation_id: String,
+    ) -> Result<RebornAutomationMutationResponse, RebornServicesError> {
+        let Some(caller) = product_agent_bound_caller_from_webui(caller) else {
+            return Err(RebornServicesError::from_status(
+                RebornServicesErrorCode::InvalidRequest,
+                400,
+                false,
+            ));
+        };
+        self.automation_facade
+            .delete_automation(caller, automation_id)
+            .await
     }
 
     async fn list_connectable_channels(
@@ -2543,6 +3286,27 @@ impl RebornServicesApi for RebornServices {
         self.skills_facade.update_skill(caller, name, content).await
     }
 
+    async fn set_skill_auto_activate(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        name: String,
+        enabled: bool,
+    ) -> Result<RebornSkillActionResponse, RebornServicesError> {
+        self.skills_facade
+            .set_skill_auto_activate(caller, name, enabled)
+            .await
+    }
+
+    async fn set_auto_activate_learned(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        enabled: bool,
+    ) -> Result<RebornSkillActionResponse, RebornServicesError> {
+        self.skills_facade
+            .set_auto_activate_learned(caller, enabled)
+            .await
+    }
+
     async fn remove_skill(
         &self,
         caller: WebUiAuthenticatedCaller,
@@ -2598,6 +3362,75 @@ impl RebornServicesApi for RebornServices {
         .await
     }
 
+    async fn get_operator_diagnostics(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+    ) -> Result<RebornOperatorCommandPlaneResponse, RebornServicesError> {
+        let mut diagnostics = Vec::new();
+        let mut operator_status = None;
+
+        match self.operator_status.status(caller.clone()).await {
+            Ok(status) => {
+                diagnostics.extend(
+                    status
+                        .checks
+                        .iter()
+                        .filter_map(operator_doctor_status_diagnostic),
+                );
+                operator_status = Some(operator_doctor_status_response(status));
+            }
+            Err(err) => {
+                tracing::debug!(
+                    error = ?err,
+                    "Failed to retrieve operator status for diagnostics"
+                );
+                diagnostics.push(operator_doctor_status_unavailable_diagnostic());
+            }
+        }
+
+        if let Some(llm_config) = &self.llm_config {
+            match llm_config.snapshot(caller).await {
+                Ok(snapshot) => {
+                    diagnostics.extend(
+                        setup_response_from_llm_snapshot(
+                            snapshot,
+                            Vec::new(),
+                            OperatorSetupHostState::default(),
+                        )
+                        .diagnostics,
+                    );
+                }
+                Err(err) => {
+                    tracing::debug!(
+                        error = ?err,
+                        "Failed to retrieve LLM config snapshot for diagnostics"
+                    );
+                    diagnostics.push(operator_doctor_setup_unavailable_diagnostic(
+                        "operator_setup_snapshot_unavailable",
+                        "Operator setup state could not be inspected.",
+                    ));
+                }
+            }
+        } else {
+            diagnostics.push(operator_doctor_setup_unavailable_diagnostic(
+                "operator_setup_service_not_wired",
+                "Operator setup diagnostics are unavailable because the LLM config service is not wired.",
+            ));
+        }
+
+        diagnostics.push(operator_config_surface_not_wired_diagnostic());
+
+        Ok(RebornOperatorCommandPlaneResponse {
+            area: RebornOperatorArea::Diagnostics,
+            status: operator_diagnostics_surface_status(&diagnostics),
+            message: "operator diagnostics completed".to_string(),
+            operator_status,
+            logs: None,
+            service_lifecycle: None,
+            diagnostics,
+        })
+    }
+
     async fn get_operator_status(
         &self,
         caller: WebUiAuthenticatedCaller,
@@ -2619,6 +3452,15 @@ impl RebornServicesApi for RebornServices {
         caller: WebUiAuthenticatedCaller,
         query: RebornOperatorLogsQuery,
     ) -> Result<RebornOperatorCommandPlaneResponse, RebornServicesError> {
+        if query.tail && query.follow {
+            return Err(RebornServicesError::validation(
+                WebUiInboundValidationError::new(
+                    "follow",
+                    WebUiInboundValidationCode::InvalidValue,
+                ),
+            ));
+        }
+
         let request = bounded_operator_logs_query(query);
         let logs = self.operator_logs.query_logs(caller, request).await?;
         Ok(RebornOperatorCommandPlaneResponse {
@@ -3377,6 +4219,72 @@ impl RebornServices {
             .ok_or_else(|| RebornServicesError::service_unavailable(false))
     }
 
+    /// Resolve the wired browse reader and verify it serves the requested
+    /// mount. An unwired reader is a 503 (composition fault, retryable-false);
+    /// a known-but-unserved mount is a 404 so probing an unavailable mount
+    /// cannot distinguish "wrong path" from "not wired".
+    fn require_filesystem_browser(
+        &self,
+        mount: FsMount,
+    ) -> Result<&Arc<dyn FilesystemBrowseReader>, RebornServicesError> {
+        let browser = self
+            .filesystem_browser
+            .as_ref()
+            .ok_or_else(|| RebornServicesError::service_unavailable(false))?;
+        if !browser.available_mounts().contains(&mount) {
+            return Err(RebornServicesError::from_status(
+                RebornServicesErrorCode::NotFound,
+                404,
+                false,
+            ));
+        }
+        Ok(browser)
+    }
+
+    fn require_project_service(&self) -> Result<&Arc<dyn ProjectService>, RebornServicesError> {
+        self.project_service
+            .as_ref()
+            .ok_or_else(|| RebornServicesError::service_unavailable(false))
+    }
+
+    /// Authorize a browser-proposed project for a new thread and, on success,
+    /// adopt it as the caller's scope for that thread only.
+    ///
+    /// The project must never be trusted from the request body alone: the
+    /// proposed id is authorized through the same access-controlled
+    /// [`get_project`](RebornServicesApi::get_project) read the project detail
+    /// route uses (`Ok` only when the caller can access the project, otherwise a
+    /// not-found/denied error). Without a proposed project the caller's default
+    /// scope is returned unchanged.
+    async fn authorize_create_thread_project(
+        &self,
+        mut caller: WebUiAuthenticatedCaller,
+        requested_project_id: Option<String>,
+    ) -> Result<WebUiAuthenticatedCaller, RebornServicesError> {
+        let Some(raw) = requested_project_id else {
+            return Ok(caller);
+        };
+        let project_id = ProjectId::new(raw).map_err(|error| {
+            // Carry the cause to the server log before mapping to the
+            // sanitized validation error (.claude/rules/error-handling.md —
+            // never `map_err(|_| …)` on a parse/validation failure).
+            tracing::debug!(?error, "create_thread received an invalid project_id");
+            RebornServicesError::validation(WebUiInboundValidationError::new(
+                "project_id",
+                WebUiInboundValidationCode::InvalidId,
+            ))
+        })?;
+        self.get_project(
+            caller.clone(),
+            RebornGetProjectRequest {
+                project_id: project_id.as_str().to_string(),
+            },
+        )
+        .await?;
+        caller.project_id = Some(project_id);
+        Ok(caller)
+    }
+
     /// Verify the caller may access the thread and return the project-scoped
     /// [`ThreadScope`] its workspace files resolve under. Reuses the same
     /// ownership + automation-trigger fallback probe as event streaming, so a
@@ -3630,6 +4538,25 @@ fn map_ownership_probe_error(error: SessionThreadError) -> RebornServicesError {
     }
 }
 
+/// Derive the read-only browse scope from the authenticated caller.
+///
+/// The standalone filesystem viewer is not thread-bound, so the scope comes
+/// straight from the trusted caller identity (tenant/user/agent/project) — never
+/// from the request body. A fresh `invocation_id` is minted per call; the
+/// scoped filesystem namespaces storage by tenant/user/agent/project, so this
+/// addresses the same mount the agent's own tools wrote through.
+fn caller_browse_scope(caller: &WebUiAuthenticatedCaller) -> ResourceScope {
+    ResourceScope {
+        tenant_id: caller.tenant_id.clone(),
+        user_id: caller.user_id.clone(),
+        agent_id: caller.agent_id.clone(),
+        project_id: caller.project_id.clone(),
+        mission_id: None,
+        thread_id: None,
+        invocation_id: InvocationId::new(),
+    }
+}
+
 /// Map a project-filesystem read error to the sanitized facade error taxonomy.
 /// No host paths or backend strings cross this boundary — only coarse
 /// transport/status shape.
@@ -3647,6 +4574,36 @@ fn map_project_fs_error(error: ProjectFsError) -> RebornServicesError {
         }
         ProjectFsError::Unavailable => RebornServicesError::service_unavailable(true),
         ProjectFsError::Internal => RebornServicesError::internal(),
+    }
+}
+
+fn project_caller(caller: &WebUiAuthenticatedCaller) -> ProjectCaller {
+    ProjectCaller {
+        tenant_id: caller.tenant_id.clone(),
+        user_id: caller.user_id.clone(),
+    }
+}
+
+fn map_project_service_error(error: ProjectServiceError) -> RebornServicesError {
+    match error {
+        ProjectServiceError::NotFound => {
+            RebornServicesError::from_status(RebornServicesErrorCode::NotFound, 404, false)
+        }
+        ProjectServiceError::Denied => participant_denied(),
+        ProjectServiceError::InvalidInput { field } => {
+            let mut error = RebornServicesError::from_status(
+                RebornServicesErrorCode::InvalidRequest,
+                400,
+                false,
+            );
+            error.field = Some(field);
+            error
+        }
+        ProjectServiceError::Conflict => {
+            RebornServicesError::from_status(RebornServicesErrorCode::Conflict, 409, false)
+        }
+        ProjectServiceError::Unavailable => RebornServicesError::service_unavailable(true),
+        ProjectServiceError::Internal => RebornServicesError::internal(),
     }
 }
 
@@ -4332,7 +5289,8 @@ fn bounded_operator_logs_query(query: RebornOperatorLogsQuery) -> RebornLogQuery
         tool_call_id: bounded_operator_logs_context_string(query.tool_call_id),
         tool_name: bounded_operator_logs_context_string(query.tool_name),
         source: bounded_operator_logs_context_string(query.source),
-        tail: false,
+        tail: query.tail,
+        follow: query.follow,
     }
 }
 
@@ -4436,5 +5394,59 @@ fn generated_thread_id(
             // Fallback remains valid under ThreadId validation rules.
             ThreadId::new("generated-thread-fallback").unwrap_or_else(|_| unreachable!())
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Every `ProjectServiceError` variant projects to a sanitized facade error
+    /// with the expected coarse code/status, and `InvalidInput`'s field name is
+    /// carried through (it is a controlled constant, never backend text).
+    #[test]
+    fn project_service_error_maps_to_sanitized_facade_error() {
+        let not_found = map_project_service_error(ProjectServiceError::NotFound);
+        assert_eq!(not_found.code, RebornServicesErrorCode::NotFound);
+        assert_eq!(not_found.status_code, 404);
+
+        let denied = map_project_service_error(ProjectServiceError::Denied);
+        assert_eq!(denied.kind, RebornServicesErrorKind::ParticipantDenied);
+        assert_eq!(denied.status_code, 403);
+
+        let invalid = map_project_service_error(ProjectServiceError::InvalidInput {
+            field: "project_id".to_string(),
+        });
+        assert_eq!(invalid.code, RebornServicesErrorCode::InvalidRequest);
+        assert_eq!(invalid.status_code, 400);
+        assert_eq!(invalid.field.as_deref(), Some("project_id"));
+
+        let conflict = map_project_service_error(ProjectServiceError::Conflict);
+        assert_eq!(conflict.code, RebornServicesErrorCode::Conflict);
+        assert_eq!(conflict.status_code, 409);
+
+        let unavailable = map_project_service_error(ProjectServiceError::Unavailable);
+        assert_eq!(unavailable.code, RebornServicesErrorCode::Unavailable);
+        assert_eq!(unavailable.status_code, 503);
+        assert!(unavailable.retryable, "unavailable is retryable");
+
+        let internal = map_project_service_error(ProjectServiceError::Internal);
+        assert_eq!(internal.code, RebornServicesErrorCode::Internal);
+        assert_eq!(internal.status_code, 500);
+    }
+
+    /// `require_project_service` returns `service_unavailable(false)` when no
+    /// project service is wired (see the helper in this file). This locks the
+    /// full shape of that sentinel — a clean, non-retryable 503 — so an unwired
+    /// runtime returns a stable error rather than a panic or a 500.
+    #[test]
+    fn unwired_project_service_sentinel_is_503() {
+        let unavailable = RebornServicesError::service_unavailable(false);
+        assert_eq!(unavailable.code, RebornServicesErrorCode::Unavailable);
+        assert_eq!(unavailable.status_code, 503);
+        assert!(
+            !unavailable.retryable,
+            "false-arg sentinel is non-retryable"
+        );
     }
 }

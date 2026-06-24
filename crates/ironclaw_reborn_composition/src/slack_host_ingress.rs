@@ -328,8 +328,17 @@ impl HostIngressCapabilityHandler for SlackEventsIngressHandler {
 pub fn slack_events_host_ingress_registrations(
     handler: Arc<SlackEventsIngressHandler>,
 ) -> Result<Vec<HostIngressRegistration>, HostIngressError> {
-    let declaration = slack_events_host_ingress_declaration(handler.declared_credential_handles())?;
-    let handler: Arc<dyn HostIngressCapabilityHandler> = handler;
+    slack_events_host_ingress_registrations_for_handler(
+        handler.declared_credential_handles(),
+        handler,
+    )
+}
+
+pub(crate) fn slack_events_host_ingress_registrations_for_handler(
+    credential_handles: Vec<IngressCredentialHandle>,
+    handler: Arc<dyn HostIngressCapabilityHandler>,
+) -> Result<Vec<HostIngressRegistration>, HostIngressError> {
+    let declaration = slack_events_host_ingress_declaration(credential_handles)?;
     Ok(vec![HostIngressRegistration {
         declaration,
         handler,
@@ -387,13 +396,53 @@ pub fn slack_events_host_ingress_declaration(
 fn slack_hmac_auth_candidate(
     installation: &SlackHostIngressInstallation,
 ) -> Result<HostIngressAuthCandidate, HostIngressError> {
-    let subject = installation.adapter_installation_id.as_str().to_string();
+    slack_hmac_auth_candidate_for_installation(
+        installation.adapter_installation_id.as_str().to_string(),
+        installation.credential_handles.clone(),
+    )
+}
+
+pub(crate) fn slack_hmac_auth_candidate_for_installation(
+    subject: String,
+    credential_handles: Vec<IngressCredentialHandle>,
+) -> Result<HostIngressAuthCandidate, HostIngressError> {
     HostIngressAuthCandidate::new(
         subject.clone(),
         slack_request_signature_auth_requirement(),
-        installation.credential_handles.clone(),
+        credential_handles,
         move |request, secret| verify_slack_hmac_candidate(request, secret, &subject),
     )
+}
+
+pub(crate) async fn slack_hmac_auth_candidates_for_installation_envelope(
+    tenant_id: ironclaw_host_api::TenantId,
+    adapter_installation_id: ironclaw_product_adapters::AdapterInstallationId,
+    selector: SlackInstallationSelector,
+    credential_handles: Vec<IngressCredentialHandle>,
+    headers: &HeaderMap,
+    body: &[u8],
+) -> Result<Vec<HostIngressAuthCandidate>, HostIngressError> {
+    let subject = adapter_installation_id.as_str().to_string();
+    let resolver = StaticSlackInstallationResolver::new([SlackInstallationRecord::new(
+        tenant_id,
+        adapter_installation_id,
+        selector,
+        Arc::new(CandidateSelectionDispatcher {
+            subject: subject.clone(),
+        }),
+    )]);
+    match resolver.resolve_ingress(headers, body).await {
+        Ok(ResolvedSlackIngress::UrlVerification { .. })
+        | Ok(ResolvedSlackIngress::Event { .. })
+        | Err(SlackIngressError::Envelope(_)) => {
+            Ok(vec![slack_hmac_auth_candidate_for_installation(
+                subject,
+                credential_handles,
+            )?])
+        }
+        Err(SlackIngressError::InstallationNotFound) => Ok(Vec::new()),
+        Err(error) => Err(map_slack_ingress_error(error)),
+    }
 }
 
 fn verify_slack_hmac_candidate(
@@ -489,7 +538,7 @@ fn map_secret_store_error(action: &'static str, error: SecretStoreError) -> Host
     }
 }
 
-fn map_slack_ingress_error(error: SlackIngressError) -> HostIngressError {
+pub(crate) fn map_slack_ingress_error(error: SlackIngressError) -> HostIngressError {
     match &error {
         SlackIngressError::Runner(error) => map_runner_error(error.clone()),
         SlackIngressError::Envelope(error) => HostIngressError::MalformedPayload {
@@ -504,7 +553,7 @@ fn map_slack_ingress_error(error: SlackIngressError) -> HostIngressError {
     }
 }
 
-fn map_runner_error(error: RunnerError) -> HostIngressError {
+pub(crate) fn map_runner_error(error: RunnerError) -> HostIngressError {
     match &error {
         RunnerError::AuthenticationFailed { failure } => {
             auth_failed(format!("Slack runner authentication failed: {failure}"))

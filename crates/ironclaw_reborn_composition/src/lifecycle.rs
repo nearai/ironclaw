@@ -335,7 +335,21 @@ impl RebornLocalLifecycleFacade {
                 let Some(extension_management) = &self.extension_management else {
                     return unsupported_projection(None);
                 };
-                extension_management.search(&query).await
+                let credential_gate = if matches!(&context, LifecycleProductContext::Surface(_)) {
+                    if let Some(credential_accounts) = &self.credential_accounts {
+                        Some(RuntimeExtensionActivationCredentialGate::new(
+                            lifecycle_resource_scope(&context)?,
+                            credential_accounts.clone(),
+                        ))
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                };
+                extension_management
+                    .search(&query, credential_gate.as_ref())
+                    .await
             }
             LifecycleProductAction::ExtensionList => {
                 let Some(extension_management) = &self.extension_management else {

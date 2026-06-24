@@ -1097,6 +1097,7 @@ mod tests {
             effective_capability_ids: Vec::new(),
             provider_replay: None,
             resume_token: None,
+            activity_id: None,
             prior_approval: None,
             replay: None,
             disposition: None,
@@ -1266,6 +1267,7 @@ mod tests {
             approval_request_id: ApprovalRequestId::new(),
             resume_token: CapabilityResumeToken::new("00000000-0000-0000-0000-000000000001")
                 .expect("valid resume token"),
+            activity_id: None,
             correlation_id: CorrelationId::new(),
             surface_version: CapabilitySurfaceVersion::new("surface:v1")
                 .expect("valid surface version"),
@@ -1390,6 +1392,7 @@ mod tests {
             effective_capability_ids: Vec::new(),
             provider_replay: None,
             resume_token: None,
+            activity_id: None,
             prior_approval: None,
             replay: None,
             disposition: None,
@@ -1401,6 +1404,7 @@ mod tests {
             approval_request_id: ApprovalRequestId::new(),
             resume_token: CapabilityResumeToken::new("00000000-0000-0000-0000-000000000002")
                 .expect("valid resume token"),
+            activity_id: None,
             correlation_id: CorrelationId::new(),
             surface_version: CapabilitySurfaceVersion::new("surface:v1")
                 .expect("valid surface version"),
@@ -1573,6 +1577,7 @@ mod tests {
             effective_capability_ids: Vec::new(),
             provider_replay: None,
             resume_token: None,
+            activity_id: None,
             prior_approval: None,
             replay: None,
             disposition: None,
@@ -1584,6 +1589,7 @@ mod tests {
             approval_request_id: ApprovalRequestId::new(),
             resume_token: CapabilityResumeToken::new("00000000-0000-0000-0000-000000000003")
                 .expect("valid resume token"),
+            activity_id: None,
             correlation_id: CorrelationId::new(),
             surface_version: CapabilitySurfaceVersion::new("surface:v1")
                 .expect("valid surface version"),

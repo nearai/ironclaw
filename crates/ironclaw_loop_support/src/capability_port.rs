@@ -5,7 +5,8 @@ use std::{
 
 use async_trait::async_trait;
 use ironclaw_host_api::{
-    CapabilityDisplayOutputPreview, CapabilityId, CapabilitySet, CorrelationId, EffectKind,
+    CapabilityDisplayOutputPreview, CapabilityId, CapabilitySet, CorrelationId,
+    DispatchFailureDetail, DispatchInputIssue, DispatchInputIssueCode, EffectKind,
     ExecutionContext, ExtensionId, InvocationId, MountView, Principal, ResourceEstimate,
     RuntimeKind, sha256_digest_token,
 };
@@ -22,10 +23,11 @@ use ironclaw_turns::{
         AgentLoopHostError, AgentLoopHostErrorKind, CapabilityApprovalResume, CapabilityAuthResume,
         CapabilityBatchInvocation, CapabilityBatchOutcome, CapabilityDenied,
         CapabilityDeniedReasonKind, CapabilityDescriptorView, CapabilityFailure,
-        CapabilityFailureKind, CapabilityInputRef, CapabilityInvocation, CapabilityOutcome,
-        CapabilityResultMessage, CapabilityResumeToken, ConcurrencyHint, LoopCapabilityPort,
-        LoopHostMilestone, LoopHostMilestoneKind, LoopHostMilestoneSink, LoopProcessRef,
-        LoopRunContext, LoopSafeSummary, ProcessHandleSummary, ProviderToolCall,
+        CapabilityFailureDetail, CapabilityFailureKind, CapabilityInputIssue,
+        CapabilityInputIssueCode, CapabilityInputRef, CapabilityInvocation, CapabilityOutcome,
+        CapabilityResultMessage, CapabilityResumeToken, ConcurrencyHint, ContentDigest,
+        LoopCapabilityPort, LoopHostMilestone, LoopHostMilestoneKind, LoopHostMilestoneSink,
+        LoopProcessRef, LoopRunContext, LoopSafeSummary, ProcessHandleSummary, ProviderToolCall,
         ProviderToolCallCapabilityIds, ProviderToolCallReplay, ProviderToolDefinition,
         VisibleCapabilityRequest, VisibleCapabilitySurface,
     },
@@ -218,13 +220,13 @@ impl LoopCapabilityInputResolver for ProviderToolCallInputResolver {
 pub trait LoopCapabilityResultWriter: Send + Sync {
     /// Write the result of a completed capability invocation.
     ///
-    /// Returns a tuple of `(LoopResultRef, u64)` where the `u64` is the
-    /// serialized byte length of the staged result JSON, for downstream
-    /// per-capability byte accounting (no PII; pure size).
+    /// Returns metadata for the staged output: the result ref, serialized byte
+    /// length for per-capability byte accounting, and an optional normalized
+    /// content digest for future output-aware progress detection.
     async fn write_capability_result(
         &self,
         write: CapabilityResultWrite<'_>,
-    ) -> Result<(LoopResultRef, u64), AgentLoopHostError>;
+    ) -> Result<CapabilityWriteResult, AgentLoopHostError>;
 
     async fn update_capability_result(
         &self,
@@ -245,6 +247,20 @@ pub trait LoopCapabilityResultWriter: Send + Sync {
     ) -> Result<(), AgentLoopHostError> {
         Ok(())
     }
+
+    /// Note that the invocation `invocation_id` has started executing with the
+    /// input staged under `input_ref`. Links the two so the still-running
+    /// activity frame can surface the input (inline argument + parameters)
+    /// before the result lands — the input was recorded under `input_ref` at
+    /// registration, but the activity projection only knows the `invocation_id`.
+    /// Default no-op: only writers that own a display-preview store implement it.
+    fn record_running_invocation(
+        &self,
+        _run_context: &LoopRunContext,
+        _invocation_id: InvocationId,
+        _input_ref: &CapabilityInputRef,
+    ) {
+    }
 }
 
 pub struct CapabilityResultWrite<'a> {
@@ -254,6 +270,48 @@ pub struct CapabilityResultWrite<'a> {
     pub capability_id: &'a CapabilityId,
     pub output: serde_json::Value,
     pub display_preview: Option<CapabilityDisplayOutputPreview>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CapabilityWriteResult {
+    pub result_ref: LoopResultRef,
+    pub byte_len: u64,
+    pub output_digest: Option<ContentDigest>,
+}
+
+impl CapabilityWriteResult {
+    pub fn without_output_digest(result_ref: LoopResultRef, byte_len: u64) -> Self {
+        Self {
+            result_ref,
+            byte_len,
+            output_digest: None,
+        }
+    }
+
+    pub fn from_output(
+        result_ref: LoopResultRef,
+        byte_len: u64,
+        output: &serde_json::Value,
+    ) -> Self {
+        // The output digest is a best-effort progress hint (consumed by output-aware
+        // no-progress detection in a later change). A failure to compute it must NEVER
+        // fail an otherwise-successful capability write — degrade to `None` instead.
+        let output_digest = match ContentDigest::from_json_value(output) {
+            Ok(digest) => Some(digest),
+            Err(error) => {
+                tracing::debug!(
+                    %error,
+                    "capability result output digest could not be built; recording result without it"
+                );
+                None
+            }
+        };
+        Self {
+            result_ref,
+            byte_len,
+            output_digest,
+        }
+    }
 }
 
 #[async_trait]
@@ -1063,7 +1121,7 @@ impl HostRuntimeLoopCapabilityPort {
             }
             Err(error) => return Err(error),
         };
-        let (result_ref, byte_len) = self
+        let write_result = self
             .result_writer
             .write_capability_result(CapabilityResultWrite {
                 run_context: &self.run_context,
@@ -1075,11 +1133,12 @@ impl HostRuntimeLoopCapabilityPort {
             })
             .await?;
         Ok(CapabilityOutcome::Completed(CapabilityResultMessage {
-            result_ref,
+            result_ref: write_result.result_ref,
             safe_summary: "capability info returned".to_string(),
             progress: ironclaw_turns::run_profile::CapabilityProgress::MadeProgress,
             terminate_hint: false,
-            byte_len,
+            byte_len: write_result.byte_len,
+            output_digest: write_result.output_digest,
         }))
     }
 
@@ -1510,6 +1569,14 @@ impl LoopCapabilityPort for HostRuntimeLoopCapabilityPort {
         let requested_capability_id = request.capability_id.clone();
         let provider = capability.provider.clone();
         let runtime = capability.runtime;
+        // Link this invocation to its staged input ref now that both are known,
+        // so the still-running activity frame can surface the input argument
+        // before the result completes.
+        self.result_writer.record_running_invocation(
+            &self.run_context,
+            invocation_id,
+            effective_input_ref,
+        );
         let capability_activity_id = CapabilityActivityId::from_uuid(invocation_id.as_uuid());
         self.emit_capability_milestone(LoopHostMilestoneKind::CapabilityInvoked {
             activity_id: capability_activity_id,
@@ -2132,7 +2199,7 @@ async fn runtime_outcome_to_loop(
     ensure_runtime_outcome_matches(conversion.requested_capability_id, &conversion.outcome)?;
     Ok(match conversion.outcome {
         RuntimeCapabilityOutcome::Completed(completed) => {
-            let (result_ref, byte_len) = result_writer
+            let write_result = result_writer
                 .write_capability_result(CapabilityResultWrite {
                     run_context,
                     input_ref: conversion.input_ref,
@@ -2143,11 +2210,12 @@ async fn runtime_outcome_to_loop(
                 })
                 .await?;
             CapabilityOutcome::Completed(CapabilityResultMessage {
-                result_ref,
+                result_ref: write_result.result_ref,
                 safe_summary: "capability completed".to_string(),
                 progress: ironclaw_turns::run_profile::CapabilityProgress::MadeProgress,
                 terminate_hint: false,
-                byte_len,
+                byte_len: write_result.byte_len,
+                output_digest: write_result.output_digest,
             })
         }
         RuntimeCapabilityOutcome::ApprovalRequired(gate) => {
@@ -2280,7 +2348,7 @@ fn runtime_model_visible_failure_to_loop(
         RuntimeFailureKind::Authorization | RuntimeFailureKind::PolicyDenied
     ) {
         return Ok(CapabilityOutcome::Denied(CapabilityDenied {
-            reason_kind: capability_denied_reason_kind(failure.kind.as_str())?,
+            reason_kind: denied_reason_kind_for(failure.kind)?,
             safe_summary: runtime_failure_safe_summary(&failure, "capability authorization denied"),
         }));
     }
@@ -2288,8 +2356,44 @@ fn runtime_model_visible_failure_to_loop(
     Ok(CapabilityOutcome::Failed(CapabilityFailure {
         error_kind: model_visible_runtime_failure_kind_to_loop(failure.kind)?,
         safe_summary: runtime_failure_safe_summary(&failure, "capability invocation failed"),
-        detail: None,
+        detail: runtime_failure_detail_to_loop(failure.detail),
     }))
+}
+
+fn runtime_failure_detail_to_loop(
+    detail: Option<DispatchFailureDetail>,
+) -> Option<CapabilityFailureDetail> {
+    detail.map(dispatch_failure_detail_to_loop)
+}
+
+fn dispatch_failure_detail_to_loop(detail: DispatchFailureDetail) -> CapabilityFailureDetail {
+    match detail {
+        DispatchFailureDetail::InvalidInput { issues } => CapabilityFailureDetail::InvalidInput {
+            issues: issues
+                .into_iter()
+                .map(dispatch_input_issue_to_loop)
+                .collect(),
+        },
+    }
+}
+
+fn dispatch_input_issue_to_loop(issue: DispatchInputIssue) -> CapabilityInputIssue {
+    CapabilityInputIssue {
+        path: issue.path,
+        code: dispatch_input_issue_code_to_loop(issue.code),
+        expected: issue.expected,
+        received: issue.received,
+        schema_path: issue.schema_path,
+    }
+}
+
+fn dispatch_input_issue_code_to_loop(code: DispatchInputIssueCode) -> CapabilityInputIssueCode {
+    match code {
+        DispatchInputIssueCode::MissingRequired => CapabilityInputIssueCode::MissingRequired,
+        DispatchInputIssueCode::UnexpectedField => CapabilityInputIssueCode::UnexpectedField,
+        DispatchInputIssueCode::TypeMismatch => CapabilityInputIssueCode::TypeMismatch,
+        DispatchInputIssueCode::InvalidValue => CapabilityInputIssueCode::InvalidValue,
+    }
 }
 
 fn runtime_failure_kind_to_loop(
@@ -2355,6 +2459,31 @@ fn ensure_runtime_outcome_matches(
         ));
     }
     Ok(())
+}
+
+/// Maps an authorization/policy runtime failure to a leak-safe denied reason
+/// identifier.
+///
+/// `RuntimeFailureKind::Authorization.as_str()` is the literal string
+/// `"authorization"`, which the loop-safe identifier validator rejects as a
+/// sensitive marker (it guards against leaking `Authorization:` header
+/// material into identifiers). Passing it straight into
+/// `capability_denied_reason_kind` therefore turned every authorization denial
+/// into an internal "could not be represented" error, which the executor
+/// mapped to `HostUnavailable` and the planned driver recorded as a terminal
+/// "driver unavailable" failure — borking the whole run (observed when a Gmail
+/// extension activation failed authorization on auth-resume). Use stable,
+/// non-leaky tags so the denial surfaces to the model as a clean `Denied`
+/// outcome instead.
+fn denied_reason_kind_for(
+    kind: RuntimeFailureKind,
+) -> Result<CapabilityDeniedReasonKind, AgentLoopHostError> {
+    let reason = match kind {
+        RuntimeFailureKind::Authorization => "auth_denied",
+        RuntimeFailureKind::PolicyDenied => "policy_denied",
+        other => other.as_str(),
+    };
+    capability_denied_reason_kind(reason)
 }
 
 fn capability_denied_reason_kind(
@@ -2717,6 +2846,35 @@ mod tests {
                     && failure.safe_summary == "capability invocation failed"
         ));
 
+        let issue =
+            DispatchInputIssue::new("schedule.kind", DispatchInputIssueCode::MissingRequired)
+                .expected("cron or once");
+        let invalid_value_issue =
+            DispatchInputIssue::new("schedule.timezone", DispatchInputIssueCode::InvalidValue)
+                .expected("an IANA timezone");
+        let detailed_invalid_input = runtime_failure_to_loop(
+            RuntimeCapabilityFailure::new(
+                capability_id.clone(),
+                RuntimeFailureKind::InvalidInput,
+                Some("trigger_create input failed validation".to_string()),
+            )
+            .with_detail(DispatchFailureDetail::InvalidInput {
+                issues: vec![issue, invalid_value_issue],
+            }),
+        )
+        .expect("convert invalid input with runtime detail");
+        assert!(matches!(
+            detailed_invalid_input,
+            CapabilityOutcome::Failed(CapabilityFailure {
+                detail: Some(CapabilityFailureDetail::InvalidInput { issues }),
+                ..
+            }) if issues.len() == 2
+                && issues[0].path == "schedule.kind"
+                && issues[0].code == CapabilityInputIssueCode::MissingRequired
+                && issues[1].path == "schedule.timezone"
+                && issues[1].code == CapabilityInputIssueCode::InvalidValue
+        ));
+
         let denied = runtime_failure_to_loop(RuntimeCapabilityFailure::new(
             capability_id.clone(),
             RuntimeFailureKind::PolicyDenied,
@@ -2728,6 +2886,27 @@ mod tests {
             CapabilityOutcome::Denied(denied)
                 if denied.reason_kind.as_str() == "policy_denied"
                     && denied.safe_summary == "policy denied request"
+        ));
+
+        // Regression: RuntimeFailureKind::Authorization.as_str() is the literal
+        // "authorization", which the loop-safe identifier validator rejects as a
+        // sensitive marker. Feeding it straight into the denied reason kind used
+        // to fail conversion with an internal "could not be represented" error,
+        // which the executor mapped to HostUnavailable and the planned driver
+        // turned into a terminal "driver unavailable" failure — borking the run
+        // (e.g. a Gmail activation that failed authorization on auth-resume).
+        // The conversion must instead yield a clean, leak-safe Denied outcome.
+        let auth_denied = runtime_failure_to_loop(RuntimeCapabilityFailure::new(
+            capability_id.clone(),
+            RuntimeFailureKind::Authorization,
+            Some("capability requires authentication".to_string()),
+        ))
+        .expect("convert authorization denial without borking the run");
+        assert!(matches!(
+            auth_denied,
+            CapabilityOutcome::Denied(denied)
+                if denied.reason_kind.as_str() == "auth_denied"
+                    && denied.safe_summary == "capability requires authentication"
         ));
 
         let operation_failed = runtime_failure_to_loop(RuntimeCapabilityFailure::new(
@@ -3181,6 +3360,96 @@ mod tests {
         assert!(error.safe_summary.contains("schema validation"));
         assert!(
             ironclaw_turns::run_profile::LoopSafeSummary::new(error.safe_summary.clone()).is_ok()
+        );
+    }
+
+    #[test]
+    fn provider_argument_preparation_accepts_trigger_create_weekly_cron_schedule() {
+        let schema = serde_json::json!({
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+                "name": { "type": "string" },
+                "prompt": { "type": "string" },
+                "schedule": {
+                    "oneOf": [
+                        {
+                            "type": "object",
+                            "additionalProperties": false,
+                            "properties": {
+                                "kind": { "const": "cron" },
+                                "expression": { "type": "string" },
+                                "timezone": { "type": "string" }
+                            },
+                            "required": ["kind", "expression", "timezone"]
+                        },
+                        {
+                            "type": "object",
+                            "additionalProperties": false,
+                            "properties": {
+                                "kind": { "const": "once" },
+                                "at": { "type": "string" },
+                                "timezone": { "type": "string" }
+                            },
+                            "required": ["kind", "at", "timezone"]
+                        }
+                    ]
+                }
+            },
+            "required": ["name", "prompt", "schedule"]
+        });
+
+        let input = serde_json::json!({
+            "name": "Tuesday reminder",
+            "prompt": "Send the Tuesday reminder",
+            "schedule": {
+                "kind": "cron",
+                "expression": "0 14 * * 2",
+                "timezone": "America/Los_Angeles"
+            }
+        });
+
+        let normalized = prepare_provider_arguments(&input, &schema, "provider arguments")
+            .expect("trigger_create weekly cron arguments should pass provider validation");
+
+        assert_eq!(normalized, input);
+
+        let once_input = serde_json::json!({
+            "name": "Dog walking reminder",
+            "prompt": "Walk the dog",
+            "schedule": {
+                "kind": "once",
+                "at": "2026-06-23T14:00:00",
+                "timezone": "America/Los_Angeles"
+            }
+        });
+
+        let normalized = prepare_provider_arguments(&once_input, &schema, "provider arguments")
+            .expect("trigger_create once arguments should pass provider validation");
+
+        assert_eq!(normalized, once_input);
+
+        let stringified_schedule_input = serde_json::json!({
+            "name": "Walk dog - Wednesdays",
+            "prompt": "Reminder: It's time to walk your dog!",
+            "schedule": "{\"kind\":\"cron\",\"expression\":\"0 15 * * 3\",\"timezone\":\"America/Los_Angeles\"}"
+        });
+
+        let normalized =
+            prepare_provider_arguments(&stringified_schedule_input, &schema, "provider arguments")
+                .expect("stringified trigger_create schedule should be decoded before validation");
+
+        assert_eq!(
+            normalized,
+            serde_json::json!({
+                "name": "Walk dog - Wednesdays",
+                "prompt": "Reminder: It's time to walk your dog!",
+                "schedule": {
+                    "kind": "cron",
+                    "expression": "0 15 * * 3",
+                    "timezone": "America/Los_Angeles"
+                }
+            })
         );
     }
 
@@ -3951,6 +4220,7 @@ mod tests {
                     capability_id: CapabilityId::new("demo.echo").expect("valid capability id"),
                     kind: RuntimeFailureKind::InvalidInput,
                     message: Some("invalid input".to_string()),
+                    detail: None,
                 }),
                 CapabilityFailureKind::InvalidInput,
             ),
@@ -6618,14 +6888,14 @@ mod tests {
         async fn write_capability_result(
             &self,
             _write: CapabilityResultWrite<'_>,
-        ) -> Result<(LoopResultRef, u64), AgentLoopHostError> {
+        ) -> Result<CapabilityWriteResult, AgentLoopHostError> {
             let result_ref = LoopResultRef::new("result:mount-test").map_err(|_| {
                 AgentLoopHostError::new(
                     AgentLoopHostErrorKind::Internal,
                     "result ref could not be built",
                 )
             })?;
-            Ok((result_ref, 0))
+            Ok(CapabilityWriteResult::without_output_digest(result_ref, 0))
         }
     }
 
@@ -6645,7 +6915,7 @@ mod tests {
         async fn write_capability_result(
             &self,
             _write: CapabilityResultWrite<'_>,
-        ) -> Result<(LoopResultRef, u64), AgentLoopHostError> {
+        ) -> Result<CapabilityWriteResult, AgentLoopHostError> {
             if self.attempts.fetch_add(1, Ordering::SeqCst) == 0 {
                 return Err(AgentLoopHostError::new(
                     AgentLoopHostErrorKind::TranscriptWriteFailed,
@@ -6658,7 +6928,7 @@ mod tests {
                     "result ref could not be built",
                 )
             })?;
-            Ok((result_ref, 0))
+            Ok(CapabilityWriteResult::without_output_digest(result_ref, 0))
         }
     }
 
@@ -6686,7 +6956,13 @@ mod tests {
         async fn write_capability_result(
             &self,
             write: CapabilityResultWrite<'_>,
-        ) -> Result<(LoopResultRef, u64), AgentLoopHostError> {
+        ) -> Result<CapabilityWriteResult, AgentLoopHostError> {
+            let output_digest = ContentDigest::from_json_value(&write.output).map_err(|error| {
+                AgentLoopHostError::new(
+                    AgentLoopHostErrorKind::Internal,
+                    format!("capability result output digest could not be built: {error}"),
+                )
+            })?;
             self.records
                 .lock()
                 .expect("records lock")
@@ -6701,7 +6977,11 @@ mod tests {
                     "result ref could not be built",
                 )
             })?;
-            Ok((result_ref, 0))
+            Ok(CapabilityWriteResult {
+                result_ref,
+                byte_len: 0,
+                output_digest: Some(output_digest),
+            })
         }
     }
 
@@ -6767,7 +7047,7 @@ mod tests {
         async fn write_capability_result(
             &self,
             _write: CapabilityResultWrite<'_>,
-        ) -> Result<(LoopResultRef, u64), AgentLoopHostError> {
+        ) -> Result<CapabilityWriteResult, AgentLoopHostError> {
             unreachable!("noop capability io should not be called")
         }
     }

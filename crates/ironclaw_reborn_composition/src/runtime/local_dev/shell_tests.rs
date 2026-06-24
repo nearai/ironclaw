@@ -92,11 +92,15 @@ async fn local_dev_yolo_shell_translates_workspace_workdir_without_scoped_mounts
         policy,
         workspace_mounts,
         memory_mounts,
+        system_extensions_lifecycle_mounts: local_runtime
+            .system_extensions_lifecycle_mounts
+            .clone(),
         extension_surface_source: LocalDevExtensionSurfaceSource::default(),
         input_resolver,
         result_writer,
         milestone_sink: Arc::new(InMemoryLoopHostMilestoneSink::default()),
         skill_activation_source: None,
+        project_service: Arc::clone(&local_runtime.project_service),
         trajectory_observer: None,
         outbound_preferences_facade: None,
         outbound_delivery_target_set_requires_approval: false,

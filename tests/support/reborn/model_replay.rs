@@ -12,8 +12,8 @@ use ironclaw_loop_support::{
 };
 use ironclaw_turns::run_profile::{
     AgentLoopHostError, CapabilityCallCandidate, CapabilityInputRef, CapabilitySurfaceVersion,
-    LoopCapabilityPort, ProviderToolCall, ProviderToolCallReplay, ProviderToolDefinition,
-    VisibleCapabilityRequest,
+    LoopCapabilityPort, ParentLoopOutput, ProviderToolCall, ProviderToolCallReplay,
+    ProviderToolDefinition, VisibleCapabilityRequest,
 };
 use thiserror::Error;
 
@@ -320,7 +320,14 @@ impl HostManagedModelGateway for RebornTraceReplayModelGateway {
     ) -> Result<HostManagedModelResponse, HostManagedModelError> {
         let step = self.take_step(request.clone())?;
         match step.output {
-            ReplayOutput::Response(response) => Ok(response),
+            ReplayOutput::Response(response) => {
+                provider_tool_calls_response_from_replayed_response(
+                    &request,
+                    capabilities,
+                    response,
+                )
+                .await
+            }
             ReplayOutput::AssertProviderToolsThenResponse {
                 capability_ids,
                 response,
@@ -486,6 +493,39 @@ async fn provider_tool_calls_response(
     Ok(HostManagedModelResponse::capability_calls(candidates, ""))
 }
 
+async fn provider_tool_calls_response_from_replayed_response(
+    request: &HostManagedModelRequest,
+    capabilities: Arc<dyn LoopCapabilityPort>,
+    response: HostManagedModelResponse,
+) -> Result<HostManagedModelResponse, HostManagedModelError> {
+    let ParentLoopOutput::CapabilityCalls(calls) = response.output else {
+        return Ok(response);
+    };
+    let mut scripted_calls = Vec::with_capacity(calls.len());
+    for call in calls {
+        let replay = call.provider_replay.ok_or_else(|| {
+            HostManagedModelError::safe(
+                HostManagedModelErrorKind::InvalidOutput,
+                format!(
+                    "trace replay capability {} is missing provider replay metadata",
+                    call.capability_id.as_str()
+                ),
+            )
+        })?;
+        scripted_calls.push(RebornScriptedProviderToolCall {
+            capability_id: call.capability_id,
+            call_id: replay.provider_call_id,
+            arguments: replay.arguments,
+        });
+    }
+    let mut registered =
+        provider_tool_calls_response(request, capabilities, scripted_calls).await?;
+    registered.safe_text_deltas = response.safe_text_deltas;
+    registered.safe_reasoning_deltas = response.safe_reasoning_deltas;
+    registered.usage = response.usage;
+    Ok(registered)
+}
+
 fn capability_host_error(error: AgentLoopHostError) -> HostManagedModelError {
     HostManagedModelError::safe(
         HostManagedModelErrorKind::InvalidOutput,
@@ -533,7 +573,9 @@ pub(crate) fn capability_call_from_trace_with_surface(
 ) -> Result<CapabilityCallCandidate, RebornTraceReplayError> {
     let surface_version = CapabilitySurfaceVersion::new(surface_version)
         .map_err(RebornTraceReplayError::InvalidSurfaceVersion)?;
-    let capability_name = if call.name.contains('.') {
+    let capability_name = if let Some(builtin) = call.name.strip_prefix("builtin__") {
+        format!("builtin.{builtin}")
+    } else if call.name.contains('.') {
         call.name.clone()
     } else {
         format!("trace.{}", call.name)

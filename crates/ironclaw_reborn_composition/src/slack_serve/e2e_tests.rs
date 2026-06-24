@@ -370,6 +370,7 @@ async fn build_harness_with_full_settings(
             egress: Arc::new(egress.clone()),
             delivery_sink: Arc::new(sink),
             auth_challenges,
+            auth_flow_canceller: None,
             approval_requests: None,
         },
         SlackFinalReplyDeliverySettings {
@@ -646,6 +647,7 @@ async fn build_harness_for_delivered_route_tests_with_store_mode(
             egress: Arc::new(egress.clone()),
             delivery_sink: Arc::new(sink),
             auth_challenges: None,
+            auth_flow_canceller: None,
             approval_requests: None,
         },
         SlackFinalReplyDeliverySettings {
@@ -2612,6 +2614,7 @@ async fn build_harness_for_auth_fanout_test(
             egress: Arc::new(egress.clone()),
             delivery_sink: Arc::new(sink),
             auth_challenges: Some(auth_challenges),
+            auth_flow_canceller: None,
             approval_requests: None,
         },
         SlackFinalReplyDeliverySettings {

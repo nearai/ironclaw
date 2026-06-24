@@ -33,6 +33,7 @@ test("gateFromEvent maps approval always-allow affordance", () => {
       kind: "gate",
       runId: "run-1",
       gateRef: "gate:approval",
+      invocationId: null,
       headline: "Approval required",
       body: "Review the action.",
       allowAlways: true,
@@ -54,6 +55,7 @@ test("gateFromEvent defaults missing always-allow affordance to false", () => {
       kind: "gate",
       runId: "run-1",
       gateRef: "gate:resource",
+      invocationId: null,
       headline: "Resource unavailable",
       body: "Try later.",
       allowAlways: false,
@@ -118,6 +120,33 @@ test("gateFromEvent keeps modern auth prompts without challenge kind off token c
     {
       kind: "auth_required",
       challengeKind: "other",
+      runId: "run-auth",
+      gateRef: "gate:auth",
+      provider: "google",
+      accountLabel: "",
+      authorizationUrl: null,
+      expiresAt: null,
+      headline: "Authentication required",
+      body: "Google authentication required",
+    },
+  );
+});
+
+test("gateFromEvent preserves explicit oauth prompts without authorization URL", () => {
+  const { gateFromEvent } = loadGates();
+
+  assert.deepEqual(
+    plain(gateFromEvent("auth_required", {
+      turn_run_id: "run-auth",
+      auth_request_ref: "gate:auth",
+      headline: "Authentication required",
+      body: "Google authentication required",
+      challenge_kind: "oauth_url",
+      provider: "google",
+    })),
+    {
+      kind: "auth_required",
+      challengeKind: "oauth_url",
       runId: "run-auth",
       gateRef: "gate:auth",
       provider: "google",
