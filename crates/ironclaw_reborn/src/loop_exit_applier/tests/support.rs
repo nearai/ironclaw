@@ -25,8 +25,13 @@ use ironclaw_turns::{
 };
 
 use crate::loop_exit_applier::{
-    InMemoryLoopExitEvidencePort, LoopExitApplier, ThreadCheckpointLoopExitEvidencePort,
+    AwaitDependentRunEvidenceStore, InMemoryLoopExitEvidencePort, LoopExitApplier,
+    ThreadCheckpointLoopExitEvidencePort,
 };
+
+pub(super) fn empty_await_dependent_run_evidence() -> Arc<dyn AwaitDependentRunEvidenceStore> {
+    Arc::new(crate::subagent::gate_resolution::BoundedSubagentGateResolutionStore::new())
+}
 
 pub(super) fn text_checkpoint_evidence(
     loop_checkpoint_store: Arc<dyn LoopCheckpointStore>,
@@ -35,6 +40,7 @@ pub(super) fn text_checkpoint_evidence(
         Arc::new(InMemorySessionThreadService::default()),
         Arc::new(StaticTurnStateStore::new(claimed_run().state)),
         loop_checkpoint_store,
+        empty_await_dependent_run_evidence(),
     )
 }
 

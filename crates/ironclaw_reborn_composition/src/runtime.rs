@@ -58,7 +58,7 @@ use ironclaw_product_workflow::{
     OutboundPreferencesProductFacade, RunStateApprovalInteractionReadModel,
 };
 use ironclaw_reborn::loop_exit_applier::{
-    ApprovalGateEvidenceStore, ThreadCheckpointLoopExitEvidencePort,
+    ApprovalGateEvidenceStore, AwaitDependentRunEvidenceStore, ThreadCheckpointLoopExitEvidencePort,
 };
 use ironclaw_reborn::milestone_events::{
     DurableLoopHostMilestoneScope, DurableLoopHostMilestoneSink,
@@ -2524,6 +2524,7 @@ pub async fn build_reborn_runtime(
         owner_user_id: Some(actor_user_id.clone()),
         mission_id: None,
     };
+    let subagent_gate_store = Arc::new(BoundedSubagentGateResolutionStore::new());
 
     // Resolve the model gateway in three flat steps so the cfg gates
     // don't multiply into a 4-way permutation:
@@ -2654,10 +2655,13 @@ pub async fn build_reborn_runtime(
         (_, None) => None,
     };
 
+    let await_dependent_run_evidence: Arc<dyn AwaitDependentRunEvidenceStore> =
+        subagent_gate_store.clone();
     let mut loop_exit_evidence = ThreadCheckpointLoopExitEvidencePort::new_with_thread_scope(
         Arc::clone(&thread_service),
         Arc::clone(&turn_state_store) as Arc<dyn ironclaw_turns::TurnStateStore>,
         Arc::clone(&loop_checkpoint_store) as Arc<dyn ironclaw_turns::LoopCheckpointStore>,
+        await_dependent_run_evidence,
         thread_scope.clone(),
     );
     if let Some(local_runtime) = local_runtime {
@@ -2958,7 +2962,7 @@ pub async fn build_reborn_runtime(
         capability_surface_resolver,
         capability_result_writer,
         subagent_goal_store,
-        subagent_gate_store: Arc::new(BoundedSubagentGateResolutionStore::new()),
+        subagent_gate_store,
         subagent_definition_resolver: Arc::new(StaticSubagentDefinitionResolver),
         subagent_spawn_input_codec: Arc::new(JsonSpawnSubagentInputCodec::new(
             capability_input_resolver,

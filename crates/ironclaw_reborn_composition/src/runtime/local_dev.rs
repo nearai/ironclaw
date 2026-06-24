@@ -22,6 +22,7 @@ use ironclaw_loop_support::{
     LoopCapabilityPortFactory, LoopCapabilityResultWriter, loop_driver_execution_extension_id,
 };
 use ironclaw_product_workflow::{OutboundPreferencesProductFacade, ProjectService};
+use ironclaw_reborn::thread_scope::ThreadScopeResolver;
 
 use ironclaw_run_state::ApprovalRequestStore;
 use ironclaw_threads::{
@@ -335,10 +336,15 @@ impl LocalDevCapabilityIo {
                     return None;
                 }
             };
+        let thread_scope = ThreadScopeResolver::resolve_for_turn(
+            &durable_previews.thread_scope,
+            &run_context.scope,
+            run_context.actor(),
+        );
         let message = match durable_previews
             .thread_service
             .append_capability_display_preview(AppendCapabilityDisplayPreviewRequest {
-                scope: durable_previews.thread_scope.clone(),
+                scope: thread_scope,
                 thread_id: run_context.thread_id.clone(),
                 turn_run_id: run_context.run_id.to_string(),
                 preview,

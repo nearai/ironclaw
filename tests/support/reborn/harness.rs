@@ -75,6 +75,7 @@ use ironclaw_loop_support::{
     EmptyUserProfileSource, HostIdentityContextBuildError, HostIdentityContextCandidate,
     HostIdentityContextSource, HostManagedModelRequest, HostRuntimeLoopCapabilityPortFactory,
     JsonSpawnSubagentInputCodec, LoopCapabilityPortFactory, LoopCapabilityResultWriter,
+    build_spawn_subagent_parameters_schema,
 };
 use ironclaw_network::{
     NetworkHttpEgress, NetworkHttpError, NetworkHttpRequest, NetworkHttpResponse, NetworkUsage,
@@ -156,6 +157,7 @@ pub type HarnessWaitConfig = WaitConfig;
 const TEST_CAPABILITY_ID: &str = "test.echo";
 const TEST_CAPABILITY_SURFACE_VERSION: &str = "trace_replay_v1";
 const SUBAGENT_ALLOWED_TEST_TOOL_NAME: &str = "test_read_file";
+const SPAWN_SUBAGENT_PROVIDER_TOOL_NAME: &str = "builtin__spawn_subagent";
 
 type HarnessResult<T> = Result<T, Box<dyn std::error::Error + Send + Sync>>;
 type HarnessCapabilityParts = (
@@ -838,6 +840,8 @@ impl RebornBinaryE2EHarness {
         let loop_checkpoint_store: Arc<dyn LoopCheckpointStore> = turn_store.clone();
         let milestone_sink =
             Arc::new(ironclaw_turns::run_profile::InMemoryLoopHostMilestoneSink::default());
+        let subagent_gate_store = Arc::new(BoundedSubagentGateResolutionStore::new());
+        let exposes_spawn_subagent = capability_mode.exposes_spawn_subagent();
         let (
             capability_factory,
             capability_surface_resolver,
@@ -845,12 +849,28 @@ impl RebornBinaryE2EHarness {
             capability_result_writer,
             capability_recorder,
         ) = capability_mode.into_parts(milestone_sink.clone())?;
+        let mut runtime_config = DefaultPlannedRuntimeConfig {
+            // Keep the durable runner heartbeat at its production default;
+            // test responsiveness comes from fast scheduler polling below.
+            poll_interval: Duration::from_millis(10),
+            // The binary-E2E harness runs many scripted runtimes in one test
+            // process. Keep each harness deterministic; scheduler worker-pool
+            // concurrency is covered by lower-level runtime tests.
+            worker_count: std::num::NonZeroUsize::MIN,
+            ..DefaultPlannedRuntimeConfig::default()
+        };
+        if exposes_spawn_subagent {
+            // Explicit spawn regression tests need the tool surface even though
+            // production currently disables model-facing spawn by default.
+            runtime_config.disabled_capability_ids = Vec::new();
+        }
         let turn_state_for_evidence: Arc<dyn TurnStateStore> = turn_store.clone();
         let evidence = Arc::new(HarnessLoopExitEvidencePort {
             inner: ThreadCheckpointLoopExitEvidencePort::new_with_thread_scope(
                 thread_harness.service.clone(),
                 turn_state_for_evidence,
                 Arc::clone(&loop_checkpoint_store),
+                subagent_gate_store.clone(),
                 thread_scope.clone(),
             ),
             loop_checkpoint_store: Arc::clone(&loop_checkpoint_store),
@@ -870,19 +890,14 @@ impl RebornBinaryE2EHarness {
             capability_surface_resolver,
             capability_result_writer,
             subagent_goal_store: Arc::new(InMemoryBoundedSubagentGoalStore::new()),
-            subagent_gate_store: Arc::new(BoundedSubagentGateResolutionStore::new()),
+            subagent_gate_store,
             subagent_definition_resolver: Arc::new(StaticSubagentDefinitionResolver),
             subagent_spawn_input_codec: Arc::new(JsonSpawnSubagentInputCodec::new(
                 capability_input_resolver,
             )),
             subagent_spawn_limits: ironclaw_loop_support::SubagentSpawnLimits::default(),
             loop_exit_evidence: evidence,
-            config: DefaultPlannedRuntimeConfig {
-                // Keep the durable runner heartbeat at its production default;
-                // test responsiveness comes from fast scheduler polling below.
-                poll_interval: Duration::from_millis(10),
-                ..DefaultPlannedRuntimeConfig::default()
-            },
+            config: runtime_config,
             model_route_resolver: None,
             cancellation_factory: None,
             skill_context_source: None,
@@ -1446,6 +1461,13 @@ impl LoopExitEvidencePort for HarnessLoopExitEvidencePort {
 }
 
 impl HarnessCapabilityMode {
+    fn exposes_spawn_subagent(&self) -> bool {
+        match self {
+            Self::Recording(port) => port.expose_spawn_subagent,
+            Self::HostRuntime(_) => false,
+        }
+    }
+
     fn into_parts(
         self,
         milestone_sink: Arc<ironclaw_turns::run_profile::InMemoryLoopHostMilestoneSink>,
@@ -3281,6 +3303,26 @@ impl RecordingTestCapabilityPort {
         }
     }
 
+    fn spawn_subagent_capability_id() -> CapabilityId {
+        CapabilityId::new(DEFAULT_SPAWN_SUBAGENT_CAPABILITY_ID).expect("valid capability id")
+    }
+
+    fn capability_id_for_provider_tool(
+        &self,
+        tool_name: &str,
+    ) -> Result<CapabilityId, AgentLoopHostError> {
+        if tool_name == self.primary_tool_name() {
+            return Ok(self.primary_capability_id());
+        }
+        if self.expose_spawn_subagent && tool_name == SPAWN_SUBAGENT_PROVIDER_TOOL_NAME {
+            return Ok(Self::spawn_subagent_capability_id());
+        }
+        Err(host_runtime_harness_error(format!(
+            "provider tool call {} is outside the visible capability surface",
+            tool_name
+        )))
+    }
+
     fn invocations(&self) -> Vec<CapabilityInvocation> {
         self.invocations.lock().unwrap().clone()
     }
@@ -3292,10 +3334,7 @@ impl RecordingTestCapabilityPort {
     fn capability_allowlist(&self) -> Vec<CapabilityId> {
         let mut allowlist = vec![self.primary_capability_id()];
         if self.expose_spawn_subagent {
-            allowlist.push(
-                CapabilityId::new(DEFAULT_SPAWN_SUBAGENT_CAPABILITY_ID)
-                    .expect("valid capability id"),
-            );
+            allowlist.push(Self::spawn_subagent_capability_id());
         }
         allowlist
     }
@@ -3317,7 +3356,7 @@ impl RecordingTestCapabilityPort {
 #[async_trait]
 impl LoopCapabilityPort for RecordingTestCapabilityPort {
     fn tool_definitions(&self) -> Result<Vec<ProviderToolDefinition>, AgentLoopHostError> {
-        let definitions = vec![ProviderToolDefinition {
+        let mut definitions = vec![ProviderToolDefinition {
             capability_id: self.primary_capability_id(),
             name: self.primary_tool_name().to_string(),
             description: "Echo a test payload".to_string(),
@@ -3328,6 +3367,14 @@ impl LoopCapabilityPort for RecordingTestCapabilityPort {
                 }
             }),
         }];
+        if self.expose_spawn_subagent {
+            definitions.push(ProviderToolDefinition {
+                capability_id: Self::spawn_subagent_capability_id(),
+                name: SPAWN_SUBAGENT_PROVIDER_TOOL_NAME.to_string(),
+                description: "Spawn a child subagent run and wait for its result".to_string(),
+                parameters: build_spawn_subagent_parameters_schema(&[]),
+            });
+        }
         Ok(definitions)
     }
 
@@ -3335,7 +3382,7 @@ impl LoopCapabilityPort for RecordingTestCapabilityPort {
         &self,
         call: ProviderToolCall,
     ) -> Result<CapabilityCallCandidate, AgentLoopHostError> {
-        let capability_id = self.primary_capability_id();
+        let capability_id = self.capability_id_for_provider_tool(&call.name)?;
         Ok(CapabilityCallCandidate {
             surface_version: CapabilitySurfaceVersion::new(TEST_CAPABILITY_SURFACE_VERSION)
                 .expect("valid surface version"),
@@ -3361,7 +3408,7 @@ impl LoopCapabilityPort for RecordingTestCapabilityPort {
         &self,
         _request: VisibleCapabilityRequest,
     ) -> Result<VisibleCapabilitySurface, AgentLoopHostError> {
-        let descriptors = vec![CapabilityDescriptorView {
+        let mut descriptors = vec![CapabilityDescriptorView {
             capability_id: self.primary_capability_id(),
             provider: Some(ExtensionId::new("test").expect("valid provider")),
             runtime: RuntimeKind::FirstParty,
@@ -3370,6 +3417,17 @@ impl LoopCapabilityPort for RecordingTestCapabilityPort {
             concurrency_hint: ConcurrencyHint::SafeForParallel,
             parameters_schema: json!({"type": "object"}),
         }];
+        if self.expose_spawn_subagent {
+            descriptors.push(CapabilityDescriptorView {
+                capability_id: Self::spawn_subagent_capability_id(),
+                provider: None,
+                runtime: RuntimeKind::FirstParty,
+                safe_name: DEFAULT_SPAWN_SUBAGENT_CAPABILITY_ID.to_string(),
+                safe_description: "Spawn a child subagent run and wait for its result".to_string(),
+                concurrency_hint: ConcurrencyHint::Exclusive,
+                parameters_schema: build_spawn_subagent_parameters_schema(&[]),
+            });
+        }
         Ok(VisibleCapabilitySurface {
             version: CapabilitySurfaceVersion::new(TEST_CAPABILITY_SURFACE_VERSION)
                 .expect("valid surface version"),

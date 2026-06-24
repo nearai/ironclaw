@@ -653,6 +653,9 @@ async fn user_message_no_profile_uses_product_live_runtime_and_persists_reply() 
     );
     let cancellation_factory = Arc::new(ReadyRunCancellationFactory::default());
     let turn_state_for_runtime: Arc<dyn RuntimeTurnStateStore> = turn_store.clone();
+    let subagent_gate_store = Arc::new(
+        ironclaw_reborn::subagent::gate_resolution::BoundedSubagentGateResolutionStore::new(),
+    );
     let composition = build_product_live_planned_runtime(DefaultPlannedRuntimeParts {
         attachment_read_port: None,
         turn_state: turn_state_for_runtime,
@@ -668,9 +671,7 @@ async fn user_message_no_profile_uses_product_live_runtime_and_persists_reply() 
         subagent_goal_store: Arc::new(
             ironclaw_reborn::subagent::goal_store::InMemoryBoundedSubagentGoalStore::new(),
         ),
-        subagent_gate_store: Arc::new(
-            ironclaw_reborn::subagent::gate_resolution::BoundedSubagentGateResolutionStore::new(),
-        ),
+        subagent_gate_store: subagent_gate_store.clone(),
         subagent_definition_resolver: Arc::new(
             ironclaw_reborn::subagent::flavors::StaticSubagentDefinitionResolver,
         ),
@@ -683,6 +684,7 @@ async fn user_message_no_profile_uses_product_live_runtime_and_persists_reply() 
                 Arc::new(thread_service.clone()),
                 turn_state_store_dyn(&turn_store),
                 checkpoint_store,
+                subagent_gate_store,
                 thread_scope.clone(),
             )
             .with_cancellation_factory(cancellation_factory.clone()),
@@ -822,6 +824,9 @@ async fn user_message_no_profile_can_cancel_product_live_run_from_product_path()
     );
     let cancellation_factory = Arc::new(ReadyRunCancellationFactory::default());
     let turn_state_for_runtime: Arc<dyn RuntimeTurnStateStore> = turn_store.clone();
+    let subagent_gate_store = Arc::new(
+        ironclaw_reborn::subagent::gate_resolution::BoundedSubagentGateResolutionStore::new(),
+    );
     let composition = build_product_live_planned_runtime(DefaultPlannedRuntimeParts {
         attachment_read_port: None,
         turn_state: turn_state_for_runtime,
@@ -837,9 +842,7 @@ async fn user_message_no_profile_can_cancel_product_live_run_from_product_path()
         subagent_goal_store: Arc::new(
             ironclaw_reborn::subagent::goal_store::InMemoryBoundedSubagentGoalStore::new(),
         ),
-        subagent_gate_store: Arc::new(
-            ironclaw_reborn::subagent::gate_resolution::BoundedSubagentGateResolutionStore::new(),
-        ),
+        subagent_gate_store: subagent_gate_store.clone(),
         subagent_definition_resolver: Arc::new(
             ironclaw_reborn::subagent::flavors::StaticSubagentDefinitionResolver,
         ),
@@ -853,6 +856,7 @@ async fn user_message_no_profile_can_cancel_product_live_run_from_product_path()
             Arc::new(thread_service.clone()),
             turn_state_store_dyn(&turn_store),
             checkpoint_store,
+            subagent_gate_store,
             thread_scope.clone(),
         )),
         config: DefaultPlannedRuntimeConfig::default(),
@@ -1004,6 +1008,9 @@ async fn product_live_runtime_rejects_unretained_cancellation_factory() {
     );
 
     let turn_state_for_runtime: Arc<dyn RuntimeTurnStateStore> = turn_store.clone();
+    let subagent_gate_store = Arc::new(
+        ironclaw_reborn::subagent::gate_resolution::BoundedSubagentGateResolutionStore::new(),
+    );
     let error = match build_product_live_planned_runtime(DefaultPlannedRuntimeParts {
         attachment_read_port: None,
         turn_state: turn_state_for_runtime,
@@ -1019,9 +1026,7 @@ async fn product_live_runtime_rejects_unretained_cancellation_factory() {
         subagent_goal_store: Arc::new(
             ironclaw_reborn::subagent::goal_store::InMemoryBoundedSubagentGoalStore::new(),
         ),
-        subagent_gate_store: Arc::new(
-            ironclaw_reborn::subagent::gate_resolution::BoundedSubagentGateResolutionStore::new(),
-        ),
+        subagent_gate_store: subagent_gate_store.clone(),
         subagent_definition_resolver: Arc::new(
             ironclaw_reborn::subagent::flavors::StaticSubagentDefinitionResolver,
         ),
@@ -1033,6 +1038,7 @@ async fn product_live_runtime_rejects_unretained_cancellation_factory() {
             Arc::new(InMemorySessionThreadService::default()),
             Arc::new(InMemoryTurnStateStore::default()) as Arc<dyn TurnStateStore>,
             checkpoint_store,
+            subagent_gate_store,
             thread_scope,
         )),
         config: DefaultPlannedRuntimeConfig::default(),
