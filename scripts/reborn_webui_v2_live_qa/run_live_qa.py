@@ -406,6 +406,13 @@ def _env_present(name: str, extra_env: dict[str, str] | None = None) -> bool:
     return bool(_env_value(name, extra_env))
 
 
+def _non_empty_env(name: str, default: str) -> str:
+    value = os.environ.get(name)
+    if value and value.strip():
+        return value.strip()
+    return default
+
+
 def _slack_enabled(config_text: str) -> bool:
     in_slack = False
     for raw_line in config_text.splitlines():
@@ -1619,6 +1626,27 @@ def _slack_auth_test(config_text: str, extra_env: dict[str, str]) -> dict[str, o
     return result
 
 
+def _slack_team_id_from_bot_token_env(bot_token_env: str) -> str | None:
+    token = env_secret(bot_token_env)
+    if not token:
+        return None
+    try:
+        import httpx
+
+        response = httpx.post(
+            "https://slack.com/api/auth.test",
+            headers={"Authorization": f"Bearer {token}"},
+            timeout=20.0,
+        )
+        payload = response.json()
+    except Exception:
+        return None
+    if not payload.get("ok"):
+        return None
+    team_id = str(payload.get("team_id") or "").strip()
+    return team_id or None
+
+
 def prepare_reborn_home(args: argparse.Namespace, selected_cases: list[str]) -> PreparedRebornHome:
     args.output_dir.mkdir(parents=True, exist_ok=True)
     needs_slack = any(CASES[name].requires_slack for name in selected_cases)
@@ -1808,25 +1836,25 @@ def create_generated_reborn_home(path: Path, *, include_slack: bool = False) -> 
         llm_default_lines.append(f'base_url = "{base_url}"')
     slack_lines: list[str] = []
     if include_slack:
-        slack_installation_id = os.environ.get(
+        slack_installation_id = _non_empty_env(
             "REBORN_WEBUI_V2_LIVE_QA_SLACK_INSTALLATION_ID",
             "local-dev-installation",
         )
-        slack_team_id = os.environ.get(
-            "REBORN_WEBUI_V2_LIVE_QA_SLACK_TEAM_ID",
-            "local-dev-team",
-        )
-        slack_api_app_id = os.environ.get(
-            "REBORN_WEBUI_V2_LIVE_QA_SLACK_API_APP_ID",
-            "local-dev-app-id",
-        )
-        slack_signing_secret_env = os.environ.get(
+        slack_signing_secret_env = _non_empty_env(
             "REBORN_WEBUI_V2_LIVE_QA_SLACK_SIGNING_SECRET_ENV",
             "IRONCLAW_REBORN_SLACK_SIGNING_SECRET",
         )
-        slack_bot_token_env = os.environ.get(
+        slack_bot_token_env = _non_empty_env(
             "REBORN_WEBUI_V2_LIVE_QA_SLACK_BOT_TOKEN_ENV",
             "IRONCLAW_REBORN_SLACK_BOT_TOKEN",
+        )
+        slack_team_id = _non_empty_env(
+            "REBORN_WEBUI_V2_LIVE_QA_SLACK_TEAM_ID",
+            _slack_team_id_from_bot_token_env(slack_bot_token_env) or "local-dev-team",
+        )
+        slack_api_app_id = _non_empty_env(
+            "REBORN_WEBUI_V2_LIVE_QA_SLACK_API_APP_ID",
+            "local-dev-app-id",
         )
         slack_lines = [
             "[slack]",

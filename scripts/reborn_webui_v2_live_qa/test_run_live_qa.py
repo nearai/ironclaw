@@ -102,6 +102,30 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
             self.assertFalse(slack["env_present"])
             self.assertEqual(slack["auth_test"]["error"], "Slack env unavailable")
 
+    def test_generated_slack_home_ignores_empty_ci_vars(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            home = Path(tmpdir) / "reborn-home"
+            env = {
+                "LIVE_OPENAI_COMPATIBLE_API_KEY": "fake-live-llm-key",
+                "REBORN_WEBUI_V2_LIVE_QA_LLM_API_KEY_ENV": "LIVE_OPENAI_COMPATIBLE_API_KEY",
+                "REBORN_WEBUI_V2_LIVE_QA_SLACK_INSTALLATION_ID": "",
+                "REBORN_WEBUI_V2_LIVE_QA_SLACK_TEAM_ID": "",
+                "REBORN_WEBUI_V2_LIVE_QA_SLACK_API_APP_ID": "",
+                "IRONCLAW_REBORN_SLACK_SIGNING_SECRET": "",
+                "IRONCLAW_REBORN_SLACK_BOT_TOKEN": "",
+            }
+
+            with patch.dict(os.environ, env, clear=True):
+                run_live_qa.create_generated_reborn_home(home, include_slack=True)
+
+            config = (home / "config.toml").read_text(encoding="utf-8")
+            self.assertIn('installation_id = "local-dev-installation"', config)
+            self.assertIn('team_id = "local-dev-team"', config)
+            self.assertIn('api_app_id = "local-dev-app-id"', config)
+            self.assertNotIn('installation_id = ""', config)
+            self.assertNotIn('team_id = ""', config)
+            self.assertNotIn('api_app_id = ""', config)
+
 
 if __name__ == "__main__":
     unittest.main()
