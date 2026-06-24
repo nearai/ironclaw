@@ -382,6 +382,48 @@ async fn install_resolves_skill_from_private_manifest_url() {
 }
 
 #[tokio::test]
+async fn install_allows_private_artifacts_on_configured_catalog_host() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let root = dir.path().join("local-dev");
+    let catalog_url = "https://private-hub.example.com/api/catalog/manifest.json";
+    let private_manifest_url =
+        "https://private-hub.example.com/api/private-artifacts/manifest.json?token=test-token";
+    let skill_url = "https://private-hub.example.com/api/private-artifacts/SKILL.md";
+    let skill_bytes = b"# scoped skill\n";
+    let private_manifest = signed_manifest(skill_manifest_json(
+        "scoped-skill",
+        "2026-01-05T00:00:00Z",
+        skill_url,
+        &sha256_hex(skill_bytes),
+        IronHubProvenance::Official,
+    ));
+    let egress = Arc::new(RecordingIronHubEgress::new([
+        (
+            catalog_url,
+            signed_manifest(empty_manifest_json("2026-01-05T00:00:00Z")),
+        ),
+        (private_manifest_url, private_manifest),
+        (skill_url, skill_bytes.to_vec()),
+    ]));
+    let service = ironhub_service(root.clone(), egress, catalog_url).await;
+
+    let installed = service
+        .execute(super::model::IronHubCommand::Install {
+            name: "scoped-skill".to_string(),
+            options: IronHubInstallOptions {
+                kind: Some(IronHubEntryKind::Skill),
+                private_manifest_url: Some(private_manifest_url.to_string()),
+                ..IronHubInstallOptions::default()
+            },
+        })
+        .await
+        .expect("install succeeds when private artifacts share the configured catalog host");
+
+    assert_eq!(installed.phase, LifecyclePhase::Installed);
+    assert!(root.join("skills/scoped-skill/SKILL.md").exists());
+}
+
+#[tokio::test]
 async fn fetch_manifest_uses_runtime_egress_host_policy() {
     let dir = tempfile::tempdir().expect("tempdir");
     let manifest_url = "https://hub.ironclaw.com/tests/policy/manifest.json";

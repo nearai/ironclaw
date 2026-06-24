@@ -148,8 +148,9 @@ fn skill_artifact_digest(entry: &IronHubSkillEntry) -> String {
 pub(super) fn validate_artifact(
     artifact: &IronHubArtifact,
     max_bytes: u64,
+    catalog_host: Option<&str>,
 ) -> Result<(), IronHubCommandError> {
-    validate_artifact_url("artifact", "url", &artifact.url)?;
+    validate_artifact_url("artifact", "url", &artifact.url, catalog_host)?;
     if artifact.size_bytes > max_bytes {
         return Err(IronHubCommandError::Catalog {
             reason: format!("artifact exceeds {} byte cap", max_bytes),
@@ -168,6 +169,7 @@ pub(super) fn validate_artifact_url(
     manifest_name: &str,
     field: &'static str,
     url: &str,
+    catalog_host: Option<&str>,
 ) -> Result<(), IronHubCommandError> {
     let parsed = url::Url::parse(url).map_err(|error| IronHubCommandError::Catalog {
         reason: format!("{manifest_name}.{field} invalid URL: {error}"),
@@ -182,7 +184,9 @@ pub(super) fn validate_artifact_url(
         .ok_or_else(|| IronHubCommandError::Catalog {
             reason: format!("{manifest_name}.{field} host is missing"),
         })?;
-    if host_is_disallowed_target(host) || !is_allowed_artifact_host(host) {
+    let host_allowed = is_allowed_artifact_host(host)
+        || catalog_host.is_some_and(|allowed| host.eq_ignore_ascii_case(allowed));
+    if host_is_disallowed_target(host) || !host_allowed {
         return Err(IronHubCommandError::Catalog {
             reason: format!("{manifest_name}.{field} host '{host}' is not allowed"),
         });
@@ -193,8 +197,9 @@ pub(super) fn validate_artifact_url(
 pub(super) fn network_policy_for_url(
     url: &str,
     max_bytes: u64,
+    catalog_host: Option<&str>,
 ) -> Result<NetworkPolicy, IronHubCommandError> {
-    validate_artifact_url("download", "url", url)?;
+    validate_artifact_url("download", "url", url, catalog_host)?;
     let parsed = url::Url::parse(url).map_err(|error| IronHubCommandError::Catalog {
         reason: format!("invalid URL: {error}"),
     })?;

@@ -459,11 +459,22 @@ impl IronHubService {
         Ok(manifest)
     }
 
+    fn catalog_host(&self) -> Option<String> {
+        url::Url::parse(&self.manifest_url)
+            .ok()
+            .and_then(|parsed| parsed.host_str().map(str::to_string))
+    }
+
     async fn download_and_verify_manifest(
         &self,
         url: &str,
     ) -> Result<IronHubManifest, IronHubCommandError> {
-        validate_artifact_url("hub-manifest", "manifest_url", url)?;
+        validate_artifact_url(
+            "hub-manifest",
+            "manifest_url",
+            url,
+            self.catalog_host().as_deref(),
+        )?;
         let envelope = self.download_url(url, MAX_SIGNED_MANIFEST_BYTES).await?;
         #[cfg(not(test))]
         let verified_manifest = verify_signed_manifest(&envelope);
@@ -490,7 +501,7 @@ impl IronHubService {
         artifact: &IronHubArtifact,
         max_bytes: u64,
     ) -> Result<Vec<u8>, IronHubCommandError> {
-        validate_artifact(artifact, max_bytes)?;
+        validate_artifact(artifact, max_bytes, self.catalog_host().as_deref())?;
         let bytes = self.download_url(&artifact.url, max_bytes).await?;
         let actual = sha256_hex(&bytes);
         if !actual.eq_ignore_ascii_case(&artifact.sha256) {
@@ -517,7 +528,7 @@ impl IronHubService {
             url: url.to_string(),
             headers: Vec::new(),
             body: Vec::new(),
-            network_policy: network_policy_for_url(url, max_bytes)?,
+            network_policy: network_policy_for_url(url, max_bytes, self.catalog_host().as_deref())?,
             credential_injections: Vec::new(),
             response_body_limit: Some(max_bytes),
             save_body_to: None,
