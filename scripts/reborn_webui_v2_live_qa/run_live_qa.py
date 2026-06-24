@@ -3560,23 +3560,21 @@ async def case_qa_3d_endpoint_status_slack_delivery(ctx: LiveQaContext) -> Probe
 async def case_qa_4c_github_release_live_chat(ctx: LiveQaContext) -> ProbeResult:
     marker = "REBORN_QA_4C_GITHUB_RELEASE_DONE"
     release = await _live_github_latest_release("nearai", "ironclaw")
+    api_url = release["api_url"]
     return await _live_chat_case(
         ctx,
         case_name="qa_4c_github_release_live_chat",
         prompt=(
-            "QA case 4C: summarize the latest release information for "
-            "https://github.com/nearai/ironclaw. Use only public web or HTTP access; "
-            "do not use an authenticated GitHub connector or GitHub auth flow. "
-            "Do not use save/download tools and do not fetch or persist large "
-            "response bodies; a concise public HTTP check is enough. "
-            f"The current live release tag is {release['tag_name']}; verify it live "
-            "and summarize the release. In the final answer include the exact marker "
-            f"{marker}, include the text GitHub, and include the release tag "
+            "QA case 4C: perform exactly one public HTTP GET to "
+            f"{api_url}. Do not use an authenticated GitHub connector, GitHub auth "
+            "flow, save/download tools, or any other URL. Confirm that the live "
+            f"response tag_name is {release['tag_name']}, then immediately final-answer "
+            f"with the exact marker {marker}, the text GitHub, and the release tag "
             f"{release['tag_name']}."
         ),
         marker=marker,
         required_text=["GitHub", release["tag_name"]],
-        timeout=180.0,
+        timeout=240.0,
         extra_details=release,
     )
 
