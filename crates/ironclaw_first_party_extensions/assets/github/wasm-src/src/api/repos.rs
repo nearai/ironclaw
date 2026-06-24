@@ -115,7 +115,6 @@ pub(crate) fn get_authenticated_user() -> Result<String, String> {
 }
 
 pub(crate) fn list_repos(
-    username: Option<&str>,
     repo_type: Option<RepoListType>,
     page: Option<u32>,
     limit: Option<u32>,
@@ -123,21 +122,7 @@ pub(crate) fn list_repos(
     validate_page(page)?;
     validate_limit(limit)?;
     let limit = limit.unwrap_or(30).min(100); // Cap at 100
-    let username = username.map(str::trim).filter(|value| !value.is_empty());
-    let named_user = username.is_some_and(|username| !is_authenticated_user_alias(username));
-    if named_user && repo_type.is_some_and(|repo_type| !repo_type.is_supported_for_named_user()) {
-        return Err("invalid_type".to_string());
-    }
-    let mut path = match username {
-        Some(username) if !is_authenticated_user_alias(username) => {
-            if !validate_path_segment(username) {
-                return Err("Invalid username".into());
-            }
-            let encoded_username = url_encode_path(username);
-            format!("/users/{}/repos?per_page={}", encoded_username, limit)
-        }
-        _ => format!("/user/repos?per_page={}", limit),
-    };
+    let mut path = format!("/user/repos?per_page={}", limit);
     if let Some(repo_type) = repo_type {
         path.push_str("&type=");
         path.push_str(repo_type.as_str());
@@ -146,10 +131,6 @@ pub(crate) fn list_repos(
         path.push_str(&format!("&page={}", p));
     }
     github_request("GET", &path, None)
-}
-
-fn is_authenticated_user_alias(username: &str) -> bool {
-    username.eq_ignore_ascii_case("me") || username.eq_ignore_ascii_case("@me")
 }
 
 pub(crate) fn list_branches(

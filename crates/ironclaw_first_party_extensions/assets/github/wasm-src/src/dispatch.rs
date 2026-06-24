@@ -282,11 +282,10 @@ pub(crate) fn execute_inner(params: &str, context: Option<&str>) -> Result<Strin
         ),
         GitHubAction::GetAuthenticatedUser {} => get_authenticated_user(),
         GitHubAction::ListRepos {
-            username,
             repo_type,
             page,
             limit,
-        } => list_repos(username.as_deref(), repo_type, page, limit),
+        } => list_repos(repo_type, page, limit),
         GitHubAction::SearchRepositories {
             query,
             page,

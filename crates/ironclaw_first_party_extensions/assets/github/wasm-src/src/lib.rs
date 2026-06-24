@@ -81,7 +81,6 @@ fn guest_error_kind(code: &str) -> &'static str {
         | "Invalid repository name"
         | "Invalid org name"
         | "Invalid fork name"
-        | "Invalid username"
         | "Invalid path: relative path segments not allowed"
         | "Invalid path: empty segment not allowed"
         | "Unsupported from_ref: use a branch or tag ref, not a raw commit SHA"
@@ -240,6 +239,10 @@ mod tests {
         assert_eq!(
             find_schema("GitHub list_repos input")["properties"]["type"]["enum"],
             json!(["all", "owner", "public", "private", "member"])
+        );
+        assert!(
+            find_schema("GitHub list_repos input")["properties"]["username"].is_null(),
+            "list_repos schema should not expose username"
         );
         assert!(find_schema("GitHub list_pull_requests input")["properties"]["head"].is_object());
         assert!(
@@ -933,23 +936,20 @@ mod tests {
     }
 
     #[test]
-    fn list_repos_uses_authenticated_endpoint_for_me_aliases() {
-        for input in [
-            r#"{"limit":2}"#,
-            r#"{"username":"me","limit":2}"#,
-            r#"{"username":"@me","limit":2}"#,
-        ] {
-            test_support::set_response(Ok(json!([]).to_string()));
+    fn list_repos_uses_authenticated_endpoint_by_default() {
+        test_support::set_response(Ok(json!([]).to_string()));
 
-            execute_inner(input, Some(r#"{"capability_id":"github.list_repos"}"#))
-                .expect("github.list_repos should list authenticated user repos");
+        execute_inner(
+            r#"{}"#,
+            Some(r#"{"capability_id":"github.list_repos"}"#),
+        )
+        .expect("github.list_repos should list authenticated user repos");
 
-            let requests = test_support::requests();
-            assert_eq!(requests.len(), 1);
-            assert_eq!(requests[0].method, "GET");
-            assert_eq!(requests[0].body, None);
-            assert_eq!(requests[0].path, "/user/repos?per_page=2");
-        }
+        let requests = test_support::requests();
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].method, "GET");
+        assert_eq!(requests[0].body, None);
+        assert_eq!(requests[0].path, "/user/repos?per_page=30");
     }
 
     #[test]
@@ -957,13 +957,50 @@ mod tests {
         test_support::set_response(Ok(json!([]).to_string()));
 
         execute_inner(
-            r#"{"username":"@me","type":"member","limit":2}"#,
+            r#"{"type":"member","limit":2}"#,
             Some(r#"{"capability_id":"github.list_repos"}"#),
         )
         .expect("github.list_repos should accept type");
 
         let requests = test_support::requests();
         assert_eq!(requests[0].path, "/user/repos?per_page=2&type=member");
+    }
+
+    #[test]
+    fn list_repos_appends_page_when_provided() {
+        test_support::set_response(Ok(json!([]).to_string()));
+
+        execute_inner(
+            r#"{"page":2,"limit":7}"#,
+            Some(r#"{"capability_id":"github.list_repos"}"#),
+        )
+        .expect("github.list_repos should accept page");
+
+        let requests = test_support::requests();
+        assert_eq!(requests[0].path, "/user/repos?per_page=7&page=2");
+    }
+
+    #[test]
+    fn list_repos_appends_supported_types_for_authenticated_user() {
+        for (repo_type, expected_path) in [
+            ("all", "/user/repos?per_page=3&type=all"),
+            ("owner", "/user/repos?per_page=3&type=owner"),
+            ("public", "/user/repos?per_page=3&type=public"),
+            ("private", "/user/repos?per_page=3&type=private"),
+            ("member", "/user/repos?per_page=3&type=member"),
+        ] {
+            test_support::set_response(Ok(json!([]).to_string()));
+
+            execute_inner(
+                &format!(r#"{{"type":"{repo_type}","limit":3}}"#),
+                Some(r#"{"capability_id":"github.list_repos"}"#),
+            )
+            .expect("github.list_repos should accept authenticated-user repo types");
+
+            let requests = test_support::requests();
+            assert_eq!(requests.len(), 1);
+            assert_eq!(requests[0].path, expected_path);
+        }
     }
 
     #[test]
@@ -1015,22 +1052,21 @@ mod tests {
     }
 
     #[test]
-    fn list_repos_rejects_private_or_public_type_for_named_user() {
-        for input in [
-            r#"{"username":"nearai","type":"public"}"#,
-            r#"{"username":"nearai","type":"private"}"#,
-        ] {
-            test_support::set_response(Ok(json!([]).to_string()));
+    fn list_repos_rejects_username_field_before_egress() {
+        test_support::set_response(Ok(json!([]).to_string()));
 
-            assert_eq!(
-                execute_inner(input, Some(r#"{"capability_id":"github.list_repos"}"#)).unwrap_err(),
-                "invalid_type"
-            );
-            assert!(
-                test_support::requests().is_empty(),
-                "invalid named-user repo type should be rejected before egress"
-            );
-        }
+        assert_eq!(
+            execute_inner(
+                r#"{"username":"nearai","limit":11,"page":2}"#,
+                Some(r#"{"capability_id":"github.list_repos"}"#),
+            )
+            .unwrap_err(),
+            "invalid_parameters"
+        );
+        assert!(
+            test_support::requests().is_empty(),
+            "username should no longer deserialize for github.list_repos"
+        );
     }
 
     #[test]
@@ -1056,20 +1092,6 @@ mod tests {
         assert_eq!(requests[0].method, "GET");
         assert_eq!(requests[0].body, None);
         assert_eq!(requests[0].path, "/user");
-    }
-
-    #[test]
-    fn list_repos_keeps_named_user_public_endpoint() {
-        test_support::set_response(Ok(json!([]).to_string()));
-
-        execute_inner(
-            r#"{"username":"nearai","limit":11,"page":2}"#,
-            Some(r#"{"capability_id":"github.list_repos"}"#),
-        )
-        .expect("github.list_repos should list named user public repos");
-
-        let requests = test_support::requests();
-        assert_eq!(requests[0].path, "/users/nearai/repos?per_page=11&page=2");
     }
 
     #[test]

@@ -241,7 +241,6 @@ pub(crate) enum GitHubAction {
     GetAuthenticatedUser {},
     #[serde(rename = "list_repos")]
     ListRepos {
-        username: Option<String>,
         #[serde(rename = "type")]
         repo_type: Option<RepoListType>,
         page: Option<u32>,
@@ -639,10 +638,6 @@ impl RepoListType {
             Self::Private => "private",
             Self::Member => "member",
         }
-    }
-
-    pub(crate) fn is_supported_for_named_user(self) -> bool {
-        matches!(self, Self::All | Self::Owner | Self::Member)
     }
 }
 

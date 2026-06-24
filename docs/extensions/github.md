@@ -89,7 +89,7 @@ Here are some of the actions your agent can perform with the GitHub extension:
 - `get_combined_status`: Get the combined status for a ref
 - `merge_pull_request`: Merge a pull request  
 - `get_authenticated_user`: Get the authenticated GitHub user
-- `list_repos`: List repositories (user/org)
+- `list_repos`: List authenticated repositories
 - `get_file_content`: Retrieve the content of a file in the repo
 - `trigger_workflow`: Manually trigger a GitHub Actions workflow
 - `get_workflow_runs`: List recent workflow runs

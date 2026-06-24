@@ -394,7 +394,7 @@ fn github_capability_calls() -> Vec<RebornScriptedProviderToolCall> {
         call(
             "github.list_repos",
             "list-repos",
-            json!({"username": "@me", "type": "member", "limit": 11, "page": 2}),
+            json!({"type": "member", "limit": 11, "page": 2}),
         ),
         call(
             "github.search_repositories",
