@@ -156,7 +156,7 @@ QA_SHEET_CASES: dict[str, dict[str, object]] = {
     "qa_4b_github_connect": {
         "rows": ["4B"],
         "feature": "GitHub connection flow",
-        "gate": "requires live GitHub extension auth state",
+        "gate": "requires live GitHub PAT/auth state",
     },
     "qa_4c_github_release_live_chat": {
         "rows": ["4C"],
@@ -837,6 +837,64 @@ def _telegram_preflight(
         ],
         "copied_reborn_home_mentions_telegram": copied_home_mentions,
         "env_materialization": env_materialization,
+    }
+
+
+def _github_auth_preflight(
+    reborn_home: Path,
+    extra_env: dict[str, str],
+    *,
+    requires_github_auth: bool,
+) -> dict[str, object]:
+    db_path = reborn_home / "local-dev" / "reborn-local-dev.db"
+    token_names = [
+        "AUTH_LIVE_GITHUB_TOKEN",
+        "IRONCLAW_REBORN_GITHUB_TOKEN",
+        "GITHUB_TOKEN",
+        "GH_TOKEN",
+    ]
+    token_present = any(_env_present(name, extra_env) for name in token_names)
+    configured_accounts: list[str] = []
+    if db_path.exists():
+        with sqlite3.connect(db_path) as db:
+            try:
+                rows = db.execute(
+                    """
+                    SELECT path, contents FROM root_filesystem_entries
+                    WHERE path LIKE '%product-auth/callback/accounts/%.json'
+                    ORDER BY path
+                    """
+                ).fetchall()
+            except sqlite3.Error:
+                rows = []
+        for path, raw in rows:
+            try:
+                payload = json.loads(raw)
+            except (TypeError, json.JSONDecodeError):
+                continue
+            if (
+                isinstance(payload, dict)
+                and payload.get("provider") == "github"
+                and payload.get("status") == "configured"
+                and (payload.get("access_secret") or payload.get("access_secret_handle"))
+            ):
+                configured_accounts.append(str(path))
+    ready = bool(configured_accounts)
+    reason = None
+    if requires_github_auth and not ready:
+        reason = (
+            "missing GitHub live prerequisites: configured GitHub product-auth "
+            "account or PAT-seeded Reborn home"
+        )
+    return {
+        "requires_github_auth": requires_github_auth,
+        "ready": ready,
+        "reason": reason,
+        "db_present": db_path.exists(),
+        "configured_account_count": len(configured_accounts),
+        "configured_account_paths": configured_accounts,
+        "token_env_present": token_present,
+        "token_env_names": token_names,
     }
 
 
@@ -1671,6 +1729,7 @@ def prepare_reborn_home(args: argparse.Namespace, selected_cases: list[str]) -> 
         CASES[name].requires_google_product_auth for name in selected_cases
     )
     needs_telegram = any(CASES[name].requires_telegram for name in selected_cases)
+    needs_github_auth = any(CASES[name].requires_github_auth for name in selected_cases)
     auth_user_id = _auth_user_id()
     source_home = args.reborn_home
     if not source_home.exists():
@@ -1796,6 +1855,11 @@ def prepare_reborn_home(args: argparse.Namespace, selected_cases: list[str]) -> 
         telegram_env_preflight,
         requires_telegram=needs_telegram,
     )
+    github_preflight = _github_auth_preflight(
+        prepared_home,
+        process_env,
+        requires_github_auth=needs_github_auth,
+    )
     return PreparedRebornHome(
         path=prepared_home,
         env=process_env,
@@ -1820,6 +1884,7 @@ def prepare_reborn_home(args: argparse.Namespace, selected_cases: list[str]) -> 
             },
             "google_product_auth": google_preflight,
             "telegram": telegram_preflight,
+            "github_auth": github_preflight,
         },
     )
 
@@ -3697,6 +3762,7 @@ class CaseSpec:
         requires_google_product_auth: bool = False,
         requires_google_runtime_access: bool = False,
         requires_telegram: bool = False,
+        requires_github_auth: bool = False,
         default_enabled: bool = True,
     ) -> None:
         self.fn = fn
@@ -3705,6 +3771,7 @@ class CaseSpec:
         self.requires_google_product_auth = requires_google_product_auth
         self.requires_google_runtime_access = requires_google_runtime_access
         self.requires_telegram = requires_telegram
+        self.requires_github_auth = requires_github_auth
         self.default_enabled = default_enabled
 
 
@@ -3776,6 +3843,8 @@ CASES: dict[str, CaseSpec] = {
     ),
     "qa_4b_github_connect": CaseSpec(
         case_qa_4b_github_connect,
+        requires_github_auth=True,
+        default_enabled=False,
     ),
     "qa_4c_github_release_live_chat": CaseSpec(case_qa_4c_github_release_live_chat),
     "qa_4d_github_release_slack_routine": CaseSpec(
@@ -3912,11 +3981,14 @@ def write_case_manifest(output_dir: Path, selected_cases: list[str]) -> Path:
                 "requires_google_product_auth": spec.requires_google_product_auth,
                 "requires_google_runtime_access": spec.requires_google_runtime_access,
                 "requires_telegram": spec.requires_telegram,
+                "requires_github_auth": spec.requires_github_auth,
                 "status": (
                     "default"
                     if spec.default_enabled
                     else "gated:requires_live_telegram"
                     if spec.requires_telegram
+                    else "gated:requires_live_github_auth"
+                    if spec.requires_github_auth
                     else "gated:requires_live_google_product_auth"
                     if spec.requires_google_product_auth
                     else "gated:requires_live_slack_delivery_target"
@@ -3974,6 +4046,7 @@ async def run_cases(args: argparse.Namespace) -> int:
         slack_preflight = prepared_home.preflight.get("slack", {})
         google_preflight = prepared_home.preflight.get("google_product_auth", {})
         telegram_preflight = prepared_home.preflight.get("telegram", {})
+        github_preflight = prepared_home.preflight.get("github_auth", {})
         google_ready_key = (
             "ready" if case_spec.requires_google_runtime_access else "configured_ready"
         )
@@ -4006,6 +4079,35 @@ async def run_cases(args: argparse.Namespace) -> int:
             print(
                 f"[reborn-webui-v2-live-qa] case={name} success={result.success} "
                 f"latency_ms={result.latency_ms} blocked=missing_telegram_ready",
+                flush=True,
+            )
+            continue
+        if (
+            case_spec.requires_github_auth
+            and isinstance(github_preflight, dict)
+            and not github_preflight.get("ready")
+        ):
+            started = time.monotonic()
+            result = _result(
+                name,
+                False,
+                started,
+                {
+                    "blocked": True,
+                    "error": (
+                        github_preflight.get("reason")
+                        or "live GitHub product-auth account is not configured"
+                    ),
+                    "required_env": [
+                        "AUTH_LIVE_GITHUB_TOKEN",
+                    ],
+                    "preflight": github_preflight,
+                },
+            )
+            results.append(result)
+            print(
+                f"[reborn-webui-v2-live-qa] case={name} success={result.success} "
+                f"latency_ms={result.latency_ms} blocked=missing_github_auth",
                 flush=True,
             )
             continue
