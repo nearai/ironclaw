@@ -353,7 +353,7 @@ async fn install_resolves_skill_from_private_manifest_url() {
         "2026-01-04T00:00:00Z",
         skill_url,
         &sha256_hex(skill_bytes),
-        IronHubProvenance::Official,
+        IronHubProvenance::Private,
     ));
     let egress = Arc::new(RecordingIronHubEgress::new([
         (

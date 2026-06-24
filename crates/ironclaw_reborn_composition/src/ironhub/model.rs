@@ -53,6 +53,7 @@ pub(super) enum IronHubProvenance {
     Official,
     Trusted,
     Verified,
+    Private,
     #[default]
     #[serde(alias = "community")]
     New,
@@ -64,6 +65,7 @@ impl IronHubProvenance {
             Self::Official => "official",
             Self::Trusted => "trusted",
             Self::Verified => "verified",
+            Self::Private => "private",
             Self::New => "new",
         }
     }
@@ -77,6 +79,7 @@ impl IronHubProvenance {
             Self::Official => "NEAR-vetted (official)",
             Self::Trusted => "community, trusted publisher",
             Self::Verified => "community, verified publisher",
+            Self::Private => "private (your organization)",
             Self::New => "UNVERIFIED community (new author)",
         }
     }
