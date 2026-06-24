@@ -165,6 +165,87 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
             self.assertIn("--all-cases", forwarded)
             self.assertNotIn("--case", forwarded)
 
+    def test_delivered_gate_routes_for_run_reads_trigger_gate_records(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            home = Path(tmpdir) / "reborn-home"
+            db_dir = home / "local-dev"
+            db_dir.mkdir(parents=True)
+            db_path = db_dir / "reborn-local-dev.db"
+            with sqlite3.connect(db_path) as db:
+                db.execute(
+                    """
+                    CREATE TABLE root_filesystem_entries (
+                        path TEXT PRIMARY KEY,
+                        contents BLOB NOT NULL,
+                        updated_at TEXT NOT NULL
+                    )
+                    """
+                )
+                db.execute(
+                    "INSERT INTO root_filesystem_entries(path, contents, updated_at) "
+                    "VALUES (?, ?, ?)",
+                    (
+                        "/tenants/reborn-cli/users/qa/outbound/delivered-gate-routes/route.json",
+                        json.dumps(
+                            {
+                                "gate_ref": "gate:approval-abc",
+                                "run_id": "run-123",
+                                "scope": {"thread_id": "thread-456"},
+                            }
+                        ),
+                        "2026-06-24T00:00:00Z",
+                    ),
+                )
+                db.execute(
+                    "INSERT INTO root_filesystem_entries(path, contents, updated_at) "
+                    "VALUES (?, ?, ?)",
+                    (
+                        "/tenants/reborn-cli/users/qa/outbound/delivered-gate-routes/other.json",
+                        json.dumps(
+                            {
+                                "gate_ref": "gate:approval-other",
+                                "run_id": "run-other",
+                                "scope": {"thread_id": "thread-other"},
+                            }
+                        ),
+                        "2026-06-24T00:00:01Z",
+                    ),
+                )
+
+            routes = run_live_qa._delivered_gate_routes_for_run(home, "run-123")
+
+            self.assertEqual(
+                routes,
+                [
+                    {
+                        "path": "/tenants/reborn-cli/users/qa/outbound/delivered-gate-routes/route.json",
+                        "gate_ref": "gate:approval-abc",
+                        "thread_id": "thread-456",
+                        "run_id": "run-123",
+                    }
+                ],
+            )
+
+    def test_slack_delivery_observed_is_status_agnostic_after_gate_resume(self):
+        self.assertTrue(
+            run_live_qa._slack_delivery_observed(
+                {"outcome": "delivered", "run_id": "run-123"},
+                {"found": True, "marker_found": True},
+            )
+        )
+        self.assertFalse(
+            run_live_qa._slack_delivery_observed(
+                {"outcome": "gate_required", "run_id": "run-123"},
+                {"found": True, "marker_found": True},
+            )
+        )
+        self.assertFalse(
+            run_live_qa._slack_delivery_observed(
+                {"outcome": "delivered", "run_id": "run-123"},
+                {"found": False, "marker_found": True},
+            )
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

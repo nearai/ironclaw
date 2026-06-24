@@ -2469,6 +2469,91 @@ def _triggered_delivery_outcome(reborn_home: Path, run_id: str) -> dict[str, obj
     return {"path": row[0], "raw_contents": payload}
 
 
+def _delivered_gate_routes_for_run(reborn_home: Path, run_id: str) -> list[dict[str, object]]:
+    db_path = reborn_home / "local-dev" / "reborn-local-dev.db"
+    if not db_path.exists() or not run_id:
+        return []
+    with sqlite3.connect(db_path) as db:
+        rows = db.execute(
+            """
+            SELECT path, contents FROM root_filesystem_entries
+            WHERE path LIKE '%/outbound/delivered-gate-routes/%'
+              AND CAST(contents AS TEXT) LIKE '%' || ? || '%'
+            ORDER BY updated_at DESC, path DESC
+            """,
+            (run_id,),
+        ).fetchall()
+    routes: list[dict[str, object]] = []
+    for path, raw in rows:
+        try:
+            payload = json.loads(raw)
+        except (TypeError, json.JSONDecodeError):
+            continue
+        if not isinstance(payload, dict):
+            continue
+        if str(payload.get("run_id") or "") != run_id:
+            continue
+        gate_ref = str(payload.get("gate_ref") or "").strip()
+        thread_id = ""
+        scope = payload.get("scope")
+        if isinstance(scope, dict):
+            thread_id = str(scope.get("thread_id") or "").strip()
+        if gate_ref and thread_id:
+            routes.append(
+                {
+                    "path": path,
+                    "gate_ref": gate_ref,
+                    "thread_id": thread_id,
+                    "run_id": run_id,
+                }
+            )
+    return routes
+
+
+async def _resolve_webui_approval_gate(
+    ctx: LiveQaContext,
+    *,
+    thread_id: str,
+    run_id: str,
+    gate_ref: str,
+) -> dict[str, object]:
+    import httpx
+
+    encoded_gate = urllib.parse.quote(gate_ref, safe="")
+    url = (
+        f"{ctx.base_url}/api/webchat/v2/threads/{thread_id}"
+        f"/runs/{run_id}/gates/{encoded_gate}/resolve"
+    )
+    payload = {
+        "resolution": "approved",
+        "always": False,
+        "client_action_id": f"live-qa-{uuid.uuid4()}",
+    }
+    async with httpx.AsyncClient(timeout=20.0) as client:
+        response = await client.post(
+            url,
+            headers={
+                "Authorization": f"Bearer {AUTH_TOKEN}",
+                "Content-Type": "application/json",
+            },
+            json=payload,
+        )
+    try:
+        body: object = response.json()
+    except json.JSONDecodeError:
+        body = response.text
+    result: dict[str, object] = {
+        "status": response.status_code,
+        "body": body,
+        "thread_id": thread_id,
+        "run_id": run_id,
+        "gate_ref": gate_ref,
+    }
+    if response.status_code < 200 or response.status_code >= 300:
+        raise AssertionError(f"resolve gate returned HTTP {response.status_code}: {body!r}")
+    return result
+
+
 def _slack_bot_token(config_text: str, extra_env: dict[str, str]) -> str | None:
     bot_env = _section_env_name(
         config_text,
@@ -2567,6 +2652,18 @@ async def _slack_history_contains_marker(
     return {"checked": True, "found": False, "message_count": len(messages)}
 
 
+def _slack_delivery_observed(
+    outcome: dict[str, object] | None,
+    history: dict[str, object] | None,
+) -> bool:
+    return (
+        isinstance(outcome, dict)
+        and outcome.get("outcome") == "delivered"
+        and isinstance(history, dict)
+        and bool(history.get("found"))
+    )
+
+
 async def _wait_for_slack_delivery_marker(
     ctx: LiveQaContext,
     *,
@@ -2583,6 +2680,8 @@ async def _wait_for_slack_delivery_marker(
     last_rows: list[dict[str, object]] = []
     last_outcome: dict[str, object] | None = None
     last_history: dict[str, object] | None = None
+    approved_gate_refs: set[str] = set()
+    approval_attempts: list[dict[str, object]] = []
     while time.monotonic() < deadline:
         rows = _trigger_run_rows(ctx.reborn_home, routine_name)
         if rows:
@@ -2595,6 +2694,19 @@ async def _wait_for_slack_delivery_marker(
                 outcome = _triggered_delivery_outcome(ctx.reborn_home, run_id)
                 if outcome:
                     last_outcome = outcome
+                for route in _delivered_gate_routes_for_run(ctx.reborn_home, run_id):
+                    gate_ref = str(route.get("gate_ref") or "")
+                    if gate_ref in approved_gate_refs:
+                        continue
+                    approved_gate_refs.add(gate_ref)
+                    approval_attempts.append(
+                        await _resolve_webui_approval_gate(
+                            ctx,
+                            thread_id=str(route["thread_id"]),
+                            run_id=run_id,
+                            gate_ref=gate_ref,
+                        )
+                    )
                 if history is None:
                     history = await _slack_history_contains_marker(
                         ctx,
@@ -2604,16 +2716,12 @@ async def _wait_for_slack_delivery_marker(
                         required_text=required_text,
                     )
                     last_history = history
-                if (
-                    row.get("status") == "ok"
-                    and isinstance(outcome, dict)
-                    and outcome.get("outcome") == "delivered"
-                    and history.get("found")
-                ):
+                if _slack_delivery_observed(outcome, history):
                     return {
                         "trigger_run": row,
                         "delivery_outcome": outcome,
                         "slack_history": history,
+                        "approval_attempts": approval_attempts[-5:],
                     }
                 if isinstance(outcome, dict) and outcome.get("outcome") not in (None, "delivered"):
                     raise AssertionError(
@@ -2625,7 +2733,7 @@ async def _wait_for_slack_delivery_marker(
         "Slack delivery marker was not observed before timeout. "
         f"routine_name={routine_name!r} marker={marker!r} "
         f"last_rows={last_rows[:3]!r} last_outcome={last_outcome!r} "
-        f"last_history={last_history!r}"
+        f"last_history={last_history!r} approvals={approval_attempts[-3:]!r}"
     )
 
 
